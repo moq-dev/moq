@@ -81,10 +81,15 @@ Look out for:
 Verification: mocked time, reusing #5057's worker harness
 (`tests/largest_regression.rs` on its branch, with Dryvnt credited as
 co-author). A worker restarts `pool/p` within the linger, behind one relay
-and behind an edge relay, on lite-05, 06, 07 and moq-transport 14, 16, 22:
-the returning reader gets the new output from group 0, never the old group,
-and sibling paths keep their readers. A same-epoch lagging replica still
-resumes. JS mirrors the tests. `just test interop --all`.
+and behind an edge relay of ours, on lite-05, 06, 07 and moq-transport 14,
+16, 22: the returning reader gets the new output from group 0, never the old
+group, and sibling paths keep their readers. On the wires without an epoch
+that rests on our relays retiring a copy on End then Start, as
+`tests/restart.rs` shows; arbitrary older caching relays are out of scope, as
+in [IETF epochs](/quest/m1/ietf-epochs.md), since base IETF object identity
+survives a withdrawal. A same-epoch lagging replica still resumes, checked on
+lite-07 only, the one wire here that carries the epoch. JS mirrors the tests.
+`just test interop --all`.
 
 Public API: breaking. A claim request is answered through `prepare` and
 `publish`, and a public claim takes no epoch, in Rust, JS, moq-ffi, moq-c and
@@ -93,4 +98,5 @@ every binding wrapper, plus the claim docs. Wire: none.
 ## Related
 
 - [Announcement takeover](/quest/m1/announce-takeover.md) - its claim-to-route operation is `Request::prepare` then `publish`; TAKEOVER then removes the cold-start reset
+- [IETF epochs](/quest/m1/ietf-epochs.md) - carries the answer epoch over moq-transport, so same-epoch resume and replacement can be told apart there
 - [#5057](https://github.com/moq-dev/moq/pull/5057) - the relay-side check this replaces
