@@ -173,6 +173,9 @@ moq --connect https://relay.example.com/anon --broadcast cam.hang transcode
 moq ... transcode --rung 720:2500000 --rung 360:600000 --encoder nvenc --decoder nvdec
 ```
 
+Rung sizes are the coded frame's short side. A 1080x1920 portrait source
+produces 720x1280 and 360x640 rungs. Catalog rotation is preserved.
+
 Publishes `cam.hang/transcode.hang` whose catalog references the source's
 rendition and adds lower rungs that are decoded and encoded only while someone
 watches them. On NVIDIA the whole pipeline stays on the GPU. The source is the

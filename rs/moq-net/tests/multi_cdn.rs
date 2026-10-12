@@ -15,6 +15,11 @@ use futures::{StreamExt, channel::mpsc};
 use moq_net::{Error, Hop, Timestamp, Version, announce, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> track::Info {
+	track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Frames per group.
@@ -151,7 +156,7 @@ impl Topology {
 		let subscriber = produce_origin(4);
 
 		let broadcast = publisher.create_broadcast("live").unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", timed()).unwrap();
 		broadcast
 			.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
 			.unwrap();

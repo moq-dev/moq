@@ -122,6 +122,11 @@ harness = false
 name = "session"
 harness = false
 
+[[bench]]
+name = "request-ids"
+harness = false
+required-features = ["fuzz"]
+
 # Uses the hidden fuzz module to observe source selection without public API.
 [[bench]]
 name = "retirement"

@@ -54,6 +54,7 @@ import {
 	SubscribeNamespaceOk,
 	UnsubscribeNamespace,
 } from "./subscribe_namespace.ts";
+import { MalformedAuthToken } from "./token.ts";
 import { Version } from "./version.ts";
 
 // Bound on how long stream-open plus SUBSCRIBE_OK may take. Browsers cap
@@ -1061,7 +1062,21 @@ export class Subscriber {
 					);
 				}
 
-				const update = await PublishNamespaceUpdate.decode(stream.reader, version);
+				let update: PublishNamespaceUpdate;
+				try {
+					update = await PublishNamespaceUpdate.decode(stream.reader, version);
+				} catch (err) {
+					if (!(err instanceof MalformedAuthToken)) throw err;
+					// Section 8.9 rejects the update, which withdraws the advertisement as any
+					// refused update does. Only draft-17+ updates arrive here, so no Request ID.
+					await stream.writer.u53(RequestError.id);
+					await new RequestError({
+						errorCode: toRequestCode("malformed_auth_token", "publish_namespace", version),
+						reasonPhrase: err.message,
+					}).encode(stream.writer, version);
+					stream.close();
+					break;
+				}
 
 				// The parameters exist only on a session that negotiated the extension;
 				// anywhere else they are the peer's violation.

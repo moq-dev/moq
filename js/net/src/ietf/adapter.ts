@@ -10,9 +10,6 @@ import * as Namespace from "./namespace.ts";
 import { initialMaxRequestId, MaxRequestId, REQUEST_WINDOW } from "./request.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
-/** Draft-14 to -16: the request ID is not valid for this peer (wrong parity or a duplicate). */
-const INVALID_REQUEST_ID = 0x4;
-
 /** The peer used a request ID the draft closes the session for. */
 export class RequestWindowError extends Error {
 	readonly code: number;
@@ -95,6 +92,68 @@ interface StreamEntry {
 
 type NamespaceDirection = "incoming" | "outgoing";
 
+/** Runs per chunk before it splits, so a split or removal shifts at most one chunk. */
+const RUN_CHUNK = 256;
+
+/**
+ * Skipped request IDs as sorted, disjoint `[start, end)` runs of one parity.
+ *
+ * A jump costs one run however far it skips, and only an ID landing inside a run splits it,
+ * so the runs never outnumber the requests received. They are kept in chunks so a split
+ * costs the chunk it lands in rather than shifting the whole table.
+ */
+class MissingRuns {
+	#chunks: [bigint, bigint][][] = [];
+
+	/** Whether `id` was skipped and not yet received. */
+	has(id: bigint): boolean {
+		return this.#find(id) !== undefined;
+	}
+
+	/** Mark a skipped `id` received, splitting its run. */
+	take(id: bigint): void {
+		const found = this.#find(id);
+		if (!found) return;
+		const [index, run] = found;
+		const chunk = this.#chunks[index];
+		const [start, end] = chunk[run];
+		const rest: [bigint, bigint][] = [];
+		if (start < id) rest.push([start, id]);
+		if (id + 2n < end) rest.push([id + 2n, end]);
+		chunk.splice(run, 1, ...rest);
+		if (chunk.length === 0) this.#chunks.splice(index, 1);
+		else if (chunk.length > 2 * RUN_CHUNK) this.#chunks.splice(index + 1, 0, chunk.splice(RUN_CHUNK));
+	}
+
+	/** Record `[start, end)` as skipped, above every existing run. */
+	push(start: bigint, end: bigint): void {
+		const last = this.#chunks.at(-1);
+		if (last && last.length < 2 * RUN_CHUNK) last.push([start, end]);
+		else this.#chunks.push([[start, end]]);
+	}
+
+	/** The chunk and run holding `id`. */
+	#find(id: bigint): [number, number] | undefined {
+		const index = lastAtOrBelow(this.#chunks, id, (chunk) => chunk[0][0]);
+		if (index < 0) return undefined;
+		const chunk = this.#chunks[index];
+		const run = lastAtOrBelow(chunk, id, (run) => run[0]);
+		return run >= 0 && id < chunk[run][1] ? [index, run] : undefined;
+	}
+}
+
+/** The last index whose key is at or below `id`, or -1, in an array sorted by key. */
+function lastAtOrBelow<T>(items: T[], id: bigint, key: (item: T) => bigint): number {
+	let lo = 0;
+	let hi = items.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (key(items[mid]) <= id) lo = mid + 1;
+		else hi = mid;
+	}
+	return lo - 1;
+}
+
 /**
  * Converts v14-v16 control stream multiplexing into virtual bidi streams.
  *
@@ -146,11 +205,21 @@ export class ControlStreamAdapter implements Session {
 	#maxRequestId: bigint;
 	#maxRequestIdResolves = new Set<() => void>();
 
+	// Drafts 14/15 require our new request IDs in order on the control stream. Callers
+	// allocate an ID and then encode asynchronously, so a shorter later request can finish
+	// first: a message spending a new ID waits here until every lower one has gone out.
+	// Draft 16 sends SUBSCRIBE_NAMESPACE on its own stream and the peer accepts any order.
+	#sendNext: bigint | undefined;
+	#sendTurns = new Map<bigint, () => void>();
+
 	// The peer's requests, flow controlled as moq-net does: at most `#peerWindow` open at
 	// once, every ID below `#peerMax`, and once half the window has closed the bound rises
 	// by the IDs they spent and goes out as one MAX_REQUEST_ID.
 	#peerWindow: bigint;
 	#peerMax: bigint;
+	#peerNext: bigint;
+	// Draft 16 reorders across streams, so it remembers the IDs skipped below #peerNext.
+	#peerMissing: MissingRuns | undefined;
 	#open = new Set<bigint>();
 	#retired = 0n;
 	#granting = false;
@@ -181,7 +250,10 @@ export class ControlStreamAdapter implements Session {
 		this.#maxRequestId = maxRequestId;
 		this.#peerWindow = window;
 		this.#peerMax = initialMaxRequestId(!client, window);
+		this.#peerNext = client ? 1n : 0n;
+		this.#peerMissing = version === Version.DRAFT_16 ? new MissingRuns() : undefined;
 		this.#requestId = client ? 0n : 1n;
+		this.#sendNext = version === Version.DRAFT_16 ? undefined : this.#requestId;
 		this.#client = client;
 	}
 
@@ -241,6 +313,7 @@ export class ControlStreamAdapter implements Session {
 					const toFlush = buffer.subarray(0, boundary);
 					buffer = buffer.subarray(boundary);
 
+					let spent: bigint | undefined;
 					if (!registered) {
 						// First message: extract requestId and register before flushing
 						const parsed = await this.#tryParseOutgoing(toFlush);
@@ -248,10 +321,13 @@ export class ControlStreamAdapter implements Session {
 							registeredRequestId = parsed.requestId;
 							this.#streams.set(parsed.requestId, { controller });
 							registered = true;
+							spent = parsed.requestId;
 						}
+					} else {
+						spent = this.#updateId(toFlush);
 					}
 
-					await this.#writeMutex.runExclusive(() => this.#writer.write(toFlush));
+					await this.#send(toFlush, spent);
 				}
 			},
 		});
@@ -490,16 +566,23 @@ export class ControlStreamAdapter implements Session {
 		// Even IDs are the client's. `#client` is this side, so the peer's IDs are the other parity.
 		const even = (requestId & 1n) === 0n;
 		if (even === this.#client) {
-			this.#refuse(INVALID_REQUEST_ID, "request id has the wrong parity");
+			this.#refuse(SessionCode.InvalidRequestId, "request id has the wrong parity");
 		}
 	}
 
 	#admitHeld(requestId: bigint): void {
 		this.#checkPeer(requestId);
-		if (this.#open.has(requestId)) {
-			this.#refuse(INVALID_REQUEST_ID, "duplicate request id");
+		const unused =
+			requestId < this.#peerNext
+				? this.#peerMissing?.has(requestId) === true
+				: requestId === this.#peerNext || this.#peerMissing !== undefined;
+		if (!unused) {
+			this.#refuse(SessionCode.InvalidRequestId, "request id was already spent or out of sequence");
 		}
 		this.#checkLive();
+		if (requestId < this.#peerNext) this.#peerMissing?.take(requestId);
+		else if (requestId > this.#peerNext) this.#peerMissing?.push(this.#peerNext, requestId);
+		if (requestId >= this.#peerNext) this.#peerNext = requestId + 2n;
 		this.#open.add(requestId);
 	}
 
@@ -513,7 +596,7 @@ export class ControlStreamAdapter implements Session {
 		this.#retire();
 	}
 
-	/** A peer reusing IDs below the bound still cannot hold more than the window open. */
+	/** Enforce the live-request cap independently of the ID bound. */
 	#checkLive(): void {
 		if (BigInt(this.#open.size) >= this.#peerWindow) {
 			this.#refuse(SessionCode.TooManyRequests, "too many open requests");
@@ -676,10 +759,42 @@ export class ControlStreamAdapter implements Session {
 
 					const toFlush = buffer.subarray(0, boundary);
 					buffer = buffer.subarray(boundary);
-					await this.#writeMutex.runExclusive(() => this.#writer.write(toFlush));
+					await this.#send(toFlush, this.#updateId(toFlush));
 				}
 			},
 		});
+	}
+
+	/** The update's own request ID if this complete message is SUBSCRIBE_UPDATE or REQUEST_UPDATE. */
+	#updateId(message: Uint8Array): bigint | undefined {
+		const [typeId, afterType] = Varint.decode(message);
+		if (typeId !== 0x02) return undefined;
+		return Varint.decodeBigInt(afterType.subarray(2))[0];
+	}
+
+	/** Write one complete message, after every lower request ID when it spends a new one. */
+	async #send(message: Uint8Array, requestId: bigint | undefined): Promise<void> {
+		if (requestId === undefined || this.#sendNext === undefined) {
+			await this.#writeMutex.runExclusive(() => this.#writer.write(message));
+			return;
+		}
+		if (requestId < this.#sendNext || this.#sendTurns.has(requestId)) {
+			throw new Error(`request id ${requestId} was already sent`);
+		}
+		if (requestId !== this.#sendNext) {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			this.#sendTurns.set(requestId, resolve);
+			await promise;
+			if (this.#closed) throw new Error("control stream closed");
+		}
+		try {
+			await this.#writeMutex.runExclusive(() => this.#writer.write(message));
+		} finally {
+			this.#sendNext = requestId + 2n;
+			const next = this.#sendTurns.get(this.#sendNext);
+			this.#sendTurns.delete(this.#sendNext);
+			next?.();
+		}
 	}
 
 	/** Encode raw message bytes: [typeId varint][size u16 BE][body] */
@@ -932,5 +1047,8 @@ export class ControlStreamAdapter implements Session {
 		// Unblock maxRequestId waiters
 		for (const resolve of this.#maxRequestIdResolves) resolve();
 		this.#maxRequestIdResolves.clear();
+
+		for (const resolve of this.#sendTurns.values()) resolve();
+		this.#sendTurns.clear();
 	}
 }

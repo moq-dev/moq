@@ -6,7 +6,7 @@ import type { Established } from "../connection/established.ts";
 import type { Drain } from "../connection/goaway.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
-import { error, fromClose, ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
+import { error, fromClose, ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
@@ -15,20 +15,24 @@ import { registerWire } from "../wire.ts";
 import { ControlStreamAdapter, NativeSession, RequestWindowError, type Session } from "./adapter.ts";
 import { AuthMessage, supported as authSupported, IetfAuthWire } from "./auth.ts";
 import * as Cluster from "./cluster.ts";
-import { Fetch, FetchHeader } from "./fetch.ts";
+import { type RequestKind, toRequestCode } from "./error.ts";
+import { Fetch, FetchError, FetchHeader } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
 import { Group } from "./object.ts";
-import { Publish } from "./publish.ts";
-import { PublishNamespace } from "./publish_namespace.ts";
+import { Publish, PublishError } from "./publish.ts";
+import { PublishNamespace, PublishNamespaceError } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
-import { Subscribe, SubscribeUpdate } from "./subscribe.ts";
+import { RequestError } from "./request.ts";
+import { Subscribe, SubscribeError, SubscribeUpdate } from "./subscribe.ts";
 import {
 	SUBSCRIBE_TRACKS_ID,
 	SubscribeNamespace,
+	SubscribeNamespaceError,
 	SubscribeNamespaceLegacy,
 	SubscribeOptions,
 } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
+import { MalformedAuthToken } from "./token.ts";
 import { TrackStatusRequest } from "./track.ts";
 import { type IetfVersion, Version, versionName } from "./version.ts";
 
@@ -273,7 +277,7 @@ export class Connection implements Established {
 	// The peer broke the protocol, so losing the stream is not enough: nothing stops it
 	// repeating the violation on the next one.
 	#violated(err: ProtocolViolation) {
-		this.#close({ closeCode: SessionCode.ProtocolViolation, reason: err.message });
+		this.#close({ closeCode: err.code, reason: err.message });
 	}
 
 	async #run(early: Reader[]): Promise<void> {
@@ -343,12 +347,12 @@ export class Connection implements Established {
 			// to the same request_id + namespace. We never send PUBLISH, so a legacy
 			// request for PUBLISH alone is refused, and one for both gets only NAMESPACE.
 			case BigInt(SubscribeNamespace.id): {
-				const msg = await SubscribeNamespace.decode(stream.reader, this.#session.version);
-				await this.#publisher.runSubscribeNamespace(msg, stream);
+				const decoded = SubscribeNamespace.decode(stream.reader, this.#session.version);
+				const msg = await this.#request(stream, "subscribe_namespace", decoded);
+				if (msg) await this.#publisher.runSubscribeNamespace(msg, stream);
 				break;
 			}
 			case BigInt(SubscribeNamespaceLegacy.id): {
-				const legacy = await SubscribeNamespaceLegacy.decode(stream.reader, this.#session.version);
 				// Draft-16 carries this on its own stream, so the control adapter never sees the ID.
 				// Draft-14 and 15 already admitted it off the control stream. A refused request
 				// still spends its ID, so it is admitted and released like any other.
@@ -356,6 +360,19 @@ export class Connection implements Established {
 					this.#session instanceof ControlStreamAdapter && this.#session.version === Version.DRAFT_16
 						? this.#session
 						: undefined;
+				let legacy: SubscribeNamespaceLegacy;
+				try {
+					legacy = await SubscribeNamespaceLegacy.decode(stream.reader, this.#session.version);
+				} catch (err) {
+					if (!(err instanceof MalformedAuthToken) || err.requestId === undefined) throw err;
+					adapter?.admitRequest(err.requestId);
+					try {
+						await this.#refuseToken(stream, "subscribe_namespace", err.requestId);
+					} finally {
+						adapter?.releaseRequest(err.requestId);
+					}
+					break;
+				}
 				if (adapter) adapter.admitRequest(legacy.requestId);
 				try {
 					if (legacy.subscribeOptions === SubscribeOptions.PUBLISH) {
@@ -380,8 +397,9 @@ export class Connection implements Established {
 			}
 			// Publisher handles incoming requests
 			case BigInt(Subscribe.id): {
-				const msg = await Subscribe.decode(stream.reader, this.#session.version);
-				await this.#publisher.runSubscribe(msg, stream);
+				const decoded = Subscribe.decode(stream.reader, this.#session.version);
+				const msg = await this.#request(stream, "subscribe", decoded);
+				if (msg) await this.#publisher.runSubscribe(msg, stream);
 				break;
 			}
 			case BigInt(SUBSCRIBE_TRACKS_ID): {
@@ -393,23 +411,27 @@ export class Connection implements Established {
 				break;
 			}
 			case BigInt(TrackStatusRequest.id): {
-				const msg = await TrackStatusRequest.decode(stream.reader, this.#session.version);
-				await this.#publisher.runTrackStatusRequest(msg, stream);
+				const decoded = TrackStatusRequest.decode(stream.reader, this.#session.version);
+				const msg = await this.#request(stream, "track_status", decoded);
+				if (msg) await this.#publisher.runTrackStatusRequest(msg, stream);
 				break;
 			}
 			case BigInt(Fetch.id): {
-				const msg = await Fetch.decode(stream.reader, this.#session.version);
-				await this.#publisher.runFetch(msg, stream);
+				const decoded = Fetch.decode(stream.reader, this.#session.version);
+				const msg = await this.#request(stream, "fetch", decoded);
+				if (msg) await this.#publisher.runFetch(msg, stream);
 				break;
 			}
 
 			// Subscriber handles incoming notifications
 			case BigInt(PublishNamespace.id): {
-				const msg = await PublishNamespace.decode(
+				const decoded = PublishNamespace.decode(
 					stream.reader,
 					this.#session.version,
 					Cluster.negotiated(this.#cluster),
 				);
+				const msg = await this.#request(stream, "publish_namespace", decoded);
+				if (!msg) break;
 
 				// Unless we declined it, we declare that advertisements to us must be
 				// solicited (MoQ Solicit), and writing the option at all proves the peer
@@ -441,14 +463,54 @@ export class Connection implements Established {
 				break;
 			}
 			case BigInt(Publish.id): {
-				const msg = await Publish.decode(stream.reader, this.#session.version);
-				await this.#subscriber.runPublish(msg, stream);
+				const decoded = Publish.decode(stream.reader, this.#session.version);
+				const msg = await this.#request(stream, "publish", decoded);
+				if (msg) await this.#subscriber.runPublish(msg, stream);
 				break;
 			}
 
 			default:
 				throw new ProtocolViolation(`unknown bidi stream type: 0x${typeId.toString(16)}`);
 		}
+	}
+
+	/**
+	 * Finish decoding a request, refusing it instead when its AUTHORIZATION TOKENs repeat.
+	 * Section 8.9 rejects that message rather than the session, unlike any other decode error.
+	 *
+	 * @returns undefined once refused.
+	 */
+	async #request<T>(stream: Stream, kind: RequestKind, decoded: Promise<T>): Promise<T | undefined> {
+		try {
+			return await decoded;
+		} catch (err) {
+			if (!(err instanceof MalformedAuthToken) || err.requestId === undefined) throw err;
+			await this.#refuseToken(stream, kind, err.requestId);
+			return undefined;
+		}
+	}
+
+	/** Refuse a request MALFORMED_AUTH_TOKEN, ending its stream. Mirrors Rust's `token::reject`. */
+	async #refuseToken(stream: Stream, kind: RequestKind, requestId: bigint) {
+		const version = this.#session.version;
+		// Each draft-14 error message has the REQUEST_ERROR body that draft-15 folded them into.
+		const id14 = {
+			subscribe: SubscribeError.id,
+			fetch: FetchError.id,
+			publish: PublishError.id,
+			publish_namespace: PublishNamespaceError.id,
+			subscribe_namespace: SubscribeNamespaceError.id,
+			// TRACK_STATUS_ERROR
+			track_status: 0x0f,
+		}[kind];
+		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
+		await stream.writer.u53(version === Version.DRAFT_14 ? id14 : RequestError.id);
+		await new RequestError({
+			requestId: legacy ? requestId : undefined,
+			errorCode: toRequestCode("malformed_auth_token", kind, version),
+			reasonPhrase: "repeated AUTHORIZATION TOKEN",
+		}).encode(stream.writer, version);
+		stream.close();
 	}
 
 	// A malformed OBJECT_DATAGRAM is the peer breaking the protocol, like an invalid stream type.

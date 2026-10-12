@@ -37,9 +37,13 @@ moq
     )
     .updates()
     .listen((event) {
-  if (event is AnnounceEventStart) {
-    print(event.announce.prefix);
-    print(event.announce.captures);
+  // A restart is a new publisher run at the same path: request it again.
+  switch (event) {
+    case AnnounceEventStart(:final announce) ||
+        AnnounceEventRestart(:final announce):
+      print(announce.prefix);
+      print(announce.captures);
+    default:
   }
 });
 final broadcast = await moq.requestBroadcast('live/camera');
@@ -54,7 +58,7 @@ final track = mine.publishTrack(name: 'video', info: null);
 final group = track.appendGroup();
 group.writeFrame(frame: Frame(payload: bytes, timestampUs: 0));
 group.finish();
-mine.announce(route: MoqRoute());
+mine.announce(route: MoqRoute(epoch: mintEpoch())); // a fresh epoch per run
 track.finish();
 mine.close();
 

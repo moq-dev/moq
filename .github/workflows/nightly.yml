@@ -105,6 +105,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just js bench broadcasts
 
+      - name: JS request ID admission benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just js bench request-ids
+
       # A route above several interest heads lands once per head, so its re-price
       # should expose any slope over heads times received routes.
       - name: JS origin announce forwarding benchmark
@@ -180,6 +184,10 @@ jobs:
       - name: moq-mux catalog estimate fanout benchmark
         if: ${{ !cancelled() }}
         run: nix develop --command cargo bench --locked -p moq-mux --bench catalog -- --test
+
+      - name: Archive timeline FETCH fanout benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs test -p moq-archive benchmark_timeline_fetch_fanout --run-ignored only --success-output immediate
 
       - name: TS damage PID benchmark
         if: ${{ !cancelled() }}

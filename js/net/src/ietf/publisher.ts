@@ -4,7 +4,7 @@ import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
 import * as DatagramStream from "../datagram_stream.ts";
-import { controlTimeout, error, reason, StreamCode, StreamError } from "../error.ts";
+import { controlTimeout, error, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
 import type { Hop, Route } from "../hop.ts";
 import { hiddenBelow, hooks, presented } from "../internal.ts";
@@ -44,6 +44,7 @@ import {
 	SubscribeNamespaceError,
 	SubscribeNamespaceOk,
 } from "./subscribe_namespace.ts";
+import { MalformedAuthToken } from "./token.ts";
 import type { TrackStatusRequest } from "./track.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -499,32 +500,52 @@ export class Publisher {
 						return stream.writer.closed;
 					}
 					if ((await stream.reader.u53()) !== 0x02) throw new Error("unexpected message on subscribe stream");
+					// Drafts 15 and 16 name the update's own Request ID; later drafts name none.
+					const refuse = async (
+						condition: "not_supported" | "malformed_auth_token",
+						reasonPhrase: string,
+						requestId?: bigint,
+					) => {
+						await stream.writer.u53(RequestError.id);
+						await new RequestError({
+							requestId,
+							errorCode: toRequestCode(condition, "subscribe", version),
+							reasonPhrase,
+						}).encode(stream.writer, version);
+						return new UpdateFailed();
+					};
 					if (legacy) {
 						// Not applied yet, but read anyway: an unread update keeps the adapter's
 						// stream from closing, which is how UNSUBSCRIBE arrives.
-						await SubscribeUpdate.decode(stream.reader, version);
+						try {
+							await SubscribeUpdate.decode(stream.reader, version);
+						} catch (err) {
+							if (!(err instanceof MalformedAuthToken)) throw err;
+							// Draft 14 answers no update, so the refusal only ends the subscription.
+							if (version === Version.DRAFT_14) throw new UpdateFailed();
+							throw await refuse("malformed_auth_token", err.message, err.requestId);
+						}
 						continue;
 					}
-					const params = await Message.decode(stream.reader, async (r) => {
-						await r.u62();
-						if (version === Version.DRAFT_17) await r.u62();
-						return Parameters.decode(r, version, "request-update");
-					});
+					let params: Parameters;
+					try {
+						params = await Message.decode(stream.reader, async (r) => {
+							await r.u62();
+							if (version === Version.DRAFT_17) await r.u62();
+							return Parameters.decode(r, version, "request-update");
+						});
+					} catch (err) {
+						// Section 8.9 rejects the update, which says more than that we do not support it.
+						if (err instanceof MalformedAuthToken) throw await refuse("malformed_auth_token", err.message);
+						throw err;
+					}
 					const unsupported =
 						params.forward === false ||
 						params.bytes.size > 0 ||
 						params.rangeFilters ||
 						params.trackPropertyFilter ||
 						[...params.vars.keys()].some((key) => key !== 0x10n && key !== 0x20n);
-					if (unsupported) {
-						await stream.writer.u53(RequestError.id);
-						await new RequestError({
-							requestId: undefined,
-							errorCode: toRequestCode("not_supported", "subscribe", version),
-							reasonPhrase: "REQUEST_UPDATE parameters not supported",
-						}).encode(stream.writer, version);
-						throw new UpdateFailed();
-					}
+					if (unsupported) throw await refuse("not_supported", "REQUEST_UPDATE parameters not supported");
 					// update() replaces every option, so carry the rest over as Rust does.
 					if (params.subscriberPriority !== undefined)
 						track.update({ ...track.subscription.peek(), priority: fromWire(params.subscriberPriority) });
@@ -623,6 +644,9 @@ export class Publisher {
 			} finally {
 				disposeGrant();
 			}
+			// An update that broke the protocol, such as one whose AUTHORIZATION TOKEN names an
+			// alias, closes the session: the connection answers a thrown violation with its code.
+			if (publishError instanceof ProtocolViolation) throw publishError;
 
 			// PUBLISH_DONE waits until every stream this subscription will open is closed, as
 			// the draft requires, so its count is final. The subscriber leaving cancels the
@@ -681,6 +705,7 @@ export class Publisher {
 			finished = true;
 			stream.close();
 		} catch (err: unknown) {
+			if (err instanceof ProtocolViolation) throw err;
 			const e = error(err);
 			console.warn(`publish error: broadcast=${name} track=${track.name} error=${reason(e)}`);
 			stream.abort(e);

@@ -129,7 +129,7 @@ impl Pipeline {
 					entry
 				}
 				None => {
-					rung.name = self.names.mint(rung.height);
+					rung.name = self.names.mint(rung.short_side);
 					catalog::rung_entry(&rung, source, &self.config.encoder).await?
 				}
 			};
