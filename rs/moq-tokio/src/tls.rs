@@ -1497,63 +1497,25 @@ impl Listen {
 	#[cfg(feature = "_certs")]
 	pub fn server_config(&self, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::ServerConfig>> {
 		self.refuse_deprecated()?;
-		server_config(self, alpn).map(|(config, _)| config)
+		let provider = crypto::provider();
+
+		let certs = ServeCerts::new(provider.clone());
+		certs.load_certs(self)?;
+		let certs = Arc::new(certs);
+
+		// TCP can negotiate TLS 1.2 as well as 1.3, unlike QUIC which is 1.3-only.
+		let builder =
+			rustls::ServerConfig::builder_with_provider(provider.clone()).with_safe_default_protocol_versions()?;
+
+		let mut tls = match self.client_auth(provider)? {
+			Some(verifier) => builder.with_client_cert_verifier(verifier).with_cert_resolver(certs),
+			None => builder.with_no_client_auth().with_cert_resolver(certs),
+		};
+
+		tls.alpn_protocols = alpn;
+		self.disable_resumption(&mut tls);
+		Ok(Arc::new(tls))
 	}
-
-	/// Build a plain-TLS server config whose file-backed certificates reload.
-	/// Must be called inside a Tokio runtime that drives the file watcher.
-	#[cfg(all(feature = "watch", feature = "_certs"))]
-	pub fn server_config_reloading(&self, alpn: Vec<Vec<u8>>) -> Result<ReloadingServerConfig> {
-		self.refuse_deprecated()?;
-		let (config, certs) = server_config(self, alpn)?;
-		let reload = Reload::spawn(certs, self.clone())?;
-		Ok(ReloadingServerConfig {
-			config,
-			_reload: reload,
-		})
-	}
-}
-
-/// A plain-TLS server config with a watcher for its file-backed certificates.
-/// Keep this handle alive for as long as the listener serves.
-#[cfg(all(feature = "watch", feature = "_certs"))]
-#[derive(Debug)]
-pub struct ReloadingServerConfig {
-	config: Arc<rustls::ServerConfig>,
-	_reload: Reload,
-}
-
-#[cfg(all(feature = "watch", feature = "_certs"))]
-impl ReloadingServerConfig {
-	/// The rustls config used for new handshakes; clones share the live resolver.
-	pub fn config(&self) -> Arc<rustls::ServerConfig> {
-		self.config.clone()
-	}
-}
-
-/// Build a [`rustls::ServerConfig`] from a [`Listen`] for a plain-TLS listener.
-#[cfg(feature = "_certs")]
-fn server_config(config: &Listen, alpn: Vec<Vec<u8>>) -> Result<(Arc<rustls::ServerConfig>, Arc<ServeCerts>)> {
-	let provider = crypto::provider();
-
-	let certs = ServeCerts::new(provider.clone());
-	certs.load_certs(config)?;
-	let certs = Arc::new(certs);
-
-	// TCP can negotiate TLS 1.2 as well as 1.3, unlike QUIC which is 1.3-only.
-	let builder =
-		rustls::ServerConfig::builder_with_provider(provider.clone()).with_safe_default_protocol_versions()?;
-
-	let mut tls = match config.client_auth(provider)? {
-		Some(verifier) => builder
-			.with_client_cert_verifier(verifier)
-			.with_cert_resolver(certs.clone()),
-		None => builder.with_no_client_auth().with_cert_resolver(certs.clone()),
-	};
-
-	tls.alpn_protocols = alpn;
-	config.disable_resumption(&mut tls);
-	Ok((Arc::new(tls), certs))
 }
 
 /// One live served identity and client-auth policy shared by a listener group.
@@ -2558,21 +2520,23 @@ mod tests {
 		assert!(handshake_kinds(client, server).is_err());
 	}
 
-	/// A plain-TLS embedder receives a working config while retaining its watcher.
-	#[cfg(all(feature = "watch", feature = "noq"))]
+	/// A plain-TLS embedder receives a working config from the shared identity.
+	#[cfg(feature = "noq")]
 	#[tokio::test]
-	async fn plain_tls_config_reloading_handshakes() {
+	async fn served_config_handshakes() {
 		let server = Listen {
 			generate: vec!["localhost".into()],
 			..Default::default()
 		}
-		.server_config_reloading(Vec::new())
-		.expect("build reloadable TLS config");
+		.load()
+		.expect("load served identity")
+		.config(Vec::new())
+		.expect("build TLS config");
 		let client = Connect {
 			insecure: Some(true),
 			..Default::default()
 		};
-		assert!(handshake_kinds(Arc::new(client.build().unwrap()), server.config()).is_ok());
+		assert!(handshake_kinds(Arc::new(client.build().unwrap()), server).is_ok());
 	}
 
 	/// The fingerprint a listener reads off an accepted session is the one the

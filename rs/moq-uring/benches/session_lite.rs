@@ -113,9 +113,12 @@ mod linux {
 			let track = broadcast.create_track("data", timed()).expect("create track");
 
 			let certs = support::certs().expect("certificates");
-			let mut server_config =
-				quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
-			server_config.alpn = vec![ALPN.to_string()];
+			let server_config = quic::server::Config::new(
+				quic::Identity::open(&certs.cert, &certs.key)
+					.expect("identity")
+					.server(&[ALPN], quic::server::ClientAuth::None)
+					.expect("tls"),
+			);
 
 			let server_sock = handle
 				.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), ablation.config.clone())
