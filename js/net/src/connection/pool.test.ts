@@ -172,7 +172,7 @@ test("switching URLs switches origins", async () => {
 	handle.close();
 });
 
-test("a shared connection outlasts an outage longer than the default retry window", async () => {
+test("a shared connection outlasts an outage longer than a finite retry window", async () => {
 	let offline = true;
 	const stub = function StubWebTransport() {
 		if (offline) throw new Error("relay is down");
@@ -431,6 +431,44 @@ test("a private partial delay keeps the unlimited retry timeout", async () => {
 		await waitUntil(() => attempts >= 3 || handle.error.peek() !== undefined);
 		expect(attempts).toBeGreaterThanOrEqual(3);
 		expect(handle.error.peek()).toBeUndefined();
+	} finally {
+		handle.close();
+		performance.now = real;
+	}
+});
+
+test("a private handle with an explicitly undefined timeout outlasts the outage", async () => {
+	let offline = true;
+	let attempts = 0;
+	const stub = function StubWebTransport() {
+		attempts++;
+		if (offline) throw new Error("relay is down");
+		const pair = createMockTransportPair(Lite.ALPN_05);
+		void accept(pair.server, url);
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	// Each real millisecond reads as a thousand seconds to the retry window, so every retry
+	// after the first lands past any finite window.
+	const real = performance.now.bind(performance);
+	const start = real();
+	performance.now = () => start + (real() - start) * 1_000_000;
+
+	// What a caller building options from optional values produces: the undefined means "the
+	// default", which for a Connection is to retry for as long as the handle is held.
+	const handle = new Connection({
+		url,
+		share: false,
+		websocket: { enabled: false },
+		delay: { initial: Time.Milli(1), multiplier: 1, max: Time.Milli(1), timeout: undefined },
+	});
+	try {
+		await waitUntil(() => attempts >= 3 || handle.error.peek() !== undefined);
+		expect(handle.error.peek()).toBeUndefined();
+
+		offline = false;
+		await waitUntil(() => handle.status.peek() === "connected");
 	} finally {
 		handle.close();
 		performance.now = real;

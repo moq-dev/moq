@@ -30,8 +30,8 @@ export type ReloadDelay = {
 
 	/**
 	 * Maximum total time to spend retrying the current URL before giving up
-	 * (default: 10000ms). Resets after each successful connection, a URL change, or a
-	 * disable/re-enable. Set to 0 for unlimited retries.
+	 * (default: 0, unlimited). Resets after each successful connection, a URL change, or a
+	 * disable/re-enable.
 	 */
 	timeout?: Time.Milli;
 };
@@ -68,17 +68,17 @@ export type ReloadProps = Omit<ConnectProps, "url" | "signal" | "transport"> & {
 /**
  * The backoff applied to whichever {@link ReloadDelay} fields a caller leaves out.
  *
- * The timeout is short on purpose: a failure that clears within it was transient, and one that
- * doesn't should surface on {@link Reload.error} rather than leave the page silently
- * reconnecting for minutes. A loop nobody watches wants `timeout: 0` instead, since there is
- * no one to react. Giving up does not dispose the loop: a new URL or a disable/re-enable
- * starts another sequence.
+ * Retries are unlimited by default: a loop that gives up stays offline until something
+ * redials it, and a page usually has nothing that will, so an outage of any length has to
+ * recover on its own. {@link Reload.status} already shows the outage. A caller that can react
+ * sets a timeout to surface a persistent failure on {@link Reload.error}; giving up does not
+ * dispose the loop, and a new URL or a disable/re-enable starts another sequence.
  */
 const DEFAULT_DELAY: Required<ReloadDelay> = {
 	initial: Time.Milli(1000),
 	multiplier: 2,
 	max: Time.Milli(5000),
-	timeout: Time.Milli(10000),
+	timeout: Time.Milli(0),
 };
 
 /** How often the send-rate estimate is sampled from the live transport. */
@@ -417,7 +417,7 @@ export class Reload {
 
 					// A session that outlived the initial delay was healthy, so its handover is not a
 					// failure. One redirected almost at once still migrates, but through the backoff,
-					// so two peers bouncing us between them escalate and eventually give up.
+					// so two peers bouncing us between them escalate to the capped delay.
 					if (performance.now() - connected < this.#initial()) {
 						this.#retry(effect, connected, new Error("peer redirected immediately"));
 						return;
