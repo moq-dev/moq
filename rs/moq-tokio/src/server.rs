@@ -338,6 +338,13 @@ impl Server {
 				needed |= build_streams && config.tcp.bind.is_some() && config.tcp.tls == Some(true);
 			}
 			match (tls, needed) {
+				// Mirrors `validate_stream_only`: an identity no listener serves is refused.
+				// A streams-only caller owns QUIC elsewhere, which serves it.
+				(Some(_), false) if parts.quic() => {
+					return Err(Error::NoBackend(
+						"server::Config::tls needs a TLS listener (--listen or --listen-tcp-tls)",
+					));
+				}
 				(Some(tls), _) => Some(tls),
 				(None, true) => Some(config.tls.load()?),
 				(None, false) => None,
@@ -1688,6 +1695,22 @@ mod tests {
 	#[test]
 	fn no_quic_backend_needs_no_served_identity() {
 		Server::new(Config::default()).expect("an absent QUIC backend must not load a TLS identity");
+	}
+
+	/// A shared identity on a plaintext-only server would be dropped silently.
+	#[cfg(all(feature = "tcp", feature = "_certs"))]
+	#[tokio::test]
+	async fn a_shared_identity_needs_a_tls_listener() {
+		let tls = crate::tls::Listen {
+			generate: vec!["localhost".into()],
+			..Default::default()
+		}
+		.load()
+		.unwrap();
+		let mut config = Config::default();
+		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.tls = Some(tls);
+		assert!(matches!(Server::new(config), Err(Error::NoBackend(_))));
 	}
 
 	/// A millisecond track: the frames written here carry timestamps.
