@@ -230,10 +230,11 @@ asking it to reconnect elsewhere, including any that connect during the drain,
 and is force-closed if it is still connected when the window ends. Accepted
 connections still handshaking or awaiting authorization hold the drain until
 they finish, fail, or reach that same deadline. The relay exits as soon as
-every admitted connection has left, when the window ends, or immediately
-on a second signal. `0` skips the GOAWAY. Only moq-lite-04+ and moq-transport
-clients act on a GOAWAY; older ones are closed when the window ends. An
-embedder can take over the signals; see [Embed](/bin/relay/#embed).
+every admitted connection has left (refusing any that arrive after), when
+the window ends, or immediately on a second signal. `0` skips the GOAWAY.
+Only moq-lite-04+ and moq-transport clients act on a GOAWAY; older ones are
+closed when the window ends. An embedder can take over the signals; see
+[Embed](/bin/relay/#embed).
 
 ## \[log]
 

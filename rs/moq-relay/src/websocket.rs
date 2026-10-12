@@ -37,7 +37,8 @@ pub(crate) async fn serve_ws(
 		return Ok(landing_response());
 	};
 
-	let active = state.shutdown.activity.enter();
+	// Closed for drain: refuse before the upgrade so the client redials elsewhere.
+	let active = state.shutdown.activity.enter().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 	let alpns = versions.alpns();
 	let ws = negotiate_subprotocol(ws, &alpns)?;
 

@@ -14,23 +14,43 @@ use crate::{
 };
 
 /// Tracks admitted connections until their handshake or session ends.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Activity {
 	state: kio::Producer<()>,
+	// Admission goes through the weak handle: its open check shares the lock
+	// `close` commits under, so a connection is either counted or refused.
+	admit: kio::ProducerWeak<()>,
+}
+
+impl Default for Activity {
+	fn default() -> Self {
+		let state = kio::Producer::default();
+		let admit = state.weak();
+		Self { state, admit }
+	}
 }
 
 impl Activity {
-	/// Hold the server active until the returned guard is dropped.
-	pub fn enter(&self) -> Active {
-		Active {
-			_guard: self.state.consume(),
-		}
+	/// Hold the server active until the returned guard is dropped, or `None` once closed.
+	pub fn enter(&self) -> Option<Active> {
+		Some(Active {
+			_guard: self.admit.try_consume()?,
+		})
 	}
 
-	/// Wait until every admitted connection has released its guard.
-	pub async fn idle(&self) {
-		// This handle owns a producer, so its channel cannot close here.
-		self.state.unused().await.expect("activity channel closed");
+	/// Wait until every admitted connection has left, then refuse new ones.
+	pub async fn close(&self) {
+		loop {
+			if self.state.unused().await.is_err() {
+				return;
+			}
+			match self.state.write_unused() {
+				kio::Unused::Idle(state) => return state.close(),
+				// Admitted between the wake and the commit: wait for it too.
+				kio::Unused::Used => continue,
+				kio::Unused::Closed => return,
+			}
+		}
 	}
 }
 

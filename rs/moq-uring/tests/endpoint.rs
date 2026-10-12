@@ -124,16 +124,16 @@ fn a_close_reaches_both_ends_with_its_code() {
 	worker
 		.block_on(async move {
 			let mut dialed = client.connect(&dial_config(server.local_addr())).await.expect("dial");
-			let idle = |activity: &moq_net::server::Activity| {
-				let mut future = std::pin::pin!(activity.idle());
+			let closes = |activity: &moq_net::server::Activity| {
+				let mut future = std::pin::pin!(activity.close());
 				std::future::Future::poll(
 					future.as_mut(),
 					&mut std::task::Context::from_waker(std::task::Waker::noop()),
 				)
 				.is_ready()
 			};
-			assert!(!idle(&activity), "unclaimed incoming connection holds admission");
-			assert!(idle(&outgoing), "outbound dials are not admissions");
+			assert!(!closes(&activity), "unclaimed incoming connection holds admission");
+			assert!(closes(&outgoing), "outbound dials are not admissions");
 			let mut accepted = server.accept().await.expect("accept");
 
 			dialed.close(CLOSE_CODE, CLOSE_REASON);
@@ -148,8 +148,12 @@ fn a_close_reaches_both_ends_with_its_code() {
 				}
 			}
 			assert!(
-				idle(&activity),
+				closes(&activity),
 				"closed transport releases admission even while handles survive"
+			);
+			assert!(
+				client.connect(&dial_config(server.local_addr())).await.is_err(),
+				"closed activity refuses a new connection at accept"
 			);
 		})
 		.expect("worker");

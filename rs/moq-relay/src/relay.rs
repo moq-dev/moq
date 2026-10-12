@@ -820,6 +820,37 @@ mod tests {
 		);
 	}
 
+	/// A connection arriving as the last admitted one leaves is either counted
+	/// before the drain commits to exit, or refused at accept; never admitted
+	/// into a relay that has already decided to exit under it.
+	#[tokio::test(start_paused = true)]
+	async fn arrival_as_the_drain_empties_is_counted_or_refused() {
+		use futures::FutureExt;
+		let (trigger, shutdown) = crate::shutdown::Observer::new(std::time::Duration::from_secs(10));
+		let activity = shutdown.activity.clone();
+		let last = activity.enter().expect("admission open before the drain");
+		trigger.start();
+		let draining = super::drain(trigger, shutdown, false);
+		tokio::pin!(draining);
+		assert!(draining.as_mut().now_or_never().is_none());
+
+		// Arrives before the drain observes the count reach zero: it is counted.
+		drop(last);
+		let arrival = activity.enter().expect("admitted before the drain committed");
+		assert!(
+			draining.as_mut().now_or_never().is_none(),
+			"drain exited under an admitted arrival"
+		);
+
+		// Arrives just after the count reaches zero: refused at accept.
+		drop(arrival);
+		assert!(matches!(draining.as_mut().now_or_never(), Some(Ok(()))));
+		assert!(
+			activity.enter().is_none(),
+			"admitted a connection after the drain committed to exit"
+		);
+	}
+
 	#[cfg(not(feature = "_quic"))]
 	#[tokio::test]
 	async fn workers_require_a_quic_backend() {

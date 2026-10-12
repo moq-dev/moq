@@ -654,7 +654,11 @@ impl Server {
 					{
 						let alpns = versions.alpns();
 						let deadline = setup.deadline();
-						let active = setup.activity.enter();
+						// Closed for drain: refuse so the peer redials elsewhere at once.
+						let Some(active) = setup.activity.enter() else {
+							_conn.refuse();
+							continue;
+						};
 						self.accept.push(async move {
 							// Accept the transport (capturing url + mTLS identity) and exchange the
 							// MoQ SETUP up front, so path/role are known before the caller authorizes
@@ -673,7 +677,10 @@ impl Server {
 					{
 						let alpns = versions.alpns();
 						let deadline = setup.deadline();
-						let active = setup.activity.enter();
+						let Some(active) = setup.activity.enter() else {
+							_conn.refuse();
+							continue;
+						};
 						self.accept.push(async move {
 							let Accepted { session, url, identity, authority, link } = within(deadline, super::iroh::accept(_conn, alpns)).await?;
 							let (request, deadline) = setup.accept(session, deadline).await?;
@@ -690,7 +697,10 @@ impl Server {
 						// warned about by the listener itself.
 						let local = self.websocket_local_addr();
 						let deadline = setup.deadline();
-						let active = setup.activity.enter();
+						// Dropping the pending upgrade closes its socket.
+						let Some(active) = setup.activity.enter() else {
+							continue;
+						};
 						self.accept.push(async move {
 							let (session, url, accepted) = within(deadline, _pending).await?;
 							let (request, deadline) = setup.accept(session, deadline).await?;
@@ -1278,9 +1288,12 @@ fn spawn_tcp_loop(
 				pending = listener.accept_pending() => pending,
 				Some(_) = handshakes.join_next() => continue,
 			};
+			// Closed for drain: dropping the pending handshake closes its socket.
+			let Some(active) = setup.activity.enter() else {
+				continue;
+			};
 			let deadline = setup.deadline();
 			let setup = setup.clone();
-			let active = setup.activity.enter();
 			let tx = tx.clone();
 			handshakes.spawn(async move {
 				match within(deadline, pending).await {
@@ -1327,9 +1340,12 @@ fn spawn_unix_loop(
 				pending = listener.accept_pending() => pending,
 				Some(_) = handshakes.join_next() => continue,
 			};
+			// Closed for drain: dropping the pending handshake closes its socket.
+			let Some(active) = setup.activity.enter() else {
+				continue;
+			};
 			let deadline = setup.deadline();
 			let setup = setup.clone();
-			let active = setup.activity.enter();
 			let tx = tx.clone();
 			let allow = allow.clone();
 			handshakes.spawn(async move {
@@ -1750,7 +1766,7 @@ mod tests {
 		let mut stalled = tokio::net::TcpStream::connect(addr).await.unwrap();
 		stalled.read_u8().await.expect("first handshake started");
 		assert!(
-			activity.idle().now_or_never().is_none(),
+			activity.close().now_or_never().is_none(),
 			"transport handshake must hold admission"
 		);
 		let mut remaining = Vec::new();
@@ -1764,7 +1780,38 @@ mod tests {
 		}
 		task.abort();
 		let _ = task.await;
-		activity.idle().await;
+		activity.close().await;
+	}
+
+	/// A drain that closed admission refuses at accept instead of starting a
+	/// handshake it would then cut off.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn tcp_closed_activity_refuses_at_accept() {
+		let activity = moq_net::server::Activity::default();
+		activity.close().await;
+		let listener = crate::tcp::Listener::bind("127.0.0.1:0".parse().unwrap())
+			.await
+			.unwrap()
+			.with_protocols(["moq-lite-06"]);
+		let addr = listener.local_addr().unwrap();
+		let (tx, _rx) = tokio::sync::mpsc::channel(1);
+		let task = spawn_tcp_loop(
+			listener,
+			Setup {
+				activity,
+				server: moq_net::Server::new(),
+				timeout: None,
+			},
+			tx,
+		);
+		let result = qmux::tcp::Config::new(qmux::Version::QMux01)
+			.protocols(["moq-lite-06"])
+			.connect(addr)
+			.await;
+		assert!(result.is_err(), "a closed server must not handshake");
+		task.abort();
+		let _ = task.await;
 	}
 
 	#[cfg(all(feature = "uds", unix))]
@@ -1793,7 +1840,7 @@ mod tests {
 		let mut stalled = tokio::net::UnixStream::connect(&path).await.unwrap();
 		stalled.read_u8().await.expect("first handshake started");
 		assert!(
-			activity.idle().now_or_never().is_none(),
+			activity.close().now_or_never().is_none(),
 			"transport handshake must hold admission"
 		);
 		let mut remaining = Vec::new();
@@ -1807,7 +1854,7 @@ mod tests {
 		}
 		task.abort();
 		let _ = task.await;
-		activity.idle().await;
+		activity.close().await;
 	}
 
 	/// Stopping the accept loop must drop a stalled handshake at once. Each

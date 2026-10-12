@@ -328,7 +328,14 @@ impl Inner {
 			return None;
 		}
 
-		let active = self.activity.enter();
+		// Closed for drain: refuse so the peer redials elsewhere instead of
+		// retransmitting into a server that is leaving.
+		let Some(active) = self.activity.enter() else {
+			buf.clear();
+			let transmit = self.endpoint.borrow_mut().refuse(incoming, buf);
+			self.respond(&transmit, buf);
+			return None;
+		};
 		buf.clear();
 		let accepted = self.endpoint.borrow_mut().accept(incoming, Instant::now(), buf, None);
 		let (key, conn) = match accepted {

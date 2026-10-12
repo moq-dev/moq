@@ -118,9 +118,10 @@ impl Observer {
 		*self.tally.borrow()
 	}
 
-	/// Resolve once every admitted transport and serving guard has left.
+	/// Resolve once every admitted transport and serving guard has left, refusing
+	/// any connection that arrives after that.
 	pub(crate) async fn drained(&self) {
-		self.activity.idle().await;
+		self.activity.close().await;
 	}
 
 	/// Count a session as draining until the returned guard drops, and as forced
@@ -177,7 +178,9 @@ impl Observer {
 
 /// An established session the drain waits on; see [`Observer::serve`].
 pub(crate) struct Serving {
-	_active: moq_net::server::Active,
+	// `None` only after the drain closed admission, which an admitted
+	// connection's own guard prevents until it leaves.
+	_active: Option<moq_net::server::Active>,
 	tally: Arc<watch::Sender<Tally>>,
 }
 
