@@ -26,21 +26,13 @@ const CONNECT_ATTEMPT: Duration = Duration::from_secs(5);
 /// wait. Only an attempt with a later candidate to fall back on is worth
 /// bounding: cutting the last one short just turns a slow connect into a failed
 /// one, on every reconnect cycle.
+///
+/// The same goes for the retry window from [`Backoff::timeout`]: it decides
+/// whether a new attempt starts, not how long one may take, so a handshake
+/// slower than the window still gets
+/// [`crate::connect::Config::timeout`](crate::connect::Config::timeout).
 fn attempt_timeout(index: usize, total: usize) -> Option<Duration> {
 	(index + 1 < total).then_some(CONNECT_ATTEMPT)
-}
-
-/// The retry window as a deadline for the address walk, or `None` to leave each
-/// attempt to the client's own connect timeout.
-///
-/// Only when reconnecting. `Backoff::timeout` is how long to keep *retrying*, so
-/// applying it to a one-shot dial would cut short the single attempt there will
-/// ever be: a handshake slower than the retry window but well inside
-/// [`crate::connect::Config::timeout`](crate::connect::Config::timeout) would fail for a
-/// reason that does not apply. That deadline is the one governing a one-shot
-/// dial, and it already does.
-fn retry_budget(reconnect: bool, retry_start: tokio::time::Instant, timeout: Duration) -> Option<tokio::time::Instant> {
-	(reconnect && !timeout.is_zero()).then(|| retry_start + timeout)
 }
 
 /// Whether a failed candidate is the peer's answer for every candidate, ending the walk.
@@ -52,39 +44,6 @@ fn settles_walk(err: &Error) -> bool {
 		|| err
 			.status()
 			.is_some_and(|status| !crate::error::status_retryable(status))
-}
-
-/// When the attempt at candidate `index` of `total` must be given up, or `None`
-/// to let it run.
-///
-/// Two bounds, whichever comes first. [`attempt_timeout`] keeps one slow
-/// candidate from eating the others' turn, and `budget` is the retry window from
-/// [`Backoff::timeout`], which the walk has to respect too: bounding only the
-/// non-final attempts left the last one to run to the client's connect timeout,
-/// so a handful of black-holed addresses could blow through a give-up budget
-/// several times over before reporting anything.
-fn attempt_deadline(
-	index: usize,
-	total: usize,
-	now: tokio::time::Instant,
-	budget: Option<tokio::time::Instant>,
-) -> Option<tokio::time::Instant> {
-	// An equal share of what's left, not all of it. Handing each candidate the
-	// whole remaining window lets the first couple spend it between them and
-	// strand a reachable address further down the list, which is the opposite of
-	// what walking the list is for. Recomputed per attempt, so one that fails fast
-	// leaves more for the rest.
-	let share = budget.map(|budget| {
-		let remaining = total - index;
-		now + budget.saturating_duration_since(now) / remaining as u32
-	});
-	let bound = attempt_timeout(index, total).map(|limit| now + limit);
-
-	match (bound, share) {
-		(Some(bound), Some(share)) => Some(bound.min(share)),
-		(Some(only), None) | (None, Some(only)) => Some(only),
-		(None, None) => None,
-	}
 }
 
 /// Exponential backoff configuration for reconnection attempts.
@@ -144,6 +103,10 @@ pub struct Backoff {
 	max_arg: Option<CliDuration>,
 
 	/// Maximum time to spend retrying before giving up. Defaults to 10s.
+	///
+	/// No attempt starts once it has passed, but one already dialing runs to
+	/// [`crate::connect::Config::timeout`](crate::connect::Config::timeout), so a handshake
+	/// slower than this still lands. Giving up can therefore take up to one dial longer.
 	///
 	/// Resets after a stable connection (one that outlives the initial backoff), so a flapping
 	/// session that reconnects then immediately drops still counts toward the timeout. Set to
@@ -881,9 +844,7 @@ impl Connection {
 				return Err(timeout_error(timeout, retry.last_error.as_ref()));
 			}
 
-			let budget = retry_budget(client.reconnect, retry.start, timeout);
-
-			match Self::dial_any(shared, &client, &addrs, &mut draining, budget).await {
+			match Self::dial_any(shared, &client, &addrs, &mut draining).await {
 				Ok((addr, dialed)) => {
 					let url = addr.url().clone();
 					tracing::info!(peer = %Endpoint(&url), transport = %dialed.transport, "connected");
@@ -1120,7 +1081,6 @@ impl Connection {
 		client: &Client,
 		addrs: &Addrs,
 		draining: &mut Option<Draining>,
-		budget: Option<tokio::time::Instant>,
 	) -> crate::Result<(crate::connect::Addr, crate::client::Dialed)> {
 		let candidates = addrs.as_slice();
 		let mut last = None;
@@ -1128,12 +1088,6 @@ impl Connection {
 
 		for (index, addr) in candidates.iter().enumerate() {
 			let url = addr.url();
-			// The retry window can run out mid-walk. Stop rather than starting an
-			// attempt with no time to finish; the caller reports the budget error.
-			if budget.is_some_and(|budget| tokio::time::Instant::now() >= budget) {
-				break;
-			}
-
 			tracing::info!(peer = %Endpoint(url), "connecting");
 
 			let mut dial = std::pin::pin!(client.dial(addr.clone()));
@@ -1144,10 +1098,9 @@ impl Connection {
 				waiter.poll_future(dial.as_mut())
 			});
 
-			let deadline = attempt_deadline(index, candidates.len(), tokio::time::Instant::now(), budget);
-			let dialed = match deadline {
+			let dialed = match attempt_timeout(index, candidates.len()) {
 				None => dialed.await,
-				Some(deadline) => match tokio::time::timeout_at(deadline, dialed).await {
+				Some(limit) => match tokio::time::timeout(limit, dialed).await {
 					Ok(dialed) => dialed,
 					Err(_) => Err(Error::Reconnect(format!("timed out connecting to {}", Endpoint(url)))),
 				},
@@ -1171,12 +1124,8 @@ impl Connection {
 			}
 		}
 
-		// `Addrs` is never empty, so the only way to get here without a failure is
-		// the budget running out before the first attempt started.
 		// One unusable candidate must not turn another candidate's transient failure terminal.
-		Err(transient
-			.or(last)
-			.unwrap_or_else(|| Error::Reconnect("retry window elapsed before dialing".to_string())))
+		Err(transient.or(last).expect("Addrs is never empty"))
 	}
 
 	/// Poll until a session is established (the first connect, or the current one).
@@ -2263,7 +2212,7 @@ mod tests {
 
 		let (connected, _session) = tokio::time::timeout(
 			WALK_TIMEOUT,
-			Connection::dial_any(&shared, &client, &addrs, &mut draining, None),
+			Connection::dial_any(&shared, &client, &addrs, &mut draining),
 		)
 		.await
 		.expect("the walk must not hang")
@@ -2285,7 +2234,7 @@ mod tests {
 
 		let result = tokio::time::timeout(
 			WALK_TIMEOUT,
-			Connection::dial_any(&shared, &client, &addrs, &mut draining, None),
+			Connection::dial_any(&shared, &client, &addrs, &mut draining),
 		)
 		.await
 		.expect("the walk must not hang");
@@ -2313,7 +2262,7 @@ mod tests {
 		let shared = shared();
 		let mut draining = None;
 		// `Session` isn't `Debug`, so unwrap the failure by hand.
-		let Err(err) = Connection::dial_any(&shared, &client, &addrs, &mut draining, None).await else {
+		let Err(err) = Connection::dial_any(&shared, &client, &addrs, &mut draining).await else {
 			panic!("a dead address must fail");
 		};
 
@@ -2423,69 +2372,6 @@ mod tests {
 		assert!(!settles_walk(&Error::Io(std::sync::Arc::new(
 			std::io::ErrorKind::ConnectionRefused.into()
 		))));
-	}
-
-	/// The retry window bounds the walk only when there are retries.
-	///
-	/// It is a budget for *retrying*, so spending it on the single attempt a
-	/// one-shot dial gets would fail a handshake that is merely slower than the
-	/// retry window while well inside the connect timeout that actually governs it.
-	#[test]
-	fn only_a_reconnecting_dial_spends_the_retry_window() {
-		let start = tokio::time::Instant::now();
-		let timeout = Duration::from_secs(10);
-
-		assert_eq!(retry_budget(true, start, timeout), Some(start + timeout));
-		assert_eq!(
-			retry_budget(false, start, timeout),
-			None,
-			"a one-shot dial is bounded by the connect timeout, not the retry window"
-		);
-		assert_eq!(
-			retry_budget(true, start, Duration::ZERO),
-			None,
-			"zero means retry forever, so nothing bounds the walk"
-		);
-	}
-
-	/// Whichever of the two bounds comes first wins, and the retry window applies
-	/// to every candidate including the last.
-	#[test]
-	fn the_retry_window_bounds_the_walk_too() {
-		let now = tokio::time::Instant::now();
-
-		// No budget: only the fixed per-candidate bound applies, and the last
-		// candidate runs free.
-		assert_eq!(attempt_deadline(0, 2, now, None), Some(now + CONNECT_ATTEMPT));
-		assert_eq!(attempt_deadline(1, 2, now, None), None);
-
-		// A tight budget is split, not spent by whoever asks first. Two seconds
-		// across two candidates is a second each, so the second one still gets a
-		// turn; handing the first the whole window would strand it.
-		let tight = now + Duration::from_secs(2);
-		assert_eq!(
-			attempt_deadline(0, 2, now, Some(tight)),
-			Some(now + Duration::from_secs(1))
-		);
-		// The last candidate gets what is actually left, which here is all of it
-		// because nothing has been spent yet in this synthetic call.
-		assert_eq!(attempt_deadline(1, 2, now, Some(tight)), Some(tight));
-
-		// The share is what a black-holed pair used to exhaust: with the default
-		// 10s window and the 5s bound, two candidates ate it and a reachable third
-		// was never dialed. Now each gets a third.
-		let default_window = now + Duration::from_secs(10);
-		assert_eq!(
-			attempt_deadline(0, 3, now, Some(default_window)),
-			Some(now + Duration::from_secs(10) / 3),
-			"a reachable third candidate must still get a turn"
-		);
-
-		// A budget with room to spare leaves the per-candidate bound in charge, so
-		// one slow address still cannot eat the others' turn.
-		let loose = now + Duration::from_secs(60);
-		assert_eq!(attempt_deadline(0, 2, now, Some(loose)), Some(now + CONNECT_ATTEMPT));
-		assert_eq!(attempt_deadline(1, 2, now, Some(loose)), Some(loose));
 	}
 
 	/// Only an attempt with somewhere to fall back on gets the fixed bound.
