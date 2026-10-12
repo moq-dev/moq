@@ -8,7 +8,9 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
+
 import "package:ffi/ffi.dart";
+
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -407,6 +409,7 @@ class FfiConverterMoqJsonStreamConfig {
 class MoqAudio {
   final String? label;
   final String? broadcast;
+  final String? track;
   final String codec;
   final Uint8List? description;
   final int sampleRate;
@@ -417,6 +420,7 @@ class MoqAudio {
   MoqAudio({
     this.label = null,
     this.broadcast = null,
+    this.track = null,
     required this.codec,
     this.description,
     required this.sampleRate,
@@ -444,6 +448,11 @@ class FfiConverterMoqAudio {
     );
     final broadcast = broadcast_lifted.value;
     new_offset += broadcast_lifted.bytesRead;
+    final track_lifted = FfiConverterOptionalString.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final track = track_lifted.value;
+    new_offset += track_lifted.bytesRead;
     final codec_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -483,6 +492,7 @@ class FfiConverterMoqAudio {
       MoqAudio(
         label: label,
         broadcast: broadcast,
+        track: track,
         codec: codec,
         description: description,
         sampleRate: sampleRate,
@@ -499,6 +509,7 @@ class FfiConverterMoqAudio {
     final total_length =
         FfiConverterOptionalString.allocationSize(value.label) +
         FfiConverterOptionalString.allocationSize(value.broadcast) +
+        FfiConverterOptionalString.allocationSize(value.track) +
         FfiConverterString.allocationSize(value.codec) +
         FfiConverterOptionalUint8List.allocationSize(value.description) +
         FfiConverterUInt32.allocationSize(value.sampleRate) +
@@ -520,6 +531,10 @@ class FfiConverterMoqAudio {
     );
     new_offset += FfiConverterOptionalString.write(
       value.broadcast,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    new_offset += FfiConverterOptionalString.write(
+      value.track,
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterString.write(
@@ -556,6 +571,7 @@ class FfiConverterMoqAudio {
   static int allocationSize(MoqAudio value) {
     return FfiConverterOptionalString.allocationSize(value.label) +
         FfiConverterOptionalString.allocationSize(value.broadcast) +
+        FfiConverterOptionalString.allocationSize(value.track) +
         FfiConverterString.allocationSize(value.codec) +
         FfiConverterOptionalUint8List.allocationSize(value.description) +
         FfiConverterUInt32.allocationSize(value.sampleRate) +
@@ -1271,6 +1287,7 @@ class FfiConverterMoqMediaFrame {
 class MoqVideo {
   final String? label;
   final String? broadcast;
+  final String? track;
   final String codec;
   final Uint8List? description;
   final MoqDimensions? coded;
@@ -1282,6 +1299,7 @@ class MoqVideo {
   MoqVideo({
     this.label = null,
     this.broadcast = null,
+    this.track = null,
     required this.codec,
     this.description,
     this.coded,
@@ -1310,6 +1328,11 @@ class FfiConverterMoqVideo {
     );
     final broadcast = broadcast_lifted.value;
     new_offset += broadcast_lifted.bytesRead;
+    final track_lifted = FfiConverterOptionalString.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final track = track_lifted.value;
+    new_offset += track_lifted.bytesRead;
     final codec_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -1354,6 +1377,7 @@ class FfiConverterMoqVideo {
       MoqVideo(
         label: label,
         broadcast: broadcast,
+        track: track,
         codec: codec,
         description: description,
         coded: coded,
@@ -1371,6 +1395,7 @@ class FfiConverterMoqVideo {
     final total_length =
         FfiConverterOptionalString.allocationSize(value.label) +
         FfiConverterOptionalString.allocationSize(value.broadcast) +
+        FfiConverterOptionalString.allocationSize(value.track) +
         FfiConverterString.allocationSize(value.codec) +
         FfiConverterOptionalUint8List.allocationSize(value.description) +
         FfiConverterOptionalMoqDimensions.allocationSize(value.coded) +
@@ -1393,6 +1418,10 @@ class FfiConverterMoqVideo {
     );
     new_offset += FfiConverterOptionalString.write(
       value.broadcast,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    new_offset += FfiConverterOptionalString.write(
+      value.track,
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterString.write(
@@ -1433,6 +1462,7 @@ class FfiConverterMoqVideo {
   static int allocationSize(MoqVideo value) {
     return FfiConverterOptionalString.allocationSize(value.label) +
         FfiConverterOptionalString.allocationSize(value.broadcast) +
+        FfiConverterOptionalString.allocationSize(value.track) +
         FfiConverterString.allocationSize(value.codec) +
         FfiConverterOptionalUint8List.allocationSize(value.description) +
         FfiConverterOptionalMoqDimensions.allocationSize(value.coded) +
