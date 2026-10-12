@@ -4,7 +4,7 @@ import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
 import * as DatagramStream from "../datagram_stream.ts";
-import { controlTimeout, error, reason, StreamCode, StreamError } from "../error.ts";
+import { controlTimeout, error, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
 import type { Hop, Route } from "../hop.ts";
 import { hiddenBelow, hooks, presented } from "../internal.ts";
@@ -623,6 +623,9 @@ export class Publisher {
 			} finally {
 				disposeGrant();
 			}
+			// An update that broke the protocol, such as one whose AUTHORIZATION TOKEN names an
+			// alias, closes the session: the connection answers a thrown violation with its code.
+			if (publishError instanceof ProtocolViolation) throw publishError;
 
 			// PUBLISH_DONE waits until every stream this subscription will open is closed, as
 			// the draft requires, so its count is final. The subscriber leaving cancels the
@@ -681,6 +684,7 @@ export class Publisher {
 			finished = true;
 			stream.close();
 		} catch (err: unknown) {
+			if (err instanceof ProtocolViolation) throw err;
 			const e = error(err);
 			console.warn(`publish error: broadcast=${name} track=${track.name} error=${reason(e)}`);
 			stream.abort(e);

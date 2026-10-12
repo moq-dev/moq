@@ -6,6 +6,7 @@ import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream, Writer } from "../stream.ts";
+import { Timescale } from "../time.ts";
 import { Connection } from "./connection.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
@@ -13,6 +14,7 @@ import { Group } from "./object.ts";
 import { Parameters, SetupOption, SetupOptions } from "./parameters.ts";
 import { initialMaxRequestId, MaxRequestId, RequestError, RequestOk } from "./request.ts";
 import { Setup } from "./setup.ts";
+import { SubscribeOk } from "./subscribe.ts";
 import {
 	SUBSCRIBE_TRACKS_ID,
 	SubscribeNamespace,
@@ -499,15 +501,34 @@ for (const [version, alpn] of [
 	}
 }
 
-/** A SUBSCRIBE for `room/video` whose only parameter is an AUTHORIZATION TOKEN holding `token`. */
-function subscribeWithToken(version: IetfVersion, token: readonly number[]): Uint8Array {
+/** An AUTHORIZATION TOKEN holding `token`, as a one-parameter block. */
+function tokenParams(token: readonly number[]): number[] {
+	return [1, 0x03, token.length, ...token];
+}
+
+/** A SUBSCRIBE for `room/video` whose parameter block is `params`. */
+function subscribeWith(version: IetfVersion, params: readonly number[]): Uint8Array {
 	const ascii = (text: string) => [...new TextEncoder().encode(text)];
 	// Request ID, then the namespace and track name.
 	const head = [0, 1, 4, ...ascii("room"), 5, ...ascii("video")];
 	// Draft-14 carries priority, group order, forward, and a Largest Object filter inline.
 	const fields = version === Version.DRAFT_14 ? [0x80, 0x02, 0x01, 0x02] : [];
-	const body = [...head, ...fields, 1, 0x03, token.length, ...token];
+	const body = [...head, ...fields, ...params];
 	return new Uint8Array([0x03, 0, body.length, ...body]);
+}
+
+/** A SUBSCRIBE for `room/video` whose only parameter is an AUTHORIZATION TOKEN holding `token`. */
+function subscribeWithToken(version: IetfVersion, token: readonly number[]): Uint8Array {
+	return subscribeWith(version, tokenParams(token));
+}
+
+/** An update to that SUBSCRIBE whose only parameter is an AUTHORIZATION TOKEN holding `token`. */
+function updateWithToken(version: IetfVersion, token: readonly number[]): Uint8Array {
+	// Draft-14 names its own Request ID and the subscription's, then the range, priority,
+	// and forward inline; later drafts name only the request it updates.
+	const head = version === Version.DRAFT_14 ? [2, 0, 0, 0, 0, 0x80, 0x01] : [0];
+	const body = [...head, ...tokenParams(token)];
+	return new Uint8Array([0x02, 0, body.length, ...body]);
 }
 
 /**
@@ -551,6 +572,64 @@ for (const [version, alpn] of [
 			} finally {
 				logged.mockRestore();
 				connection.abort();
+			}
+		});
+	}
+}
+
+/**
+ * An update's AUTHORIZATION TOKEN decodes like the request's, so one this endpoint cannot use
+ * closes the session with the draft's code, not only the subscription it updates.
+ */
+for (const [version, alpn] of [
+	[Version.DRAFT_14, ALPN.DRAFT_14],
+	[Version.DRAFT_22, ALPN.DRAFT_22],
+] as const) {
+	for (const [name, token, code] of [
+		["REGISTER", [0x01, 0x07, 0x00], SessionCode.AuthTokenCacheOverflow],
+		["DELETE", [0x00, 0x07], SessionCode.UnknownAuthTokenAlias],
+		["USE_ALIAS", [0x02, 0x07], SessionCode.UnknownAuthTokenAlias],
+		["USE_VALUE without a type", [0x03], SessionCode.KeyValueFormatting],
+	] as const) {
+		test(`an update token with ${name} closes ${alpn}`, async () => {
+			const logged = spyOn(console, "error").mockImplementation(() => void 0);
+			const pair = createMockTransportPair(alpn);
+			const control = await Stream.open(pair.server, { version });
+			const origin = new OriginProducer();
+			const broadcast = origin.createBroadcast(Path.from("room"));
+			broadcast.announce();
+			broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			const connection = new Connection({
+				url: new URL("https://example.com"),
+				quic: pair.server,
+				control,
+				maxRequestId: 100n,
+				version,
+				client: false,
+				publish: origin.consume(),
+			});
+			try {
+				const stream =
+					version === Version.DRAFT_14
+						? await Stream.accept(pair.client, version)
+						: await Stream.open(pair.client, { version });
+				if (!stream) throw new Error("no control stream");
+				await stream.writer.write(subscribeWith(version, [0]));
+				// Draft-14's control stream also carries the PUBLISH_NAMESPACE for `room`.
+				for (;;) {
+					const type = await stream.reader.u53();
+					if (type === SubscribeOk.id) break;
+					await stream.reader.read(await stream.reader.u16());
+				}
+				await SubscribeOk.decode(stream.reader, version);
+				await stream.writer.write(updateWithToken(version, token));
+
+				const info = await pair.client.closed;
+				expect(info.closeCode).toBe(code);
+			} finally {
+				logged.mockRestore();
+				connection.abort();
+				origin.close();
 			}
 		});
 	}

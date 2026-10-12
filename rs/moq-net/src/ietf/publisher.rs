@@ -976,6 +976,15 @@ where
 			match event {
 				Ok(None) => return Some(Ok(())),
 				Err(Error::Cancel) => return None,
+				// An update the draft answers by closing the session, such as one whose
+				// AUTHORIZATION TOKEN names an alias, closes it rather than only ending this
+				// subscription, as the same token on the request itself would.
+				Err(err @ Error::Decode(crate::coding::DecodeError::Session(_))) => {
+					self.session
+						.clone()
+						.close(crate::SessionError::from(&err).to_code(), &err.to_string());
+					return Some(Err(err));
+				}
 				Err(err) => return Some(Err(err)),
 				Ok(Some(update)) => {
 					// Draft 14 answers no update. Drafts 15 and 16 answer on the control
@@ -4637,6 +4646,82 @@ mod serve_tests {
 					(ietf::RequestError::ID as u8, 10),
 					"{version}: {written:?}"
 				),
+			}
+		}
+	}
+
+	/// An update whose only parameter is an AUTHORIZATION TOKEN holding `token`, framed for
+	/// the subscription's stream.
+	fn update_with_token(version: Version, token: &[u8]) -> Vec<u8> {
+		let mut body = match version {
+			Version::Draft14 => {
+				let mut body = Vec::new();
+				ietf::SubscribeUpdate {
+					request_id: RequestId(2),
+					subscription_request_id: Some(RequestId(0)),
+					start_location: Location { group: 0, object: 0 },
+					end_group: 0,
+					subscriber_priority: 10,
+					forward: true,
+				}
+				.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
+				.unwrap();
+				// Replace the empty parameter block with the token.
+				assert_eq!(body.pop(), Some(0));
+				body
+			}
+			// The request it updates; every parameter but the token is left as it is.
+			_ => vec![2],
+		};
+		body.extend([1, 0x03, token.len() as u8]);
+		body.extend(token);
+		let mut frame = vec![ietf::SubscribeUpdate::ID as u8, 0, body.len() as u8];
+		frame.extend(body);
+		frame
+	}
+
+	/// An update's AUTHORIZATION TOKEN that this endpoint cannot use closes the session with
+	/// the draft's code, as it would on the SUBSCRIBE, not only the subscription.
+	#[moq_net_sim::test]
+	async fn an_update_token_that_cannot_be_used_closes_the_session() {
+		for version in [Version::Draft14, Version::Draft22] {
+			for (token, expected, why) in [
+				(
+					&[0x01, 0x07, 0x00][..],
+					crate::SessionError::AuthTokenCacheOverflow,
+					"REGISTER",
+				),
+				(&[0x00, 0x07][..], crate::SessionError::UnknownAuthTokenAlias, "DELETE"),
+				(
+					&[0x02, 0x07][..],
+					crate::SessionError::UnknownAuthTokenAlias,
+					"USE_ALIAS",
+				),
+				(
+					&[0x03][..],
+					crate::SessionError::KeyValueFormatting,
+					"USE_VALUE without a type",
+				),
+			] {
+				let h = serve(version);
+				let mut session = ScriptedSession::per_stream(vec![update_with_token(version, token)]);
+				let mut stream = Stream::open(&mut session, version).await.unwrap();
+				let mut serving = TrackServe::new(
+					h.session.clone(),
+					h.track.subscribe(None),
+					RequestId(0),
+					version,
+					ServeRange::default(),
+					None,
+				);
+				let mut finished = false;
+				let served = h
+					.publisher
+					.run_subscription(&mut stream, &mut serving, &mut finished, async {})
+					.await;
+				assert!(matches!(served, Some(Err(_))), "{version} {why}: {served:?}");
+				let codes: Vec<u32> = h.log.closes().into_iter().map(|(code, _)| code).collect();
+				assert_eq!(codes, vec![expected.to_code()], "{version} {why}");
 			}
 		}
 	}
