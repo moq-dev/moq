@@ -39,8 +39,9 @@ These land with the next breaking release, not the 2026-09-23 train.
   `MoqSession::epoch()` are `connects()`, which is Python's `connects()`, Go's
   `Connects()`, Swift's and Kotlin's `connects()`, and Dart's `connects`. The
   audio re-anchor is `reanchor()`: `moq_audio::encode::Producer::reset_epoch` and
-  moq-ffi's `MoqAudioProducer::reset_epoch` are `reanchor`, which is Go's
-  `Reanchor()` and Swift's `reanchor()`.
+  moq-ffi's `MoqAudioProducer::reset_epoch` are `reanchor`, which is Python's
+  `reanchor()` (was `reset_epoch()`), Swift's, Kotlin's, and Dart `moq_ffi`'s
+  `reanchor()` (was `resetEpoch()`), and Go's `Reanchor()` (was `ResetEpoch()`).
 - **`moq export ts --linger` waits only for the same publisher instance.** A
   restarted publisher (a new epoch, or any return on a version without one)
   exits 1 unless `--stitch` follows it as a program switch. `export srt` takes
