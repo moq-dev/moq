@@ -49,11 +49,15 @@ trap 'rm -rf "$out"' EXIT
 # stubs, so two of them can't share a link. Header-only helpers (quality
 # defaults) build as separate binaries with no plugin source.
 for name in moq-output moq-source obs-moq; do
-    # shellcheck disable=SC2086
     # $ffmpeg and $moq_libs stay unquoted on purpose: pkg-config hands back
     # one space-separated string, and splitting it is the intended reading.
+    sources=("test/$name-test.cpp")
+    # The source test includes its implementation to exercise catalog shapes the
+    # public publishing wrapper cannot author, without adding production hooks.
+    if [ "$name" != moq-source ]; then sources+=("src/$name.cpp"); fi
+    # shellcheck disable=SC2086
     "$cxx" "${flags[@]}" "${includes[@]}" $ffmpeg \
-        -o "$out/$name-test" "test/$name-test.cpp" "src/$name.cpp" "$out/moq.o" $moq_libs
+        -o "$out/$name-test" "${sources[@]}" "$out/moq.o" $moq_libs
     TSAN_OPTIONS="halt_on_error=1 suppressions=$PWD/test/tsan.supp" "$out/$name-test"
 done
 for name in moq-quality-defaults moq-dock-stop moq-error moq-encoder-latency moq-dial moq-spark; do

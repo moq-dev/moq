@@ -69,6 +69,8 @@ session outcomes, and embedder refusals inside session outcomes.
 - [Dogfood hosted worklets](/quest/m1/dogfood-assets.md) - the moq.pro dashboard hosts the worklets and calls `assets()` after the release
 - [TS pair acquisition](/quest/m1/ts-pair-acquisition.md) - fix the clean baseline and prove the grader's controls before #5328 enables its scheduled hard gate
 - [Initial catalog routing](/quest/m1/initial-catalog-routing.md) - a usable fallback does not strand initial catalog acquisition with a spurious Unroutable
+- [Live TS clock validation](/quest/m1/ts-live-clock.md) - resolve the local PCR-rate failure with reproducible timing evidence and CI controls
+- [Same-instance TS resume](/quest/m1/ts-same-instance-resume.md) - prove valid continuation and fix the unexpected final exporter failure without weakening identity
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
 - [END_OF_TRACK placement](/quest/m1/ietf-end-of-track-placement.md) - END_OF_TRACK rides the upstream's Location, and Rust's header stops claiming END_OF_GROUP
 - [Plan: a public model](/quest/m1/model-public-surface.md) - every crate-private model item is made public or unnecessary, so a custom publisher or subscriber builds from the public model alone
@@ -98,7 +100,6 @@ session outcomes, and embedder refusals inside session outcomes.
 - [Session report parity](/quest/m1/obs-session-report.md) - a session reports its negotiated draft and reconnect failures, so the OBS dock shows them again
 - [Generated C++ shape](/quest/m1/cpp-generated-shape.md) - `moq::Client` is the generated type itself and `moq::expected` is one type at every C++ standard
 - [First C++ package release](/quest/m1/cpp-release.md) - the OBS release path is dry-run nightly, then the first `cpp-v*` tag publishes the C++ archives and the first OBS plugin built on them
-- [Catalog switch](/quest/m1/obs-catalog-switch.md) - a catalog update keeps OBS playback running until the replacement track is decoding
 - [OBS publishes under epochs](/quest/m1/obs-epoch.md) - each OBS Start Streaming is a fresh epoch, through the generated C++
 - [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
 - [The final libmoq release is the stub](/quest/m1/libmoq-final-release.md) - the release that lets `rs/libmoq` go
@@ -140,7 +141,6 @@ session outcomes, and embedder refusals inside session outcomes.
 - [Watch worker](/quest/m1/watch-worker.md) - watch playback runs in a worker onto an OffscreenCanvas, so main-thread jank never stalls video or audio
 - [Front deadlines](/quest/m1/front-deadline-index.md) - a front's per-event cost stops growing with its track count: an expiry index and per-track wakes, proven by a churn benchmark
 - [io_uring handshake deadline](/quest/m1/listener-deadlines.md) - the io_uring workers apply `listen.timeout` to the handshake
-- [iroh keep-alive](/quest/m1/iroh-keep-alive.md) - the iroh backend honors `quic.keep_alive`
 - [Rust papercuts](/quest/m1/papercuts-rs.md) - HTTP refusals are counted, and a `u64::MAX` resume is unbounded
 - [Drop insertTrack](/quest/m1/js-insert-track.md) - `createTrack` is `@moq/net`'s only way to add a track by hand, as in Rust
 - [Front parking](/quest/m1/origin-front-parks.md) - an unroutable request waits on a front instead of re-asking on every route-table move
@@ -157,10 +157,8 @@ session outcomes, and embedder refusals inside session outcomes.
 - [Time stretch](/quest/m1/watch-audio-time-stretch.md) - js/watch: the audio ring converges by time-stretching instead of skipping or going silent
 - [Native audio quality](/quest/m1/audio-quality-native.md) - the browser lane's profiles, budgets, and metric schema run against `moq play` on a dummy device
 - [Caption import](/quest/m1/captions-import.md) - fMP4 and MKV subtitle tracks import as text renditions instead of erroring or being dropped
-- [MSF caption roles](/quest/m1/captions-msf.md) - an MSF caption or subtitle track survives conversion to a hang catalog
 - [Encoder colour](/quest/m1/color-model.md) - every moq-video encode path signals the colour its output actually has, or refuses instead of mislabelling
 - [T-STD TS export](/quest/m1/tstd/README.md) - `moq export ts` is a proper remux that passes the T-STD buffer model, starting with a fixed `--delay`
-- [Multi-packet PMT](/quest/m1/ts-pmt-split.md) - `export ts` splits a PMT longer than one packet instead of exiting before its first packet
 - [ATSC AC-3](/quest/m1/ts-atsc-ac3.md) - `export ts` carries 48 kHz ATSC AC-3 at every A/52 rate up to 640 kb/s instead of aborting from 384 kb/s up
 - [Rust non-continuous signal](/quest/m1/rust-continuous.md) - the Rust container consumer reports a frame after a subscribe or discontinuity as non-continuous, like JS, for the tune-in and warmup trims
 - [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - a viewer joining at a recovery point drops the leading pictures it cannot decode; continuous viewers keep them
@@ -171,7 +169,6 @@ session outcomes, and embedder refusals inside session outcomes.
 - [moqsrc A/V alignment](/quest/m1/gst-src-av-sync.md) - every `moqsrc` pad of a run shares one timestamp reference and segment base
 - [TS passthrough export](/quest/m1/ts-passthrough-export.md) - `export ts --passthrough` writes the `m2ts` track back byte-identical (less late drops) on a fixed delay
 - [FLV and MKV export delay](/quest/m1/export-delay.md) - FLV and MKV interleave through the shared jitter buffer on a fixed delay, breaking the CLI once
-- [Size report](/quest/m1/size-report.md) - a nightly job reports every shipped artifact's size, native and JS, and alerts when one grows
 - [Bindings size profile](/quest/m1/ffi-size-profile.md) - a benchmark decides whether the moq-ffi builds ship at opt-level "s", which halves the dylib
 - [Go mirror delivery](/quest/m1/go-mirror-delivery.md) - the Go binding's staticlibs stop growing git history by ~210 MiB per release
 - [Dart on iOS](/quest/m1/dart-ios.md) - prove the shipped iOS native asset actually loads on a device, which no CI can
@@ -187,7 +184,6 @@ session outcomes, and embedder refusals inside session outcomes.
 - [Feed fetch index](/quest/m1/feed-fetch-index.md) - held feed fetches wake per group and are capped per peer session, on main then release
 - [JS pending tail](/quest/m1/js-pending-tail.md) - a JS reader holds for a track's pending tail like Rust
 - [Group demand after accept](/quest/m1/group-demand-accept.md) - an accepted group request's demand ends cleanly instead of failing with NotFound
-- [Datagram replay bound](/quest/m1/datagram-replay-bound.md) - a new Rust datagram subscriber starts within its max delay of the newest datagram, not at a minutes-old buffer
 - [Catalog colour](/quest/m1/color-catalog.md) - the catalog describes a rendition's colour and HDR properties, which the WebGPU HDR renderer reads
 - [WebGPU HDR](/quest/m1/webgpu-hdr.md) - HDR renditions play as HDR where the browser and display can show it, and tone-map to SDR elsewhere
 - [Request ID order](/quest/m1/request-id-order.md) - drafts 14 to 16 refuse a reused or lower Request ID in both languages

@@ -17,6 +17,8 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <variant>
+#include <vector>
 
 #ifdef _WIN32
 #define strncasecmp _strnicmp
@@ -141,25 +143,70 @@ struct moq_source;
 
 namespace {
 
+enum class Decoded { Pending, Ready, Failed };
+
+// A track owns its codec and converted output, including while it is only a candidate.
+struct VideoDecoder {
+	AVCodecContext *codec_ctx = nullptr;
+	AVPixelFormat current_pix_fmt = AV_PIX_FMT_NONE;
+	SwsContext *sws_ctx = nullptr;
+	bool got_keyframe = false;
+	uint32_t frames_waiting_for_keyframe = 0;
+	uint32_t consecutive_decode_errors = 0;
+	obs_source_frame frame = {};
+	uint8_t *frame_buffer = nullptr;
+
+	~VideoDecoder()
+	{
+		if (sws_ctx)
+			sws_freeContext(sws_ctx);
+		if (codec_ctx)
+			avcodec_free_context(&codec_ctx);
+		bfree(frame_buffer);
+	}
+};
+
+struct AudioDecoder {
+	AVCodecContext *codec_ctx = nullptr;
+	uint32_t sample_rate = 0;
+	uint32_t channels = 0;
+	uint64_t frames_output = 0;
+	std::vector<AVFrame *> frames;
+
+	void clear()
+	{
+		for (auto *frame : frames)
+			av_frame_free(&frame);
+		frames.clear();
+	}
+
+	~AudioDecoder()
+	{
+		clear();
+		if (codec_ctx)
+			avcodec_free_context(&codec_ctx);
+	}
+};
+
 // One subscribed track: what it is, the consumer once subscribed, and the pending
 // call that resolves, subscribes, or reads its next frame. Dropping it cancels that call.
 struct Track {
-	using Decode = void (*)(struct moq_source *, const moq::MediaFrame &);
-
-	Track(const char *kind, std::string name, moq::Container container, Decode decode)
+	Track(const char *kind, std::string name, moq::Container container)
 		: kind(kind),
 		  name(std::move(name)),
-		  container(std::move(container)),
-		  decode(decode)
+		  container(std::move(container))
 	{
 	}
 
 	// "Video" or "Audio", for the log.
 	const char *kind;
 	std::string name;
+	// The rendition the decoder was built from.
+	std::optional<moq::Video> video_config;
+	std::optional<moq::Audio> audio_config;
+	std::unique_ptr<VideoDecoder> video_decoder;
+	std::unique_ptr<AudioDecoder> audio_decoder;
 	moq::Container container;
-	// Decodes one frame and hands it to OBS, under ctx->mutex.
-	Decode decode;
 
 	std::shared_ptr<moq::MediaContainerConsumer> consumer;
 	std::optional<moq::Continuation> call;
@@ -187,32 +234,8 @@ struct Connection {
 
 	std::shared_ptr<Track> video;
 	std::shared_ptr<Track> audio;
-};
-
-struct prepared_decoder {
-	AVCodecContext *codec_ctx = nullptr;
-	AVCodecID codec_id = AV_CODEC_ID_NONE;
-	uint32_t width = 0;
-	uint32_t height = 0;
-	std::string codec;
-
-	~prepared_decoder()
-	{
-		if (codec_ctx)
-			avcodec_free_context(&codec_ctx);
-	}
-};
-
-struct prepared_audio_decoder {
-	AVCodecContext *codec_ctx = nullptr;
-	uint32_t sample_rate = 0;
-	uint32_t channels = 0;
-
-	~prepared_audio_decoder()
-	{
-		if (codec_ctx)
-			avcodec_free_context(&codec_ctx);
-	}
+	std::shared_ptr<Track> pending_video;
+	std::shared_ptr<Track> pending_audio;
 };
 
 } // namespace
@@ -231,27 +254,6 @@ struct moq_source {
 	// The current connection, or null while disconnected. A continuation for any
 	// other connection is stale and returns without touching anything.
 	std::shared_ptr<Connection> connection;
-
-	// Audio decoder state (audio rendition 0, when the catalog carries one). Frames arrive encoded
-	// (AAC/Opus) with the broadcast's presentation timestamps; decoded to PCM and handed to OBS as async
-	// audio carrying those timestamps, so OBS aligns them with the async video.
-	AVCodecContext *audio_codec_ctx = nullptr;
-	uint32_t audio_sample_rate = 0;
-	uint32_t audio_channels = 0;
-	uint64_t audio_frames_output = 0;
-
-	// Decoder state
-	AVCodecContext *codec_ctx = nullptr;
-	AVCodecID current_codec_id = AV_CODEC_ID_NONE;        // Currently configured codec
-	enum AVPixelFormat current_pix_fmt = AV_PIX_FMT_NONE; // Current pixel format for sws_ctx
-	struct SwsContext *sws_ctx = nullptr;
-	bool got_keyframe = false;
-	uint32_t frames_waiting_for_keyframe = 0; // Count of skipped frames while waiting
-	uint32_t consecutive_decode_errors = 0;   // Count of consecutive decode failures
-
-	// Output frame buffer
-	struct obs_source_frame frame = {};
-	uint8_t *frame_buffer = nullptr;
 
 	// Runs every continuation; destroy stops it before freeing the source.
 	MoQWorker worker;
@@ -279,21 +281,17 @@ static void moq_source_on_status(struct moq_source *ctx, const std::shared_ptr<C
 static void moq_source_on_catalog(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				  moq::expected<std::optional<moq::Catalog>> result);
 static void moq_source_next_catalog(struct moq_source *ctx, const std::shared_ptr<Connection> &conn);
-static std::unique_ptr<prepared_decoder> moq_source_prepare_decoder(const moq::Video &config);
-static void moq_source_install_decoder_locked(struct moq_source *ctx, std::unique_ptr<prepared_decoder> decoder);
-static void moq_source_destroy_decoder_locked(struct moq_source *ctx);
+static std::unique_ptr<VideoDecoder> moq_source_prepare_decoder(const moq::Video &config);
 static void moq_source_clear_video_locked(struct moq_source *ctx);
 static void moq_source_subscribe_video(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				       const moq::Catalog &catalog);
-static std::unique_ptr<prepared_audio_decoder> moq_source_prepare_audio_decoder(const moq::Audio &config);
-static void moq_source_install_audio_decoder_locked(struct moq_source *ctx,
-						    std::unique_ptr<prepared_audio_decoder> decoder);
-static void moq_source_destroy_audio_decoder_locked(struct moq_source *ctx);
+static std::unique_ptr<AudioDecoder> moq_source_prepare_audio_decoder(const moq::Audio &config);
 static void moq_source_clear_audio_locked(struct moq_source *ctx);
-static void moq_source_decode_audio_frame(struct moq_source *ctx, const moq::MediaFrame &frame_data);
+static Decoded moq_source_decode_audio_frame(AudioDecoder &decoder, const moq::MediaFrame &frame_data);
+static void moq_source_output_audio(struct moq_source *ctx, AudioDecoder &decoder);
 static void moq_source_subscribe_audio(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				       const moq::Catalog &catalog);
-static void moq_source_decode_frame(struct moq_source *ctx, const moq::MediaFrame &frame_data);
+static Decoded moq_source_decode_frame(VideoDecoder &decoder, const moq::MediaFrame &frame_data);
 
 // Wraps a continuation so it runs under ctx->mutex, and only while `conn` is still
 // the source's connection. Dropping a connection cancels its calls, but a result
@@ -317,7 +315,6 @@ static void *moq_source_create(obs_data_t *settings, obs_source_t *source)
 	ctx->source = source;
 
 	// Dimensions will be set dynamically from the stream.
-	ctx->frame.format = VIDEO_FORMAT_RGBA;
 
 	// Load settings from OBS - this will auto-connect if settings are valid
 	// (moq_source_update detects settings changed from empty and reconnects)
@@ -590,7 +587,10 @@ static void moq_source_on_frame(struct moq_source *ctx, const std::shared_ptr<Co
 static std::shared_ptr<Track> moq_source_track(const Connection &conn, const std::weak_ptr<Track> &weak)
 {
 	auto track = weak.lock();
-	return track && (track == conn.video || track == conn.audio) ? track : nullptr;
+	return track && (track == conn.video || track == conn.audio || track == conn.pending_video ||
+			 track == conn.pending_audio)
+		       ? track
+		       : nullptr;
 }
 
 // Wraps a track's continuation so it runs only while `track` is still current.
@@ -610,12 +610,22 @@ moq_source_track_current(struct moq_source *ctx, const std::shared_ptr<Connectio
 					  });
 }
 
+// A failed candidate owns no active playback state and can be released immediately.
+static void moq_source_discard_candidate(const std::shared_ptr<Connection> &conn, const std::shared_ptr<Track> &track)
+{
+	if (track == conn->pending_video)
+		conn->pending_video.reset();
+	if (track == conn->pending_audio)
+		conn->pending_audio.reset();
+}
+
 static void moq_source_on_resolved(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				   const std::shared_ptr<Track> &track,
 				   moq::expected<std::shared_ptr<moq::BroadcastConsumer>> result)
 {
 	if (!result) {
 		LOG_ERROR("Failed to resolve %s track broadcast: %s", track->kind, result.error().to_string().c_str());
+		moq_source_discard_candidate(conn, track);
 		return;
 	}
 	track->call =
@@ -631,6 +641,7 @@ static void moq_source_on_subscribed(struct moq_source *ctx, const std::shared_p
 {
 	if (!result) {
 		LOG_ERROR("Failed to subscribe to %s track: %s", track->kind, result.error().to_string().c_str());
+		moq_source_discard_candidate(conn, track);
 		return;
 	}
 	track->consumer = *result;
@@ -653,16 +664,75 @@ static void moq_source_on_frame(struct moq_source *ctx, const std::shared_ptr<Co
 {
 	if (!result) {
 		LOG_ERROR("%s track error: %s", track->kind, result.error().to_string().c_str());
+		moq_source_discard_candidate(conn, track);
 		return;
 	}
 	if (!*result) {
 		LOG_DEBUG("%s track closed cleanly", track->kind);
+		moq_source_discard_candidate(conn, track);
 		return;
 	}
-	track->decode(ctx, **result);
+	const auto decoded = track->video_decoder ? moq_source_decode_frame(*track->video_decoder, **result)
+						  : moq_source_decode_audio_frame(*track->audio_decoder, **result);
+	if (decoded == Decoded::Failed) {
+		if (track == conn->pending_video || track == conn->pending_audio) {
+			moq_source_discard_candidate(conn, track);
+			return;
+		}
+		// Stop only the failed audio track, so a pending replacement can still take over.
+		if (track == conn->audio) {
+			conn->audio.reset();
+			return;
+		}
+	} else if (decoded == Decoded::Ready) {
+		// Commit only after decode and conversion succeed, under the same lock as output.
+		if (track == conn->pending_video)
+			conn->video = std::move(conn->pending_video);
+		else if (track == conn->pending_audio)
+			conn->audio = std::move(conn->pending_audio);
+		if (track->video_decoder)
+			obs_source_output_video(ctx->source, &track->video_decoder->frame);
+		else
+			moq_source_output_audio(ctx, *track->audio_decoder);
+	}
 	// The frame may have stopped the track (an audio decode failure).
 	if (moq_source_track(*conn, track) == track)
 		moq_source_read_track(ctx, conn, track);
+}
+
+static bool moq_source_same_container(const moq::Container &a, const moq::Container &b)
+{
+	const auto &x = a.get_variant();
+	const auto &y = b.get_variant();
+	if (x.index() != y.index())
+		return false;
+	const auto *cmaf = std::get_if<moq::Container::kCmaf>(&x);
+	return !cmaf || cmaf->init == std::get<moq::Container::kCmaf>(y).init;
+}
+
+// Whether `track` already plays this rendition. Metadata such as the label or bitrate may
+// change; the track, its broadcast and everything its decoder was built from may not.
+static bool moq_source_same_video(const Track *track, const std::string &name, const moq::Video &config)
+{
+	if (!track || track->name != name)
+		return false;
+	const auto &old = *track->video_config;
+	const bool same_coded =
+		old.coded.has_value() == config.coded.has_value() &&
+		(!old.coded || (old.coded->width == config.coded->width && old.coded->height == config.coded->height));
+	return old.broadcast == config.broadcast && old.codec == config.codec &&
+	       old.description == config.description && same_coded &&
+	       moq_source_same_container(old.container, config.container);
+}
+
+static bool moq_source_same_audio(const Track *track, const std::string &name, const moq::Audio &config)
+{
+	if (!track || track->name != name)
+		return false;
+	const auto &old = *track->audio_config;
+	return old.broadcast == config.broadcast && old.codec == config.codec &&
+	       old.description == config.description && old.sample_rate == config.sample_rate &&
+	       old.channel_count == config.channel_count && moq_source_same_container(old.container, config.container);
 }
 
 // Resolves the rendition's broadcast (it may live in a sibling), subscribes to the
@@ -688,22 +758,26 @@ static void moq_source_subscribe_video(struct moq_source *ctx, const std::shared
 		return;
 	}
 
-	// Build the decoder before replacing the current one, so a rendition we can't
-	// decode leaves nothing half installed.
+	if (moq_source_same_video(conn->video.get(), rendition->first, rendition->second)) {
+		conn->pending_video.reset();
+		return;
+	}
+	if (moq_source_same_video(conn->pending_video.get(), rendition->first, rendition->second))
+		return;
+	conn->pending_video.reset();
+
+	// An unusable replacement leaves the current track and decoder playing.
 	auto decoder = moq_source_prepare_decoder(rendition->second);
 	if (!decoder) {
 		LOG_ERROR("Failed to initialize decoder");
-		moq_source_clear_video_locked(ctx);
-		moq_source_blank_video(ctx);
 		return;
 	}
 
-	// A catalog update can arrive while a track is already subscribed; replacing it
-	// cancels the previous one.
-	moq_source_install_decoder_locked(ctx, std::move(decoder));
-	conn->video = std::make_shared<Track>("Video", rendition->first, rendition->second.container,
-					      moq_source_decode_frame);
-	moq_source_subscribe_track(ctx, conn, conn->video, rendition->second.broadcast);
+	auto track = std::make_shared<Track>("Video", rendition->first, rendition->second.container);
+	track->video_config = rendition->second;
+	track->video_decoder = std::move(decoder);
+	conn->pending_video = track;
+	moq_source_subscribe_track(ctx, conn, track, rendition->second.broadcast);
 }
 
 // Subscribe to the first audio rendition and install the matching decoder. A
@@ -717,29 +791,34 @@ static void moq_source_subscribe_audio(struct moq_source *ctx, const std::shared
 		moq_source_clear_audio_locked(ctx);
 		return;
 	}
+	if (moq_source_same_audio(conn->audio.get(), rendition->first, rendition->second)) {
+		conn->pending_audio.reset();
+		return;
+	}
+	if (moq_source_same_audio(conn->pending_audio.get(), rendition->first, rendition->second))
+		return;
+	conn->pending_audio.reset();
 	auto decoder = moq_source_prepare_audio_decoder(rendition->second);
 	if (!decoder) {
-		LOG_ERROR("Failed to initialize audio decoder; stopping audio");
-		moq_source_clear_audio_locked(ctx);
+		LOG_ERROR("Failed to initialize replacement audio decoder");
 		return;
 	}
 
 	LOG_INFO("Subscribing to audio track (%u Hz, %u ch)", decoder->sample_rate, decoder->channels);
-	moq_source_install_audio_decoder_locked(ctx, std::move(decoder));
-	conn->audio = std::make_shared<Track>("Audio", rendition->first, rendition->second.container,
-					      moq_source_decode_audio_frame);
-	moq_source_subscribe_track(ctx, conn, conn->audio, rendition->second.broadcast);
+	auto track = std::make_shared<Track>("Audio", rendition->first, rendition->second.container);
+	track->audio_config = rendition->second;
+	track->audio_decoder = std::move(decoder);
+	conn->pending_audio = track;
+	moq_source_subscribe_track(ctx, conn, track, rendition->second.broadcast);
 }
 
 // NOTE: Caller must hold ctx->mutex.
 static void moq_source_clear_video_locked(struct moq_source *ctx)
 {
-	if (ctx->connection)
+	if (ctx->connection) {
+		ctx->connection->pending_video.reset();
 		ctx->connection->video.reset();
-	moq_source_destroy_decoder_locked(ctx);
-	ctx->got_keyframe = false;
-	ctx->frames_waiting_for_keyframe = 0;
-	ctx->consecutive_decode_errors = 0;
+	}
 }
 
 // NOTE: Caller must hold ctx->mutex.
@@ -764,7 +843,7 @@ static void moq_source_blank_video(struct moq_source *ctx)
 	LOG_DEBUG("Video preview blanked");
 }
 
-static std::unique_ptr<prepared_decoder> moq_source_prepare_decoder(const moq::Video &config)
+static std::unique_ptr<VideoDecoder> moq_source_prepare_decoder(const moq::Video &config)
 {
 	// Map codec string to FFmpeg codec ID dynamically
 	AVCodecID codec_id = codec_string_to_id(config.codec.data(), config.codec.size());
@@ -780,9 +859,7 @@ static std::unique_ptr<prepared_decoder> moq_source_prepare_decoder(const moq::V
 		return nullptr;
 	}
 
-	auto decoder = std::make_unique<prepared_decoder>();
-	decoder->codec_id = codec_id;
-	decoder->codec = config.codec;
+	auto decoder = std::make_unique<VideoDecoder>();
 	decoder->codec_ctx = avcodec_alloc_context3(codec);
 	if (!decoder->codec_ctx) {
 		LOG_ERROR("Failed to allocate codec context");
@@ -793,11 +870,9 @@ static std::unique_ptr<prepared_decoder> moq_source_prepare_decoder(const moq::V
 	// catalog didn't declare it; the codec context keeps its own.
 	if (config.coded && config.coded->width > 0) {
 		decoder->codec_ctx->width = (int)config.coded->width;
-		decoder->width = config.coded->width;
 	}
 	if (config.coded && config.coded->height > 0) {
 		decoder->codec_ctx->height = (int)config.coded->height;
-		decoder->height = config.coded->height;
 	}
 
 	// Use codec description as extradata (contains SPS/PPS for H.264, VPS/SPS/PPS for HEVC, etc.)
@@ -817,105 +892,43 @@ static std::unique_ptr<prepared_decoder> moq_source_prepare_decoder(const moq::V
 		return nullptr;
 	}
 
-	// If dimensions weren't in config, try to get them from the opened codec context
-	// (may have been parsed from extradata)
-	if (decoder->width == 0 && decoder->codec_ctx->width > 0) {
-		decoder->width = decoder->codec_ctx->width;
-	}
-	if (decoder->height == 0 && decoder->codec_ctx->height > 0) {
-		decoder->height = decoder->codec_ctx->height;
-	}
-
 	return decoder;
 }
 
 // NOTE: Caller must hold ctx->mutex when calling this function.
-static void moq_source_install_decoder_locked(struct moq_source *ctx, std::unique_ptr<prepared_decoder> decoder)
+static Decoded moq_source_decode_frame(VideoDecoder &decoder, const moq::MediaFrame &frame_data)
 {
-	moq_source_destroy_decoder_locked(ctx);
-
-	// Install new decoder state
-	// Note: sws_ctx, frame_buffer, and frame dimensions will be initialized
-	// dynamically on first decoded frame when we know the actual pixel format
-	ctx->codec_ctx = decoder->codec_ctx;
-	decoder->codec_ctx = nullptr;
-	ctx->current_codec_id = decoder->codec_id;
-	ctx->current_pix_fmt = AV_PIX_FMT_NONE; // Will be set on first frame
-	ctx->sws_ctx = NULL;                    // Will be created on first frame with actual pixel format
-	ctx->frame_buffer = NULL;               // Will be allocated on first frame with actual dimensions
-	ctx->frame.width = decoder->width;
-	ctx->frame.height = decoder->height;
-	ctx->frame.linesize[0] = decoder->width * 4;
-	ctx->frame.data[0] = NULL;
-	ctx->frame.format = VIDEO_FORMAT_RGBA;
-	ctx->frame.timestamp = 0;
-	ctx->got_keyframe = false;
-	ctx->frames_waiting_for_keyframe = 0;
-	ctx->consecutive_decode_errors = 0;
-
-	LOG_INFO("Decoder initialized: codec=%s, dimensions=%ux%u (may be refined on first frame)",
-		 decoder->codec.c_str(), decoder->width, decoder->height);
-}
-
-// NOTE: Caller must hold ctx->mutex when calling this function
-static void moq_source_destroy_decoder_locked(struct moq_source *ctx)
-{
-	if (ctx->sws_ctx) {
-		sws_freeContext(ctx->sws_ctx);
-		ctx->sws_ctx = NULL;
-	}
-
-	if (ctx->codec_ctx) {
-		avcodec_free_context(&ctx->codec_ctx);
-		ctx->codec_ctx = NULL;
-	}
-
-	if (ctx->frame_buffer) {
-		bfree(ctx->frame_buffer);
-		ctx->frame_buffer = NULL;
-		ctx->frame.data[0] = NULL;
-	}
-
-	// Reset dynamic format tracking
-	ctx->current_codec_id = AV_CODEC_ID_NONE;
-	ctx->current_pix_fmt = AV_PIX_FMT_NONE;
-}
-
-// NOTE: Caller must hold ctx->mutex.
-static void moq_source_decode_frame(struct moq_source *ctx, const moq::MediaFrame &frame_data)
-{
-	// Check if decoder is still valid (may have been destroyed during reconnect)
-	// Note: sws_ctx and frame_buffer may be NULL on first frame - they're created dynamically
-	if (!ctx->codec_ctx)
-		return;
+	// Conversion buffers are allocated when the decoder first produces a frame.
+	if (!decoder.codec_ctx)
+		return Decoded::Failed;
 
 	// Skip non-keyframes until we get the first one
-	if (!ctx->got_keyframe && !frame_data.keyframe) {
-		ctx->frames_waiting_for_keyframe++;
-		if (ctx->frames_waiting_for_keyframe == 1 || (ctx->frames_waiting_for_keyframe % 30) == 0) {
+	if (!decoder.got_keyframe && !frame_data.keyframe) {
+		decoder.frames_waiting_for_keyframe++;
+		if (decoder.frames_waiting_for_keyframe == 1 || (decoder.frames_waiting_for_keyframe % 30) == 0) {
 			LOG_INFO("Waiting for keyframe... (skipped %u frames so far)",
-				 ctx->frames_waiting_for_keyframe);
+				 decoder.frames_waiting_for_keyframe);
 		}
-		return;
+		return Decoded::Pending;
 	}
 
 	// Mark that we've received a keyframe from the stream
 	if (frame_data.keyframe) {
-		if (!ctx->got_keyframe) {
+		if (!decoder.got_keyframe) {
 			LOG_INFO("Got keyframe after waiting for %u frames, payload_size=%zu",
-				 ctx->frames_waiting_for_keyframe, frame_data.payload.size());
+				 decoder.frames_waiting_for_keyframe, frame_data.payload.size());
 			// Flush decoder to ensure clean state when starting from keyframe
-			avcodec_flush_buffers(ctx->codec_ctx);
+			avcodec_flush_buffers(decoder.codec_ctx);
 		}
-		ctx->got_keyframe = true;
-		ctx->frames_waiting_for_keyframe = 0;
-		ctx->consecutive_decode_errors = 0;
+		decoder.got_keyframe = true;
+		decoder.frames_waiting_for_keyframe = 0;
+		decoder.consecutive_decode_errors = 0;
 	}
 
 	// Create AVPacket from frame data
 	AVPacket *packet = av_packet_alloc();
 	if (!packet) {
-		return;
+		return Decoded::Failed;
 	}
 
 	packet->data = const_cast<uint8_t *>(frame_data.payload.data());
@@ -924,74 +937,75 @@ static void moq_source_decode_frame(struct moq_source *ctx, const moq::MediaFram
 	packet->dts = packet->pts;
 
 	// Send packet to decoder
-	int ret = avcodec_send_packet(ctx->codec_ctx, packet);
+	int ret = avcodec_send_packet(decoder.codec_ctx, packet);
 	av_packet_free(&packet);
 
 	if (ret < 0) {
 		if (ret != AVERROR(EAGAIN)) {
-			ctx->consecutive_decode_errors++;
+			decoder.consecutive_decode_errors++;
 			char errbuf[AV_ERROR_MAX_STRING_SIZE];
 			av_strerror(ret, errbuf, sizeof(errbuf));
 
 			// If too many consecutive errors, flush decoder and wait for next keyframe
-			if (ctx->consecutive_decode_errors >= 5) {
+			if (decoder.consecutive_decode_errors >= 5) {
 				LOG_WARNING("Too many send errors (%u), flushing decoder and waiting for keyframe",
-					    ctx->consecutive_decode_errors);
-				avcodec_flush_buffers(ctx->codec_ctx);
-				ctx->got_keyframe = false;
-				ctx->consecutive_decode_errors = 0;
-			} else if (ctx->consecutive_decode_errors == 1) {
+					    decoder.consecutive_decode_errors);
+				avcodec_flush_buffers(decoder.codec_ctx);
+				decoder.got_keyframe = false;
+				decoder.consecutive_decode_errors = 0;
+			} else if (decoder.consecutive_decode_errors == 1) {
 				LOG_ERROR("Error sending packet to decoder: %s", errbuf);
 			}
 		}
-		return;
+		return ret == AVERROR(EAGAIN) ? Decoded::Pending : Decoded::Failed;
 	}
 
 	// Receive decoded frames
 	AVFrame *frame = av_frame_alloc();
 	if (!frame) {
-		return;
+		return Decoded::Failed;
 	}
 
-	ret = avcodec_receive_frame(ctx->codec_ctx, frame);
+	ret = avcodec_receive_frame(decoder.codec_ctx, frame);
 	if (ret < 0) {
 		if (ret != AVERROR(EAGAIN)) {
-			ctx->consecutive_decode_errors++;
+			decoder.consecutive_decode_errors++;
 			char errbuf[AV_ERROR_MAX_STRING_SIZE];
 			av_strerror(ret, errbuf, sizeof(errbuf));
 
 			// If too many consecutive errors, flush decoder and wait for next keyframe
-			if (ctx->consecutive_decode_errors >= 5) {
+			if (decoder.consecutive_decode_errors >= 5) {
 				LOG_WARNING("Too many decode errors (%u), flushing decoder and waiting for keyframe",
-					    ctx->consecutive_decode_errors);
-				avcodec_flush_buffers(ctx->codec_ctx);
-				ctx->got_keyframe = false;
-				ctx->consecutive_decode_errors = 0;
-			} else if (ctx->consecutive_decode_errors == 1) {
+					    decoder.consecutive_decode_errors);
+				avcodec_flush_buffers(decoder.codec_ctx);
+				decoder.got_keyframe = false;
+				decoder.consecutive_decode_errors = 0;
+			} else if (decoder.consecutive_decode_errors == 1) {
 				// Only log first error in a sequence
 				LOG_ERROR("Error receiving frame from decoder: %s", errbuf);
 			}
 		}
 		av_frame_free(&frame);
-		return;
+		return ret == AVERROR(EAGAIN) ? Decoded::Pending : Decoded::Failed;
 	}
 
 	// Successfully decoded a frame - reset error counter
-	ctx->consecutive_decode_errors = 0;
+	decoder.consecutive_decode_errors = 0;
 
 	// Check if we need to (re)initialize the scaler - either first frame, dimension change, or pixel format change
 	enum AVPixelFormat decoded_pix_fmt = (enum AVPixelFormat)frame->format;
-	bool dimensions_changed = (frame->width != (int)ctx->frame.width || frame->height != (int)ctx->frame.height);
-	bool pix_fmt_changed = (decoded_pix_fmt != ctx->current_pix_fmt);
-	bool need_reinit = (!ctx->sws_ctx || !ctx->frame_buffer || dimensions_changed || pix_fmt_changed);
+	bool dimensions_changed =
+		(frame->width != (int)decoder.frame.width || frame->height != (int)decoder.frame.height);
+	bool pix_fmt_changed = (decoded_pix_fmt != decoder.current_pix_fmt);
+	bool need_reinit = (!decoder.sws_ctx || !decoder.frame_buffer || dimensions_changed || pix_fmt_changed);
 
 	if (need_reinit) {
 		if (dimensions_changed) {
-			LOG_INFO("Decoded frame dimensions changed: %ux%u -> %dx%d", ctx->frame.width,
-				 ctx->frame.height, frame->width, frame->height);
+			LOG_INFO("Decoded frame dimensions changed: %ux%u -> %dx%d", decoder.frame.width,
+				 decoder.frame.height, frame->width, frame->height);
 		}
 		if (pix_fmt_changed) {
-			LOG_INFO("Decoded frame pixel format changed: %d -> %d (%s)", ctx->current_pix_fmt,
+			LOG_INFO("Decoded frame pixel format changed: %d -> %d (%s)", decoder.current_pix_fmt,
 				 decoded_pix_fmt,
 				 av_get_pix_fmt_name(decoded_pix_fmt) ? av_get_pix_fmt_name(decoded_pix_fmt)
 								      : "unknown");
@@ -1001,20 +1015,20 @@ static void moq_source_decode_frame(struct moq_source *ctx, const moq::MediaFram
 		if (frame->width <= 0 || frame->height <= 0 || frame->width > 16384 || frame->height > 16384) {
 			LOG_ERROR("Invalid decoded frame dimensions: %dx%d", frame->width, frame->height);
 			av_frame_free(&frame);
-			return;
+			return Decoded::Failed;
 		}
 
 		// Validate pixel format is supported by swscale
 		if (decoded_pix_fmt == AV_PIX_FMT_NONE) {
 			LOG_ERROR("Invalid decoded frame pixel format: %d", decoded_pix_fmt);
 			av_frame_free(&frame);
-			return;
+			return Decoded::Failed;
 		}
 
 		// Free old sws context
-		if (ctx->sws_ctx) {
-			sws_freeContext(ctx->sws_ctx);
-			ctx->sws_ctx = NULL;
+		if (decoder.sws_ctx) {
+			sws_freeContext(decoder.sws_ctx);
+			decoder.sws_ctx = NULL;
 		}
 
 		// Create new scaling context with the actual pixel format from the decoded frame
@@ -1027,7 +1041,7 @@ static void moq_source_decode_frame(struct moq_source *ctx, const moq::MediaFram
 				  av_get_pix_fmt_name(decoded_pix_fmt) ? av_get_pix_fmt_name(decoded_pix_fmt)
 								       : "unknown");
 			av_frame_free(&frame);
-			return;
+			return Decoded::Failed;
 		}
 
 		// Reallocate frame buffer for new dimensions (width * height * 4 for RGBA)
@@ -1038,44 +1052,48 @@ static void moq_source_decode_frame(struct moq_source *ctx, const moq::MediaFram
 				  new_buffer_size);
 			sws_freeContext(new_sws_ctx);
 			av_frame_free(&frame);
-			return;
+			return Decoded::Failed;
 		}
 
 		// Free old frame buffer
-		if (ctx->frame_buffer) {
-			bfree(ctx->frame_buffer);
+		if (decoder.frame_buffer) {
+			bfree(decoder.frame_buffer);
 		}
 
 		// Install new state
-		ctx->sws_ctx = new_sws_ctx;
-		ctx->current_pix_fmt = decoded_pix_fmt;
-		ctx->frame_buffer = new_frame_buffer;
-		ctx->frame.width = frame->width;
-		ctx->frame.height = frame->height;
-		ctx->frame.linesize[0] = frame->width * 4;
-		ctx->frame.data[0] = new_frame_buffer;
+		decoder.sws_ctx = new_sws_ctx;
+		decoder.current_pix_fmt = decoded_pix_fmt;
+		decoder.frame_buffer = new_frame_buffer;
+		decoder.frame.width = frame->width;
+		decoder.frame.height = frame->height;
+		decoder.frame.linesize[0] = frame->width * 4;
+		decoder.frame.data[0] = new_frame_buffer;
 
 		LOG_INFO("Scaler initialized for %dx%d pix_fmt=%s", frame->width, frame->height,
 			 av_get_pix_fmt_name(decoded_pix_fmt) ? av_get_pix_fmt_name(decoded_pix_fmt) : "unknown");
 	}
 
 	// Convert YUV420P to RGBA
-	uint8_t *dst_data[4] = {ctx->frame_buffer, NULL, NULL, NULL};
-	int dst_linesize[4] = {static_cast<int>(ctx->frame.width * 4), 0, 0, 0};
+	uint8_t *dst_data[4] = {decoder.frame_buffer, NULL, NULL, NULL};
+	int dst_linesize[4] = {static_cast<int>(decoder.frame.width * 4), 0, 0, 0};
 
-	sws_scale(ctx->sws_ctx, (const uint8_t *const *)frame->data, frame->linesize, 0, ctx->frame.height, dst_data,
-		  dst_linesize);
+	if (sws_scale(decoder.sws_ctx, (const uint8_t *const *)frame->data, frame->linesize, 0, decoder.frame.height,
+		      dst_data, dst_linesize) != static_cast<int>(decoder.frame.height)) {
+		LOG_ERROR("Failed to convert decoded video frame");
+		av_frame_free(&frame);
+		return Decoded::Failed;
+	}
 
 	// Update OBS frame timestamp and output. OBS expects nanoseconds; frames
 	// carry microseconds.
-	ctx->frame.timestamp = frame_data.timestamp_us * 1000;
-	obs_source_output_video(ctx->source, &ctx->frame);
-
+	decoder.frame.timestamp = frame_data.timestamp_us * 1000;
+	decoder.frame.format = VIDEO_FORMAT_RGBA;
 	av_frame_free(&frame);
+	return Decoded::Ready;
 }
 
 // ---- Audio -------------------------------------------------------------------
-static std::unique_ptr<prepared_audio_decoder> moq_source_prepare_audio_decoder(const moq::Audio &config)
+static std::unique_ptr<AudioDecoder> moq_source_prepare_audio_decoder(const moq::Audio &config)
 {
 	AVCodecID codec_id = audio_codec_string_to_id(config.codec.data(), config.codec.size());
 	if (codec_id == AV_CODEC_ID_NONE) {
@@ -1087,7 +1105,7 @@ static std::unique_ptr<prepared_audio_decoder> moq_source_prepare_audio_decoder(
 		LOG_ERROR("Audio decoder not found for codec ID: %d", codec_id);
 		return nullptr;
 	}
-	auto decoder = std::make_unique<prepared_audio_decoder>();
+	auto decoder = std::make_unique<AudioDecoder>();
 	decoder->codec_ctx = avcodec_alloc_context3(codec);
 	if (!decoder->codec_ctx) {
 		LOG_ERROR("Failed to allocate audio codec context");
@@ -1115,103 +1133,85 @@ static std::unique_ptr<prepared_audio_decoder> moq_source_prepare_audio_decoder(
 }
 
 // NOTE: caller holds ctx->mutex.
-static void moq_source_install_audio_decoder_locked(struct moq_source *ctx,
-						    std::unique_ptr<prepared_audio_decoder> decoder)
-{
-	moq_source_destroy_audio_decoder_locked(ctx);
-	ctx->audio_codec_ctx = decoder->codec_ctx;
-	decoder->codec_ctx = nullptr;
-	ctx->audio_sample_rate = decoder->sample_rate;
-	ctx->audio_channels = decoder->channels;
-	ctx->audio_frames_output = 0;
-}
-
-// NOTE: caller holds ctx->mutex.
-static void moq_source_destroy_audio_decoder_locked(struct moq_source *ctx)
-{
-	if (ctx->audio_codec_ctx)
-		avcodec_free_context(&ctx->audio_codec_ctx);
-	ctx->audio_sample_rate = 0;
-	ctx->audio_channels = 0;
-}
-
-// NOTE: caller holds ctx->mutex.
 static void moq_source_clear_audio_locked(struct moq_source *ctx)
 {
-	if (ctx->connection)
+	if (ctx->connection) {
+		ctx->connection->pending_audio.reset();
 		ctx->connection->audio.reset();
-	moq_source_destroy_audio_decoder_locked(ctx);
+	}
 }
 
-// NOTE: caller holds ctx->mutex.
-static void moq_source_decode_audio_frame(struct moq_source *ctx, const moq::MediaFrame &frame_data)
+// Decode a packet into owned frames before any candidate output can reach OBS.
+static Decoded moq_source_decode_audio_frame(AudioDecoder &decoder, const moq::MediaFrame &frame_data)
 {
-	if (!ctx->audio_codec_ctx)
-		return;
+	decoder.clear();
 	if (frame_data.payload.size() > INT_MAX) {
 		LOG_ERROR("Audio frame is too large to decode: %zu bytes", frame_data.payload.size());
-		moq_source_clear_audio_locked(ctx);
-		return;
+		return Decoded::Failed;
 	}
 	AVPacket *packet = av_packet_alloc();
 	if (!packet || av_new_packet(packet, static_cast<int>(frame_data.payload.size())) < 0) {
 		LOG_ERROR("Failed to allocate audio packet");
 		av_packet_free(&packet);
-		moq_source_clear_audio_locked(ctx);
-		return;
+		return Decoded::Failed;
 	}
-	if (frame_data.payload.size() > 0)
+	if (!frame_data.payload.empty())
 		memcpy(packet->data, frame_data.payload.data(), frame_data.payload.size());
 	packet->pts = static_cast<int64_t>(frame_data.timestamp_us);
 	packet->dts = packet->pts;
-	int ret = avcodec_send_packet(ctx->audio_codec_ctx, packet);
+	int ret = avcodec_send_packet(decoder.codec_ctx, packet);
 	av_packet_free(&packet);
 	if (ret < 0) {
 		LOG_ERROR("Failed to send audio packet to decoder: %d", ret);
-		moq_source_clear_audio_locked(ctx);
-		return;
+		return Decoded::Failed;
 	}
-	AVFrame *frame = av_frame_alloc();
-	if (!frame) {
-		LOG_ERROR("Failed to allocate decoded audio frame");
-		moq_source_clear_audio_locked(ctx);
-		return;
-	}
-	while ((ret = avcodec_receive_frame(ctx->audio_codec_ctx, frame)) == 0) {
-		enum audio_format fmt = av_sample_fmt_to_obs(static_cast<enum AVSampleFormat>(frame->format));
-		int channels = frame->ch_layout.nb_channels;
-		enum speaker_layout speakers = audio_layout_to_speakers(&frame->ch_layout);
-		if (fmt == AUDIO_FORMAT_UNKNOWN || speakers == SPEAKERS_UNKNOWN || frame->sample_rate <= 0 ||
+	for (;;) {
+		AVFrame *frame = av_frame_alloc();
+		if (!frame)
+			return Decoded::Failed;
+		ret = avcodec_receive_frame(decoder.codec_ctx, frame);
+		if (ret < 0) {
+			av_frame_free(&frame);
+			if (ret == AVERROR(EAGAIN))
+				return decoder.frames.empty() ? Decoded::Pending : Decoded::Ready;
+			LOG_ERROR("Failed to receive decoded audio frame: %d", ret);
+			return Decoded::Failed;
+		}
+		const auto format = av_sample_fmt_to_obs(static_cast<AVSampleFormat>(frame->format));
+		const auto speakers = audio_layout_to_speakers(&frame->ch_layout);
+		if (format == AUDIO_FORMAT_UNKNOWN || speakers == SPEAKERS_UNKNOWN || frame->sample_rate <= 0 ||
 		    frame->nb_samples <= 0) {
 			LOG_ERROR("Unsupported decoded audio layout: fmt=%d channels=%d rate=%d", frame->format,
-				  channels, frame->sample_rate);
-			av_frame_unref(frame);
-			moq_source_clear_audio_locked(ctx);
-			break;
+				  frame->ch_layout.nb_channels, frame->sample_rate);
+			av_frame_free(&frame);
+			return Decoded::Failed;
 		}
-		struct obs_source_audio audio = {};
-		int planes = av_sample_fmt_is_planar(static_cast<enum AVSampleFormat>(frame->format)) ? channels : 1;
+		if (frame->pts == AV_NOPTS_VALUE)
+			frame->pts = static_cast<int64_t>(frame_data.timestamp_us);
+		decoder.frames.push_back(frame);
+	}
+}
+
+static void moq_source_output_audio(struct moq_source *ctx, AudioDecoder &decoder)
+{
+	for (auto *frame : decoder.frames) {
+		obs_source_audio audio = {};
+		const auto format = static_cast<AVSampleFormat>(frame->format);
+		const int channels = frame->ch_layout.nb_channels;
+		const int planes = av_sample_fmt_is_planar(format) ? channels : 1;
 		for (int i = 0; i < planes && i < MAX_AV_PLANES; i++)
 			audio.data[i] = frame->data[i];
 		audio.frames = static_cast<uint32_t>(frame->nb_samples);
-		audio.speakers = speakers;
-		audio.format = fmt;
+		audio.speakers = audio_layout_to_speakers(&frame->ch_layout);
+		audio.format = av_sample_fmt_to_obs(format);
 		audio.samples_per_sec = static_cast<uint32_t>(frame->sample_rate);
-		int64_t pts_us = frame->pts != AV_NOPTS_VALUE ? frame->pts
-							      : static_cast<int64_t>(frame_data.timestamp_us);
-		audio.timestamp = static_cast<uint64_t>(pts_us) * 1000ULL; // OBS expects nanoseconds
+		audio.timestamp = static_cast<uint64_t>(frame->pts) * 1000ULL;
 		obs_source_output_audio(ctx->source, &audio);
-		ctx->audio_frames_output++;
-		if (ctx->audio_frames_output == 1)
+		if (++decoder.frames_output == 1)
 			LOG_INFO("First audio frame output: %d samples, %d Hz, %d ch, fmt=%d", frame->nb_samples,
 				 frame->sample_rate, channels, frame->format);
-		av_frame_unref(frame);
 	}
-	if (ret != 0 && ret != AVERROR(EAGAIN)) {
-		LOG_ERROR("Failed to receive decoded audio frame: %d", ret);
-		moq_source_clear_audio_locked(ctx);
-	}
-	av_frame_free(&frame);
+	decoder.clear();
 }
 
 // Registration function

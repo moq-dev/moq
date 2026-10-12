@@ -362,7 +362,10 @@ impl Server {
 			iroh::listen(endpoint, &versions)?;
 		}
 
-		let mut moq = moq_net::Server::new().with_versions(versions.clone()).with_stats(stats);
+		let mut moq = moq_net::Server::new()
+			.with_versions(versions.clone())
+			.with_extensions(config.extensions)
+			.with_stats(stats);
 		if let Some(publisher) = publisher {
 			moq = moq.with_publisher(publisher);
 		}

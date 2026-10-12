@@ -143,7 +143,9 @@ impl Client {
 		let timeout = resolved.timeout;
 
 		Ok(Self {
-			moq: moq_net::Client::new().with_versions(versions.clone()),
+			moq: moq_net::Client::new()
+				.with_versions(versions.clone())
+				.with_extensions(config.extensions),
 			#[cfg(any(
 				feature = "noq",
 				feature = "iroh",
