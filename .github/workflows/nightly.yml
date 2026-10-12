@@ -347,6 +347,12 @@ jobs:
       - name: Browser publisher fairness benchmark
         run: nix develop --command just js serve-bench
         shell: bash -leo pipefail {0}
+      - name: Native headless playback
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test native-play
+        shell: bash -leo pipefail {0}
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
       - name: Audio quality
         if: ${{ !cancelled() }}
         run: nix develop --command just test audio-quality --enforce --capture
