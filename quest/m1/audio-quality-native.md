@@ -15,7 +15,8 @@ from whichever platform a user happened to be on.
   native-play` already hears it through a private PulseAudio null sink via the
   production ALSA/cpal backend in nightly (`test/native-play/`). Reuse that
   device setup rather than a fake clock: a real device callback is part of what
-  is measured. Measure that timing noise before writing native budgets.
+  is measured. Measure that null sink's timing noise before writing native
+  budgets; it is the CI floor, not a physical device's.
 - Collect the metrics where they happen. The native driver exposes only device
   failures and sink writes today, not rendered quanta, short quanta, stalls, or
   per-stage timings, so sample them at the device callback and decoder

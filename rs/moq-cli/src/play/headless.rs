@@ -45,6 +45,9 @@ pub(crate) async fn run(
 		.run(),
 	);
 
+	// One listener for the whole run: a fresh `ctrl_c()` per iteration misses a signal sent between polls.
+	let ctrl_c = tokio::signal::ctrl_c();
+	tokio::pin!(ctrl_c);
 	let mut completed = false;
 	let result = loop {
 		tokio::select! {
@@ -68,7 +71,7 @@ pub(crate) async fn run(
 					None => Ok(()),
 				};
 			},
-			result = tokio::signal::ctrl_c() => break result.context("failed to wait for Ctrl-C"),
+			result = &mut ctrl_c => break result.context("failed to wait for Ctrl-C"),
 		}
 	};
 	media.abort();
