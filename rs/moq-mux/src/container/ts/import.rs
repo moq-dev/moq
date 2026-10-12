@@ -73,8 +73,8 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// Media time seen while that hold is active, summed across time-base breaks so a source
 	/// that keeps resetting its clock still reaches the bound.
 	held: std::time::Duration,
-	/// The newest PTS of the current time base counted into `held`.
-	held_edge: Option<Timestamp>,
+	/// The newest 90 kHz PTS of the current time base counted into `held`.
+	held_edge: Option<u64>,
 
 	/// The program's timestamp base: the first PES with a PTS anchors it, and every PTS shifts by
 	/// its offset onto the catalog clock.
@@ -711,14 +711,13 @@ impl<E: catalog::Catalog> Import<E> {
 		// rather than its flush keeps the section clock below on the same offset as the media.
 		let offset = match pes.pts {
 			Some(pts) => {
-				let pts = Timestamp::from_scale(pts, 90_000)?;
-				let offset = self.timebase.anchor(pts)?;
-				let pts = offset.apply(pts)?;
-				if self.start_pts.is_none() {
-					self.start_pts = Some(pts);
-				}
 				if self.mux_rate_reservation.is_some() {
 					self.hold_media(pts);
+				}
+				let pts = Timestamp::from_scale(pts, 90_000)?;
+				let offset = self.timebase.anchor(pts)?;
+				if self.start_pts.is_none() {
+					self.start_pts = Some(offset.apply(pts)?);
 				}
 				offset
 			}
@@ -904,13 +903,16 @@ impl<E: catalog::Catalog> Import<E> {
 
 	/// Count `pts` toward the startup hold. A source without a usable PCR never completes a
 	/// measurement window, so enough media time releases its catalog without a rate.
-	fn hold_media(&mut self, pts: Timestamp) {
-		// Reordered frames and other streams land behind the edge and add nothing.
+	fn hold_media(&mut self, pts: u64) {
+		const WRAP: u64 = 1 << 33;
 		if let Some(edge) = self.held_edge {
-			let Ok(step) = pts.checked_sub(edge) else {
+			// Modulo the 33-bit wrap, so the hold counts across a rollover. A step past half the
+			// range is a frame behind the edge (reordered, or another stream), not a jump forward.
+			let step = pts.wrapping_sub(edge) % WRAP;
+			if step >= WRAP / 2 {
 				return;
-			};
-			self.held += std::time::Duration::from(step);
+			}
+			self.held += std::time::Duration::from_nanos(step * 1_000_000_000 / 90_000);
 		}
 		self.held_edge = Some(pts);
 		if self.held >= super::mux_rate::UNMEASURED {
@@ -7544,6 +7546,40 @@ pub(super) mod test {
 			}
 		}
 		unreachable!();
+	}
+
+	/// The hold counts media time across a 33-bit PTS rollover.
+	#[test]
+	fn a_ts_without_pcr_releases_its_catalog_across_a_pts_rollover() {
+		use crate::catalog::hang::Catalog;
+		use crate::container::ts::catalog::Ext;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut updates = catalog.consume().unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import
+			.decode(&synth_pmt(&[(StreamType::Mpeg2Video, PCR_PID)], false))
+			.unwrap();
+		let waiter = kio::Waiter::noop();
+		// Starts two seconds before the rollover.
+		let start = (1 << 33) - 180_000;
+		for frame in 0..100 {
+			import
+				.decode(&pes_packet(PCR_PID, (start + frame * 3_600) % (1 << 33)))
+				.unwrap();
+			assert!(updates.poll_next(&waiter).is_pending(), "catalog after frame {frame}");
+		}
+		import
+			.decode(&pes_packet(PCR_PID, (start + 100 * 3_600) % (1 << 33)))
+			.unwrap();
+		assert!(
+			updates.poll_next(&waiter).is_ready(),
+			"four seconds across the rollover did not release the catalog"
+		);
 	}
 
 	#[test]
