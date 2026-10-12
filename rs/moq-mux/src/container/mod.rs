@@ -47,7 +47,7 @@ pub enum Kind {
 
 /// A delivered frame and whether it continues the previous delivery.
 #[derive(Clone, Debug)]
-pub struct Sample<T = Frame> {
+pub struct Delivery<T = Frame> {
 	/// The encoded or decoded media frame.
 	pub frame: T,
 	/// False on the first frame and after a playhead discontinuity.

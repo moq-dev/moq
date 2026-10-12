@@ -1,6 +1,6 @@
 //! Subscribe to an encoded audio track and emit raw PCM.
 
-use moq_mux::container::Sample;
+use moq_mux::container::Delivery;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
@@ -67,7 +67,7 @@ impl Options {
 ///
 /// The mirror of [`encode::Producer`](crate::encode::Producer): output format /
 /// sample rate / layout are fixed at construction, and
-/// [`read`](Self::read) returns samples carrying each frame's delivery continuity
+/// [`read`](Self::read) returns deliveries carrying each frame's continuity
 /// and codec activity.
 pub struct Consumer {
 	decoder: Decoder,
@@ -85,7 +85,7 @@ pub struct Consumer {
 	next_start: Option<moq_net::Timestamp>,
 	/// Frames decoded and not yet handed back, so a gap's tail can be returned
 	/// ahead of the packet that exposed it.
-	ready: VecDeque<Sample<Frame>>,
+	ready: VecDeque<Delivery<Frame>>,
 	/// Codec activity spans the resampler's buffered output still covers.
 	spans: VecDeque<ActivitySpan>,
 	/// Activity of the last span the output ran past, for the rounding samples the
@@ -253,7 +253,7 @@ impl Consumer {
 	}
 
 	/// Read the next decoded PCM frame, or `None` when the track ends.
-	/// The returned sample carries the container's delivery continuity through codec buffering.
+	/// The returned delivery carries the container's continuity through codec buffering.
 	///
 	/// [`Frame::activity`] reports whether the packet these samples came from
 	/// coded audio. It describes where the frame begins, so a resampled
@@ -265,7 +265,7 @@ impl Consumer {
 	/// side stay anchored to their own packet timeline, so the hole is there to
 	/// see. "Doesn't continue" allows for the quantization the stamps carry, which
 	/// on a millisecond-stamped ingest is most of a millisecond.
-	pub async fn read(&mut self) -> Result<Option<Sample<Frame>>, Error> {
+	pub async fn read(&mut self) -> Result<Option<Delivery<Frame>>, Error> {
 		loop {
 			if let Some(frame) = self.ready.pop_front() {
 				return Ok(Some(frame));
@@ -273,15 +273,15 @@ impl Consumer {
 
 			let mux_frame = self.track.read().await?;
 			self.apply_discontinuity()?;
-			let Some(sample) = mux_frame else {
+			let Some(delivery) = mux_frame else {
 				if let Some(frame) = self.flush()? {
 					let continuous = std::mem::replace(&mut self.continuous, true);
-					self.ready.push_back(Sample { frame, continuous });
+					self.ready.push_back(Delivery { frame, continuous });
 				}
 				return Ok(self.ready.pop_front());
 			};
 
-			let mux_frame = sample.frame;
+			let mux_frame = delivery.frame;
 			// Every packet the container hands over is an arrival, including one the
 			// decoder is about to refuse, so it is observed before anything can fail.
 			let arrival = jitter::millis(now().duration_since(self.origin));
@@ -311,10 +311,10 @@ impl Consumer {
 				&& let Some(frame) = self.gap()?
 			{
 				let continuous = std::mem::replace(&mut self.continuous, true);
-				self.ready.push_back(Sample { frame, continuous });
+				self.ready.push_back(Delivery { frame, continuous });
 			}
 
-			self.continuous &= sample.continuous;
+			self.continuous &= delivery.continuous;
 			let rate = self.decoder.sample_rate();
 			let epoch = *self.epoch.get_or_insert(mux_frame.timestamp);
 			let delay = self.decoder.delay_remaining();
@@ -409,7 +409,7 @@ impl Consumer {
 			// same iteration still comes out first. The next turn of the loop pops it.
 			let frame = self.frame(pcm, timestamp, activity)?;
 			let continuous = std::mem::replace(&mut self.continuous, true);
-			self.ready.push_back(Sample { frame, continuous });
+			self.ready.push_back(Delivery { frame, continuous });
 		}
 	}
 
@@ -425,7 +425,7 @@ impl Consumer {
 		// packet declares a new one. Drain before clearing their timeline labels.
 		if let Some(frame) = self.drain()? {
 			let continuous = std::mem::replace(&mut self.continuous, true);
-			self.ready.push_back(Sample { frame, continuous });
+			self.ready.push_back(Delivery { frame, continuous });
 		}
 		self.discontinuity = discontinuity;
 		self.next_start = None;
@@ -657,8 +657,8 @@ mod tests {
 		}
 		producer.finish().unwrap();
 		let mut flags = Vec::new();
-		while let Some(sample) = consumer.read().await.unwrap() {
-			flags.push(sample.continuous);
+		while let Some(delivery) = consumer.read().await.unwrap() {
+			flags.push(delivery.continuous);
 		}
 		assert_eq!(flags, [false, true, false, true]);
 	}
@@ -930,8 +930,8 @@ mod tests {
 		}
 		producer.finish().unwrap();
 		let mut samples = Vec::new();
-		while let Some(sample) = consumer.read().await.unwrap() {
-			samples.push((sample.frame.timestamp.as_micros(), sample.continuous));
+		while let Some(delivery) = consumer.read().await.unwrap() {
+			samples.push((delivery.frame.timestamp.as_micros(), delivery.continuous));
 		}
 		assert_eq!(
 			samples.iter().map(|(_, continuous)| *continuous).collect::<Vec<_>>(),

@@ -22,11 +22,10 @@ replaces both: the rule is timestamp arithmetic on the group start.
 - Withhold rule, keyed on the same non-continuous signal in both consumers:
   `js/hang/src/container/consumer.ts` `next()` reports `continuous: false`
   after a subscribe, a declared discontinuity, or any skip (`#gap`). The Rust
-  `moq_mux::container::Consumer` gains the equivalent in
-  [Rust non-continuous signal](/quest/m1/rust-continuous.md)
-  (today `poll_read` returns a bare frame and only the `discontinuity()`
-  counter moves); this quest reuses it, and
-  `rs/moq-video/src/decode/consumer.rs` propagates it. For the first
+  `moq_mux::container::Consumer` reports the equivalent as
+  `container::Delivery::continuous`; this quest reuses it once
+  `rs/moq-video/src/decode/consumer.rs` propagates it in
+  [Rust video delivery continuity](/quest/m1/video-continuous.md). For the first
   group after that signal, every frame is decoded (the decoder needs them to
   build reference state) and frames stamped below `group.start + warmup` are
   not presented; frames stamped at or above that boundary are, so the recovery
@@ -60,7 +59,7 @@ replaces both: the rule is timestamp arithmetic on the group start.
 
 ## Required
 
-- [Rust non-continuous signal](/quest/m1/rust-continuous.md) - the Rust signal this keys on
+- [Rust video delivery continuity](/quest/m1/video-continuous.md) - the Rust video signal this keys on
 
 ## Related
 

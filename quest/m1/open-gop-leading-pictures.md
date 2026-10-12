@@ -50,8 +50,8 @@ decode, and the JS test should drive the software decoder.
   Every continuous group is passed through untouched.
 - The same rule in the Rust decode path (`moq-video` decode consumers), so
   native playback and the transcoder tune in the same way, keyed on the
-  non-continuous signal from [Rust non-continuous
-  signal](/quest/m1/rust-continuous.md).
+  non-continuous signal from [Rust video delivery
+  continuity](/quest/m1/video-continuous.md).
 - The same rule in `moq export ts`. Decided (2026-10-01): the fixed-delay
   export still sends a join's orphaned leading pictures, so 3 of 500
   frames on the open-GOP fixture decode after they present
@@ -75,7 +75,7 @@ audio warmup and consumer warmup don't wait on this one.
 
 ## Required
 
-- [Rust non-continuous signal](/quest/m1/rust-continuous.md) - the Rust decode path keys the trim on it
+- [Rust video delivery continuity](/quest/m1/video-continuous.md) - the Rust decode path keys the trim on it
 
 ## Related
 

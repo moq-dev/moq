@@ -3,7 +3,7 @@ use std::task::{Poll, ready};
 
 use moq_net::Timestamp;
 
-use super::{Container, Frame, Sample, TimestampRewind};
+use super::{Container, Delivery, Frame, TimestampRewind};
 
 /// Media and clean group boundaries in delivery order.
 pub(crate) enum Event {
@@ -179,9 +179,9 @@ impl<F: Container> Consumer<F> {
 	/// configured max delay.
 	///
 	/// Returns `None` when the track has ended.
-	/// The first sample and the first one after a playhead event have `continuous: false`.
+	/// The first delivery and the first one after a playhead event have `continuous: false`.
 	/// An undeclared forward timestamp jump alone does not change the flag.
-	pub async fn read(&mut self) -> Result<Option<Sample>, F::Error> {
+	pub async fn read(&mut self) -> Result<Option<Delivery>, F::Error> {
 		kio::wait(|waiter| self.poll_read(waiter)).await
 	}
 
@@ -189,13 +189,13 @@ impl<F: Container> Consumer<F> {
 	///
 	/// Uses a single waiter that gets registered on all relevant kio channels,
 	/// avoiding the need for `tokio::select!` or `FuturesUnordered`.
-	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Sample>, F::Error>> {
+	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Delivery>, F::Error>> {
 		loop {
 			match ready!(self.poll_event(waiter))? {
 				Some(Event::Frame(frame)) => {
 					let continuous = self.delivered == Some(self.discontinuity);
 					self.delivered = Some(self.discontinuity);
-					return Poll::Ready(Ok(Some(Sample { frame, continuous })));
+					return Poll::Ready(Ok(Some(Delivery { frame, continuous })));
 				}
 				Some(Event::FrameEnd(end)) => {
 					if self.format.kind() == super::Kind::Audio {
@@ -928,8 +928,8 @@ mod tests {
 		write_group(&mut track, 4, &[ts(2_000_000), ts(2_010_000)]);
 		track.finish().unwrap();
 		let mut flags = Vec::new();
-		while let Some(sample) = reader.read().await.unwrap() {
-			flags.push(sample.continuous);
+		while let Some(delivery) = reader.read().await.unwrap() {
+			flags.push(delivery.continuous);
 		}
 		assert_eq!(flags, [false, true, false, true, false, true]);
 	}

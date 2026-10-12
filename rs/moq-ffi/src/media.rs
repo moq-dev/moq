@@ -1104,7 +1104,7 @@ impl Media {
 		self.inner
 			.read()
 			.await?
-			.map(|sample| media_frame(sample.frame))
+			.map(|delivery| media_frame(delivery.frame))
 			.transpose()
 	}
 }
