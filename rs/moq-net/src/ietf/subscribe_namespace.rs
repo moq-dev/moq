@@ -76,9 +76,10 @@ impl Message for SubscribeNamespace<'_> {
 		let namespace = decode_namespace(r)?;
 		// The token decodes but grants nothing: the session's grant is what authorizes the request.
 		decode_params!(r, version,
-			0x03 => _authorization_token: Vec<super::token::RequestToken>,
+			0x03 => authorization_token: Vec<super::token::RequestToken>,
 			HIDDEN_PARAM => hidden: Option<u64>,
 		);
+		super::token::unique(&authorization_token)?;
 
 		Ok(Self {
 			request_id,
@@ -176,10 +177,11 @@ impl Message for SubscribeNamespaceLegacy<'_> {
 		// Draft-14 has no such parameter, so an unlisted id is ignored. Draft-18 moved
 		// FORWARD onto SUBSCRIBE_TRACKS and closes if it shows up on the new message.
 		decode_params!(r, version,
-			0x03 => _authorization_token: Vec<super::token::RequestToken>,
+			0x03 => authorization_token: Vec<super::token::RequestToken>,
 			0x10 => _forward: Option<bool> where matches!(version, Version::Draft15 | Version::Draft16 | Version::Draft17),
 			HIDDEN_PARAM => hidden: Option<u64>,
 		);
+		super::token::unique(&authorization_token)?;
 
 		Ok(Self {
 			request_id,

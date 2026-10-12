@@ -14,7 +14,7 @@ import { Group } from "./object.ts";
 import { Parameters, SetupOption, SetupOptions } from "./parameters.ts";
 import { initialMaxRequestId, MaxRequestId, RequestError, RequestOk } from "./request.ts";
 import { Setup } from "./setup.ts";
-import { SubscribeOk } from "./subscribe.ts";
+import { SubscribeError, SubscribeOk } from "./subscribe.ts";
 import {
 	SUBSCRIBE_TRACKS_ID,
 	SubscribeNamespace,
@@ -501,16 +501,20 @@ for (const [version, alpn] of [
 	}
 }
 
-/** An AUTHORIZATION TOKEN holding `token`, as a one-parameter block. */
-function tokenParams(token: readonly number[]): number[] {
-	return [1, 0x03, token.length, ...token];
+/**
+ * A parameter block of AUTHORIZATION TOKENs. Draft-16 on codes each key as a delta from the
+ * one before, so a repeat is 0.
+ */
+function tokenParams(version: IetfVersion, ...tokens: (readonly number[])[]): number[] {
+	const delta = version !== Version.DRAFT_14 && version !== Version.DRAFT_15;
+	return [tokens.length, ...tokens.flatMap((token, i) => [i > 0 && delta ? 0 : 0x03, token.length, ...token])];
 }
 
 /** A SUBSCRIBE for `room/video` whose parameter block is `params`. */
-function subscribeWith(version: IetfVersion, params: readonly number[]): Uint8Array {
+function subscribeWith(version: IetfVersion, params: readonly number[], requestId = 0): Uint8Array {
 	const ascii = (text: string) => [...new TextEncoder().encode(text)];
 	// Request ID, then the namespace and track name.
-	const head = [0, 1, 4, ...ascii("room"), 5, ...ascii("video")];
+	const head = [requestId, 1, 4, ...ascii("room"), 5, ...ascii("video")];
 	// Draft-14 carries priority, group order, forward, and a Largest Object filter inline.
 	const fields = version === Version.DRAFT_14 ? [0x80, 0x02, 0x01, 0x02] : [];
 	const body = [...head, ...fields, ...params];
@@ -519,15 +523,15 @@ function subscribeWith(version: IetfVersion, params: readonly number[]): Uint8Ar
 
 /** A SUBSCRIBE for `room/video` whose only parameter is an AUTHORIZATION TOKEN holding `token`. */
 function subscribeWithToken(version: IetfVersion, token: readonly number[]): Uint8Array {
-	return subscribeWith(version, tokenParams(token));
+	return subscribeWith(version, tokenParams(version, token));
 }
 
-/** An update to that SUBSCRIBE whose only parameter is an AUTHORIZATION TOKEN holding `token`. */
-function updateWithToken(version: IetfVersion, token: readonly number[]): Uint8Array {
+/** An update to that SUBSCRIBE whose only parameters are AUTHORIZATION TOKENs holding `tokens`. */
+function updateWithTokens(version: IetfVersion, ...tokens: (readonly number[])[]): Uint8Array {
 	// Draft-14 names its own Request ID and the subscription's, then the range, priority,
 	// and forward inline; later drafts name only the request it updates.
 	const head = version === Version.DRAFT_14 ? [2, 0, 0, 0, 0, 0x80, 0x01] : [0];
-	const body = [...head, ...tokenParams(token)];
+	const body = [...head, ...tokenParams(version, ...tokens)];
 	return new Uint8Array([0x02, 0, body.length, ...body]);
 }
 
@@ -622,7 +626,7 @@ for (const [version, alpn] of [
 					await stream.reader.read(await stream.reader.u16());
 				}
 				await SubscribeOk.decode(stream.reader, version);
-				await stream.writer.write(updateWithToken(version, token));
+				await stream.writer.write(updateWithTokens(version, token));
 
 				const info = await pair.client.closed;
 				expect(info.closeCode).toBe(code);
@@ -634,3 +638,89 @@ for (const [version, alpn] of [
 		});
 	}
 }
+
+/** Skip the messages ahead of the first `id`, such as draft-14's PUBLISH_NAMESPACE. */
+async function skipTo(reader: Stream["reader"], id: number) {
+	for (;;) {
+		if ((await reader.u53()) === id) return;
+		await reader.read(await reader.u16());
+	}
+}
+
+/** A server publishing `room/video`, and the client's stream to send requests on. */
+async function serving(version: IetfVersion, alpn: string) {
+	const pair = createMockTransportPair(alpn);
+	const control = await Stream.open(pair.server, { version });
+	const origin = new OriginProducer();
+	const broadcast = origin.createBroadcast(Path.from("room"));
+	broadcast.announce();
+	broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const connection = new Connection({
+		url: new URL("https://example.com"),
+		quic: pair.server,
+		control,
+		maxRequestId: 100n,
+		version,
+		client: false,
+		publish: origin.consume(),
+	});
+	const stream =
+		version === Version.DRAFT_14
+			? await Stream.accept(pair.client, version)
+			: await Stream.open(pair.client, { version });
+	if (!stream) throw new Error("no control stream");
+	const close = () => {
+		connection.abort();
+		origin.close();
+	};
+	return { pair, stream, close };
+}
+
+/** USE_VALUE, type 0, value 0xAA. */
+const TOKEN = [0x03, 0x00, 0xaa] as const;
+
+/**
+ * Section 8.9: a request whose tokens repeat is rejected MALFORMED_AUTH_TOKEN, which draft-15
+ * moved from 0x10 to 0x4, and the session stays open for the next request.
+ */
+for (const [version, alpn, malformed] of [
+	[Version.DRAFT_14, ALPN.DRAFT_14, 0x10],
+	[Version.DRAFT_22, ALPN.DRAFT_22, 0x4],
+] as const) {
+	test(`a repeated request token rejects only the request ${alpn}`, async () => {
+		const { pair, stream, close } = await serving(version, alpn);
+		try {
+			await stream.writer.write(subscribeWith(version, tokenParams(version, TOKEN, TOKEN)));
+			if (version === Version.DRAFT_14) {
+				await skipTo(stream.reader, SubscribeError.id);
+				expect((await SubscribeError.decode(stream.reader, version)).errorCode).toBe(malformed);
+			} else {
+				expect(await stream.reader.u53()).toBe(RequestError.id);
+				expect((await RequestError.decode(stream.reader, version)).errorCode).toBe(malformed);
+			}
+
+			const next = version === Version.DRAFT_14 ? stream : await Stream.open(pair.client, { version });
+			await next.writer.write(subscribeWith(version, tokenParams(version, TOKEN, [0x03, 0x00, 0xbb]), 2));
+			await skipTo(next.reader, SubscribeOk.id);
+			await SubscribeOk.decode(next.reader, version);
+		} finally {
+			close();
+		}
+	});
+}
+
+/** An update whose tokens repeat is answered MALFORMED_AUTH_TOKEN, not NOT_SUPPORTED. */
+test(`a repeated update token is malformed ${ALPN.DRAFT_22}`, async () => {
+	const version = Version.DRAFT_22;
+	const { stream, close } = await serving(version, ALPN.DRAFT_22);
+	try {
+		await stream.writer.write(subscribeWith(version, [0]));
+		await skipTo(stream.reader, SubscribeOk.id);
+		await SubscribeOk.decode(stream.reader, version);
+		await stream.writer.write(updateWithTokens(version, TOKEN, TOKEN));
+		expect(await stream.reader.u53()).toBe(RequestError.id);
+		expect((await RequestError.decode(stream.reader, version)).errorCode).toBe(0x4);
+	} finally {
+		close();
+	}
+});

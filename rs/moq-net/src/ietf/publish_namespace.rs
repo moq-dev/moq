@@ -39,10 +39,11 @@ impl PublishNamespace<'_> {
 
 		// The token decodes but grants nothing: the session's grant is what authorizes the request.
 		decode_params!(r, version,
-			0x03 => _authorization_token: Vec<super::token::RequestToken>,
+			0x03 => authorization_token: Vec<super::token::RequestToken>,
 			cluster::HOP_PATH => hops: Option<cluster::HopPath>,
 			cluster::ROUTE_COST => cost: Option<u64>,
 		);
+		super::token::unique(&authorization_token)?;
 
 		let cluster = match negotiated {
 			true => Some(cluster::Advert {
@@ -146,10 +147,11 @@ impl Message for PublishNamespaceUpdate {
 		};
 		// The token decodes but grants nothing: the session's grant is what authorizes the request.
 		decode_params!(r, version,
-			0x03 => _authorization_token: Vec<super::token::RequestToken>,
+			0x03 => authorization_token: Vec<super::token::RequestToken>,
 			cluster::HOP_PATH => hops: Option<cluster::HopPath>,
 			cluster::ROUTE_COST => cost: Option<u64>,
 		);
+		super::token::unique(&authorization_token)?;
 		Ok(Self { request_id, hops, cost })
 	}
 }

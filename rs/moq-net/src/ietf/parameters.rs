@@ -167,24 +167,29 @@ impl Encode<Version> for Parameters {
 }
 
 impl Parameters {
-	/// Consume a draft-14 request's parameter block, decoding every AUTHORIZATION TOKEN
-	/// (0x03) by [`super::token::RequestToken`]'s rules.
-	pub fn skip_request(r: &mut Decoder<'_>) -> Result<(), DecodeError> {
-		Self::skip(r, true)?;
-		Ok(())
+	/// Consume a draft-14 request's parameter block, returning every AUTHORIZATION TOKEN
+	/// (0x03), each decoded by [`super::token::RequestToken`]'s rules.
+	pub fn skip_request(r: &mut Decoder<'_>) -> Result<Vec<super::token::RequestToken>, DecodeError> {
+		let mut tokens = Vec::new();
+		Self::skip(r, Some(&mut tokens))?;
+		Ok(tokens)
 	}
 
 	/// Consume a draft-14 response's parameter block, returning its first
 	/// MAX_CACHE_DURATION (0x04), the one parameter we act on.
 	pub fn skip_response(r: &mut Decoder<'_>) -> Result<Option<u64>, DecodeError> {
-		Self::skip(r, false)
+		Self::skip(r, None)
 	}
 
 	/// Draft-14 section 9.2 has a receiver ignore unrecognized parameters and allow their
 	/// duplicates, and lets AUTHORIZATION TOKEN repeat, so unlike [`Parameters::decode`],
-	/// which SETUP uses, a repeat is not refused. A token on a message that does not list it,
-	/// a response, is ignored like any other parameter.
-	fn skip(r: &mut Decoder<'_>, request: bool) -> Result<Option<u64>, DecodeError> {
+	/// which SETUP uses, a repeat is not refused. A request collects its tokens into `tokens`;
+	/// on a message that does not list them, a response, they are ignored like any other
+	/// parameter.
+	fn skip(
+		r: &mut Decoder<'_>,
+		mut tokens: Option<&mut Vec<super::token::RequestToken>>,
+	) -> Result<Option<u64>, DecodeError> {
 		let count = r.varint()?;
 		if count > MAX_PARAMS {
 			return Err(DecodeError::TooMany);
@@ -201,8 +206,10 @@ impl Parameters {
 						cache_duration.get_or_insert(value);
 					}
 				}
-				_ if request && kind == u64::from(ParameterBytes::AuthorizationToken) => {
-					super::token::RequestToken::param_decode(r, Version::Draft14)?;
+				_ if let Some(tokens) = tokens.as_deref_mut()
+					&& kind == u64::from(ParameterBytes::AuthorizationToken) =>
+				{
+					tokens.push(super::token::RequestToken::param_decode(r, Version::Draft14)?);
 				}
 				_ => {
 					let len = usize::try_from(r.varint()?).map_err(|_| DecodeError::BoundsExceeded)?;

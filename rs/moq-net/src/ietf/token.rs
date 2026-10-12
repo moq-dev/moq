@@ -7,11 +7,11 @@
 
 use crate::{
 	DecodeError, Error, SessionError,
-	coding::{Decoder, EncodeError, Encoder},
+	coding::{Decode as _, Decoder, EncodeError, Encoder, Stream},
 	setup::Token,
 };
 
-use super::{Param, ParameterBytes, Parameters, Version};
+use super::{Message as _, Param, ParameterBytes, Parameters, RequestId, Version, error::request};
 
 /// Retire a registered alias.
 const DELETE: u64 = 0x0;
@@ -56,6 +56,57 @@ impl Param for RequestToken {
 		let value = r.bytes()?;
 		Ok(Self(decode(value, version, false).map_err(DecodeError::Session)?))
 	}
+}
+
+/// Refuse a request whose tokens repeat one another.
+///
+/// Section 8.9 lets a token repeat only with a different type or value, after resolving
+/// aliases, of which we accept none. Checked once every parameter decoded, so a token that
+/// closes the session wins over a repeat.
+pub fn unique(tokens: &[RequestToken]) -> Result<(), DecodeError> {
+	for (i, token) in tokens.iter().enumerate() {
+		if tokens[..i].contains(token) {
+			return Err(DecodeError::MalformedAuthToken);
+		}
+	}
+	Ok(())
+}
+
+/// Refuse a request that decoded to [`DecodeError::MalformedAuthToken`], ending its stream.
+///
+/// Section 8.9 rejects the message rather than the session. Every request starts with its
+/// Request ID, so it is read from the undecoded `body`.
+pub(super) async fn reject<S: crate::transport::poll::Session>(
+	mut stream: Stream<S, Version>,
+	kind: request::Kind,
+	body: super::Body,
+	version: Version,
+) -> Result<(), Error> {
+	let request_id = RequestId::decode(&mut body.decoder(version), version)?;
+	// Each draft-14 error message has the REQUEST_ERROR body that draft-15 folded them into.
+	let id = match (version, kind) {
+		(Version::Draft14, request::Kind::Subscribe) => super::SubscribeError::ID,
+		(Version::Draft14, request::Kind::Fetch) => super::FetchError::ID,
+		(Version::Draft14, request::Kind::Publish) => super::PublishError::ID,
+		(Version::Draft14, request::Kind::PublishNamespace) => super::PublishNamespaceError::ID,
+		(Version::Draft14, request::Kind::SubscribeNamespace) => super::SubscribeNamespaceError::ID,
+		(Version::Draft14, request::Kind::TrackStatus) => super::TRACK_STATUS_ERROR_14,
+		_ => super::RequestError::ID,
+	};
+	let err = Error::Decode(DecodeError::MalformedAuthToken);
+	stream.writer.varint(id).await?;
+	stream
+		.writer
+		.encode(&super::RequestError {
+			request_id: matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16).then_some(request_id),
+			error_code: request::to_code(&err, kind, version),
+			reason_phrase: "repeated AUTHORIZATION TOKEN".into(),
+			retry_interval: 0,
+		})
+		.await?;
+	// The peer dropping the stream once it has the rejection is a normal end.
+	let _ = stream.writer.close().await;
+	Ok(())
 }
 
 /// Encode `token` by value.
@@ -115,6 +166,22 @@ fn decode(buf: &[u8], version: Version, setup: bool) -> Result<Token, SessionErr
 mod tests {
 	use super::*;
 	use crate::coding::{Decode, Encode};
+
+	/// Section 8.9: tokens may repeat only with a different type or value.
+	#[test]
+	fn a_repeated_token_is_malformed() {
+		let token = |kind, value: &[u8]| {
+			RequestToken(Token {
+				kind,
+				value: value.to_vec(),
+			})
+		};
+		assert!(unique(&[token(0, b"a"), token(1, b"a"), token(0, b"b")]).is_ok());
+		assert!(matches!(
+			unique(&[token(0, b"a"), token(1, b"a"), token(0, b"a")]),
+			Err(DecodeError::MalformedAuthToken)
+		));
+	}
 
 	const VERSIONS: [Version; 9] = [
 		Version::Draft14,

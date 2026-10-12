@@ -80,6 +80,40 @@ export function tokenFromSetup(params: SetupOptions, version: IetfVersion): Toke
 }
 
 /**
+ * A request whose tokens repeat one another, which section 8.9 rejects with
+ * MALFORMED_AUTH_TOKEN rather than closing the session.
+ *
+ * @internal
+ */
+export class MalformedAuthToken extends Error {
+	/** The refused request. Every request starts with its Request ID, so framing fills it in. */
+	requestId?: bigint;
+
+	constructor() {
+		super("repeated AUTHORIZATION TOKEN");
+		this.name = "MalformedAuthToken";
+	}
+}
+
+/**
+ * Refuse a request whose tokens repeat one another.
+ *
+ * Section 8.9 lets a token repeat only with a different type or value, after resolving
+ * aliases, of which we accept none. Checked once every parameter decoded, so a token that
+ * closes the session wins over a repeat.
+ *
+ * @throws {MalformedAuthToken}
+ * @internal
+ */
+export function unique(tokens: Token[]) {
+	const same = (a: Token, b: Token) =>
+		a.kind === b.kind && a.value.length === b.value.length && a.value.every((byte, i) => byte === b.value[i]);
+	for (let i = 0; i < tokens.length; i++) {
+		if (tokens.slice(0, i).some((prev) => same(prev, tokens[i]))) throw new MalformedAuthToken();
+	}
+}
+
+/**
  * Decode an `AUTHORIZATION TOKEN` message parameter on a request, by the SETUP option's rules
  * except that a registration overflows the cache instead of falling back to a value.
  *

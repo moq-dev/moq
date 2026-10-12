@@ -44,6 +44,7 @@ import {
 	SubscribeNamespaceError,
 	SubscribeNamespaceOk,
 } from "./subscribe_namespace.ts";
+import { MalformedAuthToken } from "./token.ts";
 import type { TrackStatusRequest } from "./track.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -505,26 +506,37 @@ export class Publisher {
 						await SubscribeUpdate.decode(stream.reader, version);
 						continue;
 					}
-					const params = await Message.decode(stream.reader, async (r) => {
-						await r.u62();
-						if (version === Version.DRAFT_17) await r.u62();
-						return Parameters.decode(r, version, "request-update");
-					});
+					const refuse = async (
+						condition: "not_supported" | "malformed_auth_token",
+						reasonPhrase: string,
+					) => {
+						await stream.writer.u53(RequestError.id);
+						await new RequestError({
+							requestId: undefined,
+							errorCode: toRequestCode(condition, "subscribe", version),
+							reasonPhrase,
+						}).encode(stream.writer, version);
+						return new UpdateFailed();
+					};
+					let params: Parameters;
+					try {
+						params = await Message.decode(stream.reader, async (r) => {
+							await r.u62();
+							if (version === Version.DRAFT_17) await r.u62();
+							return Parameters.decode(r, version, "request-update");
+						});
+					} catch (err) {
+						// Section 8.9 rejects the update, which says more than that we do not support it.
+						if (err instanceof MalformedAuthToken) throw await refuse("malformed_auth_token", err.message);
+						throw err;
+					}
 					const unsupported =
 						params.forward === false ||
 						params.bytes.size > 0 ||
 						params.rangeFilters ||
 						params.trackPropertyFilter ||
 						[...params.vars.keys()].some((key) => key !== 0x10n && key !== 0x20n);
-					if (unsupported) {
-						await stream.writer.u53(RequestError.id);
-						await new RequestError({
-							requestId: undefined,
-							errorCode: toRequestCode("not_supported", "subscribe", version),
-							reasonPhrase: "REQUEST_UPDATE parameters not supported",
-						}).encode(stream.writer, version);
-						throw new UpdateFailed();
-					}
+					if (unsupported) throw await refuse("not_supported", "REQUEST_UPDATE parameters not supported");
 					// update() replaces every option, so carry the rest over as Rust does.
 					if (params.subscriberPriority !== undefined)
 						track.update({ ...track.subscription.peek(), priority: fromWire(params.subscriberPriority) });

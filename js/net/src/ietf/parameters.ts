@@ -2,7 +2,7 @@ import { ProtocolViolation } from "../error.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import * as Filter from "./filter.ts";
-import { AUTHORIZATION_TOKEN, tokenFromRequest } from "./token.ts";
+import { AUTHORIZATION_TOKEN, type Token, tokenFromRequest, unique } from "./token.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /// Setup Option key constants (separate namespace from Message Parameters).
@@ -436,17 +436,20 @@ export class Parameters {
 	#filter: Filter.Filter | undefined;
 	/** Every instance of a parameter that may repeat, decoded only; we never send one. */
 	#repeated: Map<bigint, Uint8Array[]>;
+	/** Every AUTHORIZATION TOKEN, checked for repeats once the block decoded. */
+	#tokens: Token[];
 
 	constructor() {
 		this.vars = new Map();
 		this.bytes = new Map();
 		this.#locations = new Map();
 		this.#repeated = new Map();
+		this.#tokens = [];
 	}
 
 	#repeat(id: bigint, value: Uint8Array, version: IetfVersion) {
 		// Every token decodes, so one this endpoint cannot use closes the session.
-		if (id === MSG_PARAM_AUTHORIZATION_TOKEN) tokenFromRequest(value, version);
+		if (id === MSG_PARAM_AUTHORIZATION_TOKEN) this.#tokens.push(tokenFromRequest(value, version));
 		const values = this.#repeated.get(id) ?? [];
 		values.push(value);
 		this.#repeated.set(id, values);
@@ -728,6 +731,8 @@ export class Parameters {
 	 * Omitting `message`, as a draft-14 request does, stores every id.
 	 *
 	 * Only a request may carry an AUTHORIZATION TOKEN, and every one decodes.
+	 *
+	 * @throws {MalformedAuthToken} once the block decoded, for tokens that repeat.
 	 */
 	static async decode(r: Reader, version: IetfVersion, message?: ControlMessage): Promise<Parameters> {
 		const count = await r.u53();
@@ -845,6 +850,7 @@ export class Parameters {
 			}
 		}
 
+		unique(params.#tokens);
 		return params;
 	}
 }

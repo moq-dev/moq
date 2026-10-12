@@ -69,7 +69,7 @@ impl Message for Subscribe<'_> {
 				let forward = r.bool()?;
 				let filter = Filter::decode(r, version)?;
 
-				Parameters::skip_request(r)?;
+				super::token::unique(&Parameters::skip_request(r)?)?;
 
 				Ok(Self {
 					request_id,
@@ -90,7 +90,7 @@ impl Message for Subscribe<'_> {
 				// dynamic groups do.
 				decode_params!(r, version,
 					0x02 => _object_delivery_timeout: Option<u64>,
-					0x03 => _authorization_token: Vec<super::token::RequestToken>,
+					0x03 => authorization_token: Vec<super::token::RequestToken>,
 					// 0x04 is MAX_CACHE_DURATION in draft-15 (a publisher parameter) and not a
 					// message parameter at all in draft-16. RENDEZVOUS_TIMEOUT arrives in draft-17.
 					0x04 => rendezvous_timeout: Option<u64> where !matches!(version, Version::Draft15 | Version::Draft16),
@@ -107,6 +107,7 @@ impl Message for Subscribe<'_> {
 					0x32 => _new_group_request: Option<u64> where has_new_group_request(version),
 					0x35 => include_properties: Option<bool> where Filter::is_draft20(version),
 				);
+				super::token::unique(&authorization_token)?;
 
 				let range_filters = [
 					subgroup_filter,
