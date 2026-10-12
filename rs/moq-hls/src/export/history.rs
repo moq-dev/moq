@@ -29,10 +29,11 @@ pub(super) async fn read(
 	let scale = moq_net::Timescale::new(section.timescale as u64)
 		.map_err(|_| moq_mux::Error::InvalidTimescale(section.timescale))?;
 	let track = broadcast.track(name)?;
-	// The largest delay the wire can carry (2^62 - 1 ms), so no history group is skipped as late.
+	// Effectively unbounded, so no history group is skipped as late: 2^53 - 1 ms is the largest
+	// delay every implementation decodes (js/net reads it as a safe integer).
 	let subscription = moq_net::track::Subscription::default()
 		.with_start(moq_net::track::Position::group(0))
-		.with_max_delay(Duration::from_millis((1_u64 << 62) - 1));
+		.with_max_delay(Duration::from_millis((1_u64 << 53) - 1));
 	let mut live = track.subscribe(subscription).await?.ordered();
 	let mut decoder = window::Decoder::<Record>::new(window::ConsumerConfig::default().with_compression(true));
 	let mut next = 0;
