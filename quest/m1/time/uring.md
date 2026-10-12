@@ -18,8 +18,7 @@ tokio workers; `Timer::set` plus btree search ~1.6%) and its plan (sample once
 per turn; closed prototype #3136 froze the clock per turn behind an RAII
 guard) carry over. The per-turn sample is the worker's ambient `now()`; code
 on the worker never reads the host clock itself. Use a timer wheel instead of
-the queue only if the bench says so. Also absorbed the two worker tests from
-[moq-uring tests under load](/quest/m1/uring-tests-under-load.md).
+the queue only if the bench says so.
 
 Measure before and after on `moq-quic`: the `[vdso]` share in `perf` on both
 flavors, and relay CPU via `just bench BASE` on Linux. The existing keep-alive

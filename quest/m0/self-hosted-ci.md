@@ -27,8 +27,7 @@ Decided in the 2026-10-09 planning session:
   branch. Merge-queue runs are trusted because a maintainer enqueues every
   entry; a reviewed Dependabot bump is then no different from a human-authored
   dependency bump, which every job already builds. To keep that true, delete `.github/workflows/dependabot.yml` (its
-  only job enables auto-merge on Dependabot PRs) and drop the Dependabot check
-  from [Merge queue](/quest/m1/merge-queue-settings.md); a maintainer enqueues
+  only job enables auto-merge on Dependabot PRs); a maintainer enqueues
   Dependabot PRs by hand (decided on review: the `merge_group` event cannot
   name its PRs' authors, and a router job was rejected). Deleting the workflow
   leaves auto-merge set on Dependabot PRs already open, so run
@@ -95,6 +94,11 @@ Decided in the 2026-10-09 planning session:
   from Cargo into mbx; give it a self-hosted mode that points mbx at the
   server instead of restoring the hosted store.
 
+The squash merge queue is active (ruleset 2420853, verified 2026-10-10;
+#5291 passed through it). Its condition quest is complete. The workflow
+removal and disabling previously enabled Dependabot auto-merge remain here;
+do not wait for the superseded automatic-merge completion check.
+
 Verify before merging what can be checked without the host: `actionlint`,
 the routing expression's four cases (fork, Dependabot, same-repo, merge
 group) with `CI_RUNNER` set and unset, and that the module evaluates (`nix eval` or a
@@ -108,4 +112,3 @@ Public API: none. Wire: none.
 
 - [CI host](/quest/m0/ci-host.md) - the maintainer brings up the host this module configures
 - [GPU CI](/quest/m1/gpu-ci.md) - the nightly NVIDIA job that runs on the `moq-gpu` instance
-- [Merge queue](/quest/m1/merge-queue-settings.md) - once on, its runs route here too

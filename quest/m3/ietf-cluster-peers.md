@@ -14,10 +14,14 @@ bit) and its selection.
 
 Test: a moq-transport relay peering through the extension discards a route
 that loops back to it, and resumes a subscription on another route when the
-serving one dies.
+serving one dies, only with matching explicit epochs. Test cluster-only,
+epoch-only, both and neither negotiated: cluster metadata alone never makes
+namespace equality sufficient for continuity. Without verified epochs,
+route replacement signals a new instance instead of stitching.
 
 Wire: extends `draft-lcurley-moq-cluster`, updated in the same PR.
 
 ## Required
 
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - settles what a cluster link carries
+- [IETF epochs](/quest/m1/ietf-epochs.md) - explicit identity for the seamless-resume guarantee

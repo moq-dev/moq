@@ -1315,6 +1315,47 @@ func TestAnnouncedExactFilterCapturesEmpty(t *testing.T) {
 	}
 }
 
+// A route carries the publisher's epoch, and a new one restarts announce consumers.
+func TestAnnouncedEpochRestarts(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	origin := newOrigin(t)
+	announced, err := origin.Consume().Announced(moq.AnnounceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer announced.Cancel()
+
+	broadcast, err := origin.CreateBroadcast("epoch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := moq.MintEpoch()
+	if at, err := moq.EpochTime("018bcfe5-6800-7000-8000-000000000000"); err != nil || !at.Equal(time.UnixMilli(1_700_000_000_000)) {
+		t.Fatalf("EpochTime = %v, %v; want 2023-11-14T22:13:20Z", at, err)
+	}
+	if err := broadcast.Announce(moq.Route{Epoch: &first}); err != nil {
+		t.Fatal(err)
+	}
+	if start := nextAnnounced(t, ctx, announced); start.Route.Epoch == nil || *start.Route.Epoch != first {
+		t.Fatalf("start epoch = %v, want %s", start.Route.Epoch, first)
+	}
+
+	second := moq.MintEpoch()
+	if err := broadcast.Announce(moq.Route{Epoch: &second}); err != nil {
+		t.Fatal(err)
+	}
+	restart, ok := nextRoute(t, ctx, announced).(moq.AnnounceEventRestart)
+	if !ok || restart.Announce.Route.Epoch == nil || *restart.Announce.Route.Epoch != second {
+		t.Fatalf("restart = %+v, want epoch %s", restart, second)
+	}
+
+	if _, err := moq.EpochTime("not-an-epoch"); !errors.Is(err, moq.ErrInvalidEpoch) {
+		t.Fatalf("EpochTime(bad) = %v, want ErrInvalidEpoch", err)
+	}
+}
+
 // nextRoute returns the next announce event.
 func nextRoute(t *testing.T, ctx context.Context, announced *moq.AnnounceConsumer) moq.AnnounceEvent {
 	t.Helper()

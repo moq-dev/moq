@@ -22,7 +22,7 @@ The design decisions are in [the line's README](/quest/m1/time/README.md).
 The installed clock is per JS realm (a page, a worker, a test file), the JS
 equivalent of one clock per runtime. Match the Rust timer semantics settled in
 [the crate](/quest/m1/time/crate.md), and agree with rs2ts on how a generated
-`moq_time::Instant` maps here ([rs2ts](/quest/m1/rs2ts/translator.md)).
+`moq_time::Instant` maps here ([Generated codec](/quest/m1/rs2ts/codec.md)).
 
 Ban direct `performance.now`, `Date.now`, `setTimeout`, and `setInterval` in
 the package outside its default backend.

@@ -42,4 +42,4 @@ traffic yet.
 
 ## Related
 
-- [Switch](/quest/m1/quic/fork/switch.md) - MoQ runs on `moq-quic`; not a blocker, since this is a local `rs/moq-quic` fix (decided for the m1 BBR quests in fork/input-validation)
+- [Switch](/quest/m1/quic/fork/switch.md) - MoQ runs on `moq-quic`; not a blocker, since this is a local `rs/moq-quic` fix

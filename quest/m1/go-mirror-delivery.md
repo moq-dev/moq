@@ -17,11 +17,8 @@ limit, and each release adds about 210 MiB of history.
   - a module proxy we host
   - release assets fetched by a build step
   Git LFS is out, because the Go module proxy doesn't serve LFS objects.
-- The release profile quest shrinks the staticlibs (121 to 41 MiB on macOS),
-  which buys headroom but doesn't stop the history growth.
+- The workspace release profile (fat LTO, one codegen unit) shrinks the
+  staticlibs (121 to 41 MiB on macOS), which buys headroom but doesn't stop
+  the history growth.
 - Deliverable: the chosen approach recorded here, and a follow-up quest to
   implement it. Split this if the prototype turns out large.
-
-## Related
-
-- [Release profile](/quest/m1/release-profile.md) - shrinks what the mirror carries

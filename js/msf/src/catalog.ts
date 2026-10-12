@@ -28,6 +28,10 @@ const trackShape = {
 	// tracks, so accept its absence rather than reject the whole catalog.
 	isLive: z.optional(z.boolean()),
 	role: z.optional(RoleSchema),
+	/** A human-readable label for the track. */
+	label: z.optional(z.string()),
+	/** The BCP-47 language tag of the track. */
+	lang: z.optional(z.string()),
 	codec: z.optional(z.string()),
 	width: z.optional(z.number()),
 	height: z.optional(z.number()),

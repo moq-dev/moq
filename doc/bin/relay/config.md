@@ -7,8 +7,9 @@ description: TOML reference for moq-relay
 
 `moq-relay relay.toml`. Every key is also a CLI flag and environment variable
 that joins the section and key: `listen.tls.cert` is `--listen-tls-cert` /
-`MOQ_LISTEN_TLS_CERT`. The exception is `listen.bind`, spelled `--listen` /
-`MOQ_LISTEN`. Precedence is CLI, then env, then file, then defaults.
+`MOQ_LISTEN_TLS_CERT`. The exceptions: `listen.bind` is spelled `--listen` /
+`MOQ_LISTEN`, and `listen.extensions` and `connect.extensions` are TOML only.
+Precedence is CLI, then env, then file, then defaults.
 `moq-relay --help` lists every flag.
 
 ## \[listen]
@@ -32,6 +33,10 @@ bind = "127.0.0.1:4444"
 [listen.unix]                        # Plaintext qmux over a Unix socket, gated by peer credentials.
 bind = "/run/moq/internal.sock"
 allow.uid = [1001]
+
+[listen.extensions]                  # moq-transport SETUP extensions to offer, each on by default.
+auth = false                         # Decline MoQ Auth (draft 17+).
+solicit = false                      # Decline MoQ Solicit, so peers may announce unasked.
 ```
 
 `timeout` bounds the whole handshake, transport through MoQ SETUP, so a peer
@@ -42,6 +47,7 @@ A setting no configured listener reads stops startup rather than being ignored.
 A stream-only relay refuses `preferred_v4`, `preferred_v6`, and `lb_id` (or `load_balancer`), which
 only QUIC reads, and a `[listen.tls]` `cert`, `key`, or `generate` unless
 `tcp.tls` serves it.
+`lb_nonce` needs `lb_id`. `lb_id` and `lb_nonce` cannot be combined with `load_balancer`.
 `unix.allow` needs `unix.bind`.
 
 ## \[quic]
@@ -53,7 +59,7 @@ Transport tuning, applied to accepted and dialed connections alike.
 congestion_control = "delay"         # "delay" (BBR, the default) or "loss" (CUBIC).
 max_streams = 10000                  # Concurrent streams per connection, bidi and uni. Default.
 idle_timeout = "10s"                 # Drop a connection after this long with nothing on it. Default.
-keep_alive = "3s"                    # Ping interval; "0s" disables it. Ignored by iroh. Default.
+keep_alive = "3s"                    # Ping interval; "0s" disables it. iroh still pings at least every 5s. Default.
 gso = true                           # UDP segmentation offload. iroh cannot turn it off.
 mtu_discovery = false                # Path MTU discovery. Default.
 receive_window = 67108864            # Whole-connection window, in bytes. Default (64 MiB).
@@ -110,6 +116,11 @@ key = "key.pem"
 listen = "127.0.0.1:9101"            # Unauthenticated /health, /metrics, /nodes, /sessions, POST /sessions/revalidate. Keep private.
 ```
 
+`listen.timeout` also closes HTTP connections with no complete request in flight,
+including HTTPS peers that stall the TLS handshake
+and HTTP/2 peers that acknowledge keep-alive PINGs. Active response bodies
+keep the connection open; a WebSocket upgrade hands its lifetime to MoQ.
+
 See [HTTP endpoints](/bin/relay/http).
 
 ## \[auth]
@@ -157,6 +168,8 @@ tls.cert = "relay.pem"               # Present a client certificate (mTLS to pee
 tls.key = "relay.key"
 goaway.redirect = "same-host"        # How far to trust a draining peer's redirect URI.
 goaway.handover = "10s"              # Cap on how long the drained upstream keeps serving.
+extensions.auth = false              # Decline MoQ Auth on outbound moq-transport sessions.
+extensions.solicit = false           # Decline MoQ Solicit. Both default to on, as in [listen.extensions].
 ```
 
 A draining upstream may name a replacement URI. `same-host` follows it only
@@ -201,6 +214,8 @@ limits, past which one is closed with `TOO_MANY_REQUESTS`. [Stats](/concept/stat
 encodings; read them with the [`moq-stats`](https://docs.rs/moq-stats) crate.
 
 ## \[iroh]
+
+Iroh requires building the relay from source with `cargo build --release -p moq-relay --features iroh`. Published binaries, Docker images, and the Nix package leave it out.
 
 ```toml
 [iroh]

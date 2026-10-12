@@ -51,7 +51,7 @@ public:
 	};
 	bool TryGetConnectionStats(ConnectionStats *out);
 
-	// Successful (re)connects after the first for this Start(); 0 until epoch >= 2.
+	// Successful (re)connects after the first for this Start(); 0 until connects() >= 2.
 	int GetReconnectCount();
 
 	// True while the current Start() attempt has an open MoQ session.
@@ -63,6 +63,10 @@ public:
 	void CopyLastFailure(int *code, std::string *reason);
 
 private:
+	friend struct MoQOutputStatsTest;
+	bool CommitConnectionStats(const std::shared_ptr<moq::Session> &current, ConnectionStats snapshot,
+				   ConnectionStats *out);
+
 	// One Start()'s connection: the client dialing, the session once it connects,
 	// and the pending call whose continuation reports on it. Replaced wholesale by
 	// the next Start() and dropped by Stop(), which cancels that call.

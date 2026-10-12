@@ -17,6 +17,7 @@ author:
     email: kixelated@gmail.com
 
 normative:
+  moqmsf: I-D.ietf-moq-msf
   moql: I-D.lcurley-moq-lite
   moqflate:
     title: "DEFLATE Compressed Tracks for MoQ"
@@ -329,6 +330,10 @@ Unlike `format`, an unrecognized `role` never prevents rendering: it describes i
 The `lang` field is the BCP-47 {{!RFC5646}} language tag of the track, for example `en` or `es-419`.
 Two renditions sharing a `lang` are told apart by `label` ({{field-label}}), one of the common rendition fields ({{common}}).
 
+A gateway translating an MSF {{moqmsf}} caption or subtitle track MUST preserve its `codec` as `format`, and its `role`, `lang`, and `label` when present.
+It MUST preserve supported packaging and timing, and MUST refuse text packaging it cannot represent rather than silently delete the track.
+A missing text codec MUST NOT be replaced with a guessed format.
+
 Regardless of `format`, each frame's timestamp ({{container}}) is the authoritative cue start time on the media clock, so a relay and a consumer can order and schedule cues without parsing the payload.
 A text track has no delta frames: every frame is a self-contained cue, so a group MAY consist of multiple frames, following the same rule as a codec that lacks delta frames ({{container}}).
 
@@ -536,6 +541,17 @@ For example:
 - A fragment or packet batch contributes the media span between its earliest timestamp and flush point.
 - Reordered frames contribute the delay they were held before flushing, without treating a decode-order presentation timestamp gap as delay by itself.
 
+### warmup {#field-warmup}
+
+An audio or video rendition MAY declare `warmup`, an integer duration in milliseconds after a group start before its decoded output is presentable without decoding the previous group.
+A publisher MUST round a fractional-millisecond warmup up to the next whole millisecond.
+Absent or `0` means every group start is immediately presentable.
+After a non-continuous join, a consumer MUST decode from the group start and MUST NOT present frames stamped before the group's start plus `warmup`.
+It SHOULD join that much earlier to obtain the requested presentation time.
+
+For video, `warmup` can describe a refresh cycle during which decoding converges without an initial keyframe.
+For audio, it describes decoder pre-roll, for example 80 milliseconds for Opus, and does not change the group-start rule.
+
 ### delay {#field-delay}
 The maximum amount, in milliseconds, by which a rendition's minimum flush lateness ({{field-jitter}}) has trailed the smallest minimum among the broadcast's renditions that measure it.
 If absent, a consumer SHOULD assume the rendition does not trail the others.
@@ -571,9 +587,11 @@ type Container =
 The `kind` field selects the framing; a consumer MUST ignore a rendition whose `kind` it does not recognize.
 Every container shares the same group rules:
 
-Each moq-lite group MUST start with a keyframe, except a group that contains only a discontinuity marker.
+A video group MUST start at a random access point: a keyframe unless the rendition declares `warmup` ({{field-warmup}}), in which case it MAY start at a picture from which decoding converges within that duration.
+Other groups MUST start with a keyframe.
+A group containing only a discontinuity marker is exempt from these rules.
 If the codec does not support delta frames (e.g. audio), a group MAY consist of multiple keyframes.
-Otherwise, a group MUST consist of a single keyframe followed by zero or more delta frames.
+Otherwise, a group MUST consist of its random access picture followed by zero or more delta frames.
 
 A group with no decodable frames is a walk-now discontinuity: one empty codec payload and no media.
 A consumer MUST NOT submit the marker to a decoder.
@@ -1074,6 +1092,9 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- Specified MSF text metadata preservation and refusal of unrepresentable text packaging during gateway conversion.
+
+- Added optional audio and video `warmup` durations, rounded up to whole milliseconds, and allowed video groups to start at convergent random access pictures.
 - Defined encoder `jitter` as flush lateness above the rendition's own recent minimum, replacing fixed frame-duration hints; container batches retain media-span estimates.
 - Timed CMAF samples from the frame timestamp, which is the fragment's earliest presentation time; `tfdt` is only relative within the fragment, and places the samples of an untimed frame. A timed CMAF track counts in its `mdhd` ticks.
 - Allowed a DVR to delete timeline objects no checkpoint recovery needs, oldest first.

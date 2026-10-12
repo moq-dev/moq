@@ -1,15 +1,15 @@
-//! Validated output renditions in ascending bitrate and height order.
+//! Validated output renditions in ascending bitrate and size order.
 
-/// One candidate output rendition: a target resolution (by height) and bitrate.
+/// One candidate output rendition: a target resolution (by short side) and bitrate.
 ///
-/// The width is derived from the source aspect ratio at runtime, and a rung is
+/// The other side is derived from the source aspect ratio at runtime, and a rung is
 /// only offered when it is strictly below the source (see [`Ladder`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Rung {
-	/// Output height in pixels. Rounded down to even when it enters a [`Ladder`]
+	/// Output short side in pixels. Rounded down to even when it enters a [`Ladder`]
 	/// (I420 chroma is 2x2).
-	pub height: u32,
+	pub size: u32,
 
 	/// The configured maximum in bits per second: the CBR target advertised in the
 	/// derivative catalog.
@@ -17,9 +17,9 @@ pub struct Rung {
 }
 
 impl Rung {
-	/// A rung at `height` pixels and `bitrate` bits per second.
-	pub fn new(height: u32, bitrate: moq_net::bandwidth::Rate) -> Self {
-		Self { height, bitrate }
+	/// A rung at `size` pixels and `bitrate` bits per second.
+	pub fn new(size: u32, bitrate: moq_net::bandwidth::Rate) -> Self {
+		Self { size, bitrate }
 	}
 }
 
@@ -27,12 +27,12 @@ impl Rung {
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-	/// A rung that encodes nothing: a height that rounds to zero pixels, or no
+	/// A rung that encodes nothing: a size that rounds to zero pixels, or no
 	/// bitrate to spend.
-	#[error("rung {height}p at {bitrate} bps encodes nothing")]
+	#[error("rung {size}p at {bitrate} bps encodes nothing")]
 	Empty {
-		/// The configured height, before rounding to even.
-		height: u32,
+		/// The configured size, before rounding to even.
+		size: u32,
 		/// The configured maximum, in bits per second.
 		bitrate: u64,
 	},
@@ -43,44 +43,44 @@ pub enum Error {
 	DuplicateBitrate {
 		/// The shared maximum, in bits per second.
 		bitrate: u64,
-		/// The shorter rung's height, in pixels.
+		/// The shorter rung's size, in pixels.
 		first: u32,
-		/// The taller rung's height, in pixels.
+		/// The taller rung's size, in pixels.
 		second: u32,
 	},
 
 	/// Resolution runs backwards against bitrate: a rung costs more than the one
 	/// below it without being taller, so bitrate and picture disagree on which
 	/// rendition is lower.
-	#[error("rung {height}p at {bitrate} bps does not rise above {below_height}p at {below_bitrate} bps")]
+	#[error("rung {size}p at {bitrate} bps does not rise above {below_size}p at {below_bitrate} bps")]
 	Unordered {
-		/// The more expensive rung's height, in pixels.
-		height: u32,
+		/// The more expensive rung's size, in pixels.
+		size: u32,
 		/// The more expensive rung's maximum, in bits per second.
 		bitrate: u64,
-		/// The cheaper rung's height, in pixels.
-		below_height: u32,
+		/// The cheaper rung's size, in pixels.
+		below_size: u32,
 		/// The cheaper rung's maximum, in bits per second.
 		below_bitrate: u64,
 	},
 }
 
 /// The output ladder, in canonical order: strictly ascending maximum bitrate,
-/// and strictly ascending height with it.
+/// and strictly ascending size with it.
 ///
 /// Construction validates the order; [`Ladder::rungs`] exposes a read-only slice. The
 /// rungs are still filtered against the source at runtime (nothing above it
 /// survives), which drops rungs but never reorders them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ladder {
-	// Ascending by bitrate, and by height with it. Heights are even.
+	// Ascending by bitrate, and by short side with it. Sizes are even.
 	rungs: Vec<Rung>,
 }
 
 impl Ladder {
 	/// Resolve `rungs` into a ladder, in any order.
 	///
-	/// Heights round down to even, and the result is sorted by maximum bitrate.
+	/// Sizes round down to even, and the result is sorted by maximum bitrate.
 	/// An ambiguous ladder is an [`Error`] rather than a guess: two rungs at the
 	/// same maximum have no lower one, and a rung that costs more without being
 	/// taller means bitrate and picture disagree about which rendition is lower.
@@ -88,32 +88,32 @@ impl Ladder {
 	pub fn new(rungs: impl IntoIterator<Item = Rung>) -> Result<Self, Error> {
 		let mut rungs: Vec<Rung> = rungs.into_iter().collect();
 		for rung in &mut rungs {
-			if rung.height < 2 || rung.bitrate.as_bps() == 0 {
+			if rung.size < 2 || rung.bitrate.as_bps() == 0 {
 				return Err(Error::Empty {
-					height: rung.height,
+					size: rung.size,
 					bitrate: rung.bitrate.as_bps(),
 				});
 			}
-			// Normalize before checking uniqueness: odd heights can share a track name.
-			rung.height &= !1;
+			// Normalize before checking uniqueness: odd sizes can share a track name.
+			rung.size &= !1;
 		}
 
-		rungs.sort_by_key(|rung| (rung.bitrate, rung.height));
+		rungs.sort_by_key(|rung| (rung.bitrate, rung.size));
 
 		for pair in rungs.windows(2) {
 			let (below, rung) = (pair[0], pair[1]);
 			if below.bitrate == rung.bitrate {
 				return Err(Error::DuplicateBitrate {
 					bitrate: rung.bitrate.as_bps(),
-					first: below.height,
-					second: rung.height,
+					first: below.size,
+					second: rung.size,
 				});
 			}
-			if rung.height <= below.height {
+			if rung.size <= below.size {
 				return Err(Error::Unordered {
-					height: rung.height,
+					size: rung.size,
 					bitrate: rung.bitrate.as_bps(),
-					below_height: below.height,
+					below_size: below.size,
 					below_bitrate: below.bitrate.as_bps(),
 				});
 			}
@@ -122,7 +122,7 @@ impl Ladder {
 		Ok(Self { rungs })
 	}
 
-	/// The rungs, lowest first: ascending maximum bitrate and ascending height.
+	/// The rungs, lowest first: ascending maximum bitrate and ascending size.
 	pub fn rungs(&self) -> &[Rung] {
 		&self.rungs
 	}
@@ -147,14 +147,14 @@ impl Default for Ladder {
 mod tests {
 	use super::*;
 
-	fn heights(ladder: &Ladder) -> Vec<u32> {
-		ladder.rungs().iter().map(|rung| rung.height).collect()
+	fn sizes(ladder: &Ladder) -> Vec<u32> {
+		ladder.rungs().iter().map(|rung| rung.size).collect()
 	}
 
 	#[test]
 	fn default_ladder_is_ordered() {
 		let ladder = Ladder::default();
-		assert_eq!(heights(&ladder), [240, 360, 480, 720, 1080]);
+		assert_eq!(sizes(&ladder), [240, 360, 480, 720, 1080]);
 	}
 
 	/// The operator writes the ladder top-down (or in whatever order), and it
@@ -167,7 +167,7 @@ mod tests {
 			Rung::new(480, moq_net::bandwidth::Rate::from_bps(1_200_000)),
 		])
 		.unwrap();
-		assert_eq!(heights(&ladder), [240, 480, 720]);
+		assert_eq!(sizes(&ladder), [240, 480, 720]);
 		// The neighbour is the next rendition down, which is what the band
 		// formula reads.
 		assert_eq!(ladder.rungs()[1].bitrate.as_bps(), 1_200_000);
@@ -192,11 +192,11 @@ mod tests {
 		);
 	}
 
-	/// Odd heights round to even, so a ladder can collide on a height it never
+	/// Odd sizes round to even, so a ladder can collide on a size it never
 	/// literally wrote. Silently dropping one rung would move its neighbour's
 	/// "next lower rendition", so it is refused too.
 	#[test]
-	fn duplicate_height_is_refused() {
+	fn duplicate_size_is_refused() {
 		let err = Ladder::new([
 			Rung::new(721, moq_net::bandwidth::Rate::from_bps(2_500_000)),
 			Rung::new(720, moq_net::bandwidth::Rate::from_bps(1_200_000)),
@@ -205,9 +205,9 @@ mod tests {
 		assert_eq!(
 			err,
 			Error::Unordered {
-				height: 720,
+				size: 720,
 				bitrate: 2_500_000,
-				below_height: 720,
+				below_size: 720,
 				below_bitrate: 1_200_000,
 			}
 		);
@@ -225,9 +225,9 @@ mod tests {
 		assert_eq!(
 			err,
 			Error::Unordered {
-				height: 360,
+				size: 360,
 				bitrate: 3_000_000,
-				below_height: 1080,
+				below_size: 1080,
 				below_bitrate: 1_000_000,
 			}
 		);
@@ -238,16 +238,13 @@ mod tests {
 		assert_eq!(
 			Ladder::new([Rung::new(1, moq_net::bandwidth::Rate::from_bps(350_000))]).unwrap_err(),
 			Error::Empty {
-				height: 1,
+				size: 1,
 				bitrate: 350_000
 			}
 		);
 		assert_eq!(
 			Ladder::new([Rung::new(240, moq_net::bandwidth::Rate::from_bps(0))]).unwrap_err(),
-			Error::Empty {
-				height: 240,
-				bitrate: 0
-			}
+			Error::Empty { size: 240, bitrate: 0 }
 		);
 	}
 

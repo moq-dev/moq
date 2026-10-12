@@ -19,6 +19,11 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Wait until the FFI runtime has polled work spawned ahead of this call.
@@ -324,6 +329,7 @@ fn route_cost_conversions_are_lossless() {
 		hops: vec![],
 		cost: 5,
 		anonymous: false,
+		epoch: None,
 	})
 	.unwrap();
 	assert_eq!(seeded.cost, moq_net::origin::Cost::new(5));
@@ -345,6 +351,7 @@ async fn announced_route_keeps_static_cost_on_reannounce() {
 			hops: vec![],
 			cost: 9,
 			anonymous: false,
+			epoch: None,
 		})
 		.unwrap();
 
@@ -366,6 +373,76 @@ async fn announced_route_keeps_static_cost_on_reannounce() {
 	let back = moq_net::origin::Route::try_from(route.clone()).unwrap();
 	assert_eq!(back.cost, moq_net::origin::Cost::new(9));
 	assert_eq!(MoqRoute::from(back), route);
+
+	broadcast.close().unwrap();
+}
+
+#[test]
+fn epoch_helpers_mint_parse_and_refuse() {
+	let epoch = moq_mint_epoch();
+	let parsed: moq_net::Epoch = epoch.parse().unwrap();
+	let unix_ms = parsed.time().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+	assert_eq!(u128::from(moq_epoch_time_ms(epoch.clone()).unwrap()), unix_ms);
+	assert!(moq_mint_epoch() > epoch, "a later mint orders newer");
+
+	// The text the route carries round-trips, and anything but a UUIDv7 is refused.
+	let route = MoqRoute {
+		epoch: Some(epoch.clone()),
+		..Default::default()
+	};
+	let back = moq_net::origin::Route::try_from(route.clone()).unwrap();
+	assert_eq!(back.epoch, Some(parsed));
+	assert_eq!(MoqRoute::from(back), route);
+
+	let uuid_v4 = "6ba7b810-9dad-41d1-80b4-00c04fd430c8".to_string();
+	for bad in [uuid_v4, epoch.to_uppercase(), String::new()] {
+		assert!(matches!(
+			moq_epoch_time_ms(bad.clone()),
+			Err(MoqError::InvalidEpoch { .. })
+		));
+		let route = MoqRoute {
+			epoch: Some(bad),
+			..Default::default()
+		};
+		assert!(matches!(
+			moq_net::origin::Route::try_from(route),
+			Err(MoqError::InvalidEpoch { .. })
+		));
+	}
+}
+
+#[tokio::test]
+async fn announced_epoch_restarts_on_a_new_epoch() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let consumer = origin.consume();
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
+	let broadcast = origin.create_broadcast("epoch-route".into()).unwrap();
+
+	let first = moq_mint_epoch();
+	broadcast
+		.announce(MoqRoute {
+			epoch: Some(first.clone()),
+			..Default::default()
+		})
+		.unwrap();
+	let announce = next_announced(&announced).await;
+	assert_eq!(announce.route.epoch, Some(first));
+
+	// A new run of the same publisher is another instance: consumers restart onto it.
+	let second = moq_mint_epoch();
+	broadcast
+		.announce(MoqRoute {
+			epoch: Some(second.clone()),
+			..Default::default()
+		})
+		.unwrap();
+	match next_event(&announced).await {
+		MoqAnnounceEvent::Restart { announce } => {
+			assert_eq!(announce.prefix, "epoch-route");
+			assert_eq!(announce.route.epoch, Some(second));
+		}
+		other => panic!("expected a restart, got {other:?}"),
+	}
 
 	broadcast.close().unwrap();
 }
@@ -498,7 +575,7 @@ async fn raw_audio_activity() {
 		.await
 		.expect("timed out waiting for raw audio to become used again")
 		.unwrap();
-	audio.reset_epoch().unwrap();
+	audio.reanchor().unwrap();
 	audio
 		.write(MoqAudioFrame {
 			timestamp_us: RESUMED_TIMESTAMP_US,
@@ -558,7 +635,7 @@ async fn raw_audio_frame_durations() {
 
 	let coarse = broadcast.encode_audio("coarse".into(), input(), output(2_000), None);
 	assert!(
-		matches!(coarse, Err(MoqError::Audio(_))),
+		matches!(coarse, Err(MoqError::Audio { .. })),
 		"2 ms is not an opus frame duration"
 	);
 
@@ -593,7 +670,7 @@ async fn raw_audio_codec_default_frame() {
 
 	assert_eq!(MoqAudioCodec::aac().codec(), moq_audio::encode::Codec::Aac);
 	let aac = broadcast.encode_audio("aac".into(), input(), output(MoqAudioCodec::aac()), None);
-	let Err(MoqError::Audio(message)) = aac else {
+	let Err(MoqError::Audio { reason: message }) = aac else {
 		panic!("no platform AAC encoder on this host");
 	};
 	assert!(message.contains("no aac audio encoder"), "{message}");
@@ -611,7 +688,7 @@ async fn raw_audio_codec_default_frame() {
 		resampled,
 		None,
 	);
-	let Err(MoqError::Audio(message)) = aac else {
+	let Err(MoqError::Audio { reason: message }) = aac else {
 		panic!("no platform AAC encoder on this host");
 	};
 	assert!(message.contains("no aac audio encoder"), "{message}");
@@ -937,6 +1014,45 @@ async fn json_consumer_takes_an_unread_track() {
 }
 
 #[tokio::test]
+async fn track_request_demand_survives_accept() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.dynamic().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let subscribe = tokio::spawn(async move { consumer.subscribe_track("events".into(), None).await });
+	let request = dynamic.requested_track().await.unwrap();
+	let demand = request.demand().unwrap();
+	assert_eq!(demand.name(), "events");
+	assert!(demand.is_used());
+	let track = request.accept(None).unwrap();
+	assert!(matches!(request.demand(), Err(MoqError::Closed)));
+	let consumer = subscribe.await.unwrap().unwrap();
+	demand.used().await.unwrap();
+	consumer.cancel();
+	demand.unused().await.unwrap();
+	let consumer = track.consume(None).unwrap();
+	demand.used().await.unwrap();
+	consumer.cancel();
+	demand.unused().await.unwrap();
+	drop(track);
+	broadcast.close().unwrap();
+	assert!(matches!(demand.used().await, Err(MoqError::Closed)));
+}
+
+#[tokio::test]
+async fn track_request_demand_ends_on_rejection() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.dynamic().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let subscribe = tokio::spawn(async move { consumer.subscribe_track("events".into(), None).await });
+	let request = dynamic.requested_track().await.unwrap();
+	let demand = request.demand().unwrap();
+	request.abort(404).unwrap();
+	assert!(subscribe.await.unwrap().is_err());
+	assert!(demand.used().await.is_err());
+	assert!(matches!(request.demand(), Err(MoqError::Closed)));
+}
+
+#[tokio::test]
 async fn dynamic_track_request() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let dynamic = broadcast.dynamic().unwrap();
@@ -1182,7 +1298,7 @@ async fn fetches_cached_group_without_subscribing() {
 #[tokio::test]
 async fn fetches_cached_media_group_and_decodes_container() {
 	let broadcast = moq_net::broadcast::Info::new().produce();
-	let track = broadcast.create_track("media", None).unwrap();
+	let track = broadcast.create_track("media", timed()).unwrap();
 	let consumer = MoqBroadcastConsumer::new(broadcast.consume());
 	let mut media = moq_mux::container::Producer::new(
 		track,
@@ -1234,7 +1350,7 @@ async fn fetches_cached_media_group_and_decodes_container() {
 #[tokio::test]
 async fn fetch_media_group_rejects_invalid_container_before_fetching() {
 	let broadcast = moq_net::broadcast::Info::new().produce();
-	let _track = broadcast.create_track("media", None).unwrap();
+	let _track = broadcast.create_track("media", timed()).unwrap();
 	let consumer = MoqBroadcastConsumer::new(broadcast.consume());
 
 	let result = MoqMediaContainerGroupConsumer::fetch(
@@ -1248,7 +1364,7 @@ async fn fetch_media_group_rejects_invalid_container_before_fetching() {
 	)
 	.await;
 
-	assert!(matches!(result, Err(MoqError::Codec(_))));
+	assert!(matches!(result, Err(MoqError::Codec { .. })));
 }
 
 #[tokio::test]
@@ -1546,7 +1662,7 @@ async fn video_publish_named_track() {
 			},
 			init()
 		),
-		Err(MoqError::Codec(_))
+		Err(MoqError::Codec { .. })
 	));
 
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
@@ -1753,7 +1869,7 @@ fn audio_rejects_bad_init_bytes() {
 	.err()
 	.expect("an OpusHead-less opus track should fail");
 	assert!(
-		matches!(err, crate::error::MoqError::Codec(_)),
+		matches!(err, crate::error::MoqError::Codec { .. }),
 		"expected Codec error, got {err}"
 	);
 }
@@ -1977,7 +2093,7 @@ async fn announced_hides_dot_paths_unless_asked() {
 #[tokio::test]
 async fn resolve_rejects_a_reference_without_an_origin() {
 	let broadcast = moq_net::broadcast::Info::new().produce();
-	let _audio = broadcast.create_track("audio", None).unwrap();
+	let _audio = broadcast.create_track("audio", timed()).unwrap();
 	let consumer = MoqBroadcastConsumer::new(broadcast.consume());
 
 	// An absent or empty reference still names this broadcast, so it needs no origin. A reference
@@ -1990,7 +2106,7 @@ async fn resolve_rejects_a_reference_without_an_origin() {
 	// Reported in normalized form, matching `EscapingBroadcast` and moq-c: it names what the
 	// resolver actually tried to reach, not the caller's spelling of it.
 	match consumer.resolve(Some("./source".into())).await {
-		Err(MoqError::UnresolvableBroadcast(reference)) => assert_eq!(reference, "source"),
+		Err(MoqError::UnresolvableBroadcast { reason: reference }) => assert_eq!(reference, "source"),
 		Err(err) => panic!("wrong error for an unresolvable reference: {err:?}"),
 		Ok(_) => panic!("a standalone broadcast cannot resolve a sibling"),
 	}
@@ -3872,14 +3988,14 @@ async fn server_new_validates_the_config() {
 	assert!(server("127.0.0.1:0").is_ok());
 	assert!(server("[::]:443").is_ok());
 	assert!(server("localhost:4443").is_ok());
-	assert!(matches!(server("localhost:443:8443"), Err(MoqError::Config(_))));
-	assert!(matches!(server("not-an-address"), Err(MoqError::Config(_))));
+	assert!(matches!(server("localhost:443:8443"), Err(MoqError::Config { .. })));
+	assert!(matches!(server("not-an-address"), Err(MoqError::Config { .. })));
 
 	let version = MoqServer::new(MoqServerConfig {
 		versions: vec!["moq-lite-99".into()],
 		..Default::default()
 	});
-	assert!(matches!(version, Err(MoqError::Config(_))));
+	assert!(matches!(version, Err(MoqError::Config { .. })));
 }
 
 #[tokio::test]
@@ -3894,7 +4010,7 @@ async fn server_cert_fingerprints_available_after_listen() {
 	// Not available before listen().
 	assert!(matches!(
 		server.cert_fingerprints(),
-		Err(crate::error::MoqError::Bind(_))
+		Err(crate::error::MoqError::Bind { .. })
 	));
 
 	tokio::time::timeout(TIMEOUT, server.listen())
@@ -4255,7 +4371,7 @@ async fn client_reconnects_and_resumes_announcements() {
 		.expect("status timed out")
 		.expect("status errored");
 	assert_eq!(status, MoqConnectionStatus::Connected);
-	assert_eq!(cs.epoch(), 1);
+	assert_eq!(cs.connects(), 1);
 
 	// Kill the transport under the client, simulating a relay restart.
 	// Nothing accepts the redial until the gate opens.
@@ -4279,15 +4395,15 @@ async fn client_reconnects_and_resumes_announcements() {
 		.expect("reconnect status errored");
 	assert_eq!(status, MoqConnectionStatus::Connected);
 
-	// The reconnect advances the epoch. The watcher may land just after the status
+	// The reconnect advances the count. The watcher may land just after the status
 	// edge it watched, so poll rather than assume ordering.
 	tokio::time::timeout(TIMEOUT, async {
-		while cs.epoch() < 2 {
+		while cs.connects() < 2 {
 			tokio::time::sleep(Duration::from_millis(10)).await;
 		}
 	})
 	.await
-	.expect("the epoch did not advance on reconnect");
+	.expect("the connect count did not advance on reconnect");
 
 	let server_session = tokio::time::timeout(TIMEOUT, accept)
 		.await
