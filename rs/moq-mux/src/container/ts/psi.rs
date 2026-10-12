@@ -24,6 +24,58 @@ pub(super) fn crc_ok(section: &[u8]) -> bool {
 	CRC.checksum(body) == u32::from_be_bytes(crc.try_into().expect("four bytes"))
 }
 
+/// Encode the exporter's single-program PAT independently of TS packet boundaries.
+pub(super) fn encode_pat(pat: &mpeg2ts::ts::payload::Pat) -> anyhow::Result<bytes::Bytes> {
+	let mut section = vec![PAT_TABLE_ID, 0xb0, 0];
+	section.extend_from_slice(&pat.transport_stream_id.to_be_bytes());
+	section.extend_from_slice(&[0xc1 | (pat.version_number.as_u8() << 1), 0, 0]);
+	for entry in &pat.table {
+		section.extend_from_slice(&entry.program_num.to_be_bytes());
+		section.extend_from_slice(&(0xe000 | entry.program_map_pid.as_u16()).to_be_bytes());
+	}
+	finish_section(section)
+}
+
+/// Encode a PMT, rejecting descriptor or table lengths that MPEG-TS cannot represent.
+pub(super) fn encode_pmt(pmt: &mpeg2ts::ts::payload::Pmt) -> anyhow::Result<bytes::Bytes> {
+	let mut section = vec![PMT_TABLE_ID, 0xb0, 0];
+	section.extend_from_slice(&pmt.program_num.to_be_bytes());
+	section.extend_from_slice(&[0xc1 | (pmt.version_number.as_u8() << 1), 0, 0]);
+	section.extend_from_slice(&(0xe000 | pmt.pcr_pid.map_or(0x1fff, |pid| pid.as_u16())).to_be_bytes());
+	encode_descriptors(&mut section, &pmt.program_info)?;
+	for stream in &pmt.es_info {
+		section.push(stream.stream_type as u8);
+		section.extend_from_slice(&(0xe000 | stream.elementary_pid.as_u16()).to_be_bytes());
+		encode_descriptors(&mut section, &stream.descriptors)?;
+	}
+	finish_section(section)
+}
+
+fn encode_descriptors(out: &mut Vec<u8>, descriptors: &[mpeg2ts::ts::Descriptor]) -> anyhow::Result<()> {
+	let length = descriptors
+		.iter()
+		.map(|descriptor| 2 + descriptor.data.len())
+		.sum::<usize>();
+	anyhow::ensure!(length <= 0x0fff, "PSI descriptor loop exceeds 4095 bytes");
+	out.extend_from_slice(&(0xf000 | length as u16).to_be_bytes());
+	for descriptor in descriptors {
+		let length = u8::try_from(descriptor.data.len()).context("PSI descriptor exceeds 255 bytes")?;
+		out.extend_from_slice(&[descriptor.tag, length]);
+		out.extend_from_slice(&descriptor.data);
+	}
+	Ok(())
+}
+
+fn finish_section(mut section: Vec<u8>) -> anyhow::Result<bytes::Bytes> {
+	let length = section.len() - 3 + 4;
+	anyhow::ensure!(length <= 1021, "PAT/PMT section exceeds 1021 bytes");
+	section[1] |= (length >> 8) as u8;
+	section[2] = length as u8;
+	let crc = CRC.checksum(&section);
+	section.extend_from_slice(&crc.to_be_bytes());
+	Ok(section.into())
+}
+
 /// The table_id of a PAT section.
 pub(super) const PAT_TABLE_ID: u8 = 0x00;
 /// The table_id of a PMT section.
@@ -319,6 +371,38 @@ pub(super) fn section(table_id: u8, extension: u16, version: u8, number: u8, las
 #[cfg(test)]
 mod test {
 	use super::*;
+
+	#[test]
+	fn pmt_encoding_rejects_unrepresentable_lengths() {
+		use mpeg2ts::ts::payload::Pmt;
+		use mpeg2ts::ts::{Descriptor, VersionNumber};
+		let mut pmt = Pmt {
+			program_num: 1,
+			pcr_pid: None,
+			version_number: VersionNumber::default(),
+			program_info: vec![Descriptor {
+				tag: 0x80,
+				data: vec![0; 256],
+			}],
+			es_info: Vec::new(),
+		};
+		assert!(encode_pmt(&pmt).unwrap_err().to_string().contains("255 bytes"));
+		pmt.program_info = vec![
+			Descriptor {
+				tag: 0x80,
+				data: vec![0; 250]
+			};
+			4
+		];
+		let section = encode_pmt(&pmt).unwrap();
+		assert!(crc_ok(&section));
+		assert_eq!(section.len(), 1024);
+		pmt.program_info.push(Descriptor {
+			tag: 0x81,
+			data: Vec::new(),
+		});
+		assert!(encode_pmt(&pmt).unwrap_err().to_string().contains("1021 bytes"));
+	}
 
 	#[test]
 	fn crc_matches_mpeg2() {

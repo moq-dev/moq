@@ -1136,6 +1136,24 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog) -> moq_msf::Catalog<E> {
 		tracks.push(track);
 	}
 
+	for (name, config) in &catalog.text.renditions {
+		let Some(packaging) = packaging_of(&config.container) else {
+			continue;
+		};
+		let mut track = moq_msf::Track::new(name.clone(), packaging);
+		track.is_live = true;
+		track.role = Some(config.role.to_string().parse().unwrap());
+		track.codec = Some(config.format.to_string());
+		track.lang = config.lang.clone();
+		track.label = config.label.clone();
+		if let hang::catalog::Container::Cmaf { init, .. } = &config.container {
+			track.init_data = Some(base64::engine::general_purpose::STANDARD.encode(init));
+		}
+		track.render_group = Some(1);
+		track.jitter = config.jitter;
+		track.delay = config.delay;
+		tracks.push(track);
+	}
 	moq_msf::Catalog::with_ext(tracks, E::default())
 }
 
@@ -1173,6 +1191,39 @@ mod test {
 			let track = consumer.track(name).expect("track");
 			let info = track.query().await.expect("info");
 			assert_eq!(info.priority, PRIORITY.catalog, "{name} should rank with the catalog");
+		}
+	}
+
+	#[test]
+	fn text_tracks_round_trip_through_msf() {
+		for (format, role) in [
+			(hang::catalog::TextFormat::Vtt, hang::catalog::TextRole::Caption),
+			(hang::catalog::TextFormat::Ttml, hang::catalog::TextRole::Subtitle),
+			(
+				hang::catalog::TextFormat::Utf8,
+				hang::catalog::TextRole::Unknown("commentary".into()),
+			),
+		] {
+			let mut config = hang::catalog::TextConfig::new(format);
+			config.role = role;
+			config.lang = Some("es-419".into());
+			config.label = Some("Español".into());
+			config.jitter = Some(std::time::Duration::from_millis(7));
+			config.delay = Some(std::time::Duration::from_millis(11));
+			config.container = Container::Loc;
+			let mut catalog = hang::Catalog::<()>::default();
+			catalog.text.insert("text", config.clone()).unwrap();
+			let msf = to_msf_media::<()>(&catalog);
+			assert_eq!(msf.tracks.len(), 1);
+			let wire = msf.to_json().unwrap();
+			assert!(wire.contains(r#""lang":"es-419""#));
+			assert!(wire.contains(r#""label":"Español""#));
+			let msf = moq_msf::Catalog::<()>::from_str(&wire).unwrap();
+			let decoded = crate::catalog::msf::from_msf(&msf).unwrap();
+			assert_eq!(decoded.text.renditions["text"], config);
+			let mut roundtrip = hang::Catalog::<()>::default();
+			roundtrip.text = decoded.text;
+			assert_eq!(to_msf_media::<()>(&roundtrip).tracks, msf.tracks);
 		}
 	}
 
