@@ -6,7 +6,7 @@ One local `just` recipe runs a bench shape and captures a relay profile in
 one of three modes, with enough metadata to reproduce it and to tell relay
 cost from load-generator cost:
 
-- **Lock wait** (first): bpftrace reports, per relay worker thread
+- **Lock wait** (first): sampled stacks report, per relay worker thread
   (`moq-uring-N`, `moq-quic-N`), the time spent blocked in futex waits and the
   user stacks that blocked, as a share of that thread's CPU. Lock wait becomes
   a number anyone can reproduce without code in `kio`.
@@ -17,11 +17,8 @@ Profiling is opt-in and costs nothing when disabled.
 
 ## Plan
 
-Draft foundation adds fail-closed Linux tool/permission probes and a tested
-worker mutex-wait/CPU reducer. The lock probe now exercises the futex tracepoints and user-stack program, retains unavailable-tool and spawn failures, and rejects address-only stacks. This host has perf_event_paranoid=4 and
-unprivileged_bpf_disabled=2. Actual capture/lifecycle integration, normalized
-bpftrace input, control overhead, symbolized MoQ stacks, heap snapshots/churn
-and macOS validation remain. Keep this quest; probes are not smoke captures. The benchmark lifecycle and retained-artifact implementation in the comparison PR must land before this integrates with it; do not copy that branch into a second launcher.
+`just bench-lock` (`bench/run.sh --lock`) delivers the lock-wait mode on
+Linux; the CPU and heap modes remain.
 
 Decided 2026-10-08: the reproducible CPU and allocation profile quest merged
 here, so the relay has one profiling recipe with capture modes rather than
@@ -45,30 +42,35 @@ Shared by every mode:
   OS/kernel, CPU, runtime, affinity, allocator, and resolved workload with the
   result, in a caller-selected artifact directory. On cancellation or a failed
   capture, stop every owned child and keep the diagnostics.
-- Local only, documented next to `just bench` and `just bench-runtime`. Not
-  in CI, since the modes need privileges. Probe tool and permission support
-  and refuse an unsupported capture clearly; never substitute wall-clock
-  timing for CPU samples.
+- Documented next to `just bench` and `just bench-runtime`. A mode that
+  needs privileges stays local and refuses an unsupported capture clearly;
+  one that does not runs nightly. Never substitute wall-clock timing for CPU
+  samples.
 
 Lock wait (decided by the maintainer 2026-10-07, after closing #5031, which
 timed every contended `kio::Lock` acquire in code and added public API in
 three crates plus five Prometheus families):
 
-- Measure from outside the process: bpftrace on the futex syscalls of the
-  relay's worker threads, aggregated by thread name and user stack. No
-  instrumentation in `kio`, no new public API, no metrics.
-- `Consumer::poll` is generic and inlined, and bpftrace doesn't expand inline
-  frames, so the stacks name its callers.
+- Measure from outside the process, aggregated by thread name and user
+  stack. No instrumentation in `kio`, no new public API, no metrics.
+- Capture without root, so it runs on a developer host with
+  `perf_event_paranoid=4` and `unprivileged_bpf_disabled=2` and nightly in CI
+  (decided 2026-10-12, replacing bpftrace, which needs `CAP_BPF`). The relay
+  starts with `PR_SET_PTRACER` naming the harness; `eu-stack -q -m` samples
+  every thread at 20 Hz in the steady window, and `addr2line -i -C`
+  symbolizes once afterwards, expanding inlined frames such as
+  `Consumer::poll`. Wait is the window scaled by the share of samples blocked
+  in the futex; `/proc` schedstat supplies CPU. Each sample briefly stops the
+  relay, so an unprofiled control run precedes every profiled run.
 - Count only stacks under the std mutex's contended path (`kio::Lock` is a
   `std::sync::Mutex`): futex waits also include allocator, condvar, and tokio
   waits, and a contended acquire that resolves while spinning never reaches
   the futex.
-- Add bpftrace to the Nix dev shell for Linux only
-  (`lib.optionals stdenv.isLinux`), since the shell also builds for
-  `aarch64-darwin`. The mode needs sudo (or `CAP_BPF`) and says so.
 - Shapes and worker counts follow #5031: fanout (`bench/workloads/fanout.toml`)
-  and chat (`rs/moq-bench/config/chat.toml`) at 1, 4, and 16 workers. Wait is
-  off-CPU, so a thread's share can exceed 1 when it blocks longer than it runs.
+  at 1, 4, and 16 workers. Chat (`rs/moq-bench/config/chat.toml`) needs its
+  60 s startup and 2,001 connections, which the harness's fixed ramp does not
+  allow yet. Wait is off-CPU, so a thread's share can exceed 1 when it blocks
+  longer than it runs.
 - Check that it roughly reproduces #5031's wait time (see kio channel
   contention), not its contended-acquire counts, and that its stacks lead to
   the same call sites.

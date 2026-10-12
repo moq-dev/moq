@@ -3,6 +3,11 @@
 # Sourced by run.sh, which owns these process and output paths.
 # shellcheck disable=SC2153,SC2154
 
+# Prepended to the relay command line; the lock profile makes the relay traceable.
+RELAY_PREFIX=()
+# Set to sample the relay's worker stacks during each workload's steady window.
+PROFILE_LOCK=
+
 relay_config() {
     local path=$1
     local port=$2
@@ -89,9 +94,9 @@ start_relay() {
 
         if [[ -n $tokio_threads ]]; then
             env TOKIO_WORKER_THREADS="$tokio_threads" RUST_LOG=warn \
-                "$relay" "$config" >"$log" 2>&1 &
+                "${RELAY_PREFIX[@]}" "$relay" "$config" >"$log" 2>&1 &
         else
-            RUST_LOG=warn "$relay" "$config" >"$log" 2>&1 &
+            RUST_LOG=warn "${RELAY_PREFIX[@]}" "$relay" "$config" >"$log" 2>&1 &
         fi
         RELAY_PID=$!
 
@@ -229,6 +234,12 @@ run_workload() {
             --interval 500ms --duration 10s --output "$host" \
             >"$directory/host.log" 2>&1 &
         HOST_PID=$!
+        if [[ -n $PROFILE_LOCK ]]; then
+            # The second half of the host window, matching the summary's throughput window.
+            python3 "$ROOT/bench/profile.py" lock "$relay_pid" "$directory/lock" --delay 5 --duration 5 \
+                >"$directory/lock.log" 2>&1 &
+            PROFILE_PID=$!
+        fi
         if ! wait -n -p finished "$HOST_PID" "$LOAD_PID"; then
             cat "$directory/host.log" "$directory/load.log" >&2
             return 1
@@ -238,6 +249,13 @@ run_workload() {
             return 1
         fi
         HOST_PID=
+        if [[ -n $PROFILE_LOCK ]]; then
+            if ! wait "$PROFILE_PID"; then
+                cat "$directory/lock.log" >&2
+                return 1
+            fi
+            PROFILE_PID=
+        fi
         kill -INT "$LOAD_PID"
         if ! wait "$LOAD_PID"; then
             cat "$directory/load.log" >&2

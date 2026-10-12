@@ -48,6 +48,31 @@ Runtime comparison requires Linux because io\_uring and relay process metrics
 come from Linux interfaces. The default worker count is the number of online
 logical CPUs.
 
+Attribute relay worker lock waits to the stacks that blocked, as a share of
+each worker's CPU:
+
+```bash
+nix develop --command just bench-lock
+nix develop --command just bench-lock fanout-heavy "4 16"
+```
+
+This builds the relay with `[profile.profiling]` and frame pointers, then runs
+the workload on Tokio workers at each count twice: an unprofiled control, then
+a profiled run, so the throughput and CPU difference shows the profiler's
+overhead. During the profiled run's steady window, `eu-stack` samples every
+thread's stack back to back. A `moq-quic-N` sample counts as a mutex wait only
+when it is blocked in the futex under std's `Mutex::lock_contended`
+(`kio::Lock`); condvar, allocator and parking waits are counted separately, and
+spinning is excluded. Wait time is the wall window scaled by the share of
+samples, and `/proc` schedstat supplies CPU, so wait/CPU can exceed one.
+`lock/mutex.folded` holds the blocking stacks in flamegraph folded format.
+
+It needs no root or perf/BPF permissions: the relay starts with
+`PR_SET_PTRACER` naming the harness, which lets Yama's default
+`ptrace_scope=1` admit the sampler. Each sample stops the relay while it
+unwinds, so treat the stacks as attribution and the absolute wait as an
+estimate. Linux only.
+
 ## Workloads
 
 The `workloads/` TOML files contain only traffic shape. The harness supplies the

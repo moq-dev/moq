@@ -1,144 +1,159 @@
 #!/usr/bin/env python3
-"""Probe capture privileges and reduce explicitly classified worker futex waits."""
+"""Sample relay worker stacks with eu-stack and attribute std mutex waits."""
 import argparse
+import ctypes
 import json
-import platform
+import os
 import re
-import shutil
 import subprocess
+import time
+from collections import Counter, defaultdict
 from pathlib import Path
 
-# Condvar, allocator and runtime parking futexes are not std mutex acquisitions.
-MUTEX = re.compile(r"std::sys::(?:sync|pal::unix)::mutex::futex::Mutex::lock_contended")
-SYMBOL = re.compile(r"[A-Za-z_][A-Za-z_0-9]*::|(?:^|\s)[A-Za-z_][A-Za-z_0-9]*\+")
-LOCK_PROBE = """
-tracepoint:syscalls:sys_enter_futex /pid == cpid/ {
-    @started[tid] = nsecs;
-    @stack[tid] = ustack;
-}
-tracepoint:syscalls:sys_exit_futex /pid == cpid && @started[tid]/ {
-    @waits[@stack[tid]] = sum(nsecs - @started[tid]);
-    delete(@started, tid);
-    delete(@stack, tid);
-}
-"""
-WORKER = re.compile(r"moq-(?:uring|quic)-[0-9]+$")
+PR_SET_PTRACER = 0x59616D61
+# Each sample stops the relay while it unwinds; 20 Hz bounds that, and the control run measures it.
+INTERVAL_NS = 50_000_000
+WORKER = re.compile(r"moq-(?:uring|quic)-[0-9]+")
+# The blocking call itself: std's futex wrapper or glibc's (allocator, pthread).
+BLOCKED = re.compile(r"futex_wait|futex_abstimed_wait|lll_lock_wait")
+# kio::Lock is a std Mutex; condvar, allocator and parking waits are separate.
+# An inlined frame carries only its short name.
+MUTEX = re.compile(r"(?:\bMutex>?::|^)lock_contended$")
+FRAME = re.compile(r"#\d+\s+0x([0-9a-f]+)\s+-\s+(\S+)")
 
 
-def reduce(samples, before, after):
-    """Normalize mutex waits by thread CPU counters, never elapsed time."""
+def parse(text):
+    """Split `eu-stack -q -m` output into innermost-first (module, address) lists keyed by TID."""
+    stacks, frames = {}, None
+    for line in text.splitlines():
+        if line.startswith('TID '):
+            frames = stacks.setdefault(line[4:].rstrip(':'), [])
+        elif frames is not None and (match := FRAME.match(line.strip())):
+            frames.append((match.group(2), int(match.group(1), 16)))
+    return stacks
+
+
+def bases(pid):
+    """Load address of each mapped file, so addresses become file-relative for addr2line."""
     result = {}
-    for sample in samples:
-        tid, name = str(sample['tid']), sample['comm']
-        if not WORKER.fullmatch(name):
-            continue
-        wait = sample['wait_ns']
-        if not isinstance(wait, int) or isinstance(wait, bool) or wait < 0:
-            raise ValueError('wait_ns must be a nonnegative integer')
-        stack = sample['stack']
-        if not isinstance(stack, list) or not stack or not all(isinstance(frame, str) for frame in stack):
-            raise ValueError('a nonempty symbolized user stack is required')
-        if not any(SYMBOL.search(frame) for frame in stack):
-            raise ValueError('user stack contains no resolved symbols')
-        row = result.setdefault(tid, {'comm': name, 'mutex_wait_ns': 0, 'other_futex_wait_ns': 0, 'stacks': []})
-        if row['comm'] != name:
-            raise ValueError('thread identity changed inside the capture')
-        if any(MUTEX.search(frame) for frame in stack):
-            row['mutex_wait_ns'] += wait
-            row['stacks'].append({'wait_ns': wait, 'stack': stack})
-        else:
-            row['other_futex_wait_ns'] += wait
-    if not result:
-        raise ValueError('capture has no symbolized relay-worker futex samples')
-    for tid, row in result.items():
-        if tid not in before or tid not in after:
-            raise ValueError(f'missing CPU counter for worker {tid}')
-        if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in (before[tid], after[tid])):
-            raise ValueError(f'invalid CPU counter for worker {tid}')
-        cpu = after[tid] - before[tid]
-        if cpu <= 0:
-            raise ValueError(f'worker {tid} has no advancing CPU counter')
-        row['cpu_ns'] = cpu
-        row['mutex_wait_per_cpu'] = row['mutex_wait_ns'] / cpu
-    return {'version': 1, 'workers': result,
-            'scope': 'completed futex waits with std mutex lock_contended frames; spinning is excluded'}
-
-
-def thread_cpu(pid):
-    """Read Linux per-thread scheduled CPU nanoseconds for the matching workers."""
-    if platform.system() != 'Linux':
-        raise ValueError('thread CPU capture requires Linux /proc schedstat')
-    result = {}
-    for task in (Path('/proc') / str(pid) / 'task').iterdir():
-        if WORKER.fullmatch((task / 'comm').read_text().strip()):
-            result[task.name] = int((task / 'schedstat').read_text().split()[0])
-    if not result:
-        raise ValueError('PID has no moq-uring-N or moq-quic-N workers')
+    for line in (Path('/proc') / str(pid) / 'maps').read_text().splitlines():
+        fields = line.split(maxsplit=5)
+        if len(fields) == 6 and fields[2] == '00000000' and fields[5].startswith('/'):
+            result.setdefault(fields[5], int(fields[0].split('-')[0], 16))
     return result
 
 
-def probe(mode, directory):
-    """Retain both successful and refused capability probes before any build."""
+def addr2line(module, offsets):
+    """Resolve file offsets to innermost-first function names, inlined frames included."""
+    done = subprocess.run(['addr2line', '-a', '-f', '-i', '-C', '-e', module],
+                          input=''.join(f'{offset:#x}\n' for offset in offsets),
+                          capture_output=True, text=True, check=True)
+    # Each address line is followed by (function, file:line) pairs, innermost first.
+    result, names, position = {}, [], 0
+    for line in done.stdout.splitlines():
+        if line.startswith('0x'):
+            names, position = result.setdefault(int(line, 16), []), 0
+            continue
+        if position % 2 == 0:
+            names.append(line)
+        position += 1
+    return result
+
+
+def symbolize(samples, loaded):
+    """Replace (module, address) frames with names; caller frames use their call instruction."""
+    wanted = defaultdict(set)
+    for sample in samples:
+        for stack in sample.values():
+            for depth, (module, address) in enumerate(stack):
+                if module in loaded:
+                    wanted[module].add(address - loaded[module] - (depth > 0))
+    names = {module: addr2line(module, sorted(offsets)) for module, offsets in wanted.items()}
+    return [{tid: [name for depth, (module, address) in enumerate(stack)
+                   for name in names.get(module, {}).get(address - loaded.get(module, 0) - (depth > 0), ['??'])]
+             for tid, stack in sample.items()} for sample in samples]
+
+
+def classify(stack):
+    """A sample is a mutex wait only while blocked in the futex under lock_contended."""
+    if not any(BLOCKED.search(frame) for frame in stack):
+        return 'other'
+    return 'mutex' if any(MUTEX.search(frame) for frame in stack) else 'futex'
+
+
+def reduce(names, samples, before, after, window_ns):
+    """Turn per-sample stacks into each worker's wait share of wall and CPU time."""
+    if not any(re.search(r'\bmoq_|\bkio::', frame) for sample in samples for tid in names for frame in sample.get(tid, [])):
+        raise ValueError('worker stacks contain no resolved MoQ frames; build with the profiling profile')
+    workers, folded = {}, Counter()
+    for tid, name in names.items():
+        stacks = [sample[tid] for sample in samples if tid in sample]
+        if not stacks:
+            raise ValueError(f'worker {name} ({tid}) was never sampled')
+        cpu = after[tid] - before[tid]
+        if cpu <= 0:
+            raise ValueError(f'worker {name} ({tid}) has no advancing CPU counter')
+        counts = Counter(classify(stack) for stack in stacks)
+        wait = window_ns * counts['mutex'] // len(stacks)
+        workers[tid] = {'comm': name, 'samples': len(stacks), 'mutex_samples': counts['mutex'],
+                        'other_futex_samples': counts['futex'], 'cpu_ns': cpu,
+                        'mutex_wait_ns': wait, 'mutex_wait_per_cpu': wait / cpu}
+        folded.update(';'.join(reversed(stack)) for stack in stacks if classify(stack) == 'mutex')
+    return {'version': 1, 'window_ns': window_ns, 'samples': len(samples), 'workers': workers,
+            'scope': 'wall-clock stack samples blocked in a futex under std Mutex::lock_contended; spinning is excluded'}, folded
+
+
+def schedstat(pid, tids):
+    return {tid: int((Path('/proc') / str(pid) / 'task' / tid / 'schedstat').read_text().split()[0]) for tid in tids}
+
+
+def sample(pid, delay, duration, directory):
+    """Capture one steady window, then symbolize once after the relay is released."""
     directory.mkdir(parents=True, exist_ok=True)
-    evidence = {'version': 1, 'mode': mode, 'command': None,
-                'kernel': platform.platform(), 'exit_code': None,
-                'status': 'unavailable', 'capture': 'not attempted; capability probe only'}
-    stdout, stderr = '', ''
-    try:
-        if platform.system() != 'Linux':
-            raise ValueError('this draft probes Linux only; macOS samply capture remains unimplemented')
-        tool = {'lock': 'bpftrace', 'cpu': 'perf'}[mode]
-        executable = shutil.which(tool)
-        if not executable:
-            raise ValueError(f'{tool} is unavailable; enter the Nix dev shell')
-        command = ([executable, '-e', LOCK_PROBE, '-c', 'true'] if mode == 'lock' else
-                   [executable, 'stat', '-e', 'cpu-clock', '--', 'true'])
-        evidence['command'] = command
-        evidence['status'] = 'spawn failed'
-        # The traced child starts after attachment and its exit ends the probe.
-        # BEGIN exits before attachment and cannot prove these capabilities.
-        # Both probes exit by construction. No deadline hides slow setup or
-        # substitutes for the child process's real result.
-        completed = subprocess.run(command, capture_output=True, text=True)
-        stdout, stderr = completed.stdout, completed.stderr
-        evidence.update(exit_code=completed.returncode,
-                        status='passed' if completed.returncode == 0 else 'refused')
-        if completed.returncode:
-            requirement = 'tracefs, BPF and user-stack permissions' if mode == 'lock' else 'perf_event permissions'
-            raise ValueError(f'{tool} capture refused: requires {requirement}; see {directory / "probe.stderr"}')
-    except (ValueError, OSError) as error:
-        if not stderr:
-            stderr = str(error) + '\n'
-        raise
-    finally:
-        (directory / 'probe.stdout').write_text(stdout)
-        (directory / 'probe.stderr').write_text(stderr)
-        (directory / 'probe.json').write_text(json.dumps(evidence, indent=2) + '\n')
-    print('Capability probe passed. No profile was captured.')
+    tasks = Path('/proc') / str(pid) / 'task'
+    names = {task.name: name for task in tasks.iterdir() if WORKER.fullmatch(name := (task / 'comm').read_text().strip())}
+    if not names:
+        raise ValueError(f'PID {pid} has no moq-uring-N or moq-quic-N workers')
+    loaded = bases(pid)
+    time.sleep(delay)
+    before, start = schedstat(pid, names), time.monotonic_ns()
+    raw = []
+    with open(directory / 'eu-stack.log', 'w') as log:
+        while (now := time.monotonic_ns()) - start < duration * 1_000_000_000:
+            # Exit 1 marks a partial backtrace, such as a frame without CFI; 2 is no frames at all.
+            done = subprocess.run(['eu-stack', '-q', '-m', '-p', str(pid)], capture_output=True, text=True)
+            log.write(done.stderr)
+            if done.returncode > 1:
+                raise ValueError(f'eu-stack failed ({done.returncode}): {done.stderr.strip()}')
+            raw.append(parse(done.stdout))
+            time.sleep(max(0, now + INTERVAL_NS - time.monotonic_ns()) / 1e9)
+    after, window = schedstat(pid, names), time.monotonic_ns() - start
+    result, folded = reduce(names, symbolize(raw, loaded), before, after, window)
+    (directory / 'lock.json').write_text(json.dumps(result, indent=2) + '\n')
+    (directory / 'mutex.folded').write_text(''.join(f'{stack} {count}\n' for stack, count in folded.most_common()))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
-    capability = commands.add_parser('probe')
-    capability.add_argument('mode', choices=('lock', 'cpu'))
-    capability.add_argument('directory', type=Path)
-    cpu = commands.add_parser('thread-cpu')
-    cpu.add_argument('pid', type=int)
-    cpu.add_argument('output', type=Path)
-    merge = commands.add_parser('reduce')
-    for name in ('samples', 'before', 'after', 'output'):
-        merge.add_argument(name, type=Path)
+    traceable = commands.add_parser('traceable', help='let TRACER and its descendants ptrace COMMAND, then exec it')
+    traceable.add_argument('tracer', type=int)
+    traceable.add_argument('argv', nargs=argparse.REMAINDER)
+    lock = commands.add_parser('lock', help='sample worker stacks of PID into DIRECTORY')
+    lock.add_argument('pid', type=int)
+    lock.add_argument('directory', type=Path)
+    lock.add_argument('--delay', type=float, default=0)
+    lock.add_argument('--duration', type=float, required=True)
     args = parser.parse_args()
     try:
-        if args.command == 'probe':
-            probe(args.mode, args.directory)
-        elif args.command == 'thread-cpu':
-            args.output.write_text(json.dumps(thread_cpu(args.pid), indent=2) + '\n')
-        else:
-            result = reduce(*(json.loads(getattr(args, name).read_text()) for name in ('samples', 'before', 'after')))
-            args.output.write_text(json.dumps(result, indent=2) + '\n')
-    except (ValueError, OSError) as error:
+        if args.command == 'traceable':
+            # Yama's default ptrace_scope=1 only lets ancestors attach, and eu-stack is not one.
+            if ctypes.CDLL(None, use_errno=True).prctl(PR_SET_PTRACER, args.tracer, 0, 0, 0):
+                raise OSError(ctypes.get_errno(), 'PR_SET_PTRACER failed')
+            argv = args.argv[1:] if args.argv[:1] == ['--'] else args.argv
+            os.execvp(argv[0], argv)
+        sample(args.pid, args.delay, args.duration, args.directory)
+    except (ValueError, OSError, subprocess.CalledProcessError) as error:
         parser.exit(1, f'profile: {error}\n')
 
 
