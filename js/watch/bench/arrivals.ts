@@ -1,27 +1,29 @@
 import { Time } from "@moq/net";
-import { Signal } from "@moq/signals";
-import { type Arrival, recordArrival } from "../src/arrivals";
+import { Producer } from "../src/arrivals";
 
-console.log("decoders,retained_frames,ns_per_arrival");
+// Sweep open handles against each handle's unread backlog: a write should cost one push per
+// handle, never a slope in the backlog.
+const frame = { timestamp: Time.Milli(0), arrival: Time.Milli(0), late: false, skipped: false };
+const WRITES = 10_000;
+
+console.log("handles,backlog,ns_per_handle_write");
 for (const count of [1, 4, 16]) {
-	for (const retained of [1, 256, 4096]) {
-		const initial: Arrival[] = Array.from({ length: retained }, () => ({
-			timestamp: Time.Milli(0),
-			arrival: Time.Milli(0),
-			late: false,
-			skipped: false,
-		}));
-		const windows = Array.from({ length: count }, () => new Signal<readonly Arrival[]>(initial));
-		const frame = initial[0];
+	for (const backlog of [0, 256, 4096]) {
+		const producer = new Producer();
+		const handles = Array.from({ length: count }, () => producer.consume());
+		for (let i = 0; i < backlog; i++) producer.write(frame);
+
 		const start = performance.now();
-		for (let n = 0; n < 1000; n++)
-			for (const window of windows) {
-				window.set(initial);
-				recordArrival(window, frame);
-			}
-		const ns = ((performance.now() - start) * 1e6) / (1000 * count);
-		for (const window of windows)
-			if (window.peek().length !== Math.min(retained + 1, 4096)) throw new Error("lost arrival");
-		console.log(`${count},${retained},${ns.toFixed(0)}`);
+		for (let n = 0; n < WRITES; n++) {
+			producer.write(frame);
+			for (const handle of handles) await handle.next();
+		}
+		const ns = ((performance.now() - start) * 1e6) / (WRITES * count);
+
+		for (const handle of handles) {
+			for (let i = 0; i < backlog; i++) if ((await handle.next()) === undefined) throw new Error("lost arrival");
+			handle.close();
+		}
+		console.log(`${count},${backlog},${ns.toFixed(0)}`);
 	}
 }

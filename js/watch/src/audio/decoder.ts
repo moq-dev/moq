@@ -13,7 +13,7 @@ import {
 	readonlys,
 	Signal,
 } from "@moq/signals";
-import { type Arrival, recordArrival } from "../arrivals";
+import { Producer as ArrivalProducer, type Arrivals } from "../arrivals";
 import { hostedAssets } from "../assets";
 import { base64ToBytes } from "../base64";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
@@ -45,8 +45,6 @@ export type DecoderProps = Inputs<DecoderInput> & {
 };
 
 type DecoderOutput = {
-	/** Recent ingress diagnostics, bounded to 30 seconds and 4096 frames. */
-	arrivals: Signal<readonly Arrival[]>;
 	/** Fatal decode failure, cleared when another source is selected. */
 	error: Signal<Error | undefined>;
 	context: Signal<AudioContext | undefined>;
@@ -97,7 +95,6 @@ export class Decoder {
 	readonly sync: Sync;
 
 	readonly #out: DecoderOutput = {
-		arrivals: new Signal<readonly Arrival[]>([]),
 		error: new Signal<Error | undefined>(undefined),
 		context: new Signal<AudioContext | undefined>(undefined),
 		root: new Signal<AudioNode | undefined>(undefined),
@@ -140,6 +137,9 @@ export class Decoder {
 
 	// The broadcast instance the ring's timeline belongs to. See #runDecoder.
 	#instance?: Moq.Broadcast.Consumer["closed"];
+
+	// Fans received frames out to open `arrivals()` handles; retains nothing without one.
+	#arrivals = new ArrivalProducer();
 
 	#signals = new Effect();
 	#failed?: Failure;
@@ -374,7 +374,6 @@ export class Decoder {
 		// Every handle to one instance shares `closed`, so it identifies the instance where the
 		// handle itself does not.
 		if (this.#instance !== undefined && this.#instance !== active.closed) {
-			this.#out.arrivals.set([]);
 			this.#ring.peek()?.reset();
 			this.#decodeBuffered.set([]);
 			this.sync.reset();
@@ -490,7 +489,7 @@ export class Decoder {
 				// Classify ingress before decoder backpressure changes the delivery clock.
 				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
 				const late = this.sync.received(timestamp, "audio", frame.arrival);
-				recordArrival(this.#out.arrivals, { timestamp, arrival: frame.arrival, late, skipped: next.skipped });
+				this.#arrivals.write({ timestamp, arrival: frame.arrival, late, skipped: next.skipped });
 
 				const duration = packetDuration(config.codec, frame);
 				if (duration !== undefined) this.#frame.set(duration);
@@ -597,7 +596,7 @@ export class Decoder {
 
 				const timestamp = Time.Milli.fromMicro(frame.timestamp);
 				const late = this.sync.received(timestamp, "audio", frame.arrival);
-				recordArrival(this.#out.arrivals, { timestamp, arrival: frame.arrival, late, skipped: next.skipped });
+				this.#arrivals.write({ timestamp, arrival: frame.arrival, late, skipped: next.skipped });
 
 				const duration = packetDuration(config.codec, frame);
 				if (duration !== undefined) this.#frame.set(duration);
@@ -753,7 +752,13 @@ export class Decoder {
 		return true;
 	}
 
+	/** Observe every frame received from now until the handle or this decoder closes. */
+	arrivals(): Arrivals {
+		return this.#arrivals.consume();
+	}
+
 	close() {
+		this.#arrivals.close();
 		this.#signals.close();
 	}
 

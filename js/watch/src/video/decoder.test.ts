@@ -275,9 +275,12 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 	const sync = new Sync({ delay });
 	const enabled = new Signal(true);
 	const decoder = new Decoder({ source, sync, enabled });
+	// Opened before the reads below, so it observes every one of them.
+	const arrivals = decoder.arrivals();
 	await microtasks();
 	return {
 		decoder,
+		arrivals,
 		delay,
 		fail: (error: DOMException, index = -1) => errors.at(index)?.(error),
 		emit: (timestamp: number, index = -1) => frames.at(index)?.(new Picture(timestamp) as unknown as VideoFrame),
@@ -438,11 +441,8 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		]);
 		try {
 			expect(playback.submitted).toEqual([1000, 1100, 1200]);
-			expect(playback.decoder.out.arrivals.peek().map((entry) => entry.timestamp)).toEqual([
-				Time.Milli(1),
-				Time.Milli(1.1),
-				Time.Milli(1.2),
-			]);
+			for (const timestamp of [1, 1.1, 1.2])
+				expect((await playback.arrivals.next())?.timestamp).toBe(Time.Milli(timestamp));
 			// Rejected payloads were still received, but never counted as frames.
 			expect(playback.decoder.out.stats.peek()).toEqual({ frameCount: 3, bytesReceived: 5 });
 		} finally {

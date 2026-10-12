@@ -14,7 +14,7 @@ import {
 	Signal,
 } from "@moq/signals";
 import { rotateVideoDimensions } from "@moq/video";
-import { type Arrival, recordArrival } from "../arrivals";
+import { Producer as ArrivalProducer, type Arrivals } from "../arrivals";
 import { base64ToBytes } from "../base64";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 
@@ -55,8 +55,6 @@ export interface Stats {
 }
 
 type DecoderOutput = {
-	/** Recent ingress diagnostics, bounded to 30 seconds and 4096 frames. */
-	arrivals: Signal<readonly Arrival[]>;
 	/** Fatal decode failure, cleared when another source is selected. */
 	error: Signal<Error | undefined>;
 	// The current frame to render.
@@ -85,7 +83,6 @@ export class Decoder {
 	readonly sync: Sync;
 
 	readonly #out: DecoderOutput = {
-		arrivals: new Signal<readonly Arrival[]>([]),
 		error: new Signal<Error | undefined>(undefined),
 		frame: new Signal<VideoFrame | undefined>(undefined),
 		timestamp: new Signal<Time.Milli | undefined>(undefined),
@@ -109,6 +106,9 @@ export class Decoder {
 	// shares `closed`, so it identifies the instance where the handle itself does not.
 	#instance?: { path: Moq.Path.Valid; closed: unknown };
 	readonly #identity: Computed<PlaybackIdentity | undefined>;
+
+	// Fans received frames out to open `arrivals()` handles; retains nothing without one.
+	#arrivals = new ArrivalProducer();
 
 	#signals = new Effect();
 	#selected?: DecoderTrack;
@@ -224,7 +224,6 @@ export class Decoder {
 		// it to catch up to the old picture would freeze video until it passed the old timestamps,
 		// so switch at once and re-anchor the clock. A rendition switch within one instance, or a
 		// switch to another path, still waits.
-		if (this.#instance && this.#instance.closed !== active.closed) this.#out.arrivals.set([]);
 		const republished = this.#instance?.path === active.path && this.#instance.closed !== active.closed;
 		this.#instance = { path: active.path, closed: active.closed };
 		if (republished) this.sync.reset();
@@ -274,6 +273,8 @@ export class Decoder {
 
 			// Upgrade the pending track to active.
 			// #runActive will be in charge of it now.
+			if (current) current.arrivals = undefined;
+			pending.arrivals = this.#arrivals;
 			this.#active.set(pending);
 			this.#pending.set(undefined);
 			pending = undefined;
@@ -319,7 +320,6 @@ export class Decoder {
 			});
 		});
 		effect.proxy(this.#out.buffered, active.buffered);
-		effect.proxy(this.#out.arrivals, active.arrivals);
 		effect.proxy(this.#spread, active.spread);
 	}
 
@@ -371,8 +371,14 @@ export class Decoder {
 		}, BUFFERING);
 	}
 
+	/** Observe every frame the displayed rendition receives until the handle or this decoder closes. */
+	arrivals(): Arrivals {
+		return this.#arrivals.consume();
+	}
+
 	close() {
 		this.#clearCurrentFrame();
+		this.#arrivals.close();
 
 		this.#signals.close();
 	}
@@ -403,7 +409,8 @@ class DecoderTrack {
 	identity: string;
 	catalog: Getter<Catalog.Root | undefined>;
 	stats: Signal<Stats | undefined>;
-	arrivals = new Signal<readonly Arrival[]>([]);
+	// Set once promoted, so only the rendition feeding the picture reports arrivals.
+	arrivals?: ArrivalProducer;
 
 	timestamp = new Signal<Time.Milli | undefined>(undefined);
 	frame = new Signal<VideoFrame | undefined>(undefined);
@@ -569,7 +576,7 @@ class DecoderTrack {
 				// Classify ingress before decoder backpressure changes the delivery clock.
 				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
 				const late = this.sync.received(timestamp, "video", frame.arrival);
-				recordArrival(this.arrivals, { timestamp, arrival: frame.arrival, late, skipped: next.skipped });
+				this.arrivals?.write({ timestamp, arrival: frame.arrival, late, skipped: next.skipped });
 
 				const chunk = new EncodedVideoChunk({
 					type: frame.keyframe ? "key" : "delta",
@@ -650,7 +657,7 @@ class DecoderTrack {
 				// Classify ingress before decoder backpressure changes the delivery clock.
 				const timestamp = Time.Milli.fromMicro(frame.timestamp);
 				const late = this.sync.received(timestamp, "video", frame.arrival);
-				recordArrival(this.arrivals, { timestamp, arrival: frame.arrival, late, skipped: next.skipped });
+				this.arrivals?.write({ timestamp, arrival: frame.arrival, late, skipped: next.skipped });
 
 				// Track decode buffer (see #runLegacy: bridge on the consumer's continuity signal,
 				// never on group adjacency, which proves nothing about the timeline).

@@ -253,7 +253,7 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 		enabled,
 		decoding,
 		context: decoder.out.context,
-		arrivals: decoder.out.arrivals,
+		arrivals: () => decoder.arrivals(),
 		error: decoder.out.error,
 		play,
 		// Remove the rendition from the catalog, then restore it.
@@ -302,6 +302,8 @@ it("decodes an audio packet inside a group after a playhead discontinuity", asyn
 	const playback = await play(Time.Milli(100));
 	try {
 		await playback.play();
+		// Opened late, so it observes only the frame below.
+		const arrivals = playback.arrivals();
 		const next = frame();
 		next.discontinuity = 1;
 		if (!next.frame) throw new Error("missing test frame");
@@ -309,11 +311,13 @@ it("decodes an audio packet inside a group after a playhead discontinuity", asyn
 		playback.push(next);
 		await microtasks();
 		expect(playback.inserted()).toContain(next.frame.timestamp);
-		expect(playback.arrivals.peek().at(-1)).toMatchObject({
+		expect(await arrivals.next()).toMatchObject({
 			timestamp: Time.Milli.fromMicro(next.frame.timestamp),
 			arrival: next.frame.arrival,
 			skipped: false,
 		});
+		arrivals.close();
+		expect(await arrivals.next()).toBeUndefined();
 	} finally {
 		playback.close();
 		await microtasks();

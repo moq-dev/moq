@@ -146,11 +146,23 @@ const player = new Watch.Player({
 
 Pass a signal from [`@moq/signals`](/lib/js/signals) for any control you want
 to change later, such as `muted` or `delay`. `Player` is the pipeline inside
-`<moq-watch>`; its parts are exported for custom composition. The audio and video
-decoders expose a recent `arrivals` window for timeline overlays. It keeps transport
-ingress timestamps through buffering and distinguishes late frames from latency
-skips. Read the window as a snapshot, since reactive updates can coalesce; it is
-bounded history rather than a cumulative statistics source.
+`<moq-watch>`; its parts are exported for custom composition.
+
+To chart when each frame arrived against when it plays, open an `arrivals()`
+handle on a decoder. It yields every frame received while it is open, stamped
+when the frame came off the transport:
+
+```ts
+const arrivals = player.audio.arrivals();
+for await (const { timestamp, arrival, late, skipped } of arrivals) {
+    // `late`: arrived after its playback deadline.
+    // `skipped`: content right before this frame was dropped to hold the latency budget.
+}
+```
+
+Unread frames queue on the handle, so keep reading and keep your own window.
+`arrivals.close()` stops observing and releases them; nothing is retained
+without an open handle. Video reports the rendition on screen.
 
 ## Buffered playback
 

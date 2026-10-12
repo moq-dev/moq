@@ -96,7 +96,7 @@ qmux-bench:
     bunx tsc --noEmit --project net/bench/tsconfig.json
     bun net/bench/qmux.ts
 
-# Sweep decoder count and retained arrival frames independently.
+# Sweep open arrival handles against their unread backlog.
 arrivals-bench:
     bun install --frozen-lockfile
     bun watch/bench/arrivals.ts

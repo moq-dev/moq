@@ -18,8 +18,8 @@
 import type * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import { Group, Time, Track } from "@moq/net";
-import { Effect, Signal } from "@moq/signals";
-import { type Arrival as Diagnostic, recordArrival } from "../arrivals";
+import { Effect } from "@moq/signals";
+import type { Arrival as Diagnostic } from "../arrivals";
 import { type Delay, Sync } from "../sync";
 import { frameDuration } from "./config";
 import { ringSamples, target } from "./latency";
@@ -70,7 +70,7 @@ export interface Options {
 
 /** One render quantum, as the worklet produced it. */
 export interface Quantum {
-	/** The diagnostic window as of this render quantum. */
+	/** Every frame the decoder received so far, in delivery order. Grows between yields. */
 	arrivals: readonly Diagnostic[];
 	/** When it finished rendering, on the trace's clock, in ms. */
 	at: number;
@@ -220,7 +220,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 
 	// The decoder's read loop, with the codec taken out. A failure is rethrown at the next quantum.
 	const terminal = new Terminal();
-	const arrivals = new Signal<readonly Diagnostic[]>([]);
+	const arrivals: Diagnostic[] = [];
 	const delivery = Promise.withResolvers<void>();
 	if (options.decodeAfter === undefined) delivery.resolve();
 	let failure: { error: unknown } | undefined;
@@ -235,7 +235,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			const { timestamp, arrival } = next.frame;
 			const media = Time.Milli.fromMicro(timestamp);
 			const late = sync.received(media, "audio", arrival);
-			recordArrival(arrivals, { timestamp: media, arrival, late, skipped: next.skipped });
+			arrivals.push({ timestamp: media, arrival, late, skipped: next.skipped });
 			const length = samples.get(timestamp);
 			if (length === undefined) throw new Error(`the consumer delivered an unrecorded frame at ${timestamp} us`);
 			ring.insert(timestamp, [new Float32Array(length).fill(0.5)]);
@@ -304,7 +304,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			output.fill(0);
 			ring.read([output]);
 			yield {
-				arrivals: arrivals.peek(),
+				arrivals,
 				at: now,
 				output,
 				stalled: ring.stalled,

@@ -1,30 +1,55 @@
 import { expect, test } from "bun:test";
 import { Time } from "@moq/net";
-import { Signal } from "@moq/signals";
-import { type Arrival, recordArrival } from "./arrivals";
+import { Producer } from "./arrivals";
 
-const frame = (arrival: number): Arrival => ({
+const frame = (arrival: number) => ({
 	timestamp: Time.Milli(arrival),
 	arrival: Time.Milli(arrival),
 	late: false,
 	skipped: false,
 });
 
-test("coalesced arrivals remain in immutable bounded snapshots", () => {
-	const window = new Signal<readonly Arrival[]>([]);
-	recordArrival(window, frame(0));
-	const before = window.peek();
-	for (let i = 1; i < 4100; i++) recordArrival(window, frame(i));
-	expect(before).toEqual([frame(0)]);
-	expect(window.peek()).toHaveLength(4096);
-	expect(window.peek()[0].arrival).toBe(Time.Milli(4));
+test("a handle receives every frame written while it is open", async () => {
+	const producer = new Producer();
+	producer.write(frame(0));
+	const handle = producer.consume();
+	for (let i = 1; i <= 3; i++) producer.write(frame(i));
+	for (let i = 1; i <= 3; i++) expect(await handle.next()).toEqual(frame(i));
+
+	const waiting = handle.next();
+	producer.write(frame(4));
+	expect(await waiting).toEqual(frame(4));
+	handle.close();
 });
 
-test("time eviction uses newest ingress even when delivery is reordered", () => {
-	const window = new Signal<readonly Arrival[]>([]);
-	recordArrival(window, frame(1000));
-	recordArrival(window, frame(32000));
-	recordArrival(window, frame(3000));
-	recordArrival(window, frame(0));
-	expect(window.peek()).toEqual([frame(32000), frame(3000)]);
+test("closing a handle releases its unread frames and stops observing", async () => {
+	const producer = new Producer();
+	const closed = producer.consume();
+	const open = producer.consume();
+	producer.write(frame(0));
+	closed.close();
+	producer.write(frame(1));
+	expect(await closed.next()).toBeUndefined();
+	expect(await open.next()).toEqual(frame(0));
+	expect(await open.next()).toEqual(frame(1));
+	open.close();
+});
+
+test("a closed decoder ends its handles once they drain", async () => {
+	const producer = new Producer();
+	const handle = producer.consume();
+	producer.write(frame(0));
+	producer.close();
+	expect(await handle.next()).toEqual(frame(0));
+	expect(await handle.next()).toBeUndefined();
+	expect(await producer.consume().next()).toBeUndefined();
+});
+
+test("a pending read refuses a concurrent one", async () => {
+	const producer = new Producer();
+	const handle = producer.consume();
+	const waiting = handle.next();
+	await expect(handle.next()).rejects.toThrow("multiple calls to next not supported");
+	handle.close();
+	expect(await waiting).toBeUndefined();
 });
