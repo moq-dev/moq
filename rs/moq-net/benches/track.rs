@@ -408,7 +408,7 @@ fn bench_datagram_subscriber_join(c: &mut Criterion) {
 				b.iter_batched(
 					|| {
 						let broadcast = broadcast::Info::default().produce();
-						let mut track = broadcast.create_track("bench", None).unwrap();
+						let mut track = broadcast.create_track("bench", timed()).unwrap();
 						for millis in 0..buffered {
 							track
 								.append_datagram(Timestamp::from_millis(millis).unwrap(), b"x".as_slice())
