@@ -69,7 +69,7 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 			match stream {
 				Ok(stream) => pending.push(Reader::new(stream, version)),
 				Err(err) => {
-					accept_error = Some(Error::from_transport(err));
+					accept_error = Some(crate::lite::error::from_transport(err));
 					break;
 				}
 			}
@@ -405,8 +405,10 @@ where
 			}
 			Err(err) => {
 				tracing::warn!(%err, "session error");
-				self.session
-					.close(SessionError::from(err).to_code(), err.to_string().as_ref());
+				self.session.close(
+					crate::lite::error::to_session_code(&SessionError::from(err)),
+					err.to_string().as_ref(),
+				);
 			}
 			_ => {
 				tracing::info!("session closed");
@@ -635,9 +637,14 @@ impl<S: crate::transport::poll::Session> PresentToken<S> {
 							let Ok(code) = u32::try_from(refused.code) else {
 								return Poll::Ready(Error::ProtocolViolation);
 							};
-							let err = Error::Session(crate::SessionError::from_code(code));
+							let err = match crate::lite::error::from_session_code(code) {
+								crate::SessionError::Unsupported => Error::Unsupported,
+								code => Error::Session(code),
+							};
 							tracing::warn!(%err, reason = %refused.reason, "auth token refused");
-							self.handle.refused(self.id);
+							if !matches!(err, Error::Unsupported) {
+								self.handle.refused(self.id);
+							}
 							*answered = true;
 							return Poll::Ready(err);
 						}
@@ -712,7 +719,7 @@ impl<S: crate::transport::poll::Session> SendSetup<S> {
 		loop {
 			match &mut self.state {
 				SendSetupState::Open { session, setup } => {
-					let stream = ready!(session.poll_open_uni(cx)).map_err(Error::from_transport)?;
+					let stream = ready!(session.poll_open_uni(cx)).map_err(crate::lite::error::from_transport)?;
 					let mut writer = Writer::new(stream, self.version);
 					writer.buffer(&super::DataType::Setup)?;
 					writer.buffer(&**setup)?;

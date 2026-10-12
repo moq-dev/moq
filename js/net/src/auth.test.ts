@@ -81,6 +81,35 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 		server.abort();
 	});
 
+	test("an oversized grant update reports Unsupported and revokes only its token", async () => {
+		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
+		const requests = server.auth.requests();
+		const issued: Issued[] = [];
+		const answering = (async () => {
+			for (;;) {
+				const request = await requests.next();
+				if (!request) break;
+				issued.push(request.accept(grant([request.token.byteLength === 0 ? "a" : "b"], [])));
+			}
+		})();
+		try {
+			await waitFor(client.auth.grant, (g) => g?.publish.equals(patterns("a")) === true);
+			const token = await client.auth.add("update");
+			await waitFor(client.auth.grant, (g) => g?.publish.equals(patterns("a", "b")) === true);
+			const publish = new Path.Patterns(
+				Array.from({ length: 20 }, (_, i) => Path.Pattern.subtree(`${i}${"x".repeat(4000)}`)),
+			);
+			issued[issued.length - 1].update({ publish, subscribe: patterns() });
+			expect(await token.closed).toBeInstanceOf(Unsupported);
+			expect(token.grant.peek()).toBeUndefined();
+			await waitFor(client.auth.grant, (g) => g?.publish.equals(patterns("a")) === true);
+		} finally {
+			client.abort();
+			server.abort();
+			await answering;
+		}
+	});
+
 	test("an out-of-scope broadcast closes the session and names the path", async () => {
 		const origin = new OriginProducer();
 		const { client, server, transport } = await connect({ publish: origin, protocol });
@@ -148,6 +177,26 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 		announced.close();
 		client.abort();
 		server.abort();
+	});
+
+	test("an explicit unsupported token uses the negotiated AUTH registry", async () => {
+		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
+		const requests = server.auth.requests();
+		const answering = (async () => {
+			for (;;) {
+				const request = await requests.next();
+				if (!request) break;
+				if (request.token.byteLength === 0) request.accept(grant([], []));
+				else request.reject(SessionCode.Unsupported, "credential kind unsupported");
+			}
+		})();
+		try {
+			await expect(client.auth.add("unsupported")).rejects.toBeInstanceOf(Unsupported);
+		} finally {
+			client.abort();
+			server.abort();
+			await answering;
+		}
 	});
 
 	test("a refused token surfaces the acceptor's code and reason", async () => {

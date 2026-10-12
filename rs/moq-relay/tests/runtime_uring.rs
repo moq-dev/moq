@@ -239,8 +239,8 @@ async fn uring_workers_report_link_facts() {
 
 /// The shutdown trigger drains sessions the io_uring workers serve as it does
 /// the shared runtime's: an established session and one arriving mid-drain
-/// are each sent a GOAWAY and leave, and `run` then returns at the deadline
-/// with the worker threads joined and the port free.
+/// are each sent a GOAWAY and leave, and `run` then returns with the worker
+/// threads joined and the port free.
 ///
 /// What an arrival is told is left of the window only reaches the wire on
 /// moq-transport-17+, which the workers do not speak; `shutdown_signal.rs`
@@ -259,10 +259,11 @@ async fn uring_workers_drain_on_the_trigger() {
 
 	let mut config = uring_config(&cert, &key);
 	config.drain_timeout = DRAIN;
-	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
+	config.auth.public.clear();
+	let mut relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
 	let trigger = relay.shutdown_trigger().clone();
-	let sessions = relay.sessions().clone();
+	let mut admissions = relay.admissions().expect("embedded admission");
 	let running = tokio::spawn(relay.run());
 
 	// One-shot (see `client`), so a session leaves on its GOAWAY rather than
@@ -270,26 +271,17 @@ async fn uring_workers_drain_on_the_trigger() {
 	let client = client();
 	let url: url::Url = format!("moql://127.0.0.1:{port}/drain").parse().expect("parse url");
 
-	let established = connect(client.clone(), url.clone()).await;
-	// moq-lite-03 has no GOAWAY, so this peer stays until the deadline closes it,
-	// keeping the drain open for the arrival below once `established` leaves.
-	let mut straggler = moq_tokio::connect::Config::default();
-	straggler.tls.insecure = Some(true);
-	straggler.once = Some(true);
-	straggler.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
-	straggler.version = vec!["moq-lite-03".parse().expect("parse version")];
-	let _straggler = connect(straggler.init(Default::default()).expect("client init"), url.clone()).await;
+	let connecting = tokio::spawn(connect(client.clone(), url.clone()));
+	let first = admissions.next().await.expect("first admission");
+	let all = || [moq_auth::Pattern::all()].into_iter().collect();
+	let (_first_lease, first_consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
+	first.grant(first_consumer);
+	let established = connecting.await.expect("client task");
 
-	// A client can see its session established before the relay counts it, and a
-	// drain with nothing counted ends at once.
-	let deadline = std::time::Instant::now() + TIMEOUT;
-	while sessions.list(&Default::default()).len() < 2 {
-		assert!(
-			std::time::Instant::now() < deadline,
-			"the relay never listed both sessions"
-		);
-		tokio::time::sleep(Duration::from_millis(25)).await;
-	}
+	// Hold the next real connection at authentication. Its admission keeps the
+	// drain open even after the first session leaves, without an unrelated peer.
+	let arriving = tokio::spawn(connect(client, url));
+	let pending = admissions.next().await.expect("pending admission");
 	trigger.start();
 	let goaway = tokio::time::timeout(TIMEOUT, established.draining().expect("connected").recv())
 		.await
@@ -301,10 +293,9 @@ async fn uring_workers_drain_on_the_trigger() {
 		.expect("the drained session never closed")
 		.expect("a one-shot session leaves cleanly on GOAWAY");
 
-	// A straggler dialing mid-drain is admitted through a worker, then told to
-	// leave at once.
-	tokio::time::sleep(DRAIN / 2).await;
-	let arrival = connect(client, url).await;
+	let (_arrival_lease, arrival_consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
+	pending.grant(arrival_consumer);
+	let arrival = arriving.await.expect("arrival task");
 	let goaway = tokio::time::timeout(Duration::from_secs(1), arrival.draining().expect("connected").recv())
 		.await
 		.expect("an arrival mid-drain was not sent a GOAWAY")

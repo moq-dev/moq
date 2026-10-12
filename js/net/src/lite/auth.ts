@@ -206,7 +206,12 @@ export class LiteAuthWire implements AuthWire {
 		if (reply instanceof AuthOk) {
 			return { grant: { publish: reply.publish, subscribe: reply.subscribe, expires: reply.expires } };
 		}
-		return { refused: new SessionError(reply.code as SessionCode, { reason: reply.reason }) };
+		return {
+			refused:
+				reply.code === SessionCode.Unsupported
+					? new Unsupported(reply.reason)
+					: new SessionError(reply.code as SessionCode, { reason: reply.reason }),
+		};
 	}
 
 	/** The stream type is already consumed by the dispatcher. */
@@ -223,8 +228,9 @@ export class LiteAuthWire implements AuthWire {
 		await new AuthError(code, reason).encode(stream.writer, this.#version);
 	}
 
-	/** Resetting reads as unsupported to the presenter, the same as a peer that predates AUTH. */
+	/** Tell the presenter explicitly, including after an earlier grant. */
 	async unsupported(stream: Stream, reason: string): Promise<void> {
-		stream.writer.reset(new Unsupported(reason));
+		await new AuthError(SessionCode.Unsupported, reason).encode(stream.writer, this.#version);
+		await stream.writer.close();
 	}
 }
