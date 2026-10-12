@@ -9,7 +9,8 @@ pub(super) struct Track {
 	pub header: String,
 	pub defaults: sample::Defaults,
 	pub timescale: Timescale,
-	pub last_decode_time: Option<u64>,
+	/// The exclusive decode end of the previous fragment; the next one may not start before it.
+	pub end_decode_time: Option<u64>,
 	pub discontinuity: bool,
 }
 
@@ -28,20 +29,12 @@ impl Track {
 	) -> crate::Result<()> {
 		let traf = input.traf;
 		let mut dts = traf.tfdt.as_ref().ok_or(Error::MissingTfdt)?.base_media_decode_time;
-		if let Some(previous) = self.last_decode_time
-			&& dts <= previous
-		{
-			return Err(Error::NonMonotonicDecodeTime {
-				track: traf.tfhd.track_id,
-				decode_time: Timestamp::new(dts, self.timescale)?,
-				previous: Timestamp::new(previous, self.timescale)?,
-			}
-			.into());
+		if self.end_decode_time.is_some_and(|end| dts < end) {
+			return Err(Error::InvalidSubtitle("WebVTT fragment overlaps the previous one").into());
 		}
 		if traf.trun.is_empty() {
 			return Err(Error::MissingTrun.into());
 		}
-		self.last_decode_time = Some(dts);
 		if self.discontinuity {
 			self.producer.discontinuity()?;
 			self.discontinuity = false;
@@ -87,6 +80,7 @@ impl Track {
 				dts = dts.checked_add(duration.value()).ok_or(Error::PtsOverflow)?;
 			}
 		}
+		self.end_decode_time = Some(dts);
 		Ok(())
 	}
 

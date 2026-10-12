@@ -382,7 +382,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				header,
 				defaults: sample::Defaults::from_moov(moov, trak.tkhd.track_id),
 				timescale: moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?,
-				last_decode_time: None,
+				end_decode_time: None,
 				discontinuity: false,
 			},
 		);
@@ -1070,7 +1070,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// fragment's decode time is not compared with the last one on each track.
 	pub fn discontinuity(&mut self) {
 		for track in self.text.values_mut() {
-			track.last_decode_time = None;
+			track.end_decode_time = None;
 			track.discontinuity = true;
 		}
 		for track in self.tracks.values_mut() {

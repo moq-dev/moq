@@ -2,7 +2,7 @@
 
 ## Goal
 
-Importing an fMP4 `stpp` TTML/IMSC subtitle track yields a `ttml` text
+Importing an fMP4 `stpp` track within a supported TTML/IMSC profile yields a `ttml` text
 rendition whose cues stay on the shared media clock. Today those XML tracks are
 skipped with a warning while SRT and WebVTT import as `vtt`.
 

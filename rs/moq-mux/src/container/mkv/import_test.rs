@@ -692,9 +692,10 @@ async fn subtitle_languages_and_empty_tracks_are_published() {
 	importer.finish().unwrap();
 }
 
+/// An SRT cue keeps its explicit end, and a plain-text `-->` is escaped for WebVTT.
 #[tokio::test(start_paused = true)]
 async fn subtitle_duration_survives_as_a_timed_cue() {
-	let MatroskaSpec::SimpleBlock(block) = simple_block(1, 250, true, b"Hello") else {
+	let MatroskaSpec::SimpleBlock(block) = simple_block(1, 250, true, b"Go --> there") else {
 		unreachable!()
 	};
 	let data = MkvBuilder::new()
@@ -733,7 +734,7 @@ async fn subtitle_duration_survives_as_a_timed_cue() {
 	assert_eq!(frame.timestamp.as_micros(), 250_000);
 	assert_eq!(
 		&frame.payload[..],
-		b"WEBVTT\n\n00:00:00.250 --> 00:00:01.500\nHello\n\n"
+		b"WEBVTT\n\n00:00:00.250 --> 00:00:01.500\nGo --&gt; there\n\n"
 	);
 }
 

@@ -1902,3 +1902,20 @@ fn webvtt_seek_after_several_cues_does_not_reuse_a_group() {
 	importer.decode(&webvtt_fragment(4000, &[cue], 1000)).unwrap();
 	importer.finish().unwrap();
 }
+
+/// A text fragment may not start inside the decode span of the previous fragment's samples.
+#[test]
+fn webvtt_fragment_overlapping_previous_samples_is_refused() {
+	let cue = subtitle_box(b"vttc", &subtitle_box(b"payl", b"hello"));
+	for (start, valid) in [(1500, false), (2000, true)] {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut importer = super::Import::new(broadcast, catalog.reserve());
+		importer.decode(&webvtt_init("WEBVTT")).unwrap();
+		importer
+			.decode(&webvtt_fragment(0, &[cue.clone(), cue.clone()], 1000))
+			.unwrap();
+		let result = importer.decode(&webvtt_fragment(start, std::slice::from_ref(&cue), 1000));
+		assert_eq!(result.is_ok(), valid, "start {start}: {result:?}");
+	}
+}

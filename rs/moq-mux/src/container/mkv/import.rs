@@ -882,7 +882,8 @@ fn cue_payload(
 	}
 	let body = match header {
 		Some(_) => crate::container::text::rebase(body, start, end).map_err(Error::InvalidSubtitle)?,
-		None => body.into(),
+		// SRT is plain text, where a literal `-->` is valid but would end a WebVTT cue.
+		None => body.replace("-->", "--&gt;"),
 	};
 	crate::container::text::append(
 		&mut output,

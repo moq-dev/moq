@@ -156,7 +156,7 @@ session outcomes, and embedder refusals inside session outcomes.
 - [Android capture](/quest/m1/mobile-capture-android.md) - Rust captures through NDK/JNI on Android, reusing the existing codecs and setting the catalog rotation
 - [Time stretch](/quest/m1/watch-audio-time-stretch.md) - js/watch: the audio ring converges by time-stretching instead of skipping or going silent
 - [Native audio quality](/quest/m1/audio-quality-native.md) - the browser lane's profiles, budgets, and metric schema run against `moq play` on a dummy device
-- [TTML caption import](/quest/m1/captions-ttml.md) - fMP4 `stpp` TTML/IMSC tracks import as `ttml` renditions on the shared clock instead of being skipped
+- [TTML caption import](/quest/m1/captions-ttml.md) - fMP4 `stpp` tracks within a supported TTML/IMSC profile import as `ttml` renditions on the shared clock instead of being skipped
 - [Fail loud on dropped timed metadata](/quest/m1/drop-loud.md) - FLV script tags and fMP4 emsg boxes are counted and warned about instead of silently dropped, until real carriage lands
 - [Encoder colour](/quest/m1/color-model.md) - every moq-video encode path signals the colour its output actually has, or refuses instead of mislabelling
 - [T-STD TS export](/quest/m1/tstd/README.md) - `moq export ts` is a proper remux that passes the T-STD buffer model, starting with a fixed `--delay`
