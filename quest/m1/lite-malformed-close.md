@@ -41,7 +41,16 @@ Rust-to-Rust and Rust-to-JS sessions never hit these; third-party peers do.
   `ProtocolViolation`. Also enforce that a server receiving a non-empty
   GOAWAY URI closes the session. Land the PROBE fix first or in the same PR,
   or a third-party PROBE target would close the whole session.
-- One test per rule per language, driving raw bytes like the runner does.
+- The rule reaches every control decoder, not only `Control::poll` and
+  `#runBidis`. Child handlers that swallow a peer's decode error must
+  propagate it: `RequestServe::poll` resets and returns `Ok(())` for a
+  malformed SUBSCRIBE_UPDATE decoded after `RequestState::Decode`, and
+  `ProbeServe::poll` consumes `poll_probe`'s error. Response decoders on
+  streams we opened count too: Rust `RecvBandwidth::poll` logs a malformed
+  PROBE report from `ProbeStream::poll`, and JS `Subscriber.runProbe` catches
+  it. Prefer one shared close path over per-handler fixes.
+- One test per rule per language, driving raw bytes like the runner does,
+  including a malformed SUBSCRIBE_UPDATE and a malformed PROBE report.
   Share the session-close helper from
   [AUTH protocol violations](/quest/m1/auth/violations.md) if it lands first.
 

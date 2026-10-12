@@ -63,11 +63,9 @@ Consumers never decide behavior by matching an error; errors are diagnostics.
   - Give every variant the catch-alls swallow a real arm, `Transport`
     included (also `TooManyRequests`, `Unsupported`, `Duplicate`,
     `InvalidRange`, `FrameOpen`, `Encode`, `InvalidJoiningRequestId`).
-  - Decode wire codes to the flat `Error` variant where one exists, so a
-    remote Unroutable is `Error::Unroutable` and not
-    `Error::Stream(StreamError::Unroutable)`, and delete the hand-written
-    dual matches (`ietf/error.rs`). Mirror it in `js/net` if JS nests the same
-    way.
+  - Remote errors stay nested (`Error::Stream(..)`), as `Error::stream()`
+    promises; nothing depends on flat values once the follower stops
+    matching. Flattening was considered and dropped on #5358's review.
   - `ts::Follower` stops matching errors. While lingering, announcements
     decide whether the broadcast returned: any resolve error returns it to
     waiting for the next announcement, and a new announcement or end cancels
