@@ -127,6 +127,7 @@ jobs:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
       - name: Portrait transcode
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test portrait
         shell: bash -leo pipefail {0}
         env:
