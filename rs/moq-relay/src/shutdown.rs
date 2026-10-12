@@ -98,21 +98,25 @@ impl Observer {
 		}
 	}
 
+	/// Run `work` until the drain deadline, or `None` if the deadline passes first.
+	/// The deadline wins a tie: work that finishes late, polled late, is still late.
+	pub(crate) async fn until_deadline<T>(&self, work: impl Future<Output = T>) -> Option<T> {
+		tokio::select! {
+			biased;
+			() = self.expired() => None,
+			res = work => Some(res),
+		}
+	}
+
 	/// Await an admission decision, refusing it as unavailable at the drain
 	/// deadline so no pending decision outlives the relay.
 	pub(crate) async fn admit<T, E: From<crate::auth::Error>>(
 		&self,
 		decision: impl Future<Output = Result<T, E>>,
 	) -> Result<T, E> {
-		tokio::select! {
-			// A decision that lands after the deadline, polled late, is still late.
-			biased;
-			() = self.expired() => Err(crate::auth::Error::Unavailable(
-				"the admission was still pending at the drain deadline".into(),
-			)
-			.into()),
-			res = decision => res,
-		}
+		self.until_deadline(decision).await.unwrap_or_else(|| {
+			Err(crate::auth::Error::Unavailable("the admission was still pending at the drain deadline".into()).into())
+		})
 	}
 
 	/// Resolve at the drain deadline, once the drain has started. Never resolves
@@ -271,6 +275,42 @@ mod tests {
 		drop(connecting.await.unwrap());
 		running.await.unwrap().unwrap();
 		assert!(waited, "drain completed while auth admission is pending");
+	}
+
+	/// A WebSocket peer that upgrades and never sends SETUP ends at the drain
+	/// deadline even with the SETUP timeout disabled, so its task does not
+	/// outlive the relay.
+	#[tokio::test]
+	async fn withheld_websocket_setup_ends_at_the_deadline() {
+		let window = Duration::from_secs(1);
+		let mut config = crate::Config::default();
+		config.listen.timeout = Duration::ZERO;
+		config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.listen.tls.generate = vec!["localhost".into()];
+		config.web.ws = true;
+		config.web.http.listen = Some("127.0.0.1:0".parse().unwrap());
+		config.auth.public = vec![moq_auth::Pattern::all()];
+		config.drain_timeout = window;
+		let relay = crate::Relay::load(config).await.unwrap().with_signals(false);
+		let addr = relay.web_addrs().http.unwrap();
+		let trigger = relay.shutdown_trigger().clone();
+		let activity = relay.shutdown().activity.clone();
+		let running = tokio::spawn(relay.run());
+
+		// Upgraded, then silent: no MoQ SETUP ever follows.
+		let _session = qmux::ws::Client::new()
+			.with_protocols(moq_net::ALPNS.iter().map(|&a| (a, &[] as &[qmux::Version])))
+			.connect(&format!("ws://{addr}/room"))
+			.await
+			.unwrap();
+
+		// Only timers decide what follows.
+		tokio::time::pause();
+		trigger.start();
+		tokio::time::timeout(window + Duration::from_secs(1), activity.close())
+			.await
+			.expect("a withheld SETUP outlived the drain deadline");
+		running.await.unwrap().unwrap();
 	}
 
 	/// A decision ready only once the deadline has passed is refused, however

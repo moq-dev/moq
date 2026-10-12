@@ -202,18 +202,28 @@ where
 	let ws = moq_tokio::transport::Session::new(ws);
 	let mut refused = ws.clone();
 	let accept = server.accept(tokio::time::Instant::now().into_std(), ws);
-	let (session, driver) = match timeout {
-		None => accept.await?,
-		Some(timeout) => match tokio::time::timeout(timeout, accept).await {
-			Ok(accepted) => accepted?,
-			// A peer that upgraded and never sent SETUP; tell it why it is dropped.
-			Err(_) => {
-				use web_transport_trait::poll::Session as _;
-				let err = moq_net::Error::Timeout;
-				refused.close(moq_net::SessionError::from(&err).to_code(), &err.to_string());
-				return Err(err.into());
-			}
-		},
+	let accept = async move {
+		match timeout {
+			None => Ok(accept.await),
+			Some(timeout) => tokio::time::timeout(timeout, accept)
+				.await
+				.map_err(|_| moq_net::Error::Timeout),
+		}
+	};
+	// The drain deadline bounds SETUP too, so a peer that never sends it cannot
+	// outlive the relay.
+	let accepted = shutdown
+		.until_deadline(accept)
+		.await
+		.unwrap_or(Err(moq_net::Error::GoawayTimeout));
+	let (session, driver) = match accepted {
+		Ok(accepted) => accepted?,
+		// A peer that upgraded and never sent SETUP in time; tell it why it is dropped.
+		Err(err) => {
+			use web_transport_trait::poll::Session as _;
+			refused.close(moq_net::SessionError::from(&err).to_code(), &err.to_string());
+			return Err(err.into());
+		}
 	};
 
 	let driver = moq_net::time::run(driver);

@@ -120,7 +120,12 @@ impl Connection {
 		if let Some(publisher) = publisher {
 			request = request.with_subscriber(publisher);
 		}
-		let session = request.ok().await?;
+		// Bounded too: a peer that stalls the SETUP reply must not outlive the relay.
+		let session = self
+			.shutdown
+			.until_deadline(request.ok())
+			.await
+			.ok_or_else(|| anyhow::anyhow!("the SETUP reply was still pending at the drain deadline"))??;
 
 		tracing::info!(version = %session.version(), %transport, "negotiated");
 
