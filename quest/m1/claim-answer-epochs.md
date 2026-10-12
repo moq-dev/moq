@@ -55,6 +55,21 @@ explicit epoch:
   `create_broadcast(request.path())`, refusing a wrong path or an announced
   one at runtime.
 
+Open, for the maintainer: a claim announced with an epoch. A lite-07
+requester may pin a child path to the claim's epoch, which an answer under a
+fresh epoch never satisfies. Options:
+
+- Public claims carry no epoch: `Producer::dynamic` refuses one (or its
+  route type has none), and a pinned request resolves only through an exact
+  route with that epoch (recommended: a claim is a capability, as announce
+  takeover already treats it). Sessions keep epochs on the peer routes they
+  land internally.
+- An epoch'd claim keeps its identity: its answers publish under the claim's
+  epoch, and changing any output's content means `Dynamic::update` to a new
+  epoch for the whole prefix.
+
+Either way the regression matrix covers a pinned request.
+
 Required: validity and route insertion are atomic. A request the claim
 released (an `update` to another instance) or abandoned (the claim dropped)
 before the handler publishes is refused, never announced, as `accept` drops
