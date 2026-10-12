@@ -1,22 +1,31 @@
+use std::ops::Range;
 use std::time::Duration;
 
 use hang::timeline::Record;
 use moq_json::window;
 use moq_mux::timeline::Entry;
 
-use super::{Reference, renditions};
+/// One edit to a durable timeline's window.
+pub(super) enum Edit {
+	/// A record became visible at this window index, which equals its sequence.
+	Push { index: u64, entry: Entry },
+	/// These window indices were removed.
+	Pop(Range<u64>),
+}
 
-/// Read every durable timeline group, recovering gaps before following live edits.
-pub(super) async fn watch(
+/// Read `track`'s durable timeline from group 0, FETCHing groups the cache evicted, then follow
+/// live edits. Every reader of a history-mode timeline (the reference and each rendition's spans)
+/// shares this, so all of them recover the same evicted history.
+pub(super) async fn read(
 	broadcast: &moq_net::broadcast::Consumer,
 	section: &hang::catalog::Archive,
-	reference: &Reference,
-	renditions: &renditions::Fanout,
+	track: &str,
+	mut apply: impl FnMut(Edit),
 ) -> crate::Result<()> {
 	let name = section
 		.timelines
-		.get(&reference.1)
-		.ok_or_else(|| moq_mux::Error::TimelineMissing(reference.1.clone()))?;
+		.get(track)
+		.ok_or_else(|| moq_mux::Error::TimelineMissing(track.to_string()))?;
 	let scale = moq_net::Timescale::new(section.timescale as u64)
 		.map_err(|_| moq_mux::Error::InvalidTimescale(section.timescale))?;
 	let track = broadcast.track(name)?;
@@ -55,9 +64,12 @@ pub(super) async fn watch(
 							if index != value.sequence {
 								return Err(moq_mux::Error::TimelineCheckpoint(index).into());
 							}
-							renditions.push(index, Entry::decode(value, scale)?, reference);
+							apply(Edit::Push {
+								index,
+								entry: Entry::decode(value, scale)?,
+							});
 						}
-						window::Event::Pop(range) => renditions.pop(range),
+						window::Event::Pop(range) => apply(Edit::Pop(range)),
 						// A durable path must not present missing history as a complete
 						// recording. Cached/live consumption may skip; this path cannot.
 						window::Event::Skip(_) => return Err(moq_net::Error::NotFound.into()),

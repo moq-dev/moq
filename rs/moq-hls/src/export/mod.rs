@@ -494,7 +494,11 @@ async fn watch(
 	history: bool,
 ) -> crate::Result<()> {
 	if history {
-		return history::watch(broadcast, section, reference, renditions).await;
+		return history::read(broadcast, section, &reference.1, |edit| match edit {
+			history::Edit::Push { index, entry } => renditions.push(index, entry, reference),
+			history::Edit::Pop(range) => renditions.pop(range),
+		})
+		.await;
 	}
 	let mut timeline = moq_mux::timeline::Consumer::<()>::subscribe(broadcast, section, &reference.1).await?;
 	while let Some(event) = timeline.next().await? {

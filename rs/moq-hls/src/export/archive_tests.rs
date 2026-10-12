@@ -711,20 +711,17 @@ async fn history_after_expiry(finished: bool) {
 		_broadcast: broadcast,
 		_origin: origin,
 	};
-	let playlist = replay
-		.playlist_until(Kind::Video, "1080p", |playlist| {
-			playlist.contains("seg/29b1cd67.11.m4s\n")
-		})
-		.await;
-	assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:0\n"), "{playlist}");
-	assert!(
-		replay
-			.rendition(Kind::Video, "1080p")
-			.listed_segment(0)
-			.await
-			.unwrap()
-			.is_some()
-	);
+	// Every rendition recovers its own evicted timeline, not only the reference: otherwise the
+	// reference's early rows resolve as gaps on its siblings.
+	for (kind, name) in [(Kind::Video, "1080p"), (Kind::Video, "360p"), (Kind::Audio, "audio")] {
+		let playlist = replay
+			.playlist_until(kind, name, |playlist| playlist.contains(".10.m4s\n"))
+			.await;
+		assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:0\n"), "{name}: {playlist}");
+		assert!(playlist.contains(".0.m4s\n"), "{name}: {playlist}");
+		assert!(!playlist.contains("#EXT-X-GAP"), "{name}: {playlist}");
+		assert!(replay.rendition(kind, name).listed_segment(0).await.unwrap().is_some());
+	}
 	serving.abort();
 	driver.abort();
 	let _ = serving.await;
@@ -763,9 +760,7 @@ async fn history_mode_refuses_a_retained_recording() {
 	}
 
 	let broadcast = replay._origin.consume().request_broadcast("rec", None).await.unwrap();
-	let reference = Arc::new((Kind::Video, "1080p".to_string()));
-	let fanout = renditions::Producer::new(Config::default().window).fanout();
-	let err = history::watch(&broadcast, &durable(), &reference, &fanout)
+	let err = history::read(&broadcast, &durable(), "1080p", |_| panic!("nothing is listed"))
 		.await
 		.unwrap_err();
 	assert!(matches!(err, crate::Error::HistoryPruned(_)), "{err}");
