@@ -73,9 +73,11 @@ class Reduce(unittest.TestCase):
         with self.assertRaises(ValueError):
             profile.reduce({'1': 'moq-quic-0'}, [{'1': IDLE}], {'1': 5}, {'1': 5}, 1)
 
-    def test_unresolved_stacks_refused(self):
+    def test_unresolved_stacks_refused_per_worker(self):
+        # One resolved worker must not vouch for another whose unwinding failed.
         with self.assertRaises(ValueError):
-            profile.reduce({'1': 'moq-quic-0'}, [{'1': ['??', 'syscall']}], {'1': 0}, {'1': 1}, 1)
+            profile.reduce({'1': 'moq-quic-0', '2': 'moq-quic-1'}, [{'1': IDLE, '2': ['??', 'syscall']}],
+                           {'1': 0, '2': 0}, {'1': 1, '2': 1}, 1)
 
 
 if __name__ == '__main__':

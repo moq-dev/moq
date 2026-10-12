@@ -83,13 +83,13 @@ def classify(stack):
 
 def reduce(names, samples, before, after, window_ns):
     """Turn per-sample stacks into each worker's wait share of wall and CPU time."""
-    if not any(re.search(r'\bmoq_|\bkio::', frame) for sample in samples for tid in names for frame in sample.get(tid, [])):
-        raise ValueError('worker stacks contain no resolved MoQ frames; build with the profiling profile')
     workers, folded = {}, Counter()
     for tid, name in names.items():
         stacks = [sample[tid] for sample in samples if tid in sample]
         if not stacks:
             raise ValueError(f'worker {name} ({tid}) was never sampled')
+        if not any(re.search(r'\bmoq_|\bkio::', frame) for stack in stacks for frame in stack):
+            raise ValueError(f'worker {name} ({tid}) has no resolved MoQ frames; build with the profiling profile')
         cpu = after[tid] - before[tid]
         if cpu <= 0:
             raise ValueError(f'worker {name} ({tid}) has no advancing CPU counter')
