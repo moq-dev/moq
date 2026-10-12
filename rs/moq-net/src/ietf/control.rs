@@ -375,17 +375,7 @@ mod tests {
 			assert_eq!(missing.iter().collect::<Vec<_>>(), [(&0, &2)]);
 		}
 		drop(control.accept(RequestId(0)).unwrap());
-		assert!(
-			control
-				.state
-				.lock()
-				.incoming
-				.as_ref()
-				.unwrap()
-				.spent
-				.missing
-				.is_empty()
-		);
+		assert!(control.state.lock().incoming.as_ref().unwrap().spent.missing.is_empty());
 		for id in [0, 2, 2046] {
 			assert!(matches!(
 				control.accept(RequestId(id)),

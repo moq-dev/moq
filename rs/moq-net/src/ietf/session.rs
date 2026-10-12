@@ -1273,7 +1273,8 @@ impl<S: crate::transport::poll::Boxable> Bidi<S> {
 			&& matches!(
 				id,
 				ietf::Subscribe::ID
-					| ietf::Fetch::ID | ietf::SubscribeNamespace::ID
+					| ietf::Fetch::ID
+					| ietf::SubscribeNamespace::ID
 					| ietf::SubscribeNamespaceLegacy::ID
 					| ietf::SUBSCRIBE_TRACKS_ID
 					| ietf::TrackStatus::ID
