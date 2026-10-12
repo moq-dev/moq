@@ -391,7 +391,10 @@ fn epoch_helpers_mint_parse_and_refuse() {
 
 	let uuid_v4 = "6ba7b810-9dad-41d1-80b4-00c04fd430c8".to_string();
 	for bad in [uuid_v4, epoch.to_uppercase(), String::new()] {
-		assert!(matches!(moq_epoch_time_ms(bad.clone()), Err(MoqError::InvalidEpoch { .. })));
+		assert!(matches!(
+			moq_epoch_time_ms(bad.clone()),
+			Err(MoqError::InvalidEpoch { .. })
+		));
 		let route = MoqRoute {
 			epoch: Some(bad),
 			..Default::default()
