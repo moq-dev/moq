@@ -22,8 +22,3 @@ Matroska has no registered TTML codec ID (the old `S_TEXT/TTML` claim was
 removed), so confirm a real mapping before adding one.
 
 Cover a namespace mismatch, nested timing, and a shifted source clock.
-
-## Related
-
-- [MSF caption roles](/quest/m1/captions-msf.md) - the catalog half of the
-  caption gap

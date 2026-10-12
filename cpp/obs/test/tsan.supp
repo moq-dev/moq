@@ -8,3 +8,10 @@
 # the symbolizer leaves Rust's v0-mangled names as they are, and every one starts
 # with _R, which no demangled C++ name does.
 race:^_R
+
+# aws-lc is C built inside moq-ffi without the sanitizer too. A TLS connection's
+# state moves between moq-ffi's worker threads through tokio's handoffs, so its
+# buffer copies can report with only aws-lc frames left on the stack and no _R
+# frame for the rule above to match.
+race:^OPENSSL_
+race:^aws_lc_

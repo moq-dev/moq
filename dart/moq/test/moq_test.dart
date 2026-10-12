@@ -16,6 +16,11 @@ Future<AnnounceEvent> nextRoute(AnnounceConsumer announced) async {
 }
 
 void main() {
+  test('diagnostic errors expose their named reason', () {
+    final error = TransportMoqException('reset');
+    expect(error.reason, 'reset');
+  });
+
   test('catalog handle closes with its broadcast', () {
     final broadcast = BroadcastProducer();
     final catalog = moq_media.CatalogProducer(broadcast: broadcast);
