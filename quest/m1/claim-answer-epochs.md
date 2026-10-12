@@ -27,53 +27,44 @@ Facts as of main 90500867d:
   peer's claim; they relay upstream numbering and keep working as is.
 
 Decided 2026-10-12: a request is answered by publishing, not by handing over
-content, and the caller names the epoch:
+content. The answer has two steps, so the broadcast holds its tracks (or a
+`broadcast::Dynamic`) before anyone resolves through it, and the caller names
+the epoch. Roughly:
 
     impl Request {
-        /// Serve the path as a new publisher instance, announced at exactly this path under `epoch`.
-        pub fn publish(self, epoch: Epoch) -> Result<broadcast::Producer, Error>;
+        /// Start answering the path as a new publisher instance under `epoch`, unannounced until published.
+        pub fn prepare(self, epoch: Epoch) -> Result<Prepared, Error>;
     }
 
-The broadcast is announced at the requested path with the claim's route
-metadata and that epoch, and requesters resolve through that route, never the
-claim's instance. Closing it ends the route; the next request publishes
-under a new epoch (`Epoch::mint()` per run, or a replica set's shared one).
-Session forwarding keeps a crate-private accept. Rejected: renewing the
-prefix on each restart (resets every sibling), and carrying sequences over to
-the next answer (relabels a different job as a continuation).
+    impl Prepared {
+        /// Announce the filled broadcast at exactly the requested path and resolve every waiting requester.
+        pub fn publish(self) -> Result<broadcast::Producer, Error>;
+    }
 
-Open, for the maintainer: a requester that resolves through an announced but
-still empty broadcast gets `NotFound` for its first track, so the handler
-must create its tracks (or a `broadcast::Dynamic`) before anyone resolves.
-`publish` as sketched announces too early. Options, keeping the name and the
-explicit epoch:
+`Prepared` (name open) gives access to the broadcast to fill and is the only
+way to answer, so an announced empty answer can't be expressed. Dropping it
+unpublished rejects the request, as dropping a `Request` does. The broadcast
+is announced with the claim's route metadata and that epoch, and requesters
+resolve through that route, never the claim's instance. Closing it ends the
+route; the next request prepares under a new epoch (`Epoch::mint()` per run,
+or a replica set's shared one). Session forwarding keeps a crate-private
+accept. Rejected: a single `publish` that announces an empty broadcast,
+renewing the prefix on each restart (resets every sibling), and carrying
+sequences over to the next answer (relabels a different job as a
+continuation).
 
-- A typed two-phase answer: `request.prepare(epoch)` returns an unannounced
-  handle to fill, and its `publish()` announces and resolves (recommended:
-  misuse can't be expressed).
-- `request.publish(broadcast, epoch)` taking a broadcast from
-  `create_broadcast(request.path())`, refusing a wrong path or an announced
-  one at runtime.
-
-Open, for the maintainer: a claim announced with an epoch. A lite-07
-requester may pin a child path to the claim's epoch, which an answer under a
-fresh epoch never satisfies. Options:
-
-- Public claims carry no epoch: `Producer::dynamic` refuses one (or its
-  route type has none), and a pinned request resolves only through an exact
-  route with that epoch (recommended: a claim is a capability, as announce
-  takeover already treats it). Sessions keep epochs on the peer routes they
-  land internally.
-- An epoch'd claim keeps its identity: its answers publish under the claim's
-  epoch, and changing any output's content means `Dynamic::update` to a new
-  epoch for the whole prefix.
-
-Either way the regression matrix covers a pinned request.
+Decided 2026-10-12: public claims carry no epoch. A claim is a capability,
+as announce takeover already treats it, so `Producer::dynamic` (JS and the
+bindings alike) cannot take one; prefer a shape where the route has none over
+a runtime refusal. A request pinned to an epoch resolves only through an
+exact-path route with that epoch. Sessions keep epochs on the peer routes
+they land internally. Migrate the in-repo callers and tests that claim with
+an epoch.
 
 Required: validity and route insertion are atomic. A request the claim
 released (an `update` to another instance) or abandoned (the claim dropped)
-before the handler publishes is refused, never announced, as `accept` drops
-it today. Regression tests cover both.
+before `publish` is refused, never announced, as `accept` drops it today.
+Regression tests cover both, and a pinned request.
 
 Look out for:
 
@@ -95,10 +86,11 @@ the returning reader gets the new output from group 0, never the old group,
 and sibling paths keep their readers. A same-epoch lagging replica still
 resumes. JS mirrors the tests. `just test interop --all`.
 
-Public API: breaking change to how a claim request is answered, in Rust, JS,
-moq-ffi, moq-c and every binding wrapper, plus the claim docs. Wire: none.
+Public API: breaking. A claim request is answered through `prepare` and
+`publish`, and a public claim takes no epoch, in Rust, JS, moq-ffi, moq-c and
+every binding wrapper, plus the claim docs. Wire: none.
 
 ## Related
 
-- [Announcement takeover](/quest/m1/announce-takeover.md) - its claim-to-route operation is `Request::publish`; TAKEOVER then removes the cold-start reset
+- [Announcement takeover](/quest/m1/announce-takeover.md) - its claim-to-route operation is `Request::prepare` then `publish`; TAKEOVER then removes the cold-start reset
 - [#5057](https://github.com/moq-dev/moq/pull/5057) - the relay-side check this replaces
