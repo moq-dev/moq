@@ -48,7 +48,7 @@ session outcomes, and embedder refusals inside session outcomes.
 - [Interop close logs](/quest/m1/interop-close-log.md) - logging fix landed; delete once the required Interop run is green
 - [One max_age meaning](/quest/m1/cache-max-age.md) - a superseded group goes stale on wall clock since its successor arrived or on media time, whichever is first, in Rust and js/net; fixes the untimed failover stall
 - [FETCH max-delay](/quest/m1/fetch-max-delay.md) - historical readers obey publisher max-age and an optional tighter reader budget, including while holding a group
-- [Upstream position regression](/quest/m1/largest-regression.md) - a relay copy that sees upstream's largest group go backwards on moq-transport or epochless lite-07 fails loud instead of serving the old instance's cache
+- [Claim answer epochs](/quest/m1/claim-answer-epochs.md) - a claim answers each output by publishing it at its exact path under its own epoch, so a restarted output never reaches a returning reader as the old one's cache
 - [Untimed decisions](/quest/m1/untimed-decisions.md) - the maintainer decides whether moq-archive keeps refusing untimed tracks, and whether a malformed FETCH object ends its track
 - [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, flate, audio, and video namespaces built from the handle below
 - [Publishing never invents a timestamp](/quest/m1/publish-timestamp.md) - no Rust or binding publish API fills in a timestamp; an untimed payload goes out untimed
