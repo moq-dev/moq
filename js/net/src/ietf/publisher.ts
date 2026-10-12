@@ -500,24 +500,33 @@ export class Publisher {
 						return stream.writer.closed;
 					}
 					if ((await stream.reader.u53()) !== 0x02) throw new Error("unexpected message on subscribe stream");
-					if (legacy) {
-						// Not applied yet, but read anyway: an unread update keeps the adapter's
-						// stream from closing, which is how UNSUBSCRIBE arrives.
-						await SubscribeUpdate.decode(stream.reader, version);
-						continue;
-					}
+					// Drafts 15 and 16 name the update's own Request ID; later drafts name none.
 					const refuse = async (
 						condition: "not_supported" | "malformed_auth_token",
 						reasonPhrase: string,
+						requestId?: bigint,
 					) => {
 						await stream.writer.u53(RequestError.id);
 						await new RequestError({
-							requestId: undefined,
+							requestId,
 							errorCode: toRequestCode(condition, "subscribe", version),
 							reasonPhrase,
 						}).encode(stream.writer, version);
 						return new UpdateFailed();
 					};
+					if (legacy) {
+						// Not applied yet, but read anyway: an unread update keeps the adapter's
+						// stream from closing, which is how UNSUBSCRIBE arrives.
+						try {
+							await SubscribeUpdate.decode(stream.reader, version);
+						} catch (err) {
+							if (!(err instanceof MalformedAuthToken)) throw err;
+							// Draft 14 answers no update, so the refusal only ends the subscription.
+							if (version === Version.DRAFT_14) throw new UpdateFailed();
+							throw await refuse("malformed_auth_token", err.message, err.requestId);
+						}
+						continue;
+					}
 					let params: Parameters;
 					try {
 						params = await Message.decode(stream.reader, async (r) => {

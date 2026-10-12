@@ -529,8 +529,14 @@ function subscribeWithToken(version: IetfVersion, token: readonly number[]): Uin
 /** An update to that SUBSCRIBE whose only parameters are AUTHORIZATION TOKENs holding `tokens`. */
 function updateWithTokens(version: IetfVersion, ...tokens: (readonly number[])[]): Uint8Array {
 	// Draft-14 names its own Request ID and the subscription's, then the range, priority,
-	// and forward inline; later drafts name only the request it updates.
-	const head = version === Version.DRAFT_14 ? [2, 0, 0, 0, 0, 0x80, 0x01] : [0];
+	// and forward inline. Drafts 15 and 16 name both IDs, and later drafts only the request
+	// it updates.
+	const head =
+		version === Version.DRAFT_14
+			? [2, 0, 0, 0, 0, 0x80, 0x01]
+			: version === Version.DRAFT_15 || version === Version.DRAFT_16
+				? [2, 0]
+				: [0];
 	const body = [...head, ...tokenParams(version, ...tokens)];
 	return new Uint8Array([0x02, 0, body.length, ...body]);
 }
@@ -664,10 +670,9 @@ async function serving(version: IetfVersion, alpn: string) {
 		client: false,
 		publish: origin.consume(),
 	});
-	const stream =
-		version === Version.DRAFT_14
-			? await Stream.accept(pair.client, version)
-			: await Stream.open(pair.client, { version });
+	// Through draft 16 every request rides the control stream.
+	const control16 = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
+	const stream = control16 ? await Stream.accept(pair.client, version) : await Stream.open(pair.client, { version });
 	if (!stream) throw new Error("no control stream");
 	const close = () => {
 		connection.abort();
@@ -709,18 +714,27 @@ for (const [version, alpn, malformed] of [
 	});
 }
 
-/** An update whose tokens repeat is answered MALFORMED_AUTH_TOKEN, not NOT_SUPPORTED. */
-test(`a repeated update token is malformed ${ALPN.DRAFT_22}`, async () => {
-	const version = Version.DRAFT_22;
-	const { stream, close } = await serving(version, ALPN.DRAFT_22);
-	try {
-		await stream.writer.write(subscribeWith(version, [0]));
-		await skipTo(stream.reader, SubscribeOk.id);
-		await SubscribeOk.decode(stream.reader, version);
-		await stream.writer.write(updateWithTokens(version, TOKEN, TOKEN));
-		expect(await stream.reader.u53()).toBe(RequestError.id);
-		expect((await RequestError.decode(stream.reader, version)).errorCode).toBe(0x4);
-	} finally {
-		close();
-	}
-});
+/**
+ * An update whose tokens repeat is answered MALFORMED_AUTH_TOKEN, not NOT_SUPPORTED, naming
+ * the update's own Request ID on draft 16.
+ */
+for (const [version, alpn, requestId] of [
+	[Version.DRAFT_16, ALPN.DRAFT_16, 2n],
+	[Version.DRAFT_22, ALPN.DRAFT_22, undefined],
+] as const) {
+	test(`a repeated update token is malformed ${alpn}`, async () => {
+		const { stream, close } = await serving(version, alpn);
+		try {
+			await stream.writer.write(subscribeWith(version, [0]));
+			await skipTo(stream.reader, SubscribeOk.id);
+			await SubscribeOk.decode(stream.reader, version);
+			await stream.writer.write(updateWithTokens(version, TOKEN, TOKEN));
+			await skipTo(stream.reader, RequestError.id);
+			const error = await RequestError.decode(stream.reader, version);
+			expect(error.errorCode).toBe(0x4);
+			expect(error.requestId).toBe(requestId);
+		} finally {
+			close();
+		}
+	});
+}
