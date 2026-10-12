@@ -1626,7 +1626,6 @@ fn raw_track_datagram_publish_consume() {
 		)
 	});
 
-	// Millisecond-aligned so the value survives the default (millisecond) timescale exactly.
 	let payload = b"hello datagram";
 	let mut sequence: u64 = u64::MAX;
 	assert_eq!(

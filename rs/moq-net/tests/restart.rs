@@ -13,6 +13,11 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 use moq_net::{Epoch, Hop, Timestamp, Version, announce, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn produce_origin(hop: u64) -> origin::Producer {
@@ -103,7 +108,7 @@ async fn relay_chain(version: &str) {
 	let _downstream = link(version, &relay, &viewer).await;
 
 	let old = publisher.publish("live", origin::Route::default()).unwrap();
-	let old_track = old.create_track("video", None).unwrap();
+	let old_track = old.create_track("video", timed()).unwrap();
 	let mut announced = viewer.consume().announced();
 	match next_event(&mut announced).await {
 		announce::Event::Start(announce) => assert_eq!(announce.prefix.as_str(), "live"),
@@ -118,7 +123,7 @@ async fn relay_chain(version: &str) {
 
 	// The publisher restarts without an epoch, its old session still open.
 	let new = publisher.publish("live", origin::Route::default()).unwrap();
-	let new_track = new.create_track("video", None).unwrap();
+	let new_track = new.create_track("video", timed()).unwrap();
 	expect_restart(version, &mut announced, "live").await;
 
 	// The old subscription stays on the old instance.
@@ -169,7 +174,7 @@ impl Worker {
 		drop(moq_net_sim::spawn(async move {
 			while let Ok(request) = handler.requested_broadcast().await {
 				let output = broadcast::Info::new().produce();
-				let track = output.create_track("video", None).unwrap();
+				let track = output.create_track("video", timed()).unwrap();
 				write(&track, &format!("{hop}"));
 				request.accept(&output);
 				served.borrow_mut().push((output, track));
@@ -252,7 +257,7 @@ impl Claim {
 		drop(moq_net_sim::spawn(async move {
 			while let Ok(request) = handler.requested_broadcast().await {
 				let output = broadcast::Info::new().produce();
-				let track = output.create_track("video", None).unwrap();
+				let track = output.create_track("video", timed()).unwrap();
 				request.accept(&output);
 				served.borrow_mut().push((output, track));
 			}
@@ -426,7 +431,7 @@ async fn retired_fetch(version: &str, explicit: bool) {
 		origin::Route::default()
 	};
 	let old = publisher.publish("live", old_route).unwrap();
-	let old_track = old.create_track("video", None).unwrap();
+	let old_track = old.create_track("video", timed()).unwrap();
 	let mut announced = viewer.consume().announced();
 	assert!(matches!(next_event(&mut announced).await, announce::Event::Start(_)));
 	let (held, mut subscription) = subscribe(&viewer, "live").await;
@@ -435,7 +440,7 @@ async fn retired_fetch(version: &str, explicit: bool) {
 	assert_eq!(read(&mut subscription).await, "old:0");
 
 	let replacement = publisher.publish("live", new_route).unwrap();
-	let replacement_track = replacement.create_track("video", None).unwrap();
+	let replacement_track = replacement.create_track("video", timed()).unwrap();
 	let _late = replacement
 		.create_track("late", Some(track::Info::default().with_priority(17)))
 		.unwrap();
@@ -518,7 +523,7 @@ async fn withdrawal_refuses_new_fetches_but_keeps_open_reads() {
 		let viewer = produce_origin(2);
 		let _session = link(version, &publisher, &viewer).await;
 		let source = publisher.publish("live", origin::Route::default()).unwrap();
-		let produced = source.create_track("video", None).unwrap();
+		let produced = source.create_track("video", timed()).unwrap();
 		let mut announced = viewer.consume().announced();
 		assert!(matches!(next_event(&mut announced).await, announce::Event::Start(_)));
 		let (held, mut subscription) = subscribe(&viewer, "live").await;
@@ -554,7 +559,7 @@ async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
 		old.write(0, "old:0");
 		assert_eq!(read(&mut subscription).await, "old:0");
 		let replacement = publisher.publish("live/job", origin::Route::default()).unwrap();
-		let replacement_track = replacement.create_track("video", None).unwrap();
+		let replacement_track = replacement.create_track("video", timed()).unwrap();
 		write(&replacement_track, "new:0");
 		write(&replacement_track, "new:1");
 		assert!(matches!(next_event(&mut announced).await, announce::Event::Start(_)));

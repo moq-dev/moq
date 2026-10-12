@@ -50,7 +50,9 @@ async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> 
 
 	// Create a track that we'll insert into the broadcast.
 	// A track is a series of groups representing a live stream.
-	let mut track = broadcast.create_track("chat", None)?;
+	// Frames are stamped with the wall clock, so the track declares a timescale.
+	let info = moq_tokio::moq_net::track::Info::default().with_timescale(moq_tokio::moq_net::Timescale::MILLI);
+	let mut track = broadcast.create_track("chat", info)?;
 
 	// Create a group.
 	// Each group is independent and the newest group(s) will be prioritized.

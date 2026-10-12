@@ -114,7 +114,7 @@ the delay; a frame that cannot arrive in time at the rate fails the export.
 ```bash
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang play
 moq ... play --delay 500ms          # fix the delay instead of measuring it
-moq ... play --no-video             # audio only
+moq ... play --no-video             # audio only, without a window
 ```
 
 Decodes H.264, H.265, and AV1 video with the platform hardware decoder where
@@ -172,6 +172,9 @@ feature (links libpipewire).
 moq --connect https://relay.example.com/anon --broadcast cam.hang transcode
 moq ... transcode --rung 720:2500000 --rung 360:600000 --encoder nvenc --decoder nvdec
 ```
+
+Rung sizes are the coded frame's short side. A 1080x1920 portrait source
+produces 720x1280 and 360x640 rungs. Catalog rotation is preserved.
 
 Publishes `cam.hang/transcode.hang` whose catalog references the source's
 rendition and adds lower rungs that are decoded and encoded only while someone
