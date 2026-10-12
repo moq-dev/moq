@@ -29,6 +29,7 @@ import { type Hop, HopSchema, MAX_HOPS, UNKNOWN_HOP } from "../hop.ts";
 import type { Reader } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import { Parameters, SetupOption, type SetupOptions } from "./parameters.ts";
+import { MalformedAuthToken } from "./token.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /**
@@ -222,6 +223,8 @@ export async function decodeParams(
 	try {
 		params = await Parameters.decode(r, version, message);
 	} catch (err) {
+		// Keep a violation's own code, such as a request token's, and a refusal of the request alone.
+		if (err instanceof ProtocolViolation || err instanceof MalformedAuthToken) throw err;
 		throw new ProtocolViolation(reason(err), { cause: err });
 	}
 

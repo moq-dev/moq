@@ -77,6 +77,7 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	buffer: BytesMut,
 	/// True once the 9-byte FLV file header and its `PreviousTagSize0` have been consumed.
 	header_seen: bool,
+	dropped_metadata: u64,
 
 	/// Demuxed video tracks keyed by RTMP track id (legacy / single-track tags use
 	/// [`DEFAULT_TRACK_ID`]).
@@ -110,9 +111,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			initial_reservation: Some(reserved),
 			buffer: BytesMut::new(),
 			header_seen: false,
+			dropped_metadata: 0,
 			video: BTreeMap::new(),
 			audio: BTreeMap::new(),
 		}
+	}
+
+	/// Return the number of metadata units discarded by this importer.
+	pub fn dropped_metadata(&self) -> u64 {
+		self.dropped_metadata
 	}
 
 	/// Select the container this importer wraps decoded media renditions in.
@@ -178,7 +185,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			match tag_type {
 				TAG_VIDEO => self.handle_video(&body, timestamp)?,
 				TAG_AUDIO => self.handle_audio(&body, timestamp)?,
-				TAG_SCRIPT => {} // onMetaData and friends: nothing we need.
+				TAG_SCRIPT => {
+					self.dropped_metadata += 1;
+					if self.dropped_metadata == 1 {
+						tracing::warn!(count = self.dropped_metadata, "discarding FLV script metadata");
+					}
+				}
 				other => tracing::debug!(tag_type = other, "ignoring unknown FLV tag"),
 			}
 		}

@@ -642,8 +642,9 @@ run_publisher() {
     local lang="$1" broadcast="$2" url="$3"
     case "$lang" in
         rust)
+            # A finished import stays up for its max-age; `stop_publisher` allows 10 s to close.
             ffmpeg_h264 | RUST_LOG="$CLI_LOG" "$MOQ" --connect "$url" --connect-version "$AUTH_VERSION" \
-                --broadcast "$broadcast" import avc3
+                --broadcast "$broadcast" import --max-age 1s avc3
             ;;
         python)
             ffmpeg_h264 | "$PY" "$CLIENTS/python/interop.py" \

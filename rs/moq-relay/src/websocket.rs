@@ -38,6 +38,8 @@ pub(crate) async fn serve_ws(
 		return Ok(landing_response());
 	};
 
+	// Closed for drain: refuse before the upgrade so the client redials elsewhere.
+	let active = state.shutdown.activity.enter().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 	let alpns = versions.alpns();
 	let ws = negotiate_subprotocol(ws, &alpns)?;
 
@@ -60,9 +62,10 @@ pub(crate) async fn serve_ws(
 	request.alpn = ws.selected_protocol().and_then(|p| p.to_str().ok()).map(str::to_owned);
 	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| auth::peer(&identity));
 	let session_id = request.id.clone();
+	// Abandoned at the drain deadline, as on the native path.
 	let lease = state
-		.auth
-		.admit(request.clone())
+		.shutdown
+		.admit(state.auth.admit(request.clone()))
 		.await
 		.inspect_err(|err| state.cluster.refusals.record(err.into()))?;
 	let token = lease.token();
@@ -85,6 +88,7 @@ pub(crate) async fn serve_ws(
 	let lease = lease.with_stats(stats.clone());
 
 	Ok(ws.on_upgrade(async move |socket| {
+		let _active = active;
 		let id = state.conn_id.fetch_add(1, Ordering::Relaxed);
 
 		// Capture the negotiated subprotocol before we erase the WebSocket type
@@ -206,18 +210,28 @@ where
 	let ws = moq_tokio::transport::Session::new(ws);
 	let mut refused = ws.clone();
 	let accept = server.accept(tokio::time::Instant::now().into_std(), ws);
-	let (session, driver) = match timeout {
-		None => accept.await?,
-		Some(timeout) => match tokio::time::timeout(timeout, accept).await {
-			Ok(accepted) => accepted?,
-			// A peer that upgraded and never sent SETUP; tell it why it is dropped.
-			Err(_) => {
-				use web_transport_trait::poll::Session as _;
-				let err = moq_net::Error::Timeout;
-				refused.close(moq_net::SessionError::from(&err).to_code(), &err.to_string());
-				return Err(err.into());
-			}
-		},
+	let accept = async move {
+		match timeout {
+			None => Ok(accept.await),
+			Some(timeout) => tokio::time::timeout(timeout, accept)
+				.await
+				.map_err(|_| moq_net::Error::Timeout),
+		}
+	};
+	// The drain deadline bounds SETUP too, so a peer that never sends it cannot
+	// outlive the relay.
+	let accepted = shutdown
+		.until_deadline(accept)
+		.await
+		.unwrap_or(Err(moq_net::Error::GoawayTimeout));
+	let (session, driver) = match accepted {
+		Ok(accepted) => accepted?,
+		// A peer that upgraded and never sent SETUP in time; tell it why it is dropped.
+		Err(err) => {
+			use web_transport_trait::poll::Session as _;
+			refused.close(moq_net::SessionError::from(&err).to_code(), &err.to_string());
+			return Err(err.into());
+		}
 	};
 
 	let driver = moq_net::time::run(driver);

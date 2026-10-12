@@ -185,7 +185,12 @@ mod tests {
 	/// Publish a viewer with a live command track.
 	fn viewer(origin: &moq_net::origin::Producer) -> (moq_net::broadcast::Producer, moq_net::track::Producer) {
 		let broadcast = origin.create_broadcast("alice").unwrap();
-		let track = broadcast.create_track("command", None).unwrap();
+		let track = broadcast
+			.create_track(
+				"command",
+				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			)
+			.unwrap();
 		broadcast.announce(moq_net::origin::Route::default()).unwrap();
 		(broadcast, track)
 	}

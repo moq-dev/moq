@@ -31,7 +31,6 @@ Public API: none. Wire: none.
 ## Required
 
 - [Codecs](/quest/m1/ffi-shape/codec.md) - settle the audio and video binding API before publishing
-- [Bindings](/quest/m0/broadcast-epoch/bindings.md) - include the epoch rename in the same breaking release
 
 ## Related
 

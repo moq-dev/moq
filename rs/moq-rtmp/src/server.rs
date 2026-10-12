@@ -1217,8 +1217,9 @@ async fn pump<S: Stream>(
 					}
 					ServerSessionEvent::PublishStreamFinished { .. } => finished = true,
 					// onMetaData and other script data: the FLV importer reads codec
-					// config from the sequence headers, so metadata isn't forwarded.
-					ServerSessionEvent::StreamMetadataChanged { .. } => {}
+					// config from the sequence headers, so script data isn't forwarded.
+					ServerSessionEvent::StreamMetadataChanged { .. }
+					| ServerSessionEvent::UnhandleableAmf0Data { .. } => publisher.metadata.record(),
 					other => tracing::trace!(%peer, ?other, "ignoring RTMP event"),
 				},
 				ServerSessionResult::UnhandleableMessageReceived(_) => {
@@ -1440,6 +1441,7 @@ async fn run_handshake<S: Stream>(stream: &mut S, peer: SocketAddr) -> anyhow::R
 /// the path.
 struct Publisher {
 	importer: FlvImport,
+	metadata: crate::metadata::Dropped,
 	// A clone of the importer's producer, so an end can close the broadcast
 	// (prompt unannounce) even though the importer owns it.
 	broadcast: moq_net::broadcast::Producer,
@@ -1463,6 +1465,7 @@ impl Publisher {
 
 		Ok(Self {
 			importer,
+			metadata: crate::metadata::Dropped::new(path),
 			broadcast: handle,
 			epoch,
 		})
@@ -1502,6 +1505,58 @@ impl Publisher {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	#[tokio::test(start_paused = true)]
+	#[tracing_test::traced_test]
+	async fn publish_metadata_drops_warn_once() {
+		let (mut stream, _peer) = tokio::io::duplex(1024);
+		let (mut session, _) = ServerSession::new(ServerSessionConfig::new()).unwrap();
+		let origin = moq_tokio::origin::spawn();
+		let mut publisher = Publisher::new(&origin, "metadata", Default::default()).unwrap();
+		let mut work = VecDeque::from([ServerSessionResult::RaisedEvent(
+			ServerSessionEvent::StreamMetadataChanged {
+				app_name: "live".into(),
+				stream_key: "metadata".into(),
+				metadata: crate::rml::sessions::StreamMetadata::new(),
+			},
+		)]);
+		// A custom script message goes through the session's own parser.
+		work.extend(session.handle_input(&crate::metadata::cue_point_packet()).unwrap());
+		work.push_back(ServerSessionResult::RaisedEvent(
+			ServerSessionEvent::PublishStreamFinished {
+				app_name: "live".into(),
+				stream_key: "metadata".into(),
+			},
+		));
+		pump(
+			&mut stream,
+			&mut session,
+			&mut work,
+			&mut publisher,
+			"127.0.0.1:1935".parse().unwrap(),
+		)
+		.await
+		.unwrap();
+		assert_eq!(publisher.metadata.count, 2);
+		publisher.finish().unwrap();
+		drop(publisher);
+		logs_assert(|lines| {
+			let warnings = lines
+				.iter()
+				.filter(|line| line.contains("discarding RTMP stream metadata"))
+				.count();
+			let summary = lines.iter().any(|line| {
+				line.contains("RTMP metadata discard summary")
+					&& line.contains("path=metadata")
+					&& line.contains("count=2")
+			});
+			if warnings == 1 && summary {
+				Ok(())
+			} else {
+				Err(format!("warnings={warnings}, summary={summary}"))
+			}
+		});
+	}
+
 	use crate::rml::sessions::{
 		ClientSession, ClientSessionConfig, ClientSessionEvent, ClientSessionResult, PublishRequestType,
 	};

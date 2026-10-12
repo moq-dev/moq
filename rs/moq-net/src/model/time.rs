@@ -41,8 +41,7 @@ impl Timescale {
 		Ok(scale) => scale,
 		Err(_) => unreachable!(),
 	};
-	/// 1,000,000 units per second (`1_000_000`). Widely used by container formats;
-	/// this crate's own default is [`Self::MILLI`].
+	/// 1,000,000 units per second (`1_000_000`). Widely used by container formats.
 	pub const MICRO: Self = match Self::new(1_000_000) {
 		Ok(scale) => scale,
 		Err(_) => unreachable!(),
@@ -103,14 +102,6 @@ impl From<Timescale> for u64 {
 impl From<Timescale> for NonZero<u64> {
 	fn from(scale: Timescale) -> Self {
 		scale.0
-	}
-}
-
-impl Default for Timescale {
-	/// Milliseconds ([`Self::MILLI`]): what a track uses when its producer doesn't pick
-	/// one, and what a lite encoder declares for an untimed track's send times.
-	fn default() -> Self {
-		Self::MILLI
 	}
 }
 
@@ -305,8 +296,7 @@ impl Timestamp {
 		}
 	}
 
-	/// Current point on the local monotonic clock, expressed in the default timescale
-	/// ([`Timescale::MILLI`]).
+	/// Current point on the local monotonic clock, in milliseconds ([`Timescale::MILLI`]).
 	///
 	/// A convenience for publishers stamping their own frames, and the only model API
 	/// that reads the local clock; drivers stamp frames from the instant they are
@@ -384,8 +374,8 @@ impl Ord for Timestamp {
 }
 
 impl From<crate::time::Instant> for Timestamp {
-	/// Convert an [`Instant`](crate::time::Instant) into a millisecond-scale timestamp
-	/// (the default timescale), measured from the model clock's anchor.
+	/// Convert an [`Instant`](crate::time::Instant) into a millisecond-scale timestamp,
+	/// measured from the model clock's anchor.
 	///
 	/// One-way only: there is no inverse, since the anchor is jittered to keep a
 	/// [`Timestamp`] from being read back as a clock.

@@ -374,7 +374,8 @@ impl Producer {
 	fn register(&self, rendition: &Arc<Rendition>) {
 		let mut feed = self.fanout.feed.lock().unwrap();
 		rendition.label(feed.generation.clone());
-		rendition.watch();
+		// An unwindowed feed is history mode: every rendition reads its timeline from the start.
+		rendition.watch(feed.window.is_none());
 		for (index, entry, reference, discontinuity) in &feed.history {
 			rendition.push(*index, entry, reference, *discontinuity, feed.window);
 		}

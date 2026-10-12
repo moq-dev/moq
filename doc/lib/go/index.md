@@ -45,13 +45,18 @@ for event, err := range announced.All(ctx) {
         if moq.IsShutdown(err) { break }
         log.Fatal(err)
     }
-    ann, ok := event.(moq.AnnounceEventStart)
-    if !ok {
+    var ann moq.Announce
+    switch event := event.(type) {
+    case moq.AnnounceEventStart:
+        ann = event.Announce
+    case moq.AnnounceEventRestart: // a new publisher run at the same path: request it again
+        ann = event.Announce
+    default:
         continue // AnnounceEventUpdate or AnnounceEventEnd
     }
     // Prefix stays origin-relative; Captures reports what each wildcard matched.
-    fmt.Printf("captures: %v\n", ann.Announce.Captures)
-    broadcast, err := client.RequestBroadcast(ctx, ann.Announce.Prefix)
+    fmt.Printf("captures: %v\n", ann.Captures)
+    broadcast, err := client.RequestBroadcast(ctx, ann.Prefix)
     if err != nil {
         log.Fatal(err)
     }
@@ -81,7 +86,8 @@ video, _ := broadcast.EncodeVideo(
     nil,
 )
 _ = video.Write(moq.VideoFrame{TimestampUs: pts, Data: rgba})
-_ = broadcast.Announce(moq.Route{})
+epoch := moq.MintEpoch() // a fresh epoch per run
+_ = broadcast.Announce(moq.Route{Epoch: &epoch})
 _ = audio.Finish()
 _ = video.Finish()
 broadcast.Close()    // keep the producer reachable while publishing, then close explicitly
