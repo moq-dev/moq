@@ -2,9 +2,10 @@
 
 ## Goal
 
-A PR that stops a drill mutation from proving sensitivity fails a required CI
-check before merge, rather than turning the nightly
-`Tests (test drill-sensitivity)` job red after it lands.
+A PR that stops a drill mutation from proving sensitivity turns a CI check
+red before merge, rather than turning the nightly
+`Tests (test drill-sensitivity)` job red after it lands. The check is
+advisory until the drills run on a controlled clock, then required.
 
 ## Plan
 
@@ -25,19 +26,27 @@ Decided 2026-10-11:
   (the patch's `+++ b/` paths), the patch itself, or
   `rs/moq-relay/tests/drills.rs`. A change to `test/drill/sensitivity.sh`
   runs every mutation.
-- **Required, not advisory:** a stale mutation is a real coverage gap. The
-  drills run on mocked time, so the job should be deterministic.
+- **Advisory until controlled time:** the drills are not deterministic yet.
+  `rs/moq-relay/tests/drills.rs` uses real sockets and wall-clock sleeps and
+  timeouts, and the impaired lane (which `ingress-burst-never-collected`
+  runs) draws a random `MOQ_SHAPER_SEED` unless one is set. A mutated run
+  can fail for the wrong reason under load. Pin the seed in the gate anyway,
+  so a red run is reproducible. Flip the check to required once the drills
+  move onto [Controlled time](/quest/m1/time/README.md)'s clock. Blocking on
+  that was rejected so the signal exists sooner. Reversed on review: the
+  first pass chose required on the false premise that the drills already
+  ran on mocked time.
 - **Cost, measured 2026-10-11:** 62 of 973 commits on `main` in the prior two
   weeks touched a target file, 42 of them `rs/moq-net/src/lite/subscriber.rs`.
   The 2026-10-11 nightly ran five mutations in about 18 minutes.
 
 Implementation guidance:
 
-- A required check has to report on every PR, so the job always runs and
-  passes quickly when nothing is selected. Branch protection only accepts a
+- Shape the job so it can later become required: it always runs and passes
+  quickly when nothing is selected, because branch protection only accepts a
   check that reports.
-- Making the check required is a repository setting. Ask the maintainer to
-  add it once the job is green on `main`.
+- Making the check required is a repository setting. Once the drills are on
+  a controlled clock, ask the maintainer to add it.
 - Keep the nightly full run: it still catches drift from changes the
   trigger misses, such as a refactor in a file the patch doesn't name.
 
@@ -46,3 +55,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the other test-reliability work in this milestone
+- [Controlled time](/quest/m1/time/README.md) - puts the drills on a controlled clock, which lets this check become required
