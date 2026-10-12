@@ -364,7 +364,8 @@ export class Consumer {
 			if (marker || !ptsContiguous(first.end ?? this.#presentedEnd, nextStart)) {
 				hole = true;
 			}
-			if (!marker && (!first.empty || !first.done)) this.#skipped = true;
+			// Only unread or still-arriving content is a skip; a group already delivered discards nothing.
+			if (!marker && (first.frames.length > 0 || !first.done)) this.#skipped = true;
 			first.consumer.close();
 			first.frames.length = 0;
 			skipped++;

@@ -1575,6 +1575,27 @@ test("Consumer latency skip bumps playhead generation once", async () => {
 	consumer.close();
 });
 
+// A delivered group still awaiting its done result holds no unread content, so retiring it
+// for the max delay discards nothing.
+test("Consumer does not report a skip for a fully delivered group", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(replay(track), { format: new LegacyFormat("audio"), maxDelay: 150 as Time.Milli });
+
+	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro]);
+	await settle();
+	expect((await nextFrame(consumer))?.frame?.timestamp).toBe(0 as Time.Micro);
+
+	writeGroupWithLegacyFrames(track, 1, [100_000 as Time.Micro]);
+	writeGroupWithLegacyFrames(track, 2, [200_000 as Time.Micro]);
+	await settle();
+
+	const next = await nextFrame(consumer);
+	expect(next?.frame?.timestamp).toBe(100_000 as Time.Micro);
+	expect(next?.skipped).toBe(false);
+
+	consumer.close();
+});
+
 test("Consumer jumps the playhead after a shed marker with a timestamp hole", async () => {
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("audio"), maxDelay: 0 as Time.Milli });
