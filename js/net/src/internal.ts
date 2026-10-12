@@ -270,14 +270,21 @@ export function* coveringPrefixes(path: Path.Valid): Generator<Path.Valid> {
 	}
 }
 
+/** Prefer the newer epoch, with none last. */
+export function compareEpochs(a: Route, b: Route): number {
+	if (a.epoch === b.epoch) return 0;
+	if (a.epoch === undefined) return 1;
+	if (b.epoch === undefined) return -1;
+	return a.epoch > b.epoch ? -1 : 1;
+}
+
 /** Prefer newer epochs, identified publishers, then lower static cost. */
 export function compareRoutes(a: Route, b: Route): number {
-	if (a.epoch !== b.epoch) {
-		if (a.epoch === undefined) return 1;
-		if (b.epoch === undefined) return -1;
-		return a.epoch > b.epoch ? -1 : 1;
-	}
-	return Number(isAnonymous(a)) - Number(isAnonymous(b)) || (a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0);
+	return (
+		compareEpochs(a, b) ||
+		Number(isAnonymous(a)) - Number(isAnonymous(b)) ||
+		(a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0)
+	);
 }
 
 /** Order same-prefix routes by preference, hop count, and the origin's stable spread hash. */

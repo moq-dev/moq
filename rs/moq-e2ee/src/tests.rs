@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::credential::{Config, Credential};
 use crate::datagram::Event;
 use crate::error::Error;
-use crate::generation::{Domain, Generation};
+use crate::generation::{Consumer, Domain, Producer};
 use crate::limits::{
 	DATAGRAM_WINDOW, KEY_LABEL, KEY_LEN, MAX_DATAGRAM_BODY, MAX_DATAGRAM_HEADER, MAX_DATAGRAM_PAYLOAD,
 	MAX_DATAGRAM_PLAINTEXT, MAX_GROUPED_PAYLOAD, MAX_GROUPED_PLAINTEXT, MAX_INVOCATIONS, MAX_PLAINTEXT_BYTES, MAX_U53,
@@ -21,6 +21,11 @@ use crate::name::Name;
 use crate::protect::{nonce, open, protect};
 use crate::{group, track};
 use moq_net::Epoch;
+
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
 
 const VECTORS: &str = include_str!("../../../drafts/moq-e2ee-00.json");
 
@@ -45,14 +50,14 @@ fn credential_from(row: &Value) -> Result<Credential, String> {
 	Credential::new(Config { context, kid, secret }).map_err(|err| code(&err))
 }
 
-fn generation_from(row: &Value) -> Result<Generation, String> {
+fn generation_from(row: &Value) -> Result<Consumer, String> {
 	let credential = credential_from(row)?;
 	let epoch: Epoch = row["epoch"]
 		.as_str()
 		.unwrap_or("")
 		.parse()
 		.map_err(|_| "identity".to_string())?;
-	Ok(credential.generation(epoch))
+	Ok(credential.consume(epoch))
 }
 
 fn domain_from(row: &Value) -> Domain {
@@ -157,7 +162,7 @@ fn naming_vectors() {
 	for row in v["naming"].as_array().unwrap() {
 		let epoch: Epoch = row["epoch"].as_str().unwrap().parse().unwrap();
 		let name = cred
-			.generation(epoch)
+			.consume(epoch)
 			.name(row["semantic_name"].as_str().unwrap())
 			.unwrap();
 		assert_eq!(name.as_str(), row["physical_name"], "{}", row["id"]);
@@ -240,7 +245,7 @@ fn negative_vectors() {
 					}
 					"semantic_name" => {
 						let semantic = String::from_utf8(data).unwrap();
-						let generation = cred.generation(Epoch::mint());
+						let generation = cred.produce();
 						let name = code(&generation.name(&semantic).unwrap_err());
 						assert_eq!(code(&cred.path(&semantic).unwrap_err()), name);
 						name
@@ -275,8 +280,12 @@ fn test_credential() -> Credential {
 	.unwrap()
 }
 
-fn test_generation() -> Generation {
-	test_credential().generation(Epoch::mint())
+fn test_generation() -> Producer {
+	test_credential().produce()
+}
+
+fn consume(generation: &Producer) -> Consumer {
+	generation.credential().consume(generation.epoch().clone())
 }
 
 fn subscribe_all() -> moq_net::track::Subscription {
@@ -286,12 +295,12 @@ fn subscribe_all() -> moq_net::track::Subscription {
 fn net_track(name: &Name) -> moq_net::track::Producer {
 	moq_net::broadcast::Info::new()
 		.produce()
-		.create_track(name.as_str(), None)
+		.create_track(name.as_str(), timed())
 		.unwrap()
 }
 
 struct Pair {
-	generation: Generation,
+	generation: Consumer,
 	net: moq_net::track::Producer,
 	producer: track::Producer,
 	consumer: track::Consumer,
@@ -301,9 +310,10 @@ fn pair(semantic: &str) -> Pair {
 	let generation = test_generation();
 	let net = net_track(&generation.name(semantic).unwrap());
 	let producer = generation.produce(net.clone()).unwrap();
-	let consumer = generation.consume(net.subscribe(subscribe_all())).unwrap();
+	let consuming = consume(&generation);
+	let consumer = consuming.consume(net.subscribe(subscribe_all())).unwrap();
 	Pair {
-		generation,
+		generation: consuming,
 		net,
 		producer,
 		consumer,
@@ -335,7 +345,7 @@ fn recv_datagram(consumer: &mut track::Consumer) -> Event {
 	}
 }
 
-fn datagram_ciphertext(generation: &Generation, name: &Name, sequence: u64, plaintext: &[u8]) -> Bytes {
+fn datagram_ciphertext(generation: &Consumer, name: &Name, sequence: u64, plaintext: &[u8]) -> Bytes {
 	let key = generation.key_bytes(name, Domain::Datagram).unwrap();
 	protect(&key, sequence, 0, plaintext, MAX_DATAGRAM_PAYLOAD).unwrap()
 }
@@ -440,11 +450,11 @@ fn track_produced_once_per_generation() {
 	let again = generation.clone();
 	assert_eq!(again.produce(net.clone()).map(|_| ()).unwrap_err().to_string(), "reuse");
 	// A new epoch is a new publisher instance.
-	let fresh = generation.credential().generation(Epoch::mint());
+	let fresh = generation.credential().produce();
 	fresh.produce(net_track(&fresh.name("video").unwrap())).unwrap();
 	// Consuming never claims.
-	generation.consume(net.subscribe(subscribe_all())).unwrap();
-	generation.consume(net.subscribe(subscribe_all())).unwrap();
+	consume(&generation).consume(net.subscribe(subscribe_all())).unwrap();
+	consume(&generation).consume(net.subscribe(subscribe_all())).unwrap();
 }
 
 #[test]
@@ -452,14 +462,14 @@ fn wrong_track_name_is_identity() {
 	let generation = test_generation();
 	let net = moq_net::broadcast::Info::new()
 		.produce()
-		.create_track("not-a-physical-name", None)
+		.create_track("not-a-physical-name", timed())
 		.unwrap();
 	assert_eq!(
 		generation.produce(net.clone()).map(|_| ()).unwrap_err().to_string(),
 		"identity"
 	);
 	assert_eq!(
-		generation
+		consume(&generation)
 			.consume(net.subscribe(subscribe_all()))
 			.map(|_| ())
 			.unwrap_err()
@@ -471,8 +481,8 @@ fn wrong_track_name_is_identity() {
 #[test]
 fn new_epoch_authenticates_old_does_not() {
 	let cred = test_credential();
-	let old = cred.generation("0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f".parse().unwrap());
-	let new = cred.generation("0199b7f4-9e10-7f42-8a3c-5d7e2b1c0f9a".parse().unwrap());
+	let old = cred.consume(cred.produce().epoch().clone());
+	let new = cred.produce();
 	assert_ne!(old.name("video").unwrap(), new.name("video").unwrap());
 
 	let net = net_track(&new.name("video").unwrap());
@@ -481,7 +491,7 @@ fn new_epoch_authenticates_old_does_not() {
 	group.write_frame(ms(1), b"fresh").unwrap();
 	group.finish().unwrap();
 
-	let mut consumer = new.clone().consume(net.subscribe(subscribe_all())).unwrap();
+	let mut consumer = consume(&new).consume(net.subscribe(subscribe_all())).unwrap();
 	assert_eq!(read_frame(&mut recv_group(&mut consumer)).plaintext, &b"fresh"[..]);
 
 	// The old generation derives a different key for the same physical name.
@@ -498,7 +508,7 @@ fn new_epoch_authenticates_old_does_not() {
 #[test]
 fn invocation_exhaustion() {
 	let generation = test_generation();
-	let mut key = generation
+	let mut key = consume(&generation)
 		.key(&generation.name("video").unwrap(), Domain::Group)
 		.unwrap();
 	key.set_usage(MAX_INVOCATIONS - 1, 0);
@@ -512,7 +522,7 @@ fn invocation_exhaustion() {
 #[test]
 fn plaintext_byte_exhaustion() {
 	let generation = test_generation();
-	let mut key = generation
+	let mut key = consume(&generation)
 		.key(&generation.name("video").unwrap(), Domain::Group)
 		.unwrap();
 	key.set_usage(0, MAX_PLAINTEXT_BYTES - 3);
@@ -527,7 +537,7 @@ fn plaintext_byte_exhaustion() {
 fn failed_opens_spend_the_key() {
 	let generation = test_generation();
 	let name = generation.name("video").unwrap();
-	let mut key = generation.key(&name, Domain::Group).unwrap();
+	let mut key = consume(&generation).key(&name, Domain::Group).unwrap();
 	let mut good = key.protect(0, 0, b"ok", MAX_GROUPED_PAYLOAD).unwrap().to_vec();
 	let mut forged = good.clone();
 	forged[0] ^= 1;
@@ -542,7 +552,7 @@ fn failed_opens_spend_the_key() {
 		"exhausted"
 	);
 	// Refusals before AEAD spend nothing.
-	let mut key = generation.key(&name, Domain::Group).unwrap();
+	let mut key = consume(&generation).key(&name, Domain::Group).unwrap();
 	assert_eq!(
 		key.open(0, 0, &good[..3], MAX_GROUPED_PAYLOAD).unwrap_err().to_string(),
 		"oversize"
@@ -861,7 +871,7 @@ fn secrets_stay_out_of_debug() {
 	assert!(text.contains("<redacted>"));
 	assert!(!text.contains(&hex::encode(test_secret())));
 	assert!(!text.contains(std::str::from_utf8(&test_secret()).unwrap()));
-	let key = generation
+	let key = consume(&generation)
 		.key(&generation.name("video").unwrap(), Domain::Group)
 		.unwrap();
 	assert!(format!("{key:?}").contains("<redacted>"));
@@ -907,7 +917,20 @@ fn resumed_group_opens_at_transport_index() {
 		panic!("net group not ready");
 	};
 	net_group.skip_to(1);
-	let key = Arc::new(Mutex::new(generation.key(&name, Domain::Group).unwrap()));
+	let key = Arc::new(Mutex::new(consume(&generation).key(&name, Domain::Group).unwrap()));
 	let mut group = group::Consumer::new(net_group, key, crate::terminal::Terminal::new(None));
 	assert_eq!(read_frame(&mut group).plaintext, &b"one"[..]);
+}
+
+#[test]
+fn credential_clones_mint_fresh_epochs_and_consumers_bind_them() {
+	let credential = test_credential();
+	let first = credential.produce();
+	let second = credential.clone().produce();
+	assert_ne!(first.epoch(), second.epoch());
+	assert_ne!(first.name("video").unwrap(), second.name("video").unwrap());
+	let bound = credential.consume(first.epoch().clone());
+	assert_eq!(bound.epoch(), first.epoch());
+	assert_eq!(bound.name("video").unwrap(), first.name("video").unwrap());
+	assert_eq!(bound.credential().kid(), credential.kid());
 }

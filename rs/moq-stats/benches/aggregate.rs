@@ -41,7 +41,10 @@ impl Node {
 			.announce(origin::Route::default().with_epoch(epoch.clone()))
 			.unwrap();
 		let track = source
-			.create_track(traffic_track(&Tier::default(), Role::Publisher, false), None)
+			.create_track(
+				traffic_track(&Tier::default(), Role::Publisher, false),
+				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			)
 			.unwrap();
 		let config = moq_json::snapshot::Config::default().with_delta_ratio(0);
 		let frame = (0..KEYS)

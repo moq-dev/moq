@@ -354,7 +354,9 @@ pub struct Producer {
 impl Producer {
 	/// The properties a timeline track is created with.
 	pub fn info() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_priority(hang::catalog::PRIORITY.catalog)
+		moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_priority(hang::catalog::PRIORITY.catalog)
 	}
 
 	/// Publish onto `track`, starting at record zero.

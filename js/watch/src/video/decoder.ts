@@ -410,9 +410,7 @@ class DecoderTrack {
 	// Decoded frames waiting to be rendered.
 	#buffered = new Signal<Container.BufferedRanges>([]);
 
-	// The last discontinuity count seen from the container consumer. An output callback
-	// captures it when the frame comes out, so a picture already parked in sync.wait
-	// can be dropped after the playhead moves.
+	// The last discontinuity count seen from the container consumer.
 	#discontinuity = 0;
 
 	// Codec description from the last configure, reused after a playhead reset.
@@ -447,9 +445,10 @@ class DecoderTrack {
 		const decoder = new VideoDecoder({
 			output: async (frame: VideoFrame) => {
 				try {
-					// The generation this frame was decoded in. If the playhead bumps while we wait
-					// below, this frame belongs to the previous generation and must be dropped.
-					const generation = this.#discontinuity;
+					// The clock epoch this frame was decoded in. A reset while we wait below (this
+					// track's playhead moving, or a shared reset such as audio's at an utterance
+					// boundary) means the frame belongs to the previous timeline and must be dropped.
+					const epoch = this.sync.epoch;
 
 					const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
 					if (timestamp < (this.timestamp.peek() ?? 0)) {
@@ -468,10 +467,12 @@ class DecoderTrack {
 						this.frame.set(frame.clone());
 					}
 
-					// Returns immediately when the latency is "instant".
-					const ok = await effect.race(this.sync.wait(timestamp).then(() => true));
-					if (!ok) return;
-					if (generation !== this.#discontinuity) return; // the playhead moved while waiting
+					// Returns immediately when the latency is "instant". Closing the track releases it.
+					// Capture the signal: a rerun replaces `effect.abort` before this continuation runs.
+					const signal = effect.abort;
+					await this.sync.wait(timestamp, signal);
+					if (signal.aborted) return;
+					if (epoch !== this.sync.epoch) return;
 
 					if (timestamp < (this.timestamp.peek() ?? 0)) {
 						// Late frame, don't render it.
@@ -684,7 +685,7 @@ class DecoderTrack {
 	// otherwise come out above the new keyframe and late-reject it. A delta continues a group the
 	// bump interrupted (a stale marker or a max-delay hole), so it keeps the decoder's references;
 	// a reset would make WebCodecs require a key chunk and throw. `reset()` cannot cancel an
-	// output callback that already holds a frame; the generation it captured rejects that one.
+	// output callback that already holds a frame; the clock epoch it captured rejects that one.
 	#resetAtKeyframe(decoder: VideoDecoder, keyframe: boolean): void {
 		if (!this.#resetPending) return;
 		this.#resetPending = false;

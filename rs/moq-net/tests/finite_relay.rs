@@ -17,6 +17,11 @@ use moq_net::track::Subscription;
 use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_DELAY: Duration = Duration::from_secs(5);
 const GROUPS: u64 = 4;
@@ -54,7 +59,7 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 	let version: Version = name.parse().unwrap();
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let mut track = broadcast.create_track("tail", None).unwrap();
+	let mut track = broadcast.create_track("tail", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
 	let relay = produce_origin(2);
