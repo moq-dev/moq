@@ -163,8 +163,8 @@ async fn next(
 ) -> crate::Result<(u64, Option<moq_net::Session>)> {
 	kio::wait(|waiter| {
 		match ready!(connection.poll(waiter, |state| {
-			if Some((state.epoch, state.session.is_some())) != previous {
-				Poll::Ready((state.epoch, state.session.clone()))
+			if Some((state.connects, state.session.is_some())) != previous {
+				Poll::Ready((state.connects, state.session.clone()))
 			} else {
 				Poll::Pending
 			}
@@ -185,12 +185,12 @@ async fn present(
 	let mut snapshot = next(&connection, None).await?;
 	let mut draining = Vec::new();
 	loop {
-		let (epoch, session) = snapshot;
+		let (connects, session) = snapshot;
 		let Some(session) = session else {
 			if let Ok(mut state) = producer.write() {
 				state.grant = None;
 			}
-			snapshot = next(&connection, Some((epoch, false))).await?;
+			snapshot = next(&connection, Some((connects, false))).await?;
 			continue;
 		};
 		if let Ok(mut state) = producer.write() {
@@ -199,7 +199,7 @@ async fn present(
 		let handle = session.auth();
 		let token = tokio::select! {
 			biased;
-			changed = next(&connection, Some((epoch, true))) => { snapshot = changed?; continue; }
+			changed = next(&connection, Some((connects, true))) => { snapshot = changed?; continue; }
 			token = handle.add(bytes.clone()) => token?,
 		};
 		if let Some(answered) = answered.take() {
@@ -212,10 +212,10 @@ async fn present(
 		loop {
 			tokio::select! {
 				biased;
-				changed = next(&connection, Some((epoch, true))) => { snapshot = changed?; break; }
+				changed = next(&connection, Some((connects, true))) => { snapshot = changed?; break; }
 				_ = session.closed() => {
 					if let Ok(mut state) = producer.write() { state.grant = None; }
-					snapshot = next(&connection, Some((epoch, true))).await?;
+					snapshot = next(&connection, Some((connects, true))).await?;
 					break;
 				}
 				grant = watch.changed() => {
@@ -301,7 +301,7 @@ mod tests {
 
 	fn attach(connection: &kio::Producer<State>, session: &moq_net::Session) {
 		let mut state = connection.write().ok().expect("connection observed");
-		state.epoch += 1;
+		state.connects += 1;
 		state.session = Some(session.clone());
 	}
 

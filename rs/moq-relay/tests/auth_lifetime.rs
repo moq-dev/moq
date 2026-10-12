@@ -1397,10 +1397,10 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 		};
 		let origin = moq_tokio::origin::spawn();
 		let a = origin.create_broadcast("a/cam").unwrap();
-		let a_track = a.create_track("video", None).unwrap();
+		let a_track = a.create_track("video", timed()).unwrap();
 		a.announce(Default::default()).unwrap();
 		let b = origin.create_broadcast("b/cam").unwrap();
-		let b_track = b.create_track("video", None).unwrap();
+		let b_track = b.create_track("video", timed()).unwrap();
 		b.announce(Default::default()).unwrap();
 		let publisher = tokio::time::timeout(
 			TIMEOUT,
