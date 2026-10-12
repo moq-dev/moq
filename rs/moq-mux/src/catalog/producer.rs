@@ -3,6 +3,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use base64::Engine;
+use hang::catalog::Reference;
 
 use super::hang::{Catalog, CatalogExt, Consumer, Extra};
 
@@ -1069,8 +1070,23 @@ fn to_msf<E: CatalogExt>(catalog: &Catalog<E>) -> moq_msf::Catalog<E> {
 }
 
 /// Convert the base media sections of a hang catalog into MSF tracks.
+///
+/// An MSF track is named by its wire name. MSF has no rendition ID or broadcast reference, so a
+/// second rendition of a wire name already taken is left out rather than made ambiguous.
 fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog) -> moq_msf::Catalog<E> {
 	let mut tracks = Vec::new();
+	let mut names = BTreeSet::new();
+	let mut claim = |id: &str, name: &str| {
+		let fresh = names.insert(name.to_string());
+		if !fresh {
+			tracing::warn!(
+				rendition = id,
+				track = name,
+				"leaving a duplicate track name out of MSF"
+			);
+		}
+		fresh
+	};
 
 	let has_multiple_video = catalog.video.renditions.len() > 1;
 	for (name, config) in &catalog.video.renditions {
@@ -1087,7 +1103,11 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog) -> moq_msf::Catalog<E> {
 		};
 
 		let sap_type = video_sap_type(&config.codec);
-		let mut track = moq_msf::Track::new(name.clone(), packaging);
+		let wire = config.track_name(name);
+		if !claim(name, wire) {
+			continue;
+		}
+		let mut track = moq_msf::Track::new(wire.to_string(), packaging);
 		track.is_live = true;
 		track.role = Some(moq_msf::Role::Video);
 		track.codec = Some(config.codec.to_string());
@@ -1119,7 +1139,11 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog) -> moq_msf::Catalog<E> {
 				.map(|d| base64::engine::general_purpose::STANDARD.encode(d.as_ref())),
 		};
 
-		let mut track = moq_msf::Track::new(name.clone(), packaging);
+		let wire = config.track_name(name);
+		if !claim(name, wire) {
+			continue;
+		}
+		let mut track = moq_msf::Track::new(wire.to_string(), packaging);
 		track.is_live = true;
 		track.role = Some(moq_msf::Role::Audio);
 		track.codec = Some(config.codec.to_string());
@@ -1140,7 +1164,11 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog) -> moq_msf::Catalog<E> {
 		let Some(packaging) = packaging_of(&config.container) else {
 			continue;
 		};
-		let mut track = moq_msf::Track::new(name.clone(), packaging);
+		let wire = config.track_name(name);
+		if !claim(name, wire) {
+			continue;
+		}
+		let mut track = moq_msf::Track::new(wire.to_string(), packaging);
 		track.is_live = true;
 		track.role = Some(config.role.to_string().parse().unwrap());
 		track.codec = Some(config.format.to_string());
@@ -1225,6 +1253,25 @@ mod test {
 			roundtrip.text = decoded.text;
 			assert_eq!(to_msf_media::<()>(&roundtrip).tracks, msf.tracks);
 		}
+	}
+
+	#[test]
+	fn msf_names_each_track_by_its_wire_name() {
+		let catalog = hang::Catalog::<()>::from_str(
+			r#"{"video": {"renditions": {
+				"hd": {"codec": "avc1.64001f", "container": {"kind": "legacy"}},
+				"left": {"broadcast": "./left", "track": "video", "codec": "avc1.64001f", "container": {"kind": "legacy"}},
+				"right": {"broadcast": "./right", "track": "video", "codec": "avc1.64001f", "container": {"kind": "legacy"}}
+			}}}"#,
+		)
+		.unwrap();
+		let msf = to_msf_media::<()>(&catalog);
+		let names: Vec<_> = msf.tracks.iter().map(|track| track.name.as_str()).collect();
+		assert_eq!(names, ["hd", "video"]);
+
+		let decoded = crate::catalog::msf::from_msf(&msf).unwrap();
+		let ids: Vec<_> = decoded.video.renditions.keys().map(String::as_str).collect();
+		assert_eq!(ids, ["hd", "video"]);
 	}
 
 	#[test]

@@ -6,7 +6,7 @@ use std::task::Poll;
 use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
-use hang::catalog::{Archive, AudioConfig, Clock, VideoConfig};
+use hang::catalog::{Archive, AudioConfig, Clock, Reference, VideoConfig};
 use moq_mux::container::fmp4::Muxer;
 use moq_mux::timeline::Entry;
 use sha2::{Digest, Sha256};
@@ -822,7 +822,7 @@ impl Rendition {
 		let Ok(broadcast) = std::task::ready!(binding.poll_broadcast(waiter)) else {
 			return Poll::Ready(None);
 		};
-		let track = broadcast.track(&self.name).ok();
+		let track = broadcast.track(self.track_name()).ok();
 		let subscription = moq_net::track::Subscription::default().with_max_delay(FEED_MAX_DELAY);
 		Poll::Ready(track.map(|track| track.subscribe(subscription).into_inner()))
 	}
@@ -839,8 +839,16 @@ impl Rendition {
 		binding: &moq_mux::Binding,
 	) -> Option<(moq_net::broadcast::Consumer, moq_net::track::Consumer)> {
 		let broadcast = binding.broadcast().await.ok()?;
-		let track = broadcast.track(&self.name).ok()?;
+		let track = broadcast.track(self.track_name()).ok()?;
 		Some((broadcast, track))
+	}
+
+	/// The media track's name in its broadcast, which can differ from the rendition's ID.
+	fn track_name(&self) -> &str {
+		match &self.config {
+			Config::Video(config) => config.track_name(&self.name),
+			Config::Audio(config) => config.track_name(&self.name),
+		}
 	}
 
 	/// The rendition's CMAF init segment, built on first request and cached.

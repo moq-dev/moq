@@ -248,6 +248,7 @@ fn sibling_audio(reference: &str) -> crate::media::MoqAudio {
 	MoqAudio {
 		label: None,
 		broadcast: Some(reference.to_string()),
+		track: None,
 		codec: "opus".to_string(),
 		description: None,
 		sample_rate: 48_000,

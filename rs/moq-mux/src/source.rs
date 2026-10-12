@@ -172,7 +172,7 @@ impl Source {
 		self.retain_valid_references("text", &mut catalog.text.renditions);
 	}
 
-	fn retain_valid_references<C: BroadcastConfig>(
+	fn retain_valid_references<C: hang::catalog::Reference>(
 		&self,
 		kind: &'static str,
 		renditions: &mut std::collections::BTreeMap<String, C>,
@@ -291,40 +291,6 @@ impl Binding {
 	/// Concurrent reads and cancelled waits retain the same request and result.
 	pub async fn broadcast(&self) -> crate::Result<moq_net::broadcast::Consumer> {
 		kio::wait(|waiter| self.poll_broadcast(waiter)).await
-	}
-}
-
-trait BroadcastConfig {
-	fn broadcast(&self) -> Option<&moq_net::path::RelativeOwned>;
-}
-
-impl BroadcastConfig for hang::catalog::VideoConfig {
-	fn broadcast(&self) -> Option<&moq_net::path::RelativeOwned> {
-		self.broadcast.as_ref()
-	}
-}
-
-impl BroadcastConfig for hang::catalog::AudioConfig {
-	fn broadcast(&self) -> Option<&moq_net::path::RelativeOwned> {
-		self.broadcast.as_ref()
-	}
-}
-
-impl BroadcastConfig for hang::catalog::TextConfig {
-	fn broadcast(&self) -> Option<&moq_net::path::RelativeOwned> {
-		self.broadcast.as_ref()
-	}
-}
-
-impl BroadcastConfig for hang::catalog::JsonConfig {
-	fn broadcast(&self) -> Option<&moq_net::path::RelativeOwned> {
-		self.broadcast.as_ref()
-	}
-}
-
-impl BroadcastConfig for hang::catalog::BinaryConfig {
-	fn broadcast(&self) -> Option<&moq_net::path::RelativeOwned> {
-		self.broadcast.as_ref()
 	}
 }
 
