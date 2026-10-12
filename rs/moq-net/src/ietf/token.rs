@@ -74,19 +74,33 @@ fn decode(buf: &[u8], version: Version, setup: bool) -> Result<Token, SessionErr
 	let malformed = |_| SessionError::KeyValueFormatting;
 	let mut r = Decoder::new(buf, version.into());
 
+	// Every field an alias type names decodes before its meaning applies, so a truncated
+	// structure is malformed whatever its type.
 	match r.varint().map_err(malformed)? {
 		USE_VALUE => {}
-		// With no cache, section 9.1.4 treats a registration in SETUP as a value; the alias is
-		// unused.
-		REGISTER if setup => {
+		REGISTER => {
 			r.varint().map_err(malformed)?;
+			// Section 8.9: a registration past the cache size of 0 closes the session. With no
+			// cache, section 9.1.4 treats one in SETUP as a value and the alias is unused.
+			if !setup {
+				r.varint().map_err(malformed)?;
+				return Err(SessionError::AuthTokenCacheOverflow);
+			}
 		}
-		// Section 8.9: a registration past the cache size of 0 closes the session.
-		REGISTER => return Err(SessionError::AuthTokenCacheOverflow),
-		// Section 9.1.3: a cache size of 0 prohibits aliases, so none was ever registered.
-		// Section 8.9 rejects the message, but 0x17 is only a session code (section 12.2), so
-		// the session closes; doc/concept/standard.md records the deviation.
-		DELETE | USE_ALIAS => return Err(SessionError::UnknownAuthTokenAlias),
+		DELETE | USE_ALIAS => {
+			r.varint().map_err(malformed)?;
+			if !r.is_empty() {
+				return Err(SessionError::KeyValueFormatting);
+			}
+			// Section 9.1.4: nothing can have been registered before SETUP.
+			if setup {
+				return Err(SessionError::ProtocolViolation);
+			}
+			// Section 9.1.3: a cache size of 0 prohibits aliases, so none was ever registered.
+			// Section 8.9 rejects the message, but 0x17 is only a session code (section 12.2),
+			// so the session closes; doc/concept/standard.md records the deviation.
+			return Err(SessionError::UnknownAuthTokenAlias);
+		}
 		_ => return Err(SessionError::KeyValueFormatting),
 	}
 
@@ -232,15 +246,16 @@ mod tests {
 		}
 	}
 
-	/// A cache size of 0 means no alias was ever registered.
+	/// Section 9.1.4: nothing can have been registered before SETUP, so an alias there is a
+	/// protocol violation.
 	#[test]
-	fn an_alias_reference_is_an_unknown_alias() {
+	fn a_setup_alias_reference_is_a_protocol_violation() {
 		for version in VERSIONS {
 			for alias_type in [DELETE, USE_ALIAS] {
 				let params = structure(version, &[alias_type, 7], &[]);
 				let err = from_setup(&params, version).unwrap_err();
 				assert!(
-					matches!(err, Error::Session(SessionError::UnknownAuthTokenAlias)),
+					matches!(err, Error::Session(SessionError::ProtocolViolation)),
 					"{version:?} {alias_type}: {err:?}"
 				);
 			}
@@ -311,6 +326,11 @@ mod tests {
 			for (fields, why) in [
 				(&[][..], "no alias type"),
 				(&[USE_VALUE][..], "no token type"),
+				(&[REGISTER][..], "a registration with no alias"),
+				(&[REGISTER, 7][..], "a registration with no token type"),
+				(&[DELETE][..], "a deletion with no alias"),
+				(&[USE_ALIAS][..], "an alias use with no alias"),
+				(&[USE_ALIAS, 7, 0][..], "an alias use with a token type"),
 				(&[0x4, 0][..], "an unknown alias type"),
 			] {
 				let err = request(version, fields, &[]).unwrap_err();
@@ -330,6 +350,8 @@ mod tests {
 				(&[USE_VALUE][..], "no token type"),
 				(&[REGISTER][..], "no alias"),
 				(&[REGISTER, 7][..], "no token type after the alias"),
+				(&[DELETE][..], "a deletion with no alias"),
+				(&[USE_ALIAS][..], "an alias use with no alias"),
 				(&[0x4, 0][..], "an unknown alias type"),
 			] {
 				let params = structure(version, fields, &[]);

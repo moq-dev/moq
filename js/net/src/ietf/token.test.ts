@@ -124,19 +124,19 @@ test("REGISTER is a value", () => {
 	}
 });
 
-/** A cache size of 0 means no alias was ever registered. */
-test("an alias reference is an unknown alias", () => {
+/** Section 9.1.4: nothing can have been registered before SETUP, so an alias there is a violation. */
+test("a SETUP alias reference is a protocol violation", () => {
 	for (const version of VERSIONS) {
 		for (const aliasType of [0x0n, 0x2n]) {
 			const params = structure(version, [aliasType, 7n]);
-			expect(sessionCode(() => tokenFromSetup(params, version))).toBe(SessionCode.UnknownAuthTokenAlias);
+			expect(sessionCode(() => tokenFromSetup(params, version))).toBe(SessionCode.ProtocolViolation);
 		}
 	}
 });
 
 test("an undecodable structure is a formatting error", () => {
 	for (const version of VERSIONS) {
-		for (const fields of [[], [0x3n], [0x1n], [0x1n, 7n], [0x4n, 0n]]) {
+		for (const fields of [[], [0x3n], [0x1n], [0x1n, 7n], [0x0n], [0x2n], [0x4n, 0n]]) {
 			const params = structure(version, fields);
 			expect(sessionCode(() => tokenFromSetup(params, version))).toBe(SessionCode.KeyValueFormatting);
 		}
@@ -185,7 +185,9 @@ test("a request alias reference is an unknown alias", () => {
 
 test("an undecodable request token is a formatting error", () => {
 	for (const version of VERSIONS) {
-		for (const fields of [[], [0x3n], [0x4n, 0n]]) {
+		// A registration, deletion, or alias use missing a field it names, or an alias use
+		// carrying a token type.
+		for (const fields of [[], [0x3n], [0x1n], [0x1n, 7n], [0x0n], [0x2n], [0x2n, 7n, 0n], [0x4n, 0n]]) {
 			const token = raw(version, fields);
 			expect(sessionCode(() => tokenFromRequest(token, version))).toBe(SessionCode.KeyValueFormatting);
 		}

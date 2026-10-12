@@ -94,8 +94,8 @@ export function tokenFromRequest(raw: Uint8Array, version: IetfVersion): Token {
  * Decode a Token structure, refusing what this endpoint cannot accept.
  *
  * @throws {ProtocolViolation} `AuthTokenCacheOverflow` for a registration outside SETUP,
- * `UnknownAuthTokenAlias` for an alias reference, or `KeyValueFormatting` for a structure that
- * cannot be decoded.
+ * `UnknownAuthTokenAlias` for an alias reference on a request (`ProtocolViolation` in SETUP),
+ * or `KeyValueFormatting` for a structure that cannot be decoded.
  */
 function decode(raw: Uint8Array, version: IetfVersion, setup: boolean): Token {
 	// Section 8.9: a structure that cannot be decoded closes with KEY_VALUE_FORMATTING_ERROR.
@@ -109,29 +109,36 @@ function decode(raw: Uint8Array, version: IetfVersion, setup: boolean): Token {
 		}
 	};
 
+	// Every field an alias type names decodes before its meaning applies, so a truncated
+	// structure is malformed whatever its type.
 	let [aliasType, rest] = unvarint(raw);
 	switch (aliasType) {
 		case USE_VALUE:
 			break;
 		case REGISTER:
-			// Section 8.9: a registration past the cache size of 0 closes the session.
+			[, rest] = unvarint(rest);
+			// Section 8.9: a registration past the cache size of 0 closes the session. With no
+			// cache, section 9.1.4 treats one in SETUP as a value and the alias is unused.
 			if (!setup) {
+				unvarint(rest);
 				throw new ProtocolViolation("AUTHORIZATION TOKEN registration", {
 					code: SessionCode.AuthTokenCacheOverflow,
 				});
 			}
-			// With no cache, section 9.1.4 treats a registration in SETUP as a value; the alias
-			// is unused.
-			[, rest] = unvarint(rest);
 			break;
-		// Section 9.1.3: a cache size of 0 prohibits aliases, so none was ever registered.
-		// Section 8.9 rejects the message, but 0x17 is only a session code (section 12.2), so
-		// the session closes; doc/concept/standard.md records the deviation.
 		case DELETE:
-		case USE_ALIAS:
+		case USE_ALIAS: {
+			const [, trailing] = unvarint(rest);
+			if (trailing.length > 0) throw malformed();
+			// Section 9.1.4: nothing can have been registered before SETUP.
+			if (setup) throw new ProtocolViolation("AUTHORIZATION TOKEN alias in SETUP");
+			// Section 9.1.3: a cache size of 0 prohibits aliases, so none was ever registered.
+			// Section 8.9 rejects the message, but 0x17 is only a session code (section 12.2),
+			// so the session closes; doc/concept/standard.md records the deviation.
 			throw new ProtocolViolation("unknown AUTHORIZATION TOKEN alias", {
 				code: SessionCode.UnknownAuthTokenAlias,
 			});
+		}
 		default:
 			throw malformed();
 	}
