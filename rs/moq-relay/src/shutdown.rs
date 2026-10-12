@@ -98,9 +98,24 @@ impl Observer {
 		}
 	}
 
+	/// Await an admission decision, refusing it as unavailable at the drain
+	/// deadline so no pending decision outlives the relay.
+	pub(crate) async fn admit<T, E: From<crate::auth::Error>>(
+		&self,
+		decision: impl Future<Output = Result<T, E>>,
+	) -> Result<T, E> {
+		tokio::select! {
+			res = decision => res,
+			() = self.expired() => Err(crate::auth::Error::Unavailable(
+				"the admission was still pending at the drain deadline".into(),
+			)
+			.into()),
+		}
+	}
+
 	/// Resolve at the drain deadline, once the drain has started. Never resolves
 	/// for [`disabled`](Self::disabled) handles.
-	pub(crate) async fn expired(&self) {
+	async fn expired(&self) {
 		let mut rx = self.rx.clone();
 		let deadline = match rx.wait_for(Option::is_some).await {
 			Ok(deadline) => *deadline,
