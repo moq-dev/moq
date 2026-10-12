@@ -109,6 +109,8 @@ struct Cue<'a> {
 	duration: Option<u64>,
 	/// WebVTT settings, identifier and comments (BlockAddID 1).
 	addition: Option<&'a [u8]>,
+	/// Whether the BlockGroup replaces the codec initialization (CodecState).
+	codec_state: bool,
 }
 
 enum Media {
@@ -462,6 +464,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let mut has_reference = false;
 		let mut duration = None;
 		let mut addition = None;
+		let mut codec_state = false;
 
 		for c in children {
 			match c {
@@ -489,6 +492,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					}
 				}
 				MatroskaSpec::BlockDuration(value) => duration = Some(*value),
+				MatroskaSpec::CodecState(_) => codec_state = true,
 				_ => {}
 			}
 		}
@@ -503,7 +507,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let parsed = SimpleBlock::try_from(data).map_err(|_| Error::InvalidBlock)?;
 		let keyframe = !has_reference;
 
-		self.handle_block(&parsed, keyframe, Cue { duration, addition })
+		self.handle_block(
+			&parsed,
+			keyframe,
+			Cue {
+				duration,
+				addition,
+				codec_state,
+			},
+		)
 	}
 
 	fn handle_block(&mut self, block: &SimpleBlock<'_>, keyframe: bool, cue: Cue<'_>) -> Result<()> {
@@ -525,6 +537,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		if track.kind == TrackKind::Text {
 			if block.lacing.is_some() {
 				return Err(Error::InvalidSubtitle("laced subtitles are unsupported").into());
+			}
+			// A replaced WebVTT header would otherwise leave stale global blocks on every later cue.
+			if cue.codec_state {
+				return Err(Error::InvalidSubtitle("subtitle CodecState updates are unsupported").into());
 			}
 			let duration = match cue.duration {
 				Some(ticks) => ticks

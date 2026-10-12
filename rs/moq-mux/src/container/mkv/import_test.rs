@@ -1062,3 +1062,37 @@ fn subtitle_seek_after_several_cues_does_not_reuse_a_group() {
 	importer.decode(second).unwrap();
 	importer.finish().unwrap();
 }
+
+/// A subtitle BlockGroup that replaces the codec initialization is refused, not silently ignored.
+#[test]
+fn subtitle_codec_state_is_refused() {
+	let MatroskaSpec::TrackEntry(Master::Full(mut fields)) = text_entry(1, "S_TEXT/WEBVTT", "en", "English") else {
+		unreachable!()
+	};
+	fields.push(MatroskaSpec::CodecPrivate(b"WEBVTT\n".to_vec()));
+	let MatroskaSpec::SimpleBlock(block) = simple_block(1, 0, true, b"Hello") else {
+		unreachable!()
+	};
+	let data = MkvBuilder::new()
+		.header("matroska")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![MatroskaSpec::TrackEntry(Master::Full(fields))])
+		.cluster(0, || {
+			vec![MatroskaSpec::BlockGroup(Master::Full(vec![
+				MatroskaSpec::Block(block),
+				MatroskaSpec::BlockDuration(1000),
+				MatroskaSpec::CodecState(b"WEBVTT\n\nSTYLE\n::cue { color: red; }\n".to_vec()),
+			]))]
+		})
+		.segment_end()
+		.build();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	let result = importer.decode(&data);
+	assert!(
+		matches!(result, Err(crate::Error::Mkv(super::Error::InvalidSubtitle(_)))),
+		"{result:?}"
+	);
+}
