@@ -3,7 +3,7 @@ use std::sync::Arc;
 use moq_mux::catalog::hang::Extra;
 
 use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqSubscription, MoqTrackConsumer};
-use crate::demand::MoqTrackDemand;
+use crate::demand::{MoqGroupDemand, MoqTrackDemand};
 use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::media::MoqFrame;
@@ -40,8 +40,9 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 			out = out.with_max_age(std::time::Duration::from_micros(us));
 		}
 		if let Some(ticks) = info.timescale {
-			let scale =
-				moq_net::Timescale::new(ticks).map_err(|_| MoqError::Codec(format!("invalid timescale: {ticks}")))?;
+			let scale = moq_net::Timescale::new(ticks).map_err(|_| MoqError::Codec {
+				reason: format!("invalid timescale: {ticks}"),
+			})?;
 			out = out.with_timescale(scale);
 		}
 		Ok(out)
@@ -62,7 +63,9 @@ impl TryFrom<&moq_net::track::Info> for MoqTrackInfo {
 			.max_age
 			.map(|age| u64::try_from(age.as_micros()))
 			.transpose()
-			.map_err(|_| MoqError::Codec("track max_age duration overflow".into()))?;
+			.map_err(|_| MoqError::Codec {
+				reason: "track max_age duration overflow".into(),
+			})?;
 		Ok(Self {
 			priority: info.priority,
 			max_age_us,
@@ -341,6 +344,12 @@ impl MoqGroupRequest {
 		self.priority
 	}
 
+	/// A handle that watches whether any caller still wants this group.
+	pub fn demand(&self) -> Result<Arc<MoqGroupDemand>, MoqError> {
+		let guard = self.inner.lock().unwrap();
+		Ok(MoqGroupDemand::new(guard.as_ref().ok_or(MoqError::Closed)?.demand()))
+	}
+
 	/// Accept the request and return a producer for filling the fetched group.
 	pub fn accept(&self) -> Result<Arc<MoqGroupProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
@@ -392,6 +401,12 @@ impl MoqTrackRequest {
 		let guard = self.inner.lock().unwrap();
 		let request = guard.as_ref().ok_or(MoqError::Closed)?;
 		Ok(request.name().to_string())
+	}
+
+	/// Watch this track's subscribers, including after the request is accepted.
+	pub fn demand(&self) -> Result<Arc<MoqTrackDemand>, MoqError> {
+		let guard = self.inner.lock().unwrap();
+		Ok(MoqTrackDemand::new(guard.as_ref().ok_or(MoqError::Closed)?.demand()))
 	}
 
 	/// Create a handler for uncached group fetches before accepting this track.

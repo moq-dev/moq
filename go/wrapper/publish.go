@@ -150,6 +150,15 @@ func (r *TrackRequest) Name() (string, error) {
 	return r.inner.Name()
 }
 
+// Demand watches this track's subscribers, including after accepting it.
+func (r *TrackRequest) Demand() (*TrackDemand, error) {
+	inner, err := r.inner.Demand()
+	if err != nil {
+		return nil, err
+	}
+	return &TrackDemand{inner: inner}, nil
+}
+
 // Dynamic creates a fetch handler before accepting this requested track.
 func (r *TrackRequest) Dynamic() (*TrackDynamic, error) {
 	inner, err := r.inner.Dynamic()
@@ -373,6 +382,15 @@ func (r *GroupRequest) Priority() uint8 {
 	return r.inner.Priority()
 }
 
+// Demand returns a watch-only handle to whether any caller still wants the group.
+func (r *GroupRequest) Demand() (*GroupDemand, error) {
+	inner, err := r.inner.Demand()
+	if err != nil {
+		return nil, err
+	}
+	return &GroupDemand{inner: inner}, nil
+}
+
 // Accept accepts the request and returns a producer for the group.
 func (r *GroupRequest) Accept() (*GroupProducer, error) {
 	inner, err := r.inner.Accept()
@@ -385,6 +403,37 @@ func (r *GroupRequest) Accept() (*GroupProducer, error) {
 // Abort rejects the fetch with an application error code.
 func (r *GroupRequest) Abort(errorCode uint16) error {
 	return r.inner.Abort(errorCode)
+}
+
+// GroupDemand watches the callers waiting on a requested group.
+//
+// It is weak: holding it does not keep the request alive. The last caller to
+// leave withdraws the request, so once unused, demand never returns: drop the
+// request. Waits fail once the request is answered: ErrClosed if it was
+// dropped, otherwise the error the accept or reject left for the waiting
+// fetches.
+type GroupDemand struct {
+	inner *ffi.MoqGroupDemand
+}
+
+// Sequence is the sequence of the group this watches.
+func (d *GroupDemand) Sequence() uint64 {
+	return d.inner.Sequence()
+}
+
+// IsUsed reports whether the group has at least one waiting caller right now.
+func (d *GroupDemand) IsUsed() bool {
+	return d.inner.IsUsed()
+}
+
+// Used blocks until the group has at least one waiting caller.
+func (d *GroupDemand) Used(ctx context.Context) error {
+	return d.inner.Used(ctx)
+}
+
+// Unused blocks until the group has no waiting callers.
+func (d *GroupDemand) Unused(ctx context.Context) error {
+	return d.inner.Unused(ctx)
 }
 
 // AudioProducer pushes raw PCM and lets libopus encode it on the way out.
@@ -416,9 +465,9 @@ func (a *AudioProducer) Unused(ctx context.Context) error {
 	return a.inner.Unused(ctx)
 }
 
-// ResetEpoch re-anchors the timeline to the next frame after an idle gap.
-func (a *AudioProducer) ResetEpoch() error {
-	return a.inner.ResetEpoch()
+// Reanchor re-anchors the timeline to the next frame after an idle gap.
+func (a *AudioProducer) Reanchor() error {
+	return a.inner.Reanchor()
 }
 
 // Write pushes one frame of PCM in the configured input format.

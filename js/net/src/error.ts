@@ -36,6 +36,8 @@ export const SessionCode = Object.freeze(
 		Unauthorized: 0x2 as SessionCode,
 		/** A protocol rule was broken; the session is unusable. */
 		ProtocolViolation: 0x3 as SessionCode,
+		/** A request ID was reused or violated the negotiated draft’s order or parity rules. */
+		InvalidRequestId: 0x4 as SessionCode,
 		/** A key-value pair was malformed or repeated more than allowed. */
 		KeyValueFormatting: 0x6 as SessionCode,
 		/** The peer went past what the session allows: a request ID past MAX_REQUEST_ID, or too many announcements or subscriptions. */
@@ -44,8 +46,12 @@ export const SessionCode = Object.freeze(
 		GoawayTimeout: 0x10 as SessionCode,
 		/** A control message took too long. */
 		Timeout: 0x11 as SessionCode,
+		/** A token registration would exceed the advertised token cache size, which is 0 when unadvertised. */
+		AuthTokenCacheOverflow: 0x13 as SessionCode,
 		/** No version could be negotiated. */
 		Version: 0x15 as SessionCode,
+		/** A token named an alias that was never registered. */
+		UnknownAuthTokenAlias: 0x17 as SessionCode,
 	} as const),
 );
 
@@ -96,6 +102,8 @@ export const StreamCode = Object.freeze(
 		FrameTooLarge: 0x38 as StreamCode,
 		/** The broadcast is neither announced nor served, so there is no route to it. */
 		Unroutable: 0x36 as StreamCode,
+		/** The grant does not cover this request, or no longer does. The session stays up. */
+		Unauthorized: 0x3b as StreamCode,
 		/** A group grew past its cache budget and was aborted. */
 		GroupTooLarge: 0x32 as StreamCode,
 		/** A frame's timedness or timestamp doesn't match its track's timescale. */
@@ -294,9 +302,13 @@ export class RefusedRedirect extends Error {
  * @public
  */
 export class ProtocolViolation extends Error {
-	constructor(message: string, options?: { cause?: unknown }) {
+	/** The session code to close with: `ProtocolViolation` unless the draft names a more specific one. */
+	readonly code: SessionCode;
+
+	constructor(message: string, options?: { cause?: unknown; code?: SessionCode }) {
 		super(message, options);
 		this.name = "ProtocolViolation";
+		this.code = options?.code ?? SessionCode.ProtocolViolation;
 	}
 }
 
@@ -368,6 +380,16 @@ function localStreamCode(err: unknown): StreamCode {
 export function controlTimeout(cause: unknown): Stream {
 	const message = cause instanceof Error && cause.message ? cause.message : "control request timed out";
 	return new Stream(StreamCode.ControlTimeout, { cause, message });
+}
+
+/**
+ * The {@link StreamCode.Unauthorized} error for a request the grant does not cover, naming
+ * the broadcast. Unlike {@link SessionCode.Unauthorized}, it ends only this stream.
+ *
+ * @internal
+ */
+export function unauthorized(broadcast: string): Stream {
+	return new Stream(StreamCode.Unauthorized, { message: `unauthorized: ${broadcast}` });
 }
 
 /**
@@ -461,6 +483,24 @@ export function fromClose(info: WebTransportCloseInfo): Session | null {
 	const code = (info.closeCode ?? SessionCode.Cancel) as SessionCode;
 	if (code === SessionCode.Cancel) return null;
 	return new Session(code, { reason: info.reason });
+}
+
+// WebTransport rejects a close reason over 1024 bytes of UTF-8 by throwing, so a reason
+// built from peer-supplied data has to be bounded before it gets there. A broadcast path
+// is peer-supplied and long enough to reach this on its own.
+const MAX_CLOSE_REASON = 1024;
+
+/**
+ * The longest prefix of `text` that fits a session close reason. `encodeInto` stops on a
+ * whole code point, so `read` never lands mid-character the way slicing bytes would.
+ *
+ * @internal
+ */
+export function closeReason(text: string): string {
+	const encoder = new TextEncoder();
+	const buf = new Uint8Array(MAX_CLOSE_REASON);
+	const { read } = encoder.encodeInto(text, buf);
+	return text.slice(0, read);
 }
 
 /**

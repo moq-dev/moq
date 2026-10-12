@@ -17,7 +17,7 @@ async function readCatalog(broadcast: Broadcast): Promise<Catalog.Root | undefin
 	const effect = new Effect();
 	const track = new Track.Producer("catalog.json");
 	broadcast.catalog.serve(track, effect);
-	const catalog = await new Json.Snapshot.Consumer<Catalog.Root>({ track: track.subscribe() }).next();
+	const catalog = (await new Json.Snapshot.Consumer<Catalog.Root>({ track: track.subscribe() }).latest())?.value;
 	effect.close();
 	return catalog;
 }
@@ -138,7 +138,7 @@ test("serves the catalog through a shared static track", async () => {
 	if (!net) throw new Error("expected a network producer once connected");
 
 	const subscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
-	const catalog = await new Json.Snapshot.Consumer<Catalog.Root>({ track: subscriber }).next();
+	const catalog = (await new Json.Snapshot.Consumer<Catalog.Root>({ track: subscriber }).latest())?.value;
 	expect(catalog?.video?.renditions.video?.codec).toBe("avc1.640028");
 
 	// Dropping the subscriber closes the served track; the broadcast keeps running for the next viewer.
@@ -200,14 +200,14 @@ test("keeps the current catalog snapshot for a reconnecting viewer", async () =>
 		if (!net) throw new Error("expected a network producer once connected");
 
 		const first = net.track(Broadcast.CATALOG_TRACK).subscribe();
-		expect((await new Json.Snapshot.Consumer<Catalog.Root>({ track: first }).next())?.video).toBeDefined();
+		expect((await new Json.Snapshot.Consumer<Catalog.Root>({ track: first }).latest())?.value.video).toBeDefined();
 		first.close();
 
 		// A reconnect past the idle cache window must still receive the live track's newest
 		// snapshot instead of waiting forever for an edit that may never come.
 		now += 60_000;
 		const second = net.track(Broadcast.CATALOG_TRACK).subscribe();
-		expect((await new Json.Snapshot.Consumer<Catalog.Root>({ track: second }).next())?.video).toBeDefined();
+		expect((await new Json.Snapshot.Consumer<Catalog.Root>({ track: second }).latest())?.value.video).toBeDefined();
 		second.close();
 
 		broadcast.close();

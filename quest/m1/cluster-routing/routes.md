@@ -26,7 +26,11 @@ Decided 2026-10-01 (see the [line's decisions](/quest/m1/cluster-routing/README.
   and lite-07's restart message from
   Restart keeps its meaning. On a
   route without an epoch, the source is the origin node and its ANNOUNCE: a
-  new one at the same path is a restart.
+  new one at the same path is a restart. This is routing provenance, not
+  permission to stitch. A concrete serving-route change without an epoch
+  remains Restart even when the origin node is unchanged; only a matching
+  explicit epoch or the separately proven Takeover operation preserves an
+  instance. Test a same-origin next-hop change with no epoch.
   ANNOUNCE_UPDATE re-prices it and ANNOUNCE_END ends one broadcast while the
   route stays up. An announce never changes its Route ID: another origin
   serving the same path is another ANNOUNCE. An ANNOUNCE naming an unknown
@@ -73,7 +77,7 @@ Decided 2026-10-01 (see the [line's decisions](/quest/m1/cluster-routing/README.
 - Origin selection keeps `route_order`'s shape and swaps its inputs: the
   candidates become the origin nodes announcing the path, ranked by longest
   prefix, then the newest epoch, then the link's preference
-  ([Multi-CDN endpoints](/quest/m1/cluster-routing/multi-cdn.md)), then the
+  (`origin::Producer::with_preference`), then the
   route metric to the node, then the path-keyed rendezvous hash, with the
   origin node id breaking a full tie.
 - Down-only bit: set on a route learned on an upstream link, kept across

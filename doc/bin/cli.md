@@ -114,7 +114,7 @@ the delay; a frame that cannot arrive in time at the rate fails the export.
 ```bash
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang play
 moq ... play --delay 500ms          # fix the delay instead of measuring it
-moq ... play --no-video             # audio only
+moq ... play --no-video             # audio only, without a window
 ```
 
 Decodes H.264, H.265, and AV1 video with the platform hardware decoder where
@@ -127,12 +127,23 @@ default, `auto`, sizes the buffer to how unevenly audio arrives, with the same
 [algorithm](/concept/audio-jitter) as the browser player. A duration fixes the
 delay and is also how long a stalled group is waited on before it is skipped.
 Each role follows the catalog, switching rendition when the publisher retires
-the one playing. Playback is behind the `play` feature, since it pulls in
-windowing and audio-device dependencies:
+the one playing.
+
+The broadcast's announcement is its online signal, followed until the window
+closes. Playback starts when the name is announced. A
+[restarted publisher](#publisher-runs) starts it over on the new run, with a
+fresh catalog, decoders, and clock. When the announcement ends, what is playing
+finishes and the player waits for the name to return. The log names each run's
+epoch. A catalog with nothing this build can play still ends the player.
+
+Playback is behind the `play` feature, since it pulls in windowing and
+audio-device dependencies:
 
 ```bash
 cargo install moq-cli --no-default-features --features "iroh,noq,websocket,play"
 ```
+
+`moq play` skips disabled renditions. If none are enabled, it waits for a later catalog. Disabling the current rendition stops it and selects an enabled replacement.
 
 ## Capture
 
@@ -161,6 +172,9 @@ feature (links libpipewire).
 moq --connect https://relay.example.com/anon --broadcast cam.hang transcode
 moq ... transcode --rung 720:2500000 --rung 360:600000 --encoder nvenc --decoder nvdec
 ```
+
+Rung sizes are the coded frame's short side. A 1080x1920 portrait source
+produces 720x1280 and 360x640 rungs. Catalog rotation is preserved.
 
 Publishes `cam.hang/transcode.hang` whose catalog references the source's
 rendition and adds lower rungs that are decoded and encoded only while someone
@@ -304,10 +318,15 @@ keyframe. The output's PCR follows the source's clock within what ISO/IEC
 13818-1 allows. `--delay 0` writes frames in arrival order and drops nothing.
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
-long for a restarted publisher instead, and marks the break in the stream
-(PCR discontinuity, PAT/PMT re-sent). An export that fails while the broadcast
-stays up, such as on a codec TS cannot carry, exits 1 without lingering. Only
-`ts` can mark a restart, so the other formats refuse `--linger`.
+long for the same publisher instance to come back, and carries on with the same
+stream. A replacement (a restarted publisher, under a new
+[epoch](/concept/moq-lite#publisher-epochs)) exits 1 unless `--stitch` follows
+it as a full program switch: a new PMT from its catalog, with every PID flagging
+the break. Without `--stitch` the export stays on the old publisher while it is
+up. Only lite-07 sessions carry epochs, so on the default version every return
+is a replacement. An export that fails while the broadcast stays up, such as on
+a codec TS cannot carry, exits 1 without lingering. Only `ts` can mark a break,
+so the other formats refuse `--linger`.
 
 ## Debugging
 

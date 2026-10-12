@@ -120,10 +120,13 @@ impl Session {
 			let _consume = consume;
 
 			let res = tokio::select! {
-				// close() requested: a clean shutdown delivers a terminal 0.
-				_ = closed.1 => Ok(()),
-				res = Self::report(callback, reconnect) => res,
+				// close() requested: drain what the session queued, then close it.
+				_ = closed.1 => reconnect.clone().close().await.map_err(map_connect_error),
+				res = Self::report(callback, reconnect.clone()) => res,
 			};
+			// The terminal callback waits for the close to reach the peer, so a caller that exits
+			// on it doesn't leave the peer to time the connection out.
+			client.close().await;
 
 			// Deliver one final terminal callback (0 = closed, < 0 = error), then
 			// drop the entry. Pull it out from under the lock so the callback never
@@ -199,7 +202,7 @@ impl Session {
 			}));
 		}
 
-		// A server-accepted session is a single transport, so it only ever reaches epoch 1.
+		// A server-accepted session is a single transport, so it only ever connects once.
 		callback.call(1);
 		Err(session.closed().await.into())
 	}
@@ -248,7 +251,7 @@ impl Session {
 		}
 	}
 
-	/// Forward connection epochs to the status callback until the reconnect loop stops.
+	/// Forward connect counts to the status callback until the reconnect loop stops.
 	///
 	/// Returns the terminal error via `?`. Disconnects aren't reported: status 0 is reserved for a
 	/// clean close (delivered as the terminal callback once the task ends).
@@ -257,11 +260,11 @@ impl Session {
 		loop {
 			if let moq_tokio::Status::Connected = reconnect.status().await.map_err(map_connect_error)? {
 				connects += 1;
-				// Positive status carries the connection epoch, so callers can tell a
+				// Positive status carries the connect count, so callers can tell a
 				// reconnect (>1) from the first connect (1). No lock is held, so the C
 				// callback is free to re-enter moq-c.
 				let code = i32::try_from(connects)
-					.context("connection epoch exceeded i32::MAX")
+					.context("connect count exceeded i32::MAX")
 					.map_err(|err| Error::Connect(Arc::new(err)))?;
 				callback.call(code);
 			}

@@ -486,7 +486,11 @@ async fn decode(
 	mut catalog: PublishCatalog,
 	mut input: impl tokio::io::AsyncRead + Unpin,
 ) -> anyhow::Result<()> {
-	let mut buffer = bytes::BytesMut::new();
+	// An empty BytesMut grows to only 64 bytes and clearing it keeps that capacity.
+	// Stdin dispatches every read to a blocking thread, so those tiny reads can
+	// backpressure a live feed. Reserve a full IO chunk; read_buf still returns
+	// whatever is available without waiting to fill it.
+	let mut buffer = bytes::BytesMut::with_capacity(64 * 1024);
 
 	// Counters reported so far, so only the change is logged. A live feed is
 	// diagnosed by the rate at which these climb, and stdin may never end, so
@@ -749,12 +753,19 @@ pub(crate) mod tests {
 		// `catalog`, the producers, and `import` stay alive: the exporter subscribes to
 		// the retained tracks.
 		drain(
-			Export::with_ts(moq_mux::Source::new(origin.consume(), "cli"), CatalogFormat::Hang)
+			Export::with_ts(resolved(&origin, "cli").await, CatalogFormat::Hang)
 				.await
 				.unwrap()
 				.with_delay(RECORDING_MAX_AGE),
 		)
 		.await
+	}
+
+	/// A source for the broadcast at `path`, resolved through `origin`.
+	async fn resolved(origin: &moq_net::origin::Producer, path: &str) -> moq_mux::Source {
+		let consumer = origin.consume();
+		let broadcast = consumer.request_broadcast(path, None).await.unwrap();
+		moq_mux::Source::new(consumer, broadcast)
 	}
 
 	/// The export's delay, long enough to reach the ancillary tracks: these tests publish a
@@ -800,7 +811,7 @@ pub(crate) mod tests {
 		// Subscribe side: the same `with_ts` call `run_ts` makes, re-emitting the
 		// ancillary streams verbatim.
 		let output = drain(
-			Export::with_ts(moq_mux::Source::new(origin.consume(), "cli"), format)
+			Export::with_ts(resolved(&origin, "cli").await, format)
 				.await
 				.unwrap()
 				.with_delay(RECORDING_MAX_AGE),
@@ -1152,6 +1163,81 @@ pub(crate) mod tests {
 			before - skew <= wall && wall <= after + skew,
 			"the first frame is live on arrival"
 		);
+	}
+
+	/// A ready TS packet is consumed in one read, without splitting it into blocking
+	/// stdin handoffs smaller than the packet itself.
+	#[tokio::test(start_paused = true)]
+	async fn stdin_reads_whole_available_packets() {
+		struct Packets<'a> {
+			remaining: &'a [u8],
+			reads: usize,
+		}
+		impl tokio::io::AsyncRead for Packets<'_> {
+			fn poll_read(
+				mut self: std::pin::Pin<&mut Self>,
+				_: &mut std::task::Context<'_>,
+				buffer: &mut tokio::io::ReadBuf<'_>,
+			) -> std::task::Poll<std::io::Result<()>> {
+				self.reads += 1;
+				let n = self.remaining.len().min(188).min(buffer.remaining());
+				buffer.put_slice(&self.remaining[..n]);
+				self.remaining = &self.remaining[n..];
+				std::task::Poll::Ready(Ok(()))
+			}
+		}
+
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
+		#[allow(irrefutable_let_patterns)]
+		let Source::Stream { decoder, catalog } = publish.source else {
+			panic!("expected a stream source");
+		};
+		let mut input = Packets {
+			remaining: BBB,
+			reads: 0,
+		};
+		decode(decoder, catalog, &mut input).await.unwrap();
+		assert_eq!(
+			input.reads,
+			BBB.len().div_ceil(188) + 1,
+			"one read per available packet, then EOF"
+		);
+	}
+
+	/// Reports file-backed import throughput, including the blocking IO handoffs used by stdin.
+	#[tokio::test]
+	#[ignore = "benchmark, run in nightly CI"]
+	async fn benchmark_stream_import() {
+		use std::io::Write;
+
+		const INPUT: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/bbb_cbr.ts");
+		let mut null = [0xff; 188];
+		null[..4].copy_from_slice(&[0x47, 0x1f, 0xff, 0x10]);
+		let padding = null.repeat(INPUT.len() / 188);
+		for copies in [1, 16, 128] {
+			let mut file = tempfile::NamedTempFile::new().unwrap();
+			file.write_all(INPUT).unwrap();
+			for _ in 1..copies {
+				file.write_all(&padding).unwrap();
+			}
+			file.flush().unwrap();
+			let input = tokio::fs::File::open(file.path()).await.unwrap();
+			let broadcast = moq_net::broadcast::Info::new().produce();
+			let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
+			#[allow(irrefutable_let_patterns)]
+			let Source::Stream { decoder, catalog } = publish.source else {
+				panic!("expected a stream source");
+			};
+			let start = std::time::Instant::now();
+			decode(decoder, catalog, input).await.unwrap();
+			let elapsed = start.elapsed();
+			let bytes = INPUT.len() * copies;
+			println!(
+				"bytes={bytes}: {elapsed:?}, {:.2} Mbit/s",
+				bytes as f64 * 8.0 / elapsed.as_secs_f64() / 1e6
+			);
+		}
 	}
 
 	/// At stdin EOF the catalog ends cleanly and still lists the renditions, so a

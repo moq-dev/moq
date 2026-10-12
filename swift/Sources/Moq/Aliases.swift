@@ -48,15 +48,16 @@ public typealias VideoCodec = MoqFFI.MoqVideoCodec
 public typealias VideoEncoderKind = MoqFFI.MoqVideoEncoderKind
 /// A best-effort raw-track datagram as received: sequence, timestamp, and payload.
 public typealias Datagram = MoqFFI.MoqDatagram
-/// A path-prefix route: the prefix it covers, relay hop ids (oldest first),
-/// and its static production and link cost, lower wins.
+/// A path-prefix route: the publisher `epoch` it serves (`nil` when unknown),
+/// relay hop ids (oldest first), and its static production and link cost,
+/// lower wins.
 public typealias Route = MoqFFI.MoqRoute
 /// A route over a prefix: the origin-relative `prefix`, what each filter
 /// wildcard matched (`captures`, `nil` for a partial overlap), and the `route`
 /// serving it. Resolve a path with `OriginConsumer.requestBroadcast`.
 public typealias Announce = MoqFFI.MoqAnnounce
-/// What an `AnnounceConsumer` yields: `.start`, `.update`, or `.end`, each
-/// carrying an `Announce`.
+/// What an `AnnounceConsumer` yields: `.start`, `.update`, `.end`, or
+/// `.restart` (request the path again), each carrying an `Announce`.
 public typealias AnnounceEvent = MoqFFI.MoqAnnounceEvent
 /// Per-subscription delivery preferences: priority, group ordering, latency
 /// budget, and group range.

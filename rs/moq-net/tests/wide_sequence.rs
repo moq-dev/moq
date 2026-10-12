@@ -7,6 +7,11 @@ use std::time::Duration;
 use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
 	support::harness::spawn(driver);
@@ -24,8 +29,8 @@ async fn wide_sequence_fails_only_its_subscription() {
 	let client = produce_origin(3);
 
 	let broadcast = publisher.create_broadcast("bench").unwrap();
-	let wide = broadcast.create_track("wide", None).unwrap();
-	let narrow = broadcast.create_track("narrow", None).unwrap();
+	let wide = broadcast.create_track("wide", timed()).unwrap();
+	let narrow = broadcast.create_track("narrow", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 	let mut group = wide.create_group(moq_net::group::Info { sequence: WIDE }).unwrap();
 	group.write_frame(Timestamp::ZERO, b"wide".as_ref()).unwrap();
@@ -80,8 +85,8 @@ async fn a_later_wide_group_fails_only_that_subscription() {
 	let client = produce_origin(3);
 
 	let broadcast = publisher.create_broadcast("bench").unwrap();
-	let wide = broadcast.create_track("wide", None).unwrap();
-	let narrow = broadcast.create_track("narrow", None).unwrap();
+	let wide = broadcast.create_track("wide", timed()).unwrap();
+	let narrow = broadcast.create_track("narrow", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 	let mut group = wide.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, b"first".as_ref()).unwrap();

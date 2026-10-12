@@ -5,6 +5,7 @@ import * as Cluster from "./cluster.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { Parameters } from "./parameters.ts";
+import { MalformedAuthToken } from "./token.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 // In draft-14, ANNOUNCE is renamed to PUBLISH_NAMESPACE
@@ -112,7 +113,12 @@ export class PublishNamespaceUpdate {
 		try {
 			return await Message.decode(r, (rd) => PublishNamespaceUpdate.#decode(rd, version));
 		} catch (err) {
-			if (err instanceof ProtocolViolation || err instanceof SessionError || err instanceof StreamError)
+			if (
+				err instanceof ProtocolViolation ||
+				err instanceof SessionError ||
+				err instanceof StreamError ||
+				err instanceof MalformedAuthToken
+			)
 				throw err;
 			if (typeof err === "object" && err !== null) {
 				const source = (err as { source?: unknown }).source;

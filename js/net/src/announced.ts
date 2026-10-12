@@ -5,7 +5,7 @@
  */
 import { type GetPromise, Once, Signal } from "@moq/signals";
 import type { Route } from "./hop.js";
-import type * as Path from "./path.js";
+import * as Path from "./path.js";
 
 /**
  * A route over a prefix, delivered inside an {@link Event}.
@@ -162,4 +162,65 @@ export class Consumer {
 	close(abort?: Error) {
 		closeState(this.#state, abort);
 	}
+}
+
+/**
+ * A reducer from the announcements of the routes covering `path` to those of the one route
+ * serving it: the most specific. Another route taking over is a `restart`, or an `update` when
+ * both carry the same epoch, since those serve the same bytes. Routes beneath `path` serve
+ * other broadcasts and are skipped, as is any change no request sees.
+ *
+ * While nothing serves the path, the rest of a batch (one change to the table) folds into one
+ * `start`, so the replay a late follower begins with (a covering prefix, then the exact path
+ * beneath it) starts on the route serving the path rather than starting and restarting. Once
+ * something serves it, each change comes through on its own: an `end` followed by a `start` is
+ * a gap that ended any request on the old route, even when both routes carry one epoch.
+ * Synchronous, so a followed stream delivers in step with an announced one. Mirrors
+ * `announce::Follow` in rs/moq-net.
+ *
+ * @internal
+ */
+export function follower(path: Path.Valid): (events: Event[]) => Event[] {
+	// Every route standing over the path, by prefix.
+	const covering = new Map<Path.Valid, Announce>();
+	const serving = () => {
+		let best: Announce | undefined;
+		for (const announce of covering.values()) {
+			if (!best || announce.prefix.length > best.prefix.length) best = announce;
+		}
+		return best;
+	};
+
+	// Apply one route's event, returning what it means for the path alone.
+	const fold = ({ kind, ...announce }: Event): Event | undefined => {
+		if (!Path.hasPrefix(announce.prefix, path)) return undefined;
+		const before = serving();
+		if (kind === "end") covering.delete(announce.prefix);
+		else covering.set(announce.prefix, announce);
+		const after = serving();
+
+		if (!before) return after && { kind: "start", ...after };
+		if (!after) return { kind: "end", ...before };
+		if (before.prefix !== after.prefix) {
+			const same = before.route.epoch !== undefined && before.route.epoch === after.route.epoch;
+			return { kind: same ? "update" : "restart", ...after };
+		}
+		// A route less specific than the serving one changing is skipped: no request sees it.
+		if (after.prefix !== announce.prefix) return undefined;
+		return { kind: kind === "restart" ? "restart" : "update", ...after };
+	};
+
+	return (events) => {
+		const reduced: Event[] = [];
+		let idle = !serving();
+		for (const event of events) {
+			const change = fold(event);
+			if (idle || !change) continue;
+			reduced.push(change);
+			idle = change.kind === "end";
+		}
+		const after = serving();
+		if (idle && after) reduced.push({ kind: "start", ...after });
+		return reduced;
+	};
 }

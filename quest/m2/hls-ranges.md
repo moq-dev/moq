@@ -32,17 +32,12 @@ Open, to settle in the PR with a recommendation:
 
 A range that ends in the future grows like an event playlist until its end
 passes. Every edge must list the same segments and `EXT-X-MEDIA-SEQUENCE` for the
-same range, regardless of when it joined. `Config::history` starts at the
-records restated when an exporter joins, so this relies on
-[replay history](/quest/m1/archive/replay-history.md); test two edges that
-join at different times.
+same range, regardless of when it joined. `Config::history` reads the stored
+timeline groups from the start, so a range older than the restated records is
+servable; test two edges that join at different times.
 
 Tests: a recording longer than the default window, clipped at its start, in
 its middle, and across the live edge; a range on a live-only timeline is
 refused. Document it in `doc/bin/hls.md`.
 
 Public API: `moq-hls` export gains range addressing. Wire: none.
-
-## Required
-
-- [History from the start](/quest/m1/archive/replay-history.md) - reads stored timeline groups, which a range older than the restated records needs

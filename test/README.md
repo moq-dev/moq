@@ -8,6 +8,7 @@ tests live in each language's own justfile.
 | [interop](interop/README.md) | `just test interop` | every client built from this checkout interoperates |
 | [wasm](wasm/README.md) | `just test wasm` | the `@moq/wasm` bindings work in a real browser |
 | [ts](ts/README.md) | `just test ts` | the subscriber's `export ts` output is IRD-compliant |
+| [native-play](native-play/README.md) | `just test native-play` | the shipped headless player reaches a private Linux null audio device and exits cleanly |
 | [audio-quality](audio-quality/README.md) | `just test audio-quality` | browser audio playout stays within budget over an impaired path |
 | [drain](drain/README.md) | `just test drain` | a JS viewer migrates off a draining relay without a dropped group |
 | video | `just test video` | the `@moq/video` renderer paints through WebGPU and falls back to Canvas2D after losing the GPU |

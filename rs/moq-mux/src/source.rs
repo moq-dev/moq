@@ -1,49 +1,90 @@
-//! Export input: an origin plus the path of the broadcast whose catalog drives the export.
+//! Export input: an origin plus the catalog broadcast that drives the export.
 //!
 //! A hang catalog rendition may reference a track published in *another*
 //! broadcast via its `broadcast` field (a path relative to the catalog's
 //! broadcast, e.g. `./source`). Resolving that reference needs the catalog
 //! broadcast's own path and an [`moq_net::origin::Consumer`] to fetch the
-//! referenced broadcast from. [`Source`] bundles the two, and resolves both the
-//! catalog broadcast and any referenced broadcast through the same origin so
+//! referenced broadcast from. [`Source`] bundles the two, and resolves every
+//! referenced broadcast through the same origin so
 //! [`request_broadcast`](moq_net::origin::Consumer::request_broadcast) deduplicates
 //! shared subscriptions.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::task::{Poll, ready};
 
-use moq_net::AsPath;
+/// The broadcast held for each path, shared by a source's clones and its requests.
+type Pins = Arc<Mutex<HashMap<moq_net::PathOwned, moq_net::broadcast::Consumer>>>;
 
-/// The subscription side of an export: an origin and the path of the broadcast
-/// whose catalog drives it.
+/// The subscription side of an export: an origin and the catalog broadcast that drives it.
 ///
-/// The catalog broadcast and every rendition (including ones whose catalog
-/// `broadcast` field references a sibling broadcast) resolve against `origin`,
-/// so a source can always follow a cross-broadcast reference. Build one with
-/// [`Source::new`].
+/// Every rendition (including ones whose catalog `broadcast` field references a sibling
+/// broadcast) resolves against `origin`, so a source can always follow a cross-broadcast
+/// reference. Build one with [`Source::new`].
+///
+/// A source serves its own path from the broadcast it was built from, and keeps the first
+/// broadcast it resolves for each sibling. Every later request for a path is served from that
+/// handle ([`broadcast`](Self::broadcast), [`catalog`](Self::catalog),
+/// [`resolve`](Self::resolve), [`bind`](Self::bind), [`subscribe_track`](Self::subscribe_track),
+/// and an export's track requests). A route replaced after that is never resolved, epoch or
+/// not, so two publishers never splice into one export; a request on a held broadcast that has
+/// ended fails instead. Clones share the held broadcasts.
 #[derive(Clone)]
 pub struct Source {
 	origin: moq_net::origin::Consumer,
 	path: moq_net::PathOwned,
+	pins: Pins,
 }
 
 impl Source {
-	/// A source rooted at `origin`, driven by the catalog of the broadcast at `path`.
+	/// A source driven by the catalog of `broadcast`, resolving its references through `origin`.
 	///
-	/// `path` names the broadcast whose catalog is exported; a rendition's relative
-	/// `broadcast` reference is resolved against it. Both the catalog broadcast and any
-	/// referenced broadcast are fetched via
-	/// [`origin.request_broadcast`](moq_net::origin::Consumer::request_broadcast), so they
-	/// must be reachable through `origin` (by exact path, or served by a dynamic handler).
-	pub fn new(origin: moq_net::origin::Consumer, path: impl AsPath) -> Self {
+	/// `broadcast` is the catalog broadcast as resolved through `origin`: a rendition's relative
+	/// `broadcast` reference resolves against its [path](moq_net::broadcast::Info::path), and the
+	/// referenced broadcast is fetched via
+	/// [`origin.request_broadcast`](moq_net::origin::Consumer::request_broadcast), so it must be
+	/// reachable through `origin` (by exact path, or served by a dynamic handler). A standalone
+	/// broadcast has an empty path, so it is its own root and any `..` reference escapes.
+	pub fn new(origin: moq_net::origin::Consumer, broadcast: moq_net::broadcast::Consumer) -> Self {
+		let path = broadcast.info().path.clone();
+		let pins = HashMap::from([(path.clone(), broadcast)]);
 		Self {
 			origin,
-			path: path.as_path().to_owned(),
+			path,
+			pins: Arc::new(Mutex::new(pins)),
 		}
 	}
 
-	/// Resolve and subscribe to the catalog broadcast (the one at this source's path).
-	pub async fn broadcast(&self) -> crate::Result<moq_net::broadcast::Consumer> {
-		Ok(self.request_catalog().await?)
+	/// This source holding nothing but `broadcast` at its own path: an export switching to
+	/// another instance starts over from the broadcast it switched to.
+	pub(crate) fn switched(&self, broadcast: &moq_net::broadcast::Consumer) -> Self {
+		let pins = HashMap::from([(self.path.clone(), broadcast.clone())]);
+		Self {
+			origin: self.origin.clone(),
+			path: self.path.clone(),
+			pins: Arc::new(Mutex::new(pins)),
+		}
+	}
+
+	/// Serve this source's own path from `broadcast` from now on, as when the same instance
+	/// returns on a new route and the old broadcast's routes are gone.
+	pub(crate) fn pin(&self, broadcast: &moq_net::broadcast::Consumer) {
+		let mut pins = self.pins.lock().expect("pins poisoned");
+		pins.insert(self.path.clone(), broadcast.clone());
+	}
+
+	pub(crate) fn origin(&self) -> &moq_net::origin::Consumer {
+		&self.origin
+	}
+
+	pub(crate) fn path(&self) -> &moq_net::PathOwned {
+		&self.path
+	}
+
+	/// The catalog broadcast, the one at this source's path.
+	pub fn broadcast(&self) -> moq_net::broadcast::Consumer {
+		let pins = self.pins.lock().expect("pins poisoned");
+		pins.get(&self.path).expect("the own path is always held").clone()
 	}
 
 	/// Subscribe to this broadcast's catalog.
@@ -55,22 +96,24 @@ impl Source {
 		&self,
 		format: crate::catalog::CatalogFormat,
 	) -> crate::Result<crate::catalog::Consumer<E>> {
-		let broadcast = self.broadcast().await?;
-		crate::catalog::Consumer::new(&broadcast, format).await
+		crate::catalog::Consumer::new(&self.broadcast(), format).await
 	}
 
-	/// Wait for the broadcast to come back after `ended`, the one an export was reading, closes.
-	///
-	/// A broadcast that stays up never returns, so a clean catalog end that leaves it announced
-	/// waits here until the caller's own deadline. Bound the wait with a timeout.
-	pub async fn returned(&self, ended: &moq_net::broadcast::Consumer) -> crate::Result<moq_net::broadcast::Consumer> {
-		ended.closed().await;
-		Ok(self.origin.routed_broadcast(&self.path).await?)
+	/// The catalog broadcast, as a binding.
+	pub(crate) fn request_catalog(&self) -> Binding {
+		Binding::new(self.broadcast())
 	}
 
-	/// Begin resolving the catalog broadcast (the one at this source's path).
-	pub(crate) fn request_catalog(&self) -> kio::Pending<moq_net::origin::Requesting> {
-		self.origin.request_broadcast(&self.path, None)
+	/// The broadcast `path` is pinned to, or a lookup that pins its answer.
+	fn request_path(&self, path: &moq_net::PathOwned) -> Binding {
+		if let Some(pinned) = self.pins.lock().expect("pins poisoned").get(path) {
+			return Binding::new(pinned.clone());
+		}
+		Binding(Bound::Requested {
+			request: self.origin.request_broadcast(path, None).into_inner(),
+			pins: self.pins.clone(),
+			path: path.clone(),
+		})
 	}
 
 	/// Resolve a rendition's optional broadcast reference to an origin path.
@@ -97,33 +140,14 @@ impl Source {
 		})
 	}
 
-	/// Begin resolving the broadcast that serves a rendition, honoring an optional
-	/// cross-broadcast reference.
-	///
-	/// The broadcast is fetched from the origin, which deduplicates repeat requests for the same
-	/// reachable or dynamically served path so the catalog and every rendition share one upstream
-	/// subscription.
-	///
-	/// Fails with [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast) if `rel` walks
-	/// above the origin root, naming no broadcast.
-	pub(crate) fn request(
-		&self,
-		rel: Option<&moq_net::path::Relative<'_>>,
-	) -> crate::Result<kio::Pending<moq_net::origin::Requesting>> {
-		Ok(self.origin.request_broadcast(&self.target(rel)?, None))
-	}
-
-	/// The skipping counterpart to [`Self::request`], returning `None` when `rel` walks above
+	/// The skipping counterpart to [`Self::bind`], returning `None` when `rel` walks above
 	/// the origin root.
 	///
 	/// The exporters use it to drop a single bad rendition rather than fail the whole export.
 	/// [`Self::retain_valid`] already removes those renditions, so this is the second half of
 	/// the same policy rather than a different one.
-	pub(crate) fn try_request(
-		&self,
-		rel: Option<&moq_net::path::Relative<'_>>,
-	) -> Option<kio::Pending<moq_net::origin::Requesting>> {
-		Some(self.origin.request_broadcast(&self.resolve_reference(rel)?, None))
+	pub(crate) fn try_request(&self, rel: Option<&moq_net::path::Relative<'_>>) -> Option<Binding> {
+		Some(self.request_path(&self.resolve_reference(rel)?))
 	}
 
 	/// Remove renditions whose broadcast reference escapes above the origin root.
@@ -180,7 +204,7 @@ impl Source {
 		&self,
 		rel: Option<&moq_net::path::Relative<'_>>,
 	) -> crate::Result<moq_net::broadcast::Consumer> {
-		Ok(self.request(rel)?.await?)
+		self.bind(rel)?.broadcast().await
 	}
 
 	/// Start one broadcast request now and retain its result for repeated reads.
@@ -189,12 +213,14 @@ impl Source {
 	/// A remote or dynamic handler may answer later. The binding never retries a failed request
 	/// or resolves the path again after a publisher is replaced.
 	///
-	/// This always looks up the path, including for a self-reference. Use [`Binding::new`]
-	/// when the intended broadcast is already in hand.
+	/// A path this source already resolved binds to that broadcast; otherwise the origin is
+	/// asked, deduplicating repeat requests for one path so the catalog and every rendition share
+	/// one upstream subscription, and its answer is pinned. Use [`Binding::new`] when the
+	/// intended broadcast is already in hand.
 	///
 	/// Rejects an escaping reference exactly as [`resolve`](Self::resolve) does.
 	pub fn bind(&self, rel: Option<&moq_net::path::Relative<'_>>) -> crate::Result<Binding> {
-		Ok(Binding(Bound::Requested(self.request(rel)?.into_inner())))
+		Ok(self.request_path(&self.target(rel)?))
 	}
 
 	/// Resolve an optional cross-broadcast reference and subscribe to track `name`,
@@ -213,7 +239,7 @@ impl Source {
 		rel: Option<&moq_net::path::Relative<'_>>,
 		name: &str,
 	) -> crate::Result<moq_net::track::Subscriber> {
-		let broadcast = self.request(rel)?.await?;
+		let broadcast = self.bind(rel)?.broadcast().await?;
 		Ok(broadcast.track(name)?.subscribe(None).await?)
 	}
 }
@@ -231,7 +257,12 @@ enum Bound {
 	/// A broadcast the caller already holds.
 	Ready(moq_net::broadcast::Consumer),
 	/// A request issued when the binding was made.
-	Requested(moq_net::origin::Requesting),
+	Requested {
+		request: moq_net::origin::Requesting,
+		/// Where the answer is pinned, the first for its path winning.
+		pins: Pins,
+		path: moq_net::PathOwned,
+	},
 }
 
 impl Binding {
@@ -246,7 +277,12 @@ impl Binding {
 	pub fn poll_broadcast(&self, waiter: &kio::Waiter) -> Poll<crate::Result<moq_net::broadcast::Consumer>> {
 		match &self.0 {
 			Bound::Ready(broadcast) => Poll::Ready(Ok(broadcast.clone())),
-			Bound::Requested(request) => Poll::Ready(Ok(ready!(request.poll_ok(waiter))?)),
+			Bound::Requested { request, pins, path } => {
+				let broadcast = ready!(request.poll_ok(waiter))?;
+				// A request that raced another for the path takes the one pinned first.
+				let mut pins = pins.lock().expect("pins poisoned");
+				Poll::Ready(Ok(pins.entry(path.clone()).or_insert(broadcast).clone()))
+			}
 		}
 	}
 
@@ -306,12 +342,23 @@ pub(crate) fn produce_origin() -> moq_net::origin::Producer {
 	producer
 }
 
-/// Test helper: serve `broadcast` on a throwaway origin's dynamic handler and return a
-/// [`Source`] rooted at it, so exporter tests that build a local broadcast can still resolve
-/// it by path. The origin is leaked so the broadcast stays reachable for the source's
-/// lifetime (harmless in a test binary).
+/// Test helper: a [`Source`] for the broadcast at `path`, resolved through `origin`.
 #[cfg(test)]
-pub(crate) fn announced(broadcast: &moq_net::broadcast::Consumer) -> Source {
+pub(crate) async fn resolved(origin: &moq_net::origin::Producer, path: &str) -> Source {
+	let consumer = origin.consume();
+	let broadcast = consumer
+		.request_broadcast(path, None)
+		.await
+		.expect("the broadcast resolves");
+	Source::new(consumer, broadcast)
+}
+
+/// Test helper: serve `broadcast` at `test` (and every other path) on a throwaway origin's
+/// dynamic handler and return a [`Source`] built from it, so exporter tests that build a
+/// local broadcast still resolve references through an origin. The origin is leaked so the
+/// broadcast stays reachable for the source's lifetime (harmless in a test binary).
+#[cfg(test)]
+pub(crate) async fn announced(broadcast: &moq_net::broadcast::Consumer) -> Source {
 	let origin = produce_origin();
 	let dynamic = origin.dynamic("", Default::default()).unwrap();
 	let served = broadcast.clone();
@@ -320,7 +367,7 @@ pub(crate) fn announced(broadcast: &moq_net::broadcast::Consumer) -> Source {
 			request.accept(served.clone());
 		}
 	});
-	let source = Source::new(origin.consume(), "test");
+	let source = resolved(&origin, "test").await;
 	Box::leak(Box::new(origin));
 	source
 }
@@ -342,9 +389,11 @@ mod tests {
 	#[tokio::test]
 	async fn binding_retains_a_pending_request_across_cancelled_and_repeated_reads() {
 		let origin = produce_origin();
-		let dynamic = origin.dynamic("", Default::default()).unwrap();
-		let source = Source::new(origin.consume(), "live");
-		let binding = source.bind(None).unwrap();
+		let _catalog = origin.publish("pub", Default::default()).unwrap();
+		settle().await;
+		let source = resolved(&origin, "pub").await;
+		let dynamic = origin.dynamic("media", Default::default()).unwrap();
+		let binding = source.bind(Some(&Relative::new("media"))).unwrap();
 		let request = dynamic.requested_broadcast().await.unwrap();
 
 		assert!(
@@ -370,46 +419,87 @@ mod tests {
 		assert!(first.is_clone(&binding.broadcast().await.unwrap()));
 	}
 
+	/// A failed lookup pins nothing: the guarantee starts at a path's first resolution.
 	#[tokio::test]
 	async fn failed_binding_does_not_retry_a_later_publisher() {
 		let origin = produce_origin();
-		let source = Source::new(origin.consume(), "live");
-		let binding = source.bind(None).unwrap();
-		assert!(binding.broadcast().await.is_err());
-		let _publisher = origin.publish("live", Default::default()).unwrap();
+		let _catalog = origin.publish("pub", Default::default()).unwrap();
 		settle().await;
-		assert!(!source.broadcast().await.unwrap().is_closed());
+		let source = resolved(&origin, "pub").await;
+		let media = Relative::new("media");
+		let binding = source.bind(Some(&media)).unwrap();
+		assert!(binding.broadcast().await.is_err());
+		let _publisher = origin.publish("media", Default::default()).unwrap();
+		settle().await;
+		assert!(!source.resolve(Some(&media)).await.unwrap().is_closed());
 		assert!(binding.broadcast().await.is_err());
 	}
 
-	#[tokio::test]
-	async fn returned_waits_for_a_new_broadcast_after_the_old_one_ends() {
+	/// A source serves its path from the broadcast it was built from, even when a replacement
+	/// already won the path: a track only the replacement carries is not read from it.
+	#[tokio::test(start_paused = true)]
+	async fn a_source_keeps_the_broadcast_it_was_built_from() {
 		let origin = produce_origin();
-		let first = origin.publish("live", Default::default()).unwrap();
+		let _old = origin.publish("live", Default::default()).unwrap();
 		settle().await;
-		let source = Source::new(origin.consume(), "live");
-		let ended = source.broadcast().await.unwrap();
+		let consumer = origin.consume();
+		let first = consumer.request_broadcast("live", None).await.unwrap();
 
-		let returned = source.returned(&ended);
-		tokio::pin!(returned);
-		tokio::select! {
-			biased;
-			_ = &mut returned => panic!("the broadcast is still up"),
-			_ = settle() => {}
+		let new = origin.publish("live", Default::default()).unwrap();
+		let _late = new.create_track("late", None).unwrap();
+		settle().await;
+		let source = Source::new(consumer, first.clone());
+		assert!(source.broadcast().is_clone(&first));
+		assert!(source.resolve(None).await.unwrap().is_clone(&first));
+		assert!(
+			source.subscribe_track(None, "late").await.is_err(),
+			"the replacement's track is never read"
+		);
+	}
+
+	/// A sibling reference stays on the broadcast it first resolved too.
+	#[tokio::test(start_paused = true)]
+	async fn a_source_keeps_the_sibling_it_resolved() {
+		let origin = produce_origin();
+		let _catalog = origin.publish("a/pub", Default::default()).unwrap();
+		let _old = origin.publish("a/source", Default::default()).unwrap();
+		settle().await;
+		let source = resolved(&origin, "a/pub").await;
+		let sibling = Relative::new("./source");
+		let first = source.resolve(Some(&sibling)).await.expect("the sibling resolves");
+
+		let new = origin.publish("a/source", Default::default()).unwrap();
+		let _late = new.create_track("late", None).unwrap();
+		settle().await;
+		assert!(source.resolve(Some(&sibling)).await.unwrap().is_clone(&first));
+		assert!(
+			source.subscribe_track(Some(&sibling), "late").await.is_err(),
+			"the replacement's track is never read"
+		);
+		let bound = source.bind(Some(&sibling)).unwrap().broadcast().await.unwrap();
+		assert!(bound.is_clone(&first), "a binding honors the pin too");
+	}
+
+	/// Every self-reference serves the broadcast the source was built from, even once it
+	/// ended and a replacement took the path.
+	#[tokio::test(start_paused = true)]
+	async fn self_references_keep_the_catalog_broadcast_after_replacement() {
+		let origin = produce_origin();
+		let old = origin.publish("a/live", Default::default()).unwrap();
+		settle().await;
+		let source = resolved(&origin, "a/live").await;
+		drop(old);
+		let _replacement = origin.publish("a/live", Default::default()).unwrap();
+		settle().await;
+
+		for reference in [None, Some(""), Some("live"), Some("./live"), Some("../a/live")] {
+			let rel = reference.map(Relative::new);
+			let bound = source.bind(rel.as_ref()).unwrap().broadcast().await.unwrap();
+			assert!(
+				bound.is_closed(),
+				"{reference:?} must keep the original catalog broadcast"
+			);
 		}
-
-		// Gone, and nothing serves the path yet.
-		drop(first);
-		tokio::select! {
-			biased;
-			_ = &mut returned => panic!("nothing has published the path again"),
-			_ = settle() => {}
-		}
-
-		let _second = origin.publish("live", Default::default()).unwrap();
-		let back = returned.await.unwrap();
-		assert!(!back.is_closed());
-		assert!(!back.is_clone(&ended));
 	}
 
 	#[tokio::test]
@@ -419,18 +509,20 @@ mod tests {
 		_producer.announce(Default::default()).unwrap();
 		settle().await;
 
-		let source = Source::new(origin.consume(), "a/pub");
+		let source = resolved(&origin, "a/pub").await;
 
 		// No reference and an empty reference both resolve to the catalog broadcast.
 		source
-			.request(None)
+			.bind(None)
 			.expect("no reference is always resolvable")
+			.broadcast()
 			.await
 			.expect("catalog broadcast should resolve");
 		let empty = Relative::empty();
 		source
-			.request(Some(&empty))
+			.bind(Some(&empty))
 			.expect("empty reference is always resolvable")
+			.broadcast()
 			.await
 			.expect("empty reference should resolve to the catalog broadcast");
 	}
@@ -444,7 +536,7 @@ mod tests {
 		let _video = producer.create_track("video", None).unwrap();
 		settle().await;
 
-		let source = Source::new(origin.consume(), "a/pub");
+		let source = resolved(&origin, "a/pub").await;
 		source
 			.subscribe_track(None, "video")
 			.await
@@ -459,7 +551,7 @@ mod tests {
 		let _video = producer.create_track("video", None).unwrap();
 		settle().await;
 
-		let source = Source::new(origin.consume(), "a/pub");
+		let source = resolved(&origin, "a/pub").await;
 
 		// Names the catalog within its own parent.
 		let rel = Relative::new("./pub");
@@ -483,7 +575,7 @@ mod tests {
 		let _clamped_video = clamped.create_track("video", None).unwrap();
 		settle().await;
 
-		let source = Source::new(origin.consume(), "a/pub");
+		let source = resolved(&origin, "a/pub").await;
 
 		// A reference resolves against the catalog's parent (`a`), so a second `..` walks
 		// above the root. A lone `..` stops at the root, which still names a broadcast, so
@@ -494,7 +586,7 @@ mod tests {
 				source.resolve_reference(Some(&rel)).is_none(),
 				"{reference} should escape"
 			);
-			assert!(source.request(Some(&rel)).is_err(), "{reference} should be rejected");
+			assert!(source.bind(Some(&rel)).is_err(), "{reference} should be rejected");
 
 			// Neither `elsewhere` nor the catalog broadcast answers it: the rendition names
 			// no broadcast at all.
@@ -511,10 +603,16 @@ mod tests {
 		}
 	}
 
+	/// A source over a broadcast created at `a/pub`, built without awaiting the origin.
+	fn created(origin: &moq_net::origin::Producer) -> Source {
+		let broadcast = origin.create_broadcast("a/pub").unwrap().consume();
+		Source::new(origin.consume(), broadcast)
+	}
+
 	#[test]
 	fn escaping_rendition_is_removed_while_valid_sibling_remains() {
 		let origin = produce_origin();
-		let source = Source::new(origin.consume(), "a/pub");
+		let source = created(&origin);
 		let mut escaped = VideoConfig::new(H264 {
 			profile: 0x42,
 			constraints: 0,
@@ -540,7 +638,7 @@ mod tests {
 	#[test]
 	fn escaping_text_rendition_is_removed() {
 		let origin = produce_origin();
-		let source = Source::new(origin.consume(), "a/pub");
+		let source = created(&origin);
 
 		let mut escaped = hang::catalog::TextConfig::new(hang::catalog::TextFormat::Vtt);
 		escaped.broadcast = Some(Relative::new("../../source").to_owned());
@@ -568,7 +666,7 @@ mod tests {
 		let _video = referenced.create_track("video", None).unwrap();
 		settle().await;
 
-		let source = Source::new(origin.consume(), "a/pub");
+		let source = resolved(&origin, "a/pub").await;
 
 		// The reference resolves to `a/source`, whose "video" track answers the subscribe.
 		let rel = Relative::new("./source");
@@ -590,7 +688,7 @@ mod tests {
 		let _video = referenced.create_track("video", None).unwrap();
 		settle().await;
 
-		let source = Source::new(origin.consume(), "a/source/transcode");
+		let source = resolved(&origin, "a/source/transcode").await;
 		let rel = Relative::new(".");
 		source
 			.subscribe_track(Some(&rel), "video")
@@ -610,7 +708,7 @@ mod tests {
 		let _video = root.create_track("video", None).unwrap();
 		settle().await;
 
-		let source = Source::new(origin.consume(), "top");
+		let source = resolved(&origin, "top").await;
 		let rel = Relative::new(".");
 		source
 			.subscribe_track(Some(&rel), "video")

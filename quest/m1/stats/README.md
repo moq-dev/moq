@@ -81,7 +81,8 @@ kind.
   - `echo::Track`: received, decoded, late, decode errors, stalls,
     stalled duration, underruns, newest arrival, latency.
   - A kind's unused fields are omitted.
-  - `transport` is one type at both roles: rtt, rate, loss, sample age. A
+  - `transport` is one type at both roles: rtt and rate gauges, cumulative
+    lost-byte and lost-packet counters, and sample age (2026-10-10 audit). A
     browser has only PROBE rtt until
     [#2733](https://github.com/moq-dev/moq/issues/2733)-style counters land.
 - **Encoding**: cumulative counters about once a second through

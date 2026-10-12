@@ -11,7 +11,7 @@ mod support;
 use std::time::Duration;
 
 use moq_net::track::{Info, Position, Subscription};
-use moq_net::{Hop, Timestamp, Version};
+use moq_net::{Hop, Timescale, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -42,7 +42,10 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let track = broadcast
-		.create_track("history", Info::default().with_max_age(FOREVER))
+		.create_track(
+			"history",
+			Info::default().with_timescale(Timescale::MILLI).with_max_age(FOREVER),
+		)
 		.unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
@@ -113,9 +116,8 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
-	// Pre-06 wires can't name group 0 (it reads as the latest group), so the publisher
-	// must place its cursor before the groups exist. Simulated time advances only once
-	// every task is idle, so this settles the subscription first.
+	// Simulated time advances only once every task is idle, so this settles the
+	// subscription before the groups exist.
 	moq_net_sim::sleep(Duration::from_millis(10)).await;
 
 	// The hop the publisher's group streams cross first: into the relay, when there is one.
@@ -202,7 +204,10 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let track = broadcast
-		.create_track("history", Info::default().with_max_age(FOREVER))
+		.create_track(
+			"history",
+			Info::default().with_timescale(Timescale::MILLI).with_max_age(FOREVER),
+		)
 		.unwrap();
 	broadcast.announce(Default::default()).unwrap();
 	let relay = produce_origin(2);

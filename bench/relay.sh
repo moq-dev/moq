@@ -165,6 +165,10 @@ summarize_load() {
 			then error("load benchmark latency sample is invalid")
 		else {
 			workload: $workload,
+			throughput_window_start_ms: $first.timestamp_ms,
+			throughput_window_end_ms: $last.timestamp_ms,
+			latency_scope: "cumulative lifetime",
+			loss_scope: "cumulative lifetime",
 			send_mbps: (($last.bytes_sent - $first.bytes_sent) * 8 / $seconds / 1000000),
 			recv_mbps: (($last.bytes_recv - $first.bytes_recv) * 8 / $seconds / 1000000),
 			send_fps: (($last.frames_sent - $first.frames_sent) / $seconds),
@@ -182,33 +186,10 @@ summarize_load() {
 add_host_summary() {
     local host=$1
     local summary=$2
-    local enriched=$summary.enriched
+    local relay=$3
+    local -a generator=("${@:4}")
+    python3 "${ROOT:-.}/bench/summary.py" host "$host" "$summary" "$relay" "${generator[@]}"
 
-    jq -s '
-		if length < 2 then error("host benchmark produced fewer than two samples") else . end
-		| .[-1] as $last
-		| ($last.timestamp_ms - 5000) as $floor
-		| map(select(.timestamp_ms >= $floor)) as $window
-		| $window[0] as $first
-		| $window[-1] as $last
-		| (($last.timestamp_ms - $first.timestamp_ms) / 1000) as $seconds
-		| if $seconds <= 0 then error("host benchmark time did not advance")
-		elif $last.cpu_user < $first.cpu_user or $last.cpu_system < $first.cpu_system
-			or $last.ctx_voluntary < $first.ctx_voluntary
-			or $last.ctx_involuntary < $first.ctx_involuntary
-			then error("host benchmark counters moved backwards")
-		else {
-			cpu_user_cores: (($last.cpu_user - $first.cpu_user) / $seconds),
-			cpu_system_cores: (($last.cpu_system - $first.cpu_system) / $seconds),
-			cpu_cores: ((($last.cpu_user + $last.cpu_system) - ($first.cpu_user + $first.cpu_system)) / $seconds),
-			ctx_voluntary_s: (($last.ctx_voluntary - $first.ctx_voluntary) / $seconds),
-			ctx_involuntary_s: (($last.ctx_involuntary - $first.ctx_involuntary) / $seconds),
-			rss_bytes: ($window | map(.rss_bytes) | max),
-			threads: ($window | map(.threads) | max)
-		}
-		end
-	' "$host" | jq -s '.[0] * .[1]' "$summary" - >"$enriched"
-    mv "$enriched" "$summary"
 }
 
 run_workload() {
@@ -232,41 +213,51 @@ run_workload() {
     mkdir -p "$directory"
     start_relay "$relay" "$directory" "$runtime" "$workers"
 
+    local relay_pid=$RELAY_PID generator_pid='' finished
+    local -a load=("$LOAD_BIN" --file "$config"
+        --connect "https://localhost:$RELAY_PORT" --connect-tls-insecure
+        --name "bench-$label-$workload" --startup 2s --report 500ms
+        --output "$stats" "${overrides[@]}")
+
     if [[ $(uname -s) == Linux ]]; then
-        "$HOST_BIN" --pid "$RELAY_PID" --interval 500ms --duration 10s --output "$host" \
+        # The sampler owns the measurement lifetime. The generator runs until
+        # interrupted after sampling, so its normal exit cannot race /proc reads.
+        "${load[@]}" >"$directory/load.log" 2>&1 &
+        LOAD_PID=$!
+        generator_pid=$LOAD_PID
+        "$HOST_BIN" --pid "$relay_pid" --pid "$generator_pid" --threads \
+            --interval 500ms --duration 10s --output "$host" \
             >"$directory/host.log" 2>&1 &
         HOST_PID=$!
-    fi
-
-    if ! "$LOAD_BIN" \
-        --file "$config" \
-        --connect "https://localhost:$RELAY_PORT" \
-        --connect-tls-insecure \
-        --name "bench-$label-$workload" \
-        --startup 2s \
-        --duration 10s \
-        --report 500ms \
-        --output "$stats" ${overrides[@]+"${overrides[@]}"} >"$directory/load.log" 2>&1; then
-        printf 'load benchmark failed: %s/%s\n' "$label" "$workload" >&2
-        cat "$directory/load.log" >&2
-        return 1
-    fi
-
-    if [[ -n $HOST_PID ]]; then
-        if ! wait "$HOST_PID"; then
-            printf 'host benchmark failed: %s/%s\n' "$label" "$workload" >&2
-            cat "$directory/host.log" >&2
-            HOST_PID=
+        if ! wait -n -p finished "$HOST_PID" "$LOAD_PID"; then
+            cat "$directory/host.log" "$directory/load.log" >&2
+            return 1
+        fi
+        if [[ $finished != "$HOST_PID" ]]; then
+            printf 'load generator exited before sampling completed\n' >&2
             return 1
         fi
         HOST_PID=
+        kill -INT "$LOAD_PID"
+        if ! wait "$LOAD_PID"; then
+            cat "$directory/load.log" >&2
+            return 1
+        fi
+        LOAD_PID=
+    elif ! "${load[@]}" --duration 10s >"$directory/load.log" 2>&1; then
+        cat "$directory/load.log" >&2
+        return 1
     fi
     stop_relay
 
-    summarize_load "$stats" "$summary" "$workload"
     if [[ -s $host ]]; then
-        add_host_summary "$host" "$summary"
+        python3 "$ROOT/bench/summary.py" align "$host" "$stats" "$directory/load-window.jsonl"
+        summarize_load "$directory/load-window.jsonl" "$summary" "$workload"
+        add_host_summary "$host" "$summary" "$relay_pid" "$generator_pid"
+    else
+        summarize_load "$stats" "$summary" "$workload"
     fi
+
 }
 
 run_relay_suite() {

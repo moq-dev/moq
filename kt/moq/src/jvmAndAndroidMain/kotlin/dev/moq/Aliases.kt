@@ -51,7 +51,7 @@ typealias AnnouncedBroadcast = uniffi.moq.MoqAnnouncedBroadcast
 typealias Announce = uniffi.moq.MoqAnnounce
 /**
  * What an [AnnounceConsumer] yields: [AnnounceEventStart], [AnnounceEventUpdate],
- * or [AnnounceEventEnd].
+ * [AnnounceEventEnd], or [AnnounceEventRestart].
  */
 typealias AnnounceEvent = uniffi.moq.MoqAnnounceEvent
 // Kotlin cannot reach a sealed class's subtypes through its typealias, so each
@@ -62,6 +62,8 @@ typealias AnnounceEventStart = uniffi.moq.MoqAnnounceEvent.Start
 typealias AnnounceEventUpdate = uniffi.moq.MoqAnnounceEvent.Update
 /** No route covers the prefix any more; carries its last route. */
 typealias AnnounceEventEnd = uniffi.moq.MoqAnnounceEvent.End
+/** Another publisher instance now serves the prefix: drop what was resolved under it and request afresh. */
+typealias AnnounceEventRestart = uniffi.moq.MoqAnnounceEvent.Restart
 // Broadcast / track / group producers and consumers.
 /** The write side of a broadcast: publish tracks into it. */
 typealias BroadcastProducer = uniffi.moq.MoqBroadcastProducer
@@ -81,6 +83,8 @@ typealias TrackDemand = uniffi.moq.MoqTrackDemand
 typealias TrackConsumer = uniffi.moq.MoqTrackConsumer
 /** A request to produce one uncached group for a fetch consumer. */
 typealias GroupRequest = uniffi.moq.MoqGroupRequest
+/** A watch-only handle to whether any caller still wants a requested group; holding it keeps nothing open. */
+typealias GroupDemand = uniffi.moq.MoqGroupDemand
 /** The write side of a single group: append frames to it. */
 typealias GroupProducer = uniffi.moq.MoqGroupProducer
 /** The read side of a single group: yields timestamped raw frames. */
@@ -101,7 +105,7 @@ typealias VideoProducer = uniffi.moq.MoqVideoProducer
 typealias Datagram = uniffi.moq.MoqDatagram
 /** A payload plus the timestamp it should be presented at. */
 typealias Frame = uniffi.moq.MoqFrame
-/** A path-prefix route: the prefix it covers, relay hop ids (oldest first), and static production and link cost (lower wins). */
+/** A path-prefix route: the publisher epoch it serves (null when unknown), relay hop ids (oldest first), and static production and link cost (lower wins). */
 typealias Route = uniffi.moq.MoqRoute
 /** Tunes how a track subscription is delivered: priority, group ordering, and range. */
 typealias Subscription = uniffi.moq.MoqSubscription

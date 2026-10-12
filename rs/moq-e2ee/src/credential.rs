@@ -8,7 +8,7 @@ use bytes::Bytes;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::error::Result;
-use crate::generation::Generation;
+use crate::generation;
 use crate::limits::{KEY_LEN, NAME_LEN, PATH_LABEL, PROFILE, SECRET_LEN, check_bytes, check_u53};
 use crate::name::encode;
 use moq_net::Epoch;
@@ -87,9 +87,14 @@ impl Credential {
 		Ok(moq_net::Path::new(encode(material).as_str()).into_owned())
 	}
 
-	/// Bind an epoch, scoping every name and key derived from this credential.
-	pub fn generation(&self, epoch: Epoch) -> Generation {
-		Generation::new(self.clone(), epoch)
+	/// Mint a fresh epoch and a producing generation whose clones share track claims.
+	pub fn produce(&self) -> generation::Producer {
+		generation::Producer::new(self.clone(), Epoch::mint())
+	}
+
+	/// Bind a discovered epoch as a consume-only generation.
+	pub fn consume(&self, epoch: Epoch) -> generation::Consumer {
+		generation::Consumer::new(self.clone(), epoch)
 	}
 
 	pub(crate) fn path_info(&self, semantic: &str) -> Result<Vec<u8>> {

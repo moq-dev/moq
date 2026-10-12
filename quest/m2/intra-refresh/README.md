@@ -51,4 +51,3 @@ Decisions the quests share:
 
 - [Audio warmup](/quest/m1/audio-warmup.md) - Opus convergence after a mid-stream join uses the same `warmup` field
 - [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - frames stamped before the group's keyframe are the other tune-in trim
-- [Catalog warmup](/quest/m1/catalog-warmup.md) - the generic `warmup` field this line reads, kept in m1 for audio and open-GOP tune-in

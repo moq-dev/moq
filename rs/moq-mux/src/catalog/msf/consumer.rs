@@ -3,7 +3,7 @@ use std::str::FromStr;
 use std::task::{Poll, ready};
 
 use base64::Engine;
-use hang::catalog::{AudioCodec, AudioConfig, Container, VideoCodec, VideoConfig};
+use hang::catalog::{AudioCodec, AudioConfig, Container, TextConfig, TextFormat, TextRole, VideoCodec, VideoConfig};
 
 use crate::Result;
 use crate::catalog::hang::{Catalog, CatalogExt};
@@ -94,9 +94,11 @@ impl<E: CatalogExt> From<moq_net::track::Subscriber> for Consumer<E> {
 ///
 /// Each MSF track is mapped onto a `hang::Catalog` rendition based on its [`moq_msf::Role`]:
 /// video tracks become [`VideoConfig`] entries, audio tracks become [`AudioConfig`] entries.
-/// Tracks with no role, with an unsupported role (caption, subtitle, sign language, audio
-/// description, custom roles), or with packaging other than [`moq_msf::Packaging::Loc`],
-/// [`moq_msf::Packaging::Cmaf`], or [`moq_msf::Packaging::Legacy`] are skipped with a warning.
+/// Caption and subtitle tracks become text renditions; custom roles do too when their codec
+/// identifies text. Unsupported text packaging is an error so a gateway cannot silently lose it.
+/// Tracks with no role, sign language, audio description, other custom roles, and audio/video
+/// with packaging other than [`moq_msf::Packaging::Loc`], [`moq_msf::Packaging::Cmaf`], or
+/// [`moq_msf::Packaging::Legacy`] are skipped with a warning.
 ///
 /// [`moq_msf::Packaging::Loc`] and [`moq_msf::Packaging::Legacy`] map to their own containers:
 /// they carry the same codec payload but frame it differently.
@@ -145,6 +147,18 @@ pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>) -> Result<Catal
 					);
 				}
 			},
+			moq_msf::Role::Caption | moq_msf::Role::Subtitle => {
+				catalog
+					.text
+					.renditions
+					.insert(track.name.clone(), text_config_from_msf(track)?);
+			}
+			moq_msf::Role::Unknown(_) if matches!(track.codec.as_deref(), Some("vtt" | "ttml" | "utf8")) => {
+				catalog
+					.text
+					.renditions
+					.insert(track.name.clone(), text_config_from_msf(track)?);
+			}
 			other => {
 				tracing::warn!(track = %track.name, role = %other, "skipping MSF track with unsupported role");
 			}
@@ -157,9 +171,8 @@ pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>) -> Result<Catal
 /// Decode the [`Container`] for a track based on its packaging and `init_data`.
 ///
 /// Returns `Ok(None)` when the packaging is unsupported (e.g. `MediaTimeline`,
-/// `EventTimeline`, or an unknown variant). The caller skips these tracks with a warning
-/// rather than failing the whole catalog, since unsupported packaging is a downstream
-/// pipeline limitation, not a malformed catalog.
+/// `EventTimeline`, or an unknown variant). Text conversion refuses it to prevent silent
+/// loss; audio/video callers retain their existing skip policy.
 ///
 /// Returns `Err` when a CMAF track is missing or has malformed `init_data`. This is an
 /// intentional hard error: a CMAF rendition is unusable without its `ftyp+moov` init
@@ -210,6 +223,27 @@ fn legacy_description(track: &moq_msf::Track) -> Result<Option<bytes::Bytes>> {
 	}
 }
 
+fn text_config_from_msf(track: &moq_msf::Track) -> Result<TextConfig> {
+	// A gateway must not silently delete text that its output is expected to preserve.
+	let container = container_from_msf(track)?.ok_or_else(|| Error::UnsupportedPackaging {
+		name: track.name.clone(),
+		packaging: track.packaging.to_string(),
+	})?;
+	let codec = track
+		.codec
+		.as_deref()
+		.ok_or_else(|| Error::MissingTextCodec(track.name.clone()))?;
+	// Keep unfamiliar codecs unfamiliar: a guessed WebVTT format could make a player render garbage.
+	let mut config = TextConfig::new(TextFormat::from_str(codec)?);
+	config.role = TextRole::from_str(&track.role.as_ref().unwrap().to_string())?;
+	config.lang = track.lang.clone();
+	config.label = track.label.clone();
+	config.container = container;
+	config.jitter = track.jitter;
+	config.delay = track.delay;
+	Ok(config)
+}
+
 fn video_config_from_msf(track: &moq_msf::Track) -> Result<Option<VideoConfig>> {
 	// Unsupported packaging (e.g. MediaTimeline) bubbles up as Ok(None) so the caller can
 	// skip the track with a warning rather than fail the whole catalog.
@@ -229,7 +263,10 @@ fn video_config_from_msf(track: &moq_msf::Track) -> Result<Option<VideoConfig>> 
 	})?;
 
 	let mut config = VideoConfig::new(codec);
-	config.description = legacy_description(track)?;
+	config.description = match &container {
+		Container::Cmaf { init } => cmaf_video_description(track, init, &config.codec)?,
+		_ => legacy_description(track)?,
+	};
 	config.coded_width = track.width;
 	config.coded_height = track.height;
 	config.bitrate = track.bitrate;
@@ -352,10 +389,10 @@ fn derive_from_codec_config(track: &moq_msf::Track, codec: &AudioCodec, init: by
 	}
 }
 
-fn derive_from_cmaf_moov(track: &moq_msf::Track, init: bytes::Bytes) -> Result<DerivedAudio> {
+fn cmaf_moov(track: &moq_msf::Track, init: &[u8]) -> Result<mp4_atom::Moov> {
 	use mp4_atom::{Any, DecodeMaybe};
 
-	let mut cursor = std::io::Cursor::new(init.as_ref());
+	let mut cursor = std::io::Cursor::new(init);
 	let mut moov: Option<mp4_atom::Moov> = None;
 	while let Some(atom) =
 		mp4_atom::Any::decode_maybe(&mut cursor).map_err(|_| Error::MalformedInitSegment(track.name.clone()))?
@@ -365,7 +402,35 @@ fn derive_from_cmaf_moov(track: &moq_msf::Track, init: bytes::Bytes) -> Result<D
 			break;
 		}
 	}
-	let moov = moov.ok_or_else(|| Error::MissingInitMoov(track.name.clone()))?;
+	Ok(moov.ok_or_else(|| Error::MissingInitMoov(track.name.clone()))?)
+}
+
+fn cmaf_video_description(track: &moq_msf::Track, init: &[u8], codec: &VideoCodec) -> Result<Option<bytes::Bytes>> {
+	use mp4_atom::{Atom, Codec};
+	let moov = cmaf_moov(track, init)?;
+	for sample in moov.trak.iter().flat_map(|trak| &trak.mdia.minf.stbl.stsd.codecs) {
+		let mut description = bytes::BytesMut::new();
+		match (codec, sample) {
+			(
+				VideoCodec::H264(codec),
+				Codec::Avc1(mp4_atom::Avc1 { avcc, .. }) | Codec::Avc3(mp4_atom::Avc3 { avcc, .. }),
+			) if codec.inline == matches!(sample, Codec::Avc3(_)) => avcc.encode_body(&mut description)?,
+			(
+				VideoCodec::H265(codec),
+				Codec::Hvc1(mp4_atom::Hvc1 { hvcc, .. }) | Codec::Hev1(mp4_atom::Hev1 { hvcc, .. }),
+			) if codec.in_band == matches!(sample, Codec::Hev1(_)) => hvcc.encode_body(&mut description)?,
+			(VideoCodec::AV1(_), Codec::Av01(av01)) => av01.av1c.encode_body(&mut description)?,
+			(VideoCodec::VP9(_), Codec::Vp09(vp09)) => vp09.vpcc.encode_body(&mut description)?,
+			(VideoCodec::VP8, Codec::Vp08(_)) => return Ok(None),
+			_ => continue,
+		}
+		return Ok(Some(description.freeze()));
+	}
+	Err(crate::container::fmp4::Error::MissingCodec.into())
+}
+
+fn derive_from_cmaf_moov(track: &moq_msf::Track, init: bytes::Bytes) -> Result<DerivedAudio> {
+	let moov = cmaf_moov(track, &init)?;
 
 	// Walk every trak looking for an audio sample entry. A single-track audio init is
 	// the only thing we expect here, but rather than enforce that we just take the first
@@ -425,13 +490,51 @@ mod test {
 	}
 
 	#[test]
-	fn cmaf_video_yields_cmaf_container() {
-		// "AAAYZ2Z0eXA=" decodes to a tiny ftyp-shaped stub; we just verify the bytes
-		// round-trip through base64 into Container::Cmaf.init.
-		let init_b64 = "AAAYZ2Z0eXA=";
-		let expected_init = base64::engine::general_purpose::STANDARD.decode(init_b64).unwrap();
+	fn unsupported_text_packaging_is_refused_instead_of_lost() {
+		for packaging in [
+			moq_msf::Packaging::MediaTimeline,
+			moq_msf::Packaging::EventTimeline,
+			moq_msf::Packaging::Unknown("future".into()),
+		] {
+			for role in [
+				moq_msf::Role::Caption,
+				moq_msf::Role::Subtitle,
+				moq_msf::Role::Unknown("commentary".into()),
+			] {
+				let mut track = moq_msf::Track::new("text", packaging.clone());
+				track.role = Some(role);
+				track.codec = Some("vtt".into());
+				let error = from_msf(&moq_msf::Catalog::<()>::new(vec![track])).unwrap_err();
+				assert!(matches!(error, crate::Error::Msf(Error::UnsupportedPackaging { .. })));
+			}
+		}
+	}
 
-		let msf = moq_msf::Catalog::new(vec![video_track("video0", moq_msf::Packaging::Cmaf, Some(init_b64))]);
+	#[test]
+	fn a_text_codec_is_required_and_unknown_formats_are_preserved() {
+		let mut track = moq_msf::Track::new("text", moq_msf::Packaging::Loc);
+		track.role = Some(moq_msf::Role::Caption);
+		assert!(
+			from_msf(&moq_msf::Catalog::new(vec![track.clone()]))
+				.unwrap_err()
+				.to_string()
+				.contains("missing codec")
+		);
+		track.codec = Some("future-text".into());
+		let catalog = from_msf(&moq_msf::Catalog::new(vec![track])).unwrap();
+		assert_eq!(
+			catalog.text.renditions["text"].format,
+			TextFormat::Unknown("future-text".into())
+		);
+	}
+
+	#[test]
+	fn cmaf_video_yields_cmaf_container() {
+		// The complete init segment survives the MSF base64 conversion.
+		let init_b64 = video_init("avc1.42001f", &[1, 0x42, 0, 0x1f, 0xff, 0xe0, 0]);
+		let expected_init = base64::engine::general_purpose::STANDARD.decode(&init_b64).unwrap();
+
+		let msf = moq_msf::Catalog::new(vec![video_track("video0", moq_msf::Packaging::Cmaf, Some(&init_b64))]);
 
 		let catalog = from_msf::<()>(&msf).expect("CMAF video should convert");
 		let video = catalog.video.renditions.get("video0").expect("video0 rendition");
@@ -508,14 +611,79 @@ mod test {
 		assert_eq!(a.description.as_deref(), Some(description_bytes));
 	}
 
+	fn video_init(codec: &str, description: &[u8]) -> String {
+		use mp4_atom::Encode;
+		let mut config = VideoConfig::new(VideoCodec::from_str(codec).unwrap());
+		config.coded_width = Some(1920);
+		config.coded_height = Some(1080);
+		let trak = crate::container::fmp4::synthesize_video_trak(1, 90_000, &config, Some(description)).unwrap();
+		let moov = mp4_atom::Moov {
+			trak: vec![trak],
+			..Default::default()
+		};
+		let mut init = Vec::new();
+		mp4_atom::Ftyp {
+			major_brand: b"iso6".into(),
+			minor_version: 0,
+			compatible_brands: vec![],
+		}
+		.encode(&mut init)
+		.unwrap();
+		moov.encode(&mut init).unwrap();
+		base64::engine::general_purpose::STANDARD.encode(init)
+	}
+
 	#[test]
-	fn cmaf_description_stays_none() {
-		// CMAF tracks carry their bytes inside Container::Cmaf::init; description
-		// must stay None so downstream code reads the bytes from one place only.
-		let init_b64 = "AAAYZ2Z0eXA=";
-		let msf = moq_msf::Catalog::new(vec![video_track("video0", moq_msf::Packaging::Cmaf, Some(init_b64))]);
-		let catalog = from_msf::<()>(&msf).unwrap();
-		assert!(catalog.video.renditions["video0"].description.is_none());
+	fn cmaf_video_description_comes_from_sample_entry() {
+		use mp4_atom::Atom;
+		let mut hvcc = mp4_atom::Hvcc::new();
+		hvcc.length_size_minus_one = 3;
+		let mut hevc_description = Vec::new();
+		hvcc.encode_body(&mut hevc_description).unwrap();
+		for (codec, opposite, description) in [
+			("avc1.42001f", "avc3.42001f", &[1, 0x42, 0, 0x1f, 0xff, 0xe0, 0][..]),
+			("avc3.42001f", "avc1.42001f", &[1, 0x42, 0, 0x1f, 0xff, 0xe0, 0][..]),
+			("hvc1.1.0.L93.00", "hev1.1.0.L93.00", hevc_description.as_slice()),
+			("hev1.1.0.L93.00", "hvc1.1.0.L93.00", hevc_description.as_slice()),
+		] {
+			let init = video_init(codec, description);
+			let mut track = video_track("video0", moq_msf::Packaging::Cmaf, Some(&init));
+			track.codec = Some(codec.to_string());
+			let catalog = from_msf::<()>(&moq_msf::Catalog::new(vec![track.clone()])).unwrap();
+			assert_eq!(
+				catalog.video.renditions["video0"].description.as_deref(),
+				Some(description)
+			);
+			track.codec = Some(opposite.to_string());
+			assert!(
+				matches!(
+					from_msf::<()>(&moq_msf::Catalog::new(vec![track])),
+					Err(crate::Error::Cmaf(crate::container::fmp4::Error::MissingCodec))
+				),
+				"{codec} init must not match {opposite}"
+			);
+		}
+	}
+
+	#[test]
+	fn cmaf_video_refuses_missing_or_wrong_sample_entry() {
+		let init = video_init("avc3.42001f", &[1, 0x42, 0, 0x1f, 0xff, 0xe0, 0]);
+		let mut track = video_track("video", moq_msf::Packaging::Cmaf, Some(&init));
+		track.codec = Some("hev1.1.0.L93.00".to_string());
+		let err = from_msf::<()>(&moq_msf::Catalog::new(vec![track])).unwrap_err();
+		assert!(matches!(
+			err,
+			crate::Error::Cmaf(crate::container::fmp4::Error::MissingCodec)
+		));
+
+		let stub = base64::engine::general_purpose::STANDARD.encode(b"not an init segment");
+		let track = video_track("video", moq_msf::Packaging::Cmaf, Some(&stub));
+		assert!(matches!(
+			from_msf::<()>(&moq_msf::Catalog::new(vec![track])),
+			Err(crate::Error::Msf(
+				Error::MalformedInitSegment(_) | Error::MissingInitMoov(_)
+			))
+		));
 	}
 
 	#[test]
@@ -607,7 +775,7 @@ mod test {
 	#[test]
 	fn unsupported_role_is_skipped() {
 		let mut track = audio_track("caption0", moq_msf::Packaging::Legacy);
-		track.role = Some(moq_msf::Role::Caption);
+		track.role = Some(moq_msf::Role::AudioDescription);
 		let msf = moq_msf::Catalog::new(vec![track]);
 
 		let catalog = from_msf::<()>(&msf).expect("unsupported role should be skipped, not error");
