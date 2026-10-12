@@ -191,10 +191,10 @@ const UNAUTHORIZED: u64 = 0x1;
 const NOT_SUPPORTED: u64 = 0x3;
 
 /// The AUTH_ERROR code for a refusal. The public API speaks session codes, and the
-/// only one this registry distinguishes is a version mismatch.
+/// only distinction this registry carries is unsupported versus unauthorized.
 fn to_code(code: SessionError) -> u64 {
 	match code {
-		SessionError::Version => NOT_SUPPORTED,
+		SessionError::Version | SessionError::Unsupported => NOT_SUPPORTED,
 		_ => UNAUTHORIZED,
 	}
 }

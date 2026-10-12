@@ -568,6 +568,9 @@ async fn a_refused_token_reports_the_code(version: &'static str) {
 					true => {
 						std::mem::forget(request.accept(Grant::default()));
 					}
+					false if request.token() == b"opaque".as_slice() => {
+						request.reject(SessionError::Unsupported, "unknown token format")
+					}
 					false => request.reject(SessionError::Unauthorized, "bad signature"),
 				}
 			}
@@ -575,6 +578,8 @@ async fn a_refused_token_reports_the_code(version: &'static str) {
 
 		let err = pair.client.auth().add("forged").await.err().expect("refused");
 		assert!(matches!(err, Error::Session(SessionError::Unauthorized)), "{err:?}");
+		let err = pair.client.auth().add("opaque").await.err().expect("refused");
+		assert!(matches!(err, Error::Unsupported), "{err:?}");
 	})
 	.await
 	.expect("timed out");
