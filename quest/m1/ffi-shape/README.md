@@ -19,9 +19,8 @@ media, and request-accept children, and the remaining children PR straight to
   each `main` merge meant hand-porting moq-ffi changes onto moved code.
 - The bindings still break once per release, not once per merge: binding
   releases (moq-ffi and the Python, Go, Swift, Kotlin, Dart, and C++
-  packages) wait until [Codecs](/quest/m1/ffi-shape/codec.md),
-  [Bindings](/quest/m0/broadcast-epoch/bindings.md)' `epoch()` rename, and
-  [named error fields](/quest/m1/ffi-shape/error-fields.md) all merge
+  packages) wait until [Codecs](/quest/m1/ffi-shape/codec.md) and
+  [Bindings](/quest/m0/broadcast-epoch/bindings.md)' `epoch()` rename both merge
   (confirmed as hard release gates in the 2026-10-10 audit). Codecs ranks
   first below for that reason. Dart is published (`moq` 0.1.0, `moq_ffi` 0.4.x), so
   its renames get the same upgrade notes as the others.
@@ -73,6 +72,5 @@ runs `just test interop --all`.
 ## Required
 
 - [Codecs](/quest/m1/ffi-shape/codec.md) - audio and video producers, codec-only encoders, and decoders move under their own namespaces, named as in Rust; binding releases wait for it
-- [Named error fields](/quest/m1/ffi-shape/error-fields.md) - `MoqError` variants name their fields, so no binding exposes a positional `v1`
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - the wrappers expose epochs and rename `session.epoch()`, on the reshaped wrappers
 - [Layers guide](/quest/m1/ffi-shape/layers-guide.md) - a `doc/lib` page maps each Rust layer to every binding's module, once Codecs adds `audio` and `video`

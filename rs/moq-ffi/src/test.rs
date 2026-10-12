@@ -558,7 +558,7 @@ async fn raw_audio_frame_durations() {
 
 	let coarse = broadcast.encode_audio("coarse".into(), input(), output(2_000), None);
 	assert!(
-		matches!(coarse, Err(MoqError::Audio(_))),
+		matches!(coarse, Err(MoqError::Audio { .. })),
 		"2 ms is not an opus frame duration"
 	);
 
@@ -593,7 +593,7 @@ async fn raw_audio_codec_default_frame() {
 
 	assert_eq!(MoqAudioCodec::aac().codec(), moq_audio::encode::Codec::Aac);
 	let aac = broadcast.encode_audio("aac".into(), input(), output(MoqAudioCodec::aac()), None);
-	let Err(MoqError::Audio(message)) = aac else {
+	let Err(MoqError::Audio { reason: message }) = aac else {
 		panic!("no platform AAC encoder on this host");
 	};
 	assert!(message.contains("no aac audio encoder"), "{message}");
@@ -611,7 +611,7 @@ async fn raw_audio_codec_default_frame() {
 		resampled,
 		None,
 	);
-	let Err(MoqError::Audio(message)) = aac else {
+	let Err(MoqError::Audio { reason: message }) = aac else {
 		panic!("no platform AAC encoder on this host");
 	};
 	assert!(message.contains("no aac audio encoder"), "{message}");
@@ -1287,7 +1287,7 @@ async fn fetch_media_group_rejects_invalid_container_before_fetching() {
 	)
 	.await;
 
-	assert!(matches!(result, Err(MoqError::Codec(_))));
+	assert!(matches!(result, Err(MoqError::Codec { .. })));
 }
 
 #[tokio::test]
@@ -1585,7 +1585,7 @@ async fn video_publish_named_track() {
 			},
 			init()
 		),
-		Err(MoqError::Codec(_))
+		Err(MoqError::Codec { .. })
 	));
 
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
@@ -1792,7 +1792,7 @@ fn audio_rejects_bad_init_bytes() {
 	.err()
 	.expect("an OpusHead-less opus track should fail");
 	assert!(
-		matches!(err, crate::error::MoqError::Codec(_)),
+		matches!(err, crate::error::MoqError::Codec { .. }),
 		"expected Codec error, got {err}"
 	);
 }
@@ -2029,7 +2029,7 @@ async fn resolve_rejects_a_reference_without_an_origin() {
 	// Reported in normalized form, matching `EscapingBroadcast` and moq-c: it names what the
 	// resolver actually tried to reach, not the caller's spelling of it.
 	match consumer.resolve(Some("./source".into())).await {
-		Err(MoqError::UnresolvableBroadcast(reference)) => assert_eq!(reference, "source"),
+		Err(MoqError::UnresolvableBroadcast { reason: reference }) => assert_eq!(reference, "source"),
 		Err(err) => panic!("wrong error for an unresolvable reference: {err:?}"),
 		Ok(_) => panic!("a standalone broadcast cannot resolve a sibling"),
 	}
@@ -3911,14 +3911,14 @@ async fn server_new_validates_the_config() {
 	assert!(server("127.0.0.1:0").is_ok());
 	assert!(server("[::]:443").is_ok());
 	assert!(server("localhost:4443").is_ok());
-	assert!(matches!(server("localhost:443:8443"), Err(MoqError::Config(_))));
-	assert!(matches!(server("not-an-address"), Err(MoqError::Config(_))));
+	assert!(matches!(server("localhost:443:8443"), Err(MoqError::Config { .. })));
+	assert!(matches!(server("not-an-address"), Err(MoqError::Config { .. })));
 
 	let version = MoqServer::new(MoqServerConfig {
 		versions: vec!["moq-lite-99".into()],
 		..Default::default()
 	});
-	assert!(matches!(version, Err(MoqError::Config(_))));
+	assert!(matches!(version, Err(MoqError::Config { .. })));
 }
 
 #[tokio::test]
@@ -3933,7 +3933,7 @@ async fn server_cert_fingerprints_available_after_listen() {
 	// Not available before listen().
 	assert!(matches!(
 		server.cert_fingerprints(),
-		Err(crate::error::MoqError::Bind(_))
+		Err(crate::error::MoqError::Bind { .. })
 	));
 
 	tokio::time::timeout(TIMEOUT, server.listen())
