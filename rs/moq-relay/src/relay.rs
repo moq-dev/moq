@@ -171,10 +171,9 @@ impl Relay {
 			"runtime.workers needs moq-relay built with the `noq` feature"
 		);
 
-		let needs_tls = config.runtime.workers().is_some()
-			|| (cfg!(feature = "_quic") && (config.listen.bind.is_some() || !config.listen.has_explicit_bind()))
-			|| (config.listen.tcp.bind.is_some() && config.listen.tcp.tls == Some(true));
-		let served = needs_tls.then(|| config.listen.tls.load()).transpose()?;
+		// Workers and the stream server split one relay across listeners, so they share
+		// one loaded identity. A lone server loads its own, only if a listener needs it.
+		let served = config.runtime.workers().map(|_| config.listen.tls.load()).transpose()?;
 		let mut listen = config.listen.clone();
 		if served.is_some() {
 			listen.tls = Default::default();
