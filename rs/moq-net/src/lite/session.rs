@@ -546,8 +546,9 @@ impl<S: crate::transport::poll::Session> kio::Task for PresentToken<S> {
 			// A peer that predates AUTH resets a stream type it does not know, and one
 			// that takes no tokens in band refuses the same way: either way, before any
 			// reply, this token earns nothing here.
-			Error::Stream(_) | Error::Decode(crate::DecodeError::Short) if !answered => Error::Unsupported,
-			// A malformed reply is the peer breaking the session protocol, not refusing a token.
+			Error::Stream(_) if !answered => Error::Unsupported,
+			// A malformed reply, truncated ones included, is the peer breaking the session
+			// protocol, not refusing a token.
 			err => crate::auth::protocol_error(err),
 		};
 		match &err {
@@ -990,6 +991,18 @@ mod tests {
 		assert_malformed_reply_closes(script).await;
 	}
 
+	/// A reply cut off inside its declared size fails to decode, unlike a peer that
+	/// resets before answering.
+	#[moq_net_sim::test]
+	async fn truncated_auth_reply_closes_the_session() {
+		let mut script = Vec::new();
+		let mut w = crate::coding::Encoder::new(&mut script, Version::Lite07.into());
+		w.varint(0).unwrap();
+		w.varint(4).unwrap();
+		w.varint(0).unwrap();
+		assert_session_closes(ScriptedSession::per_stream_eof(vec![script])).await;
+	}
+
 	#[moq_net_sim::test]
 	async fn malformed_auth_error_reasons_close_the_session() {
 		for reason in [vec![0xff], vec![b'a'; 8193]] {
@@ -1005,7 +1018,10 @@ mod tests {
 	}
 
 	async fn assert_malformed_reply_closes(script: Vec<u8>) {
-		let transport = ScriptedSession::per_stream(vec![script]);
+		assert_session_closes(ScriptedSession::per_stream(vec![script])).await;
+	}
+
+	async fn assert_session_closes(transport: ScriptedSession) {
 		let log = transport.log.clone();
 		let start = start(Config {
 			runtime: crate::time::Clock::sim(),

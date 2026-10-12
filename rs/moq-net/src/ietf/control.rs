@@ -31,8 +31,11 @@ impl Spent {
 	}
 
 	/// Whether `id` has the peer's parity and was never spent.
+	///
+	/// No peer reaches 2^62 requests, and refusing the IDs past it keeps `next` from
+	/// overflowing on a draft-17+ varint, which can carry a full 64 bits.
 	fn unused(&self, id: u64) -> bool {
-		id % 2 == self.next % 2 && (id >= self.next || self.run(id).is_some())
+		id < 1 << 62 && id % 2 == self.next % 2 && (id >= self.next || self.run(id).is_some())
 	}
 
 	/// Whether spending `id` would record one more run.
@@ -473,10 +476,12 @@ mod tests {
 		control.accept(RequestId(0)).unwrap();
 		let runs: Vec<_> = control.state.lock().modern.missing.clone().into_iter().collect();
 		assert_eq!(runs, [(2, top)]);
-		assert!(matches!(
-			control.accept(RequestId(top)),
-			Err(Error::Session(SessionError::InvalidRequestId))
-		));
+		for id in [top, 1 << 62, u64::MAX - 1] {
+			assert!(matches!(
+				control.accept(RequestId(id)),
+				Err(Error::Session(SessionError::InvalidRequestId))
+			));
+		}
 	}
 
 	/// Draft-17+ has no MAX_REQUEST_ID: nothing is granted.

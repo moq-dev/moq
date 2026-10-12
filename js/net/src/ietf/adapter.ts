@@ -189,7 +189,8 @@ export class SpentIds {
 
 	/** Spend `id`, throwing the session error a reused, wrong-parity, or unrecordable ID closes with. */
 	spend(id: bigint): void {
-		const unused = id >= this.#next || this.#missing.has(id);
+		// No peer reaches 2^62 requests; refusing past it matches Rust, whose `next` would overflow.
+		const unused = id < 1n << 62n && (id >= this.#next || this.#missing.has(id));
 		if (id % 2n !== this.#next % 2n || !unused) throw new SessionError(SessionCode.InvalidRequestId);
 		const splits = id < this.#next ? this.#missing.splits(id) : id > this.#next;
 		if (splits && this.#missing.size >= this.#limit) {

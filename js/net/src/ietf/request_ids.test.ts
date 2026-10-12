@@ -45,6 +45,8 @@ describe("draft-17+ request ID history", () => {
 		const ids = new SpentIds(0n, 1);
 		ids.spend((1n << 62n) - 2n);
 		ids.spend(0n);
-		expect(code(ids, (1n << 62n) - 2n)).toBe(SessionCode.InvalidRequestId);
+		for (const id of [(1n << 62n) - 2n, 1n << 62n, (1n << 64n) - 2n]) {
+			expect(code(ids, id)).toBe(SessionCode.InvalidRequestId);
+		}
 	});
 });
