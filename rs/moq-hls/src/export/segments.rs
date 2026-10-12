@@ -52,7 +52,7 @@ struct State {
 /// Numbers the broadcast's content timeline: the sequence bumps wherever the timeline breaks.
 ///
 /// Held once by the timeline fanout rather than per rendition, so every rendition stamps a
-/// record with the same sequence even when one isn't listing rows (waiting to rebind) or
+/// record with the same sequence even when one isn't listing rows (its sibling ended) or
 /// cleared its own window.
 #[derive(Default)]
 pub(crate) struct Discontinuities {
@@ -445,7 +445,7 @@ pub struct Consumer {
 
 /// The live subscription a [`Consumer`] holds on its rendition's media track.
 struct Feed {
-	/// What it subscribed through: a rebound sibling publisher gets a fresh feed.
+	/// What it subscribed through: a re-issued sibling bind gets a fresh feed.
 	binding: Arc<moq_mux::Binding>,
 	state: FeedState,
 }
@@ -516,7 +516,8 @@ impl Consumer {
 
 	/// Hold a live subscription on the media track the rendition is bound to now.
 	fn poll_feed(&mut self, waiter: &kio::Waiter) {
-		let binding = self.rendition.binding();
+		// Also ends the window on an ended sibling, which nothing else may wake this cursor for.
+		let binding = self.rendition.poll_media(waiter);
 		let feed = match &mut self.feed {
 			Some(feed) if Arc::ptr_eq(&feed.binding, &binding) => feed,
 			feed => feed.insert(Feed {

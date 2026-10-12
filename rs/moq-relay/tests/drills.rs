@@ -27,6 +27,8 @@
 
 use std::time::Duration;
 
+use futures::FutureExt;
+
 use moq_relay::{Config, Relay};
 use moq_tokio::moq_net;
 
@@ -790,10 +792,10 @@ const SETTLE: Duration = Duration::from_secs(10);
 
 /// The cross-relay drill's link: the drills' impairment behind a bottleneck a
 /// burst overruns, so its tail waits in the queue or is dropped from it. It is
-/// slower than [`credit`]'s receive window lets a sender go (about 1 KiB per
-/// round trip, some 160 kbit/s), or the window would bind first and the queue
-/// would never fill. The window keeps a burst's datagrams small, so the 50ms
-/// queue holds one or two of them before it drops the rest.
+/// slower than [`credit`]'s receive window lets a sender go. The first burst
+/// is collected at ingress after setup, so scheduling cannot drain the bucket
+/// between its datagrams; its surviving bytes exceed the burst and 50ms queue
+/// allowance before they are accounted at one instant.
 fn bursty() -> moq_shaper::Profile {
 	moq_shaper::Profile {
 		rate: Some(moq_shaper::Rate {
@@ -812,10 +814,22 @@ fn bursty() -> moq_shaper::Profile {
 fn credit(lane: Lane, mut quic: moq_tokio::quic::Config) -> moq_tokio::quic::Config {
 	if let Lane::Impaired = lane {
 		quic.max_streams = Some(16);
-		quic.receive_window = Some(4 * PAYLOAD as u64);
-		quic.stream_receive_window = Some(2 * PAYLOAD as u64);
+		// The one-shot ingress burst must fit inside transport credit before
+		// anything is released. Keep two bucket allowances, rounded to groups,
+		// while still forcing a full application burst to wait for more credit.
+		let receive_window = ingress_bytes();
+		assert!(receive_window < BURST_GROUPS * PAYLOAD as u64);
+		quic.receive_window = Some(receive_window);
+		quic.stream_receive_window = Some(receive_window);
 	}
 	quic
+}
+
+/// Enough bytes to cross the ingress bucket without needing an acknowledgment.
+fn ingress_bytes() -> u64 {
+	let rate = bursty().rate.expect("bursty rate");
+	let queued = (rate.bits_per_second as u128 * rate.queue.as_nanos() / 8 / 1_000_000_000) as u64;
+	(rate.burst + queued).next_multiple_of(PAYLOAD as u64) * 2
 }
 
 /// How a cross-relay group reached the subscriber, or why it never did.
@@ -853,9 +867,16 @@ async fn read_payload(mut group: moq_net::group::Consumer, sequence: u64) -> Res
 	}
 }
 
-/// The payload of group `sequence`: its number, padded to [`PAYLOAD`].
+/// The group number, padded so the first burst's newest group can fill ingress.
 fn payload(sequence: u64) -> Vec<u8> {
-	format!("{sequence:>PAYLOAD$}").into_bytes()
+	// A latest-only subscription can skip every earlier group in a burst.
+	// Its newest frame alone must cross the gate before it needs an ACK.
+	let width = if sequence == BURST_GROUPS - 1 {
+		ingress_bytes() as usize
+	} else {
+		PAYLOAD
+	};
+	format!("{sequence:>width$}").into_bytes()
 }
 
 /// Drill: bursts of one-frame groups cross a two-relay cluster.
@@ -1018,10 +1039,33 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 
 	// Subscribed before the first burst, as an app watching a control channel is.
 	let mut reader = subscribe(&subscribed, "live").await;
+	// The subscriber's subscription can start before the origin's reaches the
+	// publisher, which takes extra round trips over a moq-transport peer. The
+	// ingress burst holds every publisher datagram, including the replies and
+	// credit the origin needs before it subscribes, so arming it any earlier
+	// starves the publisher's session until it idles out.
+	tokio::time::timeout(TIMEOUT, async {
+		while track.subscription().is_none() {
+			track.subscription_changed().await.expect("track aborted");
+		}
+	})
+	.await
+	.expect("the origin never subscribed to the publisher");
 
 	// What connecting and subscribing overflowed, so only the bursts are graded.
 	let paths = [&peer, &publish_path, &subscribe_path];
 	let setup_overflowed: u64 = paths.iter().map(|path| path.overflowed()).sum();
+	let ingress = match lane {
+		Lane::Impaired => Some(
+			publish_path
+				.shaper
+				.as_ref()
+				.expect("impaired path")
+				.burst(moq_shaper::ingress::Direction::Up)
+				.expect("arm an ingress burst"),
+		),
+		Lane::Loopback => None,
+	};
 
 	let total = BURSTS * BURST_GROUPS;
 	let mut written = Vec::new();
@@ -1206,6 +1250,13 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 		.values()
 		.filter(|outcome| !matches!(outcome, Outcome::Live))
 		.count();
+	if let Some(ingress) = ingress {
+		ingress
+			.completed()
+			.now_or_never()
+			.expect("ingress burst never completed")
+			.expect("ingress burst cancelled");
+	}
 	let overflowed = paths.iter().map(|path| path.overflowed()).sum::<u64>() - setup_overflowed;
 	println!(
 		"fault activated: {gaps} of {total} groups missed the live subscription (reset: {resets:?}), {overflowed} datagrams overflowed a bottleneck during the bursts, slowest group {} after {:?}",

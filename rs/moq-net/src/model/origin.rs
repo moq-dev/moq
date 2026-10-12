@@ -382,6 +382,32 @@ impl From<u64> for Cost {
 	}
 }
 
+/// How much an endpoint prefers a link over its others; higher wins.
+///
+/// Every link starts at the neutral [`Preference::default`] (0), which is also what
+/// a broadcast published locally ranks. A positive value promotes a link and a
+/// negative one demotes it. See [`Producer::with_preference`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Preference(i8);
+
+impl Preference {
+	/// Rank a link.
+	pub const fn new(preference: i8) -> Self {
+		Self(preference)
+	}
+
+	/// The rank.
+	pub const fn value(self) -> i8 {
+		self.0
+	}
+}
+
+impl From<i8> for Preference {
+	fn from(preference: i8) -> Self {
+		Self::new(preference)
+	}
+}
+
 /// The path a route took through the mesh and what using it costs.
 ///
 /// The metadata half of an advertisement: [`Producer::dynamic`] pairs it with
@@ -539,7 +565,8 @@ fn fnv_key(name: &str, origins: impl IntoIterator<Item = Hop>) -> u64 {
 
 /// Ordering key for a route entry resolving `path`. Lower wins: the newest epoch
 /// first, since an older one is a publisher that was replaced, and a route with no
-/// epoch last. Then an identified chain (no 0) outranks an anonymous one regardless of cost, then the cheapest
+/// epoch last. Then the higher link [`Preference`], so metrics from different
+/// operators are never compared. Then an identified chain (no 0) outranks an anonymous one regardless of cost, then the cheapest
 /// cost, then a broadcast published on this origin (it serves what is here, not a
 /// claim that has to ask), then the shortest hop chain, then a deterministic hash
 /// of `path` and the chain so every node converges on the same winner, and finally
@@ -556,6 +583,7 @@ fn route_order<'a>(
 	entry: &'a RouteEntry,
 ) -> (
 	Reverse<Option<&'a crate::Epoch>>,
+	Reverse<Preference>,
 	bool,
 	Cost,
 	bool,
@@ -565,6 +593,7 @@ fn route_order<'a>(
 ) {
 	(
 		Reverse(entry.epoch.as_ref()),
+		Reverse(entry.preference),
 		entry.is_anonymous(),
 		entry.cost,
 		!entry.local,
@@ -795,6 +824,8 @@ struct RouteEntry {
 	scope: Patterns,
 	hops: Hops,
 	cost: Cost,
+	/// The rank of the link the entry arrived on; see [`Producer::with_preference`].
+	preference: Preference,
 	/// The announcing session's declared or assigned identity. Split-horizon
 	/// matches this as well as [`Self::hops`], so an anonymous hop 0 still
 	/// cannot echo back to the session it came from.
@@ -1421,6 +1452,9 @@ pub struct Producer {
 	// [`Self::peer`] and [`Self::upstream`]).
 	link: Link,
 
+	// The rank of that link; see [`Self::with_preference`].
+	preference: Preference,
+
 	// Submission handle to the origin's [`Driver`]: source watchers, fronts, and
 	// serve tasks queued here run when the driver is polled. Closed once the
 	// driver drops, which is what makes later mutations fail with `Closed`.
@@ -1452,6 +1486,7 @@ impl Producer {
 			cache_duration: config.cache_duration,
 			stats: stats::Session::default(),
 			link: Link::Local,
+			preference: Preference::default(),
 			tasks,
 			timers: timers.clone(),
 		};
@@ -1507,6 +1542,20 @@ impl Producer {
 		self
 	}
 
+	/// Rank the link this handle (and any handle derived from it) is given to:
+	/// higher wins, and every handle starts at the neutral [`Preference::default`].
+	///
+	/// Applies to what [`Self::dynamic`] advertises, which is how a session lands its
+	/// peer's routes, not to a broadcast published here. A route with a newer epoch still wins,
+	/// but among the rest preference decides before cost, so links to different
+	/// operators rank by this instead of comparing their metrics. Hand each CDN's
+	/// session its own rank to use the primary while it has a route and fail over to
+	/// the next.
+	pub fn with_preference(mut self, preference: Preference) -> Self {
+		self.preference = preference;
+		self
+	}
+
 	/// This origin's construction config.
 	pub fn config(&self) -> Config {
 		Config {
@@ -1539,6 +1588,7 @@ impl Producer {
 			cache_duration: Duration::MAX,
 			stats: stats::Session::default(),
 			link: Link::Local,
+			preference: Preference::default(),
 			tasks,
 			timers: Clock::default(),
 		}
@@ -1606,6 +1656,7 @@ impl Producer {
 			scope: self.scope.allowed.clone(),
 			local: true,
 			link: self.link,
+			preference: Preference::default(),
 			stats: self.stats.clone(),
 		};
 		let info = broadcast::Info {
@@ -1735,6 +1786,7 @@ impl Producer {
 			cache_duration: self.cache_duration,
 			stats: self.stats.clone(),
 			link: self.link,
+			preference: self.preference,
 			tasks: self.tasks.clone(),
 			timers: self.timers.clone(),
 		})
@@ -1848,6 +1900,8 @@ struct Announcing {
 	local: bool,
 	/// The link the producer's routes arrive on.
 	link: Link,
+	/// The rank of that link; a broadcast published here is on none, so it ranks at the default.
+	preference: Preference,
 	stats: stats::Session,
 }
 
@@ -1870,6 +1924,7 @@ impl Announcing {
 			scope: producer.scope.allowed.clone(),
 			local: false,
 			link: producer.link,
+			preference: producer.preference,
 			stats: producer.stats.clone(),
 		})
 	}
@@ -1901,6 +1956,7 @@ impl Announcing {
 				scope: self.scope.clone(),
 				hops: route.hops.clone(),
 				cost: route.cost,
+				preference: self.preference,
 				via,
 				local: self.local,
 				link: self.link,
@@ -3112,7 +3168,7 @@ struct RouteNode {
 	cursors_below: usize,
 	/// Who is waiting on the routes covering this prefix: the fronts serving it
 	/// and the requesters parked on it (see [`Watch`]).
-	watches: Vec<(u64, kio::Producer<Watched>)>,
+	watches: Vec<(u64, WatchProducer)>,
 	/// Watches at this node or below, so a route change walks only the subtrees
 	/// holding one.
 	watches_below: usize,
@@ -3124,6 +3180,43 @@ struct RouteNode {
 #[derive(Default)]
 struct Watched {
 	generation: u64,
+}
+
+enum WatchProducer {
+	Changes(kio::Producer<Watched>),
+	Selection(kio::Producer<Selected>),
+}
+
+struct Selected {
+	path: PathOwned,
+	via: Hop,
+	instance: Instance,
+	current: Option<kio::Producer<()>>,
+}
+
+/// The lifetime of path requests while this peer still selects the held instance.
+pub(crate) struct Selection {
+	shared: kio::Shared<OriginState>,
+	path: PathOwned,
+	id: u64,
+	signal: kio::Consumer<Selected>,
+}
+
+impl Selection {
+	pub(crate) fn current(&self) -> kio::Consumer<()> {
+		self.signal
+			.read()
+			.current
+			.as_ref()
+			.map(kio::Producer::consume)
+			.unwrap_or_else(|| kio::Producer::new(()).consume())
+	}
+}
+
+impl Drop for Selection {
+	fn drop(&mut self) {
+		self.shared.lock().routes.remove_watch(&self.path, self.id);
+	}
 }
 
 /// A registration in the route table for changes to the routes covering one
@@ -3226,24 +3319,48 @@ impl RouteNode {
 		Some(result)
 	}
 
-	/// Wake the watches at this node.
-	fn poke(&self) {
+	/// Wake route watchers, and revoke only leases whose selected instance changed.
+	fn poke(&self, routes: Option<&RouteTable>) {
 		for (_, watch) in &self.watches {
-			if let Ok(mut watched) = watch.write() {
-				watched.generation += 1;
+			match watch {
+				WatchProducer::Changes(watch) => {
+					if let Ok(mut watched) = watch.write() {
+						watched.generation += 1;
+					}
+				}
+				WatchProducer::Selection(watch) => {
+					if let Ok(mut selected) = watch.write() {
+						let active = routes
+							.and_then(|routes| {
+								routes.best_route(
+									&selected.path,
+									Horizon {
+										exclude: None,
+										local: false,
+										upstream: false,
+									},
+									&HashSet::new(),
+									|entry| entry.via == selected.via,
+								)
+							})
+							.is_some_and(|entry| entry.instance() == selected.instance);
+						if active != selected.current.is_some() {
+							selected.current = active.then(kio::Producer::default);
+						}
+					}
+				}
 			}
 		}
 	}
 
-	/// Wake the watches at this node and below: a route here covers every one
-	/// of their paths. Skips subtrees holding none.
-	fn poke_below(&self) {
+	/// Wake only the watched subtrees covered by this route.
+	fn poke_below(&self, routes: &RouteTable) {
 		if self.watches_below == 0 {
 			return;
 		}
-		self.poke();
+		self.poke(Some(routes));
 		for child in self.children.values() {
-			child.poke_below();
+			child.poke_below(routes);
 		}
 	}
 
@@ -3268,6 +3385,37 @@ impl RouteNode {
 }
 
 impl RouteTable {
+	fn best_route(
+		&self,
+		path: &Path,
+		horizon: Horizon,
+		excluded: &HashSet<u64>,
+		only: impl Fn(&RouteEntry) -> bool,
+	) -> Option<&RouteEntry> {
+		// Covering prefixes of one path form a chain, so the deepest node with a
+		// candidate holds the unique longest prefix; walking down, the last such
+		// node decides.
+		let (above, at) = self.split(path);
+		let mut best = None;
+		for node in above.into_iter().chain(at) {
+			let mut candidates = node
+				.entries
+				.iter()
+				.filter(|entry| entry.live())
+				.filter(|entry| entry.scope.matches(path.as_str()))
+				.filter(|entry| horizon.admits(entry))
+				.filter(|entry| !excluded.contains(&entry.id))
+				.filter(|entry| only(entry))
+				.peekable();
+			if candidates.peek().is_some() {
+				best = candidates
+					.filter(|entry| entry.serves(path))
+					.min_by_key(|entry| route_order(path, entry));
+			}
+		}
+		best
+	}
+
 	/// The nodes above `path` and the node at it, as far as the table has them.
 	/// The entries of those nodes are exactly the routes covering `path`.
 	fn split(&self, path: &Path) -> (Vec<&RouteNode>, Option<&RouteNode>) {
@@ -3369,7 +3517,10 @@ impl RouteTable {
 	fn add_watch(&mut self, path: &Path, id: u64) -> kio::Consumer<Watched> {
 		let producer = kio::Producer::<Watched>::default();
 		let consumer = producer.consume();
-		self.root.reach(path.parts(), Below::WATCH).watches.push((id, producer));
+		self.root
+			.reach(path.parts(), Below::WATCH)
+			.watches
+			.push((id, WatchProducer::Changes(producer)));
 		consumer
 	}
 
@@ -3384,13 +3535,13 @@ impl RouteTable {
 	/// Wake the watches of every path a route at `prefix` covers.
 	fn poke_below(&self, prefix: &Path) {
 		if let (_, Some(node)) = self.split(prefix) {
-			node.poke_below();
+			node.poke_below(self);
 		}
 	}
 
 	/// Wake every watch: the origin is tearing down.
 	fn poke_all(&self) {
-		self.root.walk(&mut |node| node.poke());
+		self.root.walk(&mut |node| node.poke(None));
 	}
 
 	/// The cursors a route at `prefix` can present on: a cursor sees a route
@@ -3676,28 +3827,7 @@ impl OriginState {
 		excluded: &HashSet<u64>,
 		only: impl Fn(&RouteEntry) -> bool,
 	) -> Option<&RouteEntry> {
-		// Covering prefixes of one path form a chain, so the deepest node with a
-		// candidate holds the unique longest prefix; walking down, the last such
-		// node decides.
-		let (above, at) = self.routes.split(path);
-		let mut best = None;
-		for node in above.into_iter().chain(at) {
-			let mut candidates = node
-				.entries
-				.iter()
-				.filter(|entry| entry.live())
-				.filter(|entry| entry.scope.matches(path.as_str()))
-				.filter(|entry| horizon.admits(entry))
-				.filter(|entry| !excluded.contains(&entry.id))
-				.filter(|entry| only(entry))
-				.peekable();
-			if candidates.peek().is_some() {
-				best = candidates
-					.filter(|entry| entry.serves(path))
-					.min_by_key(|entry| route_order(path, entry));
-			}
-		}
-		best
+		self.routes.best_route(path, horizon, excluded, only)
 	}
 
 	/// Whether every cursor presenting `prefix` restarted it since
@@ -3814,6 +3944,64 @@ pub struct Dynamic {
 }
 
 impl Dynamic {
+	pub(crate) fn request_validity(&self, path: &Path) -> Option<Selection> {
+		let shared = &self.announcement.shared;
+		let mut table = shared.lock();
+		if table.closed {
+			return None;
+		}
+		let entry = table.best_route(
+			path,
+			Horizon {
+				exclude: None,
+				local: false,
+				upstream: false,
+			},
+			&HashSet::new(),
+			|entry| {
+				entry
+					.server
+					.as_ref()
+					.is_some_and(|server| server.same_channel(&self.state))
+			},
+		)?;
+		let via = entry.via;
+		let instance = entry.instance();
+		let active = table
+			.best_route(
+				path,
+				Horizon {
+					exclude: None,
+					local: false,
+					upstream: false,
+				},
+				&HashSet::new(),
+				|entry| entry.via == via,
+			)
+			.is_some_and(|entry| entry.instance() == instance);
+		let producer = kio::Producer::new(Selected {
+			path: path.to_owned(),
+			via,
+			instance,
+			current: active.then(kio::Producer::default),
+		});
+		let signal = producer.consume();
+		let id = table.next_watch;
+		table.next_watch += 1;
+		table
+			.routes
+			.root
+			.reach(path.parts(), Below::WATCH)
+			.watches
+			.push((id, WatchProducer::Selection(producer)));
+		Some(Selection {
+			shared: shared.clone(),
+			path: path.to_owned(),
+			id,
+			signal,
+		})
+	}
+
 	/// Retire an explicit peer withdrawal, hiding derived paths only once its
 	/// last live advertisement at the prefix is gone. A lost session just drops.
 	pub(crate) fn withdrawn(self) {
@@ -4624,7 +4812,8 @@ impl Consumer {
 	/// path resolves through a front the origin's [`Driver`] runs: the request
 	/// mints one or joins the one already serving the path, and the front picks
 	/// the best announced route covering it (the most specific prefix, then the
-	/// newest [`Route::epoch`], then the cheapest, a broadcast published on this
+	/// newest [`Route::epoch`], then the preferred link ([`Producer::with_preference`]),
+	/// then the cheapest, a broadcast published on this
 	/// origin winning ties) and materializes it, from the broadcast itself or from
 	/// the peer that announced the route.
 	///
@@ -6166,6 +6355,29 @@ mod tests {
 		assert!(
 			anonymous.poll_requested_broadcast(&kio::Waiter::noop()).is_pending(),
 			"the cheaper anonymous route must not serve"
+		);
+	}
+
+	#[moq_net_sim::test]
+	async fn request_avoids_a_demoted_link_even_when_cheaper() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+
+		let demoted = producer
+			.clone()
+			.with_preference(Preference::new(-1))
+			.dynamic("room", Route::default().with_hops(hops(&[10])).with_cost(1))
+			.unwrap();
+		let unranked = producer
+			.dynamic("room", Route::default().with_hops(hops(&[11])).with_cost(5))
+			.unwrap();
+
+		let _pending = consumer.request_broadcast("room/alice", None);
+		let request = queued(&unranked).await;
+		assert_eq!(request.path().as_str(), "room/alice");
+		assert!(
+			demoted.poll_requested_broadcast(&kio::Waiter::noop()).is_pending(),
+			"the cheaper demoted link must not serve"
 		);
 	}
 
@@ -9885,6 +10097,49 @@ mod tests {
 			.await
 			.expect("the ended copy must not keep the source subscribed")
 			.unwrap();
+	}
+
+	#[test]
+	fn source_selection_leases_survive_reprices_but_never_revive_pending_work() {
+		let producer = origin(1).produce();
+		let broad = producer.dynamic("room", Route::default().with_via(origin(2))).unwrap();
+		let selected = broad.request_validity(&Path::new("room/a")).unwrap();
+		let pending = selected.current();
+		assert!(!pending.is_closed());
+		broad.update(broad.route().with_cost(Cost::from(7))).unwrap();
+		assert!(!pending.is_closed());
+		// Another peer's winning route cannot change what a request on peer 2 names.
+		let other = producer
+			.dynamic("room/a", Route::default().with_via(origin(3)))
+			.unwrap();
+		assert!(!pending.is_closed());
+		let replacement = producer
+			.dynamic("room/a", Route::default().with_via(origin(2)))
+			.unwrap();
+		assert!(pending.is_closed());
+		assert!(selected.current().is_closed());
+		// No waiter has polled between these changes: the old lease must still be dead.
+		drop(replacement);
+		let fresh = selected.current();
+		assert!(!fresh.is_closed());
+		assert!(pending.is_closed());
+		drop(other);
+		assert!(!fresh.is_closed());
+		drop(broad);
+		assert!(fresh.is_closed());
+	}
+
+	#[test]
+	fn source_selection_unregisters_without_retaining_the_source() {
+		let producer = origin(1).produce();
+		let route = producer.dynamic("room", Route::default().with_via(origin(2))).unwrap();
+		let path = Path::new("room/a");
+		let selected = route.request_validity(&path).unwrap();
+		let lease = selected.current();
+		drop(selected);
+		assert!(lease.is_closed());
+		let table = producer.shared.lock();
+		assert_eq!(table.routes.root.watches_below, 0);
 	}
 
 	#[test]

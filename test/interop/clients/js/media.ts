@@ -45,14 +45,9 @@ import {
 	waitForState,
 	waitForWatch,
 } from "./harness";
-import {
-	type CaptureState,
-	FAULTS,
-	leakedPlayerStarted,
-	SAMPLE_MS,
-	SAMPLE_RATE,
-} from "./src/contract";
+import { type CaptureState, FAULTS, leakedPlayerStarted, reachesLive, SAMPLE_MS, SAMPLE_RATE } from "./src/contract";
 import * as Pattern from "./src/pattern";
+import { resumeSkew } from "./src/resume";
 
 /** Cases beyond the mandatory capability probe, publisher readiness, and cold start. */
 const CASES = ["capture-denial", "pause", "disable", "rejoin", "detach", "republish", "late-join"] as const;
@@ -198,6 +193,11 @@ const framesToMs = (frames: number) => Math.round((frames * 1000) / Pattern.FPS)
  * Only a frame that moved since the last reading counts. The player paints the first frame it decodes
  * as a preview and holds it until its sync delay comes up, so a held frame says nothing about where
  * playback runs: a player delayed seconds behind live still shows a near-live preview first.
+ * Audio must also have left preroll, just as in measurePlayback: a new preview can replace an old
+ * one while the audio buffer is still filling, so a changed canvas alone does not prove playback.
+ *
+ * A `resumed` player gets the full timeout to start moving again, and the catch-up window opens at
+ * its first advancing frame. Every audible advancing pair before live is graded for A/V sync.
  */
 async function waitForLive(
 	publisher: Page,
@@ -205,24 +205,46 @@ async function waitForLive(
 	player: Page,
 	playerErrors: BrowserErrors,
 	assertion: string,
+	resumed = false,
 ): Promise<{ first: number; lag: number; after: number }> {
-	const since = Date.now();
+	let since = Date.now();
+	let started = !resumed;
+	const startup = since + timeoutMs;
 	let first: number | undefined;
 	let lag: number | undefined;
 	let frame: number | undefined;
 	let moved = false;
-	while (Date.now() < since + LATE_CATCHUP_MS) {
+	while (Date.now() < (started ? since + LATE_CATCHUP_MS : startup)) {
 		throwPageErrors(publisherErrors);
 		throwPageErrors(playerErrors);
 		const [fixture, state] = await Promise.all([readFixtureState(publisher), readPlayerState(player)]).catch(
 			() => [],
 		);
 		if (fixture && state?.frameId !== undefined) {
+			if (resumed) {
+				const skew = resumeSkew(state, frame);
+				if (skew !== undefined)
+					check(
+						Math.abs(skew) <= MAX_SKEW_STEPS * Pattern.STEP_MS,
+						"resume audio/video sync",
+						() => `${assertion}: offset ${skew}ms; ${traceLine(state, since)}`,
+					);
+			}
 			lag = fixture.frameId - state.frameId;
 			first ??= lag;
 			moved = frame !== undefined && state.frameId !== frame;
+			if (moved && !started) {
+				started = true;
+				since = Date.now();
+			}
+			const live = reachesLive({
+				previous: frame,
+				source: fixture.frameId,
+				sample: state,
+				bound: LIVE_LAG_FRAMES,
+			});
 			frame = state.frameId;
-			if (moved && lag <= LIVE_LAG_FRAMES) return { first, lag, after: Date.now() - since };
+			if (live) return { first, lag, after: Date.now() - since };
 		}
 		await sleep(POLL_INTERVAL_MS);
 	}
@@ -231,7 +253,7 @@ async function waitForLive(
 	throw new Failure(
 		assertion,
 		`${moved ? "still" : "held a frame"} ${lag === undefined ? "?" : framesToMs(lag)}ms behind the fixture ` +
-			`${LATE_CATCHUP_MS}ms after the first frame, against a ${framesToMs(LIVE_LAG_FRAMES)}ms bound for playback`,
+			`${started ? LATE_CATCHUP_MS : timeoutMs}ms after the first frame, against a ${framesToMs(LIVE_LAG_FRAMES)}ms bound for playback`,
 	);
 }
 
@@ -263,7 +285,7 @@ function traceLine(sample: PlayerState, start: number): string {
 		`    +${((sample.at - start) / 1000).toFixed(2)}s frame=${sample.frameId ?? "-"} ` +
 		`step=${sample.toneStep ?? "-"}/${step} tone=${margin.toFixed(0)}dB ${sample.toneHz?.toFixed(0) ?? "-"}Hz ` +
 		`rms=${sample.rms?.toFixed(3) ?? "-"} ats=${sample.audioTimestamp?.toFixed(0) ?? "-"} vts=${sample.videoTimestamp?.toFixed(0) ?? "-"} ` +
-			`paused=${sample.paused} delay=${sample.delay}ms audio=${sample.audioBytes}B${sample.audioStalled ? " stalled" : ""}`
+		`paused=${sample.paused} delay=${sample.delay}ms audio=${sample.audioBytes}B${sample.audioStalled ? " stalled" : ""}`
 	);
 }
 
@@ -750,13 +772,7 @@ try {
 		console.error("  detach released every session, audio graph, and worker");
 
 		await command(player, "reattach");
-		await waitForState(player, playerErrors, {
-			deadline: Date.now() + timeoutMs,
-			assertion: "reattach resumes playback",
-			description: `the presented frame to move past the ${busy.frameId} showing before the detach`,
-			predicate: (state) => (state.frameId ?? 0) > (busy.frameId ?? 0),
-		});
-		await waitForLive(publisher, publisherErrors, player, playerErrors, "reattach reaches live");
+		await waitForLive(publisher, publisherErrors, player, playerErrors, "reattach reaches live", true);
 		await measurePlayback(player, playerErrors, "after reattach");
 	}
 
