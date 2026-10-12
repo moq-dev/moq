@@ -16,7 +16,7 @@ Decided in planning (09-29), after the fetch-span agent (#4558) found that a
 relay bounds a sparse FETCH only if the model can request ranges:
 
 - **Wire (lite-07, unpublished).** SUBSCRIBE carries a list of group ranges
-  (an open end means live) in place of Group Start/End, plus
+  (an open end means live; ends may be relative, below) in place of Group Start/End, plus
   `order: asc | desc` (desc, newest first, is today's rule and the default).
   Subscriber Max Age (the model's `max_delay`) stays as a cap alongside the
   ranges, since a group's timestamp isn't always known. Decided 2026-10-10:
@@ -43,10 +43,22 @@ relay bounds a sparse FETCH only if the model can request ranges:
   group's existing prefix but never wait for its future objects. Downstream,
   an IETF FETCH is served from the model's ranges, capped at the Largest
   Object.
-- The `Live` flag from [lite-07 Live flag](/quest/m1/lite-live.md)
-  stays a separate field beside the range list (maintainer, 10-07): a range
-  starting above the live edge must not hide the latest group from a
-  subscriber merged with it.
+- **Relative ends** (maintainer, 2026-10-11, superseding the 10-07 `Live`
+  flag and closing #5085). Each range end is `Absolute(group, frame)` or
+  `Relative(n)`, naming the group n before the latest; either end may be
+  relative, and an omitted end is live. An offset past the track's start
+  clamps to group 0. Before any group exists, relative ends resolve when the
+  first one arrives, so `Relative(0)..` starts at it. The cross-language and
+  bridge tests cover both edges. Ends are inclusive of whole groups:
+  a relative start resolves to frame 0 of that group, and a relative end to
+  just after its last frame (the model's exclusive `Position::after_group`),
+  so `Absolute(0)..Relative(0)` includes the latest group. Live is `Relative(0)..`, so no separate `Live` field exists.
+  Merging subscribers is the union of their ranges, so a range above the
+  live edge never hides the latest group from a merged live subscriber,
+  which is the starvation the flag existed to prevent. Subscriber Max Age
+  still caps every range, so `Absolute(0)..` means everything not stale.
+  A relay that cannot resolve a relative end locally forwards it upstream as
+  relative.
 - Ranges are frame-precise (`Position`), not whole groups. The IETF joining
   FETCH for a mid-group SUBSCRIBE's uncached prefix stays, because today's
   bridge relies on it (maintainer, 09-29).
@@ -59,7 +71,6 @@ every sequence delivered or dropped.
 
 ## Required
 
-- [lite-07 Live flag](/quest/m1/lite-live.md) - the `Live` field the range list sits beside
 - [Model ranges](/quest/m1/subscribe-ranges/model.md) - `Subscription` carries ranges and order, and `Dynamic` fills misses by range
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - publishers name every group they won't deliver
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft

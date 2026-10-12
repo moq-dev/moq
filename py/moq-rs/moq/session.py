@@ -59,13 +59,13 @@ class Session:
         are the ones that already healed. Do not count outages with it."""
         return await self._inner.status()
 
-    def epoch(self) -> int:
-        """The connection epoch: 1 for the connect that built this session, one more
+    def connects(self) -> int:
+        """How many times this session has connected: 1 for the connect that built it, one more
         on each reconnect. A server-accepted session stays at 1.
 
         Pair it with :meth:`status` to log each reconnect by number; a
-        ``CONNECTED`` status whose epoch grew is a reconnect."""
-        return self._inner.epoch()
+        ``CONNECTED`` status whose count grew is a reconnect."""
+        return self._inner.connects()
 
     def cancel(self, code: int) -> None:
         """Close the session with the given error code."""

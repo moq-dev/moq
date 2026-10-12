@@ -1,5 +1,6 @@
 import { expect, jest, mock, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
+import type { Grant } from "../auth.ts";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
 import * as Epoch from "../epoch.ts";
 import { error } from "../error.ts";
@@ -14,6 +15,7 @@ import type { Producer as TrackProducer } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import { ControlStreamAdapter, NativeSession, type Session } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
+import { toRequestCode } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
 import { PublishDone } from "./publish.ts";
@@ -115,7 +117,13 @@ function publisher(
 		requiresSolicitation = false,
 		session,
 		cluster,
-	}: { requiresSolicitation?: boolean; session?: Session; cluster?: Cluster.Hops } = {},
+		grant,
+	}: {
+		requiresSolicitation?: boolean;
+		session?: Session;
+		cluster?: Cluster.Hops;
+		grant?: Signal<Grant | undefined>;
+	} = {},
 ): { pub: Publisher; origin: OriginProducer } {
 	const origin = new OriginProducer();
 	const inner = session ?? new NativeSession(transport, VERSION, true);
@@ -126,6 +134,7 @@ function publisher(
 			publish: origin.consume(),
 			requiresSolicitation,
 			cluster,
+			grant,
 		}),
 		origin,
 	};
@@ -217,6 +226,49 @@ test("FETCH and a non-forwarding SUBSCRIBE get NOT_SUPPORTED", async () => {
 		);
 		expect(paused[0]).toBe(0x05);
 		expect(paused[version <= Version.DRAFT_16 ? 4 : 3]).toBe(0x3);
+	}
+});
+
+/** A request's USE_VALUE token decodes but grants nothing yet, so a SUBSCRIBE outside the grant is still refused. */
+test("a request token does not widen the grant", async () => {
+	for (const version of [Version.DRAFT_14, Version.DRAFT_22] as const) {
+		const pair = createMockTransportPair(ALPNS[version]);
+		const session = new NativeSession(pair.server, version, true);
+		const nothing = new Signal<Grant | undefined>({
+			publish: new Path.Patterns([]),
+			subscribe: new Path.Patterns([]),
+		});
+		const { pub, origin } = publisher(pair.server, { session, grant: nothing });
+		publish(origin, Path.from("room"));
+
+		const ascii = (text: string) => [...new TextEncoder().encode(text)];
+		// Draft-14 carries priority, group order, forward, and a Largest Object filter inline.
+		const fields = version === Version.DRAFT_14 ? [0x80, 0x02, 0x01, 0x02] : [];
+		const token = [0x03, 0x00, 0xaa]; // USE_VALUE, type 0
+		const body = [0, 1, 4, ...ascii("room"), 5, ...ascii("video"), ...fields, 1, 0x03, token.length, ...token];
+		const msg = await Subscribe.decode(
+			new Reader(undefined, new Uint8Array([0, body.length, ...body]), version),
+			version,
+		);
+
+		const written: Uint8Array[] = [];
+		const stream = new Stream({
+			readable: new ReadableStream<Uint8Array>(),
+			writable: new WritableStream<Uint8Array>({
+				write: (chunk) => {
+					written.push(new Uint8Array(chunk));
+				},
+			}),
+			version,
+		});
+		await pub.runSubscribe(msg, stream);
+		await stream.writer.closed;
+		origin.close();
+
+		// SUBSCRIBE_ERROR on draft-14, REQUEST_ERROR after; the code follows the Length and any Request ID.
+		const wire = written.flatMap((chunk) => Array.from(chunk));
+		expect(wire[0]).toBe(0x05);
+		expect(wire[version === Version.DRAFT_14 ? 4 : 3]).toBe(toRequestCode("unauthorized", "subscribe", version));
 	}
 });
 

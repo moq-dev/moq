@@ -157,7 +157,9 @@ impl CidState {
                 "RETIRE_CONNECTION_ID when CIDs aren't in use",
             ));
         }
-        if sequence > self.issued {
+        // `issued` counts CIDs, so valid sequences are `0..issued`. RFC 9000 section 19.16
+        // requires PROTOCOL_VIOLATION when the sequence was never issued.
+        if sequence >= self.issued {
             debug!(
                 sequence,
                 "got RETIRE_CONNECTION_ID for unissued sequence number"
@@ -217,4 +219,51 @@ struct CidTimestamp {
     sequence: u64,
     /// Timestamp when cid needs to be retired
     timestamp: Instant,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ConnectionId, shared::IssuedCid};
+
+    const LIMIT: u64 = 8;
+
+    fn state(issued: u64) -> CidState {
+        CidState::new(8, None, Instant::now(), issued)
+    }
+
+    #[test]
+    fn retire_valid_and_already_retired_sequence() {
+        let mut state = state(2);
+        assert!(state.on_cid_retirement(0, LIMIT).is_ok());
+        assert!(!state.active_seq.contains(&0));
+        assert!(state.active_seq.contains(&1));
+        // Retiring an issued sequence again is not a protocol violation.
+        assert!(state.on_cid_retirement(0, LIMIT).is_ok());
+        assert!(state.active_seq.contains(&1));
+    }
+
+    #[test]
+    fn retire_first_unissued_sequence_before_and_after_new_cids() {
+        let mut state = state(1);
+        let unissued =
+            TransportError::PROTOCOL_VIOLATION("RETIRE_CONNECTION_ID for unissued sequence number");
+        // Sequence 1 has not been issued. `issued` is a count, not the last sequence.
+        assert_eq!(state.on_cid_retirement(1, LIMIT), Err(unissued.clone()));
+        assert!(state.active_seq.contains(&0));
+        assert_eq!(state.on_cid_retirement(2, LIMIT), Err(unissued.clone()));
+
+        state.new_cids(
+            &[IssuedCid {
+                sequence: 1,
+                id: ConnectionId::new(&[1]),
+                reset_token: [0xab; crate::RESET_TOKEN_SIZE].into(),
+            }],
+            Instant::now(),
+        );
+        assert!(state.on_cid_retirement(1, LIMIT).is_ok());
+        assert!(!state.active_seq.contains(&1));
+        assert_eq!(state.on_cid_retirement(2, LIMIT), Err(unissued));
+        assert!(state.active_seq.contains(&0));
+    }
 }

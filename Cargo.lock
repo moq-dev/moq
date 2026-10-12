@@ -4760,7 +4760,9 @@ dependencies = [
  "axum-server",
  "bytes",
  "bytesize",
+ "criterion",
  "futures",
+ "http-body",
  "http-cache-reqwest",
  "humantime",
  "hyper-util",
@@ -4853,6 +4855,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+ "tracing-test",
 ]
 
 [[package]]

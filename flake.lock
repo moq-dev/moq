@@ -51,31 +51,25 @@
     },
     "quest": {
       "inputs": {
-        "crane": [
-          "crane"
-        ],
         "flake-utils": [
           "flake-utils"
         ],
         "nixpkgs": [
           "nixpkgs"
-        ],
-        "rust-overlay": [
-          "rust-overlay"
         ]
       },
       "locked": {
-        "lastModified": 1791221651,
-        "narHash": "sha256-YTiITf1VEBkgBIADP24mzcFFLy1pL6DyREYS15+ri1c=",
+        "lastModified": 1791747381,
+        "narHash": "sha256-8K06EqlDr5V/TfHb4cd4fQYxyYzgPD46wrdlyqvV50g=",
         "owner": "kixelated",
         "repo": "quest",
-        "rev": "5ff9229d277a4580296795a82f427f5ec30072c7",
+        "rev": "b7027a3ded4b0a36505f40eb7ed788c1023e7a49",
         "type": "github"
       },
       "original": {
         "owner": "kixelated",
         "repo": "quest",
-        "rev": "5ff9229d277a4580296795a82f427f5ec30072c7",
+        "rev": "b7027a3ded4b0a36505f40eb7ed788c1023e7a49",
         "type": "github"
       }
     },

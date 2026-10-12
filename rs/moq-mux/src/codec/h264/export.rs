@@ -291,7 +291,7 @@ mod tests {
 		let consumer = broadcast.consume();
 		// The whole track is written before the exporter runs, so it needs a budget
 		// wide enough to read it: the default skips everything but the live edge.
-		let mut export = Export::new(crate::source::announced(&consumer), Once(Some(catalog)))
+		let mut export = Export::new(crate::source::announced(&consumer).await, Once(Some(catalog)))
 			.with_max_delay(std::time::Duration::from_secs(30));
 
 		let frame0 = export.next().await.unwrap().expect("first frame");
@@ -341,7 +341,7 @@ mod tests {
 			group.finish().unwrap();
 			track.finish().unwrap();
 			let consumer = broadcast.consume();
-			let mut exporter = Export::new(crate::source::announced(&consumer), Once(Some(catalog)));
+			let mut exporter = Export::new(crate::source::announced(&consumer).await, Once(Some(catalog)));
 			let result = exporter.next().await;
 			if in_band {
 				let expected: Vec<_> = nals
