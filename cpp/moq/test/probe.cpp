@@ -104,6 +104,8 @@ int main() {
     auto fingerprints = unbound->cert_fingerprints();
     CHECK(!fingerprints);
     CHECK(std::holds_alternative<moq::Error::kBind>(fingerprints.error().get_variant()));
+    CHECK(std::get<moq::Error::kBind>(fingerprints.error().get_variant()).reason ==
+          "not listening; call listen() first");
     // It prints the message Rust's Display gives.
     CHECK(fingerprints.error().to_string() == "bind: not listening; call listen() first");
 

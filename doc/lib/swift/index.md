@@ -76,6 +76,7 @@ one to one; the API reference has the names.
 - **Decoded frames hold decoder buffers.** Release each frame from `decodeVideo` promptly, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
 - **Closing.** `try await session.shutdown()` gives finished tracks up to one second to deliver and throws if they did not. `session.cancel(code:)` closes at once. Finish or abort live tracks first.
 - **Stats.** `session.stats()` reports `rttUs`, `estimatedSendRateBps`, `estimatedRecvRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`). A field is `nil` when the transport does not report it, which is not the same as zero.
+- **Errors.** Diagnostic cases use the `reason:` argument label; match their associated value to inspect it. Protocol errors carry `details`.
 - **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
 - **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
 

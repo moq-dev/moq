@@ -1683,3 +1683,45 @@ async fn imports_the_sample_defaults_fixtures() {
 		);
 	}
 }
+
+#[test]
+#[tracing_test::traced_test]
+fn emsg_metadata_drops_warn_once() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut import = super::Import::new(broadcast, catalog.reserve());
+	let event = mp4_atom::Emsg {
+		timescale: 1000,
+		presentation_time: mp4_atom::EmsgTimestamp::Absolute(0),
+		event_duration: 1000,
+		id: 1,
+		scheme_id_uri: "urn:test:event".into(),
+		value: "cue".into(),
+		message_data: b"metadata".to_vec(),
+	};
+	let mut data = Vec::new();
+	event.encode(&mut data).unwrap();
+	event.encode(&mut data).unwrap();
+	let fixture = include_bytes!("test_data/bbb.mp4");
+	let mut cursor = std::io::Cursor::new(fixture.as_slice());
+	mp4_atom::Ftyp::decode(&mut cursor).unwrap();
+	mp4_atom::Moov::decode(&mut cursor).unwrap();
+	data.extend_from_slice(&fixture[..cursor.position() as usize]);
+	data.extend_from_slice(&audio_fragment(0, 1024, 327));
+	import.decode(&data).unwrap();
+	import.finish().unwrap();
+	assert_eq!(import.dropped_metadata(), 2);
+	assert_eq!(catalog.snapshot().video.renditions.len(), 1);
+	assert_eq!(catalog.snapshot().audio.renditions.len(), 1);
+	logs_assert(|lines| {
+		let warnings = lines
+			.iter()
+			.filter(|line| line.contains("discarding fMP4 emsg metadata"))
+			.count();
+		if warnings == 1 {
+			Ok(())
+		} else {
+			Err(format!("expected one metadata warning, got {warnings}"))
+		}
+	});
+}

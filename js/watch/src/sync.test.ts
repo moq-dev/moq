@@ -147,15 +147,55 @@ describe("wait", () => {
 		sync.close();
 	});
 
-	it("wakes a sleeping wait on reset", async () => {
+	it("holds a sleeping wait across a reset until the next frame re-anchors", async () => {
 		const sync = new Sync({ delay: 10_000 as Time.Milli });
 		await flush();
-		sync.received(Time.Milli.now());
+		const timestamp = Time.Milli.now();
+		sync.received(timestamp);
 
-		const waiting = sync.wait(Time.Milli.now());
+		let woke = false;
+		const waiting = sync.wait(timestamp).then(() => {
+			woke = true;
+		});
 		await flush();
 		sync.reset();
+		await flush();
+		expect(woke).toBe(false);
+
+		// The next frame anchors far enough ahead that this one is overdue.
+		sync.received(Time.Milli.add(timestamp, Time.Milli(20_000)));
+		await waiting;
+		expect(woke).toBe(true);
+		sync.close();
+	});
+
+	it("releases a wait parked across a reset when its signal aborts", async () => {
+		const sync = new Sync({ delay: 10_000 as Time.Milli });
+		await flush();
+		const timestamp = Time.Milli.now();
+		sync.received(timestamp);
+
+		const controller = new AbortController();
+		const waiting = sync.wait(timestamp, controller.signal);
+		await flush();
+		sync.reset();
+		await flush();
+		controller.abort();
 		await waiting;
 		sync.close();
+	});
+
+	it("releases a wait parked across a reset when closed", async () => {
+		const sync = new Sync({ delay: 10_000 as Time.Milli });
+		await flush();
+		const timestamp = Time.Milli.now();
+		sync.received(timestamp);
+
+		const waiting = sync.wait(timestamp);
+		await flush();
+		sync.reset();
+		await flush();
+		sync.close();
+		await waiting;
 	});
 });

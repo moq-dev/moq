@@ -91,6 +91,11 @@ export class Sync {
 
 	#media = new Signal<{ target: Getter<Time.Milli | undefined> }[]>([]);
 
+	#epoch = 0;
+
+	// Releases parked waits, which may otherwise sleep forever on a reference that never returns.
+	#closed = new Signal(false);
+
 	#signals = new Effect();
 
 	constructor(props?: Inputs<SyncInput>) {
@@ -197,8 +202,18 @@ export class Sync {
 	// in buffered mode (typically alongside flushing the audio buffer) so the new content
 	// plays from its own first frame instead of inheriting the previous reference.
 	reset(): void {
+		this.#epoch++;
 		this.#out.reference.set(undefined);
 		this.#late.clear();
+	}
+
+	/**
+	 * Bumped by every `reset()`. A frame that waited across a bump belongs to the previous
+	 * timeline, even when the next frame restores the same reference value.
+	 * @internal
+	 */
+	get epoch(): number {
+		return this.#epoch;
 	}
 
 	// The PTS that should be rendering right now, derived from the reference + buffer.
@@ -209,8 +224,13 @@ export class Sync {
 		return Time.Milli.sub(Time.Milli.sub(Time.Milli.now(), reference), this.#out.delay.peek());
 	}
 
-	// Sleep until it's time to render this frame.
-	async wait(timestamp: Time.Milli): Promise<void> {
+	/**
+	 * Sleep until it's time to render this frame, or until `signal` aborts.
+	 *
+	 * A reset holds the wait until the next frame re-anchors the clock, then measures the frame
+	 * against that new reference. Aborting resolves the wait early and releases it.
+	 */
+	async wait(timestamp: Time.Milli, signal?: AbortSignal): Promise<void> {
 		// A zero delay still sleeps: the sleep comes from the reference, which holds an early frame
 		// until its timestamp comes up. "instant" is the only thing that skips the wait itself.
 		// Peek the input, not `out.instant`, which lags a same-turn change until effects flush.
@@ -222,8 +242,8 @@ export class Sync {
 		}
 
 		for (;;) {
-			// Switching to "instant" wakes the sleep below, so frames parked here leave.
-			if (this.in.delay.peek() === "instant") return;
+			// Switching to "instant", closing, or aborting wakes the sleep below, so frames parked here leave.
+			if (this.in.delay.peek() === "instant" || this.#closed.peek() || signal?.aborted) return;
 
 			// Sleep until it's time to decode the next frame.
 			// NOTE: This function runs in parallel for each frame.
@@ -231,7 +251,10 @@ export class Sync {
 			const ref = Time.Milli.sub(now, timestamp);
 
 			const currentRef = this.#out.reference.peek();
-			if (currentRef === undefined) return;
+			if (currentRef === undefined) {
+				await this.#sleep(undefined, signal);
+				continue;
+			}
 
 			const sleep = Time.Milli.add(Time.Milli.sub(currentRef, ref), this.#out.delay.peek());
 			if (sleep <= 0) return;
@@ -239,26 +262,33 @@ export class Sync {
 			// Skip setTimeout for small sleeps; the timer resolution (~4ms) would overshoot.
 			if (sleep < 5) return;
 
-			if (await this.#sleep(sleep)) return;
+			if (await this.#sleep(sleep, signal)) return;
 		}
 	}
 
-	// Sleeps for `ms`, or returns false early once anything the sleep was computed from changes.
-	// Releases every listener either way: frames sleep once each, so a listener left on a signal
-	// that never changes would pile up for the life of the player.
-	#sleep(ms: number): Promise<boolean> {
+	// Sleeps for `ms` (forever if undefined), or returns false early once anything the sleep was
+	// computed from changes or `signal` aborts. Releases every listener either way: frames sleep
+	// once each, so a listener left on a signal that never changes would pile up for the life of
+	// the player.
+	#sleep(ms: number | undefined, signal?: AbortSignal): Promise<boolean> {
 		return new Promise((resolve) => {
 			const wake = (ok: boolean) => {
 				clearTimeout(timer);
 				for (const dispose of disposes) dispose();
 				resolve(ok);
 			};
-			const timer = setTimeout(() => wake(true), ms);
+			const timer = ms === undefined ? undefined : setTimeout(() => wake(true), ms);
 			const disposes = [
 				this.in.delay.changed(() => wake(false)),
 				this.#out.delay.changed(() => wake(false)),
 				this.#out.reference.changed(() => wake(false)),
+				this.#closed.changed(() => wake(false)),
 			];
+			if (signal) {
+				const abort = () => wake(false);
+				signal.addEventListener("abort", abort, { once: true });
+				disposes.push(() => signal.removeEventListener("abort", abort));
+			}
 		});
 	}
 
@@ -272,6 +302,7 @@ export class Sync {
 	}
 
 	close() {
+		this.#closed.set(true);
 		this.#signals.close();
 	}
 }

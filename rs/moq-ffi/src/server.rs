@@ -108,7 +108,9 @@ async fn serve(
 	let mut listener = match server.listen().await {
 		Ok(listener) => listener,
 		Err(err) => {
-			let _ = bound.send(Err(MoqError::Bind(format!("{err}"))));
+			let _ = bound.send(Err(MoqError::Bind {
+				reason: format!("{err}"),
+			}));
 			return;
 		}
 	};
@@ -117,7 +119,9 @@ async fn serve(
 			let _ = bound.send(Ok(addr.to_string()));
 		}
 		Err(err) => {
-			let _ = bound.send(Err(MoqError::Bind(format!("{err}"))));
+			let _ = bound.send(Err(MoqError::Bind {
+				reason: format!("{err}"),
+			}));
 			listener.close().await;
 			return;
 		}
@@ -149,9 +153,9 @@ impl ServerState {
 	fn new(config: MoqServerConfig) -> Result<Self, MoqError> {
 		let mut listen = moq_tokio::listen::Config::default();
 		if let Some(bind) = config.bind {
-			let parsed = bind
-				.parse()
-				.map_err(|_| MoqError::Config(format!("invalid bind address: {bind}")))?;
+			let parsed = bind.parse().map_err(|_| MoqError::Config {
+				reason: format!("invalid bind address: {bind}"),
+			})?;
 			listen.bind = Some(parsed);
 		}
 		listen.version = crate::session::parse_versions(&config.versions)?;
@@ -178,7 +182,9 @@ impl ServerState {
 		listening: &std::sync::Mutex<Option<Listening>>,
 	) -> Result<String, MoqError> {
 		if self.requests.is_some() {
-			return Err(MoqError::Bind("already listening".into()));
+			return Err(MoqError::Bind {
+				reason: "already listening".into(),
+			});
 		}
 		let (bound, addr) = tokio::sync::oneshot::channel();
 		let (queue, requests) = tokio::sync::mpsc::channel(1);
@@ -194,7 +200,9 @@ impl ServerState {
 				.config
 				.clone()
 				.init(self.quic.clone())
-				.map_err(|err| MoqError::Bind(format!("{err}")))?;
+				.map_err(|err| MoqError::Bind {
+					reason: format!("{err}"),
+				})?;
 			let certificates = server.certificates();
 			let (stop, stopped) = tokio::sync::oneshot::channel();
 			let (closed, wait) = std::sync::mpsc::channel();
@@ -213,10 +221,9 @@ impl ServerState {
 	}
 
 	async fn accept(&mut self) -> Result<Option<Arc<MoqRequest>>, MoqError> {
-		let requests = self
-			.requests
-			.as_mut()
-			.ok_or_else(|| MoqError::Bind("not listening; call listen() first".into()))?;
+		let requests = self.requests.as_mut().ok_or_else(|| MoqError::Bind {
+			reason: "not listening; call listen() first".into(),
+		})?;
 		match requests.queue.recv().await {
 			Some(request) => Ok(Some(MoqRequest::new(
 				request,
@@ -273,10 +280,9 @@ impl MoqServer {
 	/// before `listen()`, and [`MoqError::Busy`] while `listen()` or `accept()` is in flight.
 	pub fn cert_fingerprints(&self) -> Result<Vec<String>, MoqError> {
 		let state = self.task.configure()?;
-		let requests = state
-			.requests
-			.as_ref()
-			.ok_or_else(|| MoqError::Bind("not listening; call listen() first".into()))?;
+		let requests = state.requests.as_ref().ok_or_else(|| MoqError::Bind {
+			reason: "not listening; call listen() first".into(),
+		})?;
 		Ok(requests.certificates.fingerprints())
 	}
 
@@ -462,7 +468,9 @@ impl MoqRequest {
 					.with_subscriber(subscribe.clone())
 					.ok()
 					.await
-					.map_err(|err| MoqError::Connect(format!("{err}")))?;
+					.map_err(|err| MoqError::Connect {
+						reason: format!("{err}"),
+					})?;
 				Ok(Arc::new(MoqSession::accepted(session, publish, subscribe)))
 			})
 			.await
@@ -483,10 +491,9 @@ impl MoqRequest {
 					403 => moq_tokio::server::Reject::Forbidden,
 					code => moq_tokio::server::Reject::App(code),
 				};
-				request
-					.reject(reject)
-					.await
-					.map_err(|err| MoqError::Reject(format!("{err}")))?;
+				request.reject(reject).await.map_err(|err| MoqError::Reject {
+					reason: format!("{err}"),
+				})?;
 				Ok(())
 			})
 			.await

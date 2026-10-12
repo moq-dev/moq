@@ -129,7 +129,7 @@ pub struct MoqBackoff {
 pub(crate) fn parse_versions(versions: &[String]) -> Result<Vec<moq_net::Version>, MoqError> {
 	versions
 		.iter()
-		.map(|version| version.parse().map_err(MoqError::Config))
+		.map(|version| version.parse().map_err(|message| MoqError::Config { reason: message }))
 		.collect()
 }
 
@@ -148,9 +148,9 @@ impl Client {
 
 		let mut connect = moq_tokio::connect::Config::default();
 		if let Some(bind) = config.bind {
-			let bind = bind
-				.parse()
-				.map_err(|err| MoqError::Config(format!("invalid bind address {bind}: {err}")))?;
+			let bind = bind.parse().map_err(|err| MoqError::Config {
+				reason: format!("invalid bind address {bind}: {err}"),
+			})?;
 			connect.bind = Some(bind);
 		}
 		connect.version = parse_versions(&config.versions)?;
@@ -189,7 +189,9 @@ impl Client {
 
 		// Building the endpoint here, not at connect, is what surfaces an unreadable
 		// certificate or a half-configured mTLS identity from `new`.
-		let client = connect.init(quic).map_err(|err| MoqError::Config(format!("{err}")))?;
+		let client = connect.init(quic).map_err(|err| MoqError::Config {
+			reason: format!("{err}"),
+		})?;
 
 		Ok(Self {
 			client,
@@ -226,7 +228,9 @@ fn map_connect_error(err: moq_tokio::Error) -> MoqError {
 		err => match err.connect_error() {
 			Some(moq_tokio::ConnectError::Unauthorized) => MoqError::Unauthorized,
 			Some(moq_tokio::ConnectError::Forbidden) => MoqError::Forbidden,
-			_ => MoqError::Connect(format!("{err}")),
+			_ => MoqError::Connect {
+				reason: format!("{err}"),
+			},
 		},
 	}
 }
@@ -253,7 +257,9 @@ fn map_closed_error(err: moq_tokio::Error) -> MoqError {
 		err => match err.connect_error() {
 			Some(moq_tokio::ConnectError::Unauthorized) => MoqError::Unauthorized,
 			Some(moq_tokio::ConnectError::Forbidden) => MoqError::Forbidden,
-			_ => MoqError::Connect(format!("{err}")),
+			_ => MoqError::Connect {
+				reason: format!("{err}"),
+			},
 		},
 	}
 }
@@ -285,7 +291,7 @@ mod tests {
 	#[test]
 	fn rejects_non_ascii_instead_of_panicking() {
 		for input in ["aéa", "é", "ééééééééééééééééééééééééééééééé"] {
-			assert!(matches!(decode_hex(input), Err(MoqError::Config(_))), "{input}");
+			assert!(matches!(decode_hex(input), Err(MoqError::Config { .. })), "{input}");
 		}
 	}
 
@@ -307,7 +313,7 @@ mod tests {
 			format!("{}+0", &VALID[..62]),
 			format!(" 0{}", &VALID[2..]),
 		] {
-			assert!(matches!(decode_hex(&bad), Err(MoqError::Config(_))), "{bad}");
+			assert!(matches!(decode_hex(&bad), Err(MoqError::Config { .. })), "{bad}");
 		}
 	}
 
@@ -372,13 +378,13 @@ mod tests {
 			bind: Some("not-an-address".into()),
 			..Default::default()
 		};
-		assert!(matches!(MoqClient::new(bind), Err(MoqError::Config(_))));
+		assert!(matches!(MoqClient::new(bind), Err(MoqError::Config { .. })));
 
 		let version = MoqClientConfig {
 			versions: vec!["moq-lite-99".into()],
 			..Default::default()
 		};
-		assert!(matches!(MoqClient::new(version), Err(MoqError::Config(_))));
+		assert!(matches!(MoqClient::new(version), Err(MoqError::Config { .. })));
 
 		let missing = MoqClientConfig {
 			tls: MoqClientTls {
@@ -387,7 +393,7 @@ mod tests {
 			},
 			..Default::default()
 		};
-		assert!(matches!(MoqClient::new(missing), Err(MoqError::Config(_))));
+		assert!(matches!(MoqClient::new(missing), Err(MoqError::Config { .. })));
 	}
 
 	#[test]
@@ -472,7 +478,9 @@ impl Client {
 			true => crate::transport::connect(url, &self.versions).await,
 			false => crate::transport::connect_with_hashes(url, &self.versions, self.fingerprints.clone()).await,
 		}
-		.map_err(|err| MoqError::Connect(format!("{err}")))?;
+		.map_err(|err| MoqError::Connect {
+			reason: format!("{err}"),
+		})?;
 
 		// Run the driver on the microtask queue. The driver
 		// holds no session clone, so dropping the last handle still closes the
@@ -507,24 +515,27 @@ fn decode_hex(hex: &str) -> Result<Vec<u8>, MoqError> {
 	// non-ASCII would let a 2-byte chunk split a character, and `from_str_radix` accepts
 	// a leading sign, so an unchecked "+a" would decode to 10 rather than erroring.
 	if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-		return Err(MoqError::Config(format!("fingerprint is not hex: {hex}")));
+		return Err(MoqError::Config {
+			reason: format!("fingerprint is not hex: {hex}"),
+		});
 	}
 
 	// WebTransport's `serverCertificateHashes` only accepts a 32-byte sha-256, so a
 	// different length can never match a certificate. Rejecting here beats failing
 	// opaquely inside the browser.
 	if hex.len() != LEN {
-		return Err(MoqError::Config(format!(
-			"expected a {LEN}-character sha-256 fingerprint, got {}",
-			hex.len()
-		)));
+		return Err(MoqError::Config {
+			reason: format!("expected a {LEN}-character sha-256 fingerprint, got {}", hex.len()),
+		});
 	}
 
 	hex.as_bytes()
 		.chunks(2)
 		.map(|pair| {
 			let pair = std::str::from_utf8(pair).expect("checked ascii above");
-			u8::from_str_radix(pair, 16).map_err(|err| MoqError::Config(format!("{err}")))
+			u8::from_str_radix(pair, 16).map_err(|err| MoqError::Config {
+				reason: format!("{err}"),
+			})
 		})
 		.collect()
 }
