@@ -101,6 +101,10 @@ These land with the next breaking release, not the 2026-09-23 train.
   `used`, and `unused`; read them through `demand()`. The wrappers expose these
   as `moq.media` in Python, `moq.dev/moq/media` in Go, `dev.moq.media` in
   Kotlin, `package:moq/media.dart` in Dart, and `Media` in Swift.
+- **moq-ffi error payloads are named.** `MoqError` cases that carried a
+  positional string (`Transport`, `Internal`, `Connect`, ...) name it
+  `reason` (`Reason` in Go, the `reason:` label in Swift). The Display text is
+  unchanged.
 - **Python and Go durations are native.** `Frame`, `Datagram`, `Subscription`,
   `TrackInfo`, and `ConnectionStats` carry `timedelta` in Python and
   `time.Duration` in Go instead of microsecond integers: `max_delay_us` is

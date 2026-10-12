@@ -191,6 +191,7 @@ process that exits normally can skip it.
 
 ## Errors
 
+Error cases carrying a diagnostic expose it as `reason`; protocol failures expose `details`.
 `moq::Error` holds a `std::variant` of cases (`moq::Error::kCancelled`,
 `kUnauthorized`, `kProtocol`, ...); test one with
 `std::holds_alternative<moq::Error::kUnauthorized>(error.get_variant())`. Auth
