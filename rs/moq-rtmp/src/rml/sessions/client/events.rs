@@ -36,6 +36,9 @@ pub enum ClientSessionEvent {
 		additional_values: Vec<Amf0Value>,
 	},
 
+	/// The server sent an Amf0 data message that isn't stream metadata, such as `onCuePoint`
+	UnhandleableAmf0Data { values: Vec<Amf0Value> },
+
 	/// The server sent us a result to a transaction that we don't know about
 	UnknownTransactionResultReceived {
 		transaction_id: f64,

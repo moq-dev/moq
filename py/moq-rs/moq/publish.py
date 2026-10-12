@@ -186,6 +186,10 @@ class TrackRequest:
         """
         return TrackProducer(self._inner.accept(_track_info(info)))
 
+    def demand(self) -> TrackDemand:
+        """Watch this track's subscribers, including after accepting it."""
+        return TrackDemand(self._inner.demand())
+
     def dynamic(self) -> TrackDynamic:
         """Create a fetch handler before accepting this requested track."""
         return TrackDynamic(self._inner.dynamic())
@@ -314,9 +318,9 @@ class AudioProducer:
         """Wait until this audio track has no active subscribers. Prefer :meth:`demand`."""
         await self._inner.unused()
 
-    def reset_epoch(self) -> None:
+    def reanchor(self) -> None:
         """Re-anchor the timeline to the next frame after an idle gap."""
-        self._inner.reset_epoch()
+        self._inner.reanchor()
 
     def write(self, frame: AudioFrame) -> None:
         """Push one frame of PCM in the configured input format."""

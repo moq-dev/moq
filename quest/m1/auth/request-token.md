@@ -80,7 +80,10 @@ silently ignored on moq-lite, an outbound update sniffer, unread
 - A namespace renews only from draft 17; a token-bearing draft-16
   REQUEST_UPDATE for a PUBLISH_NAMESPACE is still ignored. Implement it
   (decided 2026-10-09: draft-16 allows it, and the Drafts decision covers 16),
-  with a test that a refused one sends PUBLISH_NAMESPACE_CANCEL.
+  with a test that a refused one sends PUBLISH_NAMESPACE_CANCEL. Its tokens
+  also decode by the request rules, in Rust and JS: REGISTER, an alias, or a
+  malformed structure closes the session, and a repeat is refused
+  MALFORMED_AUTH_TOKEN (deferred from #5107).
 
 Decided 2026-10-09: `set_request_token` keeps the typed `setup::Token` and
 the encoder writes only `USE_VALUE`. Alias forms wait for a consumer that

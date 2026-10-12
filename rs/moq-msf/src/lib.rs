@@ -123,6 +123,12 @@ pub struct Track {
 	/// Content role.
 	pub role: Option<Role>,
 
+	/// A human-readable label for the track.
+	pub label: Option<String>,
+
+	/// The BCP-47 language tag of the track.
+	pub lang: Option<String>,
+
 	/// WebCodecs codec string.
 	pub codec: Option<String>,
 
@@ -469,6 +475,8 @@ impl Track {
 			packaging,
 			is_live: false,
 			role: None,
+			label: None,
+			lang: None,
 			codec: None,
 			width: None,
 			height: None,
@@ -620,6 +628,8 @@ mod test {
 			packaging: Packaging::Legacy,
 			is_live: true,
 			role: Some(Role::Video),
+			label: None,
+			lang: None,
 			codec: Some("avc3.64001f".to_string()),
 			width: Some(1280),
 			height: Some(720),
@@ -644,6 +654,8 @@ mod test {
 			packaging: Packaging::Legacy,
 			is_live: true,
 			role: Some(Role::Audio),
+			label: None,
+			lang: None,
 			codec: Some("opus".to_string()),
 			width: None,
 			height: None,
@@ -668,6 +680,8 @@ mod test {
 			packaging: Packaging::Cmaf,
 			is_live: true,
 			role: Some(Role::Video),
+			label: None,
+			lang: None,
 			codec: Some("avc1.640028".to_string()),
 			width: Some(1920),
 			height: Some(1080),

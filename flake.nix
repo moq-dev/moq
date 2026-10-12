@@ -27,11 +27,9 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/5ff9229d277a4580296795a82f427f5ec30072c7";
+      url = "github:kixelated/quest/b7027a3ded4b0a36505f40eb7ed788c1023e7a49";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
-      inputs.crane.follows = "crane";
-      inputs.rust-overlay.follows = "rust-overlay";
     };
   };
 
@@ -135,6 +133,7 @@
             cargo-edit
             cargo-semver-checks
             cargo-deny
+            cargo-bloat
             # Per-crate feature matrices (`just rs features`), where workspace
             # unification would otherwise hide a broken single-crate build.
             cargo-hack
@@ -157,6 +156,8 @@
             # PulseAudio rather than the `pipewire` PCM below. Loaded at runtime
             # only, via `alsaPlugins`.
             pkgs.alsa-plugins
+            # A private clocked null device for native playback tests.
+            (pkgs.lib.getBin pkgs.pulseaudio)
             # moq-video's `pipewire` screen-capture feature: the pipewire crate
             # links libpipewire-0.3 via pkg-config and generates bindings at build
             # time (bindgenHook above provides libclang). Linux-only; macOS uses

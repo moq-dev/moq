@@ -43,6 +43,12 @@ Every attribute is also a reactive property. The
 The overlay adds play/pause, volume, fullscreen, a quality selector, a
 buffering indicator, and a stats panel.
 
+`el.error` (also `el.player.error`) reports a fatal audio or video decode error.
+The failing track closes its subscription and stops decoding. Select another
+source or rendition to clear the failure; the player does not resubscribe to
+broken media automatically. Individual decoder errors are available at
+`el.audio.out.error` and `el.video.out.error`.
+
 `el.broadcast.out.status` is `offline`, `loading`, `live`, or `error`. On
 `error` the origin refused the broadcast, `el.broadcast.out.error` says why,
 and the player does not ask again until it is pointed elsewhere or re-enabled.

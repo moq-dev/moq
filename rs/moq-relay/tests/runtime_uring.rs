@@ -16,6 +16,11 @@ use moq_tokio::moq_net;
 const TIMEOUT: Duration = Duration::from_secs(10);
 const WORKERS: u16 = 2;
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 /// Whether this kernel can run the io_uring workers at all.
 fn supported() -> bool {
 	match moq_uring::Worker::new(Default::default()) {
@@ -124,7 +129,7 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 	let origin = moq_tokio::origin::spawn();
 	let broadcast = origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -419,7 +424,7 @@ async fn an_mtls_client_authenticates_without_a_token() {
 	let origin = moq_tokio::origin::spawn();
 	let broadcast = origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -498,7 +503,7 @@ async fn uring_workers_write_qlog_traces() {
 	let origin = moq_tokio::origin::spawn();
 	let broadcast = origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
