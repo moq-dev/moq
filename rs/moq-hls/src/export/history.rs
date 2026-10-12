@@ -38,25 +38,21 @@ pub(super) async fn read(
 	let mut decoder = window::Decoder::<Record>::new(window::ConsumerConfig::default().with_compression(true));
 	let mut next = 0;
 	loop {
-		let mut head = live.next_group().await?;
+		// The live group only marks how far to read. Each group is fetched when reached instead:
+		// a held consumer does not pin its frames, so the backfill before it could evict it.
+		let head = live.next_group().await?;
 		let finished = head.is_none();
 		// A finished track can have no groups left in cache. Its high-water mark
 		// still tells us which stored groups must be fetched before returning.
-		let end = head.as_ref().map(|group| group.sequence).or_else(|| track.latest());
+		let end = head.map(|group| group.sequence).or_else(|| track.latest());
 		while end.is_some_and(|end| next <= end) {
-			let mut group = if head.as_ref().is_some_and(|group| group.sequence == next) {
-				head.take().unwrap()
-			} else {
-				match track.fetch_group(next, None).await {
-					Ok(group) => group,
-					// Retention prunes a recording's start, which this path cannot list from yet.
-					Err(moq_net::Error::NotFound | moq_net::Error::Stream(moq_net::StreamError::NotFound))
-						if next == 0 =>
-					{
-						return Err(crate::Error::HistoryPruned(name.clone()));
-					}
-					Err(err) => return Err(err.into()),
+			let mut group = match track.fetch_group(next, None).await {
+				Ok(group) => group,
+				// Retention prunes a recording's start, which this path cannot list from yet.
+				Err(moq_net::Error::NotFound | moq_net::Error::Stream(moq_net::StreamError::NotFound)) if next == 0 => {
+					return Err(crate::Error::HistoryPruned(name.clone()));
 				}
+				Err(err) => return Err(err.into()),
 			};
 			let mut decoded = decoder.group();
 			while let Some(frame) = group.read_frame().await? {
