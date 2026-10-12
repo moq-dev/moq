@@ -122,14 +122,17 @@ impl Track {
 						*field =
 							Some(String::from_utf8(value).map_err(|_| Error::InvalidSubtitle("invalid WebVTT UTF-8"))?);
 					}
+					let payload = payload.ok_or(Error::InvalidSubtitle("missing WebVTT cue payload"))?;
+					// Inline timestamps sit on the source timeline, which only `ctim` anchors.
+					if text::has_timestamp(&payload) {
+						return Err(Error::InvalidSubtitle("inline WebVTT timestamps are unsupported").into());
+					}
 					text::append(
 						&mut output,
 						Cue {
 							start,
 							end,
-							body: payload
-								.as_deref()
-								.ok_or(Error::InvalidSubtitle("missing WebVTT cue payload"))?,
+							body: &payload,
 							id: id.as_deref().unwrap_or_default(),
 							settings: settings.as_deref().unwrap_or_default(),
 						},

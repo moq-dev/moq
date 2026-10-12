@@ -4,7 +4,8 @@
 
 An fMP4 `wvtt` sample whose cue carries a `ctim` CueTimeBox, or which
 interleaves `vtta` additional-text boxes, imports as WebVTT text instead of
-failing the import. Today both are refused with `InvalidSubtitle`.
+failing the import. Today both are refused with `InvalidSubtitle`, as is any
+inline timestamp in a cue payload.
 
 ## Plan
 

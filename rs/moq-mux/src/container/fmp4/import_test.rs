@@ -1835,6 +1835,8 @@ fn malformed_webvtt_samples_are_refused() {
 		(subtitle_box(b"vttc", &duplicate), 1250),
 		(subtitle_box(b"vttc", &subtitle_box(b"payl", b"\xff")), 1250),
 		(subtitle_box(b"vttc", &payl), 0),
+		// Inline timestamps need `ctim` to anchor them.
+		(subtitle_box(b"vttc", &subtitle_box(b"payl", b"a <00:01.000>b")), 1250),
 	] {
 		let input = webvtt_input(payload, duration);
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -1965,4 +1967,35 @@ fn emsg_metadata_drops_warn_once() {
 			Err(format!("expected one metadata warning, got {warnings}"))
 		}
 	});
+}
+
+/// A cue shorter than a millisecond keeps a positive WebVTT duration.
+#[tokio::test(start_paused = true)]
+async fn webvtt_sub_millisecond_cue_stays_positive() {
+	// A 1 MHz track, so the cue can last 400 us.
+	let (ftyp, mut moov) = decode_init(&webvtt_init("WEBVTT"));
+	moov.trak[0].mdia.mdhd.timescale = 1_000_000;
+	let mut init = Vec::new();
+	ftyp.encode(&mut init).unwrap();
+	moov.encode(&mut init).unwrap();
+	init.extend(webvtt_fragment(
+		250_200,
+		&[subtitle_box(b"vttc", &subtitle_box(b"payl", b"hi"))],
+		400,
+	));
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&init).unwrap();
+	importer.finish().unwrap();
+	let snapshot = catalog.snapshot();
+	let name = snapshot.text.renditions.keys().next().unwrap();
+	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+	let mut reader = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
+	let frame = reader.read().await.unwrap().unwrap();
+	assert_eq!(&frame.payload[..], b"WEBVTT\n\n00:00:00.250 --> 00:00:00.251\nhi\n\n");
 }

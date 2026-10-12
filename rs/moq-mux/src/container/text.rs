@@ -11,7 +11,10 @@ pub(super) struct Cue<'a> {
 }
 
 pub(super) fn stamp(value: Timestamp) -> String {
-	let millis = value.as_micros() / 1000;
+	format_millis(value.as_micros() / 1000)
+}
+
+fn format_millis(millis: u128) -> String {
 	format!(
 		"{:02}:{:02}:{:02}.{:03}",
 		millis / 3_600_000,
@@ -70,9 +73,12 @@ pub(super) fn append(output: &mut String, cue: Cue<'_>) -> Result<(), &'static s
 		output.push_str(cue.id);
 		output.push('\n');
 	}
-	output.push_str(&stamp(cue.start));
+	// WebVTT has millisecond precision: round the end up so a sub-millisecond cue stays positive.
+	let start = cue.start.as_micros() / 1000;
+	let end = cue.end.as_micros().div_ceil(1000).max(start + 1);
+	output.push_str(&format_millis(start));
 	output.push_str(" --> ");
-	output.push_str(&stamp(cue.end));
+	output.push_str(&format_millis(end));
 	if !cue.settings.is_empty() {
 		output.push(' ');
 		output.push_str(cue.settings);
@@ -81,6 +87,13 @@ pub(super) fn append(output: &mut String, cue: Cue<'_>) -> Result<(), &'static s
 	output.push_str(body.trim_end_matches('\n'));
 	output.push_str("\n\n");
 	Ok(())
+}
+
+/// Whether cue text contains an inline `<timestamp>` tag.
+pub(super) fn has_timestamp(body: &str) -> bool {
+	body.split('<')
+		.skip(1)
+		.any(|tag| tag.starts_with(|c: char| c.is_ascii_digit()))
 }
 
 /// Matroska stores inline WebVTT timestamps relative to the Block timestamp.
