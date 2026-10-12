@@ -286,6 +286,7 @@ impl Kind {
 /// The [`mp4_atom::Trak`] is heap-allocated so that embedding `Wire`
 /// in other enums (e.g. [`catalog::hang::Container`](crate::catalog::hang::Container))
 /// doesn't bloat unrelated variants.
+#[derive(Clone)]
 pub struct Wire {
 	trak: Box<mp4_atom::Trak>,
 	defaults: sample::Defaults,

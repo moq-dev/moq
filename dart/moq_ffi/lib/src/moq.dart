@@ -6448,6 +6448,7 @@ class FfiConverterMoqMediaCatalogProducer {
 abstract class MoqMediaContainerConsumerInterface {
   void cancel();
   Future<MoqMediaFrame?> next();
+  Future<MoqMediaContainerGroupConsumer?> recvGroup();
 }
 
 final _MoqMediaContainerConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -6515,6 +6516,19 @@ class MoqMediaContainerConsumer implements MoqMediaContainerConsumerInterface {
       ffi_moq_ffi_rust_future_complete_rust_buffer,
       ffi_moq_ffi_rust_future_free_rust_buffer,
       FfiConverterOptionalMoqMediaFrame.lift,
+      moqExceptionErrorHandler,
+    );
+  }
+
+  Future<MoqMediaContainerGroupConsumer?> recvGroup() {
+    return uniffiRustCallAsync(
+      () => uniffi_moq_ffi_fn_method_moqmediacontainerconsumer_recv_group(
+        uniffiClonePointer(),
+      ),
+      ffi_moq_ffi_rust_future_poll_rust_buffer,
+      ffi_moq_ffi_rust_future_complete_rust_buffer,
+      ffi_moq_ffi_rust_future_free_rust_buffer,
+      FfiConverterOptionalMoqMediaContainerGroupConsumer.lift,
       moqExceptionErrorHandler,
     );
   }
@@ -9607,6 +9621,58 @@ class FfiConverterOptionalMoqGroupConsumer {
   }
 }
 
+class FfiConverterOptionalMoqMediaContainerGroupConsumer {
+  static MoqMediaContainerGroupConsumer? lift(RustBuffer buf) {
+    return FfiConverterOptionalMoqMediaContainerGroupConsumer.read(
+      buf.asUint8List(),
+    ).value;
+  }
+
+  static LiftRetVal<MoqMediaContainerGroupConsumer?> read(Uint8List buf) {
+    if (ByteData.view(buf.buffer, buf.offsetInBytes).getInt8(0) == 0) {
+      return LiftRetVal(null, 1);
+    }
+    final result = FfiConverterMoqMediaContainerGroupConsumer.read(
+      Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+    );
+    return LiftRetVal<MoqMediaContainerGroupConsumer?>(
+      result.value,
+      result.bytesRead + 1,
+    );
+  }
+
+  static int allocationSize([MoqMediaContainerGroupConsumer? value]) {
+    if (value == null) {
+      return 1;
+    }
+    return FfiConverterMoqMediaContainerGroupConsumer.allocationSize(value) + 1;
+  }
+
+  static RustBuffer lower(MoqMediaContainerGroupConsumer? value) {
+    if (value == null) {
+      return toRustBuffer(Uint8List.fromList([0]));
+    }
+    final buf = Uint8List(
+      FfiConverterOptionalMoqMediaContainerGroupConsumer.allocationSize(value),
+    );
+    FfiConverterOptionalMoqMediaContainerGroupConsumer.write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqMediaContainerGroupConsumer? value, Uint8List buf) {
+    if (value == null) {
+      buf[0] = 0;
+      return 1;
+    }
+    buf[0] = 1;
+    return FfiConverterMoqMediaContainerGroupConsumer.write(
+          value,
+          Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+        ) +
+        1;
+  }
+}
+
 class FfiConverterOptionalMoqMediaFrame {
   static MoqMediaFrame? lift(RustBuffer buf) {
     return FfiConverterOptionalMoqMediaFrame.read(buf.asUint8List()).value;
@@ -11035,6 +11101,12 @@ external void uniffi_moq_ffi_fn_method_moqmediacontainerconsumer_cancel(
 
 @Native<Pointer<Void> Function(Pointer<Void>)>(assetId: _uniffiAssetId)
 external Pointer<Void> uniffi_moq_ffi_fn_method_moqmediacontainerconsumer_next(
+  Pointer<Void> ptr,
+);
+
+@Native<Pointer<Void> Function(Pointer<Void>)>(assetId: _uniffiAssetId)
+external Pointer<Void>
+uniffi_moq_ffi_fn_method_moqmediacontainerconsumer_recv_group(
   Pointer<Void> ptr,
 );
 
@@ -12728,6 +12800,10 @@ external int uniffi_moq_ffi_checksum_method_moqmediacontainerconsumer_next();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int
+uniffi_moq_ffi_checksum_method_moqmediacontainerconsumer_recv_group();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int
 uniffi_moq_ffi_checksum_method_moqmediacontainergroupconsumer_cancel();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -13239,11 +13315,15 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqmediacontainerconsumer_cancel() !=
-      27429) {
+      38713) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqmediacontainerconsumer_next() !=
-      17029) {
+      24777) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqmediacontainerconsumer_recv_group() !=
+      13059) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqmediacontainergroupconsumer_cancel() !=

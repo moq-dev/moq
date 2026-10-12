@@ -198,18 +198,61 @@ pub(crate) fn map_fetch_error(err: moq_net::Error) -> MoqError {
 ///
 /// `moq_net` makes the choice a handle you consume the subscriber into, which a foreign
 /// binding can't express in its type system, so the handle commits on the first group
-/// read instead: whichever group cursor a caller reaches for first is the one this
-/// track keeps, and reaching for the other afterwards is [`MoqError::AlreadyCommitted`].
-/// Datagrams are a separate cursor on either handle, so reading them never commits.
-enum Cursor {
+/// read instead: whichever cursor a caller reaches for first is the one this track keeps,
+/// and reaching for the other afterwards is [`MoqError::AlreadyCommitted`]. `O` is the
+/// ordered reader: [`OrderedCursor`] for a raw track, a decode-order container consumer
+/// for a media track.
+pub(crate) enum Cursor<O> {
 	/// No group read has happened yet; the track can still commit either way.
 	Uncommitted(moq_net::track::Subscriber),
 	/// Committed to arrival order by the first `recv_group`.
 	Arrival(moq_net::track::Subscriber),
-	/// Committed to sequence order by the first `next_group` or `read_frame`.
-	Ordered(Box<OrderedCursor>),
+	/// Committed to the ordered reader by the first read through it.
+	Ordered(O),
 	/// Transient, while the subscriber is moved out to be converted.
 	Converting,
+}
+
+impl<O> Cursor<O> {
+	/// The arrival cursor, committing this track to it, or [`MoqError::AlreadyCommitted`]
+	/// once it committed to the ordered reader.
+	pub(crate) fn arrival(&mut self) -> Result<&mut moq_net::track::Subscriber, MoqError> {
+		if let Self::Uncommitted(_) = self {
+			let Self::Uncommitted(track) = std::mem::replace(self, Self::Converting) else {
+				unreachable!("just matched Uncommitted");
+			};
+			*self = Self::Arrival(track);
+		}
+		match self {
+			Self::Arrival(track) => Ok(track),
+			Self::Ordered(_) => Err(MoqError::AlreadyCommitted),
+			// Only reachable if a previous conversion unwound mid-swap, leaving the
+			// handle with no subscriber to read: poisoned, not misused.
+			Self::Uncommitted(_) | Self::Converting => Err(MoqError::Closed),
+		}
+	}
+
+	/// The ordered reader, built by `convert` on first use, or [`MoqError::AlreadyCommitted`]
+	/// once the track committed to arrival order.
+	pub(crate) fn ordered(
+		&mut self,
+		convert: impl FnOnce(moq_net::track::Subscriber) -> O,
+	) -> Result<&mut O, MoqError> {
+		// Only move the subscriber out when there is one to convert: `convert` consumes
+		// it, and swapping unconditionally would drop an already-converted handle.
+		if let Self::Uncommitted(_) = self {
+			let Self::Uncommitted(track) = std::mem::replace(self, Self::Converting) else {
+				unreachable!("just matched Uncommitted");
+			};
+			*self = Self::Ordered(convert(track));
+		}
+		match self {
+			Self::Ordered(ordered) => Ok(ordered),
+			Self::Arrival(_) => Err(MoqError::AlreadyCommitted),
+			// See `arrival`: unreachable unless the handle was left mid-conversion.
+			Self::Uncommitted(_) | Self::Converting => Err(MoqError::Closed),
+		}
+	}
 }
 
 /// Sequence-order handle plus the group `read_frame` is in the middle of.
@@ -223,52 +266,23 @@ struct OrderedCursor {
 }
 
 struct TrackInner {
-	track: Cursor,
+	/// Datagrams are a separate cursor on either handle, so reading them never commits.
+	track: Cursor<Box<OrderedCursor>>,
 }
 
 impl TrackInner {
-	/// The arrival cursor, committing this track to it, or [`MoqError::AlreadyCommitted`]
-	/// once it committed to sequence order.
-	fn arrival(&mut self) -> Result<&mut moq_net::track::Subscriber, MoqError> {
-		if let Cursor::Uncommitted(_) = &self.track {
-			let Cursor::Uncommitted(track) = std::mem::replace(&mut self.track, Cursor::Converting) else {
-				unreachable!("just matched Uncommitted");
-			};
-			self.track = Cursor::Arrival(track);
-		}
-		match &mut self.track {
-			Cursor::Arrival(track) => Ok(track),
-			Cursor::Ordered(_) => Err(MoqError::AlreadyCommitted),
-			// Only reachable if a previous conversion unwound mid-swap, leaving the
-			// handle with no subscriber to read: poisoned, not misused.
-			Cursor::Uncommitted(_) | Cursor::Converting => Err(MoqError::Closed),
-		}
-	}
-
-	/// The sequence cursor, committing this track to it, or [`MoqError::AlreadyCommitted`]
-	/// once it committed to arrival order.
 	fn ordered(&mut self) -> Result<&mut OrderedCursor, MoqError> {
-		// Only move the subscriber out when there is one to convert: `ordered()` consumes
-		// it, and swapping unconditionally would drop an already-converted handle.
-		if let Cursor::Uncommitted(_) = &self.track {
-			let Cursor::Uncommitted(track) = std::mem::replace(&mut self.track, Cursor::Converting) else {
-				unreachable!("just matched Uncommitted");
-			};
-			self.track = Cursor::Ordered(Box::new(OrderedCursor {
+		let ordered = self.track.ordered(|track| {
+			Box::new(OrderedCursor {
 				track: track.ordered(),
 				pending: None,
-			}));
-		}
-		match &mut self.track {
-			Cursor::Ordered(track) => Ok(track.as_mut()),
-			Cursor::Arrival(_) => Err(MoqError::AlreadyCommitted),
-			// See `arrival`: unreachable unless the handle was left mid-conversion.
-			Cursor::Uncommitted(_) | Cursor::Converting => Err(MoqError::Closed),
-		}
+			})
+		})?;
+		Ok(ordered.as_mut())
 	}
 
 	fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::group::Consumer>, MoqError>> {
-		match self.arrival() {
+		match self.track.arrival() {
 			Ok(track) => track.poll_recv_group(waiter).map(|r| r.map_err(Into::into)),
 			Err(e) => Poll::Ready(Err(e)),
 		}

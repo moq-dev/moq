@@ -414,12 +414,31 @@ func (m *TrackStreamProducer) Finish() error {
 	return m.inner.Finish()
 }
 
-// ContainerConsumer is a stream of decoded media frames.
+// ContainerConsumer is a stream of decoded media frames in decode order (Next), or of
+// decoded groups in arrival order (RecvGroup). The first read picks one; the other then
+// fails with AlreadyCommitted.
 type ContainerConsumer struct {
 	inner *ffi.MoqMediaContainerConsumer
 }
 
-// Next returns the next frame, or (nil, nil) when the track ends.
+// RecvGroup returns the next decoded group in arrival order (possibly out of sequence),
+// or (nil, nil) when the track ends. No group is skipped, and frame timestamps come from
+// the container rather than the transport.
+func (m *ContainerConsumer) RecvGroup(ctx context.Context) (*ContainerGroupConsumer, error) {
+	res, err := bridge.CallHandle(ctx, m.inner.Cancel, func(ctx context.Context) (*ffi.MoqMediaContainerGroupConsumer, error) {
+		res, err := m.inner.RecvGroup(ctx)
+		if err != nil || res == nil {
+			return nil, err
+		}
+		return *res, nil
+	})
+	if err != nil || res == nil {
+		return nil, err
+	}
+	return &ContainerGroupConsumer{inner: res}, nil
+}
+
+// Next returns the next frame in decode order, or (nil, nil) when the track ends.
 func (m *ContainerConsumer) Next(ctx context.Context) (*MediaFrame, error) {
 	frame, err := bridge.Call(ctx, m.inner.Cancel, m.inner.Next)
 	if frame == nil || err != nil {
@@ -438,8 +457,8 @@ func (m *ContainerConsumer) Cancel() {
 	m.inner.Cancel()
 }
 
-// ContainerGroupConsumer is a finite stream of decoded media frames from one fetched
-// group. It ends after the group's last frame.
+// ContainerGroupConsumer is a finite stream of decoded media frames from one group,
+// fetched or received in arrival order. It ends after the group's last frame.
 type ContainerGroupConsumer struct {
 	inner *ffi.MoqMediaContainerGroupConsumer
 }

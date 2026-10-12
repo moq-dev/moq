@@ -1369,6 +1369,175 @@ async fn fetch_media_group_decodes_multiple_cmaf_samples() {
 	);
 }
 
+/// Write one legacy-container frame whose transport timestamp disagrees with its media time,
+/// the way a receiver that stamps arrival time would see it.
+fn write_legacy(group: &mut moq_net::group::Producer, transport_us: u64, media_us: u64, payload: &'static [u8]) {
+	let mut encoded = bytes::BytesMut::new();
+	hang::container::Frame {
+		timestamp: moq_net::Timestamp::from_micros(media_us).unwrap(),
+		payload: bytes::Bytes::from_static(payload),
+	}
+	.encode(&mut encoded)
+	.unwrap();
+	write_raw(group, transport_us, encoded.freeze());
+}
+
+fn write_raw(group: &mut moq_net::group::Producer, transport_us: u64, payload: bytes::Bytes) {
+	let mut frame = group
+		.create_frame(moq_net::frame::Info {
+			size: payload.len() as u64,
+			timestamp: Some(moq_net::Timestamp::from_micros(transport_us).unwrap()),
+		})
+		.unwrap();
+	frame.write(payload).unwrap();
+	frame.finish().unwrap();
+}
+
+/// A broadcast with one media track, and a container consumer subscribed to it.
+async fn legacy_media() -> (
+	moq_net::broadcast::Producer,
+	moq_net::track::Producer,
+	Arc<MoqMediaContainerConsumer>,
+) {
+	let broadcast = moq_net::broadcast::Info::new().produce();
+	let track = broadcast.create_track("audio", hang::container::track_info(0)).unwrap();
+	let consumer = MoqMediaContainerConsumer::subscribe(
+		&MoqBroadcastConsumer::new(broadcast.consume()),
+		MoqMediaContainerConfig {
+			name: "audio".into(),
+			container: MoqContainer::Legacy,
+			subscription: None,
+		},
+	)
+	.await
+	.unwrap();
+	(broadcast, track, consumer)
+}
+
+async fn recv_media_group(consumer: &MoqMediaContainerConsumer) -> Arc<MoqMediaContainerGroupConsumer> {
+	tokio::time::timeout(TIMEOUT, consumer.recv_group())
+		.await
+		.expect("timed out waiting for a group")
+		.unwrap()
+		.expect("expected a group")
+}
+
+async fn next_media(group: &MoqMediaContainerGroupConsumer) -> Result<Option<MoqMediaFrame>, MoqError> {
+	tokio::time::timeout(TIMEOUT, group.next())
+		.await
+		.expect("timed out reading a media frame")
+}
+
+/// Arrival-order groups decode as their frames land: a stalled group is neither skipped nor
+/// blocks a newer one, and each timestamp is the container's media time, not the transport's.
+#[tokio::test]
+async fn media_recv_group_decodes_in_arrival_order() {
+	let (_broadcast, track, consumer) = legacy_media().await;
+
+	let mut first = track.append_group().unwrap();
+	write_legacy(&mut first, 1, 1_000_000, b"a");
+	let first_media = recv_media_group(&consumer).await;
+	assert_eq!(first_media.sequence(), 0);
+	let frame = next_media(&first_media).await.unwrap().expect("expected a frame");
+	assert_eq!(frame.payload, b"a");
+	assert_eq!(frame.timestamp_us, 1_000_000);
+	assert!(frame.keyframe);
+
+	// A newer group lands while the first is stalled mid-way.
+	let mut second = track.append_group().unwrap();
+	write_legacy(&mut second, 2, 1_040_000, b"c");
+	let second_media = recv_media_group(&consumer).await;
+	assert_eq!(second_media.sequence(), 1);
+	let frame = next_media(&second_media).await.unwrap().expect("expected a frame");
+	assert_eq!(frame.payload, b"c");
+	assert_eq!(frame.timestamp_us, 1_040_000);
+
+	// The stalled group resumes and is still delivered.
+	write_legacy(&mut first, 3, 1_020_000, b"b");
+	let frame = next_media(&first_media)
+		.await
+		.unwrap()
+		.expect("expected the stalled group's frame");
+	assert_eq!(frame.payload, b"b");
+	assert_eq!(frame.timestamp_us, 1_020_000);
+	assert!(!frame.keyframe);
+
+	first.finish().unwrap();
+	second.finish().unwrap();
+	assert!(next_media(&first_media).await.unwrap().is_none());
+	assert!(next_media(&second_media).await.unwrap().is_none());
+
+	track.finish().unwrap();
+	assert!(
+		tokio::time::timeout(TIMEOUT, consumer.recv_group())
+			.await
+			.expect("timed out waiting for the track to end")
+			.unwrap()
+			.is_none()
+	);
+}
+
+/// The first read picks the order; reaching for the other one afterwards is refused, and the
+/// refusal leaves the chosen order working.
+#[tokio::test]
+async fn media_read_order_commits_on_first_read() {
+	let (broadcast, track, arrival) = legacy_media().await;
+	let decode = MoqMediaContainerConsumer::subscribe(
+		&MoqBroadcastConsumer::new(broadcast.consume()),
+		MoqMediaContainerConfig {
+			name: "audio".into(),
+			container: MoqContainer::Legacy,
+			subscription: None,
+		},
+	)
+	.await
+	.unwrap();
+
+	let mut group = track.append_group().unwrap();
+	write_legacy(&mut group, 1, 1_000_000, b"a");
+	write_legacy(&mut group, 2, 1_020_000, b"b");
+
+	let media = recv_media_group(&arrival).await;
+	assert!(matches!(arrival.next().await, Err(MoqError::AlreadyCommitted)));
+	assert_eq!(
+		next_media(&media).await.unwrap().expect("expected a frame").payload,
+		b"a"
+	);
+
+	let frame = tokio::time::timeout(TIMEOUT, decode.next())
+		.await
+		.expect("timed out reading in decode order")
+		.unwrap()
+		.expect("expected a frame");
+	assert_eq!(frame.timestamp_us, 1_000_000);
+	assert!(matches!(decode.recv_group().await, Err(MoqError::AlreadyCommitted)));
+}
+
+/// A container that can't be configured fails at subscribe, and a frame the container can't
+/// decode fails the group read rather than being passed through.
+#[tokio::test]
+async fn media_recv_group_fails_loudly_on_bad_containers() {
+	let broadcast = moq_net::broadcast::Info::new().produce();
+	let _track = broadcast.create_track("audio", hang::container::track_info(0)).unwrap();
+	let result = MoqMediaContainerConsumer::subscribe(
+		&MoqBroadcastConsumer::new(broadcast.consume()),
+		MoqMediaContainerConfig {
+			name: "audio".into(),
+			container: MoqContainer::Cmaf { init: Vec::new() },
+			subscription: None,
+		},
+	)
+	.await;
+	assert!(matches!(result, Err(MoqError::Codec { .. })));
+
+	let (_broadcast, track, consumer) = legacy_media().await;
+	let mut group = track.append_group().unwrap();
+	// A truncated varint timestamp: the 2-byte form with only its first byte.
+	write_raw(&mut group, 1, bytes::Bytes::from_static(&[0x40]));
+	let media = recv_media_group(&consumer).await;
+	assert!(next_media(&media).await.is_err());
+}
+
 #[tokio::test]
 async fn dynamic_track_serves_fetch_miss_and_priority() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();

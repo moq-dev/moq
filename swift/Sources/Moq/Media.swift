@@ -102,7 +102,8 @@ public enum Media {
         }
     }
 
-    /// Read side of a media track. Iterating yields decoded frames in decode order.
+    /// Read side of a media track. Iterating yields decoded frames in decode order; `recvGroup`
+    /// yields decoded groups in arrival order instead. The first read picks one.
     public final class ContainerConsumer: AsyncSequence, Sendable {
         /// The decoded media frame emitted by this sequence.
         public typealias Element = MediaFrame
@@ -122,6 +123,12 @@ public enum Media {
             try await ffi.next()
         }
 
+        /// The next decoded group in arrival order, which may be out of sequence. `nil` once the
+        /// track ends. No group is skipped, and frame timestamps come from the container.
+        public func recvGroup() async throws -> ContainerGroupConsumer? {
+            (try await ffi.recvGroup()).map(ContainerGroupConsumer.init)
+        }
+
         /// Cancel all current and future reads.
         public func cancel() {
             ffi.cancel()
@@ -135,7 +142,8 @@ public enum Media {
         }
     }
 
-    /// A finite, container-decoded media group returned by ``ContainerGroupConsumer/fetch(broadcast:config:)``.
+    /// A finite, container-decoded media group, from ``ContainerGroupConsumer/fetch(broadcast:config:)``
+    /// or ``ContainerConsumer/recvGroup()``.
     public final class ContainerGroupConsumer: AsyncSequence, Sendable {
         /// The decoded media frame emitted by this sequence.
         public typealias Element = MediaFrame

@@ -17,7 +17,8 @@ x86\_64) and desktop JVM (Linux x86\_64/aarch64, macOS arm64, Windows x64).
 / `.video` take a broadcast, a `Named` or `Requested` target, and an init record.
 `CatalogProducer(broadcast)` holds its broadcast weakly and fails with `Closed` after it closes.
 Construct readers with `CatalogConsumer.subscribe`, `ContainerConsumer.subscribe`, or
-`ContainerGroupConsumer.fetch`.
+`ContainerGroupConsumer.fetch`. A `ContainerConsumer` yields frames in decode order from `next`,
+or decoded groups in arrival order from `recvGroup`; the first read picks one.
 
 ```kotlin ignore
 dependencies {

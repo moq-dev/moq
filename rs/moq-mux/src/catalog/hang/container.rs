@@ -5,6 +5,7 @@ use crate::container::{Container as ContainerTrait, Frame, Kind, fmp4, legacy, l
 /// Runtime-dispatched wire format for a track described by a hang catalog.
 ///
 /// Built from a track's audio or video configuration, including its container.
+#[derive(Clone)]
 pub enum Container {
 	/// varint timestamp + raw codec bitstream. The original hang wire format.
 	Legacy(Kind),

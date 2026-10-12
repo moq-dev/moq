@@ -949,6 +949,95 @@ async def _take(iterator, count: int):
             return
 
 
+def _legacy(timestamp_us: int, payload: bytes) -> bytes:
+    """Encode a hang legacy frame: a 4-byte QUIC varint µs timestamp, then the payload."""
+    assert timestamp_us < 1 << 30
+    return (timestamp_us | 0x8000_0000).to_bytes(4, "big") + payload
+
+
+async def _legacy_media(broadcast: moq.BroadcastProducer) -> moq.media.ContainerConsumer:
+    return await moq.media.ContainerConsumer.subscribe(
+        broadcast.consume(), "audio", cast(moq.media.Container, moq.media.Container.LEGACY())
+    )
+
+
+async def _recv_media(consumer: moq.media.ContainerConsumer) -> moq.media.ContainerGroupConsumer:
+    group = await asyncio.wait_for(consumer.recv_group(), timeout=5.0)
+    assert group is not None
+    return group
+
+
+async def test_container_recv_group_arrival_order():
+    """Arrival-order groups decode as their frames land: a stalled group is
+    neither skipped nor blocks a newer one, and each timestamp is the
+    container's media time, not the transport's."""
+    broadcast = moq.BroadcastProducer()
+    track = broadcast.publish_track("audio")
+    consumer = await _legacy_media(broadcast)
+
+    first = track.append_group()
+    first.write_frame(_legacy(1_000_000, b"a"), timedelta(milliseconds=1))
+    first_media = await _recv_media(consumer)
+    frame = await asyncio.wait_for(anext(first_media), timeout=5.0)
+    assert (frame.payload, frame.timestamp, frame.keyframe) == (b"a", timedelta(seconds=1), True)
+
+    # A newer group lands while the first is stalled mid-way.
+    second = track.append_group()
+    second.write_frame(_legacy(1_040_000, b"c"), timedelta(milliseconds=2))
+    second_media = await _recv_media(consumer)
+    assert second_media.sequence == 1
+    frame = await asyncio.wait_for(anext(second_media), timeout=5.0)
+    assert (frame.payload, frame.timestamp) == (b"c", timedelta(microseconds=1_040_000))
+
+    # The stalled group resumes and is still delivered.
+    first.write_frame(_legacy(1_020_000, b"b"), timedelta(milliseconds=3))
+    frame = await asyncio.wait_for(anext(first_media), timeout=5.0)
+    assert (frame.payload, frame.timestamp, frame.keyframe) == (b"b", timedelta(microseconds=1_020_000), False)
+
+    first.finish()
+    second.finish()
+    assert [frame async for frame in first_media] == []
+    assert [frame async for frame in second_media] == []
+
+
+async def test_container_read_order_commits_on_first_read():
+    """The first read picks decode or arrival order; the other is refused."""
+    broadcast = moq.BroadcastProducer()
+    track = broadcast.publish_track("audio")
+    arrival = await _legacy_media(broadcast)
+    decode = await _legacy_media(broadcast)
+
+    group = track.append_group()
+    group.write_frame(_legacy(1_000_000, b"a"), timedelta(milliseconds=1))
+
+    await _recv_media(arrival)
+    with pytest.raises(moq.Error.AlreadyCommitted):  # type: ignore[attr-defined]
+        await anext(arrival)
+
+    frame = await asyncio.wait_for(anext(decode), timeout=5.0)
+    assert frame.timestamp == timedelta(seconds=1)
+    with pytest.raises(moq.Error.AlreadyCommitted):  # type: ignore[attr-defined]
+        await decode.recv_group()
+
+
+async def test_container_recv_group_fails_loudly():
+    """An unconfigurable container fails at subscribe; an undecodable frame fails the read."""
+    broadcast = moq.BroadcastProducer()
+    track = broadcast.publish_track("audio")
+    with pytest.raises(moq.Error.Codec):  # type: ignore[attr-defined]
+        await moq.media.ContainerConsumer.subscribe(
+            broadcast.consume(), "audio", cast(moq.media.Container, moq.media.Container.CMAF(init=b""))
+        )
+
+    consumer = await _legacy_media(broadcast)
+    group = track.append_group()
+    # A truncated varint timestamp: the 2-byte form with only its first byte.
+    group.write_frame(b"\x40", timedelta(milliseconds=1))
+    media = await _recv_media(consumer)
+    with pytest.raises(moq.Error):  # type: ignore[attr-defined]
+        await asyncio.wait_for(anext(media), timeout=5.0)
+
+
 async def test_raw_multi_frame_group():
     """A single group can carry multiple frames, not just one per group."""
     origin = moq.OriginProducer()
