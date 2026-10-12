@@ -66,8 +66,8 @@ export class Broadcast {
 	// root sections (e.g. `scte35`) by locking it too.
 	readonly catalog = new CatalogProducer();
 
-	// The underlying network broadcast, recreated when the name, enabled state, or maxAge changes and
-	// `undefined` in between. It lives in the origin rather than any session, so it spans
+	// The underlying network broadcast, recreated when the name, enabled state, or maxAge changes,
+	// or when a closed rendition track must be replaced, and `undefined` in between. It lives in the origin rather than any session, so it spans
 	// reconnects. Exposed so an application can serve its own tracks alongside the built-in
 	// catalog/audio/video, e.g. `net.createTrack("meta.json")` plus a matching `catalog` section.
 	// Reacquire it via an effect, since a rename swaps in a fresh producer.
@@ -89,6 +89,9 @@ export class Broadcast {
 
 	// The kind of each rendition track in the current network broadcast. A new one starts over.
 	#kinds = new Map<string, Kind>();
+
+	// Bumped to publish a new network broadcast, when a closed rendition track must be replaced.
+	readonly #restart = new Signal(0);
 
 	#signals = new Effect();
 
@@ -225,6 +228,7 @@ export class Broadcast {
 
 		const name = effect.get(this.in.name);
 		const maxAge = effect.get(this.in.maxAge);
+		effect.get(this.#restart);
 		if (Catalog.detectFormat(name) === undefined) {
 			console.warn(
 				`You should append .hang to broadcast name ${JSON.stringify(name)} to make the catalog format explicit.`,
@@ -299,10 +303,14 @@ export class Broadcast {
 				const signal = this.#tracks.get(rendition.name);
 				if (!signal) continue;
 
-				// A track that closed (an encoder error) is replaced. Its appends then throw rather
-				// than reuse the closed track's sequences.
+				// A track that closed (an encoder error) can't be continued, and a replacement under
+				// the same name would restart its sequences, so the tracks move to a new broadcast.
 				let track = tracks.get(rendition.name);
-				if (!track || track.closed.peek() !== undefined) {
+				if (track?.closed.peek() !== undefined) {
+					this.#restart.update((restarts) => restarts + 1);
+					return;
+				}
+				if (!track) {
 					track = broadcast.createTrack(
 						rendition.name,
 						Container.trackInfo({ maxAge, priority: Catalog.PRIORITY[rendition.kind] }),

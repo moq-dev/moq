@@ -276,7 +276,9 @@ test("a rendition name may change kind on a new network broadcast", async () => 
 	broadcast.close();
 });
 
-test("a rendition whose track closed gets a replacement", async () => {
+// A closed track can't be continued, and a replacement under its name would restart its sequences,
+// so the replacement goes out on a new network broadcast.
+test("replacing a closed rendition track publishes a new network broadcast", async () => {
 	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("test.hang") });
 	const video = broadcast.video("video");
 	await settle();
@@ -288,18 +290,26 @@ test("a rendition whose track closed gets a replacement", async () => {
 	const track = video.track.peek();
 	if (!track) throw new Error("expected the demanded track");
 
-	// An encoder error closes the track before it wrote anything.
+	// The encoder wrote, then failed.
+	track.appendGroup().close();
 	track.close(new Error("encoder failed"));
 	video.close();
 	await settle();
 
 	const again = broadcast.video("video");
 	await settle();
-	const second = net.track("video").subscribe();
+	const next = broadcast.net.peek();
+	expect(next).toBeDefined();
+	expect(next).not.toBe(net);
+	if (!next) throw new Error("expected a new network producer");
+
+	// The replacement starts the name over on the new broadcast.
+	const second = next.track("video").subscribe();
 	await settle();
 	const replacement = again.track.peek();
 	expect(replacement).toBeDefined();
 	expect(replacement).not.toBe(track);
+	expect(replacement?.appendGroup().sequence).toBe(0);
 
 	first.close();
 	second.close();

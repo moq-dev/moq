@@ -390,8 +390,7 @@ export class Producer {
 	 * from the returned producer. A request a handler has already taken stays a duplicate.
 	 * An append on the track throws if it would reuse a sequence an earlier track of the name
 	 * wrote in this broadcast, so a replacement writes its first group explicitly. Throws if an
-	 * open track or a live request already holds the name, or if the broadcast cannot remember
-	 * another track name's sequences.
+	 * open track or a live request already holds the name.
 	 */
 	createTrack(name: string, info: Partial<track.Info> = {}): track.Producer {
 		if (this.#state.closed.peek() !== undefined) {
@@ -417,7 +416,7 @@ export class Producer {
 		}
 
 		const producer = new track.Producer(name).accept(info);
-		hooks.bindSequence(producer, this.#state.sequences.admit(name));
+		hooks.bindSequence(producer, this.#state.sequences.get(name));
 		adopt(this.#state, producer);
 		return producer;
 	}

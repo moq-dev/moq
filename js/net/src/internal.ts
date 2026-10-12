@@ -121,36 +121,38 @@ export interface TrackSequence {
 	holders: number;
 }
 
-/** The most track names one broadcast remembers sequences for. */
-export const MAX_TRACK_SEQUENCES = 1024;
-
 /**
  * Each name's sequence namespace for one broadcast generation, outliving the producers that
  * serve it so a replacement that would append a sequence already written is refused. Written
  * namespaces are kept until the broadcast ends, since forgetting one would let a later producer
- * reuse its sequences. Namespaces nothing holds or wrote are swept once the map fills, and a new
- * name past that bound is refused: starting sequences over takes a new broadcast.
+ * reuse its sequences. Namespaces nothing holds or wrote are swept as the map grows, like the
+ * Rust map at capacity, so requests for names never served stay bounded.
  */
 export class TrackSequences {
 	#map = new Map<string, TrackSequence>();
+	// The size that triggers the next sweep, doubling past what survives so sweeps stay amortized.
+	#sweepAt = 16;
 
-	/** The namespace for `name`, admitting the name if it is new. Throws once the bound is reached. */
-	admit(name: string): TrackSequence {
+	/** The namespace for `name`, created if the name is new. */
+	get(name: string): TrackSequence {
 		const existing = this.#map.get(name);
 		if (existing) return existing;
 
-		if (this.#map.size >= MAX_TRACK_SEQUENCES) {
+		if (this.#map.size >= this.#sweepAt) {
 			for (const [key, sequence] of this.#map) {
 				if (sequence.next === 0 && sequence.holders === 0) this.#map.delete(key);
 			}
-			if (this.#map.size >= MAX_TRACK_SEQUENCES) {
-				throw new Error(`too many track names: ${name} would exceed ${MAX_TRACK_SEQUENCES}`);
-			}
+			this.#sweepAt = Math.max(16, this.#map.size * 2);
 		}
 
 		const sequence = { next: 0, holders: 0 };
 		this.#map.set(name, sequence);
 		return sequence;
+	}
+
+	/** How many names hold a namespace. */
+	get size(): number {
+		return this.#map.size;
 	}
 }
 

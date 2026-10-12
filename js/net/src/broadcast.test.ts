@@ -2,7 +2,7 @@ import { expect, setSystemTime, test } from "bun:test";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { GroupTooLarge, NotFound } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
-import { MAX_TRACK_SEQUENCES } from "./internal.ts";
+import { TrackSequences } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Milli, Timescale, Timestamp } from "./time.ts";
 import type { Request as TrackRequest } from "./track.ts";
@@ -191,37 +191,29 @@ test("created and requested tracks share a name's sequences", async () => {
 	next.close();
 });
 
-test("a broadcast bounds the names it remembers sequences for", async () => {
+test("names that never wrote leave nothing behind", () => {
+	const sequences = new TrackSequences();
+	sequences.get("written").next = 1;
+	const held = sequences.get("held");
+	held.holders = 1;
+
+	// A peer asking for arbitrary names cannot grow the map: unused names are swept as it grows.
+	for (let i = 0; i < 1000; i++) sequences.get(`unused-${i}`);
+	expect(sequences.size).toBeLessThan(64);
+
+	// Written and held names survive every sweep.
+	expect(sequences.get("written").next).toBe(1);
+	expect(sequences.get("held")).toBe(held);
+});
+
+test("a written name refuses to reuse its sequences after many other names", () => {
 	const broadcast = new BroadcastProducer();
+	const written = broadcast.createTrack("written");
+	written.appendGroup().close();
+	written.close();
+	for (let i = 0; i < 1000; i++) broadcast.createTrack(`unused-${i}`).close();
 
-	// Names that never wrote leave nothing behind once their tracks close.
-	for (let i = 0; i < MAX_TRACK_SEQUENCES * 2; i++) {
-		broadcast.createTrack(`unused-${i}`).close();
-	}
-
-	// Written names are remembered, and so is an open track that has not written yet.
-	const open = broadcast.createTrack("open");
-	for (let i = 1; i < MAX_TRACK_SEQUENCES; i++) {
-		const track = broadcast.createTrack(`written-${i}`);
-		track.appendGroup().close();
-		track.close();
-	}
-	expect(() => broadcast.createTrack("refused")).toThrow("too many track names");
-
-	// A remembered name is still admitted, and still refuses to reuse its sequences.
-	expect(() => broadcast.createTrack("written-1").appendGroup()).toThrow("duplicate sequence");
-
-	// An on-demand request past the bound is refused to its subscribers.
-	const pulled = wireOf(broadcast).requested();
-	const subscriber = broadcast.track("refused").subscribe();
-	const request = await pulled;
-	if (!request) throw new Error("expected request");
-	expect(() => request.accept()).toThrow("too many track names");
-	expect(await subscriber.closed).toBeInstanceOf(Error);
-
-	// Closing the open track without a write frees its slot.
-	open.close();
-	broadcast.createTrack("admitted");
+	expect(() => broadcast.createTrack("written").appendGroup()).toThrow("duplicate sequence");
 	broadcast.close();
 });
 
