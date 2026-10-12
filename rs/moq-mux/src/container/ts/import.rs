@@ -70,6 +70,11 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// Hold the whole catalog until one PCR measurement window completes, or enough media time
 	/// passes without one, independently of decoder readiness.
 	mux_rate_reservation: Option<crate::catalog::Reserved<E>>,
+	/// Media time seen while that hold is active, summed across time-base breaks so a source
+	/// that keeps resetting its clock still reaches the bound.
+	held: std::time::Duration,
+	/// The newest PTS of the current time base counted into `held`.
+	held_edge: Option<Timestamp>,
 
 	/// The program's timestamp base: the first PES with a PTS anchors it, and every PTS shifts by
 	/// its offset onto the catalog clock.
@@ -174,6 +179,8 @@ impl<E: catalog::Catalog> Import<E> {
 			timebase: reserved.timebase(),
 			initial_reservation: Some(reserved),
 			mux_rate_reservation,
+			held: std::time::Duration::ZERO,
+			held_edge: None,
 			pat: PatReader::default(),
 			pmt_sections: HashMap::new(),
 			crc_errors: BTreeMap::new(),
@@ -707,14 +714,11 @@ impl<E: catalog::Catalog> Import<E> {
 				let pts = Timestamp::from_scale(pts, 90_000)?;
 				let offset = self.timebase.anchor(pts)?;
 				let pts = offset.apply(pts)?;
-				let start = *self.start_pts.get_or_insert(pts);
-				// A source without a usable PCR never completes a measurement window, so media
-				// time releases its catalog without a rate.
-				if pts
-					.checked_sub(start)
-					.is_ok_and(|elapsed| std::time::Duration::from(elapsed) >= super::mux_rate::UNMEASURED)
-				{
-					self.mux_rate_reservation = None;
+				if self.start_pts.is_none() {
+					self.start_pts = Some(pts);
+				}
+				if self.mux_rate_reservation.is_some() {
+					self.hold_media(pts);
 				}
 				offset
 			}
@@ -888,6 +892,7 @@ impl<E: catalog::Catalog> Import<E> {
 		self.media_unwrap.discontinuity();
 		self.last_pts = None;
 		self.start_pts = None;
+		self.held_edge = None;
 		self.published = false;
 		self.liveness.discontinuity();
 		if self.mux_rate.discontinuity() {
@@ -895,6 +900,22 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		tracing::debug!("MPEG-TS system time-base discontinuity");
 		Ok(())
+	}
+
+	/// Count `pts` toward the startup hold. A source without a usable PCR never completes a
+	/// measurement window, so enough media time releases its catalog without a rate.
+	fn hold_media(&mut self, pts: Timestamp) {
+		// Reordered frames and other streams land behind the edge and add nothing.
+		if let Some(edge) = self.held_edge {
+			let Ok(step) = pts.checked_sub(edge) else {
+				return;
+			};
+			self.held += std::time::Duration::from(step);
+		}
+		self.held_edge = Some(pts);
+		if self.held >= super::mux_rate::UNMEASURED {
+			self.mux_rate_reservation = None;
+		}
 	}
 
 	/// Copy the measured multiplex rate into the `mpegts` section, publishing the
@@ -7490,6 +7511,39 @@ pub(super) mod test {
 			panic!("four seconds of media did not release the catalog");
 		};
 		assert_eq!(first.ext.mpegts.mux_rate, None);
+	}
+
+	/// A source whose clock keeps resetting before a window completes still releases its
+	/// catalog once enough media time has passed in total.
+	#[test]
+	fn a_ts_resetting_its_clock_releases_its_catalog_after_four_seconds_of_media() {
+		use crate::catalog::hang::Catalog;
+		use crate::container::ts::catalog::Ext;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut updates = catalog.consume().unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import
+			.decode(&synth_pmt(&[(StreamType::Mpeg2Video, PCR_PID)], false))
+			.unwrap();
+		let waiter = kio::Waiter::noop();
+		// Each epoch carries 0.96 s of media, then a flagged PCR restarts the clock.
+		for epoch in 0..6 {
+			for frame in 0..25 {
+				import.decode(&pes_packet(PCR_PID, 90_000 + frame * 3_600)).unwrap();
+			}
+			import.decode(&flag_discontinuity(pcr_packet(PCR_PID, 0))).unwrap();
+			let released = updates.poll_next(&waiter).is_ready();
+			assert_eq!(released, epoch >= 4, "released after epoch {epoch}");
+			if released {
+				return;
+			}
+		}
+		unreachable!();
 	}
 
 	#[test]

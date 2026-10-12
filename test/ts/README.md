@@ -47,8 +47,8 @@ The default arm runs `pcr-timing.py` over its capture too, after `compliance.py`
 for the PCR checks `compliance.py` leaves to it: the value interval (hard), and
 whether the bytes between consecutive PCRs are the ones the mux rate implies
 ([`pcr-schedule`](#byte-schedule), which gates whenever the rate is known, as the
-generated clip's is). With the rate known it also runs TSDuck's `pcrverify` past
-the first three seconds, failing on any PCR more than 500 ns off its byte position
+generated clip's is). With the rate known it also runs TSDuck's `pcrverify` from
+the first PCR, failing on any PCR more than 500 ns off its byte position
 at the rate: the `PCR_accuracy_error` an IRD or a TR 101 290 probe reports, which
 `pcr-schedule`'s packet of slack lets through.
 
