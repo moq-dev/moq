@@ -27,6 +27,7 @@ interface State {
 export class Arrivals implements AsyncIterable<Arrival> {
 	readonly #state: State;
 	readonly #open: Set<State>;
+	#reading = false;
 
 	/** @internal */
 	constructor(state: State, open: Set<State>) {
@@ -36,25 +37,34 @@ export class Arrivals implements AsyncIterable<Arrival> {
 
 	/** Get the next received frame, or `undefined` once the handle or its decoder closes. */
 	async next(): Promise<Arrival | undefined> {
+		if (this.#reading) throw new Error("multiple calls to next not supported");
+		this.#reading = true;
 		const state = this.#state;
-		for (;;) {
-			const entry = state.queue.shift();
-			if (entry) return entry;
-			if (state.closed) return undefined;
-			if (state.wake) throw new Error("multiple calls to next not supported");
-			await new Promise<void>((resolve) => {
-				state.wake = resolve;
-			});
-			state.wake = undefined;
+		try {
+			for (;;) {
+				const entry = state.queue.shift();
+				if (entry) return entry;
+				if (state.closed) return undefined;
+				await new Promise<void>((resolve) => {
+					state.wake = resolve;
+				});
+				state.wake = undefined;
+			}
+		} finally {
+			this.#reading = false;
 		}
 	}
 
-	/** Iterate received frames until the handle or its decoder closes. */
+	/** Iterate received frames until the handle or its decoder closes; leaving the loop closes the handle. */
 	async *[Symbol.asyncIterator](): AsyncIterator<Arrival> {
-		for (;;) {
-			const entry = await this.next();
-			if (entry === undefined) return;
-			yield entry;
+		try {
+			for (;;) {
+				const entry = await this.next();
+				if (entry === undefined) return;
+				yield entry;
+			}
+		} finally {
+			this.close();
 		}
 	}
 

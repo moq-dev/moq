@@ -161,8 +161,8 @@ for await (const { timestamp, arrival, late, skipped } of arrivals) {
 ```
 
 Unread frames queue on the handle, so keep reading and keep your own window.
-`arrivals.close()` stops observing and releases them; nothing is retained
-without an open handle. Video reports the rendition on screen.
+Leaving the loop or calling `arrivals.close()` stops observing and releases
+them; nothing is retained without an open handle. Video reports the rendition on screen.
 
 ## Buffered playback
 
