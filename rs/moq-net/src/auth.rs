@@ -257,6 +257,12 @@ impl Handle {
 		}
 	}
 
+	/// Whether this side speaks AUTH: false on a version without it, on a side that does
+	/// not offer it, and once the peer turns out not to.
+	pub(crate) fn supported(&self) -> bool {
+		self.state.lock().supported
+	}
+
 	/// The union of every grant this side holds: `None` until the peer first
 	/// answers a token (with a grant or a refusal), and forever on a version
 	/// without AUTH.

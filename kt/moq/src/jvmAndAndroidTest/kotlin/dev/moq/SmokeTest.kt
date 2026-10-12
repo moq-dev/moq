@@ -50,6 +50,12 @@ private fun opusHead(): ByteArray =
 
 class SmokeTest {
     @Test
+    fun `diagnostic errors expose their named reason`() {
+        val error = MoqException.Transport(reason = "reset")
+        assertEquals("reset", error.reason)
+    }
+
+    @Test
     fun `stream abort preserves protocol details`() = runTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("errors", null)

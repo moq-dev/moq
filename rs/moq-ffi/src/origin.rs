@@ -71,9 +71,10 @@ impl TryFrom<MoqRoute> for moq_net::origin::Route {
 			let origin = if id == 0 {
 				moq_net::Hop::UNKNOWN
 			} else {
-				moq_net::Hop::new(id).map_err(|e| MoqError::InvalidRoute(e.to_string()))?
+				moq_net::Hop::new(id).map_err(|e| MoqError::InvalidRoute { reason: e.to_string() })?
 			};
-			hops.push(origin).map_err(|e| MoqError::InvalidRoute(e.to_string()))?;
+			hops.push(origin)
+				.map_err(|e| MoqError::InvalidRoute { reason: e.to_string() })?;
 		}
 		Ok(moq_net::origin::Route::default()
 			.with_cost(moq_net::origin::Cost::new(route.cost))
