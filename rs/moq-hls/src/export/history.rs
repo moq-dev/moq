@@ -49,7 +49,9 @@ pub(super) async fn read(
 				match track.fetch_group(next, None).await {
 					Ok(group) => group,
 					// Retention prunes a recording's start, which this path cannot list from yet.
-					Err(moq_net::Error::NotFound) if next == 0 => {
+					Err(moq_net::Error::NotFound | moq_net::Error::Stream(moq_net::StreamError::NotFound))
+						if next == 0 =>
+					{
 						return Err(crate::Error::HistoryPruned(name.clone()));
 					}
 					Err(err) => return Err(err.into()),
