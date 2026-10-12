@@ -14,6 +14,8 @@ export interface Arrival {
 
 interface State {
 	queue: Arrival[];
+	// The next unread index. Advancing it instead of shifting keeps a long backlog O(1) per read.
+	head: number;
 	closed: boolean;
 	wake?: () => void;
 }
@@ -42,8 +44,16 @@ export class Arrivals implements AsyncIterable<Arrival> {
 		const state = this.#state;
 		try {
 			for (;;) {
-				const entry = state.queue.shift();
-				if (entry) return entry;
+				const entry = state.queue[state.head];
+				if (entry) {
+					state.head++;
+					// Drop the read prefix once it outweighs the rest, which amortizes to O(1).
+					if (state.head * 2 >= state.queue.length) {
+						state.queue.splice(0, state.head);
+						state.head = 0;
+					}
+					return entry;
+				}
 				if (state.closed) return undefined;
 				await new Promise<void>((resolve) => {
 					state.wake = resolve;
@@ -72,6 +82,7 @@ export class Arrivals implements AsyncIterable<Arrival> {
 	close(): void {
 		this.#open.delete(this.#state);
 		this.#state.queue.length = 0;
+		this.#state.head = 0;
 		this.#state.closed = true;
 		this.#state.wake?.();
 	}
@@ -84,7 +95,7 @@ export class Producer {
 
 	/** Open a handle that receives every later frame. */
 	consume(): Arrivals {
-		const state: State = { queue: [], closed: this.#closed };
+		const state: State = { queue: [], head: 0, closed: this.#closed };
 		if (!this.#closed) this.#open.add(state);
 		return new Arrivals(state, this.#open);
 	}
