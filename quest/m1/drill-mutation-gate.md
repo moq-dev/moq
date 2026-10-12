@@ -31,7 +31,8 @@ Decided 2026-10-11:
   timeouts, and the impaired lane (which `ingress-burst-never-collected`
   runs) draws a random `MOQ_SHAPER_SEED` unless one is set. A mutated run
   can fail for the wrong reason under load. Pin the seed in the gate anyway,
-  so a red run is reproducible. Flip the check to required once the drills
+  so the impaired lane's shaper decisions replay; socket timing and load
+  still won't. Flip the check to required once the drills
   move onto [Controlled time](/quest/m1/time/README.md)'s clock. Blocking on
   that was rejected so the signal exists sooner. Reversed on review: the
   first pass chose required on the false premise that the drills already
@@ -45,6 +46,10 @@ Implementation guidance:
 - Shape the job so it can later become required: it always runs and passes
   quickly when nothing is selected, because branch protection only accepts a
   check that reports.
+- Run on `merge_group` too, selecting against its base SHA like
+  `.github/workflows/check.yml`, so merge-queue commits get the result a
+  required check needs. Reuse that workflow and `sensitivity.sh`'s
+  mutation-name arguments rather than a parallel CI framework.
 - Making the check required is a repository setting. Once the drills are on
   a controlled clock, ask the maintainer to add it.
 - Keep the nightly full run: it still catches drift from changes the

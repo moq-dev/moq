@@ -26,4 +26,9 @@ before the QUIC session is accepted. Pick the mechanism that keeps the
 clock, so the fixture needs this shape either way. Never widen the head start
 or a wait, per this questline's rules.
 
+Observe the fallback's cancellation directly, for example by a drop or
+connection-close signal. Today `accepted.try_recv()` only proves the queue
+is empty at one instant, and a held WebSocket side could hide a fallback
+that was never dropped.
+
 Public API: none. Wire: none.
