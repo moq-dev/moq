@@ -380,7 +380,8 @@ async def test_announced_epoch_restarts():
     broadcast = origin.create_broadcast("epoch")
 
     first = moq.mint_epoch()
-    assert abs(moq.epoch_time(first) - datetime.now(timezone.utc)) < timedelta(minutes=1)
+    fixed = datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
+    assert moq.epoch_time("018bcfe5-6800-7000-8000-000000000000") == fixed
     broadcast.announce(moq.Route(epoch=first))
     start = await next_route(announced)
     assert isinstance(start, moq.AnnounceEventStart)

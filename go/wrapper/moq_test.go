@@ -1332,8 +1332,8 @@ func TestAnnouncedEpochRestarts(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := moq.MintEpoch()
-	if at, err := moq.EpochTime(first); err != nil || time.Since(at).Abs() > time.Minute {
-		t.Fatalf("EpochTime(%s) = %v, %v; want about now", first, at, err)
+	if at, err := moq.EpochTime("018bcfe5-6800-7000-8000-000000000000"); err != nil || !at.Equal(time.UnixMilli(1_700_000_000_000)) {
+		t.Fatalf("EpochTime = %v, %v; want 2023-11-14T22:13:20Z", at, err)
 	}
 	if err := broadcast.Announce(moq.Route{Epoch: &first}); err != nil {
 		t.Fatal(err)

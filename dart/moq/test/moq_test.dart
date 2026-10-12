@@ -238,8 +238,8 @@ void main() {
 
     final first = mintEpoch();
     expect(
-      DateTime.now().toUtc().difference(epochTime(first)).abs(),
-      lessThan(const Duration(minutes: 1)),
+      epochTime('018bcfe5-6800-7000-8000-000000000000'),
+      DateTime.utc(2023, 11, 14, 22, 13, 20),
     );
     broadcast.announce(route: MoqRoute(epoch: first));
     final start = await nextRoute(announced) as AnnounceEventStart;

@@ -25,8 +25,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.microseconds
 import kotlin.time.Duration.Companion.milliseconds
-import kotlin.time.Duration.Companion.minutes
-import kotlin.time.Clock
+import kotlin.time.Instant
 
 @Serializable
 private data class Status(val state: String)
@@ -405,7 +404,7 @@ class SmokeTest {
             val announced = origin.consume().announced(AnnounceConfig())
             origin.createBroadcast("epoch").use { broadcast ->
                 val first = mintEpoch()
-                assertTrue((Clock.System.now() - epochTime(first)).absoluteValue < 1.minutes)
+                assertEquals(Instant.fromEpochMilliseconds(1_700_000_000_000), epochTime("018bcfe5-6800-7000-8000-000000000000"))
                 broadcast.announce(Route(epoch = first))
                 val start = assertIs<AnnounceEventStart>(announced.nextRoute())
                 assertEquals(first, start.announce.route.epoch)

@@ -143,7 +143,7 @@ final class SmokeTests: XCTestCase {
         let broadcast = try origin.createBroadcast(path: "epoch")
 
         let first = mintEpoch()
-        XCTAssertLessThan(abs(try epochTime(first).timeIntervalSinceNow), 60)
+        XCTAssertEqual(try epochTime("018bcfe5-6800-7000-8000-000000000000"), Date(timeIntervalSince1970: 1_700_000_000))
         try broadcast.announce(route: Route(epoch: first))
         guard case .start(let start) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")

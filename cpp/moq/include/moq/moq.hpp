@@ -200,12 +200,15 @@ inline std::string mint_epoch() {
 }
 
 // The wall-clock time an epoch encodes, to the millisecond. Errors unless it is a UUIDv7.
-inline expected<std::chrono::system_clock::time_point> epoch_time(const std::string &epoch) {
+// Millisecond ticks hold every 48-bit UUIDv7 time, where system_clock's nanoseconds overflow in 2262.
+inline expected<std::chrono::time_point<std::chrono::system_clock, std::chrono::milliseconds>>
+epoch_time(const std::string &epoch) {
     auto ms = moq_epoch_time_ms(epoch);
     if (!ms) {
         return unexpected(std::move(ms).error());
     }
-    return std::chrono::system_clock::time_point(std::chrono::milliseconds(*ms));
+    return std::chrono::time_point<std::chrono::system_clock, std::chrono::milliseconds>(
+        std::chrono::milliseconds(static_cast<std::chrono::milliseconds::rep>(*ms)));
 }
 
 #ifdef MOQ_COROUTINES
