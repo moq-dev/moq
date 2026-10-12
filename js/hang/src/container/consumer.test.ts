@@ -1596,6 +1596,33 @@ test("Consumer does not report a skip for a fully delivered group", async () => 
 	consumer.close();
 });
 
+// An unread endpoint marker carries no content, so retiring its group discards nothing.
+test("Consumer does not report a skip for a group holding only its endpoint", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(replay(track), { format: new LegacyFormat("video"), maxDelay: 150 as Time.Milli });
+
+	const group = new Group.Producer(0);
+	group.writeFrame({ payload: encodeLegacy(0 as Time.Micro), timestamp: Time.Timestamp.now() });
+	group.writeFrame({
+		payload: encodeLegacyFrame(33_000 as Time.Micro, new Uint8Array()),
+		timestamp: Time.Timestamp.now(),
+	});
+	group.close();
+	track.writeGroup(group);
+	await settle();
+	expect((await nextFrame(consumer))?.frame?.timestamp).toBe(0 as Time.Micro);
+
+	writeGroupWithLegacyFrames(track, 1, [100_000 as Time.Micro]);
+	writeGroupWithLegacyFrames(track, 2, [200_000 as Time.Micro]);
+	await settle();
+
+	const next = await nextFrame(consumer);
+	expect(next?.frame?.timestamp).toBe(100_000 as Time.Micro);
+	expect(next?.skipped).toBe(false);
+
+	consumer.close();
+});
+
 test("Consumer jumps the playhead after a shed marker with a timestamp hole", async () => {
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("audio"), maxDelay: 0 as Time.Milli });
