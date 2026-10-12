@@ -133,6 +133,11 @@ impl Observer {
 		}
 	}
 
+	/// The admission tracker the drain waits on; give it to your own listener's `Config::activity`.
+	pub fn activity(&self) -> &moq_net::server::Activity {
+		&self.activity
+	}
+
 	/// When the drain window ends, if [`Trigger::start`] has fired.
 	pub(crate) fn deadline(&self) -> Option<Instant> {
 		*self.rx.borrow()
@@ -310,6 +315,24 @@ mod tests {
 		tokio::time::timeout(window + Duration::from_secs(1), activity.close())
 			.await
 			.expect("a withheld SETUP outlived the drain deadline");
+		running.await.unwrap().unwrap();
+	}
+
+	/// An embedder's own listener shares the relay's admission tracking through
+	/// [`Observer::activity`], so a connection it holds keeps the drain open.
+	#[tokio::test(start_paused = true)]
+	async fn embedder_admission_holds_drain() {
+		let mut config = crate::Config::default();
+		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		let mut relay = crate::Relay::load(config).await.unwrap().with_signals(false);
+		let _admissions = relay.admissions().unwrap();
+		let active = relay.shutdown().activity().enter().unwrap();
+		let trigger = relay.shutdown_trigger().clone();
+		let running = tokio::spawn(relay.run());
+		trigger.start();
+		tokio::time::sleep(Duration::from_millis(100)).await;
+		assert!(!running.is_finished(), "drain ended under an embedder's admission");
+		drop(active);
 		running.await.unwrap().unwrap();
 	}
 
