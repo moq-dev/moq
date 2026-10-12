@@ -61,11 +61,14 @@ pub(crate) async fn serve_ws(
 	request.alpn = ws.selected_protocol().and_then(|p| p.to_str().ok()).map(str::to_owned);
 	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| auth::peer(&identity));
 	let session_id = request.id.clone();
-	let lease = state
-		.auth
-		.admit(request.clone())
-		.await
-		.inspect_err(|err| state.cluster.refusals.record(err.into()))?;
+	// Abandoned at the drain deadline, as on the native path.
+	let lease = tokio::select! {
+		res = state.auth.admit(request.clone()) => res,
+		() = state.shutdown.expired() => Err(auth::Error::Unavailable(
+			"the admission was still pending at the drain deadline".into(),
+		)),
+	}
+	.inspect_err(|err| state.cluster.refusals.record(err.into()))?;
 	let token = lease.token();
 	let publish = state.cluster.publisher(token);
 	// A verified client certificate marks a cluster peer, which discovers hidden

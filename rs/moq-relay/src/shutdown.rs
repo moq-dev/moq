@@ -98,6 +98,20 @@ impl Observer {
 		}
 	}
 
+	/// Resolve at the drain deadline, once the drain has started. Never resolves
+	/// for [`disabled`](Self::disabled) handles.
+	pub(crate) async fn expired(&self) {
+		let mut rx = self.rx.clone();
+		let deadline = match rx.wait_for(Option::is_some).await {
+			Ok(deadline) => *deadline,
+			Err(_) => None,
+		};
+		match deadline {
+			Some(deadline) => tokio::time::sleep_until(deadline).await,
+			None => std::future::pending().await,
+		}
+	}
+
 	/// When the drain window ends, if [`Trigger::start`] has fired.
 	pub(crate) fn deadline(&self) -> Option<Instant> {
 		*self.rx.borrow()
@@ -240,6 +254,45 @@ mod tests {
 		drop(connecting.await.unwrap());
 		running.await.unwrap().unwrap();
 		assert!(waited, "drain completed while auth admission is pending");
+	}
+
+	/// An auth decision still pending at the drain deadline is abandoned then, so
+	/// the connection task does not outlive the relay.
+	#[tokio::test]
+	async fn pending_admission_is_abandoned_at_the_deadline() {
+		let window = Duration::from_secs(1);
+		let mut config = crate::Config::default();
+		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.drain_timeout = window;
+		let mut relay = crate::Relay::load(config).await.unwrap().with_signals(false);
+		let url: url::Url = format!("tcp://{}/room", relay.tcp_addr().unwrap()).parse().unwrap();
+		let mut admissions = relay.admissions().unwrap();
+		let trigger = relay.shutdown_trigger().clone();
+		let running = tokio::spawn(relay.run());
+		let connecting = tokio::spawn(async move {
+			moq_tokio::connect::Config::default()
+				.init(Default::default())
+				.unwrap()
+				.with_reconnect(false)
+				.connect(url)
+				.established()
+				.await
+		});
+		let mut admission = admissions.next().await.unwrap();
+
+		// Only timers decide what follows; the embedded admission's own timeout
+		// is well past the drain window.
+		tokio::time::pause();
+		trigger.start();
+		tokio::time::timeout(window + Duration::from_secs(1), admission.abandoned())
+			.await
+			.expect("the admission outlived the drain deadline");
+		running.await.unwrap().unwrap();
+		// The client may already count the session established (SETUP precedes
+		// auth); either way the refusal ends it.
+		if let Ok(connection) = connecting.await.unwrap() {
+			assert!(connection.closed().await.is_err(), "an abandoned admission is refused");
+		}
 	}
 
 	#[tokio::test]

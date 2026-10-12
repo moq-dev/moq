@@ -81,7 +81,16 @@ impl Connection {
 	/// Admits and serves this connection until it closes.
 	#[tracing::instrument("conn", skip_all, fields(id = self.id, remote = self.request.remote_addr().map(tracing::field::display), session = tracing::field::Empty))]
 	pub async fn run(self) -> anyhow::Result<()> {
-		let (admitted, registration) = match self.admit().await {
+		// An admission still undecided at the drain deadline is abandoned, so the
+		// deadline bounds this task and its socket like it bounds a session.
+		let admitted = tokio::select! {
+			res = self.admit() => res,
+			() = self.shutdown.expired() => Err(auth::Error::Unavailable(
+				"the admission was still pending at the drain deadline".into(),
+			)
+			.into()),
+		};
+		let (admitted, registration) = match admitted {
 			Ok(admitted) => admitted,
 			Err(err) => {
 				self.cluster.refusals.record(err.refusal);

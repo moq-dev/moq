@@ -229,7 +229,8 @@ The first SIGTERM or SIGINT starts a drain: every session is sent a GOAWAY
 asking it to reconnect elsewhere, including any that connect during the drain,
 and is force-closed if it is still connected when the window ends. Accepted
 connections still handshaking or awaiting authorization hold the drain until
-they finish, fail, or reach that same deadline. The relay exits as soon as
+they finish, fail, or reach that same deadline, where any decision still
+pending is abandoned and the connection refused. The relay exits as soon as
 every admitted connection has left (refusing any that arrive after), when
 the window ends, or immediately on a second signal. `0` skips the GOAWAY.
 Only moq-lite-04+ and moq-transport clients act on a GOAWAY; older ones are
