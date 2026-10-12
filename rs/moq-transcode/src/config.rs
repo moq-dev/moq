@@ -12,9 +12,9 @@ use crate::Ladder;
 #[non_exhaustive]
 pub struct Config {
 	/// Candidate output renditions, lowest first. Only rungs strictly below the
-	/// source survive: a rung is dropped when its height exceeds the source, when
+	/// source survive: a rung is dropped when its short side exceeds the source, when
 	/// its bitrate is not below the source bitrate (when known), or when it
-	/// matches the source height without a known source bitrate to undercut. A
+	/// matches the source short side without a known source bitrate to undercut. A
 	/// 480p source is never transcoded up to 720p.
 	///
 	/// Filtering drops rungs but never reorders them, so the surviving ladder is

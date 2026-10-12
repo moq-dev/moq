@@ -1,5 +1,6 @@
 import type * as broadcast from "./broadcast.ts";
 import type * as Epoch from "./epoch.ts";
+import { StreamCode, StreamError } from "./error.ts";
 import type { Route } from "./hop.ts";
 import { compareRouteCandidates, coveringPrefixes } from "./internal.ts";
 import type * as Path from "./path.ts";
@@ -16,7 +17,8 @@ class Validity {
 		if (allowed) {
 			if (this.#current.signal.aborted) this.#current = new AbortController();
 		} else if (!this.#current.signal.aborted) {
-			this.#current.abort(new Error("broadcast instance retired"));
+			// Unroutable, as in Rust: the instance going away is an end, not a failure.
+			this.#current.abort(new StreamError(StreamCode.Unroutable, { message: "broadcast instance retired" }));
 		}
 	}
 }

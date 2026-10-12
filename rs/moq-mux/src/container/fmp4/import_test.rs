@@ -1397,7 +1397,12 @@ async fn join_after(earlier: Earlier, start_us: u64) {
 
 	let mut data = match earlier {
 		Earlier::Data => {
-			let track = broadcast.create_track("telemetry", None).unwrap();
+			let track = broadcast
+				.create_track(
+					"telemetry",
+					moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+				)
+				.unwrap();
 			let mut stream = catalog.binary_stream(track, crate::binary::Config::default()).unwrap();
 			stream.append(&b"before"[..]).unwrap();
 			Some(stream)

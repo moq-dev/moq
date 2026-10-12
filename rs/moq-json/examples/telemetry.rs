@@ -79,7 +79,10 @@ fn telemetry(tick: u64) -> Value {
 fn wire_bytes(config: snapshot::Config, ticks: u64) -> usize {
 	let track = moq_net::broadcast::Info::new()
 		.produce()
-		.create_track("telemetry", None)
+		.create_track(
+			"telemetry",
+			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+		)
 		.unwrap();
 	let consumer = track.subscribe(None);
 	let mut producer = Producer::<Value>::new(track, config);
@@ -106,7 +109,10 @@ fn wire_bytes(config: snapshot::Config, ticks: u64) -> usize {
 fn verify(producer_config: snapshot::Config, ticks: u64) {
 	let track = moq_net::broadcast::Info::new()
 		.produce()
-		.create_track("telemetry", None)
+		.create_track(
+			"telemetry",
+			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+		)
 		.unwrap();
 	let consumer = track.subscribe(None);
 	let mut producer = Producer::<Value>::new(track, producer_config.clone());
@@ -144,7 +150,10 @@ fn verify(producer_config: snapshot::Config, ticks: u64) {
 fn verify_late_joiner(producer_config: snapshot::Config, ticks: u64) -> usize {
 	let track = moq_net::broadcast::Info::new()
 		.produce()
-		.create_track("telemetry", None)
+		.create_track(
+			"telemetry",
+			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+		)
 		.unwrap();
 	let consumer = track.subscribe(None);
 	let mut producer = Producer::<Value>::new(track, producer_config.clone());
