@@ -37,10 +37,11 @@ harness:
 # Finite track tails run too; `--tail` selects just Rust/Node/Bun tail checks.
 # Both runs first check js/net's varints against moq-net's encoder at every size boundary,
 # and on lite-06/07 messages (the filter also matches `lite_varint_interop`), then
-# moq-transport OBJECT_DATAGRAMs both ways on every draft.
+# moq-transport OBJECT_DATAGRAMs both ways on every draft, and Lite AUTH_ERROR
+# NOT_SUPPORTED after a grant in both directions.
 [positional-arguments]
 interop *args:
-    just rs test -p moq-net --lib varint_interop ietf_datagram_interop --run-ignored all
+    just rs test -p moq-net --lib varint_interop ietf_datagram_interop auth_unsupported_interop --run-ignored all
     ./interop/interop.sh "$@"
 
 # Nightly main vs newest installable registry releases: tokens, moq-lite session
@@ -127,6 +128,7 @@ drill-sensitivity *args:
 # Check the subscriber's MPEG-TS output for IRD compliance.
 [positional-arguments]
 ts *args:
+    python3 ./ts/pcr-timing.test.py
     ./ts/run.sh "$@"
 
 # Round-trip the EIT fixtures: the sparse schedule must survive and

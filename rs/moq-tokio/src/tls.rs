@@ -90,6 +90,10 @@ pub enum Error {
 	)]
 	DisableVerifyWithTrust,
 
+	/// A TLS server name, from the URL host or the host name override, is not a valid DNS name or IP address.
+	#[error("invalid TLS host name: {0}")]
+	InvalidHostName(String),
+
 	/// A root certificate parsed as PEM but rustls rejected it as a trust anchor.
 	#[error("failed to add root certificate")]
 	AddRoot(#[source] rustls::Error),
@@ -153,6 +157,24 @@ pub enum Error {
 	/// payload is the migration to print.
 	#[error("{0}")]
 	Deprecated(crate::cli::Deprecated),
+}
+
+impl Error {
+	/// A configuration no retry can fix, unlike a certificate file read mid-rotation.
+	pub(crate) fn is_terminal(&self) -> bool {
+		!matches!(
+			self,
+			Self::Open(_)
+				| Self::ReadFile(_)
+				| Self::Read(_)
+				| Self::Key(_)
+				| Self::Empty
+				| Self::EmptyRoots(_)
+				| Self::AddRoot(_)
+				| Self::ClientAuth(_)
+				| Self::ServerVerifier(_)
+		)
+	}
 }
 
 #[cfg(feature = "_certs")]
@@ -628,6 +650,14 @@ struct ConnectDeprecated {
 	client_host_name: Option<String>,
 }
 
+/// Refuse a TLS server name no handshake can use, so a dial fails before it connects rather than on every retry.
+pub(crate) fn server_name(name: &str) -> Result<()> {
+	match rustls::pki_types::ServerName::try_from(name) {
+		Ok(_) => Ok(()),
+		Err(_) => Err(Error::InvalidHostName(name.to_string())),
+	}
+}
+
 /// The last valid contents of a set of custom root files.
 ///
 /// Quiche consumes concrete DER roots per connection, while rustls consumes a
@@ -951,6 +981,9 @@ impl Connect {
 	pub fn build(&self) -> Result<rustls::ClientConfig> {
 		let provider = crypto::provider();
 		let verification = self.verification()?;
+		if let Some(name) = &self.host_name {
+			server_name(name)?;
+		}
 		let reloadable_roots = cfg!(feature = "watch")
 			&& matches!(&verification, Verification::Roots { custom, .. } if !custom.paths.is_empty());
 
@@ -3060,6 +3093,23 @@ mod legacy_tests {
 		};
 		assert!(matches!(err, Error::Deprecated(_)), "{err}");
 		assert!(err.to_string().contains("--connect-tls-root"), "{err}");
+	}
+
+	/// A host name override that can never be a TLS server name is refused before any dial.
+	#[test]
+	fn the_client_builder_refuses_an_invalid_host_name() {
+		let mut tls = parse(&["--connect-tls-insecure"]).connect;
+		tls.host_name = Some("not a host".to_string());
+
+		let Err(err) = tls.build() else {
+			panic!("building a client config must refuse an invalid host name");
+		};
+		assert!(matches!(err, Error::InvalidHostName(_)), "{err}");
+
+		for valid in ["example.com", "192.0.2.1", "::1"] {
+			tls.host_name = Some(valid.to_string());
+			tls.build().unwrap_or_else(|err| panic!("{valid}: {err}"));
+		}
 	}
 
 	/// The accept side, where a dropped `--server-tls-root` takes the mTLS client

@@ -17,7 +17,8 @@ IETF counterpart remains separate. Ordinary Start/Restart is a supported
 fallback, including the accepted cold-start reset before this lands.
 
 - A worker advertises `transcode/` without an epoch. Demand for a path starts
-  one job, which announces `transcode/path` with its own freshly minted epoch.
+  one job, which announces `transcode/path` with its own freshly minted epoch
+  through `Request::prepare` then `publish`, the claim-to-route operation.
   Lazy catalog references and initial requests need no anticipated epoch.
   Identical encoder settings do not make two workers the same instance.
 - TAKEOVER is START plus a predecessor Announce ID: it carries the child
@@ -81,12 +82,13 @@ event, not only route-table checks. Measure route/readers fanout on both axes.
 Run `just check`, `just test interop --all`, and `just drafts check`; wire
 regressions and benchmarks into existing CI lanes.
 
-Public API: a claim-to-independent-route operation and a `Takeover` event,
-mirrored across languages and exposed bindings. Wire: lite-07-wip gains
+Public API: a `Takeover` event, mirrored across languages and exposed
+bindings, on top of `Request::prepare` and `publish`. Wire: lite-07-wip gains
 ANNOUNCE_TAKEOVER; published versions retain their framing.
 
 ## Required
 
+- [Claim answer epochs](/quest/m1/claim-answer-epochs.md) - `Request::prepare` then `publish` answers a claim at the exact path under a fresh epoch, the operation TAKEOVER continues
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - shared routing layer and per-stream identity
 
 ## Related

@@ -84,6 +84,13 @@ pub enum Version {
 }
 
 impl Version {
+	pub(crate) fn session_code(self, error: &crate::SessionError) -> u32 {
+		match self {
+			Self::Lite(_) => crate::lite::error::to_session_code(error),
+			Self::Ietf(_) => error.to_code(),
+		}
+	}
+
 	/// Iterate the names accepted by [`FromStr`].
 	pub fn names() -> impl Iterator<Item = &'static str> {
 		ALL.iter().map(Self::as_str)

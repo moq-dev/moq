@@ -13,7 +13,7 @@ refusal as final.
   on `main`. Map it from lite's `AUTH_ERROR { Expired }` and moq-transport's
   `EXPIRED_AUTH_TOKEN`, and back again when refusing.
 - Lite session code 0x30 is NOT_SUPPORTED
-  ([Lite NOT_SUPPORTED](/quest/m1/auth/not-supported.md)). `Expired` takes a
+  ([Lite NOT_SUPPORTED](https://github.com/moq-dev/moq/pull/5269)). `Expired` takes a
   shared moq-transport session value if one means the same thing, otherwise
   0x31.
 - Carry it through moq-ffi's error mapping and each wrapper.

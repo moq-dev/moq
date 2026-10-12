@@ -105,6 +105,8 @@ fn dial_and_accept_share_one_socket() {
 fn a_close_reaches_both_ends_with_its_code() {
 	let Some(mut worker) = worker() else { return };
 	let handle = worker.handle();
+	let activity = moq_net::server::Activity::default();
+	let outgoing = moq_net::server::Activity::default();
 	let certs = support::certs().expect("certificates");
 
 	let socket = |handle: &moq_uring::Handle| {
@@ -112,16 +114,26 @@ fn a_close_reaches_both_ends_with_its_code() {
 			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 			.expect("socket")
 	};
-	let server = quic::Endpoint::new(
-		socket(&handle),
-		quic::endpoint::Config::default().with_server(server_config(&certs)),
-	)
-	.expect("server endpoint");
-	let client = quic::Endpoint::new(socket(&handle), quic::endpoint::Config::default()).expect("dial-only endpoint");
+	let mut incoming_config = quic::endpoint::Config::default().with_server(server_config(&certs));
+	incoming_config.activity = activity.clone();
+	let server = quic::Endpoint::new(socket(&handle), incoming_config).expect("server endpoint");
+	let mut outgoing_config = quic::endpoint::Config::default();
+	outgoing_config.activity = outgoing.clone();
+	let client = quic::Endpoint::new(socket(&handle), outgoing_config).expect("dial-only endpoint");
 
 	worker
 		.block_on(async move {
 			let mut dialed = client.connect(&dial_config(server.local_addr())).await.expect("dial");
+			let closes = |activity: &moq_net::server::Activity| {
+				let mut future = std::pin::pin!(activity.close());
+				std::future::Future::poll(
+					future.as_mut(),
+					&mut std::task::Context::from_waker(std::task::Waker::noop()),
+				)
+				.is_ready()
+			};
+			assert!(!closes(&activity), "unclaimed incoming connection holds admission");
+			assert!(closes(&outgoing), "outbound dials are not admissions");
 			let mut accepted = server.accept().await.expect("accept");
 
 			dialed.close(CLOSE_CODE, CLOSE_REASON);
@@ -135,6 +147,14 @@ fn a_close_reaches_both_ends_with_its_code() {
 					other => panic!("{end} expected an application close, got {other:?}"),
 				}
 			}
+			assert!(
+				closes(&activity),
+				"closed transport releases admission even while handles survive"
+			);
+			assert!(
+				client.connect(&dial_config(server.local_addr())).await.is_err(),
+				"closed activity refuses a new connection at accept"
+			);
 		})
 		.expect("worker");
 }

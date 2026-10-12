@@ -350,6 +350,10 @@ impl NoqClient {
 		};
 		let port = url.port().unwrap_or(443);
 
+		// Use the configured host_name override for SNI + cert verification, else the URL host.
+		let host_name = self.host_name.clone().unwrap_or(host);
+		crate::tls::server_name(&host_name)?;
+
 		// Resolve, adapted to the local socket's family; the dial below races the
 		// answers Happy Eyeballs style as they land, so neither a broken family nor a
 		// lookup still waiting on its AAAA record can stall the connect.
@@ -411,9 +415,6 @@ impl NoqClient {
 
 		tracing::debug!(peer = %crate::connect::Endpoint(&url), "connecting");
 
-		// Use the configured host_name override for SNI + cert verification, else the URL host.
-		let host_name = self.host_name.clone().unwrap_or(host);
-
 		// Race only the QUIC handshake: the winner alone performs the WebTransport
 		// CONNECT below, so the server sees a single request no matter how many
 		// addresses were dialed.
@@ -453,6 +454,25 @@ impl Error {
 			} => crate::ConnectError::from_status_u16(*status),
 			Self::Failover(failures) => failures.iter().find_map(|failure| failure.error.connect_error()),
 			_ => None,
+		}
+	}
+
+	/// A fixed local error or settled rejection that another dial cannot repair.
+	pub(crate) fn is_terminal(&self) -> bool {
+		match self {
+			Self::InvalidScheme
+			| Self::UnsupportedScheme(_)
+			| Self::InvalidDnsName
+			| Self::NoRuntime
+			| Self::NoInitialCipherSuite
+			| Self::ConnectRejected(_) => true,
+			Self::Tls(err) => err.is_terminal(),
+			Self::Failover(failures) => {
+				!failures.is_empty() && failures.iter().all(|failure| failure.error.is_terminal())
+			}
+			_ => self
+				.status()
+				.is_some_and(|status| !crate::error::status_retryable(status)),
 		}
 	}
 
