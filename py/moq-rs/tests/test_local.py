@@ -138,7 +138,9 @@ def test_protocol_error_helper_covers_known_app_and_unknown():
 
 def test_error_str_is_rust_display():
     assert str(moq.Error.Closed()) == "closed"  # type: ignore[attr-defined]
-    assert str(moq.Error.Transport("reset")) == "transport: reset"  # type: ignore[attr-defined]
+    error = moq.Error.Transport(reason="reset")  # type: ignore[attr-defined]
+    assert error.reason == "reset"
+    assert str(error) == "transport: reset"
     details = moq.ProtocolError(scope=moq.ErrorScope.STREAM, code=468, kind=moq.ProtocolKind.APP, message="gone")
     assert str(moq.Error.Protocol(details)) == "gone"  # type: ignore[attr-defined]
 
@@ -506,6 +508,8 @@ async def test_dynamic_track_request():
 
     request = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
     assert request.name == "events"
+    demand = request.demand()
+    assert demand.is_used()
 
     # Accept the request as a raw track (which unblocks the subscribe), then write.
     track = request.accept()
@@ -517,7 +521,13 @@ async def test_dynamic_track_request():
     assert frame is not None
     assert frame.payload == payload
 
+    track_consumer.cancel()
+    await asyncio.wait_for(demand.unused(), timeout=5.0)
     track.finish()
+    broadcast.close()
+    del track
+    with pytest.raises(moq.Error.Closed):  # type: ignore[attr-defined]
+        await asyncio.wait_for(demand.used(), timeout=5.0)
 
 
 async def test_dynamic_track_request_can_publish_media():

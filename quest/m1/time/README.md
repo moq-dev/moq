@@ -99,4 +99,4 @@ state the real-I/O rule and the `moq-time` testing rule in `AGENTS.md`,
 
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the per-flake fixes this line makes systemic
 - [Generated @moq/net](/quest/m1/rs2ts/README.md) - its hand-written timer glue is `@moq/time`
-- [Sans-IO moq-net](/quest/m1/rs2ts/sans-io/README.md) - the core keeps explicit instants; ambient time stays behind `async`
+- [The async feature](/quest/m1/net-async-feature.md) - the core keeps explicit instants; ambient time stays behind `async`

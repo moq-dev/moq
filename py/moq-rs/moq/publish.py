@@ -186,6 +186,10 @@ class TrackRequest:
         """
         return TrackProducer(self._inner.accept(_track_info(info)))
 
+    def demand(self) -> TrackDemand:
+        """Watch this track's subscribers, including after accepting it."""
+        return TrackDemand(self._inner.demand())
+
     def dynamic(self) -> TrackDynamic:
         """Create a fetch handler before accepting this requested track."""
         return TrackDynamic(self._inner.dynamic())
