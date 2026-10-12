@@ -29,8 +29,9 @@ import moq
 async def main():
     async with moq.connect("https://cdn.moq.dev/anon") as client:
         async for event in client.announced():
-            if not isinstance(event, moq.AnnounceEventStart):
-                continue  # AnnounceEventUpdate, AnnounceEventEnd, or AnnounceEventRestart
+            # A restart is a new publisher run at the same path: request it again.
+            if not isinstance(event, (moq.AnnounceEventStart, moq.AnnounceEventRestart)):
+                continue  # AnnounceEventUpdate or AnnounceEventEnd
             # A route covers a prefix and carries no broadcast, so resolve the path.
             broadcast = await client.request_broadcast(event.announce.prefix)
             catalog = await moq.media.catalog(broadcast)

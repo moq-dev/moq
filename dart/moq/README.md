@@ -10,10 +10,14 @@ final announced = connection.announced(
   options: const AnnounceOptions(prefix: 'live/', filter: '*/camera'),
 );
 await for (final event in announced.updates()) {
-  if (event is AnnounceEventStart) {
-    // Prefix stays origin-relative; captures reports wildcard matches.
-    print(event.announce.prefix);
-    print(event.announce.captures);
+  // A restart is a new publisher run at the same path: request it again.
+  switch (event) {
+    case AnnounceEventStart(:final announce) ||
+        AnnounceEventRestart(:final announce):
+      // Prefix stays origin-relative; captures reports wildcard matches.
+      print(announce.prefix);
+      print(announce.captures);
+    default:
   }
 }
 ```
