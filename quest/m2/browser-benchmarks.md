@@ -8,9 +8,10 @@ microbenchmarks do not exercise.
 
 ## Plan
 
-Decided 2026-10-08 and reconciled in the 2026-10-10 audit: keep this in m2.
-The rs2ts final browser report moves beside it, so m1's translator go/no-go
-and implementation do not wait for this harness.
+Decided 2026-10-12: keep this broader transport/media suite in m2. The
+[backend baseline](/quest/m1/rs2ts/spike.md) adds the focused browser harness
+in m1, and each backend adoption includes its own comparison before switching.
+Reuse that work here; backend adoption does not wait for this broader suite.
 
 The JS microbenchmarks already exist: the seven Bun sweeps in `js/net/bench`
 (`broadcasts`, `forward`, `frames`, `lite-varint`, `reader`, `track`,
@@ -43,5 +44,5 @@ pieces and add a focused recipe with artifacts under the benchmark conventions.
 
 ## Related
 
-- [Generated lite browser report](/quest/m2/rs2ts-browser-report.md) - compares generated and hand-written js/net through this harness
+- [Browser media report](/quest/m2/rs2ts-browser-report.md) - compares Rust-backed and handwritten @moq/net through this broader harness
 - [Benchmark reporting](/bench/README.md) - reporting conventions
