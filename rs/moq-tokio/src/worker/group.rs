@@ -67,6 +67,9 @@ impl Workers {
 	/// bound more than once. Serve those from a
 	/// [`init_streams`](crate::listen::Config::init_streams) server on the
 	/// caller's own runtime.
+	///
+	/// The group's shared certificate reloads run on the caller's Tokio runtime,
+	/// which must outlive the group; see [`Listen::load`](crate::tls::Listen::load).
 	pub fn bind(mut server: crate::server::Config, config: Config) -> Result<Self> {
 		if server.tls.is_some() && server.listen.tls.configured() {
 			return Err(crate::tls::Error::ConflictingServe.into());

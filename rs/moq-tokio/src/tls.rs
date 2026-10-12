@@ -1310,7 +1310,9 @@ pub(crate) struct ListenDeprecated {
 
 impl Listen {
 	/// Load one served identity and client-auth policy, sharing reloads across listeners.
-	/// Call inside the Tokio runtime that will drive certificate reloads.
+	///
+	/// File-backed certificates reload on the caller's Tokio runtime, which must outlive
+	/// every listener using the result; loading them outside a runtime is refused.
 	#[cfg(feature = "_certs")]
 	pub fn load(&self) -> Result<Serve> {
 		self.refuse_deprecated()?;
@@ -2153,6 +2155,37 @@ mod tests {
 			*cert.der(),
 			"an already-resolved handshake retains its snapshot"
 		);
+	}
+
+	/// Loading must not panic inside `tokio::spawn` when called from synchronous code.
+	#[cfg(feature = "watch")]
+	#[test]
+	fn loading_outside_a_runtime_refuses_only_what_needs_reloads() {
+		Listen {
+			generate: vec!["localhost".into()],
+			..Default::default()
+		}
+		.load()
+		.expect("a generated identity has nothing to reload");
+
+		let dir = tempfile::tempdir().unwrap();
+		let cert_path = dir.path().join("cert.pem");
+		let key_path = dir.path().join("key.pem");
+		let key = rcgen::KeyPair::generate().unwrap();
+		let cert = rcgen::CertificateParams::new(vec!["localhost".into()])
+			.unwrap()
+			.self_signed(&key)
+			.unwrap();
+		std::fs::write(&cert_path, cert.pem()).unwrap();
+		std::fs::write(&key_path, key.serialize_pem()).unwrap();
+		let error = Listen {
+			cert: vec![cert_path],
+			key: vec![key_path],
+			..Default::default()
+		}
+		.load()
+		.unwrap_err();
+		assert!(matches!(error, Error::Watch(_)));
 	}
 
 	#[cfg(feature = "watch")]
@@ -3109,18 +3142,12 @@ impl rustls::server::ResolvesServerCert for ServeCerts {
 #[derive(Debug)]
 pub(crate) struct Reload {
 	/// Named for the drop alone: nothing reads it, and losing it stops the watcher.
-	_task: AbortOnDrop,
+	/// `None` when nothing is on disk to watch, which needs no runtime.
+	_task: Option<AbortOnDrop>,
 }
 
 #[cfg(all(feature = "watch", feature = "_certs"))]
 impl Reload {
-	/// A guard over a task with nothing to do, for a listener with nothing to watch.
-	fn inert() -> Self {
-		Self {
-			_task: AbortOnDrop::new(tokio::spawn(std::future::ready(()))),
-		}
-	}
-
 	/// Start watching the file-backed pairs in `config`, if it has any.
 	///
 	/// The watch is registered here rather than inside the task, so it covers the
@@ -3129,12 +3156,17 @@ impl Reload {
 	/// rotation landing in that window would go unseen until the next unrelated change.
 	///
 	/// The returned guard stops the watcher if listener construction fails.
+	///
+	/// The task runs on the caller's Tokio runtime, which must outlive the listeners:
+	/// a reload watcher that dies with a temporary runtime would stop rotation silently.
 	pub(crate) fn spawn(certs: Arc<ServeCerts>, config: Listen) -> Result<Self> {
 		let paths: Vec<PathBuf> = config.cert.iter().chain(config.key.iter()).cloned().collect();
 		if paths.is_empty() {
-			// Nothing on disk to watch, so the task has nothing to do.
-			return Ok(Self::inert());
+			return Ok(Self { _task: None });
 		}
+		// Refused rather than panicking inside `tokio::spawn`.
+		let runtime = tokio::runtime::Handle::try_current()
+			.map_err(|_| Error::Watch("certificate reloads need a Tokio runtime".into()))?;
 
 		let watcher = crate::watch::Files::new(&paths).map_err(|err| Error::Watch(err.to_string()))?;
 
@@ -3148,7 +3180,7 @@ impl Reload {
 		}
 
 		Ok(Self {
-			_task: AbortOnDrop::new(tokio::spawn(reload_certs(watcher, certs, config))),
+			_task: Some(AbortOnDrop::new(runtime.spawn(reload_certs(watcher, certs, config)))),
 		})
 	}
 }
