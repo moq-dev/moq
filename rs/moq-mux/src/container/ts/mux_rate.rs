@@ -76,7 +76,7 @@ pub(super) struct Meter {
 	window: Vec<Interval>,
 	/// The rate recorded in the catalog, if any.
 	published: Option<u64>,
-	/// Whether the startup measurement window has completed, even for VBR.
+	/// Whether a window has completed since the last discontinuity, even for VBR.
 	ready: bool,
 }
 
@@ -86,7 +86,7 @@ impl Meter {
 		self.published
 	}
 
-	/// Whether the first PCR measurement window has completed.
+	/// Whether a PCR measurement window has completed on the current clock.
 	pub fn ready(&self) -> bool {
 		self.ready
 	}
@@ -125,6 +125,7 @@ impl Meter {
 	/// itself changed. The window is worthless and so is a rate measured before it.
 	/// Returns whether [`published`](Self::published) changed.
 	pub fn discontinuity(&mut self) -> bool {
+		self.ready = false;
 		self.packets = 0;
 		self.last = None;
 		self.sample = Interval::default();

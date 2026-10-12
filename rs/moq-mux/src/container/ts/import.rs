@@ -304,11 +304,15 @@ impl<E: catalog::Catalog> Import<E> {
 						self.health.tick(now);
 					}
 					if self.supports_mpegts {
+						let ready = self.mux_rate.ready();
 						if self.mux_rate.pcr(pcr) {
 							self.record_mux_rate()?;
 						}
 						if self.mux_rate.ready() {
 							self.mux_rate_reservation = None;
+						} else if ready {
+							// A backwards clock voided the measurement.
+							self.rearm_mux_rate();
 						}
 					}
 				}
@@ -897,8 +901,17 @@ impl<E: catalog::Catalog> Import<E> {
 		if self.mux_rate.discontinuity() {
 			self.record_mux_rate()?;
 		}
+		self.rearm_mux_rate();
 		tracing::debug!("MPEG-TS system time-base discontinuity");
 		Ok(())
+	}
+
+	/// A break voids the startup measurement, so until the first catalog publishes (while the
+	/// initial reservation still holds it), hold it again for a window on the new clock.
+	fn rearm_mux_rate(&mut self) {
+		if self.supports_mpegts && self.mux_rate_reservation.is_none() {
+			self.mux_rate_reservation = self.initial_reservation.clone();
+		}
 	}
 
 	/// Count `pts` toward the startup hold. A source without a usable PCR never completes a
@@ -7546,6 +7559,50 @@ pub(super) mod test {
 			}
 		}
 		unreachable!();
+	}
+
+	/// A clock break after a measured window but before the first catalog publishes voids the
+	/// measurement, so the catalog waits for a window on the new clock and carries its rate.
+	#[test]
+	fn a_break_before_the_first_catalog_waits_for_a_new_window() {
+		use crate::catalog::hang::Catalog;
+		use crate::container::ts::catalog::Ext;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut updates = catalog.consume().unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import
+			.decode(&synth_pmt(&[(StreamType::Mpeg2Video, PCR_PID)], false))
+			.unwrap();
+		let window = |import: &mut super::Import<Ext>, stuffing: usize| {
+			for i in 0..=50 {
+				let mut bytes = pcr_packet(PCR_PID, i * 27_000_000 / 25);
+				for _ in 0..stuffing {
+					bytes.extend_from_slice(&super::super::export::NULL_PACKET);
+				}
+				import.decode(&bytes).unwrap();
+			}
+		};
+		let waiter = kio::Waiter::noop();
+
+		// A full window before any PES, then a break, then the first PES.
+		window(&mut import, 99);
+		import.decode(&flag_discontinuity(pcr_packet(PCR_PID, 0))).unwrap();
+		import.decode(&pes_packet(PCR_PID, 90_000)).unwrap();
+		assert!(
+			updates.poll_next(&waiter).is_pending(),
+			"the catalog published on a voided measurement"
+		);
+
+		window(&mut import, 49);
+		let std::task::Poll::Ready(Ok(Some(first))) = updates.poll_next(&waiter) else {
+			panic!("the new clock's window did not release the catalog");
+		};
+		assert_eq!(first.ext.mpegts.mux_rate, Some(1_880_000));
 	}
 
 	/// The hold counts media time across a 33-bit PTS rollover.
