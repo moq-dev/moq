@@ -273,8 +273,7 @@ impl Workers {
 	/// The certificate every worker presents, for publishing its SHA-256
 	/// fingerprint.
 	///
-	/// Fixed for the group's lifetime: the identity is read once at
-	/// [`bind`](Self::bind) and nothing reloads it.
+	/// Tracks rotations: every worker resolves through the same live identity.
 	pub fn certificates(&self) -> moq_tokio::tls::Certificates {
 		self.certificates.clone()
 	}

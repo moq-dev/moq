@@ -1552,6 +1552,10 @@ impl Listen {
 }
 
 /// One live served identity and client-auth policy shared by a listener group.
+///
+/// A rotation swaps one complete snapshot: handshakes that already resolved the
+/// old certificate finish with it, and a partial or invalid replacement keeps the
+/// last valid snapshot serving.
 #[cfg(feature = "_certs")]
 #[derive(Clone, Debug)]
 pub struct Serve(Arc<Serving>);

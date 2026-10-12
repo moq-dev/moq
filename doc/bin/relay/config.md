@@ -94,12 +94,9 @@ io_uring = false                     # Drive them with io_uring instead of tokio
 ```
 
 Packets are steered by connection ID, so a client that migrates stays with its
-worker. `workers` needs the `noq` feature. File-backed certificates and generated identities are shared by every worker
-and the TLS stream listener. QUIC workers also share the client CA policy;
-TLS stream listeners continue to authenticate with tokens. Certificate rotation replaces one snapshot; handshakes that already
-resolved the old certificate finish with it. `/certificate.sha256` reads the
-same live certificate state. A partial or invalid replacement keeps the last
-valid snapshot; failure to start a watcher refuses startup.
+worker. `workers` needs the `noq` feature. Every worker and the TLS stream
+listener serve one shared identity, generated or file-backed, so a certificate
+rotation reaches them together and `/certificate.sha256` stays accurate.
 
 `io_uring` additionally needs Linux 6.12+ and the `io-uring` cargo feature; it
 shares the same reloadable TLS identity, serves moq-lite only, and refuses
