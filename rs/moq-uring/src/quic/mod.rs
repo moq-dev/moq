@@ -67,6 +67,17 @@ impl Identity {
 		}
 	}
 
+	/// A TLS 1.3 server policy presenting this identity, speaking `alpn` in
+	/// preference order, and checking clients as `client_auth` says.
+	pub fn server(
+		&self,
+		alpn: &[impl AsRef<str>],
+		client_auth: server::ClientAuth,
+	) -> Result<std::sync::Arc<rustls::ServerConfig>, Error> {
+		let alpn = alpn.iter().map(|proto| proto.as_ref().as_bytes().to_vec()).collect();
+		noq::identity_server_config(self, alpn, &client_auth)
+	}
+
 	/// The PEM certificate chain being presented, for a caller that publishes
 	/// its fingerprint. The key is deliberately not readable back out.
 	pub fn cert(&self) -> &[u8] {

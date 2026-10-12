@@ -1868,7 +1868,7 @@ mod tests {
 				"video",
 				crate::track::Info::timed(),
 			);
-			track.finish_at(3).unwrap();
+			track.finish_at(Position::group(3)).unwrap();
 			subscriber.subscribes.lock().insert(
 				7,
 				TrackEntry {
@@ -5150,7 +5150,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 										// only costs the early boundary: warn, and let the FIN
 										// finish the track. Later drafts made it exclusive, so
 										// the publisher contradicted its own end.
-										if let Err(err) = self.serving.finish_at_pending(end.group) {
+										if let Err(err) = self.serving.finish_at_pending(Position::group(end.group)) {
 											match serve.subscriber.version {
 												Version::Lite05 => {
 													tracing::warn!(track = %serve.name, group = end.group, %err, "invalid subscribe end")

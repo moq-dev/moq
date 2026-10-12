@@ -350,15 +350,6 @@ async fn reload_test() {
 		.expect("failed to init server");
 	let server = server.listen().await.expect("failed to listen");
 
-	// Every process the user runs shares one inotify instance limit, so a loaded host can refuse
-	// the listener its watcher. Judge by the listener's own watcher: a separate probe would race
-	// the rest of the host for the same limit.
-	#[cfg(feature = "watch")]
-	if tracing_test::internal::logs_with_scope_contain("moq_tokio", "hot reload disabled") {
-		eprintln!("skipping reload_test: host cannot start an inotify watcher");
-		return;
-	}
-
 	let certificates = server.certificates();
 	let before = certificates.fingerprints();
 	assert_eq!(before.len(), 1);

@@ -30,9 +30,12 @@ fn worker() -> Option<Worker> {
 const ALPN: &str = "moq-uring-identity";
 
 fn server_config(certs: &support::Certs) -> quic::server::Config {
-	let mut config = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
-	config.alpn = vec![ALPN.to_string()];
-	config
+	quic::server::Config::new(
+		quic::Identity::open(&certs.cert, &certs.key)
+			.expect("identity")
+			.server(&[ALPN], quic::server::ClientAuth::None)
+			.expect("tls"),
+	)
 }
 
 fn dial_config(peer: std::net::SocketAddr) -> quic::client::Config {

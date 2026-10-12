@@ -26,3 +26,8 @@ if ! grep -qF "$want" <<<"$output"; then
     echo "$output" | grep -E '^error' >&2 || true
     exit 1
 fi
+
+# Crypto support alone must not make a transport-less server load a QUIC identity.
+bash sh/rs/nextest.sh cargo nextest run --locked -p moq-tokio --lib \
+    --no-default-features --features tcp,aws-lc-rs \
+    -E 'test(no_quic_backend_needs_no_served_identity)'

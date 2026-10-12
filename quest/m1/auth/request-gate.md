@@ -23,7 +23,9 @@ Decisions settled while planning (2026-10-09):
   was rejected because it loses those graceful refusals.
 - **Rust and JS together**, so the shape and names stay mirrored.
 - **Effective authorization.** Land after request-token support. Dispatch
-  uses session-first admission or the admitted request grant, preserving
+  uses independently verified local session permission first, then the
+  admitted request grant; peer-issued AUTH_OK grants cannot authorize incoming
+  requests. Preserve
   renewal, revocation, expiry and the session ceiling. Do not reject a valid
   token-only request merely because it is outside the session union. Joining
   FETCH follows the named subscription's live authorization and ends with
@@ -32,6 +34,8 @@ Decisions settled while planning (2026-10-09):
   request-token setter/acceptor.
 - **Structure only.** Finding new gaps is not the goal, but any request type
   the refactor shows was ungated gets a regression test in the same PR.
+  Initial verification already consumes request capacity and observes
+  cancellation in the request-token hook; those fixes must not wait here.
 
 Today `auth::Gate` is built inside each handler: the IETF publisher's
 SUBSCRIBE, standalone FETCH, and TRACK_STATUS; the IETF subscriber; and the

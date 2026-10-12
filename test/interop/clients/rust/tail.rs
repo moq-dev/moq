@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
             track.demand().used().await?;
             // Declare the end before the final group's payload is even available.
-            track.finish_at(GROUPS)?;
+            track.finish_at(moq_net::track::Position::group(GROUPS))?;
             for sequence in 0..GROUPS {
                 let mut group = track.append_group()?;
                 group.write_frame(moq_net::Timestamp::ZERO, vec![sequence as u8; BYTES])?;
@@ -88,7 +88,10 @@ async fn main() -> anyhow::Result<()> {
                 seen == (0..GROUPS).collect::<Vec<_>>(),
                 "wrong groups: {seen:?}"
             );
-            ensure!(track.finished().await? == GROUPS, "wrong declared end");
+            ensure!(
+                track.finished().await? == moq_net::track::Position::group(GROUPS),
+                "wrong declared end"
+            );
             eprintln!("tail clean end=4 groups=0,1,2,3 bytes=1048576");
         }
         _ => anyhow::bail!("unknown role: {}", args[1]),

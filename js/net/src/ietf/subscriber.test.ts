@@ -1438,6 +1438,45 @@ test("a clear FIRST_OBJECT past object 0 is dropped", async () => {
 });
 
 /**
+ * A header-only stream with FIRST_OBJECT clear carries none of its group, so it is dropped
+ * like any headless stream. With the bit set, or on drafts 14-17 that cannot clear it, the
+ * same stream is an empty group. Matches the Rust rule.
+ */
+test.each([
+	[VERSION, false, [4]],
+	[VERSION, true, [3, 4]],
+	[Version.DRAFT_16, true, [3, 4]],
+])("draft %s with FIRST_OBJECT=%s: a header-only stream delivers %p", async (version, firstObject, expected) => {
+	const { subscriber, track } = await subscribeTrack({ version });
+
+	await subscriber.handleGroup(
+		new GroupMessage({
+			trackAlias: ALIAS,
+			groupId: 3,
+			subGroupId: 0,
+			publisherPriority: 0,
+			flags: groupFlags(firstObject),
+		}),
+		new Reader(undefined, new Uint8Array(), version),
+	);
+	await subscriber.handleGroup(
+		new GroupMessage({
+			trackAlias: ALIAS,
+			groupId: 4,
+			subGroupId: 0,
+			publisherPriority: 0,
+			flags: groupFlags(true),
+		}),
+		new Reader(undefined, encodeObjects([0]), version),
+	);
+
+	const ordered = track.ordered();
+	for (const sequence of expected) expect((await ordered.nextGroup())?.sequence).toBe(sequence);
+	ordered.close();
+	track.close();
+});
+
+/**
  * Drafts 14-17 have no FIRST_OBJECT bit, so a subgroup that starts at the live edge
  * arrives with `firstObject` forced on and a non-zero first delta. That stream is the
  * in-progress group: drop it, keep the subscription, and deliver the next group, which
