@@ -371,10 +371,10 @@ impl<S: crate::transport::poll::Session> Control<S> {
 						// logs per-stream errors, so close the session here rather than letting a
 						// peer silently replace a redirect an observer may already be acting on.
 						tracing::warn!(%uri, "duplicate GOAWAY received; closing session");
-						self.shared
-							.session
-							.clone()
-							.close(SessionError::from(&err).to_code(), &err.to_string());
+						self.shared.session.clone().close(
+							crate::lite::error::to_session_code(&SessionError::from(&err)),
+							&err.to_string(),
+						);
 						return Poll::Ready(Err(err));
 					}
 					return Poll::Ready(Ok(()));
@@ -399,6 +399,7 @@ struct AuthServe<S: crate::transport::poll::Session> {
 	default: Option<crate::auth::DefaultGrant>,
 	/// Our side is finished: FIN sent, waiting for the acknowledgement.
 	finished: bool,
+	unsupported: bool,
 }
 
 impl<S: crate::transport::poll::Session> AuthServe<S> {
@@ -413,12 +414,14 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 			serving: None,
 			default: None,
 			finished: false,
+			unsupported: false,
 		})
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let res = ready!(self.poll_serve(waiter)).map_err(crate::auth::protocol_error);
 		let err = match res {
+			Ok(()) if self.unsupported => Error::Unsupported,
 			Ok(()) => Error::Cancel,
 			Err(err) => {
 				match &err {
@@ -463,9 +466,16 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 						let _ = requests.try_push(crate::auth::Request::new(msg.token, issue.clone()));
 					}
 					// Only the connection's own credential has a default answer; a token
-					// needs someone to verify it. Resetting reads as "unsupported" to
-					// the presenter, the same as a peer that predates AUTH.
-					None if !msg.token.is_empty() => return Poll::Ready(Err(Error::Unsupported)),
+					// needs someone to verify it. Tell the presenter explicitly.
+					None if !msg.token.is_empty() => {
+						let mut state = issue.lock();
+						state.outbox.push_back(crate::auth::Reply::Refuse {
+							code: crate::SessionError::Unsupported,
+							reason: Error::Unsupported.to_string(),
+						});
+						state.done = true;
+						self.unsupported = true;
+					}
 					None => {
 						self.default = Some(crate::auth::DefaultGrant::new(
 							self.shared.auth.clone(),
@@ -520,7 +530,12 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 			match state.outbox.pop_front() {
 				Some(reply) => {
 					drop(state);
-					Self::write(&self.shared, stream, reply)?;
+					if !Self::write(&self.shared, stream, reply)? {
+						self.unsupported = true;
+						let mut state = issue.lock();
+						state.outbox.clear();
+						state.done = true;
+					}
 				}
 				// The app is done with the grant, or refused the token: close our side.
 				None => {
@@ -532,7 +547,7 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 		}
 	}
 
-	fn write(shared: &Shared<S>, stream: &mut Stream<S, Version>, reply: crate::auth::Reply) -> Result<(), Error> {
+	fn write(shared: &Shared<S>, stream: &mut Stream<S, Version>, reply: crate::auth::Reply) -> Result<bool, Error> {
 		let msg = match reply {
 			crate::auth::Reply::Grant(grant) => {
 				let now = shared.runtime.now();
@@ -543,17 +558,20 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 				})
 			}
 			crate::auth::Reply::Refuse { code, reason } => lite::AuthReply::Error(lite::AuthError {
-				code: code.to_code().into(),
+				code: crate::lite::error::to_session_code(&code).into(),
 				reason,
 			}),
 		};
-		// A grant that cannot be encoded is withheld, never trimmed. Nothing is buffered, and
-		// the reset that follows ends the token: as the first reply it reads as "unsupported",
-		// and after an AUTH_OK it revokes the earlier grant.
-		stream.writer.buffer(&msg).map_err(|err| {
+		// Message encoding is transactional: a refused grant leaves no bytes behind.
+		if let Err(err) = stream.writer.buffer(&msg) {
 			tracing::debug!(%err, "auth reply cannot be encoded; refusing the token");
-			Error::Unsupported
-		})
+			stream.writer.buffer(&lite::AuthReply::Error(lite::AuthError {
+				code: crate::lite::error::to_session_code(&crate::SessionError::Unsupported).into(),
+				reason: Error::Unsupported.to_string(),
+			}))?;
+			return Ok(false);
+		}
+		Ok(true)
 	}
 }
 
@@ -588,7 +606,7 @@ impl Enforce {
 		);
 		let err = Error::Unauthorized;
 		shared.session.clone().close(
-			SessionError::from(&err).to_code(),
+			crate::lite::error::to_session_code(&SessionError::from(&err)),
 			&crate::auth::unauthorized_reason(&path),
 		);
 		Poll::Ready(Err(err))
@@ -1543,10 +1561,10 @@ impl<S: crate::transport::poll::Session, R: Request<S>> RequestServe<S, R> {
 							Ok(charged) => self._charged = Some(charged),
 							// A peer past its limits loses the session, not just this request.
 							Err(err) => {
-								self.shared
-									.session
-									.clone()
-									.close(crate::SessionError::from(&err).to_code(), "too many subscriptions");
+								self.shared.session.clone().close(
+									crate::lite::error::to_session_code(&crate::SessionError::from(&err)),
+									"too many subscriptions",
+								);
 								return Poll::Ready(Err(err));
 							}
 						}
@@ -3648,7 +3666,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						Err(err) => {
 							self.settle_open(false);
 							self.state = GroupState::Done;
-							return Poll::Ready(Err(Error::from_transport(err)));
+							return Poll::Ready(Err(crate::lite::error::from_transport(err)));
 						}
 					};
 					self.settle_open(true);

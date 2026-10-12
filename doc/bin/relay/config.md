@@ -234,11 +234,15 @@ drain_timeout = "10s"                # Top-level key, as --drain-timeout / MOQ_D
 
 The first SIGTERM or SIGINT starts a drain: every session is sent a GOAWAY
 asking it to reconnect elsewhere, including any that connect during the drain,
-and is force-closed if it is still connected when the window ends. The relay
-exits as soon as every session has left, when the window ends, or immediately
-on a second signal. `0` skips the GOAWAY. Only moq-lite-04+ and moq-transport
-clients act on a GOAWAY; older ones are closed when the window ends. An
-embedder can take over the signals; see [Embed](/bin/relay/#embed).
+and is force-closed if it is still connected when the window ends. Accepted
+connections still handshaking or awaiting authorization hold the drain until
+they finish, fail, or reach that same deadline, where any still pending is
+refused or closed. The relay exits as soon as
+every admitted connection has left (refusing any that arrive after), when
+the window ends, or immediately on a second signal. `0` skips the GOAWAY.
+Only moq-lite-04+ and moq-transport clients act on a GOAWAY; older ones are
+closed when the window ends. An embedder can take over the signals; see
+[Embed](/bin/relay/#embed).
 
 ## \[log]
 

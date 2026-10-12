@@ -166,7 +166,9 @@ to a prefix. Right after setup both sides present the credential the connection
 already carried (the URL token, a client certificate, or nothing), so a
 publisher learns before anyone subscribes whether its broadcasts can reach the
 peer. More tokens can be added without reconnecting; the session's scope is the
-union of every open token's grant.
+union of every open token's grant. A token the peer has no verifier for, or
+whose grant is too large to send, fails with `Unsupported` and ends only that
+token; the session and its other grants stay up.
 
 A subscription or fetch that loses access resets with the `UNAUTHORIZED` stream
 code and the session stays up. A client that publishes outside its grant closes

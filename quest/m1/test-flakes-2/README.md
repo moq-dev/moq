@@ -33,7 +33,6 @@ Public API: none. Wire: none.
 ## Required
 
 - [Interop close code](/quest/m1/test-flakes-2/interop-close-code.md) - the browser close-code test reliably sees `unauthorized` for a refused session
-- [TS passthrough jump](/quest/m1/test-flakes-2/ts-passthrough-jump.md) - moq-cli's flagged-jump TS passthrough test passes under load without wall-clock pacing
 - [QUIC-wins race](/quest/m1/test-flakes-2/quic-winning-race.md) - moq-tokio's QUIC-wins test sets up QUIC's win instead of racing the WebSocket head start
 
 ## Related

@@ -36,6 +36,7 @@ struct Accepting {
 /// State shared by the handles, the demux task, and the per-connection
 /// teardown tasks.
 pub(crate) struct Inner {
+	activity: moq_net::server::Activity,
 	/// The socket's worker, where every task of this endpoint runs.
 	owner: Owner,
 	socket: Rc<udp::Socket>,
@@ -102,6 +103,7 @@ impl Endpoint {
 		let endpoint = moq_noq_proto::Endpoint::new(super::endpoint_config(socket.shard())?, server, false);
 
 		let inner = Rc::new(Inner {
+			activity: config.activity,
 			owner,
 			socket: Rc::new(socket),
 			local,
@@ -326,6 +328,14 @@ impl Inner {
 			return None;
 		}
 
+		// Closed for drain: refuse so the peer redials elsewhere instead of
+		// retransmitting into a server that is leaving.
+		let Some(active) = self.activity.enter() else {
+			buf.clear();
+			let transmit = self.endpoint.borrow_mut().refuse(incoming, buf);
+			self.respond(&transmit, buf);
+			return None;
+		};
 		buf.clear();
 		let accepted = self.endpoint.borrow_mut().accept(incoming, Instant::now(), buf, None);
 		let (key, conn) = match accepted {
@@ -340,6 +350,7 @@ impl Inner {
 		};
 
 		let shared = self.launch(key, conn);
+		shared.state.borrow_mut().active = Some(active);
 
 		// Hand the connection over once (if) its handshake completes.
 		self.pending.set(self.pending.get() + 1);

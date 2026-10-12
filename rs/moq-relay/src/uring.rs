@@ -545,9 +545,10 @@ fn serve_worker(spawn: Spawn) -> bool {
 			.handle()
 			.udp(member, udp)
 			.context("failed to adopt the worker socket")?;
+		let mut endpoint_config = moq_uring::quic::endpoint::Config::default().with_server(server);
+		endpoint_config.activity = serve.shutdown.activity.clone();
 		let endpoint =
-			moq_uring::quic::Endpoint::new(socket, moq_uring::quic::endpoint::Config::default().with_server(server))
-				.context("failed to build the QUIC endpoint")?;
+			moq_uring::quic::Endpoint::new(socket, endpoint_config).context("failed to build the QUIC endpoint")?;
 		Ok((worker, endpoint))
 	})();
 
@@ -725,10 +726,12 @@ async fn serve_connection(
 		let auth = serve.auth.clone();
 		let cluster = serve.cluster.clone();
 		let sessions = serve.sessions.clone();
+		let shutdown = serve.shutdown.clone();
 		match serve
 			.tokio
 			.spawn(async move {
-				let admitted = cluster.admit(&auth, auth_request.clone()).await?;
+				// Abandoned at the drain deadline: worker teardown only detaches this task.
+				let admitted = shutdown.admit(cluster.admit(&auth, auth_request.clone())).await?;
 				Ok::<_, crate::auth::Error>((admitted, sessions.register(auth_request)))
 			})
 			.await
@@ -828,5 +831,60 @@ mod tests {
 		assert_eq!(transport.receive_window, None);
 		assert_eq!(transport.stream_receive_window, None);
 		assert_eq!(transport.send_window, None);
+	}
+
+	/// An auth decision still pending at the drain deadline is abandoned then,
+	/// although worker teardown only detaches the task awaiting it.
+	#[tokio::test]
+	async fn pending_admission_is_abandoned_at_the_deadline() {
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default()) {
+			eprintln!("skipping io_uring relay test: {reason}");
+			return;
+		}
+
+		let dir = tempfile::tempdir().unwrap();
+		let key = rcgen::KeyPair::generate().unwrap();
+		let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+			.unwrap()
+			.self_signed(&key)
+			.unwrap();
+		let (cert_path, key_path) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
+		std::fs::write(&cert_path, cert.pem()).unwrap();
+		std::fs::write(&key_path, key.serialize_pem()).unwrap();
+
+		let window = std::time::Duration::from_secs(1);
+		let mut config = crate::Config::default();
+		config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.listen.tls.cert = vec![cert_path];
+		config.listen.tls.key = vec![key_path];
+		config.runtime.workers = Some(1);
+		config.runtime.pin = false;
+		config.runtime.io_uring = true;
+		config.drain_timeout = window;
+		let mut relay = crate::Relay::load(config).await.unwrap().with_signals(false);
+		let port = relay.addr().unwrap().port();
+		let mut admissions = relay.admissions().unwrap();
+		let trigger = relay.shutdown_trigger().clone();
+		let running = tokio::spawn(relay.run());
+
+		let mut client = moq_tokio::connect::Config::default();
+		client.tls.insecure = Some(true);
+		client.once = Some(true);
+		client.bind = Some("127.0.0.1:0".parse().unwrap());
+		let url: url::Url = format!("moql://127.0.0.1:{port}/drain").parse().unwrap();
+		let client = client.init(Default::default()).unwrap();
+		let connecting = tokio::spawn(async move { client.with_reconnect(false).connect(url).established().await });
+		let mut admission = admissions.next().await.unwrap();
+
+		// Only timers decide what follows; the embedded admission's own timeout
+		// is well past the drain window.
+		tokio::time::pause();
+		trigger.start();
+		tokio::time::timeout(window + std::time::Duration::from_secs(1), admission.abandoned())
+			.await
+			.expect("the admission outlived the drain deadline");
+		running.await.unwrap().unwrap();
+		connecting.abort();
 	}
 }

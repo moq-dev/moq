@@ -52,6 +52,8 @@ export const SessionCode = Object.freeze(
 		Version: 0x15 as SessionCode,
 		/** A token named an alias that was never registered. */
 		UnknownAuthTokenAlias: 0x17 as SessionCode,
+		/** The peer cannot support the requested feature; moq-lite only. */
+		Unsupported: 0x30 as SessionCode,
 	} as const),
 );
 
