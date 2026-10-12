@@ -15,6 +15,11 @@ use moq_net::{
 use support::harness::{now, spawn};
 use support::mock::{MockSession, create_mock_session_pair};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 /// Maximum time any single test may run before being treated as a deadlock.
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -740,12 +745,12 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 		// The server publishes room/x to the client; the client publishes up/y to the server.
 		let server_origin = produce_origin(1);
 		let down = server_origin.create_broadcast("room/x").unwrap();
-		let down_track = down.create_track("video", None).unwrap();
+		let down_track = down.create_track("video", timed()).unwrap();
 		down.announce(Default::default()).unwrap();
 
 		let client_origin = produce_origin(2);
 		let up = client_origin.create_broadcast("up/y").unwrap();
-		let up_track = up.create_track("video", None).unwrap();
+		let up_track = up.create_track("video", timed()).unwrap();
 		up.announce(Default::default()).unwrap();
 
 		let received = produce_origin(3);
@@ -1142,10 +1147,10 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 
 		let relay = produce_origin(1);
 		let audio = relay.create_broadcast("room/alice/audio").unwrap();
-		let audio_track = audio.create_track("opus", None).unwrap();
+		let audio_track = audio.create_track("opus", timed()).unwrap();
 		audio.announce(Default::default()).unwrap();
 		let video = relay.create_broadcast("room/alice/video").unwrap();
-		let video_track = video.create_track("h264", None).unwrap();
+		let video_track = video.create_track("h264", timed()).unwrap();
 		video.announce(Default::default()).unwrap();
 
 		let received = produce_origin(3);
@@ -1215,10 +1220,10 @@ async fn a_narrowing_aborts_what_the_peer_published(version: &'static str) {
 
 		let client_origin = produce_origin(2);
 		let mic = client_origin.create_broadcast("room/bob/mic").unwrap();
-		let mic_track = mic.create_track("opus", None).unwrap();
+		let mic_track = mic.create_track("opus", timed()).unwrap();
 		mic.announce(Default::default()).unwrap();
 		let cam = client_origin.create_broadcast("room/bob/cam").unwrap();
-		let cam_track = cam.create_track("h264", None).unwrap();
+		let cam_track = cam.create_track("h264", timed()).unwrap();
 		cam.announce(Default::default()).unwrap();
 
 		let relay = produce_origin(1);
@@ -1268,7 +1273,7 @@ async fn a_narrowing_resets_a_fetch_in_flight(version: &'static str) {
 
 		let relay = produce_origin(1);
 		let broadcast = relay.create_broadcast("room/x").unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", timed()).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		// The group stays open, so the fetch is still in flight when the grant narrows.
 		let mut group = track.append_group().unwrap();
@@ -1328,7 +1333,7 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 
 		let relay = produce_origin(1);
 		let audio = relay.create_broadcast("room/alice/audio").unwrap();
-		let audio_track = audio.create_track("opus", None).unwrap();
+		let audio_track = audio.create_track("opus", timed()).unwrap();
 		audio.announce(Default::default()).unwrap();
 
 		let received = produce_origin(3);
@@ -1385,7 +1390,7 @@ async fn a_widening_brings_back_what_the_peer_published(version: &'static str) {
 
 		let client_origin = produce_origin(2);
 		let mic = client_origin.create_broadcast("room/bob/mic").unwrap();
-		let mic_track = mic.create_track("opus", None).unwrap();
+		let mic_track = mic.create_track("opus", timed()).unwrap();
 		mic.announce(Default::default()).unwrap();
 
 		let relay = produce_origin(1);

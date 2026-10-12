@@ -71,6 +71,8 @@ export class Player {
 	readonly emitter: Audio.Emitter;
 	/** Caption overlay output. */
 	readonly textRenderer: Text.Renderer;
+	/** Fatal media decode failure, cleared when another source is selected. */
+	readonly error: Getter<Error | undefined>;
 
 	#videoEnabled = new Signal(false);
 	#audioEnabled = new Signal(false);
@@ -129,6 +131,10 @@ export class Player {
 			this.video.close();
 			this.audio.close();
 		});
+
+		this.error = this.#signals.computed(
+			(effect) => effect.get(this.video.out.error) ?? effect.get(this.audio.out.error),
+		);
 
 		this.emitter = new Audio.Emitter({
 			source: this.audio,

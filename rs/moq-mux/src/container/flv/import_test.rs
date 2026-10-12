@@ -843,3 +843,35 @@ async fn first_catalog_carries_the_anchored_clock() {
 	importer.finish().unwrap();
 	assert!(clocks.drain().iter().all(|clock| *clock == Some(anchored)));
 }
+
+#[test]
+#[tracing_test::traced_test]
+fn script_metadata_drops_warn_once() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut import = Import::new(broadcast, catalog.reserve());
+	let mut data = synth_flv();
+	for _ in 0..2 {
+		write_tag(
+			&mut data,
+			super::TAG_SCRIPT,
+			0,
+			b"\x02\x00\x0aonMetaData\x08\x00\x00\x00\x00\x00\x00\x09",
+		);
+	}
+	import.decode(&data).unwrap();
+	import.finish().unwrap();
+	assert_eq!(import.dropped_metadata(), 2);
+	assert_eq!(catalog.snapshot().audio.renditions.len(), 1);
+	logs_assert(|lines| {
+		let warnings = lines
+			.iter()
+			.filter(|line| line.contains("discarding FLV script metadata"))
+			.count();
+		if warnings == 1 {
+			Ok(())
+		} else {
+			Err(format!("expected one metadata warning, got {warnings}"))
+		}
+	});
+}

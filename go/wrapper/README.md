@@ -50,9 +50,12 @@ for event, err := range announced.All(ctx) {
 		}
 		log.Fatal(err)
 	}
-	if event, ok := event.(moq.AnnounceEventStart); ok {
+	switch event := event.(type) {
+	case moq.AnnounceEventStart:
 		// Prefix stays origin-relative; Captures reports wildcard matches.
 		fmt.Println("got broadcast", event.Announce.Prefix)
+	case moq.AnnounceEventRestart: // a new publisher run at the same path
+		fmt.Println("restarted broadcast", event.Announce.Prefix)
 	}
 }
 ```

@@ -51,9 +51,10 @@ output.announce(Default::default())?;
 moq_transcode::run(source, output, config).await?;
 ```
 
-Only renditions strictly below the source survive the ladder: a 480p source is
-never transcoded up to 720p, and a same-height rung is only offered when it
-undercuts a known source bitrate.
+Rung sizes measure the coded frame's short side: a 1080x1920 source produces
+720x1280 and 360x640 rungs, while catalog rotation is preserved. Only renditions
+strictly below the source survive: a 480-pixel short side is never upscaled to
+720, and a same-size rung is only offered when it undercuts a known source bitrate.
 
 `Config::ladder` is a `Ladder`, built from rungs in any order:
 
@@ -67,7 +68,7 @@ config.ladder = moq_transcode::Ladder::new([
 It ranks them by bitrate, lowest first, so every rung above the lowest has a next lower
 rendition. A ladder with no such ranking is an error rather than a guess: two
 rungs sharing a bitrate have no lower one, and a rung that costs more without
-being taller means bitrate and resolution disagree about which rendition is
+having a larger short side means bitrate and resolution disagree about which rendition is
 below which. Filtering against the source drops rungs but never reorders them.
 
 ## Example

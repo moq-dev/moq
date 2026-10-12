@@ -83,9 +83,17 @@ jobs:
         env:
           NEXTEST_PROFILE: ci
 
+      - name: Go publisher runtime benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just go bench -benchtime=1x
+
       - name: Audio grouping relay benchmark
         if: ${{ !cancelled() }}
         run: nix develop --command just bench-audio
+
+      - name: Latency observation benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs bench-latency
 
       - name: Audio mixer benchmark
         if: ${{ !cancelled() }}
@@ -96,6 +104,10 @@ jobs:
       - name: JS origin broadcast map benchmark
         if: ${{ !cancelled() }}
         run: nix develop --command just js bench broadcasts
+
+      - name: JS request ID admission benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just js bench request-ids
 
       # A route above several interest heads lands once per head, so its re-price
       # should expose any slope over heads times received routes.
@@ -152,6 +164,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command cargo bench --locked -p moq-net --features fuzz --bench '*' -- --test
 
+      - name: HTTP idle accounting benchmark smoke
+        if: ${{ !cancelled() }}
+        run: nix develop --command cargo bench --locked -p moq-relay --bench http_idle -- --test
+
       # One relay's stats tick (drain plus plain and compressed encode), swept
       # over held paths, tiers, and how many of those paths changed, plus the
       # decode table. `--test` runs each tick routine once (decode ignores it
@@ -169,9 +185,21 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command cargo bench --locked -p moq-mux --bench catalog -- --test
 
+      - name: Archive timeline FETCH fanout benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs test -p moq-archive benchmark_timeline_fetch_fanout --run-ignored only --success-output immediate
+
+      - name: TS damage PID benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs test -p moq-mux benchmark_damage_pid_fanout --run-ignored only --success-output immediate
+
       - name: RTMP chunk-stream benchmark smoke
         if: ${{ !cancelled() }}
         run: nix develop --command just rs bench-rtmp --test
+
+      - name: Stream import throughput
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs test -p moq-cli -E 'test(benchmark_stream_import)' --run-ignored only --success-output immediate
 
       - name: BBB rendition alignment
         if: ${{ !cancelled() }}
@@ -282,7 +310,7 @@ jobs:
           "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - uses: ./.github/actions/just
       - name: Install nextest
-        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
         with:
           tool: nextest@0.9.146
       - name: Test
@@ -321,9 +349,18 @@ jobs:
       - name: Playwright Chromium
         run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
 
+      - name: WebSocket fallback startup benchmark
+        run: nix develop --command just js qmux-bench
+
       - name: Browser publisher fairness benchmark
         run: nix develop --command just js serve-bench
         shell: bash -leo pipefail {0}
+      - name: Native headless playback
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test native-play
+        shell: bash -leo pipefail {0}
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
       - name: Audio quality
         if: ${{ !cancelled() }}
         run: nix develop --command just test audio-quality --enforce --capture
@@ -423,6 +460,45 @@ jobs:
       package: moq-relay
     permissions:
       contents: read
+
+  sizes:
+    name: Shipping sizes
+    # Measures what these release jobs upload rather than rebuilding it.
+    needs: [release-py-ffi, release-kt-ffi, release-swift-ffi, release-go-ffi, release-moq-c, release-moq-relay, release-moq-cli]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+        with:
+          determinate: false
+          extra-conf: |
+            extra-substituters = https://kixelated.cachix.org
+            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+      - uses: ./.github/actions/rust-cache
+      - name: Collect and compare sizes
+        run: nix develop --command just gh size-nightly size-report "$GITHUB_RUN_ID"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Preserve sizes and attribution
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: nightly-size-history
+          path: |
+            size-report/history.json
+            size-report/sizes.json
+            size-report/summary.md
+            size-report/ffi-bloat.txt
+            size-report/js/bytes.json
+            size-report/js/*.metafile.json
+          retention-days: 45
+          if-no-files-found: error
 
   fuzz:
     name: Fuzz (${{ matrix.target }})

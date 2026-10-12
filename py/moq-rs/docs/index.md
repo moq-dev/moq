@@ -143,6 +143,7 @@ broadcast, and producers advertise it in the catalog.
    AnnounceEventStart
    AnnounceEventUpdate
    AnnounceEventEnd
+   AnnounceEventRestart
 ```
 
 ## Data types
@@ -201,6 +202,8 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    is_shutdown
    protocol_error
    log_level
+   mint_epoch
+   epoch_time
 ```
 
 ```{toctree}

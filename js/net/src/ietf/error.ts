@@ -99,6 +99,8 @@ export type RequestCondition =
 	| "uninterested"
 	/** The track's content could not be parsed. */
 	| "malformed_track"
+	/** A well-formed AUTHORIZATION TOKEN this endpoint cannot use, such as a repeat. */
+	| "malformed_auth_token"
 	/** A GOAWAY is draining the session, so no new request is accepted. */
 	| "going_away";
 
@@ -158,6 +160,16 @@ function malformedTrack(kind: RequestKind, version: IetfVersion): number | undef
 	return kind === "fetch" ? MALFORMED_TRACK_14 : undefined;
 }
 
+/** Draft-15 swapped MALFORMED_AUTH_TOKEN and the missing-track code. */
+const MALFORMED_AUTH_TOKEN_14 = 0x10;
+const MALFORMED_AUTH_TOKEN = 0x4;
+
+/** The value for an unusable token, or undefined where none is assigned: draft-14 PUBLISH_ERROR. */
+function malformedAuthToken(kind: RequestKind, version: IetfVersion): number | undefined {
+	if (version !== Version.DRAFT_14) return MALFORMED_AUTH_TOKEN;
+	return kind === "publish" ? undefined : MALFORMED_AUTH_TOKEN_14;
+}
+
 /** The value for a draining session, or undefined before draft-17 registered one. */
 function goingAway(version: IetfVersion): number | undefined {
 	return version >= Version.DRAFT_17 ? GOING_AWAY : undefined;
@@ -199,6 +211,8 @@ export function toRequestCode(condition: RequestCondition, kind: RequestKind, ve
 				: (uninterested(kind, version) ?? INTERNAL_ERROR);
 		case "malformed_track":
 			return malformedTrack(kind, version) ?? INTERNAL_ERROR;
+		case "malformed_auth_token":
+			return malformedAuthToken(kind, version) ?? INTERNAL_ERROR;
 		case "going_away":
 			return goingAway(version) ?? INTERNAL_ERROR;
 	}
