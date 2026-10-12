@@ -430,9 +430,7 @@ impl<E: catalog::Catalog> Import<E> {
 			self.health.pcr_pid(pmt.pcr_pid.map(|pid| pid.as_u16()));
 			// A new clock: the intervals straddling the switch measure nothing.
 			self.liveness.discontinuity();
-			if self.mux_rate.discontinuity() {
-				self.record_mux_rate()?;
-			}
+			self.reset_mux_rate()?;
 		}
 
 		// SCTE-35 is announced by a program-level registration descriptor with
@@ -878,6 +876,8 @@ impl<E: catalog::Catalog> Import<E> {
 	/// PCR/PTS rollover sets nothing and is unwrapped rather than reset; neither is a program
 	/// break and neither reaches here.
 	fn timebase_break(&mut self) -> anyhow::Result<()> {
+		// First, so the salvage below cannot publish the first catalog with the old clock's rate.
+		self.rearm_mux_rate();
 		// The bytes still accumulating belong to the old clock, and their continuation is
 		// stamped on the new one, so cut every PES here rather than splicing across. This
 		// runs before the marker so a salvaged tail lands in the closing group, which the
@@ -901,13 +901,22 @@ impl<E: catalog::Catalog> Import<E> {
 		if self.mux_rate.discontinuity() {
 			self.record_mux_rate()?;
 		}
-		self.rearm_mux_rate();
 		tracing::debug!("MPEG-TS system time-base discontinuity");
 		Ok(())
 	}
 
-	/// A break voids the startup measurement, so until the first catalog publishes (while the
-	/// initial reservation still holds it), hold it again for a window on the new clock.
+	/// The program clock changed, so the measured rate no longer holds.
+	fn reset_mux_rate(&mut self) -> anyhow::Result<()> {
+		self.rearm_mux_rate();
+		if self.mux_rate.discontinuity() {
+			self.record_mux_rate()?;
+		}
+		Ok(())
+	}
+
+	/// A clock change voids the startup measurement, so until the first catalog publishes
+	/// (while the initial reservation still holds it), hold it again for a window on the new
+	/// clock.
 	fn rearm_mux_rate(&mut self) {
 		if self.supports_mpegts && self.mux_rate_reservation.is_none() {
 			self.mux_rate_reservation = self.initial_reservation.clone();
