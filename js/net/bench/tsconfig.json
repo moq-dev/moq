@@ -1,5 +1,15 @@
 {
 	"extends": "../tsconfig.json",
-	"compilerOptions": { "rootDir": "..", "noEmit": true },
-	"include": ["serve-browser.ts", "serve-browser-entry.ts", "serve-browser.test.ts"]
+	"compilerOptions": {
+		"rootDir": "..",
+		"noEmit": true
+	},
+	"include": [
+		"serve-browser.ts",
+		"serve-browser-entry.ts",
+		"serve-browser.test.ts",
+		"qmux.ts",
+		"qmux-eager.ts",
+		"qmux-lazy.ts"
+	]
 }

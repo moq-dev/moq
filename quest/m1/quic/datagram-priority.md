@@ -112,5 +112,3 @@ best-effort send. Wire: none.
 
 - [Scope track priority](/quest/m1/track-priority-scope.md) - owns what a
   subscription's priority means; datagrams follow it
-- [Datagram replay bound](/quest/m1/datagram-replay-bound.md) - where a new
-  datagram subscriber starts in the model's buffer, before the send queue

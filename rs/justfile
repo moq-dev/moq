@@ -121,6 +121,7 @@ macos $BASE="":
 macos-test:
     just rs test -p moq-auth -p hang -p moq-tokio -p moq-sock
     just rs test -p moq-sock --features fast-apple-datapath
+    just rs test -p moq-video --no-default-features -E 'test(encode::backend::videotoolbox::tests)'
 
 # Compile and lint the capture feature, which the default check skips.
 [positional-arguments]
@@ -352,3 +353,7 @@ bench-rtmp *args:
 [positional-arguments]
 bench-stats *args:
     cargo bench --locked -p moq-stats --features bench --bench producer_tick --bench decode -- "$@"
+
+# Sweep latency observations against writer count and report density.
+bench-latency:
+    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-bench --run-ignored only -E 'test(benchmark_observation_contention)' --success-output immediate

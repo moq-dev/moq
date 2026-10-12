@@ -12,7 +12,7 @@ out of scope: it kills the process rather than destroying the VM.
 ## Plan
 
 Decided 2026-10-08: plan for any runtime worker thread, not one runtime
-thread, since [FFI runtime](/quest/m1/ffi-runtime.md) moves moq-ffi to a
+thread, since [FFI runtime](https://github.com/moq-dev/moq/pull/5265) moves moq-ffi to a
 worker pool.
 
 - Audit first. uniffi delivers async continuations as JNA callbacks
@@ -41,4 +41,4 @@ Public API: none; the hook is internal to the binding. Wire: none.
 
 ## Related
 
-- [FFI runtime](/quest/m1/ffi-runtime.md) - moves moq-ffi to a multi-thread runtime, so callbacks fire on any worker thread
+- [FFI runtime](https://github.com/moq-dev/moq/pull/5265) - moves moq-ffi to a multi-thread runtime, so callbacks fire on any worker thread

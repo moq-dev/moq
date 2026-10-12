@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import { SessionCode, SessionError } from "../error.ts";
+import { ProtocolViolation, SessionCode } from "../error.ts";
 import { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import { SetupOption, SetupOptions } from "./parameters.ts";
-import { TOKEN_OUT_OF_BAND, type Token, tokenFromSetup, tokenIntoSetup } from "./token.ts";
+import { TOKEN_OUT_OF_BAND, type Token, tokenFromRequest, tokenFromSetup, tokenIntoSetup } from "./token.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 const VERSIONS: IetfVersion[] = [
@@ -54,16 +54,21 @@ async function received(params: SetupOptions, version: IetfVersion): Promise<Set
 }
 
 /** A raw Token structure: varint fields then a value. */
-function structure(version: IetfVersion, fields: bigint[], value: Uint8Array = new Uint8Array()): SetupOptions {
+function raw(version: IetfVersion, fields: bigint[], value: Uint8Array = new Uint8Array()): Uint8Array {
 	const parts = [...fields.map((field) => varint(field, version)), value];
-	const raw = new Uint8Array(parts.reduce((total, part) => total + part.length, 0));
+	const out = new Uint8Array(parts.reduce((total, part) => total + part.length, 0));
 	let offset = 0;
 	for (const part of parts) {
-		raw.set(part, offset);
+		out.set(part, offset);
 		offset += part.length;
 	}
+	return out;
+}
+
+/** The Token structure as a SETUP option. */
+function structure(version: IetfVersion, fields: bigint[], value: Uint8Array = new Uint8Array()): SetupOptions {
 	const params = new SetupOptions();
-	params.setBytes(SetupOption.AuthorizationToken, raw);
+	params.setBytes(SetupOption.AuthorizationToken, raw(version, fields, value));
 	return params;
 }
 
@@ -71,7 +76,7 @@ function sessionCode(fn: () => unknown): SessionCode | undefined {
 	try {
 		fn();
 	} catch (err) {
-		if (err instanceof SessionError) return err.code;
+		if (err instanceof ProtocolViolation) return err.code;
 		throw err;
 	}
 	return undefined;
@@ -119,7 +124,8 @@ test("REGISTER is a value", () => {
 	}
 });
 
-test("an alias reference is a protocol violation", () => {
+/** Section 9.1.4: nothing can have been registered before SETUP, so an alias there is a violation. */
+test("a SETUP alias reference is a protocol violation", () => {
 	for (const version of VERSIONS) {
 		for (const aliasType of [0x0n, 0x2n]) {
 			const params = structure(version, [aliasType, 7n]);
@@ -130,7 +136,7 @@ test("an alias reference is a protocol violation", () => {
 
 test("an undecodable structure is a formatting error", () => {
 	for (const version of VERSIONS) {
-		for (const fields of [[], [0x3n], [0x1n], [0x1n, 7n], [0x4n, 0n]]) {
+		for (const fields of [[], [0x3n], [0x1n], [0x1n, 7n], [0x0n], [0x2n], [0x4n, 0n]]) {
 			const params = structure(version, fields);
 			expect(sessionCode(() => tokenFromSetup(params, version))).toBe(SessionCode.KeyValueFormatting);
 		}
@@ -151,5 +157,39 @@ test("two tokens are refused", async () => {
 		await expect(SetupOptions.decode(new Reader(undefined, bytes, version), version)).rejects.toThrow(
 			/duplicate parameter/,
 		);
+	}
+});
+
+test("a request token by value decodes", () => {
+	for (const version of VERSIONS) {
+		expect(tokenFromRequest(raw(version, [0x3n, TOKEN.kind], TOKEN.value), version)).toEqual(TOKEN);
+	}
+});
+
+/** Only SETUP falls back to a value: on a request, a registration overflows the cache. */
+test("a request registration overflows the cache", () => {
+	for (const version of VERSIONS) {
+		const token = raw(version, [0x1n, 7n, TOKEN.kind], TOKEN.value);
+		expect(sessionCode(() => tokenFromRequest(token, version))).toBe(SessionCode.AuthTokenCacheOverflow);
+	}
+});
+
+test("a request alias reference is an unknown alias", () => {
+	for (const version of VERSIONS) {
+		for (const aliasType of [0x0n, 0x2n]) {
+			const token = raw(version, [aliasType, 7n]);
+			expect(sessionCode(() => tokenFromRequest(token, version))).toBe(SessionCode.UnknownAuthTokenAlias);
+		}
+	}
+});
+
+test("an undecodable request token is a formatting error", () => {
+	for (const version of VERSIONS) {
+		// A registration, deletion, or alias use missing a field it names, or an alias use
+		// carrying a token type.
+		for (const fields of [[], [0x3n], [0x1n], [0x1n, 7n], [0x0n], [0x2n], [0x2n, 7n, 0n], [0x4n, 0n]]) {
+			const token = raw(version, fields);
+			expect(sessionCode(() => tokenFromRequest(token, version))).toBe(SessionCode.KeyValueFormatting);
+		}
 	}
 });

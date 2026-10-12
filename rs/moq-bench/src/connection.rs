@@ -131,7 +131,10 @@ pub async fn run(ctx: Connection) {
 				continue;
 			}
 		};
-		let track = match broadcast.create_track(TRACK, None) {
+		let track = match broadcast.create_track(
+			TRACK,
+			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+		) {
 			Ok(track) => track,
 			Err(err) => {
 				tracing::error!(connection, %err, "failed to create track");
@@ -604,6 +607,11 @@ impl Drop for Gauge<'_> {
 mod tests {
 	use super::*;
 
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	async fn wait_for(counter: &AtomicU64, value: u64) {
 		while counter.load(Ordering::Relaxed) < value {
 			tokio::task::yield_now().await;
@@ -632,7 +640,7 @@ mod tests {
 
 		let stats = Arc::new(Stats::default());
 		let broadcast = broadcast::Info::new().produce();
-		let track = broadcast.create_track(TRACK, None).unwrap();
+		let track = broadcast.create_track(TRACK, timed()).unwrap();
 		let consumer = broadcast.consume();
 
 		// 10fps (100ms/frame), 8-byte frames, 2 payload frames per group.
@@ -676,7 +684,7 @@ mod tests {
 
 		let stats = Arc::new(Stats::default());
 		let broadcast = broadcast::Info::new().produce();
-		let track = broadcast.create_track(TRACK, None).unwrap();
+		let track = broadcast.create_track(TRACK, timed()).unwrap();
 		let consumer = broadcast.consume();
 
 		let task = tokio::spawn(produce(0, "bench/test".into(), rolled(10, 4, 0), track, stats.clone()));
@@ -707,7 +715,7 @@ mod tests {
 
 		let stats = Arc::new(Stats::default());
 		let broadcast = broadcast::Info::new().produce();
-		let track = broadcast.create_track(TRACK, None).unwrap();
+		let track = broadcast.create_track(TRACK, timed()).unwrap();
 		let consumer = broadcast.consume();
 
 		// 10fps, 300-byte messages, lone-keyframe groups (the chat shape).
@@ -740,7 +748,7 @@ mod tests {
 
 		let stats = Arc::new(Stats::default());
 		let broadcast = broadcast::Info::new().produce();
-		let track = broadcast.create_track(TRACK, None).unwrap();
+		let track = broadcast.create_track(TRACK, timed()).unwrap();
 		let consumer = broadcast.consume();
 
 		// 50 bytes is well under the serialized header (roughly 170 bytes).
@@ -785,7 +793,7 @@ mod tests {
 		// One legitimate peer under the bench namespace with a single finished group.
 		let peer = origin.create_broadcast("bench/current/0/0").unwrap();
 		peer.announce(Default::default()).unwrap();
-		let track = peer.create_track(TRACK, None).unwrap();
+		let track = peer.create_track(TRACK, timed()).unwrap();
 		let mut group = track.append_group().unwrap();
 		group
 			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"{}"))
@@ -817,7 +825,7 @@ mod tests {
 
 		let broadcast = origin.create_broadcast("bench/run/chat").unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		let track = broadcast.create_track(TRACK, None).unwrap();
+		let track = broadcast.create_track(TRACK, timed()).unwrap();
 		tokio::task::yield_now().await;
 		let mut group = track.append_group().unwrap();
 		let header = serde_json::json!({
@@ -854,7 +862,7 @@ mod tests {
 
 		let stats = Arc::new(Stats::default());
 		let broadcast = broadcast::Info::new().produce();
-		let mut track = broadcast.create_track(TRACK, None).unwrap();
+		let mut track = broadcast.create_track(TRACK, timed()).unwrap();
 		let consumer = broadcast.consume();
 
 		// Group 0 lands intact.
@@ -912,7 +920,7 @@ mod tests {
 
 		let stats = Arc::new(Stats::default());
 		let broadcast = broadcast::Info::new().produce();
-		let mut track = broadcast.create_track(TRACK, None).unwrap();
+		let mut track = broadcast.create_track(TRACK, timed()).unwrap();
 		let consumer = broadcast.consume();
 
 		let task = {
