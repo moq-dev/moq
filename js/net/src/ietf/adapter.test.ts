@@ -630,6 +630,24 @@ test("draft 16 tracks a jump across a production window as one run", async () =>
 	}
 });
 
+// Splitting runs in descending order spans many chunks; every ID is admitted exactly once.
+test("draft 16 admits a scattered window once across run chunks", async () => {
+	const window = 4096n;
+	const { adapter, peer } = await windowed(Version.DRAFT_16, ALPN.DRAFT_16, window, false);
+	const top = 2n * (window - 1n);
+	const below = Array.from({ length: Number(window - 1n) }, (_, i) => 2n * (window - 2n - BigInt(i)));
+	const ids = [top, ...below.filter((id) => (id / 2n) % 2n === 1n), ...below.filter((id) => (id / 2n) % 2n === 0n)];
+	try {
+		for (const id of ids) adapter.admitRequest(id);
+		for (const id of [0n, 2n, 1024n, top - 2n, top]) {
+			expect(() => adapter.admitRequest(id)).toThrow("request id was already spent");
+		}
+	} finally {
+		peer.close();
+		adapter.close();
+	}
+});
+
 // Allocation precedes an asynchronous encode, so a shorter later request can finish first.
 test("drafts 14 and 15 send concurrent requests in request id order", async () => {
 	for (const [version, alpn] of [

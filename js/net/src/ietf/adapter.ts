@@ -92,6 +92,68 @@ interface StreamEntry {
 
 type NamespaceDirection = "incoming" | "outgoing";
 
+/** Runs per chunk before it splits, so a split or removal shifts at most one chunk. */
+const RUN_CHUNK = 256;
+
+/**
+ * Skipped request IDs as sorted, disjoint `[start, end)` runs of one parity.
+ *
+ * A jump costs one run however far it skips, and only an ID landing inside a run splits it,
+ * so the runs never outnumber the requests received. They are kept in chunks so a split
+ * costs the chunk it lands in rather than shifting the whole table.
+ */
+class MissingRuns {
+	#chunks: [bigint, bigint][][] = [];
+
+	/** Whether `id` was skipped and not yet received. */
+	has(id: bigint): boolean {
+		return this.#find(id) !== undefined;
+	}
+
+	/** Mark a skipped `id` received, splitting its run. */
+	take(id: bigint): void {
+		const found = this.#find(id);
+		if (!found) return;
+		const [index, run] = found;
+		const chunk = this.#chunks[index];
+		const [start, end] = chunk[run];
+		const rest: [bigint, bigint][] = [];
+		if (start < id) rest.push([start, id]);
+		if (id + 2n < end) rest.push([id + 2n, end]);
+		chunk.splice(run, 1, ...rest);
+		if (chunk.length === 0) this.#chunks.splice(index, 1);
+		else if (chunk.length > 2 * RUN_CHUNK) this.#chunks.splice(index + 1, 0, chunk.splice(RUN_CHUNK));
+	}
+
+	/** Record `[start, end)` as skipped, above every existing run. */
+	push(start: bigint, end: bigint): void {
+		const last = this.#chunks.at(-1);
+		if (last && last.length < 2 * RUN_CHUNK) last.push([start, end]);
+		else this.#chunks.push([[start, end]]);
+	}
+
+	/** The chunk and run holding `id`. */
+	#find(id: bigint): [number, number] | undefined {
+		const index = lastAtOrBelow(this.#chunks, id, (chunk) => chunk[0][0]);
+		if (index < 0) return undefined;
+		const chunk = this.#chunks[index];
+		const run = lastAtOrBelow(chunk, id, (run) => run[0]);
+		return run >= 0 && id < chunk[run][1] ? [index, run] : undefined;
+	}
+}
+
+/** The last index whose key is at or below `id`, or -1, in an array sorted by key. */
+function lastAtOrBelow<T>(items: T[], id: bigint, key: (item: T) => bigint): number {
+	let lo = 0;
+	let hi = items.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (key(items[mid]) <= id) lo = mid + 1;
+		else hi = mid;
+	}
+	return lo - 1;
+}
+
 /**
  * Converts v14-v16 control stream multiplexing into virtual bidi streams.
  *
@@ -156,10 +218,8 @@ export class ControlStreamAdapter implements Session {
 	#peerWindow: bigint;
 	#peerMax: bigint;
 	#peerNext: bigint;
-	// Draft 16 reorders across streams, so it remembers the IDs skipped below #peerNext as
-	// sorted [start, end) runs. A jump costs one run however far it skips, and only a request
-	// landing inside a run splits it, so the runs never outnumber the requests received.
-	#peerMissing: [bigint, bigint][] | undefined;
+	// Draft 16 reorders across streams, so it remembers the IDs skipped below #peerNext.
+	#peerMissing: MissingRuns | undefined;
 	#open = new Set<bigint>();
 	#retired = 0n;
 	#granting = false;
@@ -191,7 +251,7 @@ export class ControlStreamAdapter implements Session {
 		this.#peerWindow = window;
 		this.#peerMax = initialMaxRequestId(!client, window);
 		this.#peerNext = client ? 1n : 0n;
-		this.#peerMissing = version === Version.DRAFT_16 ? [] : undefined;
+		this.#peerMissing = version === Version.DRAFT_16 ? new MissingRuns() : undefined;
 		this.#requestId = client ? 0n : 1n;
 		this.#sendNext = version === Version.DRAFT_16 ? undefined : this.#requestId;
 		this.#client = client;
@@ -512,40 +572,18 @@ export class ControlStreamAdapter implements Session {
 
 	#admitHeld(requestId: bigint): void {
 		this.#checkPeer(requestId);
-		const run = requestId < this.#peerNext ? this.#missingRun(requestId) : -1;
 		const unused =
-			requestId < this.#peerNext ? run >= 0 : requestId === this.#peerNext || this.#peerMissing !== undefined;
+			requestId < this.#peerNext
+				? this.#peerMissing?.has(requestId) === true
+				: requestId === this.#peerNext || this.#peerMissing !== undefined;
 		if (!unused) {
 			this.#refuse(SessionCode.InvalidRequestId, "request id was already spent or out of sequence");
 		}
 		this.#checkLive();
-		if (this.#peerMissing) {
-			if (run >= 0) {
-				const [start, end] = this.#peerMissing[run];
-				const rest: [bigint, bigint][] = [];
-				if (start < requestId) rest.push([start, requestId]);
-				if (requestId + 2n < end) rest.push([requestId + 2n, end]);
-				this.#peerMissing.splice(run, 1, ...rest);
-			} else if (requestId > this.#peerNext) {
-				this.#peerMissing.push([this.#peerNext, requestId]);
-			}
-		}
+		if (requestId < this.#peerNext) this.#peerMissing?.take(requestId);
+		else if (requestId > this.#peerNext) this.#peerMissing?.push(this.#peerNext, requestId);
 		if (requestId >= this.#peerNext) this.#peerNext = requestId + 2n;
 		this.#open.add(requestId);
-	}
-
-	/** The index of the skipped draft-16 run holding `requestId`, or -1. */
-	#missingRun(requestId: bigint): number {
-		const runs = this.#peerMissing;
-		if (!runs) return -1;
-		let lo = 0;
-		let hi = runs.length;
-		while (lo < hi) {
-			const mid = (lo + hi) >>> 1;
-			if (runs[mid][0] <= requestId) lo = mid + 1;
-			else hi = mid;
-		}
-		return lo > 0 && requestId < runs[lo - 1][1] ? lo - 1 : -1;
 	}
 
 	/**
