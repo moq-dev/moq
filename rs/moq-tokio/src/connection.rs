@@ -3110,7 +3110,7 @@ mod tests {
 			}
 			let (transport, _quic) = fallback.accept().await;
 			assert_eq!(transport, crate::Transport::WebTransport);
-			assert_eq!(connection.epoch(), 2);
+			assert_eq!(connection.connects(), 2);
 			// The dead fallback's error does not leak into closing the QUIC session.
 			tokio::time::timeout(UPGRADE_WAIT, connection.close())
 				.await
