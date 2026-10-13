@@ -87,3 +87,4 @@ have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
 - [Keep the winning transport](/quest/m0/drop-ws-upgrade.md) - a connection stays on the transport that won the race; the WebSocket-to-QUIC upgrade and its epochless `Restart` are removed
 - [Parked drain](/quest/m0/parked-drain.md) - draining parked groups after a cap rise, as a same-epoch relay handover causes, is near-linear in the backlog, not quadratic
+- [iroh off by default in moq-cli](/quest/m0/iroh-opt-in.md) - `moq-cli` and every distribution build without iroh; `--features iroh` restores it

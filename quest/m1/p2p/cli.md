@@ -3,8 +3,8 @@
 ## Goal
 
 `moq-cli --p2p` publishes a roster entry on its relay session, advertises how
-it can be reached, dials other native peers over iroh when both advertise an
-endpoint, and accepts browsers over data channels as a transit hop between
+it can be reached, dials other native peers over
+[ICE and QUIC](/quest/m1/p2p/native-quic.md), and accepts browsers over data channels as a transit hop between
 them and the relay. Its policy knobs mirror `@moq/p2p`.
 
 ## Plan
@@ -23,9 +23,9 @@ The roster entry mirrors the `info.json` schema from
 WebTransport URLs, ordered the way `mdns::Peer::urls` orders them, with the
 listener's certificate fingerprint. Use signaling's ordered-list shape and
 dialing order, confirmed in the quest audit, so multi-interface listeners
-advertise one shared schema. Include the iroh endpoint id when `--iroh` is on,
-which is the first place an endpoint id appears in any roster; `webrtc: true`;
-and `meta`. The generated certificate must satisfy the browser's
+advertise one shared schema. Include `webrtc: true`, the native ICE+QUIC
+field, and `meta`. No iroh endpoint id (decided 2026-10-13: P2P does not use
+iroh). The generated certificate must satisfy the browser's
 `serverCertificateHashes` rules (ECDSA P-256, under fourteen days); verify the
 generator does. Offers and answers go through the same per-pair broadcasts,
 mirrored in Rust.
@@ -33,8 +33,8 @@ mirrored in Rust.
 Every accepted session attaches to the shared origin with `with_publisher`
 and `with_subscriber`, as the LAN mesh does, so the node is a hop: it
 subscribes upstream once and serves each peer from the same origin. Native
-pairs selected by the operator where both advertise iroh use the existing
-iroh client, with deterministic simultaneous-dial resolution, and skip ICE.
+pairs selected by the operator connect over ICE and QUIC, with
+deterministic simultaneous-dial resolution.
 Discovery alone does not initiate a connection.
 
 Docs: a "P2P" section in `doc/bin/cli.md` beside the LAN cluster one.
@@ -42,4 +42,5 @@ Docs: a "P2P" section in `doc/bin/cli.md` beside the LAN cluster one.
 ## Required
 
 - [Native data channel transport](/quest/m1/p2p/webrtc.md)
+- [Native pairs over ICE and QUIC](/quest/m1/p2p/native-quic.md) - the native-to-native path
 - [Signaling and policy](/quest/m1/p2p/signal.md) - the roster and offer schema this mirrors
