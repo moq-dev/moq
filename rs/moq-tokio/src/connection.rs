@@ -696,8 +696,7 @@ pub struct Connection {
 /// The connection loop, shared by every [`Connection`] clone and aborted when the
 /// last one drops.
 struct Task {
-	/// `None` if the loop panicked.
-	handle: AbortOnDrop<Option<()>>,
+	handle: AbortOnDrop,
 	closed: CloseGuard,
 }
 
@@ -727,7 +726,7 @@ impl Connection {
 		let closed: CloseGuard = Default::default();
 		let task_closed = closed.clone();
 
-		let task = tokio::spawn(crate::panic::isolate(async move {
+		let task = tokio::spawn(async move {
 			let reconnect = client.reconnect;
 			let shared = Shared {
 				state: producer,
@@ -735,7 +734,12 @@ impl Connection {
 				recv_bw,
 				closed: task_closed,
 			};
-			if let Err(err) = Self::run(&shared, client, addrs).await {
+			// Isolated inside `shared`, so a panic still records a terminal error
+			// instead of closing the channels as if the caller had stopped it.
+			let res = crate::panic::isolate(Self::run(&shared, client, addrs))
+				.await
+				.unwrap_or(Err(Error::Panic));
+			if let Err(err) = res {
 				// In one-shot mode the session ending is the expected lifecycle, and
 				// its close reason arrives here; don't dress it up as a loop failure.
 				match reconnect {
@@ -745,7 +749,7 @@ impl Connection {
 				shared.failed(err);
 			}
 			// Dropping the producers here closes the channels, signaling consumers.
-		}));
+		});
 		Self {
 			task: std::sync::Arc::new(Task {
 				handle: AbortOnDrop::new(task),

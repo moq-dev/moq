@@ -299,6 +299,7 @@ fn map_connect_error(err: moq_tokio::Error) -> Error {
 		// Local auth stays the dedicated C status. A scoped protocol close is `Error::Moq`
 		// so `moq_error_protocol` can recover the registry and code.
 		moq_tokio::Error::MoqNet(moq_net::Error::Unauthorized) => Error::Unauthorized,
+		moq_tokio::Error::Panic => Error::Panic,
 		moq_tokio::Error::MoqNet(err) => err.into(),
 		err => match err.connect_error() {
 			Some(moq_tokio::ConnectError::Unauthorized) => Error::Unauthorized,

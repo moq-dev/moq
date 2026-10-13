@@ -866,10 +866,12 @@ impl Listener {
 	/// rejected early on an invalid path or missing auth. Call [Request::ok] or
 	/// [Request::reject] to complete the handshake.
 	///
-	/// `None` means every configured listener has stopped and no handshake is still
-	/// in flight, so nothing can arrive again. Everything is already bound, so a bind
-	/// failure cannot arrive here. No process signal is watched: race this against
-	/// your own ctrl-C future and drop the listener if you want one to stop the loop.
+	/// `None` means nothing can arrive again: every configured listener has stopped
+	/// with no handshake in flight, or one of them died (logged), which ends them all
+	/// rather than serving on a partial set of transports. Everything is already
+	/// bound, so a bind failure cannot arrive here. No process signal is watched:
+	/// race this against your own ctrl-C future and drop the listener if you want
+	/// one to stop the loop.
 	pub async fn accept(&mut self) -> Option<Request> {
 		self.server.accept_next().await
 	}

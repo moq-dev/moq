@@ -284,7 +284,7 @@ fn spawn_serve(
 				}
 			});
 		}
-		Ok(())
+		anyhow::bail!("the MoQ listener stopped accepting")
 	});
 }
 
