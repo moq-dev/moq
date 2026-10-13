@@ -840,7 +840,11 @@ where
 							),
 							Some(grant),
 						),
-						Err(err) => return self.reject_subscribe(stream, request_id, &err, &err.to_string()).await,
+						Err(refusal) => {
+							return self
+								.reject_subscribe(stream, request_id, &refusal.error, &refusal.reason)
+								.await;
+						}
 					}
 				}
 				None => (
@@ -1228,23 +1232,23 @@ where
 					let rg = request_grant.as_mut().expect("a renewal without a request grant");
 					// On accept the old grant is dropped (ending the old token) and the deadline
 					// re-armed at the new expiry.
-					if rg.renew(verdict, res) {
+					let Err(refusal) = rg.renew(verdict, res) else {
 						if answer && let Err(err) = self.write_request_ok(&mut stream.writer, rid).await {
 							return Some(Served::Track(Err(err)));
 						}
 						continue;
-					}
+					};
 					// Per drafts 16 section 9.11.1 / 18 section 10.9.1, a refused or uncovered
 					// renewal ends only this subscription: REQUEST_ERROR, then PUBLISH_DONE
 					// UPDATE_FAILED. The session stays up and the old grant does not survive.
 					if answer
 						&& let Err(err) = self
-							.write_subscribe_error(&mut stream.writer, rid, &Error::Unauthorized, "renewal not granted")
+							.write_subscribe_error(&mut stream.writer, rid, &refusal.error, &refusal.reason)
 							.await
 					{
 						return Some(Served::Track(Err(err)));
 					}
-					return Some(Served::UpdateFailed(Error::Unauthorized));
+					return Some(Served::UpdateFailed(refusal.error));
 				}
 				// An update behind a pending verdict waits its turn, so its answer follows the
 				// verdict's.
@@ -8811,7 +8815,7 @@ mod serve_tests {
 				"{version:?}: the renewal was answered"
 			);
 			assert!(
-				matches!(result, Some(Err(Error::Unauthorized))),
+				matches!(result, Some(Err(Error::Session(crate::SessionError::Unauthorized)))),
 				"{version:?}: a refused renewal ends the subscription at once, got {result:?}"
 			);
 			let (status, _) = Wire::read(&h.log, version).publish_done.expect("PUBLISH_DONE was sent");
@@ -8827,7 +8831,7 @@ mod serve_tests {
 				Version::Draft14 => {}
 				// draft-15/16 answer with one keyed REQUEST_ERROR before the subscription ends.
 				_ => {
-					let error = request_error_bytes(version, RequestId(0x40), "renewal not granted").await;
+					let error = request_error_bytes(version, RequestId(0x40), "no").await;
 					assert!(
 						written.starts_with(&error),
 						"{version:?}: a keyed REQUEST_ERROR is written before the subscription ends"
@@ -9229,7 +9233,7 @@ mod serve_tests {
 				settle().await;
 			}
 			let written = h.log.writes.lock().unwrap()[before..].to_vec();
-			let error = request_error_bytes(version, RequestId(0x40), "renewal not granted").await;
+			let error = request_error_bytes(version, RequestId(0x40), "no").await;
 			assert!(
 				written.starts_with(&error),
 				"{version}: the renewal's REQUEST_ERROR is the first answer"
@@ -9494,7 +9498,7 @@ mod serve_tests {
 			"acceptor never answered both tokens"
 		);
 		assert!(
-			matches!(result, Some(Err(Error::Unauthorized))),
+			matches!(result, Some(Err(Error::Session(crate::SessionError::Unauthorized)))),
 			"a refused renewal ends the subscription at once, got {result:?}"
 		);
 		let (status, _) = Wire::read(&h.log, VERSION).publish_done.expect("PUBLISH_DONE was sent");
@@ -9506,7 +9510,7 @@ mod serve_tests {
 		// Draft-17+ answers the refused update with exactly one unkeyed REQUEST_ERROR before the
 		// subscription ends.
 		let written = h.log.writes.lock().unwrap().clone();
-		let error = request_error_bytes(VERSION, RequestId(0), "renewal not granted").await;
+		let error = request_error_bytes(VERSION, RequestId(0), "no").await;
 		assert_eq!(
 			written.windows(error.len()).filter(|w| *w == error.as_slice()).count(),
 			1,

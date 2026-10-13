@@ -1213,20 +1213,43 @@ pub(crate) struct RequestVerdict {
 	issue: Option<kio::Shared<Issue>>,
 }
 
+/// Why a request token did not authorize its request: the error whose code the peer is
+/// sent, and the reason phrase with it, which the acceptor chose when it refused.
+#[derive(Debug)]
+pub(crate) struct Refusal {
+	pub error: Error,
+	pub reason: String,
+}
+
+impl Refusal {
+	fn new(error: Error, reason: &str) -> Self {
+		Self {
+			error,
+			reason: reason.to_string(),
+		}
+	}
+}
+
+impl From<Error> for Refusal {
+	fn from(error: Error) -> Self {
+		let reason = error.to_string();
+		Self { error, reason }
+	}
+}
+
 impl RequestVerdict {
 	/// Wait for the acceptor's first answer. See [`poll_grant`](Self::poll_grant).
 	#[cfg(test)]
-	pub(crate) async fn grant(&self) -> Result<Grant> {
+	pub(crate) async fn grant(&self) -> std::result::Result<Grant, Refusal> {
 		kio::wait(|waiter| self.poll_grant(waiter)).await
 	}
 
-	/// Poll for the acceptor's first answer: the grant it issued, or a refusal as the
-	/// [`Error`] whose request code the caller sends the peer. No consumer is
-	/// [`Error::Unsupported`]; an unanswered (dropped) request is
-	/// [`SessionError::Unauthorized`].
-	pub(crate) fn poll_grant(&self, waiter: &kio::Waiter) -> Poll<Result<Grant>> {
+	/// Poll for the acceptor's first answer: the grant it issued, or its refusal, which the
+	/// caller sends the peer. No consumer is [`Error::Unsupported`]; an unanswered (dropped)
+	/// request is [`SessionError::Unauthorized`].
+	pub(crate) fn poll_grant(&self, waiter: &kio::Waiter) -> Poll<std::result::Result<Grant, Refusal>> {
 		let Some(issue) = &self.issue else {
-			return Poll::Ready(Err(Error::Unsupported));
+			return Poll::Ready(Err(Error::Unsupported.into()));
 		};
 		let mut guard = ready_or!(
 			issue.poll(waiter, |issue| match issue.outbox.is_empty() && !issue.done {
@@ -1236,9 +1259,9 @@ impl RequestVerdict {
 		);
 		Poll::Ready(match guard.outbox.pop_front() {
 			Some(Reply::Grant(grant)) => Ok(grant),
-			Some(Reply::Refuse { code, .. }) => Err(Error::Session(code)),
+			Some(Reply::Refuse { code, reason }) => Err(Refusal::new(Error::Session(code), &reason)),
 			// Done with nothing written: the acceptor dropped the request unanswered.
-			None => Err(Error::Session(SessionError::Unauthorized)),
+			None => Err(Error::Session(SessionError::Unauthorized).into()),
 		})
 	}
 
@@ -1301,23 +1324,24 @@ pub(crate) struct RequestGrant {
 	kind: RequestKind,
 	/// The request's slot, shared with a renewal's verification.
 	hold: Option<Hold>,
+	clock: crate::time::Clock,
 }
 
 impl RequestGrant {
 	/// Hold the acceptor's first answer `res` for the request's life, armed to lapse at its
-	/// expiry, or the error to refuse the request with: the refusal, or
-	/// [`Error::Unauthorized`] for a grant that does not cover it.
+	/// expiry, or the refusal to answer the request with: the acceptor's own, or
+	/// [`Error::Unauthorized`] for a grant that does not cover it or has already expired.
 	pub(crate) fn new(
 		clock: &crate::time::Clock,
 		verdict: RequestVerdict,
-		res: Result<Grant>,
+		res: std::result::Result<Grant, Refusal>,
 		path: crate::PathOwned,
 		kind: RequestKind,
 		hold: Option<Hold>,
-	) -> Result<Self> {
+	) -> std::result::Result<Self, Refusal> {
 		let grant = res?;
-		if !kind.covers(&grant, path.as_str()) {
-			return Err(Error::Unauthorized);
+		if !live(clock, kind, path.as_str(), &grant) {
+			return Err(Refusal::new(Error::Unauthorized, "request token not granted"));
 		}
 		let mut deadline = crate::time::Deadline::new(clock);
 		deadline.set(grant.expires);
@@ -1328,6 +1352,7 @@ impl RequestGrant {
 			path,
 			kind,
 			hold,
+			clock: clock.clone(),
 		})
 	}
 
@@ -1347,21 +1372,25 @@ impl RequestGrant {
 		handle.verify_request(token, self.path.clone(), self.kind, self.hold.clone())
 	}
 
-	/// Apply a renewal's verdict, returning whether it renewed the request.
+	/// Apply a renewal's verdict, or return the refusal that ends the request.
 	///
-	/// A grant that still covers the request replaces this one: the new verdict is adopted
-	/// (dropping the old, which ends the old token) and the deadline re-armed at the new
-	/// expiry. A refusal, or a grant that no longer covers the request, changes nothing here;
-	/// the caller ends only that request.
-	pub(crate) fn renew(&mut self, verdict: RequestVerdict, res: Result<Grant>) -> bool {
-		let grant = match res {
-			Ok(grant) if self.covers(&grant) => grant,
-			_ => return false,
-		};
+	/// A live grant that still covers the request replaces this one: the new verdict is
+	/// adopted (dropping the old, which ends the old token) and the deadline re-armed at the
+	/// new expiry. A refusal, or a grant that no longer covers the request or has already
+	/// expired, changes nothing here; the caller ends only that request.
+	pub(crate) fn renew(
+		&mut self,
+		verdict: RequestVerdict,
+		res: std::result::Result<Grant, Refusal>,
+	) -> std::result::Result<(), Refusal> {
+		let grant = res?;
+		if !live(&self.clock, self.kind, self.path.as_str(), &grant) {
+			return Err(Refusal::new(Error::Unauthorized, "renewal not granted"));
+		}
 		self.verdict = verdict;
 		self.deadline.set(grant.expires);
 		self.grant = grant;
-		true
+		Ok(())
 	}
 
 	/// Resolve with the error that ends the request: the deadline lapsing
@@ -1390,6 +1419,12 @@ impl RequestGrant {
 			}
 		}
 	}
+}
+
+/// Whether `grant` covers a `kind` request at `path` and has not already expired: admitting
+/// an expired one until its deadline fires would let others act on it meanwhile.
+fn live(clock: &crate::time::Clock, kind: RequestKind, path: &str, grant: &Grant) -> bool {
+	kind.covers(grant, path) && grant.expires.is_none_or(|expires| expires > clock.now())
 }
 
 /// A grant issued to one of the peer's session tokens, which the peer is told. Dropping it
@@ -1848,7 +1883,7 @@ mod request_token_tests {
 		let handle = Handle::new(true);
 		let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), RequestKind::Subscribe, None);
 		let err = verdict.grant().await.expect_err("no verifier");
-		assert!(matches!(err, Error::Unsupported), "{err:?}");
+		assert!(matches!(err.error, Error::Unsupported), "{err:?}");
 	}
 
 	/// A refused request token resolves to the refusal, which the caller sends the peer as
@@ -1865,7 +1900,10 @@ mod request_token_tests {
 			.request()
 			.reject(SessionError::Unauthorized, "no");
 		let err = verdict.grant().await.expect_err("refused");
-		assert!(matches!(err, Error::Session(SessionError::Unauthorized)), "{err:?}");
+		assert!(
+			matches!(err.error, Error::Session(SessionError::Unauthorized)),
+			"{err:?}"
+		);
 	}
 
 	/// The grant lives exactly as long as the request: dropping the verdict ends the
@@ -1930,6 +1968,55 @@ mod request_token_tests {
 		assert!(expires.is_some());
 	}
 
+	/// A grant that has already expired never admits the request or renews it, even for the
+	/// moment before its deadline would fire.
+	#[moq_net_sim::test]
+	async fn an_already_expired_grant_is_refused() {
+		let runtime = crate::time::Clock::sim();
+		let handle = Handle::new(true);
+		let mut requests = handle.requests().unwrap();
+		let expired = || Grant {
+			expires: Some(runtime.now()),
+			..grant_in(&runtime, 0)
+		};
+
+		let verdict = handle.verify_request(token(b"old", 0), subscribe_path(), RequestKind::Subscribe, None);
+		let _issued = requests.next().await.unwrap().request().accept(expired());
+		let answered = verdict.grant().await;
+		let refused = RequestGrant::new(
+			&runtime,
+			verdict,
+			answered,
+			subscribe_path(),
+			RequestKind::Subscribe,
+			None,
+		);
+		assert!(
+			matches!(&refused, Err(refusal) if matches!(refusal.error, Error::Unauthorized)),
+			"an expired grant admits nothing"
+		);
+
+		let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), RequestKind::Subscribe, None);
+		let _issued = requests.next().await.unwrap().request().accept(grant_in(&runtime, 60));
+		let answered = verdict.grant().await;
+		let mut request_grant = RequestGrant::new(
+			&runtime,
+			verdict,
+			answered,
+			subscribe_path(),
+			RequestKind::Subscribe,
+			None,
+		)
+		.unwrap();
+		let renewal = handle.verify_request(token(b"old2", 0), subscribe_path(), RequestKind::Subscribe, None);
+		let _issued = requests.next().await.unwrap().request().accept(expired());
+		let renewed = renewal.grant().await;
+		assert!(
+			request_grant.renew(renewal, renewed).is_err(),
+			"an expired grant renews nothing"
+		);
+	}
+
 	/// An accepted REQUEST_UPDATE replaces the grant and its expiry.
 	#[moq_net_sim::test]
 	async fn a_renewal_token_replaces_the_grant_and_expiry() {
@@ -1958,7 +2045,10 @@ mod request_token_tests {
 		let second_expires = second.expires;
 		let _issued2 = requests.next().await.unwrap().request().accept(second);
 		let renewed = renewal.grant().await;
-		assert!(request_grant.renew(renewal, renewed), "a covering renewal renews");
+		assert!(
+			request_grant.renew(renewal, renewed).is_ok(),
+			"a covering renewal renews"
+		);
 
 		assert_eq!(request_grant.grant().expires, second_expires);
 		assert_ne!(second_expires, first_expires);
@@ -2023,8 +2113,14 @@ mod request_token_tests {
 			.request()
 			.reject(SessionError::Unauthorized, "bad token");
 		let refused = renewal.grant().await;
-		assert!(matches!(refused, Err(Error::Session(SessionError::Unauthorized))));
-		assert!(!request_grant.renew(renewal, refused), "a refusal does not renew");
+		assert!(
+			matches!(&refused, Err(refusal) if matches!(refusal.error, Error::Session(SessionError::Unauthorized)) && refusal.reason == "bad token"),
+			"the acceptor's code and reason reach the caller: {refused:?}"
+		);
+		assert!(
+			request_grant.renew(renewal, refused).is_err(),
+			"a refusal does not renew"
+		);
 
 		// The old grant still stands with its original expiry, and the request ends only
 		// when that lapses.

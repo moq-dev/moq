@@ -1347,8 +1347,8 @@ where
 				);
 				match admitted {
 					Ok(grant) => (Admit::Token(slot), Some(grant)),
-					Err(err) => {
-						self.write_error(&mut stream, request_id, &err, &err.to_string())
+					Err(refusal) => {
+						self.write_error(&mut stream, request_id, &refusal.error, &refusal.reason)
 							.await?;
 						let _ = stream.writer.close().await;
 						return Ok(());
@@ -1557,16 +1557,15 @@ where
 					// Only a token-authorized announce starts a renewal.
 					let rg = token_grant.as_mut().expect("a renewal without a request grant");
 					// On accept the old grant is dropped and the deadline re-armed (REQUEST_OK).
-					if rg.renew(verdict, res) {
+					let Err(refusal) = rg.renew(verdict, res) else {
 						self.write_ok(stream, rid).await?;
 						continue;
-					}
+					};
 					// Per drafts 16 section 9.11.1 / 18 section 10.9.1, a refused or uncovered
 					// renewal ends only this announce. Answer REQUEST_ERROR, then close the stream;
 					// the session stays up and the old grant does not survive.
-					self.write_error(stream, rid, &Error::Unauthorized, "renewal not granted")
-						.await?;
-					self.cancel_announce(stream, request_id, path, &Error::Unauthorized, "renewal not granted")
+					self.write_error(stream, rid, &refusal.error, &refusal.reason).await?;
+					self.cancel_announce(stream, request_id, path, &refusal.error, &refusal.reason)
 						.await?;
 					return Ok(());
 				}
@@ -8977,7 +8976,7 @@ mod tests {
 								request::Kind::PublishNamespace,
 								version,
 							),
-							reason_phrase: "renewal not granted".into(),
+							reason_phrase: "no".into(),
 						})
 						.await
 						.unwrap();

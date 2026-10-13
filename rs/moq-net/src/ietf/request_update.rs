@@ -129,7 +129,7 @@ pub(super) struct Verdict {
 	/// What renews the request grant, if the grant covers it.
 	pub verdict: auth::RequestVerdict,
 	/// The acceptor's grant, or its refusal.
-	pub grant: crate::Result<auth::Grant>,
+	pub grant: Result<auth::Grant, auth::Refusal>,
 	/// The update that carried the renewal, which the answer names before draft 17.
 	pub request_id: RequestId,
 }
