@@ -36,12 +36,16 @@ reading. A closing session adds its final reading. An embedder registers a conne
   reading and unregisters it.
 - **Serialization:** `#[serde(default)]` on both fields, so an older
   consumer and an older relay interoperate. `Presence` stays `Copy`. The
-  stats-feed sum (`Presence::add`) and the delta encoding carry them.
-- **Docs:** `doc/concept/stats.md` defines both fields and says
-  `Traffic.bytes` is payload.
+  stats-feed sum (`Presence::add`), the delta encoding, and the aggregator's
+  reset check (`Mergeable::regressed` in `rs/moq-stats/src/aggregate.rs`)
+  carry them, so a node whose wire totals drop is a reset.
+- **Docs:** `doc/concept/stats.md` defines both fields, says
+  `Traffic.bytes` is payload, and says WebSocket wire bytes need a host
+  whose `TCP_INFO` reports them (Linux 4.19+), counting 0 elsewhere.
 - **Tests (on controlled time):**
   - a session's wire bytes land under its root and tier;
   - a tier change splits them;
   - a reconnecting source never lowers a counter;
   - a stats group that idles out and returns starts its new epoch at zero;
+  - the aggregator treats a wire-only drop as a reset;
   - a dropped embedder guard adds its last reading.
