@@ -172,9 +172,9 @@ Frames within a Group are numbered from 0 in the order they were produced.
 This index is not transmitted per frame; it is implied by position within the Group, anchored by the [GROUP](#group) message's `Frame Start`.
 A Group Stream normally starts at frame 0, but MAY start later when the publisher only holds (or was only asked for) part of the Group.
 
-Each frame carries a presentation timestamp expressed in the parent Track's `Timescale` (see [TRACK_INFO](#track-info)), used by the moq-lite layer for [expiration](#expiration) decisions.
-This version cannot mark a Track as having no presentation time, which a relay forwarding a Track received untimed over another protocol may need.
-Every frame and datagram of such a Track carries the publisher's send time instead, and its TRACK_INFO declares any `Timescale` for those send times.
+Each frame of a timed Track carries a presentation timestamp expressed in the Track's `Timescale` (see [TRACK_INFO](#track-info)), used by the moq-lite layer for [expiration](#expiration) decisions.
+A Track without a `Timescale` is untimed: its frames and datagrams carry no timestamp.
+lite-05 and lite-06 cannot encode an untimed Track, so a publisher on those versions declares a `Timescale` of 1000 for it and stamps every frame and datagram with its send time in milliseconds.
 
 ## Positions {#positions}
 A Position is a (Group Sequence, Frame Index) pair identifying one frame within a Track.
@@ -638,6 +638,7 @@ It is not crucial to aggressively expire groups thanks to [prioritization](#prio
 It is RECOMMENDED that an application set conservative limits and only resort to expiration when data is absolutely no longer needed.
 
 A group is never expired until a later group (by sequence number) has presented a frame.
+A group of an untimed Track has no timestamps, so it is never expired.
 Once one has, the group's **timestamp age** is the difference between the *newest* frame timestamp of the latest group that has at least one frame, and this group's **reach**, defined below; the group is expired once that age meets the relevant `Max Age`.
 Timestamps are the only measure: they are consistent across relays and unaffected by buffering or jitter.
 Wall-clock reclamation of idle content is the retention cache's own policy (`Publisher Max Age`, or any implementation-defined bound), not part of this rule.
@@ -714,7 +715,7 @@ Each datagram body has the following encoding (note: there is no message length 
 DATAGRAM Body {
   Subscribe ID (i)
   Group Sequence (i)
-  Timestamp (i)
+  [Timestamp (i)]
   Payload (b)
 }
 ~~~
@@ -728,7 +729,7 @@ The absolute sequence number of the group carried by this datagram.
 
 **Timestamp**:
 The absolute timestamp of the single frame in the group, expressed in the Track's `Timescale`.
-Any varint value (including 0) is valid.
+Present only on a timed Track, which the receiver learns from the subscription named by `Subscribe ID`.
 
 **Payload**:
 The frame payload, extending to the end of the datagram.
@@ -1235,8 +1236,8 @@ Older implementations interpret this as a finite duration; the sentinel fits the
 See the [Expiration](#expiration) section for more information.
 
 **Timescale**:
-The number of timestamp units per second for frame timestamps on this Track.
-It MUST be non-zero; a subscriber that receives 0 MUST reset the stream with a protocol violation.
+The number of timestamp units per second for frame timestamps on this Track, or `0` for an untimed Track, whose FRAME messages and datagrams carry no timestamp.
+lite-05 and lite-06 have no untimed encoding: there it MUST be non-zero, and a subscriber that receives 0 MUST reset the stream with a protocol violation.
 Common values include `1000` (milliseconds), `1000000` (microseconds), `48000` (audio sample rate), and `90000` (RTP video clock).
 
 ## SUBSCRIBE_OK {#subscribe-ok}
@@ -1523,7 +1524,7 @@ The FRAME message is a payload within a group.
 
 ~~~
 FRAME Message {
-  Timestamp Delta (i)
+  [Timestamp Delta (i)]
   Message Length (i)
   Payload (b)
 }
@@ -1531,6 +1532,7 @@ FRAME Message {
 
 **Timestamp Delta**:
 A signed delta from the previous frame's timestamp, in the Track's negotiated `Timescale`.
+Present only on a timed Track.
 Encoded as a zigzag-mapped variable-length integer:
 
 - Encode: `unsigned = (signed << 1) ^ (signed >> 63)` (arithmetic right shift).
@@ -1563,7 +1565,8 @@ The `Message Length` describes the payload size on the wire.
 - Added `Largest Group` and `Largest Frame` to SUBSCRIBE_OK: the publisher's largest position when it answers, which a subscriber takes as where the live feed is. A publisher MUST answer at once when the requested start is past it. Earlier versions carry no such position, so a subscriber takes the first frame instead.
 - Added `Epoch` to ANNOUNCE_START, SUBSCRIBE, TRACK, and FETCH: a UUIDv7 naming the publisher instance, or empty. A path and an Epoch name one Broadcast. A relay MAY move a subscription between routes with the same Epoch, continuing from the first frame the subscriber lacks instead of at a group boundary, and never between routes with different Epochs or none. The newest Epoch wins a path for new requests, while subscriptions to the older one stay until their route goes. Replaces the first-hop identity.
 - Added ANNOUNCE_RESTART (0x3): another publisher instance replaces a live advertisement, under a new Epoch or, without one, through another route, including a path beneath a prefix moving to another route. Older versions send ANNOUNCE_END then ANNOUNCE_START for it.
-- An untimed Track's frames and datagrams carry their send time. lite-05 and lite-06 publishers do the same.
+- An untimed Track declares a `Timescale` of 0 in TRACK_INFO, and its FRAME messages and datagrams omit the timestamp. lite-05 and lite-06 publishers declare 1000 for it and send each payload's send time instead.
+- A group of an untimed Track is never expired.
 - An open Track Stream is interest in the Track until the subscriber closes it, which a subscriber does once its Subscribe Stream has a response. lite-05 and lite-06 implementations do the same.
 
 - Assigned `moq-lite-07-wip` as this draft's protocol identifier until it is finalized as `moq-lite-07`.

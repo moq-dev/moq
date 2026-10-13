@@ -30,7 +30,7 @@ const WIRES: Wire[] = [
 	{ name: "lite-04", protocol: Lite.ALPN_04, declares: false, stamps: false },
 	{ name: "lite-05", protocol: Lite.ALPN_05, declares: true, stamps: true },
 	{ name: "lite-06", protocol: Lite.ALPN_06, declares: true, stamps: true },
-	{ name: "lite-07-wip", protocol: Lite.ALPN_07_WIP, declares: true, stamps: true },
+	{ name: "lite-07-wip", protocol: Lite.ALPN_07_WIP, declares: true, stamps: false },
 	{ name: "ietf-14", protocol: "", version: Ietf.Version.DRAFT_14, declares: false, stamps: false },
 	{ name: "ietf-16", protocol: Ietf.ALPN.DRAFT_16, declares: false, stamps: false },
 	{ name: "ietf-17", protocol: Ietf.ALPN.DRAFT_17, declares: true, stamps: false },
@@ -185,5 +185,43 @@ for (const wire of WIRES) {
 			expect(info.timescale).toBeUndefined();
 			for (const frame of frames) expect(frame.timestamp).toBeUndefined();
 		}
+	});
+}
+
+for (const wire of WIRES.filter((wire) => wire.name === "lite-06" || wire.name === "lite-07-wip")) {
+	test(`${wire.name}: an untimed datagram arrives untimed, or with a send time where the wire must stamp`, async () => {
+		const pair = createMockTransportPair(wire.protocol);
+		const origin = new OriginProducer();
+		const [client, server] = await Promise.all([
+			connect({ url, transport: pair.client }),
+			accept({ transport: pair.server, url, publish: origin.consume() }),
+		]);
+
+		const broadcast = origin.createBroadcast(Path.from("test"));
+		broadcast.announce();
+		const producer = broadcast.createTrack("video", {});
+		const subscriber = wireOf(client).consume(Path.from("test")).track("video").subscribe();
+
+		// Datagrams aren't cached, so the first few may race the subscription setup.
+		const received = subscriber.recvDatagram();
+		let stop = false;
+		const pump = (async () => {
+			while (!stop) {
+				producer.appendDatagram(undefined, new Uint8Array([7]));
+				await new Promise((resolve) => setTimeout(resolve, 2));
+			}
+		})();
+		const datagram = await received;
+		stop = true;
+		await pump;
+
+		expect(datagram?.payload).toEqual(new Uint8Array([7]));
+		if (wire.stamps) expect(datagram?.timestamp).toBeDefined();
+		else expect(datagram?.timestamp).toBeUndefined();
+
+		broadcast.close();
+		subscriber.close();
+		client.abort();
+		server.abort();
 	});
 }

@@ -79,8 +79,8 @@ struct Shared<S: crate::transport::poll::Session> {
 	// Control streams still serving the peer data, which a draining close waits for.
 	owed: AtomicUsize,
 	interests: Interests,
-	// The send time an untimed track's frames carry, since no lite version can mark them
-	// untimed yet (see `wire_timestamp`).
+	// The send time an untimed track's frames carry on Lite05/06, which can't mark them
+	// untimed (see `wire_timestamp`).
 	runtime: crate::time::Clock,
 	estimate: kio::ProducerWeak<crate::session::Estimate>,
 }
@@ -1881,13 +1881,11 @@ impl<S: crate::transport::poll::Session> Request<S> for TrackInfoServe {
 	) -> Poll<Result<ControlFlow<()>, Error>> {
 		let info = ready!(self.querying.poll_ok(waiter))?;
 
-		// TRACK_INFO only flows on Lite05+ (the encode errors otherwise), where the
-		// timescale is mandatory. An untimed track declares milliseconds, the scale its
-		// frames' send times go out at (see `wire_timestamp`).
+		// TRACK_INFO only flows on Lite05+ (the encode errors otherwise).
 		writer.buffer(&lite::TrackInfo {
 			priority: info.priority,
 			max_age: info.max_age,
-			timescale: info.timescale.unwrap_or(crate::Timescale::MILLI),
+			timescale: info.timescale,
 		})?;
 		Poll::Ready(Ok(ControlFlow::Break(())))
 	}
@@ -1989,16 +1987,10 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 						unreachable!()
 					};
 
-					// Per-frame timestamps require a wire format that carries them. Lite05+
-					// prefixes every frame with a zigzag-delta timestamp at the track's
-					// timescale; older drafts have no wire field, so `None` here means
-					// "don't emit the prefix" (the frames still carry timestamps in the
-					// model, just not on this wire).
-					let timescale = if shared.version.has_track_stream() {
-						Some(track.info().timescale.unwrap_or(crate::Timescale::MILLI))
-					} else {
-						None
-					};
+					// `None` omits the per-frame timestamp prefix: an untimed track on
+					// Lite07+, or any track before Lite05 (whose frames still carry
+					// timestamps in the model, just not on this wire).
+					let timescale = shared.version.wire_timescale(track.info().timescale);
 
 					// Lite05+ accepts implicitly: no SUBSCRIBE_OK, the immutable properties
 					// live in TRACK_INFO, and the resolved range arrives as
@@ -2159,13 +2151,8 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 					// `group::Fetch::frame_start`).
 					group.end_at(msg.end_frame.map_or(Bound::Unbounded, Bound::Included));
 
-					// FETCH is gated to lite-05+, which learned the track timescale via
-					// TRACK_INFO.
-					let timescale = if shared.version.has_track_stream() {
-						Some(group.timescale().unwrap_or(crate::Timescale::MILLI))
-					} else {
-						None
-					};
+					// Matches the timescale TRACK_INFO declared for the track.
+					let timescale = shared.version.wire_timescale(group.timescale());
 
 					*self = Self::Serve {
 						group,
@@ -2917,9 +2904,9 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 
 /// A frame or datagram timestamp as its raw value at the wire `timescale`.
 ///
-/// No lite version encodes an absent timestamp yet, so a payload on an untimed track
-/// carries its send time on `runtime` instead, at the millisecond scale its TRACK_INFO
-/// declares. A timed payload is already at the track's timescale.
+/// Lite05/06 cannot encode an untimed track, so its payloads carry their send time on
+/// `runtime` instead, at the millisecond scale its TRACK_INFO declares. A timed payload
+/// is already at the track's timescale.
 fn wire_timestamp(
 	timestamp: Option<crate::Timestamp>,
 	timescale: crate::Timescale,
@@ -3143,10 +3130,10 @@ struct Subscription<S: crate::transport::poll::Session> {
 	/// Last steer observed by this clone, so a change only fires once.
 	steer_seen: Steer,
 	version: Version,
-	/// Negotiated timestamp scale for this track. `Some(_)` on lite-05+ after
-	/// TRACK_INFO; used to validate per-frame timestamps before encoding.
+	/// The track's wire timescale, or `None` when its frames and datagrams carry no
+	/// timestamp (see [`Version::wire_timescale`]).
 	timescale: Option<crate::Timescale>,
-	/// The clock an untimed track's send times are read from.
+	/// The clock an untimed track's Lite05/06 send times are read from.
 	runtime: crate::time::Clock,
 	/// The group streams this subscription opened, shared by every group it serves.
 	opens: Arc<Opens>,
@@ -3174,12 +3161,11 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 	/// transport's datagram limit or the send fails (congestion / no capacity right now).
 	/// Returns whether it was handed to the transport.
 	fn serve_datagram(&mut self, datagram: crate::Datagram) -> bool {
-		// Datagrams are lite-05+, which always declares a timescale in TRACK_INFO.
-		let Ok(timestamp) = wire_timestamp(
-			datagram.timestamp,
-			self.timescale.unwrap_or(crate::Timescale::MILLI),
-			&self.runtime,
-		) else {
+		let Ok(timestamp) = self
+			.timescale
+			.map(|timescale| wire_timestamp(datagram.timestamp, timescale, &self.runtime))
+			.transpose()
+		else {
 			return false;
 		};
 		let body = lite::Datagram {

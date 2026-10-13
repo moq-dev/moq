@@ -820,7 +820,7 @@ export class Subscriber {
 			// register it again or send its SUBSCRIBE.
 			state.cancel.signal.throwIfAborted();
 			producer = request.accept(this.#toModelInfo(info));
-			timescale.set(info.timescale);
+			timescale.set(info.timescale ?? 0);
 		} else {
 			// Older drafts negotiate nothing per-track: verbatim frames with no timeline.
 			producer = request.accept();
@@ -918,7 +918,7 @@ export class Subscriber {
 	// Map the wire TRACK_INFO onto the model track.Info a producer/consumer holds.
 	#toModelInfo(info: TrackInfo): track.Info {
 		return {
-			timescale: Time.Timescale(info.timescale),
+			timescale: info.timescale,
 			// Publisher Max Age rides on the wire, so the local media-time budget
 			// matches what the upstream advertises (relays re-serve with the same bound).
 			maxAge: info.maxAge === undefined ? undefined : Time.Milli(info.maxAge),
@@ -1032,7 +1032,7 @@ export class Subscriber {
 				throw err;
 			}
 
-			void this.#runFetchResponse(accepted.stream, group, Time.Timescale(accepted.info.timescale));
+			void this.#runFetchResponse(accepted.stream, group, accepted.info.timescale ?? 0);
 		} catch (err: unknown) {
 			group.close(error(err));
 			throw err;
@@ -1077,9 +1077,10 @@ export class Subscriber {
 		);
 	}
 
-	// Read the FETCH response (bare zigzag-delta-timestamped frames) into the group, then
-	// FIN. A stream-level failure aborts the group so its reader observes the gap.
-	async #runFetchResponse(stream: Stream, group: netGroup.Producer, timescale: Time.Timescale): Promise<void> {
+	// Read the FETCH response (bare frames, zigzag-delta-timestamped unless `timescale` is 0)
+	// into the group, then FIN. A stream-level failure aborts the group so its reader observes
+	// the gap.
+	async #runFetchResponse(stream: Stream, group: netGroup.Producer, timescale: number): Promise<void> {
 		try {
 			const decode = frameDecoder(timescale);
 
@@ -1397,17 +1398,23 @@ export class Subscriber {
 	// Decode one datagram body and hand it to the matching subscription's producer. Drops the
 	// datagram (best-effort) if the subscription is unknown/closed or its timescale isn't resolved.
 	async #routeDatagram(payload: Uint8Array): Promise<void> {
-		const dg = await DatagramMessage.decode(payload, this.version);
+		// An unknown or unresolved subscription's datagram is dropped below, however it parses.
+		const dg = await DatagramMessage.decode(
+			payload,
+			this.version,
+			(id) => !!this.#subscribes.get(id)?.timescale.peek(),
+		);
 
 		const entry = this.#subscribes.get(dg.subscribe);
 		if (!entry) return; // Unknown or already-closed subscription.
 
-		// Datagrams are lite-05+, which always negotiates a timescale; if it hasn't resolved
-		// yet (the datagram raced ahead of TRACK_INFO), drop rather than guess.
+		// If the timescale hasn't resolved yet (the datagram raced ahead of TRACK_INFO), drop
+		// rather than guess. Zero means the track carries no timestamps.
 		const scale = entry.timescale.peek();
-		if (!scale) return;
+		if (scale === undefined) return;
 
-		const timestamp = new Time.Timestamp(dg.timestamp, Time.Timescale(scale));
+		const timestamp =
+			dg.timestamp === undefined ? undefined : new Time.Timestamp(dg.timestamp, Time.Timescale(scale));
 		// A datagram's sequence is never owed a stream, so it never holds the tail open.
 		entry.tail.account(dg.sequence, dg.sequence + 1);
 		entry.track.insertDatagram(dg.sequence, timestamp, dg.payload);

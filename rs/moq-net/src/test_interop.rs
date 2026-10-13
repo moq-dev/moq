@@ -80,9 +80,9 @@ fn lite_values() -> Vec<u64> {
 	values
 }
 
-/// One GROUP header and its frames, as a publisher writes them: a zigzag timestamp delta,
-/// the payload size, then the payload.
-fn lite_group(version: lite::Version) -> Vec<u8> {
+/// One GROUP header and its frames, as a publisher writes them: a zigzag timestamp delta on
+/// a timed track, the payload size, then the payload.
+fn lite_group(version: lite::Version, frames: impl IntoIterator<Item = (Option<i64>, usize)>) -> Vec<u8> {
 	let mut buf = Vec::new();
 	let w = &mut Encoder::new(&mut buf, version.into());
 	let header = lite::Group {
@@ -91,8 +91,10 @@ fn lite_group(version: lite::Version) -> Vec<u8> {
 		frame_start: 200,
 	};
 	header.encode(w, version).unwrap();
-	for (delta, size) in [(0i64, 10usize), (33_333, 300), (-1_000, 20_000), (1 << 40, 1)] {
-		w.varint(varint::zigzag(delta)).unwrap();
+	for (delta, size) in frames {
+		if let Some(delta) = delta {
+			w.varint(varint::zigzag(delta)).unwrap();
+		}
 		w.varint(size as u64).unwrap();
 		w.slice(&vec![0xAB; size]);
 	}
@@ -100,12 +102,16 @@ fn lite_group(version: lite::Version) -> Vec<u8> {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Echo {
 	values: Vec<String>,
 	varints: Vec<u8>,
 	setup: Vec<u8>,
 	datagram: Vec<u8>,
+	untimed_datagram: Vec<u8>,
+	track_info: Vec<u8>,
 	group: Vec<u8>,
+	untimed_group: Vec<u8>,
 	beyond: Vec<u8>,
 }
 
@@ -135,13 +141,42 @@ fn lite_varint_interop() {
 		let datagram = lite::Datagram {
 			subscribe: (1 << 40) + 1,
 			sequence: 300,
-			timestamp: (1 << 50) + 5,
+			timestamp: Some((1 << 50) + 5),
 			payload: bytes::Bytes::from_static(b"x"),
 		}
 		.encode_bytes(version)
 		.unwrap();
 
-		let group = lite_group(version);
+		// The body doesn't say it is untimed; the subscription's track does.
+		let untimed_datagram = lite::Datagram {
+			subscribe: 9,
+			sequence: 1 << 30,
+			timestamp: None,
+			payload: bytes::Bytes::from_static(b"untimed"),
+		}
+		.encode_bytes(version)
+		.unwrap();
+
+		// An untimed track: zero on lite-07, milliseconds before it.
+		let track_info = lite::TrackInfo {
+			priority: 1,
+			max_age: None,
+			timescale: None,
+		}
+		.encode_bytes(version)
+		.unwrap();
+
+		let group = lite_group(
+			version,
+			[
+				(Some(0), 10),
+				(Some(33_333), 300),
+				(Some(-1_000), 20_000),
+				(Some(1 << 40), 1),
+			],
+		);
+		// Small, since the whole input rides in one argument.
+		let untimed_group = lite_group(version, [(None, 10), (None, 300)]);
 
 		let input = serde_json::json!({
 			"version": crate::Version::from(version).alpn(),
@@ -149,7 +184,10 @@ fn lite_varint_interop() {
 			"varints": varints,
 			"setup": setup.to_vec(),
 			"datagram": datagram.to_vec(),
+			"untimedDatagram": untimed_datagram.to_vec(),
+			"trackInfo": track_info.to_vec(),
 			"group": group,
+			"untimedGroup": untimed_group,
 		});
 		let echo: Echo = serde_json::from_slice(&bun("lite-varint.ts", input)).expect("JS returned its encodings");
 
@@ -158,7 +196,10 @@ fn lite_varint_interop() {
 		assert_eq!(echo.varints, varints, "{version}: JS encoded the values differently");
 		assert_eq!(echo.setup, setup, "{version}: SETUP");
 		assert_eq!(echo.datagram, datagram, "{version}: datagram");
+		assert_eq!(echo.untimed_datagram, untimed_datagram, "{version}: untimed datagram");
+		assert_eq!(echo.track_info, track_info, "{version}: TRACK_INFO");
 		assert_eq!(echo.group, group, "{version}: group");
+		assert_eq!(echo.untimed_group, untimed_group, "{version}: untimed group");
 
 		match version {
 			lite::Version::Lite07 => {

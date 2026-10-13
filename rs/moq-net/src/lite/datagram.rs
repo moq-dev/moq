@@ -1,9 +1,10 @@
 //! Wire-level QUIC datagram body for moq-lite-05 (§6.4).
 //!
 //! One datagram carries a single-frame group routed over an existing subscription. The body is
-//! `subscribe (i) | sequence (i) | timestamp (i) | payload (b)`; the payload runs to the datagram
-//! boundary, so unlike a [`super::Message`] there is no inner length prefix. The model counterpart
-//! is [`crate::Datagram`].
+//! `subscribe (i) | sequence (i) | [timestamp (i)] | payload (b)`, with the timestamp present only
+//! when the subscription's track carries one (see [`Version::wire_timescale`]). The payload runs to
+//! the datagram boundary, so unlike a [`super::Message`] there is no inner length prefix. The model
+//! counterpart is [`crate::Datagram`].
 
 use bytes::Bytes;
 
@@ -18,8 +19,9 @@ pub struct Datagram {
 	pub subscribe: u64,
 	/// Group sequence number (shared with the track's group namespace).
 	pub sequence: u64,
-	/// Absolute presentation timestamp, in the track's negotiated timescale.
-	pub timestamp: u64,
+	/// Absolute presentation timestamp in the track's wire timescale, or `None` on a track
+	/// that carries no timestamps.
+	pub timestamp: Option<u64>,
 	/// The frame payload, delimited by the datagram boundary.
 	pub payload: Bytes,
 }
@@ -32,7 +34,9 @@ impl Encode<Version> for Datagram {
 
 		w.varint(self.subscribe)?;
 		w.varint(self.sequence)?;
-		w.varint(self.timestamp)?;
+		if let Some(timestamp) = self.timestamp {
+			w.varint(timestamp)?;
+		}
 
 		// Payload runs to the datagram boundary: written raw, no length prefix.
 		w.slice(&self.payload);
@@ -42,7 +46,10 @@ impl Encode<Version> for Datagram {
 
 impl Datagram {
 	/// Decode a whole datagram body. The payload shares `buf` rather than copying it.
-	pub fn decode(buf: Bytes, version: Version) -> Result<Self, DecodeError> {
+	///
+	/// `timed` reports whether the track of the given subscribe ID carries a timestamp,
+	/// which the body itself does not say.
+	pub fn decode(buf: Bytes, version: Version, timed: impl FnOnce(u64) -> bool) -> Result<Self, DecodeError> {
 		if !version.has_datagrams() {
 			return Err(DecodeError::Version);
 		}
@@ -50,7 +57,7 @@ impl Datagram {
 		let mut r = Decoder::new(&buf, version.into());
 		let subscribe = r.varint()?;
 		let sequence = r.varint()?;
-		let timestamp = r.varint()?;
+		let timestamp = if timed(subscribe) { Some(r.varint()?) } else { None };
 
 		// Everything remaining is the payload (the datagram boundary delimits it).
 		let payload = buf.slice(buf.len() - r.remaining()..);
@@ -73,11 +80,11 @@ mod test {
 		let original = Datagram {
 			subscribe: 7,
 			sequence: 42,
-			timestamp: 1_000,
+			timestamp: Some(1_000),
 			payload: Bytes::from_static(b"hello"),
 		};
 		let buf = original.encode_bytes(Version::Lite05).unwrap();
-		let decoded = Datagram::decode(buf, Version::Lite05).unwrap();
+		let decoded = Datagram::decode(buf, Version::Lite05, |_| true).unwrap();
 		assert_eq!(decoded, original, "payload has no trailing length prefix");
 	}
 
@@ -86,11 +93,11 @@ mod test {
 		let original = Datagram {
 			subscribe: 0,
 			sequence: 0,
-			timestamp: 0,
+			timestamp: Some(0),
 			payload: Bytes::new(),
 		};
 		let buf = original.encode_bytes(Version::Lite05).unwrap();
-		let decoded = Datagram::decode(buf, Version::Lite05).unwrap();
+		let decoded = Datagram::decode(buf, Version::Lite05, |_| true).unwrap();
 		assert_eq!(decoded, original);
 	}
 
@@ -101,7 +108,7 @@ mod test {
 		let dg = Datagram {
 			subscribe: 1,
 			sequence: 2,
-			timestamp: 3,
+			timestamp: Some(3),
 			payload: Bytes::from_static(b"world"),
 		};
 		let buf = dg.encode_bytes(Version::Lite05).unwrap();
@@ -111,17 +118,36 @@ mod test {
 	}
 
 	#[test]
+	fn untimed_omits_the_timestamp() {
+		let dg = Datagram {
+			subscribe: 1,
+			sequence: 2,
+			timestamp: None,
+			payload: Bytes::from_static(b"world"),
+		};
+		let buf = dg.encode_bytes(Version::Lite07).unwrap();
+		assert_eq!(buf.len(), 7);
+		assert_eq!(&buf[2..], b"world");
+		let decoded = Datagram::decode(buf, Version::Lite07, |id| {
+			assert_eq!(id, 1);
+			false
+		})
+		.unwrap();
+		assert_eq!(decoded, dg);
+	}
+
+	#[test]
 	fn rejects_old_versions() {
 		let dg = Datagram {
 			subscribe: 1,
 			sequence: 2,
-			timestamp: 3,
+			timestamp: Some(3),
 			payload: Bytes::from_static(b"x"),
 		};
 		assert!(matches!(dg.encode_bytes(Version::Lite04), Err(EncodeError::Version)));
 
 		assert!(matches!(
-			Datagram::decode(Bytes::from_static(b"\x01\x02\x03x"), Version::Lite04),
+			Datagram::decode(Bytes::from_static(b"\x01\x02\x03x"), Version::Lite04, |_| true),
 			Err(DecodeError::Version)
 		));
 	}

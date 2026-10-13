@@ -216,8 +216,9 @@ doesn't match is refused. No receiver fills in an arrival time. An untimed
 group never falls past max delay, so a new subscriber starts at its latest
 group unless it names a start. Tracks from moq-lite before 05, or from
 moq-transport without a `TIMESCALE` (every track on drafts 14-16), arrive
-untimed. No moq-lite version can declare an untimed track, so on 05 and later
-its frames go out stamped with their send time.
+untimed. moq-lite 05 and 06 cannot declare an untimed track, so there its
+frames go out stamped with their send time; the work-in-progress 07 carries it
+untimed.
 
 A relay cancels its upstream subscription once nobody subscribes, but keeps its
 copy of the track for 30 seconds after the last reader leaves, so a returning
