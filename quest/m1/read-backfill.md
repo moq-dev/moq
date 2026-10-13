@@ -21,8 +21,13 @@ delivers a group that arrives below the cursor as a late backfill; Rust
   (`consumer.outoforder.test.ts` covers that order). Rust keeps it by waiting
   for an explicit start floor under the max-delay budget
   (`startup_keeps_late_arriving_head_group_within_max_delay`); give JS the same
-  startup so the window head is never below the cursor. If that is not enough
-  to keep startup media, stop and re-plan rather than drop it.
+  startup so the window head is never below the cursor.
+- Open: a subscription with only a max delay and no start (as in
+  `consumer.outoforder.test.ts`) has no floor to wait for, so the window head
+  can still land below the cursor, in Rust too. Options include requiring a
+  start floor for retained windows or settling the floor before the first
+  delivery. Ask the maintainer before dropping groups in that case; do not
+  ship a drop that loses startup media.
 - Then change the JS consumer to discard groups below the cursor, and add a
   test mirroring Rust's: a reordered group older than the cursor is never
   yielded and no extra `Gap` appears.
