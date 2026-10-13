@@ -60,12 +60,10 @@ The cut:
 Rust's lite-07 varints already carry the full 64 bits the draft specifies,
 so no codec work waits on the cut.
 
-Open, for the maintainer:
-
-- Whether released clients offer lite-07 first by default, or accept it while
-  still offering lite-06 first for one release. Recommended: servers accept
-  it by default and clients keep lite-06 first for one release, so a
-  deployment rolls out on its own schedule.
+Decided 2026-10-13: servers accept finalized lite-07 by default, and
+first-party Rust and JS clients prefer it with older-version fallback. Test
+the negotiated version against new and old servers and refusal of the wip
+identifier. This release adopts the new routing contract end to end.
 
 Public API: the lite-07 version constant and ALPN lose `-wip`. Wire: lite-07
 is published; older versions are unchanged.

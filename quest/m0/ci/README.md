@@ -47,8 +47,8 @@ Decisions (maintainer, 2026-10-13):
   signing key), so a pull request job cannot read them even from the same
   repository. Fork PRs get no secrets
   and run uncached.
-- The spare desktop still becomes the self-hosted runner, reading the same R2
-  caches instead of hosting its own cache server.
+- Self-hosted CI is dropped: hosted runners plus the R2 caches replace the
+  spare-desktop runner, its cache server, and the cache release it waited on.
 
 Measure each change against the numbers above and record the result in its PR.
 
@@ -58,8 +58,6 @@ Measure each change against the numbers above and record the result in its PR.
 - [Skip setup without work](/quest/m0/ci/setup-skip.md) - a job whose diff selects nothing skips disk cleanup, Nix and cache restore but still reports its required check
 - [mbx on R2](/quest/m0/ci/mbx-r2.md) - Rust builds on every OS read an R2 cache that only `main` writes, escaping the 10 GB Actions cache
 - [Nix cache](/quest/m0/ci/nix-cache.md) - `nix.moq.dev` on R2 replaces Cachix for CI and releases
-- [Self-hosted CI](/quest/m0/ci/self-hosted.md) - same-repo Check and Test run on a self-hosted NixOS runner behind a `CI_RUNNER` kill switch
-- [CI host](/quest/m0/ci/host.md) - the maintainer brings up the spare desktop as the `moq-ci` and `moq-gpu` runner host
 - [JS selection](/quest/m0/ci/js-select.md) - a JS change tests only the changed packages and their dependents
 - [Clippy in Test](/quest/m0/ci/clippy-test.md) - Test's clippy-driver compile denies warnings, so Check stops repeating the default Clippy pass
 - [Nightly finishes](/quest/m0/ci/nightly-split.md) - every Nightly step runs within its timeout

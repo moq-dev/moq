@@ -31,5 +31,4 @@ budget no longer decides which jobs get a cache. Only workflows running on
 
 ## Related
 
-- [Self-hosted CI](/quest/m0/ci/self-hosted.md) - reads this cache instead of running its own server
 - [Platform in the merge queue](/quest/m0/ci/platform-queue.md) - the macOS and Windows jobs this gives a cache

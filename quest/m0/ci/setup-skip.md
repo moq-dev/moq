@@ -13,7 +13,3 @@ restoring the Rust cache, and 79s entering Nix. The dispatcher in `sh/` is
 already the one place that decides what a diff selects; ask it before setup
 rather than keep a second path map in the workflow. It may need to run outside
 the dev shell, or with a smaller one.
-
-## Related
-
-- [Self-hosted CI](/quest/m0/ci/self-hosted.md) - removes most of this setup on the host; hosted fallbacks and forks still pay it

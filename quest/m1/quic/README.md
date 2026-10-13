@@ -12,7 +12,7 @@ relay peers, and endpoint sharding.
 Per-stream acknowledgment progress, per-stream deadlines, qmux on the shared
 stream state machine, and the experiments (the egress profile, ECN
 measurement, deadline keep-alive) live in [m2](/quest/m2/README.md); media
-probing is its own [m1 quest](/quest/m1/quic-probe.md); L4S,
+probing is its own [m2 quest](/quest/m2/quic-probe.md); L4S,
 careful resume, and a receive-timestamps spike toward GCC live in
 [m3](/quest/m3/README.md). None of them gate this line.
 
@@ -28,7 +28,7 @@ publish a fork release, pin it, or offer a change upstream are superseded:
 a change lands in-tree with its consumer, and upstreaming is optional.
 
 The seven BBR correctness fixes shipped in moq-noq 1.3.1 (#4206) are in
-`moq-quic`'s BBR3. The remaining BBR quests here and [BBR ACK cleanup](/quest/m1/bbr-ack-cleanup.md) all edit
+`moq-quic`'s BBR3. The remaining BBR quests here and [BBR ACK cleanup](/quest/m2/bbr-ack-cleanup.md) all edit
 `bbr3/mod.rs`, so one owner should work there at a time. Controller-level
 regressions extend the shared test `Sim` in `bbr3/mod.rs` with only what each
 needs, rather than adding another simulation loop; a fix at the transport
@@ -91,7 +91,7 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
 
 - [Scope track priority](/quest/m1/track-priority-scope.md) - the
   per-broadcast fairness policy on cluster sessions
-- [Discover media headroom](/quest/m1/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
+- [Discover media headroom](/quest/m2/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
 - [L4S on the backbone](/quest/m3/quic-ecn.md) - an ECT(1) option in the fork, an `ecn` config knob, and a dualpi2 measurement
 - [Careful resume on reconnect](/quest/m3/quic-careful-resume.md) - a redial starts at the previous connection's rate
 - [Keep-alive from the idle timeout](/quest/m2/quic-keep-alive.md) - the keep-alive interval defaults to a fraction of the negotiated idle timeout; an explicit `quic.keep_alive` overrides

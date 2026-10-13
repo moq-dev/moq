@@ -3,8 +3,7 @@
 ## Goal
 
 The work in flight now, in two independent tracks. Relay hardening: legal
-moq-transport input never fails a session ahead of Seattle interop on
-2026-10-12, every resource a peer can make the relay hold is bounded by what
+moq-transport input never fails a session in current interop coverage, every resource a peer can make the relay hold is bounded by what
 it sent or by a budget, and no peer input panics the process. Identity: nothing treats who published a route as what it carries; a path and
 the epoch on its route are the only content identity, and every first-party
 publisher that can restart mints a fresh epoch, so #4741 stalls nobody.
@@ -53,7 +52,8 @@ connection idles out.
 Audio playout: the jitter target is default in both languages (#4162); the
 [line](/quest/m1/audio-jitter-target/README.md) moved to m1 in the
 2026-10-08 audit, since only a manual browser proof and a native trace replay
-remain and no release waits on them.
+remain and the release only requires the production clock and playback contracts
+that depend on them.
 
 Interop on main (2026-10-13): the cross-client matrix fails with `unroutable`
 whenever WebSocket wins the connect race: since #5294, #4180's upgrade
@@ -77,8 +77,8 @@ have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
 
 ## Required
 
-- [CI cost and latency](/quest/m0/ci/README.md) - PRs stop queueing behind hosted runner caps: macOS and Windows move to the merge queue, caches move to R2, setup is skipped when no work is selected, and the spare desktop runs Check and Test
-- [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.5, before Seattle, then draft-20+ FETCH
+- [CI cost and latency](/quest/m0/ci/README.md) - PRs stop queueing behind hosted runner caps: macOS and Windows move to the merge queue, caches move to R2, and setup is skipped when no work is selected
+- [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.5, then draft-20+ FETCH
 - [TS duration fidelity](/quest/m0/ts-duration-fidelity.md) - Interop's TS compliance captures the whole round-tripped stream again, fixing a regression that turns Interop red on main
 - [Upgrade restarts epochless broadcasts](/quest/m0/upgrade-unroutable.md) - a WebSocket-to-QUIC upgrade retires epochless handles only once their `Restart` is delivered, and first-party consumers follow it, fixing Interop's `unroutable` rounds
 - [Unset host clock](/quest/m0/wall-clock-omit.md) - a publisher whose wall clock reads before 2020 publishes without a catalog clock instead of panicking

@@ -77,13 +77,11 @@ vector the 2026-09-30 cache-tiers audit kept:
   `transcode/foobar` at 1 from one node). Static
   configured costs stay the default (the CDN); a radio link may measure its
   own ([Link quality](/quest/m2/link-quality.md)).
-- **Topology now, wire later.** moq.pro's edge and core migration runs on
-  today's lite-06 path vector with upstream links; the route layer lands in
-  lite-07 (the current wip version) afterwards with no re-layout, once
-  the simulator has compared it. Decided
-  2026-10-05: this line gates
-  [Finalize moq-lite-07](/quest/m1/lite07-finalize.md), and lite-07 loses
-  its hop list and `Hop Base`/`Hop Keep` compression.
+- **Routing before topology expansion.** Decided 2026-10-13: the new
+  routing model and finalized lite-07 belong to this breaking release.
+  Deployments may use the current mesh; the full edge/core topology migration
+  is independent. Validate handoff and recovery before publishing the wire.
+
 
 Kept from 2026-09-30: core links are configured and may skip PoPs; routes
 use one static cost. Decided 2026-10-06: a

@@ -42,4 +42,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [Watch](/quest/m1/audio-jitter-target/watch.md) - tightens these ceilings once playout improves
-- [Audio quality native](/quest/m1/audio-quality-native.md) - reuses the same budget file for a native lane
+- [Audio quality native](/quest/m2/audio-quality-native.md) - reuses the same budget file for a native lane

@@ -34,5 +34,4 @@ and push.
 
 ## Related
 
-- [Self-hosted CI](/quest/m0/ci/self-hosted.md) - the runner module's substituter
 - [mbx on R2](/quest/m0/ci/mbx-r2.md) - shares the Environment and bootstrap pattern, not the bucket
