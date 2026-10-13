@@ -8209,6 +8209,59 @@ async fn a_nested_stitch_keeps_the_pending_catalog_deadline() {
 	assert_eq!(start.elapsed(), linger);
 }
 
+/// A replacement restored after its own deadline, when the next one goes before it resolves,
+/// fails even with its late first snapshot ready.
+#[tokio::test(start_paused = true)]
+async fn a_nested_stitch_restored_after_its_deadline_fails() {
+	let origin = crate::source::produce_origin();
+	let linger = Duration::from_secs(10);
+	let _first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let mut follower = follower(&origin).await.with_stitch(true).with_linger(linger);
+	let start = tokio::time::Instant::now();
+
+	// Switched onto a replacement whose catalog has no snapshot yet, bounded at 10s.
+	let epoch = moq_net::Epoch::mint();
+	let (_second, mut catalog) = publish_bare(&origin, Some(&epoch));
+	assert!(
+		tokio::time::timeout(Duration::from_secs(2), follower.next())
+			.await
+			.is_err(),
+		"awaiting the replacement's catalog"
+	);
+
+	// Replaced again at 2s, bounded at 12s, but that one's catalog request is never answered.
+	let third = origin
+		.publish(
+			"live",
+			moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
+		)
+		.unwrap();
+	let unanswered = third.dynamic();
+	assert!(
+		tokio::time::timeout(Duration::from_secs(1), follower.next())
+			.await
+			.is_err(),
+		"resolving the next replacement"
+	);
+
+	// At 11s, the third goes and the second's first snapshot is ready, both past its deadline.
+	tokio::time::advance(linger + Duration::from_secs(1) - start.elapsed()).await;
+	drop((third, unanswered));
+	std::ops::DerefMut::deref_mut(&mut catalog.modify().unwrap());
+	// Deliver the snapshot through the local serving path, so it is ready on the next poll.
+	let broadcast = origin.consume().request_broadcast("live", Some(epoch)).await.unwrap();
+	let mut available = crate::catalog::Consumer::<()>::new(&broadcast, crate::catalog::CatalogFormat::Hang)
+		.await
+		.unwrap();
+	use crate::catalog::Stream;
+	kio::wait(|waiter| available.poll_next(waiter)).await.unwrap().unwrap();
+
+	let std::task::Poll::Ready(Err(err)) = follower.poll_next(&kio::Waiter::noop()) else {
+		panic!("a snapshot after the restored replacement's deadline must not count");
+	};
+	assert!(err.to_string().contains("catalog"), "{err}");
+}
+
 /// A replacement whose catalog closes before its first snapshot fails the stitch, rather than
 /// ending the export cleanly.
 #[tokio::test(start_paused = true)]

@@ -176,22 +176,8 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 	}
 
 	fn poll_state(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
-		// A deadline that passed between polls ends the wait before a late snapshot can count.
-		// Within one poll a ready catalog still makes it, which zero linger relies on.
-		let awaiting = match &self.state {
-			State::Running { awaiting } => awaiting.as_ref(),
-			State::Following { awaiting, .. } => Some(awaiting),
-			State::Settling { .. } | State::Done => None,
-		};
-		if awaiting.is_some_and(|awaiting| Instant::now() >= awaiting.deadline) {
-			let (State::Running {
-				awaiting: Some(awaiting),
-			}
-			| State::Following { awaiting, .. }) = std::mem::replace(&mut self.state, State::Done)
-			else {
-				unreachable!("only a running or following state awaits a catalog");
-			};
-			return Poll::Ready(self.expire(awaiting));
+		if let Some(expired) = self.expired() {
+			return Poll::Ready(expired);
 		}
 
 		loop {
@@ -327,6 +313,10 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 								tracing::warn!(path = %self.path, %err, "broadcast went before it resolved, still waiting");
 								self.serving = Serving::Gone;
 								self.state = *fallback;
+								// The fallback's wait predates this poll, so it gets no same-poll grace.
+								if let Some(expired) = self.expired() {
+									return Poll::Ready(expired);
+								}
 								continue;
 							}
 						};
@@ -427,6 +417,29 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 				tracing::warn!(path = %self.path, %err, linger = ?self.linger, "broadcast ended, waiting for it to return")
 			}
 		}
+	}
+
+	/// End a catalog wait already past its deadline, before a late snapshot can count.
+	///
+	/// Only waits from an earlier poll are checked: within one poll a ready catalog still makes
+	/// it, which zero linger relies on.
+	fn expired(&mut self) -> Option<crate::Result<Option<Frame>>> {
+		let awaiting = match &self.state {
+			State::Running { awaiting } => awaiting.as_ref(),
+			State::Following { awaiting, .. } => Some(awaiting),
+			State::Settling { .. } | State::Done => None,
+		};
+		if !awaiting.is_some_and(|awaiting| Instant::now() >= awaiting.deadline) {
+			return None;
+		}
+		let (State::Running {
+			awaiting: Some(awaiting),
+		}
+		| State::Following { awaiting, .. }) = std::mem::replace(&mut self.state, State::Done)
+		else {
+			unreachable!("only a running or following state awaits a catalog");
+		};
+		Some(self.expire(awaiting))
 	}
 
 	/// How a wait for the catalog's first snapshot ends once the linger runs out.
