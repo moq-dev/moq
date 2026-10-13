@@ -886,6 +886,8 @@ export class Subscriber {
 			trackNamespace: broadcast,
 			trackName: request.name,
 			subscriberPriority: toWire(request.priority),
+			// Fixed for the subscription's life: no REQUEST_UPDATE parameter carries it.
+			groupOrder: request.subscription.order,
 			// No fill is requested: the fill's fetch stream and the live subscription split
 			// the group across two streams, and this subscriber does not reassemble them into
 			// one group yet. A lenient publisher (like ours) replays the whole in-range group

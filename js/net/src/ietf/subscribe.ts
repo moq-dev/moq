@@ -1,5 +1,6 @@
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import type { Order } from "../track.ts";
 import * as Filter from "./filter.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
@@ -8,14 +9,13 @@ import * as Properties from "./properties.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /**
- * The GROUP_ORDER a subscription asks the publisher to deliver in.
+ * The GROUP_ORDER wire values.
  *
- * `Default` (0x0) is the wire's "no preference": the publisher picks, which in
- * practice means its own DEFAULT_PUBLISHER_GROUP_ORDER track property. It is accepted
- * from a caller and on a draft-14 decode, and normalized away in both cases, so this
- * client never puts it on the wire. From draft-15 it could not: GROUP_ORDER is a
- * message parameter there and {@link Parameters} rejects 0 as a protocol violation, so
- * only draft-14's inline field can carry it at all.
+ * `Default` (0x0) is the wire's "no preference": the publisher picks, which in practice
+ * means its own DEFAULT_PUBLISHER_GROUP_ORDER track property. It decodes as descending, the
+ * order this publisher prefers, so the model never sees it and this client never sends it.
+ * Only drafts 14 to 16 can carry it; {@link Parameters} rejects it as a protocol violation
+ * on later drafts.
  */
 export const GroupOrder = {
 	Default: 0x00,
@@ -23,11 +23,26 @@ export const GroupOrder = {
 	Descending: 0x02,
 } as const;
 
+/** A GROUP_ORDER wire value. */
 export type GroupOrder = (typeof GroupOrder)[keyof typeof GroupOrder];
 
-// The order this client requests unless the caller names one: newest group first,
-// matching moq-lite and the order our publisher serves.
-const GROUP_ORDER = GroupOrder.Descending;
+/** The GROUP_ORDER byte for a model {@link Order}. */
+function encodeGroupOrder(order: Order): GroupOrder {
+	return order === "ascending" ? GroupOrder.Ascending : GroupOrder.Descending;
+}
+
+/** The model {@link Order} for a GROUP_ORDER byte, refusing a value the draft does not define. */
+function decodeGroupOrder(value: number): Order {
+	switch (value) {
+		case GroupOrder.Ascending:
+			return "ascending";
+		case GroupOrder.Default:
+		case GroupOrder.Descending:
+			return "descending";
+		default:
+			throw new Error(`unknown group order: ${value}`);
+	}
+}
 
 /**
  * The filter this implementation joins a live track with.
@@ -48,12 +63,8 @@ export class Subscribe {
 	trackName: string;
 	subscriberPriority: number;
 
-	/**
-	 * The order the publisher is asked to deliver groups in (GROUP_ORDER).
-	 *
-	 * Defaults to {@link GroupOrder.Descending}.
-	 */
-	groupOrder: GroupOrder;
+	/** The order the publisher is asked to deliver groups in (GROUP_ORDER). Defaults to descending. */
+	groupOrder: Order;
 
 	/** Which Objects the subscription delivers, resolved by the publisher against the live edge. */
 	filter: Filter.Filter;
@@ -86,7 +97,7 @@ export class Subscribe {
 		trackNamespace: Path.Valid;
 		trackName: string;
 		subscriberPriority: number;
-		groupOrder?: GroupOrder;
+		groupOrder?: Order;
 		filter?: Filter.Filter;
 		fill?: Filter.Fill;
 		propertiesWanted?: boolean;
@@ -97,9 +108,7 @@ export class Subscribe {
 		this.trackNamespace = trackNamespace;
 		this.trackName = trackName;
 		this.subscriberPriority = subscriberPriority;
-		// Resolve "no preference" to a real order here, so `groupOrder` is never 0 for a
-		// caller reading it back and 0 can never reach the encoders.
-		this.groupOrder = groupOrder === undefined || groupOrder === GroupOrder.Default ? GROUP_ORDER : groupOrder;
+		this.groupOrder = groupOrder ?? "descending";
 		this.filter = filter ?? { kind: "unfiltered" };
 		this.fill = fill;
 		this.propertiesWanted = propertiesWanted ?? true;
@@ -117,7 +126,7 @@ export class Subscribe {
 
 		if (version === Version.DRAFT_14) {
 			await w.u8(this.subscriberPriority);
-			await w.u8(this.groupOrder);
+			await w.u8(encodeGroupOrder(this.groupOrder));
 			await w.bool(this.forward);
 			await w.write(Filter.encode(this.filter, version));
 			await w.u53(0); // no parameters
@@ -125,7 +134,7 @@ export class Subscribe {
 			// v15+: fields moved into parameters
 			const params = new Parameters();
 			params.subscriberPriority = this.subscriberPriority;
-			params.groupOrder = this.groupOrder;
+			params.groupOrder = encodeGroupOrder(this.groupOrder);
 			params.forward = this.forward;
 			params.subscriptionFilter = this.filter;
 
@@ -165,11 +174,7 @@ export class Subscribe {
 		if (version === Version.DRAFT_14) {
 			const subscriberPriority = await r.u8();
 
-			const groupOrder = await r.u8();
-			if (groupOrder > 2) {
-				throw new Error(`unknown group order: ${groupOrder}`);
-			}
-			// 0 ("no preference") is resolved to a real order by the constructor.
+			const groupOrder = decodeGroupOrder(await r.u8());
 
 			const forward = await r.bool();
 			const filter = await Filter.decodeInline(r);
@@ -181,7 +186,7 @@ export class Subscribe {
 				trackNamespace,
 				trackName,
 				subscriberPriority,
-				groupOrder: groupOrder as GroupOrder,
+				groupOrder,
 				filter,
 				forward,
 			});
@@ -189,10 +194,7 @@ export class Subscribe {
 		// v15+: fields are in parameters
 		const params = await Parameters.decode(r, version, "subscribe");
 		const subscriberPriority = params.subscriberPriority ?? 128;
-		const groupOrder = params.groupOrder ?? GROUP_ORDER;
-		if (groupOrder > 2) {
-			throw new Error(`unknown group order: ${groupOrder}`);
-		}
+		const groupOrder = decodeGroupOrder(params.groupOrder ?? GroupOrder.Descending);
 
 		// FILL_PARAMETERS and INCLUDE_PROPERTIES are draft-20 additions, and the Range
 		// Filters draft-19 ones. An unknown message parameter is a protocol violation, so
@@ -219,7 +221,7 @@ export class Subscribe {
 			trackNamespace,
 			trackName,
 			subscriberPriority,
-			groupOrder: groupOrder as GroupOrder,
+			groupOrder,
 			filter,
 			fill,
 			// Defaults to 1, so an absent parameter means the subscriber wants them.
@@ -277,7 +279,7 @@ export class SubscribeOk {
 
 		if (version === Version.DRAFT_14) {
 			await w.u62(0n); // expires = 0
-			await w.u8(this.properties.groupOrder ?? GROUP_ORDER);
+			await w.u8(this.properties.groupOrder ?? GroupOrder.Descending);
 			await w.bool(this.largest !== undefined);
 			if (this.largest !== undefined) {
 				await w.u62(this.largest.groupId);

@@ -159,7 +159,29 @@ export interface Subscription {
 	 * subscription naming where it left off).
 	 */
 	groups?: Groups;
+	/**
+	 * Which pending group the publisher sends first. Defaults to `"descending"`.
+	 *
+	 * Carried by moq-lite 07 and moq-transport (fixed at subscribe time there); older
+	 * moq-lite versions are served newest first whatever this says.
+	 *
+	 * Aggregated across every live subscriber: any descending subscriber makes the aggregate
+	 * descending, so a relay fanning one upstream request out keeps its live subscribers
+	 * fresh. Each subscriber's own publisher still serves it in its own order.
+	 */
+	order?: Order;
 }
+
+/**
+ * Which of a subscription's pending groups the publisher sends first: `"descending"` (newest
+ * first, so congestion sheds the backlog rather than the live edge) or `"ascending"` (oldest
+ * first, draining a backlog in sequence order).
+ *
+ * A transmission order only: it never decides whether a group is delivered, which is
+ * {@link Subscription.maxDelay}'s job, so an ascending subscriber that wants a backlog needs a
+ * budget that covers it.
+ */
+export type Order = "ascending" | "descending";
 
 // Materialize the defaults at the model boundary so every layer observes a complete
 // subscription rather than interpreting an omitted field differently.
@@ -169,11 +191,19 @@ function subscriptionDefaults(subscription: Subscription = {}): Subscription {
 	return {
 		priority: priorityByte(subscription.priority ?? 0),
 		maxDelay: wireMillis("maxDelay", subscription.maxDelay ?? Milli.zero),
+		order: orderOf(subscription.order),
 		groups: {
 			start: subscription.groups?.start === undefined ? undefined : { included: bounds.start },
 			end: bounds.end === undefined ? undefined : { excluded: bounds.end },
 		},
 	};
+}
+
+// A plain JS caller can pass anything, and silently serving a typo as descending would hide it.
+function orderOf(order: Order | undefined): Order {
+	if (order === undefined) return "descending";
+	if (order !== "ascending" && order !== "descending") throw new TypeError(`unknown order: ${String(order)}`);
+	return order;
 }
 
 // Aggregate the preferences of every live subscriber, matching Rust's Subscription::poll_combined.
@@ -189,6 +219,9 @@ function combineSubscriptions(states: Iterable<TrackState>): Subscription | unde
 
 		combined.priority = Math.max(combined.priority ?? 0, subscription.priority ?? 0);
 		combined.maxDelay = Milli(Math.max(combined.maxDelay ?? Milli.zero, subscription.maxDelay ?? Milli.zero));
+		// One live subscriber held behind another's backlog is worse than a backlog sent late.
+		combined.order =
+			combined.order === "ascending" && subscription.order === "ascending" ? "ascending" : "descending";
 
 		// A floor only restricts, so a subscriber without one clears the aggregate:
 		// its budget may reach below any floor the others set.
