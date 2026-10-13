@@ -357,3 +357,8 @@ bench-stats *args:
 # Sweep latency observations against writer count and report density.
 bench-latency:
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-bench --run-ignored only -E 'test(benchmark_observation_contention)' --success-output immediate
+
+# Sweep container export tracks and queued frames independently.
+[positional-arguments]
+bench-export *args:
+    cargo bench --locked -p moq-mux --bench export -- "$@"

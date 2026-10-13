@@ -756,7 +756,7 @@ async fn serve_connection(
 		stats,
 	} = admitted;
 
-	let mut request = request.with_stats(stats);
+	let mut request = request.with_stats(stats).with_limits(serve.cluster.limits(&lease));
 	if let Some(subscriber) = subscriber {
 		request = request.with_publisher(subscriber);
 	}

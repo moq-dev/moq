@@ -4378,6 +4378,7 @@ dependencies = [
  "bytes",
  "hang",
  "humantime",
+ "libc",
  "moq-archive",
  "moq-audio",
  "moq-auth",

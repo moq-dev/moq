@@ -20,7 +20,8 @@
 //!
 //! [`Passthrough`] is the other shape: it publishes the multiplex whole, every packet
 //! verbatim on one track named by the hang catalog's `m2ts` section, for what
-//! demultiplexing cannot carry (TS-level scrambling, PSI and SI as authored).
+//! demultiplexing cannot carry (TS-level scrambling, PSI and SI as authored), and
+//! [`Release`] writes that track back out on a fixed delay.
 
 mod adts;
 mod damage;
@@ -31,6 +32,7 @@ mod import;
 mod mux_rate;
 mod programs;
 mod psi;
+mod release;
 mod schedule;
 mod si;
 
@@ -45,6 +47,7 @@ pub use follower::Follower;
 pub use import::*;
 pub use passthrough::Passthrough;
 pub use programs::Programs;
+pub use release::Release;
 
 pub mod passthrough;
 pub mod stats;
@@ -57,3 +60,5 @@ mod export_timing_test;
 mod import_test;
 #[cfg(test)]
 mod passthrough_test;
+#[cfg(test)]
+mod release_test;

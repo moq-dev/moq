@@ -1619,6 +1619,12 @@ impl Request {
 		self
 	}
 
+	/// Set request caps after authorizing the peer and before answering SETUP.
+	pub fn with_limits(mut self, limits: moq_net::session::Limits) -> Self {
+		self.kind = request_map!(self.kind, request => request.with_limits(limits));
+		self
+	}
+
 	/// Accept the session, starting the MoQ session loops.
 	///
 	/// Bounded by what remains of the handshake deadline: answering SETUP can wait

@@ -36,6 +36,19 @@ Guidance:
   (`fetch_group`, `requested_group`), moq-c (`poll_requested_group`), every
   binding wrapper and its `doc/lib` page, and `moq fetch` through
   `moq_relay::fetch_group` (added in the 2026-10-05 audit).
+- Decided 2026-10-13 (#5400): the same reshape of `MoqSubscription` in moq-ffi
+  (`rs/moq-ffi/src/consumer.rs`) adds a `MoqOrder` enum (`Ascending`,
+  `Descending`) and `MoqSubscription.order`, defaulting to `Descending` and
+  mapped to `track::Subscription::order`, beside the ranges. It follows the
+  cross-package table like the rest: the `py/moq-rs`, `swift`, `kt`,
+  `dart/moq` and `go/wrapper/moq` wrappers, `cpp/moq`, C (inherited if the
+  [generated C bindings](/quest/m1/c/README.md) have landed, otherwise
+  `rs/moq-c/src/api.rs`, from which cbindgen generates `moq.h`), and their
+  `doc/lib` pages. `cpp/obs/src` and `doc/bin/obs.md` have no subscription
+  surface today, so they change only if OBS starts building a
+  `MoqSubscription`. Folded in here rather than a separate
+  quest, so the bindings break once. Test that an ascending subscription
+  receives a cached backlog oldest first in moq-ffi and each wrapper with tests.
 - Decided in the 2026-10-10 audit: `max_delay` caps every range, including
   historical FETCH replacements, and publisher `max_age` always clamps it.
   A FETCH with no reader delay uses publisher max-age alone, not the live

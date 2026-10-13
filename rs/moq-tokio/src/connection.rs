@@ -146,18 +146,26 @@ pub struct Backoff {
 	/// Maximum time to spend retrying before giving up. Defaults to 10s.
 	///
 	/// Resets after a stable connection (one that outlives the initial backoff), so a flapping
-	/// session that reconnects then immediately drops still counts toward the timeout. Set to 0 for
-	/// unlimited retries.
+	/// session that reconnects then immediately drops still counts toward the timeout. Set to
+	/// `Some(Duration::ZERO)` for unlimited retries. `None` takes the default. When this config was
+	/// parsed from the command line, a `--backoff-timeout` given there wins over this field.
+	///
+	/// An `Option` because zero is a real setting: a command-line parse leaves this field at its
+	/// type's default, and only `None` tells "unset" apart from "retry forever".
 	#[usage(skip)]
-	#[serde(with = "crate::cli::duration::serde_duration")]
-	pub timeout: Duration,
+	#[serde(
+		default,
+		with = "crate::cli::duration::serde_duration::option",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub timeout: Option<Duration>,
 
+	// No parser default: the parser stores one as if it were given, and it would then beat a
+	// window set in code. The default lives in [`Backoff::window`] instead.
 	#[usage(
 		name = "backoff-timeout",
 		long,
 		env = "MOQ_BACKOFF_TIMEOUT",
-		default_value_t = CliDuration::fallback(DEFAULT_TIMEOUT),
-		default = "10s",
 		setting = "connect.backoff.timeout"
 	)]
 	#[serde(default, rename = "__cli_timeout", skip_serializing_if = "Option::is_none")]
@@ -172,9 +180,20 @@ impl Default for Backoff {
 			multiplier: DEFAULT_MULTIPLIER,
 			max: DEFAULT_MAX,
 			max_arg: None,
-			timeout: DEFAULT_TIMEOUT,
+			timeout: Some(DEFAULT_TIMEOUT),
 			timeout_arg: None,
 		}
+	}
+}
+
+impl Backoff {
+	/// The retry window in effect, where zero means unlimited: the flag, then the typed field, then
+	/// the default.
+	fn window(&self) -> Duration {
+		self.timeout_arg
+			.map(Into::into)
+			.or(self.timeout)
+			.unwrap_or(DEFAULT_TIMEOUT)
 	}
 }
 
@@ -847,7 +866,7 @@ impl Connection {
 		let backoff = client.backoff.clone();
 		let goaway = client.goaway.resolve();
 		let pacing = Pacing::new(&backoff);
-		let timeout = CliDuration::resolve(backoff.timeout_arg, backoff.timeout);
+		let timeout = backoff.window();
 		let initial = pacing.initial;
 		let mut retry = Retry::new(initial);
 		// Sticky across migrations: a redirect is an assignment, not a detour, so a
@@ -1655,13 +1674,13 @@ mod tests {
 		parsed.backoff.initial = Duration::from_secs(7);
 		parsed.backoff.multiplier = 5;
 		parsed.backoff.max = Duration::from_secs(11);
-		parsed.backoff.timeout = Duration::ZERO;
+		parsed.backoff.timeout = Some(Duration::ZERO);
 		parsed.update_from(&[]);
 
 		assert_eq!(parsed.backoff.initial, Duration::from_secs(7));
 		assert_eq!(parsed.backoff.multiplier, 5);
 		assert_eq!(parsed.backoff.max, Duration::from_secs(11));
-		assert_eq!(parsed.backoff.timeout, Duration::ZERO, "0 means retry forever");
+		assert_eq!(parsed.backoff.window(), Duration::ZERO, "0 means retry forever");
 
 		// With no flags, the parser defaults resolve to the typed defaults.
 		let parsed = Wrapper::parse_from(&[]).unwrap();
@@ -1669,15 +1688,53 @@ mod tests {
 		let pacing = Pacing::new(&parsed.backoff);
 		assert_eq!(pacing.initial, DEFAULT_INITIAL);
 		assert_eq!(pacing.max, DEFAULT_MAX);
-		assert_eq!(
-			CliDuration::resolve(parsed.backoff.timeout_arg, parsed.backoff.timeout),
-			DEFAULT_TIMEOUT
-		);
+		assert_eq!(parsed.backoff.window(), DEFAULT_TIMEOUT);
 
 		// And a flag still lands where the merge can see it.
 		let parsed =
 			Wrapper::parse_from(&[std::ffi::OsStr::new("--backoff-initial"), std::ffi::OsStr::new("3s")]).unwrap();
 		assert_eq!(Pacing::new(&parsed.backoff).initial, Duration::from_secs(3));
+	}
+
+	/// A window set in code wins on a config the command line built, including zero.
+	///
+	/// The parser stored its 10s default exactly as if `--backoff-timeout 10s` had been given, so
+	/// it beat the typed field, and a zero there was indistinguishable from the field left unset.
+	#[test]
+	fn a_timeout_set_in_code_beats_the_parser_default() {
+		#[derive(usage::Cli)]
+		#[usage(unknown_flags = "error", args_override_self = false)]
+		#[usage(settings)]
+		struct Wrapper {
+			#[usage(flatten)]
+			backoff: Backoff,
+		}
+
+		let mut parsed = Wrapper::parse_from(&[]).unwrap().backoff;
+		assert_eq!(parsed.window(), DEFAULT_TIMEOUT);
+		parsed.timeout = Some(Duration::ZERO);
+		assert_eq!(parsed.window(), Duration::ZERO, "a parsed config");
+
+		let merged = |backoff: &Backoff| -> Backoff { toml::Value::try_from(backoff).unwrap().try_into().unwrap() };
+		let mut config = merged(&Wrapper::parse_from(&[]).unwrap().backoff);
+		assert_eq!(config.window(), DEFAULT_TIMEOUT, "the default survives the round-trip");
+		config.timeout = Some(Duration::ZERO);
+		assert_eq!(config.window(), Duration::ZERO, "a merged config");
+		config.timeout = Some(Duration::from_secs(3));
+		assert_eq!(config.window(), Duration::from_secs(3), "a merged config, nonzero");
+
+		// An explicit flag still wins, through the round-trip too.
+		let flag = [std::ffi::OsStr::new("--backoff-timeout"), std::ffi::OsStr::new("0s")];
+		let mut config = merged(&Wrapper::parse_from(&flag).unwrap().backoff);
+		config.timeout = Some(Duration::from_secs(3));
+		assert_eq!(config.window(), Duration::ZERO, "the flag beats the field");
+
+		// A config built in code was never affected.
+		let config = Backoff {
+			timeout: Some(Duration::ZERO),
+			..Default::default()
+		};
+		assert_eq!(config.window(), Duration::ZERO);
 	}
 
 	/// GOAWAY typed defaults remain overrideable by a standing TOML layer.
@@ -2087,7 +2144,7 @@ mod tests {
 		assert_eq!(backoff.initial, Duration::from_secs(1));
 		assert_eq!(backoff.multiplier, 2);
 		assert_eq!(backoff.max, Duration::from_secs(5));
-		assert_eq!(backoff.timeout, Duration::from_secs(10));
+		assert_eq!(backoff.timeout, Some(Duration::from_secs(10)));
 	}
 
 	#[test]
@@ -2272,7 +2329,7 @@ mod tests {
 	async fn an_unsupported_scheme_ends_unlimited_reconnects() {
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
-		config.backoff.timeout = Duration::ZERO;
+		config.backoff.timeout = Some(Duration::ZERO);
 		let client = config.init(Default::default()).expect("build client");
 		let started = tokio::time::Instant::now();
 		let connection = client.connect(url("moqz://localhost/"));
@@ -2290,7 +2347,7 @@ mod tests {
 	async fn an_invalid_tls_server_name_ends_unlimited_reconnects() {
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
-		config.backoff.timeout = Duration::ZERO;
+		config.backoff.timeout = Some(Duration::ZERO);
 		let client = config.init(Default::default()).expect("build client");
 		for target in [
 			"https://a!b:1/",
@@ -2321,7 +2378,7 @@ mod tests {
 		let mut client = client();
 		client.backoff.initial = Duration::from_millis(50);
 		client.backoff.max = Duration::from_millis(50);
-		client.backoff.timeout = Duration::from_millis(200);
+		client.backoff.timeout = Some(Duration::from_millis(200));
 		let started = tokio::time::Instant::now();
 		let connection = client.connect(target);
 		let err = connection.closed().await.expect_err("refused socket connected");
