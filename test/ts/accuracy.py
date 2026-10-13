@@ -7,12 +7,15 @@ import subprocess
 from pathlib import Path
 
 
-def check(path, bitrate, log):
+def check(path, bitrate, skip, log):
     command = [
         "tsp",
         "-I",
         "file",
         str(path),
+        "-P",
+        "skip",
+        str(skip),
         "-P",
         "pcrverify",
         "--bitrate",
@@ -42,6 +45,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("ts", type=Path)
     parser.add_argument("--bitrate", required=True, type=int)
+    parser.add_argument("--skip", default=0, type=int)
     parser.add_argument("--log", required=True, type=Path)
     args = parser.parse_args()
-    check(args.ts, args.bitrate, args.log)
+    check(args.ts, args.bitrate, args.skip, args.log)
