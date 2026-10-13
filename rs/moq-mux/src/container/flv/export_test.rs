@@ -135,7 +135,13 @@ async fn drain_export<S: crate::catalog::Stream>(mut exporter: Export<S>, import
 			Ok(Ok(Some(chunk))) => exported.extend_from_slice(&chunk),
 			Ok(Ok(None)) => break,
 			Ok(Err(e)) => panic!("exporter error: {e}"),
-			Err(_) => importer = None, // close the broadcast so the exporter can EOS
+			Err(_) => {
+				if let Some(deadline) = exporter.next_deadline() {
+					tokio::time::advance(deadline.saturating_duration_since(web_async::time::Instant::now())).await;
+				} else {
+					importer = None; // No scheduled frames remain; close the broadcast.
+				}
+			}
 		}
 	}
 	drop(importer);
@@ -193,7 +199,8 @@ async fn export_emits_sequence_headers_and_frames() {
 
 	let exporter = open_export(crate::source::announced(&consumer).await)
 		.await
-		.with_max_delay(RECORDING_MAX_DELAY);
+		.with_delay(RECORDING_MAX_DELAY)
+		.with_replay();
 	let exported = drain_export(exporter, importer).await;
 
 	let tags = parse_tags(&exported);
@@ -1223,7 +1230,10 @@ async fn drain_until_idle<S: crate::catalog::Stream>(
 			Ok(Ok(Some(chunk))) => out.extend_from_slice(&chunk),
 			Ok(Ok(None)) => return Some(Ok(())),
 			Ok(Err(e)) => return Some(Err(e)),
-			Err(_) => return None,
+			Err(_) => {
+				let deadline = exporter.next_deadline()?;
+				tokio::time::advance(deadline.saturating_duration_since(web_async::time::Instant::now())).await;
+			}
 		}
 	}
 }
@@ -1277,9 +1287,14 @@ async fn a_track_leaving_the_catalog_is_read_to_its_end() {
 
 	let mut exporter = open_export(crate::source::announced(&consumer).await)
 		.await
-		.with_max_delay(RECORDING_MAX_DELAY);
+		.with_delay(RECORDING_MAX_DELAY)
+		.with_replay();
 	let mut exported = Vec::new();
-	assert!(drain_until_idle(&mut exporter, &mut exported).await.is_none());
+	// Consume the header and the two initial frames without advancing past
+	// their release deadline before publishing the next live frames.
+	for _ in 0..3 {
+		exported.extend_from_slice(&exporter.next().await.unwrap().unwrap());
+	}
 
 	// The audio rendition retires before its tail lands; the video carries on.
 	catalog.modify().unwrap().audio.renditions.remove(&audio_name);
@@ -1313,4 +1328,147 @@ async fn drain_exporter_chunks<S: crate::catalog::Stream>(mut exporter: Export<S
 		}
 	}
 	exported
+}
+
+/// A live container export holds a frame for the configured release delay.
+#[tokio::test(start_paused = true)]
+async fn configured_delay_holds_live_frames() {
+	use crate::container::test_util::{Live, raw_frame};
+	use hang::catalog::{AAC, AudioConfig};
+	let mut config = AudioConfig::new(AAC { profile: 2 }, 44100, 2);
+	config.description = Some(Bytes::from_static(&[0x12, 0x10]));
+	let mut live = Live::audio(config);
+	let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
+		.with_delay(std::time::Duration::from_millis(100));
+	assert!(export.next().await.unwrap().is_some(), "container header");
+	live.track.write(raw_frame(0, &[0xde, 0xad], true)).unwrap();
+	assert!(
+		tokio::time::timeout(std::time::Duration::from_millis(1), export.next())
+			.await
+			.is_err(),
+		"the release delay must hold a live frame instead of emitting on arrival"
+	);
+}
+
+/// Release deadlines survive source EOS, and expired frames never reach the container.
+#[tokio::test(start_paused = true)]
+async fn delay_drops_late_frames_and_drains_the_final_frame() {
+	use crate::container::test_util::{Live, raw_frame};
+	use hang::catalog::{AAC, AudioConfig};
+	let mut config = AudioConfig::new(AAC { profile: 2 }, 44100, 2);
+	config.description = Some(Bytes::from_static(&[0x12, 0x10]));
+	let mut live = Live::audio(config);
+	let delay = std::time::Duration::from_millis(100);
+	let mut export = super::Export::new(live.source().await, live.catalog_stream().await).with_delay(delay);
+	export.next().await.unwrap().unwrap();
+	let start = web_async::time::Instant::now();
+	live.track.write(raw_frame(0, b"first", true)).unwrap();
+	let first = export.next().await.unwrap().unwrap();
+	assert!(first.windows(5).any(|part| part == b"first"));
+	assert!(start.elapsed() >= delay);
+
+	// This frame's 120ms deadline has already passed.
+	tokio::time::advance(std::time::Duration::from_millis(200)).await;
+	assert!(export.poll_next(&kio::Waiter::noop()).is_pending());
+	live.track.write(raw_frame(20_000, b"expired", true)).unwrap();
+	live.track.write(raw_frame(400_000, b"final", true)).unwrap();
+	live.track.finish().unwrap();
+	live.catalog.finish().unwrap();
+	let final_frame = export.next().await.unwrap().unwrap();
+	assert!(final_frame.windows(5).any(|part| part == b"final"));
+	assert!(!final_frame.windows(7).any(|part| part == b"expired"));
+	assert!(start.elapsed() >= std::time::Duration::from_millis(500));
+	assert!(export.next().await.unwrap().is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn decode_order_is_independent_of_cross_track_arrival_order() {
+	use crate::container::test_util::{Live, raw_frame};
+	use hang::catalog::{AAC, AudioConfig, Container};
+	for reversed in [false, true] {
+		let mut config = AudioConfig::new(AAC { profile: 2 }, 44100, 2);
+		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
+		config.container = Container::Legacy;
+		let mut live = Live::audio(config.clone());
+		let mut other = live.add_track("other", |catalog, name| {
+			catalog.modify().unwrap().audio.renditions.insert(name, config);
+		});
+		let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
+			.with_delay(std::time::Duration::from_millis(100))
+			.with_multitrack(true);
+		export.next().await.unwrap().unwrap();
+		live.track.write(raw_frame(0, b"initial-a", true)).unwrap();
+		other.write(raw_frame(0, b"initial-b", true)).unwrap();
+		export.next().await.unwrap().unwrap();
+		export.next().await.unwrap().unwrap();
+		if reversed {
+			other.write(raw_frame(100_000, b"earlier", true)).unwrap();
+		} else {
+			live.track.write(raw_frame(200_000, b"later", true)).unwrap();
+		}
+		assert!(export.poll_next(&kio::Waiter::noop()).is_pending());
+		tokio::time::advance(std::time::Duration::from_millis(20)).await;
+		if reversed {
+			live.track.write(raw_frame(200_000, b"later", true)).unwrap();
+		} else {
+			other.write(raw_frame(100_000, b"earlier", true)).unwrap();
+		}
+		let first = export.next().await.unwrap().unwrap();
+		let second = export.next().await.unwrap().unwrap();
+		assert!(first.windows(7).any(|part| part == b"earlier"));
+		assert!(second.windows(5).any(|part| part == b"later"));
+	}
+}
+
+/// A backlog the source already holds, as after the sink stalls, goes out a frame at a time
+/// as each falls due, rather than being read into the export whole first.
+#[tokio::test(start_paused = true)]
+async fn a_backlog_stays_in_the_source_until_due() {
+	use crate::container::test_util::{Live, raw_frame};
+	use hang::catalog::{AAC, AudioConfig};
+	for delay in [std::time::Duration::ZERO, std::time::Duration::from_millis(100)] {
+		let mut config = AudioConfig::new(AAC { profile: 2 }, 44100, 2);
+		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
+		let mut live = Live::audio(config);
+		let mut export = super::Export::new(live.source().await, live.catalog_stream().await).with_delay(delay);
+		export.next().await.unwrap().unwrap();
+		live.track.write(raw_frame(0, b"first", true)).unwrap();
+		export.next().await.unwrap().unwrap();
+		for index in 1..=50 {
+			tokio::time::advance(std::time::Duration::from_millis(20)).await;
+			live.track.write(raw_frame(index * 20_000, b"backlog", false)).unwrap();
+		}
+		for _ in 1..=50 {
+			let tag = export.next().await.unwrap().unwrap();
+			assert!(tag.windows(7).any(|part| part == b"backlog"));
+			assert!(
+				export.buffered() <= 1,
+				"{delay:?}: {} frames buffered",
+				export.buffered()
+			);
+		}
+	}
+}
+
+/// A joiner reads the retained group to its live edge to anchor the clock, then holds no
+/// more than the delay of it.
+#[tokio::test(start_paused = true)]
+async fn a_retained_group_trims_to_the_delay() {
+	use crate::container::test_util::{Live, raw_frame};
+	use hang::catalog::{AAC, AudioConfig};
+	let mut config = AudioConfig::new(AAC { profile: 2 }, 44100, 2);
+	config.description = Some(Bytes::from_static(&[0x12, 0x10]));
+	let mut live = Live::audio(config);
+	for index in 0..50 {
+		live.track
+			.write(raw_frame(index * 20_000, b"retained", index == 0))
+			.unwrap();
+		tokio::time::advance(std::time::Duration::from_millis(20)).await;
+	}
+	let delay = std::time::Duration::from_millis(100);
+	let mut export = super::Export::new(live.source().await, live.catalog_stream().await).with_delay(delay);
+	export.next().await.unwrap().unwrap();
+	export.next().await.unwrap().unwrap();
+	// What is left spans no more than the delay: five 20 ms frames.
+	assert!(export.buffered() <= 5, "{} frames buffered", export.buffered());
 }

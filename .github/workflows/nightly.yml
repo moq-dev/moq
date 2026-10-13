@@ -190,6 +190,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command cargo bench --locked -p moq-relay --bench http_idle -- --test
 
+      - name: Relay auth refresh benchmark smoke
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs bench-relay-auth --test
+
       # One relay's stats tick (drain plus plain and compressed encode), swept
       # over held paths, tiers, and how many of those paths changed, plus the
       # decode table. `--test` runs each tick routine once (decode ignores it
@@ -214,6 +218,10 @@ jobs:
       - name: TS damage PID benchmark
         if: ${{ !cancelled() }}
         run: nix develop --command just rs test -p moq-mux benchmark_damage_pid_fanout --run-ignored only --success-output immediate
+
+      - name: Container export benchmark smoke
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs bench-export --test
 
       - name: RTMP chunk-stream benchmark smoke
         if: ${{ !cancelled() }}

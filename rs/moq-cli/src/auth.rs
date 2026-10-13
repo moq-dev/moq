@@ -19,10 +19,18 @@ pub struct Args {
 
 impl Args {
 	/// Run the requested command, writing the key, token, or payload to the chosen
-	/// destination (stdout by default). `serve` runs until killed.
+	/// destination (stdout by default). `serve` runs until SIGINT or SIGTERM.
 	pub async fn run(self) -> anyhow::Result<()> {
 		match self.command {
-			Command::Serve(serve) => serve.run().await?,
+			// A container runs `moq` as PID 1, where a signal without a handler is
+			// dropped. Only `serve` races one: `sign` and `verify` block on stdin, so a
+			// handler would swallow the signal that used to end them. `biased` installs
+			// the handlers before `serve` logs that it is listening.
+			Command::Serve(serve) => tokio::select! {
+				biased;
+				res = crate::shutdown_signal() => res?,
+				res = serve.run() => res?,
+			},
 			Command::Generate {
 				algorithm,
 				id,

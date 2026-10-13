@@ -181,7 +181,7 @@ impl Client {
 			connect.backoff.max = std::time::Duration::from_micros(max);
 		}
 		if let Some(timeout) = backoff.timeout_us {
-			connect.backoff.timeout = std::time::Duration::from_micros(timeout);
+			connect.backoff.timeout = Some(std::time::Duration::from_micros(timeout));
 		}
 
 		let mut quic = moq_tokio::quic::Config::default();

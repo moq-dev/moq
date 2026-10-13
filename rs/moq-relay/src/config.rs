@@ -20,6 +20,14 @@ use crate::{auth, cache, cluster, internal, stats, web};
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct Config {
+	/// Request caps for ordinary client sessions.
+	#[usage(flatten)]
+	pub session: crate::limits::Session,
+
+	/// Request caps for authenticated peers and outgoing cluster links.
+	#[usage(flatten)]
+	pub peer: crate::limits::Peer,
+
 	/// The QUIC/TLS configuration for the server.
 	#[usage(flatten)]
 	#[serde(default)]
@@ -128,6 +136,8 @@ pub struct Config {
 impl Default for Config {
 	fn default() -> Self {
 		Self {
+			session: Default::default(),
+			peer: Default::default(),
 			listen: Default::default(),
 			server: None,
 			connect: Default::default(),
@@ -359,6 +369,39 @@ impl Config {
 mod tests {
 	use super::*;
 	use crate::test_env::EnvGuard;
+
+	#[test]
+	fn session_limits_merge_without_crossing_peer_policy() {
+		let _env = EnvGuard::clear(&[
+			"MOQ_SESSION_ANNOUNCES",
+			"MOQ_SESSION_SUBSCRIPTIONS",
+			"MOQ_PEER_ANNOUNCES",
+			"MOQ_PEER_SUBSCRIPTIONS",
+		]);
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("limits.toml");
+		std::fs::write(
+			&path,
+			"[session]\nannounces = 7\nsubscriptions = 8\n[peer]\nannounces = 90\nsubscriptions = 91\n",
+		)
+		.unwrap();
+		let config = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.clone().into()]).unwrap();
+		assert_eq!(config.session.resolve().announces, 7);
+		assert_eq!(config.session.resolve().subscriptions, 8);
+		assert_eq!(config.peer.resolve().announces, 90);
+		assert_eq!(config.peer.resolve().subscriptions, 91);
+		let config = Config::parse_and_merge([
+			std::ffi::OsString::from("moq-relay"),
+			path.into(),
+			"--session-announces=0".into(),
+			"--peer-subscriptions=1000".into(),
+		])
+		.unwrap();
+		assert_eq!(config.session.resolve().announces, 0);
+		assert_eq!(config.session.resolve().subscriptions, 8);
+		assert_eq!(config.peer.resolve().announces, 90);
+		assert_eq!(config.peer.resolve().subscriptions, 1000);
+	}
 
 	#[cfg(not(feature = "iroh"))]
 	#[test]

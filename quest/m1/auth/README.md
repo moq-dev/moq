@@ -111,8 +111,6 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 ## Required
 
 - [WebSocket refusal](/quest/m1/auth/ws-unauthorized.md) - the relay serves WebSocket through moq-tokio, so a refused token closes the session as Unauthorized, as QUIC does
-- [Relay tokens](/quest/m1/auth/relay-refresh.md) - the relay verifies tokens
-  sent in band, unions their grants, and cancels only work that loses access
 - [Request tokens](/quest/m1/auth/request-token.md) - an experimental Rust
   verifier hook confines a token's authority to its request and renews it
 - [Request gate](/quest/m1/auth/request-gate.md) - every incoming request is

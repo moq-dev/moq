@@ -279,7 +279,10 @@ impl Relay {
 		if generated && let Some(fingerprint) = certificates.fingerprints().into_iter().next() {
 			advertise = advertise.with_fingerprint(fingerprint);
 		}
-		let cluster = cluster::Cluster::new(cluster::Options::new(config.cluster).with_cache(cache))?
+		let mut cluster_options = cluster::Options::new(config.cluster).with_cache(cache);
+		cluster_options.session = config.session;
+		cluster_options.peer = config.peer;
+		let cluster = cluster::Cluster::new(cluster_options)?
 			.with_client(client.clone())
 			.with_client_tls(config.connect.tls.build()?)
 			.with_connect(config.connect.clone(), config.quic.clone())

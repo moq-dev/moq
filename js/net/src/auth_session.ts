@@ -128,6 +128,14 @@ class PeerRequest implements Request {
 		this.#issued = issued;
 	}
 
+	get closed(): Promise<Error | null> {
+		return this.#issued.closed;
+	}
+
+	get ended(): boolean {
+		return this.#issued.ended;
+	}
+
 	accept(grant: Grant): Issued {
 		if (this.#answered) throw new Error("already answered");
 		this.#answered = true;
@@ -144,6 +152,7 @@ class PeerRequest implements Request {
 
 /** Our side of one of the peer's tokens: the grant we issued and its stream. */
 class IssuedGrant implements Issued {
+	ended = false;
 	readonly closed: Promise<Error | null>;
 	#stream: Stream;
 	#wire: AuthWire;
@@ -162,7 +171,10 @@ class IssuedGrant implements Issued {
 			.then(
 				() => null,
 				(err: unknown) => (err instanceof StreamError && err.code === StreamCode.Cancel ? null : error(err)),
-			);
+			)
+			.finally(() => {
+				this.ended = true;
+			});
 	}
 
 	#write(write: () => Promise<void>) {
@@ -204,16 +216,25 @@ class RequestQueue implements Requests {
 	#waiters: ((request: PeerRequest | undefined) => void)[] = [];
 	#closed = false;
 
-	push(request: PeerRequest): boolean {
-		if (this.#closed) return false;
+	/** Queue the token for the application, or refuse it when closed or full. */
+	push(request: PeerRequest): void {
+		if (this.#closed) {
+			request.reject(SessionCode.Unauthorized, "not accepting tokens");
+			return;
+		}
+		if (this.#queue.length >= 128) this.#queue = this.#queue.filter((queued) => !queued.ended);
+		if (this.#queue.length >= 128) {
+			request.reject(SessionCode.TooManyRequests, "too many pending tokens");
+			return;
+		}
 		const waiter = this.#waiters.shift();
 		if (waiter) waiter(request);
 		else this.#queue.push(request);
-		return true;
 	}
 
 	next(): Promise<Request | undefined> {
-		const next = this.#queue.shift();
+		let next = this.#queue.shift();
+		while (next?.ended) next = this.#queue.shift();
 		if (next || this.#closed) return Promise.resolve(next);
 		return new Promise((resolve) => this.#waiters.push(resolve));
 	}
@@ -323,7 +344,7 @@ export class AuthSession implements AuthApi {
 		const issued = new IssuedGrant(stream, wire);
 		if (this.#acceptor instanceof RequestQueue) {
 			const request = new PeerRequest(token, issued);
-			if (!this.#acceptor.push(request)) request.reject(SessionCode.Unauthorized, "not accepting tokens");
+			this.#acceptor.push(request);
 		} else if (token.byteLength > 0) {
 			// Only the connection's own credential has a default answer; a token needs
 			// someone to verify it.
