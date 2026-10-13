@@ -117,6 +117,7 @@ the feature that needs them.
 - [Drain web connections from accept](/quest/m1/drain-web-accept.md) - a relay drain never exits under an HTTP/1.1 WebSocket client still in TLS or header parsing
 - [Transport upgrade](/quest/m1/transport-upgrade/README.md) - a session that came up over WebSocket moves to QUIC once the QUIC dial lands, handing over without dropping a group
 - [Scope track priority](/quest/m1/track-priority-scope.md) - priority orders one owner's streams, and a shared cluster session is fair across tenants
+- [io_uring CI](/quest/m1/uring-ci.md) - PRs touching io_uring code run `just rs uring` on a 6.12+ kernel runner
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the playout target is default in both languages; a manual browser proof and a native trace replay remain
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
 - [Plan: watch worker](/quest/m1/plan-watch-worker.md) - prototype an invisible page worker against app-spawned workers, and land the jank harness that decides
@@ -125,6 +126,7 @@ the feature that needs them.
 - [Duration parser defaults](/quest/m1/cli-duration-defaults.md) - a moq-tokio duration set in code beats the parser default on a parsed or merged config, zero included, after #5350
 - [Publish channel count](/quest/m1/publish-audio-channel-count.md) - forcing a channel count on an Audio.Capture stops costing the subscriber gaps of silence
 - [JS request deadline](/quest/m1/js-request-deadline.md) - each JS request, PUBLISH_NAMESPACE included, has one fatal 10 s timer from create to answer and fails fast without stream credit, so nothing queues or retries
+- [Handshake deadline covers admission](/quest/m1/handshake-admission-deadline.md) - `listen.timeout` bounds a connection through auth admission on both listeners, replacing the hardcoded admission timeout
 - [JS cancellation bench](/quest/m1/js-forget-bench.md) - the requests bench sweeps cancellation over competing dynamic routes, so a per-cancel cost that grows with routes shows as a slope
 - [Rust request credit](/quest/m1/rs-request-credit.md) - a moq-net request fails at once without stream credit instead of waiting
 - [qmux no-wait opens](/quest/m1/qmux-no-wait.md) - @moq/qmux rejects an over-limit create when waitUntilAvailable is false, like Chrome
