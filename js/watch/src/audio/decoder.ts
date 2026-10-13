@@ -13,6 +13,7 @@ import {
 	readonlys,
 	Signal,
 } from "@moq/signals";
+import { Producer as ArrivalProducer, type Arrivals, gap } from "../arrivals";
 import { hostedAssets } from "../assets";
 import { base64ToBytes } from "../base64";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
@@ -136,6 +137,9 @@ export class Decoder {
 
 	// The broadcast instance the ring's timeline belongs to. See #runDecoder.
 	#instance?: Moq.Broadcast.Consumer["closed"];
+
+	// Fans received frames out to open `arrivals()` handles; retains nothing without one.
+	#arrivals = new ArrivalProducer();
 
 	#signals = new Effect();
 	#failed?: Failure;
@@ -475,12 +479,14 @@ export class Decoder {
 					decoder.reset();
 					decoder.configure(decoderConfig);
 				}
+				if (next.kind === "gap") this.#arrivals.write(gap(next));
 				if (next.kind !== "frame") continue;
 				const { frame } = next;
 
-				// Mark that we received this frame right now.
+				// Classify ingress before decoder backpressure changes the delivery clock.
 				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
-				this.sync.received(timestamp, "audio");
+				const late = this.sync.received(timestamp, "audio", frame.arrival);
+				this.#arrivals.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
 
 				const duration = packetDuration(config.codec, frame);
 				if (duration !== undefined) this.#frame.set(duration);
@@ -581,11 +587,13 @@ export class Decoder {
 					decoder.reset();
 					decoder.configure(decoderConfig);
 				}
+				if (next.kind === "gap") this.#arrivals.write(gap(next));
 				if (next.kind !== "frame") continue;
 				const { frame } = next;
 
 				const timestamp = Time.Milli.fromMicro(frame.timestamp);
-				this.sync.received(timestamp, "audio");
+				const late = this.sync.received(timestamp, "audio", frame.arrival);
+				this.#arrivals.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
 
 				const duration = packetDuration(config.codec, frame);
 				if (duration !== undefined) this.#frame.set(duration);
@@ -736,7 +744,13 @@ export class Decoder {
 		return true;
 	}
 
+	/** Observe every frame and gap received from now until the handle or this decoder closes. */
+	arrivals(): Arrivals {
+		return this.#arrivals.consume();
+	}
+
 	close() {
+		this.#arrivals.close();
 		this.#signals.close();
 	}
 

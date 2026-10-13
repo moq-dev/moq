@@ -149,18 +149,18 @@ export class Sync {
 		this.#out.delay.set(delay);
 	}
 
+	/** Anchor playback from ingress time and report whether the frame arrived late. */
 	// Fold a newly received frame into the reference. The reference anchors playback to the
 	// wall clock; we lower it (skip ahead) only when keeping it would push the lookahead past `maxDelay`.
-	received(timestamp: Time.Milli, label = ""): void {
+	received(timestamp: Time.Milli, label = "", arrival = Time.Milli.now()): boolean {
 		this.#out.timestamp.update((current) => (current === undefined || timestamp > current ? timestamp : current));
-		const now = Time.Milli.now();
-		const ref = Time.Milli.sub(now, timestamp);
+		const ref = Time.Milli.sub(arrival, timestamp);
 		const currentRef = this.#out.reference.peek();
 
 		// First frame anchors the reference.
 		if (currentRef === undefined) {
 			this.#out.reference.set(ref);
-			return;
+			return false;
 		}
 
 		// Check if `wait()` would not sleep at all.
@@ -187,15 +187,16 @@ export class Sync {
 		}
 
 		// Frame isn't earlier than the anchor: it can't add lookahead, so keep the reference.
-		if (ref >= currentRef) return;
+		if (ref >= currentRef) return sleep < 0;
 
 		// Frame is earlier (more lookahead). `sleep` is how far ahead of the playhead keeping the
 		// anchor would put it.
 		const cap = this.#out.maxDelay.peek();
-		if (sleep <= cap) return; // within budget: let the buffer grow instead of skipping ahead
+		if (sleep <= cap) return sleep < 0; // within budget: let the buffer grow instead of skipping ahead
 
 		// Over the cap: re-anchor down so the resulting lookahead is exactly the cap.
 		this.#out.reference.set(Time.Milli.add(ref, Time.Milli.sub(cap, delay)));
+		return sleep < 0;
 	}
 
 	// Re-anchor playback to the next frame received. Call this at an utterance boundary

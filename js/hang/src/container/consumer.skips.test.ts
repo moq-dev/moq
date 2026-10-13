@@ -34,7 +34,6 @@ for (const count of [1, 16, 256]) {
 			expect(warn).toHaveBeenLastCalledWith(`skipping slow groups: track=tone 0 -> ${count * 2} count=${count}`);
 			expect(consumer.buffered.peek()[0]?.start).toBe(Time.Milli(count));
 			// The retained group is still delivered, and another catch-up reports separately.
-			expect(await consumer.next()).toEqual({ kind: "gap" });
 			expect(await consumer.next()).toMatchObject({ kind: "frame", group: count * 2 });
 			newest.writeFrame({ payload: Varint.encode(count * 1000), timestamp: Time.Timestamp.now() });
 			write(count * 2 + 2, (count + 1) * 1000);

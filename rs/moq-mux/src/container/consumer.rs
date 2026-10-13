@@ -56,9 +56,10 @@ pub(crate) enum Event {
 ///
 /// ## Gaps and ends
 ///
-/// [`read`](Self::read) yields [`Read::Gap`] before the first frame and wherever media
+/// [`read`](Self::read) yields [`Read::Gap`] wherever media after an item already read
 /// will never arrive: a latency skip, an evicted current group, or a sequence hole whose
-/// boundary is not contiguous within 1 ms. A marker group (no decodable frames, one empty
+/// boundary is not contiguous within 1 ms. Whatever is lost before the first item is no
+/// gap, since nothing was read before it. A marker group (no decodable frames, one empty
 /// payload) is the publisher declaring a stop, read as [`Read::End`]; nothing is missing.
 /// Empty groups (zero objects) mean nothing. A group whose timestamps fall below the live
 /// edge earlier groups reached is malformed and aborts the track.
@@ -80,9 +81,9 @@ pub struct Consumer<F: Container> {
 	// How far we may drift from the live edge before skipping a group.
 	max_delay: std::time::Duration,
 
-	// The live edge of playback: the largest timestamp delivered so far and the group that
-	// carried it. `None` until the first frame is delivered.
-	live_edge: Option<(u64, Timestamp)>,
+	// The furthest presentation point delivered so far: max(timestamp + duration), endpoints
+	// included. `None` until the first item, so a loss before it is no gap.
+	edge: Option<std::time::Duration>,
 
 	// The first frame delivered from the latest group, and that group. Group starts never go
 	// backwards, so a later group with a frame below this is malformed.
@@ -104,7 +105,6 @@ pub struct Consumer<F: Container> {
 	markers: u64,
 
 	// Media went missing since the last item read, so the next one is preceded by a gap.
-	// Starts set: nothing before the first frame was read.
 	gap: bool,
 
 	// The item a gap was returned ahead of.
@@ -122,6 +122,22 @@ const CONTIGUITY_TOLERANCE: std::time::Duration = std::time::Duration::from_mill
 
 fn pts_contiguous(end: Option<std::time::Duration>, next_start: std::time::Duration) -> bool {
 	end.is_some_and(|end| next_start <= end.saturating_add(CONTIGUITY_TOLERANCE))
+}
+
+/// A gap from the delivered `edge` to `resume`, in the resume's scale.
+fn gap(edge: std::time::Duration, resume: Timestamp) -> Read {
+	let scale = resume.scale();
+	// A next group may start before the edge (an overlapping endpoint), so the span bottoms out at zero.
+	let start = edge
+		.as_nanos()
+		.saturating_mul(scale.as_u64() as u128)
+		.div_euclid(1_000_000_000)
+		.min(resume.value() as u128) as u64;
+	let timestamp = Timestamp::new(start, scale).expect("at or below a valid timestamp");
+	let duration = resume
+		.checked_sub(timestamp)
+		.expect("at or below the resume, in its scale");
+	Read::Gap { timestamp, duration }
 }
 
 impl<F: Container> Consumer<F> {
@@ -150,13 +166,13 @@ impl<F: Container> Consumer<F> {
 			pending: VecDeque::new(),
 			startup: start.is_none(),
 			max_delay,
-			live_edge: None,
+			edge: None,
 			start: None,
 			floor: None,
 			presented_end: None,
 			discontinuity: 0,
 			markers: 0,
-			gap: true,
+			gap: false,
 			next: None,
 			group: 0,
 		}
@@ -194,7 +210,7 @@ impl<F: Container> Consumer<F> {
 		loop {
 			match self.read().await? {
 				Some(Read::Frame { frame, .. }) => return Ok(Some(frame)),
-				Some(Read::Gap | Read::End { .. }) => continue,
+				Some(Read::Gap { .. } | Read::End { .. }) => continue,
 				None => return Ok(None),
 			}
 		}
@@ -209,6 +225,8 @@ impl<F: Container> Consumer<F> {
 			return Poll::Ready(Ok(Some(read)));
 		}
 		loop {
+			// Where delivered media reached before this item, which moves the edge.
+			let edge = self.edge;
 			let read = match ready!(self.poll_event(waiter))? {
 				Some(Event::Frame(frame)) => Read::Frame {
 					group: self.group,
@@ -219,9 +237,16 @@ impl<F: Container> Consumer<F> {
 				Some(Event::FrameEnd { opens: false, .. } | Event::GroupEnd) => continue,
 				None => return Poll::Ready(Ok(None)),
 			};
-			if std::mem::take(&mut self.gap) {
+			let resume = match &read {
+				Read::Frame { frame, .. } => frame.timestamp,
+				Read::End { end, .. } => *end,
+				Read::Gap { .. } => unreachable!("events never read as a gap"),
+			};
+			if std::mem::take(&mut self.gap)
+				&& let Some(edge) = edge
+			{
 				self.next = Some(read);
-				return Poll::Ready(Ok(Some(Read::Gap)));
+				return Poll::Ready(Ok(Some(gap(edge, resume))));
 			}
 			return Poll::Ready(Ok(Some(read)));
 		}
@@ -282,21 +307,15 @@ impl<F: Container> Consumer<F> {
 						if self.start.is_none_or(|(start, _)| start != seq) {
 							self.start = Some((seq, ts));
 						}
-						if self.live_edge.is_none_or(|(_, high)| ts.as_micros() > high.as_micros()) {
-							self.live_edge = Some((seq, ts));
-						}
+						let end = std::time::Duration::from(ts)
+							+ frame.duration.map(std::time::Duration::from).unwrap_or_default();
+						self.advance(end);
 						self.group = seq;
 						return Poll::Ready(Ok(Some(Event::Frame(frame))));
 					}
 					Poll::Ready(Ok(Some(Event::FrameEnd { end, opens }))) => {
-						let seq = group.group.sequence;
-						if self
-							.live_edge
-							.is_none_or(|(_, high)| end.as_micros() > high.as_micros())
-						{
-							self.live_edge = Some((seq, end));
-						}
-						self.group = seq;
+						self.group = group.group.sequence;
+						self.advance(end.into());
 						return Poll::Ready(Ok(Some(Event::FrameEnd { end, opens })));
 					}
 					Poll::Ready(Ok(Some(event))) => return Poll::Ready(Ok(Some(event))),
@@ -487,6 +506,12 @@ impl<F: Container> Consumer<F> {
 	fn lose(&mut self) {
 		self.bump_playhead();
 		self.gap = true;
+	}
+
+	fn advance(&mut self, end: std::time::Duration) {
+		if self.edge.is_none_or(|edge| end > edge) {
+			self.edge = Some(end);
+		}
 	}
 
 	fn note_group_edge(&mut self) {
@@ -951,13 +976,14 @@ mod tests {
 		group.finish().unwrap();
 	}
 
-	/// Every item until the track ends: a frame as its timestamp in µs, a gap, or an end.
+	/// Every item until the track ends: a frame as its timestamp in µs, a gap as its start and
+	/// span in µs, or an end.
 	async fn items(consumer: &mut Consumer<Container>) -> Vec<String> {
 		let mut items = Vec::new();
 		while let Some(read) = consumer.read().await.unwrap() {
 			items.push(match read {
 				Read::Frame { frame, .. } => frame.timestamp.as_micros().to_string(),
-				Read::Gap => "gap".to_string(),
+				Read::Gap { timestamp, duration } => format!("gap {}+{}", timestamp.as_micros(), duration.as_micros()),
 				Read::End { end, .. } => format!("end {}", end.as_micros()),
 			});
 		}
@@ -980,12 +1006,31 @@ mod tests {
 				.expect("the end is read while the track stays open")
 				.unwrap()
 		};
-		assert!(matches!(read().await, Some(Read::Gap)));
 		assert!(matches!(read().await, Some(Read::End { group: 16, end }) if end == ts(1_000_000)));
 	}
 
+	/// A gap runs from the delivered edge to the resume point, in the resume's scale, and
+	/// never past it.
+	#[test]
+	fn a_gap_spans_the_edge_to_the_resume_in_its_scale() {
+		let scale = moq_net::Timescale::new(90_000).unwrap();
+		let resume = Timestamp::new(90_000, scale).unwrap();
+		let Read::Gap { timestamp, duration } = gap(Duration::from_millis(500), resume) else {
+			unreachable!()
+		};
+		assert_eq!(timestamp, Timestamp::new(45_000, scale).unwrap());
+		assert_eq!(duration, Timestamp::new(45_000, scale).unwrap());
+
+		// A next group overlapping the edge leaves an empty span at the resume point.
+		let Read::Gap { timestamp, duration } = gap(Duration::from_secs(2), resume) else {
+			unreachable!()
+		};
+		assert_eq!(timestamp, resume);
+		assert_eq!(duration, Timestamp::new(0, scale).unwrap());
+	}
+
 	#[tokio::test]
-	async fn gaps_mark_the_join_and_holes_while_a_marker_reads_as_an_end() {
+	async fn gaps_mark_holes_while_a_marker_reads_as_an_end() {
 		let mut track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let subscription =
 			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10)));
@@ -998,10 +1043,11 @@ mod tests {
 		assert_eq!(
 			items(&mut reader).await,
 			[
-				"gap",
+				// Nothing was read before the join, so it is no gap. Legacy carries no duration, so
+				// the hole starts at the last frame read.
 				"0",
 				"10000",
-				"gap",
+				"gap 10000+990000",
 				"1000000",
 				"1010000",
 				"end 1020000",
@@ -1021,7 +1067,7 @@ mod tests {
 		write_group(&mut track, 0, &[ts(0)]);
 		write_group(&mut track, 3, &[ts(1_000_000)]);
 		track.finish().unwrap();
-		assert_eq!(items(&mut reader).await, ["gap", "0", "gap", "1000000"]);
+		assert_eq!(items(&mut reader).await, ["0", "gap 0+1000000", "1000000"]);
 	}
 
 	/// A video group's trailing duration marker is that frame's end, not a declared stop.
@@ -1051,7 +1097,7 @@ mod tests {
 			group.finish().unwrap();
 		}
 		track.finish().unwrap();
-		assert_eq!(items(&mut reader).await, ["gap", "0", "33000"]);
+		assert_eq!(items(&mut reader).await, ["0", "33000"]);
 	}
 
 	/// An audio terminal opens its group with the endpoint, then the codec's final packets.
@@ -1077,7 +1123,7 @@ mod tests {
 			.unwrap();
 		group.finish().unwrap();
 		track.finish().unwrap();
-		assert_eq!(items(&mut reader).await, ["gap", "0", "20000", "end 50000", "40000"]);
+		assert_eq!(items(&mut reader).await, ["0", "20000", "end 50000", "40000"]);
 	}
 
 	#[tokio::test]
@@ -1351,7 +1397,7 @@ mod tests {
 		let read = |consumer: &mut Consumer<Container>| loop {
 			match consumer.poll_read(&waiter) {
 				Poll::Ready(Ok(Some(Read::Frame { frame, .. }))) => break Some(frame.timestamp),
-				Poll::Ready(Ok(Some(Read::Gap))) => continue,
+				Poll::Ready(Ok(Some(Read::Gap { .. }))) => continue,
 				Poll::Pending => break None,
 				other => panic!("unexpected read: {other:?}"),
 			}
@@ -2001,7 +2047,10 @@ mod tests {
 			.expect("consumer hung on an evicted group / gap")
 			.unwrap()
 			.unwrap();
-		assert!(matches!(next, Read::Gap), "the evicted media is a gap");
+		assert!(
+			matches!(next, Read::Gap { timestamp, duration } if timestamp == ts(0) && duration == ts(150_000)),
+			"the evicted media is a gap from the last frame to the live group: {next:?}"
+		);
 		let next = consumer.read_frame().await.unwrap().unwrap();
 		assert_eq!(next.timestamp, ts(150_000), "skipped the evicted gap to the live group");
 	}
