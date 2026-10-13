@@ -62,7 +62,6 @@ above them.
 - [qmux credit](/quest/m0/qmux-credit.md) - dropped/stopped streams return credit and close is delivered
 
 - [Restart followers](/quest/m1/restart-followers.md) - first-party consumers follow an epochless `Restart`, from a GOAWAY drain or a publisher replacement, by resolving the path again
-- [Cross-node flapping](/quest/m1/cross-node-flapping.md) - incident-sensitive baseline and residual stale-revival counterexamples before the route rewrite
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
 - [P2P](/quest/m1/p2p/README.md) - application-selected peer sessions use shared priorities, routing, and same-epoch handover
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation/P2P setup

@@ -94,7 +94,6 @@ setup after the capabilities land.
 - [Route health](/quest/m2/route-health/README.md) - epoch-only active/passive delivery monitoring and automatic recovery
 - [P2P](/quest/m1/p2p/README.md) - application-selected peer sessions feed the shared routing model
 - [Routing guide](/quest/m1/routing-guide.md) - concept page and practical federation/P2P setup
-- [Cross-node flapping](/quest/m1/cross-node-flapping.md) - incident-sensitive regressions for residual withdrawal hunting
 - [Route wakes](/quest/m2/route-wakes.md) - local work follows affected fronts rather than the whole covered table
 - [Link quality](/quest/m2/link-quality.md) - optional measured link cost, distinct from delivery-health failover
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - independent origins serving the same explicit epoch
