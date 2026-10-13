@@ -543,7 +543,7 @@ fn serve_worker(spawn: Spawn) -> bool {
 			.context("failed to adopt the worker socket")?;
 		let mut endpoint_config = moq_uring::quic::endpoint::Config::default().with_server(server);
 		endpoint_config.activity = serve.shutdown.activity.clone();
-		endpoint_config.handshake_timeout = serve.timeout;
+		endpoint_config.handshake.timeout = serve.timeout;
 		let endpoint =
 			moq_uring::quic::Endpoint::new(socket, endpoint_config).context("failed to build the QUIC endpoint")?;
 		Ok((worker, endpoint))
@@ -603,7 +603,7 @@ struct Deadline {
 impl Deadline {
 	fn new(handle: &moq_uring::Handle, conn: &moq_uring::quic::Connection) -> Self {
 		let mut timer = handle.timer();
-		timer.set(conn.handshake_deadline());
+		timer.set(conn.handshake().deadline);
 		Self { timer, close: None }
 	}
 

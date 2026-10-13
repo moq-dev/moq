@@ -285,8 +285,7 @@ pub struct Connection {
 	server_name: Option<String>,
 	/// The peer's address when the handshake completed.
 	remote: SocketAddr,
-	/// When the accepting endpoint wants the whole handshake done.
-	handshake_deadline: Option<Instant>,
+	handshake: crate::quic::handshake::Info,
 }
 
 impl Connection {
@@ -333,12 +332,10 @@ impl Connection {
 		self.server_name.as_deref()
 	}
 
-	/// When the handshake, including whatever the application layers on top
-	/// of QUIC, must be done, from the accepting endpoint's
-	/// [`handshake_timeout`](crate::quic::endpoint::Config::handshake_timeout).
-	/// `None` on a dialed connection or without a timeout.
-	pub fn handshake_deadline(&self) -> Option<Instant> {
-		self.handshake_deadline
+	/// The handshake this connection went through, and when all of it must be
+	/// done.
+	pub fn handshake(&self) -> &crate::quic::handshake::Info {
+		&self.handshake
 	}
 }
 
@@ -350,7 +347,7 @@ impl Clone for Connection {
 			alpn: self.alpn.clone(),
 			server_name: self.server_name.clone(),
 			remote: self.remote,
-			handshake_deadline: self.handshake_deadline,
+			handshake: self.handshake,
 		}
 	}
 }
@@ -466,7 +463,7 @@ pub(crate) async fn establish(shared: Shared, deadline: Option<Instant>) -> Resu
 		alpn,
 		server_name,
 		remote,
-		handshake_deadline: deadline,
+		handshake: crate::quic::handshake::Info { deadline },
 	};
 	guard.shared = None;
 	Ok(conn)

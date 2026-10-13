@@ -134,8 +134,9 @@ impl Request {
 	///
 	/// Everything the session later spawns runs on the worker already driving
 	/// `conn`. No deadline here: a caller bounding the handshake, say by
-	/// [`Connection::handshake_deadline`], drops this future, which closes
-	/// the connection with an HTTP/3 error, even if it was never polled.
+	/// [`Info::deadline`](super::handshake::Info::deadline), drops this
+	/// future, which closes the connection with an HTTP/3 error, even if it
+	/// was never polled.
 	pub fn accept(conn: Connection) -> impl Future<Output = Result<Self, Error>> {
 		// The endpoint and driver retain this connection after the future is
 		// dropped. Own its close before returning, not at the first poll, so a

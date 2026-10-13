@@ -50,14 +50,8 @@ pub struct Config {
 	/// a handshake fails.
 	pub backlog: usize,
 
-	/// How long an incoming connection has from its first packet to finish
-	/// its handshake, or `None` (the default) for no bound but the idle
-	/// timeout.
-	///
-	/// The endpoint closes a QUIC handshake still running at the deadline,
-	/// and hands the rest of it to the layers above as
-	/// [`Connection::handshake_deadline`](super::Connection::handshake_deadline).
-	pub handshake_timeout: Option<std::time::Duration>,
+	/// How incoming handshakes are bounded.
+	pub handshake: super::handshake::Config,
 }
 
 impl Default for Config {
@@ -66,7 +60,7 @@ impl Default for Config {
 			server: None,
 			activity: Default::default(),
 			backlog: 1024,
-			handshake_timeout: None,
+			handshake: Default::default(),
 		}
 	}
 }

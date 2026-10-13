@@ -54,7 +54,7 @@ pub(crate) struct Inner {
 	/// bounded by [`Config::backlog`].
 	pending: Cell<usize>,
 	backlog: usize,
-	handshake_timeout: Option<std::time::Duration>,
+	handshake: crate::quic::handshake::Config,
 	/// Live [`Endpoint`] handles; at zero the endpoint winds down (no new
 	/// accepts or dials, existing connections served until they end).
 	handles: Cell<usize>,
@@ -113,7 +113,7 @@ impl Endpoint {
 			conns: RefCell::new(FxHashMap::default()),
 			pending: Cell::new(0),
 			backlog: config.backlog,
-			handshake_timeout: config.handshake_timeout,
+			handshake: config.handshake,
 			handles: Cell::new(1),
 			closed: RefCell::new(None),
 			task_waiters: RefCell::new(kio::WaiterList::new()),
@@ -340,7 +340,7 @@ impl Inner {
 		};
 		buf.clear();
 		let now = Instant::now();
-		let deadline = self.handshake_timeout.and_then(|timeout| now.checked_add(timeout));
+		let deadline = self.handshake.timeout.and_then(|timeout| now.checked_add(timeout));
 		let accepted = self.endpoint.borrow_mut().accept(incoming, now, buf, None);
 		let (key, conn) = match accepted {
 			Ok(accepted) => accepted,
