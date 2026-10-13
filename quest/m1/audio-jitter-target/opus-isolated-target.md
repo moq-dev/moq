@@ -13,7 +13,7 @@ scheduled nightlies of 2026-10-07 to 2026-10-13: Opus near-zero on the
 isolated ring reached a `target_ms_p95` of 100 to 800 ms with underrun
 episodes of about 1 s, while the postMessage ring on the same profile held at
 60 ms. A network with almost no jitter should not grow the target, so the
-difference points at the isolated page's path, not the estimator.
+first suspect is the isolated page's path rather than the estimator.
 
 Start after #5442 merges: it uploads the nightly artifacts and carries the
 measured budgets this quest tightens.
