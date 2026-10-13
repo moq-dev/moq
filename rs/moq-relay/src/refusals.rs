@@ -17,7 +17,7 @@ pub(crate) enum Refusal {
 	Refused,
 	/// The decider could not answer: the auth server was unreachable or answered
 	/// with neither a grant nor a refusal, a decider sent a grant the relay cannot
-	/// use, or an embedder did not answer.
+	/// use, or an embedder did not answer (in time, or before the drain deadline).
 	Unavailable,
 	/// An embedder refused the request as one it cannot decide. The relay's own
 	/// deciders never answer this way.

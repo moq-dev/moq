@@ -60,8 +60,8 @@ public final class AudioProducer: Sendable {
     }
 
     /// Re-anchor the timeline to the next frame after an idle gap.
-    public func resetEpoch() throws {
-        try ffi.resetEpoch()
+    public func reanchor() throws {
+        try ffi.reanchor()
     }
 
     /// Encode and write one PCM frame.

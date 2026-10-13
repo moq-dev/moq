@@ -117,3 +117,5 @@ on its own; losing the relay connection posts an error. Properties: `url`,
 `broadcast`, `tls-disable-verify`.
 
 Debug with `GST_DEBUG=*:4` for GStreamer and `RUST_LOG=debug` for the plugin.
+
+`moqsrc` creates source pads only for enabled renditions. Disabling a rendition stops its media and holds its pad idle without EOS; enabling it again resumes on the same pad.

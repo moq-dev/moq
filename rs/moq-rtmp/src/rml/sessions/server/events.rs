@@ -97,6 +97,9 @@ pub enum ServerSessionEvent {
 		additional_values: Vec<Amf0Value>,
 	},
 
+	/// The client sent an Amf0 data message that isn't stream metadata, such as `onCuePoint`
+	UnhandleableAmf0Data { values: Vec<Amf0Value> },
+
 	/// The client is requesting playback of the specified stream
 	PlayStreamRequested {
 		request_id: u32,

@@ -13,6 +13,12 @@ at raw-sample precision.
 
 ## Plan
 
+Main-side draft implements the sparse version 1 histogram and interval bounds.
+Remaining: after the main PR merges, backport the landed commit and any missing
+#5021 interval delta to release in a separate draft. Do not cherry-pick an
+unlanded main draft; keep this quest until the backport exists.
+
+
 Decided 2026-10-05 by the maintainer: percentiles neither window nor merge,
 and a load harness sums several generators against one relay, so the bench
 emits mergeable buckets.

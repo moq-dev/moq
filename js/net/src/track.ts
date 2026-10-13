@@ -5,9 +5,10 @@
  */
 import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type { Datagram } from "./datagram.ts";
-import { GroupTooLarge, TimestampMismatch, TooFarBehind } from "./error.ts";
+import { GroupTooLarge, ProtocolViolation, TimestampMismatch, TooFarBehind } from "./error.ts";
 import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import {
+	finalSequence,
 	groupBounds,
 	hooks,
 	type Recv,
@@ -41,7 +42,13 @@ const MAX_DATAGRAMS = 64;
  */
 const MAX_DATAGRAM_BYTES = 65535;
 
-/** A position within a track: a group's sequence and a frame's index inside it. */
+/**
+ * A position within a track: a group's sequence and a frame's index inside it.
+ *
+ * As a track's end it is exclusive: `{ group: 90, frame: 0 }` ends before group 90, and
+ * `{ group: 89, frame: 5 }` ends group 89 after its frames 0 to 4. Mirrors the Rust
+ * `track::Position`.
+ */
 export interface Location {
 	/** The group's sequence number within the track. */
 	group: number;
@@ -359,12 +366,12 @@ class TrackState {
 	// One past the highest group or datagram received, including evicted content.
 	received = new Signal(0);
 	/**
-	 * The exclusive final boundary, declared by {@link Producer.finishAt} or stamped by a
-	 * clean close as one past the highest sequence produced. Groups and datagrams share the
-	 * namespace, so this can exceed `latest + 1` (which only tracks groups). Mirrors the
-	 * Rust `final_sequence`.
+	 * The exclusive end, declared by {@link Producer.finishAt} or stamped by a clean close
+	 * at the head of the sequence after the highest produced. Groups and datagrams share
+	 * the namespace, so it can sit past `latest + 1` (which only tracks groups). Mirrors
+	 * the Rust `end`.
 	 */
-	final = new Signal<number | undefined>(undefined);
+	end = new Signal<Location | undefined>(undefined);
 	closed = new Once<Error | null>();
 	update: Signal<Subscription | undefined>;
 	/** Resolved once the producer commits the immutable properties. */
@@ -545,6 +552,7 @@ export class Producer {
 	}
 
 	static {
+		hooks.endTrack = (producer, end) => producer.#endPending(end);
 		bindProducerSequence = (producer, sequence) => {
 			producer.#sequence = sequence;
 		};
@@ -685,7 +693,7 @@ export class Producer {
 		for (const entry of this.#cache) this.#mirror(entry, sink);
 
 		sink.received.set(this.#received);
-		sink.final.set(this.#state.final.peek());
+		sink.end.set(this.#state.end.peek());
 		if (closed !== undefined) {
 			closeTrackState(sink, closed instanceof Error ? closed : undefined);
 		}
@@ -854,10 +862,16 @@ export class Producer {
 	// Refuse a write once the track is closed, or at or past its declared end.
 	#writable(sequence: number): void {
 		if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
-		const final = this.#state.final.peek();
-		if (final !== undefined && sequence >= final) {
-			throw new Error(`sequence ${sequence} is at or past the track's end ${final}`);
+		const end = this.#state.end.peek();
+		if (end !== undefined && sequence >= finalSequence(end)) {
+			throw new Error(`sequence ${sequence} is at or past the track's end ${end.group}/${end.frame}`);
 		}
+	}
+
+	// Cap a group the end cuts, so it never holds a frame past the end.
+	#cap(group: GroupProducer): void {
+		const end = this.#state.end.peek();
+		if (end !== undefined && end.frame !== 0 && end.group === group.sequence) hooks.limitGroup(group, end.frame);
 	}
 
 	/**
@@ -871,6 +885,7 @@ export class Producer {
 		this.#writable(sequence.next);
 		const group = new GroupProducer(sequence.next);
 		this.#bind(group);
+		this.#cap(group);
 		sequence.next = group.sequence + 1;
 		this.#publish(group);
 
@@ -890,6 +905,7 @@ export class Producer {
 	writeGroup(group: GroupProducer) {
 		this.#writable(group.sequence);
 		this.#bind(group);
+		this.#cap(group);
 
 		const existing = this.#cached.get(group.sequence);
 		if (existing) {
@@ -972,27 +988,49 @@ export class Producer {
 	 * Declare the track's exclusive end, possibly ahead of the live edge, mirroring the Rust
 	 * `finish_at`.
 	 *
-	 * `final` is the first sequence that will never be produced, so a track whose last group
-	 * is 89 finishes at 90. Groups and datagrams below it are still accepted; anything at or
-	 * above it is refused. Unlike {@link close} it is not terminal: call `close()` once the
-	 * remaining groups are written. Readers end once the live edge reaches the boundary,
-	 * independently of closure. Throws if the track is closed, already has an end, or
-	 * `final` is at or below a sequence already produced.
+	 * `end` is the first position that will never be produced: a track whose last group is
+	 * 89 finishes at `{ group: 90, frame: 0 }`, and `{ group: 89, frame: 5 }` also caps group
+	 * 89 at frames 0 to 4. Groups, frames, and datagrams below it are still accepted; anything
+	 * at or past it is refused. Unlike {@link close} it is not terminal: call `close()` once
+	 * the remaining groups are written. Readers end once the live edge reaches the end's
+	 * group, independently of closure. Throws if the track is closed, already has an end, or
+	 * `end` would orphan a group or frame already produced.
 	 */
-	finishAt(final: number): void {
+	finishAt(end: Location): void {
 		if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
-		if (!Number.isSafeInteger(final) || final < 0) throw new RangeError(`invalid track end: ${final}`);
-		const declared = this.#state.final.peek();
-		if (declared !== undefined) throw new Error(`track already ends at ${declared}`);
-		if (final < this.#received) {
-			throw new Error(`track end ${final} is below the next sequence ${this.#received}`);
-		}
-		this.#declareFinal(final);
+		const declared = this.#state.end.peek();
+		if (declared !== undefined) throw new Error(`track already ends at ${declared.group}/${declared.frame}`);
+		this.#declareEnd(end);
 	}
 
-	#declareFinal(final: number): void {
-		this.#state.final.set(final);
-		for (const sink of this.#sinks) sink.final.set(final);
+	// The wire's end: repeating it is a no-op, and a mid-group end may refine the group
+	// boundary it falls just before. Mirrors the Rust `finish_at_pending`.
+	#endPending(end: Location): void {
+		const declared = this.#state.end.peek();
+		if (declared === undefined) {
+			this.finishAt(end);
+		} else if (declared.group !== end.group || declared.frame !== end.frame) {
+			if (declared.frame !== 0 || end.frame === 0 || finalSequence(end) !== declared.group) {
+				throw new ProtocolViolation(`conflicting track end: ${end.group}/${end.frame}`);
+			}
+			this.#declareEnd(end);
+		}
+	}
+
+	#declareEnd(end: Location): void {
+		const { group, frame } = end;
+		if (!Number.isSafeInteger(group) || group < 0 || !Number.isSafeInteger(frame) || frame < 0) {
+			throw new RangeError(`invalid track end: ${group}/${frame}`);
+		}
+		const final = finalSequence(end);
+		if (final < this.#received) {
+			throw new ProtocolViolation(`track end ${group}/${frame} is below the next sequence ${this.#received}`);
+		}
+		const cut = frame === 0 ? undefined : this.#cached.get(group)?.group;
+		if (cut) hooks.limitGroup(cut, frame);
+		end = { group, frame };
+		this.#state.end.set(end);
+		for (const sink of this.#sinks) sink.end.set(end);
 	}
 
 	/**
@@ -1008,8 +1046,8 @@ export class Producer {
 	close(abort?: Error) {
 		if (this.#state.closed.peek() !== undefined) return;
 		if (abort && this.#settled()) abort = undefined;
-		if (abort === undefined && this.#state.final.peek() === undefined) {
-			this.#declareFinal(this.#received);
+		if (abort === undefined && this.#state.end.peek() === undefined) {
+			this.#declareEnd({ group: this.#received, frame: 0 });
 		}
 		// Nobody will finish these, so a subscriber that has not taken one yet never sees it.
 		// Not evicted: a reader already holding one keeps its frames and sees the abort.
@@ -1032,8 +1070,10 @@ export class Producer {
 	// Whether the declared end was reached and every cached group below it finished, so
 	// the track already holds everything it promised. Mirrors the Rust `is_settled`.
 	#settled(): boolean {
-		const final = this.#state.final.peek();
-		if (final === undefined || this.#received < final) return false;
+		const end = this.#state.end.peek();
+		if (end === undefined) return false;
+		const final = finalSequence(end);
+		if (this.#received < final) return false;
 		return this.#cache.every(({ group }) => group.sequence >= final || group.closed.peek() === null);
 	}
 
@@ -1268,34 +1308,33 @@ export class Subscriber {
 	}
 
 	/**
-	 * The track's exclusive final boundary: the end {@link Producer.finishAt} declared, which
-	 * can be ahead of the live edge, or one past the highest sequence produced once the
-	 * producer closes cleanly (0 for a track that produced none). Groups and datagrams share
-	 * the sequence namespace, so this can exceed `latest() + 1`. Undefined until declared,
-	 * and after an abort that declared none.
+	 * The track's exclusive end: the one {@link Producer.finishAt} declared, which can be
+	 * ahead of the live edge, or the head of the sequence after the highest produced once the
+	 * producer closes cleanly (`{ group: 0, frame: 0 }` for a track that produced none).
+	 * Groups and datagrams share the sequence namespace, so it can sit past `latest() + 1`.
+	 * Undefined until declared, and after an abort that declared none. Mirrors the Rust `end`.
 	 */
-	final(): number | undefined {
-		return this.#state.final.peek();
+	end(): Location | undefined {
+		return this.#state.end.peek();
 	}
 
 	/**
-	 * Resolve with the track's exclusive final boundary once it is known, mirroring the Rust
-	 * `finished`.
+	 * Resolve with the track's exclusive end once it is known, mirroring the Rust `finished`.
 	 *
 	 * Resolves as soon as the end is declared, which may be ahead of the live edge, so it
 	 * says nothing about every group having arrived: read until the cursor returns
 	 * `undefined` for that. Rejects with the abort, or if the track closes without an end.
 	 */
-	async finished(): Promise<number> {
+	async finished(): Promise<Location> {
 		for (;;) {
-			const final = this.#state.final.peek();
-			if (final !== undefined) return final;
+			const end = this.#state.end.peek();
+			if (end !== undefined) return end;
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;
 			if (closed !== undefined) throw new Error("track closed before its end was known");
 
-			await Signal.race(this.#state.final, this.#state.closed);
+			await Signal.race(this.#state.end, this.#state.closed);
 		}
 	}
 
@@ -1420,7 +1459,7 @@ export class Subscriber {
 				this.#state.groups,
 				this.#cursor,
 				this.#state.closed,
-				this.#state.final,
+				this.#state.end,
 				this.#state.received,
 			);
 		}
@@ -1459,8 +1498,8 @@ export class Subscriber {
 	// Reader completion does not settle the tail: missing lower groups and open streams
 	// remain accounted for by the wire layer, and an abort still wins on the next read.
 	#complete(): boolean {
-		const final = this.#state.final.peek();
-		return final !== undefined && this.#state.received.peek() >= final;
+		const end = this.#state.end.peek();
+		return end !== undefined && this.#state.received.peek() >= finalSequence(end);
 	}
 
 	// Package-internal readiness half of recvGroup. Each registration fires at most once, and
@@ -1471,7 +1510,7 @@ export class Subscriber {
 			this.#state.groups.changed(fn),
 			this.#cursor.changed(fn),
 			this.#state.closed.changed(fn),
-			this.#state.final.changed(fn),
+			this.#state.end.changed(fn),
 			this.#state.received.changed(fn),
 		];
 		return () => {
@@ -1529,7 +1568,7 @@ export class Subscriber {
 			if (closed instanceof Error) throw closed;
 			if (closed !== undefined || this.#complete()) return undefined;
 
-			await Signal.race(this.#state.datagrams, this.#state.closed, this.#state.final, this.#state.received);
+			await Signal.race(this.#state.datagrams, this.#state.closed, this.#state.end, this.#state.received);
 		}
 	}
 
@@ -1568,8 +1607,11 @@ export class Subscriber {
 			// A group parked above the cap stays deliverable even after a clean close
 			// (its frames remain buffered), so keep waiting for a cap raise. Only a
 			// drained track reports finished.
-			const final = this.#state.final.peek();
-			if (!groups[0] && (closed !== undefined || this.#complete() || (final !== undefined && start >= final))) {
+			const end = this.#state.end.peek();
+			if (
+				!groups[0] &&
+				(closed !== undefined || this.#complete() || (end !== undefined && start >= finalSequence(end)))
+			) {
 				return undefined;
 			}
 
@@ -1577,7 +1619,7 @@ export class Subscriber {
 				this.#state.groups,
 				this.#cursor,
 				this.#state.closed,
-				this.#state.final,
+				this.#state.end,
 				this.#state.received,
 			);
 		}
@@ -1731,13 +1773,13 @@ export class Ordered {
 		return this.#subscriber.latest();
 	}
 
-	/** The track's exclusive final boundary; see {@link Subscriber.final}. */
-	final(): number | undefined {
-		return this.#subscriber.final();
+	/** The track's exclusive end; see {@link Subscriber.end}. */
+	end(): Location | undefined {
+		return this.#subscriber.end();
 	}
 
-	/** Resolve with the track's exclusive final boundary once known; see {@link Subscriber.finished}. */
-	finished(): Promise<number> {
+	/** Resolve with the track's exclusive end once known; see {@link Subscriber.finished}. */
+	finished(): Promise<Location> {
 		return this.#subscriber.finished();
 	}
 

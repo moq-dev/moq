@@ -498,7 +498,8 @@ export class Decoder {
 
 				// Backpressure: in buffered mode this holds the encoded frame until the playhead nears
 				// it, keeping the lookahead above the floor as Opus instead of decoded PCM. No-op live.
-				await ring.wait(frame.timestamp as Time.Micro);
+				await ring.wait(frame.timestamp as Time.Micro, effect.abort);
+				if (effect.abort.aborted) break;
 
 				const chunk = new EncodedAudioChunk({
 					// WebCodecs audio chunks are key even inside a MoQ group.
@@ -603,7 +604,8 @@ export class Decoder {
 
 				// Backpressure: in buffered mode this holds the encoded frame until the playhead nears
 				// it, keeping the lookahead above the floor as Opus instead of decoded PCM. No-op live.
-				await ring.wait(frame.timestamp);
+				await ring.wait(frame.timestamp, effect.abort);
+				if (effect.abort.aborted) break;
 
 				if (decoder.state === "closed") break;
 				decoder.decode(

@@ -115,7 +115,9 @@ ok(audio->write_frame({packet, 20'000}));
 moq::VideoEncoderOutput output{moq::VideoCodec::kH264, "camera", std::nullopt, std::nullopt, moq::VideoEncoderKind::kAuto{}};
 auto video = ok(broadcast->encode_video({moq::VideoPixelFormat::kRgba, 1280, 720, 30}, output, nullptr));
 ok(video->write({0, rgba}));
-ok(broadcast->announce({}));
+moq::Route route;
+route.epoch = moq::mint_epoch(); // a fresh epoch per run
+ok(broadcast->announce(route));
 ok(broadcast->close());    // keep the producer alive while publishing, then close explicitly
 ```
 
@@ -148,11 +150,20 @@ auto continuation = std::move(reading).then(moq::inline_executor, [](moq::expect
 auto frame = co_await media->next();
 ```
 
+## Runtime
+
+Native I/O and background tasks run on a Tokio worker pool. Futures are still
+polled on the [executor](#executor), while `get()` and `wait_for()` block the
+calling thread; independent native wake callbacks can run concurrently. The
+executor passed to `then()` dispatches only the continuation. Call
+`moq::shutdown()` from a host thread before unloading the module; it joins
+native workers and then the executor. Never call shutdown from a continuation.
+
 ## Executor
 
-Futures are polled, and continuations run, on one process-wide executor
-thread unless you install your own with `moq::set_executor(executor,
-shutdown)` before the first async call. An `Executor` takes a `moq::Task` and
+Futures are polled on one process-wide executor thread unless you install your
+own with `moq::set_executor(executor, shutdown)` before the first async call.
+An `Executor` takes a `moq::Task` and
 returns true once it has accepted it; `shutdown` stops accepting and returns
 once no task can still run. A host with its own threads (a game engine)
 installs one that hops onto them. The executor passed to `then()` is separate:
@@ -164,13 +175,17 @@ Never block the executor. A continuation or resumed coroutine that calls
 which deadlocks. `moq::inline_executor` runs a continuation right where the
 future completed, which is the executor thread.
 
+## Disabled renditions
+
+Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
+
 ## Track demand
 
 Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
 
 ## Shutdown
 
-`moq::shutdown()` stops the `moq-ffi` runtime thread, then the executor.
+`moq::shutdown()` stops the `moq-ffi` runtime workers, then the executor.
 Pending calls resolve `Cancelled`, and every object stays safe to drop. Call
 it once before a plugin or engine module unloads, from a thread that is not
 running a continuation, so no thread is left calling into unmapped code. A
@@ -178,6 +193,7 @@ process that exits normally can skip it.
 
 ## Errors
 
+Error cases carrying a diagnostic expose it as `reason`; protocol failures expose `details`.
 `moq::Error` holds a `std::variant` of cases (`moq::Error::kCancelled`,
 `kUnauthorized`, `kProtocol`, ...); test one with
 `std::holds_alternative<moq::Error::kUnauthorized>(error.get_variant())`. Auth

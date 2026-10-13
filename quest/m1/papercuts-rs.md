@@ -29,7 +29,3 @@ zero `UDP_GRO` stride were dropped. Neither is reachable today: no newer
 draft exists, and Linux never emits a zero stride.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [JS papercuts](/quest/m1/papercuts-js.md) - the JavaScript half of the same audit

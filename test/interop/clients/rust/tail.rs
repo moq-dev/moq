@@ -24,7 +24,10 @@ async fn main() -> anyhow::Result<()> {
     match args[1].as_str() {
         "publish" => {
             let broadcast = origin.create_broadcast(&args[3])?;
-            let mut track = broadcast.create_track("tail", None)?;
+            let mut track = broadcast.create_track(
+                "tail",
+                moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+            )?;
             broadcast.announce(Default::default())?;
             let session = client
                 .clone()
@@ -34,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
             track.demand().used().await?;
             // Declare the end before the final group's payload is even available.
-            track.finish_at(GROUPS)?;
+            track.finish_at(moq_net::track::Position::group(GROUPS))?;
             for sequence in 0..GROUPS {
                 let mut group = track.append_group()?;
                 group.write_frame(moq_net::Timestamp::ZERO, vec![sequence as u8; BYTES])?;
@@ -88,7 +91,10 @@ async fn main() -> anyhow::Result<()> {
                 seen == (0..GROUPS).collect::<Vec<_>>(),
                 "wrong groups: {seen:?}"
             );
-            ensure!(track.finished().await? == GROUPS, "wrong declared end");
+            ensure!(
+                track.finished().await? == moq_net::track::Position::group(GROUPS),
+                "wrong declared end"
+            );
             session.close().await?;
             eprintln!("tail clean end=4 groups=0,1,2,3 bytes=1048576");
         }

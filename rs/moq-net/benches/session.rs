@@ -11,6 +11,9 @@
 //! route table they occupy, not a publisher writing into its own cache.
 //!
 //! `SESSION_ALLOCS=1` prints allocations per viewer-group instead of timing.
+//! `SESSION_EXPIRY_ONLY=1` uses the standalone 30s-expiry pool and reports groups
+//! written plus charged cache bytes every 10s during long profiling runs. Each round
+//! advances the cache clock by a second, so the expiry window spans 30 rounds.
 //!
 //! `session_join_*` times a new viewer connecting, resolving a broadcast, and
 //! receiving its latest group, swept over what the relays already announce.
@@ -41,6 +44,11 @@ use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_net::{Hop, Timestamp, Version, broadcast, cache, group, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
+
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> track::Info {
+	track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
 
 /// The lite draft production negotiates, the next one (opt-in), and the newest
 /// IETF draft.
@@ -265,7 +273,7 @@ impl Cluster {
 				let broadcast = origin
 					.publish(path(publisher * shape.broadcasts + index), Default::default())
 					.unwrap();
-				this.tracks.push(broadcast.create_track(TRACK, None).unwrap());
+				this.tracks.push(broadcast.create_track(TRACK, timed()).unwrap());
 				this._broadcasts.push(broadcast);
 			}
 
@@ -282,7 +290,11 @@ impl Cluster {
 	fn origin(&mut self, capacity: u64) -> (origin::Producer, cache::Pool) {
 		self.next_hop += 1;
 		let mut config = origin::Config::new(Hop::new(self.next_hop).unwrap());
-		let pool = cache::Pool::new(cache::Config::default().with_capacity(capacity));
+		let pool = cache::Pool::new(if std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
+			cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY)
+		} else {
+			cache::Config::default().with_capacity(capacity)
+		});
 		config.pool = pool.clone();
 		let (producer, driver) = origin::Producer::new(config);
 		support::harness::spawn(driver);
@@ -341,6 +353,8 @@ struct Room {
 	shape: Shape,
 	/// Frames written so far, so paced rounds know where each group starts and ends.
 	written: usize,
+	/// Groups finished so far across every watched broadcast.
+	groups: usize,
 	/// The group each watched broadcast is writing, when paced.
 	writing: Vec<Option<group::Producer>>,
 	/// The group each viewer's subscriber is reading, when paced, flattened in viewer order.
@@ -389,6 +403,7 @@ impl Room {
 			payload: Bytes::from(vec![0; shape.frame]),
 			shape,
 			written: 0,
+			groups: 0,
 			writing: Vec::new(),
 			reading: Vec::new(),
 			cache_now: moq_net::time::Instant::now(),
@@ -455,6 +470,7 @@ impl Room {
 			}
 		}
 		assert_eq!(bytes, self.shape.expected());
+		self.groups += self.shape.burst * self.watched.len();
 	}
 
 	/// One frame into every watched group and one frame out to every viewer, so each
@@ -470,6 +486,9 @@ impl Room {
 				group.finish().unwrap();
 				*writing = None;
 			}
+		}
+		if last {
+			self.groups += self.watched.len();
 		}
 
 		let mut bytes = 0;
@@ -492,11 +511,23 @@ impl Room {
 	/// number of pools, not with the delivery being measured.
 	async fn measure(&mut self, iters: u64) -> Duration {
 		let mut elapsed = Duration::ZERO;
+		let report = std::env::var_os("SESSION_EXPIRY_ONLY").is_some();
+		let began = Instant::now();
+		let mut next_report = Duration::from_secs(10);
 		for _ in 0..iters {
 			self.tick();
 			let start = Instant::now();
 			self.round().await;
 			elapsed += start.elapsed();
+			if report && began.elapsed() >= next_report {
+				eprintln!(
+					"cache sample: elapsed={:.1}s groups={} charged={}",
+					began.elapsed().as_secs_f64(),
+					self.groups,
+					self.pools().map(cache::Pool::used).sum::<u64>()
+				);
+				next_report += Duration::from_secs(10);
+			}
 		}
 		elapsed
 	}
@@ -631,7 +662,7 @@ impl DashRoom {
 				let path = format!(".stats/{project}/node/{node}");
 				let broadcast = cluster.relays[node].publish(path.as_str(), Default::default()).unwrap();
 				for name in &names {
-					tracks.push(broadcast.create_track(name.as_str(), None).unwrap());
+					tracks.push(broadcast.create_track(name.as_str(), timed()).unwrap());
 				}
 				broadcasts.push(broadcast);
 				paths.push(path);
@@ -968,7 +999,13 @@ fn session(c: &mut Criterion) {
 	join(c, "relays", [1, 2, 8].map(|relays| Shape { relays, ..base }));
 
 	churn(c, "sessions", [1, 16, 128].map(|sessions| Churn { sessions, held: 16 }));
-	churn(c, "held", [1, 64, 1024].map(|held| Churn { sessions: 4, held }));
+	churn(
+		c,
+		"held",
+		[1, 4, 16]
+			.into_iter()
+			.flat_map(|sessions| [1, 64, 1024].map(move |held| Churn { sessions, held })),
+	);
 
 	// Production (2026-09): ~34 nodes x >=5 projects x ~24 tracks.
 	let prod = Dash {

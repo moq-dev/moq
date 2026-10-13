@@ -9,6 +9,11 @@ use std::time::Duration;
 use moq_net::{Hop, Timestamp, Version, origin};
 use support::harness::{peer, subscribed};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 const VERSIONS: &[&str] = &[
@@ -33,7 +38,7 @@ async fn an_empty_group_arrives_empty() {
 		let _pair = peer(version.parse::<Version>().unwrap(), &publisher, &subscriber).await;
 
 		let broadcast = publisher.create_broadcast("room").unwrap();
-		let track = broadcast.create_track("data", None).unwrap();
+		let track = broadcast.create_track("data", timed()).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 
 		let consumer = subscriber.consume();
