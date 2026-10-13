@@ -306,7 +306,9 @@ pub(crate) mod request {
 			Error::Timeout | Error::Stream(StreamError::DeliveryTimeout) | Error::Session(SessionError::Timeout) => {
 				return TIMEOUT;
 			}
-			Error::Unsupported | Error::Version | Error::Session(SessionError::Version) => return NOT_SUPPORTED,
+			Error::Unsupported | Error::Version | Error::Session(SessionError::Version | SessionError::Unsupported) => {
+				return NOT_SUPPORTED;
+			}
 			// moq-transport has no code for a FETCH that reached a datagram, which is never
 			// cached, so it is a group that is not there. NOT_SUPPORTED would claim the peer
 			// does not implement FETCH at all.
@@ -385,11 +387,12 @@ pub(crate) mod request {
 		/// Every error a rejection distinguishes, plus one it does not, so the checks below cover
 		/// the whole registry rather than the variants someone remembered. A new arm in
 		/// [`to_code`] belongs here.
-		const EVERY_ERROR: [Error; 12] = [
+		const EVERY_ERROR: [Error; 13] = [
 			Error::Duplicate,
 			Error::Unauthorized,
 			Error::Timeout,
 			Error::Unsupported,
+			Error::Session(SessionError::Unsupported),
 			Error::NotFound,
 			Error::NotFetchable,
 			Error::InvalidRange,

@@ -12,7 +12,9 @@ import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Milli, Timescale } from "../time.ts";
-import type { Subscriber as TrackSubscriber } from "../track.ts";
+import type { Location as TrackLocation, Subscriber as TrackSubscriber } from "../track.ts";
+import { untilAborted } from "../util/abort.ts";
+import { LIMITS, type Limits, Slots } from "../util/limits.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
@@ -156,6 +158,8 @@ interface Target {
 
 /** What {@link Publisher.runGroup} needs to serve one group. */
 interface RunGroup {
+	/** The source retaining the exact terminal independently of cached groups. */
+	track: TrackSubscriber;
 	/** The subscription's request ID, doubling as the track alias. */
 	requestId: bigint;
 
@@ -187,7 +191,7 @@ interface RunGroup {
 }
 
 /** How many data streams a subscription opened, fill streams included. */
-type StreamCount = { opened: number };
+type StreamCount = { opened: number; terminalSent?: boolean };
 
 /** What {@link Publisher.runFill} needs to serve one subscription's backfill. */
 interface RunFill {
@@ -237,6 +241,8 @@ export class Publisher {
 	#quic: WebTransport;
 	#session: Session;
 	#requiresSolicitation: boolean;
+	// Subscriptions the peer holds live on this session.
+	#subscriptions: Slots;
 
 	// The one writer for the outbound datagram stream, shared by every subscription since a
 	// second getWriter would throw. Undefined when the transport carries no datagrams, which
@@ -280,6 +286,7 @@ export class Publisher {
 		cluster,
 		grant = new Signal<Grant | undefined>(undefined),
 		ready = Promise.resolve(),
+		limits = LIMITS,
 	}: {
 		/** The WebTransport session, for uni streams. */
 		quic: WebTransport;
@@ -297,8 +304,11 @@ export class Publisher {
 		grant?: Getter<Grant | undefined>;
 		/** Resolves once the setup tokens are answered (MoQ Auth). */
 		ready?: Promise<void>;
+		/** How many live requests the peer may hold. */
+		limits?: Limits;
 	}) {
 		this.#quic = quic;
+		this.#subscriptions = new Slots(limits.subscriptions, { quic, reason: "too many subscriptions" });
 		this.#grant = grant;
 		this.#ready = ready;
 		this.#session = session;
@@ -329,10 +339,29 @@ export class Publisher {
 	 * @internal
 	 */
 	async runSubscribe(msg: Subscribe, stream: Stream) {
+		// Only a subscription we would serve holds a slot, as in Rust: a refused one ends at
+		// once. A peer past the cap loses the session.
+		const charged = msg.forward && !msg.rangeFilters && !this.#denied(msg.trackNamespace);
+		if (charged) this.#subscriptions.acquire();
+		try {
+			await this.#serveSubscribe(msg, stream);
+		} finally {
+			if (charged) this.#subscriptions.release();
+		}
+	}
+
+	async #serveSubscribe(msg: Subscribe, stream: Stream) {
 		const version = this.#session.version;
 		const name = msg.trackNamespace;
 		let broadcast: broadcast.Consumer | undefined;
 		let refusal: { errorCode: number; reasonPhrase: string } | undefined;
+
+		// The requester leaving while the broadcast and track resolve ends the request, so a
+		// cancelled subscription gives back its slot instead of holding it until the track
+		// is answered, which may be never.
+		const left = new AbortController();
+		const cancel = new StreamError(StreamCode.Cancel, { message: "cancel" });
+		void cancelled(stream, version).then(() => left.abort(cancel));
 
 		// Legal requests we can't honor are refused one at a time. A subscription that
 		// forwards nothing is only useful to a subscriber that later turns forwarding on,
@@ -352,7 +381,9 @@ export class Publisher {
 		} else {
 			try {
 				broadcast =
-					this.#publish && (wireOf(this.#publish).local(name) ?? (await wireOf(this.#publish).demand(name)));
+					this.#publish &&
+					(wireOf(this.#publish).local(name) ??
+						(await untilAborted(wireOf(this.#publish).demand(name), left.signal)));
 				if (!broadcast) {
 					refusal = {
 						errorCode: toRequestCode("does_not_exist", "subscribe", version),
@@ -360,6 +391,11 @@ export class Publisher {
 					};
 				}
 			} catch (err: unknown) {
+				// Nobody is left to refuse.
+				if (left.signal.aborted) {
+					stream.abort(cancel);
+					return;
+				}
 				const e = error(err);
 				const condition =
 					e instanceof StreamError && (e.code === StreamCode.NotFound || e.code === StreamCode.Unroutable)
@@ -405,7 +441,7 @@ export class Publisher {
 		let cache: TrackSubscriber | undefined;
 
 		try {
-			const info = await track.info();
+			const info = await untilAborted(track.info(), left.signal);
 			// A Timestamp goes out only when this SUBSCRIBE_OK actually carries TIMESCALE.
 			// Drafts 14-16 never write that property, so their objects stay unstamped.
 			const timescale =
@@ -530,7 +566,7 @@ export class Publisher {
 					let params: Parameters;
 					try {
 						params = await Message.decode(stream.reader, async (r) => {
-							await r.u62();
+							this.#session.spendRequest(await r.u62());
 							if (version === Version.DRAFT_17) await r.u62();
 							return Parameters.decode(r, version, "request-update");
 						});
@@ -584,6 +620,7 @@ export class Publisher {
 					}
 
 					const task = this.#runGroup({
+						track,
 						requestId: msg.requestId,
 						group,
 						timescale,
@@ -655,8 +692,8 @@ export class Publisher {
 
 			// Draft 14 on has no end location in PUBLISH_DONE: an END_OF_TRACK object is what
 			// tells the subscriber where the track ended.
-			const final = track.final();
-			if (ended && !publishError && final !== undefined) {
+			const final = track.end();
+			if (ended && !publishError && final !== undefined && !streams.terminalSent) {
 				await this.#runEndOfTrack({
 					requestId: msg.requestId,
 					final,
@@ -707,7 +744,8 @@ export class Publisher {
 		} catch (err: unknown) {
 			if (err instanceof ProtocolViolation) throw err;
 			const e = error(err);
-			console.warn(`publish error: broadcast=${name} track=${track.name} error=${reason(e)}`);
+			if (e === cancel) console.debug(`publish cancelled: broadcast=${name} track=${track.name}`);
+			else console.warn(`publish error: broadcast=${name} track=${track.name} error=${reason(e)}`);
 			stream.abort(e);
 		} finally {
 			track.close();
@@ -721,7 +759,7 @@ export class Publisher {
 	 * Runs a group and sends its frames using ObjectStream (Subgroup delivery mode).
 	 */
 	async #runGroup(options: RunGroup) {
-		const { requestId, group, timescale, publisherPriority, slice, unsubscribed, streams } = options;
+		const { requestId, track, group, timescale, publisherPriority, slice, unsubscribed, streams } = options;
 		try {
 			// One stream per group is faster than a peer at its limit can retire them, so this
 			// is the one path that doesn't wait for a slot: the transport would serve the opens
@@ -797,7 +835,30 @@ export class Publisher {
 					}
 				}
 
+				// The track ends right after this group's last object, so the marker rides this
+				// stream rather than a separate one.
+				const end = track.end();
+				const marked = end?.group === group.sequence && end.frame === next;
+				if (marked) {
+					await new Frame({ endOfTrack: true }).encode(
+						stream,
+						header.flags,
+						timescale,
+						this.#session.version,
+						first ? next : 0,
+					);
+				}
+
 				stream.close();
+				// Only a stream that closed cleanly delivered the marker: one reset after its FIN
+				// may not have, which leaves the standalone fallback in place, as in Rust.
+				if (marked) {
+					const delivered = stream.closed.then(
+						() => true,
+						() => false,
+					);
+					streams.terminalSent = (await race([delivered, unsubscribed.then(() => false)])) === true;
+				}
 			} catch (err: unknown) {
 				stream.reset(error(err));
 			}
@@ -848,16 +909,10 @@ export class Publisher {
 		}
 	}
 
-	/**
-	 * Mark the track's end with an END_OF_TRACK object on its own stream, at object 0 of the
-	 * group that will never exist.
-	 *
-	 * The last group's stream has usually finished before the track ends, so the marker cannot
-	 * ride on it. A failure only costs the subscriber the early boundary.
-	 */
+	/** Preserve the original terminal on a separate stream when its group already sent FIN. */
 	async #runEndOfTrack(options: {
 		requestId: bigint;
-		final: number;
+		final: TrackLocation;
 		publisherPriority: number;
 		unsubscribed: Promise<void>;
 		streams: StreamCount;
@@ -871,7 +926,7 @@ export class Publisher {
 		try {
 			const header = new GroupMessage({
 				trackAlias: requestId,
-				groupId: final,
+				groupId: final.group,
 				subGroupId: 0,
 				publisherPriority,
 				flags: {
@@ -880,11 +935,11 @@ export class Publisher {
 					hasSubgroupObject: false,
 					hasEnd: false,
 					hasPriority: true,
-					firstObject: true,
+					firstObject: final.frame === 0,
 				},
 			});
 			await header.encode(stream, version);
-			await new Frame({ endOfTrack: true }).encode(stream, header.flags, Timescale.MILLI, version);
+			await new Frame({ endOfTrack: true }).encode(stream, header.flags, Timescale.MILLI, version, final.frame);
 			stream.close();
 		} catch (err: unknown) {
 			stream.reset(error(err));

@@ -221,10 +221,16 @@ test("the code tables match the spec", () => {
 	expect(Number(StreamCode.SessionClosed)).toBe(0x3);
 	expect(Number(StreamCode.TooFarBehind)).toBe(0x5);
 
-	// The session table carries only what the draft assigns.
+	// Session codes retain moq-transport assignments below 32; Lite owns 48-63.
 	for (const code of Object.values(SessionCode)) {
-		expect(code).toBeLessThan(32);
+		if (code === SessionCode.Unsupported) {
+			expect(code).toBeGreaterThanOrEqual(48);
+			expect(code).toBeLessThan(64);
+		} else {
+			expect(code).toBeLessThan(32);
+		}
 	}
+	expect(Number(SessionCode.Unsupported)).toBe(0x30);
 
 	// The stream table adds moq-lite's own 48-63 assignments. 32-47 is reserved and
 	// carries nothing, so no code sits there.

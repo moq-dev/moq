@@ -309,6 +309,8 @@ See [Authentication](/bin/relay/auth).
 fetchable, which the [HLS gateway](/bin/hls) depends on. `export --max-delay`
 (default 500 ms) is how far a stalled group may fall behind the live edge
 before *this* consumer skips it. Raising the first never delays playback.
+At stdin EOF, `import` keeps the finished broadcast up for its max-age, so a
+subscriber still catching up can drain it; Ctrl-C ends that early.
 
 `export ts` takes `--delay` (default 500 ms) instead, like an SRT receiver's
 latency: each frame is muxed that long after its decode time, all tracks in

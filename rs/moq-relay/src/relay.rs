@@ -144,6 +144,8 @@ impl Relay {
 			cluster::Cluster::validate_lan_versions(&config.connect, &config.listen)?;
 		}
 
+		// Every listener shares admission ownership before its workers can accept.
+		let (shutdown_trigger, shutdown) = shutdown::Observer::new(drain_timeout);
 		let server_versions = config.listen.versions();
 		let handshake_timeout = config.listen.resolved_timeout();
 		let server_extensions = config.listen.extensions;
@@ -171,12 +173,22 @@ impl Relay {
 			"runtime.workers needs moq-relay built with the `noq` feature"
 		);
 
+		// Workers and the stream server split one relay across listeners, so they share
+		// one loaded identity. A lone server loads its own, only if a listener needs it.
+		let served = config.runtime.workers().map(|_| config.listen.tls.load()).transpose()?;
+		let mut listen = config.listen.clone();
+		if served.is_some() {
+			listen.tls = Default::default();
+		}
+
 		#[cfg(feature = "_quic")]
 		let workers = match config.runtime.workers() {
 			Some(worker) if !io_uring => {
 				let mut server = moq_tokio::server::Config::default();
-				server.listen = config.listen.clone();
+				server.listen = listen.clone();
+				server.tls = served.clone();
 				server.quic = config.quic.clone();
+				server.activity = shutdown.activity.clone();
 				Some(moq_tokio::worker::Workers::bind(server, worker).context("failed to start the QUIC workers")?)
 			}
 			_ => None,
@@ -195,10 +207,13 @@ impl Relay {
 
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
 		let uring = match config.runtime.workers() {
-			Some(worker) if io_uring => Some(
-				crate::uring::Workers::bind(&config.listen, &config.quic, worker)
-					.context("failed to start the io_uring QUIC workers")?,
-			),
+			Some(worker) if io_uring => {
+				let mut server = moq_tokio::server::Config::default();
+				server.listen = listen.clone();
+				server.quic = config.quic.clone();
+				server.tls = served.clone();
+				Some(crate::uring::Workers::bind(server, worker).context("failed to start the io_uring QUIC workers")?)
+			}
 			_ => None,
 		};
 
@@ -212,8 +227,10 @@ impl Relay {
 
 		#[allow(unused_mut)]
 		let mut server_config = moq_tokio::server::Config::default();
-		server_config.listen = config.listen.clone();
+		server_config.listen = listen;
+		server_config.tls = served;
 		server_config.quic = config.quic.clone();
+		server_config.activity = shutdown.activity.clone();
 		#[cfg(feature = "iroh")]
 		{
 			server_config.iroh = iroh.clone();
@@ -272,10 +289,6 @@ impl Relay {
 		// drops the producer keeps publishing for as long as it serves.
 		let cluster = cluster.with_stats(stats.clone());
 
-		// Graceful shutdown: the first signal drains every accepted session with a
-		// GOAWAY; the relay exits once they have all left, at the drain deadline,
-		// or on a second signal.
-		let (shutdown_trigger, shutdown) = shutdown::Observer::new(drain_timeout);
 		let sessions = crate::session::Registry::new();
 		let (ready, _) = tokio::sync::watch::channel(false);
 		let web = web::Web::new(auth.clone(), cluster.clone(), certificates, config.web)
@@ -704,10 +717,9 @@ async fn drain(trigger: shutdown::Trigger, mut shutdown: shutdown::Observer, sig
 	}
 
 	// The deadline fixed when the trigger fired, which may be earlier than this
-	// future was polled (the embedder can start the drain during startup); a
-	// fresh window here would keep the process up past the time sessions were
-	// told. Each session is force-closed at it, so `drained` resolves by then;
-	// the extra second only bounds a session whose close never completes.
+	// future was polled (the embedder can start the drain during startup).
+	// Handshakes may never finish, so the same absolute deadline bounds them
+	// without waiting for an established session to force-close.
 	let deadline = shutdown.deadline().context("drain started without a deadline")?;
 	tokio::select! {
 		res = signal() => {
@@ -716,13 +728,13 @@ async fn drain(trigger: shutdown::Trigger, mut shutdown: shutdown::Observer, sig
 			return Ok(());
 		}
 		_ = shutdown.drained() => {}
-		_ = tokio::time::sleep_until(deadline + std::time::Duration::from_secs(1)) => {}
+		_ = tokio::time::sleep_until(deadline) => {}
 	}
 
 	let elapsed = tokio::time::Instant::now().saturating_duration_since(deadline - window);
 	match shutdown.tally() {
 		shutdown::Tally { live: 0, forced: 0, .. } => {
-			tracing::info!(?elapsed, "drain complete: every session left; exiting")
+			tracing::info!(?elapsed, "drain ended with no established sessions; exiting")
 		}
 		shutdown::Tally { live: 0, forced, .. } => {
 			tracing::warn!(?elapsed, forced, "drain deadline force-closed sessions; exiting")
@@ -804,8 +816,57 @@ async fn serve_listening(
 	anyhow::bail!("stopped accepting connections")
 }
 
-#[cfg(all(test, not(feature = "_quic")))]
+#[cfg(test)]
 mod tests {
+	#[tokio::test(start_paused = true)]
+	async fn pending_handshake_cannot_extend_the_drain_deadline() {
+		use futures::FutureExt;
+		let window = std::time::Duration::from_secs(10);
+		let (trigger, shutdown) = crate::shutdown::Observer::new(window);
+		let _pending = shutdown.activity.enter();
+		trigger.start();
+		let draining = super::drain(trigger, shutdown, false);
+		tokio::pin!(draining);
+		assert!(draining.as_mut().now_or_never().is_none());
+		tokio::time::advance(window).await;
+		assert!(
+			matches!(draining.as_mut().now_or_never(), Some(Ok(()))),
+			"pending handshake extended the fixed deadline"
+		);
+	}
+
+	/// A connection arriving as the last admitted one leaves is either counted
+	/// before the drain commits to exit, or refused at accept; never admitted
+	/// into a relay that has already decided to exit under it.
+	#[tokio::test(start_paused = true)]
+	async fn arrival_as_the_drain_empties_is_counted_or_refused() {
+		use futures::FutureExt;
+		let (trigger, shutdown) = crate::shutdown::Observer::new(std::time::Duration::from_secs(10));
+		let activity = shutdown.activity.clone();
+		let last = activity.enter().expect("admission open before the drain");
+		trigger.start();
+		let draining = super::drain(trigger, shutdown, false);
+		tokio::pin!(draining);
+		assert!(draining.as_mut().now_or_never().is_none());
+
+		// Arrives before the drain observes the count reach zero: it is counted.
+		drop(last);
+		let arrival = activity.enter().expect("admitted before the drain committed");
+		assert!(
+			draining.as_mut().now_or_never().is_none(),
+			"drain exited under an admitted arrival"
+		);
+
+		// Arrives just after the count reaches zero: refused at accept.
+		drop(arrival);
+		assert!(matches!(draining.as_mut().now_or_never(), Some(Ok(()))));
+		assert!(
+			activity.enter().is_none(),
+			"admitted a connection after the drain committed to exit"
+		);
+	}
+
+	#[cfg(not(feature = "_quic"))]
 	#[tokio::test]
 	async fn workers_require_a_quic_backend() {
 		let mut config = crate::Config::default();

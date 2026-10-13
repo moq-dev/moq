@@ -1,7 +1,7 @@
 import { Once } from "@moq/signals";
 import { Mutex } from "async-mutex";
 import type { Drain } from "../connection/goaway.ts";
-import { error, ProtocolViolation, SessionCode } from "../error.ts";
+import { error, ProtocolViolation, SessionCode, SessionError } from "../error.ts";
 import { Reader, Stream, type Writer } from "../stream.ts";
 import { untilAborted } from "../util/abort.ts";
 import * as Varint from "../varint.ts";
@@ -30,6 +30,8 @@ export interface Session {
 	openNativeBi?(): Promise<Stream>;
 	acceptBi(): Promise<Stream | undefined>;
 	nextRequestId(signal?: AbortSignal): Promise<bigint | undefined>;
+	/** Spend a request ID the peer used without holding a request open, closing the session if it cannot. */
+	spendRequest(id: bigint): void;
 	close(): void;
 	readonly version: IetfVersion;
 }
@@ -43,12 +45,24 @@ export class NativeSession implements Session {
 	// moq-transport reserves even request IDs for the client and odd for the server,
 	// so the two peers' ID spaces never overlap.
 	#requestId: bigint;
+	// The peer's IDs, of the other parity. Draft 17 has no window, yet an ID stays spent.
+	#spent: SpentIds;
 	readonly version: IetfVersion;
 
 	constructor(quic: WebTransport, version: IetfVersion, client: boolean) {
 		this.#quic = quic;
 		this.version = version;
 		this.#requestId = client ? 0n : 1n;
+		this.#spent = new SpentIds(client ? 1n : 0n);
+	}
+
+	spendRequest(id: bigint): void {
+		try {
+			this.#spent.spend(id);
+		} catch (err) {
+			if (err instanceof SessionError) this.#quic.close({ closeCode: err.code, reason: err.message });
+			throw err;
+		}
 	}
 
 	async openBi(): Promise<Stream> {
@@ -104,10 +118,24 @@ const RUN_CHUNK = 256;
  */
 class MissingRuns {
 	#chunks: [bigint, bigint][][] = [];
+	#size = 0;
+
+	/** How many runs are remembered. */
+	get size(): number {
+		return this.#size;
+	}
 
 	/** Whether `id` was skipped and not yet received. */
 	has(id: bigint): boolean {
 		return this.#find(id) !== undefined;
+	}
+
+	/** Whether taking `id` leaves one more run, landing strictly inside its run. */
+	splits(id: bigint): boolean {
+		const found = this.#find(id);
+		if (!found) return false;
+		const [start, end] = this.#chunks[found[0]][found[1]];
+		return start < id && id + 2n < end;
 	}
 
 	/** Mark a skipped `id` received, splitting its run. */
@@ -120,6 +148,7 @@ class MissingRuns {
 		const rest: [bigint, bigint][] = [];
 		if (start < id) rest.push([start, id]);
 		if (id + 2n < end) rest.push([id + 2n, end]);
+		this.#size += rest.length - 1;
 		chunk.splice(run, 1, ...rest);
 		if (chunk.length === 0) this.#chunks.splice(index, 1);
 		else if (chunk.length > 2 * RUN_CHUNK) this.#chunks.splice(index + 1, 0, chunk.splice(RUN_CHUNK));
@@ -127,6 +156,7 @@ class MissingRuns {
 
 	/** Record `[start, end)` as skipped, above every existing run. */
 	push(start: bigint, end: bigint): void {
+		this.#size++;
 		const last = this.#chunks.at(-1);
 		if (last && last.length < 2 * RUN_CHUNK) last.push([start, end]);
 		else this.#chunks.push([[start, end]]);
@@ -139,6 +169,39 @@ class MissingRuns {
 		const chunk = this.#chunks[index];
 		const run = lastAtOrBelow(chunk, id, (run) => run[0]);
 		return run >= 0 && id < chunk[run][1] ? [index, run] : undefined;
+	}
+}
+
+/**
+ * The peer's spent request IDs on draft 17 and later: every ID of its parity below `#next`,
+ * except the skipped runs. Mirrors Rust's `Spent`.
+ */
+export class SpentIds {
+	#next: bigint;
+	#missing = new MissingRuns();
+	// No window bounds the runs here, and forgetting one would make its IDs usable again.
+	#limit: number;
+
+	constructor(first: bigint, limit = Number(REQUEST_WINDOW)) {
+		this.#next = first;
+		this.#limit = limit;
+	}
+
+	/** Spend `id`, throwing the session error a reused, wrong-parity, or unrecordable ID closes with. */
+	spend(id: bigint): void {
+		// No peer reaches 2^62 requests; refusing past it matches Rust, whose `next` would overflow.
+		const unused = id < 1n << 62n && (id >= this.#next || this.#missing.has(id));
+		if (id % 2n !== this.#next % 2n || !unused) throw new SessionError(SessionCode.InvalidRequestId);
+		const splits = id < this.#next ? this.#missing.splits(id) : id > this.#next;
+		if (splits && this.#missing.size >= this.#limit) {
+			throw new SessionError(SessionCode.Internal, { reason: "request ID history exhausted" });
+		}
+		if (id < this.#next) {
+			this.#missing.take(id);
+			return;
+		}
+		if (id > this.#next) this.#missing.push(this.#next, id);
+		this.#next = id + 2n;
 	}
 }
 
@@ -418,7 +481,7 @@ export class ControlStreamAdapter implements Session {
 				}
 
 				if (classified.route === Route.Update) {
-					this.#admitUpdate(classified.ownRequestId);
+					this.spendRequest(classified.ownRequestId);
 					this.#pushMessage(classified.requestId, typeId, size, body);
 					continue;
 				}
@@ -590,7 +653,7 @@ export class ControlStreamAdapter implements Session {
 	 * An update spends its own request ID like any request but keeps no stream, so the
 	 * slot is retired at once. The ID is spent even when the target is already gone.
 	 */
-	#admitUpdate(requestId: bigint): void {
+	spendRequest(requestId: bigint): void {
 		this.#admitHeld(requestId);
 		this.#open.delete(requestId);
 		this.#retire();

@@ -38,14 +38,15 @@ reasons, so later sessions don't reopen them:
   host clock. Native, wasm, and io_uring instants convert at the backend.
   Nanoseconds match `Duration` and QUIC pacing. In JS a plain `number` of
   nanoseconds is exact for 104 days of uptime and only loses sub-microsecond
-  precision after; rs2ts maps `moq_time::Instant` to `@moq/time`'s `Instant`,
-  not to `U64`. Its methods mirror `std::time::Instant`'s, so swapping one for
-  the other is an import change.
+  precision after. The browser backend must preserve clock origin and units
+  across Rust and JS; a source translator's `Instant` mapping is chosen with
+  that backend, while WASM retains Rust time types. Its methods mirror
+  `std::time::Instant`'s, so swapping one for the other is an import change.
 - **Wall time is a separate type from the same clock.** The manual clock's
   `advance()` moves both; `step_wall()` moves only wall time, so a test can
   prove a clock correction never manufactures elapsed (billable) time.
 - **Runtime-ambient access.** State machines keep taking `now` (moq-net's
-  `Driver::poll(now, waiter)` and the sans-IO line's `tick(now)`). Async glue
+  `Driver::poll(now, waiter)`). Async glue
   calls `moq_time::now()`, `sleep()`, `timeout()`, and `interval()`, which
   resolve to the current runtime's clock: one clock per runtime, nothing to
   plumb, no process-global test override. The ambient functions stay behind
@@ -98,5 +99,5 @@ state the real-I/O rule and the `moq-time` testing rule in `AGENTS.md`,
 ## Related
 
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the per-flake fixes this line makes systemic
-- [Generated @moq/net](/quest/m1/rs2ts/README.md) - its hand-written timer glue is `@moq/time`
+- [Rust-backed @moq/net](/quest/m1/rs2ts/README.md) - Rust and JS clocks must agree across either browser backend
 - [The async feature](/quest/m1/net-async-feature.md) - the core keeps explicit instants; ambient time stays behind `async`

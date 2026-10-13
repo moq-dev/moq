@@ -42,6 +42,7 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [Conan remote](/quest/m3/cpp-conan.md) - a remote we own serves the same tarball to `conan install`
 - [Linux OBS GPU input](/quest/m3/obs-linux-gpu.md) - publish OBS compositor frames without CPU readback on a validated Linux graphics/encoder combination
 - [Routing cost domains](/quest/m3/routing-cost-domains.md) - design operator boundaries and policy without adding incomparable costs
+- [Relay request tokens](/quest/m3/auth-request-lease.md) - verify a request token with its own lease when a consumer needs relay integration
 - [moq-transport cluster peers](/quest/m3/ietf-cluster-peers.md) - the cluster draft carries the route layer, so moq-transport relays peer again, once a moq-transport relay operator asks
 - [The moq.pro mesh runs lite-07](/quest/m3/lite07-mesh.md) - the deployment that makes the exemption dead code
 - [Drop the hidden cluster exemption](/quest/m3/hidden-exemption.md) - relays stop forcing hidden broadcasts on cluster peers once every peer opts in on the wire
@@ -58,6 +59,7 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [fMP4 emsg](/quest/m3/emsg.md) - settles the shared framing and missing-data semantics before this section adopts them
 - [ID3 catalog section](/quest/m3/id3.md) - timed ID3 as a first-class container-neutral catalog section
 - [FLV script tags](/quest/m3/flv-script.md) - onMetaData and AMF data messages survive RTMP and FLV import
+- [MSF feedback tracks](/quest/m3/msf-publish-tracks.md) - `--stats` and `--echo` work under `--catalog-format msf` through `publishTracks`, once a consumer asks
 - [MSFTS convergence](/quest/m3/msfts-convergence.md) - the demultiplexed TS lane converges on MSFTS where they differ, once an MSFTS implementer engages
 - [#2279](/quest/m3/2279-hang-typed-scte-35-ad-cue-signaling-carried-opaquely.md) - hang: SCTE-35 cues arrive immediately on an independent metadata track, optionally associated with a rendition
 - [CEA-608/708](/quest/m3/captions-cea.md) - captions carried inside video SEI become a real text rendition at import

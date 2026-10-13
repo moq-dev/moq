@@ -2,7 +2,7 @@
 
 ## Goal
 
-`moq import ts --stats` and `moq export ts --stats` publish the `ts::stats`
+`moq import ts --stats` and `moq export ts --echo` publish the `ts::stats`
 counters so a dashboard reads the TR 101 290 counters and per-PID liveness
 beside the media and delivery counters, with no new transport. No health
 roll-up in-tree: green, amber or red per priority is the consumer's reading of
@@ -17,12 +17,15 @@ Decided while planning [#1838](https://github.com/moq-dev/moq/issues/1838):
   import flattens `ts::stats::Snapshot` into the publisher's stats snapshot under the
   catalog's `mpegts` key, the counters stay owned by moq-mux beside
   `ts::Ext`, and `hang` stays TS-free.
-- Open: an export is a viewer, which has no stats track and reports only
-  through a soliciting catalog's `.echo` feedback, so where `moq export ts
-  --stats` publishes its egress rows is unsettled. Candidates: extend the
-  solicited `.echo` snapshot with a flattened container section, give viewers
-  their own stats surface, or narrow this quest to import. Leaning toward
-  narrowing, since the other two widen the settled stats design.
+- **The export reports through `.echo`** (decided 2026-10-12, from
+  [#5360](https://github.com/moq-dev/moq/issues/5360)). An export is a viewer,
+  so `moq export ts --echo <name>` folds `ts::stats::Snapshot` into its
+  solicited `.echo` snapshot under `mpegts`, through the `E` flatten the
+  [media stats schema](/quest/m1/stats/schema.md) gives `echo::Snapshot`.
+  The egress is where an operator otherwise cannot see per-PID outages: a
+  57 s video hole passed every TR 101 290 P1 check in the reporter's lab,
+  and only per-PID access-unit counts caught it. There is no export
+  `--stats` flag.
 - **Counters sum, gauges do not.** Every check is a cumulative counter, which
   keeps `.z` deltas small and lets an aggregate sum; the PID's `quiet` is a gauge and
   merges newest-wins.
@@ -32,7 +35,8 @@ Decided while planning [#1838](https://github.com/moq-dev/moq/issues/1838):
   monitoring point (ingest grades the feed, egress grades our muxer, and
   neither is the groomed wire), the value domain of the PCR checks, and that
   the per-PID rows cover `PID_error`; `doc/bin/cli.md` the flags.
-- Test: publish a TS clip with `--stats`, read it back, and assert every ETSI
+- Test: publish a TS clip with `--stats` and export it with `--echo` to a
+  soliciting catalog, read both back, and assert every ETSI
   counter reads zero on a clean clip while every elementary stream's
   access-unit count advances.
 

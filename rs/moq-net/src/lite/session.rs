@@ -69,7 +69,7 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 			match stream {
 				Ok(stream) => pending.push(Reader::new(stream, version)),
 				Err(err) => {
-					accept_error = Some(Error::from_transport(err));
+					accept_error = Some(crate::lite::error::from_transport(err));
 					break;
 				}
 			}
@@ -405,8 +405,10 @@ where
 			}
 			Err(err) => {
 				tracing::warn!(%err, "session error");
-				self.session
-					.close(SessionError::from(err).to_code(), err.to_string().as_ref());
+				self.session.close(
+					crate::lite::error::to_session_code(&SessionError::from(err)),
+					err.to_string().as_ref(),
+				);
 			}
 			_ => {
 				tracing::info!("session closed");
@@ -546,12 +548,10 @@ impl<S: crate::transport::poll::Session> kio::Task for PresentToken<S> {
 			// A peer that predates AUTH resets a stream type it does not know, and one
 			// that takes no tokens in band refuses the same way: either way, before any
 			// reply, this token earns nothing here.
-			Error::Stream(_) | Error::Decode(crate::DecodeError::Short) if !answered => Error::Unsupported,
-			// A malformed grant is the peer breaking the session protocol, not refusing a token.
-			Error::Decode(crate::DecodeError::InvalidValue | crate::DecodeError::InvalidString(_)) => {
-				Error::ProtocolViolation
-			}
-			err => err,
+			Error::Stream(_) if !answered => Error::Unsupported,
+			// A malformed reply, truncated ones included, is the peer breaking the session
+			// protocol, not refusing a token.
+			err => crate::auth::protocol_error(err),
 		};
 		match &err {
 			Error::Cancel | Error::Unsupported | Error::Transport(_) | Error::Session(_) => {
@@ -608,7 +608,7 @@ impl<S: crate::transport::poll::Session> PresentToken<S> {
 						// The peer ended the grant without revoking it, or closed without
 						// ever answering (mapped to unsupported by the caller).
 						Ok(None) if *answered => return Poll::Ready(Error::Cancel),
-						Ok(None) => return Poll::Ready(Error::Decode(crate::DecodeError::Short)),
+						Ok(None) => return Poll::Ready(Error::Unsupported),
 						Err(err) => return Poll::Ready(err),
 					};
 					match reply {
@@ -635,9 +635,14 @@ impl<S: crate::transport::poll::Session> PresentToken<S> {
 							let Ok(code) = u32::try_from(refused.code) else {
 								return Poll::Ready(Error::ProtocolViolation);
 							};
-							let err = Error::Session(crate::SessionError::from_code(code));
+							let err = match crate::lite::error::from_session_code(code) {
+								crate::SessionError::Unsupported => Error::Unsupported,
+								code => Error::Session(code),
+							};
 							tracing::warn!(%err, reason = %refused.reason, "auth token refused");
-							self.handle.refused(self.id);
+							if !matches!(err, Error::Unsupported) {
+								self.handle.refused(self.id);
+							}
 							*answered = true;
 							return Poll::Ready(err);
 						}
@@ -712,7 +717,7 @@ impl<S: crate::transport::poll::Session> SendSetup<S> {
 		loop {
 			match &mut self.state {
 				SendSetupState::Open { session, setup } => {
-					let stream = ready!(session.poll_open_uni(cx)).map_err(Error::from_transport)?;
+					let stream = ready!(session.poll_open_uni(cx)).map_err(crate::lite::error::from_transport)?;
 					let mut writer = Writer::new(stream, self.version);
 					writer.buffer(&super::DataType::Setup)?;
 					writer.buffer(&**setup)?;
@@ -889,21 +894,20 @@ mod tests {
 	use crate::coding::Encode;
 	use crate::lite::test_transport::ScriptedSession;
 
-	/// An AUTH_ERROR code the session registry cannot hold is the peer breaking the
-	/// protocol: it closes the session rather than surfacing a code the peer never sent.
 	#[moq_net_sim::test]
-	async fn an_auth_error_code_past_u32_closes_the_session() {
-		let refused = crate::lite::AuthReply::Error(crate::lite::AuthError {
-			code: u64::from(u32::MAX) + 1,
-			reason: String::new(),
-		});
-		let mut script = Vec::new();
-		refused
-			.encode(
-				&mut crate::coding::Encoder::new(&mut script, Version::Lite07.into()),
-				Version::Lite07,
-			)
-			.unwrap();
+	async fn malformed_auth_replies_close_the_session() {
+		// Unknown reply, invalid code, truncated error, and trailing body bytes.
+		for script in [
+			vec![99],
+			vec![1, 9, 0xc0, 0, 0, 1, 0, 0, 0, 0, 0],
+			vec![1, 1, 1],
+			vec![1, 3, 1, 0, 0],
+		] {
+			malformed_auth_reply(script).await;
+		}
+	}
+
+	async fn malformed_auth_reply(script: Vec<u8>) {
 		// The setup token's AUTH stream is the first one the session opens.
 		let transport = ScriptedSession::per_stream(vec![script]);
 		let log = transport.log.clone();
@@ -936,6 +940,35 @@ mod tests {
 	}
 
 	#[moq_net_sim::test]
+	async fn malformed_presenter_auth_closes_the_session() {
+		for script in [vec![7, 1, 2], vec![7, 1, 0, 0]] {
+			let transport = ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![script]);
+			let log = transport.log.clone();
+			let start = start(Config {
+				runtime: crate::time::Clock::sim(),
+				client: false,
+				limits: Default::default(),
+				session: transport,
+				setup_stream: None,
+				publish: None,
+				subscribe: None,
+				peer_hop: None,
+				version: Version::Lite07,
+				our_setup: Setup::default(),
+				peer_setup: None,
+				auth: crate::auth::Handle::new(true),
+			})
+			.unwrap();
+			let mut driver = start.driver;
+			let _ = driver.poll(&kio::Waiter::noop());
+			assert_eq!(
+				log.closes().first().map(|close| close.0),
+				Some(SessionError::ProtocolViolation.to_code())
+			);
+		}
+	}
+
+	#[moq_net_sim::test]
 	async fn malformed_auth_ok_closes_the_session() {
 		for pattern in [
 			b"*/**".as_slice(),
@@ -965,6 +998,18 @@ mod tests {
 		assert_malformed_reply_closes(script).await;
 	}
 
+	/// A reply cut off inside its declared size fails to decode, unlike a peer that
+	/// resets before answering.
+	#[moq_net_sim::test]
+	async fn truncated_auth_reply_closes_the_session() {
+		let mut script = Vec::new();
+		let mut w = crate::coding::Encoder::new(&mut script, Version::Lite07.into());
+		w.varint(0).unwrap();
+		w.varint(4).unwrap();
+		w.varint(0).unwrap();
+		assert_session_closes(ScriptedSession::per_stream_eof(vec![script])).await;
+	}
+
 	#[moq_net_sim::test]
 	async fn malformed_auth_error_reasons_close_the_session() {
 		for reason in [vec![0xff], vec![b'a'; 8193]] {
@@ -980,7 +1025,10 @@ mod tests {
 	}
 
 	async fn assert_malformed_reply_closes(script: Vec<u8>) {
-		let transport = ScriptedSession::per_stream(vec![script]);
+		assert_session_closes(ScriptedSession::per_stream(vec![script])).await;
+	}
+
+	async fn assert_session_closes(transport: ScriptedSession) {
 		let log = transport.log.clone();
 		let start = start(Config {
 			runtime: crate::time::Clock::sim(),

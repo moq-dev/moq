@@ -706,7 +706,7 @@ async fn watching(routes: usize, subscribers: usize) -> Watching {
 	let mut tracks = Vec::new();
 	for index in 0..routes {
 		let broadcast = relay.publish(watched_path(index), origin::Route::default()).unwrap();
-		tracks.push(broadcast.create_track("video", None).unwrap());
+		tracks.push(broadcast.create_track("video", timed()).unwrap());
 		broadcasts.push(broadcast);
 	}
 

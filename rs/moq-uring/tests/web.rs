@@ -41,8 +41,12 @@ fn timed() -> moq_net::track::Info {
 
 /// Build the uring server endpoint serving `h3`.
 fn h3_endpoint(handle: &moq_uring::Handle, certs: &support::Certs) -> quic::Endpoint {
-	let mut server = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
-	server.alpn = vec!["h3".to_string()];
+	let server = quic::server::Config::new(
+		quic::Identity::open(&certs.cert, &certs.key)
+			.expect("identity")
+			.server(&["h3"], quic::server::ClientAuth::None)
+			.expect("tls"),
+	);
 	let sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("socket");

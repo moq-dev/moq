@@ -4,7 +4,7 @@ use std::{sync::Arc, task::Poll, time::Duration};
 
 use crate::transport::Stats as _;
 
-use crate::{Error, SessionError, Version, auth, bandwidth, goaway};
+use crate::{Error, SessionError, Version, auth, bandwidth, coding::StreamCodes, goaway};
 
 /// How long [`Session::close`] waits for queued data before closing anyway.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -181,7 +181,7 @@ impl Session {
 			&& !matches!(*close, Some(Close::Abort { .. }))
 		{
 			*close = Some(Close::Abort {
-				code: SessionError::from(&err).to_code(),
+				code: self.version.session_code(&SessionError::from(&err)),
 				reason: err.to_string(),
 			});
 		}
@@ -352,6 +352,7 @@ impl Session {
 		});
 
 		let supervisor = Supervisor {
+			version,
 			local_close: protocol.local_close(),
 			runtime: runtime.clone(),
 			closed_watch: session.clone(),
@@ -395,6 +396,7 @@ impl Session {
 ///
 /// Finishes once the transport reports closed; everything else is moot then.
 pub(crate) struct Supervisor<S> {
+	version: Version,
 	local_close: Arc<std::sync::atomic::AtomicBool>,
 	runtime: crate::time::Clock,
 	session: S,
@@ -450,7 +452,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 			};
 			if let Ok(mut closed) = self.closed.write() {
 				*closed = Some(Ended {
-					err: Error::from_transport(err),
+					err: self.version.transport_error(err),
 					drain,
 				});
 			}
@@ -671,7 +673,9 @@ impl Drop for Withdrawing {
 ///
 /// On moq-transport drafts 14 to 16 the caps also size the request window, which counts
 /// every request (FETCH, TRACK_STATUS and SUBSCRIBE_UPDATE included), so very low caps
-/// can starve it.
+/// can starve it. Later drafts have no window but still refuse a reused request ID, so a
+/// peer may leave at most twice the sum of these caps runs of skipped IDs; one more closes
+/// the session with `INTERNAL_ERROR` rather than forgetting any.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {

@@ -67,8 +67,12 @@ fn lite_session_over_the_worker() {
 	group.finish().expect("finish group");
 
 	let certs = support::certs().expect("certificates");
-	let mut server_config = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
-	server_config.alpn = vec![ALPN.to_string()];
+	let server_config = quic::server::Config::new(
+		quic::Identity::open(&certs.cert, &certs.key)
+			.expect("identity")
+			.server(&[ALPN], quic::server::ClientAuth::None)
+			.expect("tls"),
+	);
 
 	let server_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
@@ -196,8 +200,12 @@ fn two_lite_sessions_share_the_server_socket() {
 	group.finish().expect("finish group");
 
 	let certs = support::certs().expect("certificates");
-	let mut server_config = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
-	server_config.alpn = vec![ALPN.to_string()];
+	let server_config = quic::server::Config::new(
+		quic::Identity::open(&certs.cert, &certs.key)
+			.expect("identity")
+			.server(&[ALPN], quic::server::ClientAuth::None)
+			.expect("tls"),
+	);
 
 	let server_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
@@ -298,8 +306,12 @@ fn configured_roots_verify_the_server() {
 	let handle = worker.handle();
 	let certs = support::certs().expect("certificates");
 
-	let mut server_config = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
-	server_config.alpn = vec![ALPN.to_string()];
+	let server_config = quic::server::Config::new(
+		quic::Identity::open(&certs.cert, &certs.key)
+			.expect("identity")
+			.server(&[ALPN], quic::server::ClientAuth::None)
+			.expect("tls"),
+	);
 
 	let server_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
@@ -351,11 +363,14 @@ fn required_client_auth_refuses_an_anonymous_client() {
 	let handle = worker.handle();
 	let certs = support::certs().expect("certificates");
 
-	let mut server_config = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
-	server_config.alpn = vec![ALPN.to_string()];
 	// Any root will do: the client presents nothing, so it fails before the
 	// chain is ever checked.
-	server_config.client_auth = quic::server::ClientAuth::Required(vec![certs.cert.clone()]);
+	let server_config = quic::server::Config::new(
+		quic::Identity::open(&certs.cert, &certs.key)
+			.expect("identity")
+			.server(&[ALPN], quic::server::ClientAuth::Required(vec![certs.cert.clone()]))
+			.expect("tls"),
+	);
 
 	let server_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
@@ -415,9 +430,12 @@ fn a_root_bundle_is_loaded_whole() {
 	let handle = worker.handle();
 	let bundle = support::bundle().expect("bundle");
 
-	let mut server_config =
-		quic::server::Config::new(quic::Identity::open(&bundle.cert, &bundle.key).expect("identity"));
-	server_config.alpn = vec![ALPN.to_string()];
+	let server_config = quic::server::Config::new(
+		quic::Identity::open(&bundle.cert, &bundle.key)
+			.expect("identity")
+			.server(&[ALPN], quic::server::ClientAuth::None)
+			.expect("tls"),
+	);
 
 	let server_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())

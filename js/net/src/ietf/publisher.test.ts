@@ -9,7 +9,7 @@ import { type Hop, HopSchema } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
-import { Reader, Stream } from "../stream.ts";
+import { Reader, Stream, Writer } from "../stream.ts";
 import { Milli, Timescale, Timestamp } from "../time.ts";
 import type { Producer as TrackProducer } from "../track.ts";
 import { wireOf } from "../wire.ts";
@@ -602,6 +602,7 @@ test("a failed stream open does not kill the announce loop", async () => {
 		version: inner.version,
 		acceptBi: () => inner.acceptBi(),
 		nextRequestId: () => inner.nextRequestId(),
+		spendRequest: (id) => inner.spendRequest(id),
 		close: () => inner.close(),
 		openBi: () => {
 			if (failures-- > 0) throw new Error("no stream credit");
@@ -647,6 +648,7 @@ test("a namespace refused once is retried without anything else changing", async
 		version: inner.version,
 		acceptBi: () => inner.acceptBi(),
 		nextRequestId: () => inner.nextRequestId(),
+		spendRequest: (id) => inner.spendRequest(id),
 		close: () => inner.close(),
 		openBi: () => {
 			if (failures-- > 0) throw new Error("no stream credit");
@@ -683,6 +685,7 @@ test("a solicited legacy advertisement refused once is retried", async () => {
 		version: inner.version,
 		acceptBi: () => inner.acceptBi(),
 		nextRequestId: () => inner.nextRequestId(),
+		spendRequest: (id) => inner.spendRequest(id),
 		close: () => inner.close(),
 		openBi: () => {
 			if (failures-- > 0) throw new Error("no stream credit");
@@ -1667,7 +1670,7 @@ function fixture(version: IetfVersion = V20): {
 	close: () => void;
 } {
 	const pair = createMockTransportPair(ALPNS[version]);
-	const session = new NativeSession(pair.server, version, true);
+	const session = new NativeSession(pair.server, version, false);
 	const { pub, origin } = publisher(pair.server, { session });
 	const broadcast = publish(origin, Path.from("test"));
 	const uni = pair.client.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
@@ -1761,6 +1764,7 @@ async function readGroup(stream: ReadableStream<Uint8Array>): Promise<ServedGrou
 async function readEndOfTrack(stream: ReadableStream<Uint8Array>): Promise<number> {
 	const reader = new Reader(stream, undefined, V20);
 	const header = await GroupMessage.decode(reader, V20);
+	expect(header.flags.hasEnd).toBe(false);
 	const frame = await reader.decode((c) => Frame.decode(c, header.flags, undefined));
 	expect(frame.endOfTrack).toBe(true);
 	expect(await reader.done()).toBe(true);
@@ -2205,6 +2209,130 @@ test("drafts 14-16 send no Timestamp without TIMESCALE", async () => {
 		}
 		expect(await reader.read(await reader.u53())).toEqual(new TextEncoder().encode("0.0"));
 
+		fx.close();
+		client.close();
+	}
+});
+
+test.each([false, true])("draft-20: exact terminal 5/5 survives group FIN=%s", async (finished) => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video");
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 0n, startObject: 0n },
+		}),
+	);
+	try {
+		const group = new GroupProducer(5);
+		track.writeGroup(group);
+		for (let i = 0; i < 5; i++) group.writeFrame({ payload: new Uint8Array([i]) });
+		const uni = await fx.uni.read();
+		if (!uni.value) throw new Error("missing group stream");
+		const reader = new Reader(uni.value, undefined, V20);
+		const header = await GroupMessage.decode(reader, V20);
+		expect(header.groupId).toBe(5);
+		for (let i = 0; i < 5; i++) {
+			const frame = await reader.decode((c) => Frame.decode(c, header.flags, undefined));
+			expect(frame.payload).toEqual(new Uint8Array([i]));
+		}
+		if (finished) {
+			group.close();
+			expect(await reader.done()).toBe(true);
+		}
+		track.finishAt({ group: 5, frame: 5 });
+		group.close();
+		track.close();
+		if (finished) {
+			const marker = await fx.uni.read();
+			if (!marker.value) throw new Error("missing terminal stream");
+			const end = new Reader(marker.value, undefined, V20);
+			const endHeader = await GroupMessage.decode(end, V20);
+			expect(endHeader.groupId).toBe(5);
+			expect(endHeader.flags.hasEnd).toBe(false);
+			expect(endHeader.flags.firstObject).toBe(false);
+			const frame = await end.decode((c) => Frame.decode(c, endHeader.flags, undefined));
+			expect(frame.endOfTrack).toBe(true);
+			expect(frame.idDelta).toBe(5);
+			expect(await end.done()).toBe(true);
+		} else {
+			const frame = await reader.decode((c) => Frame.decode(c, header.flags, undefined));
+			expect(frame.endOfTrack).toBe(true);
+			expect(frame.idDelta).toBe(0);
+			expect(await reader.done()).toBe(true);
+		}
+		expect(await client.reader.u53()).toBe(PublishDone.id);
+		expect((await PublishDone.decode(client.reader, V20)).streamCount).toBe(finished ? 2n : 1n);
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
+/** An inline END_OF_TRACK on a stream reset after its FIN may never arrive, so it is resent. */
+test("draft-20: an inline terminal reset after its FIN falls back to a standalone marker", async () => {
+	const opened: Writer[] = [];
+	const tryOpen = Writer.tryOpen.bind(Writer);
+	const spy = spyOn(Writer, "tryOpen").mockImplementation(async (...args) => {
+		const writer = await tryOpen(...args);
+		if (writer) opened.push(writer);
+		return writer;
+	});
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video");
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 0n, startObject: 0n },
+		}),
+	);
+	try {
+		const group = new GroupProducer(5);
+		track.writeGroup(group);
+		for (let i = 0; i < 5; i++) group.writeFrame({ payload: new Uint8Array([i]) });
+		const uni = await fx.uni.read();
+		if (!uni.value) throw new Error("missing group stream");
+		const reader = new Reader(uni.value, undefined, V20);
+		const header = await GroupMessage.decode(reader, V20);
+		for (let i = 0; i < 5; i++) await reader.decode((c) => Frame.decode(c, header.flags, undefined));
+
+		// The group stream's close fails from here on, like a reset after its FIN.
+		const closed = Object.getOwnPropertyDescriptor(Writer.prototype, "closed")?.get;
+		if (!closed) throw new Error("Writer.closed is not a getter");
+		let reset = false;
+		Object.defineProperty(opened[0], "closed", {
+			get(this: Writer) {
+				return reset ? Promise.reject(new Error("reset after FIN")) : closed.call(this);
+			},
+		});
+		reset = true;
+
+		track.finishAt({ group: 5, frame: 5 });
+		group.close();
+		track.close();
+
+		const inline = await reader.decode((c) => Frame.decode(c, header.flags, undefined));
+		expect(inline.endOfTrack).toBe(true);
+		const marker = await fx.uni.read();
+		if (!marker.value) throw new Error("missing standalone terminal stream");
+		const end = new Reader(marker.value, undefined, V20);
+		const endHeader = await GroupMessage.decode(end, V20);
+		expect(endHeader.groupId).toBe(5);
+		const frame = await end.decode((c) => Frame.decode(c, endHeader.flags, undefined));
+		expect(frame.endOfTrack).toBe(true);
+		expect(frame.idDelta).toBe(5);
+		expect(await client.reader.u53()).toBe(PublishDone.id);
+		expect((await PublishDone.decode(client.reader, V20)).streamCount).toBe(2n);
+	} finally {
+		spy.mockRestore();
 		fx.close();
 		client.close();
 	}

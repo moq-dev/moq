@@ -662,6 +662,8 @@ fn spawn_import(
 			let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
 			Publish::new(broadcast, &format, config)?
 		};
+		// Media stays servable at EOF until it goes stale, the same max-age relays retain it for.
+		let publish = publish.linger(max_age.unwrap_or(hang::container::MAX_AGE));
 		publish.announce(epoch)?;
 		local = Some(publish);
 	} else {
