@@ -153,15 +153,9 @@ impl Refresh {
 	fn request(&mut self, request: auth::Request) {
 		if request.token().is_empty() {
 			// The connection's own lease answers an empty token while it lives, even
-			// after an earlier empty-token stream was withdrawn. It may have
-			// revalidated to a grant this session can no longer use while another
-			// credential keeps the session alive.
+			// after an earlier empty-token stream was withdrawn.
 			if self.owner.closed().now_or_never().is_some() {
 				request.reject(SessionError::Unauthorized, "connection credential ended");
-				return;
-			}
-			if !self.valid(&self.owner.grant()) {
-				request.reject(SessionError::Unauthorized, "connection credential no longer valid");
 				return;
 			}
 			let unissued = self
@@ -172,7 +166,14 @@ impl Refresh {
 				initial.issued = Some(request.accept(initial.wire(self.role)));
 				return;
 			}
+			// The lease may have revalidated to a grant this session can no longer
+			// use while another credential keeps the session alive. Validate the
+			// exact snapshot that would be issued.
 			let mut credential = Credential::new(self.owner.clone());
+			if !self.valid(&credential.grant) {
+				request.reject(SessionError::Unauthorized, "connection credential no longer valid");
+				return;
+			}
 			credential.initial = true;
 			credential.issued = Some(request.accept(credential.wire(self.role)));
 			self.credentials.insert(self.next, credential);
@@ -257,9 +258,10 @@ impl Refresh {
 					let Some((request, result)) = verdict else {
 						continue;
 					};
-					match result {
-						Ok(consumer) if self.valid(&consumer.grant()) => {
-							let mut credential = Credential::new(consumer);
+					// Validate the exact snapshot that is issued, not a later read.
+					let credential = result.map(Credential::new);
+					match credential {
+						Ok(mut credential) if self.valid(&credential.grant) => {
 							credential.issued = Some(request.accept(credential.wire(self.role)));
 							self.credentials.insert(self.next, credential);
 							self.next += 1;
