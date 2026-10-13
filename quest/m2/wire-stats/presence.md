@@ -17,7 +17,7 @@ reading. A closing session adds its final reading. An embedder registers a conne
   - **QUIC and WebTransport:** `bytes_sent` / `bytes_received` from
     `moq_net::session::Stats`. noq maps them to `udp_tx` / `udp_rx`.
   - **WebSocket:** the qmux counters from
-    [qmux byte counters](/quest/m1/wire-stats/qmux.md). Until those land, a
+    [qmux byte counters](/quest/m2/wire-stats/qmux.md). Until those land, a
     WebSocket session reports 0: an undercount, never a guess.
 - **Read the transport directly.** The tick must not re-arm the per-session
   100 ms sampler that moq#5382 stopped for idle sessions. Read the

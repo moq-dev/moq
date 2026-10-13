@@ -57,14 +57,14 @@ see cost per tenant.
 
 ## Required
 
-- [Presence wire counters](/quest/m1/wire-stats/presence.md) - QUIC,
+- [Presence wire counters](/quest/m2/wire-stats/presence.md) - QUIC,
   WebTransport, and WebSocket sessions and embedder sources count per
   (tier, root)
-- [qmux byte counters](/quest/m1/wire-stats/qmux.md) - a WebSocket session
+- [qmux byte counters](/quest/m2/wire-stats/qmux.md) - a WebSocket session
   reports its TCP bytes
-- [moq-srt wire source](/quest/m1/wire-stats/srt.md) - an SRT connection
+- [moq-srt wire source](/quest/m2/wire-stats/srt.md) - an SRT connection
   reports its wire bytes
-- [moq-rtc wire source](/quest/m1/wire-stats/rtc.md) - a WebRTC peer reports
+- [moq-rtc wire source](/quest/m2/wire-stats/rtc.md) - a WebRTC peer reports
   its wire bytes
 
 ## Related

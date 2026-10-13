@@ -14,6 +14,6 @@ definition as QUIC's `udp_tx`.
   there. Count inbound datagrams where the mux hands them to the peer. This
   needs no str0m stats interval.
 - Hand the embedder a cumulative `(tx, rx)` source per peer, in the shape
-  [Presence wire counters](/quest/m1/wire-stats/presence.md) registers.
+  [Presence wire counters](/quest/m2/wire-stats/presence.md) registers.
 - Test: a WHEP session's reported tx covers at least the RTP payload it
   sent.

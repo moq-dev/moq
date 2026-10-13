@@ -16,7 +16,7 @@ the same definition as QUIC's `udp_tx`.
   `statistics()` watch.
 - `serve_subscribe` and the publish path own the socket today and expose
   nothing. Hand the embedder a cumulative `(tx, rx)` source per connection,
-  in the shape [Presence wire counters](/quest/m1/wire-stats/presence.md)
+  in the shape [Presence wire counters](/quest/m2/wire-stats/presence.md)
   registers.
 - Target the shared-socket integration that drives `srt-protocol` directly,
   not `srt-tokio` socket handling.
