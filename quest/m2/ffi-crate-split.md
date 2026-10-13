@@ -21,11 +21,12 @@ up in moq-ffi's source, the raw generated packages (`go/ffi`,
 Go, Swift, Kotlin, and Dart wrappers already shorten it to
 `media.ContainerGroupConsumer`.
 
-Open question for the maintainer: this reopens the 2026-10-09 decision in
+✅ The maintainer reopened (2026-10-13) the 2026-10-09 decision in
 [The bindings mirror Rust's layers](/quest/m1/ffi-shape/README.md) that
-moq-ffi stays one crate and the wrappers supply the namespaces, since
-UniFFI 0.32 gives each crate one flat namespace. The spike can run before it
-is answered. The migration waits for a yes.
+moq-ffi stays one crate and the wrappers supply the namespaces, calling the
+5-word generated name from #5356 terrible. UniFFI 0.32 gives each crate one
+flat namespace, so only a split shortens it. The migration waits for the
+spike to pass.
 
 Options weighed on #5356:
 
@@ -41,27 +42,33 @@ Options weighed on #5356:
 
 Spike, splitting `media` from `net` alone:
 
-1. Generate bindings from the built library, in this order: uniffi-bindgen-go,
+1. Make the dependency one-way, `media` on `net`. Today `net`'s consumers
+   return `MoqFrame` and `MoqDatagram` from `media.rs`, which Cargo would
+   reject as a cycle; those raw records likely belong in `net`.
+2. Generate bindings from the built library, in this order: uniffi-bindgen-go,
    uniffi-bindgen-dart, uniffi-bindgen-cpp, then Kotlin, Swift, and Python.
-   For each, check two things:
+   For each, check:
    - It emits one module per crate.
-   - A `media` constructor that takes a `net` `GroupConsumer` resolves it as
-     an external type.
+   - `net` types used from `media` resolve as external types, covering each
+     category the real split crosses: an object (`GroupConsumer`), the
+     thrown `MoqError`, and a record or enum.
 
    The Go, Dart, and C++ generators are kixelated forks pinned in
    `flake.nix`, so patch a gap in the fork before calling it a no-go.
-2. Check that each platform still ships one native library: the `go/ffi`
+3. Check that each platform still ships one native library: the `go/ffi`
    module layout, the Swift XCFramework and its module maps, the Kotlin and
    Android artifacts, the `moq_ffi` Dart package, the Python wheel, and the
    C++ CMake package.
-3. Record the verdict for each generator here, along with the library size
+4. Record the verdict for each generator here, along with the library size
    before and after the split.
 
-If the spike passes and the maintainer reopens the decision, migrate:
+If the spike passes, migrate:
 
 - Split moq-ffi into one crate per ffi-shape layer.
 - Point each wrapper at the generated modules, and delete any wrapper code
-  that only existed to rename types.
+  that only existed to rename types. This includes every `rs/moq-ffi`
+  consumer in AGENTS.md's Cross-Package Sync table; `cpp/moq`'s alias list
+  backs the flat `moq::Media*` names that `cpp/obs/src` uses.
 - Update `doc/lib`, the Unreleased section of `doc/setup/upgrade.md`, and the
   ffi-shape Plan.
 - Run `just test interop --all`.
