@@ -2312,7 +2312,12 @@ mod tests {
 	#[cfg(feature = "tcp")]
 	#[tokio::test(start_paused = true)]
 	async fn a_refused_tcp_dial_keeps_retrying() {
-		let (_socket, target) = refused();
+		// Refusal is what's under test, so this can't use [`dead`]. A port nothing is
+		// bound to refuses on every OS, unlike one that is bound but not listening.
+		let target = {
+			let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+			url(&format!("tcp://{}/", listener.local_addr().expect("local addr")))
+		};
 		let mut client = client();
 		client.backoff.initial = Duration::from_millis(50);
 		client.backoff.max = Duration::from_millis(50);
