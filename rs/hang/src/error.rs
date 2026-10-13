@@ -72,6 +72,10 @@ pub enum Error {
 	/// The shared video rotation is not a finite number.
 	#[error("video rotation must be finite")]
 	InvalidVideoRotation,
+
+	/// The projected video's field of view is outside (0, 360] degrees.
+	#[error("video field of view {0} must be in (0, 360] degrees")]
+	InvalidFieldOfView(f64),
 }
 
 /// A Result type alias for hang operations.

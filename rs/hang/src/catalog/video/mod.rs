@@ -2,12 +2,14 @@ mod av1;
 mod codec;
 mod h264;
 mod h265;
+mod projection;
 mod vp9;
 
 pub use av1::*;
 pub use codec::*;
 pub use h264::*;
 pub use h265::*;
+pub use projection::*;
 pub use vp9::*;
 
 use std::collections::{BTreeMap, btree_map};
@@ -54,6 +56,10 @@ pub struct Video {
 	/// Default: false
 	#[serde(default)]
 	pub flip: Option<bool>,
+
+	/// The type of projection for video
+	#[serde(default)]
+	pub projection: Option<Projection>,
 }
 
 /// Catalog properties shared by every video rendition.
@@ -68,11 +74,16 @@ pub struct VideoProperties {
 
 	/// Flip horizontally after rotation, or clear the explicit value when absent.
 	pub flip: Option<bool>,
+
+	pub projection: Option<Projection>,
 }
 
 impl VideoProperties {
 	fn normalized(mut self) -> crate::Result<Self> {
 		self.rotation = self.rotation.map(normalize_video_rotation).transpose()?;
+		if let Some(projection) = &self.projection {
+			projection.check()?;
+		}
 		Ok(self)
 	}
 }
@@ -138,6 +149,7 @@ impl Video {
 		self.display = properties.display;
 		self.rotation = properties.rotation;
 		self.flip = properties.flip;
+		self.projection = properties.projection;
 		Ok(())
 	}
 }
@@ -501,6 +513,7 @@ mod test {
 				display: None,
 				rotation: Some(f64::NAN),
 				flip: None,
+				projection: None,
 			}),
 			Err(crate::Error::InvalidVideoRotation)
 		));
@@ -537,6 +550,7 @@ mod test {
 				}),
 				rotation: Some(315.0),
 				flip: None,
+				projection: None,
 			})
 			.unwrap();
 

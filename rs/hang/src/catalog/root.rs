@@ -150,6 +150,9 @@ impl<E> Catalog<E> {
 				max: MAX_RENDITIONS,
 			});
 		}
+		if let Some(projection) = &self.video.projection {
+			projection.check()?;
+		}
 		Ok(())
 	}
 
@@ -402,6 +405,16 @@ mod test {
 		assert_eq!(encoded, output, "encode mismatch");
 	}
 
+	#[test]
+	fn check_rejects_bad_fov() {
+		let catalog =
+			Catalog::<()>::from_str(r#"{"video":{"renditions":{},"projection":{"kind":"equirectangular","fov":400}}}"#)
+				.unwrap();
+		assert!(matches!(
+			catalog.check_renditions(),
+			Err(crate::Error::InvalidFieldOfView(_))
+		));
+	}
 	#[test]
 	fn rendition_with_broadcast_override() {
 		// Decode a catalog where one rendition references a track in a sibling broadcast,
