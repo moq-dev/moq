@@ -23,6 +23,10 @@
 //! one small frame per track per tick. Throughput counts tracks, so a flat
 //! elements/s across a sweep means the cost per track stays constant.
 //!
+//! `session_idle` times one second of idle viewer sessions, swept over sessions. Each
+//! viewer keeps a PROBE stream open, as a browser does, and nothing else happens, so
+//! the time is whatever the sessions do on their own. Paused time skips the waiting.
+//!
 //! `session_churn_*` times one request opened and closed by a session that already
 //! holds others open, swept over sessions and requests held per session. On
 //! moq-transport 14 every close is credited back through the MAX_REQUEST_ID window,
@@ -44,6 +48,7 @@ use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_net::{Hop, Timestamp, Version, broadcast, cache, group, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
+use support::mock::MockStats;
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> track::Info {
@@ -854,6 +859,62 @@ fn churn(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Churn>)
 	group.finish();
 }
 
+/// Viewer sessions to one relay, each holding a PROBE stream and otherwise idle.
+struct IdleRoom {
+	_viewers: Vec<(MockPair, moq_net::bandwidth::Consumer)>,
+}
+
+impl IdleRoom {
+	async fn new(sessions: usize) -> Self {
+		let (relay, driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
+		support::harness::spawn(driver);
+		let mut viewers = Vec::new();
+		for _ in 0..sessions {
+			let mut options = MockConnectOptions::new("moq-lite-06".parse().unwrap());
+			options.server_publish = Some(relay.consume());
+			// A QUIC backend reports both, so the relay serves PROBE.
+			options.stats = MockStats {
+				estimated_send_rate: Some(1_000_000),
+				rtt: Some(Duration::from_millis(40)),
+			};
+			let pair = connect_mock(options).await;
+			let mut probe = pair.client.recv_bandwidth().unwrap();
+			probe.changed().await.unwrap();
+			viewers.push((pair, probe));
+		}
+		Self { _viewers: viewers }
+	}
+
+	/// Let a second of protocol time pass per iteration.
+	async fn measure(&self, iters: u64) -> Duration {
+		let start = Instant::now();
+		for _ in 0..iters {
+			tokio::time::sleep(Duration::from_secs(1)).await;
+		}
+		start.elapsed()
+	}
+}
+
+fn idle(c: &mut Criterion) {
+	let mut group = c.benchmark_group("session_idle");
+	for sessions in [1, 64, 1024] {
+		group.throughput(Throughput::Elements(sessions as u64));
+		// Its own runtime, so its paused clock and its sessions end with the shape.
+		let rt = runtime();
+		let mut room = None;
+		group.bench_function(BenchmarkId::from_parameter(format!("sessions={sessions}")), |b| {
+			let room = room.get_or_insert_with(|| {
+				rt.block_on(async {
+					tokio::time::pause();
+					IdleRoom::new(sessions).await
+				})
+			});
+			b.iter_custom(|iters| rt.block_on(room.measure(iters)))
+		});
+	}
+	group.finish();
+}
+
 /// Withdraw a batch across a full mesh, sweeping both peers and prefixes.
 /// Paused protocol time lets the quiet-point timeout drain pending work without
 /// including a real wait in the measured duration.
@@ -1049,5 +1110,5 @@ fn session(c: &mut Criterion) {
 	);
 }
 
-criterion_group!(benches, session, withdrawal);
+criterion_group!(benches, session, withdrawal, idle);
 criterion_main!(benches);
