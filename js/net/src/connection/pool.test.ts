@@ -6,8 +6,10 @@ import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import * as Time from "../time.ts";
+import { connect } from "./connect.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { Connection, resetShared } from "./pool.ts";
+import { Reload } from "./reload.ts";
 
 function publish(origin: { createBroadcast(path: Path.Valid): BroadcastProducer }, path: Path.Valid) {
 	const broadcast = origin.createBroadcast(path);
@@ -333,6 +335,15 @@ test("explicit share: true refuses connection-specific options", () => {
 	} finally {
 		origin.close();
 	}
+});
+
+test("the removed discovery option is refused rather than ignored", async () => {
+	const stale = { discovery: false } as never;
+	expect(() => new Connection(stale)).toThrow(TypeError);
+	expect(() => new Reload(stale)).toThrow(TypeError);
+	await expect(connect({ url, ...(stale as object) })).rejects.toThrow(TypeError);
+	const pair = createMockTransportPair(Lite.ALPN_05);
+	await expect(acceptSession({ transport: pair.server, url, ...(stale as object) })).rejects.toThrow(TypeError);
 });
 
 test("a supplied transport cannot enter the reconnect loop", () => {

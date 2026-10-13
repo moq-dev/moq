@@ -10,7 +10,7 @@ import { redact } from "../util/log.ts";
 import { isWebTransportSupported } from "./browser.ts";
 import type { Established } from "./established.ts";
 import * as Extensions from "./extensions.ts";
-import { forwardAnnounced } from "./forward.ts";
+import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { exchangeSetup } from "./handshake.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
@@ -141,6 +141,7 @@ const NEVER_ABORTED = new AbortController().signal;
  * @returns A promise that resolves to an established session
  */
 export async function connect({ url, ...props }: ConnectProps): Promise<Established> {
+	if ("discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 	const signal = props.signal ?? NEVER_ABORTED;
 	signal.throwIfAborted();
 

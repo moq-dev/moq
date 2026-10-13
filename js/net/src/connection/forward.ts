@@ -12,6 +12,10 @@ import * as Time from "../time.ts";
 import { wireOf } from "../wire.ts";
 import type { Established } from "./established.ts";
 
+/** Why a connection refuses the removed `discovery` option rather than ignoring it. */
+export const DISCOVERY_REMOVED =
+	"the discovery option is removed: a session asks only about watched prefixes and turns blind if the relay refuses";
+
 /** How long an announce request outlives its last watcher, so a watcher torn down and rebuilt reuses it. */
 const LINGER = Time.Milli(2000);
 
@@ -31,7 +35,27 @@ interface Interest {
  */
 interface Reported {
 	handle: Dynamic;
-	readonly reporters: Map<Interest, Route>;
+	/** How many publisher restarts the handle has taken. */
+	restarts: number;
+	readonly reporters: Map<Interest, Reporter>;
+}
+
+/** One request's view of a reported route. */
+interface Reporter {
+	route: Route;
+	/** Restarts this request has reported since it joined. */
+	restarts: number;
+	/** The handle's restart count when this request joined. */
+	joined: number;
+}
+
+/**
+ * How many restarts `reporter` has seen that the handle has not taken. Positive when it
+ * reports a newer publisher instance than the handle serves: an epochless instance is told
+ * apart only by its restart, so the count is all there is to compare.
+ */
+function ahead(reported: Reported, reporter: Reporter): number {
+	return reporter.restarts - (reported.restarts - reporter.joined);
 }
 
 /**
@@ -80,26 +104,41 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 		const existing = routes.get(prefix);
 		if (!existing) {
 			const handle = originWire.receive(prefix, route);
-			routes.set(prefix, { handle, reporters: new Map([[interest, route]]) });
+			const reporter = { route, restarts: 0, joined: 0 };
+			routes.set(prefix, { handle, restarts: 0, reporters: new Map([[interest, reporter]]) });
 			void drive(handle, conn);
 			return;
 		}
 
-		const known = existing.reporters.has(interest);
-		existing.reporters.set(interest, route);
+		const reporter = existing.reporters.get(interest);
+		if (!reporter) {
+			// Joins on the instance the handle serves; a restart it reports later puts it ahead.
+			existing.reporters.set(interest, { route, restarts: 0, joined: existing.restarts });
+			return;
+		}
+		reporter.route = route;
+		if (event.kind === "restart") reporter.restarts++;
 		// Another request covering the prefix only holds it; the first reporter drives it.
-		if (!known || existing.reporters.keys().next().value !== interest) return;
+		if (existing.reporters.keys().next().value === interest) follow(existing, prefix, reporter);
+	};
 
-		if (event.kind === "restart") {
-			// Another publisher instance: a fresh route, so nothing resolved through the old one
-			// is joined again. Inserted before the old one leaves, so local readers see one
-			// restart rather than an end and a start.
-			const handle = originWire.receive(prefix, route);
+	/**
+	 * Bring the handle up to its driving reporter: a fresh route when the reporter is on a
+	 * newer publisher instance, so nothing resolved through the old one is joined again, and an
+	 * in-place update otherwise.
+	 */
+	const follow = (existing: Reported, prefix: Path.Valid, reporter: Reporter) => {
+		const lead = ahead(existing, reporter);
+		if (lead > 0) {
+			// Inserted before the old one leaves, so local readers see one restart rather than
+			// an end and a start.
+			const handle = originWire.receive(prefix, reporter.route);
 			existing.handle.close();
 			existing.handle = handle;
+			existing.restarts += lead;
 			void drive(handle, conn);
-		} else {
-			existing.handle.update(route);
+		} else if (!routesEqual(existing.handle.route, reporter.route)) {
+			existing.handle.update(reporter.route);
 		}
 	};
 
@@ -108,12 +147,13 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 		const existing = routes.get(prefix);
 		if (!existing?.reporters.delete(interest)) return;
 
+		// The next request takes over driving, restarting the route if it saw a newer instance.
 		const next = existing.reporters.values().next();
 		if (next.done) {
 			routes.delete(prefix);
 			existing.handle.close();
-		} else if (!routesEqual(existing.handle.route, next.value)) {
-			existing.handle.update(next.value);
+		} else {
+			follow(existing, prefix, next.value);
 		}
 	};
 

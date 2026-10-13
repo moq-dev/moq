@@ -293,6 +293,46 @@ test("nested watches share one request and hand over without a retraction", asyn
 	origin.close();
 });
 
+for (const broadRestarts of [false, true]) {
+	test(`a hand-over restarts only for an instance the route has not taken (broad restarts: ${broadRestarts})`, async () => {
+		const origin = new OriginProducer();
+		const session = new FakeSession();
+		forwardAnnounced(session.session, origin);
+
+		const broad = origin.announced(Path.Pattern.subtree(Path.from("a")));
+		const narrow = origin.announced(Path.Pattern.subtree(Path.from("a/b")));
+		const events = record(narrow);
+		start(session.stream("a/**"), "a/b/x");
+		await settle();
+
+		// The broad watch leaves, so the narrow request opens and joins the route.
+		broad.close();
+		await settle();
+		start(session.stream("a/b/**"), "a/b/x");
+		// The epochless publisher restarts; the narrow request hears it first.
+		const restart = {
+			prefix: Path.from("a/b/x"),
+			captures: undefined,
+			kind: "restart",
+			route: Route.default,
+		} as const;
+		session.stream("a/b/**").append(restart);
+		if (broadRestarts) session.stream("a/**").append(restart);
+		await settle();
+		expect(events).toEqual(broadRestarts ? ["start a/b/x", "restart a/b/x"] : ["start a/b/x"]);
+
+		// The broad request lingers out. The narrow one takes over on the newer instance, so a
+		// route still on the old one restarts rather than stitching the two.
+		jest.advanceTimersByTime(LINGER);
+		await settle();
+		expect(events).toEqual(["start a/b/x", "restart a/b/x"]);
+
+		narrow.close();
+		session.die();
+		origin.close();
+	});
+}
+
 test("a reconnect re-opens every live watch and skips a lingering one", async () => {
 	const origin = new OriginProducer();
 	const first = new FakeSession();

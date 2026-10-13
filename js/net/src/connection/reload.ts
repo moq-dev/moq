@@ -8,6 +8,7 @@ import * as Time from "../time.ts";
 import { wireOf } from "../wire.ts";
 import { type ConnectProps, connect, type WebSocketProps, type WebTransportProps } from "./connect.ts";
 import type { Established } from "./established.ts";
+import { DISCOVERY_REMOVED } from "./forward.ts";
 import { DEFAULT_HANDOVER, type Drain, dialed, type GoawayProps, handover, pinnedTransport, target } from "./goaway.ts";
 import type { Probe, Stats } from "./stats.ts";
 
@@ -222,6 +223,7 @@ export class Reload {
 	// equality, but replacing one with an equivalent instance should not reconnect.
 	#url: Getter<string | undefined>;
 	constructor(props?: ReloadProps) {
+		if (props && "discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 		this.url = Signal.from(props?.url);
 		this.enabled = Signal.from(props?.enabled ?? true);
 		this.delay = props?.delay ?? {};

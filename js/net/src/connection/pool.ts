@@ -21,6 +21,7 @@ import {
 } from "./connect.ts";
 import type { Established as EstablishedType } from "./established.ts";
 import type { Extensions as ExtensionsType } from "./extensions.ts";
+import { DISCOVERY_REMOVED } from "./forward.ts";
 import type { GoawayProps, Redirect as RedirectType } from "./goaway.ts";
 import { Reload, type ReloadDelay, type ReloadStatus } from "./reload.ts";
 import type { Probe as ProbeType, Stats as StatsType } from "./stats.ts";
@@ -376,6 +377,7 @@ function refuse(props?: ConnectionProps): void {
 	if (!props) return;
 
 	const extra = props as ConnectionProps & { transport?: unknown; signal?: unknown };
+	if ("discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 	if (extra.transport) {
 		throw new Error("a supplied transport cannot reconnect; call Connection.connect() instead");
 	}

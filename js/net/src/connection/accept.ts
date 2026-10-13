@@ -4,7 +4,7 @@ import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../
 import { Stream } from "../stream.ts";
 import type { Established } from "./established.ts";
 import * as Extensions from "./extensions.ts";
-import { forwardAnnounced } from "./forward.ts";
+import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { exchangeSetup } from "./handshake.ts";
 
 /** Options for {@link accept}. */
@@ -51,6 +51,7 @@ type SessionProps = {
  * @returns A promise that resolves to a Connection instance
  */
 export async function accept({ transport, url, ...props }: AcceptProps): Promise<Established> {
+	if ("discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 	const connection = await acceptInner(transport, url, props);
 	if (props.consume) forwardAnnounced(connection, props.consume);
 	return connection;
