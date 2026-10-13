@@ -5,15 +5,14 @@
 Every first-party consumer that resolves a broadcast and keeps reading holds
 the announce stream for its path, and on `Restart` drops its handles and
 resolves the path again. On `Unroutable` it fails; it never retries a
-request. A WebSocket-to-QUIC upgrade on an epochless route then costs a
-long-lived consumer nothing but the restart, and Interop's cross-client
-rounds stay green whichever transport wins the connect race.
+request. A GOAWAY drain or a publisher replacement on an epochless route
+then costs a long-lived consumer nothing but the restart.
 
 ## Plan
 
-On 2026-10-13 the maintainer questioned keeping the WebSocket-to-QUIC upgrade
-path at all, pending a separate decision; the export decision below stays open
-until then.
+Moved to m1 on 2026-10-13 (maintainer): the WebSocket-to-QUIC upgrade is
+being removed (separate m0 quest), so an epochless Restart no longer follows
+every connect; it remains for GOAWAY drains and publisher replacement.
 
 The origin side is done: a handle resolved through a peer keeps serving new
 requests while the peer's epochless replacement is held, and refuses them

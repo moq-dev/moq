@@ -58,8 +58,8 @@ that depend on them.
 Interop on main (2026-10-13): the cross-client matrix failed with `unroutable`
 whenever WebSocket won the connect race: since #5294, #4180's upgrade
 retired epochless handles before its held `Restart` reached anyone. Handles
-now retire only once it is deliverable; first-party consumers following it
-remain. The
+now retire only once it is deliverable. First-party consumers following it
+moved to m1 (maintainer, 2026-10-13), since the upgrade is being removed. The
 released wire-compat step aborts on planned breaks the last release made
 stale. Both stay in m0 (maintainer, 2026-10-13): a red Interop hides real
 regressions.
@@ -82,7 +82,6 @@ have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
 
 - [CI cost and latency](/quest/m0/ci/README.md) - PRs stop queueing behind hosted runner caps: macOS and Windows move to the merge queue, caches move to R2, and setup is skipped when no work is selected
 - [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.5, then draft-20+ FETCH
-- [Restart followers](/quest/m0/restart-followers.md) - first-party consumers follow an epochless `Restart`, such as a WebSocket-to-QUIC upgrade's, by resolving the path again
 - [Panic isolation](/quest/m0/panic-isolation.md) - unwind, ignore lock poison, and supervise every task, so a panic closes only its connection or exits on a long-lived task
 - [Wire compat on main](/quest/m0/wire-compat-green.md) - the nightly released-wire step runs again: planned breaks re-measured against the new releases, and a released-API client for the released JS lanes
 - [nixpkgs ships the lld fix](/quest/m0/nixpkgs-lld-fix.md) - waiting on NixOS/nixpkgs#568680 to reach `nixpkgs-unstable`, which the release build fix bumps to

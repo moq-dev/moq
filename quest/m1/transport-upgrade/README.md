@@ -82,4 +82,4 @@ and no cached groups splice across instances. Keep JS's matrix consistent.
 ## Related
 
 - [Closed fallback](https://github.com/moq-dev/moq/pull/5284) - a WebSocket session that closes right after connecting falls back to the pending QUIC dial instead of redialing
-- [Restart followers](/quest/m0/restart-followers.md) - the first-party consumers that follow the `Restart` an epochless upgrade delivers
+- [Restart followers](/quest/m1/restart-followers.md) - the first-party consumers that follow the `Restart` an epochless upgrade delivers
