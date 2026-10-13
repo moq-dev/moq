@@ -861,9 +861,8 @@ async fn pair_behind_a_relay_ends_lite_06() {
 /// `P` serves `video` on demand and replaces its producer partway through the broadcast,
 /// the way a publisher restarts an encoder. The epoch lets `P`'s own front resume the
 /// logical track onto the replacement, so `A` and `R` never see the abort. The
-/// replacement continues the track's sequence namespace, so its first group reaches
-/// `R` at once instead of being skipped until a fresh counter caught up with what `R`
-/// already read.
+/// replacement continues the track's sequences explicitly, so its first group reaches
+/// `R` at once instead of being skipped as one `R` already read.
 async fn producer_replaced(version: &str) {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
@@ -913,8 +912,13 @@ async fn producer_replaced(version: &str) {
 		.expect("the track was not requested again")
 		.unwrap();
 
-	let mut group = second.append_group().unwrap();
-	assert_eq!(group.sequence, 2, "{version}: the replacement restarted its sequences");
+	// The application owns where the replacement starts: an append would reuse the first
+	// producer's sequences, so it is refused, and the replacement continues explicitly.
+	assert!(
+		matches!(second.append_group(), Err(Error::Duplicate)),
+		"{version}: the replacement restarted its sequences"
+	);
+	let mut group = second.create_group(moq_net::group::Info { sequence: 2 }).unwrap();
 	for frame in 0..FRAMES {
 		group.write_frame(Timestamp::ZERO, payload(2, frame)).unwrap();
 		assert_eq!(next(&mut rx).await, (2, payload(2, frame)), "{version}");

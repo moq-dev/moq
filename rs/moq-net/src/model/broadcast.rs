@@ -99,9 +99,9 @@ struct BroadcastState {
 	requests: Requests<Arc<str>, track::Request>,
 
 	// Each name's sequence namespace, outliving the producers that serve it: a name means
-	// the same content for the broadcast's whole life, so a replacement producer continues
-	// where the last one stopped instead of reusing its sequences. Entries nothing holds or
-	// wrote are swept as the map grows, so requests for names never served stay bounded.
+	// the same content for the broadcast's whole life, so a replacement producer that would
+	// append a sequence an earlier one wrote is refused. Entries nothing holds or wrote are
+	// swept as the map grows, so requests for names never served stay bounded.
 	sequences: HashMap<Arc<str>, track::Sequence>,
 
 	// Set once the broadcast ends: `Producer::close()` or the last producer-side
@@ -1359,16 +1359,16 @@ mod test {
 		track2.assert_not_closed();
 		track2.assert_not_clone(&track1);
 
-		// The new consumer should receive the new group.
-		producer2.append_group().unwrap();
+		// The new consumer should receive the new group, which continues past the first's.
+		producer2.create_group(crate::group::Info { sequence: 1 }).unwrap();
 		track2.assert_group();
 	}
 
-	/// A name keeps one sequence namespace for the broadcast's life: a replacement producer
-	/// appends past everything an earlier one wrote, explicit writes included, while a new
-	/// broadcast starts over.
+	/// A name keeps one sequence namespace for the broadcast's life. The application owns
+	/// where a replacement starts: an append that would reuse an earlier producer's sequence,
+	/// explicit writes included, is refused, while a new broadcast starts over.
 	#[test]
-	fn replacement_continues_sequences() {
+	fn replacement_refuses_reused_sequences() {
 		let producer = Info::new().produce();
 		let mut dynamic = producer.dynamic();
 		let consumer = producer.consume();
@@ -1384,14 +1384,28 @@ mod test {
 
 		let track = consumer.track("media").unwrap();
 		let mut second = dynamic.assert_request().accept(crate::track::Info::timed());
-		assert_eq!(second.append_group().unwrap().sequence, 13);
+		assert!(matches!(second.append_group(), Err(Error::Duplicate)));
+		assert!(matches!(
+			second.append_datagram(crate::Timestamp::ZERO, b"x"),
+			Err(Error::Duplicate)
+		));
+
+		// An explicit first write picks the start, and appends continue from there.
+		second.create_group(crate::group::Info { sequence: 13 }).unwrap();
 		assert_eq!(second.append_datagram(crate::Timestamp::ZERO, b"x").unwrap(), 14);
 		second.finish().unwrap();
 		drop((second, track));
 
-		// A track the producer creates itself continues the same namespace.
+		// A track the producer creates itself checks the same namespace.
 		let third = producer.create_track("media", crate::track::Info::timed()).unwrap();
-		assert_eq!(third.append_group().unwrap().sequence, 15);
+		assert!(matches!(third.append_group(), Err(Error::Duplicate)));
+		assert_eq!(
+			third
+				.create_group(crate::group::Info { sequence: 15 })
+				.unwrap()
+				.sequence,
+			15
+		);
 
 		let next = Info::new().produce();
 		assert_eq!(

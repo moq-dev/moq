@@ -30,7 +30,7 @@ replaces both: the rule is timestamp arithmetic on the group start.
   picture itself is never withheld. `js/watch/src/video/decoder.ts` and
   `rs/moq-video/src/decode` are where presentation happens; the transcoder
   gets the skip for free because it consumes the same decode path. Keep the
-  last painted frame on screen, as `#onDiscontinuity` already does.
+  last painted frame on screen, as `#onBreak` already does.
 - IDR exception: before withholding, check the first slice NAL type of the
   group's first frame (H.264 type 5; H.265 `IDR_W_RADL`, `IDR_N_LP`, the BLA
   types). Rust has the NAL walkers in `rs/moq-mux/src/codec/{h264,h265}`;
@@ -54,6 +54,10 @@ replaces both: the rule is timestamp arithmetic on the group start.
   later group freezes on the last presented frame through that group's warmup;
   a group opening on an IDR presents immediately; a rendition without
   `warmup` is untouched.
+
+## Required
+
+- [Plan: recovery boundaries](/quest/m2/intra-refresh/plan-boundary.md) - consumers need a safe boundary before presenting the affected pictures
 
 ## Related
 

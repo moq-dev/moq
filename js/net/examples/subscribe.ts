@@ -5,7 +5,7 @@ async function main() {
 	const origin = new Moq.Origin.Producer();
 	const connection = await Moq.Connection.connect({ url, consume: origin });
 
-	// Subscribe to a broadcast
+	// Keep one publisher instance; wait.ts shows following publisher restarts.
 	const broadcast = origin.request(Moq.Path.from("my-broadcast"));
 
 	// Subscribe to a specific track (with priority 0)
@@ -39,6 +39,8 @@ async function main() {
 		}
 	}
 
+	track.close();
+	broadcast.close();
 	await connection.close();
 	origin.close();
 }
