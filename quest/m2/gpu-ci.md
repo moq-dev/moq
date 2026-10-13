@@ -2,8 +2,8 @@
 
 ## Goal
 
-The NVDEC, NVENC, and CUDA tests run nightly on the maintainer's Linux host
-(RTX 3070 Ti) instead of passing without a GPU on hosted runners, and a local
+The NVDEC, NVENC, and CUDA tests run nightly on real NVIDIA hardware instead
+of passing without a GPU on hosted runners, and a local
 `just rs nvidia` runs them against the host driver instead of silently
 skipping inside the Nix shell.
 
@@ -44,23 +44,16 @@ skipping inside the Nix shell.
   against the CPU reference for both renditions, RGBA and BGRA, through
   NVENC and CUDA external-image import (the verification #4975 deferred here).
 - Nightly: a job in `.github/workflows/nightly.yml` runs `nix develop
-  --command just rs nvidia` on the self-hosted runner, a recipe and not a
-  script path, like every other workflow step. It targets the `moq-gpu`
-  runner that [Self-hosted CI](/quest/m2/self-hosted-ci.md)'s module defines,
-  which stays stricter than the `moq-ci` runners that take same-repo PRs: only
-  `schedule` and `workflow_dispatch`, with the job gated to `refs/heads/main`,
-  never `pull_request`; a label only this job selects; read-only
-  `permissions`. Read GitHub's self-hosted runner hardening guidance before
-  wiring it.
-- The host runs NixOS, where the driver libraries live under
-  `/run/opengl-driver/lib`, not `/usr/lib/x86_64-linux-gnu`. The script must
-  find them in either place, since local runs happen on Ubuntu.
+  --command just rs nvidia`, a recipe and not a script path, like every other
+  workflow step: only `schedule` and `workflow_dispatch`, gated to
+  `refs/heads/main`, never `pull_request`, with read-only `permissions`.
+- Open: where the GPU tests run. The self-hosted host this quest planned on
+  was dropped on 2026-10-13 with self-hosted CI. Recommendation: a
+  GitHub-hosted Linux GPU larger runner for the nightly job, measured for
+  cost, since larger runners bill even on public repositories; local
+  `just rs nvidia` runs cover development until then.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [CI host](/quest/m3/ci-host.md) - the host whose `moq-gpu` runner the nightly job runs on
 
 ## Related
 

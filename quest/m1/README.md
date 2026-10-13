@@ -46,6 +46,11 @@ Keep one owner per shared code area. Order each prerequisite before its
 consumer; targeted benchmarks and controlled-time regressions remain part of
 the feature that needs them.
 
+Added 2026-10-13 by the redundant TS alignment plan: epoch refusals, the
+epoch anchor, and raw TS cuts on the epoch timeline, ranked just above
+same-epoch importers, which requires them. Catalog clock adoption moved up
+above them, since the epoch anchor requires it.
+
 ## Required
 
 - [Epoch correctness](/quest/m0/broadcast-epoch/README.md) - publisher identity, duplicate suppression, and catalog pinning gate the breaking cut
@@ -85,12 +90,14 @@ the feature that needs them.
 - [Lazy discovery](/quest/m1/lazy-discovery/README.md) - a `consume` session requests announcements only for prefixes the origin is watching, in JS then Rust; `follow`, `broadcasts`, and the `discovery` option go away
 - [A spinning loop fails a sim test](/quest/m1/spinning-loops.md) - a sim test names any loop that holds a task poll too long, and each one yields through a budget
 - [Kotlin wrapper POMs](/quest/m1/kt-ffi-pom.md) - Maven builds of `dev.moq:moq` resolve a published moq-ffi instead of the missing `0.0.0-dev`
-- [Plan: redundant TS alignment](/quest/m1/plan-ts-alignment.md) - settle shared source coordinates and distinguish TS identity from coordinated RTP recovery
+- [The catalog root clock is the producer clock](/quest/m1/catalog-clock-adopt.md) - a derivative adopts its input's wall mapping through `modify()`, and a root `clock` change after the clock is fixed is refused
+- [Epoch refusals](/quest/m1/epoch-refusals.md) - capture, avc3, `rtc --connect`, archive, and transcode refuse `--epoch`, since two instances never publish identical tracks
+- [Epoch anchor](/quest/m1/epoch-anchor.md) - same-epoch importers adopt the first importer's catalog clock and timestamp era, so they agree across a 33-bit wrap and a forward clock break
+- [Raw TS cuts on the epoch timeline](/quest/m1/ts-passthrough-epoch-cuts.md) - passthrough fallback cuts fall on the epoch's grid and a joiner adopts the live M2ts section, so instances started apart publish identical groups and catalogs
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - importers sharing one `--epoch` and fed one stream publish identical groups and timestamps, so failover between a redundant pair survives
 - [Plan: untimed verbatim PES](/quest/m1/plan-ts-pes-untimed.md) - decide how a verbatim TS track carries a PES that has no PTS, then write the implementation quest
 - [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) - json and binary consumers return each value's timestamp, in Rust and every binding; snapshots add `latest()` beside an in-order `next()`
 - [JSON window timestamps](/quest/m1/json-window-timestamps.md) - Rust and JS window consumers return each event's frame timestamp like the snapshot and stream consumers
-- [The catalog root clock is the producer clock](/quest/m1/catalog-clock-adopt.md) - a derivative adopts its input's wall mapping through `modify()`, and a root `clock` change after the clock is fixed is refused
 - [Exact catalog wall clock](/quest/m1/catalog-wall-clock-precision.md) - `hang::catalog::Clock::wall_clock` keeps sub-millisecond precision
 - [JavaScript answers TRACK_STATUS](/quest/m1/js-track-status.md) - a browser publisher answers IETF TRACK_STATUS like Rust, so a native fetch-only request needs no SUBSCRIBE fallback
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface

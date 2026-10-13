@@ -77,6 +77,7 @@ have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
 
 ## Required
 
+- [CI cost and latency](/quest/m0/ci/README.md) - PRs stop queueing behind hosted runner caps: macOS and Windows move to the merge queue, caches move to R2, and setup is skipped when no work is selected
 - [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.5, then draft-20+ FETCH
 - [TS duration fidelity](/quest/m0/ts-duration-fidelity.md) - Interop's TS compliance captures the whole round-tripped stream again, fixing a regression that turns Interop red on main
 - [Upgrade restarts epochless broadcasts](/quest/m0/upgrade-unroutable.md) - a WebSocket-to-QUIC upgrade retires epochless handles only once their `Restart` is delivered, and first-party consumers follow it, fixing Interop's `unroutable` rounds

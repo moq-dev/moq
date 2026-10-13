@@ -19,8 +19,6 @@ m4's upstream waits in here and moved m2 work with no consumer.
 
 ## Required
 
-- [CI cache release](/quest/m3/ci-cache-release.md) - a stable cache server supports anonymous reads and OIDC writes restricted to the main warmer
-- [CI host](/quest/m3/ci-host.md) - the maintainer brings up the spare desktop as the `moq-ci` and `moq-gpu` runner host
 - [Video validation hardware is on hand](/quest/m3/video-hardware-access.md) - the machines the validation runs on, including a Raspberry Pi 4/5 for embedded presenting
 - [Video hardware validation](/quest/m3/video-hardware.md) - run the encode, capture, and zero-copy paths that were never run on real machines, including PipeWire on KDE, the camera portal, and a Pi
 - [An Ada NVIDIA GPU is available](/quest/m3/ada-gpu.md) - the hardware AV1 NVENC is verified on

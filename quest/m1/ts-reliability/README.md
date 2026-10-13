@@ -64,7 +64,8 @@ their current quests.
 
 ## Related
 
-- [Plan: redundant TS alignment](/quest/m1/plan-ts-alignment.md) - shared identity requires a shared source coordinate, and TS identity alone is not ST 2022-7
+- [Epoch anchor](/quest/m1/epoch-anchor.md) - shared identity across importers requires one source coordinate per epoch
+- [TS over RTP legs](/quest/m2/ts-rtp-egress.md) - TS identity alone is not ST 2022-7, which also needs matching RTP headers
 - [TS health counters](/quest/m2/ts-health-stats.md) - ingress and egress evidence need distinct monitoring points
 - [MSFTS mapping](/quest/m3/msfts-convergence.md) - document the exact equivalence and differences between the carriage modes
 

@@ -18,11 +18,13 @@ The first follow-through is [release execution](/quest/m2/release/README.md).
 Rate-grant work targets the next unpublished lite version after finalized
 lite-07; bitrate enforcement is not part of this release.
 
+Added 2026-10-13 by the redundant TS alignment plan: TS over RTP legs,
+ranked just below deterministic TS legs, which it requires.
+
 ## Required
 
 - [Time test sweep](/quest/m2/time-test-sweep.md) - unrelated test conversion and the workspace lint ratchet
 
-- [Self-hosted CI](/quest/m2/self-hosted-ci.md) - same-repo Check and Test run on a self-hosted NixOS runner with a main-written local cache, behind a `CI_RUNNER` kill switch
 - [Binding audio delay](/quest/m2/binding-surface.md) - moq-ffi and every wrapper configure and observe audio playout delay
 - [Per-frame arrivals in @moq/watch](/quest/m2/watch-arrivals.md) - the audio and video decoders expose a window of recent frame arrivals, late and skipped marks included, as a signal
 - [Drill mutation gate](/quest/m2/drill-mutation-gate.md) - a PR touching a drill mutation's target runs that mutation's sensitivity check, advisory until the drills run on controlled time
@@ -34,7 +36,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [AudioToolbox encode](/quest/m2/audio-encode-audiotoolbox.md) - macOS and iOS encode AAC-LC
 - [mp4-atom dOps mapping](/quest/m2/mp4-atom-dops-mapping.md) - a released mp4-atom reads and writes any `dOps` channel mapping family and table
 - [CMAF surround Opus](/quest/m2/cmaf-opus-surround.md) - fMP4 import and export carry an Opus channel mapping table
-- [GPU CI](/quest/m2/gpu-ci.md) - NVIDIA tests run nightly on a self-hosted GPU runner, and `just rs nvidia` runs them locally instead of skipping
+- [GPU CI](/quest/m2/gpu-ci.md) - NVIDIA tests run nightly on real hardware, and `just rs nvidia` runs them locally instead of skipping
 - [Simulcast rung disable](/quest/m2/simulcast-rung-disable.md) - JS, Rust/FFI, and OBS publishers stop encoding the top renditions their grant cannot fund, advertise `enabled: false`, and re-enable with hysteresis
 - [Discover media headroom](/quest/m2/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
 - [Viewer up-switch](/quest/m2/viewer-upswitch.md) - a viewer capped by its small rendition finds headroom through PROBE and moves up
@@ -77,7 +79,8 @@ lite-07; bitrate enforcement is not part of this release.
 - [One port on the io_uring workers](/quest/m2/uring-demux.md) - `moq-uring`'s workers host the UDP demux, so a ring relay keeps WebRTC media and SRT on its QUIC port
 - [Synced data playback](/quest/m2/watch-data-sync.md) - js/watch releases JSON and binary payloads on the media playhead, and a slow data track holds media back
 - [Watch decode gate](/quest/m2/watch-decode-gate.md) - video lookahead stays encoded until it is near presentation, like audio
-- [Deterministic TS legs](/quest/m2/ts-hitless.md) - two export legs preserve common TS packet identity; coordinated RTP is a separate prerequisite for ST 2022-7
+- [Deterministic TS legs](/quest/m2/ts-hitless.md) - two `--sync` legs of one broadcast render every common slot identically, continuity counters included, through complementary loss
+- [TS over RTP legs](/quest/m2/ts-rtp-egress.md) - two legs send identical RTP packets, headers included, so an ST 2022-7 receiver can merge them
 - [DVB E-AC-3](/quest/m2/ts-eac3.md) - E-AC-3 private data is split per access unit (independent frame plus its dependent substreams) and buffer-modelled in TS export
 - [T-STD controls](/quest/m2/tstd-controls.md) - the harness gains an MB-overflow control and an AAC broadcast reference
 - [MP4 export](/quest/m2/mp4-export.md) - `moq export mp4 --output` records crash-safe fragments, then finishes a regular MP4 with moov at the end

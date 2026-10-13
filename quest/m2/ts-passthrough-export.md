@@ -57,10 +57,8 @@ promise immediate decode for every program in an MPTS.
 - Passthrough gives 1+1 identity for free: two exporters fed the same objects
   emit identical TS packets for every object both release, continuity
   counters included; an object one leg drops late is a gap in that leg only.
-  Aligning the legs in time is left to the `--sync` anchor planned for the
-  demultiplexed export's 2022-7 legs, which passthrough can adopt. That is TS
-  identity, not ST 2022-7 recovery, which also needs matching RTP headers from
-  a coordinated RTP egress.
+  That is TS identity, not ST 2022-7 recovery, which also needs matching RTP
+  headers from [RTP egress](/quest/m2/ts-rtp-egress.md).
 - Rust only.
 
 This quest owns the reusable raw packet/position and release-schedule oracle
@@ -88,8 +86,8 @@ Public API: a new export mode; nothing existing breaks.
 
 ## Related
 
-- [Deterministic TS legs](/quest/m2/ts-hitless.md) - common packet identity and the proposed `--sync` anchor
+- [Deterministic TS legs](/quest/m2/ts-hitless.md) - the demultiplexed lane's common packet identity under `--sync`
 - [T-STD TS export](/quest/m1/tstd/README.md) - the jitter buffer and clock recovery this release shares
 - [TS validation](/quest/m1/ts-reliability/validation.md) - shared automatic graders and controls
 - [Loss and recovery](/quest/m1/ts-reliability/recovery.md) - actual missing content and reacquisition proof
-- [Redundant alignment](/quest/m1/plan-ts-alignment.md) - identical common objects do not prove independent importers publish identical groups
+- [Same-epoch importers](/quest/m1/hop-aligned-import.md) - identical common objects do not prove independent importers publish identical groups

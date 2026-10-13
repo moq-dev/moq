@@ -1,4 +1,4 @@
-# [L] Same-epoch importers publish identical tracks
+# [M] Same-epoch importers publish identical tracks
 
 ## Goal
 
@@ -12,56 +12,63 @@ failover `export ts` sees a timestamp rewind and exits (#4354).
 
 ## Plan
 
-The 2026-10-11 audit adds a planning prerequisite for the shared source
-coordinate. The group-number and wall-anchor proposals below are provisional
-until it settles how the input supplies a common anchor and wrap era. A
-shared epoch or raw PTS/PCR value alone does not supply that mapping. Also
-resolve raw passthrough explicitly: today's `--epoch` accepts whole MPTS
-there, whereas the semantic importer scope below says one program.
-
 Decided: every publisher of one path and epoch MUST publish the same
 broadcasts and tracks, since routes with the same epoch resume each other's
 subscriptions. A redundant pair is keyed by a shared explicit epoch (decided
-2026-10-03: `--hop` no longer exists to key it). Make every importer that
-`moq import --epoch` accepts for one encoded stream (ts with one program,
-fmp4, flv, avc3, and the HLS pull that reuses them) meet the contract when
-fed one encoded stream. RTMP and SRT imports, the WHIP listener, and
-`ts --program all` are out: they mint an epoch per ingest connection
-(#4962), so two of them never share one. The WHEP pull and archive replay
-are out too (each pull's RTP session and each replay is its own instance),
-and so is capture: two encoders never align. Since the CLI still accepts
-`--epoch` for `rtc --connect`, make it refuse one (`takes_epoch` false, as
-[Replay catalog](/quest/m1/archive/replay-catalog.md) does for archive), with
-a regression test.
+2026-10-03: `--hop` no longer exists to key it). Every importer that
+`moq import --epoch` accepts meets the contract when fed one encoded stream:
+ts with one program, ts `--passthrough` (a whole multiplex included), fmp4,
+flv, and the HLS pull that reuses them. RTMP and SRT imports, the WHIP
+listener, and `ts --program all` are out: they mint an epoch per ingest
+connection (#4962), so two of them never share one. Publishers whose
+timestamps or bytes come from the instance refuse a shared epoch
+([Epoch refusals](/quest/m1/epoch-refusals.md)).
 
-- A group's sequence derives from its keyframe's media timestamp (PTS in TS),
-  not a per-process counter. Decide how both processes agree across a
-  timestamp wrap (TS PTS wraps every 26.5 h) when they started on opposite
-  sides of it.
-- Frame timestamps derive from the input alone too, and importers refuse a
-  rewind. Any offset its `catalog::Timebase` applies is input-derived for a
-  same-epoch importer, never from
-  `clock.now()` (decided in the 2026-10-06 audit), so two instances shift
-  identically.
-- The catalog's root `clock` must agree too. Today each importer places it
-  at its own first-frame arrival (`Clock::arrival` in
-  `rs/moq-mux/src/catalog/producer.rs`), which is also the first published
-  clock, since each importer holds its catalog until that frame, and a
-  joining importer is offset by its arrival time. Decided in the 2026-10-05
-  audit: redundant importers derive the wall anchor from the input (its PTS
-  or PCR) or from the shared epoch, never from arrival, so two catalogs of
-  one stream are identical. They pass it through `catalog::Timebase::place`
-  rather than a second anchoring path (2026-10-06 audit). Rejected: narrowing
-  the contract to exclude the catalog clock.
+Decided 2026-10-13 by the maintainer: an epoch has one
+coordinate, which its first importer fixes and every later importer adopts
+([Epoch anchor](/quest/m1/epoch-anchor.md)). This quest numbers groups on it
+and proves the pair end to end. A shared epoch or a raw PTS or PCR value
+alone does not supply that coordinate, and arrival time never does.
+Considered instead: one importer per epoch with redundancy only downstream,
+which stays the supported 1+1 until this lands, and a contract narrowed to
+what one input proves, which fails at the first failover across a timestamp
+wrap.
+
+- A group's sequence derives from its first frame's time on the epoch
+  timeline (the keyframe in the demultiplexed lane, the group's first object
+  in passthrough), not a per-process counter, so two importers number the
+  same group alike wherever each started. A source may start consecutive
+  groups at one timestamp (`container::Producer` accepts a keyframe at the
+  previous group's start), which time alone cannot number without a
+  history-derived counter: settle a tie-breaker the source carries, or
+  refuse equal starts under a shared epoch, and cover it in the pair test.
+- Frame timestamps derive from the input and the epoch's coordinate alone,
+  never from `clock.now()` (2026-10-06 audit), and importers refuse a rewind.
+- The catalog's root `clock` is the epoch's, never an importer's arrival
+  (2026-10-05 audit; narrowing the contract to exclude the catalog clock was
+  rejected). So is every other catalog field an importer derives from its
+  history, which a joiner adopts from the live catalog.
+- The tracks an importer generates are tracks too: the catalog tracks
+  (hang, compressed, MSF) and `*.timeline`. Today catalog groups are
+  numbered locally (`Outputs::emit`), the MSF frame is stamped with
+  `Timestamp::now()`, and timeline records start at zero, so a joiner would
+  reuse earlier group or record numbers for newer bytes. Their numbering
+  and timestamps come from the live track at join or from the epoch
+  timeline, never the instance.
 - An importer announces only once it knows its tracks, so it never refuses a
   track the incumbent serves.
-- Docs (`doc/bin/cli.md` "Redundant publishers", the `--epoch` doc comment)
-  narrow the contract to one encoded stream fed to each publisher.
+- Docs (the `--epoch` paragraph in `doc/bin/cli.md`, the `--epoch` doc
+  comment) state the contract: one encoded stream fed to each publisher, and
+  a later importer that can reach the live broadcast before it announces.
 
-Tests: per importer, two instances started at different offsets into the same
-input produce the same group sequences and timestamps. End to end: the
-issues' 1+1 setup (one relay, two `import ts` sharing one `--epoch`, two
-`export ts`) survives the standby joining and the incumbent stopping.
+Tests: per importer, two instances started at different offsets into one
+input, including the later one starting after a timestamp wrap the earlier
+crossed, publish identical catalogs, group sequences, and timestamps, on
+the generated catalog and timeline tracks too, joining after earlier
+catalog updates and timeline records. End to
+end: the issues' 1+1 setup (one relay, two `import ts` sharing one `--epoch`,
+two `export ts`) survives the standby joining, before and after a wrap, and
+the incumbent stopping; repeat it with `--passthrough`.
 
 ## Closes
 
@@ -70,9 +77,12 @@ issues' 1+1 setup (one relay, two `import ts` sharing one `--epoch`, two
 
 ## Required
 
-- [Plan: redundant TS alignment](/quest/m1/plan-ts-alignment.md) - settle the source-to-wall anchor, wrap era and raw group coordinate that a shared epoch alone does not provide
+- [Epoch refusals](/quest/m1/epoch-refusals.md) - publishers that cannot meet the contract refuse a shared epoch
+- [Epoch anchor](/quest/m1/epoch-anchor.md) - one anchor and timestamp era per epoch, adopted by every later importer
+- [Raw TS cuts on the epoch timeline](/quest/m1/ts-passthrough-epoch-cuts.md) - passthrough groups start where every instance cuts
 
 ## Related
 
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - a redundant pair shares one epoch
 - [E2EE](/quest/m2/e2ee/README.md) - an encrypting publisher refuses a shared epoch, so a redundant pair is plaintext only
+- [Deterministic TS legs](/quest/m2/ts-hitless.md) - what two exports of the pair render from the common coordinate
