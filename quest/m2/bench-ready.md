@@ -57,5 +57,5 @@ Public API: none (CLI output only). Wire: none.
 
 ## Related
 
-- [Mergeable bench buckets](/quest/m1/bench-buckets.md) - the same JSONL
+- [Mergeable bench buckets](/quest/m2/bench-buckets.md) - the same JSONL
   lines; a harness sums buckets over the window `ready` opens

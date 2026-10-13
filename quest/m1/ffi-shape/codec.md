@@ -20,8 +20,8 @@ broadcast-bound types are `video.Producer`/`audio.Producer`
 (`rs/moq-video/src/encode/producer.rs`, `rs/moq-audio/src/encode/producer.rs`),
 and this quest also owns the codec-only `video.Encoder`/`audio.Encoder`
 (`encode::Encoder` in `encoder.rs`). The OBS adapters
-([video](/quest/m1/obs-moq-video/adapter.md),
-[audio](/quest/m1/obs-moq-video/audio-publish.md)) consume these rather than
+([video](/quest/m2/obs-moq-video/adapter.md),
+[audio](/quest/m2/obs-moq-video/audio-publish.md)) consume these rather than
 adding their own. Rejected: shipping only the Producers here and leaving the
 codec-only Encoder to the OBS audio quest.
 

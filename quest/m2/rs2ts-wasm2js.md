@@ -77,4 +77,4 @@ Public API: none; the report scopes any later changes. Wire: none.
 
 ## Required
 
-- [Rust-backed @moq/net](/quest/m1/rs2ts/README.md) - the production implementation and browser evidence this reuses
+- [Rust-backed @moq/net](/quest/m2/rs2ts/README.md) - the production implementation and browser evidence this reuses

@@ -27,4 +27,4 @@ In m3 until an Unreal consumer asks; the C++ package it links already exists.
 
 ## Required
 
-- [First C++ package release](/quest/m1/cpp-release.md) - the tarball the module links
+- [First C++ package release](/quest/m2/release/cpp-release.md) - the tarball the module links

@@ -10,7 +10,7 @@ moq-tokio's `FakeSession` and `Scripted` stay: they implement
 traits, which this pair cannot stand in for. `moq_relay::Connection` runs
 over any moq-net transport session, not only a `moq_tokio::server::Request`,
 so moq-relay's integration tests (auth, the cluster origin, stats) run on the
-sim with no sockets, and [the relay session bench](/quest/m1/bench-relay.md)
+sim with no sockets, and [the relay session bench](/quest/m2/bench-relay.md)
 uses the same seam.
 
 ## Plan

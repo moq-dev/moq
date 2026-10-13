@@ -10,7 +10,7 @@ layout, and FETCH behavior as native `moq-archive` users.
 Port the archive contract to the JS packages with memory and OPFS storage. The
 application explicitly enrolls video, audio, catalog, or arbitrary data tracks;
 the archive does not infer them from Hang. Record against the per-track
-timelines from [JS per-track timelines](/quest/m1/archive/js-timelines.md).
+timelines from [JS per-track timelines](/quest/m2/archive-js-timelines.md).
 
 Commit each track independently: persist each stored span, including a frame
 range of a still-open group, then publish that track's timeline record. Match
@@ -37,5 +37,5 @@ lands first.
 
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - generic on-demand range serving in `@moq/net`
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - IETF FETCH dispatch onto it
-- [JS per-track timelines](/quest/m1/archive/js-timelines.md) - the timeline this archive records against
+- [JS per-track timelines](/quest/m2/archive-js-timelines.md) - the timeline this archive records against
 - [Archive](/quest/m1/archive/README.md) - the native writer, reader, and DVR contract this ports
