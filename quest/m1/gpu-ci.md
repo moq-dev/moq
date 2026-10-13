@@ -46,7 +46,7 @@ skipping inside the Nix shell.
 - Nightly: a job in `.github/workflows/nightly.yml` runs `nix develop
   --command just rs nvidia` on the self-hosted runner, a recipe and not a
   script path, like every other workflow step. It targets the `moq-gpu`
-  runner that [Self-hosted CI](/quest/m0/self-hosted-ci.md)'s module defines,
+  runner that [Self-hosted CI](/quest/m0/ci/self-hosted.md)'s module defines,
   which stays stricter than the `moq-ci` runners that take same-repo PRs: only
   `schedule` and `workflow_dispatch`, with the job gated to `refs/heads/main`,
   never `pull_request`; a label only this job selects; read-only
@@ -60,7 +60,7 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [CI host](/quest/m0/ci-host.md) - the host whose `moq-gpu` runner the nightly job runs on
+- [CI host](/quest/m0/ci/host.md) - the host whose `moq-gpu` runner the nightly job runs on
 
 ## Related
 

@@ -3,7 +3,7 @@
 ## Goal
 
 Check and Test for same-repo pull requests and merge-queue runs execute on a
-self-hosted x86 NixOS runner with a warm Nix store and a local mbx cache that
+self-hosted x86 NixOS runner with a warm Nix store and an mbx cache that
 only `main` writes. Fork PRs and every release workflow stay on GitHub-hosted
 runners. Unset `vars.CI_RUNNER` and everything runs hosted, as today, so this
 merges before the host exists.
@@ -53,7 +53,7 @@ Decided in the 2026-10-09 planning session:
   (`count` exposed so the host can tune it). One `moq-gpu` instance for
   [GPU CI](/quest/m1/gpu-ci.md) with `PrivateDevices=false` and
   `DeviceAllow` for `/dev/nvidia*`; it never takes `moq-ci` work. Put the
-  kixelated cachix substituter in the module's `nix.settings`, since dynamic
+  project's substituter ([Nix cache](/quest/m0/ci/nix-cache.md)) in the module's `nix.settings`, since dynamic
   users are not `trusted-users` and cannot pass `extra-substituters`. The
   shared store grows with every flake revision, so enable disk-aware
   `nix.gc` (with `min-free`/`max-free`) and keep a GC root on the current
@@ -66,33 +66,19 @@ Decided in the 2026-10-09 planning session:
   App key, and an ephemeral runner re-registers on every restart, so a
   pre-start step mints a fresh installation token from the key into that file
   each time.
-- **Cache:** run `jdx/mr-boxington-cache` on the host with filesystem blob
-  storage and a durable metadata database (the default `memory://` loses the
-  index on restart, orphaning the blobs; PostgreSQL via `services.postgresql`
-  unless a persistent embedded backend is supported), bound to loopback. The
-  server has no blob expiry on the filesystem backend, so a timer wipes blobs
-  and metadata together once the store passes a size cap (or the flake hash
-  changes); the next warmer run refills it. Writes require a GitHub OIDC
-  token whose `workflow_ref`
-  is `moq-dev/moq/.github/workflows/cache.yml@refs/heads/main`, with
-  `repository`, `repository_owner_id`, `ref: refs/heads/main`, and
-  `event_name` of `push` or `workflow_dispatch` also checked
-  (`job_workflow_ref` is only meaningful for reusable workflows). The cache
-  warmer stays the single writer, matching the hosted design. Its job needs
-  `permissions: id-token: write` to mint that token. Reads are open on
-  loopback. Each job gets an empty
-  `MBX_CACHE_DIR` and `target/`, pointed at the server in remote read-only
-  mode. The server enforces the boundary; mbx's client-side mode narrowing is
-  only a convenience. No static write token anywhere, since a same-repo PR can
-  read secrets.
+- **Cache:** no cache server on the host. mbx reads the R2 namespace that
+  [mbx on R2](/quest/m0/ci/mbx-r2.md) sets up, read-only like any PR job,
+  and only `main` writes it. Each job gets an empty `MBX_CACHE_DIR` and
+  `target/`, so one PR cannot leave artifacts for the next. The host's own
+  x86 namespace is warmed by a self-hosted leg of `cache.yml`.
 - **Warming:** add a self-hosted leg to `cache.yml` (`runs-on: moq-ci`, gated
-  on `vars.CI_RUNNER` too) that runs the unscoped suite against the server. The
-  existing ARM store keeps serving hosted fallbacks.
+  on `vars.CI_RUNNER` too) that writes the x86 namespace. The hosted ARM
+  namespace keeps serving hosted fallbacks.
 - **Workflow steps:** skip free-disk-space and the Nix installer when
   `runner.environment == 'self-hosted'`. Keep the `rust-cache` composite
   action there, since its mbx install and `mbx setup` shim are the only route
-  from Cargo into mbx; give it a self-hosted mode that points mbx at the
-  server instead of restoring the hosted store.
+  from Cargo into mbx; give it a self-hosted mode that reads R2 instead of
+  restoring the hosted store.
 
 The squash merge queue is active (ruleset 2420853, verified 2026-10-10;
 #5291 passed through it). Its condition quest is complete. The workflow
@@ -102,17 +88,16 @@ do not wait for the superseded automatic-merge completion check.
 Verify before merging what can be checked without the host: `actionlint`,
 the routing expression's four cases (fork, Dependabot, same-repo, merge
 group) with `CI_RUNNER` set and unset, and that the module evaluates (`nix eval` or a
-`nixosTest` that boots the cache server and rejects a write without a token
-and with a token from a PR ref). End-to-end proof happens in
-[CI host](/quest/m0/ci-host.md).
+`nixosTest`). End-to-end proof happens in
+[CI host](/quest/m0/ci/host.md).
 
 Public API: the NixOS runner module and its configuration options. Wire: none.
 
 ## Required
 
-- [CI cache release](/quest/m0/ci-cache-release.md) - a stable server supports the enforced read/write split; keep routing hosted until its policy is proven
+- [mbx on R2](/quest/m0/ci/mbx-r2.md) - the main-written R2 cache this host reads instead of running its own server
 
 ## Related
 
-- [CI host](/quest/m0/ci-host.md) - the maintainer brings up the host this module configures
+- [CI host](/quest/m0/ci/host.md) - the maintainer brings up the host this module configures
 - [GPU CI](/quest/m1/gpu-ci.md) - the nightly NVIDIA job that runs on the `moq-gpu` instance

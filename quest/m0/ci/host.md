@@ -4,7 +4,7 @@
 
 Condition: the maintainer's spare desktop (x86, RTX 3070 Ti) runs NixOS with
 the NVIDIA driver, imports the `ci/runner/` module from
-[Self-hosted CI](/quest/m0/self-hosted-ci.md), and has registered its
+[Self-hosted CI](/quest/m0/ci/self-hosted.md), and has registered its
 `moq-ci` and `moq-gpu` runners through the dedicated GitHub App. This is a
 maintainer action: it needs admin access to the org and the host.
 
@@ -12,8 +12,8 @@ Check: `gh api orgs/moq-dev/actions/runners` lists four `moq-ci` runners and
 one `moq-gpu` runner online, and `gh variable get CI_RUNNER --repo moq-dev/moq`
 prints `moq-ci`. Then a same-repo PR's Check and Test run on `moq-ci` with no
 free-disk-space, Nix install, or hosted cache restore step, and their logs
-show the `rust-cache` action in self-hosted mode with mbx hitting the local
-server, while fork and Dependabot PRs run on `ubuntu-24.04-arm`. Record queue and run times against the 2026-10-09
+show the `rust-cache` action in self-hosted mode with mbx reading R2,
+while fork and Dependabot PRs run on `ubuntu-24.04-arm`. Record queue and run times against the 2026-10-09
 baseline (20-50 min queued, 4-18 min run) in the PR that deletes this quest.
 
 Advance it now: install NixOS with the NVIDIA driver, and create the GitHub
@@ -28,4 +28,4 @@ it.
 
 ## Related
 
-- [Self-hosted CI](/quest/m0/self-hosted-ci.md) - the module and routing this host runs
+- [Self-hosted CI](/quest/m0/ci/self-hosted.md) - the module and routing this host runs
