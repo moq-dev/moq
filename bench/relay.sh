@@ -234,7 +234,8 @@ run_workload() {
         HOST_PID=$!
         if [[ -n $PROFILE_LOCK ]]; then
             # The second half of the host window, matching the summary's throughput window.
-            python3 "$ROOT/bench/profile.py" record "$relay_pid" "$directory/lock" --delay 5 --duration 5 \
+            # Its own process group, so cleanup also stops perf and its workload.
+            setsid python3 "$ROOT/bench/profile.py" record "$relay_pid" "$directory/lock" --delay 5 --duration 5 \
                 >"$directory/lock.log" 2>&1 &
             PROFILE_PID=$!
         fi

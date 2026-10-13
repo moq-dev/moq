@@ -24,6 +24,8 @@ case $MODE in
         BASE=
         LOCK_WORKLOAD=${MOQ_BENCH_LOCK_WORKLOAD:-fanout}
         LOCK_WORKERS=${MOQ_BENCH_LOCK_WORKERS:-1 4 16}
+        # Without frame pointers, perf's DWARF unwinder stops at the first relay frame.
+        export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C force-frame-pointers=yes"
         ;;
     --runtime)
         BASE=
@@ -74,7 +76,8 @@ STDERR_PID=
 
 cleanup() {
     if [[ -n $PROFILE_PID ]]; then
-        kill "$PROFILE_PID" 2>/dev/null || true
+        # setsid made the profiler a group leader without forking, so its PID is the group.
+        kill -- -"$PROFILE_PID" 2>/dev/null || true
         wait "$PROFILE_PID" 2>/dev/null || true
     fi
     if [[ -n $LOAD_PID ]]; then
@@ -498,15 +501,15 @@ run_lock_profile() {
     python3 "$ROOT/bench/profile.py" check
     generate_certificate
 
-    printf 'Building the relay with the profiling profile...\n'
+    printf 'Building the relay with the profiling profile and frame pointers...\n'
     CARGO_TARGET_DIR=$TARGET/profile cargo build --locked --profile profiling -p moq-relay -p moq-bench
     LOAD_BIN=$TARGET/profile/profiling/moq-bench
     HOST_BIN=$TARGET/profile/profiling/moq-bench-host
     local relay=$TARGET/profile/profiling/moq-relay
 
     printf '\nLock wait: %s, tokio workers; each profiled run follows an unprofiled control\n' "$LOCK_WORKLOAD"
-    printf '%-8s %8s %13s %13s %10s %10s %13s %9s\n' \
-        workers switches control-fps profiled-fps control-CPU profiled-CPU mutex-wait-ms wait/CPU
+    printf '%-8s %5s %8s %13s %13s %10s %10s %13s %9s\n' \
+        workers idle switches control-fps profiled-fps control-CPU profiled-CPU mutex-wait-ms wait/CPU
     local workers
     for workers in $LOCK_WORKERS; do
         run_workload "control-$workers" "$relay" "$LOCK_WORKLOAD" tokio-workers "$workers"
@@ -514,16 +517,16 @@ run_lock_profile() {
         run_workload "lock-$workers" "$relay" "$LOCK_WORKLOAD" tokio-workers "$workers"
         PROFILE_LOCK=
         jq -r -s '[
-            .[0].recv_fps, .[1].recv_fps, .[0].cpu_cores, .[1].cpu_cores,
+            .[0].recv_fps, .[1].recv_fps, .[0].cpu_cores, .[1].cpu_cores, (.[2].idle | length),
             ([.[2].workers[].switches] | min),
             ([.[2].workers[].mutex_wait_ns] | add / 1000000),
             ([.[2].workers[].mutex_wait_ns] | add) / ([.[2].workers[].cpu_ns] | add)
         ] | @tsv' "$RUN/relay/control-$workers/$LOCK_WORKLOAD/summary.json" \
             "$RUN/relay/lock-$workers/$LOCK_WORKLOAD/summary.json" \
             "$RUN/relay/lock-$workers/$LOCK_WORKLOAD/lock/lock.json" |
-            while IFS=$'\t' read -r control profiled control_cpu profiled_cpu switches wait share; do
-                printf '%-8s %8s %13.1f %13.1f %10.3f %10.3f %13.1f %9.4f\n' \
-                    "$workers" "$switches" "$control" "$profiled" "$control_cpu" "$profiled_cpu" "$wait" "$share"
+            while IFS=$'\t' read -r control profiled control_cpu profiled_cpu idle switches wait share; do
+                printf '%-8s %5s %8s %13.1f %13.1f %10.3f %10.3f %13.1f %9.4f\n' \
+                    "$workers" "$idle" "$switches" "$control" "$profiled" "$control_cpu" "$profiled_cpu" "$wait" "$share"
             done
     done
     printf '\nMutex stacks (flamegraph folded format): %s/relay/lock-*/%s/lock/mutex.folded\n' "$RUN" "$LOCK_WORKLOAD"

@@ -91,10 +91,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just bench-audio
 
-      # perf samples worker switch-outs in kernel context; bench-lock refuses without it.
+      # perf samples worker switch-outs in kernel context into a large buffer; bench-lock refuses without it.
       - name: Allow perf kernel sampling
         if: ${{ !cancelled() }}
-        run: sudo sysctl -w kernel.perf_event_paranoid=1
+        run: sudo sysctl -w kernel.perf_event_paranoid=-1
 
       # Smoke-tests the capture path: exact off-CPU waits, resolved worker stacks and CPU.
       - name: Relay lock-wait profile

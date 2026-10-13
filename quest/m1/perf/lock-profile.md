@@ -31,11 +31,11 @@ Shared by every mode:
 - Reuse `bench/run.sh`'s lifecycle (builds, relay PID, workload, host
   samples) rather than adding a second launcher. Select workload, duration,
   and mode through one configuration.
-- Build the relay with `[profile.profiling]`: the release build
-  `bench/run.sh` uses has no debug info to symbolize or unwind with. Add
-  `RUSTFLAGS="-C force-frame-pointers=yes"` only for a mode that unwinds by
-  frame pointers; lock wait unwinds by DWARF, so it builds without them
-  (decided 2026-10-12).
+- Build the relay with `[profile.profiling]` and
+  `RUSTFLAGS="-C force-frame-pointers=yes"`: the release build `bench/run.sh`
+  uses has neither debug info nor frame pointers, so stacks would stop at the
+  libc frame. Lock wait unwinds by DWARF, but without frame pointers perf's
+  unwinder still stops at the first relay frame (checked 2026-10-12).
 - Capture the relay process and all its workers, never the load generator.
   Start after readiness and mark a steady window. Keep an uninstrumented
   control run to quantify profiler overhead.
@@ -62,10 +62,12 @@ three crates plus five Prometheus families):
   exact intervals read 0.0013). It samples the `context-switches` software
   event with a period of 1, not the `sched:sched_switch` tracepoint, since
   it records the same switch-outs without tracefs access (decided
-  2026-10-12). It needs `kernel.perf_event_paranoid` at 1 or lower for
-  kernel-context samples, and refuses with the command until then; the
-  nightly sets it with sudo. Kernel frames are discarded, so `kptr_restrict`
-  does not matter. User stacks unwind by DWARF, because glibc's frameless
+  2026-10-12). It needs `kernel.perf_event_paranoid=-1`: kernel-context
+  samples need 1 or lower, and the 2 MiB ring buffer that keeps 16 workers
+  from dropping samples exceeds the locked-memory limit above -1. It refuses
+  with the command until then, and refuses any recording that dropped
+  events; the nightly sets it with sudo. Kernel frames are discarded, so
+  `kptr_restrict` does not matter. User stacks unwind by DWARF, because glibc's frameless
   `syscall` wrapper hides `Mutex::lock_contended` from frame-pointer
   unwinding. `perf script --inline` expands inlined frames such as
   `Consumer::poll`.
