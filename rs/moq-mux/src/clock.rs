@@ -142,6 +142,9 @@ impl Clock {
 				let zero = now.checked_sub(since).ok_or_else(unmappable)?;
 				Some(wall_clock(zero).map_err(|_| unmappable())?)
 			}
+			// Past the mapping's range, PTS zero is before 2020 for any host before 2305; refusing it
+			// also keeps the readings within a timestamp as the clock advances.
+			None if since.as_micros() > MAX_SAFE_INTEGER as u128 => return Err(unmappable()),
 			None => None,
 		};
 		Ok(Self {
@@ -394,6 +397,10 @@ mod tests {
 
 		// An importer arriving an hour in still gets a timeline, and placing one has no wall to use.
 		assert_eq!(Clock::arrival(Duration::from_secs(3600)).unwrap().wall(), None);
+		assert!(matches!(
+			Clock::arrival(Duration::from_micros(MAX_SAFE_INTEGER + 1)),
+			Err(crate::Error::UnmappableTimestamp(_))
+		));
 		assert!(matches!(
 			Clock::placed(Duration::from_secs(1), moq_epoch() + Duration::from_secs(60)),
 			Err(crate::Error::UnmappableTimestamp(_))
