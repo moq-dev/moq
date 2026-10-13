@@ -38,7 +38,7 @@ async def main():
 
             for name, audio in catalog.audio.items():
                 # The track is the rendition's `track` when set, otherwise its catalog key.
-                track = audio.track or name
+                track = audio.track if audio.track is not None else name
                 frames = await moq.media.ContainerConsumer.subscribe(broadcast, track, audio.container)
                 async with frames:
                     async for frame in frames:
