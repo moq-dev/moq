@@ -2,9 +2,10 @@
 
 ## Goal
 
-A relay drain never exits under a WebSocket client that is still in TLS or
-HTTP header parsing. Web connections hold the drain from TCP accept until
-their first request shows they are not a WebSocket upgrade.
+A relay drain never exits under an HTTP/1.1 WebSocket client that is still
+in TLS or HTTP header parsing. HTTP/1.1 web connections hold the drain from
+TCP accept until their first request shows they are not a WebSocket upgrade.
+h2 connections release at ALPN, since h2 can't carry a WebSocket today.
 
 ## Plan
 
@@ -28,14 +29,14 @@ Decided 2026-10-12:
   None) is accepted without a guard: `serve_ws` refuses the upgrade with 503
   as today, and plain HTTP is served until the listener stops.
 
-Plain HTTP on the public listeners (HLS, API, health checks) now holds the
+Plain HTTP/1.1 on the public listeners (HLS, API, health checks) now holds the
 drain from accept through its first request's headers, bounded by
 `listen.timeout` and the drain deadline. Say so in `config.md`. The internal
 listener doesn't use the web acceptor and is unaffected.
 
-Tests (paused time): start the drain while one client is mid-TLS or
+Tests (paused time): start the drain while one HTTP/1.1 client is mid-TLS or
 mid-headers; `Relay::run` doesn't return until it upgrades and gets a
-GOAWAY, or the deadline passes. A plain GET releases the guard so the drain
+GOAWAY, or the deadline passes. A plain HTTP/1.1 GET releases the guard so the drain
 exits. `Relay::with_web` (embedders) goes through the same acceptor.
 
 Public API: none. Wire: none.

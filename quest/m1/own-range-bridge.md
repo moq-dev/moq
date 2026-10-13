@@ -15,18 +15,22 @@ since IETF `to_stream_code` maps unknown codes to INTERNAL_ERROR. The relay
 never forwards one session's close code onto another, so this is latent and
 reachable through `Session::abort(Error::Session(Unknown(0x3x)))`.
 
-Decided 2026-10-12: map it in the shared `SessionError::to_code`, so every
-IETF close site is covered, and delete Lite's now-redundant arm in
-`lite/error.rs`. Rust only: JS was checked and can't emit these codes
-(`abort()` takes no code, IETF closes use fixed codes, and auth rejections
-send UNAUTHORIZED or NOT_SUPPORTED).
+Decided 2026-10-12: map it in the IETF session-code encoder, mirroring
+`lite::error::to_session_code`, and route `Version::session_code` and the
+direct IETF close sites through it. Not in the shared
+`SessionError::to_code`: moq-ffi and moq-c expose that value verbatim
+(`from_session`), so a received Lite `Unknown(0x31)` would reach every
+binding as 0x1. Lite keeps its own arm. Rust only: JS was checked and can't
+emit these codes (`abort()` takes no code, IETF closes use fixed codes, and
+auth rejections send UNAUTHORIZED or NOT_SUPPORTED).
 
-Tests: an IETF close with `Unknown(0x31)` sends 0x1, a Lite close is
-unchanged, and `Unknown(0x20)` (the reserved range) still passes through on
+Tests: an IETF close with `Unknown(0x31)` sends 0x1, a Lite close and
+`to_code()` are unchanged, and `Unknown(0x20)` (the reserved range) still passes through on
 both.
 
-Public API: `SessionError::Unknown(0x30..=0x3f).to_code()` returns 0x1 on
-MoQT. Wire: no change for any published version.
+Public API: none; `SessionError::to_code` is unchanged. Wire: encoding and
+negotiated versions are unchanged, but the close code value changes: a MoQT
+close carrying `Unknown(0x30..=0x3f)` sends 0x1 instead of that code.
 
 ## Related
 
