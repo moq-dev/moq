@@ -61,13 +61,14 @@ impl<S: crate::transport::poll::Session> Driver<S> {
 	///
 	/// Panics if `now` is earlier than the previous poll or construction time.
 	pub fn poll(&mut self, now: Instant, waiter: &kio::Waiter) -> Result<Option<Instant>, Error> {
-		self.clock.advance(now);
-		self.clock.register_driver(waiter);
-		match self.state.poll(waiter) {
-			Poll::Ready(Ok(())) => Err(Error::Closed),
-			Poll::Ready(Err(err)) => Err(err),
-			Poll::Pending => Ok(self.clock.timeout()),
-		}
+		waiter.batch(|| {
+			self.clock.advance(now);
+			match self.state.poll(waiter) {
+				Poll::Ready(Ok(())) => Err(Error::Closed),
+				Poll::Ready(Err(err)) => Err(err),
+				Poll::Pending => Ok(self.clock.park(waiter)),
+			}
+		})
 	}
 }
 

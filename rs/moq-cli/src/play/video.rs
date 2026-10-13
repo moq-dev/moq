@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use moq_mux::container::Frame;
+use moq_mux::container::{Frame, Read};
 use tokio::time::Instant;
 
 use super::buffer::Buffer;
@@ -73,30 +73,46 @@ impl<O: Output> Video<O> {
 	pub async fn run(self, mut track: Track, mut decoder: impl Decoder) -> anyhow::Result<()> {
 		let buffer = Mutex::new(Buffer::default());
 		let receive = async {
-			let mut discontinuity = track.discontinuity();
+			// The group of a declared end whose restart waits for a later group, so the
+			// media buffered before the end still plays out.
+			let mut end = None;
 			loop {
-				let frame = track.read().await?;
+				let read = track.read().await?;
 				let mut buffer = buffer.lock().unwrap();
 				let before = buffer.generation;
-				if track.discontinuity() != discontinuity {
-					discontinuity = track.discontinuity();
-					buffer.clear();
-					self.presentation.lock().unwrap().video_restarted();
-				}
-				let ended = frame.is_none();
-				if let Some(frame) = frame {
-					if self
-						.presentation
-						.lock()
-						.unwrap()
-						.video(frame.timestamp, Instant::now().into_std())
-					{
-						self.output.send(Event::Wake);
+				let ended = match read {
+					Some(Read::Frame { group, frame }) => {
+						if end.take_if(|end| *end != group).is_some() {
+							buffer.clear();
+							self.presentation.lock().unwrap().video_restarted();
+						}
+						if self
+							.presentation
+							.lock()
+							.unwrap()
+							.video(frame.timestamp, Instant::now().into_std())
+						{
+							self.output.send(Event::Wake);
+						}
+						buffer.push(frame, self.max_delay);
+						false
 					}
-					buffer.push(frame, self.max_delay);
-				} else {
-					buffer.ended = true;
-				}
+					// Applied in delivery order, so the restart lands before the frame after it.
+					Some(Read::Gap) => {
+						end = None;
+						buffer.clear();
+						self.presentation.lock().unwrap().video_restarted();
+						false
+					}
+					Some(Read::End { group, .. }) => {
+						end = Some(group);
+						false
+					}
+					None => {
+						buffer.ended = true;
+						true
+					}
+				};
 				if buffer.generation != before {
 					self.frames.lock().unwrap().clear();
 					self.output.send(Event::Wake);
@@ -480,6 +496,48 @@ mod tests {
 			.collect::<Vec<_>>();
 		assert_eq!(queued, [500], "old decoder output crossed the discontinuity");
 		assert_eq!(media.output.present(&media).unwrap().as_millis(), 500);
+	}
+
+	#[tokio::test]
+	async fn a_declared_end_plays_out_the_pictures_before_it() {
+		tokio::time::pause();
+		let delay = Duration::from_secs(2);
+		let media = media(delay);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let subscriber = track
+			.consume()
+			.subscribe(moq_net::track::Subscription::default().with_max_delay(delay))
+			.await
+			.unwrap();
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+		);
+		let track = moq_mux::container::Consumer::new(
+			subscriber,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+		);
+		for ms in [0, 33, 66] {
+			producer.write(frame(ms, ms == 0)).unwrap();
+		}
+		// The publisher pauses and sends nothing more for now.
+		producer.discontinuity().unwrap();
+		// A codec that holds nothing back, so every picture is owed before the track ends.
+		let task = tokio::spawn(playback(&media, delay).run(track, Buffered::new(0)));
+		let mut shown = Vec::new();
+		for _ in 0..2_200 {
+			tokio::task::yield_now().await;
+			if let Some(timestamp) = media.output.present(&media) {
+				shown.push(timestamp.as_millis());
+			}
+			tokio::time::advance(Duration::from_millis(1)).await;
+		}
+		assert_eq!(shown, [0, 33, 66], "the end discarded the pictures before it");
+		producer.finish().unwrap();
+		task.await.unwrap().unwrap();
 	}
 
 	/// Play one burst of 33 ms pictures, given by slot in decode order, through a

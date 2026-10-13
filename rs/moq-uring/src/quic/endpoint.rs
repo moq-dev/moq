@@ -49,6 +49,9 @@ pub struct Config {
 	/// peer retransmits and lands once the application drains the backlog or
 	/// a handshake fails.
 	pub backlog: usize,
+
+	/// How incoming handshakes are bounded.
+	pub handshake: super::handshake::Config,
 }
 
 impl Default for Config {
@@ -57,6 +60,7 @@ impl Default for Config {
 			server: None,
 			activity: Default::default(),
 			backlog: 1024,
+			handshake: Default::default(),
 		}
 	}
 }

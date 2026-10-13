@@ -414,9 +414,6 @@ class DecoderTrack {
 	// Decoded frames waiting to be rendered.
 	#buffered = new Signal<Container.BufferedRanges>([]);
 
-	// The last discontinuity count seen from the container consumer.
-	#discontinuity = 0;
-
 	// Codec description from the last configure, reused after a playhead reset.
 	#description?: Uint8Array;
 
@@ -548,15 +545,18 @@ class DecoderTrack {
 				const next = await nextMedia(consumer);
 				if (!next) break;
 
-				// Playhead moved: re-anchor before decoding further.
-				if (this.#onDiscontinuity(next.discontinuity)) previous = undefined;
-
+				// A gap or a declared end breaks the timeline: re-anchor before decoding further, and
+				// never bridge the buffer across it.
+				if (next.kind !== "frame") {
+					if (latest !== undefined) this.#onBreak();
+					previous = undefined;
+					continue;
+				}
 				const { frame } = next;
-				if (!frame) continue; // The group is done
 
 				// An older keyframe would replace the codec references needed by live deltas. Group
-				// sequences only grow within a subscription, so a discontinuity (which a stale marker
-				// can raise) never resets this guard. Rejected payloads still count as received bytes.
+				// sequences only grow within a subscription, so a break (which a stale marker can
+				// raise) never resets this guard. Rejected payloads still count as received bytes.
 				const stale = latest !== undefined && next.group < latest;
 				this.stats.update((current) => ({
 					frameCount: (current?.frameCount ?? 0) + (stale ? 0 : 1),
@@ -575,11 +575,11 @@ class DecoderTrack {
 				});
 
 				// Track decode buffer: frames sent to decoder but not yet rendered. Only bridge from
-				// the previous frame when the consumer says nothing is missing in between. Group ids
-				// can't answer that: they aren't required to be sequential (some encoders derive them
-				// from DTS), so adjacency neither proves continuity nor rules out a gap the consumer
-				// skipped, and reporting a skipped span as decoded overstates the buffer.
-				if (previous !== undefined && next.continuous) {
+				// the previous frame when no gap or end came between them. Group ids can't answer that:
+				// they aren't required to be sequential (some encoders derive them from DTS), so
+				// adjacency neither proves continuity nor rules out a gap the consumer skipped, and
+				// reporting a skipped span as decoded overstates the buffer.
+				if (previous !== undefined) {
 					this.#addBuffered(Time.Milli.fromMicro(previous), Time.Milli.fromMicro(frame.timestamp));
 				}
 
@@ -628,15 +628,17 @@ class DecoderTrack {
 				const next = await nextMedia(consumer);
 				if (!next) break;
 
-				// Playhead moved: re-anchor before decoding further.
-				if (this.#onDiscontinuity(next.discontinuity)) previous = undefined;
-
+				// A gap or a declared end breaks the timeline (see #runLegacy).
+				if (next.kind !== "frame") {
+					if (latest !== undefined) this.#onBreak();
+					previous = undefined;
+					continue;
+				}
 				const { frame } = next;
-				if (!frame) continue;
 
 				// An older keyframe would replace the codec references needed by live deltas. Group
-				// sequences only grow within a subscription, so a discontinuity (which a stale marker
-				// can raise) never resets this guard. Rejected payloads still count as received bytes.
+				// sequences only grow within a subscription, so a break (which a stale marker can
+				// raise) never resets this guard. Rejected payloads still count as received bytes.
 				const stale = latest !== undefined && next.group < latest;
 				this.stats.update((current) => ({
 					frameCount: (current?.frameCount ?? 0) + (stale ? 0 : 1),
@@ -648,9 +650,9 @@ class DecoderTrack {
 				const timestamp = Time.Milli.fromMicro(frame.timestamp);
 				this.sync.received(timestamp, "video");
 
-				// Track decode buffer (see #runLegacy: bridge on the consumer's continuity signal,
+				// Track decode buffer (see #runLegacy: bridge only when no gap or end came between,
 				// never on group adjacency, which proves nothing about the timeline).
-				if (previous !== undefined && next.continuous) {
+				if (previous !== undefined) {
 					this.#addBuffered(Time.Milli.fromMicro(previous), Time.Milli.fromMicro(frame.timestamp));
 				}
 
@@ -670,25 +672,21 @@ class DecoderTrack {
 		});
 	}
 
-	// The container bumped its playhead (a marker, a hole, or a latency skip). Re-anchor and
-	// let the next decoded frame decide the decoder reset (see #resetAtKeyframe). Clearing
-	// `timestamp` keeps a stale high value from late-rejecting the following frames, which may
-	// overlap the previous group's tail. The held picture stays until the new keyframe renders.
-	// Returns true when a new generation was handled.
-	#onDiscontinuity(count: number): boolean {
-		if (count === this.#discontinuity) return false;
-		this.#discontinuity = count;
+	// The container read a gap or a declared end after media. Re-anchor and let the next decoded
+	// frame decide the decoder reset (see #resetAtKeyframe). Clearing `timestamp` keeps a stale
+	// high value from late-rejecting the following frames, which may overlap the previous group's
+	// tail. The held picture stays until the new keyframe renders.
+	#onBreak(): void {
 		this.timestamp.set(undefined);
 		this.#buffered.set([]);
 		this.sync.reset();
 		this.#resetPending = true;
-		return true;
 	}
 
-	// Call before each decode. After a playhead bump, a keyframe starts a new timeline, so drop
-	// the pictures still queued in the decoder: one from later in a group that restarts would
+	// Call before each decode. After a break, a keyframe starts a new timeline, so drop the
+	// pictures still queued in the decoder: one from later in a group that restarts would
 	// otherwise come out above the new keyframe and late-reject it. A delta continues a group the
-	// bump interrupted (a stale marker or a max-delay hole), so it keeps the decoder's references;
+	// break interrupted (a stale marker or a max-delay hole), so it keeps the decoder's references;
 	// a reset would make WebCodecs require a key chunk and throw. `reset()` cannot cancel an
 	// output callback that already holds a frame; the clock epoch it captured rejects that one.
 	#resetAtKeyframe(decoder: VideoDecoder, keyframe: boolean): void {

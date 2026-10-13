@@ -2193,7 +2193,10 @@ mod tests {
 
 			async fn read_new(&self, track: &mut Track, seen: &[u64]) -> u64 {
 				loop {
-					let packet = track.read().await.unwrap().expect("a published packet");
+					let Some(moq_mux::container::Read::Frame { frame: packet, .. }) = track.read().await.unwrap()
+					else {
+						continue;
+					};
 					let timestamp = u64::try_from(packet.timestamp.as_micros()).unwrap();
 					if !seen.contains(&timestamp) {
 						return timestamp;

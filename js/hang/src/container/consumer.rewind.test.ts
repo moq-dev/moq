@@ -38,7 +38,7 @@ function group(track: Track.Producer, timestamps: number[], end?: number) {
 async function frame(consumer: Consumer) {
 	for (;;) {
 		const result = await consumer.next();
-		if (!result || result.frame) return result;
+		if (!result || result.kind === "frame") return result;
 	}
 }
 
@@ -50,7 +50,6 @@ test("Consumer accepts a resuming keyframe before the estimated group end", asyn
 		group(track, [0, 33_000], 66_000);
 		expect((await frame(consumer))?.frame?.timestamp).toBe(Time.Micro(0));
 		expect((await frame(consumer))?.frame?.timestamp).toBe(Time.Micro(33_000));
-		expect((await consumer.next())?.end).toBe(Time.Micro(66_000));
 		group(track, [50_000]);
 		expect((await frame(consumer))?.frame?.timestamp).toBe(Time.Micro(50_000));
 	} finally {

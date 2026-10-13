@@ -1,6 +1,8 @@
 //! Subscribe to an encoded audio track and emit raw PCM.
 
 use std::collections::VecDeque;
+
+use moq_mux::container::Read;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -99,10 +101,10 @@ pub struct Consumer {
 	frames_decoded: usize,
 	/// Logical endpoint carried by an empty legacy frame before terminal packets.
 	end: Option<moq_net::Timestamp>,
+	/// The group `end` came from: it bounds only the terminal packets that follow it there.
+	end_group: u64,
 	/// Presentation time of the first decoded terminal frame.
 	terminal_start: Option<moq_net::Timestamp>,
-	/// Last container playhead generation applied to timeline state.
-	discontinuity: u64,
 	/// The playout delay, fixed or estimated from arrivals.
 	target: Target,
 	/// Where arrival times are measured from.
@@ -206,8 +208,8 @@ impl Consumer {
 			delay_trimmed: 0,
 			frames_decoded: 0,
 			end: None,
+			end_group: 0,
 			terminal_start: None,
-			discontinuity: 0,
 			origin: now(),
 		})
 	}
@@ -267,10 +269,27 @@ impl Consumer {
 				return Ok(Some(frame));
 			}
 
-			let mux_frame = self.track.read().await?;
-			self.apply_discontinuity()?;
-			let Some(mux_frame) = mux_frame else {
-				return self.flush();
+			let mux_frame = match self.track.read().await? {
+				Some(Read::Frame { group, frame }) => {
+					// A later group after a declared end comes from a fresh encoder; the end's
+					// own group carries the stopped encoder's final packets, trimmed below.
+					if self.end.is_some() && group != self.end_group {
+						self.restart()?;
+					}
+					frame
+				}
+				Some(Read::Gap) => {
+					self.restart()?;
+					continue;
+				}
+				Some(Read::End { group, end }) => {
+					self.end = Some(end);
+					self.end_group = group;
+					self.frames_decoded = 0;
+					self.terminal_start = None;
+					continue;
+				}
+				None => return self.flush(),
 			};
 
 			// Every packet the container hands over is an arrival, including one the
@@ -279,14 +298,6 @@ impl Consumer {
 			let timestamp = mux_frame.timestamp;
 			let media = timestamp.value() as f64 * 1000.0 / timestamp.scale().as_u64() as f64;
 			self.target.observe(arrival, media);
-
-			if let Some(end) = self.track.end()
-				&& self.end != Some(end)
-			{
-				self.end = Some(end);
-				self.frames_decoded = 0;
-				self.terminal_start = None;
-			}
 
 			// Undeclared holes are routine: a skipped stalled group, a packet the
 			// decoder refused, an ingest that resynced. Drop every stage's state at
@@ -401,15 +412,15 @@ impl Consumer {
 		}
 	}
 
-	/// A playhead event re-applies startup delay and skip. The decoder is not reset:
+	/// Start a new timeline after a gap or past a declared end. The decoder is not reset:
 	/// the next group already starts on a keyframe, and pre-skip is a play-path concern.
-	fn apply_discontinuity(&mut self) -> Result<(), Error> {
-		let discontinuity = self.track.discontinuity();
-		if discontinuity == self.discontinuity {
-			return Ok(());
+	///
+	/// Samples the resampler still holds arrived before the break, so they are drained
+	/// as their own frame first rather than filtered together with what follows it.
+	fn restart(&mut self) -> Result<(), Error> {
+		if let Some(frame) = self.drain()? {
+			self.ready.push_back(frame);
 		}
-
-		self.discontinuity = discontinuity;
 		self.next_start = None;
 		self.spans.clear();
 		self.trailing = Activity::Active;
@@ -433,13 +444,7 @@ impl Consumer {
 	fn gap(&mut self) -> Result<Option<Frame>, Error> {
 		self.decoder.reset_prediction()?;
 
-		let mut frame = None;
-		if let Some(resampler) = self.resampler.as_mut() {
-			let held = resampler.held_at();
-			let skipped = resampler.skipped();
-			let pcm = resampler.drain()?;
-			frame = self.tail(pcm, held, skipped)?;
-		}
+		let frame = self.drain()?;
 
 		self.next_start = None;
 		self.spans.clear();
@@ -447,6 +452,17 @@ impl Consumer {
 		self.epoch = None;
 		self.delay_trimmed = 0;
 		Ok(frame)
+	}
+
+	/// Drain what the resampler holds while keeping it for what follows.
+	fn drain(&mut self) -> Result<Option<Frame>, Error> {
+		let Some(resampler) = self.resampler.as_mut() else {
+			return Ok(None);
+		};
+		let held = resampler.held_at();
+		let skipped = resampler.skipped();
+		let pcm = resampler.drain()?;
+		self.tail(pcm, held, skipped)
 	}
 
 	/// The tail the resampler is still holding when the track ends, once.
@@ -594,6 +610,61 @@ mod tests {
 	use super::*;
 	use crate::encode::{Encoder, Input, Options as EncodeOptions, Producer, Settings};
 	use crate::{Format, Layout};
+
+	/// What the resampler holds at a marker belongs before it: draining it after the next
+	/// packet would splice it onto the resumed audio and stamp that late.
+	#[tokio::test(start_paused = true)]
+	async fn resampled_tail_stays_before_a_marker() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let subscriber = broadcast.consume();
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 44_100, 1);
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
+		let mut consumer = Consumer::new(
+			&subscriber,
+			&catalog,
+			"audio",
+			Options {
+				max_delay: Duration::from_secs(10),
+				output: Output {
+					sample_rate: Some(48_000),
+					..Output::default()
+				},
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+		for index in 0..2 {
+			if index != 0 {
+				producer.discontinuity().unwrap();
+			}
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(index * 1_000_000).unwrap(),
+					duration: None,
+					payload: vec![0u8; 1024 * size_of::<f32>()].into(),
+					keyframe: true,
+				})
+				.unwrap();
+		}
+		producer.finish().unwrap();
+		let mut stamps = Vec::new();
+		while let Some(frame) = consumer.read().await.unwrap() {
+			stamps.push(frame.timestamp.as_micros());
+		}
+		assert_eq!(stamps.len(), 4, "each span's body and tail: {stamps:?}");
+		assert!(
+			stamps[1] < 1_000_000,
+			"the old tail stays before the marker: {stamps:?}"
+		);
+		assert_eq!(stamps[2], 1_000_000, "the resumed span starts on its source timestamp");
+	}
 
 	#[tokio::test]
 	async fn remixes_mono_stream_to_stereo_output() {

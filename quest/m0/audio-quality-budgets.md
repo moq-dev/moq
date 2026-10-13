@@ -22,8 +22,8 @@ measures on an `ubuntu-24.04-arm` runner. A red job nobody can act on hides
 real regressions, so this moved out of Watch into m0 (maintainer,
 2026-10-13).
 
-- Measure several nightly runs, or a matrix dispatched on the runner from
-  the branch, before setting ceilings. A single sample's noise would make
+- Measure across several scheduled nightly runs before setting ceilings;
+  Nightly is never dispatched from a branch. A single sample's noise would make
   the job flaky. Failing runs keep their summaries as the
   `audio-quality-run` artifact for 7 days.
 - Set each ceiling from the observed spread with modest headroom, and record
@@ -33,8 +33,9 @@ real regressions, so this moved out of Watch into m0 (maintainer,
   rows stalling a third of the time look like one. Budget what the player
   does today, and file each suspected defect as a follow-up quest, so the job
   goes green without hiding it.
-- Rows that are too noisy to bound on a shared runner can be dropped from
-  `--enforce` instead. That decision needs the maintainer.
+- Every row stays budgeted (decided 2026-10-13): a noisy row gets a wider
+  ceiling from its measured spread. The harness has no per-row opt-out, and
+  none is added.
 
 Public API: none. Wire: none.
 
