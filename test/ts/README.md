@@ -34,6 +34,7 @@ just test ts --pair             # two exporters of one broadcast, grade table an
 just test ts --open-gop         # open-GOP clip; its leading pictures must survive
 just test ts --hrd              # 1080p video filling a broadcast-sized 9 Mbit CPB
 just test ts --headroom         # the same with four audio PIDs, muxed above the video's Rx
+just test ts --leak             # 1080p video with no HRD, filling its level's 24 Mb/s leak
 just test ts --delay 1s         # pass the exporter's --delay
 ```
 
@@ -602,7 +603,7 @@ outcomes deterministically in Rust CI, without retries or implicit `--stitch`.
 
 [`.github/workflows/ts.yml`](../../.github/workflows/ts.yml) is independent of
 browser interop. Relevant mux, Hang, CLI, transport, harness and toolchain PRs run
-`just test ts-controls`, `just test ts-pair-controls`, the default and 2 Mb/s round trips, HRD, headroom,
+`just test ts-controls`, `just test ts-pair-controls`, the default and 2 Mb/s round trips, HRD, leak, headroom,
 open-GOP, EIT, and T-STD controls. Each step runs even after another test fails.
 All recipes use the same pinned Nix FFmpeg and TSDuck locally and in CI.
 

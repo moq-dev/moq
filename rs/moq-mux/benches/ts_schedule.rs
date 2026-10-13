@@ -35,6 +35,7 @@ fn admission(c: &mut Criterion) {
 							pid,
 							schedule::Buffer {
 								rate: 2_000_000,
+								leak: None,
 								size: Some(1_000_000),
 								transport: 512,
 							},

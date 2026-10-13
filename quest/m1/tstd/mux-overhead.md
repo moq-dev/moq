@@ -36,7 +36,3 @@ Decided 2026-10-12:
 ## Closes
 
 - [#5362](https://github.com/moq-dev/moq/issues/5362) - a full-rate CBR contribution feed exports at its own rate
-
-## Required
-
-- [TS export admits video at its full leak](/quest/m1/tstd/video-leak.md) - #5362 point 2
