@@ -1143,8 +1143,9 @@ test("the catalog bitrate and frame rate only rise", async () => {
 	}
 });
 
-// Another broadcast is another track, so the ceiling and maxima start over there.
-test("a new broadcast starts the ceiling and maxima over", async () => {
+// Another broadcast is another track, so the ceiling and maxima start over there, while returning to a
+// broadcast continues the track it kept.
+test("each broadcast keeps its own ceiling and maxima", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
 	const rendition = () => ({
 		config: new Signal(undefined),
@@ -1157,8 +1158,9 @@ test("a new broadcast starts the ceiling and maxima over", async () => {
 		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
 		out: { display: new Signal({ width: 1920, height: 1080 }), frames: new Signal(undefined) },
 	};
+	const enabled = new Signal(true);
 	const encoder = new Encoder("video", {
-		enabled: true,
+		enabled,
 		broadcast: broadcast as never,
 		capture: capture as never,
 		config: { frameRate: 60 },
@@ -1179,6 +1181,25 @@ test("a new broadcast starts the ceiling and maxima over", async () => {
 		await settle();
 		expect(encoder.out.catalog.peek()).toMatchObject({ codedWidth: 1280, codedHeight: 720, framerate: 30 });
 		expect(encoder.out.catalog.peek()?.bitrate).toBeLessThan(bitrate);
+
+		// Returning to the first broadcast continues its track, so its ceiling and maxima return too.
+		broadcast.set(first);
+		await settle();
+		expect(encoder.out.catalog.peek()).toMatchObject({
+			codedWidth: 1920,
+			codedHeight: 1072,
+			framerate: 60,
+			bitrate,
+		});
+
+		// A disabled rendition moved to another broadcast advertises nothing there, rather than the
+		// last config of the track it left.
+		enabled.set(false);
+		await settle();
+		expect(encoder.out.catalog.peek()?.enabled).toBe(false);
+		broadcast.set({ video: rendition, baseline: new Baseline() });
+		await settle();
+		expect(encoder.out.catalog.peek()).toBeUndefined();
 	} finally {
 		encoder.close();
 	}
@@ -1243,5 +1264,33 @@ test("an unsupported ceiling growth keeps the accepted ceiling", async () => {
 		encoder.close();
 		probe.mockRestore();
 		warn.mockRestore();
+	}
+});
+
+// A refused first size commits no ceiling, so a smaller one recovers the rendition.
+test("a refused first ceiling recovers at a smaller size", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+	const probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockImplementation(async (config) => ({
+		supported: config.codec.startsWith("avc1") && config.width <= 1280,
+	}));
+	const error = spyOn(console, "error").mockImplementation(() => {});
+	const capture = {
+		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
+		out: { display: new Signal({ width: 1920, height: 1080 }) },
+	};
+	const encoder = new Encoder("video", { enabled: true, capture: capture as never });
+
+	try {
+		await settle();
+		expect(encoder.out.catalog.peek()).toBeUndefined();
+		expect(encoder.settled.peek()).toBe(true);
+
+		encoder.config.set({ maxPixels: 1280 * 720 });
+		await settle();
+		expect(encoder.out.catalog.peek()).toMatchObject({ codedWidth: 1280, codedHeight: 720 });
+	} finally {
+		encoder.close();
+		probe.mockRestore();
+		error.mockRestore();
 	}
 });

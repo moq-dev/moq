@@ -139,9 +139,9 @@ export class Encoder {
 	// The output dimensions of the video in pixels.
 	#dimensions = new Signal<{ width: number; height: number } | undefined>(undefined);
 
-	// The coded-size ceiling: each side's largest output dimension so far on this broadcast. The probe
-	// runs against it, so a smaller capture resizes in band without changing what the catalog
-	// advertises. Another broadcast is another track, so it starts over.
+	// The coded-size ceiling to probe for the current broadcast: each side's largest of its accepted
+	// ceiling and the current size. A smaller capture resizes in band below it without changing what
+	// the catalog advertises.
 	#coded = new Signal<{ broadcast?: Broadcast; width: number; height: number } | undefined>(undefined);
 
 	// The config the browser accepted and encoded a probe frame with, and the codec string it reported.
@@ -179,14 +179,13 @@ export class Encoder {
 	#estimator = new Estimator();
 	// The estimator's jitter and delay, republished whenever either rises.
 	#estimate = new Signal<Estimator["estimate"]>({});
-	// The last config published while enabled, which a disabled rendition keeps advertising.
-	#last?: Catalog.VideoConfig;
-	// The largest bitrate and frame rate advertised so far on this broadcast, since the catalog may only
-	// raise them.
-	#max: { broadcast?: Broadcast; bitrate: number; framerate: number } = { bitrate: 0, framerate: 0 };
-	// Whether the rendition was disabled since a config last resolved, so it keeps advertising `#last`
-	// as disabled until the re-enabled capture resolves a new one. A capture that never reopens leaves
-	// it disabled, which is accurate: no frames are coming.
+	// What this rendition advertised on each broadcast, keyed by the broadcast or, for a local preview,
+	// the encoder. A broadcast keeps a rendition's track when it re-registers, so returning to one
+	// continues its ceiling, maxima, and last config, while another broadcast starts its own.
+	#advertised = new WeakMap<object, Advertised>();
+	// Whether the rendition was disabled since a config last resolved, so it keeps advertising its last
+	// config as disabled until the re-enabled capture resolves a new one. A capture that never reopens
+	// leaves it disabled, which is accurate: no frames are coming.
 	#paused = false;
 
 	constructor(name: string, props?: EncoderProps) {
@@ -221,7 +220,13 @@ export class Encoder {
 
 		// Every step that resolves the config counts a throw as a failure, so a bad input settles the
 		// gate instead of holding the announce forever.
-		for (const run of [this.#runCatalog, this.#runCodec, this.#runResolved, this.#runDimensions]) {
+		for (const run of [
+			this.#runCatalog,
+			this.#runCodec,
+			this.#runResolved,
+			this.#runDimensions,
+			this.#runCeiling,
+		]) {
 			this.#signals.run((effect) => {
 				try {
 					run.call(this, effect);
@@ -232,6 +237,17 @@ export class Encoder {
 			});
 		}
 		this.#signals.run(this.#runRegister.bind(this));
+	}
+
+	// What this rendition advertised on `broadcast`'s track.
+	#track(broadcast: Broadcast | undefined): Advertised {
+		const key = broadcast ?? this;
+		let track = this.#advertised.get(key);
+		if (!track) {
+			track = { bitrate: 0, framerate: 0 };
+			this.#advertised.set(key, track);
+		}
+		return track;
 	}
 
 	// Count a failure until `effect` reruns with new inputs.
@@ -444,10 +460,11 @@ export class Encoder {
 	#runCatalog(effect: Effect): void {
 		const estimate = effect.get(this.#estimate);
 		const enabled = effect.get(this.in.enabled);
+		const track = this.#track(effect.get(this.in.broadcast));
 		if (!enabled) this.#paused = true;
 		const live = enabled ? effect.get(this.#live) : undefined;
 		if (!live) {
-			const last = this.#paused ? this.#last : undefined;
+			const last = this.#paused ? track.last : undefined;
 			effect.set(this.#out.catalog, last && { ...last, ...estimate, enabled: false });
 			return;
 		}
@@ -456,14 +473,12 @@ export class Encoder {
 		// Advertise the codec string the probe's encoder reported rather than the one we configured,
 		// so it names the profile and level the bitstream actually carries at the ceiling.
 		const { config, reported } = live.detected;
-		const broadcast = effect.get(this.in.broadcast);
-		if (this.#max.broadcast !== broadcast) this.#max = { broadcast, bitrate: 0, framerate: 0 };
-		this.#max.bitrate = Math.max(this.#max.bitrate, config.bitrate);
-		this.#max.framerate = Math.max(this.#max.framerate, config.framerate);
+		track.bitrate = Math.max(track.bitrate, config.bitrate);
+		track.framerate = Math.max(track.framerate, config.framerate);
 		const catalog: Catalog.VideoConfig = {
 			codec: reported,
-			bitrate: Catalog.u53(this.#max.bitrate),
-			framerate: this.#max.framerate,
+			bitrate: Catalog.u53(track.bitrate),
+			framerate: track.framerate,
 			codedWidth: Catalog.u53(config.width),
 			codedHeight: Catalog.u53(config.height),
 			optimizeForLatency: true,
@@ -471,7 +486,7 @@ export class Encoder {
 			...estimate,
 		};
 
-		this.#last = catalog;
+		track.last = catalog;
 		effect.set(this.#out.catalog, catalog);
 	}
 
@@ -493,13 +508,18 @@ export class Encoder {
 		effect.spawn(async () => {
 			try {
 				const detected = await this.#bestCodec(dimensions, target);
-				if (!superseded.aborted) this.#codec.set({ ...detected, broadcast: dimensions.broadcast });
+				if (superseded.aborted) return;
+
+				// Only an accepted probe commits a ceiling, so a size the hardware refuses never sticks.
+				const { width, height } = detected.config;
+				this.#track(dimensions.broadcast).ceiling = { width, height };
+				this.#codec.set({ ...detected, broadcast: dimensions.broadcast });
 			} catch (err) {
 				// A newer probe reports its own outcome.
 				if (superseded.aborted) return;
 
-				// A capture that outgrew the ceiling to a size the hardware refuses keeps the last accepted
-				// ceiling and encodes scaled down to fit it, so a later shrink still has a probe to run under.
+				// A capture that outgrew the ceiling to a size the hardware refuses keeps the accepted probe
+				// and encodes scaled down to fit it, until a smaller capture reruns the probe.
 				const previous = this.#codec.peek();
 				if (
 					previous &&
@@ -511,7 +531,6 @@ export class Encoder {
 						`video ${dimensions.width}x${dimensions.height} unsupported, keeping ${width}x${height}:`,
 						err,
 					);
-					this.#coded.set({ broadcast: previous.broadcast, width, height });
 					return;
 				}
 
@@ -595,12 +614,22 @@ export class Encoder {
 		const height = 16 * Math.floor((display.height * ratio) / 16);
 
 		effect.set(this.#dimensions, { width, height });
+	}
+
+	// The ceiling to probe: each side's largest of this broadcast's accepted ceiling and the current
+	// size. Reruns once a probe commits a ceiling, which leaves it unchanged.
+	#runCeiling(effect: Effect): void {
+		const dimensions = effect.get(this.#dimensions);
+		if (!dimensions) return;
+
 		const broadcast = effect.get(this.in.broadcast);
-		this.#coded.update((coded) =>
-			coded && coded.broadcast === broadcast
-				? { broadcast, width: Math.max(coded.width, width), height: Math.max(coded.height, height) }
-				: { broadcast, width, height },
-		);
+		effect.get(this.#codec);
+		const ceiling = this.#track(broadcast).ceiling;
+		effect.set(this.#coded, {
+			broadcast,
+			width: Math.max(ceiling?.width ?? 0, dimensions.width),
+			height: Math.max(ceiling?.height ?? 0, dimensions.height),
+		});
 	}
 
 	// Try to determine the best config for the given settings.
@@ -735,6 +764,17 @@ type Detected = {
 	reported: string;
 	// The broadcast the probe ran for; another one starts its own ceiling.
 	broadcast?: Broadcast;
+};
+
+// What a rendition advertised on one broadcast's track.
+type Advertised = {
+	// The coded-size ceiling of the largest accepted probe.
+	ceiling?: { width: number; height: number };
+	// The largest bitrate and frame rate advertised, since the catalog may only raise them.
+	bitrate: number;
+	framerate: number;
+	// The last config published while enabled, which a disabled rendition keeps advertising.
+	last?: Catalog.VideoConfig;
 };
 
 // The most this rendition ever sends with `codec`, before a bandwidth grant caps it.
