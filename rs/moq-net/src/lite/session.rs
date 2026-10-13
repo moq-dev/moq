@@ -13,6 +13,8 @@ use super::{
 
 pub(crate) struct SessionStart<S: crate::transport::poll::Session> {
 	pub recv_bandwidth: Option<bandwidth::Consumer>,
+	/// The estimate PROBE reports, published by the session's supervisor.
+	pub estimate: kio::Producer<crate::session::Estimate>,
 	/// The session's protocol machine, named so its `Send`-ness stays inferred
 	/// from the transport instead of being fixed by a box.
 	pub driver: Driver<S>,
@@ -299,7 +301,9 @@ where
 		false => None,
 	};
 
+	let estimate = kio::Producer::default();
 	let publisher = Publisher::new(PublisherConfig {
+		estimate: estimate.weak(),
 		runtime: runtime.clone(),
 		session: session.clone(),
 		origin: publish,
@@ -354,6 +358,7 @@ where
 
 	Ok(SessionStart {
 		recv_bandwidth: recv_bw_consumer,
+		estimate,
 		driver,
 		goaway: goaway_handle,
 		auth,

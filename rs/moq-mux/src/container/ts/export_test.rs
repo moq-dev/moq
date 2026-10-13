@@ -1087,6 +1087,101 @@ async fn export_drops_a_trailing_partial_ac3_frame() {
 	assert!(pes.is_empty(), "a lone cut frame goes nowhere: {pes:?}");
 }
 
+/// A source that leaves `data_alignment_indicator` clear splits AC-3 sync frames across PES,
+/// each PES's PTS timing the first frame that begins in it. The export puts each frame back
+/// together, a frame a PES, byte for byte and presented a frame after the last.
+#[tokio::test(start_paused = true)]
+async fn export_reassembles_ac3_frames_split_across_pes() {
+	let stream: Vec<u8> = (0..6).flat_map(ac3_frame).collect();
+	// Cut mid-frame into frames 0-1, 1-3 and 3-5, timed by frames 0, 2 and 4.
+	let pes = exported_ac3_pes(vec![
+		Ac3Write::Pes(0, stream[..200].to_vec()),
+		Ac3Write::Pes(64, stream[200..500].to_vec()),
+		Ac3Write::Pes(128, stream[500..].to_vec()),
+	])
+	.await;
+	assert_eq!(pes.len(), 6, "one PES a sync frame");
+	for (k, (pts, bytes)) in pes.iter().enumerate() {
+		assert_eq!(*bytes, ac3_frame(k as u8), "frame {k} whole and in order");
+		assert_eq!(
+			*pts,
+			pes[0].0 + k as u64 * 2_880,
+			"frame {k} is presented 32 ms after the last"
+		);
+	}
+}
+
+/// A frame's header may itself straddle PES, across one boundary or two, and the frame still
+/// goes out whole at the time of the PES it began in.
+#[tokio::test(start_paused = true)]
+async fn export_reassembles_an_ac3_header_split_across_pes() {
+	let stream: Vec<u8> = (0..2).flat_map(ac3_frame).collect();
+	let cuts = [
+		vec![
+			Ac3Write::Pes(0, stream[..3].to_vec()),
+			Ac3Write::Pes(32, stream[3..].to_vec()),
+		],
+		vec![
+			Ac3Write::Pes(0, stream[..2].to_vec()),
+			Ac3Write::Pes(16, stream[2..5].to_vec()),
+			Ac3Write::Pes(32, stream[5..].to_vec()),
+		],
+	];
+	for input in cuts {
+		let pes = exported_ac3_pes(input).await;
+		let frames: Vec<&Vec<u8>> = pes.iter().map(|(_, bytes)| bytes).collect();
+		assert_eq!(frames, [&ac3_frame(0), &ac3_frame(1)]);
+		assert_eq!(pes[1].0 - pes[0].0, 2_880);
+	}
+}
+
+/// The first PES read may begin mid-frame, and a PES may go missing. The bytes ahead of the
+/// first sync frame, and a frame the gap cut, are no use to a decoder, so the export drops them
+/// and carries on from the next sync frame at the time its PES gives it.
+#[tokio::test(start_paused = true)]
+async fn export_drops_ac3_fragments_at_a_join_or_a_gap() {
+	let stream: Vec<u8> = (0..6).flat_map(ac3_frame).collect();
+	// Joined 60 bytes into frame 0; the PES carrying the rest of frame 2 and most of 3 is lost.
+	let pes = exported_ac3_pes(vec![
+		Ac3Write::Pes(32, stream[60..300].to_vec()),
+		Ac3Write::Pes(128, stream[500..].to_vec()),
+	])
+	.await;
+	let frames: Vec<&Vec<u8>> = pes.iter().map(|(_, bytes)| bytes).collect();
+	assert_eq!(frames, [&ac3_frame(1), &ac3_frame(4), &ac3_frame(5)]);
+	assert_eq!(pes[1].0 - pes[0].0, 3 * 2_880, "frame 4 at its PES's PTS");
+	assert_eq!(pes[2].0 - pes[1].0, 2_880);
+}
+
+/// A sync word in the bytes ahead of the first frame at a join can pass for a header whose
+/// frame runs past the PES. The export takes it for a frame only when nothing better turns up,
+/// and here takes the sync frames the next sync word confirms after it.
+#[tokio::test(start_paused = true)]
+async fn export_skips_an_unconfirmed_ac3_sync_word_at_a_join() {
+	// A 640 kb/s header, 2,560 bytes long, in the tail of a frame begun before the join.
+	let mut payload = vec![0x0b, 0x77, 0x00, 0x00, 0x25, 0x40, 0x40];
+	payload.resize(40, 0x00);
+	payload.extend((1..3).flat_map(ac3_frame));
+	let pes = exported_ac3_pes(vec![Ac3Write::Pes(0, payload)]).await;
+	let frames: Vec<&Vec<u8>> = pes.iter().map(|(_, bytes)| bytes).collect();
+	assert_eq!(frames, [&ac3_frame(1), &ac3_frame(2)]);
+}
+
+/// A declared marker breaks the timeline even where the timestamps run on, so a frame left
+/// unfinished before it is dropped rather than completed with the first bytes after it.
+#[tokio::test(start_paused = true)]
+async fn export_drops_an_ac3_frame_cut_by_a_marker() {
+	let stream: Vec<u8> = (0..4).flat_map(ac3_frame).collect();
+	let pes = exported_ac3_pes(vec![
+		Ac3Write::Pes(0, stream[..200].to_vec()),
+		Ac3Write::Marker,
+		Ac3Write::Pes(64, stream[256..].to_vec()),
+	])
+	.await;
+	let frames: Vec<&Vec<u8>> = pes.iter().map(|(_, bytes)| bytes).collect();
+	assert_eq!(frames, [&ac3_frame(0), &ac3_frame(2), &ac3_frame(3)]);
+}
+
 /// A 32 kb/s 48 kHz 2/0 AC-3 sync frame: 128 bytes, 1,536 samples (32 ms).
 fn ac3_sync() -> Vec<u8> {
 	let mut sync = vec![0x0b, 0x77, 0x00, 0x00, 0x00, 0x40, 0x40];
@@ -1094,9 +1189,34 @@ fn ac3_sync() -> Vec<u8> {
 	sync
 }
 
+/// [`ac3_sync`] with its body filled with `k + 1`, so frames tell apart.
+fn ac3_frame(k: u8) -> Vec<u8> {
+	let mut frame = ac3_sync();
+	frame[7..].fill(k + 1);
+	frame
+}
+
 /// Export one PES of `payload` on an AC-3 passthrough PID beside bbb's media, and return the
 /// PTS of every PES on that PID and how many bytes each carries.
 async fn exported_ac3(payload: Vec<u8>) -> Vec<(u64, usize)> {
+	exported_ac3_pes(vec![Ac3Write::Pes(0, payload)])
+		.await
+		.into_iter()
+		.map(|(pts, bytes)| (pts, bytes.len()))
+		.collect()
+}
+
+/// What [`exported_ac3_pes`] writes to the AC-3 track.
+enum Ac3Write {
+	/// A PES presented this many ms after the first.
+	Pes(u64, Vec<u8>),
+	/// A declared marker: a break in the timeline.
+	Marker,
+}
+
+/// Export `input` on an AC-3 passthrough PID beside bbb's media, and return the PTS and
+/// payload of every PES on that PID.
+async fn exported_ac3_pes(input: Vec<Ac3Write>) -> Vec<(u64, Vec<u8>)> {
 	const AC3_PID: u16 = 0x104;
 	let data = include_bytes!("test_data/bbb.ts");
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -1129,13 +1249,19 @@ async fn exported_ac3(payload: Vec<u8>) -> Vec<(u64, usize)> {
 	}
 	let mut ac3 = Producer::new(ac3_track, HangContainer::Legacy(crate::container::Kind::Data));
 	// Just after bbb's first keyframe at 1.4 s, so it survives the tune-in alignment.
-	ac3.write(Frame {
-		timestamp: Timestamp::from_millis(1_410).unwrap(),
-		duration: None,
-		payload: Bytes::from(payload),
-		keyframe: true,
-	})
-	.unwrap();
+	for write in input {
+		match write {
+			Ac3Write::Pes(ms, payload) => ac3
+				.write(Frame {
+					timestamp: Timestamp::from_millis(1_410 + ms).unwrap(),
+					duration: None,
+					payload: Bytes::from(payload),
+					keyframe: true,
+				})
+				.unwrap(),
+			Ac3Write::Marker => ac3.discontinuity().unwrap(),
+		}
+	}
 	ac3.cut(None).unwrap();
 	ac3.finish().unwrap();
 
@@ -1152,8 +1278,8 @@ async fn exported_ac3(payload: Vec<u8>) -> Vec<(u64, usize)> {
 	)
 	.await;
 
-	// The PTS of every PES on the AC-3 PID, and how many bytes each carries.
-	let mut pes: Vec<(u64, usize)> = Vec::new();
+	// The PTS of every PES on the AC-3 PID, and its payload.
+	let mut pes: Vec<(u64, Vec<u8>)> = Vec::new();
 	for packet in ts.as_chunks::<188>().0 {
 		let pid = (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2]);
 		if pid != AC3_PID || packet[3] & 0x10 == 0 {
@@ -1172,9 +1298,9 @@ async fn exported_ac3(payload: Vec<u8>) -> Vec<(u64, usize)> {
 				| u64::from(b[2] >> 1) << 15
 				| u64::from(b[3]) << 7
 				| u64::from(b[4] >> 1);
-			pes.push((pts, body.len() - 9 - usize::from(body[8])));
+			pes.push((pts, body[9 + usize::from(body[8])..].to_vec()));
 		} else if let Some(last) = pes.last_mut() {
-			last.1 += body.len();
+			last.1.extend_from_slice(body);
 		}
 	}
 	pes

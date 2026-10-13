@@ -11,10 +11,7 @@ const BYTES: usize = 256 * 1024;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
 	let args: Vec<_> = std::env::args().collect();
-	ensure!(
-		args.len() == 4,
-		"usage: interop-tail publish|subscribe URL BROADCAST"
-	);
+	ensure!(args.len() == 4, "usage: interop-tail publish|subscribe URL BROADCAST");
 	let url: url::Url = args[2].parse()?;
 	let mut config = moq_tokio::connect::Config::default();
 	config.websocket.enabled = Some(false);
@@ -29,7 +26,8 @@ async fn main() -> anyhow::Result<()> {
 				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 			)?;
 			broadcast.announce(Default::default())?;
-			let _session = client
+			let session = client
+				.clone()
 				.with_publisher(&origin)
 				.connect(url)
 				.established()
@@ -48,16 +46,15 @@ async fn main() -> anyhow::Result<()> {
 			tokio::io::BufReader::new(tokio::io::stdin())
 				.read_line(&mut ack)
 				.await?;
-			ensure!(
-				ack == "clean end\n",
-				"reader did not acknowledge a clean end"
-			);
+			ensure!(ack == "clean end\n", "reader did not acknowledge a clean end");
 			broadcast.close();
+			session.close().await?;
 			eprintln!("tail acknowledged");
 		}
 		"subscribe" => {
 			let consumer = origin.consume();
-			let _session = client
+			let session = client
+				.clone()
 				.with_subscriber(origin)
 				.connect(url)
 				.established()
@@ -77,24 +74,21 @@ async fn main() -> anyhow::Result<()> {
 					frame.payload.iter().all(|byte| *byte == sequence as u8),
 					"corrupt group {sequence}"
 				);
-				ensure!(
-					group.read_frame().await?.is_none(),
-					"extra frame in group {sequence}"
-				);
+				ensure!(group.read_frame().await?.is_none(), "extra frame in group {sequence}");
 				seen.push(sequence);
 			}
 			seen.sort_unstable();
-			ensure!(
-				seen == (0..GROUPS).collect::<Vec<_>>(),
-				"wrong groups: {seen:?}"
-			);
+			ensure!(seen == (0..GROUPS).collect::<Vec<_>>(), "wrong groups: {seen:?}");
 			ensure!(
 				track.finished().await? == moq_net::track::Position::group(GROUPS),
 				"wrong declared end"
 			);
+			session.close().await?;
 			eprintln!("tail clean end=4 groups=0,1,2,3 bytes=1048576");
 		}
 		_ => anyhow::bail!("unknown role: {}", args[1]),
 	}
+	// Dropping only queues the QUIC close; send it before the runtime stops.
+	client.close().await;
 	Ok(())
 }
