@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, jest, test } from "bun:test";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
 import { SessionCode, SessionError } from "../error.ts";
 import * as Lite from "../lite/index.ts";
@@ -449,29 +449,30 @@ test("a private handle with an explicitly undefined timeout outlasts the outage"
 	};
 	globalThis.WebTransport = stub as unknown as typeof WebTransport;
 
-	// Each real millisecond reads as a thousand seconds to the retry window, so every retry
-	// after the first lands past any finite window.
-	const real = performance.now.bind(performance);
-	const start = real();
-	performance.now = () => start + (real() - start) * 1_000_000;
+	// Fake timers drive both the backoff and the retry window, which reads performance.now.
+	jest.useFakeTimers();
+	const advance = async (ms: number) => {
+		for (let elapsed = 0; elapsed < ms; elapsed += 100) {
+			jest.advanceTimersByTime(100);
+			for (let i = 0; i < 64; i++) await Promise.resolve();
+		}
+	};
 
 	// What a caller building options from optional values produces: the undefined means "the
 	// default", which for a Connection is to retry for as long as the handle is held.
-	const handle = new Connection({
-		url,
-		share: false,
-		websocket: { enabled: false },
-		delay: { initial: Time.Milli(1), multiplier: 1, max: Time.Milli(1), timeout: undefined },
-	});
+	const handle = new Connection({ url, share: false, websocket: { enabled: false }, delay: { timeout: undefined } });
 	try {
-		await waitUntil(() => attempts >= 3 || handle.error.peek() !== undefined);
+		// Long enough that any finite fallback window would have given up.
+		await advance(60_000);
+		expect(attempts).toBeGreaterThan(3);
 		expect(handle.error.peek()).toBeUndefined();
 
 		offline = false;
-		await waitUntil(() => handle.status.peek() === "connected");
+		await advance(10_000);
+		expect(handle.status.peek()).toBe("connected");
 	} finally {
 		handle.close();
-		performance.now = real;
+		jest.useRealTimers();
 	}
 });
 
