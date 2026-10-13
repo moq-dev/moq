@@ -3,10 +3,10 @@
 
 use std::time::Duration;
 
-use moq_net::{PathOwned, origin, stats::Registry};
+use moq_net::{PathOwned, origin, stats::Registry, track};
 use web_async::time::Instant;
 
-use super::{Drain, Task};
+use super::{Drain, PendingPair, Task};
 
 /// Plain and compressed publisher-frame sizes from one tick, in bytes.
 ///
@@ -53,5 +53,15 @@ impl Driver {
 		self.drain.collect();
 		self.drain.publish(Instant::now());
 		self.drain.publisher_frame_bytes()
+	}
+
+	/// Hold `root`'s presence track as a reader would, so every tick updates
+	/// it. Keep the returned subscriber: dropping it lets a tick reclaim the
+	/// track.
+	pub fn hold_presence(&mut self, root: &str) -> track::Subscriber {
+		let group = self.drain.groups.get_mut("").expect("the depth 0 broadcast");
+		let root = PathOwned::from(root.to_string());
+		group.adopt_presence(&self.drain.report, root.clone(), PendingPair::default());
+		group.presence[&root].pair.plain.track.subscribe(None)
 	}
 }
