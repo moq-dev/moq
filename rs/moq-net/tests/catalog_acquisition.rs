@@ -31,10 +31,10 @@ async fn acquisition(version: &str) {
 	let _old = link(version, &publisher, &subscriber, 100).await;
 	let remote = subscriber.consume().routed_broadcast("live").await.unwrap();
 	let mut announced = subscriber.consume().follow("live").unwrap();
-	assert!(matches!(
-		announced.next().await,
-		Some(moq_net::announce::Event::Start(_))
-	));
+	let old_cost = match announced.next().await {
+		Some(moq_net::announce::Event::Start(announce)) => announce.route.cost,
+		other => panic!("expected the first route, got {other:?}"),
+	};
 	let mut pending = Box::pin(remote.track("catalog.json").unwrap().subscribe(None));
 	let request = match futures::future::select(Box::pin(dynamic.requested_track()), &mut pending).await {
 		futures::future::Either::Left((request, _)) => request.unwrap(),
@@ -43,13 +43,20 @@ async fn acquisition(version: &str) {
 	// The publisher is still available and the old session remains alive. Holding
 	// TRACK_INFO makes the replacement happen during acquisition without sleeps.
 	let _new = link(version, &publisher, &subscriber, 1).await;
-	announced.next().await.unwrap();
+	// An epochless replacement restarts the advertisement; a matching epoch only updates it.
+	let lite07 = version == "moq-lite-07-wip".parse().unwrap();
+	let new_cost = match announced.next().await {
+		Some(moq_net::announce::Event::Update(announce)) if lite07 => announce.route.cost,
+		Some(moq_net::announce::Event::Restart(announce)) if !lite07 => announce.route.cost,
+		other => panic!("{version}: unexpected route change {other:?}"),
+	};
+	assert!(new_cost < old_cost, "the cheaper session wins the route");
 	let track = request.accept(None);
 	let mut group = track.append_group().unwrap();
 	group.write_frame(None, b"catalog".to_vec()).unwrap();
 	group.finish().unwrap();
 	let result = pending.await;
-	if version == "moq-lite-07-wip".parse().unwrap() {
+	if lite07 {
 		let mut subscription = result.expect("same epoch must acquire");
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"catalog");
