@@ -494,11 +494,11 @@ async fn play_audio<O: Output>(
 		let mut quiet = fit.pad + timing.silence.saturating_sub(fit.skip);
 		while quiet > 0 {
 			let part = (quiet as usize * stride).min(silence.len());
-			let _ = sink.write(&silence[..part])?;
+			sink.write(&silence[..part])?;
 			quiet -= (part / stride) as u64;
 		}
 		let skip = fit.skip.saturating_sub(timing.silence) as usize * stride;
-		let _ = sink.write(&frame.data[skip.min(frame.data.len())..])?;
+		sink.write(&frame.data[skip.min(frame.data.len())..])?;
 
 		// Anchor the playout clock on where the speaker has actually reached, which
 		// is the only half of the pipeline that cannot skip ahead. A move has to

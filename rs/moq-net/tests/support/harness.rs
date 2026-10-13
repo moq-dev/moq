@@ -26,24 +26,13 @@ pub fn now() -> moq_net::time::Instant {
 
 /// Run a protocol driver in the background: on `moq_net_sim` in tests, on tokio in
 /// the benches.
-pub fn spawn<D: moq_net::time::Driver + Send + Unpin + 'static>(driver: D) {
-	spawn_counted(driver);
-}
-
-/// [`spawn`], returning how many times the driver has been polled.
-pub fn spawn_counted<D: moq_net::time::Driver + Send + Unpin + 'static>(driver: D) -> Arc<AtomicUsize> {
-	let polls = Arc::new(AtomicUsize::new(0));
-	let mut driver = Counted {
-		driver,
-		polls: polls.clone(),
-	};
+pub fn spawn<D: moq_net::time::Driver + Send + Unpin + 'static>(mut driver: D) {
 	match moq_net_sim::is_running() {
 		true => drop(moq_net_sim::spawn(moq_net_sim::drive(move |now, waiter| {
 			moq_net::time::Driver::poll(&mut driver, now, waiter)
 		}))),
 		false => drop(tokio::spawn(moq_net::time::run(driver))),
 	}
-	polls
 }
 
 struct Counted<D> {
@@ -93,6 +82,8 @@ pub struct MockConnectOptions {
 	pub cost: Option<u64>,
 	/// What both transports report as their connection statistics.
 	pub stats: MockStats,
+	/// Count server driver polls into this counter when supplied.
+	pub server_polls: Option<Arc<AtomicUsize>>,
 }
 
 impl MockConnectOptions {
@@ -110,6 +101,7 @@ impl MockConnectOptions {
 			server_extensions: Default::default(),
 			cost: None,
 			stats: MockStats::default(),
+			server_polls: None,
 		}
 	}
 }
@@ -123,8 +115,6 @@ pub struct MockPair {
 	pub client_transport: MockSession,
 	/// The server's end of the mock transport, for steering delivery.
 	pub server_transport: MockSession,
-	/// How many times the server's driver has been polled.
-	pub server_polls: Arc<AtomicUsize>,
 }
 
 /// Run the MoQ handshake over the mock transport, returning connected sessions.
@@ -187,16 +177,19 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 			.accept(now(), server_transport)
 			.await
 			.expect("server handshake failed");
-		(session, spawn_counted(driver))
+		match opts.server_polls {
+			Some(polls) => spawn(Counted { driver, polls }),
+			None => spawn(driver),
+		}
+		session
 	};
-	let (client_session, (server_session, server_polls)) = futures::join!(client_fut, server_fut);
+	let (client_session, server_session) = futures::join!(client_fut, server_fut);
 
 	MockPair {
 		client: client_session,
 		server: server_session,
 		client_transport: transports.0,
 		server_transport: transports.1,
-		server_polls,
 	}
 }
 

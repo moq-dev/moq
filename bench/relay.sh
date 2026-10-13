@@ -3,6 +3,9 @@
 # Sourced by run.sh, which owns these process and output paths.
 # shellcheck disable=SC2153,SC2154
 
+# Set to record the relay's worker off-CPU stacks during each workload's steady window.
+PROFILE_LOCK=
+
 relay_config() {
     local path=$1
     local port=$2
@@ -229,6 +232,13 @@ run_workload() {
             --interval 500ms --duration 10s --output "$host" \
             >"$directory/host.log" 2>&1 &
         HOST_PID=$!
+        if [[ -n $PROFILE_LOCK ]]; then
+            # The second half of the host window, matching the summary's throughput window.
+            # Its own process group, so cleanup also stops perf and its workload.
+            setsid python3 "$ROOT/bench/profile.py" record "$relay_pid" "$directory/lock" --delay 5 --duration 5 \
+                >"$directory/lock.log" 2>&1 &
+            PROFILE_PID=$!
+        fi
         if ! wait -n -p finished "$HOST_PID" "$LOAD_PID"; then
             cat "$directory/host.log" "$directory/load.log" >&2
             return 1
@@ -238,6 +248,13 @@ run_workload() {
             return 1
         fi
         HOST_PID=
+        if [[ -n $PROFILE_LOCK ]]; then
+            if ! wait "$PROFILE_PID"; then
+                cat "$directory/lock.log" >&2
+                return 1
+            fi
+            PROFILE_PID=
+        fi
         kill -INT "$LOAD_PID"
         if ! wait "$LOAD_PID"; then
             cat "$directory/load.log" >&2

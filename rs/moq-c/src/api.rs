@@ -1116,8 +1116,10 @@ pub extern "C" fn moq_client_defaults() -> moq_client_config {
 		dst.has_backoff_multiplier = true;
 		dst.backoff_max_us = micros(config.connect.backoff.max);
 		dst.has_backoff_max = true;
-		dst.backoff_timeout_us = micros(config.connect.backoff.timeout);
-		dst.has_backoff_timeout = true;
+		if let Some(timeout) = config.connect.backoff.timeout {
+			dst.backoff_timeout_us = micros(timeout);
+			dst.has_backoff_timeout = true;
+		}
 
 		let quic = config.quic.resolve();
 		dst.quic_max_streams = quic.max_streams;

@@ -99,6 +99,9 @@ pub(crate) enum Push {
 ///
 /// A zero delay holds nothing and drops nothing: each frame goes out as soon as it is
 /// read, ordered only among the frames read together.
+///
+/// A caller reads a track only while it is not [`Buffer::full`], so a backlog stays in the
+/// source and goes out as it falls due, rather than being queued here whole first.
 pub(crate) struct Buffer<K, T> {
 	delay: Duration,
 	/// Anchor each clock on the first frame rather than acquire it: a test exporting a
@@ -710,6 +713,22 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			.into_iter()
 			.chain(self.acquired_by())
 			.min()
+	}
+
+	/// Whether `key` has a frame waiting that is already due (any frame, without a delay), so
+	/// reading more of it now would only queue what the output cannot take yet.
+	pub fn full(&self, key: &K) -> bool {
+		self.tracks
+			.get(key)
+			.and_then(|track| track.queue.front())
+			.is_some_and(|(_, _, deadline, _)| self.delay.is_zero() || *deadline <= Instant::now())
+	}
+
+	/// How many frames are waiting.
+	#[cfg(test)]
+	pub fn len(&self) -> usize {
+		let held = self.acquire.as_ref().map_or(0, |acquire| acquire.frames.len());
+		held + self.tracks.values().map(|track| track.queue.len()).sum::<usize>()
 	}
 
 	/// Whether no frame is waiting.
@@ -1439,5 +1458,25 @@ mod tests {
 		assert_eq!(buffer.push(2, arrival(late, 40, "a40")).unwrap(), Push::Queued);
 		assert_eq!(due(&mut buffer), ["a40"]);
 		assert_eq!(buffer.dropped(), 0);
+	}
+
+	/// A track is full once a frame of it is due, or holds any frame without a delay, so its
+	/// reader leaves the rest in the source.
+	#[tokio::test(start_paused = true)]
+	async fn a_track_is_full_once_a_frame_is_due() {
+		let start = Instant::now();
+		let mut buffer = Buffer::new(DELAY).replay();
+		assert!(!buffer.full(&1));
+		buffer.push(1, arrival(start, 0, "v0")).unwrap();
+		assert!(!buffer.full(&1), "a frame not yet due leaves room to read ahead");
+		tokio::time::advance(DELAY).await;
+		assert!(buffer.full(&1));
+		assert!(!buffer.full(&2), "another track's due frame does not stop this one");
+		assert_eq!(due(&mut buffer), ["v0"]);
+		assert!(!buffer.full(&1));
+
+		let mut buffer = Buffer::new(Duration::ZERO);
+		buffer.push(1, arrival(start, 0, "v0")).unwrap();
+		assert!(buffer.full(&1));
 	}
 }

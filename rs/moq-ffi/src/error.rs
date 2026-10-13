@@ -65,6 +65,8 @@ pub enum MoqProtocolKind {
 	App,
 	/// A code this version does not recognize; [`MoqProtocolError::code`] is the value.
 	Unknown,
+	/// The session exceeded its announcement or subscription cap.
+	TooManyRequests,
 }
 
 /// A protocol failure a peer sent (or this side will send): scope, verbatim code, kind,
@@ -121,6 +123,7 @@ fn session_kind(err: &moq_net::SessionError) -> MoqProtocolKind {
 		moq_net::SessionError::GoawayTimeout => MoqProtocolKind::GoawayTimeout,
 		moq_net::SessionError::Timeout => MoqProtocolKind::Timeout,
 		moq_net::SessionError::Version => MoqProtocolKind::Version,
+		moq_net::SessionError::TooManyRequests => MoqProtocolKind::TooManyRequests,
 		moq_net::SessionError::App(_) => MoqProtocolKind::App,
 		moq_net::SessionError::Unknown(_) => MoqProtocolKind::Unknown,
 		_ => MoqProtocolKind::Unknown,
@@ -419,6 +422,14 @@ from_message! {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn session_limit_has_a_known_kind() {
+		let error = super::MoqProtocolError::from_session(&moq_net::SessionError::TooManyRequests);
+		assert_eq!(error.scope, super::MoqErrorScope::Session);
+		assert_eq!(error.code, moq_net::SessionError::TooManyRequests.to_code());
+		assert_eq!(error.kind, super::MoqProtocolKind::TooManyRequests);
+	}
 
 	#[test]
 	fn protocol_codes_survive_container_errors() {

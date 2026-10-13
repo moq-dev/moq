@@ -7,6 +7,7 @@ set -euo pipefail
 # runtime with the same number of independent Tokio/epoll and io_uring workers
 # on the current tree. The current load generator drives every relay so the
 # workloads stay identical. `--audio` isolates the audio grouping/load-shape matrix.
+# `--lock` records relay worker off-CPU stacks to attribute std mutex waits.
 
 MODE=${1:-}
 ROUNDS=${MOQ_BENCH_RUNTIME_ROUNDS:-3}
@@ -18,6 +19,13 @@ ROUNDS=$((10#$ROUNDS))
 case $MODE in
     --audio)
         BASE=
+        ;;
+    --lock)
+        BASE=
+        LOCK_WORKLOAD=${MOQ_BENCH_LOCK_WORKLOAD:-fanout}
+        LOCK_WORKERS=${MOQ_BENCH_LOCK_WORKERS:-1 4 16}
+        # Without frame pointers, perf's DWARF unwinder stops at the first relay frame.
+        export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C force-frame-pointers=yes"
         ;;
     --runtime)
         BASE=
@@ -62,10 +70,16 @@ WORKTREE=
 RELAY_PID=
 HOST_PID=
 LOAD_PID=
+PROFILE_PID=
 STDOUT_PID=
 STDERR_PID=
 
 cleanup() {
+    if [[ -n $PROFILE_PID ]]; then
+        # setsid made the profiler a group leader without forking, so its PID is the group.
+        kill -- -"$PROFILE_PID" 2>/dev/null || true
+        wait "$PROFILE_PID" 2>/dev/null || true
+    fi
     if [[ -n $LOAD_PID ]]; then
         kill "$LOAD_PID" 2>/dev/null || true
         wait "$LOAD_PID" 2>/dev/null || true
@@ -419,13 +433,10 @@ print_audio_sample() {
     ] | @tsv' "$RUN/relay/$label/$workload/summary.json"
 }
 
-run_runtime_comparison() {
-    if [[ $(uname -s) != Linux ]]; then
-        printf 'runtime comparison needs Linux for io_uring and /proc metrics\n' >&2
-        return 1
-    fi
+# Worker runtimes read their certificate from disk instead of generating one.
+generate_certificate() {
     if ! command -v openssl >/dev/null; then
-        printf 'runtime comparison needs openssl to generate its temporary certificate\n' >&2
+        printf 'worker runtimes need openssl to generate a temporary certificate\n' >&2
         return 1
     fi
 
@@ -439,6 +450,14 @@ run_runtime_comparison() {
         cat "$RUN/openssl.log" >&2
         return 1
     fi
+}
+
+run_runtime_comparison() {
+    if [[ $(uname -s) != Linux ]]; then
+        printf 'runtime comparison needs Linux for io_uring and /proc metrics\n' >&2
+        return 1
+    fi
+    generate_certificate
 
     printf 'Building one relay binary with the Tokio and io_uring paths...\n'
     CARGO_TARGET_DIR=$CURRENT_TARGET cargo build --locked --release \
@@ -473,6 +492,46 @@ run_runtime_comparison() {
     print_runtime_comparison
 }
 
+run_lock_profile() {
+    if [[ $(uname -s) != Linux ]]; then
+        printf 'lock profiling needs Linux for perf and /proc schedstat\n' >&2
+        return 1
+    fi
+    # Refuse before the build when the kernel would refuse the capture.
+    python3 "$ROOT/bench/profile.py" check
+    generate_certificate
+
+    printf 'Building the relay with the profiling profile and frame pointers...\n'
+    CARGO_TARGET_DIR=$TARGET/profile cargo build --locked --profile profiling -p moq-relay -p moq-bench
+    LOAD_BIN=$TARGET/profile/profiling/moq-bench
+    HOST_BIN=$TARGET/profile/profiling/moq-bench-host
+    local relay=$TARGET/profile/profiling/moq-relay
+
+    printf '\nLock wait: %s, tokio workers; each profiled run follows an unprofiled control\n' "$LOCK_WORKLOAD"
+    printf '%-8s %5s %8s %13s %13s %10s %10s %13s %9s\n' \
+        workers idle switches control-fps profiled-fps control-CPU profiled-CPU mutex-wait-ms wait/CPU
+    local workers
+    for workers in $LOCK_WORKERS; do
+        run_workload "control-$workers" "$relay" "$LOCK_WORKLOAD" tokio-workers "$workers"
+        PROFILE_LOCK=true
+        run_workload "lock-$workers" "$relay" "$LOCK_WORKLOAD" tokio-workers "$workers"
+        PROFILE_LOCK=
+        jq -r -s '[
+            .[0].recv_fps, .[1].recv_fps, .[0].cpu_cores, .[1].cpu_cores, (.[2].idle | length),
+            ([.[2].workers[].switches] | min),
+            ([.[2].workers[].mutex_wait_ns] | add / 1000000),
+            ([.[2].workers[].mutex_wait_ns] | add) / ([.[2].workers[].cpu_ns] | add)
+        ] | @tsv' "$RUN/relay/control-$workers/$LOCK_WORKLOAD/summary.json" \
+            "$RUN/relay/lock-$workers/$LOCK_WORKLOAD/summary.json" \
+            "$RUN/relay/lock-$workers/$LOCK_WORKLOAD/lock/lock.json" |
+            while IFS=$'\t' read -r control profiled control_cpu profiled_cpu idle switches wait share; do
+                printf '%-8s %5s %8s %13.1f %13.1f %10.3f %10.3f %13.1f %9.4f\n' \
+                    "$workers" "$idle" "$switches" "$control" "$profiled" "$control_cpu" "$profiled_cpu" "$wait" "$share"
+            done
+    done
+    printf '\nMutex stacks (flamegraph folded format): %s/relay/lock-*/%s/lock/mutex.folded\n' "$RUN" "$LOCK_WORKLOAD"
+}
+
 cd "$ROOT"
 
 if [[ $MODE == --audio ]]; then
@@ -480,6 +539,9 @@ if [[ $MODE == --audio ]]; then
     exit 0
 elif [[ $MODE == --runtime ]]; then
     run_runtime_comparison
+    exit 0
+elif [[ $MODE == --lock ]]; then
+    run_lock_profile
     exit 0
 elif [[ -n $BASE ]]; then
     BASE_COMMIT=$(git rev-parse --verify "$BASE^{commit}")

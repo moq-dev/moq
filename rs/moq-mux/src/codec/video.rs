@@ -22,6 +22,21 @@ pub(crate) struct Reorder {
 	pub period: Option<(u64, u64)>,
 }
 
+impl Reorder {
+	/// The minimum decode delay and lookahead in 90 kHz ticks.
+	pub(crate) fn timing(self, framerate: Option<f64>) -> (u64, u64) {
+		let period = match self.period {
+			Some((units, scale)) => units.saturating_mul(90_000).div_ceil(scale),
+			None => framerate
+				.filter(|fps| fps.is_finite() && *fps > 0.0)
+				.map_or(0, |fps| (90_000.0 / fps).ceil() as u64),
+		};
+		let delay = u64::from(self.depth).saturating_mul(period);
+		let lookahead = 1u64.checked_shl(self.depth).unwrap_or(u64::MAX).saturating_mul(period);
+		(delay, lookahead)
+	}
+}
+
 /// The hypothetical reference decoder a video sequence header declares: its NAL HRD's last
 /// schedule, the one the transport stream's decoder buffers are sized from (ISO 13818-1
 /// 2.14.3.1, 2.17.2).

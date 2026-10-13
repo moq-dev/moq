@@ -151,6 +151,10 @@ tokio = { workspace = true, features = ["test-util"] }
 # Plays the `announced` view's frames on a virtual terminal, scrolling included.
 vt100 = "0.16.2"
 
+[target.'cfg(unix)'.dev-dependencies]
+# Sends the signals the `auth serve` shutdown test checks.
+libc = { workspace = true }
+
 [[bench]]
 name = "play_buffer"
 harness = false

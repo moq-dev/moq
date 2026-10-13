@@ -4,7 +4,13 @@
 
 mod support;
 
-use std::{sync::atomic::Ordering, time::Duration};
+use std::{
+	sync::{
+		Arc,
+		atomic::{AtomicUsize, Ordering},
+	},
+	time::Duration,
+};
 
 use moq_net::{Hop, Version, bandwidth::Rate, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
@@ -24,11 +30,16 @@ const STATS: MockStats = MockStats {
 
 /// A viewer session whose server publishes `origin`, with the viewer's PROBE
 /// stream open (as a browser viewer keeps one) and its first report received.
-async fn viewer(version: &str, origin: &origin::Producer) -> (MockPair, moq_net::bandwidth::Consumer) {
+async fn viewer(
+	version: &str,
+	origin: &origin::Producer,
+	polls: Option<Arc<AtomicUsize>>,
+) -> (MockPair, moq_net::bandwidth::Consumer) {
 	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
 	options.server_publish = Some(origin.consume());
 	options.client_subscribe = Some(origin::Producer::new(origin::Config::new(Hop::new(2).unwrap())).0);
 	options.stats = STATS;
+	options.server_polls = polls;
 	let pair = connect_mock(options).await;
 
 	let mut probe = pair.client.recv_bandwidth().expect("lite carries PROBE");
@@ -47,10 +58,12 @@ fn origin() -> origin::Producer {
 async fn idle_viewer_does_not_wake_the_server() {
 	for version in VERSIONS {
 		let origin = origin();
-		let (pair, _probe) = viewer(version, &origin).await;
+		let polls = Arc::new(AtomicUsize::new(0));
+		let (pair, _probe) = viewer(version, &origin, Some(polls.clone())).await;
 
-		let (polls, reads) = (&pair.server_polls, &pair.server_transport);
+		let reads = &pair.server_transport;
 		let (start_polls, start_reads) = (polls.load(Ordering::Relaxed), reads.stats_reads());
+		assert!(start_polls > 0, "the requested poll counter must observe the handshake");
 		moq_net_sim::sleep(IDLE).await;
 		let polls = polls.load(Ordering::Relaxed) - start_polls;
 		let reads = reads.stats_reads() - start_reads;
@@ -69,7 +82,7 @@ async fn idle_viewer_does_not_wake_the_server() {
 async fn busy_viewer_sees_the_estimate_move() {
 	for version in VERSIONS {
 		let origin = origin();
-		let (pair, mut probe) = viewer(version, &origin).await;
+		let (pair, mut probe) = viewer(version, &origin, None).await;
 
 		pair.server_transport.set_stats(MockStats {
 			estimated_send_rate: Some(2_000_000),

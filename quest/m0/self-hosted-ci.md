@@ -106,7 +106,11 @@ group) with `CI_RUNNER` set and unset, and that the module evaluates (`nix eval`
 and with a token from a PR ref). End-to-end proof happens in
 [CI host](/quest/m0/ci-host.md).
 
-Public API: none. Wire: none.
+Public API: the NixOS runner module and its configuration options. Wire: none.
+
+## Required
+
+- [CI cache release](/quest/m0/ci-cache-release.md) - a stable server supports the enforced read/write split; keep routing hosted until its policy is proven
 
 ## Related
 

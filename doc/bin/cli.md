@@ -79,7 +79,7 @@ logs feed health (stalled streams, TR 101 290 errors) without changing what it
 publishes. `--passthrough` publishes the multiplex whole instead, every packet
 in order on one [`m2ts`](/concept/hang#transport-streams) track with every
 program aboard, for what demultiplexing cannot carry, such as a scrambled
-service; `export ts` does not read it. FLV covers H.264 + AAC.
+service; `export ts --passthrough` writes it back out. FLV covers H.264 + AAC.
 
 ## Export
 
@@ -306,18 +306,33 @@ See [Authentication](/bin/relay/auth).
 ## Retention and latency
 
 `import --max-age` (default 30 s) tells relays how long to keep old groups
-fetchable, which the [HLS gateway](/bin/hls) depends on. `export --max-delay`
-(default 500 ms) is how far a stalled group may fall behind the live edge
-before *this* consumer skips it. Raising the first never delays playback.
+fetchable, which the [HLS gateway](/bin/hls) depends on. `export fmp4`, `export h264`,
+and `export h265` take `--max-delay` (default 500 ms): how far a stalled group
+may fall behind the live edge before *this* consumer skips it. Raising
+`--max-age` never delays playback.
 At stdin EOF, `import` keeps the finished broadcast up for its max-age, so a
 subscriber still catching up can drain it; Ctrl-C ends that early.
 
-`export ts` takes `--delay` (default 500 ms) instead, like an SRT receiver's
+`export ts`, `export flv`, and `export mkv` take `--delay` (default 500 ms)
+instead, like an SRT receiver's
 latency: each frame is muxed that long after its decode time, all tracks in
 decode order, so two exporters of one broadcast emit the same order. A frame
 arriving after its deadline is dropped, and video resumes at its next
-keyframe. The output's PCR follows the source's clock within what ISO/IEC
-13818-1 allows. `--delay 0` writes frames in arrival order and drops nothing.
+keyframe. The delay also bounds how stale a group may get, so `--delay 0` writes each
+frame as soon as it is read and drops none as late, but still skips a stalled
+group once a newer one is ready.
+FLV and MKV reject their former `--max-delay` spelling with a migration
+message. TS output's PCR follows the source's clock within what ISO/IEC
+13818-1 allows.
+
+`export ts --passthrough` reads the track an `import ts --passthrough` published
+and writes its packets back out unchanged, from its first group on, each run
+between two PCRs `--delay` after the first one's time on the source clock. The
+output is exactly as conformant as the source, and two exporters emit the same
+bytes. A run that arrives after its deadline is dropped and counted, leaving a
+continuity error, and the rest carry on. It takes neither `--linger`,
+`--stitch` nor `--mux-rate`. Only the hang catalog names the track, so an
+`.msf` broadcast needs `--catalog-format hang`.
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
 long for the same publisher instance to come back, and carries on with the same

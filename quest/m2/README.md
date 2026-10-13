@@ -37,6 +37,7 @@ and bench readiness. Refusal reasons folded the same day into
 - [MP4 export](/quest/m2/mp4-export.md) - `moq export mp4 --output` records crash-safe fragments, then finishes a regular MP4 with moov at the end
 - [fMP4 edit lists](/quest/m2/fmp4-edit-lists.md) - the fMP4 importer applies edit lists to frame timestamps
 - [Shared timebase in the bindings](/quest/m2/ffi-timebase.md) - binding apps publish several containers from one source on one shared offset
+- [One UniFFI crate per binding layer](/quest/m2/ffi-crate-split.md) - a generator spike, then per-layer UniFFI crates in one library so generated names drop the `Moq` and layer prefixes; reopens the one-crate decision
 - [Linux decoded frames](/quest/m2/obs-decode-linux.md) - present supported native decoded surfaces with visible CPU fallback
 - [Windows decoded frames](/quest/m2/obs-decode-windows.md) - present decoded D3D11 surfaces in OBS without CPU readback
 - [macOS GPU input](/quest/m2/obs-macos.md) - feed the encoder from the OBS compositor without CPU readback
@@ -115,3 +116,6 @@ and bench readiness. Refusal reasons folded the same day into
 - [QUIC on the sim](/quest/m2/quic-sim.md) - the sim drives `moq-quic` over in-memory datagrams with latency and loss
 - [Seeded sim](/quest/m2/sim-seed.md) - sim tests draw every jitter from one seeded generator and replay bit-exact
 - [Sibling broadcasts on one clock](/quest/m2/sibling-broadcasts.md) - one broadcast per source (webcam, screen, each camera, each language) under a shared prefix, sharing one clock, documented and tested in Rust and JS
+- [Catalog broadcast references in MSF and GStreamer](/quest/m2/catalog-broadcast-reference.md) - MSF conversion and the GStreamer source honor a rendition's `broadcast` or refuse it, instead of resolving it in the catalog's own broadcast
+- [Binding track resolver](/quest/m2/binding-track-helper.md) - binding apps subscribe to a rendition without inlining `track` or the key
+- [Exporters follow a rendition to a new track](/quest/m2/export-rendition-rebind.md) - the fMP4, TS, MKV and FLV exporters rebuild a rendition whose resolved `track` or `broadcast` changes under the same ID
