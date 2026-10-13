@@ -233,15 +233,19 @@ async fn partial_mesh_withdraw_retracts_once() {
 	}
 }
 
-/// A link between two relays, by index, and its one-way latency in ms.
-type Link = ((usize, usize), u64);
+/// A link between two relays, by index, and its one-way latency.
+type Link = ((usize, usize), Duration);
+
+const fn ms(millis: u64) -> Duration {
+	Duration::from_millis(millis)
+}
 
 /// Eight relays where, without the retraction quarantine, relays 1 and 5
 /// retract a broadcast published on relay 7 and then announce it again.
 #[rustfmt::skip]
 const STALE_PATHS: &[Link] = &[
-	((0, 1), 35), ((1, 2), 90), ((0, 3), 129), ((2, 4), 140), ((1, 5), 137), ((4, 6), 148),
-	((2, 7), 30), ((3, 5), 124), ((1, 4), 111), ((0, 5), 21), ((3, 4), 34),
+	((0, 1), ms(35)), ((1, 2), ms(90)), ((0, 3), ms(129)), ((2, 4), ms(140)), ((1, 5), ms(137)), ((4, 6), ms(148)),
+	((2, 7), ms(30)), ((3, 5), ms(124)), ((1, 4), ms(111)), ((0, 5), ms(21)), ((3, 4), ms(34)),
 ];
 
 /// A relay that already retracted a withdrawn broadcast must not announce it
@@ -253,8 +257,8 @@ async fn retracted_relay_ignores_a_stale_path() {
 	let version: Version = "moq-lite-06".parse().unwrap();
 	let nodes: Vec<_> = (1..=8).map(produce_origin).collect();
 	let mut pairs = Vec::new();
-	for &((a, b), ms) in STALE_PATHS {
-		pairs.push(peer_with_latency(version, &nodes[a], &nodes[b], Duration::from_millis(ms)).await);
+	for &((a, b), latency) in STALE_PATHS {
+		pairs.push(peer_with_latency(version, &nodes[a], &nodes[b], latency).await);
 	}
 	let mut watched: Vec<_> = nodes.iter().map(|node| watch(node.consume().announced())).collect();
 
@@ -305,8 +309,8 @@ impl Cluster {
 		let n = edges.iter().map(|&((a, b), _)| a.max(b) + 1).max().unwrap();
 		let relays: Vec<_> = (1..=n as u64).map(|id| produce(id, hold)).collect();
 		let mut pairs = Vec::new();
-		for &((a, b), ms) in edges {
-			pairs.push(peer_with_latency(version, &relays[a], &relays[b], Duration::from_millis(ms)).await);
+		for &((a, b), latency) in edges {
+			pairs.push(peer_with_latency(version, &relays[a], &relays[b], latency).await);
 		}
 
 		let publishing = produce(1000, Duration::ZERO);
@@ -418,7 +422,7 @@ async fn cross_node_close_without_hold_reannounces() {
 async fn residual_slow_ring_reannounces() {
 	#[rustfmt::skip]
 	const EDGES: &[Link] = &[
-		((0, 1), 141), ((0, 2), 55), ((2, 3), 29), ((1, 4), 135), ((4, 5), 148), ((3, 5), 22),
+		((0, 1), ms(141)), ((0, 2), ms(55)), ((2, 3), ms(29)), ((1, 4), ms(135)), ((4, 5), ms(148)), ((3, 5), ms(22)),
 	];
 	use Kind::*;
 	let mut cluster = Cluster::new("moq-lite-06", EDGES, origin::DEFAULT_UPDATE_HOLD, 0, 3).await;
@@ -436,8 +440,8 @@ async fn residual_slow_ring_reannounces() {
 async fn residual_mesh_revives() {
 	#[rustfmt::skip]
 	const EDGES: &[Link] = &[
-		((3, 4), 10), ((3, 5), 12), ((1, 6), 149), ((0, 7), 73), ((6, 8), 20), ((1, 4), 26),
-		((0, 6), 121), ((3, 7), 81), ((0, 2), 96), ((2, 8), 93), ((5, 8), 89),
+		((3, 4), ms(10)), ((3, 5), ms(12)), ((1, 6), ms(149)), ((0, 7), ms(73)), ((6, 8), ms(20)), ((1, 4), ms(26)),
+		((0, 6), ms(121)), ((3, 7), ms(81)), ((0, 2), ms(96)), ((2, 8), ms(93)), ((5, 8), ms(89)),
 	];
 	use Kind::*;
 	let mut cluster = Cluster::new("moq-lite-06", EDGES, origin::DEFAULT_UPDATE_HOLD, 4, 8).await;
@@ -489,14 +493,14 @@ fn random_mesh(seed: u64) -> (Vec<Link>, usize) {
 	for b in 1..n {
 		let a = rng.range(0, b as u64 - 1) as usize;
 		linked.insert((a, b));
-		edges.push(((a, b), rng.range(1, 150)));
+		edges.push(((a, b), ms(rng.range(1, 150))));
 	}
 	for _ in 0..rng.range(0, n as u64) {
 		let a = rng.range(0, n as u64 - 1) as usize;
 		let b = rng.range(0, n as u64 - 1) as usize;
 		let (a, b) = (a.min(b), a.max(b));
 		if a != b && linked.insert((a, b)) {
-			edges.push(((a, b), rng.range(1, 150)));
+			edges.push(((a, b), ms(rng.range(1, 150))));
 		}
 	}
 	(edges, rng.range(0, n as u64 - 1) as usize)
@@ -504,12 +508,12 @@ fn random_mesh(seed: u64) -> (Vec<Link>, usize) {
 
 /// One clean close on each of 200 seeded random meshes: how many relays
 /// announce the broadcast again before their last retraction (by restarting
-/// onto a stale path, or by reviving it after retracting), and how many of
-/// those revive. Pinned at today's counts; Routes and announces brings both
-/// to zero.
+/// onto a stale path, or by reviving it after retracting), how many of those
+/// revive, and how many updates they send beyond the one retraction. Pinned at
+/// today's counts; Routes and announces brings all three to zero.
 #[moq_net_sim::test]
 async fn residual_random_meshes() {
-	let (mut hunted, mut revived) = (0, 0);
+	let (mut hunted, mut revived, mut extra) = (0, 0, 0);
 	for seed in 0..200 {
 		let (edges, publisher) = random_mesh(seed);
 		let mut cluster = Cluster::new("moq-lite-06", &edges, origin::DEFAULT_UPDATE_HOLD, publisher, 0).await;
@@ -519,7 +523,8 @@ async fn residual_random_meshes() {
 			assert_eq!(kinds.last(), Some(&Kind::End), "seed {seed}: {kinds:?}");
 			hunted += usize::from(kinds.len() > 1);
 			revived += usize::from(kinds.windows(2).any(|w| w == [Kind::End, Kind::Start]));
+			extra += kinds.len() - 1;
 		}
 	}
-	assert_eq!((hunted, revived), (179, 3));
+	assert_eq!((hunted, revived, extra), (179, 3, 192));
 }
