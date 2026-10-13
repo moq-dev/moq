@@ -32,9 +32,8 @@ about 22 s with skip-aheads on the way down.
 
 - Decide whether those re-stall refills are what the goal wants, using the
   replay rows as the measurement. Tighten the replay budgets with any fix.
-  Tighten the browser rows only from the ceilings
-  [Audio quality budgets](/quest/m0/audio-quality-budgets.md) measures on the
-  nightly runner.
+  Tighten the browser rows only from nightly runner measurements, re-measured
+  as `test/audio-quality/budgets.json`'s note describes.
 - The replay sizes every frame as the trace's median spacing, which a trace
   missing most of its frames defeats; record the codec's frame duration in the
   trace and replay that instead.
@@ -59,4 +58,3 @@ release.
 ## Related
 
 - [A/V clock](/quest/m1/av-clock.md) - reshapes `SyncInput` around the per-track target this line produces
-- [Audio quality budgets](/quest/m0/audio-quality-budgets.md) - measures the browser rows' ceilings on the nightly runner, which this quest tightens
