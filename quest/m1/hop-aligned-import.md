@@ -55,8 +55,9 @@ wrap.
   reuse earlier group or record numbers for newer bytes. Their numbering
   and timestamps come from the live track at join or from the epoch
   timeline, never the instance.
-- An importer announces only once it knows its tracks, so it never refuses a
-  track the incumbent serves.
+- An importer announces only once it knows its tracks: split out to
+  [announce once tracks are known](/quest/m1/import-announce-tracks.md)
+  (2026-10-13), which closes #4352.
 - Docs (the `--epoch` paragraph in `doc/bin/cli.md`, the `--epoch` doc
   comment) state the contract: one encoded stream fed to each publisher, and
   a later importer that can reach the live broadcast before it announces.
@@ -72,11 +73,11 @@ the incumbent stopping; repeat it with `--passthrough`.
 
 ## Closes
 
-- [#4352](https://github.com/moq-dev/moq/issues/4352) - close this issue when the quest finishes
 - [#4354](https://github.com/moq-dev/moq/issues/4354) - close this issue when the quest finishes
 
 ## Required
 
+- [Announce once tracks are known](/quest/m1/import-announce-tracks.md) - a joining importer never answers `not found` for the incumbent's tracks
 - [Epoch refusals](/quest/m1/epoch-refusals.md) - publishers that cannot meet the contract refuse a shared epoch
 - [Epoch anchor](/quest/m1/epoch-anchor.md) - one anchor and timestamp era per epoch, adopted by every later importer
 - [Raw TS cuts on the epoch timeline](/quest/m1/ts-passthrough-epoch-cuts.md) - passthrough groups start where every instance cuts

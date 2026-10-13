@@ -86,6 +86,7 @@ above them, since the epoch anchor requires it.
 - [Epoch refusals](/quest/m1/epoch-refusals.md) - capture, avc3, `rtc --connect`, archive, and transcode refuse `--epoch`, since two instances never publish identical tracks
 - [Epoch anchor](/quest/m1/epoch-anchor.md) - same-epoch importers adopt the first importer's catalog clock and timestamp era, so they agree across a 33-bit wrap and a forward clock break
 - [Raw TS cuts on the epoch timeline](/quest/m1/ts-passthrough-epoch-cuts.md) - passthrough fallback cuts fall on the epoch's grid and a joiner adopts the live M2ts section, so instances started apart publish identical groups and catalogs
+- [Announce once tracks are known](/quest/m1/import-announce-tracks.md) - a joining importer announces only after it can serve its tracks, so it never aborts the incumbent's subscribers (#4352)
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - importers sharing one `--epoch` and fed one stream publish identical groups and timestamps, so failover between a redundant pair survives
 - [Plan: untimed verbatim PES](/quest/m1/plan-ts-pes-untimed.md) - decide how a verbatim TS track carries a PES that has no PTS, then write the implementation quest
 - [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) - json and binary consumers return each value's timestamp, in Rust and every binding; snapshots add `latest()` beside an in-order `next()`
