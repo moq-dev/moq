@@ -16,6 +16,9 @@ about 2 s a minute of audio discarded. AAC wide stalled 6 to 12%. The
 budgets carry these numbers as measured so the job is green; this quest fixes
 the player and tightens them.
 
+Start after #5442 merges: it uploads the nightly artifacts and carries the
+measured budgets this quest tightens.
+
 Decided 2026-10-13 (maintainer): a child of the audio jitter target line,
 reproducible from the harness now, so Watch's manual proof runs after it.
 

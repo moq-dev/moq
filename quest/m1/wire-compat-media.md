@@ -16,6 +16,9 @@ carries #4034, so the new reader's media path ran only by hand. A planned
 break is about a version pairing, so same-version cells are never covered by
 one and stay meaningful.
 
+Start after #5444 merges: it adds the reader's `subscribe` command and the
+`INTEROP_COMPAT_CLIENT` selector this quest relies on.
+
 Decided 2026-10-13 (maintainer): m1. Add the two control cells to the
 matrix in `test/interop/compat.sh` and `resolve.ts`, reusing the existing
 lanes rather than a new harness. Pick the lite version the released packages

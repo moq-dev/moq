@@ -13,19 +13,25 @@ scheduled nightlies of 2026-10-07 to 2026-10-13: Opus near-zero on the
 isolated ring reached a `target_ms_p95` of 100 to 800 ms with underrun
 episodes of about 1 s, while the postMessage ring on the same profile held at
 60 ms. A network with almost no jitter should not grow the target, so the
-difference points at the isolated ring's path, not the estimator.
+difference points at the isolated page's path, not the estimator.
+
+Start after #5442 merges: it uploads the nightly artifacts and carries the
+measured budgets this quest tightens.
 
 Decided 2026-10-13 (maintainer): a child of the audio jitter target line,
 reproducible from the harness now, so Watch's manual proof runs after it.
 
 Reproduce it first, from the nightly artifacts and then in
 `js/watch/src/audio/replay.ts` or a ring-level test on a simulated clock.
-Compare what each ring reports as arrival and consumption to the estimator:
-an isolated ring that under-reports its fill, reads the worklet's position
-late, or misses a resize would underrun on its own and feed that back as
-measured jitter. Fix it at the source with a regression that fails without
-it, then tighten the isolated near-zero ceilings in
-`test/audio-quality/budgets.json` from re-measured nightly runs.
+The target and the underruns may have separate causes. The target follows
+`consumer.spread`, which `js/hang/src/container/consumer.ts` records from
+transport arrivals before the ring, so a ring defect cannot inflate it:
+compare the captured arrivals and configuration of the two rows first, for
+something on the cross-origin isolated page that delays when frames are
+observed. A ring that under-reports its fill, reads the worklet's position
+late, or misses a resize explains underruns only. Fix each at the source with
+a regression that fails without it, then tighten the isolated near-zero
+ceilings in `test/audio-quality/budgets.json` from re-measured nightly runs.
 
 Public API: none expected. Wire: none.
 
