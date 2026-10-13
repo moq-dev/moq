@@ -10,7 +10,7 @@ declare global {
 
 window.captureMatrix = async () => {
 	const results = [];
-	for (const mode of ["none", "rate", "channels", "both", "constraint"]) {
+	for (const mode of ["none", "rate", "channels", "both"]) {
 		const source = new AudioContext({ sampleRate: 48_000 });
 		const oscillator = source.createOscillator();
 		const destination = source.createMediaStreamDestination();
@@ -18,17 +18,6 @@ window.captureMatrix = async () => {
 		oscillator.start();
 		await source.resume();
 		const track = destination.stream.getAudioTracks()[0];
-		if (mode === "constraint") {
-			try {
-				await track.applyConstraints({ channelCount: 1 });
-			} catch (error) {
-				results.push({ mode, unsupported: String(error) });
-				track.stop();
-				oscillator.stop();
-				await source.close();
-				continue;
-			}
-		}
 		const capture = new Publish.Audio.Capture({
 			source: { track: track as Publish.Audio.StreamTrack, kind: "music" },
 			sampleRate: mode === "rate" || mode === "both" ? 48_000 : undefined,
@@ -42,10 +31,7 @@ window.captureMatrix = async () => {
 				fanout = capture.out.frames.peek();
 			}
 			const reader = fanout.subscribe(effect).getReader();
-			let audible = false;
 			const channelsAudible: boolean[] = [];
-			let leadingSilent = 0;
-			let silent = 0;
 			let gaps = 0;
 			let expected: number | undefined;
 			for (let i = 0; i < 512; i++) {
@@ -58,24 +44,11 @@ window.captureMatrix = async () => {
 					const rms = Math.sqrt(samples.reduce((sum, value) => sum + value * value, 0) / samples.length);
 					channelsAudible[channel] = (channelsAudible[channel] ?? false) || rms > 0.01;
 				}
-				const rms = Math.sqrt(frame.channels[0].reduce((sum, v) => sum + v * v, 0) / frame.channels[0].length);
-				if (rms > 0.01) audible = true;
-				else if (audible) silent++;
-				else leadingSilent++;
 				if (expected !== undefined && Math.abs(frame.timestamp - expected) > 2) gaps++;
 				expected = frame.timestamp + (frame.channels[0].length / 48_000) * 1_000_000;
 			}
 			await reader.cancel();
-			results.push({
-				mode,
-				audible,
-				channelsAudible,
-				leadingSilent,
-				silent,
-				gaps,
-				format: capture.out.format.peek(),
-				constraints: track.getConstraints(),
-			});
+			results.push({ mode, channelsAudible, gaps, format: capture.out.format.peek() });
 		} finally {
 			effect.close();
 			capture.close();

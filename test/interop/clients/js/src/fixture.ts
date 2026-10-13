@@ -108,10 +108,12 @@ export class Fixture {
 		// then requires an audio catalog after the click, which covers the capture resuming its own
 		// suspended graph.
 		//
-		// Keep both overrides absent until the macOS silence report is isolated. Removing both
-		// improved that run, but it did not establish which override caused the loss or why.
+		// Pinning mono puts the worklet behind Web Audio's explicit downmix of the stereo destination
+		// track, so the tone checks also cover that path.
 		const audioCapture = new Publish.Audio.Capture({
 			source: { track: audioTrack, kind: "music" },
+			sampleRate: SAMPLE_RATE,
+			channelCount: 1,
 		});
 		this.#signals.cleanup(() => audioCapture.close());
 

@@ -1,4 +1,4 @@
-/** Capture diagnostic uses the real browser and worklet, with each override isolated. */
+/** Capture diagnostic uses the real browser and worklet, with each format override isolated. */
 import { expect, test } from "bun:test";
 import { createServer } from "vite";
 import { launch } from "./harness";
@@ -12,28 +12,11 @@ test("capture format override matrix", async () => {
 		await page.goto(`${server.resolvedUrls?.local[0]}capture-channel-count.html`);
 		await page.waitForFunction(() => typeof window.captureMatrix === "function");
 		const result = await page.evaluate(() => window.captureMatrix());
-		console.log(JSON.stringify({ platform: process.platform, browser: browser.version(), result }));
-		expect(result).toHaveLength(5);
-		expect(result.slice(0, 4)).toMatchObject([
-			{
-				mode: "none",
-				audible: true,
-				channelsAudible: [true, true],
-				format: { sampleRate: 48_000, channelCount: 2 },
-			},
-			{
-				mode: "rate",
-				audible: true,
-				channelsAudible: [true, true],
-				format: { sampleRate: 48_000, channelCount: 2 },
-			},
-			{
-				mode: "channels",
-				audible: true,
-				channelsAudible: [true],
-				format: { sampleRate: 48_000, channelCount: 1 },
-			},
-			{ mode: "both", audible: true, channelsAudible: [true], format: { sampleRate: 48_000, channelCount: 1 } },
+		expect(result).toEqual([
+			{ mode: "none", channelsAudible: [true, true], gaps: 0, format: { sampleRate: 48_000, channelCount: 2 } },
+			{ mode: "rate", channelsAudible: [true, true], gaps: 0, format: { sampleRate: 48_000, channelCount: 2 } },
+			{ mode: "channels", channelsAudible: [true], gaps: 0, format: { sampleRate: 48_000, channelCount: 1 } },
+			{ mode: "both", channelsAudible: [true], gaps: 0, format: { sampleRate: 48_000, channelCount: 1 } },
 		]);
 	} finally {
 		await browser.close();
