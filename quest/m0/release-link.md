@@ -32,9 +32,16 @@ Remaining work: once the fix reaches `nixpkgs-unstable`, bump `flake.lock`
 `moq-relay`, `moq-cli` and `moq-gst` on both Linux targets.
 
 `release` still pins the pre-bump nixpkgs, so shipping releases are fine;
-only the next `main` -> `release` merge carries the break. A stopgap (pinning
-`zig` and `cargo-zigbuild` to the pre-bump nixpkgs) is only worth its own
-quest if a release from `main` must ship before the fix lands.
+only the next `main` -> `release` merge carries the break.
+
+Decisions (maintainer, 2026-10-13):
+
+- ✅ No stopgap pin of `zig` or `cargo-zigbuild` to the pre-bump nixpkgs.
+  `release` is unaffected and the fix is already in `staging-next`. Revisit
+  only if a release from `main` must ship before the fix lands.
+- ✅ No PR-time zigbuild check on `flake.lock` changes. The nightly caught
+  this within a day, and a full zigbuild per nix bump works against the CI
+  cost plan (#5426).
 
 Public API: none. Wire: none.
 
