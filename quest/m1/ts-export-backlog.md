@@ -15,6 +15,10 @@ with the jitter buffer's `full` check: a track is full once a frame of it is
 due, or holds any frame without a delay. TS still drains every ready frame, as
 it did before that PR. Reuse the same check rather than a TS-specific bound,
 and cover `--passthrough` too if its release path reads the same way.
+Bounding reads leaves arrived frames unread, so each read must judge a frame's
+deadline on when its source was last empty, as FLV and MKV do, not on when it
+was read: otherwise a slow sink makes frames that arrived on time late. The
+regression test covers that slow-sink case for each path.
 
 This waited for the TS work then in flight,
 [#5349](https://github.com/moq-dev/moq/pull/5349) (passthrough export) and
