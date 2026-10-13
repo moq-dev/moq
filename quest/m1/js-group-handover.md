@@ -43,9 +43,7 @@ Things to settle along the way:
 - Resume only between routes with the same epoch. Any other swap is a new
   broadcast that announce consumers see as a `Restart`, and players follow
   it with a fresh subscription. A route without an epoch never resumes, as
-  in Rust, so `drain.ts`'s publisher mints an epoch, and the
-  [transport upgrade](/quest/m1/transport-upgrade/js.md) test publishes
-  under one too.
+  in Rust, so `drain.ts`'s publisher mints an epoch.
 - `js/watch` and `js/hang` consumers that re-subscribe on `active` changes.
   Check whether they still need to.
 - Giving up a resumed group no route continues. Mirror Rust's rule from

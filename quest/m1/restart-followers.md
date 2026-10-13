@@ -59,5 +59,5 @@ Wire: none.
 
 ## Related
 
-- [Transport upgrade](/quest/m1/transport-upgrade/README.md) - its "epochless routes signal Restart and need a fresh follower resolution" decision
+- [Keep the winning transport](/quest/m0/drop-ws-upgrade.md) - removes the upgrade, so `Restart` no longer follows every WebSocket connect
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - the players that already follow `Restart`
