@@ -118,7 +118,7 @@ protocol. [Peer route policy](/quest/m1/p2p/cost-scopes.md) sets the cost
 knobs and defaults.
 
 Target the public `@moq/net` interface regardless of whether its
-[browser backend](/quest/m1/rs2ts/README.md) is transitional WASM or JS-only.
+[browser backend](/quest/m2/rs2ts/README.md) is transitional WASM or JS-only.
 Backend choice does not change the policy that watching tabs never re-serve.
 
 ### Risks
@@ -147,4 +147,4 @@ Backend choice does not change the policy that watching tabs never re-serve.
 ## Related
 
 - [Route health](/quest/m1/route-health/README.md) - epoch-only active/passive delivery recovery on selected connections
-- [E2EE](/quest/m1/e2ee/README.md) - what a peer would need if the token scope stopped being the trust boundary
+- [E2EE](/quest/m2/e2ee/README.md) - what a peer would need if the token scope stopped being the trust boundary

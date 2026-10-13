@@ -223,7 +223,7 @@ release.
 
 ## Related
 
-- [Route wakes](/quest/m1/route-wakes.md) - index work follows the settled source-selection model
-- [Announce replay](/quest/m1/perf/announce-replay.md) - linear initial/reconnect replay
+- [Route wakes](/quest/m2/route-wakes.md) - index work follows the settled source-selection model
+- [Announce replay](/quest/m2/perf/announce-replay.md) - linear initial/reconnect replay
 - [Route health](/quest/m1/route-health/README.md) - epoch-only progress observation and local delivery failover
 

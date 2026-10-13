@@ -75,4 +75,4 @@ issues' 1+1 setup (one relay, two `import ts` sharing one `--epoch`, two
 ## Related
 
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - a redundant pair shares one epoch
-- [E2EE](/quest/m1/e2ee/README.md) - an encrypting publisher refuses a shared epoch, so a redundant pair is plaintext only
+- [E2EE](/quest/m2/e2ee/README.md) - an encrypting publisher refuses a shared epoch, so a redundant pair is plaintext only

@@ -55,6 +55,11 @@ origins under local priorities make progress. Nor does a complete neighbor
 snapshot prove its claims are current. Settle those contracts before dropping
 hop-vector protections or fixing the wire.
 
+The new routing model and finalized lite-07 belong to the breaking release.
+Existing mesh deployments remain supported; the full edge/core topology
+migration is independent. Basic outbound federation proves the common routing
+contract without requiring that deployment migration.
+
 Recent baseline: #5375's two-second retraction quarantine reduced stale
 revivals but left residual cases; #5391 bounded its queue under repeated
 same-clock churn. #5382 and #5393 separately reduced idle-session polling.
@@ -90,6 +95,6 @@ setup after the capabilities land.
 - [P2P](/quest/m1/p2p/README.md) - application-selected peer sessions feed the shared routing model
 - [Routing guide](/quest/m1/routing-guide.md) - concept page and practical federation/P2P setup
 - [Cross-node flapping](/quest/m1/cross-node-flapping.md) - incident-sensitive regressions for residual withdrawal hunting
-- [Route wakes](/quest/m1/route-wakes.md) - local work follows affected fronts rather than the whole covered table
+- [Route wakes](/quest/m2/route-wakes.md) - local work follows affected fronts rather than the whole covered table
 - [Link quality](/quest/m2/link-quality.md) - optional measured link cost, distinct from delivery-health failover
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - independent origins serving the same explicit epoch

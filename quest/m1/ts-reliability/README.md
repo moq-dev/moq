@@ -61,10 +61,11 @@ their current quests.
 - [Plan: PES timing and headers](/quest/m1/plan-ts-pes-untimed.md) - private PES semantics have a settled carriage and placement contract
 - [Loss and recovery tests](/quest/m1/ts-reliability/recovery.md) - actual MoQ omissions exercise reacquisition and unaffected tracks
 - [T-STD TS export](/quest/m1/tstd/README.md) - the semantic mux schedules the content it admits within its supported buffer models
-- [TS passthrough export](/quest/m1/ts-passthrough-export.md) - unchanged surviving packets keep their original schedule
 
 ## Related
 
 - [Plan: redundant TS alignment](/quest/m1/plan-ts-alignment.md) - shared identity requires a shared source coordinate, and TS identity alone is not ST 2022-7
 - [TS health counters](/quest/m2/ts-health-stats.md) - ingress and egress evidence need distinct monitoring points
 - [MSFTS mapping](/quest/m3/msfts-convergence.md) - document the exact equivalence and differences between the carriage modes
+
+- [TS passthrough export](/quest/m2/ts-passthrough-export.md) - a new mode that does not gate correctness of existing TS modes

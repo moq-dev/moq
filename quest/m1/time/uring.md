@@ -44,4 +44,4 @@ Wire: none.
 
 ## Related
 
-- [Run to quiescence](/quest/m1/perf/uring-quiescence.md) - reshapes the same worker turn
+- [Run to quiescence](/quest/m2/perf/uring-quiescence.md) - reshapes the same worker turn
