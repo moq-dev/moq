@@ -59,4 +59,4 @@ decision rather than an invented retry or compatibility layer.
 - [Transport upgrade](/quest/m1/transport-upgrade/README.md) - existing handover and epoch contracts
 - [TS duration fidelity](/quest/m0/ts-duration-fidelity.md) - previously captured only a short suffix, not zero-packet initial acquisition
 - [Replacement catalog linger](/quest/m1/ts-follow-catalog-bound.md) - bounds a midstream stitch, not initial discovery
-- [Pair acquisition](/quest/m1/ts-pair-acquisition.md) - independent grader/mux finding
+- [Pair validation](/test/ts/README.md#table-anchoring-table-anchorpy) - independent grader/acquisition checks

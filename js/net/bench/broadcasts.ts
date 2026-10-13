@@ -28,32 +28,36 @@ for (const scope of ["unscoped", "distinct-scopes", "producer-scopes", "rooted-p
 			);
 			const touched = Path.from(scope === "rooted-producers" ? "0" : "room/0");
 			let notifications = 0;
-			const disposes = Array.from({ length: observerCount }, (_, index) =>
+			const streams = Array.from({ length: observerCount }, (_, index) =>
 				(scope === "producer-scopes"
 					? origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse(`room/**/tag-${index}`)]))
 					: scope === "rooted-producers"
 						? origin.scope(Path.from("room"), new Path.Patterns([Path.Pattern.parse(`**/tag-${index}`)]))
 						: origin
-				)
-					.broadcasts(scope === "distinct-scopes" ? Path.Pattern.parse(`room/**/tag-${index}`) : undefined)
-					.subscribe((routes) => {
-						if (routes.get(touched) === undefined) throw new Error("touched route disappeared");
-						notifications++;
-						checksum += routes.size;
-					}),
+				).announced(scope === "distinct-scopes" ? Path.Pattern.parse(`room/**/tag-${index}`) : undefined),
 			);
+			const readers = streams.map(async (stream) => {
+				for await (const event of stream) {
+					if (event.kind !== "update") continue;
+					if (event.prefix !== touched) throw new Error("unexpected touched route");
+					notifications++;
+					checksum++;
+				}
+			});
+			await new Promise<void>((resolve) => setImmediate(resolve));
 
 			const start = performance.now();
 			for (let index = 0; index < updates; index++) {
 				handles[0].update({ cost: BigInt(index + 1) });
-				await Promise.resolve(); // Flush the route signal and every observing getter.
+				await new Promise<void>((resolve) => setImmediate(resolve));
 			}
 			const elapsed = performance.now() - start;
 			if (notifications !== updates * observerCount) {
 				throw new Error(`expected ${updates * observerCount} notifications, got ${notifications}`);
 			}
 			console.log(`${scope},${routeCount},${observerCount},${((elapsed * 1000) / updates).toFixed(1)}`);
-			for (const dispose of disposes) dispose();
+			for (const stream of streams) stream.close();
+			await Promise.all(readers);
 			for (const handle of handles) handle.close();
 			origin.close();
 		}

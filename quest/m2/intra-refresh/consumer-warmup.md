@@ -60,6 +60,7 @@ replaces both: the rule is timestamp arithmetic on the group start.
 
 ## Required
 
+- [Plan: recovery boundaries](/quest/m2/intra-refresh/plan-boundary.md) - consumers need a safe boundary before presenting the affected pictures
 - [Rust non-continuous signal](/quest/m1/rust-continuous.md) - the Rust signal this keys on
 
 ## Related

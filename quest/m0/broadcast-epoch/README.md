@@ -125,7 +125,6 @@ End+Start. The child quests own their focused regressions.
 
 - [Resume duplicates](/quest/m0/broadcast-epoch/resume-duplicates.md) - a delayed group is delivered once even beyond the old 1024-entry history
 - [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - players and exporters pin siblings consistently, with optional reference epochs and documented legacy best effort
-- [Publish catalog restart](/quest/m0/broadcast-epoch/publish-catalog-restart.md) - `@moq/publish` never reuses catalog group numbers under one name and epoch after a re-announce
 - [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the same release retires the per-path stats maps for totals and on-demand prefix tracks (decided 2026-10-05)
 
 ## Related

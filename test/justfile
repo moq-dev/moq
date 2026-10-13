@@ -131,6 +131,10 @@ ts *args:
     python3 ./ts/pcr-timing.test.py
     ./ts/run.sh "$@"
 
+# Table-placement grader: acquisition, interleave, phase, drift and missing-table controls.
+ts-pair-controls:
+    python3 ./ts/table-anchor.test.py
+
 # Round-trip the EIT fixtures: the sparse schedule must survive and
 # pending-version sections must be dropped at import.
 [positional-arguments]
