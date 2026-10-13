@@ -22,7 +22,10 @@ PTS. Two importers agree only if they started at the same packet.
 Decided 2026-10-13 by the maintainer, over one importer per epoch and over a
 contract narrowed to what one input proves: a shared epoch carries no
 source-to-wall mapping or era, and only one observation of the source can
-supply them, so the epoch fixes them once and nothing re-derives them.
+supply them, so the epoch fixes them once and nothing re-derives them. The
+maintainer accepted the follow-on rules below the same day: eras from the
+incumbent's live timeline, joiners adopting history-derived catalog fields,
+and the subscribe grant a joiner needs.
 
 - The epoch's first importer places the clock at its first frame, as today.
   A later importer reads the epoch's live catalog before it announces and
@@ -43,20 +46,20 @@ supply them, so the epoch fixes them once and nothing re-derives them.
   nearest the incumbent's latest published timestamp. One offset taken from
   the first frame would misplace a stream whose first value sits across a
   wrap from it. Delivery skew alone is far below half a period, so it
-  changes nothing. Add the periods in source ticks before
-  converting to microseconds, since a period is not a whole microsecond
-  count.
-- The latest timestamp is still wrong when flagged breaks totalling half a
-  period fall within the delivery skew between the two observations: a
-  joiner one second behind, while the incumbent takes two +10 h breaks,
-  lands a wrap ahead. Settle whether the joiner confirms its era on an
-  overlapping observation before announcing (the incumbent's object at its
-  own first group's time, which would also catch a different stream), or
-  the docs state that bound.
-- Same stream is the operator's precondition, unchecked like the rest of the
-  same-epoch contract. A nearest whole period always exists, so the era
-  choice cannot detect a different stream. No check is planned for identity
-  alone; the overlapping observation above would catch one if chosen.
+  changes nothing. Add the periods in source ticks before converting to
+  microseconds, since a period is not a whole microsecond count.
+- The joiner verifies its era against one of the incumbent's objects
+  before announcing: the incumbent's object at the joiner's first group's
+  time must match it in timestamp and payload. A mismatch exits with an
+  error, and so does an incumbent that leaves before the check. Decided
+  2026-10-13 by the maintainer, over documenting a bound: the latest
+  timestamp alone is wrong when flagged breaks totalling half a period fall
+  within the delivery skew (a joiner one second behind, while the incumbent
+  takes two +10 h breaks, lands a wrap ahead).
+- The era choice alone cannot detect a different stream, since a nearest
+  whole period always exists; the verification above refuses one at join.
+  Past that, same stream stays the operator's precondition, unchecked like
+  the rest of the same-epoch contract (maintainer, 2026-10-13).
 - Every catalog field an importer derives from its history rather than the
   content at hand is the epoch's too. The joiner adopts the live value as of
   its first group, and later changes depend only on content on the epoch
@@ -79,10 +82,11 @@ supply them, so the epoch fixes them once and nothing re-derives them.
   inputs and the first source timestamp after the step can fix its anchor.
 - Nothing outlives the live route, so a total outage loses the anchor: the
   next importer under the same explicit epoch is a first importer, and its
-  era and clock can differ from the old run's. Persisting the anchor is out
-  of scope, so an explicit epoch names one continuous run, and a supervisor
+  era and clock can differ from the old run's. Decided 2026-10-13 by the
+  maintainer: an explicit epoch names one continuous run, and a supervisor
   restarting after every importer stopped mints a successor epoch, as for a
-  rewind. Settle how that is surfaced with the successor-epoch item above.
+  rewind; the `--epoch` docs say so. Rejected: persisting the anchor beyond
+  the live route, and a flag marking the first importer.
 - The mapping drifts from UTC at the source's clock error for the epoch's
   life, as one importer's does today. Nothing re-measures it.
 
@@ -91,9 +95,10 @@ Tests, on mocked time where possible: for each importer that takes
 identical catalogs and timestamps; the same with the second started after a
 33-bit wrap the first crossed, at a wrap with its streams' first values on
 opposite sides of it, after flagged forward breaks that together exceed half
-a period, with observations straddling such breaks (per the rule settled
-above), and with different delivery skew into each; a cold co-start leaves
-one publisher.
+a period, with observations straddling such breaks (the verification
+refuses a wrong era), and with different delivery skew into each; a
+different stream under the same epoch fails verification; a cold co-start
+leaves one publisher.
 
 Public API: no new items, but `--epoch` on an importer now reads the live
 broadcast before announcing, so its token needs subscribe rights on its own

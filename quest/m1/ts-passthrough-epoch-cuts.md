@@ -31,10 +31,11 @@ when the importer started.
   other start publishes `random_access` false.
 - Size cuts count from the group's start, so they follow once group starts
   do.
-- A cut is a position in the content, so it follows media time alone. A
-  wall-clock cut path would put a stalled instance's groups apart from its
-  partner's, so this lane is an exception to timers advancing on
-  max(wall, pts).
+- A cut is a position in the content, so under a shared epoch it follows
+  media time alone. Decided 2026-10-13 by the maintainer as an explicit
+  exception to timers advancing on max(wall, pts), because a wall-clock cut
+  would split a stalled instance from its partner. Rejected: keeping a wall
+  path.
 - A joiner adopts the live M2ts section as of its first group, and its later
   changes depend only on content on the epoch timeline: `random_access`
   clears on a cut both instances make, and the rate windows sit on the
