@@ -159,7 +159,7 @@ enum Acceptor {
 	#[default]
 	Undecided,
 	/// The app answers every token.
-	App(kio::Queue<Request>),
+	App(Pending),
 	/// The session answers from its own origin handles.
 	Default,
 }
@@ -335,6 +335,10 @@ impl Handle {
 	/// origin handles allow for the connection's credential, and refuses any other
 	/// token as unsupported.
 	///
+	/// At most 128 unanswered tokens queue, not counting withdrawn ones; more are
+	/// refused with [`SessionError::TooManyRequests`] (`UNAUTHORIZED` on moq-transport,
+	/// whose AUTH_ERROR registry has no such code).
+	///
 	/// # Errors
 	///
 	/// [`Error::Duplicate`] if the requests were already taken, or the driver
@@ -344,7 +348,7 @@ impl Handle {
 		if !matches!(state.acceptor, Acceptor::Undecided) {
 			return Err(Error::Duplicate);
 		}
-		let queue = kio::Queue::new();
+		let queue = Pending::default();
 		// A version without AUTH never receives a token, so its requests end with
 		// the session like any other.
 		if !state.supported {
@@ -356,7 +360,7 @@ impl Handle {
 
 	/// Decide who answers the peer's tokens: the app if it took the requests,
 	/// otherwise the session itself (`None`). Idempotent.
-	pub(crate) fn acceptor(&self) -> Option<kio::Queue<Request>> {
+	pub(crate) fn acceptor(&self) -> Option<Pending> {
 		let mut state = self.state.lock();
 		match &state.acceptor {
 			Acceptor::App(queue) => Some(queue.clone()),
@@ -716,27 +720,83 @@ impl Watch {
 ///
 /// Returned by [`Handle::requests`]. Dropping it refuses every later token.
 pub struct Requests {
-	queue: kio::Queue<Request>,
+	queue: Pending,
 }
 
 impl Requests {
 	/// Poll for the next token, or `None` once the session ends.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<Request>> {
-		self.queue.poll_pop(waiter).map(|res| res.ok())
+		self.queue.poll_next(waiter)
 	}
 
 	/// Wait for the next token the peer presents, or `None` once the session ends.
 	pub async fn next(&mut self) -> Option<Request> {
-		self.queue.pop().await.ok()
+		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 }
 
 impl Drop for Requests {
 	fn drop(&mut self) {
 		self.queue.close();
-		// The session keeps a handle to the queue, so drop what is already queued here:
-		// each request refuses its token as it drops.
-		while let Ok(Some(_)) = self.queue.try_pop() {}
+	}
+}
+
+/// Pending application decisions, bounded independently of transport stream credit.
+#[derive(Clone, Default)]
+pub(crate) struct Pending {
+	state: kio::Shared<PendingState>,
+}
+
+#[derive(Default)]
+struct PendingState {
+	requests: VecDeque<Request>,
+	closed: bool,
+}
+
+impl Pending {
+	fn close(&self) {
+		let mut state = self.state.lock();
+		state.closed = true;
+		state.requests.clear();
+	}
+
+	/// Queue the token for the application, or refuse it when closed or full.
+	pub(crate) fn push(&self, request: Request) {
+		let mut state = self.state.lock();
+		// Dropping the request refuses it as unanswered.
+		if state.closed {
+			return;
+		}
+		// A withdrawn stream must not occupy a slot while the verifier is busy.
+		if state.requests.len() >= 128 {
+			state.requests.retain(|request| !request.ended());
+		}
+		if state.requests.len() >= 128 {
+			drop(state);
+			request.reject(SessionError::TooManyRequests, "too many pending tokens");
+			return;
+		}
+		state.requests.push_back(request);
+	}
+
+	fn poll_next(&self, waiter: &kio::Waiter) -> Poll<Option<Request>> {
+		loop {
+			let mut state = std::task::ready!(self.state.poll(waiter, |state| {
+				if state.closed || !state.requests.is_empty() {
+					Poll::Ready(())
+				} else {
+					Poll::Pending
+				}
+			}));
+			while let Some(request) = state.requests.pop_front() {
+				if !request.ended() {
+					return Poll::Ready(Some(request));
+				}
+			}
+			if state.closed {
+				return Poll::Ready(None);
+			}
+		}
 	}
 }
 
@@ -810,6 +870,15 @@ impl Request {
 		&self.token
 	}
 
+	fn ended(&self) -> bool {
+		self.issue.as_ref().expect("unanswered request").read().peer.is_some()
+	}
+
+	/// Wait for the peer to withdraw this unanswered token or close the session.
+	pub async fn closed(&self) -> Error {
+		closed(self.issue.as_ref().expect("unanswered request")).await
+	}
+
 	/// Grant the token. The grant holds until the returned [`Issued`] is revoked
 	/// or dropped, or the peer withdraws the token.
 	///
@@ -867,15 +936,22 @@ impl Issued {
 	/// Wait for the peer to withdraw the token ([`Error::Cancel`]), or for its
 	/// stream or the session to end.
 	pub async fn closed(&self) -> Error {
-		kio::wait(|waiter| {
-			let issue = ready_or!(self.issue.poll(waiter, |issue| match issue.peer.is_some() {
-				true => Poll::Ready(()),
-				false => Poll::Pending,
-			}));
-			Poll::Ready(issue.peer.clone().expect("checked above"))
-		})
-		.await
+		closed(&self.issue).await
 	}
+}
+
+async fn closed(issue: &kio::Shared<Issue>) -> Error {
+	kio::wait(|waiter| {
+		let issue = ready_or!(issue.poll(waiter, |issue| {
+			if issue.peer.is_some() {
+				Poll::Ready(())
+			} else {
+				Poll::Pending
+			}
+		}));
+		Poll::Ready(issue.peer.clone().expect("checked above"))
+	})
+	.await
 }
 
 impl Drop for Issued {
@@ -1039,6 +1115,45 @@ impl Enforce {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn pending_tokens_are_bounded() {
+		let handle = Handle::new(true);
+		let _requests = handle.requests().unwrap();
+		let queue = handle.acceptor().unwrap();
+		for _ in 0..128 {
+			queue.push(Request::new(Bytes::new(), Default::default()));
+		}
+		let overflow = kio::Shared::<Issue>::default();
+		queue.push(Request::new(Bytes::new(), overflow.clone()));
+		let overflow = overflow.lock();
+		assert!(overflow.done);
+		assert!(matches!(
+			overflow.outbox.front(),
+			Some(Reply::Refuse {
+				code: SessionError::TooManyRequests,
+				..
+			})
+		));
+	}
+
+	#[test]
+	fn withdrawn_tokens_do_not_occupy_pending_slots() {
+		let handle = Handle::new(true);
+		let mut requests = handle.requests().unwrap();
+		let queue = handle.acceptor().unwrap();
+		let expired = kio::Shared::<Issue>::default();
+		for _ in 0..128 {
+			queue.push(Request::new(Bytes::from_static(b"withdrawn"), expired.clone()));
+		}
+		expired.lock().peer = Some(Error::Cancel);
+		queue.push(Request::new(Bytes::from_static(b"live"), Default::default()));
+		let Poll::Ready(Some(request)) = requests.poll_next(&kio::Waiter::noop()) else {
+			panic!("live request missing")
+		};
+		assert_eq!(request.token().as_ref(), b"live");
+		assert!(requests.poll_next(&kio::Waiter::noop()).is_pending());
+	}
 
 	fn patterns(prefixes: &[&str]) -> Patterns {
 		prefixes

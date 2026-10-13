@@ -116,6 +116,12 @@ host still poll in place; independent native wake callbacks can run concurrently
 The generated bridge synchronizes wakeups before resuming the awaiting goroutine.
 Application goroutines remain responsible for serializing their own shared state.
 
+A session closed for exceeding the relay's request caps reports the protocol
+kind `ProtocolKindTooManyRequests`. Reduce
+the simultaneous announcements or subscriptions, or ask the relay operator
+to adjust the [session limits](/bin/relay/config#session-and-peer), before
+reconnecting with the same workload.
+
 ## Reference
 
 - API reference: [pkg.go.dev/moq.dev/moq](https://pkg.go.dev/moq.dev/moq)

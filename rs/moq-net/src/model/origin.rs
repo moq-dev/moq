@@ -626,11 +626,12 @@ fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
 }
 
 /// A retraction's quarantine, keyed by prefix in its [`AnnounceConsumer`]: the
-/// retracted route's publisher, epoch, and rank, and when the quarantine ends.
+/// retracted route's publisher (none for an anonymous route, which holds
+/// nothing), epoch, and rank, and when the quarantine ends.
 #[derive(Clone)]
 struct Quarantine {
 	held: Held,
-	publisher: Hop,
+	publisher: Option<Hop>,
 	epoch: Option<crate::Epoch>,
 	rank: (Cost, usize),
 }
@@ -640,7 +641,9 @@ impl Quarantine {
 	/// first hop and epoch, ranked strictly worse. A republish ranks the same and a
 	/// new instance carries a new epoch, so neither waits.
 	fn holds(&self, meta: &RouteMeta) -> bool {
-		meta.0.iter().next() == Some(&self.publisher) && meta.3 == self.epoch && (meta.1, meta.0.len()) > self.rank
+		self.publisher.is_some_and(|hop| meta.0.iter().next() == Some(&hop))
+			&& meta.3 == self.epoch
+			&& (meta.1, meta.0.len()) > self.rank
 	}
 }
 
@@ -5200,22 +5203,23 @@ impl AnnounceConsumer {
 		}
 	}
 
-	/// Start a retraction's quarantine, or end it with a delivered announcement.
+	/// Start a retraction's quarantine. A delivered announcement leaves it to
+	/// expire: later ones for the prefix are updates, which it never holds.
 	fn quarantine(&mut self, event: &AnnounceEvent, now: Option<Instant>) {
-		let update = match event {
-			AnnounceEvent::End(announce) => announce,
-			AnnounceEvent::Start(announce) | AnnounceEvent::Update(announce) | AnnounceEvent::Restart(announce) => {
-				self.retracted.remove(&announce.prefix);
-				return;
-			}
+		let AnnounceEvent::End(update) = event else {
+			return;
 		};
 		let Some(now) = now.filter(|_| !self.update_hold.is_zero()) else {
 			return;
 		};
-		// An anonymous route names no publisher to tie a later stale path to.
-		let Some(&publisher) = update.route.hops.iter().next().filter(|hop| **hop != Hop::UNKNOWN) else {
-			return;
-		};
+		// An anonymous route names no publisher, so its quarantine holds nothing.
+		let publisher = update
+			.route
+			.hops
+			.iter()
+			.next()
+			.copied()
+			.filter(|hop| *hop != Hop::UNKNOWN);
 		// The reading may be stale; [`Self::settle`] starts the quarantine on a fresh one.
 		let quarantine = Quarantine {
 			held: Held::Anchoring(now),
@@ -5223,8 +5227,12 @@ impl AnnounceConsumer {
 			epoch: update.route.epoch.clone(),
 			rank: (update.route.cost, update.route.hops.len()),
 		};
-		self.retracted.insert(update.prefix.clone(), quarantine);
-		self.anchoring.push_back((now, update.prefix.clone()));
+		let replaced = self.retracted.insert(update.prefix.clone(), quarantine);
+		// A prefix retracted again at the same reading is already queued, so churn
+		// between clock readings can't grow the queue past one entry per prefix.
+		if !replaced.is_some_and(|q| q.held == Held::Anchoring(now)) {
+			self.anchoring.push_back((now, update.prefix.clone()));
+		}
 	}
 
 	/// Start the quarantines of retractions the clock has since moved past, and
@@ -8085,13 +8093,24 @@ mod tests {
 		let _other = peer.dynamic("anonymous", route(&[0, 3, 4], 4)).unwrap();
 		announced.assert_next_active("anonymous");
 
-		// A quarantine nothing announces again is forgotten once it ends: the cursor
-		// wakes to anchor it, then again to drop it.
+		// Retract and announce cycles at one clock reading queue the prefix once,
+		// whether or not the route names its publisher.
+		let queued = announced.anchoring.len();
+		for chain in [[9, 2], [0, 2], [9, 2], [0, 2]] {
+			let churn = peer.dynamic("churn", route(&chain, 2)).unwrap();
+			announced.assert_next_active("churn");
+			drop(churn);
+			announced.assert_next_ended("churn");
+		}
+		assert_eq!(announced.anchoring.len(), queued + 1);
+
+		// A quarantine is forgotten once it ends: the cursor wakes to anchor it,
+		// then again to drop it.
 		let gone = peer.dynamic("gone", route(&[9, 2], 2)).unwrap();
 		announced.assert_next_active("gone");
 		drop(gone);
 		announced.assert_next_ended("gone");
-		assert_eq!(announced.retracted.len(), 1);
+		assert!(!announced.retracted.is_empty());
 		for _ in 0..2 {
 			announced.assert_next_wait();
 			moq_net_sim::sleep(RETRACT_QUARANTINE).await;

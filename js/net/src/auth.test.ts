@@ -61,6 +61,46 @@ async function connect(opts: { publish?: OriginProducer; serverPublish?: OriginP
 
 // Every case runs on moq-lite-07-wip and on moq-transport with the MoQ Auth extension.
 describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
+	test("pending application tokens have a per-session bound", async () => {
+		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
+		try {
+			const requests = server.auth.requests();
+			const setup = await requests.next();
+			if (!setup) throw new Error("setup token missing");
+			setup.accept(grant(["a"], []));
+			let refused!: () => void;
+			const overflow = new Promise<void>((resolve) => {
+				refused = resolve;
+			});
+			const pending = Array.from({ length: 129 }, (_, index) =>
+				client.auth.add(`token-${index}`).then(
+					(token) => ({ token }),
+					(err: unknown) => {
+						refused();
+						return { err };
+					},
+				),
+			);
+			await withTimeout(overflow, 1000, "pending token bound did not refuse overflow");
+			for (let index = 0; index < 128; index++) {
+				const request = await requests.next();
+				if (!request) throw new Error("pending token missing");
+				request.accept(grant(["a"], []));
+			}
+			const results = await Promise.all(pending);
+			const errors = results.flatMap((result) => ("err" in result ? [result.err] : []));
+			expect(errors).toHaveLength(1);
+			// moq-transport's AUTH_ERROR registry only distinguishes unsupported from unauthorized.
+			expect((errors[0] as SessionError).code).toBe(
+				protocol === Lite.ALPN_07_WIP ? SessionCode.TooManyRequests : SessionCode.Unauthorized,
+			);
+			for (const result of results) if ("token" in result) result.token.close();
+		} finally {
+			client.abort();
+			server.abort();
+		}
+	});
+
 	test("both sides learn their default grant", async () => {
 		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
 
@@ -444,6 +484,33 @@ test("a revoked grant resets its subscriptions with UNAUTHORIZED", async () => {
 		resets.mockRestore();
 		downSub.close();
 		upSub.close();
+		client.abort();
+		server.abort();
+	}
+});
+
+test("withdrawn queued tokens are pruned before the next application decision", async () => {
+	const { client, server, transport } = await connect({ publish: new OriginProducer(), protocol: Lite.ALPN_07_WIP });
+	try {
+		const requests = server.auth.requests();
+		const setup = await requests.next();
+		if (!setup) throw new Error("setup token missing");
+		setup.accept(grant(["a"], []));
+		const wire = new LiteAuthWire(transport, Lite.Version.DRAFT_07);
+		for (let index = 0; index < 128; index++) {
+			const stream = await wire.present(new TextEncoder().encode("withdrawn"));
+			await stream.writer.close();
+			await stream.reader.closed;
+		}
+		const live = client.auth.add("live");
+		live.catch(() => void 0);
+		const request = await requests.next();
+		if (!request) throw new Error("live token missing");
+		expect(new TextDecoder().decode(request.token)).toBe("live");
+		request.accept(grant(["a"], []));
+		(await live).close();
+		await request.closed;
+	} finally {
 		client.abort();
 		server.abort();
 	}

@@ -1,5 +1,8 @@
 //! The reconnect loop around a session, and the [`Monitor`] that observes it.
 
+pub mod auth;
+pub use auth::Auth;
+
 use std::task::{Poll, ready};
 use std::time::Duration;
 
@@ -26,21 +29,13 @@ const CONNECT_ATTEMPT: Duration = Duration::from_secs(5);
 /// wait. Only an attempt with a later candidate to fall back on is worth
 /// bounding: cutting the last one short just turns a slow connect into a failed
 /// one, on every reconnect cycle.
+///
+/// The same goes for the retry window from [`Backoff::timeout`]: it decides
+/// whether a new walk starts, not how long one may take, so a walk under way
+/// tries every candidate and a handshake slower than the window still gets
+/// [`crate::connect::Config::timeout`](crate::connect::Config::timeout).
 fn attempt_timeout(index: usize, total: usize) -> Option<Duration> {
 	(index + 1 < total).then_some(CONNECT_ATTEMPT)
-}
-
-/// The retry window as a deadline for the address walk, or `None` to leave each
-/// attempt to the client's own connect timeout.
-///
-/// Only when reconnecting. `Backoff::timeout` is how long to keep *retrying*, so
-/// applying it to a one-shot dial would cut short the single attempt there will
-/// ever be: a handshake slower than the retry window but well inside
-/// [`crate::connect::Config::timeout`](crate::connect::Config::timeout) would fail for a
-/// reason that does not apply. That deadline is the one governing a one-shot
-/// dial, and it already does.
-fn retry_budget(reconnect: bool, retry_start: tokio::time::Instant, timeout: Duration) -> Option<tokio::time::Instant> {
-	(reconnect && !timeout.is_zero()).then(|| retry_start + timeout)
 }
 
 /// Whether a failed candidate is the peer's answer for every candidate, ending the walk.
@@ -54,44 +49,13 @@ fn settles_walk(err: &Error) -> bool {
 			.is_some_and(|status| !crate::error::status_retryable(status))
 }
 
-/// When the attempt at candidate `index` of `total` must be given up, or `None`
-/// to let it run.
-///
-/// Two bounds, whichever comes first. [`attempt_timeout`] keeps one slow
-/// candidate from eating the others' turn, and `budget` is the retry window from
-/// [`Backoff::timeout`], which the walk has to respect too: bounding only the
-/// non-final attempts left the last one to run to the client's connect timeout,
-/// so a handful of black-holed addresses could blow through a give-up budget
-/// several times over before reporting anything.
-fn attempt_deadline(
-	index: usize,
-	total: usize,
-	now: tokio::time::Instant,
-	budget: Option<tokio::time::Instant>,
-) -> Option<tokio::time::Instant> {
-	// An equal share of what's left, not all of it. Handing each candidate the
-	// whole remaining window lets the first couple spend it between them and
-	// strand a reachable address further down the list, which is the opposite of
-	// what walking the list is for. Recomputed per attempt, so one that fails fast
-	// leaves more for the rest.
-	let share = budget.map(|budget| {
-		let remaining = total - index;
-		now + budget.saturating_duration_since(now) / remaining as u32
-	});
-	let bound = attempt_timeout(index, total).map(|limit| now + limit);
-
-	match (bound, share) {
-		(Some(bound), Some(share)) => Some(bound.min(share)),
-		(Some(only), None) | (None, Some(only)) => Some(only),
-		(None, None) => None,
-	}
-}
-
 /// Exponential backoff configuration for reconnection attempts.
 ///
 /// The delays carry jitter, so a fleet
 /// knocked offline together does not reconnect in lockstep. The timeout bounds every failure;
-/// a settled rejection or invalid local configuration stops retrying.
+/// a settled rejection or invalid local configuration stops retrying. A GOAWAY naming no new URI
+/// is no failure: a restarting peer sends one to each session until it goes, and each of those
+/// serves, so it restarts the timeout instead.
 #[derive(Clone, Debug, usage::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
@@ -145,19 +109,32 @@ pub struct Backoff {
 
 	/// Maximum time to spend retrying before giving up. Defaults to 10s.
 	///
+	/// No new walk of the peer's addresses starts once it has passed, but one under way finishes:
+	/// each candidate but the last gets up to 5s, and the last runs to
+	/// [`crate::connect::Config::timeout`](crate::connect::Config::timeout), so a handshake
+	/// slower than this still lands. Giving up can therefore take up to one whole walk longer.
+	///
 	/// Resets after a stable connection (one that outlives the initial backoff), so a flapping
-	/// session that reconnects then immediately drops still counts toward the timeout. Set to 0 for
-	/// unlimited retries.
+	/// session that reconnects then immediately drops still counts toward the timeout. Set to
+	/// `Some(Duration::ZERO)` for unlimited retries. `None` takes the default. When this config was
+	/// parsed from the command line, a `--backoff-timeout` given there wins over this field.
+	///
+	/// An `Option` because zero is a real setting: a command-line parse leaves this field at its
+	/// type's default, and only `None` tells "unset" apart from "retry forever".
 	#[usage(skip)]
-	#[serde(with = "crate::cli::duration::serde_duration")]
-	pub timeout: Duration,
+	#[serde(
+		default,
+		with = "crate::cli::duration::serde_duration::option",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub timeout: Option<Duration>,
 
+	// No parser default: the parser stores one as if it were given, and it would then beat a
+	// window set in code. The default lives in [`Backoff::window`] instead.
 	#[usage(
 		name = "backoff-timeout",
 		long,
 		env = "MOQ_BACKOFF_TIMEOUT",
-		default_value_t = CliDuration::fallback(DEFAULT_TIMEOUT),
-		default = "10s",
 		setting = "connect.backoff.timeout"
 	)]
 	#[serde(default, rename = "__cli_timeout", skip_serializing_if = "Option::is_none")]
@@ -172,9 +149,20 @@ impl Default for Backoff {
 			multiplier: DEFAULT_MULTIPLIER,
 			max: DEFAULT_MAX,
 			max_arg: None,
-			timeout: DEFAULT_TIMEOUT,
+			timeout: Some(DEFAULT_TIMEOUT),
 			timeout_arg: None,
 		}
+	}
+}
+
+impl Backoff {
+	/// The retry window in effect, where zero means unlimited: the flag, then the typed field, then
+	/// the default.
+	fn window(&self) -> Duration {
+		self.timeout_arg
+			.map(Into::into)
+			.or(self.timeout)
+			.unwrap_or(DEFAULT_TIMEOUT)
 	}
 }
 
@@ -402,6 +390,7 @@ const MIN_BACKOFF: Duration = Duration::from_millis(50);
 /// grows it, and `max` caps it, so a zero anywhere collapses the whole schedule.
 /// Resolving them once, here, keeps that from having to be re-argued at each of
 /// the three places the loop reaches for them.
+#[derive(Clone, Copy)]
 struct Pacing {
 	/// The first delay, and the bar a session must clear to count as healthy. At
 	/// zero every session looks healthy, which resets the give-up window forever.
@@ -693,6 +682,8 @@ pub struct Snapshot {
 pub struct Connection {
 	task: std::sync::Arc<Task>,
 	state: kio::Consumer<State>,
+	/// The reconnect pacing, which retained tokens reuse to retry a transient refusal.
+	pacing: Pacing,
 	/// Persistent send-bitrate estimate, fed by the loop from each live session.
 	send_bandwidth: BandwidthConsumer,
 	/// Persistent recv-bitrate estimate, fed by the loop from each live session.
@@ -723,6 +714,7 @@ impl Connection {
 	pub(crate) fn new(client: Client, addrs: Addrs) -> Self {
 		let producer = kio::Producer::<State>::default();
 		let state = producer.consume();
+		let pacing = Pacing::new(&client.backoff);
 
 		// The loop feeds these across every reconnect, so a consumer's handle survives session churn
 		// (unlike a session's own bandwidth consumer, which dies with the session).
@@ -759,6 +751,7 @@ impl Connection {
 				closed,
 			}),
 			state,
+			pacing,
 			send_bandwidth,
 			recv_bandwidth,
 			last_reported: None,
@@ -847,7 +840,7 @@ impl Connection {
 		let backoff = client.backoff.clone();
 		let goaway = client.goaway.resolve();
 		let pacing = Pacing::new(&backoff);
-		let timeout = CliDuration::resolve(backoff.timeout_arg, backoff.timeout);
+		let timeout = backoff.window();
 		let initial = pacing.initial;
 		let mut retry = Retry::new(initial);
 		// Sticky across migrations: a redirect is an assignment, not a detour, so a
@@ -862,9 +855,7 @@ impl Connection {
 				return Err(timeout_error(timeout, retry.last_error.as_ref()));
 			}
 
-			let budget = retry_budget(client.reconnect, retry.start, timeout);
-
-			match Self::dial_any(shared, &client, &addrs, &mut draining, budget).await {
+			match Self::dial_any(shared, &client, &addrs, &mut draining).await {
 				Ok((addr, dialed)) => {
 					let url = addr.url().clone();
 					tracing::info!(peer = %Endpoint(&url), transport = %dialed.transport, "connected");
@@ -990,19 +981,33 @@ impl Connection {
 							continue;
 						}
 
-						// Redirected almost immediately. Still follow it, but score it as a
-						// failed attempt so two peers bouncing us between them escalate
-						// through backoff and eventually give up. The old session serves
-						// across the sleep, so the redirect loop costs time, not data.
-						retry.last_error = Some(Error::Reconnect("peer redirected immediately".to_string()));
-						let Some(wait) = retry_wait(retry.delay, retry.start, timeout) else {
+						// Drained almost immediately. The backoff still escalates, so the redials
+						// cannot hammer the peer, and the old session serves across the sleep.
+						//
+						// An empty URI is "reconnect to me": the peer is restarting and drains
+						// each new session until it goes, which is no failure, since every one
+						// serves. A named URI is a redirect, scored as a failed attempt so two
+						// peers bouncing us between them eventually give up.
+						let restarting = msg.uri().is_empty();
+						if !restarting {
+							retry.last_error = Some(Error::Reconnect("peer redirected immediately".to_string()));
+						}
+						// A restart's pacing is not capped by the window: a delay longer than the
+						// window would otherwise spend it all and end the loop without a redial.
+						let window = if restarting { Duration::ZERO } else { timeout };
+						let Some(wait) = retry_wait(retry.delay, retry.start, window) else {
 							return Err(timeout_error(timeout, retry.last_error.as_ref()));
 						};
-						tracing::warn!(peer = %Endpoint(&url), ?wait, "peer redirected immediately; retrying after backoff");
+						tracing::warn!(peer = %Endpoint(&url), ?wait, "peer drained the session immediately; retrying after backoff");
 						// Keep the handover bounded across the sleep: nothing else polls the
 						// predecessor while the loop is between connections.
 						sleep_draining(wait, &mut draining, shared).await;
 						retry.delay = pacing.next(retry.delay);
+						if restarting {
+							// After the sleep, so the window counts only the time after the
+							// peer stops answering.
+							retry.start = tokio::time::Instant::now();
+						}
 						continue;
 					}
 
@@ -1101,7 +1106,6 @@ impl Connection {
 		client: &Client,
 		addrs: &Addrs,
 		draining: &mut Option<Draining>,
-		budget: Option<tokio::time::Instant>,
 	) -> crate::Result<(crate::connect::Addr, crate::client::Dialed)> {
 		let candidates = addrs.as_slice();
 		let mut last = None;
@@ -1109,12 +1113,6 @@ impl Connection {
 
 		for (index, addr) in candidates.iter().enumerate() {
 			let url = addr.url();
-			// The retry window can run out mid-walk. Stop rather than starting an
-			// attempt with no time to finish; the caller reports the budget error.
-			if budget.is_some_and(|budget| tokio::time::Instant::now() >= budget) {
-				break;
-			}
-
 			tracing::info!(peer = %Endpoint(url), "connecting");
 
 			let mut dial = std::pin::pin!(client.dial(addr.clone()));
@@ -1125,10 +1123,9 @@ impl Connection {
 				waiter.poll_future(dial.as_mut())
 			});
 
-			let deadline = attempt_deadline(index, candidates.len(), tokio::time::Instant::now(), budget);
-			let dialed = match deadline {
+			let dialed = match attempt_timeout(index, candidates.len()) {
 				None => dialed.await,
-				Some(deadline) => match tokio::time::timeout_at(deadline, dialed).await {
+				Some(limit) => match tokio::time::timeout(limit, dialed).await {
 					Ok(dialed) => dialed,
 					Err(_) => Err(Error::Reconnect(format!("timed out connecting to {}", Endpoint(url)))),
 				},
@@ -1152,12 +1149,8 @@ impl Connection {
 			}
 		}
 
-		// `Addrs` is never empty, so the only way to get here without a failure is
-		// the budget running out before the first attempt started.
 		// One unusable candidate must not turn another candidate's transient failure terminal.
-		Err(transient
-			.or(last)
-			.unwrap_or_else(|| Error::Reconnect("retry window elapsed before dialing".to_string())))
+		Err(transient.or(last).expect("Addrs is never empty"))
 	}
 
 	/// Poll until a session is established (the first connect, or the current one).
@@ -1301,6 +1294,14 @@ impl Connection {
 	/// Wait until the connection loop stops.
 	pub async fn closed(&self) -> crate::Result<()> {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
+	}
+
+	/// Present tokens that survive session replacement and observe the live grant union.
+	pub fn auth(&self) -> Auth {
+		Auth {
+			connection: self.state.clone(),
+			pacing: self.pacing,
+		}
 	}
 
 	/// Observe the connection's statistics and presence across reconnects.
@@ -1655,13 +1656,13 @@ mod tests {
 		parsed.backoff.initial = Duration::from_secs(7);
 		parsed.backoff.multiplier = 5;
 		parsed.backoff.max = Duration::from_secs(11);
-		parsed.backoff.timeout = Duration::ZERO;
+		parsed.backoff.timeout = Some(Duration::ZERO);
 		parsed.update_from(&[]);
 
 		assert_eq!(parsed.backoff.initial, Duration::from_secs(7));
 		assert_eq!(parsed.backoff.multiplier, 5);
 		assert_eq!(parsed.backoff.max, Duration::from_secs(11));
-		assert_eq!(parsed.backoff.timeout, Duration::ZERO, "0 means retry forever");
+		assert_eq!(parsed.backoff.window(), Duration::ZERO, "0 means retry forever");
 
 		// With no flags, the parser defaults resolve to the typed defaults.
 		let parsed = Wrapper::parse_from(&[]).unwrap();
@@ -1669,15 +1670,53 @@ mod tests {
 		let pacing = Pacing::new(&parsed.backoff);
 		assert_eq!(pacing.initial, DEFAULT_INITIAL);
 		assert_eq!(pacing.max, DEFAULT_MAX);
-		assert_eq!(
-			CliDuration::resolve(parsed.backoff.timeout_arg, parsed.backoff.timeout),
-			DEFAULT_TIMEOUT
-		);
+		assert_eq!(parsed.backoff.window(), DEFAULT_TIMEOUT);
 
 		// And a flag still lands where the merge can see it.
 		let parsed =
 			Wrapper::parse_from(&[std::ffi::OsStr::new("--backoff-initial"), std::ffi::OsStr::new("3s")]).unwrap();
 		assert_eq!(Pacing::new(&parsed.backoff).initial, Duration::from_secs(3));
+	}
+
+	/// A window set in code wins on a config the command line built, including zero.
+	///
+	/// The parser stored its 10s default exactly as if `--backoff-timeout 10s` had been given, so
+	/// it beat the typed field, and a zero there was indistinguishable from the field left unset.
+	#[test]
+	fn a_timeout_set_in_code_beats_the_parser_default() {
+		#[derive(usage::Cli)]
+		#[usage(unknown_flags = "error", args_override_self = false)]
+		#[usage(settings)]
+		struct Wrapper {
+			#[usage(flatten)]
+			backoff: Backoff,
+		}
+
+		let mut parsed = Wrapper::parse_from(&[]).unwrap().backoff;
+		assert_eq!(parsed.window(), DEFAULT_TIMEOUT);
+		parsed.timeout = Some(Duration::ZERO);
+		assert_eq!(parsed.window(), Duration::ZERO, "a parsed config");
+
+		let merged = |backoff: &Backoff| -> Backoff { toml::Value::try_from(backoff).unwrap().try_into().unwrap() };
+		let mut config = merged(&Wrapper::parse_from(&[]).unwrap().backoff);
+		assert_eq!(config.window(), DEFAULT_TIMEOUT, "the default survives the round-trip");
+		config.timeout = Some(Duration::ZERO);
+		assert_eq!(config.window(), Duration::ZERO, "a merged config");
+		config.timeout = Some(Duration::from_secs(3));
+		assert_eq!(config.window(), Duration::from_secs(3), "a merged config, nonzero");
+
+		// An explicit flag still wins, through the round-trip too.
+		let flag = [std::ffi::OsStr::new("--backoff-timeout"), std::ffi::OsStr::new("0s")];
+		let mut config = merged(&Wrapper::parse_from(&flag).unwrap().backoff);
+		config.timeout = Some(Duration::from_secs(3));
+		assert_eq!(config.window(), Duration::ZERO, "the flag beats the field");
+
+		// A config built in code was never affected.
+		let config = Backoff {
+			timeout: Some(Duration::ZERO),
+			..Default::default()
+		};
+		assert_eq!(config.window(), Duration::ZERO);
 	}
 
 	/// GOAWAY typed defaults remain overrideable by a standing TOML layer.
@@ -2087,7 +2126,7 @@ mod tests {
 		assert_eq!(backoff.initial, Duration::from_secs(1));
 		assert_eq!(backoff.multiplier, 2);
 		assert_eq!(backoff.max, Duration::from_secs(5));
-		assert_eq!(backoff.timeout, Duration::from_secs(10));
+		assert_eq!(backoff.timeout, Some(Duration::from_secs(10)));
 	}
 
 	#[test]
@@ -2206,7 +2245,7 @@ mod tests {
 
 		let (connected, _session) = tokio::time::timeout(
 			WALK_TIMEOUT,
-			Connection::dial_any(&shared, &client, &addrs, &mut draining, None),
+			Connection::dial_any(&shared, &client, &addrs, &mut draining),
 		)
 		.await
 		.expect("the walk must not hang")
@@ -2228,7 +2267,7 @@ mod tests {
 
 		let result = tokio::time::timeout(
 			WALK_TIMEOUT,
-			Connection::dial_any(&shared, &client, &addrs, &mut draining, None),
+			Connection::dial_any(&shared, &client, &addrs, &mut draining),
 		)
 		.await
 		.expect("the walk must not hang");
@@ -2256,7 +2295,7 @@ mod tests {
 		let shared = shared();
 		let mut draining = None;
 		// `Session` isn't `Debug`, so unwrap the failure by hand.
-		let Err(err) = Connection::dial_any(&shared, &client, &addrs, &mut draining, None).await else {
+		let Err(err) = Connection::dial_any(&shared, &client, &addrs, &mut draining).await else {
 			panic!("a dead address must fail");
 		};
 
@@ -2272,7 +2311,7 @@ mod tests {
 	async fn an_unsupported_scheme_ends_unlimited_reconnects() {
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
-		config.backoff.timeout = Duration::ZERO;
+		config.backoff.timeout = Some(Duration::ZERO);
 		let client = config.init(Default::default()).expect("build client");
 		let started = tokio::time::Instant::now();
 		let connection = client.connect(url("moqz://localhost/"));
@@ -2290,7 +2329,7 @@ mod tests {
 	async fn an_invalid_tls_server_name_ends_unlimited_reconnects() {
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
-		config.backoff.timeout = Duration::ZERO;
+		config.backoff.timeout = Some(Duration::ZERO);
 		let client = config.init(Default::default()).expect("build client");
 		for target in [
 			"https://a!b:1/",
@@ -2321,7 +2360,7 @@ mod tests {
 		let mut client = client();
 		client.backoff.initial = Duration::from_millis(50);
 		client.backoff.max = Duration::from_millis(50);
-		client.backoff.timeout = Duration::from_millis(200);
+		client.backoff.timeout = Some(Duration::from_millis(200));
 		let started = tokio::time::Instant::now();
 		let connection = client.connect(target);
 		let err = connection.closed().await.expect_err("refused socket connected");
@@ -2366,69 +2405,6 @@ mod tests {
 		assert!(!settles_walk(&Error::Io(std::sync::Arc::new(
 			std::io::ErrorKind::ConnectionRefused.into()
 		))));
-	}
-
-	/// The retry window bounds the walk only when there are retries.
-	///
-	/// It is a budget for *retrying*, so spending it on the single attempt a
-	/// one-shot dial gets would fail a handshake that is merely slower than the
-	/// retry window while well inside the connect timeout that actually governs it.
-	#[test]
-	fn only_a_reconnecting_dial_spends_the_retry_window() {
-		let start = tokio::time::Instant::now();
-		let timeout = Duration::from_secs(10);
-
-		assert_eq!(retry_budget(true, start, timeout), Some(start + timeout));
-		assert_eq!(
-			retry_budget(false, start, timeout),
-			None,
-			"a one-shot dial is bounded by the connect timeout, not the retry window"
-		);
-		assert_eq!(
-			retry_budget(true, start, Duration::ZERO),
-			None,
-			"zero means retry forever, so nothing bounds the walk"
-		);
-	}
-
-	/// Whichever of the two bounds comes first wins, and the retry window applies
-	/// to every candidate including the last.
-	#[test]
-	fn the_retry_window_bounds_the_walk_too() {
-		let now = tokio::time::Instant::now();
-
-		// No budget: only the fixed per-candidate bound applies, and the last
-		// candidate runs free.
-		assert_eq!(attempt_deadline(0, 2, now, None), Some(now + CONNECT_ATTEMPT));
-		assert_eq!(attempt_deadline(1, 2, now, None), None);
-
-		// A tight budget is split, not spent by whoever asks first. Two seconds
-		// across two candidates is a second each, so the second one still gets a
-		// turn; handing the first the whole window would strand it.
-		let tight = now + Duration::from_secs(2);
-		assert_eq!(
-			attempt_deadline(0, 2, now, Some(tight)),
-			Some(now + Duration::from_secs(1))
-		);
-		// The last candidate gets what is actually left, which here is all of it
-		// because nothing has been spent yet in this synthetic call.
-		assert_eq!(attempt_deadline(1, 2, now, Some(tight)), Some(tight));
-
-		// The share is what a black-holed pair used to exhaust: with the default
-		// 10s window and the 5s bound, two candidates ate it and a reachable third
-		// was never dialed. Now each gets a third.
-		let default_window = now + Duration::from_secs(10);
-		assert_eq!(
-			attempt_deadline(0, 3, now, Some(default_window)),
-			Some(now + Duration::from_secs(10) / 3),
-			"a reachable third candidate must still get a turn"
-		);
-
-		// A budget with room to spare leaves the per-candidate bound in charge, so
-		// one slow address still cannot eat the others' turn.
-		let loose = now + Duration::from_secs(60);
-		assert_eq!(attempt_deadline(0, 2, now, Some(loose)), Some(now + CONNECT_ATTEMPT));
-		assert_eq!(attempt_deadline(1, 2, now, Some(loose)), Some(loose));
 	}
 
 	/// Only an attempt with somewhere to fall back on gets the fixed bound.

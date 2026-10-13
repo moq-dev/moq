@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { ProtocolViolation } from "../error.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import {
@@ -267,3 +268,47 @@ test("a requested range is empty when its bounds meet anywhere", () => {
 	expect(emptyRange({ startGroup: 5, endGroup: 6 })).toBe(false);
 	expect(emptyRange({ startGroup: 5 })).toBe(false);
 });
+
+// Lite-07 carries `Group Order` right after the priority, on SUBSCRIBE and SUBSCRIBE_UPDATE
+// alike, and refuses a value it does not define.
+test.each(["ascending", "descending"] as const)("lite-07 round-trips a %s group order", async (order) => {
+	const version = Version.DRAFT_07;
+	const subscribe = new Subscribe({ id: 1n, broadcast: Path.from("room"), track: "video", priority: 3, order });
+	const got = await Subscribe.decode(
+		new Reader(undefined, await encodeMessage(version, subscribe), version),
+		version,
+	);
+	expect(got.order).toBe(order);
+
+	const update = await encodeMessage(version, new SubscribeUpdate({ priority: 3, order, maxDelay: 250 }));
+	// The length prefix, the priority, then the order.
+	expect(update[1]).toBe(3);
+	expect(update[2]).toBe(order === "ascending" ? 1 : 0);
+	const decoded = await SubscribeUpdate.decode(new Reader(undefined, update, version), version);
+	expect(decoded.order).toBe(order);
+
+	const invalid = new Uint8Array(update);
+	invalid[2] = 2;
+	await expect(SubscribeUpdate.decode(new Reader(undefined, invalid, version), version)).rejects.toThrow(
+		ProtocolViolation,
+	);
+});
+
+// No earlier wire has `Group Order`, so an ascending subscription falls back to descending,
+// byte-identical to one that never asked.
+test.each([Version.DRAFT_03, Version.DRAFT_05, Version.DRAFT_06])(
+	"version %d falls back to a descending group order",
+	async (version) => {
+		const props = { id: 1n, broadcast: Path.from("room"), track: "video", priority: 3, maxDelay: 250 };
+		const descending = await encodeMessage(version, new Subscribe(props));
+		const ascending = await encodeMessage(version, new Subscribe({ ...props, order: "ascending" }));
+		expect(ascending).toEqual(descending);
+		const got = await Subscribe.decode(new Reader(undefined, ascending, version), version);
+		expect(got.order).toBe("descending");
+
+		const update = await encodeMessage(version, new SubscribeUpdate({ priority: 3, order: "ascending" }));
+		expect(update).toEqual(await encodeMessage(version, new SubscribeUpdate({ priority: 3 })));
+		const decoded = await SubscribeUpdate.decode(new Reader(undefined, update, version), version);
+		expect(decoded.order).toBe("descending");
+	},
+);

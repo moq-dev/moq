@@ -23,7 +23,7 @@ it is the relay's half of
 [Request tokens](/quest/m1/auth/request-token.md).
 
 - A per-request call on `moq_auth::Client`, not the `Client::attach` that
-  [Relay tokens](/quest/m1/auth/relay-refresh.md) builds. `attach` connects
+  session tokens use. `attach` connects
   with the connection's id, and the auth server treats that as one more grant
   on the session that never POSTs `end`, so a request token would widen the
   whole connection for its life. The per-request call carries the token in
@@ -44,5 +44,3 @@ Public API: additive on `moq_auth::Client`. Wire: none.
 
 - [Request tokens](/quest/m1/auth/request-token.md) - the per-request grant
   this lease backs
-- [Relay tokens](/quest/m1/auth/relay-refresh.md) - supplies the lease
-  revalidation this reuses

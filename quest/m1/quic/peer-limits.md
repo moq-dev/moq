@@ -18,10 +18,11 @@ setters provide this seam; the transport integration waits for
 [the fork switch](/quest/m1/quic/fork/README.md), so moq-tokio and moq-uring
 run on `moq-quic` instead of `moq-noq`.
 
-Decided 2026-10-08: [relay session limits](/quest/m1/relay-session-limits.md)
-lands first and introduces the relay's peer config surface (classifying a
-session as a cluster peer, and a peer table); this quest extends that
-surface with the QUIC values rather than adding its own.
+Decided 2026-10-08: the relay's peer config surface already exists. A
+session is a cluster peer when its admitted grant is marked `peer`, and the
+`[peer]` table (beside `[session]` for ordinary clients) holds its request
+caps; this quest extends that table with the QUIC values rather than adding
+its own.
 
 - moq-net's transport trait gains `set_limits(Limits)` on the session,
   `Limits` carrying the three values, implemented by the moq-tokio and
@@ -47,6 +48,5 @@ viewer session does not; the io_uring path applies the same values; a
 
 ## Required
 
-- [Relay session limits](/quest/m1/relay-session-limits.md) - introduces the peer classification and config table this extends
 - [Hard fork](/quest/m1/quic/fork/README.md) - moq-tokio and moq-uring run on `moq-quic`, whose setters this calls
 

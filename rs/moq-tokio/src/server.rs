@@ -1619,6 +1619,12 @@ impl Request {
 		self
 	}
 
+	/// Set request caps after authorizing the peer and before answering SETUP.
+	pub fn with_limits(mut self, limits: moq_net::session::Limits) -> Self {
+		self.kind = request_map!(self.kind, request => request.with_limits(limits));
+		self
+	}
+
 	/// Accept the session, starting the MoQ session loops.
 	///
 	/// Bounded by what remains of the handshake deadline: answering SETUP can wait
@@ -1725,6 +1731,11 @@ impl Request {
 	/// the client's intended direction.
 	pub fn role(&self) -> Option<moq_net::Role> {
 		request_ref!(self, r => r.role())
+	}
+
+	/// Answer the peer's tokens before accepting and starting its protocol driver.
+	pub fn auth(&self) -> moq_net::auth::Handle {
+		request_ref!(self, r => r.auth())
 	}
 
 	/// The Hop ID the peer declared in its SETUP (moq-lite-05+).

@@ -79,15 +79,11 @@ mod metadata;
 mod rml;
 mod server;
 
-/// Default FLV muxer latency: how long a stalled group is held before skipping to
-/// a newer one (the moq-level frame-drop latency).
+/// Default FLV release delay and stalled-group budget.
 ///
-/// RTMP is unpaced (tags go out as fast as the socket accepts them), so this
-/// bounds buffering rather than the wire rate. Zero would drop stale groups the
-/// instant a newer one arrives, which is too aggressive for RTMP's typical jitter,
-/// so the default holds a couple of seconds. Override per request with
-/// [`Play::with_max_delay`] / [`Client::with_export_max_delay`] or via
-/// [`Config::export_max_delay`].
+/// Frames are released in decode order after this delay; late video resumes at
+/// its next keyframe. Override per request with [`Play::with_max_delay`] /
+/// [`Client::with_export_max_delay`] or via [`Config::export_max_delay`].
 pub const DEFAULT_MAX_DELAY: Duration = Duration::from_secs(2);
 
 pub use dial::Client;

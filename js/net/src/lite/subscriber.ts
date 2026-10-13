@@ -22,6 +22,7 @@ import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { groupBounds, hiddenBelow, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
+import { sendOrder } from "../priority.ts";
 import { type OpenOptions, type Reader, Stream } from "../stream.ts";
 import { TAIL_GRACE_MS, Tail } from "../tail.ts";
 import * as Time from "../time.ts";
@@ -40,7 +41,6 @@ import {
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
 import { frameDecoder, type Group as GroupMessage, readFrames } from "./group.ts";
-import { sendOrder } from "./priority.ts";
 import { Probe } from "./probe.ts";
 import { ProbeLevel, type Setup } from "./setup.ts";
 import { StreamId } from "./stream.ts";
@@ -59,6 +59,7 @@ import {
 	hasAnnounceId,
 	hasAnnounceOk,
 	hasDatagrams,
+	hasOrder,
 	hasProbeRtt,
 	hasStreamCount,
 	resolvesStart,
@@ -676,6 +677,7 @@ export class Subscriber {
 			epoch,
 			track: request.name,
 			priority: subscription.priority ?? 0,
+			order: subscription.order,
 			maxDelay: subscription.maxDelay,
 			startGroup: subscription.groups?.start === undefined ? undefined : bounds.start,
 			endGroup: inclusiveGroupEnd(bounds.end),
@@ -1224,6 +1226,7 @@ export class Subscriber {
 		const stopped: Promise<null> = race([track.closed, stream.reader.closed]).then(() => null);
 		let lastSent: track.Subscription = {
 			priority: msg.priority,
+			order: msg.order,
 			maxDelay: Time.Milli(msg.maxDelay),
 			groups: {
 				start: msg.startGroup === undefined ? undefined : { included: msg.startGroup },
@@ -1255,6 +1258,7 @@ export class Subscriber {
 			// interpret SUBSCRIBE_UPDATE as a reset of ordered/maxDelay/etc.
 			const update = new SubscribeUpdate({
 				priority: current.priority ?? 0,
+				order: current.order,
 				maxDelay: current.maxDelay,
 				startGroup: current.groups?.start === undefined ? undefined : bounds.start,
 				endGroup: inclusiveGroupEnd(bounds.end),
@@ -1272,8 +1276,11 @@ export class Subscriber {
 		// joins at the publisher's start, and 0 is group 0. Lite-06 encodes both as 0.
 		const sameStart =
 			resolvesStart(this.version) || (a.groups?.start === undefined) === (b.groups?.start === undefined);
+		// A wire without `Group Order` cannot carry a change to it.
+		const sameOrder = !hasOrder(this.version) || (a.order ?? "descending") === (b.order ?? "descending");
 		return (
 			(a.priority ?? 0) === (b.priority ?? 0) &&
+			sameOrder &&
 			(a.maxDelay ?? 0) === (b.maxDelay ?? 0) &&
 			sameStart &&
 			ag.start === bg.start &&

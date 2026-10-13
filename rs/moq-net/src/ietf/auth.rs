@@ -433,8 +433,7 @@ impl Serve {
 		let mut default = None;
 		match self.handle.acceptor() {
 			Some(requests) => {
-				// A closed queue hands the request back, and dropping it refuses the token.
-				let _ = requests.try_push(Request::new(msg.token, issue.clone()));
+				requests.push(Request::new(msg.token, issue.clone()));
 			}
 			// Only the connection's own credential has a default answer; a token needs
 			// someone to verify it.

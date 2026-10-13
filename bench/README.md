@@ -48,6 +48,39 @@ Runtime comparison requires Linux because io\_uring and relay process metrics
 come from Linux interfaces. The default worker count is the number of online
 logical CPUs.
 
+Attribute relay worker lock waits to the stacks that blocked, as a share of
+each worker's CPU:
+
+```bash
+nix develop --command just bench-lock
+nix develop --command just bench-lock fanout-heavy "4 16"
+```
+
+This builds the relay with `[profile.profiling]` and frame pointers, then runs
+the workload on Tokio workers at each count twice: an unprofiled control, then
+a profiled run, so the throughput and CPU difference shows the profiler's
+overhead. During the profiled run's steady window, `perf record` samples every
+worker switch-out (the `context-switches` event with a period of 1) with a
+DWARF-unwound stack, plus each switch-in, so every off-CPU interval has an
+exact duration. glibc's `syscall` wrapper keeps no frame pointer, so
+frame-pointer unwinding alone would drop `Mutex::lock_contended`; without
+frame pointers in the relay, perf's DWARF unwinder stops at the first relay
+frame. Both are needed. An interval counts as a mutex wait only when the worker is blocked in
+the futex under std's `Mutex::lock_contended` (`kio::Lock`). Condvar,
+allocator and parking waits are counted separately, and spinning is excluded.
+`/proc` schedstat supplies CPU, so wait/CPU can exceed one.
+`lock/mutex.folded` holds the blocking stacks, weighted by microseconds
+waited, in flamegraph folded format.
+
+Linux only. A switch-out is sampled in kernel context, and 16 workers need a
+larger ring buffer than the unprivileged locked-memory limit allows, so the
+recipe refuses before building until `perf_event_paranoid` is -1. A recording
+that still drops events is refused rather than reported.
+
+```bash
+sudo sysctl -w kernel.perf_event_paranoid=-1
+```
+
 ## Workloads
 
 The `workloads/` TOML files contain only traffic shape. The harness supplies the
