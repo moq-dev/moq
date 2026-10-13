@@ -49,7 +49,7 @@ above them, since the epoch anchor requires it.
 ## Required
 
 - [Epoch correctness](/quest/m0/broadcast-epoch/README.md) - publisher identity, duplicate suppression, and catalog pinning gate the breaking cut
-- [Upgrade recovery](/quest/m0/upgrade-unroutable.md) - browser transport upgrades deliver Restart before retiring handles
+- [Upgrade recovery](/quest/m0/restart-followers.md) - first-party consumers follow the Restart an epochless transport upgrade delivers
 - [Release builds](/quest/m0/release-link.md) - package artifacts can be built
 - [qmux credit](/quest/m0/qmux-credit.md) - dropped/stopped streams return credit and close is delivered
 

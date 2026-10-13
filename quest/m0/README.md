@@ -55,9 +55,11 @@ Audio playout: the jitter target is default in both languages (#4162); the
 remain and the release only requires the production clock and playback contracts
 that depend on them.
 
-Interop on main (2026-10-13): the cross-client matrix fails with `unroutable`
-whenever WebSocket wins the connect race: since #5294, #4180's upgrade
-retires epochless handles before its held `Restart` reaches anyone. The
+Interop on main (2026-10-13): the cross-client matrix failed with `unroutable`
+whenever WebSocket won the connect race: since #5294, #4180's upgrade
+retired epochless handles before its held `Restart` reached anyone. Handles
+now retire only once it is deliverable; first-party consumers following it
+remain. The
 released wire-compat step aborts on planned breaks the last release made
 stale. Both stay in m0 (maintainer, 2026-10-13) and rank with TS duration
 fidelity: a red Interop hides real regressions.
@@ -79,7 +81,7 @@ have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
 
 - [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.5, then draft-20+ FETCH
 - [TS duration fidelity](/quest/m0/ts-duration-fidelity.md) - Interop's TS compliance captures the whole round-tripped stream again, fixing a regression that turns Interop red on main
-- [Upgrade restarts epochless broadcasts](/quest/m0/upgrade-unroutable.md) - a WebSocket-to-QUIC upgrade retires epochless handles only once their `Restart` is delivered, and first-party consumers follow it, fixing Interop's `unroutable` rounds
+- [Restart followers](/quest/m0/restart-followers.md) - first-party consumers follow an epochless `Restart`, such as a WebSocket-to-QUIC upgrade's, by resolving the path again
 - [Unset host clock](/quest/m0/wall-clock-omit.md) - a publisher whose wall clock reads before 2020 publishes without a catalog clock instead of panicking
 - [Panic isolation](/quest/m0/panic-isolation.md) - unwind, ignore lock poison, and supervise every task, so a panic closes only its connection or exits on a long-lived task
 - [Wire compat on main](/quest/m0/wire-compat-green.md) - the nightly released-wire step runs again: planned breaks re-measured against the new releases, and a released-API client for the released JS lanes
