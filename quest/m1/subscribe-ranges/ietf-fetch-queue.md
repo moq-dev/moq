@@ -3,10 +3,12 @@
 ## Goal
 
 Under congestion, a moq-transport FETCH or fill stream competes with the
-session's group streams through the same priority queue, ranked by its
-subscriber priority and the group it carries. Today the Rust moq-transport
-publisher gives these streams the raw subscriber priority as their send order,
-so they fall below every ranked group stream whatever their priority.
+session's group streams through the same priority queue: a fill as the group
+it fills, a standalone FETCH by its subscriber priority. Today the Rust
+moq-transport publisher gives these streams the raw subscriber priority as
+their send order, mixing an absolute priority with the queue's relative ranks
+(send order `255 - rank`), so how they compare with group streams is
+arbitrary.
 
 ## Plan
 
