@@ -67,8 +67,7 @@ timeline. The catalog's `clock` maps it to wall time. Stamp your own tracks
 
 `broadcast.net` is the underlying `Moq.Broadcast.Producer`, so an application
 can serve its own tracks alongside the media. It is recreated when the origin, name,
-`enabled`, or `maxAge` changes, or when a failed rendition track must be
-replaced, so acquire it from an effect and create each
+`enabled`, or `maxAge` changes, so acquire it from an effect and create each
 track once per `net`. A track name always means the same content, so a track
 re-created on the same `net` throws on an append that would reuse its sequences:
 
@@ -137,7 +136,11 @@ signal). An enabled camera or microphone prompts for permission on
 construction, and a screen source must be built inside the user gesture that
 authorizes it. Audio waits for the page's first click or keypress, since
 browsers suspend Web Audio until then. Every input and output is a signal from
-[`@moq/signals`](/lib/js/signals).
+[`@moq/signals`](/lib/js/signals). A failed encoder exposes the cause through
+`out.error` and disables only its rendition; siblings and the broadcast keep
+running. It does not retry on demand or bandwidth changes. Change its capture
+or encoder settings, or replace the encoder, to recover. Recovery keeps the
+catalog ID and uses a fresh `track` name.
 
 ## Strict CSP
 
