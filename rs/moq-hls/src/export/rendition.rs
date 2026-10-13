@@ -467,8 +467,8 @@ impl Rendition {
 	}
 
 	/// Whether this rendition is `reference`.
-	fn is(&self, reference: &(Kind, String)) -> bool {
-		reference.0 == self.kind && reference.1 == self.name
+	fn is(&self, reference: &segments::ReferenceKey) -> bool {
+		reference.0 == self.kind && reference.1 == self.name && reference.2 == self.track_name()
 	}
 
 	/// Remove source timeline records in `range` from this rendition's window.
@@ -909,7 +909,7 @@ impl Rendition {
 		let bytes = match muxer.init()? {
 			Some(bytes) => bytes,
 			None => {
-				let reference = (self.kind, self.name.clone());
+				let reference = (self.kind, self.name.clone(), self.track_name().to_string());
 				let latest = self.spans.latest_keyframe_group();
 				let Some(sequence) = latest.or_else(|| self.live.latest_keyframe_group(&reference)) else {
 					return Ok(None);
