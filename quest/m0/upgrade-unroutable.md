@@ -1,17 +1,16 @@
-# [M] A WebSocket-to-QUIC upgrade keeps a client's broadcasts usable
+# [L] A WebSocket-to-QUIC upgrade restarts epochless broadcasts explicitly
 
 ## Goal
 
-A client whose session comes up over the WebSocket fallback and then
-upgrades to QUIC keeps using the broadcasts it already resolved: a new track,
-TRACK_INFO, subscribe, or FETCH through a handle taken before the upgrade
-succeeds, on default (epochless, lite-06) sessions as well as lite-07. Interop's
-full matrix on `main` stops failing with `unroutable`, and its idle-out
-failures go away with it.
+When a client's session upgrades from the WebSocket fallback to QUIC, every
+epochless broadcast it had resolved gets an explicit `Restart` announce
+event, and every first-party consumer follows it by resolving the path
+again. Interop's full matrix on `main` stops failing with `unroutable`,
+and its idle-out failures go away with it.
 
-Non-goals: stitching two different publisher instances. A real restart
-(a new epoch, or an epochless route replaced by a different publisher) still
-retires old handles, as #5294 decided.
+Non-goals: carrying an epochless route's identity across the upgrade, and
+treating `Unroutable` as a cue to retry. Epoch routes are unchanged: a
+matching epoch already continues across the upgrade.
 
 ## Plan
 
@@ -46,60 +45,86 @@ handle resolved before the upgrade is then treated as retired, and its next
 request fails. Epochless is the default: lite-06 carries no epoch, and the
 browser and binding publishers don't set one.
 
-Reproduced while planning, on `main` at 079d7d8d4. Add an `audio` track
-to `websocket_upgrades_to_quic` and subscribe to it through `cam` after the
-upgrade: the subscribe ends with `Unroutable`. With
-`RequestValidity::check` forced to pass, the same subscribe succeeds. The
-local `just test interop` matrix passes, because QUIC wins there.
-
 Onset matches. The first Interop run with `unroutable` started at 20:09 UTC on
 2026-10-11. The last red runs before it failed for other reasons (`media`,
 `ts`). Runs before #5294 have no `unroutable`. It still passes sometimes,
-whenever QUIC wins the race.
+whenever QUIC wins the race. Users hit it too: `moq export` on a default
+connection exits whenever WebSocket wins briefly.
 
-Interop's PR trigger only fires on harness paths, so the nightly and
-harness-only PRs like #5381 are the only places this shows up. Users hit it
-too: `moq export` on a default connection exits whenever WebSocket wins
-briefly.
+Reproduced while planning, on `main` at 079d7d8d4, by extending
+`websocket_upgrades_to_quic` (`rs/moq-tokio/src/connection.rs`) with an
+epochless `audio` track that nothing subscribes until after the upgrade:
 
-Open decision (maintainer): what should a self-initiated upgrade mean for
-epochless routes? The
-[transport upgrade](/quest/m1/transport-upgrade/README.md) plan says
-epochless routes "signal Restart and need a fresh follower resolution". Read
-literally, every default client must re-resolve after any upgrade.
+- A subscribe through the pre-upgrade `cam` handle ends with `Unroutable`.
+  With `RequestValidity::check` forced to pass, it succeeds.
+- An announce consumer opened on the subscriber origin before the upgrade
+  sees only the initial `Start`. No `Restart` arrives after the upgrade,
+  even though the old handle is already retired.
+- A fresh `routed_broadcast("cam")` after the upgrade subscribes `audio`
+  fine.
 
-1. (recommended) The upgrade is a transport swap, not a new instance. The
-   upgraded session's re-announcement of a path continues the old session's
-   route identity (an update in place, the way `Announced::attached` re-prices),
-   unless the peer itself sends a `Restart` or End+Start. Content still never
-   crosses a real restart: if the relay's own route changed, it announces
-   that on both sessions. This is the smallest change and keeps the upgrade
-   invisible, which is why it exists.
-2. Upgrades are restarts, and every first-party consumer (`moq export`,
-   `moq subscribe`, moq-ffi/moq-c consumers, the interop clients) follows
-   `Restart` and re-requests after `Unroutable`. Consistent with the letter
-   of the epoch line, but every application pays for a transport detail.
-3. Don't upgrade sessions whose routes are epochless. Not decidable per
-   session (epochs are per route), and default clients would stay on
-   WebSocket.
+So retirement works as #5294 intends. What's missing is the signal: the
+handles retire silently, and nothing tells a holder to follow.
 
-Whichever is chosen, land the reproduction above as the regression, on an
-epochless route and on an epoch route. Check whether the
-relay hop has the same problem when a publisher upgrades: the relay's lite
-subscriber builds the same validity for the publisher's session. Then run
-`just test interop --all` until it passes (the race can't be forced locally;
-a fast machine usually lets QUIC win, so the unit test carries the proof).
+Decided by the maintainer 2026-10-13 on #5388: an upgrade on an epochless
+route is a Restart. "No re-requests after Unroutable please, explicitly
+Restart only." This matches the
+[transport upgrade](/quest/m1/transport-upgrade/README.md) plan ("epochless
+routes instead signal Restart and need a fresh follower resolution"). The
+other options, carrying the route identity across the upgrade and not
+upgrading epochless sessions, were rejected.
 
-Afterwards, if a failing client still leaves its connection to idle out,
-fix that client's error path to close its session (the C client's `fail()`
-and the C++ client on a consumer error both look suspect), as a separate
-commit.
+1. The upgrade signals Restart. Whenever the upgraded session's route
+   retires a handle resolved through the old session's epochless route, the
+   origin delivers `AnnounceEvent::Restart` for that prefix to every announce
+   consumer, before or atomically with the retirement. A holder must never
+   see `Unroutable` from a retired handle without a `Restart` it could have
+   followed. Find why the existing epochless-replacement Restart (the
+   `PendingUpdate::Restart` path in `model/origin.rs`) does not fire here.
+   The likely reason is that the replacement comes from the same `via`, so
+   it reads as an update in place. Fix it in the origin, not in moq-tokio, so
+   a relay hop gets the same signal when a publisher upgrades. The relay's
+   lite subscriber builds the same validity for a publisher's session; check
+   that hop too. Subscriptions already open stay sticky on the old session
+   until it drains, as today.
+2. First-party consumers follow it. Each holds the announce stream for the
+   path it resolved, and on `Restart` drops its handles and resolves afresh.
+   On `Unroutable` it fails; it never retries a request. Audit and fix:
+   - Rust: `moq export` and `moq subscribe` (the interop subscriber), plus
+     any other moq-cli command that resolves a broadcast and keeps reading.
+     `moq play` already follows `Restart` (see
+     [Broadcast epochs](/quest/m0/broadcast-epoch/README.md)); confirm it.
+   - Bindings: moq-ffi's catalog and container consumers, as Go, C++, and
+     Python reach them, and moq-c's (`moq_origin_announced_broadcast`,
+     `moq_consume_catalog`). Prefer following once in moq-ffi and moq-c over
+     duplicating it in every language wrapper. If following needs new API,
+     report it per the Cross-Package Sync table.
+   - JS: `js/net` doesn't upgrade yet (the
+     [JavaScript half](/quest/m1/transport-upgrade/js.md) of the upgrade
+     line), but a Rust relay's Restart reaches JS consumers. Confirm
+     `@moq/watch` and the js-native interop subscriber follow it.
+   - The interop clients under `test/interop/clients`, where they resolve a
+     broadcast themselves.
+3. Regression: land the reproduction above in `websocket_upgrades_to_quic`
+   or a sibling. It asserts that the announce consumer sees `Restart` for
+   `cam`, that following it (a fresh `routed_broadcast`) serves the new
+   track, and that the old handle still ends with `Unroutable` and is never
+   re-requested. Add the same case on an epoch route, where the old handle
+   keeps working and no `Restart` is sent. Then run `just test interop --all`.
+   The race can't be forced locally (a fast machine lets QUIC win), so the
+   unit test carries the proof.
 
-Public API: none expected for option 1. Wire: none.
+If a failing client still leaves its connection to idle out, fix that
+client's error path to close its session, as a separate commit. The C
+client's `fail()` and the C++ client on a consumer error both look suspect.
+
+Public API: an announce `Restart` on upgrade is new observable behavior.
+Consumer-follow API in moq-ffi and moq-c only if the audit needs it; report
+it in the PR. Wire: none.
 
 ## Related
 
-- [Transport upgrade](/quest/m1/transport-upgrade/README.md) - its "epochless routes signal Restart" decision is the one this quest revisits
-- [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - #5294's retired-request rule, which must keep holding for real restarts
+- [Transport upgrade](/quest/m1/transport-upgrade/README.md) - its "epochless routes signal Restart" decision, which this quest implements for the Rust upgrade
+- [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - #5294's retired-request rule and the players that already follow `Restart`
 - [#5294](https://github.com/moq-dev/moq/pull/5294) - refuse new requests from retired sources, the commit that exposed this
 - [#4180](https://github.com/moq-dev/moq/pull/4180) - the WebSocket-to-QUIC upgrade

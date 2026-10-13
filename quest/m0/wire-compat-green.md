@@ -27,13 +27,12 @@ Two independent causes, both on the scheduled Interop run of 2026-10-12
   environment. #5099 (2026-10-10) changed that script to call
   `catalog.latest()`, which released `@moq/hang` 0.5.2 lacks. Every
   `publisher=released fetch` cell has failed with `catalog.latest is not a
-  function` since the 2026-10-11 nightly. The released environment needs a
-  client that compiles against the released API. Recommended: give the compat
-  lanes their own observer in `test/interop/compat/client.ts`, which is
-  already the client meant for both environments. Stop sharing the interop
-  client, whose API follows the checkout. The alternative is to stage the
-  client from the released package's git tag, but that ties the compat run
-  to old harness flags.
+  function` since the 2026-10-11 nightly. Decided by the maintainer
+  2026-10-13 on #5388: the compat lanes run their own observer in
+  `test/interop/compat/client.ts`, using only API the released packages
+  have, and stop sharing the interop client, whose API follows the checkout.
+  Staging the client from the released package's tag was rejected, since it
+  ties the compat run to old harness flags.
 
 Run `just test wire-compat` locally (it needs `gh` registry access) before
 and after. Don't dispatch the nightly on a branch.

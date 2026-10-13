@@ -82,4 +82,4 @@ and no cached groups splice across instances. Keep JS's matrix consistent.
 ## Related
 
 - [Closed fallback](https://github.com/moq-dev/moq/pull/5284) - a WebSocket session that closes right after connecting falls back to the pending QUIC dial instead of redialing
-- [Upgrade keeps broadcasts](/quest/m0/upgrade-unroutable.md) - revisits whether an upgrade is a Restart for epochless routes, after it broke Interop on main
+- [Upgrade restarts epochless broadcasts](/quest/m0/upgrade-unroutable.md) - the Rust upgrade's missing epochless `Restart`, and the consumers that follow it
