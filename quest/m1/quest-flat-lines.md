@@ -63,7 +63,7 @@ Remaining:
   PR remains open.
 - #4133 qos closed without landing (2026-10-09). Its egress `lag` histogram
   is owned by [Viewer lag histogram](/quest/m1/qos/lag-histogram.md), which
-  ports it once stats-split lands. Do not reopen the umbrella PR.
+  ports it once stats prefix tracks land. Do not reopen the umbrella PR.
 - Check for leftover questline branches and retire them only once their work
   is merged or assigned to an outstanding quest.
 

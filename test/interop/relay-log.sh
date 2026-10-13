@@ -6,24 +6,23 @@ relay_log_since() {
     tail -n +"$1" "$HARNESS_RUN/relay.log" | sed 's/\x1b\[[0-9;]*m//g'
 }
 
-# Print each relay connection that appears from log line FROM on, with how it closed: the
+# Print each relay connection opened from log line FROM on, with how it closed: the
 # relay's close error, "ended" for a close without one, or "open" while it hasn't closed yet.
 # The patterns follow the relay's `conn{id=...}` span and its `connection closed` log
-# (`rs/moq-relay/src/relay.rs`). Only connections opened in the window count, so a straggler
-# from an earlier round closing here isn't blamed on this one.
+# (`rs/moq-relay/src/relay.rs`). The relay numbers connections in accept order, so an id at
+# or below the highest one logged before FROM was opened earlier: a straggler from an earlier
+# round that logs or idles out here isn't blamed on this one.
 relay_connections() {
-    relay_log_since "$1" | awk '
-        match($0, /conn\{id=[0-9]+ /) {
-            id = substr($0, RSTART + 8, RLENGTH - 9)
-            if (!(id in state)) { state[id] = "open"; order[++n] = id }
-        }
-        match($0, /connection closed id=[0-9]+/) {
-            id = substr($0, RSTART + 21, RLENGTH - 21)
-            if (id in state) {
-                rest = substr($0, RSTART + RLENGTH)
-                state[id] = sub(/^ err=/, "", rest) ? rest : "ended"
-            }
-        }
+    relay_log_since 1 | awk -v from="$1" '
+        BEGIN { before = -1 }
+        { id = -1; closed = match($0, /connection closed id=[0-9]+/) }
+        closed { id = substr($0, RSTART + 21, RLENGTH - 21) + 0; rest = substr($0, RSTART + RLENGTH) }
+        !closed && match($0, /conn\{id=[0-9]+ /) { id = substr($0, RSTART + 8, RLENGTH - 9) + 0 }
+        id < 0 { next }
+        NR < from { if (id > before) before = id; next }
+        id <= before { next }
+        !(id in state) { state[id] = "open"; order[++n] = id }
+        closed { state[id] = sub(/^ err=/, "", rest) ? rest : "ended" }
         END { for (i = 1; i <= n; i++) print order[i], state[order[i]] }
     '
 }
@@ -49,9 +48,9 @@ check_idle_outs() {
     fi
     while read -r id reason; do
         [[ "$reason" == "open" || "$reason" == *"timed out"* ]] || continue
-        # The relay subscribes upstream only on the publisher's connection.
+        # The relay subscribes or fetches upstream only on the publisher's connection.
         role=subscriber
-        relay_log_since "$from" | grep "conn{id=$id .*::subscriber: subscribe started" >/dev/null && role=publisher
+        relay_log_since "$from" | grep -E "conn\{id=$id .*::subscriber: (subscribe|fetch) started" >/dev/null && role=publisher
         echo "  FAIL  $pub round: relay connection $id ($role) idled out instead of closing ($reason)"
         relay_log_since "$from" | grep -E "conn\{id=$id |connection closed id=$id " | sed 's/^/        /'
         failed=1

@@ -6,13 +6,30 @@
 `m2ts` catalog section names and writes the same bytes back out, paced on the
 source's own PCR and released at a fixed delay like an SRT receiver. From the
 first group it releases, the output is byte-identical to the input, less any
-object dropped late, so it is exactly as T-STD-conformant as the source.
+object dropped late. On a complete path, validate preservation of the source
+schedule as well as the bytes. Missing bytes can break a decoder's acquisition
+or buffers; packet identity alone does not preserve T-STD conformance under loss.
 There is no JS player for it.
 
 ## Plan
 
 Decided (2026-10-01), from a discussion with t0ms, and split from the TS
 passthrough quest on #5003, whose import half it completes:
+
+Confirmed in the 2026-10-11 audit: carry either one supplied SPTS or the whole
+MPTS unchanged. Do not extract programs or split PIDs in this mode. Separate
+SPTS inputs have separate raw broadcasts/tracks under the existing one-multiplex
+catalog contract; extracting a program from an MPTS changes
+the packet sequence and is not the byte-identical fallback. This matches the
+distinction between `unmodified-program`, `unmodified-multiplex` and
+`per-program` in [MSFTS](https://datatracker.ietf.org/doc/html/draft-gregoire-moq-msfts).
+
+The exactness boundary is the admitted source interval, starting at the first
+released group. Account for the importer's current acquisition prefix and
+188-byte framing restrictions explicitly; do not call this whole-file identity.
+Test group acquisition without inserting synthetic tables or configuration
+into the output. A periodic group boundary or one program's RAI does not
+promise immediate decode for every program in an MPTS.
 
 - The export reuses the TS export's jitter buffer (`rs/moq-mux/src/jitter.rs`),
   keyed on each object's PCR time instead of a DTS, which also spreads each
@@ -36,12 +53,23 @@ passthrough quest on #5003, whose import half it completes:
   a coordinated RTP egress.
 - Rust only.
 
-Test: an export of a broadcast capture is byte-identical to the input from the
-first released group, and the strict T-STD check gives the same verdict on
-output and input. Two exporters fed the same objects with different arrival
+This quest owns the reusable raw packet/position and release-schedule oracle
+and its basic omission fixtures; the recovery quest extends it with the wider
+fault matrix rather than building a second harness.
+
+Automated tests in CI: an export of a supported capture is byte-identical to
+the admitted input interval on a complete path, and the applicable T-STD check
+gives the same verdict on output and input. Assert packet order and release
+schedule as well as bytes. Two exporters fed the same objects with different arrival
 skew emit identical bytes; when only one misses a deadline, its output is the
 other's less that object's packets. A dropped object is counted, and the rest
-still go out on time. Rerun the #4613 netem rig (10% loss, 120 s) against it.
+still go out on their original schedule, leaving the missing time intact.
+Use deterministic object/group omissions as well as a nightly real-network
+impairment test: IP packet loss may be retransmitted and is not proof of
+missing MoQ content. Fixtures include null/unknown PIDs, tables, adaptation
+bytes, split PES, clock wrap, and MPTS with unaligned program recovery points.
+Run TSDuck and FFmpeg automatically for profiles where their assertions apply;
+record expected decode outages under loss separately from byte preservation.
 
 Update `doc/bin/cli.md` for the flag, which today says `export ts` does not
 read the passthrough track.
@@ -50,5 +78,8 @@ Public API: a new export mode; nothing existing breaks.
 
 ## Related
 
-- [TS hitless](/quest/m2/ts-hitless.md) - the demultiplexed lane's 2022-7 legs and the `--sync` anchor
+- [Deterministic TS legs](/quest/m2/ts-hitless.md) - common packet identity and the proposed `--sync` anchor
 - [T-STD TS export](/quest/m1/tstd/README.md) - the jitter buffer and clock recovery this release shares
+- [TS validation](/quest/m1/ts-reliability/validation.md) - shared automatic graders and controls
+- [Loss and recovery](/quest/m1/ts-reliability/recovery.md) - actual missing content and reacquisition proof
+- [Redundant alignment](/quest/m1/plan-ts-alignment.md) - identical common objects do not prove independent importers publish identical groups

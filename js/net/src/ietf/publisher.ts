@@ -10,9 +10,12 @@ import type { Hop, Route } from "../hop.ts";
 import { hiddenBelow, hooks, presented } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { Priority } from "../priority.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Milli, Timescale } from "../time.ts";
 import type { Location as TrackLocation, Subscriber as TrackSubscriber } from "../track.ts";
+import { untilAborted } from "../util/abort.ts";
+import { LIMITS, type Limits, Slots } from "../util/limits.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
@@ -36,7 +39,7 @@ import {
 } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { cancelled, finCancels } from "./request_stream.ts";
-import { type Subscribe, SubscribeError, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
+import { GroupOrder, type Subscribe, SubscribeError, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
 import {
 	type SubscribeNamespace,
 	SubscribeNamespaceEntry,
@@ -178,6 +181,9 @@ interface RunGroup {
 	/** The publisher's tie-break priority, already converted to the IETF wire convention. */
 	publisherPriority: number;
 
+	/** The subscription's ranking, which orders its group streams by priority and GROUP_ORDER. */
+	ranking: Priority;
+
 	/** The objects of this group the subscription's filter selects. */
 	slice: GroupSlice;
 
@@ -196,14 +202,14 @@ interface RunFill {
 	/** The subscription's request ID, which the fetch stream names. */
 	requestId: bigint;
 
-	/**
-	 * The subscriber's delivery priority, applied to the cache subscription the fill reads.
-	 *
-	 * Deliberately not the fetch stream's send order: this publisher leaves its group
-	 * streams at the transport's default, so ranking the fill alone would put backfill
-	 * ahead of the live groups it is catching up to.
-	 */
+	/** The subscriber's delivery priority, applied to the cache subscription the fill reads. */
 	priority: number;
+
+	/**
+	 * The subscription's ranking. The fill joins it as the group it fills, so backfill goes out
+	 * in the subscription's GROUP_ORDER rather than ahead of the live groups or behind them all.
+	 */
+	ranking: Priority;
 
 	/** The range the fill resolved to. */
 	fill: FillServe;
@@ -239,6 +245,8 @@ export class Publisher {
 	#quic: WebTransport;
 	#session: Session;
 	#requiresSolicitation: boolean;
+	// Subscriptions the peer holds live on this session.
+	#subscriptions: Slots;
 
 	// The one writer for the outbound datagram stream, shared by every subscription since a
 	// second getWriter would throw. Undefined when the transport carries no datagrams, which
@@ -282,6 +290,7 @@ export class Publisher {
 		cluster,
 		grant = new Signal<Grant | undefined>(undefined),
 		ready = Promise.resolve(),
+		limits = LIMITS,
 	}: {
 		/** The WebTransport session, for uni streams. */
 		quic: WebTransport;
@@ -299,8 +308,11 @@ export class Publisher {
 		grant?: Getter<Grant | undefined>;
 		/** Resolves once the setup tokens are answered (MoQ Auth). */
 		ready?: Promise<void>;
+		/** How many live requests the peer may hold. */
+		limits?: Limits;
 	}) {
 		this.#quic = quic;
+		this.#subscriptions = new Slots(limits.subscriptions, { quic, reason: "too many subscriptions" });
 		this.#grant = grant;
 		this.#ready = ready;
 		this.#session = session;
@@ -331,10 +343,29 @@ export class Publisher {
 	 * @internal
 	 */
 	async runSubscribe(msg: Subscribe, stream: Stream) {
+		// Only a subscription we would serve holds a slot, as in Rust: a refused one ends at
+		// once. A peer past the cap loses the session.
+		const charged = msg.forward && !msg.rangeFilters && !this.#denied(msg.trackNamespace);
+		if (charged) this.#subscriptions.acquire();
+		try {
+			await this.#serveSubscribe(msg, stream);
+		} finally {
+			if (charged) this.#subscriptions.release();
+		}
+	}
+
+	async #serveSubscribe(msg: Subscribe, stream: Stream) {
 		const version = this.#session.version;
 		const name = msg.trackNamespace;
 		let broadcast: broadcast.Consumer | undefined;
 		let refusal: { errorCode: number; reasonPhrase: string } | undefined;
+
+		// The requester leaving while the broadcast and track resolve ends the request, so a
+		// cancelled subscription gives back its slot instead of holding it until the track
+		// is answered, which may be never.
+		const left = new AbortController();
+		const cancel = new StreamError(StreamCode.Cancel, { message: "cancel" });
+		void cancelled(stream, version).then(() => left.abort(cancel));
 
 		// Legal requests we can't honor are refused one at a time. A subscription that
 		// forwards nothing is only useful to a subscriber that later turns forwarding on,
@@ -354,7 +385,9 @@ export class Publisher {
 		} else {
 			try {
 				broadcast =
-					this.#publish && (wireOf(this.#publish).local(name) ?? (await wireOf(this.#publish).demand(name)));
+					this.#publish &&
+					(wireOf(this.#publish).local(name) ??
+						(await untilAborted(wireOf(this.#publish).demand(name), left.signal)));
 				if (!broadcast) {
 					refusal = {
 						errorCode: toRequestCode("does_not_exist", "subscribe", version),
@@ -362,6 +395,11 @@ export class Publisher {
 					};
 				}
 			} catch (err: unknown) {
+				// Nobody is left to refuse.
+				if (left.signal.aborted) {
+					stream.abort(cancel);
+					return;
+				}
 				const e = error(err);
 				const condition =
 					e instanceof StreamError && (e.code === StreamCode.NotFound || e.code === StreamCode.Unroutable)
@@ -395,8 +433,10 @@ export class Publisher {
 		if (!broadcast) return;
 
 		const priority = fromWire(msg.subscriberPriority);
+		const order = msg.groupOrder;
 		const track = wireOf(broadcast).subscribe(msg.trackName, {
 			priority,
+			order,
 			// moq-transport has no subscriber latency parameter. Keep everything the
 			// producer retained and let the receiving subscriber enforce its own budget.
 			// Keep the sentinel encodable if this demand crosses a Lite hop before the
@@ -405,9 +445,10 @@ export class Publisher {
 		});
 
 		let cache: TrackSubscriber | undefined;
+		let ranking: Priority | undefined;
 
 		try {
-			const info = await track.info();
+			const info = await untilAborted(track.info(), left.signal);
 			// A Timestamp goes out only when this SUBSCRIBE_OK actually carries TIMESCALE.
 			// Drafts 14-16 never write that property, so their objects stay unstamped.
 			const timescale =
@@ -432,6 +473,7 @@ export class Publisher {
 			// group; the model's `endGroup` is exclusive.
 			track.update({
 				priority,
+				order,
 				maxDelay: Milli(Varint.MAX_U53),
 				groups: {
 					start: range.start ? { included: Number(range.start.group) } : undefined,
@@ -448,7 +490,9 @@ export class Publisher {
 			const fill =
 				msg.fill && Filter.isDraft20(version) ? fillRange(msg.fill, msg.filter, edge.largest) : undefined;
 			cache =
-				fill && fill.kind !== "empty" ? track.fork({ priority, maxDelay: Milli(Varint.MAX_U53) }) : undefined;
+				fill && fill.kind !== "empty"
+					? track.fork({ priority, order, maxDelay: Milli(Varint.MAX_U53) })
+					: undefined;
 
 			// Send SUBSCRIBE_OK
 			await stream.writer.u53(SubscribeOk.id);
@@ -471,12 +515,17 @@ export class Publisher {
 						: { groupId: edge.largest.group, objectId: 0n }),
 				properties: msg.propertiesWanted
 					? // TIMESCALE is what opts the track into timestamps, on drafts that can
-						// send it. We serve the newest group first, matching moq-lite.
+						// send it.
 						{
 							// An untimed track declares none, so it stays untimed downstream.
 							timescale: info.timescale ?? undefined,
 							priority: publisherPriority,
-							groupOrder: Properties.DESCENDING,
+							// Through draft-15 this restates the order the subscription is served
+							// in. Later drafts carry the publisher's default instead, newest first.
+							groupOrder:
+								(version === Version.DRAFT_14 || version === Version.DRAFT_15) && order === "ascending"
+									? GroupOrder.Ascending
+									: Properties.DESCENDING,
 							maxCacheDuration: info.maxAge === undefined ? undefined : BigInt(info.maxAge),
 						}
 					: // INCLUDE_PROPERTIES=0. The block stays present but empty, which also means
@@ -568,6 +617,9 @@ export class Publisher {
 			// opened for PUBLISH_DONE to report.
 			const groups = new Set<Promise<void>>();
 			const streams: StreamCount = { opened: 0 };
+			// One ranking for the whole subscription, shared by every group and the fill.
+			const ranked = new Priority(track);
+			ranking = ranked;
 
 			// Serve groups until the track ends or the requester cancels.
 			const serving = (async () => {
@@ -591,6 +643,7 @@ export class Publisher {
 						group,
 						timescale,
 						publisherPriority,
+						ranking: ranked,
 						slice: groupSlice(range, group.sequence),
 						unsubscribed,
 						streams,
@@ -611,6 +664,7 @@ export class Publisher {
 					? this.#runFill({
 							requestId: msg.requestId,
 							priority,
+							ranking: ranked,
 							fill,
 							cache,
 							timescale,
@@ -710,9 +764,12 @@ export class Publisher {
 		} catch (err: unknown) {
 			if (err instanceof ProtocolViolation) throw err;
 			const e = error(err);
-			console.warn(`publish error: broadcast=${name} track=${track.name} error=${reason(e)}`);
+			if (e === cancel) console.debug(`publish cancelled: broadcast=${name} track=${track.name}`);
+			else console.warn(`publish error: broadcast=${name} track=${track.name} error=${reason(e)}`);
 			stream.abort(e);
 		} finally {
+			// Groups still draining keep being ranked until they finish.
+			ranking?.close();
 			track.close();
 			// Idempotent, and the backstop for a throw between the fork and the fill starting:
 			// #runFill closes it itself on every path it reaches.
@@ -724,15 +781,17 @@ export class Publisher {
 	 * Runs a group and sends its frames using ObjectStream (Subgroup delivery mode).
 	 */
 	async #runGroup(options: RunGroup) {
-		const { requestId, track, group, timescale, publisherPriority, slice, unsubscribed, streams } = options;
+		const { requestId, track, group, timescale, publisherPriority, ranking, slice, unsubscribed, streams } =
+			options;
 		try {
 			// One stream per group is faster than a peer at its limit can retire them, so this
 			// is the one path that doesn't wait for a slot: the transport would serve the opens
-			// in the order we asked, which is oldest-first, exactly backwards for live media.
-			// Failing here drops the group and lets the next one compete for the next slot.
+			// in the order we asked, not the subscription's order. Failing here drops the group
+			// and lets the next one compete for the next slot.
 			const stream = await Writer.tryOpen(this.#quic, {
 				cancel: unsubscribed,
 				version: this.#session.version,
+				sendOrder: ranking.rank(group.sequence),
 				waitUntilAvailable: false,
 			});
 			if (!stream) {
@@ -740,6 +799,8 @@ export class Publisher {
 				return;
 			}
 			streams.opened += 1;
+			// A REQUEST_UPDATE re-ranks the subscription, so a group already on the wire follows it.
+			ranking.add(stream, group.sequence);
 
 			const header = new GroupMessage({
 				trackAlias: requestId,
@@ -826,6 +887,10 @@ export class Publisher {
 				}
 			} catch (err: unknown) {
 				stream.reset(error(err));
+			} finally {
+				// A closed stream may still have data queued behind its FIN, so it keeps
+				// competing at its rank until the stream settles.
+				void stream.closed.catch(() => {}).then(() => ranking.remove(stream));
 			}
 		} finally {
 			group.close();
@@ -920,7 +985,7 @@ export class Publisher {
 	 * fill-failure signal. Nothing here touches the subscription either way.
 	 */
 	async #runFill(options: RunFill) {
-		const { requestId, fill, cache, timescale, unsubscribed, streams } = options;
+		const { requestId, ranking, fill, cache, timescale, unsubscribed, streams } = options;
 		const version = this.#session.version;
 
 		// Everything is inside the try so the cache fork is released on every path out,
@@ -929,12 +994,19 @@ export class Publisher {
 		try {
 			if (fill.kind === "empty") return;
 
-			stream = await Writer.tryOpen(this.#quic, { cancel: unsubscribed, version });
+			// A fill we cannot serve is reset right after its header, so it needs no rank.
+			const sequence = fill.kind === "group" ? Number(fill.sequence) : undefined;
+			stream = await Writer.tryOpen(this.#quic, {
+				cancel: unsubscribed,
+				version,
+				sendOrder: sequence === undefined ? undefined : ranking.rank(sequence),
+			});
 			if (!stream) {
 				console.debug(`fill stream failed to open: fill=${requestId}`);
 				return;
 			}
 			streams.opened += 1;
+			if (sequence !== undefined) ranking.add(stream, sequence);
 
 			await stream.u53(FetchHeader.type);
 			await new FetchHeader({ requestId }).encode(stream, version);
@@ -958,6 +1030,11 @@ export class Publisher {
 			console.debug(`fill failed, resetting its stream: fill=${requestId} error=${reason(e)}`);
 			stream?.reset(e);
 		} finally {
+			// Ranked until it settles, like a group stream.
+			if (stream) {
+				const opened = stream;
+				void opened.closed.catch(() => {}).then(() => ranking.remove(opened));
+			}
 			cache.close();
 		}
 	}

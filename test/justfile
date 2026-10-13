@@ -34,7 +34,7 @@ harness:
 # browser + C++ publish; everyone subscribes (incl. native node/bun JS, the
 # moq-c C client, and the GStreamer moqsrc plugin). Other flags pass through, e.g.
 # `just test interop --publishers rust,python --subscribers rust,c`.
-# Finite track tails run too; `--tail` selects just Rust/Node/Bun tail checks.
+# Finite track tails run too; `--tail` selects just the CLI FETCH close and Rust/Node/Bun tail checks.
 # Both runs first check js/net's varints against moq-net's encoder at every size boundary,
 # and on lite-06/07 messages (the filter also matches `lite_varint_interop`), then
 # moq-transport OBJECT_DATAGRAMs both ways on every draft, and Lite AUTH_ERROR
@@ -130,6 +130,10 @@ drill-sensitivity *args:
 ts *args:
     python3 ./ts/pcr-timing.test.py
     ./ts/run.sh "$@"
+
+# Table-placement grader: acquisition, interleave, phase, drift and missing-table controls.
+ts-pair-controls:
+    python3 ./ts/table-anchor.test.py
 
 # Round-trip the EIT fixtures: the sparse schedule must survive and
 # pending-version sections must be dropped at import.

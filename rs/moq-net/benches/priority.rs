@@ -1,12 +1,17 @@
-//! Worst-case insertion benchmarks for the Lite publisher's stream priority queue.
+//! Worst-case insertion benchmarks for the publishers' stream priority queue.
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 
-// Compiled straight from source so the queue stays private to `lite`; a `pub` re-export
+// Compiled straight from source so the queue stays private to the crate; a `pub` re-export
 // just for the bench would widen the crate's surface.
-#[path = "../src/lite/priority.rs"]
+#[path = "../src/priority.rs"]
 #[allow(dead_code)]
 mod priority;
+
+// The queue names `crate::track::Order`, which is public.
+mod track {
+	pub use moq_net::track::Order;
+}
 
 use priority::{Priority, PriorityHandle, PriorityQueue};
 

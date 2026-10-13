@@ -181,6 +181,7 @@ test("integration: lite subscription options and updates reach the publisher", a
 	expect(producer.subscription.peek()).toEqual({
 		priority: 3,
 		maxDelay: Milli(250),
+		order: "descending",
 		groups: { start: { included: 1 }, end: { excluded: 9 } },
 	});
 
@@ -193,6 +194,7 @@ test("integration: lite subscription options and updates reach the publisher", a
 	expect(await updated).toEqual({
 		priority: 8,
 		maxDelay: Milli(500),
+		order: "descending",
 		groups: { start: { included: 2 }, end: { excluded: 12 } },
 	});
 
@@ -1770,18 +1772,17 @@ test("integration: an announced request waits for a late publisher", async () =>
 	if (!active) throw new Error("expected an active broadcast");
 	expect(await active.track("video").subscribe().ordered().readString()).toBe("hello");
 
-	// It goes away, which ends the request: a publisher coming back is another instance.
+	// It goes away; the request stays open for the next publisher instance.
 	first.close();
 	await servingFirst;
 	await waitFor(watched.active, (b) => b === undefined);
-	await until(() => watched.closed.peek() !== undefined);
-	watched.close();
+	expect(watched.closed.peek()).toBeUndefined();
 
-	// It comes back under the same name, for a fresh request: a fresh consumer, not the dead one.
+	// It comes back under the same name with a fresh consumer on the same request.
 	const second = publish(origin, Path.from("late"));
 	const servingSecond = serve(second, "world");
 
-	const again = clientOrigin.request(Path.from("late"), { announced: true });
+	const again = watched;
 	const republished = await waitFor(again.active, (b) => b !== undefined);
 	if (!republished) throw new Error("expected a republished broadcast");
 	expect(republished).not.toBe(active);
@@ -1909,13 +1910,12 @@ async function runRepublishCycle(protocol: string, version?: number) {
 		}
 	};
 
+	const watched = clientOrigin.request(Path.from("toggle"), { announced: true });
 	let previous: BroadcastConsumer | undefined;
 	for (let generation = 0; generation < 3; generation++) {
 		const payload = `gen${generation}`;
 		const producer = publish(origin, Path.from("toggle"));
 		const serving = serve(producer, payload);
-		// Each generation is another publisher instance, so a player follows it with a fresh request.
-		const watched = clientOrigin.request(Path.from("toggle"), { announced: true });
 
 		// A dead consumer left in place would still satisfy `!== undefined`, so wait for the swap.
 		const active = await withTimeout(
@@ -1933,17 +1933,18 @@ async function runRepublishCycle(protocol: string, version?: number) {
 		previous = active;
 
 		// Unpublish, as the element does when it runs out of media, and go straight back around
-		// once the viewer has heard it: the request ends with its publisher.
+		// once the viewer has heard it: the request waits for the next publisher.
 		producer.close();
 		await serving;
 		await withTimeout(
-			until(() => watched.closed.peek() !== undefined),
+			waitFor(watched.active, (b) => b === undefined),
 			1000,
 			`generation ${generation} never ended`,
 		);
-		watched.close();
+		expect(watched.closed.peek()).toBeUndefined();
 	}
 
+	watched.close();
 	origin.close();
 	clientOrigin.close();
 	client.abort();
@@ -2303,7 +2304,7 @@ test("origin: a blind request ends with its session, and the next session answer
 	}
 });
 
-test("origin: a reactive handle follows announcements and ends on a republish", async () => {
+test("origin: a reactive handle follows announcements across a republish", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_05);
 	const serverOrigin = new OriginProducer();
 	const clientOrigin = new OriginProducer();
@@ -2324,19 +2325,16 @@ test("origin: a reactive handle follows announcements and ends on a republish", 
 	await until(() => watch.active.peek() !== undefined);
 	const held = watch.active.peek();
 
-	// A republish ends the request rather than cling to the dead broadcast or move to the new one.
+	// A republish swaps the active consumer without closing the request.
 	const second = publish(serverOrigin, Path.from("show"));
-	await until(() => watch.closed.peek() !== undefined);
-	expect(watch.active.peek()).toBeUndefined();
+	await waitFor(watch.active, (b) => b !== undefined && b !== held);
+	expect(watch.closed.peek()).toBeUndefined();
 
-	// A fresh request resolves the new broadcast, and unpublishing ends it too.
-	const fresh = clientOrigin.request(Path.from("show"), { announced: true });
-	await until(() => fresh.active.peek() !== undefined && fresh.active.peek() !== held);
 	second.close();
 	first.close();
-	await until(() => fresh.closed.peek() !== undefined);
+	await waitFor(watch.active, (b) => b === undefined);
+	expect(watch.closed.peek()).toBeUndefined();
 
-	fresh.close();
 	watch.close();
 	client.abort();
 	server.abort();

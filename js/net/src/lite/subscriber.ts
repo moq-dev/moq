@@ -22,11 +22,13 @@ import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { groupBounds, hiddenBelow, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
+import { sendOrder } from "../priority.ts";
 import { type OpenOptions, type Reader, Stream } from "../stream.ts";
 import { TAIL_GRACE_MS, Tail } from "../tail.ts";
 import * as Time from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import {
@@ -39,7 +41,6 @@ import {
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
 import { frameDecoder, type Group as GroupMessage, readFrames } from "./group.ts";
-import { sendOrder } from "./priority.ts";
 import { Probe } from "./probe.ts";
 import { ProbeLevel, type Setup } from "./setup.ts";
 import { StreamId } from "./stream.ts";
@@ -58,6 +59,7 @@ import {
 	hasAnnounceId,
 	hasAnnounceOk,
 	hasDatagrams,
+	hasOrder,
 	hasProbeRtt,
 	hasStreamCount,
 	resolvesStart,
@@ -154,6 +156,8 @@ const PROTOCOL_VIOLATION_CODE = 15;
 
 export class Subscriber {
 	#quic: WebTransport;
+	// Advertisements the peer holds live across every announce stream on this session.
+	#announces: Slots;
 
 	// The version of the connection.
 	readonly version: Version;
@@ -203,6 +207,7 @@ export class Subscriber {
 	 * @param peerSetup - Optional peer SETUP slot for capability gating (lite-05+)
 	 * @param goaway - Settles when the peer sends GOAWAY
 	 * @param grant - The union of our tokens' grants, which bounds what we subscribe to
+	 * @param limits - How many live requests the peer may hold
 	 *
 	 * @internal
 	 */
@@ -214,8 +219,10 @@ export class Subscriber {
 		peerSetup?: Signal<Setup | undefined>,
 		goaway?: GetPromise<Drain>,
 		grant?: Getter<Grant | undefined>,
+		limits: Limits = LIMITS,
 	) {
 		this.#quic = quic;
+		this.#announces = new Slots(limits.announces, { quic, reason: "too many announcements" });
 		this.version = version;
 		this.hop = hop;
 		this.#probe = probe;
@@ -298,7 +305,8 @@ export class Subscriber {
 			route: Route;
 			captures: Path.Pattern[] | undefined;
 		};
-		const advertised = new Map<Path.Valid, Advertisement>();
+		// Each holds one of the session's announce slots, reflected and hidden ones included.
+		const advertised = new SlotMap<Path.Valid, Advertisement>(this.#announces);
 
 		let stopDrain: Dispose | undefined;
 		try {
@@ -574,6 +582,7 @@ export class Subscriber {
 		} finally {
 			// Release only this interest's routes. Existing consumers remain pinned.
 			for (const path of advertised.keys()) this.#consumes.withdraw(path, announced);
+			advertised.clear();
 			stopDrain?.();
 		}
 	}
@@ -668,6 +677,7 @@ export class Subscriber {
 			epoch,
 			track: request.name,
 			priority: subscription.priority ?? 0,
+			order: subscription.order,
 			maxDelay: subscription.maxDelay,
 			startGroup: subscription.groups?.start === undefined ? undefined : bounds.start,
 			endGroup: inclusiveGroupEnd(bounds.end),
@@ -1216,6 +1226,7 @@ export class Subscriber {
 		const stopped: Promise<null> = race([track.closed, stream.reader.closed]).then(() => null);
 		let lastSent: track.Subscription = {
 			priority: msg.priority,
+			order: msg.order,
 			maxDelay: Time.Milli(msg.maxDelay),
 			groups: {
 				start: msg.startGroup === undefined ? undefined : { included: msg.startGroup },
@@ -1247,6 +1258,7 @@ export class Subscriber {
 			// interpret SUBSCRIBE_UPDATE as a reset of ordered/maxDelay/etc.
 			const update = new SubscribeUpdate({
 				priority: current.priority ?? 0,
+				order: current.order,
 				maxDelay: current.maxDelay,
 				startGroup: current.groups?.start === undefined ? undefined : bounds.start,
 				endGroup: inclusiveGroupEnd(bounds.end),
@@ -1264,8 +1276,11 @@ export class Subscriber {
 		// joins at the publisher's start, and 0 is group 0. Lite-06 encodes both as 0.
 		const sameStart =
 			resolvesStart(this.version) || (a.groups?.start === undefined) === (b.groups?.start === undefined);
+		// A wire without `Group Order` cannot carry a change to it.
+		const sameOrder = !hasOrder(this.version) || (a.order ?? "descending") === (b.order ?? "descending");
 		return (
 			(a.priority ?? 0) === (b.priority ?? 0) &&
+			sameOrder &&
 			(a.maxDelay ?? 0) === (b.maxDelay ?? 0) &&
 			sameStart &&
 			ag.start === bg.start &&

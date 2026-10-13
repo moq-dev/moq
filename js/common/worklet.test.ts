@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -40,4 +41,26 @@ test("library builds load worklets from a lazy blob or a hosted base", async () 
 	} finally {
 		rmSync(outDir, { recursive: true, force: true });
 	}
+});
+
+// A bundler child process would outlive `vite build` and be reaped by init, so its CPU escapes the
+// build's accounting and it lingers after the build.
+test("builds leave no child process behind", async () => {
+	const outDir = mkdtempSync(join(tmpdir(), "worklet-"));
+	try {
+		await build({
+			configFile: false,
+			logLevel: "silent",
+			plugins: [worklet()],
+			build: {
+				outDir,
+				lib: { entry: resolve(import.meta.dir, "../publish/src/video/processor.ts"), formats: ["es"] },
+				rollupOptions: { external: (id) => id.startsWith("@moq/") },
+			},
+		});
+	} finally {
+		rmSync(outDir, { recursive: true, force: true });
+	}
+
+	expect(spawnSync("pgrep", ["-l", "-P", String(process.pid)], { encoding: "utf8" }).stdout).toBe("");
 });

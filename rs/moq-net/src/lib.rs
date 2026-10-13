@@ -89,6 +89,7 @@ mod ietf;
 mod lite;
 mod model;
 pub mod path;
+mod priority;
 mod recv;
 pub mod setup;
 mod tail;

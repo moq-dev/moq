@@ -2099,8 +2099,11 @@ where
 		}
 
 		// Write Subscribe message. The aggregate is read now: a subscriber can join while
-		// the request ID and stream were awaited, and nothing updates the priority after.
-		let priority = target.subscription().map(|s| s.priority).unwrap_or(0);
+		// the request ID and stream were awaited, and nothing updates the priority or
+		// order after.
+		let aggregate = target.subscription();
+		let priority = aggregate.as_ref().map(|s| s.priority).unwrap_or(0);
+		let order = aggregate.map(|s| s.order).unwrap_or_default();
 		let written = async {
 			stream.writer.varint(ietf::Subscribe::ID).await?;
 			stream
@@ -2110,7 +2113,7 @@ where
 					track_namespace: broadcast_path.to_owned(),
 					track_name: track_name.into(),
 					subscriber_priority: super::priority::to_wire(priority),
-					group_order: GroupOrder::Descending,
+					group_order: order.into(),
 					filter: join.filter,
 					fill: join.fill,
 					// A resumed copy already knows the track, from the answer that accepted it.

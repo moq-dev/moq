@@ -145,6 +145,7 @@ Both bounds may be refined to a Frame within their Group, so a subscription can 
 
 The subscriber and publisher both indicate their delivery preference:
 - `Priority` indicates if Track A should be transmitted instead of Track B.
+- `Group Order` indicates if the newest or oldest pending Group of a Track should be transmitted first.
 - `Subscriber Max Age` indicates how far a non-latest Group may fall behind the latest Group before it is dropped from live delivery; `Publisher Max Age` indicates the maximum age before a non-latest Group is dropped from the publisher's cache.
 
 The combination of these preferences enables the most important content to arrive during network degradation while still respecting encoding dependencies.
@@ -578,7 +579,7 @@ How these streams get transmitted over the network is very important, and yet ha
 
 ## Prioritization
 The Publisher and Subscriber both exchange a `Priority` value, which determines which Track should be transmitted next.
-Group order within a Track is fixed: newest first.
+The subscriber's `Group Order` determines which Group within the Track is transmitted next.
 
 A publisher SHOULD attempt to transmit streams based on these rules.
 This depends on the QUIC implementation and it may not be possible to get fine-grained control.
@@ -616,12 +617,14 @@ ali/video: subscriber_priority=1 publisher_priority=1
 The subscriber priority takes precedence, so the subscriber can likewise full-screen Ali's window by raising the subscriber priority of Ali's tracks above Bob's.
 
 ### Group Order
-Within a Track, a publisher SHOULD transmit the newest Group first.
-Under congestion this sheds the backlog rather than the live edge, which is what a Group boundary exists to make possible.
+Within a subscription, a publisher SHOULD transmit pending Groups in the subscriber's `Group Order`: newest first when descending (the default), oldest first when ascending.
+Descending sheds the backlog rather than the live edge under congestion, which is what a Group boundary exists to make possible; ascending drains a backlog in sequence order, for catch-up.
 
-There is no field to invert it.
-A subscriber that wants Groups in sequence order gets them by reading in sequence order: reordering is a local decision, it costs the network nothing, and encoding it on the wire only lets one subscriber's preference reach a Track that a relay is fanning out to many.
-Such a subscriber SHOULD raise its `Subscriber Max Age` so the Groups it intends to read in order are still being delivered when it reaches them.
+`Group Order` only orders transmission; it never decides whether a Group is delivered, which is [Expiration](#expiration)'s job.
+An ascending subscriber SHOULD raise its `Subscriber Max Age` so the backlog it intends to drain is not expired first.
+
+A relay serving several subscriptions from one upstream subscription SHOULD request descending upstream unless every one of them is ascending, so a live subscriber is never held behind another's backlog.
+Each downstream subscription is still transmitted in its own `Group Order`.
 
 A subscriber MUST support gaps and out-of-order delivery regardless.
 
@@ -1088,6 +1091,7 @@ SUBSCRIBE Message {
   Epoch (b)
   Track Name (s)
   Subscriber Priority (8)
+  Group Order (8)
   Subscriber Max Age (i)
   Group Start (i)
   Group End (i)
@@ -1104,6 +1108,11 @@ A Subscribe ID MUST NOT be reused within the same session, even if the prior sub
 The priority of the subscription within the session, represented as a u8.
 The publisher SHOULD transmit *higher* values first during congestion.
 See the [Prioritization](#prioritization) section for more information.
+
+**Group Order**:
+Which pending Group the publisher SHOULD transmit first: descending (0x0), newest first, or ascending (0x1), oldest first.
+Any other value is a PROTOCOL_VIOLATION.
+See the [Group Order](#group-order) section for more information.
 
 **Subscriber Max Age**:
 The subscriber's preference, in milliseconds, for how long a non-latest group may remain in flight before being considered stale and dropped from live delivery.
@@ -1151,6 +1160,7 @@ The start and end group can be changed in either direction (growing or shrinking
 SUBSCRIBE_UPDATE Message {
   Message Length (i)
   Subscriber Priority (8)
+  Group Order (8)
   Subscriber Max Age (i)
   Group Start (i)
   Group End (i)
@@ -1538,6 +1548,7 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
+- Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1). A relay requests descending upstream unless every subscription it serves is ascending.
 - Listed the shared INVALID_REQUEST_ID (0x4) session code used by moq-transport drafts 14 through 16.
 
 - SUBSCRIBE_OK `Group` names where delivery starts when the subscription resolves, which need not be the first group sent. It is not a new floor. A subscriber does not wait for a group between the requested floor and it, but a publisher still delivers one that arrives later within Subscriber Max Age.
@@ -1720,7 +1731,6 @@ Some of these fields occur in multiple messages.
 
 - Request ID
 - Track Alias
-- Group Order
 - Filter Type
 - StartObject
 - Expires

@@ -114,13 +114,47 @@ export interface ReadGroupFrame {
 	complete(): void;
 }
 
-/** The next group or datagram sequence, shared by every dynamic producer that serves one broadcast track in turn. */
+/** One past the highest sequence written under a broadcast track's name, by any of its producers. */
 export interface TrackSequence {
 	next: number;
+	/** Open producers writing through this namespace. */
+	holders: number;
 }
 
-/** Per-track sequence namespaces owned by one broadcast generation. */
-export type TrackSequences = Map<string, TrackSequence>;
+/**
+ * Each name's sequence namespace for one broadcast generation, outliving the producers that
+ * serve it so a replacement that would append a sequence already written is refused. Written
+ * namespaces are kept until the broadcast ends, since forgetting one would let a later producer
+ * reuse its sequences. Namespaces nothing holds or wrote are swept as the map grows, like the
+ * Rust map at capacity, so requests for names never served stay bounded.
+ */
+export class TrackSequences {
+	#map = new Map<string, TrackSequence>();
+	// The size that triggers the next sweep, doubling past what survives so sweeps stay amortized.
+	#sweepAt = 16;
+
+	/** The namespace for `name`, created if the name is new. */
+	get(name: string): TrackSequence {
+		const existing = this.#map.get(name);
+		if (existing) return existing;
+
+		if (this.#map.size >= this.#sweepAt) {
+			for (const [key, sequence] of this.#map) {
+				if (sequence.next === 0 && sequence.holders === 0) this.#map.delete(key);
+			}
+			this.#sweepAt = Math.max(16, this.#map.size * 2);
+		}
+
+		const sequence = { next: 0, holders: 0 };
+		this.#map.set(name, sequence);
+		return sequence;
+	}
+
+	/** How many names hold a namespace. */
+	get size(): number {
+		return this.#map.size;
+	}
+}
 
 /** Inputs for creating a package-internal track request. */
 export interface TrackRequestOptions {
@@ -151,6 +185,8 @@ export const hooks: {
 	makeRequest: (options: TrackRequestOptions) => Request;
 	/** Access the existing producer while a request awaits immutable wire metadata. */
 	pendingTrackProducer: (request: Request) => Producer;
+	/** Have a producer write through a broadcast's sequence namespace for its name. */
+	bindSequence: (producer: Producer, sequence: TrackSequence) => void;
 	/**
 	 * Take the next group the subscriber's cursor allows, without waiting; assigned by `track.ts`.
 	 *
@@ -213,6 +249,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	pendingTrackProducer: () => {
+		throw new Error("track.ts not loaded");
+	},
+	bindSequence: () => {
 		throw new Error("track.ts not loaded");
 	},
 	tryRecvGroup: () => {
