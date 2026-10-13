@@ -29,6 +29,7 @@
 
 #[cfg(test)]
 mod archive_tests;
+mod history;
 pub mod master;
 mod mpd;
 mod playlist;
@@ -86,11 +87,9 @@ pub struct Config {
 	/// path, so every range it lists stays FETCHable from this broadcast. Other timelines keep
 	/// the window, since their segments leave the relay cache.
 	///
-	/// The listing starts at the records the timeline restates when this exporter joins (a
-	/// `moq-mux` publisher restates at most 256), so it reaches the start of a longer recording
-	/// only if the exporter followed it from there. For the same reason, edges that joined at
-	/// different times can list different `EXT-X-MEDIA-SEQUENCE` values: only the window keeps
-	/// every edge agreeing.
+	/// Durable history reads retained timeline groups from the beginning, including records older
+	/// than the checkpoint a live join receives. Live playlists keep their bounded join. A
+	/// recording whose start was pruned by retention is refused with [`crate::Error::HistoryPruned`].
 	pub history: bool,
 }
 
@@ -402,6 +401,7 @@ async fn watch_catalog(
 							archive,
 							next.clone(),
 							renditions.fanout(),
+							unbound,
 						));
 						*timeline_watcher.lock().unwrap() = Some(watcher);
 					}
@@ -473,11 +473,12 @@ async fn watch_timeline(
 	section: hang::catalog::Archive,
 	reference: Reference,
 	renditions: renditions::Fanout,
+	history: bool,
 ) {
 	// A failed timeline is never retried: the origin already rides out transient source
 	// failures, so an error here is final. It ends every playlist like a clean finish
 	// (`EXT-X-ENDLIST`), since a window left live would freeze players with no signal.
-	if let Err(err) = watch(&broadcast, &section, &reference, &renditions).await {
+	if let Err(err) = watch(&broadcast, &section, &reference, &renditions, history).await {
 		tracing::error!(track = %reference.1, %err, "timeline failed; ending every playlist");
 	}
 	// Recording cursors drain what is listed and end instead of parking.
@@ -490,7 +491,15 @@ async fn watch(
 	section: &hang::catalog::Archive,
 	reference: &Reference,
 	renditions: &renditions::Fanout,
+	history: bool,
 ) -> crate::Result<()> {
+	if history {
+		return history::read(broadcast, section, &reference.1, |edit| match edit {
+			history::Edit::Push { index, entry } => renditions.push(index, entry, reference),
+			history::Edit::Pop(range) => renditions.pop(range),
+		})
+		.await;
+	}
 	let mut timeline = moq_mux::timeline::Consumer::<()>::subscribe(broadcast, section, &reference.1).await?;
 	while let Some(event) = timeline.next().await? {
 		match event {
@@ -505,6 +514,11 @@ async fn watch(
 
 #[cfg(test)]
 mod tests {
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
 		let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
@@ -971,7 +985,7 @@ mod tests {
 		registration.set(video_config()).unwrap();
 		drop(reserved);
 
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -1041,7 +1055,7 @@ mod tests {
 		let mut registration = catalog.test_video("video0").unwrap();
 		registration.set(video_config()).unwrap();
 		drop(reserved);
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -1237,7 +1251,7 @@ mod tests {
 		config.coded_height = None;
 		registration.set(config).unwrap();
 		drop(reserved);
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -1291,7 +1305,7 @@ mod tests {
 		drop(reserved);
 
 		// Three GOPs, 2s apart: groups 0 and 1 are complete, group 2 is the live edge.
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -1372,7 +1386,7 @@ mod tests {
 		registration.set(video_config()).unwrap();
 		drop(reserved);
 
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -1419,14 +1433,14 @@ mod tests {
 		audio_registration.set(audio_config).unwrap();
 		drop(reserved);
 
-		let video_track = broadcast.create_track("video0", None).unwrap();
+		let video_track = broadcast.create_track("video0", timed()).unwrap();
 		let mut video = catalog
 			.media_producer(
 				video_track,
 				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
 			)
 			.unwrap();
-		let audio_track = broadcast.create_track("audio0", None).unwrap();
+		let audio_track = broadcast.create_track("audio0", timed()).unwrap();
 		let mut audio = catalog
 			.media_producer(
 				audio_track,
@@ -1516,7 +1530,7 @@ mod tests {
 		registration.set(video_config()).unwrap();
 		drop(reserved);
 
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -1572,7 +1586,7 @@ mod tests {
 		drop(reserved);
 		assert_eq!(catalog.snapshot().clock, None);
 
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -1674,7 +1688,7 @@ mod tests {
 		registration.set(video_config()).unwrap();
 		drop(reserved);
 
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -1747,7 +1761,7 @@ mod tests {
 			("video1", &[300, 2_300, 4_300, 6_300, 8_300]),
 			("video2", &[4_000, 6_000, 8_000]),
 		] {
-			let track = broadcast.create_track(name, None).unwrap();
+			let track = broadcast.create_track(name, timed()).unwrap();
 			let mut media = catalog
 				.media_producer(
 					track,
@@ -1831,7 +1845,7 @@ mod tests {
 			.unwrap();
 		drop(reserved);
 
-		let track = broadcast.create_track("audio0", None).unwrap();
+		let track = broadcast.create_track("audio0", timed()).unwrap();
 		let mut audio = catalog
 			.media_producer(
 				track,
@@ -1881,7 +1895,7 @@ mod tests {
 		drop(reserved);
 
 		// 3s GOPs against the default 1s minimum: every segment is one whole GOP.
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -1921,14 +1935,14 @@ mod tests {
 		audio_registration.set(audio_config).unwrap();
 		drop(reserved);
 
-		let video_track = broadcast.create_track("video0", None).unwrap();
+		let video_track = broadcast.create_track("video0", timed()).unwrap();
 		let mut video = catalog
 			.media_producer(
 				video_track,
 				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
 			)
 			.unwrap();
-		let audio_track = broadcast.create_track("audio0", None).unwrap();
+		let audio_track = broadcast.create_track("audio0", timed()).unwrap();
 		let mut audio = catalog
 			.media_producer(
 				audio_track,
@@ -2014,7 +2028,7 @@ mod tests {
 
 		// Two GOPs: group 0 is complete, while group 1 stays at the live edge until the
 		// publisher finishes.
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -2080,6 +2094,7 @@ mod tests {
 			archive,
 			reference,
 			renditions.fanout(),
+			false,
 		));
 		let rendition = renditions.get(Kind::Video, "video0").expect("rendition synced");
 		(rendition, watcher)
@@ -2111,7 +2126,7 @@ mod tests {
 			registration.set(config.clone()).unwrap();
 			drop(reserved);
 
-			let track = broadcast.create_track("video0", None).unwrap();
+			let track = broadcast.create_track("video0", timed()).unwrap();
 			let mut media = catalog
 				.media_producer(
 					track,
@@ -2200,7 +2215,7 @@ mod tests {
 		) -> Box<dyn std::any::Any> {
 			let broadcast = origin.create_broadcast("media").expect("publish allowed");
 			broadcast.announce(Default::default()).expect("publish allowed");
-			let track = broadcast.create_track("video0", None).unwrap();
+			let track = broadcast.create_track("video0", timed()).unwrap();
 
 			let mut media = moq_mux::container::Producer::new(
 				track,
@@ -2304,7 +2319,7 @@ mod tests {
 		recorder: moq_mux::timeline::Recorder,
 		start_micros: u64,
 	) -> moq_mux::container::Producer<moq_mux::catalog::hang::Container> {
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = moq_mux::container::Producer::new(
 			track,
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
@@ -2374,7 +2389,13 @@ mod tests {
 		renditions.sync(&upstream, &snapshot);
 		let fanout = renditions.fanout();
 		let reference = Arc::new((Kind::Video, "video0".to_string()));
-		let watcher = tokio::spawn(watch_timeline(upstream.broadcast(), archive, reference, fanout.clone()));
+		let watcher = tokio::spawn(watch_timeline(
+			upstream.broadcast(),
+			archive,
+			reference,
+			fanout.clone(),
+			false,
+		));
 		let rendition = renditions.get(Kind::Video, "video0").unwrap();
 		accept_sibling(&old_server, &old_media).await;
 		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
@@ -2451,7 +2472,13 @@ mod tests {
 		renditions.sync(&upstream, &snapshot);
 		let fanout = renditions.fanout();
 		let reference = Arc::new((Kind::Video, "video0".to_string()));
-		let watcher = tokio::spawn(watch_timeline(upstream.broadcast(), archive, reference, fanout.clone()));
+		let watcher = tokio::spawn(watch_timeline(
+			upstream.broadcast(),
+			archive,
+			reference,
+			fanout.clone(),
+			false,
+		));
 		let rendition = renditions.get(Kind::Video, "video0").unwrap();
 		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
 			.await
@@ -2711,7 +2738,7 @@ mod tests {
 		registration.set(config).unwrap();
 		drop(reserved);
 
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -2770,7 +2797,7 @@ mod tests {
 		drop(reserved);
 
 		// Groups 0 and 1 are complete; group 2 is the live edge until the publisher drops.
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -2896,6 +2923,7 @@ mod tests {
 				catalog.archive.clone().unwrap(),
 				reference(catalog, None).unwrap(),
 				renditions.fanout(),
+				false,
 			));
 			(renditions, watcher)
 		}
@@ -3079,7 +3107,7 @@ mod tests {
 		video0.set(video_config()).unwrap();
 		drop(reserved);
 
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -3129,7 +3157,7 @@ mod tests {
 
 		// Enroll the earlier timeline before the rendition, so the catalog snapshot that adds
 		// the rendition already indexes it. The reference decision runs in that same update.
-		let earlier = broadcast.create_track("a", None).unwrap();
+		let earlier = broadcast.create_track("a", timed()).unwrap();
 		let mut earlier_media = catalog
 			.media_producer(
 				earlier,
@@ -3268,6 +3296,7 @@ mod tests {
 			archive(&["video0", "video1"]),
 			Arc::new((Kind::Video, "video1".to_string())),
 			test.renditions.fanout(),
+			false,
 		));
 		let after = test.listed("video1", 2).await;
 		let new = segments::tag(&(Kind::Video, "video1".to_string()));

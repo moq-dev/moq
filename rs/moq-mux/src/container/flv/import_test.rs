@@ -181,7 +181,7 @@ async fn import_emits_frames() {
 		track,
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
-	let frame = decoder.read().await.unwrap().expect("a video frame");
+	let frame = decoder.read_frame().await.unwrap().expect("a video frame");
 	assert!(frame.keyframe);
 	// The payload is the length-prefixed NALU, carried through verbatim.
 	assert_eq!(frame.payload.as_ref(), &[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
@@ -207,7 +207,7 @@ async fn public_container_preserves_loc_for_flv() {
 		track,
 		crate::catalog::hang::Container::Loc(crate::container::Kind::Data),
 	);
-	let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read())
+	let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read_frame())
 		.await
 		.unwrap()
 		.unwrap()
@@ -504,7 +504,7 @@ async fn import_enhanced_av1() {
 		track,
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
-	let frame = decoder.read().await.unwrap().expect("an AV1 frame");
+	let frame = decoder.read_frame().await.unwrap().expect("an AV1 frame");
 	assert!(frame.keyframe);
 	assert_eq!(frame.payload.as_ref(), payload);
 }
@@ -638,7 +638,7 @@ async fn import_reports_negative_pts_and_can_resume() {
 		track,
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
-	let frame = decoder.read().await.unwrap().expect("the good frame");
+	let frame = decoder.read_frame().await.unwrap().expect("the good frame");
 	assert_eq!(frame.timestamp.as_millis(), 10);
 }
 
@@ -678,7 +678,7 @@ async fn import_enhanced_hvc1_applies_composition_time() {
 		track,
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
-	let frame = decoder.read().await.unwrap().expect("a video frame");
+	let frame = decoder.read_frame().await.unwrap().expect("a video frame");
 	assert_eq!(frame.timestamp.as_millis(), 17);
 }
 
@@ -842,4 +842,36 @@ async fn first_catalog_carries_the_anchored_clock() {
 
 	importer.finish().unwrap();
 	assert!(clocks.drain().iter().all(|clock| *clock == Some(anchored)));
+}
+
+#[test]
+#[tracing_test::traced_test]
+fn script_metadata_drops_warn_once() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut import = Import::new(broadcast, catalog.reserve());
+	let mut data = synth_flv();
+	for _ in 0..2 {
+		write_tag(
+			&mut data,
+			super::TAG_SCRIPT,
+			0,
+			b"\x02\x00\x0aonMetaData\x08\x00\x00\x00\x00\x00\x00\x09",
+		);
+	}
+	import.decode(&data).unwrap();
+	import.finish().unwrap();
+	assert_eq!(import.dropped_metadata(), 2);
+	assert_eq!(catalog.snapshot().audio.renditions.len(), 1);
+	logs_assert(|lines| {
+		let warnings = lines
+			.iter()
+			.filter(|line| line.contains("discarding FLV script metadata"))
+			.count();
+		if warnings == 1 {
+			Ok(())
+		} else {
+			Err(format!("expected one metadata warning, got {warnings}"))
+		}
+	});
 }

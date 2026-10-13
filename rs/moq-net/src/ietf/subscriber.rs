@@ -1145,7 +1145,12 @@ where
 		let mut data = body.decoder(this.version);
 		let task = match id {
 			ietf::Publish::ID => {
-				let msg = ietf::Publish::decode_msg(&mut data, this.version)?;
+				let msg = match ietf::Publish::decode_msg(&mut data, this.version) {
+					Err(DecodeError::MalformedAuthToken) => {
+						return Ok(this.reject_token(stream, request::Kind::Publish, body.clone()));
+					}
+					msg => msg?,
+				};
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}
@@ -1160,7 +1165,12 @@ where
 			ietf::PublishNamespace::ID => {
 				// A negotiated session that omits HOP_PATH fails the decode here, which
 				// the dispatcher turns into the protocol violation the draft requires.
-				let msg = ietf::PublishNamespace::decode_body(&mut data, this.version, peer.negotiated())?;
+				let msg = match ietf::PublishNamespace::decode_body(&mut data, this.version, peer.negotiated()) {
+					Err(DecodeError::MalformedAuthToken) => {
+						return Ok(this.reject_token(stream, request::Kind::PublishNamespace, body.clone()));
+					}
+					msg => msg?,
+				};
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}
@@ -1186,6 +1196,23 @@ where
 			}
 		};
 		Ok(task)
+	}
+
+	/// Refuse a request whose AUTHORIZATION TOKEN repeats (section 8.9), which unlike any
+	/// other decode error leaves the session open.
+	fn reject_token(
+		&self,
+		stream: Stream<S, Version>,
+		kind: request::Kind,
+		body: ietf::Body,
+	) -> MaybeSendBox<'static, ()> {
+		let version = self.version;
+		async move {
+			if let Err(err) = super::token::reject(stream, kind, body, version).await {
+				tracing::debug!(%err, "token refusal failed");
+			}
+		}
+		.maybe_boxed()
 	}
 
 	/// What the peer declared about being solicited (MoQ Solicit).
@@ -1365,7 +1392,28 @@ where
 				return Ok(());
 			}
 
-			let msg = ietf::PublishNamespaceUpdate::decode_msg(&mut data, self.version)?;
+			// An update spends its own request ID, even one refused below.
+			let request_id = ietf::RequestId::decode(&mut body.decoder(self.version), self.version)?;
+			if let Err(err) = self.control.accept(request_id) {
+				self.session
+					.clone()
+					.close(crate::SessionError::from(&err).to_code(), "invalid request ID");
+				return Err(err);
+			}
+			let msg = match ietf::PublishNamespaceUpdate::decode_msg(&mut data, self.version) {
+				// Section 8.9 rejects the update, which withdraws the advertisement as any
+				// refused update does.
+				Err(DecodeError::MalformedAuthToken) => {
+					let err = Error::Decode(DecodeError::MalformedAuthToken);
+					self.write_error(stream, request_id, &err, "repeated AUTHORIZATION TOKEN")
+						.await?;
+					if stream.writer.finish().is_ok() {
+						let _ = stream.writer.closed().await;
+					}
+					return Ok(());
+				}
+				msg => msg?,
+			};
 			// Junk inside the declared size would otherwise be applied silently, which
 			// is the one decode path that skipped the check the others make.
 			if !data.is_empty() {
@@ -3013,8 +3061,16 @@ where
 		};
 		let (producer, start) = match opened {
 			Opened::Group(producer, start) => (producer, start),
-			// No object at or past object 0 of this group exists, so neither does the group.
-			Opened::EndOfTrack => return end_track(&mut track, group.group_id),
+			// A standalone terminal carries a Location, not a payload group.
+			Opened::EndOfTrack(object) => {
+				return end_track(
+					&mut track,
+					track::Position {
+						group: group.group_id,
+						frame: object,
+					},
+				);
+			}
 		};
 
 		// Guarded: this handler can be dropped at any await below, and a group producer
@@ -3064,9 +3120,15 @@ where
 				let _ = producer.finish();
 			}
 			// No object past this group's last one exists, so the track ends after it.
-			Ok(Ended::Track) => {
+			Ok(Ended::Track(object)) => {
 				let _ = producer.finish();
-				return end_track(&mut track, group.group_id.saturating_add(1));
+				return end_track(
+					&mut track,
+					track::Position {
+						group: group.group_id,
+						frame: object,
+					},
+				);
 			}
 		}
 
@@ -3136,13 +3198,10 @@ where
 /// received is the publisher breaking its own end, which no later group can repair. A
 /// marker that lands after the subscription already ended (its grace expired) changes
 /// nothing.
-fn end_track(track: &mut track::Producer, end: u64) -> Result<(), Error> {
-	if track.final_sequence().is_some() {
-		return Ok(());
-	}
+fn end_track(track: &mut track::Producer, end: track::Position) -> Result<(), Error> {
 	// Lower groups may still be on the wire, behind the one that carried the end.
 	if let Err(err) = track.finish_at_pending(end) {
-		tracing::warn!(%err, end, "invalid END_OF_TRACK");
+		tracing::warn!(%err, ?end, "invalid END_OF_TRACK");
 		let _ = track.clone().abort(Error::ProtocolViolation);
 		return Err(Error::ProtocolViolation);
 	}
@@ -3153,8 +3212,8 @@ fn end_track(track: &mut track::Producer, end: u64) -> Result<(), Error> {
 enum Opened {
 	/// The group producer the stream writes into, and the Object ID it starts at.
 	Group(group::Producer, u64),
-	/// The stream's first object is an END_OF_TRACK at object 0: the group does not exist.
-	EndOfTrack,
+	/// A standalone terminal marker, which creates no payload group.
+	EndOfTrack(u64),
 }
 
 /// How a subgroup stream ended cleanly.
@@ -3163,7 +3222,7 @@ enum Ended {
 	/// The stream finished, or carried an explicit end of group.
 	Group,
 	/// It carried an END_OF_TRACK after the group's last object.
-	Track,
+	Track(u64),
 }
 
 /// Object status: no object at or past this location in the group exists (draft-14, 15).
@@ -3203,8 +3262,8 @@ where
 {
 	/// The group producer this subgroup stream writes into, and the Object ID it starts at.
 	///
-	/// The first object is peeked before any producer exists, since an END_OF_TRACK at
-	/// object 0 means the group does not exist at all. Normally the stream then starts the
+	/// The first object is peeked before any producer exists, since a standalone
+	/// END_OF_TRACK carries no payload group. Normally the stream then starts the
 	/// group. While a fill is outstanding it may instead be the tail of the group the fill
 	/// fetch stream began, which the first Object ID decides.
 	async fn open_group(
@@ -3243,8 +3302,8 @@ where
 				return Err(err);
 			}
 		};
-		if first.is_some_and(|first| first.id == 0 && first.end_of_track) {
-			return Ok(Opened::EndOfTrack);
+		if let Some(first) = first.filter(|first| first.end_of_track) {
+			return Ok(Opened::EndOfTrack(first.id));
 		}
 
 		// FIRST_OBJECT clear is the publisher's claim that the stream starts partway
@@ -4488,7 +4547,8 @@ impl GroupIngest {
 					} else if status == END_OF_TRACK {
 						// Defined on every implemented draft, whether or not the header marks
 						// the group's end.
-						self.phase = IngestPhase::Finished(Ended::Track);
+						self.phase =
+							IngestPhase::Finished(Ended::Track(self.prior_object.expect("status follows object ID")));
 					} else {
 						return Poll::Ready(Err(Error::Unsupported));
 					}
@@ -5073,7 +5133,11 @@ mod tests {
 				state.subscribes.insert(
 					*request_id,
 					TrackState::new(
-						track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), *name, None),
+						track::Producer::new(
+							std::sync::Arc::new(crate::broadcast::Info::default()),
+							*name,
+							crate::track::Info::timed(),
+						),
 						Path::new(broadcast).to_owned(),
 						kio::Producer::new(Fill::Done),
 						None,
@@ -5113,17 +5177,17 @@ mod tests {
 		let mut consumer = {
 			let mut state = subscriber.state.lock();
 			let track = state.subscribes.get_mut(&RequestId(11)).unwrap();
-			track.timescale = Some(Timescale::default());
+			track.timescale = Some(Timescale::MILLI);
 			track.producer.as_ref().unwrap().subscribe(None)
 		};
 
-		let timestamp = crate::Timestamp::new(96_000, Timescale::default()).unwrap();
+		let timestamp = crate::Timestamp::new(96_000, Timescale::MILLI).unwrap();
 		let datagram = |alias: u64, group_id: u64, object_id: Option<u64>, body: ietf::DatagramBody| {
 			let mut properties = Vec::new();
 			ietf::encode_object_time(
 				&mut crate::coding::Encoder::new(&mut properties, Version::Draft19.into()),
 				timestamp,
-				Timescale::default(),
+				Timescale::MILLI,
 				Version::Draft19,
 			)
 			.unwrap();
@@ -5180,15 +5244,15 @@ mod tests {
 		let mut consumer = {
 			let mut state = subscriber.state.lock();
 			let track = state.subscribes.get_mut(&RequestId(11)).unwrap();
-			track.timescale = Some(Timescale::default());
+			track.timescale = Some(Timescale::MILLI);
 			track.producer.as_ref().unwrap().subscribe(None)
 		};
 		let datagram = |group_id: u64| {
 			let mut properties = Vec::new();
 			ietf::encode_object_time(
 				&mut crate::coding::Encoder::new(&mut properties, Version::Draft19.into()),
-				crate::Timestamp::new(96_000, Timescale::default()).unwrap(),
-				Timescale::default(),
+				crate::Timestamp::new(96_000, Timescale::MILLI).unwrap(),
+				Timescale::MILLI,
 				Version::Draft19,
 			)
 			.unwrap();
@@ -5762,7 +5826,11 @@ mod tests {
 				TrackState {
 					alias: Some(7),
 					..TrackState::new(
-						track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None),
+						track::Producer::new(
+							std::sync::Arc::new(crate::broadcast::Info::default()),
+							"video",
+							crate::track::Info::timed(),
+						),
 						Path::new("broadcast").to_owned(),
 						kio::Producer::new(Fill::Done),
 						None,
@@ -7016,7 +7084,7 @@ mod tests {
 			crate::time::Clock::sim(),
 			session.clone(),
 			origin,
-			Control::new(None, false),
+			Control::new(None, true),
 			None,
 			peer::PeerSetup::default(),
 			self_origin,
@@ -7092,6 +7160,32 @@ mod tests {
 				cost: 0,
 			},
 		)
+	}
+
+	/// Namespace updates spend IDs from the same lifetime history as initial requests.
+	#[moq_net_sim::test]
+	async fn namespace_update_cannot_reuse_a_spent_request_id() {
+		let self_origin = crate::Hop::new(5).unwrap();
+		let peer = peer_9();
+		let (clean, _) = clean_and_looped();
+		let script = publish_namespace_updates(std::slice::from_ref(&clean)).await;
+		let (mut subscriber, _consumer, mut stream, _driver) = update_harness(self_origin, &peer, &clean, script).await;
+		let log = subscriber.session.log.clone();
+		// The initial request is already retired; its ID remains permanently spent.
+		assert!(subscriber.control.accept(RequestId(3)).unwrap().is_none());
+		let mut attached = true;
+		let err = subscriber
+			.run_publish_namespace_updates(
+				&mut stream,
+				&crate::Path::new("room/host"),
+				Some(clean),
+				peer,
+				&mut attached,
+			)
+			.await
+			.expect_err("a repeated update ID must close the session");
+		assert!(matches!(err, Error::Session(crate::SessionError::InvalidRequestId)));
+		assert_eq!(log.closes()[0].0, crate::SessionError::InvalidRequestId.to_code());
 	}
 
 	/// A reflected update detaches the route but MUST NOT end the stream. Updates ride
@@ -8473,12 +8567,31 @@ mod stitch_tests {
 		let mut stream = h.stream().await;
 
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-		assert_eq!(h.track.final_sequence(), Some(SEQUENCE + 1));
+		assert_eq!(
+			h.track.end(),
+			Some(track::Position {
+				group: SEQUENCE,
+				frame: 1
+			})
+		);
 
 		let mut group = consumer.recv_group().await.unwrap().expect("the group arrives");
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"last");
 		assert!(group.read_frame().await.unwrap().is_none(), "the group is finished");
 		assert!(consumer.recv_group().await.unwrap().is_none(), "then the track ends");
+	}
+
+	#[moq_net_sim::test]
+	async fn a_standalone_end_of_track_preserves_a_nonzero_object() {
+		let mut marker = tail_stream(5, 5, &[]);
+		for value in [5u64, 0, 0, END_OF_TRACK] {
+			Encoder::new(&mut marker, VERSION.into()).varint(value).unwrap();
+		}
+		let h = Harness::new(Fill::Done, vec![marker]);
+		let mut stream = h.stream().await;
+		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
+		assert_eq!(h.track.end(), Some(track::Position { group: 5, frame: 5 }));
+		assert_eq!(h.track.latest(), None, "a terminal marker creates no payload group");
 	}
 
 	/// A group at or past the end an END_OF_TRACK declared contradicts that end, which no
@@ -8488,7 +8601,7 @@ mod stitch_tests {
 		use futures::FutureExt;
 
 		let mut h = Harness::new(Fill::Done, vec![tail_stream(SEQUENCE, 0, &[b"late"])]);
-		h.track.finish_at(SEQUENCE).unwrap();
+		h.track.finish_at(track::Position::group(SEQUENCE)).unwrap();
 		let mut stream = h.stream().await;
 
 		let res = h.subscriber.clone().recv_group(&mut stream).await;
@@ -8510,7 +8623,7 @@ mod stitch_tests {
 		let mut stream = h.stream().await;
 
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-		assert_eq!(h.track.final_sequence(), Some(SEQUENCE));
+		assert_eq!(h.track.end(), Some(track::Position::group(SEQUENCE)));
 		assert_eq!(h.track.latest(), None, "no group was created");
 	}
 

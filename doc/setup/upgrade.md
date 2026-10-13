@@ -34,6 +34,22 @@ These land with the next breaking release, not the 2026-09-23 train.
   moq-lite 06 and older and moq-transport. moq-lite 07 adds `ANNOUNCE_RESTART`
   (0x3), and lite-06's `ANNOUNCE_RESTART` is named `ANNOUNCE_UPDATE`, as it
   always meant.
+- **@moq/net announced requests follow restarts, and `broadcasts()` is gone.**
+  An unpinned `request(path, { announced: true })` now stays open across
+  publisher instances: its `active` moves to each new instance's broadcast and
+  clears between them, instead of the request ending with `Unroutable`. Read
+  `active` reactively and close the request when done; add `epoch` to keep the
+  old single-instance behavior. `Origin.Producer` and `Origin.Consumer` drop
+  `broadcasts(scope)`; iterate `announced(scope)` and keep the entries you need.
+  `@moq/watch` with `announced` off no longer moves to a later publisher.
+- **"Epoch" means only the publisher epoch.** The reconnect counter is
+  `connects()`: `moq_tokio::Connection::epoch()` and moq-ffi's
+  `MoqSession::epoch()` are `connects()`, which is Python's `connects()`, Go's
+  `Connects()`, Swift's and Kotlin's `connects()`, and Dart's `connects`. The
+  audio re-anchor is `reanchor()`: `moq_audio::encode::Producer::reset_epoch` and
+  moq-ffi's `MoqAudioProducer::reset_epoch` are `reanchor`, which is Python's
+  `reanchor()` (was `reset_epoch()`), Swift's, Kotlin's, and Dart `moq_ffi`'s
+  `reanchor()` (was `resetEpoch()`), and Go's `Reanchor()` (was `ResetEpoch()`).
 - **`moq export ts --linger` waits only for the same publisher instance.** A
   restarted publisher (a new epoch, or any return on a version without one)
   exits 1 unless `--stitch` follows it as a program switch. `export srt` takes
@@ -283,6 +299,11 @@ These land with the next breaking release, not the 2026-09-23 train.
     `Option<Timestamp>`. The `write_frame`, `append_datagram`, and
     `insert_datagram` calls take `impl Into<Option<Timestamp>>`, so passing a
     `Timestamp` still compiles.
+    An undeclared timescale is untimed: `track::Info::default()`,
+    `create_track(name, None)`, and `accept(None)` no longer default to
+    milliseconds, and `Timescale` has no `Default`. A track you write
+    timestamps to declares one, such as
+    `Info::default().with_timescale(Timescale::MILLI)`.
   - moq-e2ee: `Frame` and `Datagram` timestamps are optional, and its writers
     take `impl Into<Option<Timestamp>>`.
   - moq-archive: recording an untimed track fails with `Error::Untimed`, so

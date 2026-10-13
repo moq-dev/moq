@@ -13,6 +13,54 @@ use crate::{
 	ietf, lite, setup, stats,
 };
 
+/// Tracks admitted connections until their handshake or session ends.
+#[derive(Clone, Debug)]
+pub struct Activity {
+	state: kio::Producer<()>,
+	// Admission goes through the weak handle: its open check shares the lock
+	// `close` commits under, so a connection is either counted or refused.
+	admit: kio::ProducerWeak<()>,
+}
+
+impl Default for Activity {
+	fn default() -> Self {
+		let state = kio::Producer::default();
+		let admit = state.weak();
+		Self { state, admit }
+	}
+}
+
+impl Activity {
+	/// Hold the server active until the returned guard is dropped, or `None` once closed.
+	pub fn enter(&self) -> Option<Active> {
+		Some(Active {
+			_guard: self.admit.try_consume()?,
+		})
+	}
+
+	/// Wait until every admitted connection has left, then refuse new ones.
+	pub async fn close(&self) {
+		loop {
+			if self.state.unused().await.is_err() {
+				return;
+			}
+			match self.state.write_unused() {
+				kio::Unused::Idle(state) => return state.close(),
+				// Admitted between the wake and the commit: wait for it too.
+				kio::Unused::Used => continue,
+				kio::Unused::Closed => return,
+			}
+		}
+	}
+}
+
+/// Keeps an admitted connection in the server's active set.
+#[derive(Debug)]
+#[must_use]
+pub struct Active {
+	_guard: kio::Consumer<()>,
+}
+
 /// A MoQ server session builder.
 #[derive(Default, Clone)]
 pub struct Server {
@@ -180,7 +228,7 @@ impl Server {
 		let mut refused = session.clone();
 		self.handshake_lite(now, session)
 			.await
-			.inspect_err(|err| close(&mut refused, err))
+			.inspect_err(|err| close(&mut refused, err, None))
 	}
 
 	async fn handshake_lite<S>(&self, now: Instant, mut session: S) -> Result<Handshake<S>, Error>
@@ -303,7 +351,7 @@ impl Server {
 		let mut refused = session.clone();
 		self.handshake(now, session)
 			.await
-			.inspect_err(|err| close(&mut refused, err))
+			.inspect_err(|err| close(&mut refused, err, None))
 	}
 
 	async fn handshake<S>(&self, now: Instant, mut session: S) -> Result<Handshake<S>, Error>
@@ -603,7 +651,7 @@ where
 	}
 
 	fn close(mut self: Box<Self>, err: Error) {
-		close(&mut self.session, &err);
+		close(&mut self.session, &err, Some(self.version.into()));
 	}
 }
 
@@ -735,7 +783,7 @@ where
 	}
 
 	fn close(mut self: Box<Self>, err: Error) {
-		close(&mut self.session, &err);
+		close(&mut self.session, &err, Some(self.version));
 	}
 }
 
@@ -868,18 +916,20 @@ where
 
 impl<S: crate::transport::poll::Session> RequestInner<S> {
 	fn close(self, err: Error) {
-		let mut session = match self.handshake {
-			PausedHandshake::LiteBare { session, .. } => session,
-			PausedHandshake::LiteSetup { session, .. } => session,
+		let (mut session, version) = match self.handshake {
+			PausedHandshake::LiteBare { session, version } => (session, version),
+			PausedHandshake::LiteSetup { session, version, .. } => (session, version),
 			PausedHandshake::Boxed(paused) => return paused.close(err),
 		};
-		close(&mut session, &err);
+		close(&mut session, &err, Some(version.into()));
 	}
 }
 
 /// Close `session` with `err`'s wire code.
-fn close<S: crate::transport::poll::Session>(session: &mut S, err: &Error) {
-	session.close(SessionError::from(err).to_code(), &err.to_string());
+fn close<S: crate::transport::poll::Session>(session: &mut S, err: &Error, version: Option<Version>) {
+	let error = SessionError::from(err);
+	let code = version.map_or_else(|| error.to_code(), |version| version.session_code(&error));
+	session.close(code, &err.to_string());
 }
 
 impl<S: crate::transport::poll::Session> Drop for Handshake<S> {

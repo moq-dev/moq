@@ -173,16 +173,15 @@ class Picture {
 	}
 }
 
-type Read = NonNullable<Awaited<ReturnType<Container.Consumer["next"]>>>;
-function sample(group: number, timestamp: number, discontinuity = 0, keyframe = true): Read {
+type Read = Container.Read;
+function sample(group: number, timestamp: number, keyframe = true): Read {
 	return {
+		kind: "frame",
 		group,
-		discontinuity,
-		continuous: true,
-		skipped: false,
 		frame: { arrival: Time.Milli.now(), timestamp: Time.Micro(timestamp), payload: new Uint8Array([1]), keyframe },
 	};
 }
+const gap: Read = { kind: "gap" };
 
 async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: readonly number[] = []) {
 	const originalDecoder = Object.getOwnPropertyDescriptor(globalThis, "VideoDecoder");
@@ -424,20 +423,20 @@ it("clears the picture once no rendition is selectable", async () => {
 	}
 });
 
-// A late marker from older history raises a discontinuity without making older groups newer.
-function marker(group: number, end: number, discontinuity: number): Read {
-	return { group, discontinuity, continuous: false, skipped: false, frame: undefined, end: Time.Micro(end) };
+// A late marker from older history breaks the timeline without making older groups newer.
+function marker(group: number, end: number): Read {
+	return { kind: "end", group, end: Time.Micro(end) };
 }
 
 for (const kind of ["legacy", "cmaf"] as const) {
-	it(`${kind} skips older groups before decode, even across a stale marker's discontinuity`, async () => {
+	it(`${kind} skips older groups before decode, even across a stale marker`, async () => {
 		const playback = await guardedPlayback(kind, [
 			sample(10, 1000),
 			sample(9, 900),
 			sample(10, 1100),
-			marker(8, 850, 1),
-			sample(7, 700, 1),
-			sample(11, 1200, 1),
+			marker(8, 850),
+			sample(7, 700),
+			sample(11, 1200),
 		]);
 		try {
 			expect(playback.submitted).toEqual([1000, 1100, 1200]);
@@ -452,9 +451,9 @@ for (const kind of ["legacy", "cmaf"] as const) {
 
 	// A group may restart at its own start, so a picture already queued from later in that
 	// group is above the new keyframe. It must not come out afterwards and late-reject it.
-	it(`${kind} drops a picture queued before a discontinuity`, async () => {
+	it(`${kind} drops a picture queued before a gap`, async () => {
 		const queued = 60_000_000;
-		const playback = await guardedPlayback(kind, [sample(1, 0), sample(1, queued), sample(2, 0, 1)], [queued]);
+		const playback = await guardedPlayback(kind, [sample(1, 0), sample(1, queued), gap, sample(2, 0)], [queued]);
 		try {
 			expect(playback.submitted).toEqual([0, queued, 0]);
 			expect(playback.outputs).toEqual([0, 0]);
@@ -465,15 +464,15 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		}
 	});
 
-	// A stale marker (or a max-delay hole) can bump the playhead while the live group is only
-	// partly delivered, so the next frame is a delta that still needs the decoder's references.
-	it(`${kind} keeps decoding a delta that follows a discontinuity`, async () => {
+	// A stale marker can break the timeline while the live group is only partly delivered, so the
+	// next frame is a delta that still needs the decoder's references.
+	it(`${kind} keeps decoding a delta that follows a stale marker`, async () => {
 		const playback = await guardedPlayback(kind, [
 			sample(10, 1000),
-			sample(10, 1100, 0, false),
-			marker(8, 850, 1),
-			sample(10, 1200, 1, false),
-			sample(11, 1300, 1),
+			sample(10, 1100, false),
+			marker(8, 850),
+			sample(10, 1200, false),
+			sample(11, 1300),
 		]);
 		try {
 			expect(playback.submitted).toEqual([1000, 1100, 1200, 1300]);
@@ -609,7 +608,7 @@ it("a shared audio clock reset cannot present a parked video frame", async () =>
 		playback.enabled.set(false);
 		playback.delay.set(Time.Milli(1000));
 		await microtasks();
-		reads.push(sample(0, 0), sample(0, 100_000, 0, false));
+		reads.push(sample(0, 0), sample(0, 100_000, false));
 		playback.enabled.set(true);
 		await microtasks();
 		expect(playback.submitted).toEqual([0, 100_000]);
@@ -651,7 +650,7 @@ it("closing the track releases a video wait parked across a reset", async () => 
 		playback.enabled.set(false);
 		playback.delay.set(Time.Milli(1000));
 		await microtasks();
-		reads.push(sample(0, 0), sample(0, 100_000, 0, false));
+		reads.push(sample(0, 0), sample(0, 100_000, false));
 		playback.enabled.set(true);
 		await microtasks();
 		expect(playback.submitted).toEqual([0, 100_000]);
@@ -686,7 +685,7 @@ it("a reset drops a parked video frame even when the next anchor restores the re
 		playback.enabled.set(false);
 		playback.delay.set(Time.Milli(1000));
 		await microtasks();
-		reads.push(sample(0, 0), sample(0, 100_000, 0, false));
+		reads.push(sample(0, 0), sample(0, 100_000, false));
 		playback.enabled.set(true);
 		await microtasks();
 		expect(playback.submitted).toEqual([0, 100_000]);

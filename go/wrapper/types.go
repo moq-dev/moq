@@ -1,6 +1,10 @@
 package moq
 
-import ffi "moq.dev/moq-ffi/moq"
+import (
+	"time"
+
+	ffi "moq.dev/moq-ffi/moq"
+)
 
 // Record, enum, and small object types re-exported from the ffi layer without the Moq prefix.
 // These are plain data, so type aliases are exact: a moq.AudioFrame is an
@@ -29,7 +33,7 @@ type (
 	ProtocolKind = ffi.MoqProtocolKind
 	// OriginConfig configures a new origin, such as its maximum cache size in bytes.
 	OriginConfig = ffi.MoqOriginConfig
-	// Route is the hop chain a broadcast takes to reach an origin, and its static production and link cost (lower wins).
+	// Route is the publisher Epoch a broadcast is announced under (nil when unknown), the hop chain it takes to reach an origin, and its static production and link cost (lower wins).
 	Route = ffi.MoqRoute
 	// Announce is a route over a prefix: the origin-relative Prefix, what each filter
 	// wildcard matched (nil Captures for a route that only overlaps the scope), and the
@@ -37,7 +41,7 @@ type (
 	// [OriginConsumer.RequestBroadcast].
 	Announce = ffi.MoqAnnounce
 	// AnnounceEvent is what an AnnounceConsumer yields: AnnounceEventStart,
-	// AnnounceEventUpdate, or AnnounceEventEnd.
+	// AnnounceEventUpdate, AnnounceEventEnd, or AnnounceEventRestart.
 	AnnounceEvent = ffi.MoqAnnounceEvent
 	// AnnounceEventStart reports a route now covering a prefix that had none.
 	AnnounceEventStart = ffi.MoqAnnounceEventStart
@@ -45,6 +49,9 @@ type (
 	AnnounceEventUpdate = ffi.MoqAnnounceEventUpdate
 	// AnnounceEventEnd reports that no route covers a prefix any more, carrying its last route.
 	AnnounceEventEnd = ffi.MoqAnnounceEventEnd
+	// AnnounceEventRestart reports another publisher instance now serving a prefix:
+	// drop what was resolved under it and request afresh.
+	AnnounceEventRestart = ffi.MoqAnnounceEventRestart
 	// VideoDecoderOutput configures what DecodeVideo delivers: an optional resize, a max delay, and whether frames keep the decoder's surface (macOS only; refused elsewhere).
 	VideoDecoderOutput = ffi.MoqVideoDecoderOutput
 	// VideoSurface is a decoded frame's platform surface, from VideoDecodedFrame.Surface: VideoSurfacePixelBuffer on macOS and iOS.
@@ -139,6 +146,23 @@ const (
 // LogLevel configures the native tracing log level (e.g. "info", "debug").
 func LogLevel(level string) error {
 	return ffi.MoqLogLevel(level)
+}
+
+// MintEpoch mints a fresh publisher epoch from the wall clock and secure randomness,
+// ordered newest last. Mint one per publisher run and announce it in Route.Epoch, so
+// viewers see a restart as a new broadcast instead of a stalled one.
+func MintEpoch() string {
+	return ffi.MoqMintEpoch()
+}
+
+// EpochTime is the wall-clock time an epoch encodes, to the millisecond. It
+// returns ErrInvalidEpoch unless epoch is a lowercase hyphenated UUIDv7.
+func EpochTime(epoch string) (time.Time, error) {
+	ms, err := ffi.MoqEpochTimeMs(epoch)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.UnixMilli(int64(ms)), nil
 }
 
 // Protocol registries and recognized kinds carried by ProtocolError.

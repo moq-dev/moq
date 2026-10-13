@@ -42,6 +42,11 @@ mod test {
 
 	use super::*;
 
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	fn cfg(compression: bool) -> Config {
 		Config {
 			compression: if compression {
@@ -55,7 +60,7 @@ mod test {
 	fn producer(compression: bool) -> (Producer, moq_net::track::Subscriber) {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", None)
+			.create_track("test", timed())
 			.unwrap();
 		let consumer = track.subscribe(None);
 		(Producer::new(track, cfg(compression)), consumer)
@@ -83,7 +88,7 @@ mod test {
 	fn a_lost_group_waits_for_its_replacement() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", None)
+			.create_track("test", timed())
 			.unwrap();
 		let mut consumer = consume(track.subscribe(None), false);
 		let waiter = kio::Waiter::noop();

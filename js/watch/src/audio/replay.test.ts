@@ -154,13 +154,14 @@ describe.each(["shared", "post"] as const)("%s ingress diagnostics", (ring) => {
 		const direct = await run();
 		const held = await run(1200);
 		expect(held).toEqual(direct);
-		expect(held).toEqual(
-			trace.map((entry) => ({
+		expect(held).toEqual([
+			{ kind: "gap" },
+			...trace.map((entry) => ({
+				kind: "frame",
 				timestamp: Time.Milli(entry.timestamp),
 				arrival: Time.Milli(entry.at),
 				late: false,
-				skipped: false,
 			})),
-		);
+		]);
 	});
 });

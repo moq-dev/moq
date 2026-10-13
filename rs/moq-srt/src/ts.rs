@@ -426,7 +426,7 @@ mod tests {
 	}
 
 	/// A two-program multiplex, each program carrying one private PES stream (carried
-	/// verbatim) and its first PES, which anchors the clock and so publishes the catalog:
+	/// verbatim) and its first PES plus a complete PCR measurement window:
 	/// program 1's on PID 0x101, program 2's on 0x201.
 	fn two_programs() -> Bytes {
 		let mut ts = psi_packet(0x0000, &pat(&[(1, 0x0100), (2, 0x0200)]));
@@ -434,6 +434,23 @@ mod tests {
 		ts.extend_from_slice(&psi_packet(0x0200, &pmt(2, 0x06, 0x0201)));
 		ts.extend_from_slice(&pes_packet(0x0101, 90_000));
 		ts.extend_from_slice(&pes_packet(0x0201, 90_000));
+		// Complete the startup rate window before expecting a live catalog.
+		for index in 0..=8u64 {
+			let base = index * 22_500;
+			for pid in [0x0101u16, 0x0201] {
+				let mut packet = vec![0x47, (pid >> 8) as u8, pid as u8, 0x20, 183, 0x10];
+				packet.extend_from_slice(&[
+					(base >> 25) as u8,
+					(base >> 17) as u8,
+					(base >> 9) as u8,
+					(base >> 1) as u8,
+					((base & 1) as u8) << 7 | 0x7e,
+					0,
+				]);
+				packet.resize(188, 0xff);
+				ts.extend_from_slice(&packet);
+			}
+		}
 		ts.into()
 	}
 
@@ -630,10 +647,9 @@ mod tests {
 
 		let track = broadcast.track(name.as_str()).unwrap().subscribe(None).await.unwrap();
 		let mut reader = moq_mux::container::Consumer::new(track, Container::Legacy(moq_mux::container::Kind::Data));
-		let cue = timeout(Duration::from_secs(5), reader.read())
+		let cue = timeout(Duration::from_secs(5), next_frame(&mut reader))
 			.await
 			.expect("cue read timed out")
-			.unwrap()
 			.expect("a published cue section");
 		let expected_cue = cue.payload;
 		assert_eq!(expected_cue[0], 0xFC, "a verbatim splice_info_section (table_id 0xFC)");
@@ -679,15 +695,24 @@ mod tests {
 			.expect("SRT egress preserves the SCTE-35 track");
 		let track = roundtrip_consumer.track(name).unwrap().subscribe(None).await.unwrap();
 		let mut reader = moq_mux::container::Consumer::new(track, Container::Legacy(moq_mux::container::Kind::Data));
-		let cue = timeout(Duration::from_secs(5), reader.read())
+		let cue = timeout(Duration::from_secs(5), next_frame(&mut reader))
 			.await
 			.expect("round-trip cue read timed out")
-			.unwrap()
 			.expect("SRT egress preserves a cue section");
 		assert_eq!(cue.payload[0], 0xFC, "the round-trip cue is a splice_info_section");
 		assert_eq!(
 			cue.payload, expected_cue,
 			"SRT egress preserves the complete cue section"
 		);
+	}
+
+	/// The next frame, passing over gaps and ends.
+	async fn next_frame(reader: &mut moq_mux::container::Consumer<Container>) -> Option<moq_mux::container::Frame> {
+		loop {
+			match reader.read().await.unwrap()? {
+				moq_mux::container::Read::Frame { frame, .. } => return Some(frame),
+				moq_mux::container::Read::Gap | moq_mux::container::Read::End { .. } => continue,
+			}
+		}
 	}
 }

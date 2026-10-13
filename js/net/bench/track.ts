@@ -87,7 +87,7 @@ async function measure(
 	// Completion wakes every subscriber independently of producer closure.
 	const ending = subscribers.map((subscriber) => subscriber.recvGroup());
 	const endStart = now();
-	producer.finishAt(sequence);
+	producer.finishAt({ group: sequence, frame: 0 });
 	for (const group of await Promise.all(ending)) {
 		if (group) throw new Error("track did not end at its declared boundary");
 	}

@@ -3,10 +3,10 @@ import { Time } from "@moq/net";
 import { Producer } from "./arrivals";
 
 const frame = (arrival: number) => ({
+	kind: "frame" as const,
 	timestamp: Time.Milli(arrival),
 	arrival: Time.Milli(arrival),
 	late: false,
-	skipped: false,
 });
 
 test("a handle receives every frame written while it is open", async () => {

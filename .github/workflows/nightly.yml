@@ -105,6 +105,16 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just js bench broadcasts
 
+      - name: JS request ID admission benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just js bench request-ids
+
+      # A restart should cost the same whether one or many requests follow the path,
+      # and an unrelated route should wake none of them.
+      - name: JS origin request restart benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just js bench requests
+
       # A route above several interest heads lands once per head, so its re-price
       # should expose any slope over heads times received routes.
       - name: JS origin announce forwarding benchmark
@@ -140,6 +150,12 @@ jobs:
       - name: JS track retention benchmark
         if: ${{ !cancelled() }}
         run: nix develop --command just js bench track
+
+      # Fails if charging a subscription costs more as the session holds more
+      # broadcasts and tracks, which means the cap accounting went back to scanning.
+      - name: JS session interest accounting benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just js bench interests
 
       - name: JS catalog estimate fanout benchmark
         if: ${{ !cancelled() }}
@@ -185,6 +201,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command cargo bench --locked -p moq-mux --bench catalog -- --test
 
+      - name: Archive timeline FETCH fanout benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs test -p moq-archive benchmark_timeline_fetch_fanout --run-ignored only --success-output immediate
+
       - name: TS damage PID benchmark
         if: ${{ !cancelled() }}
         run: nix develop --command just rs test -p moq-mux benchmark_damage_pid_fanout --run-ignored only --success-output immediate
@@ -221,6 +241,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just rs c-tests
 
+      - name: TS table alignment
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --pair
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
       # The TS exporter's PCR release timing. Everything else about the stream
       # can be graded from a capture, but *when* the bytes were handed over
       # cannot: the grader has to sit on the exporter's stdout for the length of
@@ -235,6 +261,15 @@ jobs:
       - name: TS timing
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --live --duration 120
+
+      - name: Upload TS pair failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: nightly-ts-pair
+          path: ${{ runner.temp }}/moq-test-runs
+          if-no-files-found: ignore
+          retention-days: 7
 
   tests:
     name: Tests (${{ matrix.recipe }})
@@ -351,6 +386,12 @@ jobs:
       - name: Browser publisher fairness benchmark
         run: nix develop --command just js serve-bench
         shell: bash -leo pipefail {0}
+      - name: Native headless playback
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test native-play
+        shell: bash -leo pipefail {0}
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
       - name: Audio quality
         if: ${{ !cancelled() }}
         run: nix develop --command just test audio-quality --enforce --capture

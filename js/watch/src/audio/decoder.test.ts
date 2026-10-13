@@ -67,16 +67,14 @@ class FakeData {
 	close() {}
 }
 
-type Read = NonNullable<Awaited<ReturnType<Container.Consumer["next"]>>>;
+type Read = Container.Read;
 
 let frameTimestamp = 0;
-function frame(): Read {
+function frame(): Extract<Read, { kind: "frame" }> {
 	frameTimestamp += 20_000;
 	return {
+		kind: "frame",
 		group: 0,
-		discontinuity: 0,
-		continuous: true,
-		skipped: false,
 		frame: {
 			arrival: Time.Milli.now(),
 			timestamp: Time.Micro(frameTimestamp),
@@ -240,7 +238,7 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 		const timestamps: number[] = [];
 		for (let i = 0; i < count; i++) {
 			const read = frame();
-			timestamps.push(read.frame?.timestamp ?? 0);
+			timestamps.push(read.frame.timestamp);
 			push(read);
 			await microtasks();
 		}
@@ -298,23 +296,23 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 	};
 }
 
-it("decodes an audio packet inside a group after a playhead discontinuity", async () => {
+it("decodes an audio packet inside a group after a gap", async () => {
 	const playback = await play(Time.Milli(100));
 	try {
 		await playback.play();
-		// Opened late, so it observes only the frame below.
+		// Opened late, so it observes only the gap and frame below.
 		const arrivals = playback.arrivals();
+		playback.push({ kind: "gap" });
 		const next = frame();
-		next.discontinuity = 1;
-		if (!next.frame) throw new Error("missing test frame");
 		next.frame.keyframe = false;
 		playback.push(next);
 		await microtasks();
 		expect(playback.inserted()).toContain(next.frame.timestamp);
+		expect(await arrivals.next()).toEqual({ kind: "gap" });
 		expect(await arrivals.next()).toMatchObject({
+			kind: "frame",
 			timestamp: Time.Milli.fromMicro(next.frame.timestamp),
 			arrival: next.frame.arrival,
-			skipped: false,
 		});
 		arrivals.close();
 		expect(await arrivals.next()).toBeUndefined();

@@ -1,16 +1,18 @@
 import type { Time } from "@moq/net";
 
-/** One received frame, including a latency skip immediately before it. */
-export interface Arrival {
-	/** Media presentation time in milliseconds. */
-	timestamp: Time.Milli;
-	/** Monotonic transport ingress time in milliseconds. */
-	arrival: Time.Milli;
-	/** Whether ingress missed the playback deadline. */
-	late: boolean;
-	/** Whether latency enforcement skipped content before this frame. */
-	skipped: boolean;
-}
+/** One received frame, or a gap where media will never arrive, in delivery order. */
+export type Arrival =
+	| {
+			kind: "frame";
+			/** Media presentation time in milliseconds. */
+			timestamp: Time.Milli;
+			/** Monotonic transport ingress time in milliseconds. */
+			arrival: Time.Milli;
+			/** Whether ingress missed the playback deadline. */
+			late: boolean;
+	  }
+	/** Media before the next frame never reached the decoder: the join, a latency skip, or a hole. */
+	| { kind: "gap" };
 
 interface State {
 	queue: Arrival[];
@@ -21,7 +23,7 @@ interface State {
 }
 
 /**
- * Every frame a decoder receives while this handle is open, in delivery order.
+ * Every frame a decoder receives while this handle is open, and every gap between them, in delivery order.
  *
  * Unread entries queue until {@link next} takes them, so read continuously or close the handle;
  * closing releases the queue. Obtain one from a decoder's `arrivals()`.
@@ -37,7 +39,7 @@ export class Arrivals implements AsyncIterable<Arrival> {
 		this.#open = open;
 	}
 
-	/** Get the next received frame, or `undefined` once the handle or its decoder closes. */
+	/** Get the next frame or gap, or `undefined` once the handle or its decoder closes. */
 	async next(): Promise<Arrival | undefined> {
 		if (this.#reading) throw new Error("multiple calls to next not supported");
 		this.#reading = true;
@@ -65,7 +67,7 @@ export class Arrivals implements AsyncIterable<Arrival> {
 		}
 	}
 
-	/** Iterate received frames until the handle or its decoder closes; leaving the loop closes the handle. */
+	/** Iterate frames and gaps until the handle or its decoder closes; leaving the loop closes the handle. */
 	async *[Symbol.asyncIterator](): AsyncIterator<Arrival> {
 		try {
 			for (;;) {
@@ -88,7 +90,7 @@ export class Arrivals implements AsyncIterable<Arrival> {
 	}
 }
 
-/** Fans each received frame out to the open {@link Arrivals} handles. @internal */
+/** Fans each frame and gap out to the open {@link Arrivals} handles. @internal */
 export class Producer {
 	readonly #open = new Set<State>();
 	#closed = false;

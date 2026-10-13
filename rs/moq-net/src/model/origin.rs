@@ -5,8 +5,8 @@ use std::{
 	collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
 	fmt,
 	sync::Arc,
-	sync::atomic::{AtomicU64, Ordering},
-	task::{Poll, ready},
+	sync::atomic::{AtomicBool, AtomicU64, Ordering},
+	task::{Context, Poll, Wake, Waker, ready},
 	time::Duration,
 };
 
@@ -2347,9 +2347,30 @@ struct Asked {
 	sub: Option<kio::Pending<track::Subscribing>>,
 }
 
+/// Queues just the logical track whose watched resource changed.
+struct TrackReady {
+	name: Arc<str>,
+	queue: kio::Queue<Arc<str>>,
+	queued: AtomicBool,
+}
+
+impl Wake for TrackReady {
+	fn wake(self: Arc<Self>) {
+		self.wake_by_ref();
+	}
+
+	fn wake_by_ref(self: &Arc<Self>) {
+		if !self.queued.swap(true, Ordering::AcqRel) {
+			let _ = self.queue.try_push(self.name.clone());
+		}
+	}
+}
+
 /// The driver's side of one logical track: the handles behind the names the
 /// machine uses.
 struct TrackIo {
+	ready: Arc<TrackReady>,
+	park: kio::Park,
 	/// The logical track, until the first copy says what it is.
 	request: Option<track::Request>,
 	/// The logical track once accepted. Nothing writes it: its readers read the
@@ -2376,6 +2397,7 @@ struct TrackIo {
 impl TrackIo {
 	/// Serve the track from `asked`'s copy, accepting it with that copy's info first.
 	fn splice(&mut self, asked: Asked) {
+		self.ready.wake_by_ref();
 		if let Some(request) = self.request.take() {
 			let info = asked.info.clone().unwrap_or_default();
 			self.accepted = Some(request.routes(self.routes.consume()).accept(info));
@@ -2388,6 +2410,7 @@ impl TrackIo {
 	/// End the track: cleanly with `Ok`, or failed for good. Readers drain what the
 	/// serving copy still holds.
 	fn end(&mut self, result: Result<(), Error>) {
+		self.ready.wake_by_ref();
 		self.query = None;
 		self.staged = None;
 		self.copy = None;
@@ -2407,6 +2430,18 @@ impl TrackIo {
 			}
 		}
 	}
+}
+
+/// A track the ended front left in flight, held until its last reader leaves. It
+/// keeps none of the driver's wake state, which would queue its name for a driver
+/// that is gone.
+struct InFlight {
+	weak: track::TrackWeak,
+	routes: super::resume::Producer,
+	// Kept for its readers: the logical track, its copy, and the copy's subscription.
+	_accepted: Option<track::Producer>,
+	_copy: Option<track::Consumer>,
+	_held: Option<kio::Pending<track::Subscribing>>,
 }
 
 /// Drives one front until it ends, then holds the tracks it left in flight until
@@ -2471,7 +2506,7 @@ fn pick<'a>(
 /// until the front ends; returns the tracks it ended in flight. The decisions live
 /// in the machine; this only waits and executes, so nothing here decides anything
 /// twice.
-async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
+async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 	let FrontTask {
 		shared,
 		broadcast,
@@ -2519,6 +2554,7 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 	}
 	let mut upstream: Option<Upstream> = None;
 	let mut tracks: HashMap<Arc<str>, TrackIo> = HashMap::new();
+	let ready: kio::Queue<Arc<str>> = kio::Queue::new();
 	let mut deadline = crate::time::Deadline::new(&timers);
 	// The watch generation the last selection saw.
 	let mut seen = 0;
@@ -2754,6 +2790,7 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 					}
 					Action::Query { track: name, source } => {
 						let Some(io) = tracks.get_mut(&name) else { continue };
+						io.ready.wake_by_ref();
 						let closing = sources.get(&source).is_some_and(|s| s.is_closing());
 						match sources.get(&source).map(|s| s.track(&name)) {
 							Some(Ok(copy)) => {
@@ -2792,6 +2829,7 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 					}
 					Action::Park { track: name } => {
 						let Some(io) = tracks.get_mut(&name) else { continue };
+						io.ready.wake_by_ref();
 						// Drop the copy so its source goes idle at once. A returning
 						// reader gets a fresh one, so nothing cached can be stale.
 						io.routes.park();
@@ -2887,7 +2925,21 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 								continue;
 							}
 							io.routes.conclude();
-							in_flight.push(io);
+							let TrackIo {
+								weak,
+								routes,
+								accepted,
+								copy,
+								held,
+								..
+							} = io;
+							in_flight.push(InFlight {
+								weak,
+								routes,
+								_accepted: accepted,
+								_copy: copy.map(|(_, copy)| copy),
+								_held: held,
+							});
 						}
 						return in_flight;
 					}
@@ -2925,43 +2977,56 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 			{
 				return Poll::Ready(Step::SourceClosed(id));
 			}
-			for (name, io) in &mut tracks {
-				if let Some((asked, query)) = &mut io.query
-					&& let Poll::Ready(result) = query.poll(waiter)
-				{
-					return Poll::Ready(Step::Info(name.clone(), asked.source, result));
-				}
-				// The query's subscription goes with the last reader.
-				if io.held.is_some()
-					&& let Some(accepted) = &mut io.accepted
-				{
-					while let Poll::Ready(Ok(_)) = accepted.poll_subscription_changed(waiter) {}
-					if accepted.subscription().is_none() {
-						io.held = None;
+			while let Poll::Ready(Ok(name)) = ready.poll_pop(waiter) {
+				let Some(io) = tracks.get_mut(&name) else { continue };
+				io.ready.queued.store(false, Ordering::Release);
+				let waker = Waker::from(io.ready.clone());
+				let waiter = io.park.hold(&Context::from_waker(&waker));
+				let step = (|| {
+					if let Some((asked, query)) = &mut io.query
+						&& let Poll::Ready(result) = query.poll(waiter)
+					{
+						return Some(Step::Info(name.clone(), asked.source, result));
 					}
-				}
-				// Settled once the copy closes: a group still open below a declared end is
-				// owed until then, and a session closing first means it never came.
-				if let Some((source, copy)) = &io.copy
-					&& copy.poll_closed(waiter).is_ready()
-				{
-					let result = match copy.poll_complete(&kio::Waiter::noop()) {
-						Poll::Ready(result) => result,
-						Poll::Pending => Err(Error::Dropped),
+					// The query's subscription goes with the last reader.
+					if io.held.is_some()
+						&& let Some(accepted) = &mut io.accepted
+					{
+						while let Poll::Ready(Ok(_)) = accepted.poll_subscription_changed(waiter) {}
+						if accepted.subscription().is_none() {
+							io.held = None;
+						}
+					}
+					// Settled once the copy closes: a group still open below a declared end is
+					// owed until then, and a session closing first means it never came.
+					if let Some((source, copy)) = &io.copy
+						&& copy.poll_closed(waiter).is_ready()
+					{
+						let result = match copy.poll_complete(&kio::Waiter::noop()) {
+							Poll::Ready(result) => result,
+							Poll::Pending => Err(Error::Dropped),
+						};
+						let delivered = copy.latest().is_some();
+						return Some(Step::Ended(name.clone(), *source, result, delivered));
+					}
+					// Watch the demand edge in whichever direction is unmet. Only `Pending`
+					// parks, so an answer steps and the handler looks again, polling anew when
+					// nothing changed. A closed track is unread: it owes one `Unused` if
+					// recorded read, and is no edge after.
+					let edge = match io.used {
+						true => io.weak.poll_unused(waiter).is_ready(),
+						false => matches!(io.weak.poll_used(waiter), Poll::Ready(Ok(()))),
 					};
-					let delivered = copy.latest().is_some();
-					return Poll::Ready(Step::Ended(name.clone(), *source, result, delivered));
-				}
-				// Watch the demand edge in whichever direction is unmet. Only `Pending`
-				// parks, so an answer steps and the handler looks again, polling anew when
-				// nothing changed. A closed track is unread: it owes one `Unused` if
-				// recorded read, and is no edge after.
-				let edge = match io.used {
-					true => io.weak.poll_unused(waiter).is_ready(),
-					false => matches!(io.weak.poll_used(waiter), Poll::Ready(Ok(()))),
-				};
-				if edge {
-					return Poll::Ready(Step::Demand(name.clone()));
+					if edge {
+						return Some(Step::Demand(name.clone()));
+					}
+					None
+				})();
+				if let Some(step) = step {
+					// A ready answer did not park on its next edge. Revisit this track
+					// once the machine has consumed the event and applied its actions.
+					io.ready.wake_by_ref();
+					return Poll::Ready(step);
 				}
 			}
 			// The same for whoever holds the broadcast itself.
@@ -2985,9 +3050,17 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 		let event = match step {
 			Step::Assigned(request) => {
 				let name: Arc<str> = request.name().into();
+				let track_ready = Arc::new(TrackReady {
+					name: name.clone(),
+					queue: ready.clone(),
+					queued: AtomicBool::new(false),
+				});
+				track_ready.wake_by_ref();
 				tracks.insert(
 					name.clone(),
 					TrackIo {
+						ready: track_ready,
+						park: Default::default(),
 						weak: request.weak(),
 						request: Some(request),
 						accepted: None,
@@ -5338,7 +5411,7 @@ mod tests {
 	fn a_finished_logical_track_does_not_warn() {
 		let warns = count_drop_warnings("track::Producer dropped without finish", || {
 			let broadcast = Arc::new(broadcast::Info::default());
-			let source = track::Producer::new(broadcast.clone(), "catalog.json", None);
+			let source = track::Producer::new(broadcast.clone(), "catalog.json", crate::track::Info::timed());
 			let mut group = source.create_group(7u64.into()).unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"snapshot".as_ref()).unwrap();
 			group.finish().unwrap();
@@ -5351,6 +5424,12 @@ mod tests {
 			let weak = request.weak();
 			let accepted = request.routes(routes.consume()).accept(None);
 			let mut io = TrackIo {
+				ready: Arc::new(TrackReady {
+					name: "catalog.json".into(),
+					queue: kio::Queue::new(),
+					queued: AtomicBool::new(false),
+				}),
+				park: Default::default(),
 				request: None,
 				accepted: Some(accepted),
 				weak,
@@ -6717,7 +6796,7 @@ mod tests {
 		broadcast.unannounce();
 		settle(|| resolved.is_closed()).await;
 
-		let source = request.accept(None);
+		let source = request.accept(crate::track::Info::timed());
 		let mut group = source.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"late".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -6758,7 +6837,7 @@ mod tests {
 			.await
 			.expect("the front asked the source")
 			.expect("request");
-		let source = request.resolving_start().accept(None);
+		let source = request.resolving_start().accept(crate::track::Info::timed());
 		let mut group = source.create_group(0u64.into()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"snapshot".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -6817,7 +6896,7 @@ mod tests {
 			.dynamic("room", Route::default().with_hops(hops(&[10])))
 			.unwrap();
 		let upstream = broadcast::Info::new().produce();
-		let source = upstream.create_track("video", None).unwrap();
+		let source = upstream.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = source.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"live".as_ref()).unwrap();
 
@@ -6895,7 +6974,7 @@ mod tests {
 			.dynamic("room", Route::default().with_hops(hops(&[10])))
 			.unwrap();
 		let upstream = broadcast::Info::new().produce();
-		let source = upstream.create_track("video", None).unwrap();
+		let source = upstream.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = source.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"live".as_ref()).unwrap();
 		let fronts = || producer.shared.lock().fronts.len();
@@ -7025,7 +7104,7 @@ mod tests {
 			.dynamic("room", Route::default().with_hops(hops(&[10, 7])).with_cost(100))
 			.unwrap();
 		let upstream = broadcast::Info::new().produce();
-		let source = upstream.create_track("video", None).unwrap();
+		let source = upstream.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = source.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"live".as_ref()).unwrap();
 		let fronts = || producer.shared.lock().fronts.len();
@@ -7118,7 +7197,11 @@ mod tests {
 		// A reader is mid-way through the open group when the route changes.
 		let track = resolved.track("log").unwrap();
 		let subscribing = moq_net_sim::spawn(async move { track.subscribe(None).await });
-		let source = dynamic.requested_track().await.unwrap().accept(None);
+		let source = dynamic
+			.requested_track()
+			.await
+			.unwrap()
+			.accept(crate::track::Info::timed());
 		let mut group = source.create_group(0u64.into()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"a".as_ref()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"b".as_ref()).unwrap();
@@ -7166,14 +7249,14 @@ mod tests {
 		let serving = fetched.clone();
 		let _fetching = moq_net_sim::spawn(async move {
 			while let Ok(request) = fetches.requested_group().await {
-				let mut group = request.accept(None).unwrap();
+				let mut group = request.accept(crate::track::Info::timed()).unwrap();
 				for frame in [b"a", b"b", b"c"] {
 					group.write_frame(crate::Timestamp::ZERO, frame.as_ref()).unwrap();
 				}
 				serving.lock().unwrap().push(group);
 			}
 		});
-		let mut next = request.resolving_start().accept(None);
+		let mut next = request.resolving_start().accept(crate::track::Info::timed());
 		next.start_at(0).unwrap();
 		let mut next_group = next.create_group(0u64.into()).unwrap();
 		next_group.start_at(2).unwrap();
@@ -7266,7 +7349,7 @@ mod tests {
 			.await
 			.expect("the front asked the source")
 			.expect("request");
-		let source = request.accept(None);
+		let source = request.accept(crate::track::Info::timed());
 		let mut group = source.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"cached".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -7292,7 +7375,7 @@ mod tests {
 		settle(|| resolved.is_closed()).await;
 
 		// A fresh source copy numbers groups past what the cache already delivered.
-		let source = request.accept(None);
+		let source = request.accept(crate::track::Info::timed());
 		let mut group = source.create_group(1u64.into()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"late".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -8261,7 +8344,7 @@ mod tests {
 
 		let source = broadcast::Info::new().produce();
 		for name in ["a", "b"] {
-			let track = source.create_track(name, None).unwrap();
+			let track = source.create_track(name, crate::track::Info::timed()).unwrap();
 			let mut group = track.append_group().unwrap();
 			group.write_frame(crate::Timestamp::ZERO, name.as_bytes()).unwrap();
 			group.finish().unwrap();
@@ -8485,7 +8568,7 @@ mod tests {
 			let pending = consumer.request_broadcast("room/alice", None);
 			let request = queued(&server).await;
 			let source = broadcast::Info::new().produce();
-			let track = source.create_track("video", None).unwrap();
+			let track = source.create_track("video", crate::track::Info::timed()).unwrap();
 			let mut group = track.append_group().unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
 			group.finish().unwrap();
@@ -8534,7 +8617,7 @@ mod tests {
 	async fn assert_resumes(rig: &mut ResumeRig, server: &Dynamic) {
 		let request = queued(server).await;
 		let replacement = broadcast::Info::new().produce();
-		let track = replacement.create_track("video", None).unwrap();
+		let track = replacement.create_track("video", crate::track::Info::timed()).unwrap();
 		// The same content: group 0 was already delivered through the old route,
 		// so the track resumes at group 1.
 		let mut group = track.append_group().unwrap();
@@ -8577,7 +8660,7 @@ mod tests {
 			.unwrap();
 		let pending = consumer.request_broadcast("room/alice", None);
 		let source = broadcast::Info::new().produce();
-		let track = source.create_track("video", None).unwrap();
+		let track = source.create_track("video", crate::track::Info::timed()).unwrap();
 		queued(&first).await.accept(&source);
 		let resolved = pending.await.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
@@ -8614,7 +8697,7 @@ mod tests {
 				Route::default().with_epoch(crate::Epoch::mint()).with_cost(1),
 			)
 			.unwrap();
-		let old_track = old.create_track("video", None).unwrap();
+		let old_track = old.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		deliver(&old_track, &mut subscription, b"old").await;
@@ -8625,7 +8708,7 @@ mod tests {
 				Route::default().with_epoch(crate::Epoch::mint()).with_cost(9),
 			)
 			.unwrap();
-		let new_track = new.create_track("video", None).unwrap();
+		let new_track = new.create_track("video", crate::track::Info::timed()).unwrap();
 		deliver(&old_track, &mut subscription, b"sticky").await;
 
 		let replaced = consumer.request_broadcast("room/alice", None).await.expect("resolves");
@@ -8655,7 +8738,7 @@ mod tests {
 		let old = producer
 			.publish("room/alice", Route::default().with_epoch(first.clone()))
 			.unwrap();
-		let _old_track = old.create_track("video", None).unwrap();
+		let _old_track = old.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		assert_eq!(
 			resolved.info().epoch.as_ref(),
@@ -8667,7 +8750,7 @@ mod tests {
 		let new = producer
 			.publish("room/alice", Route::default().with_epoch(epoch.clone()))
 			.unwrap();
-		let new_track = new.create_track("video", None).unwrap();
+		let new_track = new.create_track("video", crate::track::Info::timed()).unwrap();
 		let named = consumer.request_broadcast("room/alice", epoch.clone());
 		let bare = consumer.request_broadcast("room/alice", None);
 
@@ -8704,9 +8787,9 @@ mod tests {
 		let new = producer
 			.publish("room/alice", Route::default().with_epoch(crate::Epoch::mint()))
 			.unwrap();
-		let new_track = new.create_track("video", None).unwrap();
+		let new_track = new.create_track("video", crate::track::Info::timed()).unwrap();
 		let stale = broadcast::Info::new().produce();
-		let _stale_track = stale.create_track("video", None).unwrap();
+		let _stale_track = stale.create_track("video", crate::track::Info::timed()).unwrap();
 		request.accept(&stale);
 
 		let resolved = pending.await.expect("resolves the winner");
@@ -8731,7 +8814,7 @@ mod tests {
 		let request = queued(&dynamic).await;
 
 		let stale = broadcast::Info::new().produce();
-		let _stale_track = stale.create_track("video", None).unwrap();
+		let _stale_track = stale.create_track("video", crate::track::Info::timed()).unwrap();
 		let epoch = crate::Epoch::mint();
 		if answer_first {
 			request.accept(&stale);
@@ -8743,7 +8826,7 @@ mod tests {
 
 		let request = queued(&dynamic).await;
 		let fresh = broadcast::Info::new().produce();
-		let fresh_track = fresh.create_track("video", None).unwrap();
+		let fresh_track = fresh.create_track("video", crate::track::Info::timed()).unwrap();
 		request.accept(&fresh);
 		let resolved = pending.await.expect("the request carries over to the new instance");
 		assert_eq!(resolved.info().epoch.as_ref(), Some(&epoch));
@@ -8785,7 +8868,7 @@ mod tests {
 		dynamic.update(dynamic.route().with_epoch(epoch.clone())).unwrap();
 
 		let fresh = broadcast::Info::new().produce();
-		let fresh_track = fresh.create_track("video", None).unwrap();
+		let fresh_track = fresh.create_track("video", crate::track::Info::timed()).unwrap();
 		queued(&dynamic).await.accept(&fresh);
 		let resolved = pending.await.expect("the request carries over");
 		assert_eq!(resolved.info().epoch.as_ref(), Some(&epoch));
@@ -8811,11 +8894,11 @@ mod tests {
 			.unwrap();
 		dynamic.update(dynamic.route().with_epoch(old.clone())).unwrap();
 		let stale = broadcast::Info::new().produce();
-		let _stale_track = stale.create_track("video", None).unwrap();
+		let _stale_track = stale.create_track("video", crate::track::Info::timed()).unwrap();
 		request.accept(&stale);
 
 		let fresh = broadcast::Info::new().produce();
-		let fresh_track = fresh.create_track("video", None).unwrap();
+		let fresh_track = fresh.create_track("video", crate::track::Info::timed()).unwrap();
 		queued(&dynamic).await.accept(&fresh);
 		let resolved = pending.await.expect("the request carries over");
 		assert_eq!(resolved.info().epoch.as_ref(), Some(&old));
@@ -8833,7 +8916,7 @@ mod tests {
 		let dynamic = producer.dynamic("room", Route::default()).unwrap();
 		let pending = consumer.request_broadcast("room/alice", None);
 		let old = broadcast::Info::new().produce();
-		let _old_track = old.create_track("video", None).unwrap();
+		let _old_track = old.create_track("video", crate::track::Info::timed()).unwrap();
 		queued(&dynamic).await.accept(&old);
 		let resolved = pending.await.expect("resolves");
 
@@ -8846,7 +8929,7 @@ mod tests {
 
 		let retry = consumer.request_broadcast("room/alice", None);
 		let fresh = broadcast::Info::new().produce();
-		let _fresh_track = fresh.create_track("video", None).unwrap();
+		let _fresh_track = fresh.create_track("video", crate::track::Info::timed()).unwrap();
 		queued(&dynamic).await.accept(&fresh);
 		let replaced = retry.await.expect("the new instance resolves");
 		assert!(!replaced.is_clone(&resolved), "rejoined the first instance's front");
@@ -8933,8 +9016,8 @@ mod tests {
 	async fn incompatible_successor_is_refused() {
 		for replacement in [
 			track::Info::default().with_timescale(crate::Timescale::MICRO),
-			track::Info::default().with_priority(7),
-			track::Info::default().with_max_age(Duration::from_secs(7)),
+			track::Info::timed().with_priority(7),
+			track::Info::timed().with_max_age(Duration::from_secs(7)),
 		] {
 			let (mut rig, incumbent, source) = ResumeRig::new(&[10]).await;
 			let standby_server = rig.standby(&[10, 20]);
@@ -9043,7 +9126,7 @@ mod tests {
 			let pending = consumer.request_broadcast("room/alice", None);
 			let request = queued(&incumbent).await;
 			let source = broadcast::Info::new().produce();
-			let track = source.create_track("video", None).unwrap();
+			let track = source.create_track("video", crate::track::Info::timed()).unwrap();
 			let mut group = track.append_group().unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
 			group.finish().unwrap();
@@ -9071,7 +9154,7 @@ mod tests {
 				None => {
 					let request = queued(&echo).await;
 					let replacement = broadcast::Info::new().produce();
-					let track = replacement.create_track("video", None).unwrap();
+					let track = replacement.create_track("video", crate::track::Info::timed()).unwrap();
 					let mut group = track.append_group().unwrap();
 					group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
 					group.finish().unwrap();
@@ -9108,7 +9191,7 @@ mod tests {
 		let pending = consumer.request_broadcast("room/alice", None);
 		let request = queued(&server_a).await;
 		let source_a = broadcast::Info::new().produce();
-		let track_a = source_a.create_track("video", None).unwrap();
+		let track_a = source_a.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = track_a.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"from-a".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -9160,7 +9243,7 @@ mod tests {
 		let pending = consumer.request_broadcast("room/alice", None);
 		let request = queued(&server_b).await;
 		let source_b = broadcast::Info::new().produce();
-		let track_b = source_b.create_track("video", None).unwrap();
+		let track_b = source_b.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = track_b.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"from-b".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -9199,7 +9282,7 @@ mod tests {
 			.update(Route::default().with_hops(hops(&[10])).with_cost(9))
 			.unwrap();
 
-		let track = source.create_track("audio", None).unwrap();
+		let track = source.create_track("audio", crate::track::Info::timed()).unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"steady".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -9282,7 +9365,7 @@ mod tests {
 		let consumer = producer.consume();
 
 		let broadcast = producer.publish("room/alice", Route::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let mut subscription = resolved
@@ -9329,7 +9412,7 @@ mod tests {
 		let pending = consumer.request_broadcast("room/alice", None);
 		let request = queued(&server).await;
 		let source = broadcast::Info::new().produce();
-		let track = source.create_track("video", None).unwrap();
+		let track = source.create_track("video", crate::track::Info::timed()).unwrap();
 		request.accept(&source);
 
 		let resolved = pending.await.expect("resolves");
@@ -9395,7 +9478,7 @@ mod tests {
 		let consumer = producer.consume();
 
 		let broadcast = producer.publish("room/alice", Route::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"cached".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -9459,7 +9542,7 @@ mod tests {
 			.unwrap();
 		let pending = producer.consume().request_broadcast("live", None);
 		let source = broadcast::Info::new().produce();
-		let track = source.create_track("video", None).unwrap();
+		let track = source.create_track("video", crate::track::Info::timed()).unwrap();
 		queued(&server).await.accept(&source);
 		let resolved = pending.await.unwrap();
 
@@ -9495,7 +9578,7 @@ mod tests {
 	async fn a_group_the_source_aborts_ends_while_the_track_lives() {
 		let producer = origin(1).produce();
 		let broadcast = producer.publish("live", Route::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = producer.consume().request_broadcast("live", None).await.unwrap();
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 
@@ -9529,7 +9612,7 @@ mod tests {
 		let leaf_consumer = leaf.consume();
 
 		let broadcast = leaf.publish("room/alice", Route::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"cached".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -9625,7 +9708,7 @@ mod tests {
 		let first = producer
 			.publish("room/alice", Route::default().with_epoch(epoch()))
 			.unwrap();
-		let track = first.create_track("video", None).unwrap();
+		let track = first.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let mut subscription = resolved
 			.track("video")
@@ -9678,7 +9761,7 @@ mod tests {
 			.unwrap();
 		let pending = producer.consume().request_broadcast("room/alice", None);
 		let upstream = broadcast::Info::new().produce();
-		let old = upstream.create_track("video", None).unwrap();
+		let old = upstream.create_track("video", crate::track::Info::timed()).unwrap();
 		queued(&server).await.accept(&upstream);
 		let resolved = pending.await.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
@@ -9779,7 +9862,7 @@ mod tests {
 		let first = producer
 			.publish("room/alice", Route::default().with_epoch(epoch()))
 			.unwrap();
-		let track = first.create_track("video", None).unwrap();
+		let track = first.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.append_group().unwrap();
@@ -9815,7 +9898,7 @@ mod tests {
 		let first = producer
 			.publish("room/alice", Route::default().with_epoch(epoch()))
 			.unwrap();
-		let track = first.create_track("video", None).unwrap();
+		let track = first.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.append_group().unwrap();
@@ -9870,7 +9953,7 @@ mod tests {
 		let first = producer
 			.publish("room/alice", Route::default().with_epoch(epoch()))
 			.unwrap();
-		let track = first.create_track("video", None).unwrap();
+		let track = first.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.append_group().unwrap();
@@ -10028,7 +10111,7 @@ mod tests {
 		let run = moq_net_sim::spawn(crate::time::run_sim(driver));
 		let consumer = producer.consume();
 		let broadcast = producer.publish("room/alice", Route::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let sub = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 
@@ -10052,7 +10135,7 @@ mod tests {
 		let run = moq_net_sim::spawn(crate::time::run_sim(driver));
 		let consumer = producer.consume();
 		let broadcast = producer.publish("room/alice", Route::default()).unwrap();
-		let mut track = broadcast.create_track("video", None).unwrap();
+		let mut track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let sub = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let pending = resolved.track("video").unwrap().subscribe(None);
@@ -10079,7 +10162,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let broadcast = producer.publish("room/alice", Route::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let sub = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		moq_net_sim::timeout(Duration::from_secs(1), track.demand().used())
@@ -10362,7 +10445,7 @@ mod tests {
 		let expiry = Duration::from_secs(1);
 		let origin = expiring_origin(expiry);
 		let broadcast = origin.create_broadcast("test").unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 
 		let mut stalled = track.append_group().unwrap();
 		stalled.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
@@ -10394,7 +10477,7 @@ mod tests {
 		}
 		.produce();
 		let broadcast = origin.create_broadcast("test").unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 
 		let mut stalled = track.append_group().unwrap();
 		stalled.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();

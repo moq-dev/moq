@@ -10,6 +10,10 @@ one without the plugin reconnecting.
 
 ## Plan
 
+This quest exposes session AUTH only. Per-request setters and verifier APIs
+remain deferred until a consumer needs them (confirmed 2026-10-12); do not
+export the experimental Rust request hook through the bindings here.
+
 - `MoqSession` in `rs/moq-ffi/src/session.rs` gains `auth()` returning an
   `Arc<MoqAuth>` object, the shape `publisher()` uses, with `grant() ->
   Option<MoqGrant>` (a record: publish patterns, subscribe patterns, expiry

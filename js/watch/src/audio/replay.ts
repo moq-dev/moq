@@ -3,7 +3,7 @@
  *
  * Every frame is written into its group at the instant the trace says it arrived, and the player's
  * real `Container.Consumer` decides what to deliver, wait for, and skip, at the max delay the delay
- * sets. Delivered frames go into the real ring, and a discontinuity resets it, the way the decoder
+ * sets. Delivered frames go into the real ring, and a new codec epoch resets it, the way the decoder
  * does. One render quantum is read every quantum's worth of that same clock, which is what the
  * AudioWorklet does. A real {@link Sync} resolves the delay from the playout target the decoder
  * registers, measured by that same consumer from the recorded catalog config, and the ring follows
@@ -70,7 +70,7 @@ export interface Options {
 
 /** One render quantum, as the worklet produced it. */
 export interface Quantum {
-	/** Every frame the decoder received so far, in delivery order. Grows between yields. */
+	/** Every frame and gap the decoder received so far, in delivery order. Grows between yields. */
 	arrivals: readonly Diagnostic[];
 	/** When it finished rendering, on the trace's clock, in ms. */
 	at: number;
@@ -230,12 +230,13 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			const next = await consumer.next();
 			if (!next) return;
 			if (terminal.update(next)) ring.reset();
-			if (next.end !== undefined || !next.frame) continue;
+			if (next.kind === "gap") arrivals.push({ kind: "gap" });
+			if (next.kind !== "frame") continue;
 
 			const { timestamp, arrival } = next.frame;
 			const media = Time.Milli.fromMicro(timestamp);
 			const late = sync.received(media, "audio", arrival);
-			arrivals.push({ timestamp: media, arrival, late, skipped: next.skipped });
+			arrivals.push({ kind: "frame", timestamp: media, arrival, late });
 			const length = samples.get(timestamp);
 			if (length === undefined) throw new Error(`the consumer delivered an unrecorded frame at ${timestamp} us`);
 			ring.insert(timestamp, [new Float32Array(length).fill(0.5)]);

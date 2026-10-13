@@ -764,6 +764,11 @@ mod tests {
 	use crate::catalog::hang::Container;
 	use moq_net::Timestamp;
 
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	/// Mint a standalone track for tests via a throwaway broadcast, since tracks are
 	/// born from their broadcast (no public `track::Producer::new`).
 	fn track_producer(
@@ -1432,7 +1437,7 @@ mod tests {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let timelines = crate::timeline::Timelines::new(&broadcast);
 		let recorder = timelines.track("video", crate::timeline::Config::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", timed()).unwrap();
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video))
 			.with_buffer(std::time::Duration::from_secs(10))
 			.with_recorder(recorder);
@@ -1459,7 +1464,7 @@ mod tests {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let timelines = crate::timeline::Timelines::new(&broadcast);
 		let recorder = timelines.track("video", crate::timeline::Config::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", timed()).unwrap();
 		let mut producer =
 			Producer::new(track, Container::Legacy(crate::container::Kind::Video)).with_recorder(recorder);
 
@@ -1682,7 +1687,7 @@ mod tests {
 		let mut consumer =
 			crate::container::Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Video));
 		let mut timestamps = Vec::new();
-		while let Some(frame) = consumer.read().await.unwrap() {
+		while let Some(frame) = consumer.read_frame().await.unwrap() {
 			timestamps.push(frame.timestamp.as_micros());
 		}
 		assert_eq!(timestamps, [1_000_000, 1_040_000, 1_050_000]);

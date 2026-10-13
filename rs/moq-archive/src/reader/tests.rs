@@ -706,3 +706,135 @@ async fn open_requires_every_timeline_info() {
 	let result = Reader::open(store, &broadcast, config).await;
 	assert!(matches!(result, Err(Error::NotFound(_))));
 }
+
+#[tokio::test(start_paused = true)]
+async fn evicted_timeline_groups_remain_fetchable() {
+	let mut archive = Archive::new().await;
+	archive.add("video", 0..1, 1).await;
+	archive.add("video", 1..2, 1).await;
+	let mut info = broadcast::Info::new();
+	info.pool = moq_net::cache::Pool::new(moq_net::cache::Config::default().with_expiry(Duration::from_millis(100)));
+	let pool = info.pool.clone();
+	let broadcast = info.produce();
+	let reader = Reader::open(archive.store.clone(), &broadcast, archive.config())
+		.await
+		.unwrap();
+	let serve = tokio::spawn(reader.serve());
+	let expected = fetch(&broadcast, &timeline("video"), 0, 0).await.unwrap();
+	let now = moq_net::time::Instant::now();
+	pool.gc(now);
+	pool.gc(now + Duration::from_secs(1));
+	assert_eq!(fetch(&broadcast, &timeline("video"), 0, 0).await.unwrap(), expected);
+	// Past the end of an evicted complete group is EOF, as it is for a cached one.
+	pool.gc(now + Duration::from_secs(2));
+	pool.gc(now + Duration::from_secs(3));
+	assert!(
+		fetch(&broadcast, &timeline("video"), 0, expected.len() as u64 + 1)
+			.await
+			.unwrap()
+			.is_empty()
+	);
+	serve.abort();
+	let _ = serve.await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn enrolled_timeline_fetch_survives_finish() {
+	let mut archive = Archive::new().await;
+	archive.add("video", 0..1, 1).await;
+	let mut info = broadcast::Info::new();
+	info.pool = moq_net::cache::Pool::new(moq_net::cache::Config::default().with_expiry(Duration::from_secs(30)));
+	let broadcast = info.produce();
+	let mut reader = Reader::open(archive.store.clone(), &broadcast, archive.config())
+		.await
+		.unwrap();
+	let serving = tokio::spawn(reader.serve());
+	archive.add("audio", 0..1, 1).await;
+	archive.add("audio", 1..2, 1).await;
+	reader.track("audio", &timeline("audio")).await.unwrap();
+	reader.refresh().await.unwrap();
+	let expected = fetch(&broadcast, &timeline("audio"), 0, 0).await.unwrap();
+	reader.finish().unwrap();
+	let now = moq_net::time::Instant::now();
+	broadcast.info().pool.gc(now);
+	broadcast.info().pool.gc(now + Duration::from_secs(31));
+	assert_eq!(fetch(&broadcast, &timeline("audio"), 0, 0).await.unwrap(), expected);
+	let missing = fetch(&broadcast, &timeline("audio"), 2, 0).await;
+	assert!(
+		matches!(missing, Err(moq_net::Error::NotFound)),
+		"unknown timeline group: {missing:?}"
+	);
+	// Complete groups retain their known end, so a read past it is EOF.
+	assert!(
+		fetch(&broadcast, &timeline("audio"), 0, expected.len() as u64 + 1)
+			.await
+			.unwrap()
+			.is_empty()
+	);
+	serving.abort();
+	let _ = serving.await;
+}
+
+#[tokio::test(start_paused = true)]
+#[ignore = "run explicitly to measure timeline FETCH fanout"]
+async fn benchmark_timeline_fetch_fanout() {
+	for tracks in [1, 16, 128] {
+		for readers in [1, 16, 128] {
+			let mut archive = Archive::new().await;
+			for index in 0..tracks {
+				let name = format!("video-{index}");
+				archive.add(&name, 0..1, 1).await;
+				archive.add(&name, 1..2, 1).await;
+			}
+			let mut info = broadcast::Info::new();
+			info.pool =
+				moq_net::cache::Pool::new(moq_net::cache::Config::default().with_expiry(Duration::from_secs(30)));
+			let broadcast = info.produce();
+			let reader = Reader::open(archive.store.clone(), &broadcast, archive.config())
+				.await
+				.unwrap();
+			let serving = tokio::spawn(reader.serve());
+			let name = timeline("video-0");
+			let mut now = moq_net::time::Instant::now();
+			broadcast.info().pool.gc(now);
+			let mut elapsed = Duration::ZERO;
+			for _ in 0..20 {
+				// One sweep dates recent reads; the next expires them.
+				for _ in 0..2 {
+					now += Duration::from_secs(31);
+					broadcast.info().pool.gc(now);
+				}
+				let subscription = moq_net::track::Subscription::default()
+					.with_start(moq_net::track::Position::group(0))
+					.with_max_delay(Duration::from_secs(60));
+				let mut retained = broadcast
+					.consume()
+					.track(&name)
+					.unwrap()
+					.subscribe(subscription)
+					.await
+					.unwrap()
+					.ordered();
+				assert_eq!(
+					retained.next_group().await.unwrap().unwrap().sequence,
+					1,
+					"benchmark must fetch an evicted group"
+				);
+				let started = std::time::Instant::now();
+				let results = futures::future::join_all((0..readers).map(|_| fetch(&broadcast, &name, 0, 0))).await;
+				elapsed += started.elapsed();
+				assert!(
+					results
+						.iter()
+						.all(|result| result.as_ref().is_ok_and(|frames| !frames.is_empty()))
+				);
+			}
+			println!(
+				"timeline-fetch tracks={tracks} readers={readers} mean_us={:.1}",
+				elapsed.as_secs_f64() * 1_000_000.0 / 20.0
+			);
+			serving.abort();
+			let _ = serving.await;
+		}
+	}
+}

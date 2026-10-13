@@ -20,6 +20,7 @@ mod producer;
 mod source;
 #[cfg(test)]
 pub(crate) mod test_util;
+mod text;
 
 pub mod flv;
 pub mod fmp4;
@@ -42,6 +43,30 @@ pub enum Kind {
 	Video,
 	/// Opaque data has no sample-duration semantics.
 	Data,
+}
+
+/// One item of a [`Consumer`] read, in delivery order.
+#[derive(Clone, Debug)]
+pub enum Read {
+	/// A media frame from `group`.
+	Frame {
+		/// The group's sequence number. Only equality means anything: numbers may skip.
+		group: u64,
+		frame: Frame,
+	},
+	/// Media before the next item will never reach this reader: it joined mid-track, or a
+	/// group was skipped, evicted, or never arrived. A decoder resumes from here without
+	/// the references or state that media built.
+	Gap,
+	/// The publisher declared that its media stops at `end`: it paused, switched source, or
+	/// finished. Frames that follow from the same `group` are the stopped encoder's final
+	/// packets (an audio codec's drain), whose output at or past `end` is padding. The next
+	/// group starts fresh.
+	End {
+		/// The group's sequence number. Only equality means anything: numbers may skip.
+		group: u64,
+		end: moq_net::Timestamp,
+	},
 }
 
 /// A decoded media frame: timestamp, payload bytes, keyframe flag.

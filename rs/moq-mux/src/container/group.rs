@@ -87,6 +87,11 @@ mod tests {
 	use super::*;
 	use crate::catalog::hang::Container as Hang;
 
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	fn frame(timestamp_us: u64, payload: &'static [u8], keyframe: bool) -> Frame {
 		Frame {
 			timestamp: moq_net::Timestamp::from_micros(timestamp_us).unwrap(),
@@ -100,7 +105,7 @@ mod tests {
 	#[tokio::test]
 	async fn reads_a_group_to_completion() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let track = broadcast.create_track("media", None).unwrap();
+		let track = broadcast.create_track("media", timed()).unwrap();
 		let consumer = broadcast.consume();
 
 		let mut media = crate::container::Producer::new(track, Hang::Legacy(crate::container::Kind::Data));
@@ -139,11 +144,11 @@ mod tests {
 				subscription,
 				Hang::new(&config, crate::container::Kind::Data).unwrap(),
 			);
-			let first = live.read().await.unwrap().unwrap();
+			let first = live.read_frame().await.unwrap().unwrap();
 			assert!(first.payload.is_empty());
 			assert!(first.keyframe);
-			assert_eq!(live.read().await.unwrap().unwrap().payload, b"data".as_slice());
-			assert!(live.read().await.unwrap().is_none());
+			assert_eq!(live.read_frame().await.unwrap().unwrap().payload, b"data".as_slice());
+			assert!(live.read_frame().await.unwrap().is_none());
 			let group = consumer.track("data").unwrap().fetch_group(0, None).await.unwrap();
 			let mut fetched = GroupConsumer::new(group, Hang::new(&config, crate::container::Kind::Data).unwrap());
 			assert!(fetched.read().await.unwrap().unwrap().payload.is_empty());
@@ -156,7 +161,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_duration_marker_times_the_last_frame() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let track = broadcast.create_track("media", None).unwrap();
+		let track = broadcast.create_track("media", timed()).unwrap();
 		let consumer = broadcast.consume();
 
 		let mut media = crate::container::Producer::new(track, Hang::Legacy(crate::container::Kind::Video));
