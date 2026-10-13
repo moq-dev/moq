@@ -1012,6 +1012,53 @@ test("Consumer reads no gap when retiring a group holding only its endpoint", as
 	consumer.close();
 });
 
+// A truncated group lost its tail, so retiring it for the max delay is a gap even when the
+// next group is adjacent.
+test("Consumer reads a gap when retiring a truncated group", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(replay(track), { format: new LegacyFormat("audio"), maxDelay: 150 as Time.Milli });
+
+	const group = new Group.Producer(0);
+	group.writeFrame({ payload: encodeLegacy(0 as Time.Micro), timestamp: Time.Timestamp.now() });
+	track.writeGroup(group);
+	await settle();
+	expect(await consumer.next()).toEqual({ kind: "gap" });
+	expect(frameOf(await consumer.next()).timestamp).toBe(0 as Time.Micro);
+
+	group.close(new NetError.Stream(StreamCode.Cancel));
+	writeGroupWithLegacyFrames(track, 1, [100_000 as Time.Micro]);
+	writeGroupWithLegacyFrames(track, 2, [200_000 as Time.Micro]);
+	await settle();
+
+	expect(await consumer.next()).toEqual({ kind: "gap" });
+	expect(frameOf(await consumer.next()).timestamp).toBe(100_000 as Time.Micro);
+
+	consumer.close();
+});
+
+// An open group may still have a tail in flight, so adjacency proves nothing when it is retired.
+test("Consumer reads a gap when retiring an open group", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(replay(track), { format: new LegacyFormat("audio"), maxDelay: 150 as Time.Milli });
+
+	const group = new Group.Producer(0);
+	group.writeFrame({ payload: encodeLegacy(0 as Time.Micro), timestamp: Time.Timestamp.now() });
+	track.writeGroup(group);
+	await settle();
+	expect(await consumer.next()).toEqual({ kind: "gap" });
+	expect(frameOf(await consumer.next()).timestamp).toBe(0 as Time.Micro);
+
+	writeGroupWithLegacyFrames(track, 1, [100_000 as Time.Micro]);
+	writeGroupWithLegacyFrames(track, 2, [200_000 as Time.Micro]);
+	await settle();
+
+	expect(await consumer.next()).toEqual({ kind: "gap" });
+	expect(frameOf(await consumer.next()).timestamp).toBe(100_000 as Time.Micro);
+
+	group.close();
+	consumer.close();
+});
+
 // --- Buffered signal ---
 
 test("Consumer buffered signal updates as frames arrive", async () => {
