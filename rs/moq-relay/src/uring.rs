@@ -721,7 +721,9 @@ async fn serve_connection(
 			.tokio
 			.spawn(async move {
 				// Abandoned at the drain deadline: worker teardown only detaches this task.
-				let admitted = shutdown.admit(cluster.admit_session(&auth, auth_request.clone())).await?;
+				let admitted = shutdown
+					.admit(cluster.admit_session(&auth, auth_request.clone()))
+					.await?;
 				Ok::<_, crate::auth::Error>((admitted, sessions.register(auth_request)))
 			})
 			.await

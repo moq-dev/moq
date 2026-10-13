@@ -88,10 +88,10 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 				request.accept(grant(["a"], []));
 			}
 			const results = await Promise.all(pending);
-			const refused = results.flatMap((result) => ("err" in result ? [result.err] : []));
-			expect(refused).toHaveLength(1);
+			const errors = results.flatMap((result) => ("err" in result ? [result.err] : []));
+			expect(errors).toHaveLength(1);
 			// moq-transport's AUTH_ERROR registry only distinguishes unsupported from unauthorized.
-			expect((refused[0] as SessionError).code).toBe(
+			expect((errors[0] as SessionError).code).toBe(
 				protocol === Lite.ALPN_07_WIP ? SessionCode.TooManyRequests : SessionCode.Unauthorized,
 			);
 			for (const result of results) if ("token" in result) result.token.close();

@@ -171,7 +171,7 @@ impl Refresh {
 			return;
 		}
 		if self.pending.len() >= 128 {
-			request.reject(SessionError::TooManyRequests, "too many pending tokens");
+			request.reject(SessionError::TooManyRequests, "too many tokens being verified");
 			return;
 		}
 		let Ok(token) = std::str::from_utf8(request.token()) else {
@@ -458,7 +458,10 @@ mod tests {
 		tokio::select! {
 			biased;
 			_ = admissions.next() => panic!("withdrawal released an in-flight verification slot"),
-			result = auth.add("overflow") => assert!(result.is_err()),
+			result = auth.add("overflow") => assert!(matches!(
+				result,
+				Err(moq_net::Error::Session(SessionError::TooManyRequests))
+			)),
 		}
 		client.abort(moq_net::Error::Cancel);
 		supervising.abort();

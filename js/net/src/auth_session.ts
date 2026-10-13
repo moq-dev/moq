@@ -218,9 +218,15 @@ class RequestQueue implements Requests {
 
 	/** Queue the token for the application, or refuse it when closed or full. */
 	push(request: PeerRequest): void {
-		if (this.#closed) return request.reject(SessionCode.Unauthorized, "not accepting tokens");
+		if (this.#closed) {
+			request.reject(SessionCode.Unauthorized, "not accepting tokens");
+			return;
+		}
 		if (this.#queue.length >= 128) this.#queue = this.#queue.filter((queued) => !queued.ended);
-		if (this.#queue.length >= 128) return request.reject(SessionCode.TooManyRequests, "too many pending tokens");
+		if (this.#queue.length >= 128) {
+			request.reject(SessionCode.TooManyRequests, "too many pending tokens");
+			return;
+		}
 		const waiter = this.#waiters.shift();
 		if (waiter) waiter(request);
 		else this.#queue.push(request);
