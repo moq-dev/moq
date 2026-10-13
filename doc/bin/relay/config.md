@@ -41,7 +41,6 @@ solicit = false                      # Decline MoQ Solicit, so peers may announc
 
 `timeout` bounds the whole handshake, transport through MoQ SETUP, so a peer
 that connects and never speaks is closed instead of held open by keep-alives.
-The `io_uring` workers do not apply it.
 
 A setting no configured listener reads stops startup rather than being ignored.
 A stream-only relay refuses `preferred_v4`, `preferred_v6`, and `lb_id` (or `load_balancer`), which

@@ -133,8 +133,9 @@ impl Request {
 	/// take the CONNECT request.
 	///
 	/// Everything the session later spawns runs on the worker already driving
-	/// `conn`. There is no timeout here; a peer that stalls mid-handshake is
-	/// bounded by the connection's idle timeout.
+	/// `conn`. No deadline here: a caller bounding the handshake, say by
+	/// [`Connection::handshake_deadline`], drops this future, which closes
+	/// the connection with an HTTP/3 error.
 	pub async fn accept(conn: Connection) -> Result<Self, Error> {
 		// The endpoint and driver retain this connection after the future is
 		// dropped. Own its close before the first await; the returned Request
