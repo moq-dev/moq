@@ -186,23 +186,31 @@ impl Polling {
 			}
 		}
 
-		// Delivered on unwind too, so a panicking poll loses no wakeup.
-		let _scope = POLLING.with(|polling| Scope {
-			outer: polling.current.replace(Some((waker.data(), waker.vtable()))),
-			start: polling.held.borrow().len(),
-		});
+		// Delivered on unwind too, so a panicking poll loses no wakeup. Polled from a
+		// thread-local's destructor after the scope is gone, nothing is held at all.
+		let _scope = POLLING
+			.try_with(|polling| Scope {
+				outer: polling.current.replace(Some((waker.data(), waker.vtable()))),
+				start: polling.held.borrow().len(),
+			})
+			.ok();
 		poll()
 	}
 
 	/// Keep back a wake of `parent` when it is the innermost batch on this thread.
+	///
+	/// A wake from a thread-local's destructor may run after the scope is gone; it
+	/// is delivered.
 	fn hold(parent: &Waker, shared: &Arc<Shared>) -> bool {
-		POLLING.with(|polling| {
-			if polling.current.get() != Some((parent.data(), parent.vtable())) {
-				return false;
-			}
-			polling.held.borrow_mut().push(shared.clone());
-			true
-		})
+		POLLING
+			.try_with(|polling| {
+				if polling.current.get() != Some((parent.data(), parent.vtable())) {
+					return false;
+				}
+				polling.held.borrow_mut().push(shared.clone());
+				true
+			})
+			.unwrap_or(false)
 	}
 }
 
@@ -642,6 +650,41 @@ mod tests {
 		fn wake(self: Arc<Self>) {
 			self.0.fetch_add(1, Ordering::SeqCst);
 		}
+	}
+
+	/// A task woken by a thread-local's destructor, after the batch scope's own
+	/// thread-local is gone, still wakes the owner rather than panicking there.
+	#[test]
+	fn a_wake_during_thread_teardown_reaches_the_owner() {
+		type Set = Tasks<Box<dyn FnMut(&Waiter) -> Poll<()>>>;
+		struct Teardown {
+			gate: crate::Producer<bool>,
+			_tasks: Set,
+		}
+		impl Drop for Teardown {
+			fn drop(&mut self) {
+				open(&self.gate);
+			}
+		}
+		std::thread_local! {
+			static TEARDOWN: RefCell<Option<Teardown>> = const { RefCell::new(None) };
+		}
+
+		let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+		let waker = Waker::from(wakes.clone());
+		std::thread::spawn(move || {
+			// Touched before the batch scope, so destroyed after it: destructors run LIFO.
+			TEARDOWN.with(|_| {});
+			let gate = crate::Producer::new(false);
+			let mut tasks: Set = Tasks::new();
+			tasks.push(Box::new(gated(gate.consume(), Arc::new(AtomicUsize::new(0)))));
+			let waiter = Waiter::new(waker);
+			assert!(waiter.batch(|| tasks.poll(&waiter)).is_pending());
+			TEARDOWN.with(|teardown| *teardown.borrow_mut() = Some(Teardown { gate, _tasks: tasks }));
+		})
+		.join()
+		.unwrap();
+		assert_eq!(wakes.0.load(Ordering::SeqCst), 1, "the teardown wake was lost");
 	}
 
 	/// An owner whose poll wakes a task in its own set, then polls the set, took that
