@@ -92,6 +92,12 @@ host still poll in place; independent native wake callbacks can run concurrently
 The generated bindings resume Swift continuations. Use the appropriate actor
 when updating UI state.
 
+A session closed for exceeding the relay's request caps reports the protocol
+kind `ProtocolKind.tooManyRequests`. Reduce
+the simultaneous announcements or subscriptions, or ask the relay operator
+to adjust the [session limits](/bin/relay/config#session-and-peer), before
+reconnecting with the same workload.
+
 ## Reference
 
 - API reference: [Swift Package Index (DocC)](https://swiftpackageindex.com/moq-dev/moq-swift/documentation/moq)

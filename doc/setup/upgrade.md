@@ -168,13 +168,15 @@ These land with the next breaking release, not the 2026-09-23 train.
   the rendition's own delay added on top. `Sync.out.jitter` now always
   equals `Sync.out.delay`, and `"auto"` with no decoder registered resolves to
   0 rather than 100 ms.
-- **`moq export ts --delay` replaces `--max-age`** (#4645). Each frame is
+- **`moq export ts`, `flv`, and `mkv` take `--delay`** (#4645). Each frame is
   written that long after its decode time, on a clock that follows the
-  source's; `--max-age` and `--latency-max` are refused with the new flag
-  named. In Rust, moq-mux's `ts::Export::with_max_age` is `with_delay`, and
-  `ts::stats::Export` gains the dropped-frame count (late frames, and the
-  video frames then dropped waiting for a keyframe), measured drift and
-  out-of-tolerance count beside its `streams` rows. It is no longer `Eq`.
+  source's; the older staleness spellings are refused with the new flag
+  named. In Rust, moq-mux's `ts::Export::with_max_age` and the FLV and MKV
+  exports' `with_max_age` are `with_delay`. moq-rtmp's FLV egress releases
+  frames on its `max_delay` the same way. `ts::stats::Export` gains the
+  dropped-frame count (late frames, and the video frames then dropped waiting
+  for a keyframe), measured drift and out-of-tolerance count beside its
+  `streams` rows. It is no longer `Eq`.
 - **moq-mux has no clock translators.** `clock::Anchor`, `clock::Lane`, and
   `SourceMap` (#4667) are gone, along with the importers' `live()`. Publish the
   source's own timestamps and let the catalog clock map them to wall time.
@@ -232,7 +234,7 @@ These land with the next breaking release, not the 2026-09-23 train.
   shares a name with a publisher's retention, which keeps `max_age`. In Rust,
   `track::Subscription::max_age` and `with_max_age` are `max_delay` and
   `with_max_delay`; moq-mux's `container::Consumer::set_max_age` and the fMP4,
-  MKV, FLV, H.264, and H.265 exports' `with_max_age` are `set_max_delay` and
+  H.264, and H.265 exports' `with_max_age` are `set_max_delay` and
   `with_max_delay`; moq-audio's and moq-video's `decode::Options::max_age` is
   `max_delay`, as is moq-audio's `decode::Consumer::max_age()`; and moq-rtmp's
   `Play::with_max_age`, `Client::with_export_max_age`,
@@ -247,8 +249,8 @@ These land with the next breaking release, not the 2026-09-23 train.
   `MoqVideoDecoderOutput` take `max_delay_us` (each binding in its own casing),
   and so do C's `moq_subscription`, `moq_audio_decoder_output`,
   `moq_video_decoder_output`, `moq_consume_video`, and `moq_consume_audio`.
-  `moq export fmp4`, `mkv`, `flv`, `h264`, `h265`, and `rtmp` take
-  `--max-delay`, and refuse `--max-age`. `track::Info::max_age`,
+  `moq export fmp4`, `h264`, `h265`, and `rtmp` take `--max-delay`, and
+  refuse `--max-age`. `track::Info::max_age`,
   `MoqTrackInfo.max_age_us`, and `moq import --max-age` are unchanged, as is the wire.
 - **moq-relay auth takes the client-CA answer.** `auth::Config::validate` and
   `init` take `client_ca: bool`, whether any listener verifies client

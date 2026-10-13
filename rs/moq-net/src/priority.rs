@@ -6,6 +6,8 @@ use std::{
 
 use slab::Slab;
 
+use crate::track::Order;
+
 // Hybrid priority queue that provides strict priority ordering for the top 255 items.
 //
 // Design:
@@ -19,10 +21,11 @@ use slab::Slab;
 // group sequence in that subscription's own direction.
 
 /// A group stream's rank: its subscription's track priority, the subscription it
-/// belongs to, and its group sequence.
+/// belongs to, and its group sequence in that subscription's [`Order`].
 ///
-/// Higher `track` always wins. `group` breaks ties only *within* one `subscribe`,
-/// newest first, so a congested track sheds its backlog rather than its live edge.
+/// Higher `track` always wins. `group` breaks ties only *within* one `subscribe`:
+/// newest first by default, so a congested track sheds its backlog rather than its live
+/// edge, or oldest first for an ascending subscription draining one.
 ///
 /// Scoping the tie-break to a subscription is what keeps group sequence from deciding
 /// between tracks. The draft gives that job to `Priority` alone, so a session carrying
@@ -31,6 +34,7 @@ use slab::Slab;
 pub struct Priority {
 	track: u8,
 	subscribe: u64,
+	order: Order,
 	group: u64,
 }
 
@@ -40,8 +44,15 @@ impl Priority {
 		Self {
 			track,
 			subscribe,
+			order: Order::Descending,
 			group,
 		}
+	}
+
+	/// Rank groups of the same subscription in `order` instead.
+	pub fn with_order(mut self, order: Order) -> Self {
+		self.order = order;
+		self
 	}
 }
 
@@ -55,9 +66,15 @@ impl Ord for Priority {
 			// stable and independent of either one's direction. The older (lower id)
 			// subscription goes first.
 			.then(self.subscribe.cmp(&other.subscribe))
-			// Newest group first, which is what makes a congested track shed its
-			// backlog rather than its live edge.
-			.then(other.group.cmp(&self.group))
+			// Only an update in flight leaves one subscription's groups in two orders, and
+			// keeping the two apart keeps the comparison total meanwhile.
+			.then((self.order == Order::Ascending).cmp(&(other.order == Order::Ascending)))
+			// The subscription's own direction: newest first sheds a congested backlog
+			// rather than the live edge, oldest first drains it.
+			.then(match self.order {
+				Order::Descending => other.group.cmp(&self.group),
+				Order::Ascending => self.group.cmp(&other.group),
+			})
 	}
 }
 
@@ -216,6 +233,7 @@ impl PriorityState {
 		PriorityHandle {
 			id,
 			track: priority.track,
+			order: priority.order,
 			seen: u8::MAX,
 			queue: myself,
 		}
@@ -338,10 +356,11 @@ impl PriorityState {
 		}
 	}
 
-	/// Change one item's track priority, leaving the rest of its rank alone.
-	fn set_track(&mut self, id: usize, track: u8) {
+	/// Change one item's track priority and order, leaving the rest of its rank alone.
+	fn steer(&mut self, id: usize, track: u8, order: Order) {
 		let mut item = self.extract(id);
 		item.priority.track = track;
+		item.priority.order = order;
 		self.place(item);
 	}
 
@@ -367,9 +386,10 @@ impl PriorityState {
 
 pub struct PriorityHandle {
 	id: usize,
-	/// This item's track priority, the only part of its rank a handle owns; the
-	/// rest is fixed when the item is queued.
+	/// This item's track priority and order, the only parts of its rank a handle owns;
+	/// the rest is fixed when the item is queued.
 	track: u8,
+	order: Order,
 	/// Last value observed via [`current`](Self::current)/[`next`](Self::next), so
 	/// `next` fires only on a real change.
 	seen: u8,
@@ -430,17 +450,18 @@ impl PriorityHandle {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
-	/// Change this item's track priority and re-sort the queue, returning its new rank.
-	/// No-op if the track value hasn't changed.
-	pub fn set_track(&mut self, new_track: u8) -> u8 {
-		if self.track == new_track {
+	/// Change this item's track priority and order and re-sort the queue, returning its
+	/// new rank. No-op if neither changed.
+	pub fn steer(&mut self, track: u8, order: Order) -> u8 {
+		if self.track == track && self.order == order {
 			return self.current();
 		}
-		self.track = new_track;
+		self.track = track;
+		self.order = order;
 
 		let rank = {
 			let mut state = self.queue.lock();
-			state.set_track(self.id, new_track);
+			state.steer(self.id, track, order);
 			state.rank(self.id)
 		};
 
@@ -612,6 +633,8 @@ mod tests {
 		let mixed = [
 			Priority::new(100, 7, 1),
 			Priority::new(100, 7, 2),
+			Priority::new(100, 7, 1).with_order(Order::Ascending),
+			Priority::new(100, 7, 2).with_order(Order::Ascending),
 			Priority::new(100, 8, 1),
 			Priority::new(200, 7, 1),
 		];
@@ -628,6 +651,27 @@ mod tests {
 				}
 			}
 		}
+	}
+
+	#[test]
+	fn test_ascending_ranks_oldest_first() {
+		let queue = PriorityQueue::default();
+		let ascending = |group| Priority::new(100, 0, group).with_order(Order::Ascending);
+		let mut group5 = queue.insert(ascending(5));
+		let mut group1 = queue.insert(ascending(1));
+		let mut group10 = queue.insert(ascending(10));
+
+		assert_eq!(group1.current(), 0);
+		assert_eq!(group5.current(), 1);
+		assert_eq!(group10.current(), 2);
+
+		// Steering the subscription back to descending flips it once every group moved.
+		for group in [&mut group1, &mut group5, &mut group10] {
+			group.steer(100, Order::Descending);
+		}
+		assert_eq!(group10.current(), 0);
+		assert_eq!(group5.current(), 1);
+		assert_eq!(group1.current(), 2);
 	}
 
 	#[test]
@@ -912,7 +956,7 @@ mod tests {
 	}
 
 	#[test]
-	fn test_set_track_reorders() {
+	fn test_steer_track_reorders() {
 		let queue = PriorityQueue::default();
 
 		// Subscription 1 (track=255), Subscription 2 (track=55)
@@ -927,10 +971,10 @@ mod tests {
 		assert_eq!(s2_g1.current(), 3);
 
 		// Swap track priorities for each handle individually.
-		s1_g1.set_track(55);
-		s1_g2.set_track(55);
-		s2_g1.set_track(255);
-		s2_g2.set_track(255);
+		s1_g1.steer(55, Order::Descending);
+		s1_g2.steer(55, Order::Descending);
+		s2_g1.steer(255, Order::Descending);
+		s2_g2.steer(255, Order::Descending);
 
 		assert_eq!(s2_g2.current(), 0); // s2 now highest
 		assert_eq!(s2_g1.current(), 1);
@@ -939,7 +983,7 @@ mod tests {
 	}
 
 	#[moq_net_sim::test]
-	async fn test_set_track_notifies_other_handles() {
+	async fn test_steer_track_notifies_other_handles() {
 		let queue = PriorityQueue::default();
 
 		// h_low at index 1, will be promoted to 0 when h_high is demoted.
@@ -948,19 +992,19 @@ mod tests {
 
 		assert_eq!(h_low.current(), 1);
 
-		// Wait for a change notification on h_low while another handle's set_track runs.
+		// Wait for a change notification on h_low while another handle's steer runs.
 		let task = moq_net_sim::spawn(async move { h_low.next().await });
 		moq_net_sim::sleep(std::time::Duration::from_millis(10)).await;
 
 		// Demote h_high below h_low.
-		h_high.set_track(10);
+		h_high.steer(10, Order::Descending);
 
 		let new_priority = task.await.unwrap();
 		assert_eq!(new_priority, 0, "h_low should be promoted to the top");
 	}
 
 	#[test]
-	fn test_set_track_self() {
+	fn test_steer_track_self() {
 		let queue = PriorityQueue::default();
 
 		let mut h_high = queue.insert(live(255, 1));
@@ -972,7 +1016,7 @@ mod tests {
 		assert_eq!(h_low.current(), 2);
 
 		// Demote h_high below the others.
-		h_high.set_track(10);
+		h_high.steer(10, Order::Descending);
 
 		assert_eq!(h_mid.current(), 0);
 		assert_eq!(h_low.current(), 1);
@@ -980,7 +1024,7 @@ mod tests {
 	}
 
 	#[test]
-	fn test_set_track_swaps_demoted_vec_item_with_overflow() {
+	fn test_steer_track_swaps_demoted_vec_item_with_overflow() {
 		let queue = PriorityQueue::default();
 
 		// Fill vec with 255 items at track=100, groups 1..=255.
@@ -995,14 +1039,14 @@ mod tests {
 		// Lower top's track below every filler. Without the swap, top would land
 		// in vec at the tail while f1 stays in overflow despite having higher
 		// priority, breaking the "every overflow item < every vec item" invariant.
-		top.set_track(0);
+		top.steer(0, Order::Descending);
 
 		assert!(fillers[0].current() < u8::MAX, "f1 should be promoted back into vec");
 		assert_eq!(top.current(), u8::MAX, "demoted top should land in overflow");
 	}
 
 	#[test]
-	fn test_set_track_lowered_within_vec_no_overflow_disruption() {
+	fn test_steer_track_lowered_within_vec_no_overflow_disruption() {
 		let queue = PriorityQueue::default();
 
 		// Three items, all in vec; no overflow involvement.
@@ -1014,7 +1058,7 @@ mod tests {
 		assert_eq!(c.current(), 2);
 
 		// Lowering A's priority below B but above C should leave A at index 1.
-		a.set_track(75);
+		a.steer(75, Order::Descending);
 		assert_eq!(b.current(), 0);
 		assert_eq!(a.current(), 1);
 		assert_eq!(c.current(), 2);
@@ -1049,7 +1093,7 @@ mod tests {
 	}
 
 	#[moq_net_sim::test]
-	async fn test_set_track_notifies_swapped_overflow_item() {
+	async fn test_steer_track_notifies_swapped_overflow_item() {
 		let queue = PriorityQueue::default();
 
 		// Fill vec, then insert top, kicking f1 (filler at group=1) into overflow.
@@ -1065,7 +1109,7 @@ mod tests {
 		moq_net_sim::yield_now().await;
 
 		// Demoting top below every filler swaps it with f1 in overflow.
-		top.set_track(0);
+		top.steer(0, Order::Descending);
 
 		let promoted = task.await.unwrap();
 		assert!(promoted < u8::MAX, "f1 should be notified of promotion");

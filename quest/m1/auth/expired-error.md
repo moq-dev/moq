@@ -17,10 +17,12 @@ refusal as final.
   shared moq-transport session value if one means the same thing, otherwise
   0x31.
 - Carry it through moq-ffi's error mapping and each wrapper.
+- Switch the relay's in-band renewal (`rs/moq-relay/src/auth/refresh.rs`) to
+  refuse or revoke an expired credential with `Expired`. Today it uses
+  `UNAUTHORIZED`, with the cause only in the reason.
 
-Moved from m2 into the auth line: relay tokens refuse an expired
-token with `AUTH_ERROR { Expired }`, so without this moq-net cannot tell it
-apart from `Unauthorized`.
+Moved from m2 into the auth line: without this, a client renewing in band
+cannot tell an expired token apart from a refused one.
 
 ## Required
 

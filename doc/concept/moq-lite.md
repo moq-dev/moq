@@ -168,7 +168,11 @@ publisher learns before anyone subscribes whether its broadcasts can reach the
 peer. More tokens can be added without reconnecting; the session's scope is the
 union of every open token's grant. A token the peer has no verifier for, or
 whose grant is too large to send, fails with `Unsupported` and ends only that
-token; the session and its other grants stay up.
+token; the session and its other grants stay up. A relay with an
+[auth server](/bin/relay/auth#in-band-renewal) verifies these tokens through it,
+so a fresh grant can keep the connection alive after its original credential
+expires; under public rules or a client certificate it refuses them as
+`Unsupported`.
 
 A subscription or fetch that loses access resets with the `UNAUTHORIZED` stream
 code and the session stays up. A client that publishes outside its grant closes
@@ -191,8 +195,14 @@ Each subscription carries the knobs that decide behavior under congestion:
 | Knob | Effect |
 | --- | --- |
 | **Priority** (0..255) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. |
-| **Order** | Which group to send first when several are pending. Newest first for live, oldest first for catch-up. |
+| **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
 | **Max delay** | How far a non-latest group may fall behind the live edge before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
+
+Order only decides what goes first, never what is skipped, so catching up oldest
+first needs a max delay that covers the backlog. When a relay serves subscribers of
+both orders from one upstream subscription, it asks upstream for newest first, and
+still sends each subscriber its groups in that subscriber's own order. Over
+moq-transport the upstream order is fixed by whichever subscriber arrived first.
 
 Max delay is measured on the media timeline, not the wall clock, so a backlog
 delivered as a burst is still late while a congestion stall never expires

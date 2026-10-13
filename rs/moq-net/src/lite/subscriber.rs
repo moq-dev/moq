@@ -1615,6 +1615,7 @@ mod tests {
 	async fn feed_sub(tail: &kio::Producer<Tail>) -> Sub<crate::lite::test_transport::ScriptedSession> {
 		let mut session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
 		Sub::Active(SubStream {
+			order: crate::track::Order::Descending,
 			stream: Stream::open(&mut session, Version::Lite04).await.unwrap(),
 			id: 0,
 			max_delay: Duration::ZERO,
@@ -1712,6 +1713,7 @@ mod tests {
 		let mut session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
 		let stream = Stream::open(&mut session, VERSION).await.unwrap();
 		let mut sub = SubStream {
+			order: crate::track::Order::Descending,
 			stream,
 			id: 0,
 			max_delay: Duration::ZERO,
@@ -3808,6 +3810,7 @@ struct SubStream<S: crate::transport::poll::Session> {
 	max_delay: Duration,
 	start: Option<Position>,
 	priority: u8,
+	order: crate::track::Order,
 	/// The start the SUBSCRIBE itself carried, fixed for the stream's life. A
 	/// SUBSCRIBE_START describes this demand and no fresh one follows an update,
 	/// so a buffered START only applies while `start` still equals it: while the
@@ -4273,6 +4276,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						// SUBSCRIBE_UPDATE (Lite03+ only; older peers can't carry one).
 						let start_moved = active.start != subscription.start;
 						active.priority = subscription.priority;
+						active.order = subscription.order;
 						active.max_delay = subscription.max_delay;
 						if let Ok(mut tail) = active.tail.write() {
 							tail.set_grace(tail::grace(subscription.max_delay));
@@ -4457,6 +4461,7 @@ fn buffer_update<S: crate::transport::poll::Session>(
 		end_group: bounds.end_group,
 		start_frame: bounds.start_frame,
 		end_frame: bounds.end_frame,
+		order: active.order,
 	})
 }
 
@@ -4513,6 +4518,7 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 						end_group: bounds.end_group,
 						start_frame: bounds.start_frame,
 						end_frame: bounds.end_frame,
+						order: self.subscription.order,
 					};
 					stream.writer.buffer(&lite::ControlType::Subscribe)?;
 					stream.writer.buffer(&msg)?;
@@ -4563,6 +4569,7 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 			max_delay: self.subscription.max_delay,
 			start: self.subscription.start,
 			priority: self.subscription.priority,
+			order: self.subscription.order,
 			requested: self.subscription.start,
 			tail: self.tail.clone(),
 			served: None,

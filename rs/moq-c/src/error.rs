@@ -104,6 +104,8 @@ pub enum moq_protocol_kind {
 	MOQ_PROTOCOL_KIND_APP = 23,
 	/// Unknown.
 	MOQ_PROTOCOL_KIND_UNKNOWN = 24,
+	/// The session exceeded its announcement or subscription cap.
+	MOQ_PROTOCOL_KIND_TOO_MANY_REQUESTS = 25,
 }
 
 /// A protocol failure a peer sent: scope, verbatim wire code, and recognized kind.
@@ -377,6 +379,7 @@ fn session_kind(err: &moq_net::SessionError) -> moq_protocol_kind {
 		moq_net::SessionError::GoawayTimeout => MOQ_PROTOCOL_KIND_GOAWAY_TIMEOUT,
 		moq_net::SessionError::Timeout => MOQ_PROTOCOL_KIND_TIMEOUT,
 		moq_net::SessionError::Version => MOQ_PROTOCOL_KIND_VERSION,
+		moq_net::SessionError::TooManyRequests => MOQ_PROTOCOL_KIND_TOO_MANY_REQUESTS,
 		moq_net::SessionError::App(_) => MOQ_PROTOCOL_KIND_APP,
 		moq_net::SessionError::Unknown(_) => MOQ_PROTOCOL_KIND_UNKNOWN,
 		_ => MOQ_PROTOCOL_KIND_UNKNOWN,
@@ -453,5 +456,19 @@ impl ffi::ReturnCode for Error {
 			Error::InvalidConfig(_) => MOQ_ERROR_INVALID_CONFIG,
 			Error::UnresolvableBroadcast(_) => MOQ_ERROR_UNRESOLVABLE_BROADCAST,
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	#[test]
+	fn session_limit_has_a_known_kind() {
+		let error = super::from_session(&moq_net::SessionError::TooManyRequests);
+		assert_eq!(error.scope, super::moq_error_scope::MOQ_ERROR_SCOPE_SESSION as u32);
+		assert_eq!(error.code, moq_net::SessionError::TooManyRequests.to_code());
+		assert_eq!(
+			error.kind,
+			super::moq_protocol_kind::MOQ_PROTOCOL_KIND_TOO_MANY_REQUESTS as u32
+		);
 	}
 }

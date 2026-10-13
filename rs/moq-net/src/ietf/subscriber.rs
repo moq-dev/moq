@@ -1997,16 +1997,19 @@ where
 		// SUBSCRIBEs: its TRACK_STATUS answer cannot say whether the track is timed.
 		let mut target = match request.subscription() {
 			None if ietf::TrackStatusOk::describes_track(self.version) => {
-				let Some(idle) = self.track_status(&broadcast_path, &track_name, request).await else {
-					return;
-				};
-				let Some(next) = self
-					.linger(&broadcast_path, &track_name, idle, &mut group_fetches, &mut gate)
-					.await
-				else {
-					return;
-				};
-				Target::Resume(next)
+				match self.track_status(&broadcast_path, &track_name, request).await {
+					Some(Target::Resume(idle)) => {
+						let Some(next) = self
+							.linger(&broadcast_path, &track_name, idle, &mut group_fetches, &mut gate)
+							.await
+						else {
+							return;
+						};
+						Target::Resume(next)
+					}
+					Some(target) => target,
+					None => return,
+				}
 			}
 			_ => Target::Request(request),
 		};
@@ -2099,8 +2102,11 @@ where
 		}
 
 		// Write Subscribe message. The aggregate is read now: a subscriber can join while
-		// the request ID and stream were awaited, and nothing updates the priority after.
-		let priority = target.subscription().map(|s| s.priority).unwrap_or(0);
+		// the request ID and stream were awaited, and nothing updates the priority or
+		// order after.
+		let aggregate = target.subscription();
+		let priority = aggregate.as_ref().map(|s| s.priority).unwrap_or(0);
+		let order = aggregate.map(|s| s.order).unwrap_or_default();
 		let written = async {
 			stream.writer.varint(ietf::Subscribe::ID).await?;
 			stream
@@ -2110,7 +2116,7 @@ where
 					track_namespace: broadcast_path.to_owned(),
 					track_name: track_name.into(),
 					subscriber_priority: super::priority::to_wire(priority),
-					group_order: GroupOrder::Descending,
+					group_order: order.into(),
 					filter: join.filter,
 					fill: join.fill,
 					// A resumed copy already knows the track, from the answer that accepted it.
@@ -2316,9 +2322,11 @@ where
 				(request.accept(info), dynamic)
 			}
 		};
-		// A live join starts at the publisher's edge; an absolute one where it asked.
+		// A live join starts at the publisher's edge; an absolute one where it asked. With
+		// no Largest the join skips nothing, so every group is owed: a lower one's stream
+		// may still arrive after a higher one's.
 		let _ = match live {
-			true => track.start_at(largest.map(|largest| largest.group)),
+			true => track.start_at(largest.map_or(0, |largest| largest.group)),
 			false => track.start_at(start.map(|start| start.group)),
 		};
 		let mut fetching: Option<MaybeSendBox<'static, ()>> = None;
@@ -2850,15 +2858,17 @@ where
 	}
 
 	/// Learn a track nobody subscribes to from TRACK_STATUS, and accept it as a copy with no
-	/// subscription, which [`Self::linger`] serves fetches from and subscribes once someone
-	/// does. `None` once the request was refused or abandoned: a publisher that refuses
-	/// TRACK_STATUS refuses the fetch-only request too.
+	/// subscription ([`Target::Resume`]), which [`Self::linger`] serves fetches from and
+	/// subscribes once someone does. A publisher that does not implement TRACK_STATUS hands
+	/// the request back ([`Target::Request`]) to be learned from SUBSCRIBE. `None` once the
+	/// request was refused or abandoned: a publisher that refuses the track's status refuses
+	/// the fetch-only request too.
 	async fn track_status(
 		&mut self,
 		broadcast_path: &Path<'_>,
 		track_name: &str,
 		request: track::Request,
-	) -> Option<Idle> {
+	) -> Option<Target> {
 		let validity = self.validity.start();
 		// An allocated ID is always sent, as in `subscribe_once`.
 		let request_id = match validity.run(self.control.next_request_id(&self.runtime)).await {
@@ -2933,6 +2943,12 @@ where
 		let _ = stream.writer.finish();
 		let ok = match response {
 			Ok(ok) => ok,
+			// NOT_SUPPORTED refuses the method, not the track. The origin queries a track before
+			// its first reader's subscription lands, so this is often a subscriber's request.
+			Err(Error::Unsupported) => {
+				tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "track status not supported, subscribing");
+				return Some(Target::Request(request));
+			}
 			Err(err) => {
 				tracing::debug!(%err, broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "track status refused");
 				request.reject(err);
@@ -2949,12 +2965,12 @@ where
 		));
 		// Nothing feeds this copy live: what it caches is fetched, never the live edge.
 		track.set_idle();
-		Some(Idle {
+		Some(Target::Resume(Idle {
 			demand: track.demand(),
 			track,
 			dynamic,
 			timescale: ok.properties.timescale,
-		})
+		}))
 	}
 
 	/// Read the answer to a TRACK_STATUS: TRACK_STATUS_OK, or the publisher's refusal as an
@@ -5958,22 +5974,91 @@ mod tests {
 		outstanding
 	}
 
+	/// A control message as the peer writes it: type id, then the length-prefixed body.
+	fn message<M: Message>(id: u64, msg: &M, version: Version) -> Vec<u8> {
+		use crate::coding::Encode as _;
+		let mut buf = Vec::new();
+		crate::coding::Encoder::new(&mut buf, version.into())
+			.varint(id)
+			.unwrap();
+		msg.encode(&mut crate::coding::Encoder::new(&mut buf, version.into()), version)
+			.unwrap();
+		buf
+	}
+
+	/// A publisher without TRACK_STATUS still serves the track: its NOT_SUPPORTED refuses
+	/// the method, so the request is learned from SUBSCRIBE instead. The origin queries a new
+	/// track before its first reader's subscription lands, so a reader reaching such a
+	/// publisher through a relay takes this path.
+	#[moq_net_sim::test]
+	async fn an_unsupported_track_status_subscribes_instead() {
+		for version in [Version::Draft18, Version::Draft19, Version::Draft22] {
+			let refused = message(
+				ietf::RequestError::ID,
+				&ietf::RequestError {
+					request_id: None,
+					error_code: request::to_code(&Error::Unsupported, request::Kind::TrackStatus, version),
+					reason_phrase: "TRACK_STATUS is not supported".into(),
+					retry_interval: 0,
+				},
+				version,
+			);
+			let subscribe_ok = message(
+				ietf::SubscribeOk::ID,
+				&ietf::SubscribeOk {
+					request_id: None,
+					track_alias: 7,
+					largest: None,
+					properties: Default::default(),
+				},
+				version,
+			);
+			let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![refused, subscribe_ok]);
+			let log = session.log.clone();
+			let (tasks, _task_set) = crate::util::TaskSet::new();
+			let mut subscriber = Subscriber::new(
+				crate::time::Clock::sim(),
+				session,
+				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				Control::new(None, false),
+				None,
+				peer::PeerSetup::default(),
+				crate::Hop::new(1).unwrap(),
+				None,
+				version,
+				tasks,
+				Default::default(),
+			);
+
+			let producer = crate::broadcast::Info::default().produce();
+			let mut dynamic = producer.dynamic();
+			let consumer = producer.consume();
+			let track = consumer.track("video").unwrap();
+			let mut query = std::pin::pin!(track.query());
+			assert!(futures::poll!(query.as_mut()).is_pending());
+			let request = dynamic.requested_track().await.expect("no track requested");
+
+			let serving = moq_net_sim::spawn(async move {
+				subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+			});
+			settle().await;
+
+			assert!(query.await.is_ok(), "{version}: NOT_SUPPORTED refused the track");
+			assert!(track.subscribe(None).await.is_ok(), "{version}: the reader was refused");
+			assert_eq!(
+				control_message_types(&log, version)[..2],
+				[ietf::TrackStatus::ID, ietf::Subscribe::ID],
+				"{version}"
+			);
+			serving.abort();
+		}
+	}
+
 	/// A copy that already knows its track, here from TRACK_STATUS_OK, opts out of the
 	/// properties when a subscriber returns, and keeps the units it learned rather than
 	/// taking the empty block the opted-out SUBSCRIBE_OK carries.
 	#[moq_net_sim::test]
 	async fn a_resumed_subscribe_opts_out_of_known_properties() {
-		use crate::coding::Encode as _;
-		fn message<M: Message>(id: u64, msg: &M, version: Version) -> Vec<u8> {
-			let mut buf = Vec::new();
-			crate::coding::Encoder::new(&mut buf, version.into())
-				.varint(id)
-				.unwrap();
-			msg.encode(&mut crate::coding::Encoder::new(&mut buf, version.into()), version)
-				.unwrap();
-			buf
-		}
-
 		let declared = Timescale::new(90_000).unwrap();
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let opts_out = ietf::Filter::is_draft20(version);

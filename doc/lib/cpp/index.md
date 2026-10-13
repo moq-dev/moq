@@ -202,6 +202,12 @@ gives the message Rust's `Display` does, for logs; branch on the case, not the
 text. A Rust panic or a misused future (`get()` twice) aborts with a message on
 stderr instead of throwing.
 
+A session closed for exceeding the relay's request caps reports the protocol
+kind `ProtocolKind::kTooManyRequests`. Reduce
+the simultaneous announcements or subscriptions, or ask the relay operator
+to adjust the [session limits](/bin/relay/config#session-and-peer), before
+reconnecting with the same workload.
+
 Check a result before reading it. With exceptions off below C++23, reading the
 value of an error is undefined, through `*result` and `value()` alike, since
 the bundled `tl::expected` has nothing to throw.

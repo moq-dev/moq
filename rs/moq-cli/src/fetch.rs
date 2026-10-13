@@ -74,19 +74,26 @@ async fn fetch(
 		.with_subscriber(origin.clone())
 		.with_reconnect(false);
 
-	fetch_from(
+	let connection = client.connect(url);
+	let result = fetch_from(
 		Request {
 			args,
 			path: &broadcast,
 			deadline,
 		},
 		async {
-			let connection = client.connect(url).established().await.context("failed to connect")?;
+			let connection = connection.clone().established().await.context("failed to connect")?;
 			anyhow::Ok((origin, connection))
 		},
 		out,
 	)
-	.await
+	.await;
+	// Keep an independent handle outside the timed operation: cancellation of setup or
+	// a read must still send the session close before the runtime can stop.
+	let closed = connection.close().await;
+	client.close().await;
+	result?;
+	closed.context("failed to close fetch connection")
 }
 
 /// The operation's selection and one absolute deadline, including setup.
@@ -104,7 +111,7 @@ async fn fetch_from<C>(
 ) -> anyhow::Result<()> {
 	let Request { args, path, deadline } = request;
 	let result = timeout_at(deadline, async {
-		// Held until the last frame is read; dropping it closes the session.
+		// Held until the last frame is read; the caller closes the connection afterward.
 		let (origin, _connection) = setup.await?;
 
 		// Wait for a covering route rather than asking on the spot: the announcement

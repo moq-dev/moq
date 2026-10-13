@@ -95,6 +95,13 @@ Public API: breaking. A claim request is answered through `prepare` and
 `publish`, and a public claim takes no epoch, in Rust, JS, moq-ffi, moq-c and
 every binding wrapper, plus the claim docs. Wire: none.
 
+Decided in the quest audit: migrate the hand-written C claim API in this
+change as a narrow correctness exception to the
+[C freeze](/quest/m1/c/README.md). Leaving its existing accept path would
+preserve the identity bug, so claim safety does not wait for generated C.
+This permits only the claim migration and its tests and upgrade notes;
+the broader C API still waits for the generated replacement.
+
 ## Related
 
 - [Announcement takeover](/quest/m1/announce-takeover.md) - its claim-to-route operation is `Request::prepare` then `publish`; TAKEOVER then removes the cold-start reset

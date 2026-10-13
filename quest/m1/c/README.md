@@ -43,6 +43,10 @@ client build and run against the released 0.8.0 archive, not only in-tree.
 
 The hand-written crate gets no more feature work: its shutdown, CMake library,
 and fetch quests were abandoned for this line, and hidden is done.
+Decided in the quest audit: [claim epochs](/quest/m1/claim-answer-epochs.md)
+is a narrow correctness exception. Its existing claim API migrates with
+Rust and JS so C cannot retain the unsafe accept path while this line waits.
+That change owns its C tests and upgrade notes; other API reshaping stays here.
 
 ## Required
 

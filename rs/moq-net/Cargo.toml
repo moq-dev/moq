@@ -136,3 +136,7 @@ required-features = ["fuzz"]
 name = "retirement"
 harness = false
 required-features = ["fuzz"]
+
+[[bench]]
+name = "auth"
+harness = false
