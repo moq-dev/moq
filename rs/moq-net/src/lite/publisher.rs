@@ -19,10 +19,8 @@ use crate::transport::Stats;
 use crate::{
 	Error, Hop, Hops,
 	coding::{Decode, DecodeError, Decoder, Encode, Stream, Writer},
-	lite::{
-		self,
-		priority::{Priority, PriorityHandle, PriorityQueue},
-	},
+	lite,
+	priority::{Priority, PriorityHandle, PriorityQueue},
 	track::Order,
 };
 
