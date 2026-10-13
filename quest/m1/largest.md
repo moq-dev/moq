@@ -23,8 +23,11 @@ Decided with the maintainer (2026-10-13), after moq-dev/moq#5369 proposed
 - **One name everywhere.** Rename on the producer, consumer and subscriber,
   and update every caller (moq-json, moq-flate, moq-mux, moq-relay, moq-hls,
   moq-c, and the rest) in the same PR. JS's buffered-only `largest()` takes
-  the new meaning. Callers that read `latest()` synchronously today, such as
-  producers picking their next sequence, are the risk of stream only; if one
+  the new meaning. Producers that pick their next sequence from
+  `latest() + 1` (moq-json, moq-mux) read the sequence high-water, which
+  datagrams and frameless groups also advance, so a frame `Location` can't
+  replace it: move each to the track's own allocator (`append_group`). If a
+  caller can't (moq-mux skips a sequence on a data-track discontinuity) or
   truly needs a synchronous read, ask the maintainer rather than adding a
   snapshot.
 - Check that no cursor logic assumes the largest location was received
