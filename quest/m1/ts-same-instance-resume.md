@@ -61,5 +61,5 @@ required behavior or API change returns to the maintainer for a decision.
 - [Live clock validation](/quest/m1/ts-live-clock.md) - independent local live failure
 - [Replacement catalog linger](/quest/m1/ts-follow-catalog-bound.md) - #5305 owns the bound on a mid-stream switch's first catalog
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - shared catalogs, tracks and source-derived group identity
-- [Closed fallback](/quest/m1/transport-upgrade/closed-fallback.md) - #5284 owns early WebSocket closure and its transport-test fix
+- [Closed fallback #5284](https://github.com/moq-dev/moq/pull/5284) - early WebSocket closure and its transport-test fix
 - [TS duration fidelity](/quest/m0/ts-duration-fidelity.md) - diagnose a shared end-of-stream cause only if reproduced

@@ -197,6 +197,7 @@ impl Server {
 				goaway: start.goaway,
 				auth: start.auth,
 				setup: start.setup,
+				estimate: Some(start.estimate),
 			},
 		))
 	}
@@ -644,7 +645,12 @@ where
 				version.into(),
 				None,
 				crate::driver::Protocol::Ietf(protocol),
-				crate::session::Handles { goaway, auth, setup },
+				crate::session::Handles {
+					goaway,
+					auth,
+					setup,
+					estimate: None,
+				},
 			))
 		}
 		.maybe_boxed()
@@ -717,7 +723,7 @@ where
 			};
 			stream.writer.encode(&server_setup).await?;
 
-			let (recv_bw, protocol, goaway, auth, setup) = match version {
+			let (recv_bw, protocol, goaway, auth, setup, estimate) = match version {
 				Version::Lite(v) => {
 					let stream = stream.with_version(v);
 					// Pre-lite-05: no Setup Stream, so nothing to advertise or seed.
@@ -741,6 +747,7 @@ where
 						start.goaway,
 						start.auth,
 						start.setup,
+						Some(start.estimate),
 					)
 				}
 				Version::Ietf(v) => {
@@ -766,7 +773,7 @@ where
 						early_unis: Vec::new(),
 						extensions: server.extensions,
 					})?;
-					(None, crate::driver::Protocol::Ietf(protocol), goaway, auth, setup)
+					(None, crate::driver::Protocol::Ietf(protocol), goaway, auth, setup, None)
 				}
 			};
 
@@ -776,7 +783,12 @@ where
 				version,
 				recv_bw,
 				protocol,
-				crate::session::Handles { goaway, auth, setup },
+				crate::session::Handles {
+					goaway,
+					auth,
+					setup,
+					estimate,
+				},
 			))
 		}
 		.maybe_boxed()
