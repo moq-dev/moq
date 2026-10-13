@@ -39,6 +39,7 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [Cut-through](/quest/m3/cut-through/README.md) - a lossy-hop bench decides whether a relay should forward bytes behind a QUIC stream hole; the build is re-planned if it says go
 - [Unreal prototype](/quest/m3/unreal.md) - a UE5 module on the C++ package with exceptions disabled, rendering a subscribed broadcast to a texture
 - [vcpkg registry](/quest/m3/cpp-vcpkg.md) - a registry we own serves the prebuilt package to `vcpkg` manifests, once a consumer asks
+- [Group order in the bindings](/quest/m3/ffi-order.md) - `order` on the moq-ffi subscription and every binding, once a consumer needs it
 - [Conan remote](/quest/m3/cpp-conan.md) - a remote we own serves the same tarball to `conan install`
 - [Linux OBS GPU input](/quest/m3/obs-linux-gpu.md) - publish OBS compositor frames without CPU readback on a validated Linux graphics/encoder combination
 - [Routing cost domains](/quest/m3/routing-cost-domains.md) - design operator boundaries and policy without adding incomparable costs
