@@ -624,6 +624,238 @@ fn tracks_after_finish_are_refused() {
 	assert!(catalog.snapshot().audio.renditions.is_empty(), "no track was declared");
 }
 
+fn text_entry(number: u64, codec: &str, language: &str, name: &str) -> MatroskaSpec {
+	MatroskaSpec::TrackEntry(Master::Full(vec![
+		MatroskaSpec::TrackNumber(number),
+		MatroskaSpec::TrackUID(number),
+		MatroskaSpec::TrackType(17),
+		MatroskaSpec::CodecID(codec.into()),
+		MatroskaSpec::Language(language.into()),
+		MatroskaSpec::Name(name.into()),
+	]))
+}
+
+#[tokio::test]
+async fn subtitle_languages_and_empty_tracks_are_published() {
+	let data = MkvBuilder::new()
+		.header("matroska")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![
+			text_entry(1, "S_TEXT/UTF8", "en", "English"),
+			text_entry(2, "S_TEXT/UTF8", "es", "Spanish"),
+			text_entry(3, "S_TEXT/UTF8", "fr", "French"),
+			text_entry(4, "S_TEXT/ASS", "de", "Unsupported"),
+		])
+		.cluster(0, || {
+			let MatroskaSpec::SimpleBlock(block) = simple_block(1, 250, true, b"Hello") else {
+				unreachable!()
+			};
+			vec![MatroskaSpec::BlockGroup(Master::Full(vec![
+				MatroskaSpec::Block(block),
+				MatroskaSpec::BlockDuration(1250),
+			]))]
+		})
+		.segment_end()
+		.build();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&data).unwrap();
+	let snapshot = catalog.snapshot();
+	assert_eq!(snapshot.text.renditions.len(), 3);
+	let (name, english) = snapshot
+		.text
+		.renditions
+		.iter()
+		.find(|(_, config)| config.lang.as_deref() == Some("en"))
+		.unwrap();
+	assert_eq!(english.label.as_deref(), Some("English"));
+	assert_eq!(english.format, hang::catalog::TextFormat::Vtt);
+	let track = consumer
+		.track(name)
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default())
+		.await
+		.unwrap();
+	let mut reader = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
+	let frame = reader.read().await.unwrap().unwrap();
+	assert_eq!(
+		&frame.payload[..],
+		b"WEBVTT\n\n00:00:00.250 --> 00:00:01.500\nHello\n\n"
+	);
+	assert_eq!(frame.timestamp.as_micros(), 250_000);
+	importer.finish().unwrap();
+}
+
+/// An SRT cue keeps its explicit end, and a plain-text `-->` is escaped for WebVTT.
+#[tokio::test(start_paused = true)]
+async fn subtitle_duration_survives_as_a_timed_cue() {
+	let MatroskaSpec::SimpleBlock(block) = simple_block(1, 250, true, b"Go --> there") else {
+		unreachable!()
+	};
+	let data = MkvBuilder::new()
+		.header("matroska")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![text_entry(1, "S_TEXT/UTF8", "en", "English")])
+		.cluster(0, || {
+			vec![MatroskaSpec::BlockGroup(Master::Full(vec![
+				MatroskaSpec::Block(block),
+				MatroskaSpec::BlockDuration(1250),
+			]))]
+		})
+		.segment_end()
+		.build();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&data).unwrap();
+	importer.finish().unwrap();
+	let snapshot = catalog.snapshot();
+	let (name, config) = snapshot.text.renditions.iter().next().unwrap();
+	assert_eq!(config.format, hang::catalog::TextFormat::Vtt);
+	let track = consumer
+		.track(name)
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default())
+		.await
+		.unwrap();
+	let mut reader = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
+	let frame = reader.read().await.unwrap().unwrap();
+	assert_eq!(frame.timestamp.as_micros(), 250_000);
+	assert_eq!(
+		&frame.payload[..],
+		b"WEBVTT\n\n00:00:00.250 --> 00:00:01.500\nGo --&gt; there\n\n"
+	);
+}
+
+#[tokio::test(start_paused = true)]
+async fn webvtt_preserves_cue_metadata_and_relative_timestamps() {
+	let MatroskaSpec::TrackEntry(Master::Full(mut fields)) = text_entry(1, "S_TEXT/WEBVTT", "en", "English") else {
+		unreachable!()
+	};
+	fields.push(MatroskaSpec::CodecPrivate(
+		b"WEBVTT\n\nSTYLE\n::cue { color: lime; }\n".to_vec(),
+	));
+	fields.push(MatroskaSpec::LanguageIETF("en-GB".into()));
+	let MatroskaSpec::SimpleBlock(block) = simple_block(1, 250, true, b"Hello <00:00.500>world") else {
+		unreachable!()
+	};
+	let data = MkvBuilder::new()
+		.header("matroska")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![MatroskaSpec::TrackEntry(Master::Full(fields))])
+		.cluster(0, || {
+			vec![MatroskaSpec::BlockGroup(Master::Full(vec![
+				MatroskaSpec::Block(block),
+				MatroskaSpec::BlockDuration(1250),
+				MatroskaSpec::BlockAdditions(Master::Full(vec![MatroskaSpec::BlockMore(Master::Full(vec![
+					MatroskaSpec::BlockAddID(1),
+					MatroskaSpec::BlockAdditional(b"align:start\ncue-1\nNOTE source".to_vec()),
+				]))])),
+			]))]
+		})
+		.segment_end()
+		.build();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&data).unwrap();
+	importer.finish().unwrap();
+	let snapshot = catalog.snapshot();
+	let (name, config) = snapshot.text.renditions.iter().next().unwrap();
+	assert_eq!(config.lang.as_deref(), Some("en-GB"));
+	let track = consumer
+		.track(name)
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default())
+		.await
+		.unwrap();
+	let mut reader = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
+	let frame = reader.read().await.unwrap().unwrap();
+	assert_eq!(&frame.payload[..], b"WEBVTT\n\nSTYLE\n::cue { color: lime; }\n\nNOTE source\n\ncue-1\n00:00:00.250 --> 00:00:01.500 align:start\nHello <00:00:00.750>world\n\n");
+}
+
+#[test]
+fn text_requires_valid_utf8_and_explicit_or_default_duration() {
+	for (default_duration, payload, valid) in [
+		(None, b"text".as_slice(), false),
+		(Some(0), b"text".as_slice(), false),
+		(Some(1_000_000_000), b"text".as_slice(), true),
+		(Some(1_000_000_000), b"\xff".as_slice(), false),
+	] {
+		let MatroskaSpec::TrackEntry(Master::Full(mut fields)) = text_entry(1, "S_TEXT/UTF8", "en", "English") else {
+			unreachable!()
+		};
+		if let Some(duration) = default_duration {
+			fields.push(MatroskaSpec::DefaultDuration(duration));
+		}
+		let data = MkvBuilder::new()
+			.header("matroska")
+			.segment_start()
+			.info(1_000_000)
+			.tracks(vec![MatroskaSpec::TrackEntry(Master::Full(fields))])
+			.cluster(0, || vec![simple_block(1, 0, true, payload)])
+			.segment_end()
+			.build();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut importer = super::Import::new(broadcast, catalog.reserve());
+		let result = importer.decode(&data);
+		if valid {
+			result.unwrap();
+		} else {
+			assert!(
+				matches!(result, Err(crate::Error::Mkv(super::Error::InvalidSubtitle(_)))),
+				"{result:?}"
+			);
+		}
+	}
+}
+
+#[test]
+fn laced_subtitle_blocks_are_refused() {
+	let MatroskaSpec::TrackEntry(Master::Full(mut fields)) = text_entry(1, "S_TEXT/UTF8", "en", "English") else {
+		unreachable!()
+	};
+	fields.push(MatroskaSpec::DefaultDuration(1_000_000_000));
+	let MatroskaSpec::SimpleBlock(mut block) = simple_block(1, 0, true, b"\x01ab") else {
+		unreachable!()
+	};
+	block[3] |= 0x04; // Fixed-size lacing, two one-byte frames.
+	let data = MkvBuilder::new()
+		.header("matroska")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![MatroskaSpec::TrackEntry(Master::Full(fields))])
+		.cluster(0, || vec![MatroskaSpec::SimpleBlock(block)])
+		.segment_end()
+		.build();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	assert!(matches!(
+		importer.decode(&data),
+		Err(crate::Error::Mkv(super::Error::InvalidSubtitle(
+			"laced subtitles are unsupported"
+		)))
+	));
+}
+
 /// Opus packets packed like mkvmerge's laced audio blocks retain their boundaries and times.
 #[tokio::test]
 async fn laced_opus_frames() {
@@ -789,4 +1021,78 @@ async fn unlaced_block_duration_does_not_use_track_default() {
 		}
 	}
 	assert_eq!(last, Some((80_000, 0)));
+}
+
+/// Text closes a group per cue, so a segment seek must not rewind onto a cue group already written.
+#[test]
+fn subtitle_seek_after_several_cues_does_not_reuse_a_group() {
+	let MatroskaSpec::TrackEntry(Master::Full(mut fields)) = text_entry(1, "S_TEXT/UTF8", "en", "English") else {
+		unreachable!()
+	};
+	fields.push(MatroskaSpec::DefaultDuration(500_000_000));
+	let data = MkvBuilder::new()
+		.header("matroska")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![MatroskaSpec::TrackEntry(Master::Full(fields))])
+		.cluster(0, || {
+			(0..3).map(|index| simple_block(1, index * 1000, true, b"hi")).collect()
+		})
+		.cluster(4000, || vec![simple_block(1, 0, true, b"hi")])
+		.segment_end()
+		.build();
+	// Split just before each Cluster's ID.
+	const CLUSTER: [u8; 4] = [0x1f, 0x43, 0xb6, 0x75];
+	let clusters: Vec<usize> = data
+		.windows(4)
+		.enumerate()
+		.filter(|(_, window)| *window == CLUSTER)
+		.map(|(index, _)| index)
+		.collect();
+	let (head, rest) = data.split_at(clusters[0]);
+	let (first, second) = rest.split_at(clusters[1] - clusters[0]);
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(head).unwrap();
+	importer.seek(100).unwrap();
+	importer.decode(first).unwrap();
+	// The next segment is 101, but the cues already spent groups past it.
+	importer.seek(101).unwrap();
+	importer.decode(second).unwrap();
+	importer.finish().unwrap();
+}
+
+/// A subtitle BlockGroup that replaces the codec initialization is refused, not silently ignored.
+#[test]
+fn subtitle_codec_state_is_refused() {
+	let MatroskaSpec::TrackEntry(Master::Full(mut fields)) = text_entry(1, "S_TEXT/WEBVTT", "en", "English") else {
+		unreachable!()
+	};
+	fields.push(MatroskaSpec::CodecPrivate(b"WEBVTT\n".to_vec()));
+	let MatroskaSpec::SimpleBlock(block) = simple_block(1, 0, true, b"Hello") else {
+		unreachable!()
+	};
+	let data = MkvBuilder::new()
+		.header("matroska")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![MatroskaSpec::TrackEntry(Master::Full(fields))])
+		.cluster(0, || {
+			vec![MatroskaSpec::BlockGroup(Master::Full(vec![
+				MatroskaSpec::Block(block),
+				MatroskaSpec::BlockDuration(1000),
+				MatroskaSpec::CodecState(b"WEBVTT\n\nSTYLE\n::cue { color: red; }\n".to_vec()),
+			]))]
+		})
+		.segment_end()
+		.build();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	let result = importer.decode(&data);
+	assert!(
+		matches!(result, Err(crate::Error::Mkv(super::Error::InvalidSubtitle(_)))),
+		"{result:?}"
+	);
 }

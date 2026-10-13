@@ -15,7 +15,7 @@
 use std::{
 	sync::{
 		Arc, Mutex,
-		atomic::{AtomicBool, AtomicUsize, Ordering},
+		atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering},
 	},
 	task::{Context, Poll},
 	time::Duration,
@@ -143,6 +143,9 @@ pub struct MockSendStream {
 	/// Where to log the first byte written, the stream type (see
 	/// [`MockSession::bidi_types`]), until it is written.
 	first_byte: Option<StreamTypes>,
+	/// The send order last set, shared with the peer's end for
+	/// [`MockSession::release_unis_by_priority`].
+	priority: Arc<AtomicI32>,
 	conn: Arc<ConnectionState>,
 }
 
@@ -175,7 +178,9 @@ impl poll::SendStream for MockSendStream {
 		)
 	}
 
-	fn set_priority(&mut self, _order: i32) {}
+	fn set_priority(&mut self, order: i32) {
+		self.priority.store(order, Ordering::Relaxed);
+	}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
 		if self.withhold_fin.load(Ordering::Relaxed) {
@@ -245,6 +250,8 @@ pub struct MockRecvStream {
 	chunks: usize,
 	/// Shared signal to notify the peer's send-side `poll_closed`.
 	closed: Arc<ClosedSignal>,
+	/// The sender's send order; see [`MockSendStream::priority`].
+	priority: Arc<AtomicI32>,
 	park: kio::Park,
 	conn: Arc<ConnectionState>,
 }
@@ -386,6 +393,7 @@ type StreamTypes = Arc<Mutex<Vec<u8>>>;
 fn new_stream_pair(conn: &Arc<ConnectionState>, resets: &Resets) -> (MockSendStream, MockRecvStream) {
 	let queue = kio::Queue::new();
 	let closed = Arc::new(ClosedSignal::default());
+	let priority = Arc::new(AtomicI32::new(0));
 
 	let send = MockSendStream {
 		tx: Some(queue.clone()),
@@ -395,6 +403,7 @@ fn new_stream_pair(conn: &Arc<ConnectionState>, resets: &Resets) -> (MockSendStr
 		ack_fin: false,
 		withhold_fin: Arc::default(),
 		first_byte: None,
+		priority: priority.clone(),
 		conn: conn.clone(),
 	};
 	let recv = MockRecvStream {
@@ -406,6 +415,7 @@ fn new_stream_pair(conn: &Arc<ConnectionState>, resets: &Resets) -> (MockSendStr
 		split: None,
 		chunks: 0,
 		closed,
+		priority,
 		park: kio::Park::default(),
 		conn: conn.clone(),
 	};
@@ -481,6 +491,29 @@ struct SessionSide {
 	withhold_bidi_fins: Arc<AtomicBool>,
 	/// The first byte of each bidi stream this side opened.
 	bidi_types: StreamTypes,
+	/// What [`poll::Session::stats`] reports.
+	stats: Mutex<MockStats>,
+	/// How many times the stats were read.
+	stats_reads: AtomicUsize,
+}
+
+/// The connection statistics a [`MockSession`] reports. Unavailable by default.
+#[derive(Clone, Copy, Default)]
+pub struct MockStats {
+	/// The congestion controller's send-rate estimate, in bits per second.
+	pub estimated_send_rate: Option<u64>,
+	/// The smoothed round-trip time.
+	pub rtt: Option<Duration>,
+}
+
+impl moq_net::transport::Stats for MockStats {
+	fn estimated_send_rate(&self) -> Option<u64> {
+		self.estimated_send_rate
+	}
+
+	fn rtt(&self) -> Option<Duration> {
+		self.rtt
+	}
 }
 
 /// An in-memory mock WebTransport session.
@@ -620,7 +653,8 @@ impl poll::Session for MockSession {
 	}
 
 	fn stats(&self) -> impl moq_net::transport::Stats {
-		moq_net::transport::StatsUnavailable
+		self.side.stats_reads.fetch_add(1, Ordering::Relaxed);
+		*self.side.stats.lock().unwrap()
 	}
 }
 
@@ -630,6 +664,16 @@ impl MockSession {
 	/// Streams whose FIN was sent before the connection closed.
 	pub fn finished_streams(&self) -> usize {
 		self.side.conn.finishes.load(Ordering::Relaxed)
+	}
+
+	/// Report `stats` from now on.
+	pub fn set_stats(&self, stats: MockStats) {
+		*self.side.stats.lock().unwrap() = stats;
+	}
+
+	/// How many times the stats were read.
+	pub fn stats_reads(&self) -> usize {
+		self.side.stats_reads.load(Ordering::Relaxed)
 	}
 
 	/// Drop the FIN of the bidi streams this side opens, keeping them open.
@@ -688,6 +732,16 @@ impl MockSession {
 			.into_iter()
 			.rev()
 		{
+			let _ = self.side.peer_uni.try_push(stream);
+		}
+	}
+
+	/// Deliver the held uni streams highest send order first, as a congested sender
+	/// would transmit them, and stop holding. Equal send orders keep their open order.
+	pub fn release_unis_by_priority(&self) {
+		let mut held = self.side.held.lock().unwrap().take().unwrap_or_default();
+		held.sort_by_key(|stream| std::cmp::Reverse(stream.priority.load(Ordering::Relaxed)));
+		for stream in held {
 			let _ = self.side.peer_uni.try_push(stream);
 		}
 	}
@@ -814,6 +868,8 @@ pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession,
 		lossy: Mutex::default(),
 		withhold_bidi_fins: Arc::default(),
 		bidi_types: StreamTypes::default(),
+		stats: Mutex::default(),
+		stats_reads: AtomicUsize::default(),
 	});
 
 	let server_side = Arc::new(SessionSide {
@@ -834,6 +890,8 @@ pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession,
 		lossy: Mutex::default(),
 		withhold_bidi_fins: Arc::default(),
 		bidi_types: StreamTypes::default(),
+		stats: Mutex::default(),
+		stats_reads: AtomicUsize::default(),
 	});
 
 	let new = |side| MockSession {

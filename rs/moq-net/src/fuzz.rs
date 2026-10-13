@@ -339,6 +339,7 @@ impl LiteSample {
 			.encode(w, version)
 			.unwrap(),
 			Self::Subscribe => lite::Subscribe {
+				order: crate::track::Order::Descending,
 				epoch: None,
 				id: 3,
 				broadcast: Path::new("room/alice"),
@@ -523,6 +524,7 @@ impl Default for Messages {
 
 		Self {
 			lite_subscribe: lite::Subscribe {
+				order: crate::track::Order::Descending,
 				epoch: None,
 				id: 7,
 				broadcast: Path::new("room/alice"),
@@ -535,6 +537,7 @@ impl Default for Messages {
 				end_frame: None,
 			},
 			lite_update: lite::SubscribeUpdate {
+				order: crate::track::Order::Descending,
 				priority: 4,
 				max_delay: Duration::from_millis(500),
 				start_group: Some(1_000),
@@ -1053,7 +1056,12 @@ impl FrameRecv {
 		let mut info = broadcast::Info::new();
 		info.pool = cache::Pool::unbounded();
 		let broadcast = info.produce();
-		let track = broadcast.create_track("frames", None).unwrap();
+		let track = broadcast
+			.create_track(
+				"frames",
+				crate::track::Info::default().with_timescale(crate::Timescale::MILLI),
+			)
+			.unwrap();
 		let budget = budget.map(frame::Budget::new).unwrap_or_default();
 		let payload = bytes::Bytes::from(vec![0u8; size]);
 
@@ -1169,6 +1177,16 @@ impl crate::transport::Error for NoError {
 	fn session_error(&self) -> Option<(u32, String)> {
 		None
 	}
+}
+
+/// Admit modern request IDs for the history benchmark, returning the accepted count.
+pub fn request_history(ids: &[u64]) -> usize {
+	ietf::request_history(ids)
+}
+
+/// Admit a draft-16 window for the request-ID benchmark, returning the accepted count.
+pub fn request_ids(window: u64, ids: &[u64]) -> usize {
+	ietf::request_ids(window, ids)
 }
 
 /// A source-selection watch for the private request-lifetime benchmark.

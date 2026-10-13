@@ -84,7 +84,9 @@ pub(super) struct Update {
 	/// The first Request ID: the update's own on drafts 14-16, which their answer names.
 	pub(super) request_id: super::RequestId,
 	pub(super) priority: Option<u8>,
-	pub(super) unsupported: bool,
+	/// Why the update is refused, which fails the subscription: [`Error::Unsupported`], or a
+	/// [`DecodeError::MalformedAuthToken`] for tokens that repeat.
+	pub(super) refused: Option<Error>,
 }
 
 impl Update {
@@ -112,14 +114,14 @@ impl Update {
 				let _end_group = data.varint()?;
 				let priority = data.u8()?;
 				let forward = data.bool()?;
-				Parameters::skip(data)?;
+				let tokens = Parameters::skip_request(data)?;
 				if !data.is_empty() {
 					return Err(DecodeError::InvalidValue);
 				}
 				return Ok(Self {
 					request_id,
 					priority: Some(priority),
-					unsupported: !forward,
+					refused: Self::refused(&tokens, !forward),
 				});
 			}
 			// The request it updates, which the adapter already routed by.
@@ -133,7 +135,7 @@ impl Update {
 		}
 		decode_params!(data, version,
 			0x02 => object_timeout: Option<u64>,
-			0x03 => token: Vec<Opaque>,
+			0x03 => token: Vec<super::token::RequestToken>,
 			0x06 => subgroup_timeout: Option<u64> where !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17),
 			0x10 => forward: Option<bool>,
 			0x20 => priority: Option<u8>,
@@ -149,22 +151,32 @@ impl Update {
 		if !data.is_empty() {
 			return Err(DecodeError::InvalidValue);
 		}
+		let unsupported = forward == Some(false)
+			|| filter.is_some()
+			|| fill.is_some()
+			|| object_timeout.is_some()
+			|| subgroup_timeout.is_some()
+			|| !token.is_empty()
+			|| !subgroup_filter.is_empty()
+			|| !object_filter.is_empty()
+			|| !priority_filter.is_empty()
+			|| !property_filter.is_empty()
+			|| !track_filter.is_empty()
+			|| new_group.is_some();
 		Ok(Self {
 			request_id,
 			priority,
-			unsupported: forward == Some(false)
-				|| filter.is_some()
-				|| fill.is_some()
-				|| object_timeout.is_some()
-				|| subgroup_timeout.is_some()
-				|| !token.is_empty()
-				|| !subgroup_filter.is_empty()
-				|| !object_filter.is_empty()
-				|| !priority_filter.is_empty()
-				|| !property_filter.is_empty()
-				|| !track_filter.is_empty()
-				|| new_group.is_some(),
+			refused: Self::refused(&token, unsupported),
 		})
+	}
+
+	/// Section 8.9 rejects an update whose tokens repeat, which says more than that we do not
+	/// support it.
+	fn refused(tokens: &[super::token::RequestToken], unsupported: bool) -> Option<Error> {
+		match super::token::unique(tokens) {
+			Err(err) => Some(err.into()),
+			Ok(()) => unsupported.then_some(Error::Unsupported),
+		}
 	}
 }
 
@@ -196,6 +208,6 @@ mod tests {
 		let mut buf = bytes::Bytes::from_static(&[0x02, 0x01, 0x20, 0x05]);
 		let update = crate::coding::decode_buf(&mut buf, Version::Draft18, Update::decode_body).unwrap();
 		assert_eq!(update.priority, Some(5));
-		assert!(!update.unsupported);
+		assert!(update.refused.is_none());
 	}
 }

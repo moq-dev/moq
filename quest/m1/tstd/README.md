@@ -50,10 +50,12 @@ MB/AAC controls. Do not relabel the current subset a full standards check.
 ## Required
 
 - [Send-ahead within the delay](/quest/m1/tstd/send-ahead.md) - total lag is `--delay`, send-ahead included, with a 1 s default
-- [Mux-rate hold](/quest/m1/tstd/mux-rate-hold.md) - import publishes its catalog once the mux rate is measured, so export is constant-rate from the start
 - [PSI runs](/quest/m1/tstd/psi-runs.md) - the PAT and PMT are deduplicated and paced so the system buffers never overflow
+- [Video at its full leak](/quest/m1/tstd/video-leak.md) - a leak-bound video PID is admitted at its full Rbx, not about 3 % below it
+- [Mux overhead](/quest/m1/tstd/mux-overhead.md) - the PCR rides in the video's adaptation field and audio PES carry several frames, so a full CBR source re-muxes at its own rate
 
 ## Related
 
 - [TS passthrough export](/quest/m1/ts-passthrough-export.md) - the passthrough lane named in the Goal
+- [Automated validation](/test/ts/README.md) - independent decode, profile coverage and CI ownership
 - [Loss and recovery](/quest/m1/ts-reliability/recovery.md) - actual object/group omissions and recovery

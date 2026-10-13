@@ -24,7 +24,7 @@ async fn a_transient_failure_retries_until_the_budget_runs_out() {
 	let mut backoff = moq_tokio::Backoff::default();
 	backoff.initial = Duration::from_millis(20);
 	backoff.max = Duration::from_millis(40);
-	backoff.timeout = Duration::from_millis(200);
+	backoff.timeout = Some(Duration::from_millis(200));
 
 	// Nothing listens on port 1, so every attempt is refused: transient as far as this layer knows.
 	let url: url::Url = "tcp://127.0.0.1:1".parse().expect("failed to parse url");
@@ -54,11 +54,76 @@ async fn a_transient_failure_retries_until_the_budget_runs_out() {
 	);
 }
 
-/// The epoch advances in the same write that reports `Connected`, so a caller
-/// pairing [`Connection::status`] with [`Connection::epoch`] never sees a stale
+/// The retry window decides whether a new attempt starts, not how long one may take: a handshake
+/// slower than the window, but inside the connect timeout, lands on the first dial. Cutting it at
+/// the window would only fail it, and every redial the same way.
+#[tokio::test]
+async fn a_handshake_slower_than_the_retry_window_still_lands() {
+	const WINDOW: Duration = Duration::from_millis(300);
+	const HANDSHAKE: Duration = Duration::from_secs(1);
+
+	// `tls://`, so the dial waits on the server's half of the TLS handshake.
+	let mut listen = moq_tokio::listen::Config::default();
+	listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
+	listen.tcp.tls = Some(true);
+	listen.tls.generate = vec!["localhost".into()];
+	let mut server = listen
+		.init(Default::default())
+		.expect("init server")
+		.listen()
+		.await
+		.expect("bind tcp listener");
+	let server_addr = server.tcp_local_addr().expect("tcp listener bound");
+	let (accepted, mut sessions) = tokio::sync::mpsc::unbounded_channel();
+	let _server = tokio::spawn(async move {
+		let origin = moq_tokio::origin::spawn();
+		while let Some(request) = server.accept().await {
+			if let Ok(session) = request.with_publisher(&origin).ok().await {
+				let _ = accepted.send(session);
+			}
+		}
+	});
+
+	// Holds each connection for the handshake's length before forwarding it to the server.
+	let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind proxy");
+	let port = proxy.local_addr().expect("proxy bound").port();
+	let (dialed, mut dials) = tokio::sync::mpsc::unbounded_channel();
+	let _proxy = tokio::spawn(async move {
+		while let Ok((mut client, _)) = proxy.accept().await {
+			let _ = dialed.send(());
+			tokio::spawn(async move {
+				tokio::time::sleep(HANDSHAKE).await;
+				let mut upstream = tokio::net::TcpStream::connect(server_addr)
+					.await
+					.expect("connect to the server");
+				let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+			});
+		}
+	});
+
+	let mut config = moq_tokio::connect::Config::default();
+	config.tls.insecure = Some(true);
+	config.backoff.timeout = Some(WINDOW);
+	let client = config.init(Default::default()).expect("failed to init client");
+	let url: url::Url = format!("tls://127.0.0.1:{port}/").parse().expect("parse url");
+	let connection = client.connect(url);
+
+	tokio::select! {
+		session = sessions.recv() => {
+			session.expect("server stopped accepting");
+		}
+		res = connection.closed() => panic!("gave up mid-handshake: {res:?}"),
+		_ = tokio::time::sleep(Duration::from_secs(30)) => panic!("never connected"),
+	}
+	dials.recv().await.expect("proxy stopped");
+	assert!(dials.try_recv().is_err(), "the first dial was cut short and redialed");
+}
+
+/// The connect count advances in the same write that reports `Connected`, so a caller
+/// pairing [`Connection::status`] with [`Connection::connects`] never sees a stale
 /// count, however fast the redial.
 #[tokio::test]
-async fn the_epoch_advances_on_reconnect() {
+async fn the_connect_count_advances_on_reconnect() {
 	let (port, mut sessions, _task) = spawn_server().await;
 	let url: url::Url = format!("tcp://localhost:{port}/").parse().expect("parse url");
 	let mut connection = quick_client(Default::default()).connect(url);
@@ -68,19 +133,19 @@ async fn the_epoch_advances_on_reconnect() {
 		.expect("status timed out")
 		.expect("status failed");
 	assert_eq!(status, moq_tokio::Status::Connected);
-	assert_eq!(connection.epoch(), 1, "the first connect is epoch 1");
+	assert_eq!(connection.connects(), 1, "the first connect counts 1");
 
 	// Dropping the server's handle closes the session, so the loop redials.
 	let session = sessions.recv().await.expect("server stopped accepting");
 	drop(session);
 
 	tokio::time::timeout(Duration::from_secs(10), async {
-		while connection.epoch() < 2 {
+		while connection.connects() < 2 {
 			tokio::time::sleep(Duration::from_millis(10)).await;
 		}
 	})
 	.await
-	.expect("the epoch never advanced past the first connect");
+	.expect("the connect count never advanced past the first connect");
 }
 
 #[tokio::test]
@@ -138,7 +203,7 @@ fn quick_client(redirect: moq_tokio::Redirect) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.backoff.initial = Duration::from_millis(20);
 	config.backoff.max = Duration::from_millis(40);
-	config.backoff.timeout = Duration::ZERO;
+	config.backoff.timeout = Some(Duration::ZERO);
 	config.goaway.redirect = redirect;
 	config.init(Default::default()).expect("failed to init client")
 }
@@ -259,4 +324,80 @@ async fn an_empty_goaway_preserves_configured_fallbacks() {
 		.await
 		.expect("configured fallback was discarded")
 		.expect("server B stopped accepting");
+}
+
+/// A graceful restart: the server keeps accepting while it drains, and sends every new session
+/// an empty-URI GOAWAY at once, for longer than the retry window. Each of those sessions serves
+/// until the client moves on, so none is a failure, and the client is still there to land on
+/// the first session the server lets stay.
+#[tokio::test]
+async fn a_draining_peer_does_not_exhaust_the_retry_window() {
+	// Each redial waits at least half of its 200ms delay, so the drained sessions alone span
+	// more than twice the window. A GOAWAY arriving inside the 200ms health bar is what makes a
+	// session count as drained at once rather than as a healthy session that later migrated.
+	let mut backoff = moq_tokio::Backoff::default();
+	backoff.initial = Duration::from_millis(200);
+	backoff.max = Duration::from_millis(200);
+	backoff.timeout = Some(Duration::from_millis(500));
+	rides_out_a_drain(backoff, 12).await;
+}
+
+/// A restart's pacing sleep can be longer than the retry window. It must not spend the window,
+/// or the loop would give up right after the sleep without redialing the restarting peer.
+#[tokio::test]
+async fn a_drain_backoff_longer_than_the_retry_window_still_redials() {
+	// From the second drained session on, the delay is 400ms against a 100ms window.
+	let mut backoff = moq_tokio::Backoff::default();
+	backoff.initial = Duration::from_millis(200);
+	backoff.max = Duration::from_millis(400);
+	backoff.timeout = Some(Duration::from_millis(100));
+	rides_out_a_drain(backoff, 4).await;
+}
+
+/// Connect with `backoff` to a server that sends its first `drained` sessions an empty-URI
+/// GOAWAY at once, and assert the client is still there to land on the session after them.
+async fn rides_out_a_drain(backoff: moq_tokio::Backoff, drained: usize) {
+	let client = client(backoff);
+
+	let mut server = moq_tokio::listen::Config::default();
+	server.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
+	let mut server = server
+		.init(Default::default())
+		.expect("init server")
+		.listen()
+		.await
+		.expect("bind tcp listener");
+	let port = server.tcp_local_addr().expect("tcp listener bound").port();
+
+	let (served_tx, mut served) = tokio::sync::mpsc::unbounded_channel();
+	let _task = tokio::spawn(async move {
+		let origin = moq_tokio::origin::spawn();
+		// Held, as a draining server does: each one closes when the client leaves it.
+		let mut held = Vec::new();
+		while let Some(request) = server.accept().await {
+			let Ok(session) = request.with_publisher(&origin).ok().await else {
+				continue;
+			};
+			if held.len() < drained {
+				session
+					.drain()
+					.send(moq_net::goaway::Goaway::new().with_timeout(Duration::from_secs(30)))
+					.expect("send goaway");
+				held.push(session);
+			} else {
+				let _ = served_tx.send(session);
+			}
+		}
+	});
+
+	let url: url::Url = format!("tcp://127.0.0.1:{port}/").parse().expect("parse url");
+	let connection = client.connect(url);
+
+	tokio::select! {
+		session = served.recv() => {
+			session.expect("server stopped accepting");
+		}
+		res = connection.closed() => panic!("gave up during the drain: {res:?}"),
+		_ = tokio::time::sleep(Duration::from_secs(30)) => panic!("never landed after the drain"),
+	}
 }

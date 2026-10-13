@@ -31,8 +31,7 @@ Facts (2026-10-10, `origin/main` e5446b036):
 Decisions:
 
 - What counts as a watch: `announced(scope)` and
-  `request(path, { announced: true })` (after the
-  [read API](/quest/m1/lazy-discovery/read-api.md) fold). Each holds its
+  `request(path, { announced: true })`. Each holds its
   watch until closed.
 - The origin exposes the live watched-prefix set to its sessions through the
   `wire.ts` seam; each session maintains the covering set against it.
@@ -62,7 +61,3 @@ Public API: `discovery` removed from connect, accept, and `Connection` props,
 and `Established.discovery` removed; a `consume` origin no longer fills until
 something watches. Note the removal and the fill change in the PR's
 migration notes and `doc/lib/js/net.md`. Wire: none.
-
-## Required
-
-- [Origin read API](/quest/m1/lazy-discovery/read-api.md) - the watch set is defined over the folded API

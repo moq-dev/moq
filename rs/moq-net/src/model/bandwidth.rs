@@ -104,6 +104,11 @@ impl Producer {
 		}
 	}
 
+	/// A handle that mints consumers without being one, so holding it is not demand.
+	pub(crate) fn weak(&self) -> Weak {
+		Weak(self.state.weak())
+	}
+
 	/// Close the producer with an error, notifying all consumers.
 	pub fn abort(&self, err: Error) -> Result<()> {
 		let mut state = self.modify()?;
@@ -158,6 +163,20 @@ impl Producer {
 impl Default for Producer {
 	fn default() -> Self {
 		Self::new()
+	}
+}
+
+/// Mints [`Consumer`]s on demand without counting as one, nor keeping the channel open.
+#[derive(Clone)]
+pub(crate) struct Weak(kio::ProducerWeak<State>);
+
+impl Weak {
+	/// A new consumer, which reports the closure once the producer is gone.
+	pub(crate) fn consume(&self) -> Consumer {
+		Consumer {
+			inner: Inner::Whole(self.0.consume()),
+			last: None,
+		}
 	}
 }
 
@@ -632,7 +651,7 @@ mod tests {
 	fn track(priority: u8) -> (broadcast::Producer, track::Producer) {
 		let broadcast = broadcast::Info::default().produce();
 		let track = broadcast
-			.create_track("t", track::Info::default().with_priority(priority))
+			.create_track("t", track::Info::timed().with_priority(priority))
 			.unwrap();
 		(broadcast, track)
 	}

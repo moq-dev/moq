@@ -143,7 +143,9 @@ impl Client {
 		let timeout = resolved.timeout;
 
 		Ok(Self {
-			moq: moq_net::Client::new().with_versions(versions.clone()),
+			moq: moq_net::Client::new()
+				.with_versions(versions.clone())
+				.with_extensions(config.extensions),
 			#[cfg(any(
 				feature = "noq",
 				feature = "iroh",
@@ -214,6 +216,12 @@ impl Client {
 	/// Subscribe to the peer's broadcasts, ingesting them into the given origin.
 	pub fn with_subscriber(mut self, subscribe: moq_net::origin::Producer) -> Self {
 		self.moq = self.moq.with_subscriber(subscribe);
+		self
+	}
+
+	/// Cap the announcements and subscriptions this peer can hold on a session.
+	pub fn with_limits(mut self, limits: moq_net::session::Limits) -> Self {
+		self.moq = self.moq.with_limits(limits);
 		self
 	}
 
@@ -875,7 +883,7 @@ where
 /// answers the fallback with 403 while QUIC is still in flight, and reconnect
 /// treats is_auth() as terminal, so a mixed pair reports the retryable error.
 #[cfg(all(feature = "websocket", feature = "noq"))]
-fn race_error(quic: Error, websocket: Error) -> Error {
+pub(crate) fn race_error(quic: Error, websocket: Error) -> Error {
 	match (quic.is_auth(), websocket.is_auth()) {
 		(false, false) => Error::TransportRace {
 			quic: std::sync::Arc::new(quic),
@@ -908,6 +916,11 @@ async fn connect_session<S: moq_net::transport::poll::Boxable>(
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
 
 	/// A QUIC session whose peer never sends SETUP gives up at the connect deadline, so the
 	/// WebSocket session keeps serving instead of waiting on the upgrade forever.
@@ -1638,7 +1651,9 @@ mod tests {
 		broadcast
 			.announce(Default::default())
 			.expect("failed to create broadcast");
-		let track = broadcast.create_track("video", None).expect("failed to create track");
+		let track = broadcast
+			.create_track("video", timed())
+			.expect("failed to create track");
 		let mut group = track.append_group().expect("failed to append group");
 		group
 			.write_frame(crate::moq_net::Timestamp::ZERO, b"hello".as_ref())

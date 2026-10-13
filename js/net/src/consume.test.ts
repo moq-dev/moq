@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { Producer } from "./broadcast.ts";
 import { BroadcastCache } from "./consume.ts";
 import * as Epoch from "./epoch.ts";
+import { StreamCode, StreamError } from "./error.ts";
 import { Route } from "./hop.ts";
 import * as Path from "./path.ts";
 
@@ -114,6 +115,10 @@ test("request validity cancels one selection period and permits the held fallbac
 	expect(first?.aborted).toBe(false);
 	cache.announce(path, b, Route.default);
 	expect(first?.aborted).toBe(true);
+	// A more specific route taking over ends the old instance's requests the way Rust does, so
+	// players treat it as the instance going offline rather than an unexpected failure.
+	expect(first?.reason).toBeInstanceOf(StreamError);
+	expect(first?.reason).toMatchObject({ code: StreamCode.Unroutable });
 	const sourceB = new Producer();
 	const instanceB = cache.instance(path);
 	const heldB = cache.insert(path, instanceB, sourceB.consume());

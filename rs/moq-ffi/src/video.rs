@@ -653,7 +653,9 @@ impl MoqVideoDecodedFrame {
 				.to_rgba(&moq_video::convert::Config::default())
 				.map(|rgba| rgba.into_data()),
 		}
-		.map_err(|err| MoqError::Codec(err.to_string()))
+		.map_err(|err| MoqError::Codec {
+			reason: err.to_string(),
+		})
 	}
 
 	/// A borrowed handle to the decoder's surface, or `None` when the frame is

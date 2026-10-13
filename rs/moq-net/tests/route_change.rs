@@ -21,6 +21,11 @@ use futures::{StreamExt, channel::mpsc};
 use moq_net::{Error, Hop, Timestamp, Version, announce, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Frames per group.
@@ -105,7 +110,7 @@ impl Topology {
 		let subscriber = produce_origin(4);
 
 		let broadcast = publisher.create_broadcast("live").unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", timed()).unwrap();
 		broadcast
 			.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
 			.unwrap();
@@ -536,7 +541,7 @@ async fn lagging_route_dies(version: Version) -> mpsc::UnboundedReceiver<Deliver
 		produce_origin(5),
 	);
 	let broadcast = p.create_broadcast("live").unwrap();
-	let track = broadcast.create_track("video", None).unwrap();
+	let track = broadcast.create_track("video", timed()).unwrap();
 	broadcast
 		.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
 		.unwrap();
@@ -640,7 +645,7 @@ async fn redundant_pair_fails_over(version: &str, loss: Loss) {
 	for (name, hop, cost) in [("P1", 1, 1), ("P2", 2, 5)] {
 		let publisher = produce_origin(hop);
 		let broadcast = publisher.create_broadcast("live").unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", timed()).unwrap();
 		broadcast
 			.announce(origin::Route::default().with_epoch(epoch.clone()).with_cost(cost))
 			.unwrap();
@@ -747,7 +752,7 @@ async fn replaced_behind_a_relay(version: &str, epoch: Option<moq_net::Epoch>, r
 	for (name, hop, cost) in [("P1", 1, None), ("P2", 2, Some(1_000))] {
 		let publisher = produce_origin(hop);
 		let broadcast = publisher.create_broadcast("live").unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", timed()).unwrap();
 		let route = match &epoch {
 			Some(epoch) => origin::Route::default().with_epoch(epoch.clone()),
 			None => origin::Route::default(),
@@ -856,9 +861,8 @@ async fn pair_behind_a_relay_ends_lite_06() {
 /// `P` serves `video` on demand and replaces its producer partway through the broadcast,
 /// the way a publisher restarts an encoder. The epoch lets `P`'s own front resume the
 /// logical track onto the replacement, so `A` and `R` never see the abort. The
-/// replacement continues the track's sequence namespace, so its first group reaches
-/// `R` at once instead of being skipped until a fresh counter caught up with what `R`
-/// already read.
+/// replacement continues the track's sequences explicitly, so its first group reaches
+/// `R` at once instead of being skipped as one `R` already read.
 async fn producer_replaced(version: &str) {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
@@ -873,7 +877,7 @@ async fn producer_replaced(version: &str) {
 	let (tx, mut producers) = mpsc::unbounded();
 	moq_net_sim::spawn(async move {
 		while let Ok(request) = dynamic.requested_track().await {
-			if tx.unbounded_send(request.accept(None)).is_err() {
+			if tx.unbounded_send(request.accept(timed())).is_err() {
 				return;
 			}
 		}
@@ -908,8 +912,13 @@ async fn producer_replaced(version: &str) {
 		.expect("the track was not requested again")
 		.unwrap();
 
-	let mut group = second.append_group().unwrap();
-	assert_eq!(group.sequence, 2, "{version}: the replacement restarted its sequences");
+	// The application owns where the replacement starts: an append would reuse the first
+	// producer's sequences, so it is refused, and the replacement continues explicitly.
+	assert!(
+		matches!(second.append_group(), Err(Error::Duplicate)),
+		"{version}: the replacement restarted its sequences"
+	);
+	let mut group = second.create_group(moq_net::group::Info { sequence: 2 }).unwrap();
 	for frame in 0..FRAMES {
 		group.write_frame(Timestamp::ZERO, payload(2, frame)).unwrap();
 		assert_eq!(next(&mut rx).await, (2, payload(2, frame)), "{version}");

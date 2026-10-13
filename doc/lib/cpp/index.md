@@ -115,7 +115,9 @@ ok(audio->write_frame({packet, 20'000}));
 moq::VideoEncoderOutput output{moq::VideoCodec::kH264, "camera", std::nullopt, std::nullopt, moq::VideoEncoderKind::kAuto{}};
 auto video = ok(broadcast->encode_video({moq::VideoPixelFormat::kRgba, 1280, 720, 30}, output, nullptr));
 ok(video->write({0, rgba}));
-ok(broadcast->announce({}));
+moq::Route route;
+route.epoch = moq::mint_epoch(); // a fresh epoch per run
+ok(broadcast->announce(route));
 ok(broadcast->close());    // keep the producer alive while publishing, then close explicitly
 ```
 
@@ -191,6 +193,7 @@ process that exits normally can skip it.
 
 ## Errors
 
+Error cases carrying a diagnostic expose it as `reason`; protocol failures expose `details`.
 `moq::Error` holds a `std::variant` of cases (`moq::Error::kCancelled`,
 `kUnauthorized`, `kProtocol`, ...); test one with
 `std::holds_alternative<moq::Error::kUnauthorized>(error.get_variant())`. Auth
@@ -198,6 +201,12 @@ rejections are their own cases, so you don't retry them. `error.to_string()`
 gives the message Rust's `Display` does, for logs; branch on the case, not the
 text. A Rust panic or a misused future (`get()` twice) aborts with a message on
 stderr instead of throwing.
+
+A session closed for exceeding the relay's request caps reports the protocol
+kind `ProtocolKind::kTooManyRequests`. Reduce
+the simultaneous announcements or subscriptions, or ask the relay operator
+to adjust the [session limits](/bin/relay/config#session-and-peer), before
+reconnecting with the same workload.
 
 Check a result before reading it. With exceptions off below C++23, reading the
 value of an error is undefined, through `*result` and `value()` alike, since

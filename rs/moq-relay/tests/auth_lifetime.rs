@@ -24,6 +24,11 @@ use moq_relay::{Config, Connection, Relay, auth, cluster, web};
 use moq_tokio::moq_net;
 use moq_tokio::moq_net::stats;
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What the scripted server answers next, per event.
@@ -163,8 +168,15 @@ async fn spawn_relay_with(
 /// Stand up the relay's axum web stack with WebSocket enabled and return the
 /// port plus an abort handle.
 async fn spawn_ws_relay(auth: moq_relay::auth::Auth) -> (u16, tokio::task::JoinHandle<()>) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+	spawn_ws_relay_with(auth, cluster).await
+}
+
+async fn spawn_ws_relay_with(
+	auth: moq_relay::auth::Auth,
+	cluster: cluster::Cluster,
+) -> (u16, tokio::task::JoinHandle<()>) {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 	// Stream listeners bind lazily, so this server never opens a socket; only
 	// its certificate handle is used.
@@ -212,7 +224,7 @@ async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_t
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -460,7 +472,7 @@ async fn a_moved_tier_retags_the_live_session() {
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 	let pub_session = tokio::time::timeout(
 		TIMEOUT,
 		client()
@@ -586,7 +598,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 		let mut tracks = Vec::new();
 		for path in ["alice/audio", "alice/video"] {
 			let broadcast = pub_origin.create_broadcast(path).expect("create broadcast");
-			let track = broadcast.create_track("media", None).expect("create track");
+			let track = broadcast.create_track("media", timed()).expect("create track");
 			broadcast.announce(Default::default()).expect("announce broadcast");
 			tracks.push((broadcast, track));
 		}
@@ -773,7 +785,7 @@ async fn http_routes_hold_a_lease() {
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -1367,4 +1379,176 @@ async fn quic_and_webtransport_report_distinct_auth_transports() {
 	}
 	relay.abort();
 	let _ = relay.await;
+}
+
+/// A token can reach a prefix outside the initial credential, and withdrawing it
+/// revokes only the streams that depended on it on both native and upgraded WS.
+#[tokio::test]
+async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
+	for scheme in ["tcp", "ws"] {
+		let mut initial = Grant::new(all(), ["a/**".parse().unwrap()].into_iter().collect());
+		initial.expires = Some(SystemTime::now() + Duration::from_secs(3600));
+		let script = Script::new(initial);
+		let auth = build_auth(script.spawn().await);
+		let (port, relay) = if scheme == "tcp" {
+			spawn_relay(auth).await
+		} else {
+			spawn_ws_relay(auth).await
+		};
+		let client = || {
+			let mut config = moq_tokio::connect::Config::default();
+			config.once = Some(true);
+			config.version = vec!["moq-transport-22".parse().unwrap()];
+			config.websocket.delay = Duration::ZERO;
+			config.init(Default::default()).unwrap()
+		};
+		let origin = moq_tokio::origin::spawn();
+		let a = origin.create_broadcast("a/cam").unwrap();
+		let a_track = a.create_track("video", timed()).unwrap();
+		a.announce(Default::default()).unwrap();
+		let b = origin.create_broadcast("b/cam").unwrap();
+		let b_track = b.create_track("video", timed()).unwrap();
+		b.announce(Default::default()).unwrap();
+		let publisher = tokio::time::timeout(
+			TIMEOUT,
+			client()
+				.with_publisher(origin.consume())
+				.connect(room_url(scheme, port))
+				.established(),
+		)
+		.await
+		.unwrap()
+		.unwrap();
+		let received = moq_tokio::origin::spawn();
+		let read = received.consume();
+		let subscriber = tokio::time::timeout(
+			TIMEOUT,
+			client()
+				.with_subscriber(received)
+				.connect(room_url(scheme, port))
+				.established(),
+		)
+		.await
+		.unwrap()
+		.unwrap();
+		let a_read = tokio::time::timeout(TIMEOUT, read.routed_broadcast("a/cam"))
+			.await
+			.unwrap()
+			.unwrap();
+		let mut a_sub = a_read.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut replacement = Grant::new(all(), ["b/**".parse().unwrap()].into_iter().collect());
+		replacement.expires = Some(SystemTime::now() + Duration::from_secs(3600));
+		script.on_connect(Answer::Grant(replacement));
+		let token = tokio::time::timeout(TIMEOUT, subscriber.auth().add("replacement"))
+			.await
+			.unwrap()
+			.unwrap();
+		let b_read = tokio::time::timeout(TIMEOUT, read.routed_broadcast("b/cam"))
+			.await
+			.expect("new prefix not announced")
+			.unwrap();
+		let mut b_sub = b_read.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut group = b_track.append_group().unwrap();
+		group
+			.write_frame(moq_net::Timestamp::ZERO, b"new prefix".as_ref())
+			.unwrap();
+		group.finish().unwrap();
+		assert!(
+			tokio::time::timeout(TIMEOUT, b_sub.recv_group())
+				.await
+				.unwrap()
+				.unwrap()
+				.is_some()
+		);
+		drop(token);
+		let ended = tokio::time::timeout(TIMEOUT, b_sub.recv_group())
+			.await
+			.expect("withdrawn prefix stayed authorized");
+		assert!(
+			matches!(
+				ended,
+				Err(moq_net::Error::Unauthorized | moq_net::Error::Stream(moq_net::StreamError::Unauthorized))
+			),
+			"{scheme}: {:?}",
+			ended.as_ref().err()
+		);
+		let mut group = a_track.append_group().unwrap();
+		group
+			.write_frame(moq_net::Timestamp::ZERO, b"original prefix".as_ref())
+			.unwrap();
+		group.finish().unwrap();
+		assert!(
+			tokio::time::timeout(TIMEOUT, a_sub.recv_group())
+				.await
+				.unwrap()
+				.unwrap()
+				.is_some()
+		);
+		subscriber.abort(moq_net::Error::Cancel);
+		publisher.abort(moq_net::Error::Cancel);
+		relay.abort();
+		let _ = relay.await;
+	}
+}
+
+/// Both admission paths apply the selected cap before starting the session driver.
+#[tokio::test]
+async fn relay_request_limits_distinguish_clients_and_peers() {
+	for scheme in ["tcp", "ws"] {
+		for peer in [false, true] {
+			let mut grant = Grant::new(all(), all());
+			grant.peer = peer;
+			let script = Script::new(grant);
+			let auth = build_auth(script.spawn().await);
+			let mut options = cluster::Options::default();
+			options.session.announces = 1;
+			options.peer.announces = 2;
+			let cluster = cluster::Cluster::new(options).unwrap();
+			let consumer = cluster.origin.consume();
+			let mut observed = consumer.announced();
+			let (port, relay) = match scheme {
+				"tcp" => spawn_relay_with(auth, cluster).await,
+				_ => spawn_ws_relay_with(auth, cluster).await,
+			};
+			let origin = moq_tokio::origin::spawn();
+			let session = client()
+				.with_publisher(origin.consume())
+				.with_reconnect(false)
+				.connect(room_url(scheme, port))
+				.established()
+				.await
+				.unwrap();
+			let first = origin.create_broadcast("one").unwrap();
+			first.announce(Default::default()).unwrap();
+			tokio::time::timeout(TIMEOUT, next_update(&mut observed))
+				.await
+				.unwrap()
+				.unwrap();
+			let second = origin.create_broadcast("two").unwrap();
+			second.announce(Default::default()).unwrap();
+			if peer {
+				let (route, active) = tokio::time::timeout(TIMEOUT, next_update(&mut observed))
+					.await
+					.unwrap()
+					.unwrap();
+				assert!(active, "the peer must retain its second announcement: {route:?}");
+			} else {
+				let error = tokio::time::timeout(TIMEOUT, session.closed())
+					.await
+					.expect("the second client announcement exceeds the cap");
+				assert!(
+					matches!(
+						error,
+						Err(moq_tokio::Error::MoqNet(moq_net::Error::Session(
+							moq_net::SessionError::TooManyRequests
+						)))
+					),
+					"{error:?}"
+				);
+			}
+			drop(session);
+			relay.abort();
+			let _ = relay.await;
+		}
+	}
 }

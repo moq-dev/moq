@@ -596,6 +596,9 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	self_origin: crate::Hop,
 	// What the peer declared in its SETUP.
 	peer_setup: peer::PeerSetup,
+	// Whether our SETUP declared MoQ Solicit, which is what makes an unsolicited
+	// PUBLISH_NAMESPACE the peer's fault.
+	solicit: bool,
 	// Local policy for what pulling from this peer costs, overriding whatever it
 	// declared. See `cluster::link_cost`.
 	cost: Option<u64>,
@@ -688,6 +691,7 @@ where
 			session_origin: peer_hop.unwrap_or(crate::Hop::UNKNOWN),
 			self_origin,
 			peer_setup,
+			solicit: true,
 			cost,
 			state: Default::default(),
 			tasks,
@@ -706,6 +710,13 @@ where
 		self.auth = auth;
 		let this = self.clone();
 		self.tasks.push(async move { this.run_limit().await });
+		self
+	}
+
+	/// Whether our SETUP declared MoQ Solicit. Without it an unsolicited PUBLISH_NAMESPACE
+	/// is what we invited, even from a peer that implements the extension.
+	pub fn with_solicit(mut self, solicit: bool) -> Self {
+		self.solicit = solicit;
 		self
 	}
 
@@ -1134,7 +1145,12 @@ where
 		let mut data = body.decoder(this.version);
 		let task = match id {
 			ietf::Publish::ID => {
-				let msg = ietf::Publish::decode_msg(&mut data, this.version)?;
+				let msg = match ietf::Publish::decode_msg(&mut data, this.version) {
+					Err(DecodeError::MalformedAuthToken) => {
+						return Ok(this.reject_token(stream, request::Kind::Publish, body.clone()));
+					}
+					msg => msg?,
+				};
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}
@@ -1149,7 +1165,12 @@ where
 			ietf::PublishNamespace::ID => {
 				// A negotiated session that omits HOP_PATH fails the decode here, which
 				// the dispatcher turns into the protocol violation the draft requires.
-				let msg = ietf::PublishNamespace::decode_body(&mut data, this.version, peer.negotiated())?;
+				let msg = match ietf::PublishNamespace::decode_body(&mut data, this.version, peer.negotiated()) {
+					Err(DecodeError::MalformedAuthToken) => {
+						return Ok(this.reject_token(stream, request::Kind::PublishNamespace, body.clone()));
+					}
+					msg => msg?,
+				};
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}
@@ -1177,6 +1198,23 @@ where
 		Ok(task)
 	}
 
+	/// Refuse a request whose AUTHORIZATION TOKEN repeats (section 8.9), which unlike any
+	/// other decode error leaves the session open.
+	fn reject_token(
+		&self,
+		stream: Stream<S, Version>,
+		kind: request::Kind,
+		body: ietf::Body,
+	) -> MaybeSendBox<'static, ()> {
+		let version = self.version;
+		async move {
+			if let Err(err) = super::token::reject(stream, kind, body, version).await {
+				tracing::debug!(%err, "token refusal failed");
+			}
+		}
+		.maybe_boxed()
+	}
+
 	/// What the peer declared about being solicited (MoQ Solicit).
 	///
 	/// Read once by the dispatch loop and handed to each stream rather than awaited per
@@ -1188,16 +1226,20 @@ where
 
 	/// Whether an incoming PUBLISH_NAMESPACE means the peer ignored our SETUP.
 	///
-	/// We always declare that advertisements to us must be solicited (MoQ Solicit), and a
-	/// peer that wrote the option at all proves it implements the extension, whichever
-	/// value it chose. It also cannot have advertised before reading our SETUP, since our
-	/// SETUP is what says whether advertising unasked is allowed. So this is a bug in the
-	/// peer, and a silent one on both sides if we tolerate it.
+	/// Unless [`with_solicit`](Self::with_solicit) turned it off, we declare that
+	/// advertisements to us must be solicited (MoQ Solicit), and a peer that wrote the
+	/// option at all proves it implements the extension, whichever value it chose. It also
+	/// cannot have advertised before reading our SETUP, since our SETUP is what says whether
+	/// advertising unasked is allowed. So this is a bug in the peer, and a silent one on
+	/// both sides if we tolerate it.
 	///
 	/// Draft-14/15 are exempt: they have no inline NAMESPACE, so a PUBLISH_NAMESPACE
 	/// request is also how a peer answers our SUBSCRIBE_NAMESPACE there, and the message
 	/// alone does not say which it is.
 	fn unsolicited_is_a_violation(&self, declared: Option<bool>) -> bool {
+		if !self.solicit {
+			return false;
+		}
 		match self.version {
 			Version::Draft14 | Version::Draft15 => false,
 			_ => declared.is_some(),
@@ -1350,7 +1392,28 @@ where
 				return Ok(());
 			}
 
-			let msg = ietf::PublishNamespaceUpdate::decode_msg(&mut data, self.version)?;
+			// An update spends its own request ID, even one refused below.
+			let request_id = ietf::RequestId::decode(&mut body.decoder(self.version), self.version)?;
+			if let Err(err) = self.control.accept(request_id) {
+				self.session
+					.clone()
+					.close(crate::SessionError::from(&err).to_code(), "invalid request ID");
+				return Err(err);
+			}
+			let msg = match ietf::PublishNamespaceUpdate::decode_msg(&mut data, self.version) {
+				// Section 8.9 rejects the update, which withdraws the advertisement as any
+				// refused update does.
+				Err(DecodeError::MalformedAuthToken) => {
+					let err = Error::Decode(DecodeError::MalformedAuthToken);
+					self.write_error(stream, request_id, &err, "repeated AUTHORIZATION TOKEN")
+						.await?;
+					if stream.writer.finish().is_ok() {
+						let _ = stream.writer.closed().await;
+					}
+					return Ok(());
+				}
+				msg => msg?,
+			};
 			// Junk inside the declared size would otherwise be applied silently, which
 			// is the one decode path that skipped the check the others make.
 			if !data.is_empty() {
@@ -1934,16 +1997,19 @@ where
 		// SUBSCRIBEs: its TRACK_STATUS answer cannot say whether the track is timed.
 		let mut target = match request.subscription() {
 			None if ietf::TrackStatusOk::describes_track(self.version) => {
-				let Some(idle) = self.track_status(&broadcast_path, &track_name, request).await else {
-					return;
-				};
-				let Some(next) = self
-					.linger(&broadcast_path, &track_name, idle, &mut group_fetches, &mut gate)
-					.await
-				else {
-					return;
-				};
-				Target::Resume(next)
+				match self.track_status(&broadcast_path, &track_name, request).await {
+					Some(Target::Resume(idle)) => {
+						let Some(next) = self
+							.linger(&broadcast_path, &track_name, idle, &mut group_fetches, &mut gate)
+							.await
+						else {
+							return;
+						};
+						Target::Resume(next)
+					}
+					Some(target) => target,
+					None => return,
+				}
 			}
 			_ => Target::Request(request),
 		};
@@ -2036,8 +2102,11 @@ where
 		}
 
 		// Write Subscribe message. The aggregate is read now: a subscriber can join while
-		// the request ID and stream were awaited, and nothing updates the priority after.
-		let priority = target.subscription().map(|s| s.priority).unwrap_or(0);
+		// the request ID and stream were awaited, and nothing updates the priority or
+		// order after.
+		let aggregate = target.subscription();
+		let priority = aggregate.as_ref().map(|s| s.priority).unwrap_or(0);
+		let order = aggregate.map(|s| s.order).unwrap_or_default();
 		let written = async {
 			stream.writer.varint(ietf::Subscribe::ID).await?;
 			stream
@@ -2047,7 +2116,7 @@ where
 					track_namespace: broadcast_path.to_owned(),
 					track_name: track_name.into(),
 					subscriber_priority: super::priority::to_wire(priority),
-					group_order: GroupOrder::Descending,
+					group_order: order.into(),
 					filter: join.filter,
 					fill: join.fill,
 					// A resumed copy already knows the track, from the answer that accepted it.
@@ -2253,9 +2322,11 @@ where
 				(request.accept(info), dynamic)
 			}
 		};
-		// A live join starts at the publisher's edge; an absolute one where it asked.
+		// A live join starts at the publisher's edge; an absolute one where it asked. With
+		// no Largest the join skips nothing, so every group is owed: a lower one's stream
+		// may still arrive after a higher one's.
 		let _ = match live {
-			true => track.start_at(largest.map(|largest| largest.group)),
+			true => track.start_at(largest.map_or(0, |largest| largest.group)),
 			false => track.start_at(start.map(|start| start.group)),
 		};
 		let mut fetching: Option<MaybeSendBox<'static, ()>> = None;
@@ -2787,15 +2858,17 @@ where
 	}
 
 	/// Learn a track nobody subscribes to from TRACK_STATUS, and accept it as a copy with no
-	/// subscription, which [`Self::linger`] serves fetches from and subscribes once someone
-	/// does. `None` once the request was refused or abandoned: a publisher that refuses
-	/// TRACK_STATUS refuses the fetch-only request too.
+	/// subscription ([`Target::Resume`]), which [`Self::linger`] serves fetches from and
+	/// subscribes once someone does. A publisher that does not implement TRACK_STATUS hands
+	/// the request back ([`Target::Request`]) to be learned from SUBSCRIBE. `None` once the
+	/// request was refused or abandoned: a publisher that refuses the track's status refuses
+	/// the fetch-only request too.
 	async fn track_status(
 		&mut self,
 		broadcast_path: &Path<'_>,
 		track_name: &str,
 		request: track::Request,
-	) -> Option<Idle> {
+	) -> Option<Target> {
 		let validity = self.validity.start();
 		// An allocated ID is always sent, as in `subscribe_once`.
 		let request_id = match validity.run(self.control.next_request_id(&self.runtime)).await {
@@ -2870,6 +2943,12 @@ where
 		let _ = stream.writer.finish();
 		let ok = match response {
 			Ok(ok) => ok,
+			// NOT_SUPPORTED refuses the method, not the track. The origin queries a track before
+			// its first reader's subscription lands, so this is often a subscriber's request.
+			Err(Error::Unsupported) => {
+				tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "track status not supported, subscribing");
+				return Some(Target::Request(request));
+			}
 			Err(err) => {
 				tracing::debug!(%err, broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "track status refused");
 				request.reject(err);
@@ -2886,12 +2965,12 @@ where
 		));
 		// Nothing feeds this copy live: what it caches is fetched, never the live edge.
 		track.set_idle();
-		Some(Idle {
+		Some(Target::Resume(Idle {
 			demand: track.demand(),
 			track,
 			dynamic,
 			timescale: ok.properties.timescale,
-		})
+		}))
 	}
 
 	/// Read the answer to a TRACK_STATUS: TRACK_STATUS_OK, or the publisher's refusal as an
@@ -2998,8 +3077,16 @@ where
 		};
 		let (producer, start) = match opened {
 			Opened::Group(producer, start) => (producer, start),
-			// No object at or past object 0 of this group exists, so neither does the group.
-			Opened::EndOfTrack => return end_track(&mut track, group.group_id),
+			// A standalone terminal carries a Location, not a payload group.
+			Opened::EndOfTrack(object) => {
+				return end_track(
+					&mut track,
+					track::Position {
+						group: group.group_id,
+						frame: object,
+					},
+				);
+			}
 		};
 
 		// Guarded: this handler can be dropped at any await below, and a group producer
@@ -3049,9 +3136,15 @@ where
 				let _ = producer.finish();
 			}
 			// No object past this group's last one exists, so the track ends after it.
-			Ok(Ended::Track) => {
+			Ok(Ended::Track(object)) => {
 				let _ = producer.finish();
-				return end_track(&mut track, group.group_id.saturating_add(1));
+				return end_track(
+					&mut track,
+					track::Position {
+						group: group.group_id,
+						frame: object,
+					},
+				);
 			}
 		}
 
@@ -3121,13 +3214,10 @@ where
 /// received is the publisher breaking its own end, which no later group can repair. A
 /// marker that lands after the subscription already ended (its grace expired) changes
 /// nothing.
-fn end_track(track: &mut track::Producer, end: u64) -> Result<(), Error> {
-	if track.final_sequence().is_some() {
-		return Ok(());
-	}
+fn end_track(track: &mut track::Producer, end: track::Position) -> Result<(), Error> {
 	// Lower groups may still be on the wire, behind the one that carried the end.
 	if let Err(err) = track.finish_at_pending(end) {
-		tracing::warn!(%err, end, "invalid END_OF_TRACK");
+		tracing::warn!(%err, ?end, "invalid END_OF_TRACK");
 		let _ = track.clone().abort(Error::ProtocolViolation);
 		return Err(Error::ProtocolViolation);
 	}
@@ -3138,8 +3228,8 @@ fn end_track(track: &mut track::Producer, end: u64) -> Result<(), Error> {
 enum Opened {
 	/// The group producer the stream writes into, and the Object ID it starts at.
 	Group(group::Producer, u64),
-	/// The stream's first object is an END_OF_TRACK at object 0: the group does not exist.
-	EndOfTrack,
+	/// A standalone terminal marker, which creates no payload group.
+	EndOfTrack(u64),
 }
 
 /// How a subgroup stream ended cleanly.
@@ -3148,7 +3238,7 @@ enum Ended {
 	/// The stream finished, or carried an explicit end of group.
 	Group,
 	/// It carried an END_OF_TRACK after the group's last object.
-	Track,
+	Track(u64),
 }
 
 /// Object status: no object at or past this location in the group exists (draft-14, 15).
@@ -3188,8 +3278,8 @@ where
 {
 	/// The group producer this subgroup stream writes into, and the Object ID it starts at.
 	///
-	/// The first object is peeked before any producer exists, since an END_OF_TRACK at
-	/// object 0 means the group does not exist at all. Normally the stream then starts the
+	/// The first object is peeked before any producer exists, since a standalone
+	/// END_OF_TRACK carries no payload group. Normally the stream then starts the
 	/// group. While a fill is outstanding it may instead be the tail of the group the fill
 	/// fetch stream began, which the first Object ID decides.
 	async fn open_group(
@@ -3228,8 +3318,8 @@ where
 				return Err(err);
 			}
 		};
-		if first.is_some_and(|first| first.id == 0 && first.end_of_track) {
-			return Ok(Opened::EndOfTrack);
+		if let Some(first) = first.filter(|first| first.end_of_track) {
+			return Ok(Opened::EndOfTrack(first.id));
 		}
 
 		// FIRST_OBJECT clear is the publisher's claim that the stream starts partway
@@ -4473,7 +4563,8 @@ impl GroupIngest {
 					} else if status == END_OF_TRACK {
 						// Defined on every implemented draft, whether or not the header marks
 						// the group's end.
-						self.phase = IngestPhase::Finished(Ended::Track);
+						self.phase =
+							IngestPhase::Finished(Ended::Track(self.prior_object.expect("status follows object ID")));
 					} else {
 						return Poll::Ready(Err(Error::Unsupported));
 					}
@@ -4671,8 +4762,13 @@ mod tests {
 	}
 
 	/// What an unsolicited advertisement means to a subscriber on `version` whose peer
-	/// declared `solicit`.
+	/// declared `solicit`, when we declared MoQ Solicit ourselves.
 	fn unsolicited_is_a_violation(solicit: Option<bool>, version: Version) -> bool {
+		unsolicited_is_a_violation_to(true, solicit, version)
+	}
+
+	/// The same, for a subscriber whose own SETUP declared MoQ Solicit only if `ours`.
+	fn unsolicited_is_a_violation_to(ours: bool, solicit: Option<bool>, version: Version) -> bool {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
 		let peer_setup = peer::PeerSetup::default();
@@ -4695,10 +4791,23 @@ mod tests {
 			tasks,
 			Default::default(),
 		)
+		.with_solicit(ours)
 		.unsolicited_is_a_violation(solicit)
 	}
 
-	/// We always declare that advertisements to us must be solicited, so a peer that
+	/// A side that declined MoQ Solicit invited unsolicited advertisements, so one is
+	/// expected even from a peer that implements the extension.
+	#[moq_net_sim::test]
+	async fn an_announce_to_a_side_that_declined_solicit_is_fine() {
+		for solicit in [Some(true), Some(false), None] {
+			assert!(
+				!unsolicited_is_a_violation_to(false, solicit, Version::Draft17),
+				"{solicit:?}"
+			);
+		}
+	}
+
+	/// By default we declare that advertisements to us must be solicited, so a peer that
 	/// implements the extension and announces anyway has a bug. Tolerating it is what
 	/// keeps that bug invisible on both sides, so the session goes.
 	///
@@ -5040,7 +5149,11 @@ mod tests {
 				state.subscribes.insert(
 					*request_id,
 					TrackState::new(
-						track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), *name, None),
+						track::Producer::new(
+							std::sync::Arc::new(crate::broadcast::Info::default()),
+							*name,
+							crate::track::Info::timed(),
+						),
 						Path::new(broadcast).to_owned(),
 						kio::Producer::new(Fill::Done),
 						None,
@@ -5080,17 +5193,17 @@ mod tests {
 		let mut consumer = {
 			let mut state = subscriber.state.lock();
 			let track = state.subscribes.get_mut(&RequestId(11)).unwrap();
-			track.timescale = Some(Timescale::default());
+			track.timescale = Some(Timescale::MILLI);
 			track.producer.as_ref().unwrap().subscribe(None)
 		};
 
-		let timestamp = crate::Timestamp::new(96_000, Timescale::default()).unwrap();
+		let timestamp = crate::Timestamp::new(96_000, Timescale::MILLI).unwrap();
 		let datagram = |alias: u64, group_id: u64, object_id: Option<u64>, body: ietf::DatagramBody| {
 			let mut properties = Vec::new();
 			ietf::encode_object_time(
 				&mut crate::coding::Encoder::new(&mut properties, Version::Draft19.into()),
 				timestamp,
-				Timescale::default(),
+				Timescale::MILLI,
 				Version::Draft19,
 			)
 			.unwrap();
@@ -5147,15 +5260,15 @@ mod tests {
 		let mut consumer = {
 			let mut state = subscriber.state.lock();
 			let track = state.subscribes.get_mut(&RequestId(11)).unwrap();
-			track.timescale = Some(Timescale::default());
+			track.timescale = Some(Timescale::MILLI);
 			track.producer.as_ref().unwrap().subscribe(None)
 		};
 		let datagram = |group_id: u64| {
 			let mut properties = Vec::new();
 			ietf::encode_object_time(
 				&mut crate::coding::Encoder::new(&mut properties, Version::Draft19.into()),
-				crate::Timestamp::new(96_000, Timescale::default()).unwrap(),
-				Timescale::default(),
+				crate::Timestamp::new(96_000, Timescale::MILLI).unwrap(),
+				Timescale::MILLI,
 				Version::Draft19,
 			)
 			.unwrap();
@@ -5729,7 +5842,11 @@ mod tests {
 				TrackState {
 					alias: Some(7),
 					..TrackState::new(
-						track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None),
+						track::Producer::new(
+							std::sync::Arc::new(crate::broadcast::Info::default()),
+							"video",
+							crate::track::Info::timed(),
+						),
 						Path::new("broadcast").to_owned(),
 						kio::Producer::new(Fill::Done),
 						None,
@@ -5857,22 +5974,91 @@ mod tests {
 		outstanding
 	}
 
+	/// A control message as the peer writes it: type id, then the length-prefixed body.
+	fn message<M: Message>(id: u64, msg: &M, version: Version) -> Vec<u8> {
+		use crate::coding::Encode as _;
+		let mut buf = Vec::new();
+		crate::coding::Encoder::new(&mut buf, version.into())
+			.varint(id)
+			.unwrap();
+		msg.encode(&mut crate::coding::Encoder::new(&mut buf, version.into()), version)
+			.unwrap();
+		buf
+	}
+
+	/// A publisher without TRACK_STATUS still serves the track: its NOT_SUPPORTED refuses
+	/// the method, so the request is learned from SUBSCRIBE instead. The origin queries a new
+	/// track before its first reader's subscription lands, so a reader reaching such a
+	/// publisher through a relay takes this path.
+	#[moq_net_sim::test]
+	async fn an_unsupported_track_status_subscribes_instead() {
+		for version in [Version::Draft18, Version::Draft19, Version::Draft22] {
+			let refused = message(
+				ietf::RequestError::ID,
+				&ietf::RequestError {
+					request_id: None,
+					error_code: request::to_code(&Error::Unsupported, request::Kind::TrackStatus, version),
+					reason_phrase: "TRACK_STATUS is not supported".into(),
+					retry_interval: 0,
+				},
+				version,
+			);
+			let subscribe_ok = message(
+				ietf::SubscribeOk::ID,
+				&ietf::SubscribeOk {
+					request_id: None,
+					track_alias: 7,
+					largest: None,
+					properties: Default::default(),
+				},
+				version,
+			);
+			let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![refused, subscribe_ok]);
+			let log = session.log.clone();
+			let (tasks, _task_set) = crate::util::TaskSet::new();
+			let mut subscriber = Subscriber::new(
+				crate::time::Clock::sim(),
+				session,
+				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				Control::new(None, false),
+				None,
+				peer::PeerSetup::default(),
+				crate::Hop::new(1).unwrap(),
+				None,
+				version,
+				tasks,
+				Default::default(),
+			);
+
+			let producer = crate::broadcast::Info::default().produce();
+			let mut dynamic = producer.dynamic();
+			let consumer = producer.consume();
+			let track = consumer.track("video").unwrap();
+			let mut query = std::pin::pin!(track.query());
+			assert!(futures::poll!(query.as_mut()).is_pending());
+			let request = dynamic.requested_track().await.expect("no track requested");
+
+			let serving = moq_net_sim::spawn(async move {
+				subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+			});
+			settle().await;
+
+			assert!(query.await.is_ok(), "{version}: NOT_SUPPORTED refused the track");
+			assert!(track.subscribe(None).await.is_ok(), "{version}: the reader was refused");
+			assert_eq!(
+				control_message_types(&log, version)[..2],
+				[ietf::TrackStatus::ID, ietf::Subscribe::ID],
+				"{version}"
+			);
+			serving.abort();
+		}
+	}
+
 	/// A copy that already knows its track, here from TRACK_STATUS_OK, opts out of the
 	/// properties when a subscriber returns, and keeps the units it learned rather than
 	/// taking the empty block the opted-out SUBSCRIBE_OK carries.
 	#[moq_net_sim::test]
 	async fn a_resumed_subscribe_opts_out_of_known_properties() {
-		use crate::coding::Encode as _;
-		fn message<M: Message>(id: u64, msg: &M, version: Version) -> Vec<u8> {
-			let mut buf = Vec::new();
-			crate::coding::Encoder::new(&mut buf, version.into())
-				.varint(id)
-				.unwrap();
-			msg.encode(&mut crate::coding::Encoder::new(&mut buf, version.into()), version)
-				.unwrap();
-			buf
-		}
-
 		let declared = Timescale::new(90_000).unwrap();
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let opts_out = ietf::Filter::is_draft20(version);
@@ -6983,7 +7169,7 @@ mod tests {
 			crate::time::Clock::sim(),
 			session.clone(),
 			origin,
-			Control::new(None, false),
+			Control::new(None, true),
 			None,
 			peer::PeerSetup::default(),
 			self_origin,
@@ -7059,6 +7245,32 @@ mod tests {
 				cost: 0,
 			},
 		)
+	}
+
+	/// Namespace updates spend IDs from the same lifetime history as initial requests.
+	#[moq_net_sim::test]
+	async fn namespace_update_cannot_reuse_a_spent_request_id() {
+		let self_origin = crate::Hop::new(5).unwrap();
+		let peer = peer_9();
+		let (clean, _) = clean_and_looped();
+		let script = publish_namespace_updates(std::slice::from_ref(&clean)).await;
+		let (mut subscriber, _consumer, mut stream, _driver) = update_harness(self_origin, &peer, &clean, script).await;
+		let log = subscriber.session.log.clone();
+		// The initial request is already retired; its ID remains permanently spent.
+		assert!(subscriber.control.accept(RequestId(3)).unwrap().is_none());
+		let mut attached = true;
+		let err = subscriber
+			.run_publish_namespace_updates(
+				&mut stream,
+				&crate::Path::new("room/host"),
+				Some(clean),
+				peer,
+				&mut attached,
+			)
+			.await
+			.expect_err("a repeated update ID must close the session");
+		assert!(matches!(err, Error::Session(crate::SessionError::InvalidRequestId)));
+		assert_eq!(log.closes()[0].0, crate::SessionError::InvalidRequestId.to_code());
 	}
 
 	/// A reflected update detaches the route but MUST NOT end the stream. Updates ride
@@ -8440,12 +8652,31 @@ mod stitch_tests {
 		let mut stream = h.stream().await;
 
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-		assert_eq!(h.track.final_sequence(), Some(SEQUENCE + 1));
+		assert_eq!(
+			h.track.end(),
+			Some(track::Position {
+				group: SEQUENCE,
+				frame: 1
+			})
+		);
 
 		let mut group = consumer.recv_group().await.unwrap().expect("the group arrives");
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"last");
 		assert!(group.read_frame().await.unwrap().is_none(), "the group is finished");
 		assert!(consumer.recv_group().await.unwrap().is_none(), "then the track ends");
+	}
+
+	#[moq_net_sim::test]
+	async fn a_standalone_end_of_track_preserves_a_nonzero_object() {
+		let mut marker = tail_stream(5, 5, &[]);
+		for value in [5u64, 0, 0, END_OF_TRACK] {
+			Encoder::new(&mut marker, VERSION.into()).varint(value).unwrap();
+		}
+		let h = Harness::new(Fill::Done, vec![marker]);
+		let mut stream = h.stream().await;
+		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
+		assert_eq!(h.track.end(), Some(track::Position { group: 5, frame: 5 }));
+		assert_eq!(h.track.latest(), None, "a terminal marker creates no payload group");
 	}
 
 	/// A group at or past the end an END_OF_TRACK declared contradicts that end, which no
@@ -8455,7 +8686,7 @@ mod stitch_tests {
 		use futures::FutureExt;
 
 		let mut h = Harness::new(Fill::Done, vec![tail_stream(SEQUENCE, 0, &[b"late"])]);
-		h.track.finish_at(SEQUENCE).unwrap();
+		h.track.finish_at(track::Position::group(SEQUENCE)).unwrap();
 		let mut stream = h.stream().await;
 
 		let res = h.subscriber.clone().recv_group(&mut stream).await;
@@ -8477,7 +8708,7 @@ mod stitch_tests {
 		let mut stream = h.stream().await;
 
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-		assert_eq!(h.track.final_sequence(), Some(SEQUENCE));
+		assert_eq!(h.track.end(), Some(track::Position::group(SEQUENCE)));
 		assert_eq!(h.track.latest(), None, "no group was created");
 	}
 

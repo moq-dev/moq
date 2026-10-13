@@ -17,7 +17,9 @@ relay bounds a sparse FETCH only if the model can request ranges:
 
 - **Wire (lite-07, unpublished).** SUBSCRIBE carries a list of group ranges
   (an open end means live; ends may be relative, below) in place of Group Start/End, plus
-  `order: asc | desc` (desc, newest first, is today's rule and the default).
+  `order: asc | desc` (desc, newest first, is the default). Order landed in
+  #5385; over moq-transport the upstream order is fixed at SUBSCRIBE, since no
+  draft lets an update change it.
   Subscriber Max Age (the model's `max_delay`) stays as a cap alongside the
   ranges, since a group's timestamp isn't always known. Decided 2026-10-10:
   historical requests also obey that cap and publisher max-age. An omitted
@@ -30,7 +32,7 @@ relay bounds a sparse FETCH only if the model can request ranges:
   requested ranges the publisher won't deliver: never existed, expired, or
   refused upstream. Datagram groups are always dropped in a past range (#4982). The
   publisher delivers what it has and fills the rest as upstream answers.
-- **Model.** `Subscription` gains `ranges` and `order`, mirroring the wire;
+- **Model.** `Subscription` gains `ranges` beside its `order`, mirroring the wire;
   `request_groups` as a separate API was rejected. A publisher's
   `track::Dynamic` receives range requests for misses, replacing per-group
   `requested_group`, and `fetch_group` becomes a one-range subscription or is
@@ -71,9 +73,11 @@ every sequence delivered or dropped.
 
 ## Required
 
-- [Model ranges](/quest/m1/subscribe-ranges/model.md) - `Subscription` carries ranges and order, and `Dynamic` fills misses by range
+- [Model ranges](/quest/m1/subscribe-ranges/model.md) - `Subscription` carries ranges, and `Dynamic` fills misses by range
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - publishers name every group they won't deliver
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft
+- [moq-transport FETCH and fill streams in the session queue](/quest/m1/subscribe-ranges/ietf-fetch-queue.md) - Rust FETCH and fill streams ranked against group streams; JS already ranks its fill and serves no FETCH
+- [moq-transport upstream updates](/quest/m1/subscribe-ranges/ietf-update.md) - the upstream request follows the aggregate priority; its order stays fixed, as every draft requires
 - [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md) - range FETCH upstream per missing run, and non-blocking FETCH served downstream
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - `@moq/net` model and lite-07 parity
 

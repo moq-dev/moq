@@ -13,6 +13,11 @@ use bytes::Bytes;
 use moq_net::{Hop, Timescale, Timestamp, Version, origin, track};
 use support::harness::peer;
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What a subscriber reads for a timed and an untimed track.
@@ -121,7 +126,7 @@ async fn frame_through(hops: &[&str], info: track::Info) -> (Option<Timestamp>, 
 #[moq_net_sim::test]
 async fn frames_arrive_as_published() {
 	for version in VERSIONS {
-		let (timed, timed_info) = frame_through(&[version], track::Info::default()).await;
+		let (timed, timed_info) = frame_through(&[version], timed()).await;
 		let (untimed, untimed_info) = frame_through(&[version], untimed()).await;
 		match expected(version) {
 			Arrives::Faithful => {
@@ -154,7 +159,7 @@ async fn a_relay_forwards_an_untimed_track_untimed() {
 		&["moq-lite-03", "moq-transport-17"][..],
 		&["moq-transport-16", "moq-transport-20"][..],
 	] {
-		let (frame, info) = frame_through(hops, track::Info::default()).await;
+		let (frame, info) = frame_through(hops, timed()).await;
 		assert_eq!(frame, None, "{hops:?}: the first hop has no timestamps to forward");
 		assert_eq!(info.timescale, None, "{hops:?}: the relay must not claim a timeline");
 	}
@@ -250,7 +255,7 @@ async fn a_fetched_untimed_frame_arrives_untimed() {
 			futures::future::Either::Left((request, _)) => request.expect("the fetch reaches the publisher"),
 			futures::future::Either::Right(_) => panic!("nothing answered the fetch"),
 		};
-		let mut group = request.accept(None).unwrap();
+		let mut group = request.accept(timed()).unwrap();
 		group.write_frame(None, Bytes::from_static(b"segment")).unwrap();
 		group.finish().unwrap();
 

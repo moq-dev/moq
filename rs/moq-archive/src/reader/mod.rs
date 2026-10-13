@@ -5,6 +5,7 @@
 //! with a single GET, validated against its record, and kept in a byte-bounded cache so adjacent
 //! groups reuse it. A request for one track never downloads another track's object. A group whose
 //! records do not reach its end yet, such as an append-only log, grows as later records commit.
+//! Timeline groups remain FETCHable from their original objects after broadcast-cache eviction.
 //!
 //! The reader never infers that a recording ended: it keeps following until the caller, who may
 //! know finality out of band, calls [`Reader::finish`].
@@ -86,9 +87,25 @@ struct Timeline {
 	cursor: Option<u64>,
 }
 
+struct TimelineRequests {
+	name: String,
+	timescale: Timescale,
+	dynamic: track::Dynamic,
+}
+
+struct TimelineRequest {
+	name: String,
+	timescale: Timescale,
+	request: group::Request,
+}
+
 struct Shared<T> {
 	store: Store<T>,
 	index: Mutex<Index>,
+	/// Stored object sequence for every validated timeline group.
+	timelines: Mutex<HashMap<String, BTreeMap<u64, u64>>>,
+	/// New timeline handlers, including tracks enrolled after serve starts.
+	requests: kio::Queue<TimelineRequests>,
 	cache: quick_cache::sync::Cache<Key, Arc<Object>, Weight>,
 	/// Each track's `.info`, which is immutable, so a re-requested track costs no GET.
 	infos: Mutex<HashMap<String, track::Info>>,
@@ -110,6 +127,8 @@ impl<T: ObjectStore> Reader<T> {
 		let shared = Arc::new(Shared {
 			store,
 			index: Mutex::default(),
+			timelines: Mutex::default(),
+			requests: kio::Queue::new(),
 			cache: quick_cache::sync::Cache::with_weighter(items, config.cache, Weight),
 			infos: Mutex::default(),
 			served: Mutex::default(),
@@ -142,7 +161,16 @@ impl<T: ObjectStore> Reader<T> {
 			return Err(moq_net::Error::Duplicate.into());
 		}
 		let info = track_info(&self.shared.store.get_info(&timeline).await?)?;
-		let producer = self.broadcast.create_track(timeline, info)?;
+		let timescale = info.timescale.expect("track_info declares a timescale");
+		let producer = self.broadcast.create_track(timeline.clone(), info)?;
+		self.shared
+			.requests
+			.try_push(TimelineRequests {
+				name: timeline,
+				timescale,
+				dynamic: producer.dynamic(),
+			})
+			.expect("the unbounded handler queue stays open while the reader lives");
 		self.shared.served.lock().unwrap().insert(track.clone());
 		self.timelines.push(Timeline {
 			track,
@@ -212,7 +240,7 @@ impl Timeline {
 
 		for segment in segments {
 			match shared.store.get_segments(&name, segment).await {
-				Ok(object) => self.replay(shared, &object)?,
+				Ok(object) => self.replay(shared, segment, &object)?,
 				Err(Error::Store(err)) => return Err(Error::Store(err)),
 				Err(err) => {
 					tracing::warn!(timeline = name, segment, %err, "skipping unreadable timeline segment");
@@ -226,7 +254,7 @@ impl Timeline {
 	}
 
 	/// Index one timeline object's groups, then republish each on the timeline track.
-	fn replay<T>(&mut self, shared: &Shared<T>, object: &Object) -> Result<()> {
+	fn replay<T>(&mut self, shared: &Shared<T>, segment: u64, object: &Object) -> Result<()> {
 		for stored in &object.groups {
 			let mut group = self.decoder.group();
 			let decoded = stored.frames.iter().try_for_each(|frame| group.decode(&frame.payload));
@@ -263,6 +291,14 @@ impl Timeline {
 				continue;
 			}
 
+			shared
+				.timelines
+				.lock()
+				.unwrap()
+				.entry(self.producer.name().to_string())
+				.or_default()
+				.insert(stored.sequence, segment);
+
 			let mut producer = match self.producer.create_group(stored.sequence.into()) {
 				Ok(producer) => producer,
 				Err(moq_net::Error::Duplicate) => continue,
@@ -282,6 +318,9 @@ impl Timeline {
 async fn serve<T: ObjectStore>(shared: Arc<Shared<T>>, mut dynamic: broadcast::Dynamic) {
 	let mut serving = kio::Tasks::new();
 	kio::wait(|waiter| {
+		while let Poll::Ready(Ok(requests)) = shared.requests.poll_pop(waiter) {
+			serving.push(task(Box::pin(serve_timeline(shared.clone(), requests))));
+		}
 		loop {
 			match dynamic.poll_requested_track(waiter) {
 				Poll::Ready(Ok(request)) => {
@@ -296,6 +335,98 @@ async fn serve<T: ObjectStore>(shared: Arc<Shared<T>>, mut dynamic: broadcast::D
 		Poll::Pending
 	})
 	.await
+}
+
+/// Serve a timeline's evicted groups from their original stored objects.
+async fn serve_timeline<T: ObjectStore>(shared: Arc<Shared<T>>, requests: TimelineRequests) {
+	let mut groups = kio::Tasks::new();
+	kio::wait(|waiter| {
+		loop {
+			match requests.dynamic.poll_requested_group(waiter) {
+				Poll::Ready(Ok(request)) => {
+					groups.push(task(Box::pin(serve_timeline_group(
+						shared.clone(),
+						TimelineRequest {
+							name: requests.name.clone(),
+							timescale: requests.timescale,
+							request,
+						},
+					))));
+				}
+				Poll::Ready(Err(_)) => return Poll::Ready(()),
+				Poll::Pending => break,
+			}
+		}
+		let _ = groups.poll(waiter);
+		Poll::Pending
+	})
+	.await;
+}
+
+async fn serve_timeline_group<T: ObjectStore>(shared: Arc<Shared<T>>, request: TimelineRequest) {
+	let TimelineRequest {
+		name,
+		timescale,
+		request,
+	} = request;
+	let sequence = request.sequence();
+	let segment = shared
+		.timelines
+		.lock()
+		.unwrap()
+		.get(&name)
+		.and_then(|groups| groups.get(&sequence))
+		.copied();
+	let Some(segment) = segment else {
+		request.reject(moq_net::Error::NotFound);
+		return;
+	};
+	let key = match Key::segments(&name, segment) {
+		Ok(key) => key,
+		Err(_) => {
+			request.reject(moq_net::Error::NotFound);
+			return;
+		}
+	};
+	let object = shared
+		.cache
+		.get_or_insert_async(&key, async {
+			shared.store.get_segments(&name, segment).await.map(Arc::new)
+		})
+		.await;
+	let object = match object {
+		Ok(object) => object,
+		Err(err) => {
+			tracing::warn!(track = name, sequence, %err, "archived timeline group is unavailable");
+			request.reject(moq_net::Error::NotFound);
+			return;
+		}
+	};
+	let start = request.frame_start();
+	let Some(stored) = object.groups.iter().find(|group| group.sequence == sequence) else {
+		request.reject(moq_net::Error::NotFound);
+		return;
+	};
+	if object.frame_start != 0 {
+		request.reject(moq_net::Error::NotFound);
+		return;
+	}
+	let Ok(mut producer) = request.accept(None) else {
+		return;
+	};
+	if producer.start_at(start).is_err() {
+		return;
+	}
+	for frame in stored.frames.iter().skip(start as usize) {
+		let Ok(timestamp) = timestamp(frame.timestamp, timescale) else {
+			let _ = producer.abort(moq_net::Error::NotFound);
+			return;
+		};
+		if producer.write_frame(timestamp, frame.payload.clone()).is_err() {
+			return;
+		}
+	}
+	let _ = producer.finish();
 }
 
 /// Accept a track a timeline indexes, then serve its group requests until nobody uses it.

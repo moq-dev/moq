@@ -33,6 +33,11 @@ use futures::FutureExt;
 use moq_net::{Epoch, Hop, Hops, Pattern, Patterns, Timestamp, announce, auth, broadcast, kio, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> track::Info {
+	track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 /// `(publishers, subscribers)` shapes for the fan-out benchmarks.
 const SHAPES: [(usize, usize); 3] = [(100, 10), (1_000, 100), (1_000, 1_000)];
 
@@ -93,6 +98,47 @@ fn bench_announce(c: &mut Criterion) {
 					cursor.next().now_or_never().flatten().expect("retract delivered");
 				}
 			});
+		});
+	}
+	group.finish();
+}
+
+/// A peer carrying `publishers` broadcasts withdraws them all before the
+/// driver's clock moves again, then `subscribers` cursors drain the retractions.
+/// Each retraction quarantines its prefix until a fresh clock reading, so a cost
+/// per earlier retraction shows up as a slope over publishers.
+fn bench_withdraw(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/withdraw");
+	for (publishers, subscribers) in [(100, 1), (1_000, 1), (10_000, 1), (1_000, 10)] {
+		let id = BenchmarkId::from_parameter(format!("{publishers}p_{subscribers}s"));
+		group.bench_function(id, |b| {
+			b.iter_batched(
+				|| {
+					let (producer, mut driver) = origin::Producer::new(origin::Config::default());
+					// Retractions read the driver's last clock reading, which stays put below.
+					driver
+						.poll(moq_net::time::Instant::now(), &kio::Waiter::noop())
+						.unwrap();
+					let routes: Vec<_> = (0..publishers)
+						.map(|i| producer.dynamic(format!("room/{i}"), peer_route(9, 1)).unwrap())
+						.collect();
+					let mut cursors: Vec<_> = (0..subscribers).map(|_| producer.consume().announced()).collect();
+					for cursor in &mut cursors {
+						while cursor.next().now_or_never().flatten().is_some() {}
+					}
+					(producer, driver, routes, cursors)
+				},
+				|(producer, driver, routes, mut cursors)| {
+					drop(routes);
+					for cursor in &mut cursors {
+						for _ in 0..publishers {
+							cursor.next().now_or_never().flatten().expect("retract delivered");
+						}
+					}
+					(producer, driver, cursors)
+				},
+				BatchSize::LargeInput,
+			);
 		});
 	}
 	group.finish();
@@ -281,9 +327,10 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 					for cost in [incumbent_cost - 1, incumbent_cost + 1] {
 						route.update(peer_route(challenger, cost)).unwrap();
 						for cursor in &mut cursors {
+							// The winner switches between epochless routes, which is another instance.
 							let event = cursor.next().now_or_never().flatten().expect("winner changed");
-							let moq_net::announce::Event::Update(update) = event else {
-								panic!("expected an update: got {event:?}");
+							let moq_net::announce::Event::Restart(update) = event else {
+								panic!("expected a restart: got {event:?}");
 							};
 							assert_eq!(update.route.cost, moq_net::origin::Cost::new(cost.min(incumbent_cost)));
 						}
@@ -608,8 +655,10 @@ fn bench_pool_cursors(c: &mut Criterion) {
 
 /// Publisher handoff at one path: a subscriber is reading from one local
 /// source when a second announces at the same path and takes over (newest
-/// wins). Measured from the standby's attach to the subscriber receiving its
-/// first group, with `publishers` unrelated broadcasts in the table.
+/// wins). An open subscription stays on the old instance, so the subscriber
+/// re-requests the broadcast. Measured from the standby's attach to the
+/// re-request receiving its first group, with `publishers` unrelated
+/// broadcasts in the table.
 fn bench_handoff(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/handoff");
 	group.measurement_time(Duration::from_secs(5));
@@ -632,7 +681,7 @@ fn bench_handoff(c: &mut Criterion) {
 					let mut total = Duration::ZERO;
 					for _ in 0..iterations {
 						let incumbent = producer.publish("room/live", origin::Route::default()).unwrap();
-						let track = incumbent.create_track("video", None).unwrap();
+						let track = incumbent.create_track("video", timed()).unwrap();
 						let mut first = track.append_group().unwrap();
 						first.write_frame(Timestamp::ZERO, b"one".as_ref()).unwrap();
 						first.finish().unwrap();
@@ -643,20 +692,26 @@ fn bench_handoff(c: &mut Criterion) {
 
 						let started = std::time::Instant::now();
 						let standby = producer.create_broadcast("room/live").unwrap();
-						let track = standby.create_track("video", None).unwrap();
+						let track = standby.create_track("video", timed()).unwrap();
 						let mut second = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
 						second.write_frame(Timestamp::ZERO, b"two".as_ref()).unwrap();
 						second.finish().unwrap();
 						// Announcing is what makes the standby a route the front can take.
 						standby.announce(origin::Route::default()).unwrap();
-						subscription.recv_group().await.unwrap().expect("standby group");
+						let replaced = consumer.request_broadcast("room/live", None).await.unwrap();
+						let mut replacement = replaced.track("video").unwrap().subscribe(None).await.unwrap();
+						let group = replacement.recv_group().await.unwrap().expect("standby group");
 						total += started.elapsed();
+						// Rejoining the incumbent would replay its cached group 0 instead.
+						assert_eq!(group.sequence, 1, "standby group");
 
 						drop(subscription);
+						drop(replacement);
 						incumbent.close();
 						standby.close();
-						// Wait for the front to close so the next iteration starts a fresh one.
+						// Wait for the fronts to close so the next iteration starts fresh ones.
 						resolved.closed().await;
+						replaced.closed().await;
 					}
 					total
 				})
@@ -701,7 +756,7 @@ async fn watching(routes: usize, subscribers: usize) -> Watching {
 	let mut tracks = Vec::new();
 	for index in 0..routes {
 		let broadcast = relay.publish(watched_path(index), origin::Route::default()).unwrap();
-		tracks.push(broadcast.create_track("video", None).unwrap());
+		tracks.push(broadcast.create_track("video", timed()).unwrap());
 		broadcasts.push(broadcast);
 	}
 
@@ -835,7 +890,7 @@ fn bench_relay(c: &mut Criterion) {
 			runtime.spawn(moq_net::time::run(driver));
 			let broadcast = producer.publish("room/live", origin::Route::default()).unwrap();
 			let sources: Vec<_> = (0..tracks)
-				.map(|i| broadcast.create_track(format!("{i}"), None).unwrap())
+				.map(|i| broadcast.create_track(format!("{i}"), timed()).unwrap())
 				.collect();
 			let mut subscriptions = runtime.block_on(async {
 				let resolved = producer.consume().request_broadcast("room/live", None).await.unwrap();
@@ -945,7 +1000,7 @@ impl Generation {
 		let broadcast = producer.create_broadcast(COPY_PATH).unwrap();
 		let mut held = Vec::with_capacity(tracks);
 		for i in 0..tracks {
-			let track = broadcast.create_track(format!("{i}"), None).unwrap();
+			let track = broadcast.create_track(format!("{i}"), timed()).unwrap();
 			let mut written = track.append_group().unwrap();
 			written.write_frame(Timestamp::ZERO, b"f".as_ref()).unwrap();
 			written.finish().unwrap();
@@ -1073,6 +1128,7 @@ fn bench_copy_walk(c: &mut Criterion) {
 criterion_group!(
 	benches,
 	bench_announce,
+	bench_withdraw,
 	bench_announce_mounted,
 	bench_announce_fleet,
 	bench_announce_duplicate,

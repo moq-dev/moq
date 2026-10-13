@@ -1,3 +1,4 @@
+import { announcedView } from "../src/announced.test-util";
 /** Sweep interest heads and received routes for one route re-price forwarded from a session. */
 import * as Announce from "../src/announced.ts";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
@@ -64,7 +65,7 @@ for (const touched of ["covering", "single"] as const) {
 			await flush();
 
 			const path = touched === "covering" ? Path.empty() : Path.join(heads[0], Path.from("r0"));
-			const table = origin.broadcasts();
+			const table = await announcedView(origin);
 			if (table.peek().size !== routeCount + 1) throw new Error(`expected ${routeCount + 1} routes`);
 
 			const start = performance.now();

@@ -18,7 +18,9 @@ than adding startup checks. `--p2p-ice-server`,
 The roster entry mirrors the `info.json` schema from
 [signaling](/quest/m3/p2p/signal.md): the listener's LAN addresses as
 WebTransport URLs, ordered the way `mdns::Peer::urls` orders them, with the
-listener's certificate fingerprint; the iroh endpoint id when `--iroh` is on,
+listener's certificate fingerprint. Use signaling's ordered-list shape and
+dialing order, confirmed in the quest audit, so multi-interface listeners
+advertise one shared schema. Include the iroh endpoint id when `--iroh` is on,
 which is the first place an endpoint id appears in any roster; `webrtc: true`;
 and `meta`. The generated certificate must satisfy the browser's
 `serverCertificateHashes` rules (ECDSA P-256, under fourteen days); verify the

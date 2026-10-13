@@ -13,6 +13,54 @@ use crate::{
 	ietf, lite, setup, stats,
 };
 
+/// Tracks admitted connections until their handshake or session ends.
+#[derive(Clone, Debug)]
+pub struct Activity {
+	state: kio::Producer<()>,
+	// Admission goes through the weak handle: its open check shares the lock
+	// `close` commits under, so a connection is either counted or refused.
+	admit: kio::ProducerWeak<()>,
+}
+
+impl Default for Activity {
+	fn default() -> Self {
+		let state = kio::Producer::default();
+		let admit = state.weak();
+		Self { state, admit }
+	}
+}
+
+impl Activity {
+	/// Hold the server active until the returned guard is dropped, or `None` once closed.
+	pub fn enter(&self) -> Option<Active> {
+		Some(Active {
+			_guard: self.admit.try_consume()?,
+		})
+	}
+
+	/// Wait until every admitted connection has left, then refuse new ones.
+	pub async fn close(&self) {
+		loop {
+			if self.state.unused().await.is_err() {
+				return;
+			}
+			match self.state.write_unused() {
+				kio::Unused::Idle(state) => return state.close(),
+				// Admitted between the wake and the commit: wait for it too.
+				kio::Unused::Used => continue,
+				kio::Unused::Closed => return,
+			}
+		}
+	}
+}
+
+/// Keeps an admitted connection in the server's active set.
+#[derive(Debug)]
+#[must_use]
+pub struct Active {
+	_guard: kio::Consumer<()>,
+}
+
 /// A MoQ server session builder.
 #[derive(Default, Clone)]
 pub struct Server {
@@ -21,6 +69,7 @@ pub struct Server {
 	stats: stats::Session,
 	versions: Versions,
 	limits: crate::session::Limits,
+	extensions: setup::Extensions,
 }
 
 impl Server {
@@ -69,6 +118,12 @@ impl Server {
 	/// Defaults to every version this crate supports.
 	pub fn with_versions(mut self, versions: Versions) -> Self {
 		self.versions = versions;
+		self
+	}
+
+	/// Choose which moq-transport extensions to offer in SETUP. Defaults to all of them.
+	pub fn with_extensions(mut self, extensions: setup::Extensions) -> Self {
+		self.extensions = extensions;
 		self
 	}
 
@@ -142,6 +197,7 @@ impl Server {
 				goaway: start.goaway,
 				auth: start.auth,
 				setup: start.setup,
+				estimate: Some(start.estimate),
 			},
 		))
 	}
@@ -173,7 +229,7 @@ impl Server {
 		let mut refused = session.clone();
 		self.handshake_lite(now, session)
 			.await
-			.inspect_err(|err| close(&mut refused, err))
+			.inspect_err(|err| close(&mut refused, err, None))
 	}
 
 	async fn handshake_lite<S>(&self, now: Instant, mut session: S) -> Result<Handshake<S>, Error>
@@ -296,7 +352,7 @@ impl Server {
 		let mut refused = session.clone();
 		self.handshake(now, session)
 			.await
-			.inspect_err(|err| close(&mut refused, err))
+			.inspect_err(|err| close(&mut refused, err, None))
 	}
 
 	async fn handshake<S>(&self, now: Instant, mut session: S) -> Result<Handshake<S>, Error>
@@ -438,8 +494,9 @@ impl Server {
 			origin: peer_setup.declared.cluster.hop.filter(|h| *h != crate::Hop::UNKNOWN),
 			token: peer_setup.token.clone(),
 			assigned_hop: crate::Hop::random(),
-			// The client's SETUP already settled whether MoQ Auth is negotiated.
-			auth: crate::auth::Handle::new(peer_setup.declared.auth),
+			// The client's SETUP already settled whether it offered MoQ Auth, so it is
+			// negotiated exactly when we offer it too.
+			auth: crate::auth::Handle::new(peer_setup.declared.auth && self.extensions.auth),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -579,6 +636,7 @@ where
 				peer_declared: Some(peer_setup.declared),
 				auth: auth.clone(),
 				early_unis: peer_setup.early,
+				extensions: server.extensions,
 			})?;
 			tracing::debug!(?version, "connected");
 			Ok(Session::new(
@@ -587,14 +645,19 @@ where
 				version.into(),
 				None,
 				crate::driver::Protocol::Ietf(protocol),
-				crate::session::Handles { goaway, auth, setup },
+				crate::session::Handles {
+					goaway,
+					auth,
+					setup,
+					estimate: None,
+				},
 			))
 		}
 		.maybe_boxed()
 	}
 
 	fn close(mut self: Box<Self>, err: Error) {
-		close(&mut self.session, &err);
+		close(&mut self.session, &err, Some(self.version.into()));
 	}
 }
 
@@ -644,7 +707,9 @@ where
 						ietf::initial_max_request_id(server.limits.requests(), true),
 					);
 					parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
-					ietf::solicit::into_setup(&mut parameters, v);
+					if server.extensions.solicit {
+						ietf::solicit::into_setup(&mut parameters, v);
+					}
 					ietf::hidden::into_setup(&mut parameters, v);
 					ietf::active_count::into_setup(&mut parameters, v);
 					parameters.encode_bytes(v)?
@@ -658,7 +723,7 @@ where
 			};
 			stream.writer.encode(&server_setup).await?;
 
-			let (recv_bw, protocol, goaway, auth, setup) = match version {
+			let (recv_bw, protocol, goaway, auth, setup, estimate) = match version {
 				Version::Lite(v) => {
 					let stream = stream.with_version(v);
 					// Pre-lite-05: no Setup Stream, so nothing to advertise or seed.
@@ -682,6 +747,7 @@ where
 						start.goaway,
 						start.auth,
 						start.setup,
+						Some(start.estimate),
 					)
 				}
 				Version::Ietf(v) => {
@@ -705,8 +771,9 @@ where
 						peer_declared: Some(peer_declared),
 						auth: auth.clone(),
 						early_unis: Vec::new(),
+						extensions: server.extensions,
 					})?;
-					(None, crate::driver::Protocol::Ietf(protocol), goaway, auth, setup)
+					(None, crate::driver::Protocol::Ietf(protocol), goaway, auth, setup, None)
 				}
 			};
 
@@ -716,14 +783,19 @@ where
 				version,
 				recv_bw,
 				protocol,
-				crate::session::Handles { goaway, auth, setup },
+				crate::session::Handles {
+					goaway,
+					auth,
+					setup,
+					estimate,
+				},
 			))
 		}
 		.maybe_boxed()
 	}
 
 	fn close(mut self: Box<Self>, err: Error) {
-		close(&mut self.session, &err);
+		close(&mut self.session, &err, Some(self.version));
 	}
 }
 
@@ -818,6 +890,12 @@ where
 		self
 	}
 
+	/// Set request caps after authorizing the peer and before answering SETUP.
+	pub fn with_limits(mut self, limits: crate::session::Limits) -> Self {
+		self.inner_mut().server.limits = limits;
+		self
+	}
+
 	fn inner_mut(&mut self) -> &mut RequestInner<S> {
 		self.inner.as_mut().expect("request already responded")
 	}
@@ -856,18 +934,20 @@ where
 
 impl<S: crate::transport::poll::Session> RequestInner<S> {
 	fn close(self, err: Error) {
-		let mut session = match self.handshake {
-			PausedHandshake::LiteBare { session, .. } => session,
-			PausedHandshake::LiteSetup { session, .. } => session,
+		let (mut session, version) = match self.handshake {
+			PausedHandshake::LiteBare { session, version } => (session, version),
+			PausedHandshake::LiteSetup { session, version, .. } => (session, version),
 			PausedHandshake::Boxed(paused) => return paused.close(err),
 		};
-		close(&mut session, &err);
+		close(&mut session, &err, Some(version.into()));
 	}
 }
 
 /// Close `session` with `err`'s wire code.
-fn close<S: crate::transport::poll::Session>(session: &mut S, err: &Error) {
-	session.close(SessionError::from(err).to_code(), &err.to_string());
+fn close<S: crate::transport::poll::Session>(session: &mut S, err: &Error, version: Option<Version>) {
+	let error = SessionError::from(err);
+	let code = version.map_or_else(|| error.to_code(), |version| version.session_code(&error));
+	session.close(code, &err.to_string());
 }
 
 impl<S: crate::transport::poll::Session> Drop for Handshake<S> {

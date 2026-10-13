@@ -27,9 +27,12 @@ Decided 2026-10-08:
 - Offer the reporter the `release` head for their rig once the children
   land, but don't gate the cut on their result.
 
-The backports have landed, including moq-noq 1.3.5 in #5170 (refreshed in the
-2026-10-10 audit). This README's remaining work: bump `@moq/net` on
-`release` (`/bump`), merge the release-plz PR it regenerates for the
-backports (0.17.3; 0.17.2 already shipped, and #4944 predates the
-backports), and send the reporter the branch.
+The backports shipped in moq-relay 0.17.3 (#5119) and `@moq/net` 0.4.3
+(refreshed 2026-10-12). Draft-22 interop on 2026-10-12 then found FETCH still
+refused on draft-20+ sessions. This README's remaining work: once the child
+lands, cut the next 0.17 patch and `@moq/net` with it (`/bump`, then the
+release-plz PR), and tell the testers.
 
+## Required
+
+- [Draft-20+ FETCH](/quest/m0/release-22/fetch.md) - backport #4971 so a draft-22 FETCH is served, not refused

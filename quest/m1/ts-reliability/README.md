@@ -49,8 +49,9 @@ and the MPEG-TS draft consistent in each feature change.
 The planning children settle catalog and clock contracts before production
 changes. Their output adds independently completable implementation quests to
 this line; an audit finding is not authorization to guess a public API.
-Existing fixes for PMT fragmentation, initial mux-rate measurement, PSI runs,
-decoder-time admission, and catalog linger remain with their current quests.
+PMT fragmentation (#5220) and initial mux-rate measurement (#5287) have
+landed; PSI runs, decoder-time admission, and catalog linger remain with
+their current quests.
 
 ## Required
 

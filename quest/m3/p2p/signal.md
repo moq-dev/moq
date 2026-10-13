@@ -25,9 +25,11 @@ hop list, so no hop chain carries it.
 Roster: each peer publishes `<prefix><id>` with an `info.json` snapshot track:
 the moq ALPNs it accepts, `webrtc: true`, the presenter public key that
 [peer grants](/quest/m3/p2p/peer-grant.md) bind, the application's `meta`,
-and for native peers an optional `webtransport: { url, fingerprint }` and
-`iroh` endpoint id. The schema is shared with
-[moq-cli](/quest/m3/p2p/cli.md).
+and for native peers an optional WebTransport entry with an ordered list of
+URLs and the listener's certificate fingerprint, plus an `iroh` endpoint id.
+Decided in the quest audit: use a list so a native peer can advertise its
+reachable interfaces without choosing one for every browser. This quest
+owns the schema shared with [moq-cli](/quest/m3/p2p/cli.md).
 
 Pairing is sparse: broadcasts exist only for pairs some `select` chose, so
 the cost is the dialed pairs, not the square of the roster. Whoever selects a
@@ -46,9 +48,11 @@ The gate: a peer connection is built with `iceServers` when the roster holds
 candidates are always gathered, so LAN pairs form at any roster size.
 Established pairs are never closed by the gate.
 
-Native entries: when `info.webtransport` is present the dialer first tries
-`connect` with the fingerprint pinned and a short timeout, then falls
-through to WebRTC. Chrome 147 may prompt for local network access on that
+Native entries: when `info.webtransport` is present the dialer tries its
+URLs in advertised order, using `connect` with the listener's fingerprint
+pinned and the bounded attempt policy, then falls through to WebRTC if none
+connects. Mirror this order in the CLI and test that a later address is tried
+after an earlier one fails. Chrome 147 may prompt for local network access on that
 dial; a denial falls through the same way.
 
 Lifecycle: a retracted roster entry closes that peer's session. An ICE

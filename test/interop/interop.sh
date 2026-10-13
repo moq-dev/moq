@@ -642,8 +642,9 @@ run_publisher() {
     local lang="$1" broadcast="$2" url="$3"
     case "$lang" in
         rust)
+            # A finished import stays up for its max-age; `stop_publisher` allows 10 s to close.
             ffmpeg_h264 | RUST_LOG="$CLI_LOG" "$MOQ" --connect "$url" --connect-version "$AUTH_VERSION" \
-                --broadcast "$broadcast" import avc3
+                --broadcast "$broadcast" import --max-age 1s avc3
             ;;
         python)
             ffmpeg_h264 | "$PY" "$CLIENTS/python/interop.py" \
@@ -1002,6 +1003,40 @@ run_tail_pair() {
     rm "$fifo"
 }
 
+# Exercise this checkout's CLI FETCH under the same relay close check as live readers.
+run_fetch_round() {
+    local name="fetch-rust" fifo="$HARNESS_RUN/fetch-ack" broadcast="fetch-$$-$RANDOM" pid from
+    from=$(relay_next_line)
+    mkfifo "$fifo"
+    exec 9<>"$fifo"
+    harness_spawn "$name-pub" "$HARNESS_RUN/$name-pub.log" run_tail_publisher "$fifo" rust publish "$broadcast" "$(token_url --publish "$broadcast")"
+    pid="$HARNESS_PID"
+    if timeout -k 3 "$TIMEOUT" "$MOQ" --connect "$(token_url --subscribe "**/$broadcast")" \
+        --broadcast "$broadcast" fetch tail --group 0 >"$HARNESS_RUN/$name.raw" &&
+        python3 - "$HARNESS_RUN/$name.raw" <<'PYCODE'
+import pathlib, sys
+assert pathlib.Path(sys.argv[1]).read_bytes() == bytes(256 * 1024), "incorrect FETCH payload"
+PYCODE
+    then
+        printf 'clean end\n' >&9
+        harness_wait "$pid" || true
+        if grep -qx 'tail acknowledged' "$HARNESS_RUN/$name-pub.log"; then
+            echo "  PASS  CLI FETCH (group 0; 262144 bytes)"
+        else
+            echo "  FAIL  CLI FETCH (publisher did not acknowledge)"
+            overall=1
+            cat "$HARNESS_RUN/$name-pub.log"
+        fi
+    else
+        echo "  FAIL  CLI FETCH"
+        overall=1
+        harness_reap "$pid"
+    fi
+    exec 9>&-
+    rm "$fifo"
+    check_idle_outs "$name" "$from"
+}
+
 # One media.ts invocation. It reports its own verdict (a negative control passes by failing on the
 # assertion it names), so the exit code is the whole answer.
 run_media() {
@@ -1130,6 +1165,8 @@ elif [[ "$TAIL_ONLY" -eq 0 ]]; then
 fi
 
 if [[ "$NEGATIVE" -eq 0 && "$MEDIA" -eq 0 && "$IN_TREE" -eq 1 ]]; then
+    echo "=== CLI FETCH close ==="
+    run_fetch_round
     echo "=== finite track tails ==="
     run_tail_pair rust rust
     for runtime in js-native-node js-native-bun; do

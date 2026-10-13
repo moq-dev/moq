@@ -34,6 +34,22 @@ These land with the next breaking release, not the 2026-09-23 train.
   moq-lite 06 and older and moq-transport. moq-lite 07 adds `ANNOUNCE_RESTART`
   (0x3), and lite-06's `ANNOUNCE_RESTART` is named `ANNOUNCE_UPDATE`, as it
   always meant.
+- **@moq/net announced requests follow restarts, and `broadcasts()` is gone.**
+  An unpinned `request(path, { announced: true })` now stays open across
+  publisher instances: its `active` moves to each new instance's broadcast and
+  clears between them, instead of the request ending with `Unroutable`. Read
+  `active` reactively and close the request when done; add `epoch` to keep the
+  old single-instance behavior. `Origin.Producer` and `Origin.Consumer` drop
+  `broadcasts(scope)`; iterate `announced(scope)` and keep the entries you need.
+  `@moq/watch` with `announced` off no longer moves to a later publisher.
+- **"Epoch" means only the publisher epoch.** The reconnect counter is
+  `connects()`: `moq_tokio::Connection::epoch()` and moq-ffi's
+  `MoqSession::epoch()` are `connects()`, which is Python's `connects()`, Go's
+  `Connects()`, Swift's and Kotlin's `connects()`, and Dart's `connects`. The
+  audio re-anchor is `reanchor()`: `moq_audio::encode::Producer::reset_epoch` and
+  moq-ffi's `MoqAudioProducer::reset_epoch` are `reanchor`, which is Python's
+  `reanchor()` (was `reset_epoch()`), Swift's, Kotlin's, and Dart `moq_ffi`'s
+  `reanchor()` (was `resetEpoch()`), and Go's `Reanchor()` (was `ResetEpoch()`).
 - **`moq export ts --linger` waits only for the same publisher instance.** A
   restarted publisher (a new epoch, or any return on a version without one)
   exits 1 unless `--stitch` follows it as a program switch. `export srt` takes
@@ -101,6 +117,10 @@ These land with the next breaking release, not the 2026-09-23 train.
   `used`, and `unused`; read them through `demand()`. The wrappers expose these
   as `moq.media` in Python, `moq.dev/moq/media` in Go, `dev.moq.media` in
   Kotlin, `package:moq/media.dart` in Dart, and `Media` in Swift.
+- **moq-ffi error payloads are named.** `MoqError` cases that carried a
+  positional string (`Transport`, `Internal`, `Connect`, ...) name it
+  `reason` (`Reason` in Go, the `reason:` label in Swift). The Display text is
+  unchanged.
 - **Python and Go durations are native.** `Frame`, `Datagram`, `Subscription`,
   `TrackInfo`, and `ConnectionStats` carry `timedelta` in Python and
   `time.Duration` in Go instead of microsecond integers: `max_delay_us` is
@@ -148,13 +168,15 @@ These land with the next breaking release, not the 2026-09-23 train.
   the rendition's own delay added on top. `Sync.out.jitter` now always
   equals `Sync.out.delay`, and `"auto"` with no decoder registered resolves to
   0 rather than 100 ms.
-- **`moq export ts --delay` replaces `--max-age`** (#4645). Each frame is
+- **`moq export ts`, `flv`, and `mkv` take `--delay`** (#4645). Each frame is
   written that long after its decode time, on a clock that follows the
-  source's; `--max-age` and `--latency-max` are refused with the new flag
-  named. In Rust, moq-mux's `ts::Export::with_max_age` is `with_delay`, and
-  `ts::stats::Export` gains the dropped-frame count (late frames, and the
-  video frames then dropped waiting for a keyframe), measured drift and
-  out-of-tolerance count beside its `streams` rows. It is no longer `Eq`.
+  source's; the older staleness spellings are refused with the new flag
+  named. In Rust, moq-mux's `ts::Export::with_max_age` and the FLV and MKV
+  exports' `with_max_age` are `with_delay`. moq-rtmp's FLV egress releases
+  frames on its `max_delay` the same way. `ts::stats::Export` gains the
+  dropped-frame count (late frames, and the video frames then dropped waiting
+  for a keyframe), measured drift and out-of-tolerance count beside its
+  `streams` rows. It is no longer `Eq`.
 - **moq-mux has no clock translators.** `clock::Anchor`, `clock::Lane`, and
   `SourceMap` (#4667) are gone, along with the importers' `live()`. Publish the
   source's own timestamps and let the catalog clock map them to wall time.
@@ -212,7 +234,7 @@ These land with the next breaking release, not the 2026-09-23 train.
   shares a name with a publisher's retention, which keeps `max_age`. In Rust,
   `track::Subscription::max_age` and `with_max_age` are `max_delay` and
   `with_max_delay`; moq-mux's `container::Consumer::set_max_age` and the fMP4,
-  MKV, FLV, H.264, and H.265 exports' `with_max_age` are `set_max_delay` and
+  H.264, and H.265 exports' `with_max_age` are `set_max_delay` and
   `with_max_delay`; moq-audio's and moq-video's `decode::Options::max_age` is
   `max_delay`, as is moq-audio's `decode::Consumer::max_age()`; and moq-rtmp's
   `Play::with_max_age`, `Client::with_export_max_age`,
@@ -227,8 +249,8 @@ These land with the next breaking release, not the 2026-09-23 train.
   `MoqVideoDecoderOutput` take `max_delay_us` (each binding in its own casing),
   and so do C's `moq_subscription`, `moq_audio_decoder_output`,
   `moq_video_decoder_output`, `moq_consume_video`, and `moq_consume_audio`.
-  `moq export fmp4`, `mkv`, `flv`, `h264`, `h265`, and `rtmp` take
-  `--max-delay`, and refuse `--max-age`. `track::Info::max_age`,
+  `moq export fmp4`, `h264`, `h265`, and `rtmp` take `--max-delay`, and
+  refuse `--max-age`. `track::Info::max_age`,
   `MoqTrackInfo.max_age_us`, and `moq import --max-age` are unchanged, as is the wire.
 - **moq-relay auth takes the client-CA answer.** `auth::Config::validate` and
   `init` take `client_ca: bool`, whether any listener verifies client
@@ -279,6 +301,11 @@ These land with the next breaking release, not the 2026-09-23 train.
     `Option<Timestamp>`. The `write_frame`, `append_datagram`, and
     `insert_datagram` calls take `impl Into<Option<Timestamp>>`, so passing a
     `Timestamp` still compiles.
+    An undeclared timescale is untimed: `track::Info::default()`,
+    `create_track(name, None)`, and `accept(None)` no longer default to
+    milliseconds, and `Timescale` has no `Default`. A track you write
+    timestamps to declares one, such as
+    `Info::default().with_timescale(Timescale::MILLI)`.
   - moq-e2ee: `Frame` and `Datagram` timestamps are optional, and its writers
     take `impl Into<Option<Timestamp>>`.
   - moq-archive: recording an untimed track fails with `Error::Untimed`, so

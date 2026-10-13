@@ -1848,7 +1848,7 @@ mod tests {
 		let mut session = ScriptedSession::new(script);
 		let (_, recv) = session.open_bi().await.unwrap();
 		// We are the server, so the client's request IDs are even.
-		let control = Control::new(None, false).with_window(window, false);
+		let control = Control::new(None, false).with_window(window, false, VERSION);
 		let adapter = ControlStreamAdapter::new(session, control, VERSION);
 		let log = Log::default();
 		let writer = Writer::new(SinkSend::new(log.clone()), VERSION);

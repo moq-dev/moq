@@ -21,8 +21,7 @@ roster, so a copied JWT is not enough: the presenter proves possession of
 the matching private key on the direct AUTH stream. A roster peer that
 received someone else's grant cannot replay it.
 
-Issuance: the relay owns AUTH via
-[Relay tokens](/quest/m1/auth/relay-refresh.md). The client writes
+Issuance: the relay owns AUTH (`rs/moq-relay/src/auth/refresh.rs`). The client writes
 `AUTH_CNF { Jwk (b) }` after AUTH on the empty-token stream; the relay
 copies that JWK into `cnf`. Then, after AUTH_OK:
 

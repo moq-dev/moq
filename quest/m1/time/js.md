@@ -21,8 +21,9 @@ It lands additively on `main`; `@moq/net` keeps its own units until
 The design decisions are in [the line's README](/quest/m1/time/README.md).
 The installed clock is per JS realm (a page, a worker, a test file), the JS
 equivalent of one clock per runtime. Match the Rust timer semantics settled in
-[the crate](/quest/m1/time/crate.md), and agree with rs2ts on how a generated
-`moq_time::Instant` maps here ([Generated codec](/quest/m1/rs2ts/codec.md)).
+[the crate](/quest/m1/time/crate.md). Coordinate clock origin, units, and
+controlled-time behavior with the [browser backend](/quest/m1/rs2ts/README.md);
+its boundary representation depends on whether it uses WASM or generated JS.
 
 Ban direct `performance.now`, `Date.now`, `setTimeout`, and `setInterval` in
 the package outside its default backend.

@@ -17,8 +17,7 @@ pub struct Config {
 	///
 	/// A connection is handled start to finish by one worker, which trades the
 	/// shared runtime's load balancing for no cross-thread traffic per packet.
-	/// Linux-only, and mutually exclusive with `--listen-tls-generate`, since
-	/// each worker would otherwise generate and serve a certificate of its own.
+	/// Linux-only; every worker shares the relay's served identity and reloads.
 	/// Unset (the default) keeps QUIC on the shared runtime.
 	#[usage(long = "runtime-workers", env = "MOQ_RUNTIME_WORKERS", setting = "runtime.workers")]
 	pub workers: Option<u16>,

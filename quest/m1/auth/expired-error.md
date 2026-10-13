@@ -13,14 +13,16 @@ refusal as final.
   on `main`. Map it from lite's `AUTH_ERROR { Expired }` and moq-transport's
   `EXPIRED_AUTH_TOKEN`, and back again when refusing.
 - Lite session code 0x30 is NOT_SUPPORTED
-  ([Lite NOT_SUPPORTED](/quest/m1/auth/not-supported.md)). `Expired` takes a
+  ([Lite NOT_SUPPORTED](https://github.com/moq-dev/moq/pull/5269)). `Expired` takes a
   shared moq-transport session value if one means the same thing, otherwise
   0x31.
 - Carry it through moq-ffi's error mapping and each wrapper.
+- Switch the relay's in-band renewal (`rs/moq-relay/src/auth/refresh.rs`) to
+  refuse or revoke an expired credential with `Expired`. Today it uses
+  `UNAUTHORIZED`, with the cause only in the reason.
 
-Moved from m2 into the auth line: relay tokens refuse an expired
-token with `AUTH_ERROR { Expired }`, so without this moq-net cannot tell it
-apart from `Unauthorized`.
+Moved from m2 into the auth line: without this, a client renewing in band
+cannot tell an expired token apart from a refused one.
 
 ## Required
 
