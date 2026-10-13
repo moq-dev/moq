@@ -2,10 +2,11 @@
 
 ## Goal
 
-A `@moq/net` publisher answers IETF TRACK_STATUS on drafts 18 and later
-instead of refusing every one with NOT_SUPPORTED, so a native fetch-only
-request learns the track in one round trip rather than falling back to
-SUBSCRIBE.
+A `@moq/net` publisher answers IETF TRACK_STATUS on every draft instead of
+refusing every one with NOT_SUPPORTED, so a native fetch-only request on
+drafts 14-16 and 18-22 learns the track in one round trip rather than falling
+back to SUBSCRIBE. Draft 17 still subscribes, since its answer cannot say
+whether the track is timed.
 
 ## Plan
 
@@ -26,14 +27,15 @@ Rust.
 Split out of [JavaScript FETCH](/quest/m1/js-fetch.md), which is blocked on
 JS ranges; answering TRACK_STATUS does not need FETCH.
 
-Verify with a native IETF subscriber against a browser publisher on every
-supported draft: a fetch-only request gets TRACK_STATUS_OK with no SUBSCRIBE
-fallback, a cancelled request releases origin demand, and a request outside
-the grant is refused. Run `just test interop --all`.
+Verify with a native IETF subscriber against a browser publisher: on drafts
+14-16 and 18-22 a fetch-only request gets TRACK_STATUS_OK with no SUBSCRIBE
+fallback, while draft 17 keeps subscribing (`TrackStatusOk::describes_track`).
+On every draft, a cancelled request releases origin demand and a request
+outside the grant is refused. Run `just test interop --all`.
 
 Public API: none. Wire: implement the existing TRACK_STATUS and
-TRACK_STATUS_OK formats in JS; update `doc/concept/standard.md` if it lists JS
-as refusing them.
+TRACK_STATUS_OK formats in JS; drop JavaScript from the TRACK_STATUS refusals
+in `doc/concept/standard.md`.
 
 ## Related
 
