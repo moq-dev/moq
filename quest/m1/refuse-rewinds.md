@@ -54,18 +54,21 @@ Cases the rule must cover (from review):
 - Eviction must not drop the bound. An unstamped group whose stamped
   predecessor expires (Rust's `evict_expired_scan`, JS's `#prune`) would
   otherwise have no lower neighbor and accept a rewind. The track keeps the
-  sequence and original start of the highest-sequence group it evicted, and
-  a group above it with no cached lower neighbor is checked against that.
-  One entry, so no history grows with the cache.
+  sequence and original start of the highest-sequence group it evicted. A
+  group above it is checked against both its cached neighbors and that
+  watermark, never one in place of the other, since eviction is not a
+  sequence prefix (each recently written group is retained on its own). One
+  entry, so no history grows with the cache.
 - A late or refetched group at or below that watermark (JS `writeGroup`
   accepts long-evicted sequences; Rust takes older groups after `finish`)
-  may have lost its neighbors' starts. Eviction is not a sequence prefix
-  (each recently written group is retained on its own), so it is still
-  checked against its surviving cached neighbors, plus the watermark as an
-  upper bound. It never serves as another group's bound, so a
-  refetched legitimate group is never refused because of it. The guarantee
-  is stated as such: a hop refuses a rewind against the starts it still
-  holds, not against history it has evicted.
+  is checked against its surviving cached neighbors plus the watermark as an
+  upper bound, but its lower bound may be gone. Open, for the implementer to
+  confirm with the maintainer. Recommended: accept it unverified, keep it out
+  of every other group's bounds and out of timestamp-driven expiry, so
+  backfill below the watermark keeps working (fetched backfill is already
+  served by sequence only). Alternative: refuse a late group whose lower
+  bound was evicted, which keeps the Goal absolute but refuses legitimate
+  backfill of evicted history.
 
 The check costs one ordered neighbor lookup per group, not per frame. The
 existing `group_write_frames` benchmark writes into an otherwise empty
@@ -111,12 +114,14 @@ Reconcile the docs:
 
 Regression tests in both languages: a timed track refuses a group whose
 first frame rewinds, whether appended, created out of order, received
-through the streamed-frame path, written after its predecessor was evicted,
-or (JS) written before `writeGroup`; an equal start is accepted; a resumed
-partial group of a valid overlapping pair is accepted; a late group below
-the eviction watermark does not cause a later refetch to be refused, but is
-refused against a surviving cached neighbor after a non-prefix eviction; an untimed track
-accepts groups in any order.
+through the streamed-frame path, written after its predecessor was evicted
+(including a delayed stamp above the watermark while an older group
+survives a non-prefix eviction), or (JS) written before `writeGroup`; an
+equal start is accepted; a resumed partial group of a valid overlapping
+pair is accepted; a late group below the watermark is refused against a
+surviving cached neighbor, follows the chosen rule otherwise, and never
+causes a later refetch to be refused; an untimed track accepts groups in
+any order.
 
 Public API: write paths can now fail with `TimestampMismatch` on a rewind.
 Wire: none if `TimestampMismatch` is reused; the draft's description of

@@ -30,9 +30,11 @@ a 1 s grant, so a slow connect and round trip races the expiry.
 Decided (maintainer, 2026-10-13): mock the clock so the tests are
 deterministic, rather than widen a bound.
 
-- Read the grant's wall time through moq-clock
-  ([#5465](https://github.com/moq-dev/moq/pull/5465)) in `Grant::deadline()`
-  and `Grant::valid()`, and the tests stamp `expires` from its simulated
+- Read the grant's wall time through the controlled-clock crate (moq-clock
+  in [#5465](https://github.com/moq-dev/moq/pull/5465), planned as
+  moq-time) in both `Grant::deadline()` and `Grant::validate()`
+  (`rs/moq-auth/src/grant.rs`), which each compare `expires` with
+  `SystemTime::now()` today, and the tests stamp `expires` from its simulated
   clock, which moves wall and monotonic time together. Nothing reads the host
   clock.
 - Paused Tokio time alone is not enough (review on #5474): it does not pause
