@@ -30,8 +30,8 @@ on the workspace's aws-lc-rs provider with no second provider in the tree;
   needs port 80, and the crate's resolver already answers the challenge
   where the relay already listens.
 - **Delivery.** The crate's resolver becomes a certificate source for the
-  shared served-identity handle from
-  [One served identity](/quest/m1/2924-moq-relay-tls-rotation-is-not-atomic-across-thread-per.md),
+  shared served-identity handle, `moq_tokio::tls::Serve` (injected through
+  `server::Config::tls`; io_uring workers take its `config(alpn)`),
   so QUIC, HTTPS, and every worker on both runtimes serve the same
   certificate and pick up a renewal on their next handshake. Keys are
   written owner-only (`0600`) and `acme.dir` is created `0700`.
@@ -56,10 +56,6 @@ with an actionable error; a renewal reaches every worker through a fresh
 handshake without restart; a failed renewal leaves the old certificate
 serving; the config rejects `[acme]` alongside explicit paths, without
 `web.https`, or with a wildcard.
-
-## Required
-
-- [One served identity](/quest/m1/2924-moq-relay-tls-rotation-is-not-atomic-across-thread-per.md) - every listener must share one reloadable identity before ACME can promise renewal
 
 ## Closes
 

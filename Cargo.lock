@@ -4855,6 +4855,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+ "tracing-test",
 ]
 
 [[package]]

@@ -18,12 +18,13 @@ import {
 } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
-import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
+import { finalSequence, hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
-import { type Cursor, Reader, type Stream, UnexpectedEnd } from "../stream.ts";
+import { type Cursor, Reader, type Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
 import { Milli, type Timescale, type Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
+import { untilAborted } from "../util/abort.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
@@ -54,6 +55,7 @@ import {
 	SubscribeNamespaceOk,
 	UnsubscribeNamespace,
 } from "./subscribe_namespace.ts";
+import { MalformedAuthToken } from "./token.ts";
 import { Version } from "./version.ts";
 
 // Bound on how long stream-open plus SUBSCRIBE_OK may take. Browsers cap
@@ -579,23 +581,20 @@ export class Subscriber {
 	 */
 	consume(path: Path.Valid): broadcast.Consumer {
 		const instance = this.#consumes.instance(path);
-		return this.#consumes.get(path, instance) ?? this.#consumes.insert(path, instance, this.#createConsume(path));
+		return this.#consumes.get(path, instance) ?? this.#createConsume(path, instance);
 	}
 
-	#createConsume(path: Path.Valid): broadcast.Consumer {
-		// moq-transport has no one-shot group fetch; ConsumeBroadcast rejects it. Track info
-		// is resolved by the subscribe path (the inherited resolveTrackInfo).
+	#createConsume(path: Path.Valid, instance: ReturnType<BroadcastCache["instance"]>): broadcast.Consumer {
+		// moq-transport resolves metadata through SUBSCRIBE and has no one-shot group fetch here.
 		const consumer = new ConsumeBroadcast();
-
 		void (async () => {
 			for (;;) {
 				const request = await wireOf(consumer).requested();
 				if (!request) break;
-				void this.#runSubscribe(path, request);
+				void this.#runSubscribe(path, request, instance.validity?.signal);
 			}
 		})();
-
-		return consumer;
+		return this.#consumes.insert(path, instance, consumer);
 	}
 
 	// The adapter is gone. If the transport has already closed, that close is the
@@ -610,14 +609,23 @@ export class Subscriber {
 		]);
 	}
 
-	async #runSubscribe(broadcast: Path.Valid, request: track.Request) {
+	async #runSubscribe(broadcast: Path.Valid, request: track.Request, valid?: AbortSignal) {
 		const refused = unauthorized(broadcast);
 		if (this.#denied(broadcast)) {
 			request.reject(refused);
 			return;
 		}
 
-		const requestId = await this.#session.nextRequestId();
+		let requestId: bigint | undefined;
+		try {
+			valid?.throwIfAborted();
+			// The allocator cancels its own wait. Once it returns an ID, setup must spend
+			// it on the wire before cancellation, or the next legacy request would skip it.
+			requestId = await this.#session.nextRequestId(valid);
+		} catch (err) {
+			request.reject(error(err));
+			return;
+		}
 		if (requestId === undefined) {
 			request.reject(await this.#closedSession());
 			return;
@@ -663,7 +671,7 @@ export class Subscriber {
 				`subscribe timed out after ${SUBSCRIBE_OK_TIMEOUT_MS}ms waiting for SUBSCRIBE_OK (browser stream limit reached?)`,
 			);
 			for (;;) {
-				const result = await race([accepted, waitAbandoned()]);
+				const result = await untilAborted(race([accepted, waitAbandoned()]), valid);
 				if (result !== null) {
 					stream = result.stream;
 					trackAlias = result.alias;
@@ -866,7 +874,11 @@ export class Subscriber {
 		// The timeout can fire while the open is still in flight, in which case cleanup ran
 		// with nothing to release. Bail now that the stream is recorded, so settling this
 		// promise hands it back to be torn down.
-		if (state.cancelled) throw new Error("subscribe cancelled before it was sent");
+		// A legacy ID is already spent and cannot be skipped. Its virtual open is local,
+		// so finish this request and let cleanup send UNSUBSCRIBE, even if retirement
+		// won the await above. No response data is released from the canceled setup.
+		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
+		if (state.cancelled && !legacy) throw new Error("subscribe cancelled before it was sent");
 
 		await state.stream.writer.u53(Subscribe.id);
 		const msg = new Subscribe({
@@ -1056,7 +1068,24 @@ export class Subscriber {
 					);
 				}
 
-				const update = await PublishNamespaceUpdate.decode(stream.reader, version);
+				let update: PublishNamespaceUpdate;
+				try {
+					update = await PublishNamespaceUpdate.decode(stream.reader, version);
+				} catch (err) {
+					if (!(err instanceof MalformedAuthToken)) throw err;
+					// A refused update still spends its own request ID.
+					if (err.requestId !== undefined) this.#session.spendRequest(err.requestId);
+					// Section 8.9 rejects the update, which withdraws the advertisement as any
+					// refused update does. Only draft-17+ updates arrive here, so no Request ID.
+					await stream.writer.u53(RequestError.id);
+					await new RequestError({
+						errorCode: toRequestCode("malformed_auth_token", "publish_namespace", version),
+						reasonPhrase: err.message,
+					}).encode(stream.writer, version);
+					stream.close();
+					break;
+				}
+				this.#session.spendRequest(update.requestId);
 
 				// The parameters exist only on a session that negotiated the extension;
 				// anywhere else they are the peer's violation.
@@ -1188,41 +1217,13 @@ export class Subscriber {
 		};
 
 		try {
-			// FIRST_OBJECT clear is the publisher's claim that the stream starts partway
-			// through the group. The first Object ID is absolute either way, and IDs start
-			// at 0, so a clear bit on object 0 is still the whole group. Any other first ID,
-			// or a stream with no object, has a hole at the front: drop it and pick up at
-			// the next group.
-			//
-			// Drafts before the bit cannot say this in the header. A non-zero delta on the
-			// first object is the same hole, and the catch below drops that stream too. A
-			// later gap, or a header that claimed the group starts at object 0, still fails
-			// it: `Frame.decode` refuses every non-zero delta.
-			if (!group.flags.firstObject) {
-				let id: bigint | undefined;
-				try {
-					const peek = await race([stream.peekU62(), track.closed]);
-					if (typeof peek !== "bigint") {
-						stream.stop(peek ?? new StreamError(StreamCode.Cancel));
-						return;
-					}
-					id = peek;
-				} catch (err: unknown) {
-					if (!(err instanceof UnexpectedEnd)) throw err;
-				}
-				if (id !== 0n) {
-					console.debug(`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`);
-					stream.stop(new Error("a group must start at object 0"));
-					return;
-				}
-			}
-
 			// The alias binds after SUBSCRIBE_OK commits the track property; an omitted
 			// header priority inherits it (draft-21 section 10.4).
 			if (!group.flags.hasPriority) group.publisherPriority = toWire((await track.info()).priority);
 
 			const timescale = this.#timescales.get(group.trackAlias);
 			const decode = (c: Cursor) => Frame.decode(c, group.flags, timescale);
+			let nextObject = 0;
 			for (;;) {
 				// Every object already buffered is written without an await, so the reader wakes
 				// once per batch rather than once per object. Only the group's own stream ends it:
@@ -1235,19 +1236,32 @@ export class Subscriber {
 					stream.stop(frame ?? new StreamError(StreamCode.Cancel));
 					return;
 				}
-				if (!frame || frame instanceof Error) break;
+				if (!frame || frame instanceof Error) {
+					// FIRST_OBJECT clear on a stream that ends with no object: it starts partway
+					// through its group and carries none of it, so drop it like any headless
+					// stream. Drafts 14-17 cannot clear the bit, so there it is an empty group.
+					if (!producer && !group.flags.firstObject) {
+						console.debug(
+							`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`,
+						);
+						stream.stop(new Error("a group must start at object 0"));
+						return;
+					}
+					break;
+				}
 
 				if (frame.endOfTrack) {
 					// No object at or past this location exists: after the group's last object
 					// the track ends with it, and at object 0 it ends before it.
-					const end = producer ? group.groupId + 1 : group.groupId;
+					if (producer && frame.idDelta !== 0) throw new ObjectIdGap(frame.idDelta);
+					const end = { group: group.groupId, frame: nextObject + frame.idDelta };
 					producer?.close();
 					try {
-						track.finishAt(end);
+						hooks.endTrack(track, end);
 					} catch (err: unknown) {
 						throw new ProtocolViolation(`invalid END_OF_TRACK: ${reason(error(err))}`);
 					}
-					subscription.end ??= end;
+					subscription.end ??= finalSequence(end);
 					return;
 				}
 				if (frame.payload === undefined) break;
@@ -1260,6 +1274,7 @@ export class Subscriber {
 					});
 				}
 				open().writeFrame({ payload: frame.payload, timestamp: frame.timestamp });
+				nextObject += 1;
 			}
 
 			// A group with no objects still exists.
@@ -1270,7 +1285,11 @@ export class Subscriber {
 			// with no FIRST_OBJECT bit, that non-zero delta is a headless group: drop the
 			// stream and leave the subscription up for the next group. Delivering the
 			// object would renumber a P-frame as the keyframe the group opens with.
-			if (producer === undefined && e instanceof ObjectIdGap && !hasFirstObjectBit(this.#session.version)) {
+			if (
+				producer === undefined &&
+				e instanceof ObjectIdGap &&
+				(!group.flags.firstObject || !hasFirstObjectBit(this.#session.version))
+			) {
 				console.debug(`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`);
 				stream.stop(new Error("a group must start at object 0"));
 				return;

@@ -4,7 +4,7 @@ import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
 import * as DatagramStream from "../datagram_stream.ts";
-import { controlTimeout, error, reason, StreamCode, StreamError } from "../error.ts";
+import { controlTimeout, error, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
 import type { Hop, Route } from "../hop.ts";
 import { hiddenBelow, hooks, presented } from "../internal.ts";
@@ -12,7 +12,7 @@ import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Milli, Timescale } from "../time.ts";
-import type { Subscriber as TrackSubscriber } from "../track.ts";
+import type { Location as TrackLocation, Subscriber as TrackSubscriber } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { LIMITS, type Limits, Slots } from "../util/limits.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
@@ -46,6 +46,7 @@ import {
 	SubscribeNamespaceError,
 	SubscribeNamespaceOk,
 } from "./subscribe_namespace.ts";
+import { MalformedAuthToken } from "./token.ts";
 import type { TrackStatusRequest } from "./track.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -157,6 +158,8 @@ interface Target {
 
 /** What {@link Publisher.runGroup} needs to serve one group. */
 interface RunGroup {
+	/** The source retaining the exact terminal independently of cached groups. */
+	track: TrackSubscriber;
 	/** The subscription's request ID, doubling as the track alias. */
 	requestId: bigint;
 
@@ -188,7 +191,7 @@ interface RunGroup {
 }
 
 /** How many data streams a subscription opened, fill streams included. */
-type StreamCount = { opened: number };
+type StreamCount = { opened: number; terminalSent?: boolean };
 
 /** What {@link Publisher.runFill} needs to serve one subscription's backfill. */
 interface RunFill {
@@ -533,32 +536,52 @@ export class Publisher {
 						return stream.writer.closed;
 					}
 					if ((await stream.reader.u53()) !== 0x02) throw new Error("unexpected message on subscribe stream");
+					// Drafts 15 and 16 name the update's own Request ID; later drafts name none.
+					const refuse = async (
+						condition: "not_supported" | "malformed_auth_token",
+						reasonPhrase: string,
+						requestId?: bigint,
+					) => {
+						await stream.writer.u53(RequestError.id);
+						await new RequestError({
+							requestId,
+							errorCode: toRequestCode(condition, "subscribe", version),
+							reasonPhrase,
+						}).encode(stream.writer, version);
+						return new UpdateFailed();
+					};
 					if (legacy) {
 						// Not applied yet, but read anyway: an unread update keeps the adapter's
 						// stream from closing, which is how UNSUBSCRIBE arrives.
-						await SubscribeUpdate.decode(stream.reader, version);
+						try {
+							await SubscribeUpdate.decode(stream.reader, version);
+						} catch (err) {
+							if (!(err instanceof MalformedAuthToken)) throw err;
+							// Draft 14 answers no update, so the refusal only ends the subscription.
+							if (version === Version.DRAFT_14) throw new UpdateFailed();
+							throw await refuse("malformed_auth_token", err.message, err.requestId);
+						}
 						continue;
 					}
-					const params = await Message.decode(stream.reader, async (r) => {
-						await r.u62();
-						if (version === Version.DRAFT_17) await r.u62();
-						return Parameters.decode(r, version, "request-update");
-					});
+					let params: Parameters;
+					try {
+						params = await Message.decode(stream.reader, async (r) => {
+							this.#session.spendRequest(await r.u62());
+							if (version === Version.DRAFT_17) await r.u62();
+							return Parameters.decode(r, version, "request-update");
+						});
+					} catch (err) {
+						// Section 8.9 rejects the update, which says more than that we do not support it.
+						if (err instanceof MalformedAuthToken) throw await refuse("malformed_auth_token", err.message);
+						throw err;
+					}
 					const unsupported =
 						params.forward === false ||
 						params.bytes.size > 0 ||
 						params.rangeFilters ||
 						params.trackPropertyFilter ||
 						[...params.vars.keys()].some((key) => key !== 0x10n && key !== 0x20n);
-					if (unsupported) {
-						await stream.writer.u53(RequestError.id);
-						await new RequestError({
-							requestId: undefined,
-							errorCode: toRequestCode("not_supported", "subscribe", version),
-							reasonPhrase: "REQUEST_UPDATE parameters not supported",
-						}).encode(stream.writer, version);
-						throw new UpdateFailed();
-					}
+					if (unsupported) throw await refuse("not_supported", "REQUEST_UPDATE parameters not supported");
 					// update() replaces every option, so carry the rest over as Rust does.
 					if (params.subscriberPriority !== undefined)
 						track.update({ ...track.subscription.peek(), priority: fromWire(params.subscriberPriority) });
@@ -597,6 +620,7 @@ export class Publisher {
 					}
 
 					const task = this.#runGroup({
+						track,
 						requestId: msg.requestId,
 						group,
 						timescale,
@@ -657,6 +681,9 @@ export class Publisher {
 			} finally {
 				disposeGrant();
 			}
+			// An update that broke the protocol, such as one whose AUTHORIZATION TOKEN names an
+			// alias, closes the session: the connection answers a thrown violation with its code.
+			if (publishError instanceof ProtocolViolation) throw publishError;
 
 			// PUBLISH_DONE waits until every stream this subscription will open is closed, as
 			// the draft requires, so its count is final. The subscriber leaving cancels the
@@ -665,8 +692,8 @@ export class Publisher {
 
 			// Draft 14 on has no end location in PUBLISH_DONE: an END_OF_TRACK object is what
 			// tells the subscriber where the track ended.
-			const final = track.final();
-			if (ended && !publishError && final !== undefined) {
+			const final = track.end();
+			if (ended && !publishError && final !== undefined && !streams.terminalSent) {
 				await this.#runEndOfTrack({
 					requestId: msg.requestId,
 					final,
@@ -715,6 +742,7 @@ export class Publisher {
 			finished = true;
 			stream.close();
 		} catch (err: unknown) {
+			if (err instanceof ProtocolViolation) throw err;
 			const e = error(err);
 			if (e === cancel) console.debug(`publish cancelled: broadcast=${name} track=${track.name}`);
 			else console.warn(`publish error: broadcast=${name} track=${track.name} error=${reason(e)}`);
@@ -731,7 +759,7 @@ export class Publisher {
 	 * Runs a group and sends its frames using ObjectStream (Subgroup delivery mode).
 	 */
 	async #runGroup(options: RunGroup) {
-		const { requestId, group, timescale, publisherPriority, slice, unsubscribed, streams } = options;
+		const { requestId, track, group, timescale, publisherPriority, slice, unsubscribed, streams } = options;
 		try {
 			// One stream per group is faster than a peer at its limit can retire them, so this
 			// is the one path that doesn't wait for a slot: the transport would serve the opens
@@ -807,7 +835,30 @@ export class Publisher {
 					}
 				}
 
+				// The track ends right after this group's last object, so the marker rides this
+				// stream rather than a separate one.
+				const end = track.end();
+				const marked = end?.group === group.sequence && end.frame === next;
+				if (marked) {
+					await new Frame({ endOfTrack: true }).encode(
+						stream,
+						header.flags,
+						timescale,
+						this.#session.version,
+						first ? next : 0,
+					);
+				}
+
 				stream.close();
+				// Only a stream that closed cleanly delivered the marker: one reset after its FIN
+				// may not have, which leaves the standalone fallback in place, as in Rust.
+				if (marked) {
+					const delivered = stream.closed.then(
+						() => true,
+						() => false,
+					);
+					streams.terminalSent = (await race([delivered, unsubscribed.then(() => false)])) === true;
+				}
 			} catch (err: unknown) {
 				stream.reset(error(err));
 			}
@@ -858,16 +909,10 @@ export class Publisher {
 		}
 	}
 
-	/**
-	 * Mark the track's end with an END_OF_TRACK object on its own stream, at object 0 of the
-	 * group that will never exist.
-	 *
-	 * The last group's stream has usually finished before the track ends, so the marker cannot
-	 * ride on it. A failure only costs the subscriber the early boundary.
-	 */
+	/** Preserve the original terminal on a separate stream when its group already sent FIN. */
 	async #runEndOfTrack(options: {
 		requestId: bigint;
-		final: number;
+		final: TrackLocation;
 		publisherPriority: number;
 		unsubscribed: Promise<void>;
 		streams: StreamCount;
@@ -881,7 +926,7 @@ export class Publisher {
 		try {
 			const header = new GroupMessage({
 				trackAlias: requestId,
-				groupId: final,
+				groupId: final.group,
 				subGroupId: 0,
 				publisherPriority,
 				flags: {
@@ -890,11 +935,11 @@ export class Publisher {
 					hasSubgroupObject: false,
 					hasEnd: false,
 					hasPriority: true,
-					firstObject: true,
+					firstObject: final.frame === 0,
 				},
 			});
 			await header.encode(stream, version);
-			await new Frame({ endOfTrack: true }).encode(stream, header.flags, Timescale.MILLI, version);
+			await new Frame({ endOfTrack: true }).encode(stream, header.flags, Timescale.MILLI, version, final.frame);
 			stream.close();
 		} catch (err: unknown) {
 			stream.reset(error(err));

@@ -1,3 +1,5 @@
+//! Producing generations mint an epoch; consuming generations bind a discovered one.
+
 use std::collections::HashSet;
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -20,33 +22,32 @@ pub(crate) enum Domain {
 struct Inner {
 	credential: Credential,
 	epoch: Epoch,
-	// Physical names this generation has produced. Never released: a track reopened
-	// under the same epoch would restart its sequences and repeat nonces.
-	claims: Mutex<HashSet<Name>>,
 }
 
-/// One credential under one epoch: the scope of every name, key, and nonce.
+/// A consume-only generation bound to a discovered epoch.
 ///
-/// Clones share the publisher claims, so a physical track is produced at most once per generation.
+/// A discovered epoch cannot produce tracks:
+///
+/// ```compile_fail
+/// fn encrypt(generation: &moq_e2ee::generation::Consumer, track: moq_net::track::Producer) {
+///     generation.produce(track);
+/// }
+/// ```
 #[derive(Clone)]
-pub struct Generation(Arc<Inner>);
+pub struct Consumer(Arc<Inner>);
 
-impl fmt::Debug for Generation {
+impl fmt::Debug for Consumer {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct("Generation")
+		f.debug_struct("Consumer")
 			.field("credential", &self.0.credential)
 			.field("epoch", &self.0.epoch)
 			.finish()
 	}
 }
 
-impl Generation {
+impl Consumer {
 	pub(crate) fn new(credential: Credential, epoch: Epoch) -> Self {
-		Self(Arc::new(Inner {
-			credential,
-			epoch,
-			claims: Mutex::new(HashSet::new()),
-		}))
+		Self(Arc::new(Inner { credential, epoch }))
 	}
 
 	/// The credential this generation derives from.
@@ -67,24 +68,6 @@ impl Generation {
 	pub fn name(&self, semantic: &str) -> Result<Name> {
 		let material = self.0.credential.expand(&self.name_info(semantic)?)?;
 		Ok(encode(material))
-	}
-
-	/// Protect a net track whose name is a physical name, claiming it for this generation.
-	///
-	/// # Errors
-	///
-	/// [`Error::Identity`] if the track name is not a physical name, [`Error::Reuse`] if
-	/// this generation already produced it.
-	pub fn produce(&self, track: moq_net::track::Producer) -> Result<track::Producer> {
-		let name: Name = track.name().parse()?;
-		if !self.0.claims.lock().expect("claims").insert(name) {
-			return Err(Error::Reuse);
-		}
-		Ok(track::Producer::new(
-			track,
-			self.key(&name, Domain::Group)?,
-			self.key(&name, Domain::Datagram)?,
-		))
 	}
 
 	/// Open a net subscription whose track name is a physical name.
@@ -132,5 +115,63 @@ impl Generation {
 		append_bytes(info, self.0.epoch.as_str().as_bytes())?;
 		info.extend_from_slice(&self.0.credential.kid().to_be_bytes());
 		Ok(())
+	}
+}
+
+/// A publisher-minted generation whose clones share permanent track claims.
+///
+/// Explicit epochs cannot construct a producing generation:
+///
+/// ```compile_fail
+/// fn reopen(credential: moq_e2ee::Credential, epoch: moq_net::Epoch) {
+///     let _ = moq_e2ee::generation::Producer::new(credential, epoch);
+/// }
+/// ```
+#[derive(Clone, Debug)]
+pub struct Producer {
+	consumer: Consumer,
+	// Never release a claim: reopening a track would restart its nonce counters.
+	claims: Arc<Mutex<HashSet<Name>>>,
+}
+
+impl Producer {
+	pub(crate) fn new(credential: Credential, epoch: Epoch) -> Self {
+		Self {
+			consumer: Consumer::new(credential, epoch),
+			claims: Arc::new(Mutex::new(HashSet::new())),
+		}
+	}
+
+	/// The credential this generation derives from.
+	pub fn credential(&self) -> &Credential {
+		self.consumer.credential()
+	}
+
+	/// The epoch minted for this publisher instance.
+	pub fn epoch(&self) -> &Epoch {
+		self.consumer.epoch()
+	}
+
+	/// Derive the opaque physical track name, refusing semantic names longer than 65535 bytes.
+	pub fn name(&self, semantic: &str) -> Result<Name> {
+		self.consumer.name(semantic)
+	}
+
+	/// Protect a net track whose name is a physical name, claiming it for this generation.
+	///
+	/// # Errors
+	///
+	/// [`Error::Identity`] if the track name is not a physical name, [`Error::Reuse`] if
+	/// this generation already produced it.
+	pub fn produce(&self, track: moq_net::track::Producer) -> Result<track::Producer> {
+		let name: Name = track.name().parse()?;
+		if !self.claims.lock().expect("claims").insert(name) {
+			return Err(Error::Reuse);
+		}
+		Ok(track::Producer::new(
+			track,
+			self.consumer.key(&name, Domain::Group)?,
+			self.consumer.key(&name, Domain::Datagram)?,
+		))
 	}
 }

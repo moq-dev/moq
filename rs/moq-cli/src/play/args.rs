@@ -56,7 +56,7 @@ impl fmt::Display for Delay {
 	}
 }
 
-/// Play one MoQ broadcast through a native window and speaker.
+/// Play one MoQ broadcast through a native window or an audio-only speaker.
 #[derive(usage::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Args {
@@ -105,6 +105,17 @@ impl Args {
 	/// How far video trails the live edge while no speaker is setting the pace.
 	pub(super) fn video_delay(&self) -> Duration {
 		self.fixed_delay().unwrap_or(AUTO_VIDEO_DELAY)
+	}
+
+	/// How long a stalled video group is waited on, given the catalog's audio.
+	///
+	/// With no enabled speaker to follow, the playhead is video's own, so waiting
+	/// on the audio estimate's budget would only freeze the picture.
+	pub(super) fn video_max_delay(&self, audio: &hang::catalog::Audio) -> Duration {
+		match audio.enabled().next() {
+			Some(_) => self.max_delay(),
+			None => self.video_delay(),
+		}
 	}
 
 	/// Reject a codec the local decoders can't open.
@@ -202,6 +213,21 @@ mod tests {
 		assert_eq!(parse(&["--delay", "auto"]).delay, Delay::Auto);
 		assert_eq!(Delay::Auto.to_string(), "auto");
 		assert_eq!(Delay::Fixed(Duration::from_millis(250)).to_string(), "250ms");
+	}
+
+	/// Disabled audio sends nothing to follow, so video keeps its own budget.
+	#[test]
+	fn disabled_audio_leaves_video_its_own_budget() {
+		let args = parse(&[]);
+		let mut audio = hang::catalog::Audio::default();
+		assert_eq!(args.video_max_delay(&audio), AUTO_VIDEO_DELAY);
+
+		let config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		audio.renditions.insert("audio".into(), config);
+		assert_eq!(args.video_max_delay(&audio), AUTO_MAX_DELAY);
+
+		audio.renditions.get_mut("audio").unwrap().enabled = false;
+		assert_eq!(args.video_max_delay(&audio), AUTO_VIDEO_DELAY);
 	}
 
 	/// The playout budget has one spelling because it always controls both

@@ -26,7 +26,7 @@ try {
 		const demand = track.demand();
 		while (!demand.used.peek()) await demand.used.changed();
 		// The end precedes the last group's data; the transport still has to drain it.
-		track.finishAt(GROUPS);
+		track.finishAt({ group: GROUPS, frame: 0 });
 		for (let sequence = 0; sequence < GROUPS; sequence++) {
 			const group = track.appendGroup();
 			group.writeFrame({ payload: new Uint8Array(BYTES).fill(sequence) });
@@ -77,7 +77,7 @@ try {
 					seen.sort((a, b) => a - b),
 					[0, 1, 2, 3],
 				);
-				assert.equal(await track.finished(), GROUPS);
+				assert.deepEqual(await track.finished(), { group: GROUPS, frame: 0 });
 				console.error("tail clean end=4 groups=0,1,2,3 bytes=1048576");
 			} finally {
 				track.close();

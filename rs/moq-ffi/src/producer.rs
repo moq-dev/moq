@@ -40,8 +40,9 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 			out = out.with_max_age(std::time::Duration::from_micros(us));
 		}
 		if let Some(ticks) = info.timescale {
-			let scale =
-				moq_net::Timescale::new(ticks).map_err(|_| MoqError::Codec(format!("invalid timescale: {ticks}")))?;
+			let scale = moq_net::Timescale::new(ticks).map_err(|_| MoqError::Codec {
+				reason: format!("invalid timescale: {ticks}"),
+			})?;
 			out = out.with_timescale(scale);
 		}
 		Ok(out)
@@ -62,7 +63,9 @@ impl TryFrom<&moq_net::track::Info> for MoqTrackInfo {
 			.max_age
 			.map(|age| u64::try_from(age.as_micros()))
 			.transpose()
-			.map_err(|_| MoqError::Codec("track max_age duration overflow".into()))?;
+			.map_err(|_| MoqError::Codec {
+				reason: "track max_age duration overflow".into(),
+			})?;
 		Ok(Self {
 			priority: info.priority,
 			max_age_us,
@@ -570,7 +573,7 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let track = guard.as_mut().ok_or(MoqError::Closed)?;
-		if track.final_sequence().is_none() {
+		if track.end().is_none() {
 			track.finish()?;
 		}
 		Ok(())
@@ -585,7 +588,7 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let track = guard.as_mut().ok_or(MoqError::Closed)?;
-		track.finish_at(final_sequence)?;
+		track.finish_at(moq_net::track::Position::group(final_sequence))?;
 		Ok(())
 	}
 }

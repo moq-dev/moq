@@ -31,6 +31,14 @@ func TestStreamAbortProtocolDetails(t *testing.T) {
 }
 
 func TestErrorMessage(t *testing.T) {
+	var transport *ffi.MoqErrorTransport
+	if !errors.As(ffi.NewMoqErrorTransport("reset"), &transport) {
+		t.Fatal("transport payload is not accessible")
+	}
+	if transport.Reason != "reset" {
+		t.Fatalf("transport reason = %q, want reset", transport.Reason)
+	}
+
 	tests := []struct {
 		err  error
 		want string
@@ -84,6 +92,7 @@ func TestErrorSentinels(t *testing.T) {
 		{"Unsupported", ffi.NewMoqErrorUnsupported(), moq.ErrUnsupported},
 		{"InvalidRoute", ffi.NewMoqErrorInvalidRoute(""), moq.ErrInvalidRoute},
 		{"InvalidPattern", ffi.NewMoqErrorInvalidPattern(""), moq.ErrInvalidPattern},
+		{"InvalidEpoch", ffi.NewMoqErrorInvalidEpoch(""), moq.ErrInvalidEpoch},
 		{"UnresolvableBroadcast", ffi.NewMoqErrorUnresolvableBroadcast(""), moq.ErrUnresolvableBroadcast},
 		{"AlreadyCommitted", ffi.NewMoqErrorAlreadyCommitted(), moq.ErrAlreadyCommitted},
 		{"Log", ffi.NewMoqErrorLog(""), moq.ErrLog},

@@ -59,6 +59,11 @@ mod test {
 
 	use super::*;
 
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	fn cfg(compression: bool) -> Config {
 		Config {
 			compression: if compression {
@@ -72,7 +77,7 @@ mod test {
 	fn producer(compression: bool) -> (Producer, moq_net::track::Subscriber) {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", None)
+			.create_track("test", timed())
 			.unwrap();
 		let consumer = track.subscribe(None);
 		(Producer::new(track, cfg(compression)), consumer)
@@ -200,7 +205,7 @@ mod test {
 	/// write failure (the real one is a frame over moq-net's 32 MB per-group cache) without
 	/// allocating 32 MB to provoke it. Borrowed from moq-json's stream tests.
 	fn rejecting_track() -> moq_net::track::Producer {
-		let mut info = moq_net::track::Info::default();
+		let mut info = timed();
 		info.timescale = Some(moq_net::Timescale::new((1u64 << 62) - 1).unwrap());
 
 		moq_net::broadcast::Info::new()
@@ -375,7 +380,7 @@ mod test {
 	fn a_second_group_is_a_rolled_log() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", None)
+			.create_track("test", timed())
 			.unwrap();
 		let subscriber = track.subscribe(replaying());
 
@@ -413,7 +418,7 @@ mod test {
 	fn a_second_group_is_reported_while_the_first_is_open() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", None)
+			.create_track("test", timed())
 			.unwrap();
 		let subscriber = track.subscribe(replaying());
 
@@ -450,7 +455,7 @@ mod test {
 	fn a_late_lower_group_is_still_reported() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", None)
+			.create_track("test", timed())
 			.unwrap();
 		let subscriber = track.subscribe(replaying());
 

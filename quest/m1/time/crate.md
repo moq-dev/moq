@@ -33,7 +33,7 @@ Settle in the PR:
   consumer needs otherwise).
 - How the tokio backend reports a logical instant: an origin captured once per
   runtime, so paused tokio stays deterministic, and the multi-thread runtime
-  [FFI runtime](/quest/m1/ffi-runtime.md) moves to stays correct.
+  [FFI runtime](https://github.com/moq-dev/moq/pull/5265) moves to stays correct.
 - The browser backend reuses web-async's wasmtimer plumbing rather than a new
   shim.
 - The sim keeps everything moq-net relies on today: stall-driven advance,

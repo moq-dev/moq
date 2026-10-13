@@ -60,6 +60,7 @@ criterion = { workspace = true }
 # what hid moq-tokio's backend-less build from the nightly feature matrix.
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["aws-lc-rs"] }
 tokio = { workspace = true, features = ["test-util"] }
+tracing-test = { workspace = true, features = ["no-env-filter"] }
 
 [[bench]]
 name = "chunk_interleaving"

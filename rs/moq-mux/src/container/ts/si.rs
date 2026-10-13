@@ -364,12 +364,15 @@ impl Entry {
 			None if frames.is_empty() => return Ok(()),
 			// Deterministic, greppable name; fall back to a unique suffix on the
 			// (pathological) collision with an existing track.
-			None => self.track.insert(
-				match broadcast.create_track(format!("{pid:#06x}-{table_id:#04x}.si"), None) {
-					Ok(track) => track,
-					Err(_) => broadcast.unique_track(".si", None)?,
-				},
-			),
+			None => {
+				let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+				self.track.insert(
+					match broadcast.create_track(format!("{pid:#06x}-{table_id:#04x}.si"), info.clone()) {
+						Ok(track) => track,
+						Err(_) => broadcast.unique_track(".si", info)?,
+					},
+				)
+			}
 		};
 		let mut group = track.append_group()?;
 		for payload in frames {
