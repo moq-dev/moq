@@ -129,7 +129,7 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
-	track.finish_at(GROUPS).unwrap();
+	track.finish_at(moq_net::track::Position::group(GROUPS)).unwrap();
 	match arrival {
 		Arrival::HeldTails => {
 			let mut groups = Vec::new();

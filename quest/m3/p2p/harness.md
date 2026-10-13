@@ -12,8 +12,9 @@ quotes.
 
 A Playwright driver with a local relay, `moq-bench` publishing synthetic
 frames of known size and rate through it, and `moq-cli --p2p` as the native
-hop. It stands alone rather than reusing `test/wasm`, which
-[rs2ts](/quest/m2/rs2ts-remove-wasm.md) removes. The NAT rows run the peers behind a network-namespace NAT with a
+hop. Reuse relay/browser fixtures from `test/wasm` or the
+[backend baseline](/quest/m1/rs2ts/spike.md) where useful; their lifetime is
+independent of the selected runtime backend. The NAT rows run the peers behind a network-namespace NAT with a
 local STUN server, so a reflexive pair is exercised without leaving the host.
 
 Matrix:

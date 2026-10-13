@@ -385,10 +385,11 @@ impl Rendition {
 		})
 	}
 
-	/// Start following this rendition's own timeline, trimmed to the listed segments.
+	/// Start following this rendition's own timeline, trimmed to the listed segments. `history`
+	/// reads it from the start, as the reference does in history mode.
 	///
 	/// A rendition the catalog indexes no timeline for resolves nothing but the reference's rows.
-	pub(crate) fn watch(&self) {
+	pub(crate) fn watch(&self, history: bool) {
 		let Some(_) = self.section.timelines.get(&self.name) else {
 			self.spans.end();
 			return;
@@ -398,6 +399,7 @@ impl Rendition {
 			self.section.clone(),
 			self.name.clone(),
 			self.spans.clone(),
+			history,
 		));
 		*self.watcher.lock().expect("watcher lock poisoned") = Some(watcher);
 	}
@@ -1055,8 +1057,21 @@ fn last_group(range: &std::ops::Range<hang::timeline::Position>) -> u64 {
 }
 
 /// Follow `track`'s own timeline into `spans` until it ends, then mark nothing pending.
-async fn watch_spans(broadcast: moq_net::broadcast::Consumer, section: Archive, track: String, spans: Arc<Spans>) {
+async fn watch_spans(
+	broadcast: moq_net::broadcast::Consumer,
+	section: Archive,
+	track: String,
+	spans: Arc<Spans>,
+	history: bool,
+) {
 	let result: Result<()> = async {
+		if history {
+			return super::history::read(&broadcast, &section, &track, |edit| match edit {
+				super::history::Edit::Push { entry, .. } => spans.push(entry),
+				super::history::Edit::Pop(range) => spans.pop(range),
+			})
+			.await;
+		}
 		let mut timeline = moq_mux::timeline::Consumer::<()>::subscribe(&broadcast, &section, &track).await?;
 		while let Some(event) = timeline.next().await? {
 			match event {

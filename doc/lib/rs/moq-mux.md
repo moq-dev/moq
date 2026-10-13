@@ -13,10 +13,10 @@ back. This is what `moq import` / `export` and the gateways are built on.
 
 | Format | Import | Export | Notes |
 | --- | --- | --- | --- |
-| fMP4 / CMAF | yes | yes | Passthrough as `cmaf` or repackaged as `legacy`. |
+| fMP4 / CMAF | yes | yes | Audio/video passthrough as `cmaf` or repackaged as `legacy`; `wvtt` subtitles import as timed WebVTT text, preserving source language and label when present. |
 | MPEG-TS | yes | yes | H.264/H.265; AAC, MP2, AC-3, E-AC-3, Opus up to 7.1; SCTE-35 and subtitle PIDs as tracks; service tables round-trip. |
 | FLV / RTMP | yes | yes | Legacy H.264 + AAC + MP3, plus enhanced-RTMP HEVC, AV1, VP9, Opus, AC-3, E-AC-3, and multitrack. |
-| Matroska / WebM | yes | yes | |
+| Matroska / WebM | yes | yes | Timed SRT and WebVTT subtitles import as WebVTT text renditions, preserving source language and label when present; other subtitle codecs are skipped. |
 | Annex-B (H.264, H.265) | yes | yes | Parameter sets extracted to the catalog or re-injected per keyframe. |
 
 Importers fill the catalog from the bitstream, split groups at keyframes, and

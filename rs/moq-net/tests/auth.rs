@@ -64,6 +64,7 @@ cases!(
 	an_issued_grant_ends_with_its_session,
 	a_reset_auth_stream_reports_unsupported,
 	a_revoked_grant_cancels_its_subscriptions,
+	a_grant_update_too_large_for_one_message_is_unsupported,
 	nothing_outside_the_grant_reaches_the_peer,
 );
 
@@ -567,6 +568,9 @@ async fn a_refused_token_reports_the_code(version: &'static str) {
 					true => {
 						std::mem::forget(request.accept(Grant::default()));
 					}
+					false if request.token() == b"opaque".as_slice() => {
+						request.reject(SessionError::Unsupported, "unknown token format")
+					}
 					false => request.reject(SessionError::Unauthorized, "bad signature"),
 				}
 			}
@@ -574,6 +578,8 @@ async fn a_refused_token_reports_the_code(version: &'static str) {
 
 		let err = pair.client.auth().add("forged").await.err().expect("refused");
 		assert!(matches!(err, Error::Session(SessionError::Unauthorized)), "{err:?}");
+		let err = pair.client.auth().add("opaque").await.err().expect("refused");
+		assert!(matches!(err, Error::Unsupported), "{err:?}");
 	})
 	.await
 	.expect("timed out");
@@ -938,6 +944,41 @@ async fn a_grant_too_large_for_one_message_is_unsupported(version: &'static str)
 		assert!(matches!(err, Error::Unsupported), "{err:?}");
 		// No AUTH_OK for it reached the wire: the union is still just the setup grant.
 		assert_eq!(pair.client.auth().grant().peek(), Some(grant(&["a"], &[])));
+		assert_eq!(pair.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
+async fn a_grant_update_too_large_for_one_message_is_unsupported(version: &'static str) {
+	within(async {
+		let mut pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(produce_origin(2)),
+			server_subscribe: Some(produce_origin(1)),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+		let mut issued = serve(pair.requests.take().unwrap(), |token| {
+			Some(grant(if token.is_empty() { &["a"] } else { &["b"] }, &[]))
+		});
+		let (_, _setup) = issued.next().await.unwrap();
+		let token = pair.client.auth().add("update").await.unwrap();
+		let (_, updated) = issued.next().await.unwrap();
+		assert_eq!(granted(&pair.client).await, grant(&["a", "b"], &[]));
+		let huge: Patterns = (0..20)
+			.map(|i| Pattern::subtree(&format!("{i}{}", "x".repeat(4000))).unwrap())
+			.collect();
+		updated.update(Grant {
+			publish: huge,
+			subscribe: Patterns::new(),
+			expires: None,
+		});
+		let err = token.closed().await;
+		assert!(matches!(err, Error::Unsupported), "{err:?}");
+		assert_eq!(token.grant().peek(), None);
+		wait_for(pair.client.auth().grant(), |g| g == &Some(grant(&["a"], &[]))).await;
 		assert_eq!(pair.client_transport.close_reason(), None);
 	})
 	.await

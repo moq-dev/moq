@@ -739,6 +739,14 @@ pub struct Admission {
 	reply: oneshot::Sender<Result<lease::Consumer, Error>>,
 }
 
+#[cfg(test)]
+impl Admission {
+	/// Resolve once the relay stops waiting for this decision.
+	pub(crate) async fn abandoned(&mut self) {
+		self.reply.closed().await
+	}
+}
+
 impl Admission {
 	/// Admit the session on `lease`: [`lease::Consumer::fixed`] for a grant that
 	/// never changes, or the consumer of a [`lease::Producer`] the decider keeps to

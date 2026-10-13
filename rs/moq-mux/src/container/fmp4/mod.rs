@@ -12,6 +12,7 @@ mod fragmenter;
 mod import;
 mod muxer;
 mod sample;
+mod text;
 
 pub use export::*;
 pub use fragmenter::*;
@@ -40,6 +41,10 @@ use crate::container::{Container, Frame};
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// A subtitle sample cannot be reconstructed with valid text and timing.
+	#[error("invalid subtitle: {0}")]
+	InvalidSubtitle(&'static str),
+
 	#[error("mp4: {0}")]
 	Mp4(std::sync::Arc<mp4_atom::Error>),
 

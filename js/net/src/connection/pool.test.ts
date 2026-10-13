@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, jest, test } from "bun:test";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
 import { SessionCode, SessionError } from "../error.ts";
 import * as Lite from "../lite/index.ts";
@@ -172,7 +172,7 @@ test("switching URLs switches origins", async () => {
 	handle.close();
 });
 
-test("a shared connection outlasts an outage longer than the default retry window", async () => {
+test("a shared connection outlasts an outage longer than a finite retry window", async () => {
 	let offline = true;
 	const stub = function StubWebTransport() {
 		if (offline) throw new Error("relay is down");
@@ -434,6 +434,45 @@ test("a private partial delay keeps the unlimited retry timeout", async () => {
 	} finally {
 		handle.close();
 		performance.now = real;
+	}
+});
+
+test("a private handle with an explicitly undefined timeout outlasts the outage", async () => {
+	let offline = true;
+	let attempts = 0;
+	const stub = function StubWebTransport() {
+		attempts++;
+		if (offline) throw new Error("relay is down");
+		const pair = createMockTransportPair(Lite.ALPN_05);
+		void accept(pair.server, url);
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	// Fake timers drive both the backoff and the retry window, which reads performance.now.
+	jest.useFakeTimers();
+	const advance = async (ms: number) => {
+		for (let elapsed = 0; elapsed < ms; elapsed += 100) {
+			jest.advanceTimersByTime(100);
+			for (let i = 0; i < 64; i++) await Promise.resolve();
+		}
+	};
+
+	// What a caller building options from optional values produces: the undefined means "the
+	// default", which for a Connection is to retry for as long as the handle is held.
+	const handle = new Connection({ url, share: false, websocket: { enabled: false }, delay: { timeout: undefined } });
+	try {
+		// Long enough that any finite fallback window would have given up.
+		await advance(60_000);
+		expect(attempts).toBeGreaterThan(3);
+		expect(handle.error.peek()).toBeUndefined();
+
+		offline = false;
+		await advance(10_000);
+		expect(handle.status.peek()).toBe("connected");
+	} finally {
+		handle.close();
+		jest.useRealTimers();
 	}
 });
 

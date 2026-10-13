@@ -358,11 +358,9 @@ harness_endpoint relay "$URL"
 
 # SCHEDULE carries the rate pcr-timing.py's schedule check grades against, and gates
 # on it. The generated clip is muxed at $BITRATE, which is the rate the catalog records
-# and the exporter pads to, on a constant-rate schedule from the first null packet on:
-# every interval is the bytes the rate implies, to one packet. Left to estimate, the
-# grader divides total bytes by the PCR span, and the unpadded start drags that off the
-# true rate. A --source capture's rate is not known here, so for that the grader
-# estimates it, says so, and only reports.
+# and the exporter pads to, on a constant-rate schedule from the first PCR:
+# every interval is the bytes the rate implies, to one packet. A --source capture's
+# rate is not known here, so for that the grader estimates it, says so, and only reports.
 SCHEDULE=()
 [[ -z "$SOURCE" ]] && SCHEDULE=(--mux-rate "$BITRATE" --schedule-pct-min 99)
 
@@ -421,13 +419,14 @@ sleep 1
 # at 5). It is the publisher's granularity, not the exporter's, so the harness has
 # to be well inside it or it grades tsp.
 # Bounded like the subscriber: if the relay stalls after readiness, `moq import
-# ts` could otherwise block `wait "$PUB_PID"` forever. tsp/moq stderr lands in
-# pub.log, which the empty-capture handler below dumps on failure.
+# ts` could otherwise block `wait "$PUB_PID"` forever. The bound adds the 30 s
+# default max-age a finished import stays up for after EOF. tsp/moq stderr lands
+# in pub.log, which the empty-capture handler below dumps on failure.
 echo "### publishing PCR-paced TS -> $BROADCAST"
 # shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
 publish() {
     # shellcheck disable=SC2016  # $1..$4 are the child bash -c positionals, not ours.
-    timeout -k 3 $((DURATION + 20)) bash -c '
+    timeout -k 3 $((DURATION + 20 + 30)) bash -c '
         tsp -I file "$1" -P regulate --pcr-synchronous --wait-min 5 |
             "$2" --connect "$3" --broadcast "$4" import ts
     ' _ "$SRC_TS" "$MOQ" "$URL" "$BROADCAST"
@@ -589,13 +588,11 @@ fi
 
 # pcr-schedule allows each PCR a packet of slack, but an IRD or a TR 101 290 probe holds
 # every PCR to within 500 ns of its byte position at the mux rate (PCR_accuracy_error).
-# TSDuck's pcrverify measures exactly that. The first seconds are skipped: the export
-# starts unpadded until the importer has measured the source's rate and recorded it.
+# TSDuck's pcrverify measures exactly that, including the first PCR interval.
 if [[ ${#SCHEDULE[@]} -gt 0 ]]; then
     echo
     echo "### PCR accuracy (tsp -P pcrverify, +/-500 ns at ${BITRATE} b/s)"
-    SKIP=$((3 * BITRATE / 8 / 188))
-    tsp -I file "$SUB_TS" -P skip "$SKIP" -P pcrverify --bitrate "$BITRATE" --absolute --jitter-max 13 \
+    tsp -I file "$SUB_TS" -P pcrverify --bitrate "$BITRATE" --absolute --jitter-max 13 \
         -O drop >"$HARNESS_RUN/pcrverify.log" 2>&1 || true
     VERDICT=$(grep -E "PCR OK, " "$HARNESS_RUN/pcrverify.log" | tail -1)
     echo "  ${VERDICT:-no verdict}"

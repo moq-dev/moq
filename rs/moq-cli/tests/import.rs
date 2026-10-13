@@ -8,7 +8,10 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Child;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
-const BBB: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/bbb.ts");
+/// How long a finished import stays up: long enough for a subscriber to request its media
+/// after reading the final catalog, short enough that the process exits within `TIMEOUT`.
+const MAX_AGE: &str = "5s";
+const BBB: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/scte35/bbb5s.ts");
 
 /// Await `step` while `moq` still holds stdin open, failing as soon as the process exits.
 ///
@@ -22,6 +25,34 @@ async fn running<T>(child: &mut Child, what: &str, step: impl Future<Output = T>
 	}
 }
 
+/// Start `moq import ts`, publishing `demo` from stdin to the relay at `url`.
+fn import(url: &str, fingerprint: &str) -> Child {
+	let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"));
+	// A `MOQ_*` variable in the developer's shell must not reconfigure the child.
+	for (name, _) in std::env::vars_os() {
+		if name.to_string_lossy().starts_with("MOQ_") {
+			command.env_remove(name);
+		}
+	}
+	command
+		.args([
+			"--connect",
+			url,
+			"--connect-tls-fingerprint",
+			fingerprint,
+			"--broadcast",
+			"demo",
+			"import",
+			"--max-age",
+			MAX_AGE,
+			"ts",
+		])
+		.stdin(Stdio::piped())
+		.kill_on_drop(true)
+		.spawn()
+		.expect("spawn moq")
+}
+
 #[tokio::test]
 async fn import_delivers_the_catalog_finish_at_eof() {
 	let _ = moq_tokio::crypto::install_default();
@@ -30,29 +61,9 @@ async fn import_delivers_the_catalog_finish_at_eof() {
 	tokio::spawn(fixture.relay.run());
 	ready.wait().await.expect("relay ready");
 
-	let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"));
-	// A `MOQ_*` variable in the developer's shell must not reconfigure the child.
-	for (name, _) in std::env::vars_os() {
-		if name.to_string_lossy().starts_with("MOQ_") {
-			command.env_remove(name);
-		}
-	}
-	let mut child = command
-		.args([
-			"--connect",
-			fixture.url.as_str(),
-			"--connect-tls-fingerprint",
-			&fixture.fingerprint,
-			"--broadcast",
-			"demo",
-			"import",
-			"ts",
-		])
-		.stdin(Stdio::piped())
-		.kill_on_drop(true)
-		.spawn()
-		.expect("spawn moq");
+	let mut child = import(fixture.url.as_str(), &fixture.fingerprint);
 	let mut stdin = child.stdin.take().expect("stdin");
+	// A live TS catalog waits for its initial two-second PCR rate measurement.
 	stdin.write_all(BBB).await.expect("write stdin");
 
 	let origin = moq_tokio::origin::spawn();
@@ -109,4 +120,91 @@ async fn import_delivers_the_catalog_finish_at_eof() {
 			Err(err) => panic!("the catalog ends with {err} instead of finishing"),
 		}
 	}
+}
+
+/// About one second of CBR HEVC and Opus: shorter than the two-second mux-rate window, so
+/// the catalog is only released at EOF.
+const SHORT: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/bbb_cbr.ts")
+	.split_at(256 * 188)
+	.0;
+
+/// A subscriber already waiting when a short import ends still receives its media: the
+/// publisher keeps the finished tracks servable for their max-age after EOF.
+#[tokio::test]
+async fn a_short_import_drains_its_media_to_a_waiting_subscriber() {
+	let _ = moq_tokio::crypto::install_default();
+	let fixture = moq_relay::test_relay().await.expect("test relay");
+	let ready = fixture.relay.ready();
+	tokio::spawn(fixture.relay.run());
+	ready.wait().await.expect("relay ready");
+
+	let mut child = import(fixture.url.as_str(), &fixture.fingerprint);
+	let mut stdin = child.stdin.take().expect("stdin");
+
+	let origin = moq_tokio::origin::spawn();
+	let consumer = origin.consume();
+	let mut announced = consumer.announced();
+	let mut config = moq_tokio::connect::Config::default();
+	config.tls.insecure = Some(true);
+	config.bind = Some("127.0.0.1:0".parse().unwrap());
+	let _connection = config
+		.init(Default::default())
+		.expect("client")
+		.with_subscriber(origin)
+		.with_reconnect(false)
+		.connect(fixture.url.clone())
+		.established()
+		.await
+		.expect("subscriber connects");
+
+	running(&mut child, "the announce", announced.next())
+		.await
+		.expect("origin closed");
+	let broadcast = running(&mut child, "the broadcast", consumer.request_broadcast("demo", None))
+		.await
+		.expect("announced broadcast resolves");
+	let mut catalogs = running(
+		&mut child,
+		"the catalog subscription",
+		hang::catalog::Catalog::<()>::subscribe(&broadcast),
+	)
+	.await
+	.expect("subscribe to the catalog");
+
+	stdin.write_all(SHORT).await.expect("write stdin");
+	drop(stdin);
+
+	let catalog = tokio::time::timeout(TIMEOUT, catalogs.next())
+		.await
+		.expect("no catalog")
+		.expect("catalog read")
+		.expect("the import released its catalog");
+	let name = catalog
+		.video
+		.renditions
+		.keys()
+		.next()
+		.expect("a video rendition")
+		.clone();
+	let mut track = tokio::time::timeout(TIMEOUT, broadcast.track(&name).expect("track").subscribe(None))
+		.await
+		.expect("the video subscription timed out")
+		.expect("subscribe to the video");
+	let mut frames = 0;
+	while let Some(mut group) = tokio::time::timeout(TIMEOUT, track.recv_group())
+		.await
+		.expect("the video never ended")
+		.expect("video group")
+	{
+		while group.read_frame().await.expect("video frame").is_some() {
+			frames += 1;
+		}
+	}
+	assert!(frames > 0, "the subscriber received no video");
+
+	let status = tokio::time::timeout(TIMEOUT, child.wait())
+		.await
+		.expect("moq never exited")
+		.expect("wait for moq");
+	assert!(status.success(), "moq exited with {status}");
 }

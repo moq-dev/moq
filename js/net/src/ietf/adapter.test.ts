@@ -9,6 +9,7 @@ import { GoAway } from "./goaway.ts";
 import { PublishNamespace, PublishNamespaceCancel, PublishNamespaceDone } from "./publish_namespace.ts";
 import { initialMaxRequestId, MaxRequestId, RequestError } from "./request.ts";
 import { Subscribe, SubscribeUpdate } from "./subscribe.ts";
+import { SubscribeNamespaceLegacy } from "./subscribe_namespace.ts";
 import { TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
@@ -391,10 +392,10 @@ test("a request id with the wrong parity closes the session", async () => {
 
 test("a second use of an open request id closes the session", async () => {
 	for (const [version, alpn] of WINDOW_DRAFTS) {
-		const { pair, peer, running } = await windowed(version, alpn, 2n, false);
+		const { pair, peer, running } = await windowed(version, alpn, 1n, false);
 		await trackStatus(peer, version, 0n);
 		await trackStatus(peer, version, 0n);
-		await expect(running).rejects.toThrow("duplicate request id");
+		await expect(running).rejects.toThrow("request id was already spent or out of sequence");
 		expect((await pair.client.closed).closeCode).toBe(INVALID_REQUEST_ID);
 	}
 });
@@ -434,9 +435,9 @@ test("drafts 14 to 16 route an update to its second request id", async () => {
 	for (const [version, alpn] of WINDOW_DRAFTS) {
 		const { adapter, peer, running } = await windowed(version, alpn, 4n, false);
 		const state = settled(running);
-		const target = await subscribe(adapter, peer, version, 2n);
-		await update(peer, version, 6n, 2n);
-		expect(await updated(target, version)).toBe(2n);
+		const target = await subscribe(adapter, peer, version, 0n);
+		await update(peer, version, 2n, 0n);
+		expect(await updated(target, version)).toBe(0n);
 		expect(await state()).toBeUndefined();
 	}
 });
@@ -488,24 +489,45 @@ test("an update spending an open request id closes the session", async () => {
 			await trackStatus(peer, version, heldId);
 			if (!(await adapter.acceptBi())) throw new Error("no stream");
 			await update(peer, version, heldId, heldId);
-			await expect(running).rejects.toThrow("duplicate request id");
+			await expect(running).rejects.toThrow("request id was already spent or out of sequence");
 			expect((await pair.client.closed).closeCode).toBe(INVALID_REQUEST_ID);
 		}
 	}
 });
 
-/** Repeated updates raise the maximum, but the peer still cannot hold more than the window open. */
-test("reused update ids cannot hold more than the window", async () => {
+/** Request IDs stay spent after their stream or update retires. */
+test("retired and lower request ids close the session", async () => {
 	for (const [version, alpn] of WINDOW_DRAFTS) {
-		const { pair, adapter, peer, running } = await windowed(version, alpn, 2n, false);
+		for (const client of [false, true]) {
+			const parity = client ? 1n : 0n;
+			for (const [first, later] of [
+				[parity, parity],
+				[parity + 4n, parity + 2n],
+			] as const) {
+				const { pair, adapter, peer, running } = await windowed(version, alpn, 8n, client);
+				for (let id = parity; id <= first; id += 2n) {
+					await trackStatus(peer, version, id);
+					const stream = await adapter.acceptBi();
+					if (!stream) throw new Error("no stream");
+					stream.close();
+				}
+				await trackStatus(peer, version, later);
+				await expect(running).rejects.toThrow("request id was already spent or out of sequence");
+				expect((await pair.client.closed).closeCode).toBe(INVALID_REQUEST_ID);
+			}
+		}
+	}
+});
+
+test("an update id stays spent after the update retires", async () => {
+	for (const [version, alpn] of WINDOW_DRAFTS) {
+		const { pair, adapter, peer, running } = await windowed(version, alpn, 4n, false);
 		await trackStatus(peer, version, 0n);
 		if (!(await adapter.acceptBi())) throw new Error("no stream");
-		for (let i = 0; i < 8; i++) await update(peer, version, 2n, 0n);
-		await trackStatus(peer, version, 4n);
-		if (!(await adapter.acceptBi())) throw new Error("no stream");
-		await trackStatus(peer, version, 6n);
-		await expect(running).rejects.toThrow("too many open requests");
-		expect((await pair.client.closed).closeCode).toBe(SessionCode.TooManyRequests);
+		await update(peer, version, 2n, 0n);
+		await update(peer, version, 2n, 0n);
+		await expect(running).rejects.toThrow("request id was already spent or out of sequence");
+		expect((await pair.client.closed).closeCode).toBe(INVALID_REQUEST_ID);
 	}
 });
 
@@ -540,6 +562,128 @@ test("more requests than the setup window complete on one session", async () => 
 		pair.server.close();
 		await running.catch(() => undefined);
 		await reading;
+	}
+});
+
+// Both requests and updates allocate IDs, even when an update's target is gone.
+test("skipped request and update ids close the session", async () => {
+	for (const [version, alpn] of WINDOW_DRAFTS.filter(([version]) => version !== Version.DRAFT_16)) {
+		for (const client of [false, true]) {
+			for (const prefix of [0n, 1n]) {
+				for (const isUpdate of [false, true]) {
+					const { pair, peer, running } = await windowed(version, alpn, 8n, client);
+					const first = client ? 1n : 0n;
+					if (prefix) await trackStatus(peer, version, first);
+					const skipped = first + 2n * prefix + 2n;
+					if (isUpdate) await update(peer, version, skipped, 100n);
+					else await trackStatus(peer, version, skipped);
+					await expect(running).rejects.toThrow("request id was already spent or out of sequence");
+					expect((await pair.client.closed).closeCode).toBe(SessionCode.InvalidRequestId);
+				}
+			}
+		}
+	}
+});
+
+// SUBSCRIBE_NAMESPACE uses an independent bidi stream in draft 16, sharing the ID space.
+test("draft 16 accepts reordered native and control IDs but never reuses them", async () => {
+	for (const client of [false, true]) {
+		for (const nativeFirst of [false, true]) {
+			const version = Version.DRAFT_16;
+			const { pair, adapter, peer, running } = await windowed(version, ALPN.DRAFT_16, 8n, client);
+			void running.catch(() => undefined);
+			const first = client ? 1n : 0n;
+			const native = nativeFirst ? first + 2n : first;
+			const control = nativeFirst ? first : first + 2n;
+			try {
+				if (nativeFirst) adapter.admitRequest(native);
+				await trackStatus(peer, version, control);
+				const stream = await adapter.acceptBi();
+				if (!stream) throw new Error("no reordered control request");
+				if (!nativeFirst) adapter.admitRequest(native);
+				stream.close();
+				adapter.releaseRequest(native);
+				await trackStatus(peer, version, first);
+				await expect(running).rejects.toThrow("request id was already spent");
+				expect((await pair.client.closed).closeCode).toBe(SessionCode.InvalidRequestId);
+			} finally {
+				peer.close();
+				adapter.close();
+			}
+		}
+	}
+});
+
+// Draft 16 remembers a skipped stretch as one run, so a jump costs nothing per skipped ID.
+test("draft 16 tracks a jump across a production window as one run", async () => {
+	const window = 220_000n;
+	const { adapter, peer } = await windowed(Version.DRAFT_16, ALPN.DRAFT_16, window, false);
+	const top = 2n * (window - 1n);
+	try {
+		for (const id of [top, 100n, 0n, top - 2n, 2n, 98n]) adapter.admitRequest(id);
+		for (const id of [0n, 2n, 98n, 100n, top - 2n, top]) {
+			expect(() => adapter.admitRequest(id)).toThrow("request id was already spent");
+		}
+	} finally {
+		peer.close();
+		adapter.close();
+	}
+});
+
+// Splitting runs in descending order spans many chunks; every ID is admitted exactly once.
+test("draft 16 admits a scattered window once across run chunks", async () => {
+	const window = 4096n;
+	const { adapter, peer } = await windowed(Version.DRAFT_16, ALPN.DRAFT_16, window, false);
+	const top = 2n * (window - 1n);
+	const below = Array.from({ length: Number(window - 1n) }, (_, i) => 2n * (window - 2n - BigInt(i)));
+	const ids = [top, ...below.filter((id) => (id / 2n) % 2n === 1n), ...below.filter((id) => (id / 2n) % 2n === 0n)];
+	try {
+		for (const id of ids) adapter.admitRequest(id);
+		for (const id of [0n, 2n, 1024n, top - 2n, top]) {
+			expect(() => adapter.admitRequest(id)).toThrow("request id was already spent");
+		}
+	} finally {
+		peer.close();
+		adapter.close();
+	}
+});
+
+// Allocation precedes an asynchronous encode, so a shorter later request can finish first.
+test("drafts 14 and 15 send concurrent requests in request id order", async () => {
+	for (const [version, alpn] of [
+		[Version.DRAFT_14, ALPN.DRAFT_14],
+		[Version.DRAFT_15, ALPN.DRAFT_15],
+	] as const) {
+		const pair = createMockTransportPair(alpn);
+		const control = await Stream.open(pair.server, { version });
+		const sender = new ControlStreamAdapter(pair.server, control, version, 100n, true);
+		void sender.run().catch(() => undefined);
+		const peer = await Stream.accept(pair.client, version);
+		if (!peer) throw new Error("no control stream");
+		const receiver = new ControlStreamAdapter(pair.client, peer, version, 100n, false, 8n);
+		void receiver.run().catch(() => undefined);
+		try {
+			const request = async (namespace: Path.Valid) => {
+				const requestId = await sender.nextRequestId();
+				if (requestId === undefined) throw new Error("no request id");
+				const stream = sender.openBi();
+				await stream.writer.u53(SubscribeNamespaceLegacy.id);
+				await new SubscribeNamespaceLegacy({ namespace, requestId }).encode(stream.writer, version);
+			};
+			await Promise.all([request(Path.from("a/b/c/d/e/f/g/h")), request(Path.from("a"))]);
+
+			const received: bigint[] = [];
+			for (let i = 0; i < 2; i++) {
+				const stream = await receiver.acceptBi();
+				if (!stream) throw new Error("the receiver refused a request");
+				expect(await stream.reader.u53()).toBe(SubscribeNamespaceLegacy.id);
+				received.push((await SubscribeNamespaceLegacy.decode(stream.reader, version)).requestId);
+			}
+			expect(received).toEqual([0n, 2n]);
+		} finally {
+			sender.close();
+			receiver.close();
+		}
 	}
 });
 

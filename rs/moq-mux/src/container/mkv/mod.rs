@@ -19,6 +19,10 @@ mod import_test;
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// A subtitle cue cannot be represented with valid text and timing.
+	#[error("invalid subtitle: {0}")]
+	InvalidSubtitle(&'static str),
+
 	#[error("unsupported EBML DocType: {0}")]
 	UnsupportedDocType(String),
 

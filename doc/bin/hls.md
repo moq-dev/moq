@@ -31,14 +31,18 @@ transcoded, so the player must support the publisher's codecs.
 What that means for you:
 
 - **Idle renditions cost nothing**, and a segment is servable for as long as the relay's [cache](/bin/relay/config#cache) retains it. Keep `--window` (the playlist length, default 16 s) within that retention.
-- **Joining costs the window, not the broadcast's age.** The exporter reads only what the timeline restates on join, and the window lists at most 256 segments.
+- **Live joins cost the window.** The default exporter reads the timeline checkpoint and lists at most 256 segments. `export::Config::history` reads a durable recording's retained timeline groups from the beginning instead of joining only the checkpoint tail.
 - **Publish timelines.** A broadcast whose catalog advertises no timelines is skipped.
 - **Align GOPs across video renditions.** Segment boundaries come from one reference rendition. Other video renditions snap to their nearest keyframe, and a segment with none nearby becomes an `EXT-X-GAP`.
 - **Segment URLs are stable.** Every edge and every reload derive the same URLs, so a CDN in front of export caches them.
 
 A [`moq-archive`](https://docs.rs/moq-archive) recording replayed through its
 `Reader` is served the same way, with no second stored copy, and lists the
-same window as a live broadcast.
+same window as a live broadcast by default. `export::Config::history` includes
+earlier timeline groups even after replay-cache eviction: the exporter FETCHes
+missing groups from the Reader's stored timeline objects before following live
+edits. Missing or unreadable stored history ends that export with an error,
+and so does a recording whose start was pruned by retention.
 
 `--listen-tls-cert`/`--listen-tls-key` or `--listen-tls-generate` serve HTTPS,
 and `--cors-origin` opens it to browsers. See `moq export hls --help`.
