@@ -117,3 +117,4 @@ and bench readiness. Refusal reasons folded the same day into
 - [Sibling broadcasts on one clock](/quest/m2/sibling-broadcasts.md) - one broadcast per source (webcam, screen, each camera, each language) under a shared prefix, sharing one clock, documented and tested in Rust and JS
 - [Catalog broadcast references in MSF and GStreamer](/quest/m2/catalog-broadcast-reference.md) - MSF conversion and the GStreamer source honor a rendition's `broadcast` or refuse it, instead of resolving it in the catalog's own broadcast
 - [Binding track resolver](/quest/m2/binding-track-helper.md) - binding apps subscribe to a rendition without inlining `track` or the key
+- [Exporters follow a rendition to a new track](/quest/m2/export-rendition-rebind.md) - the fMP4, TS, MKV and FLV exporters rebuild a rendition whose resolved `track` or `broadcast` changes under the same ID
