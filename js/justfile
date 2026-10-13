@@ -51,7 +51,7 @@ test:
     bun test common/declarations.test.ts common/deps.test.ts common/worklet.test.ts
     bun run --filter='*' --elide-lines=0 test
 
-# Run one net benchmark: broadcasts, forward, reader, frames, track, varint, lite-varint, or request-ids.
+# Run one net benchmark: broadcasts, forward, reader, frames, track, interests, varint, lite-varint, or request-ids.
 bench name:
     bun install --frozen-lockfile
     bun net/bench/{{ name }}.ts
