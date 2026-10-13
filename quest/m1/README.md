@@ -76,6 +76,7 @@ above them, since the epoch anchor requires it.
 - [Live largest location](/quest/m1/largest.md) - `largest()` replaces `latest()` in Rust and JS as a live stream of the track's largest location, known before the first group from the publisher's report
 - [Untimed lite-07](/quest/m1/lite-untimed.md) - lite-07 carries an untimed track in both languages; lite-05/06 write send time
 - [Live TS clock validation](/quest/m1/ts-live-clock.md) - resolve the local PCR-rate failure with reproducible timing evidence and CI controls
+- [Slow source fails](/quest/m1/slow-source.md) - an export whose source runs further off real time than the output may follow fails promptly naming the rate, instead of dropping frames for hours
 - [Same-instance TS resume](/quest/m1/ts-same-instance-resume.md) - prove valid continuation and fix the unexpected final exporter failure without weakening identity
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
 - [Plan: a public model](/quest/m1/model-public-surface.md) - every crate-private model item is made public or unnecessary, so a custom publisher or subscriber builds from the public model alone
