@@ -2,9 +2,9 @@
 
 ## Goal
 
-The Rust model's `Subscription` carries a list of group ranges and an order,
-aggregated across subscribers. A track serves the union from one cursor
-without duplicating a group, in the requested order, and reports every
+The Rust model's `Subscription` carries a list of group ranges, aggregated
+across subscribers. A track serves the union from one cursor without
+duplicating a group, in the subscription's order, and reports every
 sequence it won't deliver. A publisher's `track::Dynamic` receives range
 requests for misses instead of one request per group.
 
@@ -16,8 +16,8 @@ Guidance:
 - Ranges have `Absolute` or `Relative` ends (see the line). Aggregating
   subscribers onto one upstream request is the union of their ranges; a
   relative end resolves against the track's latest group when the publisher
-  serves it. Decide and document the order rule when orders conflict (for
-  example, desc wins).
+  serves it. [Subscription order](/quest/m1/subscribe-ranges/order.md) owns
+  `order` and its merge rule (descending wins).
 - This absorbs the deleted lite-07 Live flag quest, so the model mirrors the
   wire with no `live` field, and its tests move here, on mock time and both
   in-process and through a relay: a subscriber from `Absolute(4)` merged with
@@ -48,4 +48,5 @@ Guidance:
 
 ## Related
 
+- [Subscription order](/quest/m1/subscribe-ranges/order.md) - `Subscription` carries `order`, which ranges are served in
 - [FETCH max-delay](/quest/m1/fetch-max-delay.md) - historical request budgets and per-caller enforcement
