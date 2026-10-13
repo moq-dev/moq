@@ -39,6 +39,13 @@ Decided 2026-10-13 (maintainer):
   `catalog.clock = clock.wall()`.
 - Fail loud where a wall is actually needed: `reading(wall)`, and an
   importer placing a source wall on a wall-less clock, return an error.
+- Clock identity can't be the wall mapping. `Listing::stamp`
+  (`rs/moq-mux/src/catalog/data.rs`) detects an importer re-anchoring the
+  clock by comparing `wall()`, which is `None` for both clocks on an unset
+  host, so it would measure jitter, delay, and bitrate across unrelated
+  timelines. Compare whole clocks (monotonic anchor, reading, and wall).
+  Cover a withheld catalog plus a data producer and an importer in the test.
+  Found in review on #5418.
 - Mirror in `pageClock()`: omit `clock` instead of throwing.
 - Interplay with [catalog clock adopt](/quest/m1/catalog-clock-adopt.md),
   which assumes `wall()` is always present: whichever lands second
