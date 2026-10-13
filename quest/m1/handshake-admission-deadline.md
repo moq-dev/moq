@@ -45,6 +45,12 @@ Gaps found in this plan's review, to settle with the maintainer at start:
   inherits the caller's deadline. `attach` (in-band AUTH, which shares the
   `connect` path), `revalidate` and `end` run after the handshake and keep
   theirs, like grant renewal, so a stalled server cannot pile up requests.
+- `moq_tokio::server::Request` keeps its handshake deadline private and
+  applies it only in `ok()`, after admission, so `connection.rs` cannot race
+  admission against it today. Recommendation: a public `Request` method that
+  bounds a future by what remains of the deadline, keeping the deadline itself
+  private, mirrored on the io_uring request if it has the same shape. Do not
+  start a fresh timeout at admission; the deadline runs from the first packet.
 
 Race inside the task that owns the admission, or cancel it, so an expired
 deadline does not leave admission work running detached.
@@ -54,9 +60,13 @@ auth server: an admission that never answers closes at the deadline, one
 answered just inside it (past 10 s for the HTTP server) is admitted, and
 `"0"` waits. An `attach` to a stalled server is still refused at its bound.
 Update `doc/bin/relay/config.md`, which says the deadline covers
-"transport through MoQ SETUP", and note the behavior change for slow auth
+"transport through MoQ SETUP", and `doc/bin/relay/auth.md`, which promises
+that an embedded admission left unanswered for ten seconds is refused; the
+embedder now owns that deadline. Note the behavior change for slow auth
 servers in the relay changelog.
 
-Public API: no signature changes; `Auth::admit`, `Cluster::admit` and
-`moq_auth::Client::connect` no longer time out on their own. Config:
+Public API: a new `moq_tokio::server::Request` method to bound admission by
+the handshake deadline. `Auth::admit`, `Cluster::admit` and
+`moq_auth::Client::connect` keep their signatures but no longer time out on
+their own. Config:
 `listen.timeout` now includes admission. Wire: none.
