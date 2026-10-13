@@ -360,13 +360,14 @@ export class Consumer {
 			this.#groups.shift();
 			this.#active = this.#groups[0]?.consumer.sequence;
 
-			const nextStart = this.#groups[0]?.frames.at(0)?.timestamp ?? this.#groups[0]?.end;
+			const next = this.#groups[0];
+			const nextStart = next?.frames.at(0)?.timestamp ?? next?.end;
 			const marker = !first.empty && !first.media;
-			// Buffered frames are thrown away, and `first.end` counts them, so contiguity alone would hide them.
-			const discarded = first.frames.length > 0;
-			if (marker || discarded || !ptsContiguous(first.end ?? this.#presentedEnd, nextStart)) {
-				this.#lost = true;
-			}
+			// Unread media is thrown away, and `first.end` counts it, so contiguity alone would hide it.
+			// A trailing endpoint carries no media, so leaving it unread discards nothing.
+			const discarded = first.frames.some((frame) => this.#format.end?.(frame) === undefined);
+			const continued = continues(first, next) || ptsContiguous(first.end ?? this.#presentedEnd, nextStart);
+			if (marker || discarded || !continued) this.#lost = true;
 			first.consumer.close();
 			first.frames.length = 0;
 			skipped++;

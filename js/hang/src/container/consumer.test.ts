@@ -965,6 +965,53 @@ test("Consumer accepts open-GOP leading pictures above the previous group", asyn
 	consumer.close();
 });
 
+// A delivered group still awaiting its done result holds no unread media, so retiring it for
+// the max delay loses nothing.
+test("Consumer reads no gap when retiring a fully delivered group", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(replay(track), { format: new LegacyFormat("audio"), maxDelay: 150 as Time.Milli });
+
+	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro]);
+	await settle();
+	expect(await consumer.next()).toEqual({ kind: "gap" });
+	expect(frameOf(await consumer.next()).timestamp).toBe(0 as Time.Micro);
+
+	writeGroupWithLegacyFrames(track, 1, [100_000 as Time.Micro]);
+	writeGroupWithLegacyFrames(track, 2, [200_000 as Time.Micro]);
+	await settle();
+
+	// Read directly: a gap here would fail the frame check.
+	expect(frameOf(await consumer.next()).timestamp).toBe(100_000 as Time.Micro);
+
+	consumer.close();
+});
+
+// An unread trailing endpoint carries no media, so retiring its group loses nothing.
+test("Consumer reads no gap when retiring a group holding only its endpoint", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(replay(track), { format: new LegacyFormat("video"), maxDelay: 150 as Time.Milli });
+
+	const group = new Group.Producer(0);
+	group.writeFrame({ payload: encodeLegacy(0 as Time.Micro), timestamp: Time.Timestamp.now() });
+	group.writeFrame({
+		payload: encodeLegacyFrame(33_000 as Time.Micro, new Uint8Array()),
+		timestamp: Time.Timestamp.now(),
+	});
+	group.close();
+	track.writeGroup(group);
+	await settle();
+	expect(await consumer.next()).toEqual({ kind: "gap" });
+	expect(frameOf(await consumer.next()).timestamp).toBe(0 as Time.Micro);
+
+	writeGroupWithLegacyFrames(track, 1, [100_000 as Time.Micro]);
+	writeGroupWithLegacyFrames(track, 2, [200_000 as Time.Micro]);
+	await settle();
+
+	expect(frameOf(await consumer.next()).timestamp).toBe(100_000 as Time.Micro);
+
+	consumer.close();
+});
+
 // --- Buffered signal ---
 
 test("Consumer buffered signal updates as frames arrive", async () => {
