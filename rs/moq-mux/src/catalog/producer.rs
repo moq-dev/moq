@@ -1469,10 +1469,10 @@ mod test {
 		let track = catalog.outputs.hang.consume();
 
 		let result = catalog.mutate(|catalog| {
-			catalog
-				.video
-				.renditions
-				.insert("main".to_string(), hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8));
+			catalog.video.renditions.insert(
+				"main".to_string(),
+				hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8),
+			);
 			catalog.audio.renditions.insert(
 				"main".to_string(),
 				hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2),

@@ -228,7 +228,10 @@ impl Tracks {
 		use hang::catalog::Reference;
 
 		// Recorded by track name, which is what the archive's timelines are keyed by.
-		fn entry<'a, C: Reference>((id, config): (&'a String, &'a C), media: bool) -> (&'a str, Option<&'a moq_net::path::RelativeOwned>, bool) {
+		fn entry<'a, C: Reference>(
+			(id, config): (&'a String, &'a C),
+			media: bool,
+		) -> (&'a str, Option<&'a moq_net::path::RelativeOwned>, bool) {
 			(config.track_name(id), config.broadcast(), media)
 		}
 		let video = catalog.video.renditions.iter().map(|e| entry(e, true));

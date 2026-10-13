@@ -826,8 +826,8 @@ fn reconcile(
 	// skipped rather than failing the whole run, so one bad rendition can't tear down the
 	// others we're already serving.
 	let mut desired: HashMap<String, Desired> = HashMap::new();
-	let mut insert = |name: &String, kind, caps: Result<gst::Caps>, container: &hang::catalog::Container, track: &str| {
-		match caps {
+	let mut insert =
+		|name: &String, kind, caps: Result<gst::Caps>, container: &hang::catalog::Container, track: &str| match caps {
 			Ok(caps) => {
 				let shape = Shape {
 					caps,
@@ -837,8 +837,7 @@ fn reconcile(
 				desired.insert(name.clone(), Desired { kind, shape });
 			}
 			Err(err) => gst::warning!(CAT, "ignoring {kind:?} rendition {name}: {err:?}"),
-		}
-	};
+		};
 	for (name, config) in catalog.video.enabled() {
 		let track = hang::catalog::Reference::track_name(config, name);
 		insert(name, TrackKind::Video, video_caps(config), &config.container, track);

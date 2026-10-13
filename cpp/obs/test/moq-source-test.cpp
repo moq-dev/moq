@@ -663,7 +663,7 @@ int main()
 			rekeyed.video.insert(std::move(entry));
 			moq_source_subscribe_video(ctx, conn, rekeyed);
 			CHECK(!conn->pending_video);
-			video.coded =moq::Dimensions{(video.coded ? video.coded->width : 0) + 16, 16};
+			video.coded = moq::Dimensions{(video.coded ? video.coded->width : 0) + 16, 16};
 			audio.sample_rate += 1;
 			moq_source_subscribe_video(ctx, conn, *snapshot);
 			moq_source_subscribe_audio(ctx, conn, *snapshot);
