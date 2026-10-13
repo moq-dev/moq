@@ -13,10 +13,13 @@ them and the relay. Its policy knobs mirror `@moq/p2p`.
 (`--listen`); shape the flag so the value carries those prerequisites rather
 than adding startup checks. `--p2p-ice-server`,
 `--p2p-max`, `--p2p-prefix`, and `--p2p-meta` carry the same knobs the JS
-`Peers` takes; `select` is the CLI's built-in default of dialing everyone.
+`Peers` takes. Decided 2026-10-13: the operator explicitly selects peers;
+there is no built-in dial-all default. Provide an explicit selection/configuration
+surface and per-connection priority/cost mirroring the application API; settle
+its concrete CLI shape before coding and update all invocations against --help.
 
 The roster entry mirrors the `info.json` schema from
-[signaling](/quest/m3/p2p/signal.md): the listener's LAN addresses as
+[signaling](/quest/m1/p2p/signal.md): the listener's LAN addresses as
 WebTransport URLs, ordered the way `mdns::Peer::urls` orders them, with the
 listener's certificate fingerprint. Use signaling's ordered-list shape and
 dialing order, confirmed in the quest audit, so multi-interface listeners
@@ -30,12 +33,13 @@ mirrored in Rust.
 Every accepted session attaches to the shared origin with `with_publisher`
 and `with_subscriber`, as the LAN mesh does, so the node is a hop: it
 subscribes upstream once and serves each peer from the same origin. Native
-pairs where both advertise iroh use the existing iroh client, lower id
-dialing, and skip ICE entirely.
+pairs selected by the operator where both advertise iroh use the existing
+iroh client, with deterministic simultaneous-dial resolution, and skip ICE.
+Discovery alone does not initiate a connection.
 
 Docs: a "P2P" section in `doc/bin/cli.md` beside the LAN cluster one.
 
 ## Required
 
-- [Native data channel transport](/quest/m3/p2p/webrtc.md)
-- [Signaling and policy](/quest/m3/p2p/signal.md) - the roster and offer schema this mirrors
+- [Native data channel transport](/quest/m1/p2p/webrtc.md)
+- [Signaling and policy](/quest/m1/p2p/signal.md) - the roster and offer schema this mirrors

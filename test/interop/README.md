@@ -187,13 +187,15 @@ The relay is anonymous here, since released binaries may predate AUTH; the
 default matrix covers tokens and grants.
 Current Rust media publishers feed released Rust and JS readers, then released
 publishers feed current readers, through both relay sources. Rust exports must
-decode to a video frame through ffmpeg. The existing JS subscriber
-reconstructs the catalog and decodes the container.
+decode to a video frame through ffmpeg. The JS reader is
+`compat/client.ts`, not the interop subscriber, whose API follows the
+checkout. One copy runs against each package set, using only API both have,
+and it reconstructs the catalog and decodes the container.
 
 Each `moq-net` library states whether a draft has FETCH (lite-05 onward
 today). A draft without it in both is logged and its FETCH lanes skipped; one
 the release supports and the checkout dropped fails. Both Rust versions FETCH the group the
-publisher's own JS subscriber observed and compare every frame's exact
+publisher's own compat client observed and compare every frame's exact
 payload. JS publishers write one group after that subscriber's demand, and the
 opposite-source Rust CLI FETCHes it by the same observed ID.
 

@@ -544,7 +544,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 		t.Fatalf("audio = %+v, want opus/48000/2", audio)
 	}
 
-	mediaConsumer, err := moqmedia.NewContainerConsumer(ctx, bc, moqmedia.ContainerConfig{Name: trackName, Container: audio.Container, Subscription: nil})
+	mediaConsumer, err := moqmedia.NewTrackConsumer(ctx, bc, moqmedia.TrackConfig{Name: trackName, Container: audio.Container, Subscription: nil})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -564,6 +564,32 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	}
 	if string(frame.Payload) != string(payload) || uint64(frame.Timestamp.Microseconds()) != 1_000_000 {
 		t.Fatalf("frame = %+v, want payload=%q ts=1000000", frame, payload)
+	}
+
+	// The same group, received raw in arrival order and decoded with the container.
+	track, err := bc.SubscribeTrack(ctx, trackName, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer track.Cancel()
+	group, err := track.RecvGroup(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if group == nil {
+		t.Fatal("expected a group")
+	}
+	decoded, err := moqmedia.NewGroupConsumer(group, audio.Container)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer decoded.Cancel()
+	frame, err = decoded.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame == nil || string(frame.Payload) != string(payload) || uint64(frame.Timestamp.Microseconds()) != 1_000_000 {
+		t.Fatalf("decoded frame = %+v, want payload=%q ts=1000000", frame, payload)
 	}
 }
 
@@ -800,12 +826,12 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	}
 
 	type subscribeResult struct {
-		media *moqmedia.ContainerConsumer
+		media *moqmedia.TrackConsumer
 		err   error
 	}
 	subscribe := make(chan subscribeResult, 1)
 	go func() {
-		media, err := moqmedia.NewContainerConsumer(ctx, consumer, moqmedia.ContainerConfig{Name: "requested-audio", Container: moqmedia.LegacyContainer(), Subscription: nil})
+		media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Name: "requested-audio", Container: moqmedia.LegacyContainer(), Subscription: nil})
 		subscribe <- subscribeResult{media: media, err: err}
 	}()
 
@@ -837,7 +863,7 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 		t.Fatalf("request name after accept error = %v, want ErrClosed", err)
 	}
 
-	var mediaConsumer *moqmedia.ContainerConsumer
+	var mediaConsumer *moqmedia.TrackConsumer
 	select {
 	case res := <-subscribe:
 		if res.err != nil {

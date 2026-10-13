@@ -4,11 +4,12 @@
 
 Opted-in moq-lite clients serve each other directly, over WebRTC data channels
 between any two peers and over iroh between native ones, while the relay stays
-the rendezvous and the path of last resort. A client subscribes through the
+the rendezvous and an available fallback route. A client subscribes through the
 relay at once, negotiates peers in the background, and a subscription
-migrates to a direct peer when that peer is the broadcast's origin (or a
-routing node such as `moq-cli --p2p`) and back to the relay when the peer
-goes away. A browser never carries another peer's traffic. Nothing waits on ICE and nothing breaks when it
+migrates when an application-selected direct connection wins the shared
+priority/cost ordering, and returns to the best eligible route when it goes
+away. A peer serves its own publications or is an authorized native routing
+node such as `moq-cli --p2p`. A browser never carries another peer's traffic. Nothing waits on ICE and nothing breaks when it
 fails: a symmetric NAT, a denied local-network prompt, or a filtered multicast
 segment leaves the client exactly where it started.
 
@@ -29,7 +30,10 @@ under "One channel, qmux, ordered".
 
 ## Plan
 
-Deferred in the 2026-09-30 audit and moved to m3 in the 2026-10-05 audit: no named consumer.
+Promoted to m1 in the 2026-10-13 clustering interview: CDN-connected clients
+using application-selected shorter or preferred P2P paths are a required
+consumer. P2P remains an independently shippable milestone after the shared
+routing contracts; no second routing implementation.
 
 ### The relay is the rendezvous and the fallback
 
@@ -40,10 +44,13 @@ trust is its token scope. A peer that may publish
 under the prefix is as trusted as any publisher the token admits, so this
 line needs no E2EE.
 
-The relay route never goes away. Migration is route ranking in the origin, so
-a peer that dies, drains, or was never reachable leaves the relay route as
-the best remaining one and the subscription moves back. That is the whole
-fallback story; nothing TURN-shaped is built.
+The CDN session and discovery remain connected. Release unused CDN media
+demand after a same-epoch handoff, except bounded overlap while validating a
+replacement. If a peer dies, drains, or was never reachable, the shared
+origin selects the best remaining eligible route. This is ordinary transport
+fallback; nothing TURN-shaped is built. Still-open delivery stalls
+are handled by [Route health](/quest/m2/route-health/README.md), only with a
+matching explicit epoch. Epochless source changes restart instead of resume.
 
 A relay that also answers STUN on its QUIC port is the lowest-RTT STUN
 server a client can name, but this line takes ICE servers from the
@@ -54,7 +61,8 @@ once the harness shows the relay's STUN beats the application's servers.
 
 ### Policy is the application's
 
-`Peers` takes the shared origin plus:
+`Peers` takes the shared origin, a reconnect-safe relay auth handle for
+[peer grants](/quest/m1/p2p/peer-grant.md), plus:
 
 - `enabled`: an explicit on/off signal, off by default;
 - `prefix`: the reserved prefix, `.p2p/` under the session root by default;
@@ -65,8 +73,13 @@ once the harness shows the relay's STUN beats the application's servers.
   established are left alone when the roster grows past `max`, which is what
   keeps the boundary from flapping;
 - `meta`: an opaque JSON value published in this peer's roster entry;
-- `select(peers)`: called on every roster change with each peer's id and
-  `meta`, returns the peers to dial. The default dials everyone.
+- application-owned peer selection: discovery exposes candidates and only
+  explicitly selected peers are dialed; incoming connections need application
+  admission too. No default dial-all or automatic
+  demand-selected dialing. Prefer an explicit set/handle over a policy callback;
+  settle the concrete public shape with its consumer before implementation.
+- application-owned per-connection priority, whether CDN or P2P, followed by
+  configured additive cost. Discovery and transport do not decide route rank.
 
 Geo and AS hints are the application's to source (a peer does not know its
 own AS); downstream exposes a whoami endpoint for exactly this.
@@ -83,7 +96,7 @@ SCTP retransmits it. Decided 2026-10-08: the channel is always ordered, and
 unordered qmux was dropped. Receiver reassembly would exist only in the Rust
 qmux, so it could cover native pairs alone, and a native pair already
 prefers iroh, whose QUIC streams are independent. The
-[harness](/quest/m3/p2p/harness.md) reports the stall so the cost stays
+[harness](/quest/m1/p2p/harness.md) reports the stall so the cost stays
 visible.
 
 Channel-per-stream is not planned. moq opens a stream per group, so it churns
@@ -95,15 +108,14 @@ channel, and has no reset code without a side channel.
 Routing is the [cluster routing line](/quest/m1/cluster-routing/README.md)'s:
 every session speaks per-node ROUTEs and path-less ANNOUNCEs, so a broadcast's
 announce names its origin node, the roster maps that node to a peer, and the
-route metric over the node's own link costs picks the direct link or the
-relay. The roster id is the node id, held once per origin rather than once
+application priority followed by total cost picks the direct link or relay. The roster id is the node id, held once per origin rather than once
 per session.
 
-Decided 2026-10-01: a direct link wins only when the peer is the origin or a
-routing node; a watching tab never re-serves what it receives. Offloading a
-room of watchers is a customer relay's job (`moq-cli --p2p` is the small
-one), which keeps warm and cold costs and cache-aware routing out of the
-protocol. [Direct peers win](/quest/m3/p2p/cost-scopes.md) sets the cost
+Decided 2026-10-13: priority then total cost selects among authorized routes;
+a direct connection does not always win. A watching tab never re-serves what
+it receives. Offloading a room of watchers is a local relay's job
+(`moq-cli --p2p` is the small one), which keeps warm and cold costs and cache-aware routing out of the
+protocol. [Peer route policy](/quest/m1/p2p/cost-scopes.md) sets the cost
 knobs and defaults.
 
 Target the public `@moq/net` interface regardless of whether its
@@ -124,15 +136,16 @@ Backend choice does not change the policy that watching tabs never re-serve.
 
 ## Required
 
-- [Data channel transport](/quest/m3/p2p/transport.md) - `@moq/p2p` speaks qmux over one ordered RTCDataChannel behind the WebTransport shape `@moq/net` consumes
-- [Peer grants](/quest/m3/p2p/peer-grant.md) - the relay issues a node-bound, asymmetrically signed grant a browser can verify; HS256 keys issue none
-- [Signaling and policy](/quest/m3/p2p/signal.md) - opted-in peers find each other under the prefix, the application picks who to dial, and the roster-size gate decides whether STUN is used
-- [Native data channel transport](/quest/m3/p2p/webrtc.md) - `moq-tokio` holds a moq-net session with a browser over str0m with a full ICE agent
-- [moq-cli joins](/quest/m3/p2p/cli.md) - `--p2p` publishes a roster entry with its iroh endpoint, dials iroh between native peers, and serves browsers as a transit hop
-- [Direct peers win](/quest/m3/p2p/cost-scopes.md) - a direct link wins only when the peer is the origin or a routing node, by link costs the node sets itself
-- [Watch opts in](/quest/m3/p2p/watch.md) - one attribute turns it on in the demo and the watcher migrates to the cheapest route
-- [Harness](/quest/m3/p2p/harness.md) - the Playwright harness and the numbers behind every mapping decision
+- [Data channel transport](/quest/m1/p2p/transport.md) - `@moq/p2p` speaks qmux over one ordered RTCDataChannel behind the WebTransport shape `@moq/net` consumes
+- [Peer grants](/quest/m1/p2p/peer-grant.md) - the relay issues a node-bound, asymmetrically signed grant a browser can verify; HS256 keys issue none
+- [Signaling and policy](/quest/m1/p2p/signal.md) - opted-in peers find each other under the prefix, the application picks who to dial, and the roster-size gate decides whether STUN is used
+- [Native data channel transport](/quest/m1/p2p/webrtc.md) - `moq-tokio` holds a moq-net session with a browser over str0m with a full ICE agent
+- [moq-cli joins](/quest/m1/p2p/cli.md) - `--p2p` publishes a roster entry with its iroh endpoint, dials iroh between native peers, and serves browsers as a transit hop
+- [Peer route policy](/quest/m1/p2p/cost-scopes.md) - application priorities and total cost choose eligible routes, with epoch-aware handover
+- [Watch opts in](/quest/m1/p2p/watch.md) - one attribute turns it on in the demo and the watcher migrates to the best eligible route
+- [Harness](/quest/m1/p2p/harness.md) - the Playwright harness and the numbers behind every mapping decision
 
 ## Related
 
+- [Route health](/quest/m2/route-health/README.md) - epoch-only active/passive delivery recovery on selected connections
 - [E2EE](/quest/m2/e2ee/README.md) - what a peer would need if the token scope stopped being the trust boundary

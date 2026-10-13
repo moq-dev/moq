@@ -39,6 +39,6 @@ candidate is offered and selected. Browser interop is the harness's job.
 
 ## Related
 
-- [Data channel transport](/quest/m3/p2p/transport.md) - the browser side of the same binding
-- [moq-cli joins](/quest/m3/p2p/cli.md) - the first consumer
-- [P2P](/quest/m3/p2p/README.md) - owns the relay-side public STUN responder this client could be pointed at, moved out of the one-port demux
+- [Data channel transport](/quest/m1/p2p/transport.md) - the browser side of the same binding
+- [moq-cli joins](/quest/m1/p2p/cli.md) - the first consumer
+- [P2P](/quest/m1/p2p/README.md) - owns the relay-side public STUN responder this client could be pointed at, moved out of the one-port demux

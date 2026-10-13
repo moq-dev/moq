@@ -413,11 +413,12 @@ jobs:
         env:
           # Somewhere upload-artifact can reach; the harness default is under $TMPDIR.
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          # A passing run is kept too: budgets.json is measured from these nights.
+          MOQ_TEST_KEEP: 1
       # The run directory is the diagnosis: each process's log, the shaper's
-      # counters, the raw samples, and every row's summary. The harness keeps it
-      # on a failure without being asked.
-      - name: Keep the failing run
-        if: ${{ failure() }}
+      # counters, the raw samples, and every row's summary.
+      - name: Keep the run
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: audio-quality-run

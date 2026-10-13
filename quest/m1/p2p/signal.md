@@ -3,19 +3,25 @@
 ## Goal
 
 An opted-in browser discovers the other opted-in peers on its relay session,
-asks the application which to dial, and ends up holding an established
-`@moq/net` connection to each one ICE can reach, wired into the shared origin
+exposes candidates for the application to select, and ends up holding an established
+`@moq/net` connection to each selected peer ICE can reach, wired into the shared origin
 in both directions. The application supplies the ICE servers and the roster
 size above which new negotiations stop using them. No new relay behavior.
 
 ## Plan
 
-`Peers` in `@moq/p2p` takes the shared origin and the policy knobs from the
-[questline README](/quest/m3/p2p/README.md): `enabled`, `prefix`,
-`iceServers`, `max`, `meta`, `select`. Publishing into the origin reaches the
-relay and the origin's announce stream is the roster. Tests inject a peer
-connection factory so `bun test` covers pairing, the roster gate, and
-`select` with a fake.
+`Peers` in `@moq/p2p` takes the shared origin, a reconnect-safe handle to the
+relay connection's auth, and the policy knobs from the
+[questline README](/quest/m1/p2p/README.md): `enabled`, `prefix`,
+`iceServers`, `max`, `meta`, plus application-owned selection and per-connection
+priority/cost. Decided 2026-10-13: only explicitly selected peers are dialed;
+there is no default dial-all. Prefer a selected set/handle to a callback,
+settling the public shape with its consumer. The origin carries no auth state
+and the pooled `Connection` hides `Established.auth`, yet peer grants need
+AUTH_CNF written and AUTH_KEYS/AUTH_PEER received across relay reconnects, so
+define that handle before fixing `Peers`. Publishing into the origin reaches
+the relay and its announce stream is the roster. Tests inject transport
+factories and cover pairing, application selection, and the roster gate.
 
 Identity: the roster id is the origin's route-layer node id, the id its
 ROUTE_START carries ([routes](/quest/m1/cluster-routing/routes.md)), owned
@@ -24,18 +30,20 @@ hop list, so no hop chain carries it.
 
 Roster: each peer publishes `<prefix><id>` with an `info.json` snapshot track:
 the moq ALPNs it accepts, `webrtc: true`, the presenter public key that
-[peer grants](/quest/m3/p2p/peer-grant.md) bind, the application's `meta`,
+[peer grants](/quest/m1/p2p/peer-grant.md) bind, the application's `meta`,
 and for native peers an optional WebTransport entry with an ordered list of
 URLs and the listener's certificate fingerprint, plus an `iroh` endpoint id.
 Decided in the quest audit: use a list so a native peer can advertise its
 reachable interfaces without choosing one for every browser. This quest
-owns the schema shared with [moq-cli](/quest/m3/p2p/cli.md).
+owns the schema shared with [moq-cli](/quest/m1/p2p/cli.md).
 
-Pairing is sparse: broadcasts exist only for pairs some `select` chose, so
-the cost is the dialed pairs, not the square of the roster. Whoever selects a
-pair dials it; `select` decides initiative, not admission, and an answerer
-accepts any offer from a roster peer because the token scope already decided
-who may be there. When both sides select the same pair and dial at once, the
+Pairing follows explicit selection: pair broadcasts exist only for selected
+pairs. The application may still choose a full mesh, so measure that cost
+rather than claiming sparsity from the API alone. Incoming offers also require
+application admission before a connection is attached to the shared origin;
+roster membership and token scope authorize access but do not select peers
+on the application's behalf. An application may explicitly accept an offer
+without having initiated a dial. When both sides select the same pair and dial at once, the
 higher id abandons its own offer on seeing the lower id's, perfect
 negotiation with the higher id polite. The dialer publishes
 `<prefix><target>/<self>` with a `signal` stream track carrying the offer and
@@ -46,7 +54,8 @@ prefix.
 The gate: a peer connection is built with `iceServers` when the roster holds
 `max` peers or fewer, and with an empty list otherwise. Host and mDNS
 candidates are always gathered, so LAN pairs form at any roster size.
-Established pairs are never closed by the gate.
+Established pairs are never closed by the gate. This is a STUN policy, not a
+connection budget; test roster churn and pending negotiations separately.
 
 Native entries: when `info.webtransport` is present the dialer tries its
 URLs in advertised order, using `connect` with the listener's fingerprint
@@ -55,7 +64,10 @@ connects. Mirror this order in the CLI and test that a later address is tried
 after an earlier one fails. Chrome 147 may prompt for local network access on that
 dial; a denial falls through the same way.
 
-Lifecycle: a retracted roster entry closes that peer's session. An ICE
+Lifecycle: application deselection or a retracted roster entry closes that
+peer's session and releases its routing and signaling demand. Test an
+unsolicited offer with no selected/admitted peers, explicit incoming admission,
+and deselection during negotiation and while serving. An ICE
 failure is terminal for the pair until either side re-announces; no retry
 loop. Each established connection goes through `connect` with the supplied
 transport on the dialing side and `accept` on the answering side, both with
@@ -72,9 +84,9 @@ Instead the relay issues each session a peer grant, a relay-signed statement
 of that session's path scopes bound to its node id, its presenter public key,
 and short-lived, which the peer presents in band with a proof of possession;
 the other side verifies the relay's signature, the node id and key against
-the roster, and AUTH_POP, then serves only the granted paths. Issuance,
+the roster, and a fresh session-bound AUTH_POP, then serves only the granted paths. Issuance,
 asymmetric keys, JWKS, PoP, and refresh live in
-[Peer grants](/quest/m3/p2p/peer-grant.md): HMAC keys cannot be given to
+[Peer grants](/quest/m1/p2p/peer-grant.md): HMAC keys cannot be given to
 browsers without also letting them forge grants, so an HS256-only relay
 issues nothing. A peer session with no verifiable grant serves nothing;
 there is no equal-scope shortcut.
@@ -82,5 +94,5 @@ there is no equal-scope shortcut.
 ## Required
 
 - [Routes](/quest/m1/cluster-routing/routes.md) - the ROUTE_START node id the roster keys on
-- [Data channel transport](/quest/m3/p2p/transport.md)
-- [Peer grants](/quest/m3/p2p/peer-grant.md) - the node-bound, asymmetrically signed credential a direct session presents; HS256 keys issue none
+- [Data channel transport](/quest/m1/p2p/transport.md)
+- [Peer grants](/quest/m1/p2p/peer-grant.md) - the node-bound, asymmetrically signed credential a direct session presents; HS256 keys issue none
