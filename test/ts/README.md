@@ -35,6 +35,7 @@ just test ts --pair             # two exporters of one broadcast, grade table an
 just test ts --open-gop         # open-GOP clip; its leading pictures must survive
 just test ts --hrd              # 1080p video filling a broadcast-sized 9 Mbit CPB
 just test ts --headroom         # the same with four audio PIDs, muxed above the video's Rx
+just test ts --leak             # 1080p video with no HRD, filling its level's 24 Mb/s leak
 just test ts --delay 1s         # pass the exporter's --delay
 ```
 
@@ -563,7 +564,7 @@ exporter re-emits SI on its own repetition cadence rather than the source's.
 ## CI
 
 `.github/workflows/interop.yml` runs `just test ts`, `just test ts --bitrate
-2000000`, `just test ts --hrd`, `just test ts --headroom`,
+2000000`, `just test ts --hrd`, `just test ts --leak`, `just test ts --headroom`,
 `just test ts --open-gop`, `just test ts-eit`, and `just test ts-tstd` after the
 interop matrix (nightly, on demand, and on PRs touching `test/ts/`).
 `ts-eit` is `eit-roundtrip.sh`: it builds the sparse-schedule and

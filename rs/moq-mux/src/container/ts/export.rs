@@ -366,8 +366,7 @@ impl Track {
 	/// a unit whose DTS sits on a PCR slot boundary, as a source's own 25 fps timestamps put
 	/// every fifth frame, arrives complete only after it decodes.
 	fn drain(&self) -> Duration {
-		let rate = self.buffer().map_or(Buffer::SYSTEM.rate, |buffer| buffer.rate);
-		Duration::from_nanos(TsPacket::SIZE as u64 * 8 * 1_000_000_000 / rate.max(1))
+		self.buffer().unwrap_or(Buffer::SYSTEM).drain()
 	}
 
 	/// Queue every held video frame whose DTS is settled, or all of them when `flush`.
@@ -468,16 +467,17 @@ impl Timing {
 	}
 
 	/// The receiver's buffers (H.222.0 2.14.3.1, 2.17.2): EB is the HRD's CPB, else the
-	/// level's, and packets go no faster than the slower of the transport buffer's Rx and the
-	/// leak from MB into EB, so neither MB nor TB fills.
+	/// level's; the transport buffer drains at Rx, scaled from the HRD's BitRate or else the
+	/// level's; and MB passes payload on into EB at the level's Rbx whatever the HRD declares.
 	fn buffer(&self) -> Option<Buffer> {
 		let level = self.level?;
-		let (rate, cpb) = match self.hrd {
-			Some(hrd) => (hrd.bit_rate.saturating_mul(level.factor) / 1_000, hrd.cpb_size),
-			None => (level.leak, level.cpb),
+		let (bit_rate, cpb) = match self.hrd {
+			Some(hrd) => (hrd.bit_rate, hrd.cpb_size),
+			None => (level.bit_rate, level.cpb),
 		};
 		Some(Buffer {
-			rate: rate.min(level.leak),
+			rate: bit_rate.saturating_mul(level.factor) / 1_000,
+			leak: Some(level.leak),
 			size: Some(usize::try_from(cpb / 8).unwrap_or(usize::MAX)),
 		})
 	}
@@ -2420,6 +2420,9 @@ fn at_edge(source: ExportSource, replay: bool) -> ExportSource {
 struct Level {
 	/// The leak from MB into EB, Rbx: CpbBrNalFactor * MaxBR.
 	leak: u64,
+	/// BitRate without an HRD, which `factor` scales to Rx: 1200 * MaxBR for H.264, the
+	/// least cpbBrNalFactor of any profile, and CpbBrVclFactor * MaxBR for H.265.
+	bit_rate: u64,
 	/// EB without an HRD: CpbBrNalFactor * MaxCPB.
 	cpb: u64,
 	/// Rx over an HRD's BitRate, in thousandths: 1.2 for H.264, CpbBrNalFactor /
@@ -2456,6 +2459,7 @@ fn video_level(config: &VideoConfig, name: &str) -> Level {
 			};
 			limits.map(|(max_br, max_cpb)| Level {
 				leak: 1_200 * max_br,
+				bit_rate: 1_200 * max_br,
 				cpb: 1_200 * max_cpb,
 				factor: 1_200,
 			})
@@ -2485,6 +2489,7 @@ fn video_level(config: &VideoConfig, name: &str) -> Level {
 			};
 			limits.map(|(max_br, max_cpb)| Level {
 				leak: 1_100 * max_br,
+				bit_rate: 1_000 * max_br,
 				cpb: 1_100 * max_cpb,
 				factor: 1_100,
 			})
@@ -2495,6 +2500,7 @@ fn video_level(config: &VideoConfig, name: &str) -> Level {
 		tracing::warn!(track = %name, codec = %config.codec, "no T-STD limits for this level; sending its units early");
 		Level {
 			leak: 1_200 * 64,
+			bit_rate: 1_200 * 64,
 			cpb: 1_200 * 175,
 			factor: 1_200,
 		}
@@ -2518,7 +2524,11 @@ fn audio_buffer(config: &AudioConfig, kind: &Kind) -> Buffer {
 		Kind::Eac3 => (2_000_000, 12_896),
 		_ => (2_000_000, 3_584),
 	};
-	Buffer { rate, size: Some(size) }
+	Buffer {
+		rate,
+		leak: None,
+		size: Some(size),
+	}
 }
 
 /// The DVB AC-3 descriptor's tag (ETSI EN 300 468 6.2.1), marking AC-3 as private data.
@@ -2542,10 +2552,12 @@ fn verbatim_buffer(kind: &Kind, descriptors: &[catalog::Descriptor]) -> Option<B
 	descriptors.iter().find_map(|descriptor| match descriptor.tag {
 		AC3_DESCRIPTOR => Some(Buffer {
 			rate: 2_000_000,
+			leak: None,
 			size: Some(5_696),
 		}),
 		TELETEXT_DESCRIPTOR => Some(Buffer {
 			rate: 6_750_000,
+			leak: None,
 			size: None,
 		}),
 		_ => None,
@@ -3112,6 +3124,7 @@ mod tests {
 			verbatim_buffer(&kind, &[descriptor(0x56)]),
 			Some(Buffer {
 				rate: 6_750_000,
+				leak: None,
 				size: None,
 			})
 		);

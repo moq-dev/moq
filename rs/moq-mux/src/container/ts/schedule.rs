@@ -63,9 +63,11 @@ fn rate_pcr(index: u128, rate: u64) -> u128 {
 /// A PID's buffers in a receiver, as the schedule respects them (ISO 13818-1 2.4.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Buffer {
-	/// How fast the receiver takes the PID's packets on, in bits per second: its transport
-	/// buffer's Rx, or for video the slower leak from MB into EB.
+	/// How fast the receiver's transport buffer drains whole packets, Rx, in bits per second.
 	pub rate: u64,
+	/// For video, how fast MB passes payload on into EB, Rbx, in bits per second (ISO
+	/// 13818-1 2.14.3.1). `None` where the transport buffer feeds the decoder buffer directly.
+	pub leak: Option<u64>,
 	/// The decoder buffer (EB for video, B for audio) in bytes, which a unit fills from its
 	/// first packet until it decodes. `None` bounds nothing, so the PID's units go out only
 	/// in the slot before their own.
@@ -76,15 +78,33 @@ impl Buffer {
 	/// The program tables' (ISO 13818-1 2.4.2.3, Rxsys).
 	pub const SYSTEM: Self = Self {
 		rate: 1_000_000,
+		leak: None,
 		size: None,
 	};
 
-	/// The packets one slot may carry on the PID: what its transport buffer passes on within
-	/// the slot, less one, but at least one. Even laid out evenly, the packets bunch a little
-	/// where one slot meets the next, and the slack drains that off.
-	fn per_slot(&self) -> usize {
-		let bits = u128::from(self.rate) * PCR_INTERVAL.as_nanos() / 1_000_000_000;
-		(bits / (TsPacket::SIZE as u128 * 8)).saturating_sub(1).max(1) as usize
+	/// How long the receiver takes to pass one packet on into the decoder buffer: through the
+	/// transport buffer at Rx and, for video, its payload through MB at Rbx, which overlap.
+	pub fn drain(&self) -> Duration {
+		let through = |bytes: usize, rate: u64| Duration::from_nanos(bytes as u64 * 8_000_000_000 / rate.max(1));
+		let transport = through(TsPacket::SIZE, self.rate);
+		self.leak
+			.map_or(transport, |leak| transport.max(through(PAYLOAD, leak)))
+	}
+
+	/// The media packets slot `index` may carry on the PID unpadded: what its transport buffer
+	/// passes on at Rx, less the slot's `clock` packet when it rides the PID, and for video no
+	/// more payload than MB passes on at Rbx. Both count from the start of the timeline, so
+	/// no slot rounds on its own. At least one, or a PID too slow for both the clock packet and
+	/// one of its own would never finish a unit.
+	fn per_slot(&self, index: u128, clock: bool) -> usize {
+		let through = |rate: u64, bytes: usize| {
+			let before =
+				|index: u128| index * u128::from(rate) * PCR_INTERVAL.as_nanos() / (bytes as u128 * 8_000_000_000);
+			before(index + 1) - before(index)
+		};
+		let packets = through(self.rate, TsPacket::SIZE).saturating_sub(u128::from(clock));
+		let packets = self.leak.map_or(packets, |leak| packets.min(through(leak, PAYLOAD)));
+		packets.max(1) as usize
 	}
 }
 
@@ -415,6 +435,8 @@ pub(super) struct Schedule {
 	decoding: VecDeque<(u16, u128, usize)>,
 	/// When each transport buffer's last admitted packet finishes leaving it.
 	transport: HashMap<u16, i128>,
+	/// When each video PID's MB finishes passing its last admitted payload on into EB.
+	mb: HashMap<u16, i128>,
 	/// Every source has ended, so a unit that misses its deadline is the tail going out late
 	/// rather than an output that cannot keep up.
 	ended: bool,
@@ -434,6 +456,7 @@ impl Schedule {
 			pmt: None,
 			decoding: VecDeque::new(),
 			transport: HashMap::new(),
+			mb: HashMap::new(),
 			ended: false,
 		}
 	}
@@ -533,6 +556,7 @@ impl Schedule {
 		self.units.clear();
 		self.decoding.clear();
 		self.transport.clear();
+		self.mb.clear();
 		self.next = None;
 		self.horizon = None;
 		self.last = None;
@@ -634,7 +658,7 @@ impl Schedule {
 			caps: self
 				.buffers
 				.iter()
-				.map(|(&pid, buffer)| (pid, buffer.per_slot()))
+				.map(|(&pid, buffer)| (pid, buffer.per_slot(index, self.clock == Some(pid))))
 				.collect(),
 			positions: None,
 		}))
@@ -735,9 +759,26 @@ impl Schedule {
 						continue;
 					}
 				}
+				// Video's payload goes on from MB into EB at Rbx as it leaves the transport
+				// buffer, its PES header discarded, so only payload counts against the leak.
+				// Holding MB to a transport buffer's worth, below any MB size, still carries the
+				// leak's whole rate across packet positions.
+				let leak = buffer.and_then(|buffer| buffer.leak).map(|leak| {
+					let from = self.mb.get(&pid).copied().unwrap_or(free).max(free);
+					let bits = elementary(packet).len() as u128 * 8 * 1_000_000_000;
+					let leaked = from + bits.div_ceil(u128::from(leak)) as i128;
+					(leaked, (512 * 8 * 1_000_000_000 / u128::from(leak)) as i128)
+				});
+				if let Some((leaked, capacity)) = leak
+					&& leaked - now > capacity
+				{
+					waiting.push(Reverse((leaked - capacity, lane)));
+					continue;
+				}
 				// No byte leaves the transport buffer before it has arrived: below Rx, the
 				// multiplex rate decides when the packet's last byte gets there.
-				let done = drained.max(time(position + 1));
+				let arrived = drained.max(time(position + 1));
+				let done = leak.map_or(arrived, |(leaked, _)| arrived.max(leaked));
 				let held = if pid == unit.pid && buffer.is_some_and(|buffer| buffer.size.is_some()) {
 					elementary(packet).len()
 				} else {
@@ -757,7 +798,10 @@ impl Schedule {
 						"MPEG-TS output missed a decode deadline on PID {pid} at {rate} b/s; raise the delay or the multiplex rate"
 					);
 				}
-				self.transport.insert(tb, done);
+				self.transport.insert(tb, arrived);
+				if let Some((leaked, _)) = leak {
+					self.mb.insert(pid, leaked);
+				}
 				out.positions.as_mut().unwrap().push(position);
 				out.packets.extend_from_slice(packet);
 				out.nulls -= 1;
@@ -836,14 +880,7 @@ impl Schedule {
 		let mut order: Vec<usize> = (0..self.units.len()).collect();
 		order.sort_by_key(|&i| self.units[i].due);
 		let mut take = vec![0; self.units.len()];
-		// The clock packet counts against its PID unless that would leave the PID's media no
-		// packet at all, which would never finish a unit however sparse its frames.
-		let mut carried: HashMap<u16, usize> = self
-			.clock
-			.filter(|pid| self.buffers.get(pid).is_some_and(|buffer| buffer.per_slot() > 1))
-			.map(|pid| (pid, 1))
-			.into_iter()
-			.collect();
+		let mut carried: HashMap<u16, usize> = HashMap::new();
 		let mut stopped: Vec<u16> = Vec::new();
 		for i in order {
 			let unit = &self.units[i];
@@ -858,7 +895,10 @@ impl Schedule {
 			if self.release(unit) <= index {
 				while n < unit.remaining() && budget > 0 {
 					let pid = unit.pid_at(unit.sent + n);
-					let cap = self.buffers.get(&pid).map_or(usize::MAX, Buffer::per_slot);
+					let cap = self
+						.buffers
+						.get(&pid)
+						.map_or(usize::MAX, |buffer| buffer.per_slot(index, self.clock == Some(pid)));
 					let count = carried.entry(pid).or_default();
 					if *count >= cap {
 						break;
@@ -922,6 +962,7 @@ mod tests {
 	/// A video-like buffer: far more than a slot passes on, and a large decoder buffer.
 	const VIDEO: Buffer = Buffer {
 		rate: 100_000_000,
+		leak: None,
 		size: Some(1_000_000),
 	};
 
@@ -1075,6 +1116,7 @@ mod tests {
 		// Room for ten packets.
 		let small = Buffer {
 			rate: 100_000_000,
+			leak: None,
 			size: Some(10 * PAYLOAD),
 		};
 		schedule.set_buffer(1, small);
@@ -1121,9 +1163,10 @@ mod tests {
 	fn a_pid_takes_what_its_transport_buffer_passes_on() {
 		let mut schedule = Schedule::new(Duration::from_millis(100));
 		schedule.set_rate(Some(RATE));
-		// 2 Mb/s: 33 packets a slot, less one.
+		// 2 Mb/s: 33.2 packets a slot.
 		let audio = Buffer {
 			rate: 2_000_000,
+			leak: None,
 			size: Some(100_000),
 		};
 		schedule.set_buffer(1, audio);
@@ -1139,9 +1182,10 @@ mod tests {
 	fn the_clock_packet_counts_against_its_pid() {
 		let mut schedule = Schedule::new(Duration::from_millis(100));
 		schedule.set_rate(Some(RATE));
-		// 2 Mb/s: 33 packets a slot, less one, the clock packet among them.
+		// 2 Mb/s: 33.2 packets a slot, the clock packet among them.
 		let audio = Buffer {
 			rate: 2_000_000,
+			leak: None,
 			size: Some(100_000),
 		};
 		schedule.set_buffer(1, audio);
@@ -1150,6 +1194,76 @@ mod tests {
 			schedule.push(1, timing(1_000 + at), unit(1, 4), false).unwrap();
 		}
 		assert_eq!(checked_transport(&mut schedule, 1), 80);
+	}
+
+	/// Video whose payload fills its level's leak keeps up: its transport buffer drains whole
+	/// packets at Rx, the clock packet among them, while MB passes only payload on at Rbx
+	/// (moq-dev/moq#5362). Charging whole packets, or the clock packet, to Rbx falls behind.
+	#[test]
+	fn video_keeps_up_with_its_full_leak() {
+		// Level 4.0 without an HRD: Rx 1.2 x 24 Mb/s, Rbx 24 Mb/s, BSmux + BSoh 16,000 bytes.
+		const RX: f64 = 28_800_000.0;
+		const RBX: f64 = 24_000_000.0;
+		let video = Buffer {
+			rate: RX as u64,
+			leak: Some(RBX as u64),
+			size: Some(3_750_000),
+		};
+		let rate = 26_000_000;
+		let mut schedule = Schedule::new(Duration::from_millis(200));
+		schedule.set_rate(Some(rate));
+		schedule.set_buffer(1, video);
+		schedule.set_clock(1);
+		// 20 s of 40 ms frames, each 652 packets of payload: 23.99 Mb/s.
+		for frame in 0..500 {
+			schedule
+				.push(1, timing(1_000 + 40 * frame), unit(1, 652), frame % 25 == 0)
+				.unwrap();
+		}
+		let mut null = unit(0, 1);
+		(null[1], null[2]) = (0x1f, 0xff);
+		let (mut tb, mut mb, mut previous, mut sent) = (0.0f64, 0.0f64, None::<f64>, 0);
+		while let Some(slot) = schedule.next(None).unwrap() {
+			let mut clock = unit(1, 1);
+			clock[3] = 0x20;
+			for (position, packet) in slot.layout(&clock, 100, &null).chunks(188).enumerate() {
+				let at = slot.pcr as f64 / SYSTEM_CLOCK as f64 + position as f64 * 1504.0 / rate as f64;
+				if let Some(previous) = previous {
+					tb = (tb - (at - previous) * RX / 8.0).max(0.0);
+					mb = (mb - (at - previous) * RBX / 8.0).max(0.0);
+				}
+				previous = Some(at);
+				if pid(packet) == 1 {
+					tb += 188.0;
+					mb += elementary(packet).len() as f64;
+					sent += usize::from(packet[3] & 0x10 != 0);
+				}
+				assert!(tb <= 512.001, "TB holds {tb} bytes at {at}");
+				assert!(mb <= 16_000.0, "MB holds {mb} bytes at {at}");
+			}
+		}
+		assert_eq!(sent, 500 * 652, "every frame goes out");
+	}
+
+	/// Unpadded, a video PID's slot carries the lesser of Rx in whole packets and Rbx in
+	/// payload, fractions carried from slot to slot, and the clock packet counts against Rx
+	/// alone.
+	#[test]
+	fn unpadded_video_takes_the_lesser_of_rx_and_rbx() {
+		let second = |buffer: Buffer| (0..40).map(|index| buffer.per_slot(index, true)).sum::<usize>();
+		// Rbx binds: 24 Mb/s of 184-byte payloads, 16,304.3 a second.
+		let leak = Buffer {
+			rate: 28_800_000,
+			leak: Some(24_000_000),
+			size: None,
+		};
+		assert_eq!(second(leak), 16_304);
+		// Rx binds: 20 Mb/s of 188-byte packets, 13,297.9 a second, less 40 clock packets.
+		let transport = Buffer {
+			rate: 20_000_000,
+			..leak
+		};
+		assert_eq!(second(transport), 13_297 - 40);
 	}
 
 	/// A PID whose transport buffer passes on a single packet a slot still carries one of its
@@ -1161,6 +1275,7 @@ mod tests {
 		// 76.8 kb/s: one packet a slot.
 		let slow = Buffer {
 			rate: 76_800,
+			leak: None,
 			size: Some(100_000),
 		};
 		schedule.set_buffer(1, slow);
@@ -1180,6 +1295,7 @@ mod tests {
 			1,
 			Buffer {
 				rate: 76_800,
+				leak: None,
 				size: Some(100_000),
 			},
 		);
@@ -1200,6 +1316,7 @@ mod tests {
 		// Room for ten packets.
 		let small = Buffer {
 			rate: 100_000_000,
+			leak: None,
 			size: Some(10 * PAYLOAD),
 		};
 		schedule.set_buffer(1, small);
@@ -1239,6 +1356,7 @@ mod tests {
 			1,
 			Buffer {
 				rate: 2_000_000,
+				leak: None,
 				size: Some(2_592),
 			},
 		);
@@ -1263,6 +1381,7 @@ mod tests {
 			1,
 			Buffer {
 				rate: 2_000_000,
+				leak: None,
 				size: Some(2 * PAYLOAD),
 			},
 		);
@@ -1309,6 +1428,7 @@ mod tests {
 				1,
 				Buffer {
 					rate: 2_000_000,
+					leak: None,
 					size: Some(2_592),
 				},
 			);
@@ -1436,11 +1556,12 @@ mod tests {
 	#[test]
 	fn unpadded_units_go_out_by_their_decode_time() {
 		let mut schedule = Schedule::new(Duration::ZERO);
-		// 2 Mb/s passes 32 packets a slot.
+		// 2 Mb/s passes 33 packets a slot.
 		schedule.set_buffer(
 			1,
 			Buffer {
 				rate: 2_000_000,
+				leak: None,
 				size: Some(100_000),
 			},
 		);
@@ -1570,7 +1691,15 @@ mod tests {
 				packets,
 				keyframe: true,
 				units: vec![video.into()],
-				caps: HashMap::from([(video.into(), Buffer { rate: RX, size: None }.per_slot())]),
+				caps: HashMap::from([(
+					video.into(),
+					Buffer {
+						rate: RX,
+						leak: None,
+						size: None,
+					}
+					.per_slot(0, true),
+				)]),
 				positions: None,
 			};
 			let mut null = unit(0, 1);
@@ -1608,10 +1737,12 @@ mod tests {
 		let (a, b) = (
 			Buffer {
 				rate: 7_833_600,
+				leak: None,
 				size: None,
 			},
 			Buffer {
 				rate: 8_160_000,
+				leak: None,
 				size: None,
 			},
 		);
@@ -1622,7 +1753,7 @@ mod tests {
 			nulls: 88,
 			keyframe: true,
 			units: vec![1, 2],
-			caps: HashMap::from([(1, a.per_slot()), (2, b.per_slot())]),
+			caps: HashMap::from([(1, a.per_slot(0, true)), (2, b.per_slot(0, false))]),
 			positions: None,
 		};
 		let mut null = unit(0, 1);

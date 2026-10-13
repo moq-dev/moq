@@ -21,6 +21,7 @@
 #   ./run.sh --open-gop            # open-GOP clip; its leading pictures must survive
 #   ./run.sh --hrd                 # 1080p video filling a broadcast-sized 9 Mbit CPB
 #   ./run.sh --headroom            # the same with four audio PIDs, muxed above the video's Rx
+#   ./run.sh --leak                # 1080p video with no HRD, filling its level's 24 Mb/s leak
 #   ./run.sh --delay 1s            # pass the exporter's --delay
 
 # `--live` swaps the analyzer, not the rig. compliance.py grades a captured file
@@ -67,6 +68,7 @@ PAIR=""     # subscribe twice and grade the two captures against each other
 OPEN_GOP="" # publish open GOP with leading pictures, and grade them through the round-trip
 HRD=""      # publish video that fills a broadcast-sized CPB, as a contribution encoder does
 HEADROOM="" # the same plus four audio PIDs, in a multiplex faster than the video's Rx
+LEAK=""     # publish video with no HRD at its level's leak, as a full-rate feed does
 EXPORT=()   # extra `export ts` flags (--delay)
 # How far into the run the second subscriber joins. A late join is the point: two
 # exporters started together can share a cadence by starting together, which is
@@ -75,8 +77,8 @@ PAIR_JOIN="${TSC_PAIR_JOIN:-5}"
 # Shortest overlap worth a verdict, in seconds. Below this the slower tables fall under
 # the analyzer's emission floor and go report-only, which reads as a pass.
 PAIR_MIN_OVERLAP="${TSC_PAIR_MIN_OVERLAP:-25}"
-DURATION_SET="" # so pair mode can raise the default without overriding an explicit --duration
-BITRATE_SET=""  # so headroom mode can raise the default without overriding an explicit --bitrate
+DURATION_SET="" # so pair and leak modes can raise the default without overriding an explicit --duration
+BITRATE_SET=""  # so headroom and leak modes can raise the default without overriding an explicit --bitrate
 PASSTHRU=()     # forwarded to compliance.py (thresholds, --report-json, ...)
 
 while [[ $# -gt 0 ]]; do
@@ -139,6 +141,10 @@ while [[ $# -gt 0 ]]; do
             HEADROOM=1
             shift
             ;;
+        --leak)
+            LEAK=1
+            shift
+            ;;
         --delay)
             EXPORT=(--delay "$2")
             shift 2
@@ -180,6 +186,14 @@ if [[ -n "$HEADROOM" && -n "$HRD$OPEN_GOP$SOURCE$ANALYZE_ONLY" ]]; then
 fi
 # Room for the audio, with the video still taking up to 86 % of the multiplex.
 [[ -n "$HEADROOM" && -z "$BITRATE_SET" && -z "${TSC_BITRATE:-}" ]] && BITRATE=12500000
+if [[ -n "$LEAK" && -n "$HRD$HEADROOM$OPEN_GOP$SOURCE$ANALYZE_ONLY" ]]; then
+    echo "error: --leak generates its own clip and cannot be combined with --hrd, --headroom, --open-gop, --source, or --analyze-only" >&2
+    exit 1
+fi
+# Room for the video's packet headers, and long enough that an export admitting video a
+# few percent below the leak exhausts the delay's lead and misses a deadline.
+[[ -n "$LEAK" && -z "$BITRATE_SET" && -z "${TSC_BITRATE:-}" ]] && BITRATE=26000000
+[[ -n "$LEAK" && -z "$DURATION_SET" && -z "${TSC_DURATION:-}" ]] && DURATION=30
 if [[ -n "$OPEN_GOP" && -n "$ANALYZE_ONLY$LIVE$PAIR" ]]; then
     echo "error: --open-gop cannot be combined with --analyze-only, --live, or --pair" >&2
     exit 1
@@ -293,6 +307,17 @@ elif [[ -n "$HRD$HEADROOM" ]]; then
         -t "$DURATION" "${AUDIO[@]}" \
         -c:v libx264 -profile:v high -level 4.0 -preset veryfast -pix_fmt yuv420p \
         -x264-params "keyint=25:min-keyint=25:scenecut=0:nal-hrd=cbr" -b:v 9M -maxrate 9M -bufsize 9M \
+        -f mpegts -muxrate "$BITRATE" -pcr_period 20 -pes_payload_size 0 "$SRC_TS"
+elif [[ -n "$LEAK" ]]; then
+    echo "### generating ~${DURATION}s 1080p clip with no HRD at its level's 24 Mb/s leak with ffmpeg"
+    # A full-rate feed's shape: with no HRD, level 4.0's leak from MB into EB (Rbx, 24 Mb/s)
+    # is the video's only limit, and a target above the VBV's 24 Mb/s ceiling holds the
+    # video at it, so the export has to admit the leak's whole rate (moq-dev/moq#5362).
+    ffmpeg -y -hide_banner -loglevel error \
+        -f lavfi -i "testsrc2=size=1920x1080:rate=25,noise=alls=24:allf=t" \
+        -t "$DURATION" -an \
+        -c:v libx264 -profile:v high -level 4.0 -preset veryfast -pix_fmt yuv420p \
+        -x264-params "keyint=25:min-keyint=25:scenecut=0" -b:v 30M -maxrate 24M -bufsize 24M \
         -f mpegts -muxrate "$BITRATE" -pcr_period 20 -pes_payload_size 0 "$SRC_TS"
 else
     echo "### generating ~${DURATION}s broadcast-like ${OPEN_GOP:+open-GOP }clip with ffmpeg"
