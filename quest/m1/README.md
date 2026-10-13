@@ -63,6 +63,10 @@ disabled renditions, ranked just above simulcast rung disable, which
 publishes them. Rung disable does not wait on it, but until it lands a
 disabled rung strands WHEP, HLS, and moq-mux export viewers.
 
+Added 2026-10-13 by the redundant TS alignment plan: epoch refusals, the
+epoch anchor, and raw TS cuts on the epoch timeline, ranked just above
+same-epoch importers, which requires them.
+
 ## Required
 
 - [Interop close logs](/quest/m1/interop-close-log.md) - logging fix landed; delete once the required Interop run is green
@@ -99,7 +103,9 @@ disabled rung strands WHEP, HLS, and moq-mux export viewers.
 - [Lazy discovery](/quest/m1/lazy-discovery/README.md) - a `consume` session requests announcements only for prefixes the origin is watching, in JS then Rust; `follow`, `broadcasts`, and the `discovery` option go away
 - [A spinning loop fails a sim test](/quest/m1/spinning-loops.md) - a sim test names any loop that holds a task poll too long, and each one yields through a budget
 - [Kotlin wrapper POMs](/quest/m1/kt-ffi-pom.md) - Maven builds of `dev.moq:moq` resolve a published moq-ffi instead of the missing `0.0.0-dev`
-- [Plan: redundant TS alignment](/quest/m1/plan-ts-alignment.md) - settle shared source coordinates and distinguish TS identity from coordinated RTP recovery
+- [Epoch refusals](/quest/m1/epoch-refusals.md) - capture, avc3, `rtc --connect`, and transcode refuse `--epoch`, since two instances never publish identical tracks
+- [Epoch anchor](/quest/m1/epoch-anchor.md) - same-epoch importers adopt the first importer's catalog clock and timestamp era, so they agree across a 33-bit wrap and a forward clock break
+- [Raw TS cuts on the epoch timeline](/quest/m1/ts-passthrough-epoch-cuts.md) - passthrough fallback cuts fall on the epoch's grid, so instances started apart cut identical groups
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - importers sharing one `--epoch` and fed one stream publish identical groups and timestamps, so failover between a redundant pair survives
 - [moq.sh deploys from CI](/quest/m1/moq-sh-deploy.md) - the first `release` run of the moq.sh workflow deploys with the Workers Editor token
 - [Plan: untimed verbatim PES](/quest/m1/plan-ts-pes-untimed.md) - decide how a verbatim TS track carries a PES that has no PTS, then write the implementation quest
