@@ -118,9 +118,11 @@ pub(crate) type Reference = Arc<ReferenceKey>;
 pub(crate) fn tag(reference: &ReferenceKey) -> String {
 	let (kind, id, track) = reference;
 	// A track named by its ID hashes as before, so edges on either side of an upgrade agree.
+	// An override uses a separator the ID form cannot produce after the kind, and length-prefixes
+	// the ID, so no pair of names can hash the bytes of another reference.
 	let digest = match id == track {
 		true => Sha256::digest(format!("{}/{id}", kind.as_str())),
-		false => Sha256::digest(format!("{}/{id}\0{track}", kind.as_str())),
+		false => Sha256::digest(format!("{}\0{}\0{id}{track}", kind.as_str(), id.len())),
 	};
 	// 32 bits: the tag only has to tell apart the references one broadcast ever switches between.
 	digest[..4].iter().map(|b| format!("{b:02x}")).collect()
@@ -781,5 +783,19 @@ mod tests {
 		};
 		assert_eq!(next.segment, 0);
 		assert_ne!(tag(&next.reference), tag(&old.reference), "its URLs carry another tag");
+	}
+
+	#[test]
+	fn tag_encodings_never_collide() {
+		let key = |id: &str, track: &str| (Kind::Video, id.to_string(), track.to_string());
+		// The ID form and an override cannot share bytes, whatever the names contain.
+		assert_ne!(tag(&key("a\0b", "a\0b")), tag(&key("a", "b")));
+		// Nor can two overrides that split the same bytes differently.
+		assert_ne!(tag(&key("ab", "c")), tag(&key("a", "bc")));
+		// A track named by its ID keeps the tag it had before overrides existed.
+		assert_eq!(tag(&key("video", "video")), {
+			let digest = Sha256::digest("video/video");
+			digest[..4].iter().map(|b| format!("{b:02x}")).collect::<String>()
+		});
 	}
 }

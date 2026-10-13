@@ -170,7 +170,7 @@ A video track contains the necessary information to decode a video stream.
 
 ~~~
 type VideoSchema = {
-  "renditions": Map<TrackName, VideoDecoderConfig>,
+  "renditions": Map<RenditionId, VideoDecoderConfig>,
   "display": {
     "width": number,
     "height": number,
@@ -241,7 +241,7 @@ An audio track contains the necessary information to decode an audio stream.
 
 ~~~
 type AudioSchema = {
-  "renditions": Map<TrackName, AudioDecoderConfig>,
+  "renditions": Map<RenditionId, AudioDecoderConfig>,
 }
 ~~~
 
@@ -297,7 +297,7 @@ Unlike audio and video there is no WebCodecs decoder for text, so a consumer par
 
 ~~~
 type TextSchema = {
-  "renditions": Map<TrackName, TextConfig>,
+  "renditions": Map<RenditionId, TextConfig>,
 }
 
 type TextConfig = {
@@ -365,11 +365,11 @@ The catalog lists them in two sections, split by payload encoding:
 
 ~~~
 type JsonTracks = {
-  "tracks": Map<TrackName, JsonSchema>,
+  "tracks": Map<EntryId, JsonSchema>,
 }
 
 type BinaryTracks = {
-  "tracks": Map<TrackName, BinarySchema>,
+  "tracks": Map<EntryId, BinarySchema>,
 }
 ~~~
 
@@ -389,6 +389,7 @@ type JsonSchema = {
   "compression": Compression | undefined,
   "schema": string | undefined,
   "broadcast": string | undefined,
+  "track": string | undefined,
   "bitrate": number | undefined,
   "jitter": number | undefined,
   "delay": number | undefined,
@@ -405,6 +406,7 @@ type BinarySchema = {
   "compression": Compression | undefined,
   "mime": string | undefined,
   "broadcast": string | undefined,
+  "track": string | undefined,
   "bitrate": number | undefined,
   "jitter": number | undefined,
   "delay": number | undefined,
