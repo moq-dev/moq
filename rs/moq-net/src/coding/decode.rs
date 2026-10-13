@@ -93,6 +93,16 @@ pub enum DecodeError {
 	/// The field does not exist in the negotiated protocol version.
 	#[error("unsupported version")]
 	Version,
+
+	/// The value is one the draft answers by closing the session with this code, such as an
+	/// `AUTHORIZATION TOKEN` naming an alias.
+	#[error(transparent)]
+	Session(crate::SessionError),
+
+	/// A request's `AUTHORIZATION TOKEN` is well formed but unusable, such as a repeat of
+	/// another, which rejects the request rather than closing the session.
+	#[error("malformed authorization token")]
+	MalformedAuthToken,
 }
 
 impl DecodeError {

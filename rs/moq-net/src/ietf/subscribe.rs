@@ -69,7 +69,7 @@ impl Message for Subscribe<'_> {
 				let forward = r.bool()?;
 				let filter = Filter::decode(r, version)?;
 
-				Parameters::skip(r)?;
+				super::token::unique(&Parameters::skip_request(r)?)?;
 
 				Ok(Self {
 					request_id,
@@ -85,12 +85,12 @@ impl Message for Subscribe<'_> {
 				})
 			}
 			_ => {
-				// The token is ignored: the session's grant is what authorizes the request.
+				// The token decodes but grants nothing: the session's grant is what authorizes the request.
 				// NEW_GROUP_REQUEST is ignored too, as the draft lets a publisher without
 				// dynamic groups do.
 				decode_params!(r, version,
 					0x02 => _object_delivery_timeout: Option<u64>,
-					0x03 => _authorization_token: Vec<Opaque>,
+					0x03 => authorization_token: Vec<super::token::RequestToken>,
 					// 0x04 is MAX_CACHE_DURATION in draft-15 (a publisher parameter) and not a
 					// message parameter at all in draft-16. RENDEZVOUS_TIMEOUT arrives in draft-17.
 					0x04 => rendezvous_timeout: Option<u64> where !matches!(version, Version::Draft15 | Version::Draft16),
@@ -107,6 +107,7 @@ impl Message for Subscribe<'_> {
 					0x32 => _new_group_request: Option<u64> where has_new_group_request(version),
 					0x35 => include_properties: Option<bool> where Filter::is_draft20(version),
 				);
+				super::token::unique(&authorization_token)?;
 
 				let range_filters = [
 					subgroup_filter,
@@ -276,7 +277,7 @@ impl Message for SubscribeOk {
 					largest = Some(Location::decode(r, version)?);
 				}
 
-				properties.max_cache_duration = Parameters::skip(r)?.map(std::time::Duration::from_millis);
+				properties.max_cache_duration = Parameters::skip_response(r)?.map(std::time::Duration::from_millis);
 			}
 			_ => {
 				// GROUP_ORDER and MAX_CACHE_DURATION are legal here only in draft-15. Draft-16
@@ -433,7 +434,7 @@ impl Message for SubscribeUpdate {
 				let end_group = r.varint()?;
 				let subscriber_priority = r.u8()?;
 				let forward = r.bool()?;
-				Parameters::skip(r)?;
+				Parameters::skip_request(r)?;
 
 				Ok(Self {
 					request_id,
@@ -449,7 +450,7 @@ impl Message for SubscribeUpdate {
 				let subscription_request_id = Some(RequestId::decode(r, version)?);
 				decode_params!(r, version,
 					0x02 => _object_delivery_timeout: Option<u64>,
-					0x03 => _authorization_token: Vec<Opaque>,
+					0x03 => _authorization_token: Vec<super::token::RequestToken>,
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
 					0x21 => _filter: Option<Filter>,
@@ -478,7 +479,7 @@ impl Message for SubscribeUpdate {
 				// consumed so a legal update does not fail the session.
 				decode_params!(r, version,
 					0x02 => _object_delivery_timeout: Option<u64>,
-					0x03 => _authorization_token: Vec<Opaque>,
+					0x03 => _authorization_token: Vec<super::token::RequestToken>,
 					0x06 => _subgroup_delivery_timeout: Option<u64> where !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17),
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,

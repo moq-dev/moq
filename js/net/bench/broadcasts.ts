@@ -327,3 +327,41 @@ for (const routeCount of routeCounts) {
 		source.close();
 	}
 }
+
+// Retiring a covering route cancels its pending descendants, not unrelated consumers.
+console.log("retirement,routes,consumers,retire_us,refused");
+for (const routeCount of routeCounts) {
+	for (const consumerCount of observerCounts) {
+		let elapsed = 0;
+		let refused = 0;
+		for (let round = 0; round < 256; round++) {
+			const cache = new BroadcastCache();
+			const source = new BroadcastProducer();
+			const owners = Array.from({ length: routeCount }, () => ({}));
+			const held = [];
+			for (let route = 0; route < routeCount; route++) {
+				const prefix = Path.from(`route/${route}`);
+				cache.announce(prefix, owners[route], Route.default);
+				for (let consumer = 0; consumer < (route === 0 ? consumerCount : 1); consumer++) {
+					const path = Path.from(`${prefix}/job/${consumer}`);
+					const instance = cache.instance(path);
+					if (route === 0)
+						instance.validity?.signal.addEventListener(
+							"abort",
+							() => {
+								refused++;
+							},
+							{ once: true },
+						);
+					held.push(cache.insert(path, instance, source.consume()));
+				}
+			}
+			const start = performance.now();
+			cache.withdraw(Path.from("route/0"), owners[0]);
+			elapsed += performance.now() - start;
+			for (const consumer of held) consumer.close();
+			source.close();
+		}
+		console.log(`retirement,${routeCount},${consumerCount},${((elapsed * 1000) / 256).toFixed(2)},${refused}`);
+	}
+}

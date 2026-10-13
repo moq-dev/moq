@@ -3,6 +3,7 @@ import type { AuthWire, WireGrant, WireReply } from "../auth_session.ts";
 import { SessionCode, SessionError } from "../error.ts";
 import * as Path from "../path.ts";
 import type { Reader, Stream, Writer } from "../stream.ts";
+import type { Session } from "./adapter.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { SetupOption, type SetupOptions } from "./parameters.ts";
@@ -195,6 +196,7 @@ export class AuthError {
 		guard(version);
 		return Message.decode(r, async (rd) => {
 			const code = await rd.u53();
+			if (code > 0xffffffff) throw new Error("AUTH_ERROR code exceeds 32 bits");
 			const reason = await rd.string();
 			if (new TextEncoder().encode(reason).byteLength > MAX_REASON) {
 				throw new Error("AUTH_ERROR reason exceeds 8,192 bytes");
@@ -212,24 +214,18 @@ export class AuthError {
 
 /** The moq-transport binding of the token lifecycle. @internal */
 export class IetfAuthWire implements AuthWire {
-	#openBi: () => Promise<Stream>;
-	#nextRequestId: () => Promise<bigint | undefined>;
+	#session: Session;
 	#version: IetfVersion;
 
-	constructor(props: {
-		openBi: () => Promise<Stream>;
-		nextRequestId: () => Promise<bigint | undefined>;
-		version: IetfVersion;
-	}) {
-		this.#openBi = props.openBi;
-		this.#nextRequestId = props.nextRequestId;
-		this.#version = props.version;
+	constructor(session: Session) {
+		this.#session = session;
+		this.#version = session.version;
 	}
 
 	async present(token: Uint8Array): Promise<Stream> {
-		const requestId = await this.#nextRequestId();
+		const requestId = await this.#session.nextRequestId();
 		if (requestId === undefined) throw new Error("no request id available");
-		const stream = await this.#openBi();
+		const stream = await this.#session.openBi();
 		await new AuthMessage(requestId, token).encode(stream.writer, this.#version);
 		return stream;
 	}
@@ -254,6 +250,7 @@ export class IetfAuthWire implements AuthWire {
 	/** The type id is already consumed by the dispatcher. */
 	async accept(stream: Stream): Promise<Uint8Array> {
 		const msg = await AuthMessage.decode(stream.reader, this.#version);
+		this.#session.spendRequest(msg.requestId);
 		return msg.token;
 	}
 
@@ -262,8 +259,8 @@ export class IetfAuthWire implements AuthWire {
 	}
 
 	async refuse(stream: Stream, code: SessionCode, reason: string): Promise<void> {
-		// The public API speaks session codes; this registry distinguishes only a version mismatch.
-		const wire = code === SessionCode.Version ? NOT_SUPPORTED : UNAUTHORIZED;
+		// The public API speaks session codes; this registry distinguishes only unsupported from unauthorized.
+		const wire = code === SessionCode.Version || code === SessionCode.Unsupported ? NOT_SUPPORTED : UNAUTHORIZED;
 		await new AuthError(wire, reason).encode(stream.writer, this.#version);
 	}
 

@@ -21,6 +21,11 @@ use crate::container::ts::{Export, catalog as tscat, stats};
 use crate::container::{Frame, Kind, Producer};
 use moq_net::Timestamp;
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const SC: &[u8] = &[0, 0, 0, 1];
 // Reusable H.264 parameter-set and slice NALs (NAL type = first byte & 0x1f).
 const SPS: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
@@ -2530,14 +2535,14 @@ async fn si_pids_are_re_emitted_on_their_own_interval() {
 	let name = track.name().to_string();
 
 	// SI snapshot tracks, one group each: an SDT (2s) and a NIT (10s).
-	let mut sdt_track = broadcast.create_track("0x0011-0x42.si", None).unwrap();
+	let mut sdt_track = broadcast.create_track("0x0011-0x42.si", timed()).unwrap();
 	sdt_track
 		.write_frame(
 			Timestamp::ZERO,
 			Bytes::from(make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 8])),
 		)
 		.unwrap();
-	let mut nit_track = broadcast.create_track("0x0010-0x40.si", None).unwrap();
+	let mut nit_track = broadcast.create_track("0x0010-0x40.si", timed()).unwrap();
 	nit_track
 		.write_frame(
 			Timestamp::ZERO,
@@ -2860,7 +2865,7 @@ fn publish_sdt(
 	broadcast: &mut moq_net::broadcast::Producer,
 	catalog: &mut crate::catalog::Producer<tscat::Ext>,
 ) -> moq_net::track::Producer {
-	let mut track = broadcast.create_track("0x0011-0x42.si", None).unwrap();
+	let mut track = broadcast.create_track("0x0011-0x42.si", timed()).unwrap();
 	track
 		.write_frame(
 			Timestamp::ZERO,
@@ -3906,7 +3911,7 @@ async fn stale_si_entry_does_not_block_output() {
 	.unwrap();
 
 	// A track that exists (the subscription resolves) but never produces a group.
-	let ghost = broadcast.create_track("ghost.si", None).unwrap();
+	let ghost = broadcast.create_track("ghost.si", timed()).unwrap();
 
 	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
 	let track = broadcast
@@ -4947,11 +4952,11 @@ async fn repointed_si_entry_resubscribes() {
 	)
 	.unwrap();
 
-	let mut track_a = broadcast.create_track("a.si", None).unwrap();
+	let mut track_a = broadcast.create_track("a.si", timed()).unwrap();
 	track_a
 		.write_frame(Timestamp::ZERO, Bytes::from(sdt_a.clone()))
 		.unwrap();
-	let mut track_b = broadcast.create_track("b.si", None).unwrap();
+	let mut track_b = broadcast.create_track("b.si", timed()).unwrap();
 	track_b
 		.write_frame(Timestamp::ZERO, Bytes::from(sdt_b.clone()))
 		.unwrap();
@@ -5084,7 +5089,7 @@ async fn si_revision_after_final_media_frame_is_flushed() {
 	)
 	.unwrap();
 
-	let mut si_track = broadcast.create_track("0x0011-0x42.si", None).unwrap();
+	let mut si_track = broadcast.create_track("0x0011-0x42.si", timed()).unwrap();
 	si_track
 		.write_frame(Timestamp::ZERO, Bytes::from(sdt_v1.clone()))
 		.unwrap();
@@ -5196,7 +5201,7 @@ async fn si_cadence_rig(pid: u16, table_id: u8, interval: Duration) -> SiCadence
 	.unwrap();
 
 	let si_name = format!("{pid:#06x}-{table_id:#04x}.si");
-	let si_track = broadcast.create_track(si_name.as_str(), None).unwrap();
+	let si_track = broadcast.create_track(si_name.as_str(), timed()).unwrap();
 
 	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
 	let track = broadcast
@@ -7546,6 +7551,123 @@ async fn export_stats_count_a_gap_longer_than_the_backfill() {
 	assert!(quiet < Duration::from_millis(200), "{quiet:?}");
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_large_pmt_is_split_across_packets() {
+	assert_eq!(large_pmt(24, None).await, 2);
+}
+
+/// A PMT spanning three packets at 20 Mb/s goes out at TBsys's rate: the PAT and PMT share its
+/// 512 bytes, which drain at Rxsys (ISO 13818-1 2.4.2.3).
+#[tokio::test(start_paused = true)]
+async fn a_large_pmt_keeps_within_the_system_buffer() {
+	assert_eq!(large_pmt(48, Some(20_000_000)).await, 3);
+}
+
+/// Export `streams` language-tagged AAC streams, check the PMT reassembles across its packets
+/// and keeps within TBsys at `mux_rate`, and return how many packets it spans.
+async fn large_pmt(streams: u16, mux_rate: Option<u64>) -> usize {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
+	let mut config = tscat::Mpegts::default();
+	let mut producers = Vec::new();
+	for index in 0..streams {
+		let name = format!("audio{index:02}");
+		let track = broadcast
+			.create_track(
+				name.as_str(),
+				hang::container::track_info(hang::catalog::PRIORITY.audio),
+			)
+			.unwrap();
+		catalog
+			.modify()
+			.unwrap()
+			.audio
+			.renditions
+			.insert(name.clone(), AudioConfig::new(AAC { profile: 2 }, 48_000, 2));
+		let mut entry = tscat::Track::new(0x1001 + index);
+		entry.descriptors = vec![tscat::Descriptor {
+			tag: 0x0a,
+			data: Bytes::from_static(b"eng\0"),
+		}];
+		config.tracks.insert(name, entry);
+		let mut producer = Producer::new(track, HangContainer::Legacy(Kind::Data));
+		producer
+			.write(Frame {
+				timestamp: Timestamp::ZERO,
+				duration: None,
+				keyframe: true,
+				payload: Bytes::from_static(b"aac"),
+			})
+			.unwrap();
+		producer.finish().unwrap();
+		producers.push(producer);
+	}
+	catalog.modify().unwrap().ext.mpegts = config;
+	let mut exporter = Export::with_ts(crate::source::announced(&broadcast.consume()).await, Default::default())
+		.await
+		.unwrap();
+	if let Some(mux_rate) = mux_rate {
+		exporter = exporter.with_mux_rate(mux_rate);
+	}
+	let ts = drain_with(exporter).await;
+	let packets = ts.as_chunks::<188>().0;
+	let pid = |packet: &[u8; 188]| (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2]);
+	if let Some(mux_rate) = mux_rate {
+		// TBsys: 188 B in per table packet, drained at Rxsys over each packet's time.
+		let drain = 1_000_000.0 / mux_rate as f64 * 188.0;
+		let (mut tb, mut peak) = (0.0f64, 0.0f64);
+		for packet in packets {
+			tb = (tb - drain).max(0.0);
+			if [0, 0x1000].contains(&pid(packet)) {
+				tb += 188.0;
+				peak = peak.max(tb);
+			}
+		}
+		assert!(peak <= 512.0, "TBsys peak {peak:.0} B");
+	}
+	let mut section = Vec::new();
+	let mut counters = Vec::new();
+	for packet in packets {
+		if pid(packet) != 0x1000 {
+			continue;
+		}
+		counters.push(packet[3] & 0x0f);
+		let offset = if packet[3] & 0x20 != 0 {
+			5 + usize::from(packet[4])
+		} else {
+			4
+		};
+		if packet[1] & 0x40 != 0 {
+			assert!(section.is_empty());
+			assert_eq!(packet[offset], 0);
+			section.extend_from_slice(&packet[offset + 1..]);
+		} else {
+			section.extend_from_slice(&packet[offset..]);
+		}
+		let length = 3 + (((usize::from(section[1]) & 0x0f) << 8) | usize::from(section[2]));
+		if section.len() >= length {
+			section.truncate(length);
+			break;
+		}
+	}
+	for pair in counters.windows(2) {
+		assert_eq!(pair[1], (pair[0] + 1) & 0x0f);
+	}
+	assert!(super::psi::crc_ok(&section));
+	let pmt = super::psi::Pmt::parse(&section).unwrap();
+	assert_eq!(pmt.streams.len(), usize::from(streams));
+	for (index, stream) in pmt.streams.iter().enumerate() {
+		assert_eq!(stream.pid.as_u16(), 0x1001 + index as u16);
+		assert_eq!(stream.stream_type, 0x0f);
+		assert_eq!(stream.descriptors[0].data.as_ref(), b"eng\0");
+	}
+	counters.len()
+}
+
 /// Publish a catalog-only broadcast at `live`, for a test of what follows its end.
 fn publish_bare(
 	origin: &moq_net::origin::Producer,
@@ -8141,7 +8263,7 @@ async fn a_repointed_si_entry_never_reads_a_replacement() {
 		..Default::default()
 	};
 	let si_track = |broadcast: &mut moq_net::broadcast::Producer, name: &str, sdt: &[u8]| {
-		let mut track = broadcast.create_track(name, None).unwrap();
+		let mut track = broadcast.create_track(name, timed()).unwrap();
 		track.write_frame(Timestamp::ZERO, Bytes::copy_from_slice(sdt)).unwrap();
 		track
 	};

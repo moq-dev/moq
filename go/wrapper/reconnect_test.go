@@ -90,15 +90,15 @@ func dialWorker(t *testing.T, ctx context.Context, url string) *moq.Client {
 	return client
 }
 
-// waitEpoch blocks until the session reports at least want connections, proving
+// waitConnects blocks until the session reports at least want connections, proving
 // the worker redialed rather than just reusing the transport.
-func waitEpoch(t *testing.T, ctx context.Context, session *moq.Session, want uint64) {
+func waitConnects(t *testing.T, ctx context.Context, session *moq.Session, want uint64) {
 	t.Helper()
 
-	for session.Epoch() < want {
+	for session.Connects() < want {
 		select {
 		case <-ctx.Done():
-			t.Fatalf("epoch = %d, want >= %d", session.Epoch(), want)
+			t.Fatalf("connects = %d, want >= %d", session.Connects(), want)
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
@@ -148,7 +148,7 @@ func TestServerCloseReleasesPort(t *testing.T) {
 
 // A Go worker survives a relay restart the way a moq-c worker does: the session
 // redials with backoff, the publisher re-announces its broadcast to the fresh
-// relay, and the subscriber's subscription receives frames again. The epoch
+// relay, and the subscriber's subscription receives frames again. The connect count
 // pairs with Status so a worker can log each reconnect.
 func TestReconnectAcrossRelayRestart(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), reconnectTimeout)
@@ -223,9 +223,9 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	current = current.restart(t, ctx)
 	defer func() { _ = current.server.Close() }()
 
-	// Both workers observe the reconnect and advance their epoch past the first.
-	waitEpoch(t, ctx, publisher.Session(), 2)
-	waitEpoch(t, ctx, subscriber.Session(), 2)
+	// Both workers observe the reconnect and advance their connect count past the first.
+	waitConnects(t, ctx, publisher.Session(), 2)
+	waitConnects(t, ctx, subscriber.Session(), 2)
 
 	// The publisher re-announces the broadcast the fresh relay never saw.
 	awaitAnnouncement(t, ctx, announced, "live")

@@ -34,7 +34,7 @@ informative:
 
 This document specifies moq-e2ee-00, a versioned profile for end-to-end encryption of MoQ application payloads.
 Authorized publishers and subscribers share a 32-byte broadcast secret out of band.
-Each publisher instance mints an epoch and publishes under an opaque broadcast path ending in it.
+Each publisher instance mints an epoch and announces it on the route for an opaque broadcast path.
 HKDF-SHA-256 derives opaque physical track names and per-track AES-128-GCM keys from the secret and the epoch; grouped frames and datagrams use separate key domains.
 Media frames and datagrams carry only ciphertext plus a 16-byte tag.
 The profile binds object identity through derivation and the nonce, not an on-wire header.
@@ -69,7 +69,7 @@ It differs where the models diverge:
 
 - One 32-byte broadcast secret authorizes every track. Per-track keys are derived, not supplied.
 - The Key ID is part of the out-of-band credential. No per-frame header or immutable property carries it.
-- The salt is not derived from the key. The publisher instance's epoch is an input to every derivation and the last segment of the broadcast path ({{epoch}}), so a restarted publisher derives new keys instead of needing a new Key ID.
+- The salt is not derived from the key. The publisher instance's epoch is an input to every derivation announced on the broadcast route ({{epoch}}), so a restarted publisher derives new keys instead of needing a new Key ID.
 - The nonce is the identity counter itself, not a salt XOR. The derived key is already unique per credential, epoch, physical name, and domain.
 - The payload is ciphertext concatenated with the 16-byte tag, with no inner length prefix, encrypted properties, or padding.
 - moq-lite frame indices are implied by position in the group ({{moql}} Section "Frame"), not an on-wire object ID. This profile still uses that index as the 32-bit nonce half, because it is the only canonical end-to-end frame identity on both moq-lite and MoQ Transport.
@@ -130,6 +130,9 @@ The lowercase hyphenated text of a UUID version 7 with the RFC variant ({{RFC956
 Noncanonical text and other UUID versions or variants MUST be refused (`identity`).
 Each instance of a broadcast MUST mint an epoch that no other instance under the same credential has used or will use.
 Two instances MUST NOT share an epoch: they would derive the same keys and collide on nonces.
+An encrypting core MUST mint its producing epoch internally and MUST NOT accept an explicit or shared epoch for production.
+Binding a discovered epoch MUST yield a consume-only generation.
+Clones of a producing generation MUST share permanent track claims so reopening a physical track cannot reset its nonce counters.
 Its leading 48-bit timestamp makes epochs sort by creation time and its random bits make collisions negligible.
 
 A protected broadcast is published at `<opaque>`, the 22-character base64url segment derived from the credential and the application's semantic broadcast name according to {{derive}}.
@@ -335,7 +338,7 @@ Relays, caches, recorders, and control planes are untrusted for content.
 Authorized endpoints that hold the broadcast secret are trusted.
 Sender authenticity against another endpoint that also holds the secret is not a goal of `moq-e2ee-00`.
 
-A relay can still observe the outer broadcast path including the opaque segment and epoch, opaque physical names, group and frame structure, timestamps, sizes, and traffic patterns.
+A relay can still observe the opaque broadcast path, route epoch, opaque physical names, group and frame structure, timestamps, sizes, and traffic patterns.
 Padding and metadata-flow confidentiality are out of scope.
 
 The opaque segment hides the application's semantic broadcast name from a relay only while the application does not publish or otherwise expose the same name in plaintext.
@@ -364,6 +367,7 @@ This document requests no registrations.
 ## draft-lcurley-moq-e2ee-00
 {:numbered="false"}
 
+- Require internally minted producing epochs and consume-only bindings for discovered epochs.
 - Require canonical UUIDv7 epochs, carried on the route rather than in the path, leaving HKDF UUID inputs unchanged.
 - Initial `moq-e2ee-00` profile: out-of-band credential, opaque broadcast path with a publisher-minted epoch on its route, HKDF physical names and keys, AES-128-GCM payloads, identity bounds, typed failures, and shared primitive vectors.
 

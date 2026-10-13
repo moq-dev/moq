@@ -16,6 +16,11 @@ use support::{
 	mock::MockSession,
 };
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 const LATENCY: Duration = Duration::from_millis(10);
 const VERSIONS: [&str; 3] = ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
@@ -88,7 +93,7 @@ async fn one_used_edge(version: &str, relays: usize, reorder: bool) {
 		while let Ok(request) = dynamic.requested_track().await {
 			served.1.borrow_mut().get_or_insert_with(|| record!(request.demand()));
 			moq_net_sim::sleep(STARTUP).await;
-			let track = request.accept(None);
+			let track = request.accept(timed());
 			let mut group = track.append_group().unwrap();
 			group.write_frame(Timestamp::ZERO, b"key".as_ref()).unwrap();
 			served.0.borrow_mut().push((track, group));
@@ -176,7 +181,7 @@ async fn held_tracks_share_the_cap_with_their_subscriptions() {
 		let broadcast = server.create_broadcast("room").unwrap();
 		let mut tracks = Vec::new();
 		for i in 0..=CAP {
-			let track = broadcast.create_track(format!("t{i}"), None).unwrap();
+			let track = broadcast.create_track(format!("t{i}"), timed()).unwrap();
 			let mut group = track.append_group().unwrap();
 			group.write_frame(Timestamp::ZERO, b"key".as_ref()).unwrap();
 			let edges = record!(track.demand());

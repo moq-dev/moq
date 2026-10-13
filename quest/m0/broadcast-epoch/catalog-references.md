@@ -72,7 +72,7 @@ guarantee and the selected legacy best-effort behavior.
 
 - [Source pin](https://github.com/moq-dev/moq/pull/5252) - exporters share their resolved catalog handle
 - [JS consume identity](https://github.com/moq-dev/moq/pull/5254) - JS resolves the actual serving identity
-- [Retired requests](/quest/m0/broadcast-epoch/retired-requests.md) - held handles cannot emit unpinned requests after retirement
+- [Retired requests](https://github.com/moq-dev/moq/pull/5294) - held handles cannot emit unpinned requests after retirement
 - [Catalog rendition IDs](/quest/m1/catalog-track-id.md) - the adjacent optional wire-track field
 - [Catalog track identity](/quest/m1/catalog-tracks.md) - catalog updates cannot redefine a track's content
 - [IETF epochs](/quest/m1/ietf-epochs.md) - verified catalog identity over negotiated IETF sessions

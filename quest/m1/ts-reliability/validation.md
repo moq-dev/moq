@@ -59,14 +59,13 @@ the current model complete. Correct the blanket claim in the harness docs
 that no maintained tool implements T-STD: commercial analyzers advertise
 it, while no suitable maintained open-source replacement was established.
 
-Independent failure reporting is already being fixed in the latecomer-control
-quest. Keep its workflow changes, and ensure an earlier unrelated failure
-cannot suppress these tests. All new controls have CI invocations too.
+Independent failure reporting landed in #5297; keep its workflow shape, and
+ensure an earlier unrelated failure cannot suppress these tests. All new
+controls have CI invocations too.
 
 ## Related
 
 - [TS duration fidelity](/quest/m0/ts-duration-fidelity.md) - fixes the base capture regression without weakening the duration assertion
-- [Independent Interop checks](/quest/m0/interop-latecomer-control.md) - TS tests still execute after another suite fails
 - [T-STD controls](/quest/m2/tstd-controls.md) - MB and AAC positive/negative coverage
 - [PSI system buffer](/quest/m1/tstd/psi-runs.md) - system-buffer proof belongs with the PSI fix
 - [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - acquisition trims change the decoder oracle
