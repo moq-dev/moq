@@ -37,8 +37,7 @@ precondition.
   value nearest its arrival on the epoch's clock, as the importer's wall clock
   reads it. The source's offset from the wall clock is the same for every
   importer, so they agree unless their delivery and host-clock skew straddles
-  a half-period boundary of that offset: about skew over the period, near
-  1e-7 for 10 ms against TS's 26.5 h. Document that bound. Add the periods in
+  a half-period boundary of that offset. Add the periods in
   source ticks before converting to microseconds, since a period is not a
   whole microsecond count.
 - Recommended: derive every value's era this way, not only each base's first,
@@ -47,12 +46,18 @@ precondition.
   teletext) then need no special case, and `PtsUnwrap`'s history goes away.
   The cost is that media time stays within half a period of the epoch
   clock's reading. A flagged forward break that would carry it further reads
-  as a step back, which stays fatal on every importer alike; so does source
-  drift that walks the offset to the boundary over the epoch's life (30 ppm
-  takes years from a random offset), and a file read faster than real time
-  for half a period. The raw importer's clamp after a small flagged jump
+  as a step back, which stays fatal on every importer alike, as does a file
+  read faster than real time for half a period. The raw importer's clamp after a small flagged jump
   (`(last + step).max(self.written)` in `passthrough.rs`) depends on history;
   remove it.
+- Two known failure cases, documented rather than guarded (maintainer,
+  2026-10-13, over refusing to start inside a guard band of the halfway
+  point): importers that start together split onto adjacent eras when their
+  skew straddles the halfway point, with odds of about skew over the period
+  (near 1e-7 at 10 ms against TS's 26.5 h); and the gap between the source
+  clock and wall time drifts by seconds a day, so over weeks it can drift
+  onto the halfway point mid-run, where even a single importer reads a
+  rewind and fails.
 - The catalog's wall mapping derives from the epoch too (maintainer): media
   time maps to wall through the epoch's wall time plus the deterministic era,
   so every importer writes the same root `clock`. Rejected: no wall mapping
