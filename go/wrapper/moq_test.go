@@ -565,6 +565,32 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	if string(frame.Payload) != string(payload) || uint64(frame.Timestamp.Microseconds()) != 1_000_000 {
 		t.Fatalf("frame = %+v, want payload=%q ts=1000000", frame, payload)
 	}
+
+	// The same group, received raw in arrival order and decoded with the container.
+	track, err := bc.SubscribeTrack(ctx, trackName, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer track.Cancel()
+	group, err := track.RecvGroup(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if group == nil {
+		t.Fatal("expected a group")
+	}
+	decoded, err := moqmedia.DecodeGroup(group, audio.Container)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer decoded.Cancel()
+	frame, err = decoded.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame == nil || string(frame.Payload) != string(payload) || uint64(frame.Timestamp.Microseconds()) != 1_000_000 {
+		t.Fatalf("decoded frame = %+v, want payload=%q ts=1000000", frame, payload)
+	}
 }
 
 func TestTrackPublishConsume(t *testing.T) {

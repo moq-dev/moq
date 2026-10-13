@@ -109,19 +109,6 @@ fun ContainerConsumer.frames(): Flow<MediaFrame> = flow {
     if (cause is CancellationException) cancel()
 }
 
-/**
- * Stream of decoded media groups in arrival order, with none skipped and frame timestamps
- * from the container. Committing to it refuses [frames] on the same consumer, and vice versa.
- */
-fun ContainerConsumer.groupsAsArrived(): Flow<ContainerGroupConsumer> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(recvGroup() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
-
 /** Stream of decoded frames from one finite media group. */
 fun ContainerGroupConsumer.frames(): Flow<MediaFrame> = flow {
     while (true) {

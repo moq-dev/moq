@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, cast
@@ -53,7 +52,7 @@ from moq_ffi import (
 
 from ._records import Frame, Subscription, _from_us, _subscription, _to_us
 from .publish import BroadcastProducer, TrackDemand, TrackRequest
-from .subscribe import BroadcastConsumer
+from .subscribe import BroadcastConsumer, GroupConsumer
 from .types import FetchGroupOptions
 
 
@@ -258,10 +257,8 @@ class TrackStreamProducer:
 class ContainerConsumer:
     """Async-iterable stream of decoded :class:`MediaFrame` in decode order.
 
-    Construct with :meth:`subscribe`. Iterate with ``async for``, or read
-    decoded groups in arrival order with :meth:`recv_group`; the first read
-    picks one, and the other then raises ``Error.AlreadyCommitted``. Usable as
-    an async context manager that cancels on exit.
+    Construct with :meth:`subscribe`. Iterate with ``async for``;
+    usable as an async context manager that cancels on exit.
     """
 
     @classmethod
@@ -290,25 +287,6 @@ class ContainerConsumer:
             raise StopAsyncIteration
         return MediaFrame._from_ffi(frame)
 
-    async def recv_group(self) -> ContainerGroupConsumer | None:
-        """Return the next decoded group in arrival order. Returns `None` when the track ends.
-
-        Every group is returned as it lands, which may be out of sequence
-        order, and none is skipped. Frame timestamps come from the container
-        rather than the transport. Read groups concurrently to see frames as
-        they arrive.
-        """
-        group = await self._inner.recv_group()
-        return None if group is None else ContainerGroupConsumer(group)
-
-    async def groups_as_arrived(self) -> AsyncIterator[ContainerGroupConsumer]:
-        """Iterate decoded groups in arrival order via :meth:`recv_group`."""
-        while True:
-            group = await self.recv_group()
-            if group is None:
-                return
-            yield group
-
     def cancel(self) -> None:
         """Cancel the subscription and stop delivering frames."""
         self._inner.cancel()
@@ -317,11 +295,28 @@ class ContainerConsumer:
 class ContainerGroupConsumer:
     """Async iterator of decoded :class:`MediaFrame` within a single group.
 
-    Construct with :meth:`fetch`, or receive one from
-    :meth:`ContainerConsumer.recv_group`. Finite: iteration ends
-    after the group's last frame. Usable as an async context manager that cancels
-    on exit.
+    Construct with :meth:`fetch`, or decode a raw :class:`~moq.GroupConsumer`,
+    such as one from :meth:`~moq.TrackConsumer.recv_group` for arrival-order
+    reads. Finite: iteration ends after the group's last frame. Usable as an
+    async context manager that cancels on exit.
     """
+
+    def __init__(self, group: GroupConsumer, container: Container) -> None:
+        """Decode ``group`` with the track's container, as each frame lands.
+
+        Frame timestamps are container media time, not the transport's. Which
+        groups arrive, and how long a stalled one stays readable, is the
+        subscription's ``max_delay``. Takes over ``group``, whose handle is
+        closed afterward; raises ``Error.AlreadyCommitted`` if it has already
+        read a frame.
+        """
+        self._inner = MoqMediaContainerGroupConsumer(group._inner, container)
+
+    @classmethod
+    def _from_inner(cls, inner: MoqMediaContainerGroupConsumer) -> ContainerGroupConsumer:
+        self = cls.__new__(cls)
+        self._inner = inner
+        return self
 
     @classmethod
     async def fetch(
@@ -335,10 +330,7 @@ class ContainerGroupConsumer:
     ) -> ContainerGroupConsumer:
         """Fetch and decode exactly one media group."""
         config = MoqMediaContainerGroupConfig(name=name, sequence=sequence, container=container, options=options)
-        return cls(await MoqMediaContainerGroupConsumer.fetch(broadcast._inner, config))
-
-    def __init__(self, inner: MoqMediaContainerGroupConsumer) -> None:
-        self._inner = inner
+        return cls._from_inner(await MoqMediaContainerGroupConsumer.fetch(broadcast._inner, config))
 
     @property
     def sequence(self) -> int:

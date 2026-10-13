@@ -189,11 +189,12 @@ client = moq.Client(
 - `await media.CatalogConsumer.subscribe(broadcast)` streams catalog snapshots;
   `await media.catalog(broadcast)` reads one snapshot and releases its subscription.
 - `await media.ContainerConsumer.subscribe(broadcast, name, container, *, subscription=None)`
-  decodes live media. Pass the catalog rendition's `container`. Iterate it for frames in decode
-  order, or call `await .recv_group()` (or iterate `.groups_as_arrived()`) for decoded groups in
-  arrival order, with none skipped and timestamps from the container. The first read picks one.
+  decodes live media. Pass the catalog rendition's `container`.
 - `await media.ContainerGroupConsumer.fetch(broadcast, name, sequence, container, *, options=None)`
   fetches and decodes exactly one group.
+- `media.ContainerGroupConsumer(group, container)` decodes a raw group, such as one from
+  `TrackConsumer.recv_group()` for arrival-order reads, with container media time on each frame
+  as it lands.
 
 `media.TrackProducer.write_frame(payload, timestamp=timedelta(0))` and `.flush(timestamp)` use
 `timedelta`; returned `media.MediaFrame.timestamp` does too. `demand()` owns the track name and

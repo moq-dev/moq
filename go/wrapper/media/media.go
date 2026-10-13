@@ -222,6 +222,20 @@ func NewContainerGroupConsumer(ctx context.Context, broadcast *moq.BroadcastCons
 	return &ContainerGroupConsumer{inner: inner}, nil
 }
 
+// DecodeGroup decodes a raw group with the track's container, as each frame lands.
+//
+// Pair it with TrackConsumer.RecvGroup to read media in arrival order: frame timestamps are
+// container media time, not the transport's. Which groups arrive, and how long a stalled one
+// stays readable, is the subscription's MaxDelay. Takes over group, whose handle is closed
+// afterward; errors if it has already read a frame.
+func DecodeGroup(group *moq.GroupConsumer, container Container) (*ContainerGroupConsumer, error) {
+	inner, err := ffi.NewMoqMediaContainerGroupConsumer(bridge.GroupConsumer(group), container)
+	if err != nil {
+		return nil, err
+	}
+	return &ContainerGroupConsumer{inner: inner}, nil
+}
+
 // LegacyContainer selects the legacy hang container for a media subscription.
 func LegacyContainer() Container {
 	return ContainerLegacy{}
@@ -414,31 +428,12 @@ func (m *TrackStreamProducer) Finish() error {
 	return m.inner.Finish()
 }
 
-// ContainerConsumer is a stream of decoded media frames in decode order (Next), or of
-// decoded groups in arrival order (RecvGroup). The first read picks one; the other then
-// fails with AlreadyCommitted.
+// ContainerConsumer is a stream of decoded media frames.
 type ContainerConsumer struct {
 	inner *ffi.MoqMediaContainerConsumer
 }
 
-// RecvGroup returns the next decoded group in arrival order (possibly out of sequence),
-// or (nil, nil) when the track ends. No group is skipped, and frame timestamps come from
-// the container rather than the transport.
-func (m *ContainerConsumer) RecvGroup(ctx context.Context) (*ContainerGroupConsumer, error) {
-	res, err := bridge.CallHandle(ctx, m.inner.Cancel, func(ctx context.Context) (*ffi.MoqMediaContainerGroupConsumer, error) {
-		res, err := m.inner.RecvGroup(ctx)
-		if err != nil || res == nil {
-			return nil, err
-		}
-		return *res, nil
-	})
-	if err != nil || res == nil {
-		return nil, err
-	}
-	return &ContainerGroupConsumer{inner: res}, nil
-}
-
-// Next returns the next frame in decode order, or (nil, nil) when the track ends.
+// Next returns the next frame, or (nil, nil) when the track ends.
 func (m *ContainerConsumer) Next(ctx context.Context) (*MediaFrame, error) {
 	frame, err := bridge.Call(ctx, m.inner.Cancel, m.inner.Next)
 	if frame == nil || err != nil {
@@ -458,7 +453,7 @@ func (m *ContainerConsumer) Cancel() {
 }
 
 // ContainerGroupConsumer is a finite stream of decoded media frames from one group,
-// fetched or received in arrival order. It ends after the group's last frame.
+// fetched or decoded from a raw group. It ends after the group's last frame.
 type ContainerGroupConsumer struct {
 	inner *ffi.MoqMediaContainerGroupConsumer
 }

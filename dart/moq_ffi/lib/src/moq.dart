@@ -8,7 +8,9 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
+
 import "package:ffi/ffi.dart";
+
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -6509,7 +6511,6 @@ class FfiConverterMoqMediaCatalogProducer {
 abstract class MoqMediaContainerConsumerInterface {
   void cancel();
   Future<MoqMediaFrame?> next();
-  Future<MoqMediaContainerGroupConsumer?> recvGroup();
 }
 
 final _MoqMediaContainerConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -6580,19 +6581,6 @@ class MoqMediaContainerConsumer implements MoqMediaContainerConsumerInterface {
       moqExceptionErrorHandler,
     );
   }
-
-  Future<MoqMediaContainerGroupConsumer?> recvGroup() {
-    return uniffiRustCallAsync(
-      () => uniffi_moq_ffi_fn_method_moqmediacontainerconsumer_recv_group(
-        uniffiClonePointer(),
-      ),
-      ffi_moq_ffi_rust_future_poll_rust_buffer,
-      ffi_moq_ffi_rust_future_complete_rust_buffer,
-      ffi_moq_ffi_rust_future_free_rust_buffer,
-      FfiConverterOptionalMoqMediaContainerGroupConsumer.lift,
-      moqExceptionErrorHandler,
-    );
-  }
 }
 
 class FfiConverterMoqMediaContainerConsumer {
@@ -6640,6 +6628,20 @@ class MoqMediaContainerGroupConsumer
     implements MoqMediaContainerGroupConsumerInterface {
   late final Pointer<Void> _ptr;
   MoqMediaContainerGroupConsumer._(this._ptr) {
+    _MoqMediaContainerGroupConsumerFinalizer.attach(this, _ptr, detach: this);
+  }
+  MoqMediaContainerGroupConsumer({
+    required MoqGroupConsumer group,
+    required MoqContainer container,
+  }) : _ptr = rustCall(
+         (status) =>
+             uniffi_moq_ffi_fn_constructor_moqmediacontainergroupconsumer_new(
+               FfiConverterMoqGroupConsumer.lower(group),
+               FfiConverterMoqContainer.lower(container),
+               status,
+             ),
+         moqExceptionErrorHandler,
+       ) {
     _MoqMediaContainerGroupConsumerFinalizer.attach(this, _ptr, detach: this);
   }
   static Future<MoqMediaContainerGroupConsumer> fetch({
@@ -9682,58 +9684,6 @@ class FfiConverterOptionalMoqGroupConsumer {
   }
 }
 
-class FfiConverterOptionalMoqMediaContainerGroupConsumer {
-  static MoqMediaContainerGroupConsumer? lift(RustBuffer buf) {
-    return FfiConverterOptionalMoqMediaContainerGroupConsumer.read(
-      buf.asUint8List(),
-    ).value;
-  }
-
-  static LiftRetVal<MoqMediaContainerGroupConsumer?> read(Uint8List buf) {
-    if (ByteData.view(buf.buffer, buf.offsetInBytes).getInt8(0) == 0) {
-      return LiftRetVal(null, 1);
-    }
-    final result = FfiConverterMoqMediaContainerGroupConsumer.read(
-      Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
-    );
-    return LiftRetVal<MoqMediaContainerGroupConsumer?>(
-      result.value,
-      result.bytesRead + 1,
-    );
-  }
-
-  static int allocationSize([MoqMediaContainerGroupConsumer? value]) {
-    if (value == null) {
-      return 1;
-    }
-    return FfiConverterMoqMediaContainerGroupConsumer.allocationSize(value) + 1;
-  }
-
-  static RustBuffer lower(MoqMediaContainerGroupConsumer? value) {
-    if (value == null) {
-      return toRustBuffer(Uint8List.fromList([0]));
-    }
-    final buf = Uint8List(
-      FfiConverterOptionalMoqMediaContainerGroupConsumer.allocationSize(value),
-    );
-    FfiConverterOptionalMoqMediaContainerGroupConsumer.write(value, buf);
-    return toRustBuffer(buf);
-  }
-
-  static int write(MoqMediaContainerGroupConsumer? value, Uint8List buf) {
-    if (value == null) {
-      buf[0] = 0;
-      return 1;
-    }
-    buf[0] = 1;
-    return FfiConverterMoqMediaContainerGroupConsumer.write(
-          value,
-          Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
-        ) +
-        1;
-  }
-}
-
 class FfiConverterOptionalMoqMediaFrame {
   static MoqMediaFrame? lift(RustBuffer buf) {
     return FfiConverterOptionalMoqMediaFrame.read(buf.asUint8List()).value;
@@ -11184,12 +11134,6 @@ external Pointer<Void> uniffi_moq_ffi_fn_method_moqmediacontainerconsumer_next(
   Pointer<Void> ptr,
 );
 
-@Native<Pointer<Void> Function(Pointer<Void>)>(assetId: _uniffiAssetId)
-external Pointer<Void>
-uniffi_moq_ffi_fn_method_moqmediacontainerconsumer_recv_group(
-  Pointer<Void> ptr,
-);
-
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -11213,6 +11157,16 @@ external Pointer<Void>
 uniffi_moq_ffi_fn_constructor_moqmediacontainergroupconsumer_fetch(
   Pointer<Void> broadcast,
   RustBuffer config,
+);
+
+@Native<
+  Pointer<Void> Function(Pointer<Void>, RustBuffer, Pointer<RustCallStatus>)
+>(assetId: _uniffiAssetId)
+external Pointer<Void>
+uniffi_moq_ffi_fn_constructor_moqmediacontainergroupconsumer_new(
+  Pointer<Void> group,
+  RustBuffer container,
+  Pointer<RustCallStatus> uniffiStatus,
 );
 
 @Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
@@ -12899,10 +12853,6 @@ external int uniffi_moq_ffi_checksum_method_moqmediacontainerconsumer_next();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int
-uniffi_moq_ffi_checksum_method_moqmediacontainerconsumer_recv_group();
-
-@Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int
 uniffi_moq_ffi_checksum_method_moqmediacontainergroupconsumer_cancel();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -13226,6 +13176,10 @@ uniffi_moq_ffi_checksum_constructor_moqmediacontainergroupconsumer_fetch();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int
+uniffi_moq_ffi_checksum_constructor_moqmediacontainergroupconsumer_new();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int
 uniffi_moq_ffi_checksum_constructor_moqmediacontainerproducer_new();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -13322,7 +13276,7 @@ void _checkApiChecksums() {
       17412) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqtrackconsumer_recv_group() != 60887) {
+  if (uniffi_moq_ffi_checksum_method_moqtrackconsumer_recv_group() != 28712) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqtrackconsumer_update() != 24851) {
@@ -13420,15 +13374,11 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqmediacontainerconsumer_cancel() !=
-      38713) {
+      27429) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqmediacontainerconsumer_next() !=
-      24777) {
-    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
-  }
-  if (uniffi_moq_ffi_checksum_method_moqmediacontainerconsumer_recv_group() !=
-      13059) {
+      17029) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqmediacontainergroupconsumer_cancel() !=
@@ -13766,6 +13716,10 @@ void _checkApiChecksums() {
   }
   if (uniffi_moq_ffi_checksum_constructor_moqmediacontainergroupconsumer_fetch() !=
       48900) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_constructor_moqmediacontainergroupconsumer_new() !=
+      51869) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqmediacontainerproducer_new() !=

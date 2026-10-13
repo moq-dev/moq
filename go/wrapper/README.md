@@ -82,7 +82,8 @@ target takes over a subscriber's pending request. A duplicate name fails.
 `NewContainerStreamProducer` demux whole chunks or a byte stream into their own tracks.
 `NewCatalogProducer` holds its broadcast weakly and owns catalog properties and sections.
 `NewCatalogConsumer`, `NewContainerConsumer`, and `NewContainerGroupConsumer` read
-catalog snapshots, live media, and one fetched media group. Frames and `Flush` use
+catalog snapshots, live media, and one fetched media group. `DecodeGroup` decodes a raw
+group, such as one from `TrackConsumer.RecvGroup` for arrival-order reads. Frames and `Flush` use
 `time.Duration`; `Demand()` owns track names and subscriber waits.
 
 `BroadcastProducer.Dynamic()` accepts subscriber-requested tracks. Call

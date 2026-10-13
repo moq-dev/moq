@@ -5,7 +5,7 @@ use bytes::Buf;
 use moq_mux::catalog::hang::Extra;
 
 use crate::consumer::{
-	Cursor, MoqBroadcastConsumer, MoqFetchGroupOptions, MoqSubscription, map_fetch_error, timestamp_us,
+	MoqBroadcastConsumer, MoqFetchGroupOptions, MoqGroupConsumer, MoqSubscription, map_fetch_error, timestamp_us,
 };
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
@@ -1091,35 +1091,19 @@ impl Catalog {
 	}
 }
 
-/// Reads container-decoded media from a live track, as frames in decode order or as groups in
-/// arrival order.
+/// Reads container-decoded frames from a live media track.
 #[derive(uniffi::Object)]
 pub struct MoqMediaContainerConsumer {
 	task: Task<Media>,
 }
 
 struct Media {
-	cursor: Cursor<moq_mux::container::Consumer<moq_mux::catalog::hang::Container>>,
-	container: moq_mux::catalog::hang::Container,
+	inner: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
 }
 
 impl Media {
 	async fn next(&mut self) -> Result<Option<MoqMediaFrame>, MoqError> {
-		let container = &self.container;
-		let consumer = self
-			.cursor
-			.ordered(|track| moq_mux::container::Consumer::new(track, container.clone()))?;
-		consumer.read().await?.map(media_frame).transpose()
-	}
-
-	async fn recv_group(&mut self) -> Result<Option<Arc<MoqMediaContainerGroupConsumer>>, MoqError> {
-		let group = self.cursor.arrival()?.recv_group().await?;
-		Ok(group.map(|group| {
-			Arc::new(MoqMediaContainerGroupConsumer::from_inner(
-				group,
-				self.container.clone(),
-			))
-		}))
+		self.inner.read().await?.map(media_frame).transpose()
 	}
 }
 
@@ -1133,8 +1117,7 @@ impl MediaGroupInner {
 	}
 }
 
-/// A finite, container-decoded media group, from [`MoqMediaContainerGroupConsumer::fetch`] or
-/// [`MoqMediaContainerConsumer::recv_group`].
+/// A finite, container-decoded media group, fetched or decoded from a raw group.
 #[derive(uniffi::Object)]
 pub struct MoqMediaContainerGroupConsumer {
 	sequence: u64,
@@ -1192,26 +1175,12 @@ impl MoqMediaCatalogConsumer {
 
 #[uniffi::export]
 impl MoqMediaContainerConsumer {
-	/// Get the next frame in decode order. Returns `None` when the track ends or is closed.
-	///
-	/// Frames pass through a jitter buffer that skips a group stalled past the subscription's
-	/// max delay. The first call commits this track to decode order: [`Self::recv_group`]
-	/// fails with [`MoqError::AlreadyCommitted`] afterwards.
+	/// Get the next frame. Returns `None` when the track ends or is closed.
 	pub async fn next(&self) -> Result<Option<MoqMediaFrame>, MoqError> {
 		self.task.run(|mut state| async move { state.next().await }).await
 	}
 
-	/// Return the next group in arrival order, decoded. Returns `None` when the track ends.
-	///
-	/// Every group is returned exactly once, as it lands, which may be out of sequence order;
-	/// none is skipped, and frame timestamps come from the container rather than the transport.
-	/// Read the groups concurrently to see frames as they arrive. The first call commits this
-	/// track to arrival order: [`Self::next`] fails with [`MoqError::AlreadyCommitted`] afterwards.
-	pub async fn recv_group(&self) -> Result<Option<Arc<MoqMediaContainerGroupConsumer>>, MoqError> {
-		self.task.run(|mut state| async move { state.recv_group().await }).await
-	}
-
-	/// Cancel all current and future reads.
+	/// Cancel all current and future `next()` calls.
 	///
 	/// Terminal: the subscription is released here, not when the handle is.
 	pub fn cancel(&self) {
@@ -1254,17 +1223,29 @@ impl MoqMediaContainerConsumer {
 		let media = media_container(container)?;
 		let subscription = subscription.map(moq_net::track::Subscription::from).unwrap_or_default();
 		let track = broadcast.inner.track(&name)?.subscribe(subscription).await?;
+		let consumer = moq_mux::container::Consumer::new(track, media);
 		Ok(Arc::new(MoqMediaContainerConsumer {
-			task: Task::new(Media {
-				cursor: Cursor::Uncommitted(track),
-				container: media,
-			}),
+			task: Task::new(Media { inner: consumer }),
 		}))
 	}
 }
 
 #[uniffi::export]
 impl MoqMediaContainerGroupConsumer {
+	/// Decode `group` with the track's container, as each frame lands.
+	///
+	/// Pair it with [`MoqTrackConsumer::recv_group`](crate::consumer::MoqTrackConsumer::recv_group)
+	/// to read media in arrival order: frame timestamps are container media time, not the
+	/// transport's. Which groups arrive, and how long a stalled one stays readable, is the
+	/// subscription's `max_delay_us`. Takes over `group`, whose handle is closed afterward; errors
+	/// if it has already read a frame.
+	#[uniffi::constructor]
+	pub fn new(group: &MoqGroupConsumer, container: MoqContainer) -> Result<Arc<Self>, MoqError> {
+		// Parse the container first, so a bad init leaves the raw group readable.
+		let media = media_container(container)?;
+		Ok(Arc::new(Self::from_inner(group.take()?, media)))
+	}
+
 	/// Fetch and decode exactly one media group.
 	#[uniffi::constructor]
 	pub async fn fetch(

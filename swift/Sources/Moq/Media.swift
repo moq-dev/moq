@@ -102,8 +102,7 @@ public enum Media {
         }
     }
 
-    /// Read side of a media track. Iterating yields decoded frames in decode order; `recvGroup`
-    /// yields decoded groups in arrival order instead. The first read picks one.
+    /// Read side of a media track. Iterating yields decoded frames in decode order.
     public final class ContainerConsumer: AsyncSequence, Sendable {
         /// The decoded media frame emitted by this sequence.
         public typealias Element = MediaFrame
@@ -123,12 +122,6 @@ public enum Media {
             try await ffi.next()
         }
 
-        /// The next decoded group in arrival order, which may be out of sequence. `nil` once the
-        /// track ends. No group is skipped, and frame timestamps come from the container.
-        public func recvGroup() async throws -> ContainerGroupConsumer? {
-            (try await ffi.recvGroup()).map(ContainerGroupConsumer.init)
-        }
-
         /// Cancel all current and future reads.
         public func cancel() {
             ffi.cancel()
@@ -143,7 +136,7 @@ public enum Media {
     }
 
     /// A finite, container-decoded media group, from ``ContainerGroupConsumer/fetch(broadcast:config:)``
-    /// or ``ContainerConsumer/recvGroup()``.
+    /// or decoded from a raw ``GroupConsumer``.
     public final class ContainerGroupConsumer: AsyncSequence, Sendable {
         /// The decoded media frame emitted by this sequence.
         public typealias Element = MediaFrame
@@ -156,6 +149,16 @@ public enum Media {
         }
         init(_ ffi: MoqMediaContainerGroupConsumer) {
             self.ffi = ffi
+        }
+
+        /// Decode `group` with the track's container, as each frame lands.
+        ///
+        /// Pair it with ``TrackConsumer/recvGroup()`` to read media in arrival order: frame
+        /// timestamps are container media time, not the transport's. Which groups arrive, and how
+        /// long a stalled one stays readable, is the subscription's `maxDelayUs`. Takes over
+        /// `group`, whose handle is closed afterward; throws if it has already read a frame.
+        public convenience init(group: GroupConsumer, container: Container) throws {
+            self.init(try MoqMediaContainerGroupConsumer(group: group.ffi, container: container))
         }
 
         /// The sequence number of this group within the track.

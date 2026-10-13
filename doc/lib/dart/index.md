@@ -18,8 +18,9 @@ container consumers. `TrackProducer.audio` / `.video` take a broadcast, an init 
 and a `Named` or `Requested` target. `CatalogProducer(broadcast: ...)` owns catalog properties
 and sections; it holds the broadcast weakly and fails after the broadcast closes.
 `CatalogConsumer.subscribe`, `ContainerConsumer.subscribe`, and `ContainerGroupConsumer.fetch`
-construct the read side from a broadcast. A `ContainerConsumer` yields frames in decode order
-from `next`, or decoded groups in arrival order from `recvGroup`; the first read picks one.
+construct the read side from a broadcast. For arrival-order reads, decode each group from
+`TrackConsumer.recvGroup()` with `ContainerGroupConsumer(group: ..., container: ...)`; frames
+carry container media time as they land.
 
 ```bash
 dart pub add moq        # or: flutter pub add moq

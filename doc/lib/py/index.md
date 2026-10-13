@@ -18,6 +18,8 @@ Use `Named(name)` or `Requested(request)` as the target for `TrackProducer.audio
 `CatalogProducer(broadcast)` holds the broadcast weakly and owns catalog properties and sections;
 its writes fail with `Error.Closed` after the broadcast closes or is released.
 `MediaFrame.timestamp`, media writes, and `flush` use `datetime.timedelta`.
+For arrival-order reads, decode each group from `TrackConsumer.recv_group()` with
+`ContainerGroupConsumer(group, container)`; frames carry container media time as they land.
 
 ```bash
 pip install moq-rs      # or: uv add moq-rs
