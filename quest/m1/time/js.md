@@ -2,7 +2,7 @@
 
 ## Goal
 
-A published `js/time` package, `@moq/time`, mirrors `moq-time`: an `Instant`
+A published `js/time` package, `@moq/time`, mirrors `moq-clock`: an `Instant`
 (a `number` of nanoseconds from the clock's origin), the `Milli`, `Micro`,
 `Nano`, and `Second` duration units, a wall-clock timestamp, and ambient
 `now()`, `wall()`, `sleep()`, `timeout()`, and `interval()` that resolve to
@@ -19,17 +19,22 @@ It lands additively on `main`; `@moq/net` keeps its own units until
 ## Plan
 
 The design decisions are in [the line's README](/quest/m1/time/README.md).
+
+Open: mirror the Rust name as `@moq/clock`, or keep `@moq/time`. `@moq/clock`
+is unpublished on npm but names the private `js/clock` demo (bin
+`moq-clock`), which would need renaming first.
 The installed clock is per JS realm (a page, a worker, a test file), the JS
-equivalent of one clock per runtime. Match the Rust timer semantics settled in
-[the crate](/quest/m1/time/crate.md). Coordinate clock origin, units, and
+equivalent of one clock per runtime. Match the timer semantics `moq-clock`
+settled and tests: an already-reached deadline fires at once, equal deadlines
+fire in arming order, and `interval` defaults to `Burst` with `Delay` and
+`Skip` available. Coordinate clock origin, units, and
 controlled-time behavior with the [browser backend](/quest/m2/rs2ts/README.md);
 its boundary representation depends on whether it uses WASM or generated JS.
+`moq-clock`'s browser backend counts from its first read, not from
+`performance.now()`'s origin, so the two need one origin before an instant
+crosses between them.
 
 Ban direct `performance.now`, `Date.now`, `setTimeout`, and `setInterval` in
 the package outside its default backend.
 
 Public API: a new package. Wire: none.
-
-## Required
-
-- [The moq-time crate](/quest/m1/time/crate.md) - the semantics this mirrors

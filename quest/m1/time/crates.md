@@ -1,4 +1,4 @@
-# [XL] Every crate on moq-time
+# [XL] Every crate on moq-clock
 
 ## Goal
 
@@ -6,9 +6,9 @@ Every remaining workspace crate (moq-tokio, moq-relay, moq-cli,
 moq-hls, moq-auth, moq-archive, moq-audio, moq-video, moq-gst, moq-rtc,
 moq-rtmp, moq-srt, moq-shaper, moq-sock, moq-transcode, moq-e2ee, moq-boy,
 moq-bench, moq-c, hang, and the rest under `rs/`) reads time and arms timers
-only through `moq-time`, and tests needed to prove those migrations use the sim, paused tokio, or
+only through `moq-clock`, and tests needed to prove those migrations use the sim, paused tokio, or
 events. No production direct `Instant::now`, `SystemTime::now`, `tokio::time`, or
-`std::thread::sleep` remains outside moq-time's backends and explicit
+`std::thread::sleep` remains outside moq-clock's backends and explicit
 performance measurement (moq-bench's timings).
 
 ## Plan
@@ -33,7 +33,7 @@ Wire: none.
 
 ## Required
 
-- [moq-net on moq-time](/quest/m1/time/net.md) - these crates consume moq-net's instant
+- [moq-net on moq-clock](/quest/m1/time/net.md) - these crates consume moq-net's instant
 
 ## Related
 

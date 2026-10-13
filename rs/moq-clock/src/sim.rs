@@ -1,0 +1,723 @@
+//! A single-threaded, deterministic executor with simulated time.
+//!
+//! Inside [`run`], the ambient clock is the simulator's: [`now`](crate::now) starts
+//! at [`Instant::ZERO`], [`wall`](crate::wall) at [`Timestamp::UNIX_EPOCH`], and
+//! [`sleep`](crate::sleep), [`timeout`](crate::timeout), and
+//! [`interval`](crate::interval) arm simulated timers. Time never moves on its own:
+//! once every task has stalled, [`run`] jumps the clock to the earliest armed
+//! timer and wakes it, like tokio's paused clock, so a test never waits on the
+//! host clock. A run whose tasks are all parked with nothing armed can never
+//! finish, so it panics rather than hang.
+//!
+//! Caller-driven state machines take time from their caller:
+//! [`drive`](crate::drive) polls one with the simulated instant, and [`attach`]
+//! keeps an externally owned clock, such as [`Deadlines`](crate::Deadlines), in step.
+
+use std::{
+	cell::RefCell,
+	collections::BTreeMap,
+	future::{Future, IntoFuture},
+	pin::{Pin, pin},
+	rc::Rc,
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering},
+	},
+	task::{Context, Poll, Wake, Waker},
+	time::Duration,
+};
+
+use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
+
+use crate::{Instant, Manual, Timestamp};
+
+thread_local! {
+	static CURRENT: RefCell<Option<Rc<Runtime>>> = const { RefCell::new(None) };
+}
+
+/// A source of deadlines kept in step with simulated time: called with the new
+/// instant whenever time moves, it returns its earliest deadline still pending.
+type Source = Box<dyn FnMut(Instant) -> Option<Instant>>;
+
+type Task = Pin<Box<dyn Future<Output = ()>>>;
+
+struct Runtime {
+	/// Spawned since the run loop last collected them.
+	spawned: RefCell<Vec<Task>>,
+	time: RefCell<Time>,
+	sources: RefCell<Vec<Source>>,
+}
+
+struct Time {
+	clock: Manual,
+	/// Orders timers armed for the same instant by when they were armed.
+	next: u64,
+	timers: BTreeMap<(Instant, u64), Waker>,
+}
+
+impl Runtime {
+	fn now(&self) -> Instant {
+		self.time.borrow().clock.now()
+	}
+
+	/// Move time to `at` (never backwards), waking every timer and source due by then.
+	fn advance_to(&self, at: Instant) {
+		let due = {
+			let mut time = self.time.borrow_mut();
+			let now = time.clock.now();
+			time.clock.advance(at.saturating_duration_since(now));
+			let now = time.clock.now();
+			let mut due = Vec::new();
+			while let Some(entry) = time.timers.first_entry() {
+				if entry.key().0 > now {
+					break;
+				}
+				due.push(entry.remove());
+			}
+			due
+		};
+		due.into_iter().for_each(Waker::wake);
+		self.poll_sources();
+	}
+
+	/// Bring every source up to the current instant, returning the earliest deadline they report.
+	fn poll_sources(&self) -> Option<Instant> {
+		let now = self.now();
+		// Taken out so a source may attach another while it runs.
+		let mut sources = std::mem::take(&mut *self.sources.borrow_mut());
+		let next = sources.iter_mut().filter_map(|source| source(now)).min();
+		let mut current = self.sources.borrow_mut();
+		sources.append(&mut current);
+		*current = sources;
+		next
+	}
+
+	/// Jump to the earliest armed timer or source deadline. False when nothing is armed.
+	fn advance(&self) -> bool {
+		let timer = self.time.borrow().timers.first_key_value().map(|((at, _), _)| *at);
+		let source = self.poll_sources();
+		match timer.into_iter().chain(source).min() {
+			Some(at) => {
+				self.advance_to(at);
+				true
+			}
+			None => false,
+		}
+	}
+}
+
+fn current() -> Option<Rc<Runtime>> {
+	CURRENT.with(|current| current.borrow().clone())
+}
+
+fn expect_current() -> Rc<Runtime> {
+	current().expect("not inside moq_clock::sim::run")
+}
+
+/// The simulated instant, when the calling thread is inside [`run`].
+pub(crate) fn now() -> Option<Instant> {
+	current().map(|runtime| runtime.now())
+}
+
+/// The simulated wall time, when the calling thread is inside [`run`].
+pub(crate) fn wall() -> Option<Timestamp> {
+	current().map(|runtime| runtime.time.borrow().clock.wall())
+}
+
+/// Whether the calling thread is inside [`run`].
+pub fn is_running() -> bool {
+	CURRENT.with(|current| current.borrow().is_some())
+}
+
+/// Raises a flag the run loop checks, for the root future and the spawned tasks.
+struct Flag(AtomicBool);
+
+impl Wake for Flag {
+	fn wake(self: Arc<Self>) {
+		self.0.store(true, Ordering::SeqCst);
+	}
+}
+
+/// Clears the thread's runtime when [`run`] returns or unwinds.
+struct Enter;
+
+impl Drop for Enter {
+	fn drop(&mut self) {
+		CURRENT.with(|current| current.borrow_mut().take());
+	}
+}
+
+/// Run `future` to completion, along with everything it spawns, in simulated time.
+///
+/// Spawned tasks still pending when `future` finishes are dropped.
+///
+/// # Panics
+///
+/// When called inside another `run`, and when every task is parked with no timer
+/// armed, which is a deadlock.
+pub fn run<F: IntoFuture>(future: F) -> F::Output {
+	let runtime = Rc::new(Runtime {
+		spawned: RefCell::new(Vec::new()),
+		time: RefCell::new(Time {
+			clock: Manual::new(),
+			next: 0,
+			timers: BTreeMap::new(),
+		}),
+		sources: RefCell::new(Vec::new()),
+	});
+	CURRENT.with(|current| {
+		let mut current = current.borrow_mut();
+		assert!(current.is_none(), "moq_clock::sim::run cannot nest");
+		*current = Some(runtime.clone());
+	});
+	let enter = Enter;
+
+	let mut future = pin!(future.into_future());
+	let root = Arc::new(Flag(AtomicBool::new(true)));
+	let root_waker = Waker::from(root.clone());
+	let mut root_cx = Context::from_waker(&root_waker);
+
+	let mut tasks = FuturesUnordered::new();
+	let pool = Arc::new(Flag(AtomicBool::new(false)));
+	let pool_waker = Waker::from(pool.clone());
+	let mut pool_cx = Context::from_waker(&pool_waker);
+
+	// The root and the spawned tasks take turns, so a task that keeps waking
+	// itself cannot starve the root: `FuturesUnordered` yields after one pass.
+	let output = loop {
+		if root.0.swap(false, Ordering::SeqCst)
+			&& let Poll::Ready(output) = future.as_mut().poll(&mut root_cx)
+		{
+			break output;
+		}
+		tasks.extend(runtime.spawned.take());
+		pool.0.store(false, Ordering::SeqCst);
+		while let Poll::Ready(Some(())) = tasks.poll_next_unpin(&mut pool_cx) {}
+		if root.0.load(Ordering::SeqCst) || pool.0.load(Ordering::SeqCst) || !runtime.spawned.borrow().is_empty() {
+			continue;
+		}
+		assert!(
+			runtime.advance(),
+			"deadlock: every task is parked and no timer is armed"
+		);
+	};
+
+	drop(tasks);
+	drop(runtime.spawned.take());
+	drop(enter);
+	// Sources and timers may hold wakers into the dropped tasks.
+	runtime.sources.borrow_mut().clear();
+	runtime.time.borrow_mut().timers.clear();
+	output
+}
+
+/// Keep an externally owned clock in step with simulated time.
+///
+/// `source` is called with the new instant whenever time moves and returns its
+/// earliest pending deadline, which [`run`] treats like an armed timer.
+///
+/// # Panics
+///
+/// Outside [`run`].
+pub fn attach(source: impl FnMut(Instant) -> Option<Instant> + 'static) {
+	expect_current().sources.borrow_mut().push(Box::new(source));
+}
+
+/// Let `duration` of simulated time pass, moving both the instant and the wall
+/// time and waking everything due, then yield.
+///
+/// # Panics
+///
+/// Outside [`run`].
+pub async fn advance(duration: Duration) {
+	let runtime = expect_current();
+	let at = runtime.now() + duration;
+	runtime.advance_to(at);
+	yield_now().await;
+}
+
+/// Set the simulated wall time, forward or back, as a clock correction would.
+/// No time passes and no timer fires.
+///
+/// # Panics
+///
+/// Outside [`run`].
+pub fn step_wall(wall: Timestamp) {
+	expect_current().time.borrow_mut().clock.step_wall(wall);
+}
+
+/// Yield once, letting every other ready task run first.
+pub fn yield_now() -> impl Future<Output = ()> {
+	let mut yielded = false;
+	std::future::poll_fn(move |cx| {
+		if yielded {
+			return Poll::Ready(());
+		}
+		yielded = true;
+		cx.waker().wake_by_ref();
+		Poll::Pending
+	})
+}
+
+/// A simulated timer behind [`Sleep`](crate::Sleep).
+pub(crate) struct Timer {
+	runtime: Rc<Runtime>,
+	at: Instant,
+	key: Option<(Instant, u64)>,
+}
+
+impl Timer {
+	/// A timer for `at`, or `None` outside [`run`].
+	pub(crate) fn new(at: Instant) -> Option<Self> {
+		Some(Self {
+			runtime: current()?,
+			at,
+			key: None,
+		})
+	}
+
+	pub(crate) fn reset(&mut self, at: Instant) {
+		self.disarm();
+		self.at = at;
+	}
+
+	fn disarm(&mut self) {
+		if let Some(key) = self.key.take() {
+			self.runtime.time.borrow_mut().timers.remove(&key);
+		}
+	}
+
+	pub(crate) fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+		let mut time = self.runtime.time.borrow_mut();
+		if time.clock.now() >= self.at {
+			if let Some(key) = self.key.take() {
+				time.timers.remove(&key);
+			}
+			return Poll::Ready(());
+		}
+		let key = *self.key.get_or_insert_with(|| {
+			let id = time.next;
+			time.next += 1;
+			(self.at, id)
+		});
+		time.timers.insert(key, cx.waker().clone());
+		Poll::Pending
+	}
+}
+
+impl Drop for Timer {
+	fn drop(&mut self) {
+		self.disarm();
+	}
+}
+
+/// A spawned task failed to complete: it panicked or was aborted.
+pub struct JoinError(Option<Box<dyn std::any::Any + Send>>);
+
+impl JoinError {
+	/// Whether [`JoinHandle::abort`] cancelled the task.
+	pub fn is_cancelled(&self) -> bool {
+		self.0.is_none()
+	}
+
+	/// Whether the task panicked.
+	pub fn is_panic(&self) -> bool {
+		self.0.is_some()
+	}
+}
+
+impl std::fmt::Debug for JoinError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		std::fmt::Display::fmt(self, f)
+	}
+}
+
+impl std::fmt::Display for JoinError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match &self.0 {
+			None => f.write_str("task was cancelled"),
+			Some(panic) => match (panic.downcast_ref::<&str>(), panic.downcast_ref::<String>()) {
+				(Some(message), _) => write!(f, "task panicked: {message}"),
+				(_, Some(message)) => write!(f, "task panicked: {message}"),
+				_ => f.write_str("task panicked"),
+			},
+		}
+	}
+}
+
+impl std::error::Error for JoinError {}
+
+struct Join<T> {
+	output: Option<Result<T, JoinError>>,
+	finished: bool,
+	aborted: bool,
+	detached: bool,
+	task: Option<Waker>,
+	joiner: Option<Waker>,
+}
+
+/// Await a spawned task's output. Dropping it detaches the task.
+pub struct JoinHandle<T> {
+	join: Rc<RefCell<Join<T>>>,
+}
+
+impl<T> JoinHandle<T> {
+	/// Cancel the task: it is dropped before its next poll.
+	pub fn abort(&self) {
+		let mut join = self.join.borrow_mut();
+		join.aborted = true;
+		if let Some(task) = join.task.take() {
+			task.wake();
+		}
+	}
+
+	/// Whether the task has completed, panicked, or been cancelled.
+	pub fn is_finished(&self) -> bool {
+		self.join.borrow().finished
+	}
+}
+
+impl<T> Future for JoinHandle<T> {
+	type Output = Result<T, JoinError>;
+
+	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+		let mut join = self.join.borrow_mut();
+		if let Some(output) = join.output.take() {
+			return Poll::Ready(output);
+		}
+		assert!(!join.finished, "JoinHandle polled after completion");
+		join.joiner = Some(cx.waker().clone());
+		Poll::Pending
+	}
+}
+
+impl<T> Drop for JoinHandle<T> {
+	fn drop(&mut self) {
+		let output = {
+			let mut join = self.join.borrow_mut();
+			join.detached = true;
+			join.output.take()
+		};
+		// A task that already panicked won't finish again to report it.
+		if let Some(Err(JoinError(Some(panic)))) = output
+			&& !std::thread::panicking()
+		{
+			std::panic::resume_unwind(panic);
+		}
+	}
+}
+
+/// Spawn a task on the running simulator.
+///
+/// A panic is kept for the [`JoinHandle`], or propagated out of [`run`] once the
+/// handle is dropped, so a detached task cannot fail silently.
+///
+/// # Panics
+///
+/// Outside [`run`].
+pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
+where
+	F: Future + 'static,
+	F::Output: 'static,
+{
+	let runtime = expect_current();
+	let join = Rc::new(RefCell::new(Join {
+		output: None,
+		finished: false,
+		aborted: false,
+		detached: false,
+		task: None,
+		joiner: None,
+	}));
+	let state = join.clone();
+	let mut future = Some(Box::pin(future));
+	// Every poll of a spawned task goes through here.
+	let task = std::future::poll_fn(move |cx| {
+		let finish = |output| {
+			let mut join = state.borrow_mut();
+			join.finished = true;
+			if join.detached {
+				if let Err(JoinError(Some(panic))) = output {
+					std::panic::resume_unwind(panic);
+				}
+				return;
+			}
+			join.output = Some(output);
+			if let Some(joiner) = join.joiner.take() {
+				joiner.wake();
+			}
+		};
+
+		if state.borrow().aborted {
+			future = None;
+			finish(Err(JoinError(None)));
+			return Poll::Ready(());
+		}
+		state.borrow_mut().task = Some(cx.waker().clone());
+
+		let running = future.as_mut().expect("task polled after completion");
+		let output = match std::panic::AssertUnwindSafe(running.as_mut())
+			.catch_unwind()
+			.poll_unpin(cx)
+		{
+			Poll::Pending => return Poll::Pending,
+			Poll::Ready(output) => output,
+		};
+		future = None;
+		finish(output.map_err(|panic| JoinError(Some(panic))));
+		Poll::Ready(())
+	});
+	runtime.spawned.borrow_mut().push(Box::pin(task));
+	JoinHandle { join }
+}
+
+#[cfg(test)]
+mod tests {
+	use std::cell::Cell;
+
+	use super::*;
+	use crate::{Deadline, Deadlines, Elapsed, MissedTickBehavior};
+
+	fn at(secs: u64) -> Instant {
+		Instant::ZERO + Duration::from_secs(secs)
+	}
+
+	#[crate::test]
+	async fn starts_at_zero() {
+		assert_eq!(crate::now(), Instant::ZERO);
+		assert_eq!(crate::wall(), Timestamp::UNIX_EPOCH);
+	}
+
+	#[test]
+	fn time_moves_only_when_every_task_stalls() {
+		run(async {
+			let a = spawn(async {
+				crate::sleep(Duration::from_secs(5)).await;
+				crate::now()
+			});
+			let b = spawn(async {
+				crate::sleep(Duration::from_secs(2)).await;
+				crate::now()
+			});
+			assert_eq!(crate::now(), Instant::ZERO, "spawning does not move time");
+			assert_eq!(b.await.unwrap(), at(2));
+			assert_eq!(a.await.unwrap(), at(5));
+			assert_eq!(
+				crate::wall(),
+				Timestamp::UNIX_EPOCH + Duration::from_secs(5),
+				"wall time moved too"
+			);
+		});
+	}
+
+	#[crate::test]
+	async fn timeout_uses_simulated_time() {
+		let slow = crate::timeout(Duration::from_secs(1), crate::sleep(Duration::from_secs(60))).await;
+		assert_eq!(slow.unwrap_err(), Elapsed);
+		assert_eq!(crate::now(), at(1));
+		let fast = crate::timeout(Duration::from_secs(60), async { 7 }).await;
+		assert_eq!(fast, Ok(7));
+	}
+
+	#[crate::test]
+	async fn advance_wakes_due_timers() {
+		let timer = spawn(crate::sleep(Duration::from_secs(3)));
+		yield_now().await;
+		advance(Duration::from_secs(3)).await;
+		assert!(timer.is_finished());
+		assert_eq!(crate::now(), at(3));
+	}
+
+	#[crate::test]
+	async fn a_wall_step_passes_no_time() {
+		advance(Duration::from_secs(10)).await;
+		step_wall(Timestamp::UNIX_EPOCH + Duration::from_secs(4));
+		assert_eq!(crate::now(), at(10), "a step back passes no time");
+		assert_eq!(crate::wall(), Timestamp::UNIX_EPOCH + Duration::from_secs(4));
+		advance(Duration::from_secs(1)).await;
+		assert_eq!(crate::wall(), Timestamp::UNIX_EPOCH + Duration::from_secs(5));
+	}
+
+	#[crate::test]
+	async fn cancellation() {
+		let fired = Rc::new(Cell::new(false));
+		let task = spawn({
+			let fired = fired.clone();
+			async move {
+				crate::sleep(Duration::from_secs(1)).await;
+				fired.set(true);
+			}
+		});
+		yield_now().await;
+		task.abort();
+		assert!(task.await.unwrap_err().is_cancelled());
+		// Nothing else is armed: a dropped sleep left no timer behind, so time jumps here.
+		crate::sleep(Duration::from_secs(5)).await;
+		assert!(!fired.get());
+		assert_eq!(crate::now(), at(5));
+	}
+
+	#[crate::test]
+	async fn rearming() {
+		let mut sleep = crate::sleep(Duration::from_secs(1));
+		sleep.reset(at(3));
+		(&mut sleep).await;
+		assert_eq!(crate::now(), at(3), "the old instant is gone");
+		sleep.reset(at(4));
+		sleep.await;
+		assert_eq!(crate::now(), at(4), "a completed sleep re-arms");
+	}
+
+	#[crate::test]
+	async fn an_expired_deadline_fires_at_once() {
+		advance(Duration::from_secs(10)).await;
+		crate::sleep_until(at(5)).await;
+		crate::sleep_until(at(10)).await;
+		crate::sleep(Duration::ZERO).await;
+		assert_eq!(crate::now(), at(10));
+	}
+
+	#[crate::test]
+	async fn equal_deadlines_fire_in_arming_order() {
+		let order = Rc::new(RefCell::new(Vec::new()));
+		// Created in one order; a sleep arms on its first poll, so spawning them in
+		// the other order arms them in that order.
+		let first = crate::sleep_until(at(1));
+		let second = crate::sleep_until(at(1));
+		let record = |name: &'static str, sleep: crate::Sleep| {
+			let order = order.clone();
+			spawn(async move {
+				sleep.await;
+				order.borrow_mut().push(name);
+			})
+		};
+		let a = record("second", second);
+		let b = record("first", first);
+		a.await.unwrap();
+		b.await.unwrap();
+		assert_eq!(*order.borrow(), ["second", "first"]);
+	}
+
+	#[crate::test]
+	async fn interval_bursts_missed_ticks_by_default() {
+		let mut ticks = crate::interval(Duration::from_secs(1));
+		assert_eq!(ticks.tick().await, at(0), "the first tick is immediate");
+		advance(Duration::from_millis(3500)).await;
+		assert_eq!(ticks.tick().await, at(1));
+		assert_eq!(ticks.tick().await, at(2));
+		assert_eq!(ticks.tick().await, at(3));
+		assert_eq!(
+			crate::now(),
+			Instant::ZERO + Duration::from_millis(3500),
+			"caught up at once"
+		);
+		assert_eq!(ticks.tick().await, at(4));
+		assert_eq!(crate::now(), at(4));
+	}
+
+	#[crate::test]
+	async fn interval_delay_restarts_from_the_late_tick() {
+		let mut ticks = crate::interval(Duration::from_secs(1));
+		ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+		ticks.tick().await;
+		advance(Duration::from_millis(3500)).await;
+		assert_eq!(ticks.tick().await, at(1));
+		assert_eq!(ticks.tick().await, Instant::ZERO + Duration::from_millis(4500));
+	}
+
+	#[crate::test]
+	async fn interval_skip_resumes_the_schedule() {
+		let mut ticks = crate::interval(Duration::from_secs(1));
+		ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
+		ticks.tick().await;
+		advance(Duration::from_millis(3500)).await;
+		assert_eq!(ticks.tick().await, at(1));
+		assert_eq!(ticks.tick().await, at(4));
+	}
+
+	#[crate::test]
+	async fn abort_cancels_a_task() {
+		let task = spawn(std::future::pending::<()>());
+		task.abort();
+		assert!(task.await.unwrap_err().is_cancelled());
+	}
+
+	#[crate::test]
+	async fn a_panic_waits_in_the_handle() {
+		let task = spawn(async { panic!("boom") });
+		yield_now().await;
+		assert!(task.is_finished());
+		assert!(task.await.unwrap_err().is_panic());
+	}
+
+	#[test]
+	#[should_panic(expected = "boom")]
+	fn a_detached_panic_fails_the_run() {
+		run(async {
+			drop(spawn(async { panic!("boom") }));
+			yield_now().await;
+		});
+	}
+
+	#[test]
+	#[should_panic(expected = "boom")]
+	fn dropping_the_handle_of_a_panicked_task_fails_the_run() {
+		run(async {
+			let task = spawn(async { panic!("boom") });
+			yield_now().await;
+			assert!(task.is_finished());
+			drop(task);
+		});
+	}
+
+	#[crate::test]
+	async fn a_self_waking_task_cannot_starve_the_root() {
+		let done = Rc::new(Cell::new(false));
+		let task = spawn({
+			let done = done.clone();
+			async move {
+				while !done.get() {
+					yield_now().await;
+				}
+			}
+		});
+		yield_now().await;
+		done.set(true);
+		task.await.unwrap();
+	}
+
+	#[test]
+	#[should_panic(expected = "deadlock")]
+	fn a_deadlock_panics() {
+		run(std::future::pending::<()>());
+	}
+
+	#[crate::test]
+	async fn attached_deadlines_advance_with_time() {
+		let deadlines = Deadlines::new(crate::now());
+		let driven = deadlines.clone();
+		attach(move |now| {
+			driven.advance(now);
+			driven.next()
+		});
+		let mut deadline = Deadline::after(&deadlines, Duration::from_secs(4));
+		// Nothing else is armed, so the stall jumps straight to the queue's deadline.
+		kio::wait(|waiter| deadline.poll(waiter)).await;
+		assert_eq!(crate::now(), at(4));
+	}
+
+	#[crate::test]
+	async fn drive_polls_at_each_requested_instant() {
+		let mut polls = Vec::new();
+		let err = crate::drive(|now, _waiter| {
+			polls.push(now);
+			match polls.len() {
+				3 => Err("done"),
+				n => Ok(Some(now + Duration::from_secs(n as u64))),
+			}
+		})
+		.await;
+		assert_eq!(err, "done");
+		assert_eq!(polls, [at(0), at(1), at(3)]);
+	}
+}

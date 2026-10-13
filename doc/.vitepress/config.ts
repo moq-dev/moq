@@ -177,6 +177,7 @@ export default defineConfig({
 								{ text: "moq-room", link: "/lib/rs/moq-room" },
 								{ text: "moq-json", link: "/lib/rs/moq-json" },
 								{ text: "moq-flate", link: "/lib/rs/moq-flate" },
+								{ text: "moq-clock", link: "/lib/rs/moq-clock" },
 							],
 						},
 						{

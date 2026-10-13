@@ -21,7 +21,7 @@ Found in the 2026-09-30 fork planning; none needs a QUIC API change:
 - Datagram receive: `endpoint.rs` allocates a `BytesMut` per GRO segment.
   Copy once per completion and split it into segments.
 
-The clock-read fix is [moq-uring on moq-time](/quest/m1/time/uring.md).
+The clock-read fix is [moq-uring on moq-clock](/quest/m1/time/uring.md).
 Measure with the echo benches and `just bench`. Paths above are pre-fork names.
 
 ## Required
