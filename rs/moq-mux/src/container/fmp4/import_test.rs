@@ -1690,6 +1690,244 @@ async fn imports_the_sample_defaults_fixtures() {
 }
 
 #[test]
+fn an_unknown_subtitle_track_does_not_refuse_supported_media() {
+	use mp4_atom::{DecodeMaybe, Encode};
+	let mut cursor = std::io::Cursor::new(include_bytes!("test_data/bbb.mp4"));
+	let mut input = Vec::new();
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
+		if let mp4_atom::Any::Moov(mut moov) = atom {
+			let mut subtitle = moov.trak[0].clone();
+			subtitle.tkhd.track_id = 99;
+			subtitle.mdia.hdlr.handler = b"sbtl".into();
+			moov.trak.push(subtitle);
+			moov.encode(&mut input).unwrap();
+			break;
+		} else {
+			atom.encode(&mut input).unwrap();
+		}
+	}
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&input).unwrap();
+	importer.finish().unwrap();
+	assert!(!catalog.snapshot().video.renditions.is_empty());
+	assert!(catalog.snapshot().text.renditions.is_empty());
+}
+
+fn webvtt_init(header: &str) -> Vec<u8> {
+	let (_, moov) = decode_init(include_bytes!("test_data/bbb.mp4"));
+	let mut trak = moov.trak[0].clone();
+	trak.tkhd.track_id = 1;
+	trak.mdia.mdhd.timescale = 1000;
+	trak.mdia.mdhd.language = "eng".into();
+	trak.mdia.hdlr.handler = b"text".into();
+	trak.mdia.hdlr.name = "English captions".into();
+	trak.mdia.minf.stbl.stsd.codecs = vec![mp4_atom::Codec::Wvtt(mp4_atom::Wvtt {
+		plaintext: mp4_atom::PlainText {
+			data_reference_index: 1,
+		},
+		config: mp4_atom::VttC { config: header.into() },
+		label: Some(mp4_atom::Vlab {
+			source_label: "urn:example:source".into(),
+		}),
+		btrt: None,
+	})];
+	audio_init(trak)
+}
+
+/// One fragment carrying `samples` back to back, each lasting `duration` ms from `decode_time`.
+fn webvtt_fragment(decode_time: u64, samples: &[Vec<u8>], duration: u32) -> Vec<u8> {
+	let moof = mp4_atom::Moof {
+		mfhd: mp4_atom::Mfhd { sequence_number: 1 },
+		traf: vec![mp4_atom::Traf {
+			tfhd: mp4_atom::Tfhd {
+				track_id: 1,
+				default_sample_duration: Some(duration),
+				..Default::default()
+			},
+			tfdt: Some(mp4_atom::Tfdt {
+				base_media_decode_time: decode_time,
+			}),
+			trun: vec![mp4_atom::Trun {
+				data_offset: None,
+				entries: samples
+					.iter()
+					.map(|sample| mp4_atom::TrunEntry {
+						size: Some(sample.len() as u32),
+						..Default::default()
+					})
+					.collect(),
+			}],
+			..Default::default()
+		}],
+	};
+	let mut output = Vec::new();
+	moof.encode(&mut output).unwrap();
+	mp4_atom::Mdat { data: samples.concat() }.encode(&mut output).unwrap();
+	output
+}
+
+fn webvtt_input(payload: Vec<u8>, duration: u32) -> Vec<u8> {
+	let mut input = webvtt_init("WEBVTT");
+	input.extend(webvtt_fragment(250, &[payload], duration));
+	input
+}
+
+fn subtitle_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+	let mut bytes = Vec::new();
+	bytes.extend_from_slice(&((8 + payload.len()) as u32).to_be_bytes());
+	bytes.extend_from_slice(kind);
+	bytes.extend_from_slice(payload);
+	bytes
+}
+
+#[tokio::test(start_paused = true)]
+async fn webvtt_samples_become_timed_text_with_source_metadata() {
+	let mut cue = subtitle_box(b"iden", b"cue-1");
+	cue.extend(subtitle_box(b"sttg", b"align:start"));
+	cue.extend(subtitle_box(b"payl", b"Hello"));
+	let payload = subtitle_box(b"vttc", &cue);
+	let input = webvtt_input(payload, 1250);
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&input).unwrap();
+	importer.finish().unwrap();
+	let snapshot = catalog.snapshot();
+	assert_eq!(snapshot.text.renditions.len(), 1);
+	let (name, config) = snapshot.text.renditions.iter().next().unwrap();
+	assert_eq!(config.lang.as_deref(), Some("eng"));
+	assert_eq!(
+		config.label.as_deref(),
+		Some("English captions"),
+		"hdlr name, not the vlab source"
+	);
+	assert_eq!(config.role, hang::catalog::TextRole::Subtitle);
+	let track = consumer
+		.track(name)
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default())
+		.await
+		.unwrap();
+	let mut reader = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
+	let frame = reader.read().await.unwrap().unwrap();
+	assert_eq!(frame.timestamp.as_micros(), 250_000);
+	assert_eq!(
+		&frame.payload[..],
+		b"WEBVTT\n\ncue-1\n00:00:00.250 --> 00:00:01.500 align:start\nHello\n\n"
+	);
+}
+
+#[test]
+fn malformed_webvtt_samples_are_refused() {
+	let payl = subtitle_box(b"payl", b"hello");
+	let mut duplicate = payl.clone();
+	duplicate.extend_from_slice(&payl);
+	for (payload, duration) in [
+		(Vec::new(), 1250),
+		(vec![0, 0, 0, 4], 1250),
+		(subtitle_box(b"vttc", &[]), 1250),
+		(subtitle_box(b"vttc", &duplicate), 1250),
+		(subtitle_box(b"vttc", &subtitle_box(b"payl", b"\xff")), 1250),
+		(subtitle_box(b"vttc", &payl), 0),
+		// Inline timestamps need `ctim` to anchor them.
+		(subtitle_box(b"vttc", &subtitle_box(b"payl", b"a <00:01.000>b")), 1250),
+	] {
+		let input = webvtt_input(payload, duration);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut importer = super::Import::new(broadcast, catalog.reserve());
+		assert!(importer.decode(&input).is_err());
+	}
+}
+
+#[test]
+fn empty_and_multiple_webvtt_cues_are_supported() {
+	let cue = subtitle_box(b"vttc", &subtitle_box(b"payl", b"hello"));
+	let mut multiple = cue.clone();
+	multiple.extend(cue);
+	for payload in [subtitle_box(b"vtte", &[]), multiple] {
+		let input = webvtt_input(payload, 1250);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut importer = super::Import::new(broadcast, catalog.reserve());
+		importer.decode(&input).unwrap();
+		importer.finish().unwrap();
+		assert_eq!(catalog.snapshot().text.renditions.len(), 1);
+	}
+}
+
+/// The WebVTT `Kind` header sets the role, and lone CR line terminators are accepted.
+#[tokio::test(start_paused = true)]
+async fn webvtt_kind_and_lone_cr_terminators() {
+	let mut input = webvtt_init("WEBVTT\rKind: captions\r");
+	input.extend(webvtt_fragment(
+		250,
+		&[subtitle_box(b"vttc", &subtitle_box(b"payl", b"Hello\rworld"))],
+		1250,
+	));
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&input).unwrap();
+	importer.finish().unwrap();
+	let snapshot = catalog.snapshot();
+	let (name, config) = snapshot.text.renditions.iter().next().unwrap();
+	assert_eq!(config.role, hang::catalog::TextRole::Caption);
+	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+	let mut reader = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
+	let frame = reader.read().await.unwrap().unwrap();
+	assert_eq!(
+		&frame.payload[..],
+		b"WEBVTT\nKind: captions\n\n00:00:00.250 --> 00:00:01.500\nHello\nworld\n\n"
+	);
+}
+
+/// Text closes a group per cue, so a segment seek must not rewind onto a cue group already written.
+#[test]
+fn webvtt_seek_after_several_cues_does_not_reuse_a_group() {
+	let cue = subtitle_box(b"vttc", &subtitle_box(b"payl", b"hello"));
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&webvtt_init("WEBVTT")).unwrap();
+	importer.seek(100).unwrap();
+	importer
+		.decode(&webvtt_fragment(0, &[cue.clone(), cue.clone(), cue.clone()], 1000))
+		.unwrap();
+	// Segment 101 was missed; groups 100..=102 already hold the three cues.
+	importer.seek(102).unwrap();
+	importer.decode(&webvtt_fragment(4000, &[cue], 1000)).unwrap();
+	importer.finish().unwrap();
+}
+
+/// A text fragment may not start inside the decode span of the previous fragment's samples.
+#[test]
+fn webvtt_fragment_overlapping_previous_samples_is_refused() {
+	let cue = subtitle_box(b"vttc", &subtitle_box(b"payl", b"hello"));
+	for (start, valid) in [(1500, false), (2000, true)] {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut importer = super::Import::new(broadcast, catalog.reserve());
+		importer.decode(&webvtt_init("WEBVTT")).unwrap();
+		importer
+			.decode(&webvtt_fragment(0, &[cue.clone(), cue.clone()], 1000))
+			.unwrap();
+		let result = importer.decode(&webvtt_fragment(start, std::slice::from_ref(&cue), 1000));
+		assert_eq!(result.is_ok(), valid, "start {start}: {result:?}");
+	}
+}
+
+#[test]
 #[tracing_test::traced_test]
 fn emsg_metadata_drops_warn_once() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -1729,4 +1967,35 @@ fn emsg_metadata_drops_warn_once() {
 			Err(format!("expected one metadata warning, got {warnings}"))
 		}
 	});
+}
+
+/// A cue shorter than a millisecond keeps a positive WebVTT duration.
+#[tokio::test(start_paused = true)]
+async fn webvtt_sub_millisecond_cue_stays_positive() {
+	// A 1 MHz track, so the cue can last 400 us.
+	let (ftyp, mut moov) = decode_init(&webvtt_init("WEBVTT"));
+	moov.trak[0].mdia.mdhd.timescale = 1_000_000;
+	let mut init = Vec::new();
+	ftyp.encode(&mut init).unwrap();
+	moov.encode(&mut init).unwrap();
+	init.extend(webvtt_fragment(
+		250_200,
+		&[subtitle_box(b"vttc", &subtitle_box(b"payl", b"hi"))],
+		400,
+	));
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&init).unwrap();
+	importer.finish().unwrap();
+	let snapshot = catalog.snapshot();
+	let name = snapshot.text.renditions.keys().next().unwrap();
+	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+	let mut reader = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
+	let frame = reader.read().await.unwrap().unwrap();
+	assert_eq!(&frame.payload[..], b"WEBVTT\n\n00:00:00.250 --> 00:00:00.251\nhi\n\n");
 }

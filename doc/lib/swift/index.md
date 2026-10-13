@@ -35,7 +35,12 @@ let client = try Client()
 let session = try await client.connect(to: "https://relay.example.com")
 
 for try await event in try session.consume.announced(prefix: "live/", filter: "*/camera") {
-    guard case .start(let announcement) = event else { continue } // .update or .end
+    // A restart is a new publisher run at the same path: request it again.
+    let announcement: Announce
+    switch event {
+    case .start(let started), .restart(let started): announcement = started
+    default: continue // .update or .end
+    }
     // Prefixes stay origin-relative; captures reports what each wildcard matched.
     print(announcement.captures ?? [])
     let broadcast = try await session.consume.requestBroadcast(path: announcement.prefix)
@@ -58,7 +63,7 @@ let video = try broadcast.encodeVideo(
     output: VideoEncoderOutput(codec: .h264, track: "camera", kind: .auto)
 )
 try video.write(VideoFrame(timestampUs: pts, data: rgba))
-try broadcast.announce()
+try broadcast.announce(route: Route(epoch: mintEpoch())) // a fresh epoch per run
 try audio.finish()
 try video.finish()
 try broadcast.close()

@@ -26,6 +26,8 @@ use crate::catalog::Estimator;
 /// - AAC (MP4A)
 /// - Opus
 /// - FLAC
+///
+/// **Text:** WebVTT (`wvtt`), reconstructed as timed text; unsupported subtitle codecs are skipped.
 pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	/// The broadcast being produced
 	broadcast: moq_net::broadcast::Producer,
@@ -47,6 +49,7 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 
 	// A lookup to tracks in the broadcast
 	tracks: HashMap<u32, Fmp4Track<E>>,
+	text: HashMap<u32, super::text::Track>,
 
 	// Track ids skipped by `select`, so their moof fragments are ignored rather
 	// than treated as referencing an unknown track.
@@ -152,6 +155,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			initial_reservation: Some(reserved),
 			select: None,
 			tracks: HashMap::default(),
+			text: HashMap::default(),
 			skipped: HashSet::default(),
 			moov: None,
 			moof: None,
@@ -286,6 +290,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let handler = &trak.mdia.hdlr.handler;
 			let suffix = ".m4s";
 
+			if matches!(handler.as_ref(), b"sbtl" | b"subt" | b"text") {
+				if self.init_text(trak, &moov, &reserved)? {
+					continue;
+				}
+				tracing::warn!(track_id, handler = %handler, "unsupported fMP4 subtitle encoding, skipping");
+				self.skipped.insert(track_id);
+				continue;
+			}
+
 			let kind = Kind::from_handler(*handler)?;
 
 			// Drop tracks whose role isn't selected before minting or publishing them; their
@@ -347,13 +360,46 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 		// The reservation stays held until the first fragment anchors the clock, unless no track
 		// was declared: then no fragment ever will.
-		if self.tracks.is_empty() {
+		if self.tracks.is_empty() && self.text.is_empty() {
 			self.initial_reservation = None;
 		}
 
 		self.moov = Some(moov);
 
 		Ok(())
+	}
+
+	fn init_text(&mut self, trak: &Trak, moov: &Moov, reserved: &crate::catalog::Reserved<E>) -> Result<bool> {
+		let [mp4_atom::Codec::Wvtt(codec)] = trak.mdia.minf.stbl.stsd.codecs.as_slice() else {
+			return Ok(false);
+		};
+		if codec.plaintext.data_reference_index != 1 {
+			return Err(Error::InvalidSubtitle("external subtitle data reference").into());
+		}
+		let header = crate::container::text::header(&codec.config.config).map_err(Error::InvalidSubtitle)?;
+		let mut config = hang::catalog::TextConfig::new(hang::catalog::TextFormat::Vtt);
+		config.role = crate::container::text::role(&header);
+		config.lang = Some(trak.mdia.mdhd.language.clone());
+		// The picker label is the HandlerBox name; `vlab` is an opaque source identifier.
+		config.label = (!trak.mdia.hdlr.name.is_empty()).then(|| trak.mdia.hdlr.name.clone());
+		let wire = crate::catalog::hang::Container::new(&config.container, crate::container::Kind::Data)?;
+		let track = self.broadcast.create_track(
+			self.broadcast.unique_name(".mp4-t"),
+			self.catalog.track_info(hang::catalog::PRIORITY.text),
+		)?;
+		let producer = reserved.text(track, wire, config)?;
+		self.text.insert(
+			trak.tkhd.track_id,
+			super::text::Track {
+				producer,
+				header,
+				defaults: sample::Defaults::from_moov(moov, trak.tkhd.track_id),
+				timescale: moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?,
+				end_decode_time: None,
+				discontinuity: false,
+			},
+		);
+		Ok(true)
 	}
 
 	fn container(&self, trak: &Trak, moov: &Moov) -> Result<Container> {
@@ -674,6 +720,19 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// Loop over all of the traf boxes in the moof.
 		for traf in &moof.traf {
 			let track_id = traf.tfhd.track_id;
+			if let Some(track) = self.text.get_mut(&track_id) {
+				track.extract(
+					super::text::Fragment {
+						traf,
+						data: &mdat.data,
+						moof_size,
+						header_size,
+					},
+					&mut self.timebase,
+				)?;
+				self.initial_reservation = None;
+				continue;
+			}
 			let track = match self.tracks.get_mut(&track_id) {
 				Some(track) => track,
 				// A fragment for a track `select` dropped: ignore it.
@@ -960,6 +1019,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Finish all tracks, flushing current groups.
 	pub fn finish(&mut self) -> Result<()> {
+		for track in self.text.values_mut() {
+			track.producer.finish()?;
+		}
 		// No frame follows to anchor the clock, so publish the declared track set now.
 		self.initial_reservation = None;
 		for track in self.tracks.values_mut() {
@@ -979,6 +1041,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Abort all tracks with `err` instead of finishing, so subscribers see the real
 	/// cause rather than [`moq_net::Error::Dropped`]. Consumes the importer.
 	pub fn abort(mut self, err: moq_net::Error) {
+		for track in std::mem::take(&mut self.text).into_values() {
+			track.producer.abort(err.clone());
+		}
 		// Dropping each track's rendition retires its catalog entry.
 		for mut track in std::mem::take(&mut self.tracks).into_values() {
 			if let Some(g) = track.group.take() {
@@ -993,8 +1058,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Broadcast-wide: every track inside this fMP4 import advances together; per-track
 	/// control is intentionally not exposed. Skipping sequences is not a new timeline, so the
 	/// next fragment must still advance past the last decode time; see
-	/// [`discontinuity`](Self::discontinuity).
+	/// [`discontinuity`](Self::discontinuity). Text spends a group per cue, so a text track that
+	/// is already past `sequence` continues from its own next group instead.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+		for track in self.text.values_mut() {
+			let next = track.producer.track().latest().map_or(0, |latest| latest + 1);
+			track.producer.seek(sequence.max(next))?;
+		}
 		for track in self.tracks.values_mut() {
 			track.estimator.cut(None);
 			track.publish_estimate()?;
@@ -1012,6 +1082,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// The source signalled a new timeline (an HLS `EXT-X-DISCONTINUITY`), so the next
 	/// fragment's decode time is not compared with the last one on each track.
 	pub fn discontinuity(&mut self) {
+		for track in self.text.values_mut() {
+			track.end_decode_time = None;
+			track.discontinuity = true;
+		}
 		for track in self.tracks.values_mut() {
 			track.last_decode_time = None;
 		}

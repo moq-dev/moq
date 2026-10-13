@@ -999,7 +999,13 @@ fn session(c: &mut Criterion) {
 	join(c, "relays", [1, 2, 8].map(|relays| Shape { relays, ..base }));
 
 	churn(c, "sessions", [1, 16, 128].map(|sessions| Churn { sessions, held: 16 }));
-	churn(c, "held", [1, 64, 1024].map(|held| Churn { sessions: 4, held }));
+	churn(
+		c,
+		"held",
+		[1, 4, 16]
+			.into_iter()
+			.flat_map(|sessions| [1, 64, 1024].map(move |held| Churn { sessions, held })),
+	);
 
 	// Production (2026-09): ~34 nodes x >=5 projects x ~24 tracks.
 	let prod = Dash {

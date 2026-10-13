@@ -270,6 +270,10 @@ pub enum MoqError {
 	#[error("invalid pattern: {reason}")]
 	InvalidPattern { reason: String },
 
+	/// An epoch was not a lowercase hyphenated UUIDv7.
+	#[error("{reason}")]
+	InvalidEpoch { reason: String },
+
 	/// A catalog rendition named another broadcast, but this consumer came from a standalone
 	/// broadcast rather than an origin, so there is nothing to resolve the reference against.
 	#[error("unresolvable broadcast reference: {reason}")]
@@ -404,6 +408,7 @@ from_message! {
 	tracing::metadata::ParseLevelError => LogLevel,
 	serde_json::Error => Json,
 	moq_net::InvalidPattern => InvalidPattern,
+	moq_net::InvalidEpoch => InvalidEpoch,
 }
 
 #[cfg(not(target_arch = "wasm32"))]

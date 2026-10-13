@@ -94,10 +94,13 @@ io_uring = false                     # Drive them with io_uring instead of tokio
 ```
 
 Packets are steered by connection ID, so a client that migrates stays with its
-worker. `workers` needs the `noq` feature and real certificate files rather
-than `tls.generate`. `io_uring` additionally needs Linux 6.12+, the `io-uring`
-cargo feature, and exactly one certificate; it serves moq-lite only, and
-refuses `mtu_discovery`. A setting the build or host cannot deliver refuses to
+worker. `workers` needs the `noq` feature. Every worker and the TLS stream
+listener serve one shared identity, generated or file-backed, so a certificate
+rotation reaches them together and `/certificate.sha256` stays accurate.
+
+`io_uring` additionally needs Linux 6.12+ and the `io-uring` cargo feature; it
+shares the same reloadable TLS identity, serves moq-lite only, and refuses
+`mtu_discovery`. A setting the build or host cannot deliver refuses to
 start rather than being ignored. If io\_uring workers fail to start naming
 `RLIMIT_MEMLOCK`, raise it (`LimitMEMLOCK=` under systemd).
 
@@ -234,11 +237,15 @@ drain_timeout = "10s"                # Top-level key, as --drain-timeout / MOQ_D
 
 The first SIGTERM or SIGINT starts a drain: every session is sent a GOAWAY
 asking it to reconnect elsewhere, including any that connect during the drain,
-and is force-closed if it is still connected when the window ends. The relay
-exits as soon as every session has left, when the window ends, or immediately
-on a second signal. `0` skips the GOAWAY. Only moq-lite-04+ and moq-transport
-clients act on a GOAWAY; older ones are closed when the window ends. An
-embedder can take over the signals; see [Embed](/bin/relay/#embed).
+and is force-closed if it is still connected when the window ends. Accepted
+connections still handshaking or awaiting authorization hold the drain until
+they finish, fail, or reach that same deadline, where any still pending is
+refused or closed. The relay exits as soon as
+every admitted connection has left (refusing any that arrive after), when
+the window ends, or immediately on a second signal. `0` skips the GOAWAY.
+Only moq-lite-04+ and moq-transport clients act on a GOAWAY; older ones are
+closed when the window ends. An embedder can take over the signals; see
+[Embed](/bin/relay/#embed).
 
 ## \[log]
 

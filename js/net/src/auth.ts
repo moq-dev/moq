@@ -13,7 +13,7 @@
  */
 
 import { type Getter, Signal } from "@moq/signals";
-import type { SessionCode } from "./error.ts";
+import { SessionCode } from "./error.ts";
 import type * as Path from "./path.ts";
 
 /**
@@ -38,6 +38,8 @@ export function grantsEqual(a: Grant | undefined, b: Grant | undefined): boolean
 
 /** The session or peer carries no AUTH exchange, or takes no tokens in band. */
 export class Unsupported extends Error {
+	/** The moq-lite session code for this condition. */
+	readonly code = SessionCode.Unsupported;
 	constructor(message = "auth unsupported") {
 		super(message);
 		this.name = "Unsupported";

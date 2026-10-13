@@ -27,7 +27,7 @@
 //! transition can be checked in a unit test by comparing the actions it emits.
 
 use std::{
-	collections::{BTreeMap, HashSet},
+	collections::{BTreeMap, BTreeSet, HashSet},
 	sync::Arc,
 	time::Duration,
 };
@@ -204,6 +204,7 @@ pub(super) struct Front {
 	/// Whether the parked requesters were resolved (the first source attached).
 	resolved: bool,
 	tracks: BTreeMap<Arc<str>, Track>,
+	parked: BTreeSet<(Instant, Arc<str>)>,
 	/// Immutable track metadata, fixed by the first copy of each track. Every
 	/// source of the broadcast must serve the same content.
 	info: BTreeMap<Arc<str>, track::Info>,
@@ -231,6 +232,7 @@ impl Front {
 			last_err: None,
 			resolved: false,
 			tracks: BTreeMap::new(),
+			parked: BTreeSet::new(),
 			info: BTreeMap::new(),
 			linger,
 			armed: None,
@@ -272,6 +274,18 @@ impl Front {
 		if self.ended {
 			return actions;
 		}
+		// Only a track event can change that track's linger. Route-wide transitions
+		// leave parked tracks alone, so they need no deadline-index scan.
+		let touched = match &event {
+			Event::TrackAssigned { track, .. }
+			| Event::TrackInfo { track, .. }
+			| Event::TrackEnded { track, .. }
+			| Event::Used { track }
+			| Event::Unused { track, .. }
+			| Event::Forgotten { track } => Some(track.clone()),
+			_ => None,
+		};
+		let before = touched.as_ref().and_then(|name| self.parked_at(name));
 		match event {
 			Event::Selected { best, serving_closing } => self.selected(best, serving_closing, &mut actions),
 			Event::Resolved { route, result } => self.resolved(route, result, &mut actions),
@@ -319,6 +333,17 @@ impl Front {
 			Event::Unheld => self.held = false,
 			Event::Retired => self.end(Error::Dropped, &mut actions),
 			Event::Closed => self.end(Error::Dropped, &mut actions),
+		}
+		if let Some(name) = touched {
+			let after = self.parked_at(&name);
+			if before != after {
+				if let Some(at) = before {
+					self.parked.remove(&(at, name.clone()));
+				}
+				if let Some(at) = after {
+					self.parked.insert((at, name));
+				}
+			}
 		}
 		if !self.ended {
 			let at = self.next_deadline();
@@ -661,24 +686,23 @@ impl Front {
 		// parked, even if nothing was due yet, or it would never be forgotten.
 		// Idle until the driver confirms: a reader that arrived first keeps it.
 		self.armed = None;
-		for (name, track) in &mut self.tracks {
-			if let TrackState::Parked { since } = track.state
-				&& since + self.linger <= now
-			{
-				track.state = TrackState::Idle;
-				actions.push(Action::Forget { track: name.clone() });
-			}
+		while self.parked.first().is_some_and(|(at, _)| *at <= now) {
+			let (_, name) = self.parked.pop_first().unwrap();
+			let track = self.tracks.get_mut(&name).expect("a parked track is registered");
+			track.state = TrackState::Idle;
+			actions.push(Action::Forget { track: name });
+		}
+	}
+
+	fn parked_at(&self, name: &str) -> Option<Instant> {
+		match self.tracks.get(name)?.state {
+			TrackState::Parked { since } => Some(since + self.linger),
+			_ => None,
 		}
 	}
 
 	fn next_deadline(&self) -> Option<Instant> {
-		self.tracks
-			.values()
-			.filter_map(|track| match track.state {
-				TrackState::Parked { since } => Some(since + self.linger),
-				_ => None,
-			})
-			.min()
+		self.parked.first().map(|(at, _)| *at)
 	}
 
 	fn end(&mut self, err: Error, actions: &mut Vec<Action>) {
@@ -1427,6 +1451,40 @@ mod tests {
 				Action::Arm { at: None },
 			],
 		);
+	}
+
+	#[test]
+	fn returning_reader_preserves_other_tracks_deadlines() {
+		let mut front = serving(remote(1), 100);
+		let now = Instant::now();
+		front.step(Event::Unused {
+			track: name("video"),
+			now,
+		});
+		front.step(Event::TrackAssigned {
+			track: name("audio"),
+			now: now + LINGER / 2,
+		});
+		assert_actions(
+			front.step(Event::Used { track: name("video") }),
+			&[
+				Action::Query {
+					track: name("video"),
+					source: 100,
+				},
+				Action::Arm {
+					at: Some(now + LINGER + LINGER / 2),
+				},
+			],
+		);
+		assert_actions(
+			front.step(Event::Deadline {
+				now: now + LINGER + LINGER / 2,
+			}),
+			&[Action::Forget { track: name("audio") }],
+		);
+		assert_actions(front.step(Event::Forgotten { track: name("audio") }), &[]);
+		assert!(front.tracks.contains_key("video"));
 	}
 
 	/// A track whose reader left before the front saw it is never spliced, and is

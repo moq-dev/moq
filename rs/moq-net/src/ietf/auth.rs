@@ -140,7 +140,8 @@ impl Message for AuthOk {
 		let subscribe = decode_prefixes(r)?;
 		let expires = match r.varint()? {
 			0 => None,
-			ms => Some(Duration::from_millis(ms)),
+			ms if ms <= MAX_EXPIRES_MS => Some(Duration::from_millis(ms)),
+			_ => return Err(DecodeError::InvalidValue),
 		};
 		Ok(Self {
 			publish,
@@ -177,6 +178,9 @@ impl Message for AuthError {
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		check_version(version)?;
 		let code = r.varint()?;
+		if code > u32::MAX as u64 {
+			return Err(DecodeError::InvalidValue);
+		}
 		let len = r.varint()?;
 		if len > MAX_REASON as u64 {
 			return Err(DecodeError::InvalidValue);
@@ -191,10 +195,10 @@ const UNAUTHORIZED: u64 = 0x1;
 const NOT_SUPPORTED: u64 = 0x3;
 
 /// The AUTH_ERROR code for a refusal. The public API speaks session codes, and the
-/// only one this registry distinguishes is a version mismatch.
+/// only distinction this registry carries is unsupported versus unauthorized.
 fn to_code(code: SessionError) -> u64 {
 	match code {
-		SessionError::Version => NOT_SUPPORTED,
+		SessionError::Version | SessionError::Unsupported => NOT_SUPPORTED,
 		_ => UNAUTHORIZED,
 	}
 }
@@ -232,7 +236,8 @@ pub(super) async fn run_present<S>(
 	peer_setup: peer::PeerSetup,
 	version: Version,
 	going_away: crate::goaway::GoingAway,
-) where
+) -> Result<(), Error>
+where
 	S: crate::transport::poll::Boxable,
 {
 	if !peer_setup.get().await.auth {
@@ -241,7 +246,19 @@ pub(super) async fn run_present<S>(
 	}
 
 	let mut tasks = crate::util::TaskSet::owned();
-	while let Some((id, token)) = tasks.drive(|waiter| handle.poll_opening(waiter)).await {
+	let violation: kio::Shared<Option<Error>> = Default::default();
+	while let Some((id, token)) = tasks
+		.drive(|waiter| {
+			if let Poll::Ready(mut err) = violation.poll(waiter, |err| match err.is_some() {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			}) {
+				return Poll::Ready(Err(err.take().unwrap()));
+			}
+			handle.poll_opening(waiter).map(Ok)
+		})
+		.await?
+	{
 		let present = Present {
 			runtime: runtime.clone(),
 			session: session.clone(),
@@ -251,12 +268,18 @@ pub(super) async fn run_present<S>(
 			id,
 		};
 		let going_away = going_away.clone();
+		let violation = violation.clone();
 		tasks.push(async move {
 			// After a GOAWAY the peer must not see new requests.
 			let err = match going_away.is_set() {
 				true => Error::GoingAway,
 				false => present.run(token).await,
 			};
+			let err = crate::auth::protocol_error(err);
+			if matches!(err, Error::ProtocolViolation) {
+				violation.lock().get_or_insert(err.clone());
+			}
+
 			match &err {
 				Error::Cancel | Error::Unsupported | Error::Transport(_) | Error::Session(_) => {
 					tracing::debug!(%err, "auth token ended")
@@ -404,7 +427,7 @@ impl Serve {
 		mut stream: Stream<S, Version>,
 		msg: Auth,
 		version: Version,
-	) {
+	) -> Result<(), Error> {
 		let serving = Serving::new(self.handle.clone());
 		let issue = &serving.issue;
 		let mut default = None;
@@ -423,7 +446,7 @@ impl Serve {
 				if stream.writer.encode_message(&reply).await.is_ok() {
 					let _ = stream.writer.close().await;
 				}
-				return;
+				return Ok(());
 			}
 			// Re-sent whenever a new limit changes it.
 			None => default = Some(crate::auth::DefaultGrant::new(self.handle.clone(), self.peer_grant)),
@@ -441,7 +464,12 @@ impl Serve {
 				err
 			}
 		};
-		serving.end(err);
+		let err = crate::auth::protocol_error(err);
+		serving.end(err.clone());
+		if matches!(err, Error::ProtocolViolation) {
+			return Err(err);
+		}
+		Ok(())
 	}
 }
 
@@ -462,7 +490,12 @@ async fn serve_issue<S: crate::transport::poll::Session>(
 	loop {
 		let next = kio::wait(|waiter| {
 			let mut cx = std::task::Context::from_waker(waiter.waker());
-			if let Poll::Ready(res) = stream.reader.poll_closed(&mut cx) {
+			if let Poll::Ready(res) = stream.reader.poll_read_chunk(&mut cx, 1).map(|res| {
+				res.and_then(|chunk| match chunk {
+					None => Ok(()),
+					Some(_) => Err(Error::ProtocolViolation),
+				})
+			}) {
 				return Poll::Ready(Next::Withdrawn(res));
 			}
 			if let Some(default) = default.as_deref_mut()
