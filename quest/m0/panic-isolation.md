@@ -58,9 +58,11 @@ Decided 2026-10-13 (maintainer):
   named long-lived task (such as the cache governor) and assert
   `Relay::run` returns with the panic instead of logging and continuing.
 - Update comments and docs that assume abort inline, including
-  `doc/lib/cpp/index.md`.
+  `doc/lib/cpp/index.md`, and document the panic counter's name and meaning
+  in `doc/bin/relay/http.md`.
 
-Public API: none. Wire: none.
+Public API: none in Rust. Operational: a new relay `/metrics` panic counter.
+Wire: none.
 
 ## Related
 
