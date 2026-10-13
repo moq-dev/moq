@@ -49,9 +49,14 @@ as acceptable. Every regression runs in CI, at least nightly for long integratio
 coverage. Completion requires the causal test and the relevant full checks,
 not a successful isolated rerun after a loaded failure.
 
-Keep validation PR #5328 and catalog PR #5333 draft until their readiness
-findings are resolved. Update affected test documentation and comments
-inline. No new public API, wire format, or user guide is expected; a newly
+Decided by the maintainer 2026-10-13: this quest no longer gates validation
+PR #5328, and #5333 has merged. None of 137 runs reproduced the exit 1. With the
+exporter's stderr kept in the assertion, 97 passed here: batches of 16 and 48 concurrent, 24
+concurrent runs of the whole `export` binary, 8 with the WebSocket race forced
+(`MOQ_CONNECT_WEBSOCKET_DELAY=0s`), and a full `just check`, on `main` and the
+merged validation branch. Another 40 of 40 passed in an earlier measurement on #5328. The
+quest stays open on its own until a failure is captured with its stderr. Update
+affected test documentation and comments inline. No new public API, wire format, or user guide is expected; a newly
 required behavior or API change returns to the maintainer for a decision.
 
 ## Related

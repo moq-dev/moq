@@ -124,8 +124,11 @@ upgrading epochless sessions, were rejected.
    `Restart` for `cam`, and that following it (a fresh `routed_broadcast`)
    serves the new track. Add the same case on an epoch route, where the old handle
    keeps working and no `Restart` is sent. Then run `just test interop --all`.
-   The race can't be forced locally (a fast machine lets QUIC win), so the
-   unit test carries the proof.
+   A fast machine lets QUIC win, but setting the QUIC head start to zero
+   forces the race: `MOQ_CONNECT_WEBSOCKET_DELAY=0s just test interop
+   --publishers js,python --subscribers rust` fails `js -> rust` and `CLI
+   FETCH` with `unroutable` on every run on `main`. Use it to confirm the
+   fix end to end; the unit test still carries the proof.
 
 If a failing client still leaves its connection to idle out, fix that
 client's error path to close its session, as a separate commit. The C
