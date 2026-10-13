@@ -387,7 +387,7 @@ export class Publisher {
 				broadcast =
 					this.#publish &&
 					(wireOf(this.#publish).local(name) ??
-						(await untilAborted(wireOf(this.#publish).demand(name), left.signal)));
+						(await wireOf(this.#publish).demand(name, undefined, left.signal)));
 				if (!broadcast) {
 					refusal = {
 						errorCode: toRequestCode("does_not_exist", "subscribe", version),

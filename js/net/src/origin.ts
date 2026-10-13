@@ -10,7 +10,7 @@
  *
  * @module
  */
-import { Derived, type Dispose, type GetPromise, type Getter, getter, Once, Signal } from "@moq/signals";
+import { Derived, type Dispose, type GetPromise, type Getter, getter, Once, race, Signal } from "@moq/signals";
 import * as announce from "./announced.ts";
 import * as broadcast from "./broadcast.ts";
 import type * as Epoch from "./epoch.ts";
@@ -325,7 +325,7 @@ class ServeState {
 		this.originated = originated;
 	}
 
-	queue = new Signal<Request[]>([]);
+	queue = new Signal(new Set<Request>());
 	pending = new Map<Path.Valid, Request>();
 	served = new Map<Path.Valid, broadcast.Consumer>();
 	rejected = new Map<Path.Valid, Error>();
@@ -349,8 +349,19 @@ class ServeState {
 		const request = makeRequest(Path.stripPrefix(this.root, path) ?? Path.empty(), this);
 		this.pending.set(path, request);
 		this.queue.mutate((queue) => {
-			queue.push(request);
+			queue.add(request);
 		});
+	}
+
+	/** Withdraw only this pending request; a later answer cannot replace a newer one. */
+	forget(path: Path.Valid, request: Request): void {
+		if (this.pending.get(path) !== request) return;
+		this.pending.delete(path);
+		this.queue.mutate((queue) => {
+			queue.delete(request);
+		});
+		this.rejected.delete(path);
+		finishRequest(request, unroutable());
 	}
 
 	accept(request: Request, front: broadcast.Consumer): void {
@@ -402,7 +413,7 @@ class ServeState {
 		const queued = [...this.pending.values()];
 		this.pending.clear();
 		this.queue.mutate((queue) => {
-			queue.length = 0;
+			queue.clear();
 		});
 		for (const request of queued) {
 			finishRequest(request, err);
@@ -562,6 +573,26 @@ class OriginState {
 		const detached = [...(this.detached.get(path) ?? [])];
 		if (slot) this.reroute(path, slot);
 		for (const other of detached) this.reroute(path, other);
+		this.forget(path);
+	}
+
+	/** Release unanswered requests no wire waiter or local route still needs. */
+	forget(path: Path.Valid): void {
+		const slot = this.requests.peek()?.get(path);
+		// An empty slot remains joinable until its deferred teardown removes it.
+		const best = slot ? this.bestEntry(path) : undefined;
+		const wanted = best && !this.localWins(path, best) ? best.server : undefined;
+		const failovers = this.detached.get(path);
+		for (const prefix of coveringPrefixes(path)) {
+			for (const entry of this.routes.peek()?.get(prefix) ?? []) {
+				const server = entry.server;
+				const pending = server?.pending.get(path);
+				if (!server || !pending || server.demanding.has(path) || server === wanted) continue;
+				if (failovers && [...failovers].some((slot) => slot.handles.size > 0 && slot.failover === entry))
+					continue;
+				server.forget(path, pending);
+			}
+		}
 	}
 
 	/**
@@ -753,6 +784,7 @@ class OriginState {
 		slot.answer = undefined;
 		slot.route.set(undefined);
 		if (joined) this.releaseMaterialized(path);
+		this.forget(path);
 		for (const closed of slot.handles) closed.set(err);
 		slot.handles.clear();
 	}
@@ -782,6 +814,8 @@ class OriginState {
 			if (!Path.hasPrefix(prefix, path)) continue;
 			for (const slot of slots) this.reroute(path, slot);
 		}
+		for (const path of this.requests.peek()?.keys() ?? []) if (Path.hasPrefix(prefix, path)) this.forget(path);
+		for (const [path] of detached) if (Path.hasPrefix(prefix, path)) this.forget(path);
 	}
 
 	/** Rebuild the publisher-facing originated table after an advertisement write. */
@@ -1448,7 +1482,7 @@ export class Consumer {
 					? state.originated
 					: new Derived([state.originated], (routes) => scope.projectRoutes(routes)),
 			local: (path, epoch) => this.#local(scope.path(path), epoch),
-			demand: (path, epoch) => this.#demand(scope.path(path), epoch),
+			demand: (path, epoch, signal) => this.#demand(scope.path(path), epoch, signal),
 		});
 	}
 
@@ -1729,6 +1763,7 @@ export class Consumer {
 				// detached slot owns the front it took.
 				if (this.#state.requests.peek()?.get(path) !== taken) {
 					this.#state.detach(path, taken);
+					this.#state.forget(path);
 					return;
 				}
 				this.#state.requests.mutate((map) => {
@@ -1738,6 +1773,7 @@ export class Consumer {
 				taken.answer = undefined;
 				taken.route.set(undefined);
 				this.#state.releaseMaterialized(path);
+				this.#state.forget(path);
 			});
 		});
 	}
@@ -1867,57 +1903,83 @@ export class Consumer {
 	 *
 	 * @internal
 	 */
-	async #demand(path: Path.Valid, epoch?: Epoch.Valid): Promise<broadcast.Consumer | undefined> {
-		// Each pass asks the instance that wins now; an epoch change releasing the request starts another.
-		for (;;) {
-			const local = this.#local(path);
-			if (local) {
-				// A peer naming one publisher instance is never handed another.
-				if (epoch !== undefined && this.#state.advertisedLocal.peek()?.get(path)?.epoch !== epoch)
-					throw unroutable();
-				return local;
-			}
-			const entry = this.#state.bestEntry(path, received);
-			if (!entry?.server) return undefined;
-			if (epoch !== undefined && entry.route.peek().epoch !== epoch) throw unroutable();
-
-			const server = entry.server;
-			const live = server.served.get(path);
-			if (live && live.closed.peek() === undefined) return live;
-
-			const resets = server.resets;
-			server.enqueue(path);
-			server.demanding.set(path, (server.demanding.get(path) ?? 0) + 1);
-			try {
-				for (;;) {
-					// The route may name another instance by the time its handler answers.
-					if (epoch !== undefined && this.#state.bestEntry(path, received)?.route.peek().epoch !== epoch)
+	async #demand(
+		path: Path.Valid,
+		epoch?: Epoch.Valid,
+		signal?: AbortSignal,
+	): Promise<broadcast.Consumer | undefined> {
+		signal?.throwIfAborted();
+		const cancelled = new Once<true>();
+		let release: Dispose | undefined;
+		const abort = () => {
+			// Withdraw before a handler can answer in the same turn as cancellation.
+			release?.();
+			cancelled.set(true);
+		};
+		signal?.addEventListener("abort", abort, { once: true });
+		try {
+			// Each pass asks the instance that wins now; an epoch change releasing the request starts another.
+			for (;;) {
+				signal?.throwIfAborted();
+				const local = this.#local(path);
+				if (local) {
+					// A peer naming one publisher instance is never handed another.
+					if (epoch !== undefined && this.#state.advertisedLocal.peek()?.get(path)?.epoch !== epoch)
 						throw unroutable();
-					const served = server.served.get(path);
-					if (served && served.closed.peek() === undefined) return served;
-					const rejected = server.rejected.get(path);
-					if (rejected) {
-						server.rejected.delete(path);
-						throw rejected;
-					}
-					const closed = server.closed.peek();
-					if (closed !== undefined) {
-						if (closed) throw closed;
-						return undefined;
-					}
-					// Released by an epoch change, which also dropped this pass's count: ask again.
-					if (server.resets !== resets) break;
-					if (!server.pending.has(path)) return undefined;
-					await Signal.race(server.settled, server.closed);
+					return local;
 				}
-			} finally {
-				// A reset already cleared the count, and a later pass may have registered anew.
-				if (server.resets === resets) {
-					const n = (server.demanding.get(path) ?? 1) - 1;
-					if (n <= 0) server.demanding.delete(path);
-					else server.demanding.set(path, n);
+				const entry = this.#state.bestEntry(path, received);
+				if (!entry?.server) return undefined;
+				if (epoch !== undefined && entry.route.peek().epoch !== epoch) throw unroutable();
+
+				const server = entry.server;
+				const live = server.served.get(path);
+				if (live && live.closed.peek() === undefined) return live;
+
+				const resets = server.resets;
+				server.enqueue(path);
+				server.demanding.set(path, (server.demanding.get(path) ?? 0) + 1);
+				release = () => {
+					// Abort and finally share this registration; release it only once.
+					release = undefined;
+					// A reset already cleared the count, and a later pass may have registered anew.
+					if (server.resets === resets) {
+						const n = (server.demanding.get(path) ?? 1) - 1;
+						if (n <= 0) {
+							server.demanding.delete(path);
+							server.rejected.delete(path);
+						} else server.demanding.set(path, n);
+						this.#state.forget(path);
+					}
+				};
+				try {
+					for (;;) {
+						signal?.throwIfAborted();
+						// The route may name another instance by the time its handler answers.
+						if (epoch !== undefined && this.#state.bestEntry(path, received)?.route.peek().epoch !== epoch)
+							throw unroutable();
+						const served = server.served.get(path);
+						if (served && served.closed.peek() === undefined) return served;
+						const rejected = server.rejected.get(path);
+						if (rejected) {
+							throw rejected;
+						}
+						const closed = server.closed.peek();
+						if (closed !== undefined) {
+							if (closed) throw closed;
+							return undefined;
+						}
+						// Released by an epoch change, which also dropped this pass's count: ask again.
+						if (server.resets !== resets) break;
+						if (!server.pending.has(path)) return undefined;
+						await race([Signal.race(server.settled, server.closed), cancelled]);
+					}
+				} finally {
+					release?.();
 				}
 			}
+		} finally {
+			signal?.removeEventListener("abort", abort);
 		}
 	}
 }
@@ -1999,20 +2061,23 @@ export class Dynamic {
 			current?.reject(unroutable());
 			current = undefined;
 		};
+		// Keep the cursor while draining: restarting it would rescan deleted entries.
+		let queued = server.queue.peek().values();
 		try {
 			for (;;) {
-				const next = server.queue.peek()[0];
-				if (next) {
+				const next = queued.next();
+				if (!next.done) {
 					drop();
 					server.queue.mutate((queue) => {
-						queue.shift();
+						queue.delete(next.value);
 					});
-					current = next;
-					yield next;
+					current = next.value;
+					yield next.value;
 					continue;
 				}
 				if (server.closed.peek() !== undefined) return;
 				await Signal.race(server.queue, server.closed);
+				queued = server.queue.peek().values();
 			}
 		} finally {
 			drop();
@@ -2035,6 +2100,7 @@ export class Request {
 
 	#server: ServeState;
 	#done = false;
+	#withdrawn = false;
 
 	private constructor(path: Path.Valid, server: ServeState) {
 		this.path = path;
@@ -2045,6 +2111,7 @@ export class Request {
 		makeRequest = (path, server) => new Request(path, server);
 		finishRequest = (request, err) => {
 			request.#done = true;
+			request.#withdrawn = true;
 			void err;
 		};
 	}
@@ -2062,7 +2129,12 @@ export class Request {
 	 * @throws Error when handed a broadcast a session delivered. The request stays open.
 	 */
 	accept(source: broadcast.Producer | broadcast.Consumer): void {
-		if (this.#done) return;
+		if (this.#done) {
+			// A withdrawn request takes no answer. Only the handed-off consumer is ours;
+			// the application still owns its producer and any other consumers.
+			if (this.#withdrawn && source instanceof broadcast.Consumer) source.close();
+			return;
+		}
 		if (this.#server.originated && !(source instanceof broadcast.Producer) && wireOf(source).fromSession) {
 			throw new Error("origin cannot serve a broadcast it did not produce");
 		}

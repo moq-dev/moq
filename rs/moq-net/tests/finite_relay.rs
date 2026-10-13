@@ -129,6 +129,10 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
+	// Let the publisher answer while the track is still empty, so no Largest Object
+	// tells the relay where its feed starts; otherwise the outcome rests on whether the
+	// first group is written before SUBSCRIBE_OK.
+	moq_net_sim::sleep(Duration::from_millis(1)).await;
 	track.finish_at(moq_net::track::Position::group(GROUPS)).unwrap();
 	match arrival {
 		Arrival::HeldTails => {
