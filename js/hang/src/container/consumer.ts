@@ -625,6 +625,8 @@ export class Consumer {
 
 	/** Stop consuming and release the track and all buffered groups. */
 	close(): void {
+		// The item a gap was returned ahead of is buffered media too.
+		this.#next = undefined;
 		this.#finish(null);
 		this.#signals.close();
 	}

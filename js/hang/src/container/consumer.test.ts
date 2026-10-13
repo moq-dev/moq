@@ -769,6 +769,27 @@ test("Consumer next() yields a gap before the first frame only", async () => {
 	consumer.close();
 });
 
+test("Consumer reads nothing after close, even the frame a gap was returned ahead of", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(track.subscribe(), {
+		format: new LegacyFormat("video"),
+		maxDelay: 500 as Time.Milli,
+	});
+
+	const group = new Group.Producer(0);
+	group.writeFrame({
+		payload: encodeLegacyFrame(0 as Time.Micro, new Uint8Array([0xde, 0xad])),
+		timestamp: Time.Timestamp.now(),
+	});
+	track.writeGroup(group);
+
+	expect(await consumer.next()).toEqual({ kind: "gap" });
+	consumer.close();
+	expect(await consumer.next()).toBeUndefined();
+	group.close();
+	track.close();
+});
+
 test("Consumer keeps a trailing duration marker internal", async () => {
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), {
