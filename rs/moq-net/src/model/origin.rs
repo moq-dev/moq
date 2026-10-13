@@ -630,7 +630,7 @@ fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
 #[derive(Clone)]
 struct Quarantine {
 	held: Held,
-	publisher: Option<Hop>,
+	publisher: Hop,
 	epoch: Option<crate::Epoch>,
 	rank: (Cost, usize),
 }
@@ -640,7 +640,7 @@ impl Quarantine {
 	/// first hop and epoch, ranked strictly worse. A republish ranks the same and a
 	/// new instance carries a new epoch, so neither waits.
 	fn holds(&self, meta: &RouteMeta) -> bool {
-		meta.0.iter().next().copied() == self.publisher && meta.3 == self.epoch && (meta.1, meta.0.len()) > self.rank
+		meta.0.iter().next() == Some(&self.publisher) && meta.3 == self.epoch && (meta.1, meta.0.len()) > self.rank
 	}
 }
 
@@ -650,7 +650,7 @@ impl Quarantine {
 /// driver's last reading, not the time the update arrived. So a hold first waits
 /// for the driver's next reading (armed a nanosecond past the stale one, which
 /// wakes the driver at once), and counts from there.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Held {
 	Anchoring(Instant),
 	Until(Instant),
@@ -5072,9 +5072,11 @@ pub struct AnnounceConsumer {
 	// clock they count on, and the timer that wakes the next.
 	update_hold: Duration,
 	held: HashMap<PathOwned, Held>,
+	// Quarantines by prefix, and their retractions in clock order: first waiting
+	// for a fresh reading (by the stale one), then quarantined (by when each ends).
 	retracted: HashMap<PathOwned, Quarantine>,
-	anchoring: Vec<PathOwned>,
-	retracted_swept: usize,
+	anchoring: VecDeque<(Instant, PathOwned)>,
+	expiring: VecDeque<(Instant, PathOwned)>,
 	timers: Clock,
 	hold: crate::time::Deadline,
 }
@@ -5118,8 +5120,8 @@ impl AnnounceConsumer {
 			update_hold,
 			held: HashMap::new(),
 			retracted: HashMap::new(),
-			anchoring: Vec::new(),
-			retracted_swept: 16,
+			anchoring: VecDeque::new(),
+			expiring: VecDeque::new(),
 			hold: crate::time::Deadline::new(&timers),
 			timers,
 		}
@@ -5137,47 +5139,54 @@ impl AnnounceConsumer {
 		let Some(now) = now.filter(|_| !self.update_hold.is_zero()) else {
 			return;
 		};
-		// Forget expired quarantines once the map doubles, so the sweep is amortized.
-		if self.retracted.len() >= self.retracted_swept * 2 {
-			self.retracted
-				.retain(|_, q| !matches!(q.held, Held::Until(until) if until <= now));
-			self.retracted_swept = self.retracted.len().max(16);
-		}
+		// An anonymous route names no publisher to tie a later stale path to.
+		let Some(&publisher) = update.route.hops.iter().next().filter(|hop| **hop != Hop::UNKNOWN) else {
+			return;
+		};
 		// The reading may be stale; [`Self::settle`] starts the quarantine on a fresh one.
 		let quarantine = Quarantine {
 			held: Held::Anchoring(now),
-			publisher: update.route.hops.iter().next().copied(),
+			publisher,
 			epoch: update.route.epoch.clone(),
 			rank: (update.route.cost, update.route.hops.len()),
 		};
 		self.retracted.insert(update.prefix.clone(), quarantine);
-		self.anchoring.push(update.prefix.clone());
+		self.anchoring.push_back((now, update.prefix.clone()));
 	}
 
-	/// Start the quarantines of retractions the clock has since moved past. Returns
-	/// when to wake to read the clock again, if any still wait.
+	/// Start the quarantines of retractions the clock has since moved past, and
+	/// forget ended ones. Returns when to wake to read the clock again, if any remain.
 	fn settle(&mut self, now: Option<Instant>) -> Option<Instant> {
 		let now = now?;
-		let mut wake = None;
-		let retracted = &mut self.retracted;
-		self.anchoring.retain(|prefix| match retracted.get_mut(prefix) {
-			Some(Quarantine {
-				held: Held::Anchoring(seen),
-				..
-			}) if now <= *seen => {
-				let at = *seen + Duration::from_nanos(1);
-				wake = Some(wake.map_or(at, |w: Instant| w.min(at)));
-				true
+		// Both queues are in clock order, so only their fronts can be due. An entry
+		// whose prefix was since announced or retracted again no longer matches.
+		while let Some((seen, prefix)) = self.anchoring.front() {
+			if *seen >= now {
+				break;
 			}
-			Some(Quarantine { held, .. }) => {
-				if matches!(held, Held::Anchoring(_)) {
-					*held = Held::Until(now + RETRACT_QUARANTINE);
-				}
-				false
+			if let Some(quarantine) = self.retracted.get_mut(prefix)
+				&& quarantine.held == Held::Anchoring(*seen)
+			{
+				quarantine.held = Held::Until(now + RETRACT_QUARANTINE);
+				self.expiring.push_back((now + RETRACT_QUARANTINE, prefix.clone()));
 			}
-			None => false,
-		});
-		wake
+			self.anchoring.pop_front();
+		}
+		while let Some((until, prefix)) = self.expiring.front() {
+			if *until > now {
+				break;
+			}
+			if self
+				.retracted
+				.get(prefix)
+				.is_some_and(|q| q.held == Held::Until(*until))
+			{
+				self.retracted.remove(prefix);
+			}
+			self.expiring.pop_front();
+		}
+		let anchoring = self.anchoring.front().map(|(seen, _)| *seen + Duration::from_nanos(1));
+		earliest(anchoring, self.expiring.front().map(|(until, _)| *until))
 	}
 
 	/// Drive the egress announce guards for one update.
@@ -7965,6 +7974,51 @@ mod tests {
 		// The last route goes: retracted at once.
 		drop(farther);
 		announced.assert_next_ended("room");
+	}
+
+	/// After a retraction, a worse path to the same publisher waits out the
+	/// quarantine. An anonymous route names no publisher, so one after it is not held.
+	#[moq_net_sim::test]
+	async fn a_retraction_quarantines_a_named_publisher() {
+		let producer = origin(1).produce();
+		let peer = producer.clone().peer();
+		let mut announced = producer.consume().announced();
+		moq_net_sim::sleep(Duration::from_millis(1)).await;
+
+		let route = |chain: &[u64], via| Route::default().with_hops(hops(chain)).with_via(origin(via));
+
+		let near = peer.dynamic("named", route(&[9, 2], 2)).unwrap();
+		announced.assert_next_active("named");
+		drop(near);
+		announced.assert_next_ended("named");
+		let start = moq_net_sim::now();
+		let _stale = peer.dynamic("named", route(&[9, 3, 4], 4)).unwrap();
+		match announced.next().await.unwrap() {
+			AnnounceEvent::Start(announce) => assert_eq!(announce.route.hops, hops(&[9, 3, 4])),
+			other => panic!("should be a start: got {other:?}"),
+		}
+		assert!(moq_net_sim::now() - start >= RETRACT_QUARANTINE);
+
+		let near = peer.dynamic("anonymous", route(&[0, 2], 2)).unwrap();
+		announced.assert_next_active("anonymous");
+		drop(near);
+		announced.assert_next_ended("anonymous");
+		let _other = peer.dynamic("anonymous", route(&[0, 3, 4], 4)).unwrap();
+		announced.assert_next_active("anonymous");
+
+		// A quarantine nothing announces again is forgotten once it ends: the cursor
+		// wakes to anchor it, then again to drop it.
+		let gone = peer.dynamic("gone", route(&[9, 2], 2)).unwrap();
+		announced.assert_next_active("gone");
+		drop(gone);
+		announced.assert_next_ended("gone");
+		assert_eq!(announced.retracted.len(), 1);
+		for _ in 0..2 {
+			announced.assert_next_wait();
+			moq_net_sim::sleep(RETRACT_QUARANTINE).await;
+		}
+		announced.assert_next_wait();
+		assert!(announced.retracted.is_empty(), "the ended quarantine is still held");
 	}
 
 	/// A peer withdrawing a prefix hides the routes there through it, so the next
