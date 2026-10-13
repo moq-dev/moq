@@ -18,12 +18,11 @@ live readers or recovery; the JS lite-03/04 path does not run that response
 loop. Once a track ends, the Rust
 publisher on lite-05 and lite-06 names every sequence from its
 SUBSCRIBE_START to the end that the subscription never got (skipped,
-stale, or missing its head), just before its FIN. Still missing: JS
-publishers, drops sent as soon as a group is given up rather than at the end,
-and groups reset before their header. The end-of-track drops also miss a gap
-the publisher aged out of its grace while the subscriber still waits on it:
-the publisher ages a gap from when it queued the group above it, which can be
-well before stream credit lets that group's header out. lite-07 (still `moq-lite-07-wip`,
+stale, or missing its head), just before its FIN. Still missing: groups
+reset before their header. JS publishers and drops sent as soon as a group is
+given up belong to [Early drops](/quest/m1/subscribe-drop-early.md), which
+also stops the end-of-track drops missing a gap the publisher aged out of its
+grace. lite-07 (still `moq-lite-07-wip`,
 unpublished) removed SUBSCRIBE_DROP for a `Stream Count` on SUBSCRIBE_END
 (#4224).
 
@@ -78,14 +77,16 @@ Learned from the shelved [#4998](https://github.com/moq-dev/moq/pull/4998)
   flakes under load (`Ok(None)` with 10 of 20 frames, #4332): the code can
   still end it clean until this lands, and it should pass reliably after.
 
-Update `drafts/draft-lcurley-moq-lite.md` (SUBSCRIBE_DROP, SUBSCRIBE_END, the
+Update `drafts/draft-lcurley-moq-lite.md` (SUBSCRIBE_DROP, including that a
+publisher SHOULD send it as soon as it gives a sequence up; SUBSCRIBE_END; the
 lite-07 changelog), `doc/concept/moq-lite.md`, and the Rust and JS lite
 publishers, subscribers, and tail accounting. Run `just drafts check` and
 `just test interop --all`.
 
 Regression tests: a publisher that expires a group or resets a stream before
 its header; on each version the subscriber settles without waiting out the
-grace. A skipped sequence at the end is covered on lite-05 through lite-07
+grace. An early DROP settles the dropped group for its reader before the
+track's FIN, on both stacks. A skipped sequence at the end is covered on lite-05 through lite-07
 (`track_tail::skipped_groups_end_without_the_grace`).
 
 Add the lite-07 drop case to the tail interop harness
@@ -94,6 +95,10 @@ subscribers both settle on SUBSCRIBE_DROP through the relay, so a group the
 publisher skipped or never opened ends the track without waiting out the
 grace. Decided in the 2026-09-30 audit: the case moved here so the basic
 tail interop could land first.
+
+## Required
+
+- [Early drops](/quest/m1/subscribe-drop-early.md) - Rust and JS publishers drop a sequence the moment they give it up, and forward an upstream drop
 
 ## Related
 
