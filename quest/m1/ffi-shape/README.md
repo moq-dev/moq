@@ -62,11 +62,6 @@ Settled shape:
   take the net `GroupConsumer` it wraps. Python drops the media type
   silently; every other generator refuses. Revisit only if UniFFI
   namespaces external types.
-- Still open from #5356: whether the import-side
-  `MoqMediaContainerStreamProducer` (`media.ContainerStreamProducer`) is
-  named by role. "Container" there means an importer that recovers framing
-  from a raw byte stream and may publish several tracks, unlike the
-  per-track `media.TrackConsumer` and `media.GroupConsumer`.
 - `demand()` is the one way to watch subscribers; producers drop their
   `name`/`is_used`/`used`/`unused` duplicates.
 - moq-ffi and its generated consumers, including `cpp/obs` (above). The
@@ -87,4 +82,5 @@ runs `just test interop --all`.
 ## Required
 
 - [Codecs](/quest/m1/ffi-shape/codec.md) - audio and video producers, codec-only encoders, and decoders move under their own namespaces, named as in Rust; binding releases wait for it
+- [Stream importer name](/quest/m1/ffi-shape/stream-producer-name.md) - the maintainer settles `media.ContainerStreamProducer`'s name before the binding release
 - [Layers guide](/quest/m1/ffi-shape/layers-guide.md) - a `doc/lib` page maps each Rust layer to every binding's module, once Codecs adds `audio` and `video`
