@@ -17,8 +17,10 @@ connection protocol. Do not require an inbound connection to the local relay.
 Use authenticated, namespace-scoped peer admission. A normal publisher is not
 implicitly an unrestricted cluster peer. Link direction in export policy is
 independent of which side dialed; the local side's CDN uplink must not make
-the CDN treat the local relay as its own upstream. Preserve the down-only
-restriction across the local mesh and export eligible local alternatives.
+the CDN treat the local relay as its own upstream, and the CDN marks the local
+relay downstream so a missing local `upstream` mark cannot leak CDN routes
+back. Preserve the export view across the local mesh and export eligible
+local alternatives.
 Basic federation requires neither economic cost translation nor folded domain IDs.
 
 Controlled-time integration tests: publish/consume in both directions through

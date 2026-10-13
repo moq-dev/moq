@@ -48,12 +48,13 @@ Decided with the maintainer, 2026-10-13:
 - Retain the CDN session and discovery during P2P use. Release unused CDN
   media demand, except for bounded overlap during a same-epoch handoff.
 
-The implementation is gated on [routing contracts](/quest/m1/cluster-routing/contracts.md)
-and [handoff proofs](/quest/m1/cluster-routing/handoff.md). Per-origin Babel
-feasibility alone does not prove that path-only subscriptions which reselect
-origins under local priorities make progress. Nor does a complete neighbor
-snapshot prove its claims are current. Settle those contracts before dropping
-hop-vector protections or fixing the wire.
+The implementation is gated on [handoff proofs](/quest/m1/cluster-routing/handoff.md):
+a complete neighbor snapshot does not prove its claims are current. The
+routing contract is recorded in [Routes and announces](/quest/m1/cluster-routing/routes.md)
+with deterministic counterexamples: path-only subscriptions that reselect
+origins at every hop loop and deadlock, so forwarded requests name their
+identity; feasibility makes transit priorities depend on arrival order;
+export uses a second view with bilateral roles; and the metric adds hops.
 
 The new routing model and finalized lite-07 belong to the breaking release.
 Existing mesh deployments remain supported; the full edge/core topology
@@ -84,7 +85,6 @@ setup after the capabilities land.
 
 ## Required
 
-- [Routing contracts](/quest/m1/cluster-routing/contracts.md) - identity, local priority, loop freedom, and export views have a consistent tested model
 - [Next-hop handoff](/quest/m1/cluster-routing/handoff.md) - complete and fresh claims survive rerouting without resurrection or false END
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - implement the proven route layer with Rust/JS parity and tiered-cluster acceptance
 - [Outbound federation](/quest/m1/cluster-routing/federation.md) - an outbound-only local relay exchanges authorized broadcasts with the CDN and survives partition/healing

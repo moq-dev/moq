@@ -16,7 +16,7 @@ nothing on a direct connection.
 is a separate type (`moq_auth::PeerGrant`) so presenting one as `?jwt=`
 fails verification rather than widening a relay session. It carries the
 session's publish and subscribe patterns, the origin's authenticated process/tab routing identity (shared by its live
-sessions and refreshed on restart, per Routing contracts), a presenter
+sessions and refreshed on restart, per Routes and announces), a presenter
 public key (`cnf`), `iat`, and a short `exp`. A node id is public on the
 roster, so a copied JWT is not enough: the presenter proves possession of
 the matching private key on the direct AUTH stream. A roster peer that

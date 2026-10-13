@@ -14,16 +14,19 @@ claim whose withdrawal is already known.
 ## Plan
 
 Keep the 2026-10-01 two-layer direction, reconciled with the maintainer's
-2026-10-13 [decisions](/quest/m1/cluster-routing/README.md). The sketch below
-is conditional on Routing contracts and Next-hop handoff; those planning
-quests settle identity, forwarding progress and claim freshness before coding:
+2026-10-13 [decisions](/quest/m1/cluster-routing/README.md) and the routing
+contract below. The routing contract's fixtures live in
+`rs/moq-net/tests/routing_contracts/` and run against a small reference model;
+port each topology to the implementation as acceptance, then delete the model.
+The sketch stays conditional on Next-hop handoff, which settles claim
+freshness before coding:
 
 - Wire sketch, flexible in detail. ROUTE_START carries the node id, a seqno,
-  the metric, and a down-only bit, and implicitly takes the next stream-local
-  Route ID, as ANNOUNCE_START takes the next Announce ID today. ROUTE_UPDATE
-  (Route ID, seqno, metric, down-only bit) and ROUTE_END (Route ID) reference
-  it; the bit rides UPDATE so a route moving between a mesh path and a CDN
-  fallback changes it without retracting its announces.
+  the metric, and the export metric (below), and implicitly takes the next
+  stream-local Route ID, as ANNOUNCE_START takes the next Announce ID today.
+  ROUTE_UPDATE (Route ID, seqno, metric, export metric) and ROUTE_END (Route
+  ID) reference it; the export metric rides UPDATE so a route moving between a
+  mesh path and a CDN fallback changes it without retracting its announces.
   ANNOUNCE_START carries the prefix (keeping today's Path Base/Keep
   compression), a Route ID, the origin's cost for that prefix, and the epoch,
   and lite-07's restart message from
@@ -68,16 +71,40 @@ quests settle identity, forwarding progress and claim freshness before coding:
   route metric. Link changes therefore touch only ROUTE, and feasibility runs
   on the route metric alone. This is today's single route cost, which stops
   accumulating per hop once this lands.
-- Use configured additive costs with hop-count defaults and a strictly
-  increasing feasibility metric. Routing contracts settles zero-cost and
-  overflow representation before this wire is fixed, replacing the earlier
-  unqualified cost-plus-one sketch.
+- The metric is the configured additive cost, then the hop count, compared
+  lexicographically. Every link increases it, as Babel's feasibility requires
+  (RFC 8966 s3.5.2), while `?cost=0` and today's prices keep their meaning;
+  unconfigured links still reproduce hop counting. A sum past the cost ceiling
+  is unreachable, never saturated. A zero-cost link or a saturated cost leaves
+  a route equal to its own feasibility distance, so the next recomputation
+  refuses it (`zero_cost_and_saturated_links_need_hops_in_the_metric`). GOAWAY
+  therefore cannot keep re-pricing routes to the maximum: the relay that
+  received it stops selecting that peer for new requests and advertises
+  whatever it selects instead.
 - Fresh opaque routing identity per process/tab restart, shared across its
   authenticated live sessions, decided 2026-10-13. Keep administrative
   identity and broadcast epoch separate. The shared identity recognizes an
-  origin reached through CDN and direct links and maps it to a roster peer;
-  a session cannot assert another origin's identity or seqno without authority.
-  Follow Routing contracts for `cluster.id`, admission, and stale incarnations.
+  origin reached through CDN and direct links and maps it to a roster peer.
+  The origin advances its seqno whenever its own set of sessions changes:
+  feasibility distances held elsewhere otherwise refuse a restart that reuses
+  an identity, and starve the old neighbors of an origin that moved to a
+  farther attachment (`restart_reusing_identity_is_refused`,
+  `reconnect_without_restart_needs_a_seqno_advance`). A random identity alone
+  does not keep a dead incarnation away. What bounds it is ordered sessions,
+  state scoped to the session that delivered it, never advertising an
+  unreachable route, and keeping a feasibility distance while any route to
+  that identity remains: a collected incarnation then reappears only from a
+  message already in flight on a live session, which delivers the retraction
+  next (`collected_incarnation_returns_only_while_its_retraction_is_in_flight`).
+  `cluster.id` stops naming a routing identity.
+- An identity learned through a scoped admission is filed under that admission,
+  which travels with its ROUTE: it serves only claims inside the scope, and its
+  seqno never outranks the same identity learned elsewhere. Routes are shared
+  by all of an identity's claims, so otherwise a scoped peer forging an
+  identity captures claims outside its namespace and leaves a seqno the real
+  origin cannot pass after the forger leaves
+  (`forged_identity_hijacks_claims_outside_the_forgers_scope`). Only unscoped
+  cluster peers transit bare identities.
 - Loop freedom is Babel's feasibility condition (RFC 8966) keyed by node:
   accept a route if its seqno is newer, or equal with a metric below the
   feasibility distance. Only the origin advances its seqno. Retraction is an
@@ -98,33 +125,70 @@ quests settle identity, forwarding progress and claim freshness before coding:
   reset to accept a longer route after a retraction or a session replay.
   The handoff proof must revise this pending/retrigger sketch if a quiet
   origin could otherwise remain starved after the final retry.
+- Feasibility makes a detour longer than the lost route wait for that request
+  to reach the origin, where today's path vector fails over at once. Redundant
+  cores are feasible successors and switch immediately
+  (`redundant_cores_fail_over_without_a_seqno_request`); a local mesh reaching
+  its other half through the CDN, or a routing node falling back from P2P to
+  the CDN, starves until the origin answers
+  (`partitioned_local_mesh_reaches_itself_through_the_cdn`,
+  `p2p_fallback_is_immediate_for_leaves_and_needs_a_seqno_for_transit`).
+  Measure that window in the failover tests.
 - Claim authority and freshness follow the handoff proof, independently of
   the requested path's forwarding choice. Next-hop authority alone failed
   the simulator below. A complete old snapshot cannot overwrite a known
   withdrawal. Do not preclude claim revisions or freshness floors before
   that proof. Store only state justified by its bounded replay/coverage model.
-- Origin selection keeps `route_order`'s shape and swaps its inputs: the
-  candidates become the origin nodes announcing the path, ranked by longest
-  prefix, then the newest epoch, then the link's preference
-  (`origin::Producer::with_preference`), then the
-  sum of prefix seed and route metric, then the deterministic path-keyed
-  rendezvous hash. Prefer the newest connection/announcement only for an
-  otherwise identical route, preserving reconnect behavior without making
-  every new equal-cost connection win. Apply the proved requester/export
-  constraints first. Epochless source changes never resume.
-- Down-only bit: set on a route learned on an upstream link, kept across
-  other links, and a route carrying it is never sent on an upstream link
-  (extending the `upstream` link mark in `doc/bin/relay/cluster.md`).
+- Only the first hop selects the origin. It keeps `route_order`'s shape over
+  the origin nodes announcing the path: longest prefix, newest epoch, the
+  link's priority (`origin::Producer::with_preference`), seed plus route
+  metric, then a rendezvous hash of the path and the identity, and the newest
+  connection only for an otherwise identical route. The hash drops the hop
+  chain, which differs per node, so every node agrees on a pool member
+  (`pool_ties_agree_only_on_a_path_and_identity_hash`). The request then names
+  that identity, and every later hop follows its own route to it, so
+  forwarding needs a route but not the claim.
+- Reselecting the origin at every hop loops although each origin's routes are
+  loop-free (RFC 8966 s2.7): a ring of same-epoch importers whose relays
+  prioritize different links, and nested wildcards where a relay has not
+  heard the specific claim, both cycle past requester exclusion; joining
+  another relay's subscription by path or epoch deadlocks; and without an
+  epoch a later hop splices another publisher under the requester's
+  announcement with no Restart (`local_priorities_loop_path_only_requests`,
+  `overlapping_wildcards_loop_where_specific_claims_are_unheard`,
+  `aggregation_cycles_starve_without_a_forwarding_constraint`,
+  `epochless_reselection_splices_another_publisher`,
+  `sweep_forwarding_progress`). A relay therefore joins a forwarded request
+  only to a subscription following its route to the same identity. When that
+  identity becomes unreachable the forwarded request ends, and the first hop
+  re-resolves, resuming only on a matching epoch. A request carrying a cost
+  bound instead also never loops, but stalls where a transit hop has not
+  heard the claim and still splices epochless sources.
+- Transit route selection ranks by metric alone. A relay may select only a
+  feasible route, so its priority for a longer route holds only if that route
+  arrived first, and one topology settles differently by session order
+  (`transit_priority_depends_on_arrival_order`). Application priority applies
+  where it is free: the first hop's origin choice, and endpoints that
+  advertise nothing.
+- Export view, replacing the down-only bit: each node keeps two selections
+  per identity, each with its own feasibility distance, one over every route
+  and one over routes not learned on an upstream link (the export metric). It
+  sends upstream links only the export selection and forwards a request
+  arriving from one by it. One selection with a down-only bit hides a cheaper
+  exportable LAN route whenever the preferred local route is down-only
+  (`preferred_down_only_route_hides_the_exportable_alternative`). The role is
+  bilateral, as RFC 9234 section 5 makes it: the side accepting a federation
+  peer marks it downstream, sends it no export metric, and takes only its
+  export metric, so a local relay missing its `upstream` mark cannot leak CDN
+  routes back (`misconfigured_uplink_leaks_unless_the_cdn_marks_its_downstream`).
+  This extends the `upstream` link mark in `doc/bin/relay/cluster.md`.
 - A plain client advertises its own origin and publications only. Its
   authenticated routing identity is shared across its live sessions so P2P
   can recognize the same origin, superseding the session-only identity plan.
   Clients receive only authorized, interested claims; opaque ids expose no
-  backbone addresses, but are not themselves authorization.
-- Preserve path-only subscription aggregation if Routing contracts proves
-  it safe under local priorities and multiple origins. Per-origin Babel
-  feasibility is not a proof for arbitrary origin reselection at each hop.
-  Implement the reviewed forwarding constraint; do not silently remove
-  requester exclusion or assume aggregation makes a cycle deliver media.
+  backbone addresses, but are not themselves authorization. A client
+  advertises nothing it receives, so it holds no feasibility distance and
+  falls back from P2P to the CDN at once.
 - Mixed versions: a lite-06 peer keeps today's path vector, translated at the
   relay that speaks both, for the rollout window only.
 
@@ -168,8 +232,8 @@ benchmarks.
 Open, for the implementer to settle and record:
 
 - The earlier simulator persisted seqnos across restart. Re-run with the
-  settled fresh routing incarnation and the contracts proof's stale-state
-  rules; do not carry the old assumption into acceptance.
+  settled fresh routing incarnation and the stale-state rules above; do not
+  carry the old assumption into acceptance.
 - The window where an origin's ANNOUNCE_END and a next-hop change cross in
   flight, and what makes a replacement next hop's announce set current. Kept
   open: [Next-hop handoff](/quest/m1/cluster-routing/handoff.md) settles it
@@ -223,16 +287,18 @@ benchmark smoke alone does not enforce complexity, so add operation-count
 regressions. Bound pending requests and freshness state under same-clock churn.
 
 Wire: `drafts/draft-lcurley-moq-lite.md` in the same PR, and `js/net`
-encodes, decodes, and resolves it. Browsers remain non-transit; P2P reuses
-this model rather than adding a browser forwarding engine. Public API: the
-route-change surface on
-`broadcast::Route` and its bindings will likely change; report it. This may
+encodes, decodes, and resolves it. Requests forwarded between routing nodes
+name the serving identity. Browsers remain non-transit; P2P reuses this model
+rather than adding a browser forwarding engine. Public API: the route-change
+surface on `broadcast::Route` and its bindings will likely change, `Hops`
+and saturating `Cost` go, `Preference` no longer ranks transit routes, and
+`cluster.id`/`--cluster-id` is removed rather than kept as an unused label;
+report it. This may
 split at start (Rust and draft, then JS), as long as both land in one
 release.
 
 ## Required
 
-- [Routing contracts](/quest/m1/cluster-routing/contracts.md) - authenticated incarnation, local priorities, forwarding progress, and export views
 - [Next-hop handoff](/quest/m1/cluster-routing/handoff.md) - complete and fresh claims with bounded state
 
 ## Closes
