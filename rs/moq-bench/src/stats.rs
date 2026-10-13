@@ -279,6 +279,10 @@ impl IntervalLatency {
 impl Snapshot {
 	fn take(stats: &Stats) -> Self {
 		let latency = stats.latency.snapshot();
+		// Acquire the counters bounded by `groups_expected` before reading it, pairing
+		// with the release in `GapTracker::record`, so neither exceeds it.
+		let groups_lost = stats.groups_lost.load(Ordering::Acquire);
+		let groups_present = stats.groups_present.load(Ordering::Acquire);
 		Self {
 			captured_at: latency.captured_at,
 			connections: stats.connections.load(Ordering::Relaxed),
@@ -290,8 +294,8 @@ impl Snapshot {
 			bytes_recv: stats.bytes_recv.load(Ordering::Relaxed),
 			groups_recv: stats.groups_recv.load(Ordering::Relaxed),
 			groups_expected: stats.groups_expected.load(Ordering::Relaxed),
-			groups_present: stats.groups_present.load(Ordering::Relaxed),
-			groups_lost: stats.groups_lost.load(Ordering::Relaxed),
+			groups_present,
+			groups_lost,
 			latency_samples: latency.samples,
 			latency_p50_ms: latency.p50_ms,
 			latency_p90_ms: latency.p90_ms,

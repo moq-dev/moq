@@ -580,13 +580,16 @@ impl<'a> GapTracker<'a> {
 		let expected = self.cap.map_or(0, |cap| cap - self.min + 1) + u64::from(!self.frontier_complete);
 		let present = self.complete - u64::from(self.frontier_complete);
 		let grown = (expected - present).saturating_sub(self.expected - self.present);
-		self.stats.groups_lost.fetch_add(grown, Ordering::Relaxed);
+		// Grow the denominator first and release the counters bounded by it, so a
+		// snapshot that acquires them before reading `groups_expected` never sees
+		// more lost or present groups than expected.
 		self.stats
 			.groups_expected
 			.fetch_add(expected - self.expected, Ordering::Relaxed);
+		self.stats.groups_lost.fetch_add(grown, Ordering::Release);
 		self.stats
 			.groups_present
-			.fetch_add(present - self.present, Ordering::Relaxed);
+			.fetch_add(present - self.present, Ordering::Release);
 		self.expected = expected;
 		self.present = present;
 	}
