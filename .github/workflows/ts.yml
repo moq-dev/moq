@@ -19,6 +19,12 @@ on:
       - "rs/moq-relay/**"
       - "rs/moq-loc/**"
       - "rs/moq-json/**"
+      # Workspace dependencies of moq-net, moq-tokio and moq-mux on the TS path.
+      - "rs/kio/**"
+      - "rs/moq-flate/**"
+      - "rs/moq-msf/**"
+      - "rs/moq-pattern/**"
+      - "rs/moq-sock/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
