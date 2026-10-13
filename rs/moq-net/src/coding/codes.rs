@@ -1,4 +1,4 @@
-//! Which stream reset registry a stream's codes are written and read with.
+//! The negotiated registries for errors reported by a stream.
 
 use crate::{Error, StreamError, ietf, lite};
 
@@ -20,14 +20,18 @@ pub trait StreamCodes {
 	/// Read a code the peer reset a stream (or sent STOP_SENDING) with.
 	fn decode_stream_code(&self, code: u32) -> StreamError;
 
+	/// Read the session close reported while using this stream's protocol.
+	fn decode_session_code(&self, code: u32) -> crate::SessionError {
+		crate::SessionError::from_code(code)
+	}
+
 	/// Turn a transport failure into an [`Error`], reading a stream reset with this
 	/// registry.
 	///
-	/// A session close is not stream-scoped, so it decodes through
-	/// [`SessionError`](crate::SessionError) exactly as [`Error::from_transport`] does.
+	/// Session closes use the same negotiated protocol as stream resets.
 	fn transport_error<E: crate::transport::Error>(&self, err: E) -> Error {
 		if let Some((code, _reason)) = err.session_error() {
-			return crate::SessionError::from_code(code).into();
+			return self.decode_session_code(code).into();
 		}
 
 		if let Some(code) = err.stream_error() {
@@ -41,6 +45,10 @@ pub trait StreamCodes {
 /// moq-lite's registry, specified by draft-lcurley-moq-lite (Error Codes). A code a version
 /// lacks is sent there as the closest one it has, and not read back there.
 impl StreamCodes for lite::Version {
+	fn decode_session_code(&self, code: u32) -> crate::SessionError {
+		lite::error::from_session_code(code)
+	}
+
 	fn encode_stream_code(&self, err: &StreamError) -> u32 {
 		match err {
 			StreamError::NotFetchable if !self.has_not_fetchable() => StreamError::NotFound.to_code(),
@@ -70,6 +78,13 @@ impl StreamCodes for ietf::Version {
 /// The negotiated version before it is narrowed to one protocol, e.g. the SETUP stream a
 /// pre-lite-05 session opens.
 impl StreamCodes for crate::Version {
+	fn decode_session_code(&self, code: u32) -> crate::SessionError {
+		match self {
+			Self::Lite(version) => version.decode_session_code(code),
+			Self::Ietf(version) => version.decode_session_code(code),
+		}
+	}
+
 	fn encode_stream_code(&self, err: &StreamError) -> u32 {
 		match self {
 			Self::Lite(version) => version.encode_stream_code(err),
@@ -194,6 +209,22 @@ mod tests {
 				stream: Some(0x0)
 			}),
 			Error::Stream(StreamError::Internal)
+		));
+
+		// A session-level failure still needs the stream's negotiated protocol.
+		assert!(matches!(
+			version.transport_error(Failed {
+				session: Some(0x30),
+				stream: None
+			}),
+			Error::Session(crate::SessionError::Unknown(0x30))
+		));
+		assert!(matches!(
+			lite::Version::Lite07.transport_error(Failed {
+				session: Some(0x30),
+				stream: None
+			}),
+			Error::Session(crate::SessionError::Unsupported)
 		));
 
 		// Neither: the transport itself failed.

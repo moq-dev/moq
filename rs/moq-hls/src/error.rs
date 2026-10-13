@@ -39,6 +39,10 @@ pub enum Error {
 	#[error("mux: {0}")]
 	Mux(#[from] moq_mux::Error),
 
+	/// History mode found no first group on this timeline, as in a retained (DVR) recording.
+	#[error("history needs timeline {0} from its first group; retained recordings are not supported")]
+	HistoryPruned(String),
+
 	/// A `file://` URL could not be turned back into a filesystem path.
 	#[error("invalid file URL")]
 	InvalidFileUrl,

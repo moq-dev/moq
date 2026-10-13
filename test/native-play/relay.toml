@@ -1,0 +1,13 @@
+# Private loopback relay for the native playback smoke test.
+[log]
+level = "info"
+
+[listen]
+bind = "127.0.0.1:4443"
+tls.generate = ["localhost", "127.0.0.1"]
+
+[web.http]
+listen = "127.0.0.1:4443"
+
+[auth]
+public = "**"

@@ -114,7 +114,7 @@ the delay; a frame that cannot arrive in time at the rate fails the export.
 ```bash
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang play
 moq ... play --delay 500ms          # fix the delay instead of measuring it
-moq ... play --no-video             # audio only
+moq ... play --no-video             # audio only, without a window
 ```
 
 Decodes H.264, H.265, and AV1 video with the platform hardware decoder where
@@ -143,6 +143,8 @@ audio-device dependencies:
 cargo install moq-cli --no-default-features --features "iroh,noq,websocket,play"
 ```
 
+`moq play` skips disabled renditions. If none are enabled, it waits for a later catalog. Disabling the current rendition stops it and selects an enabled replacement.
+
 ## Capture
 
 ```bash
@@ -170,6 +172,9 @@ feature (links libpipewire).
 moq --connect https://relay.example.com/anon --broadcast cam.hang transcode
 moq ... transcode --rung 720:2500000 --rung 360:600000 --encoder nvenc --decoder nvdec
 ```
+
+Rung sizes are the coded frame's short side. A 1080x1920 portrait source
+produces 720x1280 and 360x640 rungs. Catalog rotation is preserved.
 
 Publishes `cam.hang/transcode.hang` whose catalog references the source's
 rendition and adds lower rungs that are decoded and encoded only while someone
@@ -305,6 +310,8 @@ fetchable, which the [HLS gateway](/bin/hls) depends on. `export fmp4`, `export 
 and `export h265` use `--max-delay`
 (default 500 ms) is how far a stalled group may fall behind the live edge
 before *this* consumer skips it. Raising the first never delays playback.
+At stdin EOF, `import` keeps the finished broadcast up for its max-age, so a
+subscriber still catching up can drain it; Ctrl-C ends that early.
 
 `export ts`, `export flv`, and `export mkv` take `--delay` (default 500 ms)
 instead, like an SRT receiver's

@@ -10,6 +10,11 @@ use std::time::Duration;
 use moq_net::{Error, Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
@@ -32,7 +37,7 @@ struct Setup {
 async fn setup(version: &str) -> Setup {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let track = broadcast.create_track("video", None).unwrap();
+	let track = broadcast.create_track("video", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
 	let subscriber = produce_origin(2);
@@ -287,5 +292,35 @@ async fn older_lite_close_keeps_ack_drain() {
 		group.finish().unwrap();
 		track.finish().unwrap();
 		pair.client.close().await.expect("released draft still drains on ACKs");
+	}
+}
+
+/// A locally unsupported feature uses only the negotiated session registry.
+#[moq_net_sim::test]
+async fn unsupported_abort_uses_the_negotiated_session_registry() {
+	for protocol in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-17", "moq-transport-22"] {
+		let version: Version = protocol.parse().unwrap();
+		let pair = connect_mock(MockConnectOptions::new(version)).await;
+		pair.client.abort(Error::Unsupported);
+		let _ = pair.server.closed().await;
+		let (code, _) = pair.server_transport.close_reason().expect("transport closed");
+		assert_eq!(code, if version.is_lite() { 0x30 } else { 0x1 }, "{protocol}");
+	}
+}
+
+/// A Lite-only close code arriving on IETF stays unknown instead of gaining Lite semantics.
+#[moq_net_sim::test]
+async fn unsupported_close_is_decoded_by_the_negotiated_session_registry() {
+	for protocol in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-17", "moq-transport-22"] {
+		let version: Version = protocol.parse().unwrap();
+		let mut pair = connect_mock(MockConnectOptions::new(version)).await;
+		moq_net::transport::poll::Session::close(&mut pair.server_transport, 0x30, "unsupported");
+		let error = pair.client.closed().await;
+		let expected = if version.is_lite() {
+			moq_net::SessionError::Unsupported
+		} else {
+			moq_net::SessionError::Unknown(0x30)
+		};
+		assert!(matches!(error, Error::Session(code) if code == expected), "{protocol}");
 	}
 }

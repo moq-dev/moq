@@ -18,13 +18,17 @@ pub fn moq_log_level(level: String) -> Result<(), MoqError> {
 	};
 
 	if INITIALIZED.swap(true, Ordering::SeqCst) {
-		return Err(MoqError::Log("logging already initialized".into()));
+		return Err(MoqError::Log {
+			reason: "logging already initialized".into(),
+		});
 	}
 
 	moq_tokio::Log::new(level)
 		.init()
 		.inspect_err(|_| INITIALIZED.store(false, Ordering::SeqCst))
-		.map_err(|err| MoqError::Log(err.to_string()))?;
+		.map_err(|err| MoqError::Log {
+			reason: err.to_string(),
+		})?;
 
 	Ok(())
 }

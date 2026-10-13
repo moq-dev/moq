@@ -1224,7 +1224,8 @@ test("integration: ietf fetch group is unsupported", async () => {
 // subscription already on the session keeps going.
 test("integration: ietf SUBSCRIBE_TRACKS is refused per request", async () => {
 	// SUBSCRIBE_TRACKS, Length, Request ID, Track Namespace Prefix ("room"), no parameters.
-	const subscribeTracks = new Uint8Array([0x51, 0x00, 0x08, 0x01, 0x01, 0x04, 0x72, 0x6f, 0x6f, 0x6d, 0x00]);
+	// A fresh even client ID, distinct from the connection's setup/discovery/subscription requests.
+	const subscribeTracks = new Uint8Array([0x51, 0x00, 0x08, 0x3e, 0x01, 0x04, 0x72, 0x6f, 0x6f, 0x6d, 0x00]);
 
 	for (const protocol of [
 		Ietf.ALPN.DRAFT_18,

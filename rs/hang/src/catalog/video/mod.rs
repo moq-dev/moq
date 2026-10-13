@@ -113,12 +113,16 @@ impl Video {
 		self.renditions.is_empty()
 	}
 
+	/// Iterate enabled renditions in quality order.
+	pub fn enabled(&self) -> impl Iterator<Item = (&String, &VideoConfig)> {
+		self.ranked().filter(|(_, config)| config.enabled)
+	}
+
 	/// Iterate the renditions best first: enabled, then largest picture, then highest bitrate.
 	///
 	/// A consumer that carries one rendition takes the first it supports, so the
-	/// picture doesn't depend on how the tracks are named. A disabled rendition sends
-	/// no frames, so it ranks below every enabled one. Unknown dimensions or bitrate
-	/// rank below known ones, and exact ties keep name order.
+	/// picture doesn't depend on how the tracks are named. Unknown dimensions or
+	/// bitrate rank below known ones, and exact ties keep name order.
 	pub fn ranked(&self) -> impl Iterator<Item = (&String, &VideoConfig)> {
 		let mut ranked: Vec<_> = self.renditions.iter().collect();
 		ranked.sort_by_key(|(_, config)| {
@@ -365,10 +369,25 @@ mod test {
 		let names: Vec<_> = video.ranked().map(|(name, _)| name.as_str()).collect();
 		assert_eq!(names, ["f", "d", "e", "c", "b", "a"]);
 
-		// A disabled rendition sends no frames, so it ranks below every enabled one.
+		// Disabled renditions rank last, so catalog transforms can retain their metadata.
 		video.renditions.get_mut("f").unwrap().enabled = false;
 		let names: Vec<_> = video.ranked().map(|(name, _)| name.as_str()).collect();
 		assert_eq!(names, ["d", "e", "c", "b", "a", "f"]);
+		let names: Vec<_> = video.enabled().map(|(name, _)| name.as_str()).collect();
+		assert_eq!(names, ["d", "e", "c", "b", "a"]);
+	}
+
+	#[test]
+	fn disabled_renditions_are_ineligible_until_reenabled() {
+		let mut catalog = Video::default();
+		let config = VideoConfig::new(VideoCodec::VP8);
+		catalog.renditions.insert("track".into(), config);
+		assert_eq!(catalog.enabled().count(), 1);
+		catalog.renditions.get_mut("track").unwrap().enabled = false;
+		assert_eq!(catalog.enabled().count(), 0);
+		assert_eq!(catalog.ranked().count(), 1);
+		catalog.renditions.get_mut("track").unwrap().enabled = true;
+		assert_eq!(catalog.enabled().count(), 1);
 	}
 
 	#[test]

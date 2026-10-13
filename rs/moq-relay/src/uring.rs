@@ -82,7 +82,7 @@ pub struct Workers {
 	members: Vec<moq_sock::shard::Socket>,
 	addr: SocketAddr,
 	server: moq_uring::quic::server::Config,
-	/// What the workers serve, fingerprinted once, for `/certificate.sha256`.
+	/// The same live resolver used by every worker and the fingerprint endpoint.
 	certificates: moq_tokio::tls::Certificates,
 	/// One counter set per worker, in shard order. Created here rather than on
 	/// the worker thread so `/metrics` can publish every worker's series from
@@ -110,19 +110,27 @@ pub struct Workers {
 impl Workers {
 	/// Bind one socket per worker on the address `listen` describes.
 	///
-	/// Like the tokio group, `listen`'s `tcp`/`unix` listeners are ignored
-	/// (serve those from an [`init_streams`](moq_tokio::listen::Config::init_streams)
-	/// server), and `tls.generate` is refused since every worker must serve
-	/// one identity. Unlike it, exactly one certificate/key pair is required,
-	/// and it is read here rather than on each worker thread.
-	pub fn bind(
-		listen: &moq_tokio::listen::Config,
-		quic: &moq_tokio::quic::Config,
-		config: moq_tokio::worker::Config,
-	) -> anyhow::Result<Self> {
-		if !listen.tls.generate.is_empty() {
-			anyhow::bail!("io_uring workers cannot use listen.tls.generate; provide a certificate file");
-		}
+	/// Shares one served identity with every member; stream listeners are served separately.
+	pub fn bind(server: moq_tokio::server::Config, config: moq_tokio::worker::Config) -> anyhow::Result<Self> {
+		let listen = &server.listen;
+		let quic = &server.quic;
+		let tls = match server.tls {
+			Some(tls) => {
+				// A second configured source must not be silently ignored.
+				anyhow::ensure!(
+					listen.tls.cert.is_empty()
+						&& listen.tls.key.is_empty()
+						&& listen.tls.generate.is_empty()
+						&& listen.tls.root.is_empty()
+						&& listen.tls.identity.is_none()
+						&& listen.tls.peers.is_none(),
+					"a shared TLS policy cannot be combined with listen.tls settings"
+				);
+				tls
+			}
+			None => listen.tls.load()?,
+		};
+		let certificates = tls.certificates();
 
 		// Everything below is a setting this listener cannot deliver. Refusing
 		// beats starting and quietly behaving differently from what the
@@ -134,26 +142,6 @@ impl Workers {
 				 QUIC-LB server id (listen.lb_id)"
 			);
 		}
-		let (cert, key) = match (listen.tls.cert.as_slice(), listen.tls.key.as_slice()) {
-			([cert], [key]) => (cert.clone(), key.clone()),
-			([], []) => anyhow::bail!("io_uring workers need a certificate (listen.tls.cert/key)"),
-			_ => anyhow::bail!("io_uring workers serve exactly one certificate, got several"),
-		};
-		// Read once, here, rather than per worker: every worker must present
-		// the same identity, and a certificate replaced on disk while the
-		// threads are starting would otherwise split the group between two.
-		let identity = moq_uring::quic::Identity::open(&cert, &key)
-			.with_context(|| format!("failed to load {} / {}", cert.display(), key.display()))?;
-		let certificates = moq_tokio::tls::Certificates::from_pem(identity.cert())
-			.with_context(|| format!("failed to fingerprint {}", cert.display()))?;
-
-		// A client certificate stands in for a JWT, exactly as on the tokio
-		// path; a client that presents none still gets the token flow.
-		let client_auth = match listen.tls.root.is_empty() {
-			true => moq_uring::quic::server::ClientAuth::None,
-			false => moq_uring::quic::server::ClientAuth::Optional(listen.tls.root.clone()),
-		};
-
 		// One resolution for the whole group, so a DNS answer that rotates
 		// between queries cannot hand members different addresses.
 		//
@@ -234,9 +222,12 @@ impl Workers {
 			);
 		}
 
-		let mut server = moq_uring::quic::server::Config::new(identity);
-		server.alpn = alpns.iter().cloned().chain(["h3".to_string()]).collect();
-		server.client_auth = client_auth;
+		let alpn = alpns
+			.iter()
+			.map(|alpn| alpn.as_bytes().to_vec())
+			.chain([b"h3".to_vec()])
+			.collect();
+		let mut server = moq_uring::quic::server::Config::new(tls.config(alpn)?);
 		let quic = quic.resolve();
 		server.transport = transport(&quic)?;
 
@@ -282,8 +273,7 @@ impl Workers {
 	/// The certificate every worker presents, for publishing its SHA-256
 	/// fingerprint.
 	///
-	/// Fixed for the group's lifetime: the identity is read once at
-	/// [`bind`](Self::bind) and nothing reloads it.
+	/// Tracks rotations: every worker resolves through the same live identity.
 	pub fn certificates(&self) -> moq_tokio::tls::Certificates {
 		self.certificates.clone()
 	}
@@ -545,9 +535,10 @@ fn serve_worker(spawn: Spawn) -> bool {
 			.handle()
 			.udp(member, udp)
 			.context("failed to adopt the worker socket")?;
+		let mut endpoint_config = moq_uring::quic::endpoint::Config::default().with_server(server);
+		endpoint_config.activity = serve.shutdown.activity.clone();
 		let endpoint =
-			moq_uring::quic::Endpoint::new(socket, moq_uring::quic::endpoint::Config::default().with_server(server))
-				.context("failed to build the QUIC endpoint")?;
+			moq_uring::quic::Endpoint::new(socket, endpoint_config).context("failed to build the QUIC endpoint")?;
 		Ok((worker, endpoint))
 	})();
 
@@ -725,10 +716,12 @@ async fn serve_connection(
 		let auth = serve.auth.clone();
 		let cluster = serve.cluster.clone();
 		let sessions = serve.sessions.clone();
+		let shutdown = serve.shutdown.clone();
 		match serve
 			.tokio
 			.spawn(async move {
-				let admitted = cluster.admit(&auth, auth_request.clone()).await?;
+				// Abandoned at the drain deadline: worker teardown only detaches this task.
+				let admitted = shutdown.admit(cluster.admit(&auth, auth_request.clone())).await?;
 				Ok::<_, crate::auth::Error>((admitted, sessions.register(auth_request)))
 			})
 			.await
@@ -828,5 +821,60 @@ mod tests {
 		assert_eq!(transport.receive_window, None);
 		assert_eq!(transport.stream_receive_window, None);
 		assert_eq!(transport.send_window, None);
+	}
+
+	/// An auth decision still pending at the drain deadline is abandoned then,
+	/// although worker teardown only detaches the task awaiting it.
+	#[tokio::test]
+	async fn pending_admission_is_abandoned_at_the_deadline() {
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default()) {
+			eprintln!("skipping io_uring relay test: {reason}");
+			return;
+		}
+
+		let dir = tempfile::tempdir().unwrap();
+		let key = rcgen::KeyPair::generate().unwrap();
+		let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+			.unwrap()
+			.self_signed(&key)
+			.unwrap();
+		let (cert_path, key_path) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
+		std::fs::write(&cert_path, cert.pem()).unwrap();
+		std::fs::write(&key_path, key.serialize_pem()).unwrap();
+
+		let window = std::time::Duration::from_secs(1);
+		let mut config = crate::Config::default();
+		config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.listen.tls.cert = vec![cert_path];
+		config.listen.tls.key = vec![key_path];
+		config.runtime.workers = Some(1);
+		config.runtime.pin = false;
+		config.runtime.io_uring = true;
+		config.drain_timeout = window;
+		let mut relay = crate::Relay::load(config).await.unwrap().with_signals(false);
+		let port = relay.addr().unwrap().port();
+		let mut admissions = relay.admissions().unwrap();
+		let trigger = relay.shutdown_trigger().clone();
+		let running = tokio::spawn(relay.run());
+
+		let mut client = moq_tokio::connect::Config::default();
+		client.tls.insecure = Some(true);
+		client.once = Some(true);
+		client.bind = Some("127.0.0.1:0".parse().unwrap());
+		let url: url::Url = format!("moql://127.0.0.1:{port}/drain").parse().unwrap();
+		let client = client.init(Default::default()).unwrap();
+		let connecting = tokio::spawn(async move { client.with_reconnect(false).connect(url).established().await });
+		let mut admission = admissions.next().await.unwrap();
+
+		// Only timers decide what follows; the embedded admission's own timeout
+		// is well past the drain window.
+		tokio::time::pause();
+		trigger.start();
+		tokio::time::timeout(window + std::time::Duration::from_secs(1), admission.abandoned())
+			.await
+			.expect("the admission outlived the drain deadline");
+		running.await.unwrap().unwrap();
+		connecting.abort();
 	}
 }

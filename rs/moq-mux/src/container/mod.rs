@@ -21,6 +21,7 @@ mod producer;
 mod source;
 #[cfg(test)]
 pub(crate) mod test_util;
+mod text;
 
 pub mod flv;
 pub mod fmp4;

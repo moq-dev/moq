@@ -83,4 +83,3 @@ loudly on a recording with no catalog.
 ## Required
 
 - [Catalog track identity](/quest/m1/catalog-tracks.md) - the guarantee that one recorded catalog describes every group
-- [History from the start](/quest/m1/archive/replay-history.md) - history mode lists a recording from its start, which "lists the whole recording" needs

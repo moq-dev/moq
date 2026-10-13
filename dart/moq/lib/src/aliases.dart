@@ -53,7 +53,7 @@ typedef AnnouncedBroadcast = MoqAnnouncedBroadcast;
 typedef Announce = MoqAnnounce;
 
 /// What an [AnnounceConsumer] yields: [AnnounceEventStart],
-/// [AnnounceEventUpdate], or [AnnounceEventEnd].
+/// [AnnounceEventUpdate], [AnnounceEventEnd], or [AnnounceEventRestart].
 typedef AnnounceEvent = MoqAnnounceEvent;
 
 /// A route now covers the prefix; the stream had none there.
@@ -64,6 +64,10 @@ typedef AnnounceEventUpdate = UpdateMoqAnnounceEvent;
 
 /// No route covers the prefix any more; carries its last route.
 typedef AnnounceEventEnd = EndMoqAnnounceEvent;
+
+/// Another publisher instance now serves the prefix: drop what was resolved
+/// under it and request afresh.
+typedef AnnounceEventRestart = RestartMoqAnnounceEvent;
 
 /// The write side of a broadcast: publish tracks into it.
 typedef BroadcastProducer = MoqBroadcastProducer;

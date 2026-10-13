@@ -258,6 +258,9 @@ test("announcing and subscribing after GOAWAY still open streams, on the adapter
 			nextRequestId() {
 				return Promise.resolve(0n);
 			},
+			spendRequest() {
+				throw new Error("unexpected incoming request");
+			},
 			close() {},
 		};
 
