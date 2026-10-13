@@ -16,8 +16,12 @@ excluded:
   ACKs, and retransmits.
 - **WebSocket:** the TCP stream's bytes, which include TLS, WebSocket, and
   qmux framing and retransmits.
-- **Gateways an embedder terminates** (SRT, WebRTC, RTMP): the same counts
-  from their own stacks.
+- **Gateways an embedder terminates:** SRT and WebRTC through moq-srt's and
+  moq-rtc's sources. An embedder terminating RTMP on its own socket
+  registers that socket's `TCP_INFO` counts; moq-rtmp's own `Server` and
+  client expose no source until a consumer needs one.
+- **TCP receive:** bytes TCP delivered, so a peer's duplicate retransmits
+  are not counted.
 
 Non-goals:
 

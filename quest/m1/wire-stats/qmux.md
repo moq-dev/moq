@@ -4,8 +4,12 @@
 
 A qmux session over TCP (WebSocket or raw TLS) reports cumulative bytes sent
 and received in its `SessionStats`, so moq-net's `Stats.bytes_sent` /
-`bytes_received` is nonzero on WebSocket. The counts include TLS, WebSocket,
-and qmux framing and TCP retransmits, and exclude TCP/IP headers.
+`bytes_received` is nonzero on WebSocket. Sent bytes include TLS, WebSocket,
+and qmux framing and TCP retransmits, and exclude TCP/IP headers. Received
+bytes are what TCP delivered (`tcpi_bytes_received` is RFC 4898's
+application-throughput counter), so a peer's duplicate retransmitted payload
+is not counted: an accepted undercount on the receive side, documented
+beside the field.
 
 ## Plan
 
