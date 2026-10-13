@@ -1,4 +1,4 @@
-# [S] The handshake deadline covers admission
+# [M] The handshake deadline covers admission
 
 ## Goal
 
@@ -28,10 +28,30 @@ the deadline while authorization runs):
 Start after #5244 (io_uring handshake deadline) merges, since it adds the
 io_uring deadline this extends.
 
-Tests on controlled time for both listeners: an admission that never answers
-closes at the deadline, one answered just inside it is admitted, and `"0"`
-waits. Update `doc/bin/relay/config.md`, which says the deadline covers
+Gaps found in this plan's review, to settle with the maintainer at start:
+
+- Dropping the shared cap leaves the other `Auth::admit` callers unbounded:
+  WebSocket admission before the upgrade (`websocket.rs`), HTTP admission
+  (`admit_http` in `web.rs`), and the public `Cluster::admit` for gateway
+  sessions. Recommendation, following the decision above: the web callers
+  race the web listener's timeout, which is the same `listen.timeout`, and
+  `Cluster::admit` documents that the embedder owns the deadline.
+- `moq_auth::Client` sets a 10 s reqwest timeout on every request
+  (`rs/moq-auth/src/client.rs`), so an HTTP auth server answering `connect`
+  after 10 s is still refused. The `connect` request drops that fixed bound
+  and inherits the caller's deadline; `revalidate` and `end` keep theirs, like
+  grant renewal.
+
+Race inside the task that owns the admission, or cancel it, so an expired
+deadline does not leave admission work running detached.
+
+Tests on controlled time for each caller, the embedded decider and an HTTP
+auth server: an admission that never answers closes at the deadline, one
+answered just inside it (past 10 s for the HTTP server) is admitted, and
+`"0"` waits. Update `doc/bin/relay/config.md`, which says the deadline covers
 "transport through MoQ SETUP", and note the behavior change for slow auth
 servers in the relay changelog.
 
-Public API: none. Config: `listen.timeout` now includes admission. Wire: none.
+Public API: no signature changes; `Cluster::admit` and
+`moq_auth::Client::connect` no longer time out on their own. Config:
+`listen.timeout` now includes admission. Wire: none.
