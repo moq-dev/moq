@@ -223,6 +223,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just rs test -p moq-mux benchmark_damage_pid_fanout --run-ignored only --success-output immediate
 
+      - name: TS scheduler benchmark smoke
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs bench-ts-schedule --test
+
       - name: Container export benchmark smoke
         if: ${{ !cancelled() }}
         run: nix develop --command just rs bench-export --test

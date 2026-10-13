@@ -48,7 +48,3 @@ Public API: none. Wire: none.
 ## Required
 
 - [nixpkgs ships the lld fix](/quest/m0/nixpkgs-lld-fix.md) - NixOS/nixpkgs#568680 reaches `nixpkgs-unstable`
-
-## Related
-
-- [Fuzz targets build under LTO](/quest/m0/fuzz-lto.md) - the other build break in the same nightly, from a different cause
