@@ -40,7 +40,9 @@ impl Release {
 	/// Fails for [`CatalogFormat::Msf`], which has no `m2ts` section.
 	pub async fn new(source: crate::Source, catalog_format: CatalogFormat) -> crate::Result<Self> {
 		if catalog_format == CatalogFormat::Msf {
-			return Err(anyhow::anyhow!("the MSF catalog has no `m2ts` passthrough track; read the hang catalog").into());
+			return Err(
+				anyhow::anyhow!("the MSF catalog has no `m2ts` passthrough track; read the hang catalog").into(),
+			);
 		}
 		let catalog = source.catalog(catalog_format).await?;
 		let mut release = Self {
