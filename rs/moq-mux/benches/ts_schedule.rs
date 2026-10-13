@@ -45,7 +45,7 @@ fn admission(c: &mut Criterion) {
 						for pid in 1..=pids {
 							let at = (999 + frame * 40) * 1_000_000;
 							schedule
-								.push(
+								.push_frames(
 									pid,
 									schedule::Timing {
 										by: at,
@@ -53,6 +53,7 @@ fn admission(c: &mut Criterion) {
 									},
 									packet(pid).repeat(10),
 									false,
+									Vec::new(),
 								)
 								.unwrap();
 						}

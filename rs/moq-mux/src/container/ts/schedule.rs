@@ -175,6 +175,10 @@ struct Unit {
 	pid: u16,
 	/// The coarse deadline used by release windows and unpadded admission.
 	due: u128,
+	/// The due slot of its last frame. A PES that packs several is pushed once that frame is
+	/// muxed, so its window runs from there, as one frame's runs from when it is pushed: every
+	/// slot it may ride is laid out after it is queued, whenever the caller lays them.
+	settled: u128,
 	timing: Timing,
 	/// The slot after the unit pushed before it, which it may go out from even without a
 	/// window: nothing pushed later can be due sooner.
@@ -187,11 +191,41 @@ struct Unit {
 	late: bool,
 	/// Its bytes in the PID's decoder buffer, until it decodes.
 	held: usize,
+	/// The decode time and bytes of each frame of a PES that packs several, which leave the
+	/// decoder buffer one by one; empty for a PES of one frame, which leaves at once.
+	frames: Vec<(u128, usize)>,
 }
 
 impl Unit {
 	fn count(&self) -> usize {
 		self.packets.len() / TsPacket::SIZE
+	}
+
+	/// When its last bytes leave the decoder buffer.
+	fn last_decode(&self) -> u128 {
+		self.frames.last().map_or(self.timing.decode, |&(decode, _)| decode)
+	}
+
+	/// When each of its frames leaves the decoder buffer, with the bytes it takes: all it
+	/// holds, for a unit of one frame.
+	fn frames(&self) -> impl Iterator<Item = (u128, usize)> + '_ {
+		let single = self.frames.is_empty().then_some((self.timing.decode, usize::MAX));
+		self.frames.iter().copied().chain(single)
+	}
+
+	/// What it leaves in the decoder buffer once sent: each frame's PID, decode time and
+	/// bytes, of the bytes it holds, which the frames decoded already have taken first.
+	fn leaving(&self) -> Vec<(u16, u128, usize)> {
+		let mut held = self.held;
+		let mut out: Vec<_> = self.frames().collect();
+		for (_, bytes) in out.iter_mut().rev() {
+			*bytes = (*bytes).min(held);
+			held -= *bytes;
+		}
+		out.into_iter()
+			.filter(|&(_, bytes)| bytes > 0)
+			.map(|(decode, bytes)| (self.pid, decode, bytes))
+			.collect()
 	}
 
 	fn remaining(&self) -> usize {
@@ -234,6 +268,90 @@ fn elementary(packet: &[u8]) -> &[u8] {
 	}
 }
 
+/// A PCR of `ticks` as an adaptation field carries it: the 33-bit base, six reserved bits,
+/// all ones as ISO 13818-1 requires, and the 9-bit extension.
+pub(super) fn pcr_field(ticks: u64) -> [u8; 6] {
+	let (base, extension) = ((ticks / 300) & ((1 << 33) - 1), ticks % 300);
+	[
+		(base >> 25) as u8,
+		(base >> 17) as u8,
+		(base >> 9) as u8,
+		(base >> 1) as u8,
+		((base as u8) << 7) | 0x7e | (extension >> 8) as u8,
+		extension as u8,
+	]
+}
+
+/// `packets`, the rest of a PES on one PID, rewritten so the first carries the PCR `ticks` in
+/// its adaptation field: the payload moves on by the field's bytes, into the stuffing of the
+/// last packet or one more packet. `None` unless every packet is the PID's with payload, and
+/// its adaptation field, if any, carries nothing but flags and stuffing, as the export
+/// writes them.
+fn with_pcr(packets: &[u8], ticks: u64) -> Option<Vec<u8>> {
+	let packets = packets.as_chunks::<{ TsPacket::SIZE }>().0;
+	let first = packets.first()?;
+	let mut body = Vec::with_capacity(packets.len() * PAYLOAD);
+	let mut flags = Vec::with_capacity(packets.len());
+	for packet in packets {
+		if pid(packet) != pid(first) || packet[3] & 0x10 == 0 {
+			return None;
+		}
+		// Only the PES's first packet may start it, and only the flags byte's random access
+		// and discontinuity indicators may be set.
+		if packet != first && packet[1] & 0x40 != 0 {
+			return None;
+		}
+		let field = (packet[3] & 0x20 != 0).then(|| &packet[5..5 + usize::from(packet[4])]);
+		let flag = field.and_then(|field| field.first().copied()).unwrap_or(0);
+		if flag & !0xc0 != 0 {
+			return None;
+		}
+		flags.push(flag);
+		body.extend_from_slice(payload(packet));
+	}
+	if body.is_empty() {
+		return None;
+	}
+	let mut out = Vec::with_capacity((packets.len() + 1) * TsPacket::SIZE);
+	let mut offset = 0;
+	for k in 0.. {
+		let start = if k == 0 { first[1] & 0x40 } else { 0 };
+		let flag = flags.get(k).copied().unwrap_or(0);
+		let mut field = Vec::new();
+		if k == 0 {
+			field.push(flag | 0x10);
+			field.extend_from_slice(&pcr_field(ticks));
+		} else if flag != 0 {
+			field.push(flag);
+		}
+		let room = PAYLOAD - if field.is_empty() { 0 } else { 1 + field.len() };
+		let take = room.min(body.len() - offset);
+		if take < room {
+			// Stuffing fills the field out to the packet's end; a field of length 0 is the
+			// single byte of stuffing.
+			if field.is_empty() && take + 1 < PAYLOAD {
+				field.push(0);
+			}
+			field.resize(PAYLOAD - 1 - take, 0xff);
+		}
+		out.extend_from_slice(&[first[0], first[1] & !0x40 | start, first[2]]);
+		match field.is_empty() && take == PAYLOAD {
+			true => out.push(0x10),
+			false => {
+				out.push(0x30);
+				out.push(field.len() as u8);
+				out.extend_from_slice(&field);
+			}
+		}
+		out.extend_from_slice(&body[offset..offset + take]);
+		offset += take;
+		if offset == body.len() {
+			break;
+		}
+	}
+	Some(out)
+}
+
 /// One grid slot's worth of output.
 pub(super) struct Slot {
 	pub index: u128,
@@ -251,14 +369,17 @@ pub(super) struct Slot {
 	pub caps: HashMap<u16, usize>,
 	/// Exact positions of the media packets in a padded slot, counting the opening clock.
 	positions: Option<Vec<usize>>,
+	/// The padded slot opens with a packet of the clock's PID carrying its PCR, so it needs
+	/// no clock packet of its own.
+	pub clocked: bool,
 }
 
 impl Slot {
-	/// The whole slot, opening with its `clock` packet. Padded slots use the exact
-	/// positions planned against receiver buffers. Unpadded slots use smooth weighted
-	/// round-robin: each PID (the clock packet counted on its own) and the null packets take
-	/// positions in proportion to their count, as evenly as they can, every PID keeping its
-	/// own order.
+	/// The whole slot, opening with its `clock` packet unless it is [`Self::clocked`]. Padded
+	/// slots use the exact positions planned against receiver buffers. Unpadded slots use
+	/// smooth weighted round-robin: each PID (the clock packet counted on its own) and the null
+	/// packets take positions in proportion to their count, as evenly as they can, every PID
+	/// keeping its own order.
 	///
 	/// A PID's packets in a run would arrive at the multiplex's full rate and overflow its
 	/// 512-byte transport buffer, which drains only at its Rx (ISO 13818-1 2.4.2.3): an audio
@@ -274,15 +395,18 @@ impl Slot {
 	pub fn layout(&self, clock: &[u8], pmt_pid: u16, null: &[u8]) -> Vec<u8> {
 		let packets = self.packets.as_chunks::<{ TsPacket::SIZE }>().0;
 		if let Some(positions) = &self.positions {
-			let mut out = Vec::with_capacity((1 + packets.len() + self.nulls) * TsPacket::SIZE);
-			out.extend_from_slice(clock);
+			let count = usize::from(!self.clocked) + packets.len() + self.nulls;
+			let mut out = Vec::with_capacity(count * TsPacket::SIZE);
+			if !self.clocked {
+				out.extend_from_slice(clock);
+			}
 			for (&position, packet) in positions.iter().zip(packets) {
 				while out.len() / TsPacket::SIZE < position {
 					out.extend_from_slice(null);
 				}
 				out.extend_from_slice(packet);
 			}
-			while out.len() / TsPacket::SIZE < 1 + packets.len() + self.nulls {
+			while out.len() / TsPacket::SIZE < count {
 				out.extend_from_slice(null);
 			}
 			return out;
@@ -508,11 +632,29 @@ impl Schedule {
 		self.clock = Some(pid);
 	}
 
-	/// Queue an access unit on `pid` (whole TS packets, the tables muxed ahead of it first)
-	/// with its exact transport deadline and decoder removal time.
+	/// Queue an access unit of one frame.
+	#[cfg(test)]
 	pub fn push(&mut self, pid: u16, timing: Timing, packets: Vec<u8>, keyframe: bool) -> anyhow::Result<()> {
+		self.push_frames(pid, timing, packets, keyframe, Vec::new())
+	}
+
+	/// Queue an access unit on `pid` (whole TS packets, the tables muxed ahead of it first)
+	/// with its exact transport deadline and decoder removal time. A PES that packs several
+	/// frames lists each one's decode time and elementary bytes, in decode order, which leave
+	/// the decoder buffer one by one; `timing` is then the first frame's.
+	pub fn push_frames(
+		&mut self,
+		pid: u16,
+		timing: Timing,
+		packets: Vec<u8>,
+		keyframe: bool,
+		mut frames: Vec<(u128, usize)>,
+	) -> anyhow::Result<()> {
 		if packets.is_empty() {
 			return Ok(());
+		}
+		if frames.len() < 2 {
+			frames.clear();
 		}
 		let due = slot(timing.by);
 		// An ended source relaxes deadlines, never buffer sizes: such a unit never fits.
@@ -538,13 +680,23 @@ impl Schedule {
 					"MPEG-TS access unit on PID {pid} has {elementary} payload bytes ({bytes} bytes with PES headers), exceeding its {size}-byte decoder buffer"
 				);
 			}
+			// The PES header leaves the decoder buffer with the first frame after it.
+			if let Some(first) = frames.first_mut() {
+				first.1 += bytes - on_pid().map(|packet| elementary(packet).len()).sum::<usize>();
+			}
 		}
-		self.horizon = self.horizon.max(Some(timing.by.div_ceil(PCR_INTERVAL.as_nanos())));
+		// The deadline its last frame would have on its own.
+		let last = timing.by
+			+ frames
+				.last()
+				.map_or(0, |&(decode, _)| decode.saturating_sub(timing.decode));
+		self.horizon = self.horizon.max(Some(last.div_ceil(PCR_INTERVAL.as_nanos())));
 		let start = self.last.map_or(due, |last| (last + 1).min(due));
 		self.last = Some(due);
 		self.units.push_back(Unit {
 			pid,
 			due,
+			settled: slot(last),
 			timing,
 			start,
 			packets,
@@ -552,6 +704,7 @@ impl Schedule {
 			keyframe,
 			late: self.next.is_some_and(|next| due < next),
 			held: 0,
+			frames,
 		});
 		Ok(())
 	}
@@ -582,16 +735,16 @@ impl Schedule {
 		self.ended = false;
 	}
 
-	/// The first slot `unit` may go out in: a window ahead of its due slot, or only the slot
-	/// before it for a PID whose decoder buffer bounds nothing, and never before the slot
-	/// after the unit pushed ahead of it needs.
+	/// The first slot `unit` may go out in: a window ahead of its last frame's due slot, or
+	/// only the slot before it for a PID whose decoder buffer bounds nothing, and never before
+	/// the slot after the unit pushed ahead of it needs.
 	fn release(&self, unit: &Unit) -> u128 {
 		let ahead = match self.buffers.get(&unit.pid).and_then(|buffer| buffer.size) {
 			_ if unit.late => return 0,
 			Some(_) => self.window,
 			None => 1,
 		};
-		unit.due.saturating_sub(ahead).min(unit.start)
+		unit.settled.saturating_sub(ahead).min(unit.start)
 	}
 
 	/// The slot [`Self::next`] lays out next, with `known` as it would be given.
@@ -656,15 +809,15 @@ impl Schedule {
 				keyframe |= unit.keyframe;
 				// Only the tables muxed ahead of a frame that wrote nothing are no access unit.
 				if unit.packets_on(0..unit.count(), unit.pid) > 0 {
-					units.push(unit.pid);
+					units.extend(std::iter::repeat_n(unit.pid, unit.frames.len().max(1)));
 				}
 			}
 			let from = unit.sent * TsPacket::SIZE;
 			packets.extend_from_slice(&unit.packets[from..from + take * TsPacket::SIZE]);
 			unit.sent += take;
 		}
-		for unit in self.units.iter().filter(|unit| unit.remaining() == 0 && unit.held > 0) {
-			self.decoding.push_back((unit.pid, unit.timing.decode, unit.held));
+		for unit in self.units.iter().filter(|unit| unit.remaining() == 0) {
+			self.decoding.extend(unit.leaving());
 		}
 		self.units.retain(|unit| unit.remaining() > 0);
 		Ok(Some(Slot {
@@ -680,6 +833,7 @@ impl Schedule {
 				.map(|(&pid, buffer)| (pid, buffer.per_slot(index, self.clock == Some(pid))))
 				.collect(),
 			positions: None,
+			clocked: false,
 		}))
 	}
 
@@ -701,22 +855,16 @@ impl Schedule {
 			units: Vec::new(),
 			caps: HashMap::new(),
 			positions: Some(Vec::new()),
+			clocked: false,
 		};
-		// The transport buffer the clock packet rides and how long it holds it, which every
-		// slot's clock packet may add to a busy stretch without the chance to wait.
-		let mut clock = None;
-		if let Some(pid) = self.clock
-			&& let Some(buffer) = self.buffers.get(&pid)
-		{
-			let duration = (TsPacket::SIZE as u128 * 8 * 1_000_000_000).div_ceil(u128::from(buffer.rate)) as i128;
-			let tb = self.transport_buffer(pid);
-			let (free, since) = self.transport.entry(tb).or_insert((time(0), time(0)));
-			if *free + TICK <= time(0) {
-				*since = time(0);
-			}
-			*free = ((*free).max(time(0)) + duration).max(time(1));
-			clock = Some((tb, duration));
-		}
+		let clock = self.clock.filter(|pid| self.buffers.contains_key(pid));
+		// The transport buffer every slot's PCR rides and how long it holds the packet carrying
+		// it, which each later slot's PCR may add to a busy stretch without the chance to wait.
+		let clock_buffer = clock.map(|pid| {
+			let rate = u128::from(self.buffers[&pid].rate);
+			let duration = (TsPacket::SIZE as u128 * 8 * 1_000_000_000).div_ceil(rate) as i128;
+			(self.transport_buffer(pid), duration)
+		});
 		// One head per PID preserves decode order without walking all future units at every
 		// transport position. Removal events keep occupancy work proportional to units.
 		let mut lanes: Vec<VecDeque<usize>> = Vec::new();
@@ -734,9 +882,11 @@ impl Schedule {
 				lanes.len() - 1
 			});
 			lanes[lane].push_back(i);
-			if unit.timing.decode as i128 > time(0) {
+			if unit.last_decode() as i128 > time(0) {
 				*occupancy.entry(unit.pid).or_default() += unit.held;
-				removals.push((unit.timing.decode, unit.pid, Some(i), 0));
+				for (decode, bytes) in unit.frames().filter(|&(decode, _)| decode as i128 > time(0)) {
+					removals.push((decode, unit.pid, Some(i), bytes));
+				}
 			}
 		}
 		removals.sort_by_key(|event| event.0);
@@ -750,11 +900,16 @@ impl Schedule {
 			})
 			.collect();
 		let mut waiting: BinaryHeap<Reverse<(i128, usize)>> = BinaryHeap::new();
-		let mut position = 1;
+		let mut position = 0;
 		while position < count {
 			let now = time(position);
 			while let Some((_, pid, unit, held)) = removals.next_if(|event| event.0 as i128 <= now) {
-				let held = unit.map_or(held, |i| std::mem::take(&mut self.units[i].held));
+				let held = unit.map_or(held, |i| {
+					let unit = &mut self.units[i];
+					let take = held.min(unit.held);
+					unit.held -= take;
+					take
+				});
 				*occupancy.get_mut(&pid).unwrap() -= held;
 			}
 			while waiting.peek().is_some_and(|Reverse((at, _))| *at <= now) {
@@ -762,10 +917,26 @@ impl Schedule {
 				ready.push(Reverse((self.units[*lanes[lane].front().unwrap()].timing.by, lane)));
 			}
 			let mut emitted = false;
-			while let Some(Reverse((_, lane))) = ready.pop() {
+			// The slot's PCR opens it. Its PID's next packet carries it there when it can go
+			// out at once, which spares the slot a clock packet; the other PIDs wait a position.
+			let mut passed = Vec::new();
+			while let Some(Reverse((by, lane))) = ready.pop() {
 				let i = *lanes[lane].front().unwrap();
 				let unit = &self.units[i];
-				let packet = &unit.packets[unit.sent * TsPacket::SIZE..(unit.sent + 1) * TsPacket::SIZE];
+				let rest = &unit.packets[unit.sent * TsPacket::SIZE..];
+				let opening = match position {
+					0 => match clock.filter(|&clock| self::pid(rest) == clock) {
+						Some(_) => with_pcr(rest, out.pcr),
+						None => None,
+					},
+					_ => None,
+				};
+				if position == 0 && opening.is_none() {
+					passed.push(Reverse((by, lane)));
+					continue;
+				}
+				let packet = opening.as_deref().unwrap_or(rest);
+				let packet = &packet[..TsPacket::SIZE];
 				let pid = self::pid(packet);
 				let buffer = self.buffers.get(&pid);
 				let duration = buffer.map_or(0, |buffer| {
@@ -817,7 +988,7 @@ impl Schedule {
 				// busy that long waits for it to. Every later slot's clock packet that arrives
 				// before the buffer empties extends the stretch without the chance to wait.
 				let mut busy = arrived;
-				if let Some((_, duration)) = clock.filter(|&(clock, _)| clock == tb) {
+				if let Some((_, duration)) = clock_buffer.filter(|&(clock, _)| clock == tb) {
 					let mut next = index + 1;
 					while busy - since <= TB_EMPTY.as_nanos() as i128 {
 						let start = (packets_before(next, rate) - first) as usize;
@@ -859,14 +1030,21 @@ impl Schedule {
 				out.packets.extend_from_slice(packet);
 				out.nulls -= 1;
 				let unit = &mut self.units[i];
+				if let Some(rest) = opening {
+					unit.packets.truncate(unit.sent * TsPacket::SIZE);
+					unit.packets.extend_from_slice(&rest);
+					out.clocked = true;
+					out.nulls += 1;
+				}
 				if unit.sent == 0 {
 					out.keyframe |= unit.keyframe;
 					if unit.packets_on(0..unit.count(), unit.pid) > 0 {
-						out.units.push(unit.pid);
+						out.units
+							.extend(std::iter::repeat_n(unit.pid, unit.frames.len().max(1)));
 					}
 				}
 				unit.sent += 1;
-				if unit.timing.decode as i128 > now {
+				if unit.last_decode() as i128 > now {
 					unit.held += held;
 					*occupancy.entry(unit.pid).or_default() += held;
 				}
@@ -882,7 +1060,19 @@ impl Schedule {
 				emitted = true;
 				break;
 			}
-			if emitted {
+			ready.extend(passed);
+			if position == 0 && !emitted {
+				// A clock packet of its own opens the slot, and its PID's transport buffer
+				// takes it first.
+				if let Some((tb, duration)) = clock_buffer {
+					let (free, since) = self.transport.entry(tb).or_insert((time(0), time(0)));
+					if *free + TICK <= time(0) {
+						*since = time(0);
+					}
+					*free = ((*free).max(time(0)) + duration).max(time(1));
+				}
+				position = 1;
+			} else if emitted {
 				position += 1;
 			} else if let Some(Reverse((next, _))) = waiting.peek() {
 				// Nothing can use intervening null positions. Jump to the first packet at the
@@ -906,8 +1096,8 @@ impl Schedule {
 				unit.pid
 			);
 		}
-		for unit in self.units.iter().filter(|unit| unit.remaining() == 0 && unit.held > 0) {
-			self.decoding.push_back((unit.pid, unit.timing.decode, unit.held));
+		for unit in self.units.iter().filter(|unit| unit.remaining() == 0) {
+			self.decoding.extend(unit.leaving());
 		}
 		self.units.retain(|unit| unit.remaining() > 0);
 		Ok(out)
@@ -1033,7 +1223,8 @@ mod tests {
 		slots
 	}
 
-	/// Check actual wire positions against the receiver's transport buffer, clock included.
+	/// Check actual wire positions against the receiver's transport buffer, clock included,
+	/// and count the packets' worth of payload PID 1 sent.
 	fn checked_transport(schedule: &mut Schedule, clock: u8) -> usize {
 		let rate = schedule.rate.unwrap();
 		let rx = schedule.buffers[&1].rate;
@@ -1047,7 +1238,8 @@ mod tests {
 				.0
 				.iter()
 				.filter(|packet| pid(*packet) == 1)
-				.count();
+				.map(|packet| payload(packet).len())
+				.sum::<usize>();
 			for (position, packet) in slot.layout(&unit(clock, 1), 100, &null).chunks(188).enumerate() {
 				let at = slot.pcr as f64 / SYSTEM_CLOCK as f64 + position as f64 * 1504.0 / rate as f64;
 				if let Some(previous) = previous {
@@ -1060,7 +1252,7 @@ mod tests {
 				assert!(fill <= 512.001, "PID1 transport buffer holds {fill} bytes");
 			}
 		}
-		sent
+		sent / PAYLOAD
 	}
 
 	/// Distinct tune-in tables keep their copies and still fit TBsys, which the PAT and PMT
@@ -1342,8 +1534,8 @@ mod tests {
 		assert_eq!(checked_transport(&mut schedule, 9), 80);
 	}
 
-	/// The clock packet opening every slot rides its PID's transport buffer too, so that PID
-	/// takes one packet fewer of its own.
+	/// The PCR opening every slot rides its PID's transport buffer too, in a clock packet or
+	/// one of the PID's own.
 	#[test]
 	fn the_clock_packet_counts_against_its_pid() {
 		let mut schedule = Schedule::new(Duration::from_millis(100));
@@ -1393,7 +1585,7 @@ mod tests {
 		let (mut tb, mut mb, mut previous, mut sent) = (0.0f64, 0.0f64, None::<f64>, 0);
 		while let Some(slot) = schedule.next(None).unwrap() {
 			let mut clock = unit(1, 1);
-			clock[3] = 0x20;
+			(clock[3], clock[4]) = (0x20, 183);
 			for (position, packet) in slot.layout(&clock, 100, &null).chunks(188).enumerate() {
 				let at = slot.pcr as f64 / SYSTEM_CLOCK as f64 + position as f64 * 1504.0 / rate as f64;
 				if let Some(previous) = previous {
@@ -1404,13 +1596,13 @@ mod tests {
 				if pid(packet) == 1 {
 					tb += 188.0;
 					mb += elementary(packet).len() as f64;
-					sent += usize::from(packet[3] & 0x10 != 0);
+					sent += payload(packet).len();
 				}
 				assert!(tb <= 512.001, "TB holds {tb} bytes at {at}");
 				assert!(mb <= 16_000.0, "MB holds {mb} bytes at {at}");
 			}
 		}
-		assert_eq!(sent, 500 * 652, "every frame goes out");
+		assert_eq!(sent, 500 * 652 * PAYLOAD, "every frame goes out");
 	}
 
 	/// Audio due before the video takes a position or a few between video packets, and MB
@@ -1424,24 +1616,26 @@ mod tests {
 			rate: 28_800_000,
 			leak: Some(RBX),
 			size: Some(3_750_000),
+			transport: 512,
 		};
 		let audio = Buffer {
 			rate: 2_000_000,
 			leak: None,
 			size: Some(3_584),
+			transport: 512,
 		};
 		let rate = 26_000_000;
 		let mut schedule = Schedule::new(Duration::from_secs(2));
 		schedule.set_rate(Some(rate));
-		schedule.set_buffer(1, video);
-		schedule.set_buffer(2, audio);
-		schedule.set_buffer(3, audio);
-		schedule.set_clock(1);
+		schedule.set_buffer(7, video);
+		schedule.set_buffer(8, audio);
+		schedule.set_buffer(9, audio);
+		schedule.set_clock(7);
 		// Two seconds of video due from 2 s on, so it is queued from the first slot, and audio
 		// due within the first second: MP2's 24 ms frames and AC-3's 32 ms, four packets each.
-		let mut units: Vec<(u128, u8, usize)> = (0..50).map(|frame| (2_000 + 40 * frame, 1, 652)).collect();
-		units.extend((0..40).map(|frame| (24 * frame, 2, 4)));
-		units.extend((0..30).map(|frame| (32 * frame, 3, 4)));
+		let mut units: Vec<(u128, u8, usize)> = (0..50).map(|frame| (2_000 + 40 * frame, 7, 652)).collect();
+		units.extend((0..40).map(|frame| (24 * frame, 8, 4)));
+		units.extend((0..30).map(|frame| (32 * frame, 9, 4)));
 		units.sort();
 		for (ms, pid, packets) in units {
 			schedule
@@ -1451,7 +1645,7 @@ mod tests {
 		let mut video = 0;
 		for _ in 0..40 {
 			let slot = schedule.next(None).unwrap().unwrap();
-			video += slot.packets.chunks(188).filter(|packet| pid(packet) == 1).count();
+			video += slot.packets.chunks(188).filter(|packet| pid(packet) == 7).count();
 		}
 		// A second of the leak is 16,304 packets of payload.
 		assert!(video >= 16_290, "{video} video packets in a second");
@@ -1514,8 +1708,9 @@ mod tests {
 				transport: 512,
 			},
 		);
-		schedule.push(1, timing(1_000), unit(1, 4), false).unwrap();
-		schedule.push(1, timing(1_200), unit(1, 4), false).unwrap();
+		// 76.8 kb/s passes on five packets in the window, the slots' PCRs among them.
+		schedule.push(1, timing(1_000), unit(1, 6), false).unwrap();
+		schedule.push(1, timing(1_200), unit(1, 6), false).unwrap();
 		let error = std::iter::from_fn(|| schedule.next(None).transpose())
 			.find_map(Result::err)
 			.unwrap();
@@ -1547,10 +1742,11 @@ mod tests {
 		assert_eq!(sent, [(32, 8), (36, 2), (41, 6)]);
 	}
 
-	/// Packetize a PES with exactly `bytes` elementary bytes and adaptation stuffing.
+	/// Packetize a PES with exactly `bytes` elementary bytes, each its offset's low byte, and
+	/// adaptation stuffing.
 	fn audio(bytes: usize) -> Vec<u8> {
-		let mut pes = vec![0; 14 + bytes];
-		pes[..9].copy_from_slice(&[0, 0, 1, 0xbd, 0, 0, 0x80, 0x80, 5]);
+		let mut pes: Vec<u8> = (0..14 + bytes).map(|i| i as u8).collect();
+		pes[..14].copy_from_slice(&[0, 0, 1, 0xbd, 0, 0, 0x80, 0x80, 5, 0, 0, 0, 0, 0]);
 		let mut out = Vec::new();
 		for (index, body) in pes.chunks(PAYLOAD).enumerate() {
 			let mut packet = [0xff; TsPacket::SIZE];
@@ -1558,6 +1754,9 @@ mod tests {
 			if body.len() < PAYLOAD {
 				packet[3] |= 0x20;
 				packet[4] = (PAYLOAD - body.len() - 1) as u8;
+				if packet[4] > 0 {
+					packet[5] = 0;
+				}
 			}
 			packet[TsPacket::SIZE - body.len()..].copy_from_slice(body);
 			out.extend(packet);
@@ -1835,6 +2034,7 @@ mod tests {
 			units: vec![],
 			caps: HashMap::new(),
 			positions: None,
+			clocked: false,
 		};
 		let mut null = unit(0, 1);
 		(null[1], null[2]) = (0x1f, 0xff);
@@ -1873,6 +2073,7 @@ mod tests {
 			units: vec![1, 3],
 			caps: HashMap::new(),
 			positions: None,
+			clocked: false,
 		};
 		let mut null = unit(0, 1);
 		(null[1], null[2]) = (0x1f, 0xff);
@@ -1941,6 +2142,7 @@ mod tests {
 					.per_slot(0, true),
 				)]),
 				positions: None,
+				clocked: false,
 			};
 			let mut null = unit(0, 1);
 			(null[1], null[2]) = (0x1f, 0xff);
@@ -1997,6 +2199,7 @@ mod tests {
 			units: vec![1, 2],
 			caps: HashMap::from([(1, a.per_slot(0, true)), (2, b.per_slot(0, false))]),
 			positions: None,
+			clocked: false,
 		};
 		let mut null = unit(0, 1);
 		(null[1], null[2]) = (0x1f, 0xff);
@@ -2015,5 +2218,161 @@ mod tests {
 			}
 			assert!(peak <= 512.0, "PID {media} TB peak {peak:.0} B");
 		}
+	}
+
+	/// The PCR `packet`'s adaptation field carries, in system clock ticks.
+	fn pcr_of(packet: &[u8]) -> Option<u64> {
+		let field = (packet[3] & 0x20 != 0 && packet[4] >= 7 && packet[5] & 0x10 != 0).then(|| &packet[6..12])?;
+		let base = u64::from(field[0]) << 25
+			| u64::from(field[1]) << 17
+			| u64::from(field[2]) << 9
+			| u64::from(field[3]) << 1
+			| u64::from(field[4]) >> 7;
+		Some(base * 300 + (u64::from(field[4] & 1) << 8 | u64::from(field[5])))
+	}
+
+	/// A PCR moves the PES it rides on by its field's bytes: into the last packet's stuffing,
+	/// or into one more packet where that has too little.
+	#[test]
+	fn a_pcr_reflows_the_pes_it_rides() {
+		let body = |packets: &[u8]| -> Vec<u8> { packets.chunks(TsPacket::SIZE).flat_map(payload).copied().collect() };
+		// With its 14-byte header: one packet with room, two with 7 bytes of stuffing, two full.
+		for (bytes, count) in [(100, 1), (346, 2), (354, 3)] {
+			let pes = audio(bytes);
+			let ticks = 27_000_000 * 5 + 299;
+			let out = with_pcr(&pes, ticks).expect("an exported PES takes a PCR");
+			let packets: Vec<&[u8]> = out.chunks(TsPacket::SIZE).collect();
+			assert_eq!(packets.len(), count, "{bytes} bytes");
+			assert_eq!(out.len(), count * TsPacket::SIZE, "{bytes} bytes");
+			assert_eq!(pcr_of(packets[0]), Some(ticks), "{bytes} bytes");
+			assert!(
+				packets[0][1] & 0x40 != 0,
+				"{bytes} bytes: the first packet still starts the PES"
+			);
+			assert!(
+				packets[1..]
+					.iter()
+					.all(|packet| packet[1] & 0x40 == 0 && pcr_of(packet).is_none()),
+				"{bytes} bytes: the PCR and the PES start stay in the first packet"
+			);
+			assert_eq!(body(&out), body(&pes), "{bytes} bytes: the PES is unchanged");
+			assert!(
+				with_pcr(&out, ticks).is_none(),
+				"a PES carrying a PCR already is left alone"
+			);
+		}
+	}
+
+	/// A slot's PCR rides the clock PID's packet when that PID can go out at once, sparing the
+	/// slot a clock packet; a slot with only another PID's packets opens with one of its own.
+	#[test]
+	fn the_pcr_rides_the_clock_pid_when_it_can() {
+		let mut schedule = Schedule::new(Duration::from_millis(200));
+		schedule.set_rate(Some(RATE));
+		schedule.set_buffer(1, VIDEO);
+		schedule.set_buffer(2, VIDEO);
+		schedule.set_clock(1);
+		schedule.push(1, timing(1_000), unit(1, 4), true).unwrap();
+		schedule.push(2, timing(2_000), unit(2, 4), false).unwrap();
+		let mut clock = unit(1, 1);
+		(clock[3], clock[4]) = (0x20, 183);
+		let mut null = unit(0, 1);
+		(null[1], null[2]) = (0x1f, 0xff);
+		let (mut sent, mut clocked) = (HashMap::<u16, usize>::new(), Vec::new());
+		while let Some(slot) = schedule.next(None).unwrap() {
+			let laid = slot.layout(&clock, 100, &null);
+			assert_eq!(laid.len(), 40 * TsPacket::SIZE, "slot {} keeps its size", slot.index);
+			let first = &laid[..TsPacket::SIZE];
+			match slot.clocked {
+				true => {
+					assert_eq!(pid(first), 1, "slot {}", slot.index);
+					assert_eq!(pcr_of(first), Some(slot.pcr), "slot {}", slot.index);
+				}
+				false => assert_eq!(first, &clock[..], "slot {} opens with a clock packet", slot.index),
+			}
+			for packet in laid.chunks(TsPacket::SIZE).skip(usize::from(!slot.clocked)) {
+				if [1, 2].contains(&pid(packet)) {
+					*sent.entry(pid(packet)).or_default() += payload(packet).len();
+					clocked.push((pid(packet), slot.clocked));
+				}
+			}
+		}
+		assert_eq!(
+			sent,
+			HashMap::from([(1, 4 * PAYLOAD), (2, 4 * PAYLOAD)]),
+			"no payload is lost"
+		);
+		assert_eq!(
+			clocked.first(),
+			Some(&(1, true)),
+			"the clock PID's unit carries its slot's PCR"
+		);
+		assert!(
+			clocked
+				.iter()
+				.filter(|&&(pid, _)| pid == 2)
+				.all(|&(_, clocked)| !clocked),
+			"another PID's slot has its own clock packet"
+		);
+	}
+
+	/// Each frame of a PES that packs several leaves B at its own decode time, the PES header
+	/// with the first, so the next PES goes in once the first frame is removed rather than the
+	/// last.
+	#[test]
+	fn packed_frames_leave_the_decoder_buffer_one_by_one() {
+		let mut schedule = Schedule::new(Duration::from_millis(200));
+		schedule.set_rate(Some(RATE));
+		// The packed PES's 1,514 bytes leave too little for the next one's 414 until its first
+		// frame's 514 leave.
+		schedule.set_buffer(
+			1,
+			Buffer {
+				rate: 2_000_000,
+				leak: None,
+				size: Some(1_600),
+				transport: 512,
+			},
+		);
+		let frames = vec![(ms(1_000), 500), (ms(1_024), 500), (ms(1_048), 500)];
+		schedule
+			.push_frames(
+				1,
+				Timing {
+					by: ms(999),
+					decode: ms(1_000),
+				},
+				audio(1_500),
+				false,
+				frames,
+			)
+			.unwrap();
+		schedule
+			.push(
+				1,
+				Timing {
+					by: ms(1_099),
+					decode: ms(1_100),
+				},
+				audio(400),
+				false,
+			)
+			.unwrap();
+		let mut null = unit(0, 1);
+		(null[1], null[2]) = (0x1f, 0xff);
+		let mut starts = Vec::new();
+		while let Some(slot) = schedule.next(None).unwrap() {
+			for (position, packet) in slot.layout(&unit(9, 1), 100, &null).chunks(TsPacket::SIZE).enumerate() {
+				if pid(packet) == 1 && packet[1] & 0x40 != 0 {
+					starts.push(slot.pcr as f64 / SYSTEM_CLOCK as f64 + position as f64 * 1504.0 / RATE as f64);
+				}
+			}
+		}
+		assert_eq!(starts.len(), 2);
+		assert!(
+			starts[1] >= 1.000 && starts[1] < 1.024,
+			"the next PES starts at {}",
+			starts[1]
+		);
 	}
 }
