@@ -190,6 +190,7 @@ test.each(["lite", "ietf"] as const)("%s closes on the first advertisement beyon
 					session: {
 						version: IetfVersion.DRAFT_22,
 						nextRequestId: async () => 0n,
+						spendRequest: () => {},
 						openBi: async () => new Stream({ version, readable, writable }),
 						acceptBi: async () => undefined,
 						close: () => pair.server.close(),
