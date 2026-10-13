@@ -109,7 +109,8 @@ pub struct Export<S: Stream> {
 	source: crate::Source,
 	catalog: Option<S>,
 	delay: std::time::Duration,
-	jitter: crate::jitter::Buffer<(u8, usize), Bytes>,
+	/// Frames with their tag timestamp, encoded only once released.
+	jitter: crate::jitter::Buffer<(u8, usize), (Frame, u32)>,
 	/// Emit every rendition as an enhanced-RTMP multitrack track, rather than only
 	/// the best video and audio rendition.
 	multitrack: bool,
@@ -192,7 +193,9 @@ impl<S: Stream> Export<S> {
 
 	/// Release frames a fixed delay after their decode time, dropping late frames.
 	///
-	/// The same delay bounds each source's staleness. Zero (the default) holds and drops nothing.
+	/// The same delay bounds each source's staleness. Zero (the default) releases each frame as
+	/// soon as it is read and drops none as late, but a stalled group is still skipped once a
+	/// newer one is ready.
 	pub fn with_delay(mut self, delay: std::time::Duration) -> Self {
 		self.delay = delay;
 		self.jitter = crate::jitter::Buffer::new(delay);
@@ -253,7 +256,9 @@ impl<S: Stream> Export<S> {
 		}
 
 		if let Poll::Ready(ready) = self.jitter.poll_next(waiter) {
-			return Poll::Ready(Ok(Some(ready.item)));
+			let (kind, index) = ready.track;
+			let (frame, timestamp) = ready.item;
+			return Poll::Ready(Ok(Some(self.encode_frame(kind == 0, index, frame, timestamp)?)));
 		}
 		if !self.jitter.is_empty() {
 			return Poll::Pending;
@@ -285,18 +290,27 @@ impl<S: Stream> Export<S> {
 		self.jitter.next_deadline()
 	}
 
+	/// How many frames the export holds between its sources and the output.
+	#[cfg(test)]
+	pub(super) fn buffered(&self) -> usize {
+		self.jitter.len()
+	}
+
 	#[cfg(test)]
 	pub(super) fn with_replay(mut self) -> Self {
 		self.jitter = self.jitter.replay();
 		self
 	}
 
-	/// Read available frames once, preserving ingress timing before buffering or encoding.
+	/// Read each track until it has a frame due, preserving ingress timing before buffering.
 	fn fill(&mut self, waiter: &kio::Waiter) -> anyhow::Result<()> {
 		for kind in [0, 1] {
 			let count = if kind == 0 { self.video.len() } else { self.audio.len() };
 			for index in 0..count {
 				loop {
+					if self.header_emitted && self.jitter.full(&(kind, index)) {
+						break;
+					}
 					let track = if kind == 0 {
 						&mut self.video[index]
 					} else {
@@ -305,7 +319,7 @@ impl<S: Stream> Export<S> {
 					if !self.header_emitted && track.pending.is_some() {
 						break;
 					}
-					let mut arrival = if let Some(pending) = track.pending.take() {
+					let arrival = if let Some(pending) = track.pending.take() {
 						pending
 					} else {
 						if track.finished {
@@ -339,27 +353,29 @@ impl<S: Stream> Export<S> {
 						track.pending = Some(arrival);
 						break;
 					}
-					arrival.decode = moq_net::Timestamp::from_millis(u64::from(track.tag_timestamp(&arrival.item)?))?;
+					let timestamp = track.tag_timestamp(&arrival.item)?;
+					if track.flavor.has_composition_time() {
+						track.last_dts = Some(timestamp);
+					}
 					let crate::jitter::Arrival {
 						arrived,
 						read,
-						decode,
 						restart,
 						skip,
 						sync,
 						item,
+						..
 					} = arrival;
-					let item = self.encode_frame(kind == 0, index, item)?;
 					if self.jitter.push(
 						(kind, index),
 						crate::jitter::Arrival {
 							arrived,
 							read,
-							decode,
+							decode: moq_net::Timestamp::from_millis(u64::from(timestamp))?,
 							restart,
 							skip,
 							sync,
-							item,
+							item: (item, timestamp),
 						},
 					)? == crate::jitter::Push::Late
 					{
@@ -556,16 +572,15 @@ impl<S: Stream> Export<S> {
 		Ok(out.freeze())
 	}
 
-	/// Encode one frame as a single FLV tag.
-	fn encode_frame(&mut self, is_video: bool, index: usize, frame: Frame) -> anyhow::Result<Bytes> {
+	/// Encode one frame as a single FLV tag at its authored `timestamp_ms`.
+	fn encode_frame(&self, is_video: bool, index: usize, frame: Frame, timestamp_ms: u32) -> anyhow::Result<Bytes> {
 		let mut out = BytesMut::with_capacity(TAG_HEADER_LEN + frame.payload.len() + 8);
 		let multitrack = self.multitrack;
 		if is_video {
-			let track = &mut self.video[index];
+			let track = &self.video[index];
 			let flavor = track.flavor;
 			let track_id = track.track_id;
 			let pts_ms = frame_timestamp_ms(&frame)?;
-			let timestamp_ms = track.tag_timestamp(&frame)?;
 			let frame_type = if frame.keyframe {
 				FRAME_TYPE_KEY
 			} else {
@@ -606,16 +621,12 @@ impl<S: Stream> Export<S> {
 					}
 				}
 			}
-			if flavor.has_composition_time() {
-				track.last_dts = Some(timestamp_ms);
-			}
 			body.put_slice(&frame.payload);
 			write_tag(&mut out, TAG_VIDEO, timestamp_ms, &body)?;
 		} else {
 			let track = &self.audio[index];
 			let flavor = track.flavor;
 			let track_id = track.track_id;
-			let timestamp_ms = frame_timestamp_ms(&frame)?;
 			let mut body = BytesMut::with_capacity(7 + frame.payload.len());
 			if multitrack {
 				body.put_u8((AUDIO_FORMAT_EX << 4) | AUDIO_PACKET_MULTITRACK);

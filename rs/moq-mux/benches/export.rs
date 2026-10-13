@@ -2,13 +2,30 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use hang::catalog::{AAC, AudioConfig};
 use moq_mux::catalog::hang::Container;
 use moq_mux::container::{Frame, Kind};
 use moq_net::Timestamp;
 
-async fn export(format: &str, tracks: usize, frames: usize) {
+/// What keeps a prepared broadcast served; dropping it stops the origin's tasks.
+struct Fixture {
+	/// The broadcast, its catalog and its tracks, which a reader needs kept open.
+	_published: Box<dyn std::any::Any>,
+	_origin: moq_net::origin::Producer,
+	driver: tokio::task::JoinHandle<moq_net::Error>,
+	requests: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Fixture {
+	fn drop(&mut self) {
+		self.driver.abort();
+		self.requests.abort();
+	}
+}
+
+/// A finished broadcast of `tracks` audio tracks with `frames` queued frames each.
+async fn prepare(tracks: usize, frames: usize) -> (moq_mux::Source, moq_mux::catalog::Consumer, Fixture) {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
@@ -42,13 +59,23 @@ async fn export(format: &str, tracks: usize, frames: usize) {
 	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 	let driver = tokio::spawn(moq_net::time::run(driver));
 	let dynamic = origin.dynamic("", Default::default()).unwrap();
-	let served = consumer.clone();
 	let requests = tokio::spawn(async move {
 		while let Ok(request) = dynamic.requested_broadcast().await {
-			request.accept(served.clone());
+			request.accept(consumer.clone());
 		}
 	});
-	let source = moq_mux::Source::new(origin.consume(), "bench");
+	let resolved = origin.consume().request_broadcast("bench", None).await.unwrap();
+	let source = moq_mux::Source::new(origin.consume(), resolved);
+	let fixture = Fixture {
+		_published: Box::new((broadcast, catalog, publishers)),
+		_origin: origin,
+		driver,
+		requests,
+	};
+	(source, stream, fixture)
+}
+
+async fn export(format: &str, source: moq_mux::Source, stream: moq_mux::catalog::Consumer) -> usize {
 	let mut chunks = 0;
 	if format == "flv" {
 		let mut export = moq_mux::container::flv::Export::new(source, stream).with_multitrack(true);
@@ -63,11 +90,7 @@ async fn export(format: &str, tracks: usize, frames: usize) {
 			chunks += 1;
 		}
 	}
-	assert_eq!(chunks, 1 + tracks * frames);
-	requests.abort();
-	driver.abort();
-	let _ = requests.await;
-	let _ = driver.await;
+	chunks
 }
 
 fn bench_export(c: &mut Criterion) {
@@ -83,7 +106,16 @@ fn bench_export(c: &mut Criterion) {
 			for frames in [1, 16, 64] {
 				group.throughput(Throughput::Elements((tracks * frames) as u64));
 				group.bench_function(BenchmarkId::new(format, format!("{tracks}x{frames}")), |b| {
-					b.iter(|| runtime.block_on(export(format, tracks, frames)));
+					// Publishing the broadcast is setup; only exporting it is measured.
+					b.iter_batched(
+						|| runtime.block_on(prepare(tracks, frames)),
+						|(source, stream, fixture)| {
+							let chunks = runtime.block_on(export(format, source, stream));
+							assert_eq!(chunks, 1 + tracks * frames);
+							fixture
+						},
+						BatchSize::PerIteration,
+					);
 				});
 			}
 		}

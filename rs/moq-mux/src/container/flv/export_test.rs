@@ -1338,7 +1338,7 @@ async fn configured_delay_holds_live_frames() {
 	let mut config = AudioConfig::new(AAC { profile: 2 }, 44100, 2);
 	config.description = Some(Bytes::from_static(&[0x12, 0x10]));
 	let mut live = Live::audio(config);
-	let mut export = super::Export::new(live.source(), live.catalog_stream().await)
+	let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
 		.with_delay(std::time::Duration::from_millis(100));
 	assert!(export.next().await.unwrap().is_some(), "container header");
 	live.track.write(raw_frame(0, &[0xde, 0xad], true)).unwrap();
@@ -1359,7 +1359,7 @@ async fn delay_drops_late_frames_and_drains_the_final_frame() {
 	config.description = Some(Bytes::from_static(&[0x12, 0x10]));
 	let mut live = Live::audio(config);
 	let delay = std::time::Duration::from_millis(100);
-	let mut export = super::Export::new(live.source(), live.catalog_stream().await).with_delay(delay);
+	let mut export = super::Export::new(live.source().await, live.catalog_stream().await).with_delay(delay);
 	export.next().await.unwrap().unwrap();
 	let start = web_async::time::Instant::now();
 	live.track.write(raw_frame(0, b"first", true)).unwrap();
@@ -1393,7 +1393,7 @@ async fn decode_order_is_independent_of_cross_track_arrival_order() {
 		let mut other = live.add_track("other", |catalog, name| {
 			catalog.modify().unwrap().audio.renditions.insert(name, config);
 		});
-		let mut export = super::Export::new(live.source(), live.catalog_stream().await)
+		let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
 			.with_delay(std::time::Duration::from_millis(100))
 			.with_multitrack(true);
 		export.next().await.unwrap().unwrap();
@@ -1417,5 +1417,35 @@ async fn decode_order_is_independent_of_cross_track_arrival_order() {
 		let second = export.next().await.unwrap().unwrap();
 		assert!(first.windows(7).any(|part| part == b"earlier"));
 		assert!(second.windows(5).any(|part| part == b"later"));
+	}
+}
+
+/// A backlog the source already holds, as after the sink stalls, goes out a frame at a time
+/// as each falls due, rather than being read into the export whole first.
+#[tokio::test(start_paused = true)]
+async fn a_backlog_stays_in_the_source_until_due() {
+	use crate::container::test_util::{Live, raw_frame};
+	use hang::catalog::{AAC, AudioConfig};
+	for delay in [std::time::Duration::ZERO, std::time::Duration::from_millis(100)] {
+		let mut config = AudioConfig::new(AAC { profile: 2 }, 44100, 2);
+		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
+		let mut live = Live::audio(config);
+		let mut export = super::Export::new(live.source().await, live.catalog_stream().await).with_delay(delay);
+		export.next().await.unwrap().unwrap();
+		live.track.write(raw_frame(0, b"first", true)).unwrap();
+		export.next().await.unwrap().unwrap();
+		for index in 1..=50 {
+			tokio::time::advance(std::time::Duration::from_millis(20)).await;
+			live.track.write(raw_frame(index * 20_000, b"backlog", false)).unwrap();
+		}
+		for _ in 1..=50 {
+			let tag = export.next().await.unwrap().unwrap();
+			assert!(tag.windows(7).any(|part| part == b"backlog"));
+			assert!(
+				export.buffered() <= 1,
+				"{delay:?}: {} frames buffered",
+				export.buffered()
+			);
+		}
 	}
 }

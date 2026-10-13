@@ -1062,7 +1062,8 @@ impl Container {
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Buffered {
 	/// How long after its decode time each frame is written (e.g. `500ms`); late frames are dropped.
-	/// The same delay bounds source staleness. Zero writes in arrival order and drops nothing.
+	/// The same delay bounds source staleness. Zero writes each frame as soon as it is read and
+	/// drops none as late, but still skips a stalled group once a newer one is ready.
 	#[usage(long, default = "500ms")]
 	pub delay: crate::duration::Duration,
 	/// Accepted only to refuse a nonzero value: only TS can mark a broadcast restart.

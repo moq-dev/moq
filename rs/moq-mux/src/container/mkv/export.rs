@@ -218,7 +218,9 @@ impl<S: Stream> Export<S> {
 
 	/// Release frames a fixed delay after their decode time, dropping late frames.
 	///
-	/// The same delay bounds each source's staleness. Zero (the default) holds and drops nothing.
+	/// The same delay bounds each source's staleness. Zero (the default) releases each frame as
+	/// soon as it is read and drops none as late, but a stalled group is still skipped once a
+	/// newer one is ready.
 	pub fn with_delay(mut self, delay: Duration) -> Self {
 		self.delay = delay;
 		self.jitter = crate::jitter::Buffer::new(delay);
@@ -324,15 +326,25 @@ impl<S: Stream> Export<S> {
 		self.jitter.next_deadline()
 	}
 
+	/// How many frames the export holds between its sources and the output.
+	#[cfg(test)]
+	pub(super) fn buffered(&self) -> usize {
+		self.jitter.len()
+	}
+
 	#[cfg(test)]
 	pub(super) fn with_replay(mut self) -> Self {
 		self.jitter = self.jitter.replay();
 		self
 	}
 
+	/// Read each track until it has a frame due, preserving ingress timing before buffering.
 	fn fill(&mut self, waiter: &kio::Waiter) -> Result<()> {
 		for (name, track) in &mut self.tracks {
 			loop {
+				if self.header_emitted && self.jitter.full(name) {
+					break;
+				}
 				if !self.header_emitted && track.pending.is_some() {
 					break;
 				}
