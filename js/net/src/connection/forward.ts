@@ -172,6 +172,9 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 		for (const [prefix, interest] of interests) {
 			if (want.has(prefix) || interest.linger !== undefined) continue;
 			interest.linger = setTimeout(() => {
+				// Forgotten now rather than once its stream winds down, so a watch arriving
+				// meanwhile opens a fresh request instead of reviving this one.
+				interests.delete(prefix);
 				interest.closing = true;
 				interest.announced.close();
 			}, LINGER);

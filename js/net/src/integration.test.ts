@@ -60,7 +60,11 @@ function withoutDiscovery(): () => number {
 	};
 	spyOn(LitePublisher.prototype, "runAnnounce").mockImplementation(refuse);
 	// A reset virtual stream never reaches a pre-draft-17 peer, so answer with the error message.
-	spyOn(IetfPublisher.prototype, "runSubscribeNamespace").mockImplementation(function (this: IetfPublisher, msg, stream) {
+	spyOn(IetfPublisher.prototype, "runSubscribeNamespace").mockImplementation(function (
+		this: IetfPublisher,
+		msg,
+		stream,
+	) {
 		refused++;
 		return this.refuseSubscribeNamespace(msg.requestId, stream);
 	});

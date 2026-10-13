@@ -2,8 +2,9 @@
  * Sweep the session forwarder: a route re-price over interest heads and received routes, and
  * a watch coming and going over held watches and attached sessions.
  */
-import * as Announce from "../src/announced.ts";
+
 import { announcedView } from "../src/announced.test-util";
+import * as Announce from "../src/announced.ts";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import type { Established } from "../src/connection/established.ts";
 import { forwardAnnounced } from "../src/connection/forward.ts";

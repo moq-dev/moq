@@ -64,7 +64,9 @@ class FakeSession {
 
 	/** The live stream for `scope`. */
 	stream(scope: string): Announce.Producer {
-		const found = this.requests.find((request) => request.scope === scope && request.stream.closed.peek() === undefined);
+		const found = this.requests.find(
+			(request) => request.scope === scope && request.stream.closed.peek() === undefined,
+		);
 		if (!found) throw new Error(`no open announce request for ${scope}`);
 		return found.stream;
 	}
@@ -155,6 +157,29 @@ test("a watch opens its request, and the request closes once the linger expires"
 	// Closing it on purpose is not a discovery failure.
 	expect(origin.discovery.peek()).toBe(true);
 
+	session.die();
+	origin.close();
+});
+
+test("a watch arriving as the linger expires opens a fresh request", async () => {
+	const origin = new OriginProducer();
+	const session = new FakeSession();
+	forwardAnnounced(session.session, origin);
+
+	const watch = origin.announced(Path.Pattern.subtree(Path.from("room")));
+	await settle();
+	watch.close();
+	await settle();
+
+	// The next watch and the expiry land before either is noticed, so the old request is
+	// already closing when its prefix is wanted again.
+	const again = origin.announced(Path.Pattern.subtree(Path.from("room")));
+	jest.advanceTimersByTime(LINGER);
+	await settle();
+	expect(session.requests.length).toBe(2);
+	expect(session.open()).toEqual(["room/**"]);
+
+	again.close();
 	session.die();
 	origin.close();
 });
