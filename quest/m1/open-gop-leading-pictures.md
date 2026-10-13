@@ -38,16 +38,16 @@ decode, and the JS test should drive the software decoder.
 
 - In the JS consumer (`js/hang/src/container/consumer.ts` forces the first
   sample of a group to `keyframe`, and `js/watch/src/video/decoder.ts` submits
-  it as `"key"`): for the first group after a gap item, skip delta frames
-  stamped before that group's keyframe. `next()` yields `{ kind: "gap" }`
-  before the first frame of a subscribe and after a latency skip, eviction, or
-  hole; a declared end is not a gap, since a fresh encoder has no earlier GOP
+  it as `"key"`): for the first group read and the first group after a gap
+  item, skip delta frames stamped before that group's keyframe. `next()`
+  yields `{ kind: "gap" }` after a latency skip, eviction, or hole, but not
+  before the first frame of a subscribe; a declared end is not a gap, since a fresh encoder has no earlier GOP
   to reference. A latency skip does not flush the decoder, and a viewer that
   skipped into a later GOP lacks its references just like a cold join.
   Every group without a gap before it is passed through untouched.
 - The same rule in the Rust decode path (`moq-video` decode consumers), so
   native playback and the transcoder tune in the same way, keyed on the
-  container read's `Read::Gap` item.
+  first frame read and the container read's `Read::Gap` item.
 - The same rule in `moq export ts`. Decided (2026-10-01): the fixed-delay
   export still sends a join's orphaned leading pictures, so 3 of 500
   frames on the open-GOP fixture decode after they present
@@ -71,7 +71,8 @@ decode, and the JS test should drive the software decoder.
   the initial group fails. Both cases in both languages.
 
 Decided 2026-10-12: both container reads yield the gap item, so nothing
-here waits on another quest.
+here waits on another quest. Decided 2026-10-13 (#5311): a join is not a gap,
+so the first frame read is its own trigger.
 
 ## Related
 

@@ -171,6 +171,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just js catalog-bench
 
+      - name: JS arrival window benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just js arrivals-bench
+
       # Times Effect create and close beside a bare `new Error()`. No threshold: it only
       # has to keep running, and its numbers track the creation stack's cost.
       - name: JS signals effect benchmark
