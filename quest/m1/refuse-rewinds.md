@@ -57,6 +57,13 @@ Cases the rule must cover (from review):
   sequence and original start of the highest-sequence group it evicted, and
   a group above it with no cached lower neighbor is checked against that.
   One entry, so no history grows with the cache.
+- A late or refetched group at or below that watermark (JS `writeGroup`
+  accepts long-evicted sequences; Rust takes older groups after `finish`)
+  has lost its neighbors' starts. It is checked only against the watermark,
+  as an upper bound, and never serves as another group's bound, so a
+  refetched legitimate group is never refused because of it. The guarantee
+  is stated as such: a hop refuses a rewind against the starts it still
+  holds, not against history it has evicted.
 
 The check costs one ordered neighbor lookup per group, not per frame. The
 existing `group_write_frames` benchmark writes into an otherwise empty
@@ -104,7 +111,8 @@ Regression tests in both languages: a timed track refuses a group whose
 first frame rewinds, whether appended, created out of order, received
 through the streamed-frame path, written after its predecessor was evicted,
 or (JS) written before `writeGroup`; an equal start is accepted; a resumed
-partial group of a valid overlapping pair is accepted; an untimed track
+partial group of a valid overlapping pair is accepted; a late group below
+the eviction watermark does not cause a later refetch to be refused; an untimed track
 accepts groups in any order.
 
 Public API: write paths can now fail with `TimestampMismatch` on a rewind.
