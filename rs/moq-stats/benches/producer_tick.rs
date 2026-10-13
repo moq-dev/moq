@@ -10,6 +10,9 @@
 //! delta. Time is the Criterion target `stats/tick`. The table is one warm-up
 //! plus a few ticks, allocations included.
 //!
+//! `stats/presence` sweeps the same tick over connected auth roots and the
+//! presence tracks held for them.
+//!
 //! Run `cargo bench -p moq-stats --features bench --bench producer_tick`.
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -241,5 +244,88 @@ fn bench(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, bench);
+/// Connected auth roots, one session each.
+const ROOTS: [usize; 2] = [100, 10_000];
+
+/// Roots whose presence track a reader holds.
+const HELD: [usize; 3] = [0, 100, 1_000];
+
+/// A relay with sessions under many roots, some of them held.
+struct Presence {
+	driver: Driver,
+	_registry: stats::Registry,
+	_origin: origin::Producer,
+	_origin_driver: origin::Driver,
+	_sessions: Vec<stats::Session>,
+	_held: Vec<moq_net::track::Subscriber>,
+}
+
+impl Presence {
+	fn build(roots: usize, held: usize) -> Self {
+		let registry = stats::Registry::new(stats::Config::new());
+		let (origin, origin_driver) = origin::Producer::new(origin::Config::default());
+		let names: Vec<String> = (0..roots).map(|index| format!("room/{index:05}")).collect();
+		let sessions = names
+			.iter()
+			.map(|root| registry.tier(stats::Tier::default()).session(root.as_str()))
+			.collect();
+		let mut driver = Driver::new(registry.clone(), origin.clone()).expect("stats broadcast");
+		driver.tick();
+		let held = names.iter().take(held).map(|root| driver.hold_presence(root)).collect();
+		Self {
+			driver,
+			_registry: registry,
+			_origin: origin,
+			_origin_driver: origin_driver,
+			_sessions: sessions,
+			_held: held,
+		}
+	}
+}
+
+/// What holding presence tracks costs a tick, swept over connected roots and
+/// held roots: each session row looks its root up once, and each held track
+/// is summed and encoded once.
+fn presence(c: &mut Criterion) {
+	println!("roots held allocs/tick us/tick");
+
+	let mut group = c.benchmark_group("stats/presence");
+	group.sample_size(10);
+	group.warm_up_time(Duration::from_millis(200));
+	group.measurement_time(Duration::from_secs(1));
+	for &roots in &ROOTS {
+		for &held in HELD.iter().filter(|&&held| held <= roots) {
+			let id = BenchmarkId::from_parameter(format!("{roots}r_{held}h"));
+			group.throughput(Throughput::Elements(roots as u64));
+			let mut relay = None;
+			group.bench_function(id, |b| {
+				let relay = relay.get_or_insert_with(|| {
+					let mut relay = Presence::build(roots, held);
+					black_box(relay.driver.tick());
+					ALLOCATIONS.store(0, Ordering::Relaxed);
+					COUNTING.store(true, Ordering::Relaxed);
+					let start = Instant::now();
+					for _ in 0..TABLE_TICKS {
+						black_box(relay.driver.tick());
+					}
+					let micros = start.elapsed().as_secs_f64() * 1e6 / TABLE_TICKS as f64;
+					COUNTING.store(false, Ordering::Relaxed);
+					let allocs = ALLOCATIONS.load(Ordering::Relaxed) / TABLE_TICKS as usize;
+					println!("{roots:>5} {held:>4} {allocs:>11} {micros:>8.1}");
+					relay
+				});
+				b.iter_custom(|iters| {
+					let start = Instant::now();
+					for _ in 0..iters {
+						black_box(relay.driver.tick());
+					}
+					start.elapsed()
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, bench, presence);
 criterion_main!(benches);
