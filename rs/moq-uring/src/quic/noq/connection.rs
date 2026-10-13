@@ -411,22 +411,24 @@ pub(crate) async fn establish(shared: Shared, deadline: Option<Instant>) -> Resu
 		timer.set(Some(at));
 		timer
 	});
+	let mut expired = false;
 	let result = kio::wait(|waiter| {
-		{
-			let mut state = shared.state.borrow_mut();
-			if state.established {
-				return Poll::Ready(Ok(()));
-			}
-			if let Some(err) = &state.closed {
-				return Poll::Ready(Err(err.clone()));
-			}
-			waiter.register(&mut state.establish_waiters);
-		}
-		// The close resolves this wait once the driver has staged it.
+		// The deadline goes first, so a handshake that completed in the same
+		// turn it expired is still refused. The close resolves this wait once
+		// the driver has staged it.
 		if timer.as_mut().is_some_and(|timer| timer.poll(waiter).is_ready()) {
 			timer = None;
+			expired = true;
 			shared.close_code(0, "QUIC handshake timed out");
 		}
+		let mut state = shared.state.borrow_mut();
+		if state.established && !expired {
+			return Poll::Ready(Ok(()));
+		}
+		if let Some(err) = &state.closed {
+			return Poll::Ready(Err(err.clone()));
+		}
+		waiter.register(&mut state.establish_waiters);
 		Poll::Pending
 	})
 	.await;
