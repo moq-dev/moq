@@ -126,6 +126,11 @@ pub struct Config {
 	/// the wave's spread across the mesh. Defaults to [`DEFAULT_UPDATE_HOLD`];
 	/// zero delivers updates at once.
 	///
+	/// A broadcast resolved through a peer's route keeps serving new requests while
+	/// the peer's replacement of it is held, and refuses them with
+	/// [`Error::Unroutable`] once the restart is delivered, so a holder following
+	/// restarts never sees that refusal first.
+	///
 	/// A relay further out can still pass a stale path to a cursor that already
 	/// retracted the prefix, which would announce it anew. So for two seconds after
 	/// a retraction, an announcement from the same publisher (first hop and epoch)
@@ -659,6 +664,96 @@ enum Held {
 	Until(Instant),
 }
 
+/// When one table change's held restart ends: the announce cursors deliver its
+/// `Restart`, and the request handles it replaced retire. Shared by both, so a
+/// handle never retires before its holder could see the `Restart` to follow.
+///
+/// Anchored like [`Held`], on the first clock reading after the change.
+#[derive(Clone)]
+struct Release(Arc<std::sync::Mutex<ReleaseState>>);
+
+struct ReleaseState {
+	held: Held,
+	hold: Duration,
+	clock: Clock,
+	deadline: crate::time::Deadline,
+}
+
+impl Release {
+	/// A release `hold` after a change made now, or `None` when nothing is held: the
+	/// hold is zero, or the origin's driver never read the clock.
+	fn new(clock: &Clock, hold: Duration) -> Option<Self> {
+		let now = clock.try_now().filter(|_| !hold.is_zero())?;
+		Some(Self(Arc::new(std::sync::Mutex::new(ReleaseState {
+			held: Held::Anchoring(now),
+			hold,
+			clock: clock.clone(),
+			deadline: crate::time::Deadline::new(clock),
+		}))))
+	}
+
+	/// When this releases, as far as `now` can tell: past a stale anchor, it is
+	/// still waiting for a fresh reading to count from.
+	fn until(&self, now: Instant) -> Instant {
+		self.0.lock().unwrap().until(now)
+	}
+
+	/// Whether the clock has reached the release.
+	fn released(&self) -> bool {
+		let mut state = self.0.lock().unwrap();
+		let Some(now) = state.clock.try_now() else {
+			return false;
+		};
+		state.until(now) <= now
+	}
+
+	/// `Ready` once released, registering `waiter` until then.
+	fn poll(&self, waiter: &kio::Waiter) -> Poll<()> {
+		let mut state = self.0.lock().unwrap();
+		let Some(now) = state.clock.try_now() else {
+			return Poll::Pending;
+		};
+		let until = state.until(now);
+		state.deadline.set(Some(until));
+		state.deadline.poll(waiter)
+	}
+}
+
+impl ReleaseState {
+	fn until(&mut self, now: Instant) -> Instant {
+		match self.held {
+			Held::Anchoring(seen) if now <= seen => seen + Duration::from_nanos(1),
+			Held::Anchoring(_) => {
+				let until = now + self.hold;
+				self.held = Held::Until(until);
+				until
+			}
+			Held::Until(until) => until,
+		}
+	}
+}
+
+/// The [`Release`] one table change's held restarts share, made on first use.
+struct Hold<'a> {
+	clock: &'a Clock,
+	hold: Duration,
+	release: std::cell::OnceCell<Option<Release>>,
+}
+
+impl<'a> Hold<'a> {
+	fn new(clock: &'a Clock, hold: Duration) -> Self {
+		Self {
+			clock,
+			hold,
+			release: std::cell::OnceCell::new(),
+		}
+	}
+
+	fn release(&self) -> Option<Release> {
+		self.release.get_or_init(|| Release::new(self.clock, self.hold)).clone()
+	}
+}
+
 /// One coalesced update queued for an `AnnounceConsumer`.
 ///
 /// At most one entry exists per prefix, so a slow consumer's pending set is
@@ -670,9 +765,13 @@ type AnnounceMeta = (RouteMeta, Option<Vec<Pattern>>);
 
 enum PendingUpdate {
 	Announce(AnnounceMeta),
-	Restart(AnnounceMeta),
+	/// Held until its [`Release`], if any.
+	Restart(AnnounceMeta, Option<Release>),
 	Unannounce(AnnounceMeta),
-	UnannounceAnnounce { old: AnnounceMeta, new: AnnounceMeta },
+	UnannounceAnnounce {
+		old: AnnounceMeta,
+		new: AnnounceMeta,
+	},
 }
 
 /// Pending updates keyed by prefix. `BTreeMap` keeps memory strictly bounded by
@@ -699,7 +798,7 @@ impl OriginConsumerState {
 			// First announce, a stale announce being replaced, or a metadata update.
 			None | Some(PendingUpdate::Announce(_)) => PendingUpdate::Announce(meta),
 			// The consumer still owes the restart; this only moves its metadata.
-			Some(PendingUpdate::Restart(_)) => PendingUpdate::Restart(meta),
+			Some(PendingUpdate::Restart(_, release)) => PendingUpdate::Restart(meta, release),
 			// Consumer needs to observe the retraction before this announce.
 			Some(PendingUpdate::Unannounce(old) | PendingUpdate::UnannounceAnnounce { old, .. }) => {
 				PendingUpdate::UnannounceAnnounce { old, new: meta }
@@ -709,14 +808,24 @@ impl OriginConsumerState {
 	}
 
 	/// Another instance replaces the route at `prefix`, or announces it afresh when
-	/// the consumer never saw the old one.
-	fn apply_restart(&mut self, prefix: PathOwned, meta: RouteMeta, captures: Option<Vec<Pattern>>) {
+	/// the consumer never saw the old one. A restart owed already keeps its release,
+	/// unless this one goes at once.
+	fn apply_restart(
+		&mut self,
+		prefix: PathOwned,
+		meta: RouteMeta,
+		captures: Option<Vec<Pattern>>,
+		release: Option<Release>,
+	) {
 		let meta = (meta, captures);
 		let new = match self.pending.remove(&prefix) {
 			Some(PendingUpdate::Unannounce(old) | PendingUpdate::UnannounceAnnounce { old, .. }) => {
 				PendingUpdate::UnannounceAnnounce { old, new: meta }
 			}
-			_ if self.delivered.contains(&prefix) => PendingUpdate::Restart(meta),
+			Some(PendingUpdate::Restart(_, owed)) => {
+				PendingUpdate::Restart(meta, release.map(|new| owed.unwrap_or(new)))
+			}
+			_ if self.delivered.contains(&prefix) => PendingUpdate::Restart(meta, release),
 			// The consumer never saw the old instance, so this is its first announce.
 			_ => PendingUpdate::Announce(meta),
 		};
@@ -731,7 +840,7 @@ impl OriginConsumerState {
 			Some(PendingUpdate::Announce(_)) if !self.delivered.contains(&prefix) => {}
 			// Either nothing is pending or the pending announce was a metadata
 			// update on a delivered route; the consumer still owes a retraction.
-			None | Some(PendingUpdate::Announce(_) | PendingUpdate::Restart(_) | PendingUpdate::Unannounce(_)) => {
+			None | Some(PendingUpdate::Announce(_) | PendingUpdate::Restart(..) | PendingUpdate::Unannounce(_)) => {
 				self.pending.insert(prefix, PendingUpdate::Unannounce(last));
 			}
 			// The embedded announce cancels with this retraction; the consumer still
@@ -742,18 +851,13 @@ impl OriginConsumerState {
 		}
 	}
 
-	/// Whether the pending entry at `prefix` changes a route the consumer holds
-	/// to another route, rather than adding or removing one, and so waits out the
-	/// hold. A restart to a route without an epoch waits too, since a withdrawal
-	/// wave's stale path looks just like one; a newer epoch is a publisher's own
-	/// restart and goes at once.
+	/// Whether the pending entry at `prefix` changes the metadata of a route the
+	/// consumer holds, and so waits out the hold. A restart to a route without an
+	/// epoch waits too, since a withdrawal wave's stale path looks just like one,
+	/// but on its [`Release`]: the handles it replaces retire on that one. A newer
+	/// epoch is a publisher's own restart and goes at once.
 	fn is_update(&self, prefix: &PathOwned, update: &PendingUpdate) -> bool {
-		let held = match update {
-			PendingUpdate::Announce(_) => true,
-			PendingUpdate::Restart((meta, _)) => meta.3.is_none(),
-			_ => false,
-		};
-		held && self.delivered.contains(prefix)
+		matches!(update, PendingUpdate::Announce(_)) && self.delivered.contains(prefix)
 	}
 
 	/// The first pending prefix ready to deliver, or when the next held one is.
@@ -771,6 +875,14 @@ impl OriginConsumerState {
 			let Some(now) = now.filter(|_| !hold.is_zero() && !self.ended) else {
 				return Ok(prefix.clone());
 			};
+			if let PendingUpdate::Restart(_, Some(release)) = update {
+				let until = release.until(now);
+				if until <= now {
+					return Ok(prefix.clone());
+				}
+				wake = Some(wake.map_or(until, |w: Instant| w.min(until)));
+				continue;
+			}
 			if !self.is_update(prefix, update) {
 				let quarantine = match update {
 					PendingUpdate::Announce((meta, _)) => retracted.get(prefix).filter(|q| q.holds(meta)),
@@ -815,7 +927,7 @@ impl OriginConsumerState {
 				};
 				(meta, kind)
 			}
-			PendingUpdate::Restart(meta) => {
+			PendingUpdate::Restart(meta, _) => {
 				self.delivered.insert(prefix.clone());
 				(meta, AnnounceEvent::Restart)
 			}
@@ -1174,7 +1286,7 @@ impl TableCursor {
 
 	/// Deliver a changed winner at this presented prefix, as of `now`, the
 	/// [`OriginState::next_route`].
-	fn update(&mut self, presented: &PathOwned, best: Option<&RouteEntry>, now: u64) {
+	fn update(&mut self, presented: &PathOwned, best: Option<&RouteEntry>, now: u64, hold: &Hold) {
 		match best {
 			Some(entry) => {
 				let meta = (entry.hops.clone(), entry.cost, entry.entered(), entry.epoch.clone());
@@ -1202,8 +1314,9 @@ impl TableCursor {
 					}
 					// Another instance: whatever was resolved under the prefix is stale.
 					Some((prev, ..)) if prev != instance => {
+						let release = meta.3.is_none().then(|| hold.release()).flatten();
 						if let Ok(mut state) = self.state.write() {
-							state.apply_restart(self.under.join(presented), meta, captures);
+							state.apply_restart(self.under.join(presented), meta, captures, release);
 						}
 					}
 					// Unchanged metadata and servability: nothing the consumer could
@@ -1529,8 +1642,8 @@ impl Producer {
 	pub fn new(config: Config) -> (Self, Driver) {
 		let (tasks, set) = TaskSet::new();
 		let scope = OriginScope::default();
-		let shared = kio::Shared::new(OriginState::new(config.update_hold));
 		let timers = Clock::default();
+		let shared = kio::Shared::new(OriginState::new(config.update_hold, timers.clone()));
 		let pool = config.pool.clone();
 		let producer = Self {
 			hop: config.hop,
@@ -1638,7 +1751,7 @@ impl Producer {
 			hop,
 			scope: OriginScope::empty(),
 			root: PathOwned::default(),
-			shared: kio::Shared::new(OriginState::new(DEFAULT_UPDATE_HOLD)),
+			shared: kio::Shared::new(OriginState::new(DEFAULT_UPDATE_HOLD, Clock::default())),
 			pool: cache::Pool::default(),
 			cache_duration: Duration::MAX,
 			stats: stats::Session::default(),
@@ -3320,7 +3433,62 @@ struct Selected {
 	path: PathOwned,
 	via: Hop,
 	instance: Instance,
+	/// The prefix of the route the instance came through.
+	prefix: PathOwned,
+	/// The selection period, closed when the peer stops selecting the instance.
 	current: Option<kio::Producer<()>>,
+	/// The [`Release`] that ends `current`: the peer replaced the instance with a
+	/// route without an epoch, whose `Restart` is held until then.
+	retiring: Option<Release>,
+}
+
+/// How a [`Selected`] period changes.
+enum Change {
+	/// A new period: nothing refused in the last one revives.
+	Start,
+	/// The instance won again before its replacement was released.
+	Continue,
+	/// Retire the period once the replacement's held restart is released.
+	Retire(Release),
+	/// The peer no longer selects the instance, effective at once.
+	End,
+}
+
+impl Selected {
+	/// How the period changes now that the peer's best route is `best`, if it does.
+	fn change(&self, best: Option<&RouteEntry>, hold: &Hold) -> Option<Change> {
+		if best.is_some_and(|entry| entry.instance() == self.instance) {
+			return match (&self.current, &self.retiring) {
+				(Some(_), None) => None,
+				(Some(_), Some(release)) if !release.released() => Some(Change::Continue),
+				_ => Some(Change::Start),
+			};
+		}
+		self.current.as_ref()?;
+		// Announce cursors hold a restart at the same prefix onto a route without an
+		// epoch, so the period lasts as long. Anything else they deliver at once.
+		let held = best.is_some_and(|entry| entry.epoch.is_none() && entry.prefix == self.prefix);
+		match (held, &self.retiring) {
+			(true, Some(_)) => None,
+			(true, None) => Some(hold.release().map_or(Change::End, Change::Retire)),
+			(false, _) => Some(Change::End),
+		}
+	}
+
+	fn apply(&mut self, change: Change) {
+		match change {
+			Change::Start => {
+				self.current = Some(kio::Producer::default());
+				self.retiring = None;
+			}
+			Change::Continue => self.retiring = None,
+			Change::Retire(release) => self.retiring = Some(release),
+			Change::End => {
+				self.current = None;
+				self.retiring = None;
+			}
+		}
+	}
 }
 
 /// The lifetime of path requests while this peer still selects the held instance.
@@ -3339,6 +3507,18 @@ impl Selection {
 			.as_ref()
 			.map(kio::Producer::consume)
 			.unwrap_or_else(|| kio::Producer::new(()).consume())
+	}
+
+	/// `Ready` once the current period's replacement is released, registering
+	/// `waiter` until then.
+	pub(crate) fn poll_retired(&self, waiter: &kio::Waiter) -> Poll<()> {
+		match self.signal.poll(waiter, |selected| match &selected.retiring {
+			Some(release) => release.poll(waiter),
+			None => Poll::Pending,
+		}) {
+			Poll::Pending => Poll::Pending,
+			Poll::Ready(_) => Poll::Ready(()),
+		}
 	}
 }
 
@@ -3449,7 +3629,7 @@ impl RouteNode {
 	}
 
 	/// Wake route watchers, and revoke only leases whose selected instance changed.
-	fn poke(&self, routes: Option<&RouteTable>) {
+	fn poke(&self, routes: Option<(&RouteTable, &Hold)>) {
 		for (_, watch) in &self.watches {
 			match watch {
 				WatchProducer::Changes(watch) => {
@@ -3459,9 +3639,9 @@ impl RouteNode {
 				}
 				WatchProducer::Selection(watch) => {
 					if let Ok(mut selected) = watch.write() {
-						let active = routes
-							.and_then(|routes| {
-								routes.best_route(
+						let change = match routes {
+							Some((routes, hold)) => {
+								let best = routes.best_route(
 									&selected.path,
 									Horizon {
 										exclude: None,
@@ -3470,11 +3650,14 @@ impl RouteNode {
 									},
 									&HashSet::new(),
 									|entry| entry.via == selected.via,
-								)
-							})
-							.is_some_and(|entry| entry.instance() == selected.instance);
-						if active != selected.current.is_some() {
-							selected.current = active.then(kio::Producer::default);
+								);
+								selected.change(best, hold)
+							}
+							None => selected.current.is_some().then_some(Change::End),
+						};
+						// Only a change wakes the requests waiting on the selection.
+						if let Some(change) = change {
+							selected.apply(change);
 						}
 					}
 				}
@@ -3483,13 +3666,13 @@ impl RouteNode {
 	}
 
 	/// Wake only the watched subtrees covered by this route.
-	fn poke_below(&self, routes: &RouteTable) {
+	fn poke_below(&self, routes: &RouteTable, hold: &Hold) {
 		if self.watches_below == 0 {
 			return;
 		}
-		self.poke(Some(routes));
+		self.poke(Some((routes, hold)));
 		for child in self.children.values() {
-			child.poke_below(routes);
+			child.poke_below(routes, hold);
 		}
 	}
 
@@ -3662,9 +3845,9 @@ impl RouteTable {
 	}
 
 	/// Wake the watches of every path a route at `prefix` covers.
-	fn poke_below(&self, prefix: &Path) {
+	fn poke_below(&self, prefix: &Path, hold: &Hold) {
 		if let (_, Some(node)) = self.split(prefix) {
-			node.poke_below(self);
+			node.poke_below(self, hold);
 		}
 	}
 
@@ -3699,6 +3882,8 @@ struct OriginState {
 	// See [`Config::update_hold`]. No `Default`: every origin takes it from its
 	// config, so no path silently disables the hold.
 	update_hold: Duration,
+	// The driver's clock, which a held restart's [`Release`] counts on.
+	timers: Clock,
 
 	// The announced routes, keyed by prefix. The table holds one entry per live
 	// advertisement, not one per broadcast consumer.
@@ -3729,9 +3914,10 @@ struct OriginState {
 }
 
 impl OriginState {
-	fn new(update_hold: Duration) -> Self {
+	fn new(update_hold: Duration, timers: Clock) -> Self {
 		Self {
 			update_hold,
+			timers,
 			routes: RouteTable::default(),
 			next_route: 0,
 			next_watch: 0,
@@ -3816,6 +4002,7 @@ impl OriginState {
 		// Split borrows: the recompute reads `routes` while mutating a cursor.
 		let routes = &self.routes;
 		let now = self.next_route;
+		let hold = Hold::new(&self.timers, self.update_hold);
 		let mut candidates = None;
 		for id in routes.cursors_touching(prefix) {
 			let Some(cursor) = self.cursors.get_mut(&id) else {
@@ -3824,7 +4011,7 @@ impl OriginState {
 			if let Some(presented) = cursor.presented(prefix, claim) {
 				if presented.is_empty() {
 					// A cursor root can collapse several covering prefixes into one.
-					Self::sync_cursor(routes, cursor, &presented, now);
+					Self::sync_cursor(routes, cursor, &presented, now, &hold);
 				} else {
 					// Every non-root presentation refers to this exact prefix. Rank
 					// its routes once, then take each cursor's first visible entry.
@@ -3840,12 +4027,12 @@ impl OriginState {
 						.iter()
 						.map(|(_, entry)| *entry)
 						.find(|entry| cursor.visible(entry));
-					cursor.update(&presented, best, now);
+					cursor.update(&presented, best, now, &hold);
 				}
 			}
 		}
 		// The fronts and requesters under the prefix re-select from the table.
-		routes.poke_below(prefix);
+		routes.poke_below(prefix, &hold);
 	}
 
 	/// A path beneath `prefix` moved to another of its routes without an epoch, while
@@ -3881,7 +4068,7 @@ impl OriginState {
 
 	/// Recompute the best visible route presenting at `presented` (relative) for
 	/// one cursor and deliver the change, if any, as of `now`.
-	fn sync_cursor(routes: &RouteTable, cursor: &mut TableCursor, presented: &PathOwned, now: u64) {
+	fn sync_cursor(routes: &RouteTable, cursor: &mut TableCursor, presented: &PathOwned, now: u64, hold: &Hold) {
 		// The entries presenting here are the ones announced at the absolute
 		// prefix, or, for the cursor's own root, at the root and every prefix
 		// above it (all of which present as the empty path). Among them, the
@@ -3905,7 +4092,7 @@ impl OriginState {
 				.min_by_key(|entry| route_order(&entry.prefix, entry))
 		});
 
-		cursor.update(presented, best, now);
+		cursor.update(presented, best, now, hold);
 	}
 
 	/// Register a cursor and replay the current best route per presented prefix.
@@ -3925,8 +4112,10 @@ impl OriginState {
 				}
 			}
 		}
+		// A cursor's first sight of a route is no restart, so nothing is held.
+		let hold = Hold::new(&self.timers, Duration::ZERO);
 		for p in &presented {
-			Self::sync_cursor(&self.routes, &mut cursor, p, self.next_route);
+			Self::sync_cursor(&self.routes, &mut cursor, p, self.next_route, &hold);
 		}
 		for head in &cursor.heads {
 			self.routes.add_cursor(head, id);
@@ -4096,6 +4285,7 @@ impl Dynamic {
 		)?;
 		let via = entry.via;
 		let instance = entry.instance();
+		let prefix = entry.prefix.clone();
 		let active = table
 			.best_route(
 				path,
@@ -4112,7 +4302,9 @@ impl Dynamic {
 			path: path.to_owned(),
 			via,
 			instance,
+			prefix,
 			current: active.then(kio::Producer::default),
+			retiring: None,
 		});
 		let signal = producer.consume();
 		let id = table.next_watch;

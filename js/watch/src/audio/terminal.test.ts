@@ -39,7 +39,7 @@ test("Terminal preserves samples before the source endpoint", () => {
 	expect(terminal.span({ timestamp: 0, sampleRate: 48_000, numberOfFrames: 960 }).frames).toBe(960);
 });
 
-test("the gap before the first frame ends no epoch", () => {
+test("a gap before any frame ends no epoch", () => {
 	const terminal = new Terminal();
 	expect(terminal.update(gap)).toBe(false);
 });

@@ -123,7 +123,9 @@ async fn play(consumer: moq_net::origin::Consumer, announce: moq_net::announce::
 				bytes = frame.payload.len(),
 				"received frame"
 			),
-			moq_mux::container::Read::Gap => tracing::info!("media skipped"),
+			moq_mux::container::Read::Gap { timestamp, duration } => {
+				tracing::info!(?timestamp, ?duration, "media skipped")
+			}
 			moq_mux::container::Read::End { end, .. } => tracing::info!(?end, "media stopped"),
 		}
 	}

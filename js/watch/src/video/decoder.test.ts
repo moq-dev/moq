@@ -178,10 +178,10 @@ function sample(group: number, timestamp: number, keyframe = true): Read {
 	return {
 		kind: "frame",
 		group,
-		frame: { timestamp: Time.Micro(timestamp), payload: new Uint8Array([1]), keyframe },
+		frame: { arrival: Time.Milli.now(), timestamp: Time.Micro(timestamp), payload: new Uint8Array([1]), keyframe },
 	};
 }
-const gap: Read = { kind: "gap" };
+const gap: Read = { kind: "gap", timestamp: Time.Micro(0), duration: Time.Micro(0) };
 
 async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: readonly number[] = []) {
 	const originalDecoder = Object.getOwnPropertyDescriptor(globalThis, "VideoDecoder");
@@ -274,9 +274,12 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 	const sync = new Sync({ delay });
 	const enabled = new Signal(true);
 	const decoder = new Decoder({ source, sync, enabled });
+	// Opened before the reads below, so it observes every one of them.
+	const arrivals = decoder.arrivals();
 	await microtasks();
 	return {
 		decoder,
+		arrivals,
 		delay,
 		fail: (error: DOMException, index = -1) => errors.at(index)?.(error),
 		emit: (timestamp: number, index = -1) => frames.at(index)?.(new Picture(timestamp) as unknown as VideoFrame),
@@ -437,6 +440,11 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		]);
 		try {
 			expect(playback.submitted).toEqual([1000, 1100, 1200]);
+			for (const timestamp of [1, 1.1, 1.2])
+				expect(await playback.arrivals.next()).toMatchObject({
+					kind: "frame",
+					timestamp: Time.Milli(timestamp),
+				});
 			// Rejected payloads were still received, but never counted as frames.
 			expect(playback.decoder.out.stats.peek()).toEqual({ frameCount: 3, bytesReceived: 5 });
 		} finally {

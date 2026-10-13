@@ -63,7 +63,3 @@ Decided 2026-10-13 (maintainer):
 
 Public API: none in Rust. Operational: a new relay `/metrics` panic counter.
 Wire: none.
-
-## Related
-
-- [Fuzz builds under LTO](/quest/m0/fuzz-lto.md) - also edits the release profile

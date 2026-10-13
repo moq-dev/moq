@@ -171,6 +171,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just js catalog-bench
 
+      - name: JS arrival window benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just js arrivals-bench
+
       # Times Effect create and close beside a bare `new Error()`. No threshold: it only
       # has to keep running, and its numbers track the creation stack's cost.
       - name: JS signals effect benchmark
@@ -218,6 +222,10 @@ jobs:
       - name: TS damage PID benchmark
         if: ${{ !cancelled() }}
         run: nix develop --command just rs test -p moq-mux benchmark_damage_pid_fanout --run-ignored only --success-output immediate
+
+      - name: TS scheduler benchmark smoke
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs bench-ts-schedule --test
 
       - name: Container export benchmark smoke
         if: ${{ !cancelled() }}

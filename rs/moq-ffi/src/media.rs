@@ -1117,7 +1117,7 @@ impl Media {
 			match self.inner.read().await? {
 				Some(moq_mux::container::Read::Frame { frame, .. }) => return media_frame(frame).map(Some),
 				// The bindings carry frames only.
-				Some(moq_mux::container::Read::Gap | moq_mux::container::Read::End { .. }) => continue,
+				Some(moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. }) => continue,
 				None => return Ok(None),
 			}
 		}
