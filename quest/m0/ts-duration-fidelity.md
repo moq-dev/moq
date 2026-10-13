@@ -22,6 +22,14 @@ a catalog finish arriving before the media), starts late, or the capture is
 cut off by the harness. Fix that at its source, with a regression that fails
 without it. No longer timeout and no lower duration threshold.
 
+Seen again 2026-10-11 on #5306's Interop run
+[38118020915](https://github.com/moq-dev/moq/actions/runs/38118020915):
+2.5 s of 20.1 s. The subscriber's release clock measured the source
+-218,579 ppm (21.9 % slow), and the jitter buffer dropped frames as late
+from its first two seconds, before the multiplex rate arrived and padding
+began. A rerun of the same merge commit captured 20.5 s with no drops, so
+look at frame arrival on the subscriber, not at the padded scheduler.
+
 #5147 (export ts follows announcements, merged 2026-10-10) changed how an
 export ends, so check it first. Never raise a timeout or add a retry (the
 test-flakes-2 rules still apply).
