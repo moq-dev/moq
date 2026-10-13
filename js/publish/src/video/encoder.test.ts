@@ -1170,6 +1170,7 @@ test("a new broadcast starts the ceiling and maxima over", async () => {
 		capture.out.display.set({ width: 1280, height: 720 });
 		await settle();
 		expect(encoder.out.catalog.peek()).toMatchObject({ codedWidth: 1920, codedHeight: 1072, framerate: 60 });
+		const bitrate = encoder.out.catalog.peek()?.bitrate ?? 0;
 
 		broadcast.set({ video: rendition, baseline: new Baseline() });
 		// The previous broadcast's probe never describes the new track, even while its own runs.
@@ -1177,6 +1178,7 @@ test("a new broadcast starts the ceiling and maxima over", async () => {
 		expect(encoder.out.catalog.peek()).toBeUndefined();
 		await settle();
 		expect(encoder.out.catalog.peek()).toMatchObject({ codedWidth: 1280, codedHeight: 720, framerate: 30 });
+		expect(encoder.out.catalog.peek()?.bitrate).toBeLessThan(bitrate);
 	} finally {
 		encoder.close();
 	}
