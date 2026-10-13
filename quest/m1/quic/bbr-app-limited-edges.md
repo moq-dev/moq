@@ -38,5 +38,4 @@ already in `rs/moq-quic`.
 
 ## Related
 
-- [BBR idle burst](/quest/m1/quic/bbr-app-limited.md) - the first app-limited fix this extends
 - [Natural media drains](/quest/m2/quic-bbr-natural-drain.md) - measures natural draining on the corrected controller
