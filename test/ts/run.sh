@@ -509,7 +509,8 @@ if [[ -n "$PAIR" ]]; then
     fi
     echo "### captured $(wc -c <"$SUB_TS" | tr -d ' ') + $(wc -c <"$SUB_B_TS" | tr -d ' ') bytes -> comparing table anchors"
     echo
-    if ! python3 "$DIR/table-anchor.py" "$SUB_TS" "$SUB_B_TS" $STRICT \
+    if ! python3 "$DIR/table-anchor.py" "$SUB_TS" "$SUB_B_TS" --source "$SRC_TS" \
+        --report-json "$HARNESS_RUN/table-anchor.json" $STRICT \
         ${PASSTHRU[@]+"${PASSTHRU[@]}"}; then
         echo >&2
         echo "error: table anchor analysis failed (see round-trip logs below)" >&2

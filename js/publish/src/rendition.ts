@@ -40,7 +40,10 @@ export class Rendition<Config> {
 		this.#close = close;
 	}
 
-	/** Unregister: removes the catalog entry and closes any active track. Idempotent. */
+	/**
+	 * Unregister: removes the catalog entry and detaches the track. The broadcast keeps the
+	 * network track open, so registering the name again continues it. Idempotent.
+	 */
 	close(): void {
 		if (this.#closed) return;
 		this.#closed = true;
