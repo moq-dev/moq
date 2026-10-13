@@ -24,7 +24,8 @@ Decided with the maintainer on 2026-10-13:
 
 - Fail loud, not just warn: a source the output can never follow is refused.
 - The check lives in the shared jitter buffer, so TS, FLV, and MKV export
-  and audio decode fail the same way.
+  fail the same way. Audio decode is out of scope: `moq-audio` sizes its
+  delay with its own estimator and doesn't steer a clock.
 - The rule is the existing one minus "the steered clock is at its limit":
   the measured rate is past `MAX_DRIFT` and half the delay is gone. No new
   constant. Rejected: a run of a delay's worth of consecutive drops, a new
