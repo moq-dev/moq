@@ -30,8 +30,28 @@ created and received out of sequence order. An equal start is allowed, as
 moq-mux's `container::Producer` already allows a keyframe at the previous
 group's start. Groups no longer cached are not checked. The write fails
 without writing; a session receiving such a group aborts the track with
-that error and keeps the session. The check costs one neighbor lookup per
-group, not per frame; confirm with the existing group benchmark.
+that error and keeps the session.
+
+Cases the rule must cover (from review):
+
+- Only an original start counts. A group received from a later frame
+  (`start_at(hdr.frame_start)` in `rs/moq-net/src/lite/subscriber.rs`, or a
+  partial fetch) stamps its first *received* frame, which can sit above a
+  valid successor's start, since moq-mux lets a keyframe overlap the previous
+  group's last frame. A group whose first held frame is not index 0 has no
+  known start: it is neither checked nor used as a neighbor's bound.
+- The neighbor check and the first stamp are one atomic step under the
+  shared track state, taken in the existing track-before-group lock order.
+  Groups are written on independent streams, so two unstamped neighbors
+  checked under only their own locks could each accept a rewind.
+- A JS `GroupProducer` can hold frames before `track.writeGroup` attaches
+  it, so its start is stamped with no timeline to check. Check an already
+  started group when it is attached, before it is cached or fanned out.
+
+The check costs one ordered neighbor lookup per group, not per frame. The
+existing `group_write_frames` benchmark writes into an otherwise empty
+track, so add a row that stamps groups swept over the retained group count,
+where a scan of `lookup` would show as a slope.
 
 Recommended: every track producer refuses, local or received. The check
 sits where the start is stamped, which publishers, relays, and Rust and JS
@@ -71,9 +91,10 @@ Reconcile the docs:
   rewind is unspecified.
 
 Regression tests in both languages: a timed track refuses a group whose
-first frame rewinds, whether appended or created out of order, and from a
-received group; an equal start is accepted; an untimed track accepts groups
-in any order.
+first frame rewinds, whether appended, created out of order, received, or
+(JS) written before `writeGroup`; an equal start is accepted; a resumed
+partial group of a valid overlapping pair is accepted; an untimed track
+accepts groups in any order.
 
 Public API: write paths can now fail with `TimestampMismatch` on a rewind.
 Wire: none if `TimestampMismatch` is reused; the draft's description of
