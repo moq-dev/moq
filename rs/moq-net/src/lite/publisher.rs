@@ -14,8 +14,6 @@ use std::{
 	time::Duration,
 };
 
-use crate::transport::Stats;
-
 use crate::{
 	Error, Hop, Hops,
 	coding::{Decode, DecodeError, Decoder, Encode, Stream, Writer},
@@ -48,6 +46,8 @@ pub(super) struct PublisherConfig<S: crate::transport::poll::Session> {
 	pub auth: crate::auth::Handle,
 	/// What the default acceptor grants the peer's connection credential.
 	pub peer_grant: crate::auth::Grant,
+	/// The supervisor's estimate, which a PROBE stream follows.
+	pub estimate: kio::ProducerWeak<crate::session::Estimate>,
 	/// Whether we dialed: only then does a publication outside our grant abort.
 	pub client: bool,
 	/// Subscriptions the peer may hold at once (`session::Limits::subscriptions`).
@@ -83,6 +83,7 @@ struct Shared<S: crate::transport::poll::Session> {
 	// The send time an untimed track's frames carry, since no lite version can mark them
 	// untimed yet (see `wire_timestamp`).
 	runtime: crate::time::Clock,
+	estimate: kio::ProducerWeak<crate::session::Estimate>,
 }
 
 /// Largest millisecond duration every implementation can carry losslessly.
@@ -200,6 +201,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 				owed: AtomicUsize::new(0),
 				interests: Interests::new(config.subscriptions),
 				runtime: config.runtime.clone(),
+				estimate: config.estimate,
 			}),
 			runtime: config.runtime,
 			accept,
@@ -613,17 +615,25 @@ impl Enforce {
 	}
 }
 
-/// Serves one PROBE stream: periodic bandwidth estimates until the peer closes
-/// its side.
+/// Serves one PROBE stream: bandwidth estimates until the peer closes its side.
+///
+/// Reports when the supervisor's estimate moves enough to matter, or once the
+/// last report ages out, rather than on a timer: an idle session costs nothing.
 struct ProbeServe<S: crate::transport::poll::Session> {
 	shared: Arc<Shared<S>>,
 	runtime: crate::time::Clock,
 	stream: Option<Stream<S, Version>>,
+	/// The supervisor's estimate. Holding it is what keeps the supervisor sampling.
+	estimate: kio::Consumer<crate::session::Estimate>,
+	/// The estimate last weighed, so only a new one wakes this stream.
+	seen: Option<crate::session::Estimate>,
 	last_sent: Option<(lite::Probe, crate::time::Instant)>,
-	next_probe: crate::time::Deadline,
+	/// When the unsent change becomes worth reporting by age alone.
+	due: crate::time::Deadline,
 }
 
 impl<S: crate::transport::poll::Session> ProbeServe<S> {
+	/// The shortest age the bitrate threshold decays from.
 	const PROBE_INTERVAL: Duration = Duration::from_millis(100);
 	const PROBE_MAX_AGE: Duration = Duration::from_secs(10);
 	const PROBE_MAX_DELTA: f64 = 0.25;
@@ -644,23 +654,39 @@ impl<S: crate::transport::poll::Session> ProbeServe<S> {
 		}
 	}
 
-	/// The bitrate change worth reporting, decaying to zero as the last report
-	/// ages: a stale estimate is worth refreshing for a smaller move.
-	fn bitrate_threshold(elapsed: Duration) -> f64 {
-		let t = elapsed
-			.as_secs_f64()
-			.clamp(Self::PROBE_INTERVAL.as_secs_f64(), Self::PROBE_MAX_AGE.as_secs_f64());
-		let range = Self::PROBE_MAX_AGE.as_secs_f64() - Self::PROBE_INTERVAL.as_secs_f64();
-		Self::PROBE_MAX_DELTA * (Self::PROBE_MAX_AGE.as_secs_f64() - t) / range
+	/// How old the last report must be before this bitrate change is worth
+	/// another. The threshold decays linearly from [`Self::PROBE_MAX_DELTA`] at
+	/// [`Self::PROBE_INTERVAL`] to zero at [`Self::PROBE_MAX_AGE`]: a stale estimate
+	/// is worth refreshing for a smaller move.
+	fn bitrate_due(prev: Option<u64>, next: Option<u64>) -> Duration {
+		let (Some(prev), Some(next)) = (prev, next) else {
+			return match prev == next {
+				true => Self::PROBE_MAX_AGE,
+				false => Duration::ZERO,
+			};
+		};
+		if prev == 0 {
+			return match next {
+				0 => Self::PROBE_MAX_AGE,
+				_ => Duration::ZERO,
+			};
+		}
+		let delta = (next as f64 - prev as f64).abs() / prev as f64;
+		if delta >= Self::PROBE_MAX_DELTA {
+			return Duration::ZERO;
+		}
+		let range = Self::PROBE_MAX_AGE - Self::PROBE_INTERVAL;
+		Self::PROBE_MAX_AGE - range.mul_f64(delta / Self::PROBE_MAX_DELTA)
 	}
 
 	fn new(shared: Arc<Shared<S>>, runtime: crate::time::Clock, stream: Stream<S, Version>) -> Self {
 		Self {
+			estimate: shared.estimate.consume(),
+			seen: None,
 			shared,
 			stream: Some(stream),
 			last_sent: None,
-			// Send the first probe immediately, then keep an anchored cadence.
-			next_probe: crate::time::Deadline::at(&runtime, runtime.now()),
+			due: crate::time::Deadline::new(&runtime),
 			runtime,
 		}
 	}
@@ -681,65 +707,94 @@ impl<S: crate::transport::poll::Session> ProbeServe<S> {
 		let mut cx = waiter.context();
 
 		loop {
-			// Deliver the previous estimate before ticking out the next one.
+			// Deliver the previous estimate before weighing the next one.
 			ready!(stream.writer.poll_flush(&mut cx))?;
 
-			// Tick the probe interval, bailing as soon as the peer closes its side.
+			// Bail as soon as the peer closes its side.
 			if let Poll::Ready(res) = stream.reader.poll_closed(&mut cx) {
 				return Poll::Ready(res);
 			}
-			ready!(self.next_probe.poll(waiter));
-			let next = self
-				.next_probe
-				.deadline()
-				.and_then(|at| at.checked_add(Self::PROBE_INTERVAL));
-			self.next_probe.set(next);
+
+			let estimate = match self.seen {
+				// The first report reads the transport: the supervisor only samples
+				// for this stream from the next poll on.
+				None => {
+					// Mark the current value seen, so only the supervisor's next change wakes us.
+					self.seen = Some(*self.estimate.read());
+					crate::session::Estimate::read(&self.shared.session)
+				}
+				Some(seen) => {
+					let changed = match self.estimate.poll(waiter, |current| match **current != seen {
+						true => Poll::Ready(**current),
+						false => Poll::Pending,
+					}) {
+						Poll::Ready(Ok(current)) => Some(current),
+						// The session is ending; age alone can still refresh a report.
+						Poll::Ready(Err(_)) | Poll::Pending => None,
+					};
+					match changed {
+						Some(current) => {
+							self.seen = Some(current);
+							current
+						}
+						None => {
+							ready!(self.due.poll(waiter));
+							*self.estimate.read()
+						}
+					}
+				}
+			};
 
 			// The two fields are independent on the wire, each using 0 for unknown,
 			// so a transport that exposes only one still has something to report.
 			// Anything this version can't carry is dropped here rather than by the
 			// encoder, so it reads as unknown to every check below.
-			// Scoped so the borrowed stats handle is dropped before mutating the
-			// stream below.
-			let report = {
-				let stats = self.shared.session.stats();
-				lite::Probe {
-					bitrate: stats.estimated_send_rate(),
-					rtt: self
-						.shared
-						.version
-						.has_probe_rtt()
-						.then(|| stats.rtt().map(|d| d.as_millis() as u64))
-						.flatten(),
-				}
+			let report = lite::Probe {
+				bitrate: estimate.send_rate.map(crate::bandwidth::Rate::as_bps),
+				rtt: self
+					.shared
+					.version
+					.has_probe_rtt()
+					.then(|| estimate.rtt.map(|d| d.as_millis() as u64))
+					.flatten(),
 			};
 
 			// Nothing left to report. Say so once if it retracts a value the peer is
 			// still holding, then stay quiet rather than repeating "unknown" every
 			// time the max age comes around.
-			if report.bitrate.is_none() && report.rtt.is_none() {
-				let retracts = self
+			let unknown = report.bitrate.is_none() && report.rtt.is_none();
+			if unknown
+				&& !self
 					.last_sent
 					.as_ref()
-					.is_some_and(|(prev, _)| prev.bitrate.is_some() || prev.rtt.is_some());
-				if !retracts {
-					continue;
-				}
+					.is_some_and(|(prev, _)| prev.bitrate.is_some() || prev.rtt.is_some())
+			{
+				self.due.set(None);
+				continue;
 			}
 
-			let should_send = match &self.last_sent {
-				None => true,
+			let now = self.runtime.now();
+			let due = match &self.last_sent {
+				None => Some(now),
 				Some((prev, at)) => {
-					let elapsed = self.runtime.now().duration_since(*at);
-					elapsed >= Self::PROBE_MAX_AGE
-						|| Self::moved(prev.bitrate, report.bitrate, Self::bitrate_threshold(elapsed))
-						|| Self::moved(prev.rtt, report.rtt, Self::PROBE_RTT_DELTA)
+					let wait = match Self::moved(prev.rtt, report.rtt, Self::PROBE_RTT_DELTA) {
+						true => Duration::ZERO,
+						false => Self::bitrate_due(prev.bitrate, report.bitrate),
+					};
+					at.checked_add(wait)
 				}
 			};
 
-			if should_send {
+			if due.is_some_and(|due| due <= now) {
 				stream.writer.buffer(&report)?;
-				self.last_sent = Some((report, self.runtime.now()));
+				self.last_sent = Some((report, now));
+				// A retraction is final until something is measured again.
+				self.due.set(match unknown {
+					true => None,
+					false => now.checked_add(Self::PROBE_MAX_AGE),
+				});
+			} else {
+				self.due.set(due);
 			}
 		}
 	}
@@ -5089,6 +5144,7 @@ mod tests {
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: Default::default(),
+			estimate: kio::Producer::default().weak(),
 		});
 
 		let serving = kio::wait(|waiter| publisher.shared.poll_serving_origin(waiter)).await;
@@ -5226,11 +5282,7 @@ mod tests {
 
 	/// Decode the PROBE messages the publisher wrote. The publisher only replies on
 	/// a stream the subscriber opened, so there is no leading ControlType here.
-	fn decode_probes(bytes: &[u8]) -> Vec<lite::Probe> {
-		decode_probes_version(bytes, Version::Lite05)
-	}
-
-	fn decode_probes_version(bytes: &[u8], version: Version) -> Vec<lite::Probe> {
+	fn decode_probes(bytes: &[u8], version: Version) -> Vec<lite::Probe> {
 		use crate::coding::Decode as _;
 		let mut slice = bytes;
 		let mut out = Vec::new();
@@ -5240,11 +5292,13 @@ mod tests {
 		out
 	}
 
-	/// Build the poll-based PROBE server around a stream opened by the test peer.
+	/// Build the poll-based PROBE server around a stream opened by the test peer,
+	/// following `estimate` as it would the supervisor's.
 	fn probe_server(
 		session: SinkSession,
 		stream: Stream<SinkSession, Version>,
 		version: Version,
+		estimate: &kio::Producer<crate::session::Estimate>,
 	) -> ProbeServe<SinkSession> {
 		let origin = Hop::random().produce();
 		let (_, goaway) = crate::goaway::Handle::new(true);
@@ -5260,8 +5314,56 @@ mod tests {
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: Default::default(),
+			estimate: estimate.weak(),
 		});
 		ProbeServe::new(publisher.shared.clone(), publisher.runtime.clone(), stream)
+	}
+
+	/// A PROBE stream served against a transport reporting `stats`.
+	struct Probing {
+		estimate: kio::Producer<crate::session::Estimate>,
+		log: crate::lite::test_transport::Log,
+		server: ProbeServe<SinkSession>,
+		version: Version,
+		_gate: kio::Producer<bool>,
+	}
+
+	impl Probing {
+		async fn new(stats: crate::lite::test_transport::SinkStats, version: Version) -> Self {
+			let gate = kio::Producer::new(true);
+			let mut session = SinkSession::gated_bi(gate.consume()).with_stats(stats);
+			let log = session.log.clone();
+			let stream = Stream::open(&mut session, version).await.unwrap();
+			// The supervisor's construction-time snapshot.
+			let estimate = kio::Producer::new(crate::session::Estimate::read(&session));
+			let server = probe_server(session, stream, version, &estimate);
+			Self {
+				estimate,
+				log,
+				server,
+				version,
+				_gate: gate,
+			}
+		}
+
+		/// Publish a new estimate, as the supervisor does when a sample moves.
+		fn set(&self, send_rate: Option<u64>, rtt: Option<Duration>) {
+			let Ok(mut estimate) = self.estimate.write() else {
+				panic!("the estimate outlives the stream");
+			};
+			*estimate = crate::session::Estimate {
+				send_rate: send_rate.map(crate::bandwidth::Rate::from_bps),
+				rtt,
+			};
+		}
+
+		/// Run until everything parks at `after` from now, returning every report so far.
+		async fn reports(&mut self, after: Duration) -> Vec<lite::Probe> {
+			let server = &mut self.server;
+			let run = kio::wait(|waiter| server.poll_probe(waiter));
+			assert!(moq_net_sim::timeout(after, run).await.is_err(), "the stream never ends");
+			decode_probes(&self.log.writes.lock().unwrap(), self.version)
+		}
 	}
 
 	/// Drive the PROBE state machine against a transport reporting `stats`, and
@@ -5272,21 +5374,10 @@ mod tests {
 
 	/// As above, on a specific negotiated version.
 	async fn probe_writes_version(stats: crate::lite::test_transport::SinkStats, version: Version) -> Vec<lite::Probe> {
-		let gate = kio::Producer::new(true);
-		let mut session = SinkSession::gated_bi(gate.consume()).with_stats(stats);
-		let log = session.log.clone();
-		let stream = Stream::open(&mut session, version).await.unwrap();
-
-		let mut server = probe_server(session, stream, version);
-		let mut run = std::pin::pin!(kio::wait(|waiter| server.poll_probe(waiter)));
-		// The loop reports on a 100ms cadence, so let the first tick land before
-		// reading what it wrote. It parks on the next tick either way.
-		assert!(futures::poll!(run.as_mut()).is_pending());
-		moq_net_sim::sleep(Duration::from_millis(150)).await;
-		assert!(futures::poll!(run.as_mut()).is_pending());
-
-		let writes = log.writes.lock().unwrap().clone();
-		decode_probes_version(&writes, version)
+		Probing::new(stats, version)
+			.await
+			.reports(Duration::from_millis(150))
+			.await
 	}
 
 	/// A transport that exposes an RTT but no send-rate estimate must still report.
@@ -5350,29 +5441,15 @@ mod tests {
 	/// holding the last value we sent. But only one, however long the stream runs.
 	#[moq_net_sim::test]
 	async fn a_bitrate_going_unknown_is_retracted_once() {
-		let gate = kio::Producer::new(true);
 		let stats = crate::lite::test_transport::SinkStats::default().with_send_rate(1_000_000);
-		let mut session = SinkSession::gated_bi(gate.consume()).with_stats(stats);
-		let log = session.log.clone();
-		let stream = Stream::open(&mut session, Version::Lite05).await.unwrap();
-
-		let mut server = probe_server(session.clone(), stream, Version::Lite05);
-		let mut run = std::pin::pin!(kio::wait(|waiter| server.poll_probe(waiter)));
-		assert!(futures::poll!(run.as_mut()).is_pending());
-		moq_net_sim::sleep(Duration::from_millis(150)).await;
-		assert!(futures::poll!(run.as_mut()).is_pending());
+		let mut probing = Probing::new(stats, Version::Lite05).await;
+		assert_eq!(probing.reports(Duration::from_millis(150)).await.len(), 1);
 
 		// The transport stops measuring. Everything after this is unknown.
-		session.set_stats(crate::lite::test_transport::SinkStats::default());
+		probing.set(None, None);
 
 		// Well past PROBE_MAX_AGE, so a stale-report timer would have fired repeatedly.
-		for _ in 0..3 {
-			moq_net_sim::sleep(Duration::from_secs(11)).await;
-			assert!(futures::poll!(run.as_mut()).is_pending());
-		}
-
-		let writes = log.writes.lock().unwrap().clone();
-		let probes = decode_probes(&writes);
+		let probes = probing.reports(Duration::from_secs(33)).await;
 		assert_eq!(
 			probes.len(),
 			2,
@@ -5380,6 +5457,48 @@ mod tests {
 		);
 		assert_eq!(probes[0].bitrate, Some(1_000_000));
 		assert_eq!(probes[1].bitrate, None);
+	}
+
+	/// An estimate that never moves is refreshed once per PROBE_MAX_AGE, and costs
+	/// nothing in between.
+	#[moq_net_sim::test]
+	async fn an_unchanged_estimate_refreshes_at_max_age() {
+		let stats = crate::lite::test_transport::SinkStats::default().with_send_rate(1_000_000);
+		let mut probing = Probing::new(stats, Version::Lite05).await;
+		assert_eq!(probing.reports(Duration::from_millis(9_900)).await.len(), 1);
+		assert_eq!(probing.reports(Duration::from_millis(200)).await.len(), 2);
+		assert_eq!(probing.reports(Duration::from_millis(9_800)).await.len(), 2);
+		assert_eq!(probing.reports(Duration::from_millis(200)).await.len(), 3);
+	}
+
+	/// A move past PROBE_MAX_DELTA is reported as soon as the estimate changes.
+	#[moq_net_sim::test]
+	async fn a_large_move_reports_at_once() {
+		let stats = crate::lite::test_transport::SinkStats::default().with_send_rate(1_000_000);
+		let mut probing = Probing::new(stats, Version::Lite05).await;
+		assert_eq!(probing.reports(Duration::from_secs(1)).await.len(), 1);
+
+		probing.set(Some(2_000_000), None);
+		let probes = probing.reports(Duration::from_millis(1)).await;
+		assert_eq!(probes.len(), 2);
+		assert_eq!(probes[1].bitrate, Some(2_000_000));
+	}
+
+	/// A smaller move waits for the threshold to decay to it, even though the
+	/// estimate does not change again.
+	#[moq_net_sim::test]
+	async fn a_small_move_waits_for_the_threshold() {
+		let stats = crate::lite::test_transport::SinkStats::default().with_send_rate(1_000_000);
+		let mut probing = Probing::new(stats, Version::Lite05).await;
+		assert_eq!(probing.reports(Duration::from_secs(1)).await.len(), 1);
+
+		// 10% clears the threshold once it decays to 0.1: 10s - 0.4 * 9.9s = 6.04s
+		// after the first report.
+		probing.set(Some(1_100_000), None);
+		assert_eq!(probing.reports(Duration::from_millis(4_990)).await.len(), 1);
+		let probes = probing.reports(Duration::from_millis(100)).await;
+		assert_eq!(probes.len(), 2);
+		assert_eq!(probes[1].bitrate, Some(1_100_000));
 	}
 
 	/// Where a request waits when its requester leaves.
@@ -5436,6 +5555,7 @@ mod tests {
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: Default::default(),
+			estimate: kio::Producer::default().weak(),
 		});
 
 		let mut script = Vec::new();
@@ -5556,6 +5676,7 @@ mod tests {
 					peer_setup.set(crate::lite::Setup::default());
 					let (_, goaway) = crate::goaway::Handle::new(true);
 					let publisher = Publisher::new(PublisherConfig {
+						estimate: kio::Producer::default().weak(),
 						runtime: crate::time::Clock::sim(),
 						session: ScriptedSession::new(Vec::new()),
 						origin: origin.consume(),
@@ -5646,6 +5767,7 @@ mod tests {
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: Default::default(),
+			estimate: kio::Producer::default().weak(),
 		});
 
 		let mut script = Vec::new();
@@ -5724,6 +5846,7 @@ mod tests {
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		let version = Version::Lite07;
 		let publisher = Publisher::new(PublisherConfig {
+			estimate: kio::Producer::default().weak(),
 			runtime: crate::time::Clock::sim(),
 			session: ScriptedSession::new(Vec::new()),
 			origin: origin.consume(),
@@ -5875,6 +5998,7 @@ mod tests {
 			let origin = Hop::random().produce();
 			let (_, goaway) = crate::goaway::Handle::new(true);
 			let mut publisher = Publisher::new(PublisherConfig {
+				estimate: kio::Producer::default().weak(),
 				runtime: crate::time::Clock::sim(),
 				session,
 				origin: origin.consume(),
