@@ -32,7 +32,7 @@ and a p90 5 times before it merges.
 the warm's `just ci check --all` and `just ci test --all` pass, and a red test
 on `main` blocks it. OBS on a `main` push also saves into the same shared key
 space. The fix (warm compiles only, readers never save) is in flight as its
-own PR.
+own PR (#5428).
 
 Decisions (maintainer, 2026-10-13):
 
