@@ -38,5 +38,5 @@ the sentence declaring P2P out of scope goes. `just drafts check` passes.
 
 ## Related
 
-- [Signaling and policy](/quest/m3/p2p/signal.md) - supplies the peer connection and the agreed ALPN
-- [Native data channel transport](/quest/m3/p2p/webrtc.md) - the same binding in Rust
+- [Signaling and policy](/quest/m1/p2p/signal.md) - supplies the peer connection and the agreed ALPN
+- [Native data channel transport](/quest/m1/p2p/webrtc.md) - the same binding in Rust

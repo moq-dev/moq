@@ -66,6 +66,12 @@ Decisions:
   loop, one of the watch consumers here; whichever lands second adapts it.
   (2026-09-30)
 
+Decided 2026-10-13: coordinate the index with the per-origin route model and
+per-track active/standby selection. Routing contracts settles identity and
+filtered candidate views first. Do not build a second route table per track or
+turn one origin metric update into per-broadcast mutations. Whichever
+implementation lands first preserves these operation-count tests for the next.
+
 Verification: `origin/pool_churn` leaves flat in served paths at every pool
 width it already sweeps, and a unit test that counts `select` calls per
 route change: zero for an unrelated route's leave, only the won paths on a
@@ -73,6 +79,10 @@ join, and a parked waiter retrying when a deeper advertise-only claim over a
 served root is withdrawn.
 
 Public API: none. Wire: none.
+
+## Required
+
+- [Routing contracts](/quest/m1/cluster-routing/contracts.md) - the identity and selection views the index serves
 
 ## Related
 

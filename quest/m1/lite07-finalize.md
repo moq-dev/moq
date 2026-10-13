@@ -30,7 +30,13 @@ lite-07, decided 2026-10-05. That removes lite-07's `Hop Base`/`Hop Keep`
 announce compression along with the hop list, and moq.pro's lite-07 rollout
 has to plan for a lite-07 without hop lists. Only
 [Routes and announces](/quest/m1/cluster-routing/routes.md) gates the cut,
-not the rest of the cluster-routing line (decided 2026-10-08).
+not the later federation/P2P integrations. Their peer-auth wire is a separate
+cut prerequisite, so lite-07 is not published before AUTH_CNF/KEYS/PEER/POP
+and the session-bound proof exchange are specified and implemented. Decided 2026-10-13: routes now
+owns the tier/partition correctness tests, so they run before the cut.
+Metadata-only subscriptions also gate lite-07: `Subscription.meta: true`
+observes group/frame progress without payload in both languages. The automatic
+health policy may land separately on that wire; its resume behavior is epoch-only.
 
 Decided 2026-10-08: Restart and AUTH join Required, since both change the
 lite-07 wire. SUBSCRIBE_OK carrying live media time was dropped: no reader
@@ -74,6 +80,8 @@ is published; older versions are unchanged.
 
 - [In-band auth](/quest/m1/auth/README.md) - lite-07 carries the Auth Stream and UNAUTHORIZED (0x3B)
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
+- [Peer grants](/quest/m1/p2p/peer-grant.md) - lite-07 peer authentication and replay-resistant session proof, independently of P2P integration
+- [Metadata subscriptions](/quest/m1/route-health/meta.md) - lite-07 carries payload-free group/frame progress and safe mode changes in Rust and JS
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - lite-07 restores SUBSCRIBE_DROP in place of `Stream Count`
 - [FETCH max-delay](/quest/m1/fetch-max-delay.md) - historical requests have a reader budget, carried by FETCH while present and by ranges after its removal
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
