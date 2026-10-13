@@ -28,7 +28,10 @@ them at replacement, and recovers a group from the new copy at the first
 missing frame and byte. It does not copy through the earlier single-writer
 pump or immediately cancel every old copy. Decided in the 2026-10-10 audit:
 mirror the current identity, reader, recovery and lifetime contract, including
-the late-duplicate correction, rather than porting the obsolete pump.
+the late-duplicate correction, rather than porting the obsolete pump. Each copy
+remembers the groups other copies handed out within its own range (its resume
+floor through its newest group at replacement) and drops that with the copy;
+no fixed-size history of delivered groups.
 Things to settle along the way:
 
 - Whether the request's `active` broadcast stays the same object across a swap,
@@ -66,7 +69,6 @@ subscriptions across a swap. Report it in the PR.
 ## Required
 
 - [One max_age meaning](/quest/m1/cache-max-age.md) - the rule that gives up a resumed group no route continues
-- [Resume duplicates](/quest/m0/broadcast-epoch/resume-duplicates.md) - the corrected once-only delivery contract for reordered copies
 
 ## Related
 

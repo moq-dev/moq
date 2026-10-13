@@ -13,6 +13,12 @@
 //! its [`Recover`]: once its copy fails with its route, or stalls while a newer route
 //! serves, it continues from the serving route's copy of the same group at the same frame
 //! (and byte), found in that copy's cache or fetched from it.
+//!
+//! A group is handed out once however many copies deliver it. A copy never repeats a
+//! group itself, so each copy remembers only the groups handed out from the others
+//! within its own range: from where it was asked to start through its newest group at
+//! replacement. That bounds the bookkeeping by how far the copies overlap, and it goes
+//! away with the copy.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -21,10 +27,6 @@ use std::task::{Poll, ready};
 use crate::{Datagram, Error, Result, StreamError, group, stats, track};
 
 use super::subscription::{Cap, Position, Subscription, max_some};
-
-/// How many delivered group sequences a reader remembers, so a group two routes both
-/// deliver is handed out once.
-const MAX_DELIVERED: usize = 1024;
 
 /// What the front says about a logical track: the copy to read now, and how it ended.
 #[derive(Default)]
@@ -147,7 +149,6 @@ impl Consumer {
 				mirrored,
 				generation: None,
 				copies: Vec::new(),
-				delivered: BTreeSet::new(),
 				newest: None,
 				ordered: None,
 				datagram: None,
@@ -248,6 +249,9 @@ struct Copy {
 	/// Held by every group handed out from this copy, so a replaced copy stays
 	/// subscribed while one is still read.
 	lease: Arc<()>,
+	/// Groups within this copy's range that another copy handed out, so this one does
+	/// not hand them out again.
+	delivered: BTreeSet<u64>,
 }
 
 enum Sub {
@@ -255,7 +259,31 @@ enum Sub {
 	Ready(track::Subscriber),
 }
 
+impl Sub {
+	/// The subscription, once the copy answered. `Err` once it refused.
+	fn poll_ready(&mut self, groups: (u64, Cap), waiter: &kio::Waiter) -> Poll<Result<&mut track::Subscriber>> {
+		if let Self::Pending(pending) = self {
+			let mut sub = ready!(pending.poll_ok(waiter))?;
+			sub.raise_start_to(groups.0);
+			sub.end_at(groups.1);
+			*self = Self::Ready(sub);
+		}
+		let Self::Ready(sub) = self else { unreachable!() };
+		Poll::Ready(Ok(sub))
+	}
+}
+
 impl Copy {
+	/// Whether this copy may still deliver `sequence`: it has not run out, and the group
+	/// lies between where it was asked to start and where it was replaced.
+	fn covers(&self, sequence: u64) -> bool {
+		self.done.is_none()
+			&& self.floor.is_none_or(|floor| sequence >= floor.group)
+			&& self
+				.until
+				.is_none_or(|until| until.is_some_and(|until| sequence <= until))
+	}
+
 	/// What this copy is asked for: the reader's own preferences, from no earlier than
 	/// where it was asked to start, and through no later than where it was replaced.
 	fn wire(&self, reader: &Subscription) -> Subscription {
@@ -280,14 +308,7 @@ impl Copy {
 
 	/// The subscription, once the copy answered. `Err` once it refused.
 	fn poll_ready(&mut self, groups: (u64, Cap), waiter: &kio::Waiter) -> Poll<Result<&mut track::Subscriber>> {
-		if let Sub::Pending(pending) = &self.sub {
-			let mut sub = ready!(pending.poll_ok(waiter))?;
-			sub.raise_start_to(groups.0);
-			sub.end_at(groups.1);
-			self.sub = Sub::Ready(sub);
-		}
-		let Sub::Ready(sub) = &mut self.sub else { unreachable!() };
-		Poll::Ready(Ok(sub))
+		self.sub.poll_ready(groups, waiter)
 	}
 
 	/// Whether this copy is still needed: it serves, or a group read from it is still out.
@@ -404,8 +425,6 @@ struct Reader {
 	generation: Option<u64>,
 	/// Oldest first: the last one is the serving route's, when it is subscribed.
 	copies: Vec<Copy>,
-	/// The groups handed out, so a group two copies deliver is handed out once.
-	delivered: BTreeSet<u64>,
 	/// The newest group handed out: where a new copy is asked to start.
 	newest: Option<u64>,
 	/// Reading in sequence order: the last group handed out.
@@ -472,6 +491,8 @@ impl Reader {
 			datagrams_done: None,
 			datagrams_seen: self.datagram,
 			lease: Arc::new(()),
+			// Every group handed out so far is at or below its floor, the newest of them.
+			delivered: self.newest.into_iter().collect(),
 		});
 	}
 
@@ -480,7 +501,6 @@ impl Reader {
 		let serving = self.generation;
 		let groups = self.groups;
 		let ordered = self.ordered;
-		let delivered = &self.delivered;
 		self.copies.retain_mut(|copy| {
 			if copy.needed(Some(copy.generation) == serving) {
 				return true;
@@ -489,7 +509,7 @@ impl Reader {
 				return false;
 			}
 			let until = copy.until;
-			let Poll::Ready(Ok(sub)) = copy.poll_ready(groups, &kio::Waiter::noop()) else {
+			let Poll::Ready(Ok(sub)) = copy.sub.poll_ready(groups, &kio::Waiter::noop()) else {
 				return false;
 			};
 			// Inspect without moving either cursor: a later group poll still chooses its
@@ -498,7 +518,7 @@ impl Reader {
 			sub.has_unread_group(&track::Unread {
 				start: groups.0.max(ordered.map_or(0, |last| last.saturating_add(1))),
 				end: until.and_then(|until| until.map_or(Some(0), |last| last.checked_add(1))),
-				delivered,
+				delivered: &copy.delivered,
 			})
 		});
 	}
@@ -512,7 +532,7 @@ impl Reader {
 		}
 		match self.ordered {
 			Some(last) => sequence > last,
-			None => !self.delivered.contains(&sequence),
+			None => !copy.delivered.contains(&sequence),
 		}
 	}
 
@@ -521,9 +541,10 @@ impl Reader {
 		if ordered {
 			self.ordered = Some(sequence);
 		}
-		self.delivered.insert(sequence);
-		if self.delivered.len() > MAX_DELIVERED {
-			self.delivered.pop_first();
+		for (other, copy) in self.copies.iter_mut().enumerate() {
+			if other != index && copy.covers(sequence) {
+				copy.delivered.insert(sequence);
+			}
 		}
 		self.newest = self.newest.max(Some(sequence));
 		let copy = &self.copies[index];
@@ -1251,6 +1272,177 @@ mod test {
 		routes.serve(b.consume());
 		assert_eq!(recv(&mut sub).sequence, 2);
 		assert!(sub.recv_group().now_or_never().is_none());
+	}
+
+	/// A budget that never writes off a group in these tests.
+	const HOUR: Duration = Duration::from_secs(3600);
+
+	/// A reader on the routes themselves, so a test can inspect its copies.
+	fn reader(routes: &Producer, max_delay: Duration) -> Subscriber {
+		routes
+			.consume()
+			.subscribe(kio::Producer::new(Subscription::default().with_max_delay(max_delay)))
+	}
+
+	/// Write a finished one-frame group, stamped with its sequence.
+	fn write(track: &track::Producer, sequence: u64) {
+		let mut group = track.create_group(group::Info { sequence }).unwrap();
+		group.write_frame(ts(sequence), b"x".as_ref()).unwrap();
+		group.finish().unwrap();
+	}
+
+	/// Every group the reader hands out right now.
+	fn drain(sub: &mut Subscriber, ordered: bool) -> Vec<u64> {
+		let mut sequences = Vec::new();
+		while let Poll::Ready(Ok(Some(group))) = sub.poll_group(ordered, &kio::Waiter::noop()) {
+			sequences.push(group.sequence);
+		}
+		sequences
+	}
+
+	/// How many groups handed out elsewhere each of the reader's copies remembers.
+	fn remembered(sub: &Subscriber) -> Vec<usize> {
+		sub.reader().copies.iter().map(|copy| copy.delivered.len()).collect()
+	}
+
+	/// A copy delivering a group long after the reader moved past it does not hand it out
+	/// again, however many groups came between; one never handed out is still delivered.
+	#[test]
+	fn a_late_group_is_handed_out_once_however_late() {
+		let routes = Producer::new();
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = reader(&routes, HOUR);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, false), [0]);
+
+		let b = copy();
+		routes.serve(b.consume());
+		for sequence in 2..=2000 {
+			write(&b, sequence);
+		}
+		assert_eq!(drain(&mut sub, false), (2..=2000).collect::<Vec<_>>());
+
+		// The replacement's copies of groups 1 and 0 land last: 1 is new, 0 is not.
+		write(&b, 1);
+		write(&b, 0);
+		assert_eq!(drain(&mut sub, false), [1]);
+		assert_eq!(remembered(&sub), [1], "only the group the replaced copy handed out");
+	}
+
+	/// An ordered reader never goes back, late duplicate or not.
+	#[test]
+	fn an_ordered_reader_skips_a_late_group() {
+		let routes = Producer::new();
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = reader(&routes, HOUR);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, true), [0]);
+
+		let b = copy();
+		routes.serve(b.consume());
+		for sequence in 1..=2000 {
+			write(&b, sequence);
+		}
+		assert_eq!(drain(&mut sub, true), (1..=2000).collect::<Vec<_>>());
+		write(&b, 0);
+		assert_eq!(drain(&mut sub, true), Vec::<u64>::new());
+	}
+
+	/// Two routes taking turns, each also delivering the other's groups late and out of
+	/// order, hand out every group once. What a reader remembers stays bounded by the
+	/// overlap, not by how many groups or flaps went by.
+	#[test]
+	fn route_flaps_hand_out_every_group_once() {
+		let routes = Producer::new();
+		let tracks = [copy(), copy()];
+		routes.serve(tracks[0].consume());
+		let mut sub = reader(&routes, HOUR);
+		let mut seen = Vec::new();
+		let mut memory = Vec::new();
+		for round in 0..16u64 {
+			let (serving, other) = (&tracks[round as usize % 2], &tracks[1 - round as usize % 2]);
+			let groups = round * 10..round * 10 + 10;
+			// The serving route brings half the round, the reader takes it, then the rest.
+			for sequence in groups.clone().take(5) {
+				write(serving, sequence);
+			}
+			seen.extend(drain(&mut sub, false));
+			for sequence in groups.clone().skip(5) {
+				write(serving, sequence);
+			}
+			// The other route takes over and the replaced copy hands out the rest; the
+			// other's own copy of the round lands only afterwards, newest first.
+			routes.serve(other.consume());
+			seen.extend(drain(&mut sub, false));
+			for sequence in groups.clone().rev() {
+				write(other, sequence);
+			}
+			seen.extend(drain(&mut sub, false));
+			memory.push(remembered(&sub));
+		}
+		let mut sorted = seen.clone();
+		sorted.sort_unstable();
+		assert_eq!(sorted, (0..160).collect::<Vec<_>>(), "handed out: {seen:?}");
+		// Each round, only the serving copy is left, remembering its floor and the half
+		// round the replaced copy handed out.
+		assert!(
+			memory.iter().all(|copies| copies == &[6]),
+			"bookkeeping grew with the flaps: {memory:?}"
+		);
+	}
+
+	/// A reader holding an old group open keeps its replaced copy, and moving its group
+	/// bounds neither repeats a group nor loses one. Once that copy finishes, what it
+	/// remembered goes with it.
+	#[test]
+	fn held_groups_and_moved_bounds_hand_out_each_group_once() {
+		let routes = Producer::new();
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = reader(&routes, HOUR);
+		sub.end_at(Cap::from(..=0));
+		let mut held = a.create_group(group::Info { sequence: 0 }).unwrap();
+		held.write_frame(ts(0), b"a".as_ref()).unwrap();
+		let Poll::Ready(Ok(Some(reading))) = sub.poll_group(false, &kio::Waiter::noop()) else {
+			panic!("group 0 is handed out")
+		};
+		// Past the cap: parked on the copy, not handed out.
+		write(&a, 1);
+		write(&a, 2);
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+
+		let b = copy();
+		routes.serve(b.consume());
+		for sequence in [2, 0, 3, 1] {
+			write(&b, sequence);
+		}
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		assert_eq!(sub.reader().copies.len(), 2, "the held group keeps its copy");
+
+		sub.end_at(Cap::from(..));
+		let mut seen = drain(&mut sub, false);
+		seen.sort_unstable();
+		assert_eq!(seen, [1, 2, 3]);
+		sub.start_at(0);
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		// The replaced copy remembers the groups the serving one handed out through its
+		// newest at replacement; the serving one, the group handed out before it.
+		assert_eq!(remembered(&sub), [2, 1]);
+
+		// The replaced copy finishes; the held group is all it has left.
+		held.finish().unwrap();
+		a.finish().unwrap();
+		drop(reading);
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		assert_eq!(
+			remembered(&sub),
+			[1],
+			"the finished copy is let go with what it remembered"
+		);
+		write(&b, 4);
+		assert_eq!(drain(&mut sub, false), [4]);
 	}
 
 	/// A replacement copy asked to start at the newest group handed out keeps that

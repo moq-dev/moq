@@ -19,6 +19,8 @@
 //!
 //! A route swap on one front is swept over its tracks and the copies each track
 //! still holds from earlier routes, and a front retiring over the fronts around it.
+//! Readers draining a swapped track are swept over their count and the groups
+//! both routes delivered.
 //!
 //! Run with `cargo bench -p moq-net --bench origin`.
 
@@ -1125,6 +1127,102 @@ fn bench_copy_walk(c: &mut Criterion) {
 	group.finish();
 }
 
+/// `(readers, retained)` for [`bench_resume_overlap`]: readers of one track, and
+/// the groups both routes hold when it swaps.
+const RESUME_OVERLAP: [(usize, usize); 6] = [(1, 1), (1, 64), (1, 1024), (32, 64), (256, 64), (32, 1024)];
+
+/// A track that swapped routes before its readers read anything: the replaced copy
+/// and the new one hold the same groups, the new one in reverse arrival order.
+struct ResumeOverlap {
+	_producer: origin::Producer,
+	_generations: [broadcast::Producer; 2],
+	_tracks: [track::Producer; 2],
+	readers: Vec<track::Subscriber>,
+}
+
+async fn resume_overlap(readers: usize, retained: usize) -> ResumeOverlap {
+	let (producer, driver) = origin::Producer::new(origin::Config::default());
+	tokio::spawn(moq_net::time::run(driver));
+	let epoch = Epoch::mint();
+	let generation = |order: &mut dyn Iterator<Item = usize>| {
+		let broadcast = producer.create_broadcast(COPY_PATH).unwrap();
+		let track = broadcast.create_track("0", timed()).unwrap();
+		for sequence in order {
+			let mut group = track
+				.create_group(moq_net::group::Info {
+					sequence: sequence as u64,
+				})
+				.unwrap();
+			group.write_frame(Timestamp::ZERO, b"f".as_ref()).unwrap();
+			group.finish().unwrap();
+		}
+		(broadcast, track)
+	};
+	let (first, first_track) = generation(&mut (0..retained));
+	first
+		.announce(origin::Route::default().with_epoch(epoch.clone()))
+		.unwrap();
+	let resolved = tokio::time::timeout(COPY_WAIT, producer.consume().request_broadcast(COPY_PATH, None))
+		.await
+		.expect("front did not resolve")
+		.expect("front refused");
+	let track = resolved.track("0").unwrap();
+	// A budget covering every group, so none is written off as late.
+	let subscription = track::Subscription::default().with_max_delay(Duration::from_secs(3600));
+	let mut subscribers = Vec::with_capacity(readers);
+	for _ in 0..readers {
+		let subscriber = tokio::time::timeout(COPY_WAIT, track.subscribe(subscription.clone()))
+			.await
+			.expect("track did not splice")
+			.expect("subscribe failed");
+		subscribers.push(subscriber);
+	}
+	let (second, second_track) = generation(&mut (0..retained).rev());
+	second.announce(origin::Route::default().with_epoch(epoch)).unwrap();
+	tokio::time::timeout(COPY_WAIT, second_track.demand().used())
+		.await
+		.expect("route swap did not splice")
+		.expect("replacement track closed");
+	ResumeOverlap {
+		_producer: producer,
+		_generations: [first, second],
+		_tracks: [first_track, second_track],
+		readers: subscribers,
+	}
+}
+
+/// Readers draining a track whose two routes both delivered every group: each group
+/// is handed out once, and the copy still owed it remembers that until it is let go.
+/// The slope over retained groups is that bookkeeping's delivery cost.
+fn bench_resume_overlap(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/resume_overlap");
+	group.sample_size(10);
+	for (readers, retained) in RESUME_OVERLAP {
+		group.throughput(Throughput::Elements((readers * retained) as u64));
+		group.bench_function(BenchmarkId::from_parameter(format!("{readers}r_{retained}g")), |b| {
+			let runtime = tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.unwrap();
+			let waiter = kio::Waiter::noop();
+			b.iter_batched_ref(
+				|| runtime.block_on(resume_overlap(readers, retained)),
+				|rig| {
+					for reader in &mut rig.readers {
+						let mut delivered = 0;
+						while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {
+							delivered += 1;
+						}
+						assert_eq!(delivered, retained, "every group once");
+					}
+				},
+				BatchSize::PerIteration,
+			);
+		});
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_announce,
@@ -1145,6 +1243,7 @@ criterion_group!(
 	bench_narrow,
 	bench_relay,
 	bench_parked,
-	bench_copy_walk
+	bench_copy_walk,
+	bench_resume_overlap
 );
 criterion_main!(benches);
