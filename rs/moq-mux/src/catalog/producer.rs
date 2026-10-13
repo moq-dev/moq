@@ -362,11 +362,11 @@ impl<E: CatalogExt> Producer<E> {
 
 		// The broadcast clock is advertised at the catalog root from the first snapshot,
 		// independently of any archive timeline: a live-only publisher exposes its mapping
-		// without creating a segment index.
+		// without creating a segment index. A host with an unset wall clock advertises none.
 		let anchored = config.clock.is_some();
 		let clock = config.clock.unwrap_or_default();
 		let mut catalog = config.catalog;
-		catalog.clock = Some(clock.wall());
+		catalog.clock = clock.wall();
 
 		// The contents are `Send + Sync` natively; on wasm moq-net's handles are
 		// `Rc`-backed, so clippy sees a pointlessly atomic `Arc`. Keeping one type for
@@ -512,7 +512,7 @@ impl<E: CatalogExt> Producer<E> {
 		let offset = if guard.state.anchored {
 			let clock = guard.state.clock;
 			let at = match wall {
-				Some(wall) => clock.reading(wall),
+				Some(wall) => clock.reading(wall)?,
 				None => clock.now().as_micros() as i128,
 			};
 			super::Offset::from_micros(at - pts.as_micros() as i128)?
@@ -524,7 +524,7 @@ impl<E: CatalogExt> Producer<E> {
 			};
 			guard.state.clock = clock;
 			guard.state.anchored = true;
-			guard.clock = Some(clock.wall());
+			guard.clock = clock.wall();
 			super::Offset::default()
 		};
 
@@ -1541,7 +1541,7 @@ mod test {
 		// A live-only broadcast exposes its clock without creating a segment index.
 		let snapshot = catalog.snapshot();
 		assert_eq!(snapshot.archive, None);
-		assert_eq!(snapshot.clock, Some(catalog.clock().wall()));
+		assert_eq!(snapshot.clock, catalog.clock().wall());
 	}
 
 	/// How far `pts` lands from `clock`'s reading now, which is zero for a frame live on arrival.
@@ -1592,7 +1592,7 @@ mod test {
 			"the first timebase stays verbatim"
 		);
 		let clock = catalog.clock();
-		assert_eq!(catalog.snapshot().clock, Some(clock.wall()), "the anchor is advertised");
+		assert_eq!(catalog.snapshot().clock, clock.wall(), "the anchor is advertised");
 		let drift = clock
 			.wall_clock(first)
 			.unwrap()
@@ -1681,7 +1681,7 @@ mod test {
 			"it placed the clock, so it stays verbatim"
 		);
 		let placed = catalog.clock();
-		assert_eq!(placed.reading(wall), pts.as_micros() as i128);
+		assert_eq!(placed.reading(wall).unwrap(), pts.as_micros() as i128);
 
 		// Placed again on the now fixed clock, the same mapping shifts by nothing.
 		let again = catalog.timebase();
@@ -1692,6 +1692,65 @@ mod test {
 		// A timebase that already anchored keeps its offset.
 		assert!(matches!(
 			timebase.place(pts, wall),
+			Err(crate::Error::UnmappableTimestamp(_))
+		));
+	}
+
+	/// A host whose wall clock reads before 2020 (booted before NTP sync) publishes its media on the
+	/// monotonic timeline with no root `clock`, rather than advertise a false one. Placing a source's
+	/// wall time is refused, whether it would place the clock or offset onto it.
+	#[test]
+	fn an_unset_host_clock_publishes_without_a_wall() {
+		use std::time::{Duration, SystemTime};
+
+		crate::clock::fake_host_wall(SystemTime::UNIX_EPOCH + Duration::from_secs(86_400));
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		assert_eq!(catalog.snapshot().clock, None);
+
+		let wall = SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS);
+		let pts = moq_net::Timestamp::from_micros(1_000_000).unwrap();
+		assert!(matches!(
+			catalog.timebase().place(pts, wall),
+			Err(crate::Error::UnmappableTimestamp(_))
+		));
+
+		let net = broadcast
+			.create_track("video0", catalog.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut video = catalog
+			.video(
+				net,
+				crate::catalog::hang::Container::Legacy(crate::container::Kind::Video),
+				VideoConfig::new(hang::catalog::VideoCodec::VP8),
+			)
+			.unwrap();
+		let mut subscriber = video.consume();
+		let timestamp = catalog.timestamp(None).unwrap();
+		video
+			.write(crate::container::Frame {
+				timestamp,
+				duration: None,
+				payload: Bytes::from_static(b"keyframe"),
+				keyframe: true,
+			})
+			.unwrap();
+
+		let snapshot = catalog.snapshot();
+		assert!(snapshot.video.renditions.contains_key("video0"));
+		assert_eq!(snapshot.clock, None, "publishing never invents a wall");
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_recv_group(&waiter) else {
+			panic!("the frame's group is published");
+		};
+		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+			panic!("the frame is published");
+		};
+		assert_eq!(frame.timestamp, Some(timestamp));
+
+		// The catalog clock is fixed now, and has no wall to offset a placement onto.
+		assert!(matches!(
+			catalog.timebase().place(pts, wall),
 			Err(crate::Error::UnmappableTimestamp(_))
 		));
 	}
