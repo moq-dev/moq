@@ -41,14 +41,8 @@ and bench readiness. Refusal reasons folded the same day into
 - [Windows decoded frames](/quest/m2/obs-decode-windows.md) - present decoded D3D11 surfaces in OBS without CPU readback
 - [macOS GPU input](/quest/m2/obs-macos.md) - feed the encoder from the OBS compositor without CPU readback
 - [Windows GPU input](/quest/m2/obs-windows.md) - import or blit OBS D3D11 textures with explicit synchronization
-- [rs2ts model support](/quest/m2/rs2ts-model-support.md) - rs2ts translates kio and the model's Drop, Arc, Weak, atomics, and collections; moves to the rs2ts repo once it exists
-- [Generated model](/quest/m2/rs2ts-model.md) - @moq/net's model layer and kio are generated from moq-net
-- [Sans-IO lite session](/quest/m2/rs2ts-sans-io-lite.md) - the lite session is driven by bytes, stream events, and `tick(now)`, once the generated model works
-- [Generated lite session](/quest/m2/rs2ts-session.md) - @moq/net's lite session is generated over the generated model
-- [Remove moq-wasm](/quest/m2/rs2ts-remove-wasm.md) - the WASM experiment is deleted once generated lite ships
-- [Sans-IO IETF session](/quest/m2/rs2ts-sans-io-ietf.md) - the moq-transport session is driven by bytes and tick(now), so it can translate
-- [IETF parameters](/quest/m2/rs2ts-ietf-params.md) - the IETF codec drops its `Param` trait on primitives, so it translates like lite
-- [Generated IETF](/quest/m2/rs2ts-ietf.md) - @moq/net's moq-transport session is generated too
+- [WASM-to-JS evaluation](/quest/m2/rs2ts-wasm2js.md) - try the production Rust browser implementation as JS-only output and compare source-translator alternatives if needed
+- [JS-only @moq/net](/quest/m2/rs2ts-js.md) - adopt the selected Rust-to-JS route after browser parity and measured tradeoffs are accepted
 - [Per-stream deadlines](/quest/m2/quic-deadline.md) - hopeless retransmits
   become resets, and a tail loss probe fires early while there is still time
 - [qmux on the QUIC stream state machine](/quest/m2/quic-qmux.md) - qmux is a
@@ -69,7 +63,7 @@ and bench readiness. Refusal reasons folded the same day into
 - [Send depth](/quest/m2/send-depth.md) - moq-net futures prove Send at the default recursion limit, so downstream crates see no nightly lint
 - [Bench coverage](/quest/m2/bench-coverage.md) - Criterion targets for moq-pattern matching first, then moq-mux containers
 - [Browser benchmarks](/quest/m2/browser-benchmarks.md) - measure JS transport, container, decode, and render costs in an identified browser
-- [Generated lite browser report](/quest/m2/rs2ts-browser-report.md) - compare generated and hand-written js/net on bundle size, per-frame CPU, and first-frame latency
+- [Browser media report](/quest/m2/rs2ts-browser-report.md) - compare Rust-backed and handwritten @moq/net through full media workloads, supplementing the pre-adoption comparisons
 - [mTLS on tls://](/quest/m2/tls-listener-mtls.md) - a `tls://` listener can identify a cluster peer by its client certificate
 - [Link quality](/quest/m2/link-quality.md) - a radio link's cost follows its measured quality without flapping routes
 - [One transport adapter](/quest/m2/transport-adapter-dedup.md) - the poll transport adapter exists once, and the 64 KiB cap in moq-net's default `poll_read_buf` (not in the adapter) has a test

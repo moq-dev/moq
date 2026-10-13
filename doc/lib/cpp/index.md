@@ -115,7 +115,9 @@ ok(audio->write_frame({packet, 20'000}));
 moq::VideoEncoderOutput output{moq::VideoCodec::kH264, "camera", std::nullopt, std::nullopt, moq::VideoEncoderKind::kAuto{}};
 auto video = ok(broadcast->encode_video({moq::VideoPixelFormat::kRgba, 1280, 720, 30}, output, nullptr));
 ok(video->write({0, rgba}));
-ok(broadcast->announce({}));
+moq::Route route;
+route.epoch = moq::mint_epoch(); // a fresh epoch per run
+ok(broadcast->announce(route));
 ok(broadcast->close());    // keep the producer alive while publishing, then close explicitly
 ```
 

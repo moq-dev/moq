@@ -49,6 +49,12 @@ use moq_net::Timestamp;
 /// fails is dropped and counted in [`stats::Snapshot::crc_error`]; the last good table stays
 /// in force.
 ///
+/// With the `mpegts` catalog extension, the initial catalog waits for a two-second PCR
+/// measurement window. This hold applies to every subscriber of the broadcast.
+/// A variable-rate window publishes without a rate, as does four seconds of media without a
+/// complete PCR window; EOF releases a shorter input too.
+/// Imports without that extension do not wait for a rate measurement.
+///
 /// The selected container applies only to decoded media renditions. Verbatim tracks in the
 /// `mpegts` catalog section continue to use the legacy Hang container.
 pub struct Import<E: catalog::Catalog = ()> {
@@ -61,6 +67,14 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// final. A one-shot muxer (fMP4, TS re-export) sees the complete track list in the first
 	/// snapshot rather than a half-converged one. See [`Reserved`](crate::catalog::Reserved).
 	initial_reservation: Option<crate::catalog::Reserved<E>>,
+	/// Hold the whole catalog until one PCR measurement window completes, or enough media time
+	/// passes without one, independently of decoder readiness.
+	mux_rate_reservation: Option<crate::catalog::Reserved<E>>,
+	/// Media time seen while that hold is active, summed across time-base breaks so a source
+	/// that keeps resetting its clock still reaches the bound.
+	held: std::time::Duration,
+	/// The newest 90 kHz PTS of the current time base counted into `held`.
+	held_edge: Option<u64>,
 
 	/// The program's timestamp base: the first PES with a PTS anchors it, and every PTS shifts by
 	/// its offset onto the catalog clock.
@@ -157,12 +171,16 @@ impl<E: catalog::Catalog> Import<E> {
 		let mut snapshot = catalog.snapshot();
 		let supports_mpegts = snapshot.ext.mpegts_mut().is_some();
 		let si = super::si::Capture::new(broadcast.clone(), catalog.clone());
+		let mux_rate_reservation = supports_mpegts.then(|| reserved.clone());
 		Self {
 			broadcast,
 			catalog,
 			container,
 			timebase: reserved.timebase(),
 			initial_reservation: Some(reserved),
+			mux_rate_reservation,
+			held: std::time::Duration::ZERO,
+			held_edge: None,
 			pat: PatReader::default(),
 			pmt_sections: HashMap::new(),
 			crc_errors: BTreeMap::new(),
@@ -285,8 +303,17 @@ impl<E: catalog::Catalog> Import<E> {
 					if let Some(now) = self.liveness.now() {
 						self.health.tick(now);
 					}
-					if self.supports_mpegts && self.mux_rate.pcr(pcr) {
-						self.record_mux_rate()?;
+					if self.supports_mpegts {
+						let ready = self.mux_rate.ready();
+						if self.mux_rate.pcr(pcr) {
+							self.record_mux_rate()?;
+						}
+						if self.mux_rate.ready() {
+							self.mux_rate_reservation = None;
+						} else if ready {
+							// A backwards clock voided the measurement.
+							self.rearm_mux_rate();
+						}
 					}
 				}
 			}
@@ -403,9 +430,7 @@ impl<E: catalog::Catalog> Import<E> {
 			self.health.pcr_pid(pmt.pcr_pid.map(|pid| pid.as_u16()));
 			// A new clock: the intervals straddling the switch measure nothing.
 			self.liveness.discontinuity();
-			if self.mux_rate.discontinuity() {
-				self.record_mux_rate()?;
-			}
+			self.reset_mux_rate()?;
 		}
 
 		// SCTE-35 is announced by a program-level registration descriptor with
@@ -688,6 +713,9 @@ impl<E: catalog::Catalog> Import<E> {
 		// rather than its flush keeps the section clock below on the same offset as the media.
 		let offset = match pes.pts {
 			Some(pts) => {
+				if self.mux_rate_reservation.is_some() {
+					self.hold_media(pts);
+				}
 				let pts = Timestamp::from_scale(pts, 90_000)?;
 				let offset = self.timebase.anchor(pts)?;
 				if self.start_pts.is_none() {
@@ -848,6 +876,8 @@ impl<E: catalog::Catalog> Import<E> {
 	/// PCR/PTS rollover sets nothing and is unwrapped rather than reset; neither is a program
 	/// break and neither reaches here.
 	fn timebase_break(&mut self) -> anyhow::Result<()> {
+		// First, so the salvage below cannot publish the first catalog with the old clock's rate.
+		self.rearm_mux_rate();
 		// The bytes still accumulating belong to the old clock, and their continuation is
 		// stamped on the new one, so cut every PES here rather than splicing across. This
 		// runs before the marker so a salvaged tail lands in the closing group, which the
@@ -865,6 +895,7 @@ impl<E: catalog::Catalog> Import<E> {
 		self.media_unwrap.discontinuity();
 		self.last_pts = None;
 		self.start_pts = None;
+		self.held_edge = None;
 		self.published = false;
 		self.liveness.discontinuity();
 		if self.mux_rate.discontinuity() {
@@ -872,6 +903,43 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		tracing::debug!("MPEG-TS system time-base discontinuity");
 		Ok(())
+	}
+
+	/// The program clock changed, so the measured rate no longer holds.
+	fn reset_mux_rate(&mut self) -> anyhow::Result<()> {
+		self.rearm_mux_rate();
+		if self.mux_rate.discontinuity() {
+			self.record_mux_rate()?;
+		}
+		Ok(())
+	}
+
+	/// A clock change voids the startup measurement, so until the first catalog publishes
+	/// (while the initial reservation still holds it), hold it again for a window on the new
+	/// clock.
+	fn rearm_mux_rate(&mut self) {
+		if self.supports_mpegts && self.mux_rate_reservation.is_none() {
+			self.mux_rate_reservation = self.initial_reservation.clone();
+		}
+	}
+
+	/// Count `pts` toward the startup hold. A source without a usable PCR never completes a
+	/// measurement window, so enough media time releases its catalog without a rate.
+	fn hold_media(&mut self, pts: u64) {
+		const WRAP: u64 = 1 << 33;
+		if let Some(edge) = self.held_edge {
+			// Modulo the 33-bit wrap, so the hold counts across a rollover. A step past half the
+			// range is a frame behind the edge (reordered, or another stream), not a jump forward.
+			let step = pts.wrapping_sub(edge) % WRAP;
+			if step >= WRAP / 2 {
+				return;
+			}
+			self.held += std::time::Duration::from_nanos(step * 1_000_000_000 / 90_000);
+		}
+		self.held_edge = Some(pts);
+		if self.held >= super::mux_rate::UNMEASURED {
+			self.mux_rate_reservation = None;
+		}
 	}
 
 	/// Copy the measured multiplex rate into the `mpegts` section, publishing the
@@ -993,7 +1061,8 @@ impl<E: catalog::Catalog> Import<E> {
 		for pid in pids {
 			self.flush(pid)?;
 		}
-		// No frame follows to anchor the clock, so publish the declared track set now.
+		// EOF releases an unmeasured short source as well as its decoder reservations.
+		self.mux_rate_reservation = None;
 		self.initial_reservation = None;
 		self.release_sections(self.timebase.offset().unwrap_or_default())?;
 		for (pid, stream) in &mut self.streams {
@@ -5947,10 +6016,9 @@ pub(super) mod test {
 		assert_eq!(&frame.payload[..], &payload[..], "verbatim PES payload round-trips");
 	}
 
-	/// A program of only verbatim PIDs reserves no rendition, so the held reservation alone keeps
-	/// its PMT from publishing the catalog before the first PES anchors the clock.
+	/// A verbatim-only program retains the PES clock while waiting for rate measurement or EOF.
 	#[tokio::test]
-	async fn verbatim_only_program_publishes_at_the_first_pes() {
+	async fn verbatim_only_program_retains_its_pes_clock_until_catalog_release() {
 		use crate::catalog::hang::Catalog;
 		use crate::container::ts::catalog::Ext;
 
@@ -5978,12 +6046,11 @@ pub(super) mod test {
 			.unwrap();
 		let anchored = catalog.snapshot().clock.expect("a clock");
 		assert_ne!(anchored, provisional, "the first PES anchors the clock");
-		let published = clocks.drain();
-		assert!(!published.is_empty(), "the first PES publishes the catalog");
-		assert!(published.iter().all(|clock| *clock == Some(anchored)), "{published:?}");
-
+		assert!(clocks.drain().is_empty(), "rate measurement still holds the catalog");
 		import.finish().unwrap();
-		assert!(clocks.drain().iter().all(|clock| *clock == Some(anchored)));
+		let published = clocks.drain();
+		assert!(!published.is_empty(), "EOF releases a program without PCR samples");
+		assert!(published.iter().all(|clock| *clock == Some(anchored)), "{published:?}");
 	}
 
 	/// A TS packet on `pid` carrying only an adaptation field (no payload) that sets
@@ -7395,6 +7462,216 @@ pub(super) mod test {
 		];
 		p.resize(188, 0xff);
 		p
+	}
+
+	#[test]
+	fn first_ts_catalog_waits_for_the_mux_rate_window() {
+		use crate::catalog::hang::Catalog;
+		use crate::container::ts::catalog::Ext;
+
+		for cbr in [true, false] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = crate::catalog::Producer::new(
+				&mut broadcast,
+				crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+			)
+			.unwrap();
+			let mut updates = catalog.consume().unwrap();
+			let mut import = super::Import::new(broadcast, catalog.reserve());
+			import
+				.decode(&synth_pmt(&[(StreamType::Mpeg2Video, PCR_PID)], false))
+				.unwrap();
+			import.decode(&pes_packet(PCR_PID, 90_000)).unwrap();
+			let waiter = kio::Waiter::noop();
+			assert!(
+				updates.poll_next(&waiter).is_pending(),
+				"catalog preceded rate measurement"
+			);
+
+			for i in 0..=50 {
+				let mut bytes = pcr_packet(PCR_PID, i * 27_000_000 / 25);
+				let stuffing = if cbr || i < 25 { 99 } else { 19 };
+				for _ in 0..stuffing {
+					bytes.extend_from_slice(&super::super::export::NULL_PACKET);
+				}
+				import.decode(&bytes).unwrap();
+				if i < 50 {
+					assert!(
+						updates.poll_next(&waiter).is_pending(),
+						"catalog before a full PCR window"
+					);
+				}
+			}
+			let std::task::Poll::Ready(Ok(Some(first))) = updates.poll_next(&waiter) else {
+				panic!("catalog did not release at the end of the first window");
+			};
+			assert_eq!(first.ext.mpegts.mux_rate, cbr.then_some(3_760_000));
+		}
+	}
+
+	/// A live source with no PCR never completes a window, so media time releases its catalog.
+	#[test]
+	fn a_ts_without_pcr_releases_its_catalog_after_four_seconds_of_media() {
+		use crate::catalog::hang::Catalog;
+		use crate::container::ts::catalog::Ext;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut updates = catalog.consume().unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import
+			.decode(&synth_pmt(&[(StreamType::Mpeg2Video, PCR_PID)], false))
+			.unwrap();
+		let waiter = kio::Waiter::noop();
+		for frame in 0..100 {
+			import.decode(&pes_packet(PCR_PID, 90_000 + frame * 3_600)).unwrap();
+			assert!(updates.poll_next(&waiter).is_pending(), "catalog after frame {frame}");
+		}
+		import.decode(&pes_packet(PCR_PID, 90_000 + 100 * 3_600)).unwrap();
+		let std::task::Poll::Ready(Ok(Some(first))) = updates.poll_next(&waiter) else {
+			panic!("four seconds of media did not release the catalog");
+		};
+		assert_eq!(first.ext.mpegts.mux_rate, None);
+	}
+
+	/// A source whose clock keeps resetting before a window completes still releases its
+	/// catalog once enough media time has passed in total.
+	#[test]
+	fn a_ts_resetting_its_clock_releases_its_catalog_after_four_seconds_of_media() {
+		use crate::catalog::hang::Catalog;
+		use crate::container::ts::catalog::Ext;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut updates = catalog.consume().unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import
+			.decode(&synth_pmt(&[(StreamType::Mpeg2Video, PCR_PID)], false))
+			.unwrap();
+		let waiter = kio::Waiter::noop();
+		// Each epoch carries 0.96 s of media, then a flagged PCR restarts the clock.
+		for epoch in 0..6 {
+			for frame in 0..25 {
+				import.decode(&pes_packet(PCR_PID, 90_000 + frame * 3_600)).unwrap();
+			}
+			import.decode(&flag_discontinuity(pcr_packet(PCR_PID, 0))).unwrap();
+			let released = updates.poll_next(&waiter).is_ready();
+			assert_eq!(released, epoch >= 4, "released after epoch {epoch}");
+			if released {
+				return;
+			}
+		}
+		unreachable!();
+	}
+
+	/// A clock break after a measured window but before the first catalog publishes voids the
+	/// measurement, so the catalog waits for a window on the new clock and carries its rate.
+	#[test]
+	fn a_break_before_the_first_catalog_waits_for_a_new_window() {
+		use crate::catalog::hang::Catalog;
+		use crate::container::ts::catalog::Ext;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut updates = catalog.consume().unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import
+			.decode(&synth_pmt(&[(StreamType::Mpeg2Video, PCR_PID)], false))
+			.unwrap();
+		let window = |import: &mut super::Import<Ext>, stuffing: usize| {
+			for i in 0..=50 {
+				let mut bytes = pcr_packet(PCR_PID, i * 27_000_000 / 25);
+				for _ in 0..stuffing {
+					bytes.extend_from_slice(&super::super::export::NULL_PACKET);
+				}
+				import.decode(&bytes).unwrap();
+			}
+		};
+		let waiter = kio::Waiter::noop();
+
+		// A full window before any PES, then a break, then the first PES.
+		window(&mut import, 99);
+		import.decode(&flag_discontinuity(pcr_packet(PCR_PID, 0))).unwrap();
+		import.decode(&pes_packet(PCR_PID, 90_000)).unwrap();
+		assert!(
+			updates.poll_next(&waiter).is_pending(),
+			"the catalog published on a voided measurement"
+		);
+
+		window(&mut import, 49);
+		let std::task::Poll::Ready(Ok(Some(first))) = updates.poll_next(&waiter) else {
+			panic!("the new clock's window did not release the catalog");
+		};
+		assert_eq!(first.ext.mpegts.mux_rate, Some(1_880_000));
+	}
+
+	/// The hold counts media time across a 33-bit PTS rollover.
+	#[test]
+	fn a_ts_without_pcr_releases_its_catalog_across_a_pts_rollover() {
+		use crate::catalog::hang::Catalog;
+		use crate::container::ts::catalog::Ext;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut updates = catalog.consume().unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import
+			.decode(&synth_pmt(&[(StreamType::Mpeg2Video, PCR_PID)], false))
+			.unwrap();
+		let waiter = kio::Waiter::noop();
+		// Starts two seconds before the rollover.
+		let start = (1 << 33) - 180_000;
+		for frame in 0..100 {
+			import
+				.decode(&pes_packet(PCR_PID, (start + frame * 3_600) % (1 << 33)))
+				.unwrap();
+			assert!(updates.poll_next(&waiter).is_pending(), "catalog after frame {frame}");
+		}
+		import
+			.decode(&pes_packet(PCR_PID, (start + 100 * 3_600) % (1 << 33)))
+			.unwrap();
+		assert!(
+			updates.poll_next(&waiter).is_ready(),
+			"four seconds across the rollover did not release the catalog"
+		);
+	}
+
+	#[test]
+	fn finishing_a_short_ts_releases_its_catalog_without_a_rate() {
+		use crate::catalog::hang::Catalog;
+		use crate::container::ts::catalog::Ext;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut updates = catalog.consume().unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import
+			.decode(&synth_pmt(&[(StreamType::Mpeg2Video, PCR_PID)], false))
+			.unwrap();
+		import.decode(&pes_packet(PCR_PID, 90_000)).unwrap();
+		import.decode(&pcr_packet(PCR_PID, 0)).unwrap();
+		let waiter = kio::Waiter::noop();
+		assert!(updates.poll_next(&waiter).is_pending());
+		import.finish().unwrap();
+		let std::task::Poll::Ready(Ok(Some(first))) = updates.poll_next(&waiter) else {
+			panic!("short recording finished without a catalog");
+		};
+		assert_eq!(first.ext.mpegts.mux_rate, None);
 	}
 
 	/// The catalog follows the clock: a stable multiplex rate is recorded, a source that

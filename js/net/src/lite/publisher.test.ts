@@ -1182,7 +1182,7 @@ test("lite draft-07: subscribe end waits for groups below a declared finish", as
 		first.writeFrame(textFrame("hello"));
 		first.close();
 		track.writeGroup(first);
-		track.finishAt(2);
+		track.finishAt({ group: 2, frame: 0 });
 
 		const start = await decodeSubscribeResponse(client.reader, Version.DRAFT_07);
 		expect("start" in start).toBe(true);

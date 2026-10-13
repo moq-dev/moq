@@ -86,7 +86,8 @@ test("fetch refusal codes follow each draft registry", () => {
 test("only registered codes reach the wire", () => {
 	for (const version of ALL) {
 		for (const kind of KINDS) {
-			for (const condition of CONDITIONS) {
+			// Sent but never read back as itself, so it stays out of the round trip.
+			for (const condition of [...CONDITIONS, "malformed_auth_token" as const]) {
 				const code = toRequestCode(condition, kind, version);
 				expect(registered(kind, version)).toContain(code);
 			}
@@ -102,6 +103,19 @@ test("every emitted code round trips", () => {
 				const decoded = fromRequestCode(code, kind, version) ?? "internal";
 				expect(toRequestCode(decoded, kind, version)).toBe(code);
 			}
+		}
+	}
+});
+
+/**
+ * Draft-15 swapped MALFORMED_AUTH_TOKEN and the missing-track code, and draft-14 gives
+ * PUBLISH_ERROR no value for it.
+ */
+test("a malformed token uses the draft's own number", () => {
+	for (const kind of KINDS) {
+		expect(toRequestCode("malformed_auth_token", kind, Version.DRAFT_14)).toBe(kind === "publish" ? 0x0 : 0x10);
+		for (const version of ALL.slice(1)) {
+			expect(toRequestCode("malformed_auth_token", kind, version)).toBe(0x4);
 		}
 	}
 });

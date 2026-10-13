@@ -8,6 +8,11 @@ use std::time::Duration;
 use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
 	support::harness::spawn(driver);
@@ -20,7 +25,7 @@ async fn after_abort(version: &str, hops: u32) {
 	let relay = produce_origin(2);
 	let far = produce_origin(3);
 	let broadcast = publisher.create_broadcast("bench").unwrap();
-	let track = broadcast.create_track("video", None).unwrap();
+	let track = broadcast.create_track("video", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
 	options.server_publish = Some(publisher.consume());
@@ -74,7 +79,7 @@ async fn recreate(finish: bool) {
 	broadcast
 		.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
 		.unwrap();
-	let track = broadcast.create_track("video", None).unwrap();
+	let track = broadcast.create_track("video", timed()).unwrap();
 	let remote = origin.consume().request_broadcast("bench", None).await.unwrap();
 	let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut open = track.create_group(moq_net::group::Info { sequence: 2 }).unwrap();
@@ -83,7 +88,7 @@ async fn recreate(finish: bool) {
 	assert_eq!(group.sequence, 2);
 	group.read_frame().await.unwrap().unwrap();
 	track.abort(moq_net::Error::Cancel).unwrap();
-	let fresh = broadcast.create_track("video", None).unwrap();
+	let fresh = broadcast.create_track("video", timed()).unwrap();
 	let mut next = fresh.create_group(moq_net::group::Info { sequence: 3 }).unwrap();
 	next.write_frame(Timestamp::from_millis(1).unwrap(), b"next".as_ref())
 		.unwrap();

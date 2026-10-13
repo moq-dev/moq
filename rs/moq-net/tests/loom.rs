@@ -28,6 +28,11 @@ use bytes::Bytes;
 use loom::{future::block_on, thread};
 use moq_net::{Error, Hop, Timestamp, broadcast, cache, origin};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 /// Preemptions per execution unless `LOOM_MAX_PREEMPTIONS` overrides it. Loom's own
 /// guidance is that 2 or 3 catches most bugs, and each extra level multiplies the
 /// search several times over. Unbounded, `back_to_back_groups_arrive_in_order` no
@@ -49,7 +54,7 @@ fn frame_reaches_a_parked_subscriber() {
 	model(|| {
 		let broadcast = broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let track = broadcast.create_track("video", None).expect("create track");
+		let track = broadcast.create_track("video", timed()).expect("create track");
 		let track_consumer = consumer.track("video").expect("track");
 
 		let publisher = thread::spawn(move || {
@@ -340,7 +345,7 @@ fn concurrent_tracks_drain_a_shared_pool() {
 		let handles: Vec<_> = ["video", "audio"]
 			.into_iter()
 			.map(|name| {
-				let track = broadcast.create_track(name, None).expect("create track");
+				let track = broadcast.create_track(name, timed()).expect("create track");
 				thread::spawn(move || {
 					let mut group = track.append_group().expect("append group");
 					group

@@ -51,7 +51,7 @@ public:
 	};
 	bool TryGetConnectionStats(ConnectionStats *out);
 
-	// Successful (re)connects after the first for this Start(); 0 until epoch >= 2.
+	// Successful (re)connects after the first for this Start(); 0 until connects() >= 2.
 	int GetReconnectCount();
 
 	// True while the current Start() attempt has an open MoQ session.

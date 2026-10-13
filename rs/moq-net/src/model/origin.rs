@@ -5338,7 +5338,7 @@ mod tests {
 	fn a_finished_logical_track_does_not_warn() {
 		let warns = count_drop_warnings("track::Producer dropped without finish", || {
 			let broadcast = Arc::new(broadcast::Info::default());
-			let source = track::Producer::new(broadcast.clone(), "catalog.json", None);
+			let source = track::Producer::new(broadcast.clone(), "catalog.json", crate::track::Info::timed());
 			let mut group = source.create_group(7u64.into()).unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"snapshot".as_ref()).unwrap();
 			group.finish().unwrap();
@@ -6717,7 +6717,7 @@ mod tests {
 		broadcast.unannounce();
 		settle(|| resolved.is_closed()).await;
 
-		let source = request.accept(None);
+		let source = request.accept(crate::track::Info::timed());
 		let mut group = source.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"late".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -6758,7 +6758,7 @@ mod tests {
 			.await
 			.expect("the front asked the source")
 			.expect("request");
-		let source = request.resolving_start().accept(None);
+		let source = request.resolving_start().accept(crate::track::Info::timed());
 		let mut group = source.create_group(0u64.into()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"snapshot".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -6817,7 +6817,7 @@ mod tests {
 			.dynamic("room", Route::default().with_hops(hops(&[10])))
 			.unwrap();
 		let upstream = broadcast::Info::new().produce();
-		let source = upstream.create_track("video", None).unwrap();
+		let source = upstream.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = source.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"live".as_ref()).unwrap();
 
@@ -6895,7 +6895,7 @@ mod tests {
 			.dynamic("room", Route::default().with_hops(hops(&[10])))
 			.unwrap();
 		let upstream = broadcast::Info::new().produce();
-		let source = upstream.create_track("video", None).unwrap();
+		let source = upstream.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = source.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"live".as_ref()).unwrap();
 		let fronts = || producer.shared.lock().fronts.len();
@@ -7025,7 +7025,7 @@ mod tests {
 			.dynamic("room", Route::default().with_hops(hops(&[10, 7])).with_cost(100))
 			.unwrap();
 		let upstream = broadcast::Info::new().produce();
-		let source = upstream.create_track("video", None).unwrap();
+		let source = upstream.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = source.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"live".as_ref()).unwrap();
 		let fronts = || producer.shared.lock().fronts.len();
@@ -7118,7 +7118,11 @@ mod tests {
 		// A reader is mid-way through the open group when the route changes.
 		let track = resolved.track("log").unwrap();
 		let subscribing = moq_net_sim::spawn(async move { track.subscribe(None).await });
-		let source = dynamic.requested_track().await.unwrap().accept(None);
+		let source = dynamic
+			.requested_track()
+			.await
+			.unwrap()
+			.accept(crate::track::Info::timed());
 		let mut group = source.create_group(0u64.into()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"a".as_ref()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"b".as_ref()).unwrap();
@@ -7166,14 +7170,14 @@ mod tests {
 		let serving = fetched.clone();
 		let _fetching = moq_net_sim::spawn(async move {
 			while let Ok(request) = fetches.requested_group().await {
-				let mut group = request.accept(None).unwrap();
+				let mut group = request.accept(crate::track::Info::timed()).unwrap();
 				for frame in [b"a", b"b", b"c"] {
 					group.write_frame(crate::Timestamp::ZERO, frame.as_ref()).unwrap();
 				}
 				serving.lock().unwrap().push(group);
 			}
 		});
-		let mut next = request.resolving_start().accept(None);
+		let mut next = request.resolving_start().accept(crate::track::Info::timed());
 		next.start_at(0).unwrap();
 		let mut next_group = next.create_group(0u64.into()).unwrap();
 		next_group.start_at(2).unwrap();
@@ -7266,7 +7270,7 @@ mod tests {
 			.await
 			.expect("the front asked the source")
 			.expect("request");
-		let source = request.accept(None);
+		let source = request.accept(crate::track::Info::timed());
 		let mut group = source.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"cached".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -7292,7 +7296,7 @@ mod tests {
 		settle(|| resolved.is_closed()).await;
 
 		// A fresh source copy numbers groups past what the cache already delivered.
-		let source = request.accept(None);
+		let source = request.accept(crate::track::Info::timed());
 		let mut group = source.create_group(1u64.into()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"late".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -8261,7 +8265,7 @@ mod tests {
 
 		let source = broadcast::Info::new().produce();
 		for name in ["a", "b"] {
-			let track = source.create_track(name, None).unwrap();
+			let track = source.create_track(name, crate::track::Info::timed()).unwrap();
 			let mut group = track.append_group().unwrap();
 			group.write_frame(crate::Timestamp::ZERO, name.as_bytes()).unwrap();
 			group.finish().unwrap();
@@ -8485,7 +8489,7 @@ mod tests {
 			let pending = consumer.request_broadcast("room/alice", None);
 			let request = queued(&server).await;
 			let source = broadcast::Info::new().produce();
-			let track = source.create_track("video", None).unwrap();
+			let track = source.create_track("video", crate::track::Info::timed()).unwrap();
 			let mut group = track.append_group().unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
 			group.finish().unwrap();
@@ -8534,7 +8538,7 @@ mod tests {
 	async fn assert_resumes(rig: &mut ResumeRig, server: &Dynamic) {
 		let request = queued(server).await;
 		let replacement = broadcast::Info::new().produce();
-		let track = replacement.create_track("video", None).unwrap();
+		let track = replacement.create_track("video", crate::track::Info::timed()).unwrap();
 		// The same content: group 0 was already delivered through the old route,
 		// so the track resumes at group 1.
 		let mut group = track.append_group().unwrap();
@@ -8577,7 +8581,7 @@ mod tests {
 			.unwrap();
 		let pending = consumer.request_broadcast("room/alice", None);
 		let source = broadcast::Info::new().produce();
-		let track = source.create_track("video", None).unwrap();
+		let track = source.create_track("video", crate::track::Info::timed()).unwrap();
 		queued(&first).await.accept(&source);
 		let resolved = pending.await.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
@@ -8614,7 +8618,7 @@ mod tests {
 				Route::default().with_epoch(crate::Epoch::mint()).with_cost(1),
 			)
 			.unwrap();
-		let old_track = old.create_track("video", None).unwrap();
+		let old_track = old.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		deliver(&old_track, &mut subscription, b"old").await;
@@ -8625,7 +8629,7 @@ mod tests {
 				Route::default().with_epoch(crate::Epoch::mint()).with_cost(9),
 			)
 			.unwrap();
-		let new_track = new.create_track("video", None).unwrap();
+		let new_track = new.create_track("video", crate::track::Info::timed()).unwrap();
 		deliver(&old_track, &mut subscription, b"sticky").await;
 
 		let replaced = consumer.request_broadcast("room/alice", None).await.expect("resolves");
@@ -8655,7 +8659,7 @@ mod tests {
 		let old = producer
 			.publish("room/alice", Route::default().with_epoch(first.clone()))
 			.unwrap();
-		let _old_track = old.create_track("video", None).unwrap();
+		let _old_track = old.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		assert_eq!(
 			resolved.info().epoch.as_ref(),
@@ -8667,7 +8671,7 @@ mod tests {
 		let new = producer
 			.publish("room/alice", Route::default().with_epoch(epoch.clone()))
 			.unwrap();
-		let new_track = new.create_track("video", None).unwrap();
+		let new_track = new.create_track("video", crate::track::Info::timed()).unwrap();
 		let named = consumer.request_broadcast("room/alice", epoch.clone());
 		let bare = consumer.request_broadcast("room/alice", None);
 
@@ -8704,9 +8708,9 @@ mod tests {
 		let new = producer
 			.publish("room/alice", Route::default().with_epoch(crate::Epoch::mint()))
 			.unwrap();
-		let new_track = new.create_track("video", None).unwrap();
+		let new_track = new.create_track("video", crate::track::Info::timed()).unwrap();
 		let stale = broadcast::Info::new().produce();
-		let _stale_track = stale.create_track("video", None).unwrap();
+		let _stale_track = stale.create_track("video", crate::track::Info::timed()).unwrap();
 		request.accept(&stale);
 
 		let resolved = pending.await.expect("resolves the winner");
@@ -8731,7 +8735,7 @@ mod tests {
 		let request = queued(&dynamic).await;
 
 		let stale = broadcast::Info::new().produce();
-		let _stale_track = stale.create_track("video", None).unwrap();
+		let _stale_track = stale.create_track("video", crate::track::Info::timed()).unwrap();
 		let epoch = crate::Epoch::mint();
 		if answer_first {
 			request.accept(&stale);
@@ -8743,7 +8747,7 @@ mod tests {
 
 		let request = queued(&dynamic).await;
 		let fresh = broadcast::Info::new().produce();
-		let fresh_track = fresh.create_track("video", None).unwrap();
+		let fresh_track = fresh.create_track("video", crate::track::Info::timed()).unwrap();
 		request.accept(&fresh);
 		let resolved = pending.await.expect("the request carries over to the new instance");
 		assert_eq!(resolved.info().epoch.as_ref(), Some(&epoch));
@@ -8785,7 +8789,7 @@ mod tests {
 		dynamic.update(dynamic.route().with_epoch(epoch.clone())).unwrap();
 
 		let fresh = broadcast::Info::new().produce();
-		let fresh_track = fresh.create_track("video", None).unwrap();
+		let fresh_track = fresh.create_track("video", crate::track::Info::timed()).unwrap();
 		queued(&dynamic).await.accept(&fresh);
 		let resolved = pending.await.expect("the request carries over");
 		assert_eq!(resolved.info().epoch.as_ref(), Some(&epoch));
@@ -8811,11 +8815,11 @@ mod tests {
 			.unwrap();
 		dynamic.update(dynamic.route().with_epoch(old.clone())).unwrap();
 		let stale = broadcast::Info::new().produce();
-		let _stale_track = stale.create_track("video", None).unwrap();
+		let _stale_track = stale.create_track("video", crate::track::Info::timed()).unwrap();
 		request.accept(&stale);
 
 		let fresh = broadcast::Info::new().produce();
-		let fresh_track = fresh.create_track("video", None).unwrap();
+		let fresh_track = fresh.create_track("video", crate::track::Info::timed()).unwrap();
 		queued(&dynamic).await.accept(&fresh);
 		let resolved = pending.await.expect("the request carries over");
 		assert_eq!(resolved.info().epoch.as_ref(), Some(&old));
@@ -8833,7 +8837,7 @@ mod tests {
 		let dynamic = producer.dynamic("room", Route::default()).unwrap();
 		let pending = consumer.request_broadcast("room/alice", None);
 		let old = broadcast::Info::new().produce();
-		let _old_track = old.create_track("video", None).unwrap();
+		let _old_track = old.create_track("video", crate::track::Info::timed()).unwrap();
 		queued(&dynamic).await.accept(&old);
 		let resolved = pending.await.expect("resolves");
 
@@ -8846,7 +8850,7 @@ mod tests {
 
 		let retry = consumer.request_broadcast("room/alice", None);
 		let fresh = broadcast::Info::new().produce();
-		let _fresh_track = fresh.create_track("video", None).unwrap();
+		let _fresh_track = fresh.create_track("video", crate::track::Info::timed()).unwrap();
 		queued(&dynamic).await.accept(&fresh);
 		let replaced = retry.await.expect("the new instance resolves");
 		assert!(!replaced.is_clone(&resolved), "rejoined the first instance's front");
@@ -8933,8 +8937,8 @@ mod tests {
 	async fn incompatible_successor_is_refused() {
 		for replacement in [
 			track::Info::default().with_timescale(crate::Timescale::MICRO),
-			track::Info::default().with_priority(7),
-			track::Info::default().with_max_age(Duration::from_secs(7)),
+			track::Info::timed().with_priority(7),
+			track::Info::timed().with_max_age(Duration::from_secs(7)),
 		] {
 			let (mut rig, incumbent, source) = ResumeRig::new(&[10]).await;
 			let standby_server = rig.standby(&[10, 20]);
@@ -9043,7 +9047,7 @@ mod tests {
 			let pending = consumer.request_broadcast("room/alice", None);
 			let request = queued(&incumbent).await;
 			let source = broadcast::Info::new().produce();
-			let track = source.create_track("video", None).unwrap();
+			let track = source.create_track("video", crate::track::Info::timed()).unwrap();
 			let mut group = track.append_group().unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
 			group.finish().unwrap();
@@ -9071,7 +9075,7 @@ mod tests {
 				None => {
 					let request = queued(&echo).await;
 					let replacement = broadcast::Info::new().produce();
-					let track = replacement.create_track("video", None).unwrap();
+					let track = replacement.create_track("video", crate::track::Info::timed()).unwrap();
 					let mut group = track.append_group().unwrap();
 					group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
 					group.finish().unwrap();
@@ -9108,7 +9112,7 @@ mod tests {
 		let pending = consumer.request_broadcast("room/alice", None);
 		let request = queued(&server_a).await;
 		let source_a = broadcast::Info::new().produce();
-		let track_a = source_a.create_track("video", None).unwrap();
+		let track_a = source_a.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = track_a.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"from-a".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -9160,7 +9164,7 @@ mod tests {
 		let pending = consumer.request_broadcast("room/alice", None);
 		let request = queued(&server_b).await;
 		let source_b = broadcast::Info::new().produce();
-		let track_b = source_b.create_track("video", None).unwrap();
+		let track_b = source_b.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = track_b.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"from-b".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -9199,7 +9203,7 @@ mod tests {
 			.update(Route::default().with_hops(hops(&[10])).with_cost(9))
 			.unwrap();
 
-		let track = source.create_track("audio", None).unwrap();
+		let track = source.create_track("audio", crate::track::Info::timed()).unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"steady".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -9282,7 +9286,7 @@ mod tests {
 		let consumer = producer.consume();
 
 		let broadcast = producer.publish("room/alice", Route::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let mut subscription = resolved
@@ -9329,7 +9333,7 @@ mod tests {
 		let pending = consumer.request_broadcast("room/alice", None);
 		let request = queued(&server).await;
 		let source = broadcast::Info::new().produce();
-		let track = source.create_track("video", None).unwrap();
+		let track = source.create_track("video", crate::track::Info::timed()).unwrap();
 		request.accept(&source);
 
 		let resolved = pending.await.expect("resolves");
@@ -9395,7 +9399,7 @@ mod tests {
 		let consumer = producer.consume();
 
 		let broadcast = producer.publish("room/alice", Route::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"cached".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -9459,7 +9463,7 @@ mod tests {
 			.unwrap();
 		let pending = producer.consume().request_broadcast("live", None);
 		let source = broadcast::Info::new().produce();
-		let track = source.create_track("video", None).unwrap();
+		let track = source.create_track("video", crate::track::Info::timed()).unwrap();
 		queued(&server).await.accept(&source);
 		let resolved = pending.await.unwrap();
 
@@ -9495,7 +9499,7 @@ mod tests {
 	async fn a_group_the_source_aborts_ends_while_the_track_lives() {
 		let producer = origin(1).produce();
 		let broadcast = producer.publish("live", Route::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = producer.consume().request_broadcast("live", None).await.unwrap();
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 
@@ -9529,7 +9533,7 @@ mod tests {
 		let leaf_consumer = leaf.consume();
 
 		let broadcast = leaf.publish("room/alice", Route::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"cached".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -9625,7 +9629,7 @@ mod tests {
 		let first = producer
 			.publish("room/alice", Route::default().with_epoch(epoch()))
 			.unwrap();
-		let track = first.create_track("video", None).unwrap();
+		let track = first.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let mut subscription = resolved
 			.track("video")
@@ -9678,7 +9682,7 @@ mod tests {
 			.unwrap();
 		let pending = producer.consume().request_broadcast("room/alice", None);
 		let upstream = broadcast::Info::new().produce();
-		let old = upstream.create_track("video", None).unwrap();
+		let old = upstream.create_track("video", crate::track::Info::timed()).unwrap();
 		queued(&server).await.accept(&upstream);
 		let resolved = pending.await.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
@@ -9779,7 +9783,7 @@ mod tests {
 		let first = producer
 			.publish("room/alice", Route::default().with_epoch(epoch()))
 			.unwrap();
-		let track = first.create_track("video", None).unwrap();
+		let track = first.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.append_group().unwrap();
@@ -9815,7 +9819,7 @@ mod tests {
 		let first = producer
 			.publish("room/alice", Route::default().with_epoch(epoch()))
 			.unwrap();
-		let track = first.create_track("video", None).unwrap();
+		let track = first.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.append_group().unwrap();
@@ -9870,7 +9874,7 @@ mod tests {
 		let first = producer
 			.publish("room/alice", Route::default().with_epoch(epoch()))
 			.unwrap();
-		let track = first.create_track("video", None).unwrap();
+		let track = first.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.append_group().unwrap();
@@ -10028,7 +10032,7 @@ mod tests {
 		let run = moq_net_sim::spawn(crate::time::run_sim(driver));
 		let consumer = producer.consume();
 		let broadcast = producer.publish("room/alice", Route::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let sub = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 
@@ -10052,7 +10056,7 @@ mod tests {
 		let run = moq_net_sim::spawn(crate::time::run_sim(driver));
 		let consumer = producer.consume();
 		let broadcast = producer.publish("room/alice", Route::default()).unwrap();
-		let mut track = broadcast.create_track("video", None).unwrap();
+		let mut track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let sub = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let pending = resolved.track("video").unwrap().subscribe(None);
@@ -10079,7 +10083,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let broadcast = producer.publish("room/alice", Route::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let sub = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		moq_net_sim::timeout(Duration::from_secs(1), track.demand().used())
@@ -10362,7 +10366,7 @@ mod tests {
 		let expiry = Duration::from_secs(1);
 		let origin = expiring_origin(expiry);
 		let broadcast = origin.create_broadcast("test").unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 
 		let mut stalled = track.append_group().unwrap();
 		stalled.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
@@ -10394,7 +10398,7 @@ mod tests {
 		}
 		.produce();
 		let broadcast = origin.create_broadcast("test").unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 
 		let mut stalled = track.append_group().unwrap();
 		stalled.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();

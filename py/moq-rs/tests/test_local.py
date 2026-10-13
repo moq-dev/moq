@@ -2,7 +2,7 @@
 
 import asyncio
 import struct
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import cast
 
 import moq
@@ -371,6 +371,35 @@ async def test_announced_broadcast():
         broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
         _catalog = await moq.media.CatalogConsumer.subscribe(broadcast_consumer)
         break
+
+
+async def test_announced_epoch_restarts():
+    origin = moq.OriginProducer()
+    consumer = origin.consume()
+    announced = consumer.announced()
+    broadcast = origin.create_broadcast("epoch")
+
+    first = moq.mint_epoch()
+    fixed = datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
+    assert moq.epoch_time("018bcfe5-6800-7000-8000-000000000000") == fixed
+    broadcast.announce(moq.Route(epoch=first))
+    start = await next_route(announced)
+    assert isinstance(start, moq.AnnounceEventStart)
+    assert start.announce.route.epoch == first
+
+    second = moq.mint_epoch()
+    broadcast.announce(moq.Route(epoch=second))
+    restart = await next_route(announced)
+    assert isinstance(restart, moq.AnnounceEventRestart)
+    assert restart.announce.route.epoch == second
+
+    with pytest.raises(moq.Error.InvalidEpoch):  # type: ignore[attr-defined]
+        moq.epoch_time(first.upper())
+    with pytest.raises(OverflowError):
+        moq.epoch_time("ffffffff-ffff-7000-8000-000000000000")
+    with pytest.raises(moq.Error.InvalidEpoch):  # type: ignore[attr-defined]
+        broadcast.announce(moq.Route(epoch="not-an-epoch"))
+    broadcast.close()
 
 
 def test_publish_lifecycle():
