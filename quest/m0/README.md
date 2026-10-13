@@ -59,8 +59,8 @@ Interop on main (2026-10-13): the cross-client matrix fails with `unroutable`
 whenever WebSocket wins the connect race: since #5294, #4180's upgrade
 retires epochless handles before its held `Restart` reaches anyone. The
 released wire-compat step aborts on planned breaks the last release made
-stale. Both stay in m0 (maintainer, 2026-10-13) and rank with TS duration
-fidelity: a red Interop hides real regressions.
+stale. Both stay in m0 (maintainer, 2026-10-13): a red Interop hides real
+regressions.
 
 Crashes (2026-10-13, #5407): a publisher on a host whose wall clock reads
 before 2020 panics, and `panic = "abort"` turns any library panic into a
@@ -78,7 +78,6 @@ have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
 ## Required
 
 - [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.5, then draft-20+ FETCH
-- [TS duration fidelity](/quest/m0/ts-duration-fidelity.md) - Interop's TS compliance captures the whole round-tripped stream again, fixing a regression that turns Interop red on main
 - [Upgrade restarts epochless broadcasts](/quest/m0/upgrade-unroutable.md) - a WebSocket-to-QUIC upgrade retires epochless handles only once their `Restart` is delivered, and first-party consumers follow it, fixing Interop's `unroutable` rounds
 - [Unset host clock](/quest/m0/wall-clock-omit.md) - a publisher whose wall clock reads before 2020 publishes without a catalog clock instead of panicking
 - [Panic isolation](/quest/m0/panic-isolation.md) - unwind, ignore lock poison, and supervise every task, so a panic closes only its connection or exits on a long-lived task
