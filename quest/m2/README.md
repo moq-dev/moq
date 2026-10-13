@@ -147,7 +147,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Compressed tracks](/quest/m2/flate.md) - moq-ffi and every wrapper expose flate tracks through a `flate` namespace like `json`
 - [VAAPI encode and decode](/quest/m2/video-vaapi.md) - H.265 encode and decode, pre-generated bindings, and pooled resize surfaces, including the moq-dev/vaapi release that carries them
 - [GPU capacity and health](/quest/m2/gpu-health.md) - moq-video reports each device's sessions, memory, utilization, and health on NVIDIA, AMD, and Intel alike
-- [A release carries multi-vendor GPU input](/quest/m2/gpu-release.md) - `release` ships all three so a pinned consumer drops its vendor code
+- [A release carries multi-vendor GPU input](/quest/m2/gpu-release.md) - `release` carries the GPU surface validated on AMD and Intel; health follows separately
 - [moq-transport request codes](/quest/m2/ietf-request-codes.md) - Range Filters (INVALID_FILTER), reserved namespaces, and RENDEZVOUS_TIMEOUT get the draft's answer, or a recorded fallback code, and the deliberate deviations are documented
 - [Kotlin JVM exit](/quest/m2/kt-jvm-exit.md) - a Kotlin/JVM program exits cleanly whatever the moq-ffi runtime thread is doing, like Python does since #3766
 - [JS audio ranking](/quest/m2/js-audio-ranked.md) - @moq/hang ranks audio and video renditions like Rust, enabled first, and HLS lists audio by that rank
@@ -166,3 +166,4 @@ lite-07; bitrate enforcement is not part of this release.
 - [Publisher timeliness at relay ingest](/quest/m2/qos-publisher-timeliness.md) - follow-on capability after the release contract is stable
 
 - [Release execution](/quest/m2/release/README.md) - publication, installed-artifact proof, cleanup, and downstream adoption after m1
+- [IETF driver double poll](/quest/m2/ietf-driver-double-poll.md) - a fired deadline costs a moq-transport session's driver one poll, as #5393 makes moq-lite's

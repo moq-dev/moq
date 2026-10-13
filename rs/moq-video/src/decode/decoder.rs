@@ -598,7 +598,12 @@ mod tests {
 			.unwrap();
 		let mut track =
 			moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::try_from(config).unwrap());
-		let sample = track.read().await.unwrap().expect("an imported sample");
+		let sample = loop {
+			let read = track.read().await.unwrap().expect("an imported sample");
+			if let moq_mux::container::Read::Frame { frame, .. } = read {
+				break frame;
+			}
+		};
 		assert!(sample.keyframe);
 
 		let decoder =

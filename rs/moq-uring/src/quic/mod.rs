@@ -21,6 +21,7 @@
 
 pub mod client;
 pub mod endpoint;
+pub mod handshake;
 #[cfg(feature = "qlog")]
 pub mod qlog;
 pub mod server;

@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 
 use hang::catalog::VideoConfig;
+use moq_mux::container::Read;
 
 use super::decoder::Config;
 use super::sink::Sink;
@@ -85,8 +86,6 @@ pub struct Consumer {
 	pending: VecDeque<Frame>,
 	/// Whether the ended track's decoder has already been drained.
 	drained: bool,
-	/// Last container playhead generation observed.
-	discontinuity: u64,
 }
 
 impl Consumer {
@@ -140,7 +139,6 @@ impl Consumer {
 			track,
 			pending: VecDeque::new(),
 			drained: false,
-			discontinuity: 0,
 		})
 	}
 
@@ -166,14 +164,13 @@ impl Consumer {
 				return Ok(None);
 			}
 
-			let mux_frame = self.track.read().await?;
-			let discontinuity = self.track.discontinuity();
-			if discontinuity != self.discontinuity {
-				// A playhead event re-applies startup delay and skip; the next group
-				// already starts on a keyframe with parameter sets, so the decoder is
-				// not flushed.
-				self.discontinuity = discontinuity;
-			}
+			let mux_frame = match self.track.read().await? {
+				Some(Read::Frame { frame, .. }) => Some(frame),
+				// The next group starts on a keyframe with parameter sets, so neither a
+				// gap nor a declared end flushes the decoder.
+				Some(Read::Gap | Read::End { .. }) => continue,
+				None => None,
+			};
 
 			let Some(mux_frame) = mux_frame else {
 				// The flag goes up only once the tail is in hand, so a read

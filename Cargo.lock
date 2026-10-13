@@ -4796,6 +4796,7 @@ dependencies = [
  "tracing",
  "url",
  "usage-rs",
+ "web-transport-moq",
  "web-transport-trait",
 ]
 

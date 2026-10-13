@@ -563,7 +563,7 @@ impl<S: Stream> Export<S> {
 							track.pending = Some(frame);
 							break;
 						}
-						Poll::Ready(Some(Event::FrameEnd(end))) => {
+						Poll::Ready(Some(Event::FrameEnd { end, .. })) => {
 							if track.is_video
 								&& let Some(last) = track.buffer.last_mut()
 								&& last.duration.is_none()

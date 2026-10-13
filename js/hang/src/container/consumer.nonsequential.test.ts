@@ -5,6 +5,14 @@ import { Format as LegacyFormat } from "./legacy.ts";
 
 // Standalone from consumer.test.ts so it only pulls the Legacy format, not the CMAF decoder.
 
+/** The next frame, passing over gaps and ends. */
+async function nextFrame(consumer: Consumer) {
+	for (;;) {
+		const next = await consumer.next();
+		if (!next || next.kind === "frame") return next;
+	}
+}
+
 function encodeLegacyFrame(timestamp: Time.Micro, payload: Uint8Array): Uint8Array {
 	const tsBytes = Varint.encode(timestamp);
 	const data = new Uint8Array(tsBytes.byteLength + payload.byteLength);
@@ -40,10 +48,9 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 	a.close();
 	track.writeGroup(a);
 
-	// Drain A: its frame, then its group-done marker.
-	const firstFrame = await consumer.next();
-	expect(firstFrame?.frame?.payload).toEqual(new Uint8Array([0x01]));
-	await consumer.next();
+	// Drain A's frame.
+	const firstFrame = await nextFrame(consumer);
+	expect(firstFrame?.frame.payload).toEqual(new Uint8Array([0x01]));
 
 	// Park next() before the next group's frames arrive (the live streaming case).
 	const pending = consumer.next();

@@ -53,6 +53,7 @@ the feature that needs them.
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Interop close logs](/quest/m1/interop-close-log.md) - logging fix landed; delete once the required Interop run is green
 - [One max_age meaning](/quest/m1/cache-max-age.md) - a superseded group goes stale on wall clock since its successor arrived or on media time, whichever is first, in Rust and js/net; fixes the untimed failover stall
+- [Quiet latest group test](/quest/m1/quiet-edge-test.md) - pins on `main` that a quiet track's latest group survives rejoin, expiry, and takeover
 - [FETCH max-delay](/quest/m1/fetch-max-delay.md) - historical readers obey publisher max-age and an optional tighter reader budget, including while holding a group
 - [Claim answer epochs](/quest/m1/claim-answer-epochs.md) - a claim answers each output by publishing it at its exact path under its own epoch, so a restarted output never reaches a returning reader as the old one's cache
 - [Untimed decisions](/quest/m1/untimed-decisions.md) - the maintainer decides whether moq-archive keeps refusing untimed tracks, and whether a malformed FETCH object ends its track
@@ -79,6 +80,7 @@ the feature that needs them.
 - [JSON window timestamps](/quest/m1/json-window-timestamps.md) - Rust and JS window consumers return each event's frame timestamp like the snapshot and stream consumers
 - [The catalog root clock is the producer clock](/quest/m1/catalog-clock-adopt.md) - a derivative adopts its input's wall mapping through `modify()`, and a root `clock` change after the clock is fixed is refused
 - [Exact catalog wall clock](/quest/m1/catalog-wall-clock-precision.md) - `hang::catalog::Clock::wall_clock` keeps sub-millisecond precision
+- [JavaScript answers TRACK_STATUS](/quest/m1/js-track-status.md) - a browser publisher answers IETF TRACK_STATUS like Rust, so a native fetch-only request needs no SUBSCRIBE fallback
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native FILL_TIMEOUT bounds upstream waiting on drafts 18-22, alongside local content-age enforcement
 - [IETF group ingest refuses loudly](/quest/m1/ietf-ingest-refusal.md) - a subgroup other than 0 or a datagram past object 0 aborts the track, and a peer's malformed group is refused rather than dropped at debug
@@ -115,11 +117,11 @@ the feature that needs them.
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
 - [Plan: watch worker](/quest/m1/plan-watch-worker.md) - prototype an invisible page worker against app-spawned workers, and land the jank harness that decides
 - [Watch worker](/quest/m1/watch-worker.md) - watch playback runs in a worker onto an OffscreenCanvas, so main-thread jank never stalls video or audio
-- [io_uring handshake deadline](/quest/m1/listener-deadlines.md) - the io_uring workers apply `listen.timeout` to the handshake
 - [Rust papercuts](/quest/m1/papercuts-rs.md) - HTTP refusals are counted, and a `u64::MAX` resume is unbounded
 - [Duration parser defaults](/quest/m1/cli-duration-defaults.md) - a moq-tokio duration set in code beats the parser default on a parsed or merged config, zero included, after #5350
 - [Publish channel count](/quest/m1/publish-audio-channel-count.md) - forcing a channel count on an Audio.Capture stops costing the subscriber gaps of silence
 - [JS request deadline](/quest/m1/js-request-deadline.md) - each JS request, PUBLISH_NAMESPACE included, has one fatal 10 s timer from create to answer and fails fast without stream credit, so nothing queues or retries
+- [JS cancellation bench](/quest/m1/js-forget-bench.md) - the requests bench sweeps cancellation over competing dynamic routes, so a per-cancel cost that grows with routes shows as a slope
 - [Rust request credit](/quest/m1/rs-request-credit.md) - a moq-net request fails at once without stream credit instead of waiting
 - [qmux no-wait opens](/quest/m1/qmux-no-wait.md) - @moq/qmux rejects an over-limit create when waitUntilAvailable is false, like Chrome
 - [#933](/quest/m1/933-video-rotation-metadata-not-propagated-from-mobile-camera.md) - the catalog rotation follows the live camera's orientation
@@ -127,7 +129,6 @@ the feature that needs them.
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [T-STD TS export](/quest/m1/tstd/README.md) - `moq export ts` is a proper remux that passes the supported T-STD buffer models, starting with a fixed `--delay`
 - [ATSC AC-3](/quest/m1/ts-atsc-ac3.md) - `export ts` carries 48 kHz ATSC AC-3 at every A/52 rate up to 640 kb/s instead of aborting from 384 kb/s up
-- [Rust non-continuous signal](/quest/m1/rust-continuous.md) - the Rust container consumer reports a frame after a subscribe or discontinuity as non-continuous, like JS, for the tune-in and warmup trims
 - [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - a viewer joining at a recovery point drops the leading pictures it cannot decode; continuous viewers keep them
 - [Audio warmup](/quest/m1/audio-warmup.md) - a viewer joining an Opus rendition mid-stream never hears the unconverged first 80 ms
 - [#3021](/quest/m1/3021-moq-gst-anchor-generated-media-timelines-to-wall-clock.md) - moq-gst picks the broadcast wall epoch; a restarted source is a new epoch, not a forward re-anchor

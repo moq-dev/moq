@@ -3885,7 +3885,7 @@ pub(super) mod test {
 			.await
 			.unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy(crate::container::Kind::Data));
-		let frame = tokio::time::timeout(Duration::from_secs(1), reader.read())
+		let frame = tokio::time::timeout(Duration::from_secs(1), reader.read_frame())
 			.await
 			.expect("cue read timed out")
 			.unwrap()
@@ -4554,7 +4554,7 @@ pub(super) mod test {
 			crate::catalog::hang::Container::Legacy(crate::container::Kind::Audio),
 		);
 		let mut frames = Vec::new();
-		while let Ok(Ok(Some(frame))) = tokio::time::timeout(Duration::from_millis(50), reader.read()).await {
+		while let Ok(Ok(Some(frame))) = tokio::time::timeout(Duration::from_millis(50), reader.read_frame()).await {
 			frames.push(frame);
 		}
 		frames
@@ -4608,7 +4608,7 @@ pub(super) mod test {
 			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 		);
 		let mut frames = Vec::new();
-		while let Ok(Ok(Some(frame))) = tokio::time::timeout(Duration::from_millis(50), reader.read()).await {
+		while let Ok(Ok(Some(frame))) = tokio::time::timeout(Duration::from_millis(50), reader.read_frame()).await {
 			frames.push(frame);
 		}
 		frames
@@ -5432,7 +5432,7 @@ pub(super) mod test {
 			track,
 			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 		);
-		let published = tokio::time::timeout(Duration::from_millis(50), reader.read()).await;
+		let published = tokio::time::timeout(Duration::from_millis(50), reader.read_frame()).await;
 		assert!(
 			matches!(published, Ok(Ok(Some(_)))),
 			"a PID that never published held the catalog shut: {published:?}"
@@ -5822,7 +5822,7 @@ pub(super) mod test {
 			.await
 			.unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy(crate::container::Kind::Data));
-		let frame = tokio::time::timeout(Duration::from_secs(1), reader.read())
+		let frame = tokio::time::timeout(Duration::from_secs(1), reader.read_frame())
 			.await
 			.expect("cue read timed out")
 			.unwrap()
@@ -6008,7 +6008,7 @@ pub(super) mod test {
 			.await
 			.unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy(crate::container::Kind::Data));
-		let frame = tokio::time::timeout(Duration::from_secs(1), reader.read())
+		let frame = tokio::time::timeout(Duration::from_secs(1), reader.read_frame())
 			.await
 			.expect("verbatim read timed out")
 			.unwrap()
@@ -6099,7 +6099,8 @@ pub(super) mod test {
 			crate::catalog::hang::Container::Legacy(crate::container::Kind::Audio),
 		);
 		let mut frames = Vec::new();
-		while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await
+		while let Ok(Ok(Some(frame))) =
+			tokio::time::timeout(std::time::Duration::from_millis(50), reader.read_frame()).await
 		{
 			frames.push(frame);
 		}
@@ -6707,7 +6708,7 @@ pub(super) mod test {
 		let track = consumer.track(name).unwrap().subscribe(subscription).await.unwrap();
 		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy(kind));
 		let mut frames = Vec::new();
-		while let Ok(Ok(Some(frame))) = tokio::time::timeout(Duration::from_millis(50), reader.read()).await {
+		while let Ok(Ok(Some(frame))) = tokio::time::timeout(Duration::from_millis(50), reader.read_frame()).await {
 			if !frame.payload.is_empty() {
 				frames.push(frame);
 			}

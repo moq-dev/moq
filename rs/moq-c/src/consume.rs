@@ -539,8 +539,10 @@ impl Consume {
 			let frame = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
-				frame = track.read() => match frame? {
-					Some(frame) => frame,
+				read = track.read() => match read? {
+					Some(moq_mux::container::Read::Frame { frame, .. }) => frame,
+					// The C ABI carries frames only.
+					Some(moq_mux::container::Read::Gap | moq_mux::container::Read::End { .. }) => continue,
 					None => return Ok(()),
 				},
 			};
