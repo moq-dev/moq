@@ -98,7 +98,9 @@ auto broadcast = ok(announced->available().get());
 auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(broadcast).get());
 if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the catalog ends
     for (const auto &[name, video] : catalog->video) {
-        auto media = ok(moq::MediaContainerConsumer::subscribe(broadcast, {name, video.container}).get());
+        // The track is the rendition's `track` when set, otherwise its catalog key.
+        auto track = video.track.value_or(name);
+        auto media = ok(moq::MediaContainerConsumer::subscribe(broadcast, {track, video.container}).get());
         auto frame = ok(media->next().get());   // std::nullopt once the track ends
     }
 }

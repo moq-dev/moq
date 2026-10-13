@@ -155,6 +155,8 @@ impl<E: CatalogExt> Clone for Outputs<E> {
 impl<E: CatalogExt> Outputs<E> {
 	/// Emit the catalog to hang, compressed hang, MSF, and the broadcast timeline.
 	fn emit(&mut self, catalog: &Catalog<E>) -> crate::Result<()> {
+		// Every consumer refuses a catalog that fails this, so refuse it before it reaches one.
+		catalog.check_renditions()?;
 		// One snapshot per group while deltas are disabled; the `.z` track carries the identical catalog.
 		self.hang.update(catalog)?;
 		self.catalog_timeline.lock().unwrap().record(&self.hang_track);
@@ -1456,6 +1458,31 @@ mod test {
 		catalog.modify().unwrap().remove_section("big").unwrap();
 		catalog.finish().unwrap();
 		assert_eq!(track.latest(), Some(0));
+	}
+
+	/// Every consumer refuses an ID naming both a video and an audio rendition, so the producer
+	/// refuses to publish one.
+	#[test]
+	fn a_cross_kind_duplicate_id_is_refused() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let track = catalog.outputs.hang.consume();
+
+		let result = catalog.mutate(|catalog| {
+			catalog
+				.video
+				.renditions
+				.insert("main".to_string(), hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8));
+			catalog.audio.renditions.insert(
+				"main".to_string(),
+				hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2),
+			);
+		});
+		assert!(matches!(
+			result,
+			Err(crate::Error::Hang(hang::Error::DuplicateRendition(id))) if id == "main"
+		));
+		assert_eq!(track.latest(), None, "the refused catalog reached the wire");
 	}
 
 	#[test]

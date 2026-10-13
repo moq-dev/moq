@@ -377,7 +377,8 @@ async fn watch_catalog(
 	};
 
 	let mut unbound = false;
-	let mut reference: Option<Reference> = None;
+	// The reference and the track its timeline indexes, which can change under one rendition ID.
+	let mut reference: Option<(Reference, String)> = None;
 	loop {
 		match kio::wait(|waiter| consumer.poll_next(waiter)).await {
 			Ok(Some(catalog)) => {
@@ -389,17 +390,19 @@ async fn watch_catalog(
 				renditions.sync(&source, &catalog);
 
 				// Keep the reference while it stays. Replacing it renumbers every segment.
-				let next = self::reference(&catalog, reference.as_ref());
+				let current = reference.as_ref().map(|(current, _)| current);
+				let next = self::reference(&catalog, current).map(|(next, track)| (next, track.to_string()));
 				if next != reference {
 					if let Some(watcher) = timeline_watcher.lock().unwrap().take() {
 						watcher.abort();
 						renditions.fanout().skip();
 					}
-					if let (Some(next), Some(archive)) = (&next, catalog.archive.clone()) {
+					if let (Some((next, track)), Some(archive)) = (&next, catalog.archive.clone()) {
 						let watcher = tokio::spawn(watch_timeline(
 							broadcast.clone(),
 							archive,
 							next.clone(),
+							track.clone(),
 							renditions.fanout(),
 							unbound,
 						));
@@ -420,42 +423,58 @@ async fn watch_catalog(
 	renditions.close();
 }
 
-/// The rendition every segment boundary comes from.
+/// The rendition every segment boundary comes from, with the track its timeline indexes.
 ///
 /// The first choice is the first video rendition with a timeline, or the first audio one when
-/// the broadcast has no video. Renditions are ordered by name, so edges choosing together pick
+/// the broadcast has no video. Renditions are ordered by ID, so edges choosing together pick
 /// the same one. A video `current` stays while it is still a rendition with a timeline: a newer
 /// rendition that sorts earlier must not take over, or `EXT-X-MEDIA-SEQUENCE` rewinds. An audio
 /// `current` stays only while no video rendition has a timeline, since video segments cut on
 /// audio records would mostly be gaps; that switch, like a reference that leaves, rewinds.
-fn reference(catalog: &moq_mux::catalog::hang::Catalog, current: Option<&Reference>) -> Option<Reference> {
+fn reference<'a>(
+	catalog: &'a moq_mux::catalog::hang::Catalog,
+	current: Option<&Reference>,
+) -> Option<(Reference, &'a str)> {
+	use hang::catalog::Reference as _;
+
 	let archive = catalog.archive.as_ref()?;
-	let indexed = |name: &str| archive.timelines.contains_key(name);
+	let indexed = |track: &&str| archive.timelines.contains_key(*track);
 	let video = catalog
 		.video
 		.renditions
-		.keys()
-		.find(|name| indexed(name))
-		.map(|name| (Kind::Video, name));
+		.iter()
+		.map(|(id, config)| (Kind::Video, id, config.track_name(id)))
+		.find(|(_, _, track)| indexed(track));
 	if let Some(current) = current {
-		let (kind, name) = current.as_ref();
-		let listed = match kind {
-			Kind::Video => catalog.video.renditions.contains_key(name),
-			Kind::Audio => video.is_none() && catalog.audio.renditions.contains_key(name),
+		let (kind, id) = current.as_ref();
+		let track = match kind {
+			Kind::Video => catalog
+				.video
+				.renditions
+				.get_key_value(id)
+				.map(|(id, config)| config.track_name(id)),
+			Kind::Audio if video.is_none() => catalog
+				.audio
+				.renditions
+				.get_key_value(id)
+				.map(|(id, config)| config.track_name(id)),
+			Kind::Audio => None,
 		};
-		if listed && indexed(name) {
-			return Some(Arc::clone(current));
+		if let Some(track) = track.filter(indexed) {
+			return Some((Arc::clone(current), track));
 		}
 	}
 	let audio = || {
 		catalog
 			.audio
 			.renditions
-			.keys()
-			.find(|name| indexed(name))
-			.map(|name| (Kind::Audio, name))
+			.iter()
+			.map(|(id, config)| (Kind::Audio, id, config.track_name(id)))
+			.find(|(_, _, track)| indexed(track))
 	};
-	video.or_else(audio).map(|(kind, name)| Arc::new((kind, name.clone())))
+	video
+		.or_else(audio)
+		.map(|(kind, id, track)| (Arc::new((kind, id.clone())), track))
 }
 
 /// Whether every range `archive` advertises stays FETCHable from this broadcast until the
@@ -466,20 +485,21 @@ fn durable(archive: &hang::catalog::Archive) -> bool {
 	archive.store.is_some() && archive.replay.is_none()
 }
 
-/// The segment watcher: read the reference rendition's timeline and fan each record out to every
-/// rendition's window as a segment.
+/// The segment watcher: read the reference rendition's timeline, which indexes `track`, and fan
+/// each record out to every rendition's window as a segment.
 async fn watch_timeline(
 	broadcast: moq_net::broadcast::Consumer,
 	section: hang::catalog::Archive,
 	reference: Reference,
+	track: String,
 	renditions: renditions::Fanout,
 	history: bool,
 ) {
 	// A failed timeline is never retried: the origin already rides out transient source
 	// failures, so an error here is final. It ends every playlist like a clean finish
 	// (`EXT-X-ENDLIST`), since a window left live would freeze players with no signal.
-	if let Err(err) = watch(&broadcast, &section, &reference, &renditions, history).await {
-		tracing::error!(track = %reference.1, %err, "timeline failed; ending every playlist");
+	if let Err(err) = watch(&broadcast, &section, &reference, &track, &renditions, history).await {
+		tracing::error!(%track, %err, "timeline failed; ending every playlist");
 	}
 	// Recording cursors drain what is listed and end instead of parking.
 	renditions.end_windows();
@@ -490,17 +510,18 @@ async fn watch(
 	broadcast: &moq_net::broadcast::Consumer,
 	section: &hang::catalog::Archive,
 	reference: &Reference,
+	track: &str,
 	renditions: &renditions::Fanout,
 	history: bool,
 ) -> crate::Result<()> {
 	if history {
-		return history::read(broadcast, section, &reference.1, |edit| match edit {
+		return history::read(broadcast, section, track, |edit| match edit {
 			history::Edit::Push { index, entry } => renditions.push(index, entry, reference),
 			history::Edit::Pop(range) => renditions.pop(range),
 		})
 		.await;
 	}
-	let mut timeline = moq_mux::timeline::Consumer::<()>::subscribe(broadcast, section, &reference.1).await?;
+	let mut timeline = moq_mux::timeline::Consumer::<()>::subscribe(broadcast, section, track).await?;
 	while let Some(event) = timeline.next().await? {
 		match event {
 			moq_mux::timeline::Event::Push { index, entry } => renditions.push(index, entry, reference),
@@ -2093,6 +2114,7 @@ mod tests {
 			upstream.broadcast(),
 			archive,
 			reference,
+			"video0".to_string(),
 			renditions.fanout(),
 			false,
 		));
@@ -2393,6 +2415,7 @@ mod tests {
 			upstream.broadcast(),
 			archive,
 			reference,
+			"video0".to_string(),
 			fanout.clone(),
 			false,
 		));
@@ -2476,6 +2499,7 @@ mod tests {
 			upstream.broadcast(),
 			archive,
 			reference,
+			"video0".to_string(),
 			fanout.clone(),
 			false,
 		));
@@ -2918,10 +2942,12 @@ mod tests {
 			let upstream = moq_mux::Source::new(produce_origin().consume(), broadcast.consume());
 			let renditions = renditions::Producer::new(Config::default().window);
 			renditions.sync(&upstream, catalog);
+			let (reference, track) = reference(catalog, None).unwrap();
 			let watcher = tokio::spawn(watch_timeline(
 				upstream.broadcast(),
 				catalog.archive.clone().unwrap(),
-				reference(catalog, None).unwrap(),
+				reference,
+				track.to_string(),
 				renditions.fanout(),
 				false,
 			));
@@ -3243,6 +3269,9 @@ mod tests {
 		};
 		let video = |name: &str| Arc::new((Kind::Video, name.to_string()));
 		let audio = |name: &str| Arc::new((Kind::Audio, name.to_string()));
+		let reference = |catalog: &moq_mux::catalog::hang::Catalog, current: Option<&Reference>| {
+			reference(catalog, current).map(|(reference, _)| reference)
+		};
 
 		let first = reference(&catalog(&["b"], &[]), None);
 		assert_eq!(first, Some(video("b")));
@@ -3260,6 +3289,24 @@ mod tests {
 			reference(&catalog(&["v"], &["a", "b"]), first.as_ref()),
 			Some(video("v"))
 		);
+	}
+
+	// Timelines are keyed by the indexed track's name, so a rendition whose ID differs from its
+	// track is found, and kept, by its track.
+	#[test]
+	fn the_reference_timeline_is_found_by_track_name() {
+		let mut catalog = moq_mux::catalog::hang::Catalog::default();
+		let mut config = video_config();
+		config.track = Some("video".to_string());
+		catalog.video.renditions.insert("main".to_string(), config);
+		catalog.archive = Some(archive(&["video"]));
+
+		let main = Arc::new((Kind::Video, "main".to_string()));
+		assert_eq!(reference(&catalog, None), Some((main.clone(), "video")));
+		assert_eq!(reference(&catalog, Some(&main)), Some((main.clone(), "video")));
+
+		catalog.archive = Some(archive(&["main"]));
+		assert_eq!(reference(&catalog, Some(&main)), None);
 	}
 
 	// A new reference numbers segments from its own records, so its URLs carry its own tag and
@@ -3295,6 +3342,7 @@ mod tests {
 			test.broadcast.consume(),
 			archive(&["video0", "video1"]),
 			Arc::new((Kind::Video, "video1".to_string())),
+			"video1".to_string(),
 			test.renditions.fanout(),
 			false,
 		));

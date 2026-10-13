@@ -230,7 +230,7 @@ fn normalize_audio(config: &AudioConfig) -> AudioConfig {
 /// A single HLS rendition: master-playlist metadata, its view of the broadcast timeline (which
 /// renders its media playlist), and on-demand segment fetching.
 pub struct Rendition {
-	/// Rendition name (the catalog track name; also its URL path component).
+	/// The rendition's catalog ID, also its URL path component.
 	pub name: String,
 	/// Whether this rendition is video or audio.
 	pub kind: Kind,
@@ -390,14 +390,15 @@ impl Rendition {
 	///
 	/// A rendition the catalog indexes no timeline for resolves nothing but the reference's rows.
 	pub(crate) fn watch(&self, history: bool) {
-		let Some(_) = self.section.timelines.get(&self.name) else {
+		let track = self.track_name();
+		if !self.section.timelines.contains_key(track) {
 			self.spans.end();
 			return;
-		};
+		}
 		let watcher = tokio::spawn(watch_spans(
 			self.catalog.clone(),
 			self.section.clone(),
-			self.name.clone(),
+			track.to_string(),
 			self.spans.clone(),
 			history,
 		));
