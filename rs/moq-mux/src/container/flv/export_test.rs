@@ -1449,3 +1449,26 @@ async fn a_backlog_stays_in_the_source_until_due() {
 		}
 	}
 }
+
+/// A joiner reads the retained group to its live edge to anchor the clock, then holds no
+/// more than the delay of it.
+#[tokio::test(start_paused = true)]
+async fn a_retained_group_trims_to_the_delay() {
+	use crate::container::test_util::{Live, raw_frame};
+	use hang::catalog::{AAC, AudioConfig};
+	let mut config = AudioConfig::new(AAC { profile: 2 }, 44100, 2);
+	config.description = Some(Bytes::from_static(&[0x12, 0x10]));
+	let mut live = Live::audio(config);
+	for index in 0..50 {
+		live.track
+			.write(raw_frame(index * 20_000, b"retained", index == 0))
+			.unwrap();
+		tokio::time::advance(std::time::Duration::from_millis(20)).await;
+	}
+	let delay = std::time::Duration::from_millis(100);
+	let mut export = super::Export::new(live.source().await, live.catalog_stream().await).with_delay(delay);
+	export.next().await.unwrap().unwrap();
+	export.next().await.unwrap().unwrap();
+	// What is left spans no more than the delay: five 20 ms frames.
+	assert!(export.buffered() <= 5, "{} frames buffered", export.buffered());
+}
