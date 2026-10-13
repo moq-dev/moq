@@ -11,6 +11,10 @@ rounds stay green whichever transport wins the connect race.
 
 ## Plan
 
+On 2026-10-13 the maintainer questioned keeping the WebSocket-to-QUIC upgrade
+path at all, pending a separate decision; the export decision below stays open
+until then.
+
 The origin side is done: a handle resolved through a peer keeps serving new
 requests while the peer's epochless replacement is held, and refuses them
 with `Unroutable` only once the `Restart` is deliverable (`Release` in `rs/moq-net/src/model/origin.rs`,
