@@ -64,6 +64,7 @@ folded into Dropped sources.
 - [Binding audio delay](/quest/m1/binding-surface.md) - moq-ffi and every wrapper configure and observe audio playout delay
 - [Per-frame arrivals in @moq/watch](/quest/m1/watch-arrivals.md) - the audio and video decoders expose a window of recent frame arrivals, late and skipped marks included, as a signal
 - [Bump web-transport-iroh for the capsule close](/quest/m1/iroh-capsule-bump.md) - condition: moq-dev/web-transport#419 ships in a release, then moq's iroh HTTP/3 client reports a peer's close capsule
+- [Early drops](/quest/m1/subscribe-drop-early.md) - Rust and JS publishers drop a sequence the moment they give it up, and forward an upstream drop
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every stream group in a lite subscription arrives or is dropped by name, and lite-07 drops its stream count for it
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges with absolute or relative ends, in either order, and replaces FETCH; merged ranges never starve a subscriber; relays fill misses by range, including over moq-transport
 - [Live largest location](/quest/m1/largest.md) - `largest()` replaces `latest()` in Rust and JS as a live stream of the track's largest location, known before the first group from the publisher's report
@@ -71,7 +72,6 @@ folded into Dropped sources.
 - [Untimed lite-07](/quest/m1/lite-untimed.md) - lite-07 carries an untimed track in both languages; lite-05/06 write send time
 - [A watch and publish release ships assets()](/quest/m1/assets-release.md) - the release that lets the sites host the worklets
 - [Dogfood hosted worklets](/quest/m1/dogfood-assets.md) - the moq.pro dashboard hosts the worklets and calls `assets()` after the release
-- [TS pair acquisition](/quest/m1/ts-pair-acquisition.md) - fix the clean baseline and prove the grader's controls before #5328 enables its scheduled hard gate
 - [Initial catalog routing](/quest/m1/initial-catalog-routing.md) - a usable fallback does not strand initial catalog acquisition with a spurious Unroutable
 - [Live TS clock validation](/quest/m1/ts-live-clock.md) - resolve the local PCR-rate failure with reproducible timing evidence and CI controls
 - [Same-instance TS resume](/quest/m1/ts-same-instance-resume.md) - prove valid continuation and fix the unexpected final exporter failure without weakening identity
@@ -82,11 +82,14 @@ folded into Dropped sources.
 - [Lazy discovery](/quest/m1/lazy-discovery/README.md) - a `consume` session requests announcements only for prefixes the origin is watching, in JS then Rust; `follow`, `broadcasts`, and the `discovery` option go away
 - [A spinning loop fails a sim test](/quest/m1/spinning-loops.md) - a sim test names any loop that holds a task poll too long, and each one yields through a budget
 - [Kotlin wrapper POMs](/quest/m1/kt-ffi-pom.md) - Maven builds of `dev.moq:moq` resolve a published moq-ffi instead of the missing `0.0.0-dev`
+- [Plan: redundant TS alignment](/quest/m1/plan-ts-alignment.md) - settle shared source coordinates and distinguish TS identity from coordinated RTP recovery
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - importers sharing one `--epoch` and fed one stream publish identical groups and timestamps, so failover between a redundant pair survives
 - [moq.sh deploys from CI](/quest/m1/moq-sh-deploy.md) - the first `release` run of the moq.sh workflow deploys with the Workers Editor token
 - [Plan: untimed verbatim PES](/quest/m1/plan-ts-pes-untimed.md) - decide how a verbatim TS track carries a PES that has no PTS, then write the implementation quest
 - [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) - json and binary consumers return each value's timestamp, in Rust and every binding; snapshots add `latest()` beside an in-order `next()`
 - [JSON window timestamps](/quest/m1/json-window-timestamps.md) - Rust and JS window consumers return each event's frame timestamp like the snapshot and stream consumers
+- [The catalog root clock is the producer clock](/quest/m1/catalog-clock-adopt.md) - a derivative adopts its input's wall mapping through `modify()`, and a root `clock` change after the clock is fixed is refused
+- [Exact catalog wall clock](/quest/m1/catalog-wall-clock-precision.md) - `hang::catalog::Clock::wall_clock` keeps sub-millisecond precision
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native FILL_TIMEOUT bounds upstream waiting on drafts 18-22, alongside local content-age enforcement
 - [IETF group ingest refuses loudly](/quest/m1/ietf-ingest-refusal.md) - a subgroup other than 0 or a datagram past object 0 aborts the track, and a peer's malformed group is refused rather than dropped at debug
@@ -101,7 +104,6 @@ folded into Dropped sources.
 - [Identity and recovery guide](/quest/m1/identity-guide.md) - explain pinned catalogs, lazy jobs, takeover, restart and version compatibility
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Dropped sources](/quest/m1/dropped-sources.md) - track consumers see the producer's real error on every end path, never `Dropped`; a dead route ends Unroutable, and the TS follower lingers on announcements instead of matching errors
-- [Release warm FETCH](/quest/m1/release-warm-fetch.md) - on the 0.17 line, a FETCH of a group a subscription delivered in part gets every frame instead of stalling on a parked open group
 - [Malformed moq-lite input](/quest/m1/lite-malformed-close.md) - a lite peer that breaks a control-stream rule, including SETUP's client-only parameters, gets PROTOCOL_VIOLATION, and a Report-level publisher answers PROBE targets, in Rust and js/net
 - [Own-range codes on MoQT](/quest/m1/own-range-bridge.md) - a MoQT close never carries a moq-lite own-range session code
 - [Client settings parity](/quest/m1/obs-client-config.md) - moq-ffi offers moq-c's client knobs, and the OBS Advanced settings get back the ones the C++ migration dropped
@@ -148,7 +150,6 @@ folded into Dropped sources.
 - [Front deadlines](/quest/m1/front-deadline-index.md) - a front's per-event cost stops growing with its track count: an expiry index and per-track wakes, proven by a churn benchmark
 - [io_uring handshake deadline](/quest/m1/listener-deadlines.md) - the io_uring workers apply `listen.timeout` to the handshake
 - [Rust papercuts](/quest/m1/papercuts-rs.md) - HTTP refusals are counted, and a `u64::MAX` resume is unbounded
-- [Drop insertTrack](/quest/m1/js-insert-track.md) - `createTrack` is `@moq/net`'s only way to add a track by hand, as in Rust
 - [Front parking](/quest/m1/origin-front-parks.md) - an unroutable request waits on a front instead of re-asking on every route-table move
 - [Route wakes](/quest/m1/route-wakes.md) - a route change wakes only the fronts it can move, so pool churn stops scaling with served paths
 - [Publish channel count](/quest/m1/publish-audio-channel-count.md) - forcing a channel count on an Audio.Capture stops costing the subscriber gaps of silence
@@ -164,7 +165,8 @@ folded into Dropped sources.
 - [TTML caption import](/quest/m1/captions-ttml.md) - fMP4 `stpp` tracks within a supported TTML/IMSC profile import as `ttml` renditions on the shared clock instead of being skipped
 - [fMP4 WebVTT ctim and vtta](/quest/m1/wvtt-ctim-vtta.md) - `wvtt` samples with `ctim` cue times or `vtta` comments import instead of failing
 - [Encoder colour](/quest/m1/color-model.md) - every moq-video encode path signals the colour its output actually has, or refuses instead of mislabelling
-- [T-STD TS export](/quest/m1/tstd/README.md) - `moq export ts` is a proper remux that passes the T-STD buffer model, starting with a fixed `--delay`
+- [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
+- [T-STD TS export](/quest/m1/tstd/README.md) - `moq export ts` is a proper remux that passes the supported T-STD buffer models, starting with a fixed `--delay`
 - [ATSC AC-3](/quest/m1/ts-atsc-ac3.md) - `export ts` carries 48 kHz ATSC AC-3 at every A/52 rate up to 640 kb/s instead of aborting from 384 kb/s up
 - [Rust non-continuous signal](/quest/m1/rust-continuous.md) - the Rust container consumer reports a frame after a subscribe or discontinuity as non-continuous, like JS, for the tune-in and warmup trims
 - [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - a viewer joining at a recovery point drops the leading pictures it cannot decode; continuous viewers keep them

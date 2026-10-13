@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { Once } from "@moq/signals";
+import { announcedView } from "../announced.test-util";
 import * as Announce from "../announced.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "../broadcast.ts";
 import { Route } from "../hop.ts";
@@ -98,17 +99,12 @@ test("a discovery failure under a live session downgrades the origin", async () 
 	expect(wireOf(origin).routes(path)).toBe(false);
 	expect(origin.discovery.peek()).toBe(false);
 
-	// The watcher's route went, so its request ends; a fresh one falls back to a standing
-	// request, which this same session answers.
-	expect(watched.closed.peek()).toBeInstanceOf(Error);
-	const again = origin.request(path, { announced: true });
-	await settle();
-	await settle();
-	expect(again.active.peek()).toBeDefined();
+	// The same request falls back to a blind answer on the live session.
+	expect(watched.closed.peek()).toBeUndefined();
+	expect(watched.active.peek()).toBeDefined();
 	// The announcement's own consume, plus the blind answer standing in for it now.
 	expect(session.consumes(path)).toBe(2);
 
-	again.close();
 	watched.close();
 	origin.close();
 });
@@ -249,12 +245,17 @@ test("a scoped session filters announcements and blind requests under its root",
 	const allowed = origin.request(Path.from("tenant/room/bob/chat"));
 	const denied = origin.request(Path.from("tenant/room/bob/video"));
 	await settle();
-	expect([...origin.broadcasts().peek().keys()]).toEqual([Path.from("tenant/room/alice/chat")]);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect([...(await announcedView(origin)).peek().keys()]).toEqual([Path.from("tenant/room/alice/chat")]);
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(session.consumes(Path.from("room/bob/chat"))).toBe(1);
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(session.consumes(Path.from("room/bob/video"))).toBe(0);
 	const routed = origin.request(Path.from("tenant/room/alice/chat"));
 	await settle();
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(session.consumes(Path.from("room/alice/chat"))).toBe(1);
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(routed.active.peek()).toBeDefined();
 	allowed.close();
 	denied.close();
@@ -282,14 +283,19 @@ test("one failed scoped interest leaves the other routes live until the session 
 			?.append({ prefix: Path.from(name), captures: undefined, kind: "start", route: Route.default });
 	}
 	await settle();
-	expect(origin.broadcasts().peek().size).toBe(2);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect((await announcedView(origin)).peek().size).toBe(2);
 	sources.get("a/**")?.close(new Error("namespace rejected"));
 	await settle();
-	expect([...origin.broadcasts().peek().keys()]).toEqual([Path.from("b")]);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect([...(await announcedView(origin)).peek().keys()]).toEqual([Path.from("b")]);
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(origin.discovery.peek()).toBe(false);
 	session.die();
 	await settle();
-	expect(origin.broadcasts().peek().size).toBe(0);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect((await announcedView(origin)).peek().size).toBe(0);
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(origin.discovery.peek()).toBeUndefined();
 	origin.close();
 });

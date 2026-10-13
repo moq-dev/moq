@@ -170,13 +170,13 @@ impl Info {
 }
 
 /// The sequence namespace a track name keeps within its broadcast, shared by every
-/// producer that serves the name, so a replacement appends after whatever an earlier one
-/// wrote. Holds one past the highest sequence written.
+/// producer that serves the name, so a replacement that would append a sequence an earlier
+/// one wrote is refused. Holds one past the highest sequence written.
 #[derive(Clone, Default)]
 pub(crate) struct Sequence(Arc<AtomicU64>);
 
 impl Sequence {
-	/// The next sequence an append takes.
+	/// One past the highest sequence any producer of the name wrote.
 	fn next(&self) -> u64 {
 		self.0.load(Ordering::Relaxed)
 	}
@@ -271,8 +271,8 @@ pub(crate) struct TrackState {
 	// datagrams, so it can run ahead of any cached group.
 	max_sequence: Option<u64>,
 
-	// The name's sequence namespace within the broadcast, which an append continues
-	// even when an earlier producer of the name wrote past this one's `max_sequence`.
+	// The name's sequence namespace within the broadcast, which can run past this track's
+	// `max_sequence` when an earlier producer of the name wrote further.
 	sequence: Sequence,
 
 	// The sequence of the newest cached group: the live edge, protected from
@@ -1130,14 +1130,20 @@ impl TrackState {
 		self.sequence.advance(sequence);
 	}
 
-	/// The sequence the next append takes: past this track's own writes and past every
-	/// earlier producer's of the same name.
+	/// The sequence the next append takes: one past this track's own writes.
+	///
+	/// The application owns where a replacement of the name starts, so an append that
+	/// would reuse a sequence an earlier producer wrote is [`Error::Duplicate`] instead of
+	/// renumbering.
 	fn next_sequence(&self) -> Result<u64> {
-		let own = match self.max_sequence {
+		let next = match self.max_sequence {
 			Some(max) => max.checked_add(1).ok_or(coding::BoundsExceeded)?,
 			None => 0,
 		};
-		Ok(own.max(self.sequence.next()))
+		if next < self.sequence.next() {
+			return Err(Error::Duplicate);
+		}
+		Ok(next)
 	}
 
 	/// Reject a sequence that is still cached; a dead (aborted or evicted)
@@ -1840,7 +1846,10 @@ impl Producer {
 		Ok(group)
 	}
 
-	/// Create a new group with the next sequence number.
+	/// Create a new group with the next sequence number: one past this producer's own writes.
+	///
+	/// [`Error::Duplicate`] if an earlier producer of the name in this broadcast already wrote
+	/// that sequence. A replacement picks where it starts with [`Self::create_group`].
 	pub fn append_group(&self) -> Result<group::Producer> {
 		let mut state = self.modify()?;
 		let sequence = state.next_sequence()?;
@@ -1870,7 +1879,8 @@ impl Producer {
 	/// before 05, or stream-only transports like WebSocket) never deliver them. Keep payloads well under the 1200-byte minimum path MTU.
 	/// A datagram is never cached or served by a fetch, so use a group for anything a late
 	/// joiner needs. An origin publisher uses this; a relay preserving upstream numbering
-	/// uses [`Self::insert_datagram`].
+	/// uses [`Self::insert_datagram`]. Like [`Self::append_group`], it is [`Error::Duplicate`]
+	/// if an earlier producer of the name already wrote that sequence.
 	///
 	/// Pass `None` on an untimed track; a datagram that doesn't match its track is
 	/// [`Error::TimestampMismatch`].
