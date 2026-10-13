@@ -175,6 +175,8 @@ disabled rung strands WHEP, HLS, and moq-mux export viewers.
 - [Publish channel count](/quest/m1/publish-audio-channel-count.md) - forcing a channel count on an Audio.Capture stops costing the subscriber gaps of silence
 - [JS request deadline](/quest/m1/js-request-deadline.md) - each JS request, PUBLISH_NAMESPACE included, has one fatal 10 s timer from create to answer and fails fast without stream credit, so nothing queues or retries
 - [JS cancellation bench](/quest/m1/js-forget-bench.md) - the requests bench sweeps cancellation over competing dynamic routes, so a per-cancel cost that grows with routes shows as a slope
+- [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS container consumer drops groups below its read cursor like Rust
+- [ExportSource reads Read items](/quest/m1/export-source-read.md) - exporters learn of gaps and ends from the read stream, and the private counters go
 - [Rust request credit](/quest/m1/rs-request-credit.md) - a moq-net request fails at once without stream credit instead of waiting
 - [qmux no-wait opens](/quest/m1/qmux-no-wait.md) - @moq/qmux rejects an over-limit create when waitUntilAvailable is false, like Chrome
 - [E2EE](/quest/m1/e2ee/README.md) - TypeScript and Rust peers interoperate over encrypted broadcasts no relay can decrypt
