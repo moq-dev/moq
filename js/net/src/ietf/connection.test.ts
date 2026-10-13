@@ -152,6 +152,11 @@ test("SUBSCRIBE_TRACKS refuses only its request", async () => {
 		for (let i = 0; i < 2; i++) {
 			const stream = await Stream.open(pair.client, { version });
 			await stream.writer.u62(BigInt(SUBSCRIBE_TRACKS_ID));
+			await Message.encode(stream.writer, async (writer) => {
+				await writer.u62(BigInt(i * 2));
+				await Namespace.encode(writer, Path.from(""));
+				await writer.u53(0);
+			});
 			expect(await stream.reader.u53()).toBe(RequestError.id);
 			const refused = await RequestError.decode(stream.reader, version);
 			expect(refused.errorCode).toBe(0x3);
@@ -529,14 +534,14 @@ function subscribeWithToken(version: IetfVersion, token: readonly number[]): Uin
 /** An update to that SUBSCRIBE whose only parameters are AUTHORIZATION TOKENs holding `tokens`. */
 function updateWithTokens(version: IetfVersion, ...tokens: (readonly number[])[]): Uint8Array {
 	// Draft-14 names its own Request ID and the subscription's, then the range, priority,
-	// and forward inline. Drafts 15 and 16 name both IDs, and later drafts only the request
-	// it updates.
+	// and forward inline. Drafts 15 and 16 name both IDs, and later drafts only its own,
+	// which must be fresh: the subscription already spent 0.
 	const head =
 		version === Version.DRAFT_14
 			? [2, 0, 0, 0, 0, 0x80, 0x01]
 			: version === Version.DRAFT_15 || version === Version.DRAFT_16
 				? [2, 0]
-				: [0];
+				: [2];
 	const body = [...head, ...tokenParams(version, ...tokens)];
 	return new Uint8Array([0x02, 0, body.length, ...body]);
 }

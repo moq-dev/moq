@@ -18,6 +18,7 @@ import * as Cluster from "./cluster.ts";
 import { type RequestKind, toRequestCode } from "./error.ts";
 import { Fetch, FetchError, FetchHeader } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
+import * as Message from "./message.ts";
 import { Group } from "./object.ts";
 import { Publish, PublishError } from "./publish.ts";
 import { PublishNamespace, PublishNamespaceError } from "./publish_namespace.ts";
@@ -193,20 +194,17 @@ export class Connection implements Established {
 		// since we consume on demand, and subscribing to whatever we publish.
 		const session = this.#session;
 		this.#auth = new AuthSession({
-			wire:
-				auth && authSupported(version)
-					? new IetfAuthWire({
-							openBi: async () => session.openBi(),
-							nextRequestId: () => session.nextRequestId(),
-							version,
-						})
-					: undefined,
+			wire: auth && authSupported(version) ? new IetfAuthWire(session) : undefined,
 			peerGrant: {
 				publish: new Path.Patterns([Path.Pattern.all()]),
 				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
 			},
 		});
 		this.#client = client;
+
+		this.#auth.violated.subscribe((err) => {
+			if (err) this.#violated(err);
+		});
 
 		this.#publisher = new Publisher({
 			quic: this.#quic,
@@ -366,6 +364,7 @@ export class Connection implements Established {
 				} catch (err) {
 					if (!(err instanceof MalformedAuthToken) || err.requestId === undefined) throw err;
 					adapter?.admitRequest(err.requestId);
+					this.#spend(err.requestId);
 					try {
 						await this.#refuseToken(stream, "subscribe_namespace", err.requestId);
 					} finally {
@@ -374,6 +373,7 @@ export class Connection implements Established {
 					break;
 				}
 				if (adapter) adapter.admitRequest(legacy.requestId);
+				this.#spend(legacy.requestId);
 				try {
 					if (legacy.subscribeOptions === SubscribeOptions.PUBLISH) {
 						await this.#publisher.refuseSubscribeNamespace(legacy.requestId, stream);
@@ -407,6 +407,12 @@ export class Connection implements Established {
 				if (this.#session.version < Version.DRAFT_18) {
 					throw new ProtocolViolation("SUBSCRIBE_TRACKS before draft-18");
 				}
+				const requestId = await Message.decode(stream.reader, async (reader) => {
+					const id = await reader.u62();
+					await reader.readAll();
+					return id;
+				});
+				this.#session.spendRequest(requestId);
 				await this.#publisher.runSubscribeTracks(stream);
 				break;
 			}
@@ -480,14 +486,27 @@ export class Connection implements Established {
 	 *
 	 * @returns undefined once refused.
 	 */
-	async #request<T>(stream: Stream, kind: RequestKind, decoded: Promise<T>): Promise<T | undefined> {
+	async #request<T extends { requestId: bigint }>(
+		stream: Stream,
+		kind: RequestKind,
+		decoded: Promise<T>,
+	): Promise<T | undefined> {
+		let msg: T;
 		try {
-			return await decoded;
+			msg = await decoded;
 		} catch (err) {
 			if (!(err instanceof MalformedAuthToken) || err.requestId === undefined) throw err;
+			this.#spend(err.requestId);
 			await this.#refuseToken(stream, kind, err.requestId);
 			return undefined;
 		}
+		this.#spend(msg.requestId);
+		return msg;
+	}
+
+	/** Spend a request's ID on draft 17+; the control stream adapter already spent it on earlier drafts. */
+	#spend(requestId: bigint) {
+		if (this.#session instanceof NativeSession) this.#session.spendRequest(requestId);
 	}
 
 	/** Refuse a request MALFORMED_AUTH_TOKEN, ending its stream. Mirrors Rust's `token::reject`. */

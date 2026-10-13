@@ -18,13 +18,14 @@ import {
 } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
-import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
+import { finalSequence, hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
-import { type Cursor, Reader, type Stream, UnexpectedEnd } from "../stream.ts";
+import { type Cursor, Reader, type Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
 import { Milli, type Timescale, type Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
@@ -153,8 +154,9 @@ export class Subscriber {
 	// PUBLISH_NAMESPACE and an inline NAMESPACE answering our own SUBSCRIBE_NAMESPACE are
 	// two messages about one source, which the MoQ Solicit draft requires us to tolerate.
 	// Counting them is what keeps the second from duplicating the announce and the first
-	// to end from retracting what the other still holds.
-	#announced = new Map<Path.Valid, { count: number; route: Route }>();
+	// to end from retracting what the other still holds. Each path holds one of the
+	// session's announce slots, however many advertisements reference it.
+	#announced: SlotMap<Path.Valid, { count: number; route: Route }>;
 
 	// Any consumers that want each new announcement, keyed by their local filter.
 	#announcedConsumers = new Map<announce.Producer, Filter>();
@@ -190,6 +192,7 @@ export class Subscriber {
 		solicit,
 		goaway,
 		grant,
+		limits = LIMITS,
 	}: {
 		/** The session abstraction for bidi streams and request IDs. */
 		session: Session;
@@ -205,9 +208,12 @@ export class Subscriber {
 		goaway?: GetPromise<Drain>;
 		/** The union of our tokens' grants (MoQ Auth), which bounds what we subscribe to. */
 		grant?: Getter<Grant | undefined>;
+		/** How many live requests the peer may hold. */
+		limits?: Limits;
 	}) {
 		this.#session = session;
 		this.#quic = quic;
+		this.#announced = new SlotMap(new Slots(limits.announces, { quic, reason: "too many announcements" }));
 		this.#cluster = cluster;
 		this.#hidden = hidden;
 		this.#solicit = solicit;
@@ -488,8 +494,8 @@ export class Subscriber {
 							if (live.has(path)) {
 								this.#updateAnnounce(path, route);
 							} else {
-								live.add(path);
 								this.#attachAnnounce(path, route);
+								live.add(path);
 							}
 						} else if (msgType === SubscribeNamespaceEntryDone.id) {
 							const entry = await SubscribeNamespaceEntryDone.decode(stream.reader, version);
@@ -1027,8 +1033,8 @@ export class Subscriber {
 
 			// Only now is the advertisement ours to announce, for the reason above: a
 			// consumer reacting with a SUBSCRIBE must not interleave with that OK.
-			attached = true;
 			this.#attachAnnounce(path, this.#route(msg.cluster));
+			attached = true;
 
 			// An advertisement is updated in place with REQUEST_UPDATE on the stream that
 			// already carries it, so read until the stream ends rather than waiting on the
@@ -1067,6 +1073,8 @@ export class Subscriber {
 					update = await PublishNamespaceUpdate.decode(stream.reader, version);
 				} catch (err) {
 					if (!(err instanceof MalformedAuthToken)) throw err;
+					// A refused update still spends its own request ID.
+					if (err.requestId !== undefined) this.#session.spendRequest(err.requestId);
 					// Section 8.9 rejects the update, which withdraws the advertisement as any
 					// refused update does. Only draft-17+ updates arrive here, so no Request ID.
 					await stream.writer.u53(RequestError.id);
@@ -1077,6 +1085,7 @@ export class Subscriber {
 					stream.close();
 					break;
 				}
+				this.#session.spendRequest(update.requestId);
 
 				// The parameters exist only on a session that negotiated the extension;
 				// anywhere else they are the peer's violation.
@@ -1208,41 +1217,13 @@ export class Subscriber {
 		};
 
 		try {
-			// FIRST_OBJECT clear is the publisher's claim that the stream starts partway
-			// through the group. The first Object ID is absolute either way, and IDs start
-			// at 0, so a clear bit on object 0 is still the whole group. Any other first ID,
-			// or a stream with no object, has a hole at the front: drop it and pick up at
-			// the next group.
-			//
-			// Drafts before the bit cannot say this in the header. A non-zero delta on the
-			// first object is the same hole, and the catch below drops that stream too. A
-			// later gap, or a header that claimed the group starts at object 0, still fails
-			// it: `Frame.decode` refuses every non-zero delta.
-			if (!group.flags.firstObject) {
-				let id: bigint | undefined;
-				try {
-					const peek = await race([stream.peekU62(), track.closed]);
-					if (typeof peek !== "bigint") {
-						stream.stop(peek ?? new StreamError(StreamCode.Cancel));
-						return;
-					}
-					id = peek;
-				} catch (err: unknown) {
-					if (!(err instanceof UnexpectedEnd)) throw err;
-				}
-				if (id !== 0n) {
-					console.debug(`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`);
-					stream.stop(new Error("a group must start at object 0"));
-					return;
-				}
-			}
-
 			// The alias binds after SUBSCRIBE_OK commits the track property; an omitted
 			// header priority inherits it (draft-21 section 10.4).
 			if (!group.flags.hasPriority) group.publisherPriority = toWire((await track.info()).priority);
 
 			const timescale = this.#timescales.get(group.trackAlias);
 			const decode = (c: Cursor) => Frame.decode(c, group.flags, timescale);
+			let nextObject = 0;
 			for (;;) {
 				// Every object already buffered is written without an await, so the reader wakes
 				// once per batch rather than once per object. Only the group's own stream ends it:
@@ -1255,19 +1236,32 @@ export class Subscriber {
 					stream.stop(frame ?? new StreamError(StreamCode.Cancel));
 					return;
 				}
-				if (!frame || frame instanceof Error) break;
+				if (!frame || frame instanceof Error) {
+					// FIRST_OBJECT clear on a stream that ends with no object: it starts partway
+					// through its group and carries none of it, so drop it like any headless
+					// stream. Drafts 14-17 cannot clear the bit, so there it is an empty group.
+					if (!producer && !group.flags.firstObject) {
+						console.debug(
+							`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`,
+						);
+						stream.stop(new Error("a group must start at object 0"));
+						return;
+					}
+					break;
+				}
 
 				if (frame.endOfTrack) {
 					// No object at or past this location exists: after the group's last object
 					// the track ends with it, and at object 0 it ends before it.
-					const end = producer ? group.groupId + 1 : group.groupId;
+					if (producer && frame.idDelta !== 0) throw new ObjectIdGap(frame.idDelta);
+					const end = { group: group.groupId, frame: nextObject + frame.idDelta };
 					producer?.close();
 					try {
-						track.finishAt(end);
+						hooks.endTrack(track, end);
 					} catch (err: unknown) {
 						throw new ProtocolViolation(`invalid END_OF_TRACK: ${reason(error(err))}`);
 					}
-					subscription.end ??= end;
+					subscription.end ??= finalSequence(end);
 					return;
 				}
 				if (frame.payload === undefined) break;
@@ -1280,6 +1274,7 @@ export class Subscriber {
 					});
 				}
 				open().writeFrame({ payload: frame.payload, timestamp: frame.timestamp });
+				nextObject += 1;
 			}
 
 			// A group with no objects still exists.
@@ -1290,7 +1285,11 @@ export class Subscriber {
 			// with no FIRST_OBJECT bit, that non-zero delta is a headless group: drop the
 			// stream and leave the subscription up for the next group. Delivering the
 			// object would renumber a P-frame as the keyframe the group opens with.
-			if (producer === undefined && e instanceof ObjectIdGap && !hasFirstObjectBit(this.#session.version)) {
+			if (
+				producer === undefined &&
+				e instanceof ObjectIdGap &&
+				(!group.flags.firstObject || !hasFirstObjectBit(this.#session.version))
+			) {
 				console.debug(`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`);
 				stream.stop(new Error("a group must start at object 0"));
 				return;

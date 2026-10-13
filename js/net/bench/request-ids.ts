@@ -1,5 +1,5 @@
 // Request-ID admission cost across independent sessions and reordered windows.
-import { ControlStreamAdapter } from "../src/ietf/adapter.ts";
+import { ControlStreamAdapter, SpentIds } from "../src/ietf/adapter.ts";
 import { Version } from "../src/ietf/version.ts";
 import { Stream } from "../src/stream.ts";
 
@@ -77,4 +77,31 @@ try {
 	}
 } finally {
 	console.debug = debug;
+}
+
+// Draft 17+ has no MAX_REQUEST_ID window, yet still remembers skipped runs to refuse reuse.
+console.log("modern_mode,sessions,requests,admit_us,accepted");
+for (const mode of ["ordered", "reordered", "scattered"]) {
+	for (const sessions of [1, 8, 32]) {
+		for (const requests of [8, 128, 220_000]) {
+			const ids = order(mode, requests);
+			const rounds = Math.max(1, Math.floor(8192 / requests));
+			let elapsed = 0;
+			let accepted = 0;
+			for (let round = 0; round < rounds; round++) {
+				const receivers = Array.from({ length: sessions }, () => new SpentIds(0n));
+				const start = performance.now();
+				for (const receiver of receivers) {
+					for (const id of ids) {
+						receiver.spend(id);
+						accepted++;
+					}
+				}
+				elapsed += performance.now() - start;
+			}
+			console.log(
+				`modern-${mode},${sessions},${requests},${((elapsed * 1000) / rounds).toFixed(2)},${accepted / rounds}`,
+			);
+		}
+	}
 }

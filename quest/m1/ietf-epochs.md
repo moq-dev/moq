@@ -73,12 +73,9 @@ Public API: expose negotiation through the existing extension configuration
 and reuse the epoch model in Rust and JS. Wire: an opt-in IETF identity
 extension; no changes to unnegotiated published versions or broadcast paths.
 
-## Required
-
-- [Setup extensions](/quest/m1/auth/extensions.md) - the common configuration for offering extensions
-
 ## Related
 
+- [#5106](https://github.com/moq-dev/moq/pull/5106) - landed the common configuration for offering extensions
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - current lite-07 identity and legacy restart behavior
 - [Announcement takeover](/quest/m1/announce-takeover.md) - shared continuity model and lite-07 operation
 - [IETF takeover](/quest/m1/ietf-takeover.md) - independently advertised continuation of a claim-served instance

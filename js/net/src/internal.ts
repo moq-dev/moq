@@ -12,7 +12,7 @@ import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from
 import { isAnonymous, type Route } from "./hop.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
-import type { Groups, Producer, Request, Subscriber } from "./track.ts";
+import type { Groups, Location, Producer, Request, Subscriber } from "./track.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
 /** Normalize public group bounds into an inclusive start and exclusive end. */
@@ -134,8 +134,19 @@ export interface TrackRequestOptions {
 	pending: Set<Request>;
 }
 
+/** The first group an exclusive track end excludes whole: one past the last group that may exist. */
+export function finalSequence(end: Location): number {
+	return end.group + (end.frame === 0 ? 0 : 1);
+}
+
 /** Hooks assigned in static blocks by the owning class. */
 export const hooks: {
+	/**
+	 * Declare the end a wire subscription received: repeating it is a no-op, and a mid-group
+	 * end may refine the group boundary it falls just before. Throws `ProtocolViolation` on
+	 * any other second end. Mirrors the Rust `finish_at_pending`; assigned by `track.ts`.
+	 */
+	endTrack: (producer: Producer, end: Location) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
 	/** Access the existing producer while a request awaits immutable wire metadata. */
@@ -166,6 +177,11 @@ export const hooks: {
 	 * Throws `TimestampMismatch` if a buffered frame already disagrees.
 	 */
 	bindGroupTimed: (group: GroupProducer, timed: boolean) => void;
+	/**
+	 * Cap a group at `frames` for a track end inside it, so later writes past it throw.
+	 * Throws `ProtocolViolation` if a frame at or past the cap already exists.
+	 */
+	limitGroup: (group: GroupProducer, frames: number) => void;
 	/** Return a group's first timestamp, retained even after its first frame is read. */
 	groupTimestamp: (group: GroupConsumer) => Timestamp | undefined;
 	groupLatest: (group: GroupConsumer) => Timestamp | undefined;
@@ -190,6 +206,9 @@ export const hooks: {
 	/** Name the epoch of the route an origin resolved a broadcast handle through. */
 	stampEpoch: (target: BroadcastConsumer, epoch: Epoch.Valid | undefined) => void;
 } = {
+	endTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
 	makeRequest: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -209,6 +228,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	bindGroupTimed: () => {
+		throw new Error("group.ts not loaded");
+	},
+	limitGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupTimestamp: () => {

@@ -23,6 +23,17 @@ that predates the stream. Node-bound peer grants for direct sessions belong to
 
 Decisions settled while planning, recorded so review does not relitigate them:
 
+- **Per-request boundary (2026-10-12).** Request tokens are an experimental
+  Rust interoperability hook with application-owned verification, retaining
+  renewal. They are not a complete authentication scheme or a relay feature.
+  Local session permission may admit an incoming request; grants received
+  from the peer may not. The shared acceptor queue distinguishes session and
+  request events with separate acceptance handles. This is an intentional
+  Rust API change, not an optional scope field on the existing acceptor.
+  Per-request relay integration, JS APIs, CLI, and bindings are deferred;
+  session AUTH work continues. Document the hook only in minimal API comments,
+  with no feature page or guide. The relay request-lease quest is related
+  future work, no longer required to complete this epic.
 - **One AUTH stream per token, opened by whoever presents it.** Either side of
   a session may open one; the acceptor answers with the grant that token
   earns. A moq-net session opens one on both sides right after SETUP with an
@@ -88,8 +99,9 @@ Decisions settled while planning, recorded so review does not relitigate them:
   SUBSCRIBE_OK. Rust is `moq_net::auth` with `auth::Grant`, `auth::Handle`,
   `auth::Token`, and `auth::Request`; JS mirrors as `connection.auth`.
 
-Everything here is additive: `Session::auth()` is new, and the relay derives
-the grant from the origin handles it already scopes. Decided 2026-10-05: wire
+`Session::auth()` is additive, while the request-token hook intentionally
+changes the Rust acceptor API as described above. The relay derives the grant
+from the origin handles it already scopes. Decided 2026-10-05: wire
 work targets the wip lite version until the maintainer cuts it, never a
 published version in place, so AUTH lands in `moq-lite-07-wip` (or whichever
 version is wip then), not lite-06. The UNAUTHORIZED stream code stays on lite-06
@@ -99,21 +111,12 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 ## Required
 
 - [WebSocket refusal](/quest/m1/auth/ws-unauthorized.md) - the relay serves WebSocket through moq-tokio, so a refused token closes the session as Unauthorized, as QUIC does
-- [Lite NOT_SUPPORTED](/quest/m1/auth/not-supported.md) - a lite acceptor answers AUTH_ERROR NOT_SUPPORTED after a grant too, with a lite session code for `Error::Unsupported`
-- [AUTH violations](/quest/m1/auth/violations.md) - every AUTH protocol violation closes the session in Rust and JS, lite and IETF
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - the relay verifies tokens
   sent in band, unions their grants, and cancels only work that loses access
-- [Request-token decode](/quest/m1/auth/request-token-decode.md) - an
-  `AUTHORIZATION TOKEN` on a moq-transport request decodes by the draft's
-  rules, closing the session on the forms the draft forbids
-- [Setup extensions](/quest/m1/auth/extensions.md) - a side declares which
-  Setup extensions it offers with one `Extensions` struct
-- [Request tokens](/quest/m1/auth/request-token.md) - a token on a
-  moq-transport request authorizes that request and renews it in band
+- [Request tokens](/quest/m1/auth/request-token.md) - an experimental Rust
+  verifier hook confines a token's authority to its request and renews it
 - [Request gate](/quest/m1/auth/request-gate.md) - every incoming request is
   refused up front and held to the grant through a gate its dispatcher owns
-- [Request leases](/quest/m1/auth/request-lease.md) - moq-relay honors a
-  request token with a lease of its own
 - [Expired token error](/quest/m1/auth/expired-error.md) - an expired token
   reports `Error::Expired`, not `Unauthorized`, in Rust, JS, and the bindings
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
@@ -124,6 +127,12 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 
 ## Related
 
+- [Request leases](/quest/m3/auth-request-lease.md) - deferred relay
+  integration, to revisit when a consumer needs per-request verification
+- [#5107](https://github.com/moq-dev/moq/pull/5107) - landed request-token
+  decoding, including session-fatal REQUEST_UPDATE decode failures
+- [#5106](https://github.com/moq-dev/moq/pull/5106) - landed setup extension
+  configuration
 - [Malformed grant](https://github.com/moq-dev/moq/pull/5256) - a malformed or
   non-canonical grant pattern, or an out-of-range `Expires`, closes the
   session with PROTOCOL_VIOLATION in Rust and JS
@@ -131,3 +140,5 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 
 - [Peer grants](/quest/m3/p2p/peer-grant.md) - P2P's node-bound credential,
   built on this line's relay tokens
+
+- [#5269](https://github.com/moq-dev/moq/pull/5269) - explicit Lite AUTH NOT_SUPPORTED, including grant updates
