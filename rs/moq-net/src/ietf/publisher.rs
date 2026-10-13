@@ -2128,7 +2128,8 @@ where
 	/// retracts with NAMESPACE_DONE. Otherwise each advertisement rides its own
 	/// PUBLISH_NAMESPACE request: an update is a REQUEST_UPDATE **on the stream that
 	/// already carries it**, since a second stream would leave two claiming one
-	/// namespace, and a withdrawal closes the request with PUBLISH_NAMESPACE_DONE.
+	/// namespace, and a withdrawal cancels the request (PUBLISH_NAMESPACE_DONE before
+	/// draft-17).
 	async fn sync_namespace(
 		&self,
 		ns: &mut Namespaces<S>,
@@ -2396,7 +2397,7 @@ where
 			ietf::RequestError::ID => {
 				let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
 				tracing::warn!(message = ?msg, "publish_namespace update error");
-				// The peer closed its side; finishing ours completes the withdrawal.
+				// The peer closed its side; closing ours completes the withdrawal.
 				self.withdraw_namespace(target, requests, suffix.clone()).await?;
 				Ok(self.refusal(msg.retry_interval))
 			}
@@ -2467,8 +2468,8 @@ where
 		.await
 	}
 
-	/// Withdraw an advertised namespace: NAMESPACE_DONE inline, or PUBLISH_NAMESPACE_DONE
-	/// closing the request that carried it.
+	/// Withdraw an advertised namespace: NAMESPACE_DONE inline, or end the request that
+	/// carried it (PUBLISH_NAMESPACE_DONE before draft-17, a cancel after).
 	async fn withdraw_namespace(
 		&self,
 		target: &mut Target<S>,
@@ -2478,23 +2479,23 @@ where
 		match target {
 			Target::Requests(_) => {
 				if let Some(mut request) = requests.remove(&suffix) {
-					// Draft-19+ FIN only ends updates; withdrawal must cancel both directions.
-					if !super::request_stream::fin_cancels(self.version) {
+					// Draft-17+ withdraws by cancelling the request in both directions; a FIN
+					// is only allowed to end SUBSCRIBE_NAMESPACE and SUBSCRIBE_TRACKS.
+					if !matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 						request.stream.reader.abort(&Error::Cancel);
 						request.stream.writer.abort(&Error::Cancel);
 						return Ok(());
 					}
-					if matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
-						// Best effort: the peer may already be gone.
-						let _ = request
-							.stream
-							.writer
-							.encode_message(&ietf::PublishNamespaceDone {
-								track_namespace: request.path.as_path(),
-								request_id: request.request_id,
-							})
-							.await;
-					}
+
+					// Best effort: the peer may already be gone.
+					let _ = request
+						.stream
+						.writer
+						.encode_message(&ietf::PublishNamespaceDone {
+							track_namespace: request.path.as_path(),
+							request_id: request.request_id,
+						})
+						.await;
 
 					// The withdrawal rides this request's own stream, which drops with it, so
 					// it needs the acknowledgement before the drop-time reset can discard it.
@@ -8352,6 +8353,60 @@ mod tests {
 			"PUBLISH_NAMESPACE without a SUBSCRIBE_NAMESPACE"
 		);
 		assert_eq!(log.bi_opens(), 1, "one request stream");
+	}
+
+	/// From draft-17 a PUBLISH_NAMESPACE is withdrawn by cancelling its request: reset
+	/// plus STOP_SENDING. A FIN there is a protocol violation some peers close on.
+	#[moq_net_sim::test]
+	async fn publish_namespace_withdraws_by_reset_from_draft_17() {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft19, Version::Draft22] {
+			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let local = origin.announce("local-cam", crate::origin::Route::default()).unwrap();
+			settle().await;
+
+			let session =
+				crate::lite::test_transport::ScriptedSession::per_stream(vec![publish_namespace_ok(version).await]);
+			let log = session.log.clone();
+			let peer_setup = peer::PeerSetup::default();
+			peer_setup.set(peer::Peer::default());
+			let publisher = Publisher::new(
+				crate::time::Clock::sim(),
+				session,
+				origin.consume(),
+				Control::new(None, false),
+				None,
+				peer_setup,
+				version,
+			);
+
+			let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+			for _ in 0..100 {
+				assert!(futures::poll!(run.as_mut()).is_pending());
+				if occurrences(&log, b"local-cam") >= 1 {
+					break;
+				}
+				settle().await;
+			}
+			assert_eq!(occurrences(&log, b"local-cam"), 1, "{version}: PUBLISH_NAMESPACE");
+
+			drop(local);
+			for _ in 0..100 {
+				assert!(futures::poll!(run.as_mut()).is_pending());
+				if !log.resets().is_empty() {
+					break;
+				}
+				settle().await;
+			}
+
+			let cancelled = crate::ietf::error::CANCELLED;
+			assert_eq!(log.resets(), vec![cancelled], "{version}: reset");
+			assert_eq!(log.stops(), vec![cancelled], "{version}: STOP_SENDING");
+			assert!(
+				!log.trail().iter().any(|(_, sent)| *sent == crate::lite::test_transport::Sent::Finish),
+				"{version}: FIN"
+			);
+			assert!(log.closes().is_empty(), "{version}: the session closed");
+		}
 	}
 
 	/// ACTIVE_COUNT only answers SUBSCRIBE_NAMESPACE (MoQ Active Count), so one on the OK
