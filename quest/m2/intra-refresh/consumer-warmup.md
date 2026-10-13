@@ -19,21 +19,18 @@ This absorbs the old gradual-recovery quest, which planned to carry
 `recovery_frame_cnt` on the wire and count `frame_num`. The catalog duration
 replaces both: the rule is timestamp arithmetic on the group start.
 
-- Withhold rule, keyed on the same non-continuous signal in both consumers:
-  `js/hang/src/container/consumer.ts` `next()` reports `continuous: false`
-  after a subscribe, a declared discontinuity, or any skip (`#gap`). The Rust
-  `moq_mux::container::Consumer` gains the equivalent in
-  [Rust non-continuous signal](/quest/m1/rust-continuous.md)
-  (today `poll_read` returns a bare frame and only the `discontinuity()`
-  counter moves); this quest reuses it, and
-  `rs/moq-video/src/decode/consumer.rs` propagates it. For the first
-  group after that signal, every frame is decoded (the decoder needs them to
+- Withhold rule, keyed on the gap item both container reads yield before the
+  first frame and after any skip: `{ kind: "gap" }` from
+  `js/hang/src/container/consumer.ts` `next()` and `Read::Gap` from the Rust
+  `moq_mux::container::Consumer`, which `rs/moq-video/src/decode/consumer.rs`
+  reads directly. A declared end is not a gap and keeps everything. For the
+  first group after a gap, every frame is decoded (the decoder needs them to
   build reference state) and frames stamped below `group.start + warmup` are
   not presented; frames stamped at or above that boundary are, so the recovery
   picture itself is never withheld. `js/watch/src/video/decoder.ts` and
   `rs/moq-video/src/decode` are where presentation happens; the transcoder
   gets the skip for free because it consumes the same decode path. Keep the
-  last painted frame on screen, as `#onDiscontinuity` already does.
+  last painted frame on screen, as `#onBreak` already does.
 - IDR exception: before withholding, check the first slice NAL type of the
   group's first frame (H.264 type 5; H.265 `IDR_W_RADL`, `IDR_N_LP`, the BLA
   types). Rust has the NAL walkers in `rs/moq-mux/src/codec/{h264,h265}`;
@@ -61,7 +58,6 @@ replaces both: the rule is timestamp arithmetic on the group start.
 ## Required
 
 - [Plan: recovery boundaries](/quest/m2/intra-refresh/plan-boundary.md) - consumers need a safe boundary before presenting the affected pictures
-- [Rust non-continuous signal](/quest/m1/rust-continuous.md) - the Rust signal this keys on
 
 ## Related
 

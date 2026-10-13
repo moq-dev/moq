@@ -401,6 +401,35 @@ fn an_abandoned_handshake_closes_the_connection() {
 	client.join().expect("client thread");
 }
 
+/// A handshake dropped before its first poll, as when its deadline has already
+/// passed, still closes the connection.
+#[test]
+fn an_unpolled_handshake_closes_the_connection() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let endpoint = h3_endpoint(&handle, &certs);
+	let addr = endpoint.local_addr();
+
+	let client = noq_client_err(format!("https://{addr}/"));
+
+	worker
+		.block_on(async move {
+			let conn = endpoint.accept().await.expect("accept");
+			let mut watch = conn.clone();
+			drop(quic::web::Request::accept(conn));
+			within(
+				&handle,
+				"the unpolled handshake's connection to close",
+				std::future::poll_fn(|cx| watch.poll_closed(cx)),
+			)
+			.await;
+		})
+		.expect("worker");
+
+	client.join().expect("client thread");
+}
+
 /// A rejection reaches the peer as the status it was sent.
 ///
 /// The HTTP/3 critical streams (the peer's control and QPACK streams, and

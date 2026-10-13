@@ -3,7 +3,7 @@
  *
  * Every frame is written into its group at the instant the trace says it arrived, and the player's
  * real `Container.Consumer` decides what to deliver, wait for, and skip, at the max delay the delay
- * sets. Delivered frames go into the real ring, and a discontinuity resets it, the way the decoder
+ * sets. Delivered frames go into the real ring, and a new codec epoch resets it, the way the decoder
  * does. One render quantum is read every quantum's worth of that same clock, which is what the
  * AudioWorklet does. A real {@link Sync} resolves the delay from the playout target the decoder
  * registers, measured by that same consumer from the recorded catalog config, and the ring follows
@@ -221,7 +221,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			const next = await consumer.next();
 			if (!next) return;
 			if (terminal.update(next)) ring.reset();
-			if (next.end !== undefined || !next.frame) continue;
+			if (next.kind !== "frame") continue;
 
 			const { timestamp } = next.frame;
 			const length = samples.get(timestamp);

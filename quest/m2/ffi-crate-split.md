@@ -74,6 +74,12 @@ If the spike passes, migrate:
   backs the flat `moq::Media*` names that `cpp/obs/src` uses.
 - Update `doc/lib`, the Unreleased section of `doc/setup/upgrade.md`, and the
   ffi-shape Plan.
+- Review the import-side media names under the same rule (decided
+  2026-10-13 instead of a separate quest). `MoqMediaContainerStreamProducer`
+  (`media.ContainerStreamProducer`) is still five words, and "Container" there
+  means an importer that recovers framing from a raw byte stream and may publish
+  several tracks, unlike the per-track consumers #5356 renamed to
+  `media.TrackConsumer` and `media.GroupConsumer`.
 - Run `just test interop --all`.
 
 The migration lands after [Codecs](/quest/m1/ffi-shape/codec.md), so it does

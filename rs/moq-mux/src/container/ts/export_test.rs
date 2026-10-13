@@ -1431,7 +1431,7 @@ async fn export_scte35_roundtrip() {
 		.unwrap();
 	let mut scte_reader = crate::container::Consumer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 	let frame = scte_reader
-		.read()
+		.read_frame()
 		.await
 		.unwrap()
 		.expect("no SCTE-35 frame after round-trip");
@@ -1550,7 +1550,7 @@ async fn export_pes_verbatim_roundtrip() {
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 	let frame = reader
-		.read()
+		.read_frame()
 		.await
 		.unwrap()
 		.expect("no verbatim PES frame after round-trip");
@@ -1628,7 +1628,7 @@ async fn read_frames(consumer: &moq_net::broadcast::Consumer, name: &str, kind: 
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy(kind));
 	let mut frames = Vec::new();
-	while let Ok(res) = tokio::time::timeout(Duration::from_millis(50), reader.read()).await {
+	while let Ok(res) = tokio::time::timeout(Duration::from_millis(50), reader.read_frame()).await {
 		let Some(frame) = res.unwrap() else { break };
 		frames.push(frame.payload.to_vec());
 	}
@@ -2209,7 +2209,7 @@ async fn read_cues(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<(
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 	let mut cues = Vec::new();
-	while let Ok(res) = tokio::time::timeout(Duration::from_millis(50), reader.read()).await {
+	while let Ok(res) = tokio::time::timeout(Duration::from_millis(50), reader.read_frame()).await {
 		let Some(frame) = res.unwrap() else { break };
 		cues.push((frame.payload.to_vec(), frame.timestamp));
 	}

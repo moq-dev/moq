@@ -1099,7 +1099,8 @@ impl Pump {
 				// This rendition is being torn down (its run ended, or a catalog update replaced it).
 				_ = cancel.changed() => return None,
 				frame = track.read() => match frame {
-					Ok(Some(frame)) => {
+					Ok(Some(moq_mux::container::Read::Gap | moq_mux::container::Read::End { .. })) => {}
+					Ok(Some(moq_mux::container::Read::Frame { frame, .. })) => {
 						// PTS restarts at zero with every pump, so the segment places that zero at the
 						// current running time, or a synced sink would drop a restarted run as late.
 						let segment = reference_ts.is_none().then(|| {

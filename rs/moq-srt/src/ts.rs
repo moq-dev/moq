@@ -647,10 +647,9 @@ mod tests {
 
 		let track = broadcast.track(name.as_str()).unwrap().subscribe(None).await.unwrap();
 		let mut reader = moq_mux::container::Consumer::new(track, Container::Legacy(moq_mux::container::Kind::Data));
-		let cue = timeout(Duration::from_secs(5), reader.read())
+		let cue = timeout(Duration::from_secs(5), next_frame(&mut reader))
 			.await
 			.expect("cue read timed out")
-			.unwrap()
 			.expect("a published cue section");
 		let expected_cue = cue.payload;
 		assert_eq!(expected_cue[0], 0xFC, "a verbatim splice_info_section (table_id 0xFC)");
@@ -696,15 +695,24 @@ mod tests {
 			.expect("SRT egress preserves the SCTE-35 track");
 		let track = roundtrip_consumer.track(name).unwrap().subscribe(None).await.unwrap();
 		let mut reader = moq_mux::container::Consumer::new(track, Container::Legacy(moq_mux::container::Kind::Data));
-		let cue = timeout(Duration::from_secs(5), reader.read())
+		let cue = timeout(Duration::from_secs(5), next_frame(&mut reader))
 			.await
 			.expect("round-trip cue read timed out")
-			.unwrap()
 			.expect("SRT egress preserves a cue section");
 		assert_eq!(cue.payload[0], 0xFC, "the round-trip cue is a splice_info_section");
 		assert_eq!(
 			cue.payload, expected_cue,
 			"SRT egress preserves the complete cue section"
 		);
+	}
+
+	/// The next frame, passing over gaps and ends.
+	async fn next_frame(reader: &mut moq_mux::container::Consumer<Container>) -> Option<moq_mux::container::Frame> {
+		loop {
+			match reader.read().await.unwrap()? {
+				moq_mux::container::Read::Frame { frame, .. } => return Some(frame),
+				moq_mux::container::Read::Gap | moq_mux::container::Read::End { .. } => continue,
+			}
+		}
 	}
 }
