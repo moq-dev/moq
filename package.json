@@ -22,14 +22,10 @@
 		"check": "bun run --filter='*' check",
 		"fix": "bun run --filter='*' fix"
 	},
-	"trustedDependencies": [
-		"@fails-components/webtransport-transport-http3-quiche"
-	],
 	"type": "module",
 	"workspaces": [
 		"doc",
 		"js/net",
-		"js/clock",
 		"js/pattern",
 		"js/auth",
 		"js/flate",

@@ -1,7 +1,7 @@
 //! One clock for Media over QUIC.
 //!
 //! - [`Instant`] is a logical point on the monotonic clock, in nanoseconds from
-//!   the clock's origin, with [`std::time::Instant`]'s methods. [`Timestamp`] is
+//!   the clock's origin, with [`std::time::Instant`]'s methods. [`Wall`] is
 //!   wall time from the same clock, kept a separate type so wall time never
 //!   measures elapsed time.
 //! - Caller-driven state machines take `now` and never read a clock. They arm
@@ -24,13 +24,13 @@ mod runtime;
 #[cfg(feature = "sim")]
 pub mod sim;
 mod timer;
-mod timestamp;
+mod wall;
 
 pub use deadline::{Deadline, Deadlines};
 pub use instant::Instant;
 pub use manual::Manual;
 pub use timer::{Elapsed, Interval, MissedTickBehavior, Sleep, Timeout, drive, interval, sleep, sleep_until, timeout};
-pub use timestamp::{OutOfRange, Timestamp};
+pub use wall::{OutOfRange, Wall};
 
 /// Run an `async fn` test to completion on [`sim::run`].
 #[cfg(feature = "sim")]
@@ -56,7 +56,7 @@ pub fn now() -> Instant {
 /// # Panics
 ///
 /// When the host's wall clock reads before 1970.
-pub fn wall() -> Timestamp {
+pub fn wall() -> Wall {
 	#[cfg(feature = "sim")]
 	if let Some(wall) = sim::wall() {
 		return wall;

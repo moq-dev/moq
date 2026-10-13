@@ -10,11 +10,16 @@ use std::{
 /// wall time can be stepped, forward or back, without any monotonic time passing,
 /// so it never measures elapsed time. Times before 1970 are unrepresentable.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Timestamp(u64);
+pub struct Wall(u64);
 
-impl Timestamp {
+impl Wall {
 	/// 1970-01-01T00:00:00Z.
 	pub const UNIX_EPOCH: Self = Self(0);
+
+	/// `secs` whole seconds after the Unix epoch, for constants.
+	pub(crate) const fn from_unix_secs(secs: u64) -> Self {
+		Self(secs * 1_000_000_000)
+	}
 
 	/// The current wall time on the ambient clock.
 	pub fn now() -> Self {
@@ -44,33 +49,33 @@ impl Timestamp {
 	}
 }
 
-impl Add<Duration> for Timestamp {
+impl Add<Duration> for Wall {
 	type Output = Self;
 
-	/// Panics past 2554; see [`Timestamp::checked_add`].
+	/// Panics past 2554; see [`Wall::checked_add`].
 	fn add(self, duration: Duration) -> Self {
 		self.checked_add(duration)
 			.expect("overflow when adding duration to timestamp")
 	}
 }
 
-impl Sub<Duration> for Timestamp {
+impl Sub<Duration> for Wall {
 	type Output = Self;
 
-	/// Panics before 1970; see [`Timestamp::checked_sub`].
+	/// Panics before 1970; see [`Wall::checked_sub`].
 	fn sub(self, duration: Duration) -> Self {
 		self.checked_sub(duration)
 			.expect("overflow when subtracting duration from timestamp")
 	}
 }
 
-impl From<Timestamp> for std::time::SystemTime {
-	fn from(timestamp: Timestamp) -> Self {
-		Self::UNIX_EPOCH + Duration::from_nanos(timestamp.0)
+impl From<Wall> for std::time::SystemTime {
+	fn from(wall: Wall) -> Self {
+		Self::UNIX_EPOCH + Duration::from_nanos(wall.0)
 	}
 }
 
-/// A [`std::time::SystemTime`] before 1970 or past 2554.
+/// A [`std::time::SystemTime`] before 1970 or past 2554, outside [`Wall`]'s range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutOfRange;
 
@@ -82,7 +87,7 @@ impl fmt::Display for OutOfRange {
 
 impl std::error::Error for OutOfRange {}
 
-impl TryFrom<std::time::SystemTime> for Timestamp {
+impl TryFrom<std::time::SystemTime> for Wall {
 	type Error = OutOfRange;
 
 	fn try_from(time: std::time::SystemTime) -> Result<Self, OutOfRange> {
@@ -93,9 +98,9 @@ impl TryFrom<std::time::SystemTime> for Timestamp {
 	}
 }
 
-impl fmt::Debug for Timestamp {
+impl fmt::Debug for Wall {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		write!(f, "Timestamp({:?} since 1970)", Duration::from_nanos(self.0))
+		write!(f, "Wall({:?} since 1970)", Duration::from_nanos(self.0))
 	}
 }
 
@@ -105,20 +110,20 @@ mod tests {
 
 	#[test]
 	fn steps_either_way_without_wrapping() {
-		let wall = Timestamp::UNIX_EPOCH + Duration::from_secs(10);
+		let wall = Wall::UNIX_EPOCH + Duration::from_secs(10);
 		let back = wall - Duration::from_secs(4);
 		assert_eq!(wall.checked_duration_since(back), Some(Duration::from_secs(4)));
 		assert_eq!(back.checked_duration_since(wall), None);
 		assert_eq!(back.saturating_duration_since(wall), Duration::ZERO);
-		assert_eq!(Timestamp::UNIX_EPOCH.checked_sub(Duration::from_nanos(1)), None);
+		assert_eq!(Wall::UNIX_EPOCH.checked_sub(Duration::from_nanos(1)), None);
 	}
 
 	#[test]
 	fn converts_with_system_time() {
-		let wall = Timestamp::UNIX_EPOCH + Duration::from_millis(1_700_000_000_123);
+		let wall = Wall::UNIX_EPOCH + Duration::from_millis(1_700_000_000_123);
 		let system = std::time::SystemTime::from(wall);
-		assert_eq!(Timestamp::try_from(system), Ok(wall));
+		assert_eq!(Wall::try_from(system), Ok(wall));
 		let before = std::time::SystemTime::UNIX_EPOCH - Duration::from_secs(1);
-		assert_eq!(Timestamp::try_from(before), Err(OutOfRange));
+		assert_eq!(Wall::try_from(before), Err(OutOfRange));
 	}
 }

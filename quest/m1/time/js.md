@@ -1,10 +1,10 @@
-# [M] @moq/time
+# [M] @moq/clock
 
 ## Goal
 
-A published `js/time` package, `@moq/time`, mirrors `moq-clock`: an `Instant`
+A published `js/clock` package, `@moq/clock`, mirrors `moq-clock`: an `Instant`
 (a `number` of nanoseconds from the clock's origin), the `Milli`, `Micro`,
-`Nano`, and `Second` duration units, a wall-clock timestamp, and ambient
+`Nano`, and `Second` duration units, a `Wall` wall-clock time, and ambient
 `now()`, `wall()`, `sleep()`, `timeout()`, and `interval()` that resolve to
 an installed clock (by default `performance.now()`, `Date.now()`, and
 `setTimeout`). Tests install a `Manual` clock with scoped restore
@@ -14,15 +14,17 @@ workerd test runner's RPC timers, for one) stay real. `doc/lib/js` documents
 it.
 
 It lands additively on `main`; `@moq/net` keeps its own units until
-[JS on @moq/time](/quest/m1/time/js-migrate.md).
+[JS on @moq/clock](/quest/m1/time/js-migrate.md).
 
 ## Plan
 
 The design decisions are in [the line's README](/quest/m1/time/README.md).
 
-Open: mirror the Rust name as `@moq/clock`, or keep `@moq/time`. `@moq/clock`
-is unpublished on npm but names the private `js/clock` demo (bin
-`moq-clock`), which would need renaming first.
+Named `@moq/clock` to mirror `moq-clock` (decided 2026-10-13 by the
+maintainer). The name is unpublished on npm; the private CLOCK demo that held
+it in `js/clock` was deleted in #5465. A `Manual` clock starts where Rust's
+does: instant zero and 2025-01-01 UTC wall time.
+
 The installed clock is per JS realm (a page, a worker, a test file), the JS
 equivalent of one clock per runtime. Match the timer semantics `moq-clock`
 settled and tests: an already-reached deadline fires at once, equal deadlines

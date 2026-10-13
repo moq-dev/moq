@@ -3,7 +3,7 @@
 ## Goal
 
 Every MoQ crate and package reads time and arms timers only through
-`moq-clock` (Rust) or `@moq/time` (JS), with the production and public API migrations completed in m1. Tests
+`moq-clock` (Rust) or `@moq/clock` (JS), with the production and public API migrations completed in m1. Tests
 needed to prove these changes use controlled time. The backend is
 the current runtime's (tokio, browser, io_uring, or the simulator), so the
 same logic runs on each and a test can swap in simulated time.
@@ -38,8 +38,9 @@ reasons, so later sessions don't reopen them:
   name is ours: the "CLOCK over QUIC" demo binary held it until 0.10.21 and
   stopped publishing when #1488 and #1494 made it the moq-tokio `clock`
   example. The library publishes as 0.11.0, a semver break from the demo.
-  Whether `@moq/time` follows as `@moq/clock` is open in
-  [@moq/time](/quest/m1/time/js.md).
+  The JS mirror is `@moq/clock` (same decision), and the private JS CLOCK
+  demo that held that name is gone. Wall time is `moq_clock::Wall`, so it
+  never reads as `moq_net::Timestamp` (media time).
 - **The instant is logical:** `Instant(u64)` nanoseconds from the clock's
   origin, so a test starts at zero with fixed coordinates and never reads the
   host clock. Native, wasm, and io_uring instants convert at the backend.
@@ -95,9 +96,10 @@ cleanup and the global lint ratchet belong to
 
 ## Required
 
-- [@moq/time](/quest/m1/time/js.md) - the same model in JS, with an installable clock
+- [@moq/clock](/quest/m1/time/js.md) - the same model in JS, with an installable clock
+- [moq-clock's browser backend runs in CI](/quest/m1/time/wasm-test.md) - a wasm-bindgen-test suite runs the browser backend in headless Chromium
 - [moq-net on moq-clock](/quest/m1/time/net.md) - moq-net, moq-mux, moq-stats, moq-room, and moq-ffi run on moq-clock and moq-net-sim is gone
-- [JS on @moq/time](/quest/m1/time/js-migrate.md) - every JS package reads time only through `@moq/time`
+- [JS on @moq/clock](/quest/m1/time/js-migrate.md) - every JS package reads time only through `@moq/clock`
 - [Every crate on moq-clock](/quest/m1/time/crates.md) - every remaining crate reads time only through moq-clock, with controlled tests for the production/public API migrations
 - [moq-uring on moq-clock](/quest/m1/time/uring.md) - one clock read per worker turn and moq-clock's deadline queue replace the private timer heap
 - [The relay seam](/quest/m1/time/relay-seam.md) - one in-memory session and a generic `moq_relay::Connection`, so relay tests run on the sim

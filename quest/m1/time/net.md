@@ -37,9 +37,10 @@ What moq-clock landed with, mapped onto moq-net: `time::Clock` becomes
 `Deadlines::next`. `time::run` and `run_sim` both become `moq_clock::drive`.
 `moq_net_sim::{now, sleep, sleep_until, timeout}` become the ambient
 `moq_clock` functions; `spawn`, `advance`, and `yield_now` move to
-`moq_clock::sim`. The sim's wall clock starts at the Unix epoch, which
-moq-mux reads as an unset host clock, so a test that needs a wall mapping
-calls `sim::step_wall` first.
+`moq_clock::sim`. The sim's and `Manual`'s wall clock start at the fixed
+`Manual::WALL_START` (2025-01-01 UTC), so moq-mux sees a set host clock
+without any setup. `moq_clock::Wall` is wall time; `moq_net::Timestamp`
+stays media time.
 
 moq-mux's paused-clock test (`paused_clock_preserves_native_boundaries`) moves
 to the sim or `Manual`, and gains a `step_wall` case: a wall step changes the

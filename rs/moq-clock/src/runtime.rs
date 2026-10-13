@@ -12,7 +12,7 @@ use std::{
 
 use web_async::time as host;
 
-use crate::{Instant, Timestamp};
+use crate::{Instant, Wall};
 
 /// Where every unpaused clock counts from, so instants read on any thread, in any
 /// runtime or none, stay comparable.
@@ -42,11 +42,11 @@ pub(crate) fn now() -> Instant {
 	Instant::from_origin(reading.duration_since(origin))
 }
 
-pub(crate) fn wall() -> Timestamp {
+pub(crate) fn wall() -> Wall {
 	let since = host::SystemTime::now()
 		.duration_since(host::UNIX_EPOCH)
 		.expect("the host wall clock reads before 1970");
-	Timestamp::UNIX_EPOCH + since
+	Wall::UNIX_EPOCH + since
 }
 
 /// A host timer for `at`.

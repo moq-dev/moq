@@ -1,7 +1,7 @@
 //! A single-threaded, deterministic executor with simulated time.
 //!
 //! Inside [`run`], the ambient clock is the simulator's: [`now`](crate::now) starts
-//! at [`Instant::ZERO`], [`wall`](crate::wall) at [`Timestamp::UNIX_EPOCH`], and
+//! at [`Instant::ZERO`], [`wall`](crate::wall) at [`Manual::WALL_START`], and
 //! [`sleep`](crate::sleep), [`timeout`](crate::timeout), and
 //! [`interval`](crate::interval) arm simulated timers. Time never moves on its own:
 //! once every task has stalled, [`run`] jumps the clock to the earliest armed
@@ -29,7 +29,7 @@ use std::{
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 
-use crate::{Instant, Manual, Timestamp};
+use crate::{Instant, Manual, Wall};
 
 thread_local! {
 	static CURRENT: RefCell<Option<Rc<Runtime>>> = const { RefCell::new(None) };
@@ -120,7 +120,7 @@ pub(crate) fn now() -> Option<Instant> {
 }
 
 /// The simulated wall time, when the calling thread is inside [`run`].
-pub(crate) fn wall() -> Option<Timestamp> {
+pub(crate) fn wall() -> Option<Wall> {
 	current().map(|runtime| runtime.time.borrow().clock.wall())
 }
 
@@ -242,7 +242,7 @@ pub async fn advance(duration: Duration) {
 /// # Panics
 ///
 /// Outside [`run`].
-pub fn step_wall(wall: Timestamp) {
+pub fn step_wall(wall: Wall) {
 	expect_current().time.borrow_mut().clock.step_wall(wall);
 }
 
@@ -485,7 +485,7 @@ mod tests {
 	#[crate::test]
 	async fn starts_at_zero() {
 		assert_eq!(crate::now(), Instant::ZERO);
-		assert_eq!(crate::wall(), Timestamp::UNIX_EPOCH);
+		assert_eq!(crate::wall(), Manual::WALL_START);
 	}
 
 	#[test]
@@ -504,7 +504,7 @@ mod tests {
 			assert_eq!(a.await.unwrap(), at(5));
 			assert_eq!(
 				crate::wall(),
-				Timestamp::UNIX_EPOCH + Duration::from_secs(5),
+				Manual::WALL_START + Duration::from_secs(5),
 				"wall time moved too"
 			);
 		});
@@ -531,11 +531,11 @@ mod tests {
 	#[crate::test]
 	async fn a_wall_step_passes_no_time() {
 		advance(Duration::from_secs(10)).await;
-		step_wall(Timestamp::UNIX_EPOCH + Duration::from_secs(4));
+		step_wall(Manual::WALL_START + Duration::from_secs(4));
 		assert_eq!(crate::now(), at(10), "a step back passes no time");
-		assert_eq!(crate::wall(), Timestamp::UNIX_EPOCH + Duration::from_secs(4));
+		assert_eq!(crate::wall(), Manual::WALL_START + Duration::from_secs(4));
 		advance(Duration::from_secs(1)).await;
-		assert_eq!(crate::wall(), Timestamp::UNIX_EPOCH + Duration::from_secs(5));
+		assert_eq!(crate::wall(), Manual::WALL_START + Duration::from_secs(5));
 	}
 
 	#[crate::test]

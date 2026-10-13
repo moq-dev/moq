@@ -14,7 +14,7 @@ in the browser, and in a simulator that tests drive.
 ## The clock
 
 `moq_clock::Instant` is a monotonic instant, counted in nanoseconds from the
-clock's origin, with the methods of `std::time::Instant`. `Timestamp` is wall
+clock's origin, with the methods of `std::time::Instant`. `Wall` is wall
 time from the same clock. It is a separate type because wall time can step
 forward or back without any time passing, so it never measures elapsed time.
 
@@ -62,11 +62,11 @@ async fn gives_up_after_five_seconds() {
 }
 ```
 
-Inside the simulator the clock starts at `Instant::ZERO` and the Unix epoch.
-Time moves only when every task has stalled: the clock jumps to the earliest
-armed timer, so a test of a 30 second timeout takes no real time. A run where
-every task is parked and no timer is armed panics as a deadlock instead of
-hanging. `sim::advance()` and `sim::step_wall()` move time by hand, and
+Inside the simulator the clock starts at `Instant::ZERO` and 2025-01-01 UTC
+(`Manual::WALL_START`), like a new `Manual`. Time moves only when every task
+has stalled: the clock jumps to the earliest armed timer, so a test of a 30
+second timeout takes no real time. A run where every task is parked and no
+timer is armed panics as a deadlock instead of hanging. `sim::advance()` and `sim::step_wall()` move time by hand, and
 `sim::attach()` keeps a `Deadlines` queue in step.
 
 Tests that do real I/O (sockets, browsers, codecs) can't use the simulator.
