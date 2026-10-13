@@ -30,6 +30,19 @@ use bytes::Bytes;
 
 use crate::{Error, Patterns, Result, SessionError, time::Instant};
 
+/// Classify malformed AUTH messages separately from transport and local failures.
+pub(crate) fn protocol_error(err: Error) -> Error {
+	match err {
+		Error::Decode(_)
+		| Error::BoundsExceeded(_)
+		| Error::WrongSize
+		| Error::TooManyParameters
+		| Error::UnexpectedMessage
+		| Error::UnexpectedStream => Error::ProtocolViolation,
+		err => err,
+	}
+}
+
 /// `ready!` for a `kio::Shared` poll, which yields a guard rather than a result.
 macro_rules! ready_or {
 	($e:expr) => {
@@ -743,17 +756,23 @@ impl Pending {
 		state.requests.clear();
 	}
 
-	pub(crate) fn try_push(&self, request: Request) -> std::result::Result<(), Request> {
+	/// Queue the token for the application, or refuse it when closed or full.
+	pub(crate) fn push(&self, request: Request) {
 		let mut state = self.state.lock();
+		// Dropping the request refuses it as unanswered.
+		if state.closed {
+			return;
+		}
 		// A withdrawn stream must not occupy a slot while the verifier is busy.
 		if state.requests.len() >= 128 {
 			state.requests.retain(|request| !request.ended());
 		}
-		if state.closed || state.requests.len() >= 128 {
-			return Err(request);
+		if state.requests.len() >= 128 {
+			drop(state);
+			request.reject(SessionError::TooManyRequests, "too many pending tokens");
+			return;
 		}
 		state.requests.push_back(request);
-		Ok(())
 	}
 
 	fn poll_next(&self, waiter: &kio::Waiter) -> Poll<Option<Request>> {
@@ -1099,9 +1118,19 @@ mod tests {
 		let _requests = handle.requests().unwrap();
 		let queue = handle.acceptor().unwrap();
 		for _ in 0..128 {
-			assert!(queue.try_push(Request::new(Bytes::new(), Default::default())).is_ok());
+			queue.push(Request::new(Bytes::new(), Default::default()));
 		}
-		assert!(queue.try_push(Request::new(Bytes::new(), Default::default())).is_err());
+		let overflow = kio::Shared::<Issue>::default();
+		queue.push(Request::new(Bytes::new(), overflow.clone()));
+		let overflow = overflow.lock();
+		assert!(overflow.done);
+		assert!(matches!(
+			overflow.outbox.front(),
+			Some(Reply::Refuse {
+				code: SessionError::TooManyRequests,
+				..
+			})
+		));
 	}
 
 	#[test]
@@ -1111,18 +1140,10 @@ mod tests {
 		let queue = handle.acceptor().unwrap();
 		let expired = kio::Shared::<Issue>::default();
 		for _ in 0..128 {
-			assert!(
-				queue
-					.try_push(Request::new(Bytes::from_static(b"withdrawn"), expired.clone()))
-					.is_ok()
-			);
+			queue.push(Request::new(Bytes::from_static(b"withdrawn"), expired.clone()));
 		}
 		expired.lock().peer = Some(Error::Cancel);
-		assert!(
-			queue
-				.try_push(Request::new(Bytes::from_static(b"live"), Default::default()))
-				.is_ok()
-		);
+		queue.push(Request::new(Bytes::from_static(b"live"), Default::default()));
 		let Poll::Ready(Some(request)) = requests.poll_next(&kio::Waiter::noop()) else {
 			panic!("live request missing")
 		};

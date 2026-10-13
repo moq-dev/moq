@@ -114,7 +114,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		await fin();
 
 		// The end is known before the last group arrives.
-		expect(await reader.finished()).toBe(2);
+		expect(await reader.finished()).toEqual({ group: 2, frame: 0 });
 
 		// QUIC does not order streams, so group 1 lands after the FIN.
 		const late = groupStream(subscriber, 1);
@@ -125,7 +125,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		expect(await readAll(await reader.recvGroup())).toEqual(["1.0"]);
 		expect(await reader.recvGroup()).toBeUndefined();
 		expect(await reader.closed).toBeNull();
-		expect(reader.final()).toBe(2);
+		expect(reader.end()).toEqual({ group: 2, frame: 0 });
 	});
 
 	test("a group read across the subscribe stream's FIN is delivered whole", async () => {
@@ -203,7 +203,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			expect(await ordered.readString()).toBe("1.0");
 			expect(await ordered.readString()).toBeUndefined();
 			expect(reader.closed.peek()).toBeUndefined();
-			expect(reader.final()).toBe(2);
+			expect(reader.end()).toEqual({ group: 2, frame: 0 });
 
 			now = GRACE;
 			expire();
@@ -242,7 +242,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 
 		expect(await settlesWithin(reader.recvGroup(), 1000)).toBe(true);
 		expect(await reader.closed).toBeNull();
-		expect(reader.final()).toBe(0);
+		expect(reader.end()).toEqual({ group: 0, frame: 0 });
 	});
 
 	// lite-05 specified an inclusive end, so there the group costs only its own stream.
@@ -250,7 +250,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const { subscriber, reader, respond } = await subscribed(version);
 		await respond({ start: new SubscribeStart(0) });
 		await respond({ end: new SubscribeEnd(2, 2) });
-		expect(await reader.finished()).toBe(2);
+		expect(await reader.finished()).toEqual({ group: 2, frame: 0 });
 
 		await groupStream(subscriber, 2).handled;
 		if (version === Version.DRAFT_05) {
@@ -359,7 +359,7 @@ test("lite-07 zero count ends without grace even when the announced range is non
 
 	expect(await settlesWithin(reader.recvGroup(), 1000)).toBe(true);
 	expect(await reader.closed).toBeNull();
-	expect(reader.final()).toBe(3);
+	expect(reader.end()).toEqual({ group: 3, frame: 0 });
 });
 
 for (const started of [false, true]) {
@@ -396,7 +396,7 @@ test("lite-07 FIN waits for the skipped and reset final range to settle", async 
 		finished = true;
 	});
 	// Wait for SUBSCRIBE_END to be decoded without advancing any timers.
-	while (reader.final() !== 3) await Promise.resolve();
+	while (reader.end()?.group !== 3) await Promise.resolve();
 	expect(finished).toBe(false);
 	last.reset();
 	await last.handled;

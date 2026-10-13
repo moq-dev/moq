@@ -25,7 +25,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const SUBSCRIBE_TRACKS: &[u8] = &[
 	0x51, // SUBSCRIBE_TRACKS
 	0x00, 0x08, // Length
-	0x01, // Request ID
+	0x3f, // Fresh server-parity Request ID, after the existing subscription.
 	0x01, 0x04, b'r', b'o', b'o', b'm', // Track Namespace Prefix
 	0x00, // Number of Parameters
 ];

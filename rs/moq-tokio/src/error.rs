@@ -154,11 +154,6 @@ pub enum Error {
 		max: u16,
 	},
 
-	/// A worker group was asked to generate its own certificate, which would give
-	/// every member a different one.
-	#[error("QUIC workers cannot generate certificates; configure a certificate and key instead")]
-	WorkerTlsGenerate,
-
 	/// Another worker group already holds this listen port.
 	///
 	/// A second group on an overlapping address would silently join the first's
@@ -234,6 +229,44 @@ pub enum Error {
 }
 
 impl Error {
+	/// A fixed local error or settled rejection that another dial cannot repair.
+	pub(crate) fn is_terminal(&self) -> bool {
+		match self {
+			#[cfg(feature = "websocket")]
+			Self::TransportRace { quic, websocket } => quic.is_terminal() && websocket.is_terminal(),
+			Self::Tls(err) => err.is_terminal(),
+			Self::NoBackend(_)
+			| Self::Deprecated(_)
+			| Self::IdleTimeoutRange
+			| Self::WindowRange(_)
+			| Self::QlogUnsupported
+			| Self::Connect(_) => true,
+			#[cfg(feature = "noq")]
+			Self::Noq(err) => err.is_terminal(),
+			#[cfg(feature = "websocket")]
+			Self::WebSocket(err) => err.is_terminal(),
+			#[cfg(feature = "tcp")]
+			Self::Tcp(err) => matches!(
+				err.as_ref(),
+				crate::tcp::Error::MissingHostname | crate::tcp::Error::MissingPort
+			),
+			#[cfg(all(feature = "uds", unix))]
+			Self::Unix(err) => matches!(err.as_ref(), crate::unix::Error::MissingPath),
+			#[cfg(feature = "iroh")]
+			Self::IrohDisabled => true,
+			#[cfg(feature = "iroh")]
+			Self::Iroh(err) => matches!(
+				err.as_ref(),
+				crate::iroh::Error::MissingHost
+					| crate::iroh::Error::InvalidEndpointId(_)
+					| crate::iroh::Error::InvalidUrl
+					| crate::iroh::Error::Url(_)
+					| crate::iroh::Error::NoVersions
+			),
+			_ => self.is_auth(),
+		}
+	}
+
 	/// The auth rejection behind this error, digging through backend and race variants.
 	pub fn connect_error(&self) -> Option<crate::ConnectError> {
 		match self {
@@ -261,9 +294,8 @@ impl Error {
 	/// `None` covers everything else: a dial that never got a response, a QUIC handshake that
 	/// failed, a URL we couldn't parse. Only a status the peer actually sent shows up here, and
 	/// whether it invites another attempt is the caller's call (`408`, `429`, `502`, `503`, and
-	/// `504` are the ones worth repeating). This deliberately does not try to say whether some
-	/// *other* kind of failure is worth retrying; that's a guess, and a backoff budget bounds it
-	/// instead.
+	/// `504` are the ones worth repeating). This reports only HTTP responses; local configuration errors are
+	/// classified separately by the reconnect loop.
 	pub fn status(&self) -> Option<u16> {
 		match self {
 			// A race is only settled when both halves were answered, and answered with something not
@@ -354,6 +386,57 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(all(test, feature = "websocket"))]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn a_transport_race_is_terminal_only_when_every_arm_is_terminal() {
+		let local = || Error::WebSocket(Arc::new(crate::websocket::Error::UnsupportedScheme("bad".into())));
+		let transient = || Error::Io(Arc::new(std::io::Error::from(std::io::ErrorKind::ConnectionRefused)));
+		assert!(local().is_terminal());
+		assert!(!transient().is_terminal());
+		for (quic, websocket) in [(local(), transient()), (transient(), local())] {
+			assert!(
+				!Error::TransportRace {
+					quic: Arc::new(quic),
+					websocket: Arc::new(websocket)
+				}
+				.is_terminal()
+			);
+		}
+		assert!(
+			Error::TransportRace {
+				quic: Arc::new(local()),
+				websocket: Arc::new(local())
+			}
+			.is_terminal()
+		);
+		assert!(Error::Tls(Arc::new(crate::tls::Error::NoRoots)).is_terminal());
+		assert!(Error::Tls(Arc::new(crate::tls::Error::InvalidHostName("a!b".into()))).is_terminal());
+		// A root file can be briefly absent or empty while it rotates, so rereading it may succeed.
+		assert!(!Error::Tls(Arc::new(crate::tls::Error::EmptyRoots("roots.pem".into()))).is_terminal());
+		assert!(!Error::Tls(Arc::new(crate::tls::Error::Open(std::io::ErrorKind::NotFound.into()))).is_terminal());
+	}
+
+	/// Every raced address building the same malformed request is as terminal as one address doing so.
+	#[test]
+	fn an_address_race_is_terminal_only_when_every_attempt_is_terminal() {
+		use crate::failover::Attempt;
+		use crate::websocket::Error as Ws;
+
+		let addr = |port| std::net::SocketAddr::from(([127, 0, 0, 1], port));
+		let malformed = |port| Attempt {
+			addr: addr(port),
+			error: Ws::BuildRequest("fragment".into()),
+		};
+		let refused = |port| Attempt {
+			addr: addr(port),
+			error: Ws::Io(std::io::ErrorKind::ConnectionRefused.into()),
+		};
+
+		let race = |attempts| Error::WebSocket(Arc::new(Ws::Failover(attempts)));
+		assert!(race(vec![malformed(1), malformed(2)]).is_terminal());
+		assert!(!race(vec![malformed(1), refused(2)]).is_terminal());
+		assert!(!race(vec![refused(1), malformed(2)]).is_terminal());
+	}
 
 	#[test]
 	fn transport_race_propagates_nested_connect_errors() {

@@ -69,3 +69,9 @@ pub(crate) fn request_ids(window: u64, ids: &[u64]) -> usize {
 		.collect();
 	held.len()
 }
+
+#[cfg(any(test, feature = "fuzz"))]
+pub(crate) fn request_history(ids: &[u64]) -> usize {
+	let control = Control::new(None, false);
+	ids.iter().filter(|id| control.accept(RequestId(**id)).is_ok()).count()
+}

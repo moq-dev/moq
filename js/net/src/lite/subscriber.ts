@@ -1150,7 +1150,7 @@ export class Subscriber {
 				// A local close can win the race with the response; there is nothing left to end.
 				if (entry.track.closed.peek() !== undefined) continue;
 				try {
-					entry.track.finishAt(entry.end);
+					entry.track.finishAt({ group: entry.end, frame: 0 });
 				} catch (err) {
 					// lite-05 specified an inclusive end, and @moq/net 0.1.3 to 0.1.9 sent one, so
 					// there an end below a received group only costs the early boundary: the FIN

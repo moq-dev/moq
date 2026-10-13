@@ -163,11 +163,11 @@ impl Refresh {
 			return;
 		}
 		let Some(source) = &self.source else {
-			request.reject(SessionError::Version, "tokens are not verified in band");
+			request.reject(SessionError::Unsupported, "tokens are not verified in band");
 			return;
 		};
 		if source.request.tls.is_some() {
-			request.reject(SessionError::Version, "a certificate cannot be renewed in band");
+			request.reject(SessionError::Unsupported, "a certificate cannot be renewed in band");
 			return;
 		}
 		if self.pending.len() >= 128 {

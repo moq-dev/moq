@@ -4,18 +4,26 @@
 
 moq-relay verifies a moq-transport request token through `moq_auth::Client`,
 each request getting a lease of its own that is never counted as a session
-grant and ends when the request ends. Until this lands the relay has no
-`requests()` consumer, so it refuses every request token `Unsupported`, even
-once [Request tokens](/quest/m1/auth/request-token.md) merges.
+grant and ends when the request ends. Until this lands the relay explicitly
+refuses request-token verification as `Unsupported`, even if it consumes
+session-token events and once [Request tokens](/quest/m1/auth/request-token.md)
+merges. Requests independently covered by locally verified session permission
+do not require request-token verification.
 
 ## Plan
 
+Deferred on 2026-10-12 until a consumer needs relay request verification.
+This is not required for the experimental Rust hook or the session AUTH epic.
+Revisit the design against moq-transport's authentication model at that point;
+the lease integration below is future work, not a capability of the hook.
+
 An application acceptor built on moq-net answers request tokens through
-`requests()` itself and does not need this; it is the relay's half of
+the explicit request variant of `requests()` itself and does not need this;
+it is the relay's half of
 [Request tokens](/quest/m1/auth/request-token.md).
 
 - A per-request call on `moq_auth::Client`, not the `Client::attach` that
-  [Relay tokens](/quest/m1/auth/relay-refresh.md) builds. `attach` connects
+  session tokens use. `attach` connects
   with the connection's id, and the auth server treats that as one more grant
   on the session that never POSTs `end`, so a request token would widen the
   whole connection for its life. The per-request call carries the token in
@@ -36,5 +44,3 @@ Public API: additive on `moq_auth::Client`. Wire: none.
 
 - [Request tokens](/quest/m1/auth/request-token.md) - the per-request grant
   this lease backs
-- [Relay tokens](/quest/m1/auth/relay-refresh.md) - supplies the lease
-  revalidation this reuses

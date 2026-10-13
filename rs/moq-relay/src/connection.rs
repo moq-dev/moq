@@ -81,7 +81,10 @@ impl Connection {
 	/// Admits and serves this connection until it closes.
 	#[tracing::instrument("conn", skip_all, fields(id = self.id, remote = self.request.remote_addr().map(tracing::field::display), session = tracing::field::Empty))]
 	pub async fn run(self) -> anyhow::Result<()> {
-		let (admitted, registration) = match self.admit().await {
+		// Abandoned at the drain deadline, so the deadline bounds this task and its
+		// socket like it bounds a session.
+		let admitted = self.shutdown.admit(self.admit()).await;
+		let (admitted, registration) = match admitted {
 			Ok(admitted) => admitted,
 			Err(err) => {
 				self.cluster.refusals.record(err.refusal);
@@ -118,7 +121,12 @@ impl Connection {
 			request = request.with_subscriber(publisher);
 		}
 		let lease = lease.preparing(request.auth(), request.role())?;
-		let session = request.ok().await?;
+		// Bounded too: a peer that stalls the SETUP reply must not outlive the relay.
+		let session = self
+			.shutdown
+			.until_deadline(request.ok())
+			.await
+			.ok_or_else(|| anyhow::anyhow!("the SETUP reply was still pending at the drain deadline"))??;
 
 		tracing::info!(version = %session.version(), %transport, "negotiated");
 

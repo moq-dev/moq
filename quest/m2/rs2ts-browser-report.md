@@ -1,34 +1,26 @@
-# [M] Compare generated lite in the browser
+# [M] Compare Rust-backed @moq/net in media workloads
 
 ## Goal
 
-A reproducible browser report compares generated lite with the hand-written
-js/net it replaces on bundle size, per-frame CPU, and first-frame latency.
-It records whether the generated implementation regresses, with retained
-measurements and enough context to reproduce the comparison.
+A reproducible browser report compares Rust-backed `@moq/net` with its
+retained handwritten baseline through full publish/watch media workloads,
+including bundle size, CPU, and first-frame latency.
 
 ## Plan
 
-Decided in the 2026-10-10 audit: move the final rs2ts comparison into m2 with
-the browser benchmark harness. The translator's earlier bundle-size and
-per-frame CPU go/no-go still gates the m1 implementation before the sans-IO
-API changes. This report follows generated lite; it does not block it.
+Decided 2026-10-12: this broader media report remains in m2. It supplements
+the focused browser comparison required before each backend adoption; it
+cannot replace or postpone that decision evidence. Measure whichever backend
+is deployed, WASM or JS-only, and name the exact revisions and build inputs.
 
-Compare identified generated and hand-written revisions through the browser
-harness under the same workload and environment. Retain the baseline even
-though generated lite deletes the hand-written implementation. Follow the
-harness's controls for variability and record unsupported measurements
-explicitly. Report any regression and the evidence needed to scope its fix;
-do not assume that generated code is faster or substitute the codec-only
-go/no-go for the browser measurements.
+Follow the browser harness's controls for variability, separate network,
+decode, and render costs, and record unsupported metrics explicitly. Keep
+baseline artifacts even after deleting handwritten code. Report regressions
+and accepted tradeoffs without assuming that generated code is faster.
 
 Public API: none. Wire: none.
 
 ## Required
 
-- [Browser benchmarks](/quest/m2/browser-benchmarks.md) - the real-browser harness and artifact conventions
-- [Generated lite session](/quest/m2/rs2ts-session.md) - the implementation being compared
-
-## Related
-
-- [Generated @moq/net](/quest/m1/rs2ts/README.md) - the implementation line whose final comparison moved here
+- [Browser benchmarks](/quest/m2/browser-benchmarks.md) - the full media workload harness and artifact conventions
+- [Rust-backed @moq/net](/quest/m1/rs2ts/README.md) - the adopted implementation and retained baseline

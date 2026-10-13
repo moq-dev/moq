@@ -280,3 +280,35 @@ fn ietf_datagram_interop() {
 		assert_eq!(timestamp.map(|t| t.as_millis()), Some(1234), "{version}: Timestamp");
 	}
 }
+
+/// Unsupported after a grant keeps its meaning across the Rust/JS Lite binding boundary.
+#[test]
+#[ignore = "requires Bun; run by just test interop"]
+fn lite_auth_unsupported_interop() {
+	let version = lite::Version::Lite07;
+	let grant = lite::AuthReply::Ok(lite::AuthOk {
+		publish: crate::Patterns::from(crate::Pattern::subtree("room").unwrap()),
+		subscribe: crate::Patterns::new(),
+		expires: None,
+	});
+	let refused = lite::AuthReply::Error(lite::AuthError {
+		code: crate::lite::error::to_session_code(&crate::SessionError::Unsupported).into(),
+		reason: "unsupported".into(),
+	});
+	let mut bytes = Vec::new();
+	let mut writer = Encoder::new(&mut bytes, version.into());
+	grant.encode(&mut writer, version).unwrap();
+	refused.encode(&mut writer, version).unwrap();
+	let echo: Vec<u8> = serde_json::from_slice(&bun("auth-unsupported.ts", serde_json::json!(bytes))).unwrap();
+	assert_eq!(echo, bytes);
+	let mut reader = Decoder::new(&echo, version.into());
+	assert_eq!(
+		<lite::AuthReply as crate::coding::Decode<_>>::decode(&mut reader, version).unwrap(),
+		grant
+	);
+	assert_eq!(
+		<lite::AuthReply as crate::coding::Decode<_>>::decode(&mut reader, version).unwrap(),
+		refused
+	);
+	assert!(reader.is_empty());
+}

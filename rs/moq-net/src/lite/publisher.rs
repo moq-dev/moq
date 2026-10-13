@@ -371,10 +371,10 @@ impl<S: crate::transport::poll::Session> Control<S> {
 						// logs per-stream errors, so close the session here rather than letting a
 						// peer silently replace a redirect an observer may already be acting on.
 						tracing::warn!(%uri, "duplicate GOAWAY received; closing session");
-						self.shared
-							.session
-							.clone()
-							.close(SessionError::from(&err).to_code(), &err.to_string());
+						self.shared.session.clone().close(
+							crate::lite::error::to_session_code(&SessionError::from(&err)),
+							&err.to_string(),
+						);
 						return Poll::Ready(Err(err));
 					}
 					return Poll::Ready(Ok(()));
@@ -399,6 +399,7 @@ struct AuthServe<S: crate::transport::poll::Session> {
 	default: Option<crate::auth::DefaultGrant>,
 	/// Our side is finished: FIN sent, waiting for the acknowledgement.
 	finished: bool,
+	unsupported: bool,
 }
 
 impl<S: crate::transport::poll::Session> AuthServe<S> {
@@ -413,12 +414,14 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 			serving: None,
 			default: None,
 			finished: false,
+			unsupported: false,
 		})
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		let res = ready!(self.poll_serve(waiter));
+		let res = ready!(self.poll_serve(waiter)).map_err(crate::auth::protocol_error);
 		let err = match res {
+			Ok(()) if self.unsupported => Error::Unsupported,
 			Ok(()) => Error::Cancel,
 			Err(err) => {
 				match &err {
@@ -434,7 +437,14 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 			}
 		};
 		if let Some(serving) = &self.serving {
-			serving.end(err);
+			serving.end(err.clone());
+		}
+		if matches!(err, Error::ProtocolViolation) {
+			self.shared.auth.close(err.clone());
+			self.shared
+				.session
+				.clone()
+				.close(SessionError::ProtocolViolation.to_code(), &err.to_string());
 		}
 		Poll::Ready(Ok(()))
 	}
@@ -451,14 +461,19 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 				let issue = serving.issue.clone();
 				match self.shared.auth.acceptor() {
 					Some(requests) => {
-						// A closed queue hands the request back, and dropping it refuses
-						// the token on this stream.
-						let _ = requests.try_push(crate::auth::Request::new(msg.token, issue.clone()));
+						requests.push(crate::auth::Request::new(msg.token, issue.clone()));
 					}
 					// Only the connection's own credential has a default answer; a token
-					// needs someone to verify it. Resetting reads as "unsupported" to
-					// the presenter, the same as a peer that predates AUTH.
-					None if !msg.token.is_empty() => return Poll::Ready(Err(Error::Unsupported)),
+					// needs someone to verify it. Tell the presenter explicitly.
+					None if !msg.token.is_empty() => {
+						let mut state = issue.lock();
+						state.outbox.push_back(crate::auth::Reply::Refuse {
+							code: crate::SessionError::Unsupported,
+							reason: Error::Unsupported.to_string(),
+						});
+						state.done = true;
+						self.unsupported = true;
+					}
 					None => {
 						self.default = Some(crate::auth::DefaultGrant::new(
 							self.shared.auth.clone(),
@@ -479,7 +494,12 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 
 			// The presenter withdrew the token, by FIN or by a cancelling reset, or its
 			// stream died.
-			if let Poll::Ready(res) = stream.reader.poll_closed(&mut cx) {
+			if let Poll::Ready(res) = stream.reader.poll_read_chunk(&mut cx, 1).map(|res| {
+				res.and_then(|chunk| match chunk {
+					None => Ok(()),
+					Some(_) => Err(Error::ProtocolViolation),
+				})
+			}) {
 				match res {
 					Ok(()) | Err(Error::Stream(crate::StreamError::Cancel)) => {}
 					Err(err) => return Poll::Ready(Err(err)),
@@ -508,7 +528,12 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 			match state.outbox.pop_front() {
 				Some(reply) => {
 					drop(state);
-					Self::write(&self.shared, stream, reply)?;
+					if !Self::write(&self.shared, stream, reply)? {
+						self.unsupported = true;
+						let mut state = issue.lock();
+						state.outbox.clear();
+						state.done = true;
+					}
 				}
 				// The app is done with the grant, or refused the token: close our side.
 				None => {
@@ -520,7 +545,7 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 		}
 	}
 
-	fn write(shared: &Shared<S>, stream: &mut Stream<S, Version>, reply: crate::auth::Reply) -> Result<(), Error> {
+	fn write(shared: &Shared<S>, stream: &mut Stream<S, Version>, reply: crate::auth::Reply) -> Result<bool, Error> {
 		let msg = match reply {
 			crate::auth::Reply::Grant(grant) => {
 				let now = shared.runtime.now();
@@ -530,22 +555,21 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 					expires: grant.expires.map(|at| at.saturating_duration_since(now)),
 				})
 			}
-			crate::auth::Reply::Refuse {
-				code: crate::SessionError::Version,
-				..
-			} => return Err(Error::Unsupported),
 			crate::auth::Reply::Refuse { code, reason } => lite::AuthReply::Error(lite::AuthError {
-				code: code.to_code().into(),
+				code: crate::lite::error::to_session_code(&code).into(),
 				reason,
 			}),
 		};
-		// A grant that cannot be encoded is withheld, never trimmed. Nothing is buffered, and
-		// the reset that follows ends the token: as the first reply it reads as "unsupported",
-		// and after an AUTH_OK it revokes the earlier grant.
-		stream.writer.buffer(&msg).map_err(|err| {
+		// Message encoding is transactional: a refused grant leaves no bytes behind.
+		if let Err(err) = stream.writer.buffer(&msg) {
 			tracing::debug!(%err, "auth reply cannot be encoded; refusing the token");
-			Error::Unsupported
-		})
+			stream.writer.buffer(&lite::AuthReply::Error(lite::AuthError {
+				code: crate::lite::error::to_session_code(&crate::SessionError::Unsupported).into(),
+				reason: Error::Unsupported.to_string(),
+			}))?;
+			return Ok(false);
+		}
+		Ok(true)
 	}
 }
 
@@ -580,7 +604,7 @@ impl Enforce {
 		);
 		let err = Error::Unauthorized;
 		shared.session.clone().close(
-			SessionError::from(&err).to_code(),
+			crate::lite::error::to_session_code(&SessionError::from(&err)),
 			&crate::auth::unauthorized_reason(&path),
 		);
 		Poll::Ready(Err(err))
@@ -1535,10 +1559,10 @@ impl<S: crate::transport::poll::Session, R: Request<S>> RequestServe<S, R> {
 							Ok(charged) => self._charged = Some(charged),
 							// A peer past its limits loses the session, not just this request.
 							Err(err) => {
-								self.shared
-									.session
-									.clone()
-									.close(crate::SessionError::from(&err).to_code(), "too many subscriptions");
+								self.shared.session.clone().close(
+									crate::lite::error::to_session_code(&crate::SessionError::from(&err)),
+									"too many subscriptions",
+								);
 								return Poll::Ready(Err(err));
 							}
 						}
@@ -2328,7 +2352,7 @@ mod test {
 
 		// The last group is 6 (exclusive 7), but only group 5 has been produced so far.
 		producer.create_group(group::Info { sequence: 5 }).unwrap();
-		producer.finish_at(7).unwrap();
+		producer.finish_at(track::Position::group(7)).unwrap();
 
 		// Group 5 is delivered first.
 		match recv_next(&mut subscriber, false, true).await.unwrap() {
@@ -2382,7 +2406,7 @@ mod test {
 
 		// Staleness is the max delay window's job, not arrival order's: the track
 		// still finishes normally afterward.
-		producer.finish_at(3).unwrap();
+		producer.finish_at(track::Position::group(3)).unwrap();
 		match recv_next(&mut subscriber, false, false).await.unwrap() {
 			Recv::Finished => {}
 			_ => panic!("expected finished"),
@@ -2880,6 +2904,12 @@ enum Recv {
 	Finished,
 }
 
+/// The group boundary SUBSCRIBE_END carries. Lite cannot name a frame, so a mid-group end
+/// rounds up past its group, whose own stream FIN says where it stops.
+fn final_sequence(end: track::Position) -> u64 {
+	end.final_sequence().unwrap_or(u64::MAX)
+}
+
 /// Poll a single [`track::Subscriber`] for the next group (cap-aware, in arrival order) or
 /// datagram from one `&mut` borrow, so groups and datagrams share the same subscription. Groups
 /// are polled first so a datagram burst can't starve them; datagrams are polled only when the
@@ -2918,7 +2948,7 @@ fn poll_recv_next(
 		// No live data ready: report the boundary (if declared) before signalling Finished, so a
 		// future boundary reaches the subscriber while the trailing groups are still in flight.
 		if emit_boundary && let Poll::Ready(res) = track.poll_finished(waiter) {
-			return Poll::Ready(res.map(Recv::Boundary));
+			return Poll::Ready(res.map(|end| Recv::Boundary(final_sequence(end))));
 		}
 		if groups_finished {
 			return Poll::Ready(Ok(Recv::Finished));
@@ -3392,7 +3422,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 					if self.ctx.opens.pending.load(Ordering::Relaxed) > 0 {
 						return Poll::Pending;
 					}
-					let group = ready!(self.track.poll_finished(waiter))?;
+					let group = final_sequence(ready!(self.track.poll_finished(waiter))?);
 					let streams = self.ctx.opens.opened.load(Ordering::Relaxed);
 					self.end_sent = true;
 					writer.buffer(&lite::SubscribeResponse::End(lite::SubscribeEnd { group, streams }))?;
@@ -3441,11 +3471,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			return Ok(());
 		};
 		// A cap below the end bounds what the subscriber is owed, as on its side.
-		let end = match self.track.subscription().end {
-			Some(end) if end.frame == 0 => end.group.min(fin),
-			Some(end) => end.group.saturating_add(1).min(fin),
-			None => fin,
-		};
+		let end = final_sequence(self.track.subscription().end.map_or(fin, |end| end.min(fin)));
 		served.expire(self.ctx.runtime.now());
 		for gap in served.gaps(start..end) {
 			writer.buffer(&lite::SubscribeResponse::Drop(lite::SubscribeDrop {
@@ -3640,7 +3666,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						Err(err) => {
 							self.settle_open(false);
 							self.state = GroupState::Done;
-							return Poll::Ready(Err(Error::from_transport(err)));
+							return Poll::Ready(Err(crate::lite::error::from_transport(err)));
 						}
 					};
 					self.settle_open(true);
@@ -4497,7 +4523,7 @@ mod serve_group_test {
 			let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 			{
 				let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
-				track.finish_at(4).unwrap();
+				track.finish_at(track::Position::group(4)).unwrap();
 				write_group(&mut track, 0, 0);
 				assert!(futures::poll!(run.as_mut()).is_pending());
 				write_group(&mut track, 2, 2);
@@ -4526,7 +4552,7 @@ mod serve_group_test {
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 		write_group(&mut track, 2, 2);
 		write_group(&mut track, 5, 5);
-		track.finish_at(7).unwrap();
+		track.finish_at(track::Position::group(7)).unwrap();
 		// Serve group 5, which resolves SUBSCRIBE_START.
 		while run.start.is_none() {
 			let step = run.poll_step(&mut writer, &kio::Waiter::noop());
@@ -4587,7 +4613,7 @@ mod serve_group_test {
 			let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
 			write_group(&mut track, 2, 0);
 			assert!(futures::poll!(run.as_mut()).is_pending());
-			track.finish_at(6).unwrap();
+			track.finish_at(track::Position::group(6)).unwrap();
 			drop(track);
 			run.await.unwrap();
 		}
@@ -4633,7 +4659,7 @@ mod serve_group_test {
 		moq_net_sim::advance(Duration::from_millis(900)).await;
 		run.update(update(2));
 		moq_net_sim::advance(Duration::from_millis(200)).await;
-		track.finish_at(6).unwrap();
+		track.finish_at(track::Position::group(6)).unwrap();
 		drop(track);
 		kio::wait(|waiter| run.poll(&mut writer, waiter)).await.unwrap();
 		assert_eq!(drops(writer, &log, version).await, [(1, 4)]);
@@ -4734,7 +4760,7 @@ mod serve_group_test {
 			moq_net_sim::advance(Duration::from_secs(2)).await;
 			write_group(&mut track, 4, 0);
 			assert!(futures::poll!(run.as_mut()).is_pending());
-			track.finish_at(5).unwrap();
+			track.finish_at(track::Position::group(5)).unwrap();
 			drop(track);
 			run.await.unwrap();
 		}

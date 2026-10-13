@@ -405,7 +405,7 @@ where
 					}
 				};
 
-				let control = Control::new(None, client);
+				let control = Control::new(None, client).with_history(limits.requests());
 				// Only the dialing side fails loud on a publication outside its grant: a
 				// server's publish origin is everything the peer may read, not what it
 				// intends to push.
@@ -511,7 +511,7 @@ where
 				)));
 				let mut datagrams = std::pin::pin!(err_only(run_datagrams(session.clone(), subscriber.clone())));
 				let mut goaway_recv = std::pin::pin!(err_only(goaway_recv));
-				let mut present = std::pin::pin!(present);
+				let mut present = std::pin::pin!(err_only(present));
 				let mut enforce = std::pin::pin!(err_only(enforce));
 				let mut setup = std::pin::pin!(setup);
 				// Unsolicited PUBLISH_NAMESPACE unless the peer requires solicitation;
@@ -556,8 +556,10 @@ where
 					if let Poll::Ready(err) = waiter.poll_future(goaway_recv.as_mut()) {
 						return Poll::Ready(Err(err));
 					}
-					// Presenting tokens never ends the session.
-					let _ = waiter.poll_future(present.as_mut());
+					// Malformed replies are session-fatal, unlike token refusals.
+					if let Poll::Ready(err) = waiter.poll_future(present.as_mut()) {
+						return Poll::Ready(Err(err));
+					}
 					if let Poll::Ready(err) = waiter.poll_future(enforce.as_mut()) {
 						return Poll::Ready(Err(err));
 					}
@@ -1267,6 +1269,22 @@ impl<S: crate::transport::poll::Boxable> Bidi<S> {
 			}
 			Err(err) => return Err(err),
 		};
+		if !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+			&& matches!(
+				id,
+				ietf::Subscribe::ID
+					| ietf::Fetch::ID
+					| ietf::SubscribeNamespace::ID
+					| ietf::SubscribeNamespaceLegacy::ID
+					| ietf::SUBSCRIBE_TRACKS_ID
+					| ietf::TrackStatus::ID
+					| ietf::Publish::ID
+					| ietf::PublishNamespace::ID
+					| auth::Auth::ID
+			) {
+			let request_id = RequestId::decode(&mut data.decoder(version), version)?;
+			publisher.control.accept(request_id)?;
+		}
 		match id {
 			// Draft-16 moved SUBSCRIBE_NAMESPACE to its own stream, past the control stream
 			// that admits every other request, but it still takes a request ID from the
@@ -1298,7 +1316,7 @@ impl<S: crate::transport::poll::Boxable> Bidi<S> {
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}
-				serve.run(stream, msg, version).await;
+				serve.run(stream, msg, version).await?;
 			}
 			_ => {
 				tracing::warn!(id, "unexpected bidi stream type");
@@ -1406,6 +1424,194 @@ async fn enforce_grant<S: crate::transport::poll::Session>(
 mod tests {
 	use super::*;
 	use crate::model::ProduceTest;
+
+	#[moq_net_sim::test]
+	async fn auth_ids_share_the_modern_request_history() {
+		for version in [
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			for client in [false, true] {
+				let first = u64::from(client);
+				for requests in [
+					vec![(true, first), (true, first)],
+					vec![(true, first), (false, first)],
+					vec![(false, first), (true, first)],
+					vec![(true, first ^ 1)],
+				] {
+					let incoming = requests
+						.into_iter()
+						.map(|(is_auth, id)| {
+							let mut body = Vec::new();
+							let mut encoder = crate::coding::Encoder::new(&mut body, version.into());
+							let kind = if is_auth {
+								auth::Auth {
+									request_id: RequestId(id),
+									token: Default::default(),
+								}
+								.encode_msg(&mut encoder, version)
+								.unwrap();
+								auth::Auth::ID
+							} else {
+								ietf::TrackStatus {
+									request_id: RequestId(id),
+									track_namespace: crate::Path::from("test"),
+									track_name: "video".into(),
+									properties_wanted: true,
+								}
+								.encode_msg(&mut encoder, version)
+								.unwrap();
+								ietf::TrackStatus::ID
+							};
+							let mut script = Vec::new();
+							let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
+							encoder.varint(kind).unwrap();
+							encoder.u16(body.len() as u16);
+							script.extend(body);
+							script
+						})
+						.collect();
+					let session =
+						crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(incoming);
+					let log = session.log.clone();
+					let (driver, _, _) = start(Config {
+						runtime: crate::time::Clock::sim(),
+						session,
+						setup: None,
+						request_id_max: None,
+						limits: Default::default(),
+						client,
+						publish: None,
+						subscribe: None,
+						peer_hop: None,
+						cost: None,
+						version,
+						path: None,
+						authority: None,
+						peer_setup_stream: None,
+						peer_declared: Some(peer::Peer {
+							auth: true,
+							..Default::default()
+						}),
+						auth: crate::auth::Handle::new(true),
+						early_unis: Vec::new(),
+						extensions: Default::default(),
+					})
+					.unwrap();
+					let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+						.await
+						.expect("invalid AUTH ID left the session open")
+						.expect_err("invalid request ID must be fatal");
+					assert!(
+						matches!(err, Error::Session(SessionError::InvalidRequestId)),
+						"{version:?} client={client}: {err:?}"
+					);
+					assert_eq!(log.closes()[0].0, SessionError::InvalidRequestId.to_code());
+				}
+			}
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn malformed_auth_replies_close_the_session() {
+		for version in [Version::Draft17, Version::Draft22] {
+			for (id, body) in [
+				(99, vec![]),
+				(auth::AuthError::ID, vec![0xc0, 0, 0, 1, 0, 0, 0, 0, 0]),
+				(auth::AuthError::ID, vec![1]),
+				(auth::AuthError::ID, vec![1, 0, 0]),
+				(auth::AuthOk::ID, vec![0, 0, 0xc0, 0x20, 0, 0, 0, 0, 0, 0]),
+			] {
+				let mut script = Vec::new();
+				let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
+				encoder.varint(id).unwrap();
+				encoder.u16(body.len() as u16);
+				script.extend(body);
+				let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![script]);
+				let log = session.log.clone();
+				let (driver, _, _) = start(Config {
+					runtime: crate::time::Clock::sim(),
+					session,
+					setup: None,
+					request_id_max: None,
+					limits: Default::default(),
+					client: true,
+					publish: None,
+					subscribe: None,
+					peer_hop: None,
+					cost: None,
+					version,
+					path: None,
+					authority: None,
+					peer_setup_stream: None,
+					peer_declared: Some(peer::Peer {
+						auth: true,
+						..Default::default()
+					}),
+					auth: crate::auth::Handle::new(true),
+					early_unis: Vec::new(),
+					extensions: Default::default(),
+				})
+				.unwrap();
+				let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+					.await
+					.expect("the session outlived a malformed AUTH reply")
+					.expect_err("malformed AUTH is fatal");
+				assert!(is_protocol_violation(&err), "{err:?}");
+				assert_eq!(log.closes()[0].0, SessionError::ProtocolViolation.to_code());
+			}
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn malformed_presenter_auth_closes_the_session() {
+		for version in [Version::Draft17, Version::Draft22] {
+			for body in [vec![0, 2], vec![0, 0, 0]] {
+				let mut script = Vec::new();
+				let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
+				encoder.varint(auth::Auth::ID).unwrap();
+				encoder.u16(2);
+				script.extend(body);
+				let session =
+					crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![script]);
+				let log = session.log.clone();
+				let (driver, _, _) = start(Config {
+					runtime: crate::time::Clock::sim(),
+					session,
+					setup: None,
+					request_id_max: None,
+					limits: Default::default(),
+					client: false,
+					publish: None,
+					subscribe: None,
+					peer_hop: None,
+					cost: None,
+					version,
+					path: None,
+					authority: None,
+					peer_setup_stream: None,
+					peer_declared: Some(peer::Peer {
+						auth: true,
+						..Default::default()
+					}),
+					auth: crate::auth::Handle::new(true),
+					early_unis: Vec::new(),
+					extensions: Default::default(),
+				})
+				.unwrap();
+				let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+					.await
+					.expect("malformed presenter AUTH was ignored")
+					.expect_err("malformed AUTH is fatal");
+				assert!(is_protocol_violation(&err), "{err:?}");
+				assert_eq!(log.closes()[0].0, SessionError::ProtocolViolation.to_code());
+			}
+		}
+	}
 
 	#[test]
 	fn object_overflow_is_session_fatal_but_a_stream_error_is_not() {

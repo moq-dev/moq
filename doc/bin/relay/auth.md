@@ -137,7 +137,9 @@ independently but never report `end` or free a session-limit slot; only the
 connection reports its end, even if its first credential expired earlier.
 The initial credential remains responsible for the connection's stats tier.
 Certificate sessions cannot renew a certificate in band, and public rules
-cannot verify a presented token.
+cannot verify a presented token; both refuse it as unsupported. A session may
+have 128 tokens queued and 128 being verified; more are refused with
+`TOO_MANY_REQUESTS` on moq-lite and `UNAUTHORIZED` on moq-transport.
 
 ### Claims
 

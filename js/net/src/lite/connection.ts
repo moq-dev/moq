@@ -159,6 +159,12 @@ export class Connection implements Established {
 				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
 			},
 		});
+		this.#auth.violated.subscribe((err) => {
+			if (!err) return;
+			this.#quic.close({ closeCode: err.code, reason: err.message });
+			this.abort();
+		});
+
 		this.#publisher = new Publisher(this.#quic, this.#version, this.hop, publish, {
 			grant: this.#auth.grant,
 			ready: this.#auth.setupAnswered(),
@@ -299,7 +305,10 @@ export class Connection implements Established {
 					// A protocol violation on one stream is the peer breaking the session.
 					// Resetting that stream leaves it free to repeat the violation; a duplicate
 					// GOAWAY is the one this dispatcher raises.
-					if (err instanceof ProtocolViolation) this.abort();
+					if (err instanceof ProtocolViolation) {
+						this.#quic.close({ closeCode: err.code, reason: err.message });
+						this.abort();
+					}
 				})
 				.finally(() => {
 					stream.writer.close();

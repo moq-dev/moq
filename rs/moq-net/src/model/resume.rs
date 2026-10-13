@@ -324,8 +324,8 @@ impl Subscriber {
 		self.reader().poll_recv_datagram(waiter)
 	}
 
-	/// Poll for the track's declared final sequence.
-	pub(crate) fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
+	/// Poll for the track's declared exclusive end.
+	pub(crate) fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
 		self.reader().poll_finished(waiter)
 	}
 
@@ -696,7 +696,7 @@ impl Reader {
 		self.poll_end(waiter, |copy| copy.datagrams_done.clone())
 	}
 
-	fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
+	fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
 		self.sync(waiter);
 		let groups = self.groups;
 		let concluded = self.route.end();
@@ -1125,6 +1125,22 @@ mod test {
 
 	fn ts(ms: u64) -> Timestamp {
 		Timestamp::from_millis(ms).unwrap()
+	}
+
+	#[test]
+	fn a_route_preserves_a_mid_group_end() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let mut source = copy();
+		routes.serve(source.consume());
+		let mut sub = subscribe(&logical, Duration::ZERO);
+		assert!(sub.poll_finished(&kio::Waiter::noop()).is_pending());
+		let end = Position { group: 5, frame: 5 };
+		source.finish_at(end).unwrap();
+		assert_eq!(
+			sub.poll_finished(&kio::Waiter::noop()).map(|result| result.unwrap()),
+			Poll::Ready(end)
+		);
 	}
 
 	#[test]

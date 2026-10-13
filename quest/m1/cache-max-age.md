@@ -80,7 +80,7 @@ Facts, and work carried over:
   `CACHE_WINDOW_MS` idle window drives `#prune`, as Rust's pool does. The
   remaining JS work is the wall term, and rewriting `Info.maxAge`'s doc,
   which says a congestion stall cannot age content out.
-  [Generated @moq/net](/quest/m1/rs2ts/README.md) replaces the JS model later;
+  [Rust-backed @moq/net](/quest/m1/rs2ts/README.md) replaces the JS model later;
   the maintainer chose to fix it by hand first.
 - Bench in `rs/moq-net/benches/track.rs`, swept over tracks (1 to 10k) and
   cached groups per track (1 to 1k): write-path cost, timer cost per driver
@@ -128,5 +128,5 @@ encoding change; Max Age semantics in the lite draft change.
 
 - [Model ranges](/quest/m1/subscribe-ranges/model.md) - an untimed `Absolute(0)..` range follows this rule: replay what is not stale
 - [JS track handover](/quest/m1/js-group-handover.md) - mirrors the failover rule in JS
-- [Generated @moq/net](/quest/m1/rs2ts/README.md) - retires js/net's hand-written model
+- [Rust-backed @moq/net](/quest/m1/rs2ts/README.md) - retires js/net's hand-written model
 - [FETCH max-delay](/quest/m1/fetch-max-delay.md) - applies the shared rule to historical requests and reconciles native IETF retention clocks

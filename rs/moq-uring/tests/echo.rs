@@ -53,8 +53,12 @@ fn echo_noq_peer() {
 	let handle = worker.handle();
 	let certs = support::certs().expect("certificates");
 
-	let mut server = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
-	server.alpn = vec![web_transport_moq::ALPN.to_string()];
+	let server = quic::server::Config::new(
+		quic::Identity::open(&certs.cert, &certs.key)
+			.expect("identity")
+			.server(&[web_transport_moq::ALPN], quic::server::ClientAuth::None)
+			.expect("tls"),
+	);
 	let socket = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("socket");
