@@ -115,3 +115,5 @@ and bench readiness. Refusal reasons folded the same day into
 - [QUIC on the sim](/quest/m2/quic-sim.md) - the sim drives `moq-quic` over in-memory datagrams with latency and loss
 - [Seeded sim](/quest/m2/sim-seed.md) - sim tests draw every jitter from one seeded generator and replay bit-exact
 - [Sibling broadcasts on one clock](/quest/m2/sibling-broadcasts.md) - one broadcast per source (webcam, screen, each camera, each language) under a shared prefix, sharing one clock, documented and tested in Rust and JS
+- [Catalog broadcast references in MSF and GStreamer](/quest/m2/catalog-broadcast-reference.md) - MSF conversion and the GStreamer source honor a rendition's `broadcast` or refuse it, instead of resolving it in the catalog's own broadcast
+- [Binding track resolver](/quest/m2/binding-track-helper.md) - binding apps subscribe to a rendition without inlining `track` or the key
