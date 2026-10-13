@@ -312,3 +312,104 @@ fn lite_auth_unsupported_interop() {
 	);
 	assert!(reader.is_empty());
 }
+
+/// TRACK_STATUS on every draft: the JS publisher decodes what Rust encodes and answers with a
+/// TRACK_STATUS_OK the Rust subscriber reads, carrying what a SUBSCRIBE_OK would as far as the
+/// draft has room, or refuses a missing broadcast DOES_NOT_EXIST.
+#[test]
+#[ignore = "requires Bun; run by just test interop"]
+fn ietf_track_status_interop() {
+	use crate::coding::Decode;
+	use crate::ietf::error::request;
+
+	let all = [
+		ietf::Version::Draft14,
+		ietf::Version::Draft15,
+		ietf::Version::Draft16,
+		ietf::Version::Draft17,
+		ietf::Version::Draft18,
+		ietf::Version::Draft19,
+		ietf::Version::Draft20,
+		ietf::Version::Draft21,
+		ietf::Version::Draft22,
+	];
+	for (draft, version) in (14..).zip(all) {
+		let legacy = matches!(
+			version,
+			ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16
+		);
+		let request = |id: u64, namespace: &str, wanted: bool| {
+			let mut buf = Vec::new();
+			let mut w = Encoder::new(&mut buf, version.into());
+			w.varint(<ietf::TrackStatus as ietf::Message>::ID).unwrap();
+			ietf::TrackStatus {
+				request_id: ietf::RequestId(id),
+				track_namespace: crate::Path::new(namespace),
+				track_name: "video".into(),
+				properties_wanted: wanted,
+			}
+			.encode(&mut w, version)
+			.unwrap();
+			buf
+		};
+		let input = serde_json::json!({
+			"draft": draft,
+			"requests": [request(1, "room", true), request(3, "room", false), request(5, "absent", true)],
+		});
+		let responses: Vec<Vec<u8>> =
+			serde_json::from_slice(&bun("track-status.ts", input)).expect("JS returned its responses");
+		assert_eq!(responses.len(), 3, "{version}");
+
+		for (index, wanted) in [true, false].into_iter().enumerate() {
+			let mut r = Decoder::new(&responses[index], version.into());
+			assert_eq!(r.varint().unwrap(), ietf::TrackStatusOk::id(version), "{version}");
+			let ok = ietf::TrackStatusOk::decode(&mut r, version).unwrap();
+			assert!(r.is_empty(), "{version}: trailing bytes");
+
+			let expected = match version {
+				// GROUP_ORDER is a field on draft-14 and a parameter on draft-15.
+				ietf::Version::Draft14 | ietf::Version::Draft15 => ietf::Properties {
+					group_order: Some(ietf::GroupOrder::Descending),
+					..Default::default()
+				},
+				ietf::Version::Draft16 | ietf::Version::Draft17 => ietf::Properties::default(),
+				// Only draft-20 can carry the opt-out.
+				_ if !wanted && ietf::Filter::is_draft20(version) => ietf::Properties::default(),
+				_ => ietf::Properties {
+					max_cache_duration: Some(std::time::Duration::from_millis(5000)),
+					timescale: Some(crate::Timescale::MILLI),
+					// The JS track's priority 2, lower-first on the wire.
+					priority: Some(u8::MAX - 2),
+					group_order: Some(ietf::GroupOrder::Descending),
+				},
+			};
+			assert_eq!(
+				ok,
+				ietf::TrackStatusOk {
+					request_id: legacy.then_some(ietf::RequestId(1 + 2 * index as u64)),
+					largest: Some(ietf::Location { group: 4, object: 1 }),
+					properties: expected,
+				},
+				"{version} wanted={wanted}"
+			);
+		}
+
+		let mut r = Decoder::new(&responses[2], version.into());
+		let code = match r.varint().unwrap() {
+			ietf::TRACK_STATUS_ERROR_14 if version == ietf::Version::Draft14 => {
+				ietf::SubscribeError::decode(&mut r, version).unwrap().error_code
+			}
+			id if id == <ietf::RequestError as ietf::Message>::ID && version != ietf::Version::Draft14 => {
+				ietf::RequestError::decode(&mut r, version).unwrap().error_code
+			}
+			id => panic!("{version}: unexpected refusal type {id}"),
+		};
+		assert!(
+			matches!(
+				request::from_code(code, request::Kind::TrackStatus, version),
+				crate::Error::NotFound
+			),
+			"{version}: missing broadcast refused with {code}"
+		);
+	}
+}

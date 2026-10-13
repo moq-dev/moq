@@ -504,23 +504,31 @@ test("TrackStatusRequest: round trip", async () => {
 	expect(decoded.trackName).toBe("main");
 });
 
-test("TrackStatus v14: round trip", async () => {
-	const msg = new Track.TrackStatus({
-		trackNamespace: Path.from("test"),
-		trackName: "status",
-		statusCode: 200,
-		lastGroupId: 42n,
-		lastObjectId: 100n,
-	});
+// TRACK_STATUS_OK carries what SUBSCRIBE_OK would, as far as each draft's answer has room.
+test("TrackStatusOk: round trip on every draft", async () => {
+	const properties = { timescale: Timescale.MILLI, priority: 7, groupOrder: 0x02, maxCacheDuration: 1000n };
+	for (const version of Object.values(Version).filter((v): v is IetfVersion => v !== Version.DRAFT_07)) {
+		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
+		const msg = new Track.TrackStatusOk({
+			requestId: legacy ? 3n : undefined,
+			largest: { groupId: 4n, objectId: 1n },
+			properties,
+		});
+		const encoded = await encodeVersioned(msg, version);
+		const decoded = await decodeVersioned(encoded, Track.TrackStatusOk.decode, version);
 
-	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
-	const decoded = await decodeVersioned(encoded, Track.TrackStatus.decode, Version.DRAFT_14);
-
-	expect(decoded.trackNamespace).toBe("test" as Path.Valid);
-	expect(decoded.trackName).toBe("status");
-	expect(decoded.statusCode).toBe(200);
-	expect(decoded.lastGroupId).toBe(42n);
-	expect(decoded.lastObjectId).toBe(100n);
+		expect(decoded.requestId).toBe(legacy ? 3n : undefined);
+		expect(decoded.largest).toEqual({ groupId: 4n, objectId: 1n });
+		// GROUP_ORDER is a field on draft-14 and a parameter on draft-15; REQUEST_OK has no
+		// properties block until draft-18.
+		const expected =
+			version === Version.DRAFT_14 || version === Version.DRAFT_15
+				? { groupOrder: 0x02 }
+				: version >= Version.DRAFT_18
+					? properties
+					: {};
+		expect(decoded.properties).toEqual(expected);
+	}
 });
 
 // Validation tests
@@ -2058,6 +2066,7 @@ test("TrackStatusRequest: carries SUBSCRIBE fields", async () => {
 	for (const [version, rest] of cases) {
 		const msg = await decodeVersioned(framed([...TRACK_HEAD, ...rest]), Track.TrackStatusRequest.decode, version);
 		expect(msg.trackName).toBe("video");
+		expect(msg.propertiesWanted).toBe(version !== Version.DRAFT_20);
 	}
 });
 

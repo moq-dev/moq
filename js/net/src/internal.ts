@@ -187,6 +187,8 @@ export const hooks: {
 	pendingTrackProducer: (request: Request) => Producer;
 	/** Have a producer write through a broadcast's sequence namespace for its name. */
 	bindSequence: (producer: Producer, sequence: TrackSequence) => void;
+	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
+	cachedLargest: (producer: Producer) => Location | undefined;
 	/**
 	 * Take the next group the subscriber's cursor allows, without waiting; assigned by `track.ts`.
 	 *
@@ -252,6 +254,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	bindSequence: () => {
+		throw new Error("track.ts not loaded");
+	},
+	cachedLargest: () => {
 		throw new Error("track.ts not loaded");
 	},
 	tryRecvGroup: () => {

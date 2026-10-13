@@ -599,6 +599,7 @@ export class Producer {
 			sequence.holders++;
 		};
 		hooks.bindSequence = bindProducerSequence;
+		hooks.cachedLargest = (producer) => producer.#largest();
 	}
 
 	/**
@@ -809,6 +810,22 @@ export class Producer {
 		if (latest === undefined) return undefined;
 		const group = this.#cached.get(latest)?.group;
 		return group?.closed.peek() instanceof Error ? undefined : group;
+	}
+
+	// The newest frame in the cache, as {@link Subscriber.largest} reads it from a sink:
+	// unknown once the newest group is evicted, since what is left cannot say where the edge is.
+	#largest(): Location | undefined {
+		const latest = this.#state.latest;
+		if (latest === undefined || !this.#cached.has(latest)) return undefined;
+
+		let largest: Location | undefined;
+		for (const { group } of this.#cache) {
+			const count = group.consume().frameCount;
+			if (count > 0 && (largest === undefined || group.sequence > largest.group)) {
+				largest = { group: group.sequence, frame: count - 1 };
+			}
+		}
+		return largest;
 	}
 
 	// Evict cached groups idle for longer than the cache window. Idle means nothing
