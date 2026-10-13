@@ -65,6 +65,11 @@ Decided (2026-10-06, maintainer):
   reclamation from the rule), and the untimed text in
   `drafts/draft-lcurley-moq-timestamp.md` that the untimed model adds
   ("never media-stale, starts at the latest group"). No new guide.
+- Decided 2026-10-13 (maintainer): the wall term also advances the floor of
+  `track::Subscriber`'s `Delivered` record (`rs/moq-net/src/model/delivered.rs`).
+  An untimed track has no media time, so that floor never advances on it, and
+  an endless untimed track that skips groups grows the record by one range per
+  gap.
 
 Facts, and work carried over:
 
@@ -120,6 +125,10 @@ Tests, with mocked time:
   hide the stall. Nothing writes after the successor arrives, so only the
   deadline wake can release the reader. It fails without the fix.
 - An untimed subscriber starts at the oldest group that isn't stale.
+- An endless untimed track with gaps keeps a subscriber's `Delivered` record
+  bounded: the wall term forgets a gap once a delivered group above it is
+  stale, as `track::an_endless_track_with_gaps_stays_bounded` checks for
+  timed tracks.
 
 Public API: no signature change; `max_age` behaviour changes. Wire: no
 encoding change; Max Age semantics in the lite draft change.
