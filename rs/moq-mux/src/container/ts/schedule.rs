@@ -196,6 +196,16 @@ fn payload(packet: &[u8]) -> &[u8] {
 	&packet[start..]
 }
 
+/// The bytes of `packet` that reach a decoder buffer: its payload less any PES header, which
+/// the T-STD discards on the way out of the transport buffer (ISO 13818-1 2.4.2.3).
+fn elementary(packet: &[u8]) -> &[u8] {
+	let body = payload(packet);
+	match packet[1] & 0x40 != 0 && body.starts_with(&[0, 0, 1]) && body.len() >= 9 {
+		true => body.get(9 + usize::from(body[8])..).unwrap_or_default(),
+		false => body,
+	}
+}
+
 /// One grid slot's worth of output.
 pub(super) struct Slot {
 	pub index: u128,
@@ -479,18 +489,11 @@ impl Schedule {
 					.iter()
 					.filter(|packet| self::pid(*packet) == pid)
 			};
-			let bytes: usize = on_pid().map(|packet| payload(packet).len()).sum();
+			let bytes: usize = on_pid().map(|packet| elementary(packet).len()).sum();
 			if bytes > size {
-				// Only the error names the elementary size, so the PES headers are parsed here.
-				let headers: usize = on_pid()
-					.filter(|packet| packet[1] & 0x40 != 0)
-					.map(|packet| payload(packet))
-					.filter(|body| body.starts_with(&[0, 0, 1]) && body.len() >= 9)
-					.map(|body| 9 + usize::from(body[8]))
-					.sum();
-				let elementary = bytes.saturating_sub(headers);
+				let pes: usize = on_pid().map(|packet| payload(packet).len()).sum();
 				anyhow::bail!(
-					"MPEG-TS access unit on PID {pid} has {elementary} payload bytes ({bytes} bytes with PES headers), exceeding its {size}-byte decoder buffer"
+					"MPEG-TS access unit on PID {pid} has {bytes} payload bytes ({pes} bytes with PES headers), exceeding its {size}-byte decoder buffer"
 				);
 			}
 		}
@@ -736,7 +739,7 @@ impl Schedule {
 				// multiplex rate decides when the packet's last byte gets there.
 				let done = drained.max(time(position + 1));
 				let held = if pid == unit.pid && buffer.is_some_and(|buffer| buffer.size.is_some()) {
-					payload(packet).len()
+					elementary(packet).len()
 				} else {
 					0
 				};
@@ -1246,7 +1249,8 @@ mod tests {
 		assert!(error.contains("2688"), "{error}");
 		assert!(error.contains("2592"), "{error}");
 		assert!(!schedule.queued(), "refusal must not partially queue a unit");
-		for bytes in [2_304, 2_436] {
+		// Only the elementary bytes count: the PES header never reaches the decoder buffer.
+		for bytes in [2_304, 2_436, 2_592] {
 			schedule.push(1, timing(1_000), audio(bytes), false).unwrap();
 		}
 	}
@@ -1346,7 +1350,7 @@ mod tests {
 					free = free.max(at) + 1504.0 / 2_000_000.0;
 					let decode = 1.0 + frame as f64 * 0.032;
 					assert!(free <= decode + 1e-7, "{bitrate} frame{frame}: {free} > {decode}");
-					held[frame] += payload(packet).len();
+					held[frame] += elementary(packet).len();
 					let occupancy: usize = held
 						.iter()
 						.enumerate()
