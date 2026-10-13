@@ -48,7 +48,7 @@ export class Publisher {
 	send(text: string): void {
 		if (!text) return;
 		this.expire();
-		this.#producer.push(text);
+		this.#producer.push({ value: text, at: Time.Timestamp.now() });
 		this.#expires.update((expires) => [...expires, performance.now() + HISTORY]);
 	}
 
@@ -59,7 +59,7 @@ export class Publisher {
 		let count = 0;
 		while (count < expires.length && expires[count] <= now) count++;
 		if (!count) return;
-		this.#producer.pop(count);
+		this.#producer.pop(count, Time.Timestamp.now());
 		this.#expires.set(expires.slice(count));
 	}
 

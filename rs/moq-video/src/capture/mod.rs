@@ -4,7 +4,7 @@
 //!   zero-copy `CVPixelBuffer` surfaces straight to VideoToolbox.
 //! - Linux camera -> native V4L2 (YUYV / MJPEG -> CPU I420), or a PipeWire
 //!   camera node (`pipewire` feature), X11 display and window -> X11, Wayland
-//!   display -> xdg-desktop-portal + PipeWire (`pipewire` feature).
+//!   display and window -> xdg-desktop-portal + PipeWire (`pipewire` feature).
 //! - Windows camera -> native Media Foundation (`IMFSourceReader`), display and
 //!   window -> Windows.Graphics.Capture (GPU NV12, Windows 10 2004 or newer).
 //!
@@ -50,6 +50,10 @@ mod x11;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 mod pipewire;
 
+/// System-picked screen or window selection and its restore grant.
+#[cfg(any(all(target_os = "linux", feature = "pipewire"), test))]
+pub mod portal;
+
 // Native Media Foundation camera capture on Windows.
 #[cfg(target_os = "windows")]
 mod mediafoundation;
@@ -68,9 +72,7 @@ mod pump;
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 mod settle;
 
-/// What to capture. Each variant carries the identifier that selects it, so a
-/// window can't be captured without saying which one, and a camera id can't
-/// reach the display backend.
+/// What to capture, selected by a native identifier or the system picker.
 ///
 /// The identifiers come from [`cameras`], [`displays`], [`windows`], and
 /// [`apps`]; each listed item's `source()` builds the matching variant.
@@ -105,6 +107,13 @@ pub enum Source {
 	/// Every window belonging to one application, by the id [`apps`] reports
 	/// (a bundle identifier). Windows that open later are included. macOS only.
 	App(String),
+
+	/// A screen or window chosen through the Linux system picker.
+	///
+	/// Clone the selection for demand-driven reopens; create a new one to ask
+	/// for a different source. Restoration depends on compositor support.
+	#[cfg(all(target_os = "linux", feature = "pipewire"))]
+	Portal(portal::Selection),
 }
 
 /// The default camera, matching the historical `Config::default()`.
@@ -131,6 +140,8 @@ impl Source {
 			Self::Display(Some(id)) => format!("display:{}", id.strip_prefix("display:").unwrap_or(id)),
 			Self::Window(id) => format!("window:{}", id.strip_prefix("window:").unwrap_or(id)),
 			Self::App(id) => format!("app:{id}"),
+			#[cfg(all(target_os = "linux", feature = "pipewire"))]
+			Self::Portal(selection) => format!("portal:{:?}", selection.kind()),
 		}
 	}
 }
@@ -446,7 +457,10 @@ pub async fn open(config: &Config) -> Result<Stream, Error> {
 				if x11::selected(device.as_deref()) {
 					x11::open_display(config, device.as_deref()).await
 				} else {
-					pipewire::open(config, device.as_deref()).await
+					if let Some(device) = device {
+						tracing::debug!(%device, "portal screen capture ignores the device selector; the picker owns selection");
+					}
+					pipewire::open(config, None).await
 				}
 			}
 			#[cfg(all(target_os = "linux", not(feature = "pipewire")))]
@@ -477,6 +491,8 @@ pub async fn open(config: &Config) -> Result<Stream, Error> {
 				Err(Error::Unsupported("window capture".to_string()))
 			}
 		}
+		#[cfg(all(target_os = "linux", feature = "pipewire"))]
+		Source::Portal(selection) => pipewire::open(config, Some(selection)).await,
 		Source::App(id) => {
 			let _ = id;
 			#[cfg(target_os = "macos")]

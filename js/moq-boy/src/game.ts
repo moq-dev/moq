@@ -262,13 +262,13 @@ export class Game {
 		// Reconstruct each status from snapshots and deltas, validated against the schema.
 		const consumer = new Json.Snapshot.Consumer({ track: statusTrack, schema: GameStatusSchema });
 
-		// Closing the track on cleanup unblocks a pending next() (it returns undefined), so the loop
+		// Closing the track on cleanup unblocks a pending latest() (it returns undefined), so the loop
 		// ends without racing the teardown.
 		effect.spawn(async () => {
 			for (;;) {
 				let status: GameStatus | undefined;
 				try {
-					status = await consumer.next();
+					status = (await consumer.latest())?.value;
 				} catch (err) {
 					console.warn("Invalid status JSON:", err);
 					continue;
@@ -324,6 +324,6 @@ export class Game {
 		const command = effect.get(this.#command);
 		if (!command) return;
 
-		producer.update({ ...command.cmd, timestamps: command.timestamps });
+		producer.update({ value: { ...command.cmd, timestamps: command.timestamps }, at: Moq.Time.Timestamp.now() });
 	}
 }

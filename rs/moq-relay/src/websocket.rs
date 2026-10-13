@@ -29,6 +29,7 @@ pub(crate) async fn serve_ws(
 	ConnectInfo(remote): ConnectInfo<crate::listener::Peer>,
 	socket_stats: Option<Extension<crate::web::SocketStats>>,
 	Extension(versions): Extension<moq_net::Versions>,
+	Extension(extensions): Extension<moq_net::setup::Extensions>,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<Response> {
 	// If this isn't a WebSocket upgrade (e.g. a plain browser visit), serve
@@ -37,6 +38,8 @@ pub(crate) async fn serve_ws(
 		return Ok(landing_response());
 	};
 
+	// Closed for drain: refuse before the upgrade so the client redials elsewhere.
+	let active = state.shutdown.activity.enter().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 	let alpns = versions.alpns();
 	let ws = negotiate_subprotocol(ws, &alpns)?;
 
@@ -59,9 +62,10 @@ pub(crate) async fn serve_ws(
 	request.alpn = ws.selected_protocol().and_then(|p| p.to_str().ok()).map(str::to_owned);
 	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| auth::peer(&identity));
 	let session_id = request.id.clone();
+	// Abandoned at the drain deadline, as on the native path.
 	let lease = state
-		.auth
-		.admit(request.clone())
+		.shutdown
+		.admit(state.auth.admit(request.clone()))
 		.await
 		.inspect_err(|err| state.cluster.refusals.record(err.into()))?;
 	let token = lease.token();
@@ -84,6 +88,7 @@ pub(crate) async fn serve_ws(
 	let lease = lease.with_stats(stats.clone());
 
 	Ok(ws.on_upgrade(async move |socket| {
+		let _active = active;
 		let id = state.conn_id.fetch_add(1, Ordering::Relaxed);
 
 		// Capture the negotiated subprotocol before we erase the WebSocket type
@@ -99,6 +104,7 @@ pub(crate) async fn serve_ws(
 			remote: remote.0,
 			alpn,
 			versions,
+			extensions,
 			publish,
 			subscribe,
 			stats,
@@ -117,6 +123,8 @@ struct SessionInputs {
 	remote: SocketAddr,
 	alpn: Option<String>,
 	versions: moq_net::Versions,
+	/// The moq-transport extensions this side offers in SETUP.
+	extensions: moq_net::setup::Extensions,
 	publish: Option<origin::Producer>,
 	subscribe: Option<origin::Consumer>,
 	stats: Session,
@@ -137,7 +145,7 @@ struct SessionInputs {
 async fn handle_socket<T>(
 	socket: T,
 	session: SessionInputs,
-	mut lease: auth::Lease,
+	lease: auth::Lease,
 	pending: Option<(crate::session::Registry, moq_auth::Request)>,
 ) -> anyhow::Result<()>
 where
@@ -153,6 +161,7 @@ where
 		remote: _,
 		alpn,
 		versions,
+		extensions,
 		publish,
 		subscribe,
 		stats,
@@ -187,7 +196,10 @@ where
 	// Only set the side the token actually grants. moq-net defaults the
 	// unset side to a fresh no-op origin, which is fine for a
 	// publish-only or subscribe-only token.
-	let mut server = moq_net::Server::new().with_versions(versions).with_stats(stats);
+	let mut server = moq_net::Server::new()
+		.with_versions(versions)
+		.with_extensions(extensions)
+		.with_stats(stats);
 	if let Some(subscribe) = subscribe {
 		server = server.with_publisher(subscribe);
 	}
@@ -198,18 +210,28 @@ where
 	let ws = moq_tokio::transport::Session::new(ws);
 	let mut refused = ws.clone();
 	let accept = server.accept(tokio::time::Instant::now().into_std(), ws);
-	let (session, driver) = match timeout {
-		None => accept.await?,
-		Some(timeout) => match tokio::time::timeout(timeout, accept).await {
-			Ok(accepted) => accepted?,
-			// A peer that upgraded and never sent SETUP; tell it why it is dropped.
-			Err(_) => {
-				use web_transport_trait::poll::Session as _;
-				let err = moq_net::Error::Timeout;
-				refused.close(moq_net::SessionError::from(&err).to_code(), &err.to_string());
-				return Err(err.into());
-			}
-		},
+	let accept = async move {
+		match timeout {
+			None => Ok(accept.await),
+			Some(timeout) => tokio::time::timeout(timeout, accept)
+				.await
+				.map_err(|_| moq_net::Error::Timeout),
+		}
+	};
+	// The drain deadline bounds SETUP too, so a peer that never sends it cannot
+	// outlive the relay.
+	let accepted = shutdown
+		.until_deadline(accept)
+		.await
+		.unwrap_or(Err(moq_net::Error::GoawayTimeout));
+	let (session, driver) = match accepted {
+		Ok(accepted) => accepted?,
+		// A peer that upgraded and never sent SETUP in time; tell it why it is dropped.
+		Err(err) => {
+			use web_transport_trait::poll::Session as _;
+			refused.close(moq_net::SessionError::from(&err).to_code(), &err.to_string());
+			return Err(err.into());
+		}
 	};
 
 	let driver = moq_net::time::run(driver);
@@ -218,6 +240,7 @@ where
 	// The handshake is done, so this is a MoQ session now: only now can a push
 	// be serviced, and only now does the session appear in the live table.
 	let registration = pending.map(|(sessions, request)| sessions.register(request));
+	let mut lease = lease.authorizing(&session);
 	let _serving = shutdown.serve();
 
 	loop {
@@ -975,6 +998,7 @@ mod tests {
 			remote: "127.0.0.1:0".parse().unwrap(),
 			alpn: Some(alpn.clone()),
 			versions: moq_net::Versions::all(),
+			extensions: Default::default(),
 			publish: None,
 			subscribe: None,
 			stats: Session::default(),
@@ -1041,6 +1065,7 @@ mod tests {
 			remote: "127.0.0.1:0".parse().unwrap(),
 			alpn: Some(alpn.clone()),
 			versions: moq_net::Versions::all(),
+			extensions: Default::default(),
 			publish: None,
 			subscribe: None,
 			stats: Session::default(),

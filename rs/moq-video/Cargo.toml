@@ -167,7 +167,7 @@ ndk = { version = "0.9", optional = true, default-features = false, features = [
 ash = { workspace = true, optional = true }
 # xdg-desktop-portal ScreenCast and Camera negotiation for the `pipewire` feature
 # (pure Rust, zbus over DBus). The ScreenCast portal owns source selection: the
-# user picks a monitor in a compositor dialog, and we get back a PipeWire fd +
+# user picks a monitor or window in a compositor dialog, and we get back a PipeWire fd +
 # node id to stream from. The Camera portal grants a sandboxed app a PipeWire
 # remote that exposes the cameras.
 ashpd = { version = "0.13", optional = true, default-features = false, features = ["tokio", "screencast", "camera"] }

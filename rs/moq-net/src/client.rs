@@ -19,6 +19,7 @@ pub struct Client {
 	cost: Option<u64>,
 	peer_hop: Option<crate::Hop>,
 	limits: crate::session::Limits,
+	extensions: setup::Extensions,
 }
 
 impl Client {
@@ -91,6 +92,12 @@ impl Client {
 	/// Set the URI authority to advertise in SETUP (moq-transport only)
 	pub fn with_authority(mut self, authority: impl Into<String>) -> Self {
 		self.setup_authority = Some(authority.into());
+		self
+	}
+
+	/// Choose which moq-transport extensions to offer in SETUP. Defaults to all of them.
+	pub fn with_extensions(mut self, extensions: setup::Extensions) -> Self {
+		self.extensions = extensions;
 		self
 	}
 
@@ -200,6 +207,7 @@ impl Client {
 
 		let start = lite::start(lite::Config {
 			runtime: runtime.clone(),
+			client: true,
 			limits: self.limits,
 			session: session.clone(),
 			setup_stream: None,
@@ -209,6 +217,7 @@ impl Client {
 			version,
 			our_setup,
 			peer_setup: None,
+			auth: crate::auth::Handle::new(version.has_auth()),
 		})?;
 
 		Ok(Session::new(
@@ -217,8 +226,11 @@ impl Client {
 			version.into(),
 			start.recv_bandwidth,
 			crate::driver::Protocol::Lite(Box::new(start.driver)),
-			start.goaway,
-			start.setup,
+			crate::session::Handles {
+				goaway: start.goaway,
+				auth: start.auth,
+				setup: start.setup,
+			},
 		))
 	}
 
@@ -276,6 +288,9 @@ impl Client {
 
 				// Draft-17+: SETUP is exchanged by the connection driver.
 				// We advertise the request path in our SETUP for URL-less transports.
+				// The peer's SETUP decides whether AUTH is negotiated. A handle that does not
+				// offer it keeps the option out of our SETUP and presents no credential.
+				let auth = crate::auth::Handle::new(self.extensions.auth);
 				let (protocol, goaway, setup) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
 					limits: self.limits,
@@ -292,7 +307,9 @@ impl Client {
 					authority: self.setup_authority.clone(),
 					peer_setup_stream: None,
 					peer_declared: None,
+					auth: auth.clone(),
 					early_unis: Vec::new(),
+					extensions: self.extensions,
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
@@ -302,8 +319,7 @@ impl Client {
 					v,
 					None,
 					crate::driver::Protocol::Ietf(protocol),
-					goaway,
-					setup,
+					crate::session::Handles { goaway, auth, setup },
 				));
 			}
 			Some(ALPN_16) => {
@@ -374,7 +390,9 @@ impl Client {
 		if let Some(authority) = &self.setup_authority {
 			parameters.set_bytes(ietf::ParameterBytes::Authority, authority.clone().into_bytes());
 		}
-		ietf::solicit::into_setup(&mut parameters, ietf_encoding);
+		if self.extensions.solicit {
+			ietf::solicit::into_setup(&mut parameters, ietf_encoding);
+		}
 		ietf::hidden::into_setup(&mut parameters, ietf_encoding);
 		ietf::active_count::into_setup(&mut parameters, ietf_encoding);
 		let parameters = parameters.encode_bytes(ietf_encoding)?;
@@ -394,11 +412,12 @@ impl Client {
 			.copied()
 			.ok_or(Error::Version)?;
 
-		let (recv_bw, protocol, goaway, setup) = match version {
+		let (recv_bw, protocol, goaway, auth, setup) = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
 				let start = lite::start(lite::Config {
 					runtime: runtime.clone(),
+					client: true,
 					limits: self.limits,
 					session: session.clone(),
 					setup_stream: Some(stream),
@@ -410,12 +429,15 @@ impl Client {
 					// (pre-lite-05), which have no Setup Stream.
 					our_setup: lite::Setup::default(),
 					peer_setup: None,
+					// Negotiated over the bidi SETUP: lite 01/02, which carry no AUTH.
+					auth: crate::auth::Handle::new(v.has_auth()),
 				})?;
 
 				(
 					start.recv_bandwidth,
 					crate::driver::Protocol::Lite(Box::new(start.driver)),
 					start.goaway,
+					start.auth,
 					start.setup,
 				)
 			}
@@ -434,6 +456,8 @@ impl Client {
 				};
 
 				let stream = stream.with_version(v);
+				// Draft 14-16 carry no AUTH, but the session is still limited through this handle.
+				let auth = crate::auth::Handle::new(false);
 				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
 				let (protocol, goaway, setup) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
@@ -451,14 +475,21 @@ impl Client {
 					authority: None,
 					peer_setup_stream: None,
 					peer_declared: Some(peer_declared),
+					auth: auth.clone(),
 					early_unis: Vec::new(),
+					extensions: self.extensions,
 				})?;
-				(None, crate::driver::Protocol::Ietf(protocol), goaway, setup)
+				(None, crate::driver::Protocol::Ietf(protocol), goaway, auth, setup)
 			}
 		};
 
 		Ok(Session::new(
-			runtime, session, version, recv_bw, protocol, goaway, setup,
+			runtime,
+			session,
+			version,
+			recv_bw,
+			protocol,
+			crate::session::Handles { goaway, auth, setup },
 		))
 	}
 }

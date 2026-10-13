@@ -81,7 +81,10 @@ impl Connection {
 	/// Admits and serves this connection until it closes.
 	#[tracing::instrument("conn", skip_all, fields(id = self.id, remote = self.request.remote_addr().map(tracing::field::display), session = tracing::field::Empty))]
 	pub async fn run(self) -> anyhow::Result<()> {
-		let (admitted, registration) = match self.admit().await {
+		// Abandoned at the drain deadline, so the deadline bounds this task and its
+		// socket like it bounds a session.
+		let admitted = self.shutdown.admit(self.admit()).await;
+		let (admitted, registration) = match admitted {
 			Ok(admitted) => admitted,
 			Err(err) => {
 				self.cluster.refusals.record(err.refusal);
@@ -117,7 +120,12 @@ impl Connection {
 		if let Some(publisher) = publisher {
 			request = request.with_subscriber(publisher);
 		}
-		let session = request.ok().await?;
+		// Bounded too: a peer that stalls the SETUP reply must not outlive the relay.
+		let session = self
+			.shutdown
+			.until_deadline(request.ok())
+			.await
+			.ok_or_else(|| anyhow::anyhow!("the SETUP reply was still pending at the drain deadline"))??;
 
 		tracing::info!(version = %session.version(), %transport, "negotiated");
 
@@ -186,20 +194,22 @@ impl Connection {
 /// the internal listener re-checks this lease; `None` for a session that is
 /// not in the table.
 ///
-/// The lease is the decider's live word on the grant: when it stops covering
-/// the session ([`auth::Lease::ended`]) the session closes with the reason, and
-/// the session's own close is reported back through the lease as the `end` event.
-/// Either way, a relay shutdown drains the session with a GOAWAY instead of
-/// cutting it off, and does not exit before this returns or the drain deadline.
+/// The lease is the decider's live word on the grant: a re-check re-authorizes the
+/// session in place, narrower or wider, and when it stops covering the session
+/// ([`auth::Lease::ended`]) the session closes with the reason. The session's own
+/// close is reported back through the lease as the `end` event. Either way, a relay
+/// shutdown drains the session with a GOAWAY instead of cutting it off, and does not
+/// exit before this returns or the drain deadline.
 ///
 /// The session handle is `Send + Sync` whatever transport carries it, so this
 /// runs on the shared runtime even for sessions a pinned QUIC worker drives.
 pub async fn supervise(
 	session: moq_net::Session,
-	mut lease: auth::Lease,
+	lease: auth::Lease,
 	mut shutdown: crate::shutdown::Observer,
 	registration: Option<crate::session::Registration>,
 ) -> anyhow::Result<()> {
+	let mut lease = lease.authorizing(&session);
 	let _serving = shutdown.serve();
 	loop {
 		let nudged = async {

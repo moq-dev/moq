@@ -10,7 +10,7 @@ import { ALPN, Version as IetfVersion } from "./ietf/version.ts";
 import { Goaway } from "./lite/goaway.ts";
 import { StreamId } from "./lite/stream.ts";
 import { ALPN_06, Version as LiteVersion } from "./lite/version.ts";
-import { createMockTransportPair, type MockTransport } from "./mock.ts";
+import { createMockTransportPair, type MockTransport, textFrame } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Stream, Writer } from "./stream.ts";
@@ -95,7 +95,8 @@ async function sendLiteGoaway(server: WebTransport): Promise<void> {
 /**
  * After GOAWAY the old session keeps opening subscribe, fetch, and announce-interest streams
  * while it is the only route, at the drain cost. Once a replacement answers, it outranks the
- * old session and new requests open there instead.
+ * old session and new requests open there instead. These wires carry no epoch, so the
+ * replacement is another instance: the request already open stays on the draining session.
  */
 async function handover(kind: "lite" | "ietf"): Promise<void> {
 	const protocol = kind === "lite" ? ALPN_06 : ALPN.DRAFT_17;
@@ -115,9 +116,9 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 			const req = await wireOf(broadcast).requested();
 			if (!req) break;
 			const track = req.accept({ timescale: Timescale.MILLI });
-			if (req.name === "video" && armVideo) track.writeString("one");
-			if (req.name === "later") track.writeString("from-draining");
-			if (req.name === "audio") track.writeString("from-replacement");
+			if (req.name === "video" && armVideo) track.writeFrame(textFrame("one"));
+			if (req.name === "later") track.writeFrame(textFrame("from-draining"));
+			if (req.name === "audio") track.writeFrame(textFrame("from-replacement"));
 			served.push(track);
 		}
 	})();
@@ -130,6 +131,7 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 	const announced = client.announced();
 	const request = consume.request(Path.from("room"));
 	let replacement: Awaited<ReturnType<typeof connect>> | undefined;
+	let fresh: ReturnType<typeof consume.request> | undefined;
 	let replacementServer: Awaited<ReturnType<typeof accept>> | undefined;
 
 	try {
@@ -163,7 +165,7 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 		expect(request.active.peek()).toBe(front);
 
 		for (const producer of served) {
-			if (producer.closed.peek() === undefined) producer.writeString("two");
+			if (producer.closed.peek() === undefined) producer.writeFrame(textFrame("two"));
 		}
 		expect(await video.readString()).toBe("two");
 
@@ -185,17 +187,23 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 		expect(pair.client.sendStreams.bidi.length).toBeGreaterThan(opened);
 		const drainingOpened = pair.client.sendStreams.bidi.length;
 
+		const routes = consume.consume().announced();
+		expect((await routes.next())?.kind).toBe("start");
+
 		const pair2 = createMockTransportPair(protocol);
 		[replacement, replacementServer] = await Promise.all([
 			connect({ url, transport: pair2.client, consume }),
 			accept({ transport: pair2.server, url, publish: publish.consume() }),
 		]);
 
-		await waitUntil(() => {
-			const active = request.active.peek();
-			return active !== undefined && active !== front;
-		});
-		const audio = request.active.peek()?.track("audio").subscribe().ordered();
+		expect(await routes.next()).toMatchObject({ prefix: Path.from("room"), kind: "restart" });
+		routes.close();
+		expect(request.active.peek()).toBe(front);
+
+		fresh = consume.request(Path.from("room"));
+		await waitUntil(() => fresh?.active.peek() !== undefined);
+		expect(fresh.active.peek()).not.toBe(front);
+		const audio = fresh.active.peek()?.track("audio").subscribe().ordered();
 		if (!audio) throw new Error("replacement did not answer");
 		expect(await audio.readString()).toBe("from-replacement");
 		// Once the replacement wins, nothing new opens on the draining session.
@@ -209,6 +217,7 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 	} finally {
 		announced.close();
 		request.close();
+		fresh?.close();
 		replacement?.abort();
 		replacementServer?.abort();
 		client.abort();
@@ -248,6 +257,9 @@ test("announcing and subscribing after GOAWAY still open streams, on the adapter
 			},
 			nextRequestId() {
 				return Promise.resolve(0n);
+			},
+			spendRequest() {
+				throw new Error("unexpected incoming request");
 			},
 			close() {},
 		};

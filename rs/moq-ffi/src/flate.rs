@@ -1,7 +1,7 @@
 //! Opaque data tracks over the FFI boundary, advertised in the catalog.
 //!
 //! The `moq-flate` counterpart of [`crate::json`]: opaque payloads (for example a camera's latest
-//! JPEG thumbnail) on a named track, in either mode: `snapshot` (each payload supersedes the last)
+//! JPEG thumbnail) on a track, in either mode: `snapshot` (each payload supersedes the last)
 //! or `stream` (every payload preserved in order). The broadcast's catalog carries
 //! `binary.tracks.<name>` (mode, plus `mime` and `compression` when set) for as long as the track
 //! lives, so a consumer discovers it without knowing the application.
@@ -12,7 +12,7 @@ use moq_mux::binary::Config;
 use moq_mux::catalog::hang::Extra;
 
 use crate::error::MoqError;
-use crate::producer::MoqBroadcastProducer;
+use crate::producer::{MoqBroadcastProducer, MoqTrackProducer};
 
 /// Options for an opaque data track, in either mode (the mode is fixed by the constructor).
 #[derive(Clone, uniffi::Record)]
@@ -36,45 +36,6 @@ impl From<MoqFlateConfig> for Config {
 	}
 }
 
-#[uniffi::export]
-impl MoqBroadcastProducer {
-	/// Publish an opaque snapshot track (lossy latest-value) by name, advertised in the catalog.
-	///
-	/// Errors if the catalog already carries an entry under `name`.
-	pub fn publish_flate_snapshot(
-		&self,
-		name: String,
-		config: MoqFlateConfig,
-	) -> Result<Arc<MoqFlateSnapshotProducer>, MoqError> {
-		let _guard = crate::ffi::enter();
-		self.with_state(|state| {
-			let track = state.broadcast.create_track(name, None)?;
-			let producer = state.catalog.binary_snapshot(track, Config::from(config))?;
-			Ok(Arc::new(MoqFlateSnapshotProducer {
-				inner: std::sync::Mutex::new(Some(producer)),
-			}))
-		})
-	}
-
-	/// Publish an opaque stream track (lossless append-log) by name, advertised in the catalog.
-	///
-	/// Errors if the catalog already carries an entry under `name`.
-	pub fn publish_flate_stream(
-		&self,
-		name: String,
-		config: MoqFlateConfig,
-	) -> Result<Arc<MoqFlateStreamProducer>, MoqError> {
-		let _guard = crate::ffi::enter();
-		self.with_state(|state| {
-			let track = state.broadcast.create_track(name, None)?;
-			let producer = state.catalog.binary_stream(track, Config::from(config))?;
-			Ok(Arc::new(MoqFlateStreamProducer {
-				inner: std::sync::Mutex::new(Some(producer)),
-			}))
-		})
-	}
-}
-
 /// Publishes opaque payloads that consumers see as a single latest value.
 #[derive(uniffi::Object)]
 pub struct MoqFlateSnapshotProducer {
@@ -83,6 +44,28 @@ pub struct MoqFlateSnapshotProducer {
 
 #[uniffi::export]
 impl MoqFlateSnapshotProducer {
+	/// Publish `track` as an opaque snapshot track (lossy latest-value), advertised in `broadcast`'s catalog.
+	///
+	/// `track` must come from `broadcast`; otherwise the catalog advertises a track the broadcast
+	/// does not carry.
+	///
+	/// Takes over `track`, whose handle is closed afterward. Errors if the catalog already
+	/// carries an entry under the track's name.
+	#[uniffi::constructor]
+	pub fn new(
+		broadcast: &MoqBroadcastProducer,
+		track: &MoqTrackProducer,
+		config: MoqFlateConfig,
+	) -> Result<Arc<Self>, MoqError> {
+		let _guard = crate::ffi::enter();
+		let config = Config::from(config);
+		let producer =
+			track.adopt(|track| broadcast.with_state(|state| Ok(state.catalog.binary_snapshot(track, config)?)))?;
+		Ok(Arc::new(Self {
+			inner: std::sync::Mutex::new(Some(producer)),
+		}))
+	}
+
 	/// Publish a new payload, superseding the last.
 	pub fn update(&self, payload: Vec<u8>) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
@@ -108,6 +91,28 @@ pub struct MoqFlateStreamProducer {
 
 #[uniffi::export]
 impl MoqFlateStreamProducer {
+	/// Publish `track` as an opaque stream track (lossless append-log), advertised in `broadcast`'s catalog.
+	///
+	/// `track` must come from `broadcast`; otherwise the catalog advertises a track the broadcast
+	/// does not carry.
+	///
+	/// Takes over `track`, whose handle is closed afterward. Errors if the catalog already
+	/// carries an entry under the track's name.
+	#[uniffi::constructor]
+	pub fn new(
+		broadcast: &MoqBroadcastProducer,
+		track: &MoqTrackProducer,
+		config: MoqFlateConfig,
+	) -> Result<Arc<Self>, MoqError> {
+		let _guard = crate::ffi::enter();
+		let config = Config::from(config);
+		let producer =
+			track.adopt(|track| broadcast.with_state(|state| Ok(state.catalog.binary_stream(track, config)?)))?;
+		Ok(Arc::new(Self {
+			inner: std::sync::Mutex::new(Some(producer)),
+		}))
+	}
+
 	/// Append one payload to the log.
 	pub fn append(&self, payload: Vec<u8>) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();

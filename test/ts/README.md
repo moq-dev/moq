@@ -34,6 +34,7 @@ just test ts --live             # grade PCR release timing off the live pipe
 just test ts --pair             # two exporters of one broadcast, grade table anchoring
 just test ts --open-gop         # open-GOP clip; its leading pictures must survive
 just test ts --hrd              # 1080p video filling a broadcast-sized 9 Mbit CPB
+just test ts --headroom         # the same with four audio PIDs, muxed above the video's Rx
 just test ts --delay 1s         # pass the exporter's --delay
 ```
 
@@ -46,8 +47,8 @@ The default arm runs `pcr-timing.py` over its capture too, after `compliance.py`
 for the PCR checks `compliance.py` leaves to it: the value interval (hard), and
 whether the bytes between consecutive PCRs are the ones the mux rate implies
 ([`pcr-schedule`](#byte-schedule), which gates whenever the rate is known, as the
-generated clip's is). With the rate known it also runs TSDuck's `pcrverify` past
-the first three seconds, failing on any PCR more than 500 ns off its byte position
+generated clip's is). With the rate known it also runs TSDuck's `pcrverify` from
+the first PCR, failing on any PCR more than 500 ns off its byte position
 at the rate: the `PCR_accuracy_error` an IRD or a TR 101 290 probe reports, which
 `pcr-schedule`'s packet of slack lets through.
 
@@ -349,16 +350,13 @@ correct 2 Mb/s stream on a 25 ms grid reads −0.74 % and +2.27 % on alternate
 intervals, which a percentage alone would fail.
 
 Give the rate whenever it is known. The estimate is total bytes over total time,
-so a transient biases every interval by the same amount: over a 20 s live window,
-the exporter's unpadded first half-second pulled it ~3 % low and read every padded
-interval after it as off schedule. `run.sh` passes the generated clip's rate
-(`--bitrate`) with `--schedule-pct-min 99`, and lets the grader estimate, and only
-report, for `--source`.
+so a transient biases every interval by the same amount. `run.sh` passes the generated
+clip's rate (`--bitrate`) with `--schedule-pct-min 99`, and lets the grader estimate,
+and only report, for `--source`.
 
-With the rate given, the intervals before the first null packet are not graded. The
-exporter pads only once its catalog records the rate, which import measures over the
-source's first two seconds, so a subscriber that starts with the publisher begins
-unpadded; the report counts those intervals as `unpadded_lead`.
+Every PCR interval is graded. Import holds the catalog until its initial two-second
+PCR window has measured a stable rate or established that the input is variable-rate.
+A constant-rate exporter therefore has the rate before it sends its first PCR.
 
 At the default 10 Mb/s the generated clip compresses to almost nothing, so padding
 dominates and no keyframe outgrows its 31 kB slot. At 2 Mb/s its 13-19 kB keyframes
@@ -367,7 +365,12 @@ DTS; CI runs that too (`just test ts --bitrate 2000000`). `--hrd` goes further: 
 1080p encode with a 9 Mbit NAL HRD kept near full by noise, the shape of a
 contribution encoder's output, which sends pictures most of a second ahead of their
 decode time and loads the decoder buffer past 60 % at the default delay (the recipe
-moq-dev/moq#4645 graded with; CI runs it too). A real constant-rate
+moq-dev/moq#4645 graded with; CI runs it too). Every other clip muxes at or below the
+video's Rx, where its transport buffer cannot fill. `--headroom` puts that video
+beside three MPEG-1 Layer II PIDs and an AC-3 one in a 12.5 Mb/s multiplex, above
+the video's 10.8 Mb/s Rx, as a broadcast feed runs; each slot then has to
+interleave the video with the audio and the nulls, or TB overflows
+(moq-dev/moq#5142; CI runs it too). A real constant-rate
 capture discriminates further. A 60 s cut of a 9.95 Mb/s broadcast clip
 round-tripped through the harness before the export kept a schedule came back with
 a median of 1,316 B between PCRs against 31,081 B nominal and 3.1 % of intervals
@@ -584,9 +587,9 @@ exporter re-emits SI on its own repetition cadence rather than the source's.
 ## CI
 
 `.github/workflows/interop.yml` runs `just test ts`, `just test ts --bitrate
-2000000`, `just test ts --hrd`, `just test ts --open-gop`, `just test ts-eit`, and
-`just test ts-tstd` after the interop matrix (nightly, on demand, and on PRs
-touching `test/ts/`).
+2000000`, `just test ts --hrd`, `just test ts --headroom`,
+`just test ts --open-gop`, `just test ts-eit`, and `just test ts-tstd` after the
+interop matrix (nightly, on demand, and on PRs touching `test/ts/`).
 `ts-eit` is `eit-roundtrip.sh`: it builds the sparse-schedule and
 pending-version fixtures from a generated clip, round-trips them through a
 relay, and censuses the capture, so a break in the generators or in the SI

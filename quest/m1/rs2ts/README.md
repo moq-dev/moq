@@ -1,85 +1,70 @@
-# Generated @moq/net
+# Rust-backed @moq/net
 
 ## Goal
 
-moq-net is the single implementation of the MoQ protocol and model layer.
-The browser runs it as TypeScript generated from the Rust source, retiring
-js/net's hand-written equivalent with no regression in bundle size, CPU, or
-usability. Lite is this line; IETF follows in m2. Transport glue (the WebTransport and
-WebSocket pumps, timers) stays hand-written TypeScript.
+moq-net is the single implementation of the browser's MoQ protocol and model
+layer, covering publishing and consumption for lite and moq-transport.
+`@moq/net` remains the public package. Ship a production WASM replacement
+first; the eventual browser distribution is JS-only, built from Rust.
+Hand-written TypeScript provides browser integration and the public interface.
+
+This m1 line delivers the WASM replacement. The
+[JS-only stage](/quest/m2/rs2ts-js.md) follows in m2.
 
 ## Plan
 
-Decided in planning (2026-09-27), with the spike data in
-<https://claude.ai/artifact/8DnE9dgGN3fXvuyBwbcPJG>:
+Decided with the maintainer on 2026-10-12:
 
-- Generated TypeScript, not WASM. Today's `moq-wasm` is 527 KB gzip against
-  js/net's 84 KB, and loses on CPU to async wasm-bindgen glue (~600 ns per
-  async call against 26 ns in JS). A hand-carved sans-IO lite core was 6 KB
-  gzip and 1.7-9x faster than js/net, but a plain-JS port of the same
-  synchronous decoder was faster still: the win is the sans-IO shape, not
-  WASM. The model layer is shared too, and every call on a model handle would
-  cross the WASM boundary, so generated TS is the path.
-- The translator is `rs/rs2ts`, built on Charon (Rust MIR restructured into
-  LLBC). Charon's `--precise-drops` gives exact drop points, which the
-  close-on-last-drop handles depend on, and `--start-from` extracts a subset.
-  rust-js was evaluated and rejected as a base: no Drop, no generic traits,
-  JS only, all-or-nothing extraction, 32-bit `usize`. Its MIT oxc printer is
-  worth borrowing for formatting and source maps.
-- moq-net itself becomes the sans-IO core: bytes and timestamps in, events
-  and bytes out, no runtime. The async helper methods move behind an `async`
-  cargo feature; rs2ts reads the crate without it and JS reimplements the
-  helpers with Promises. No second crate.
-- Values are plain `u64` in Rust, and varint is a wire encoding in the codec,
-  not a type. The spec is not bounded to 2^53: the leading-ones form
-  (moq-lite 07, moq-transport draft-17+) carries all 64 bits, and the QUIC
-  form (moq-lite 01-06, drafts 14-16) refuses anything past 2^62 - 1 rather
-  than truncating. Rust
-  `u64` maps to a TypeScript `U64` (two `u32` halves), generically, with
-  checked conversion to and from `number`.
-- The generated TypeScript is committed and a CI lane regenerates it and
-  fails on drift, so JS contributors and npm publishing never need the
-  nightly toolchain Charon pins. It lives inside js/net and `@moq/net` stays
-  the package.
-- The `@moq/net` API may change (disposable handles, `U64`) as long as it
-  is no worse to use; watch, publish, hang, and the demos update in the same
-  change.
-- Parity: `just test interop --all`, plus moq-net's own tests translated with
-  the code. They run on simulated time with no runtime (`moq-net-sim`), so the
-  async-free ones translate as they stand.
-- The Rust refactors break moq-net's published API, and the translator and
-  generated code build on them.
-- Hand-written js/net fixes keep landing until the generated path replaces
-  them; it is months out.
+- Ship WASM in production, not only as a comparison. It is transitional;
+  stopping permanently at WASM does not meet the final JS-only goal.
+- Try WASM-to-JS first using the production Rust implementation and browser
+  fixtures. Pursue Charon, rust-js, or another source translator only if
+  measured costs justify it. These are alternatives, not mandatory successive
+  implementations. A new generic translator repo is not a prerequisite.
+- Allow explicitly reviewed bundle-size, startup, and CPU tradeoffs for
+  reduced maintenance. Compare complete browser workloads before each
+  adoption and record the maintainer's decision; do not invent percentage
+  thresholds. Correctness and wire compatibility remain required.
+- Keep the TypeScript interface of `@moq/net` where practical. Hide backend
+  initialization and ownership details where feasible, without duplicating
+  protocol or model logic. Propose necessary API breaks separately and migrate
+  in-tree consumers with the change; do not expose Rust bindings by default.
+- Update existing API docs and package READMEs, including loading, deployment,
+  and regeneration instructions. No separate browser-backend guide quest.
+- Continue fixing handwritten js/net until adoption. Retain its identified
+  baseline and reusable tests when deleting the replaced implementation.
 
-Decided in the 2026-09-30 audit: the lite half stays in m1 with an explicit
-go/no-go. The IETF half (the sans-IO IETF session, generated IETF, and IETF
-parameters) moved to m2 and waits on that go.
+This supersedes the earlier generated-TypeScript-only decision, the absolute
+no-regression gate, and the codec/model/session translation sequence. Keep
+Rust async, kio, integer representations, and storage unless evidence calls
+for a source change. A batched boundary is an optimization candidate, not a
+reason to require a full sans-IO rewrite. Controlled time remains independently
+useful; source-level `Instant` mappings depend on the chosen backend.
 
-Decided 2026-10-08: the go/no-go comes right after the
-[translator](/quest/m1/rs2ts/translator.md), before the sans-IO refactors
-break moq-net's published API. It compares the generated lite codec with
-js/net's hand-written one on bundle size and per-frame CPU. A no-go stops the
-line there.
+Evidence from [#5337](https://github.com/moq-dev/moq/issues/5337) motivates
+reopening the options, not choosing a winner. Its attachment reports the
+original async Rust consumer passing nine browser tests in both WASM and
+WASM-to-JS, without Rust edits, at about 543 KB and 875 KB gzip respectively.
+A separate synchronous publisher prototype reports median times of about
+8.6 us/frame for WASM, 25.1 for WASM-to-JS, and 100.9 for its Charon emitter.
+The issue's 27.9 versus 104 us comparison is a different minified run.
+These are contributor measurements, not reproduced results. The publisher
+comparison is not fully reproducible from the attachment, excludes network
+and encryption, and has incomparable startup paths. The async fixtures are
+consume-only and do not cover values above the JS exact-integer range.
 
-This README's own work is the final no-downgrade report once generated lite ships:
-bundle size, per-frame CPU, and first-frame latency against the hand-written
-js/net it replaces, measured with the [browser benchmarks](/quest/m1/browser-benchmarks.md).
+Public API: the plan retains `@moq/net`; implementation quests must enumerate
+any necessary breaks. Wire: no changes intended.
 
 ## Required
 
-- [Browser benchmarks](/quest/m1/browser-benchmarks.md) - the harness the no-downgrade report uses
-- [rs2ts](/quest/m1/rs2ts/translator.md) - a Charon-based translator emits readable TypeScript for moq-net's lite codec, committed and checked for drift in CI
-- [Sans-IO moq-net](/quest/m1/rs2ts/sans-io/README.md) - moq-net builds and runs without a runtime; async helpers sit behind an `async` feature
-- [Generated lite](/quest/m1/rs2ts/lite.md) - @moq/net's lite session and model layer are generated from moq-net
-- [Remove moq-wasm](/quest/m1/rs2ts/remove-wasm.md) - the WASM experiment is deleted once generated lite ships
-
-## Closes
-
-- [#2907](https://github.com/moq-dev/moq/issues/2907) - close this issue when the quest finishes
-- [#2822](https://github.com/moq-dev/moq/issues/2822) - close this issue when the quest finishes
-- [#2835](https://github.com/moq-dev/moq/issues/2835) - close this issue when the quest finishes
+- [Browser backend baseline](/quest/m1/rs2ts/spike.md) - reproducible browser fixtures and measurements before choosing or adopting a backend
+- [Complete WASM bindings](/quest/m1/rs2ts/wasm-bindings.md) - Rust publishing and consumption cover the browser protocol and model surface
+- [Adopt WASM in @moq/net](/quest/m1/rs2ts/wasm-adopt.md) - the TypeScript interface uses Rust, with measured tradeoffs accepted before replacement
 
 ## Related
 
-- [Generated IETF](/quest/m2/rs2ts-ietf.md) - the IETF half, deferred to m2 until the lite go/no-go
+- [WASM-to-JS evaluation](/quest/m2/rs2ts-wasm2js.md) - the first JS-only candidate, with source translators as alternatives
+- [JS-only @moq/net](/quest/m2/rs2ts-js.md) - the eventual distribution uses no WASM runtime
+- [Browser media report](/quest/m2/rs2ts-browser-report.md) - broader media measurements after adoption
+- [Controlled time](/quest/m1/time/README.md) - coherent Rust and JS clocks regardless of backend

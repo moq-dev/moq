@@ -368,6 +368,12 @@ fn last_error_protocol_captures_session_known_app_and_unknown() {
 			moq_protocol_kind::MOQ_PROTOCOL_KIND_UNAUTHORIZED as u32,
 		),
 		(
+			moq_net::Error::from(moq_net::StreamError::Unauthorized),
+			moq_error_scope::MOQ_ERROR_SCOPE_STREAM as u32,
+			0x3b,
+			moq_protocol_kind::MOQ_PROTOCOL_KIND_UNAUTHORIZED as u32,
+		),
+		(
 			moq_net::Error::from(moq_net::SessionError::App(7)),
 			moq_error_scope::MOQ_ERROR_SCOPE_SESSION as u32,
 			64 + 7,
@@ -1620,7 +1626,6 @@ fn raw_track_datagram_publish_consume() {
 		)
 	});
 
-	// Millisecond-aligned so the value survives the default (millisecond) timescale exactly.
 	let payload = b"hello datagram";
 	let mut sequence: u64 = u64::MAX;
 	assert_eq!(
@@ -4812,7 +4817,7 @@ fn server_accepts_a_session() {
 		"accept consumes the request"
 	);
 
-	// Both sides report the first (and, for the server, only) epoch.
+	// Both sides report the first (and, for the server, only) connect.
 	assert_eq!(session_cb.recv(), 1);
 	assert_eq!(client_cb.recv(), 1);
 

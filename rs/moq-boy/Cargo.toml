@@ -33,3 +33,6 @@ serde = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 usage = { workspace = true, features = ["completions", "config"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

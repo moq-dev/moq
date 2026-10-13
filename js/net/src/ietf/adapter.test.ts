@@ -8,7 +8,8 @@ import { toRequestCode } from "./error.ts";
 import { GoAway } from "./goaway.ts";
 import { PublishNamespace, PublishNamespaceCancel, PublishNamespaceDone } from "./publish_namespace.ts";
 import { initialMaxRequestId, MaxRequestId, RequestError } from "./request.ts";
-import { SubscribeUpdate } from "./subscribe.ts";
+import { Subscribe, SubscribeUpdate } from "./subscribe.ts";
+import { SubscribeNamespaceLegacy } from "./subscribe_namespace.ts";
 import { TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
@@ -17,10 +18,22 @@ test("draft-14 TRACK_STATUS_OK cannot be routed as NAMESPACE_DONE", async () => 
 	const control = await Stream.open(pair.server, { version: Version.DRAFT_14 });
 	const adapter = new ControlStreamAdapter(pair.server, control, Version.DRAFT_14, 100n, true);
 	const running = adapter.run();
+	// A writer may yield a task before the rejection assertion below.
+	void running.catch(() => {});
 	const peer = await Stream.accept(pair.client, Version.DRAFT_14);
 	if (!peer) throw new Error("no control stream");
 	await peer.writer.u53(0x0e);
 	await peer.writer.u16(0);
+	// The adapter may reject while the writer yields a browser task.
+	await new Promise<void>((resolve) => {
+		const channel = new MessageChannel();
+		channel.port1.onmessage = () => {
+			channel.port1.close();
+			channel.port2.close();
+			resolve();
+		};
+		channel.port2.postMessage(null);
+	});
 	await expect(running).rejects.toThrow("unexpected message 0x0e");
 });
 
@@ -214,6 +227,8 @@ test("a server adapter rejects a client GOAWAY that names a redirect", async () 
 	const control = await Stream.open(pair.server, { version: VERSION });
 	const adapter = new ControlStreamAdapter(pair.server, control, VERSION, 100n, false);
 	const running = adapter.run();
+	// A writer may yield a task before the rejection assertion below.
+	void running.catch(() => {});
 	const peer = await Stream.accept(pair.client, VERSION);
 	if (!peer) throw new Error("no control stream");
 
@@ -222,11 +237,21 @@ test("a server adapter rejects a client GOAWAY that names a redirect", async () 
 	await expect(running).rejects.toThrow("client GOAWAY must not name a redirect");
 });
 
+test("the control stream adapter refuses draft 17 and later", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_17);
+	const control = await Stream.open(pair.server, { version: Version.DRAFT_17 });
+	expect(() => new ControlStreamAdapter(pair.server, control, Version.DRAFT_17, 100n, true)).toThrow(
+		"drafts 14 to 16",
+	);
+});
+
 test("a second GOAWAY on the control stream closes the session", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_15);
 	const control = await Stream.open(pair.server, { version: VERSION });
 	const adapter = new ControlStreamAdapter(pair.server, control, VERSION, 100n, true);
 	const running = adapter.run();
+	// A writer may yield a task before the rejection assertion below.
+	void running.catch(() => {});
 	const peer = await Stream.accept(pair.client, VERSION);
 	if (!peer) throw new Error("no control stream");
 
@@ -266,6 +291,8 @@ async function windowed(
 	const control = await Stream.open(pair.server, { version });
 	const adapter = new ControlStreamAdapter(pair.server, control, version, 100n, client, window);
 	const running = adapter.run();
+	// A peer write may yield a browser task before the assertion awaits this rejection.
+	void running.catch(() => {});
 	const peer = await Stream.accept(pair.client, version);
 	if (!peer) throw new Error("no control stream");
 	return { pair, adapter, peer, running };
@@ -281,10 +308,38 @@ async function trackStatus(peer: Stream, version: IetfVersion, requestId: bigint
 	}).encode(peer.writer, version);
 }
 
-/** A REQUEST_UPDATE spending `requestId`. */
-async function update(peer: Stream, version: IetfVersion, requestId: bigint): Promise<void> {
+/** A SUBSCRIBE as `requestId`, returning its virtual stream past the initial message. */
+async function subscribe(adapter: ControlStreamAdapter, peer: Stream, version: IetfVersion, requestId: bigint) {
+	await peer.writer.u53(Subscribe.id);
+	await new Subscribe({
+		requestId,
+		trackNamespace: Path.from("update"),
+		trackName: "video",
+		subscriberPriority: 128,
+	}).encode(peer.writer, version);
+
+	const stream = await adapter.acceptBi();
+	if (!stream) throw new Error(`no stream for ${requestId}`);
+	expect(await stream.reader.u53()).toBe(Subscribe.id);
+	await Subscribe.decode(stream.reader, version);
+	return stream;
+}
+
+/** An update spending `own` that changes `target`. */
+async function update(peer: Stream, version: IetfVersion, own: bigint, target: bigint): Promise<void> {
 	await peer.writer.u53(SubscribeUpdate.id);
-	await new SubscribeUpdate({ requestId }).encode(peer.writer, version);
+	await new SubscribeUpdate({ requestId: target, ownRequestId: own }).encode(peer.writer, version);
+}
+
+/** The request named by the next update delivered to `stream`. */
+async function updated(stream: Stream, version: IetfVersion): Promise<bigint> {
+	const typeId = await Promise.race([
+		stream.reader.u53(),
+		new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), WAIT)),
+	]);
+	if (typeId === undefined) throw new Error("update did not reach its target");
+	expect(typeId).toBe(SubscribeUpdate.id);
+	return (await SubscribeUpdate.decode(stream.reader, version)).requestId;
 }
 
 /** The next MAX_REQUEST_ID on the peer's control stream, skipping anything else. */
@@ -337,10 +392,10 @@ test("a request id with the wrong parity closes the session", async () => {
 
 test("a second use of an open request id closes the session", async () => {
 	for (const [version, alpn] of WINDOW_DRAFTS) {
-		const { pair, peer, running } = await windowed(version, alpn, 2n, false);
+		const { pair, peer, running } = await windowed(version, alpn, 1n, false);
 		await trackStatus(peer, version, 0n);
 		await trackStatus(peer, version, 0n);
-		await expect(running).rejects.toThrow("duplicate request id");
+		await expect(running).rejects.toThrow("request id was already spent or out of sequence");
 		expect((await pair.client.closed).closeCode).toBe(INVALID_REQUEST_ID);
 	}
 });
@@ -375,6 +430,33 @@ test("a request the peer closes is granted back", async () => {
 	expect(await state()).toBeUndefined();
 });
 
+// A single-id update cannot tell its own Request ID from the target, so these carry both.
+test("drafts 14 to 16 route an update to its second request id", async () => {
+	for (const [version, alpn] of WINDOW_DRAFTS) {
+		const { adapter, peer, running } = await windowed(version, alpn, 4n, false);
+		const state = settled(running);
+		const target = await subscribe(adapter, peer, version, 0n);
+		await update(peer, version, 2n, 0n);
+		expect(await updated(target, version)).toBe(0n);
+		expect(await state()).toBeUndefined();
+	}
+});
+
+// The update's own id is retired, not the target's, so half a window of updates earns a grant.
+test("updates to an open request earn a grant and still reach it", async () => {
+	for (const [version, alpn] of WINDOW_DRAFTS) {
+		const { adapter, peer, running } = await windowed(version, alpn, 4n, false);
+		const state = settled(running);
+		const target = await subscribe(adapter, peer, version, 0n);
+		for (const own of [2n, 4n]) {
+			await update(peer, version, own, 0n);
+			expect(await updated(target, version)).toBe(0n);
+		}
+		expect(await nextGrant(peer, version)).toBe(initialMaxRequestId(true, 4n) + 4n);
+		expect(await state()).toBeUndefined();
+	}
+});
+
 test("a request update spends an id and retires it immediately", async () => {
 	const warn = spyOn(console, "warn").mockImplementation(() => undefined);
 	try {
@@ -384,7 +466,8 @@ test("a request update spends an id and retires it immediately", async () => {
 				const nextId = client ? 3n : 2n;
 				const { adapter, peer, running } = await windowed(version, alpn, 1n, client);
 				const state = settled(running);
-				await update(peer, version, updateId);
+				// The target is gone, which drops the update but still spends its id.
+				await update(peer, version, updateId, 100n);
 				// The update's own id is granted back, so the next id is admitted.
 				await trackStatus(peer, version, nextId);
 				const stream = await adapter.acceptBi();
@@ -398,45 +481,53 @@ test("a request update spends an id and retires it immediately", async () => {
 	}
 });
 
-test("an update naming an open request does not grow the window", async () => {
-	const warn = spyOn(console, "warn").mockImplementation(() => undefined);
-	try {
-		for (const [version, alpn] of WINDOW_DRAFTS) {
-			for (const client of [false, true]) {
-				const heldId = client ? 1n : 0n;
-				const nextId = client ? 3n : 2n;
-				const { pair, adapter, peer, running } = await windowed(version, alpn, 1n, client);
-				await trackStatus(peer, version, heldId);
-				const held = await adapter.acceptBi();
-				if (!held) throw new Error("no stream");
-				await update(peer, version, heldId);
-				await trackStatus(peer, version, nextId);
-				await expect(running).rejects.toThrow("request id exceeds max");
-				expect((await pair.client.closed).closeCode).toBe(SessionCode.TooManyRequests);
-			}
+test("an update spending an open request id closes the session", async () => {
+	for (const [version, alpn] of WINDOW_DRAFTS) {
+		for (const client of [false, true]) {
+			const heldId = client ? 1n : 0n;
+			const { pair, adapter, peer, running } = await windowed(version, alpn, 2n, client);
+			await trackStatus(peer, version, heldId);
+			if (!(await adapter.acceptBi())) throw new Error("no stream");
+			await update(peer, version, heldId, heldId);
+			await expect(running).rejects.toThrow("request id was already spent or out of sequence");
+			expect((await pair.client.closed).closeCode).toBe(INVALID_REQUEST_ID);
 		}
-	} finally {
-		warn.mockRestore();
 	}
 });
 
-/** Repeated updates raise the maximum, but the peer still cannot hold more than the window open. */
-test("reused update ids cannot hold more than the window", async () => {
-	const warn = spyOn(console, "warn").mockImplementation(() => undefined);
-	try {
-		for (const [version, alpn] of WINDOW_DRAFTS) {
-			const { pair, adapter, peer, running } = await windowed(version, alpn, 2n, false);
-			await trackStatus(peer, version, 0n);
-			if (!(await adapter.acceptBi())) throw new Error("no stream");
-			for (let i = 0; i < 8; i++) await update(peer, version, 2n);
-			await trackStatus(peer, version, 4n);
-			if (!(await adapter.acceptBi())) throw new Error("no stream");
-			await trackStatus(peer, version, 6n);
-			await expect(running).rejects.toThrow("too many open requests");
-			expect((await pair.client.closed).closeCode).toBe(SessionCode.TooManyRequests);
+/** Request IDs stay spent after their stream or update retires. */
+test("retired and lower request ids close the session", async () => {
+	for (const [version, alpn] of WINDOW_DRAFTS) {
+		for (const client of [false, true]) {
+			const parity = client ? 1n : 0n;
+			for (const [first, later] of [
+				[parity, parity],
+				[parity + 4n, parity + 2n],
+			] as const) {
+				const { pair, adapter, peer, running } = await windowed(version, alpn, 8n, client);
+				for (let id = parity; id <= first; id += 2n) {
+					await trackStatus(peer, version, id);
+					const stream = await adapter.acceptBi();
+					if (!stream) throw new Error("no stream");
+					stream.close();
+				}
+				await trackStatus(peer, version, later);
+				await expect(running).rejects.toThrow("request id was already spent or out of sequence");
+				expect((await pair.client.closed).closeCode).toBe(INVALID_REQUEST_ID);
+			}
 		}
-	} finally {
-		warn.mockRestore();
+	}
+});
+
+test("an update id stays spent after the update retires", async () => {
+	for (const [version, alpn] of WINDOW_DRAFTS) {
+		const { pair, adapter, peer, running } = await windowed(version, alpn, 4n, false);
+		await trackStatus(peer, version, 0n);
+		if (!(await adapter.acceptBi())) throw new Error("no stream");
+		await update(peer, version, 2n, 0n);
+		await update(peer, version, 2n, 0n);
+		await expect(running).rejects.toThrow("request id was already spent or out of sequence");
+		expect((await pair.client.closed).closeCode).toBe(INVALID_REQUEST_ID);
 	}
 });
 
@@ -471,5 +562,154 @@ test("more requests than the setup window complete on one session", async () => 
 		pair.server.close();
 		await running.catch(() => undefined);
 		await reading;
+	}
+});
+
+// Both requests and updates allocate IDs, even when an update's target is gone.
+test("skipped request and update ids close the session", async () => {
+	for (const [version, alpn] of WINDOW_DRAFTS.filter(([version]) => version !== Version.DRAFT_16)) {
+		for (const client of [false, true]) {
+			for (const prefix of [0n, 1n]) {
+				for (const isUpdate of [false, true]) {
+					const { pair, peer, running } = await windowed(version, alpn, 8n, client);
+					const first = client ? 1n : 0n;
+					if (prefix) await trackStatus(peer, version, first);
+					const skipped = first + 2n * prefix + 2n;
+					if (isUpdate) await update(peer, version, skipped, 100n);
+					else await trackStatus(peer, version, skipped);
+					await expect(running).rejects.toThrow("request id was already spent or out of sequence");
+					expect((await pair.client.closed).closeCode).toBe(SessionCode.InvalidRequestId);
+				}
+			}
+		}
+	}
+});
+
+// SUBSCRIBE_NAMESPACE uses an independent bidi stream in draft 16, sharing the ID space.
+test("draft 16 accepts reordered native and control IDs but never reuses them", async () => {
+	for (const client of [false, true]) {
+		for (const nativeFirst of [false, true]) {
+			const version = Version.DRAFT_16;
+			const { pair, adapter, peer, running } = await windowed(version, ALPN.DRAFT_16, 8n, client);
+			void running.catch(() => undefined);
+			const first = client ? 1n : 0n;
+			const native = nativeFirst ? first + 2n : first;
+			const control = nativeFirst ? first : first + 2n;
+			try {
+				if (nativeFirst) adapter.admitRequest(native);
+				await trackStatus(peer, version, control);
+				const stream = await adapter.acceptBi();
+				if (!stream) throw new Error("no reordered control request");
+				if (!nativeFirst) adapter.admitRequest(native);
+				stream.close();
+				adapter.releaseRequest(native);
+				await trackStatus(peer, version, first);
+				await expect(running).rejects.toThrow("request id was already spent");
+				expect((await pair.client.closed).closeCode).toBe(SessionCode.InvalidRequestId);
+			} finally {
+				peer.close();
+				adapter.close();
+			}
+		}
+	}
+});
+
+// Draft 16 remembers a skipped stretch as one run, so a jump costs nothing per skipped ID.
+test("draft 16 tracks a jump across a production window as one run", async () => {
+	const window = 220_000n;
+	const { adapter, peer } = await windowed(Version.DRAFT_16, ALPN.DRAFT_16, window, false);
+	const top = 2n * (window - 1n);
+	try {
+		for (const id of [top, 100n, 0n, top - 2n, 2n, 98n]) adapter.admitRequest(id);
+		for (const id of [0n, 2n, 98n, 100n, top - 2n, top]) {
+			expect(() => adapter.admitRequest(id)).toThrow("request id was already spent");
+		}
+	} finally {
+		peer.close();
+		adapter.close();
+	}
+});
+
+// Splitting runs in descending order spans many chunks; every ID is admitted exactly once.
+test("draft 16 admits a scattered window once across run chunks", async () => {
+	const window = 4096n;
+	const { adapter, peer } = await windowed(Version.DRAFT_16, ALPN.DRAFT_16, window, false);
+	const top = 2n * (window - 1n);
+	const below = Array.from({ length: Number(window - 1n) }, (_, i) => 2n * (window - 2n - BigInt(i)));
+	const ids = [top, ...below.filter((id) => (id / 2n) % 2n === 1n), ...below.filter((id) => (id / 2n) % 2n === 0n)];
+	try {
+		for (const id of ids) adapter.admitRequest(id);
+		for (const id of [0n, 2n, 1024n, top - 2n, top]) {
+			expect(() => adapter.admitRequest(id)).toThrow("request id was already spent");
+		}
+	} finally {
+		peer.close();
+		adapter.close();
+	}
+});
+
+// Allocation precedes an asynchronous encode, so a shorter later request can finish first.
+test("drafts 14 and 15 send concurrent requests in request id order", async () => {
+	for (const [version, alpn] of [
+		[Version.DRAFT_14, ALPN.DRAFT_14],
+		[Version.DRAFT_15, ALPN.DRAFT_15],
+	] as const) {
+		const pair = createMockTransportPair(alpn);
+		const control = await Stream.open(pair.server, { version });
+		const sender = new ControlStreamAdapter(pair.server, control, version, 100n, true);
+		void sender.run().catch(() => undefined);
+		const peer = await Stream.accept(pair.client, version);
+		if (!peer) throw new Error("no control stream");
+		const receiver = new ControlStreamAdapter(pair.client, peer, version, 100n, false, 8n);
+		void receiver.run().catch(() => undefined);
+		try {
+			const request = async (namespace: Path.Valid) => {
+				const requestId = await sender.nextRequestId();
+				if (requestId === undefined) throw new Error("no request id");
+				const stream = sender.openBi();
+				await stream.writer.u53(SubscribeNamespaceLegacy.id);
+				await new SubscribeNamespaceLegacy({ namespace, requestId }).encode(stream.writer, version);
+			};
+			await Promise.all([request(Path.from("a/b/c/d/e/f/g/h")), request(Path.from("a"))]);
+
+			const received: bigint[] = [];
+			for (let i = 0; i < 2; i++) {
+				const stream = await receiver.acceptBi();
+				if (!stream) throw new Error("the receiver refused a request");
+				expect(await stream.reader.u53()).toBe(SubscribeNamespaceLegacy.id);
+				received.push((await SubscribeNamespaceLegacy.decode(stream.reader, version)).requestId);
+			}
+			expect(received).toEqual([0n, 2n]);
+		} finally {
+			sender.close();
+			receiver.close();
+		}
+	}
+});
+
+// Canceling the wait must remove the allocation itself, not just stop awaiting it.
+test("a canceled request ID wait never spends a later grant", async () => {
+	for (const [version, alpn] of WINDOW_DRAFTS) {
+		const pair = createMockTransportPair(alpn);
+		const control = await Stream.open(pair.server, { version });
+		const adapter = new ControlStreamAdapter(pair.server, control, version, 0n, true);
+		const running = adapter.run().catch(() => undefined);
+		const peer = await Stream.accept(pair.client, version);
+		if (!peer) throw new Error("no control stream");
+		try {
+			const signal = new AbortController();
+			const canceled = adapter.nextRequestId(signal.signal);
+			signal.abort(new Error("retired"));
+			await expect(canceled).rejects.toThrow("retired");
+			await peer.writer.u53(MaxRequestId.id);
+			await new MaxRequestId({ requestId: 4n }).encode(peer.writer, version);
+			expect(await adapter.nextRequestId()).toBe(0n);
+			await expect(adapter.nextRequestId(signal.signal)).rejects.toThrow("retired");
+			expect(await adapter.nextRequestId()).toBe(2n);
+		} finally {
+			peer.close();
+			adapter.close();
+			void running;
+		}
 	}
 });

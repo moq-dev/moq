@@ -1,5 +1,5 @@
+import type { Timed } from "@moq/net";
 import * as Moq from "@moq/net";
-import { Time } from "@moq/net";
 import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "../codec.ts";
 
 import { type Compression, isDeflate } from "../compression.ts";
@@ -39,9 +39,10 @@ export class Producer {
 	 * Unlike `@moq/json`, an identical value is republished rather than skipped: comparing two
 	 * opaque blobs costs a full scan, and only the caller knows whether its bytes changed.
 	 *
-	 * `at` is when the payload was captured, written as its frame timestamp. Defaults to now.
+	 * `at` is when the payload was captured, written as its frame timestamp. Omit it only on an
+	 * untimed track: it is never filled in.
 	 */
-	update(payload: Uint8Array, at: Time.Timestamp = Time.Timestamp.now()): void {
+	update({ value: payload, at }: Timed<Uint8Array>): void {
 		// Consumers all decode with `@moq/flate`'s default cap, so publishing past it would advertise
 		// a value that always fails to read. Rejected before anything is published; unlike a stream
 		// this is not terminal, since the previous value still stands and the next update supersedes.

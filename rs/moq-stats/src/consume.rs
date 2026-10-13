@@ -127,6 +127,11 @@ impl Presence {
 
 #[cfg(test)]
 mod tests {
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
 		let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
@@ -143,7 +148,9 @@ mod tests {
 	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+			moq_net::announce::Event::Start(route)
+			| moq_net::announce::Event::Update(route)
+			| moq_net::announce::Event::Restart(route) => Some((route, true)),
 			moq_net::announce::Event::End(route) => Some((route, false)),
 		}
 	}
@@ -196,7 +203,7 @@ mod tests {
 		let mut announced = egress.announced();
 		let source = feed_origin.create_broadcast(path).unwrap();
 		source.announce(origin::Route::default()).unwrap();
-		let track = source.clone().create_track("video", None).unwrap();
+		let track = source.clone().create_track("video", timed()).unwrap();
 
 		let (_, active) = next_update(&mut announced).await.expect("announce");
 		assert!(active);

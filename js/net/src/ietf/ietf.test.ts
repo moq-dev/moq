@@ -984,28 +984,36 @@ test("PublishDone v17: no requestId", async () => {
 
 // --- SubscribeUpdate tests ---
 
-test("SubscribeUpdate v14: round trip", async () => {
-	const msg = new Subscribe.SubscribeUpdate({ requestId: 5n });
+// The first field is the update's own Request ID. requestId is the subscription
+// (drafts 14 and 15) or the existing request (draft 16), and a round trip that
+// only carries one id cannot tell them apart.
+test("SubscribeUpdate drafts 14 to 16 round-trip the target separately from the update", async () => {
+	const own = 10n;
+	const target = 4n;
+	for (const version of [Version.DRAFT_14, Version.DRAFT_15, Version.DRAFT_16] as const) {
+		const msg = new Subscribe.SubscribeUpdate({ requestId: target, ownRequestId: own });
 
-	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
-	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeUpdate.decode, Version.DRAFT_14);
+		const encoded = await encodeVersioned(msg, version);
+		const reader = new Reader(undefined, encoded, version);
+		await reader.u16();
+		expect(await reader.u62()).toBe(own);
+		expect(await reader.u62()).toBe(target);
 
-	expect(decoded.requestId).toBe(5n);
-});
-
-test("SubscribeUpdate v15: round trip", async () => {
-	const msg = new Subscribe.SubscribeUpdate({ requestId: 10n });
-
-	const encoded = await encodeVersioned(msg, Version.DRAFT_15);
-	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeUpdate.decode, Version.DRAFT_15);
-
-	expect(decoded.requestId).toBe(10n);
+		const decoded = await decodeVersioned(encoded, Subscribe.SubscribeUpdate.decode, version);
+		expect(decoded.requestId).toBe(target);
+		const again = await encodeVersioned(decoded, version);
+		expect(Array.from(again)).toEqual(Array.from(encoded));
+	}
 });
 
 test("SubscribeUpdate v17: round trip with requiredRequestIdDelta", async () => {
 	const msg = new Subscribe.SubscribeUpdate({ requestId: 42n });
 
 	const encoded = await encodeVersioned(msg, Version.DRAFT_17);
+	const reader = new Reader(undefined, encoded, Version.DRAFT_17);
+	await reader.u16();
+	expect(await reader.u62()).toBe(42n);
+
 	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeUpdate.decode, Version.DRAFT_17);
 
 	expect(decoded.requestId).toBe(42n);
@@ -1949,21 +1957,48 @@ test("Subscribe: FORWARD=0 decodes", async () => {
 });
 
 // A draft-20 FETCH names the track up front and carries its range in LOCATION_FILTER.
-test("Fetch v20: decodes every legal parameter", async () => {
+// Groups 128 through 130: the group takes two bytes, so draft-20's Length (4) and
+// draft-22's Location Filter Type (0x03) differ, and reading one as the other misframes
+// every parameter after it.
+for (const [version, locationFilter] of [
+	[Version.DRAFT_20, [0x01, 0x04, 0x80, 0x80, 0x00, 0x02]],
+	[Version.DRAFT_21, [0x01, 0x04, 0x80, 0x80, 0x00, 0x02]],
+	[Version.DRAFT_22, [0x01, 0x03, 0x80, 0x80, 0x00, 0x02]],
+] as const) {
+	test(`Fetch ${version}: decodes every legal parameter`, async () => {
+		const body = framed([
+			...TRACK_HEAD,
+			0x07, // Number of Parameters
+			...[0x03, 0x03, 0x03, 0x00, 0xaa], // AUTHORIZATION TOKEN
+			...[0x07, 0x64], // FILL_TIMEOUT (0x0A)
+			...[0x16, 0x40], // SUBSCRIBER_PRIORITY (0x20)
+			...locationFilter, // LOCATION_FILTER (0x21)
+			...[0x01, 0x01], // GROUP_ORDER (0x22)
+			...[0x04, 0x02, 0x00, 0x05], // OBJECTID_FILTER (0x26)
+			...[0x0f, 0x00], // INCLUDE_PROPERTIES (0x35)
+		]);
+
+		const msg = await decodeVersioned(body, Fetch.decode, version);
+		expect(msg.requestId).toBe(1n);
+	});
+}
+
+// Draft-22's LOCATION_FILTER is a Location Filter Type with no Length, so Next Object is the
+// single byte 0x05 and the parameter after it starts right behind it.
+test("Subscribe draft-22: Next Object is 0x21 0x05", async () => {
 	const body = framed([
 		...TRACK_HEAD,
-		0x07, // Number of Parameters
-		...[0x03, 0x03, 0x03, 0x00, 0xaa], // AUTHORIZATION TOKEN
-		...[0x07, 0x64], // FILL_TIMEOUT (0x0A)
-		...[0x16, 0x40], // SUBSCRIBER_PRIORITY (0x20)
-		...[0x01, 0x03, 0x04, 0x00, 0x02], // LOCATION_FILTER (0x21)
-		...[0x01, 0x01], // GROUP_ORDER (0x22)
-		...[0x04, 0x02, 0x00, 0x05], // OBJECTID_FILTER (0x26)
-		...[0x0f, 0x00], // INCLUDE_PROPERTIES (0x35)
+		0x04, // Number of Parameters
+		...[0x10, 0x01], // FORWARD (0x10) = 1
+		...[0x10, 0x40], // SUBSCRIBER_PRIORITY (0x20) = 64
+		...[0x01, 0x05], // LOCATION_FILTER (0x21): Next Object
+		...[0x01, 0x02], // GROUP_ORDER (0x22) = Descending
 	]);
 
-	const msg = await decodeVersioned(body, Fetch.decode, Version.DRAFT_20);
-	expect(msg.requestId).toBe(1n);
+	const msg = await decodeVersioned(body, Subscribe.Subscribe.decode, Version.DRAFT_22);
+	expect(msg.filter).toEqual({ kind: "nextObject" });
+	expect(msg.subscriberPriority).toBe(64);
+	expect(await encodeVersioned(msg, Version.DRAFT_22)).toEqual(body);
 });
 
 // The tagged forms through draft-19, with a token.

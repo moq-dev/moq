@@ -18,11 +18,12 @@ mod args;
 mod buffer;
 mod layout;
 mod playback;
-mod source;
 mod timeline;
 
 #[cfg(all(test, feature = "play"))]
 mod fake;
+#[cfg(feature = "play")]
+mod headless;
 #[cfg(feature = "play")]
 mod media;
 #[cfg(feature = "play")]
@@ -34,5 +35,17 @@ mod window;
 
 #[cfg(feature = "play")]
 pub use args::Args;
+/// Play a broadcast through a window or an audio-only speaker.
 #[cfg(feature = "play")]
-pub use window::run;
+pub async fn run(
+	origin: hang::moq_net::origin::Consumer,
+	broadcast: String,
+	args: Args,
+	network: tokio::task::JoinSet<anyhow::Result<()>>,
+) -> anyhow::Result<()> {
+	if args.select.no_video {
+		headless::run(origin, broadcast, args, network).await
+	} else {
+		window::run(origin, broadcast, args, network)
+	}
+}

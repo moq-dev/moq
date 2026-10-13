@@ -196,14 +196,14 @@ impl Message for Fetch<'_> {
 			let _required_request_id_delta = buf.varint()?;
 		}
 
-		// The token is ignored: the session's grant is what authorizes the request.
+		// The token decodes but grants nothing: the session's grant is what authorizes the request.
 		let (fetch_type, subscriber_priority, group_order, range_filters, fill_timeout, properties_wanted) =
 			match version {
 				Version::Draft14 => {
 					let subscriber_priority = buf.u8()?;
 					let group_order = GroupOrder::decode(buf, version)?;
 					let fetch_type = FetchType::decode(buf, version)?;
-					Parameters::skip(buf)?;
+					super::token::unique(&Parameters::skip_request(buf)?)?;
 					(
 						fetch_type,
 						Some(subscriber_priority),
@@ -216,7 +216,7 @@ impl Message for Fetch<'_> {
 				Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18 | Version::Draft19 => {
 					let fetch_type = FetchType::decode(buf, version)?;
 					decode_params!(buf, version,
-						0x03 => _authorization_token: Vec<Opaque>,
+						0x03 => authorization_token: Vec<super::token::RequestToken>,
 						0x0A => fill_timeout: Option<u64> where !matches!(version, Version::Draft15 | Version::Draft16 | Version::Draft17),
 						0x20 => subscriber_priority: Option<u8>,
 						0x22 => group_order: Option<GroupOrder>,
@@ -225,6 +225,7 @@ impl Message for Fetch<'_> {
 						0x27 => priority_filter: Vec<Opaque> where has_range_filters(version),
 						0x28 => object_property_filter: Vec<Opaque> where has_range_filters(version),
 					);
+					super::token::unique(&authorization_token)?;
 					let range_filters = [
 						subgroup_filter,
 						object_id_filter,
@@ -248,7 +249,7 @@ impl Message for Fetch<'_> {
 					let namespace = decode_namespace(buf)?;
 					let track = Cow::Owned(buf.string()?);
 					decode_params!(buf, version,
-						0x03 => _authorization_token: Vec<Opaque>,
+						0x03 => authorization_token: Vec<super::token::RequestToken>,
 						0x0A => fill_timeout: Option<u64>,
 						0x20 => subscriber_priority: Option<u8>,
 						0x21 => filter: Option<Filter>,
@@ -259,6 +260,7 @@ impl Message for Fetch<'_> {
 						0x28 => object_property_filter: Vec<Opaque>,
 						0x35 => include_properties: Option<bool>,
 					);
+					super::token::unique(&authorization_token)?;
 					let range_filters = [
 						subgroup_filter,
 						object_id_filter,
@@ -354,7 +356,7 @@ impl Message for FetchOk {
 				let end_of_track = buf.bool()?;
 				let end_location = Location::decode(buf, version)?;
 				let properties = super::Properties {
-					max_cache_duration: Parameters::skip(buf)?.map(std::time::Duration::from_millis),
+					max_cache_duration: Parameters::skip_response(buf)?.map(std::time::Duration::from_millis),
 					..Default::default()
 				};
 				Ok(Self {
@@ -925,19 +927,29 @@ mod tests {
 	/// Reading a Fetch Type there instead takes the namespace's field count for one.
 	#[test]
 	fn test_fetch_v20_decodes_every_parameter() {
+		// Groups 128 through 130. The group takes two bytes, so draft-20's Length (4) and
+		// draft-22's Location Filter Type (0x03) differ, and reading one as the other
+		// misframes every parameter after it.
 		#[rustfmt::skip]
-		let body = [FETCH_HEAD, &[
-			0x07, // Number of Parameters
-			0x03, 0x03, 0x03, 0x00, 0xAA, // AUTHORIZATION TOKEN
-			0x07, 0x64, // FILL_TIMEOUT (0x0A) = 100, a varint
-			0x16, 0x40, // SUBSCRIBER_PRIORITY (0x20) = 64
-			0x01, 0x03, 0x04, 0x00, 0x02, // LOCATION_FILTER (0x21): groups 4 through 6
-			0x01, 0x01, // GROUP_ORDER (0x22) = Ascending
-			0x04, 0x02, 0x00, 0x05, // OBJECTID_FILTER (0x26): SetID 0, from 5
-			0x0F, 0x00, // INCLUDE_PROPERTIES (0x35) = 0
-		]].concat();
+		let cases: [(Version, &[u8]); 3] = [
+			(Version::Draft20, &[0x01, 0x04, 0x80, 0x80, 0x00, 0x02]),
+			(Version::Draft21, &[0x01, 0x04, 0x80, 0x80, 0x00, 0x02]),
+			(Version::Draft22, &[0x01, 0x03, 0x80, 0x80, 0x00, 0x02]),
+		];
 
-		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
+		for (version, location_filter) in cases {
+			#[rustfmt::skip]
+			let body = [FETCH_HEAD, &[
+				0x07, // Number of Parameters
+				0x03, 0x03, 0x03, 0x00, 0xAA, // AUTHORIZATION TOKEN
+				0x07, 0x64, // FILL_TIMEOUT (0x0A) = 100, a varint
+				0x16, 0x40, // SUBSCRIBER_PRIORITY (0x20) = 64
+			], location_filter, &[
+				0x01, 0x01, // GROUP_ORDER (0x22) = Ascending
+				0x04, 0x02, 0x00, 0x05, // OBJECTID_FILTER (0x26): SetID 0, from 5
+				0x0F, 0x00, // INCLUDE_PROPERTIES (0x35) = 0
+			]].concat();
+
 			let fetch: Fetch = decode_message(&body, version).unwrap_or_else(|e| panic!("{version}: {e}"));
 			assert_eq!(fetch.request_id, RequestId(1));
 			assert_eq!(fetch.subscriber_priority, 64);
@@ -951,8 +963,11 @@ mod tests {
 					namespace: Path::new("live"),
 					track: "video".into(),
 					filter: Filter::Absolute {
-						start: Location { group: 4, object: 0 },
-						end: Some(crate::ietf::EndLocation { group: 6, object: None }),
+						start: Location { group: 128, object: 0 },
+						end: Some(crate::ietf::EndLocation {
+							group: 130,
+							object: None,
+						}),
 					},
 				},
 				"{version}"

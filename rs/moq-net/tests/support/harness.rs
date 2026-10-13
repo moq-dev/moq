@@ -53,6 +53,12 @@ pub struct MockConnectOptions {
 	pub latency: std::time::Duration,
 	/// What the client may make the server's session hold, when not the default.
 	pub server_limits: Option<moq_net::session::Limits>,
+	/// The extensions the client offers.
+	pub client_extensions: moq_net::setup::Extensions,
+	/// The extensions the server offers.
+	pub server_extensions: moq_net::setup::Extensions,
+	/// The price the client puts on the link, when not the default.
+	pub cost: Option<u64>,
 }
 
 impl MockConnectOptions {
@@ -66,6 +72,9 @@ impl MockConnectOptions {
 			server_subscribe: None,
 			latency: std::time::Duration::ZERO,
 			server_limits: None,
+			client_extensions: Default::default(),
+			server_extensions: Default::default(),
+			cost: None,
 		}
 	}
 }
@@ -96,7 +105,12 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	client_transport.set_latency(opts.latency);
 	let transports = (client_transport.clone(), server_transport.clone());
 
-	let mut client = Client::new().with_versions(opts.version.into());
+	let mut client = Client::new()
+		.with_versions(opts.version.into())
+		.with_extensions(opts.client_extensions);
+	if let Some(cost) = opts.cost {
+		client = client.with_cost(cost);
+	}
 	if let Some(publish) = &opts.client_publish {
 		client = client.with_publisher(publish);
 	}
@@ -104,7 +118,9 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 		client = client.with_subscriber(subscribe);
 	}
 
-	let mut server = Server::new().with_versions(opts.version.into());
+	let mut server = Server::new()
+		.with_versions(opts.version.into())
+		.with_extensions(opts.server_extensions);
 	if let Some(publish) = &opts.server_publish {
 		server = server.with_publisher(publish);
 	}

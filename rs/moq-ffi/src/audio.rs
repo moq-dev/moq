@@ -1,7 +1,7 @@
 //! Raw-audio import/export via [`moq_audio`].
 //!
-//! Sibling to [`producer::MoqMediaProducer`](crate::producer::MoqMediaProducer)
-//! and [`consumer::MoqMediaConsumer`](crate::consumer::MoqMediaConsumer):
+//! Sibling to [`media::MoqMediaTrackProducer`](crate::media::MoqMediaTrackProducer)
+//! and [`media::MoqMediaContainerConsumer`](crate::media::MoqMediaContainerConsumer):
 //! those deal in already-encoded frames, these deal in PCM and run
 //! Opus encode/decode inside the FFI boundary.
 
@@ -178,7 +178,7 @@ impl TryFrom<MoqAudioFrame> for moq_audio::Frame {
 
 /// Producer for a raw-audio track.
 ///
-/// Built via [`MoqBroadcastProducer::publish_audio`]. Each
+/// Built via [`MoqBroadcastProducer::encode_audio`]. Each
 /// [`write`](Self::write) accepts an [`MoqAudioFrame`] whose `data`
 /// is PCM in the format declared by the [`MoqAudioEncoderInput`]
 /// passed at publish time.
@@ -231,11 +231,11 @@ impl MoqAudioProducer {
 	///
 	/// Call this before writing after an idle gap so the gap remains visible in
 	/// the audio PTS instead of being compressed out by the running sample count.
-	pub fn reset_epoch(&self) -> Result<(), MoqError> {
+	pub fn reanchor(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::runtime().enter();
 		let mut guard = self.inner.lock().unwrap();
 		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
-		producer.reset_epoch();
+		producer.reanchor();
 		Ok(())
 	}
 
@@ -368,6 +368,9 @@ impl MoqAudioConsumer {
 }
 
 fn audio_config(catalog_audio: crate::media::MoqAudio) -> Result<hang::catalog::AudioConfig, MoqError> {
+	if !catalog_audio.enabled {
+		return Err(MoqError::NotFound);
+	}
 	let codec = catalog_audio.codec.parse().map_err(|_| MoqError::Unsupported)?;
 	// What moq-audio's decoder opens. It rejects the rest itself, so this is only
 	// here to report an unusable rendition as a plain Unsupported rather than a
@@ -391,7 +394,7 @@ fn audio_config(catalog_audio: crate::media::MoqAudio) -> Result<hang::catalog::
 impl MoqBroadcastConsumer {
 	/// Subscribe to an audio track. `catalog_audio_config` comes from
 	/// the catalog (see
-	/// [`MoqCatalogConsumer::next`](crate::consumer::MoqCatalogConsumer::next));
+	/// [`MoqMediaCatalogConsumer::next`](crate::media::MoqMediaCatalogConsumer::next));
 	/// the codec is inferred from it. Only Opus and AAC-LC are supported.
 	///
 	/// A rendition whose [`broadcast`](crate::media::MoqAudio::broadcast) names another broadcast
@@ -439,6 +442,15 @@ mod tests {
 			enabled: true,
 			container: MoqContainer::Legacy,
 		}
+	}
+
+	#[test]
+	fn audio_config_refuses_disabled_renditions() {
+		let mut config = catalog_audio("opus");
+		config.enabled = false;
+		assert!(matches!(audio_config(config.clone()), Err(MoqError::NotFound)));
+		config.enabled = true;
+		assert!(audio_config(config).is_ok());
 	}
 
 	#[test]

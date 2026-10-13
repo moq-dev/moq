@@ -70,20 +70,24 @@ pub struct Info {
 }
 
 impl Info {
-	/// Create a producer for this group on a default (millisecond) track.
+	/// Create a producer for this group on a millisecond track.
 	///
 	/// Test-only: real groups are created via [`track::Producer`], which
 	/// supplies the parent track's [`track::Info`]. This helper exists for in-crate
 	/// tests that don't exercise timestamps.
 	#[cfg(test)]
 	pub(crate) fn produce(self) -> Producer {
-		Producer::new(self, track::Info::default(), Default::default())
+		Producer::new(
+			self,
+			track::Info::default().with_timescale(Timescale::MILLI),
+			Default::default(),
+		)
 	}
 
 	/// Create a producer for this group on an untimed track. Test-only, like [`Self::produce`].
 	#[cfg(test)]
 	pub(crate) fn produce_untimed(self) -> Producer {
-		Producer::new(self, track::Info::default().with_timescale(None), Default::default())
+		Producer::new(self, track::Info::default(), Default::default())
 	}
 }
 
@@ -147,6 +151,10 @@ pub(crate) struct GroupState {
 	// production stopped, and an abort is exactly when it asks.
 	next_index: usize,
 
+	// Exclusive cap on `next_index`, set when the track ends inside this group: a write
+	// past the track's end is refused rather than served as content that does not exist.
+	limit: Option<usize>,
+
 	// One past the last frame that was fully written. Trails `next_index` while a chunked
 	// frame is in flight, which is the frame a replacement route has to redeliver: only
 	// its opener saw the payload, and only partly.
@@ -156,7 +164,7 @@ pub(crate) struct GroupState {
 	// written so far.
 	pub(crate) cache: u64,
 
-	// Mirrors `cache` into the track's shared cache pool, so the group's bytes count
+	// Bills payload and frame-slot growth to the track's shared cache pool, so its bytes count
 	// against the byte budget tracks evict toward.
 	charge: cache::Charge,
 
@@ -192,6 +200,14 @@ enum Timeline {
 }
 
 impl GroupState {
+	/// Refuse a write that would advance the group to `next_index`, past the track's end.
+	fn admit(&self, next_index: usize) -> Result<()> {
+		match self.limit {
+			Some(limit) if next_index > limit => Err(Error::Closed),
+			_ => Ok(()),
+		}
+	}
+
 	/// Whether the first frame opened, or the group ended without one.
 	fn started(&self) -> bool {
 		!matches!(self.timeline, Timeline::Empty) || self.fin.is_some() || self.abort.is_some()
@@ -316,6 +332,14 @@ impl GroupState {
 			|| self.cache.saturating_add(extra_bytes) > MAX_CACHE_BYTES
 	}
 
+	/// Reserve the next completed frame, returning growth not covered by the fixed overhead.
+	fn reserve_frame(&mut self) -> u64 {
+		let before = self.frames.capacity().saturating_sub(FRAME_SLOTS);
+		self.frames.reserve(1);
+		let after = self.frames.capacity().saturating_sub(FRAME_SLOTS);
+		((after - before) * size_of::<Frame>()) as u64
+	}
+
 	/// Charge the in-flight frame's bytes written since its last charge, as a write access.
 	///
 	/// Returns the coarse tick it stamped, like [`cache::Charge::add`].
@@ -328,12 +352,17 @@ impl GroupState {
 			None => 0,
 		};
 		self.cache += written;
-		self.charge.add(written)
+		let slots = if self.partial.is_some() {
+			self.reserve_frame()
+		} else {
+			0
+		};
+		self.charge.add(written + slots)
 	}
 
 	/// Drop the cached frames (and any in-flight tail) and release their pool charge.
 	fn release(&mut self) {
-		self.frames.clear();
+		self.frames = VecDeque::new();
 		self.partial = None;
 		self.cache = 0;
 		self.charge.clear();
@@ -561,13 +590,15 @@ impl Producer {
 			.next_index
 			.checked_add(1)
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+		state.admit(next_index)?;
 		debug_assert!(state.partial.is_none(), "a frame is already open");
 		let size = payload.len() as u64;
 		if state.would_overflow(1, size) {
 			return Err(self.abort_too_large(state));
 		}
 		state.cache += size;
-		let now = state.charge.add(size);
+		let slots = state.reserve_frame();
+		let now = state.charge.add(size + slots);
 		state.frames.push_back(Frame { timestamp, payload });
 		state.next_index = next_index;
 		state.committed = state.next_index;
@@ -619,6 +650,7 @@ impl Producer {
 			.next_index
 			.checked_add(count)
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+		state.admit(next_index)?;
 		if state.would_overflow(count, bytes) {
 			return Err(self.abort_too_large(state));
 		}
@@ -630,7 +662,8 @@ impl Producer {
 			frame.timestamp = on_track(frame.timestamp, self.track.timescale).expect("timestamp scale checked above");
 			let size = frame.payload.len() as u64;
 			state.cache += size;
-			now = state.charge.add(size);
+			let slots = state.reserve_frame();
+			now = state.charge.add(size + slots);
 			state.stamp(frame.timestamp);
 			latest = frame.timestamp;
 			state.frames.push_back(frame);
@@ -708,6 +741,7 @@ impl Producer {
 			.next_index
 			.checked_add(1)
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+		state.admit(next_index)?;
 		// Only one frame is ever in flight, so the declared size is the most the cache
 		// can grow by before the next check.
 		if state.would_overflow(1, frame.size) {
@@ -790,6 +824,21 @@ impl Producer {
 	/// logical length rather than the number of frames this handle holds.
 	pub fn frame_count(&self) -> usize {
 		self.state.read().next_index
+	}
+
+	/// Cap the group at `frames`, for a track end inside it, or lift the cap with `None`:
+	/// later writes past the cap are [`Error::Closed`]. A frame already at or past the cap is
+	/// [`Error::ProtocolViolation`]. An aborted group gets no more frames, so it takes no cap.
+	pub(crate) fn limit(&self, frames: Option<u64>) -> Result<()> {
+		let Ok(mut state) = self.state.write() else {
+			return Ok(());
+		};
+		let frames = frames.map(|frames| usize::try_from(frames).unwrap_or(usize::MAX));
+		if frames.is_some_and(|frames| state.next_index > frames) {
+			return Err(Error::ProtocolViolation);
+		}
+		state.limit = frames;
+		Ok(())
 	}
 
 	/// Mark the group as complete; no more frames will be written.
@@ -1024,12 +1073,13 @@ impl Producer {
 		}
 	}
 
-	/// Block until the group is closed or aborted.
+	/// Block until the group is aborted, including by eviction. Finishing does not close it.
 	pub async fn closed(&self) -> Error {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
-	/// Poll until the group is closed or aborted; ready with the cause.
+	/// Poll until the group is aborted, including by eviction; ready with the cause.
+	/// Finishing does not close it.
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
 		self.state.poll_closed(waiter).map(|()| self.abort_reason())
 	}
@@ -1484,9 +1534,10 @@ impl Consumer {
 		self.keep_alive();
 	}
 
-	/// Park `waiter` until the group closes (finish, abort, or eviction). Subscribers
-	/// register on parked groups so an eviction wakes them; a group that already closed
-	/// cleanly can never abort, so no waiter is needed.
+	/// Park `waiter` until the group closes: an abort (including eviction), or its last
+	/// producer dropping. Finishing does not close it, since a finished group can still be
+	/// evicted. Subscribers register on parked groups so an eviction wakes them; a group
+	/// that closed without an abort can never abort, so no waiter is needed.
 	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.cursor.state.poll_closed(waiter)
 	}
@@ -1974,6 +2025,50 @@ mod test {
 		assert!(matches!(demand.used().now_or_never(), Some(Err(Error::Dropped))));
 	}
 
+	#[test]
+	fn frame_capacity_growth_is_charged_and_released() {
+		for mode in 0..3 {
+			let pool = cache::Pool::unbounded();
+			let cache = cache::Track::new(pool.clone(), kio::Weak::new());
+			let mut group = Producer::new(Info::from(0u64), track::Info::timed(), cache);
+			for _ in 0..FRAME_SLOTS {
+				group.write_frame(Timestamp::ZERO, bytes::Bytes::new()).unwrap();
+			}
+			let before = pool.used();
+			match mode {
+				0 => group.write_frame(Timestamp::ZERO, bytes::Bytes::new()).unwrap(),
+				1 => {
+					let mut buffer = frame::Buffer::<1>::new();
+					buffer
+						.push(Frame {
+							timestamp: Some(Timestamp::ZERO),
+							payload: bytes::Bytes::new(),
+						})
+						.unwrap();
+					group.write_frames(&mut buffer).unwrap();
+				}
+				_ => {
+					let frame = group
+						.create_frame(frame::Info {
+							size: 0,
+							timestamp: Some(Timestamp::ZERO),
+						})
+						.unwrap();
+					frame.finish().unwrap();
+				}
+			}
+			let capacity = group.state.read().frames.capacity();
+			assert!(capacity > FRAME_SLOTS);
+			assert_eq!(
+				pool.used() - before,
+				((capacity - FRAME_SLOTS) * size_of::<Frame>()) as u64
+			);
+			let consumer = group.consume();
+			group.abort(Error::Cancel).unwrap();
+			assert_eq!(consumer.cursor.state.read().frames.capacity(), 0);
+		}
+	}
+
 	/// [`FRAME_SLOTS`] is std's rounding, not ours, so measure it: a larger real value
 	/// would undercharge every cached group without touching a line of this crate.
 	#[test]
@@ -2344,7 +2439,7 @@ mod test {
 
 	fn prefetched_consumer(pool: &cache::Pool, max_age: std::time::Duration) -> (Producer, Consumer) {
 		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
-		let track = track::Info::default().with_max_age(max_age);
+		let track = track::Info::timed().with_max_age(max_age);
 		let mut producer = Producer::new(Info { sequence: 0 }, track, cache);
 		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"a")).unwrap();
 		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"b")).unwrap();
@@ -2775,7 +2870,7 @@ mod test {
 	fn frame_is_charged_as_written() {
 		let pool = cache::Pool::unbounded();
 		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
-		let mut producer = Producer::new(Info { sequence: 0 }, track::Info::default(), cache);
+		let mut producer = Producer::new(Info { sequence: 0 }, track::Info::timed(), cache);
 		let before = pool.used();
 
 		let mut frame = producer
@@ -2802,7 +2897,7 @@ mod test {
 	fn frame_commit_charges_the_tail() {
 		let pool = cache::Pool::unbounded();
 		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
-		let mut producer = Producer::new(Info { sequence: 0 }, track::Info::default(), cache);
+		let mut producer = Producer::new(Info { sequence: 0 }, track::Info::timed(), cache);
 		let before = pool.used();
 
 		let mut frame = producer

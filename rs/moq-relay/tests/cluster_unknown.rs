@@ -7,8 +7,13 @@ use std::time::Duration;
 use moq_relay::{Config, Relay};
 use url::Url;
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TIMEOUT: Duration = Duration::from_secs(10);
-const PATH: &str = "opalin/cell-clumsy-octopus/cameras/left.hang";
+const PATH: &str = "robot/cell-clumsy-octopus/cameras/left.hang";
 
 async fn spawn_relay(
 	id: u64,
@@ -68,7 +73,7 @@ async fn publish_version(port: u16, version: &str) -> Publisher {
 	let origin = moq_tokio::origin::spawn();
 	let broadcast = origin.create_broadcast(PATH).expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 
 	// Stream like a real publisher: a fresh group every 100ms, so a subscriber
 	// that attaches at any point receives one (and the test doesn't depend on
@@ -368,7 +373,9 @@ async fn unknown_publisher_does_not_flap_across_a_lite04_cluster_triangle() {
 /// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+		moq_net::announce::Event::Start(route)
+		| moq_net::announce::Event::Update(route)
+		| moq_net::announce::Event::Restart(route) => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }

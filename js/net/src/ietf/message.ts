@@ -1,7 +1,9 @@
 import { Reader, Writer } from "../stream.ts";
+import { MalformedAuthToken } from "./token.ts";
 
-// Encodes a message with a u16 (16-bit) size prefix as per draft-14.
-export async function encode(writer: Writer, f: (w: Writer) => Promise<void>) {
+// Encodes a message with a u16 (16-bit) size prefix as per draft-14. A type `id` is written
+// only once the body fits, so an oversized message leaves nothing on the stream.
+export async function encode(writer: Writer, f: (w: Writer) => Promise<void>, id?: number) {
 	let scratch = new Uint8Array();
 
 	const temp = new Writer(
@@ -44,6 +46,8 @@ export async function encode(writer: Writer, f: (w: Writer) => Promise<void>) {
 		throw new Error(`Message too large: ${scratch.byteLength} bytes (max 65535)`);
 	}
 
+	if (id !== undefined) await writer.u53(id);
+
 	// Write u16 size (2 bytes, big-endian)
 	await writer.u16(scratch.byteLength);
 	await writer.write(scratch);
@@ -55,7 +59,14 @@ export async function decode<T>(reader: Reader, f: (r: Reader) => Promise<T>): P
 	const data = await reader.read(size);
 
 	const limit = new Reader(undefined, data, reader.version);
-	const msg = await f(limit);
+	let msg: T;
+	try {
+		msg = await f(limit);
+	} catch (err) {
+		// Every request starts with its Request ID, which the refusal names.
+		if (err instanceof MalformedAuthToken) err.requestId = await new Reader(undefined, data, reader.version).u62();
+		throw err;
+	}
 
 	// Check that we consumed exactly the right number of bytes
 	if (!(await limit.done())) {

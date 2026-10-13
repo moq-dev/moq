@@ -126,6 +126,7 @@ pub(in crate::capture) async fn open(config: &Config, node: Option<&str>) -> Res
 		config,
 		Capture {
 			kind: Kind::Camera,
+			selection: None,
 			remote,
 			target: Target::Camera(node.map(str::to_string), want),
 			label,

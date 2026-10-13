@@ -42,7 +42,7 @@ async fn export_header_roundtrip_vp9_opus() {
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
 		.expect("catalog consumer");
-	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer), catalog_stream);
+	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer).await, catalog_stream);
 
 	// First `next()` should give us the header (EBML + Segment-start + Info + Tracks).
 	let header = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
@@ -202,6 +202,54 @@ fn build_flac_audio_track_entry() {
 	crate::codec::flac::Config::parse(&mut private.as_slice()).expect("valid FLAC header");
 }
 
+/// The catalog names HE-AAC's output rate; Matroska wants the SBR core's rate as
+/// SamplingFrequency and the output as OutputSamplingFrequency.
+#[test]
+fn build_he_aac_audio_track_entry() {
+	// fdkaacenc HE-AAC at 48 kHz stereo: SBR over a 24 kHz LC core.
+	let mut config = hang::catalog::AudioConfig::new(AudioCodec::AAC(hang::catalog::AAC { profile: 5 }), 48_000, 2);
+	config.description = Some(Bytes::from_static(&[0x2B, 0x11, 0x88, 0x00]));
+	assert_eq!(audio_rates(&config), (24_000.0, Some(48_000.0)));
+
+	// HE-AACv2: the same rates over a mono PS core.
+	config.codec = AudioCodec::AAC(hang::catalog::AAC { profile: 29 });
+	config.description = Some(Bytes::from_static(&[0xEB, 0x09, 0x88, 0x00]));
+	assert_eq!(audio_rates(&config), (24_000.0, Some(48_000.0)));
+
+	// AAC-LC 48 kHz stereo plays at its own rate.
+	config.codec = AudioCodec::AAC(hang::catalog::AAC { profile: 2 });
+	config.description = Some(Bytes::from_static(&[0x11, 0x90]));
+	assert_eq!(audio_rates(&config), (48_000.0, None));
+
+	// AAC-LC keeps the catalog's rate without parsing its description (a reserved rate index here).
+	config.description = Some(Bytes::from_static(&[0x16, 0x90]));
+	assert_eq!(audio_rates(&config), (48_000.0, None));
+}
+
+/// The SamplingFrequency and OutputSamplingFrequency of an exported audio track entry.
+fn audio_rates(config: &hang::catalog::AudioConfig) -> (f64, Option<f64>) {
+	let entry = super::export::build_audio_track_entry(1, config).expect("build audio entry");
+	let MatroskaSpec::TrackEntry(Master::Full(children)) = entry else {
+		panic!("expected a TrackEntry");
+	};
+	let audio = children
+		.into_iter()
+		.find_map(|c| match c {
+			MatroskaSpec::Audio(Master::Full(audio)) => Some(audio),
+			_ => None,
+		})
+		.expect("an Audio element");
+	let sampling = audio.iter().find_map(|c| match c {
+		MatroskaSpec::SamplingFrequency(rate) => Some(*rate),
+		_ => None,
+	});
+	let output = audio.iter().find_map(|c| match c {
+		MatroskaSpec::OutputSamplingFrequency(rate) => Some(*rate),
+		_ => None,
+	});
+	(sampling.expect("SamplingFrequency"), output)
+}
+
 /// MP3 (config in band, no codec private) survives an import -> export -> re-import
 /// round trip as the `A_MPEG/L3` track entry.
 #[tokio::test(start_paused = true)]
@@ -222,7 +270,7 @@ async fn export_header_roundtrip_mp3() {
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
 		.expect("catalog consumer");
-	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer), catalog_stream);
+	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer).await, catalog_stream);
 
 	let header = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
@@ -301,7 +349,7 @@ async fn export_waits_for_catalog_before_header() {
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
 		.unwrap();
-	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer), catalog_stream);
+	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer).await, catalog_stream);
 
 	// next() must remain pending (timing out), not surface a "no catalog
 	// snapshot" error from a vacuously-ready empty track set.
@@ -337,7 +385,7 @@ async fn export_derives_video_geometry_before_header() {
 		.unwrap();
 	live.track.finish().unwrap();
 
-	let mut exporter = crate::container::mkv::Export::new(live.source(), live.catalog_stream().await);
+	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await);
 	let header = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
 		.expect("exporter timed out")
@@ -373,7 +421,7 @@ async fn export_emits_blocks_for_each_frame() {
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
 		.expect("catalog consumer");
-	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer), catalog_stream)
+	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer).await, catalog_stream)
 		// Use per-frame clustering so each frame is observable as its own
 		// Cluster chunk; batching is exercised in a dedicated test below.
 		.with_fragment_duration(std::time::Duration::ZERO)
@@ -453,7 +501,7 @@ async fn export_rejects_cmaf_track() {
 		catalog.modify().unwrap().video.renditions.insert(name, config);
 	});
 
-	let mut exporter = crate::container::mkv::Export::new(live.source(), live.catalog_stream().await);
+	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await);
 	let result = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
 		.expect("exporter timed out");
@@ -478,7 +526,7 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 	live.track.finish().unwrap();
 	live.catalog.finish().unwrap();
 
-	let mut exporter = crate::container::mkv::Export::new(live.source(), live.catalog_stream().await)
+	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await)
 		.with_fragment_duration(std::time::Duration::ZERO);
 	let mut exported: Vec<u8> = Vec::new();
 
@@ -614,7 +662,7 @@ async fn export_fragment_duration_batches_blocks() {
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
 		.expect("catalog consumer");
-	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer), catalog_stream)
+	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer).await, catalog_stream)
 		.with_fragment_duration(std::time::Duration::from_secs(2))
 		.with_max_delay(RECORDING_MAX_DELAY);
 	let mut exported: Vec<u8> = Vec::new();
@@ -657,7 +705,7 @@ async fn zero_fragment_duration_emits_without_successor() {
 	let mut live = Live::avc3();
 	live.track.write(video_frame(0, true)).unwrap();
 
-	let mut exporter = crate::container::mkv::Export::new(live.source(), live.catalog_stream().await)
+	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await)
 		.with_fragment_duration(std::time::Duration::ZERO);
 	let header = chunk_now(&mut exporter).await;
 	let cluster = chunk_now(&mut exporter).await;
@@ -671,7 +719,7 @@ async fn reconfigured_zero_duration_drains_open_cluster() {
 	live.track.write(video_frame(33_000, false)).unwrap();
 
 	// Default per-GOP clustering: both frames land in one open cluster.
-	let mut exporter = crate::container::mkv::Export::new(live.source(), live.catalog_stream().await);
+	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await);
 	let header = chunk_now(&mut exporter).await;
 	tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next())
 		.await

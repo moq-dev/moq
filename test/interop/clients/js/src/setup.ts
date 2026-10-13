@@ -29,6 +29,8 @@ if (role === "publish") {
 	// camera and microphone input. Audio is encoded lazily when a player asks.
 	el.setAttribute("source", "camera");
 	document.body.appendChild(el);
+	// So the driver can wait for the session to close before closing the browser.
+	watchResources();
 	// Playwright reads the shared DOM, so mirror the public source state onto the element.
 	const sample = () => {
 		type CaptureSource = { out: { source: { peek(): unknown }; error?: { peek(): Error | undefined } } };
@@ -57,10 +59,6 @@ if (role === "publish") {
 	// The driver stops and restarts the publisher in place to exercise a same-path republish, which
 	// has to reuse this page so the audio context keeps its user activation.
 	publish({
-		liveGop: () => {
-			if (!fixture) throw new Error("the fixture is stopped");
-			return fixture.liveGop();
-		},
 		stop: () => {
 			fixture?.close();
 			fixture = undefined;
@@ -87,6 +85,10 @@ if (role === "publish") {
 	// stops downloading and leaves the canvas black. Only it passes this.
 	const visible = params.get("visible");
 	if (visible) el.setAttribute("visible", visible);
+
+	// Only the late-join negative control passes this, to hold the player behind live.
+	const delay = params.get("delay");
+	if (delay) el.setAttribute("delay", delay);
 
 	const player = document.createElement("moq-watch-ui");
 	player.appendChild(el);

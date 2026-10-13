@@ -39,10 +39,10 @@ test("metadata updates keep the same track and reach an existing subscriber", as
 		await flush();
 		const track = net.consume().track(TRACK.user).subscribe();
 		const consumer = new Json.Snapshot.Consumer<{ name: string }>({ track });
-		expect((await consumer.next())?.name).toBe("Alice");
+		expect((await consumer.latest())?.value.name).toBe("Alice");
 		user.name.set("Bob");
 		await flush();
-		expect((await consumer.next())?.name).toBe("Bob");
+		expect((await consumer.latest())?.value.name).toBe("Bob");
 		track.close();
 	} finally {
 		effect.close();
@@ -62,8 +62,8 @@ test("metadata clears when entries disappear or broadcast becomes inactive", asy
 	const preview = new Json.Snapshot.Producer({
 		track: net.createTrack(TRACK.preview, { timescale: Net.Time.Timescale.MILLI }),
 	});
-	user.update({ name: "Alice" });
-	preview.update({ info: { video: true } });
+	user.update({ value: { name: "Alice" }, at: Net.Time.Timestamp.now() });
+	preview.update({ value: { info: { video: true } }, at: Net.Time.Timestamp.now() });
 	const consumed = consume({ out: { catalog, active } } as unknown as Watch.Broadcast);
 	try {
 		await flush();

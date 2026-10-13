@@ -4,7 +4,7 @@ use moq_net::Timestamp;
 use mp4_atom::{Any, Atom, DecodeMaybe, Encode, Mdat, Moof, Moov, Trak};
 use std::collections::{HashMap, HashSet};
 
-use super::{Error, Kind};
+use super::{Error, Kind, sample};
 use crate::Result;
 use crate::catalog::Estimator;
 
@@ -26,6 +26,8 @@ use crate::catalog::Estimator;
 /// - AAC (MP4A)
 /// - Opus
 /// - FLAC
+///
+/// **Text:** WebVTT (`wvtt`), reconstructed as timed text; unsupported subtitle codecs are skipped.
 pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	/// The broadcast being produced
 	broadcast: moq_net::broadcast::Producer,
@@ -38,11 +40,16 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	/// importers, until they release theirs too).
 	initial_reservation: Option<crate::catalog::Reserved<E>>,
 
+	/// The source's timestamp base: the first fragment anchors it, and every fragment's timestamp
+	/// shifts by its offset onto the catalog clock. The `tfdt` inside a fragment stays verbatim.
+	timebase: crate::catalog::Timebase<E>,
+
 	// Which track roles to publish. `None` imports every supported track.
 	select: Option<crate::select::Broadcast>,
 
 	// A lookup to tracks in the broadcast
 	tracks: HashMap<u32, Fmp4Track<E>>,
+	text: HashMap<u32, super::text::Track>,
 
 	// Track ids skipped by `select`, so their moof fragments are ignored rather
 	// than treated as referencing an unknown track.
@@ -69,6 +76,7 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	// The current segment's boundary was declared by the source (rather than inferred from a
 	// keyframe), so each track cuts its timeline where it opens its group for the segment.
 	declared: bool,
+	dropped_metadata: u64,
 }
 
 /// The catalog entry for one imported track, whichever section it lives in.
@@ -91,6 +99,9 @@ impl<E: crate::catalog::hang::CatalogExt> Rendition<E> {
 
 struct Fmp4Track<E: crate::catalog::hang::CatalogExt> {
 	kind: Kind,
+
+	/// The `trex` values this track's samples fall back to.
+	defaults: sample::Defaults,
 
 	/// The catalog entry, which owns the published bitrate and jitter and removes itself on drop.
 	rendition: Rendition<E>,
@@ -140,9 +151,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
 		Self {
 			catalog: reserved.producer(),
+			timebase: reserved.timebase(),
 			initial_reservation: Some(reserved),
 			select: None,
 			tracks: HashMap::default(),
+			text: HashMap::default(),
 			skipped: HashSet::default(),
 			moov: None,
 			moof: None,
@@ -152,7 +165,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			pending_cut: false,
 			segment: 0,
 			declared: false,
+			dropped_metadata: 0,
 		}
+	}
+
+	/// Return the number of metadata units discarded by this importer.
+	pub fn dropped_metadata(&self) -> u64 {
+		self.dropped_metadata
 	}
 
 	/// Declare that the next fragment starts a new segment, for callers that know the source's
@@ -225,6 +244,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		for (atom, start, size) in parsed {
 			match atom {
 				Any::Ftyp(_) => {}
+				Any::Emsg(_) => {
+					self.dropped_metadata += 1;
+					if self.dropped_metadata == 1 {
+						tracing::warn!(count = self.dropped_metadata, "discarding fMP4 emsg metadata");
+					}
+				}
 				// A styp opens a CMAF segment: the on-disk segmentation is the boundary,
 				// landing on the next fragment.
 				Any::Styp(_) => self.pending_cut = true,
@@ -264,6 +289,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let track_id = trak.tkhd.track_id;
 			let handler = &trak.mdia.hdlr.handler;
 			let suffix = ".m4s";
+
+			if matches!(handler.as_ref(), b"sbtl" | b"subt" | b"text") {
+				if self.init_text(trak, &moov, &reserved)? {
+					continue;
+				}
+				tracing::warn!(track_id, handler = %handler, "unsupported fMP4 subtitle encoding, skipping");
+				self.skipped.insert(track_id);
+				continue;
+			}
 
 			let kind = Kind::from_handler(*handler)?;
 
@@ -309,6 +343,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				track_id,
 				Fmp4Track {
 					kind,
+					defaults: sample::Defaults::from_moov(&moov, track_id),
 					rendition,
 					track,
 					group: None,
@@ -325,13 +360,46 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 		// The reservation stays held until the first fragment anchors the clock, unless no track
 		// was declared: then no fragment ever will.
-		if self.tracks.is_empty() {
+		if self.tracks.is_empty() && self.text.is_empty() {
 			self.initial_reservation = None;
 		}
 
 		self.moov = Some(moov);
 
 		Ok(())
+	}
+
+	fn init_text(&mut self, trak: &Trak, moov: &Moov, reserved: &crate::catalog::Reserved<E>) -> Result<bool> {
+		let [mp4_atom::Codec::Wvtt(codec)] = trak.mdia.minf.stbl.stsd.codecs.as_slice() else {
+			return Ok(false);
+		};
+		if codec.plaintext.data_reference_index != 1 {
+			return Err(Error::InvalidSubtitle("external subtitle data reference").into());
+		}
+		let header = crate::container::text::header(&codec.config.config).map_err(Error::InvalidSubtitle)?;
+		let mut config = hang::catalog::TextConfig::new(hang::catalog::TextFormat::Vtt);
+		config.role = crate::container::text::role(&header);
+		config.lang = Some(trak.mdia.mdhd.language.clone());
+		// The picker label is the HandlerBox name; `vlab` is an opaque source identifier.
+		config.label = (!trak.mdia.hdlr.name.is_empty()).then(|| trak.mdia.hdlr.name.clone());
+		let wire = crate::catalog::hang::Container::new(&config.container, crate::container::Kind::Data)?;
+		let track = self.broadcast.create_track(
+			self.broadcast.unique_name(".mp4-t"),
+			self.catalog.track_info(hang::catalog::PRIORITY.text),
+		)?;
+		let producer = reserved.text(track, wire, config)?;
+		self.text.insert(
+			trak.tkhd.track_id,
+			super::text::Track {
+				producer,
+				header,
+				defaults: sample::Defaults::from_moov(moov, trak.tkhd.track_id),
+				timescale: moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?,
+				end_decode_time: None,
+				discontinuity: false,
+			},
+		);
+		Ok(true)
 	}
 
 	fn container(&self, trak: &Trak, moov: &Moov) -> Result<Container> {
@@ -589,15 +657,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// A segment is the unit a group carries: each fragment inside it becomes a frame, which is
 	/// what lets audio (whose samples are all independently decodable, so it has no boundary of
 	/// its own) follow the same segmentation as video instead of opening a group per fragment.
-	fn starts_segment(&self, moof: &Moof, has_video: bool) -> Result<bool> {
+	fn starts_segment(&self, moof: &Moof, has_video: bool) -> bool {
 		if self.pending_cut {
-			return Ok(true);
+			return true;
 		}
 
 		if !has_video {
 			// Audio-only and unsegmented: nothing in the container says where a segment ends, so
 			// fall back to a group per fragment. Bounded, unlike one group for the whole source.
-			return Ok(true);
+			return true;
 		}
 
 		// A video keyframe starts a segment, but only once the current segment already has its
@@ -605,30 +673,20 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// `styp` or a `cut()` that already declared the boundary, and bumping a second time would
 		// strand video a segment ahead of the audio that rolled on the declaration.
 		if !self.video_rolled() {
-			return Ok(false);
+			return false;
 		}
 
-		let moov = self.moov.as_ref().ok_or(Error::NoMoov)?;
-		Ok(moof.traf.iter().any(|traf| {
-			let track_id = traf.tfhd.track_id;
-			if self.tracks.get(&track_id).map(|t| &t.kind) != Some(&Kind::Video) {
+		moof.traf.iter().any(|traf| {
+			let Some(track) = self.tracks.get(&traf.tfhd.track_id) else {
 				return false;
-			}
-			let trex_flags = moov
-				.mvex
-				.as_ref()
-				.and_then(|mvex| mvex.trex.iter().find(|trex| trex.track_id == track_id))
-				.map(|trex| trex.default_sample_flags)
-				.unwrap_or_default();
-
-			traf.trun.iter().flat_map(|trun| trun.entries.iter()).any(|entry| {
-				is_sync_sample(
-					entry
-						.flags
-						.unwrap_or(traf.tfhd.default_sample_flags.unwrap_or(trex_flags)),
-				)
-			})
-		}))
+			};
+			track.kind == Kind::Video
+				&& traf
+					.trun
+					.iter()
+					.flat_map(|trun| trun.entries.iter())
+					.any(|entry| track.defaults.resolve(&traf.tfhd, entry).is_sync())
+		})
 	}
 
 	/// Whether every video track has already opened its group for the current segment.
@@ -649,7 +707,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// Resolve the segment boundary BEFORE the per-track loop. A moof can carry both an audio
 		// and a video traf, and whichever comes first must see the same answer, or the other rolls
 		// a fragment late and the two tracks stop agreeing on where segments fall.
-		if self.starts_segment(&moof, has_video)? {
+		if self.starts_segment(&moof, has_video) {
 			self.segment += 1;
 			// A boundary the source declared is also a timeline boundary; one merely inferred
 			// from a keyframe is not, since the default pacing already sees that group open.
@@ -662,6 +720,19 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// Loop over all of the traf boxes in the moof.
 		for traf in &moof.traf {
 			let track_id = traf.tfhd.track_id;
+			if let Some(track) = self.text.get_mut(&track_id) {
+				track.extract(
+					super::text::Fragment {
+						traf,
+						data: &mdat.data,
+						moof_size,
+						header_size,
+					},
+					&mut self.timebase,
+				)?;
+				self.initial_reservation = None;
+				continue;
+			}
 			let track = match self.tracks.get_mut(&track_id) {
 				Some(track) => track,
 				// A fragment for a track `select` dropped: ignore it.
@@ -675,15 +746,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				.iter()
 				.find(|trak| trak.tkhd.track_id == track_id)
 				.ok_or(Error::UnknownTrack(track_id))?;
-			let trex = moov
-				.mvex
-				.as_ref()
-				.and_then(|mvex| mvex.trex.iter().find(|trex| trex.track_id == track_id));
-
-			// The moov contains some defaults
-			let default_sample_duration = trex.map(|trex| trex.default_sample_duration).unwrap_or_default();
-			let default_sample_size = trex.map(|trex| trex.default_sample_size).unwrap_or_default();
-			let default_sample_flags = trex.map(|trex| trex.default_sample_flags).unwrap_or_default();
 
 			let tfdt = traf.tfdt.as_ref().ok_or(Error::MissingTfdt)?;
 			let timescale = moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?;
@@ -740,17 +802,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				}
 
 				for entry in &trun.entries {
-					let flags = entry
-						.flags
-						.unwrap_or(tfhd.default_sample_flags.unwrap_or(default_sample_flags));
-					let duration = entry
-						.duration
-						.or(tfhd.default_sample_duration)
-						.or(Some(default_sample_duration))
-						.filter(|duration| *duration != 0);
-					let size = entry
-						.size
-						.unwrap_or(tfhd.default_sample_size.unwrap_or(default_sample_size)) as usize;
+					let sample = track.defaults.resolve(tfhd, entry);
+					let duration = sample.duration;
+					let size = sample.size as usize;
 
 					// A non-final sample with no resolvable duration leaves the rest of the
 					// fragment's DTS ambiguous, so reject it rather than collapse timestamps.
@@ -782,7 +836,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					}
 
 					let keyframe = match track.kind {
-						Kind::Video => is_sync_sample(flags),
+						Kind::Video => sample.is_sync(),
 						Kind::Audio => true,
 					};
 
@@ -866,10 +920,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					let trun_data_size: u64 = trun_mut
 						.entries
 						.iter()
-						.map(|e| {
-							e.size
-								.unwrap_or(traf_mut.tfhd.default_sample_size.unwrap_or(default_sample_size)) as u64
-						})
+						.map(|entry| u64::from(track.defaults.resolve(&traf_mut.tfhd, entry).size))
 						.sum();
 					cumulative_offset += trun_data_size;
 				}
@@ -885,14 +936,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 			let fragment_bytes = Bytes::from(moof_buf);
 
-			// Carry the fragment's earliest presentation time as the frame timestamp,
-			// in the track's native timescale. Consumers present the fragment at it;
-			// `tfdt` only places the samples relative to each other.
-			let timestamp = min_timestamp.ok_or(Error::MissingTrun)?;
-			// The first fragment of the import is live on arrival. Anchor before releasing the
-			// reservation, so the first snapshot carries the final clock; the moov declared every
-			// track, so any track's fragment releases it.
-			self.catalog.anchor(timestamp)?;
+			// Carry the fragment's earliest presentation time as the frame timestamp, in the
+			// track's native timescale and shifted onto the catalog clock. Consumers present the
+			// fragment at it; `tfdt` only places the samples relative to each other. Anchor before
+			// releasing the reservation, so the first snapshot carries the final clock; the moov
+			// declared every track, so any track's fragment releases it.
+			let earliest = min_timestamp.ok_or(Error::MissingTrun)?;
+			let offset = self.timebase.anchor(earliest)?;
+			let timestamp = offset.apply(earliest)?;
+			let max_end = max_end.map(|end| offset.apply(end)).transpose()?;
 			self.initial_reservation = None;
 
 			// Write the per-track fragment as a single MoQ frame (passthrough). The group rolls
@@ -967,6 +1019,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Finish all tracks, flushing current groups.
 	pub fn finish(&mut self) -> Result<()> {
+		for track in self.text.values_mut() {
+			track.producer.finish()?;
+		}
 		// No frame follows to anchor the clock, so publish the declared track set now.
 		self.initial_reservation = None;
 		for track in self.tracks.values_mut() {
@@ -986,6 +1041,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Abort all tracks with `err` instead of finishing, so subscribers see the real
 	/// cause rather than [`moq_net::Error::Dropped`]. Consumes the importer.
 	pub fn abort(mut self, err: moq_net::Error) {
+		for track in std::mem::take(&mut self.text).into_values() {
+			track.producer.abort(err.clone());
+		}
 		// Dropping each track's rendition retires its catalog entry.
 		for mut track in std::mem::take(&mut self.tracks).into_values() {
 			if let Some(g) = track.group.take() {
@@ -1000,8 +1058,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Broadcast-wide: every track inside this fMP4 import advances together; per-track
 	/// control is intentionally not exposed. Skipping sequences is not a new timeline, so the
 	/// next fragment must still advance past the last decode time; see
-	/// [`discontinuity`](Self::discontinuity).
+	/// [`discontinuity`](Self::discontinuity). Text spends a group per cue, so a text track that
+	/// is already past `sequence` continues from its own next group instead.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+		for track in self.text.values_mut() {
+			let next = track.producer.track().latest().map_or(0, |latest| latest + 1);
+			track.producer.seek(sequence.max(next))?;
+		}
 		for track in self.tracks.values_mut() {
 			track.estimator.cut(None);
 			track.publish_estimate()?;
@@ -1019,16 +1082,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// The source signalled a new timeline (an HLS `EXT-X-DISCONTINUITY`), so the next
 	/// fragment's decode time is not compared with the last one on each track.
 	pub fn discontinuity(&mut self) {
+		for track in self.text.values_mut() {
+			track.end_decode_time = None;
+			track.discontinuity = true;
+		}
 		for track in self.tracks.values_mut() {
 			track.last_decode_time = None;
 		}
 	}
-}
-
-/// Whether a sample's `trun` flags mark it a sync sample (an IDR): `sample_depends_on == 2` and
-/// `sample_is_non_sync_sample` clear, per ISO/IEC 14496-12.
-fn is_sync_sample(flags: u32) -> bool {
-	let depends_on_none = (flags >> 24) & 0x3 == 0x2;
-	let non_sync = (flags >> 16) & 0x1 == 0x1;
-	depends_on_none && !non_sync
 }

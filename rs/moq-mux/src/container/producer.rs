@@ -608,8 +608,8 @@ where
 	/// source, resuming on a re-anchored clock. Without it a break is invisible: the next
 	/// group looks exactly like the one that would have followed, and a consumer bounding a
 	/// sample by the next group's first frame hands it the entire gap as its duration. That
-	/// produced a 2405 second video sample out of a publisher that had been paused 40 minutes
-	/// (moq-dev/moq.pro#814). Consecutive sequence numbers can't rule a pause out, so this
+	/// produced a 2405 second video sample out of a publisher that had been paused 40 minutes.
+	/// Consecutive sequence numbers can't rule a pause out, so this
 	/// marker is the only thing that can say one happened.
 	///
 	/// It also fixes what a subscriber joining mid-break sees. A subscription starts at the
@@ -763,6 +763,11 @@ mod tests {
 	use super::*;
 	use crate::catalog::hang::Container;
 	use moq_net::Timestamp;
+
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
 
 	/// Mint a standalone track for tests via a throwaway broadcast, since tracks are
 	/// born from their broadcast (no public `track::Producer::new`).
@@ -1082,7 +1087,7 @@ mod tests {
 	/// A subscription starts at the track's LATEST group, and the marker advances it even
 	/// though it carries nothing. So a subscriber arriving mid-break waits for real media
 	/// rather than being handed the pre-break group as if it were live -- which is how a
-	/// 40-minute-stale frame reached a VOD recording in moq-dev/moq.pro#814.
+	/// 40-minute-stale frame once reached a VOD recording.
 	#[tokio::test]
 	async fn discontinuity_moves_the_live_edge_off_stale_content() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
@@ -1432,7 +1437,7 @@ mod tests {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let timelines = crate::timeline::Timelines::new(&broadcast);
 		let recorder = timelines.track("video", crate::timeline::Config::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", timed()).unwrap();
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video))
 			.with_buffer(std::time::Duration::from_secs(10))
 			.with_recorder(recorder);
@@ -1459,7 +1464,7 @@ mod tests {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let timelines = crate::timeline::Timelines::new(&broadcast);
 		let recorder = timelines.track("video", crate::timeline::Config::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", timed()).unwrap();
 		let mut producer =
 			Producer::new(track, Container::Legacy(crate::container::Kind::Video)).with_recorder(recorder);
 

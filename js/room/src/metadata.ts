@@ -164,7 +164,7 @@ function serveSnapshot<T>(
 		effect.cleanup(() => producer.finish());
 
 		effect.run((effect) => {
-			producer.update(value(effect));
+			producer.update({ value: value(effect), at: Moq.Time.Timestamp.now() });
 		});
 	});
 }
@@ -236,9 +236,9 @@ function subscribeJson<T>(
 	const consumer = new Json.Snapshot.Consumer<T>({ track });
 	effect.spawn(async () => {
 		for (;;) {
-			const value = await effect.race(consumer.next());
-			if (value === undefined) break;
-			update(value);
+			const state = await effect.race(consumer.latest());
+			if (state === undefined) break;
+			update(state.value);
 		}
 	});
 }

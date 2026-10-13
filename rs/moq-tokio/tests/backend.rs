@@ -2,6 +2,11 @@
 
 use std::time::Duration;
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Inputs for [`connect_test`].
@@ -113,7 +118,9 @@ async fn connect_test(config: ConnectTest<'_>) {
 	broadcast
 		.announce(Default::default())
 		.expect("failed to create broadcast");
-	let track = broadcast.create_track("video", None).expect("failed to create track");
+	let track = broadcast
+		.create_track("video", timed())
+		.expect("failed to create track");
 
 	let mut group = track.append_group().expect("failed to append group");
 	group
@@ -342,15 +349,6 @@ async fn reload_test() {
 		.init(moq_tokio::quic::Config::default())
 		.expect("failed to init server");
 	let server = server.listen().await.expect("failed to listen");
-
-	// Every process the user runs shares one inotify instance limit, so a loaded host can refuse
-	// the listener its watcher. Judge by the listener's own watcher: a separate probe would race
-	// the rest of the host for the same limit.
-	#[cfg(feature = "watch")]
-	if tracing_test::internal::logs_with_scope_contain("moq_tokio", "hot reload disabled") {
-		eprintln!("skipping reload_test: host cannot start an inotify watcher");
-		return;
-	}
 
 	let certificates = server.certificates();
 	let before = certificates.fingerprints();
@@ -605,7 +603,9 @@ async fn iroh_connect_test(version: Option<&str>) {
 	broadcast
 		.announce(Default::default())
 		.expect("failed to create broadcast");
-	let track = broadcast.create_track("video", None).expect("failed to create track");
+	let track = broadcast
+		.create_track("video", timed())
+		.expect("failed to create track");
 
 	let mut group = track.append_group().expect("failed to append group");
 	group
@@ -826,7 +826,9 @@ async fn noq_client_close_drains_finished_track() {
 			let origin = moq_tokio::origin::spawn();
 			let broadcast = origin.create_broadcast("test").expect("failed to create broadcast");
 			broadcast.announce(Default::default()).expect("failed to announce");
-			let mut track = broadcast.create_track("video", None).expect("failed to create track");
+			let mut track = broadcast
+				.create_track("video", timed())
+				.expect("failed to create track");
 
 			let mut config = moq_tokio::connect::Config::default();
 			config.tls.insecure = Some(true);
@@ -938,7 +940,9 @@ async fn noq_client_close_drains_migrated_predecessor() {
 			let origin = moq_tokio::origin::spawn();
 			let broadcast = origin.create_broadcast("test").expect("failed to create broadcast");
 			broadcast.announce(Default::default()).expect("failed to announce");
-			let mut track = broadcast.create_track("video", None).expect("failed to create track");
+			let mut track = broadcast
+				.create_track("video", timed())
+				.expect("failed to create track");
 
 			let mut config = moq_tokio::connect::Config::default();
 			config.tls.insecure = Some(true);
@@ -955,7 +959,7 @@ async fn noq_client_close_drains_migrated_predecessor() {
 			subscribed_tx.send(()).unwrap();
 
 			// Once the replacement is live, only the predecessor serves the subscription.
-			while connection.epoch() < 2 || !connection.connected() {
+			while connection.connects() < 2 || !connection.connected() {
 				connection.status().await.expect("connection stopped");
 			}
 			migrated_tx.send(()).unwrap();
@@ -1079,7 +1083,9 @@ async fn noq_client_close_keeps_predecessor_handover() {
 			let broadcast = origin.create_broadcast("test").expect("failed to create broadcast");
 			broadcast.announce(Default::default()).expect("failed to announce");
 			// Never finished, so the predecessor serving it cannot drain.
-			let mut track = broadcast.create_track("video", None).expect("failed to create track");
+			let mut track = broadcast
+				.create_track("video", timed())
+				.expect("failed to create track");
 
 			let mut config = moq_tokio::connect::Config::default();
 			config.tls.insecure = Some(true);
@@ -1354,7 +1360,9 @@ async fn noq_windows() {
 /// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+		moq_net::announce::Event::Start(route)
+		| moq_net::announce::Event::Update(route)
+		| moq_net::announce::Event::Restart(route) => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }

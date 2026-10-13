@@ -76,7 +76,10 @@ each as its own broadcast (`event.hang` becomes `event/1.hang`,
 `event/2.hang`). A damaged packet is dropped on its own PID, so video freezes
 until its next keyframe while the other tracks carry on. The importer also
 logs feed health (stalled streams, TR 101 290 errors) without changing what it
-publishes. FLV covers H.264 + AAC.
+publishes. `--passthrough` publishes the multiplex whole instead, every packet
+in order on one [`m2ts`](/concept/hang#transport-streams) track with every
+program aboard, for what demultiplexing cannot carry, such as a scrambled
+service; `export ts` does not read it. FLV covers H.264 + AAC.
 
 ## Export
 
@@ -111,7 +114,7 @@ the delay; a frame that cannot arrive in time at the rate fails the export.
 ```bash
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang play
 moq ... play --delay 500ms          # fix the delay instead of measuring it
-moq ... play --no-video             # audio only
+moq ... play --no-video             # audio only, without a window
 ```
 
 Decodes H.264, H.265, and AV1 video with the platform hardware decoder where
@@ -124,12 +127,23 @@ default, `auto`, sizes the buffer to how unevenly audio arrives, with the same
 [algorithm](/concept/audio-jitter) as the browser player. A duration fixes the
 delay and is also how long a stalled group is waited on before it is skipped.
 Each role follows the catalog, switching rendition when the publisher retires
-the one playing. Playback is behind the `play` feature, since it pulls in
-windowing and audio-device dependencies:
+the one playing.
+
+The broadcast's announcement is its online signal, followed until the window
+closes. Playback starts when the name is announced. A
+[restarted publisher](#publisher-runs) starts it over on the new run, with a
+fresh catalog, decoders, and clock. When the announcement ends, what is playing
+finishes and the player waits for the name to return. The log names each run's
+epoch. A catalog with nothing this build can play still ends the player.
+
+Playback is behind the `play` feature, since it pulls in windowing and
+audio-device dependencies:
 
 ```bash
 cargo install moq-cli --no-default-features --features "iroh,noq,websocket,play"
 ```
+
+`moq play` skips disabled renditions. If none are enabled, it waits for a later catalog. Disabling the current rendition stops it and selects an enabled replacement.
 
 ## Capture
 
@@ -158,6 +172,9 @@ feature (links libpipewire).
 moq --connect https://relay.example.com/anon --broadcast cam.hang transcode
 moq ... transcode --rung 720:2500000 --rung 360:600000 --encoder nvenc --decoder nvdec
 ```
+
+Rung sizes are the coded frame's short side. A 1080x1920 portrait source
+produces 720x1280 and 360x640 rungs. Catalog rotation is preserved.
 
 Publishes `cam.hang/transcode.hang` whose catalog references the source's
 rendition and adds lower rungs that are decoded and encoded only while someone
@@ -239,13 +256,13 @@ Each run of `moq` announces a fresh
 The RTMP, SRT, and WHIP ingests mint one per connection instead, and
 `import ts --program all` one per program.
 
-Epochs cross a connection only on moq-lite 07, which is opt-in. There, a
-restarted process takes the name at once, as long as its host's clock is not
-behind the old run's: subscriptions to the old run end with
-`Unroutable`, and a viewer's next subscribe reaches the new run instead of
-waiting for its group numbers to catch up. On older versions and moq-transport
-the relay sees no epoch and keeps a subscription on the route it first resolved
-through, so viewers of a restarted process wait until the old session closes.
+A restarted process takes the name at once: viewers see the broadcast restart,
+and their next subscribe reaches the new run instead of waiting for its group
+numbers to catch up. Epochs cross a connection only on moq-lite 07, which is
+opt-in, and order by the host's clock there, so a host whose clock runs behind
+the old run's waits for it to close. Older versions and moq-transport carry no
+epoch, so a restart from another session is the newest route at an equal cost,
+or a better one.
 
 On moq-lite 07, two processes that pass the same `--epoch` (a UUIDv7, such as
 `uuidgen -7` prints) are one publisher: relays fail over between them
@@ -292,6 +309,8 @@ See [Authentication](/bin/relay/auth).
 fetchable, which the [HLS gateway](/bin/hls) depends on. `export --max-delay`
 (default 500 ms) is how far a stalled group may fall behind the live edge
 before *this* consumer skips it. Raising the first never delays playback.
+At stdin EOF, `import` keeps the finished broadcast up for its max-age, so a
+subscriber still catching up can drain it; Ctrl-C ends that early.
 
 `export ts` takes `--delay` (default 500 ms) instead, like an SRT receiver's
 latency: each frame is muxed that long after its decode time, all tracks in
@@ -301,10 +320,15 @@ keyframe. The output's PCR follows the source's clock within what ISO/IEC
 13818-1 allows. `--delay 0` writes frames in arrival order and drops nothing.
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
-long for a restarted publisher instead, and marks the break in the stream
-(PCR discontinuity, PAT/PMT re-sent). An export that fails while the broadcast
-stays up, such as on a codec TS cannot carry, exits 1 without lingering. Only
-`ts` can mark a restart, so the other formats refuse `--linger`.
+long for the same publisher instance to come back, and carries on with the same
+stream. A replacement (a restarted publisher, under a new
+[epoch](/concept/moq-lite#publisher-epochs)) exits 1 unless `--stitch` follows
+it as a full program switch: a new PMT from its catalog, with every PID flagging
+the break. Without `--stitch` the export stays on the old publisher while it is
+up. Only lite-07 sessions carry epochs, so on the default version every return
+is a replacement. An export that fails while the broadcast stays up, such as on
+a codec TS cannot carry, exits 1 without lingering. Only `ts` can mark a break,
+so the other formats refuse `--linger`.
 
 ## Debugging
 

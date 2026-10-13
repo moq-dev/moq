@@ -20,7 +20,8 @@
 //! #     broadcast: &mut moq_net::broadcast::Producer,
 //! #     catalog: &moq_mux::catalog::Producer,
 //! # ) -> moq_mux::Result<()> {
-//! let track = broadcast.create_track("chat", None)?;
+//! let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+//! let track = broadcast.create_track("chat", info)?;
 //! let config = moq_mux::json::Config::default().with_compression(true);
 //! let mut chat = catalog.json_stream::<Message>(track, config)?;
 //! chat.append(&Message { text: "hello".to_string() })?;
@@ -34,8 +35,7 @@
 //! A value timed on the broadcast [`Clock`](crate::Clock) is written at that timestamp as given,
 //! and the entry advertises how late values reach the transport as its `jitter` and `delay`, the
 //! way a media rendition does. A capture [`Instant`](std::time::Instant) converts with
-//! [`Clock::capture`](crate::Clock::capture) on the catalog's clock, read at write time since an
-//! importer's first frame re-anchors it:
+//! [`Clock::capture`](crate::Clock::capture) on the catalog's clock:
 //!
 //! ```no_run
 //! # fn example(
@@ -450,6 +450,11 @@ mod test {
 
 	use super::*;
 
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	fn catalog() -> (moq_net::broadcast::Producer, crate::catalog::Producer) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
@@ -458,7 +463,7 @@ mod test {
 
 	/// Create the moq-net track a data producer publishes on, as a caller does for a media track.
 	fn track(broadcast: &mut moq_net::broadcast::Producer, name: &str) -> moq_net::track::Producer {
-		broadcast.create_track(name, None).unwrap()
+		broadcast.create_track(name, timed()).unwrap()
 	}
 
 	fn entry(catalog: &crate::catalog::Producer, name: &str) -> JsonConfig {
@@ -524,11 +529,11 @@ mod test {
 		assert_eq!(drain(consumer), vec![json!({ "live": true })]);
 	}
 
-	/// A track created before an importer's first frame stamps on the clock that frame anchors, not
-	/// the one the catalog started with.
+	/// A track registered before an importer's first frame fixes the clock, so an importer starting
+	/// an hour in shifts onto it: the track keeps stamping on the clock it started with.
 	#[test]
-	fn a_write_follows_the_anchored_clock() {
-		let (mut broadcast, mut catalog) = catalog();
+	fn an_importer_joins_the_data_tracks_clock() {
+		let (mut broadcast, catalog) = catalog();
 		let mut status = catalog
 			.json_snapshot::<Value>(track(&mut broadcast, "status"), Config::default())
 			.unwrap();
@@ -537,9 +542,15 @@ mod test {
 			.unwrap();
 		let mut subscribers = [status.consume(), chat.consume()];
 
+		let published = catalog.snapshot().clock;
+		let before = catalog.clock().now();
 		// The stream starts an hour in, far from the ten seconds a fresh clock reads.
-		let first = moq_net::Timestamp::from_secs(3600).unwrap();
-		catalog.anchor(first).unwrap();
+		let first = catalog
+			.timebase()
+			.shift(moq_net::Timestamp::from_micros(3_600_000_000).unwrap())
+			.unwrap();
+		assert_eq!(catalog.snapshot().clock, published, "the clock never moves");
+		assert!(before <= first, "the importer lands at now: {before:?} {first:?}");
 		status.update(&json!({ "live": true })).unwrap();
 		chat.append(Timed::from(&json!({ "n": 1 })).at(catalog.clock().now()))
 			.unwrap();
@@ -763,7 +774,7 @@ mod test {
 	async fn an_entry_subscribes_and_reads() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-		let source = crate::source::announced(&broadcast.consume());
+		let source = crate::source::announced(&broadcast.consume()).await;
 
 		let mut chat = catalog
 			.json_stream::<Value>(track(&mut broadcast, "chat"), Config::default())
@@ -846,7 +857,7 @@ mod test {
 	fn an_unrecognized_mode_or_compression_is_refused() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("chat", None)
+			.create_track("chat", timed())
 			.unwrap();
 
 		let mut config = JsonConfig::new(Mode::Unknown("windowed".to_string()));

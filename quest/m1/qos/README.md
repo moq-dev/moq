@@ -32,21 +32,21 @@ moq.pro (downstream) dashboard work, including the health badge and the
 connection-health drill-down, consumes both.
 
 The per-broadcast verdict combining client reports, the relay's starvation,
-and publisher timeliness lives in moq.pro's
-[health badge](https://github.com/moq-dev/moq.pro/blob/main/quest/m1/qos/badge.md).
-This line only reports the counters.
+and publisher timeliness lives downstream. This line only reports the
+counters.
 
 Decided (2026-10-06 audit): [stats prefix
 tracks](/quest/m0/broadcast-epoch/prefix-tracks.md) lands first, since it is
-m0 and gates the release; #4133 rebases its histograms onto the stats totals
-and prefix tracks rather than the per-path `publisher.json` and
-`subscriber.json` map rows it writes today, which prefix tracks retire.
-Rejected: #4133 first, which would make prefix tracks carry the lag histogram
-and dropped counters across.
+m0 and gates the release; the lag histogram lands on the stats totals and
+prefix tracks rather than the per-path `publisher.json` and
+`subscriber.json` map rows, which prefix tracks retire.
+Rejected: the histogram first, which would make prefix tracks carry the lag
+histogram and dropped counters across.
 
 Decided (2026-10-08): the egress histogram is its own quest,
 [viewer lag histogram](/quest/m1/qos/lag-histogram.md), since every other
-child reads it and it exists only on the line branch.
+child reads it. The line's PR, #4133, closed without landing (2026-10-09);
+its code is kept on `wip/4133-lag-histogram`.
 
 Decided (2026-09-28): the line's moq-stats changes break the published
 crate. Client stats left the line (2026-09-29)
