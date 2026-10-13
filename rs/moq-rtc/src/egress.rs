@@ -1,11 +1,11 @@
 //! Per-broadcast egress source for the RTP-out paths.
 //!
 //! Counterpart to [`crate::ingest::IngestSink`]. Holds a
-//! [`moq_net::broadcast::Consumer`] and a cached catalog snapshot; on each
+//! [`moq_net::broadcast::Consumer`] and follows its catalog; on each
 //! `MediaAdded` event the session loop calls [`EgressSource::on_track`]
-//! which picks a matching rendition, subscribes to it, and spawns a pump
-//! task that feeds RTP-ready frames back to the session loop via an mpsc
-//! channel.
+//! which spawns a pump task that serves the best enabled rendition in the
+//! line's codec, re-picks as the catalog changes, and feeds RTP-ready frames
+//! back to the session loop via an mpsc channel.
 //!
 //! Used by `server subscribe` (WHEP server) and `client publish` (WHIP
 //! client). SDP negotiation lives in the matching modules; this file is
@@ -19,7 +19,7 @@ use moq_mux::catalog::Stream;
 use moq_mux::catalog::hang::Catalog;
 use str0m::format::Codec;
 use str0m::media::{Frequency, MediaTime, Mid, Pt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::{Error, Result, codec};
 
@@ -87,10 +87,9 @@ pub struct EgressSource {
 	/// The catalog broadcast plus optional origin context, so a rendition referencing a
 	/// sibling broadcast (its catalog `broadcast` field) resolves against the origin.
 	source: moq_mux::Source,
-	/// Snapshot of the catalog at session start. Sufficient for v1: SDP
-	/// negotiation happens once and the codec list is fixed for the
-	/// lifetime of the session.
-	catalog: Catalog,
+	/// The latest catalog snapshot, followed for the session's life so each pump serves the
+	/// best enabled rendition. Its sender drops when the catalog ends.
+	catalog: watch::Receiver<Catalog>,
 	writes_tx: mpsc::Sender<WriteRequest>,
 	writes_rx: Option<mpsc::Receiver<WriteRequest>>,
 }
@@ -108,6 +107,8 @@ impl EgressSource {
 	pub async fn new(source: moq_mux::Source) -> Result<Self> {
 		let mut consumer = source.catalog::<()>(moq_mux::catalog::CatalogFormat::Hang).await?;
 		let catalog = consumer.next().await?.ok_or(Error::CatalogClosed)?;
+		let (catalog_tx, catalog) = watch::channel(catalog);
+		tokio::spawn(follow_catalog(consumer, catalog_tx));
 
 		let (tx, rx) = mpsc::channel(64);
 		Ok(Self {
@@ -127,38 +128,37 @@ impl EgressSource {
 	/// Spawn a pump task for a newly added (sendonly) media line.
 	///
 	/// `mid` and `pt` come from str0m's negotiated state; `clock_rate` is
-	/// the codec's negotiated RTP clock. The pump subscribes to a matching
-	/// catalog rendition and forwards every frame as a [`WriteRequest`].
+	/// the codec's negotiated RTP clock. The pump serves the best enabled catalog
+	/// rendition in `codec` and forwards every frame as a [`WriteRequest`].
 	pub fn on_track(&mut self, mid: Mid, codec: Codec, pt: Pt, clock_rate: Frequency) -> Result<()> {
-		// the `subscribe` call blocks on SUBSCRIBE_OK, so pick + subscribe inside
-		// the pump task to keep this str0m callback non-blocking.
-		let tx = self.writes_tx.clone();
-		let source = self.source.clone();
-		let catalog = self.catalog.clone();
-		tokio::spawn(async move {
-			let track = match pick_track(&source, &catalog, codec).await {
-				Ok(Some(t)) => t,
-				Ok(None) => {
-					tracing::warn!(?codec, "no matching catalog rendition; egress track ignored");
-					return;
-				}
-				Err(err) => {
-					tracing::warn!(?codec, %err, "egress track subscribe failed");
-					return;
-				}
-			};
-			pump(mid, pt, clock_rate, track, tx).await;
-		});
+		let Some(target) = Target::new(codec) else {
+			tracing::warn!(?codec, "unsupported egress codec; egress track ignored");
+			return Ok(());
+		};
+		let pump = Pump {
+			mid,
+			pt,
+			clock_rate,
+			target,
+			source: self.source.clone(),
+			catalog: self.catalog.clone(),
+			tx: self.writes_tx.clone(),
+			playhead: None,
+		};
+		// Subscribing blocks on SUBSCRIBE_OK, so keep it inside the pump task to keep this
+		// str0m callback non-blocking.
+		tokio::spawn(pump.run());
 		Ok(())
 	}
 
 	/// Codecs present in the catalog, used by the SDP-offer side
-	/// (`client publish`) to declare what we have. For v1: the union of
-	/// audio + video codecs across all renditions.
+	/// (`client publish`) to declare what we have: the union of audio and video
+	/// codecs across all renditions, disabled ones included since they may re-enable.
+	/// The SDP codec list stays fixed for the session.
 	pub fn catalog_codecs(&self) -> Vec<Codec> {
+		let catalog = self.catalog.borrow();
 		let mut out = Vec::new();
-		if self
-			.catalog
+		if catalog
 			.audio
 			.renditions
 			.values()
@@ -166,7 +166,7 @@ impl EgressSource {
 		{
 			out.push(Codec::Opus);
 		}
-		for rendition in self.catalog.video.renditions.values() {
+		for rendition in catalog.video.renditions.values() {
 			if !valid_reference(&self.source, rendition.broadcast.as_ref()) {
 				continue;
 			}
@@ -188,57 +188,106 @@ impl EgressSource {
 	}
 }
 
+/// Publish each catalog snapshot until the catalog ends or every pump is gone.
+async fn follow_catalog(mut consumer: moq_mux::catalog::Consumer<()>, tx: watch::Sender<Catalog>) {
+	loop {
+		tokio::select! {
+			next = consumer.next() => match next {
+				Ok(Some(catalog)) => {
+					tx.send_replace(catalog);
+				}
+				Ok(None) => return,
+				Err(err) => {
+					tracing::warn!(%err, "egress catalog failed");
+					return;
+				}
+			},
+			_ = tx.closed() => return,
+		}
+	}
+}
+
 fn valid_reference(source: &moq_mux::Source, broadcast: Option<&moq_net::path::Relative<'_>>) -> bool {
 	source.resolve_reference(broadcast).is_some()
 }
 
-/// Find a catalog rendition for the given codec (the best ranked one) and
-/// build a [`codec::Track`] subscribed to it, honoring an optional cross-broadcast
-/// reference (the rendition's catalog `broadcast` field). Returns `None` if no
-/// rendition matches.
-async fn pick_track(source: &moq_mux::Source, catalog: &Catalog, codec: Codec) -> Result<Option<codec::Track>> {
-	match codec {
-		Codec::Opus => {
-			let Some((name, config)) = pick_audio(source, catalog) else {
-				return Ok(None);
-			};
-			let track = source
-				.subscribe_track(config.broadcast.as_ref(), hang::catalog::Reference::track(config, name))
-				.await?;
-			Ok(Some(codec::Track::opus(track, config)?))
+/// What a negotiated media line carries.
+#[derive(Clone, Copy, Debug)]
+enum Target {
+	Opus,
+	Video(VideoCodecKind),
+}
+
+impl Target {
+	fn new(codec: Codec) -> Option<Self> {
+		Some(match codec {
+			Codec::Opus => Self::Opus,
+			Codec::H264 => Self::Video(VideoCodecKind::H264),
+			Codec::H265 => Self::Video(VideoCodecKind::H265),
+			Codec::Vp8 => Self::Video(VideoCodecKind::VP8),
+			Codec::Vp9 => Self::Video(VideoCodecKind::VP9),
+			Codec::Av1 => Self::Video(VideoCodecKind::AV1),
+			_ => return None,
+		})
+	}
+
+	/// The best enabled rendition in this codec that `source` can reach.
+	fn pick(self, source: &moq_mux::Source, catalog: &Catalog) -> Option<Rendition> {
+		match self {
+			Self::Opus => {
+				pick_audio(source, catalog).map(|(name, config)| Rendition::Audio(name.clone(), config.clone()))
+			}
+			Self::Video(kind) => {
+				pick_video(source, catalog, kind).map(|(name, config)| Rendition::Video(name.clone(), config.clone()))
+			}
 		}
-		Codec::H264 | Codec::H265 | Codec::Vp8 | Codec::Vp9 | Codec::Av1 => {
-			let target = match codec {
-				Codec::H264 => VideoCodecKind::H264,
-				Codec::H265 => VideoCodecKind::H265,
-				Codec::Vp8 => VideoCodecKind::VP8,
-				Codec::Vp9 => VideoCodecKind::VP9,
-				Codec::Av1 => VideoCodecKind::AV1,
-				_ => unreachable!(),
-			};
-			let Some((name, config)) = pick_video(source, catalog, target) else {
-				return Ok(None);
-			};
-			let track = source
-				.subscribe_track(config.broadcast.as_ref(), hang::catalog::Reference::track(config, name))
-				.await?;
-			Ok(Some(codec::Track::video(track, config)?))
-		}
-		other => Err(Error::UnsupportedCodec(format!("{other:?}"))),
 	}
 }
 
-/// The best [ranked](hang::catalog::Audio::ranked) Opus rendition that `source` can reach.
+/// A catalog rendition a media line can serve.
+enum Rendition {
+	Audio(String, hang::catalog::AudioConfig),
+	Video(String, hang::catalog::VideoConfig),
+}
+
+impl Rendition {
+	fn name(&self) -> &str {
+		match self {
+			Self::Audio(name, _) | Self::Video(name, _) => name,
+		}
+	}
+
+	/// Subscribe to the rendition, honoring its cross-broadcast reference (the catalog
+	/// `broadcast` field).
+	async fn subscribe(&self, source: &moq_mux::Source) -> Result<codec::Track> {
+		match self {
+			Self::Audio(name, config) => {
+				let track = source
+					.subscribe_track(config.broadcast.as_ref(), hang::catalog::Reference::track(config, name))
+					.await?;
+				codec::Track::opus(track, config)
+			}
+			Self::Video(name, config) => {
+				let track = source
+					.subscribe_track(config.broadcast.as_ref(), hang::catalog::Reference::track(config, name))
+					.await?;
+				codec::Track::video(track, config)
+			}
+		}
+	}
+}
+
+/// The best [enabled](hang::catalog::Audio::enabled) Opus rendition that `source` can reach.
 fn pick_audio<'a>(
 	source: &moq_mux::Source,
 	catalog: &'a Catalog,
 ) -> Option<(&'a String, &'a hang::catalog::AudioConfig)> {
-	catalog.audio.ranked().find(|(_, config)| {
+	catalog.audio.enabled().find(|(_, config)| {
 		matches!(config.codec, AudioCodec::Opus) && valid_reference(source, config.broadcast.as_ref())
 	})
 }
 
-/// The best [ranked](hang::catalog::Video::ranked) video rendition in `target`'s codec
+/// The best [enabled](hang::catalog::Video::enabled) video rendition in `target`'s codec
 /// that `source` can reach.
 fn pick_video<'a>(
 	source: &moq_mux::Source,
@@ -247,36 +296,138 @@ fn pick_video<'a>(
 ) -> Option<(&'a String, &'a hang::catalog::VideoConfig)> {
 	catalog
 		.video
-		.ranked()
+		.enabled()
 		.find(|(_, c)| c.codec.kind() == target && valid_reference(source, c.broadcast.as_ref()))
 }
 
-/// Per-rendition pump task. Reads frames, converts the timestamp into the
-/// codec's clock domain, and forwards as a [`WriteRequest`].
-async fn pump(mid: Mid, pt: Pt, clock_rate: Frequency, mut track: codec::Track, tx: mpsc::Sender<WriteRequest>) {
-	loop {
-		let frame = match track.next().await {
-			Ok(Some(f)) => f,
-			Ok(None) => {
-				tracing::debug!(?mid, "egress track ended");
+/// A subscribed rendition.
+struct Serving {
+	name: String,
+	track: codec::Track,
+}
+
+/// Serves one negotiated media line from the best enabled rendition in its codec.
+///
+/// The pump re-picks on every catalog change. A better or newly enabled rendition is
+/// subscribed beside the current one, which keeps flowing until the new one reaches a
+/// keyframe past the line's playhead, so a switch leaves no gap and never steps back in
+/// time: a new subscription starts at the rendition's latest group, which for one re-enabled
+/// is the stale group it stopped on. With nothing enabled it serves nothing until a
+/// rendition re-enables. There is no ABR on the peer, so a re-enabled top rendition wins
+/// the line back.
+struct Pump {
+	mid: Mid,
+	pt: Pt,
+	clock_rate: Frequency,
+	target: Target,
+	source: moq_mux::Source,
+	catalog: watch::Receiver<Catalog>,
+	tx: mpsc::Sender<WriteRequest>,
+	/// The latest presentation time written, in microseconds.
+	playhead: Option<u64>,
+}
+
+impl Pump {
+	async fn run(mut self) {
+		let mut serving: Option<Serving> = None;
+		// The rendition to switch to at its first keyframe.
+		let mut next: Option<Serving> = None;
+		let mut following = true;
+		let mut repick = true;
+
+		loop {
+			if repick {
+				repick = false;
+				let pick = self.target.pick(&self.source, &self.catalog.borrow_and_update());
+				match pick {
+					None => {
+						if serving.is_some() || next.is_some() {
+							tracing::debug!(mid = ?self.mid, "no enabled rendition; egress track idle");
+						}
+						serving = None;
+						next = None;
+					}
+					Some(pick) if serving.as_ref().is_some_and(|s| s.name == pick.name()) => next = None,
+					Some(pick) if next.as_ref().is_some_and(|s| s.name == pick.name()) => {}
+					Some(pick) => match pick.subscribe(&self.source).await {
+						Ok(track) => {
+							next = Some(Serving {
+								name: pick.name().to_string(),
+								track,
+							})
+						}
+						Err(err) => {
+							tracing::warn!(mid = ?self.mid, rendition = pick.name(), %err, "egress track subscribe failed");
+							next = None;
+						}
+					},
+				}
+			}
+
+			// The catalog ended, so nothing new will be picked: serve what is left.
+			if !following && serving.is_none() && next.is_none() {
+				tracing::debug!(mid = ?self.mid, "egress track ended");
 				return;
 			}
-			Err(err) => {
-				tracing::warn!(?mid, %err, "egress track error");
-				return;
+
+			tokio::select! {
+				changed = self.catalog.changed(), if following => match changed {
+					Ok(()) => repick = true,
+					Err(_) => following = false,
+				},
+				frame = read(self.mid, &mut serving) => match frame {
+					Some(frame) => {
+						if !self.write(frame).await {
+							return;
+						}
+					}
+					None => serving = None,
+				},
+				frame = read(self.mid, &mut next) => match frame {
+					Some(frame) if self.joins(&frame) => {
+						serving = next.take();
+						if !self.write(frame).await {
+							return;
+						}
+					}
+					Some(_) => {}
+					None => next = None,
+				},
 			}
-		};
-		let ticks = us_to_ticks(frame.timestamp_us, clock_rate);
-		let time = MediaTime::new(ticks, clock_rate);
-		let req = WriteRequest {
-			mid,
-			pt,
-			time,
+		}
+	}
+
+	/// Whether the line can switch to a new rendition at `frame`: one the peer can start
+	/// decoding at, past what was already written.
+	fn joins(&self, frame: &codec::PacketizedFrame) -> bool {
+		(frame.keyframe || matches!(self.target, Target::Opus))
+			&& self.playhead.is_none_or(|playhead| frame.timestamp_us > playhead)
+	}
+
+	/// Forward one frame to the session loop, or return false once the session is gone.
+	async fn write(&mut self, frame: codec::PacketizedFrame) -> bool {
+		self.playhead = self.playhead.max(Some(frame.timestamp_us));
+		let ticks = us_to_ticks(frame.timestamp_us, self.clock_rate);
+		let request = WriteRequest {
+			mid: self.mid,
+			pt: self.pt,
+			time: MediaTime::new(ticks, self.clock_rate),
 			payload: frame.payload,
 		};
-		if tx.send(req).await.is_err() {
-			// Session closed; drop the pump.
-			return;
+		self.tx.send(request).await.is_ok()
+	}
+}
+
+/// The next frame of `serving`, or `None` once it ends or fails. Pending forever without one.
+async fn read(mid: Mid, serving: &mut Option<Serving>) -> Option<codec::PacketizedFrame> {
+	let Some(serving) = serving else {
+		return std::future::pending().await;
+	};
+	match serving.track.next().await {
+		Ok(frame) => frame,
+		Err(err) => {
+			tracing::warn!(?mid, rendition = serving.name, %err, "egress track error");
+			None
 		}
 	}
 }
@@ -355,7 +506,7 @@ mod tests {
 		let (writes_tx, writes_rx) = mpsc::channel(1);
 		let egress = EgressSource {
 			source,
-			catalog,
+			catalog: watch::channel(catalog).1,
 			writes_tx,
 			writes_rx: Some(writes_rx),
 		};
@@ -394,6 +545,14 @@ mod tests {
 		let (name, _) = pick_video(&source, &catalog, VideoCodecKind::VP8).unwrap();
 		assert_eq!(name, "d");
 		assert!(pick_video(&source, &catalog, VideoCodecKind::AV1).is_none());
+
+		// A disabled rendition is never picked, so the next best serves instead, and a codec
+		// with nothing enabled serves nothing.
+		catalog.video.renditions.get_mut("b").unwrap().enabled = false;
+		let (name, _) = pick_video(&source, &catalog, VideoCodecKind::H264).unwrap();
+		assert_eq!(name, "c");
+		catalog.video.renditions.get_mut("d").unwrap().enabled = false;
+		assert!(pick_video(&source, &catalog, VideoCodecKind::VP8).is_none());
 	}
 
 	#[test]
@@ -423,6 +582,124 @@ mod tests {
 		catalog.audio.renditions.insert("d".to_string(), escaped);
 		let (name, _) = pick_audio(&source, &catalog).unwrap();
 		assert_eq!(name, "c");
+
+		// A disabled Opus rendition is never picked.
+		catalog.audio.renditions.get_mut("c").unwrap().enabled = false;
+		let (name, _) = pick_audio(&source, &catalog).unwrap();
+		assert_eq!(name, "a");
+	}
+
+	/// A live VP8 rendition `name` of `height` lines, registered in `catalog`.
+	fn vp8(
+		broadcast: &mut moq_net::broadcast::Producer,
+		catalog: &mut moq_mux::catalog::Producer,
+		name: &str,
+		height: u32,
+	) -> moq_mux::container::Producer<moq_mux::catalog::hang::Container> {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.container = hang::catalog::Container::Legacy;
+		config.coded_width = Some(height * 16 / 9);
+		config.coded_height = Some(height);
+		catalog
+			.modify()
+			.unwrap()
+			.video
+			.renditions
+			.insert(name.to_string(), config);
+		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+		moq_mux::container::Producer::new(
+			broadcast.create_track(name, info).unwrap(),
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+		)
+	}
+
+	fn frame(millis: u64, payload: &'static [u8], keyframe: bool) -> moq_mux::container::Frame {
+		moq_mux::container::Frame {
+			timestamp: moq_net::Timestamp::from_millis(millis).unwrap(),
+			payload: Bytes::from_static(payload),
+			keyframe,
+			duration: None,
+		}
+	}
+
+	/// The payload of the next write, required without another frame arriving.
+	async fn written(writes: &mut mpsc::Receiver<WriteRequest>) -> Bytes {
+		tokio::time::timeout(Duration::from_millis(10), writes.recv())
+			.await
+			.expect("a frame is written")
+			.expect("the pump is alive")
+			.payload
+	}
+
+	/// Nothing is written without another frame arriving.
+	async fn idle(writes: &mut mpsc::Receiver<WriteRequest>) {
+		let next = tokio::time::timeout(Duration::from_millis(10), writes.recv()).await;
+		assert!(
+			next.is_err(),
+			"unexpected write: {:?}",
+			next.map(|w| w.map(|w| w.payload))
+		);
+	}
+
+	/// A media line follows the catalog for the session's life: a disabled rendition hands
+	/// the line to its enabled sibling, nothing enabled serves nothing, and a re-enabled top
+	/// rendition wins the line back at its first keyframe past the playhead, never replaying
+	/// the stale group a new subscription starts on.
+	#[tokio::test(start_paused = true)]
+	async fn a_media_line_follows_the_catalog() {
+		let origin = produce_origin();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut high = vp8(&mut broadcast, &mut catalog, "high", 1080);
+		let mut low = vp8(&mut broadcast, &mut catalog, "low", 360);
+		let set_enabled = |catalog: &mut moq_mux::catalog::Producer, name: &str, enabled: bool| {
+			catalog
+				.modify()
+				.unwrap()
+				.video
+				.renditions
+				.get_mut(name)
+				.unwrap()
+				.enabled = enabled;
+		};
+
+		let mut egress = EgressSource::new(moq_mux::Source::new(origin.consume(), broadcast.consume()))
+			.await
+			.unwrap();
+		let mut writes = egress.take_writes();
+		egress
+			.on_track(
+				Mid::from("0"),
+				Codec::Vp8,
+				Pt::new_with_value(96),
+				Frequency::NINETY_KHZ,
+			)
+			.unwrap();
+
+		high.write(frame(0, b"high-0", true)).unwrap();
+		low.write(frame(0, b"low-0", true)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"high-0");
+
+		// The top rendition is disabled: the line moves to the low one at its next keyframe.
+		set_enabled(&mut catalog, "high", false);
+		idle(&mut writes).await;
+		low.write(frame(100, b"low-1", true)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"low-1");
+		low.write(frame(133, b"low-2", false)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"low-2");
+
+		// Nothing enabled serves nothing, even when a disabled rendition still sends.
+		set_enabled(&mut catalog, "low", false);
+		idle(&mut writes).await;
+		low.write(frame(166, b"low-3", false)).unwrap();
+		idle(&mut writes).await;
+
+		// The top rendition re-enables. Its stale group is skipped, and the line takes it
+		// back at its first fresh keyframe.
+		set_enabled(&mut catalog, "high", true);
+		idle(&mut writes).await;
+		high.write(frame(200, b"high-1", true)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"high-1");
 	}
 
 	#[test]

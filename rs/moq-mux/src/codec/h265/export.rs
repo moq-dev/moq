@@ -21,6 +21,10 @@ pub struct Export<S: Stream> {
 	catalog: Option<S>,
 	max_delay: std::time::Duration,
 	track: Option<H265Track>,
+	/// The latest presentation time written. A switch to another rendition resumes at its first
+	/// keyframe past it: a new subscription starts at the rendition's latest group, which for
+	/// one re-enabled is the stale group it stopped on.
+	playhead: Option<std::time::Duration>,
 }
 
 struct H265Track {
@@ -34,6 +38,8 @@ struct H265Track {
 	/// A decoder description supplies length-prefix size and any out-of-band parameter sets.
 	/// Without one, the payload is already Annex-B.
 	convert: Option<Convert>,
+	/// Frames are dropped until a keyframe past the playhead.
+	joining: bool,
 }
 
 struct Convert {
@@ -53,6 +59,7 @@ impl<S: Stream> Export<S> {
 			catalog: Some(catalog),
 			max_delay: std::time::Duration::ZERO,
 			track: None,
+			playhead: None,
 		}
 	}
 
@@ -92,6 +99,14 @@ impl<S: Stream> Export<S> {
 
 			match ready!(track.source.poll_read(waiter))? {
 				Some(frame) => {
+					let timestamp = std::time::Duration::from(frame.timestamp);
+					if track.joining {
+						if !frame.keyframe || self.playhead.is_some_and(|playhead| timestamp <= playhead) {
+							continue;
+						}
+						track.joining = false;
+					}
+					self.playhead = self.playhead.max(Some(timestamp));
 					let bytes = match &track.convert {
 						None => frame.payload,
 						Some(convert) => {
@@ -114,7 +129,7 @@ impl<S: Stream> Export<S> {
 
 	fn update_catalog(&mut self, catalog: &Catalog) -> crate::Result<()> {
 		let mut catalog = catalog.clone();
-		self.source.retain_valid_media(&mut catalog);
+		self.source.retain_selectable(&mut catalog);
 
 		let picked = catalog
 			.video
@@ -175,6 +190,7 @@ impl<S: Stream> Export<S> {
 			config: config.clone(),
 			source,
 			convert,
+			joining: true,
 		});
 
 		Ok(())

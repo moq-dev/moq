@@ -1206,7 +1206,7 @@ impl<E: catalog::Catalog> Export<E> {
 	}
 
 	fn update_catalog(&mut self, mut catalog: Catalog<E>) -> anyhow::Result<()> {
-		self.source.retain_valid(&mut catalog);
+		self.source.retain_selectable(&mut catalog);
 
 		// The MPEG-TS section lives in the extension. The trait only exposes
 		// `mpegts_mut`, and this snapshot is owned, so clone it out (`()` yields the
