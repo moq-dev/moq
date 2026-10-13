@@ -433,7 +433,7 @@ int main()
 		if (catalog) {
 			const auto &[name, rendition] = *catalog->video.begin();
 			auto media = TestOk(
-				moq::MediaContainerConsumer::subscribe(broadcast, {name, rendition.container}).get(),
+				moq::MediaTrackConsumer::subscribe(broadcast, {name, rendition.container}).get(),
 				"container consumer");
 			// Read a frame first, so the relay is subscribed before the last one is written.
 			auto next = media->next();

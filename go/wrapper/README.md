@@ -81,9 +81,9 @@ target takes over a subscriber's pending request. A duplicate name fails.
 `VideoInit.Hint` seeds fields the bitstream cannot supply. `NewContainerProducer` /
 `NewContainerStreamProducer` demux whole chunks or a byte stream into their own tracks.
 `NewCatalogProducer` holds its broadcast weakly and owns catalog properties and sections.
-`NewCatalogConsumer`, `NewContainerConsumer`, and `FetchContainerGroup` read
-catalog snapshots, live media, and one fetched media group. `NewContainerGroupConsumer`
-decodes a raw group, such as one from `TrackConsumer.RecvGroup` for arrival-order reads.
+`NewCatalogConsumer`, `NewTrackConsumer`, and `FetchGroup` read
+catalog snapshots, live media, and one fetched media group. `NewGroupConsumer`
+decodes a raw group, such as one from `moq.TrackConsumer.RecvGroup` for arrival-order reads.
 Frames and `Flush` use `time.Duration`; `Demand()` owns track names and subscriber waits.
 
 `BroadcastProducer.Dynamic()` accepts subscriber-requested tracks. Call

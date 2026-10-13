@@ -37,7 +37,7 @@ async def main():
             catalog = await moq.media.catalog(broadcast)
 
             for name, track in catalog.audio.items():
-                frames = await moq.media.ContainerConsumer.subscribe(broadcast, name, track.container)
+                frames = await moq.media.TrackConsumer.subscribe(broadcast, name, track.container)
                 async with frames:
                     async for frame in frames:
                         print(f"Got frame: {len(frame.payload)} bytes, ts={frame.timestamp}")
@@ -188,11 +188,11 @@ client = moq.Client(
   or releasing the broadcast.
 - `await media.CatalogConsumer.subscribe(broadcast)` streams catalog snapshots;
   `await media.catalog(broadcast)` reads one snapshot and releases its subscription.
-- `await media.ContainerConsumer.subscribe(broadcast, name, container, *, subscription=None)`
+- `await media.TrackConsumer.subscribe(broadcast, name, container, *, subscription=None)`
   decodes live media. Pass the catalog rendition's `container`.
-- `await media.ContainerGroupConsumer.fetch(broadcast, name, sequence, container, *, options=None)`
+- `await media.GroupConsumer.fetch(broadcast, name, sequence, container, *, options=None)`
   fetches and decodes exactly one group.
-- `media.ContainerGroupConsumer(group, container)` decodes a raw group, such as one from
+- `media.GroupConsumer(group, container)` decodes a raw group, such as one from
   `TrackConsumer.recv_group()` for arrival-order reads, with container media time on each frame
   as it lands.
 
@@ -215,7 +215,7 @@ subscriber waits. `.cut()` / `.seek(sequence)` draw group boundaries; `.finish()
 - **`GroupConsumer`**. Async iterator of timestamped `Frame`s.
   - `.read_frame() -> Frame | None` returns a timestamped raw frame.
 
-Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.ContainerConsumer`, `media.ContainerGroupConsumer`, `TrackConsumer`, `AudioConsumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `AnnounceConsumer`, `AnnouncedBroadcast`) and the dynamic sources (`OriginDynamic`, `BroadcastDynamic`, `TrackDynamic`).
+Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.TrackConsumer`, `media.GroupConsumer`, `TrackConsumer`, `AudioConsumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `AnnounceConsumer`, `AnnouncedBroadcast`) and the dynamic sources (`OriginDynamic`, `BroadcastDynamic`, `TrackDynamic`).
 
 ### Origin (advanced)
 

@@ -98,14 +98,14 @@ auto broadcast = ok(announced->available().get());
 auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(broadcast).get());
 if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the catalog ends
     for (const auto &[name, video] : catalog->video) {
-        auto media = ok(moq::MediaContainerConsumer::subscribe(broadcast, {name, video.container}).get());
+        auto media = ok(moq::MediaTrackConsumer::subscribe(broadcast, {name, video.container}).get());
         auto frame = ok(media->next().get());   // std::nullopt once the track ends
     }
 }
 ```
 
-`MediaContainerConsumer` reads in decode order. For arrival-order reads, decode each group
-from `TrackConsumer::recv_group` with `moq::MediaContainerGroupConsumer::init(group, container)`;
+`MediaTrackConsumer` reads in decode order. For arrival-order reads, decode each group
+from `TrackConsumer::recv_group` with `moq::MediaGroupConsumer::init(group, container)`;
 frames carry container media time as they land.
 
 ```cpp

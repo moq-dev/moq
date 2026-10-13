@@ -49,8 +49,8 @@ func (b *BroadcastConsumer) FetchGroup(
 // Resolve returns the broadcast serving a catalog rendition, honoring its broadcast
 // reference: ffi.MoqVideo.Broadcast / ffi.MoqAudio.Broadcast. A nil or empty reference names this
 // broadcast, anything else names a sibling relative to it (e.g. "./source"). Call it on a
-// rendition that carries one before media.NewContainerConsumer, SubscribeTrack, FetchGroup, or
-// media.FetchContainerGroup, which take a track name rather than a rendition; DecodeAudio and
+// rendition that carries one before media.NewTrackConsumer, SubscribeTrack, FetchGroup, or
+// media.FetchGroup, which take a track name rather than a rendition; DecodeAudio and
 // DecodeVideo resolve it themselves.
 //
 // Errors if this broadcast came from a local producer rather than an origin, since a

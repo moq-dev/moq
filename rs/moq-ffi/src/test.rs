@@ -529,9 +529,9 @@ async fn raw_audio_activity() {
 		.unwrap()
 		.expect("expected a raw audio catalog");
 	let container = catalog.audio.get("microphone").unwrap().container.clone();
-	let subscription = MoqMediaContainerConsumer::subscribe(
+	let subscription = MoqMediaTrackConsumer::subscribe(
 		&consumer,
-		MoqMediaContainerConfig {
+		MoqMediaTrackConfig {
 			name: "microphone".into(),
 			container: container.clone(),
 			subscription: None,
@@ -562,9 +562,9 @@ async fn raw_audio_activity() {
 		.expect("timed out waiting for raw audio to become unused")
 		.unwrap();
 
-	let subscription = MoqMediaContainerConsumer::subscribe(
+	let subscription = MoqMediaTrackConsumer::subscribe(
 		&consumer,
-		MoqMediaContainerConfig {
+		MoqMediaTrackConfig {
 			name: "microphone".into(),
 			container,
 			subscription: None,
@@ -1324,9 +1324,9 @@ async fn fetches_cached_media_group_and_decodes_container() {
 		.unwrap();
 	media.finish().unwrap();
 
-	let fetched = MoqMediaContainerGroupConsumer::fetch(
+	let fetched = MoqMediaGroupConsumer::fetch(
 		&consumer,
-		MoqMediaContainerGroupConfig {
+		MoqMediaGroupConfig {
 			name: "media".into(),
 			sequence: 0,
 			container: crate::media::MoqContainer::Legacy,
@@ -1354,9 +1354,9 @@ async fn fetch_media_group_rejects_invalid_container_before_fetching() {
 	let _track = broadcast.create_track("media", timed()).unwrap();
 	let consumer = MoqBroadcastConsumer::new(broadcast.consume());
 
-	let result = MoqMediaContainerGroupConsumer::fetch(
+	let result = MoqMediaGroupConsumer::fetch(
 		&consumer,
-		MoqMediaContainerGroupConfig {
+		MoqMediaGroupConfig {
 			name: "media".into(),
 			sequence: 0,
 			container: crate::media::MoqContainer::Cmaf { init: Vec::new() },
@@ -1403,9 +1403,9 @@ async fn fetch_media_group_decodes_multiple_cmaf_samples() {
 
 	let fetched = tokio::time::timeout(
 		TIMEOUT,
-		MoqMediaContainerGroupConsumer::fetch(
+		MoqMediaGroupConsumer::fetch(
 			&consumer,
-			MoqMediaContainerGroupConfig {
+			MoqMediaGroupConfig {
 				name: "video".into(),
 				sequence: 0,
 				container: crate::media::MoqContainer::Cmaf { init: init.to_vec() },
@@ -1489,12 +1489,12 @@ async fn recv_raw_group(track: &MoqTrackConsumer) -> Arc<MoqGroupConsumer> {
 		.expect("expected a group")
 }
 
-async fn recv_media_group(track: &MoqTrackConsumer) -> Arc<MoqMediaContainerGroupConsumer> {
+async fn recv_media_group(track: &MoqTrackConsumer) -> Arc<MoqMediaGroupConsumer> {
 	let group = recv_raw_group(track).await;
-	MoqMediaContainerGroupConsumer::new(&group, MoqContainer::Legacy).unwrap()
+	MoqMediaGroupConsumer::new(&group, MoqContainer::Legacy).unwrap()
 }
 
-async fn next_media(group: &MoqMediaContainerGroupConsumer) -> Result<Option<MoqMediaFrame>, MoqError> {
+async fn next_media(group: &MoqMediaGroupConsumer) -> Result<Option<MoqMediaFrame>, MoqError> {
 	tokio::time::timeout(TIMEOUT, group.next())
 		.await
 		.expect("timed out reading a media frame")
@@ -1554,7 +1554,7 @@ async fn media_group_takes_over_an_unread_group() {
 	let raw = recv_raw_group(&consumer).await;
 	assert!(raw.read_frame().await.unwrap().is_some());
 	assert!(matches!(
-		MoqMediaContainerGroupConsumer::new(&raw, MoqContainer::Legacy),
+		MoqMediaGroupConsumer::new(&raw, MoqContainer::Legacy),
 		Err(MoqError::AlreadyCommitted)
 	));
 	assert!(
@@ -1565,7 +1565,7 @@ async fn media_group_takes_over_an_unread_group() {
 	let mut group = track.append_group().unwrap();
 	write_legacy(&mut group, 3, 1_040_000, b"c");
 	let raw = recv_raw_group(&consumer).await;
-	let media = MoqMediaContainerGroupConsumer::new(&raw, MoqContainer::Legacy).unwrap();
+	let media = MoqMediaGroupConsumer::new(&raw, MoqContainer::Legacy).unwrap();
 	assert!(matches!(raw.read_frame().await, Err(MoqError::Cancelled)));
 	assert_eq!(
 		next_media(&media).await.unwrap().expect("expected a frame").payload,
@@ -1584,10 +1584,10 @@ async fn media_group_fails_loudly_on_bad_containers() {
 
 	let raw = recv_raw_group(&consumer).await;
 	assert!(matches!(
-		MoqMediaContainerGroupConsumer::new(&raw, MoqContainer::Cmaf { init: Vec::new() }),
+		MoqMediaGroupConsumer::new(&raw, MoqContainer::Cmaf { init: Vec::new() }),
 		Err(MoqError::Codec { .. })
 	));
-	let media = MoqMediaContainerGroupConsumer::new(&raw, MoqContainer::Legacy).unwrap();
+	let media = MoqMediaGroupConsumer::new(&raw, MoqContainer::Legacy).unwrap();
 	assert!(next_media(&media).await.is_err());
 }
 
@@ -1829,9 +1829,9 @@ async fn requested_track_keeps_its_name() {
 	let dynamic = broadcast.dynamic().unwrap();
 	let consumer = broadcast.consume().unwrap();
 	let subscribe = tokio::spawn(async move {
-		MoqMediaContainerConsumer::subscribe(
+		MoqMediaTrackConsumer::subscribe(
 			&consumer,
-			MoqMediaContainerConfig {
+			MoqMediaTrackConfig {
 				name: "requested".into(),
 				container: crate::media::MoqContainer::Legacy,
 				subscription: None,
@@ -1869,9 +1869,9 @@ async fn dynamic_track_request_can_publish_media() {
 	let subscribe = {
 		let consumer = consumer.clone();
 		tokio::spawn(async move {
-			MoqMediaContainerConsumer::subscribe(
+			MoqMediaTrackConsumer::subscribe(
 				&consumer,
-				MoqMediaContainerConfig {
+				MoqMediaTrackConfig {
 					name: "requested-audio".into(),
 					container: crate::media::MoqContainer::Legacy,
 					subscription: None,
@@ -2401,9 +2401,9 @@ async fn local_publish_consume_audio() {
 	assert_eq!(audio.channel_count, 2);
 	assert!(catalog.video.is_empty());
 
-	let media_consumer = MoqMediaContainerConsumer::subscribe(
+	let media_consumer = MoqMediaTrackConsumer::subscribe(
 		&broadcast_consumer,
-		MoqMediaContainerConfig {
+		MoqMediaTrackConfig {
 			name: track_name.clone(),
 			container: audio.container.clone(),
 			subscription: None,
@@ -2470,9 +2470,9 @@ async fn video_publish_consume() {
 	assert_eq!(coded.height, 720);
 	assert!(catalog.audio.is_empty());
 
-	let media_consumer = MoqMediaContainerConsumer::subscribe(
+	let media_consumer = MoqMediaTrackConsumer::subscribe(
 		&broadcast_consumer,
-		MoqMediaContainerConfig {
+		MoqMediaTrackConfig {
 			name: track_name.clone(),
 			container: video.container.clone(),
 			subscription: None,
@@ -2583,9 +2583,9 @@ async fn video_raw_publish_consume() {
 	assert_eq!(coded.height, 240);
 	assert!(catalog.audio.is_empty());
 
-	let media_consumer = MoqMediaContainerConsumer::subscribe(
+	let media_consumer = MoqMediaTrackConsumer::subscribe(
 		&broadcast_consumer,
-		MoqMediaContainerConfig {
+		MoqMediaTrackConfig {
 			name: track_name.clone(),
 			container: rendition.container.clone(),
 			subscription: None,
@@ -2923,9 +2923,9 @@ async fn multiple_frames_ordering() {
 		.unwrap();
 
 	let (track_name, audio) = catalog.audio.iter().next().unwrap();
-	let media_consumer = MoqMediaContainerConsumer::subscribe(
+	let media_consumer = MoqMediaTrackConsumer::subscribe(
 		&broadcast_consumer,
-		MoqMediaContainerConfig {
+		MoqMediaTrackConfig {
 			name: track_name.clone(),
 			container: audio.container.clone(),
 			subscription: None,
@@ -4009,9 +4009,9 @@ async fn server_client_roundtrip() {
 		.unwrap()
 		.expect("expected a catalog");
 	let (track_name, audio) = catalog.audio.iter().next().unwrap();
-	let media_consumer = MoqMediaContainerConsumer::subscribe(
+	let media_consumer = MoqMediaTrackConsumer::subscribe(
 		&bc,
-		MoqMediaContainerConfig {
+		MoqMediaTrackConfig {
 			name: track_name.clone(),
 			container: audio.container.clone(),
 			subscription: None,

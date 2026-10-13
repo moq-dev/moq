@@ -19,7 +19,7 @@ Use `Named(name)` or `Requested(request)` as the target for `TrackProducer.audio
 its writes fail with `Error.Closed` after the broadcast closes or is released.
 `MediaFrame.timestamp`, media writes, and `flush` use `datetime.timedelta`.
 For arrival-order reads, decode each group from `TrackConsumer.recv_group()` with
-`ContainerGroupConsumer(group, container)`; frames carry container media time as they land.
+`media.GroupConsumer(group, container)`; frames carry container media time as they land.
 
 ```bash
 pip install moq-rs      # or: uv add moq-rs
@@ -40,7 +40,7 @@ async def main():
             broadcast = await client.request_broadcast(announcement.prefix)
             catalog = await moq.media.catalog(broadcast)
             name, track = next(iter(catalog.audio.items()))
-            async for frame in await moq.media.ContainerConsumer.subscribe(broadcast, name, track.container):
+            async for frame in await moq.media.TrackConsumer.subscribe(broadcast, name, track.container):
                 print(frame.timestamp, len(frame.payload))
 
 asyncio.run(main())

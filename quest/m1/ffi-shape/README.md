@@ -37,6 +37,11 @@ Settled shape:
   consumers); `json`, `flate`, `audio`, and `video` own their producers and
   consumers. `flate` holds the opaque snapshot and stream tracks, named after
   the `moq-flate` crate.
+- A layer reuses the net noun it decodes, and its namespace tells them apart:
+  `media.TrackConsumer` and `media.GroupConsumer` read what
+  `media.TrackProducer` writes, a level above the raw `TrackConsumer` and
+  `GroupConsumer` (decided 2026-10-13 on #5356, replacing the 5-word
+  `MoqMediaContainerGroupConsumer`).
 - A layer's type is constructed from the handles its Rust constructor takes,
   not reached through an accessor on the broadcast: JSON wraps a track
   (`moq_json::snapshot::Producer::new(track, config)`), so it also works on a

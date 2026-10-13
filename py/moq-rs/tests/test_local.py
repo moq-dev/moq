@@ -222,7 +222,7 @@ async def test_local_publish_consume_audio():
         assert audio.sample_rate == 48000
         assert audio.channel_count == 2
 
-        media_consumer = await moq.media.ContainerConsumer.subscribe(broadcast_consumer, track_name, audio.container)
+        media_consumer = await moq.media.TrackConsumer.subscribe(broadcast_consumer, track_name, audio.container)
 
         payload = b"opus audio payload data"
         media.write_frame(payload, timedelta(microseconds=1_000_000))
@@ -258,7 +258,7 @@ async def test_video_publish_consume():
         assert video.coded.width == 1280
         assert video.coded.height == 720
 
-        media_consumer = await moq.media.ContainerConsumer.subscribe(broadcast_consumer, track_name, video.container)
+        media_consumer = await moq.media.TrackConsumer.subscribe(broadcast_consumer, track_name, video.container)
 
         keyframe = bytes([0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, 0xBB, 0xCC])
         media.write_frame(keyframe, timedelta(microseconds=0))
@@ -304,7 +304,7 @@ async def test_multiple_frames_ordering():
         catalog = await moq.media.catalog(broadcast_consumer)
         track_name = list(catalog.audio.keys())[0]
         audio = catalog.audio[track_name]
-        media_consumer = await moq.media.ContainerConsumer.subscribe(broadcast_consumer, track_name, audio.container)
+        media_consumer = await moq.media.TrackConsumer.subscribe(broadcast_consumer, track_name, audio.container)
 
         timestamps = [0, 20_000, 40_000, 60_000, 80_000]
         for i, ts in enumerate(timestamps):
@@ -567,9 +567,9 @@ async def test_dynamic_track_request_can_publish_media():
     catalog_consumer = await moq.media.CatalogConsumer.subscribe(consumer)
 
     # TrackProducer.audio with Requested accepts the request (at the media timescale), which is what
-    # unblocks ContainerConsumer.subscribe, so run the subscribe concurrently until then.
+    # unblocks TrackConsumer.subscribe, so run the subscribe concurrently until then.
     subscribe = asyncio.create_task(
-        moq.media.ContainerConsumer.subscribe(
+        moq.media.TrackConsumer.subscribe(
             consumer, "requested-audio", cast(moq.media.Container, moq.media.Container.LEGACY())
         )
     )
@@ -776,7 +776,7 @@ def test_public_api_exports():
 
 
 async def test_container_consumer_default_latency_and_context_manager():
-    """ContainerConsumer.subscribe defaults the
+    """TrackConsumer.subscribe defaults the
     latency; the returned consumer is also an async context manager."""
     origin = moq.OriginProducer()
     broadcast = create_announced(origin, "live")
@@ -795,7 +795,7 @@ async def test_container_consumer_default_latency_and_context_manager():
         payload = b"opus audio payload data"
         media.write_frame(payload, timedelta(microseconds=1_000_000))
 
-        async with await moq.media.ContainerConsumer.subscribe(
+        async with await moq.media.TrackConsumer.subscribe(
             broadcast_consumer, track_name, audio.container
         ) as media_consumer:
             async for frame in media_consumer:
@@ -994,8 +994,8 @@ async def _recv_raw(track: moq.TrackConsumer) -> moq.GroupConsumer:
     return group
 
 
-async def _recv_media(track: moq.TrackConsumer) -> moq.media.ContainerGroupConsumer:
-    return moq.media.ContainerGroupConsumer(await _recv_raw(track), _LEGACY)
+async def _recv_media(track: moq.TrackConsumer) -> moq.media.GroupConsumer:
+    return moq.media.GroupConsumer(await _recv_raw(track), _LEGACY)
 
 
 async def test_container_group_decodes_arrival_order():
@@ -1042,12 +1042,12 @@ async def test_container_group_takes_over_an_unread_group():
     raw = await _recv_raw(consumer)
     assert await raw.read_frame() is not None
     with pytest.raises(moq.Error.AlreadyCommitted):  # type: ignore[attr-defined]
-        moq.media.ContainerGroupConsumer(raw, _LEGACY)
+        moq.media.GroupConsumer(raw, _LEGACY)
 
     group = track.append_group()
     group.write_frame(_legacy(1_020_000, b"b"), timedelta(milliseconds=2))
     raw = await _recv_raw(consumer)
-    media = moq.media.ContainerGroupConsumer(raw, _LEGACY)
+    media = moq.media.GroupConsumer(raw, _LEGACY)
     with pytest.raises(moq.Error.Cancelled):  # type: ignore[attr-defined]
         await raw.read_frame()
     frame = await asyncio.wait_for(anext(media), timeout=5.0)
@@ -1065,8 +1065,8 @@ async def test_container_group_fails_loudly():
     group.write_frame(b"\x40", timedelta(milliseconds=1))
     raw = await _recv_raw(consumer)
     with pytest.raises(moq.Error.Codec):  # type: ignore[attr-defined]
-        moq.media.ContainerGroupConsumer(raw, cast(moq.media.Container, moq.media.Container.CMAF(init=b"")))
-    media = moq.media.ContainerGroupConsumer(raw, _LEGACY)
+        moq.media.GroupConsumer(raw, cast(moq.media.Container, moq.media.Container.CMAF(init=b"")))
+    media = moq.media.GroupConsumer(raw, _LEGACY)
     with pytest.raises(moq.Error):  # type: ignore[attr-defined]
         await asyncio.wait_for(anext(media), timeout=5.0)
 
