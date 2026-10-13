@@ -141,7 +141,6 @@ using ContainerFormat = MoqContainerFormat;
 using Error = MoqError;
 using ErrorScope = MoqErrorScope;
 using MediaTarget = MoqMediaTarget;
-// Includes TooManyRequests when a peer exceeds its session request caps.
 using ProtocolKind = MoqProtocolKind;
 using Transport = MoqTransport;
 using VideoCodec = MoqVideoCodec;

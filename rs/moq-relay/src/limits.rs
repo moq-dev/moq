@@ -36,10 +36,7 @@ impl Default for Session {
 
 impl Session {
 	pub(crate) fn resolve(&self) -> moq_net::session::Limits {
-		let mut limits = moq_net::session::Limits::default();
-		limits.announces = self.announces;
-		limits.subscriptions = self.subscriptions;
-		limits
+		resolve(self.announces, self.subscriptions)
 	}
 }
 
@@ -77,9 +74,13 @@ impl Default for Peer {
 
 impl Peer {
 	pub(crate) fn resolve(&self) -> moq_net::session::Limits {
-		let mut limits = moq_net::session::Limits::default();
-		limits.announces = self.announces;
-		limits.subscriptions = self.subscriptions;
-		limits
+		resolve(self.announces, self.subscriptions)
 	}
+}
+
+fn resolve(announces: usize, subscriptions: usize) -> moq_net::session::Limits {
+	let mut limits = moq_net::session::Limits::default();
+	limits.announces = announces;
+	limits.subscriptions = subscriptions;
+	limits
 }

@@ -421,6 +421,8 @@ from_message! {
 
 #[cfg(test)]
 mod tests {
+	use super::*;
+
 	#[test]
 	fn session_limit_has_a_known_kind() {
 		let error = super::MoqProtocolError::from_session(&moq_net::SessionError::TooManyRequests);
@@ -428,8 +430,6 @@ mod tests {
 		assert_eq!(error.code, moq_net::SessionError::TooManyRequests.to_code());
 		assert_eq!(error.kind, super::MoqProtocolKind::TooManyRequests);
 	}
-
-	use super::*;
 
 	#[test]
 	fn protocol_codes_survive_container_errors() {

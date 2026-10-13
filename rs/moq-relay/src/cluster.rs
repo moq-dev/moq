@@ -973,9 +973,9 @@ pub struct Admitted {
 }
 
 impl Cluster {
+	/// The request caps for an admitted session: only a `peer` grant gets the peer policy.
 	pub(crate) fn limits(&self, lease: &auth::Lease) -> moq_net::session::Limits {
-		let token = lease.token();
-		if token.peer || token.upstream {
+		if lease.token().peer {
 			self.peer_limits
 		} else {
 			self.session_limits
@@ -1743,7 +1743,7 @@ impl Cluster {
 			.with_publisher(origin.consume().with_hidden(true))
 			.with_subscriber(origin)
 			.with_stats(self.stats.tier(self.cluster_tier()).session(""))
-			.limits(self.peer_limits);
+			.with_limits(self.peer_limits);
 		if let Some(cost) = target.cost {
 			client = client.with_cost(cost);
 		}
@@ -1979,6 +1979,9 @@ pub(crate) fn canonicalize_peer_key(peer: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+	use super::*;
+	use crate::Config as RelayConfig;
+
 	#[tokio::test]
 	async fn request_limits_follow_the_admitted_grant() {
 		let mut options = Options::default();
@@ -1987,7 +1990,7 @@ mod tests {
 		options.peer.announces = 20;
 		options.peer.subscriptions = 30;
 		let cluster = Cluster::new(options).unwrap();
-		for (peer, upstream, expected) in [(false, false, (2, 3)), (true, false, (20, 30)), (false, true, (20, 30))] {
+		for (peer, upstream, expected) in [(false, false, (2, 3)), (true, false, (20, 30)), (true, true, (20, 30))] {
 			let mut grant = moq_auth::Grant::new(Default::default(), Default::default());
 			grant.peer = peer;
 			grant.upstream = upstream;
@@ -1998,9 +2001,6 @@ mod tests {
 			assert_eq!((limits.announces, limits.subscriptions), expected);
 		}
 	}
-
-	use super::*;
-	use crate::Config as RelayConfig;
 
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {

@@ -879,7 +879,7 @@ where
 	}
 
 	/// Set request caps after authorizing the peer and before answering SETUP.
-	pub fn limits(mut self, limits: crate::session::Limits) -> Self {
+	pub fn with_limits(mut self, limits: crate::session::Limits) -> Self {
 		self.inner_mut().server.limits = limits;
 		self
 	}

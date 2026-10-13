@@ -139,7 +139,6 @@ typedef Backoff = MoqBackoff;
 typedef ErrorScope = MoqErrorScope;
 
 /// A recognized protocol kind, or APP / UNKNOWN when the code is not named.
-// Includes TooManyRequests when a peer exceeds its session request caps.
 typedef ProtocolKind = MoqProtocolKind;
 
 /// A protocol failure: scope, verbatim wire code, kind, and a diagnostic message.

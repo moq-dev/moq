@@ -367,6 +367,9 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+	use super::*;
+	use crate::test_env::EnvGuard;
+
 	#[test]
 	fn session_limits_merge_without_crossing_peer_policy() {
 		let _env = EnvGuard::clear(&[
@@ -399,9 +402,6 @@ mod tests {
 		assert_eq!(config.peer.resolve().announces, 90);
 		assert_eq!(config.peer.resolve().subscriptions, 1000);
 	}
-
-	use super::*;
-	use crate::test_env::EnvGuard;
 
 	#[cfg(not(feature = "iroh"))]
 	#[test]

@@ -220,7 +220,7 @@ impl Client {
 	}
 
 	/// Cap the announcements and subscriptions this peer can hold on a session.
-	pub fn limits(mut self, limits: moq_net::session::Limits) -> Self {
+	pub fn with_limits(mut self, limits: moq_net::session::Limits) -> Self {
 		self.moq = self.moq.with_limits(limits);
 		self
 	}
