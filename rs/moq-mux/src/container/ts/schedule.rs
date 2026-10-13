@@ -791,15 +791,17 @@ impl Schedule {
 					}
 				}
 				// Video's payload goes on from MB into EB at Rbx as it leaves the transport
-				// buffer, its PES header discarded, so only payload counts against the leak.
-				// Holding MB to a transport buffer's worth, below any MB size, still carries the
-				// leak's whole rate across packet positions.
+				// buffer, its PES header discarded, so only payload counts against the leak. MB
+				// runs up to BSmux ahead of the leak, 4 ms of the larger of Rbx and 2 Mb/s: the
+				// room 2.14.3.1 gives it for the multiplex's other PIDs, so the leak never idles
+				// while they take a few positions, and BSoh is left for the PES headers.
 				let leak = buffer.and_then(|buffer| buffer.leak).map(|leak| {
 					let free = last.max(now);
 					let from = self.mb.get(&pid).copied().unwrap_or(free).max(free);
 					let bits = elementary(packet).len() as u128 * 8 * 1_000_000_000;
 					let leaked = from + bits.div_ceil(u128::from(leak)) as i128;
-					(leaked, (512 * 8 * 1_000_000_000 / u128::from(leak)) as i128)
+					let room = 4_000_000 * u128::from(leak.max(2_000_000)) / u128::from(leak);
+					(leaked, room as i128)
 				});
 				if let Some((leaked, capacity)) = leak
 					&& leaked - now > capacity
@@ -1409,6 +1411,50 @@ mod tests {
 			}
 		}
 		assert_eq!(sent, 500 * 652, "every frame goes out");
+	}
+
+	/// Audio due before the video takes a position or a few between video packets, and MB
+	/// holds enough payload ahead of the leak that the leak runs on through them: video with
+	/// frames queued passes on its whole Rbx. With only a transport buffer's worth ahead, the
+	/// leak idles after the audio's packets and video falls about 1 % below it.
+	#[test]
+	fn audio_between_video_packets_leaves_the_leak_running() {
+		const RBX: u64 = 24_000_000;
+		let video = Buffer {
+			rate: 28_800_000,
+			leak: Some(RBX),
+			size: Some(3_750_000),
+		};
+		let audio = Buffer {
+			rate: 2_000_000,
+			leak: None,
+			size: Some(3_584),
+		};
+		let rate = 26_000_000;
+		let mut schedule = Schedule::new(Duration::from_secs(2));
+		schedule.set_rate(Some(rate));
+		schedule.set_buffer(1, video);
+		schedule.set_buffer(2, audio);
+		schedule.set_buffer(3, audio);
+		schedule.set_clock(1);
+		// Two seconds of video due from 2 s on, so it is queued from the first slot, and audio
+		// due within the first second: MP2's 24 ms frames and AC-3's 32 ms, four packets each.
+		let mut units: Vec<(u128, u8, usize)> = (0..50).map(|frame| (2_000 + 40 * frame, 1, 652)).collect();
+		units.extend((0..40).map(|frame| (24 * frame, 2, 4)));
+		units.extend((0..30).map(|frame| (32 * frame, 3, 4)));
+		units.sort();
+		for (ms, pid, packets) in units {
+			schedule
+				.push(pid.into(), timing(ms), unit(pid, packets), false)
+				.unwrap();
+		}
+		let mut video = 0;
+		for _ in 0..40 {
+			let slot = schedule.next(None).unwrap().unwrap();
+			video += slot.packets.chunks(188).filter(|packet| pid(packet) == 1).count();
+		}
+		// A second of the leak is 16,304 packets of payload.
+		assert!(video >= 16_290, "{video} video packets in a second");
 	}
 
 	/// Unpadded, a video PID's slot carries the lesser of Rx in whole packets and Rbx in
