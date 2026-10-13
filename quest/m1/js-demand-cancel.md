@@ -43,13 +43,14 @@ Decided 2026-10-13: don't signal the handler that a request it took was
 withdrawn. Its late answer just closes its front, and `Request` gets no new
 public API; the bound doesn't depend on it.
 
-Regression: a dynamic handler that never answers; in both protocol families,
-subscribe to many distinct paths and cancel each before an answer, then check
-that the origin holds nothing for them. Also check that a second requester on
-a shared path still resolves after the first cancels, both a second peer and a
-local `Consumer.request()`, with the handler answering after the peer
-cancels. Drive it on events, and
-use fake timers for any wait. It must fail on main.
+Regression: a dynamic handler that never answers; for each covered request
+(SUBSCRIBE in both protocol families, lite FETCH, and lite TRACK), request
+many distinct paths and cancel each before an answer, then check that the
+origin holds nothing for them. Also check that a second requester on a shared
+path still resolves after the first cancels, both a second peer and a local
+`Consumer.request()`, with the handler answering after the peer cancels.
+Drive it on events, and use fake timers for any wait. Each case must fail on
+main.
 
 Public API: none, since `demand` is internal. Wire: none.
 
