@@ -124,7 +124,9 @@ impl Default for Config {
 /// The totals and presence tracks never regress: a node's counter going down
 /// is that node resetting (a restart on a route without an epoch, or a
 /// presence track held again from zero), so its previous readout is kept as a
-/// baseline the new one adds to. A per-path traffic track keeps the reset
+/// baseline the new one adds to. A node that resumes after its departure
+/// closed its open pairs reopens them as new starts rather than lowering their
+/// ends. A per-path traffic track keeps the reset
 /// contract of a single node: a route without an epoch that returns within the
 /// grace with a lower counter regresses the merged counter.
 pub struct Consumer {
@@ -251,6 +253,11 @@ trait Mergeable: serde::de::DeserializeOwned + Default + Copy + PartialEq + 'sta
 	/// state while its cumulative counters stay.
 	fn retire(self) -> Self;
 
+	/// The pairs [`Self::retire`] closes, as that many starts and ends and
+	/// nothing else. Added to a node that resumes after a departure, so the
+	/// pairs reopen as new starts instead of their ends going back down.
+	fn reopen(self) -> Self;
+
 	/// Whether any counter in `self` is below `prev`.
 	fn regressed(&self, prev: &Self) -> bool;
 }
@@ -258,6 +265,13 @@ trait Mergeable: serde::de::DeserializeOwned + Default + Copy + PartialEq + 'sta
 /// Close an open started/ended pair.
 fn close(started: u64, ended: &mut u64) {
 	*ended = (*ended).max(started);
+}
+
+/// Set a pair to as many starts and ends as `started`/`ended` leaves open.
+fn reopen(started: u64, ended: u64, into_started: &mut u64, into_ended: &mut u64) {
+	let open = started.saturating_sub(ended);
+	*into_started = open;
+	*into_ended = open;
 }
 
 impl Mergeable for Traffic {
@@ -274,6 +288,29 @@ impl Mergeable for Traffic {
 		close(self.broadcasts_started, &mut self.broadcasts_ended);
 		close(self.subscriptions_started, &mut self.subscriptions_ended);
 		self
+	}
+
+	fn reopen(self) -> Self {
+		let mut open = Self::default();
+		reopen(
+			self.announces_started,
+			self.announces_ended,
+			&mut open.announces_started,
+			&mut open.announces_ended,
+		);
+		reopen(
+			self.broadcasts_started,
+			self.broadcasts_ended,
+			&mut open.broadcasts_started,
+			&mut open.broadcasts_ended,
+		);
+		reopen(
+			self.subscriptions_started,
+			self.subscriptions_ended,
+			&mut open.subscriptions_started,
+			&mut open.subscriptions_ended,
+		);
+		open
 	}
 
 	fn regressed(&self, prev: &Self) -> bool {
@@ -309,6 +346,17 @@ impl Mergeable for Presence {
 		self
 	}
 
+	fn reopen(self) -> Self {
+		let mut open = Self::default();
+		reopen(
+			self.sessions_started,
+			self.sessions_ended,
+			&mut open.sessions_started,
+			&mut open.sessions_ended,
+		);
+		open
+	}
+
 	fn regressed(&self, prev: &Self) -> bool {
 		self.sessions_started < prev.sessions_started
 			|| self.sessions_ended < prev.sessions_ended
@@ -336,6 +384,10 @@ impl Mergeable for Gauge {
 		Self(self.0.retire())
 	}
 
+	fn reopen(self) -> Self {
+		Self(self.0.reopen())
+	}
+
 	fn regressed(&self, prev: &Self) -> bool {
 		self.0.regressed(&prev.0)
 	}
@@ -353,6 +405,14 @@ impl Mergeable for Totals {
 		self.subscriber = self.subscriber.retire();
 		self.sessions = self.sessions.retire();
 		self
+	}
+
+	fn reopen(self) -> Self {
+		Self {
+			publisher: self.publisher.reopen(),
+			subscriber: self.subscriber.reopen(),
+			sessions: self.sessions.reopen(),
+		}
 	}
 
 	fn regressed(&self, prev: &Self) -> bool {
@@ -426,15 +486,22 @@ impl<V: Mergeable> Node<V> {
 	}
 
 	/// Take a fresh frame. Where the node reset, the previous readout becomes
-	/// part of its baseline, so the merged counters never go down.
+	/// part of its baseline. Where it resumed after a departure closed its open
+	/// pairs, those pairs reopen as new starts. Either way the merged counters
+	/// never go down.
 	fn observe(&mut self, frame: BTreeMap<String, V>) {
 		if V::RESETS
 			&& let Some(last) = self.last.take()
 		{
 			for (key, prev) in last {
-				if frame.get(&key).is_none_or(|next| next.regressed(&prev)) {
-					V::merge(self.base.entry(key).or_default(), prev.retire());
-				}
+				let base = match frame.get(&key) {
+					Some(next) if !next.regressed(&prev) => match self.stale {
+						true => prev.reopen(),
+						false => continue,
+					},
+					_ => prev.retire(),
+				};
+				V::merge(self.base.entry(key).or_default(), base);
 			}
 		}
 		self.last = Some(frame);
@@ -1723,11 +1790,12 @@ mod tests {
 		read_until(&mut totals.inner, grew, |frame| frame[""].publisher.bytes == 175).await;
 	}
 
-	#[test]
-	fn a_reset_closes_the_old_open_pairs() {
+	/// A node announced at `.stats/acme/node/a` with no epoch, ready to observe
+	/// frames by hand.
+	fn hand_merged<V: Mergeable>() -> (Merged<V>, (PathOwned, Option<Epoch>)) {
 		let origin = produce_origin();
 		let path = PathOwned::from(".stats/acme/node/a");
-		let mut merged = Merged::<Presence>::new(origin.consume(), &Config::new().with_depth(1), "p".into());
+		let mut merged = Merged::<V>::new(origin.consume(), &Config::new().with_depth(1), "p".into());
 		merged.apply_announce(
 			moq_net::announce::Announce {
 				prefix: path.clone(),
@@ -1736,13 +1804,19 @@ mod tests {
 			},
 			true,
 		);
+		(merged, (path, None))
+	}
+
+	#[test]
+	fn a_reset_closes_the_old_open_pairs() {
+		let (mut merged, key) = hand_merged::<Presence>();
 		let presence = |started, ended| {
 			let mut presence = Presence::default();
 			presence.sessions_started = started;
 			presence.sessions_ended = ended;
 			presence
 		};
-		let node = merged.nodes.get_mut(&(path, None)).expect("node");
+		let node = merged.nodes.get_mut(&key).expect("node");
 		node.observe(BTreeMap::from([(String::new(), presence(5, 3))]));
 		node.observe(BTreeMap::from([(String::new(), presence(6, 4))]));
 		assert_eq!(merged.merged()[""], presence(6, 4), "growth is not a reset");
@@ -1751,6 +1825,63 @@ mod tests {
 		let node = merged.nodes.values_mut().next().expect("node");
 		node.observe(BTreeMap::from([(String::new(), presence(1, 0))]));
 		assert_eq!(merged.merged()[""], presence(7, 6));
+	}
+
+	#[test]
+	fn a_resume_reopens_closed_pairs_without_going_down() {
+		let (mut merged, key) = hand_merged::<Presence>();
+		let presence = |started, ended| {
+			let mut presence = Presence::default();
+			presence.sessions_started = started;
+			presence.sessions_ended = ended;
+			presence
+		};
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.observe(BTreeMap::from([(String::new(), presence(5, 3))]));
+		assert_eq!(merged.merged()[""], presence(5, 3));
+
+		// The node departs: its two open sessions read as ended.
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.depart();
+		assert_eq!(merged.merged()[""], presence(5, 5));
+
+		// The same epoch resumes with those sessions still open: they start
+		// again rather than un-end, so no counter goes down.
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.observe(BTreeMap::from([(String::new(), presence(5, 3))]));
+		assert_eq!(merged.merged()[""], presence(7, 5));
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.observe(BTreeMap::from([(String::new(), presence(6, 4))]));
+		assert_eq!(merged.merged()[""], presence(8, 6));
+
+		// A departure followed by a reset folds the closed readout instead.
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.depart();
+		assert_eq!(merged.merged()[""], presence(8, 8));
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.observe(BTreeMap::from([(String::new(), presence(1, 0))]));
+		assert_eq!(merged.merged()[""], presence(9, 8));
+	}
+
+	#[test]
+	fn a_resume_reopens_the_pairs_inside_totals() {
+		let (mut merged, key) = hand_merged::<Totals>();
+		let mut totals = Totals::default();
+		totals.publisher.bytes = 10;
+		totals.publisher.subscriptions_started = 4;
+		totals.publisher.subscriptions_ended = 1;
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.observe(BTreeMap::from([(String::new(), totals)]));
+		node.depart();
+		let departed = merged.merged()[""];
+		assert_eq!(departed.publisher.subscriptions_ended, 4);
+
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.observe(BTreeMap::from([(String::new(), totals)]));
+		let resumed = merged.merged()[""];
+		assert!(!resumed.regressed(&departed), "{departed:?} -> {resumed:?}");
+		assert_eq!(resumed.publisher.bytes, 10, "flow counters are not reopened");
+		assert_eq!(resumed.publisher.active_subscriptions(), 3);
 	}
 
 	#[tokio::test(start_paused = true)]
