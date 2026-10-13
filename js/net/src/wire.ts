@@ -35,8 +35,11 @@ export interface Broadcast {
 
 /** The protocol-facing operations behind an origin producer. */
 export interface OriginProducer {
-	/** Minimal root-relative namespace prefixes that cover this origin scope. */
-	interests(): readonly Path.Valid[];
+	/**
+	 * The minimal root-relative prefixes readers of this origin are watching, narrowed to its
+	 * scope; sessions ask their peer for announcements under exactly these.
+	 */
+	readonly interests: Getter<readonly Path.Valid[]>;
 	/** Whether an advertised prefix overlaps the handle's allowed paths. */
 	accepts(prefix: Path.Valid): boolean;
 	receive(

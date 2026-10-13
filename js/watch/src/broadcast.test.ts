@@ -568,6 +568,41 @@ describe("cross-broadcast renditions", () => {
 		}
 	});
 
+	it("watches each resolved reference and never the root", async () => {
+		const owner = new Origin.Producer();
+		const scopes: string[] = [];
+		const announced = owner.announced.bind(owner);
+		owner.announced = (scope, options) => {
+			scopes.push(scope?.text ?? "**");
+			return announced(scope, options);
+		};
+		const source = new Broadcast({
+			origin: owner,
+			name: Path.from("a/b/main.hang"),
+			enabled: true,
+			catalogFormat: "manual",
+			catalog: {
+				video: { renditions: { remote: video("avc1.640028", "../x") } },
+			} as Catalog.Root,
+		});
+
+		try {
+			await settle();
+			// `../x` from `a/b/main.hang` is `a/x`: watched exactly, so the origin's session asks
+			// its relay about that broadcast alone rather than everything the token allows.
+			expect(scopes).toEqual(["a/x"]);
+			expect(videoRenditions(source)).toEqual([]);
+
+			publish(owner, Path.from("a/x"));
+			await settle();
+			expect(videoRenditions(source)).toEqual(["remote"]);
+			expect(scopes).toEqual(["a/x"]);
+		} finally {
+			source.close();
+			owner.close();
+		}
+	});
+
 	it("follows a republished rendition broadcast through its announcement", async () => {
 		const owner = new Origin.Producer();
 		const source = new Broadcast({

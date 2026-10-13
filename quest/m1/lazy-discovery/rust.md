@@ -4,7 +4,7 @@
 
 The Rust client session requests announcements only for prefixes its
 `consume` origin is watching, matching the
-[JS behavior](/quest/m1/lazy-discovery/js.md) and the
+[JS behavior](/doc/lib/js/net.md) and the
 [line's shared rules](/quest/m1/lazy-discovery/README.md). Rust's `follow`
 folds into its request path as in the
 [JS read API](/doc/lib/js/net.md). Relays keep watching the
@@ -27,6 +27,13 @@ Facts (2026-10-10, `origin/main` e5446b036):
 - moq-relay reads `origin.consume().announced()` for the root in its web,
   internal, and cluster paths, so a relay's watch set is the root.
 
+The JS shape to mirror (`js/net/src/connection/forward.ts`): the origin
+counts watched literal heads and hands sessions the covering set; a session
+inserts a route reported by overlapping requests once, driven by the first
+reporter, so a hand-over never retracts; a request closes 2s after its last
+watcher (a fixed constant, since one-shot connections have no `linger`); a
+refused or reset request downgrades the whole session to blind answers.
+
 Open for the plan round: the Rust equivalent of an announced request, how the
 watch set crosses the poll-based session driver, and moq-ffi and binding
 fallout (see the Cross-Package Sync table in `AGENTS.md`).
@@ -34,7 +41,3 @@ fallout (see the Cross-Package Sync table in `AGENTS.md`).
 Tests must pin the relay side: an origin in relay mode (cluster and upstream
 sessions on the client subscriber path) still sends a root request, so
 lazy discovery never narrows what a relay discovers.
-
-## Required
-
-- [JS lazy discovery](/quest/m1/lazy-discovery/js.md) - Rust mirrors the settled JS shape

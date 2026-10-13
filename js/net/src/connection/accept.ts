@@ -18,12 +18,6 @@ export interface AcceptProps {
 	version?: number;
 
 	/**
-	 * Whether this server supports broadcast discovery; see {@link Established.discovery}.
-	 * Defaults to true.
-	 */
-	discovery?: boolean;
-
-	/**
 	 * The origin whose broadcasts the session announces and serves to the peer. Omit to
 	 * publish nothing. Borrowed, not owned: closing the session leaves its broadcasts alone.
 	 */
@@ -41,7 +35,6 @@ export interface AcceptProps {
 
 /** The per-session wiring shared by every negotiated protocol path. */
 type SessionProps = {
-	discovery: boolean;
 	publish?: OriginConsumer;
 	/** Whether this side dialed; only the dialing side aborts on a publication its grant does not cover. */
 	client: boolean;
@@ -73,7 +66,6 @@ async function acceptInner(
 	const protocol = (transport as { protocol?: string }).protocol;
 
 	const wiring: SessionProps = {
-		discovery: props.discovery ?? true,
 		publish: props.publish,
 		client: false,
 		extensions: Extensions.offered(props.extensions),

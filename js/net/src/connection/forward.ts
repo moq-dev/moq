@@ -4,111 +4,202 @@
  * @module
  */
 import { type Dispose, race } from "@moq/signals";
+import type * as Announce from "../announced.ts";
+import { type Route, routesEqual } from "../hop.ts";
 import type { Dynamic, Producer as OriginProducer, RequestSlot } from "../origin.ts";
 import * as Path from "../path.ts";
+import * as Time from "../time.ts";
 import { wireOf } from "../wire.ts";
 import type { Established } from "./established.ts";
 
+/** How long an announce request outlives its last watcher, so a watcher torn down and rebuilt reuses it. */
+const LINGER = Time.Milli(2000);
+
+/** One announce request open on the session, and the routes it currently reports. */
+interface Interest {
+	readonly announced: Announce.Consumer;
+	readonly reported: Set<Path.Valid>;
+	/** The pending close, set while nothing watches the prefix. */
+	linger?: ReturnType<typeof setTimeout>;
+	/** Closed on purpose, so its end is not a discovery failure. */
+	closing: boolean;
+}
+
+/**
+ * A route one or more overlapping requests report, inserted into the origin once so a
+ * request handing over to another never retracts it. The first reporter drives it.
+ */
+interface Reported {
+	handle: Dynamic;
+	readonly reporters: Map<Interest, Route>;
+}
+
 /**
  * Wire a session into `origin` for the session's lifetime: forward the peer's announced
- * routes into the table, and answer the origin's open requests with blind
- * subscriptions.
+ * routes under the prefixes the origin's readers watch, and answer the origin's open
+ * requests with blind subscriptions.
  *
- * Each active announcement inserts a route covering the announced prefix, served
- * lazily through this connection, so nothing touches the wire until somebody requests
- * a path under it. A retraction removes the entry, and so does the session dying (the
- * announce stream ends with it), which is what scopes remote routes to the session
- * that announced them. A reconnect wires a fresh session to the same origin and
- * re-populates it.
+ * Discovery is lazy. One announce request opens per prefix in the origin's covering set of
+ * watches (`announced(scope)` and `request(path, { announced: true })`), and closes
+ * {@link LINGER} after its last watcher leaves. A broader watch opens its request before the
+ * narrower ones close, and a route both report stays inserted, so nothing retracts.
  *
- * Without discovery there are no announcements to forward, so the table stays empty and
- * requests are the only way through; see the origin's `request`.
+ * Each active announcement inserts a route covering the announced prefix, served lazily
+ * through this connection, so nothing touches the wire until somebody requests a path
+ * under it. A retraction removes the entry, and so does the session dying, which is what
+ * scopes remote routes to the session that announced them. A reconnect wires a fresh
+ * session to the same origin and re-opens whatever is still watched.
+ *
+ * A peer that refuses or resets an announce request downgrades the whole session to blind
+ * answers: gated requests stop waiting for an announcement, and later watches open nothing
+ * on it.
  *
  * @internal
  */
 export function forwardAnnounced(conn: Established, origin: OriginProducer): void {
 	const originWire = wireOf(origin);
-	// Reassigned if discovery dies under a live session, so the origin stops counting this
-	// one as a discovering session. Called through a closure so the session's death always
-	// detaches whichever attachment is current.
-	let detach = originWire.attach(conn.discovery);
-
+	// Reassigned on a downgrade, so the origin stops counting this session as discovering.
+	// Called through a closure so the session's death always detaches the current one.
+	let detach = originWire.attach(true);
 	let dead = false;
-	let discovering = conn.discovery;
-	void conn.closed.then(() => {
-		dead = true;
-		detach();
-	});
+	let blind = false;
+
+	const interests = new Map<Path.Valid, Interest>();
+	const routes = new Map<Path.Valid, Reported>();
 
 	void serveRequests(conn, origin);
 
-	if (!conn.discovery) {
-		console.warn("relay does not support broadcast discovery; broadcasts resolve on request only.");
-		return;
-	}
+	const report = (interest: Interest, event: Announce.Event) => {
+		const { prefix, route } = event;
+		if (event.kind === "end") {
+			unreport(interest, prefix);
+			return;
+		}
+		interest.reported.add(prefix);
 
-	for (const prefix of originWire.interests()) {
+		const existing = routes.get(prefix);
+		if (!existing) {
+			const handle = originWire.receive(prefix, route);
+			routes.set(prefix, { handle, reporters: new Map([[interest, route]]) });
+			void drive(handle, conn);
+			return;
+		}
+
+		const known = existing.reporters.has(interest);
+		existing.reporters.set(interest, route);
+		// Another request covering the prefix only holds it; the first reporter drives it.
+		if (!known || existing.reporters.keys().next().value !== interest) return;
+
+		if (event.kind === "restart") {
+			// Another publisher instance: a fresh route, so nothing resolved through the old one
+			// is joined again. Inserted before the old one leaves, so local readers see one
+			// restart rather than an end and a start.
+			const handle = originWire.receive(prefix, route);
+			existing.handle.close();
+			existing.handle = handle;
+			void drive(handle, conn);
+		} else {
+			existing.handle.update(route);
+		}
+	};
+
+	const unreport = (interest: Interest, prefix: Path.Valid) => {
+		interest.reported.delete(prefix);
+		const existing = routes.get(prefix);
+		if (!existing?.reporters.delete(interest)) return;
+
+		const next = existing.reporters.values().next();
+		if (next.done) {
+			routes.delete(prefix);
+			existing.handle.close();
+		} else if (!routesEqual(existing.handle.route, next.value)) {
+			existing.handle.update(next.value);
+		}
+	};
+
+	const downgrade = (failure: unknown) => {
+		if (blind) return;
+		blind = true;
+		// Announcement-gated consumers would wait forever on a table this session cannot fill,
+		// so they fall back to blind answers, which this session still provides.
+		console.warn("broadcast discovery failed; broadcasts resolve on request only.", failure);
+		detach();
+		detach = originWire.attach(false);
+	};
+
+	const open = (prefix: Path.Valid) => {
 		// Hidden routes are mirrored too; each local reader opts in on its own.
-		const announced = conn.announced(Path.Pattern.subtree(prefix), { hidden: true });
-		const inserted = new Map<Path.Valid, Dynamic>();
-
-		// End the stream the moment the session closes rather than waiting for the wire to
-		// error it, so the retractions below land promptly.
-		void conn.closed.then(() => announced.close());
+		const interest: Interest = {
+			announced: conn.announced(Path.Pattern.subtree(prefix), { hidden: true }),
+			reported: new Set(),
+			closing: false,
+		};
+		interests.set(prefix, interest);
 
 		void (async () => {
 			let failure: unknown;
 			try {
 				for (;;) {
-					const event = await announced.next();
+					const event = await interest.announced.next();
 					if (!event) break;
-					if (!originWire.accepts(event.prefix)) continue;
-
-					if (event.kind === "restart") {
-						// Another publisher instance: a fresh route, so nothing resolved through the
-						// old one is joined again. Inserted before the old one leaves, so local
-						// readers see one restart rather than an end and a start.
-						const handle = originWire.receive(event.prefix, event.route);
-						inserted.get(event.prefix)?.close();
-						inserted.set(event.prefix, handle);
-						void drive(handle, conn);
-					} else if (event.kind !== "end") {
-						const existing = inserted.get(event.prefix);
-						if (existing) {
-							existing.update(event.route);
-						} else {
-							const handle = originWire.receive(event.prefix, event.route);
-							inserted.set(event.prefix, handle);
-							void drive(handle, conn);
-						}
-					} else {
-						const handle = inserted.get(event.prefix);
-						inserted.delete(event.prefix);
-						handle?.close();
-					}
+					if (originWire.accepts(event.prefix)) report(interest, event);
 				}
 			} catch (err) {
-				// The session died mid-stream, or the relay refused or reset the stream. The
-				// cleanup below retracts everything this stream fed either way.
+				// The session died mid-stream, or the peer refused or reset the request.
 				failure = err;
 			} finally {
-				for (const handle of inserted.values()) handle.close();
-				inserted.clear();
-				announced.close();
-
-				// Discovery ended while the session lives, and nothing reopens the stream on this
-				// connection. Downgrade the attachment rather than leaving the origin claiming a
-				// discovery that no longer works: announcement-gated consumers would wait forever
-				// on a table this session can no longer fill. Now they fall back to standing
-				// requests, which this session still answers.
-				if (!dead && discovering) {
-					discovering = false;
-					console.warn("broadcast discovery failed; broadcasts resolve on request only.", failure);
-					detach();
-					detach = originWire.attach(false);
-				}
+				for (const reported of [...interest.reported]) unreport(interest, reported);
+				interest.announced.close();
+				clearTimeout(interest.linger);
+				if (interests.get(prefix) === interest) interests.delete(prefix);
+				if (!dead && !interest.closing) downgrade(failure);
 			}
 		})();
+	};
+
+	const reconcile = (wanted: readonly Path.Valid[]) => {
+		if (dead) return;
+		const want = new Set(wanted);
+		for (const prefix of want) {
+			const interest = interests.get(prefix);
+			if (interest) {
+				clearTimeout(interest.linger);
+				interest.linger = undefined;
+			} else if (!blind) {
+				open(prefix);
+			}
+		}
+		for (const [prefix, interest] of interests) {
+			if (want.has(prefix) || interest.linger !== undefined) continue;
+			interest.linger = setTimeout(() => {
+				interest.closing = true;
+				interest.announced.close();
+			}, LINGER);
+		}
+	};
+
+	const unsubscribe = originWire.interests.subscribe(reconcile);
+	reconcile(originWire.interests.peek());
+
+	void conn.closed.then(() => {
+		dead = true;
+		unsubscribe();
+		// End every request the moment the session closes rather than waiting for the wire to
+		// error it, so the retractions land promptly.
+		for (const interest of interests.values()) interest.announced.close();
+		detach();
+	});
+}
+
+/** Answer the requests under a received route by consuming them from the session. */
+async function drive(handle: Dynamic, conn: Established): Promise<void> {
+	const session = wireOf(conn);
+	try {
+		for await (const request of handle.requested()) {
+			request.accept(session.consume(request.path));
+		}
+	} catch {
+		handle.close();
 	}
 }
 
@@ -123,17 +214,6 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
  * A path the table already routes is left alone. A request resolves to the table's route over
  * any blind answer, so answering one would only park a handle nothing reads.
  */
-async function drive(handle: Dynamic, conn: Established): Promise<void> {
-	const session = wireOf(conn);
-	try {
-		for await (const request of handle.requested()) {
-			request.accept(session.consume(request.path));
-		}
-	} catch {
-		handle.close();
-	}
-}
-
 async function serveRequests(conn: Established, origin: OriginProducer): Promise<void> {
 	const table = wireOf(origin);
 	const session = wireOf(conn);

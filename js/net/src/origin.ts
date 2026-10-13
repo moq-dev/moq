@@ -4,9 +4,9 @@
  * Publish broadcasts into an origin and hand the origin to one or more connections to
  * serve them; the broadcasts outlive any single session. Hand the same (or another)
  * origin to a connection's `consume` option and the peer's announced routes appear
- * in the table too: each route covers a path prefix, and a request for a path under
- * it resolves through the session that announced it. Mirrors the `origin` module in
- * `rs/moq-net`.
+ * in the table too, under whatever its readers watch: each route covers a path prefix,
+ * and a request for a path under it resolves through the session that announced it.
+ * Mirrors the `origin` module in `rs/moq-net`.
  *
  * @module
  */
@@ -99,10 +99,40 @@ class Scope {
 	}
 
 	/** Omit nested heads because the outer subscription already carries their routes. */
-	heads(): Path.Valid[] {
+	#heads(): Path.Valid[] {
 		if (!this.allowed) return [Path.empty()];
 		const heads = [...new Set([...this.allowed.rebase(this.root)].map(scopeHead))].sort();
 		return heads.filter((head) => !heads.some((other) => other !== head && Path.hasPrefix(other, head)));
+	}
+
+	#headsCache?: Path.Valid[];
+
+	/**
+	 * The root-relative prefixes a session asks its peer about for the `watched` absolute
+	 * prefixes: a watch above a head requests the head, since this scope may not ask for more,
+	 * and a watch inside one requests itself.
+	 */
+	interests(watched: readonly Path.Valid[]): readonly Path.Valid[] {
+		if (this === Scope.all) return watched;
+		this.#headsCache ??= this.#heads();
+		const out = new Set<Path.Valid>();
+		for (const absolute of watched) {
+			const relative = Path.stripPrefix(this.root, absolute);
+			if (relative === null) {
+				if (Path.hasPrefix(absolute, this.root)) for (const head of this.#headsCache) out.add(head);
+				continue;
+			}
+			for (const head of this.#headsCache) {
+				if (Path.hasPrefix(relative, head)) out.add(head);
+				else if (Path.hasPrefix(head, relative) && this.overlaps(absolute)) out.add(relative);
+			}
+		}
+		return [...out].sort();
+	}
+
+	/** Whether this scope allows anything beneath the absolute `prefix`. */
+	overlaps(prefix: Path.Valid): boolean {
+		return this.allowed?.overlaps(Path.Pattern.subtree(prefix)) ?? true;
 	}
 
 	/** The exact paths within this scope, relative to its root. */
@@ -158,6 +188,16 @@ class Scope {
 /** Whether the route advertised at `prefix` may serve any path `pattern` admits. */
 function advertOverlaps(advert: Advertised, prefix: Path.Valid, pattern: Path.Pattern): boolean {
 	return advert.claim ? advert.claim.overlaps(pattern) : scopeOverlaps(pattern, prefix);
+}
+
+/** Whether a strict ancestor of `head` is watched. */
+function watchedAbove(watched: ReadonlyMap<Path.Valid, number>, head: Path.Valid): boolean {
+	if (head === Path.empty()) return false;
+	if (watched.has(Path.empty())) return true;
+	for (let end = head.indexOf("/"); end >= 0; end = head.indexOf("/", end + 1)) {
+		if (watched.has(head.slice(0, end) as Path.Valid)) return true;
+	}
+	return false;
 }
 
 /**
@@ -551,6 +591,42 @@ class OriginState {
 	// How many sessions are attached, and how many of those support broadcast discovery.
 	// What backs the public `discovery` getter.
 	sessions = new Signal({ total: 0, discovery: 0 });
+
+	// The literal heads readers are watching, counted: announcement streams and announced
+	// requests. Sessions ask their peer for announcements under these and nothing else.
+	watched = new VersionedSignal(new Map<Path.Valid, number>());
+
+	#coveringVersion = -1;
+	#covering: Path.Valid[] = [];
+
+	/** Count `heads` as watched until the returned dispose runs. */
+	watch(heads: readonly Path.Valid[]): Dispose {
+		this.watched.mutate((watched) => {
+			for (const head of heads) watched.set(head, (watched.get(head) ?? 0) + 1);
+		});
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			this.watched.mutate((watched) => {
+				for (const head of heads) {
+					const count = (watched.get(head) ?? 0) - 1;
+					if (count > 0) watched.set(head, count);
+					else watched.delete(head);
+				}
+			});
+		};
+	}
+
+	/** The broadest watched heads, sorted: a narrower watch rides its ancestor's request. */
+	covering(): Path.Valid[] {
+		if (this.#coveringVersion !== this.watched.version) {
+			const watched = this.watched.peek();
+			this.#covering = [...watched.keys()].filter((head) => !watchedAbove(watched, head)).sort();
+			this.#coveringVersion = this.watched.version;
+		}
+		return this.#covering;
+	}
 
 	// How many things are prepared to answer a request: attached sessions, plus reconnecting
 	// connections that have no session right now but will. Zero means an unrouted path is
@@ -951,7 +1027,10 @@ export interface Table {
 
 /** Options for resolving a broadcast path. */
 export interface RequestOptions {
-	/** Follow announced instances unless an epoch is pinned; resolve blindly when discovery is unavailable. */
+	/**
+	 * Follow announced instances unless an epoch is pinned; resolve blindly when discovery is
+	 * unavailable. Watches the path, so a `consume` session asks its peer about it.
+	 */
 	announced?: boolean;
 	/** Refuse a different publisher instance, including an asynchronous answer or a retry. */
 	epoch?: Epoch.Valid;
@@ -977,6 +1056,7 @@ export class Producer implements Table {
 	#scope = Scope.all;
 	#preference = Preference.default;
 	#requests?: Getter<ReadonlyMap<Path.Valid, RequestSlot> | undefined>;
+	#interests?: Getter<readonly Path.Valid[]>;
 
 	// The reader backing the passthroughs, so holding a Producer never requires the
 	// consume().x() stutter for everyday reads. One instance, so `discovery` keeps its
@@ -987,10 +1067,13 @@ export class Producer implements Table {
 		const thisProducer = this;
 		registerWire(this, {
 			receive: (prefix, route) => this.#receive(prefix, route),
-			interests: () => this.#scope.heads(),
-			accepts: (prefix) =>
-				!this.#scope.allowed ||
-				this.#scope.allowed.overlaps(Path.Pattern.subtree(Path.join(this.#scope.root, prefix))),
+			get interests() {
+				thisProducer.#interests ??= new Derived([thisProducer.#state.watched], () =>
+					thisProducer.#scope.interests(thisProducer.#state.covering()),
+				);
+				return thisProducer.#interests;
+			},
+			accepts: (prefix) => this.#scope.overlaps(Path.join(this.#scope.root, prefix)),
 			attach: (discovery) => this.#attach(discovery),
 			expect: () => this.#expect(),
 			get requests() {
@@ -1689,6 +1772,8 @@ export class Consumer {
 		const announced = options.announced === true;
 		if (announced) slot.announced += 1;
 		else slot.blind += 1;
+		// An announced request is a watch: sessions ask their peer about this path while it lives.
+		const unwatch = announced ? this.#state.watch([path]) : undefined;
 		this.#state.requests.mutate(() => {});
 
 		// Hand out a handle of the request's own rather than the table's. Closing a consumer
@@ -1747,6 +1832,7 @@ export class Consumer {
 			handle = undefined;
 			source = undefined;
 
+			unwatch?.();
 			taken.handles.delete(closed);
 			if (closed.peek() === undefined) closed.set(null);
 			if (announced) taken.announced -= 1;
@@ -1785,10 +1871,14 @@ export class Consumer {
 	 * peer sees it. A dynamic or received route announces the prefix it covers when its
 	 * subtree overlaps the scope. The stream ends when the origin closes or the consumer is
 	 * closed. Hidden routes are left out unless `options.hidden` opts in (see {@link announce.Options}).
+	 * While open, it watches the scope's literal head: a `consume` session asks its peer for
+	 * announcements there.
 	 */
 	announced(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Consumer {
 		const producer = new announce.Producer();
-		void this.#runAnnounced(producer, this.#scope.patterns(scope), options?.hidden ?? false);
+		const patterns = this.#scope.patterns(scope);
+		void producer.closed.then(this.#state.watch([...patterns].map(scopeHead)));
+		void this.#runAnnounced(producer, patterns, options?.hidden ?? false);
 		return producer.consume();
 	}
 

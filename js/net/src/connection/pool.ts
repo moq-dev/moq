@@ -59,9 +59,6 @@ export interface ConnectionProps {
 	/** WebSocket fallback options applied to each connection attempt (not reactive). */
 	websocket?: WebSocketPropsType;
 
-	/** Whether the relay supports broadcast discovery. */
-	discovery?: boolean;
-
 	/** The origin whose broadcasts are served, spanning reconnects. Implies a private loop. */
 	publish?: Origin.Consumer;
 
@@ -106,7 +103,7 @@ export interface ConnectionProps {
  * session finishes its groups, and the handle and its origin carry across. A redirect the
  * {@link ConnectionProps.goaway} policy refuses stops the loop like an auth rejection does.
  *
- * Options the pool cannot honor (transport options, discovery, delay, goaway, a pinned
+ * Options the pool cannot honor (transport options, delay, goaway, a pinned
  * certificate, caller-owned origins) use a private loop. An explicit `share: true`
  * refuses them. A supplied transport cannot reconnect at all; pass it to {@link Connection.connect}
  * instead.
@@ -255,7 +252,6 @@ export class Connection {
 			consume: origin,
 			webtransport: props.webtransport,
 			websocket: props.websocket,
-			discovery: props.discovery,
 			delay: props.delay,
 			goaway: props.goaway,
 		});
@@ -401,9 +397,6 @@ function refuse(props?: ConnectionProps): void {
 	if (props.websocket !== undefined) {
 		throw new Error("websocket options cannot be shared; pass share: false");
 	}
-	if (props.discovery !== undefined) {
-		throw new Error("discovery cannot be shared; pass share: false");
-	}
 	if (props.delay !== undefined) {
 		throw new Error("delay cannot be shared; pass share: false");
 	}
@@ -417,7 +410,6 @@ function requiresPrivate(props: ConnectionProps): boolean {
 	return (
 		props.webtransport !== undefined ||
 		props.websocket !== undefined ||
-		props.discovery !== undefined ||
 		props.delay !== undefined ||
 		props.goaway !== undefined ||
 		props.publish !== undefined ||

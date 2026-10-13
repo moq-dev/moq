@@ -84,12 +84,6 @@ export interface ConnectProps {
 	transport?: WebTransport;
 
 	/**
-	 * Whether the relay supports broadcast discovery; see {@link Established.discovery}.
-	 * Defaults to true.
-	 */
-	discovery?: boolean;
-
-	/**
 	 * The origin whose broadcasts the session announces and serves to the peer. Omit to
 	 * publish nothing.
 	 *
@@ -103,11 +97,13 @@ export interface ConnectProps {
 	 * The origin the session feeds with the peer's announced broadcasts. Omit to discover
 	 * nothing.
 	 *
-	 * Everything the peer announces appears in the origin's table for the session's
-	 * lifetime, consumable by path; the entries retract when the session dies. Pass the
-	 * producer behind {@link ConnectProps.publish} to route both directions through one
-	 * origin: a locally published path is then served back to local consumers directly, and
-	 * the session still never announces the peer's own broadcasts back to it.
+	 * What the peer announces under the prefixes the origin's readers watch
+	 * (`announced(scope)` or `request(path, { announced: true })`) appears in its table for
+	 * the session's lifetime, consumable by path; nothing is asked until something watches,
+	 * and the entries retract when the session dies. Pass the producer behind
+	 * {@link ConnectProps.publish} to route both directions through one origin: a locally
+	 * published path is then served back to local consumers directly, and the session still
+	 * never announces the peer's own broadcasts back to it.
 	 */
 	consume?: OriginProducer;
 
@@ -124,7 +120,6 @@ export interface ConnectProps {
 
 /** The per-session wiring shared by every negotiated protocol path. */
 type SessionProps = {
-	discovery: boolean;
 	publish?: OriginConsumer;
 	/** Whether this side dialed; only the dialing side aborts on a publication its grant does not cover. */
 	client: boolean;
@@ -173,7 +168,6 @@ export async function connect({ url, ...props }: ConnectProps): Promise<Establis
 
 async function connectInner(url: URL, props: Omit<ConnectProps, "url">, abort: Promise<void>): Promise<Established> {
 	const wiring: SessionProps = {
-		discovery: props.discovery ?? true,
 		publish: props.publish,
 		client: true,
 		extensions: Extensions.offered(props.extensions),

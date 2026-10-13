@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, mock, spyOn, test } from "bun:test";
 import type { Getter } from "@moq/signals";
 import type * as Announce from "./announce.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
@@ -14,7 +14,9 @@ import * as Epoch from "./epoch.ts";
 import { SessionCode, SessionError, StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import { Producer as GroupProducer } from "./group.ts";
 import * as Ietf from "./ietf/index.ts";
+import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
 import * as Lite from "./lite/index.ts";
+import { Publisher as LitePublisher } from "./lite/publisher.ts";
 import { createMockTransportPair, textFrame } from "./mock.ts";
 import type { Consumer as OriginConsumer } from "./origin.ts";
 import { Producer as OriginProducer } from "./origin.ts";
@@ -45,6 +47,27 @@ function accept(
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Have every peer refuse announce requests for the rest of the test, the way a relay without
+ * discovery does. Returns how many it has refused so far.
+ */
+function withoutDiscovery(): () => number {
+	let refused = 0;
+	const refuse = async () => {
+		refused++;
+		throw new Error("discovery unsupported");
+	};
+	spyOn(LitePublisher.prototype, "runAnnounce").mockImplementation(refuse);
+	// A reset virtual stream never reaches a pre-draft-17 peer, so answer with the error message.
+	spyOn(IetfPublisher.prototype, "runSubscribeNamespace").mockImplementation(function (this: IetfPublisher, msg, stream) {
+		refused++;
+		return this.refuseSubscribeNamespace(msg.requestId, stream);
+	});
+	return () => refused;
+}
+
+afterEach(() => mock.restore());
 
 /**
  * The table's route for `path` as a handle of the caller's own.
@@ -1800,11 +1823,12 @@ test("integration: an announced request waits for a late publisher", async () =>
 });
 
 test("integration: an announced request consumes blind without discovery", async () => {
+	withoutDiscovery();
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
 	const clientOrigin = new OriginProducer();
 	const [client, server] = await Promise.all([
-		connect(url, { transport: pair.client, discovery: false, consume: clientOrigin }),
+		connect(url, { transport: pair.client, consume: clientOrigin }),
 		accept(pair.server, url, { publish: origin.consume() }),
 	]);
 
@@ -1960,11 +1984,12 @@ test("integration: ietf republish on one session swaps the handle every generati
 });
 
 test("integration: a blind handle picks up a publisher that arrives late", async () => {
+	withoutDiscovery();
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
 	const clientOrigin = new OriginProducer();
 	const [client, server] = await Promise.all([
-		connect(url, { transport: pair.client, discovery: false, consume: clientOrigin }),
+		connect(url, { transport: pair.client, consume: clientOrigin }),
 		accept(pair.server, url, { publish: origin.consume() }),
 	]);
 
@@ -1999,11 +2024,12 @@ test("integration: a blind handle picks up a publisher that arrives late", async
 });
 
 test("integration: a blind handle goes offline when the session dies", async () => {
+	withoutDiscovery();
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
 	const clientOrigin = new OriginProducer();
 	const [client, server] = await Promise.all([
-		connect(url, { transport: pair.client, discovery: false, consume: clientOrigin }),
+		connect(url, { transport: pair.client, consume: clientOrigin }),
 		accept(pair.server, url, { publish: origin.consume() }),
 	]);
 
@@ -2023,11 +2049,12 @@ test("integration: a blind handle goes offline when the session dies", async () 
 // The handle and the consume-cache eviction are protocol-agnostic, but their implementations
 // are not: each subscriber resolves announcements its own way. These mirror the lite cases.
 test("integration: ietf blind handle picks up a publisher that arrives late", async () => {
+	withoutDiscovery();
 	const pair = createMockTransportPair("");
 	const origin = new OriginProducer();
 	const clientOrigin = new OriginProducer();
 	const [client, server] = await Promise.all([
-		connect(url, { transport: pair.client, discovery: false, consume: clientOrigin }),
+		connect(url, { transport: pair.client, consume: clientOrigin }),
 		accept(pair.server, url, { version: Ietf.Version.DRAFT_14, publish: origin.consume() }),
 	]);
 
@@ -2143,6 +2170,8 @@ test("origin: remote entries retract when the session dies, local ones survive",
 	const mine = publish(clientOrigin, Path.from("mine"));
 
 	const reader = clientOrigin.consume();
+	// Watching is what has the session discover the peer's routes.
+	const watching = reader.announced();
 	await until(() => wireOf(reader).routes(Path.from("remote")));
 
 	client.abort();
@@ -2156,6 +2185,7 @@ test("origin: remote entries retract when the session dies, local ones survive",
 	expect(local).toBeDefined();
 	local?.close();
 
+	watching.close();
 	mine.close();
 	serverOrigin.close();
 	clientOrigin.close();
@@ -2173,6 +2203,10 @@ test("origin: one origin on both directions consumes locally and never echoes", 
 		connect(url, { transport: pair.client, publish: shared.consume(), consume: shared }),
 		accept(pair.server, url, { publish: serverSees.consume(), consume: serverSees }),
 	]);
+
+	// Both sides watch everything, so each session asks the other for announcements.
+	const watchingShared = shared.announced();
+	const watchingServer = serverSees.announced();
 
 	// The server announces a broadcast; it lands in the shared origin as a remote entry.
 	{
@@ -2203,6 +2237,8 @@ test("origin: one origin on both directions consumes locally and never echoes", 
 	await sleep(50);
 	expect(wireOf(serverReader).routes(Path.from("from-server"))).toBe(false);
 
+	watchingShared.close();
+	watchingServer.close();
 	mine.close();
 	client.abort();
 	server.abort();
@@ -2210,14 +2246,14 @@ test("origin: one origin on both directions consumes locally and never echoes", 
 	serverSees.close();
 });
 
-test("origin: a request resolves blind on a relay without discovery", async () => {
+test("origin: a plain request resolves blind without opening discovery", async () => {
+	const refused = withoutDiscovery();
 	const pair = createMockTransportPair(Lite.ALPN_05);
 	const serverOrigin = new OriginProducer();
 	const clientOrigin = new OriginProducer();
 
 	const [client, server] = await Promise.all([
-		// The client believes the relay lacks discovery, so no announce stream opens.
-		connect(url, { transport: pair.client, consume: clientOrigin, discovery: false }),
+		connect(url, { transport: pair.client, consume: clientOrigin }),
 		accept(pair.server, url, { publish: serverOrigin.consume() }),
 	]);
 
@@ -2231,9 +2267,8 @@ test("origin: a request resolves blind on a relay without discovery", async () =
 	})();
 
 	const reader = clientOrigin.consume();
-	expect(reader.discovery.peek()).toBe(false);
-
-	// Nothing announced, so the table stays empty; a request is the only way through.
+	// Nothing watches, so the session never asks about announcements and never learns the
+	// relay would refuse: the table stays empty and a plain request answers blind.
 	expect(wireOf(reader).routes(Path.from("blind"))).toBe(false);
 
 	const request = reader.request(Path.from("blind"));
@@ -2243,6 +2278,8 @@ test("origin: a request resolves blind on a relay without discovery", async () =
 	const track = front?.track("chat").subscribe().ordered();
 	if (!track) throw new Error("expected a track");
 	expect(await track.readString()).toBe("found you");
+	expect(refused()).toBe(0);
+	expect(reader.discovery.peek()).toBe(true);
 
 	track.close();
 	request.close();
@@ -2365,6 +2402,7 @@ test("origin: overlapping sessions carrying one path fail over", async () => {
 		return { client, server, serverOrigin, broadcast, serving };
 	};
 
+	const watching = clientOrigin.announced();
 	const first = await setup();
 	const second = await setup();
 
@@ -2383,6 +2421,7 @@ test("origin: overlapping sessions carrying one path fail over", async () => {
 
 	track.close();
 	remote.close();
+	watching.close();
 	first.broadcast.close();
 	await first.serving;
 	first.client.abort();
@@ -2400,8 +2439,8 @@ test("origin: a standby session answers a fresh request when the answerer dies",
 		const pair = createMockTransportPair(Lite.ALPN_05);
 		const serverOrigin = new OriginProducer();
 		const [client, server] = await Promise.all([
-			// No discovery: requests are the only way through.
-			connect(url, { transport: pair.client, consume: clientOrigin, discovery: false }),
+			// Nothing watches, so no announce request opens: requests are the only way through.
+			connect(url, { transport: pair.client, consume: clientOrigin }),
 			accept(pair.server, url, { publish: serverOrigin.consume() }),
 		]);
 		const broadcast = publish(serverOrigin, Path.from("blind"));
