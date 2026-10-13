@@ -760,11 +760,21 @@ impl Schedule {
 				// multiplex rate decides when the packet's last byte gets there.
 				let done = drained.max(time(position + 1));
 				// A transport buffer must empty at least once a second (2.4.2.3), so a PID kept
-				// busy that long waits for it to, leaving room for a clock packet that cannot.
-				let reserve = clock
-					.filter(|&(clock, _)| clock == tb)
-					.map_or(0, |(_, duration)| duration);
-				if done - since + reserve > TB_EMPTY.as_nanos() as i128 {
+				// busy that long waits for it to. Every later slot's clock packet that arrives
+				// before the buffer empties extends the stretch without the chance to wait.
+				let mut busy = done;
+				if let Some((_, duration)) = clock.filter(|&(clock, _)| clock == tb) {
+					let mut next = index + 1;
+					while busy - since <= TB_EMPTY.as_nanos() as i128 {
+						let start = (packets_before(next, rate) - first) as usize;
+						if busy + TICK <= time(start) {
+							break;
+						}
+						busy = (busy.max(time(start)) + duration).max(time(start + 1));
+						next += 1;
+					}
+				}
+				if busy - since > TB_EMPTY.as_nanos() as i128 {
 					waiting.push(Reverse((last + TICK, lane)));
 					continue;
 				}
@@ -1110,7 +1120,7 @@ mod tests {
 	#[test]
 	fn a_busy_transport_buffer_empties_every_second() {
 		let rate = 10_000_000;
-		for (rx, count, clock) in [(1_000_000, 2_000, 7), (150_000, 150, 9)] {
+		for (rx, count, clock) in [(1_000_000, 2_000, 7), (150_000, 150, 9), (120_000, 150, 9)] {
 			let slow = Buffer {
 				rate: rx,
 				size: Some(1_000_000),
