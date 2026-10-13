@@ -512,7 +512,10 @@ mod tests {
 		let ascending = Subscription::default().with_order(Order::Ascending);
 		let descending = Subscription::default();
 
-		assert_eq!(combine(&[ascending.clone()]).unwrap().order, Order::Ascending);
+		assert_eq!(
+			combine(std::slice::from_ref(&ascending)).unwrap().order,
+			Order::Ascending
+		);
 		assert_eq!(
 			combine(&[ascending.clone(), ascending.clone()]).unwrap().order,
 			Order::Ascending
