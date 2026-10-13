@@ -82,7 +82,7 @@ pub struct Workers {
 	members: Vec<moq_sock::shard::Socket>,
 	addr: SocketAddr,
 	server: moq_uring::quic::server::Config,
-	/// What the workers serve, fingerprinted once, for `/certificate.sha256`.
+	/// The same live resolver used by every worker and the fingerprint endpoint.
 	certificates: moq_tokio::tls::Certificates,
 	/// One counter set per worker, in shard order. Created here rather than on
 	/// the worker thread so `/metrics` can publish every worker's series from
@@ -110,19 +110,27 @@ pub struct Workers {
 impl Workers {
 	/// Bind one socket per worker on the address `listen` describes.
 	///
-	/// Like the tokio group, `listen`'s `tcp`/`unix` listeners are ignored
-	/// (serve those from an [`init_streams`](moq_tokio::listen::Config::init_streams)
-	/// server), and `tls.generate` is refused since every worker must serve
-	/// one identity. Unlike it, exactly one certificate/key pair is required,
-	/// and it is read here rather than on each worker thread.
-	pub fn bind(
-		listen: &moq_tokio::listen::Config,
-		quic: &moq_tokio::quic::Config,
-		config: moq_tokio::worker::Config,
-	) -> anyhow::Result<Self> {
-		if !listen.tls.generate.is_empty() {
-			anyhow::bail!("io_uring workers cannot use listen.tls.generate; provide a certificate file");
-		}
+	/// Shares one served identity with every member; stream listeners are served separately.
+	pub fn bind(server: moq_tokio::server::Config, config: moq_tokio::worker::Config) -> anyhow::Result<Self> {
+		let listen = &server.listen;
+		let quic = &server.quic;
+		let tls = match server.tls {
+			Some(tls) => {
+				// A second configured source must not be silently ignored.
+				anyhow::ensure!(
+					listen.tls.cert.is_empty()
+						&& listen.tls.key.is_empty()
+						&& listen.tls.generate.is_empty()
+						&& listen.tls.root.is_empty()
+						&& listen.tls.identity.is_none()
+						&& listen.tls.peers.is_none(),
+					"a shared TLS policy cannot be combined with listen.tls settings"
+				);
+				tls
+			}
+			None => listen.tls.load()?,
+		};
+		let certificates = tls.certificates();
 
 		// Everything below is a setting this listener cannot deliver. Refusing
 		// beats starting and quietly behaving differently from what the
@@ -134,26 +142,6 @@ impl Workers {
 				 QUIC-LB server id (listen.lb_id)"
 			);
 		}
-		let (cert, key) = match (listen.tls.cert.as_slice(), listen.tls.key.as_slice()) {
-			([cert], [key]) => (cert.clone(), key.clone()),
-			([], []) => anyhow::bail!("io_uring workers need a certificate (listen.tls.cert/key)"),
-			_ => anyhow::bail!("io_uring workers serve exactly one certificate, got several"),
-		};
-		// Read once, here, rather than per worker: every worker must present
-		// the same identity, and a certificate replaced on disk while the
-		// threads are starting would otherwise split the group between two.
-		let identity = moq_uring::quic::Identity::open(&cert, &key)
-			.with_context(|| format!("failed to load {} / {}", cert.display(), key.display()))?;
-		let certificates = moq_tokio::tls::Certificates::from_pem(identity.cert())
-			.with_context(|| format!("failed to fingerprint {}", cert.display()))?;
-
-		// A client certificate stands in for a JWT, exactly as on the tokio
-		// path; a client that presents none still gets the token flow.
-		let client_auth = match listen.tls.root.is_empty() {
-			true => moq_uring::quic::server::ClientAuth::None,
-			false => moq_uring::quic::server::ClientAuth::Optional(listen.tls.root.clone()),
-		};
-
 		// One resolution for the whole group, so a DNS answer that rotates
 		// between queries cannot hand members different addresses.
 		//
@@ -234,9 +222,12 @@ impl Workers {
 			);
 		}
 
-		let mut server = moq_uring::quic::server::Config::new(identity);
-		server.alpn = alpns.iter().cloned().chain(["h3".to_string()]).collect();
-		server.client_auth = client_auth;
+		let alpn = alpns
+			.iter()
+			.map(|alpn| alpn.as_bytes().to_vec())
+			.chain([b"h3".to_vec()])
+			.collect();
+		let mut server = moq_uring::quic::server::Config::new(tls.config(alpn)?);
 		let quic = quic.resolve();
 		server.transport = transport(&quic)?;
 
@@ -282,8 +273,7 @@ impl Workers {
 	/// The certificate every worker presents, for publishing its SHA-256
 	/// fingerprint.
 	///
-	/// Fixed for the group's lifetime: the identity is read once at
-	/// [`bind`](Self::bind) and nothing reloads it.
+	/// Tracks rotations: every worker resolves through the same live identity.
 	pub fn certificates(&self) -> moq_tokio::tls::Certificates {
 		self.certificates.clone()
 	}

@@ -67,12 +67,16 @@ impl Workers {
 	/// bound more than once. Serve those from a
 	/// [`init_streams`](crate::listen::Config::init_streams) server on the
 	/// caller's own runtime.
+	///
+	/// The group's shared certificate reloads run on the caller's Tokio runtime,
+	/// which must outlive the group; see [`Listen::load`](crate::tls::Listen::load).
 	pub fn bind(mut server: crate::server::Config, config: Config) -> Result<Self> {
-		// Each worker loads the certificate files itself, so generating would give
-		// every member a certificate of its own and clients a different one per
-		// connection.
-		if !server.listen.tls.generate.is_empty() {
-			return Err(Error::WorkerTlsGenerate);
+		if server.tls.is_some() && server.listen.tls.configured() {
+			return Err(crate::tls::Error::ConflictingServe.into());
+		}
+		if server.tls.is_none() {
+			server.tls = Some(server.listen.tls.load()?);
+			server.listen.tls = Default::default();
 		}
 
 		let cores = config.pin.then(cores).unwrap_or_default();
@@ -144,11 +148,7 @@ impl Workers {
 		self.addr
 	}
 
-	/// The certificates the workers are serving, tracking hot reloads.
-	///
-	/// Each worker watches the files itself, so a rotation is not atomic across
-	/// the group: for as long as the reloads take, two workers can be serving
-	/// different certificates.
+	/// The certificates every worker serves from the same live resolver.
 	pub fn certificates(&self) -> crate::tls::Certificates {
 		self.certificates.clone()
 	}
@@ -290,7 +290,7 @@ impl Group {
 
 	/// The certificates the workers are serving, tracking hot reloads.
 	///
-	/// See [`Workers::certificates`]: a rotation is not atomic across members.
+	/// Every member resolves through this same live identity.
 	pub fn certificates(&self) -> crate::tls::Certificates {
 		self.certificates.clone()
 	}

@@ -29,6 +29,35 @@ fn request_ids(c: &mut Criterion) {
 	}
 	group.finish();
 }
+
+/// Draft-17+ admission, which spends IDs without a window but remembers skipped runs.
+fn request_history(c: &mut Criterion) {
+	let mut group = c.benchmark_group("modern-request-ids");
+	group.sample_size(20);
+	group.warm_up_time(Duration::from_millis(200));
+	group.measurement_time(Duration::from_secs(1));
+	for mode in ["ordered", "reordered", "scattered"] {
+		for sessions in [1, 8, 32] {
+			for requests in [8, 128, 220_000] {
+				let ids = ids(mode, requests);
+				println!(
+					"admitted-modern,{mode},{sessions},{requests},{}",
+					moq_net::fuzz::request_history(&ids) * sessions
+				);
+				group.bench_function(BenchmarkId::new(mode, format!("{sessions}x{requests}")), |b| {
+					b.iter(|| {
+						let accepted: usize = (0..sessions)
+							.map(|_| moq_net::fuzz::request_history(black_box(&ids)))
+							.sum();
+						black_box(accepted)
+					});
+				});
+			}
+		}
+	}
+	group.finish();
+}
+
 /// Every ID in the window: in order, reversed (one skip to the top, then each fill
 /// shortens it), or scattered (the top first, then every other ID descending, so each
 /// splits the lowest skipped run and the remembered runs grow to half the window).
@@ -48,5 +77,5 @@ fn ids(mode: &str, window: u64) -> Vec<u64> {
 	}
 }
 
-criterion_group!(benches, request_ids);
+criterion_group!(benches, request_ids, request_history);
 criterion_main!(benches);

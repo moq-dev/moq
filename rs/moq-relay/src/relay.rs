@@ -173,11 +173,20 @@ impl Relay {
 			"runtime.workers needs moq-relay built with the `noq` feature"
 		);
 
+		// Workers and the stream server split one relay across listeners, so they share
+		// one loaded identity. A lone server loads its own, only if a listener needs it.
+		let served = config.runtime.workers().map(|_| config.listen.tls.load()).transpose()?;
+		let mut listen = config.listen.clone();
+		if served.is_some() {
+			listen.tls = Default::default();
+		}
+
 		#[cfg(feature = "_quic")]
 		let workers = match config.runtime.workers() {
 			Some(worker) if !io_uring => {
 				let mut server = moq_tokio::server::Config::default();
-				server.listen = config.listen.clone();
+				server.listen = listen.clone();
+				server.tls = served.clone();
 				server.quic = config.quic.clone();
 				server.activity = shutdown.activity.clone();
 				Some(moq_tokio::worker::Workers::bind(server, worker).context("failed to start the QUIC workers")?)
@@ -198,10 +207,13 @@ impl Relay {
 
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
 		let uring = match config.runtime.workers() {
-			Some(worker) if io_uring => Some(
-				crate::uring::Workers::bind(&config.listen, &config.quic, worker)
-					.context("failed to start the io_uring QUIC workers")?,
-			),
+			Some(worker) if io_uring => {
+				let mut server = moq_tokio::server::Config::default();
+				server.listen = listen.clone();
+				server.quic = config.quic.clone();
+				server.tls = served.clone();
+				Some(crate::uring::Workers::bind(server, worker).context("failed to start the io_uring QUIC workers")?)
+			}
 			_ => None,
 		};
 
@@ -215,7 +227,8 @@ impl Relay {
 
 		#[allow(unused_mut)]
 		let mut server_config = moq_tokio::server::Config::default();
-		server_config.listen = config.listen.clone();
+		server_config.listen = listen;
+		server_config.tls = served;
 		server_config.quic = config.quic.clone();
 		server_config.activity = shutdown.activity.clone();
 		#[cfg(feature = "iroh")]

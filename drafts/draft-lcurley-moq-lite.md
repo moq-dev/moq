@@ -1457,6 +1457,9 @@ A pattern that breaks any of these rules is a PROTOCOL_VIOLATION.
 
 A grant covers a request when one of its patterns matches the path.
 
+An endpoint MUST close the session with PROTOCOL_VIOLATION when an AUTH stream message fails to decode, has trailing body bytes, or has an unexpected type for its direction.
+The opener sends exactly one AUTH; any additional message on its side is a PROTOCOL_VIOLATION.
+
 ## AUTH_ERROR {#auth-error}
 AUTH_ERROR refuses a token, or revokes it after an AUTH_OK.
 
@@ -1566,6 +1569,7 @@ The `Message Length` describes the payload size on the wire.
 - Added the AUTH_TOKEN_CACHE_OVERFLOW (0x13) and UNKNOWN_AUTH_TOKEN_ALIAS (0x17) session codes, with moq-transport's meaning.
 - Limited AUTH_OK Expires to 2^53 - 1 milliseconds, with an out-of-range value closing the session with PROTOCOL_VIOLATION.
 - Invalid UTF-8 or an oversized AUTH_ERROR reason closes the session with PROTOCOL_VIOLATION.
+- An Auth Stream message that fails to decode, has trailing body bytes, or has an unexpected type, or a second AUTH from the opener, closes the session with PROTOCOL_VIOLATION.
 - Added NOT_SUPPORTED (0x30) to session errors; unsupported Auth Stream tokens and grants use AUTH_ERROR before or after a grant.
 - Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path patterns](#path-pattern) it may publish and subscribe to. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
 

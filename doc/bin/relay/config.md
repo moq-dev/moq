@@ -94,10 +94,13 @@ io_uring = false                     # Drive them with io_uring instead of tokio
 ```
 
 Packets are steered by connection ID, so a client that migrates stays with its
-worker. `workers` needs the `noq` feature and real certificate files rather
-than `tls.generate`. `io_uring` additionally needs Linux 6.12+, the `io-uring`
-cargo feature, and exactly one certificate; it serves moq-lite only, and
-refuses `mtu_discovery`. A setting the build or host cannot deliver refuses to
+worker. `workers` needs the `noq` feature. Every worker and the TLS stream
+listener serve one shared identity, generated or file-backed, so a certificate
+rotation reaches them together and `/certificate.sha256` stays accurate.
+
+`io_uring` additionally needs Linux 6.12+ and the `io-uring` cargo feature; it
+shares the same reloadable TLS identity, serves moq-lite only, and refuses
+`mtu_discovery`. A setting the build or host cannot deliver refuses to
 start rather than being ignored. If io\_uring workers fail to start naming
 `RLIMIT_MEMLOCK`, raise it (`LimitMEMLOCK=` under systemd).
 

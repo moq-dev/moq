@@ -117,8 +117,12 @@ fn a_steered_group_serves_a_shared_port() {
 				// steers with, and there is no other way to hand one over.
 				let socket = handle.udp(member, udp::Config::default()).expect("socket");
 
-				let mut server = quic::server::Config::new(quic::Identity::open(cert, key).expect("identity"));
-				server.alpn = vec![ALPN.to_string()];
+				let server = quic::server::Config::new(
+					quic::Identity::open(cert, key)
+						.expect("identity")
+						.server(&[ALPN], quic::server::ClientAuth::None)
+						.expect("tls"),
+				);
 				let endpoint = quic::Endpoint::new(socket, quic::endpoint::Config::default().with_server(server))
 					.expect("endpoint");
 

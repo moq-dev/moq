@@ -6,7 +6,7 @@ use crate::listen;
 use crate::quic::CongestionControl;
 use crate::quic::Resolved;
 use crate::quic::ServerId;
-use crate::tls::{FingerprintVerifier, ServeCerts};
+use crate::tls::FingerprintVerifier;
 use std::net;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, RwLock};
@@ -543,9 +543,8 @@ fn proto_status(err: &web_transport_moq::proto::ConnectError) -> Option<u16> {
 
 pub(crate) struct NoqServer {
 	pub quic: noq::Endpoint,
-	pub certs: Arc<ServeCerts>,
+	tls: crate::tls::Serve,
 	socket: Socket,
-	_reload: crate::tls::Reload,
 }
 
 /// The server's UDP socket, which [`NoqServer::shutdown`] closes even while noq
@@ -681,30 +680,26 @@ impl std::task::Wake for Blocked {
 	}
 }
 
+pub(crate) struct Options {
+	pub config: listen::Config,
+	pub quic: crate::quic::Config,
+	pub member: Option<listen::Socket>,
+	pub tls: crate::tls::Serve,
+}
+
 impl NoqServer {
-	pub fn new(config: listen::Config, quic: &crate::quic::Config, member: Option<listen::Socket>) -> Result<Self> {
+	pub fn new(options: Options) -> Result<Self> {
+		let Options {
+			config,
+			quic,
+			member,
+			tls: served,
+		} = options;
 		let mut transport = noq::TransportConfig::default();
 		let quic = quic.resolve();
 		apply_transport(&mut transport, &quic);
 		apply_qlog(&mut transport, &quic, "server")?;
 		let transport = Arc::new(transport);
-
-		let provider = crate::crypto::provider();
-
-		let certs = ServeCerts::new(provider.clone());
-		certs.load_certs(&config.tls)?;
-		let certs = Arc::new(certs);
-
-		let tls_builder = rustls::ServerConfig::builder_with_provider(provider.clone())
-			.with_protocol_versions(&[&rustls::version::TLS13])
-			.map_err(crate::tls::Error::from)?;
-
-		let mut tls = match config.tls.client_auth(provider)? {
-			Some(verifier) => tls_builder
-				.with_client_cert_verifier(verifier)
-				.with_cert_resolver(certs.clone()),
-			None => tls_builder.with_no_client_auth().with_cert_resolver(certs.clone()),
-		};
 
 		// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
 		let mut alpns: Vec<Vec<u8>> = config
@@ -715,9 +710,8 @@ impl NoqServer {
 			.collect();
 		alpns.push(web_transport_moq::ALPN.as_bytes().to_vec());
 
-		tls.alpn_protocols = alpns;
+		let mut tls = (*served.config(alpns)?).clone();
 		tls.key_log = Arc::new(rustls::KeyLogFile::new());
-		config.tls.disable_resumption(&mut tls);
 
 		let tls: noq::crypto::rustls::QuicServerConfig = tls.try_into()?;
 		let mut tls = noq::ServerConfig::with_crypto(Arc::new(tls));
@@ -791,15 +785,10 @@ impl NoqServer {
 			noq::Endpoint::new_with_abstract_socket(endpoint_config, Some(tls), Box::new(socket.clone()), runtime)
 				.map_err(Error::CreateEndpoint)?;
 
-		// Spawn the cert reload watcher only after endpoint creation succeeds,
-		// so we don't leave a dangling watcher on failure.
-		let _reload = crate::tls::Reload::spawn(certs.clone(), config.tls.clone());
-
 		Ok(Self {
 			quic,
-			certs,
+			tls: served,
 			socket,
-			_reload,
 		})
 	}
 
@@ -808,7 +797,7 @@ impl NoqServer {
 	}
 
 	pub fn certificates(&self) -> crate::tls::Certificates {
-		crate::tls::Certificates::new(self.certs.info.clone())
+		self.tls.certificates()
 	}
 
 	pub fn local_addr(&self) -> Result<net::SocketAddr> {
@@ -1024,18 +1013,21 @@ mod tests {
 
 	async fn pinned_connection(bind: &str, host_name: Option<&str>) {
 		let quic = crate::quic::Config::default();
-		let server = NoqServer::new(
-			listen::Config {
-				bind: Some(bind.parse().unwrap()),
-				tls: crate::tls::Listen {
-					generate: vec!["localhost".into()],
-					..Default::default()
-				},
+		let config = listen::Config {
+			bind: Some(bind.parse().unwrap()),
+			tls: crate::tls::Listen {
+				generate: vec!["localhost".into()],
 				..Default::default()
 			},
-			&quic,
-			None,
-		)
+			..Default::default()
+		};
+		let tls = config.tls.load().unwrap();
+		let server = NoqServer::new(Options {
+			config,
+			quic: quic.clone(),
+			member: None,
+			tls,
+		})
 		.expect("server init");
 		let addr = server.local_addr().expect("local addr");
 		let mut tls_config = crate::tls::Connect::default();
@@ -1127,7 +1119,14 @@ mod tests {
 		// The knob left unset, the way a binary that never mentions it runs.
 		let quic = crate::quic::Config::default();
 
-		let server = NoqServer::new(server_config, &quic, None).expect("server init");
+		let tls = server_config.tls.load().unwrap();
+		let server = NoqServer::new(Options {
+			config: server_config,
+			quic: quic.clone(),
+			member: None,
+			tls,
+		})
+		.expect("server init");
 		let addr = server.local_addr().expect("local addr");
 
 		let accepted = tokio::spawn(async move {

@@ -25,6 +25,7 @@ import { Tail } from "../tail.ts";
 import { Milli, type Timescale, type Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
@@ -153,8 +154,9 @@ export class Subscriber {
 	// PUBLISH_NAMESPACE and an inline NAMESPACE answering our own SUBSCRIBE_NAMESPACE are
 	// two messages about one source, which the MoQ Solicit draft requires us to tolerate.
 	// Counting them is what keeps the second from duplicating the announce and the first
-	// to end from retracting what the other still holds.
-	#announced = new Map<Path.Valid, { count: number; route: Route }>();
+	// to end from retracting what the other still holds. Each path holds one of the
+	// session's announce slots, however many advertisements reference it.
+	#announced: SlotMap<Path.Valid, { count: number; route: Route }>;
 
 	// Any consumers that want each new announcement, keyed by their local filter.
 	#announcedConsumers = new Map<announce.Producer, Filter>();
@@ -190,6 +192,7 @@ export class Subscriber {
 		solicit,
 		goaway,
 		grant,
+		limits = LIMITS,
 	}: {
 		/** The session abstraction for bidi streams and request IDs. */
 		session: Session;
@@ -205,9 +208,12 @@ export class Subscriber {
 		goaway?: GetPromise<Drain>;
 		/** The union of our tokens' grants (MoQ Auth), which bounds what we subscribe to. */
 		grant?: Getter<Grant | undefined>;
+		/** How many live requests the peer may hold. */
+		limits?: Limits;
 	}) {
 		this.#session = session;
 		this.#quic = quic;
+		this.#announced = new SlotMap(new Slots(limits.announces, { quic, reason: "too many announcements" }));
 		this.#cluster = cluster;
 		this.#hidden = hidden;
 		this.#solicit = solicit;
@@ -488,8 +494,8 @@ export class Subscriber {
 							if (live.has(path)) {
 								this.#updateAnnounce(path, route);
 							} else {
-								live.add(path);
 								this.#attachAnnounce(path, route);
+								live.add(path);
 							}
 						} else if (msgType === SubscribeNamespaceEntryDone.id) {
 							const entry = await SubscribeNamespaceEntryDone.decode(stream.reader, version);
@@ -1027,8 +1033,8 @@ export class Subscriber {
 
 			// Only now is the advertisement ours to announce, for the reason above: a
 			// consumer reacting with a SUBSCRIBE must not interleave with that OK.
-			attached = true;
 			this.#attachAnnounce(path, this.#route(msg.cluster));
+			attached = true;
 
 			// An advertisement is updated in place with REQUEST_UPDATE on the stream that
 			// already carries it, so read until the stream ends rather than waiting on the
@@ -1067,6 +1073,8 @@ export class Subscriber {
 					update = await PublishNamespaceUpdate.decode(stream.reader, version);
 				} catch (err) {
 					if (!(err instanceof MalformedAuthToken)) throw err;
+					// A refused update still spends its own request ID.
+					if (err.requestId !== undefined) this.#session.spendRequest(err.requestId);
 					// Section 8.9 rejects the update, which withdraws the advertisement as any
 					// refused update does. Only draft-17+ updates arrive here, so no Request ID.
 					await stream.writer.u53(RequestError.id);
@@ -1077,6 +1085,7 @@ export class Subscriber {
 					stream.close();
 					break;
 				}
+				this.#session.spendRequest(update.requestId);
 
 				// The parameters exist only on a session that negotiated the extension;
 				// anywhere else they are the peer's violation.

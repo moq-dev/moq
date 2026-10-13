@@ -154,11 +154,6 @@ pub enum Error {
 		max: u16,
 	},
 
-	/// A worker group was asked to generate its own certificate, which would give
-	/// every member a different one.
-	#[error("QUIC workers cannot generate certificates; configure a certificate and key instead")]
-	WorkerTlsGenerate,
-
 	/// Another worker group already holds this listen port.
 	///
 	/// A second group on an overlapping address would silently join the first's

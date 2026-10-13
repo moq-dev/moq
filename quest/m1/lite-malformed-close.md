@@ -51,8 +51,7 @@ Rust-to-Rust and Rust-to-JS sessions never hit these; third-party peers do.
   it. Prefer one shared close path over per-handler fixes.
 - One test per rule per language, driving raw bytes like the runner does,
   including a malformed SUBSCRIBE_UPDATE and a malformed PROBE report.
-  Share the session-close helper from
-  [AUTH protocol violations](/quest/m1/auth/violations.md) if it lands first.
+  Share the session-close path that malformed AUTH messages already use.
 
 Public API: none. Wire: none; the behavior now matches the draft.
 
@@ -65,4 +64,3 @@ Public API: none. Wire: none; the behavior now matches the draft.
 ## Related
 
 - [Malformed moq-transport input](/quest/m2/ietf-malformed-close.md) - the same rule for draft-18 and draft-21
-- [AUTH protocol violations](/quest/m1/auth/violations.md) - the AUTH-only slice, in progress
