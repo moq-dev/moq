@@ -106,6 +106,12 @@ host still poll in place; independent native wake callbacks can run concurrently
 The generated bindings wake Python futures through the asyncio event loop. The
 package exit hook joins native workers before interpreter finalization.
 
+A session closed for exceeding the relay's request caps reports the protocol
+kind `ProtocolKind.TOO_MANY_REQUESTS`. Reduce
+the simultaneous announcements or subscriptions, or ask the relay operator
+to adjust the [session limits](/bin/relay/config#session-and-peer), before
+reconnecting with the same workload.
+
 ## Reference
 
 - API reference: [moq-rs.readthedocs.io](https://moq-rs.readthedocs.io)

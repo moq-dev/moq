@@ -10,6 +10,10 @@
 #[derive(usage::Config)]
 pub struct Settings {
 	#[usage(flatten)]
+	session: Session,
+	#[usage(flatten)]
+	peer: Peer,
+	#[usage(flatten)]
 	listen: moq_tokio::settings::Listen,
 
 	#[usage(flatten)]
@@ -206,4 +210,22 @@ struct Cache {
 struct Internal {
 	#[usage(env = "MOQ_INTERNAL_LISTEN", cli("--internal-listen"))]
 	listen: Option<String>,
+}
+
+#[derive(usage::Config)]
+#[usage(prefix = "session")]
+struct Session {
+	#[usage(env = "MOQ_SESSION_ANNOUNCES", cli("--session-announces"))]
+	announces: Option<usize>,
+	#[usage(env = "MOQ_SESSION_SUBSCRIPTIONS", cli("--session-subscriptions"))]
+	subscriptions: Option<usize>,
+}
+
+#[derive(usage::Config)]
+#[usage(prefix = "peer")]
+struct Peer {
+	#[usage(env = "MOQ_PEER_ANNOUNCES", cli("--peer-announces"))]
+	announces: Option<usize>,
+	#[usage(env = "MOQ_PEER_SUBSCRIPTIONS", cli("--peer-subscriptions"))]
+	subscriptions: Option<usize>,
 }

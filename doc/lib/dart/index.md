@@ -87,6 +87,12 @@ host still poll in place; independent native wake callbacks can run concurrently
 The generated bindings deliver native wakeups to the Dart isolate. Keep UI work
 on its owning isolate.
 
+A session closed for exceeding the relay's request caps reports the protocol
+kind `ProtocolKind.tooManyRequests`. Reduce
+the simultaneous announcements or subscriptions, or ask the relay operator
+to adjust the [session limits](/bin/relay/config#session-and-peer), before
+reconnecting with the same workload.
+
 ## Reference
 
 - API reference: [pub.dev/documentation/moq](https://pub.dev/documentation/moq/latest/)

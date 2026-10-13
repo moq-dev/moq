@@ -174,6 +174,9 @@ QString ExplainFailure(int code, const std::string &reason)
 		return QStringLiteral("Connect failed · the relay did not accept the session");
 	case MoQError::Kind::Offline:
 		return {};
+	case MoQError::Kind::TooManyRequests:
+		return QStringLiteral(
+			"Relay request limit reached · reduce tracks or ask the operator to raise the limit");
 	case MoQError::Kind::Other:
 		return QString::fromStdString(reason);
 	}
