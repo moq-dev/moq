@@ -94,6 +94,27 @@ test("catalog producer advertises the page clock from the first snapshot", async
 	effect.close();
 });
 
+test("catalog producer omits the clock when the page's wall clock is unset", async () => {
+	// A device booted before it synced its clock: the page began in 1970.
+	Object.defineProperty(performance, "timeOrigin", { value: 86_400_000, configurable: true });
+	try {
+		const catalog = new CatalogProducer();
+		catalog.mutate((c) => {
+			c.video = { renditions: {} };
+		});
+
+		const effect = new Effect();
+		const track = new Track.Producer("catalog.json");
+		catalog.serve(track, effect);
+		const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track: track.subscribe() });
+		expect(await consumer.next()).toEqual({ video: { renditions: {} } });
+		effect.close();
+	} finally {
+		// Drops the override, uncovering the real getter.
+		Reflect.deleteProperty(performance, "timeOrigin");
+	}
+});
+
 test("a reconnecting subscriber is seeded with the full current catalog", async () => {
 	const catalog = new CatalogProducer();
 	catalog.mutate((c) => {

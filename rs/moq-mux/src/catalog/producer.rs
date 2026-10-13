@@ -320,9 +320,9 @@ impl<E: CatalogExt> Producer<E> {
 
 		// The broadcast clock is advertised at the catalog root from the first snapshot,
 		// independently of any archive timeline: a live-only publisher exposes its mapping
-		// without creating a segment index.
+		// without creating a segment index. A host with an unset wall clock advertises none.
 		let mut catalog = config.catalog;
-		catalog.clock = Some(config.clock.wall());
+		catalog.clock = config.clock.mapping();
 
 		// The contents are `Send + Sync` natively; on wasm moq-net's handles are
 		// `Rc`-backed, so clippy sees a pointlessly atomic `Arc`. Keeping one type for
@@ -1264,6 +1264,51 @@ mod test {
 		let snapshot = catalog.snapshot();
 		assert_eq!(snapshot.archive, None);
 		assert_eq!(snapshot.clock, Some(catalog.clock().wall()));
+	}
+
+	/// A host whose wall clock reads before 2020 (booted before NTP sync) publishes its media on the
+	/// monotonic timeline with no root `clock`, rather than advertise a false one or abort.
+	#[test]
+	fn an_unset_host_clock_publishes_without_a_wall() {
+		use std::time::{Duration, SystemTime};
+
+		crate::clock::fake_host_wall(SystemTime::UNIX_EPOCH + Duration::from_secs(86_400));
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		assert_eq!(catalog.snapshot().clock, None);
+
+		let net = broadcast
+			.create_track("video0", catalog.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut video = catalog
+			.video(
+				net,
+				crate::catalog::hang::Container::Legacy(crate::container::Kind::Video),
+				VideoConfig::new(hang::catalog::VideoCodec::VP8),
+			)
+			.unwrap();
+		let mut subscriber = video.consume();
+		let timestamp = catalog.timestamp(None).unwrap();
+		video
+			.write(crate::container::Frame {
+				timestamp,
+				duration: None,
+				payload: Bytes::from_static(b"keyframe"),
+				keyframe: true,
+			})
+			.unwrap();
+
+		let snapshot = catalog.snapshot();
+		assert!(snapshot.video.renditions.contains_key("video0"));
+		assert_eq!(snapshot.clock, None, "publishing never invents a wall");
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_recv_group(&waiter) else {
+			panic!("the frame's group is published");
+		};
+		assert!(
+			matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))),
+			"the frame is published"
+		);
 	}
 
 	#[test]

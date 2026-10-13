@@ -10,7 +10,9 @@
 //! [`Clock::TIMESCALE`] units since the moq epoch (2020-01-01). A consumer derives any
 //! timestamp's wall time as `wall + pts` after converting it into this timescale. The mapping
 //! is fixed at construction and never overwritten: a discontinuity marker is a delivery event,
-//! not a new epoch, and a system-clock adjustment never retimes it.
+//! not a new epoch, and a system-clock adjustment never retimes it. A host whose wall clock reads
+//! before 2020 has not set it yet (a device booted before NTP sync), so its clock carries no
+//! mapping and the catalog omits `clock` rather than advertise a false one.
 //!
 //! A source with its own zero (a file, a restarted encoder) is translated onto the mapping with
 //! [`SourceMap`]: the first frame anchors onto the live edge, and a reset re-anchors forward,
@@ -22,6 +24,27 @@
 use std::time::{Duration, Instant, SystemTime};
 
 use hang::catalog::{MAX_SAFE_INTEGER, MOQ_EPOCH_UNIX_MILLIS};
+
+/// The host's wall clock.
+fn host_wall() -> SystemTime {
+	#[cfg(test)]
+	if let Some(now) = HOST_WALL.get() {
+		return now;
+	}
+	SystemTime::now()
+}
+
+#[cfg(test)]
+thread_local! {
+	/// What [`host_wall`] reads on this thread instead of the system clock.
+	static HOST_WALL: std::cell::Cell<Option<SystemTime>> = const { std::cell::Cell::new(None) };
+}
+
+/// Make this thread's host wall clock read `now`, so a test can fake one that was never set.
+#[cfg(test)]
+pub(crate) fn fake_host_wall(now: SystemTime) {
+	HOST_WALL.set(Some(now));
+}
 
 /// The catalog clock for PTS zero at `wall`.
 fn wall_clock(wall: SystemTime) -> crate::Result<hang::catalog::Clock> {
@@ -52,7 +75,8 @@ fn wall_clock(wall: SystemTime) -> crate::Result<hang::catalog::Clock> {
 #[derive(Clone, Copy, Debug)]
 pub struct Clock {
 	epoch: Instant,
-	wall: hang::catalog::Clock,
+	/// `None` when the host's wall clock was unset at construction.
+	wall: Option<hang::catalog::Clock>,
 }
 
 impl Clock {
@@ -72,14 +96,20 @@ impl Clock {
 
 	/// Start a clock at the current instant, with PTS zero ten seconds earlier on both the
 	/// monotonic and the wall clock, so earlier-stamped frames of a source anchored now still map.
+	///
+	/// Without a wall mapping when the host's wall clock is unset, or reads a time the mapping can't
+	/// name: media needs only the monotonic timeline.
 	pub fn new() -> Self {
-		let (now, wall) = (Instant::now(), SystemTime::now());
+		let (now, wall) = (Instant::now(), host_wall());
 		// Shortly after boot the monotonic clock may not reach back that far; start at now then.
 		let (epoch, wall) = match (now.checked_sub(Self::LEAD), wall.checked_sub(Self::LEAD)) {
 			(Some(epoch), Some(wall)) => (epoch, wall),
 			_ => (now, wall),
 		};
-		Self::at(epoch, wall).expect("the current wall time is representable as a broadcast clock")
+		Self {
+			epoch,
+			wall: wall_clock(wall).ok(),
+		}
 	}
 
 	/// Start a clock at an explicit monotonic epoch and wall time.
@@ -89,7 +119,7 @@ impl Clock {
 	pub fn at(epoch: Instant, wall: SystemTime) -> crate::Result<Self> {
 		Ok(Self {
 			epoch,
-			wall: wall_clock(wall)?,
+			wall: Some(wall_clock(wall)?),
 		})
 	}
 
@@ -138,16 +168,30 @@ impl Clock {
 	}
 
 	/// The catalog root section advertising this clock.
+	///
+	/// # Panics
+	///
+	/// If the host's wall clock was unset (before 2020) when this clock was created by
+	/// [`new`](Self::new), leaving no mapping to advertise.
 	pub fn wall(&self) -> hang::catalog::Clock {
+		self.wall
+			.expect("the host wall clock was set when this clock was created")
+	}
+
+	/// The catalog root section advertising this clock, or `None` if the host's wall clock was unset.
+	pub(crate) fn mapping(&self) -> Option<hang::catalog::Clock> {
 		self.wall
 	}
 
 	/// The wall-clock time of `pts` under this broadcast's fixed mapping.
 	///
 	/// Pure in the stored epoch: a system-clock adjustment after construction changes nothing.
-	/// Refuses an unrepresentable result rather than truncating it.
+	/// Refuses an unrepresentable result rather than truncating it, and a clock without a mapping.
 	pub fn wall_clock(&self, pts: moq_net::Timestamp) -> crate::Result<SystemTime> {
-		self.wall.wall_clock(pts).map_err(crate::Error::from)
+		let wall = self
+			.wall
+			.ok_or_else(|| crate::Error::UnmappableTimestamp("the host wall clock was unset".to_string()))?;
+		wall.wall_clock(pts).map_err(crate::Error::from)
 	}
 
 	/// Translate a source with its own zero onto this broadcast's mapping.
@@ -479,6 +523,30 @@ mod tests {
 		assert!(Clock::at(epoch(), SystemTime::UNIX_EPOCH).is_err());
 		assert!(Clock::at(epoch(), moq_epoch() - Duration::from_micros(1)).is_err());
 		assert_eq!(Clock::at(epoch(), moq_epoch()).unwrap().wall().wall.value(), 0);
+	}
+
+	/// A host wall clock before 2020 is unset: the clock keeps its monotonic timeline without a wall
+	/// mapping, and refuses whatever needs one rather than invent it.
+	#[test]
+	fn an_unset_host_clock_has_no_wall() {
+		fake_host_wall(SystemTime::UNIX_EPOCH + Duration::from_secs(86_400));
+
+		let clock = Clock::new();
+		assert_eq!(clock.mapping(), None);
+		assert!(matches!(
+			clock.wall_clock(clock.now()),
+			Err(crate::Error::UnmappableTimestamp(_))
+		));
+
+		// A source still translates onto the monotonic timeline.
+		let mut source = clock.source();
+		assert_eq!(
+			source.translate_at(us(5_000_000), 100_000).unwrap().as_micros(),
+			100_000
+		);
+
+		// An explicit wall needs no host clock.
+		assert!(Clock::at(epoch(), moq_epoch()).unwrap().mapping().is_some());
 	}
 
 	#[test]

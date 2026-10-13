@@ -215,7 +215,8 @@ pub enum Error {
 	InvalidTimescale(u32),
 
 	/// A source timestamp cannot be mapped onto the broadcast clock: it would land before the
-	/// broadcast began or outside the representable range.
+	/// broadcast began or outside the representable range, or the host's wall clock was unset so
+	/// the clock has no wall mapping.
 	#[error("timestamp cannot be mapped onto the broadcast clock: {0}")]
 	UnmappableTimestamp(String),
 	/// Tried to set an application catalog section whose name collides with a
