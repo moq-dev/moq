@@ -451,10 +451,10 @@ impl Schedule {
 		self.pmt = Some(pmt_pid);
 	}
 
-	/// The transport buffer `pid`'s packets enter: TBsys for the program tables the export
-	/// writes, else its own.
+	/// The transport buffer `pid`'s packets enter: TBsys for the reserved system PIDs (PAT,
+	/// CAT, TSDT, IPMP) and the PMT, else its own.
 	fn transport_buffer(&self, pid: u16) -> u16 {
-		match pid == 0 || self.pmt == Some(pid) {
+		match pid <= 3 || self.pmt == Some(pid) {
 			true => 0,
 			false => pid,
 		}
@@ -663,7 +663,8 @@ impl Schedule {
 			&& let Some(buffer) = self.buffers.get(&pid)
 		{
 			let duration = (TsPacket::SIZE as u128 * 8 * 1_000_000_000).div_ceil(u128::from(buffer.rate));
-			let free = self.transport.entry(pid).or_insert(time(0));
+			let tb = self.transport_buffer(pid);
+			let free = self.transport.entry(tb).or_insert(time(0));
 			*free = ((*free).max(time(0)) + duration as i128).max(time(1));
 		}
 		// One head per PID preserves decode order without walking all future units at every
@@ -1006,6 +1007,35 @@ mod tests {
 					}
 					assert_eq!(tables, [usize::from(pids); 2]);
 				}
+			}
+		}
+	}
+
+	/// Sections on a reserved system PID share TBsys with the PAT and PMT.
+	#[test]
+	fn reserved_system_pids_share_tbsys_with_the_tables() {
+		let rate = 25_000_000;
+		let mut schedule = Schedule::new(Duration::from_millis(200));
+		schedule.set_rate(Some(rate));
+		schedule.set_clock(7);
+		schedule.set_buffer(7, VIDEO);
+		schedule.set_tables(100);
+		schedule.set_buffer(1, Buffer::SYSTEM);
+		// A CAT muxed with the tables ahead of a keyframe, as the export writes them.
+		let packets = [unit(0, 1), unit(100, 2), unit(1, 3), unit(7, 1)].concat();
+		schedule.push(7, timing(1_000), packets, true).unwrap();
+		let (mut fill, mut previous) = (0.0f64, None::<f64>);
+		while let Some(slot) = schedule.next(None).unwrap() {
+			for (position, packet) in slot.layout(&unit(7, 1), 100, &[0xff; 188]).chunks(188).enumerate() {
+				let at = slot.pcr as f64 / SYSTEM_CLOCK as f64 + position as f64 * 1504.0 / rate as f64;
+				if let Some(previous) = previous {
+					fill = (fill - (at - previous) * 125_000.0).max(0.0);
+				}
+				previous = Some(at);
+				if [0, 1, 100].contains(&pid(packet)) {
+					fill += 188.0;
+				}
+				assert!(fill <= 512.001, "TBsys holds {fill} bytes");
 			}
 		}
 	}
