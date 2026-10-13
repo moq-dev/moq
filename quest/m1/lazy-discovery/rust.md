@@ -33,7 +33,8 @@ covering-set changes a watch causes, so the cost per session stays flat over
 held watches (`js/net/bench/forward.ts`); a session inserts a route reported
 by overlapping requests once, driven by the first reporter, so a hand-over
 never retracts, and restarts it unless one epoch proves both requests saw one
-instance; closing an announce request ends its stream; a request closes 2s after its last
+instance; closing an announce request ends its stream; a plain request
+resolved through a discovered route watches its path until closed; a request closes 2s after its last
 watcher (a fixed constant, since one-shot connections have no `linger`); a
 refused or reset request downgrades the whole session to blind answers.
 

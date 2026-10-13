@@ -1656,9 +1656,8 @@ export class Consumer {
 	 * Resolve a path, following publisher restarts when `announced` is true and no epoch is pinned.
 	 * Announced requests clear `active` on an end and resolve again on the next start. A refusal
 	 * is terminal. An epoch-pinned request never changes instance; a plain request keeps its
-	 * accepted instance and may resolve blindly when discovery has no answer. A plain request
-	 * does not watch its path, so one resolved through a discovered route ends once nothing
-	 * watches that route any more.
+	 * accepted instance and may resolve blindly when discovery has no answer. Either one,
+	 * once resolved through a discovered route, watches its path until closed.
 	 * Announcement gating falls back to blind resolution when discovery is unavailable.
 	 * Close the request to release its handle and announcement watch.
 	 */
@@ -1817,7 +1816,7 @@ export class Consumer {
 		if (announced) slot.announced += 1;
 		else slot.blind += 1;
 		// An announced request is a watch: sessions ask their peer about this path while it lives.
-		const unwatch = announced ? this.#state.watch([path]) : undefined;
+		let unwatch = announced ? this.#state.watch([path]) : undefined;
 		this.#state.requests.mutate(() => {});
 
 		// Hand out a handle of the request's own rather than the table's. Closing a consumer
@@ -1855,7 +1854,17 @@ export class Consumer {
 		// holder that only ever peeked would then pin a route that has already been retracted
 		// until it happened to read again. Following the route as well retires it promptly,
 		// and the memo makes the two paths agree: whichever runs first does the swap.
-		const unsubscribe = route.subscribe(own);
+		// Any other request watches its path once it resolves through a discovered route, so that
+		// route stays discovered after whatever watch found it, such as a listing, is gone.
+		const discovered = (resolution: Resolution | undefined) => {
+			if (unwatch || !resolution?.front || !resolution.source || resolution.source === resolution.front) return;
+			unwatch = this.#state.watch([path]);
+		};
+		discovered(route.peek());
+		const unsubscribe = route.subscribe((resolution) => {
+			own(resolution);
+			discovered(resolution);
+		});
 
 		// Only meaningful while nothing is routed, so it reads the route rather than `active`:
 		// the two cannot disagree, since a routed path always has an answerer-independent

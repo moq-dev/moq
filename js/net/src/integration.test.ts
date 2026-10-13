@@ -2327,6 +2327,92 @@ test.each([Lite.ALPN_03, Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 	},
 );
 
+test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
+	"%s: closing an announce consumer before ANNOUNCE_OK ends the peer's stream",
+	async (alpn) => {
+		// The peer never answers, and returns only once the request stream closes.
+		let started = 0;
+		let ended = 0;
+		spyOn(LitePublisher.prototype, "runAnnounce").mockImplementation(async (_msg, stream) => {
+			started++;
+			await stream.reader.closed.catch(() => {});
+			ended++;
+		});
+		const pair = createMockTransportPair(alpn);
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client }),
+			accept(pair.server, url, { publish: new OriginProducer().consume() }),
+		]);
+
+		const announced = client.announced(Path.Pattern.subtree(Path.from("room")));
+		await until(() => started === 1);
+		announced.close();
+		await until(() => ended === 1);
+
+		client.abort();
+		server.abort();
+	},
+);
+
+test("moq-lite-07-wip: a plain request outlives the listing it resolved through", async () => {
+	const run = LitePublisher.prototype.runAnnounce;
+	let ended = 0;
+	spyOn(LitePublisher.prototype, "runAnnounce").mockImplementation(function (this: LitePublisher, msg, stream) {
+		return run.call(this, msg, stream).finally(() => ended++);
+	});
+	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
+	const serverOrigin = new OriginProducer();
+	const clientOrigin = new OriginProducer();
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client, consume: clientOrigin }),
+		accept(pair.server, url, { publish: serverOrigin.consume() }),
+	]);
+
+	// An epoch proves the request's own announce request reports the same instance; without one
+	// the hand-over restarts the route and ends the request.
+	const broadcast = serverOrigin.createBroadcast(Path.from("room/cam"));
+	broadcast.announce({ epoch: Epoch.mint() });
+	const serving = (async () => {
+		for (;;) {
+			const req = await wireOf(broadcast).requested();
+			if (!req) break;
+			req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame(req.name));
+		}
+	})();
+
+	// Browse, then play what the listing found with a plain request.
+	const reader = clientOrigin.consume();
+	const listing = reader.announced(Path.Pattern.subtree(Path.from("room")));
+	expect((await listing.next())?.kind).toBe("start");
+	const request = reader.request(Path.from("room/cam"));
+	await until(() => request.active.peek() !== undefined);
+	const front = request.active.peek();
+
+	// The listing leaves, the request's own announce request opens and reports the route, and
+	// then the listing's lingers out.
+	jest.useFakeTimers();
+	listing.close();
+	for (let i = 0; i < 64; i++) await new Promise((resolve) => setImmediate(resolve));
+	jest.advanceTimersByTime(2000);
+	jest.useRealTimers();
+	await until(() => ended === 1);
+
+	// The publisher is still live, so the request keeps its instance and serves new tracks.
+	expect(request.closed.peek()).toBeUndefined();
+	expect(request.active.peek()).toBe(front);
+	const track = front?.track("after").subscribe().ordered();
+	expect(await track?.readString()).toBe("after");
+
+	track?.close();
+	request.close();
+	broadcast.close();
+	await serving;
+	client.abort();
+	server.abort();
+	serverOrigin.close();
+	clientOrigin.close();
+});
+
 test.each([Lite.ALPN_06, Lite.ALPN_07_WIP])(
 	"%s: a following request keeps serving tracks after discovery hands over",
 	async (alpn) => {

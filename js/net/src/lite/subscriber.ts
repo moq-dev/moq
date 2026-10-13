@@ -319,7 +319,12 @@ export class Subscriber {
 			// keep the reflected-announce loop check seeing the full chain.
 			let responderOrigin: Hop | undefined;
 			if (hasAnnounceOk(this.version)) {
-				const ok = await AnnounceOk.decode(stream.reader, this.version);
+				const ok = await race([AnnounceOk.decode(stream.reader, this.version), announced.closed]);
+				// A consumer that leaves before the peer answers ends the request now, not on the answer.
+				if (!(ok instanceof AnnounceOk)) {
+					stream.close();
+					return;
+				}
 				// Keep a withheld 0: it names nobody for loop detection, but it is the
 				// anonymous mark and must travel the reconstructed chain. Assigned identities
 				// stay off this hop and are never forwarded.
