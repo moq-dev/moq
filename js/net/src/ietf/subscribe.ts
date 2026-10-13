@@ -12,7 +12,7 @@ import { type IetfVersion, Version } from "./version.ts";
  *
  * `Default` (0x0) is the wire's "no preference": the publisher picks, which in
  * practice means its own DEFAULT_PUBLISHER_GROUP_ORDER track property. It is accepted
- * from a caller and on a draft-14 decode, and normalized away in both cases -- this
+ * from a caller and on a draft-14 decode, and normalized away in both cases, so this
  * client never puts it on the wire. From draft-15 it could not: GROUP_ORDER is a
  * message parameter there and {@link Parameters} rejects 0 as a protocol violation, so
  * only draft-14's inline field can carry it at all.
@@ -25,8 +25,8 @@ export const GroupOrder = {
 
 export type GroupOrder = (typeof GroupOrder)[keyof typeof GroupOrder];
 
-// The order this client requests unless the caller names one. Descending (newest
-// group first) is what every subscription asked for before `groupOrder` existed.
+// The order this client requests unless the caller names one: newest group first,
+// matching moq-lite and the order our publisher serves.
 const GROUP_ORDER = GroupOrder.Descending;
 
 /**
@@ -51,8 +51,7 @@ export class Subscribe {
 	/**
 	 * The order the publisher is asked to deliver groups in (GROUP_ORDER).
 	 *
-	 * Defaults to {@link GroupOrder.Descending}, which is what this client sent
-	 * unconditionally before the field existed.
+	 * Defaults to {@link GroupOrder.Descending}.
 	 */
 	groupOrder: GroupOrder;
 

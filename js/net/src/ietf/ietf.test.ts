@@ -2153,12 +2153,8 @@ for (const version of [Version.DRAFT_14, Version.DRAFT_15, Version.DRAFT_16]) {
 	});
 }
 
-// Caller-selected SUBSCRIBE group order.
-//
-// GROUP_ORDER was a module constant written unconditionally on both wire shapes, and
-// `Subscribe` had no field for it -- so no caller, internal or public, could ask for
-// Ascending. The decoder already read and validated the value, and then dropped it: a relay
-// built on this parsed the subscriber's requested order correctly and could not act on it.
+// Caller-selected SUBSCRIBE group order, on both wire shapes: draft-14's inline u8 and
+// the draft-15+ message parameter.
 test.each([
 	["v14", Version.DRAFT_14],
 	["v20", Version.DRAFT_20],
@@ -2218,7 +2214,7 @@ test.each([
 	["v20", Version.DRAFT_20],
 ] as const)("Subscribe %s: a caller asking for Default sends a real order", async (_name, version) => {
 	// 0x0 is the wire's "no preference". A caller may pass it, but it must normalize to a
-	// real order rather than reaching the encoders -- from draft-15 GROUP_ORDER is a message
+	// real order rather than reaching the encoders: from draft-15 GROUP_ORDER is a message
 	// parameter and Parameters rejects 0 outright, so sending it would be unencodable.
 	const msg = new Subscribe.Subscribe({
 		requestId: 1n,
