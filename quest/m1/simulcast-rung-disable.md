@@ -8,8 +8,9 @@ each as `enabled: false` in the catalog, and re-enables them with hysteresis
 once the grant recovers. The lower renditions keep their share instead of
 every rung degrading together. Covers the JS publisher (`js/publish`), the
 Rust and FFI publishers (the `rs/moq-video` producer under the `rs/moq-mux`
-rate policy), and the OBS plugin. `@moq/watch`, `moq play`, `moqsrc`, and
-the FFI consumers already skip disabled renditions. WHEP, HLS, and the
+rate policy), and the OBS plugin. `@moq/watch`, `moq play`, and `moqsrc`
+already skip disabled renditions; moq-ffi and moq-c refuse to subscribe one
+and leave the fallback pick to the application. WHEP, HLS, and the
 moq-mux exports still serve them until
 [Native egress skips disabled renditions](/quest/m1/egress-enabled.md)
 lands, so a disabled rung can strand those viewers.

@@ -57,7 +57,8 @@ demand (#5214), each ranked beside the work it shares code with.
 
 Added 2026-10-12 from the Codex review of #5386: native egress skipping
 disabled renditions, ranked just above simulcast rung disable, which
-publishes them.
+publishes them. Rung disable does not wait on it, but until it lands a
+disabled rung strands WHEP, HLS, and moq-mux export viewers.
 
 ## Required
 
