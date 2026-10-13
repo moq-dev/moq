@@ -441,7 +441,10 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		try {
 			expect(playback.submitted).toEqual([1000, 1100, 1200]);
 			for (const timestamp of [1, 1.1, 1.2])
-				expect((await playback.arrivals.next())?.timestamp).toBe(Time.Milli(timestamp));
+				expect(await playback.arrivals.next()).toMatchObject({
+					kind: "frame",
+					timestamp: Time.Milli(timestamp),
+				});
 			// Rejected payloads were still received, but never counted as frames.
 			expect(playback.decoder.out.stats.peek()).toEqual({ frameCount: 3, bytesReceived: 5 });
 		} finally {

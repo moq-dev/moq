@@ -157,7 +157,7 @@ describe.each(["shared", "post"] as const)("%s ingress diagnostics", (ring) => {
 		expect(held).toEqual([
 			{ kind: "gap" },
 			...trace.map((entry) => ({
-				kind: "frame",
+				kind: "frame" as const,
 				timestamp: Time.Milli(entry.timestamp),
 				arrival: Time.Milli(entry.at),
 				late: false,
