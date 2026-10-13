@@ -29,7 +29,9 @@ the nearest one above it. Both sides are checked because groups can be
 created and received out of sequence order. An equal start is allowed, as
 moq-mux's `container::Producer` already allows a keyframe at the previous
 group's start. Groups no longer cached are not checked. The write fails
-without writing; a session receiving such a group aborts the track with
+without writing: Rust's `write_frame` and `write_frames` commit the frame
+before `stamp` today, so the check runs before any cache, frame, or index
+change, and the start is stamped only once it passes. A session receiving such a group aborts the track with
 that error and keeps the session.
 
 Cases the rule must cover (from review):
