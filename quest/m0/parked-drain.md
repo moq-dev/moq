@@ -15,10 +15,11 @@ drain at about a tenth of the rate of 64, on `main` as well.
 `parked.retain(..)` over every parked group on every poll, re-registering an
 abort waiter on each, so a drain is quadratic.
 
-Decided 2026-10-13 (maintainer): m1, not m0. Groups park only when a
-subscriber caps its range below arriving groups and later raises the cap;
-live players and default relay forwarding set no end cap, so production's
-parked set is empty today.
+Decided 2026-10-13 (maintainer): m0. Groups park in production during a
+same-epoch relay handover: `Copy::wire` (`rs/moq-net/src/model/resume.rs`)
+caps the replaced copy's range, the lite publisher treats that end group as
+a serving cap, and the new route's unbounded demand then drains the parked
+set quadratically. Live players setting no cap of their own doesn't help.
 
 Recommended: validate lazily. Wake the subscriber from the track (one
 registration) when a cached group aborts, rather than registering on every
