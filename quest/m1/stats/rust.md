@@ -26,7 +26,8 @@
     `rs/moq-audio/src/playback` is already counted privately.
 - `moq-cli` folds the counters into `hang::stats::Snapshot` on the stats
   interval and writes it through `moq_json::snapshot`, with the `.z` sibling.
-  A TS import flattens `ts::stats::Snapshot` in as `mpegts`. `transport` comes from
+  A TS import flattens `ts::stats::Snapshot` in as `mpegts`, and a TS
+  export flattens its egress counters into `.echo` the same way. `transport` comes from
   the connection's `ConnectionStats`.
 - Feedback: after reading a catalog with an `echo` section, the player
   resolves the echo path against the broadcast, appends `<name>.echo`, and

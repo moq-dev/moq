@@ -24,7 +24,10 @@ and the hang draft specs both. Nothing produces them yet.
   way `Catalog<E>` takes `ts::Ext`. `Track` holds sent frames, sent bytes,
   keyframes, skipped frames, and the target bitrate as a gauge.
 - `rs/hang/src/echo.rs`:
-  `Snapshot { transport, renditions: BTreeMap<String, Track> }`. `Track`
+  `Snapshot<E = ()> { transport, renditions: BTreeMap<String, Track>, #[serde(flatten)] ext: E }`,
+  the same flatten as `stats::Snapshot`, so a TS export folds its
+  `mpegts` egress counters in (decided 2026-10-12, from
+  [#5360](https://github.com/moq-dev/moq/issues/5360)). `Track`
   holds:
   - received frames and bytes, decoded, late, and decode errors;
   - stalls, stalled duration, and underruns;
@@ -51,10 +54,11 @@ and the hang draft specs both. Nothing produces them yet.
   schemas, and the `.echo` convention: one broadcast per soliciting catalog,
   under the catalog's echo path, announced after the viewer reads the
   catalog. Validate with `just drafts check`.
-- Open: the MSF catalog conversion in `rs/moq-mux` copies only the media
-  sections and `ext`, so `stats` and `echo` drop silently under
-  `--catalog-format msf`. Candidates: carry them through MSF with a
-  round-trip test, or refuse `--stats` and `--echo` with MSF.
+- **Refuse `--stats` and `--echo` with `--catalog-format msf`** (decided
+  2026-10-12). The MSF conversion in `rs/moq-mux` copies only the media
+  sections and `ext`, so the sections would otherwise drop silently. Carrying
+  them through MSF `publishTracks` is
+  [MSF feedback tracks](/quest/m3/msf-publish-tracks.md).
 - Docs: `doc/concept/hang.md`, and a media section in `doc/concept/stats.md`.
 - Tests:
   - fixtures round-trip in both languages;
