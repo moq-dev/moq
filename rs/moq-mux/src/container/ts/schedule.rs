@@ -469,6 +469,9 @@ impl Schedule {
 	/// Queue an access unit on `pid` (whole TS packets, the tables muxed ahead of it first)
 	/// with its exact transport deadline and decoder removal time.
 	pub fn push(&mut self, pid: u16, timing: Timing, packets: Vec<u8>, keyframe: bool) -> anyhow::Result<()> {
+		if packets.is_empty() {
+			return Ok(());
+		}
 		let due = slot(timing.by);
 		// An ended source relaxes deadlines, never buffer sizes: such a unit never fits.
 		if let Some(size) = self.buffers.get(&pid).and_then(|buffer| buffer.size) {
@@ -1246,8 +1249,28 @@ mod tests {
 		assert!(error.contains("2688"), "{error}");
 		assert!(error.contains("2592"), "{error}");
 		assert!(!schedule.queued(), "refusal must not partially queue a unit");
-		for bytes in [2_304, 2_436] {
+		// The 14-byte PES header waits in B with its unit (BSn includes BSoh, 2.4.2.3), so
+		// 2,578 elementary bytes fill the buffer exactly and 2,580 overflow it.
+		assert!(schedule.push(1, timing(1_000), audio(2_580), false).is_err());
+		for bytes in [2_304, 2_436, 2_578] {
 			schedule.push(1, timing(1_000), audio(bytes), false).unwrap();
+		}
+	}
+
+	/// A unit with no packets, such as a dropped malformed section, has nothing to place.
+	#[test]
+	fn an_empty_unit_is_skipped() {
+		for rate in [Some(RATE), None] {
+			let mut schedule = Schedule::new(Duration::from_millis(100));
+			schedule.set_rate(rate);
+			schedule.set_buffer(1, VIDEO);
+			schedule.push(1, timing(1_000), Vec::new(), false).unwrap();
+			schedule.push(1, timing(1_040), unit(1, 2), true).unwrap();
+			let sent: usize = drain(&mut schedule)
+				.iter()
+				.filter_map(|(_, per_pid, _)| per_pid.get(&1))
+				.sum();
+			assert_eq!(sent, 2, "{rate:?}");
 		}
 	}
 
