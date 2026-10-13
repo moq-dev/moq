@@ -108,7 +108,9 @@ These land with the next breaking release, not the 2026-09-23 train.
   or `MoqMediaContainerGroupConsumer::fetch` instead. Producers drop `name`,
   `used`, and `unused`; read them through `demand()`. The wrappers expose these
   as `moq.media` in Python, `moq.dev/moq/media` in Go, `dev.moq.media` in
-  Kotlin, `package:moq/media.dart` in Dart, and `Media` in Swift.
+  Kotlin, `package:moq/media.dart` in Dart, and `Media` in Swift. Go fetches a
+  group with `media.FetchContainerGroup`; its `NewContainerGroupConsumer` decodes
+  a raw group instead.
 - **moq-ffi error payloads are named.** `MoqError` cases that carried a
   positional string (`Transport`, `Internal`, `Connect`, ...) name it
   `reason` (`Reason` in Go, the `reason:` label in Swift). The Display text is

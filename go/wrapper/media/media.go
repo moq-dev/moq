@@ -213,8 +213,8 @@ type ContainerGroupConfig struct {
 	Options   *moq.FetchGroupOptions
 }
 
-// NewContainerGroupConsumer fetches and decodes exactly one media group.
-func NewContainerGroupConsumer(ctx context.Context, broadcast *moq.BroadcastConsumer, config ContainerGroupConfig) (*ContainerGroupConsumer, error) {
+// FetchContainerGroup fetches and decodes exactly one media group.
+func FetchContainerGroup(ctx context.Context, broadcast *moq.BroadcastConsumer, config ContainerGroupConfig) (*ContainerGroupConsumer, error) {
 	inner, err := ffi.MoqMediaContainerGroupConsumerFetch(ctx, bridge.BroadcastConsumer(broadcast), ffi.MoqMediaContainerGroupConfig{Name: config.Name, Sequence: config.Sequence, Container: config.Container, Options: config.Options})
 	if err != nil {
 		return nil, err
@@ -222,13 +222,13 @@ func NewContainerGroupConsumer(ctx context.Context, broadcast *moq.BroadcastCons
 	return &ContainerGroupConsumer{inner: inner}, nil
 }
 
-// DecodeGroup decodes a raw group with the track's container, as each frame lands.
+// NewContainerGroupConsumer decodes a raw group with the track's container, as each frame lands.
 //
 // Pair it with TrackConsumer.RecvGroup to read media in arrival order: frame timestamps are
 // container media time, not the transport's. Which groups arrive, and how long a stalled one
 // stays readable, is the subscription's MaxDelay. Takes over group, whose handle is closed
 // afterward; errors if it has already read a frame.
-func DecodeGroup(group *moq.GroupConsumer, container Container) (*ContainerGroupConsumer, error) {
+func NewContainerGroupConsumer(group *moq.GroupConsumer, container Container) (*ContainerGroupConsumer, error) {
 	inner, err := ffi.NewMoqMediaContainerGroupConsumer(bridge.GroupConsumer(group), container)
 	if err != nil {
 		return nil, err

@@ -579,7 +579,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	if group == nil {
 		t.Fatal("expected a group")
 	}
-	decoded, err := moqmedia.DecodeGroup(group, audio.Container)
+	decoded, err := moqmedia.NewContainerGroupConsumer(group, audio.Container)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -17,8 +17,9 @@ linux/amd64, linux/arm64, darwin/arm64 (macOS 12.3+), windows/amd64.
 Construct `NewAudioTrackProducer` / `NewVideoTrackProducer` from a broadcast, an init record,
 and a `Named` or `Requested` target. `NewCatalogProducer` holds its broadcast weakly;
 catalog writes fail with `ErrClosed` after the broadcast closes. Media timestamps use `time.Duration`.
-For arrival-order reads, decode each group from `TrackConsumer.RecvGroup` with `DecodeGroup`;
-frames carry container media time as they land.
+For arrival-order reads, decode each group from `TrackConsumer.RecvGroup` with
+`NewContainerGroupConsumer`; frames carry container media time as they land. `FetchContainerGroup`
+fetches and decodes one past group.
 
 ```bash
 go get moq.dev/moq@latest
