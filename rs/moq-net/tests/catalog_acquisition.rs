@@ -46,9 +46,7 @@ async fn acquisition(version: &str) {
 	announced.next().await.unwrap();
 	let track = request.accept(None);
 	let mut group = track.append_group().unwrap();
-	group
-		.write_frame(moq_net::Timestamp::ZERO, b"catalog".to_vec())
-		.unwrap();
+	group.write_frame(None, b"catalog".to_vec()).unwrap();
 	group.finish().unwrap();
 	let result = pending.await;
 	if version == "moq-lite-07-wip".parse().unwrap() {
