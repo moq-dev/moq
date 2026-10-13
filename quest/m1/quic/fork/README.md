@@ -65,5 +65,5 @@ is either ported by a child quest or recorded as not applicable in the
 ## Related
 
 - [Shard the endpoint](/quest/m1/quic/shard.md) - the first feature the fork makes possible
-- [Remove moq-uring copies](/quest/m1/perf/uring-copies.md) - cheap copy removals on the new core
+- [Remove moq-uring copies](/quest/m2/perf/uring-copies.md) - cheap copy removals on the new core
 - [Redesign the QUIC I/O boundary](/quest/m2/quic-io-boundary.md) - the breaking perf rewrite, gated on a profile

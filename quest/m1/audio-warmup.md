@@ -14,9 +14,9 @@ frames decode independently and set nothing; HE-AAC is out of scope.
 - `rs/moq-audio/src/encode/producer.rs` and `rs/moq-mux/src/codec/opus`
   publish `warmup` for Opus; `js/publish` does the same for its Opus track.
 - `rs/moq-audio/src/decode` already trims Opus `pre_skip` at stream start;
-  the warmup trim is the same mechanism keyed on the container consumer's
-  non-continuous signal (added in Rust by
-  [Rust non-continuous signal](/quest/m1/rust-continuous.md)), and the
+  the warmup trim is the same mechanism keyed on the container read's gap
+  item (`container::Read::Gap` in Rust, `{ kind: "gap" }` in JS), never on a
+  declared end, which would cut 80 ms at every pause, and the
   subscription's maximum age grows by `warmup` as the video consumer quest
   does. `js/watch` audio mirrors it.
 - The trim replaces `LEGACY_WARMUP_CALLBACKS` in `js/watch/src/audio/decoder.ts`,
@@ -25,10 +25,6 @@ frames decode independently and set nothing; HE-AAC is out of scope.
   return after an absence: 60 ms of 20 ms Opus.
 - Tests in both languages: a mid-stream join discards exactly the warmup span
   and a continuous listener loses nothing.
-
-## Required
-
-- [Rust non-continuous signal](/quest/m1/rust-continuous.md) - the signal the trim keys on
 
 ## Related
 

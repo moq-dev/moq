@@ -6,7 +6,7 @@ use std::task::Poll;
 use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
-use hang::catalog::{Archive, AudioConfig, Clock, VideoConfig};
+use hang::catalog::{Archive, AudioConfig, Clock, Reference, VideoConfig};
 use moq_mux::container::fmp4::Muxer;
 use moq_mux::timeline::Entry;
 use sha2::{Digest, Sha256};
@@ -230,7 +230,7 @@ fn normalize_audio(config: &AudioConfig) -> AudioConfig {
 /// A single HLS rendition: master-playlist metadata, its view of the broadcast timeline (which
 /// renders its media playlist), and on-demand segment fetching.
 pub struct Rendition {
-	/// Rendition name (the catalog track name; also its URL path component).
+	/// The rendition's catalog ID, also its URL path component.
 	pub name: String,
 	/// Whether this rendition is video or audio.
 	pub kind: Kind,
@@ -390,14 +390,15 @@ impl Rendition {
 	///
 	/// A rendition the catalog indexes no timeline for resolves nothing but the reference's rows.
 	pub(crate) fn watch(&self, history: bool) {
-		let Some(_) = self.section.timelines.get(&self.name) else {
+		let track = self.track_name();
+		if !self.section.timelines.contains_key(track) {
 			self.spans.end();
 			return;
-		};
+		}
 		let watcher = tokio::spawn(watch_spans(
 			self.catalog.clone(),
 			self.section.clone(),
-			self.name.clone(),
+			track.to_string(),
 			self.spans.clone(),
 			history,
 		));
@@ -466,8 +467,8 @@ impl Rendition {
 	}
 
 	/// Whether this rendition is `reference`.
-	fn is(&self, reference: &(Kind, String)) -> bool {
-		reference.0 == self.kind && reference.1 == self.name
+	fn is(&self, reference: &segments::ReferenceKey) -> bool {
+		reference.0 == self.kind && reference.1 == self.name && reference.2 == self.track_name()
 	}
 
 	/// Remove source timeline records in `range` from this rendition's window.
@@ -822,7 +823,7 @@ impl Rendition {
 		let Ok(broadcast) = std::task::ready!(binding.poll_broadcast(waiter)) else {
 			return Poll::Ready(None);
 		};
-		let track = broadcast.track(&self.name).ok();
+		let track = broadcast.track(self.track_name()).ok();
 		let subscription = moq_net::track::Subscription::default().with_max_delay(FEED_MAX_DELAY);
 		Poll::Ready(track.map(|track| track.subscribe(subscription).into_inner()))
 	}
@@ -839,8 +840,16 @@ impl Rendition {
 		binding: &moq_mux::Binding,
 	) -> Option<(moq_net::broadcast::Consumer, moq_net::track::Consumer)> {
 		let broadcast = binding.broadcast().await.ok()?;
-		let track = broadcast.track(&self.name).ok()?;
+		let track = broadcast.track(self.track_name()).ok()?;
 		Some((broadcast, track))
+	}
+
+	/// The media track's name in its broadcast, which can differ from the rendition's ID.
+	fn track_name(&self) -> &str {
+		match &self.config {
+			Config::Video(config) => config.track(&self.name),
+			Config::Audio(config) => config.track(&self.name),
+		}
 	}
 
 	/// The rendition's CMAF init segment, built on first request and cached.
@@ -900,7 +909,7 @@ impl Rendition {
 		let bytes = match muxer.init()? {
 			Some(bytes) => bytes,
 			None => {
-				let reference = (self.kind, self.name.clone());
+				let reference = (self.kind, self.name.clone(), self.track_name().to_string());
 				let latest = self.spans.latest_keyframe_group();
 				let Some(sequence) = latest.or_else(|| self.live.latest_keyframe_group(&reference)) else {
 					return Ok(None);

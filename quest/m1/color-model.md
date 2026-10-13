@@ -16,10 +16,10 @@ requested color: convert correctly or refuse. Preserve color information
 through CUDA, D3D, and Android paths and test the signaled VUI against pixels.
 
 Decided in the 2026-09-30 audit: split from the catalog colour model,
-[Catalog colour](/quest/m1/color-catalog.md), which the WebGPU HDR renderer
+[Catalog colour](/quest/m2/color-catalog.md), which the WebGPU HDR renderer
 now consumes (2026-10-08). Encoder correctness stays separate because a
 mislabelled stream is wrong for every consumer.
 
 ## Related
 
-- [Catalog colour](/quest/m1/color-catalog.md) - the catalog describes a rendition's colour and HDR properties
+- [Catalog colour](/quest/m2/color-catalog.md) - the catalog describes a rendition's colour and HDR properties

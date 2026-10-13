@@ -36,8 +36,10 @@ async def main():
             broadcast = await client.request_broadcast(event.announce.prefix)
             catalog = await moq.media.catalog(broadcast)
 
-            for name, track in catalog.audio.items():
-                frames = await moq.media.ContainerConsumer.subscribe(broadcast, name, track.container)
+            for name, audio in catalog.audio.items():
+                # The track is the rendition's `track` when set, otherwise its catalog key.
+                track = audio.track if audio.track is not None else name
+                frames = await moq.media.ContainerConsumer.subscribe(broadcast, track, audio.container)
                 async with frames:
                     async for frame in frames:
                         print(f"Got frame: {len(frame.payload)} bytes, ts={frame.timestamp}")
@@ -189,7 +191,7 @@ client = moq.Client(
 - `await media.CatalogConsumer.subscribe(broadcast)` streams catalog snapshots;
   `await media.catalog(broadcast)` reads one snapshot and releases its subscription.
 - `await media.ContainerConsumer.subscribe(broadcast, name, container, *, subscription=None)`
-  decodes live media. Pass the catalog rendition's `container`.
+  decodes live media. Pass the catalog rendition's `track` (or its key when unset) and `container`.
 - `await media.ContainerGroupConsumer.fetch(broadcast, name, sequence, container, *, options=None)`
   fetches and decodes exactly one group.
 

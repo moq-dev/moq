@@ -80,7 +80,7 @@ use moq_net::Timed;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use hang::catalog::{Compression, JsonConfig, Mode};
+use hang::catalog::{Compression, JsonConfig, Mode, Reference};
 
 use crate::catalog::hang::CatalogExt;
 use crate::catalog::{IntoRendition, Listing, RenditionConfig};
@@ -436,7 +436,7 @@ impl crate::catalog::Entry<'_, JsonConfig> {
 	/// Errors if the entry declares a mode or compression this build doesn't implement.
 	pub async fn subscribe<T: DeserializeOwned>(&self, source: &crate::Source) -> crate::Result<Consumer<T>> {
 		let track = source
-			.subscribe_track(self.config().broadcast.as_ref(), self.name())
+			.subscribe_track(self.config().broadcast.as_ref(), self.config().track(self.name()))
 			.await?;
 		Consumer::from_track(track, self.config())
 	}

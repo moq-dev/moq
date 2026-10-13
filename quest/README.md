@@ -7,17 +7,17 @@ grouped into milestones ordered by priority.
 
 ## Plan
 
-m0 is everything in flight now: relay hardening and the IETF interop
-fixes ahead of Seattle, and broadcast epochs. m1 is the next wave across reliability, features, performance, and
-planning. m2 holds later features, design studies, and experiments. m3 is
-gated on the outside world (hardware, a partner, a consumer, a provider's
-offer, or an upstream release) or is speculative work with no named consumer
-yet.
+m0 holds urgent fixes and release-line maintenance. m1 is the finite next
+breaking release: clustering stability first, the QUIC library switch, and
+planned public API and format breaks with their correctness and validation.
+m2 holds independently shippable capabilities and optimizations, plus the
+publication and adoption steps that follow m1. m3 holds external conditions
+and speculative work. A milestone is a priority horizon; m0 maintenance does
+not make unrelated infrastructure a gate for the main-to-release cut.
 
-A quest waiting on the outside world, in any milestone, requires a small quest
-beside it that names the condition. That condition quest stays ready, so
-every `/quest-spawn` resurfaces it; when the condition clears, delete it and
-move the blocked quest to the milestone its priority belongs in.
+The [release execution](/quest/m2/release/README.md) starts after m1 is ready.
+It publishes artifacts before downstream adoption and rollout can complete.
+Critical fixes continue to reach the existing release through backports.
 
 ## Required
 

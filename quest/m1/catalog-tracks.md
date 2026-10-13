@@ -49,7 +49,7 @@ relies on it. Reasons:
   Test: a quiet-start import that rises to a sustained 5 Mb/s reselects a
   0.5 Mb/s rung on a 2 Mb/s connection.
 - A change to codec or description, or past a ceiling, mints a new rendition
-  name through a [catalog rendition ID](/quest/m1/catalog-track-id.md) when
+  name through a new catalog rendition ID when
   the catalog can keep both, or a new
   [broadcast epoch](/quest/m0/broadcast-epoch/README.md) when the whole
   broadcast restarts. The catalog may still add and remove tracks; a removed
@@ -74,7 +74,6 @@ the hang catalog's field semantics, documented in its draft.
 
 ## Related
 
-- [Catalog rendition IDs](/quest/m1/catalog-track-id.md) - lets a catalog list a new track name for a changed rendition
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - a restart is a new epoch rather than a changed track
 - [Archive](/quest/m1/archive/README.md) - storage and replay consume the identity contract
 - [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - an update cannot retarget an already-pinned sibling instance

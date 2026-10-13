@@ -1208,8 +1208,12 @@ mod tests {
 		}
 
 		async fn read(track: &mut moq_mux::container::Consumer<moq_mux::catalog::hang::Container>) -> u64 {
-			let frame = track.read().await.unwrap().expect("a published frame");
-			u64::try_from(frame.timestamp.as_micros()).unwrap()
+			loop {
+				let read = track.read().await.unwrap().expect("a published frame");
+				if let moq_mux::container::Read::Frame { frame, .. } = read {
+					return u64::try_from(frame.timestamp.as_micros()).unwrap();
+				}
+			}
 		}
 
 		/// Read the next frame not already in `seen`: a resubscription replays retained groups first.

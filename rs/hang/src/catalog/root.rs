@@ -141,7 +141,8 @@ impl Catalog<()> {
 }
 
 impl<E> Catalog<E> {
-	/// Refuse a catalog with more renditions than a consumer can hold.
+	/// Refuse a catalog with more renditions than a consumer can hold, or with an ID naming both
+	/// a video and an audio rendition.
 	pub fn check_renditions(&self) -> Result<()> {
 		let count = self.video.renditions.len() + self.audio.renditions.len() + self.text.renditions.len();
 		if count > MAX_RENDITIONS {
@@ -149,6 +150,14 @@ impl<E> Catalog<E> {
 				count,
 				max: MAX_RENDITIONS,
 			});
+		}
+		if let Some(id) = self
+			.video
+			.renditions
+			.keys()
+			.find(|id| self.audio.renditions.contains_key(*id))
+		{
+			return Err(crate::Error::DuplicateRendition(id.clone()));
 		}
 		Ok(())
 	}
@@ -245,6 +254,57 @@ mod test {
 				count: 65,
 				max: MAX_RENDITIONS
 			})
+		));
+	}
+
+	#[test]
+	fn track_name_defaults_to_the_id() {
+		use crate::catalog::Reference;
+
+		let catalog = Catalog::<()>::from_str(
+			r#"{
+				"video": {"renditions": {"hd": {"codec": "avc1.64001f", "container": {"kind": "legacy"}}}},
+				"audio": {"renditions": {"en": {"codec": "opus", "sampleRate": 48000, "numberOfChannels": 2, "container": {"kind": "legacy"}}}}
+			}"#,
+		)
+		.unwrap();
+		assert_eq!(catalog.video.renditions["hd"].track("hd"), "hd");
+		assert_eq!(catalog.audio.renditions["en"].track("en"), "en");
+		assert!(!catalog.to_json().unwrap().contains("\"track\""));
+	}
+
+	#[test]
+	fn one_track_name_in_two_broadcasts() {
+		use crate::catalog::Reference;
+
+		let encoded = r#"{
+			"video": {"renditions": {
+				"left": {"broadcast": "./left", "track": "video", "codec": "avc1.64001f", "container": {"kind": "legacy"}},
+				"right": {"broadcast": "./right", "track": "video", "codec": "avc1.64001f", "container": {"kind": "legacy"}}
+			}}
+		}"#;
+		let catalog = Catalog::<()>::from_str(encoded).unwrap();
+		assert!(catalog.check_renditions().is_ok());
+		for id in ["left", "right"] {
+			let config = &catalog.video.renditions[id];
+			assert_eq!(config.track(id), "video");
+			assert_eq!(config.broadcast().map(|b| b.as_str()), Some(id));
+		}
+		assert_eq!(Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap(), catalog);
+	}
+
+	#[test]
+	fn cross_kind_duplicate_id_is_refused() {
+		let catalog = Catalog::<()>::from_str(
+			r#"{
+				"video": {"renditions": {"main": {"codec": "avc1.64001f", "container": {"kind": "legacy"}}}},
+				"audio": {"renditions": {"main": {"codec": "opus", "sampleRate": 48000, "numberOfChannels": 2, "container": {"kind": "legacy"}}}}
+			}"#,
+		)
+		.unwrap();
+		assert!(matches!(
+			catalog.check_renditions(),
+			Err(crate::Error::DuplicateRendition(id)) if id == "main"
 		));
 	}
 
@@ -348,6 +408,7 @@ mod test {
 			"video".to_string(),
 			VideoConfig {
 				broadcast: None,
+				track: None,
 				label: None,
 				codec: H264 {
 					profile: 0x64,
@@ -377,6 +438,7 @@ mod test {
 			"audio".to_string(),
 			AudioConfig {
 				broadcast: None,
+				track: None,
 				label: None,
 				codec: Opus,
 				sample_rate: 48_000,

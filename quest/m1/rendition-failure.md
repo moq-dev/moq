@@ -49,15 +49,14 @@ Decided with the maintainer (2026-10-13):
   recovered rendition publishes under a new track name or a new broadcast
   epoch; when unsure, default to one of those, because that's safer. This
   keeps #5068's decision 7 for any replacement encoder. A new track name
-  leaves the siblings running but needs
-  [catalog rendition IDs](/quest/m1/catalog-track-id.md) to keep the catalog
-  ID stable; a new epoch restarts the siblings, so reserve it for recovery,
+  leaves the siblings running and keeps the catalog ID stable through the
+  rendition's `track` field (#5367); a new epoch restarts the siblings, so reserve it for recovery,
   never for the failure itself.
 - **Milestone: m1**, as reliability of a shipped feature.
 
 Also:
 
-- Watch for the interaction with [simulcast rung disable](/quest/m1/simulcast-rung-disable.md),
+- Watch for the interaction with [simulcast rung disable](/quest/m2/simulcast-rung-disable.md),
   which also drives `enabled`: a recovering grant must not re-enable a
   failed rendition.
 - Tests on mock time with a fake encoder: a failing video rendition leaves a
@@ -68,6 +67,5 @@ Also:
 
 ## Related
 
-- [Simulcast rung disable](/quest/m1/simulcast-rung-disable.md) - the other driver of a rendition's `enabled` state
+- [Simulcast rung disable](/quest/m2/simulcast-rung-disable.md) - the other driver of a rendition's `enabled` state
 - [Native egress skips disabled renditions](/quest/m1/egress-enabled.md) - WHEP, HLS and moq-mux exports honor `enabled: false`
-- [Catalog rendition IDs](/quest/m1/catalog-track-id.md) - lets a rendition move to a new track name without changing its catalog ID

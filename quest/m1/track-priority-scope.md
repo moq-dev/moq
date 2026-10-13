@@ -58,7 +58,8 @@ Direction to settle in the draft first, then the code:
   needed on the wire; the draft only has to say that a relay MAY scope
   priority to the broadcast.
 - On a relay-to-relay session with fairness on, ordering across broadcasts is
-  byte-fair (the scheduler's fair tier, one send group per broadcast), the
+  byte-fair (the scheduler's fair tier, one domain per broadcast and one send group
+  per subscription inside that domain), the
   publisher's track priority orders streams within a broadcast, and
   downstream subscriber priorities are not forwarded. Attribute FETCH streams
   to a domain the same way: cache-miss and history fetches carry Subscriber
@@ -121,7 +122,7 @@ to 127 on IETF. Report both with the draft change.
 ## Required
 
 - [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - the fair
-  tier the per-broadcast send groups ride on
+  tier the broadcast domains and subscription send groups ride on
 
 ## Related
 
