@@ -189,12 +189,29 @@ export function hasFrameBounds(version: Version): boolean {
 	}
 }
 
+/** Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's `Group Order`. Added in
+ * lite-07; an earlier subscription is served newest first. */
+export function hasOrder(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /** Whether SUBSCRIBE, SUBSCRIBE_UPDATE, SUBSCRIBE_OK, and TRACK_INFO carry the retired
  * `Ordered` byte.
  *
- * The field is gone from the model: a publisher transmits newest-first within a track,
- * always. Deployed drafts still have the byte in their layout, so it is written as 0 and
- * ignored on read rather than shifting every field behind it. */
+ * These drafts are served newest first whatever the byte says, so it is written as 0 and
+ * ignored on read rather than shifting every field behind it. Lite-07's `Group Order` (see
+ * {@link hasOrder}) is a new field, not this one. */
 export function hasGroupOrder(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-06+ behavior.
 	switch (version) {

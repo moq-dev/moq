@@ -2,8 +2,9 @@
 
 ## Goal
 
-The relay's session stats carry, per tier in [stats-split](/quest/m0/broadcast-epoch/stats-split.md)'s
-totals and per root in its requested per-root track, how many sessions were
+The relay's session stats carry, per tier in the `totals.json` track and per
+root in the requested `<root>/presence.json` track
+([Stats](/doc/concept/stats.md#tracks)), how many sessions were
 refused, by reason, and how many ended abnormally, by kind: idle timeout,
 transport error, application error, or token expired. A dashboard computes an
 error rate from the stats feed alone, with no log scraping. Refusals count
@@ -30,7 +31,7 @@ playback needs an error rate it cannot see client-side):
   grant, so no root or tier. Count a refusal under the empty root on the
   default tier. `group_key` sends the empty root to the root group
   (`<prefix>/node/<node>`) at any `--stats-depth`, so it lands there, created
-  on first sight and following stats-split's linger and epoch; a project's
+  on first sight and following the stats linger and epoch; a project's
   group never sees it. Sessions admitted under the empty root (public rules)
   share that group. `expired` and per-root attribution need the decider to
   say so, which [Typed refusal reason](/quest/m1/refusal-reason.md) adds.
@@ -69,9 +70,10 @@ playback needs an error rate it cannot see client-side):
   fixed named counters per reason and per kind, so `Presence` stays `Copy`
   (what downstream aggregators plan against). `sessions_ended` stays
   the total, so the live count (`sessions_started - sessions_ended`) is
-  unchanged. They ride stats-split's totals and per-root track, not
-  `sessions.json`, which stats-split retires (quest audit, 2026-10-08).
-- **Outcomes follow stats-split's counter rules.** A pruned root folds its
+  unchanged. Readers take them from the totals and presence tracks (quest
+  audit, 2026-10-08); `sessions.json` stays for existing readers (#5084, kept
+  backwards compatible 2026-10-12) and carries the same `Presence` entries.
+- **Outcomes follow the stats counter rules.** A pruned root folds its
   counts into the group totals, and the aggregator merges with a baseline per
   upstream (node, epoch), so a node leaving or returning never reads as new
   errors or a drop.
@@ -86,11 +88,6 @@ playback needs an error rate it cannot see client-side):
 
 Public API: a refusal reason type and a refusal method on `stats::Handle`;
 `Presence` gains the counters. Wire: the stats track's `Presence` fields.
-
-## Required
-
-- [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) -
-  the totals and per-root track these counters ride, replacing `sessions.json`
 
 ## Related
 

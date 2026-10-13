@@ -91,6 +91,16 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just bench-audio
 
+      # perf samples worker switch-outs in kernel context into a large buffer; bench-lock refuses without it.
+      - name: Allow perf kernel sampling
+        if: ${{ !cancelled() }}
+        run: sudo sysctl -w kernel.perf_event_paranoid=-1
+
+      # Smoke-tests the capture path: exact off-CPU waits, resolved worker stacks and CPU.
+      - name: Relay lock-wait profile
+        if: ${{ !cancelled() }}
+        run: nix develop --command just bench-lock fanout-heavy 4
+
       - name: Latency observation benchmark
         if: ${{ !cancelled() }}
         run: nix develop --command just rs bench-latency

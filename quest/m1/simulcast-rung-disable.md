@@ -8,9 +8,12 @@ each as `enabled: false` in the catalog, and re-enables them with hysteresis
 once the grant recovers. The lower renditions keep their share instead of
 every rung degrading together. Covers the JS publisher (`js/publish`), the
 Rust and FFI publishers (the `rs/moq-video` producer under the `rs/moq-mux`
-rate policy), and the OBS plugin. `@moq/watch` already skips disabled
-renditions, and native consumers now skip them too, so a disabled rung
-never strands a viewer.
+rate policy), and the OBS plugin. `@moq/watch`, `moq play`, and `moqsrc`
+already skip disabled renditions; moq-ffi and moq-c refuse to subscribe one
+and leave the fallback pick to the application. WHEP, HLS, and the
+moq-mux exports still serve them until
+[Native egress skips disabled renditions](/quest/m1/egress-enabled.md)
+lands, so a disabled rung can strand those viewers.
 
 ## Plan
 
@@ -56,6 +59,7 @@ publishers expose for it. Wire: none; `enabled` already exists.
 
 ## Related
 
+- [Native egress skips disabled renditions](/quest/m1/egress-enabled.md) - WHEP, HLS, and the moq-mux exports stop serving a disabled rung
 - [Ladder controller](/quest/m3/ladder/controller.md) - the same rung disable for generated transcode ladders
 - [Rendition preference](/quest/m1/rendition-preference.md) - viewer selection that drops disabled renditions before ranking the rest
 - [OBS multitrack](/quest/m1/obs-multitrack.md) - OBS's native multitrack encoders as the renditions this disables

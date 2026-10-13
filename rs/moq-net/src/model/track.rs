@@ -19,7 +19,7 @@ use crate::{broadcast, cache, group, stats};
 use super::{Datagram, Requests};
 
 use super::Cap;
-pub use super::subscription::{Position, Subscription};
+pub use super::subscription::{Order, Position, Subscription};
 
 use std::{
 	collections::{BTreeMap, VecDeque},

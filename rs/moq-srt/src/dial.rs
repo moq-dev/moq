@@ -114,6 +114,7 @@ impl Client {
 	/// Wait up to `linger` for the same publisher instance to come back once the broadcast
 	/// [`publish`](Self::publish) reads ends, carrying on with the same stream. Zero (the
 	/// default) ends the push at the broadcast's end.
+	/// A stitched replacement must also supply its first catalog within this bound.
 	pub fn with_linger(mut self, linger: Duration) -> Self {
 		self.linger = linger;
 		self

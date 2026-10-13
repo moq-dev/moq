@@ -16,7 +16,6 @@ mod group;
 mod info;
 pub mod message;
 mod parameters;
-mod priority;
 mod probe;
 mod publisher;
 mod session;

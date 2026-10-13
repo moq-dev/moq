@@ -230,6 +230,7 @@ impl Client {
 				goaway: start.goaway,
 				auth: start.auth,
 				setup: start.setup,
+				estimate: Some(start.estimate),
 			},
 		))
 	}
@@ -319,7 +320,12 @@ impl Client {
 					v,
 					None,
 					crate::driver::Protocol::Ietf(protocol),
-					crate::session::Handles { goaway, auth, setup },
+					crate::session::Handles {
+						goaway,
+						auth,
+						setup,
+						estimate: None,
+					},
 				));
 			}
 			Some(ALPN_16) => {
@@ -412,7 +418,7 @@ impl Client {
 			.copied()
 			.ok_or(Error::Version)?;
 
-		let (recv_bw, protocol, goaway, auth, setup) = match version {
+		let (recv_bw, protocol, goaway, auth, setup, estimate) = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
 				let start = lite::start(lite::Config {
@@ -439,6 +445,7 @@ impl Client {
 					start.goaway,
 					start.auth,
 					start.setup,
+					Some(start.estimate),
 				)
 			}
 			Version::Ietf(v) => {
@@ -479,7 +486,7 @@ impl Client {
 					early_unis: Vec::new(),
 					extensions: self.extensions,
 				})?;
-				(None, crate::driver::Protocol::Ietf(protocol), goaway, auth, setup)
+				(None, crate::driver::Protocol::Ietf(protocol), goaway, auth, setup, None)
 			}
 		};
 
@@ -489,7 +496,12 @@ impl Client {
 			version,
 			recv_bw,
 			protocol,
-			crate::session::Handles { goaway, auth, setup },
+			crate::session::Handles {
+				goaway,
+				auth,
+				setup,
+				estimate,
+			},
 		))
 	}
 }

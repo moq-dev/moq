@@ -26,7 +26,12 @@ async fn main() -> anyhow::Result<()> {
 				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 			)?;
 			broadcast.announce(Default::default())?;
-			let _session = client.with_publisher(&origin).connect(url).established().await?;
+			let session = client
+				.clone()
+				.with_publisher(&origin)
+				.connect(url)
+				.established()
+				.await?;
 			track.demand().used().await?;
 			// Declare the end before the final group's payload is even available.
 			track.finish_at(moq_net::track::Position::group(GROUPS))?;
@@ -43,11 +48,17 @@ async fn main() -> anyhow::Result<()> {
 				.await?;
 			ensure!(ack == "clean end\n", "reader did not acknowledge a clean end");
 			broadcast.close();
+			session.close().await?;
 			eprintln!("tail acknowledged");
 		}
 		"subscribe" => {
 			let consumer = origin.consume();
-			let _session = client.with_subscriber(origin).connect(url).established().await?;
+			let session = client
+				.clone()
+				.with_subscriber(origin)
+				.connect(url)
+				.established()
+				.await?;
 			let broadcast = consumer.routed_broadcast(&args[3]).await?;
 			let options = moq_net::track::Subscription::default()
 				.with_max_delay(Duration::from_secs(5))
@@ -72,9 +83,12 @@ async fn main() -> anyhow::Result<()> {
 				track.finished().await? == moq_net::track::Position::group(GROUPS),
 				"wrong declared end"
 			);
+			session.close().await?;
 			eprintln!("tail clean end=4 groups=0,1,2,3 bytes=1048576");
 		}
 		_ => anyhow::bail!("unknown role: {}", args[1]),
 	}
+	// Dropping only queues the QUIC close; send it before the runtime stops.
+	client.close().await;
 	Ok(())
 }

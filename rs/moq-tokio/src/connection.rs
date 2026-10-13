@@ -2134,22 +2134,24 @@ mod tests {
 		value.parse().expect("valid url")
 	}
 
-	/// A loopback TCP port with nothing listening on it, which refuses instantly.
+	/// A loopback TCP port that hangs up on every connection, so dialing it fails fast.
 	///
-	/// A dead address that *refuses* rather than black-holes is what keeps these
+	/// A dead address that fails fast rather than black-holes is what keeps these
 	/// tests fast and deterministic: the walk itself is what's under test, and
 	/// bounding a black-holed attempt is covered by
 	/// [`only_a_candidate_with_a_fallback_is_bounded`] as a pure function.
 	///
-	/// The returned socket is bound but never listens, so the port refuses while
-	/// staying reserved: no other listener (or an ephemeral self-connect) can take
-	/// it mid-test. Hold it for as long as the URL is dialed.
+	/// It listens rather than leaving the port merely bound: only Linux refuses a
+	/// SYN to a socket that is bound but not listening, while macOS drops it and
+	/// each attempt waits out its timeout. Listening also keeps the port reserved,
+	/// so no other listener (or an ephemeral self-connect) can take it mid-test.
 	#[cfg(feature = "tcp")]
-	fn refused() -> (tokio::net::TcpSocket, Url) {
-		let socket = tokio::net::TcpSocket::new_v4().expect("tcp socket");
-		socket.bind("127.0.0.1:0".parse().unwrap()).expect("bind");
-		let addr = socket.local_addr().expect("local addr");
-		(socket, url(&format!("tcp://{addr}/")))
+	async fn dead() -> Url {
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+		let addr = listener.local_addr().expect("local addr");
+		// Dropping each stream unread hangs up before the qmux handshake completes.
+		tokio::spawn(async move { while listener.accept().await.is_ok() {} });
+		url(&format!("tcp://{addr}/"))
 	}
 
 	/// A bound stream listener and the URL that reaches it.
@@ -2196,8 +2198,8 @@ mod tests {
 		let (mut server, live) = live().await;
 		tokio::spawn(async move { while server.accept().await.is_some() {} });
 
-		let (_a, dead_a) = refused();
-		let (_b, dead_b) = refused();
+		let dead_a = dead().await;
+		let dead_b = dead().await;
 		let addrs = Addrs::collect([dead_a, dead_b, live.clone()]).expect("not empty");
 		let shared = shared();
 		let mut draining = None;
@@ -2218,8 +2220,8 @@ mod tests {
 	async fn dial_any_reports_failure_when_nothing_answers() {
 		let client = client();
 
-		let (_a, dead_a) = refused();
-		let (_b, dead_b) = refused();
+		let dead_a = dead().await;
+		let dead_b = dead().await;
 		let addrs = Addrs::collect([dead_a, dead_b]).expect("not empty");
 		let shared = shared();
 		let mut draining = None;
@@ -2230,7 +2232,7 @@ mod tests {
 		)
 		.await
 		.expect("the walk must not hang");
-		assert!(result.is_err(), "every address refused, so the walk must fail");
+		assert!(result.is_err(), "every address hung up, so the walk must fail");
 	}
 
 	/// Dialing must not write the LAN mesh's membership credential to the log.
@@ -2247,7 +2249,7 @@ mod tests {
 		const SECRET: &str = "b91d7fe20c4a";
 
 		let client = client();
-		let (_dead, mut target) = refused();
+		let mut target = dead().await;
 		target.set_path(&format!("/.cluster/{SECRET}"));
 
 		let addrs = Addrs::new(target);
@@ -2255,7 +2257,7 @@ mod tests {
 		let mut draining = None;
 		// `Session` isn't `Debug`, so unwrap the failure by hand.
 		let Err(err) = Connection::dial_any(&shared, &client, &addrs, &mut draining, None).await else {
-			panic!("a refused address must fail");
+			panic!("a dead address must fail");
 		};
 
 		// The log line did happen, so the assertion below isn't vacuously true.
@@ -2310,7 +2312,12 @@ mod tests {
 	#[cfg(feature = "tcp")]
 	#[tokio::test(start_paused = true)]
 	async fn a_refused_tcp_dial_keeps_retrying() {
-		let (_socket, target) = refused();
+		// Refusal is what's under test, so this can't use [`dead`]. A port nothing is
+		// bound to refuses on every OS, unlike one that is bound but not listening.
+		let target = {
+			let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+			url(&format!("tcp://{}/", listener.local_addr().expect("local addr")))
+		};
 		let mut client = client();
 		client.backoff.initial = Duration::from_millis(50);
 		client.backoff.max = Duration::from_millis(50);
