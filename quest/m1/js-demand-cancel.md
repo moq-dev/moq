@@ -25,7 +25,7 @@ may be never. With a stalled handler, a peer that subscribes to distinct paths
 and cancels each one grows that state without bound, while #5214's caps hand
 the slots back.
 
-Recommended: `demand` takes an `AbortSignal` on the internal wire interface
+`demand` takes an `AbortSignal` on the internal wire interface
 (`js/net/src/wire.ts`). On abort the waiter drops its count, and the last one
 out withdraws the request the way `ServeState.reset` does, but for one path:
 out of `pending` and the queue, finished so a late answer closes its front.
@@ -35,9 +35,9 @@ Rust's behavior (`Requests::remove_if` and `ServeState::forget` in
 `rs/moq-net/src/model/origin.rs`) and match it, including whether a request a
 handler has already taken is withdrawn.
 
-Don't tell a handler that its taken request was withdrawn. That needs public
-API on `Request`, and the bound doesn't depend on it; propose it separately if
-Rust has the equivalent.
+Decided 2026-10-13: don't signal the handler that a request it took was
+withdrawn. Its late answer just closes its front, and `Request` gets no new
+public API; the bound doesn't depend on it.
 
 Regression: a dynamic handler that never answers; in both protocol families,
 subscribe to many distinct paths and cancel each before an answer, then check

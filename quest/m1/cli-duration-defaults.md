@@ -23,11 +23,11 @@ These aren't one-line fixes. Each field's public type changes, and its callers
 in moq-c, moq-ffi, moq-gst, moq-relay, and the moq-tokio tests (about 70
 sites) follow.
 
-Recommended: give every field #5350's shape. The typed field becomes
+Decided 2026-10-13: give all ten fields #5350's shape. The typed field becomes
 `Option<Duration>` (`None` is unset, and `Default` holds the default), the
 `*_arg` field loses its parser default, and each field resolves the flag, then
 the typed field, then the default. `fallback`, `resolve`, and the `explicit`
-bit then have no callers, so delete them and leave `CliDuration` as the
+bit then have no callers, so delete them (also decided) and leave `CliDuration` as the
 humantime parser.
 
 Rejected: fixing usage (jdx/usage, an outside party) to assign

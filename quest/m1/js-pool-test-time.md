@@ -20,9 +20,13 @@ the file did not. Still on real time as of `079d7d8d4`:
   by monkeypatching `performance.now`, and the shared one sleeps 2 s under a
   30 s test timeout.
 
+Decided 2026-10-13: switch to Bun's fake timers now, as a standalone quest,
+rather than waiting for `@moq/time`.
+
 Use Bun's `jest.useFakeTimers()`, which also drives `performance.now` (#5355),
 as `connect.test.ts`, `js/publish/src/source/retry.test.ts`, and #5355's test
-already do. Check that it drives `Date.now` too, or drop the `Date` reads.
+already do. Check that it drives `Date.now` too, or drop the `Date` reads
+(left to the implementer, decided 2026-10-13).
 Replace `settle`, `waitUntil`, and `expired` with one helper that advances the
 clock and drains microtasks; the mock transport's handshake must still finish
 inside a drain.
