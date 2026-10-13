@@ -2780,8 +2780,8 @@ where
 	/// REQUEST_UPDATE (MoQ request-token renewal), so a refreshed credential reaches the peer
 	/// before the old grant lapses.
 	///
-	/// Draft-17+ only: earlier drafts have no PUBLISH_NAMESPACE_UPDATE, so a token set on them
-	/// rides the initial advertisement and is not renewed in place. Clearing the token (`None`)
+	/// Draft-16+ only: earlier drafts have no update for an advertisement, so a token set on
+	/// them rides the initial advertisement and is not renewed in place. Clearing the token (`None`)
 	/// is not a renewal and sends nothing. A refusal withdraws the announce, since the receiver
 	/// closes its stream on a renewal it cannot grant; the retry re-offers it carrying the new
 	/// token, honoring any retry interval the refusal named.
@@ -2793,7 +2793,7 @@ where
 		let Some(token) = token else {
 			return Ok(());
 		};
-		if matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
+		if matches!(self.version, Version::Draft14 | Version::Draft15) {
 			return Ok(());
 		}
 
@@ -2803,8 +2803,13 @@ where
 			let Some(request) = ns.requests.get_mut(&suffix) else {
 				continue;
 			};
+			// Draft-16 names the advertisement in the update, and its answer names the update,
+			// which the control stream routes back here while this is held.
+			let legacy = self.version == Version::Draft16;
+			let _follow_up = legacy.then(|| self.control.follow_up(request_id, request.request_id));
 			let update = ietf::PublishNamespaceUpdate {
 				request_id,
+				namespace_request_id: legacy.then_some(request.request_id),
 				hops: None,
 				cost: None,
 				authorization_token: Some(crate::ietf::token::RequestToken(token.clone())),
@@ -11075,6 +11080,7 @@ mod tests {
 			VERSION,
 			&ietf::PublishNamespaceUpdate {
 				request_id: RequestId(3),
+				namespace_request_id: None,
 				hops: None,
 				cost: Some(0),
 				authorization_token: None,
@@ -11228,6 +11234,7 @@ mod tests {
 			VERSION,
 			&ietf::PublishNamespaceUpdate {
 				request_id: RequestId(3),
+				namespace_request_id: None,
 				hops: Some(cluster::HopPath::new(
 					crate::Hops::try_from(vec![crate::Hop::new(8).unwrap(), crate::Hop::new(1).unwrap()]).unwrap(),
 				)),
@@ -11369,6 +11376,7 @@ mod tests {
 			VERSION,
 			&ietf::PublishNamespaceUpdate {
 				request_id: RequestId(3),
+				namespace_request_id: None,
 				hops: None,
 				cost: Some(0),
 				authorization_token: None,

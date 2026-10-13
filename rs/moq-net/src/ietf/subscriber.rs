@@ -1378,7 +1378,15 @@ where
 		// update) is not released twice here.
 		let mut attached = true;
 		let res = self
-			.run_publish_namespace_updates(&mut stream, &path, msg.cluster, peer, &mut attached, token_grant)
+			.run_publish_namespace_updates(
+				&mut stream,
+				request_id,
+				&path,
+				msg.cluster,
+				peer,
+				&mut attached,
+				token_grant,
+			)
 			.await;
 
 		if attached {
@@ -1414,6 +1422,7 @@ where
 	async fn run_publish_namespace_updates(
 		&mut self,
 		stream: &mut Stream<S, Version>,
+		request_id: RequestId,
 		path: &PathOwned,
 		mut held: Option<cluster::Advert>,
 		peer: cluster::Peer,
@@ -1530,7 +1539,11 @@ where
 					return stream.writer.closed().await;
 				}
 				Turn::Failed(err) => return Err(err),
-				Turn::Ended(err) => return Err(err),
+				Turn::Ended(err) => {
+					self.cancel_announce(stream, request_id, path, &err, "request token grant ended")
+						.await?;
+					return Err(err);
+				}
 				Turn::Renewal(request_update::Verdict {
 					verdict,
 					grant: res,
@@ -1548,18 +1561,15 @@ where
 					// the session stays up and the old grant does not survive.
 					self.write_error(stream, rid, &Error::Unauthorized, "renewal not granted")
 						.await?;
-					if stream.writer.finish().is_ok() {
-						let _ = stream.writer.closed().await;
-					}
+					self.cancel_announce(stream, request_id, path, &Error::Unauthorized, "renewal not granted")
+						.await?;
 					return Ok(());
 				}
 			};
 
-			// Drafts 14-16 carry no advertisement parameters to update, so an update the
-			// adapter routed here changes nothing.
-			if type_id == ietf::SubscribeUpdate::ID
-				&& matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16)
-			{
+			// Drafts 14-15 have no update for an advertisement, so a SUBSCRIBE_UPDATE the adapter
+			// routed here changes nothing. Draft-16's REQUEST_UPDATE renews its token.
+			if type_id == ietf::SubscribeUpdate::ID && matches!(self.version, Version::Draft14 | Version::Draft15) {
 				continue;
 			}
 			let terminal = self.terminal_publish_namespace(type_id);
@@ -1581,9 +1591,12 @@ where
 				return Ok(());
 			}
 
-			// An update spends its own request ID, even one refused below.
-			let request_id = ietf::RequestId::decode(&mut body.decoder(self.version), self.version)?;
-			if let Err(err) = self.control.accept(request_id) {
+			// An update spends its own request ID, even one refused below. On draft-16 the
+			// adapter already spent it when it routed the update here.
+			let update_id = ietf::RequestId::decode(&mut body.decoder(self.version), self.version)?;
+			if self.version != Version::Draft16
+				&& let Err(err) = self.control.accept(update_id)
+			{
 				self.session
 					.clone()
 					.close(crate::SessionError::from(&err).to_code(), "invalid request ID");
@@ -1594,11 +1607,10 @@ where
 				// refused update does.
 				Err(DecodeError::MalformedAuthToken) => {
 					let err = Error::Decode(DecodeError::MalformedAuthToken);
-					self.write_error(stream, request_id, &err, "repeated AUTHORIZATION TOKEN")
+					self.write_error(stream, update_id, &err, "repeated AUTHORIZATION TOKEN")
 						.await?;
-					if stream.writer.finish().is_ok() {
-						let _ = stream.writer.closed().await;
-					}
+					self.cancel_announce(stream, request_id, path, &err, "repeated AUTHORIZATION TOKEN")
+						.await?;
 					return Ok(());
 				}
 				msg => msg?,
@@ -1683,6 +1695,33 @@ where
 			// No token rides this update: acknowledge it now.
 			self.write_ok(stream, msg.request_id).await?;
 		}
+	}
+
+	/// End an advertisement we accepted, leaving the session up: a closed stream from draft-17,
+	/// and PUBLISH_NAMESPACE_CANCEL before it, where the request outlives its stream.
+	async fn cancel_announce(
+		&self,
+		stream: &mut Stream<S, Version>,
+		request_id: RequestId,
+		path: &PathOwned,
+		err: &Error,
+		reason: &str,
+	) -> Result<(), Error> {
+		if matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
+			stream
+				.writer
+				.encode_message(&ietf::PublishNamespaceCancel {
+					track_namespace: path.clone(),
+					request_id,
+					error_code: request::to_code(err, request::Kind::PublishNamespace, self.version),
+					reason_phrase: reason.into(),
+				})
+				.await?;
+		}
+		if stream.writer.finish().is_ok() {
+			let _ = stream.writer.closed().await;
+		}
+		Ok(())
 	}
 
 	/// Reject an incoming PUBLISH.
@@ -7609,6 +7648,7 @@ mod tests {
 				.encode(&ietf::PublishNamespaceUpdate {
 					// Each update consumes a request id of the peer's parity.
 					request_id: RequestId(3 + 2 * i as u64),
+					namespace_request_id: None,
 					hops: Some(advert.hops.clone()),
 					cost: Some(advert.cost),
 					authorization_token: None,
@@ -7741,6 +7781,7 @@ mod tests {
 		let err = subscriber
 			.run_publish_namespace_updates(
 				&mut stream,
+				RequestId(1),
 				&crate::Path::new("room/host"),
 				Some(clean),
 				peer,
@@ -7772,6 +7813,7 @@ mod tests {
 		{
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
+				RequestId(1),
 				&path,
 				Some(clean.clone()),
 				peer,
@@ -7819,6 +7861,7 @@ mod tests {
 		{
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
+				RequestId(1),
 				&path,
 				Some(clean.clone()),
 				peer,
@@ -7868,6 +7911,7 @@ mod tests {
 			writer
 				.encode(&ietf::PublishNamespaceUpdate {
 					request_id: RequestId(3),
+					namespace_request_id: None,
 					hops: None,
 					cost: Some(0),
 					authorization_token: None,
@@ -7888,6 +7932,7 @@ mod tests {
 		{
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
+				RequestId(1),
 				&path,
 				Some(held.clone()),
 				peer,
@@ -7937,6 +7982,7 @@ mod tests {
 		{
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
+				RequestId(1),
 				&path,
 				Some(clean.clone()),
 				peer,
@@ -7984,6 +8030,7 @@ mod tests {
 		{
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
+				RequestId(1),
 				&path,
 				Some(clean.clone()),
 				peer,
@@ -8044,6 +8091,7 @@ mod tests {
 		let mut attached = true;
 		let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 			&mut stream,
+			RequestId(1),
 			&path,
 			Some(clean.clone()),
 			peer,
@@ -8544,6 +8592,7 @@ mod tests {
 		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
 		let msg = ietf::PublishNamespaceUpdate {
 			request_id: RequestId(3),
+			namespace_request_id: (version == Version::Draft16).then_some(RequestId(1)),
 			hops: None,
 			cost: None,
 			authorization_token: Some(announce_token()),
@@ -8560,6 +8609,7 @@ mod tests {
 		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
 		let msg = ietf::PublishNamespaceUpdate {
 			request_id: RequestId(3),
+			namespace_request_id: None,
 			hops: Some(hop_path(&[7, 9])),
 			cost: Some(0),
 			authorization_token: Some(announce_token()),
@@ -8772,134 +8822,161 @@ mod tests {
 	/// re-arms the deadline.
 	#[moq_net_sim::test]
 	async fn a_publish_namespace_renewal_extends_past_the_old_expiry() {
-		const VERSION: Version = Version::Draft18;
-		let (mut subscriber, mut requests, _cred, consumer, session) =
-			auth_announce_harness(VERSION, publish_namespace_update_with_token(VERSION).await);
-		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		for version in [Version::Draft16, Version::Draft18] {
+			let (mut subscriber, mut requests, _cred, consumer, session) =
+				auth_announce_harness(version, publish_namespace_update_with_token(version).await);
+			let rt = subscriber.runtime.clone();
+			let stream = Stream::open(&mut session.clone(), version).await.unwrap();
 
-		let answered = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-		let acceptor = {
-			let answered = answered.clone();
-			async move {
-				let mut held = Vec::new();
-				// The first grant lapses in 60s; the renewal never expires.
-				let first = requests.next().await.expect("a request").scoped();
-				held.push(first.accept(publish_grant_expiring(&rt, Some(60))));
-				answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-				let renewal = requests.next().await.expect("a renewal").scoped();
-				held.push(renewal.accept(publish_grant_expiring(&rt, None)));
-				answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-				std::future::pending::<()>().await
+			let answered = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+			let acceptor = {
+				let answered = answered.clone();
+				async move {
+					let mut held = Vec::new();
+					// The first grant lapses in 60s; the renewal never expires.
+					let first = requests.next().await.expect("a request").scoped();
+					held.push(first.accept(publish_grant_expiring(&rt, Some(60))));
+					answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+					let renewal = requests.next().await.expect("a renewal").scoped();
+					held.push(renewal.accept(publish_grant_expiring(&rt, None)));
+					answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+					std::future::pending::<()>().await
+				}
+			};
+			let mut acceptor = std::pin::pin!(acceptor);
+			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
+				stream,
+				token_publish_namespace(),
+				cluster::Peer::default(),
+				None,
+			));
+
+			for _ in 0..500 {
+				let _ = futures::poll!(acceptor.as_mut());
+				assert!(
+					futures::poll!(run.as_mut()).is_pending(),
+					"the announce ended during setup"
+				);
+				if answered.load(std::sync::atomic::Ordering::Relaxed) >= 2 {
+					break;
+				}
+				settle().await;
 			}
-		};
-		let mut acceptor = std::pin::pin!(acceptor);
-		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-			stream,
-			token_publish_namespace(),
-			cluster::Peer::default(),
-			None,
-		));
-
-		for _ in 0..500 {
-			let _ = futures::poll!(acceptor.as_mut());
-			assert!(
-				futures::poll!(run.as_mut()).is_pending(),
-				"the announce ended during setup"
+			assert_eq!(
+				answered.load(std::sync::atomic::Ordering::Relaxed),
+				2,
+				"acceptor never answered both tokens"
 			);
-			if answered.load(std::sync::atomic::Ordering::Relaxed) >= 2 {
-				break;
+			// Let the loop apply the renewal it read.
+			for _ in 0..20 {
+				let _ = futures::poll!(acceptor.as_mut());
+				assert!(futures::poll!(run.as_mut()).is_pending());
+				settle().await;
 			}
-			settle().await;
-		}
-		assert_eq!(
-			answered.load(std::sync::atomic::Ordering::Relaxed),
-			2,
-			"acceptor never answered both tokens"
-		);
-		// Let the loop apply the renewal it read.
-		for _ in 0..20 {
-			let _ = futures::poll!(acceptor.as_mut());
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			settle().await;
-		}
 
-		// Past the original 60s expiry: the renewal re-armed the deadline, so the announce
-		// stays attached.
-		moq_net_sim::advance(std::time::Duration::from_secs(120)).await;
-		for _ in 0..50 {
-			let _ = futures::poll!(acceptor.as_mut());
+			// Past the original 60s expiry: the renewal re-armed the deadline, so the announce
+			// stays attached.
+			moq_net_sim::advance(std::time::Duration::from_secs(120)).await;
+			for _ in 0..50 {
+				let _ = futures::poll!(acceptor.as_mut());
+				assert!(
+					futures::poll!(run.as_mut()).is_pending(),
+					"renewal did not extend the announce"
+				);
+				settle().await;
+			}
 			assert!(
-				futures::poll!(run.as_mut()).is_pending(),
-				"renewal did not extend the announce"
+				routed_now(&consumer, "room/alice").is_some(),
+				"the renewed announce must still be attached"
 			);
-			settle().await;
 		}
-		assert!(
-			routed_now(&consumer, "room/alice").is_some(),
-			"the renewed announce must still be attached"
-		);
 	}
+
 
 	/// Per drafts 16 section 9.11.1 / 18 section 10.9.1, a refused PUBLISH_NAMESPACE
-	/// renewal ends only that announce at once, by closing its stream, not by waiting for the old
-	/// 60s grant to lapse. The session stays up.
+	/// renewal ends only that announce at once, by closing its stream (and cancelling it on
+	/// draft-16), not by waiting for the old 60s grant to lapse. The session stays up.
 	#[moq_net_sim::test]
 	async fn a_refused_publish_namespace_renewal_ends_the_announce() {
-		const VERSION: Version = Version::Draft18;
-		let (mut subscriber, mut requests, _cred, _consumer, session) =
-			auth_announce_harness(VERSION, publish_namespace_update_with_token(VERSION).await);
-		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		for version in [Version::Draft16, Version::Draft18] {
+			let (mut subscriber, mut requests, _cred, _consumer, session) =
+				auth_announce_harness(version, publish_namespace_update_with_token(version).await);
+			let rt = subscriber.runtime.clone();
+			let stream = Stream::open(&mut session.clone(), version).await.unwrap();
 
-		let answered = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-		let acceptor = {
-			let answered = answered.clone();
-			async move {
-				// The first grant lasts 60s; the renewal is refused.
-				let first = requests.next().await.expect("a request").scoped();
-				let _issued = first.accept(publish_grant_expiring(&rt, Some(60)));
-				answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-				let renewal = requests.next().await.expect("a renewal").scoped();
-				renewal.reject(crate::SessionError::Unauthorized, "no");
-				answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-				std::future::pending::<()>().await
-			}
-		};
-		let mut acceptor = std::pin::pin!(acceptor);
-		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-			stream,
-			token_publish_namespace(),
-			cluster::Peer::default(),
-			None,
-		));
+			let answered = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+			let acceptor = {
+				let answered = answered.clone();
+				async move {
+					// The first grant lasts 60s; the renewal is refused.
+					let first = requests.next().await.expect("a request").scoped();
+					let _issued = first.accept(publish_grant_expiring(&rt, Some(60)));
+					answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+					let renewal = requests.next().await.expect("a renewal").scoped();
+					renewal.reject(crate::SessionError::Unauthorized, "no");
+					answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+					std::future::pending::<()>().await
+				}
+			};
+			let mut acceptor = std::pin::pin!(acceptor);
+			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
+				stream,
+				token_publish_namespace(),
+				cluster::Peer::default(),
+				None,
+			));
 
-		// No time is advanced: the refusal must end the announce on its own, not by letting the
-		// 60s grant lapse.
-		let mut result = None;
-		for _ in 0..500 {
-			let _ = futures::poll!(acceptor.as_mut());
-			if let std::task::Poll::Ready(res) = futures::poll!(run.as_mut()) {
-				result = Some(res);
-				break;
+			// No time is advanced: the refusal must end the announce on its own, not by letting the
+			// 60s grant lapse.
+			let mut result = None;
+			for _ in 0..500 {
+				let _ = futures::poll!(acceptor.as_mut());
+				if let std::task::Poll::Ready(res) = futures::poll!(run.as_mut()) {
+					result = Some(res);
+					break;
+				}
+				settle().await;
 			}
-			settle().await;
+			assert_eq!(
+				answered.load(std::sync::atomic::Ordering::Relaxed),
+				2,
+				"acceptor never answered both tokens"
+			);
+			assert!(
+				matches!(result, Some(Ok(()))),
+				"a refused renewal ends the announce cleanly by closing the stream, got {result:?}"
+			);
+			assert!(
+				session.log.closes().is_empty(),
+				"the session must stay up: {:?}",
+				session.log.closes()
+			);
+			// Draft-16's request outlives its stream, so the refusal cancels it explicitly.
+			if version == Version::Draft16 {
+				let cancel = {
+					let log = crate::lite::test_transport::Log::default();
+					let mut writer =
+						crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+					writer
+						.encode_message(&ietf::PublishNamespaceCancel {
+							track_namespace: crate::Path::new("room/alice"),
+							request_id: RequestId(1),
+							error_code: request::to_code(&Error::Unauthorized, request::Kind::PublishNamespace, version),
+							reason_phrase: "renewal not granted".into(),
+						})
+						.await
+						.unwrap();
+					log.writes.lock().unwrap().clone()
+				};
+				let writes = session.log.writes.lock().unwrap().clone();
+				assert!(
+					writes.windows(cancel.len()).any(|window| window == cancel.as_slice()),
+					"a refused draft-16 renewal sends PUBLISH_NAMESPACE_CANCEL"
+				);
+			}
 		}
-		assert_eq!(
-			answered.load(std::sync::atomic::Ordering::Relaxed),
-			2,
-			"acceptor never answered both tokens"
-		);
-		assert!(
-			matches!(result, Some(Ok(()))),
-			"a refused renewal ends the announce cleanly by closing the stream, got {result:?}"
-		);
-		assert!(
-			session.log.closes().is_empty(),
-			"the session must stay up: {:?}",
-			session.log.closes()
-		);
 	}
+
 	/// A REQUEST_UPDATE carrying both a fresh token and cluster parameters applies both: the
 	/// renewal re-arms the grant and the HOP_PATH/ROUTE_COST re-route the advertisement,
 	/// answered with the renewal's single response. Before the fix the token branch
@@ -8966,6 +9043,7 @@ mod tests {
 		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
 		let msg = ietf::PublishNamespaceUpdate {
 			request_id: RequestId(rid),
+			namespace_request_id: None,
 			hops,
 			cost,
 			authorization_token: Some(announce_token()),

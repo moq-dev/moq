@@ -97,16 +97,19 @@ impl Message for PublishNamespace<'_> {
 	}
 }
 
-/// REQUEST_UPDATE (0x02) on a PUBLISH_NAMESPACE stream: the cluster parameters that
-/// changed (draft-lcurley-moq-cluster, Updating an Advertisement).
+/// REQUEST_UPDATE (0x02) on a PUBLISH_NAMESPACE: the cluster parameters that changed
+/// (draft-lcurley-moq-cluster, Updating an Advertisement), or a renewed request token.
 ///
 /// An omitted parameter keeps its value (moq-transport Section 9.5), so a cost that
 /// dropped to 0 is sent as an explicit 0, unlike the advertisement itself where absent
-/// means 0. Draft-17+ only: the extension negotiates on nothing earlier.
+/// means 0. Draft-16+: the cluster extension negotiates on draft-17+ only, so draft-16
+/// carries only the token.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublishNamespaceUpdate {
 	/// The update's own Request ID; every REQUEST_UPDATE consumes one.
 	pub request_id: RequestId,
+	/// Draft-16 only: the PUBLISH_NAMESPACE this updates, which later drafts name by stream.
+	pub namespace_request_id: Option<RequestId>,
 	/// HOP_PATH, when the route changed.
 	pub hops: Option<cluster::HopPath>,
 	/// ROUTE_COST, when the cost changed.
@@ -121,6 +124,7 @@ impl PublishNamespaceUpdate {
 	pub fn between(request_id: RequestId, held: &cluster::Advert, next: &cluster::Advert) -> Self {
 		Self {
 			request_id,
+			namespace_request_id: None,
 			hops: (held.hops != next.hops).then(|| next.hops.clone()),
 			cost: (held.cost != next.cost).then_some(next.cost),
 			authorization_token: None,
@@ -141,7 +145,11 @@ impl Message for PublishNamespaceUpdate {
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => return Err(EncodeError::Version),
+			Version::Draft14 | Version::Draft15 => return Err(EncodeError::Version),
+			Version::Draft16 => {
+				self.request_id.encode(w, version)?;
+				self.namespace_request_id.ok_or(EncodeError::Version)?.encode(w, version)?;
+			}
 			Version::Draft17 => {
 				self.request_id.encode(w, version)?;
 				w.varint(0)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
@@ -157,14 +165,15 @@ impl Message for PublishNamespaceUpdate {
 	}
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		let request_id = match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => return Err(DecodeError::Version),
+		let (request_id, namespace_request_id) = match version {
+			Version::Draft14 | Version::Draft15 => return Err(DecodeError::Version),
+			Version::Draft16 => (RequestId::decode(r, version)?, Some(RequestId::decode(r, version)?)),
 			Version::Draft17 => {
 				let request_id = RequestId::decode(r, version)?;
 				let _required_request_id_delta = r.varint()?;
-				request_id
+				(request_id, None)
 			}
-			_ => RequestId::decode(r, version)?,
+			_ => (RequestId::decode(r, version)?, None),
 		};
 		decode_params!(r, version,
 			0x03 => authorization_token: Vec<super::token::RequestToken>,
@@ -174,6 +183,7 @@ impl Message for PublishNamespaceUpdate {
 		super::token::unique(&authorization_token)?;
 		Ok(Self {
 			request_id,
+			namespace_request_id,
 			hops,
 			cost,
 			authorization_token: authorization_token.into_iter().next(),
@@ -595,21 +605,33 @@ mod tests {
 		assert_eq!(decoded.apply(&held), rerouted);
 	}
 
-	/// The extension negotiates on draft-17+ only, so the update has no legacy shape.
+	/// Drafts 14-15 have no update for an advertisement, and draft-16's names the one it
+	/// updates.
 	#[test]
-	fn update_has_no_legacy_encoding() {
-		let msg = PublishNamespaceUpdate {
+	fn update_names_the_advertisement_on_draft_16() {
+		let mut msg = PublishNamespaceUpdate {
 			request_id: RequestId(2),
+			namespace_request_id: None,
 			hops: None,
-			cost: Some(0),
-			authorization_token: None,
+			cost: None,
+			authorization_token: Some(super::super::token::RequestToken(crate::setup::Token {
+				kind: 0,
+				value: b"jwt".to_vec(),
+			})),
 		};
-		let mut buf = Vec::new();
-		assert!(
-			msg.encode_msg(&mut Encoder::new(&mut buf, Version::Draft16.into()), Version::Draft16)
-				.is_err()
-		);
-		assert!(decode_message::<PublishNamespaceUpdate>(&[0x02, 0x00], Version::Draft16).is_err());
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			let mut buf = Vec::new();
+			assert!(
+				msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version).is_err(),
+				"{version:?}"
+			);
+		}
+		assert!(decode_message::<PublishNamespaceUpdate>(&[0x02, 0x00], Version::Draft15).is_err());
+
+		msg.namespace_request_id = Some(RequestId(1));
+		let decoded: PublishNamespaceUpdate =
+			decode_message(&encode_message(&msg, Version::Draft16), Version::Draft16).unwrap();
+		assert_eq!(decoded, msg);
 	}
 
 	#[test]

@@ -508,6 +508,47 @@ async fn a_request_token_authorizes_a_legacy_announce_through_the_driver() {
 	.expect("timed out");
 }
 
+/// Draft-16 renews an announce's token with a REQUEST_UPDATE naming the PUBLISH_NAMESPACE on
+/// the control stream: replacing the client's token reaches the server's acceptor as a renewal,
+/// whose answer finds its way back without disturbing the announce.
+#[moq_net_sim::test]
+async fn a_request_token_renews_a_legacy_announce_through_the_driver() {
+	within(async {
+		let publisher = produce_origin(2);
+		let relay = produce_origin(1);
+		let mut pair = connect(Options {
+			version: Some(MOQT_16),
+			client_publish: Some(publisher.clone()),
+			client_request_token: Some(request_token(b"aa")),
+			server_subscribe: Some(relay.scope("", &patterns(&["room/alice"])).unwrap()),
+			server_requests: true,
+			// Unsolicited, so the announce is a PUBLISH_NAMESPACE carrying the token.
+			server_decline_solicit: true,
+			..Default::default()
+		})
+		.await;
+		let requests = pair.requests.take().expect("server took its requests pre-ok");
+		let mut answered = serve(requests, |_token| Some(grant(&["room/alice"], &[])));
+
+		let bc = publisher.create_broadcast("room/alice").unwrap();
+		bc.announce(Default::default()).unwrap();
+		let (token, _first) = answered.recv().await.expect("the token reached the acceptor");
+		assert_eq!(token, b"aa");
+		wait_announced(&relay.consume(), "room/alice", true).await;
+
+		pair.client.auth().set_request_token(request_token(b"bb")).unwrap();
+		let (token, _renewed) = answered.recv().await.expect("the renewal reached the acceptor");
+		assert_eq!(token, b"bb", "the replaced token rides the REQUEST_UPDATE");
+
+		moq_net_sim::sleep(Duration::from_millis(100)).await;
+		wait_announced(&relay.consume(), "room/alice", true).await;
+		assert_eq!(pair.client_transport.close_reason(), None, "renewal never touches the session");
+		assert_eq!(pair.server_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
 /// A client may decline the MoQ Auth extension, connecting at draft-18 as a peer that
 /// does not negotiate it (a non-moq-dev encoder or CDN). Its SETUP omits the option, so
 /// the server sees `declared.auth == false` and the session carries no connection grant
