@@ -106,6 +106,17 @@ impl Buffer {
 		let packets = self.leak.map_or(packets, |leak| packets.min(through(leak, PAYLOAD)));
 		packets.max(1) as usize
 	}
+
+	/// The bytes of `packet` the decoder buffer holds: the payload less any PES header for
+	/// video, whose MB discards it, and the whole payload where the transport buffer feeds the
+	/// decoder buffer, which holds a PES header until the access unit after it is removed
+	/// (ISO 13818-1 2.4.2.3).
+	fn holds(&self, packet: &[u8]) -> usize {
+		match self.leak {
+			Some(_) => elementary(packet).len(),
+			None => payload(packet).len(),
+		}
+	}
 }
 
 /// TBsys in a receiver over one slot: the single 512-byte transport buffer that PIDs 0-3 and
@@ -216,8 +227,7 @@ fn payload(packet: &[u8]) -> &[u8] {
 	&packet[start..]
 }
 
-/// The bytes of `packet` that reach a decoder buffer: its payload less any PES header, which
-/// the T-STD discards on the way out of the transport buffer (ISO 13818-1 2.4.2.3).
+/// The elementary bytes of `packet`: its payload less any PES header.
 fn elementary(packet: &[u8]) -> &[u8] {
 	let body = payload(packet);
 	match packet[1] & 0x40 != 0 && body.starts_with(&[0, 0, 1]) && body.len() >= 9 {
@@ -504,7 +514,9 @@ impl Schedule {
 	pub fn push(&mut self, pid: u16, timing: Timing, packets: Vec<u8>, keyframe: bool) -> anyhow::Result<()> {
 		let due = slot(timing.by);
 		// An ended source relaxes deadlines, never buffer sizes: such a unit never fits.
-		if let Some(size) = self.buffers.get(&pid).and_then(|buffer| buffer.size) {
+		if let Some(buffer) = self.buffers.get(&pid)
+			&& let Some(size) = buffer.size
+		{
 			let on_pid = || {
 				packets
 					.as_chunks::<{ TsPacket::SIZE }>()
@@ -512,8 +524,9 @@ impl Schedule {
 					.iter()
 					.filter(|packet| self::pid(*packet) == pid)
 			};
+			let held: usize = on_pid().map(|packet| buffer.holds(packet)).sum();
 			let bytes: usize = on_pid().map(|packet| elementary(packet).len()).sum();
-			if bytes > size {
+			if held > size {
 				let pes: usize = on_pid().map(|packet| payload(packet).len()).sum();
 				anyhow::bail!(
 					"MPEG-TS access unit on PID {pid} has {bytes} payload bytes ({pes} bytes with PES headers), exceeding its {size}-byte decoder buffer"
@@ -781,10 +794,9 @@ impl Schedule {
 				// multiplex rate decides when the packet's last byte gets there.
 				let arrived = drained.max(time(position + 1));
 				let done = leak.map_or(arrived, |(leaked, _)| arrived.max(leaked));
-				let held = if pid == unit.pid && buffer.is_some_and(|buffer| buffer.size.is_some()) {
-					elementary(packet).len()
-				} else {
-					0
+				let held = match buffer {
+					Some(buffer) if pid == unit.pid && buffer.size.is_some() => buffer.holds(packet),
+					_ => 0,
 				};
 				if let Some(size) = buffer.and_then(|buffer| buffer.size)
 					&& occupancy.get(&pid).copied().unwrap_or(0) + held > size
@@ -1413,10 +1425,14 @@ mod tests {
 		assert!(error.contains("2688"), "{error}");
 		assert!(error.contains("2592"), "{error}");
 		assert!(!schedule.queued(), "refusal must not partially queue a unit");
-		// Only the elementary bytes count: the PES header never reaches the decoder buffer.
-		for bytes in [2_304, 2_436, 2_592] {
+		// B holds the PES header too, until the frame after it is removed.
+		for bytes in [2_304, 2_436, 2_578] {
 			schedule.push(1, timing(1_000), audio(bytes), false).unwrap();
 		}
+		assert!(
+			schedule.push(1, timing(1_000), audio(2_579), false).is_err(),
+			"a frame filling B leaves no room for its PES header"
+		);
 	}
 
 	#[test]
@@ -1516,7 +1532,7 @@ mod tests {
 					free = free.max(at) + 1504.0 / 2_000_000.0;
 					let decode = 1.0 + frame as f64 * 0.032;
 					assert!(free <= decode + 1e-7, "{bitrate} frame{frame}: {free} > {decode}");
-					held[frame] += elementary(packet).len();
+					held[frame] += payload(packet).len();
 					let occupancy: usize = held
 						.iter()
 						.enumerate()
