@@ -43,18 +43,20 @@ nothing repeats a lost ACK until the peer's next backed-off PTO.
 packets that carry other frames (`can_send_with_other_frames`, paced by
 `next_bundled_ack_time`). noq predates it.
 
-Open decision for the maintainer: port the bundling to moq-dev/noq and bump
-`moq-noq-proto`, or let [the switch](/quest/m1/quic/fork/switch.md) carry
-it. Recommendation: port it. The noq fork is frozen, but
-[#32](https://github.com/moq-dev/noq/pull/32) and
-[#34](https://github.com/moq-dev/noq/pull/34) made the same exception for
-this drill's last handshake flake, and the switch is not started. If the
-switch wins instead, keep this quest blocked on it and only add the
-regression test below.
+Decision (maintainer, 2026-10-13; ✅ marks the choice):
 
-Either way, land a mock-time regression test in the QUIC stack that gets the
-fix: the peer's first ACK of a two-datagram Initial flight is lost, and the
-next packet in that space carries the ACK. Check that `moq-quic` passes the
+- ✅ Port it to the frozen moq-dev/noq: repeat pending Initial and Handshake
+  ACK ranges in any packet sent in that space, as `moq-quic`'s
+  `can_send_with_other_frames` does, then bump the `moq-noq-proto` pin.
+  [#32](https://github.com/moq-dev/noq/pull/32) and
+  [#34](https://github.com/moq-dev/noq/pull/34) made the same exception for
+  this drill's last handshake flake.
+- Wait for [the switch](/quest/m1/quic/fork/switch.md) to `moq-quic`, which
+  has not started.
+
+Land a mock-time regression test in noq with the fix: the peer's first ACK
+of a two-datagram Initial flight is lost, and the next packet in that space
+carries the ACK. Check that `moq-quic` passes the
 same test, so the switch keeps the behavior.
 
 Also look at the PTO cascade. When the ACK reset `pto_count`, the Handshake
