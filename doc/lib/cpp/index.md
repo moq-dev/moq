@@ -104,6 +104,10 @@ if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the cata
 }
 ```
 
+`MediaContainerConsumer` reads in decode order. For arrival-order reads, decode each group
+from `TrackConsumer::recv_group` with `moq::MediaContainerGroupConsumer::init(group, container)`;
+frames carry container media time as they land.
+
 ```cpp
 // Publish encoded frames, or raw pixels with the codec inside the binding.
 // session is connected as above; opus_init, packet, and rgba come from your
