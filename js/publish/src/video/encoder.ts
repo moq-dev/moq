@@ -139,9 +139,10 @@ export class Encoder {
 	// The output dimensions of the video in pixels.
 	#dimensions = new Signal<{ width: number; height: number } | undefined>(undefined);
 
-	// The coded-size ceiling: each side's largest output dimension so far. The probe runs against it,
-	// so a smaller capture resizes in band without changing what the catalog advertises.
-	#coded = new Signal<{ width: number; height: number } | undefined>(undefined);
+	// The coded-size ceiling: each side's largest output dimension so far on this broadcast. The probe
+	// runs against it, so a smaller capture resizes in band without changing what the catalog
+	// advertises. Another broadcast is another track, so it starts over.
+	#coded = new Signal<{ broadcast?: Broadcast; width: number; height: number } | undefined>(undefined);
 
 	// The config the browser accepted and encoded a probe frame with, and the codec string it reported.
 	// Kept through a re-probe, so the rendition stays in the catalog until the new probe replaces it.
@@ -180,8 +181,9 @@ export class Encoder {
 	#estimate = new Signal<Estimator["estimate"]>({});
 	// The last config published while enabled, which a disabled rendition keeps advertising.
 	#last?: Catalog.VideoConfig;
-	// The largest bitrate and frame rate advertised so far, since the catalog may only raise them.
-	#max = { bitrate: 0, framerate: 0 };
+	// The largest bitrate and frame rate advertised so far on this broadcast, since the catalog may only
+	// raise them.
+	#max: { broadcast?: Broadcast; bitrate: number; framerate: number } = { bitrate: 0, framerate: 0 };
 	// Whether the rendition was disabled since a config last resolved, so it keeps advertising `#last`
 	// as disabled until the re-enabled capture resolves a new one. A capture that never reopens leaves
 	// it disabled, which is accurate: no frames are coming.
@@ -454,6 +456,8 @@ export class Encoder {
 		// Advertise the codec string the probe's encoder reported rather than the one we configured,
 		// so it names the profile and level the bitstream actually carries at the ceiling.
 		const { config, reported } = live.detected;
+		const broadcast = effect.get(this.in.broadcast);
+		if (this.#max.broadcast !== broadcast) this.#max = { broadcast, bitrate: 0, framerate: 0 };
 		this.#max.bitrate = Math.max(this.#max.bitrate, config.bitrate);
 		this.#max.framerate = Math.max(this.#max.framerate, config.framerate);
 		const catalog: Catalog.VideoConfig = {
@@ -572,10 +576,12 @@ export class Encoder {
 		const height = 16 * Math.floor((display.height * ratio) / 16);
 
 		effect.set(this.#dimensions, { width, height });
-		this.#coded.update((coded) => ({
-			width: Math.max(coded?.width ?? 0, width),
-			height: Math.max(coded?.height ?? 0, height),
-		}));
+		const broadcast = effect.get(this.in.broadcast);
+		this.#coded.update((coded) =>
+			coded && coded.broadcast === broadcast
+				? { broadcast, width: Math.max(coded.width, width), height: Math.max(coded.height, height) }
+				: { broadcast, width, height },
+		);
 	}
 
 	// Try to determine the best config for the given settings.

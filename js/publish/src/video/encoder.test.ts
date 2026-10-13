@@ -1142,3 +1142,39 @@ test("the catalog bitrate and frame rate only rise", async () => {
 		sub.close();
 	}
 });
+
+// Another broadcast is another track, so the ceiling and maxima start over there.
+test("a new broadcast starts the ceiling and maxima over", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+	const rendition = () => ({
+		config: new Signal(undefined),
+		track: new Signal<Moq.Track.Producer | undefined>(undefined),
+		close: () => {},
+	});
+	const first = { video: rendition, baseline: new Baseline() };
+	const broadcast = new Signal<unknown>(first);
+	const capture = {
+		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
+		out: { display: new Signal({ width: 1920, height: 1080 }), frames: new Signal(undefined) },
+	};
+	const encoder = new Encoder("video", {
+		enabled: true,
+		broadcast: broadcast as never,
+		capture: capture as never,
+		config: { frameRate: 60 },
+	});
+
+	try {
+		await settle();
+		encoder.config.set({ frameRate: 30 });
+		capture.out.display.set({ width: 1280, height: 720 });
+		await settle();
+		expect(encoder.out.catalog.peek()).toMatchObject({ codedWidth: 1920, codedHeight: 1072, framerate: 60 });
+
+		broadcast.set({ video: rendition, baseline: new Baseline() });
+		await settle();
+		expect(encoder.out.catalog.peek()).toMatchObject({ codedWidth: 1280, codedHeight: 720, framerate: 30 });
+	} finally {
+		encoder.close();
+	}
+});

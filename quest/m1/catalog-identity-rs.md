@@ -55,7 +55,10 @@ resize).
 
 Later, at lower priority: watch and HLS export consumer coverage for in-band
 resolution changes, rendition switches, reconnects, and late joiners against
-the contract.
+the contract. Watch's `renditionJitter` fallback
+(`js/watch/src/video/playhead.ts`) reads `framerate` as the live cadence, but it
+is now a maximum, so a stream running below it gets less than a frame interval
+of buffer when no `jitter` is advertised.
 
 ## Related
 
