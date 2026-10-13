@@ -86,8 +86,12 @@ upgrading epochless sessions, were rejected.
    origin, not in moq-tokio, so a relay hop behaves the same when a publisher
    upgrades. The relay's lite subscriber builds the same validity for a
    publisher's session; check that hop too. Recommended: a handle's
-   `RequestValidity` retires when its `Restart` is published, so the old
-   route keeps serving new requests through the hold. The old session is
+   `RequestValidity` retires only once its held `Restart` becomes
+   deliverable, so the old route keeps serving new requests through the
+   hold. Queueing is not enough: today `OriginState::sync_route` queues the
+   `PendingUpdate::Restart` (via `TableCursor::update`) before
+   `routes.poke_below` invalidates the `Selection`, and the hold is only
+   applied later in `AnnounceConsumer::poll_next`. The old session is
    still draining, so it can. The alternative is to skip the hold for a
    replacement that retires handles, but the hold exists to absorb path
    hunting after a withdrawal, so check what that would cost first. Don't
@@ -127,9 +131,10 @@ If a failing client still leaves its connection to idle out, fix that
 client's error path to close its session, as a separate commit. The C
 client's `fail()` and the C++ client on a consumer error both look suspect.
 
-Public API: an announce `Restart` on upgrade is new observable behavior.
-Consumer-follow API in moq-ffi and moq-c only if the audit needs it; report
-it in the PR. Wire: none.
+Public API: the upgrade's `Restart` already exists. What changes is when
+an old handle retires relative to it, and that first-party consumers follow
+it. Consumer-follow API in moq-ffi and moq-c only if the audit needs it;
+report it in the PR. Wire: none.
 
 ## Related
 
