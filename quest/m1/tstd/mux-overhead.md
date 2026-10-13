@@ -27,8 +27,9 @@ Decided 2026-10-12:
   into one PES while the PES fits the PID's B, timed by the first frame's
   PTS. This applies to every audio stream the export frames (AAC, MP2, AC-3,
   E-AC-3), not only DVB AC-3.
-- Land after [#5363](https://github.com/moq-dev/moq/pull/5363), which reworks
-  the DVB AC-3 framing this packs.
+- [#5363](https://github.com/moq-dev/moq/pull/5363) landed the DVB AC-3 framing
+  this packs. Video leak accounting must land first too, so the full-rate
+  proof covers every part of #5362 before this quest closes it.
 - Test: a generated CBR source with no nulls, at the source's own
   `--mux-rate`, exports for the whole clip and passes the strict T-STD check.
 
@@ -36,6 +37,6 @@ Decided 2026-10-12:
 
 - [#5362](https://github.com/moq-dev/moq/issues/5362) - a full-rate CBR contribution feed exports at its own rate
 
-## Related
+## Required
 
 - [TS export admits video at its full leak](/quest/m1/tstd/video-leak.md) - #5362 point 2

@@ -46,7 +46,10 @@ Guidance:
   enforcement; reuse its contract rather than restoring a historical exemption.
 - Benchmark range count and span as separate axes (AGENTS.md fan-out rule).
 
-## Related
+## Required
 
 - [Subscription order](/quest/m1/subscribe-ranges/order.md) - `Subscription` carries `order`, which ranges are served in
+
+## Related
+
 - [FETCH max-delay](/quest/m1/fetch-max-delay.md) - historical request budgets and per-caller enforcement

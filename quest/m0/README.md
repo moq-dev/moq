@@ -57,6 +57,7 @@ remain and no release waits on them.
 
 ## Required
 
+- [CI cache release](/quest/m0/ci-cache-release.md) - a stable cache server supports anonymous reads and OIDC writes restricted to the main warmer
 - [Self-hosted CI](/quest/m0/self-hosted-ci.md) - same-repo Check and Test run on a self-hosted NixOS runner with a main-written local cache, behind a `CI_RUNNER` kill switch
 - [CI host](/quest/m0/ci-host.md) - the maintainer brings up the spare desktop as the `moq-ci` and `moq-gpu` runner host
 - [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.5, before Seattle, then draft-20+ FETCH

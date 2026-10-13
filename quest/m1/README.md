@@ -68,7 +68,6 @@ demand (#5214), each ranked beside the work it shares code with.
 - [Controlled time](/quest/m1/time/README.md) - every crate and package reads time through moq-time or @moq/time, and every test runs on a controlled clock; ranks above the fork, whose switch adopts its instant
 - [Hard fork](/quest/m1/quic/fork/README.md) - quinn hard-forked in-tree as `moq-quic`, ranked ahead of perf; the rest of the QUIC line follows it
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - any node routes toward a broadcast's origin over CDN and P2P links alike, with per-origin routes and path-less announces
-- [Flat questlines](/quest/m1/quest-flat-lines.md) - moq pins the current quest CLI, lands its questline branches on main, and retires them
 - [Binding audio delay](/quest/m1/binding-surface.md) - moq-ffi and every wrapper configure and observe audio playout delay
 - [Per-frame arrivals in @moq/watch](/quest/m1/watch-arrivals.md) - the audio and video decoders expose a window of recent frame arrivals, late and skipped marks included, as a signal
 - [Bump web-transport-iroh for the capsule close](/quest/m1/iroh-capsule-bump.md) - condition: moq-dev/web-transport#419 ships in a release, then moq's iroh HTTP/3 client reports a peer's close capsule
@@ -151,7 +150,7 @@ demand (#5214), each ranked beside the work it shares code with.
 - [BBR ACK cleanup](/quest/m1/bbr-ack-cleanup.md) - packet bookkeeping scales with completed entries instead of scanning the flight on every ACK
 - [Perf](/quest/m1/perf/README.md) - eliminate measured hot-path costs across moq-uring, kio, and the moq-net model
 - [Benchmark regressions in CI](/quest/m1/bench-ci.md) - PRs get a non-blocking comparison of the Criterion benches they affect, and a nightly trend on main alerts on regressions
-- [Mergeable bench buckets](/quest/m1/bench-buckets.md) - moq-bench emits per-interval latency buckets that sum across processes and hosts
+- [Backport mergeable bench buckets](/quest/m1/bench-buckets.md) - release receives main's per-interval latency buckets and their tests
 - [Relay session bench](/quest/m1/bench-relay.md) - the same scenario through moq-relay's own connection handling
 - [Read-only lookup](/quest/m1/read-only-lookup.md) - a live track lookup stops waking the front and every demand watcher
 - [Rust-backed @moq/net](/quest/m1/rs2ts/README.md) - measure browser baselines, complete WASM bindings, and adopt Rust behind @moq/net before the later JS-only stage
