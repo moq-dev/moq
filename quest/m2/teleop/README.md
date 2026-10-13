@@ -94,8 +94,8 @@ stating plainly because it is what a builder is comparing against.
 - [Operator arbitration](/quest/m3/teleop-arbitration.md) - exactly one
   controller commands a vehicle at a time, with explicit handoff and a stated
   authorization boundary, parked in m3
-- [e2ee](/quest/m1/e2ee/README.md) - the answer for a protected control link
-- [Media stats](/quest/m1/stats/schema.md) - publisher-reported stats
+- [e2ee](/quest/m2/e2ee/README.md) - the answer for a protected control link
+- [Media stats](/quest/m2/stats/schema.md) - publisher-reported stats
   on a catalog-announced track (moq#2734); teleop's latency instrumentation
   extends those types rather than adding a second stats surface
 - [Video hardware validation](/quest/m3/video-hardware.md) - the VAAPI run

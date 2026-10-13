@@ -38,7 +38,7 @@ traffic yet.
 
 ## Required
 
-- [BBR ACK cleanup](/quest/m1/bbr-ack-cleanup.md) - edits the same `bbr3/mod.rs` packet bookkeeping and lands first; this keeps the metadata it preserves
+- [BBR ACK cleanup](/quest/m2/bbr-ack-cleanup.md) - edits the same `bbr3/mod.rs` packet bookkeeping and lands first; this keeps the metadata it preserves
 
 ## Related
 

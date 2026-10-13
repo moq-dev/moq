@@ -56,7 +56,7 @@ Decided with the maintainer (2026-10-13):
 
 Also:
 
-- Watch for the interaction with [simulcast rung disable](/quest/m1/simulcast-rung-disable.md),
+- Watch for the interaction with [simulcast rung disable](/quest/m2/simulcast-rung-disable.md),
   which also drives `enabled`: a recovering grant must not re-enable a
   failed rendition.
 - Tests on mock time with a fake encoder: a failing video rendition leaves a
@@ -67,5 +67,5 @@ Also:
 
 ## Related
 
-- [Simulcast rung disable](/quest/m1/simulcast-rung-disable.md) - the other driver of a rendition's `enabled` state
+- [Simulcast rung disable](/quest/m2/simulcast-rung-disable.md) - the other driver of a rendition's `enabled` state
 - [Native egress skips disabled renditions](/quest/m1/egress-enabled.md) - WHEP, HLS and moq-mux exports honor `enabled: false`

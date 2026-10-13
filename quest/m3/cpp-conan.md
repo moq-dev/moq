@@ -28,5 +28,5 @@ first. The vcpkg registry, which this reuses, is parked in m3 too (decided
 
 ## Required
 
-- [First C++ package release](/quest/m1/cpp-release.md) - the tarballs the recipe packages
+- [First C++ package release](/quest/m2/release/cpp-release.md) - the tarballs the recipe packages
 - [vcpkg registry](/quest/m3/cpp-vcpkg.md) - the release manifest and bump automation this reuses
