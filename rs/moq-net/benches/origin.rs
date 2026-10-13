@@ -19,8 +19,8 @@
 //!
 //! A route swap on one front is swept over its tracks and the copies each track
 //! still holds from earlier routes, and a front retiring over the fronts around it.
-//! Readers draining a swapped track are swept over their count and the groups
-//! both routes delivered.
+//! Readers draining a swapped track are swept over their count, the groups every
+//! route delivered, and the routes each reader still holds a copy of.
 //!
 //! Run with `cargo bench -p moq-net --bench origin`.
 
@@ -1127,20 +1127,30 @@ fn bench_copy_walk(c: &mut Criterion) {
 	group.finish();
 }
 
-/// `(readers, retained)` for [`bench_resume_overlap`]: readers of one track, and
-/// the groups both routes hold when it swaps.
-const RESUME_OVERLAP: [(usize, usize); 6] = [(1, 1), (1, 64), (1, 1024), (32, 64), (256, 64), (32, 1024)];
+/// `(readers, retained, routes)` for [`bench_resume_overlap`]: readers of one track,
+/// the groups every route holds, and the routes it swapped through.
+const RESUME_OVERLAP: [(usize, usize, usize); 9] = [
+	(1, 1, 2),
+	(1, 64, 2),
+	(1, 1024, 2),
+	(32, 64, 2),
+	(256, 64, 2),
+	(32, 1024, 2),
+	(1, 64, 8),
+	(1, 64, 32),
+	(32, 64, 8),
+];
 
-/// A track that swapped routes before its readers read anything: the replaced copy
-/// and the new one hold the same groups, the new one in reverse arrival order.
+/// A track that swapped through its routes while its readers' local cap held every
+/// group back, so each reader keeps a copy per route and every copy holds the same
+/// groups, each replacement in reverse arrival order.
 struct ResumeOverlap {
 	_producer: origin::Producer,
-	_generations: [broadcast::Producer; 2],
-	_tracks: [track::Producer; 2],
+	_generations: Vec<(broadcast::Producer, track::Producer)>,
 	readers: Vec<track::Subscriber>,
 }
 
-async fn resume_overlap(readers: usize, retained: usize) -> ResumeOverlap {
+async fn resume_overlap(readers: usize, retained: usize, routes: usize) -> ResumeOverlap {
 	let (producer, driver) = origin::Producer::new(origin::Config::default());
 	tokio::spawn(moq_net::time::run(driver));
 	let epoch = Epoch::mint();
@@ -1156,12 +1166,12 @@ async fn resume_overlap(readers: usize, retained: usize) -> ResumeOverlap {
 			group.write_frame(Timestamp::ZERO, b"f".as_ref()).unwrap();
 			group.finish().unwrap();
 		}
+		broadcast
+			.announce(origin::Route::default().with_epoch(epoch.clone()))
+			.unwrap();
 		(broadcast, track)
 	};
-	let (first, first_track) = generation(&mut (0..retained));
-	first
-		.announce(origin::Route::default().with_epoch(epoch.clone()))
-		.unwrap();
+	let mut generations = vec![generation(&mut (0..retained))];
 	let resolved = tokio::time::timeout(COPY_WAIT, producer.consume().request_broadcast(COPY_PATH, None))
 		.await
 		.expect("front did not resolve")
@@ -1171,54 +1181,71 @@ async fn resume_overlap(readers: usize, retained: usize) -> ResumeOverlap {
 	let subscription = track::Subscription::default().with_max_delay(Duration::from_secs(3600));
 	let mut subscribers = Vec::with_capacity(readers);
 	for _ in 0..readers {
-		let subscriber = tokio::time::timeout(COPY_WAIT, track.subscribe(subscription.clone()))
+		let mut subscriber = tokio::time::timeout(COPY_WAIT, track.subscribe(subscription.clone()))
 			.await
 			.expect("track did not splice")
 			.expect("subscribe failed");
+		// Held back until the drain, so every route's copy is kept for its unread groups.
+		subscriber.set_groups(..0);
 		subscribers.push(subscriber);
 	}
-	let (second, second_track) = generation(&mut (0..retained).rev());
-	second.announce(origin::Route::default().with_epoch(epoch)).unwrap();
-	tokio::time::timeout(COPY_WAIT, second_track.demand().used())
-		.await
-		.expect("route swap did not splice")
-		.expect("replacement track closed");
+	let waiter = kio::Waiter::noop();
+	for _ in 1..routes {
+		generations.push(generation(&mut (0..retained).rev()));
+		let (_, latest) = generations.last().unwrap();
+		tokio::time::timeout(COPY_WAIT, latest.demand().used())
+			.await
+			.expect("route swap did not splice")
+			.expect("replacement track closed");
+		// Each reader follows the swap, subscribing to the new copy.
+		for subscriber in &mut subscribers {
+			assert!(
+				subscriber.poll_recv_group(&waiter).is_pending(),
+				"the cap holds every group"
+			);
+		}
+	}
+	for subscriber in &mut subscribers {
+		subscriber.set_groups(..);
+	}
 	ResumeOverlap {
 		_producer: producer,
-		_generations: [first, second],
-		_tracks: [first_track, second_track],
+		_generations: generations,
 		readers: subscribers,
 	}
 }
 
-/// Readers draining a track whose two routes both delivered every group: each group
-/// is handed out once, and the copy still owed it remembers that until it is let go.
-/// The slope over retained groups is that bookkeeping's delivery cost.
+/// Readers draining a track whose routes all delivered every group: each group is
+/// handed out once, and every other copy still owed it remembers that until it is let
+/// go. The slopes over retained groups and routes are that bookkeeping's delivery cost.
 fn bench_resume_overlap(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/resume_overlap");
 	group.sample_size(10);
-	for (readers, retained) in RESUME_OVERLAP {
+	for (readers, retained, routes) in RESUME_OVERLAP {
 		group.throughput(Throughput::Elements((readers * retained) as u64));
-		group.bench_function(BenchmarkId::from_parameter(format!("{readers}r_{retained}g")), |b| {
-			let runtime = tokio::runtime::Builder::new_current_thread()
-				.enable_all()
-				.build()
-				.unwrap();
-			let waiter = kio::Waiter::noop();
-			b.iter_batched_ref(
-				|| runtime.block_on(resume_overlap(readers, retained)),
-				|rig| {
-					for reader in &mut rig.readers {
-						let mut delivered = 0;
-						while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {
-							delivered += 1;
+		group.bench_function(
+			BenchmarkId::from_parameter(format!("{readers}r_{retained}g_{routes}c")),
+			|b| {
+				let runtime = tokio::runtime::Builder::new_current_thread()
+					.enable_all()
+					.build()
+					.unwrap();
+				let waiter = kio::Waiter::noop();
+				b.iter_batched_ref(
+					|| runtime.block_on(resume_overlap(readers, retained, routes)),
+					|rig| {
+						for reader in &mut rig.readers {
+							let mut delivered = 0;
+							while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {
+								delivered += 1;
+							}
+							assert_eq!(delivered, retained, "every group once");
 						}
-						assert_eq!(delivered, retained, "every group once");
-					}
-				},
-				BatchSize::PerIteration,
-			);
-		});
+					},
+					BatchSize::PerIteration,
+				);
+			},
+		);
 	}
 	group.finish();
 }
