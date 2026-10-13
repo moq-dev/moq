@@ -256,9 +256,7 @@ export class Connection {
 			webtransport: props.webtransport,
 			websocket: props.websocket,
 			discovery: props.discovery,
-			// A handle nobody watches wants unlimited retries; an auth rejection still
-			// stops this URL, and a new one starts another sequence.
-			delay: { timeout: Time.Milli(0), ...props.delay },
+			delay: props.delay,
 			goaway: props.goaway,
 		});
 		this.#signals.cleanup(() => loop.close());
@@ -451,10 +449,6 @@ function acquire(key: string, linger?: Time.Milli): Entry & { release: () => voi
 			enabled: true,
 			publish: origin.consume(),
 			consume: origin,
-			// Nobody observes a shared loop's `closed`, so giving up would strand every handle
-			// on this URL offline until the page reloads. Retry for as long as the entry lives
-			// instead; an auth rejection still stops this URL, and evicts below.
-			delay: { timeout: Time.Milli(0) },
 		});
 
 		const created: Entry = { key, origin, connection, refs: 0, linger: linger ?? LINGER_MS };

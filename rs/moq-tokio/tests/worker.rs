@@ -72,8 +72,7 @@ fn open_sockets() -> std::collections::HashSet<u64> {
 		.collect()
 }
 
-/// A self-signed certificate on disk. Workers refuse `tls.generate`, since each
-/// would generate one of its own and serve a different identity.
+/// A self-signed certificate on disk.
 fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
 	let key = rcgen::KeyPair::generate().expect("keypair");
 	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("cert params");
@@ -434,22 +433,31 @@ async fn an_unaddressable_group_is_refused() {
 	);
 }
 
-/// Generating a certificate would give every member a different identity, so it
-/// is refused rather than silently served.
+/// Generated certificates are minted once and shared by the whole worker group.
 #[tokio::test]
-async fn generated_certificates_are_refused() {
+async fn generated_certificates_are_shared() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-
 	let mut listen = moq_tokio::listen::Config::default();
 	listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	listen.tls.generate = vec!["localhost".to_string()];
-
-	let err =
-		bind_workers(listen, Default::default(), config(WORKERS)).expect_err("generated certificates cannot be shared");
-	assert!(
-		matches!(err, moq_tokio::Error::WorkerTlsGenerate),
-		"unexpected error: {err}"
-	);
+	let workers =
+		bind_workers(listen, Default::default(), config(WORKERS)).expect("one generated identity for all workers");
+	let expected = workers.certificates().fingerprints();
+	assert_eq!(expected.len(), 1);
+	let mut group = workers.split();
+	let (send, mut recv) = tokio::sync::mpsc::unbounded_channel();
+	for member in group.members() {
+		let send = send.clone();
+		member.serve(|server| async move {
+			send.send(server.certificates().fingerprints()).unwrap();
+			std::future::pending::<()>().await;
+		});
+	}
+	drop(send);
+	for _ in 0..WORKERS {
+		assert_eq!(recv.recv().await.unwrap(), expected);
+	}
+	group.shutdown().await;
 }
 
 /// Dropping a server handle cannot take its socket out of the reuseport group.
@@ -708,4 +716,81 @@ async fn dropping_the_group_with_work_in_flight_stops() {
 		owned.is_disjoint(&open_sockets()),
 		"dropping the group must release the port"
 	);
+}
+
+/// Every member's next fresh handshake uses the fingerprint exposed by the group.
+#[cfg(feature = "watch")]
+#[tokio::test]
+async fn rotated_identity_reaches_every_worker() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let dir = tempfile::tempdir().unwrap();
+	let (cert, key) = certificate(dir.path());
+	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(WORKERS)).unwrap();
+	let addr = workers.local_addr();
+	let certificates = workers.certificates();
+	let before = certificates.fingerprints();
+	let mut group = workers.split();
+	let (send, mut recv) = tokio::sync::mpsc::unbounded_channel();
+	for member in group.members() {
+		let index = member.index();
+		let send = send.clone();
+		member.serve(move |server| async move {
+			let certificates = server.certificates();
+			let mut listener = server.listen().await.unwrap();
+			while let Some(request) = listener.accept().await {
+				let send = send.clone();
+				let certificates = certificates.clone();
+				tokio::spawn(async move {
+					let session = request.ok().await.unwrap();
+					send.send((index, certificates.fingerprints())).unwrap();
+					let _ = session.closed().await;
+				});
+			}
+		});
+	}
+	drop(send);
+	let probe = async {
+		for rotated in [false, true] {
+			let expected = if rotated {
+				let replacement = tempfile::tempdir().unwrap();
+				let (new_cert, new_key) = certificate(replacement.path());
+				std::fs::rename(new_cert, &cert).unwrap();
+				std::fs::rename(new_key, &key).unwrap();
+				loop {
+					let current = certificates.fingerprints();
+					if current != before {
+						break current;
+					}
+					tokio::task::yield_now().await;
+				}
+			} else {
+				before.clone()
+			};
+			let mut seen = std::collections::HashSet::new();
+			while seen.len() < usize::from(WORKERS) {
+				// Fresh client endpoints make independent handshakes, without session resumption.
+				let mut config = moq_tokio::connect::Config::default();
+				config.tls.fingerprint = expected.clone();
+				config.once = Some(true);
+				#[cfg(feature = "websocket")]
+				{
+					config.websocket.enabled = Some(false);
+				}
+				let client = config.init(Default::default()).unwrap();
+				let url: url::Url = format!("https://{addr}/").parse().unwrap();
+				let session = client
+					.connect(url)
+					.established()
+					.await
+					.expect("handshake must match the shared fingerprint");
+				let (worker, served) = recv.recv().await.unwrap();
+				assert_eq!(served, expected, "worker {worker}");
+				seen.insert(worker);
+				drop(session);
+			}
+		}
+	};
+	let result = tokio::time::timeout(std::time::Duration::from_secs(10), probe).await;
+	group.shutdown().await;
+	result.expect("every worker must serve both snapshots");
 }

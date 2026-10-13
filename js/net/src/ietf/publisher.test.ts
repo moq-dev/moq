@@ -602,6 +602,7 @@ test("a failed stream open does not kill the announce loop", async () => {
 		version: inner.version,
 		acceptBi: () => inner.acceptBi(),
 		nextRequestId: () => inner.nextRequestId(),
+		spendRequest: (id) => inner.spendRequest(id),
 		close: () => inner.close(),
 		openBi: () => {
 			if (failures-- > 0) throw new Error("no stream credit");
@@ -647,6 +648,7 @@ test("a namespace refused once is retried without anything else changing", async
 		version: inner.version,
 		acceptBi: () => inner.acceptBi(),
 		nextRequestId: () => inner.nextRequestId(),
+		spendRequest: (id) => inner.spendRequest(id),
 		close: () => inner.close(),
 		openBi: () => {
 			if (failures-- > 0) throw new Error("no stream credit");
@@ -683,6 +685,7 @@ test("a solicited legacy advertisement refused once is retried", async () => {
 		version: inner.version,
 		acceptBi: () => inner.acceptBi(),
 		nextRequestId: () => inner.nextRequestId(),
+		spendRequest: (id) => inner.spendRequest(id),
 		close: () => inner.close(),
 		openBi: () => {
 			if (failures-- > 0) throw new Error("no stream credit");
@@ -1667,7 +1670,7 @@ function fixture(version: IetfVersion = V20): {
 	close: () => void;
 } {
 	const pair = createMockTransportPair(ALPNS[version]);
-	const session = new NativeSession(pair.server, version, true);
+	const session = new NativeSession(pair.server, version, false);
 	const { pub, origin } = publisher(pair.server, { session });
 	const broadcast = publish(origin, Path.from("test"));
 	const uni = pair.client.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<

@@ -151,6 +151,10 @@ impl Parts {
 #[derive(Default)]
 #[non_exhaustive]
 pub struct Config {
+	/// Shared served identity; `listen.tls` must be empty when this is set.
+	#[cfg(feature = "_certs")]
+	pub tls: Option<crate::tls::Serve>,
+
 	/// Tracks accepted transports through their handshake and session lifetime.
 	pub activity: moq_net::server::Activity,
 	/// The accept side of the endpoint: what to listen on and how to be trusted.
@@ -197,6 +201,8 @@ impl Config {
 	pub(crate) fn worker(&self) -> Self {
 		Self {
 			listen: self.listen.clone(),
+			#[cfg(feature = "_certs")]
+			tls: self.tls.clone(),
 			quic: self.quic.clone(),
 			#[cfg(feature = "websocket")]
 			websocket: None,
@@ -265,6 +271,8 @@ impl Server {
 			activity,
 			listen: config,
 			quic,
+			#[cfg(feature = "_certs")]
+			tls,
 			#[cfg(feature = "websocket")]
 			websocket,
 			#[cfg(feature = "iroh")]
@@ -323,6 +331,35 @@ impl Server {
 			return Err(Error::NoBackend("--listen-tls-root requires the noq feature"));
 		}
 
+		#[cfg(feature = "_certs")]
+		let tls = {
+			if tls.is_some() && config.tls.configured() {
+				return Err(crate::tls::Error::ConflictingServe.into());
+			}
+			#[allow(unused_mut)]
+			let mut needed = cfg!(feature = "noq") && build_quic;
+			#[cfg(feature = "tcp")]
+			{
+				needed |= build_streams && config.tcp.bind.is_some() && config.tcp.tls == Some(true);
+			}
+			match (tls, needed) {
+				// Mirrors `validate_stream_only`: an identity no listener serves is refused.
+				// A streams-only caller owns QUIC elsewhere, which serves it.
+				(Some(_), false) if parts.quic() => {
+					return Err(Error::NoBackend(
+						"server::Config::tls needs a TLS listener (--listen or --listen-tcp-tls)",
+					));
+				}
+				(Some(tls), _) => Some(tls),
+				(None, true) => Some(config.tls.load()?),
+				(None, false) => None,
+			}
+		};
+		#[cfg(feature = "_certs")]
+		if parts.quic() && !build_quic && tls.as_ref().is_some_and(crate::tls::Serve::client_auth) {
+			return Err(Error::MtlsUnsupported);
+		}
+
 		// The member is a serving handle released by a complete reuseport group,
 		// so the backend may take it only once.
 		#[cfg(feature = "noq")]
@@ -330,7 +367,14 @@ impl Server {
 
 		#[cfg(feature = "noq")]
 		let noq = build_quic
-			.then(|| crate::noq::NoqServer::new(config.clone(), &quic, member))
+			.then(|| {
+				crate::noq::NoqServer::new(crate::noq::Options {
+					config: config.clone(),
+					quic: quic.clone(),
+					member,
+					tls: tls.clone().expect("QUIC needs TLS"),
+				})
+			})
 			.transpose()?;
 
 		// Collect the configured stream listeners (at most one TCP, one Unix).
@@ -339,7 +383,12 @@ impl Server {
 		#[cfg(feature = "tcp")]
 		if let Some(addr) = config.tcp.bind.filter(|_| build_streams) {
 			let tls = match config.tcp.tls == Some(true) {
-				true => Some(TcpTls::new(&config, &versions)?),
+				true => Some(TcpTls::new(
+					&config,
+					&versions,
+					#[cfg(feature = "_certs")]
+					tls.clone().expect("TLS stream needs an identity"),
+				)?),
 				false => None,
 			};
 			stream_binds.push(StreamBind::Tcp(addr, tls));
@@ -1032,43 +1081,24 @@ enum StreamBind {
 #[cfg(feature = "tcp")]
 struct TcpTls {
 	config: std::sync::Arc<rustls::ServerConfig>,
-	#[cfg(all(feature = "watch", feature = "_certs"))]
-	_reload: crate::tls::ReloadingServerConfig,
 }
 
 #[cfg(all(feature = "tcp", feature = "_certs"))]
 impl TcpTls {
-	/// Serve the listen certificate, accepting each stream version as a
-	/// `qmux-01.<alpn>` TLS ALPN.
-	///
-	/// Asks for no client certificate: qmux's TLS accept keeps no peer identity
-	/// for the auth server to read, so neither a `tls.root` nor pinned `peers`
-	/// meant for QUIC apply, and a peer on this listener authenticates with a token.
-	fn new(config: &crate::listen::Config, versions: &moq_net::Versions) -> crate::Result<Self> {
-		let mut listen = config.tls.clone();
-		listen.root.clear();
-		listen.peers = None;
+	// qmux does not report peer certificates; keep token-only authentication while
+	// using the same certificate resolver as the QUIC listeners.
+	fn new(
+		_config: &crate::listen::Config,
+		versions: &moq_net::Versions,
+		serve: crate::tls::Serve,
+	) -> crate::Result<Self> {
 		let alpn = stream_versions(versions)
 			.alpns()
 			.iter()
 			.map(|alpn| format!("{}{alpn}", qmux::Version::QMux01.prefix()).into_bytes())
 			.collect();
-		Self::serve(&listen, alpn)
-	}
-
-	#[cfg(feature = "watch")]
-	fn serve(listen: &crate::tls::Listen, alpn: Vec<Vec<u8>>) -> crate::Result<Self> {
-		let reload = listen.server_config_reloading(alpn)?;
 		Ok(Self {
-			config: reload.config(),
-			_reload: reload,
-		})
-	}
-
-	#[cfg(not(feature = "watch"))]
-	fn serve(listen: &crate::tls::Listen, alpn: Vec<Vec<u8>>) -> crate::Result<Self> {
-		Ok(Self {
-			config: listen.server_config(alpn)?,
+			config: serve.anonymous(alpn)?,
 		})
 	}
 }
@@ -1731,6 +1761,28 @@ impl Request {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[cfg(all(not(feature = "noq"), feature = "_certs"))]
+	#[test]
+	fn no_quic_backend_needs_no_served_identity() {
+		Server::new(Config::default()).expect("an absent QUIC backend must not load a TLS identity");
+	}
+
+	/// A shared identity on a plaintext-only server would be dropped silently.
+	#[cfg(all(feature = "tcp", feature = "_certs"))]
+	#[tokio::test]
+	async fn a_shared_identity_needs_a_tls_listener() {
+		let tls = crate::tls::Listen {
+			generate: vec!["localhost".into()],
+			..Default::default()
+		}
+		.load()
+		.unwrap();
+		let mut config = Config::default();
+		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.tls = Some(tls);
+		assert!(matches!(Server::new(config), Err(Error::NoBackend(_))));
+	}
 
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {

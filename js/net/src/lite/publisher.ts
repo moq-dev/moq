@@ -14,6 +14,7 @@ import { type Reader, type Stream, Writer } from "../stream.ts";
 import { Milli, Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { Interests, LIMITS, type Limits, Slots } from "../util/limits.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
@@ -384,6 +385,9 @@ export class Publisher {
 
 	#quic: WebTransport;
 
+	// Subscriptions and open TRACK streams the peer holds live on this session.
+	#interests: Interests;
+
 	// The one writer for the outbound datagram stream (getWriter locks it), acquired once at
 	// construction when this version + transport carry datagrams, released in close(). Its
 	// presence is the gate: undefined means datagrams aren't served on this connection. All
@@ -420,6 +424,7 @@ export class Publisher {
 	 * @param publish - The origin whose broadcasts this session serves; omit to publish nothing
 	 * @param auth - The union of our tokens' grants, which bounds what we publish, and when the
 	 *   setup tokens are answered
+	 * @param limits - How many live requests the peer may hold
 	 *
 	 * @internal
 	 */
@@ -429,8 +434,10 @@ export class Publisher {
 		hop: Hop,
 		publish?: OriginConsumer,
 		auth?: { grant: Getter<Grant | undefined>; ready: Promise<void> },
+		limits: Limits = LIMITS,
 	) {
 		this.#quic = quic;
+		this.#interests = new Interests(new Slots(limits.subscriptions, { quic, reason: "too many subscriptions" }));
 		this.#grant = auth?.grant;
 		this.#ready = auth?.ready ?? Promise.resolve();
 		this.version = version;
@@ -666,6 +673,8 @@ export class Publisher {
 	 * @internal
 	 */
 	async runSubscribe(msg: Subscribe, stream: Stream) {
+		// Charged before anything else, as in Rust. A peer past the cap loses the session.
+		const interest = this.#interests.acquire(msg.broadcast, msg.track, "subscribe");
 		// Serve only what our grant lets us publish, and stop once it no longer does. The
 		// watch is armed before the first check and held to the end, so a shrink while the
 		// broadcast resolves is never missed.
@@ -682,6 +691,7 @@ export class Publisher {
 			});
 		} finally {
 			watch.dispose();
+			interest.release();
 		}
 	}
 
@@ -710,12 +720,21 @@ export class Publisher {
 			return;
 		}
 
+		// The requester leaving while the broadcast and track resolve ends the request, as
+		// Rust polls the requester throughout, so a cancelled subscription gives back its
+		// charge instead of holding it until the track is answered, which may be never. A
+		// subscriber's close (STOP_SENDING) and its abort (RESET_STREAM) both land here.
+		const left = new AbortController();
+		const cancel = new StreamError(StreamCode.Cancel, { message: "cancel" });
+		const leave = () => left.abort(cancel);
+		void race([stream.reader.closed, stream.writer.closed]).then(leave, leave);
+
 		let front: broadcast.Consumer | undefined;
 		try {
 			front =
 				this.#publish &&
 				(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
-					(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch)));
+					(await untilAborted(wireOf(this.#publish).demand(msg.broadcast, msg.epoch), left.signal)));
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
@@ -760,7 +779,7 @@ export class Publisher {
 				// they always agree. Awaiting info() also surfaces a rejected track
 				// (accept never called, track closed) as an error here, which resets the
 				// stream.
-				const info = await track.info();
+				const info = await untilAborted(track.info(), left.signal);
 				timescale = wireTimescale(info);
 			} else {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
@@ -820,7 +839,8 @@ export class Publisher {
 			await Promise.all([datagrams, controls.decoding, finished && acknowledged(stream.writer)]);
 		} catch (err: unknown) {
 			const e = error(err);
-			console.warn(`publish error: broadcast=${msg.broadcast} track=${track.name} error=${reason(e)}`);
+			if (e === cancel) console.debug(`publish cancelled: broadcast=${msg.broadcast} track=${track.name}`);
+			else console.warn(`publish error: broadcast=${msg.broadcast} track=${track.name} error=${reason(e)}`);
 			track.close(e);
 			stream.abort(e);
 			await Promise.all([datagrams, controls?.decoding]);
@@ -1177,7 +1197,11 @@ export class Publisher {
 	 * @internal
 	 */
 	async runTrackInfo(msg: TrackMessage, stream: Stream) {
+		// Charged before anything else and held with the track, as in Rust. A peer past the
+		// cap loses the session.
+		const interest = this.#interests.acquire(msg.broadcast, msg.track, "track");
 		const hold = new AbortController();
+		hold.signal.addEventListener("abort", () => interest.release(), { once: true });
 		// Armed before the first check and held until the answer is acknowledged, so a grant
 		// that shrinks while the answer is blocked on flow control resets it, never sends it.
 		const watch = this.#watch(msg.broadcast, () => {
@@ -1187,6 +1211,7 @@ export class Publisher {
 		});
 		if (watch.revoked()) {
 			watch.dispose();
+			hold.abort();
 			stream.writer.reset(unauthorized(msg.broadcast));
 			return;
 		}

@@ -78,9 +78,12 @@ fn a_send_staged_on_the_way_out_still_goes() {
 }
 
 fn server_config(certs: &support::Certs) -> quic::server::Config {
-	let mut config = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
-	config.alpn = vec![ALPN.to_string()];
-	config
+	quic::server::Config::new(
+		quic::Identity::open(&certs.cert, &certs.key)
+			.expect("identity")
+			.server(&[ALPN], quic::server::ClientAuth::None)
+			.expect("tls"),
+	)
 }
 
 fn dial_config(peer: std::net::SocketAddr) -> quic::client::Config {

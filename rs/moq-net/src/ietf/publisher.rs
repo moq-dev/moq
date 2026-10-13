@@ -990,7 +990,15 @@ where
 							.reader
 							.poll_decode_maybe::<super::request_stream::Update>(&mut cx)
 						{
-							Poll::Ready(Ok(Some(update))) => return Poll::Ready(Ok(Some(update))),
+							Poll::Ready(Ok(Some(update))) => {
+								if let Err(err) = self.control.accept(update.request_id) {
+									session
+										.clone()
+										.close(crate::SessionError::from(&err).to_code(), "invalid request ID");
+									return Poll::Ready(Err(err));
+								}
+								return Poll::Ready(Ok(Some(update)));
+							}
 							Poll::Ready(Ok(None)) if !super::request_stream::fin_cancels(self.version) => {
 								*finished = true
 							}

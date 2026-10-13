@@ -1392,11 +1392,18 @@ where
 				return Ok(());
 			}
 
+			// An update spends its own request ID, even one refused below.
+			let request_id = ietf::RequestId::decode(&mut body.decoder(self.version), self.version)?;
+			if let Err(err) = self.control.accept(request_id) {
+				self.session
+					.clone()
+					.close(crate::SessionError::from(&err).to_code(), "invalid request ID");
+				return Err(err);
+			}
 			let msg = match ietf::PublishNamespaceUpdate::decode_msg(&mut data, self.version) {
 				// Section 8.9 rejects the update, which withdraws the advertisement as any
 				// refused update does.
 				Err(DecodeError::MalformedAuthToken) => {
-					let request_id = ietf::RequestId::decode(&mut body.decoder(self.version), self.version)?;
 					let err = Error::Decode(DecodeError::MalformedAuthToken);
 					self.write_error(stream, request_id, &err, "repeated AUTHORIZATION TOKEN")
 						.await?;
@@ -7077,7 +7084,7 @@ mod tests {
 			crate::time::Clock::sim(),
 			session.clone(),
 			origin,
-			Control::new(None, false),
+			Control::new(None, true),
 			None,
 			peer::PeerSetup::default(),
 			self_origin,
@@ -7153,6 +7160,32 @@ mod tests {
 				cost: 0,
 			},
 		)
+	}
+
+	/// Namespace updates spend IDs from the same lifetime history as initial requests.
+	#[moq_net_sim::test]
+	async fn namespace_update_cannot_reuse_a_spent_request_id() {
+		let self_origin = crate::Hop::new(5).unwrap();
+		let peer = peer_9();
+		let (clean, _) = clean_and_looped();
+		let script = publish_namespace_updates(std::slice::from_ref(&clean)).await;
+		let (mut subscriber, _consumer, mut stream, _driver) = update_harness(self_origin, &peer, &clean, script).await;
+		let log = subscriber.session.log.clone();
+		// The initial request is already retired; its ID remains permanently spent.
+		assert!(subscriber.control.accept(RequestId(3)).unwrap().is_none());
+		let mut attached = true;
+		let err = subscriber
+			.run_publish_namespace_updates(
+				&mut stream,
+				&crate::Path::new("room/host"),
+				Some(clean),
+				peer,
+				&mut attached,
+			)
+			.await
+			.expect_err("a repeated update ID must close the session");
+		assert!(matches!(err, Error::Session(crate::SessionError::InvalidRequestId)));
+		assert_eq!(log.closes()[0].0, crate::SessionError::InvalidRequestId.to_code());
 	}
 
 	/// A reflected update detaches the route but MUST NOT end the stream. Updates ride

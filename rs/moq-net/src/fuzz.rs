@@ -1176,6 +1176,11 @@ impl crate::transport::Error for NoError {
 	}
 }
 
+/// Admit modern request IDs for the history benchmark, returning the accepted count.
+pub fn request_history(ids: &[u64]) -> usize {
+	ietf::request_history(ids)
+}
+
 /// Admit a draft-16 window for the request-ID benchmark, returning the accepted count.
 pub fn request_ids(window: u64, ids: &[u64]) -> usize {
 	ietf::request_ids(window, ids)
