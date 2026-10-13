@@ -15,11 +15,13 @@ the raw H.264/H.265 exports) still learn of a gap after the fact.
 
 - Map `Gap` to the exporter's discontinuity handling and `End` to its
   declared-end handling, in delivery order.
-- Keep group boundaries reaching the exporters. `Read` has no group-end item,
-  but fMP4 cuts a fragment on `Event::GroupEnd` while the track stays live;
-  losing it stalls live fMP4 until the track closes. Keep a crate-private
-  boundary signal alongside the Read items, with a test that a live fMP4 export
-  still emits a fragment at each group end.
+- Keep the events `Read` filters reaching the exporters. fMP4 cuts a fragment
+  on `Event::GroupEnd` while the track stays live, and sizes a durationless
+  final sample from a trailing `Event::FrameEnd { opens: false }`; losing
+  either stalls fMP4 or writes the wrong duration. Keep a crate-private path
+  for both alongside the Read items. Tests: a live fMP4 export still emits a
+  fragment at each group end, and
+  `zero_fragment_duration_waits_for_the_exact_video_endpoint` passes.
 - Delete `Consumer::discontinuity()` and `Consumer::markers()` once nothing
   reads them, along with `ExportSource::markers()` if it only forwards.
 - Existing exporter tests must pass unchanged; add one where a gap and an end
