@@ -73,6 +73,7 @@ pub struct Config {
 	/// How long an egress waits for the same publisher instance to come back once its
 	/// broadcast ends, carrying on with the same stream. Zero (the default) closes the SRT
 	/// stream at the end. Only affects egress (`m=request`).
+	/// A stitched replacement must also supply its first catalog within this bound.
 	pub linger: Duration,
 
 	/// Whether an egress follows another publisher instance replacing its broadcast, as a full

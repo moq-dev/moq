@@ -6,6 +6,7 @@ use crate::{
 };
 
 use super::{Message, Version};
+use crate::track::Order;
 
 /// Sent by the subscriber to request all future objects for the given track.
 ///
@@ -33,6 +34,9 @@ pub struct Subscribe<'a> {
 	/// Last frame to deliver (inclusive) within `end_group`'s group, or `None` for the
 	/// whole group. Lite06+ only, and meaningless without an explicit `end_group`.
 	pub end_frame: Option<u64>,
+	/// Which pending group to send first. Lite07+ only; earlier wires decode as
+	/// [`Order::Descending`] and cannot ask for anything else.
+	pub order: Order,
 }
 
 impl Version {
@@ -54,14 +58,14 @@ impl Message for Subscribe<'_> {
 		let track = Cow::Owned(r.string()?);
 		let priority = r.u8()?;
 
-		let (max_delay, start_group, end_group) = match version {
-			Version::Lite01 | Version::Lite02 => (std::time::Duration::ZERO, None, None),
+		let (order, max_delay, start_group, end_group) = match version {
+			Version::Lite01 | Version::Lite02 => (Order::Descending, std::time::Duration::ZERO, None, None),
 			_ => {
-				skip_group_order(r, version)?;
+				let order = decode_order(r, version)?;
 				let max_delay = std::time::Duration::from_millis(r.varint()?);
 				let start_group = decode_start_group(r, version)?;
 				let end_group = r.varint_opt()?;
-				(max_delay, start_group, end_group)
+				(order, max_delay, start_group, end_group)
 			}
 		};
 
@@ -79,6 +83,7 @@ impl Message for Subscribe<'_> {
 			end_group,
 			start_frame,
 			end_frame,
+			order,
 		})
 	}
 
@@ -92,7 +97,7 @@ impl Message for Subscribe<'_> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {}
 			_ => {
-				pad_group_order(w, version)?;
+				encode_order(w, version, self.order)?;
 				w.varint(u64::try_from(self.max_delay.as_millis()).map_err(|_| EncodeError::BoundsExceeded)?)?;
 				encode_start_group(w, version, self.start_group)?;
 				w.varint_opt(self.end_group)?;
@@ -128,6 +133,33 @@ pub(super) fn pad_group_order(w: &mut Encoder<'_>, version: Version) -> Result<(
 	if version.has_group_order() {
 		w.u8(0);
 	}
+	Ok(())
+}
+
+/// Decode the byte after the subscriber priority shared by SUBSCRIBE and SUBSCRIBE_UPDATE:
+/// lite-07's `Group Order`, or the retired `Ordered` byte an older layout still carries.
+fn decode_order(r: &mut Decoder<'_>, version: Version) -> Result<Order, DecodeError> {
+	if !version.has_order() {
+		skip_group_order(r, version)?;
+		return Ok(Order::Descending);
+	}
+	match r.u8()? {
+		0 => Ok(Order::Descending),
+		1 => Ok(Order::Ascending),
+		_ => Err(DecodeError::InvalidValue),
+	}
+}
+
+/// Encode the inverse of [`decode_order`]. A wire without `Group Order` serves newest
+/// first, so an ascending subscription over it falls back to descending.
+fn encode_order(w: &mut Encoder<'_>, version: Version, order: Order) -> Result<(), EncodeError> {
+	if !version.has_order() {
+		return pad_group_order(w, version);
+	}
+	w.u8(match order {
+		Order::Descending => 0,
+		Order::Ascending => 1,
+	});
 	Ok(())
 }
 
@@ -388,6 +420,8 @@ pub struct SubscribeUpdate {
 	pub start_frame: u64,
 	/// See [`Subscribe::end_frame`].
 	pub end_frame: Option<u64>,
+	/// See [`Subscribe::order`].
+	pub order: Order,
 }
 
 impl Message for SubscribeUpdate {
@@ -400,7 +434,7 @@ impl Message for SubscribeUpdate {
 		}
 
 		let priority = r.u8()?;
-		skip_group_order(r, version)?;
+		let order = decode_order(r, version)?;
 		let max_delay = std::time::Duration::from_millis(r.varint()?);
 		let start_group = decode_start_group(r, version)?;
 		let end_group = match r.varint()? {
@@ -418,6 +452,7 @@ impl Message for SubscribeUpdate {
 			end_group,
 			start_frame,
 			end_frame,
+			order,
 		})
 	}
 
@@ -430,7 +465,7 @@ impl Message for SubscribeUpdate {
 		}
 
 		w.u8(self.priority);
-		pad_group_order(w, version)?;
+		encode_order(w, version, self.order)?;
 		w.varint(u64::try_from(self.max_delay.as_millis()).map_err(|_| EncodeError::BoundsExceeded)?)?;
 
 		encode_start_group(w, version, self.start_group)?;
@@ -712,6 +747,7 @@ mod test {
 
 	fn subscribe_sample() -> Subscribe<'static> {
 		Subscribe {
+			order: crate::track::Order::Descending,
 			epoch: None,
 			id: 1,
 			broadcast: Path::new("room").to_owned(),
@@ -892,5 +928,71 @@ mod test {
 			resp.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
 				.is_err()
 		);
+	}
+
+	/// Lite-07 carries `Group Order` right after the priority, on SUBSCRIBE and
+	/// SUBSCRIBE_UPDATE alike, and refuses a value it does not define.
+	#[test]
+	fn group_order_roundtrips_on_lite07() {
+		use crate::track::Order;
+
+		let version = Version::Lite07;
+		for order in [Order::Ascending, Order::Descending] {
+			let mut msg = subscribe_sample();
+			msg.order = order;
+			let mut buf = Vec::new();
+			msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
+				.unwrap();
+			let got = crate::coding::decode_buf(&mut buf.as_slice(), version, Subscribe::decode_msg).unwrap();
+			assert_eq!(got.order, order);
+
+			let update = SubscribeUpdate {
+				priority: 3,
+				max_delay: std::time::Duration::from_millis(250),
+				start_group: None,
+				end_group: None,
+				start_frame: 0,
+				end_frame: None,
+				order,
+			};
+			let mut buf = Vec::new();
+			update
+				.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
+				.unwrap();
+			// The priority, then the order.
+			assert_eq!(buf[1], u8::from(order == Order::Ascending));
+			let got = crate::coding::decode_buf(&mut buf.as_slice(), version, SubscribeUpdate::decode_msg).unwrap();
+			assert_eq!(got.order, order);
+
+			buf[1] = 2;
+			assert!(matches!(
+				crate::coding::decode_buf(&mut buf.as_slice(), version, SubscribeUpdate::decode_msg),
+				Err(DecodeError::InvalidValue)
+			));
+		}
+	}
+
+	/// No earlier wire has `Group Order`, so an ascending subscription falls back to
+	/// descending, byte-identical to one that never asked.
+	#[test]
+	fn group_order_falls_back_before_lite07() {
+		use crate::track::Order;
+
+		for version in [Version::Lite03, Version::Lite05, Version::Lite06] {
+			let mut msg = subscribe_sample();
+			msg.start_frame = 0;
+			msg.end_frame = None;
+			let mut descending = Vec::new();
+			msg.encode_msg(&mut Encoder::new(&mut descending, version.into()), version)
+				.unwrap();
+			msg.order = Order::Ascending;
+			let mut ascending = Vec::new();
+			msg.encode_msg(&mut Encoder::new(&mut ascending, version.into()), version)
+				.unwrap();
+			assert_eq!(ascending, descending, "{version}");
+
+			let got = crate::coding::decode_buf(&mut ascending.as_slice(), version, Subscribe::decode_msg).unwrap();
+			assert_eq!(got.order, Order::Descending, "{version}");
+		}
 	}
 }

@@ -6,6 +6,7 @@
 //! producer side is driven by [`Client`](crate::Client) when an auth server answers, or
 //! by any in-process logic when the embedder decides itself. No trait, no callbacks.
 
+use std::sync::Arc;
 #[cfg(feature = "tokio")]
 use std::sync::Mutex;
 use std::task::Poll;
@@ -170,7 +171,7 @@ impl Producer {
 				#[cfg(feature = "tokio")]
 				clock_changed: tokio::sync::Notify::new(),
 			},
-			Consumer { state, seen: 0 },
+			Consumer::new(state),
 		)
 	}
 
@@ -312,14 +313,42 @@ impl Drop for Producer {
 
 /// The session's side of a lease: reads the grant and learns when it changes or ends.
 ///
-/// Dropping it ends the lease with [`Reason::Dropped`]; [`close`](Self::close) says why.
-#[derive(Debug)]
+/// Dropping the last clone ends the lease with [`Reason::Dropped`]; [`close`](Self::close) ends every clone.
+#[derive(Debug, Clone)]
 pub struct Consumer {
-	state: kio::Shared<State>,
+	hold: Arc<Held>,
 	seen: u64,
 }
 
+#[derive(Debug)]
+struct Held {
+	state: kio::Shared<State>,
+	#[cfg(feature = "client")]
+	context: Option<crate::client::Context>,
+}
+
 impl Consumer {
+	fn new(state: kio::Shared<State>) -> Self {
+		Self {
+			hold: Arc::new(Held {
+				state,
+				#[cfg(feature = "client")]
+				context: None,
+			}),
+			seen: 0,
+		}
+	}
+
+	#[cfg(feature = "client")]
+	pub(crate) fn context(&self) -> Option<&crate::client::Context> {
+		self.hold.context.as_ref()
+	}
+
+	#[cfg(feature = "client")]
+	pub(crate) fn set_context(&mut self, context: crate::client::Context) {
+		Arc::get_mut(&mut self.hold).expect("new lease has one holder").context = Some(context);
+	}
+
 	/// A lease on a grant nobody drives: it never changes and is never revoked,
 	/// so only the holder ends it. What a static or public grant admits under.
 	pub fn fixed(grant: Grant) -> Self {
@@ -329,19 +358,20 @@ impl Consumer {
 			closed: None,
 			revalidate: 0,
 		});
-		Self { state, seen: 0 }
+		Self::new(state)
 	}
 
 	/// The grant as it stands now.
 	pub fn grant(&self) -> Grant {
-		self.state.read().grant.clone()
+		self.hold.state.read().grant.clone()
 	}
 
 	/// Poll for the next update: the new grant, or the reason the lease ended.
 	pub fn poll_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Grant, Reason>> {
 		let seen = self.seen;
 		let state = std::task::ready!(
-			self.state
+			self.hold
+				.state
 				.poll(waiter, |state| ready_if(state.epoch > seen || state.closed.is_some()))
 		);
 		if let Some((reason, _)) = &state.closed {
@@ -358,7 +388,7 @@ impl Consumer {
 
 	/// Poll for the lease ending.
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Reason> {
-		let state = std::task::ready!(self.state.poll(waiter, |state| ready_if(state.closed.is_some())));
+		let state = std::task::ready!(self.hold.state.poll(waiter, |state| ready_if(state.closed.is_some())));
 		Poll::Ready(state.closed.as_ref().expect("waited for a close").0.clone())
 	}
 
@@ -370,19 +400,28 @@ impl Consumer {
 	/// Ask the producer to re-check now. A no-op on a [`fixed`](Self::fixed)
 	/// lease, which has nobody to ask.
 	pub fn revalidate(&self) {
-		self.state.lock().revalidate += 1;
+		self.hold.state.lock().revalidate += 1;
 	}
 
 	/// End the lease with the session's own close classification and the totals it
-	/// moved, consuming the handle, and return the reason the lease ended with:
+	/// moved, and return the reason the lease ended with:
 	/// `reason`, or the producer's if it revoked first. [`Drop`] reports zero bytes.
 	pub fn close(self, reason: impl Into<Reason>, bytes: Bytes) -> Reason {
-		self.state.lock().closed.get_or_insert((reason.into(), bytes)).0.clone()
+		let reason = reason.into();
+		#[cfg(feature = "client")]
+		if let Some(context) = &self.hold.context {
+			context.close(reason.clone(), bytes);
+		}
+		self.hold.state.lock().closed.get_or_insert((reason, bytes)).0.clone()
 	}
 }
 
-impl Drop for Consumer {
+impl Drop for Held {
 	fn drop(&mut self) {
+		#[cfg(feature = "client")]
+		if let Some(context) = &self.context {
+			context.close(Reason::Dropped, Bytes::default());
+		}
 		self.state
 			.lock()
 			.closed
@@ -439,6 +478,31 @@ mod tests {
 		assert_eq!(
 			poll(producer.closed()),
 			Poll::Ready((Reason::Session("done".into()), Bytes { sent: 3, received: 5 }))
+		);
+	}
+
+	#[test]
+	fn consumer_clones_hold_the_lease_until_the_last_drop() {
+		let (producer, consumer) = Producer::new(grant("a/**"));
+		let retained = consumer.clone();
+		drop(consumer);
+		assert!(poll(producer.closed()).is_pending());
+		drop(retained);
+		assert_eq!(
+			poll(producer.closed()),
+			Poll::Ready((Reason::Dropped, Bytes::default()))
+		);
+	}
+
+	#[test]
+	fn closing_one_consumer_ends_every_clone() {
+		let (producer, consumer) = Producer::new(grant("a/**"));
+		let retained = consumer.clone();
+		consumer.close(Reason::Shutdown, Bytes { sent: 3, received: 5 });
+		assert_eq!(poll(retained.closed()), Poll::Ready(Reason::Shutdown));
+		assert_eq!(
+			poll(producer.closed()),
+			Poll::Ready((Reason::Shutdown, Bytes { sent: 3, received: 5 }))
 		);
 	}
 

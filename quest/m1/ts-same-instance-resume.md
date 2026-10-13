@@ -59,7 +59,7 @@ required behavior or API change returns to the maintainer for a decision.
 - [Validation PR #5328](https://github.com/moq-dev/moq/pull/5328#issuecomment-6114456593) - failing full-check evidence
 - [Catalog identity controls #5333](https://github.com/moq-dev/moq/pull/5333) - initial acquisition preserves the selected contract
 - [Live clock validation](/quest/m1/ts-live-clock.md) - independent local live failure
-- [Replacement catalog linger](/quest/m1/ts-follow-catalog-bound.md) - #5305 owns the bound on a mid-stream switch's first catalog
+- [Replacement catalog linger #5305](https://github.com/moq-dev/moq/pull/5305) - owns the bound on a mid-stream switch's first catalog
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - shared catalogs, tracks and source-derived group identity
 - [Closed fallback #5284](https://github.com/moq-dev/moq/pull/5284) - early WebSocket closure and its transport-test fix
 - [TS duration fidelity](/quest/m0/ts-duration-fidelity.md) - diagnose a shared end-of-stream cause only if reproduced

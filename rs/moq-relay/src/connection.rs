@@ -113,13 +113,14 @@ impl Connection {
 		//
 		// moq-net defaults the unset side to a fresh no-op origin, which is fine for a
 		// publish-only or subscribe-only session.
-		let mut request = self.request.with_stats(stats);
+		let mut request = self.request.with_stats(stats).with_limits(self.cluster.limits(&lease));
 		if let Some(subscriber) = subscriber {
 			request = request.with_publisher(subscriber);
 		}
 		if let Some(publisher) = publisher {
 			request = request.with_subscriber(publisher);
 		}
+		let lease = lease.preparing(request.auth(), request.role())?;
 		// Bounded too: a peer that stalls the SETUP reply must not outlive the relay.
 		let session = self
 			.shutdown
@@ -151,7 +152,7 @@ impl Connection {
 		if self.request.peer_identity().is_some() {
 			tracing::debug!("client certificate verified; reported to the auth server");
 		}
-		let admitted = self.cluster.admit(&self.auth, request.clone()).await?;
+		let admitted = self.cluster.admit_session(&self.auth, request.clone()).await?;
 		let registration = self.sessions.as_ref().map(|sessions| sessions.register(request));
 		Ok((admitted, registration))
 	}

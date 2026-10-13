@@ -2963,7 +2963,7 @@ async fn a_dead_session_unannounces_while_the_reconnect_retries() {
 	client_config.tls.insecure = Some(true);
 	// Retry forever with a fast cadence: the worst case for a stale announce.
 	client_config.backoff.initial = Duration::from_millis(10);
-	client_config.backoff.timeout = Duration::ZERO;
+	client_config.backoff.timeout = Some(Duration::ZERO);
 	let client = client_config.init(Default::default()).expect("failed to init client");
 
 	let connection = tokio::time::timeout(TIMEOUT, client.with_subscriber(sub_origin).connect(url).established())
@@ -3639,7 +3639,7 @@ async fn zero_initial_backoff_still_gives_up_on_a_flapping_peer() {
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	client_config.backoff.initial = Duration::ZERO;
-	client_config.backoff.timeout = Duration::from_millis(500);
+	client_config.backoff.timeout = Some(Duration::from_millis(500));
 	let client = client_config.init(Default::default()).expect("failed to init client");
 
 	let connection = client.connect(url);
