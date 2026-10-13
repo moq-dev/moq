@@ -363,6 +363,11 @@ bench-stats *args:
 bench-latency:
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-bench --run-ignored only -E 'test(benchmark_observation_contention)' --success-output immediate
 
+# Exact TS receiver scheduling across PID and queued-unit fanout.
+[positional-arguments]
+bench-ts-schedule *args:
+    cargo bench --locked -p moq-mux --bench ts_schedule -- "$@"
+
 # Sweep container export tracks and queued frames independently.
 [positional-arguments]
 bench-export *args:

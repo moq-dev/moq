@@ -6,14 +6,17 @@ Routing info splits into two layers on the session's announce stream, in
 lite-07 (the current wip version, decided 2026-10-05), for every session. A ROUTE advertises reachability of one
 origin node; an ANNOUNCE says a prefix lives at a route's node and carries no
 path. A link flap or relay loss sends one ROUTE change per origin whose best
-route changed, never a re-announce per broadcast; ending a broadcast reaches
-each node about once and nothing hunts; failover to another neighbour with
-the same epoch is seamless; and no state of disagreeing neighbours keeps a dead broadcast
-alive.
+route changed, never a re-announce per broadcast; withdrawing an origin-owned
+claim does not revive stale copies or end other origins serving the same epoch; failover to another neighbour with
+the same epoch preserves continuity; and no stale neighbor copy revives a
+claim whose withdrawal is already known.
 
 ## Plan
 
-Decided 2026-10-01 (see the [line's decisions](/quest/m1/cluster-routing/README.md)):
+Keep the 2026-10-01 two-layer direction, reconciled with the maintainer's
+2026-10-13 [decisions](/quest/m1/cluster-routing/README.md). The sketch below
+is conditional on Routing contracts and Next-hop handoff; those planning
+quests settle identity, forwarding progress and claim freshness before coding:
 
 - Wire sketch, flexible in detail. ROUTE_START carries the node id, a seqno,
   the metric, and a down-only bit, and implicitly takes the next stream-local
@@ -31,11 +34,17 @@ Decided 2026-10-01 (see the [line's decisions](/quest/m1/cluster-routing/README.
   remains Restart even when the origin node is unchanged; only a matching
   explicit epoch or the separately proven Takeover operation preserves an
   instance. Test a same-origin next-hop change with no epoch.
-  ANNOUNCE_UPDATE re-prices it and ANNOUNCE_END ends one broadcast while the
-  route stays up. An announce never changes its Route ID: another origin
+  ANNOUNCE_UPDATE re-prices it and ANNOUNCE_END withdraws this origin's claim
+  while the route stays up. A wildcard claim is capability, not an inventory
+  of broadcasts; another origin may still serve the same epoch. An announce
+  never changes its Route ID: another origin
   serving the same path is another ANNOUNCE. An ANNOUNCE naming an unknown
-  Route ID is a protocol violation, and ROUTE_END ends that stream's
-  ANNOUNCEs on the route. ROUTE_REQUEST (node id, seqno, hop count) travels
+  Route ID is a protocol violation. ROUTE_END removes this stream's
+  reachability, not proof that the
+  origin withdrew its claims. Preserve known presence through uncertain
+  handoff with forwarding availability represented separately and bounded
+  state, following the handoff proof's reference/retirement contract.
+  ROUTE_REQUEST (node id, seqno, hop count) travels
   the other way on the same stream, toward the neighbour that sent the route.
   The hop list leaves lite-07, and with it the
   `Hop Base`/`Hop Keep` compression.
@@ -45,27 +54,30 @@ Decided 2026-10-01 (see the [line's decisions](/quest/m1/cluster-routing/README.
   ANNOUNCE_START prefix=transcode/ route=0 cost=10    -> announce 0
   ANNOUNCE_START prefix=transcode/foobar route=0 cost=1 -> announce 1
   ROUTE_UPDATE route=0 seqno=42 metric=15
-  ANNOUNCE_END announce=1                       # one broadcast ends
-  ROUTE_END    route=0                          # ends announce 0 too
+  ANNOUNCE_END announce=1                       # this origin withdraws a claim
+  ROUTE_END    route=0                          # this stream loses reachability
   ```
-- A stream carries a ROUTE only while some ANNOUNCE on it references it: sent
-  just before the first, ended after the last. That bounds a client session
-  to the origins of what it asked for (announce interest already scopes it),
-  not the CDN's whole node table.
+- Scope route state to interested origins, not the CDN's whole node table.
+  Send a route before any announcement referencing it. The handoff contract
+  defines unavailable routes and reference retirement, including partial
+  interest, so collection neither invents a publisher END nor permits stale
+  claims to revive after rejoin.
 - The announce cost is the origin's per-prefix seed (`transcode/**` at 10 and
   `transcode/foobar` at 1 from one node, decided 2026-10-01) and nobody
   changes it in transit; a path's cost through a route is that seed plus the
   route metric. Link changes therefore touch only ROUTE, and feasibility runs
   on the route metric alone. This is today's single route cost, which stops
   accumulating per hop once this lands.
-- Each hop adds its link cost plus one to the metric (decided 2026-10-01), so
-  the metric strictly increases as Babel requires while operators keep
-  configuring cost 0 for a free link.
-- The node id is global and opaque: a relay's `cluster.id` or a random id,
-  and an app's handshake id. It is needed so routes from two neighbours to
-  one origin are recognized as one, which carries loop freedom,
-  deduplication, and P2P dialing (an app maps an announce's node to a roster
-  peer).
+- Use configured additive costs with hop-count defaults and a strictly
+  increasing feasibility metric. Routing contracts settles zero-cost and
+  overflow representation before this wire is fixed, replacing the earlier
+  unqualified cost-plus-one sketch.
+- Fresh opaque routing identity per process/tab restart, shared across its
+  authenticated live sessions, decided 2026-10-13. Keep administrative
+  identity and broadcast epoch separate. The shared identity recognizes an
+  origin reached through CDN and direct links and maps it to a roster peer;
+  a session cannot assert another origin's identity or seqno without authority.
+  Follow Routing contracts for `cluster.id`, admission, and stale incarnations.
 - Loop freedom is Babel's feasibility condition (RFC 8966) keyed by node:
   accept a route if its seqno is newer, or equal with a metric below the
   feasibility distance. Only the origin advances its seqno. Retraction is an
@@ -84,28 +96,35 @@ Decided 2026-10-01 (see the [line's decisions](/quest/m1/cluster-routing/README.
   route is gone, or when the retries run out, and only a later infeasible
   update starts a new one. Feasibility is never
   reset to accept a longer route after a retraction or a session replay.
-- Next-hop authority: store every neighbour's ANNOUNCEs, but a prefix is live
-  at a node only as its current next hop toward the origin announces it, the
-  neighbour a subscribe for that path would go to (metric, then the path-keyed
-  rendezvous hash among equal next hops). When the next hop changes, adopt
-  the new neighbour's stored set and send downstream only the difference.
-  No per-announce seqno.
+  The handoff proof must revise this pending/retrigger sketch if a quiet
+  origin could otherwise remain starved after the final retry.
+- Claim authority and freshness follow the handoff proof, independently of
+  the requested path's forwarding choice. Next-hop authority alone failed
+  the simulator below. A complete old snapshot cannot overwrite a known
+  withdrawal. Do not preclude claim revisions or freshness floors before
+  that proof. Store only state justified by its bounded replay/coverage model.
 - Origin selection keeps `route_order`'s shape and swaps its inputs: the
   candidates become the origin nodes announcing the path, ranked by longest
   prefix, then the newest epoch, then the link's preference
   (`origin::Producer::with_preference`), then the
-  route metric to the node, then the path-keyed rendezvous hash, with the
-  origin node id breaking a full tie.
+  sum of prefix seed and route metric, then the deterministic path-keyed
+  rendezvous hash. Prefer the newest connection/announcement only for an
+  otherwise identical route, preserving reconnect behavior without making
+  every new equal-cost connection win. Apply the proved requester/export
+  constraints first. Epochless source changes never resume.
 - Down-only bit: set on a route learned on an upstream link, kept across
   other links, and a route carrying it is never sent on an upstream link
   (extending the `upstream` link mark in `doc/bin/relay/cluster.md`).
-- A plain client with one link advertises a ROUTE for itself and the
-  ANNOUNCEs it publishes; its node id is scoped to its session, and
-  nothing promotes it to an identity shared across sessions.
-  A relay advertising routes to a client sends them as usual; node ids reveal
-  nothing about the backbone.
-- Every hop re-selects; SUBSCRIBE names no origin, and the reply names none
-  either: any route announcing a path under the same epoch resumes it.
+- A plain client advertises its own origin and publications only. Its
+  authenticated routing identity is shared across its live sessions so P2P
+  can recognize the same origin, superseding the session-only identity plan.
+  Clients receive only authorized, interested claims; opaque ids expose no
+  backbone addresses, but are not themselves authorization.
+- Preserve path-only subscription aggregation if Routing contracts proves
+  it safe under local priorities and multiple origins. Per-origin Babel
+  feasibility is not a proof for arbitrary origin reselection at each hop.
+  Implement the reviewed forwarding constraint; do not silently remove
+  requester exclusion or assume aggregation makes a cycle deliver media.
 - Mixed versions: a lite-06 peer keeps today's path vector, translated at the
   relay that speaks both, for the rollout window only.
 
@@ -113,10 +132,12 @@ Why not a hold-down: #4644 retracted at once and re-announced a replacement
 after 1 s, which ended a downstream front whose only path ran through the
 relay, dropping subscribers for about a second while the relay kept serving;
 holding without retracting brought hunting back in measurements, and
-#4642's 300 ms cursor hold is the production mitigation.
-Separating "the path changed" (ROUTE) from "the broadcast ended" (ANNOUNCE)
-removes that trade, and the failover tests must show no front loses its
-route while a working one exists. Decide whether #4642's hold can then go.
+#4642's 300 ms cursor hold was the earlier mitigation. Main also contains
+#5375's two-second retraction quarantine and #5391's same-clock queue dedup.
+#5375 measured residual stale revivals, so neither longer holds nor one passing
+mesh establish correctness. Separating reachability from claim freshness is
+the direction, not yet a proof. Retire mitigations only after the incident
+fixtures and failover tests demonstrate their replacement.
 
 Simulator findings (2026-10-12), measured with seed 1 on a tiered
 45-node topology (four regions of two upstream nodes and their edges, plus
@@ -146,10 +167,9 @@ benchmarks.
 
 Open, for the implementer to settle and record:
 
-- Seqno lifetime across restarts of a node with a configured stable id
-  (persist it, fold an incarnation into the id, or rely on the seqno
-  request). The simulator persisted each origin's counter across restarts to
-  keep this choice from hiding starvation.
+- The earlier simulator persisted seqnos across restart. Re-run with the
+  settled fresh routing incarnation and the contracts proof's stale-state
+  rules; do not carry the old assumption into acceptance.
 - The window where an origin's ANNOUNCE_END and a next-hop change cross in
   flight, and what makes a replacement next hop's announce set current. Kept
   open: [Next-hop handoff](/quest/m1/cluster-routing/handoff.md) settles it
@@ -172,14 +192,42 @@ whose ROUTE arrives before its ANNOUNCE set, and reports per-path
 retractions and re-announcements beside the ROUTE budget; eventual route
 recovery alone does not show it is seamless.
 
+Tiered-cluster and partition/healing end-to-end checks belong in this quest,
+not after lite-07 can be finalized: two regions with redundant cores, publish,
+claim withdrawal, core loss, and matching-epoch failover reaching a far edge;
+a two-uplink mesh reached through CDN during partition. Include overlapping
+wildcards, per-export-view alternatives, and epochless Restart. Fixtures are
+public and time-mocked, wired into CI alongside Rust/JS interop.
+
+Benchmark origins, broadcasts per origin, neighbors, active tracks/fronts,
+and announce cursors independently. A route update must not expand back into
+per-broadcast table rewrites or poll unrelated fronts. Measure messages, bytes,
+wakes/select calls, CPU, replay work, and retained state. One broadcast per
+origin is an explicit case. Coordinate with Route wakes and Announce replay;
+benchmark smoke alone does not enforce complexity, so add operation-count
+regressions. Bound pending requests and freshness state under same-clock churn.
+
 Wire: `drafts/draft-lcurley-moq-lite.md` in the same PR, and `js/net`
-encodes, decodes, and resolves it (JS transit stays in
-[P2P](/quest/m3/p2p/README.md)). Public API: the route-change surface on
+encodes, decodes, and resolves it. Browsers remain non-transit; P2P reuses
+this model rather than adding a browser forwarding engine. Public API: the
+route-change surface on
 `broadcast::Route` and its bindings will likely change; report it. This may
 split at start (Rust and draft, then JS), as long as both land in one
 release.
 
 ## Required
 
-- [Next-hop handoff](/quest/m1/cluster-routing/handoff.md) - what keeps an END final and a replacement next hop's announces current across the handoff
+- [Routing contracts](/quest/m1/cluster-routing/contracts.md) - authenticated incarnation, local priorities, forwarding progress, and export views
+- [Next-hop handoff](/quest/m1/cluster-routing/handoff.md) - complete and fresh claims with bounded state
+- [Cross-node flapping](/quest/m1/cross-node-flapping.md) - incident-sensitive baseline and residual counterexamples
+
+## Closes
+
+- [#4349](https://github.com/moq-dev/moq/issues/4349) - close once the residual cross-node flapping counterexamples pass
+
+## Related
+
+- [Route wakes](/quest/m2/route-wakes.md) - index work follows the settled source-selection model
+- [Announce replay](/quest/m2/perf/announce-replay.md) - linear initial/reconnect replay
+- [Route health](/quest/m2/route-health/README.md) - epoch-only progress observation and local delivery failover
 

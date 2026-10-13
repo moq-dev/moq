@@ -29,8 +29,6 @@ start on the first loss or a mismatched RTT.
   `rs/moq-tokio/src/connection.rs`, dialing through the race in
   `failover.rs`) seeds a redial from the session it replaces, and
   the relay's cluster peers seed from the previous session to the same peer.
-  The transport-upgrade quest's QUIC dial seeds from nothing, since the
-  previous session ran over TCP.
 
 Measure time to the encoder's target rate after a reconnect on the impaired
 path profile, plus loss and latency during the jump. Ship it on by default
@@ -42,5 +40,4 @@ only when the jump never makes the first second worse than slow start.
 
 ## Related
 
-- [Transport upgrade](/quest/m1/transport-upgrade/README.md) - its first QUIC connection has no seed from TCP; later QUIC reconnects may reuse a remembered estimate
 - [noq#815](https://github.com/n0-computer/noq/issues/815) - the careful-resume proposal to n0

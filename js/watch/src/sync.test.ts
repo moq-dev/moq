@@ -199,3 +199,21 @@ describe("wait", () => {
 		await waiting;
 	});
 });
+
+describe("recorded ingress", () => {
+	it("anchors and classifies using arrival rather than delayed delivery", async () => {
+		const sync = new Sync({ delay: Time.Milli(100) });
+		const original = performance.now;
+		performance.now = () => 10000;
+		try {
+			for (let i = 0; i < 20; i++) await Promise.resolve();
+			expect(sync.received(Time.Milli(0), "audio", Time.Milli(1000))).toBe(false);
+			expect(sync.out.reference.peek()).toBe(Time.Milli(1000));
+			expect(sync.received(Time.Milli(20), "audio", Time.Milli(1020))).toBe(false);
+			expect(sync.received(Time.Milli(40), "audio", Time.Milli(1200))).toBe(true);
+		} finally {
+			performance.now = original;
+			sync.close();
+		}
+	});
+});

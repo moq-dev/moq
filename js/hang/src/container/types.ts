@@ -17,6 +17,12 @@ export interface Frame {
 	duration?: Time.Micro;
 }
 
+/** A media frame carrying its local transport ingress time. */
+export interface ReceivedFrame extends Frame {
+	/** Monotonic ingress time in milliseconds, before reordering or decoder backpressure. */
+	arrival: Time.Milli;
+}
+
 /** A contiguous span of buffered media, in milliseconds. */
 export interface BufferedRange {
 	/** Start of the range in milliseconds. */

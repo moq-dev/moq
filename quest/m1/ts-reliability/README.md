@@ -49,9 +49,9 @@ and the MPEG-TS draft consistent in each feature change.
 The planning children settle catalog and clock contracts before production
 changes. Their output adds independently completable implementation quests to
 this line; an audit finding is not authorization to guess a public API.
-PMT fragmentation (#5220) and initial mux-rate measurement (#5287) have
-landed; PSI runs, decoder-time admission, and catalog linger remain with
-their current quests.
+PMT fragmentation (#5220), initial mux-rate measurement (#5287), and
+decoder-time admission (#5306) have landed; PSI runs and catalog linger
+remain with their current quests.
 
 ## Required
 
@@ -64,7 +64,7 @@ their current quests.
 
 ## Related
 
-- [Epoch anchor](/quest/m1/epoch-anchor.md) - shared identity across importers requires one source coordinate per epoch
+- [Epoch anchor](/quest/m1/epoch-anchor.md) - shared identity across importers requires one source coordinate per epoch, derived from the epoch
 - [TS over RTP legs](/quest/m2/ts-rtp-egress.md) - TS identity alone is not ST 2022-7, which also needs matching RTP headers
 - [TS health counters](/quest/m2/ts-health-stats.md) - ingress and egress evidence need distinct monitoring points
 - [MSFTS mapping](/quest/m3/msfts-convergence.md) - document the exact equivalence and differences between the carriage modes

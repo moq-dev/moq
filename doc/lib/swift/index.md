@@ -17,6 +17,8 @@ slices for iOS 16+, the iOS Simulator, and macOS 12.3+.
 `.named(name:)` or `.requested(request)` target. `Media.CatalogProducer(broadcast:)`
 updates catalog properties and sections without keeping the broadcast open.
 Its writes fail after closing or releasing the broadcast.
+For arrival-order reads, decode each group from `TrackConsumer.recvGroup()` with
+`Media.GroupConsumer(group:container:)`; frames carry container media time as they land.
 
 ```swift ignore
 dependencies: [

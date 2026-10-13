@@ -534,6 +534,8 @@ pub(crate) enum RequestValidity {
 	Unrestricted,
 	Route(kio::Consumer<()>),
 	Selected(std::sync::Arc<crate::model::origin_impl::Selection>),
+	/// One period of a selection, captured by [`Self::start`].
+	Period(kio::Consumer<()>, std::sync::Arc<crate::model::origin_impl::Selection>),
 }
 
 impl RequestValidity {
@@ -551,7 +553,7 @@ impl RequestValidity {
 	/// Capture one selection period so a pending request never revives after a replacement.
 	pub(crate) fn start(&self) -> Self {
 		match self {
-			Self::Selected(selected) => Self::Route(selected.current()),
+			Self::Selected(selected) => Self::Period(selected.current(), selected.clone()),
 			other => other.clone(),
 		}
 	}
@@ -559,6 +561,12 @@ impl RequestValidity {
 	pub(crate) fn check(&self, waiter: &kio::Waiter) -> Result<(), crate::Error> {
 		match self {
 			Self::Route(route) if route.poll_closed(waiter).is_ready() => Err(crate::Error::Unroutable),
+			// A replacement retires the period only once its held `Restart` is released.
+			Self::Period(route, selected)
+				if route.poll_closed(waiter).is_ready() || selected.poll_retired(waiter).is_ready() =>
+			{
+				Err(crate::Error::Unroutable)
+			}
 			Self::Selected(_) => self.start().check(waiter),
 			_ => Ok(()),
 		}

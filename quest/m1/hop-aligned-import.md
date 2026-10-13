@@ -24,15 +24,15 @@ connection (#4962), so two of them never share one. Publishers whose
 timestamps or bytes come from the instance refuse a shared epoch
 ([Epoch refusals](/quest/m1/epoch-refusals.md)).
 
-Decided 2026-10-13 by the maintainer: an epoch has one
-coordinate, which its first importer fixes and every later importer adopts
-([Epoch anchor](/quest/m1/epoch-anchor.md)). This quest numbers groups on it
-and proves the pair end to end. A shared epoch or a raw PTS or PCR value
-alone does not supply that coordinate, and arrival time never does.
-Considered instead: one importer per epoch with redundancy only downstream,
-which stays the supported 1+1 until this lands, and a contract narrowed to
-what one input proves, which fails at the first failover across a timestamp
-wrap.
+Decided 2026-10-13 by the maintainer: every importer of an epoch stays live
+and derives one coordinate from the epoch and its source alone
+([Epoch anchor](/quest/m1/epoch-anchor.md)), superseding the same day's plan
+where later importers adopted the first one's. This quest numbers groups on
+that coordinate and proves the pair end to end. A raw PTS or PCR value alone
+does not supply it, and arrival time chooses only the era. Considered
+instead: one importer per epoch with redundancy only downstream, which stays
+the supported 1+1 until this lands, and a contract narrowed to what one input
+proves, which fails at the first failover across a timestamp wrap.
 
 - A group's sequence derives from its first frame's time on the epoch
   timeline (the keyframe in the demultiplexed lane, the group's first object
@@ -46,39 +46,42 @@ wrap.
   never from `clock.now()` (2026-10-06 audit), and importers refuse a rewind.
 - The catalog's root `clock` is the epoch's, never an importer's arrival
   (2026-10-05 audit; narrowing the contract to exclude the catalog clock was
-  rejected). So is every other catalog field an importer derives from its
-  history, which a joiner adopts from the live catalog.
+  rejected). Every other catalog field an importer derives from its history
+  derives from the epoch and the content instead, never from the live
+  catalog.
 - The tracks an importer generates are tracks too: the catalog tracks
   (hang, compressed, MSF) and `*.timeline`. Today catalog groups are
   numbered locally (`Outputs::emit`), the MSF frame is stamped with
-  `Timestamp::now()`, and timeline records start at zero, so a joiner would
-  reuse earlier group or record numbers for newer bytes. Their numbering
-  and timestamps come from the live track at join or from the epoch
-  timeline, never the instance.
-- An importer announces only once it knows its tracks, so it never refuses a
-  track the incumbent serves.
+  `Timestamp::now()`, and timeline records start at zero, so an importer
+  started later would reuse earlier group or record numbers for newer bytes.
+  Their numbering and timestamps come from the epoch timeline and the
+  content, never the instance or the live track.
+- An importer announces only once it knows its tracks: split out to
+  [announce once tracks are known](/quest/m1/import-announce-tracks.md)
+  (2026-10-13), which closes #4352.
 - Docs (the `--epoch` paragraph in `doc/bin/cli.md`, the `--epoch` doc
-  comment) state the contract: one encoded stream fed to each publisher, and
-  a later importer that can reach the live broadcast before it announces.
+  comment) state the contract: one encoded stream fed to each publisher, no
+  access to the live broadcast needed, and a wall mapping only as accurate as
+  the epoch's wall time matches the source.
 
 Tests: per importer, two instances started at different offsets into one
 input, including the later one starting after a timestamp wrap the earlier
 crossed, publish identical catalogs, group sequences, and timestamps, on
-the generated catalog and timeline tracks too, joining after earlier
-catalog updates and timeline records. End to
-end: the issues' 1+1 setup (one relay, two `import ts` sharing one `--epoch`,
-two `export ts`) survives the standby joining, before and after a wrap, and
-the incumbent stopping; repeat it with `--passthrough`.
+the generated catalog and timeline tracks too, starting after earlier
+catalog updates and timeline records. End to end: the issues' 1+1 setup (one
+relay, two `import ts` sharing one `--epoch`, two `export ts`) survives the
+second importer starting, before and after a wrap, and either importer
+stopping and restarting; repeat it with `--passthrough`.
 
 ## Closes
 
-- [#4352](https://github.com/moq-dev/moq/issues/4352) - close this issue when the quest finishes
 - [#4354](https://github.com/moq-dev/moq/issues/4354) - close this issue when the quest finishes
 
 ## Required
 
+- [Announce once tracks are known](/quest/m1/import-announce-tracks.md) - a starting importer never answers `not found` for tracks its partner serves
 - [Epoch refusals](/quest/m1/epoch-refusals.md) - publishers that cannot meet the contract refuse a shared epoch
-- [Epoch anchor](/quest/m1/epoch-anchor.md) - one anchor and timestamp era per epoch, adopted by every later importer
+- [Epoch anchor](/quest/m1/epoch-anchor.md) - every importer derives one catalog clock and timestamp era from the epoch
 - [Raw TS cuts on the epoch timeline](/quest/m1/ts-passthrough-epoch-cuts.md) - passthrough groups start where every instance cuts
 
 ## Related

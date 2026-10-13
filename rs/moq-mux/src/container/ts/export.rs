@@ -480,6 +480,7 @@ impl Timing {
 		Some(Buffer {
 			rate: rate.min(level.leak),
 			size: Some(usize::try_from(cpb / 8).unwrap_or(usize::MAX)),
+			transport: 512,
 		})
 	}
 
@@ -1803,8 +1804,7 @@ impl<E: catalog::Catalog> Export<E> {
 			es_info,
 		};
 
-		self.schedule.set_buffer(0, Buffer::SYSTEM);
-		self.schedule.set_buffer(pmt_pid, Buffer::SYSTEM);
+		self.schedule.set_tables(pmt_pid);
 		self.schedule.set_clock(pcr_pid);
 		for track in self.tracks.values() {
 			self.liveness.register(track.pid);
@@ -1978,7 +1978,15 @@ impl<E: catalog::Catalog> Export<E> {
 			self.schedule.set_buffer(pid, buffer);
 		}
 		let by = decode.as_nanos().saturating_sub(track.drain().as_nanos());
-		self.schedule.push(pid, by, out, keyframe);
+		self.schedule.push(
+			pid,
+			super::schedule::Timing {
+				by,
+				decode: decode.as_nanos(),
+			},
+			out,
+			keyframe,
+		)?;
 		Ok(())
 	}
 
@@ -2499,7 +2507,11 @@ fn audio_buffer(config: &AudioConfig, kind: &Kind) -> Buffer {
 		Kind::Eac3 => (2_000_000, 12_896),
 		_ => (2_000_000, 3_584),
 	};
-	Buffer { rate, size: Some(size) }
+	Buffer {
+		rate,
+		size: Some(size),
+		transport: 512,
+	}
 }
 
 /// The DVB AC-3 descriptor's tag (ETSI EN 300 468 6.2.1), marking AC-3 as private data.
@@ -2509,8 +2521,8 @@ const AC3_DESCRIPTOR: u8 = 0x6a;
 const TELETEXT_DESCRIPTOR: u8 = 0x56;
 
 /// A verbatim stream's buffers, for the kinds its descriptors identify: AC-3 as DVB private
-/// data (ATSC A/52 Annex A 5.4), and teletext, whose transport buffer drains at 6.75 Mb/s
-/// (ETSI EN 300 472 5). Any other stream has none the schedule knows.
+/// data (ATSC A/52 Annex A 5.4), and teletext, whose 480-byte transport buffer drains at
+/// 6.75 Mb/s (ETSI EN 300 472 5). Any other stream has none the schedule knows.
 fn verbatim_buffer(kind: &Kind, descriptors: &[catalog::Descriptor]) -> Option<Buffer> {
 	let Kind::Verbatim {
 		stream_type: 0x06,
@@ -2524,10 +2536,12 @@ fn verbatim_buffer(kind: &Kind, descriptors: &[catalog::Descriptor]) -> Option<B
 		AC3_DESCRIPTOR => Some(Buffer {
 			rate: 2_000_000,
 			size: Some(5_696),
+			transport: 512,
 		}),
 		TELETEXT_DESCRIPTOR => Some(Buffer {
 			rate: 6_750_000,
 			size: None,
+			transport: 480,
 		}),
 		_ => None,
 	})
@@ -2999,6 +3013,7 @@ mod tests {
 			Some(Buffer {
 				rate: 6_750_000,
 				size: None,
+				transport: 480,
 			})
 		);
 		assert_eq!(verbatim_buffer(&kind, &[descriptor(0x0a)]), None);
