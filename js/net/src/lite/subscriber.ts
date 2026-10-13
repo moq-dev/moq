@@ -565,6 +565,9 @@ export class Subscriber {
 			}
 
 			announced.close();
+			// Either side ending the interest ends the stream, or the peer keeps it open, still
+			// discovering into it and holding a stream slot.
+			stream.close();
 		} catch (err: unknown) {
 			const e = error(err);
 			// Reaches here on a protocol violation the peer committed (a second

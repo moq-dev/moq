@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
 import { Once } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "../broadcast.ts";
+import * as Epoch from "../epoch.ts";
 import { Route } from "../hop.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -95,8 +96,8 @@ class FakeSession {
 	}
 }
 
-function start(stream: Announce.Producer, prefix: string) {
-	stream.append({ prefix: Path.from(prefix), captures: undefined, kind: "start", route: Route.default });
+function start(stream: Announce.Producer, prefix: string, route: Route = Route.default) {
+	stream.append({ prefix: Path.from(prefix), captures: undefined, kind: "start", route });
 }
 
 /** Every event an origin announcement stream yields, as `kind prefix`. */
@@ -256,7 +257,49 @@ test("a pattern watches its literal head", async () => {
 	origin.close();
 });
 
-test("nested watches share one request and hand over without a retraction", async () => {
+for (const epoch of [undefined, Epoch.mint()]) {
+	test(`nested watches share one request and hand over without a retraction (epoch: ${epoch !== undefined})`, async () => {
+		const origin = new OriginProducer();
+		const session = new FakeSession();
+		forwardAnnounced(session.session, origin);
+		const route = { ...Route.default, epoch };
+
+		const broad = origin.announced(Path.Pattern.subtree(Path.from("a")));
+		const narrow = origin.announced(Path.Pattern.subtree(Path.from("a/b")));
+		const events = record(narrow);
+		await settle();
+		// The narrower watch rides the broader request.
+		expect(session.open()).toEqual(["a/**"]);
+
+		start(session.stream("a/**"), "a/b/x", route);
+		start(session.stream("a/**"), "a/c", route);
+		await settle();
+		expect(events).toEqual(["start a/b/x"]);
+
+		// The broader watch leaves: the narrower request opens at once, before the broader closes.
+		broad.close();
+		await settle();
+		expect(session.open()).toEqual(["a/**", "a/b/**"]);
+		start(session.stream("a/b/**"), "a/b/x", route);
+		await settle();
+
+		jest.advanceTimersByTime(LINGER);
+		await settle();
+		expect(session.open()).toEqual(["a/b/**"]);
+		// Only what the broader request alone carried retracts.
+		expect(wireOf(origin).routes(Path.from("a/b/x"))).toBe(true);
+		expect(wireOf(origin).routes(Path.from("a/c"))).toBe(false);
+		// The epoch proves the narrower request reports the same instance. Without one, the route
+		// restarts rather than stitch two instances together.
+		expect(events).toEqual(epoch ? ["start a/b/x"] : ["start a/b/x", "restart a/b/x"]);
+
+		narrow.close();
+		session.die();
+		origin.close();
+	});
+}
+
+test("a hand-over to another epoch restarts the route", async () => {
 	const origin = new OriginProducer();
 	const session = new FakeSession();
 	forwardAnnounced(session.session, origin);
@@ -264,74 +307,25 @@ test("nested watches share one request and hand over without a retraction", asyn
 	const broad = origin.announced(Path.Pattern.subtree(Path.from("a")));
 	const narrow = origin.announced(Path.Pattern.subtree(Path.from("a/b")));
 	const events = record(narrow);
+	start(session.stream("a/**"), "a/b/x", { ...Route.default, epoch: Epoch.mint() });
 	await settle();
-	// The narrower watch rides the broader request.
-	expect(session.open()).toEqual(["a/**"]);
 
-	start(session.stream("a/**"), "a/b/x");
-	start(session.stream("a/**"), "a/c");
-	await settle();
-	expect(events).toEqual(["start a/b/x"]);
-
-	// The broader watch leaves: the narrower request opens at once, before the broader closes.
+	// The publisher restarted. The narrow request snapshots the newer instance while the
+	// broad one has yet to report it.
 	broad.close();
 	await settle();
-	expect(session.open()).toEqual(["a/**", "a/b/**"]);
-	start(session.stream("a/b/**"), "a/b/x");
+	start(session.stream("a/b/**"), "a/b/x", { ...Route.default, epoch: Epoch.mint() });
 	await settle();
+	expect(events).toEqual(["start a/b/x"]);
 
 	jest.advanceTimersByTime(LINGER);
 	await settle();
-	expect(session.open()).toEqual(["a/b/**"]);
-	// Only what the broader request alone carried retracts.
-	expect(wireOf(origin).routes(Path.from("a/b/x"))).toBe(true);
-	expect(wireOf(origin).routes(Path.from("a/c"))).toBe(false);
-	expect(events).toEqual(["start a/b/x"]);
+	expect(events).toEqual(["start a/b/x", "restart a/b/x"]);
 
 	narrow.close();
 	session.die();
 	origin.close();
 });
-
-for (const broadRestarts of [false, true]) {
-	test(`a hand-over restarts only for an instance the route has not taken (broad restarts: ${broadRestarts})`, async () => {
-		const origin = new OriginProducer();
-		const session = new FakeSession();
-		forwardAnnounced(session.session, origin);
-
-		const broad = origin.announced(Path.Pattern.subtree(Path.from("a")));
-		const narrow = origin.announced(Path.Pattern.subtree(Path.from("a/b")));
-		const events = record(narrow);
-		start(session.stream("a/**"), "a/b/x");
-		await settle();
-
-		// The broad watch leaves, so the narrow request opens and joins the route.
-		broad.close();
-		await settle();
-		start(session.stream("a/b/**"), "a/b/x");
-		// The epochless publisher restarts; the narrow request hears it first.
-		const restart = {
-			prefix: Path.from("a/b/x"),
-			captures: undefined,
-			kind: "restart",
-			route: Route.default,
-		} as const;
-		session.stream("a/b/**").append(restart);
-		if (broadRestarts) session.stream("a/**").append(restart);
-		await settle();
-		expect(events).toEqual(broadRestarts ? ["start a/b/x", "restart a/b/x"] : ["start a/b/x"]);
-
-		// The broad request lingers out. The narrow one takes over on the newer instance, so a
-		// route still on the old one restarts rather than stitching the two.
-		jest.advanceTimersByTime(LINGER);
-		await settle();
-		expect(events).toEqual(["start a/b/x", "restart a/b/x"]);
-
-		narrow.close();
-		session.die();
-		origin.close();
-	});
-}
 
 test("a reconnect re-opens every live watch and skips a lingering one", async () => {
 	const origin = new OriginProducer();

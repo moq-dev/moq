@@ -35,27 +35,8 @@ interface Interest {
  */
 interface Reported {
 	handle: Dynamic;
-	/** How many publisher restarts the handle has taken. */
-	restarts: number;
-	readonly reporters: Map<Interest, Reporter>;
-}
-
-/** One request's view of a reported route. */
-interface Reporter {
-	route: Route;
-	/** Restarts this request has reported since it joined. */
-	restarts: number;
-	/** The handle's restart count when this request joined. */
-	joined: number;
-}
-
-/**
- * How many restarts `reporter` has seen that the handle has not taken. Positive when it
- * reports a newer publisher instance than the handle serves: an epochless instance is told
- * apart only by its restart, so the count is all there is to compare.
- */
-function ahead(reported: Reported, reporter: Reporter): number {
-	return reporter.restarts - (reported.restarts - reporter.joined);
+	/** Each request's latest route for the prefix. */
+	readonly reporters: Map<Interest, Route>;
 }
 
 /**
@@ -66,7 +47,9 @@ function ahead(reported: Reported, reporter: Reporter): number {
  * Discovery is lazy. One announce request opens per prefix in the origin's covering set of
  * watches (`announced(scope)` and `request(path, { announced: true })`), and closes
  * {@link LINGER} after its last watcher leaves. A broader watch opens its request before the
- * narrower ones close, and a route both report stays inserted, so nothing retracts.
+ * narrower ones close, and a route both report stays inserted, so nothing retracts. An
+ * epochless route restarts when it changes hands, since nothing proves both requests saw
+ * one instance.
  *
  * Each active announcement inserts a route covering the announced prefix, served lazily
  * through this connection, so nothing touches the wire until somebody requests a path
@@ -104,56 +87,53 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 		const existing = routes.get(prefix);
 		if (!existing) {
 			const handle = originWire.receive(prefix, route);
-			const reporter = { route, restarts: 0, joined: 0 };
-			routes.set(prefix, { handle, restarts: 0, reporters: new Map([[interest, reporter]]) });
+			routes.set(prefix, { handle, reporters: new Map([[interest, route]]) });
 			void drive(handle, conn);
 			return;
 		}
 
-		const reporter = existing.reporters.get(interest);
-		if (!reporter) {
-			// Joins on the instance the handle serves; a restart it reports later puts it ahead.
-			existing.reporters.set(interest, { route, restarts: 0, joined: existing.restarts });
-			return;
-		}
-		reporter.route = route;
-		if (event.kind === "restart") reporter.restarts++;
+		const joined = existing.reporters.has(interest);
+		existing.reporters.set(interest, route);
 		// Another request covering the prefix only holds it; the first reporter drives it.
-		if (existing.reporters.keys().next().value === interest) follow(existing, prefix, reporter);
+		if (joined && existing.reporters.keys().next().value === interest) {
+			follow(existing, prefix, route, event.kind === "restart");
+		}
 	};
 
 	/**
-	 * Bring the handle up to its driving reporter: a fresh route when the reporter is on a
-	 * newer publisher instance, so nothing resolved through the old one is joined again, and an
-	 * in-place update otherwise.
+	 * Bring the handle up to its driving reporter's route: a fresh route for another publisher
+	 * instance, so nothing resolved through the old one is joined again, and an in-place
+	 * update otherwise.
 	 */
-	const follow = (existing: Reported, prefix: Path.Valid, reporter: Reporter) => {
-		const lead = ahead(existing, reporter);
-		if (lead > 0) {
+	const follow = (existing: Reported, prefix: Path.Valid, route: Route, restart: boolean) => {
+		if (restart || route.epoch !== existing.handle.route.epoch) {
 			// Inserted before the old one leaves, so local readers see one restart rather than
 			// an end and a start.
-			const handle = originWire.receive(prefix, reporter.route);
+			const handle = originWire.receive(prefix, route);
 			existing.handle.close();
 			existing.handle = handle;
-			existing.restarts += lead;
 			void drive(handle, conn);
-		} else if (!routesEqual(existing.handle.route, reporter.route)) {
-			existing.handle.update(reporter.route);
+		} else if (!routesEqual(existing.handle.route, route)) {
+			existing.handle.update(route);
 		}
 	};
 
 	const unreport = (interest: Interest, prefix: Path.Valid) => {
 		interest.reported.delete(prefix);
 		const existing = routes.get(prefix);
-		if (!existing?.reporters.delete(interest)) return;
+		if (!existing) return;
+		const driving = existing.reporters.keys().next().value === interest;
+		if (!existing.reporters.delete(interest)) return;
 
-		// The next request takes over driving, restarting the route if it saw a newer instance.
 		const next = existing.reporters.values().next();
 		if (next.done) {
 			routes.delete(prefix);
 			existing.handle.close();
-		} else {
-			follow(existing, prefix, next.value);
+		} else if (driving) {
+			// The next request takes over driving. Without an epoch nothing proves it reports the
+			// instance the handle serves, and the session consumes each request's announcements as
+			// an instance of their own, so the route restarts rather than stitch two together.
+			follow(existing, prefix, next.value, next.value.epoch === undefined);
 		}
 	};
 

@@ -1656,7 +1656,9 @@ export class Consumer {
 	 * Resolve a path, following publisher restarts when `announced` is true and no epoch is pinned.
 	 * Announced requests clear `active` on an end and resolve again on the next start. A refusal
 	 * is terminal. An epoch-pinned request never changes instance; a plain request keeps its
-	 * accepted instance and may resolve blindly when discovery has no answer.
+	 * accepted instance and may resolve blindly when discovery has no answer. A plain request
+	 * does not watch its path, so one resolved through a discovered route ends once nothing
+	 * watches that route any more.
 	 * Announcement gating falls back to blind resolution when discovery is unavailable.
 	 * Close the request to release its handle and announcement watch.
 	 */

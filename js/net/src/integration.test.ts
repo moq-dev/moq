@@ -1,4 +1,4 @@
-import { afterEach, expect, mock, spyOn, test } from "bun:test";
+import { afterEach, expect, jest, mock, spyOn, test } from "bun:test";
 import type { Getter } from "@moq/signals";
 import type * as Announce from "./announce.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
@@ -2294,6 +2294,98 @@ test("origin: a plain request resolves blind without opening discovery", async (
 	serverOrigin.close();
 	clientOrigin.close();
 });
+
+test.each([Lite.ALPN_03, Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
+	"%s: closing an announce consumer ends the peer's announce stream",
+	async (alpn) => {
+		// Wrap the peer's handler so the test sees when its side of the stream ends.
+		const run = LitePublisher.prototype.runAnnounce;
+		let ended = 0;
+		spyOn(LitePublisher.prototype, "runAnnounce").mockImplementation(function (this: LitePublisher, msg, stream) {
+			return run.call(this, msg, stream).finally(() => ended++);
+		});
+		const pair = createMockTransportPair(alpn);
+		const serverOrigin = new OriginProducer();
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client }),
+			accept(pair.server, url, { publish: serverOrigin.consume() }),
+		]);
+		const broadcast = publish(serverOrigin, Path.from("room/cam"));
+
+		// Repeated watch cycles must each give their stream back, not pile up on the peer.
+		for (let i = 1; i <= 3; i++) {
+			const announced = client.announced(Path.Pattern.subtree(Path.from("room")));
+			expect((await announced.next())?.kind).toBe("start");
+			announced.close();
+			await until(() => ended === i);
+		}
+
+		broadcast.close();
+		client.abort();
+		server.abort();
+		serverOrigin.close();
+	},
+);
+
+test.each([Lite.ALPN_06, Lite.ALPN_07_WIP])(
+	"%s: a following request keeps serving tracks after discovery hands over",
+	async (alpn) => {
+		const run = LitePublisher.prototype.runAnnounce;
+		let ended = 0;
+		spyOn(LitePublisher.prototype, "runAnnounce").mockImplementation(function (this: LitePublisher, msg, stream) {
+			return run.call(this, msg, stream).finally(() => ended++);
+		});
+		const pair = createMockTransportPair(alpn);
+		const serverOrigin = new OriginProducer();
+		const clientOrigin = new OriginProducer();
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client, consume: clientOrigin }),
+			accept(pair.server, url, { publish: serverOrigin.consume() }),
+		]);
+
+		const broadcast = publish(serverOrigin, Path.from("room/cam"));
+		const serving = (async () => {
+			for (;;) {
+				const req = await wireOf(broadcast).requested();
+				if (!req) break;
+				req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame(req.name));
+			}
+		})();
+
+		const reader = clientOrigin.consume();
+		const listing = reader.announced(Path.Pattern.subtree(Path.from("room")));
+		const request = reader.request(Path.from("room/cam"), { announced: true });
+		const read = async (name: string) => {
+			await until(() => request.active.peek() !== undefined);
+			const track = request.active.peek()?.track(name).subscribe().ordered();
+			try {
+				return await track?.readString();
+			} finally {
+				track?.close();
+			}
+		};
+		expect(await read("before")).toBe("before");
+
+		// The listing leaves and its request lingers out, handing the route to the request's own.
+		jest.useFakeTimers();
+		listing.close();
+		// The watch is released once the close settles, which is what starts the linger.
+		for (let i = 0; i < 64; i++) await Promise.resolve();
+		jest.advanceTimersByTime(2000);
+		jest.useRealTimers();
+		await until(() => ended === 1);
+
+		expect(await read("after")).toBe("after");
+
+		request.close();
+		broadcast.close();
+		await serving;
+		client.abort();
+		server.abort();
+		serverOrigin.close();
+		clientOrigin.close();
+	},
+);
 
 test("origin: a blind request ends with its session, and the next session answers a fresh one", async () => {
 	const original = globalThis.WebTransport;
