@@ -56,9 +56,17 @@ Settled shape:
   the wrappers supply real namespaces in each language's idiom: Python
   submodules, Go subpackages (`moq.dev/moq/json`, aliased on import next to
   `encoding/json`), Kotlin packages, Dart libraries, Swift caseless-enum
-  namespaces. Reopened 2026-10-13:
-  [Binding namespace feasibility](/quest/m1/ffi-crate-spike.md) spikes
-  a per-layer split that would move the namespaces below the wrappers.
+  namespaces. A per-layer crate split, reopened 2026-10-13 to move the
+  namespaces below the wrappers, was spiked and rejected (PR_PLACEHOLDER): UniFFI
+  0.32 keys a crate's types by bare name, so `media.GroupConsumer` cannot
+  take the net `GroupConsumer` it wraps. Python drops the media type
+  silently; every other generator refuses. Revisit only if UniFFI
+  namespaces external types.
+- Still open from #5356: whether the import-side
+  `MoqMediaContainerStreamProducer` (`media.ContainerStreamProducer`) is
+  named by role. "Container" there means an importer that recovers framing
+  from a raw byte stream and may publish several tracks, unlike the
+  per-track `media.TrackConsumer` and `media.GroupConsumer`.
 - `demand()` is the one way to watch subscribers; producers drop their
   `name`/`is_used`/`used`/`unused` duplicates.
 - moq-ffi and its generated consumers, including `cpp/obs` (above). The

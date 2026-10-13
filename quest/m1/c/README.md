@@ -52,8 +52,6 @@ That change owns its C tests and upgrade notes; other API reshaping stays here.
 
 ## Required
 
-- [Binding namespaces](/quest/m1/ffi-crate-split.md) - settle the generated package shape before its C/C++ release proof
-
 - [moq-c package](/quest/m1/c/package.md) - the generated header ships as `moq-c` 0.8.0 with `moq::c`, pkg-config, and a release workflow
 - [C consumers](/quest/m1/c/consumers.md) - the C interop client and `doc/lib/c` samples move onto the generated API
 

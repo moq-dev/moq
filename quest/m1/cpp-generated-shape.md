@@ -34,7 +34,3 @@ place that names the pin.
   makes `value()` on an error `__builtin_unreachable`; patch it to abort
   with a message, like a misused future, and drop the "undefined" warning
   from the Errors section of `doc/lib/cpp/index.md`.
-
-## Required
-
-- [Binding namespaces](/quest/m1/ffi-crate-split.md) - settle the generated package shape before its C/C++ release proof
