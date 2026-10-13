@@ -25,8 +25,10 @@ host sees `MOQ_ERROR_PANIC` (moq-c) or the binding's panic error (moq-ffi),
 while another object keeps working. Also add the regression #5447 left out:
 a moq-tokio accept loop that panics ends its listener.
 
-Public API: none expected, beyond the panic error reaching more callbacks;
-report any new error variant through the Cross-Package Sync table. Wire: none.
+Public API: none expected, beyond the panic error reaching more callbacks.
+That is a host-visible change even without a new error variant, so walk the
+`rs/moq-ffi` row of the Cross-Package Sync table: every wrapper and
+`doc/lib` page surfaces the panic error. Wire: none.
 
 ## Related
 
