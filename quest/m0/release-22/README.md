@@ -43,4 +43,3 @@ track's latest group lost after rejoin.
 
 - [Draft-20+ FETCH](/quest/m0/release-22/fetch.md) - backport #4971 so a draft-22 FETCH is served, not refused
 - [Unset host clock](/quest/m0/release-22/wall-clock-omit.md) - a publisher whose wall clock reads before 2020 omits the catalog clock instead of aborting the host
-- [Quiet latest group](/quest/m0/release-22/quiet-edge.md) - a late subscriber to a quiet track gets its latest group after rejoin, cache expiry, or takeover

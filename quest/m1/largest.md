@@ -33,6 +33,10 @@ Decided with the maintainer (2026-10-13), after moq-dev/moq#5369 proposed
   caller can't (moq-mux skips a sequence on a data-track discontinuity) or
   truly needs a synchronous read, ask the maintainer rather than adding a
   snapshot.
+- Route health will consume progress through metadata-only subscriptions.
+  Keep source-reported progress distinct from locally usable payload and
+  reader demand: a reported location never satisfies a payload read or proves
+  an alternate can deliver. Reuse this API's naming without conflating evidence.
 - Check that no cursor logic assumes the largest location was received
   locally: a reported largest is a hint about the edge, not a cached group.
 - Bindings follow the cross-package table if any expose `latest()`.
@@ -40,3 +44,7 @@ Decided with the maintainer (2026-10-13), after moq-dev/moq#5369 proposed
   SUBSCRIBE_OK and SUBSCRIBE_START, advancing per frame, holding through a
   started group with no frames, coalescing, and
   ending with the track.
+
+## Related
+
+- [Metadata subscriptions](/quest/m2/route-health/meta.md) - a live group/frame progress stream without payload

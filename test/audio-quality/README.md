@@ -83,7 +83,7 @@ configuration.
 connection and track, priority, and maximum age, so it adds no upstream subscription demand.
 Groups drain concurrently, so an earlier stalled group cannot hide a later arrival. Capture
 errors void the row. Capture adds local decoding and recording work; it is off by default and
-on in nightly so a failing run preserves the inputs for diagnosis.
+on in nightly so a run preserves the inputs for diagnosis.
 
 To replay a capture, put its arrivals and final environment configuration into the version 2
 `Trace` below, subtract the first arrival's `at` from every arrival and from the last sample's
@@ -213,10 +213,12 @@ replay row crosses no shaper, so the `shaper` void does not apply to it.
 `budgets.json` holds a ceiling per graded key per row, keyed by the whole row: runtime, codec, rate,
 profile, and ring. Under `--enforce` a run fails on a breach, a budgeted key the run left
 unmeasured, a void row, or a row with no budget. Tightening a ceiling is a visible diff; loosening
-one needs a reason in review. The file's `note` says how the current ceilings were measured.
+one needs a reason in review. The file's `note` says how the current ceilings were measured: the
+browser rows come from several nightly runs, not a developer machine.
 
-The nightly `Audio quality` job runs the matrix under `--enforce` and keeps a failing run directory
-for a week: each process's log, the shaper's counters, every row's raw samples and summary. The
+The nightly `Audio quality` job runs the matrix under `--enforce` and keeps every run directory for a
+week as the `audio-quality-run` artifact: each process's log, the shaper's counters, every row's raw
+samples and summary. The
 replays also run under `--enforce` on every PR that touches the player's packages (`js/watch`,
 `js/hang`, `js/net`, `js/signals`) or the harness (`.github/workflows/audio-quality.yml`), so a
 change that moves them updates `budgets.json` in the same PR.

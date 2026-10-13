@@ -32,7 +32,7 @@ pub struct MoqSubscription {
 	/// `0` skips immediately; a larger value tolerates that much reordering.
 	///
 	/// Enforced both by the publisher's cache (sent on the wire) and by any local
-	/// buffering, such as [`MoqMediaContainerConsumer`]'s jitter buffer.
+	/// buffering, such as [`MoqMediaTrackConsumer`]'s jitter buffer.
 	#[uniffi(default = 0)]
 	pub max_delay_us: u64,
 	/// The lowest group to deliver (a floor), or null for none. A floor is not a
@@ -136,8 +136,8 @@ impl MoqBroadcastConsumer {
 	///
 	/// `reference` is [`MoqVideo::broadcast`] / [`MoqAudio::broadcast`]: absent or empty names
 	/// this broadcast, anything else names a sibling relative to it (e.g. `./source`). Call it on a
-	/// rendition that carries one before [`crate::media::MoqMediaContainerConsumer::subscribe`], [`Self::subscribe_track`],
-	/// [`Self::fetch_group`], or [`crate::media::MoqMediaContainerGroupConsumer::fetch`], which take a track name rather than a
+	/// rendition that carries one before [`crate::media::MoqMediaTrackConsumer::subscribe`], [`Self::subscribe_track`],
+	/// [`Self::fetch_group`], or [`crate::media::MoqMediaGroupConsumer::fetch`], which take a track name rather than a
 	/// rendition; `decode_video` and `decode_audio` resolve it themselves.
 	///
 	/// Errors if this broadcast came from a local producer rather than an origin, since a
@@ -476,6 +476,8 @@ impl MoqTrackConsumer {
 	///
 	/// Groups are returned as they arrive on the wire, which may be out of sequence
 	/// order (e.g. if a later group lands before an earlier one on a separate stream).
+	/// One that drifts further behind the live edge than the subscription's `max_delay_us`
+	/// is skipped, or ends its pending read if already returned; raise it to keep stalled groups.
 	///
 	/// The first call commits this track to arrival order: sequence-order reads
 	/// ([`Self::next_group`], [`Self::read_frame`]) fail with
@@ -594,6 +596,18 @@ impl MoqGroupConsumer {
 			sequence: group.sequence,
 			task: Task::new(GroupInner { group }),
 		}
+	}
+
+	/// Hand the group to a typed reader (a media group consumer, say), closing this handle.
+	///
+	/// Errors with [`MoqError::AlreadyCommitted`] once a frame has been read, since the reader
+	/// would start mid-group, and [`MoqError::Busy`] while a read is in flight.
+	pub(crate) fn take(&self) -> Result<moq_net::group::Consumer, MoqError> {
+		let inner = self.task.take(|inner| match inner.group.index() {
+			0 => Ok(()),
+			_ => Err(MoqError::AlreadyCommitted),
+		})?;
+		Ok(inner.group)
 	}
 }
 

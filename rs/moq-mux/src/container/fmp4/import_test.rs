@@ -1485,7 +1485,7 @@ async fn an_import_shifts_onto_an_explicit_clock() {
 	fmp4.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
-	assert_eq!(snapshot.clock, Some(clock.wall()));
+	assert_eq!(snapshot.clock, clock.wall());
 	let published = crate::container::test_util::published(&consumer, &snapshot).await;
 	let first = published[snapshot.video.renditions.keys().next().unwrap()][0];
 	assert!((before - TICK..=after).contains(&first), "{before} {first} {after}");

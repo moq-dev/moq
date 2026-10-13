@@ -266,8 +266,8 @@ class BroadcastConsumer:
         ``reference`` is ``catalog.video[name].broadcast`` /
         ``catalog.audio[name].broadcast``: ``None`` or empty names this broadcast,
         anything else names a sibling relative to it (e.g. ``./source``). Call it on
-        a rendition that carries one before :meth:`~moq.media.ContainerConsumer.subscribe`,
-        :meth:`subscribe_track`, :meth:`fetch_group`, or :meth:`~moq.media.ContainerGroupConsumer.fetch`,
+        a rendition that carries one before :meth:`~moq.media.TrackConsumer.subscribe`,
+        :meth:`subscribe_track`, :meth:`fetch_group`, or :meth:`~moq.media.GroupConsumer.fetch`,
         which take a track name rather than a rendition: the rendition's ``track``, or its
         catalog key when unset. :meth:`decode_audio` and :meth:`decode_video` resolve both
         themselves.

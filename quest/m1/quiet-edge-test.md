@@ -14,9 +14,11 @@ superseded group still expires.
 future origin rework from regressing. Decided 2026-10-13 (maintainer): land
 the port of the reporter's test plus a takeover variant, on lite-05, 06 and
 07 and transport-19 and 22, using `moq_net_sim::test` time. Mention #5413
-without a closing keyword; the [release backport](/quest/m0/release-22/quiet-edge.md)
-closes it.
+without a closing keyword; the release backport
+([#5430](https://github.com/moq-dev/moq/pull/5430)) closed it.
 
-## Related
-
-- [Release backport](/quest/m0/release-22/quiet-edge.md) - the 0.17 fix this pins on `main`
+Port #5430's takeover variant (`taken_over_quiet_catalog_survives_cache_expiry`).
+On `release` it sleeps 100ms on the paused clock before dropping the old
+upstream, because an equal-cost second route emits no announce update to wait
+on. The `main` test should await a real signal that the replacement route
+landed instead of that sleep.

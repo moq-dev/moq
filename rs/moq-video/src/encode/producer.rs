@@ -1341,7 +1341,7 @@ mod tests {
 					let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(now.as_secs() - 3600);
 					let fixture = Fixture::start(Duration::from_secs(1), wall).await;
 					let advertised = fixture.catalog.snapshot().clock;
-					assert_eq!(advertised, Some(fixture.clock.wall()));
+					assert_eq!(advertised, fixture.clock.wall());
 
 					let mut track = fixture.subscribe().await;
 					let camera = fixture.camera();

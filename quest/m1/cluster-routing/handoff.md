@@ -1,39 +1,59 @@
-# [M] Next-hop handoff
+# [M] Prove complete and fresh route handoff
 
 ## Goal
 
-When a node's next hop toward an origin changes, the announces it treats as
-live stay current: it adopts a replacement neighbour's stored set only once
-that set is complete, and an origin's ANNOUNCE_END stays final across the
-handoff, even when the END and the next-hop change cross in flight. The
-chosen design, any wire it needs, and its deterministic acceptance tests are
-recorded in [Routes and announces](/quest/m1/cluster-routing/routes.md)
-before that wire is written.
+A next-hop change adopts complete, current origin-owned claims without
+reviving a known withdrawal or reporting a false publisher END. The chosen
+protocol and controlled-time acceptance fixtures are recorded in routes.md
+before its wire is written. This is a design/proof quest, not a production
+implementation.
 
 ## Plan
 
-Next-hop authority alone measured about twice the once-only minimum of
-client updates when a broadcast ends, and on an upstream link loss the
-announces trailed the route move (see the simulator findings in Routes and
-announces).
+The existing simulator found 2,000 client updates against a 900 once-only
+minimum on END, including 550 re-announcements, and 722.8 aggregate seconds
+of false absence after an upstream-link loss. Next-hop authority alone did
+not meet the goal; the earlier epic's assertion that it did is withdrawn.
 
-Compare two designs in time-mocked tests:
+Decided 2026-10-13: keep known advertisement presence through uncertain
+handoff, represent forwarding availability separately, and bound retained
+state. Route loss is not withdrawal by the origin. An END withdraws that
+origin's claim, including wildcard capability claims, not every replica of
+an epoch. No promise of learning an unseen withdrawal during a partition.
 
-- A snapshot barrier: a neighbour marks when the announces it holds for a
-  route are complete, and a node adopts a new next hop's set only after that
-  mark, keeping the old set until then.
-- END generations or tombstones per origin that no stale neighbour's copy
-  can outlive.
+Decided 2026-10-13: no origin-confirmed reconciliation, since a relay never
+waits on an origin round trip before trusting a new next hop. Prove the
+remaining candidate against its failing control:
 
-Bring the comparison to the maintainer, then record the choice in
-routes.md's wire sketch and Tests.
+- Origin-versioned claim changes with scoped complete snapshots and retained
+  freshness floors. A snapshot must certify both its coverage and which
+  changes it incorporates; a high revision for one path proves nothing about
+  an unwatched path. This is the candidate to prove.
+- A neighbor snapshot barrier alone is a failing control: completeness does
+  not reject an older complete snapshot after an END arrived elsewhere.
 
-Acceptance, time mocked: a new next hop whose ROUTE arrives before its
-ANNOUNCE set; an END crossing a next-hop change; a ring of three where a
-stale neighbour cannot revive an ended broadcast; per-path retractions and
-re-announcements counted beside the ROUTE budget, against one update per
-node for an end.
+Prove delayed snapshot/delta reconciliation, partial and widening interest,
+cancellation/rejoin, wildcard coverage, origin restart, and stale replay after
+collection. Fresh routing identity per restart is settled; exact freshness
+representation is not. Compact negative history only when equivalent knowledge
+survives, or require fresh reconciliation. Do not retain every historical
+neighbor forever or use arbitrary tombstone expiry as a correctness argument.
+
+Keep a live same-epoch route serving while its replacement is validated;
+epochless changes retain Restart. A lack of a usable route must be represented
+honestly without terminally retracting known presence. Measure client events,
+control bytes, replay work, and retained state against active origins, scopes,
+claims, and neighbors. Store public synthetic fixtures in CI with mocked time.
+
+Bring the comparison and any remaining wire/API decision to the maintainer,
+then update routes.md. The proof must also specify eventual recovery when a
+bounded seqno-request attempt ends and no further unsolicited update arrives.
+
+## Required
+
+- [Routing contracts](/quest/m1/cluster-routing/contracts.md) - incarnation, authority, and export views the handoff preserves
 
 ## Related
 
-- [Routes and announces](/quest/m1/cluster-routing/routes.md) - the route layer whose next-hop authority this completes
+- [Cross-node flapping](/quest/m1/cross-node-flapping.md) - residual stale-revival fixtures
+- [Lazy discovery](/quest/m1/lazy-discovery/README.md) - interest changes must not erase freshness protection
