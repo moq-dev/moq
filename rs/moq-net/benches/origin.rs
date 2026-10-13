@@ -1216,8 +1216,8 @@ async fn resume_overlap(readers: usize, retained: usize, routes: usize) -> Resum
 }
 
 /// Readers draining a track whose routes all delivered every group: each group is
-/// handed out once, and every other copy still owed it remembers that until it is let
-/// go. The slopes over retained groups and routes are that bookkeeping's delivery cost.
+/// handed out once, and every other copy's duplicate is skipped against what the reader
+/// handed out. The slopes over retained groups and routes are that skipping's cost.
 fn bench_resume_overlap(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/resume_overlap");
 	group.sample_size(10);

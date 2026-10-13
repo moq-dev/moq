@@ -16,6 +16,7 @@
 use crate::{Error, Result, Timescale, Timestamp, coding};
 use crate::{broadcast, cache, group, stats};
 
+use super::delivered::Delivered;
 use super::{Datagram, Requests};
 
 use super::Cap;
@@ -2287,6 +2288,7 @@ impl Producer {
 			broadcast,
 			info,
 			inner: Inner::Plain(Cursor::new(self.state.consume(), subscription)),
+			delivered: Delivered::default(),
 			// A producer-side (in-process) subscribe is not egress: stay untagged.
 			stats: stats::Scope::default(),
 			_stats_sub: stats::Subscription::default(),
@@ -3339,6 +3341,7 @@ impl Subscribing {
 			broadcast: self.broadcast.clone(),
 			info,
 			inner,
+			delivered: Delivered::default(),
 			stats: self.stats.clone(),
 			_stats_sub: self.stats.subscribe(),
 		}))
@@ -3678,6 +3681,9 @@ pub struct Subscriber {
 	broadcast: Arc<broadcast::Info>,
 	info: Info,
 	inner: Inner,
+	/// The groups handed out, so none is handed out twice: not when its sequence is
+	/// re-created, nor when another route delivers it too.
+	delivered: Delivered,
 	// Egress stats scope, used to meter the groups this subscriber reads. Empty
 	// (no-op) for an untagged track.
 	stats: stats::Scope,
@@ -3690,7 +3696,7 @@ pub struct Subscriber {
 pub(crate) struct Unread<'a> {
 	pub start: u64,
 	pub end: Option<u64>,
-	pub delivered: &'a std::collections::BTreeSet<u64>,
+	pub delivered: &'a Delivered,
 }
 
 /// How a [`Subscriber`] reads: its track's own cache, or a front's routes.
@@ -3933,6 +3939,15 @@ impl Cursor {
 		self.poll(waiter, |state| {
 			Poll::Ready(Ok(state.is_stale(group.sequence, &drift.edge, drift.budget)))
 		})
+	}
+
+	/// Whether a group at `sequence` is past this cursor's budget now, whether this track
+	/// holds it or not: one landing there would be written off.
+	fn is_past_budget(&self, sequence: u64) -> bool {
+		let max_delay = self.subscription.read().max_delay;
+		let state = self.state.read();
+		let budget = clamp_max_delay(max_delay, state.max_age_bound());
+		state.drifted(sequence, &state.drift_edge(self.end_sequence), budget)
 	}
 
 	fn with_expiry(&self, group: group::Consumer) -> group::Consumer {
@@ -4193,6 +4208,11 @@ impl Subscriber {
 	/// [`Self::ordered`] if you only want groups whose sequence number is higher than any
 	/// previously returned.
 	///
+	/// Once means once per sequence: a group the publisher aborts and re-creates, or that
+	/// a second route delivers too, is not handed out again. Once a group is past the
+	/// budget below, the subscriber stops expecting every group before it, so a gap that
+	/// old is never filled.
+	///
 	/// Groups are semi-reliable, and the [`Subscription::max_delay`] budget is the other
 	/// thing (alongside eviction and a moving start) that decides which of them arrive:
 	/// one that has drifted further behind the live edge than the budget tolerates is
@@ -4215,13 +4235,60 @@ impl Subscriber {
 	/// `Poll::Ready(Err(e))` when the track has been aborted, or
 	/// `Poll::Pending` when no group is available yet.
 	pub fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+		self.poll_group(false, waiter)
+	}
+
+	/// The next group in arrival order, or in sequence order for `ordered`, skipping any
+	/// already handed out.
+	fn poll_group(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		let meter = self.stats.meter();
 		let res = match &mut self.inner {
-			Inner::Plain(cursor) => cursor.poll_recv_group(waiter),
-			Inner::Resume(resume, _) => resume.poll_group(false, waiter),
+			Inner::Plain(cursor) => loop {
+				let res = match ordered {
+					true => cursor.poll_next_group(waiter),
+					false => cursor.poll_recv_group(waiter),
+				};
+				match res {
+					Poll::Ready(Ok(Some(group))) if self.delivered.contains(group.sequence) => continue,
+					res => break res,
+				}
+			},
+			Inner::Resume(resume, _) => resume.poll_group(ordered, &self.delivered, waiter),
 		};
+		if let Poll::Ready(Ok(Some(group))) = &res {
+			self.hand_out(group.sequence, ordered);
+		}
 		self.count_stale(&meter);
 		res.map(|res| res.map(|group| group.map(|group| group.with_meter(meter))))
+	}
+
+	/// Record `sequence` as handed out. An ordered read never goes back, and any reader
+	/// stops expecting what is past its budget, so only the gaps within it cost memory.
+	fn hand_out(&mut self, sequence: u64, ordered: bool) {
+		if ordered {
+			self.delivered.forget_below(sequence);
+		}
+		self.delivered.insert(sequence);
+		while let Some(oldest) = self.delivered.above_gap()
+			&& self.is_past_budget(oldest)
+		{
+			self.delivered.forget_below(oldest);
+		}
+	}
+
+	/// Whether a group at `sequence` is past this subscriber's budget now: one landing
+	/// there would be written off.
+	pub(crate) fn is_past_budget(&self, sequence: u64) -> bool {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.is_past_budget(sequence),
+			Inner::Resume(resume, _) => resume.is_past_budget(sequence),
+		}
+	}
+
+	/// How many runs of handed-out groups this subscriber remembers.
+	#[cfg(test)]
+	pub(crate) fn delivered_runs(&self) -> usize {
+		self.delivered.runs()
 	}
 
 	/// Whether an unread cached group needs this subscription, without moving its cursor.
@@ -4235,7 +4302,7 @@ impl Subscriber {
 		let eligible = |sequence: u64| {
 			sequence >= floor
 				&& super::subscription::before_end(sequence, unread.end)
-				&& !unread.delivered.contains(&sequence)
+				&& !unread.delivered.contains(sequence)
 		};
 		cursor
 			.parked
@@ -4257,7 +4324,7 @@ impl Subscriber {
 
 	/// Receive the next group in arrival order.
 	///
-	/// Every group is returned exactly once, in the order it landed on the wire, which may
+	/// Every group sequence is returned at most once, in the order it landed on the wire, which may
 	/// be out of sequence due to network reordering or loss. Use [`Self::ordered`] if you
 	/// only want groups whose sequence number is higher than any previously returned.
 	/// See [`Self::poll_recv_group`] for how [`Self::set_groups`] applies.
@@ -4281,7 +4348,7 @@ impl Subscriber {
 		let meter = self.stats.meter();
 		let res = match &mut self.inner {
 			Inner::Plain(cursor) => cursor.poll_recv_datagram(waiter),
-			Inner::Resume(resume, _) => resume.poll_recv_datagram(waiter),
+			Inner::Resume(resume, _) => resume.poll_recv_datagram(&self.delivered, waiter),
 		};
 		// Unlike a group (metered lazily as its frames are read), a datagram is
 		// delivered whole here, so count it as the single-frame group it stands in for.
@@ -4303,13 +4370,7 @@ impl Subscriber {
 
 	/// The sequence cursor behind [`Ordered`], which owns the only public door to it.
 	pub(crate) fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
-		let meter = self.stats.meter();
-		let res = match &mut self.inner {
-			Inner::Plain(cursor) => cursor.poll_next_group(waiter),
-			Inner::Resume(resume, _) => resume.poll_group(true, waiter),
-		};
-		self.count_stale(&meter);
-		res.map(|res| res.map(|group| group.map(|group| group.with_meter(meter))))
+		self.poll_group(true, waiter)
 	}
 
 	/// Read this track's groups in sequence order instead of arrival order.
@@ -10631,5 +10692,98 @@ mod test {
 		producer.abort(Error::Cancel).unwrap();
 		assert!(pending.await.is_err());
 		drop(dynamic);
+	}
+
+	/// Write a finished one-frame group, presented at its sequence in milliseconds.
+	fn write_group(producer: &Producer, sequence: u64) {
+		let mut group = producer.create_group(group::Info { sequence }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(sequence).unwrap(), &b"x"[..])
+			.unwrap();
+		group.finish().unwrap();
+	}
+
+	/// Every group the subscriber hands out right now, in arrival order.
+	fn drain_groups(subscriber: &mut Subscriber) -> Vec<u64> {
+		let mut sequences = Vec::new();
+		while let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&kio::Waiter::noop()) {
+			sequences.push(group.sequence);
+		}
+		sequences
+	}
+
+	/// A sequence the publisher aborts and re-creates is handed out once.
+	#[test]
+	fn a_recreated_group_is_handed_out_once() {
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(replay());
+		write_group(&producer, 0);
+		let open = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		assert_eq!(drain_groups(&mut subscriber), [0, 1]);
+
+		open.abort(Error::Cancel).unwrap();
+		write_group(&producer, 1);
+		write_group(&producer, 2);
+		assert_eq!(drain_groups(&mut subscriber), [2]);
+	}
+
+	/// A gap is remembered until a group above it is past the budget, max delay or max
+	/// age alike. Then every group below that one counts as handed out.
+	#[test]
+	fn a_gap_is_forgotten_once_a_group_above_it_is_past_the_budget() {
+		let budget = Duration::from_millis(10);
+		let readers = [
+			(Info::timed(), Subscription::default().with_max_delay(budget)),
+			(
+				Info::timed().with_max_age(budget),
+				Subscription::default().with_max_delay(Duration::from_secs(3600)),
+			),
+		];
+		for (info, subscription) in readers {
+			let producer = track_producer("test", info);
+			let mut subscriber = producer.subscribe(subscription);
+			// Group 3 never arrives.
+			for sequence in [0, 1, 2, 4, 5, 6] {
+				write_group(&producer, sequence);
+			}
+			assert_eq!(drain_groups(&mut subscriber), [0, 1, 2, 4, 5, 6]);
+			// Group 4 reaches until group 5 presents at 5ms, so it is past a 10ms budget once
+			// the edge presents at 15ms.
+			for sequence in 7..=14 {
+				write_group(&producer, sequence);
+				assert_eq!(drain_groups(&mut subscriber), [sequence]);
+				assert_eq!(subscriber.delivered_runs(), 2, "the gap at 3 is kept at {sequence}");
+			}
+			write_group(&producer, 15);
+			assert_eq!(drain_groups(&mut subscriber), [15]);
+			assert_eq!(subscriber.delivered_runs(), 1, "the gap at 3 is forgotten");
+			write_group(&producer, 3);
+			assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new());
+		}
+	}
+
+	/// An endless track with groups missing remembers only the gaps within the budget, and
+	/// still delivers an unseen group that arrives late within it.
+	#[test]
+	fn an_endless_track_with_gaps_stays_bounded() {
+		let producer = track_producer("test", Info::timed());
+		// Groups present 1ms apart, so the budget spans ten of them.
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(10)));
+		let mut most = 0;
+		for sequence in 0..3000u64 {
+			// Every third group never arrives.
+			if sequence % 3 == 1 {
+				continue;
+			}
+			write_group(&producer, sequence);
+			assert_eq!(drain_groups(&mut subscriber), [sequence]);
+			most = most.max(subscriber.delivered_runs());
+		}
+		assert_eq!(most, 5, "the floor and the gaps within the budget");
+
+		// 2998 is within the budget, 2500 far past it.
+		write_group(&producer, 2998);
+		write_group(&producer, 2500);
+		assert_eq!(drain_groups(&mut subscriber), [2998]);
 	}
 }
