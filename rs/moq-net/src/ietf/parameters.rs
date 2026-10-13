@@ -17,6 +17,8 @@ pub enum ParameterVarInt {
 	/// Removed in draft-17; only used in draft-14/15/16.
 	MaxRequestId = 2,
 	MaxAuthTokenCacheSize = 4,
+	/// MAX_REQUEST_UPDATES, added in draft-19.
+	MaxRequestUpdates = super::request_update::OPTION,
 	/// HOP_ID, from the MoQ Cluster extension.
 	HopId = super::cluster::HOP_ID,
 	/// RELAY_COST, from the MoQ Cluster extension.
@@ -1276,7 +1278,9 @@ mod tests {
 			0x3E, 0x06, // and again
 		];
 		let mut r = Decoder::new(&block, Version::Draft14.into());
-		Parameters::skip_request(&mut r).unwrap();
+		let tokens = Parameters::skip_request(&mut r).unwrap();
+		assert_eq!(tokens.len(), 2);
+		assert_eq!(tokens[1].0.kind, 1);
 		assert!(r.is_empty());
 	}
 

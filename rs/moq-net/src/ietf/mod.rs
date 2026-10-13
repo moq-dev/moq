@@ -29,6 +29,7 @@ mod publish_namespace;
 mod publisher;
 mod request;
 mod request_stream;
+mod request_update;
 mod session;
 pub mod solicit;
 mod subscribe;

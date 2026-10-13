@@ -78,6 +78,18 @@ impl Decode<Version> for FollowUp {
 	}
 }
 
+/// One whole `[type][length][body]` message off a request stream, decoded at once so a read
+/// dropped part-way consumes nothing.
+#[derive(Debug)]
+pub(super) struct Framed(pub(super) u64, pub(super) super::Body);
+
+impl Decode<Version> for Framed {
+	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+		let id = r.varint()?;
+		Ok(Self(id, super::Body::decode(r, version)?))
+	}
+}
+
 /// A framed subscription update, preserving omitted preferences.
 #[derive(Debug)]
 pub(super) struct Update {
@@ -87,6 +99,8 @@ pub(super) struct Update {
 	/// Why the update is refused, which fails the subscription: [`Error::Unsupported`], or a
 	/// [`DecodeError::MalformedAuthToken`] for tokens that repeat.
 	pub(super) refused: Option<Error>,
+	/// The AUTHORIZATION TOKEN renewing the request's credential.
+	pub(super) authorization_token: Option<super::token::RequestToken>,
 }
 
 impl Update {
@@ -122,6 +136,7 @@ impl Update {
 					request_id,
 					priority: Some(priority),
 					refused: Self::refused(&tokens, !forward),
+					authorization_token: tokens.into_iter().next(),
 				});
 			}
 			// The request it updates, which the adapter already routed by.
@@ -156,7 +171,6 @@ impl Update {
 			|| fill.is_some()
 			|| object_timeout.is_some()
 			|| subgroup_timeout.is_some()
-			|| !token.is_empty()
 			|| !subgroup_filter.is_empty()
 			|| !object_filter.is_empty()
 			|| !priority_filter.is_empty()
@@ -167,6 +181,7 @@ impl Update {
 			request_id,
 			priority,
 			refused: Self::refused(&token, unsupported),
+			authorization_token: token.into_iter().next(),
 		})
 	}
 

@@ -7,6 +7,7 @@ use crate::{Path, coding::*, ietf::RequestId};
 use super::Message;
 use super::cluster;
 use super::namespace::{decode_namespace, encode_namespace};
+use super::token::RequestToken;
 
 use super::Version;
 
@@ -21,6 +22,10 @@ pub struct PublishNamespace<'a> {
 	/// negotiated the extension and `None` on one that did not, which is what decides
 	/// whether they appear on the wire at all.
 	pub cluster: Option<cluster::Advert>,
+
+	/// The `AUTHORIZATION TOKEN` (0x03) this request presents. The parameter may repeat; the
+	/// first instance is the request's credential, and every instance has been decoded.
+	pub authorization_token: Option<RequestToken>,
 }
 
 impl PublishNamespace<'_> {
@@ -37,7 +42,6 @@ impl PublishNamespace<'_> {
 		}
 		let track_namespace = decode_namespace(r)?;
 
-		// The token decodes but grants nothing: the session's grant is what authorizes the request.
 		decode_params!(r, version,
 			0x03 => authorization_token: Vec<super::token::RequestToken>,
 			cluster::HOP_PATH => hops: Option<cluster::HopPath>,
@@ -60,6 +64,7 @@ impl PublishNamespace<'_> {
 			request_id,
 			track_namespace,
 			cluster,
+			authorization_token: authorization_token.into_iter().next(),
 		})
 	}
 }
@@ -73,7 +78,18 @@ impl Message for PublishNamespace<'_> {
 			w.varint(0)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
 		}
 		encode_namespace(w, &self.track_namespace)?;
-		encode_cluster_params(w, version, self.cluster.as_ref())
+		// ROUTE_COST is optional and absent means 0, so a free path sends nothing.
+		let hops = self.cluster.as_ref().map(|advert| advert.hops.clone());
+		let cost = self
+			.cluster
+			.as_ref()
+			.and_then(|advert| (advert.cost != 0).then_some(advert.cost));
+		encode_params!(w, version,
+			0x03 => self.authorization_token.clone(),
+			cluster::HOP_PATH => hops,
+			cluster::ROUTE_COST => cost,
+		);
+		Ok(())
 	}
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
@@ -95,6 +111,9 @@ pub struct PublishNamespaceUpdate {
 	pub hops: Option<cluster::HopPath>,
 	/// ROUTE_COST, when the cost changed.
 	pub cost: Option<u64>,
+	/// The `AUTHORIZATION TOKEN` (0x03) renewing the advertisement's credential, if any. The
+	/// parameter may repeat; the first instance is kept, and every instance has been decoded.
+	pub authorization_token: Option<RequestToken>,
 }
 
 impl PublishNamespaceUpdate {
@@ -104,6 +123,7 @@ impl PublishNamespaceUpdate {
 			request_id,
 			hops: (held.hops != next.hops).then(|| next.hops.clone()),
 			cost: (held.cost != next.cost).then_some(next.cost),
+			authorization_token: None,
 		}
 	}
 
@@ -129,6 +149,7 @@ impl Message for PublishNamespaceUpdate {
 			_ => self.request_id.encode(w, version)?,
 		}
 		encode_params!(w, version,
+			0x03 => self.authorization_token.clone(),
 			cluster::HOP_PATH => self.hops,
 			cluster::ROUTE_COST => self.cost,
 		);
@@ -145,14 +166,18 @@ impl Message for PublishNamespaceUpdate {
 			}
 			_ => RequestId::decode(r, version)?,
 		};
-		// The token decodes but grants nothing: the session's grant is what authorizes the request.
 		decode_params!(r, version,
 			0x03 => authorization_token: Vec<super::token::RequestToken>,
 			cluster::HOP_PATH => hops: Option<cluster::HopPath>,
 			cluster::ROUTE_COST => cost: Option<u64>,
 		);
 		super::token::unique(&authorization_token)?;
-		Ok(Self { request_id, hops, cost })
+		Ok(Self {
+			request_id,
+			hops,
+			cost,
+			authorization_token: authorization_token.into_iter().next(),
+		})
 	}
 }
 
@@ -369,6 +394,7 @@ mod tests {
 			request_id: RequestId(1),
 			track_namespace: Path::new("test/broadcast"),
 			cluster: None,
+			authorization_token: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -458,6 +484,7 @@ mod tests {
 			request_id: RequestId(5),
 			track_namespace: Path::new("v17/broadcast"),
 			cluster: None,
+			authorization_token: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -473,6 +500,7 @@ mod tests {
 			request_id: RequestId(5),
 			track_namespace: Path::new("v18/broadcast"),
 			cluster: None,
+			authorization_token: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -574,6 +602,7 @@ mod tests {
 			request_id: RequestId(2),
 			hops: None,
 			cost: Some(0),
+			authorization_token: None,
 		};
 		let mut buf = Vec::new();
 		assert!(
