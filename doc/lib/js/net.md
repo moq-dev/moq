@@ -36,7 +36,7 @@ broadcast.announce();
 - **The origin holds the broadcasts, not the connection.** Closing a session unannounces them and leaves them created for the next one. A broadcast is invisible, locally and remotely, until `announce()`. `dynamic(prefix, route)` claims a prefix and yields each requested path to accept or reject. `accept` throws on a broadcast a session delivered, since JS apps do not proxy; copy its tracks into a broadcast you produce instead.
 - **Requests can pin an epoch.** `consumer.request(path, { epoch })` resolves only through a route announcing that [publisher epoch](/concept/moq-lite#publisher-epochs) and reports `unroutable` otherwise. The resolved broadcast's `epoch` names the route it came through, pinned or not.
 - **Rank several CDNs.** Connect to each with its own `consume: origin.withPreference(Origin.Preference(rank))` (higher wins; 0 is neutral and a negative rank demotes), all on one origin. Requests use the preferred link that has a route and fail over to the next; see [multiple CDNs](/concept/moq-lite#multiple-cdns).
-- **Follow restarts.** `origin.request(path, { announced: true })` owns a closeable announcement watch. Its `active` changes to a fresh consumer on a restart, clears on an end, and resolves again on the next start. Add `epoch` to pin one instance. Plain `request(path)` retains its accepted instance and can resolve blindly. Handler refusals remain terminal.
+- **Follow restarts.** `origin.request(path, { announced: true })` follows whichever publisher instance serves the path: its `active` changes to a fresh broadcast on a restart, clears on an end, and resolves again on the next start, so read it reactively and close the request when done. Instances are never stitched, so subscribe again to each new broadcast. A refusal ends the request. Add `epoch` to pin one instance; a plain `request(path)` keeps its accepted instance, can resolve blindly, and ends once that instance stops serving. To list what is live, iterate `announced(scope)`.
 - **One connection per URL, unless you opt out.** `new Connection({ url })` pools and reconnects with backoff, which the elements use. Supplying your own transport options, discovery, or origin selects a private loop.
 - **GOAWAY moves the session.** The connection dials the replacement at once while the old session keeps serving its groups, up to `goaway.handover` (default 10s, or the relay's deadline when that is sooner). New requests keep opening on the old session until the replacement's route outranks it, which is a restart without an epoch: an unpinned announced request follows the replacement, while a blind or epoch-pinned request stays on its accepted instance. An empty GOAWAY redials the same URL. A redirect stays on the same host unless `goaway.redirect` is `"follow"`.
 - **One send estimate per connection.** `Bandwidth.Allocator` divides it by track priority, max-min fair within a tier. An idle track claims nothing. Publishers reserve against it so their targets sum to the estimate.
@@ -52,43 +52,3 @@ Examples:
 Runs in the browser and, over WebSocket, in Node, Bun, and Deno; see
 [server-side](/lib/js/#server-side). Path patterns are on the
 [concept page](/concept/moq-lite#path-patterns).
-
-## Origin read API migration
-
-Replace the `follow(path)` event loop that closes and recreates requests on each
-`start` or `restart` with one request and a reactive read:
-
-```ts
-// Before: the application owns restart handling.
-let request = origin.request(path, { announced: true });
-const followed = origin.follow(path);
-for await (const event of followed) {
-  if (event.kind !== "start" && event.kind !== "restart") continue;
-  request.close();
-  request = origin.request(path, { announced: true });
-}
-request.close();
-followed.close();
-```
-
-```ts
-// After: one request owns the watch and current instance.
-const request = origin.request(path, { announced: true });
-const effect = new Moq.Signals.Effect();
-effect.run((run) => {
-  const active = run.get(request.active);
-  if (!active) return;
-  const track = active.track("chat").subscribe();
-  run.cleanup(() => track.close());
-});
-// When finished:
-effect.close();
-request.close();
-```
-
-`Origin.Consumer` and `Producer` no longer expose `follow` or `broadcasts`.
-Replace live map reads with `announced(scope)` and maintain the entries you need,
-closing the stream when finished. Use `{ announced: true, epoch }` for a read
-that must never cross publisher instances. Watch now delegates restart following
-to these requests; setting its `announced` input to false selects blind, pinned
-behavior instead of following later announcements.

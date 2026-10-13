@@ -421,6 +421,35 @@ describe("restart", () => {
 });
 
 describe("refusal", () => {
+	it("reports an unroutable refusal of a restarted publisher", async () => {
+		const owner = new Origin.Producer();
+		const name = Path.from("room/live.hang");
+		const upstream = new Moq.Broadcast.Producer();
+		const first = owner.dynamic(Path.from("room"), { epoch: Moq.Epoch.mint() });
+		const firstRequests = first.requested();
+		void (async () => {
+			for await (const request of firstRequests) request.accept(upstream);
+		})();
+		const source = new Broadcast({ origin: owner, name, enabled: true, announced: true, catalogFormat: "manual" });
+		await settle();
+		expect(source.out.active.peek()).toBeDefined();
+
+		// The restarted publisher refuses with the same code an ended instance reports.
+		const second = owner.dynamic(Path.from("room"), { epoch: Moq.Epoch.mint() });
+		const refused = await second.requested().next();
+		refused.value?.reject(new Moq.Error.Stream(Moq.StreamCode.Unroutable, { message: "refused" }));
+		await settle();
+		expect(source.out.error.peek()?.message).toBe("refused");
+		expect(source.out.status.peek()).toBe("error");
+
+		second.close();
+		first.close();
+		upstream.close();
+		source.close();
+		owner.close();
+		await settle();
+	});
+
 	it("refuses a name outside the origin's scope", async () => {
 		const owner = new Origin.Producer();
 		const scoped = owner.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("room"))]));

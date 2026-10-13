@@ -262,7 +262,10 @@ export class Broadcast {
 		effect.run((nested) => {
 			const closed = nested.get(request.closed);
 			if (!closed) return;
-			const offline = resolved && closed instanceof NetError.Stream && closed.code === StreamCode.Unroutable;
+			// An announced request outlives its instances, so only a refusal ends it. A blind one
+			// ends with its accepted instance, which reads as offline rather than an error.
+			const offline =
+				!announced && resolved && closed instanceof NetError.Stream && closed.code === StreamCode.Unroutable;
 			if (!offline) nested.set(this.#out.error, closed, undefined);
 		});
 	}

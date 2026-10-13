@@ -187,3 +187,81 @@ test("an announced request ignores a covering route whose scope excludes its pat
 	prefix.close();
 	origin.close();
 });
+
+test("an announced request follows an epochless route replaced by an identical one", async () => {
+	const origin = new Producer();
+	const path = Path.from("room");
+	const serve = (source: BroadcastProducer) => {
+		const route = origin.dynamic(path);
+		void (async () => {
+			for await (const request of route.requested()) request.accept(source.consume());
+		})();
+		return route;
+	};
+	const firstSource = new BroadcastProducer();
+	const first = serve(firstSource);
+	const request = origin.request(path, { announced: true });
+	await settle();
+	expect(request.active.peek()?.closed).toBe(firstSource.closed);
+
+	// Same (default) route metadata and no epoch: only the entry's identity differs.
+	const secondSource = new BroadcastProducer();
+	const second = serve(secondSource);
+	await settle();
+	first.close();
+	await settle();
+	expect(request.active.peek()?.closed).toBe(secondSource.closed);
+
+	request.close();
+	second.close();
+	firstSource.close();
+	secondSource.close();
+	origin.close();
+});
+
+test("an origin closing settles an announced request a served route resolved", async () => {
+	const origin = new Producer();
+	const path = Path.from("room");
+	const source = new BroadcastProducer();
+	const route = origin.dynamic(path);
+	void (async () => {
+		for await (const request of route.requested()) request.accept(source.consume());
+	})();
+	const request = origin.request(path, { announced: true });
+	await settle();
+	expect(request.active.peek()).toBeDefined();
+	const abort = new Error("shutdown");
+	origin.close(abort);
+	await settle();
+	expect(request.closed.peek()).toBe(abort);
+	expect(request.active.peek()).toBeUndefined();
+	request.close();
+	source.close();
+});
+
+test("an announced request keeps a refusal that lands with a re-price", async () => {
+	const origin = new Producer();
+	const path = Path.from("room");
+	const route = origin.dynamic(path);
+	const requested = route.requested();
+	const request = origin.request(path, { announced: true });
+	const pending = (await requested.next()).value;
+	if (!pending) throw new Error("expected a request");
+
+	// Both land in one turn: the watch notification must not retry the refused request.
+	route.update({ cost: 5n });
+	const denied = new Error("denied");
+	pending.reject(denied);
+	await settle();
+	expect(request.closed.peek()).toBe(denied);
+
+	let asked = false;
+	void requested.next().then(() => {
+		asked = true;
+	});
+	await settle();
+	expect(asked).toBe(false);
+	request.close();
+	route.close();
+	origin.close();
+});

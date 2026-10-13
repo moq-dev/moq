@@ -522,8 +522,11 @@ class OriginState {
 	// present, not known live, so it must not read as an availability claim.
 	requests = new Signal<Map<Path.Valid, RequestSlot> | undefined>(new Map());
 
-	// Closeable, path-local watches survive the end of a resolved instance.
-	watchers = new Map<Path.Valid, { users: number; value: Signal<{ instance?: Instance; closed?: Error | null }> }>();
+	// Path-local wakeups for announced requests, which survive the end of a resolved instance.
+	// A counter rather than the instance: the instance is a plain object, so two epochless
+	// routes with identical metadata compare equal, and a coalesced write could hide a takeover
+	// or the origin closing. Watchers read the table and `closed` themselves when woken.
+	watchers = new Map<Path.Valid, { users: number; version: Signal<number> }>();
 
 	// Slots taken out of `requests` because another instance won their path, still open for
 	// their handles. Nothing joins them, but they are refreshed with the table, so one ends
@@ -554,7 +557,7 @@ class OriginState {
 	 * the answer for a single path.
 	 */
 	refresh(path: Path.Valid): void {
-		this.watchers.get(path)?.value.set({ instance: this.instance(path) });
+		this.watchers.get(path)?.version.update((n) => n + 1);
 		const slot = this.requests.peek()?.get(path);
 		const detached = [...(this.detached.get(path) ?? [])];
 		if (slot) this.reroute(path, slot);
@@ -770,8 +773,7 @@ class OriginState {
 	 * releases a retracted route's session subscription even when nothing reads it again.
 	 */
 	refreshPrefix(prefix: Path.Valid): void {
-		for (const [path, watch] of this.watchers)
-			if (Path.hasPrefix(prefix, path)) watch.value.set({ instance: this.instance(path) });
+		for (const [path, watch] of this.watchers) if (Path.hasPrefix(prefix, path)) watch.version.update((n) => n + 1);
 		const detached = [...this.detached].map(([path, slots]) => [path, [...slots]] as const);
 		for (const [path, slot] of [...(this.requests.peek() ?? [])]) {
 			if (Path.hasPrefix(prefix, path)) this.reroute(path, slot);
@@ -1292,7 +1294,7 @@ export class Producer implements Table {
 	close(abort?: Error) {
 		if (this.#state.closed.peek() !== undefined) return;
 		this.#state.closed.set(abort ?? null);
-		for (const watch of this.#state.watchers.values()) watch.value.set({ closed: abort ?? null });
+		for (const watch of this.#state.watchers.values()) watch.version.update((n) => n + 1);
 		for (const front of this.#state.created?.values() ?? []) {
 			front.close();
 		}
@@ -1509,19 +1511,13 @@ export class Consumer {
 		Path.Pattern.literal(path);
 		let watch = this.#state.watchers.get(absolute);
 		if (!watch) {
-			watch = {
-				users: 0,
-				value: new Signal<{ instance?: Instance; closed?: Error | null }>({
-					instance: this.#state.instance(absolute),
-					closed: this.#state.closed.peek(),
-				}),
-			};
+			watch = { users: 0, version: new Signal(0) };
 			this.#state.watchers.set(absolute, watch);
 		}
 		watch.users++;
 		const watched = watch;
 		let unwatch: Dispose = () => {};
-		let previous = watched.value.peek().instance;
+		let previous = this.#state.instance(absolute);
 		const active = new Signal<broadcast.Consumer | undefined>(undefined);
 		const closed = new Once<Error | null>();
 		const missing = new Derived(
@@ -1529,6 +1525,8 @@ export class Consumer {
 			(value, answerers, error) => error !== undefined || (!value && answerers === 0),
 		);
 		let current: Requesting | undefined;
+		// Whether `current` ever resolved, so losing it reads as an end rather than a refusal.
+		let resolved = false;
 		let subscriptions: Dispose[] = [];
 		let disposed = false;
 		const release = () => {
@@ -1545,6 +1543,15 @@ export class Consumer {
 			release();
 			active.set(undefined);
 			closed.set(error);
+		};
+		const ended = (error: Error | null | undefined) => {
+			if (!error) return;
+			// Losing an accepted instance waits for its next announcement; a refusal is final.
+			if (resolved && error instanceof StreamError && error.code === StreamCode.Unroutable) {
+				active.set(undefined);
+				return;
+			}
+			finish(error);
 		};
 		const replace = (next?: Requesting) => {
 			if (disposed) {
@@ -1566,22 +1573,13 @@ export class Consumer {
 			current = next;
 			active.set(value);
 			if (!next) return;
-			let resolved = value !== undefined;
+			resolved = value !== undefined;
 			subscriptions.push(
 				next.active.subscribe((value) => {
 					if (value) resolved = true;
 					active.set(value);
 				}),
 			);
-			const ended = (error: Error | null | undefined) => {
-				if (!error) return;
-				// Losing an accepted instance waits for its next announcement; a refusal is final.
-				if (resolved && error instanceof StreamError && error.code === StreamCode.Unroutable) {
-					active.set(undefined);
-					return;
-				}
-				finish(error);
-			};
 			subscriptions.push(next.closed.subscribe(ended));
 			ended(next.closed.peek());
 		};
@@ -1591,12 +1589,16 @@ export class Consumer {
 			finish(error instanceof Error ? error : new Error(String(error)));
 			throw error;
 		}
-		const changed = (state: { instance?: Instance; closed?: Error | null }) => {
-			if (state.closed !== undefined) {
-				finish(state.closed);
+		const changed = () => {
+			const shutdown = this.#state.closed.peek();
+			if (shutdown !== undefined) {
+				finish(shutdown);
 				return;
 			}
-			const next = state.instance;
+			// A refusal landing in the same turn as this wakeup is final; never retry past it.
+			ended(current?.closed.peek());
+			if (disposed) return;
+			const next = this.#state.instance(absolute);
 			const had = previous !== undefined;
 			const same = previous && next && sameInstance(previous, next);
 			previous = next;
@@ -1605,8 +1607,8 @@ export class Consumer {
 			} else if (!same || !current || current.closed.peek() !== undefined) replace(this.#resolve(path, options));
 		};
 		if (!disposed) {
-			unwatch = watched.value.subscribe(changed);
-			changed(watched.value.peek());
+			unwatch = watched.version.subscribe(changed);
+			changed();
 		}
 
 		return makeRequesting(path, active, missing, closed, () => finish(null));
