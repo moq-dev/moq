@@ -145,6 +145,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just js bench track
 
+      # Fails if charging a subscription costs more as the session holds more
+      # broadcasts and tracks, which means the cap accounting went back to scanning.
+      - name: JS session interest accounting benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just js bench interests
+
       - name: JS catalog estimate fanout benchmark
         if: ${{ !cancelled() }}
         run: nix develop --command just js catalog-bench
