@@ -43,8 +43,8 @@ fn serving_subscription(subscriber_priority: u8) -> Subscription {
 /// INCLUDE_PROPERTIES=0, which keeps the block present but empty.
 ///
 /// Declaring the timescale is what opts the track into timestamps; every object Timestamp
-/// is in these units. We serve the newest group first, matching moq-lite. A draft without
-/// room for a property drops it on encode.
+/// is in these units. We serve the newest group first by default, matching moq-lite. A draft
+/// without room for a property drops it on encode.
 fn track_properties(info: &track::Info, wanted: bool) -> ietf::Properties {
 	if !wanted {
 		return ietf::Properties::default();
@@ -773,7 +773,8 @@ where
 				}
 			};
 
-			let mut subscription = serving_subscription(msg.subscriber_priority).with_order(msg.group_order.to_order());
+			let order = msg.group_order.to_order();
+			let mut subscription = serving_subscription(msg.subscriber_priority).with_order(order);
 			let priority = subscription.priority;
 
 			// Subscribe before resolving the filter: on a routed broadcast the live edge only
@@ -854,7 +855,15 @@ where
 					track_alias: request_id.0,
 					// The subscription floor and FETCH/FILL cap use this same snapshot.
 					largest: edge.largest,
-					properties: track_properties(track.info(), msg.properties_wanted),
+					properties: {
+						let mut properties = track_properties(track.info(), msg.properties_wanted);
+						// Through draft-15 this restates the order the subscription is served in.
+						// Later drafts carry the publisher's default instead.
+						if matches!(self.version, Version::Draft14 | Version::Draft15) {
+							properties.group_order = Some(order.into());
+						}
+						properties
+					},
 				})
 				.await?;
 
@@ -7502,6 +7511,45 @@ mod serve_tests {
 		crate::coding::decode_buf(&mut buf, version, ietf::SubscribeOk::decode)
 			.unwrap()
 			.largest
+	}
+
+	/// Through draft-15 SUBSCRIBE_OK restates the order the subscription is served in; later
+	/// drafts announce the publisher's default, newest first.
+	#[moq_net_sim::test]
+	async fn subscribe_ok_announces_the_served_order() {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft20,
+		] {
+			for (requested, announced) in [
+				(GroupOrder::Ascending, GroupOrder::Ascending),
+				(GroupOrder::Descending, GroupOrder::Descending),
+				(GroupOrder::Any, GroupOrder::Descending),
+			] {
+				let mut h = serve(version);
+				let mut msg = subscribe(Filter::NextObject, None);
+				msg.group_order = requested;
+				run_live(&mut h, msg).await;
+
+				let writes = h.log.writes.lock().unwrap().clone();
+				let mut buf = writes.as_slice();
+				assert_eq!(
+					crate::coding::decode_varint(&mut buf, version).unwrap(),
+					ietf::SubscribeOk::ID
+				);
+				let ok = crate::coding::decode_buf(&mut buf, version, ietf::SubscribeOk::decode).unwrap();
+				let expected = match version {
+					Version::Draft14 | Version::Draft15 => Some(announced),
+					// Draft-16 has no room for it.
+					Version::Draft16 => None,
+					_ => Some(GroupOrder::Descending),
+				};
+				assert_eq!(ok.properties.group_order, expected, "{version:?} {requested:?}");
+			}
+		}
 	}
 
 	#[moq_net_sim::test]

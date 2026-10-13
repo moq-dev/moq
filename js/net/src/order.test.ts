@@ -14,6 +14,7 @@ import { createMockTransportPair, type MockTransport, textFrame } from "./mock.t
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { sendOrder } from "./priority.ts";
+import type { SendStream } from "./stream.ts";
 import { Milli, Timescale } from "./time.ts";
 import type { Order, Producer as TrackProducer, Subscriber as TrackSubscriber } from "./track.ts";
 import { wireOf } from "./wire.ts";
@@ -151,6 +152,75 @@ test.each(["ascending", "descending"] as const)("ietf serves GROUP_ORDER %s", as
 	}
 	expect(sendOrders(transport)).toEqual(expected(order, 3));
 
+	for (const group of groups) group.close();
+	subscriber.close();
+	remote.close();
+	broadcast.close();
+	client.abort();
+	server.abort();
+});
+
+// Holds the FIN of every uni stream `transport` opens from here on, while their data still
+// flows, until `release`. `closing` resolves once a stream has asked to close.
+function holdFins(transport: MockTransport): { closing: Promise<void>; release: () => void } {
+	let release!: () => void;
+	const released = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	let closed!: () => void;
+	const closing = new Promise<void>((resolve) => {
+		closed = resolve;
+	});
+
+	const create = transport.createUnidirectionalStream.bind(transport);
+	transport.createUnidirectionalStream = async (options) => {
+		const inner = await create(options);
+		const writer = inner.getWriter();
+		const outer: SendStream = new WritableStream<Uint8Array>({
+			write: (chunk) => writer.write(chunk),
+			close: async () => {
+				closed();
+				await released;
+				await writer.close();
+			},
+			abort: (reason) => writer.abort(reason),
+		});
+		outer.sendOrder = options?.sendOrder;
+		// Record the stream the publisher re-ranks.
+		const log = transport.sendStreams.uni;
+		log[log.indexOf(inner)] = outer;
+		return outer;
+	};
+	return { closing, release };
+}
+
+// A finished group whose FIN is still queued keeps its rank, rather than being frozen while
+// the groups behind it are promoted to tie with it.
+test("ietf keeps a closing group stream ranked until it settles", async () => {
+	const origin = new OriginProducer();
+	const { client, server, transport } = await session(Ietf.ALPN.DRAFT_17, origin);
+	const fins = holdFins(transport);
+
+	const broadcast = origin.createBroadcast(Path.from("test"));
+	broadcast.announce();
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+
+	const remote = wireOf(client).consume(Path.from("test"));
+	const subscriber = remote.track("video").subscribe({ maxDelay: MAX_DELAY, order: "descending" });
+	await aggregate(video, (upstream) => upstream === "descending");
+
+	const groups: GroupProducer[] = [];
+	for (let i = 0; i < 3; i++) {
+		groups.push(writeGroup(video));
+		await receive(subscriber, 1);
+	}
+
+	// The newest group, ranked first, finishes while its FIN is held.
+	groups[2]?.close();
+	await fins.closing;
+	expect(sendOrders(transport)).toEqual(expected("descending", 3));
+
+	fins.release();
 	for (const group of groups) group.close();
 	subscriber.close();
 	remote.close();

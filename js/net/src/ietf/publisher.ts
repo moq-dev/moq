@@ -39,7 +39,7 @@ import {
 } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { cancelled, finCancels } from "./request_stream.ts";
-import { type Subscribe, SubscribeError, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
+import { GroupOrder, type Subscribe, SubscribeError, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
 import {
 	type SubscribeNamespace,
 	SubscribeNamespaceEntry,
@@ -515,12 +515,17 @@ export class Publisher {
 						: { groupId: edge.largest.group, objectId: 0n }),
 				properties: msg.propertiesWanted
 					? // TIMESCALE is what opts the track into timestamps, on drafts that can
-						// send it. Newest first is the order a subscriber gets unless it asks.
+						// send it.
 						{
 							// An untimed track declares none, so it stays untimed downstream.
 							timescale: info.timescale ?? undefined,
 							priority: publisherPriority,
-							groupOrder: Properties.DESCENDING,
+							// Through draft-15 this restates the order the subscription is served
+							// in. Later drafts carry the publisher's default instead, newest first.
+							groupOrder:
+								(version === Version.DRAFT_14 || version === Version.DRAFT_15) && order === "ascending"
+									? GroupOrder.Ascending
+									: Properties.DESCENDING,
 							maxCacheDuration: info.maxAge === undefined ? undefined : BigInt(info.maxAge),
 						}
 					: // INCLUDE_PROPERTIES=0. The block stays present but empty, which also means
@@ -883,7 +888,9 @@ export class Publisher {
 			} catch (err: unknown) {
 				stream.reset(error(err));
 			} finally {
-				ranking.remove(stream);
+				// A closed stream may still have data queued behind its FIN, so it keeps
+				// competing at its rank until the stream settles.
+				void stream.closed.catch(() => {}).then(() => ranking.remove(stream));
 			}
 		} finally {
 			group.close();
@@ -1023,7 +1030,11 @@ export class Publisher {
 			console.debug(`fill failed, resetting its stream: fill=${requestId} error=${reason(e)}`);
 			stream?.reset(e);
 		} finally {
-			if (stream) ranking.remove(stream);
+			// Ranked until it settles, like a group stream.
+			if (stream) {
+				const opened = stream;
+				void opened.closed.catch(() => {}).then(() => ranking.remove(opened));
+			}
 			cache.close();
 		}
 	}

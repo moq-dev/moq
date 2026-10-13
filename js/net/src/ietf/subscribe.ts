@@ -328,7 +328,7 @@ export class SubscribeOk {
 			// arrives as PUBLISH_DONE regardless, so there is nothing to act on.
 			await r.u62();
 
-			await r.u8(); // Don't care about group order
+			properties.groupOrder = await r.u8();
 
 			const contentExists = await r.bool();
 			if (contentExists) {
@@ -345,7 +345,10 @@ export class SubscribeOk {
 			const params = await Parameters.decode(r, version, "subscribe-ok");
 			largest = params.largest;
 			properties = await Properties.decode(r, version);
-			if (version === Version.DRAFT_15) properties.maxCacheDuration = params.maxCacheDuration;
+			if (version === Version.DRAFT_15) {
+				properties.maxCacheDuration = params.maxCacheDuration;
+				properties.groupOrder = params.groupOrder;
+			}
 		}
 
 		return new SubscribeOk({ requestId, trackAlias, largest, properties });
