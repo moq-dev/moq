@@ -30,50 +30,39 @@ Current behaviour:
   encoder this repeats on every later rendition change, because the new
   broadcast's audio track closes at once.
 
-Direction:
+Decided with the maintainer (2026-10-13):
 
-- Separate failing from recovering. Failing is local and immediate: end the
-  track with the error, take the rendition out of selection, and expose the
-  failure to the application (for example an error signal on the encoder or
-  the `Rendition`).
-- Only a change of inputs (codec, config, capture, or an explicit
-  application action) may re-arm a failed rendition, never the close itself,
-  so a deterministic failure stays down instead of looping. No timed retry.
-- One rendition failing never republishes the network broadcast. Remove the
-  `#restart` path for closed rendition tracks, or narrow it to whatever the
-  questions below settle.
+- **Scope: JS `@moq/publish` only**, where the library owns the rendition
+  tracks. Native publishers' apps own each track directly.
+- **Fail locally and at once.** End the track with the encoder's error,
+  advertise the rendition as `enabled: false` with its last config (which
+  `@moq/watch` and native consumers already skip), and expose the failure to
+  the application, for example as an error signal on the encoder or the
+  `Rendition`. Failing never republishes the network broadcast, so remove or
+  narrow the `#restart` path that does today.
+- **Only a changed input or an explicit application call re-arms a failed
+  rendition.** No automatic or timed retry, so a deterministic failure stays
+  down instead of looping.
+- **Do not resume numbering unless it's a continuation (same encoder).** A
+  recovered rendition publishes under a new track name or a new broadcast
+  epoch; when unsure, default to one of those, because that's safer. This
+  keeps #5068's decision 7 for any replacement encoder. A new track name
+  leaves the siblings running but needs
+  [catalog rendition IDs](/quest/m1/catalog-track-id.md) to keep the catalog
+  ID stable; a new epoch restarts the siblings, so reserve it for recovery,
+  never for the failure itself.
+- **Milestone: m1**, as reliability of a shipped feature.
+
+Also:
+
 - Watch for the interaction with [simulcast rung disable](/quest/m1/simulcast-rung-disable.md),
   which also drives `enabled`: a recovering grant must not re-enable a
   failed rendition.
 - Tests on mock time with a fake encoder: a failing video rendition leaves a
-  sibling rendition and the catalog writing under the same epoch; viewers
-  stop being offered the failed rendition; a dead audio encoder does not
-  republish the broadcast when another rendition registers; any recovery
-  never reuses a sequence.
-
-Open questions for the maintainer:
-
-1. How the catalog shows a failed rendition. (a) `enabled: false` with its
-   last config, which `@moq/watch` and native consumers already skip
-   (recommended, since it leaves room to recover); (b) remove its entry,
-   which fits a permanent failure.
-2. How a failed rendition recovers inside the same broadcast. This revisits
-   #5068's decision 7, which moved every track to a new network broadcast.
-   (a) It doesn't: it stays down until the broadcast is replaced for another
-   reason; (b) the replacement track continues the name's sequences, writing
-   its first group explicitly after the closed track's last one
-   (recommended: the same rendition continuing its numbering is the same
-   content, and only that rendition's viewers resubscribe); (c) the
-   replacement publishes under a new track name, which needs
-   [catalog rendition IDs](/quest/m1/catalog-track-id.md) to keep the
-   catalog ID stable.
-3. What re-arms a failed rendition. (a) Only a changed input or an explicit
-   application call (recommended); (b) also one automatic retry with a fresh
-   `VideoEncoder`, since a GPU reset can kill one instance; audio never
-   retries.
-4. Scope. (a) JS `@moq/publish` only, where the library owns the rendition
-   tracks (recommended); (b) also the native multi-encoder publishers (OBS
-   multitrack, moq-ffi), after checking how they handle one encoder failing.
+  sibling rendition and the catalog writing under the same epoch; the
+  failed rendition is advertised `enabled: false`; a dead audio encoder
+  does not republish the broadcast when another rendition registers; a
+  re-armed rendition never reuses a closed track's sequences.
 
 ## Related
 
