@@ -29,10 +29,11 @@ jobs and the `cache.yml` warm dominate. A branch's PR Check runs a median 2
 and a p90 5 times before it merges.
 
 `cache.yml` has not published since 2026-10-11: its save step only runs when
-the warm's `just ci check --all` and `just ci test --all` pass, and a red test
-on `main` blocks it. OBS on a `main` push also saves into the same shared key
-space. The fix (warm compiles only, readers never save) is in flight as its
-own PR (#5428).
+the warm's `just ci check --all` and `just ci test --all` pass, and a
+formatting slip and a flaky test on `main` blocked it. OBS on a `main` push
+also saved into the same shared key space, so PRs restored its sliver of the
+workspace. #5428 lets the warm save regardless and stops OBS saving; a
+compile-only warm can follow if the warm's runtime matters.
 
 Decisions (maintainer, 2026-10-13):
 
