@@ -140,7 +140,11 @@ attached JWT counts against its own `--limit-token` cap until the connection
 ends. The initial credential remains responsible for the connection's stats tier.
 Certificate sessions cannot renew a certificate in band, and public rules
 cannot verify a presented token; both refuse it as unsupported. A burst of
-tokens past the session's pending-verification bound is refused.
+tokens past the session's pending-verification bound is refused. An auth server
+that cannot answer, by timeout or outage, refuses a token as a transient error
+on moq-lite (`UNAUTHORIZED` on moq-transport), and `Connection::auth()` presents
+it again on its reconnect backoff. Retrying never extends an accepted grant, so
+a session whose last grant expires during an outage still closes.
 
 ### Claims
 
@@ -325,7 +329,9 @@ admissions itself, without the HTTP: leave `[auth]` empty and take
 refusal. A fixed lease never changes; a `lease::Producer` the application keeps
 re-checks, updates, and revokes on its own clock. The relay still closes the
 session at the grant's `expires`, and an admission left unanswered for ten
-seconds is refused. Gateway accept loops can call `Cluster::admit` for the same
+seconds is refused. `Admission::attached()` marks a token presented
+[in band](#in-band-renewal) for a session already admitted under the same id,
+so count sessions only on the others. Gateway accept loops can call `Cluster::admit` for the same
 scoped session as a native connection. See
 [docs.rs/moq-relay](https://docs.rs/moq-relay) and
 [moq-auth](/lib/rs/moq-auth).

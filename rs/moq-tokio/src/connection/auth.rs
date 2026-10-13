@@ -6,13 +6,14 @@ use bytes::Bytes;
 use futures::FutureExt;
 use moq_net::{auth, kio};
 
-use super::{State, terminal};
+use super::{Pacing, State, terminal};
 use crate::{Error, abort::AbortOnDrop};
 
 /// Present session tokens across every session of a connection.
 #[derive(Clone)]
 pub struct Auth {
 	pub(super) connection: kio::Consumer<State>,
+	pub(super) pacing: Pacing,
 }
 
 impl Auth {
@@ -29,11 +30,12 @@ impl Auth {
 		let producer = kio::Producer::<Granted>::default();
 		let state = producer.consume();
 		let connection = self.connection.clone();
+		let pacing = self.pacing;
 		let token = token.into();
 		let (answered, answer) = tokio::sync::oneshot::channel();
 		let task = AbortOnDrop::new(tokio::spawn(async move {
 			let mut answered = Some(answered);
-			if let Err(err) = present(connection, token, &producer, &mut answered).await {
+			if let Err(err) = present(connection, pacing, token, &producer, &mut answered).await {
 				if let Some(answered) = answered.take() {
 					let _ = answered.send(Err(err.clone()));
 				}
@@ -176,15 +178,28 @@ async fn next(
 	.await
 }
 
+/// Whether a refusal is the acceptor failing to decide rather than its verdict on
+/// the token, such as an unreachable auth server or a full verification queue.
+/// moq-transport's AUTH_ERROR carries neither, so there every refusal is final.
+fn transient(err: &moq_net::Error) -> bool {
+	matches!(
+		err,
+		moq_net::Error::Session(
+			moq_net::SessionError::Internal | moq_net::SessionError::TooManyRequests | moq_net::SessionError::Timeout
+		)
+	)
+}
+
 async fn present(
 	connection: kio::Consumer<State>,
+	pacing: Pacing,
 	bytes: Bytes,
 	producer: &kio::Producer<Granted>,
 	answered: &mut Option<tokio::sync::oneshot::Sender<crate::Result<()>>>,
 ) -> crate::Result<()> {
 	let mut snapshot = next(&connection, None).await?;
 	let mut draining = Vec::new();
-	loop {
+	'session: loop {
 		let (connects, session) = snapshot;
 		let Some(session) = session else {
 			if let Ok(mut state) = producer.write() {
@@ -197,18 +212,35 @@ async fn present(
 			state.grant = None;
 		}
 		let handle = session.auth();
-		let token = tokio::select! {
-			biased;
-			changed = next(&connection, Some((connects, true))) => { snapshot = changed?; continue; }
-			token = handle.add(bytes.clone()) => match token {
-				Ok(token) => token,
+		let mut delay = None;
+		let token = loop {
+			let attempt = async {
+				if let Some(delay) = delay {
+					tokio::time::sleep(delay).await;
+				}
+				handle.add(bytes.clone()).await
+			};
+			let result = tokio::select! {
+				biased;
+				changed = next(&connection, Some((connects, true))) => { snapshot = changed?; continue 'session; }
+				result = attempt => result,
+			};
+			match result {
+				Ok(token) => break token,
 				// The session ending is no verdict on the token: replay it on the next one.
 				Err(_) if session.closed().now_or_never().is_some() => {
 					snapshot = next(&connection, Some((connects, true))).await?;
-					continue;
+					continue 'session;
+				}
+				// Nor is an acceptor that could not decide: present it again, paced like a
+				// reconnect. Only an accepted grant counts, so a retry never extends one.
+				Err(err) if transient(&err) => {
+					let wait = delay.map_or(pacing.initial, |delay| pacing.next(delay));
+					tracing::debug!(%err, ?wait, "token refused transiently; presenting it again");
+					delay = Some(wait);
 				}
 				Err(err) => return Err(err.into()),
-			},
+			}
 		};
 		if let Some(answered) = answered.take() {
 			let _ = answered.send(Ok(()));
@@ -325,9 +357,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_token_survives_replacement_and_withdraws_from_both_sessions() {
 		let connection = kio::Producer::<State>::default();
-		let auth = Auth {
-			connection: connection.consume(),
-		};
+		let auth = retained(&connection);
 		let mut first = pair().await;
 		attach(&connection, &first.client);
 		let (token, first_grant) = tokio::join!(auth.add("renew"), async {
@@ -359,9 +389,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_session_closing_mid_replay_keeps_the_token() {
 		let connection = kio::Producer::<State>::default();
-		let auth = Auth {
-			connection: connection.consume(),
-		};
+		let auth = retained(&connection);
 		let mut first = pair().await;
 		attach(&connection, &first.client);
 		let (token, _first_grant) = tokio::join!(auth.add("renew"), async {
@@ -385,12 +413,60 @@ mod tests {
 		drop(token);
 	}
 
+	fn retained(connection: &kio::Producer<State>) -> Auth {
+		Auth {
+			connection: connection.consume(),
+			pacing: Pacing::new(&super::super::Backoff::default()),
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_transient_refusal_is_presented_again_after_backoff() {
+		let connection = kio::Producer::<State>::default();
+		let auth = retained(&connection);
+		let mut pair = pair().await;
+		attach(&connection, &pair.client);
+		let start = tokio::time::Instant::now();
+		let (token, issued) = tokio::join!(auth.add("renew"), async {
+			for _ in 0..2 {
+				let outage = pair.requests.recv().await.unwrap();
+				outage.reject(moq_net::SessionError::Internal, "auth server unavailable");
+			}
+			let retried = pair.requests.recv().await.unwrap();
+			assert_eq!(retried.token().as_ref(), b"renew");
+			retried.accept(auth::Grant::all())
+		});
+		let token = token.unwrap();
+		// The default pacing waits 1s, then 2s, before the third presentation.
+		assert!(
+			start.elapsed() >= std::time::Duration::from_secs(3),
+			"retried without backing off: {:?}",
+			start.elapsed()
+		);
+		assert!(token.grant().changed().await.unwrap().is_some());
+		drop(token);
+		issued.closed().await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn an_unauthorized_refusal_is_final() {
+		let connection = kio::Producer::<State>::default();
+		let auth = retained(&connection);
+		let mut pair = pair().await;
+		attach(&connection, &pair.client);
+		let (token, ()) = tokio::join!(auth.add("renew"), async {
+			let refused = pair.requests.recv().await.unwrap();
+			refused.reject(moq_net::SessionError::Unauthorized, "token refused");
+		});
+		assert!(token.is_err());
+		tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+		assert!(pair.requests.try_recv().is_err(), "a refused token was presented again");
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn ending_the_connection_withdraws_a_retained_token_handle() {
 		let connection = kio::Producer::<State>::default();
-		let auth = Auth {
-			connection: connection.consume(),
-		};
+		let auth = retained(&connection);
 		let mut pair = pair().await;
 		attach(&connection, &pair.client);
 		let (token, issued) = tokio::join!(auth.add("renew"), async {

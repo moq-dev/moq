@@ -405,6 +405,7 @@ const MIN_BACKOFF: Duration = Duration::from_millis(50);
 /// grows it, and `max` caps it, so a zero anywhere collapses the whole schedule.
 /// Resolving them once, here, keeps that from having to be re-argued at each of
 /// the three places the loop reaches for them.
+#[derive(Clone, Copy)]
 struct Pacing {
 	/// The first delay, and the bar a session must clear to count as healthy. At
 	/// zero every session looks healthy, which resets the give-up window forever.
@@ -696,6 +697,8 @@ pub struct Snapshot {
 pub struct Connection {
 	task: std::sync::Arc<Task>,
 	state: kio::Consumer<State>,
+	/// The reconnect pacing, which retained tokens reuse to retry a transient refusal.
+	pacing: Pacing,
 	/// Persistent send-bitrate estimate, fed by the loop from each live session.
 	send_bandwidth: BandwidthConsumer,
 	/// Persistent recv-bitrate estimate, fed by the loop from each live session.
@@ -726,6 +729,7 @@ impl Connection {
 	pub(crate) fn new(client: Client, addrs: Addrs) -> Self {
 		let producer = kio::Producer::<State>::default();
 		let state = producer.consume();
+		let pacing = Pacing::new(&client.backoff);
 
 		// The loop feeds these across every reconnect, so a consumer's handle survives session churn
 		// (unlike a session's own bandwidth consumer, which dies with the session).
@@ -762,6 +766,7 @@ impl Connection {
 				closed,
 			}),
 			state,
+			pacing,
 			send_bandwidth,
 			recv_bandwidth,
 			last_reported: None,
@@ -1310,6 +1315,7 @@ impl Connection {
 	pub fn auth(&self) -> Auth {
 		Auth {
 			connection: self.state.clone(),
+			pacing: self.pacing,
 		}
 	}
 

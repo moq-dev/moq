@@ -739,7 +739,7 @@ impl Auth {
 
 	/// Admit a session: the lease it holds, carrying the scope the origin applies.
 	pub async fn admit(&self, request: Request) -> Result<Lease, Error> {
-		let consumer = self.decide(request.clone(), None).await?;
+		let consumer = self.decide(request.clone()).await?;
 		let mut lease = Lease::new(&request.path, consumer);
 		lease.source = Some(Source {
 			auth: self.clone(),
@@ -748,7 +748,16 @@ impl Auth {
 		Ok(lease)
 	}
 
-	async fn decide(&self, request: Request, connection: Option<lease::Consumer>) -> Result<lease::Consumer, Error> {
+	async fn decide(&self, request: Request) -> Result<lease::Consumer, Error> {
+		let answer = self.submit(request, None)?;
+		let answered = tokio::time::timeout(ADMIT_TIMEOUT, answer)
+			.await
+			.map_err(|_| timed_out())?;
+		answered_with(answered)
+	}
+
+	/// Queue one admission for the decider, returning its pending answer.
+	fn submit(&self, request: Request, connection: Option<lease::Consumer>) -> Result<Answer, Error> {
 		let (reply, answer) = oneshot::channel();
 		self.admissions
 			.send(Admission {
@@ -757,14 +766,7 @@ impl Auth {
 				reply,
 			})
 			.map_err(|_| Error::Unavailable("nobody is answering admissions".into()))?;
-		let consumer = tokio::time::timeout(ADMIT_TIMEOUT, answer)
-			.await
-			.map_err(|_| Error::Unavailable("the admission timed out".into()))?
-			.map_err(|_| Error::Unavailable("the admission went unanswered".into()))??;
-		// Every decider is held to the same answer contract: a grant that admits
-		// nothing or asks for a re-check without a bound is a bug, not a refusal.
-		consumer.grant().validate()?;
-		Ok(consumer)
+		Ok(answer)
 	}
 
 	/// Admit a session on a grant decided locally, bypassing the server: the LAN
@@ -774,11 +776,31 @@ impl Auth {
 	}
 }
 
+/// A decider's pending answer to one [`Admission`].
+type Answer = oneshot::Receiver<Result<lease::Consumer, Error>>;
+
+fn timed_out() -> Error {
+	Error::Unavailable("the admission timed out".into())
+}
+
+/// Check a decider's answer against the contract every decider is held to: a
+/// grant that admits nothing or asks for a re-check without a bound is a bug, not
+/// a refusal.
+fn answered_with(
+	answered: Result<Result<lease::Consumer, Error>, oneshot::error::RecvError>,
+) -> Result<lease::Consumer, Error> {
+	let consumer = answered.map_err(|_| Error::Unavailable("the admission went unanswered".into()))??;
+	consumer.grant().validate()?;
+	Ok(consumer)
+}
+
 /// The sessions an embedded [`Auth`] is waiting to admit, in arrival order.
 ///
 /// The transport has already accepted each one; it waits for its answer, so a
 /// slow decider holds connects the way a slow auth server would, and one that
-/// takes longer than a server may (ten seconds) is refused as unavailable.
+/// takes longer than a server may (ten seconds) is refused as unavailable. An
+/// [attached](Admission::attached) token keeps its place in the session's
+/// verification bound until the decider answers or drops it, even past that.
 /// Answer in place or hand each [`Admission`] to its own task; nothing here
 /// serializes them.
 pub struct Admissions(mpsc::UnboundedReceiver<Admission>);
@@ -809,6 +831,12 @@ impl Admission {
 }
 
 impl Admission {
+	/// Whether this verifies another credential presented in band for the session
+	/// already admitted as `request.id`, rather than admitting a new session.
+	pub fn attached(&self) -> bool {
+		self.connection.is_some()
+	}
+
 	/// Admit the session on `lease`: [`lease::Consumer::fixed`] for a grant that
 	/// never changes, or the consumer of a [`lease::Producer`] the decider keeps to
 	/// re-check, update, revoke, and learn when the session ends.
