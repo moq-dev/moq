@@ -153,9 +153,15 @@ impl Refresh {
 	fn request(&mut self, request: auth::Request) {
 		if request.token().is_empty() {
 			// The connection's own lease answers an empty token while it lives, even
-			// after an earlier empty-token stream was withdrawn.
+			// after an earlier empty-token stream was withdrawn. It may have
+			// revalidated to a grant this session can no longer use while another
+			// credential keeps the session alive.
 			if self.owner.closed().now_or_never().is_some() {
 				request.reject(SessionError::Unauthorized, "connection credential ended");
+				return;
+			}
+			if !self.valid(&self.owner.grant()) {
+				request.reject(SessionError::Unauthorized, "connection credential no longer valid");
 				return;
 			}
 			let unissued = self
@@ -570,6 +576,40 @@ mod tests {
 		let narrowed = union.changed().await.unwrap().unwrap();
 		assert!(narrowed.publish.matches("a/cam"));
 		assert!(!narrowed.publish.matches("c/cam"));
+		assert!(!supervising.is_finished());
+		client.abort(moq_net::Error::Cancel);
+		supervising.abort();
+		let _ = supervising.await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn an_empty_token_is_refused_once_the_connection_credential_changes_root() {
+		let (auth, mut admissions) = super::super::Auth::embedded("test");
+		let request = auth.request(moq_auth::Transport::Quic, "/room");
+		let (owner, consumer) = lease::Producer::new(grant("a/**", 3000));
+		let (lease, ()) = tokio::join!(auth.admit(request), async {
+			admissions.next().await.unwrap().grant(consumer);
+		});
+		let (client, supervising) = sessions(lease.unwrap()).await;
+		let auth = client.auth();
+		let (token, ()) = tokio::join!(auth.add("replacement"), async {
+			admissions
+				.next()
+				.await
+				.unwrap()
+				.grant(lease::Consumer::fixed(grant("a/**", 3000)));
+		});
+		let _token = token.unwrap();
+		let mut moved = grant("a/**", 3000);
+		moved.root = Some("other".into());
+		owner.update(moved);
+		tokio::task::yield_now().await;
+		let result = auth.add("").await;
+		assert!(
+			matches!(result, Err(moq_net::Error::Session(SessionError::Unauthorized))),
+			"an empty token reissued a credential the relay removed: {:?}",
+			result.map(|token| token.grant().peek())
+		);
 		assert!(!supervising.is_finished());
 		client.abort(moq_net::Error::Cancel);
 		supervising.abort();

@@ -337,7 +337,7 @@ impl<S: Post> Driver<S> {
 		let mut inflight: Option<Pin<Box<dyn Future<Output = crate::Result<Grant>> + Send>>> = None;
 		let mut pending = false;
 
-		loop {
+		let ended = loop {
 			let reply = async {
 				match inflight.as_mut() {
 					Some(request) => request.await,
@@ -346,17 +346,11 @@ impl<S: Post> Driver<S> {
 			};
 			tokio::select! {
 				biased;
-				ended = producer.closed() => return ended,
-				// An attached credential ends with its connection, after its in-flight
-				// Revalidate lands, so End is the last request for this id.
-				reason = self.context.connection_ended() => {
-					if let Some(request) = inflight.take() {
-						let _ = request.await;
-					}
-					return producer.finish(reason, Bytes::default());
-				},
+				ended = producer.closed() => break ended,
+				// An attached credential ends with its connection.
+				reason = self.context.connection_ended() => break producer.finish(reason, Bytes::default()),
 				due = producer.due() => match due {
-					Due::Expired => return producer.finish(Reason::Expired, Bytes::default()),
+					Due::Expired => break producer.finish(Reason::Expired, Bytes::default()),
 					Due::Revalidate if inflight.is_some() => pending = true,
 					Due::Revalidate => inflight = Some(self.post_revalidate()),
 				},
@@ -364,9 +358,9 @@ impl<S: Post> Driver<S> {
 					inflight = None;
 					match result {
 						Ok(fresh) => producer.update(fresh),
-						Err(Error::Refused) => return producer.finish(Reason::Refused, Bytes::default()),
+						Err(Error::Refused) => break producer.finish(Reason::Refused, Bytes::default()),
 						Err(Error::GrantExpired | Error::UnboundedRevalidate | Error::ZeroRevalidate) => {
-							return producer.finish(Reason::Invalid, Bytes::default());
+							break producer.finish(Reason::Invalid, Bytes::default());
 						},
 						Err(err) => {
 							let delay = producer.failed();
@@ -380,7 +374,13 @@ impl<S: Post> Driver<S> {
 					}
 				},
 			}
+		};
+		// Land an in-flight Revalidate before releasing the connection's End, so
+		// End is the last request for this id however the lease ended.
+		if let Some(request) = inflight {
+			let _ = request.await;
 		}
+		ended
 	}
 
 	fn post_revalidate(&self) -> Pin<Box<dyn Future<Output = crate::Result<Grant>> + Send>> {
@@ -588,6 +588,57 @@ mod tests {
 			),
 			"an attached lease outlived its connection's End"
 		);
+	}
+
+	#[tokio::test]
+	async fn a_withdrawn_attachment_lands_its_revalidate_before_end() {
+		#[derive(Clone)]
+		struct HeldRevalidate {
+			script: Script,
+			arrived: Arc<tokio::sync::Notify>,
+			release: Arc<tokio::sync::Notify>,
+		}
+		impl Post for HeldRevalidate {
+			async fn post(&self, request: &Request) -> crate::Result<Grant> {
+				if request.event == Event::Revalidate {
+					self.arrived.notify_one();
+					self.release.notified().await;
+				}
+				self.script.post(request).await
+			}
+			async fn post_end(&self, request: &Request) -> crate::Result<()> {
+				self.script.post_end(request).await
+			}
+		}
+		let log = Log::default();
+		let script = Script::new(log.clone(), |_| Some(Ok(grant(None, None))));
+		let owner = script.connect().await.unwrap();
+		let server = HeldRevalidate {
+			script: script.clone(),
+			arrived: Arc::default(),
+			release: Arc::default(),
+		};
+		let mut request = request();
+		request.query = Some("jwt=replacement".into());
+		let context = owner.context().unwrap().attach(&request, &script.identity).unwrap();
+		let attached = admit(server.clone(), request, context).await.unwrap();
+		attached.revalidate();
+		server.arrived.notified().await;
+		drop(attached);
+		tokio::task::yield_now().await;
+		owner.close(Reason::Shutdown, Bytes::default());
+		tokio::task::yield_now().await;
+		assert_eq!(
+			log.events(),
+			[Event::Connect, Event::Connect],
+			"end overtook a withdrawn attachment's in-flight revalidate"
+		);
+		server.release.notify_one();
+		log.end().await;
+		assert!(matches!(
+			log.events().as_slice(),
+			[Event::Connect, Event::Connect, Event::Revalidate, Event::End { .. }]
+		));
 	}
 
 	#[tokio::test]
