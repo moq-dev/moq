@@ -35,6 +35,15 @@ than silently following the active route through ordinary aggregation. Different
 first hops do not imply independent paths; include common upstreams and a
 candidate returning through the requester.
 
+Prove bounded exploration beyond the initial next-best standby when active
+and standby share a failure. One standby is a concurrency bound, not a fixed
+choice: define how outstanding demand and insufficient evidence advance through
+other eligible candidates without treating silence as failure, opening every
+alternative, or polling quiet tracks forever. Test a healthy third route behind
+two stalled candidates, all candidates quiet, and candidate churn; measure
+observation cost and time to discover useful progress. Settle scheduling and
+budgets from these fixtures before implementation.
+
 Test quiet publishers, empty groups, partial frames, out-of-order delivery,
 receiver backpressure, metadata advancing while payload stalls, cached/stale
 reports, epoch changes, and simultaneous failure/recovery at several hops.

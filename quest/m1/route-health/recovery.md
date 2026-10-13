@@ -11,7 +11,10 @@ Epochless broadcasts never enter this active/passive mechanism.
 
 Implement the evidence rules established by Health design. Observe the next-best
 eligible same-epoch candidate using metadata-only demand, shared across downstream
-readers. Compare remote progress, actual useful payload, and outstanding demand;
+readers. Apply the proven bounded exploration rule when that standby is
+uninformative, so a healthy third candidate remains discoverable while only
+one steady standby is observed at a time. Compare remote progress, actual
+useful payload, and outstanding demand;
 neither source silence nor local backpressure alone establishes a route failure.
 
 Health may temporarily exclude an otherwise preferred route, allowing a
@@ -33,7 +36,9 @@ closure. A newer same-epoch connection is not automatically a healthier route.
 
 Mock-time tests cover all Health design counterexamples, including a preferred
 route whose metadata advances but media remains blocked, failed promotion,
-recovery that repeatedly degrades, multi-hop simultaneous failover, and no
+recovery that repeatedly degrades, a shared active/standby failure with a
+healthy third route, bounded exploration when every candidate is quiet,
+multi-hop simultaneous failover, and no
 standby for epochless broadcasts. Run through Rust/JS interop and existing CI.
 Measure tracks, routes, and readers on both axes; retain the idle-session
 poll-count regressions and report overlap, switch counts, and memory.

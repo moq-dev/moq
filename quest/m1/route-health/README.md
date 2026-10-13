@@ -17,8 +17,12 @@ Decided with the maintainer, 2026-10-13:
   Deterministic hashing still chooses distinct equal routes; a new connection
   wins only when routes otherwise match. Stalled delivery is addressed by
   evidence, not a general newest-connection preference.
-- Observe one next-best eligible same-epoch route for each demanded track,
-  aggregating downstream readers. Metadata watchers must not recursively
+- Observe at most one eligible same-epoch standby at a time per demanded
+  track, initially the next-best route, aggregating downstream readers. If
+  active and standby provide insufficient evidence, bounded exploration must
+  reach other eligible candidates; a shared failure must not hide a working
+  third route. Silence alone still does not establish failure. Metadata watchers
+  must not recursively
   create their own backups at every relay or multiply into a network-wide
   monitoring tree. Monitor at endpoints and relays from the first implementation.
 - New lite-07 support is required. The preferred API is `Subscription.meta:
@@ -44,7 +48,8 @@ The epic's remaining work is end-to-end validation across a multi-hop relay
 network and alternate sessions representing CDN/direct paths: stalled video moves while healthy audio remains,
 control advances while payload stalls, the recovered primary resumes without
 oscillation, and both quiet routes stay unknown rather than falsely failing.
-Test epochless exclusion, shared bottlenecks, simultaneous relay decisions,
+Test epochless exclusion, an active/standby shared bottleneck with a healthy
+third route, simultaneous relay decisions,
 loss/reordering, cancelled demand, and stale/replayed progress. Wire these into
 CI. Report actual media overlap, control traffic, wakes, switches, and memory
 across tracks, candidate connections, and downstream readers. Real browser/native
