@@ -55,10 +55,18 @@ pub enum Read {
 		group: u64,
 		frame: Frame,
 	},
-	/// Media before the next item will never reach this reader: it joined mid-track, or a
-	/// group was skipped, evicted, or never arrived. A decoder resumes from here without
-	/// the references or state that media built.
-	Gap,
+	/// Media after an item already read will never reach this reader: a group was skipped,
+	/// evicted, or never arrived. A decoder resumes from here without the references or
+	/// state that media built. Joining mid-track is not a gap: nothing was read before it.
+	///
+	/// The span is an upper bound, in the scale of the item that follows.
+	Gap {
+		/// The furthest presentation point already read. Without a per-frame duration this
+		/// is the last frame's timestamp, one frame early.
+		timestamp: moq_net::Timestamp,
+		/// How long until the next item resumes, so it also covers any declared pause.
+		duration: moq_net::Timestamp,
+	},
 	/// The publisher declared that its media stops at `end`: it paused, switched source, or
 	/// finished. Frames that follow from the same `group` are the stopped encoder's final
 	/// packets (an audio codec's drain), whose output at or past `end` is padding. The next

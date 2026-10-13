@@ -35,10 +35,10 @@ function setup(maxDelay = 100) {
 	return { track, consumer, results, warn };
 }
 
-// Each item as "gap", "<group>@<µs>" for a frame, or "end <group>@<µs>".
+// Each item as "gap <µs>+<µs>", "<group>@<µs>" for a frame, or "end <group>@<µs>".
 function items(results: Read[]): string[] {
 	return results.map((read) => {
-		if (read.kind === "gap") return "gap";
+		if (read.kind === "gap") return `gap ${read.timestamp}+${read.duration}`;
 		if (read.kind === "end") return `end ${read.group}@${read.end}`;
 		return `${read.group}@${read.frame.timestamp}`;
 	});
@@ -79,8 +79,8 @@ for (const emptySuccessor of [false, true]) {
 			for (let i = 0; i < 5; i++) write(live, 1_000_000 + i * 33_333);
 			await flush();
 
+			// Nothing was read before the live group, so the stale one leaves no gap.
 			expect(items(results)).toEqual([
-				"gap",
 				...[1_000_000, 1_033_333, 1_066_666, 1_099_999, 1_133_332].map(
 					(timestamp) => `${sequence}@${timestamp}`,
 				),
@@ -98,14 +98,15 @@ test("Consumer preserves a declared marker before its first media across a hole"
 	write(marker, 0, true);
 	marker.close();
 	await flush();
-	expect(items(results)).toEqual(["gap", "end 16@0"]);
+	expect(items(results)).toEqual(["end 16@0"]);
 
 	const live = new Group.Producer(18);
 	track.writeGroup(live);
 	write(live, 50_000);
 	await flush();
-	// Group 17 never arrived, so the media after the marker is past a gap.
-	expect(items(results)).toEqual(["gap", "end 16@0", "gap", "18@50000"]);
+	// Group 17 never arrived, so the media after the marker is past a gap. It spans the declared
+	// pause too: the reader can't tell where group 17 would have started.
+	expect(items(results)).toEqual(["end 16@0", "gap 0+50000", "18@50000"]);
 	expect(frames(results)[0].frame.keyframe).toBe(true);
 	expect(warn).not.toHaveBeenCalled();
 });
@@ -117,7 +118,7 @@ test.each([false, true])("Consumer still waits for a gap after media (playhead r
 	write(first, 0);
 	first.close();
 	await flush();
-	expect(items(results)).toEqual(["gap", "16@0"]);
+	expect(items(results)).toEqual(["16@0"]);
 
 	if (reset) {
 		const marker = new Group.Producer(17);
@@ -125,7 +126,7 @@ test.each([false, true])("Consumer still waits for a gap after media (playhead r
 		write(marker, 0, true);
 		marker.close();
 		await flush();
-		expect(items(results)).toEqual(["gap", "16@0", "end 17@0"]);
+		expect(items(results)).toEqual(["16@0", "end 17@0"]);
 	}
 	const sequence = reset ? 20 : 19;
 	const later = new Group.Producer(sequence);
@@ -141,13 +142,7 @@ test.each([false, true])("Consumer still waits for a gap after media (playhead r
 	write(bridge, 0);
 	bridge.close();
 	await flush();
-	// The bridge closes the hole, so nothing reads as a gap past the first.
-	expect(items(results)).toEqual([
-		"gap",
-		"16@0",
-		...(reset ? ["end 17@0"] : []),
-		`${sequence - 1}@0`,
-		`${sequence}@50000`,
-	]);
+	// The bridge closes the hole, so nothing reads as a gap.
+	expect(items(results)).toEqual(["16@0", ...(reset ? ["end 17@0"] : []), `${sequence - 1}@0`, `${sequence}@50000`]);
 	expect(warn).not.toHaveBeenCalled();
 });

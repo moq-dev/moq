@@ -19,7 +19,7 @@ import type * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import { Group, Time, Track } from "@moq/net";
 import { Effect } from "@moq/signals";
-import type { Arrival as Diagnostic } from "../arrivals";
+import { type Arrival as Diagnostic, gap } from "../arrivals";
 import { type Delay, Sync } from "../sync";
 import { frameDuration } from "./config";
 import { ringSamples, target } from "./latency";
@@ -230,7 +230,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			const next = await consumer.next();
 			if (!next) return;
 			if (terminal.update(next)) ring.reset();
-			if (next.kind === "gap") arrivals.push({ kind: "gap" });
+			if (next.kind === "gap") arrivals.push(gap(next));
 			if (next.kind !== "frame") continue;
 
 			const { timestamp, arrival } = next.frame;

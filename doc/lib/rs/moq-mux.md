@@ -31,8 +31,10 @@ export. The [CLI page](/bin/cli#import) covers these and the MPEG-TS specifics:
 one program per broadcast, damaged packets, and feed checks.
 
 A container read yields frames plus two markers in delivery order: a gap where
-media will never arrive (the join, a skip, a hole) and an end where the
-publisher declared its media stops (a pause, a source switch, the finish).
+media after what was read will never arrive (a skip, a hole), carrying where it
+starts and how long it lasts as an upper bound, and an end where the publisher
+declared its media stops (a pause, a source switch, the finish). Joining
+mid-track is not a gap.
 
 Data tracks are catalog entries too. The [hang page](/concept/hang#data-tracks)
 describes the modes. A capture time converts onto the broadcast clock; a

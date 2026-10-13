@@ -302,13 +302,13 @@ it("decodes an audio packet inside a group after a gap", async () => {
 		await playback.play();
 		// Opened late, so it observes only the gap and frame below.
 		const arrivals = playback.arrivals();
-		playback.push({ kind: "gap" });
+		playback.push({ kind: "gap", timestamp: Time.Micro(20_000), duration: Time.Micro(40_000) });
 		const next = frame();
 		next.frame.keyframe = false;
 		playback.push(next);
 		await microtasks();
 		expect(playback.inserted()).toContain(next.frame.timestamp);
-		expect(await arrivals.next()).toEqual({ kind: "gap" });
+		expect(await arrivals.next()).toEqual({ kind: "gap", timestamp: Time.Milli(20), duration: Time.Milli(40) });
 		expect(await arrivals.next()).toMatchObject({
 			kind: "frame",
 			timestamp: Time.Milli.fromMicro(next.frame.timestamp),

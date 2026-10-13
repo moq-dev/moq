@@ -13,7 +13,7 @@ import {
 	readonlys,
 	Signal,
 } from "@moq/signals";
-import { Producer as ArrivalProducer, type Arrivals } from "../arrivals";
+import { Producer as ArrivalProducer, type Arrivals, gap } from "../arrivals";
 import { hostedAssets } from "../assets";
 import { base64ToBytes } from "../base64";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
@@ -479,7 +479,7 @@ export class Decoder {
 					decoder.reset();
 					decoder.configure(decoderConfig);
 				}
-				if (next.kind === "gap") this.#arrivals.write({ kind: "gap" });
+				if (next.kind === "gap") this.#arrivals.write(gap(next));
 				if (next.kind !== "frame") continue;
 				const { frame } = next;
 
@@ -587,7 +587,7 @@ export class Decoder {
 					decoder.reset();
 					decoder.configure(decoderConfig);
 				}
-				if (next.kind === "gap") this.#arrivals.write({ kind: "gap" });
+				if (next.kind === "gap") this.#arrivals.write(gap(next));
 				if (next.kind !== "frame") continue;
 				const { frame } = next;
 

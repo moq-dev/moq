@@ -181,7 +181,7 @@ function sample(group: number, timestamp: number, keyframe = true): Read {
 		frame: { arrival: Time.Milli.now(), timestamp: Time.Micro(timestamp), payload: new Uint8Array([1]), keyframe },
 	};
 }
-const gap: Read = { kind: "gap" };
+const gap: Read = { kind: "gap", timestamp: Time.Micro(0), duration: Time.Micro(0) };
 
 async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: readonly number[] = []) {
 	const originalDecoder = Object.getOwnPropertyDescriptor(globalThis, "VideoDecoder");

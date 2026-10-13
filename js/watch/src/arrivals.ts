@@ -1,4 +1,5 @@
-import type { Time } from "@moq/net";
+import type * as Container from "@moq/hang/container";
+import { Time } from "@moq/net";
 
 /** One received frame, or a gap where media will never arrive, in delivery order. */
 export type Arrival =
@@ -11,8 +12,26 @@ export type Arrival =
 			/** Whether ingress missed the playback deadline. */
 			late: boolean;
 	  }
-	/** Media before the next frame never reached the decoder: the join, a latency skip, or a hole. */
-	| { kind: "gap" };
+	/**
+	 * Media after an earlier frame never reached the decoder: a latency skip or a hole. The span is
+	 * an upper bound, as on the container read's gap.
+	 */
+	| {
+			kind: "gap";
+			/** The furthest presentation point received before the gap, in milliseconds. */
+			timestamp: Time.Milli;
+			/** How long until media resumes, in milliseconds. */
+			duration: Time.Milli;
+	  };
+
+/** The arrival entry for a container read's gap. */
+export function gap(read: Extract<Container.Read, { kind: "gap" }>): Arrival {
+	return {
+		kind: "gap",
+		timestamp: Time.Milli.fromMicro(read.timestamp),
+		duration: Time.Milli.fromMicro(read.duration),
+	};
+}
 
 interface State {
 	queue: Arrival[];

@@ -14,7 +14,7 @@ import {
 	Signal,
 } from "@moq/signals";
 import { rotateVideoDimensions } from "@moq/video";
-import { Producer as ArrivalProducer, type Arrivals } from "../arrivals";
+import { Producer as ArrivalProducer, type Arrivals, gap } from "../arrivals";
 import { base64ToBytes } from "../base64";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 
@@ -562,7 +562,7 @@ class DecoderTrack {
 				// A gap or a declared end breaks the timeline: re-anchor before decoding further, and
 				// never bridge the buffer across it.
 				if (next.kind !== "frame") {
-					if (next.kind === "gap") this.arrivals?.write({ kind: "gap" });
+					if (next.kind === "gap") this.arrivals?.write(gap(next));
 					if (latest !== undefined) this.#onBreak();
 					previous = undefined;
 					continue;
@@ -646,7 +646,7 @@ class DecoderTrack {
 
 				// A gap or a declared end breaks the timeline (see #runLegacy).
 				if (next.kind !== "frame") {
-					if (next.kind === "gap") this.arrivals?.write({ kind: "gap" });
+					if (next.kind === "gap") this.arrivals?.write(gap(next));
 					if (latest !== undefined) this.#onBreak();
 					previous = undefined;
 					continue;
