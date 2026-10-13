@@ -12,4 +12,4 @@ Supported Windows hardware decoders deliver GPU frames to the OBS source without
 
 ## Required
 
-- [Video source replacement](/quest/m1/obs-moq-video/source.md) - shared native frame ownership, source rendering, and CPU fallback
+- [Video source replacement](/quest/m2/obs-moq-video/source.md) - shared native frame ownership, source rendering, and CPU fallback

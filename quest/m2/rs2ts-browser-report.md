@@ -23,4 +23,4 @@ Public API: none. Wire: none.
 ## Required
 
 - [Browser benchmarks](/quest/m2/browser-benchmarks.md) - the full media workload harness and artifact conventions
-- [Rust-backed @moq/net](/quest/m1/rs2ts/README.md) - the adopted implementation and retained baseline
+- [Rust-backed @moq/net](/quest/m2/rs2ts/README.md) - the adopted implementation and retained baseline

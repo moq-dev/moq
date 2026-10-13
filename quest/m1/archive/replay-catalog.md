@@ -43,7 +43,7 @@ this by hand-building a catalog.
   advertising the URL at all. `replay` stays unset: the timelines live on this broadcast.
 - The logic lives in `moq-archive` (`moq_archive::Reader`), so any host of
   the archive behind the root claim republishes and stamps the catalog, not
-  only `moq-cli` (decided 09-29 in [DVR rewind](/quest/m1/archive/dvr.md)).
+  only `moq-cli` (decided 09-29 in [DVR rewind](/quest/m2/archive-dvr.md)).
   `moq-cli` only passes the URL and the opt-out. Select the catalog track by
   catalog format as `export archive` does: hang and hang.z are stamped, MSF
   is refused.
@@ -55,8 +55,9 @@ this by hand-building a catalog.
   catalog groups, so the same name, epoch, and group number could carry
   different bytes. Revisit only once replayed metadata is byte- and
   sequence-identical to live. So `moq import archive` refuses `--epoch`
-  (`takes_epoch` false for `Archive`), and any `moq-archive` host mints its
-  own epoch or takes one from its caller, never defaulting to `.info`'s.
+  ([Epoch refusals](/quest/m1/epoch-refusals.md) lands that), and any
+  `moq-archive` host mints its own epoch or takes one from its caller, never
+  defaulting to `.info`'s.
 - The recorded catalog's `archive` entry describes the source's live
   timelines, not the recording's, so replace it with the timelines the reader
   replays rather than trusting the recorded ones.

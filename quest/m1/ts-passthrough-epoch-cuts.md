@@ -1,0 +1,60 @@
+# [S] Raw TS groups and their catalog section follow the epoch timeline
+
+## Goal
+
+Two `moq import ts --passthrough` instances sharing one `--epoch` and fed
+one stream cut identical groups wherever each started, including on a
+source that never marks random access and on a multi-program stream.
+Objects already run from PCR to PCR, so only group starts differ: the
+fallback cut counts `FALLBACK` from the current group's start, and before
+the first group from when the importer began waiting, so on a source with no
+random access points each importer keeps its own group phase for good.
+Their catalogs' M2ts sections match too, though both fields depend on
+history today: one non-random-access cut clears `random_access` for good,
+and the recorded `mux_rate` is judged over windows that start at the
+importer's first PCR.
+
+## Plan
+
+Decided 2026-10-13 by the maintainer: every group start is a function of
+the content and the [epoch's timeline](/quest/m1/epoch-anchor.md), never of
+when the importer started.
+
+- Fallback cuts fall on a grid of the epoch timeline, so a joiner's first
+  group starts where the incumbent cut. A grid on the raw 27 MHz count will
+  not do: a 33-bit wrap is not a whole number of seconds, so such a grid
+  shifts by about 0.72 s at each wrap.
+- An importer's first group starts only where the incumbent's rules also
+  cut: a random access point, a flagged forward break, or the grid.
+- Settle the grid rule so that a source marking random access more often
+  than `FALLBACK` is never cut away from its random access points, since any
+  other start publishes `random_access` false.
+- Size cuts count from the group's start, so they follow once group starts
+  do.
+- A cut is a position in the content, so under a shared epoch it follows
+  media time alone. Decided 2026-10-13 by the maintainer as an explicit
+  exception to timers advancing on max(wall, pts), because a wall-clock cut
+  would split a stalled instance from its partner. Rejected: keeping a wall
+  path.
+- A joiner adopts the live M2ts section as of its first group, and its later
+  changes depend only on content on the epoch timeline: `random_access`
+  clears on a cut both instances make, and the rate windows sit on the
+  epoch's grid, or the recorded rate stays fixed for the epoch. Settle which.
+
+Tests: two instances started at different offsets into one capture publish
+identical groups and objects from the later one's first group. Cover a
+source with no random access indicator, a multi-program stream, groups that
+hit the size cap, the later instance started after a 33-bit wrap the
+earlier crossed, and one started after the earlier made a fallback cut and
+recorded a rate; their catalogs match.
+
+Public API: none.
+
+## Required
+
+- [Epoch anchor](/quest/m1/epoch-anchor.md) - the timeline the grid sits on
+
+## Related
+
+- [Same-epoch importers](/quest/m1/hop-aligned-import.md) - group sequences and the end-to-end pair
+- [TS passthrough export](/quest/m2/ts-passthrough-export.md) - identical objects export as identical packets

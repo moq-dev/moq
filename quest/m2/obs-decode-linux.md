@@ -13,7 +13,7 @@ At least one supported Linux hardware decoder delivers frames to OBS without CPU
 
 ## Required
 
-- [Video source replacement](/quest/m1/obs-moq-video/source.md) - native frame contract and fallback lifecycle
+- [Video source replacement](/quest/m2/obs-moq-video/source.md) - native frame contract and fallback lifecycle
 
 ## Related
 
