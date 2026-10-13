@@ -22,9 +22,11 @@ platform break still blocks the merge.
   `pull_request` with the jobs skipped there, rather than path-filtered, or
   PRs wait forever. Changing the ruleset is a maintainer action after the
   workflow lands.
-- Drop the PR-time release dry runs that build on macOS or Windows (Release
-  Dart FFI, Swift Lib, Kotlin Lib, Dart). Nightly already builds every
-  release artifact.
+- Drop the macOS and Windows legs of PR-time release dry runs only where
+  Nightly already runs that workflow (Release Dart FFI, via
+  `release-ffi.yml`). Release Swift Lib's macOS jobs have no nightly run, so
+  add one before removing them. Release Dart and Kotlin Lib build on Linux
+  and stay.
 - Linux-only legs of these workflows (OBS on ARM, Android, WASM) are out of
   scope and stay on PRs.
 - Check the `release` ruleset too; a `release` PR should not lose platform

@@ -14,8 +14,11 @@ and push.
   dev shell closures plus three-platform release builds outgrow. R2 has no
   such cap and no egress charge.
 - Nix verifies signatures, so the signing key, not the bucket key, is the
-  trust boundary: keep it in the same `main`-only GitHub Environment as the
-  write key. A leaked bucket key cannot make a client accept a path.
+  trust boundary. Keep it and the bucket key in GitHub Environments that
+  `main` and the release tags can deploy from, and nothing else. Release tags
+  are unprotected today (no tag ruleset), so restricting who can create them
+  comes first; a separate release Environment from the mbx one is fine. A
+  leaked bucket key cannot make a client accept a path.
 - Serve the bucket like apt and rpm: a Worker in `infra/nix` with a checked-in
   `wrangler.jsonc` and custom domain, cache headers suited to `.narinfo`
   (short) and `nar/` (immutable). Bucket and lifecycle are one-time commands
