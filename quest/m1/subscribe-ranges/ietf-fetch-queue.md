@@ -6,9 +6,7 @@ Under congestion, a moq-transport FETCH or fill stream competes with the
 session's group streams through the same priority queue, ranked by its
 subscriber priority and the group it carries. Today the Rust moq-transport
 publisher gives these streams the raw subscriber priority as their send order,
-so they fall below every ranked group stream whatever their priority. The JS
-publisher opens a standalone FETCH stream with no send order, which puts it
-above all group data.
+so they fall below every ranked group stream whatever their priority.
 
 ## Plan
 
@@ -29,13 +27,15 @@ The work:
 - A standalone FETCH gets its own queue entry: its subscriber priority, its
   own request id, and its group, ordered by the FETCH's GROUP_ORDER. It
   follows priority changes the way a group stream's `Rank` does.
-- JS ranks its standalone FETCH stream through the same `Priority` ranking,
-  instead of opening it at the transport default, so both languages match
-  (decided 2026-10-13 in #5400: in scope, for parity).
+- JS parity (decided 2026-10-13 in #5400). JS already ranks its fill through
+  the subscription's `Priority`. It serves no standalone FETCH: `runFetch`
+  (`js/net/src/ietf/publisher.ts`) refuses every one. So JS has nothing to
+  change now, and any FETCH serving it gains later ranks through the same
+  `Priority`.
 - Keep each stream ranked until it settles, not just until its FIN is
   written (the #5385 review fix for JS group streams).
-- Tests, on mock time: a fill and a FETCH stream ranked against open group
-  streams of the same and a different priority, in both languages, asserting
+- Tests, on mock time, in Rust: a fill and a FETCH stream ranked against open
+  group streams of the same and a different priority, asserting
   the recorded send orders the way `group_stream_preserves_model_priority`
   does.
 

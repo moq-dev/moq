@@ -43,7 +43,10 @@ Guidance:
   cross-package table like the rest: the `py/moq-rs`, `swift`, `kt`,
   `dart/moq` and `go/wrapper/moq` wrappers, `cpp/moq`, C (inherited if the
   [generated C bindings](/quest/m1/c/README.md) have landed, otherwise
-  `moq.h`), and their `doc/lib` pages. Folded in here rather than a separate
+  `rs/moq-c/src/api.rs`, from which cbindgen generates `moq.h`), and their
+  `doc/lib` pages. `cpp/obs/src` and `doc/bin/obs.md` have no subscription
+  surface today, so they change only if OBS starts building a
+  `MoqSubscription`. Folded in here rather than a separate
   quest, so the bindings break once. Test that an ascending subscription
   receives a cached backlog oldest first in moq-ffi and each wrapper with tests.
 - Decided in the 2026-10-10 audit: `max_delay` caps every range, including

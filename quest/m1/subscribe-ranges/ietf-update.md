@@ -35,6 +35,12 @@ What an update can carry, and this quest sends:
 
 - Subscriber priority, on every draft: a fixed field on draft-14, the
   SUBSCRIBER_PRIORITY parameter after.
+- Draft-14's SUBSCRIBE_UPDATE also requires Start Location and End Group, so a
+  priority update repeats the subscription's current bounds rather than
+  zeroes, which a conforming peer would read as narrowing to group 0.
+- From draft-15 on, a priority update omits the subscription filter. Today
+  `SubscribeUpdate::encode_msg` (`rs/moq-net/src/ietf/subscribe.rs`) always
+  writes `Filter::NextObject`, which would reset the filter.
 - Forward stays 1. Pausing is not part of this.
 - The subscription filter is updatable from draft-15 on. Narrowing upstream
   ranges belongs to [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md),
@@ -44,9 +50,16 @@ Implementation: the IETF subscriber watches the aggregate the way
 `lite/subscriber.rs` does (`buffer_update`), sending one update per change
 and coalescing changes while one is in flight. The publisher side already
 applies a priority update to open group streams
-(`subscription_update_reprioritizes_open_group_streams`). Test on mock time,
+(`subscription_update_reprioritizes_open_group_streams`). The JS publisher on
+drafts 14 to 16 still reads and discards updates, which
+[the legacy updates quest](/quest/m1/ietf-legacy-updates.md) fixes first.
+Test on mock time,
 in Rust and JS, directly and through a relay: a second downstream subscriber
 at a higher priority raises the upstream priority, and leaving lowers it again.
+
+## Required
+
+- [Apply draft 14-16 request updates](/quest/m1/ietf-legacy-updates.md) - the JS publisher applies the priority this sends
 
 ## Related
 

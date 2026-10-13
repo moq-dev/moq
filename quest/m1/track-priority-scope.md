@@ -66,10 +66,10 @@ Direction to settle in the draft first, then the code:
   bypasses tenant isolation; settle their carrier beside the subscription one,
   or narrow the goal to subscription delivery.
 - Rank by track priority, then subscription, then the subscription's own group
-  order (newest first until subscribe ranges adds a direction).
+  order (`Subscription::order`, newest first by default).
 - Decide whether the publisher's `track::Info::priority` breaks a tie
   between equal subscriber priorities in `Priority::cmp`
-  (`rs/moq-net/src/lite/priority.rs`). The
+  (`rs/moq-net/src/priority.rs`). The
   [ladder controller](/quest/m3/ladder/controller.md), now in m3, wants that
   tiebreak; this quest owns the answer and the code change, so the controller
   only consumes it (2026-10-06 audit). Either way, make the docs agree:
