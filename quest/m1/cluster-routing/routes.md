@@ -35,8 +35,8 @@ Decided 2026-10-01 (see the [line's decisions](/quest/m1/cluster-routing/README.
   route stays up. An announce never changes its Route ID: another origin
   serving the same path is another ANNOUNCE. An ANNOUNCE naming an unknown
   Route ID is a protocol violation, and ROUTE_END ends that stream's
-  ANNOUNCEs on the route. ROUTE_REQUEST (node id, seqno) travels the
-  other way on the same stream, toward the neighbour that sent the route.
+  ANNOUNCEs on the route. ROUTE_REQUEST (node id, seqno, hop count) travels
+  the other way on the same stream, toward the neighbour that sent the route.
   The hop list leaves lite-07, and with it the
   `Hop Base`/`Hop Keep` compression.
 
@@ -74,10 +74,15 @@ Decided 2026-10-01 (see the [line's decisions](/quest/m1/cluster-routing/README.
   2026-10-12). A node whose routes to an origin are all infeasible sends
   ROUTE_REQUEST for that origin, with its feasibility seqno plus one, to the
   neighbour it would use. A node holding a route at least that new answers
-  with it; otherwise it forwards the request toward its own next hop, and
-  only the origin advances its seqno to answer. A node keeps one request
-  per origin and seqno outstanding, suppressing duplicates, and resends it
-  on its own timer until answered or the route is gone. Feasibility is never
+  with it, and only the origin advances its seqno to answer. Otherwise, while
+  the hop count is at least two, it forwards the request with the hop count
+  decremented, never to the requesting neighbour (RFC 8966 s3.8.1.2): through
+  a feasible route's next hop if one avoids the requester, else through an
+  infeasible route's, else it drops the request. A node keeps one request
+  per origin and seqno pending, suppressing duplicates, and resends its own
+  a small number of times; the pending entry expires when answered, when the
+  route is gone, or when the retries run out, and only a later infeasible
+  update starts a new one. Feasibility is never
   reset to accept a longer route after a retraction or a session replay.
 - Next-hop authority: store every neighbour's ANNOUNCEs, but a prefix is live
   at a node only as its current next hop toward the origin announces it, the
@@ -159,7 +164,9 @@ broadcast; a two-uplink mesh that never carries CDN routes back to the CDN;
 an island reached through the CDN after a partition; an unknown Route ID
 refused; a five-node ring whose preferred origin link fails recovers its
 longer backup through a seqno request, duplicates suppressed, while that
-backup never loses its session. Failover is measured
+backup never loses its session; a ring where a node's own preferred route
+points back at the requester forwards the request around it instead, and an
+unanswerable request stops after its retries. Failover is measured
 on broadcast liveness while the next hop changes, including a new next hop
 whose ROUTE arrives before its ANNOUNCE set, and reports per-path
 retractions and re-announcements beside the ROUTE budget; eventual route
