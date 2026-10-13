@@ -14,7 +14,7 @@ shows the bound, at zero and nonzero delay.
 with the jitter buffer's `full` check: a track is full once a frame of it is
 due, or holds any frame without a delay. TS still drains every ready frame, as
 it did before that PR. Reuse the same check rather than a TS-specific bound,
-and cover `--passthrough` too if its release path reads the same way.
+and bound `--passthrough` too, whose release path drains ready frames the same way.
 Bounding reads leaves arrived frames unread, so each read must judge a frame's
 deadline on when its source was last empty, as FLV and MKV do, not on when it
 was read: otherwise a slow sink makes frames that arrived on time late. The
