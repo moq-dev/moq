@@ -24,15 +24,19 @@ nothing a leg mints.
   packets on every leg. The sequence number and the 90 kHz timestamp come
   from the datagram's position on the broadcast's media timeline, modulo
   their field widths, so they survive the 33-bit source wrap and a late
-  join. The SSRC derives from the route's epoch, so a replacement is a new
-  RTP stream. An epochless route (a session whose version carries no
+  join. The SSRC derives from the broadcast path and the route's epoch, so
+  a replacement is a new RTP stream and two broadcasts sharing one epoch
+  (a multi-stage import clones its process epoch across paths) never
+  collide. An epochless route (a session whose version carries no
   epoch) gives two legs nothing shared to derive it from, so synchronized
   RTP refuses one; settle whether an explicit SSRC lifts that.
 - A leg never sends a datagram it cannot fill exactly. A packetizer that
   completes a datagram with stuffing, or primes a cushion with null-only
   datagrams after a stall, sends them under sequence numbers its partner
   fills with programme, and a receiver keeps whichever copy arrives first.
-  Silence lets the partner's copy through.
+  Silence lets the partner's copy through. The renderer hands the
+  packetizer which slots it filled with substitute stuffing, since the
+  bytes alone cannot tell them from the source's own null packets.
 - Datagrams go out on the export's own release; no wall-clock scheduling.
 - Settle the sink's shape (a destination on `export ts`, or its own sink),
   and whether the passthrough export can be packetized the same way from a
@@ -42,9 +46,10 @@ Tests: two legs fed one broadcast with different join offsets, delivery
 skew, and complementary group loss send byte-identical RTP packets for every
 datagram both send, and a reference ST 2022-7 selection over the two
 reproduces every datagram either sent. A datagram neither leg can fill is
-absent from both, never stuffing in one. Sequence numbers and timestamps
-wrap identically, a replacement changes the SSRC, and an epochless route is
-refused. Claims of ST 2022-7 compatibility cite the standard and an
+absent from both, never stuffing in one, and a datagram holding a slot one
+leg substituted is absent from that leg. Sequence numbers and timestamps
+wrap identically, a replacement or another path changes the SSRC, and an
+epochless route is refused. Claims of ST 2022-7 compatibility cite the standard and an
 RTP-level test, not TS identity.
 
 Public API: an RTP output for TS export, in the shape settled above.

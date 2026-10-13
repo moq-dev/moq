@@ -26,12 +26,13 @@ supply them, so the epoch fixes them once and nothing re-derives them.
 
 - The epoch's first importer places the clock at its first frame, as today.
   A later importer reads the epoch's live catalog before it announces and
-  adopts its root clock before publishing a frame, through
-  `catalog::Timebase::place` or the adoption path that
-  [catalog clock adoption](/quest/m1/catalog-clock-adopt.md) adds. Its token
-  needs subscribe rights on its own path for that. It reads what its relay
-  has now and never waits on the cluster for completeness; an incumbent it
-  cannot see yet is the co-start case below.
+  adopts its root clock exactly before publishing a frame, through the path
+  that [catalog clock adoption](/quest/m1/catalog-clock-adopt.md) adds.
+  `catalog::Timebase::place` will not do: it takes a `SystemTime`, which
+  `Clock::wall_clock` floors to milliseconds, so the re-advertised clock
+  would differ by up to 999 µs. It reads what its relay has now and never
+  waits on the cluster for completeness; an incumbent it cannot see yet is
+  the co-start case below.
 - The era comes from the incumbent's published timeline, not from the
   clock's wall reading. A flagged forward break advances media time without
   wall time, so after two accepted +10 h breaks the clock reads about 10 h
@@ -41,15 +42,21 @@ supply them, so the epoch fixes them once and nothing re-derives them.
   whole number of periods (2^33 at 90 kHz for TS) that lands its first value
   nearest the incumbent's latest published timestamp. One offset taken from
   the first frame would misplace a stream whose first value sits across a
-  wrap from it. Delivery skew between the two inputs is far below half a
-  period, so it changes nothing. Add the periods in source ticks before
+  wrap from it. Delivery skew alone is far below half a period, so it
+  changes nothing. Add the periods in source ticks before
   converting to microseconds, since a period is not a whole microsecond
   count.
+- The latest timestamp is still wrong when flagged breaks totalling half a
+  period fall within the delivery skew between the two observations: a
+  joiner one second behind, while the incumbent takes two +10 h breaks,
+  lands a wrap ahead. Settle whether the joiner confirms its era on an
+  overlapping observation before announcing (the incumbent's object at its
+  own first group's time, which would also catch a different stream), or
+  the docs state that bound.
 - Same stream is the operator's precondition, unchecked like the rest of the
   same-epoch contract. A nearest whole period always exists, so the era
-  choice cannot detect a different stream. Not planned: comparing the
-  joiner's first group with the incumbent's before announcing; propose it if
-  misconfigured pairs show up.
+  choice cannot detect a different stream. No check is planned for identity
+  alone; the overlapping observation above would catch one if chosen.
 - Every catalog field an importer derives from its history rather than the
   content at hand is the epoch's too. The joiner adopts the live value as of
   its first group, and later changes depend only on content on the epoch
@@ -70,6 +77,12 @@ supply them, so the epoch fixes them once and nothing re-derives them.
   anchor without the co-start race above. The successor epoch is proposed to
   derive from the old epoch and the last frame's catalog time; the same
   inputs and the first source timestamp after the step can fix its anchor.
+- Nothing outlives the live route, so a total outage loses the anchor: the
+  next importer under the same explicit epoch is a first importer, and its
+  era and clock can differ from the old run's. Persisting the anchor is out
+  of scope, so an explicit epoch names one continuous run, and a supervisor
+  restarting after every importer stopped mints a successor epoch, as for a
+  rewind. Settle how that is surfaced with the successor-epoch item above.
 - The mapping drifts from UTC at the source's clock error for the epoch's
   life, as one importer's does today. Nothing re-measures it.
 
@@ -78,14 +91,21 @@ Tests, on mocked time where possible: for each importer that takes
 identical catalogs and timestamps; the same with the second started after a
 33-bit wrap the first crossed, at a wrap with its streams' first values on
 opposite sides of it, after flagged forward breaks that together exceed half
-a period, and with different delivery skew into each; a cold co-start leaves
+a period, with observations straddling such breaks (per the rule settled
+above), and with different delivery skew into each; a cold co-start leaves
 one publisher.
 
-Public API: none new. `--epoch` on an importer reads the live broadcast
-before announcing. Wire: none.
+Public API: no new items, but `--epoch` on an importer now reads the live
+broadcast before announcing, so its token needs subscribe rights on its own
+path. A publish-only token that works with `--epoch` today fails there: a
+breaking auth requirement, documented with `--epoch` in `doc/bin/cli.md` and
+`doc/bin/relay/auth.md`. Wire: none.
+
+## Required
+
+- [The catalog root clock is the producer clock](/quest/m1/catalog-clock-adopt.md) - the exact adoption path a joining importer uses
 
 ## Related
 
-- [The catalog root clock is the producer clock](/quest/m1/catalog-clock-adopt.md) - the adoption path a joining importer can use
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - group sequences and the end-to-end pair on this coordinate
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - same-epoch routes resume each other's subscriptions
