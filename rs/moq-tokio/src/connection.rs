@@ -2280,6 +2280,46 @@ mod tests {
 		);
 	}
 
+	/// A request token on a moq-lite session fails the connection at once, even with unlimited
+	/// reconnects: the server negotiates moq-lite again, so a retry cannot carry the token.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn a_request_token_on_moq_lite_fails_at_once() {
+		let mut cfg = crate::listen::Config::default();
+		cfg.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		cfg.version = vec!["moq-lite-06".parse().unwrap()];
+		let mut listener = cfg
+			.init(Default::default())
+			.expect("server")
+			.listen()
+			.await
+			.expect("listen");
+		let addr = listener.tcp_local_addr().expect("tcp listener bound");
+		tokio::spawn(async move {
+			let mut sessions = Vec::new();
+			while let Some(request) = listener.accept().await {
+				if let Ok(session) = request.ok().await {
+					sessions.push(session);
+				}
+			}
+		});
+
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let mut config = crate::connect::Config::default();
+		config.tls.insecure = Some(true);
+		config.backoff.timeout = Some(Duration::ZERO);
+		let client = config
+			.with_request_token(tok(b"token"))
+			.init(Default::default())
+			.expect("client");
+		let connection = client.connect(url(&format!("tcp://{addr}/")));
+		let err = tokio::time::timeout(Duration::from_secs(10), connection.closed())
+			.await
+			.expect("kept retrying a session that cannot carry the token")
+			.expect_err("connected without carrying the token");
+		assert!(matches!(err, Error::MoqNet(moq_net::Error::Unsupported)), "{err}");
+	}
+
 	/// A draft-16 server for the first-request tests: it accepts one session, reports on
 	/// `paused` once the client's SETUP has arrived (the client's handshake then waits on this
 	/// side's reply), holds its SERVER_SETUP until `release` fires, and sends the first

@@ -762,7 +762,8 @@ impl Config {
 	/// PUBLISH_NAMESPACE requests. Experimental: the peer's application must verify it.
 	///
 	/// It seeds the connection's request token, which [`crate::Auth::set_request_token`]
-	/// replaces across reconnects.
+	/// replaces across reconnects. A session that negotiates moq-lite cannot carry it, so
+	/// the connection ends with [`moq_net::Error::Unsupported`] instead of retrying.
 	pub fn with_request_token(mut self, token: moq_net::setup::Token) -> Self {
 		self.request_token = Some(RequestToken(token));
 		self

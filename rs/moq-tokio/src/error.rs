@@ -91,10 +91,6 @@ pub enum Error {
 	#[error("qlog capture requires the 'qlog' feature")]
 	QlogUnsupported,
 
-	/// A request token is configured, but the session negotiated moq-lite, which cannot carry one.
-	#[error("a request token needs moq-transport, but the session negotiated moq-lite")]
-	RequestTokenUnsupported,
-
 	/// The config was parsed from released spellings that no longer work. The
 	/// payload is the migration to print.
 	#[error("{0}")]
@@ -248,8 +244,11 @@ impl Error {
 			| Self::IdleTimeoutRange
 			| Self::WindowRange(_)
 			| Self::QlogUnsupported
-			| Self::RequestTokenUnsupported
 			| Self::Connect(_) => true,
+			// Something this dial needs the negotiated session cannot do, such as carry a
+			// configured request token on moq-lite. The same peer negotiates the same way
+			// again, so retrying cannot help.
+			Self::MoqNet(moq_net::Error::Unsupported) => true,
 			#[cfg(feature = "noq")]
 			Self::Noq(err) => err.is_terminal(),
 			#[cfg(feature = "websocket")]
@@ -396,10 +395,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 mod tests {
 	use super::*;
 
-	/// The same server negotiates moq-lite again, so a token it cannot carry fails the dial for good.
+	/// The same peer negotiates the same way again, so a dial it cannot support fails for good.
 	#[test]
-	fn a_request_token_on_moq_lite_is_terminal() {
-		assert!(Error::RequestTokenUnsupported.is_terminal());
+	fn an_unsupported_dial_is_terminal() {
+		assert!(Error::MoqNet(moq_net::Error::Unsupported).is_terminal());
 	}
 
 	#[test]
