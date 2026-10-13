@@ -28,6 +28,11 @@ use bytes::Bytes;
 use loom::{future::block_on, thread};
 use moq_net::{Error, Hop, Timestamp, broadcast, cache, origin};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 /// Preemptions per execution unless `LOOM_MAX_PREEMPTIONS` overrides it. Loom's own
 /// guidance is that 2 or 3 catches most bugs, and each extra level multiplies the
 /// search several times over. Unbounded, `back_to_back_groups_arrive_in_order` no
@@ -49,7 +54,7 @@ fn frame_reaches_a_parked_subscriber() {
 	model(|| {
 		let broadcast = broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let track = broadcast.create_track("video", None).expect("create track");
+		let track = broadcast.create_track("video", timed()).expect("create track");
 		let track_consumer = consumer.track("video").expect("track");
 
 		let publisher = thread::spawn(move || {
@@ -75,6 +80,9 @@ fn frame_reaches_a_parked_subscriber() {
 /// Two groups written back to back must both reach the subscriber in order. This is
 /// the path where the producer takes the waiter list for group 1 and wakes outside
 /// the lock while group 2 is already being written.
+///
+/// The subscription starts at group 0: an unfloored subscriber on an untimed track
+/// starts at the latest group, so one opened after both writes would only see the second.
 #[test]
 fn back_to_back_groups_arrive_in_order() {
 	model(|| {
@@ -91,7 +99,8 @@ fn back_to_back_groups_arrive_in_order() {
 			track.finish().expect("finish track");
 		});
 
-		let mut subscriber = block_on(track_consumer.subscribe(None)).expect("subscribe");
+		let from_start = moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(0));
+		let mut subscriber = block_on(track_consumer.subscribe(from_start)).expect("subscribe");
 		let first = block_on(subscriber.recv_group()).expect("recv").expect("first group");
 		let second = block_on(subscriber.recv_group()).expect("recv").expect("second group");
 		assert!(second.sequence > first.sequence, "groups arrived out of order");
@@ -340,7 +349,7 @@ fn concurrent_tracks_drain_a_shared_pool() {
 		let handles: Vec<_> = ["video", "audio"]
 			.into_iter()
 			.map(|name| {
-				let track = broadcast.create_track(name, None).expect("create track");
+				let track = broadcast.create_track(name, timed()).expect("create track");
 				thread::spawn(move || {
 					let mut group = track.append_group().expect("append group");
 					group

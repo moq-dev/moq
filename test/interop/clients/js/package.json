@@ -13,8 +13,8 @@
 		"@moq/watch": "workspace:*"
 	},
 	"devDependencies": {
-		"esbuild": "^0.28.2",
 		"playwright": "^1.63.0",
+		"rolldown": "^1.2.12",
 		"vite": "^8.3.2"
 	}
 }

@@ -28,6 +28,11 @@ use std::time::Duration;
 
 use moq_tokio::moq_net;
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 const FRAMES: usize = 10;
 /// Frames are padded so the final group (4 MB of it) cannot fit in the connection's
@@ -46,7 +51,7 @@ async fn round(drop_session: bool) -> (usize, Option<moq_net::Error>) {
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("127.0.0.1:0".parse().unwrap());

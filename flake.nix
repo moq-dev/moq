@@ -133,6 +133,7 @@
             cargo-edit
             cargo-semver-checks
             cargo-deny
+            cargo-bloat
             # Per-crate feature matrices (`just rs features`), where workspace
             # unification would otherwise hide a broken single-crate build.
             cargo-hack
@@ -155,6 +156,8 @@
             # PulseAudio rather than the `pipewire` PCM below. Loaded at runtime
             # only, via `alsaPlugins`.
             pkgs.alsa-plugins
+            # A private clocked null device for native playback tests.
+            (pkgs.lib.getBin pkgs.pulseaudio)
             # moq-video's `pipewire` screen-capture feature: the pipewire crate
             # links libpipewire-0.3 via pkg-config and generates bindings at build
             # time (bindgenHook above provides libclang). Linux-only; macOS uses
@@ -560,7 +563,9 @@
             ++ cppDeps
             ++ dartDeps
             ++ devTools
-            ++ [ quest-cli ];
+            ++ [ quest-cli ]
+            # perf records relay worker off-CPU stacks for `just bench-lock`.
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.perf ];
 
           # jemalloc's configure uses -O0 test builds, which conflict with
           # Nix's _FORTIFY_SOURCE hardening (requires -O).

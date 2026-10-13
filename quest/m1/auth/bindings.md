@@ -10,6 +10,10 @@ one without the plugin reconnecting.
 
 ## Plan
 
+This quest exposes session AUTH only. Per-request setters and verifier APIs
+remain deferred until a consumer needs them (confirmed 2026-10-12); do not
+export the experimental Rust request hook through the bindings here.
+
 - `MoqSession` in `rs/moq-ffi/src/session.rs` gains `auth()` returning an
   `Arc<MoqAuth>` object, the shape `publisher()` uses, with `grant() ->
   Option<MoqGrant>` (a record: publish patterns, subscribe patterns, expiry
@@ -18,8 +22,7 @@ one without the plugin reconnecting.
   Arc<MoqAuthToken>` whose object carries that token's own `grant()` and
   `closed()` and whose release withdraws it, raising the structured error
   moq-ffi already maps on refusal. `MoqClient` sessions reached through the
-  reconnecting connection use the accessor
-  [Relay tokens](/quest/m1/auth/relay-refresh.md) adds.
+  reconnecting connection use `moq_tokio::Connection::auth()`.
 - No new libmoq API: the hand-written C ABI gets no more feature work. The
   generated C and C++ bindings get this from moq-ffi, and OBS reaches it
   through the generated C++; update `cpp/obs/src`
@@ -44,5 +47,3 @@ surface comes from moq-ffi rather than new `moq_session_auth_*` calls.
 ## Required
 
 - [FFI shape](/quest/m1/ffi-shape/README.md) - reshapes the moq-ffi session and wrappers this edits, so the wrappers break once
-- [Relay tokens](/quest/m1/auth/relay-refresh.md) - supplies the connection
-  accessor and a relay that answers a real token, which the wrapper tests need

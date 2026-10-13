@@ -14,19 +14,16 @@ The line landed on `main` in #4519 (2026-10-09) with its json/flate, net,
 media, and request-accept children, and the remaining children PR straight to
 `main`. Decided by the maintainer, 2026-10-09:
 
-- Land now rather than keep collecting on the line branch, because questline
-  branches are retiring ([Flat questlines](/quest/m1/quest-flat-lines.md)) and
-  each `main` merge meant hand-porting moq-ffi changes onto moved code.
+- Children PR directly to `main`, so moving a binding layer does not require
+  hand-porting concurrent moq-ffi changes onto a separate line branch.
 - The bindings still break once per release, not once per merge: binding
   releases (moq-ffi and the Python, Go, Swift, Kotlin, Dart, and C++
-  packages) wait until [Codecs](/quest/m1/ffi-shape/codec.md),
-  [Bindings](/quest/m0/broadcast-epoch/bindings.md)' `epoch()` rename, and
-  [named error fields](/quest/m1/ffi-shape/error-fields.md) all merge
-  (confirmed as hard release gates in the 2026-10-10 audit). Codecs ranks
-  first below for that reason. Dart is published (`moq` 0.1.0, `moq_ffi` 0.4.x), so
+  packages) wait until [Codecs](/quest/m1/ffi-shape/codec.md) merges
+  (confirmed as a hard release gate in the 2026-10-10 audit), joining the
+  named error fields and the broadcast-epoch renames (`connects()`,
+  `reanchor()`) already on `main`. Codecs ranks first below for that reason.
+  Dart is published (`moq` 0.1.0, `moq_ffi` 0.4.x), so
   its renames get the same upgrade notes as the others.
-- Bindings no longer lands first (reversing the 2026-10-05 audit): it adopts
-  the reshaped wrappers on `main` instead of this line rebasing onto it.
 - The C++ package (#4079) landed first, so #4519 ported `cpp/moq` (including
   the hand-kept `moq::` aliases `just cpp check` audits), `cpp/obs`, and the
   C++ interop client. C++ stays a flat `moq::` namespace with `Media*` type
@@ -61,7 +58,9 @@ Settled shape:
   hand-written moq-c is out of scope: the
   [generated C](/quest/m1/c/README.md) and C++
   bindings inherit this shape from moq-ffi, so reshaping the hand-written C
-  ABI would break C users twice.
+  ABI would break C users twice. The narrow
+  [claim-epoch correctness exception](/quest/m1/claim-answer-epochs.md) does
+  not expand this layer reshaping to the hand-written ABI.
 - `rs/moq-ffi/AGENTS.md` records the per-language namespace pattern `json`
   set.
 
@@ -73,6 +72,4 @@ runs `just test interop --all`.
 ## Required
 
 - [Codecs](/quest/m1/ffi-shape/codec.md) - audio and video producers, codec-only encoders, and decoders move under their own namespaces, named as in Rust; binding releases wait for it
-- [Named error fields](/quest/m1/ffi-shape/error-fields.md) - `MoqError` variants name their fields, so no binding exposes a positional `v1`
-- [Bindings](/quest/m0/broadcast-epoch/bindings.md) - the wrappers expose epochs and rename `session.epoch()`, on the reshaped wrappers
 - [Layers guide](/quest/m1/ffi-shape/layers-guide.md) - a `doc/lib` page maps each Rust layer to every binding's module, once Codecs adds `audio` and `video`

@@ -65,6 +65,8 @@ MoQError::Code FailureCode(const moq::Error &error)
 	if (std::holds_alternative<moq::Error::kConnect>(variant))
 		return MoQError::Code::Connect;
 	if (const auto *protocol = std::get_if<moq::Error::kProtocol>(&variant)) {
+		if (protocol->details.kind == moq::ProtocolKind::kTooManyRequests)
+			return MoQError::Code::TooManyRequests;
 		if (protocol->details.kind == moq::ProtocolKind::kUnauthorized)
 			return MoQError::Code::Unauthorized;
 	}
@@ -239,7 +241,7 @@ void MoQOutput::OnConnect(const std::shared_ptr<Attempt> &current, moq::expected
 
 	auto elapsed = std::chrono::steady_clock::now() - current->started;
 	auto ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
-	const int connect_epoch = static_cast<int>((*result)->epoch());
+	const int connects = static_cast<int>((*result)->connects());
 
 	current->session = *result;
 	current->connected = true;
@@ -256,7 +258,7 @@ void MoQOutput::OnConnect(const std::shared_ptr<Attempt> &current, moq::expected
 	// Clamp sub-millisecond connects to 1 so that sentinel stays honest.
 	connect_time_ms = ms > 0 ? ms : 1;
 
-	LOG_INFO("MoQ session connected (%d ms, epoch %d): %s", ms, connect_epoch, MoQRedactUrl(current->url).c_str());
+	LOG_INFO("MoQ session connected (%d ms, connect %d): %s", ms, connects, MoQRedactUrl(current->url).c_str());
 
 	WatchStatus(current);
 }
@@ -282,7 +284,7 @@ void MoQOutput::OnStatus(const std::shared_ptr<Attempt> &current, moq::expected<
 
 	switch (*result) {
 	case moq::ConnectionStatus::kConnected: {
-		const int connect_epoch = static_cast<int>(current->session->epoch());
+		const int connects = static_cast<int>(current->session->connects());
 		current->live = true;
 		{
 			std::lock_guard<std::mutex> lock(mutex);
@@ -290,7 +292,7 @@ void MoQOutput::OnStatus(const std::shared_ptr<Attempt> &current, moq::expected<
 			last_failure_code = MoQError::None;
 			last_failure_reason.clear();
 		}
-		LOG_INFO("MoQ session reconnected (epoch %d): %s", connect_epoch, MoQRedactUrl(current->url).c_str());
+		LOG_INFO("MoQ session reconnected (connect %d): %s", connects, MoQRedactUrl(current->url).c_str());
 		break;
 	}
 	case moq::ConnectionStatus::kDisconnected: {
@@ -472,8 +474,8 @@ int MoQOutput::GetReconnectCount()
 	}
 	// Read live rather than tracked from status(), which coalesces a drop that
 	// reconnects before it is asked again.
-	const uint64_t connect_epoch = current ? current->epoch() : 0;
-	return connect_epoch > 1 ? static_cast<int>(connect_epoch - 1) : 0;
+	const uint64_t connects = current ? current->connects() : 0;
+	return connects > 1 ? static_cast<int>(connects - 1) : 0;
 }
 
 bool MoQOutput::IsLiveSession()

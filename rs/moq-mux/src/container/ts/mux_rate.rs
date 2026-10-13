@@ -16,6 +16,9 @@ const PACKET_BITS: u64 = 188 * 8;
 pub(super) const PCR_WRAP: u64 = (1 << 33) * 300;
 /// How much PCR time one window spans before it is judged.
 const WINDOW: u64 = 2 * PCR_HZ;
+/// Media time after which a source that has not completed a window publishes without a rate:
+/// twice the window, so a usable PCR clock always completes one first.
+pub(super) const UNMEASURED: std::time::Duration = std::time::Duration::from_secs(2 * WINDOW / PCR_HZ);
 /// Intervals are pooled into samples this long before they are compared. One
 /// packet of rounding, or a clock a hardware muxer stamps at half-millisecond
 /// granularity, is a few percent of one 25 ms interval but well inside the
@@ -73,12 +76,19 @@ pub(super) struct Meter {
 	window: Vec<Interval>,
 	/// The rate recorded in the catalog, if any.
 	published: Option<u64>,
+	/// Whether a window has completed since the last discontinuity, even for VBR.
+	ready: bool,
 }
 
 impl Meter {
 	/// The rate recorded in the catalog.
 	pub fn published(&self) -> Option<u64> {
 		self.published
+	}
+
+	/// Whether a PCR measurement window has completed on the current clock.
+	pub fn ready(&self) -> bool {
+		self.ready
 	}
 
 	/// One transport packet went by.
@@ -101,7 +111,7 @@ impl Meter {
 			return self.discontinuity();
 		}
 		self.sample.add(Interval { packets, ticks });
-		if self.sample.ticks < SAMPLE {
+		if self.sample.ticks < SAMPLE && self.sample.ticks + self.window.iter().map(|s| s.ticks).sum::<u64>() < WINDOW {
 			return false;
 		}
 		self.window.push(std::mem::take(&mut self.sample));
@@ -115,6 +125,7 @@ impl Meter {
 	/// itself changed. The window is worthless and so is a rate measured before it.
 	/// Returns whether [`published`](Self::published) changed.
 	pub fn discontinuity(&mut self) -> bool {
+		self.ready = false;
 		self.packets = 0;
 		self.last = None;
 		self.sample = Interval::default();
@@ -124,6 +135,7 @@ impl Meter {
 
 	/// Judge the full window and discard it.
 	fn judge(&mut self) -> bool {
+		self.ready = true;
 		let window = std::mem::take(&mut self.window);
 		let mut whole = Interval::default();
 		window.iter().for_each(|s| whole.add(*s));

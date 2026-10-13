@@ -349,6 +349,11 @@ bench-playback:
 bench-rtmp *args:
     cargo bench --locked -p moq-rtmp --bench chunk_interleaving -- "$@"
 
+# Refresh one credential across unrelated sessions and held token counts.
+[positional-arguments]
+bench-relay-auth *args:
+    cargo bench --locked -p moq-relay --bench auth -- "$@"
+
 # One relay's stats tick, plus the decode table. `--test` runs each tick once; decode ignores it and prints its whole table.
 [positional-arguments]
 bench-stats *args:
@@ -357,3 +362,8 @@ bench-stats *args:
 # Sweep latency observations against writer count and report density.
 bench-latency:
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-bench --run-ignored only -E 'test(benchmark_observation_contention)' --success-output immediate
+
+# Sweep container export tracks and queued frames independently.
+[positional-arguments]
+bench-export *args:
+    cargo bench --locked -p moq-mux --bench export -- "$@"

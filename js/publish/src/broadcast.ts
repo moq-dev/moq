@@ -18,8 +18,8 @@ export type BroadcastInput = {
 
 	// Whether to announce the broadcast. Defaults to true. Until it is announced nobody can
 	// see or subscribe to it. The flip rather than a gate on creating it: tracks can be
-	// populated while this is false, then announced once ready. The catalog is served only while
-	// announced, so its first snapshot is the one current at announce time.
+	// populated while this is false, then announced once ready. The catalog is served from the
+	// first announce, so its first snapshot is the one current at announce time.
 	announce: Getter<boolean>;
 
 	// The broadcast name.
@@ -39,7 +39,8 @@ export type BroadcastInput = {
 	 * full playlist window.
 	 *
 	 * A retention budget, not a delivery one, so lowering it does not reduce latency: it only
-	 * shortens how far back a fetch can reach.
+	 * shortens how far back a fetch can reach. A track's retention is fixed when it is created,
+	 * so changing this publishes a new network broadcast.
 	 */
 	maxAge: Getter<Moq.Time.Milli | undefined>;
 };
@@ -65,8 +66,8 @@ export class Broadcast {
 	// root sections (e.g. `scte35`) by locking it too.
 	readonly catalog = new CatalogProducer();
 
-	// The underlying network broadcast, recreated when the name or enabled state changes and
-	// `undefined` in between. It lives in the origin rather than any session, so it spans
+	// The underlying network broadcast, recreated when the name, enabled state, or maxAge changes,
+	// or when a closed rendition track must be replaced, and `undefined` in between. It lives in the origin rather than any session, so it spans
 	// reconnects. Exposed so an application can serve its own tracks alongside the built-in
 	// catalog/audio/video, e.g. `net.createTrack("meta.json")` plus a matching `catalog` section.
 	// Reacquire it via an effect, since a rename swaps in a fresh producer.
@@ -85,6 +86,12 @@ export class Broadcast {
 	// The writable track producer signals backing each Rendition's read-only `track`, keyed by name.
 	// A static network track is exposed here only while at least one subscriber uses it.
 	readonly #tracks = new Map<string, Signal<Moq.Track.Producer | undefined>>();
+
+	// The kind of each rendition track in the current network broadcast. A new one starts over.
+	#kinds = new Map<string, Kind>();
+
+	// Bumped to publish a new network broadcast, when a closed rendition track must be replaced.
+	readonly #restart = new Signal(0);
 
 	#signals = new Effect();
 
@@ -130,6 +137,11 @@ export class Broadcast {
 		if (this.#renditions.peek()[name]) {
 			throw new Error(`rendition already registered: ${name}`);
 		}
+		// A name keeps its track, so it keeps its kind: different media takes a different name.
+		const previous = this.#kinds.get(name);
+		if (previous !== undefined && previous !== kind) {
+			throw new Error(`rendition ${name} was registered as ${previous}, not ${kind}`);
+		}
 
 		const track = new Signal<Moq.Track.Producer | undefined>(undefined);
 		this.#tracks.set(name, track);
@@ -143,7 +155,7 @@ export class Broadcast {
 	#unregister(name: string): void {
 		const track = this.#tracks.get(name);
 		if (track) {
-			track.peek()?.close();
+			// The network track stays with the broadcast, so registering the name again continues it.
 			track.set(undefined);
 			this.#tracks.delete(name);
 		}
@@ -215,6 +227,8 @@ export class Broadcast {
 		const [_enabled, origin] = values;
 
 		const name = effect.get(this.in.name);
+		const maxAge = effect.get(this.in.maxAge);
+		effect.get(this.#restart);
 		if (Catalog.detectFormat(name) === undefined) {
 			console.warn(
 				`You should append .hang to broadcast name ${JSON.stringify(name)} to make the catalog format explicit.`,
@@ -235,30 +249,46 @@ export class Broadcast {
 			if (this.net.peek() === broadcast) this.net.set(undefined);
 		});
 
+		// Each track lives as long as the broadcast: a track name always means the same content,
+		// so a re-announce or a rendition change keeps writing to it instead of restarting its
+		// group sequence under the same epoch. Rendition tracks by name, so registering a name
+		// again finds its track; the catalog's stay out of reach of a colliding rendition.
+		const tracks = new Map<string, Moq.Track.Producer>();
+		const kinds = new Map<string, Kind>();
+		this.#kinds = kinds;
+		effect.cleanup(() => {
+			for (const track of tracks.values()) track.close();
+			if (this.#kinds === kinds) this.#kinds = new Map();
+		});
+
+		let serving = false;
 		effect.run((inner) => {
 			if (!inner.get(this.in.announce)) {
 				broadcast.unannounce();
 				return;
 			}
 
-			// Serve the catalog only while announced. Nobody can find the broadcast before then, so an
-			// earlier catalog would only leave a stale first snapshot behind; this way the first one is
-			// whatever the catalog holds at announce time.
-			for (const [name, compression] of [
-				[Broadcast.CATALOG_TRACK, false],
-				[Broadcast.CATALOG_TRACK_COMPRESSED, true],
-			] as const) {
-				// A catalog may publish once and stay unchanged for the broadcast's whole life. Keep
-				// that sole closed snapshot replayable so a viewer arriving after the ordinary media
-				// retention window can still bootstrap.
-				const track = broadcast.createTrack(name, {
-					// Each catalog snapshot is stamped when written.
-					timescale: Moq.Time.Timescale.MILLI,
-					maxAge: Moq.Time.Milli(Number.MAX_SAFE_INTEGER),
-					priority: Catalog.PRIORITY.catalog,
-				});
-				inner.cleanup(() => track.close());
-				this.catalog.serve(track, inner, { compression });
+			// Serve the catalog from the first announce. Nobody can find the broadcast before then, so
+			// an earlier catalog would only leave a stale first snapshot behind; this way the first one
+			// is whatever the catalog holds at announce time.
+			if (!serving) {
+				serving = true;
+				for (const [name, compression] of [
+					[Broadcast.CATALOG_TRACK, false],
+					[Broadcast.CATALOG_TRACK_COMPRESSED, true],
+				] as const) {
+					// A catalog may publish once and stay unchanged for the broadcast's whole life. Keep
+					// that sole closed snapshot replayable so a viewer arriving after the ordinary media
+					// retention window can still bootstrap.
+					const track = broadcast.createTrack(name, {
+						// Each catalog snapshot is stamped when written.
+						timescale: Moq.Time.Timescale.MILLI,
+						maxAge: Moq.Time.Milli(Number.MAX_SAFE_INTEGER),
+						priority: Catalog.PRIORITY.catalog,
+					});
+					effect.cleanup(() => track.close());
+					this.catalog.serve(track, effect, { compression });
+				}
 			}
 
 			broadcast.announce({ epoch });
@@ -266,21 +296,31 @@ export class Broadcast {
 
 		// Static tracks fan out to every subscriber. Keep the encoder-facing handle demand-gated
 		// so capture and encoding still stop when the final subscriber leaves.
-		effect.run((tracks) => {
-			const renditions = tracks.get(this.#renditions);
-			const maxAge = tracks.get(this.in.maxAge);
+		effect.run((inner) => {
+			const renditions = inner.get(this.#renditions);
 
 			for (const rendition of Object.values(renditions)) {
 				const signal = this.#tracks.get(rendition.name);
 				if (!signal) continue;
 
-				const track = broadcast.createTrack(
-					rendition.name,
-					Container.trackInfo({ maxAge, priority: Catalog.PRIORITY[rendition.kind] }),
-				);
-				tracks.cleanup(() => track.close());
-				tracks.run((demand) => {
-					demand.set(signal, demand.get(track.demand().used) ? track : undefined);
+				// A track that closed (an encoder error) can't be continued, and a replacement under
+				// the same name would restart its sequences, so the tracks move to a new broadcast.
+				let track = tracks.get(rendition.name);
+				if (track?.closed.peek() !== undefined) {
+					this.#restart.update((restarts) => restarts + 1);
+					return;
+				}
+				if (!track) {
+					track = broadcast.createTrack(
+						rendition.name,
+						Container.trackInfo({ maxAge, priority: Catalog.PRIORITY[rendition.kind] }),
+					);
+					tracks.set(rendition.name, track);
+					kinds.set(rendition.name, rendition.kind);
+				}
+				const served = track;
+				inner.run((demand) => {
+					demand.set(signal, demand.get(served.demand().used) ? served : undefined);
 				});
 			}
 		});

@@ -4378,6 +4378,7 @@ dependencies = [
  "bytes",
  "hang",
  "humantime",
+ "libc",
  "moq-archive",
  "moq-audio",
  "moq-auth",
@@ -4855,6 +4856,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+ "tracing-test",
 ]
 
 [[package]]

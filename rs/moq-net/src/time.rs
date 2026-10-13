@@ -182,13 +182,6 @@ impl Deadline {
 		}
 	}
 
-	/// A deadline armed for `at`.
-	pub(crate) fn at(clock: &Clock, at: Instant) -> Self {
-		let mut deadline = Self::new(clock);
-		deadline.set(Some(at));
-		deadline
-	}
-
 	/// A deadline armed for `duration` past the clock's [`now`](Clock::now).
 	///
 	/// A duration the clock cannot represent (e.g. [`std::time::Duration::MAX`])
@@ -271,7 +264,8 @@ mod tests {
 		let now = Instant::now();
 		let clock = Clock::new(now);
 		let at = now + Duration::from_secs(3);
-		let mut deadline = Deadline::at(&clock, at);
+		let mut deadline = Deadline::new(&clock);
+		deadline.set(Some(at));
 		assert_eq!(clock.timeout(), Some(at));
 		assert!(deadline.poll(&kio::Waiter::noop()).is_pending());
 		clock.advance(at);

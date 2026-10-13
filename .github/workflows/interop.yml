@@ -18,6 +18,7 @@ on:
       - "test/lib/**"
       - "test/interop/**"
       - "test/max-age/**"
+      - "test/portrait/**"
       - "rs/moq-tokio/tests/max_age.rs"
       # The TS/IRD compliance harness runs in the same job (see below).
       - "test/ts/**"
@@ -125,6 +126,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
+      - name: Portrait transcode
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: nix develop --command just test portrait
+        shell: bash -leo pipefail {0}
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
       - name: Interop negative control
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test interop-negative
@@ -140,6 +148,11 @@ jobs:
         shell: bash -leo pipefail {0}
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
+      - name: TS pair controls
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: nix develop --command just test ts-pair-controls
+        shell: bash -leo pipefail {0}
 
       # Round-trips a PCR-paced TS through a relay and checks the subscriber's
       # `export ts` output with TSDuck (tsp/tsanalyze from the nix devShell).

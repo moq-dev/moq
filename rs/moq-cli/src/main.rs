@@ -497,7 +497,7 @@ async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()
 	let client = net.client(moq.client.clone())?;
 	let Attached { origin, .. } = spawn_moq(&moq, &net, client, cluster, directions, &mut tasks).await?;
 
-	play::run(origin.consume(), name, args, tasks)
+	play::run(origin.consume(), name, args, tasks).await
 }
 
 /// Run every stage over one Origin and one MoQ attachment.
@@ -662,6 +662,8 @@ fn spawn_import(
 			let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
 			Publish::new(broadcast, &format, config)?
 		};
+		// Media stays servable at EOF until it goes stale, the same max-age relays retain it for.
+		let publish = publish.linger(max_age.unwrap_or(hang::container::MAX_AGE));
 		publish.announce(epoch)?;
 		local = Some(publish);
 	} else {
@@ -745,6 +747,7 @@ fn spawn_export(
 			stitch: stdout.stitch,
 			fragment_duration: stdout.fragment_duration,
 			mux_rate: stdout.mux_rate,
+			passthrough: stdout.passthrough,
 			catalog: export.catalog_format,
 			select: export.select,
 		};

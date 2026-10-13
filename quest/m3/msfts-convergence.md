@@ -15,12 +15,23 @@ Decided in the 2026-09-30 audit: moved from m4 and the msfts#33 gate removed.
 msfts#33 closed on 2026-09-28, answered by msfts#36 (merged 2026-09-24), and
 egress moved to msfts#37 (closed). Two differences remain:
 
-- **Program tables.** MSFTS carries them in tracks; here they live in the
-  Hang catalog's `mpegts` section. Decide whether to publish a mapping from
-  the catalog section to MSFTS's table tracks, or change either side.
+- **Program tables.** PAT/PMT information lives in the Hang catalog's
+  `mpegts` section; supported SI already uses tracks. Map these mechanisms
+  separately to MSFTS's table tracks instead of saying all tables live in
+  the catalog.
 - **ES units.** MSFTS es-units carry the whole PES packet; here they carry the
   payload plus `stream_id`. Decide whether the PES header fields we drop
   matter to a subscriber, and converge or document the mapping.
+
+Decided in the 2026-10-11 audit: keep the semantic lane and raw fallback
+distinct. Whole SPTS maps to `unmodified-program`, whole MPTS to
+`unmodified-multiplex`. MSFTS `per-program` extraction and `es-packets`
+(which omit null packets) are not byte-identical whole-input carriage.
+The fallback will not split PIDs or add source-position reconstruction
+metadata. Use [the current draft](https://datatracker.ietf.org/doc/html/draft-gregoire-moq-msfts)
+to document both semantic and scheduling differences; shared terminology
+does not establish wire interoperability. Coordinate PES decisions with
+[private PES timing and headers](/quest/m1/plan-ts-pes-untimed.md).
 
 Update `drafts/draft-lcurley-moq-mpegts.md` and `doc/concept` with whatever
 lands. [#4577](https://github.com/moq-dev/moq/pull/4577) (per-ES access

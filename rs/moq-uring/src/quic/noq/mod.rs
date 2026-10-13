@@ -180,14 +180,35 @@ pub(crate) fn client_config(config: &client::Config) -> Result<moq_noq_proto::Cl
 
 /// Serve as `config` says.
 pub(crate) fn server_config(config: &server::Config) -> Result<moq_noq_proto::ServerConfig, Error> {
-	config.check()?;
+	let crypto = QuicServerConfig::try_from(config.tls.clone()).map_err(|err| Error::Tls(err.to_string()))?;
+	let mut server = moq_noq_proto::ServerConfig::with_crypto(Arc::new(crypto));
+	let transport = transport_config(&config.transport)?;
+	#[cfg(feature = "qlog")]
+	let transport = with_qlog(transport, &config.transport);
+	server.transport_config(Arc::new(transport));
+	Ok(server)
+}
+
+/// A TLS 1.3 policy presenting `identity`, speaking `alpn`, and checking clients as `auth` says.
+pub(crate) fn identity_server_config(
+	identity: &Identity,
+	alpn: Vec<Vec<u8>>,
+	auth: &server::ClientAuth,
+) -> Result<Arc<rustls::ServerConfig>, Error> {
 	let provider = provider();
 	let builder = rustls::ServerConfig::builder_with_provider(provider.clone())
 		.with_protocol_versions(&[&rustls::version::TLS13])
 		.map_err(|err| Error::Tls(err.to_string()))?;
 
-	let verifier = match config.client_auth.roots() {
+	let verifier = match auth.roots() {
 		None => rustls::server::WebPkiClientVerifier::no_client_auth(),
+		// An empty store rejects every chain, so asking for a certificate with
+		// nothing to check it against refuses exactly the clients that obey.
+		Some(([], _)) => {
+			return Err(Error::Tls(
+				"client authentication needs at least one root certificate".to_string(),
+			));
+		}
 		Some((roots, required)) => {
 			// Client certificates chain to the roots configured here, never to
 			// the platform store for public sites.
@@ -201,20 +222,13 @@ pub(crate) fn server_config(config: &server::Config) -> Result<moq_noq_proto::Se
 		}
 	};
 
-	let (chain, key) = keypair(&config.identity)?;
+	let (chain, key) = keypair(identity)?;
 	let mut tls = builder
 		.with_client_cert_verifier(verifier)
 		.with_single_cert(chain, key)
 		.map_err(|err| Error::Tls(err.to_string()))?;
-	tls.alpn_protocols = alpn(&config.alpn);
-
-	let crypto = QuicServerConfig::try_from(tls).map_err(|err| Error::Tls(err.to_string()))?;
-	let mut server = moq_noq_proto::ServerConfig::with_crypto(Arc::new(crypto));
-	let transport = transport_config(&config.transport)?;
-	#[cfg(feature = "qlog")]
-	let transport = with_qlog(transport, &config.transport);
-	server.transport_config(Arc::new(transport));
-	Ok(server)
+	tls.alpn_protocols = alpn;
+	Ok(Arc::new(tls))
 }
 
 /// Attach the configured qlog sink, if any.

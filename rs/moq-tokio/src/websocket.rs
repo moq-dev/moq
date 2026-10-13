@@ -35,6 +35,10 @@ pub enum Error {
 	#[error("missing hostname")]
 	MissingHostname,
 
+	/// The TLS server name could not be used.
+	#[error(transparent)]
+	Tls(#[from] crate::tls::Error),
+
 	/// The URL scheme can't carry WebSocket. Only `http`, `https`, `ws`, and `wss` work.
 	#[error("unsupported URL scheme for WebSocket: {0}")]
 	UnsupportedScheme(String),
@@ -305,20 +309,6 @@ pub(crate) async fn connect(
 		return Err(Error::Disabled);
 	}
 
-	let key = won_key(&url)?;
-	let (host, port) = key.clone();
-
-	// Apply a small penalty to WebSocket to improve odds for QUIC to connect first,
-	// unless we've already had to fall back to WebSockets for this server.
-	// TODO if let chain
-	match resolved.delay {
-		delay if !delay.is_zero() && !WEBSOCKET_WON.lock().unwrap().contains(&key) => {
-			tokio::time::sleep(delay).await;
-			tracing::debug!(peer = %crate::connect::Endpoint(&url), delay_ms = %delay.as_millis(), "QUIC not yet connected, attempting WebSocket fallback");
-		}
-		_ => {}
-	}
-
 	// Convert URL scheme: http:// -> ws://, https:// -> wss://
 	// Custom protocols (moqt://, moql://) use raw QUIC and don't support WebSocket.
 	let needs_tls = match url.scheme() {
@@ -334,6 +324,29 @@ pub(crate) async fn connect(
 		"wss" => true,
 		_ => return Err(Error::UnsupportedScheme(url.scheme().to_string())),
 	};
+
+	let key = won_key(&url)?;
+	let (host, port) = key.clone();
+
+	// A secure dial presents this name on every attempt; the override was checked when the client was built.
+	if needs_tls && tls_host_name.is_none() {
+		match url.host() {
+			// URL brackets delimit IPv6 literals, but aren't part of the TLS server name.
+			Some(url::Host::Ipv6(ip)) => crate::tls::server_name(&ip.to_string())?,
+			_ => crate::tls::server_name(&host)?,
+		}
+	}
+
+	// Apply a small penalty to WebSocket to improve odds for QUIC to connect first,
+	// unless we've already had to fall back to WebSockets for this server.
+	// TODO if let chain
+	match resolved.delay {
+		delay if !delay.is_zero() && !WEBSOCKET_WON.lock().unwrap().contains(&key) => {
+			tokio::time::sleep(delay).await;
+			tracing::debug!(peer = %crate::connect::Endpoint(&url), delay_ms = %delay.as_millis(), "QUIC not yet connected, attempting WebSocket fallback");
+		}
+		_ => {}
+	}
 
 	tracing::debug!(peer = %crate::connect::Endpoint(&url), "connecting via WebSocket");
 
@@ -410,7 +423,7 @@ async fn connect_tls_override(
 		Ok(ip) => tls_url.set_ip_host(ip),
 		Err(_) => tls_url.set_host(Some(tls_host_name)).map_err(|_| ()),
 	}
-	.map_err(|_| Error::connect(qmux::Error::InvalidServerName))?;
+	.map_err(|_| Error::BuildRequest(format!("invalid TLS host name: {tls_host_name}")))?;
 	let mut request = tls_url
 		.as_str()
 		.into_client_request()
@@ -465,6 +478,25 @@ impl Error {
 				status: Some(status), ..
 			} => crate::ConnectError::from_status_u16(*status),
 			_ => None,
+		}
+	}
+
+	/// A fixed local error or settled rejection that another dial cannot repair.
+	pub(crate) fn is_terminal(&self) -> bool {
+		match self {
+			Self::Disabled
+			| Self::MissingHostname
+			| Self::UnsupportedScheme(_)
+			| Self::BuildRequest(_)
+			| Self::ProtocolHeader(_)
+			| Self::ConnectRejected(_) => true,
+			Self::Tls(err) => err.is_terminal(),
+			Self::Failover(failures) => {
+				!failures.is_empty() && failures.iter().all(|failure| failure.error.is_terminal())
+			}
+			_ => self
+				.status()
+				.is_some_and(|status| !crate::error::status_retryable(status)),
 		}
 	}
 

@@ -741,7 +741,7 @@ impl Publish {
 	/// boundary and only releases the handle.
 	pub fn track_finish(&mut self, track: Id) -> Result<(), Error> {
 		let track = self.tracks.remove(track).ok_or(Error::TrackNotFound)?;
-		if track.final_sequence().is_none() {
+		if track.end().is_none() {
 			track.finish()?;
 		}
 		Ok(())
@@ -750,7 +750,7 @@ impl Publish {
 	/// Declare a raw track's exclusive final group sequence.
 	pub fn track_finish_at(&mut self, track: Id, final_sequence: u64) -> Result<(), Error> {
 		let track = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		track.finish_at(final_sequence)?;
+		track.finish_at(moq_net::track::Position::group(final_sequence))?;
 		Ok(())
 	}
 
@@ -770,7 +770,10 @@ impl Publish {
 		publish: impl FnOnce(&moq_mux::catalog::Producer<Extra>, moq_net::track::Producer) -> moq_mux::Result<T>,
 	) -> Result<T, Error> {
 		let broadcast = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
-		let track = broadcast.producer.create_track(name, None)?;
+		let track = broadcast.producer.create_track(
+			name,
+			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+		)?;
 		Ok(publish(&broadcast.catalog, track)?)
 	}
 

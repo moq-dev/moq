@@ -75,7 +75,7 @@ const url = new URL("https://relay.example/room");
 // Short enough to watch, long enough that a handover visibly overlaps the replacement.
 const handover = Time.Milli(200);
 
-test("an empty GOAWAY migrates, ending the request on the old session's broadcast", async () => {
+test("an empty GOAWAY migrates the announced request to the replacement session", async () => {
 	const { dials, origin } = fleet();
 	const broadcast = origin.createBroadcast(Path.from("cam"));
 	broadcast.announce();
@@ -107,16 +107,13 @@ test("an empty GOAWAY migrates, ending the request on the old session's broadcas
 		expect(drained.closed).toBe(false);
 		expect(reload.status.peek()).toBe("connected");
 
-		// Without an epoch the new session's route is another publisher instance: the request
-		// stays on the old session's broadcast until that closes at the handover cap, then ends
-		// rather than moving, and a fresh request resolves the new session.
-		expect(watched.active.peek()).toBe(served);
+		// Without an epoch the replacement route is a new publisher instance.
+		// The announced request follows it while the old session finishes draining.
+		await waitUntil(() => watched.active.peek() !== undefined && watched.active.peek() !== served);
+		expect(watched.closed.peek()).toBeUndefined();
 		await waitUntil(() => drained.closed, handover * 10);
-		await waitUntil(() => watched.closed.peek() !== undefined);
-		expect(watched.active.peek()).toBeUndefined();
-		const fresh = consume.request(Path.from("cam"), { announced: true });
-		await waitUntil(() => fresh.active.peek() !== undefined);
-		fresh.close();
+		expect(watched.active.peek()).toBeDefined();
+		expect(watched.closed.peek()).toBeUndefined();
 		expect(dials.length).toBe(2);
 	} finally {
 		watched.close();

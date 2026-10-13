@@ -15,6 +15,11 @@ use moq_net::{
 use support::harness::{now, spawn};
 use support::mock::{MockSession, create_mock_session_pair};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 /// Maximum time any single test may run before being treated as a deadlock.
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -59,6 +64,7 @@ cases!(
 	an_issued_grant_ends_with_its_session,
 	a_reset_auth_stream_reports_unsupported,
 	a_revoked_grant_cancels_its_subscriptions,
+	a_grant_update_too_large_for_one_message_is_unsupported,
 	nothing_outside_the_grant_reaches_the_peer,
 );
 
@@ -562,6 +568,9 @@ async fn a_refused_token_reports_the_code(version: &'static str) {
 					true => {
 						std::mem::forget(request.accept(Grant::default()));
 					}
+					false if request.token() == b"opaque".as_slice() => {
+						request.reject(SessionError::Unsupported, "unknown token format")
+					}
 					false => request.reject(SessionError::Unauthorized, "bad signature"),
 				}
 			}
@@ -569,6 +578,8 @@ async fn a_refused_token_reports_the_code(version: &'static str) {
 
 		let err = pair.client.auth().add("forged").await.err().expect("refused");
 		assert!(matches!(err, Error::Session(SessionError::Unauthorized)), "{err:?}");
+		let err = pair.client.auth().add("opaque").await.err().expect("refused");
+		assert!(matches!(err, Error::Unsupported), "{err:?}");
 	})
 	.await
 	.expect("timed out");
@@ -740,12 +751,12 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 		// The server publishes room/x to the client; the client publishes up/y to the server.
 		let server_origin = produce_origin(1);
 		let down = server_origin.create_broadcast("room/x").unwrap();
-		let down_track = down.create_track("video", None).unwrap();
+		let down_track = down.create_track("video", timed()).unwrap();
 		down.announce(Default::default()).unwrap();
 
 		let client_origin = produce_origin(2);
 		let up = client_origin.create_broadcast("up/y").unwrap();
-		let up_track = up.create_track("video", None).unwrap();
+		let up_track = up.create_track("video", timed()).unwrap();
 		up.announce(Default::default()).unwrap();
 
 		let received = produce_origin(3);
@@ -933,6 +944,41 @@ async fn a_grant_too_large_for_one_message_is_unsupported(version: &'static str)
 		assert!(matches!(err, Error::Unsupported), "{err:?}");
 		// No AUTH_OK for it reached the wire: the union is still just the setup grant.
 		assert_eq!(pair.client.auth().grant().peek(), Some(grant(&["a"], &[])));
+		assert_eq!(pair.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
+async fn a_grant_update_too_large_for_one_message_is_unsupported(version: &'static str) {
+	within(async {
+		let mut pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(produce_origin(2)),
+			server_subscribe: Some(produce_origin(1)),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+		let mut issued = serve(pair.requests.take().unwrap(), |token| {
+			Some(grant(if token.is_empty() { &["a"] } else { &["b"] }, &[]))
+		});
+		let (_, _setup) = issued.next().await.unwrap();
+		let token = pair.client.auth().add("update").await.unwrap();
+		let (_, updated) = issued.next().await.unwrap();
+		assert_eq!(granted(&pair.client).await, grant(&["a", "b"], &[]));
+		let huge: Patterns = (0..20)
+			.map(|i| Pattern::subtree(&format!("{i}{}", "x".repeat(4000))).unwrap())
+			.collect();
+		updated.update(Grant {
+			publish: huge,
+			subscribe: Patterns::new(),
+			expires: None,
+		});
+		let err = token.closed().await;
+		assert!(matches!(err, Error::Unsupported), "{err:?}");
+		assert_eq!(token.grant().peek(), None);
+		wait_for(pair.client.auth().grant(), |g| g == &Some(grant(&["a"], &[]))).await;
 		assert_eq!(pair.client_transport.close_reason(), None);
 	})
 	.await
@@ -1142,10 +1188,10 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 
 		let relay = produce_origin(1);
 		let audio = relay.create_broadcast("room/alice/audio").unwrap();
-		let audio_track = audio.create_track("opus", None).unwrap();
+		let audio_track = audio.create_track("opus", timed()).unwrap();
 		audio.announce(Default::default()).unwrap();
 		let video = relay.create_broadcast("room/alice/video").unwrap();
-		let video_track = video.create_track("h264", None).unwrap();
+		let video_track = video.create_track("h264", timed()).unwrap();
 		video.announce(Default::default()).unwrap();
 
 		let received = produce_origin(3);
@@ -1215,10 +1261,10 @@ async fn a_narrowing_aborts_what_the_peer_published(version: &'static str) {
 
 		let client_origin = produce_origin(2);
 		let mic = client_origin.create_broadcast("room/bob/mic").unwrap();
-		let mic_track = mic.create_track("opus", None).unwrap();
+		let mic_track = mic.create_track("opus", timed()).unwrap();
 		mic.announce(Default::default()).unwrap();
 		let cam = client_origin.create_broadcast("room/bob/cam").unwrap();
-		let cam_track = cam.create_track("h264", None).unwrap();
+		let cam_track = cam.create_track("h264", timed()).unwrap();
 		cam.announce(Default::default()).unwrap();
 
 		let relay = produce_origin(1);
@@ -1268,7 +1314,7 @@ async fn a_narrowing_resets_a_fetch_in_flight(version: &'static str) {
 
 		let relay = produce_origin(1);
 		let broadcast = relay.create_broadcast("room/x").unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", timed()).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		// The group stays open, so the fetch is still in flight when the grant narrows.
 		let mut group = track.append_group().unwrap();
@@ -1328,7 +1374,7 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 
 		let relay = produce_origin(1);
 		let audio = relay.create_broadcast("room/alice/audio").unwrap();
-		let audio_track = audio.create_track("opus", None).unwrap();
+		let audio_track = audio.create_track("opus", timed()).unwrap();
 		audio.announce(Default::default()).unwrap();
 
 		let received = produce_origin(3);
@@ -1385,7 +1431,7 @@ async fn a_widening_brings_back_what_the_peer_published(version: &'static str) {
 
 		let client_origin = produce_origin(2);
 		let mic = client_origin.create_broadcast("room/bob/mic").unwrap();
-		let mic_track = mic.create_track("opus", None).unwrap();
+		let mic_track = mic.create_track("opus", timed()).unwrap();
 		mic.announce(Default::default()).unwrap();
 
 		let relay = produce_origin(1);

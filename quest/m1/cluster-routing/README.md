@@ -69,7 +69,8 @@ vector the 2026-09-30 cache-tiers audit kept:
 - **Multi-CDN by link preference.** A node may rank its links (moq.pro
   primary, Cloudflare secondary) ahead of the metric, so metrics from
   different operators are never compared; a CDN that speaks no ROUTE is just
-  a link. See [Multi-CDN endpoints](/quest/m1/cluster-routing/multi-cdn.md).
+  a link. Landed as `origin::Producer::with_preference` and
+  `Producer.withPreference`; see [multiple CDNs](/doc/concept/moq-lite.md#multiple-cdns).
 - **Metric on the wire, cost policy local.** One additive metric on ROUTE,
   where each hop adds its link cost plus one so it strictly increases; the
   origin's per-prefix cost rides ANNOUNCE untouched (`transcode/**` at 10 and
@@ -79,7 +80,7 @@ vector the 2026-09-30 cache-tiers audit kept:
 - **Topology now, wire later.** moq.pro's edge and core migration runs on
   today's lite-06 path vector with upstream links; the route layer lands in
   lite-07 (the current wip version) afterwards with no re-layout, once
-  [the simulator](/quest/m1/cluster-routing/sim.md) has compared it. Decided
+  the simulator has compared it. Decided
   2026-10-05: this line gates
   [Finalize moq-lite-07](/quest/m1/lite07-finalize.md), and lite-07 loses
   its hop list and `Hop Base`/`Hop Keep` compression.
@@ -133,8 +134,7 @@ Once every child has landed:
 
 ## Required
 
-- [Multi-CDN endpoints](/quest/m1/cluster-routing/multi-cdn.md) - an endpoint holds sessions to several CDNs, uses its preferred one, and fails over to the next
-- [Simulate the split](/quest/m1/cluster-routing/sim.md) - moq.pro's simulator compares the route layer with path vector before the wire is written
+- [Next-hop handoff](/quest/m1/cluster-routing/handoff.md) - an END stays final and a replacement next hop's announces current across the handoff, with deterministic tests
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - ROUTE per origin node and path-less ANNOUNCE on one stream, loop-free by Babel feasibility
 
 ## Related

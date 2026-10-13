@@ -9,7 +9,7 @@ instead of ending at the end with groups missing (`doc/lib/js/net.md`).
 ## Plan
 
 Mirror the Rust pending-tail hold from #4225 (`rs/moq-net/src/model/track.rs`)
-and test it against the Rust behavior with mocked time. Split from [JS session parity](/quest/m1/js-session-parity.md) on
+and test it against the Rust behavior with mocked time. Split from [JS session parity](https://github.com/moq-dev/moq/pull/5214) on
 2026-10-08 so the caps work stays ready.
 
 Mirror the arrival record from [Tail arrivals](/quest/m1/tail-arrivals.md)
@@ -24,4 +24,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [JS session parity](/quest/m1/js-session-parity.md) - per-session caps, the other half
+- [JS session parity](https://github.com/moq-dev/moq/pull/5214) - per-session caps, the other half

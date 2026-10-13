@@ -89,6 +89,9 @@ After an AUTH_ERROR the acceptor closes its side of the stream.
 The presenter withdraws a token by closing or resetting its side of the stream, and the acceptor then closes its own.
 An acceptor that closes its side without an AUTH_ERROR ends the grant without a reason.
 
+A receiver MUST close the session with PROTOCOL_VIOLATION if an AUTH message fails to decode, has trailing body bytes, or has an unexpected type for its direction.
+A presenter sends exactly one AUTH on its request stream; any additional message is a PROTOCOL_VIOLATION.
+
 ## Scope {#scope}
 
 An endpoint's scope is the union of the grants of its open Auth requests.
@@ -132,7 +135,8 @@ AUTH Message {
 ~~~
 
 **Request ID**:
-The request's identifier, allocated like that of any other request ({{moqt}}).
+The request's identifier, allocated from the same space as every other request ({{moqt}}).
+A duplicate or wrong-parity Request ID closes the session with INVALID_REQUEST_ID, including an ID from an AUTH that has ended.
 
 **Token**:
 The credential to verify, opaque to this extension.
@@ -162,6 +166,7 @@ A namespace prefix the presenter may subscribe to and discover.
 
 **Expires**:
 The number of milliseconds until the grant lapses, or 0 for never.
+Expires MUST NOT exceed 2^53 - 1 milliseconds; a larger value is a PROTOCOL_VIOLATION.
 The acceptor revokes a lapsed grant with AUTH_ERROR, and the presenter uses Expires to present a replacement token in time.
 
 ## AUTH_ERROR {#auth-error}
@@ -179,6 +184,7 @@ AUTH_ERROR Message {
 ~~~
 
 **Error Code**:
+A code MUST fit in 32 bits; a larger value is a PROTOCOL_VIOLATION.
 A code from the REQUEST_ERROR registry ({{moqt}}): UNAUTHORIZED, MALFORMED_AUTH_TOKEN, EXPIRED_AUTH_TOKEN, or NOT_SUPPORTED ({{prefixes}}).
 
 **Reason Phrase**:

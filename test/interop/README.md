@@ -23,7 +23,7 @@ The normal run also checks a finite raw track through the relay. Its publisher
 announces end 4 before writing four 256 KiB groups; the reader verifies every byte,
 exactly groups 0 through 3, and a clean end at 4. Rust-to-Rust always runs. Selecting
 native JS adds both Rust-to-JS and JS-to-Rust under that runtime, so `--all` covers
-Node and Bun. `--tail` runs just these five lanes. The wire-compat lanes, which swap in released relays and clients, skip them.
+Node and Bun. The current CLI also FETCHes group 0, verifies every byte, and closes under the relay idle-out check. `--tail` runs this FETCH round and the five finite-tail lanes. The wire-compat lanes, which swap in released relays and clients, skip them.
 
 The finite clients keep their session alive until the harness acknowledges the
 reader's complete clean end over stdin, so a lane tests delivery rather than
@@ -141,7 +141,7 @@ just test interop --all
 # Pick your own axes:
 just test interop --publishers rust,python --subscribers rust,c,js-native-bun
 
-# Finite track tails only: Rust-to-Rust and Rust/Node/Bun in both directions.
+# CLI FETCH close and finite track tails only: Rust-to-Rust and Rust/Node/Bun in both directions.
 just test interop --tail
 
 # Subscription termination: Rust/JS response bytes over in-memory transports.
@@ -336,6 +336,10 @@ hands moq-net's QUIC and leading-ones encodings of each varint size boundary
 `varint.ts`. That script decodes them into js/net's `U64`, checks its
 `number` conversion, and returns js/net's own encodings, which Rust requires to
 match byte for byte and decode back to the same value.
+
+`lite_auth_unsupported_interop` sends an AUTH\_OK followed by AUTH\_ERROR
+NOT\_SUPPORTED across Rust and JS in both directions, checking that the later
+refusal retains its meaning and both bindings emit the same bytes.
 
 `lite_varint_interop` runs next to it and does the same through moq-lite's
 version dispatch: `lite-varint.ts` decodes Rust's lite-06 (QUIC) and lite-07
