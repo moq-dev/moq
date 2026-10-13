@@ -27,7 +27,14 @@ the driver, so its panic can be reported; wrapping the helper that aborts the
 process (`moq_tokio::origin::spawn`) is not enough. Also add the regression #5447 left out:
 a moq-tokio accept loop that panics ends its listener.
 
-Public API: none expected, beyond the panic error reaching more callbacks.
+Folded in from #5447's review (maintainer, 2026-10-13): when the driver of a
+session a server accepted panics, moq-c sees an ordinary close error, not
+`MOQ_ERROR_PANIC`. Have `Request::ok` (`rs/moq-tokio/src/server.rs`) hand
+the driver back to the caller, so the binding observes its `JoinHandle` and
+reports `moq_tokio::Error::Panic` like the client's reconnect loop does.
+
+Public API: `Request::ok`'s return changes in moq-tokio; otherwise the
+panic error reaching more callbacks.
 That is a host-visible change even without a new error variant, so walk the
 `rs/moq-ffi` row of the Cross-Package Sync table: every wrapper and
 `doc/lib` page surfaces the panic error. Wire: none.

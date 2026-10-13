@@ -18,7 +18,14 @@ per-connection or long-lived, observe its `JoinHandle` with
 `moq_tokio::panic`, and add a regression that injects a panic into one task
 of each class.
 
-Public API: none expected. Wire: none.
+Folded in from #5447's review (maintainer, 2026-10-13): `Server::serve_*`
+still returns `Ok(())` when a transport's accept loop dies, because
+`Listener::accept` only yields requests. Surface the dead transport's error
+through `Listener::accept`, so a server built on it fails loud the way the
+relay and the CLI already do.
+
+Public API: `Listener::accept`'s signature in moq-tokio (and
+`Server::serve_*`'s result). Wire: none.
 
 ## Related
 
