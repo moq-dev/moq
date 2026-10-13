@@ -4215,7 +4215,8 @@ impl Subscriber {
 	/// Once means once per sequence: a group the publisher aborts and re-creates, or that
 	/// a second route delivers too, is not handed out again. Once a group is past the
 	/// budget below, the subscriber stops expecting every group before it, so a gap that
-	/// old is never filled.
+	/// old is never filled. That assumes group timestamps on a track never rewind; which
+	/// late groups are handed out after a rewind is unspecified.
 	///
 	/// Groups are semi-reliable, and the [`Subscription::max_delay`] budget is the other
 	/// thing (alongside eviction and a moving start) that decides which of them arrive:

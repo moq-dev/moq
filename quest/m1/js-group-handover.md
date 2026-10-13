@@ -37,7 +37,9 @@ by direct and resumed reads, with no fixed-size history. Once a group is past
 the reader's budget (max delay, clamped by max age), the reader stops expecting
 every group below it and counts them as delivered, so only gaps within the
 budget cost memory. A genuinely unseen late group within the budget is still
-delivered.
+delivered. Group timestamps on a track never rewind; which late groups are
+delivered after a rewind is unspecified, so the floor is judged by the
+delivered group above a gap rather than the gap itself.
 Things to settle along the way:
 
 - Whether the request's `active` broadcast stays the same object across a swap,
