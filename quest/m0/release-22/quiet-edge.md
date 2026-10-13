@@ -25,7 +25,7 @@ returns early on a finished held group, so takeover loses it the same way.
 
 Decided 2026-10-13 (maintainer):
 
-- Backport to `release` only; `main` gets [a regression test](/quest/m1/quiet-edge-test.md).
+- Backport to `release` only; `main` already has quiet rejoin and takeover regression tests.
 - Keep the `WarmCopy` alive and unfinished until the new copy delivers a
   group newer than its edge, so the one existing rule (a live track's
   latest is protected) covers it. Give `retire` the same treatment for a
