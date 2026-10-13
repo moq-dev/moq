@@ -37,6 +37,7 @@ and bench readiness. Refusal reasons folded the same day into
 - [MP4 export](/quest/m2/mp4-export.md) - `moq export mp4 --output` records crash-safe fragments, then finishes a regular MP4 with moov at the end
 - [fMP4 edit lists](/quest/m2/fmp4-edit-lists.md) - the fMP4 importer applies edit lists to frame timestamps
 - [Shared timebase in the bindings](/quest/m2/ffi-timebase.md) - binding apps publish several containers from one source on one shared offset
+- [One UniFFI crate per binding layer](/quest/m2/ffi-crate-split.md) - a generator spike, then per-layer UniFFI crates in one library so generated names drop the `Moq` and layer prefixes; reopens the one-crate decision
 - [Linux decoded frames](/quest/m2/obs-decode-linux.md) - present supported native decoded surfaces with visible CPU fallback
 - [Windows decoded frames](/quest/m2/obs-decode-windows.md) - present decoded D3D11 surfaces in OBS without CPU readback
 - [macOS GPU input](/quest/m2/obs-macos.md) - feed the encoder from the OBS compositor without CPU readback
