@@ -87,7 +87,6 @@ have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
 - [Panic isolation](/quest/m0/panic-isolation.md) - unwind, ignore lock poison, and supervise every task, so a panic closes only its connection or exits on a long-lived task
 - [Wire compat on main](/quest/m0/wire-compat-green.md) - the nightly released-wire step runs again: planned breaks re-measured against the new releases, and a released-API client for the released JS lanes
 - [Release builds link](/quest/m0/release-link.md) - the Linux zigbuild release binaries and moq-gst packages link again after the 2026-10-11 nixpkgs bump, so the next release cut can publish
-- [Fuzz builds under LTO](/quest/m0/fuzz-lto.md) - the nightly fuzz targets build again despite the release profile's fat LTO
 - [Audio quality budgets](/quest/m0/audio-quality-budgets.md) - the nightly Audio quality job grades against ceilings measured on its own runner, so a breach means a regression again
 - [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on moq-dev/web-transport#412 and #413 to merge and ship, which qmux credit bumps to
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines

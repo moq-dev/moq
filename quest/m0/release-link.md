@@ -41,7 +41,3 @@ zigbuild, so nothing caught it before the nightly. Consider a cheap PR-time
 check when `flake.lock` changes, if the fix shows one is worth it.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Fuzz targets build under LTO](/quest/m0/fuzz-lto.md) - the other build break in the same nightly, from a different cause
