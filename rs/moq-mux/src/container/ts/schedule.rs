@@ -668,16 +668,20 @@ impl Schedule {
 			caps: HashMap::new(),
 			positions: Some(Vec::new()),
 		};
+		// The transport buffer the clock packet rides and how long it holds it, which every
+		// slot's clock packet may add to a busy stretch without the chance to wait.
+		let mut clock = None;
 		if let Some(pid) = self.clock
 			&& let Some(buffer) = self.buffers.get(&pid)
 		{
-			let duration = (TsPacket::SIZE as u128 * 8 * 1_000_000_000).div_ceil(u128::from(buffer.rate));
+			let duration = (TsPacket::SIZE as u128 * 8 * 1_000_000_000).div_ceil(u128::from(buffer.rate)) as i128;
 			let tb = self.transport_buffer(pid);
 			let (free, since) = self.transport.entry(tb).or_insert((time(0), time(0)));
 			if *free + TICK <= time(0) {
 				*since = time(0);
 			}
-			*free = ((*free).max(time(0)) + duration as i128).max(time(1));
+			*free = ((*free).max(time(0)) + duration).max(time(1));
+			clock = Some((tb, duration));
 		}
 		// One head per PID preserves decode order without walking all future units at every
 		// transport position. Removal events keep occupancy work proportional to units.
@@ -756,8 +760,11 @@ impl Schedule {
 				// multiplex rate decides when the packet's last byte gets there.
 				let done = drained.max(time(position + 1));
 				// A transport buffer must empty at least once a second (2.4.2.3), so a PID kept
-				// busy that long waits for it to.
-				if done - since > TB_EMPTY.as_nanos() as i128 {
+				// busy that long waits for it to, leaving room for a clock packet that cannot.
+				let reserve = clock
+					.filter(|&(clock, _)| clock == tb)
+					.map_or(0, |(_, duration)| duration);
+				if done - since + reserve > TB_EMPTY.as_nanos() as i128 {
 					waiting.push(Reverse((last + TICK, lane)));
 					continue;
 				}
@@ -1098,41 +1105,48 @@ mod tests {
 	}
 
 	/// A PID with more than a second's backlog at its Rx still lets its transport buffer
-	/// empty once a second, as the receiver sees it.
+	/// empty once a second, as the receiver sees it, including when the slots' mandatory
+	/// clock packets ride the same PID.
 	#[test]
 	fn a_busy_transport_buffer_empties_every_second() {
 		let rate = 10_000_000;
-		let slow = Buffer {
-			rate: 1_000_000,
-			size: Some(1_000_000),
-			transport: 512,
-		};
-		let mut schedule = Schedule::new(Duration::from_secs(4));
-		schedule.set_rate(Some(rate));
-		schedule.set_clock(7);
-		schedule.set_buffer(7, VIDEO);
-		schedule.set_buffer(9, slow);
-		// Three seconds of packets at the PID's Rx.
-		schedule.push(9, timing(5_000), unit(9, 2_000), false).unwrap();
-		let wire = 1504.0 / rate as f64;
-		let drain = 1504.0 / slow.rate as f64;
-		let (mut leave, mut since, mut longest, mut sent) = (f64::MIN, 0.0, 0.0f64, 0);
-		while let Some(slot) = schedule.next(None).unwrap() {
-			for (position, packet) in slot.layout(&unit(7, 1), 100, &[0xff; 188]).chunks(188).enumerate() {
-				if pid(packet) != 9 {
-					continue;
+		for (rx, count, clock) in [(1_000_000, 2_000, 7), (150_000, 150, 9)] {
+			let slow = Buffer {
+				rate: rx,
+				size: Some(1_000_000),
+				transport: 512,
+			};
+			let mut schedule = Schedule::new(Duration::from_secs(4));
+			schedule.set_rate(Some(rate));
+			schedule.set_clock(clock);
+			schedule.set_buffer(7, VIDEO);
+			schedule.set_buffer(9, slow);
+			// More than a second of packets at the PID's Rx.
+			schedule.push(9, timing(5_000), unit(9, count), false).unwrap();
+			let wire = 1504.0 / rate as f64;
+			let drain = 1504.0 / rx as f64;
+			let (mut leave, mut since, mut longest, mut sent) = (f64::MIN, 0.0, 0.0f64, 0);
+			while let Some(slot) = schedule.next(None).unwrap() {
+				let laid = slot.layout(&unit(clock as u8, 1), 100, &[0xff; 188]);
+				for (position, packet) in laid.chunks(188).enumerate() {
+					if pid(packet) != 9 {
+						continue;
+					}
+					let start = slot.pcr as f64 / SYSTEM_CLOCK as f64 + position as f64 * wire;
+					if leave <= start {
+						since = start;
+					}
+					leave = (start + wire).max(leave.max(start) + drain);
+					longest = longest.max(leave - since);
+					sent += 1;
 				}
-				let start = slot.pcr as f64 / SYSTEM_CLOCK as f64 + position as f64 * wire;
-				if leave <= start {
-					since = start;
-				}
-				leave = (start + wire).max(leave.max(start) + drain);
-				longest = longest.max(leave - since);
-				sent += 1;
 			}
+			assert!(sent >= count, "{rx}: sent {sent}");
+			assert!(
+				longest <= 1.0,
+				"{rx}: the transport buffer stayed busy for {longest:.4} s"
+			);
 		}
-		assert_eq!(sent, 2_000);
-		assert!(longest <= 1.0, "the transport buffer stayed busy for {longest:.3} s");
 	}
 
 	/// A unit goes out a window ahead of its due slot, as soon as it is released.
