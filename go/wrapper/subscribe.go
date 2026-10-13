@@ -50,8 +50,8 @@ func (b *BroadcastConsumer) FetchGroup(
 // reference: ffi.MoqVideo.Broadcast / ffi.MoqAudio.Broadcast. A nil or empty reference names this
 // broadcast, anything else names a sibling relative to it (e.g. "./source"). Call it on a
 // rendition that carries one before media.NewTrackConsumer, SubscribeTrack, FetchGroup, or
-// media.FetchGroup, which take a track name rather than a rendition; DecodeAudio and
-// DecodeVideo resolve it themselves.
+// media.FetchGroup, which take a track name rather than a rendition: the
+// rendition's Track, or its catalog key when nil. DecodeAudio and DecodeVideo resolve both themselves.
 //
 // Errors if this broadcast came from a local producer rather than an origin, since a
 // standalone broadcast has no sibling to name.

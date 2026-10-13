@@ -57,6 +57,5 @@ and measured release timing as separate checks.
 
 ## Related
 
-- [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - trims after non-continuous transitions
+- [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - trims after a gap
 - [Gradual recovery](/quest/m2/intra-refresh/README.md) - recovery counts and per-group warmup
-- [Rust continuity](/quest/m1/rust-continuous.md) - consumers observe delivery breaks

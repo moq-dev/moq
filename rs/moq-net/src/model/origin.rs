@@ -2278,14 +2278,15 @@ impl Driver {
 	/// broadcast, or [`Dynamic`]) has dropped and the remaining lifecycle work
 	/// has drained.
 	pub fn poll(&mut self, now: Instant, waiter: &kio::Waiter) -> Result<Option<Instant>, Error> {
-		self.timers.advance(now);
-		self.timers.register_driver(waiter);
-		let result = self.state.poll(waiter);
-		let gc = self.pool.gc(now);
-		if result.is_ready() {
-			return Err(Error::Closed);
-		}
-		Ok(self.timers.timeout().into_iter().chain(gc).min())
+		waiter.batch(|| {
+			self.timers.advance(now);
+			let result = self.state.poll(waiter);
+			let gc = self.pool.gc(now);
+			if result.is_ready() {
+				return Err(Error::Closed);
+			}
+			Ok(self.timers.park(waiter).into_iter().chain(gc).min())
+		})
 	}
 }
 

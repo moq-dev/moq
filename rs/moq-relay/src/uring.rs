@@ -70,6 +70,9 @@ struct Serve {
 	versions: moq_net::Versions,
 	/// The address every worker socket shares, reported as a session's `local`.
 	local: SocketAddr,
+	/// `listen.timeout`, which each worker's endpoint starts at a connection's
+	/// first packet.
+	timeout: Option<std::time::Duration>,
 }
 
 /// A bound group of io_uring QUIC workers sharing one port.
@@ -94,6 +97,7 @@ pub struct Workers {
 	pin: bool,
 	alpns: Arc<Vec<String>>,
 	versions: moq_net::Versions,
+	timeout: Option<std::time::Duration>,
 
 	threads: Vec<(u16, std::thread::JoinHandle<()>)>,
 	stops: Vec<Arc<Stop>>,
@@ -249,6 +253,7 @@ impl Workers {
 			pin: config.pin,
 			alpns: Arc::new(alpns),
 			versions,
+			timeout: listen.resolved_timeout(),
 			threads: Vec::new(),
 			stops: Vec::new(),
 			failures,
@@ -300,6 +305,7 @@ impl Workers {
 			alpns: self.alpns.clone(),
 			versions: self.versions.clone(),
 			local: self.addr,
+			timeout: self.timeout,
 		};
 
 		let cores = match self.pin {
@@ -537,6 +543,7 @@ fn serve_worker(spawn: Spawn) -> bool {
 			.context("failed to adopt the worker socket")?;
 		let mut endpoint_config = moq_uring::quic::endpoint::Config::default().with_server(server);
 		endpoint_config.activity = serve.shutdown.activity.clone();
+		endpoint_config.handshake.timeout = serve.timeout;
 		let endpoint =
 			moq_uring::quic::Endpoint::new(socket, endpoint_config).context("failed to build the QUIC endpoint")?;
 		Ok((worker, endpoint))
@@ -583,6 +590,45 @@ fn serve_worker(spawn: Spawn) -> bool {
 	true
 }
 
+/// What remains of a connection's handshake deadline, and how to tell the peer
+/// it passed.
+struct Deadline {
+	timer: moq_uring::Timer,
+	/// Closes with the timeout code once a session exists to carry it. Until
+	/// then a timed-out handshake is just dropped, and its guard closes in the
+	/// handshake's own error space, as HTTP/3 has no MoQ codes.
+	close: Option<moq_uring::quic::web::Session>,
+}
+
+impl Deadline {
+	fn new(handle: &moq_uring::Handle, conn: &moq_uring::quic::Connection) -> Self {
+		let mut timer = handle.timer();
+		timer.set(conn.handshake().deadline);
+		Self { timer, close: None }
+	}
+
+	async fn bound<T, E: Into<anyhow::Error>>(
+		&mut self,
+		handshake: impl Future<Output = Result<T, E>>,
+	) -> anyhow::Result<T> {
+		use web_transport_trait::poll::Session as _;
+		let timer = std::pin::pin!(self.timer.wait());
+		let handshake = std::pin::pin!(handshake);
+		match futures::future::select(timer, handshake).await {
+			futures::future::Either::Left(_) => {
+				// Close before dropping the pending handshake, whose cancellation guard
+				// would otherwise replace the timeout with an abandoned-handshake error.
+				let err = moq_net::Error::Timeout;
+				if let Some(close) = &mut self.close {
+					close.close(moq_net::SessionError::Timeout.to_code(), &err.to_string());
+				}
+				Err(err.into())
+			}
+			futures::future::Either::Right((result, _)) => result.map_err(Into::into),
+		}
+	}
+}
+
 /// Serve one accepted connection on its worker: handshake and session start
 /// here; authentication and supervision on the shared runtime.
 async fn serve_connection(
@@ -592,6 +638,10 @@ async fn serve_connection(
 	serve: Serve,
 ) -> anyhow::Result<()> {
 	use web_transport_trait::poll::Session as _;
+
+	// The endpoint started this deadline at the connection's first packet and
+	// enforced it through the QUIC handshake; it covers SETUP OK too.
+	let mut deadline = Deadline::new(&handle, &conn);
 
 	// Read the link facts now: the handshake below consumes the connection.
 	let remote = conn.remote_addr();
@@ -617,7 +667,8 @@ async fn serve_connection(
 	let mut alpn = conn.protocol().map(str::to_owned);
 	let (transport, url) = match conn.protocol() {
 		Some("h3") => {
-			let request = moq_uring::quic::web::Request::accept(conn)
+			let request = deadline
+				.bound(moq_uring::quic::web::Request::accept(conn))
 				.await
 				.context("WebTransport handshake failed")?;
 			let url = request.url().clone();
@@ -631,8 +682,8 @@ async fn serve_connection(
 				response = response.with_protocol(protocol);
 			}
 			alpn = protocol.clone();
-			let session = request
-				.respond(response)
+			let session = deadline
+				.bound(request.respond(response))
 				.await
 				.context("WebTransport response failed")?;
 			(session, Some(url))
@@ -640,9 +691,10 @@ async fn serve_connection(
 		_ => (moq_uring::quic::web::Session::raw(conn), None),
 	};
 
-	let request = moq_net::Server::new()
-		.with_versions(serve.versions.clone())
-		.accept_request_lite(std::time::Instant::now(), moq_uring::transport::Session::new(transport))
+	deadline.close = Some(transport.clone());
+	let server = moq_net::Server::new().with_versions(serve.versions.clone());
+	let request = deadline
+		.bound(server.accept_request_lite(std::time::Instant::now(), moq_uring::transport::Session::new(transport)))
 		.await
 		.context("moq handshake failed")?;
 
@@ -766,7 +818,7 @@ async fn serve_connection(
 		request = request.with_subscriber(publisher);
 	}
 	let lease = lease.preparing(request.auth(), request.role())?;
-	let (session, driver) = request.ok().await?;
+	let (session, driver) = deadline.bound(request.ok()).await?;
 	let driver_handle = handle.clone();
 	handle.spawn(async move {
 		match driver_handle.run(driver).await {

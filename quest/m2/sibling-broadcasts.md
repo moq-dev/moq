@@ -60,4 +60,3 @@ Public API: none. Wire: none.
 
 - [Teleoperation](/quest/m2/teleop/README.md) - the robot line whose multi-camera case motivates this
 - [Shared timebase in the bindings](/quest/m2/ffi-timebase.md) - shares one offset within a binding broadcast; sharing across broadcasts would extend it
-- [Catalog rendition IDs](/quest/m1/catalog-track-id.md) - lists renditions from several broadcasts in one catalog, as alternatives of one source rather than as siblings

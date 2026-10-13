@@ -99,6 +99,10 @@ pub struct MoqVideo {
 	/// (e.g. `./source`). Absent or empty means the catalog's broadcast.
 	#[uniffi(default = None)]
 	pub broadcast: Option<String>,
+	/// The track's name in its broadcast, when it differs from the rendition's key. Absent means
+	/// the key is the track name.
+	#[uniffi(default = None)]
+	pub track: Option<String>,
 	pub codec: String,
 	pub description: Option<Vec<u8>>,
 	pub coded: Option<MoqDimensions>,
@@ -120,6 +124,10 @@ pub struct MoqAudio {
 	/// (e.g. `./source`). Absent or empty means the catalog's broadcast.
 	#[uniffi(default = None)]
 	pub broadcast: Option<String>,
+	/// The track's name in its broadcast, when it differs from the rendition's key. Absent means
+	/// the key is the track name.
+	#[uniffi(default = None)]
+	pub track: Option<String>,
 	pub codec: String,
 	pub description: Option<Vec<u8>>,
 	pub sample_rate: u32,
@@ -378,6 +386,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 				MoqVideo {
 					label: config.label.clone(),
 					broadcast: config.broadcast.as_ref().map(|path| path.as_str().to_string()),
+					track: config.track.clone(),
 					codec: config.codec.to_string(),
 					description: config.description.as_ref().map(|d| d.to_vec()),
 					coded: match (config.coded_width, config.coded_height) {
@@ -407,6 +416,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 				MoqAudio {
 					label: config.label.clone(),
 					broadcast: config.broadcast.as_ref().map(|path| path.as_str().to_string()),
+					track: config.track.clone(),
 					codec: config.codec.to_string(),
 					description: config.description.as_ref().map(|d| d.to_vec()),
 					sample_rate: config.sample_rate,
@@ -1103,7 +1113,14 @@ struct Media {
 
 impl Media {
 	async fn next(&mut self) -> Result<Option<MoqMediaFrame>, MoqError> {
-		self.inner.read().await?.map(media_frame).transpose()
+		loop {
+			match self.inner.read().await? {
+				Some(moq_mux::container::Read::Frame { frame, .. }) => return media_frame(frame).map(Some),
+				// The bindings carry frames only.
+				Some(moq_mux::container::Read::Gap | moq_mux::container::Read::End { .. }) => continue,
+				None => return Ok(None),
+			}
+		}
 	}
 }
 

@@ -68,11 +68,6 @@ and the hang draft specs both. Nothing produces them yet.
   - an old catalog without the sections parses unchanged;
   - a snapshot with an unknown field parses.
 
-## Required
-
-- [Catalog rendition IDs](/quest/m1/catalog-track-id.md) - the rendition
-  ID both snapshots key by
-
 ## Related
 
 - [#4145](https://github.com/moq-dev/moq/pull/4145) - the closed moq-stats
