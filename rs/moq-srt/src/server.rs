@@ -454,6 +454,7 @@ impl Subscribe {
 	/// Wait up to `linger` for the same publisher instance to come back once the broadcast
 	/// ends, carrying on with the same stream. Zero (the default) closes the SRT stream at
 	/// the broadcast's end.
+	/// A stitched replacement must also supply its first catalog within this bound.
 	pub fn with_linger(mut self, linger: Duration) -> Self {
 		self.0.linger = linger;
 		self
@@ -1129,7 +1130,7 @@ mod tests {
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		tokio::spawn(moq_net::time::run(driver));
 		let mut old = Instance::publish(&origin, "old.aac");
-		let (mut receiver, egress) = egress(&origin, Duration::ZERO, true).await;
+		let (mut receiver, egress) = egress(&origin, Duration::from_secs(10), true).await;
 
 		old.write(30, 600_000_000);
 		let first = tokio::time::timeout(Duration::from_secs(10), receiver.next())

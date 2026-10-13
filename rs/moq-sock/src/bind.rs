@@ -105,7 +105,7 @@ impl Udp {
 	}
 }
 
-/// Bind a UDP socket, making an IPv6 socket dual-stack so it also serves IPv4.
+/// Bind a UDP socket, making an IPv6 `[::]` socket dual-stack so it also serves IPv4.
 ///
 /// The socket buffers are grown to 8 MiB where the OS allows it, and a warning
 /// names the sysctl to raise where it doesn't.
@@ -280,7 +280,7 @@ pub fn udp_is_dual_stack(socket: &UdpSocket) -> bool {
 	}
 }
 
-/// Bind a TCP listener, making an IPv6 socket dual-stack so it also serves IPv4.
+/// Bind a TCP listener, making an IPv6 `[::]` socket dual-stack so it also serves IPv4.
 ///
 /// The returned listener is non-blocking, ready to be adopted by an async runtime
 /// (`tokio::net::TcpListener::from_std`, `axum_server::from_tcp`).
@@ -310,14 +310,20 @@ pub fn tcp(addr: SocketAddr) -> io::Result<TcpListener> {
 	Ok(listener)
 }
 
-/// Clear `IPV6_V6ONLY` so an IPv6 socket also accepts IPv4. Best-effort: a
-/// platform that rejects the option keeps its default rather than failing the
-/// bind. No-op for IPv4 sockets.
+/// Clear `IPV6_V6ONLY` so an IPv6 socket bound to `[::]` (or an IPv4-mapped
+/// address) also carries IPv4. Best-effort: a platform that rejects the option
+/// keeps its default rather than failing the bind. No-op for IPv4 sockets.
+///
+/// A specific IPv6 address such as `[::1]` can never carry IPv4, so it is set
+/// v6-only instead, which Linux does on bind anyway. Windows keeps the cleared
+/// flag, so the socket claims an IPv4 side it lacks and then rejects the
+/// IPv4-level options noq sets on a dual-stack socket with `WSAEINVAL`, failing
+/// endpoint setup.
 fn make_dual_stack(socket: &Socket, addr: SocketAddr) {
-	if addr.is_ipv6()
-		&& let Err(err) = socket.set_only_v6(false)
-	{
-		tracing::warn!(%err, "failed to enable dual-stack IPv6 socket; IPv4 clients may be unreachable");
+	let SocketAddr::V6(addr) = addr else { return };
+	let dual = addr.ip().is_unspecified() || addr.ip().to_ipv4_mapped().is_some();
+	if let Err(err) = socket.set_only_v6(!dual) {
+		tracing::warn!(%err, dual, "failed to set IPV6_V6ONLY on the IPv6 socket");
 	}
 }
 
@@ -355,6 +361,19 @@ mod tests {
 		};
 		let socket = Socket::from(socket);
 		assert!(!socket.only_v6().unwrap(), "IPv6 socket should be dual-stack");
+	}
+
+	/// A specific IPv6 address can't carry IPv4, so the socket must not claim to:
+	/// Windows rejects noq's IPv4 socket options on a dual-stack `[::1]` socket.
+	/// Linux forces v6-only on such a bind itself, so only Windows can regress.
+	#[test]
+	fn udp_ipv6_loopback_is_v6_only() {
+		let socket = match udp(Udp::new("[::1]:0".parse().unwrap())) {
+			Ok(socket) => socket,
+			Err(err) if skip_if_no_ipv6(&err) => return,
+			Err(err) => panic!("failed to bind IPv6 UDP socket: {err}"),
+		};
+		assert!(!udp_is_dual_stack(&socket), "[::1] socket should be v6-only");
 	}
 
 	#[test]

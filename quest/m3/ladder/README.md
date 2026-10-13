@@ -35,7 +35,7 @@ estimate by `track::Info::priority`, filling a tier before the next sees a
 bit and splitting max-min fair within one. A controller that assigns
 descending priorities down the ladder gets correct allocation from that
 alone. Send order is a different number today: `Priority::cmp`
-(`rs/moq-net/src/lite/priority.rs`) ranks first by `Priority.track`, which is
+(`rs/moq-net/src/priority.rs`) ranks first by `Priority.track`, which is
 the subscriber's priority from SUBSCRIBE (`msg.priority` in
 `rs/moq-net/src/lite/publisher.rs`), not the publisher's `Info::priority`.
 [Scope track priority](/quest/m1/track-priority-scope.md) owns making the

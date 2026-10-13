@@ -56,6 +56,7 @@ pub struct ExportArgs {
 	/// How long to wait for the same publisher instance to come back once it ends (e.g. `10s`),
 	/// then carry on with the same stream. A replacement ends the stream unless `--stitch`
 	/// is passed.
+	/// Also bounds a stitched replacement through its first catalog; zero requires it already available.
 	#[usage(long, default = "0s")]
 	pub linger: crate::duration::Duration,
 

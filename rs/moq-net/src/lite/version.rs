@@ -178,12 +178,23 @@ impl Version {
 		}
 	}
 
+	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's `Group Order`.
+	/// Added in lite-07; an earlier subscription is served newest first.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn has_order(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether this version's SUBSCRIBE, SUBSCRIBE_UPDATE, SUBSCRIBE_OK, and TRACK_INFO
 	/// carry the retired `Ordered` byte.
 	///
-	/// The field is gone from the model: a publisher transmits newest-first within a
-	/// track, always. Deployed drafts still have the byte in their layout, so it is
-	/// written as 0 and ignored on read rather than shifting every field behind it.
+	/// These drafts are served newest first whatever the byte says, so it is written as 0
+	/// and ignored on read rather than shifting every field behind it. Lite-07's
+	/// `Group Order` (see [`Self::has_order`]) is a new field, not this one.
 	pub(crate) fn has_group_order(self) -> bool {
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 => true,

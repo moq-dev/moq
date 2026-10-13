@@ -976,6 +976,7 @@ impl ExportSink {
 			stitch: false,
 			fragment_duration: None,
 			mux_rate: None,
+			passthrough: false,
 		};
 		let buffered = |format, args: &Buffered| Stdout {
 			format,
@@ -984,6 +985,7 @@ impl ExportSink {
 			stitch: false,
 			fragment_duration: None,
 			mux_rate: None,
+			passthrough: false,
 		};
 		Some(match self {
 			Self::Fmp4(args) => Stdout {
@@ -1001,6 +1003,7 @@ impl ExportSink {
 				stitch: args.stitch,
 				fragment_duration: None,
 				mux_rate: args.mux_rate,
+				passthrough: args.passthrough,
 			},
 			Self::Flv(args) => buffered(SubscribeFormat::Flv, args),
 			Self::H264(args) => container(SubscribeFormat::H264, args),
@@ -1020,6 +1023,8 @@ pub struct Stdout {
 	pub stitch: bool,
 	pub fragment_duration: Option<Duration>,
 	pub mux_rate: Option<u64>,
+	/// Write the `m2ts` passthrough track back out (`ts` only).
+	pub passthrough: bool,
 }
 
 /// Staleness options for stdout sinks without a fixed release delay.
@@ -1120,6 +1125,7 @@ pub struct Transport {
 	/// How long to wait for the same publisher instance to come back once it ends (e.g. `10s`),
 	/// then carry on with the same stream. A replacement exits 1 unless `--stitch` is passed.
 	/// An export that fails while the broadcast is still up exits without waiting.
+	/// Also bounds a stitched replacement through its first catalog; zero requires it already available.
 	#[usage(long, default = "0s")]
 	pub linger: crate::duration::Duration,
 
@@ -1133,6 +1139,12 @@ pub struct Transport {
 	/// source (`mpegts.muxRate`); without either the output is unpadded.
 	#[usage(long)]
 	pub mux_rate: Option<u64>,
+
+	/// Write the multiplex an `import ts --passthrough` published back out byte-identical,
+	/// paced on its own PCR, `--delay` behind it. Packets that arrive later than that are
+	/// dropped, leaving a continuity error.
+	#[usage(long, conflicts("--linger", "--stitch", "--mux-rate"))]
+	pub passthrough: bool,
 
 	/// The released spelling of [`Self::delay`].
 	#[usage(long = "max-age", hide = true)]
@@ -1239,6 +1251,27 @@ mod tests {
 				panic!("{old} must not start a run");
 			};
 			assert!(err.to_string().contains(&format!("{old} -> --delay")), "{err}");
+		}
+	}
+
+	/// `export ts --passthrough` writes the source's own packets, so it neither switches
+	/// programs, waits for a return, nor pads to a rate.
+	#[test]
+	fn export_ts_passthrough_writes_the_source_alone() {
+		let parse = |args: &[&str]| {
+			let mut argv = vec!["moq", "export", "--broadcast", "b", "ts", "--passthrough"];
+			argv.extend_from_slice(args);
+			Invocation::try_parse_from(argv)
+		};
+		let cli = parse(&["--delay", "2s"]).unwrap();
+		let Command::Export(export) = &cli.stages[0] else {
+			panic!("not an export");
+		};
+		let stdout = export.sink.stdout().unwrap();
+		assert!(stdout.passthrough);
+		assert_eq!(stdout.max_delay, Duration::from_secs(2));
+		for flags in [&["--stitch"][..], &["--linger", "10s"], &["--mux-rate", "20000000"]] {
+			assert!(parse(flags).is_err(), "{flags:?} must not start a run");
 		}
 	}
 

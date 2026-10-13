@@ -146,18 +146,26 @@ pub struct Backoff {
 	/// Maximum time to spend retrying before giving up. Defaults to 10s.
 	///
 	/// Resets after a stable connection (one that outlives the initial backoff), so a flapping
-	/// session that reconnects then immediately drops still counts toward the timeout. Set to 0 for
-	/// unlimited retries.
+	/// session that reconnects then immediately drops still counts toward the timeout. Set to
+	/// `Some(Duration::ZERO)` for unlimited retries. `None` takes the default. When this config was
+	/// parsed from the command line, a `--backoff-timeout` given there wins over this field.
+	///
+	/// An `Option` because zero is a real setting: a command-line parse leaves this field at its
+	/// type's default, and only `None` tells "unset" apart from "retry forever".
 	#[usage(skip)]
-	#[serde(with = "crate::cli::duration::serde_duration")]
-	pub timeout: Duration,
+	#[serde(
+		default,
+		with = "crate::cli::duration::serde_duration::option",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub timeout: Option<Duration>,
 
+	// No parser default: the parser stores one as if it were given, and it would then beat a
+	// window set in code. The default lives in [`Backoff::window`] instead.
 	#[usage(
 		name = "backoff-timeout",
 		long,
 		env = "MOQ_BACKOFF_TIMEOUT",
-		default_value_t = CliDuration::fallback(DEFAULT_TIMEOUT),
-		default = "10s",
 		setting = "connect.backoff.timeout"
 	)]
 	#[serde(default, rename = "__cli_timeout", skip_serializing_if = "Option::is_none")]
@@ -172,9 +180,20 @@ impl Default for Backoff {
 			multiplier: DEFAULT_MULTIPLIER,
 			max: DEFAULT_MAX,
 			max_arg: None,
-			timeout: DEFAULT_TIMEOUT,
+			timeout: Some(DEFAULT_TIMEOUT),
 			timeout_arg: None,
 		}
+	}
+}
+
+impl Backoff {
+	/// The retry window in effect, where zero means unlimited: the flag, then the typed field, then
+	/// the default.
+	fn window(&self) -> Duration {
+		self.timeout_arg
+			.map(Into::into)
+			.or(self.timeout)
+			.unwrap_or(DEFAULT_TIMEOUT)
 	}
 }
 
@@ -847,7 +866,7 @@ impl Connection {
 		let backoff = client.backoff.clone();
 		let goaway = client.goaway.resolve();
 		let pacing = Pacing::new(&backoff);
-		let timeout = CliDuration::resolve(backoff.timeout_arg, backoff.timeout);
+		let timeout = backoff.window();
 		let initial = pacing.initial;
 		let mut retry = Retry::new(initial);
 		// Sticky across migrations: a redirect is an assignment, not a detour, so a
@@ -1655,13 +1674,13 @@ mod tests {
 		parsed.backoff.initial = Duration::from_secs(7);
 		parsed.backoff.multiplier = 5;
 		parsed.backoff.max = Duration::from_secs(11);
-		parsed.backoff.timeout = Duration::ZERO;
+		parsed.backoff.timeout = Some(Duration::ZERO);
 		parsed.update_from(&[]);
 
 		assert_eq!(parsed.backoff.initial, Duration::from_secs(7));
 		assert_eq!(parsed.backoff.multiplier, 5);
 		assert_eq!(parsed.backoff.max, Duration::from_secs(11));
-		assert_eq!(parsed.backoff.timeout, Duration::ZERO, "0 means retry forever");
+		assert_eq!(parsed.backoff.window(), Duration::ZERO, "0 means retry forever");
 
 		// With no flags, the parser defaults resolve to the typed defaults.
 		let parsed = Wrapper::parse_from(&[]).unwrap();
@@ -1669,15 +1688,53 @@ mod tests {
 		let pacing = Pacing::new(&parsed.backoff);
 		assert_eq!(pacing.initial, DEFAULT_INITIAL);
 		assert_eq!(pacing.max, DEFAULT_MAX);
-		assert_eq!(
-			CliDuration::resolve(parsed.backoff.timeout_arg, parsed.backoff.timeout),
-			DEFAULT_TIMEOUT
-		);
+		assert_eq!(parsed.backoff.window(), DEFAULT_TIMEOUT);
 
 		// And a flag still lands where the merge can see it.
 		let parsed =
 			Wrapper::parse_from(&[std::ffi::OsStr::new("--backoff-initial"), std::ffi::OsStr::new("3s")]).unwrap();
 		assert_eq!(Pacing::new(&parsed.backoff).initial, Duration::from_secs(3));
+	}
+
+	/// A window set in code wins on a config the command line built, including zero.
+	///
+	/// The parser stored its 10s default exactly as if `--backoff-timeout 10s` had been given, so
+	/// it beat the typed field, and a zero there was indistinguishable from the field left unset.
+	#[test]
+	fn a_timeout_set_in_code_beats_the_parser_default() {
+		#[derive(usage::Cli)]
+		#[usage(unknown_flags = "error", args_override_self = false)]
+		#[usage(settings)]
+		struct Wrapper {
+			#[usage(flatten)]
+			backoff: Backoff,
+		}
+
+		let mut parsed = Wrapper::parse_from(&[]).unwrap().backoff;
+		assert_eq!(parsed.window(), DEFAULT_TIMEOUT);
+		parsed.timeout = Some(Duration::ZERO);
+		assert_eq!(parsed.window(), Duration::ZERO, "a parsed config");
+
+		let merged = |backoff: &Backoff| -> Backoff { toml::Value::try_from(backoff).unwrap().try_into().unwrap() };
+		let mut config = merged(&Wrapper::parse_from(&[]).unwrap().backoff);
+		assert_eq!(config.window(), DEFAULT_TIMEOUT, "the default survives the round-trip");
+		config.timeout = Some(Duration::ZERO);
+		assert_eq!(config.window(), Duration::ZERO, "a merged config");
+		config.timeout = Some(Duration::from_secs(3));
+		assert_eq!(config.window(), Duration::from_secs(3), "a merged config, nonzero");
+
+		// An explicit flag still wins, through the round-trip too.
+		let flag = [std::ffi::OsStr::new("--backoff-timeout"), std::ffi::OsStr::new("0s")];
+		let mut config = merged(&Wrapper::parse_from(&flag).unwrap().backoff);
+		config.timeout = Some(Duration::from_secs(3));
+		assert_eq!(config.window(), Duration::ZERO, "the flag beats the field");
+
+		// A config built in code was never affected.
+		let config = Backoff {
+			timeout: Some(Duration::ZERO),
+			..Default::default()
+		};
+		assert_eq!(config.window(), Duration::ZERO);
 	}
 
 	/// GOAWAY typed defaults remain overrideable by a standing TOML layer.
@@ -2087,7 +2144,7 @@ mod tests {
 		assert_eq!(backoff.initial, Duration::from_secs(1));
 		assert_eq!(backoff.multiplier, 2);
 		assert_eq!(backoff.max, Duration::from_secs(5));
-		assert_eq!(backoff.timeout, Duration::from_secs(10));
+		assert_eq!(backoff.timeout, Some(Duration::from_secs(10)));
 	}
 
 	#[test]
@@ -2134,22 +2191,24 @@ mod tests {
 		value.parse().expect("valid url")
 	}
 
-	/// A loopback TCP port with nothing listening on it, which refuses instantly.
+	/// A loopback TCP port that hangs up on every connection, so dialing it fails fast.
 	///
-	/// A dead address that *refuses* rather than black-holes is what keeps these
+	/// A dead address that fails fast rather than black-holes is what keeps these
 	/// tests fast and deterministic: the walk itself is what's under test, and
 	/// bounding a black-holed attempt is covered by
 	/// [`only_a_candidate_with_a_fallback_is_bounded`] as a pure function.
 	///
-	/// The returned socket is bound but never listens, so the port refuses while
-	/// staying reserved: no other listener (or an ephemeral self-connect) can take
-	/// it mid-test. Hold it for as long as the URL is dialed.
+	/// It listens rather than leaving the port merely bound: only Linux refuses a
+	/// SYN to a socket that is bound but not listening, while macOS drops it and
+	/// each attempt waits out its timeout. Listening also keeps the port reserved,
+	/// so no other listener (or an ephemeral self-connect) can take it mid-test.
 	#[cfg(feature = "tcp")]
-	fn refused() -> (tokio::net::TcpSocket, Url) {
-		let socket = tokio::net::TcpSocket::new_v4().expect("tcp socket");
-		socket.bind("127.0.0.1:0".parse().unwrap()).expect("bind");
-		let addr = socket.local_addr().expect("local addr");
-		(socket, url(&format!("tcp://{addr}/")))
+	async fn dead() -> Url {
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+		let addr = listener.local_addr().expect("local addr");
+		// Dropping each stream unread hangs up before the qmux handshake completes.
+		tokio::spawn(async move { while listener.accept().await.is_ok() {} });
+		url(&format!("tcp://{addr}/"))
 	}
 
 	/// A bound stream listener and the URL that reaches it.
@@ -2196,8 +2255,8 @@ mod tests {
 		let (mut server, live) = live().await;
 		tokio::spawn(async move { while server.accept().await.is_some() {} });
 
-		let (_a, dead_a) = refused();
-		let (_b, dead_b) = refused();
+		let dead_a = dead().await;
+		let dead_b = dead().await;
 		let addrs = Addrs::collect([dead_a, dead_b, live.clone()]).expect("not empty");
 		let shared = shared();
 		let mut draining = None;
@@ -2218,8 +2277,8 @@ mod tests {
 	async fn dial_any_reports_failure_when_nothing_answers() {
 		let client = client();
 
-		let (_a, dead_a) = refused();
-		let (_b, dead_b) = refused();
+		let dead_a = dead().await;
+		let dead_b = dead().await;
 		let addrs = Addrs::collect([dead_a, dead_b]).expect("not empty");
 		let shared = shared();
 		let mut draining = None;
@@ -2230,7 +2289,7 @@ mod tests {
 		)
 		.await
 		.expect("the walk must not hang");
-		assert!(result.is_err(), "every address refused, so the walk must fail");
+		assert!(result.is_err(), "every address hung up, so the walk must fail");
 	}
 
 	/// Dialing must not write the LAN mesh's membership credential to the log.
@@ -2247,7 +2306,7 @@ mod tests {
 		const SECRET: &str = "b91d7fe20c4a";
 
 		let client = client();
-		let (_dead, mut target) = refused();
+		let mut target = dead().await;
 		target.set_path(&format!("/.cluster/{SECRET}"));
 
 		let addrs = Addrs::new(target);
@@ -2255,7 +2314,7 @@ mod tests {
 		let mut draining = None;
 		// `Session` isn't `Debug`, so unwrap the failure by hand.
 		let Err(err) = Connection::dial_any(&shared, &client, &addrs, &mut draining, None).await else {
-			panic!("a refused address must fail");
+			panic!("a dead address must fail");
 		};
 
 		// The log line did happen, so the assertion below isn't vacuously true.
@@ -2270,7 +2329,7 @@ mod tests {
 	async fn an_unsupported_scheme_ends_unlimited_reconnects() {
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
-		config.backoff.timeout = Duration::ZERO;
+		config.backoff.timeout = Some(Duration::ZERO);
 		let client = config.init(Default::default()).expect("build client");
 		let started = tokio::time::Instant::now();
 		let connection = client.connect(url("moqz://localhost/"));
@@ -2288,7 +2347,7 @@ mod tests {
 	async fn an_invalid_tls_server_name_ends_unlimited_reconnects() {
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
-		config.backoff.timeout = Duration::ZERO;
+		config.backoff.timeout = Some(Duration::ZERO);
 		let client = config.init(Default::default()).expect("build client");
 		for target in [
 			"https://a!b:1/",
@@ -2310,11 +2369,16 @@ mod tests {
 	#[cfg(feature = "tcp")]
 	#[tokio::test(start_paused = true)]
 	async fn a_refused_tcp_dial_keeps_retrying() {
-		let (_socket, target) = refused();
+		// Refusal is what's under test, so this can't use [`dead`]. A port nothing is
+		// bound to refuses on every OS, unlike one that is bound but not listening.
+		let target = {
+			let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+			url(&format!("tcp://{}/", listener.local_addr().expect("local addr")))
+		};
 		let mut client = client();
 		client.backoff.initial = Duration::from_millis(50);
 		client.backoff.max = Duration::from_millis(50);
-		client.backoff.timeout = Duration::from_millis(200);
+		client.backoff.timeout = Some(Duration::from_millis(200));
 		let started = tokio::time::Instant::now();
 		let connection = client.connect(target);
 		let err = connection.closed().await.expect_err("refused socket connected");
