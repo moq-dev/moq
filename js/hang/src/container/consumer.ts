@@ -367,8 +367,12 @@ export class Consumer {
 			// Unread media is thrown away, and `first.end` counts it, so contiguity alone would hide it.
 			// A trailing endpoint carries no media, so leaving it unread discards nothing.
 			const discarded = first.frames.some((frame) => this.#format.end?.(frame) === undefined);
-			const continued = continues(first, next) || ptsContiguous(first.end ?? this.#presentedEnd, nextStart);
-			if (marker || discarded || !continued) this.#lost = true;
+			// Adjacency proves nothing is missing only once the group finished cleanly: a truncated
+			// or still-open group may have lost its tail.
+			const finished = first.done && !first.truncated;
+			const adjacent = next?.consumer.sequence === first.consumer.sequence + 1;
+			const continued = (finished && adjacent) || ptsContiguous(first.end ?? this.#presentedEnd, nextStart);
+			if (marker || discarded || first.truncated || !continued) this.#lost = true;
 			first.consumer.close();
 			first.frames.length = 0;
 			skipped++;

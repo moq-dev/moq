@@ -239,11 +239,12 @@ impl<F: Container> Consumer<F> {
 		// first arrivals instead of assuming group 0. Skipping stays the budget's job.
 		if self.startup {
 			// NOTE: poll_min_timestamp buffers at least one frame per group and
-			// registers the waiter on the ones still empty.
-			let any_frame = self
-				.pending
-				.iter_mut()
-				.any(|group| matches!(group.poll_min_timestamp(waiter, &self.format), Poll::Ready(Ok(_))));
+			// registers the waiter on the ones still empty. Any wire frame counts, so a
+			// paused track whose only group is a marker still reads its end.
+			let any_frame = self.pending.iter_mut().any(|group| {
+				let _ = group.poll_min_timestamp(waiter, &self.format);
+				!group.empty
+			});
 			if any_frame {
 				self.current = self.pending.front().expect("a group has a frame").sequence;
 				self.startup = false;
@@ -961,6 +962,26 @@ mod tests {
 			});
 		}
 		items
+	}
+
+	/// Joining a paused track, whose only served group is a marker, reads the end without
+	/// waiting for media to resume.
+	#[tokio::test(start_paused = true)]
+	async fn a_join_on_a_marker_group_reads_its_end() {
+		let mut track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let subscription =
+			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10)));
+		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Audio));
+		write_marker_group(&mut track, 16, ts(1_000_000));
+
+		let mut read = async || {
+			tokio::time::timeout(Duration::from_secs(1), reader.read())
+				.await
+				.expect("the end is read while the track stays open")
+				.unwrap()
+		};
+		assert!(matches!(read().await, Some(Read::Gap)));
+		assert!(matches!(read().await, Some(Read::End { group: 16, end }) if end == ts(1_000_000)));
 	}
 
 	#[tokio::test]
