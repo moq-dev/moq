@@ -20,8 +20,9 @@ Decided 2026-10-12:
 
 - **Exact accounting.** Cap a leak-bound PID at the lesser of Rx in packets
   and Rbx in payload bytes, since Rbx governs payload into EB while TB drains
-  at Rx. Carry fractional packets from slot to slot, drop the one-packet
-  slack, and stop charging the clock packet to the video.
+  at Rx. Carry fractional packets from slot to slot and drop the one-packet
+  slack. A standalone PCR packet still enters the video's transport buffer,
+  so it counts against the Rx packet budget but not the Rbx payload budget.
 - Test: a generated source whose video fills Rbx on average exports for the
   whole clip and passes the strict T-STD check that `just test ts --hrd` runs.
 

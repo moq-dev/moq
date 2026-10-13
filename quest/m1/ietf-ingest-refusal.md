@@ -23,16 +23,18 @@ frame, and a draft-22 test suite) found that the refusal is quiet. In
   truncated groups and no error.
 - The catch-all `Err(err)` arm after `GroupIngest` logs at debug and returns
   `Ok(())`. Gaps no longer reach it (#5233 returns Unsupported), but a
-  malformed object extension block (`Decode`), a second stream for a live
-  group (`Duplicate`) and `FrameTooLarge` still do.
+  malformed object extension block (`Decode`), a FIN before the declared
+  payload ends (`WrongSize`), a second stream for a live group
+  (`Duplicate`), and an oversized frame or group (`FrameTooLarge`,
+  `GroupTooLarge`) still do.
 
 Decided 2026-10-12:
 
 - **Abort the track** on the first subgroup other than 0 or datagram past
   object 0, with Unsupported at warn. The subscriber sees an error, not
   partial media.
-- **Narrow the catch-all.** Route the peer's faults (`Decode`, `Duplicate`,
-  `FrameTooLarge`) to the refusing arm so the dispatcher sends STOP_SENDING.
+- **Narrow the catch-all.** Route the peer's faults (`Decode`, `WrongSize`,
+  `Duplicate`, `FrameTooLarge`, `GroupTooLarge`) to the refusing arm so the dispatcher sends STOP_SENDING.
   Peer resets, transport errors and Cancel stay at debug.
 - One PR for both, since they share the error routing.
 - **Docs.** Record in the deliberate deviations of

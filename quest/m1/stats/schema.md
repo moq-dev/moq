@@ -54,10 +54,13 @@ and the hang draft specs both. Nothing produces them yet.
   schemas, and the `.echo` convention: one broadcast per soliciting catalog,
   under the catalog's echo path, announced after the viewer reads the
   catalog. Validate with `just drafts check`.
-- **Refuse `--stats` and `--echo` with `--catalog-format msf`** (decided
-  2026-10-12). The MSF conversion in `rs/moq-mux` copies only the media
-  sections and `ext`, so the sections would otherwise drop silently. Carrying
-  them through MSF `publishTracks` is
+- **MSF carries neither section yet** (decided 2026-10-12). The MSF
+  conversion in `rs/moq-mux` copies only the media sections and `ext`. A
+  viewer given `--echo` with `--catalog-format msf` refuses, since it would
+  never see an `echo` section to answer. An import has no catalog-format
+  flag and always emits the MSF catalog beside the hang one, so that catalog
+  omits `stats` and `echo` the way it omits `json` and `binary`; hang
+  readers still get them. Carrying them through MSF `publishTracks` is
   [MSF feedback tracks](/quest/m3/msf-publish-tracks.md).
 - Docs: `doc/concept/hang.md`, and a media section in `doc/concept/stats.md`.
 - Tests:
