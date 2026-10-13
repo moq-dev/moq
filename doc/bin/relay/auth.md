@@ -140,11 +140,12 @@ attached JWT counts against its own `--limit-token` cap until the connection
 ends. The initial credential remains responsible for the connection's stats tier.
 Certificate sessions cannot renew a certificate in band, and public rules
 cannot verify a presented token; both refuse it as unsupported. A burst of
-tokens past the session's pending-verification bound is refused. An auth server
-that cannot answer, by timeout or outage, refuses a token as a transient error
-on moq-lite (`UNAUTHORIZED` on moq-transport), and `Connection::auth()` presents
-it again on its reconnect backoff. Retrying never extends an accepted grant, so
-a session whose last grant expires during an outage still closes.
+tokens past the session's pending-verification bound is refused. On moq-lite, an
+auth server that cannot answer, by timeout or outage, refuses a token as a
+transient error, and `Connection::auth()` presents it again on its reconnect
+backoff. On moq-transport the refusal is final and the token ends. Retrying
+never extends an accepted grant, so a session whose last grant expires during an
+outage still closes.
 
 ### Claims
 
