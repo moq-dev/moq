@@ -52,7 +52,7 @@ of a stream of the same group.
 This is a transport API change, not a MoQ wire change.
 
 Decided in the 2026-09-30 audit: deadlines, qmux, BBR loss parity, ECN
-measurement, ACK progress, and the ACK hook moved to m2, since no m2 quest
+measurement, ACK progress, and the ACK hook moved to m2, since no m1 quest
 consumes them. Decided 2026-10-08: L4S and careful resume moved on to m3,
 and GCC shrank to a receive-timestamps spike, since none has a consumer.
 The BBR app-limited fixes land in `moq-quic` without waiting for the switch.

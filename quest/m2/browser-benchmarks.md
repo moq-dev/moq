@@ -10,7 +10,7 @@ microbenchmarks do not exercise.
 
 Decided 2026-10-12: keep this broader transport/media suite in m2. The
 [backend baseline](/quest/m2/rs2ts/spike.md) adds the focused browser harness
-in m1, and each backend adoption includes its own comparison before switching.
+in m2, and each backend adoption includes its own comparison before switching.
 Reuse that work here; backend adoption does not wait for this broader suite.
 
 The JS microbenchmarks already exist: the seven Bun sweeps in `js/net/bench`
