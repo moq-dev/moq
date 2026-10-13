@@ -628,11 +628,10 @@ static void moq_source_on_resolved(struct moq_source *ctx, const std::shared_ptr
 		moq_source_discard_candidate(conn, track);
 		return;
 	}
-	track->call =
-		moq::MediaTrackConsumer::subscribe(*result, {track->name, track->container})
-			.then(ctx->worker.Executor(),
-			      moq_source_track_current<moq::expected<std::shared_ptr<moq::MediaTrackConsumer>>>(
-				      ctx, conn, track, moq_source_on_subscribed));
+	track->call = moq::MediaTrackConsumer::subscribe(*result, {track->name, track->container})
+			      .then(ctx->worker.Executor(),
+				    moq_source_track_current<moq::expected<std::shared_ptr<moq::MediaTrackConsumer>>>(
+					    ctx, conn, track, moq_source_on_subscribed));
 }
 
 static void moq_source_on_subscribed(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
