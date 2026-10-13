@@ -135,6 +135,10 @@ impl Deadline {
 		self.at = at;
 		let Some(at) = at else { return };
 		if at <= state.now {
+			// Already reached: wake whoever is parked on it, so it fires now.
+			drop(state);
+			let mut ready = self.waiters.lock().unwrap().take();
+			ready.wake();
 			return;
 		}
 		let key = (at, state.next);
@@ -288,6 +292,23 @@ mod tests {
 		deadline.set(Some(clock.now()));
 		assert!(deadline.poll(&kio::Waiter::noop()).is_ready(), "exactly now");
 		assert_eq!(deadlines.next(), None, "neither was queued");
+	}
+
+	/// A parked deadline re-armed to an instant already reached wakes its waiter,
+	/// rather than leaving it parked on the instant it no longer holds.
+	#[test]
+	fn rearming_to_a_reached_instant_wakes_the_waiter() {
+		let mut clock = Manual::new();
+		let deadlines = Deadlines::new(clock.now());
+		let mut deadline = Deadline::after(&deadlines, Duration::from_secs(5));
+		let (wakes, waiter) = counter();
+		assert!(deadline.poll(&waiter).is_pending());
+
+		clock.advance(Duration::from_secs(1));
+		deadlines.advance(clock.now());
+		deadline.set(Some(clock.now()));
+		assert_eq!(wakes.count.load(Ordering::SeqCst), 1, "the parked waiter was not woken");
+		assert!(deadline.poll(&waiter).is_ready());
 	}
 
 	#[test]

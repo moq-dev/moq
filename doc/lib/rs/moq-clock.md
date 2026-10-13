@@ -22,8 +22,10 @@ Async code reads the ambient clock: `now()`, `wall()`, `sleep()`,
 `sleep_until()`, `timeout()`, `interval()`, and `drive()` resolve to the
 current runtime's clock. That is tokio's on native, including paused tokio,
 and `performance.now()` with `setTimeout` in the browser. Nothing is plumbed
-through and nothing is global, so each runtime keeps its own clock. Paused
-tokio pauses the instant but not wall time.
+through. On native, every unpaused runtime and every plain thread share one
+clock, so their instants compare. A paused tokio runtime has its own clock,
+and it pauses the instant but not wall time. The simulator is its own clock
+too.
 
 Instants from different clocks don't compare, and there is no conversion back
 to `std::time::Instant`.
