@@ -24,7 +24,7 @@ connection (#4962), so two of them never share one. Publishers whose
 timestamps or bytes come from the instance refuse a shared epoch
 ([Epoch refusals](/quest/m1/epoch-refusals.md)).
 
-Decided 2026-10-13 with the redundant TS alignment plan: an epoch has one
+Decided 2026-10-13 by the maintainer: an epoch has one
 coordinate, which its first importer fixes and every later importer adopts
 ([Epoch anchor](/quest/m1/epoch-anchor.md)). This quest numbers groups on it
 and proves the pair end to end. A shared epoch or a raw PTS or PCR value
@@ -42,7 +42,8 @@ wrap.
   never from `clock.now()` (2026-10-06 audit), and importers refuse a rewind.
 - The catalog's root `clock` is the epoch's, never an importer's arrival
   (2026-10-05 audit; narrowing the contract to exclude the catalog clock was
-  rejected).
+  rejected). So is every other catalog field an importer derives from its
+  history, which a joiner adopts from the live catalog.
 - An importer announces only once it knows its tracks, so it never refuses a
   track the incumbent serves.
 - Docs (the `--epoch` paragraph in `doc/bin/cli.md`, the `--epoch` doc

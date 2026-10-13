@@ -17,8 +17,8 @@ first failover instead of at start.
 
 ## Plan
 
-Decided 2026-10-13 with the redundant TS alignment plan: same-epoch routes
-resume each other's subscriptions, so a publisher that cannot meet the
+Decided 2026-10-13 by the maintainer: same-epoch routes resume each other's
+subscriptions, so a publisher that cannot meet the
 [same-epoch contract](/quest/m1/hop-aligned-import.md) refuses the epoch
 rather than documenting a hazard. `takes_epoch` in `rs/moq-cli/src/args.rs`
 returns false for the three import sources, and `validate` refuses

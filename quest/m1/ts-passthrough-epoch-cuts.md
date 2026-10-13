@@ -1,4 +1,4 @@
-# [S] Raw TS groups cut on the epoch timeline
+# [S] Raw TS groups and their catalog section follow the epoch timeline
 
 ## Goal
 
@@ -9,13 +9,16 @@ Objects already run from PCR to PCR, so only group starts differ: the
 fallback cut counts `FALLBACK` from the current group's start, and before
 the first group from when the importer began waiting, so on a source with no
 random access points each importer keeps its own group phase for good.
+Their catalogs' M2ts sections match too, though both fields depend on
+history today: one non-random-access cut clears `random_access` for good,
+and the recorded `mux_rate` is judged over windows that start at the
+importer's first PCR.
 
 ## Plan
 
-Decided 2026-10-13 with the redundant TS alignment plan: every group start
-is a function of the content and the
-[epoch's timeline](/quest/m1/epoch-anchor.md), never of when the importer
-started.
+Decided 2026-10-13 by the maintainer: every group start is a function of
+the content and the [epoch's timeline](/quest/m1/epoch-anchor.md), never of
+when the importer started.
 
 - Fallback cuts fall on a grid of the epoch timeline, so a joiner's first
   group starts where the incumbent cut. A grid on the raw 27 MHz count will
@@ -28,12 +31,21 @@ started.
   other start publishes `random_access` false.
 - Size cuts count from the group's start, so they follow once group starts
   do.
+- A cut is a position in the content, so it follows media time alone. A
+  wall-clock cut path would put a stalled instance's groups apart from its
+  partner's, so this lane is an exception to timers advancing on
+  max(wall, pts).
+- A joiner adopts the live M2ts section as of its first group, and its later
+  changes depend only on content on the epoch timeline: `random_access`
+  clears on a cut both instances make, and the rate windows sit on the
+  epoch's grid, or the recorded rate stays fixed for the epoch. Settle which.
 
 Tests: two instances started at different offsets into one capture publish
 identical groups and objects from the later one's first group. Cover a
 source with no random access indicator, a multi-program stream, groups that
-hit the size cap, and the later instance started after a 33-bit wrap the
-earlier crossed.
+hit the size cap, the later instance started after a 33-bit wrap the
+earlier crossed, and one started after the earlier made a fallback cut and
+recorded a rate; their catalogs match.
 
 Public API: none.
 

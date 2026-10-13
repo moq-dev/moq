@@ -16,7 +16,7 @@ identity across a replaced broadcast.
 
 ## Plan
 
-Decided 2026-10-13 with the redundant TS alignment plan: RTP identity is a
+Decided 2026-10-13 by the maintainer: RTP identity is a
 function of [TS slot identity](/quest/m2/ts-hitless.md) and the epoch, and of
 nothing a leg mints.
 
@@ -25,7 +25,9 @@ nothing a leg mints.
   from the datagram's position on the broadcast's media timeline, modulo
   their field widths, so they survive the 33-bit source wrap and a late
   join. The SSRC derives from the route's epoch, so a replacement is a new
-  RTP stream; settle whether an explicit SSRC is also accepted.
+  RTP stream. An epochless route (a session whose version carries no
+  epoch) gives two legs nothing shared to derive it from, so synchronized
+  RTP refuses one; settle whether an explicit SSRC lifts that.
 - A leg never sends a datagram it cannot fill exactly. A packetizer that
   completes a datagram with stuffing, or primes a cushion with null-only
   datagrams after a stall, sends them under sequence numbers its partner
@@ -41,10 +43,11 @@ skew, and complementary group loss send byte-identical RTP packets for every
 datagram both send, and a reference ST 2022-7 selection over the two
 reproduces every datagram either sent. A datagram neither leg can fill is
 absent from both, never stuffing in one. Sequence numbers and timestamps
-wrap identically, and a replacement changes the SSRC. Claims of ST 2022-7
-compatibility cite the standard and an RTP-level test, not TS identity.
+wrap identically, a replacement changes the SSRC, and an epochless route is
+refused. Claims of ST 2022-7 compatibility cite the standard and an
+RTP-level test, not TS identity.
 
-Public API: an RTP destination for `export ts`.
+Public API: an RTP output for TS export, in the shape settled above.
 
 ## Required
 

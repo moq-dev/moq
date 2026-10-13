@@ -1,4 +1,4 @@
-# [M] Redundant TS exports render common content identically
+# [L] Redundant TS exports render common content identically
 
 ## Goal
 
@@ -20,15 +20,15 @@ output across restarts is not supported).
 
 ## Plan
 
-Decided 2026-10-13 with the redundant TS alignment plan: the coordinate the
+Decided 2026-10-13 by the maintainer: the coordinate the
 legs share is the broadcast's media timeline, each object's timestamp on its
 catalog clock, with a constant mux rate. Two exports of one broadcast
 already read the same objects and timestamps, so this needs no importer
 alignment; [same-epoch importers](/quest/m1/hop-aligned-import.md) extend it
 to legs fed by different importers of one epoch. Every byte a `--sync` leg
-renders (slot, PCR, table, PES header, continuity counter) is a function of
-that coordinate, the catalog, and the rate, never of what the leg has sent
-or when it joined. 2022-7 is a differentiator for primary distribution, not
+renders from the objects it has (slot, PCR, table, PES header, continuity
+counter) is a function of those objects, that coordinate, the catalog, and
+the rate, never of what the leg has sent or when it joined. 2022-7 is a differentiator for primary distribution, not
 a requirement (t0ms's review of #4645), so this waits until the T-STD line
 settles.
 
@@ -45,7 +45,14 @@ settles.
   time-base break. Loss is still detected within a group.
 - Content one leg misses never changes what the other renders, and the leg
   that misses it renders stuffing in its slots. Forcing both legs to drop the
-  same content would defeat redundant paths. t0ms's
+  same content would defeat redundant paths.
+- A leg that lacks an access unit cannot know how many packets it fills, so
+  no later packet's slot may depend on an earlier access unit's size. A
+  constant rate fixes capacity, not placement. Settle the placement rule
+  before building the scheduler: fixed per-PID reservations on the timeline,
+  a packet plan carried with the objects, or each group re-anchored at a
+  slot derived from its timestamp, with headroom.
+- t0ms's
   `two_legs_render_a_skip_the_same_way`
   (`rs/moq-mux/src/container/ts/export_timing_test.rs`) becomes this
   complementary case and stops being ignored. With the audio late, it also
