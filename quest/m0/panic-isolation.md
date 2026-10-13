@@ -63,8 +63,3 @@ Decided 2026-10-13 (maintainer):
 
 Public API: none in Rust. Operational: a new relay `/metrics` panic counter.
 Wire: none.
-
-## Related
-
-- [Unset host clock](/quest/m0/wall-clock-omit.md) - removes the panic that surfaced this
-- [Fuzz builds under LTO](/quest/m0/fuzz-lto.md) - also edits the release profile

@@ -20,9 +20,9 @@ declared end has to reach the decode loop so it flushes the pictures it still
 holds before decoding the resumed group, which today happens only when the
 track ends.
 
-Open: whether audio follows the same queue or snaps to the new timeline. Audio
-owns the presentation anchor, so this sets the latency and sync policy; ask
-the maintainer before implementing.
+✅ Decided 2026-10-13: audio queues with video. One sequential timeline: audio
+and video both play out the old segment, then rebase together, which keeps
+A/V sync. Not chosen: audio snaps to the new timeline; leave it open.
 
 Test with a declared end followed immediately by a new group, using a decoder
 that holds pictures (depth above zero): every pre-end picture is shown before

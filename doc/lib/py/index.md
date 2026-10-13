@@ -18,6 +18,8 @@ Use `Named(name)` or `Requested(request)` as the target for `TrackProducer.audio
 `CatalogProducer(broadcast)` holds the broadcast weakly and owns catalog properties and sections;
 its writes fail with `Error.Closed` after the broadcast closes or is released.
 `MediaFrame.timestamp`, media writes, and `flush` use `datetime.timedelta`.
+For arrival-order reads, decode each group from `TrackConsumer.recv_group()` with
+`media.GroupConsumer(group, container)`; frames carry container media time as they land.
 
 ```bash
 pip install moq-rs      # or: uv add moq-rs
@@ -40,7 +42,7 @@ async def main():
             name, audio = next(iter(catalog.audio.items()))
             # The track is the rendition's `track` when set, otherwise its catalog key.
             track = audio.track if audio.track is not None else name
-            async for frame in await moq.media.ContainerConsumer.subscribe(broadcast, track, audio.container):
+            async for frame in await moq.media.TrackConsumer.subscribe(broadcast, track, audio.container):
                 print(frame.timestamp, len(frame.payload))
 
 asyncio.run(main())

@@ -95,3 +95,8 @@ qmux-bench:
     bun install --frozen-lockfile
     bunx tsc --noEmit --project net/bench/tsconfig.json
     bun net/bench/qmux.ts
+
+# Sweep open arrival handles against their unread backlog.
+arrivals-bench:
+    bun install --frozen-lockfile
+    bun watch/bench/arrivals.ts

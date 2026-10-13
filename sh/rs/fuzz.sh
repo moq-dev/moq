@@ -40,5 +40,10 @@ export PATH="$sysroot/bin:$PATH"
 # Fail here before an overflow becomes a hard error on stable.
 export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-D recursion_depth_exceeding_limit"
 
+# Fat LTO drops sanitizer-coverage globals referenced by ASan. Keep symbol
+# names too, so sanitizer and libFuzzer reports identify the crashing code.
+export CARGO_PROFILE_RELEASE_LTO=false
+export CARGO_PROFILE_RELEASE_STRIP=none
+
 cargo fuzz run --fuzz-dir rs/moq-net/fuzz "$target" \
     rs/moq-net/fuzz/corpus/"$target" rs/moq-net/fuzz/seeds/"$target" "$@"

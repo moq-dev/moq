@@ -1242,9 +1242,11 @@ def check_duration_fidelity(captured_s: float, reference_s: float) -> Check:
     Every timing check above reads the stream's own PCR, so a PCR emitted on the
     wrong clock rate stays internally consistent and passes them all. Comparing
     the exported PCR span against the source's independent duration is the one
-    check that pins the absolute rate. Keyframe alignment drops up to a GOP of
-    lead, so the captured span runs a shade short, never materially long; the
-    band is wide enough to ignore that yet catch a gross scale error.
+    check that pins the absolute rate. The exporter joins at the live edge once
+    the catalog appears, and import holds the catalog for its two-second mux-rate
+    window, so the captured span runs up to that window plus a GOP short, never
+    materially long; the band is wide enough to ignore that yet catch a gross
+    scale error.
     """
     metrics = {"captured_s": round(captured_s, 2), "reference_s": round(reference_s, 2)}
     if reference_s <= 0:

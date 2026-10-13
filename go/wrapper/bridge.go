@@ -19,5 +19,6 @@ func init() {
 	bridge.BroadcastProducer = func(v any) *ffi.MoqBroadcastProducer { return v.(*BroadcastProducer).inner }
 	bridge.TrackProducer = func(v any) *ffi.MoqTrackProducer { return v.(*TrackProducer).inner }
 	bridge.TrackConsumer = func(v any) *ffi.MoqTrackConsumer { return v.(*TrackConsumer).inner }
+	bridge.GroupConsumer = func(v any) *ffi.MoqGroupConsumer { return v.(*GroupConsumer).inner }
 	bridge.TrackDemand = func(inner *ffi.MoqTrackDemand) any { return &TrackDemand{inner: inner} }
 }

@@ -4,7 +4,7 @@ import { Effect, type Getter, type GetterInit, getter, Once, Signal } from "@moq
 
 import type { Format } from "./format";
 import { Jitter } from "./jitter";
-import type { BufferedRanges, Frame } from "./types";
+import type { BufferedRanges, ReceivedFrame } from "./types";
 
 /** Options for constructing a {@link Consumer}; the obsolete `maxAge` prop is refused. */
 export interface ConsumerProps {
@@ -24,13 +24,17 @@ export interface ConsumerProps {
 /** One item of a {@link Consumer.next} read, in delivery order. Mirrors Rust's `container::Read`. */
 export type Read =
 	/** A media frame from `group`. Only group equality means anything: numbers may skip. */
-	| { kind: "frame"; group: number; frame: Frame }
+	| { kind: "frame"; group: number; frame: ReceivedFrame }
 	/**
-	 * Media before the next item will never reach this reader: it joined mid-track, or a group was
-	 * skipped, evicted, truncated, or never arrived. A decoder resumes without the references or
-	 * state that media built.
+	 * Media after an item already read will never reach this reader: a group was skipped, evicted,
+	 * truncated, or never arrived. A decoder resumes without the references or state that media
+	 * built. Joining mid-track is not a gap: nothing was read before it.
+	 *
+	 * The span is an upper bound. `timestamp` is the furthest point already read; without a
+	 * per-frame duration that is the last frame's timestamp, one frame early. `duration` runs to
+	 * where the next item resumes, so it also covers any declared pause in between.
 	 */
-	| { kind: "gap" }
+	| { kind: "gap"; timestamp: Time.Micro; duration: Time.Micro }
 	/**
 	 * The publisher declared that its media stops at `end`: it paused, switched source, or finished.
 	 * Frames that follow from the same `group` are the stopped encoder's final packets (an audio
@@ -40,7 +44,7 @@ export type Read =
 
 interface Group {
 	consumer: Moq.Group.Consumer;
-	frames: Frame[]; // decode order
+	frames: ReceivedFrame[]; // decode order
 	empty: boolean; // no wire frame was published; empty groups mean nothing
 	media: boolean; // a decodable (non-marker) frame was buffered
 	start?: Time.Micro; // First decoded timestamp
@@ -98,9 +102,11 @@ export class Consumer {
 	// Group of the last media frame next() returned, so an endpoint after it reads as that frame's
 	// duration rather than a declared stop.
 	#mediaGroup?: number;
-	// Media went missing since the last item read, so the next one is preceded by a gap. Starts set:
-	// nothing before the first frame was read.
-	#lost = true;
+	// Media went missing since the last item read, so the next one is preceded by a gap.
+	#lost = false;
+	// The furthest presentation point read so far: max(timestamp + duration), endpoints included.
+	// Undefined until the first item, so a loss before it is no gap.
+	#edge?: Time.Micro;
 	// The item a gap was returned ahead of.
 	#next?: Read;
 	// The first media timestamp of the latest delivered group, and its predecessor's start.
@@ -213,7 +219,8 @@ export class Consumer {
 						this.#jitter.observe(arrival, Moq.Time.Milli.fromMicro(sample.timestamp));
 						this.#spread.set(this.#jitter.measured);
 					}
-					const frame: Frame = {
+					const frame: ReceivedFrame = {
+						arrival,
 						payload: sample.payload,
 						timestamp: sample.timestamp,
 						// Protocol invariant: groups always start at a keyframe.
@@ -449,7 +456,7 @@ export class Consumer {
 
 	/**
 	 * Returns the next {@link Read} in delivery order, awaiting one if needed: a frame, a gap where
-	 * media will never arrive (always one before the first frame), or an end the publisher declared.
+	 * media after an earlier item will never arrive, or an end the publisher declared.
 	 * An unmarked forward timestamp jump is not a gap, since nothing on the wire says media is missing.
 	 * After buffered groups drain, a finished track returns undefined and an aborted track throws.
 	 */
@@ -517,8 +524,11 @@ export class Consumer {
 					const end = this.#format.end?.(frame);
 					if (end !== undefined) {
 						this.#updateBuffered();
-						// A trailing endpoint is the last frame's duration, which only the skip logic needs.
-						if (seq === this.#mediaGroup) continue;
+						// A trailing endpoint is the last frame's duration: it moves the edge, nothing else.
+						if (seq === this.#mediaGroup) {
+							this.#advance(end);
+							continue;
+						}
 						return this.#emit({ kind: "end", group: seq, end });
 					}
 					this.#mediaGroup = seq;
@@ -588,12 +598,25 @@ export class Consumer {
 		}
 	}
 
-	// Return `read`, or a gap ahead of it when media went missing first.
-	#emit(read: Read): Read {
-		if (!this.#lost) return read;
+	// Return `read`, or a gap ahead of it when media went missing after an earlier item.
+	#emit(read: Exclude<Read, { kind: "gap" }>): Read {
+		const resume = read.kind === "frame" ? read.frame.timestamp : read.end;
+		const edge = this.#edge;
+		const lost = this.#lost;
 		this.#lost = false;
+		this.#advance(
+			read.kind === "frame" ? Moq.Time.Micro.add(resume, read.frame.duration ?? Moq.Time.Micro.zero) : resume,
+		);
+		if (!lost || edge === undefined) return read;
+
+		// A next group may start before the edge (an overlapping endpoint), so the span bottoms out at zero.
+		const timestamp = Moq.Time.Micro.min(edge, resume);
 		this.#next = read;
-		return { kind: "gap" };
+		return { kind: "gap", timestamp, duration: Moq.Time.Micro.sub(resume, timestamp) };
+	}
+
+	#advance(end: Time.Micro): void {
+		if (this.#edge === undefined || end > this.#edge) this.#edge = end;
 	}
 
 	#updateBuffered(): void {
@@ -624,6 +647,8 @@ export class Consumer {
 
 	/** Stop consuming and release the track and all buffered groups. */
 	close(): void {
+		// The item a gap was returned ahead of is buffered media too.
+		this.#next = undefined;
 		this.#finish(null);
 		this.#signals.close();
 	}

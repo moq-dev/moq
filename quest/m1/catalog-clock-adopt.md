@@ -63,6 +63,9 @@ offering both:
   `Config::with_clock` say that the root `clock` is the producer's clock and
   when it may change, and that writes through `Reserved::video` and the codec
   producers keep their timestamps verbatim.
+- `Clock::wall()` returns `Option`: a host whose wall clock reads before 2020
+  is unset and has no mapping, so the catalog omits `clock`. An absent wall
+  matches an absent catalog `clock`.
 - Kept apart from `hang::catalog::Clock`, which is the wire mapping alone.
   `moq_mux::Clock` adds a monotonic anchor and reads the host's time, which
   neither the format crate nor the JS catalog schema should carry.
@@ -72,7 +75,7 @@ offering both:
   [the shared timebase](/quest/m1/ffi-timebase.md).
 
 Tests: a micro catalog clock written before anything fixes the clock is
-advertised unchanged and `Producer::clock().wall()` equals it; a millisecond
+advertised unchanged and `Producer::clock().wall()` is `Some` of it; a millisecond
 wall converts; an inexact wall, a future PTS zero, a change after the clock
 is fixed, and a clear are refused; `now()` reads the elapsed time since the
 wall's PTS zero on a paused clock; moq-transcode's derivative stamps data on

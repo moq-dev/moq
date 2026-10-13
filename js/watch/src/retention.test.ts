@@ -100,7 +100,7 @@ test("a long subscription through the player path leaves nothing behind", async 
 	const play = async (count: number) => {
 		for (let i = 0; i < count; i++) {
 			producer.encode(new Uint8Array([i & 0xff]), Math.round(Time.Micro.now()) as Time.Micro, true);
-			// Pass over the gap before the first frame.
+			// Pass over any gap or end.
 			let next = await nextMedia(consumer);
 			while (next && next.kind !== "frame") next = await nextMedia(consumer);
 			if (!next) throw new Error("the track ended");
