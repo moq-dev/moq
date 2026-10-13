@@ -42,7 +42,7 @@ Still serving disabled renditions:
   mux every selected rendition. RTMP's `play_selection` also refuses a
   multitrack play over a disabled rendition it can't carry.
 
-Recommendations, pending the maintainer:
+Decided with the maintainer (2026-10-13):
 
 - **One rule in moq-mux, no new hang API.** `hang` already has
   `Video::enabled()` and `Audio::enabled()`. Treat a disabled rendition as
@@ -63,6 +63,9 @@ Recommendations, pending the maintainer:
   keyframe rather than leaving a gap. With no ABR on the peer, it serves the
   current best enabled rendition, so a re-enabled top rung wins back. The
   SDP codec list stays fixed for the session.
+- **Related to simulcast rung disable, not Required.** The publisher side
+  stands alone, and manual disable already has this gap, so rung disable
+  stays ready.
 
 Tests on mocked time with in-process broadcasts: a mixed catalog never
 selects the disabled rendition; an all-disabled catalog selects nothing; a
