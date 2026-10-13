@@ -55,15 +55,25 @@ relies on it. Reasons:
   broadcast restarts. The catalog may still add and remove tracks; a removed
   name is never reused for different content.
 
-Known violation: the JS publisher rewrites `codedWidth` and `codedHeight`
-when the capture resizes (`#runCatalog` in `js/publish/src/video/encoder.ts`).
-Fix it to publish the ceiling and resize in band. Audit the other Rust and JS
-publishers for fields that change mid-track today the same way.
+The first PR named the split in the hang draft (Track Identity) and the catalog
+docs, and moved `js/publish` video to a coded-size ceiling with in-band
+resizing and monotone `bitrate`/`framerate` (audio `bitrate` too). Remaining:
 
-Name the identity, ceiling, and live-state split in the hang draft
-(`drafts/draft-lcurley-moq-hang.md`, `just drafts check`) and the catalog
-docs, so a catalog update that changes only live state is never mistaken for
-a new identity.
+- `js/publish` still mutates a served track when the video ceiling grows, the
+  codec knob or a re-probe changes the codec string, the audio capture changes
+  sample rate or channel count, or Opus adds its encoder-reported
+  `description` on first encode. Enforce identity once served (republish under
+  a new epoch, which `Broadcast` already does for a closed track), and probe
+  the Opus description before advertising.
+- Rust publishers mutate in place: `moq-mux` `Rendition::set` has no identity
+  guard and every video importer (h264/h265 inline SPS, av1 sequence header,
+  vp8/vp9 keyframe size, a codec hint republished with the real
+  profile/level) rewrites its rendition; `moq-video` on capture reopen;
+  `moq-rtc` ingest; `moq-c` re-declared configs; `moq-gst` reusing an
+  explicit pad name after renegotiation. TS AAC/MP2/AC-3 and FLV legacy audio
+  ignore a mid-stream header change instead. `Rendition::resolved` lets a
+  re-set `bitrate`/`framerate` fall. FLV, fMP4, MKV, HLS import, and
+  `moq-transcode` rungs already comply.
 
 Cover codec changes, resolution changes below and past the ceiling,
 rendition switches, reconnects, and late joiners in Rust, JS, and HLS/watch

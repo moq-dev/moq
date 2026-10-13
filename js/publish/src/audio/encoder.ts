@@ -224,6 +224,8 @@ export class Encoder {
 	#estimate = new Signal<Estimator["estimate"]>({});
 	// The last config published while enabled, which a disabled rendition keeps advertising.
 	#last?: Catalog.AudioConfig;
+	// The largest bitrate advertised so far, since the catalog may only raise it.
+	#bitrate = 0;
 	// Whether the rendition was disabled since a config last resolved, so it keeps advertising `#last`
 	// as disabled until the re-enabled capture resolves a new one. A capture that never reopens leaves
 	// it disabled, which is accurate: no frames are coming.
@@ -442,7 +444,11 @@ export class Encoder {
 
 		const decoder = effect.get(this.#decoderDescription);
 		const catalog = decoder?.config === config ? { ...config, description: decoder.description } : config;
-		this.#last = { ...catalog, ...estimate };
+		// The catalog bitrate is the most this track has been configured for, so lowering the knob
+		// retunes the encoder without lowering what the catalog advertises.
+		this.#bitrate = Math.max(this.#bitrate, catalog.bitrate ?? 0);
+		const bitrate = this.#bitrate > 0 ? Catalog.u53(this.#bitrate) : undefined;
+		this.#last = { ...catalog, bitrate, ...estimate };
 		effect.set(this.#out.catalog, this.#last);
 	}
 
