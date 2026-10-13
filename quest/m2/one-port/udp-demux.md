@@ -30,7 +30,7 @@ STUN: an ICE connectivity check is a Binding request carrying USERNAME, so
 it goes to the WebRTC hook, whose mux reads the local ufrag from it. A
 Binding request without USERNAME is a public query; drop and count it.
 Decided 2026-10-08: the public STUN responder is left to the P2P line
-(m3), its only consumer, so `moq-sock` takes no STUN codec
+(m1), its only consumer, so `moq-sock` takes no STUN codec
 dependency (str0m included).
 
 WebRTC: DTLS, RTP, and USERNAME-carrying STUN go to a `webrtc` hook that

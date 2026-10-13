@@ -10,12 +10,16 @@ size above which new negotiations stop using them. No new relay behavior.
 
 ## Plan
 
-`Peers` in `@moq/p2p` takes the shared origin and the policy knobs from the
+`Peers` in `@moq/p2p` takes the shared origin, a reconnect-safe handle to the
+relay connection's auth, and the policy knobs from the
 [questline README](/quest/m1/p2p/README.md): `enabled`, `prefix`,
 `iceServers`, `max`, `meta`, plus application-owned selection and per-connection
 priority/cost. Decided 2026-10-13: only explicitly selected peers are dialed;
 there is no default dial-all. Prefer a selected set/handle to a callback,
-settling the public shape with its consumer. Publishing into the origin reaches
+settling the public shape with its consumer. The origin carries no auth state
+and the pooled `Connection` hides `Established.auth`, yet peer grants need
+AUTH_CNF written and AUTH_KEYS/AUTH_PEER received across relay reconnects, so
+define that handle before fixing `Peers`. Publishing into the origin reaches
 the relay and its announce stream is the roster. Tests inject transport
 factories and cover pairing, application selection, and the roster gate.
 

@@ -221,6 +221,10 @@ release.
 - [Next-hop handoff](/quest/m1/cluster-routing/handoff.md) - complete and fresh claims with bounded state
 - [Cross-node flapping](/quest/m1/cross-node-flapping.md) - incident-sensitive baseline and residual counterexamples
 
+## Closes
+
+- [#4349](https://github.com/moq-dev/moq/issues/4349) - close once the residual cross-node flapping counterexamples pass
+
 ## Related
 
 - [Route wakes](/quest/m2/route-wakes.md) - index work follows the settled source-selection model

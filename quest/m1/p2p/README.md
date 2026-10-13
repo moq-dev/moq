@@ -61,7 +61,8 @@ once the harness shows the relay's STUN beats the application's servers.
 
 ### Policy is the application's
 
-`Peers` takes the shared origin plus:
+`Peers` takes the shared origin, a reconnect-safe relay auth handle for
+[peer grants](/quest/m1/p2p/peer-grant.md), plus:
 
 - `enabled`: an explicit on/off signal, off by default;
 - `prefix`: the reserved prefix, `.p2p/` under the session root by default;

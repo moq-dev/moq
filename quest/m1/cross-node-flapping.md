@@ -35,10 +35,9 @@ Loss and FETCH were clean in every run (about 31k FETCHes, all ok).
   quarantine holds strictly worse stale alternatives, leaving equal/better
   stale ranks. Do not lengthen the hold to declare the issue solved.
 - Land the incident-sensitive baseline and residual fixtures before the route
-  rewrite, without requiring a redesign here. If residual cases remain, keep
-  #4349 open and move its Closes ownership to Routes and announces; this quest
-  can complete with the counterexample harness, rather than depending on the
-  implementation it gates. A passing single topology is not enough to close
+  rewrite, without requiring a redesign here. Routes and announces owns
+  closing #4349, so this quest can complete with the counterexample harness
+  rather than depending on the implementation it gates. A passing single topology is not enough to close
   the residual concern. Fix a small independent root cause only if one is found.
 - Not planned here: the reporter's self-hosted two-relay rejoin stall
   (`subscribe canceled (idle)`, then `old`, then no state). On 0.17.2 a
@@ -47,10 +46,6 @@ Loss and FETCH were clean in every run (about 31k FETCHes, all ok).
   carrying those still stalls.
 - Harness for reference: https://github.com/fperex/moq-burst-repro (published
   crates only); its traces hold per-session announcement sequences.
-
-## Closes
-
-- [#4349](https://github.com/moq-dev/moq/issues/4349) - close this issue when the quest finishes
 
 ## Related
 
