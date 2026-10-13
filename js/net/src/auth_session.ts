@@ -1,4 +1,4 @@
-import { type Dispose, type Getter, Signal } from "@moq/signals";
+import { type Dispose, type Getter, Once, Signal } from "@moq/signals";
 import {
 	type Auth as AuthApi,
 	type Grant,
@@ -9,7 +9,7 @@ import {
 	type Token,
 	Unsupported,
 } from "./auth.ts";
-import { closeReason, error, SessionCode, StreamCode, StreamError } from "./error.ts";
+import { closeReason, error, ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import * as Path from "./path.ts";
 import type { Stream } from "./stream.ts";
 
@@ -154,10 +154,15 @@ class IssuedGrant implements Issued {
 		this.#stream = stream;
 		this.#wire = wire;
 		// The presenter withdraws by closing or cancelling its side.
-		this.closed = stream.reader.closed.then(
-			() => null,
-			(err: unknown) => (err instanceof StreamError && err.code === StreamCode.Cancel ? null : error(err)),
-		);
+		this.closed = stream.reader
+			.done()
+			.then((done) => {
+				if (!done) throw new ProtocolViolation("additional message on an AUTH stream");
+			})
+			.then(
+				() => null,
+				(err: unknown) => (err instanceof StreamError && err.code === StreamCode.Cancel ? null : error(err)),
+			);
 	}
 
 	#write(write: () => Promise<void>) {
@@ -237,6 +242,8 @@ export interface AuthSessionProps {
  * @internal
  */
 export class AuthSession implements AuthApi {
+	/** The peer sent a malformed AUTH message; the owning connection closes the session. */
+	readonly violated = new Once<ProtocolViolation>();
 	#wire?: AuthWire;
 	#peerGrant: Grant;
 
@@ -297,7 +304,19 @@ export class AuthSession implements AuthApi {
 		const wire = this.#wire;
 		if (!wire) throw new Error("auth not negotiated");
 
-		const token = await wire.accept(stream);
+		let token: Uint8Array;
+		try {
+			token = await wire.accept(stream);
+		} catch (err) {
+			if (
+				err instanceof StreamError ||
+				err instanceof SessionError ||
+				err instanceof Unsupported ||
+				(typeof err === "object" && err !== null && "source" in err && err.source === "session")
+			)
+				throw err;
+			throw new ProtocolViolation("malformed AUTH", { cause: err });
+		}
 		await this.#decided;
 		if (this.#acceptor === "undecided") this.#acceptor = "default";
 
@@ -314,8 +333,9 @@ export class AuthSession implements AuthApi {
 			issued.update(this.#peerGrant);
 		}
 
-		await issued.closed;
+		const ended = await issued.closed;
 		issued.close();
+		if (ended instanceof ProtocolViolation) throw ended;
 	}
 
 	/** End the session: fail every pending token and close the requests. */
@@ -344,7 +364,19 @@ export class AuthSession implements AuthApi {
 			if (token.withdrawn) throw cancel();
 
 			for (;;) {
-				const reply = await wire.read(stream);
+				let reply: WireReply | undefined;
+				try {
+					reply = await wire.read(stream);
+				} catch (err) {
+					if (
+						err instanceof StreamError ||
+						err instanceof SessionError ||
+						err instanceof Unsupported ||
+						(typeof err === "object" && err !== null && "source" in err && err.source === "session")
+					)
+						throw err;
+					throw new ProtocolViolation("malformed AUTH reply", { cause: err });
+				}
 				if (!reply) {
 					// The peer ended the grant without revoking it, or closed without ever
 					// answering. Close our side too, which is what settles its Issued.closed.
@@ -376,6 +408,9 @@ export class AuthSession implements AuthApi {
 				result = new Unsupported();
 			} else {
 				result = error(err);
+				if (result instanceof ProtocolViolation && !this.#closed && this.violated.peek() === undefined) {
+					this.violated.set(result);
+				}
 				if (!this.#closed) console.warn("auth token ended", result);
 			}
 		}

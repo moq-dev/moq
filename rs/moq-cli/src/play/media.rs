@@ -125,6 +125,8 @@ impl<O: Output> Media<O> {
 		let mut catalogs = catalog.select(self.args.select.selection(None));
 		let mut tasks = tokio::task::JoinSet::new();
 		let mut playback = Playback::default();
+		let mut video_demand: Option<(String, tokio::sync::oneshot::Sender<()>)> = None;
+		let mut audio_demand: Option<(String, tokio::sync::oneshot::Sender<()>)> = None;
 		// Shared by an audio rendition and the retired tails still playing beside
 		// it, so their sinks mix on one stream: a second stream on an exclusive
 		// device would fail to open. Released once none of them is left, so an
@@ -174,7 +176,11 @@ impl<O: Output> Media<O> {
 					// are still running.
 					snapshot = catalogs.next(), if playback.following() => {
 						match snapshot.context("failed to read the catalog")? {
-							Some(snapshot) => playback.received(snapshot),
+							Some(snapshot) => {
+								stop_disabled(&mut video_demand, snapshot.video.renditions.iter().filter(|(_, config)| !config.enabled).map(|(name, _)| name));
+								stop_disabled(&mut audio_demand, snapshot.audio.renditions.iter().filter(|(_, config)| !config.enabled).map(|(name, _)| name));
+								playback.received(snapshot);
+							},
 							None => {
 								if !playback.played {
 									return Err(Unplayable("the catalog contains no playable audio or video renditions".into()).into());
@@ -209,7 +215,7 @@ impl<O: Output> Media<O> {
 
 			if playback.wants(Kind::Video) {
 				playback.read(Kind::Video);
-				for (name, config) in snapshot.video.renditions {
+				for (name, config) in snapshot.video.enabled() {
 					// A rendition pointing at a broadcast we can't reach is that
 					// rendition's problem, not the catalog's: fall through to the
 					// next one like an unsupported codec does.
@@ -222,17 +228,11 @@ impl<O: Output> Media<O> {
 						}
 					};
 					// Nothing older than the playhead is worth presenting, so the delay
-					// doubles as the staleness budget on the wire. With no speaker to
-					// follow, the playhead is video's own, so waiting on the audio
-					// estimate's budget would only freeze the picture.
-					let max_delay = if snapshot.audio.renditions.is_empty() {
-						self.args.video_delay()
-					} else {
-						self.args.max_delay()
-					};
+					// doubles as the staleness budget on the wire.
+					let max_delay = self.args.video_max_delay(&snapshot.audio);
 					let opened = async {
-						let decoder = moq_video::decode::Sink::open(&config, &Default::default()).await?;
-						let track = rendition.track(&name)?;
+						let decoder = moq_video::decode::Sink::open(config, &Default::default()).await?;
+						let track = rendition.track(name)?;
 						let mut subscriber = track
 							.subscribe(
 								moq_net::track::Subscription::default()
@@ -245,7 +245,7 @@ impl<O: Output> Media<O> {
 						if let Some(latest) = track.latest() {
 							subscriber.set_groups(latest..);
 						}
-						let format = catalog::hang::Container::try_from(&config)?;
+						let format = catalog::hang::Container::try_from(config)?;
 						Ok::<_, anyhow::Error>((moq_mux::container::Consumer::new(subscriber, format), decoder))
 					}
 					.await;
@@ -259,7 +259,17 @@ impl<O: Output> Media<O> {
 								output: self.output.clone(),
 								max_delay,
 							};
-							tasks.spawn(async move { (Kind::Video, video.run(track, decoder).await.map(|()| None)) });
+							let (stop, stopped) = tokio::sync::oneshot::channel();
+							video_demand = Some((name.clone(), stop));
+							tasks.spawn(async move {
+								(
+									Kind::Video,
+									tokio::select! {
+									result = video.run(track, decoder) => result.map(|()| None),
+									_ = stopped => Ok(None),
+									},
+								)
+							});
 							playback.started(Kind::Video);
 							break;
 						}
@@ -273,7 +283,7 @@ impl<O: Output> Media<O> {
 
 			if playback.wants(Kind::Audio) {
 				playback.read(Kind::Audio);
-				for (name, config) in snapshot.audio.renditions {
+				for (name, config) in snapshot.audio.enabled() {
 					let rendition = match source.resolve(config.broadcast.as_ref()).await {
 						Ok(rendition) => rendition,
 						Err(err) => {
@@ -293,7 +303,7 @@ impl<O: Output> Media<O> {
 					// The sink and the frame-duration math below both assume f32,
 					// so ask for it rather than inheriting the decoder default.
 					decode.output.format = moq_audio::Format::F32;
-					match moq_audio::decode::Consumer::new(&rendition, &config, &name, decode).await {
+					match moq_audio::decode::Consumer::new(&rendition, config, name, decode).await {
 						Ok(consumer) => {
 							tracing::info!(track = name, decoder = consumer.name(), "playing audio rendition");
 							if speaker.is_none() {
@@ -306,7 +316,17 @@ impl<O: Output> Media<O> {
 								changed: self.drained.clone(),
 								output: self.output.clone(),
 							};
-							tasks.spawn(async move { (Kind::Audio, play_audio(consumer, audio).await.map(Some)) });
+							let (stop, stopped) = tokio::sync::oneshot::channel();
+							audio_demand = Some((name.clone(), stop));
+							tasks.spawn(async move {
+								(
+									Kind::Audio,
+									tokio::select! {
+									result = play_audio(consumer, audio) => result.map(Some),
+									_ = stopped => Ok(None),
+									},
+								)
+							});
 							playback.started(Kind::Audio);
 							break;
 						}
@@ -326,6 +346,20 @@ impl<O: Output> Media<O> {
 				);
 			}
 		}
+	}
+}
+
+// Cancel through the task's own result so it still reports which half ended.
+fn stop_disabled<'a>(
+	playing: &mut Option<(String, tokio::sync::oneshot::Sender<()>)>,
+	mut disabled: impl Iterator<Item = &'a String>,
+) {
+	if playing
+		.as_ref()
+		.is_some_and(|(name, _)| disabled.any(|disabled| disabled == name))
+	{
+		let (_, stop) = playing.take().unwrap();
+		let _ = stop.send(());
 	}
 }
 
@@ -552,6 +586,43 @@ mod tests {
 			drained: Default::default(),
 			output,
 		}
+	}
+
+	#[tokio::test]
+	async fn disabling_a_live_high_rendition_plays_the_lower_one() {
+		tokio::time::pause();
+		let origin = moq_tokio::origin::spawn();
+		let mut broadcast = origin.create_broadcast("room").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let mut catalog = catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut high = rendition(&broadcast, &catalog, "high");
+		let recorder = Recorder::default();
+		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
+		write(&mut high, 10, 0.25).await;
+		let mut low = rendition(&broadcast, &catalog, "low");
+		catalog
+			.mutate(|catalog| {
+				let high = catalog.audio.renditions.get_mut("high").unwrap();
+				high.bitrate = Some(u64::from(SAMPLE_RATE) * 32);
+				high.enabled = false;
+				// An unknown bitrate ranks below a known one without falsifying PCM metadata.
+				catalog.audio.renditions.get_mut("low").unwrap().bitrate = None;
+			})
+			.unwrap();
+		for index in 10..40 {
+			high.write(packet(index, 0.25)).unwrap();
+			low.write(packet(index, 0.5)).unwrap();
+			tokio::time::sleep(PACKET_DURATION).await;
+		}
+		low.finish().unwrap();
+		catalog.finish().unwrap();
+		// The high rendition remains open: only the disabled catalog can stop it.
+		settle(player, &recorder).await;
+		assert!(recorder.played().iter().any(|part| part.sample == 0.25));
+		assert!(
+			recorder.played().iter().any(|part| part.sample == 0.5),
+			"the live disabled track prevented fallback"
+		);
 	}
 
 	/// A publisher retires an audio rendition by naming its replacement and then

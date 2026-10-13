@@ -20,9 +20,8 @@ after the handshake deadline (moq-dev/moq#4612), by applying
   controlled time instead of the private timer heap.
 
 Split on 2026-10-08: the HTTP/2 idle deadline is
-[HTTP listener deadlines](https://github.com/moq-dev/moq/pull/5245) and the iroh
-keep-alive is [iroh keep-alive](/quest/m1/iroh-keep-alive.md); each lands on
-its own.
+[HTTP listener deadlines](https://github.com/moq-dev/moq/pull/5245). The iroh
+keep-alive landed on its own.
 
 Public API: none beyond existing settings. Wire: none.
 
@@ -33,4 +32,3 @@ Public API: none beyond existing settings. Wire: none.
 ## Related
 
 - [HTTP listener deadlines](https://github.com/moq-dev/moq/pull/5245) - the HTTPS and internal listeners' half
-- [iroh keep-alive](/quest/m1/iroh-keep-alive.md) - the iroh backend's half

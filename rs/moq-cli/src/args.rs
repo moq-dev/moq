@@ -709,7 +709,8 @@ pub struct Import {
 	/// wait for a late group). The default suits a segmented egress (HLS/DASH), which may only
 	/// advertise segments that are still fetchable; lower it when nothing reads history and the
 	/// memory matters. Media tracks only -- the catalog and timeline are read at the live edge,
-	/// which is retained unconditionally.
+	/// which is retained unconditionally. A stdin import also stays up this long after EOF, so
+	/// a subscriber still catching up can drain the finished broadcast.
 	#[usage(long)]
 	pub max_age: Option<crate::duration::Duration>,
 

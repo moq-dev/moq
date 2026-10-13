@@ -189,6 +189,7 @@ pub(crate) async fn connect_tls(
 		url::Host::Ipv4(ip) => ip.to_string(),
 		url::Host::Ipv6(ip) => ip.to_string(),
 	});
+	crate::tls::server_name(&name)?;
 	let client = qmux::tls::Client::new(std::sync::Arc::new(tls.build()?))
 		.with_protocols(protocols.iter().map(|&alpn| (alpn, &[WIRE_VERSION][..])))
 		.require_protocol();

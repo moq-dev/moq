@@ -6,8 +6,10 @@ use crate::coding;
 /// unchanged; 64+ are the application's. The stream registry is [`StreamError`] and the two
 /// are disjoint, so the same integer means different things in each.
 ///
-/// Every variant is a registered code, so the registry round-trips: 32 through 47 is
-/// reserved, nothing is sent there, and a received one stays [`Unknown`](Self::Unknown).
+/// Shared codes round-trip through [`to_code`](Self::to_code) and
+/// [`from_code`](Self::from_code). Protocol drivers translate Lite-only variants at
+/// their wire boundary; the shared decoder keeps those numbers [`Unknown`](Self::Unknown).
+/// Codes 32 through 47 are reserved and have no assigned meaning.
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SessionError {
@@ -46,9 +48,18 @@ pub enum SessionError {
 	#[error("control message timeout")]
 	Timeout,
 
+	/// A token registration would exceed the advertised `MAX_AUTH_TOKEN_CACHE_SIZE`, which is
+	/// 0 when unadvertised.
+	#[error("auth token cache overflow")]
+	AuthTokenCacheOverflow,
+
 	/// No version could be negotiated.
 	#[error("version negotiation failed")]
 	Version,
+
+	/// A token named an alias that was never registered.
+	#[error("unknown auth token alias")]
+	UnknownAuthTokenAlias,
 
 	/// An application-chosen code, offset into the 64+ range on the wire.
 	#[error("app code={0}")]
@@ -57,27 +68,39 @@ pub enum SessionError {
 	/// A code this version does not recognize, kept verbatim.
 	#[error("unknown code={0}")]
 	Unknown(u32),
+
+	/// The peer cannot support the requested feature; moq-lite only.
+	#[error("not supported")]
+	Unsupported,
+
+	/// A request ID was reused or violated the negotiated draft’s order or parity rules.
+	#[error("invalid request id")]
+	InvalidRequestId,
 }
 
 impl SessionError {
-	/// The integer sent on the wire.
+	/// The shared session code; Lite-only conditions fall back to an internal error.
 	pub fn to_code(&self) -> u32 {
 		match self {
 			Self::Cancel => 0x0,
 			Self::Internal => 0x1,
 			Self::Unauthorized => 0x2,
 			Self::ProtocolViolation => 0x3,
+			Self::InvalidRequestId => 0x4,
 			Self::KeyValueFormatting => 0x6,
 			Self::TooManyRequests => 0x7,
 			Self::GoawayTimeout => 0x10,
 			Self::Timeout => 0x11,
+			Self::AuthTokenCacheOverflow => 0x13,
 			Self::Version => 0x15,
+			Self::UnknownAuthTokenAlias => 0x17,
+			Self::Unsupported => 0x1,
 			Self::App(app) => *app as u32 + 64,
 			Self::Unknown(code) => *code,
 		}
 	}
 
-	/// Decode a code received off the wire.
+	/// Decode a shared session code, leaving protocol-specific codes unknown.
 	///
 	/// Unlike a raw peer code, the registered ones are specified, so decoding them is a
 	/// wire contract rather than an assumption. Anything unregistered stays
@@ -88,11 +111,14 @@ impl SessionError {
 			0x1 => Self::Internal,
 			0x2 => Self::Unauthorized,
 			0x3 => Self::ProtocolViolation,
+			0x4 => Self::InvalidRequestId,
 			0x6 => Self::KeyValueFormatting,
 			0x7 => Self::TooManyRequests,
 			0x10 => Self::GoawayTimeout,
 			0x11 => Self::Timeout,
+			0x13 => Self::AuthTokenCacheOverflow,
 			0x15 => Self::Version,
+			0x17 => Self::UnknownAuthTokenAlias,
 			code @ 64.. => match u16::try_from(code - 64) {
 				Ok(app) => Self::App(app),
 				Err(_) => Self::Unknown(code),
@@ -549,13 +575,14 @@ impl From<StreamError> for Error {
 impl From<&Error> for SessionError {
 	fn from(err: &Error) -> Self {
 		match err {
-			Error::Session(err) => err.clone(),
+			Error::Session(err) | Error::Decode(coding::DecodeError::Session(err)) => err.clone(),
 			// App codes share the 64+ range in both registries.
 			Error::Stream(StreamError::App(app)) => Self::App(*app),
 			// A stream-scoped code has no meaning in this registry; don't forward the number.
 			Error::Stream(_) => Self::Internal,
 			Error::Cancel | Error::Closed | Error::GoingAway | Error::SessionClosed => Self::Cancel,
 			Error::Unauthorized => Self::Unauthorized,
+			Error::Unsupported => Self::Unsupported,
 			Error::Version | Error::UnknownAlpn(_) => Self::Version,
 			Error::TooManyParameters => Self::KeyValueFormatting,
 			Error::TooManyRequests => Self::TooManyRequests,
@@ -595,6 +622,7 @@ impl From<&Error> for StreamError {
 			Error::Session(_) => Self::Internal,
 			Error::Cancel | Error::Closed => Self::Cancel,
 			Error::SessionClosed => Self::Session(SessionError::Cancel),
+			Error::Decode(coding::DecodeError::Session(err)) => Self::Session(err.clone()),
 			Error::Old => Self::Old,
 			Error::Evicted => Self::Evicted,
 			Error::Lagged => Self::TooFarBehind,
@@ -648,6 +676,12 @@ mod tests {
 	// Both registries are wire contracts now (draft-lcurley-moq-lite, Error Codes), so
 	// every code we send must decode back to what we meant.
 	#[test]
+	fn lite_unsupported_is_not_in_the_shared_session_registry() {
+		assert_eq!(SessionError::from(&Error::Unsupported).to_code(), 0x1);
+		assert_eq!(SessionError::from_code(0x30), SessionError::Unknown(0x30));
+	}
+
+	#[test]
 	fn session_codes_round_trip() {
 		// Only the registered codes are a wire contract, so only they round trip.
 		let registered = [
@@ -655,11 +689,14 @@ mod tests {
 			SessionError::Internal,
 			SessionError::Unauthorized,
 			SessionError::ProtocolViolation,
+			SessionError::InvalidRequestId,
 			SessionError::KeyValueFormatting,
 			SessionError::TooManyRequests,
 			SessionError::GoawayTimeout,
 			SessionError::Timeout,
+			SessionError::AuthTokenCacheOverflow,
 			SessionError::Version,
+			SessionError::UnknownAuthTokenAlias,
 			SessionError::App(0),
 			SessionError::App(404),
 		];
@@ -673,13 +710,16 @@ mod tests {
 
 		// The moq-transport codes we reuse must keep moq-transport's values.
 		assert_eq!(SessionError::Unauthorized.to_code(), 0x2);
+		assert_eq!(SessionError::InvalidRequestId.to_code(), 0x4);
 		assert_eq!(SessionError::TooManyRequests.to_code(), 0x7);
 		assert_eq!(SessionError::GoawayTimeout.to_code(), 0x10);
+		assert_eq!(SessionError::AuthTokenCacheOverflow.to_code(), 0x13);
 		assert_eq!(SessionError::Version.to_code(), 0x15);
+		assert_eq!(SessionError::UnknownAuthTokenAlias.to_code(), 0x17);
 
 		// The reserved 32-47 range, and anything else unregistered, keeps its value instead
 		// of being given a meaning. A peer on the old placeholders (0x20-0x22) lands here.
-		for code in [0x1f, 0x20, 0x21, 0x22, 0x2f] {
+		for code in [0x1f, 0x20, 0x21, 0x22, 0x2f, 0x30] {
 			assert_eq!(SessionError::from_code(code), SessionError::Unknown(code));
 		}
 

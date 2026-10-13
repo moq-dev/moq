@@ -2,6 +2,7 @@ import { StreamError } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
 import * as Ietf from "../ietf/index.ts";
 import { Reader, Stream, UnexpectedEnd, Writer } from "../stream.ts";
+import * as Extensions from "./extensions.ts";
 
 /**
  * Draft-17+ SETUP exchange. Each side opens a uni stream, writes its Setup
@@ -12,16 +13,17 @@ import { Reader, Stream, UnexpectedEnd, Writer } from "../stream.ts";
  * Returns the control stream, the uni streams that arrived before it (see
  * {@link receiveSetup}), plus what the peer's SETUP declared: whether it requires
  * solicitation, which decides whether we announce namespaces unprompted (see the MoQ Solicit
- * extension), its Hop ID (see the MoQ Cluster extension), and whether it offered MoQ Auth.
- * We declare all three ourselves on
- * every session: we send SUBSCRIBE_NAMESPACE for each prefix we want, so an unsolicited
- * advertisement can tell us nothing we won't have asked for, and a peer that knows our Hop
- * ID can withhold the advertisements that already flowed through us.
+ * extension), its Hop ID (see the MoQ Cluster extension), and whether MoQ Auth is negotiated.
+ * We declare our Hop ID on every session, and Solicit and Auth unless `extensions` declines
+ * them: we send SUBSCRIBE_NAMESPACE for each prefix we want, so an unsolicited advertisement
+ * can tell us nothing we won't have asked for, and a peer that knows our Hop ID can withhold
+ * the advertisements that already flowed through us.
  */
 export async function exchangeSetup(
 	transport: WebTransport,
 	version: Ietf.IetfVersion,
 	implementation: string,
+	extensions: Extensions.Offered,
 ): Promise<{
 	control: Stream;
 	early: Reader[];
@@ -33,9 +35,8 @@ export async function exchangeSetup(
 	const encoder = new TextEncoder();
 	const params = new Ietf.SetupOptions();
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode(implementation));
-	Ietf.solicitIntoSetup(params);
+	Extensions.intoSetup(params, extensions, version);
 	Ietf.hiddenIntoSetup(params);
-	Ietf.Auth.intoSetup(params, version);
 
 	// One id per session, like the moq-lite connection: nothing in this process forwards
 	// between sessions, so there is nothing for a shared id to detect.
@@ -55,7 +56,8 @@ export async function exchangeSetup(
 		solicit: received.solicit,
 		hidden: received.hidden,
 		cluster: { self, peer: received.cluster },
-		auth: received.auth,
+		// Negotiated only when both sides offer it.
+		auth: received.auth && extensions.auth,
 	};
 }
 

@@ -135,14 +135,6 @@ let
       rustPlatform.bindgenHook
     ];
 
-    # libmoq.a carries moq-ffi's whole dep tree, so an unstripped build is
-    # ~75 MB+. Thin LTO with a single codegen unit dead-strips the unused
-    # monomorphizations Rust bakes into a staticlib, halving the artifact
-    # with no source or ABI change, which keeps the release tarball and
-    # brew download small. Mirrors rs/moq-c/build.sh's Windows cargo path.
-    CARGO_PROFILE_RELEASE_LTO = "thin";
-    CARGO_PROFILE_RELEASE_CODEGEN_UNITS = "1";
-
     # moq-c is a staticlib; crane's default install phase only handles
     # binaries. Lay out the artifact tree the way release tarballs and
     # downstream `find_package(moq-c)` consumers already expect.

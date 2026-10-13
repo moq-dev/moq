@@ -57,6 +57,11 @@ mod test {
 	use super::*;
 	use crate::Compression;
 
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	/// An uncompressed config with the given delta ratio.
 	fn cfg(delta_ratio: u32) -> Config {
 		Config::default().with_delta_ratio(delta_ratio)
@@ -84,7 +89,7 @@ mod test {
 	fn producer(config: Config) -> (Producer<Value>, moq_net::track::Subscriber) {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", None)
+			.create_track("test", timed())
 			.unwrap();
 		let consumer = track.subscribe(None);
 		(Producer::new(track, config), consumer)
@@ -131,7 +136,7 @@ mod test {
 	fn a_lost_group_waits_for_its_replacement() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", None)
+			.create_track("test", timed())
 			.unwrap();
 		let mut consumer = Consumer::<Value>::new(track.subscribe(None), consumer::Config::default());
 		let waiter = kio::Waiter::noop();
@@ -165,7 +170,7 @@ mod test {
 	fn a_lost_group_on_a_finished_track_ends_cleanly() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", None)
+			.create_track("test", timed())
 			.unwrap();
 		let mut consumer = Consumer::<Value>::new(track.subscribe(None), consumer::Config::default());
 		let waiter = kio::Waiter::noop();
@@ -450,7 +455,7 @@ mod test {
 
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", None)
+			.create_track("test", timed())
 			.unwrap();
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::<Doc>::new(track, Config::default());
@@ -476,7 +481,7 @@ mod test {
 
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", None)
+			.create_track("test", timed())
 			.unwrap();
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::<Doc>::new(track, Config::default());
@@ -520,7 +525,7 @@ mod test {
 
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", None)
+			.create_track("test", timed())
 			.unwrap();
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::<Doc>::new(track, cfg(0));
@@ -703,7 +708,7 @@ mod test {
 	/// write failure (the reported one is a frame over moq-net's 32 MB per-group cache) without
 	/// allocating 32 MB to provoke it.
 	fn rejecting_track() -> moq_net::track::Producer {
-		let mut info = moq_net::track::Info::default();
+		let mut info = timed();
 		info.timescale = Some(moq_net::Timescale::new((1u64 << 62) - 1).unwrap());
 
 		moq_net::broadcast::Info::new()
@@ -742,7 +747,7 @@ mod test {
 
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", None)
+			.create_track("test", timed())
 			.unwrap();
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::<Doc>::new(track, cfg(0));
@@ -791,7 +796,7 @@ mod test {
 		// keep waiting on it rather than ending the stream. Regression for the backlog-collapse poll.
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", None)
+			.create_track("test", timed())
 			.unwrap();
 		let mut group = track.append_group().unwrap();
 		let consumer_track = track.subscribe(None);

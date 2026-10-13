@@ -75,6 +75,8 @@ pub struct Client<S = TcpStream> {
 	import_max_age: Option<Duration>,
 	/// Connection allocator each ingested track claims its peak-hold bitrate on.
 	import_bandwidth: moq_net::bandwidth::Allocator,
+	/// Script data [`pull`](Self::pull) discards, including any sent before Play.Start.
+	metadata: crate::metadata::Dropped,
 }
 
 impl Client<TcpStream> {
@@ -156,6 +158,7 @@ impl<S: Stream> Client<S> {
 			export_max_delay: crate::DEFAULT_MAX_DELAY,
 			import_max_age: None,
 			import_bandwidth: moq_net::bandwidth::Allocator::unlimited(),
+			metadata: Default::default(),
 		})
 	}
 
@@ -291,6 +294,7 @@ impl<S: Stream> Client<S> {
 			.request_playback(stream_key.to_string())
 			.map_err(|e| anyhow::anyhow!("rtmp request play: {e:?}"))?;
 		self.work.push_back(request);
+		self.metadata = crate::metadata::Dropped::new(path.as_str());
 		self.await_event(Direction::Play).await?;
 
 		let config = moq_mux::catalog::Config::default()
@@ -365,9 +369,10 @@ impl<S: Stream> Client<S> {
 							tracing::warn!(%err, "dropping RTMP audio frame that failed to demux");
 						}
 					}
-					// Codec config arrives in the sequence-header tags, so metadata
-					// isn't forwarded.
-					ClientSessionEvent::StreamMetadataReceived { .. } => {}
+					// Codec config arrives in the sequence-header tags, so script
+					// data isn't forwarded.
+					ClientSessionEvent::StreamMetadataReceived { .. }
+					| ClientSessionEvent::UnhandleableAmf0Data { .. } => self.metadata.record(),
 					other => tracing::trace!(?other, "ignoring RTMP event during pull"),
 				},
 				ClientSessionResult::UnhandleableMessageReceived(_) => {}
@@ -387,6 +392,12 @@ impl<S: Stream> Client<S> {
 					ClientSessionResult::RaisedEvent(event) => match (direction, event) {
 						(Direction::Publish, ClientSessionEvent::PublishRequestAccepted)
 						| (Direction::Play, ClientSessionEvent::PlaybackRequestAccepted) => return Ok(()),
+						// Script data can precede Play.Start; count it without keeping the payload.
+						(
+							Direction::Play,
+							ClientSessionEvent::StreamMetadataReceived { .. }
+							| ClientSessionEvent::UnhandleableAmf0Data { .. },
+						) => self.metadata.record(),
 						// A refused publish/play arrives as an onStatus *failure* code, not a
 						// Rejected event; surface it instead of hanging until the peer closes.
 						// Benign progress codes (e.g. NetStream.Play.Reset, which precedes
@@ -548,6 +559,58 @@ mod tests {
 	use std::time::Duration;
 
 	use super::*;
+	#[tokio::test(start_paused = true)]
+	#[tracing_test::traced_test]
+	async fn pull_metadata_drops_warn_once() {
+		let (stream, _peer) = tokio::io::duplex(1024);
+		let (mut session, _) = ClientSession::new(crate::rml::sessions::ClientSessionConfig::new()).unwrap();
+		// A custom script message goes through the session's own parser, ahead of
+		// Play.Start, then onMetaData follows the acceptance.
+		let mut work = VecDeque::from(session.handle_input(&crate::metadata::cue_point_packet()).unwrap());
+		work.push_back(ClientSessionResult::RaisedEvent(
+			ClientSessionEvent::PlaybackRequestAccepted,
+		));
+		work.push_back(ClientSessionResult::RaisedEvent(
+			ClientSessionEvent::StreamMetadataReceived {
+				metadata: crate::rml::sessions::StreamMetadata::new(),
+			},
+		));
+		let mut client = Client {
+			stream,
+			session,
+			work,
+			app: "live".into(),
+			export_max_delay: crate::DEFAULT_MAX_DELAY,
+			import_max_age: None,
+			import_bandwidth: Default::default(),
+			metadata: crate::metadata::Dropped::new("metadata"),
+		};
+		let origin = moq_tokio::origin::spawn();
+		let mut publisher = Publisher::new(&origin, "metadata", Default::default()).unwrap();
+		client.await_event(Direction::Play).await.unwrap();
+		let queued = std::mem::take(&mut client.work);
+		client.pull_results(queued, &mut publisher).await.unwrap();
+		assert_eq!(client.metadata.count, 2);
+		publisher.finish().unwrap();
+		drop(client);
+		logs_assert(|lines| {
+			let warnings = lines
+				.iter()
+				.filter(|line| line.contains("discarding RTMP stream metadata"))
+				.count();
+			let summary = lines.iter().any(|line| {
+				line.contains("RTMP metadata discard summary")
+					&& line.contains("path=metadata")
+					&& line.contains("count=2")
+			});
+			if warnings == 1 && summary {
+				Ok(())
+			} else {
+				Err(format!("warnings={warnings}, summary={summary}"))
+			}
+		});
+	}
+
 	use crate::server::{Request, Server};
 
 	/// Loopback: dial the crate's own server and pull a broadcast the server plays
