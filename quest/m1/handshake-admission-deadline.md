@@ -58,12 +58,14 @@ deadline does not leave admission work running detached.
 Tests on controlled time for each caller, the embedded decider and an HTTP
 auth server: an admission that never answers closes at the deadline, one
 answered just inside it (past 10 s for the HTTP server) is admitted, and
-`"0"` waits. An `attach` to a stalled server is still refused at its bound.
+`"0"` waits. At the deadline the HTTP server sees its `connect` request
+dropped, so expired admissions leave no in-flight requests behind. An
+`attach` to a stalled server is still refused at its bound.
 Update `doc/bin/relay/config.md`, which says the deadline covers
 "transport through MoQ SETUP", and `doc/bin/relay/auth.md`, which promises
 that an embedded admission left unanswered for ten seconds is refused; the
 embedder now owns that deadline. Note the behavior change for slow auth
-servers in the relay changelog.
+servers in the `moq-relay` and `moq-auth` changelogs.
 
 Public API: a new `moq_tokio::server::Request` method to bound admission by
 the handshake deadline. `Auth::admit`, `Cluster::admit` and
