@@ -1763,6 +1763,39 @@ test("Frame object time: draft-16 starts delta property types", async () => {
 	expect(decoded.timestamp?.scale).toBe(Timescale.MILLI);
 });
 
+// The End-of-Group header bit and an END_OF_GROUP (0x03) status are independent, so a
+// publisher may send both. Either way the group ends on a payload-less frame.
+test("Frame: END_OF_GROUP is accepted whether or not the header marks the end", async () => {
+	const makeFlags = (hasEnd: boolean): GroupFlags => ({
+		hasExtensions: false,
+		hasSubgroup: false,
+		hasSubgroupObject: false,
+		hasEnd,
+		hasPriority: true,
+		firstObject: true,
+	});
+
+	// idDelta 0, zero-length payload, then the END_OF_GROUP status.
+	const wire = new Uint8Array([0x00, 0x00, 0x03]);
+
+	for (const hasEnd of [false, true]) {
+		const decoded = await new Reader(undefined, wire, Version.DRAFT_20).decode((c) =>
+			Frame.decode(c, makeFlags(hasEnd), Timescale.MILLI),
+		);
+
+		// No payload is the group-end signal the subscriber breaks its read loop on.
+		expect(decoded.payload).toBeUndefined();
+		expect(decoded.endOfTrack).toBe(false);
+	}
+
+	// Status 0 on a marked stream is still an empty frame, not a group end.
+	const empty = await new Reader(undefined, new Uint8Array([0x00, 0x00, 0x00]), Version.DRAFT_20).decode((c) =>
+		Frame.decode(c, makeFlags(true), Timescale.MILLI),
+	);
+	expect(empty.payload).toEqual(new Uint8Array(0));
+	expect(empty.endOfTrack).toBe(false);
+});
+
 test("Frame decodes objects split at every byte", async () => {
 	const flags: GroupFlags = {
 		hasExtensions: true,
