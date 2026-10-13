@@ -229,6 +229,7 @@ export class Decoder {
 			sync: this.sync,
 			broadcast: active,
 			track,
+			name: Catalog.track(track, identity),
 			config: identity.decoder,
 			identity: key,
 			stats: this.#out.stats,
@@ -378,7 +379,9 @@ export class Decoder {
 interface DecoderTrackProps {
 	sync: Sync;
 	broadcast: Moq.Broadcast.Consumer;
+	// The rendition ID; `name` is its track's name in `broadcast`.
 	track: string;
+	name: string;
 	config: DecoderConfig;
 	identity: string;
 	// The broadcast catalog this subscription started from. Updates on that broadcast still apply;
@@ -393,6 +396,7 @@ class DecoderTrack {
 	sync: Sync;
 	broadcast: Moq.Broadcast.Consumer;
 	track: string;
+	name: string;
 	config: DecoderConfig;
 	identity: string;
 	catalog: Getter<Catalog.Root | undefined>;
@@ -425,6 +429,7 @@ class DecoderTrack {
 		this.sync = props.sync;
 		this.broadcast = props.broadcast;
 		this.track = props.track;
+		this.name = props.name;
 		this.config = props.config;
 		this.identity = props.identity;
 		this.catalog = props.catalog;
@@ -436,7 +441,7 @@ class DecoderTrack {
 	#run(effect: Effect): void {
 		const sub = subscribeMedia(effect, {
 			broadcast: this.broadcast,
-			track: this.track,
+			track: this.name,
 			priority: Catalog.PRIORITY.video,
 			maxDelay: this.sync.out.maxDelay,
 		});

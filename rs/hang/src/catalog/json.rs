@@ -71,6 +71,16 @@ pub struct JsonConfig {
 	#[serde(default)]
 	pub broadcast: Option<moq_net::path::RelativeOwned>,
 
+	/// The track's name in its broadcast, when it differs from this entry's ID: its key in the
+	/// catalog. Absent means the ID is the track name, as in every catalog before this field.
+	///
+	/// Set it only when the ID can't be the name, such as two renditions of same-named tracks
+	/// from different broadcasts. Readers resolve the name with
+	/// [`Reference::track`](crate::catalog::Reference::track); one that predates the
+	/// field subscribes to the ID instead.
+	#[serde(default)]
+	pub track: Option<String>,
+
 	/// Whether the track is a latest-value document or an append log. Always stated: see [`Mode`].
 	#[serde_as(as = "serde_with::DisplayFromStr")]
 	pub mode: Mode,
@@ -118,6 +128,7 @@ impl JsonConfig {
 	pub fn new(mode: Mode) -> Self {
 		Self {
 			broadcast: None,
+			track: None,
 			mode,
 			compression: None,
 			schema: None,

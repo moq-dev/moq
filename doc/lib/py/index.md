@@ -37,8 +37,10 @@ async def main():
             print(announcement.captures)  # what * matched, or None for a partial overlap
             broadcast = await client.request_broadcast(announcement.prefix)
             catalog = await moq.media.catalog(broadcast)
-            name, track = next(iter(catalog.audio.items()))
-            async for frame in await moq.media.ContainerConsumer.subscribe(broadcast, name, track.container):
+            name, audio = next(iter(catalog.audio.items()))
+            # The track is the rendition's `track` when set, otherwise its catalog key.
+            track = audio.track if audio.track is not None else name
+            async for frame in await moq.media.ContainerConsumer.subscribe(broadcast, track, audio.container):
                 print(frame.timestamp, len(frame.payload))
 
 asyncio.run(main())

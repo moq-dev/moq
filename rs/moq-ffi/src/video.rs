@@ -724,6 +724,7 @@ fn video_config(catalog_video: crate::media::MoqVideo) -> Result<hang::catalog::
 
 	let mut config = hang::catalog::VideoConfig::new(codec);
 	config.label = catalog_video.label;
+	config.track = catalog_video.track;
 	config.description = catalog_video.description.map(Into::into);
 	if let Some(coded) = catalog_video.coded {
 		config.coded_width = Some(coded.width);
@@ -803,6 +804,7 @@ mod decode_tests {
 		MoqVideo {
 			label: None,
 			broadcast: None,
+			track: None,
 			codec: codec.to_string(),
 			description: None,
 			coded: Some(MoqDimensions {

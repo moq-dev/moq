@@ -32,6 +32,25 @@ test("catalog producer seeds subscribers and fans out edits", async () => {
 	effect.close();
 });
 
+test("catalog producer refuses an ID naming both a video and an audio rendition", () => {
+	const catalog = new CatalogProducer();
+	expect(() =>
+		catalog.mutate((c) => {
+			c.video = { renditions: { main: { codec: "avc1.64001f", container: { kind: "legacy" } } } };
+			c.audio = {
+				renditions: {
+					main: {
+						codec: "opus",
+						sampleRate: Catalog.u53(48000),
+						numberOfChannels: Catalog.u53(2),
+						container: { kind: "legacy" },
+					},
+				},
+			};
+		}),
+	).toThrow(Catalog.DuplicateRendition);
+});
+
 test("catalog producer publishes every update as a snapshot group", async () => {
 	const catalog = new CatalogProducer();
 	catalog.mutate((c) => {

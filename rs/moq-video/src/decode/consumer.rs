@@ -101,7 +101,7 @@ impl Consumer {
 		let decoder = Sink::open(catalog, &options.decoder).await?;
 
 		let name = name.into();
-		let track = broadcast.track(&name)?;
+		let track = broadcast.track(hang::catalog::Reference::track(catalog, &name))?;
 		let mut subscriber = track
 			.subscribe(
 				moq_net::track::Subscription::default()
