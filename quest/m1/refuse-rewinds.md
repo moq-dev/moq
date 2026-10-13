@@ -34,7 +34,12 @@ group's start. The write fails without writing: every Rust write path
 commits the frame (or installs the partial one) before `stamp` today, so
 the check runs before any cache, frame, or index change, and the start is
 stamped only once it passes. A session receiving such a group aborts the
-track with that error and keeps the session.
+track with that error and keeps the session. The ingress handlers must
+route it there: today Rust's IETF subscriber (`rs/moq-net/src/ietf/subscriber.rs`)
+sends `TimestampMismatch` down the generic branch that aborts only the
+group, and js/net's (`js/net/src/ietf/subscriber.ts`) closes the track only
+for `ProtocolViolation` or `MalformedTrack`. Check the lite subscribers the
+same way, and test that the track, not just the group, closes.
 
 Cases the rule must cover (from review):
 
@@ -105,10 +110,10 @@ Reconcile the docs:
 - Delete tests whose premise is a rewind, such as
   `reach_follows_the_immediate_successor_not_a_later_rewind`.
 - The container layers already refuse rewinds (moq-mux's
-  `container::Producer` returns `TimestampRewind`, and js/hang's `Consumer`
-  aborts one). Keep the producers' refusal, which fires before writing and
-  also floors every frame, not just a group's first. Delete only consumer
-  checks the model now makes unreachable.
+  `container::Producer` returns `TimestampRewind`; the Rust and js/hang
+  container consumers abort one). Keep all of them: they floor every frame
+  against the previous group's start, while the model checks only a group's
+  first frame, and a foreign wire publisher bypasses the producer's floor.
 - If #5446 lands first, update its note that late-group delivery after a
   rewind is unspecified.
 
