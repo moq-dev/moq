@@ -2319,7 +2319,7 @@ mod tests {
 			while let Some(event) = requests.next().await {
 				match event {
 					moq_net::auth::Event::Session(req) => sessions.push(req.accept(moq_net::auth::Grant::all())),
-					moq_net::auth::Event::Scoped(req) => {
+					moq_net::auth::Event::Request(req) => {
 						if let Some(tx) = first_tx.take() {
 							let _ = tx.send(req.token().value.clone());
 						}

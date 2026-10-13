@@ -417,7 +417,7 @@ impl Handle {
 	///
 	/// Session tokens arrive as [`Event::Session`]. An `AUTHORIZATION TOKEN` on a SUBSCRIBE
 	/// or PUBLISH_NAMESPACE that [`authorize`](Self::authorize) does not cover arrives as
-	/// [`Event::Scoped`] and decides that request alone. Experimental.
+	/// [`Event::Request`] and decides that request alone. Experimental.
 	///
 	/// Call it before running the session's driver: whoever answers is decided
 	/// once, on the driver's first poll, so a later call cannot take over tokens
@@ -449,7 +449,7 @@ impl Handle {
 
 	/// Ask the acceptor to verify a token that rode on one request.
 	///
-	/// The token reaches the application as an [`Event::Scoped`]. The grant it answers covers
+	/// The token reaches the application as an [`Event::Request`]. The grant it answers covers
 	/// only this request, never joins the session union, and ends when the returned
 	/// [`RequestVerdict`] is dropped. With no [`requests`](Self::requests) consumer the token
 	/// cannot be verified, so the verdict is [`Error::Unsupported`]. `hold` is the request's
@@ -469,7 +469,7 @@ impl Handle {
 			..Default::default()
 		});
 		// A closed or full queue refuses the token.
-		queue.push(Event::Scoped(Scoped {
+		queue.push(Event::Request(Scoped {
 			token,
 			path,
 			kind,
@@ -899,14 +899,14 @@ pub enum Event {
 	Session(Request),
 	/// A token on one SUBSCRIBE or PUBLISH_NAMESPACE, answered with a grant only that
 	/// request holds. Experimental.
-	Scoped(Scoped),
+	Request(Scoped),
 }
 
 impl Event {
 	fn ended(&self) -> bool {
 		let issue = match self {
 			Self::Session(request) => &request.issue,
-			Self::Scoped(scoped) => &scoped.issue,
+			Self::Request(scoped) => &scoped.issue,
 		};
 		issue.as_ref().expect("unanswered request").read().peer.is_some()
 	}
@@ -914,7 +914,7 @@ impl Event {
 	fn reject(self, code: SessionError, reason: &str) {
 		match self {
 			Self::Session(request) => request.reject(code, reason),
-			Self::Scoped(scoped) => scoped.reject(code, reason),
+			Self::Request(scoped) => scoped.reject(code, reason),
 		}
 	}
 }
@@ -924,13 +924,13 @@ impl Event {
 	pub(crate) fn session(self) -> Request {
 		match self {
 			Self::Session(request) => request,
-			Self::Scoped(_) => panic!("expected a session token"),
+			Self::Request(_) => panic!("expected a session token"),
 		}
 	}
 
-	pub(crate) fn scoped(self) -> Scoped {
+	pub(crate) fn request(self) -> Scoped {
 		match self {
-			Self::Scoped(scoped) => scoped,
+			Self::Request(scoped) => scoped,
 			Self::Session(_) => panic!("expected a request token"),
 		}
 	}
@@ -989,7 +989,7 @@ impl Pending {
 				}
 				// From here the application owns the verification, so a withdrawal no longer
 				// releases what it holds against the request cap.
-				if let Event::Scoped(scoped) = &event {
+				if let Event::Request(scoped) = &event {
 					scoped.issue.as_ref().expect("unanswered request").lock().taken = true;
 				}
 				return Poll::Ready(Some(event));
@@ -1811,7 +1811,7 @@ mod request_token_tests {
 		let mut requests = handle.requests().expect("take the requests");
 		let verdict = handle.verify_request(token(b"jwt", 7), subscribe_path(), RequestKind::Subscribe, None);
 
-		let request = requests.next().await.expect("a request").scoped();
+		let request = requests.next().await.expect("a request").request();
 		assert_eq!(request.token(), &token(b"jwt", 7));
 		assert_eq!(request.path(), &subscribe_path());
 		assert_eq!(request.kind(), RequestKind::Subscribe);
@@ -1832,7 +1832,7 @@ mod request_token_tests {
 		let mut requests = handle.requests().expect("take the requests");
 		for kind in [RequestKind::Subscribe, RequestKind::PublishNamespace] {
 			let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), kind, None);
-			let request = requests.next().await.expect("a request reaches the acceptor").scoped();
+			let request = requests.next().await.expect("a request reaches the acceptor").request();
 			assert_eq!(request.kind(), kind);
 			let _issued = request.accept(Grant::all());
 			assert!(
@@ -1862,7 +1862,7 @@ mod request_token_tests {
 			.next()
 			.await
 			.unwrap()
-			.scoped()
+			.request()
 			.reject(SessionError::Unauthorized, "no");
 		let err = verdict.grant().await.expect_err("refused");
 		assert!(matches!(err, Error::Session(SessionError::Unauthorized)), "{err:?}");
@@ -1875,7 +1875,7 @@ mod request_token_tests {
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().unwrap();
 		let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), RequestKind::Subscribe, None);
-		let issued = requests.next().await.unwrap().scoped().accept(Grant::all());
+		let issued = requests.next().await.unwrap().request().accept(Grant::all());
 		verdict.grant().await.expect("granted");
 		drop(verdict);
 		let err = issued.closed().await;
@@ -1889,7 +1889,7 @@ mod request_token_tests {
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().unwrap();
 		let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), RequestKind::Subscribe, None);
-		let _issued = requests.next().await.unwrap().scoped().accept(Grant::all());
+		let _issued = requests.next().await.unwrap().request().accept(Grant::all());
 		verdict.grant().await.expect("granted");
 		// The union only reflects tokens presented on this side (none here), never a
 		// request token the acceptor answered.
@@ -1915,7 +1915,7 @@ mod request_token_tests {
 		let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), RequestKind::Subscribe, None);
 		let grant = grant_in(&runtime, 60);
 		let expires = grant.expires;
-		let _issued = requests.next().await.unwrap().scoped().accept(grant);
+		let _issued = requests.next().await.unwrap().request().accept(grant);
 		let answered = verdict.grant().await.unwrap();
 		let request_grant = RequestGrant::new(
 			&runtime,
@@ -1940,7 +1940,7 @@ mod request_token_tests {
 		let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), RequestKind::Subscribe, None);
 		let first = grant_in(&runtime, 60);
 		let first_expires = first.expires;
-		let _issued = requests.next().await.unwrap().scoped().accept(first);
+		let _issued = requests.next().await.unwrap().request().accept(first);
 		let answered = verdict.grant().await.unwrap();
 		let mut request_grant = RequestGrant::new(
 			&runtime,
@@ -1956,7 +1956,7 @@ mod request_token_tests {
 		let renewal = handle.verify_request(token(b"jwt2", 0), subscribe_path(), RequestKind::Subscribe, None);
 		let second = grant_in(&runtime, 600);
 		let second_expires = second.expires;
-		let _issued2 = requests.next().await.unwrap().scoped().accept(second);
+		let _issued2 = requests.next().await.unwrap().request().accept(second);
 		let renewed = renewal.grant().await;
 		assert!(request_grant.renew(renewal, renewed), "a covering renewal renews");
 
@@ -1973,7 +1973,7 @@ mod request_token_tests {
 		let mut requests = handle.requests().unwrap();
 		let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), RequestKind::Subscribe, None);
 		// Held for the request's life, so only the deadline (not a drop) ends it.
-		let _issued = requests.next().await.unwrap().scoped().accept(grant_in(&runtime, 60));
+		let _issued = requests.next().await.unwrap().request().accept(grant_in(&runtime, 60));
 		let answered = verdict.grant().await.unwrap();
 		let mut request_grant = RequestGrant::new(
 			&runtime,
@@ -2002,7 +2002,7 @@ mod request_token_tests {
 		let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), RequestKind::Subscribe, None);
 		let first = grant_in(&runtime, 60);
 		let first_expires = first.expires;
-		let _issued = requests.next().await.unwrap().scoped().accept(first);
+		let _issued = requests.next().await.unwrap().request().accept(first);
 		let answered = verdict.grant().await.unwrap();
 		let mut request_grant = RequestGrant::new(
 			&runtime,
@@ -2020,7 +2020,7 @@ mod request_token_tests {
 			.next()
 			.await
 			.unwrap()
-			.scoped()
+			.request()
 			.reject(SessionError::Unauthorized, "bad token");
 		let refused = renewal.grant().await;
 		assert!(matches!(refused, Err(Error::Session(SessionError::Unauthorized))));
@@ -2041,7 +2041,7 @@ mod request_token_tests {
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().unwrap();
 		let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), RequestKind::Subscribe, None);
-		let issued = requests.next().await.unwrap().scoped().accept(Grant::all());
+		let issued = requests.next().await.unwrap().request().accept(Grant::all());
 		let answered = verdict.grant().await.unwrap();
 		let mut request_grant = RequestGrant::new(
 			&runtime,
@@ -2097,7 +2097,7 @@ mod request_token_tests {
 		let mut requests = handle.requests().unwrap();
 		let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), RequestKind::Subscribe, None);
 		// A grant that never expires, so only the revoke can end the request.
-		let issued = requests.next().await.unwrap().scoped().accept(Grant::all());
+		let issued = requests.next().await.unwrap().request().accept(Grant::all());
 		let answered = verdict.grant().await.unwrap();
 		let mut request_grant = RequestGrant::new(
 			&runtime,

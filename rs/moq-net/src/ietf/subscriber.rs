@@ -8638,7 +8638,7 @@ mod tests {
 		let acceptor = async {
 			let mut held = Vec::new();
 			loop {
-				let request = requests.next().await.expect("a request").scoped();
+				let request = requests.next().await.expect("a request").request();
 				held.push(request.accept(crate::auth::Grant::all()));
 			}
 		};
@@ -8672,7 +8672,7 @@ mod tests {
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 
 		let acceptor = async {
-			let request = requests.next().await.expect("a request").scoped();
+			let request = requests.next().await.expect("a request").request();
 			request.reject(crate::SessionError::Unauthorized, "no");
 			std::future::pending::<()>().await
 		};
@@ -8716,7 +8716,7 @@ mod tests {
 		let acceptor = {
 			let consulted = consulted.clone();
 			async move {
-				let request = requests.next().await.expect("a request").scoped();
+				let request = requests.next().await.expect("a request").request();
 				consulted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 				request.reject(crate::SessionError::Unauthorized, "no");
 				std::future::pending::<()>().await
@@ -8790,7 +8790,7 @@ mod tests {
 		let (mut subscriber, mut requests, consumer, session) = announce_harness_with(VERSION, auth.clone());
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		let acceptor = async move {
-			let request = requests.next().await.expect("a request").scoped();
+			let request = requests.next().await.expect("a request").request();
 			let _held = request.accept(crate::auth::Grant::all());
 			std::future::pending::<()>().await
 		};
@@ -8846,10 +8846,10 @@ mod tests {
 				async move {
 					let mut held = Vec::new();
 					// The first grant lapses in 60s; the renewal never expires.
-					let first = requests.next().await.expect("a request").scoped();
+					let first = requests.next().await.expect("a request").request();
 					held.push(first.accept(publish_grant_expiring(&rt, Some(60))));
 					answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-					let renewal = requests.next().await.expect("a renewal").scoped();
+					let renewal = requests.next().await.expect("a renewal").request();
 					held.push(renewal.accept(publish_grant_expiring(&rt, None)));
 					answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 					std::future::pending::<()>().await
@@ -8920,10 +8920,10 @@ mod tests {
 				let answered = answered.clone();
 				async move {
 					// The first grant lasts 60s; the renewal is refused.
-					let first = requests.next().await.expect("a request").scoped();
+					let first = requests.next().await.expect("a request").request();
 					let _issued = first.accept(publish_grant_expiring(&rt, Some(60)));
 					answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-					let renewal = requests.next().await.expect("a renewal").scoped();
+					let renewal = requests.next().await.expect("a renewal").request();
 					renewal.reject(crate::SessionError::Unauthorized, "no");
 					answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 					std::future::pending::<()>().await
@@ -9020,9 +9020,9 @@ mod tests {
 			let rt = rt.clone();
 			async move {
 				let mut held = Vec::new();
-				let first = requests.next().await.expect("a request").scoped();
+				let first = requests.next().await.expect("a request").request();
 				held.push(first.accept(publish_grant_expiring(&rt, Some(60))));
-				let renewal = requests.next().await.expect("a renewal").scoped();
+				let renewal = requests.next().await.expect("a renewal").request();
 				held.push(renewal.accept(publish_grant_expiring(&rt, None)));
 				std::future::pending::<()>().await
 			}
@@ -9105,15 +9105,15 @@ mod tests {
 			let answered = answered.clone();
 			let release = release.clone();
 			async move {
-				let first = requests.next().await.expect("a request").scoped();
+				let first = requests.next().await.expect("a request").request();
 				let mut held = vec![first.accept(publish_grant_expiring(&rt, None))];
 				answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-				let a = requests.next().await.expect("a renewal").scoped();
+				let a = requests.next().await.expect("a renewal").request();
 				release.notified().await;
 				held.push(a.accept(publish_grant_expiring(&rt, None)));
 				answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 				loop {
-					let renewal = requests.next().await.expect("a renewal").scoped();
+					let renewal = requests.next().await.expect("a renewal").request();
 					held.push(renewal.accept(publish_grant_expiring(&rt, None)));
 					answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 				}
@@ -9167,7 +9167,7 @@ mod tests {
 
 		// Accept the initial token, then never answer a renewal, so the buffer only grows.
 		let acceptor = async move {
-			let first = requests.next().await.expect("a request").scoped();
+			let first = requests.next().await.expect("a request").request();
 			let _held = first.accept(publish_grant_expiring(&rt, None));
 			std::future::pending::<()>().await
 		};
@@ -9224,7 +9224,7 @@ mod tests {
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 
 		let acceptor = async move {
-			let first = requests.next().await.expect("a request").scoped();
+			let first = requests.next().await.expect("a request").request();
 			let _held = first.accept(publish_grant_expiring(&rt, None));
 			std::future::pending::<()>().await
 		};
@@ -9267,7 +9267,7 @@ mod tests {
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 
 		let acceptor = async move {
-			let first = requests.next().await.expect("a request").scoped();
+			let first = requests.next().await.expect("a request").request();
 			let _held = first.accept(publish_grant_expiring(&rt, None));
 			std::future::pending::<()>().await
 		};
@@ -9309,7 +9309,7 @@ mod tests {
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 
 		let acceptor = async move {
-			let first = requests.next().await.expect("a request").scoped();
+			let first = requests.next().await.expect("a request").request();
 			let _held = first.accept(publish_grant_expiring(&rt, None));
 			std::future::pending::<()>().await
 		};
@@ -9415,7 +9415,7 @@ mod tests {
 				async move {
 					let mut held = Vec::new();
 					loop {
-						let request = requests.next().await.expect("a request reaches the acceptor").scoped();
+						let request = requests.next().await.expect("a request reaches the acceptor").request();
 						consulted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 						held.push(request.accept(crate::auth::Grant::all()));
 					}
@@ -9457,7 +9457,7 @@ mod tests {
 				auth_announce_harness_no_ext(VERSION, Some(crate::auth::Grant::default()));
 			let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 			let acceptor = async move {
-				let request = requests.next().await.expect("a request reaches the acceptor").scoped();
+				let request = requests.next().await.expect("a request reaches the acceptor").request();
 				request.reject(crate::SessionError::Unauthorized, "no");
 				std::future::pending::<()>().await
 			};
@@ -9500,10 +9500,10 @@ mod tests {
 		let acceptor = {
 			let popped = popped.clone();
 			async move {
-				let first = requests.next().await.expect("a request").scoped();
+				let first = requests.next().await.expect("a request").request();
 				let _issued = first.accept(crate::auth::Grant::all());
 				popped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-				let _never_answered = requests.next().await.expect("a renewal").scoped();
+				let _never_answered = requests.next().await.expect("a renewal").request();
 				popped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 				std::future::pending::<()>().await
 			}
@@ -9558,7 +9558,7 @@ mod tests {
 				auth_announce_harness_no_ext(VERSION, Some(crate::auth::Grant::default()));
 			let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 			let acceptor = async move {
-				let request = requests.next().await.expect("a request reaches the acceptor").scoped();
+				let request = requests.next().await.expect("a request reaches the acceptor").request();
 				let _issued = request.accept(grant);
 				std::future::pending::<()>().await
 			};

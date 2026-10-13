@@ -1266,7 +1266,7 @@ mod tests {
 				.next()
 				.await
 				.expect("the pre-ok consumer receives the request")
-				.scoped();
+				.request();
 			assert_eq!(received.path().as_str(), "room/alice", "{version:?}");
 			assert_eq!(
 				received.kind(),

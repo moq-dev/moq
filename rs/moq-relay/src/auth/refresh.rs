@@ -253,7 +253,7 @@ impl Refresh {
 				Event::Request(Some(auth::Event::Session(request))) => self.request(request),
 				// A request token would authorize one request beyond every credential, which
 				// the relay's grants do not model.
-				Event::Request(Some(auth::Event::Scoped(scoped))) => {
+				Event::Request(Some(auth::Event::Request(scoped))) => {
 					scoped.reject(SessionError::Unsupported, "request tokens are not verified")
 				}
 				// Dropping a token of a kind added later refuses it.

@@ -356,7 +356,7 @@ fn serve(
 					let answered = answer(&token).map(|grant| Answered::Session(request.accept(grant)));
 					(token, answered)
 				}
-				auth::Event::Scoped(request) => {
+				auth::Event::Request(request) => {
 					let token = request.token().value.clone();
 					let answered = match answer(&token) {
 						Some(grant) => Some(Answered::Request(request.accept(grant))),
@@ -833,7 +833,7 @@ async fn a_held_renewal_coalesces_a_burst_without_tripping_the_credit() {
 			let mut issued = Vec::new();
 			let mut count = 0u64;
 			let mut release_waiter = Some(release_waiter);
-			while let Some(auth::Event::Scoped(request)) = requests.next().await {
+			while let Some(auth::Event::Request(request)) = requests.next().await {
 				let token = request.token().value.clone();
 				count += 1;
 				seen_tx.unbounded_send(token).ok();
