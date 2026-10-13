@@ -34,6 +34,6 @@ Public API: none. Wire: none; only the merged values an aggregator emits.
 
 ## Related
 
-- [Stats prefix tracks](/quest/m0/broadcast-epoch/prefix-tracks.md) - its
+- [Stats prefix tracks](/quest/m1/stats-prefix-tracks.md) - its
   merged prefix tracks need the same resume rule
 - [QoS](/quest/m1/qos/README.md) - histograms that land on the same tracks

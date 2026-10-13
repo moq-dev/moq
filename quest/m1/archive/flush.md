@@ -29,7 +29,7 @@ Decided:
   broadcast-wide `cut`, and `Recorder::flush()` on a timeline.
 - Rust only (decided 2026-10-07): JS publishes no timeline yet, so its idle
   deadline and `flush()` belong to
-  [JS per-track timelines](/quest/m1/archive/js-timelines.md), and this quest
+  [JS per-track timelines](/quest/m2/archive-js-timelines.md), and this quest
   does not wait on the port.
 - The bound covers closing a record, not upload latency: a slow object-store
   PUT still delays the durable commit, which the writer already serializes.
@@ -40,4 +40,4 @@ Decided:
 
 ## Related
 
-- [JS per-track timelines](/quest/m1/archive/js-timelines.md) - carries the JS idle deadline and `flush()`
+- [JS per-track timelines](/quest/m2/archive-js-timelines.md) - carries the JS idle deadline and `flush()`

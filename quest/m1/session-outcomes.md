@@ -94,7 +94,7 @@ Public API: a refusal reason type and a refusal method on `stats::Handle`;
 - [Typed refusal reason](/quest/m1/refusal-reason.md) - adds `expired`
   and per-root, per-tier refusal attribution on top of these counters, and
   the `/metrics` split of an expired token from an invalid one
-- [HTTP fetch stats](/quest/m1/http-fetch-stats.md) - HTTP `/fetch` counts
+- [HTTP fetch stats](/quest/m2/http-fetch-stats.md) - HTTP `/fetch` counts
   `requests` beside these session counters, never a session
 - [Own the QUIC stack](/quest/m1/quic/README.md) - where a typed close kind
   is natural once `moq-quic` owns the connection

@@ -3,7 +3,8 @@ import * as z from "@zod/mini";
 import { ARCHIVE_VERSION } from "./archive.ts";
 import { u53 } from "./integers.ts";
 import type { RelativeBroadcast } from "./path.ts";
-import { RootSchema } from "./root.ts";
+import { checkRenditions, DuplicateRendition, RootSchema } from "./root.ts";
+import { track } from "./track.ts";
 
 // The base catalog carries the media sections (`video`/`audio`) and the data track sections
 // (`json`/`binary`). Applications add their own root sections (e.g. `scte35`) without modifying
@@ -196,4 +197,41 @@ test("a malformed text rendition rejects the catalog", () => {
 	// a text section still has to decode, or a rendition with no format would silently cost a
 	// publisher its captions in the browser while Rust refuses the same catalog.
 	expect(() => RootSchema.parse({ text: { renditions: { captions: { container: { kind: "legacy" } } } } })).toThrow();
+});
+
+const avc = { codec: "avc1.64001f", container: { kind: "legacy" } };
+const opus = { codec: "opus", sampleRate: 48000, numberOfChannels: 2, container: { kind: "legacy" } };
+
+test("a rendition without a track name subscribes to its ID", () => {
+	const parsed = RootSchema.parse({ video: { renditions: { hd: avc } }, audio: { renditions: { en: opus } } });
+	const video = parsed.video?.renditions.hd;
+	const audio = parsed.audio?.renditions.en;
+	if (!video || !audio) throw new Error("missing rendition");
+	expect(track("hd", video)).toBe("hd");
+	expect(track("en", audio)).toBe("en");
+	expect(JSON.stringify(parsed)).not.toContain('"track"');
+});
+
+test("one track name in two broadcasts keeps both renditions", () => {
+	const catalog = {
+		video: {
+			renditions: {
+				left: { ...avc, broadcast: "./left", track: "video" },
+				right: { ...avc, broadcast: "./right", track: "video" },
+			},
+		},
+	};
+	const parsed = checkRenditions(RootSchema.parse(catalog));
+	for (const id of ["left", "right"]) {
+		const config = parsed.video?.renditions[id];
+		if (!config) throw new Error(`missing ${id}`);
+		expect(track(id, config)).toBe("video");
+		expect(config.broadcast as string).toBe(id);
+	}
+	expect(RootSchema.parse(JSON.parse(JSON.stringify(parsed)))).toEqual(parsed);
+});
+
+test("an ID used by both video and audio is refused", () => {
+	const parsed = RootSchema.parse({ video: { renditions: { main: avc } }, audio: { renditions: { main: opus } } });
+	expect(() => checkRenditions(parsed)).toThrow(DuplicateRendition);
 });

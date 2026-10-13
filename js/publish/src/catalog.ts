@@ -27,6 +27,8 @@ export class CatalogProducer {
 	mutate(fn: (catalog: Catalog.Root) => void): void {
 		const value = structuredClone(this.#value);
 		fn(value);
+		// Every consumer refuses a catalog that fails this, so refuse the edit before it reaches one.
+		Catalog.checkRenditions(value);
 		for (const field of ["jitter", "delay"] as const) {
 			const previous = advertised(this.#value, field);
 			for (const [section, next] of Object.entries(advertised(value, field))) {

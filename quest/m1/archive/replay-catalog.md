@@ -43,7 +43,7 @@ this by hand-building a catalog.
   advertising the URL at all. `replay` stays unset: the timelines live on this broadcast.
 - The logic lives in `moq-archive` (`moq_archive::Reader`), so any host of
   the archive behind the root claim republishes and stamps the catalog, not
-  only `moq-cli` (decided 09-29 in [DVR rewind](/quest/m1/archive/dvr.md)).
+  only `moq-cli` (decided 09-29 in [DVR rewind](/quest/m2/archive-dvr.md)).
   `moq-cli` only passes the URL and the opt-out. Select the catalog track by
   catalog format as `export archive` does: hang and hang.z are stamped, MSF
   is refused.
@@ -65,10 +65,10 @@ this by hand-building a catalog.
 A live playlist stays capped even for a durable timeline; listing past the
 window is the explicit `moq_hls::export::Config::history` mode, which `moq
 export hls` does not expose yet. Give it a flag here. History mode lists from
-the records the timeline restates when the exporter joins (at most 256 from a
-`moq-mux` publisher), so "the whole recording" also needs the exporter to
-read a longer recording's stored history rather than only its live
-restatement.
+stored timeline groups, including records older than the live restatement
+(#5236). Reuse that recovery in the end-to-end proof rather than implement it
+again. [Retained-floor history](/quest/m1/archive/history-floor.md) and
+[HLS failure signaling](/quest/m1/hls-failure-signal.md) remain separate work.
 
 Add a CI test that records a broadcast longer than the default window, replays
 it, and asserts the stock exporter lists segment 0 with a durable

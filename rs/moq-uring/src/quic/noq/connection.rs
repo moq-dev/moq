@@ -285,6 +285,7 @@ pub struct Connection {
 	server_name: Option<String>,
 	/// The peer's address when the handshake completed.
 	remote: SocketAddr,
+	handshake: crate::quic::handshake::Info,
 }
 
 impl Connection {
@@ -330,6 +331,12 @@ impl Connection {
 	pub fn server_name(&self) -> Option<&str> {
 		self.server_name.as_deref()
 	}
+
+	/// The handshake this connection went through, and when all of it must be
+	/// done.
+	pub fn handshake(&self) -> &crate::quic::handshake::Info {
+		&self.handshake
+	}
 }
 
 impl Clone for Connection {
@@ -340,6 +347,7 @@ impl Clone for Connection {
 			alpn: self.alpn.clone(),
 			server_name: self.server_name.clone(),
 			remote: self.remote,
+			handshake: self.handshake,
 		}
 	}
 }
@@ -392,14 +400,29 @@ impl Drop for EstablishGuard {
 	}
 }
 
-/// Wait out the handshake, yielding the connection's public handle.
-pub(crate) async fn establish(shared: Shared) -> Result<Connection, Error> {
+/// Wait out the handshake, yielding the connection's public handle, or close
+/// the connection if it is still handshaking at `deadline`.
+pub(crate) async fn establish(shared: Shared, deadline: Option<Instant>) -> Result<Connection, Error> {
 	let mut guard = EstablishGuard {
 		shared: Some(shared.clone()),
 	};
+	let mut timer = deadline.map(|at| {
+		let mut timer = shared.owner.timer();
+		timer.set(Some(at));
+		timer
+	});
+	let mut expired = false;
 	let result = kio::wait(|waiter| {
+		// The deadline goes first, so a handshake that completed in the same
+		// turn it expired is still refused. The close resolves this wait once
+		// the driver has staged it.
+		if timer.as_mut().is_some_and(|timer| timer.poll(waiter).is_ready()) {
+			timer = None;
+			expired = true;
+			shared.close_code(0, "QUIC handshake timed out");
+		}
 		let mut state = shared.state.borrow_mut();
-		if state.established {
+		if state.established && !expired {
 			return Poll::Ready(Ok(()));
 		}
 		if let Some(err) = &state.closed {
@@ -442,6 +465,7 @@ pub(crate) async fn establish(shared: Shared) -> Result<Connection, Error> {
 		alpn,
 		server_name,
 		remote,
+		handshake: crate::quic::handshake::Info { deadline },
 	};
 	guard.shared = None;
 	Ok(conn)

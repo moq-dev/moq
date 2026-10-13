@@ -263,7 +263,7 @@ async fn public_container_preserves_loc_for_mkv() {
 		track,
 		crate::catalog::hang::Container::Loc(crate::container::Kind::Data),
 	);
-	let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read())
+	let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read_frame())
 		.await
 		.unwrap()
 		.unwrap()
@@ -683,7 +683,7 @@ async fn subtitle_languages_and_empty_tracks_are_published() {
 		track,
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
-	let frame = reader.read().await.unwrap().unwrap();
+	let frame = reader.read_frame().await.unwrap().unwrap();
 	assert_eq!(
 		&frame.payload[..],
 		b"WEBVTT\n\n00:00:00.250 --> 00:00:01.500\nHello\n\n"
@@ -730,7 +730,7 @@ async fn subtitle_duration_survives_as_a_timed_cue() {
 		track,
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
-	let frame = reader.read().await.unwrap().unwrap();
+	let frame = reader.read_frame().await.unwrap().unwrap();
 	assert_eq!(frame.timestamp.as_micros(), 250_000);
 	assert_eq!(
 		&frame.payload[..],
@@ -786,7 +786,7 @@ async fn webvtt_preserves_cue_metadata_and_relative_timestamps() {
 		track,
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
-	let frame = reader.read().await.unwrap().unwrap();
+	let frame = reader.read_frame().await.unwrap().unwrap();
 	assert_eq!(&frame.payload[..], b"WEBVTT\n\nSTYLE\n::cue { color: lime; }\n\nNOTE source\n\ncue-1\n00:00:00.250 --> 00:00:01.500 align:start\nHello <00:00:00.750>world\n\n");
 }
 
@@ -904,11 +904,11 @@ async fn laced_opus_frames() {
 			let mut reader =
 				crate::container::Consumer::new(track, crate::catalog::hang::Container::try_from(config).unwrap());
 			for (index, packet) in packets.iter().enumerate() {
-				let frame = reader.read().await.unwrap().expect("one frame per packet");
+				let frame = reader.read_frame().await.unwrap().expect("one frame per packet");
 				assert_eq!(frame.payload.as_ref(), *packet, "{lacing:?}, grouped={grouped}");
 				assert_eq!(frame.timestamp.as_micros(), 107_000 + index as u128 * 20_000);
 			}
-			assert!(reader.read().await.unwrap().is_none());
+			assert!(reader.read_frame().await.unwrap().is_none());
 		}
 	}
 }

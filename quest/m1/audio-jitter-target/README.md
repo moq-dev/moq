@@ -13,7 +13,7 @@ the same arrival trace.
 
 Boundaries: convergence still uses skip-ahead and silence, so playing slightly
 faster or slower to converge stays [Time
-stretch](/quest/m1/watch-audio-time-stretch.md). No packet loss concealment.
+stretch](/quest/m2/watch-audio-time-stretch.md). No packet loss concealment.
 Video keeps its own target; making the audio playhead the clock is [A/V
 clock](/quest/m1/av-clock.md).
 
@@ -25,14 +25,14 @@ its conformance corpus, `js/watch` `Sync` holds the deepest track's target in
 `"auto"`, and `moq play --delay` defaults to `auto`. Both are the default for
 every viewer, so `"auto"` shipped ahead of the Chrome and Safari proof the
 Watch quest still owes; the maintainer accepted that, and the re-measured
-replay budgets, on 2026-10-04. Decided 2026-10-08: the line no longer gates
-the release and moves to m1, since the defaults are on and only the manual
-browser proof is left.
+replay budgets, on 2026-10-04. Decided 2026-10-13: retain the remaining proof in m1 because the A/V
+clock and worker release contracts depend on it. Native quality expansion
+remains separately scoped in m2.
 
 What the line still owes once Watch lands: its recorded trace replayed through
 the native decode path too, asserting the same target series the browser's
 `playout.test.ts` does. Grading native playback against the harness budgets is
-[Audio quality native](/quest/m1/audio-quality-native.md).
+[Audio quality native](/quest/m2/audio-quality-native.md).
 
 ## Required
 
@@ -44,4 +44,4 @@ the native decode path too, asserting the same target series the browser's
 
 ## Related
 
-- [Time stretch](/quest/m1/watch-audio-time-stretch.md) - inaudible convergence, on top of this
+- [Time stretch](/quest/m2/watch-audio-time-stretch.md) - inaudible convergence, on top of this

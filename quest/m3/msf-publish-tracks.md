@@ -10,7 +10,7 @@ consumer asks.
 ## Plan
 
 Raised in [#5360](https://github.com/moq-dev/moq/issues/5360). Until then the
-[media stats schema](/quest/m1/stats/schema.md) leaves both sections out of
+[media stats schema](/quest/m2/stats/schema.md) leaves both sections out of
 the MSF catalog and refuses a viewer's `--echo` under `--catalog-format msf`
 (decided 2026-10-12).
 
@@ -21,4 +21,4 @@ dropped frames, latency, throughput, errors) for consumers that ingest CMCD.
 
 ## Required
 
-- [Media stats schema](/quest/m1/stats/schema.md) - the `stats` and `echo` sections this maps
+- [Media stats schema](/quest/m2/stats/schema.md) - the `stats` and `echo` sections this maps

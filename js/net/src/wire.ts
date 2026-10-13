@@ -60,7 +60,7 @@ export interface OriginConsumer {
 	 * A request naming an `epoch` only matches a route serving it. */
 	local(path: Path.Valid, epoch?: Epoch.Valid): broadcast.Consumer | undefined;
 	/** Resolve `path` for serving; throws `Unroutable` when the route serves another `epoch`. */
-	demand(path: Path.Valid, epoch?: Epoch.Valid): Promise<broadcast.Consumer | undefined>;
+	demand(path: Path.Valid, epoch?: Epoch.Valid, signal?: AbortSignal): Promise<broadcast.Consumer | undefined>;
 }
 
 /** One originated advertisement exposed to the publishing wire. */

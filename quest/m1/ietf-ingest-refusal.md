@@ -49,4 +49,4 @@ Decided 2026-10-12:
 
 - [#5371](https://github.com/moq-dev/moq/issues/5371) - closed: its gap case was fixed by #5233, and it pointed at the catch-all this narrows
 
-- [Malformed moq-transport input](/quest/m2/ietf-malformed-close.md) - session-level malformed control input
+- [Malformed moq-transport input](/quest/m1/ietf-malformed-close.md) - session-level malformed control input

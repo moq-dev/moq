@@ -22,7 +22,7 @@ The design decisions are in [the line's README](/quest/m1/time/README.md).
 The installed clock is per JS realm (a page, a worker, a test file), the JS
 equivalent of one clock per runtime. Match the Rust timer semantics settled in
 [the crate](/quest/m1/time/crate.md). Coordinate clock origin, units, and
-controlled-time behavior with the [browser backend](/quest/m1/rs2ts/README.md);
+controlled-time behavior with the [browser backend](/quest/m2/rs2ts/README.md);
 its boundary representation depends on whether it uses WASM or generated JS.
 
 Ban direct `performance.now`, `Date.now`, `setTimeout`, and `setInterval` in

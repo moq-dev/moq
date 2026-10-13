@@ -89,7 +89,7 @@ async function measure(t: Arrival[], budget: (target: Time.Milli) => Time.Milli)
 		for (;;) {
 			const next = await consumer.next();
 			if (!next) return;
-			if (next.frame) result.delivered++;
+			if (next.kind === "frame") result.delivered++;
 		}
 	})();
 

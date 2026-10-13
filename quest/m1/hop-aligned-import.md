@@ -84,5 +84,5 @@ the incumbent stopping; repeat it with `--passthrough`.
 ## Related
 
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - a redundant pair shares one epoch
-- [E2EE](/quest/m1/e2ee/README.md) - an encrypting publisher refuses a shared epoch, so a redundant pair is plaintext only
+- [E2EE](/quest/m2/e2ee/README.md) - an encrypting publisher refuses a shared epoch, so a redundant pair is plaintext only
 - [Deterministic TS legs](/quest/m2/ts-hitless.md) - what two exports of the pair render from the common coordinate

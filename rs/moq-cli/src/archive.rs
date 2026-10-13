@@ -225,27 +225,20 @@ impl Tracks {
 	/// Refuses a track served from another broadcast, since an archive holds exactly one, and a
 	/// track that returns after the catalog dropped it, since the writer cannot resume one.
 	fn update(&mut self, catalog: &hang::Catalog) -> anyhow::Result<Vec<Change>> {
-		let video = catalog
-			.video
-			.renditions
-			.iter()
-			.map(|(name, c)| (name, &c.broadcast, true));
-		let audio = catalog
-			.audio
-			.renditions
-			.iter()
-			.map(|(name, c)| (name, &c.broadcast, true));
-		let text = catalog
-			.text
-			.renditions
-			.iter()
-			.map(|(name, c)| (name, &c.broadcast, false));
-		let json = catalog.json.tracks.iter().map(|(name, c)| (name, &c.broadcast, false));
-		let binary = catalog
-			.binary
-			.tracks
-			.iter()
-			.map(|(name, c)| (name, &c.broadcast, false));
+		use hang::catalog::Reference;
+
+		// Recorded by track name, which is what the archive's timelines are keyed by.
+		fn entry<'a, C: Reference>(
+			(id, config): (&'a String, &'a C),
+			media: bool,
+		) -> (&'a str, Option<&'a moq_net::path::RelativeOwned>, bool) {
+			(config.track(id), config.broadcast(), media)
+		}
+		let video = catalog.video.renditions.iter().map(|e| entry(e, true));
+		let audio = catalog.audio.renditions.iter().map(|e| entry(e, true));
+		let text = catalog.text.renditions.iter().map(|e| entry(e, false));
+		let json = catalog.json.tracks.iter().map(|e| entry(e, false));
+		let binary = catalog.binary.tracks.iter().map(|e| entry(e, false));
 
 		let mut listed = HashSet::new();
 		let mut changes = Vec::new();
@@ -255,16 +248,16 @@ impl Tracks {
 					"track `{name}` is served from broadcast `{broadcast}`; an archive records one broadcast"
 				);
 			}
-			if !listed.insert(name.clone()) || self.listed.contains(name) {
+			if !listed.insert(name.to_string()) || self.listed.contains(name) {
 				continue;
 			}
 			anyhow::ensure!(
-				self.enrolled.insert(name.clone()),
+				self.enrolled.insert(name.to_string()),
 				"track `{name}` returned to the catalog after it was dropped; the recording cannot resume it"
 			);
 			changes.push(match media {
-				true => Change::Media(name.clone()),
-				false => Change::Sparse(name.clone()),
+				true => Change::Media(name.to_string()),
+				false => Change::Sparse(name.to_string()),
 			});
 		}
 
@@ -306,6 +299,20 @@ mod tests {
 		catalog.audio.renditions.insert("audio2".into(), audio());
 		assert_eq!(tracks.update(&catalog).unwrap(), [Change::Media("audio2".into())]);
 		assert_eq!(tracks.update(&catalog).unwrap(), []);
+	}
+
+	/// A rendition keyed apart from its track records the track.
+	#[test]
+	fn renditions_record_their_track() {
+		let mut rendition = audio();
+		rendition.track = Some("audio".into());
+		let mut catalog = hang::Catalog::default();
+		catalog.audio.renditions.insert("main".into(), rendition);
+
+		assert_eq!(
+			Tracks::default().update(&catalog).unwrap(),
+			[Change::Media("audio".into())]
+		);
 	}
 
 	/// A dropped rendition stops recording, and coming back is refused rather than silently lost.

@@ -232,7 +232,7 @@ impl<O: Output> Media<O> {
 					let max_delay = self.args.video_max_delay(&snapshot.audio);
 					let opened = async {
 						let decoder = moq_video::decode::Sink::open(config, &Default::default()).await?;
-						let track = rendition.track(name)?;
+						let track = rendition.track(hang::catalog::Reference::track(config, name))?;
 						let mut subscriber = track
 							.subscribe(
 								moq_net::track::Subscription::default()
