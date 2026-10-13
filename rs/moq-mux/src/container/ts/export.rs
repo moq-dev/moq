@@ -239,6 +239,8 @@ struct Track {
 	timing: Timing,
 	/// The receiver's buffers for an audio or verbatim track; video's come from [`Timing`].
 	buffer: Option<Buffer>,
+	/// The AC-3 sync frame a passed-through PES left unfinished, for the next PES to complete.
+	ac3_carry: Option<Ac3Carry>,
 }
 
 impl Track {
@@ -257,6 +259,7 @@ impl Track {
 			clock: DecodeClock::default(),
 			timing: Timing::default(),
 			buffer: None,
+			ac3_carry: None,
 		}
 	}
 
@@ -272,6 +275,9 @@ impl Track {
 			self.restart = pending.restart;
 			self.clock = DecodeClock::default();
 		}
+		if self.carries_ac3() {
+			return self.queue_ac3(name, pending, jitter);
+		}
 		let Kind::Video(stream_type) = self.kind else {
 			return self.push(name, pending, None, None, jitter);
 		};
@@ -281,6 +287,53 @@ impl Track {
 		let pts = to_ticks(pending.frame.timestamp);
 		self.clock.push((pending, self.source.description().cloned()), pts);
 		self.release(name, jitter, false)
+	}
+
+	/// Queue each AC-3 sync frame of a passed-through PES on its own, due at its own decode
+	/// time: a receiver's buffer holds and decodes each on its own, and the whole PES would
+	/// overflow it. A frame the last PES began decodes ahead of this PES, so the jitter buffer
+	/// has to order it on its own time, not the PES's.
+	fn queue_ac3(
+		&mut self,
+		name: &str,
+		pending: Pending,
+		jitter: &mut jitter::Buffer<u16, Queued>,
+	) -> anyhow::Result<()> {
+		let Pending {
+			frame,
+			restart,
+			skip,
+			arrived,
+			read,
+		} = pending;
+		let Some(frames) = ac3_frames(&mut self.ac3_carry, skip, frame.timestamp, &frame.payload) else {
+			let pending = Pending {
+				frame,
+				restart,
+				skip,
+				arrived,
+				read,
+			};
+			return self.push(name, pending, None, None, jitter);
+		};
+		for (timestamp, payload) in frames {
+			let frame = Frame {
+				timestamp,
+				duration: None,
+				payload,
+				// Only the first frame that begins in the PES has its PTS.
+				keyframe: frame.keyframe && timestamp == frame.timestamp,
+			};
+			let pending = Pending {
+				frame,
+				restart,
+				skip,
+				arrived,
+				read,
+			};
+			self.push(name, pending, None, None, jitter)?;
+		}
+		Ok(())
 	}
 
 	/// Whether the track passes AC-3 through as DVB private data, whose PES may carry several
@@ -1904,40 +1957,15 @@ impl<E: catalog::Catalog> Export<E> {
 					Kind::Opus { .. } => Some(StreamId::PRIVATE_STREAM_1),
 					_ => None,
 				};
-				// A passed-through PES of several AC-3 sync frames goes out a frame a PES, each
-				// due at its own decode time: a receiver's buffer holds and decodes each on its
-				// own, and the whole PES would overflow it.
-				let track = self.tracks.get(name).context("missing track")?;
-				let frames = track
-					.carries_ac3()
-					.then(|| ac3_frames(frame.timestamp, &es_payload))
-					.flatten()
-					.unwrap_or_else(|| vec![(frame.timestamp, es_payload.as_slice())]);
-				if frames.is_empty() {
-					// Nothing left of the PES but the tables muxed ahead of it.
-					return match out.is_empty() {
-						true => Ok(()),
-						false => self.push_unit(name, pid, decode, out, false),
-					};
-				}
-				let mut at = decode;
-				for (k, (timestamp, payload)) in frames.into_iter().enumerate() {
-					if k > 0 {
-						let unit = std::mem::take(&mut out);
-						self.push_unit(name, pid, at, unit, keyframe && k == 1)?;
-						at = timestamp;
-					}
-					let unit = PesUnit {
-						pid,
-						is_video,
-						keyframe: frame.keyframe && k == 0,
-						timestamp,
-						dts: dts.filter(|_| k == 0),
-						stream_id,
-					};
-					self.write_pes(&mut out, &unit, payload)?;
-				}
-				return self.push_unit(name, pid, at, out, keyframe && at == decode);
+				let unit = PesUnit {
+					pid,
+					is_video,
+					keyframe,
+					timestamp: frame.timestamp,
+					dts,
+					stream_id,
+				};
+				self.write_pes(&mut out, &unit, &es_payload)?;
 			}
 		}
 		self.push_unit(name, pid, decode, out, keyframe)
@@ -2517,27 +2545,161 @@ fn verbatim_buffer(kind: &Kind, descriptors: &[catalog::Descriptor]) -> Option<B
 	})
 }
 
-/// The AC-3 sync frames `payload` holds, each with its presentation time counted on from
-/// `start`, or `None` if it does not parse as AC-3. A trailing frame shorter than its header
-/// says is dropped, as a source cut off mid-frame leaves one: no decoder can use it.
-fn ac3_frames(start: Timestamp, payload: &[u8]) -> Option<Vec<(Timestamp, &[u8])>> {
+/// An AC-3 sync frame a passed-through PES left unfinished.
+struct Ac3Carry {
+	/// The playhead count it was read under ([`Pending::skip`]).
+	skip: u64,
+	/// When it is presented.
+	at: Timestamp,
+	/// Its bytes so far.
+	bytes: Vec<u8>,
+}
+
+/// The AC-3 sync frames a PES's `payload` completes or holds, each with its presentation time,
+/// or `None` if no sync frame can begin in it.
+///
+/// A PES need not begin on a sync frame: a source that leaves `data_alignment_indicator`
+/// clear splits frames, and even their headers, across PES. `carry` holds the frame the last
+/// PES left unfinished, which this payload's first bytes complete, keeping its own time. The
+/// PES's PTS, `start`, times the first frame that begins in it (ISO 13818-1 2.4.3.7), the rest
+/// count on from there, and a frame left unfinished at the end is carried into the next PES.
+/// A carried frame is dropped when the playhead jumped since (`skip`: a skipped group, a
+/// marker, a resubscription), or when it would not end where the next frame begins, by that
+/// PTS and its sync word: either way it spans a gap in the source. So are bytes ahead of the
+/// first sync frame with nothing carried. No decoder can use them.
+fn ac3_frames(
+	carry: &mut Option<Ac3Carry>,
+	skip: u64,
+	start: Timestamp,
+	payload: &Bytes,
+) -> Option<Vec<(Timestamp, Bytes)>> {
+	let codec = &crate::codec::ac3::DESCRIPTOR;
+	let duration = |samples: u64, rate: u32| Timestamp::from_micros(samples * 1_000_000 / u64::from(rate.max(1)));
 	let mut frames = Vec::new();
-	let (mut rest, mut samples) = (payload, 0u64);
-	while !rest.is_empty() {
-		let header = (crate::codec::ac3::DESCRIPTOR.parse)(rest).ok()?;
-		let Some((frame, tail)) = rest.split_at_checked(header.len) else {
-			tracing::warn!(
-				missing = header.len - rest.len(),
-				"dropped an AC-3 sync frame cut short of its length"
-			);
-			return Some(frames);
+	let mut offset = None;
+	match carry.take() {
+		None => {}
+		Some(head) if head.skip != skip => {
+			tracing::debug!("dropped an AC-3 sync frame cut by a jump in the playhead");
+		}
+		Some(mut head) => {
+			let probe: Vec<u8> = head
+				.bytes
+				.iter()
+				.chain(payload.iter())
+				.take(codec.min_header_len)
+				.copied()
+				.collect();
+			if probe.len() < codec.min_header_len {
+				// Even the header runs on past this PES.
+				head.bytes.extend_from_slice(payload);
+				*carry = Some(head);
+				return Some(frames);
+			}
+			match (codec.parse)(&probe) {
+				Ok(header) => {
+					let need = header.len.saturating_sub(head.bytes.len());
+					let Some((tail, after)) = payload.split_at_checked(need) else {
+						// The frame runs on past this PES as well.
+						head.bytes.extend_from_slice(payload);
+						*carry = Some(head);
+						return Some(frames);
+					};
+					let length = duration(header.samples, header.sample_rate).ok()?;
+					let end = head.at.checked_add(length).ok()?;
+					// Only a frame that begins here has a PTS to meet.
+					let next = after.is_empty()
+						|| (end.as_micros().abs_diff(start.as_micros()) <= length.as_micros() / 2
+							&& ac3_sync_prefix(after));
+					if next {
+						head.bytes.extend_from_slice(tail);
+						frames.push((head.at, Bytes::from(head.bytes)));
+						offset = Some(need);
+					} else {
+						tracing::warn!(?end, ?start, "dropped an AC-3 sync frame cut by a gap between PES");
+					}
+				}
+				Err(_) => tracing::warn!("dropped the start of an AC-3 sync frame whose header does not parse"),
+			}
+		}
+	}
+	let mut offset = match offset {
+		Some(offset) => offset,
+		None if payload.is_empty() => 0,
+		None => {
+			let first = ac3_sync(payload)?;
+			if first > 0 {
+				tracing::debug!(
+					bytes = first,
+					"dropped the end of an AC-3 sync frame begun before the join"
+				);
+			}
+			first
+		}
+	};
+	let (mut samples, mut rate) = (0u64, 0u32);
+	while offset < payload.len() {
+		let rest = &payload[offset..];
+		let at = start.checked_add(duration(samples, rate).ok()?).ok()?;
+		let header = match (codec.parse)(rest) {
+			Ok(header) => header,
+			// A header cut short at the end, which the next PES completes.
+			Err(_) if rest.len() < codec.min_header_len && ac3_sync_prefix(rest) => {
+				*carry = Some(Ac3Carry {
+					skip,
+					at,
+					bytes: rest.to_vec(),
+				});
+				break;
+			}
+			Err(_) => {
+				tracing::warn!(bytes = rest.len(), "dropped the rest of a PES that lost AC-3 sync");
+				break;
+			}
 		};
-		let offset = Timestamp::from_micros(samples * 1_000_000 / u64::from(header.sample_rate.max(1))).ok()?;
-		frames.push((start.checked_add(offset).ok()?, frame));
+		if rest.len() < header.len {
+			*carry = Some(Ac3Carry {
+				skip,
+				at,
+				bytes: rest.to_vec(),
+			});
+			break;
+		}
+		frames.push((at, payload.slice(offset..offset + header.len)));
 		samples += header.samples;
-		rest = tail;
+		rate = header.sample_rate;
+		offset += header.len;
 	}
 	Some(frames)
+}
+
+/// Where the first AC-3 sync frame in `payload` begins: a sync word whose header parses and
+/// whose frame ends at the next sync word. Failing that, the first that may still begin one,
+/// for the next PES to confirm: a frame that runs to the payload's end or past it, or a
+/// header the payload cuts short. A sync word in the body of a frame begun before the join can
+/// pass for a header, so it is taken only when nothing confirmed follows.
+fn ac3_sync(payload: &[u8]) -> Option<usize> {
+	let codec = &crate::codec::ac3::DESCRIPTOR;
+	let mut fallback = None;
+	for (i, _) in payload.iter().enumerate().filter(|&(_, &byte)| byte == codec.sync_byte) {
+		let rest = &payload[i..];
+		match (codec.parse)(rest) {
+			Ok(header) => match rest.get(header.len..) {
+				Some([0x0b, 0x77, ..]) => return Some(i),
+				Some(next) if !ac3_sync_prefix(next) => continue,
+				_ => {}
+			},
+			Err(_) if rest.len() < codec.min_header_len && ac3_sync_prefix(rest) => {}
+			Err(_) => continue,
+		}
+		fallback.get_or_insert(i);
+	}
+	fallback
+}
+
+/// Whether `bytes` could begin an AC-3 sync word, for all they show of it.
+fn ac3_sync_prefix(bytes: &[u8]) -> bool {
+	bytes.iter().zip([0x0b, 0x77]).all(|(&byte, sync)| byte == sync)
 }
 
 /// Build the Annex-B elementary-stream payload for one video frame: rewrite the
@@ -2869,6 +3031,60 @@ mod tests {
 
 	fn ms(value: u64) -> Timestamp {
 		Timestamp::from_millis(value).unwrap()
+	}
+
+	/// A PES that completes the AC-3 sync frame the last one began holds a frame decoding
+	/// ahead of its own PTS. Each sync frame reaches the jitter buffer at its own decode time,
+	/// so the buffer orders that frame against the other tracks on its own time, not the PES's.
+	#[tokio::test(start_paused = true)]
+	async fn ac3_frames_reach_the_jitter_buffer_at_their_own_decode_time() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let source = crate::source::announced(&broadcast.consume()).await;
+		let source = super::ExportSource::for_stream(&source, "audio", Duration::ZERO).unwrap();
+		let mut track = super::Track::new(
+			source,
+			Kind::Verbatim {
+				stream_type: 0x06,
+				framing: super::catalog::Framing::Pes,
+				stream_id: None,
+			},
+		);
+		track.descriptors = vec![super::catalog::Descriptor {
+			tag: super::AC3_DESCRIPTOR,
+			data: bytes::Bytes::from_static(&[0x00]),
+		}];
+		let mut jitter = super::jitter::Buffer::new(Duration::ZERO);
+
+		// Three 32 ms sync frames, cut mid-frame into frames 0-1 and 1-2, timed by frames 0 and 2.
+		let mut frame = vec![0x0b, 0x77, 0x00, 0x00, 0x00, 0x40, 0x40];
+		frame.resize(128, 0x00);
+		let stream = bytes::Bytes::from(frame.repeat(3));
+		// In microseconds, as every hang frame is.
+		let us = |ms: u64| Timestamp::from_micros(ms * 1_000).unwrap();
+		let now = web_async::time::Instant::now();
+		for (pts, payload) in [(us(0), stream.slice(..200)), (us(64), stream.slice(200..))] {
+			let frame = super::Frame {
+				timestamp: pts,
+				duration: None,
+				payload,
+				keyframe: true,
+			};
+			let pending = super::Pending {
+				frame,
+				restart: 0,
+				skip: 0,
+				arrived: now,
+				read: now,
+			};
+			track.queue("audio", pending, &mut jitter).unwrap();
+		}
+
+		let waiter = kio::Waiter::noop();
+		let mut decode = Vec::new();
+		while let std::task::Poll::Ready(ready) = jitter.poll_next(&waiter) {
+			decode.push(ready.item.decode);
+		}
+		assert_eq!(decode, [us(0), us(32), us(64)]);
 	}
 
 	/// Teletext passed through as DVB private data takes its transport buffer's rate from

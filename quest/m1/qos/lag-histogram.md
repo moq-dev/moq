@@ -5,9 +5,8 @@
 The relay's `moq-stats` egress side reports, per broadcast, how far behind
 its viewers are according to what the network has acknowledged: a
 byte-weighted cumulative `lag` histogram and `dropped` counters (duration,
-bytes, and groups dropped before they were acknowledged), on the totals and
-prefix tracks of [stats totals and prefix
-tracks](/quest/m0/broadcast-epoch/stats-split.md). A spliced subscription
+bytes, and groups dropped before they were acknowledged), on the stats totals
+and [prefix tracks](/quest/m0/broadcast-epoch/prefix-tracks.md). A spliced subscription
 stays exact across a route switch, and a closing subscription records its
 last partial interval.
 
@@ -15,9 +14,9 @@ last partial interval.
 
 Decided 2026-10-08: split out of the QoS line so the dashboard and publisher
 timeliness can require a histogram that exists on `main`. This quest lands it
-on `main` once stats-split has, moved from the per-path `publisher.json` and
-`subscriber.json` map rows it writes today onto stats-split's totals and
-prefix tracks.
+on `main` once prefix tracks have, moved from the per-path `publisher.json`
+and `subscriber.json` map rows it writes today onto the totals and prefix
+tracks.
 
 Decided 2026-10-09: the QoS line
 ([#4133](https://github.com/moq-dev/moq/pull/4133)) closed without landing,
@@ -58,4 +57,4 @@ stats JSON gains the egress fields.
 
 ## Required
 
-- [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the totals and prefix tracks the histogram lands on
+- [Stats prefix tracks](/quest/m0/broadcast-epoch/prefix-tracks.md) - the prefix tracks the histogram lands on, beside the totals

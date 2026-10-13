@@ -132,6 +132,24 @@ impl GroupOrder {
 			other => other,
 		}
 	}
+
+	/// The model's order: `Any` leaves the choice to the publisher, which serves newest
+	/// first.
+	pub fn to_order(self) -> crate::track::Order {
+		match self {
+			Self::Ascending => crate::track::Order::Ascending,
+			Self::Any | Self::Descending => crate::track::Order::Descending,
+		}
+	}
+}
+
+impl From<crate::track::Order> for GroupOrder {
+	fn from(order: crate::track::Order) -> Self {
+		match order {
+			crate::track::Order::Ascending => Self::Ascending,
+			crate::track::Order::Descending => Self::Descending,
+		}
+	}
 }
 
 impl Encode<Version> for GroupOrder {

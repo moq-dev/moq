@@ -339,6 +339,7 @@ impl LiteSample {
 			.encode(w, version)
 			.unwrap(),
 			Self::Subscribe => lite::Subscribe {
+				order: crate::track::Order::Descending,
 				epoch: None,
 				id: 3,
 				broadcast: Path::new("room/alice"),
@@ -523,6 +524,7 @@ impl Default for Messages {
 
 		Self {
 			lite_subscribe: lite::Subscribe {
+				order: crate::track::Order::Descending,
 				epoch: None,
 				id: 7,
 				broadcast: Path::new("room/alice"),
@@ -535,6 +537,7 @@ impl Default for Messages {
 				end_frame: None,
 			},
 			lite_update: lite::SubscribeUpdate {
+				order: crate::track::Order::Descending,
 				priority: 4,
 				max_delay: Duration::from_millis(500),
 				start_group: Some(1_000),

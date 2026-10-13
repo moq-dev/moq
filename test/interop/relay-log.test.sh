@@ -24,4 +24,8 @@ overall=0
 check_idle_outs timeout 6 >"$HARNESS_RUN/result"
 [[ "$overall" == 1 ]]
 grep 'idled out instead of closing' "$HARNESS_RUN/result"
+
+# An earlier round's connection that logs or idles out in this window isn't counted.
+printf '%s\n' 'WARN conn{id=1 remote=localhost}: refused' 'INFO conn{id=4 remote=localhost}: accepted' 'WARN connection closed id=3 err=timed out' 'INFO connection closed id=4' >>"$HARNESS_RUN/relay.log"
+[[ "$(relay_connections 8)" == '4 ended' ]]
 echo 'relay log regression passed'

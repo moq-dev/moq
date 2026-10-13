@@ -300,15 +300,22 @@ test("subscriber options and updates are forwarded to the producer's aggregate",
 	expect(producer.subscription.peek()).toEqual({
 		priority: 0,
 		maxDelay: Milli(0),
+		order: "descending",
 		groups: { start: { included: 0 } },
 	});
 
 	// The wire layer watches the producer's signal to emit SUBSCRIBE_UPDATE.
 	const next = producer.subscription.changed();
-	track.update({ priority: 7, maxDelay: Milli(250), groups: { start: { included: 2 }, end: { excluded: 9 } } });
+	track.update({
+		priority: 7,
+		maxDelay: Milli(250),
+		order: "ascending",
+		groups: { start: { included: 2 }, end: { excluded: 9 } },
+	});
 	expect(await next).toEqual({
 		priority: 7,
 		maxDelay: Milli(250),
+		order: "ascending",
 		groups: { start: { included: 2 }, end: { excluded: 9 } },
 	});
 });
@@ -329,6 +336,14 @@ test("subscriber maxAge is refused before defaults or updates take effect", () =
 	// Publisher retention keeps its distinct maxAge field.
 	producer.accept({ maxAge: Milli(500) });
 	track.close();
+	producer.close();
+});
+
+// A typo from plain JS would otherwise be served as the default without a word.
+test("an unknown subscriber order is refused", () => {
+	const producer = new TrackProducer("test");
+	expect(() => producer.subscribe({ order: "newest" } as unknown as Subscription)).toThrow(TypeError);
+	expect(producer.subscription.peek()).toBeUndefined();
 	producer.close();
 });
 
@@ -387,13 +402,17 @@ test("multiple subscriber options aggregate like Rust", async () => {
 	const bounded = producer.subscribe({
 		priority: 2,
 		maxDelay: Milli(100),
+		order: "ascending",
 		groups: { start: { included: 10 }, end: { excluded: 20 } },
 	});
 	const live = producer.subscribe({ priority: 7, maxDelay: Milli(250), groups: { start: { included: 5 } } });
 
+	// One descending subscriber makes the aggregate descending, so a live reader is never held
+	// behind another's backlog.
 	expect(producer.subscription.peek()).toEqual({
 		priority: 7,
 		maxDelay: Milli(250),
+		order: "descending",
 		groups: { start: { included: 5 } },
 	});
 
@@ -402,6 +421,7 @@ test("multiple subscriber options aggregate like Rust", async () => {
 	expect(await narrowed).toEqual({
 		priority: 2,
 		maxDelay: Milli(100),
+		order: "ascending",
 		groups: { start: { included: 10 }, end: { excluded: 20 } },
 	});
 

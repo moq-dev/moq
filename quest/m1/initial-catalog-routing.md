@@ -54,9 +54,8 @@ decision rather than an invented retry or compatibility layer.
 ## Related
 
 - [Validation PR #5328](https://github.com/moq-dev/moq/pull/5328) - records the process failures and successful PR CI baseline
-- [Closed fallback](/quest/m1/transport-upgrade/closed-fallback.md) - #5284 owns the pending QUIC dial after an early WebSocket close
 - [Fallback PR #5284](https://github.com/moq-dev/moq/pull/5284) - check its actual effect on this reproduction before duplicating work
 - [Transport upgrade](/quest/m1/transport-upgrade/README.md) - existing handover and epoch contracts
 - [TS duration fidelity](/quest/m0/ts-duration-fidelity.md) - previously captured only a short suffix, not zero-packet initial acquisition
-- [Replacement catalog linger](/quest/m1/ts-follow-catalog-bound.md) - bounds a midstream stitch, not initial discovery
+- [Replacement catalog linger #5305](https://github.com/moq-dev/moq/pull/5305) - bounds a midstream stitch, not initial discovery
 - [Pair validation](/test/ts/README.md#table-anchoring-table-anchorpy) - independent grader/acquisition checks
