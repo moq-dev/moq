@@ -4,7 +4,7 @@
 
 When one rendition's encoder fails mid-stream in `@moq/publish`, only that
 rendition goes down, and loudly: its track ends with the encoder's real
-error, viewers stop selecting it, and the application can see which
+error, the catalog marks it disabled, and the application can see which
 rendition failed and why. The other renditions, the catalog, and the network
 broadcast keep running under the same epoch. A failure never starts a retry
 loop.
@@ -36,7 +36,8 @@ Decided with the maintainer (2026-10-13):
   tracks. Native publishers' apps own each track directly.
 - **Fail locally and at once.** End the track with the encoder's error,
   advertise the rendition as `enabled: false` with its last config (which
-  `@moq/watch` and native consumers already skip), and expose the failure to
+  `@moq/watch` already skips; WHEP and HLS egress still serve a disabled
+  rendition, a consumer gap outside this quest), and expose the failure to
   the application, for example as an error signal on the encoder or the
   `Rendition`. Failing never republishes the network broadcast, so remove or
   narrow the `#restart` path that does today.
