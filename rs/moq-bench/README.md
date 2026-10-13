@@ -41,8 +41,9 @@ Every `--report` interval, `moq-bench` logs throughput (`send_mbps`/`recv_mbps`
 and `send_fps`/`recv_fps`) plus delivery accounting for the subscribe side:
 
 - `recv_groups`: cumulative groups read end to end across all subscriptions.
-- `lost_groups`: cumulative groups that never arrived, or that the relay gave up
-  on part-way.
+- `lost_groups`: cumulative groups that were skipped or that the relay gave up
+  on part-way. It never decreases: a group that lands after being counted
+  lost stays lost.
 - `loss`: `lost_groups` as a percentage.
 - `latency_p50_ms` / `latency_p90_ms` / `latency_p99_ms` / `latency_max_ms`:
   cumulative one-way delivery latency from each group's keyframe timestamp.
@@ -113,6 +114,11 @@ cumulative and monotonic, so a consumer diffs successive lines to compute
 rates, the same convention as `moq-stats` frames. `connections`, `broadcasts`,
 and `subscriptions` are live gauges that fall as work ends; diff only the
 counters.
+
+`groups_lost` is the logged `lost_groups`, so its increase over a window is the
+groups lost inside it. `groups_expected - groups_present` is the gaps still
+outstanding, which a late arrival closes; it is not monotonic, so do not diff
+it to count loss.
 
 Latency is measured from wall-clock milliseconds embedded by the publisher.
 Keep separate publisher and subscriber hosts NTP-synchronized. Samples where
