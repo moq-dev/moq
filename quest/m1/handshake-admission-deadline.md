@@ -38,9 +38,10 @@ Gaps found in this plan's review, to settle with the maintainer at start:
   `Cluster::admit` documents that the embedder owns the deadline.
 - `moq_auth::Client` sets a 10 s reqwest timeout on every request
   (`rs/moq-auth/src/client.rs`), so an HTTP auth server answering `connect`
-  after 10 s is still refused. The `connect` request drops that fixed bound
-  and inherits the caller's deadline; `revalidate` and `end` keep theirs, like
-  grant renewal.
+  after 10 s is still refused. Only `connect` drops that fixed bound and
+  inherits the caller's deadline. `attach` (in-band AUTH, which shares the
+  `connect` path), `revalidate` and `end` run after the handshake and keep
+  theirs, like grant renewal, so a stalled server cannot pile up requests.
 
 Race inside the task that owns the admission, or cancel it, so an expired
 deadline does not leave admission work running detached.
@@ -48,7 +49,8 @@ deadline does not leave admission work running detached.
 Tests on controlled time for each caller, the embedded decider and an HTTP
 auth server: an admission that never answers closes at the deadline, one
 answered just inside it (past 10 s for the HTTP server) is admitted, and
-`"0"` waits. Update `doc/bin/relay/config.md`, which says the deadline covers
+`"0"` waits. An `attach` to a stalled server is still refused at its bound.
+Update `doc/bin/relay/config.md`, which says the deadline covers
 "transport through MoQ SETUP", and note the behavior change for slow auth
 servers in the relay changelog.
 
