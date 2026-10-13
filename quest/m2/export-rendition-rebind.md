@@ -25,6 +25,13 @@ that track ends) while the catalog names the new one.
   format-specific discontinuity on the continuing output, or ends the export
   loudly where its format cannot express the switch; it never resets output
   state mid-stream.
+- Revalidate declarations already emitted. A replacement track can carry
+  different initialization data (an AVC or HEVC SPS/PPS, geometry), which
+  the fMP4 `moov`, MKV `Tracks` and FLV sequence header already declared for
+  the old track. Each rebind resolves the replacement's declaration and
+  compares it: if it differs, emit a new header where the format permits, or
+  fail before writing any replacement payload. The tests include a
+  replacement with changed initialization data.
 - Tests per exporter: a rendition `main` moved from `video-a` to
   `video-b` exports `video-b`'s frames after the update and none of
   `video-a`'s, and a `broadcast`-only change does the same. Each test also

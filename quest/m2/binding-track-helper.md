@@ -16,8 +16,9 @@ Open question, recommendation first:
 
 1. Make the mistake unrepresentable: the container consumer and group fetch
    take the rendition (its ID and config) instead of a raw track name, and
-   resolve it in moq-ffi. Every wrapper inherits it, and the docs stop
-   describing the rule. Recommended.
+   moq-ffi resolves both its `broadcast` reference and its track name. Every
+   wrapper inherits it, and the docs stop describing the rule. Covered by a
+   regression test with a rendition in a sibling broadcast. Recommended.
 2. Add a `track` helper to the FFI records (`MoqVideo` / `MoqAudio`) and
    wrap it in each language. Callers still pass a raw name, but have one
    obvious way to get it.
