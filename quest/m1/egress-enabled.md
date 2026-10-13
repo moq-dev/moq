@@ -50,9 +50,12 @@ Decided with the maintainer (2026-10-13):
   `supported` in `select::Broadcast` and in each export's catalog intake
   (where `Source::retain_valid_media` runs), so no export carries its own
   check. Prefer extending an existing filter over adding a parallel one.
-- **Muxed exports drop a disabled rendition like a removed one**, reusing
-  each format's existing path for a rendition leaving and returning. Do not
-  keep an idle track in the mux.
+- **A muxed export puts only enabled renditions in its header.** After the
+  header, a rendition that gets disabled keeps its declared track, idle
+  until it re-enables, so MKV and fMP4 never end on a rung disable (a
+  post-header removal is an error in MKV, and fMP4 refuses a track added
+  after init). A rendition first enabled after the header follows the
+  format's existing rule for added tracks.
 - **HLS and DASH omit a disabled rendition from the multivariant playlist
   and manifest, but keep its window and media playlist serving.** Closing it
   would end the playlist with `EXT-X-ENDLIST`, which reads as a finished
@@ -72,7 +75,9 @@ selects the disabled rendition; an all-disabled catalog selects nothing; a
 disable mid-stream moves WHEP and the single-rendition exports to the
 enabled sibling and a re-enable restores it; HLS drops and restores the
 multivariant entry without resetting the media sequence; a muxed export
-drops and restores the track.
+leaves a disabled rendition out of its header, and a rendition disabled
+after the header idles its track without ending the export and resumes it
+on re-enable.
 
 Public API: none expected beyond `select::Broadcast`'s documented behavior.
 Update the egress docs (`doc/bin/cli.md`, `rtc.md`, `hls.md`, `rtmp.md`,
