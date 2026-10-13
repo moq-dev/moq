@@ -19,6 +19,7 @@ import type * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import { Group, Time, Track } from "@moq/net";
 import { Effect } from "@moq/signals";
+import { type Arrival as Diagnostic, gap } from "../arrivals";
 import { type Delay, Sync } from "../sync";
 import { frameDuration } from "./config";
 import { ringSamples, target } from "./latency";
@@ -50,6 +51,8 @@ export interface Arrival {
 
 /** What a replay plays through. */
 export interface Options {
+	/** Hold decoder delivery until this simulated monotonic time. */
+	decodeAfter?: number;
 	/** `shared` is the SharedArrayBuffer ring a cross-origin isolated page runs; `post` is the rest. */
 	ring: "shared" | "post";
 	/** The sample rate, in Hz. */
@@ -67,6 +70,8 @@ export interface Options {
 
 /** One render quantum, as the worklet produced it. */
 export interface Quantum {
+	/** Every frame and gap the decoder received so far, in delivery order. Grows between yields. */
+	arrivals: readonly Diagnostic[];
 	/** When it finished rendering, on the trace's clock, in ms. */
 	at: number;
 	/** The quantum: what the ring supplied at the front, zeros after it. Reused between yields. */
@@ -215,15 +220,23 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 
 	// The decoder's read loop, with the codec taken out. A failure is rethrown at the next quantum.
 	const terminal = new Terminal();
+	const arrivals: Diagnostic[] = [];
+	const delivery = Promise.withResolvers<void>();
+	if (options.decodeAfter === undefined) delivery.resolve();
 	let failure: { error: unknown } | undefined;
 	const decode = (async () => {
+		await delivery.promise;
 		for (;;) {
 			const next = await consumer.next();
 			if (!next) return;
 			if (terminal.update(next)) ring.reset();
+			if (next.kind === "gap") arrivals.push(gap(next));
 			if (next.kind !== "frame") continue;
 
-			const { timestamp } = next.frame;
+			const { timestamp, arrival } = next.frame;
+			const media = Time.Milli.fromMicro(timestamp);
+			const late = sync.received(media, "audio", arrival);
+			arrivals.push({ kind: "frame", timestamp: media, arrival, late });
 			const length = samples.get(timestamp);
 			if (length === undefined) throw new Error(`the consumer delivered an unrecorded frame at ${timestamp} us`);
 			ring.insert(timestamp, [new Float32Array(length).fill(0.5)]);
@@ -275,6 +288,11 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 				next++;
 			}
 			if (next > stamped) await settle();
+			clock = now;
+			if (options.decodeAfter !== undefined && now >= options.decodeAfter) {
+				delivery.resolve();
+				await settle();
+			}
 			if (failure) throw failure.error;
 
 			// The decoder resizes the ring as the resolved delay moves, which only an arrival does.
@@ -286,9 +304,17 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 
 			output.fill(0);
 			ring.read([output]);
-			yield { at: now, output, stalled: ring.stalled, timestamp: Time.Milli.fromMicro(ring.timestamp), delay };
+			yield {
+				arrivals,
+				at: now,
+				output,
+				stalled: ring.stalled,
+				timestamp: Time.Milli.fromMicro(ring.timestamp),
+				delay,
+			};
 		}
 	} finally {
+		delivery.resolve();
 		consumer.close();
 		track.close();
 		await decode;

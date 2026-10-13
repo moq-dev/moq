@@ -278,7 +278,7 @@ impl Consumer {
 					}
 					frame
 				}
-				Some(Read::Gap) => {
+				Some(Read::Gap { .. }) => {
 					self.restart()?;
 					continue;
 				}

@@ -48,6 +48,12 @@ harness in CI, with broader network cases at least nightly, and a verdict
 with pinned sources/configurations. Any adopted production policy gets a
 separate implementation quest; this study does not silently change defaults.
 
+Check which side sends keep-alives in moq-tokio's native QUIC config. If
+both sides ping, the sender's controller may see no samples during an idle,
+which masks bugs like #4219. BBR also idles in its 1.25x probe-bandwidth
+phase while the app has nothing to send; this is harmless today because
+restart from idle resets the gain to 1.0.
+
 ### Google differences
 
 The 2026-09-21 audit compared noq-proto 1.3.0 / upstream `1a26a8b` with

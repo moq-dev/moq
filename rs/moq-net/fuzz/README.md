@@ -31,6 +31,11 @@ discovers to `corpus/<target>/`, which is kept across runs and gitignored along 
 `seeds/` and `artifacts/`. `cargo +nightly fuzz cmin --fuzz-dir rs/moq-net/fuzz <target>`
 shrinks the corpus once it has grown.
 
+Calling `cargo fuzz` directly skips `just rs fuzz`, which turns off the release
+profile's fat LTO (it drops the sanitizer-coverage globals, so the link fails) and
+symbol stripping. Prefix direct calls with
+`CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_STRIP=none`.
+
 ## What the targets assert
 
 Beyond "does not panic":
@@ -51,8 +56,8 @@ decode at a version that cannot express it again.
 
 ## When something crashes
 
-libFuzzer writes the input to `artifacts/<target>/crash-<hash>` and prints the command
-to reproduce it. Fix the bug, then commit the input:
+libFuzzer writes the input to `artifacts/<target>/crash-<hash>` and prints the `cargo fuzz`
+command to reproduce it (add the prefix above). Fix the bug, then commit the input:
 
 ```bash
 cp rs/moq-net/fuzz/artifacts/lite/crash-<hash> rs/moq-net/fuzz/regressions/lite/
