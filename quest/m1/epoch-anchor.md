@@ -55,7 +55,10 @@ and the subscribe grant a joiner needs.
   every joiner would adopt the broken coordinate. Timestamps are unsigned,
   so the pre-wrap stream's nearest candidate can be negative: resolve the
   initial bases together before placing the clock, and lift the whole
-  coordinate by a period when one would land below zero.
+  coordinate by a period when one would land below zero. A base created
+  later, such as a PID a PMT revision adds after a wrap (today
+  `ensure_stream` starts it at `PtsUnwrap::default()`), resolves against
+  the program's current verified timeline, on every importer alike.
 - The joiner verifies its era against the incumbent's objects before
   announcing, one per independently mapped timestamp base (each track): the
   incumbent's object at the joiner's first group's time must match it in
@@ -119,7 +122,8 @@ opposite sides of it, after flagged forward breaks that together exceed half
 a period, with observations straddling such breaks (the verification
 refuses a wrong era, on every track), and with different delivery skew into
 each; a first importer started at a wrap with its streams on opposite sides
-of it; a different stream under the same epoch fails verification; a cold
+of it; a stream a PMT revision adds after a wrap; a different stream under
+the same epoch fails verification; a cold
 co-start, including one across two clustered relays, leaves one publisher.
 
 Public API: no new items, but `--epoch` on an importer now reads the live
