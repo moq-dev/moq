@@ -6,7 +6,7 @@ A reader of a node's stats broadcast can request a stats track for any prefix
 within the group and gets that prefix's rollup, its self counters, and a
 one-level map of its direct children, produced only while requested. The
 per-path map tracks (`[<tier>/]publisher.json`, `[<tier>/]subscriber.json`, and
-their `.json.z` siblings) are gone.
+their `.json.z` siblings) stay beside them, unchanged, for existing readers.
 
 ## Plan
 
@@ -14,9 +14,8 @@ Split from stats-split (decided 2026-10-08), which landed the per-group
 `totals.json` and the requested per-root `<root>/presence.json` beside the
 existing tracks. Reuse what it built: the `<key>/<kind>.json` naming (the last
 segment picks the kind, everything before it is the key), the requested-track
-hold and reclaim in `rs/moq-stats/src/produce.rs`, the cap refused with
-`TooManyRequests`, and the aggregator's per-node reset baseline and refusal
-retry in `rs/moq-stats/src/aggregate.rs`.
+hold and reclaim in `rs/moq-stats/src/produce.rs`, and the aggregator's
+per-node reset baseline in `rs/moq-stats/src/aggregate.rs`.
 
 Decided 2026-10-05 and 2026-10-07:
 
@@ -59,19 +58,16 @@ Decided 2026-10-05 and 2026-10-07:
   lock or a walk of every entry, for example an `ArcSwap` ancestor list or a
   generation counter rechecked on bump. Benchmark across held-prefix count and
   depth.
-- Held prefixes get their own cap per group broadcast, refused with a typed
-  error the reader retries, like presence tracks.
-- Retire the map tracks in the same release, and decide whether prefix tracks
-  keep `.json.z` siblings. Update the aggregator, `doc/concept/stats.md`,
-  `doc/bin/inspect.md`, and `demo/web/src/stats.ts` (which reads both maps).
+- Held prefixes have no cap: a hold is reclaimed when its last reader leaves,
+  like presence tracks, whose cap was dropped for that reason (decided
+  2026-10-12 in #5084).
+- Decide whether prefix tracks keep `.json.z` siblings. Update the
+  aggregator, `doc/concept/stats.md`, and `doc/bin/inspect.md`.
 
-A downstream dashboard reads one prefix per visible row and group header the
-moment the maps retire, so the maps and prefix tracks change in one release.
-
-Open: stats-split was kept backwards compatible at the maintainer's request
-(#5084, 2026-10-12): it kept `sessions.json` and every existing track and
-field. Confirm with the maintainer whether retiring the map tracks still
-holds, or whether they stay beside the prefix tracks for existing readers.
+Decided 2026-10-12 (#5084): the map tracks are kept, not retired. Prefix
+tracks are added beside them so existing readers keep working, the same
+backwards-compatible shape stats-split took when it kept `sessions.json`.
+This supersedes the 2026-10-05 plan to retire the maps in the same release.
 
 Public API: `moq-stats` producer and consumer types. Wire: stats track names
 and payloads.

@@ -82,9 +82,8 @@ with `{}` until the tier records.
 A presence track exists only while subscribed. Ask for `<root>/presence.json`
 for any auth root in the group (`presence.json` for the empty root). The relay
 answers with the root's current sessions and counts from there, holding a root
-with no sessions open at `{}`. Each group broadcast holds a bounded number of
-presence tracks; a request past it fails with `TOO_MANY_REQUESTS`, which a
-reader retries later. Any other name is refused.
+with no sessions open at `{}`, and stops producing it once the last subscriber
+leaves. A root outside the group, or any other name, is refused.
 
 ## Frames
 

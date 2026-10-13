@@ -152,13 +152,6 @@ const MAX_REQUESTED_TRACKS: usize = 64;
 /// to stop the parked buffer itself growing without limit.
 const MAX_PARKED_REQUESTS: usize = 256;
 
-/// Cap on held presence tracks per group broadcast. Each held root costs a
-/// track pair and a map lookup per drain. A request beyond the cap is refused
-/// with [`moq_net::Error::TooManyRequests`], which a presence reader retries,
-/// rather than parked the way a tier request is (a tier collector treats a
-/// refusal as final). Sized for an aggregator holding every root it fans in.
-const MAX_PRESENCE_TRACKS: usize = 1024;
-
 /// Keeps the publish task alive: the task holds only a `Weak` to this, so it
 /// exits once the last [`Producer`] clone drops.
 struct Keepalive;
@@ -1152,8 +1145,8 @@ impl GroupPublisher {
 	///
 	/// A presence track is held only while requested, for a root in this group,
 	/// and answered at once with the root's current counters from `report`.
-	/// Requests past [`MAX_PRESENCE_TRACKS`] are refused. Any other name is
-	/// rejected.
+	/// It is reclaimed once its last consumer leaves, so the held set follows
+	/// live readers. Any other name is rejected.
 	fn serve_requests(&mut self, report: &Report, depth: usize) {
 		// Reclaim before parking and adopting, so a freed slot is usable by
 		// this very drain.
@@ -1176,10 +1169,6 @@ impl GroupPublisher {
 			if let Some((root, compressed)) = parse_presence_track(request.name()) {
 				if group_key(root.as_str(), depth) != self.key.as_str() {
 					request.reject(moq_net::Error::NotFound);
-					continue;
-				}
-				if !roots.contains_key(&root) && self.presence.len() + roots.len() >= MAX_PRESENCE_TRACKS {
-					request.reject(moq_net::Error::TooManyRequests);
 					continue;
 				}
 				let pending = roots.entry(root).or_default();
@@ -2257,10 +2246,9 @@ mod tests {
 		assert_eq!(tick(), 0, "reclaimed");
 	}
 
-	/// Presence requests past the cap are refused with a typed error the
-	/// reader retries, and a root outside the group is not found.
+	/// A root outside the group is not found, and every root inside it is held.
 	#[tokio::test(start_paused = true)]
-	async fn presence_requests_are_capped_and_scoped() {
+	async fn presence_requests_are_scoped() {
 		let (producer, origin, _events) = grouped_producer(DEFAULT_LINGER);
 		let _f = feed(producer.registry(), Tier::default(), "acme/live", true, 1, 42).await;
 		drive_tick().await;
@@ -2276,7 +2264,7 @@ mod tests {
 			"a root in another group"
 		);
 
-		let pending: Vec<_> = (0..MAX_PRESENCE_TRACKS)
+		let pending: Vec<_> = (0..3)
 			.map(|i| {
 				acme.track(&presence_track(format!("acme/{i}").as_str(), false))
 					.expect("track")
@@ -2286,18 +2274,8 @@ mod tests {
 		drive_tick().await;
 		let mut held = Vec::new();
 		for subscribing in pending {
-			held.push(subscribing.await.expect("within the cap"));
+			held.push(subscribing.await.expect("held"));
 		}
-
-		let subscribing = acme
-			.track(&presence_track("acme/over", false))
-			.expect("track")
-			.subscribe(None);
-		drive_tick().await;
-		assert!(
-			matches!(subscribing.await, Err(moq_net::Error::TooManyRequests)),
-			"past the cap"
-		);
 
 		// A held root's compressed flavor shares the live pair.
 		let subscribing = acme

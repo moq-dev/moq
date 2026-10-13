@@ -8,7 +8,6 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
-use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -22,10 +21,6 @@ use crate::{
 	PresenceFrame, Result, SessionsFrame, Totals, TotalsFrame, TrafficFrame, parse_node_path, presence_track,
 	sessions_track, totals_track, traffic_track,
 };
-
-/// How long a node's reader waits before re-requesting a presence track the
-/// node refused for being at its cap.
-const REFUSED_RETRY: Duration = Duration::from_secs(5);
 
 /// Configuration for an [`Consumer`]. Construct with [`Config::new`] and chain
 /// the `with_*` setters.
@@ -172,8 +167,7 @@ impl Consumer {
 	}
 
 	/// A merged reader over auth `root`'s presence track, holding it on every
-	/// node broadcast in the group; see [`Self::totals`]. A node refusing it
-	/// for being at its cap is asked again later.
+	/// node broadcast in the group; see [`Self::totals`].
 	pub fn presence(&self, root: impl AsPath) -> PresenceConsumer {
 		let name = presence_track(root, self.config.compression);
 		PresenceConsumer {
@@ -384,9 +378,6 @@ enum Reader<V: Mergeable> {
 	/// Reading frames. Boxed: the snapshot consumer dwarfs the other variants,
 	/// and one lives per node in a map.
 	Active(Box<moq_json::snapshot::Consumer<BTreeMap<String, V>>>),
-	/// The node refused the track for being at its cap; ask again once this
-	/// sleep ends.
-	Refused(Pin<Box<web_async::time::Sleep>>),
 	/// The subscription failed or the track ended; the node no longer reads. It
 	/// lingers until it reannounces or, once unannounced, its grace elapses,
 	/// still contributing its last frame.
@@ -748,21 +739,10 @@ fn advance<V: Mergeable>(
 					node.reader =
 						Reader::Active(Box::new(moq_json::snapshot::Consumer::new(subscriber, config.clone())));
 				}
-				// The node holds as many presence tracks as it allows; ask again
-				// later rather than give the root up until it reannounces.
-				Poll::Ready(Err(moq_net::Error::TooManyRequests)) => {
-					tracing::debug!(name, "stats: node refused the track at its cap");
-					changed |= node.depart();
-					node.reader = Reader::Refused(Box::pin(web_async::time::sleep(REFUSED_RETRY)));
-				}
 				Poll::Ready(Err(err)) => {
 					tracing::debug!(?err, name, "stats: node subscribe failed");
 					return changed | node.depart();
 				}
-				Poll::Pending => return changed,
-			},
-			Reader::Refused(sleep) => match waiter.poll_future(sleep.as_mut()) {
-				Poll::Ready(()) => node.reader = resolve(origin, &node.path, node.epoch.clone()),
 				Poll::Pending => return changed,
 			},
 			Reader::Active(reader) => match reader.poll_next(waiter) {
@@ -1807,33 +1787,5 @@ mod tests {
 		let _fb = feed(&node_b, Tier::default(), "acme", "acme/room", 8).await;
 		let frame = read_until(&mut presence.inner, grew, |frame| frame[""].active() == 2).await;
 		assert_eq!(frame[""].sessions_started, 3);
-	}
-
-	#[tokio::test(start_paused = true)]
-	async fn refused_presence_is_requested_again() {
-		// A node at its presence cap refuses the track; the reader asks again
-		// later instead of giving the root up.
-		let origin = produce_origin();
-		let source = origin.create_broadcast(".stats/acme/node/a").expect("create broadcast");
-		source.announce(origin::Route::default()).expect("announce");
-		let mut dynamic = source.dynamic();
-
-		let agg = Consumer::new(origin.consume(), Config::new().with_depth(1));
-		let mut presence = agg.presence("acme");
-		let reader = tokio::spawn(async move { presence.next().await.expect("read").expect("frame") });
-
-		let request = dynamic.requested_track().await.expect("request");
-		assert_eq!(request.name(), "acme/presence.json");
-		request.reject(moq_net::Error::TooManyRequests);
-
-		let request = dynamic.requested_track().await.expect("asked again");
-		let config = moq_json::snapshot::Config::default().with_delta_ratio(0);
-		let mut track = moq_json::snapshot::Producer::new(request.accept(timed()), config);
-		let mut sessions = Presence::default();
-		sessions.sessions_started = 1;
-		track
-			.update(&PresenceFrame::from([(String::new(), sessions)]))
-			.expect("publish");
-		assert_eq!(reader.await.expect("reader")[""].active(), 1);
 	}
 }

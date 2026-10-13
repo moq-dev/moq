@@ -29,8 +29,8 @@ Document the window length beside the bucket edges.
 
 Aggregate as a byte-weighted cumulative histogram of drift on the ingress
 (`Role::Subscriber`) side of the stats totals and [prefix
-tracks](/quest/m0/broadcast-epoch/prefix-tracks.md), which land first and
-retires the per-path rows (decided in the 2026-10-06 audit), with the same
+tracks](/quest/m0/broadcast-epoch/prefix-tracks.md), which land first,
+rather than the per-path rows (decided in the 2026-10-06 audit), with the same
 bucket edges and the same monotonic contract as the egress `lag` histogram. Beside it keep two cumulative
 counters: `timestamp_regressions`, frames whose timestamp is below the
 previous group's newest timestamp, and `stalls`, gaps between complete frames

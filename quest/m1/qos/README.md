@@ -39,7 +39,8 @@ Decided (2026-10-06 audit): [stats prefix
 tracks](/quest/m0/broadcast-epoch/prefix-tracks.md) lands first, since it is
 m0 and gates the release; the lag histogram lands on the stats totals and
 prefix tracks rather than the per-path `publisher.json` and
-`subscriber.json` map rows, which prefix tracks retire.
+`subscriber.json` map rows, which stay unchanged for existing readers
+(2026-10-12).
 Rejected: the histogram first, which would make prefix tracks carry the lag
 histogram and dropped counters across.
 
@@ -67,7 +68,7 @@ on `main`.
 ## Related
 
 - [Stats prefix tracks](/quest/m0/broadcast-epoch/prefix-tracks.md) -
-  lands first and replaces the map rows; this line's histograms move onto the
+  lands first beside the map rows; this line's histograms land on the
   totals and prefix tracks
 - [Media stats](/quest/m1/stats/README.md) - publishers and viewers report
   their own media, transport, and playback health, the media half of a verdict

@@ -79,8 +79,7 @@ impl Consumer {
 
 	/// Subscribe to the presence track for auth `root`, awaiting the
 	/// subscription handshake. Fails with
-	/// [`TooManyRequests`](moq_net::Error::TooManyRequests) while the producer
-	/// holds its cap of presence tracks; retry later.
+	/// [`NotFound`](moq_net::Error::NotFound) for a root outside the group.
 	pub async fn presence(&self, root: impl AsPath) -> Result<Presence> {
 		let name = presence_track(root, self.config.compression);
 		Ok(Presence {

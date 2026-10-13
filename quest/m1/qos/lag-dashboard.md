@@ -10,9 +10,9 @@ and per node like the existing counters.
 ## Plan
 
 - Read both from the stats totals and [prefix
-  tracks](/quest/m0/broadcast-epoch/prefix-tracks.md), which land first and
-  retires the `publisher.json` rows they sit on today (decided in the
-  2026-10-06 audit); [viewer lag histogram](/quest/m1/qos/lag-histogram.md)
+  tracks](/quest/m0/broadcast-epoch/prefix-tracks.md), which land first,
+  rather than the `publisher.json` rows they sit on today (decided in the
+  2026-10-06 audit; the rows stay for existing readers, 2026-10-12); [viewer lag histogram](/quest/m1/qos/lag-histogram.md)
   lands them on the egress side of its per-group totals and prefix tracks
   (decided 2026-10-08). `lag` is a cumulative byte count per bucket keyed
   by its upper edge (`"50ms"` to `"5s"`, then `"inf"`, empty buckets
