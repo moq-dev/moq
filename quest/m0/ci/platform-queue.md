@@ -4,7 +4,8 @@
 
 No macOS or Windows runner starts for a `pull_request` event. Each merge-queue
 entry runs at most one macOS job and one Windows job, which cover what
-Platform, OBS, Swift, and the C++ Windows leg check on PRs today, plus the
+Platform, OBS, Swift, the moq.sh installer test, and the C++ Windows leg check
+on PRs today, plus the
 `rs macos-test` and `rs windows-test` suites that now run only nightly. A
 platform break still blocks the merge.
 

@@ -11,4 +11,6 @@ JS workspace. WASM builds only when a package that consumes it is selected.
 Observed: one run spent 7 ms on the changed package's tests, about 50s on the
 rest of the workspace's tests, and 49s compiling WASM. The dispatcher already
 selects Rust crates by dependents; give JS the same selection, derived from the
-workspace's own dependency graph rather than a hand-kept list.
+workspace's own dependency graph rather than a hand-kept list. A changed file
+that belongs to no workspace package (`js/common/`, `js/justfile`,
+`test/tsconfig.json`, `drafts/`) selects every package, as today.
