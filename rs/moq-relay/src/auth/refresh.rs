@@ -162,7 +162,7 @@ impl Refresh {
 			}
 			return;
 		}
-		let Some(source) = &self.source else {
+		let Some(source) = self.source.as_ref().filter(|source| source.auth.in_band) else {
 			request.reject(SessionError::Unsupported, "tokens are not verified in band");
 			return;
 		};
@@ -179,16 +179,7 @@ impl Refresh {
 			return;
 		};
 		let mut facts = source.request.clone();
-		let mut query = url::form_urlencoded::Serializer::new(String::new());
-		if let Some(original) = &facts.query {
-			for (key, value) in url::form_urlencoded::parse(original.as_bytes()) {
-				if key != "jwt" {
-					query.append_pair(&key, &value);
-				}
-			}
-		}
-		query.append_pair("jwt", token);
-		facts.query = Some(query.finish());
+		facts.query = Some(with_jwt(facts.query.as_deref(), token));
 		facts.token = None;
 		let auth = source.auth.clone();
 		let owner = self.owner.clone();
@@ -281,6 +272,32 @@ impl Refresh {
 			}
 		}
 	}
+}
+
+/// Replace the `jwt` pair, leaving every other byte of the dialed query as it was,
+/// since the auth server may interpret or authenticate its raw form.
+fn with_jwt(query: Option<&str>, token: &str) -> String {
+	let jwt = format!(
+		"jwt={}",
+		url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>()
+	);
+	let mut pairs = Vec::new();
+	let mut replaced = false;
+	for pair in query.unwrap_or_default().split('&').filter(|pair| !pair.is_empty()) {
+		let is_jwt = url::form_urlencoded::parse(pair.as_bytes())
+			.next()
+			.is_some_and(|(key, _)| key == "jwt");
+		if !is_jwt {
+			pairs.push(pair);
+		} else if !replaced {
+			pairs.push(&jwt);
+			replaced = true;
+		}
+	}
+	if !replaced {
+		pairs.push(&jwt);
+	}
+	pairs.join("&")
 }
 
 #[cfg(test)]
@@ -463,6 +480,38 @@ mod tests {
 				Err(moq_net::Error::Session(SessionError::TooManyRequests))
 			)),
 		}
+		client.abort(moq_net::Error::Cancel);
+		supervising.abort();
+		let _ = supervising.await;
+	}
+
+	#[test]
+	fn renewal_replaces_only_the_jwt_pair() {
+		assert_eq!(
+			with_jwt(Some("flag&a=%2f&jwt=old&b=x+y&j%77t=dup"), "new token"),
+			"flag&a=%2f&jwt=new+token&b=x+y"
+		);
+		assert_eq!(with_jwt(Some("a=1"), "t"), "a=1&jwt=t");
+		assert_eq!(with_jwt(None, "t"), "jwt=t");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn public_rule_sessions_refuse_tokens_as_unsupported() {
+		let auth = super::super::Config {
+			public_publish: vec!["**".parse().unwrap()],
+			..Default::default()
+		}
+		.init("test", &moq_tokio::tls::Connect::default(), false)
+		.unwrap();
+		let lease = auth
+			.admit(auth.request(moq_auth::Transport::Quic, "/room"))
+			.await
+			.unwrap();
+		let (client, supervising) = sessions(lease).await;
+		assert!(matches!(
+			client.auth().add("token").await,
+			Err(moq_net::Error::Unsupported)
+		));
 		client.abort(moq_net::Error::Cancel);
 		supervising.abort();
 		let _ = supervising.await;

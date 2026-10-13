@@ -303,7 +303,8 @@ impl Config {
 			),
 			(None, None) => unreachable!("validated above"),
 		};
-		let (auth, admissions) = Auth::embedded(node);
+		let (mut auth, admissions) = Auth::embedded(node);
+		auth.in_band = matches!(decider, Decider::Server(_));
 		decider.spawn(admissions);
 		Ok(auth)
 	}
@@ -696,6 +697,8 @@ fn presents_token(request: &Request) -> bool {
 pub struct Auth {
 	admissions: mpsc::UnboundedSender<Admission>,
 	node: Arc<str>,
+	/// Whether the decider can verify a token presented in band; public rules cannot.
+	in_band: bool,
 }
 
 impl Auth {
@@ -707,6 +710,7 @@ impl Auth {
 		let auth = Self {
 			admissions: sender,
 			node: Arc::from(node.into()),
+			in_band: true,
 		};
 		(auth, Admissions(receiver))
 	}
