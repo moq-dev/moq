@@ -2035,14 +2035,18 @@ mod tests {
 		// one, and a multitrack client that can't decode it still plays the rest.
 		catalog.video.renditions.get_mut("c").unwrap().enabled = false;
 		assert_eq!(best(&catalog, &legacy).as_deref(), Some("a"));
-		let h264_only = ClientCapabilities::new(CAPS_EX_MULTITRACK, FourCcSupport::default(), FourCcSupport::default());
+		let avc = FourCcSupport {
+			any: false,
+			fourccs: vec![*b"avc1"],
+		};
+		let h264_only = ClientCapabilities::new(CAPS_EX_MULTITRACK, avc, FourCcSupport::default());
 		assert!(
 			play_selection(&catalog, &h264_only).is_err(),
 			"b is enabled and is H.265"
 		);
 		catalog.video.renditions.get_mut("b").unwrap().enabled = false;
 		assert!(play_selection(&catalog, &h264_only).is_ok());
-		assert_eq!(best(&catalog, &multitrack).as_deref(), Some("a"));
+		assert_eq!(best(&catalog, &h264_only).as_deref(), Some("a"));
 	}
 
 	/// A single-track client gets the best audio rendition it can play, not the first by name.
