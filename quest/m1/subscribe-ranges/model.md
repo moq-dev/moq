@@ -16,8 +16,8 @@ Guidance:
 - Ranges have `Absolute` or `Relative` ends (see the line). Aggregating
   subscribers onto one upstream request is the union of their ranges; a
   relative end resolves against the track's latest group when the publisher
-  serves it. [Subscription order](/quest/m1/subscribe-ranges/order.md) owns
-  `order` and its merge rule (descending wins).
+  serves it. Ranges are served in the existing `Subscription::order`, which
+  merges with descending winning.
 - This absorbs the deleted lite-07 Live flag quest, so the model mirrors the
   wire with no `live` field, and its tests move here, on mock time and both
   in-process and through a relay: a subscriber from `Absolute(4)` merged with
@@ -48,5 +48,4 @@ Guidance:
 
 ## Related
 
-- [Subscription order](/quest/m1/subscribe-ranges/order.md) - `Subscription` carries `order`, which ranges are served in
 - [FETCH max-delay](/quest/m1/fetch-max-delay.md) - historical request budgets and per-caller enforcement

@@ -118,10 +118,10 @@ const dispose = el.signals.run((effect) => {
 ```
 
 Call `dispose()` on unmount. The effect re-runs when the catalog or the
-active broadcast changes, so a reconnect resubscribes on its own: the broadcast
-requests the path again whenever it is announced (a start or a restart), and
-switches only when that resolves another broadcast. A request ending is never
-the trigger, so following a restart needs a relay with discovery.
+active broadcast changes, so a reconnect resubscribes on its own: the
+broadcast's announced request moves to each start or restart, and switches only
+when that resolves another broadcast. A request ending is never the trigger, so
+following a restart needs a relay with discovery.
 
 ## Without the element
 

@@ -231,3 +231,40 @@ async fn partial_mesh_withdraw_retracts_once() {
 		assert!(hunted.is_empty(), "publisher {publisher}: {hunted:?}");
 	}
 }
+
+/// A relay that already retracted a withdrawn broadcast must not announce it
+/// again. Its neighbors, two or more hops from the publisher's relay, still hunt
+/// through stale paths; one that falls back to a path not through this relay
+/// offers it as a new route after the relay forgot the withdrawal.
+#[moq_net_sim::test]
+async fn retracted_relay_ignores_a_stale_path() {
+	#[rustfmt::skip]
+	const EDGES: &[((usize, usize), u64)] = &[
+		((0, 1), 35), ((1, 2), 90), ((0, 3), 129), ((2, 4), 140), ((1, 5), 137), ((4, 6), 148),
+		((2, 7), 30), ((3, 5), 124), ((1, 4), 111), ((0, 5), 21), ((3, 4), 34),
+	];
+	let version: Version = "moq-lite-06".parse().unwrap();
+	let nodes: Vec<_> = (1..=8).map(produce_origin).collect();
+	let mut pairs = Vec::new();
+	for &((a, b), ms) in EDGES {
+		pairs.push(peer_with_latency(version, &nodes[a], &nodes[b], Duration::from_millis(ms)).await);
+	}
+	let mut watched: Vec<_> = nodes.iter().map(|node| watch(node.consume().announced())).collect();
+
+	let broadcast = nodes[7].create_broadcast("room/7").unwrap();
+	broadcast.announce(Default::default()).unwrap();
+	for watched in watched.iter_mut() {
+		drain(watched).await;
+	}
+
+	drop(broadcast);
+	let mut revived = Vec::new();
+	for (relay, watched) in watched.iter_mut().enumerate() {
+		let kinds = drain(watched).await.remove("room/7").unwrap();
+		assert_eq!(kinds.last(), Some(&Kind::End), "relay {relay}: {kinds:?}");
+		if kinds.windows(2).any(|w| w == [Kind::End, Kind::Start]) {
+			revived.push((relay, kinds));
+		}
+	}
+	assert!(revived.is_empty(), "{revived:?}");
+}

@@ -8,7 +8,7 @@ async function main() {
 	const origin = new Moq.Origin.Producer();
 	const connection = new Moq.Connection({ url, consume: origin });
 
-	// Wait for a broadcast that may not exist yet. `consume` would subscribe blind and get reset
+	// Wait for a broadcast that may not exist yet. a plain `request` would subscribe blind and get reset
 	// if nobody is publishing the path; this waits for the announcement instead.
 	const broadcast = origin.request(Moq.Path.from("my-broadcast"), { announced: true });
 
