@@ -559,7 +559,6 @@ impl Client {
 					Err(err) => {
 						// The fallback got through but its MoQ handshake did not. A QUIC dial still
 						// pending may yet connect, bounded by the same deadline as the race.
-						let err = Error::from(err);
 						let quic = match quic {
 							Ok(dial) => {
 								tracing::warn!(%err, "WebSocket handshake failed; waiting on QUIC");
@@ -576,7 +575,7 @@ impl Client {
 						// Both handshakes failing is still a two-arm loss: a mixed auth pair stays retryable.
 						let session = connect_session(moq, quic, token)
 							.await
-							.map_err(|quic| race_error(quic.into(), err))?;
+							.map_err(|quic| race_error(quic, err))?;
 						return Ok(Dialed::new(session, transport));
 					}
 				};
@@ -586,7 +585,7 @@ impl Client {
 					let token = token.clone();
 					let dial = Box::pin(async move {
 						let quic = quic.await?;
-						Ok(Box::pin(async move { Ok(connect_session(&moq, quic, &token).await?) }) as Handshake)
+						Ok(Box::pin(async move { connect_session(&moq, quic, &token).await }) as Handshake)
 					});
 					Upgrade::new(dial, transport)
 				});
@@ -911,13 +910,16 @@ async fn connect_session<S: moq_net::transport::poll::Boxable>(
 	client: &moq_net::Client,
 	transport: S,
 	token: &RequestToken,
-) -> Result<moq_net::Session, moq_net::Error> {
+) -> crate::Result<moq_net::Session> {
 	let (session, driver) = client
 		.connect(tokio::time::Instant::now().into_std(), transport)
 		.await?;
 	// Before the driver runs, so the first request carries the newest token. A session that
-	// cannot carry one (moq-lite) fails the dial rather than drop it.
-	token.attach(session.auth())?;
+	// cannot carry one (moq-lite) fails the dial for good rather than drop it.
+	token.attach(session.auth()).map_err(|err| match err {
+		moq_net::Error::Unsupported => Error::RequestTokenUnsupported,
+		err => err.into(),
+	})?;
 	use tracing::Instrument;
 	tokio::spawn(crate::panic::isolate(moq_net::time::run(driver)).instrument(tracing::Span::current()));
 	Ok(session)

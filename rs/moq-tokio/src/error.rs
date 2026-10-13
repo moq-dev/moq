@@ -91,6 +91,10 @@ pub enum Error {
 	#[error("qlog capture requires the 'qlog' feature")]
 	QlogUnsupported,
 
+	/// A request token is configured, but the session negotiated moq-lite, which cannot carry one.
+	#[error("a request token needs moq-transport, but the session negotiated moq-lite")]
+	RequestTokenUnsupported,
+
 	/// The config was parsed from released spellings that no longer work. The
 	/// payload is the migration to print.
 	#[error("{0}")]
@@ -244,6 +248,7 @@ impl Error {
 			| Self::IdleTimeoutRange
 			| Self::WindowRange(_)
 			| Self::QlogUnsupported
+			| Self::RequestTokenUnsupported
 			| Self::Connect(_) => true,
 			#[cfg(feature = "noq")]
 			Self::Noq(err) => err.is_terminal(),
@@ -390,6 +395,12 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(all(test, feature = "websocket"))]
 mod tests {
 	use super::*;
+
+	/// The same server negotiates moq-lite again, so a token it cannot carry fails the dial for good.
+	#[test]
+	fn a_request_token_on_moq_lite_is_terminal() {
+		assert!(Error::RequestTokenUnsupported.is_terminal());
+	}
 
 	#[test]
 	fn a_transport_race_is_terminal_only_when_every_arm_is_terminal() {
