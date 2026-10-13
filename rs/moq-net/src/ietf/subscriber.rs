@@ -2316,9 +2316,11 @@ where
 				(request.accept(info), dynamic)
 			}
 		};
-		// A live join starts at the publisher's edge; an absolute one where it asked.
+		// A live join starts at the publisher's edge; an absolute one where it asked. With
+		// no Largest the join skips nothing, so every group is owed: a lower one's stream
+		// may still arrive after a higher one's.
 		let _ = match live {
-			true => track.start_at(largest.map(|largest| largest.group)),
+			true => track.start_at(largest.map_or(0, |largest| largest.group)),
 			false => track.start_at(start.map(|start| start.group)),
 		};
 		let mut fetching: Option<MaybeSendBox<'static, ()>> = None;
