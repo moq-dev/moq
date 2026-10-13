@@ -68,3 +68,8 @@ stream with the reason in the log rather than silently using a default.
 
 The plugin is C++ over the [generated C++ bindings](/lib/cpp/) and ships with
 every moq-cpp release.
+
+If the relay closes the session for too many requests, reduce the broadcasts
+or subscribed tracks, or have the operator adjust its
+[session limits](/bin/relay/config#session-and-peer). Reconnecting with the same
+workload does not resolve a request cap.

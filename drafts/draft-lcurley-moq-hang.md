@@ -170,7 +170,7 @@ A video track contains the necessary information to decode a video stream.
 
 ~~~
 type VideoSchema = {
-  "renditions": Map<TrackName, VideoDecoderConfig>,
+  "renditions": Map<RenditionId, VideoDecoderConfig>,
   "display": {
     "width": number,
     "height": number,
@@ -180,7 +180,7 @@ type VideoSchema = {
 }
 ~~~
 
-The `renditions` field contains a map of track names to video decoder configurations.
+The `renditions` field contains a map of rendition IDs to video decoder configurations; each names its track as {{field-track}} describes.
 See the [WebCodecs specification](https://www.w3.org/TR/webcodecs/#video-decoder-config) for specifics and registered codecs.
 Any field carrying raw bytes, notably `description`, is a hex string ({{binary}}).
 
@@ -241,11 +241,11 @@ An audio track contains the necessary information to decode an audio stream.
 
 ~~~
 type AudioSchema = {
-  "renditions": Map<TrackName, AudioDecoderConfig>,
+  "renditions": Map<RenditionId, AudioDecoderConfig>,
 }
 ~~~
 
-The `renditions` field contains a map of track names to audio decoder configurations.
+The `renditions` field contains a map of rendition IDs to audio decoder configurations; each names its track as {{field-track}} describes.
 See the [WebCodecs specification](https://www.w3.org/TR/webcodecs/#audio-decoder-config) for specifics and registered codecs.
 Any field carrying raw bytes, notably `description`, is a hex string ({{binary}}).
 The `sampleRate` and `numberOfChannels` fields describe the decoded output: for HE-AAC, the SBR rate rather than the core's, and two channels under parametric stereo.
@@ -297,7 +297,7 @@ Unlike audio and video there is no WebCodecs decoder for text, so a consumer par
 
 ~~~
 type TextSchema = {
-  "renditions": Map<TrackName, TextConfig>,
+  "renditions": Map<RenditionId, TextConfig>,
 }
 
 type TextConfig = {
@@ -308,7 +308,7 @@ type TextConfig = {
 }
 ~~~
 
-The `renditions` field maps track names to text configurations, typically one per language.
+The `renditions` field maps rendition IDs to text configurations, typically one per language; each names its track as {{field-track}} describes.
 
 The `format` field selects the cue serialization, and tells a consumer how to parse each frame's payload:
 
@@ -365,18 +365,18 @@ The catalog lists them in two sections, split by payload encoding:
 
 ~~~
 type JsonTracks = {
-  "tracks": Map<TrackName, JsonSchema>,
+  "tracks": Map<EntryId, JsonSchema>,
 }
 
 type BinaryTracks = {
-  "tracks": Map<TrackName, BinarySchema>,
+  "tracks": Map<EntryId, BinarySchema>,
 }
 ~~~
 
 A `json` track's frames are UTF-8 JSON values; a `binary` track's frames are opaque to everything but the application.
 The split is by what a generic consumer can do without knowing the application: parse, inspect, and re-serialize a JSON track, but only copy a binary one.
 
-Each map is keyed by track name, so an entry's key is the name to subscribe to.
+Each map is keyed by entry ID, which is also the track name unless the entry's `track` field ({{field-track}}) says otherwise.
 Unlike the media sections these are not rendition sets: entries are distinct tracks, not alternatives to choose between.
 A publisher MUST omit a section that holds no tracks.
 
@@ -389,6 +389,7 @@ type JsonSchema = {
   "compression": Compression | undefined,
   "schema": string | undefined,
   "broadcast": string | undefined,
+  "track": string | undefined,
   "bitrate": number | undefined,
   "jitter": number | undefined,
   "delay": number | undefined,
@@ -405,6 +406,7 @@ type BinarySchema = {
   "compression": Compression | undefined,
   "mime": string | undefined,
   "broadcast": string | undefined,
+  "track": string | undefined,
   "bitrate": number | undefined,
   "jitter": number | undefined,
   "delay": number | undefined,
@@ -460,8 +462,8 @@ A consumer MUST ignore a track whose `compression` it does not recognize, since 
 The `deflate` value is the group-scoped DEFLATE of {{compression}}.
 A `snapshot` group covers a single value (plus any deltas), so its window spans that group alone; a `stream` group's frames compress against the earlier ones in the log.
 
-### broadcast {#data-shared}
-The `broadcast` field carries the same meaning here as it does for a media rendition ({{field-broadcast}}).
+### broadcast and track {#data-shared}
+The `broadcast` and `track` fields carry the same meaning here as they do for a media rendition ({{field-broadcast}}, {{field-track}}).
 
 ### bitrate, jitter, and delay {#data-estimates}
 The optional `bitrate` field is the track's maximum bitrate in bits per second.
@@ -485,6 +487,7 @@ Audio, video, and text renditions share the following fields, extending the WebC
 ~~~
 type CommonExtensions = {
   "broadcast": string | undefined,
+  "track": string | undefined,
   "label": string | undefined,
   "container": Container,
   "jitter": number | undefined,
@@ -508,7 +511,15 @@ A consumer MUST reject a catalog containing one, rather than resolving the refer
 This lets a publisher author a catalog that points at tracks it does not republish.
 For example, a transcoder produces a catalog listing its own downstream renditions alongside the untouched source rendition, referencing the latter in the source broadcast rather than copying the bytes through.
 
-A consumer subscribes to such a rendition in the referenced broadcast, using the rendition's track name unchanged.
+A consumer subscribes to such a rendition in the referenced broadcast, using the rendition's track name ({{field-track}}).
+
+### track {#field-track}
+A rendition's key in its map is its ID, and by default also the name of its track.
+The `track` field overrides the name, so that the ID can stay unique when the name cannot: two renditions referencing same-named tracks in different broadcasts ({{field-broadcast}}) need different IDs.
+A consumer MUST subscribe to the `track` value when present and to the ID otherwise.
+
+A publisher SHOULD omit `track` unless the ID cannot be the track name, since a consumer that predates the field subscribes to the ID.
+A rendition ID MUST NOT name both a video and an audio rendition, and a consumer MUST reject a catalog in which one does.
 
 ### label {#field-label}
 The `label` field is a human-readable rendition name for a track picker.
@@ -1112,6 +1123,7 @@ This document has no IANA actions.
 - An edge keeps its derived-format video reference rendition while that rendition stays in the catalog; an audio reference yields once video has a timeline.
 - Added an optional `epoch` to `.info`: the source route's Epoch, compared on resume so a restarted source fails enrollment.
 - Audio `sampleRate` and `numberOfChannels` describe the decoded output, so HE-AAC names its SBR rate and parametric stereo names two channels.
+- Added an optional `track` field to video, audio, text, `json`, and `binary` entries naming the track in its broadcast; the entry's key is its ID and names the track when `track` is absent. A consumer MUST reject a catalog using one ID for both a video and an audio rendition.
 
 ## moq-hang-03
 {:numbered="false"}

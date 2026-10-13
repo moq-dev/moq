@@ -391,7 +391,7 @@ export class Decoder {
 			attempt = run;
 			const sub = subscribeMedia(run, {
 				broadcast: active,
-				track,
+				track: Catalog.track(track, identity),
 				priority: Catalog.PRIORITY.audio,
 				maxDelay: this.#subscribeMaxDelay,
 			});

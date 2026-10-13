@@ -232,7 +232,7 @@ impl<O: Output> Media<O> {
 					let max_delay = self.args.video_max_delay(&snapshot.audio);
 					let opened = async {
 						let decoder = moq_video::decode::Sink::open(config, &Default::default()).await?;
-						let track = rendition.track(name)?;
+						let track = rendition.track(hang::catalog::Reference::track(config, name))?;
 						let mut subscriber = track
 							.subscribe(
 								moq_net::track::Subscription::default()
@@ -494,11 +494,11 @@ async fn play_audio<O: Output>(
 		let mut quiet = fit.pad + timing.silence.saturating_sub(fit.skip);
 		while quiet > 0 {
 			let part = (quiet as usize * stride).min(silence.len());
-			let _ = sink.write(&silence[..part])?;
+			sink.write(&silence[..part])?;
 			quiet -= (part / stride) as u64;
 		}
 		let skip = fit.skip.saturating_sub(timing.silence) as usize * stride;
-		let _ = sink.write(&frame.data[skip.min(frame.data.len())..])?;
+		sink.write(&frame.data[skip.min(frame.data.len())..])?;
 
 		// Anchor the playout clock on where the speaker has actually reached, which
 		// is the only half of the pipeline that cannot skip ahead. A move has to

@@ -98,7 +98,9 @@ auto broadcast = ok(announced->available().get());
 auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(broadcast).get());
 if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the catalog ends
     for (const auto &[name, video] : catalog->video) {
-        auto media = ok(moq::MediaContainerConsumer::subscribe(broadcast, {name, video.container}).get());
+        // The track is the rendition's `track` when set, otherwise its catalog key.
+        auto track = video.track.value_or(name);
+        auto media = ok(moq::MediaContainerConsumer::subscribe(broadcast, {track, video.container}).get());
         auto frame = ok(media->next().get());   // std::nullopt once the track ends
     }
 }
@@ -201,6 +203,12 @@ rejections are their own cases, so you don't retry them. `error.to_string()`
 gives the message Rust's `Display` does, for logs; branch on the case, not the
 text. A Rust panic or a misused future (`get()` twice) aborts with a message on
 stderr instead of throwing.
+
+A session closed for exceeding the relay's request caps reports the protocol
+kind `ProtocolKind::kTooManyRequests`. Reduce
+the simultaneous announcements or subscriptions, or ask the relay operator
+to adjust the [session limits](/bin/relay/config#session-and-peer), before
+reconnecting with the same workload.
 
 Check a result before reading it. With exceptions off below C++23, reading the
 value of an error is undefined, through `*result` and `value()` alike, since

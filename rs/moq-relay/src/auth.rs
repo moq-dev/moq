@@ -3,6 +3,8 @@
 //! process answering [`Admissions`]. Nothing else admits anyone; a verified client
 //! certificate is reported to whoever decides as a fact.
 
+mod refresh;
+
 use std::sync::Arc;
 
 use axum::http;
@@ -301,7 +303,8 @@ impl Config {
 			),
 			(None, None) => unreachable!("validated above"),
 		};
-		let (auth, admissions) = Auth::embedded(node);
+		let (mut auth, admissions) = Auth::embedded(node);
+		auth.in_band = matches!(decider, Decider::Server(_));
 		decider.spawn(admissions);
 		Ok(auth)
 	}
@@ -436,6 +439,8 @@ impl Token {
 /// a fixed grant. [`ended`](Self::ended) resolves when that word no longer covers
 /// the session; the holder then closes the session, and the lease with the reason.
 pub struct Lease {
+	refresh: Option<refresh::Refresh>,
+	source: Option<Source>,
 	consumer: lease::Consumer,
 	token: Token,
 	/// The live session a re-check re-authorizes in place, once attached.
@@ -449,18 +454,35 @@ pub struct Lease {
 	stats: moq_net::stats::Session,
 }
 
+struct Source {
+	auth: Auth,
+	request: Request,
+}
+
 impl Lease {
 	/// Hold `consumer` for a session that dialed `path`, reducing its grant to
 	/// what the origin scopes by.
 	pub fn new(path: &str, consumer: lease::Consumer) -> Self {
 		let grant = consumer.grant();
 		Self {
+			refresh: None,
+			source: None,
 			token: Token::new(path, &grant),
 			expires: grant.deadline(),
 			consumer,
 			session: None,
 			stats: Default::default(),
 		}
+	}
+
+	/// Take AUTH decisions before the protocol driver chooses its default acceptor.
+	pub(crate) fn preparing(
+		mut self,
+		handle: moq_net::auth::Handle,
+		role: Option<moq_net::Role>,
+	) -> Result<Self, moq_net::Error> {
+		self.refresh = Some(refresh::Refresh::new(&mut self, handle, role)?);
+		Ok(self)
 	}
 
 	/// Re-authorize `session` in place when a re-check changes what the grant allows,
@@ -484,7 +506,11 @@ impl Lease {
 
 	/// Ask the lease's producer to re-check now. A no-op on a fixed lease.
 	pub fn revalidate(&self) {
-		self.consumer.revalidate();
+		if let Some(refresh) = &self.refresh {
+			refresh.revalidate();
+		} else {
+			self.consumer.revalidate();
+		}
 	}
 
 	/// Wait for the lease to stop covering the session: the grant expired, was
@@ -498,7 +524,13 @@ impl Lease {
 	/// since the routes it already announced would be misreported as entering here or
 	/// from a peer, or offered to the wrong links. A changed tier keeps the session and
 	/// moves its [stats](Self::with_stats) to the new tier.
+	///
+	/// Once the relay answers the session's AUTH requests itself, each of
+	/// these ends only that credential's grant; the lease ends when no credential remains.
 	pub async fn ended(&mut self) -> lease::Reason {
+		if let Some(refresh) = &mut self.refresh {
+			return refresh.ended().await;
+		}
 		loop {
 			let expire = async {
 				match self.expires {
@@ -562,6 +594,14 @@ impl Lease {
 	/// moved, and learn what it ended with: that, or the decider's reason if it
 	/// revoked first. Dropping the consumer reports zero bytes.
 	pub fn close(self, reason: impl Into<lease::Reason>, bytes: Bytes) -> lease::Reason {
+		let mut reason = reason.into();
+		// A gateway has one credential, so its revocation caused the transfer to
+		// end. A refreshed session instead reports the result of its whole union.
+		if self.refresh.is_none()
+			&& let std::task::Poll::Ready(ended) = self.consumer.poll_closed(&moq_net::kio::Waiter::noop())
+		{
+			reason = ended;
+		}
 		self.consumer.close(reason, bytes)
 	}
 }
@@ -609,7 +649,11 @@ impl Decider {
 					Self::Server(client) => {
 						let client = client.clone();
 						tokio::spawn(async move {
-							match client.connect(admission.request.clone()).await {
+							let lease = match &admission.connection {
+								Some(connection) => client.attach(connection, admission.request.clone()).await,
+								None => client.connect(admission.request.clone()).await,
+							};
+							match lease {
 								Ok(lease) => admission.grant(lease),
 								Err(err) => admission.refuse(err.into()),
 							}
@@ -656,6 +700,8 @@ fn presents_token(request: &Request) -> bool {
 pub struct Auth {
 	admissions: mpsc::UnboundedSender<Admission>,
 	node: Arc<str>,
+	/// Whether the decider can verify a token presented in band; public rules cannot.
+	in_band: bool,
 }
 
 impl Auth {
@@ -667,6 +713,7 @@ impl Auth {
 		let auth = Self {
 			admissions: sender,
 			node: Arc::from(node.into()),
+			in_band: true,
 		};
 		(auth, Admissions(receiver))
 	}
@@ -692,19 +739,34 @@ impl Auth {
 
 	/// Admit a session: the lease it holds, carrying the scope the origin applies.
 	pub async fn admit(&self, request: Request) -> Result<Lease, Error> {
-		let path = request.path.clone();
+		let consumer = self.decide(request.clone()).await?;
+		let mut lease = Lease::new(&request.path, consumer);
+		lease.source = Some(Source {
+			auth: self.clone(),
+			request,
+		});
+		Ok(lease)
+	}
+
+	async fn decide(&self, request: Request) -> Result<lease::Consumer, Error> {
+		let answer = self.submit(request, None)?;
+		let answered = tokio::time::timeout(ADMIT_TIMEOUT, answer)
+			.await
+			.map_err(|_| timed_out())?;
+		answered_with(answered)
+	}
+
+	/// Queue one admission for the decider, returning its pending answer.
+	fn submit(&self, request: Request, connection: Option<lease::Consumer>) -> Result<Answer, Error> {
 		let (reply, answer) = oneshot::channel();
 		self.admissions
-			.send(Admission { request, reply })
+			.send(Admission {
+				request,
+				connection,
+				reply,
+			})
 			.map_err(|_| Error::Unavailable("nobody is answering admissions".into()))?;
-		let consumer = tokio::time::timeout(ADMIT_TIMEOUT, answer)
-			.await
-			.map_err(|_| Error::Unavailable("the admission timed out".into()))?
-			.map_err(|_| Error::Unavailable("the admission went unanswered".into()))??;
-		// Every decider is held to the same answer contract: a grant that admits
-		// nothing or asks for a re-check without a bound is a bug, not a refusal.
-		consumer.grant().validate()?;
-		Ok(Lease::new(&path, consumer))
+		Ok(answer)
 	}
 
 	/// Admit a session on a grant decided locally, bypassing the server: the LAN
@@ -714,11 +776,31 @@ impl Auth {
 	}
 }
 
+/// A decider's pending answer to one [`Admission`].
+type Answer = oneshot::Receiver<Result<lease::Consumer, Error>>;
+
+fn timed_out() -> Error {
+	Error::Unavailable("the admission timed out".into())
+}
+
+/// Check a decider's answer against the contract every decider is held to: a
+/// grant that admits nothing or asks for a re-check without a bound is a bug, not
+/// a refusal.
+fn answered_with(
+	answered: Result<Result<lease::Consumer, Error>, oneshot::error::RecvError>,
+) -> Result<lease::Consumer, Error> {
+	let consumer = answered.map_err(|_| Error::Unavailable("the admission went unanswered".into()))??;
+	consumer.grant().validate()?;
+	Ok(consumer)
+}
+
 /// The sessions an embedded [`Auth`] is waiting to admit, in arrival order.
 ///
 /// The transport has already accepted each one; it waits for its answer, so a
 /// slow decider holds connects the way a slow auth server would, and one that
-/// takes longer than a server may (ten seconds) is refused as unavailable.
+/// takes longer than a server may (ten seconds) is refused as unavailable. An
+/// [attached](Admission::attached) token keeps its place in the session's
+/// verification bound until the decider answers or drops it, even past that.
 /// Answer in place or hand each [`Admission`] to its own task; nothing here
 /// serializes them.
 pub struct Admissions(mpsc::UnboundedReceiver<Admission>);
@@ -736,6 +818,7 @@ impl Admissions {
 pub struct Admission {
 	/// The `connect` request the relay built: every fact the transport knows.
 	pub request: Request,
+	connection: Option<lease::Consumer>,
 	reply: oneshot::Sender<Result<lease::Consumer, Error>>,
 }
 
@@ -748,6 +831,12 @@ impl Admission {
 }
 
 impl Admission {
+	/// Whether this verifies another credential presented in band for the session
+	/// already admitted as `request.id`, rather than admitting a new session.
+	pub fn attached(&self) -> bool {
+		self.connection.is_some()
+	}
+
 	/// Admit the session on `lease`: [`lease::Consumer::fixed`] for a grant that
 	/// never changes, or the consumer of a [`lease::Producer`] the decider keeps to
 	/// re-check, update, revoke, and learn when the session ends.

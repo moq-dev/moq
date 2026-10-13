@@ -10,6 +10,7 @@ import { Cost, type Hop, type Route, routesEqual } from "../hop.ts";
 import { finalSequence, hiddenBelow, hooks, presented } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { Priority, sendOrder } from "../priority.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
 import { Milli, Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
@@ -20,7 +21,6 @@ import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import type { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
-import { Priority, sendOrder } from "./priority.ts";
 import { Probe } from "./probe.ts";
 import {
 	encodeSubscribeResponse,
@@ -734,7 +734,7 @@ export class Publisher {
 			front =
 				this.#publish &&
 				(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
-					(await untilAborted(wireOf(this.#publish).demand(msg.broadcast, msg.epoch), left.signal)));
+					(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch, left.signal)));
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
@@ -750,6 +750,7 @@ export class Publisher {
 		const endGroup = exclusiveGroupEnd(msg.endGroup);
 		const track = wireOf(front).subscribe(msg.track, {
 			priority: msg.priority,
+			order: msg.order,
 			maxDelay: Milli(servingMaxDelay(this.version, msg.maxDelay)),
 			groups: {
 				start: msg.startGroup === undefined ? undefined : { included: msg.startGroup },
@@ -808,6 +809,7 @@ export class Publisher {
 					const end = exclusiveGroupEnd(update.endGroup);
 					track.update({
 						priority: update.priority,
+						order: update.order,
 						maxDelay: Milli(servingMaxDelay(this.version, update.maxDelay)),
 						groups: {
 							start: update.startGroup === undefined ? undefined : { included: update.startGroup },
@@ -886,66 +888,71 @@ export class Publisher {
 			return;
 		}
 
-		let front: broadcast.Consumer | undefined;
-		try {
-			front =
-				this.#publish &&
-				(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
-					(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch)));
-		} catch (err: unknown) {
-			stream.writer.reset(error(err));
-			return;
-		}
-		if (!front) {
-			console.debug(`fetch unknown: broadcast=${msg.broadcast}`);
-			stream.writer.reset(new NotFound(`broadcast ${msg.broadcast}`));
-			return;
-		}
-		// Revoked while the broadcast resolved: the watch already reset the stream.
-		if (watch.revoked()) return;
-
-		// The subscriber opened this stream, so its send order only ranked the request. Rank the
-		// response here, on the same scale as the group streams it competes with.
-		stream.writer.setPriority(sendOrder({ priority: msg.priority }));
-
-		// A FETCH requester leaves early by resetting its stream or losing its session, which
-		// lets go of a lookup still waiting on the answer.
+		// A normal request FIN is not a cancellation: FETCH has no more request bytes.
 		const hold = new AbortController();
 		void stream.reader.closed.catch(() => hold.abort());
-
-		let group: group.Consumer | undefined;
+		void stream.writer.closed.catch(() => hold.abort());
 		try {
-			// The timescale is immutable, so serve exactly what TRACK_INFO advertised. Both
-			// come off the same front, so the metadata and the frames are one generation.
-			let info: TrackInfoMessage;
+			let front: broadcast.Consumer | undefined;
 			try {
-				info = await this.#resolveTrackInfo(front, msg.track, hold.signal, true);
-			} finally {
-				hold.abort();
-			}
-			group = await wireOf(front).fetchGroup(msg.track, msg.group, { priority: msg.priority });
-			serving(group);
-			// Revoked while the group resolved: the watch already reset the stream.
-			if (watch.revoked()) {
-				group.close(unauthorized(msg.broadcast));
+				front =
+					this.#publish &&
+					(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
+						(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch, hold.signal)));
+			} catch (err: unknown) {
+				stream.writer.reset(error(err));
 				return;
 			}
-			await this.#runFetchGroup(group, stream.writer, {
-				timescale: Timescale(info.timescale),
-				start: msg.startFrame,
-				end: msg.endFrame,
-			});
-			console.debug(`fetch done: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
-			stream.close();
-			group.close();
-			await acknowledged(stream.writer);
-		} catch (err: unknown) {
-			const e = error(err);
-			console.warn(
-				`fetch error: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group} error=${reason(e)}`,
-			);
-			group?.close(e);
-			stream.abort(e);
+			if (!front) {
+				console.debug(`fetch unknown: broadcast=${msg.broadcast}`);
+				stream.writer.reset(new NotFound(`broadcast ${msg.broadcast}`));
+				return;
+			}
+			// Revoked while the broadcast resolved: the watch already reset the stream.
+			if (watch.revoked()) return;
+
+			// The subscriber opened this stream, so its send order only ranked the request. Rank the
+			// response here, on the same scale as the group streams it competes with.
+			stream.writer.setPriority(sendOrder({ priority: msg.priority }));
+
+			// A FETCH requester leaves early by resetting its stream or losing its session, which
+			// lets go of a lookup still waiting on the answer.
+			let group: group.Consumer | undefined;
+			try {
+				// The timescale is immutable, so serve exactly what TRACK_INFO advertised. Both
+				// come off the same front, so the metadata and the frames are one generation.
+				let info: TrackInfoMessage;
+				try {
+					info = await this.#resolveTrackInfo(front, msg.track, hold.signal, true);
+				} finally {
+					hold.abort();
+				}
+				group = await wireOf(front).fetchGroup(msg.track, msg.group, { priority: msg.priority });
+				serving(group);
+				// Revoked while the group resolved: the watch already reset the stream.
+				if (watch.revoked()) {
+					group.close(unauthorized(msg.broadcast));
+					return;
+				}
+				await this.#runFetchGroup(group, stream.writer, {
+					timescale: Timescale(info.timescale),
+					start: msg.startFrame,
+					end: msg.endFrame,
+				});
+				console.debug(`fetch done: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
+				stream.close();
+				group.close();
+				await acknowledged(stream.writer);
+			} catch (err: unknown) {
+				const e = error(err);
+				console.warn(
+					`fetch error: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group} error=${reason(e)}`,
+				);
+				group?.close(e);
+				stream.abort(e);
+			}
+		} finally {
+			hold.abort();
 		}
 	}
 
@@ -1229,7 +1236,7 @@ export class Publisher {
 			const front =
 				this.#publish &&
 				(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
-					(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch)));
+					(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch, hold.signal)));
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
 
 			const info = await this.#resolveTrackInfo(front, msg.track, hold.signal);

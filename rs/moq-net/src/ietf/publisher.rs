@@ -16,7 +16,8 @@ use crate::{
 	AsPath, DecodeError, Error, Timescale, Timestamp,
 	coding::{Encode as _, Encoder, Stream, Writer},
 	ietf::{self, Control, EndLocation, FetchHeader, FetchType, Filter, GroupOrder, Location, RequestId},
-	track::Subscription,
+	priority::{Priority, PriorityHandle, PriorityQueue},
+	track::{Order, Subscription},
 	util::{MaybeBoxedExt, MaybeSendBox},
 };
 
@@ -42,8 +43,8 @@ fn serving_subscription(subscriber_priority: u8) -> Subscription {
 /// INCLUDE_PROPERTIES=0, which keeps the block present but empty.
 ///
 /// Declaring the timescale is what opts the track into timestamps; every object Timestamp
-/// is in these units. We serve the newest group first, matching moq-lite. A draft without
-/// room for a property drops it on encode.
+/// is in these units. We serve the newest group first by default, matching moq-lite. A draft
+/// without room for a property drops it on encode.
 fn track_properties(info: &track::Info, wanted: bool) -> ietf::Properties {
 	if !wanted {
 		return ietf::Properties::default();
@@ -376,6 +377,8 @@ pub(super) struct Publisher<S: crate::transport::poll::Session> {
 	pub(super) owed: Arc<AtomicUsize>,
 	// Subscriptions the peer may hold at once (`session::Limits::subscriptions`).
 	pub(super) subscriptions: crate::session::Slots,
+	// Ranks every subscription's group streams against each other for the transport.
+	priority: PriorityQueue,
 }
 
 struct Serve(Arc<AtomicUsize>);
@@ -444,6 +447,7 @@ where
 			auth: crate::auth::Handle::new(false),
 			owed: Default::default(),
 			subscriptions: Default::default(),
+			priority: Default::default(),
 		}
 	}
 
@@ -769,7 +773,8 @@ where
 				}
 			};
 
-			let mut subscription = serving_subscription(msg.subscriber_priority);
+			let order = msg.group_order.to_order();
+			let mut subscription = serving_subscription(msg.subscriber_priority).with_order(order);
 			let priority = subscription.priority;
 
 			// Subscribe before resolving the filter: on a routed broadcast the live edge only
@@ -850,7 +855,15 @@ where
 					track_alias: request_id.0,
 					// The subscription floor and FETCH/FILL cap use this same snapshot.
 					largest: edge.largest,
-					properties: track_properties(track.info(), msg.properties_wanted),
+					properties: {
+						let mut properties = track_properties(track.info(), msg.properties_wanted);
+						// Through draft-15 this restates the order the subscription is served in.
+						// Later drafts carry the publisher's default instead.
+						if matches!(self.version, Version::Draft14 | Version::Draft15) {
+							properties.group_order = Some(order.into());
+						}
+						properties
+					},
 				})
 				.await?;
 
@@ -860,7 +873,8 @@ where
 			// The fill (when one was requested) runs alongside on its own fetch stream;
 			// its failures reset that stream and never touch the subscription.
 			let mut track_serve =
-				TrackServe::new(self.session.clone(), track, request_id, self.version, range, timescale);
+				TrackServe::new(self.session.clone(), track, request_id, self.version, range, timescale)
+					.ranked(self.priority.clone());
 			let opened = track_serve.opened.clone();
 			let fill = async {
 				if let Some((fill, cache, timescale)) = fill {
@@ -2896,6 +2910,8 @@ struct TrackServe<S: crate::transport::poll::Session> {
 	children: kio::Tasks<GroupServe<S>>,
 	/// The subscriber priority, which every group stream follows while it is open.
 	priority: kio::Producer<u8>,
+	/// Where the group streams are ranked: the session's queue once [`Self::ranked`].
+	queue: PriorityQueue,
 	/// The track finished: the in-flight group machines drain, then FIN.
 	draining: bool,
 	/// Group streams opened, shared with the group machines.
@@ -2945,11 +2961,34 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			timescale,
 			children: kio::Tasks::new(),
 			priority,
+			queue: PriorityQueue::default(),
 			draining: false,
 			opened: Default::default(),
 			end: None,
 			terminal: Default::default(),
 			budget: kio::coop::Budget::new(32),
+		}
+	}
+
+	/// Rank this subscription's group streams in `queue`, shared with the session's other
+	/// subscriptions. Without it they are only ranked against each other.
+	fn ranked(mut self, queue: PriorityQueue) -> Self {
+		self.queue = queue;
+		self
+	}
+
+	/// This group's place in the queue, in the subscription's order.
+	fn rank(&self, sequence: u64) -> Rank {
+		let priority = self.priority.consume();
+		let current = *priority.read();
+		let order = self.track.subscription().order;
+		Rank {
+			handle: self
+				.queue
+				.insert(Priority::new(current, self.request_id.0, sequence).with_order(order)),
+			priority,
+			applied: current,
+			order,
 		}
 	}
 
@@ -3072,11 +3111,12 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						},
 					};
 
+					let rank = self.rank(sequence);
 					self.children.push(
 						GroupServe::new(
 							self.session.clone(),
 							msg,
-							self.priority.consume(),
+							rank,
 							group,
 							self.timescale,
 							self.version,
@@ -3159,6 +3199,49 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 	}
 }
 
+/// A group stream's place in the session's send order: its subscription's priority, then
+/// its sequence in the subscription's GROUP_ORDER.
+struct Rank {
+	handle: PriorityHandle,
+	/// The subscription's priority, followed while the stream is open.
+	priority: kio::Consumer<u8>,
+	/// The priority last applied to [`Self::handle`].
+	applied: u8,
+	/// The subscription's GROUP_ORDER, fixed for its life: no update carries it.
+	order: Order,
+}
+
+impl Rank {
+	/// A group ranked only against itself, for driving one group machine alone.
+	#[cfg(test)]
+	fn solo(priority: kio::Consumer<u8>) -> Self {
+		let applied = *priority.read();
+		Self {
+			handle: PriorityQueue::default().insert(Priority::new(applied, 0, 0)),
+			priority,
+			applied,
+			order: Order::Descending,
+		}
+	}
+
+	/// A send order for the stream once the subscription priority or the queue moved it.
+	fn poll_moved(&mut self, waiter: &kio::Waiter) -> Option<u8> {
+		let applied = self.applied;
+		let mut moved = None;
+		if let Poll::Ready(Ok(priority)) = self.priority.poll(waiter, |priority| match **priority == applied {
+			true => Poll::Pending,
+			false => Poll::Ready(**priority),
+		}) {
+			self.applied = priority;
+			moved = Some(PriorityHandle::send_order_of(self.handle.steer(priority, self.order)));
+		}
+		while let Poll::Ready(rank) = self.handle.poll_next(waiter) {
+			moved = Some(PriorityHandle::send_order_of(rank));
+		}
+		moved
+	}
+}
+
 /// Serves one group on its own unidirectional stream in the moq-transport
 /// subgroup format.
 struct GroupServe<S: crate::transport::poll::Session> {
@@ -3166,10 +3249,7 @@ struct GroupServe<S: crate::transport::poll::Session> {
 	/// The subscription's count of opened streams, bumped once this one opens.
 	opened: Arc<AtomicU64>,
 	msg: ietf::GroupHeader,
-	/// The subscription's priority, followed while the stream is open.
-	priority: kio::Consumer<u8>,
-	/// The priority last handed to the stream.
-	applied: u8,
+	rank: Rank,
 	group: group::Consumer,
 	timescale: Option<Timescale>,
 	version: Version,
@@ -3219,7 +3299,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 	fn new(
 		session: S,
 		msg: ietf::GroupHeader,
-		priority: kio::Consumer<u8>,
+		rank: Rank,
 		mut group: group::Consumer,
 		timescale: Option<Timescale>,
 		version: Version,
@@ -3228,13 +3308,11 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		group.skip_to(slice.skip);
 		group.end_at(slice.until.map_or(Bound::Unbounded, Bound::Excluded));
 		let object_delta = group.index();
-		let applied = *priority.read();
 		Self {
 			session,
 			opened: Default::default(),
 			msg,
-			applied,
-			priority,
+			rank,
 			group,
 			timescale,
 			version,
@@ -3259,20 +3337,11 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let mut cx = waiter.context();
-		// A REQUEST_UPDATE can move the subscriber priority while this stream is open.
-		// Serve and Closed, the only states holding a writer, apply the change; Open
-		// reads the current value once it gets its stream.
-		let applied = self.applied;
-		let mut moved = match self.priority.poll(waiter, |priority| match **priority == applied {
-			true => Poll::Pending,
-			false => Poll::Ready(**priority),
-		}) {
-			Poll::Ready(Ok(priority)) => {
-				self.applied = priority;
-				Some(priority)
-			}
-			_ => None,
-		};
+		// A REQUEST_UPDATE can move the subscriber priority while this stream is open, and
+		// the session's other group streams can move its rank. Serve and Closed, the only
+		// states holding a writer, apply the change; Open reads the current rank once it
+		// gets its stream.
+		let mut moved = self.rank.poll_moved(waiter);
 		loop {
 			match &mut self.state {
 				GroupState::Open => {
@@ -3289,8 +3358,9 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					};
 					self.opened.fetch_add(1, Ordering::Relaxed);
 					let mut stream = stream;
-					self.applied = *self.priority.read();
-					stream.set_priority(self.applied.into());
+					// The current rank, which already includes anything `moved` saw.
+					stream.set_priority(self.rank.handle.send_order().into());
+					moved = None;
 
 					let mut writer = Writer::new(stream, self.version);
 					if let Err(err) = writer.buffer(&self.msg) {
@@ -3697,7 +3767,7 @@ mod group_priority_test {
 					publisher_priority: 0,
 					flags: Default::default(),
 				},
-				kio::Producer::new(0).consume(),
+				Rank::solo(kio::Producer::new(0).consume()),
 				group,
 				Some(Timescale::MILLI),
 				Version::Draft19,
@@ -3734,14 +3804,25 @@ mod group_priority_test {
 		}
 	}
 
+	/// A group of `subscribe` ranked in `queue` at `priority`'s current value.
+	fn rank_in(queue: &PriorityQueue, priority: &kio::Producer<u8>, subscribe: u64) -> Rank {
+		let applied = *priority.read();
+		Rank {
+			handle: queue.insert(Priority::new(applied, subscribe, 0)),
+			priority: priority.consume(),
+			applied,
+			order: Order::Descending,
+		}
+	}
+
 	/// The model's `Subscription::priority` is higher-first ("higher values preempt
-	/// lower ones"), matching the transport trait's send order, so a group stream must
-	/// receive the model value unchanged. An inversion here would transmit the
-	/// LOWEST-priority track first under contention.
+	/// lower ones"), matching the transport trait's send order, so the higher-priority
+	/// subscription's group stream must get the higher send order. An inversion here
+	/// would transmit the LOWEST-priority track first under contention.
 	#[moq_net_sim::test]
 	async fn group_stream_preserves_model_priority() {
 		let log = crate::lite::test_transport::Log::default();
-		let session = SinkSession::new(log.clone());
+		let queue = PriorityQueue::default();
 
 		let track = track::Producer::new(
 			std::sync::Arc::new(crate::broadcast::Info::default()),
@@ -3752,7 +3833,6 @@ mod group_priority_test {
 		group
 			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
 			.unwrap();
-		let consumer = group.consume();
 		group.finish().unwrap();
 
 		let msg = ietf::GroupHeader {
@@ -3763,21 +3843,28 @@ mod group_priority_test {
 			flags: Default::default(),
 		};
 
-		let mut serve = GroupServe::new(
-			session,
-			msg,
-			kio::Producer::new(200).consume(),
-			consumer,
-			Some(Timescale::MILLI),
-			Version::Draft14,
-			GroupSlice::default(),
-		);
-		kio::wait(|waiter| serve.poll_serve(waiter)).await.unwrap();
+		// Queue both before either opens, so each stream is handed its final rank.
+		let high = kio::Producer::new(200);
+		let low = kio::Producer::new(100);
+		let mut serves = [(&low, 1), (&high, 0)].map(|(priority, subscribe)| {
+			GroupServe::new(
+				SinkSession::new(log.clone()),
+				msg.clone(),
+				rank_in(&queue, priority, subscribe),
+				group.consume(),
+				Some(Timescale::MILLI),
+				Version::Draft14,
+				GroupSlice::default(),
+			)
+		});
+		for serve in &mut serves {
+			kio::wait(|waiter| serve.poll_serve(waiter)).await.unwrap();
+		}
 
 		assert_eq!(
 			log.priorities(),
-			vec![200],
-			"model priority must pass through unchanged"
+			vec![254, 255],
+			"the higher model priority must transmit first"
 		);
 	}
 
@@ -4080,7 +4167,7 @@ mod group_priority_test {
 				publisher_priority: 0,
 				flags: Default::default(),
 			},
-			kio::Producer::new(0).consume(),
+			Rank::solo(kio::Producer::new(0).consume()),
 			group,
 			Some(Timescale::MILLI),
 			Version::Draft19,
@@ -4127,7 +4214,7 @@ mod group_priority_test {
 				publisher_priority: 0,
 				flags: Default::default(),
 			},
-			kio::Producer::new(0).consume(),
+			Rank::solo(kio::Producer::new(0).consume()),
 			group,
 			Some(Timescale::MILLI),
 			Version::Draft19,
@@ -4165,6 +4252,10 @@ mod group_priority_test {
 		let consumer = group.consume();
 		group.finish().unwrap();
 
+		// Another subscription's group at 150 sits in the same queue, so each update
+		// moves this stream across it.
+		let queue = PriorityQueue::default();
+		let _other = queue.insert(Priority::new(150, 1, 0));
 		let priority = kio::Producer::new(200);
 		let mut serve = GroupServe::new(
 			session,
@@ -4175,7 +4266,7 @@ mod group_priority_test {
 				publisher_priority: 0,
 				flags: Default::default(),
 			},
-			priority.consume(),
+			rank_in(&queue, &priority, 0),
 			consumer,
 			Some(Timescale::MILLI),
 			Version::Draft19,
@@ -4186,15 +4277,15 @@ mod group_priority_test {
 			futures::poll!(serving.as_mut()).is_pending(),
 			"the FIN is unacknowledged"
 		);
-		assert_eq!(log.priorities(), vec![200]);
+		assert_eq!(log.priorities(), vec![255]);
 
 		*priority.write().ok().unwrap() = 100;
 		assert!(futures::poll!(serving.as_mut()).is_pending());
-		assert_eq!(log.priorities(), vec![200, 100]);
+		assert_eq!(log.priorities(), vec![255, 254]);
 
-		*priority.write().ok().unwrap() = 50;
+		*priority.write().ok().unwrap() = 175;
 		assert!(futures::poll!(serving.as_mut()).is_pending());
-		assert_eq!(log.priorities(), vec![200, 100, 50]);
+		assert_eq!(log.priorities(), vec![255, 254, 255]);
 	}
 
 	/// The final payload remains guarded after its frame has advanced the group cursor.
@@ -4226,7 +4317,7 @@ mod group_priority_test {
 				publisher_priority: 0,
 				flags: Default::default(),
 			},
-			kio::Producer::new(0).consume(),
+			Rank::solo(kio::Producer::new(0).consume()),
 			group,
 			Some(Timescale::MILLI),
 			Version::Draft19,
@@ -4530,6 +4621,10 @@ mod serve_tests {
 		let h = serve(version);
 		let session = ScriptedSession::new(Vec::new());
 		let mut stream = Stream::open(&mut session.clone(), version).await.unwrap();
+		// Another subscription's group at 100 shares the queue, so the update moves this
+		// subscription's stream past it.
+		let queue = PriorityQueue::default();
+		let _other = queue.insert(Priority::new(100, 1, 0));
 		let mut serving = TrackServe::new(
 			h.session.clone(),
 			h.track.subscribe(None),
@@ -4537,7 +4632,8 @@ mod serve_tests {
 			version,
 			ServeRange::default(),
 			None,
-		);
+		)
+		.ranked(queue);
 		let mut finished = false;
 		let mut run = std::pin::pin!(
 			h.publisher
@@ -4549,7 +4645,7 @@ mod serve_tests {
 		group.write_frame(timestamp(), b"open".as_slice()).unwrap();
 		assert!(futures::poll!(run.as_mut()).is_pending());
 		let before = h.log.priorities();
-		assert_eq!(before.len(), 1, "{before:?}");
+		assert_eq!(before, [254], "below the other subscription");
 
 		// REQUEST_UPDATE with SUBSCRIBER_PRIORITY 10.
 		session.push(&[0x02, 0, 4, 2, 1, 0x20, 10]);
@@ -4558,7 +4654,7 @@ mod serve_tests {
 		}
 		assert_eq!(h.track.subscription().unwrap().priority, 245);
 		let after = h.log.priorities();
-		assert_eq!(after.last(), Some(&245), "{after:?}");
+		assert_eq!(after.last(), Some(&255), "above the other subscription: {after:?}");
 	}
 
 	#[moq_net_sim::test]
@@ -7417,6 +7513,45 @@ mod serve_tests {
 			.largest
 	}
 
+	/// Through draft-15 SUBSCRIBE_OK restates the order the subscription is served in; later
+	/// drafts announce the publisher's default, newest first.
+	#[moq_net_sim::test]
+	async fn subscribe_ok_announces_the_served_order() {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft20,
+		] {
+			for (requested, announced) in [
+				(GroupOrder::Ascending, GroupOrder::Ascending),
+				(GroupOrder::Descending, GroupOrder::Descending),
+				(GroupOrder::Any, GroupOrder::Descending),
+			] {
+				let mut h = serve(version);
+				let mut msg = subscribe(Filter::NextObject, None);
+				msg.group_order = requested;
+				run_live(&mut h, msg).await;
+
+				let writes = h.log.writes.lock().unwrap().clone();
+				let mut buf = writes.as_slice();
+				assert_eq!(
+					crate::coding::decode_varint(&mut buf, version).unwrap(),
+					ietf::SubscribeOk::ID
+				);
+				let ok = crate::coding::decode_buf(&mut buf, version, ietf::SubscribeOk::decode).unwrap();
+				let expected = match version {
+					Version::Draft14 | Version::Draft15 => Some(announced),
+					// Draft-16 has no room for it.
+					Version::Draft16 => None,
+					_ => Some(GroupOrder::Descending),
+				};
+				assert_eq!(ok.properties.group_order, expected, "{version:?} {requested:?}");
+			}
+		}
+	}
+
 	#[moq_net_sim::test]
 	async fn largest_object_is_the_live_edge_before_draft20() {
 		for version in [
@@ -7480,7 +7615,7 @@ mod serve_tests {
 			let mut serve = GroupServe::new(
 				session,
 				header(),
-				kio::Producer::new(0).consume(),
+				Rank::solo(kio::Producer::new(0).consume()),
 				consumer,
 				Some(Timescale::MILLI),
 				Version::Draft20,

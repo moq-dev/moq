@@ -165,7 +165,7 @@ impl Publisher {
 pub(crate) struct Options {
 	/// The muxer's jitter-buffer delay ([`Subscriber::new`]).
 	pub latency: Duration,
-	/// How long to wait for the same publisher instance to come back once its broadcast ends.
+	/// How long a return or stitched replacement has to supply its first catalog.
 	pub linger: Duration,
 	/// Follow another instance replacing the broadcast, as a full program switch.
 	pub stitch: bool,

@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use url::Url;
@@ -18,6 +19,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// `end` when the session closes.
 #[derive(Clone)]
 pub struct Client {
+	identity: Arc<()>,
 	http: reqwest::Client,
 	url: Url,
 }
@@ -59,15 +61,154 @@ impl Client {
 		};
 
 		Ok(Self {
+			identity: Arc::new(()),
 			http: builder.build()?,
 			url,
 		})
 	}
 
 	/// Admit a session: POST `connect`, validate the reply, and return the lease the
-	/// session holds. The session reports totals through [`lease::Consumer::close`].
+	/// session holds. The session reports its end and totals through [`lease::Consumer::close`]
+	/// or drop; credential expiry alone never reports that the connection ended.
 	pub async fn connect(&self, request: Request) -> crate::Result<lease::Consumer> {
-		connect(self.clone(), request).await
+		let context = Context::new(request.clone(), self.identity.clone());
+		admit(self.clone(), request, context).await
+	}
+
+	/// Verify another credential for this connection without owning its end event.
+	pub async fn attach(&self, connection: &lease::Consumer, request: Request) -> crate::Result<lease::Consumer> {
+		let context = connection.context().ok_or(Error::Refused)?;
+		let context = context.attach(&request, &self.identity)?;
+		admit(self.clone(), request, context).await
+	}
+}
+
+/// A credential's ownership of the connection it belongs to.
+#[derive(Clone)]
+pub(crate) struct Context {
+	connection: Arc<Connection>,
+	owner: bool,
+}
+
+struct Connection {
+	request: Request,
+	issuer: Arc<()>,
+	lifecycle: kio::Shared<Lifecycle>,
+}
+
+#[derive(Default)]
+struct Lifecycle {
+	ended: Option<(Reason, Bytes, Instant)>,
+	pending: usize,
+}
+
+/// End must follow every request an attached credential has in flight for this
+/// connection id: its Connect, and each Revalidate until its driver stops.
+struct Admission(Arc<Connection>);
+
+impl Drop for Admission {
+	fn drop(&mut self) {
+		self.0.lifecycle.lock().pending -= 1;
+	}
+}
+
+impl std::fmt::Debug for Context {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Context")
+			.field("owner", &self.owner)
+			.finish_non_exhaustive()
+	}
+}
+
+impl Context {
+	fn new(mut request: Request, issuer: Arc<()>) -> Self {
+		request.event = Event::Connect;
+		Self {
+			connection: Arc::new(Connection {
+				request,
+				issuer,
+				lifecycle: Default::default(),
+			}),
+			owner: true,
+		}
+	}
+
+	fn attach(&self, request: &Request, issuer: &Arc<()>) -> crate::Result<Self> {
+		if !self.owner || !Arc::ptr_eq(issuer, &self.connection.issuer) || self.connection.request.tls.is_some() {
+			return Err(Error::Refused);
+		}
+		let mut expected = self.connection.request.clone();
+		expected.query = request.query.clone();
+		expected.token = request.token.clone();
+		if &expected != request {
+			return Err(Error::Refused);
+		}
+		if self.connection.lifecycle.read().ended.is_some() {
+			return Err(Error::Refused);
+		}
+		Ok(Self {
+			connection: self.connection.clone(),
+			owner: false,
+		})
+	}
+
+	fn admitting(&self) -> crate::Result<Option<Admission>> {
+		if self.owner {
+			return Ok(None);
+		}
+		let mut lifecycle = self.connection.lifecycle.lock();
+		if lifecycle.ended.is_some() {
+			return Err(Error::Refused);
+		}
+		lifecycle.pending += 1;
+		Ok(Some(Admission(self.connection.clone())))
+	}
+
+	pub(crate) fn close(&self, reason: Reason, bytes: Bytes) {
+		if self.owner {
+			self.connection
+				.lifecycle
+				.lock()
+				.ended
+				.get_or_insert((reason, bytes, Instant::now()));
+		}
+	}
+
+	/// Resolve with the connection's end reason, for an attached credential only.
+	async fn connection_ended(&self) -> Reason {
+		if self.owner {
+			return std::future::pending().await;
+		}
+		kio::wait(|waiter| {
+			let lifecycle = std::task::ready!(self.connection.lifecycle.poll(waiter, |lifecycle| {
+				if lifecycle.ended.is_some() {
+					std::task::Poll::Ready(())
+				} else {
+					std::task::Poll::Pending
+				}
+			}));
+			std::task::Poll::Ready(lifecycle.ended.as_ref().expect("waited for connection end").0.clone())
+		})
+		.await
+	}
+
+	async fn end(&self) -> Option<(Reason, Bytes, Instant)> {
+		if !self.owner {
+			return None;
+		}
+		Some(
+			kio::wait(|waiter| {
+				let lifecycle = std::task::ready!(self.connection.lifecycle.poll(waiter, |ended| {
+					if ended.ended.is_some() && ended.pending == 0 {
+						std::task::Poll::Ready(())
+					} else {
+						std::task::Poll::Pending
+					}
+				}));
+				std::task::Poll::Ready(lifecycle.ended.clone().expect("waited for connection end"))
+			})
+			.await,
+		)
 	}
 }
 
@@ -110,13 +251,20 @@ impl Post for Client {
 }
 
 /// Admit a session through `server` and spawn the driver behind its lease.
-async fn connect<S: Post>(server: S, mut request: Request) -> crate::Result<lease::Consumer> {
+async fn admit<S: Post>(server: S, mut request: Request, context: Context) -> crate::Result<lease::Consumer> {
 	request.event = Event::Connect;
+	let admission = context.admitting()?;
 
 	let grant = ask(&server, &request).await?;
-	let (producer, consumer) = lease::Producer::new(grant.clone());
+	if context.connection.lifecycle.read().ended.is_some() {
+		return Err(Error::Refused);
+	}
+	let (producer, mut consumer) = lease::Producer::new(grant.clone());
+	consumer.set_context(context.clone());
 
 	let driver = Driver {
+		context,
+		_admission: admission,
 		server,
 		request,
 		producer: Some(producer),
@@ -151,6 +299,9 @@ fn redact(url: &Url) -> String {
 
 /// The task behind a lease: re-checks on cadence and reports the end.
 struct Driver<S> {
+	context: Context,
+	/// Held by an attached credential's driver, so the connection's End waits for it.
+	_admission: Option<Admission>,
 	server: S,
 	request: Request,
 	producer: Option<lease::Producer>,
@@ -159,12 +310,15 @@ struct Driver<S> {
 
 impl<S: Post> Driver<S> {
 	async fn run(mut self) {
-		let (reason, bytes) = self.drive().await;
+		self.drive().await;
+		let Some((reason, bytes, ended)) = self.context.end().await else {
+			return;
+		};
 
 		let mut request = self.request.clone();
 		request.event = Event::End {
 			reason,
-			duration: self.started.elapsed(),
+			duration: ended.saturating_duration_since(self.started),
 			bytes,
 		};
 		// The session is already gone; nothing to do with a failure but say so.
@@ -183,7 +337,7 @@ impl<S: Post> Driver<S> {
 		let mut inflight: Option<Pin<Box<dyn Future<Output = crate::Result<Grant>> + Send>>> = None;
 		let mut pending = false;
 
-		loop {
+		let ended = loop {
 			let reply = async {
 				match inflight.as_mut() {
 					Some(request) => request.await,
@@ -192,9 +346,11 @@ impl<S: Post> Driver<S> {
 			};
 			tokio::select! {
 				biased;
-				ended = producer.closed() => return ended,
+				ended = producer.closed() => break ended,
+				// An attached credential ends with its connection.
+				reason = self.context.connection_ended() => break producer.finish(reason, Bytes::default()),
 				due = producer.due() => match due {
-					Due::Expired => return producer.finish(Reason::Expired, Bytes::default()),
+					Due::Expired => break producer.finish(Reason::Expired, Bytes::default()),
 					Due::Revalidate if inflight.is_some() => pending = true,
 					Due::Revalidate => inflight = Some(self.post_revalidate()),
 				},
@@ -202,9 +358,9 @@ impl<S: Post> Driver<S> {
 					inflight = None;
 					match result {
 						Ok(fresh) => producer.update(fresh),
-						Err(Error::Refused) => return producer.finish(Reason::Refused, Bytes::default()),
+						Err(Error::Refused) => break producer.finish(Reason::Refused, Bytes::default()),
 						Err(Error::GrantExpired | Error::UnboundedRevalidate | Error::ZeroRevalidate) => {
-							return producer.finish(Reason::Invalid, Bytes::default());
+							break producer.finish(Reason::Invalid, Bytes::default());
 						},
 						Err(err) => {
 							let delay = producer.failed();
@@ -218,7 +374,13 @@ impl<S: Post> Driver<S> {
 					}
 				},
 			}
+		};
+		// Land an in-flight Revalidate before releasing the connection's End, so
+		// End is the last request for this id however the lease ended.
+		if let Some(request) = inflight {
+			let _ = request.await;
 		}
+		ended
 	}
 
 	fn post_revalidate(&self) -> Pin<Box<dyn Future<Output = crate::Result<Grant>> + Send>> {
@@ -302,6 +464,7 @@ mod tests {
 	/// socket, the clock only advances once every answer has landed.
 	#[derive(Clone)]
 	struct Script {
+		identity: Arc<()>,
 		log: Log,
 		#[allow(clippy::type_complexity)]
 		respond: std::sync::Arc<dyn Fn(&Request) -> Option<crate::Result<Grant>> + Send + Sync>,
@@ -310,13 +473,21 @@ mod tests {
 	impl Script {
 		fn new(log: Log, respond: impl Fn(&Request) -> Option<crate::Result<Grant>> + Send + Sync + 'static) -> Self {
 			Self {
+				identity: Arc::new(()),
 				log,
 				respond: std::sync::Arc::new(respond),
 			}
 		}
 
 		async fn connect(&self) -> crate::Result<lease::Consumer> {
-			connect(self.clone(), request()).await
+			admit(self.clone(), request(), Context::new(request(), self.identity.clone())).await
+		}
+		async fn attach(&self, owner: &lease::Consumer, request: Request) -> crate::Result<lease::Consumer> {
+			let context = owner
+				.context()
+				.ok_or(Error::Refused)?
+				.attach(&request, &self.identity)?;
+			admit(self.clone(), request, context).await
 		}
 	}
 
@@ -372,6 +543,205 @@ mod tests {
 			}
 			other => panic!("expected an end, got {other:?}"),
 		}
+	}
+
+	#[tokio::test]
+	async fn an_attached_lease_never_reports_the_connection_end() {
+		let log = Log::default();
+		let script = Script::new(log.clone(), |_| Some(Ok(grant(None, None))));
+		let owner = script.connect().await.unwrap();
+		let retained = owner.clone();
+		let mut request = request();
+		request.query = Some("jwt=replacement".into());
+		let attached = script.attach(&owner, request).await.unwrap();
+		drop(attached);
+		tokio::task::yield_now().await;
+		assert_eq!(log.events(), [Event::Connect, Event::Connect]);
+		owner.close("done", Bytes { sent: 7, received: 11 });
+		match log.end().await.event {
+			Event::End { reason, bytes, .. } => {
+				assert_eq!(reason, Reason::Session("done".into()));
+				assert_eq!(bytes, Bytes { sent: 7, received: 11 });
+			}
+			other => panic!("expected connection end, got {other:?}"),
+		}
+		drop(retained);
+	}
+
+	#[tokio::test]
+	async fn an_attached_lease_ends_with_its_connection() {
+		let log = Log::default();
+		let script = Script::new(log.clone(), |_| Some(Ok(grant(None, None))));
+		let owner = script.connect().await.unwrap();
+		let mut request = request();
+		request.query = Some("jwt=replacement".into());
+		let attached = script.attach(&owner, request).await.unwrap();
+		owner.close(Reason::Shutdown, Bytes::default());
+		assert_eq!(attached.closed().await, Reason::Shutdown);
+		log.end().await;
+		attached.revalidate();
+		tokio::task::yield_now().await;
+		assert!(
+			matches!(
+				log.events().as_slice(),
+				[Event::Connect, Event::Connect, Event::End { .. }]
+			),
+			"an attached lease outlived its connection's End"
+		);
+	}
+
+	#[tokio::test]
+	async fn a_withdrawn_attachment_lands_its_revalidate_before_end() {
+		#[derive(Clone)]
+		struct HeldRevalidate {
+			script: Script,
+			arrived: Arc<tokio::sync::Notify>,
+			release: Arc<tokio::sync::Notify>,
+		}
+		impl Post for HeldRevalidate {
+			async fn post(&self, request: &Request) -> crate::Result<Grant> {
+				if request.event == Event::Revalidate {
+					self.arrived.notify_one();
+					self.release.notified().await;
+				}
+				self.script.post(request).await
+			}
+			async fn post_end(&self, request: &Request) -> crate::Result<()> {
+				self.script.post_end(request).await
+			}
+		}
+		let log = Log::default();
+		let script = Script::new(log.clone(), |_| Some(Ok(grant(None, None))));
+		let owner = script.connect().await.unwrap();
+		let server = HeldRevalidate {
+			script: script.clone(),
+			arrived: Arc::default(),
+			release: Arc::default(),
+		};
+		let mut request = request();
+		request.query = Some("jwt=replacement".into());
+		let context = owner.context().unwrap().attach(&request, &script.identity).unwrap();
+		let attached = admit(server.clone(), request, context).await.unwrap();
+		attached.revalidate();
+		server.arrived.notified().await;
+		drop(attached);
+		tokio::task::yield_now().await;
+		owner.close(Reason::Shutdown, Bytes::default());
+		tokio::task::yield_now().await;
+		assert_eq!(
+			log.events(),
+			[Event::Connect, Event::Connect],
+			"end overtook a withdrawn attachment's in-flight revalidate"
+		);
+		server.release.notify_one();
+		log.end().await;
+		assert!(matches!(
+			log.events().as_slice(),
+			[Event::Connect, Event::Connect, Event::Revalidate, Event::End { .. }]
+		));
+	}
+
+	#[tokio::test]
+	async fn initial_credential_expiry_does_not_end_a_renewed_connection() {
+		tokio::time::pause();
+		let log = Log::default();
+		let script = Script::new(log.clone(), |request| {
+			let seconds = if request.query.as_deref() == Some("jwt=replacement") {
+				5
+			} else {
+				1
+			};
+			Some(Ok(grant(Some(Duration::from_secs(seconds)), None)))
+		});
+		let owner = script.connect().await.unwrap();
+		let mut request = request();
+		request.query = Some("jwt=replacement".into());
+		let attached = script.attach(&owner, request).await.unwrap();
+		assert_eq!(owner.closed().await, Reason::Expired);
+		assert_eq!(log.events(), [Event::Connect, Event::Connect]);
+		assert!(matches!(attached.poll_closed(&kio::Waiter::noop()), Poll::Pending));
+		owner.close(Reason::Shutdown, Bytes::default());
+		assert!(matches!(
+			log.end().await.event,
+			Event::End {
+				reason: Reason::Shutdown,
+				..
+			}
+		));
+		drop(attached);
+	}
+
+	#[tokio::test]
+	async fn connection_end_waits_for_an_attachment_already_being_verified() {
+		#[derive(Clone)]
+		struct HeldPost {
+			script: Script,
+			arrived: Arc<tokio::sync::Notify>,
+			release: Arc<tokio::sync::Notify>,
+		}
+		impl Post for HeldPost {
+			async fn post(&self, request: &Request) -> crate::Result<Grant> {
+				self.arrived.notify_one();
+				self.release.notified().await;
+				self.script.post(request).await
+			}
+			async fn post_end(&self, request: &Request) -> crate::Result<()> {
+				self.script.post_end(request).await
+			}
+		}
+		let log = Log::default();
+		let script = Script::new(log.clone(), |_| Some(Ok(grant(None, None))));
+		let owner = script.connect().await.unwrap();
+		let server = HeldPost {
+			script: script.clone(),
+			arrived: Arc::default(),
+			release: Arc::default(),
+		};
+		let context = owner.context().unwrap().attach(&request(), &script.identity).unwrap();
+		let pending = tokio::spawn(admit(server.clone(), request(), context));
+		server.arrived.notified().await;
+		owner.close(Reason::Shutdown, Bytes::default());
+		tokio::task::yield_now().await;
+		assert_eq!(
+			log.events(),
+			[Event::Connect],
+			"end overtook an in-flight connect for the same id"
+		);
+		server.release.notify_one();
+		assert!(matches!(pending.await.unwrap(), Err(Error::Refused)));
+		assert!(matches!(
+			log.end().await.event,
+			Event::End {
+				reason: Reason::Shutdown,
+				..
+			}
+		));
+		assert!(matches!(
+			log.events().as_slice(),
+			[Event::Connect, Event::Connect, Event::End { .. }]
+		));
+	}
+
+	#[tokio::test]
+	async fn an_attachment_cannot_change_connection_identity() {
+		let log = Log::default();
+		let script = Script::new(log.clone(), |_| Some(Ok(grant(None, None))));
+		let owner = script.connect().await.unwrap();
+		for change in [0, 1, 2, 3] {
+			let mut request = request();
+			match change {
+				0 => request.id = "another".into(),
+				1 => request.path = "/another".into(),
+				2 => request.role = Some(crate::Role::Publisher),
+				_ => request.node = "another".into(),
+			}
+			assert!(matches!(script.attach(&owner, request).await, Err(Error::Refused)));
+		}
+		let other = Script::new(log.clone(), |_| Some(Ok(grant(None, None))));
+		assert!(matches!(other.attach(&owner, request()).await, Err(Error::Refused)));
+		assert_eq!(log.events(), [Event::Connect]);
+		owner.clone().close("done", Bytes::default());
+		assert!(matches!(script.attach(&owner, request()).await, Err(Error::Refused)));
 	}
 
 	#[tokio::test]
@@ -573,6 +943,7 @@ mod tests {
 			.await
 			.expect("closed at expires, not later");
 		assert_eq!(reason, Reason::Expired);
+		consumer.close(reason, Bytes::default());
 		assert!(matches!(
 			log.end().await.event,
 			Event::End {

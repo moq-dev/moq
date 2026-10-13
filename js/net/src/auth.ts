@@ -60,6 +60,8 @@ export interface Token {
 export interface Request {
 	/** The token the peer presented. Empty means the credential its connection carried. */
 	readonly token: Uint8Array;
+	/** Settles when the peer withdraws this unanswered token or closes the session. */
+	readonly closed: PromiseLike<Error | null>;
 	/**
 	 * Grant the token until the returned {@link Issued} is revoked or closed.
 	 *

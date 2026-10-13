@@ -17,7 +17,7 @@
 use std::task::{Poll, ready};
 
 use bytes::Bytes;
-use hang::catalog::{AudioConfig, Container, VideoCodec, VideoConfig};
+use hang::catalog::{AudioConfig, Container, Reference, VideoCodec, VideoConfig};
 
 use super::consumer::Event;
 use crate::catalog::hang::Container as HangContainer;
@@ -158,7 +158,7 @@ impl ExportSource {
 		};
 
 		let mut source = Self {
-			state: SourceState::Requesting(request, name.to_string()),
+			state: SourceState::Requesting(request, config.track(name).to_string()),
 			media: Some(media),
 			max_delay,
 			live: false,
@@ -189,7 +189,7 @@ impl ExportSource {
 		};
 
 		Ok(Some(Self {
-			state: SourceState::Requesting(request, name.to_string()),
+			state: SourceState::Requesting(request, config.track(name).to_string()),
 			media: Some(media),
 			max_delay,
 			live: false,

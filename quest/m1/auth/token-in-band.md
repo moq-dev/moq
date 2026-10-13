@@ -82,7 +82,5 @@ Additive.
 ## Required
 
 - [FFI shape](/quest/m1/ffi-shape/README.md) - puts the `MoqClientConfig` record in place that `tokens` extends, so the wrappers break once
-- [Relay tokens](/quest/m1/auth/relay-refresh.md) - supplies the verify and
-  widen path the configured tokens reuse
 - [Bindings](/quest/m1/auth/bindings.md) - supplies the client surface the new
   token setters sit beside

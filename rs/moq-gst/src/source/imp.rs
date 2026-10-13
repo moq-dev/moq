@@ -383,13 +383,14 @@ impl MoqSrc {
 	}
 }
 
-/// The identity we reconcile a rendition on: a change to either field tears the pad down and
+/// The identity we reconcile a rendition on: a change to any field tears the pad down and
 /// recreates it. Caps cover codec/resolution; the container descriptor covers the wire framing
-/// (e.g. legacy -> cmaf).
+/// (e.g. legacy -> cmaf); the track is the name subscribed, which can differ from the ID.
 #[derive(Clone, PartialEq)]
 struct Shape {
 	caps: gst::Caps,
 	container: hang::catalog::Container,
+	track: String,
 }
 
 /// A pump's progress, shared with its [`ActiveTrack`] so teardown and pad creation can't both
@@ -797,7 +798,7 @@ async fn follow_catalog(
 }
 
 /// Bring the run's pumps in line with `catalog`: spawn pumps for newly announced renditions,
-/// hand the pad of any whose caps or container changed to a new pump, leave ones that vanished to
+/// hand the pad of any whose [`Shape`] changed to a new pump, leave ones that vanished to
 /// end with their track, stop disabled ones, and end the kept pads of renditions it no longer
 /// lists. Returns the renditions it lists.
 ///
@@ -825,21 +826,25 @@ fn reconcile(
 	// skipped rather than failing the whole run, so one bad rendition can't tear down the
 	// others we're already serving.
 	let mut desired: HashMap<String, Desired> = HashMap::new();
-	let mut insert = |name: &String, kind, caps: Result<gst::Caps>, container: &hang::catalog::Container| match caps {
-		Ok(caps) => {
-			let shape = Shape {
-				caps,
-				container: container.clone(),
-			};
-			desired.insert(name.clone(), Desired { kind, shape });
-		}
-		Err(err) => gst::warning!(CAT, "ignoring {kind:?} rendition {name}: {err:?}"),
-	};
+	let mut insert =
+		|name: &String, kind, caps: Result<gst::Caps>, container: &hang::catalog::Container, track: &str| match caps {
+			Ok(caps) => {
+				let shape = Shape {
+					caps,
+					container: container.clone(),
+					track: track.to_string(),
+				};
+				desired.insert(name.clone(), Desired { kind, shape });
+			}
+			Err(err) => gst::warning!(CAT, "ignoring {kind:?} rendition {name}: {err:?}"),
+		};
 	for (name, config) in catalog.video.enabled() {
-		insert(name, TrackKind::Video, video_caps(config), &config.container);
+		let track = hang::catalog::Reference::track(config, name);
+		insert(name, TrackKind::Video, video_caps(config), &config.container, track);
 	}
 	for (name, config) in catalog.audio.enabled() {
-		insert(name, TrackKind::Audio, audio_caps(config), &config.container);
+		let track = hang::catalog::Reference::track(config, name);
+		insert(name, TrackKind::Audio, audio_caps(config), &config.container, track);
 	}
 
 	// A disabled rendition stays listed: its pump stops, but its pad waits idle for a re-enable,
@@ -927,7 +932,7 @@ fn reconcile(
 		// serves is never, so doing it here would park the catalog loop and leave every other
 		// rendition unstarted. A name the broadcast refuses outright skips just this rendition,
 		// same as an unsupported codec or a malformed init above.
-		let track = match broadcast.track(&name) {
+		let track = match broadcast.track(&d.shape.track) {
 			Ok(track) => track,
 			Err(err) => {
 				gst::warning!(CAT, "ignoring rendition {name}: {err:?}");

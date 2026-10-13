@@ -868,6 +868,69 @@ mod tests {
 		transcoder.abort();
 	}
 
+	/// A source rendition keyed apart from its track is read from the track, on
+	/// both the live path and the fetch path.
+	#[tokio::test]
+	async fn a_source_keyed_apart_from_its_track() {
+		let mut source = source_broadcast(2, 5);
+		source
+			.catalog
+			.mutate(|catalog| {
+				let mut video = catalog.video.renditions.remove("video").unwrap();
+				video.track = Some("video".to_string());
+				catalog.video.renditions.insert("main".to_string(), video);
+			})
+			.unwrap();
+
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			..Default::default()
+		};
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		let catalog = loop {
+			match consumer.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("catalog track: {err}"),
+			}
+		};
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog.subscribe(None).await.unwrap());
+		await_catalog(&mut catalogs, |snapshot| {
+			snapshot.video.renditions.contains_key("video/120p")
+		})
+		.await;
+
+		let mut fetched = consumer
+			.track("video/120p")
+			.unwrap()
+			.fetch_group(0, None)
+			.await
+			.unwrap();
+		let mut frames = 0;
+		while fetched.read_frame().await.unwrap().is_some() {
+			frames += 1;
+		}
+		assert_eq!(frames, 5);
+
+		let mut live = consumer
+			.track("video/120p")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap()
+			.ordered();
+		let mut group = live.next_group().await.unwrap().unwrap();
+		assert!(group.read_frame().await.unwrap().is_some());
+
+		transcoder.abort();
+	}
+
 	/// The whole point of [`active`]: a caller metering or pricing the work is
 	/// handed the ladder, sees each rendition start and stop, and can bill the
 	/// seconds in between. Nothing else distinguishes a transcoder publishing a

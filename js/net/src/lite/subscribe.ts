@@ -1,10 +1,19 @@
 import type * as Epoch from "../epoch.ts";
+import { ProtocolViolation } from "../error.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
-import type { Location } from "../track.ts";
+import type { Location, Order } from "../track.ts";
 import { decodeEpoch, encodeEpoch } from "./epoch.ts";
 import * as Message from "./message.ts";
-import { hasFrameBounds, hasGroupOrder, hasLargest, hasStreamCount, resolvesStart, Version } from "./version.ts";
+import {
+	hasFrameBounds,
+	hasGroupOrder,
+	hasLargest,
+	hasOrder,
+	hasStreamCount,
+	resolvesStart,
+	Version,
+} from "./version.ts";
 
 /**
  * Encode the `Group Start` field shared by SUBSCRIBE and SUBSCRIBE_UPDATE.
@@ -111,6 +120,38 @@ async function padGroupOrder(w: Writer, version: Version) {
 }
 
 /**
+ * Decode the byte after the subscriber priority shared by SUBSCRIBE and SUBSCRIBE_UPDATE:
+ * lite-07's `Group Order`, or the retired `Ordered` byte an older layout still carries.
+ */
+async function decodeOrder(r: Reader, version: Version): Promise<Order> {
+	if (!hasOrder(version)) {
+		await skipGroupOrder(r, version);
+		return "descending";
+	}
+	const order = await r.u8();
+	switch (order) {
+		case 0:
+			return "descending";
+		case 1:
+			return "ascending";
+		default:
+			throw new ProtocolViolation(`unknown group order: ${order}`);
+	}
+}
+
+/**
+ * The inverse of {@link decodeOrder}. A wire without `Group Order` serves newest first, so an
+ * ascending subscription over it falls back to descending.
+ */
+async function encodeOrder(w: Writer, version: Version, order: Order) {
+	if (!hasOrder(version)) {
+		await padGroupOrder(w, version);
+		return;
+	}
+	await w.u8(order === "ascending" ? 1 : 0);
+}
+
+/**
  * Exclusive model/local cap from a decoded inclusive last group.
  *
  * The wire's `Group End` is inclusive once decoded; the track model and `setGroups` are
@@ -149,6 +190,8 @@ export function emptyRange({ startGroup, endGroup }: { startGroup?: number; endG
 
 export class SubscribeUpdate {
 	priority: number;
+	/** See {@link Subscribe.order}. */
+	order: Order;
 	/** Subscriber max delay in milliseconds; zero skips once a newer group is available. */
 	maxDelay: number;
 	startGroup?: number;
@@ -160,6 +203,7 @@ export class SubscribeUpdate {
 
 	constructor(props: {
 		priority: number;
+		order?: Order;
 		maxDelay?: number;
 		startGroup?: number;
 		endGroup?: number;
@@ -167,6 +211,7 @@ export class SubscribeUpdate {
 		endFrame?: number;
 	}) {
 		this.priority = props.priority;
+		this.order = props.order ?? "descending";
 		this.maxDelay = props.maxDelay ?? 0;
 		this.startGroup = props.startGroup;
 		this.endGroup = props.endGroup;
@@ -182,7 +227,7 @@ export class SubscribeUpdate {
 				break;
 			default:
 				await w.u8(this.priority);
-				await padGroupOrder(w, version);
+				await encodeOrder(w, version, this.order);
 				await w.u53(this.maxDelay);
 				await encodeStartGroup(w, version, this.startGroup);
 				await w.u53(this.endGroup !== undefined ? this.endGroup + 1 : 0);
@@ -198,7 +243,7 @@ export class SubscribeUpdate {
 				return new SubscribeUpdate({ priority: await r.u8() });
 			default: {
 				const priority = await r.u8();
-				await skipGroupOrder(r, version);
+				const order = await decodeOrder(r, version);
 				const maxDelay = await r.u53();
 				const startGroup = await decodeStartGroup(r, version);
 				const endGroup = (await r.u53()) || undefined;
@@ -206,6 +251,7 @@ export class SubscribeUpdate {
 				const frames = await decodeFrameBounds(r, version, startGroup, end);
 				return new SubscribeUpdate({
 					priority,
+					order,
 					maxDelay,
 					startGroup: canonicalStartGroup(version, startGroup, frames.startFrame),
 					endGroup: end,
@@ -235,6 +281,11 @@ export class Subscribe {
 	epoch?: Epoch.Valid;
 	track: string;
 	priority: number;
+	/**
+	 * Which pending group to send first. Lite-07+; earlier wires decode as descending and
+	 * cannot ask for anything else.
+	 */
+	order: Order;
 	/** Subscriber max delay in milliseconds; zero skips once a newer group is available. */
 	maxDelay: number;
 
@@ -260,6 +311,7 @@ export class Subscribe {
 		epoch?: Epoch.Valid;
 		track: string;
 		priority: number;
+		order?: Order;
 		maxDelay?: number;
 		startGroup?: number;
 		endGroup?: number;
@@ -271,6 +323,7 @@ export class Subscribe {
 		this.epoch = props.epoch;
 		this.track = props.track;
 		this.priority = props.priority;
+		this.order = props.order ?? "descending";
 		this.maxDelay = props.maxDelay ?? 0;
 		this.startGroup = props.startGroup;
 		this.endGroup = props.endGroup;
@@ -290,7 +343,7 @@ export class Subscribe {
 			case Version.DRAFT_02:
 				break;
 			default:
-				await padGroupOrder(w, version);
+				await encodeOrder(w, version, this.order);
 				await w.u53(this.maxDelay);
 				await encodeStartGroup(w, version, this.startGroup);
 				await w.u53(this.endGroup !== undefined ? this.endGroup + 1 : 0);
@@ -311,7 +364,7 @@ export class Subscribe {
 			case Version.DRAFT_02:
 				return new Subscribe({ id, broadcast, track, priority });
 			default: {
-				await skipGroupOrder(r, version);
+				const order = await decodeOrder(r, version);
 				const maxDelay = await r.u53();
 				const startGroup = await decodeStartGroup(r, version);
 				const endGroup = (await r.u53()) || undefined;
@@ -323,6 +376,7 @@ export class Subscribe {
 					epoch,
 					track,
 					priority,
+					order,
 					maxDelay,
 					startGroup: canonicalStartGroup(version, startGroup, frames.startFrame),
 					endGroup: end,
