@@ -26,8 +26,6 @@ pub struct Release {
 	catalog: Option<crate::catalog::Consumer<()>>,
 	/// The `m2ts` track, once a catalog names it.
 	track: Option<(String, ExportSource)>,
-	/// When the track was last found empty: an object read since arrived no earlier.
-	empty: Instant,
 	finished: bool,
 	/// An object has gone out.
 	released: bool,
@@ -38,13 +36,17 @@ pub struct Release {
 
 impl Release {
 	/// Subscribe to the catalog of `source`, waiting for the `m2ts` section that names its track.
+	///
+	/// Fails for [`CatalogFormat::Msf`], which has no `m2ts` section.
 	pub async fn new(source: crate::Source, catalog_format: CatalogFormat) -> crate::Result<Self> {
+		if catalog_format == CatalogFormat::Msf {
+			return Err(anyhow::anyhow!("the MSF catalog has no `m2ts` passthrough track; read the hang catalog").into());
+		}
 		let catalog = source.catalog(catalog_format).await?;
 		let mut release = Self {
 			source,
 			catalog: Some(catalog),
 			track: None,
-			empty: Instant::now(),
 			finished: false,
 			released: false,
 			delay: Duration::ZERO,
@@ -123,14 +125,14 @@ impl Release {
 						break;
 					}
 					Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-					Poll::Pending => {
-						self.empty = Instant::now();
-						break;
-					}
+					Poll::Pending => break,
 				};
+				// The track wakes the release as each object lands, so the read times its arrival.
+				// The last empty poll would let one landing past its deadline out late instead.
+				let read = Instant::now();
 				let arrival = Arrival {
-					arrived: self.empty,
-					read: Instant::now(),
+					arrived: read,
+					read,
 					decode: frame.timestamp,
 					restart: track.markers(),
 					skip: track.skips(),

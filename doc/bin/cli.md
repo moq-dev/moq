@@ -323,7 +323,8 @@ between two PCRs `--delay` after the first one's time on the source clock. The
 output is exactly as conformant as the source, and two exporters emit the same
 bytes. A run that arrives after its deadline is dropped and counted, leaving a
 continuity error, and the rest carry on. It takes neither `--linger`,
-`--stitch` nor `--mux-rate`.
+`--stitch` nor `--mux-rate`. Only the hang catalog names the track, so an
+`.msf` broadcast needs `--catalog-format hang`.
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
 long for the same publisher instance to come back, and carries on with the same

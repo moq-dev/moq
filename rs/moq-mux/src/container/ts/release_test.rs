@@ -143,6 +143,17 @@ async fn drain(mut release: Release) -> (Vec<(Instant, Frame)>, Release) {
 	(released, release)
 }
 
+/// Drain a release of `republished` with a 500 ms delay, in a task of its own so that no other
+/// release waking polls it.
+fn spawn_release(republished: &Republished) -> tokio::task::JoinHandle<(Vec<(Instant, Frame)>, Release)> {
+	let consumer = republished.consumer.clone();
+	tokio::spawn(async move {
+		let source = crate::source::announced(&consumer).await;
+		let release = Release::new(source, CatalogFormat::Hang).await.unwrap();
+		drain(release.with_delay(Duration::from_millis(500))).await
+	})
+}
+
 fn bytes<'a>(payloads: impl IntoIterator<Item = &'a Bytes>) -> Vec<u8> {
 	payloads
 		.into_iter()
@@ -259,13 +270,9 @@ async fn releases_fed_with_different_skew_write_the_same_bytes() {
 		pcr(object) + Duration::from_millis(40 + 30 * (i as u64 % 3))
 	});
 
-	let release = |consumer| async move {
-		let source = crate::source::announced(consumer).await;
-		let release = Release::new(source, CatalogFormat::Hang).await.unwrap();
-		drain(release.with_delay(Duration::from_millis(500))).await
-	};
-	let ((steady_out, steady_release), (skewed_out, skewed_release)) =
-		tokio::join!(release(&steady.consumer), release(&skewed.consumer));
+	let (steady_task, skewed_task) = (spawn_release(&steady), spawn_release(&skewed));
+	let (steady_out, steady_release) = steady_task.await.unwrap();
+	let (skewed_out, skewed_release) = skewed_task.await.unwrap();
 
 	assert_eq!(steady_release.dropped(), 0);
 	assert_eq!(skewed_release.dropped(), 0);
@@ -299,13 +306,9 @@ async fn an_object_past_its_deadline_is_a_gap_in_that_release_only() {
 		}
 	});
 
-	let release = |consumer| async move {
-		let source = crate::source::announced(consumer).await;
-		let release = Release::new(source, CatalogFormat::Hang).await.unwrap();
-		drain(release.with_delay(Duration::from_millis(500))).await
-	};
-	let ((steady_out, steady_release), (stalled_out, stalled_release)) =
-		tokio::join!(release(&steady.consumer), release(&stalled.consumer));
+	let (steady_task, stalled_task) = (spawn_release(&steady), spawn_release(&stalled));
+	let (steady_out, steady_release) = steady_task.await.unwrap();
+	let (stalled_out, stalled_release) = stalled_task.await.unwrap();
 
 	assert_eq!(steady_release.dropped(), 0);
 	let dropped = stalled_release.dropped() as usize;
@@ -336,4 +339,15 @@ async fn an_object_past_its_deadline_is_a_gap_in_that_release_only() {
 	for (i, lag) in lag(&stalled_out).into_iter().enumerate() {
 		assert!(lag.abs() < 1_000, "object {i} goes out {lag} us off its PCR time");
 	}
+}
+
+/// The MSF catalog never names the `m2ts` track, so a release reading it would wait forever.
+#[tokio::test(start_paused = true)]
+async fn an_msf_catalog_is_refused() {
+	let imported = import(KYRION).await;
+	let source = crate::source::announced(&imported.consumer).await;
+	let Err(err) = Release::new(source, CatalogFormat::Msf).await else {
+		panic!("a release reading the MSF catalog must fail");
+	};
+	assert!(err.to_string().contains("MSF"), "{err}");
 }
