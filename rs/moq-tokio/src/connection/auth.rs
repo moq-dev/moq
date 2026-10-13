@@ -325,7 +325,7 @@ mod tests {
 			let acceptor = tokio::spawn(async move {
 				let _session = session;
 				let mut initial = Vec::new();
-				while let Some(request) = requests.next().await {
+				while let Some(auth::Event::Session(request)) = requests.next().await {
 					if request.token().is_empty() {
 						initial.push(request.accept(auth::Grant::default()));
 					} else if sender.send(request).is_err() {

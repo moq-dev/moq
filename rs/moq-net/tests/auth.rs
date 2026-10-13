@@ -311,22 +311,66 @@ async fn connect(opts: Options) -> Pair {
 	}
 }
 
+/// A grant [`serve`] issued: to a session token, or to a request token.
+enum Answered {
+	Session(auth::Issued),
+	Request(auth::Enforced),
+}
+
+impl Answered {
+	fn update(&self, grant: Grant) {
+		match self {
+			Self::Session(issued) => issued.update(grant),
+			Self::Request(enforced) => enforced.update(grant),
+		}
+	}
+
+	fn revoke(self, code: SessionError, reason: &str) {
+		match self {
+			Self::Session(issued) => issued.revoke(code, reason),
+			Self::Request(enforced) => enforced.revoke(code, reason),
+		}
+	}
+
+	async fn closed(&self) -> Error {
+		match self {
+			Self::Session(issued) => issued.closed().await,
+			Self::Request(enforced) => enforced.closed().await,
+		}
+	}
+}
+
 /// Answer the peer's tokens from a table, holding every grant (and any request the
 /// table leaves unanswered) for as long as the returned task lives.
 fn serve(
 	mut requests: auth::Requests,
 	answer: impl Fn(&[u8]) -> Option<Grant> + 'static,
-) -> futures::channel::mpsc::UnboundedReceiver<(Vec<u8>, auth::Issued)> {
+) -> futures::channel::mpsc::UnboundedReceiver<(Vec<u8>, Answered)> {
 	let (tx, rx) = futures::channel::mpsc::unbounded();
 	moq_net_sim::spawn(async move {
 		let mut unanswered = Vec::new();
-		while let Some(request) = requests.next().await {
-			let token = request.token().to_vec();
-			match answer(&token) {
-				Some(grant) => {
-					let _ = tx.unbounded_send((token, request.accept(grant)));
+		while let Some(event) = requests.next().await {
+			let (token, answered) = match event {
+				auth::Event::Session(request) => {
+					let token = request.token().to_vec();
+					let answered = answer(&token).map(|grant| Answered::Session(request.accept(grant)));
+					(token, answered)
 				}
-				None => unanswered.push(request),
+				auth::Event::Scoped(request) => {
+					let token = request.token().value.clone();
+					let answered = match answer(&token) {
+						Some(grant) => Some(Answered::Request(request.accept(grant))),
+						None => {
+							unanswered.push(request);
+							None
+						}
+					};
+					(token, answered)
+				}
+				_ => unreachable!("an unknown token kind"),
+			};
+			if let Some(answered) = answered {
+				let _ = tx.unbounded_send((token, answered));
 			}
 		}
 	});
@@ -744,8 +788,8 @@ async fn a_held_renewal_coalesces_a_burst_without_tripping_the_credit() {
 			let mut issued = Vec::new();
 			let mut count = 0u64;
 			let mut release_waiter = Some(release_waiter);
-			while let Some(request) = requests.next().await {
-				let token = request.token().to_vec();
+			while let Some(auth::Event::Scoped(request)) = requests.next().await {
+				let token = request.token().value.clone();
 				count += 1;
 				seen_tx.unbounded_send(token).ok();
 				// Request 1 is the initial SUBSCRIBE token; request 2 is the first renewal,
@@ -1096,7 +1140,7 @@ async fn a_refused_token_reports_the_code(version: &'static str) {
 		.await;
 		let mut requests = pair.requests.take().unwrap();
 		moq_net_sim::spawn(async move {
-			while let Some(request) = requests.next().await {
+			while let Some(auth::Event::Session(request)) = requests.next().await {
 				match request.token().is_empty() {
 					true => {
 						std::mem::forget(request.accept(Grant::default()));
@@ -1131,7 +1175,7 @@ async fn a_refused_setup_token_grants_nothing(version: &'static str) {
 		.await;
 		let mut requests = pair.requests.take().unwrap();
 		moq_net_sim::spawn(async move {
-			while let Some(request) = requests.next().await {
+			while let Some(auth::Event::Session(request)) = requests.next().await {
 				request.reject(SessionError::Unauthorized, "bad credential");
 			}
 		});
@@ -1154,7 +1198,9 @@ async fn dropping_the_requests_refuses_queued_tokens(version: &'static str) {
 		.await;
 		let mut requests = pair.requests.take().unwrap();
 		// Wait for the setup token to be queued, then hand it back to the queue's owner.
-		let first = requests.next().await.expect("setup token");
+		let Some(auth::Event::Session(first)) = requests.next().await else {
+			panic!("setup token")
+		};
 		drop(first.accept(Grant::default()));
 		let auth = pair.client.auth();
 		let pending = moq_net_sim::spawn(async move { auth.add("queued").await.map(drop) });
@@ -1201,7 +1247,10 @@ async fn an_issued_grant_ends_with_its_session(version: &'static str) {
 		})
 		.await;
 		let mut requests = pair.requests.take().unwrap();
-		let issued = requests.next().await.expect("setup token").accept(Grant::default());
+		let Some(auth::Event::Session(setup)) = requests.next().await else {
+			panic!("setup token")
+		};
+		let issued = setup.accept(Grant::default());
 		granted(&pair.client).await;
 
 		pair.server_driver.abort();
@@ -1629,7 +1678,9 @@ async fn nothing_outside_the_grant_reaches_the_peer(version: &'static str) {
 
 		// Hold the answer, so the peer's discovery request is in long before the grant.
 		let mut requests = pair.requests.take().unwrap();
-		let setup = requests.next().await.expect("setup token");
+		let Some(auth::Event::Session(setup)) = requests.next().await else {
+			panic!("setup token")
+		};
 		let leaked = moq_net_sim::timeout(
 			Duration::from_millis(100),
 			wait_announced(&relay.consume(), "foo/bar", true),

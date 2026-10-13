@@ -557,11 +557,24 @@ struct BroadcastState {
 	// active number of PUBLISH_NAMESPACE messages.
 	count: usize,
 
+	// How many of them their own request token authorized. While any is live the
+	// namespace is exempt from the session's limit.
+	tokens: usize,
+
 	// Closes as the namespace is retracted, which closes every source minted under it.
 	live: kio::Producer<()>,
 
 	// Counts this namespace against the session's announce cap until it is retracted.
-	_slot: crate::session::Slot,
+	_slot: crate::auth::Hold,
+}
+
+/// What authorized one advertisement.
+enum Admit {
+	/// The session, so the limit holds it back while it does not cover the namespace.
+	Session,
+	/// Its own request token, which stands in for the limit. Carries the announce slot
+	/// taken before verification, when the namespace was not attached yet.
+	Token(Option<crate::auth::Hold>),
 }
 
 /// What one advertisement said, once its parameters are resolved against the session.
@@ -748,22 +761,10 @@ where
 			let mut state = self.state.lock();
 			let mut attached = Vec::new();
 			for (path, entry) in state.broadcasts.iter_mut() {
-				let allowed = permit.within_limit(path.as_str());
-				match &entry.dynamic {
-					None if allowed => {
-						let mut route = entry.route.clone();
-						if self.going_away.is_set() {
-							route.cost = crate::origin::Cost::DRAIN;
-						}
-						let Ok(dynamic) = self.origin.dynamic(path, route) else {
-							continue;
-						};
-						tracing::info!(route = %self.origin.absolute(path), "namespace authorized again");
-						entry.dynamic = Some(dynamic);
-						entry.generation += 1;
-						attached.push((path.clone(), entry.generation));
-					}
-					_ => {}
+				if permit.within_limit(path.as_str())
+					&& let Ok(Some(generation)) = self.reattach(path, entry)
+				{
+					attached.push((path.clone(), generation));
 				}
 			}
 			drop(state);
@@ -1054,7 +1055,7 @@ where
 		// guards drop.
 		let res = self.run_namespace_entries(&mut stream, &prefix, &peer, &mut live).await;
 		for path in live {
-			let _ = self.stop_announce(path);
+			let _ = self.stop_announce(path, false);
 		}
 		res
 	}
@@ -1098,7 +1099,7 @@ where
 						// leave subscriptions on a path the peer no longer offers.
 						tracing::debug!(%path, "dropping reflected namespace");
 						if live.remove(&path) {
-							let _ = self.stop_announce(path);
+							let _ = self.stop_announce(path, false);
 						}
 						continue;
 					};
@@ -1109,7 +1110,7 @@ where
 						// down merely because an update arrived.
 						self.update_announce(path, advert)?;
 					} else {
-						match self.start_announce(path.clone(), advert) {
+						match self.start_announce(path.clone(), advert, Admit::Session) {
 							Ok(()) => {
 								live.insert(path);
 							}
@@ -1128,7 +1129,7 @@ where
 					let path = prefix.join(&msg.suffix);
 					tracing::debug!(%path, "namespace_done");
 					if live.remove(&path) {
-						let _ = self.stop_announce(path);
+						let _ = self.stop_announce(path, false);
 					}
 				}
 				_ => {
@@ -1291,42 +1292,73 @@ where
 			return Ok(());
 		};
 
-		// A request token on the PUBLISH_NAMESPACE authorizes the announce when the session
-		// grant does not already cover it (MoQ request-token, draft-17 section 9.3.2 /
-		// draft-18+ section 10.2.2). Purely additive: with no token, or a grant that covers
-		// the path, everything below is unchanged and the origin model decides scope as it
-		// did before.
-		let mut token_grant = None;
-		if let Some(token) = &msg.authorization_token
-			&& !self.auth.covers(crate::auth::Direction::Subscribe, path.as_str())
-		{
-			// The token's grant must cover this announce; it authorizes nothing else and never
-			// joins the session union.
-			let admitted = self
-				.auth
-				.admit_request(
-					&self.runtime,
-					token.0.clone(),
+		// Our authorization of the peer (the limit) admits the announce, and holds back one
+		// it does not cover until it does. When it does not cover it, an AUTHORIZATION TOKEN
+		// on the announce goes to the application to verify for this announce alone (MoQ
+		// request-token), and a verified one is exempt from the limit while it lasts.
+		let token = match &msg.authorization_token {
+			Some(token) if self.auth.token_decides(crate::auth::Direction::Subscribe, path.as_str()) => {
+				Some(token.0.clone())
+			}
+			_ => None,
+		};
+		let (admit, token_grant) = match token {
+			None => (Admit::Session, None),
+			Some(token) => {
+				// Counted against the cap while the application verifies, unless the
+				// namespace already holds a slot.
+				let slot = match self.state.lock().broadcasts.contains_key(&path) {
+					true => None,
+					false => Some(std::sync::Arc::new(self.acquire_announce()?)),
+				};
+				let verdict = self.auth.verify_request(
+					token,
 					path.clone(),
 					crate::auth::RequestKind::PublishNamespace,
-				)
+					slot.clone(),
+				);
+				// The session closing or the peer withdrawing the announce withdraws the token.
+				let mut session = self.session.clone();
+				let version = self.version;
+				let verified = kio::wait(|waiter| {
+					let mut cx = waiter.context();
+					if session.poll_closed(&mut cx).is_ready()
+						|| super::request_stream::poll_withdrawn(&mut stream, version, &mut cx).is_ready()
+					{
+						return Poll::Ready(None);
+					}
+					verdict.poll_grant(waiter).map(Some)
+				})
 				.await;
-			match admitted {
-				Ok(grant) => token_grant = Some(grant),
-				Err(err) => {
-					self.write_error(&mut stream, request_id, &err, &err.to_string())
-						.await?;
-					let _ = stream.writer.close().await;
+				let Some(verified) = verified else {
 					return Ok(());
+				};
+				let admitted = crate::auth::RequestGrant::new(
+					&self.runtime,
+					verdict,
+					verified,
+					path.clone(),
+					crate::auth::RequestKind::PublishNamespace,
+					slot.clone(),
+				);
+				match admitted {
+					Ok(grant) => (Admit::Token(slot), Some(grant)),
+					Err(err) => {
+						self.write_error(&mut stream, request_id, &err, &err.to_string())
+							.await?;
+						let _ = stream.writer.close().await;
+						return Ok(());
+					}
 				}
 			}
-		}
+		};
+		let token = token_grant.is_some();
 
-		match self.start_announce(path.clone(), advert) {
+		match self.start_announce(path.clone(), advert, admit) {
 			Ok(_) => {
 				if let Err(err) = self.write_ok(&mut stream, request_id).await {
 					// Local rollback, not a peer unannounce: don't count announce bytes.
-					let _ = self.stop_announce(path);
+					let _ = self.stop_announce(path, token);
 					return Err(err);
 				}
 			}
@@ -1350,7 +1382,7 @@ where
 			.await;
 
 		if attached {
-			self.stop_announce(path)?;
+			self.stop_announce(path, token)?;
 		}
 
 		res
@@ -1603,7 +1635,7 @@ where
 					None => {
 						if std::mem::take(attached) {
 							tracing::debug!(%path, "publish_namespace now loops back; detaching");
-							let _ = self.stop_announce(path.clone());
+							let _ = self.stop_announce(path.clone(), token_grant.is_some());
 						}
 						Ok(())
 					}
@@ -1612,7 +1644,13 @@ where
 						match *attached {
 							true => self.update_announce(path.clone(), advert),
 							// Re-attach: a clean path replaced the reflected one we detached from.
-							false => self.start_announce(path.clone(), advert).map(|()| *attached = true),
+							false => {
+								let admit = match token_grant {
+									Some(_) => Admit::Token(None),
+									None => Admit::Session,
+								};
+								self.start_announce(path.clone(), advert, admit).map(|()| *attached = true)
+							}
 						}
 					}
 				},
@@ -1636,12 +1674,9 @@ where
 			// The routing above is already applied, so the renewal's answer (written when its
 			// verdict resolves) is this update's single response, cluster parameters included.
 			if let Some(token) = msg.authorization_token
-				&& token_grant.is_some()
+				&& let Some(grant) = &token_grant
 			{
-				let verdict =
-					self.auth
-						.verify_request(token.0, path.clone(), crate::auth::RequestKind::PublishNamespace);
-				renewal.verify(verdict, msg.request_id);
+				renewal.verify(grant.verify_renewal(&self.auth, token.0), msg.request_id);
 				continue;
 			}
 
@@ -1823,16 +1858,50 @@ where
 	/// Attach the route for one newly advertised namespace, bumping its refcount.
 	///
 	/// Pair with [`Self::stop_announce`].
-	fn start_announce(&mut self, path: PathOwned, advert: Advertised) -> Result<(), Error> {
+	fn start_announce(&mut self, path: PathOwned, advert: Advertised, admit: Admit) -> Result<(), Error> {
 		let mut state = self.state.lock();
+		let (token, slot) = match admit {
+			Admit::Session => (false, None),
+			Admit::Token(slot) => (true, slot),
+		};
 		let existing = state.broadcasts.contains_key(&path);
-		self.attach(&mut state, path.clone(), advert)?;
-		if existing && let Some(entry) = state.broadcasts.get_mut(&path) {
-			// The path was already attached, so this is one more advertisement for
-			// it; only a freshly created entry starts at one and skips this.
-			entry.count += 1;
+		self.attach(&mut state, path.clone(), advert, slot, token)?;
+		if !existing {
+			return Ok(());
+		}
+		let Some(entry) = state.broadcasts.get_mut(&path) else {
+			return Ok(());
+		};
+		// A token stands in for the limit, so a namespace the limit withheld attaches now.
+		let attached = match token {
+			true => self.reattach(&path, entry)?,
+			false => None,
+		};
+		// The path was already attached, so this is one more advertisement for it; only a
+		// freshly created entry starts at one and skips this.
+		entry.count += 1;
+		entry.tokens += usize::from(token);
+		drop(state);
+		if let Some(generation) = attached {
+			self.serve_route(path, generation);
 		}
 		Ok(())
+	}
+
+	/// Attach the route of a namespace the limit withheld, returning the generation
+	/// to serve. `None` when it is attached already.
+	fn reattach(&self, path: &PathOwned, entry: &mut BroadcastState) -> Result<Option<u64>, Error> {
+		if entry.dynamic.is_some() {
+			return Ok(None);
+		}
+		let mut route = entry.route.clone();
+		if self.going_away.is_set() {
+			route.cost = crate::origin::Cost::DRAIN;
+		}
+		entry.dynamic = Some(self.origin.dynamic(path, route)?);
+		entry.generation += 1;
+		tracing::info!(route = %self.origin.absolute(path), "namespace authorized again");
+		Ok(Some(entry.generation))
 	}
 
 	/// Apply a changed advertisement to a namespace that is already attached.
@@ -1844,7 +1913,7 @@ where
 		if !state.broadcasts.contains_key(&path) {
 			return Err(Error::NotFound);
 		}
-		self.attach(&mut state, path, advert)?;
+		self.attach(&mut state, path, advert, None, false)?;
 		Ok(())
 	}
 
@@ -1854,7 +1923,17 @@ where
 	/// This is the semantic heart of the mapping: a moq-transport namespace IS a
 	/// prefix route, so a PUBLISH_NAMESPACE advertises the whole prefix and paths
 	/// beneath it materialize on demand.
-	fn attach(&self, state: &mut State, path: PathOwned, advert: Advertised) -> Result<(), Error> {
+	///
+	/// `slot` is one taken ahead for a new entry, and `token` exempts a new entry from
+	/// the limit.
+	fn attach(
+		&self,
+		state: &mut State,
+		path: PathOwned,
+		advert: Advertised,
+		slot: Option<crate::auth::Hold>,
+		token: bool,
+	) -> Result<(), Error> {
 		let Advertised { mut route } = advert;
 
 		// A namespace published after the peer's GOAWAY starts out draining, so
@@ -1876,20 +1955,20 @@ where
 			}
 			Entry::Vacant(entry) => {
 				// A peer past its limits loses the session, not just this namespace.
-				let slot = self.announces.acquire().inspect_err(|err| {
-					self.session
-						.clone()
-						.close(crate::SessionError::from(err).to_code(), "too many announcements");
-				})?;
+				let slot = match slot {
+					Some(slot) => slot,
+					None => std::sync::Arc::new(self.acquire_announce()?),
+				};
 				// Outside the session's limit: held, not refused, so a wider limit can
 				// attach it while the peer still advertises it.
-				if !self.auth.within_limit(crate::auth::Direction::Subscribe, path.as_str()) {
+				if !token && !self.auth.within_limit(crate::auth::Direction::Subscribe, path.as_str()) {
 					tracing::debug!(route = %self.origin.absolute(&path), "withholding announce outside the limit");
 					entry.insert(BroadcastState {
 						route,
 						dynamic: None,
 						generation: 0,
 						count: 1,
+						tokens: usize::from(token),
 						live: Default::default(),
 						_slot: slot,
 					});
@@ -1903,6 +1982,7 @@ where
 					dynamic: Some(dynamic),
 					generation: 0,
 					count: 1,
+					tokens: usize::from(token),
 					live: Default::default(),
 					_slot: slot,
 				});
@@ -1915,18 +1995,38 @@ where
 		}
 	}
 
+	/// Take one slot of the session's announce cap. A peer past it loses the session.
+	fn acquire_announce(&self) -> Result<crate::session::Slot, Error> {
+		self.announces.acquire().inspect_err(|err| {
+			self.session
+				.clone()
+				.close(crate::SessionError::from(err).to_code(), "too many announcements");
+		})
+	}
+
 	/// Release one advertisement of `path`, closing its sources when it was the last.
-	fn stop_announce(&mut self, path: PathOwned) -> Result<(), Error> {
+	/// `token` says its own request token authorized it.
+	fn stop_announce(&mut self, path: PathOwned, token: bool) -> Result<(), Error> {
 		let mut state = self.state.lock();
 
 		match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(mut entry) => {
-				entry.get_mut().count -= 1;
-				if entry.get().count == 0 {
+				let state = entry.get_mut();
+				state.count -= 1;
+				state.tokens -= usize::from(token);
+				if state.count == 0 {
 					tracing::debug!(route = %self.origin.absolute(&path), "unannounced");
 					// Dropping the entry retracts the route (its announcement drops) and
 					// closes its sources (its token closes).
 					entry.remove();
+				} else if state.tokens == 0
+					&& state.dynamic.is_some()
+					&& !self.auth.within_limit(crate::auth::Direction::Subscribe, path.as_str())
+				{
+					// The last token that stood in for the limit is gone: hold the route back.
+					tracing::info!(route = %self.origin.absolute(&path), "namespace no longer authorized");
+					state.dynamic = None;
+					state.live = Default::default();
 				}
 			}
 			Entry::Vacant(_) => return Err(Error::NotFound),
@@ -1992,7 +2092,8 @@ where
 					if entry.generation != generation {
 						return Poll::Ready(None);
 					}
-					if excluded && entry.dynamic.is_some() {
+					// A namespace its own request token authorized is exempt from the limit.
+					if excluded && entry.tokens == 0 && entry.dynamic.is_some() {
 						tracing::info!(route = %self.origin.absolute(&path), "namespace no longer authorized");
 						entry.dynamic = None;
 						// Dropping the namespace's token closes every source minted under it.
@@ -6606,10 +6707,10 @@ mod tests {
 			advert(&subscriber),
 			advert(&subscriber),
 		);
-		subscriber.start_announce(a.clone(), first).unwrap();
-		subscriber.start_announce(a.clone(), repeat).unwrap();
+		subscriber.start_announce(a.clone(), first, Admit::Session).unwrap();
+		subscriber.start_announce(a.clone(), repeat, Admit::Session).unwrap();
 		assert!(matches!(
-			subscriber.start_announce(b.clone(), over),
+			subscriber.start_announce(b.clone(), over, Admit::Session),
 			Err(Error::TooManyRequests)
 		));
 		assert_eq!(
@@ -6620,9 +6721,9 @@ mod tests {
 			)]
 		);
 
-		subscriber.stop_announce(a.clone()).unwrap();
-		subscriber.stop_announce(a).unwrap();
-		subscriber.start_announce(b, last).unwrap();
+		subscriber.stop_announce(a.clone(), false).unwrap();
+		subscriber.stop_announce(a, false).unwrap();
+		subscriber.start_announce(b, last, Admit::Session).unwrap();
 	}
 
 	/// moq-transport carries no hop ids, so a peer's broadcasts are marked
@@ -6652,7 +6753,7 @@ mod tests {
 
 		let advert = subscriber.route(None, &cluster::Peer::default()).expect("route");
 		subscriber
-			.start_announce(crate::Path::new("room/host").to_owned(), advert)
+			.start_announce(crate::Path::new("room/host").to_owned(), advert, Admit::Session)
 			.unwrap();
 
 		let mut announced = consumer.announced();
@@ -6712,7 +6813,7 @@ mod tests {
 		);
 		let advert = subscriber.route(None, &cluster::Peer::default()).expect("route");
 		subscriber
-			.start_announce(crate::Path::new("room/host").to_owned(), advert)
+			.start_announce(crate::Path::new("room/host").to_owned(), advert, Admit::Session)
 			.unwrap();
 
 		// No announce churn: the upstream route stays the best one, on both cursors.
@@ -6752,7 +6853,7 @@ mod tests {
 			);
 			let advert = subscriber.route(None, &cluster::Peer::default()).expect("route");
 			subscriber
-				.start_announce(crate::Path::new("room/host").to_owned(), advert)
+				.start_announce(crate::Path::new("room/host").to_owned(), advert, Admit::Session)
 				.unwrap();
 			subscriber
 		};
@@ -6842,7 +6943,7 @@ mod tests {
 
 		let mut subscriber = subscriber;
 		subscriber
-			.start_announce(crate::Path::new("room/host").to_owned(), advertised)
+			.start_announce(crate::Path::new("room/host").to_owned(), advertised, Admit::Session)
 			.unwrap();
 
 		let route = routed_now(&consumer, "room/host").expect("routed");
@@ -7039,10 +7140,10 @@ mod tests {
 
 		let path = crate::Path::new("room/host").to_owned();
 		let advert = subscriber.route(None, &cluster::Peer::default()).expect("route");
-		subscriber.start_announce(path.clone(), advert).unwrap();
+		subscriber.start_announce(path.clone(), advert, Admit::Session).unwrap();
 		settle().await;
 
-		subscriber.stop_announce(path).unwrap();
+		subscriber.stop_announce(path, false).unwrap();
 		assert!(
 			routed_now(&consumer, "room/host").is_none(),
 			"an explicit NAMESPACE_DONE must retract the route",
@@ -7231,12 +7332,12 @@ mod tests {
 
 		for _ in 0..2 {
 			let advert = subscriber.route(None, &peer).expect("route");
-			subscriber.start_announce(path.clone(), advert).unwrap();
+			subscriber.start_announce(path.clone(), advert, Admit::Session).unwrap();
 		}
 		settle().await;
 
 		// One advertisement's stream dies: the other still holds the source.
-		subscriber.stop_announce(path.clone()).unwrap();
+		subscriber.stop_announce(path.clone(), false).unwrap();
 		settle().await;
 		assert!(
 			routed_now(&consumer, "room/host").is_some(),
@@ -7244,7 +7345,7 @@ mod tests {
 		);
 
 		// The last owner retracts: the broadcast closes with it.
-		subscriber.stop_announce(path).unwrap();
+		subscriber.stop_announce(path, false).unwrap();
 		settle().await;
 		assert!(
 			routed_now(&consumer, "room/host").is_none(),
@@ -7325,7 +7426,7 @@ mod tests {
 				.with_hops(hop_path(&[7, 9]).hops().clone())
 				.with_cost(4),
 		};
-		subscriber.start_announce(path.clone(), first).unwrap();
+		subscriber.start_announce(path.clone(), first, Admit::Session).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// A new chain and cost: the route updates in place.
@@ -7343,7 +7444,7 @@ mod tests {
 
 		// One advertisement, so one unannounce detaches it. If the update had bumped the
 		// refcount, this would leave the route stranded.
-		subscriber.stop_announce(path).unwrap();
+		subscriber.stop_announce(path, false).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
@@ -7376,7 +7477,7 @@ mod tests {
 				&peer,
 			)
 			.expect("route");
-		subscriber.start_announce(path.clone(), advertised).unwrap();
+		subscriber.start_announce(path.clone(), advertised, Admit::Session).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// The peer re-advertises the same path cheaper: it started carrying it.
@@ -7393,7 +7494,7 @@ mod tests {
 		);
 
 		// One advertisement, so one unannounce detaches it.
-		subscriber.stop_announce(path).unwrap();
+		subscriber.stop_announce(path, false).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
@@ -7414,17 +7515,17 @@ mod tests {
 		let advert = cluster::Advert { hops, cost: 0 };
 
 		let first = subscriber.route(Some(&advert), &peer).expect("route");
-		subscriber.start_announce(path.clone(), first).unwrap();
+		subscriber.start_announce(path.clone(), first, Admit::Session).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		let second = subscriber.route(Some(&advert), &peer).expect("route");
-		subscriber.start_announce(path.clone(), second).unwrap();
+		subscriber.start_announce(path.clone(), second, Admit::Session).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// Two advertisements, so it takes two unannounces to retract.
-		subscriber.stop_announce(path.clone()).unwrap();
+		subscriber.stop_announce(path.clone(), false).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
-		subscriber.stop_announce(path).unwrap();
+		subscriber.stop_announce(path, false).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
@@ -7442,18 +7543,18 @@ mod tests {
 
 		// What a PUBLISH_NAMESPACE with no cluster parameters resolves to.
 		let first = subscriber.route(None, &peer).expect("route");
-		subscriber.start_announce(path.clone(), first).unwrap();
+		subscriber.start_announce(path.clone(), first, Admit::Session).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// The NAMESPACE for the same namespace arrives second.
 		let second = subscriber.route(None, &peer).expect("route");
-		subscriber.start_announce(path.clone(), second).unwrap();
+		subscriber.start_announce(path.clone(), second, Admit::Session).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// Two advertisements, so it takes two unannounces to retract.
-		subscriber.stop_announce(path.clone()).unwrap();
+		subscriber.stop_announce(path.clone(), false).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
-		subscriber.stop_announce(path).unwrap();
+		subscriber.stop_announce(path, false).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
@@ -7476,7 +7577,7 @@ mod tests {
 			cost: 0,
 		};
 		let advert = subscriber.route(Some(&clean), &peer).expect("route");
-		subscriber.start_announce(path.clone(), advert).unwrap();
+		subscriber.start_announce(path.clone(), advert, Admit::Session).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// The peer re-advertises the namespace over a path that now flows through us.
@@ -7490,7 +7591,7 @@ mod tests {
 		);
 
 		// That supersedes the advertisement it repeats, so the old route is retired.
-		subscriber.stop_announce(path).unwrap();
+		subscriber.stop_announce(path, false).unwrap();
 		assert!(
 			routed_now(&consumer, "room/host").is_none(),
 			"the superseded route must not stay attached"
@@ -7559,7 +7660,7 @@ mod tests {
 
 		let path = crate::Path::new("room/host").to_owned();
 		let advert = subscriber.route(Some(attached), peer).expect("route");
-		subscriber.start_announce(path, advert).unwrap();
+		subscriber.start_announce(path, advert, Admit::Session).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some(), "attached to start with");
 
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
@@ -7976,7 +8077,7 @@ mod tests {
 		for path in ["room/a", "room/b"] {
 			let path = crate::Path::new(path).to_owned();
 			let advert = subscriber.route(None, &peer).expect("route");
-			subscriber.start_announce(path.clone(), advert).unwrap();
+			subscriber.start_announce(path.clone(), advert, Admit::Session).unwrap();
 			live.insert(path);
 		}
 		assert!(routed_now(&consumer, "room/a").is_some());
@@ -7984,7 +8085,7 @@ mod tests {
 
 		// What the stream's exit path does with whatever it still holds.
 		for path in live {
-			subscriber.stop_announce(path).unwrap();
+			subscriber.stop_announce(path, false).unwrap();
 		}
 
 		assert!(routed_now(&consumer, "room/a").is_none(), "room/a leaked a refcount");
@@ -8379,9 +8480,15 @@ mod tests {
 				expires: None,
 			},
 		);
+		// We let the peer announce only "other".
+		auth.authorize(&crate::auth::Grant {
+			publish: crate::Pattern::subtree("other").unwrap().into(),
+			subscribe: crate::Patterns::new(),
+			expires: None,
+		});
 		assert!(
-			!auth.allows(crate::auth::Direction::Subscribe, "room/alice"),
-			"the session grant must not cover the announced path"
+			!auth.within_limit(crate::auth::Direction::Subscribe, "room/alice"),
+			"the limit must not cover the announced path"
 		);
 
 		let subscriber = Subscriber::new(
@@ -8473,7 +8580,7 @@ mod tests {
 		let acceptor = async {
 			let mut held = Vec::new();
 			loop {
-				let request = requests.next().await.expect("a request");
+				let request = requests.next().await.expect("a request").scoped();
 				held.push(request.accept(crate::auth::Grant::all()));
 			}
 		};
@@ -8507,7 +8614,7 @@ mod tests {
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 
 		let acceptor = async {
-			let request = requests.next().await.expect("a request");
+			let request = requests.next().await.expect("a request").scoped();
 			request.reject(crate::SessionError::Unauthorized, "no");
 			std::future::pending::<()>().await
 		};
@@ -8535,6 +8642,131 @@ mod tests {
 		);
 	}
 
+	/// What the peer's AUTH_OK grants us never authorizes what the peer asks of us: with a
+	/// covering peer grant and no limit, the application still verifies the announce's token,
+	/// and its refusal refuses the announce.
+	#[moq_net_sim::test]
+	async fn a_covering_peer_grant_never_skips_the_verifier() {
+		const VERSION: Version = Version::Draft18;
+		let auth = crate::auth::Handle::new(true);
+		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
+		auth.granted(0, crate::auth::Grant::all());
+		let (mut subscriber, mut requests, consumer, session) = announce_harness_with(VERSION, auth);
+		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+
+		let consulted = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+		let acceptor = {
+			let consulted = consulted.clone();
+			async move {
+				let request = requests.next().await.expect("a request").scoped();
+				consulted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+				request.reject(crate::SessionError::Unauthorized, "no");
+				std::future::pending::<()>().await
+			}
+		};
+		let mut acceptor = std::pin::pin!(acceptor);
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
+			stream,
+			token_publish_namespace(),
+			cluster::Peer::default(),
+			None,
+		));
+		let mut ended = false;
+		for _ in 0..500 {
+			let _ = futures::poll!(acceptor.as_mut());
+			if futures::poll!(run.as_mut()).is_ready() {
+				ended = true;
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(consulted.load(std::sync::atomic::Ordering::Relaxed), 1, "the verifier ran");
+		assert!(ended, "the refused announce ends");
+		assert!(routed_now(&consumer, "room/alice").is_none(), "and is never attached");
+	}
+
+	/// A limit that covers the announce admits it on its own: the token rides along unread.
+	#[moq_net_sim::test]
+	async fn a_covering_limit_admits_without_the_verifier() {
+		const VERSION: Version = Version::Draft18;
+		let limit = crate::auth::Grant {
+			publish: crate::Pattern::subtree("room").unwrap().into(),
+			subscribe: crate::Patterns::new(),
+			expires: None,
+		};
+		let (mut subscriber, mut requests, consumer, session) = auth_announce_harness_no_ext(VERSION, Some(limit));
+		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
+			stream,
+			token_publish_namespace(),
+			cluster::Peer::default(),
+			None,
+		));
+		let mut routed = false;
+		for _ in 0..500 {
+			assert!(futures::poll!(run.as_mut()).is_pending(), "the announce ended early");
+			if routed_now(&consumer, "room/alice").is_some() {
+				routed = true;
+				break;
+			}
+			settle().await;
+		}
+		assert!(routed, "the limit admits the announce");
+		assert!(
+			requests.poll_next(&kio::Waiter::noop()).is_pending(),
+			"the token never reached the verifier"
+		);
+	}
+
+	/// A token-authorized announce stands outside the limit while it lasts: a narrower limit
+	/// leaves it attached, and only its own end retracts it.
+	#[moq_net_sim::test]
+	async fn a_token_authorized_announce_is_exempt_from_the_limit() {
+		const VERSION: Version = Version::Draft18;
+		let auth = crate::auth::Handle::new(false);
+		auth.authorize(&crate::auth::Grant::default());
+		let (mut subscriber, mut requests, consumer, session) = announce_harness_with(VERSION, auth.clone());
+		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let acceptor = async move {
+			let request = requests.next().await.expect("a request").scoped();
+			let _held = request.accept(crate::auth::Grant::all());
+			std::future::pending::<()>().await
+		};
+		let mut acceptor = std::pin::pin!(acceptor);
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
+			stream,
+			token_publish_namespace(),
+			cluster::Peer::default(),
+			None,
+		));
+		let mut routed = false;
+		for _ in 0..500 {
+			let _ = futures::poll!(acceptor.as_mut());
+			assert!(futures::poll!(run.as_mut()).is_pending(), "the announce ended early");
+			if routed_now(&consumer, "room/alice").is_some() {
+				routed = true;
+				break;
+			}
+			settle().await;
+		}
+		assert!(routed, "the token admits the announce outside the limit");
+
+		auth.authorize(&crate::auth::Grant {
+			publish: crate::Pattern::subtree("other").unwrap().into(),
+			subscribe: crate::Patterns::new(),
+			expires: None,
+		});
+		for _ in 0..50 {
+			let _ = futures::poll!(acceptor.as_mut());
+			assert!(futures::poll!(run.as_mut()).is_pending(), "the announce ended");
+			settle().await;
+		}
+		assert!(
+			routed_now(&consumer, "room/alice").is_some(),
+			"a narrower limit leaves the token-authorized announce attached"
+		);
+	}
+
 	/// A REQUEST_UPDATE the acceptor renews keeps a token-authorized announce alive past the
 	/// old grant's expiry: the subscriber re-verifies the token off the announce stream and
 	/// re-arms the deadline.
@@ -8552,10 +8784,10 @@ mod tests {
 			async move {
 				let mut held = Vec::new();
 				// The first grant lapses in 60s; the renewal never expires.
-				let first = requests.next().await.expect("a request");
+				let first = requests.next().await.expect("a request").scoped();
 				held.push(first.accept(publish_grant_expiring(&rt, Some(60))));
 				answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-				let renewal = requests.next().await.expect("a renewal");
+				let renewal = requests.next().await.expect("a renewal").scoped();
 				held.push(renewal.accept(publish_grant_expiring(&rt, None)));
 				answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 				std::future::pending::<()>().await
@@ -8625,10 +8857,10 @@ mod tests {
 			let answered = answered.clone();
 			async move {
 				// The first grant lasts 60s; the renewal is refused.
-				let first = requests.next().await.expect("a request");
+				let first = requests.next().await.expect("a request").scoped();
 				let _issued = first.accept(publish_grant_expiring(&rt, Some(60)));
 				answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-				let renewal = requests.next().await.expect("a renewal");
+				let renewal = requests.next().await.expect("a renewal").scoped();
 				renewal.reject(crate::SessionError::Unauthorized, "no");
 				answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 				std::future::pending::<()>().await
@@ -8696,9 +8928,9 @@ mod tests {
 			let rt = rt.clone();
 			async move {
 				let mut held = Vec::new();
-				let first = requests.next().await.expect("a request");
+				let first = requests.next().await.expect("a request").scoped();
 				held.push(first.accept(publish_grant_expiring(&rt, Some(60))));
-				let renewal = requests.next().await.expect("a renewal");
+				let renewal = requests.next().await.expect("a renewal").scoped();
 				held.push(renewal.accept(publish_grant_expiring(&rt, None)));
 				std::future::pending::<()>().await
 			}
@@ -8780,15 +9012,15 @@ mod tests {
 			let answered = answered.clone();
 			let release = release.clone();
 			async move {
-				let first = requests.next().await.expect("a request");
+				let first = requests.next().await.expect("a request").scoped();
 				let mut held = vec![first.accept(publish_grant_expiring(&rt, None))];
 				answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-				let a = requests.next().await.expect("a renewal");
+				let a = requests.next().await.expect("a renewal").scoped();
 				release.notified().await;
 				held.push(a.accept(publish_grant_expiring(&rt, None)));
 				answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 				loop {
-					let renewal = requests.next().await.expect("a renewal");
+					let renewal = requests.next().await.expect("a renewal").scoped();
 					held.push(renewal.accept(publish_grant_expiring(&rt, None)));
 					answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 				}
@@ -8842,7 +9074,7 @@ mod tests {
 
 		// Accept the initial token, then never answer a renewal, so the buffer only grows.
 		let acceptor = async move {
-			let first = requests.next().await.expect("a request");
+			let first = requests.next().await.expect("a request").scoped();
 			let _held = first.accept(publish_grant_expiring(&rt, None));
 			std::future::pending::<()>().await
 		};
@@ -8899,7 +9131,7 @@ mod tests {
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 
 		let acceptor = async move {
-			let first = requests.next().await.expect("a request");
+			let first = requests.next().await.expect("a request").scoped();
 			let _held = first.accept(publish_grant_expiring(&rt, None));
 			std::future::pending::<()>().await
 		};
@@ -8942,7 +9174,7 @@ mod tests {
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 
 		let acceptor = async move {
-			let first = requests.next().await.expect("a request");
+			let first = requests.next().await.expect("a request").scoped();
 			let _held = first.accept(publish_grant_expiring(&rt, None));
 			std::future::pending::<()>().await
 		};
@@ -8984,7 +9216,7 @@ mod tests {
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 
 		let acceptor = async move {
-			let first = requests.next().await.expect("a request");
+			let first = requests.next().await.expect("a request").scoped();
 			let _held = first.accept(publish_grant_expiring(&rt, None));
 			std::future::pending::<()>().await
 		};
@@ -9016,10 +9248,27 @@ mod tests {
 	}
 
 	/// Like [`auth_announce_harness`] but the session never negotiated the MoQ Auth extension,
-	/// so its union is `None` forever: `allows` is permissive, `covers` is not. No credential
-	/// is presented; the acceptor answers request tokens regardless.
+	/// so its union is `None` forever, and the application set `limit`, if any.
 	fn auth_announce_harness_no_ext(
 		version: Version,
+		limit: Option<crate::auth::Grant>,
+	) -> (
+		Subscriber<crate::lite::test_transport::ScriptedSession>,
+		crate::auth::Requests,
+		origin::Consumer,
+		crate::lite::test_transport::ScriptedSession,
+	) {
+		let auth = crate::auth::Handle::new(false);
+		if let Some(limit) = &limit {
+			auth.authorize(limit);
+		}
+		announce_harness_with(version, auth)
+	}
+
+	/// An announce harness over `auth`, set up by the caller, taking its requests.
+	fn announce_harness_with(
+		version: Version,
+		auth: crate::auth::Handle,
 	) -> (
 		Subscriber<crate::lite::test_transport::ScriptedSession>,
 		crate::auth::Requests,
@@ -9034,16 +9283,7 @@ mod tests {
 		let peer_setup = peer::PeerSetup::default();
 		peer_setup.set(peer::Peer::default());
 
-		let auth = crate::auth::Handle::new(false);
 		let requests = auth.requests().unwrap();
-		assert!(
-			auth.allows(crate::auth::Direction::Subscribe, "room/alice"),
-			"a None union is permissive for allows"
-		);
-		assert!(
-			!auth.covers(crate::auth::Direction::Subscribe, "room/alice"),
-			"a None union does not cover"
-		);
 
 		let subscriber = Subscriber::new(
 			crate::time::Clock::sim(),
@@ -9063,10 +9303,9 @@ mod tests {
 		(subscriber, requests, consumer, session)
 	}
 
-	/// On a session without the AUTH extension the union is `None` forever, so `allows` is
-	/// permissive; a token-bearing PUBLISH_NAMESPACE must still be verified (`covers`), not
-	/// admitted by that default. Admitted on a covering grant; refused UNAUTHORIZED (not
-	/// admitted) on refusal. This is the standard moq-transport peer shape the quest targets.
+	/// On a session without the AUTH extension, a token-bearing PUBLISH_NAMESPACE the limit
+	/// does not cover is verified by the application. Admitted on a covering grant; refused
+	/// UNAUTHORIZED (not admitted) on refusal. This is the standard moq-transport peer shape.
 	#[moq_net_sim::test]
 	async fn a_request_token_on_a_no_auth_session_is_verified() {
 		const VERSION: Version = Version::Draft18;
@@ -9074,7 +9313,7 @@ mod tests {
 		// Accepted: the acceptor is consulted (proving the token path, not the permissive
 		// default, which the origin model would also route) and its grant admits the announce.
 		{
-			let (mut subscriber, mut requests, consumer, session) = auth_announce_harness_no_ext(VERSION);
+			let (mut subscriber, mut requests, consumer, session) = auth_announce_harness_no_ext(VERSION, Some(crate::auth::Grant::default()));
 			let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 			let consulted = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 			let acceptor = {
@@ -9082,7 +9321,7 @@ mod tests {
 				async move {
 					let mut held = Vec::new();
 					loop {
-						let request = requests.next().await.expect("a request reaches the acceptor");
+						let request = requests.next().await.expect("a request reaches the acceptor").scoped();
 						consulted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 						held.push(request.accept(crate::auth::Grant::all()));
 					}
@@ -9120,10 +9359,10 @@ mod tests {
 
 		// Refused: not admitted by the permissive default.
 		{
-			let (mut subscriber, mut requests, consumer, session) = auth_announce_harness_no_ext(VERSION);
+			let (mut subscriber, mut requests, consumer, session) = auth_announce_harness_no_ext(VERSION, Some(crate::auth::Grant::default()));
 			let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 			let acceptor = async move {
-				let request = requests.next().await.expect("a request reaches the acceptor");
+				let request = requests.next().await.expect("a request reaches the acceptor").scoped();
 				request.reject(crate::SessionError::Unauthorized, "no");
 				std::future::pending::<()>().await
 			};
@@ -9166,10 +9405,10 @@ mod tests {
 		let acceptor = {
 			let popped = popped.clone();
 			async move {
-				let first = requests.next().await.expect("a request");
+				let first = requests.next().await.expect("a request").scoped();
 				let _issued = first.accept(crate::auth::Grant::all());
 				popped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-				let _never_answered = requests.next().await.expect("a renewal");
+				let _never_answered = requests.next().await.expect("a renewal").scoped();
 				popped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 				std::future::pending::<()>().await
 			}
@@ -9220,10 +9459,10 @@ mod tests {
 			expires: None,
 		};
 		for (grant, admitted) in [(read_only, false), (write_only, true)] {
-			let (mut subscriber, mut requests, consumer, session) = auth_announce_harness_no_ext(VERSION);
+			let (mut subscriber, mut requests, consumer, session) = auth_announce_harness_no_ext(VERSION, Some(crate::auth::Grant::default()));
 			let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 			let acceptor = async move {
-				let request = requests.next().await.expect("a request reaches the acceptor");
+				let request = requests.next().await.expect("a request reaches the acceptor").scoped();
 				let _issued = request.accept(grant);
 				std::future::pending::<()>().await
 			};
@@ -9260,7 +9499,7 @@ mod tests {
 	#[moq_net_sim::test]
 	async fn a_token_less_request_on_a_no_auth_session_is_unchanged() {
 		const VERSION: Version = Version::Draft18;
-		let (mut subscriber, _requests, consumer, session) = auth_announce_harness_no_ext(VERSION);
+		let (mut subscriber, _requests, consumer, session) = auth_announce_harness_no_ext(VERSION, None);
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 
 		let mut msg = token_publish_namespace();

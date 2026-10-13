@@ -433,6 +433,9 @@ enum Joined {
 		cache: track::Consumer,
 		/// The subscription's namespace, which the fetch is held to the grant on.
 		namespace: crate::PathOwned,
+		/// The subscription's own request token authorized it, so the limit does not bound
+		/// the fetch either.
+		token: bool,
 	},
 }
 
@@ -748,66 +751,24 @@ where
 
 			// Serve only what our grant lets us publish (MoQ Auth), and stop once it no
 			// longer does. Checked before resolving, so a denied request never reaches the
-			// origin. The session grant is checked first; a request it does not cover falls
-			// back to an AUTHORIZATION TOKEN carried on the SUBSCRIBE itself (MoQ
-			// request-token), verified by the app's acceptor and scoped to this one request.
-			// Every admitted subscription is gated so it ends if the session narrows: a
-			// union-authorized one on the union and the limit, a token-authorized one on the
-			// limit alone (the union never covered it; its grant ends with the request).
-			let mut request_grant = None;
-			// A request presenting a token is authorized by it whenever the session union does
-			// not positively cover the path. `covers` treats a `None` union (no answer yet, or a
-			// session without the AUTH extension) as NOT covering, so a standard peer's token is
-			// verified rather than admitted by the permissive default. A token-less request keeps
-			// the permissive `allows` default unchanged.
-			let mut gate = if let Some(token) = &msg.authorization_token
-				&& !self
-					.auth
-					.covers(crate::auth::Direction::Publish, msg.track_namespace.as_str())
-			{
-				// The token stands in for the union, never for the limit this side set on the
-				// peer: a request outside that ceiling is refused whatever the token grants.
-				if !self
-					.auth
-					.within_limit(crate::auth::Direction::Publish, msg.track_namespace.as_str())
+			// origin. Our own authorization of the peer (the limit) admits the request; when it
+			// does not cover it, an AUTHORIZATION TOKEN on the request goes to the application
+			// to verify for this request alone (MoQ request-token). What the peer granted us
+			// bounds what we send either way, and never stands in for our authorization of it.
+			let path = msg.track_namespace.as_str();
+			let token = match &msg.authorization_token {
+				Some(token)
+					if self.auth.within_grant(crate::auth::Direction::Publish, path)
+						&& self.auth.token_decides(crate::auth::Direction::Publish, path) =>
 				{
-					let err = Error::Unauthorized;
-					return self.reject_subscribe(stream, request_id, &err, "not granted").await;
+					Some(token.0.clone())
 				}
-				// Held for the subscription's life: the request ends when this grant lapses, is
-				// revoked, or stops covering it, or when the limit narrows past it (the gate),
-				// never the session. It authorizes nothing else and never joins the session union.
-				let admitted = self
-					.auth
-					.admit_request(
-						&self.runtime,
-						token.0.clone(),
-						msg.track_namespace.to_owned(),
-						crate::auth::RequestKind::Subscribe,
-					)
-					.await;
-				match admitted {
-					Ok(grant) => request_grant = Some(grant),
-					Err(err) => return self.reject_subscribe(stream, request_id, &err, &err.to_string()).await,
-				}
-				crate::auth::Gate::limit(
-					self.auth.clone(),
-					msg.track_namespace.to_owned(),
-					crate::auth::Direction::Publish,
-				)
-			} else if self
-				.auth
-				.allows(crate::auth::Direction::Publish, msg.track_namespace.as_str())
-			{
-				crate::auth::Gate::new(
-					self.auth.clone(),
-					msg.track_namespace.to_owned(),
-					crate::auth::Direction::Publish,
-				)
-			} else {
+				_ => None,
+			};
+			if token.is_none() && !self.auth.allows(crate::auth::Direction::Publish, path) {
 				let err = Error::Unauthorized;
 				return self.reject_subscribe(stream, request_id, &err, "not granted").await;
-			};
+			}
 			// Legal requests we can't honor are refused one at a time, never by closing the
 			// session. A subscription that forwards nothing is only useful to a subscriber
 			// that later turns forwarding on, and serving a Range Filter unfiltered would
@@ -822,9 +783,10 @@ where
 					.reject_subscribe(stream, request_id, &Error::Unsupported, "range filters not supported")
 					.await;
 			}
-			// Held for the life of the subscription. A peer past its limits loses the session.
-			let _slot = match self.subscriptions.acquire() {
-				Ok(slot) => slot,
+			// Held for the life of the subscription, and while the application verifies its
+			// token. A peer past its limits loses the session.
+			let slot: crate::auth::Hold = match self.subscriptions.acquire() {
+				Ok(slot) => std::sync::Arc::new(slot),
 				Err(err) => {
 					self.session
 						.clone()
@@ -832,6 +794,65 @@ where
 					return Err(err);
 				}
 			};
+
+			let mut request_finished = false;
+			// A token-authorized subscription is held to its own grant, which ends it when the
+			// grant lapses, is revoked, or stops covering it. Every subscription is gated so it
+			// ends once what the peer granted us stops covering it, and a limit-authorized one
+			// once the limit does too.
+			let (mut gate, request_grant) = match token {
+				Some(token) => {
+					let verdict = self.auth.verify_request(
+						token,
+						msg.track_namespace.to_owned(),
+						crate::auth::RequestKind::Subscribe,
+						Some(slot.clone()),
+					);
+					// The subscriber cancelling or the session closing withdraws the token.
+					let mut session = self.session.clone();
+					let verified = kio::wait(|waiter| {
+						let mut cx = waiter.context();
+						if session.poll_closed(&mut cx).is_ready()
+							|| super::request_stream::poll_withdrawn(&mut stream, self.version, &mut cx).is_ready()
+						{
+							return Poll::Ready(None);
+						}
+						verdict.poll_grant(waiter).map(Some)
+					})
+					.await;
+					let Some(verified) = verified else {
+						return Ok(());
+					};
+					let admitted = crate::auth::RequestGrant::new(
+						&self.runtime,
+						verdict,
+						verified,
+						msg.track_namespace.to_owned(),
+						crate::auth::RequestKind::Subscribe,
+						Some(slot.clone()),
+					);
+					match admitted {
+						Ok(grant) => (
+							crate::auth::Gate::granted(
+								self.auth.clone(),
+								msg.track_namespace.to_owned(),
+								crate::auth::Direction::Publish,
+							),
+							Some(grant),
+						),
+						Err(err) => return self.reject_subscribe(stream, request_id, &err, &err.to_string()).await,
+					}
+				}
+				None => (
+					crate::auth::Gate::new(
+						self.auth.clone(),
+						msg.track_namespace.to_owned(),
+						crate::auth::Direction::Publish,
+					),
+					None,
+				),
+			};
+			let _slot = slot;
 
 			// Stats (subscriptions, viewer refcount, groups/frames/bytes) are counted in
 			// the model, through the tagged `origin::Consumer` the broadcast resolves from.
@@ -917,6 +938,7 @@ where
 						},
 						cache: cache.clone(),
 						namespace: msg.track_namespace.to_owned(),
+						token: request_grant.is_some(),
 					},
 					(Filter::NextObject, None) => Joined::Empty,
 					_ => Joined::Unsupported,
@@ -954,8 +976,6 @@ where
 					},
 				})
 				.await?;
-
-			let mut request_finished = false;
 
 			// Serve the track while reading updates; only abrupt closure cancels on draft-19+.
 			// The fill (when one was requested) runs alongside on its own fetch stream;
@@ -1101,7 +1121,7 @@ where
 			// Handle one queued update before reading the next, so answers stay in order.
 			if let Some(update) = renewal.next() {
 				if let Err(served) = self
-					.apply_subscription_update(stream, serve, &namespace, &request_grant, &mut renewal, update)
+					.apply_subscription_update(stream, serve, &request_grant, &mut renewal, update)
 					.await
 				{
 					return Some(served);
@@ -1241,7 +1261,7 @@ where
 				},
 				Turn::Update(update) => {
 					if let Err(served) = self
-						.apply_subscription_update(stream, serve, &namespace, &request_grant, &mut renewal, update)
+						.apply_subscription_update(stream, serve, &request_grant, &mut renewal, update)
 						.await
 					{
 						return Some(served);
@@ -1262,7 +1282,6 @@ where
 		&self,
 		stream: &mut Stream<S, Version>,
 		serve: &mut TrackServe<S>,
-		namespace: &crate::PathOwned,
 		request_grant: &Option<crate::auth::RequestGrant>,
 		renewal: &mut request_update::Renewal<super::request_stream::Update>,
 		update: super::request_stream::Update,
@@ -1289,11 +1308,8 @@ where
 				.set_priority(super::priority::from_wire(priority))
 				.map_err(failed)?;
 		}
-		if let (Some(token), true) = (update.authorization_token, request_grant.is_some()) {
-			let verdict = self
-				.auth
-				.verify_request(token.0, namespace.clone(), crate::auth::RequestKind::Subscribe);
-			renewal.verify(verdict, update.request_id);
+		if let (Some(token), Some(grant)) = (update.authorization_token, request_grant) {
+			renewal.verify(grant.verify_renewal(&self.auth, token.0), update.request_id);
 			return Ok(());
 		}
 		if answer {
@@ -1819,13 +1835,17 @@ where
 			| FetchType::AbsoluteJoining {
 				subscriber_request_id, ..
 			} => {
-				let (end, cache, namespace) = match self.joined(&mut stream, subscriber_request_id).await? {
+				let (end, cache, namespace, token) = match self.joined(&mut stream, subscriber_request_id).await? {
 					Ok(joined) => joined,
 					Err((err, reason)) => return self.reject_fetch(stream, msg.request_id, &err, reason).await,
 				};
 				// The cache outlives the subscription, so the fetch holds its own gate rather
-				// than trusting the subscription's to stop it.
-				let gate = crate::auth::Gate::new(self.auth.clone(), namespace, crate::auth::Direction::Publish);
+				// than trusting the subscription's to stop it. One the subscription's request
+				// token authorized is held to the peer's grant alone, as the subscription is.
+				let gate = match token {
+					true => crate::auth::Gate::granted(self.auth.clone(), namespace, crate::auth::Direction::Publish),
+					false => crate::auth::Gate::new(self.auth.clone(), namespace, crate::auth::Direction::Publish),
+				};
 				let start = match fetch_type {
 					FetchType::RelativeJoining { group_offset, .. } => end.group.saturating_sub(group_offset),
 					FetchType::AbsoluteJoining { group_id, .. } if group_id <= end.group => group_id,
@@ -2065,7 +2085,7 @@ where
 		&mut self,
 		stream: &mut Stream<S, Version>,
 		subscribe_id: RequestId,
-	) -> Result<Result<(Location, track::Consumer, crate::PathOwned), (Error, &'static str)>, Error> {
+	) -> Result<Result<(Location, track::Consumer, crate::PathOwned, bool), (Error, &'static str)>, Error> {
 		// Request streams can arrive out of order. Wait on registration, while bounding
 		// the lifetime of a request whose subscription never arrives or resolves.
 		let joined = {
@@ -2102,7 +2122,12 @@ where
 		let refusal = match joined {
 			Err(Error::Timeout) => (Error::Timeout, "subscription not ready"),
 			Err(err) => return Err(err),
-			Ok(Some(Joined::Group { end, cache, namespace })) => return Ok(Ok((end, cache, namespace))),
+			Ok(Some(Joined::Group {
+				end,
+				cache,
+				namespace,
+				token,
+			})) => return Ok(Ok((end, cache, namespace, token))),
 			Ok(None) => (
 				match self.version {
 					Version::Draft14
@@ -8149,17 +8174,16 @@ mod serve_tests {
 		let auth = crate::auth::Handle::new(true);
 		let requests = auth.requests().unwrap();
 		let cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
-		auth.granted(
-			0,
-			crate::auth::Grant {
-				publish: crate::Pattern::subtree("other").unwrap().into(),
-				subscribe: crate::Patterns::new(),
-				expires: None,
-			},
-		);
+		// The peer lets us publish everything, and we let it read only "other".
+		auth.granted(0, crate::auth::Grant::all());
+		auth.authorize(&crate::auth::Grant {
+			publish: crate::Patterns::new(),
+			subscribe: crate::Pattern::subtree("other").unwrap().into(),
+			expires: None,
+		});
 		assert!(
 			!auth.allows(crate::auth::Direction::Publish, "room"),
-			"the session grant must not cover the request path"
+			"the limit must not cover the request path"
 		);
 		(auth, requests, cred)
 	}
@@ -8454,10 +8478,10 @@ mod serve_tests {
 			async move {
 				let mut held = Vec::new();
 				// The first grant lapses in 60s; the renewal never expires.
-				let first = requests.next().await.unwrap();
+				let first = requests.next().await.unwrap().scoped();
 				held.push(first.accept(grant_all_expiring(&rt, Some(60))));
 				answered.fetch_add(1, Ordering::Relaxed);
-				let renewal = requests.next().await.unwrap();
+				let renewal = requests.next().await.unwrap().scoped();
 				held.push(renewal.accept(grant_all_expiring(&rt, None)));
 				answered.fetch_add(1, Ordering::Relaxed);
 				std::future::pending::<()>().await
@@ -8550,10 +8574,10 @@ mod serve_tests {
 			let release = release.clone();
 			async move {
 				let mut held = Vec::new();
-				let first = requests.next().await.unwrap();
+				let first = requests.next().await.unwrap().scoped();
 				held.push(first.accept(grant_all_expiring(&rt, Some(60))));
 				answered.fetch_add(1, Ordering::Relaxed);
-				let renewal = requests.next().await.unwrap();
+				let renewal = requests.next().await.unwrap().scoped();
 				release.notified().await;
 				if accept {
 					held.push(renewal.accept(grant_all_expiring(&rt, None)));
@@ -8748,16 +8772,16 @@ mod serve_tests {
 			let answered = answered.clone();
 			let release = release.clone();
 			async move {
-				let first = requests.next().await.unwrap();
+				let first = requests.next().await.unwrap().scoped();
 				let mut held = vec![first.accept(grant_all_expiring(&rt, None))];
 				answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-				let a = requests.next().await.unwrap();
+				let a = requests.next().await.unwrap().scoped();
 				release.notified().await;
 				held.push(a.accept(grant_all_expiring(&rt, None)));
 				answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 				// 0x42 then 0x44: reached only if neither was dropped from the buffer.
 				loop {
-					let renewal = requests.next().await.unwrap();
+					let renewal = requests.next().await.unwrap().scoped();
 					held.push(renewal.accept(grant_all_expiring(&rt, None)));
 					answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 				}
@@ -8815,7 +8839,7 @@ mod serve_tests {
 
 		// Accept the initial token, then never answer a renewal, so the buffer only grows.
 		let acceptor = async move {
-			let first = requests.next().await.unwrap();
+			let first = requests.next().await.unwrap().scoped();
 			let _held = first.accept(grant_all_expiring(&rt, None));
 			std::future::pending::<()>().await
 		};
@@ -8867,7 +8891,7 @@ mod serve_tests {
 		let stream = Stream::open(&mut h.session.clone(), VERSION).await.unwrap();
 
 		let acceptor = async move {
-			let first = requests.next().await.unwrap();
+			let first = requests.next().await.unwrap().scoped();
 			let _held = first.accept(grant_all_expiring(&rt, None));
 			std::future::pending::<()>().await
 		};
@@ -8912,7 +8936,7 @@ mod serve_tests {
 		let stream = Stream::open(&mut h.session.clone(), VERSION).await.unwrap();
 
 		let acceptor = async move {
-			let first = requests.next().await.unwrap();
+			let first = requests.next().await.unwrap().scoped();
 			let _held = first.accept(grant_all_expiring(&rt, None));
 			std::future::pending::<()>().await
 		};
@@ -8957,7 +8981,7 @@ mod serve_tests {
 		let stream = Stream::open(&mut h.session.clone(), VERSION).await.unwrap();
 
 		let acceptor = async move {
-			let first = requests.next().await.unwrap();
+			let first = requests.next().await.unwrap().scoped();
 			let _held = first.accept(grant_all_expiring(&rt, None));
 			std::future::pending::<()>().await
 		};
@@ -9026,9 +9050,9 @@ mod serve_tests {
 			let acceptor = {
 				let release = release.clone();
 				async move {
-					let first = requests.next().await.unwrap();
+					let first = requests.next().await.unwrap().scoped();
 					let _held = first.accept(grant_all_expiring(&rt, None));
-					let renewal = requests.next().await.unwrap();
+					let renewal = requests.next().await.unwrap().scoped();
 					release.notified().await;
 					renewal.reject(crate::SessionError::Unauthorized, "no");
 					std::future::pending::<()>().await
@@ -9090,7 +9114,7 @@ mod serve_tests {
 
 			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
 			let acceptor = async move {
-				let first = requests.next().await.unwrap();
+				let first = requests.next().await.unwrap().scoped();
 				let _held = first.accept(grant_all_expiring(&rt, None));
 				std::future::pending::<()>().await
 			};
@@ -9145,7 +9169,7 @@ mod serve_tests {
 		let stream = Stream::open(&mut h.session.clone(), VERSION).await.unwrap();
 
 		let acceptor = async move {
-			let first = requests.next().await.unwrap();
+			let first = requests.next().await.unwrap().scoped();
 			let _held = first.accept(grant_all_expiring(&rt, None));
 			std::future::pending::<()>().await
 		};
@@ -9185,10 +9209,10 @@ mod serve_tests {
 		let acceptor = {
 			let popped = popped.clone();
 			async move {
-				let first = requests.next().await.expect("a request");
+				let first = requests.next().await.expect("a request").scoped();
 				let _issued = first.accept(crate::auth::Grant::all());
 				popped.fetch_add(1, Ordering::Relaxed);
-				let _never_answered = requests.next().await.expect("a renewal");
+				let _never_answered = requests.next().await.expect("a renewal").scoped();
 				popped.fetch_add(1, Ordering::Relaxed);
 				std::future::pending::<()>().await
 			}
@@ -9250,9 +9274,9 @@ mod serve_tests {
 
 			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
 			let acceptor = async move {
-				let first = requests.next().await.expect("a request");
+				let first = requests.next().await.expect("a request").scoped();
 				let _issued = first.accept(crate::auth::Grant::all());
-				let _never_answered = requests.next().await.expect("a renewal");
+				let _never_answered = requests.next().await.expect("a renewal").scoped();
 				std::future::pending::<()>().await
 			};
 			let mut acceptor = std::pin::pin!(acceptor);
@@ -9296,10 +9320,10 @@ mod serve_tests {
 			let answered = answered.clone();
 			async move {
 				// The first grant lasts 60s; the renewal is refused.
-				let first = requests.next().await.unwrap();
+				let first = requests.next().await.unwrap().scoped();
 				let _issued = first.accept(grant_all_expiring(&rt, Some(60)));
 				answered.fetch_add(1, Ordering::Relaxed);
-				let renewal = requests.next().await.unwrap();
+				let renewal = requests.next().await.unwrap().scoped();
 				renewal.reject(crate::SessionError::Unauthorized, "no");
 				answered.fetch_add(1, Ordering::Relaxed);
 				std::future::pending::<()>().await
@@ -9372,11 +9396,11 @@ mod serve_tests {
 			async move {
 				let mut held = Vec::new();
 				// The first grant lapses in 60s.
-				let first = requests.next().await.expect("a request");
+				let first = requests.next().await.expect("a request").scoped();
 				held.push(first.accept(grant_all_expiring(&rt, Some(60))));
 				popped.fetch_add(1, Ordering::Relaxed);
 				// The renewal is popped but never answered: a slow or hung acceptor.
-				let _slow = requests.next().await.expect("a renewal");
+				let _slow = requests.next().await.expect("a renewal").scoped();
 				popped.fetch_add(1, Ordering::Relaxed);
 				std::future::pending::<()>().await
 			}
@@ -9415,22 +9439,14 @@ mod serve_tests {
 	}
 
 	/// Publisher / SUBSCRIBE side: on a session without the AUTH extension the union is
-	/// `None` forever, so `allows` is permissive; a token-bearing SUBSCRIBE must still be
-	/// verified via `covers`, not admitted by that default. The acceptor is consulted; with the
-	/// bug the token path was bypassed and the token silently ignored.
+	/// `None` forever. A token-bearing SUBSCRIBE the limit does not cover is verified by the
+	/// application, not admitted by the permissive union.
 	#[moq_net_sim::test]
 	async fn a_request_token_on_a_no_auth_session_is_verified() {
 		const VERSION: Version = Version::Draft18;
 		let auth = crate::auth::Handle::new(false);
 		let mut requests = auth.requests().unwrap();
-		assert!(
-			auth.allows(crate::auth::Direction::Publish, "room"),
-			"None union is permissive"
-		);
-		assert!(
-			!auth.covers(crate::auth::Direction::Publish, "room"),
-			"None union does not cover"
-		);
+		auth.authorize(&crate::auth::Grant::default());
 
 		let h = serve_with_auth(VERSION, auth, Vec::new());
 		let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
@@ -9445,7 +9461,7 @@ mod serve_tests {
 			async move {
 				let mut held = Vec::new();
 				loop {
-					let request = requests.next().await.expect("a request");
+					let request = requests.next().await.expect("a request").scoped();
 					consulted.fetch_add(1, Ordering::Relaxed);
 					held.push(request.accept(crate::auth::Grant::all()));
 				}
@@ -9495,7 +9511,7 @@ mod serve_tests {
 		let serving: Serving = Box::pin(async move {
 			let acceptor = async move {
 				let mut held = Vec::new();
-				while let Some(request) = requests.next().await {
+				while let Some(crate::auth::Event::Scoped(request)) = requests.next().await {
 					held.push(request.accept(grant.clone()));
 				}
 				std::future::pending::<Result<(), Error>>().await
@@ -9535,33 +9551,209 @@ mod serve_tests {
 			subscribe: crate::Patterns::new(),
 			expires: None,
 		};
-		let (_auth, _h, mut serving) = serve_token_subscribe(read_only, None).await;
+		let nothing = Some(crate::auth::Grant::default());
+		let (_auth, _h, mut serving) = serve_token_subscribe(read_only, nothing.clone()).await;
 		assert!(still_serving(&mut serving).await, "a read grant admits it");
-		let (_auth, _h, mut serving) = serve_token_subscribe(write_only, None).await;
+		let (_auth, _h, mut serving) = serve_token_subscribe(write_only, nothing).await;
 		assert!(!still_serving(&mut serving).await, "a write grant refuses it");
 	}
 
-	/// A request token stands in for the union, never for the limit this side set on the
-	/// peer: a SUBSCRIBE outside that ceiling is refused whatever the token grants, and a
-	/// later narrowing ends one the token admitted.
+	/// A request token stands in for the limit this side set on the peer, so a SUBSCRIBE the
+	/// limit refuses is admitted on the token and a later narrowing leaves it standing.
 	#[moq_net_sim::test]
-	async fn a_request_token_cannot_exceed_the_local_limit() {
+	async fn a_request_token_stands_in_for_the_local_limit() {
 		let nothing = Some(crate::auth::Grant::default());
-		let (_auth, _h, mut serving) = serve_token_subscribe(crate::auth::Grant::all(), nothing).await;
-		assert!(
-			!still_serving(&mut serving).await,
-			"a limit of nothing refuses an all-covering token"
-		);
-
-		let (auth, _h, mut serving) = serve_token_subscribe(crate::auth::Grant::all(), None).await;
+		let (auth, _h, mut serving) = serve_token_subscribe(crate::auth::Grant::all(), nothing).await;
 		assert!(
 			still_serving(&mut serving).await,
-			"an unlimited session admits the token"
+			"a limit of nothing defers to the token"
+		);
+		auth.authorize(&crate::auth::Grant {
+			publish: crate::Patterns::new(),
+			subscribe: crate::Pattern::subtree("other").unwrap().into(),
+			expires: None,
+		});
+		assert!(
+			still_serving(&mut serving).await,
+			"narrowing the limit leaves a token-authorized subscription"
+		);
+	}
+
+	/// What the peer's AUTH_OK grants us never authorizes what the peer asks of us: with a
+	/// covering peer grant and no limit, the application still verifies the SUBSCRIBE's token,
+	/// and its refusal refuses the subscription.
+	#[moq_net_sim::test]
+	async fn a_covering_peer_grant_never_skips_the_verifier() {
+		const VERSION: Version = Version::Draft18;
+		let auth = crate::auth::Handle::new(true);
+		let mut requests = auth.requests().unwrap();
+		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
+		auth.granted(0, crate::auth::Grant::all());
+		let h = serve_with_auth(VERSION, auth, Vec::new());
+		let stream = Stream::open(&mut h.session.clone(), VERSION).await.unwrap();
+
+		let consulted = std::sync::Arc::new(AtomicU64::new(0));
+		let acceptor = {
+			let consulted = consulted.clone();
+			async move {
+				let request = requests.next().await.expect("a request").scoped();
+				consulted.fetch_add(1, Ordering::Relaxed);
+				request.reject(crate::SessionError::Unauthorized, "no");
+				std::future::pending::<()>().await
+			}
+		};
+		let mut acceptor = std::pin::pin!(acceptor);
+		let mut serving = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, token_subscribe()));
+		let mut ended = false;
+		for _ in 0..500 {
+			let _ = futures::poll!(acceptor.as_mut());
+			if futures::poll!(serving.as_mut()).is_ready() {
+				ended = true;
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(consulted.load(Ordering::Relaxed), 1, "the verifier ran");
+		assert!(ended, "the refused subscription ends");
+	}
+
+	/// A limit that covers the SUBSCRIBE admits it on its own: the token rides along unread.
+	#[moq_net_sim::test]
+	async fn a_covering_limit_admits_without_the_verifier() {
+		let room = crate::auth::Grant {
+			publish: crate::Patterns::new(),
+			subscribe: crate::Pattern::subtree("room").unwrap().into(),
+			expires: None,
+		};
+		let (auth, _h, mut serving) = serve_token_subscribe(crate::auth::Grant::default(), Some(room)).await;
+		assert!(still_serving(&mut serving).await, "the limit admits the subscription");
+		drop(auth);
+	}
+
+	/// With no verifier, a token the limit leaves to decide refuses the request as unsupported
+	/// rather than unauthorized, and a session never limited ignores the token.
+	#[moq_net_sim::test]
+	async fn a_token_without_a_verifier_is_unsupported() {
+		const VERSION: Version = Version::Draft18;
+		let auth = crate::auth::Handle::new(false);
+		auth.authorize(&crate::auth::Grant::default());
+		let h = serve_with_auth(VERSION, auth, Vec::new());
+		let stream = Stream::open(&mut h.session.clone(), VERSION).await.unwrap();
+		let res = h.publisher.clone().run_subscribe_stream(stream, token_subscribe()).await;
+		assert!(res.is_ok(), "refused, not failed: {res:?}");
+		let refusal = {
+			let log = Log::default();
+			let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+			writer.varint(ietf::RequestError::ID).await.unwrap();
+			writer
+				.encode(&ietf::RequestError {
+					request_id: None,
+					error_code: request::to_code(&Error::Unsupported, request::Kind::Subscribe, VERSION),
+					reason_phrase: Error::Unsupported.to_string().into(),
+					retry_interval: 0,
+				})
+				.await
+				.unwrap();
+			log.writes.lock().unwrap().clone()
+		};
+		assert_eq!(occurrences(&h.log, &refusal), 1, "refused NOT_SUPPORTED");
+
+		let unlimited = crate::auth::Handle::new(false);
+		let h = serve_with_auth(VERSION, unlimited, Vec::new());
+		let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(timestamp(), b"frame".as_slice()).unwrap();
+		settle().await;
+		let stream = Stream::open(&mut h.session.clone(), VERSION).await.unwrap();
+		let mut serving = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, token_subscribe()));
+		for _ in 0..50 {
+			assert!(futures::poll!(serving.as_mut()).is_pending(), "an unlimited session serves it");
+			settle().await;
+		}
+	}
+
+	/// A token waiting on the application holds the subscription's slot. Withdrawn while still
+	/// queued it gives the slot back at once; once the application took it, the slot stays
+	/// counted until the application answers, and that late answer authorizes nothing.
+	#[moq_net_sim::test]
+	async fn a_stalled_verification_holds_the_subscription_slot() {
+		const VERSION: Version = Version::Draft18;
+
+		// Withdrawn before the application looked.
+		let auth = crate::auth::Handle::new(false);
+		let _requests = auth.requests().unwrap();
+		let mut h = serve_with_auth(VERSION, auth, Vec::new());
+		h.publisher.subscriptions = crate::session::Slots::new(1);
+		let stream = Stream::open(&mut h.session.clone(), VERSION).await.unwrap();
+		{
+			let mut serving = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, token_subscribe()));
+			for _ in 0..10 {
+				assert!(futures::poll!(serving.as_mut()).is_pending(), "verification is pending");
+				settle().await;
+			}
+			assert!(h.publisher.subscriptions.acquire().is_err(), "the pending token holds the slot");
+		}
+		assert!(
+			h.publisher.subscriptions.acquire().is_ok(),
+			"a withdrawn queued token gives the slot back"
+		);
+
+		// Withdrawn after the application took it.
+		let auth = crate::auth::Handle::new(false);
+		let mut requests = auth.requests().unwrap();
+		let mut h = serve_with_auth(VERSION, auth, Vec::new());
+		h.publisher.subscriptions = crate::session::Slots::new(1);
+		let stream = Stream::open(&mut h.session.clone(), VERSION).await.unwrap();
+		let taken = {
+			let mut serving = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, token_subscribe()));
+			let mut taken = None;
+			for _ in 0..10 {
+				assert!(futures::poll!(serving.as_mut()).is_pending(), "verification is pending");
+				if taken.is_none()
+					&& let Poll::Ready(Some(event)) = requests.poll_next(&kio::Waiter::noop())
+				{
+					taken = Some(event.scoped());
+				}
+				settle().await;
+			}
+			taken.expect("the application took the token")
+		};
+		assert!(
+			h.publisher.subscriptions.acquire().is_err(),
+			"a token the application holds keeps its slot after the request ends"
+		);
+		let late = taken.accept(crate::auth::Grant::all());
+		assert!(
+			h.publisher.subscriptions.acquire().is_ok(),
+			"answering releases the slot"
+		);
+		let ended = late.closed().await;
+		assert!(matches!(ended, Error::Cancel), "the late answer lands nowhere: {ended:?}");
+	}
+
+	/// What the peer granted us bounds what we send, so a request token never admits a
+	/// SUBSCRIBE outside it, and the application is not even asked.
+	#[moq_net_sim::test]
+	async fn a_request_token_cannot_exceed_the_peers_grant() {
+		const VERSION: Version = Version::Draft18;
+		let auth = crate::auth::Handle::new(true);
+		let mut requests = auth.requests().unwrap();
+		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
+		auth.granted(
+			0,
+			crate::auth::Grant {
+				publish: crate::Pattern::subtree("other").unwrap().into(),
+				subscribe: crate::Patterns::new(),
+				expires: None,
+			},
 		);
 		auth.authorize(&crate::auth::Grant::default());
+		let h = serve_with_auth(VERSION, auth, Vec::new());
+		let stream = Stream::open(&mut h.session.clone(), VERSION).await.unwrap();
+		let res = h.publisher.clone().run_subscribe_stream(stream, token_subscribe()).await;
+		assert!(res.is_ok(), "refused, not failed: {res:?}");
 		assert!(
-			!still_serving(&mut serving).await,
-			"narrowing the limit ends a token-authorized subscription"
+			requests.poll_next(&kio::Waiter::noop()).is_pending(),
+			"the token must not reach the application"
 		);
 	}
 

@@ -43,7 +43,7 @@ async fn pair(version: Version) -> Pair {
 		(session, requests)
 	};
 	let (client, (server, mut requests)) = futures::join!(client, server);
-	let initial = requests.next().await.unwrap().accept(auth::Grant::all());
+	let initial = session(requests.next().await).accept(auth::Grant::all());
 	Pair {
 		client,
 		_server: server,
@@ -59,7 +59,7 @@ impl Pair {
 		let accept = async {
 			let mut issued = Vec::with_capacity(count);
 			for _ in 0..count {
-				issued.push(self.requests.next().await.unwrap().accept(auth::Grant::all()));
+				issued.push(session(self.requests.next().await).accept(auth::Grant::all()));
 			}
 			issued
 		};
@@ -100,3 +100,11 @@ fn admission(c: &mut Criterion) {
 
 criterion_group!(benches, admission);
 criterion_main!(benches);
+
+/// The next token, which these sessions only ever present for the whole session.
+fn session(event: Option<auth::Event>) -> auth::Request {
+	match event {
+		Some(auth::Event::Session(request)) => request,
+		_ => panic!("expected a session token"),
+	}
+}

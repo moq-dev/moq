@@ -38,6 +38,27 @@ pub(super) fn poll_cancel<S: crate::transport::poll::Session>(
 	Poll::Pending
 }
 
+/// Watch for the requester ending a request it has not been answered on yet, without consuming
+/// what it sent meanwhile: a waiting message (an update, say) ends the watch on the reader and
+/// is read once the request is answered.
+pub(super) fn poll_withdrawn<S: crate::transport::poll::Session>(
+	stream: &mut Stream<S, Version>,
+	version: Version,
+	cx: &mut Context<'_>,
+) -> Poll<()> {
+	// Virtual writers on drafts 14-16 are already closed while their control request lives.
+	if !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+		&& stream.writer.poll_closed(cx).is_ready()
+	{
+		return Poll::Ready(());
+	}
+	match stream.reader.poll_has_more(cx) {
+		Poll::Ready(Ok(false)) if fin_cancels(version) => Poll::Ready(()),
+		Poll::Ready(Err(_)) => Poll::Ready(()),
+		_ => Poll::Pending,
+	}
+}
+
 /// Poll a draft 14-16 virtual request stream until the requester ends the request.
 ///
 /// An update modifies the request rather than ending it, so it is skipped. Any other
