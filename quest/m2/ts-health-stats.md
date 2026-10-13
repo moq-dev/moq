@@ -12,6 +12,10 @@ counter rates and PID quiet times.
 
 Decided while planning [#1838](https://github.com/moq-dev/moq/issues/1838):
 
+The quest audit confirmed this stays in m2 and owns TS counter serialization
+and integration. Rust reporters in m1 supplies only the generic per-rendition
+plumbing; it does not implement this quest's `mpegts` payloads.
+
 - **Surface through the stats plumbing**, as the issue settled. The
   [media stats schema](/quest/m1/stats/schema.md) settles the shape: an
   import flattens `ts::stats::Snapshot` into the publisher's stats snapshot under the

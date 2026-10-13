@@ -44,11 +44,12 @@ same `root` and `mounts` resizes the live session in place, narrower or wider,
 so a moderation decision lands on the session it targets and can be lifted the
 same way: what falls outside a narrower grant resets with `Unauthorized`, the
 broadcasts the session published outside it abort, and everything else keeps
-flowing. A wider grant brings those paths back, up to what the session was
-admitted with. A one-shot HTTP `/fetch` ends on a narrower grant instead. A
-changed `root`, `mounts`, `peer`, or `upstream` closes the session. A changed
-`tier` keeps the session and moves its stats from then on. A 401 or
-403 closes it. Any other failure retries with backoff and the session lives
+flowing. A wider grant brings those paths back within the admitted root and
+SETUP role. A one-shot HTTP `/fetch` ends on a narrower grant instead. A
+changed `root`, `mounts`, `peer`, or `upstream`, or a 401 or 403, ends that
+credential's grant, which closes the session unless an
+[in-band](#in-band-renewal) credential still holds it. A changed `tier` keeps
+the session and moves its stats from then on. Any other failure retries with backoff and the session lives
 until `expires`, so an outage always has the bound the server chose. A grant
 with `revalidate` must set `expires` for that reason.
 
@@ -113,6 +114,39 @@ TOKEN` option with Token Type 0. HMAC, RSA, ECDSA, and EdDSA keys all work. A
 key can itself be **scoped** at generation (`--root`, `--publish`,
 `--subscribe`), after which it can never sign a broader token.
 
+### In-band renewal
+
+On moq-lite-07-wip or moq-transport draft-17 and later with MoQ Auth negotiated,
+a client can present another JWT without reconnecting. Present its replacement
+before the current grant expires and keep the returned token handle alive.
+The native `Connection::auth()` handle re-presents retained tokens after a
+reconnect; the JavaScript session's `auth.add()` presents one for that session.
+Older versions refuse in-band tokens.
+
+Each accepted token adds its publish and subscribe patterns to the session's
+union, within its admitted root and SETUP role. A publish-only connection cannot
+become a subscriber. A replacement must retain the root, mounts, and routing
+classification. Dropping a token handle, expiry, or refusal at revalidation
+removes that token's grant: streams that lose permission reset, and other grants
+keep the connection alive. A refused new token leaves existing grants alone.
+The grant reports its real expiry so the client can renew in time.
+
+The relay verifies a presented JWT through the same admission path, replacing
+`jwt` in the original query and preserving the connection's identity. The auth
+server sees another `connect` for the same session id. Attached grants revalidate
+independently but never report `end`; only the connection reports its end, even
+if its first credential expired earlier, after its attached grants stop. Each
+attached JWT counts against its own `--limit-token` cap until the connection
+ends. The initial credential remains responsible for the connection's stats tier.
+Certificate sessions cannot renew a certificate in band, and public rules
+cannot verify a presented token; both refuse it as unsupported. A burst of
+tokens past the session's pending-verification bound is refused. On moq-lite, an
+auth server that cannot answer, by timeout or outage, refuses a token as a
+transient error, and `Connection::auth()` presents it again on its reconnect
+backoff. On moq-transport the refusal is final and the token ends. Retrying
+never extends an accepted grant, so a session whose last grant expires during an
+outage still closes.
+
 ### Claims
 
 | Claim | Meaning |
@@ -120,7 +154,7 @@ key can itself be **scoped** at generation (`--root`, `--publish`,
 | `root` | Base path. Optional. |
 | `publish` | Patterns the bearer may publish under `root`. `**` means everything; omitted means no publishing. |
 | `subscribe` | Patterns the bearer may subscribe to under `root`. Same rules. |
-| `exp`, `iat`, `nbf` | Expiry, issue time, and not-before. `exp` is enforced for the whole session, not just at connect, and a token is refused from its `exp` on and before its `nbf`. |
+| `exp`, `iat`, `nbf` | Expiry, issue time, and not-before. `exp` ends that credential's grant, including after connect; another accepted token can keep the session alive. A token is refused from its `exp` on and before its `nbf`. |
 | `iss`, `sub`, `jti` | Read and ignored. |
 
 Any other claim refuses the token with its name, `aud` included: an unknown
@@ -296,7 +330,9 @@ admissions itself, without the HTTP: leave `[auth]` empty and take
 refusal. A fixed lease never changes; a `lease::Producer` the application keeps
 re-checks, updates, and revokes on its own clock. The relay still closes the
 session at the grant's `expires`, and an admission left unanswered for ten
-seconds is refused. Gateway accept loops can call `Cluster::admit` for the same
+seconds is refused. `Admission::attached()` marks a token presented
+[in band](#in-band-renewal) for a session already admitted under the same id,
+so count sessions only on the others. Gateway accept loops can call `Cluster::admit` for the same
 scoped session as a native connection. See
 [docs.rs/moq-relay](https://docs.rs/moq-relay) and
 [moq-auth](/lib/rs/moq-auth).

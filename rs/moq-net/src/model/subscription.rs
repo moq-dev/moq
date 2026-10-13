@@ -86,6 +86,27 @@ pub struct Subscription {
 	/// cursor; [`Position::group_end`] translates this field into its bound. Setting one
 	/// does not imply the other.
 	pub end: Option<Position>,
+	/// Which pending group the publisher sends first; see [`Order`].
+	///
+	/// Aggregated across every live subscriber: any [`Order::Descending`] subscriber makes
+	/// the aggregate descending, so a relay fanning one upstream request out keeps its live
+	/// subscribers fresh. Each subscriber's own publisher (a relay's downstream session)
+	/// still serves it in its own order.
+	pub order: Order,
+}
+
+/// Which of a subscription's pending groups the publisher sends first.
+///
+/// A transmission order only: it never decides *whether* a group is delivered, which is
+/// [`Subscription::max_delay`]'s job. An ascending subscriber that wants a backlog
+/// therefore needs a budget that covers it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Order {
+	/// Oldest first, draining a backlog in sequence order.
+	Ascending,
+	/// Newest first, so congestion sheds the backlog rather than the live edge.
+	#[default]
+	Descending,
 }
 
 impl Default for Subscription {
@@ -95,6 +116,7 @@ impl Default for Subscription {
 			max_delay: Duration::ZERO,
 			start: None,
 			end: None,
+			order: Order::Descending,
 		}
 	}
 }
@@ -134,6 +156,12 @@ impl Subscription {
 		self
 	}
 
+	/// Set which pending group the publisher sends first, returning `self` for chaining.
+	pub fn with_order(mut self, order: Order) -> Self {
+		self.order = order;
+		self
+	}
+
 	/// Request the whole groups in `groups`, replacing both [`Self::start`] and
 	/// [`Self::end`]. Returns `self` for chaining.
 	///
@@ -165,6 +193,10 @@ impl Subscription {
 			// would invent a bound neither asked for.
 			start: min_floored(self.start, combined.start),
 			end: max_unbounded(self.end, combined.end),
+			order: match (self.order, combined.order) {
+				(Order::Ascending, Order::Ascending) => Order::Ascending,
+				_ => Order::Descending,
+			},
 		};
 
 		if &merged != combined {
@@ -473,6 +505,26 @@ mod tests {
 		let later_group = Subscription::default().with_end(Position::after(6, 1));
 		let combined = combine(&[short, later_group]).unwrap();
 		assert_eq!(combined.end, Some(Position { group: 6, frame: 2 }));
+	}
+
+	#[test]
+	fn combined_order_prefers_descending() {
+		let ascending = Subscription::default().with_order(Order::Ascending);
+		let descending = Subscription::default();
+
+		assert_eq!(
+			combine(std::slice::from_ref(&ascending)).unwrap().order,
+			Order::Ascending
+		);
+		assert_eq!(
+			combine(&[ascending.clone(), ascending.clone()]).unwrap().order,
+			Order::Ascending
+		);
+		assert_eq!(
+			combine(&[ascending.clone(), descending.clone()]).unwrap().order,
+			Order::Descending
+		);
+		assert_eq!(combine(&[descending, ascending]).unwrap().order, Order::Descending);
 	}
 
 	#[test]

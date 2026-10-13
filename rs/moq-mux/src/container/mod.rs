@@ -15,6 +15,7 @@ use std::task::Poll;
 use bytes::Bytes;
 
 mod consumer;
+mod decode;
 mod group;
 mod producer;
 mod source;

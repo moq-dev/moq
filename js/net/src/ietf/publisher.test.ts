@@ -22,7 +22,7 @@ import { PublishDone } from "./publish.ts";
 import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
 import { RequestError, RequestOk } from "./request.ts";
-import { Subscribe, SubscribeOk, SubscribeUpdate, Unsubscribe } from "./subscribe.ts";
+import { GroupOrder, Subscribe, SubscribeOk, SubscribeUpdate, Unsubscribe } from "./subscribe.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
 import { TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
@@ -2171,6 +2171,34 @@ test("draft-20: an opt-out peer gets no track properties", async () => {
 		fx.close();
 		client.close();
 	}
+});
+
+/**
+ * Through draft-15 SUBSCRIBE_OK restates the order the subscription is served in; later
+ * drafts announce the publisher's default, newest first.
+ */
+test.each([
+	[Version.DRAFT_14, GroupOrder.Ascending],
+	[Version.DRAFT_15, GroupOrder.Ascending],
+	[Version.DRAFT_17, GroupOrder.Descending],
+] as const)("%s: SUBSCRIBE_OK announces the served order", async (version, announced) => {
+	const fx = fixture(version);
+	fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+
+	const { client, ok } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			groupOrder: "ascending",
+		}),
+	);
+	expect(ok.properties.groupOrder).toBe(announced);
+
+	fx.close();
+	client.close();
 });
 
 /**

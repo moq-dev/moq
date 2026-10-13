@@ -746,12 +746,9 @@ impl<S: Stream> Play<S> {
 		self.peer
 	}
 
-	/// Set how long the FLV muxer waits for a stalled group before skipping to a
-	/// newer one (the moq-level frame-drop latency). Defaults to
-	/// [`DEFAULT_MAX_DELAY`](crate::DEFAULT_MAX_DELAY). RTMP is unpaced (tags go out as
-	/// fast as the socket accepts them), so this bounds buffering, not the wire
-	/// rate. Pass [`Duration::ZERO`] to drop stale groups
-	/// aggressively.
+	/// Set the FLV release delay and stalled-group budget.
+	/// Defaults to [`DEFAULT_MAX_DELAY`](crate::DEFAULT_MAX_DELAY); zero releases
+	/// available frames immediately without deadline drops.
 	pub fn with_max_delay(mut self, latency: Duration) -> Self {
 		self.latency = latency;
 		self
@@ -838,7 +835,7 @@ impl<S: Stream> Play<S> {
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
 			.select(select);
 		let mut export = FlvExport::new(source, stream)
-			.with_max_delay(self.latency)
+			.with_delay(self.latency)
 			.with_multitrack(self.capabilities.multitrack);
 
 		// Resolve the catalog and codec headers before Play.Start, too. Otherwise a

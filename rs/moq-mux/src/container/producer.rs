@@ -524,11 +524,12 @@ where
 		let tail_end = marker_at.filter(|_| !self.reordered);
 		self.flush_buffer(tail_end)?;
 
-		// Tell the timeline where this group's content stops: the duration marker when we
-		// write one, else the caller's bound, else the furthest point we wrote. After the flush,
+		// Where this group's content stops: the duration marker when we write one, else the
+		// caller's bound, else the furthest point we wrote. The timeline hears it after the flush,
 		// so a group still wholly buffered has reported its first frame and opened a record.
+		let reached = marker_at.or(end).max(self.end);
 		if let Some(recorder) = self.recorder.as_mut()
-			&& let Some(end) = marker_at.or(end).max(self.end)
+			&& let Some(end) = reached
 		{
 			recorder.end(end);
 		}
@@ -540,9 +541,10 @@ where
 			if let Some(recorder) = self.recorder.as_mut() {
 				recorder.finish_group(group.sequence);
 			}
-		}
-		if let Some(end) = self.end {
-			self.raise_live_edge(end);
+			// Only a closed group reaches anything; a cut with none open names a point nothing reached.
+			if let Some(end) = reached {
+				self.raise_live_edge(end);
+			}
 		}
 		self.end = None;
 		self.last_duration = None;
@@ -1101,6 +1103,34 @@ mod tests {
 
 		assert_ne!(edge, stale, "the marker group is the live edge now");
 		assert_eq!(edge, stale.map(|s| s + 1));
+	}
+
+	/// The marker sits at the duration marker a cut wrote, not at the last frame below it,
+	/// which a consumer bounding groups by their reach would read as a rewind.
+	#[tokio::test]
+	async fn discontinuity_after_a_cut_starts_at_the_duration_marker() {
+		for (end, marker) in [(Some(25_000), 25_000), (None, 20_000)] {
+			let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+			let consumer = track.subscribe(replay());
+			let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
+
+			producer.write(frame(0, true)).unwrap();
+			assert_eq!(producer.live_edge(), None, "no group has ended yet");
+			producer.write(frame(10_000, false)).unwrap();
+			producer.cut(end.map(|us| Timestamp::from_micros(us).unwrap())).unwrap();
+			// With no group open, a cut's bound is a point nothing reached.
+			producer.cut(Some(Timestamp::from_micros(90_000).unwrap())).unwrap();
+			producer.discontinuity().unwrap();
+			producer.finish().unwrap();
+
+			let groups = collect_payloads(consumer).await;
+			assert_eq!(
+				groups[0].last(),
+				Some(&(marker, 0)),
+				"cut({end:?}) writes its duration marker"
+			);
+			assert_eq!(groups[1], vec![(marker, 0)], "cut({end:?}) then discontinuity");
+		}
 	}
 
 	/// Explicit keyframe closes the current group and starts a new one.

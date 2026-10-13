@@ -56,6 +56,10 @@ bench-audio:
 bench-runtime $ROUNDS="3" $WORKERS="":
     MOQ_BENCH_RUNTIME_ROUNDS="$ROUNDS" MOQ_BENCH_RUNTIME_WORKERS="$WORKERS" bench/run.sh --runtime
 
+# Attribute relay worker std mutex waits by stack, for each worker count.
+bench-lock $WORKLOAD="fanout" $WORKERS="1 4 16":
+    MOQ_BENCH_LOCK_WORKLOAD="$WORKLOAD" MOQ_BENCH_LOCK_WORKERS="$WORKERS" bench/run.sh --lock
+
 # Install repo-wide tooling. Per-language deps install on first check.
 install:
     bun install

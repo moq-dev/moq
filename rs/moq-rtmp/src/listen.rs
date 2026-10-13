@@ -45,10 +45,9 @@ pub struct Config {
 	/// namespace all of its streams (e.g. `live`).
 	pub prefix: PathOwned,
 
-	/// How long a play's FLV muxer waits for a stalled group before skipping to a
-	/// newer one (the moq-level frame-drop latency). Defaults to
-	/// [`DEFAULT_MAX_DELAY`](crate::DEFAULT_MAX_DELAY); set [`Duration::ZERO`]
-	/// to drop stale groups aggressively. Only affects egress (plays); ingest ignores it.
+	/// FLV release delay and stalled-group budget for plays.
+	/// Defaults to [`DEFAULT_MAX_DELAY`](crate::DEFAULT_MAX_DELAY); zero releases
+	/// available frames immediately without deadline drops. Ingest ignores it.
 	pub export_max_delay: Duration,
 
 	/// How long relays keep a non-latest group of an ingested media track fetchable, or

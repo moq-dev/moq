@@ -1,12 +1,13 @@
 /**
- * Stream prioritization for moq-lite, mirroring the Rust `lite::priority` queue.
+ * Group stream prioritization shared by the moq-lite and moq-transport publishers, mirroring
+ * the Rust `lite::priority` queue.
  *
  * @module
  */
 
 import type { Dispose } from "@moq/signals";
-import type { Writer } from "../stream.ts";
-import type * as track from "../track.ts";
+import type { Writer } from "./stream.ts";
+import type * as track from "./track.ts";
 
 // The transport compares send orders as a single number, so the two ranks are packed into
 // disjoint ranges: the track priority takes the high bits so it always dominates, and the
@@ -60,9 +61,9 @@ function clamp(value: number, max: number): number {
  * set changes or the subscription is updated.
  *
  * A group's rank is its position among the groups in flight, so which group goes first is
- * decided here rather than by arithmetic on sequence numbers. Newest first, always: under
- * congestion that sheds the backlog rather than the live edge, and a subscriber wanting
- * sequence order reorders locally rather than asking the wire for it.
+ * decided here rather than by arithmetic on sequence numbers. The subscription's
+ * {@link track.Order} picks the direction: newest first sheds a congested backlog rather than
+ * the live edge, oldest first drains it.
  *
  * One listener covers the whole subscription. A listener per group would instead pile up on
  * it, and a track that stalls with many groups open would trip the signals leak guard.
@@ -83,9 +84,10 @@ export class Priority {
 
 	/** The send order for a group at `sequence`, whether or not it has a stream yet. */
 	rank(sequence: number): number {
+		const subscription = this.#track.subscription.peek();
 		return sendOrder({
-			priority: this.#track.subscription.peek()?.priority ?? 0,
-			position: this.#position(sequence),
+			priority: subscription?.priority ?? 0,
+			position: this.#position(sequence, subscription?.order),
 		});
 	}
 
@@ -124,18 +126,19 @@ export class Priority {
 	// How many of this subscription's groups in flight should be sent before `sequence`.
 	// Sequences are unique within a subscription, so a group already registered never counts
 	// itself.
-	#position(sequence: number): number {
+	#position(sequence: number, order: track.Order = "descending"): number {
 		let ahead = 0;
 		for (const other of this.#streams.values()) {
-			if (other > sequence) ahead++;
+			if (order === "ascending" ? other < sequence : other > sequence) ahead++;
 		}
 		return ahead;
 	}
 
 	#rerank() {
-		const priority = this.#track.subscription.peek()?.priority ?? 0;
+		const subscription = this.#track.subscription.peek();
+		const priority = subscription?.priority ?? 0;
 		for (const [stream, sequence] of this.#streams) {
-			stream.setPriority(sendOrder({ priority, position: this.#position(sequence) }));
+			stream.setPriority(sendOrder({ priority, position: this.#position(sequence, subscription?.order) }));
 		}
 	}
 }

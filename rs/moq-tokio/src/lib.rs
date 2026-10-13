@@ -70,7 +70,7 @@ pub mod websocket;
 // new `pub` item in these modules doesn't silently join it.
 pub use client::Client;
 pub use connect::{Addrs, ConnectError};
-pub use connection::{Backoff, Connection, Redirect, Status};
+pub use connection::{Auth, Backoff, Connection, Redirect, Status};
 pub use error::{Error, Result};
 pub use log::{Log, RedactedUrl};
 #[cfg(feature = "_transport")]
