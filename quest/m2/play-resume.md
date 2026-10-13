@@ -15,10 +15,17 @@ it did before #5288.
 
 Playing them out needs a sequential timeline in `play`: queue the new group's
 frames behind the remaining pre-end pictures, then rebase the clock at the
-boundary. Decide in this quest whether audio follows the same queue or snaps
-to the new timeline.
+boundary. Queueing encoded frames is not enough when the decoder reorders: the
+declared end has to reach the decode loop so it flushes the pictures it still
+holds before decoding the resumed group, which today happens only when the
+track ends.
 
-Test with a declared end followed immediately by a new group: every pre-end
-picture is shown before the first new one.
+Open: whether audio follows the same queue or snaps to the new timeline. Audio
+owns the presentation anchor, so this sets the latency and sync policy; ask
+the maintainer before implementing.
+
+Test with a declared end followed immediately by a new group, using a decoder
+that holds pictures (depth above zero): every pre-end picture is shown before
+the first new one.
 
 Public API: none. Wire: none.
