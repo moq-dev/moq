@@ -68,8 +68,9 @@ dead host app. Both joined m0 (maintainer): fix the unset clock at its
 source, then unwind so a panic closes only its connection.
 
 Nightly on main (triaged 2026-10-13): two build breaks from 2026-10-11 get
-quests here. The nixpkgs bump broke the Linux zigbuild release builds, and
-fat LTO in the release profile broke the fuzz build. Audio quality has been
+quests here. The nixpkgs bump broke the Linux zigbuild release builds (its
+GCC 16 miscompiles lld 21, fixed upstream and waiting on `nixpkgs-unstable`),
+and fat LTO in the release profile broke the fuzz build. Audio quality has been
 red since it landed, against budgets recorded locally; re-measuring them on
 the runner moved here from Watch (maintainer, 2026-10-13). The other red jobs
 have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
@@ -83,6 +84,7 @@ have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
 - [Unset host clock](/quest/m0/wall-clock-omit.md) - a publisher whose wall clock reads before 2020 publishes without a catalog clock instead of panicking
 - [Panic isolation](/quest/m0/panic-isolation.md) - unwind, ignore lock poison, and supervise every task, so a panic closes only its connection or exits on a long-lived task
 - [Wire compat on main](/quest/m0/wire-compat-green.md) - the nightly released-wire step runs again: planned breaks re-measured against the new releases, and a released-API client for the released JS lanes
+- [nixpkgs ships the lld fix](/quest/m0/nixpkgs-lld-fix.md) - waiting on NixOS/nixpkgs#568680 to reach `nixpkgs-unstable`, which the release build fix bumps to
 - [Release builds link](/quest/m0/release-link.md) - the Linux zigbuild release binaries and moq-gst packages link again after the 2026-10-11 nixpkgs bump, so the next release cut can publish
 - [Fuzz builds under LTO](/quest/m0/fuzz-lto.md) - the nightly fuzz targets build again despite the release profile's fat LTO
 - [Audio quality budgets](/quest/m0/audio-quality-budgets.md) - the nightly Audio quality job grades against ceilings measured on its own runner, so a breach means a regression again
