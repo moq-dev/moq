@@ -58,13 +58,19 @@ epochless `audio` track that nothing subscribes until after the upgrade:
 - A subscribe through the pre-upgrade `cam` handle ends with `Unroutable`.
   With `RequestValidity::check` forced to pass, it succeeds.
 - An announce consumer opened on the subscriber origin before the upgrade
-  sees only the initial `Start`. No `Restart` arrives after the upgrade,
-  even though the old handle is already retired.
+  does get `Restart` for `cam`, but only after the origin's `update_hold`
+  (300 ms by default; `TableCursor::update` holds epochless restarts, and
+  `identical_reannounce_restarts_without_an_epoch` covers the event). A
+  first check within about 300 ms saw nothing; a 2 s wait saw the `Restart`.
+  Codex caught this on #5388's review.
 - A fresh `routed_broadcast("cam")` after the upgrade subscribes `audio`
   fine.
 
-So retirement works as #5294 intends. What's missing is the signal: the
-handles retire silently, and nothing tells a holder to follow.
+So the signal exists, but it arrives late: `RequestValidity` retires the old
+handle as soon as the new route wins, while its `Restart` waits out the hold.
+A consumer that asks for a track inside that window, which every interop
+subscriber does right after connecting, gets `Unroutable` before any
+`Restart` could reach it. And no interop consumer follows `Restart` anyway.
 
 Decided by the maintainer 2026-10-13 on #5388: an upgrade on an epochless
 route is a Restart. "No re-requests after Unroutable please, explicitly
@@ -74,19 +80,20 @@ routes instead signal Restart and need a fresh follower resolution"). The
 other options, carrying the route identity across the upgrade and not
 upgrading epochless sessions, were rejected.
 
-1. The upgrade signals Restart. Whenever the upgraded session's route
-   retires a handle resolved through the old session's epochless route, the
-   origin delivers `AnnounceEvent::Restart` for that prefix to every announce
-   consumer, before or atomically with the retirement. A holder must never
-   see `Unroutable` from a retired handle without a `Restart` it could have
-   followed. Find why the existing epochless-replacement Restart (the
-   `PendingUpdate::Restart` path in `model/origin.rs`) does not fire here.
-   The likely reason is that the replacement comes from the same `via`, so
-   it reads as an update in place. Fix it in the origin, not in moq-tokio, so
-   a relay hop gets the same signal when a publisher upgrades. The relay's
-   lite subscriber builds the same validity for a publisher's session; check
-   that hop too. Subscriptions already open stay sticky on the old session
-   until it drains, as today.
+1. Retirement and its Restart agree. A holder must never see `Unroutable`
+   from a retired handle before the `Restart` it could have followed has been
+   delivered. The origin already emits the `Restart`; align the two in the
+   origin, not in moq-tokio, so a relay hop behaves the same when a publisher
+   upgrades. The relay's lite subscriber builds the same validity for a
+   publisher's session; check that hop too. Recommended: a handle's
+   `RequestValidity` retires when its `Restart` is published, so the old
+   route keeps serving new requests through the hold. The old session is
+   still draining, so it can. The alternative is to skip the hold for a
+   replacement that retires handles, but the hold exists to absorb path
+   hunting after a withdrawal, so check what that would cost first. Don't
+   change same-`via` handling: an identical epochless re-announcement already
+   restarts. Subscriptions already open stay sticky on the old session until
+   it drains, as today.
 2. First-party consumers follow it. Each holds the announce stream for the
    path it resolved, and on `Restart` drops its handles and resolves afresh.
    On `Unroutable` it fails; it never retries a request. Audit and fix:
@@ -106,10 +113,12 @@ upgrading epochless sessions, were rejected.
    - The interop clients under `test/interop/clients`, where they resolve a
      broadcast themselves.
 3. Regression: land the reproduction above in `websocket_upgrades_to_quic`
-   or a sibling. It asserts that the announce consumer sees `Restart` for
-   `cam`, that following it (a fresh `routed_broadcast`) serves the new
-   track, and that the old handle still ends with `Unroutable` and is never
-   re-requested. Add the same case on an epoch route, where the old handle
+   or a sibling, with the clock under control rather than a wall-clock wait
+   for the hold. It asserts that a request through the old handle made
+   right after the upgrade, before the `Restart` is delivered, does not fail
+   with `Unroutable`. It also asserts that the announce consumer then sees
+   `Restart` for `cam`, and that following it (a fresh `routed_broadcast`)
+   serves the new track. Add the same case on an epoch route, where the old handle
    keeps working and no `Restart` is sent. Then run `just test interop --all`.
    The race can't be forced locally (a fast machine lets QUIC win), so the
    unit test carries the proof.
