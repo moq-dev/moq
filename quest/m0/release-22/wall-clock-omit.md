@@ -16,7 +16,9 @@ can take it in a patch.
 Decided 2026-10-13 (maintainer, from review on #5418): keep the public Rust
 API. `main` makes `Clock::wall()` return `Option`, which a patch can't
 (release is moq-mux 0.10.x). On `release`, store the mapping as a private
-`Option`, which `Producer::new` and `Listing::stamp` use internally. Keep
+`Option`, which `Producer::new` uses internally, and port `main`'s
+whole-clock comparison in `Listing::stamp` with its withheld-catalog test,
+since two wall-less clocks compare equal by mapping alone. Keep
 `wall() -> hang::catalog::Clock`, which panics only when a caller asks an
 unset host for its mapping; that host already crashed at construction
 before. Rejected: a breaking moq-mux 0.11.0 cut from `release`, which takes

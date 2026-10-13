@@ -32,7 +32,7 @@ Decided 2026-10-08:
 The backports shipped in moq-relay 0.17.3 (#5119) and `@moq/net` 0.4.3
 (refreshed 2026-10-12). Draft-22 interop on 2026-10-12 then found FETCH still
 refused on draft-20+ sessions. This README's remaining work: once the children
-land, cut the next 0.17 patch and `@moq/net` with them (`/bump`, then the
+land, cut the next 0.17 patch, `@moq/net`, and `@moq/publish` with them (`/bump`, then the
 release-plz PR), and tell the testers and the reporters of #5407 and #5413.
 
 Decided 2026-10-13: the same patch also carries two crash and availability

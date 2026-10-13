@@ -54,6 +54,9 @@ Decided 2026-10-13 (maintainer):
 - Regression test: a fake transport whose poll panics. Only that session
   closes, its broadcasts leave the origin, and a second session keeps
   working.
+- Regression test for the fatal side: inject a deterministic panic into one
+  named long-lived task (such as the cache governor) and assert
+  `Relay::run` returns with the panic instead of logging and continuing.
 - Update comments and docs that assume abort inline, including
   `doc/lib/cpp/index.md`.
 
