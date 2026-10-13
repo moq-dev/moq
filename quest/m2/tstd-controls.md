@@ -25,5 +25,5 @@ The only positive reference carries MPEG audio, but the export emits AAC.
 
 ## Related
 
-- [TS validation](/quest/m1/ts-reliability/validation.md) - reports supported model coverage and assumptions without claiming full conformance
+- [TS validation](/test/ts/README.md) - reports supported model coverage and assumptions without claiming full conformance
 - [PSI system buffer](/quest/m1/tstd/psi-runs.md) - owns the separate system-buffer assertion and regression

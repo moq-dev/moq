@@ -115,7 +115,7 @@ use std::{
 	collections::HashMap,
 	fmt,
 	sync::{
-		Arc, Mutex, Weak,
+		Arc, Mutex, PoisonError, Weak,
 		atomic::{AtomicU64, AtomicUsize, Ordering},
 	},
 };
@@ -862,7 +862,7 @@ impl BroadcastEntry {
 	fn tier(&self, tier: &Tier) -> Arc<TierCounters> {
 		self.tiers
 			.lock()
-			.expect("stats tiers poisoned")
+			.unwrap_or_else(PoisonError::into_inner)
 			.entry(tier.clone())
 			.or_default()
 			.clone()
@@ -986,7 +986,7 @@ impl Registry {
 		{
 			let entries = shared.entries.lock();
 			for entry in entries.values() {
-				let tiers = entry.tiers.lock().expect("stats tiers poisoned");
+				let tiers = entry.tiers.lock().unwrap_or_else(PoisonError::into_inner);
 				for (tier, counters) in tiers.iter() {
 					let totals = snap.traffic.entry(tier.clone()).or_default();
 					totals[Role::Publisher.idx()].add(counters.publisher.snapshot());
@@ -1029,7 +1029,7 @@ impl Registry {
 		// totals, and dropped, with no bump able to land after it.
 		shared.entries.lock().retain(|path, entry| {
 			let free = Arc::strong_count(entry) == 1;
-			let mut tiers = entry.tiers.lock().expect("stats tiers poisoned");
+			let mut tiers = entry.tiers.lock().unwrap_or_else(PoisonError::into_inner);
 			tiers.retain(|tier, counters| {
 				let closed = free && Arc::strong_count(counters) == 1;
 				let publisher = counters.publisher.snapshot();
@@ -1223,7 +1223,7 @@ impl Session {
 	/// Record this session's presence and later traffic under `tier` from now on.
 	pub fn set_tier(&self, tier: Tier) {
 		let Some(inner) = &self.inner else { return };
-		let mut current = inner.current.lock().expect("stats session poisoned");
+		let mut current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);
 		if current.tier == tier {
 			return;
 		}
@@ -1233,7 +1233,7 @@ impl Session {
 		}
 		if let Some(presence) = &presence {
 			// Slots still held count on the new tier, but not the old tier's history.
-			let mut held = inner.held.lock().expect("stats session poisoned");
+			let mut held = inner.held.lock().unwrap_or_else(PoisonError::into_inner);
 			held.retain(|(cap, live)| {
 				let Some(live) = live.upgrade() else { return false };
 				presence
@@ -1253,7 +1253,7 @@ impl Session {
 	/// Count `live` as what this session holds against `cap`, so a tier change carries it.
 	pub(crate) fn track_held(&self, cap: Cap, live: &Arc<AtomicUsize>) {
 		let Some(inner) = &self.inner else { return };
-		let mut held = inner.held.lock().expect("stats session poisoned");
+		let mut held = inner.held.lock().unwrap_or_else(PoisonError::into_inner);
 		// A context reused across reconnects registers again each time: drop the gone ones.
 		held.retain(|(_, live)| live.strong_count() > 0);
 		held.push((cap, Arc::downgrade(live)));
@@ -1263,7 +1263,7 @@ impl Session {
 	/// tier and root.
 	pub(crate) fn hold(&self, cap: Cap, held: u64) {
 		let Some(inner) = &self.inner else { return };
-		let current = inner.current.lock().expect("stats session poisoned");
+		let current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);
 		let Some(presence) = &current.presence else { return };
 		presence.peak(cap).fetch_max(held, Ordering::Relaxed);
 	}
@@ -1297,7 +1297,7 @@ impl Session {
 	/// The first bumps `broadcasts_started` there.
 	fn viewer_open(&self, path: &PathOwned, counters: &Arc<TierCounters>) {
 		let Some(inner) = &self.inner else { return };
-		let mut viewers = inner.viewers.lock().expect("stats viewers poisoned");
+		let mut viewers = inner.viewers.lock().unwrap_or_else(PoisonError::into_inner);
 		let viewer = viewers.entry(path.clone()).or_insert_with(|| {
 			counters.publisher.broadcasts_started.fetch_add(1, Ordering::Relaxed);
 			Viewer {
@@ -1312,7 +1312,7 @@ impl Session {
 	/// `broadcasts_ended` on the counters the first opened on.
 	fn viewer_close(&self, path: &PathOwned) {
 		let Some(inner) = &self.inner else { return };
-		let mut viewers = inner.viewers.lock().expect("stats viewers poisoned");
+		let mut viewers = inner.viewers.lock().unwrap_or_else(PoisonError::into_inner);
 		let Some(viewer) = viewers.get_mut(path) else { return };
 		viewer.subscriptions -= 1;
 		if viewer.subscriptions == 0
@@ -1333,7 +1333,7 @@ impl SessionInner {
 	/// generation they were resolved at.
 	fn resolve(&self, path: &PathOwned) -> Resolved {
 		let (generation, tier) = {
-			let current = self.current.lock().expect("stats session poisoned");
+			let current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
 			(self.generation.load(Ordering::Relaxed), current.tier.clone())
 		};
 		Resolved {
@@ -1467,7 +1467,7 @@ impl Clone for Scope {
 			resolved: self
 				.resolved
 				.as_ref()
-				.map(|r| Box::new(Mutex::new(r.lock().expect("stats scope poisoned").clone()))),
+				.map(|r| Box::new(Mutex::new(r.lock().unwrap_or_else(PoisonError::into_inner).clone()))),
 			side: self.side,
 			path: self.path.clone(),
 		}
@@ -1480,7 +1480,7 @@ impl Scope {
 	fn counters(&self) -> Option<Arc<TierCounters>> {
 		let inner = self.session.inner.as_ref()?;
 		let generation = inner.generation.load(Ordering::Acquire);
-		let mut resolved = self.resolved.as_ref()?.lock().expect("stats scope poisoned");
+		let mut resolved = self.resolved.as_ref()?.lock().unwrap_or_else(PoisonError::into_inner);
 		if resolved.generation != generation {
 			*resolved = inner.resolve(&self.path);
 		}

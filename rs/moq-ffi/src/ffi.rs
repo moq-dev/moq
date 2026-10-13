@@ -101,14 +101,19 @@ pub(crate) fn shutdown() {
 impl Runtime {
 	fn shutdown(&self) {
 		let runtime = self;
-		let mut owner = runtime.thread.lock().unwrap();
+		let mut owner = runtime.thread.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 		let Some(thread) = owner.take() else {
 			return;
 		};
 		// Before the thread stops, so no call awaited in place polls the runtime after it is gone.
-		let mut polls = runtime.polls.lock().unwrap();
+		let mut polls = runtime.polls.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 		polls.stopped = true;
-		drop(runtime.idle.wait_while(polls, |polls| polls.active > 0).unwrap());
+		drop(
+			runtime
+				.idle
+				.wait_while(polls, |polls| polls.active > 0)
+				.unwrap_or_else(std::sync::PoisonError::into_inner),
+		);
 		// Outside the lock: a waker may poll inline, which takes it.
 		runtime.stopped.send_replace(true);
 		let _ = thread.stop.send(());
@@ -140,7 +145,10 @@ struct Polling;
 impl Polling {
 	/// `None` once [`shutdown`] has begun.
 	fn start() -> Option<Self> {
-		let mut polls = runtime().polls.lock().unwrap();
+		let mut polls = runtime()
+			.polls
+			.lock()
+			.unwrap_or_else(std::sync::PoisonError::into_inner);
 		if polls.stopped {
 			return None;
 		}
@@ -153,7 +161,7 @@ impl Polling {
 impl Drop for Polling {
 	fn drop(&mut self) {
 		let runtime = runtime();
-		let mut polls = runtime.polls.lock().unwrap();
+		let mut polls = runtime.polls.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 		polls.active -= 1;
 		if polls.active == 0 {
 			runtime.idle.notify_all();

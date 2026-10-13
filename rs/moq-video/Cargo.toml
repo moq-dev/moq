@@ -186,8 +186,8 @@ cudarc = { workspace = true, features = ["nvrtc"], optional = true }
 # an honest error instead of treating tiled memory as rows.
 libc = { workspace = true, optional = true }
 # Probe for the NVIDIA driver libraries before calling cudarc / the NVENC SDK,
-# which panic (process-abort under release `panic = "abort"`) if their library is
-# absent. Lets a GPU-less host fall back to the next encoder instead of crashing.
+# which panic if their library is absent. Lets a GPU-less host fall back to the
+# next encoder instead of crashing.
 libloading = { workspace = true, optional = true }
 # Architecture-correct DMA_BUF_IOCTL_SYNC request values for CPU access.
 linux-raw-sys = { workspace = true, optional = true }

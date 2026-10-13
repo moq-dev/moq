@@ -1031,8 +1031,7 @@ mod tests {
 	/// long delay and has to shrink again when it shortens, and until sonora
 	/// 0.2.0 that shrink indexed a slice backwards and panicked
 	/// (dignifiedquire/sonora#14, `slice index starts at 13 but ends at 12`).
-	/// Cargo builds test binaries with unwinding, so here that surfaces as a
-	/// failure; a real binary takes the workspace's `panic = "abort"` and dies.
+	/// Here that surfaces as a test failure.
 	#[test]
 	fn survives_a_moving_echo_delay() {
 		let mut room = Room::new(MAX_DELAY - 4);

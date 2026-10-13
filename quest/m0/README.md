@@ -62,9 +62,9 @@ now retire only once it is deliverable. First-party consumers following it
 moved to m1 (maintainer, 2026-10-13), since the upgrade is being removed.
 
 Crashes (2026-10-13, #5407): a publisher on a host whose wall clock reads
-before 2020 panics, and `panic = "abort"` turns any library panic into a
-dead host app. Both joined m0 (maintainer). The unset clock is fixed at its
-source on `main`; unwinding remains, so a panic closes only its connection.
+before 2020 panics, and `panic = "abort"` turned any library panic into a
+dead host app. Both joined m0 (maintainer) and are fixed: the clock at its
+source, and unwinding so a panic closes only its connection.
 
 Nightly on main (triaged 2026-10-13): two build breaks from 2026-10-11 get
 quests here. The nixpkgs bump broke the Linux zigbuild release builds (its
@@ -79,7 +79,6 @@ have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
 
 - [CI cost and latency](/quest/m0/ci/README.md) - PRs stop queueing behind hosted runner caps: macOS and Windows move to the merge queue, caches move to R2, and setup is skipped when no work is selected
 - [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.5, then a patch with draft-20+ FETCH and the unset-clock and quiet-edge fixes
-- [Panic isolation](/quest/m0/panic-isolation.md) - unwind, ignore lock poison, and supervise every task, so a panic closes only its connection or exits on a long-lived task
 - [nixpkgs ships the lld fix](/quest/m0/nixpkgs-lld-fix.md) - waiting on NixOS/nixpkgs#568680 to reach `nixpkgs-unstable`, which the release build fix bumps to
 - [Release builds link](/quest/m0/release-link.md) - the Linux zigbuild release binaries and moq-gst packages link again after the 2026-10-11 nixpkgs bump, so the next release cut can publish
 - [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on moq-dev/web-transport#412 and #413 to merge and ship, which qmux credit bumps to

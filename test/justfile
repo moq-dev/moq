@@ -116,7 +116,7 @@ drill-sensitivity *args:
     ./drill/sensitivity.sh "$@"
 
 # Round-trips a PCR-paced TS through a relay and checks the subscriber's `export
-# ts` output with TSDuck plus a custom analyzer (the T-STD buffer model, PCR
+# ts` output with FFmpeg, TSDuck and a custom analyzer (the T-STD buffer model, PCR
 # spacing and byte schedule). Flags: `--analyze-only file.ts`
 # (skip the round-trip), `--strict` (fail on shape warnings), `--source file.ts`
 # (use a real capture), `--live` (grade PCR release timing and byte position off
@@ -144,7 +144,11 @@ ts-eit *args:
 # The T-STD model's controls: a broadcast capture must pass, and the same capture
 # delivered too slowly, too early, or in a burst must fail. Needs only TSDuck.
 ts-tstd:
-    ./ts/tstd-controls.py
+    bash ./ts/tstd-controls.sh
+
+# Prove FFmpeg decode/content and TSDuck structure/PCR assertions reject damaged TS.
+ts-controls:
+    bash ./ts/controls.sh
 
 # A JS viewer watching a live track through a relay that drains (SIGTERM, after
 # a stand-in for DNS stops pointing at it) migrates to a second relay behind the

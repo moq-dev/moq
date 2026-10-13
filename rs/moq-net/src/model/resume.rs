@@ -18,7 +18,7 @@
 //! sequence its [`track::Subscriber`] already handed out, the same record that keeps a
 //! direct reader from taking a re-created group twice.
 
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::task::{Poll, ready};
 
 use crate::{Datagram, Error, Result, StreamError, group, stats, track};
@@ -71,12 +71,15 @@ impl Producer {
 			route.copy = Some(copy);
 		}
 		let readers = {
-			let mut readers = self.readers.lock().expect("readers poisoned");
+			let mut readers = self.readers.lock().unwrap_or_else(PoisonError::into_inner);
 			readers.retain(|reader| reader.strong_count() > 0);
 			readers.clone()
 		};
 		for reader in readers.iter().filter_map(Weak::upgrade) {
-			reader.lock().expect("reader poisoned").sync(&kio::Waiter::noop());
+			reader
+				.lock()
+				.unwrap_or_else(PoisonError::into_inner)
+				.sync(&kio::Waiter::noop());
 		}
 	}
 
@@ -155,7 +158,7 @@ impl Consumer {
 		// Subscribed to the serving copy at once, so groups it has now are the reader's
 		// even if the route changes before the first read, and to each copy after.
 		{
-			let mut readers = self.readers.lock().expect("readers poisoned");
+			let mut readers = self.readers.lock().unwrap_or_else(PoisonError::into_inner);
 			// Sweep the readers that left once the list fills, so it tracks the live count.
 			if readers.len() == readers.capacity() {
 				readers.retain(|reader| reader.strong_count() > 0);
@@ -164,7 +167,10 @@ impl Consumer {
 			}
 			readers.push(Arc::downgrade(&reader));
 		}
-		reader.lock().expect("reader poisoned").sync(&kio::Waiter::noop());
+		reader
+			.lock()
+			.unwrap_or_else(PoisonError::into_inner)
+			.sync(&kio::Waiter::noop());
 		Subscriber { reader, subscription }
 	}
 
@@ -304,7 +310,7 @@ pub(crate) struct Subscriber {
 
 impl Subscriber {
 	fn reader(&self) -> MutexGuard<'_, Reader> {
-		self.reader.lock().expect("reader poisoned")
+		self.reader.lock().unwrap_or_else(PoisonError::into_inner)
 	}
 
 	/// The reader's preferences channel, shared with its [`track::Control`].
@@ -865,7 +871,7 @@ impl Recover {
 		// Subscribe the reader to a new route from its newest group, which is this one or
 		// later, so that route's subscription delivers the rest of it.
 		if let Some(reader) = self.reader.as_ref().and_then(Weak::upgrade) {
-			reader.lock().expect("reader poisoned").sync(waiter);
+			reader.lock().unwrap_or_else(PoisonError::into_inner).sync(waiter);
 		}
 		loop {
 			let (generation, serving, end, closed) = {
@@ -988,7 +994,7 @@ impl Recover {
 	/// to be late against.
 	pub(crate) fn poll_budget(&self, waiter: &kio::Waiter) -> Option<std::time::Duration> {
 		let reader = self.reader.as_ref()?.upgrade()?;
-		let mut reader = reader.lock().expect("reader poisoned");
+		let mut reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
 		// A held group or frame may be the only thing being polled. Mirror and watch
 		// preferences here too, before judging its budget against the live edge.
 		reader.sync(waiter);
@@ -1002,7 +1008,7 @@ impl Recover {
 		// A later switch must keep this copy subscribed while the recovered group
 		// still reads it, just like a group handed out from that copy directly.
 		self.lease = self.reader.as_ref().and_then(Weak::upgrade).and_then(|reader| {
-			let reader = reader.lock().expect("reader poisoned");
+			let reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
 			reader
 				.copies
 				.iter()

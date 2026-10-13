@@ -744,8 +744,7 @@ impl Drop for MoqSession {
 	fn drop(&mut self) {
 		let _guard = crate::ffi::enter();
 		// Close the transport while the runtime is entered. The backend spawns a
-		// lingering CLOSE task, which panics (aborting under panic=abort) if no reactor
-		// is in context. We can't leave this to the last `Session` clone's drop: clones
+		// lingering CLOSE task, which panics if no reactor is in context. We can't leave this to the last `Session` clone's drop: clones
 		// live in the `closed`/`status` tasks and the connection state, released after
 		// this guard, off-runtime. Close-once dedup then makes those trailing drops no-ops.
 		self.teardown(moq_net::Error::Cancel);
