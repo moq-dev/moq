@@ -20,7 +20,7 @@ Where it stands after #5385 (`rs/moq-net/src/ietf/publisher.rs`):
 - `run_fill` calls `stream.set_priority(priority)` with the raw subscriber
   priority, and so does the FETCH stream in `run_fetch_stream`.
 
-Recommended:
+The work:
 
 - A draft-20 fill joins its subscription's ranking as the group it fills,
   the way JS already ranks it (`js/net/src/ietf/publisher.ts`, `#runFill`).
@@ -30,7 +30,8 @@ Recommended:
   own request id, and its group, ordered by the FETCH's GROUP_ORDER. It
   follows priority changes the way a group stream's `Rank` does.
 - JS ranks its standalone FETCH stream through the same `Priority` ranking,
-  instead of opening it at the transport default, so both languages match.
+  instead of opening it at the transport default, so both languages match
+  (decided 2026-10-13 in #5400: in scope, for parity).
 - Keep each stream ranked until it settles, not just until its FIN is
   written (the #5385 review fix for JS group streams).
 - Tests, on mock time: a fill and a FETCH stream ranked against open group

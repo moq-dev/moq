@@ -10,7 +10,8 @@ aggregate once, at SUBSCRIBE (`rs/moq-net/src/ietf/subscriber.rs`,
 `js/net/src/ietf/subscriber.ts`), and never updates the request.
 
 Group order is not part of this. The upstream order stays whatever SUBSCRIBE
-asked for.
+asked for (decided 2026-10-13 in #5400: updates carry priority only, with no
+re-subscribe and no forced Descending upstream).
 
 ## Plan
 
