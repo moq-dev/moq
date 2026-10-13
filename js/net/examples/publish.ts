@@ -11,8 +11,8 @@ async function main() {
 	const broadcast = origin.createBroadcast(Moq.Path.from("my-broadcast"));
 	broadcast.announce();
 
-	// Insert the "chat" track up front. A subscriber is served directly from this
-	// track, no requested() round-trip needed. Mirrors the Rust createTrack/insertTrack.
+	// Create the "chat" track up front. A subscriber is served directly from this
+	// track, no requested() round-trip needed. Mirrors Rust's create_track.
 	// Each frame is stamped with the time it was written, so the track declares a timescale.
 	void publishTrack(broadcast.createTrack("chat", { timescale: Moq.Time.Timescale.MILLI }));
 	console.log("Published broadcast: my-broadcast");

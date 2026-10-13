@@ -92,24 +92,20 @@ test("an origin handle resolves a local publish with no session attached", async
 	const held = watch.active.peek();
 	expect(held).toBeDefined();
 
-	// A republish is another publisher instance: the request ends rather than moving onto it,
-	// and a fresh request resolves the new broadcast.
+	// The same request moves to the new publisher instance.
 	const second = publish(origin, path);
 	await settle();
-	expect(watch.active.peek()).toBeUndefined();
-	expect(watch.closed.peek()).toBeInstanceOf(Error);
-	const fresh = origin.request(path, { announced: true });
-	expect(fresh.active.peek()).toBeDefined();
-	expect(fresh.active.peek()).not.toBe(held);
+	expect(watch.active.peek()).toBeDefined();
+	expect(watch.active.peek()).not.toBe(held);
+	expect(watch.closed.peek()).toBeUndefined();
 
-	// Unpublishing ends that one too.
+	// Unpublishing clears active while keeping the request open for another start.
 	second.close();
 	first.close();
 	await settle();
-	expect(fresh.active.peek()).toBeUndefined();
-	expect(fresh.closed.peek()).toBeInstanceOf(Error);
+	expect(watch.active.peek()).toBeUndefined();
+	expect(watch.closed.peek()).toBeUndefined();
 
-	fresh.close();
 	watch.close();
 	origin.close();
 });
