@@ -747,6 +747,7 @@ fn spawn_export(
 			stitch: stdout.stitch,
 			fragment_duration: stdout.fragment_duration,
 			mux_rate: stdout.mux_rate,
+			passthrough: stdout.passthrough,
 			catalog: export.catalog_format,
 			select: export.select,
 		};

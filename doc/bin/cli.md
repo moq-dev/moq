@@ -79,7 +79,7 @@ logs feed health (stalled streams, TR 101 290 errors) without changing what it
 publishes. `--passthrough` publishes the multiplex whole instead, every packet
 in order on one [`m2ts`](/concept/hang#transport-streams) track with every
 program aboard, for what demultiplexing cannot carry, such as a scrambled
-service; `export ts` does not read it. FLV covers H.264 + AAC.
+service; `export ts --passthrough` writes it back out. FLV covers H.264 + AAC.
 
 ## Export
 
@@ -318,6 +318,15 @@ decode order, so two exporters of one broadcast emit the same order. A frame
 arriving after its deadline is dropped, and video resumes at its next
 keyframe. The output's PCR follows the source's clock within what ISO/IEC
 13818-1 allows. `--delay 0` writes frames in arrival order and drops nothing.
+
+`export ts --passthrough` reads the track an `import ts --passthrough` published
+and writes its packets back out unchanged, from its first group on, each run
+between two PCRs `--delay` after the first one's time on the source clock. The
+output is exactly as conformant as the source, and two exporters emit the same
+bytes. A run that arrives after its deadline is dropped and counted, leaving a
+continuity error, and the rest carry on. It takes neither `--linger`,
+`--stitch` nor `--mux-rate`. Only the hang catalog names the track, so an
+`.msf` broadcast needs `--catalog-format hang`.
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
 long for the same publisher instance to come back, and carries on with the same
