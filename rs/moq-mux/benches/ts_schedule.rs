@@ -36,6 +36,7 @@ fn admission(c: &mut Criterion) {
 							schedule::Buffer {
 								rate: 2_000_000,
 								size: Some(1_000_000),
+								reach: Duration::from_secs(1),
 							},
 						);
 					}

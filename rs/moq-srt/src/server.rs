@@ -184,8 +184,8 @@ pub struct Server {
 	_listener: SrtListener,
 	incoming: SrtIncoming,
 	local_addr: SocketAddr,
-	/// The negotiated SRT receive latency, reused as the egress skip threshold on
-	/// each [`Subscribe`] (see [`crate::ts::Subscriber::new`]).
+	/// The negotiated SRT receive latency, reused as the egress delay (at least a
+	/// second) on each [`Subscribe`] (see [`crate::ts::Subscriber::new`]).
 	latency: Duration,
 }
 
@@ -193,8 +193,8 @@ impl Server {
 	/// Bind an SRT listener on `addr` (SRT has no well-known port; 9000 is common).
 	///
 	/// `latency` is the SRT receive latency, negotiated at handshake time; pass
-	/// `None` for a sensible default (500ms). It doubles as the egress skip
-	/// threshold for [`Subscribe`] requests.
+	/// `None` for a sensible default (500ms). It doubles as the egress delay for
+	/// [`Subscribe`] requests, but no less than a second.
 	pub async fn bind(addr: SocketAddr, latency: impl Into<Option<Duration>>) -> Result<Self> {
 		let latency = latency.into().unwrap_or(DEFAULT_LATENCY);
 
@@ -276,7 +276,7 @@ struct Pending {
 	/// fields out of it (e.g. a token in `u=` or a custom key).
 	stream_id: Option<String>,
 	peer: SocketAddr,
-	/// The SRT receive latency, reused as the egress skip threshold on a subscribe.
+	/// The SRT receive latency, reused as the egress delay (at least a second) on a subscribe.
 	latency: Duration,
 	/// Retention declared on the media tracks an ingest mints, or `None` for hang's own
 	/// default. Override with [`Publish::with_max_age`].

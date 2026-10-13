@@ -35,7 +35,7 @@ just test ts --pair             # two exporters of one broadcast, grade table an
 just test ts --open-gop         # open-GOP clip; its leading pictures must survive
 just test ts --hrd              # 1080p video filling a broadcast-sized 9 Mbit CPB
 just test ts --headroom         # the same with four audio PIDs, muxed above the video's Rx
-just test ts --delay 1s         # pass the exporter's --delay
+just test ts --delay 2s         # pass the exporter's --delay
 ```
 
 `--live` swaps the analyzer, not the rig: the same round-trip runs, but the
@@ -288,7 +288,7 @@ the total and reports the rate over the tail of the sample beside it. A sender
 that buffers builds a standing lag once and then runs at the media rate: the lag
 is a constant offset no receiver can see, and it cannot grow past the latency
 budget the sender is allowed to hold, so set `--drift-ms` to that budget
-(`export ts --delay`, 500 ms by default). A pipe that is not running at the
+(`export ts --delay`, 1 s by default). A pipe that is not running at the
 media rate never stops accumulating and so breaches any fixed bound given a long
 enough sample. The tail rate is what tells the two apart, and it needs a sample
 longer than the lag takes to build: measured against the grid-sliced exporter,
@@ -364,7 +364,7 @@ outgrow a 6 kB slot, so the exporter has to spread each over the slots before it
 DTS; CI runs that too (`just test ts --bitrate 2000000`). `--hrd` goes further: a
 1080p encode with a 9 Mbit NAL HRD kept near full by noise, the shape of a
 contribution encoder's output, which sends pictures most of a second ahead of their
-decode time and loads the decoder buffer past 60 % at the default delay (the recipe
+decode time and fills the decoder buffer to its declared size at the default delay (the recipe
 moq-dev/moq#4645 graded with; CI runs it too). Every other clip muxes at or below the
 video's Rx, where its transport buffer cannot fill. `--headroom` puts that video
 beside three MPEG-1 Layer II PIDs and an AC-3 one in a 12.5 Mb/s multiplex, above

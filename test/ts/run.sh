@@ -21,7 +21,7 @@
 #   ./run.sh --open-gop            # open-GOP clip; its leading pictures must survive
 #   ./run.sh --hrd                 # 1080p video filling a broadcast-sized 9 Mbit CPB
 #   ./run.sh --headroom            # the same with four audio PIDs, muxed above the video's Rx
-#   ./run.sh --delay 1s            # pass the exporter's --delay
+#   ./run.sh --delay 2s            # pass the exporter's --delay
 
 # `--live` swaps the analyzer, not the rig. compliance.py grades a captured file
 # on the stream's own PCR clock, which is the right basis for the IRD model it

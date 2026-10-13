@@ -106,8 +106,11 @@ Other video waits for its first keyframe.
 MPEG-TS export pads to the source's constant mux rate when the catalog
 recorded one, or to `--mux-rate`, on a constant-rate schedule an IRD or groomer
 can lock to. Each frame goes out as early as the receiver's buffers admit, up
-to `--delay` ahead of its decode time on the output's clock, so the output trails the source by twice
-the delay; a frame that cannot arrive in time at the rate fails the export.
+to `--delay` ahead of its decode time and no further than its decoder buffer
+holds. That send-ahead comes out of the delay, so the output trails a TS source
+by `--delay`. A frame that cannot arrive in time at the rate fails the export,
+as does video whose HRD declares a longer buffer delay than `--delay`; the
+error names the `--delay` it needs.
 
 ## Play
 
@@ -312,12 +315,15 @@ before *this* consumer skips it. Raising the first never delays playback.
 At stdin EOF, `import` keeps the finished broadcast up for its max-age, so a
 subscriber still catching up can drain it; Ctrl-C ends that early.
 
-`export ts` takes `--delay` (default 500 ms) instead, like an SRT receiver's
-latency: each frame is muxed that long after its decode time, all tracks in
-decode order, so two exporters of one broadcast emit the same order. A frame
-arriving after its deadline is dropped, and video resumes at its next
-keyframe. The output's PCR follows the source's clock within what ISO/IEC
-13818-1 allows. `--delay 0` writes frames in arrival order and drops nothing.
+`export ts` takes `--delay` (default 1 s) instead, like an SRT receiver's
+latency: the output runs that far behind the source, all tracks in one order,
+so two exporters of one broadcast emit the same order. The send-ahead that fills
+a receiver's buffers comes out of the same budget; 1 s fits a broadcast-sized
+CPB. A source that sends no track ahead of its decode time, as RTMP and browser
+publishers do, trails by the video's send-ahead on top. A frame arriving after
+its deadline is dropped, and video resumes at its next keyframe. The output's
+PCR follows the source's clock within what ISO/IEC 13818-1 allows.
+`--delay 0` writes frames in arrival order and drops nothing.
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
 long for the same publisher instance to come back, and carries on with the same

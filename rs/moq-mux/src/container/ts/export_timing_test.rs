@@ -880,12 +880,13 @@ async fn a_joiner_keeps_the_system_clock_in_tolerance() {
 }
 
 /// A receiver that joins mid-group runs at the delay from its first output: every slot goes
-/// out a fixed lag after the source sent its media (the delay before release, and the delay
-/// the schedule sends ahead of the decode time), rather than that plus how old the group it
-/// joined on was.
+/// out the delay after a TS source sent it, rather than that plus how old the group it joined
+/// on was, or plus the send-ahead again. The source sends its video as far ahead as the
+/// export does (the level's CPB reaches past the delay, so the whole delay) and its audio at
+/// its decode time, which is the source's clock.
 #[tokio::test(start_paused = true)]
 async fn a_joiner_runs_at_the_delay_from_its_first_output() {
-	let mut live = Live::new(1.0, 0).await;
+	let mut live = Live::new(1.0, DELAY.as_micros() as i64).await;
 	live.run(JOIN, &mut [], |_| false).await;
 	let mut leg = live.join(Duration::ZERO).await;
 	live.run(JOIN + 10_000_000 / VIDEO_US, &mut [&mut leg], |_| false).await;
@@ -894,13 +895,16 @@ async fn a_joiner_runs_at_the_delay_from_its_first_output() {
 	let held: Vec<Duration> = leg
 		.out
 		.iter()
-		.map(|(sent, frame)| sent.saturating_duration_since(live.sent(frame.timestamp.as_micros() as u64)))
+		.map(|(sent, frame)| {
+			let media = frame.timestamp.as_micros() as u64;
+			sent.saturating_duration_since(live.send_times(media, media).1)
+		})
 		.collect();
 	assert!(held.len() > 100, "too little output to judge: {}", held.len());
 	let slot = Duration::from_millis(SLOT_MS as u64);
 	for (i, held) in held.iter().enumerate() {
 		assert!(
-			*held >= 2 * DELAY && *held <= 2 * DELAY + 2 * slot,
+			*held >= DELAY && *held <= DELAY + 2 * slot,
 			"slot {i} went out {held:?} after the source sent it, against a {DELAY:?} delay"
 		);
 	}

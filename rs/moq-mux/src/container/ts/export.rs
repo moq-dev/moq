@@ -9,9 +9,9 @@
 //! position agrees with the values, and a pacing caller releases each slot at
 //! the instant it asserts. Video is carried as Annex-B, audio as ADTS AAC.
 //!
-//! Every frame is muxed a fixed delay after its decode time ([`Export::with_delay`]),
-//! so tracks interleave in `(DTS, PID)` order whatever the arrival skew between them,
-//! and the output keeps the source's pace.
+//! Every frame is muxed a fixed delay after its release time, its decode time less its
+//! send-ahead ([`Export::with_delay`]), so tracks interleave in one order whatever the
+//! arrival skew between them, and the output keeps the source's pace.
 //!
 //! Video flows through `ExportSource`, which normalizes every H.264/H.265
 //! source to length-prefixed NALU plus a resolved avcC/hvcC (parsing in-band
@@ -241,6 +241,8 @@ struct Track {
 	buffer: Option<Buffer>,
 	/// The AC-3 sync frame a passed-through PES left unfinished, for the next PES to complete.
 	ac3_carry: Option<Ac3Carry>,
+	/// The last frame's decode time and its jitter buffer key ([`Self::release_key`]).
+	released: Option<(Timestamp, Timestamp)>,
 }
 
 impl Track {
@@ -260,6 +262,7 @@ impl Track {
 			timing: Timing::default(),
 			buffer: None,
 			ac3_carry: None,
+			released: None,
 		}
 	}
 
@@ -370,6 +373,39 @@ impl Track {
 		Duration::from_nanos(TsPacket::SIZE as u64 * 8 * 1_000_000_000 / rate.max(1))
 	}
 
+	/// How far ahead of its decode time the track's units may go out under `delay`: as far
+	/// as [`schedule::ahead`] lets them, and nothing without a delay.
+	fn ahead(&self, delay: Duration) -> Duration {
+		if delay.is_zero() {
+			return Duration::ZERO;
+		}
+		let slots = schedule::ahead(self.buffer().as_ref(), schedule::slot(delay.as_nanos()));
+		PCR_INTERVAL * u32::try_from(slots).unwrap_or(u32::MAX)
+	}
+
+	/// Where the jitter buffer orders a frame decoding at `decode` under `delay`: at its release
+	/// time, [`Self::ahead`] before its decode time, so it reaches the schedule as the first slot
+	/// it may ride is laid, and a slot goes out the delay after the source's clock rather than a
+	/// delay later still. Keys run a delay past release times, which no send-ahead exceeds, so a
+	/// frame near the start of the timeline is not cut short of its send-ahead. The clock anchors
+	/// on the track sent latest against these keys, so every track keeps the whole delay to
+	/// arrive in. A send-ahead that grew (a new SPS declaring a larger CPB) releases no frame
+	/// before the one ahead of it.
+	fn release_key(&mut self, decode: Timestamp, delay: Duration) -> anyhow::Result<Timestamp> {
+		let lead = delay.saturating_sub(self.ahead(delay));
+		let key = Duration::from(decode)
+			.checked_add(lead)
+			.context("MPEG-TS decode time past the end of the timeline")?;
+		let mut key = Timestamp::try_from(key)?;
+		if let Some((last, previous)) = self.released
+			&& decode >= last
+		{
+			key = key.max(previous);
+		}
+		self.released = Some((decode, key));
+		Ok(key)
+	}
+
 	/// Queue every held video frame whose DTS is settled, or all of them when `flush`.
 	///
 	/// A held frame is ready no earlier than the frame read since the source was last found
@@ -410,10 +446,18 @@ impl Track {
 		let decode = dts
 			.and_then(|ticks| Timestamp::from_scale(ticks, 90_000).ok())
 			.unwrap_or(frame.timestamp);
+		let key = self.release_key(decode, jitter.delay())?;
+		// Replaying anchors on the first frame, and the tracks arrive together rather than each
+		// sent ahead by its send-ahead: judged as arriving that much earlier, as a live source
+		// sends it, every track's first frames are on the clock whichever anchors it.
+		let ahead = match jitter.replaying() {
+			true => (Duration::from(decode) + jitter.delay()).saturating_sub(Duration::from(key)),
+			false => Duration::ZERO,
+		};
 		let arrival = Arrival {
-			arrived,
-			read,
-			decode,
+			arrived: arrived - ahead,
+			read: read - ahead,
+			decode: key,
 			restart,
 			skip,
 			sync: frame.keyframe || !matches!(self.kind, Kind::Video(_)),
@@ -469,7 +513,8 @@ impl Timing {
 
 	/// The receiver's buffers (H.222.0 2.14.3.1, 2.17.2): EB is the HRD's CPB, else the
 	/// level's, and packets go no faster than the slower of the transport buffer's Rx and the
-	/// leak from MB into EB, so neither MB nor TB fills.
+	/// leak from MB into EB, so neither MB nor TB fills. EB reaches the HRD's buffer delay
+	/// ahead, else what the level's CPB holds at its top rate.
 	fn buffer(&self) -> Option<Buffer> {
 		let level = self.level?;
 		let (rate, cpb) = match self.hrd {
@@ -479,7 +524,14 @@ impl Timing {
 		Some(Buffer {
 			rate: rate.min(level.leak),
 			size: Some(usize::try_from(cpb / 8).unwrap_or(usize::MAX)),
+			reach: self.buffer_delay().unwrap_or_else(|| fill(level.cpb, level.leak)),
 		})
+	}
+
+	/// How long the HRD's CPB takes to fill at its rate: how far ahead of its decode time the
+	/// source may send a picture, so the export has to as well.
+	fn buffer_delay(&self) -> Option<Duration> {
+		self.hrd.map(|hrd| fill(hrd.cpb_size, hrd.bit_rate))
 	}
 
 	/// The least reorder delay and lookahead the SPS declares, in ticks, so two exporters agree
@@ -884,21 +936,31 @@ impl<E: catalog::Catalog> Export<E> {
 		self
 	}
 
-	/// Mux each frame this long after its decode time, like an SRT receiver's TSBPD.
+	/// Mux each frame this long after its release time, like an SRT receiver's TSBPD: its
+	/// decode time less its send-ahead.
+	///
+	/// The send-ahead comes out of the same budget. A frame may go out up to the delay
+	/// ahead of its decode time, as far as its PID's decoder buffer holds and as early as the
+	/// receiver's buffers admit, so a heavy passage rides the slots before it. Its release
+	/// time is that far before its decode time, so it is muxed just as the first slot it may
+	/// ride is laid, and each slot goes out the delay after its own time on the source's
+	/// clock rather than a delay later still.
 	///
 	/// The clock is acquired before anything goes out: frames are held until a track starts
-	/// a new group, or for the delay at most, and the freshest of them sets the clock, so a
-	/// joiner runs at the delay from its first output. The output then keeps the source's
-	/// pace and muxes every track in `(DTS, PID)` order whatever the arrival skew between
-	/// them. A frame that arrives after its deadline is dropped, and a video track that
-	/// dropped one resumes at its next keyframe. A stalled group is skipped once it falls
-	/// half the delay behind the newest content (see [`Consumer`](crate::container::Consumer)),
-	/// so the group after it still arrives with the other half to spare.
+	/// a new group, or for the delay at most, and the freshest of them against its release
+	/// time sets the clock, so a joiner runs at the delay from its first output and every
+	/// frame has the whole delay to arrive in. A source that sends its video its send-ahead
+	/// early, as a TS mux does, is trailed by the delay; one that sends every track at its
+	/// decode time, by the delay and the video's send-ahead. The output then keeps the
+	/// source's pace and muxes every track in `(release time, PID)` order whatever the
+	/// arrival skew between them. A frame that arrives after its deadline is dropped, and a
+	/// video track that dropped one resumes at its next keyframe. A stalled group is skipped
+	/// once it falls half the delay behind the newest content (see
+	/// [`Consumer`](crate::container::Consumer)), so the group after it still arrives with
+	/// the other half to spare.
 	///
-	/// It is also how far ahead of its decode time a frame may go out, as early as the
-	/// receiver's buffers for its PID admit, so a heavy passage rides the slots before it
-	/// and the output trails the source by twice the delay. With a multiplex rate, a frame
-	/// that cannot arrive by its decode time fails the export. Defaults to
+	/// With a multiplex rate, a frame that cannot arrive by its decode time fails the export,
+	/// as does video whose HRD declares a buffer delay past the delay. Defaults to
 	/// [`Duration::ZERO`], which holds nothing and sends each frame by its decode time.
 	pub fn with_delay(mut self, delay: Duration) -> Self {
 		self.delay = delay;
@@ -1983,6 +2045,19 @@ impl<E: catalog::Catalog> Export<E> {
 		if let Some(buffer) = track.buffer() {
 			self.schedule.set_buffer(pid, buffer);
 		}
+		// A padded output cannot burst a picture late, so a CPB that the source may fill to
+		// its declared buffer delay needs that much send-ahead, all of it out of the delay.
+		if self.mux_rate.is_some()
+			&& let Some(needs) = track.timing.buffer_delay()
+		{
+			let slots = schedule::slot(needs.as_nanos());
+			anyhow::ensure!(
+				slots <= schedule::slot(self.delay.as_nanos()),
+				"MPEG-TS video on PID {pid} declares a {needs:.3?} decoder buffer delay (its HRD's CPB over its bit rate), past what a {:?} delay sends it ahead; raise the delay to {:?}",
+				self.delay,
+				PCR_INTERVAL * u32::try_from(slots).unwrap_or(u32::MAX),
+			);
+		}
 		let by = decode.as_nanos().saturating_sub(track.drain().as_nanos());
 		self.schedule.push(
 			pid,
@@ -2004,13 +2079,15 @@ impl<E: catalog::Catalog> Export<E> {
 	/// When the next grid slot is due on the jitter buffer's clock: once every frame that could
 	/// ride it has gone out of the jitter buffer, so its contents depend on the frames alone,
 	/// never on when they arrived, and the output keeps the clock's pace while media is queued
-	/// or still to decode. `None` without a delay, where frames settle the slots instead.
+	/// (in the schedule or still in the jitter buffer) or still to decode. `None` without a
+	/// delay, where frames settle the slots instead.
 	fn slot_due(&self) -> Option<(u128, web_async::time::Instant)> {
-		if self.delay.is_zero() || self.psi.is_none() || self.schedule.is_empty() {
+		if self.delay.is_zero() || self.psi.is_none() || (self.schedule.is_empty() && self.jitter.is_empty()) {
 			return None;
 		}
 		let (_, known) = self.schedule.upcoming()?;
-		let settled = known * PCR_INTERVAL.as_nanos() + self.max_drain().as_nanos();
+		// On the jitter buffer's keys, which run a delay past release times ([`Track::release_key`]).
+		let settled = known * PCR_INTERVAL.as_nanos() + self.max_drain().as_nanos() + self.delay.as_nanos();
 		let settled = Timestamp::from_micros(u64::try_from(settled / 1_000).ok()?).ok()?;
 		Some((known, self.jitter.at(settled)?))
 	}
@@ -2501,8 +2578,16 @@ fn video_level(config: &VideoConfig, name: &str) -> Level {
 	})
 }
 
+/// How long `bits` take to arrive at `rate` bits per second: how far ahead of its decode
+/// time a decoder buffer that size, filling at that rate, holds a unit.
+fn fill(bits: u64, rate: u64) -> Duration {
+	let nanos = u128::from(bits) * 1_000_000_000 / u128::from(rate.max(1));
+	Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
+}
+
 /// An audio stream's buffers in a receiver (H.222.0 2.4.2.3): by channel count for ADTS
-/// AAC (and Opus, which borrows them), 2 Mb/s and the codec's main buffer for the rest.
+/// AAC (and Opus, which borrows them), 2 Mb/s and the codec's main buffer for the rest. B
+/// reaches as far ahead as it takes to fill at Rx.
 fn audio_buffer(config: &AudioConfig, kind: &Kind) -> Buffer {
 	let by_channels = || match config.channel_count {
 		0..=2 => (2_000_000, 3_584),
@@ -2518,7 +2603,11 @@ fn audio_buffer(config: &AudioConfig, kind: &Kind) -> Buffer {
 		Kind::Eac3 => (2_000_000, 12_896),
 		_ => (2_000_000, 3_584),
 	};
-	Buffer { rate, size: Some(size) }
+	Buffer {
+		rate,
+		size: Some(size),
+		reach: fill(size as u64 * 8, rate),
+	}
 }
 
 /// The DVB AC-3 descriptor's tag (ETSI EN 300 468 6.2.1), marking AC-3 as private data.
@@ -2543,10 +2632,12 @@ fn verbatim_buffer(kind: &Kind, descriptors: &[catalog::Descriptor]) -> Option<B
 		AC3_DESCRIPTOR => Some(Buffer {
 			rate: 2_000_000,
 			size: Some(5_696),
+			reach: fill(5_696 * 8, 2_000_000),
 		}),
 		TELETEXT_DESCRIPTOR => Some(Buffer {
 			rate: 6_750_000,
 			size: None,
+			reach: Duration::ZERO,
 		}),
 		_ => None,
 	})
@@ -3113,6 +3204,7 @@ mod tests {
 			Some(Buffer {
 				rate: 6_750_000,
 				size: None,
+				reach: Duration::ZERO,
 			})
 		);
 		assert_eq!(verbatim_buffer(&kind, &[descriptor(0x0a)]), None);

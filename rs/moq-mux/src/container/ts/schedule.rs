@@ -37,6 +37,16 @@ pub(super) fn slot(nanos: u128) -> u128 {
 	nanos / PCR_INTERVAL.as_nanos()
 }
 
+/// How many slots ahead of its due slot a unit on a PID with `buffer` may go out, within a
+/// `window` of slots: as far as its decoder buffer reaches, or only the slot before its own
+/// where no decoder buffer bounds it.
+pub(super) fn ahead(buffer: Option<&Buffer>, window: u128) -> u128 {
+	match buffer {
+		Some(buffer) if buffer.size.is_some() => window.min(slot(buffer.reach.as_nanos())),
+		_ => 1,
+	}
+}
+
 /// One slot in system clock ticks.
 const SLOT_TICKS: u128 = PCR_INTERVAL.as_nanos() * SYSTEM_CLOCK / 1_000_000_000;
 
@@ -70,6 +80,9 @@ pub(super) struct Buffer {
 	/// first packet until it decodes. `None` bounds nothing, so the PID's units go out only
 	/// in the slot before their own.
 	pub size: Option<usize>,
+	/// How far ahead of its decode time the decoder buffer holds a unit: its size over the
+	/// rate it fills at. Sending further ahead only adds latency.
+	pub reach: Duration,
 }
 
 impl Buffer {
@@ -77,6 +90,7 @@ impl Buffer {
 	pub const SYSTEM: Self = Self {
 		rate: 1_000_000,
 		size: None,
+		reach: Duration::ZERO,
 	};
 
 	/// The packets one slot may carry on the PID: what its transport buffer passes on within
@@ -381,9 +395,11 @@ impl Slot {
 ///
 /// Each slot's packets go earliest deadline first across PIDs, each PID in its own order, and
 /// each unit as soon as its PID's buffers in a receiver admit it. Padded output checks
-/// transport occupancy and decoder removal at exact packet positions. A unit may go out up to the `window` before
-/// its due slot, which keeps that far ahead of a heavy passage, so the output trails the
-/// decode times by the window.
+/// transport occupancy and decoder removal at exact packet positions. A unit may go out as far
+/// ahead of its due slot as its PID's decoder buffer reaches, within the `window`, which keeps
+/// that far ahead of a heavy passage ([`ahead`]). A slot is laid once no unit still to be
+/// pushed could go out in it, so a caller that pushes each unit that far ahead of its due slot
+/// has the output trail the decode times by no more than the window.
 ///
 /// With a multiplex rate each slot carries exactly what the rate allows, padded with null
 /// packets, and a unit that is not complete by its exact deadline fails the export rather than
@@ -395,7 +411,7 @@ impl Slot {
 pub(super) struct Schedule {
 	/// In push order, which is each PID's decode order.
 	units: VecDeque<Unit>,
-	/// Slots before its due slot a unit may go out: the export's delay.
+	/// Slots before its due slot a unit may go out at most: the export's delay.
 	window: u128,
 	/// The multiplex rate, in bits per second.
 	rate: Option<u64>,
@@ -539,15 +555,13 @@ impl Schedule {
 		self.ended = false;
 	}
 
-	/// The first slot `unit` may go out in: a window ahead of its due slot, or only the slot
-	/// before it for a PID whose decoder buffer bounds nothing, and never before the slot
-	/// after the unit pushed ahead of it needs.
+	/// The first slot `unit` may go out in: [`ahead`] of its due slot, and never before the
+	/// slot after the unit pushed ahead of it needs.
 	fn release(&self, unit: &Unit) -> u128 {
-		let ahead = match self.buffers.get(&unit.pid).and_then(|buffer| buffer.size) {
-			_ if unit.late => return 0,
-			Some(_) => self.window,
-			None => 1,
-		};
+		if unit.late {
+			return 0;
+		}
+		let ahead = ahead(self.buffers.get(&unit.pid), self.window);
 		unit.due.saturating_sub(ahead).min(unit.start)
 	}
 
@@ -559,23 +573,23 @@ impl Schedule {
 			(None, Some(first)) => Some(first),
 			// Skip the empty slots of a long gap, keeping the second before what comes next.
 			(Some(next), first) => {
-				let target = first.or(known.map(|known| known.saturating_sub(self.window)));
+				let target = first.or(known);
 				Some(next.max(target.map_or(0, |target| target.saturating_sub(BACKFILL))))
 			}
 		}
 	}
 
-	/// The next slot to lay out, and the first slot a unit still to be pushed could be due
-	/// in once every unit that may ride it is known: the `known` that settles it.
+	/// The next slot to lay out, and the first slot a unit still to be pushed could go out in
+	/// once every unit that may ride it is known: the `known` that settles it.
 	pub fn upcoming(&self) -> Option<(u128, u128)> {
 		let index = self.index(None)?;
-		Some((index, index + self.window + 1))
+		Some((index, index + 1))
 	}
 
 	/// Lay out the next slot, if it is settled.
 	///
-	/// `known` is the first slot a unit still to be pushed could be due in, which settles
-	/// every slot whose window ends before it; `None` means nothing more is coming, so every
+	/// `known` is the first slot a unit still to be pushed could go out in ([`Self::release`]),
+	/// which settles every slot before it; `None` means nothing more is coming, so every
 	/// queued unit goes out and the clock runs on to the last decode time.
 	pub fn next(&mut self, known: Option<u128>) -> anyhow::Result<Option<Slot>> {
 		if known.is_none() && self.is_empty() {
@@ -584,7 +598,7 @@ impl Schedule {
 		let Some(index) = self.index(known) else {
 			return Ok(None);
 		};
-		if known.is_some_and(|known| index + self.window >= known) {
+		if known.is_some_and(|known| index >= known) {
 			return Ok(None);
 		}
 		self.next = Some(index + 1);
@@ -753,9 +767,7 @@ impl Schedule {
 					continue;
 				}
 				if !self.ended && !unit.late && pid == unit.pid && done > unit.timing.decode as i128 {
-					anyhow::bail!(
-						"MPEG-TS output missed a decode deadline on PID {pid} at {rate} b/s; raise the delay or the multiplex rate"
-					);
+					return Err(self.missed(pid, rate));
 				}
 				self.transport.insert(tb, done);
 				out.positions.as_mut().unwrap().push(position);
@@ -804,16 +816,34 @@ impl Schedule {
 				.iter()
 				.find(|unit| !unit.late && unit.timing.by as i128 <= end && unit.remaining() > 0)
 		{
-			anyhow::bail!(
-				"MPEG-TS output missed a decode deadline on PID {} at {rate} b/s; raise the delay or the multiplex rate",
-				unit.pid
-			);
+			return Err(self.missed(unit.pid, rate));
 		}
 		for unit in self.units.iter().filter(|unit| unit.remaining() == 0 && unit.held > 0) {
 			self.decoding.push_back((unit.pid, unit.timing.decode, unit.held));
 		}
 		self.units.retain(|unit| unit.remaining() > 0);
 		Ok(out)
+	}
+
+	/// The error for a unit on `pid` that misses its decode deadline at `rate`, naming what
+	/// would carry it: the delay at which it goes as far ahead as its decoder buffer holds,
+	/// where the window cut it short, else a faster multiplex.
+	fn missed(&self, pid: u16, rate: u64) -> anyhow::Error {
+		let reach = self
+			.buffers
+			.get(&pid)
+			.filter(|buffer| buffer.size.is_some())
+			.map(|buffer| slot(buffer.reach.as_nanos()))
+			.filter(|&reach| reach > self.window);
+		match reach {
+			Some(reach) => anyhow::anyhow!(
+				"MPEG-TS output missed a decode deadline on PID {pid} at {rate} b/s; raise the delay to {:?}, which sends it as far ahead as its decoder buffer holds, or the multiplex rate",
+				PCR_INTERVAL * u32::try_from(reach).unwrap_or(u32::MAX)
+			),
+			None => anyhow::anyhow!(
+				"MPEG-TS output missed a decode deadline on PID {pid} at {rate} b/s, sent as far ahead as its decoder buffer holds; raise the multiplex rate"
+			),
+		}
 	}
 
 	/// How many of each unit's packets slot `index` carries, at most `budget` in all.
@@ -919,10 +949,14 @@ mod tests {
 
 	/// 40 packets per slot, the clock packet included.
 	const RATE: u64 = 40 * PACKET;
+	/// A decoder buffer's reach past every window here, so the window bounds how far ahead a
+	/// unit goes.
+	const REACH: Duration = Duration::from_secs(1);
 	/// A video-like buffer: far more than a slot passes on, and a large decoder buffer.
 	const VIDEO: Buffer = Buffer {
 		rate: 100_000_000,
 		size: Some(1_000_000),
+		reach: REACH,
 	};
 
 	/// Every slot until the schedule is empty: (index, packets per PID, nulls).
@@ -1025,6 +1059,27 @@ mod tests {
 		assert_eq!(clock, [36, 37, 38, 39, 40], "the clock runs on to its decode time");
 	}
 
+	/// However long the window, a unit goes out no further ahead of its due slot than its
+	/// decoder buffer reaches.
+	#[test]
+	fn a_unit_goes_out_no_further_ahead_than_its_buffer_reaches() {
+		let mut schedule = Schedule::new(Duration::from_millis(500));
+		schedule.set_rate(Some(RATE));
+		schedule.set_buffer(
+			1,
+			Buffer {
+				reach: Duration::from_millis(100),
+				..VIDEO
+			},
+		);
+		schedule.push(1, timing(1_000), unit(1, 3), true).unwrap();
+		assert_eq!(
+			drain(&mut schedule)[0].0,
+			36,
+			"the buffer's reach ahead of its due slot"
+		);
+	}
+
 	/// A burst bigger than a slot fills the slots from its release on.
 	#[test]
 	fn a_burst_fills_the_slots_from_its_release() {
@@ -1039,15 +1094,29 @@ mod tests {
 		assert_eq!(sent, [(36, 39), (37, 39), (38, 22), (39, 0), (40, 0)]);
 	}
 
-	/// A burst the window cannot carry by its due slot fails the export.
+	/// A burst the window cannot carry by its due slot fails the export, naming the delay that
+	/// sends it as far ahead as its decoder buffer holds. Once the buffer rather than the
+	/// window stops it, only a faster multiplex helps.
 	#[test]
 	fn a_burst_too_big_for_the_window_fails() {
-		let mut schedule = Schedule::new(Duration::from_millis(50));
-		schedule.set_rate(Some(RATE));
-		schedule.set_buffer(1, VIDEO);
-		schedule.push(1, timing(1_000), unit(1, 200), true).unwrap();
-		let err = std::iter::from_fn(|| schedule.next(None).transpose()).find_map(Result::err);
-		assert!(err.is_some(), "a burst past the window must fail the export");
+		for (window, reach, fix) in [
+			(50, 1_000, "raise the delay to 1s"),
+			(1_000, 50, "raise the multiplex rate"),
+		] {
+			let mut schedule = Schedule::new(Duration::from_millis(window));
+			schedule.set_rate(Some(RATE));
+			schedule.set_buffer(
+				1,
+				Buffer {
+					reach: Duration::from_millis(reach),
+					..VIDEO
+				},
+			);
+			schedule.push(1, timing(1_000), unit(1, 200), true).unwrap();
+			let err = std::iter::from_fn(|| schedule.next(None).transpose()).find_map(Result::err);
+			let err = err.expect("a burst past the window must fail the export").to_string();
+			assert!(err.contains(fix), "window {window} ms, reach {reach} ms: {err}");
+		}
 	}
 
 	/// Once every source has ended, a unit the window cannot carry by its due slot is the
@@ -1076,6 +1145,7 @@ mod tests {
 		let small = Buffer {
 			rate: 100_000_000,
 			size: Some(10 * PAYLOAD),
+			reach: REACH,
 		};
 		schedule.set_buffer(1, small);
 		schedule.set_ended(true);
@@ -1125,6 +1195,7 @@ mod tests {
 		let audio = Buffer {
 			rate: 2_000_000,
 			size: Some(100_000),
+			reach: REACH,
 		};
 		schedule.set_buffer(1, audio);
 		for at in 0..20 {
@@ -1143,6 +1214,7 @@ mod tests {
 		let audio = Buffer {
 			rate: 2_000_000,
 			size: Some(100_000),
+			reach: REACH,
 		};
 		schedule.set_buffer(1, audio);
 		schedule.set_clock(1);
@@ -1162,6 +1234,7 @@ mod tests {
 		let slow = Buffer {
 			rate: 76_800,
 			size: Some(100_000),
+			reach: REACH,
 		};
 		schedule.set_buffer(1, slow);
 		schedule.set_clock(1);
@@ -1181,6 +1254,7 @@ mod tests {
 			Buffer {
 				rate: 76_800,
 				size: Some(100_000),
+				reach: REACH,
 			},
 		);
 		schedule.push(1, timing(1_000), unit(1, 4), false).unwrap();
@@ -1201,6 +1275,7 @@ mod tests {
 		let small = Buffer {
 			rate: 100_000_000,
 			size: Some(10 * PAYLOAD),
+			reach: REACH,
 		};
 		schedule.set_buffer(1, small);
 		schedule.push(1, timing(1_000), unit(1, 8), true).unwrap();
@@ -1240,6 +1315,7 @@ mod tests {
 			Buffer {
 				rate: 2_000_000,
 				size: Some(2_592),
+				reach: REACH,
 			},
 		);
 		let error = schedule
@@ -1264,6 +1340,7 @@ mod tests {
 			Buffer {
 				rate: 2_000_000,
 				size: Some(2 * PAYLOAD),
+				reach: REACH,
 			},
 		);
 		schedule
@@ -1310,6 +1387,7 @@ mod tests {
 				Buffer {
 					rate: 2_000_000,
 					size: Some(2_592),
+					reach: REACH,
 				},
 			);
 			let bytes = bitrate / 8 * 32 / 1_000;
@@ -1417,8 +1495,9 @@ mod tests {
 		schedule.set_buffer(1, VIDEO);
 		schedule.push(1, timing(1_000), unit(1, 8), true).unwrap();
 		schedule.push(1, timing(1_100), unit(1, 100), false).unwrap();
-		// Unpadded, both go out as soon as they are released, a window ahead.
-		let first: Vec<_> = std::iter::from_fn(|| schedule.next(Some(slot(ms(1_100)))).unwrap())
+		// Unpadded, both go out as soon as they are released, a window ahead: the slots before
+		// the second unit's release are settled.
+		let first: Vec<_> = std::iter::from_fn(|| schedule.next(Some(slot(ms(1_000)))).unwrap())
 			.map(|slot| (slot.index, slot.packets.len() / TsPacket::SIZE, slot.nulls))
 			.collect();
 		assert_eq!(first, [(36, 8, 0), (37, 0, 0), (38, 0, 0), (39, 0, 0)]);
@@ -1442,6 +1521,7 @@ mod tests {
 			Buffer {
 				rate: 2_000_000,
 				size: Some(100_000),
+				reach: REACH,
 			},
 		);
 		schedule.push(1, timing(1_000), unit(1, 50), true).unwrap();
@@ -1570,7 +1650,15 @@ mod tests {
 				packets,
 				keyframe: true,
 				units: vec![video.into()],
-				caps: HashMap::from([(video.into(), Buffer { rate: RX, size: None }.per_slot())]),
+				caps: HashMap::from([(
+					video.into(),
+					Buffer {
+						rate: RX,
+						size: None,
+						reach: Duration::ZERO,
+					}
+					.per_slot(),
+				)]),
 				positions: None,
 			};
 			let mut null = unit(0, 1);
@@ -1609,10 +1697,12 @@ mod tests {
 			Buffer {
 				rate: 7_833_600,
 				size: None,
+				reach: Duration::ZERO,
 			},
 			Buffer {
 				rate: 8_160_000,
 				size: None,
+				reach: Duration::ZERO,
 			},
 		);
 		let slot = Slot {
