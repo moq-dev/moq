@@ -611,7 +611,7 @@ pub struct Monitor {
 
 impl Monitor {
 	/// Cumulative connects and disconnects of this reconnect loop, the same shape as a relay's
-	/// presence track: `sessions_started - sessions_ended` is 1 while connected, and a rate is a delta over
+	/// sessions track: `sessions_started - sessions_ended` is 1 while connected, and a rate is a delta over
 	/// any window.
 	pub fn presence(&self) -> moq_net::stats::Presence {
 		self.state.read().presence

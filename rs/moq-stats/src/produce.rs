@@ -13,7 +13,9 @@ use serde::Serialize;
 use web_async::spawn;
 use web_async::time::Instant;
 
-use crate::{COMPRESSED_SUFFIX, Totals, parse_presence_track, presence_track, totals_track, traffic_track};
+use crate::{
+	COMPRESSED_SUFFIX, Totals, parse_presence_track, presence_track, sessions_track, totals_track, traffic_track,
+};
 
 /// Settings for a [`Producer`]. Construct with [`Config::new`] and chain
 /// the `with_*` setters (e.g.
@@ -432,8 +434,8 @@ pub mod bench;
 /// One track's frame, rebuilt every drain in a buffer kept across drains.
 /// Serializes as a JSON object keyed by path or tier label, byte-identical to
 /// the matching [`TrafficFrame`](crate::TrafficFrame),
-/// [`TotalsFrame`](crate::TotalsFrame), or [`PresenceFrame`](crate::PresenceFrame)
-/// once sorted.
+/// [`SessionsFrame`](crate::SessionsFrame), [`TotalsFrame`](crate::TotalsFrame),
+/// or [`PresenceFrame`](crate::PresenceFrame) once sorted.
 struct Frame<V> {
 	entries: Vec<(PathOwned, V)>,
 }
@@ -670,13 +672,14 @@ impl PendingPair {
 	}
 }
 
-/// The tier traffic tracks' live pairs and the requests parked for them.
+/// One frame type's live per-tier pairs and the requests parked for them; the
+/// traffic tracks and the sessions tracks each form one family.
 struct TrackFamily<V> {
 	sequence: Arc<AtomicU64>,
 	tracks: HashMap<String, TrackPair<V>>,
 	/// Valid-shaped requests awaiting quota, keyed by plain name and bounded by
-	/// [`MAX_PARKED_REQUESTS`]. Adopted as the quota frees, or dropped once
-	/// every requester leaves.
+	/// [`MAX_PARKED_REQUESTS`] across both families. Adopted as the quota
+	/// frees, or dropped once every requester leaves.
 	parked: HashMap<String, PendingPair>,
 }
 
@@ -854,7 +857,9 @@ struct GroupPublisher {
 	/// losing its last consumer (reclaimed, quota refunded).
 	requested: HashSet<String>,
 	traffic: TrackFamily<Traffic>,
+	sessions: TrackFamily<Presence>,
 	local: HashMap<PathOwned, HashMap<Tier, SideSlots>>,
+	session_local: HashMap<Tier, HashMap<PathOwned, SessionSlotState>>,
 	/// Track names per tier, built once so a drain never formats a name.
 	names: HashMap<Tier, TierNames>,
 	totals: TotalsTrack,
@@ -871,6 +876,7 @@ struct GroupPublisher {
 struct TierNames {
 	publisher: String,
 	subscriber: String,
+	sessions: String,
 }
 
 impl TierNames {
@@ -878,6 +884,7 @@ impl TierNames {
 		Self {
 			publisher: traffic_track(tier, Role::Publisher, false),
 			subscriber: traffic_track(tier, Role::Subscriber, false),
+			sessions: sessions_track(tier, false),
 		}
 	}
 }
@@ -965,6 +972,7 @@ impl GroupPublisher {
 
 		let sequence = Arc::new(AtomicU64::new(0));
 		let mut traffic = TrackFamily::new(sequence.clone());
+		let mut sessions = TrackFamily::new(sequence.clone());
 
 		// The totals and the default tier's tracks always exist, even while idle.
 		let tier = Tier::default();
@@ -978,6 +986,16 @@ impl GroupPublisher {
 					tracing::warn!(?err, name, "stats: failed to create track");
 					return None;
 				}
+			}
+		}
+		let name = sessions_track(&tier, false);
+		match TrackPair::create(&broadcast, &name, sequence.clone()) {
+			Ok(pair) => {
+				sessions.tracks.insert(name, pair);
+			}
+			Err(err) => {
+				tracing::warn!(?err, name, "stats: failed to create track");
+				return None;
 			}
 		}
 		let name = totals_track(false);
@@ -1000,7 +1018,9 @@ impl GroupPublisher {
 			dynamic,
 			requested: HashSet::new(),
 			traffic,
+			sessions,
 			local: HashMap::new(),
+			session_local: HashMap::new(),
 			names: HashMap::new(),
 			totals,
 			presence: HashMap::new(),
@@ -1028,7 +1048,9 @@ impl GroupPublisher {
 			broadcast,
 			requested,
 			traffic,
+			sessions,
 			local,
+			session_local,
 			names,
 			totals,
 			presence,
@@ -1076,12 +1098,29 @@ impl GroupPublisher {
 				traffic.push(broadcast, requested, &names.subscriber, entry.path.clone(), snap);
 			});
 		}
+
+		for &i in session_rows.iter() {
+			let entry = &report.sessions[i];
+			let names = names
+				.entry(entry.tier.clone())
+				.or_insert_with(|| TierNames::new(&entry.tier));
+			let state = session_local
+				.entry(entry.tier.clone())
+				.or_default()
+				.entry(entry.root.clone())
+				.or_default();
+			state.seen = tick;
+			process_session_slot(entry.presence, state, |snap| {
+				sessions.push(broadcast, requested, &names.sessions, entry.root.clone(), snap);
+			});
+		}
 	}
 
 	/// Publish the pending frames, then drop change-detection state for
 	/// entries this drain did not carry (the registry pruned them).
 	fn flush(&mut self, tick: u64) {
 		self.traffic.flush();
+		self.sessions.flush();
 
 		self.totals.sums.fill(&mut self.totals.pair.frame);
 		self.totals.pair.publish(crate::TOTALS);
@@ -1093,6 +1132,10 @@ impl GroupPublisher {
 		self.local.retain(|_, tiers| {
 			tiers.retain(|_, slots| slots.seen == tick);
 			!tiers.is_empty()
+		});
+		self.session_local.retain(|_, roots| {
+			roots.retain(|_, state| state.seen == tick);
+			!roots.is_empty()
 		});
 	}
 
@@ -1115,6 +1158,7 @@ impl GroupPublisher {
 		// Reclaim before parking and adopting, so a freed slot is usable by
 		// this very drain.
 		self.traffic.reclaim(&mut self.requested);
+		self.sessions.reclaim(&mut self.requested);
 		self.presence.retain(|_, track| {
 			if track.pair.is_used() {
 				return true;
@@ -1153,11 +1197,15 @@ impl GroupPublisher {
 				request.reject(moq_net::Error::NotFound);
 				continue;
 			};
-			let full = self.traffic.parked.len() >= MAX_PARKED_REQUESTS;
-			self.traffic.park(shape.plain, shape.compressed, request, full);
+			let full = self.traffic.parked.len() + self.sessions.parked.len() >= MAX_PARKED_REQUESTS;
+			match shape.sessions {
+				true => self.sessions.park(shape.plain, shape.compressed, request, full),
+				false => self.traffic.park(shape.plain, shape.compressed, request, full),
+			}
 		}
 
 		self.traffic.adopt_parked(&self.broadcast, &mut self.requested);
+		self.sessions.adopt_parked(&self.broadcast, &mut self.requested);
 		for (root, pending) in roots {
 			self.adopt_presence(report, root, pending);
 		}
@@ -1199,6 +1247,7 @@ impl GroupPublisher {
 	/// Deliberately end the broadcast: finish every pair, then close the broadcast.
 	fn finish(mut self) {
 		self.traffic.finish();
+		self.sessions.finish();
 		self.totals.pair.finish();
 		for track in self.presence.values_mut() {
 			track.pair.finish();
@@ -1207,16 +1256,18 @@ impl GroupPublisher {
 	}
 }
 
-/// The parsed shape of a consumer-requested tier traffic track name.
+/// The parsed shape of a consumer-requested per-tier track name.
 struct RequestedShape {
 	/// The plain (uncompressed) track name, the pair maps' key.
 	plain: String,
 	/// Whether the requested flavor was the [`COMPRESSED_SUFFIX`] one.
 	compressed: bool,
+	/// Sessions track vs traffic track, picking the frame type.
+	sessions: bool,
 }
 
-/// Classify a consumer-requested track name against the tier traffic track
-/// shape `[<tier>/]{publisher|subscriber}.json[.z]`, or `None` for a name no
+/// Classify a consumer-requested track name against the per-tier track shape
+/// `[<tier>/]{publisher|subscriber|sessions}.json[.z]`, or `None` for a name no
 /// tier could ever produce.
 fn requested_track_shape(name: &str) -> Option<RequestedShape> {
 	let (base, compressed) = match name.strip_suffix(COMPRESSED_SUFFIX) {
@@ -1227,9 +1278,11 @@ fn requested_track_shape(name: &str) -> Option<RequestedShape> {
 		Some((tier, kind)) => (Some(tier), kind),
 		None => (None, base),
 	};
-	if !matches!(kind, "publisher.json" | "subscriber.json") {
-		return None;
-	}
+	let sessions = match kind {
+		"publisher.json" | "subscriber.json" => false,
+		"sessions.json" => true,
+		_ => return None,
+	};
 	// The tier label is an arbitrary path; require a clean one so a malformed
 	// name can't mint a track a real tier could never produce.
 	if let Some(tier) = tier
@@ -1240,6 +1293,7 @@ fn requested_track_shape(name: &str) -> Option<RequestedShape> {
 	Some(RequestedShape {
 		plain: base.to_string(),
 		compressed,
+		sessions,
 	})
 }
 
@@ -1261,6 +1315,14 @@ struct SideSlots {
 	seen: u64,
 }
 
+/// Change-detection state for one session-track root.
+#[derive(Default)]
+struct SessionSlotState {
+	prev_emitted: Option<Presence>,
+	/// The last drain that reported this root.
+	seen: u64,
+}
+
 /// Per-drain work for a single `(side, tier)` slot: hand `snap` to `emit` once
 /// the side has moved, on every drain until the registry drops the entry.
 fn process_slot(snap: Traffic, slot_state: &mut SlotState, emit: impl FnOnce(Traffic)) {
@@ -1276,6 +1338,21 @@ fn process_slot(snap: Traffic, slot_state: &mut SlotState, emit: impl FnOnce(Tra
 	// counter above zero, so it has always moved.
 	slot_state.moved |= snap != Traffic::default();
 	if slot_state.moved {
+		emit(snap);
+	}
+}
+
+/// Per-drain work for one session-track root: emit it while a session is
+/// connected, and on the drain its counters change. A root's counters are
+/// dropped with its last session, so it never idles in the registry.
+fn process_session_slot(snap: Presence, slot_state: &mut SessionSlotState, emit: impl FnOnce(Presence)) {
+	let live = snap.active() > 0;
+	let prev_snap = slot_state.prev_emitted.unwrap_or_default();
+	let changed = snap != prev_snap;
+	if changed {
+		slot_state.prev_emitted = Some(snap);
+	}
+	if live || changed {
 		emit(snap);
 	}
 }
@@ -1508,6 +1585,24 @@ mod tests {
 	/// immediate first (often empty) frame at time zero, so a test that records
 	/// traffic asynchronously reads the accumulated state rather than that stale one.
 	async fn read_last_frame(broadcast: &moq_net::broadcast::Consumer, name: &str) -> BTreeMap<String, Traffic> {
+		let mut track = subscribe(broadcast, name).await;
+		let mut last = next_frame(&mut track).await;
+		while let Some(frame) = try_next_frame(&mut track) {
+			last = frame;
+		}
+		serde_json::from_slice(&last.payload).expect("json parse")
+	}
+
+	async fn read_session_frame(broadcast: &moq_net::broadcast::Consumer, name: &str) -> BTreeMap<String, Presence> {
+		let mut track = subscribe(broadcast, name).await;
+		let frame = next_frame(&mut track).await;
+		serde_json::from_slice(&frame.payload).expect("json parse")
+	}
+
+	async fn read_session_frame_last(
+		broadcast: &moq_net::broadcast::Consumer,
+		name: &str,
+	) -> BTreeMap<String, Presence> {
 		let mut track = subscribe(broadcast, name).await;
 		let mut last = next_frame(&mut track).await;
 		while let Some(frame) = try_next_frame(&mut track) {
@@ -1890,6 +1985,8 @@ mod tests {
 		assert_eq!(take_events(&mut events), [], "an empty group lingers");
 		let frame = read_last_frame(&acme, "publisher.json").await;
 		assert!(frame.is_empty(), "no live counters while lingering, got {frame:?}");
+		let frame = read_session_frame_last(&sessions, "sessions.json").await;
+		assert!(frame.is_empty(), "no presence while lingering, got {frame:?}");
 		let totals = default_totals(&acme).await;
 		assert_eq!(totals.publisher.bytes, 100, "the totals keep the ended path");
 		assert_eq!(totals.publisher.active_subscriptions(), 0);
@@ -1976,6 +2073,32 @@ mod tests {
 		let mut ended = take_events(&mut events);
 		ended.sort();
 		assert_eq!(ended, [(ACME.to_string(), false), (FEED.to_string(), false)]);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn session_track_surfaces_by_root() {
+		let (producer, origin) = test_producer(Some("sjc"));
+		let _a = producer.registry().tier(Tier::default()).session("acme");
+		let _b = producer.registry().tier(Tier::default()).session("acme");
+		let _c = producer.registry().tier(Tier::new("region/sjc")).session("peer");
+
+		drive_tick().await;
+
+		let (_, broadcast) = announced(&origin).await;
+		let frame = read_session_frame(&broadcast, "sessions.json").await;
+		let snap = frame.get("acme").expect("root entry");
+		assert_eq!(snap.sessions_started, 2);
+		assert_eq!(snap.sessions_ended, 0);
+		assert!(
+			!frame.contains_key("peer"),
+			"regional session must not appear on the default track"
+		);
+
+		let snap = *read_session_frame(&broadcast, "region/sjc/sessions.json")
+			.await
+			.get("peer")
+			.expect("regional entry");
+		assert_eq!(snap.sessions_started, 1);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -2214,7 +2337,12 @@ mod tests {
 		assert!(frame.is_empty(), "subscriber.json must be empty, got {frame:?}");
 
 		// The compressed siblings of the default tracks always exist.
-		for name in ["publisher.json.z", "subscriber.json.z", "totals.json.z"] {
+		for name in [
+			"publisher.json.z",
+			"subscriber.json.z",
+			"sessions.json.z",
+			"totals.json.z",
+		] {
 			assert!(broadcast.track(name).is_ok(), "{name} must exist");
 		}
 
@@ -2271,13 +2399,19 @@ mod tests {
 		let shape = requested_track_shape("rtmp/publisher.json").expect("valid");
 		assert_eq!(shape.plain, "rtmp/publisher.json");
 		assert!(!shape.compressed);
+		assert!(!shape.sessions);
 
 		let shape = requested_track_shape("region/sjc/subscriber.json.z").expect("valid");
 		assert_eq!(shape.plain, "region/sjc/subscriber.json");
 		assert!(shape.compressed);
+		assert!(!shape.sessions);
 
-		assert!(requested_track_shape("sessions.json").is_none(), "retired");
-		assert!(requested_track_shape("rtmp/sessions.json").is_none(), "retired");
+		let shape = requested_track_shape("sessions.json").expect("default tier");
+		assert_eq!(shape.plain, "sessions.json");
+		assert!(shape.sessions);
+
+		assert!(requested_track_shape("totals.json").is_none(), "not per tier");
+		assert!(requested_track_shape("acme/presence.json").is_none(), "not per tier");
 		assert!(requested_track_shape("bogus.json").is_none());
 		assert!(requested_track_shape("xpublisher.json").is_none());
 		assert!(requested_track_shape("/publisher.json").is_none());
@@ -2327,6 +2461,22 @@ mod tests {
 
 		// The plain sibling was created alongside, so it resolves immediately.
 		subscribe(&broadcast, "srt/subscriber.json").await;
+	}
+
+	/// A sessions-shaped request is held open with zeros like the traffic ones.
+	#[tokio::test(start_paused = true)]
+	async fn idle_tier_sessions_track_resolves_with_zeros() {
+		let (producer, origin) = test_producer(Some("sjc"));
+		let _f = feed(producer.registry(), Tier::default(), "foo/bar", true, 1, 42).await;
+		drive_tick().await;
+		let (_, broadcast) = announced(&origin).await;
+
+		let subscribing = broadcast.track("webrtc/sessions.json").expect("track").subscribe(None);
+		drive_tick().await;
+		let mut sub = subscribing.await.expect("held open, not rejected").ordered();
+		let frame = next_frame(&mut sub).await;
+		let parsed: BTreeMap<String, Presence> = serde_json::from_slice(&frame.payload).expect("json");
+		assert!(parsed.is_empty());
 	}
 
 	/// A name no tier could produce is still rejected.

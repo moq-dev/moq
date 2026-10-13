@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 /// `<prefix>/node/<node>` broadcast (or `<prefix>/node` when [`Self::node`] is
 /// unset) on the cluster origin, under a fresh epoch each run. Each broadcast
 /// carries plain `.json` tracks of cumulative counters (per-tier totals,
-/// per-path traffic, and per-root presence on request) plus compressed
+/// per-path traffic, per-root sessions, and per-root presence on request) plus compressed
 /// `.json.z` siblings; see `moq_stats` for the wire format and per-field
 /// semantics.
 #[derive(usage::Args, Clone, Debug, Deserialize, Serialize)]

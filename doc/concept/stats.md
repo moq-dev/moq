@@ -65,17 +65,19 @@ comes in two encodings:
 | `totals.json` | tier | [Totals](#totals) for the whole group |
 | `[<tier>/]publisher.json` | broadcast path | [Traffic](#traffic) this node sent (egress) |
 | `[<tier>/]subscriber.json` | broadcast path | [Traffic](#traffic) this node received (ingress) |
+| `[<tier>/]sessions.json` | auth root | [Sessions](#sessions) connected now |
 | `[<root>/]presence.json` | tier | [Sessions](#sessions) under one auth root |
 
-The default tier's traffic tracks are unprefixed. A named tier prefixes each
+The default tier's per-tier tracks are unprefixed. A named tier prefixes each
 name with its label and a slash: tier `region/sjc` publishes
 `region/sjc/publisher.json`. Appending `.z` selects the
 [compressed](#compressed) encoding of the same track: `publisher.json.z`.
 
-`totals.json` and the default tier's traffic tracks always exist. A named
-tier's traffic tracks are created on its first recorded traffic, but a
-subscriber may ask for them earlier: the name is accepted and held open with
-`{}` until the tier records.
+`totals.json` and the default tier's six per-tier tracks always exist. A named
+tier's are created on its first recorded traffic, but a subscriber may ask for
+them earlier: any name of the shape
+`[<tier>/]{publisher,subscriber,sessions}.json[.z]` is accepted and held open
+with `{}` until the tier records.
 
 A presence track exists only while subscribed. Ask for `<root>/presence.json`
 for any auth root in the group (`presence.json` for the empty root). The relay
@@ -116,13 +118,15 @@ A lingering group's frames repeat its final totals. A reader that misses every
 frame from the group's last change until it unannounces loses that epoch's
 tail, so a meter that only reads totals under-counts by it.
 
-### Per-path traffic
+### Per-tier tracks
 
 A traffic entry appears from its first nonzero counter until the relay drops
 its counters, even while idle: the last viewer can leave while the publisher
 still holds the path, and a returning viewer resumes the same counters. So a
 key missing from a frame had no counters, and one that returns starts from
-zero; the totals keep what it counted.
+zero; the totals keep what it counted. A sessions entry appears while a
+session is connected and on the tick its last one disconnects. While a group
+lingers empty, these tracks hold `{}`.
 
 ### Presence
 
@@ -168,19 +172,22 @@ should prefer the canonical name and fall back to the legacy one.
 ### Sessions
 
 ```json
-{ "": { "sessions_started": 12, "sessions_ended": 10, "sessions": 12, "sessions_closed": 10, "announces_peak": 40, "subscriptions_peak": 900 } }
+{ "acme": { "sessions_started": 12, "sessions_ended": 10, "sessions": 12, "sessions_closed": 10, "announces_peak": 40, "subscriptions_peak": 900 } }
 ```
 
-`sessions_started` and `sessions_ended` count connects and disconnects on the
-tier, whether or not any data flows. `sessions` and `sessions_closed` are their
+`sessions_started` and `sessions_ended` count connects and disconnects, whether
+or not any data flows: under an auth root on the tier for `sessions.json`,
+under the root on each tier for `presence.json`, and under every root in the
+group on the tier for `totals.json`. `sessions` and `sessions_closed` are their
 legacy spellings. A session moved to a new tier ends on the old one and starts
 on the new.
 
 `announces_peak` and `subscriptions_peak` are the most broadcasts announced to
 the relay, and subscriptions held on it, by any one session. Compare them with
 the relay's per-session limits: a session that goes past one is closed with
-`TOO_MANY_REQUESTS`. A peak never goes down within an epoch, and summing nodes
-or roots takes the largest.
+`TOO_MANY_REQUESTS`. On `sessions.json` a peak never goes down while the root
+has a session; on the totals and presence tracks it never goes down while the
+track lives. Summing nodes or roots takes the largest.
 
 ### Counters
 
@@ -190,7 +197,7 @@ count is started minus ended. A frame never shows ended above started.
 
 A new epoch starts every counter from zero, so a reader summing a node over
 time adds each epoch's counters rather than diffing across them. Within one
-epoch the totals never go down. A per-path counter going **down** means the
+epoch the totals never go down. A per-tier counter going **down** means the
 entry was dropped and re-created, and a presence counter going down means the
 track was held again. Treat it as the start of a fresh segment rather than a
 negative rate. On a route without an epoch (an older relay, or a session older

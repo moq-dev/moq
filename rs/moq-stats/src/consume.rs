@@ -3,7 +3,10 @@
 use moq_net::stats::{Role, Tier};
 use moq_net::{AsPath, broadcast};
 
-use crate::{PresenceFrame, Result, TotalsFrame, TrafficFrame, presence_track, totals_track, traffic_track};
+use crate::{
+	PresenceFrame, Result, SessionsFrame, TotalsFrame, TrafficFrame, presence_track, sessions_track, totals_track,
+	traffic_track,
+};
 
 /// Configuration for a [`Consumer`]. Construct with [`Config::new`]
 /// and chain the `with_*` setters.
@@ -33,9 +36,9 @@ impl Config {
 /// yielding typed frames per track.
 ///
 /// Subscribe to the tracks you care about with [`Self::totals`],
-/// [`Self::traffic`], and [`Self::presence`]. A named tier's traffic track is
-/// held open with an empty frame until the tier records, and a root's presence
-/// track is produced only while subscribed.
+/// [`Self::traffic`], [`Self::sessions`], and [`Self::presence`]. A named
+/// tier's tracks are held open with an empty frame until the tier records, and
+/// a root's presence track is produced only while subscribed.
 pub struct Consumer {
 	broadcast: broadcast::Consumer,
 	config: Config,
@@ -61,6 +64,15 @@ impl Consumer {
 	pub async fn traffic(&self, tier: &Tier, role: Role) -> Result<Traffic> {
 		let name = traffic_track(tier, role, self.config.compression);
 		Ok(Traffic {
+			inner: self.subscribe(&name).await?,
+		})
+	}
+
+	/// Subscribe to the sessions track for `tier`, awaiting the subscription
+	/// handshake.
+	pub async fn sessions(&self, tier: &Tier) -> Result<Sessions> {
+		let name = sessions_track(tier, self.config.compression);
+		Ok(Sessions {
 			inner: self.subscribe(&name).await?,
 		})
 	}
@@ -96,6 +108,18 @@ pub struct Traffic {
 impl Traffic {
 	/// The next frame, or `None` once the track ends (the producer went away).
 	pub async fn next(&mut self) -> Result<Option<TrafficFrame>> {
+		Ok(self.inner.next().await?)
+	}
+}
+
+/// A typed reader over one sessions track; see [`Traffic`].
+pub struct Sessions {
+	inner: moq_json::snapshot::Consumer<SessionsFrame>,
+}
+
+impl Sessions {
+	/// The next frame, or `None` once the track ends (the producer went away).
+	pub async fn next(&mut self) -> Result<Option<SessionsFrame>> {
 		Ok(self.inner.next().await?)
 	}
 }
@@ -272,6 +296,10 @@ mod tests {
 		let z_frame = z_traffic.next().await.expect("read").expect("frame");
 		assert_eq!(plain_frame.get("foo/bar").expect("entry").bytes, 50);
 		assert_eq!(plain_frame, z_frame, "delta reconstructs the same frame");
+
+		let mut sessions = compressed.sessions(&tier).await.expect("subscribe sessions");
+		let frame = sessions.next().await.expect("read").expect("frame");
+		assert_eq!(frame.get("acme").expect("root").active(), 1);
 
 		let mut totals = compressed.totals().await.expect("subscribe totals");
 		let frame = totals.next().await.expect("read").expect("frame");

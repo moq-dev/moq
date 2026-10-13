@@ -19,8 +19,8 @@ use moq_net::{AsPath, Epoch, PathOwned, origin};
 use web_async::time::Instant;
 
 use crate::{
-	PresenceFrame, Result, Totals, TotalsFrame, TrafficFrame, parse_node_path, presence_track, totals_track,
-	traffic_track,
+	PresenceFrame, Result, SessionsFrame, Totals, TotalsFrame, TrafficFrame, parse_node_path, presence_track,
+	sessions_track, totals_track, traffic_track,
 };
 
 /// How long a node's reader waits before re-requesting a presence track the
@@ -123,6 +123,9 @@ impl Default for Config {
 /// contribution carries across; a different known epoch keeps its own entry,
 /// even when an unversioned reader resolves it first.
 ///
+/// A sessions track is the exception: it is a gauge, so a departed node stops
+/// counting its sessions immediately.
+///
 /// The totals and presence tracks never regress: a node's counter going down
 /// is that node resetting (a restart on a route without an epoch, or a
 /// presence track held again from zero), so its previous readout is kept as a
@@ -156,6 +159,14 @@ impl Consumer {
 	pub fn traffic(&self, tier: &Tier, role: Role) -> TrafficConsumer {
 		let name = traffic_track(tier, role, self.config.compression);
 		TrafficConsumer {
+			inner: Merged::new(self.origin.clone(), &self.config, name),
+		}
+	}
+
+	/// A merged reader over the sessions track for `tier`; see [`Self::totals`].
+	pub fn sessions(&self, tier: &Tier) -> SessionsConsumer {
+		let name = sessions_track(tier, self.config.compression);
+		SessionsConsumer {
 			inner: Merged::new(self.origin.clone(), &self.config, name),
 		}
 	}
@@ -201,6 +212,20 @@ impl TrafficConsumer {
 	}
 }
 
+/// A merged reader over one sessions track across every node in the group; see
+/// [`TotalsConsumer`].
+pub struct SessionsConsumer {
+	inner: Merged<Gauge>,
+}
+
+impl SessionsConsumer {
+	/// The next merged frame, or `None` once the announce stream ends.
+	pub async fn next(&mut self) -> Result<Option<SessionsFrame>> {
+		let frame = kio::wait(|waiter| self.inner.poll_next(waiter)).await?;
+		Ok(frame.map(|frame| frame.into_iter().map(|(root, gauge)| (root, gauge.0)).collect()))
+	}
+}
+
 /// A merged reader over one root's presence track across every node in the
 /// group; see [`TotalsConsumer`].
 pub struct PresenceConsumer {
@@ -216,6 +241,10 @@ impl PresenceConsumer {
 
 /// A per-key cumulative counter that folds across nodes.
 trait Mergeable: serde::de::DeserializeOwned + Default + Copy + PartialEq + 'static {
+	/// Whether a node's last contribution survives its departure, with its
+	/// open pairs closed. Only the sessions gauge drops it instead.
+	const STICKY: bool = true;
+
 	/// Whether a node's counter going down, or a key leaving its frame, means
 	/// that node reset, so its previous readout becomes a baseline. A per-path
 	/// map drops keys and restarts counters as entries end, so it does not.
@@ -291,6 +320,30 @@ impl Mergeable for Presence {
 			|| self.sessions_ended < prev.sessions_ended
 			|| self.announces_peak < prev.announces_peak
 			|| self.subscriptions_peak < prev.subscriptions_peak
+	}
+}
+
+/// One root's sessions on a sessions track, merged as a gauge: a departed
+/// node's contribution leaves at once rather than staying with its pairs
+/// closed, and a root leaving a node's frame is not a reset.
+#[derive(Debug, Default, Clone, Copy, PartialEq, serde::Deserialize)]
+#[serde(transparent)]
+struct Gauge(Presence);
+
+impl Mergeable for Gauge {
+	const STICKY: bool = false;
+	const RESETS: bool = false;
+
+	fn merge(acc: &mut Self, other: Self) {
+		acc.0.add(other.0);
+	}
+
+	fn retire(self) -> Self {
+		Self(self.0.retire())
+	}
+
+	fn regressed(&self, prev: &Self) -> bool {
+		self.0.regressed(&prev.0)
 	}
 }
 
@@ -371,6 +424,9 @@ impl<V: Mergeable> Node<V> {
 	/// merged view changed.
 	fn depart(&mut self) -> bool {
 		self.reader = Reader::Ended;
+		if !V::STICKY {
+			return self.last.take().is_some();
+		}
 		if self.stale {
 			return false;
 		}
@@ -465,8 +521,8 @@ impl<V: Mergeable> Merged<V> {
 	}
 
 	/// Poll for the next merged frame. Returns `Ready(Some(_))` whenever the
-	/// merged view changed (a node produced a frame, or a departed node's open
-	/// pairs closed), `Ready(None)` once the announce stream closes, else
+	/// merged view changed (a node produced a frame, a departed node's open
+	/// pairs closed, or a gauge's contribution left), `Ready(None)` once the announce stream closes, else
 	/// `Pending`.
 	fn poll_next(&mut self, waiter: &Waiter) -> Poll<Result<Option<BTreeMap<String, V>>>> {
 		let mut changed = false;
@@ -531,8 +587,8 @@ impl<V: Mergeable> Merged<V> {
 	}
 
 	/// Apply one announce update to the node set. Returns whether the merged view
-	/// changed (only a departure closing open pairs does; the contribution is
-	/// kept).
+	/// changed (only a departure closing open pairs, or a gauge's contribution
+	/// leaving, does).
 	fn apply_announce(&mut self, update: moq_net::announce::Announce, active: bool) -> bool {
 		let path = update.prefix;
 		let absolute = self.announce.absolute(&path).to_owned();
@@ -605,7 +661,7 @@ impl<V: Mergeable> Merged<V> {
 					false
 				}
 			}
-		} else {
+		} else if V::STICKY {
 			// Unannounce: keep the cumulative counters, close the open pairs,
 			// and stop reading. The entry stays so a reannounce within the
 			// grace re-arms it.
@@ -616,6 +672,11 @@ impl<V: Mergeable> Merged<V> {
 				}
 				None => false,
 			}
+		} else {
+			// A gauge drops its contribution, and its entry, so a departed node
+			// stops counting and its path is not retained.
+			self.last_announced.remove(&key.0);
+			self.nodes.remove(&key).is_some_and(|old| old.last.is_some())
 		}
 	}
 
@@ -1502,6 +1563,72 @@ mod tests {
 		assert_eq!(snap.active_subscriptions(), 0, "no phantom subscriptions");
 	}
 
+	#[tokio::test(start_paused = true)]
+	async fn merges_sessions_across_nodes() {
+		// Session presence sums per auth root across nodes.
+		let origin = produce_origin();
+		let node_a = node_producer(&origin, "a");
+		let node_b = node_producer(&origin, "b");
+
+		// Each node needs a live broadcast to announce; the sessions ride the same
+		// group.
+		let _fa = feed(&node_a, Tier::default(), "acme", "acme/room", 8).await;
+		let _fb = feed(&node_b, Tier::default(), "acme", "acme/room", 8).await;
+		let _sa = node_a.registry().tier(Tier::default()).session("acme");
+		let _sb = node_b.registry().tier(Tier::default()).session("acme");
+		drive_tick().await;
+
+		let agg = Consumer::new(origin.consume(), Config::new().with_depth(1));
+		let mut sessions = agg.sessions(&Tier::default());
+
+		loop {
+			let frame = sessions.next().await.expect("read").expect("frame");
+			// Each feed opens one session ("acme" root) plus the explicit ones,
+			// summed across both nodes.
+			if frame.get("acme").map(|p| p.active()) >= Some(4) {
+				break;
+			}
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn unannounce_drops_sessions_immediately() {
+		// Unlike traffic, the sessions track is a gauge: a node's unannounce must stop
+		// counting its sessions immediately, not pin a stale gauge.
+		let origin = produce_origin();
+		let node_a = node_producer(&origin, "a");
+		let node_b = node_producer(&origin, "b");
+
+		let _fa = feed(&node_a, Tier::default(), "acme", "acme/room", 8).await;
+		let fb = feed(&node_b, Tier::default(), "acme", "acme/room", 8).await;
+		let _sa = node_a.registry().tier(Tier::default()).session("acme");
+		let sb = node_b.registry().tier(Tier::default()).session("acme");
+		drive_tick().await;
+
+		let agg = Consumer::new(origin.consume(), Config::new().with_depth(1));
+		let mut sessions = agg.sessions(&Tier::default());
+
+		loop {
+			let frame = sessions.next().await.expect("read").expect("frame");
+			// Each feed opens one session ("acme" root) plus the explicit ones,
+			// summed across both nodes.
+			if frame.get("acme").map(|p| p.active()) >= Some(4) {
+				break;
+			}
+		}
+
+		// Node B departs: its sessions leave the gauge at once.
+		drop(fb);
+		drop(sb);
+		drop(node_b);
+		drive_tick().await;
+
+		let frame = sessions.next().await.expect("read").expect("frame");
+		let acme = frame.get("acme").expect("node a's sessions");
+		assert_eq!(acme.active(), 2, "presence drops immediately");
+		assert_eq!(acme.sessions_started, 2, "the departed node's count leaves with it");
+	}
+
 	/// Read merged frames until `done` accepts one, asserting `monotonic` holds
 	/// between each frame and the one before.
 	async fn read_until<V: Mergeable + std::fmt::Debug>(
@@ -1573,7 +1700,7 @@ mod tests {
 				.create_broadcast(format!(".stats/acme/node/{node}").as_str())
 				.expect("create broadcast");
 			source.announce(origin::Route::default()).expect("announce");
-			let track = source.create_track(totals_track(false), None).expect("create track");
+			let track = source.create_track(totals_track(false), timed()).expect("create track");
 			let config = moq_json::snapshot::Config::default().with_delta_ratio(0);
 			Self {
 				_source: source,
@@ -1701,7 +1828,7 @@ mod tests {
 
 		let request = dynamic.requested_track().await.expect("asked again");
 		let config = moq_json::snapshot::Config::default().with_delta_ratio(0);
-		let mut track = moq_json::snapshot::Producer::new(request.accept(None), config);
+		let mut track = moq_json::snapshot::Producer::new(request.accept(timed()), config);
 		let mut sessions = Presence::default();
 		sessions.sessions_started = 1;
 		track

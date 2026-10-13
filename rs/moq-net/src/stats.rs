@@ -526,7 +526,7 @@ impl Traffic {
 /// one session came to its [`crate::session::Limits`].
 ///
 /// Like [`Traffic`], this is also the wire shape of one entry on a published
-/// presence or totals track. Serialize writes both the canonical names and the legacy
+/// sessions, presence, or totals track. Serialize writes both the canonical names and the legacy
 /// `sessions`/`sessions_closed` spellings; deserialize accepts either, with
 /// the canonical name winning when both are present.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -620,9 +620,9 @@ impl Presence {
 /// etc. traffic. Each tracked broadcast keeps a per-tier counter set on both its
 /// publisher and subscriber sides.
 ///
-/// The default tier ([`Tier::default`]) is unprefixed: its published traffic
-/// tracks are `publisher.json` and `subscriber.json`. A named tier prefixes them
-/// with its label, so `Tier::new("region/sjc")` records on
+/// The default tier ([`Tier::default`]) is unprefixed: its published tracks are
+/// `publisher.json`, `subscriber.json`, and `sessions.json`. A named tier
+/// prefixes every track with its label, so `Tier::new("region/sjc")` records on
 /// `region/sjc/publisher.json`. The label is an arbitrary path chosen by business
 /// logic; an empty label is the default tier.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
@@ -836,7 +836,8 @@ struct Shared {
 	retired: Lock<Snapshot>,
 	entries: Lock<HashMap<PathOwned, Arc<BroadcastEntry>>>,
 	/// Connected-session gauges keyed by `(tier, auth root)`. Independent of any
-	/// broadcast; surfaced in the totals and presence tracks. A tier's inner map is
+	/// broadcast; surfaced on the per-tier session tracks and in the totals and
+	/// presence tracks. A tier's inner map is
 	/// created the first time a session records under it.
 	sessions: Lock<HashMap<Tier, HashMap<PathOwned, Arc<SessionCounters>>>>,
 }
@@ -1099,8 +1100,9 @@ impl Handle {
 	/// Record a connected session authenticated under `root` on this tier. Hold
 	/// the returned guard for the session's lifetime; dropping it bumps
 	/// `sessions_ended`. Counts presence regardless of any data flow, so a
-	/// session that merely connects is still billable. Surfaced in this tier's
-	/// totals and in `root`'s presence track.
+	/// session that merely connects is still billable. Surfaced on the session
+	/// track for this tier, keyed by `root`, in its totals, and in `root`'s
+	/// presence track.
 	pub fn session(&self, root: impl AsPath) -> Session {
 		Session::new(self.stats.clone(), self.tier.clone(), root)
 	}

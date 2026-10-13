@@ -23,10 +23,11 @@
 //! them apart by the announced route's epoch. Every broadcast carries a
 //! `totals.json` track of each [`Tier`]'s [`Totals`] for the epoch, each tier
 //! carries `publisher.json` and `subscriber.json` tracks of per-path
-//! [`Traffic`], and a reader may request any auth root's
-//! `<root>/presence.json` track of [`Presence`]. Every track has a `.z`
-//! sibling encoded with [`moq_json::snapshot`]; compute names with
-//! [`totals_track`], [`traffic_track`], and [`presence_track`]. The full
+//! [`Traffic`] and a `sessions.json` track of per-root [`Presence`], and a
+//! reader may request any auth root's `<root>/presence.json` track. Every
+//! track has a `.z` sibling encoded with [`moq_json::snapshot`]; compute names
+//! with [`totals_track`], [`traffic_track`], [`sessions_track`], and
+//! [`presence_track`]. The full
 //! contract (paths, tracks, both encodings, and counter semantics) is at
 //! <https://doc.moq.dev/concept/stats>.
 
@@ -47,6 +48,9 @@ use moq_net::{AsPath, Path, PathOwned};
 
 /// One frame off a traffic track: cumulative counters keyed by broadcast path.
 pub type TrafficFrame = BTreeMap<String, Traffic>;
+
+/// One frame off a sessions track: connect/disconnect gauges keyed by auth root.
+pub type SessionsFrame = BTreeMap<String, Presence>;
 
 /// One frame off the totals track: each tier's [`Totals`], keyed by tier label
 /// (`""` for the default tier).
@@ -94,6 +98,17 @@ const PRESENCE: &str = "presence.json";
 /// on a named one, plus [`COMPRESSED_SUFFIX`] when `compressed`.
 pub fn traffic_track(tier: &Tier, role: Role, compressed: bool) -> String {
 	let mut name = tier.track_name(&format!("{}.json", role.as_str()));
+	if compressed {
+		name.push_str(COMPRESSED_SUFFIX);
+	}
+	name
+}
+
+/// The sessions track name for a tier: `sessions.json` on the default tier,
+/// `<tier>/sessions.json` on a named one, plus [`COMPRESSED_SUFFIX`] when
+/// `compressed`.
+pub fn sessions_track(tier: &Tier, compressed: bool) -> String {
+	let mut name = tier.track_name("sessions.json");
 	if compressed {
 		name.push_str(COMPRESSED_SUFFIX);
 	}
@@ -270,6 +285,8 @@ mod tests {
 			traffic_track(&regional, Role::Publisher, false),
 			"region/sjc/publisher.json"
 		);
+		assert_eq!(sessions_track(&default, false), "sessions.json");
+		assert_eq!(sessions_track(&regional, true), "region/sjc/sessions.json.z");
 		assert_eq!(totals_track(false), "totals.json");
 		assert_eq!(totals_track(true), "totals.json.z");
 		assert_eq!(presence_track("acme/live", false), "acme/live/presence.json");
@@ -294,6 +311,8 @@ mod tests {
 		for name in [
 			"publisher.json",
 			"acme/publisher.json",
+			"sessions.json",
+			"acme/sessions.json",
 			"totals.json",
 			"xpresence.json",
 			"/presence.json",

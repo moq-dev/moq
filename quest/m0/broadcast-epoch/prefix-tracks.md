@@ -11,15 +11,14 @@ their `.json.z` siblings) are gone.
 ## Plan
 
 Split from stats-split (decided 2026-10-08), which landed the per-group
-`totals.json` and the requested per-root `<root>/presence.json` and retired
-`sessions.json`. Reuse what it built: the `<key>/<kind>.json` naming (the last
+`totals.json` and the requested per-root `<root>/presence.json` beside the
+existing tracks. Reuse what it built: the `<key>/<kind>.json` naming (the last
 segment picks the kind, everything before it is the key), the requested-track
 hold and reclaim in `rs/moq-stats/src/produce.rs`, the cap refused with
 `TooManyRequests`, and the aggregator's per-node reset baseline and refusal
 retry in `rs/moq-stats/src/aggregate.rs`.
 
-Decided 2026-10-05 and 2026-10-07 (planned from moq-dev/moq.pro#2202 and
-moq-dev/moq.pro#2165):
+Decided 2026-10-05 and 2026-10-07:
 
 - **Prefix tracks.** Routing is by prefix, so a reader requests any prefix of
   a member path (depth bounded by `Path::MAX_PARTS` less the group's own
@@ -66,9 +65,13 @@ moq-dev/moq.pro#2165):
   keep `.json.z` siblings. Update the aggregator, `doc/concept/stats.md`,
   `doc/bin/inspect.md`, and `demo/web/src/stats.ts` (which reads both maps).
 
-MoQ Pro's Broadcasts page reads one prefix per visible row and group header
-the moment the maps retire, so the maps and prefix tracks change in one
-release.
+A downstream dashboard reads one prefix per visible row and group header the
+moment the maps retire, so the maps and prefix tracks change in one release.
+
+Open: stats-split was kept backwards compatible at the maintainer's request
+(#5084, 2026-10-12): it kept `sessions.json` and every existing track and
+field. Confirm with the maintainer whether retiring the map tracks still
+holds, or whether they stay beside the prefix tracks for existing readers.
 
 Public API: `moq-stats` producer and consumer types. Wire: stats track names
 and payloads.

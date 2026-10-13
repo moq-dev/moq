@@ -70,8 +70,9 @@ playback needs an error rate it cannot see client-side):
   fixed named counters per reason and per kind, so `Presence` stays `Copy`
   (what downstream aggregators plan against). `sessions_ended` stays
   the total, so the live count (`sessions_started - sessions_ended`) is
-  unchanged. They ride the totals and presence tracks; `sessions.json` is
-  retired (quest audit, 2026-10-08).
+  unchanged. Readers take them from the totals and presence tracks (quest
+  audit, 2026-10-08); `sessions.json` stays for existing readers (#5084, kept
+  backwards compatible 2026-10-12) and carries the same `Presence` entries.
 - **Outcomes follow the stats counter rules.** A pruned root folds its
   counts into the group totals, and the aggregator merges with a baseline per
   upstream (node, epoch), so a node leaving or returning never reads as new
