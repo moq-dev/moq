@@ -44,6 +44,13 @@ wrap.
   (2026-10-05 audit; narrowing the contract to exclude the catalog clock was
   rejected). So is every other catalog field an importer derives from its
   history, which a joiner adopts from the live catalog.
+- The tracks an importer generates are tracks too: the catalog tracks
+  (hang, compressed, MSF) and `*.timeline`. Today catalog groups are
+  numbered locally (`Outputs::emit`), the MSF frame is stamped with
+  `Timestamp::now()`, and timeline records start at zero, so a joiner would
+  reuse earlier group or record numbers for newer bytes. Their numbering
+  and timestamps come from the live track at join or from the epoch
+  timeline, never the instance.
 - An importer announces only once it knows its tracks, so it never refuses a
   track the incumbent serves.
 - Docs (the `--epoch` paragraph in `doc/bin/cli.md`, the `--epoch` doc
@@ -52,7 +59,9 @@ wrap.
 
 Tests: per importer, two instances started at different offsets into one
 input, including the later one starting after a timestamp wrap the earlier
-crossed, publish identical catalogs, group sequences, and timestamps. End to
+crossed, publish identical catalogs, group sequences, and timestamps, on
+the generated catalog and timeline tracks too, joining after earlier
+catalog updates and timeline records. End to
 end: the issues' 1+1 setup (one relay, two `import ts` sharing one `--epoch`,
 two `export ts`) survives the standby joining, before and after a wrap, and
 the incumbent stopping; repeat it with `--passthrough`.

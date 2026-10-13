@@ -48,9 +48,16 @@ and the subscribe grant a joiner needs.
   wrap from it. Delivery skew alone is far below half a period, so it
   changes nothing. Add the periods in source ticks before converting to
   microseconds, since a period is not a whole microsecond count.
-- The joiner verifies its era against one of the incumbent's objects
-  before announcing: the incumbent's object at the joiner's first group's
-  time must match it in timestamp and payload. A mismatch exits with an
+- The first importer has no incumbent, so it applies the same rule with its
+  own first value as the reference. Today each stream's `PtsUnwrap` starts
+  at era 0, so a first importer started at a wrap, with one stream's first
+  PTS still just before it, places that stream 26.5 h from the others, and
+  every joiner would adopt the broken coordinate.
+- The joiner verifies its era against the incumbent's objects before
+  announcing, one per independently mapped timestamp base (each track): the
+  incumbent's object at the joiner's first group's time must match it in
+  timestamp and payload. One object would let a matching video track
+  approve an audio track a period off. A mismatch exits with an
   error, and so does an incumbent that leaves before the check. Decided
   2026-10-13 by the maintainer, over documenting a bound: the latest
   timestamp alone is wrong when flagged breaks totalling half a period fall
@@ -67,8 +74,16 @@ and the subscribe grant a joiner needs.
   recorded `mux_rate`, owned by
   [raw TS cuts](/quest/m1/ts-passthrough-epoch-cuts.md).
 - Two importers that both start before either is live would place two
-  clocks under one epoch. The later must detect it and exit, so that its
-  supervisor's restart adopts; settle how it detects it.
+  clocks under one epoch. One must exit, so that its supervisor's restart
+  adopts; settle how. Detection by each importer through its own relay
+  fails in a cluster: a replica on each relay reads before its peer's route
+  arrives, and `route_order` keeps preferring each relay's own route
+  afterwards, so neither sees the other. A co-start is also routine, since
+  both importers of a pair restart together under a successor epoch.
+  Candidates: an external leader or shared anchor; detection through state
+  both can see, such as the announcement of the peer's route; or co-start
+  as an unsupported precondition, which the successor-epoch flow would have
+  to avoid.
 - A flagged forward break must be carried as the same function of the
   source's clock values on every importer, so media time stays congruent to
   the raw clock modulo the period and the era choice above holds after it.
@@ -96,9 +111,10 @@ identical catalogs and timestamps; the same with the second started after a
 33-bit wrap the first crossed, at a wrap with its streams' first values on
 opposite sides of it, after flagged forward breaks that together exceed half
 a period, with observations straddling such breaks (the verification
-refuses a wrong era), and with different delivery skew into each; a
-different stream under the same epoch fails verification; a cold co-start
-leaves one publisher.
+refuses a wrong era, on every track), and with different delivery skew into
+each; a first importer started at a wrap with its streams on opposite sides
+of it; a different stream under the same epoch fails verification; a cold
+co-start, including one across two clustered relays, leaves one publisher.
 
 Public API: no new items, but `--epoch` on an importer now reads the live
 broadcast before announcing, so its token needs subscribe rights on its own
