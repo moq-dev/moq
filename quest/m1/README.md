@@ -37,14 +37,19 @@ upgrade and identity guides carry migrations; feature docs change inline.
 Keep generic proofs in this repository; deployments and their operational
 acceptance belong to the downstream operator.
 
+The 2026-10-13 clustering interview brings P2P back to m1 with a required
+consumer: application-selected peer paths alongside persistent CDN sessions.
+Routing proofs precede the shared wire; federation and P2P ship independently,
+while epoch-only active/passive route health follows in m2.
+
 Keep one owner per shared code area. Order each prerequisite before its
 consumer; targeted benchmarks and controlled-time regressions remain part of
 the feature that needs them.
 
 Added 2026-10-13 by the redundant TS alignment plan: epoch refusals, the
 epoch anchor, and raw TS cuts on the epoch timeline, ranked just above
-same-epoch importers, which requires them. Catalog clock adoption moved up
-above them, since the epoch anchor requires it.
+same-epoch importers, which requires them. Catalog clock adoption ranks
+above them.
 
 ## Required
 
@@ -53,11 +58,13 @@ above them, since the epoch anchor requires it.
 - [Release builds](/quest/m0/release-link.md) - package artifacts can be built
 - [qmux credit](/quest/m0/qmux-credit.md) - dropped/stopped streams return credit and close is delivered
 
-- [Cluster routing](/quest/m1/cluster-routing/README.md) - any node routes toward a broadcast's origin over CDN and P2P links alike, with per-origin routes and path-less announces
+- [Cross-node flapping](/quest/m1/cross-node-flapping.md) - incident-sensitive baseline and residual stale-revival counterexamples before the route rewrite
+- [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
+- [P2P](/quest/m1/p2p/README.md) - application-selected peer sessions use shared priorities, routing, and same-epoch handover
+- [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation/P2P setup
 - [Controlled time](/quest/m1/time/README.md) - every crate and package reads time through moq-time or @moq/time, with regression tests for the changed contracts; ranks above the fork, whose switch adopts its instant
 - [Hard fork](/quest/m1/quic/fork/README.md) - quinn hard-forked in-tree as `moq-quic`, ranked ahead of perf; the rest of the QUIC line follows it
 - [Own the QUIC stack](/quest/m1/quic/README.md) - quinn hard-forked in-tree as `moq-quic`, carrying BBR, reliable reset, hierarchical scheduling, peer limits, and endpoint sharding
-- [Reproduce cross-node announce flapping](/quest/m1/cross-node-flapping.md) - a clean close reaches a client on another node as one retraction, checked by a 3+ relay drill on main
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Interop close logs](/quest/m1/interop-close-log.md) - logging fix landed; delete once the required Interop run is green
 - [One max_age meaning](/quest/m1/cache-max-age.md) - a superseded group goes stale on wall clock since its successor arrived or on media time, whichever is first, in Rust and js/net; fixes the untimed failover stall
@@ -78,6 +85,8 @@ above them, since the epoch anchor requires it.
 - [Live TS clock validation](/quest/m1/ts-live-clock.md) - resolve the local PCR-rate failure with reproducible timing evidence and CI controls
 - [Slow source fails](/quest/m1/slow-source.md) - an export whose source runs further off real time than the output may follow fails promptly naming the rate, instead of dropping frames for hours
 - [Same-instance TS resume](/quest/m1/ts-same-instance-resume.md) - prove valid continuation and fix the unexpected final exporter failure without weakening identity
+- [Wire compat media](/quest/m1/wire-compat-media.md) - wire-compat always runs same-version media cells through the compat reader, so planned breaks can't hide its regressions
+- [Binding panic supervision](/quest/m1/ffi-panic-supervision.md) - a panic in any moq-c or moq-ffi background task reaches the host as a panic, never a lost callback or Cancel
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
 - [Plan: a public model](/quest/m1/model-public-surface.md) - every crate-private model item is made public or unnecessary, so a custom publisher or subscriber builds from the public model alone
 - [Lazy discovery](/quest/m1/lazy-discovery/README.md) - a `consume` session requests announcements only for prefixes the origin is watching, in JS then Rust; `follow`, `broadcasts`, and the `discovery` option go away
@@ -85,8 +94,9 @@ above them, since the epoch anchor requires it.
 - [Kotlin wrapper POMs](/quest/m1/kt-ffi-pom.md) - Maven builds of `dev.moq:moq` resolve a published moq-ffi instead of the missing `0.0.0-dev`
 - [The catalog root clock is the producer clock](/quest/m1/catalog-clock-adopt.md) - a derivative adopts its input's wall mapping through `modify()`, and a root `clock` change after the clock is fixed is refused
 - [Epoch refusals](/quest/m1/epoch-refusals.md) - capture, avc3, `rtc --connect`, archive, and transcode refuse `--epoch`, since two instances never publish identical tracks
-- [Epoch anchor](/quest/m1/epoch-anchor.md) - same-epoch importers adopt the first importer's catalog clock and timestamp era, so they agree across a 33-bit wrap and a forward clock break
-- [Raw TS cuts on the epoch timeline](/quest/m1/ts-passthrough-epoch-cuts.md) - passthrough fallback cuts fall on the epoch's grid and a joiner adopts the live M2ts section, so instances started apart publish identical groups and catalogs
+- [Epoch anchor](/quest/m1/epoch-anchor.md) - same-epoch importers each derive the catalog clock and timestamp era from the epoch and stay live, so they agree across a 33-bit wrap, a forward clock break, and a restart
+- [Raw TS cuts on the epoch timeline](/quest/m1/ts-passthrough-epoch-cuts.md) - passthrough fallback cuts fall on the epoch's grid and the M2ts section derives from the epoch and content, so instances started apart publish identical groups and catalogs
+- [Announce once tracks are known](/quest/m1/import-announce-tracks.md) - an importer announces only after it can serve its tracks, so starting beside a live partner never aborts its subscribers (#4352)
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - importers sharing one `--epoch` and fed one stream publish identical groups and timestamps, so failover between a redundant pair survives
 - [Plan: untimed verbatim PES](/quest/m1/plan-ts-pes-untimed.md) - decide how a verbatim TS track carries a PES that has no PTS, then write the implementation quest
 - [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) - json and binary consumers return each value's timestamp, in Rust and every binding; snapshots add `latest()` beside an in-order `next()`

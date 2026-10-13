@@ -29,14 +29,14 @@ from moq_ffi import (
     MoqError,
     MoqMediaCatalogConsumer,
     MoqMediaCatalogProducer,
-    MoqMediaContainerConfig,
-    MoqMediaContainerConsumer,
-    MoqMediaContainerGroupConfig,
-    MoqMediaContainerGroupConsumer,
     MoqMediaContainerProducer,
     MoqMediaContainerStreamProducer,
     MoqMediaFrame,
+    MoqMediaGroupConfig,
+    MoqMediaGroupConsumer,
     MoqMediaTarget,
+    MoqMediaTrackConfig,
+    MoqMediaTrackConsumer,
     MoqMediaTrackProducer,
     MoqMediaTrackStreamProducer,
 )
@@ -50,6 +50,7 @@ from moq_ffi import (
     MoqVideoProperties as VideoProperties,
 )
 
+from . import subscribe as _subscribe
 from ._records import Frame, Subscription, _from_us, _subscription, _to_us
 from .publish import BroadcastProducer, TrackDemand, TrackRequest
 from .subscribe import BroadcastConsumer
@@ -254,7 +255,7 @@ class TrackStreamProducer:
         self._inner.finish()
 
 
-class ContainerConsumer:
+class TrackConsumer:
     """Async-iterable stream of decoded :class:`MediaFrame` in decode order.
 
     Construct with :meth:`subscribe`. Iterate with ``async for``;
@@ -264,12 +265,12 @@ class ContainerConsumer:
     @classmethod
     async def subscribe(
         cls, broadcast: BroadcastConsumer, name: str, container: Container, *, subscription: Subscription | None = None
-    ) -> ContainerConsumer:
+    ) -> TrackConsumer:
         """Subscribe to a media track and decode its container."""
-        config = MoqMediaContainerConfig(name=name, container=container, subscription=_subscription(subscription))
-        return cls(await MoqMediaContainerConsumer.subscribe(broadcast._inner, config))
+        config = MoqMediaTrackConfig(name=name, container=container, subscription=_subscription(subscription))
+        return cls(await MoqMediaTrackConsumer.subscribe(broadcast._inner, config))
 
-    def __init__(self, inner: MoqMediaContainerConsumer) -> None:
+    def __init__(self, inner: MoqMediaTrackConsumer) -> None:
         self._inner = inner
 
     async def __aenter__(self):
@@ -292,13 +293,31 @@ class ContainerConsumer:
         self._inner.cancel()
 
 
-class ContainerGroupConsumer:
-    """Async iterator of decoded :class:`MediaFrame` within a single fetched group.
+class GroupConsumer:
+    """Async iterator of decoded :class:`MediaFrame` within a single group.
 
-    Construct with :meth:`fetch`. Finite: iteration ends
-    after the group's last frame. Usable as an async context manager that cancels
-    on exit.
+    Construct with :meth:`fetch`, or decode a raw :class:`~moq.GroupConsumer`,
+    such as one from :meth:`~moq.TrackConsumer.recv_group` for arrival-order
+    reads. Finite: iteration ends after the group's last frame. Usable as an
+    async context manager that cancels on exit.
     """
+
+    def __init__(self, group: _subscribe.GroupConsumer, container: Container) -> None:
+        """Decode ``group`` with the track's container, as each frame lands.
+
+        Frame timestamps are container media time, not the transport's. Which
+        groups arrive, and how long a stalled one stays readable, is the
+        subscription's ``max_delay``. Takes over ``group``, whose handle is
+        closed afterward; raises ``Error.AlreadyCommitted`` if it has already
+        read a frame.
+        """
+        self._inner = MoqMediaGroupConsumer(group._inner, container)
+
+    @classmethod
+    def _from_inner(cls, inner: MoqMediaGroupConsumer) -> GroupConsumer:
+        self = cls.__new__(cls)
+        self._inner = inner
+        return self
 
     @classmethod
     async def fetch(
@@ -309,13 +328,10 @@ class ContainerGroupConsumer:
         container: Container,
         *,
         options: FetchGroupOptions | None = None,
-    ) -> ContainerGroupConsumer:
+    ) -> GroupConsumer:
         """Fetch and decode exactly one media group."""
-        config = MoqMediaContainerGroupConfig(name=name, sequence=sequence, container=container, options=options)
-        return cls(await MoqMediaContainerGroupConsumer.fetch(broadcast._inner, config))
-
-    def __init__(self, inner: MoqMediaContainerGroupConsumer) -> None:
-        self._inner = inner
+        config = MoqMediaGroupConfig(name=name, sequence=sequence, container=container, options=options)
+        return cls._from_inner(await MoqMediaGroupConsumer.fetch(broadcast._inner, config))
 
     @property
     def sequence(self) -> int:
@@ -399,8 +415,8 @@ __all__ = [
     "TrackStreamProducer",
     "ContainerProducer",
     "ContainerStreamProducer",
-    "ContainerConsumer",
-    "ContainerGroupConsumer",
+    "TrackConsumer",
+    "GroupConsumer",
     "Audio",
     "Video",
     "Catalog",

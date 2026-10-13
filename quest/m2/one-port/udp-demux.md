@@ -30,7 +30,7 @@ STUN: an ICE connectivity check is a Binding request carrying USERNAME, so
 it goes to the WebRTC hook, whose mux reads the local ufrag from it. A
 Binding request without USERNAME is a public query; drop and count it.
 Decided 2026-10-08: the public STUN responder is left to the P2P line
-(m3), its only consumer, so `moq-sock` takes no STUN codec
+(m1), its only consumer, so `moq-sock` takes no STUN codec
 dependency (str0m included).
 
 WebRTC: DTLS, RTP, and USERNAME-carrying STUN go to a `webrtc` hook that
@@ -54,5 +54,5 @@ the demuxed port. `moq-relay` docs list the port once.
 
 ## Related
 
-- [P2P](/quest/m3/p2p/README.md) - the only consumer of a public STUN responder, which it plans when it needs one
+- [P2P](/quest/m1/p2p/README.md) - the only consumer of a public STUN responder, which it plans when it needs one
 - [One port on the io_uring workers](/quest/m2/uring-demux.md) - runs this classifier and flow table on the io_uring workers

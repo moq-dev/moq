@@ -100,11 +100,15 @@ if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the cata
     for (const auto &[name, video] : catalog->video) {
         // The track is the rendition's `track` when set, otherwise its catalog key.
         auto track = video.track.value_or(name);
-        auto media = ok(moq::MediaContainerConsumer::subscribe(broadcast, {track, video.container}).get());
+        auto media = ok(moq::MediaTrackConsumer::subscribe(broadcast, {track, video.container}).get());
         auto frame = ok(media->next().get());   // std::nullopt once the track ends
     }
 }
 ```
+
+`MediaTrackConsumer` reads in decode order. For arrival-order reads, decode each group
+from `TrackConsumer::recv_group` with `moq::MediaGroupConsumer::init(group, container)`;
+frames carry container media time as they land.
 
 ```cpp
 // Publish encoded frames, or raw pixels with the codec inside the binding.

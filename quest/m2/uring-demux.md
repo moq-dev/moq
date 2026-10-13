@@ -18,7 +18,7 @@ customer feature, and moq.pro already ranks one-port above its uring
 rollout.
 
 Decided 2026-10-08: the UDP demux shrinks to QUIC plus the WebRTC hook, and
-the public STUN responder moves to the m3 P2P line, so the ring carries no
+the public STUN responder moves to the m1 P2P line, so the ring carries no
 STUN responder class either. An ICE Binding request is WebRTC traffic and
 follows that class.
 

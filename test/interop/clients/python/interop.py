@@ -107,7 +107,7 @@ async def subscribe(url: str, broadcast: str, timeout: float) -> None:
         track_name = next(iter(catalog.video))
         video = catalog.video[track_name]
 
-        media = await moq.media.ContainerConsumer.subscribe(
+        media = await moq.media.TrackConsumer.subscribe(
             consumer, track_name, video.container, subscription=moq.Subscription(max_delay=MAX_DELAY)
         )
 

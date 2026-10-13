@@ -19,12 +19,12 @@ This absorbs the old gradual-recovery quest, which planned to carry
 `recovery_frame_cnt` on the wire and count `frame_num`. The catalog duration
 replaces both: the rule is timestamp arithmetic on the group start.
 
-- Withhold rule, keyed on the gap item both container reads yield before the
-  first frame and after any skip: `{ kind: "gap" }` from
+- Withhold rule, keyed on the first frame a reader reads and on the gap item
+  both container reads yield after any skip (a join yields no gap): `{ kind: "gap" }` from
   `js/hang/src/container/consumer.ts` `next()` and `Read::Gap` from the Rust
   `moq_mux::container::Consumer`, which `rs/moq-video/src/decode/consumer.rs`
   reads directly. A declared end is not a gap and keeps everything. For the
-  first group after a gap, every frame is decoded (the decoder needs them to
+  first group read and the first group after a gap, every frame is decoded (the decoder needs them to
   build reference state) and frames stamped below `group.start + warmup` are
   not presented; frames stamped at or above that boundary are, so the recovery
   picture itself is never withheld. `js/watch/src/video/decoder.ts` and

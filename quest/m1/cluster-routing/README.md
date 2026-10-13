@@ -2,144 +2,99 @@
 
 ## Goal
 
-Any MoQ node routes a subscription toward a broadcast's origin over whatever
-links it holds, and a change in the network costs messages in proportion to
-the origins it touches, not the broadcasts behind them. One protocol serves
-every layout: moq.pro's edge and core tiers, a customer's own cluster, and a
-drone swarm where some drones have an uplink, the rest reach it over a lossy
-radio mesh, and every drone proxies for its neighbours. A node holding both a
-direct link and a CDN link knows which one reaches an origin, so it uses the
-CDN only when no direct route exists, and an endpoint linked to several CDNs
-prefers its primary and fails over to the next. The CDN never exposes its backbone to
-end users, and a broadcast under overlapping prefixes routes to one origin
-deterministically.
+One routing model serves CDN tiers, outbound-connected local clusters, and
+application-selected P2P connections. Topology changes update reachability
+per affected origin rather than replaying every advertisement behind it.
+Known advertisements remain distinct from current reachability, and stale
+copies cannot revive a claim after its withdrawal is known.
 
-Non-goals: link-state topology, cache-aware route switching, TURN (the CDN
-route is the fallback), and a permanently mixed-version cluster.
+Reliability, federation, and P2P are independently shippable milestones of
+this architecture. Active/passive delivery health is a separate
+[route-health line](/quest/m2/route-health/README.md), shared by endpoints
+and relays, and applies only to broadcasts with epochs.
 
 ## Plan
 
-### Decisions
+Decided with the maintainer, 2026-10-13:
 
-Settled in the 2026-10-01 audit (#4694), replacing the per-broadcast path
-vector the 2026-09-30 cache-tiers audit kept:
+- Keep per-origin ROUTEs and path-less ANNOUNCEs on the ordered announce
+  stream in lite-07-wip. Reachability and origin-owned claims have separate
+  lifetimes. A wildcard claim is a capability, not a list of live broadcasts;
+  withdrawing one origin's claim does not end other origins' copies of an epoch.
+- Applications choose connections and assign each a local priority, whether
+  it reaches a CDN or a peer. Priority precedes additive cost; at equal
+  priority use the lowest eligible total cost, with hop-count defaults.
+  Preserve deterministic path hashing among equal routes and newest-first
+  only for otherwise identical routes. A new connection alone does not
+  outrank a different equal-cost route. Cost includes the origin's prefix seed.
+- Mint a fresh opaque routing identity per process or tab restart, shared
+  across that live origin's authenticated sessions. Keep administrative
+  identity separate. Session scoping alone cannot identify one publisher
+  through both its CDN and P2P connections. Authentication must prevent a
+  peer claiming another origin or advancing its sequence number.
+- Matching explicit epochs authorize resume. Epochless changes retain
+  Restart and fresh resolution; neither node identity nor a healthy
+  alternate grants permission to splice content.
+- During uncertain handoff, preserve known advertisement presence while
+  representing unavailable forwarding separately. Never manufacture an END
+  from route loss, imply successful delivery while unreachable, or retain
+  unbounded stale state.
+- Keep upstream/down-only export policy so two local uplinks do not make
+  the local network CDN transit. Preserve longer exportable alternatives
+  even when a cheaper down-only route wins locally.
+- Browsers serve only their own publications. Relays and opted-in native
+  routing nodes may forward received content. Applications explicitly
+  select P2P connections; discovery does not dial everyone.
+- Retain the CDN session and discovery during P2P use. Release unused CDN
+  media demand, except for bounded overlap during a same-epoch handoff.
 
-- **Two layers on one stream.** A ROUTE advertises reachability of one origin
-  node (node id, seqno, metric); an ANNOUNCE says a prefix lives at a route's
-  node and carries no path. Both ride the session's announce stream, so a
-  ROUTE always precedes the ANNOUNCEs naming it. A link flap updates one ROUTE
-  per affected origin instead of re-announcing every broadcast through it,
-  and ending a broadcast is one fact with nothing to path-hunt. The hop list
-  and the per-broadcast seqno plan (#4650) are gone. See
-  [Routes and announces](/quest/m1/cluster-routing/routes.md).
-- **Loop freedom per node, not per prefix.** Routes use Babel's feasibility
-  condition (RFC 8966) keyed by node id. Babel was set aside earlier because
-  it is not loop-free for a prefix with several origins (RFC 8966 s2.7);
-  routing to a node removes that case, and a redundant pair is two ANNOUNCEs
-  of one path under one epoch.
-- **Next-hop authority.** A node stores every neighbour's announces but treats
-  as live only those from its current next hop toward the origin. Babel's next
-  hops toward one origin form a tree, so an END is final and no cycle of
-  neighbours can keep a dead broadcast alive, while losing a neighbour just
-  moves the next hop and adopts the stored copies.
-- **Every hop re-selects.** No origin pinning in SUBSCRIBE: a pin breaks
-  subscription aggregation and has no good answer when stale. Nearest-origin
-  selection over consistent metrics is still a shortest-path tree, so it is
-  loop-free once converged, and a transient cycle collapses into one
-  aggregated subscription until re-selection moves it.
-- **Policy per link, not roles.** A link marked upstream never receives
-  routes learned on another upstream link, and a route learned upstream keeps
-  a down-only mark across other links so a mesh with two uplinks cannot leak
-  CDN routes back into the CDN. An edge marks its core links upstream; a
-  Starlink drone marks its CDN link upstream. The per-link mark landed on
-  today's path vector (`doc/bin/relay/cluster.md`); the down-only mark lands
-  with [Routes and announces](/quest/m1/cluster-routing/routes.md).
-- **One node id space, no cluster ids.** A customer cluster is nodes behind
-  upstream or trusted links. Loop detection by cluster id would drop a
-  partitioned swarm's traffic to itself through the CDN (BGP's partitioned-AS
-  problem). Folding a large customer cluster into one id at its boundary is
-  [Routing cost domains](/quest/m3/routing-cost-domains.md)'s.
-- **Every session speaks it**, relays, apps, and browsers, in lite-07 (the
-  current wip version, decided 2026-10-05); a plain client with one link advertises only itself. Node ids are
-  opaque randoms, so routes reveal no backbone addresses.
-- **Trust.** Cluster-peer links may advertise any node; a client link's node
-  ids stay scoped to its session. Promoting them to a shared identity was
-  dropped in the 2026-10-06 audit: session scoping already covers the
-  security goal, and promotion has no consumer.
-- **Multi-CDN by link preference.** A node may rank its links (moq.pro
-  primary, Cloudflare secondary) ahead of the metric, so metrics from
-  different operators are never compared; a CDN that speaks no ROUTE is just
-  a link. Landed as `origin::Producer::with_preference` and
-  `Producer.withPreference`; see [multiple CDNs](/doc/concept/moq-lite.md#multiple-cdns).
-- **Metric on the wire, cost policy local.** One additive metric on ROUTE,
-  where each hop adds its link cost plus one so it strictly increases; the
-  origin's per-prefix cost rides ANNOUNCE untouched (`transcode/**` at 10 and
-  `transcode/foobar` at 1 from one node). Static
-  configured costs stay the default (the CDN); a radio link may measure its
-  own ([Link quality](/quest/m2/link-quality.md)).
-- **Routing before topology expansion.** Decided 2026-10-13: the new
-  routing model and finalized lite-07 belong to this breaking release.
-  Deployments may use the current mesh; the full edge/core topology migration
-  is independent. Validate handoff and recovery before publishing the wire.
+The implementation is gated on [routing contracts](/quest/m1/cluster-routing/contracts.md)
+and [handoff proofs](/quest/m1/cluster-routing/handoff.md). Per-origin Babel
+feasibility alone does not prove that path-only subscriptions which reselect
+origins under local priorities make progress. Nor does a complete neighbor
+snapshot prove its claims are current. Settle those contracts before dropping
+hop-vector protections or fixing the wire.
 
+The new routing model and finalized lite-07 belong to the breaking release.
+Existing mesh deployments remain supported; the full edge/core topology
+migration is independent. Basic outbound federation proves the common routing
+contract without requiring that deployment migration.
 
-Kept from 2026-09-30: core links are configured and may skip PoPs; routes
-use one static cost. Decided 2026-10-06: a
-path plus its [publisher epoch](/doc/concept/moq-lite.md#publisher-epochs) is
-a source's identity, whoever serves it.
-Anything specific to moq.pro's deployment is planned in moq.pro.
-Decided 2026-10-08: [Link quality](/quest/m2/link-quality.md)
-is Related, not Required, and moves to m2; measured cost is opt-in and the
-line ships on static costs.
+Recent baseline: #5375's two-second retraction quarantine reduced stale
+revivals but left residual cases; #5391 bounded its queue under repeated
+same-clock churn. #5382 and #5393 separately reduced idle-session polling.
+The 300 ms update hold alone is no longer the baseline. Keep regression
+coverage for announcement churn, idle work, active continuity, and retained
+state separately; fewer control bytes does not prove cheaper runtime work.
 
-### Simulator findings
+The earlier simulator estimates remain in [Routes and announces](/quest/m1/cluster-routing/routes.md).
+They do not prove the proposed handoff correct. Preserve public synthetic
+fixtures and controlled-time regressions, including residual stale revival,
+not only results from deployment tooling. Do not claim per-origin aggregation
+reduces origin count when every application publishes one broadcast.
 
-Measured on the earlier flat mesh with moq.pro's `just rs sim` (live's graph)
-and `just rs sim sweep` (synthetic regional graphs of 34, 340, and 1020
-relays).
+Non-goals: measured RTT/loss pricing by default, cache-dependent route prices,
+TURN, browser transit, full link-state topology, or cross-operator economic
+exchange rates. Basic federation does not wait for
+[routing cost domains](/quest/m3/routing-cost-domains.md).
 
-- Existence costs about one message per relay per event flooded. On live, a
-  wide customer prefix with `.stats` from every relay cost 2.5M announces
-  under path vector and 4k flooded.
-- Link-state liveness flooding dominates at scale: at 1020 relays (mean
-  degree 35), a link loss and restore plus a relay loss and restart cost
-  about 290 MiB of liveness against under 1 MiB of existence for twenty
-  publishes. Per-node distance vector sends a route change only where the
-  best route changes, which is what the split candidate must show.
-- Failure detection, not routing, sets every outage window: a silent link or
-  relay loss is noticed only after the QUIC idle timeout.
-- HRW split an equal-cost pool 63/49 where a hash of the announced prefix
-  sent all of it to one sibling.
-- [#4399](https://github.com/moq-dev/moq/pull/4399) trades path hunting for
-  flapping: each re-announce by a peer revives every route through it, stale
-  ones included, and without coalescing the revivals cascade (18.6M messages
-  instead of 189k). ANNOUNCEs that carry no path and follow the next hop end
-  both.
-
-### Remaining work
-
-Once every child has landed:
-
-- End-to-end tests in `rs/moq-relay/tests` with time mocked: a two-region
-  tiered cluster (publish, end, core loss, redundant-pair failover reaching a
-  far edge), and a drone mesh with two uplinks that partitions and heals
-  (a broadcast from a drone without an uplink reaches a CDN subscriber, and
-  each island reaches the other through the CDN).
-- Rewrite `doc/bin/relay/cluster.md` into the operator's view (upstream
-  links, tiers, dial rules, TLS edge links, link costs, redundant pairs), and
-  add a routing page under `doc/concept` that walks both the CDN tiers and the
-  drone mesh through the same ROUTE and ANNOUNCE rules.
+Each implementation updates the docs it makes stale. The separate
+[routing guide](/quest/m1/routing-guide.md) explains the combined design and
+setup after the capabilities land.
 
 ## Required
 
-- [Next-hop handoff](/quest/m1/cluster-routing/handoff.md) - an END stays final and a replacement next hop's announces current across the handoff, with deterministic tests
-- [Routes and announces](/quest/m1/cluster-routing/routes.md) - ROUTE per origin node and path-less ANNOUNCE on one stream, loop-free by Babel feasibility
+- [Routing contracts](/quest/m1/cluster-routing/contracts.md) - identity, local priority, loop freedom, and export views have a consistent tested model
+- [Next-hop handoff](/quest/m1/cluster-routing/handoff.md) - complete and fresh claims survive rerouting without resurrection or false END
+- [Routes and announces](/quest/m1/cluster-routing/routes.md) - implement the proven route layer with Rust/JS parity and tiered-cluster acceptance
+- [Outbound federation](/quest/m1/cluster-routing/federation.md) - an outbound-only local relay exchanges authorized broadcasts with the CDN and survives partition/healing
 
 ## Related
 
-- [Link quality](/quest/m2/link-quality.md) - a radio link's cost follows its measured quality without flapping routes; not a blocker, since static costs are the default
-- [P2P](/quest/m3/p2p/README.md) - browser and native peers that become routing nodes over this layer
-- [Same-epoch importers](/quest/m1/hop-aligned-import.md) - the importer half of a redundant pair under one explicit epoch
-- [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - a redundant pair shares one epoch
-- [Reproduce cross-node announce flapping](/quest/m1/cross-node-flapping.md) - a drill for #4349's post-close announce toggling across nodes, checked on the release and on main
-- [Routing cost domains](/quest/m3/routing-cost-domains.md) - policy and aggregation at boundaries between operators
+- [Route health](/quest/m2/route-health/README.md) - epoch-only active/passive delivery monitoring and automatic recovery
+- [P2P](/quest/m1/p2p/README.md) - application-selected peer sessions feed the shared routing model
+- [Routing guide](/quest/m1/routing-guide.md) - concept page and practical federation/P2P setup
+- [Cross-node flapping](/quest/m1/cross-node-flapping.md) - incident-sensitive regressions for residual withdrawal hunting
+- [Route wakes](/quest/m2/route-wakes.md) - local work follows affected fronts rather than the whole covered table
+- [Link quality](/quest/m2/link-quality.md) - optional measured link cost, distinct from delivery-health failover
+- [Same-epoch importers](/quest/m1/hop-aligned-import.md) - independent origins serving the same explicit epoch
