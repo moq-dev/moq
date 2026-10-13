@@ -335,12 +335,29 @@ async fn a_draining_peer_does_not_exhaust_the_retry_window() {
 	// Each redial waits at least half of its 200ms delay, so the drained sessions alone span
 	// more than twice the window. A GOAWAY arriving inside the 200ms health bar is what makes a
 	// session count as drained at once rather than as a healthy session that later migrated.
-	const DRAINED: usize = 12;
-	let mut config = moq_tokio::connect::Config::default();
-	config.backoff.initial = Duration::from_millis(200);
-	config.backoff.max = Duration::from_millis(200);
-	config.backoff.timeout = Some(Duration::from_millis(500));
-	let client = config.init(Default::default()).expect("failed to init client");
+	let mut backoff = moq_tokio::Backoff::default();
+	backoff.initial = Duration::from_millis(200);
+	backoff.max = Duration::from_millis(200);
+	backoff.timeout = Some(Duration::from_millis(500));
+	rides_out_a_drain(backoff, 12).await;
+}
+
+/// A restart's pacing sleep can be longer than the retry window. It must not spend the window,
+/// or the loop would give up right after the sleep without redialing the restarting peer.
+#[tokio::test]
+async fn a_drain_backoff_longer_than_the_retry_window_still_redials() {
+	// From the second drained session on, the delay is 400ms against a 100ms window.
+	let mut backoff = moq_tokio::Backoff::default();
+	backoff.initial = Duration::from_millis(200);
+	backoff.max = Duration::from_millis(400);
+	backoff.timeout = Some(Duration::from_millis(100));
+	rides_out_a_drain(backoff, 4).await;
+}
+
+/// Connect with `backoff` to a server that sends its first `drained` sessions an empty-URI
+/// GOAWAY at once, and assert the client is still there to land on the session after them.
+async fn rides_out_a_drain(backoff: moq_tokio::Backoff, drained: usize) {
+	let client = client(backoff);
 
 	let mut server = moq_tokio::listen::Config::default();
 	server.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
@@ -356,17 +373,17 @@ async fn a_draining_peer_does_not_exhaust_the_retry_window() {
 	let _task = tokio::spawn(async move {
 		let origin = moq_tokio::origin::spawn();
 		// Held, as a draining server does: each one closes when the client leaves it.
-		let mut drained = Vec::new();
+		let mut held = Vec::new();
 		while let Some(request) = server.accept().await {
 			let Ok(session) = request.with_publisher(&origin).ok().await else {
 				continue;
 			};
-			if drained.len() < DRAINED {
+			if held.len() < drained {
 				session
 					.drain()
 					.send(moq_net::goaway::Goaway::new().with_timeout(Duration::from_secs(30)))
 					.expect("send goaway");
-				drained.push(session);
+				held.push(session);
 			} else {
 				let _ = served_tx.send(session);
 			}

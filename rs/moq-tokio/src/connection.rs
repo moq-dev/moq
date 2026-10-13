@@ -975,18 +975,19 @@ impl Connection {
 
 						// Drained almost immediately. The backoff still escalates, so the redials
 						// cannot hammer the peer, and the old session serves across the sleep.
-						if msg.uri().is_empty() {
-							// "Reconnect to me": the peer is restarting and drains each new
-							// session until it goes, which is no failure, since every one
-							// serves. The window restarts here, so it counts only the time
-							// after the peer stops answering.
-							retry.start = tokio::time::Instant::now();
-						} else {
-							// Redirected: score it as a failed attempt, so two peers bouncing us
-							// between them eventually give up.
+						//
+						// An empty URI is "reconnect to me": the peer is restarting and drains
+						// each new session until it goes, which is no failure, since every one
+						// serves. A named URI is a redirect, scored as a failed attempt so two
+						// peers bouncing us between them eventually give up.
+						let restarting = msg.uri().is_empty();
+						if !restarting {
 							retry.last_error = Some(Error::Reconnect("peer redirected immediately".to_string()));
 						}
-						let Some(wait) = retry_wait(retry.delay, retry.start, timeout) else {
+						// A restart's pacing is not capped by the window: a delay longer than the
+						// window would otherwise spend it all and end the loop without a redial.
+						let window = if restarting { Duration::ZERO } else { timeout };
+						let Some(wait) = retry_wait(retry.delay, retry.start, window) else {
 							return Err(timeout_error(timeout, retry.last_error.as_ref()));
 						};
 						tracing::warn!(peer = %Endpoint(&url), ?wait, "peer drained the session immediately; retrying after backoff");
@@ -994,6 +995,11 @@ impl Connection {
 						// predecessor while the loop is between connections.
 						sleep_draining(wait, &mut draining, shared).await;
 						retry.delay = pacing.next(retry.delay);
+						if restarting {
+							// After the sleep, so the window counts only the time after the
+							// peer stops answering.
+							retry.start = tokio::time::Instant::now();
+						}
 						continue;
 					}
 
