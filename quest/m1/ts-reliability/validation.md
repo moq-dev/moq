@@ -65,7 +65,6 @@ controls have CI invocations too.
 
 ## Related
 
-- [TS duration fidelity](/quest/m0/ts-duration-fidelity.md) - fixes the base capture regression without weakening the duration assertion
 - [T-STD controls](/quest/m2/tstd-controls.md) - MB and AAC positive/negative coverage
 - [PSI system buffer](/quest/m1/tstd/psi-runs.md) - system-buffer proof belongs with the PSI fix
 - [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - acquisition trims change the decoder oracle

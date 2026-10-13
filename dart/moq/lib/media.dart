@@ -16,10 +16,10 @@ typedef ContainerProducer = MoqMediaContainerProducer;
 typedef ContainerStreamProducer = MoqMediaContainerStreamProducer;
 
 /// The read side of a media track: yields frames with codec metadata in decode order.
-typedef ContainerConsumer = MoqMediaContainerConsumer;
+typedef TrackConsumer = MoqMediaTrackConsumer;
 
 /// A finite fetched media group: yields container-decoded frames until the group ends.
-typedef ContainerGroupConsumer = MoqMediaContainerGroupConsumer;
+typedef GroupConsumer = MoqMediaGroupConsumer;
 
 /// The read side of a broadcast's catalog: yields updates as the set of tracks changes.
 typedef CatalogConsumer = MoqMediaCatalogConsumer;
@@ -76,10 +76,10 @@ typedef Named = NamedMoqMediaTarget;
 typedef Requested = RequestedMoqMediaTarget;
 
 /// A track name, container, and live delivery options.
-typedef ContainerConfig = MoqMediaContainerConfig;
+typedef TrackConfig = MoqMediaTrackConfig;
 
 /// A fetched group name, sequence, container, and delivery options.
-typedef ContainerGroupConfig = MoqMediaContainerGroupConfig;
+typedef GroupConfig = MoqMediaGroupConfig;
 
 /// The packaging advertised for a media track.
 typedef Container = MoqContainer;

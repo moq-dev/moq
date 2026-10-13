@@ -620,6 +620,43 @@ mod test {
 		);
 	}
 
+	/// On a host whose wall clock reads before 2020, no clock has a wall mapping, so the data track
+	/// tells an importer's re-anchor apart by the whole clock. While the catalog is withheld the
+	/// importer's first frame, an hour in, places the clock; measured across that jump, the first
+	/// payload would read as a near-zero bitrate.
+	#[test]
+	fn an_unset_host_clock_still_marks_a_reanchor() {
+		use std::time::{Duration, SystemTime};
+
+		crate::clock::fake_host_wall(SystemTime::UNIX_EPOCH + Duration::from_secs(86_400));
+		let (mut broadcast, catalog) = catalog();
+		let reserved = catalog.reserve();
+		let mut stream = catalog
+			.binary_stream(track(&mut broadcast, "telemetry"), Config::default())
+			.unwrap();
+		let mut subscriber = stream.consume();
+		stream.append(&b"before"[..]).unwrap();
+
+		let hour = moq_net::Timestamp::from_secs(3600).unwrap();
+		assert_eq!(
+			catalog.timebase().shift(hour).unwrap(),
+			hour,
+			"the importer placed the clock"
+		);
+		stream.append(&b"after"[..]).unwrap();
+		drop(reserved);
+
+		assert_eq!(catalog.snapshot().clock, None);
+		let stamps = stamps(&mut subscriber);
+		assert_eq!(stamps.len(), 2);
+		assert!(stamps[0] < 3_600_000 && 3_600_000 <= stamps[1], "{stamps:?}");
+		assert_eq!(
+			entry(&catalog, "telemetry").bitrate,
+			None,
+			"nothing is timed across the re-anchor"
+		);
+	}
+
 	#[test]
 	fn a_stream_track_roundtrips() {
 		let (mut broadcast, catalog) = catalog();

@@ -1,16 +1,14 @@
-# [M] Same-epoch importers share one anchor and era
+# [M] Same-epoch importers derive one coordinate from the epoch
 
 ## Goal
 
-Every importer publishing one path under one explicit `--epoch` places its
-timestamps on one coordinate: the catalog root clock that the epoch's first
-importer fixed, and the timestamp era that clock implies. A later importer
-adopts that clock instead of placing its own, and shifts each timestamp
-base by the whole number of the format's timestamp periods that lands it on
-the incumbent's live timeline. Two
-importers of one stream then publish identical timestamps and catalogs
-whenever each started, including on opposite sides of a 33-bit TS wrap or of
-a flagged forward clock break.
+Every importer publishing one path under one explicit `--epoch`, fed one
+stream, derives its catalog root clock and each timestamp's era from the
+epoch and the source alone. They all stay live (active-active) and publish
+identical timestamps and catalogs whenever each started, including on
+opposite sides of a 33-bit TS wrap or a flagged forward break, and after a
+restart under the same epoch. No importer reads another's broadcast, waits
+on one, or exits because one exists.
 
 Today each importer places its clock at its own first frame's arrival, or
 shifts onto a clock already in use by `clock.now()` minus its first
@@ -19,124 +17,111 @@ PTS. Two importers agree only if they started at the same packet.
 
 ## Plan
 
-Decided 2026-10-13 by the maintainer, over one importer per epoch and over a
-contract narrowed to what one input proves: a shared epoch carries no
-source-to-wall mapping or era, and only one observation of the source can
-supply them, so the epoch fixes them once and nothing re-derives them. The
-maintainer accepted the follow-on rules below the same day: eras from the
-incumbent's live timeline, joiners adopting history-derived catalog fields,
-and the subscribe grant a joiner needs.
+Decided 2026-10-13 by the maintainer: importers sharing an explicit epoch
+derive the same coordinate without coordination, and none is first. This
+supersedes the same day's #5412 plan, where the epoch's first importer fixed
+the clock and era and every later one read the live catalog and adopted
+them: adoption needs a first importer, and a co-start (routine, since both
+importers of a pair restart together) has none that either can name.
+Rejected with it: a co-started importer that watches its peer's announcement
+and exits, an external leader or anchor flag, and co-start as an unsupported
+precondition.
 
-- The epoch's first importer places the clock at its first frame, as today.
-  A later importer reads the epoch's live catalog before it announces and
-  adopts its root clock exactly before publishing a frame, through the path
-  that [catalog clock adoption](/quest/m1/catalog-clock-adopt.md) adds.
-  `catalog::Timebase::place` will not do: it takes a `SystemTime`, which
-  `Clock::wall_clock` floors to milliseconds, so the re-advertised clock
-  would differ by up to 999 µs. It reads what its relay has now and never
-  waits on the cluster for completeness; an incumbent it cannot see yet is
-  the co-start case below.
-- The era comes from the incumbent's published timeline, not from the
-  clock's wall reading. A flagged forward break advances media time without
-  wall time, so after two accepted +10 h breaks the clock reads about 10 h
-  while the incumbent publishes 30 h, and a joiner choosing against the
-  clock lands a full wrap off. Each independent timestamp base (in TS the
-  PCR, and each stream's PTS and DTS, which unwrap separately) takes the
-  whole number of periods (2^33 at 90 kHz for TS) that lands its first value
-  nearest the incumbent's latest published timestamp. One offset taken from
-  the first frame would misplace a stream whose first value sits across a
-  wrap from it. Delivery skew alone is far below half a period, so it
-  changes nothing. Add the periods in source ticks before converting to
-  microseconds, since a period is not a whole microsecond count.
-- The first importer has no incumbent, so it applies the same rule with its
-  own first value as the reference. Today each stream's `PtsUnwrap` starts
-  at era 0, so a first importer started at a wrap, with one stream's first
-  PTS still just before it, places that stream 26.5 h from the others, and
-  every joiner would adopt the broken coordinate. Timestamps are unsigned,
-  so the pre-wrap stream's nearest candidate can be negative: resolve the
-  initial bases together before placing the clock, and lift the whole
-  coordinate by a period when one would land below zero. A base created
-  later, such as a PID a PMT revision adds after a wrap (today
-  `ensure_stream` starts it at `PtsUnwrap::default()`), resolves against
-  the program's current verified timeline, on every importer alike.
-- The joiner verifies its era against the incumbent's objects before
-  announcing, one per independently mapped timestamp base (each track): the
-  incumbent's object at the joiner's first group's time must match it in
-  timestamp and payload. One object would let a matching video track
-  approve an audio track a period off. A sparse base with no cadence
-  (verbatim subtitles or teletext, each with its own `PtsUnwrap`) must not
-  hold the announcement until its next cue: resolve it against its
-  program's verified PCR base instead. A mismatch exits with an error, and
-  so does an incumbent that leaves before the check. Decided
-  2026-10-13 by the maintainer, over documenting a bound: the latest
-  timestamp alone is wrong when flagged breaks totalling half a period fall
-  within the delivery skew (a joiner one second behind, while the incumbent
-  takes two +10 h breaks, lands a wrap ahead).
-- The era choice alone cannot detect a different stream, since a nearest
-  whole period always exists; the verification above refuses one at join.
-  Past that, same stream stays the operator's precondition, unchecked like
-  the rest of the same-epoch contract (maintainer, 2026-10-13).
+- The epoch is a UUIDv7, so it carries a millisecond wall time that every
+  importer shares exactly. Each importer reads only its own input, the epoch,
+  and its own wall clock, and never the relay or the cluster.
+- The era comes from the epoch (maintainer, superseding #5412's era from the
+  incumbent's published timeline and the join-time verification against its
+  objects): for each timestamp base (in TS the PCR, and each stream's PTS and
+  DTS), the whole number of periods (2^33 at 90 kHz for TS) that lands the
+  value nearest its arrival on the epoch's clock, as the importer's wall clock
+  reads it. The source's offset from the wall clock is the same for every
+  importer, so they agree unless their delivery and host-clock skew straddles
+  a half-period boundary of that offset. Add the periods in
+  source ticks before converting to microseconds, since a period is not a
+  whole microsecond count.
+- Recommended: derive every value's era this way, not only each base's first,
+  so no importer state enters the coordinate. A restart, a base a PMT
+  revision adds after a wrap, and a sparse base (verbatim subtitles or
+  teletext) then need no special case, and `PtsUnwrap`'s history goes away.
+  The cost is that media time stays within half a period of the epoch
+  clock's reading. A flagged forward break that would carry it further reads
+  as a step back, which stays fatal on every importer alike, as does a file
+  read faster than real time for half a period. The raw importer's clamp after a small flagged jump
+  (`(last + step).max(self.written)` in `passthrough.rs`) depends on history;
+  remove it.
+- Two known failure cases, documented rather than guarded (maintainer,
+  2026-10-13, over refusing to start inside a guard band of the halfway
+  point): importers that start together split onto adjacent eras when their
+  skew straddles the halfway point, with odds of about skew over the period
+  (near 1e-7 at 10 ms against TS's 26.5 h); and the gap between the source
+  clock and wall time drifts by seconds a day, so over weeks it can drift
+  onto the halfway point mid-run, where even a single importer reads a
+  rewind and fails.
+- The catalog's wall mapping derives from the epoch too (maintainer): media
+  time maps to wall through the epoch's wall time plus the deterministic era,
+  so every importer writes the same root `clock`. Rejected: no wall mapping
+  under a shared epoch, and quantizing each importer's measured offset, whose
+  rounding boundary splits importers far more often than a period's. The
+  accuracy is bounded by how well the epoch's wall time matches the source:
+  the mapping is off by the source clock's reading at the epoch's wall time,
+  modulo the period, which for an arbitrary TS program clock is anywhere
+  within half a period (13.25 h). Document that with `--epoch`. The exact rule
+  is open; recommended: PTS zero sits one period before the epoch's wall time
+  (`E - period`, deterministically rounded to a whole microsecond), and the
+  era is chosen against that clock's reading. Then timestamps never land
+  below zero for an importer whose clock reads after the epoch's wall time
+  minus half a period, and a source whose clock reads zero at the epoch's
+  wall time (a stream started when the epoch was minted) maps exactly and
+  sits half a period from the boundary. A format whose timestamps never wrap
+  has no era: PTS zero is the epoch's wall time and its timestamps stay
+  verbatim. Install it through `Timebase::place`, which keeps whole
+  microseconds; nothing reads a catalog back, so the millisecond flooring in
+  `Clock::wall_clock` never enters it.
 - Every catalog field an importer derives from its history rather than the
-  content at hand is the epoch's too. The joiner adopts the live value as of
-  its first group, and later changes depend only on content on the epoch
-  timeline. In TS passthrough that is the M2ts section's `random_access` and
-  recorded `mux_rate`, owned by
-  [raw TS cuts](/quest/m1/ts-passthrough-epoch-cuts.md).
-- Two importers that both start before either is live would place two
-  clocks under one epoch. One must exit, so that its supervisor's restart
-  adopts; settle how. Detection by each importer through its own relay
-  fails in a cluster: a replica on each relay reads before its peer's route
-  arrives, and `route_order` keeps preferring each relay's own route
-  afterwards, so neither sees the other. A co-start is also routine, since
-  both importers of a pair restart together under a successor epoch.
-  Candidates: an external leader or shared anchor; detection through state
-  both can see, such as the announcement of the peer's route; or co-start
-  as an unsupported precondition, which the successor-epoch flow would have
-  to avoid.
-- A flagged forward break must be carried as the same function of the
-  source's clock values on every importer, so media time stays congruent to
-  the raw clock modulo the period and the era choice above holds after it.
-  The raw importer's clamp after a small flagged jump
-  (`(last + step).max(self.written)` in `passthrough.rs`) breaks that and
-  depends on history; remove or bound it.
-- A rewind stays fatal (#4543), so both importers of a pair exit together
-  and restart under a successor epoch. Settle how the successor gets its
-  anchor without the co-start race above. The successor epoch is proposed to
-  derive from the old epoch and the last frame's catalog time; the same
-  inputs and the first source timestamp after the step can fix its anchor.
-- Nothing outlives the live route, so a total outage loses the anchor: the
-  next importer under the same explicit epoch is a first importer, and its
-  era and clock can differ from the old run's. Decided 2026-10-13 by the
-  maintainer: an explicit epoch names one continuous run, and a supervisor
-  restarting after every importer stopped mints a successor epoch, as for a
-  rewind; the `--epoch` docs say so. Rejected: persisting the anchor beyond
-  the live route, and a flag marking the first importer.
+  content at hand derives from the epoch and the content instead (maintainer,
+  superseding #5412's adoption from the live catalog). In TS passthrough that
+  is the M2ts section's `random_access` and recorded `mux_rate`, owned by
+  [raw TS cuts](/quest/m1/ts-passthrough-epoch-cuts.md); audit the other
+  importers for more.
+- A restart under the same epoch re-derives the same coordinate, including
+  after a total outage, so the epoch keeps naming one timeline and resuming
+  across the outage is a gap, not a stitch (maintainer, reversing #5412's
+  "an explicit epoch names one continuous run; mint a successor after a total
+  outage"). Nothing persists beyond the live route.
+- A rewind stays fatal (#4543), so both importers of a pair exit and restart
+  under a successor epoch. An importer never rolls to a successor in-process
+  (maintainer: "Never"). Open: how a supervisor obtains the successor so both
+  importers of a pair land on the same one without coordination. Proposed:
+  derive it from the old epoch and the last frame's catalog time. Its wall
+  time then fixes the successor's coordinate like any explicit epoch's.
+- Same stream stays the operator's precondition, unchecked. Known gap, not
+  planned now (maintainer): nothing refuses two routes with the same epoch
+  but different content, and failover resumes mid-group across them
+  (`rs/moq-net/src/model/resume.rs`), so a misfed pair splices two streams.
 - The mapping drifts from UTC at the source's clock error for the epoch's
-  life, as one importer's does today. Nothing re-measures it.
+  life. Nothing re-measures it.
 
 Tests, on mocked time where possible: for each importer that takes
 `--epoch`, two instances started at different source offsets publish
 identical catalogs and timestamps; the same with the second started after a
 33-bit wrap the first crossed, at a wrap with its streams' first values on
-opposite sides of it, after flagged forward breaks that together exceed half
-a period, with observations straddling such breaks (the verification
-refuses a wrong era, on every track), and with different delivery skew into
-each; a first importer started at a wrap with its streams on opposite sides
-of it; a stream a PMT revision adds after a wrap; a different stream under
-the same epoch fails verification; a cold
-co-start, including one across two clustered relays, leaves one publisher.
+opposite sides of it, after flagged forward breaks, and with different
+delivery skew into each; a stream a PMT revision adds after a wrap; forward
+breaks carrying media time past half a period from the epoch clock fail on
+both alike; a co-start across two clustered relays leaves both live and
+byte-identical; a restart under the same epoch, alone and after both
+stopped, rejoins identically; the derived root `clock` matches the
+recommended rule, including a source that reads zero at the epoch's wall
+time.
 
-Public API: no new items, but `--epoch` on an importer now reads the live
-broadcast before announcing, so its token needs subscribe rights on its own
-path. A publish-only token that works with `--epoch` today fails there: a
-breaking auth requirement, documented with `--epoch` in `doc/bin/cli.md` and
-`doc/bin/relay/auth.md`. Wire: none.
-
-## Required
-
-- [The catalog root clock is the producer clock](/quest/m1/catalog-clock-adopt.md) - the exact adoption path a joining importer uses
+Public API: no new items. Under a shared epoch the root `clock` and the
+timestamps move from arrival to the epoch's derivation; the `--epoch` docs
+state the accuracy bound. `--epoch` needs no subscribe right (#5412's
+breaking grant for publish-only tokens is dropped). Wire: none.
 
 ## Related
 
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - group sequences and the end-to-end pair on this coordinate
+- [The catalog root clock is the producer clock](/quest/m1/catalog-clock-adopt.md) - exact clock adoption, which a derived clock no longer needs
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - same-epoch routes resume each other's subscriptions

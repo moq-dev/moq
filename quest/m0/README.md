@@ -61,17 +61,18 @@ retired epochless handles before its held `Restart` reached anyone. Handles
 now retire only once it is deliverable; first-party consumers following it
 remain. The
 released wire-compat step aborts on planned breaks the last release made
-stale. Both stay in m0 (maintainer, 2026-10-13) and rank with TS duration
-fidelity: a red Interop hides real regressions.
+stale. Both stay in m0 (maintainer, 2026-10-13): a red Interop hides real
+regressions.
 
 Crashes (2026-10-13, #5407): a publisher on a host whose wall clock reads
 before 2020 panics, and `panic = "abort"` turns any library panic into a
-dead host app. Both joined m0 (maintainer): fix the unset clock at its
-source, then unwind so a panic closes only its connection.
+dead host app. Both joined m0 (maintainer). The unset clock is fixed at its
+source on `main`; unwinding remains, so a panic closes only its connection.
 
 Nightly on main (triaged 2026-10-13): two build breaks from 2026-10-11 get
-quests here. The nixpkgs bump broke the Linux zigbuild release builds, and
-fat LTO in the release profile broke the fuzz build. Audio quality has been
+quests here. The nixpkgs bump broke the Linux zigbuild release builds (its
+GCC 16 miscompiles lld 21, fixed upstream and waiting on `nixpkgs-unstable`),
+and fat LTO in the release profile broke the fuzz build. Audio quality has been
 red since it landed, against budgets recorded locally; re-measuring them on
 the runner moved here from Watch (maintainer, 2026-10-13). The other red jobs
 have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
@@ -79,15 +80,14 @@ have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
 
 ## Required
 
+- [CI cost and latency](/quest/m0/ci/README.md) - PRs stop queueing behind hosted runner caps: macOS and Windows move to the merge queue, caches move to R2, and setup is skipped when no work is selected
 - [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.5, then draft-20+ FETCH
-- [TS duration fidelity](/quest/m0/ts-duration-fidelity.md) - Interop's TS compliance captures the whole round-tripped stream again, fixing a regression that turns Interop red on main
 - [Restart followers](/quest/m0/restart-followers.md) - first-party consumers follow an epochless `Restart`, such as a WebSocket-to-QUIC upgrade's, by resolving the path again
-- [Unset host clock](/quest/m0/wall-clock-omit.md) - a publisher whose wall clock reads before 2020 publishes without a catalog clock instead of panicking
 - [Panic isolation](/quest/m0/panic-isolation.md) - unwind, ignore lock poison, and supervise every task, so a panic closes only its connection or exits on a long-lived task
 - [Wire compat on main](/quest/m0/wire-compat-green.md) - the nightly released-wire step runs again: planned breaks re-measured against the new releases, and a released-API client for the released JS lanes
+- [nixpkgs ships the lld fix](/quest/m0/nixpkgs-lld-fix.md) - waiting on NixOS/nixpkgs#568680 to reach `nixpkgs-unstable`, which the release build fix bumps to
 - [Release builds link](/quest/m0/release-link.md) - the Linux zigbuild release binaries and moq-gst packages link again after the 2026-10-11 nixpkgs bump, so the next release cut can publish
 - [Fuzz builds under LTO](/quest/m0/fuzz-lto.md) - the nightly fuzz targets build again despite the release profile's fat LTO
-- [Audio quality budgets](/quest/m0/audio-quality-budgets.md) - the nightly Audio quality job grades against ceilings measured on its own runner, so a breach means a regression again
 - [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on moq-dev/web-transport#412 and #413 to merge and ship, which qmux credit bumps to
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription

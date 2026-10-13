@@ -5,7 +5,7 @@
 The generated bindings carry the layers themselves. moq-ffi becomes one
 UniFFI crate per layer (`net`, `media`, `json`, `flate`, `audio`, `video`),
 all linked into the one moq-ffi library, so a generated type is
-`media.ContainerGroupConsumer` instead of `MoqMediaContainerGroupConsumer`.
+`media.GroupConsumer` instead of `MoqMediaGroupConsumer`.
 The separate feasibility spike decides whether all generators can carry
 this shape. A no-go removes this migration from the release and retains
 wrapper namespaces; do not hold the release for an infeasible generator.
@@ -15,11 +15,13 @@ Out of scope: the hand-written moq-c, the wire, and Rust type names.
 ## Plan
 
 Raised on #5356, where the maintainer found `MoqMediaContainerGroupConsumer`
-too long and asked how to namespace the modules better. The long name shows
-up in moq-ffi's source, the raw generated packages (`go/ffi`,
-`dart/moq_ffi`), and C++ (`moq::MediaContainerGroupConsumer`). The Python,
-Go, Swift, Kotlin, and Dart wrappers already shorten it to
-`media.ContainerGroupConsumer`.
+too long and asked how to namespace the modules better. #5356 renamed the
+media consumers to `MoqMediaTrackConsumer` and `MoqMediaGroupConsumer`, but
+every generated name still carries `Moq` and its layer, as in
+`MoqMediaContainerStreamProducer`. They show up in moq-ffi's source, the raw
+generated packages (`go/ffi`, `dart/moq_ffi`), and C++
+(`moq::MediaGroupConsumer`). The Python, Go, Swift, Kotlin, and Dart
+wrappers already shorten them to `media.GroupConsumer`.
 
 ✅ The maintainer reopened (2026-10-13) the 2026-10-09 decision in
 [The bindings mirror Rust's layers](/quest/m1/ffi-shape/README.md) that
