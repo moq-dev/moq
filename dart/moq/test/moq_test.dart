@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:moq/media.dart' as moq_media;
+import 'package:moq/json.dart' as moq_json;
 import 'package:moq/moq.dart';
 import 'package:test/test.dart';
 
@@ -14,13 +16,33 @@ Future<AnnounceEvent> nextRoute(AnnounceConsumer announced) async {
 }
 
 void main() {
+  test('diagnostic errors expose their named reason', () {
+    final error = TransportMoqException('reset');
+    expect(error.reason, 'reset');
+  });
+
+  test('catalog handle closes with its broadcast', () {
+    final broadcast = BroadcastProducer();
+    final catalog = moq_media.CatalogProducer(broadcast: broadcast);
+    catalog.setSection(name: 'app', json: '{"value":42}');
+    broadcast.close();
+    expect(
+      () => catalog.removeSection(name: 'app'),
+      throwsA(isA<ClosedMoqException>()),
+    );
+  });
+
   test('connects, announces, subscribes, and delivers a frame', () async {
     final relay = MoqOriginProducer(config: MoqOriginConfig());
-    final server = MoqServer();
-    server.setBind(addr: '127.0.0.1:0');
-    server.setTlsGenerate(hostnames: ['localhost']);
-    server.setPublish(origin: relay);
-    server.setConsume(origin: relay);
+    final server = MoqServer(
+      config: MoqServerConfig(
+        bind: '127.0.0.1:0',
+        tls: MoqServerTls(generate: ['localhost']),
+        quic: MoqQuicConfig(),
+        publish: relay,
+        consume: relay,
+      ),
+    );
     final address = await server.listen().timeout(timeout);
 
     final accepted = () async {
@@ -36,7 +58,7 @@ void main() {
     final serverSession = await accepted;
     expect(client.bandwidth(), isA<MoqBandwidth>());
 
-    final announcement = client.announcements().firstWhere(
+    final announcement = client.announced().updates().firstWhere(
       (event) => event is AnnounceEventStart,
     );
     final broadcast = relay.createBroadcast(path: 'live');
@@ -55,7 +77,7 @@ void main() {
 
     // Routed subscriptions pull their source lazily when the consumer is first read.
     final nextGroup = consumer.nextGroup();
-    await track.used().timeout(timeout);
+    await track.demand().used().timeout(timeout);
 
     final producer = track.appendGroup();
     producer.writeFrame(
@@ -102,7 +124,7 @@ void main() {
     ).timeout(timeout);
     final serverSession = await accepted;
 
-    final announcement = client.announcements().firstWhere(
+    final announcement = client.announced().updates().firstWhere(
       (event) => event is AnnounceEventStart,
     );
     final broadcast = server.createBroadcast('live');
@@ -129,6 +151,16 @@ void main() {
         ),
       ),
       throwsArgumentError,
+    );
+  });
+
+  test('an invalid config fails before dialing', () {
+    expect(
+      Moq.connect(
+        'https://localhost',
+        options: const ConnectOptions(versions: ['moq-lite-99']),
+      ),
+      throwsA(isA<ConfigMoqException>()),
     );
   });
 
@@ -199,6 +231,30 @@ void main() {
     announced.dispose();
   });
 
+  test('a new epoch restarts announce consumers', () async {
+    final origin = MoqOriginProducer(config: MoqOriginConfig());
+    final announced = origin.consume().announced(config: MoqAnnounceConfig());
+    final broadcast = origin.createBroadcast(path: 'epoch');
+
+    final first = mintEpoch();
+    expect(
+      epochTime('018bcfe5-6800-7000-8000-000000000000'),
+      DateTime.utc(2023, 11, 14, 22, 13, 20),
+    );
+    broadcast.announce(route: MoqRoute(epoch: first));
+    final start = await nextRoute(announced) as AnnounceEventStart;
+    expect(start.announce.route.epoch, first);
+
+    final second = mintEpoch();
+    broadcast.announce(route: MoqRoute(epoch: second));
+    final restart = await nextRoute(announced) as AnnounceEventRestart;
+    expect(restart.announce.route.epoch, second);
+
+    expect(() => epochTime('not-an-epoch'), throwsA(isA<MoqException>()));
+    announced.cancel();
+    announced.dispose();
+  });
+
   test('announced pattern reports captures', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
     final announced = origin.consume().announced(
@@ -224,5 +280,30 @@ void main() {
     dynamic.cancel();
     dynamic.dispose();
     served.dispose();
+  });
+
+  test('JSON tracks take over a raw track', () async {
+    final broadcast = MoqBroadcastProducer();
+    final producer = moq_json.SnapshotProducer(
+      broadcast: broadcast,
+      track: broadcast.publishTrack(name: 'status', info: null),
+      config: moq_json.SnapshotConfig(),
+    );
+    final track = await broadcast
+        .consume()
+        .subscribeTrack(name: 'status', subscription: null)
+        .timeout(timeout);
+    final consumer = moq_json.SnapshotConsumer(
+      track: track,
+      config: moq_json.SnapshotConfig(),
+    );
+
+    producer.update(value: jsonEncode({'state': 'live'}));
+    final value = await consumer.next().timeout(timeout);
+    expect(jsonDecode(value!), {'state': 'live'});
+
+    consumer.cancel();
+    producer.finish();
+    broadcast.close();
   });
 }

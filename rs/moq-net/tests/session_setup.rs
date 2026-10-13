@@ -173,3 +173,23 @@ fn every_version_is_classified() {
 	sorted.sort_unstable();
 	assert_eq!(sorted, all);
 }
+
+/// Admission refusals use the same negotiated session registry as active sessions.
+#[moq_net_sim::test]
+async fn unsupported_admission_uses_the_negotiated_session_registry() {
+	for name in LATE {
+		let version = version(name);
+		let (session, request) = dial(version).await;
+		request.close(Error::Unsupported);
+		let err = setup(&session).await.expect("the refusal never arrived").unwrap_err();
+		let expected = if version.is_lite() {
+			SessionError::Unsupported
+		} else {
+			SessionError::Internal
+		};
+		assert!(
+			matches!(&err, Error::Session(code) if *code == expected),
+			"{name}: {err:?}"
+		);
+	}
+}

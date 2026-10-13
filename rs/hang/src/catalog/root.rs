@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 ///
 /// The base catalog carries the media sections (`video`, `audio`, `text`), the optional
 /// `archive` (each track's timeline and any durable recording), the optional `clock` (the
-/// broadcast's one wall-clock mapping), and the data sections
-/// (`json`, `binary`) for application tracks that aren't media.
+/// broadcast's one wall-clock mapping), the data sections
+/// (`json`, `binary`) for application tracks that aren't media, and the optional `m2ts` (a
+/// transport stream carried whole).
 /// Applications extend it with their own root sections (e.g. `scte35`) through `E`. The catalog
 /// does not deny unknown fields, so a base consumer ignores the extra sections and an extended
 /// catalog stays wire-compatible. See the `extension_roundtrip` test.
@@ -99,6 +100,11 @@ pub struct Catalog<E = ()> {
 	)]
 	pub binary: Binary,
 
+	/// A transport stream carried whole rather than demultiplexed: the one track holding its
+	/// packets, verbatim. See [`M2ts`](crate::catalog::M2ts). Omitted from the wire when absent.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub m2ts: Option<crate::catalog::M2ts>,
+
 	/// Application-defined root sections, flattened alongside the base catalog sections.
 	#[serde(flatten)]
 	pub ext: E,
@@ -120,8 +126,11 @@ impl Catalog<()> {
 	///
 	/// Keeps the bare `moq_net` retention rather than the media one: the catalog is
 	/// snapshot mode, so the useful value is the live edge, which is always kept.
+	/// Timed in milliseconds, so snapshots share the broadcast clock with media.
 	pub fn default_track_info() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_priority(PRIORITY.catalog)
+		moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_priority(PRIORITY.catalog)
 	}
 
 	/// The subscription preferences used for the catalog track (high priority so
@@ -357,6 +366,7 @@ mod test {
 				framerate: None,
 				optimize_for_latency: None,
 				container: Container::Legacy,
+				warmup: None,
 				jitter: Some(std::time::Duration::from_millis(100)),
 				delay: Some(std::time::Duration::from_millis(200)),
 			},
@@ -375,6 +385,7 @@ mod test {
 				enabled: true,
 				description: None,
 				container: Container::Legacy,
+				warmup: None,
 				jitter: Some(std::time::Duration::from_millis(40)),
 				delay: None,
 			},
@@ -697,6 +708,23 @@ mod test {
 		assert_eq!(
 			Catalog::<()>::from_str(&json).expect("failed to decode").clock,
 			Some(clock)
+		);
+	}
+
+	#[test]
+	fn m2ts_roundtrips_at_the_root() {
+		let mut m2ts = crate::catalog::M2ts::new("0.m2ts");
+		m2ts.random_access = true;
+		let catalog = Catalog::<()> {
+			m2ts: Some(m2ts.clone()),
+			..Default::default()
+		};
+
+		let json = catalog.to_json().expect("failed to encode");
+		assert_eq!(json, r#"{"m2ts":{"track":"0.m2ts","randomAccess":true}}"#);
+		assert_eq!(
+			Catalog::<()>::from_str(&json).expect("failed to decode").m2ts,
+			Some(m2ts)
 		);
 	}
 

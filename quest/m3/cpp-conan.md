@@ -23,7 +23,10 @@ first. The vcpkg registry, which this reuses, is parked in m3 too (decided
 - CI: a consumer smoke project (`conan install` then CMake) built nightly on
   all three platforms.
 - conan-center is out of scope; it wants source builds.
+- Decided 2026-10-08: like the vcpkg port, this needs the first C++ package
+  release, which #4079 adds as its own quest.
 
 ## Required
 
+- [First C++ package release](/quest/m1/cpp-release.md) - the tarballs the recipe packages
 - [vcpkg registry](/quest/m3/cpp-vcpkg.md) - the release manifest and bump automation this reuses

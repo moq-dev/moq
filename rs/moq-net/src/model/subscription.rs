@@ -234,6 +234,11 @@ impl Position {
 			Bound::Included(self.group)
 		}
 	}
+
+	/// The first group this exclusive end excludes whole, `None` past the last group.
+	pub(crate) fn final_sequence(self) -> Option<u64> {
+		self.group.checked_add(u64::from(self.frame != 0))
+	}
 }
 
 /// Where a read cursor stops: a group sequence or frame index it will not deliver.

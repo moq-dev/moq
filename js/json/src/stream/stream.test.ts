@@ -11,7 +11,7 @@ async function drain(track: Track.Subscriber, compression: boolean): Promise<num
 	for (;;) {
 		const record = await consumer.next();
 		if (record === undefined) break;
-		out.push(record.n);
+		out.push(record.value.n);
 	}
 	return out;
 }
@@ -19,7 +19,7 @@ async function drain(track: Track.Subscriber, compression: boolean): Promise<num
 test("plaintext roundtrip in order", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Rec>({ track });
-	for (let n = 0; n < 5; n++) producer.append({ n });
+	for (let n = 0; n < 5; n++) producer.append({ value: { n } });
 	producer.finish();
 
 	expect(await drain(track.subscribe(), false)).toEqual([0, 1, 2, 3, 4]);
@@ -28,7 +28,7 @@ test("plaintext roundtrip in order", async () => {
 test("compressed roundtrip in order", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Rec>({ track, compression: "deflate" });
-	for (let n = 0; n < 20; n++) producer.append({ n });
+	for (let n = 0; n < 20; n++) producer.append({ value: { n } });
 	producer.finish();
 
 	expect(await drain(track.subscribe(), true)).toEqual(Array.from({ length: 20 }, (_, n) => n));
@@ -37,7 +37,7 @@ test("compressed roundtrip in order", async () => {
 test("the whole log rides one group, never rolled", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Rec>({ track, compression: "deflate" });
-	for (let n = 0; n < 50; n++) producer.append({ n });
+	for (let n = 0; n < 50; n++) producer.append({ value: { n } });
 	producer.finish();
 
 	// A single group holds everything, and the consumer reads it all in order.
@@ -54,7 +54,7 @@ test("records with embedded newlines round-trip (JSON escapes the newline)", asy
 	const track = new Track.Producer("test");
 	const producer = new Producer<{ s: string }>({ track, compression: "deflate" });
 	const value = { s: "line1\nline2\ttab" };
-	for (let i = 0; i < 4; i++) producer.append(value);
+	for (let i = 0; i < 4; i++) producer.append({ value: value });
 	producer.finish();
 
 	const consumer = new Consumer<{ s: string }>({ track: track.subscribe(), compression: "deflate" });
@@ -62,7 +62,7 @@ test("records with embedded newlines round-trip (JSON escapes the newline)", asy
 	for (;;) {
 		const record = await consumer.next();
 		if (record === undefined) break;
-		out.push(record);
+		out.push(record.value);
 	}
 	expect(out).toEqual([value, value, value, value]);
 });
@@ -84,7 +84,7 @@ test("a second group is reported while the first is still open", async () => {
 	// Ask for a replay window, so the first group is delivered rather than skipped by the
 	// subscriber's default max delay budget once a newer group exists.
 	const consumer = new Consumer<Rec>({ track: track.subscribe({ maxDelay: Time.Milli(30_000) }) });
-	expect(await consumer.next()).toEqual({ n: 0 });
+	expect((await consumer.next())?.value).toEqual({ n: 0 });
 	await expect(consumer.next()).rejects.toThrow(Rolled);
 
 	// Both mirrors are released. The read that lost the race would otherwise stay registered on the
@@ -102,13 +102,13 @@ test("a second concurrent read is refused rather than served the first one's gro
 	// group for a second one and fail a perfectly good log. Rust gets this from `&mut self`.
 	const track = new Track.Producer("test");
 	const producer = new Producer<Rec>({ track });
-	producer.append({ n: 0 });
+	producer.append({ value: { n: 0 } });
 	producer.finish();
 
 	const consumer = new Consumer<Rec>({ track: track.subscribe() });
 	const first = consumer.next();
 	expect(() => consumer.next()).toThrow("multiple calls to next not supported");
-	expect(await first).toEqual({ n: 0 });
+	expect((await first)?.value).toEqual({ n: 0 });
 });
 
 // Counts the reactions `run` attaches to promises still pending once it returns. A promise holds each
@@ -140,8 +140,8 @@ test("blocked reads leave nothing behind on the pending group read", async () =>
 	const reactions = await pendingReactions(async () => {
 		for (let n = 0; n < 1000; n++) {
 			const next = consumer.next();
-			producer.append({ n });
-			expect((await next)?.n).toBe(n);
+			producer.append({ value: { n } });
+			expect((await next)?.value.n).toBe(n);
 		}
 	});
 	expect(reactions).toBeLessThan(10);
@@ -150,16 +150,31 @@ test("blocked reads leave nothing behind on the pending group read", async () =>
 	producer.finish();
 });
 
-test("each record keeps its capture timestamp", async () => {
-	const track = new Track.Producer("test");
+test("an untimed record reads back untimed", async () => {
+	const track = new Track.Producer("test").accept({});
 	const producer = new Producer<number>({ track });
-	producer.append(1, Time.Timestamp.fromMillis(1_000));
-	producer.append(2, Time.Timestamp.fromMillis(2_000));
+	producer.append({ value: 1 });
 	producer.finish();
 
-	const group = await track.subscribe().ordered().nextGroup();
-	expect((await group?.readFrame())?.timestamp?.as(Time.Timescale.MILLI)).toBe(1_000);
-	expect((await group?.readFrame())?.timestamp?.as(Time.Timescale.MILLI)).toBe(2_000);
+	const consumer = new Consumer<number>({ track: track.subscribe() });
+	expect(await consumer.next()).toEqual({ value: 1, at: undefined });
+	expect(await consumer.next()).toBeUndefined();
+});
+
+test("each record reads back with its capture timestamp", async () => {
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
+	const producer = new Producer<number>({ track, compression: "deflate" });
+	producer.append({ value: 1, at: Time.Timestamp.fromMillis(1_000) });
+	producer.append({ value: 2, at: Time.Timestamp.fromMillis(2_000) });
+	producer.finish();
+
+	const consumer = new Consumer<number>({ track: track.subscribe(), compression: "deflate" });
+	const records: [number, number | undefined][] = [];
+	for await (const { value, at } of consumer) records.push([value, at?.as(Time.Timescale.MILLI)]);
+	expect(records).toEqual([
+		[1, 1_000],
+		[2, 2_000],
+	]);
 });
 
 // A record past the group budget is refused before anything is written, so the log carries on: the
@@ -168,11 +183,13 @@ for (const compression of [false, true]) {
 	test(`an oversized record is refused and the log continues (compression=${compression})`, async () => {
 		const track = new Track.Producer("test");
 		const producer = new Producer<Rec | string>({ track, compression: compression ? "deflate" : "none" });
-		producer.append({ n: 0 });
+		producer.append({ value: { n: 0 } });
 
-		expect(() => producer.append("x".repeat(Group.MAX_GROUP_CACHE_BYTES))).toThrow(NetError.GroupTooLarge);
+		expect(() => producer.append({ value: "x".repeat(Group.MAX_GROUP_CACHE_BYTES) })).toThrow(
+			NetError.GroupTooLarge,
+		);
 
-		producer.append({ n: 1 });
+		producer.append({ value: { n: 1 } });
 		producer.finish();
 		expect(await drain(track.subscribe(), compression)).toEqual([0, 1]);
 	});
@@ -184,10 +201,10 @@ for (const compression of [false, true]) {
 	test(`a spent budget refuses every append (compression=${compression})`, async () => {
 		const track = new Track.Producer("test");
 		const producer = new Producer<Rec>({ track, compression: compression ? "deflate" : "none" });
-		for (let n = 0; n < Group.MAX_GROUP_FRAMES; n++) producer.append({ n });
+		for (let n = 0; n < Group.MAX_GROUP_FRAMES; n++) producer.append({ value: { n } });
 
-		expect(() => producer.append({ n: -1 })).toThrow(NetError.GroupTooLarge);
-		expect(() => producer.append({ n: -2 })).toThrow(NetError.GroupTooLarge);
+		expect(() => producer.append({ value: { n: -1 } })).toThrow(NetError.GroupTooLarge);
+		expect(() => producer.append({ value: { n: -2 } })).toThrow(NetError.GroupTooLarge);
 		producer.finish();
 
 		const records = await drain(track.subscribe(), compression);

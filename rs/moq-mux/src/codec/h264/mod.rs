@@ -492,6 +492,41 @@ pub(crate) fn build_avcc(sps_nals: &[Bytes], pps_nals: &[Bytes]) -> Result<Bytes
 	Ok(out.freeze())
 }
 
+/// An avcC whose parameter sets will arrive in the samples, from a catalog codec
+/// string that already fixes the record.
+///
+/// Baseline, Main, and Extended carry no avcC extension. High is 8-bit and declared
+/// 4:2:0, which the extension must state when the SPS is absent; a monochrome High
+/// stream is rare enough to accept that mismatch, and its in-band SPS still governs
+/// decoding. Every other profile leaves chroma format or bit depth to the SPS, so the
+/// record has to wait for one.
+pub(crate) fn catalog_avcc(h264: &hang::catalog::H264) -> Option<Bytes> {
+	if !h264.inline {
+		return None;
+	}
+	let extension = match h264.profile {
+		66 | 77 | 88 => false,
+		100 => true,
+		_ => return None,
+	};
+
+	let mut out = BytesMut::with_capacity(if extension { 11 } else { 7 });
+	out.put_u8(1);
+	out.put_u8(h264.profile);
+	out.put_u8(h264.constraints);
+	out.put_u8(h264.level);
+	out.put_u8(0xff); // lengthSizeMinusOne = 3
+	out.put_u8(0xe0); // numOfSequenceParameterSets = 0
+	out.put_u8(0); // numOfPictureParameterSets = 0
+	if extension {
+		out.put_u8(0xfc | 1); // chroma_format_idc = 1 (4:2:0)
+		out.put_u8(0xf8); // bit_depth_luma_minus8 = 0
+		out.put_u8(0xf8); // bit_depth_chroma_minus8 = 0
+		out.put_u8(0); // numOfSequenceParameterSetExt = 0
+	}
+	Some(out.freeze())
+}
+
 /// Read `count` length-prefixed (u16) NAL units from `buf` starting at `*pos`,
 /// advancing `*pos` past the last one. All arithmetic is checked so malformed
 /// configs surface as errors rather than panics.
@@ -949,5 +984,70 @@ mod tests {
 		let p_out = tx.transform(p).expect("transform p").expect("output");
 		assert_eq!(p_out.len(), 4 + pslice.len());
 		assert_eq!(&p_out[4..], pslice);
+	}
+
+	fn decode_avcc(bytes: &Bytes) -> mp4_atom::Avcc {
+		use mp4_atom::Atom;
+		mp4_atom::Avcc::decode_body(&mut std::io::Cursor::new(bytes.as_ref())).unwrap()
+	}
+
+	#[test]
+	fn catalog_avcc_baseline_has_no_extension() {
+		let h264 = hang::catalog::H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: true,
+		};
+		let avcc = decode_avcc(&catalog_avcc(&h264).unwrap());
+		assert_eq!(avcc.avc_profile_indication, 0x42);
+		assert_eq!(avcc.profile_compatibility, 0xc0);
+		assert_eq!(avcc.avc_level_indication, 0x1f);
+		assert_eq!(avcc.length_size, 4);
+		assert!(avcc.sequence_parameter_sets.is_empty());
+		assert!(avcc.picture_parameter_sets.is_empty());
+		assert!(avcc.ext.is_none());
+	}
+
+	#[test]
+	fn catalog_avcc_high_states_420_8bit() {
+		let h264 = hang::catalog::H264 {
+			profile: 100,
+			constraints: 0,
+			level: 0x28,
+			inline: true,
+		};
+		let avcc = decode_avcc(&catalog_avcc(&h264).unwrap());
+		assert_eq!(avcc.avc_profile_indication, 100);
+		assert!(avcc.sequence_parameter_sets.is_empty());
+		assert_eq!(
+			avcc.ext,
+			Some(mp4_atom::AvccExt {
+				chroma_format: 1,
+				bit_depth_luma: 8,
+				bit_depth_chroma: 8,
+				sequence_parameter_sets_ext: Vec::new(),
+			})
+		);
+	}
+
+	#[test]
+	fn catalog_avcc_refuses_profiles_the_string_cannot_describe() {
+		for profile in [110, 122, 244, 44, 144] {
+			let h264 = hang::catalog::H264 {
+				profile,
+				constraints: 0,
+				level: 0x1f,
+				inline: true,
+			};
+			assert!(catalog_avcc(&h264).is_none(), "profile {profile}");
+		}
+		let out_of_band = hang::catalog::H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: false,
+		};
+		assert!(catalog_avcc(&out_of_band).is_none());
 	}
 }

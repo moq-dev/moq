@@ -21,7 +21,8 @@ export function bufferingIndicator(parent: Effect, watch: MoqWatch): HTMLElement
 		const status = effect.get(watch.broadcast.out.status);
 		const online = status === "loading" || status === "live";
 		const unsupported = effect.get(watch.video.source.out.error) === "unsupported";
-		container.style.display = buffering && online && !unsupported ? "" : "none";
+		const paused = effect.get(watch.controls.paused);
+		container.style.display = buffering && online && !unsupported && !paused ? "" : "none";
 	});
 
 	return container;

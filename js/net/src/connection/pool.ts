@@ -20,6 +20,7 @@ import {
 	type WebTransportProps as WebTransportPropsType,
 } from "./connect.ts";
 import type { Established as EstablishedType } from "./established.ts";
+import type { Extensions as ExtensionsType } from "./extensions.ts";
 import type { GoawayProps, Redirect as RedirectType } from "./goaway.ts";
 import { Reload, type ReloadDelay, type ReloadStatus } from "./reload.ts";
 import type { Probe as ProbeType, Stats as StatsType } from "./stats.ts";
@@ -372,6 +373,8 @@ export namespace Connection {
 	export type CertificateHash = CertificateHashType;
 	/** An established one-shot session. */
 	export type Established = EstablishedType;
+	/** The moq-transport extensions a one-shot session offers. */
+	export type Extensions = ExtensionsType;
 }
 
 /** Throw if `props` cannot be honored, rather than silently dropping them. */

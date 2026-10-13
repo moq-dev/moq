@@ -25,7 +25,7 @@ pub enum MoqProtocolKind {
 	Cancel,
 	/// Something went wrong that isn't worth a dedicated code. Session 1, stream 0.
 	Internal,
-	/// The peer's token does not grant the requested path or operation.
+	/// The peer's token does not grant the requested path or operation. Session 2, stream 0x3B.
 	Unauthorized,
 	/// The peer broke a protocol rule; the session is unusable.
 	ProtocolViolation,
@@ -144,6 +144,7 @@ fn stream_kind(err: &moq_net::StreamError) -> MoqProtocolKind {
 		moq_net::StreamError::WrongSize => MoqProtocolKind::WrongSize,
 		moq_net::StreamError::FrameTooLarge => MoqProtocolKind::FrameTooLarge,
 		moq_net::StreamError::TimestampMismatch => MoqProtocolKind::TimestampMismatch,
+		moq_net::StreamError::Unauthorized => MoqProtocolKind::Unauthorized,
 		moq_net::StreamError::App(_) => MoqProtocolKind::App,
 		moq_net::StreamError::Unknown(_) => MoqProtocolKind::Unknown,
 		_ => MoqProtocolKind::Unknown,
@@ -153,6 +154,7 @@ fn stream_kind(err: &moq_net::StreamError) -> MoqProtocolKind {
 /// Error returned by all UniFFI-exported functions.
 ///
 /// Exports `Display`, which the bindings surface as the error's string form.
+/// Diagnostic payloads are named `reason`; structured protocol failures use `details`.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 #[uniffi::export(Display)]
 #[non_exhaustive]
@@ -162,47 +164,47 @@ pub enum MoqError {
 	Protocol { details: MoqProtocolError },
 
 	/// The underlying QUIC/WebTransport connection failed.
-	#[error("transport: {0}")]
-	Transport(String),
+	#[error("transport: {reason}")]
+	Transport { reason: String },
 
 	/// A local failure without a session or stream code.
-	#[error("internal: {0}")]
-	Internal(String),
+	#[error("internal: {reason}")]
+	Internal { reason: String },
 
-	#[error("{0}")]
-	Media(String),
+	#[error("{reason}")]
+	Media { reason: String },
 
-	#[error("{0}")]
-	Mux(String),
+	#[error("{reason}")]
+	Mux { reason: String },
 
-	#[error("{0}")]
-	JsonTrack(String),
+	#[error("{reason}")]
+	JsonTrack { reason: String },
 
 	// Native codec errors, behind the optional `audio`/`video` features.
 	#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
-	#[error("{0}")]
-	Audio(String),
+	#[error("{reason}")]
+	Audio { reason: String },
 
 	#[cfg(all(feature = "video", not(target_arch = "wasm32")))]
-	#[error("{0}")]
-	Video(String),
+	#[error("{reason}")]
+	Video { reason: String },
 
-	#[error("url: {0}")]
-	Url(String),
+	#[error("url: {reason}")]
+	Url { reason: String },
 
 	#[error("timestamp overflow")]
 	TimeOverflow,
 
-	#[error("log level: {0}")]
-	LogLevel(String),
+	#[error("log level: {reason}")]
+	LogLevel { reason: String },
 
 	// Only the native path spawns onto a runtime, so only it can fail to join.
 	#[cfg(not(target_arch = "wasm32"))]
-	#[error("task: {0}")]
-	Task(String),
+	#[error("task: {reason}")]
+	Task { reason: String },
 
-	#[error("json: {0}")]
-	Json(String),
+	#[error("json: {reason}")]
+	Json { reason: String },
 
 	#[error("cancelled")]
 	Cancelled,
@@ -217,20 +219,20 @@ pub enum MoqError {
 	#[error("busy")]
 	Busy,
 
-	#[error("connect: {0}")]
-	Connect(String),
+	#[error("connect: {reason}")]
+	Connect { reason: String },
 
-	#[error("bind: {0}")]
-	Bind(String),
+	#[error("bind: {reason}")]
+	Bind { reason: String },
 
-	#[error("reject: {0}")]
-	Reject(String),
+	#[error("reject: {reason}")]
+	Reject { reason: String },
 
 	#[error("already responded")]
 	AlreadyResponded,
 
-	#[error("codec: {0}")]
-	Codec(String),
+	#[error("codec: {reason}")]
+	Codec { reason: String },
 
 	#[error("unauthorized")]
 	Unauthorized,
@@ -250,37 +252,45 @@ pub enum MoqError {
 	#[error("unsupported")]
 	Unsupported,
 
-	/// This track already committed to the other delivery order.
+	/// This track already committed to another way of reading it.
 	///
-	/// A track is read in arrival order or in sequence order, never both, and the first
-	/// group read picks which. Reaching for the other one afterwards is this error rather
-	/// than [`Self::Unsupported`]: both orders work fine here, the track just isn't
-	/// reading in the one you asked for. Read the track through a second consumer if you
-	/// genuinely need both.
-	#[error("already committed to the other delivery order")]
+	/// A track is read in arrival order, in sequence order, or by a typed reader such as a
+	/// JSON consumer, never two of them, and the first group read picks the order. Reaching
+	/// for another one afterwards is this error rather than [`Self::Unsupported`]: each works
+	/// fine here, the track just isn't reading the way you asked for. Read the track through
+	/// a second consumer if you genuinely need both.
+	#[error("already committed to another way of reading")]
 	AlreadyCommitted,
 
 	/// A route carried an invalid hop id or too many hops.
-	#[error("invalid route: {0}")]
-	InvalidRoute(String),
+	#[error("invalid route: {reason}")]
+	InvalidRoute { reason: String },
 
 	/// A path pattern was empty, had a doubled slash, or used a reserved segment form.
-	#[error("invalid pattern: {0}")]
-	InvalidPattern(String),
+	#[error("invalid pattern: {reason}")]
+	InvalidPattern { reason: String },
+
+	/// An epoch was not a lowercase hyphenated UUIDv7.
+	#[error("{reason}")]
+	InvalidEpoch { reason: String },
 
 	/// A catalog rendition named another broadcast, but this consumer came from a standalone
 	/// broadcast rather than an origin, so there is nothing to resolve the reference against.
-	#[error("unresolvable broadcast reference: {0}")]
-	UnresolvableBroadcast(String),
+	#[error("unresolvable broadcast reference: {reason}")]
+	UnresolvableBroadcast { reason: String },
 
-	#[error("log: {0}")]
-	Log(String),
+	#[error("log: {reason}")]
+	Log { reason: String },
+
+	/// A configuration record held a value the constructor cannot use.
+	#[error("config: {reason}")]
+	Config { reason: String },
 }
 
 impl From<moq_net::Error> for MoqError {
 	fn from(err: moq_net::Error) -> Self {
 		match err {
-			moq_net::Error::Transport(message) => Self::Transport(message),
+			moq_net::Error::Transport(message) => Self::Transport { reason: message },
 			moq_net::Error::NotFound | moq_net::Error::NotFetchable => Self::NotFound,
 			moq_net::Error::Closed | moq_net::Error::GoingAway | moq_net::Error::SessionClosed => Self::Closed,
 			moq_net::Error::Cancel => Self::Cancelled,
@@ -304,7 +314,9 @@ impl From<moq_net::Error> for MoqError {
 					stream,
 					moq_net::StreamError::Internal | moq_net::StreamError::Session(_)
 				) {
-					Self::Internal(other.to_string())
+					Self::Internal {
+						reason: other.to_string(),
+					}
 				} else {
 					Self::Protocol {
 						details: MoqProtocolError::from_stream(&stream),
@@ -319,7 +331,9 @@ impl From<hang::Error> for MoqError {
 	fn from(err: hang::Error) -> Self {
 		match err {
 			hang::Error::Moq(err) => err.into(),
-			err => Self::Media(err.to_string()),
+			err => Self::Media {
+				reason: err.to_string(),
+			},
 		}
 	}
 }
@@ -333,7 +347,9 @@ impl From<moq_mux::Error> for MoqError {
 			err => std::iter::successors(Some(&err as &(dyn std::error::Error + 'static)), |err| err.source())
 				.find_map(|err| err.downcast_ref::<moq_net::Error>())
 				.map(|err| err.clone().into())
-				.unwrap_or_else(|| Self::Mux(err.to_string())),
+				.unwrap_or_else(|| Self::Mux {
+					reason: err.to_string(),
+				}),
 		}
 	}
 }
@@ -342,7 +358,9 @@ impl From<moq_json::Error> for MoqError {
 	fn from(err: moq_json::Error) -> Self {
 		match err {
 			moq_json::Error::Net(err) => err.into(),
-			err => Self::JsonTrack(err.to_string()),
+			err => Self::JsonTrack {
+				reason: err.to_string(),
+			},
 		}
 	}
 }
@@ -350,14 +368,18 @@ impl From<moq_json::Error> for MoqError {
 #[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
 impl From<moq_audio::Error> for MoqError {
 	fn from(err: moq_audio::Error) -> Self {
-		Self::Audio(err.to_string())
+		Self::Audio {
+			reason: err.to_string(),
+		}
 	}
 }
 
 #[cfg(all(feature = "video", not(target_arch = "wasm32")))]
 impl From<moq_video::Error> for MoqError {
 	fn from(err: moq_video::Error) -> Self {
-		Self::Video(err.to_string())
+		Self::Video {
+			reason: err.to_string(),
+		}
 	}
 }
 
@@ -374,7 +396,7 @@ macro_rules! from_message {
 		$(
 			impl From<$ty> for MoqError {
 				fn from(err: $ty) -> Self {
-					Self::$variant(err.to_string())
+					Self::$variant { reason: err.to_string() }
 				}
 			}
 		)*
@@ -386,6 +408,7 @@ from_message! {
 	tracing::metadata::ParseLevelError => LogLevel,
 	serde_json::Error => Json,
 	moq_net::InvalidPattern => InvalidPattern,
+	moq_net::InvalidEpoch => InvalidEpoch,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -466,6 +489,19 @@ mod tests {
 				assert_eq!(protocol.scope, MoqErrorScope::Session);
 				assert_eq!(protocol.code, 0x1f);
 				assert_eq!(protocol.kind, MoqProtocolKind::Unknown);
+			}
+			other => panic!("expected Protocol, got {other}"),
+		}
+	}
+
+	#[test]
+	fn stream_unauthorized_keeps_its_kind() {
+		let err = MoqError::from(moq_net::Error::from(moq_net::StreamError::Unauthorized));
+		match err {
+			MoqError::Protocol { details: protocol } => {
+				assert_eq!(protocol.scope, MoqErrorScope::Stream);
+				assert_eq!(protocol.code, 0x3b);
+				assert_eq!(protocol.kind, MoqProtocolKind::Unauthorized);
 			}
 			other => panic!("expected Protocol, got {other}"),
 		}

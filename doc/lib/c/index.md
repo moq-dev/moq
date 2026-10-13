@@ -7,11 +7,12 @@ description: moq-c, the stable C ABI over the Rust core
 
 [![GitHub release](https://img.shields.io/github/v/release/moq-dev/moq?filter=moq-c-v*\&label=moq-c)](https://github.com/moq-dev/moq/releases?q=moq-c)
 
-`moq-c` exposes MoQ to C, C++, and any language with a C FFI through a
+`moq-c` exposes MoQ to C and any language with a C FFI through a
 stable ABI: a generated `moq.h`, a static `libmoq.a` that links the whole Rust
-runtime in, and a pkg-config file for its native link dependencies. The
-[OBS plugin](/bin/obs) is built on it. Releases through 0.6 were named
-`libmoq`.
+runtime in, and a pkg-config file for its native link dependencies. Releases
+through 0.6 were named `libmoq`. C++ projects should prefer the
+[C++ package](/lib/cpp/) (`moq-cpp`): the same core as RAII objects and
+futures instead of handles and callbacks.
 
 ## Install
 
@@ -63,6 +64,7 @@ inside. The header is the reference: each function carries a doc comment.
 - **Live encoder timing.** After writing a frame you encoded yourself, call `moq_publish_media_flush` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `moq_publish_media_discontinuity`, then keep timestamps moving forward and resume video on a keyframe.
 - **Decoded frames hold decoder buffers.** Free each frame id with `moq_decode_video_frame_free` promptly, or the decoder stalls.
 - **Stats.** `moq_session_stats()` fills `moq_connection_stats` with `rtt_us`, `estimated_send_rate_bps`, `estimated_recv_rate_bps`, and the byte and packet counters (`bytes_sent`, `bytes_received`, `bytes_lost`, `packets_sent`, `packets_received`, `packets_lost`). Each has a `<field>_valid` flag, false when the transport does not report it, which is not the same as zero.
+- **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
 
 ## Reference
 

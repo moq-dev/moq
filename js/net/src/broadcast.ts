@@ -27,10 +27,12 @@ export interface Announcer {
 let attachAnnouncer: (producer: Producer, announcer: Announcer) => void;
 let stampProducer: (producer: Producer, path: Path.Valid) => void;
 
-// Info lookups pending on a requested track. Each is demand, as a pending track request is in Rust,
+// Info lookups pending or held on a track. Each is demand, as a pending track request is in Rust,
 // though nobody subscribes.
 class Lookups {
 	pending = 0;
+	// Whether a lookup opened the request, so the last lookup to end closes it unless subscribed.
+	opened = false;
 	// Re-evaluates the track's demand at once; set by watchDemand.
 	changed = () => {};
 
@@ -92,6 +94,8 @@ function watchDemand(state: BroadcastState, producer: track.Producer, lookups?: 
 	const cleanup = () => {
 		disposeUsed();
 		disposeClosed();
+		// A removed track keeps its lookups, so a hold ending later must not count it again.
+		if (lookups?.changed === update) lookups.changed = () => {};
 		if (active) {
 			state.active--;
 			active = false;
@@ -201,18 +205,45 @@ function subscribe(state: BroadcastState, name: string, options: track.Subscript
 	return logical(state, name).producer.subscribe(options);
 }
 
-async function resolveTrackInfo(state: BroadcastState, name: string): Promise<track.Info> {
+// A pending lookup is demand, and so is a held one until `hold` aborts, which also abandons it before
+// the answer. A request a lookup opened is let go once it is answered and nobody holds or subscribes
+// to it; closing it sooner would hand its handler a closed producer.
+async function resolveTrackInfo(state: BroadcastState, name: string, hold?: AbortSignal): Promise<track.Info> {
+	hold?.throwIfAborted();
 	const { producer, requested } = logical(state, name);
 	const lookups = state.lookups.get(producer);
-	lookups?.add(1);
-	try {
-		return await producer.info();
-	} finally {
-		lookups?.add(-1);
-		// A finished lookup is no demand: let go of a request it opened that nobody subscribed to
-		// meanwhile.
-		if (requested && !producer.demand().used.peek()) producer.close();
+	if (!lookups) return producer.info();
+	if (requested) lookups.opened = true;
+	lookups.add(1);
+
+	const info = producer.info();
+	let answered = false;
+	let ended = false;
+	const release = () => {
+		if (lookups.opened && lookups.pending === 0 && !producer.demand().used.peek()) producer.close();
+	};
+	info.then(
+		() => {
+			answered = true;
+			if (ended) release();
+		},
+		() => {},
+	);
+	const end = () => {
+		ended = true;
+		lookups.add(-1);
+		if (answered) release();
+	};
+
+	if (!hold) {
+		try {
+			return await info;
+		} finally {
+			end();
+		}
 	}
+	hold.addEventListener("abort", end, { once: true });
+	return untilAborted(info, hold);
 }
 
 // Serve a group from the local retained window by subscribing and scanning to the
@@ -292,7 +323,7 @@ export class Producer {
 	constructor() {
 		registerWire(this, {
 			subscribe: (name, options) => subscribe(this.#state, name, options),
-			resolveTrackInfo: (name) => resolveTrackInfo(this.#state, name),
+			resolveTrackInfo: (name, hold) => resolveTrackInfo(this.#state, name, hold),
 			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
 			requested: () => requested(this.#state),
 		});
@@ -338,7 +369,9 @@ export class Producer {
 			throw new Error(`duplicate track: ${track.name}`);
 		}
 
-		watchDemand(this.#state, track);
+		const lookups = this.#state.lookups.get(track) ?? new Lookups();
+		this.#state.lookups.set(track, lookups);
+		watchDemand(this.#state, track, lookups);
 		this.#state.tracks.set(track.name, track);
 
 		// A finished track keeps serving its cache, so only an abort evicts it.
@@ -453,7 +486,7 @@ export class Consumer {
 		this.#state.consumers++;
 		registerWire(this, {
 			subscribe: (name, options) => subscribe(this.#state, name, options),
-			resolveTrackInfo: (name) => resolveTrackInfo(this.#state, name),
+			resolveTrackInfo: (name, hold) => resolveTrackInfo(this.#state, name, hold),
 			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
 			requested: () => requested(this.#state),
 		});

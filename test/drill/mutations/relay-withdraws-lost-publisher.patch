@@ -9,25 +9,25 @@
 diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
 --- a/rs/moq-net/src/lite/subscriber.rs
 +++ b/rs/moq-net/src/lite/subscriber.rs
-@@ -3192 +3192 @@ fn withdraw(&mut self, path: &PathOwned) {
+@@ -3515 +3515 @@ fn withdraw(&mut self, path: &PathOwned) {
 -			entry.dynamic.withdrawn();
 +			std::mem::ManuallyDrop::into_inner(entry.dynamic).withdrawn();
-@@ -3241,7 +3241,8 @@
+@@ -3568,7 +3568,8 @@
  	/// without recomputing the chain.
  	route: crate::origin::Route,
  	/// Dropping it retracts the route and rejects its queued requests.
 -	dynamic: crate::origin::Dynamic,
 +	// MUTATION: never dropped, so a route outlives the session that announced it.
 +	dynamic: std::mem::ManuallyDrop<crate::origin::Dynamic>,
- 	/// One minted source per requested path, each closed when its guard drops.
- 	sources: HashMap<PathOwned, crate::model::broadcast::SourceGuard>,
+ 	/// Closes as the route goes, which closes every source it minted.
+ 	live: kio::Producer<()>,
  	/// Whether the GOAWAY drain already re-priced this route.
-@@ -3257,7 +3258,7 @@
+@@ -3584,7 +3585,7 @@
  	fn new(route: crate::origin::Route, dynamic: crate::origin::Dynamic, wake: Arc<RouteWake>) -> Self {
  		Self {
  			route,
 -			dynamic,
 +			dynamic: std::mem::ManuallyDrop::new(dynamic),
- 			sources: HashMap::new(),
+ 			live: Default::default(),
  			drained: false,
  			waker: std::task::Waker::from(wake.clone()),

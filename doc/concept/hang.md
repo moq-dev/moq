@@ -126,6 +126,27 @@ Name the section with a namespaced key such as
 `com.example.mavlink`. A generic consumer only finds tracks in `json` and
 `binary`.
 
+## Transport streams
+
+A broadcast can carry an MPEG transport stream whole instead of demultiplexed
+into renditions, for what demultiplexing cannot carry, such as a scrambled
+service. The root `m2ts` section names the one track holding it:
+
+```json
+{
+  "m2ts": { "track": "0.m2ts", "randomAccess": true, "muxRate": 2499999 }
+}
+```
+
+Each frame is a run of whole 188-byte packets in input order, timestamped on
+the multiplex's own PCR clock, which never steps back: a source whose clock
+steps back is a new broadcast. `randomAccess` says whether every group begins
+where a receiver can start decoding, and `muxRate` is the constant multiplex
+rate in bits per second, absent for a variable-rate source. A player has
+nothing to decode here. `moq import ts --passthrough` writes this section (see
+[moq-cli](/bin/cli)); the encoding is in
+[draft-lcurley-moq-mpegts](/draft/moq-mpegts).
+
 ## Container
 
 The `container.kind` on each rendition says how frames are framed:
@@ -138,6 +159,13 @@ The `container.kind` on each rendition says how frames are framed:
 
 A consumer skips renditions with a kind it doesn't recognize and carries them
 through when republishing the catalog.
+
+A CMAF frame's timestamp is its fragment's earliest presentation time, and the
+broadcast timeline: `tfdt` only places the samples relative to each other. A
+publisher can move a passthrough track to another timeline by changing the frame
+timestamp alone, without rewriting the fragment. An untimed track's frames carry
+no timestamp, so their samples present at `tfdt`. A timed CMAF track declares the
+init segment's `mdhd` timescale, so the frame timestamp lands on a media tick.
 
 A Legacy or LOC video publisher can close the last frame's duration with an empty
 codec payload whose timestamp is that frame's exclusive end. Consumers treat it

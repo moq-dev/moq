@@ -366,7 +366,7 @@ mod tests {
 	fn resolved(name: &str, height: u32) -> Resolved {
 		Resolved {
 			name: name.to_string(),
-			height,
+			short_side: height,
 			size: moq_video::Size::new(height * 16 / 9, height),
 			bitrate: moq_net::bandwidth::Rate::from_bps(100_000),
 			framerate: Some(moq_video::Rate::new(30, 1).unwrap()),

@@ -69,7 +69,11 @@ authorization and hidden names work exactly as without one.
 
 - **One instance, one epoch.** A publisher mints an epoch per run. Replicas of
   the same content announce that same epoch. A prefix claim, and any route
-  without an epoch, names no instance.
+  without an epoch, names no instance, so a relay cannot tell that a claim's
+  worker closed a path and serves it again. Such a worker keeps the path's group
+  sequence going, even when its own input starts over at 0. Otherwise a viewer
+  returning within a relay's cache window gets the old output's latest group,
+  then nothing until the new sequence passes it.
 - **Newest wins.** Among routes at the same prefix, the newest epoch ranks
   first, ahead of cost, and a route without an epoch ranks last. Newest means
   the latest UUIDv7 timestamp, so hosts with skewed clocks can lose a restart
@@ -77,23 +81,42 @@ authorization and hidden names work exactly as without one.
 - **Same epoch resumes.** A subscription moves between routes with the same
   epoch without a seam, continuing from the first frame it lacks. A route
   without an epoch keeps its subscriptions until that route goes, which is how
-  a transcoder claim stays on the worker that first served it.
-- **A newer epoch replaces.** Subscriptions to the old instance end, and
-  clients re-request the path to get the new broadcast. That is how a restarted
-  encoder, whose group numbers start over, takes the name instead of stalling
-  viewers on the old sequence.
+  a transcoder claim stays on the worker that first served it, and a track that
+  fails ends instead of resuming, so request the path again.
+- **Another instance restarts.** A newer epoch, or, without one, another route
+  winning the path, is announced as a restart. Subscriptions already open stay
+  on the old instance until dropped or its route goes, while new requests get
+  the new one, so a player follows the restart by requesting the path again.
+  Held handles can still read their old cached content, but cannot open new
+  epochless requests after retirement. Request the path again for new content.
+  That is how a restarted encoder, whose group numbers start over, takes the
+  name instead of stalling viewers on the old sequence. A relay drops its copy
+  of the old instance, so a new subscriber never sees its cached groups.
 
-The epoch travels on moq-lite 07, which is opt-in. Older moq-lite versions and
-moq-transport cannot carry it, so their routes have no epoch: a relay keeps a
-subscription on the route it first resolved through, and viewers of a
-restarted publisher wait until the old session closes. In a mixed deployment
-the epoch-carrying route supersedes the one without each time it appears, so a
-flapping moq-lite 07 link cuts viewers that resolved through the older link.
+The epoch and the restart message travel on moq-lite 07, which is opt-in.
+Older moq-lite versions and moq-transport carry neither, so their routes have
+no epoch and a restart reaches them as an end then a start of the path. Without
+an epoch, any other route winning is a restart, even a reconnect over the same
+path, since nothing says it serves the same bytes.
 
 `moq` and `moqsink` mint a fresh epoch per run, kept across reconnects, and the
 RTMP, SRT, and WHIP ingests mint one per connection. Replicas share one by
 passing the same `moq --epoch`, except under [encryption](/concept/hang#encryption). See [Clustering](/bin/relay/cluster) for how a
 relay uses this.
+
+### Multiple CDNs
+
+An endpoint can hold sessions to several CDNs at once, each feeding one shared
+origin, and rank them: moq.pro as primary, another CDN as secondary. The rank is
+a per-link preference the endpoint sets (higher wins, 0 is neutral, negative demotes), never sent on the wire. It decides after
+the newest epoch and before cost, so metrics from different operators are never
+compared. A subscription uses the preferred link that has a route and moves to the
+next when that route goes; a publisher pushes the same broadcast to every CDN.
+
+The move resumes without a seam only between routes with the same epoch, which
+needs moq-lite 07 on both links. A CDN speaking moq-transport carries no epoch, so
+moving onto it, or back off it, is a restart and the player requests the path
+again.
 
 ### Hidden broadcasts
 
@@ -133,6 +156,26 @@ a literal `*`. The empty pattern matches the empty path.
 A subscriber watching under a root sees advertisements named relative to that
 root. When several routes advertise one prefix, each reader sees the best route
 its scope can use.
+
+## Authorization
+
+On moq-lite 07 (`moq-lite-07-wip`, opt-in) each side presents a token on its
+own Auth stream and learns what it may publish and subscribe to: a union of
+[path patterns](#path-patterns), delivered exactly as issued rather than widened
+to a prefix. Right after setup both sides present the credential the connection
+already carried (the URL token, a client certificate, or nothing), so a
+publisher learns before anyone subscribes whether its broadcasts can reach the
+peer. More tokens can be added without reconnecting; the session's scope is the
+union of every open token's grant. A token the peer has no verifier for, or
+whose grant is too large to send, fails with `Unsupported` and ends only that
+token; the session and its other grants stay up.
+
+A subscription or fetch that loses access resets with the `UNAUTHORIZED` stream
+code and the session stays up. A client that publishes outside its grant closes
+the session with `UNAUTHORIZED`, naming the path. moq-transport carries the same
+exchange on draft-17+ through the [MoQ Auth extension](/draft/moq-auth), limited
+to namespace prefixes. Older versions have no grant; the URL token keeps working
+everywhere.
 
 ## Subscriptions
 

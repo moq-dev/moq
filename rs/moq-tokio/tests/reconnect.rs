@@ -54,11 +54,11 @@ async fn a_transient_failure_retries_until_the_budget_runs_out() {
 	);
 }
 
-/// The epoch advances in the same write that reports `Connected`, so a caller
-/// pairing [`Connection::status`] with [`Connection::epoch`] never sees a stale
+/// The connect count advances in the same write that reports `Connected`, so a caller
+/// pairing [`Connection::status`] with [`Connection::connects`] never sees a stale
 /// count, however fast the redial.
 #[tokio::test]
-async fn the_epoch_advances_on_reconnect() {
+async fn the_connect_count_advances_on_reconnect() {
 	let (port, mut sessions, _task) = spawn_server().await;
 	let url: url::Url = format!("tcp://localhost:{port}/").parse().expect("parse url");
 	let mut connection = quick_client(Default::default()).connect(url);
@@ -68,19 +68,19 @@ async fn the_epoch_advances_on_reconnect() {
 		.expect("status timed out")
 		.expect("status failed");
 	assert_eq!(status, moq_tokio::Status::Connected);
-	assert_eq!(connection.epoch(), 1, "the first connect is epoch 1");
+	assert_eq!(connection.connects(), 1, "the first connect counts 1");
 
 	// Dropping the server's handle closes the session, so the loop redials.
 	let session = sessions.recv().await.expect("server stopped accepting");
 	drop(session);
 
 	tokio::time::timeout(Duration::from_secs(10), async {
-		while connection.epoch() < 2 {
+		while connection.connects() < 2 {
 			tokio::time::sleep(Duration::from_millis(10)).await;
 		}
 	})
 	.await
-	.expect("the epoch never advanced past the first connect");
+	.expect("the connect count never advanced past the first connect");
 }
 
 #[tokio::test]

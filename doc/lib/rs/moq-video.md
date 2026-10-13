@@ -35,6 +35,12 @@ libclang), `v4l2` (ARM SoC codecs such as a Raspberry Pi's), `pipewire` (Linux
 portal capture and PipeWire cameras; links libpipewire), and `vpx` (links
 libvpx).
 
+On Wayland, the `pipewire` feature lets Rust callers request a screen or
+window through the system picker with `capture::Source::Portal`. Keep the
+selection for automatic reopens; create a new one to choose another source.
+Restoring a grant without another dialog depends on compositor support. X11
+continues to select displays and windows by ID.
+
 Windows display and window capture use Windows.Graphics.Capture on Windows 10
 2004 or newer; application capture and system audio are not provided there.
 

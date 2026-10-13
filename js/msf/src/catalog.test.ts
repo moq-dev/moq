@@ -250,3 +250,16 @@ test("round-trips a __proto__ extension member as data", () => {
 	expect(Object.keys(wire)).toContain("__proto__");
 	expect(wire.ok).toBe(2);
 });
+
+test("caption role, label, language and codec survive the wire", () => {
+	const track = {
+		name: "captions.en",
+		packaging: "loc",
+		isLive: true,
+		role: "caption",
+		codec: "ttml",
+		lang: "en",
+		label: "English SDH",
+	};
+	expect(decode(encode({ tracks: [track] })).tracks).toEqual([track]);
+});

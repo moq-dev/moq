@@ -18,7 +18,7 @@ re-clamps a live encoder.
 The grant's wire shape is specified in `drafts/draft-lcurley-moq-auth.md`
 (which the in-band auth line adds); update it in the same PR and run
 `just drafts check`. Wire work targets the wip lite version until it is cut
-(decided 2026-10-05, see [AUTH on the wip version](/quest/m1/auth/wip-version.md)),
+(decided 2026-10-05, see [In-band auth](/quest/m1/auth/README.md)),
 and the Auth Stream exists only there, so the rates ride only the wip
 version's grant.
 

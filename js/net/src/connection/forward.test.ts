@@ -98,18 +98,22 @@ test("a discovery failure under a live session downgrades the origin", async () 
 	expect(wireOf(origin).routes(path)).toBe(false);
 	expect(origin.discovery.peek()).toBe(false);
 
-	// So the watcher falls back to a standing request, which this same session answers.
+	// The watcher's route went, so its request ends; a fresh one falls back to a standing
+	// request, which this same session answers.
+	expect(watched.closed.peek()).toBeInstanceOf(Error);
+	const again = origin.request(path, { announced: true });
 	await settle();
 	await settle();
-	expect(watched.active.peek()).toBeDefined();
+	expect(again.active.peek()).toBeDefined();
 	// The announcement's own consume, plus the blind answer standing in for it now.
 	expect(session.consumes(path)).toBe(2);
 
+	again.close();
 	watched.close();
 	origin.close();
 });
 
-test("a request outlives the discovery failure that fed it", async () => {
+test("a fresh request falls back to a blind answer after the discovery failure", async () => {
 	const origin = new OriginProducer();
 	const session = new FakeSession();
 	const path = Path.from("wanted");
@@ -127,15 +131,20 @@ test("a request outlives the discovery failure that fed it", async () => {
 	// serving loop leaves it alone rather than parking a blind subscription behind it.
 	expect(session.consumes(path)).toBe(1);
 
-	// Discovery dies under the live session: the route goes, so the request now needs the
-	// blind answer the serving loop skipped while the table had it.
+	// Discovery dies under the live session: the route goes, which ends the request on it, so
+	// the next request needs the blind answer the serving loop skipped while the table had it.
 	session.announces.close(new Error("stream reset"));
 	await settle();
 	await settle();
+	expect(request.closed.peek()).toBeInstanceOf(Error);
 
-	expect(request.active.peek()).toBeDefined();
+	const again = origin.request(path);
+	await settle();
+	await settle();
+	expect(again.active.peek()).toBeDefined();
 	expect(session.consumes(path)).toBe(2);
 
+	again.close();
 	request.close();
 	origin.close();
 });

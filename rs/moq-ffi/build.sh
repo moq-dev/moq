@@ -14,19 +14,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 WORKSPACE_DIR="$(cd "$RS_DIR/.." && pwd)"
 
-# Shrink the release staticlib. The Go mirror commits the native libs straight
-# into git, and GitHub's pre-receive hook hard-rejects any file over 100 MB
-# (GH001). An unstripped moq-ffi staticlib is ~110 MB on Linux, which silently
-# blocked every moq-go mirror push and pinned consumers to a stale release.
-# Thin LTO with a single codegen unit dead-strips the unused monomorphizations
-# Rust bakes into a staticlib, cutting it by ~60% (~110 MB to ~35 MB) with no
-# source or ABI changes. (Swift ships an XCFramework release asset and Kotlin a
-# Maven .so, so neither hits the git limit, but both still get smaller libs.)
-# Scoped here via env vars so a plain `cargo build --release` stays fast; a
-# caller can still override.
-export CARGO_PROFILE_RELEASE_LTO="${CARGO_PROFILE_RELEASE_LTO:-thin}"
-export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${CARGO_PROFILE_RELEASE_CODEGEN_UNITS:-1}"
-
 # Resolve cargo target directory (respects CARGO_TARGET_DIR, .cargo/config, etc.)
 TARGET_BASE_DIR=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps 2>/dev/null |
     sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' ||
@@ -189,8 +176,20 @@ generate_bindings() {
         echo "  Skipping dart bindings: uniffi_bindgen_dart not on PATH"
     fi
 
+    # C++ uses a third-party bindgen too: a fork carrying LiveKit's async support
+    # ported to uniffi 0.32, which upstream has not released. Install it with:
+    # cargo install --locked uniffi-bindgen-cpp --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.4+v0.32.2
+    if command -v uniffi-bindgen-cpp >/dev/null 2>&1; then
+        echo "  Generating cpp bindings..."
+        uniffi-bindgen-cpp --library "$lib_path" \
+            --config "$WORKSPACE_DIR/cpp/moq/uniffi.toml" \
+            --out-dir "$OUTPUT_DIR/bindings/cpp"
+    else
+        echo "  Skipping cpp bindings: uniffi-bindgen-cpp not on PATH"
+    fi
+
     if [[ "$ARCHIVE" == true ]]; then
-        for lang in kotlin swift python go dart; do
+        for lang in kotlin swift python go dart cpp; do
             if [[ -d "$OUTPUT_DIR/bindings/$lang" ]]; then
                 local archive="moq-ffi-${VERSION}-${lang}.tar.gz"
                 tar -czf "$OUTPUT_DIR/$archive" -C "$OUTPUT_DIR/bindings" "$lang"

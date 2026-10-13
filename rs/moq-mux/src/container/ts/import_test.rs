@@ -286,7 +286,7 @@ async fn opus_catalog_carries_the_anchored_clock() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let provisional = catalog.clock().wall();
+	let provisional = catalog.snapshot().clock.expect("a clock");
 	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 
@@ -299,7 +299,7 @@ async fn opus_catalog_carries_the_anchored_clock() {
 	import.finish().unwrap();
 	published.extend(clocks.drain());
 
-	let anchored = catalog.clock().wall();
+	let anchored = catalog.snapshot().clock.expect("a clock");
 	assert_ne!(anchored, provisional, "the first PES anchors the clock");
 	assert!(!published.is_empty(), "the catalog publishes");
 	assert!(published.iter().all(|clock| *clock == Some(anchored)), "{published:?}");
@@ -474,7 +474,7 @@ async fn import_export_import_roundtrip() {
 
 	// Re-export to TS. `import` and `catalog` stay alive so the exporter can
 	// subscribe to the finished, retained tracks.
-	let mut exporter = crate::container::ts::Export::new(crate::source::announced(&consumer))
+	let mut exporter = crate::container::ts::Export::new(crate::source::announced(&consumer).await)
 		.await
 		.unwrap()
 		.with_delay(RECORDING_MAX_AGE)

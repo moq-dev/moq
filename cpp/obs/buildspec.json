@@ -38,7 +38,6 @@
     },
     "name": "obs-moq",
     "displayName": "MOQ for OBS",
-    "version": "0.0.1",
     "author": "Montevideo Tech",
     "website": "https://montevideotech.dev",
     "email": "emil@qualabs.com"

@@ -79,7 +79,10 @@ impl Room {
 			}
 
 			let (update, active) = match ready!(self.announced.poll_next(waiter)) {
-				Some(announce::Event::Start(update) | announce::Event::Update(update)) => (update, true),
+				// A restart resolves the new instance, replacing the one handed out before.
+				Some(
+					announce::Event::Start(update) | announce::Event::Update(update) | announce::Event::Restart(update),
+				) => (update, true),
 				Some(announce::Event::End(update)) => (update, false),
 				None => return Poll::Ready(None),
 			};

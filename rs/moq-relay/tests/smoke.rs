@@ -12,6 +12,11 @@ use std::time::Duration;
 use moq_relay::{Config, Connection, Relay, auth, cluster, web};
 use moq_tokio::moq_net;
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The newest moq-lite ALPN both sides should converge on. Derived from
@@ -135,7 +140,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -235,7 +240,7 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 	let pub_origin = moq_tokio::origin::spawn();
 	let hidden = pub_origin.create_broadcast(".x/y").expect("create hidden");
 	hidden.announce(Default::default()).expect("announce hidden");
-	let track = hidden.create_track("video", None).expect("create track");
+	let track = hidden.create_track("video", timed()).expect("create track");
 	track
 		.append_group()
 		.expect("append group")
@@ -436,7 +441,7 @@ async fn relay_websocket_root_path_upgrades() {
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -508,7 +513,7 @@ async fn two_publish_only_clients_coexist() {
 	let pub_a = moq_tokio::origin::spawn();
 	let broadcast_a = pub_a.create_broadcast("alpha").expect("create broadcast a");
 	broadcast_a.announce(Default::default()).expect("create broadcast a");
-	let track_a = broadcast_a.create_track("video", None).expect("create track a");
+	let track_a = broadcast_a.create_track("video", timed()).expect("create track a");
 	track_a
 		.append_group()
 		.expect("append group a")
@@ -518,7 +523,7 @@ async fn two_publish_only_clients_coexist() {
 	let pub_b = moq_tokio::origin::spawn();
 	let broadcast_b = pub_b.create_broadcast("beta").expect("create broadcast b");
 	broadcast_b.announce(Default::default()).expect("create broadcast b");
-	let track_b = broadcast_b.create_track("video", None).expect("create track b");
+	let track_b = broadcast_b.create_track("video", timed()).expect("create track b");
 	track_b
 		.append_group()
 		.expect("append group b")
@@ -650,7 +655,7 @@ async fn internal_tcp_round_trip() {
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -753,7 +758,7 @@ async fn internal_unix_round_trip() {
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -845,7 +850,7 @@ async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: 
 	let pub_origin = moq_tokio::origin::spawn();
 	let bc = pub_origin.create_broadcast(broadcast).expect("create broadcast");
 	bc.announce(Default::default()).expect("create broadcast");
-	let track = bc.create_track("video", None).expect("create track");
+	let track = bc.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -1001,7 +1006,7 @@ async fn spawn_subscribe_only_relay() -> (u16, tokio::task::JoinHandle<()>) {
 /// handshake instead of being accepted and silently carrying no media. The client
 /// advertises `Role::Publisher` in its SETUP (derived from `with_publisher`), and the
 /// relay closes the session because the token has no publish scope. This is the
-/// regression guard for moq.pro#338: before the role hint, this connection was
+/// regression guard for the role hint: before it, this connection was
 /// accepted and the publisher streamed into a dropped session forever.
 #[tokio::test]
 async fn subscribe_only_public_rejects_publisher_role() {
@@ -1114,7 +1119,9 @@ async fn connect_once(
 /// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+		moq_net::announce::Event::Start(route)
+		| moq_net::announce::Event::Update(route)
+		| moq_net::announce::Event::Restart(route) => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }

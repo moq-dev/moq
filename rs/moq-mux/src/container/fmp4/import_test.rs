@@ -564,7 +564,12 @@ fn sample(timestamp_us: u64, keyframe: bool, duration_us: Option<u64>) -> crate:
 fn decode_rejects_durationless_multisample() {
 	let frames = vec![sample(0, true, None), sample(33_000, false, None)];
 	let frag = super::encode_fragment(info(1, scale(), 0), &frames).unwrap();
-	let err = super::decode(frag, scale(), crate::container::fmp4::Kind::Video).unwrap_err();
+	let err = super::decode(
+		frag,
+		None,
+		super::Track::new(scale(), crate::container::fmp4::Kind::Video),
+	)
+	.unwrap_err();
 	assert!(matches!(err, super::Error::MissingSampleDuration), "got {err:?}");
 }
 
@@ -572,7 +577,12 @@ fn decode_rejects_durationless_multisample() {
 #[test]
 fn decode_single_sample_no_duration_ok() {
 	let frag = super::encode_fragment(info(1, scale(), 0), &[sample(0, true, None)]).unwrap();
-	let out = super::decode(frag, scale(), crate::container::fmp4::Kind::Video).unwrap();
+	let out = super::decode(
+		frag,
+		None,
+		super::Track::new(scale(), crate::container::fmp4::Kind::Video),
+	)
+	.unwrap();
 	assert_eq!(out.len(), 1);
 	assert_eq!(out[0].timestamp.as_micros(), 0);
 }
@@ -583,7 +593,12 @@ fn decode_single_sample_no_duration_ok() {
 fn decode_multisample_with_durations_roundtrips() {
 	let frames = vec![sample(0, true, Some(33_000)), sample(33_000, false, Some(33_000))];
 	let frag = super::encode_fragment(info(1, scale(), 0), &frames).unwrap();
-	let out = super::decode(frag, scale(), crate::container::fmp4::Kind::Video).unwrap();
+	let out = super::decode(
+		frag,
+		None,
+		super::Track::new(scale(), crate::container::fmp4::Kind::Video),
+	)
+	.unwrap();
 	assert_eq!(out.len(), 2);
 	assert_eq!(out[0].timestamp.as_micros(), 0);
 	assert_eq!(out[1].timestamp.as_micros(), 33_000);
@@ -1359,6 +1374,123 @@ async fn import_publishes_decode_times_on_an_arrival_clock() {
 	);
 }
 
+/// The most a shifted timestamp rounds down, in microseconds: under one unit of bbb's track scales.
+const TICK: u128 = 1_000;
+
+/// What fixes the catalog's clock before an fMP4 import's first fragment.
+#[derive(Clone, Copy, Debug)]
+enum Earlier {
+	/// A data track, whose registration publishes the catalog.
+	Data,
+	/// A capture, which takes the clock and stamps on its own copy.
+	Capture,
+}
+
+/// Something stamps on the catalog clock before an fMP4 import whose decode times start at
+/// `start_us`. The import offsets onto that clock instead of moving it: its first fragment lands
+/// at now on the earlier source's timeline, which keeps advancing with no rewind.
+async fn join_after(earlier: Earlier, start_us: u64) {
+	let (init, _, _) = bbb_init();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+
+	let mut data = match earlier {
+		Earlier::Data => {
+			let track = broadcast
+				.create_track(
+					"telemetry",
+					moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+				)
+				.unwrap();
+			let mut stream = catalog.binary_stream(track, crate::binary::Config::default()).unwrap();
+			stream.append(&b"before"[..]).unwrap();
+			Some(stream)
+		}
+		Earlier::Capture => None,
+	};
+	let mut stamps = data.as_ref().map(|stream| stream.consume());
+	let clock = catalog.clock();
+	let fixed = catalog.snapshot().clock;
+
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+	fmp4.decode(&init).unwrap();
+	let before = clock.now().as_micros();
+	fmp4.decode(&live_session(start_us, 20)).unwrap();
+	let after = clock.now().as_micros();
+	if let Some(stream) = data.as_mut() {
+		stream.append(&b"after"[..]).unwrap();
+	}
+	fmp4.finish().unwrap();
+
+	let snapshot = catalog.snapshot();
+	assert_eq!(snapshot.clock, fixed, "{earlier:?}: the import never moves the clock");
+	let published = crate::container::test_util::published(&consumer, &snapshot).await;
+	let video = &published[snapshot.video.renditions.keys().next().unwrap()];
+	// The offset rounds down to the track's own units.
+	assert!(
+		(before - TICK..=after).contains(&video[0]),
+		"{earlier:?}: the first fragment lands at now: {before} {} {after}",
+		video[0]
+	);
+	assert!(
+		video.windows(2).all(|w| (w[1] - w[0]).abs_diff(100_000) <= 1),
+		"the fragments keep their spacing: {video:?}"
+	);
+
+	if let Some(stamps) = stamps.as_mut() {
+		let waiter = kio::Waiter::noop();
+		let mut times = Vec::new();
+		while let std::task::Poll::Ready(Ok(Some(mut group))) = stamps.poll_recv_group(&waiter) {
+			while let std::task::Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) {
+				times.push(frame.timestamp.unwrap().as_micros());
+			}
+		}
+		assert_eq!(times.len(), 2);
+		assert!(
+			times[0] <= times[1],
+			"{earlier:?}: the data track never rewinds: {times:?}"
+		);
+	}
+}
+
+/// A data track registered first fixes the clock; a feed an hour in still lands at now.
+#[tokio::test]
+async fn an_import_joins_a_data_tracks_clock() {
+	join_after(Earlier::Data, 3_600_000_000).await;
+}
+
+/// A capture that took the clock first keeps it; a feed at zero lands on its timeline rather than
+/// stepping it back ten seconds.
+#[tokio::test]
+async fn an_import_joins_a_captures_clock() {
+	join_after(Earlier::Capture, 0).await;
+}
+
+/// A `with_clock` catalog is fixed from the start, so even the first import shifts onto it.
+#[tokio::test]
+async fn an_import_shifts_onto_an_explicit_clock() {
+	let (init, _, _) = bbb_init();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let clock = crate::Clock::new();
+	let config = crate::catalog::Config::default().with_clock(clock);
+	let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
+
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+	fmp4.decode(&init).unwrap();
+	let before = clock.now().as_micros();
+	fmp4.decode(&live_session(3_600_000_000, 5)).unwrap();
+	let after = clock.now().as_micros();
+	fmp4.finish().unwrap();
+
+	let snapshot = catalog.snapshot();
+	assert_eq!(snapshot.clock, Some(clock.wall()));
+	let published = crate::container::test_util::published(&consumer, &snapshot).await;
+	let first = published[snapshot.video.renditions.keys().next().unwrap()][0];
+	assert!((before - TICK..=after).contains(&first), "{before} {first} {after}");
+}
+
 /// A source whose decode times restart is a new epoch: the import refuses the rewind rather than
 /// re-anchoring it forward, keeping everything published before it.
 #[tokio::test]
@@ -1414,7 +1546,7 @@ async fn first_catalog_carries_the_anchored_clock() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let provisional = catalog.clock().wall();
+	let provisional = catalog.snapshot().clock.expect("a clock");
 	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 
@@ -1422,7 +1554,7 @@ async fn first_catalog_carries_the_anchored_clock() {
 	assert_eq!(clocks.drain(), vec![], "the moov alone publishes nothing");
 
 	fmp4.decode(&live_session(3_600_000_000, 20)).unwrap();
-	let anchored = catalog.clock().wall();
+	let anchored = catalog.snapshot().clock.expect("a clock");
 	assert_ne!(anchored, provisional, "the first fragment anchors the clock");
 	let published = clocks.drain();
 	assert!(!published.is_empty(), "the first fragment publishes the catalog");
@@ -1461,7 +1593,7 @@ async fn a_moov_with_nothing_selected_publishes() {
 		.with_select(crate::select::Broadcast::default());
 
 	fmp4.decode(&init).unwrap();
-	catalog.clone().anchor(moq_net::Timestamp::ZERO).unwrap();
+	catalog.timebase().anchor(moq_net::Timestamp::ZERO).unwrap();
 	assert_eq!(clocks.drain().len(), 1, "the catalog publishes without a fragment");
 }
 
@@ -1505,4 +1637,365 @@ async fn a_deselected_fragment_does_not_publish() {
 	let video = super::encode_fragment(info(video_id, video_scale, 0), &[sample(0, true, Some(100_000))]).unwrap();
 	fmp4.decode(&video).unwrap();
 	assert_eq!(clocks.drain().len(), 1, "the selected track's first fragment publishes");
+}
+
+/// The importer resolves sample flags the way every CMAF reader does, so a fragment opening on a
+/// sync sample rolls a group even when its flags are left to `tfhd` or `trex`, or say nothing.
+/// The fragments it passes through then decode against its catalog init to the same samples.
+#[tokio::test]
+async fn imports_the_sample_defaults_fixtures() {
+	use mp4_atom::DecodeMaybe;
+
+	for fixture in super::fixtures() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+		fmp4.decode(&fixture.init).unwrap();
+
+		let snapshot = catalog.snapshot();
+		let (name, video) = snapshot.video.renditions.iter().next().unwrap();
+		let Container::Cmaf { init } = &video.container else {
+			panic!("{}: a CMAF rendition", fixture.name);
+		};
+		let wire = super::Wire::from_init(init).unwrap();
+		let mut track = consumer.track(name).unwrap().subscribe(replay()).await.unwrap();
+
+		// The same fragment again, one second later, so its first sample can open a second group.
+		let mut cursor = std::io::Cursor::new(fixture.fragment.as_slice());
+		let Some(mp4_atom::Any::Moof(mut moof)) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() else {
+			panic!("{}: a moof first", fixture.name);
+		};
+		moof.traf[0].tfdt.as_mut().unwrap().base_media_decode_time += 1_000;
+		let mut later = Vec::new();
+		moof.encode(&mut later).unwrap();
+		later.extend_from_slice(&fixture.fragment[cursor.position() as usize..]);
+
+		fmp4.decode(&fixture.fragment).unwrap();
+		fmp4.decode(&later).unwrap();
+		fmp4.finish().unwrap();
+
+		let mut first = track.recv_group().await.unwrap().unwrap();
+		let frame = first.read_frame().await.unwrap().unwrap();
+		let frames = super::decode(frame.payload, frame.timestamp, wire.track().unwrap()).unwrap();
+		let samples: Vec<super::FixtureSample> = frames.iter().map(super::FixtureSample::from).collect();
+		assert_eq!(samples, fixture.samples, "{}", fixture.name);
+
+		assert!(
+			track.recv_group().await.unwrap().is_some(),
+			"{}: the second fragment opens on a sync sample, so a group",
+			fixture.name
+		);
+	}
+}
+
+#[test]
+fn an_unknown_subtitle_track_does_not_refuse_supported_media() {
+	use mp4_atom::{DecodeMaybe, Encode};
+	let mut cursor = std::io::Cursor::new(include_bytes!("test_data/bbb.mp4"));
+	let mut input = Vec::new();
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
+		if let mp4_atom::Any::Moov(mut moov) = atom {
+			let mut subtitle = moov.trak[0].clone();
+			subtitle.tkhd.track_id = 99;
+			subtitle.mdia.hdlr.handler = b"sbtl".into();
+			moov.trak.push(subtitle);
+			moov.encode(&mut input).unwrap();
+			break;
+		} else {
+			atom.encode(&mut input).unwrap();
+		}
+	}
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&input).unwrap();
+	importer.finish().unwrap();
+	assert!(!catalog.snapshot().video.renditions.is_empty());
+	assert!(catalog.snapshot().text.renditions.is_empty());
+}
+
+fn webvtt_init(header: &str) -> Vec<u8> {
+	let (_, moov) = decode_init(include_bytes!("test_data/bbb.mp4"));
+	let mut trak = moov.trak[0].clone();
+	trak.tkhd.track_id = 1;
+	trak.mdia.mdhd.timescale = 1000;
+	trak.mdia.mdhd.language = "eng".into();
+	trak.mdia.hdlr.handler = b"text".into();
+	trak.mdia.hdlr.name = "English captions".into();
+	trak.mdia.minf.stbl.stsd.codecs = vec![mp4_atom::Codec::Wvtt(mp4_atom::Wvtt {
+		plaintext: mp4_atom::PlainText {
+			data_reference_index: 1,
+		},
+		config: mp4_atom::VttC { config: header.into() },
+		label: Some(mp4_atom::Vlab {
+			source_label: "urn:example:source".into(),
+		}),
+		btrt: None,
+	})];
+	audio_init(trak)
+}
+
+/// One fragment carrying `samples` back to back, each lasting `duration` ms from `decode_time`.
+fn webvtt_fragment(decode_time: u64, samples: &[Vec<u8>], duration: u32) -> Vec<u8> {
+	let moof = mp4_atom::Moof {
+		mfhd: mp4_atom::Mfhd { sequence_number: 1 },
+		traf: vec![mp4_atom::Traf {
+			tfhd: mp4_atom::Tfhd {
+				track_id: 1,
+				default_sample_duration: Some(duration),
+				..Default::default()
+			},
+			tfdt: Some(mp4_atom::Tfdt {
+				base_media_decode_time: decode_time,
+			}),
+			trun: vec![mp4_atom::Trun {
+				data_offset: None,
+				entries: samples
+					.iter()
+					.map(|sample| mp4_atom::TrunEntry {
+						size: Some(sample.len() as u32),
+						..Default::default()
+					})
+					.collect(),
+			}],
+			..Default::default()
+		}],
+	};
+	let mut output = Vec::new();
+	moof.encode(&mut output).unwrap();
+	mp4_atom::Mdat { data: samples.concat() }.encode(&mut output).unwrap();
+	output
+}
+
+fn webvtt_input(payload: Vec<u8>, duration: u32) -> Vec<u8> {
+	let mut input = webvtt_init("WEBVTT");
+	input.extend(webvtt_fragment(250, &[payload], duration));
+	input
+}
+
+fn subtitle_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+	let mut bytes = Vec::new();
+	bytes.extend_from_slice(&((8 + payload.len()) as u32).to_be_bytes());
+	bytes.extend_from_slice(kind);
+	bytes.extend_from_slice(payload);
+	bytes
+}
+
+#[tokio::test(start_paused = true)]
+async fn webvtt_samples_become_timed_text_with_source_metadata() {
+	let mut cue = subtitle_box(b"iden", b"cue-1");
+	cue.extend(subtitle_box(b"sttg", b"align:start"));
+	cue.extend(subtitle_box(b"payl", b"Hello"));
+	let payload = subtitle_box(b"vttc", &cue);
+	let input = webvtt_input(payload, 1250);
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&input).unwrap();
+	importer.finish().unwrap();
+	let snapshot = catalog.snapshot();
+	assert_eq!(snapshot.text.renditions.len(), 1);
+	let (name, config) = snapshot.text.renditions.iter().next().unwrap();
+	assert_eq!(config.lang.as_deref(), Some("eng"));
+	assert_eq!(
+		config.label.as_deref(),
+		Some("English captions"),
+		"hdlr name, not the vlab source"
+	);
+	assert_eq!(config.role, hang::catalog::TextRole::Subtitle);
+	let track = consumer
+		.track(name)
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default())
+		.await
+		.unwrap();
+	let mut reader = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
+	let frame = reader.read().await.unwrap().unwrap();
+	assert_eq!(frame.timestamp.as_micros(), 250_000);
+	assert_eq!(
+		&frame.payload[..],
+		b"WEBVTT\n\ncue-1\n00:00:00.250 --> 00:00:01.500 align:start\nHello\n\n"
+	);
+}
+
+#[test]
+fn malformed_webvtt_samples_are_refused() {
+	let payl = subtitle_box(b"payl", b"hello");
+	let mut duplicate = payl.clone();
+	duplicate.extend_from_slice(&payl);
+	for (payload, duration) in [
+		(Vec::new(), 1250),
+		(vec![0, 0, 0, 4], 1250),
+		(subtitle_box(b"vttc", &[]), 1250),
+		(subtitle_box(b"vttc", &duplicate), 1250),
+		(subtitle_box(b"vttc", &subtitle_box(b"payl", b"\xff")), 1250),
+		(subtitle_box(b"vttc", &payl), 0),
+		// Inline timestamps need `ctim` to anchor them.
+		(subtitle_box(b"vttc", &subtitle_box(b"payl", b"a <00:01.000>b")), 1250),
+	] {
+		let input = webvtt_input(payload, duration);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut importer = super::Import::new(broadcast, catalog.reserve());
+		assert!(importer.decode(&input).is_err());
+	}
+}
+
+#[test]
+fn empty_and_multiple_webvtt_cues_are_supported() {
+	let cue = subtitle_box(b"vttc", &subtitle_box(b"payl", b"hello"));
+	let mut multiple = cue.clone();
+	multiple.extend(cue);
+	for payload in [subtitle_box(b"vtte", &[]), multiple] {
+		let input = webvtt_input(payload, 1250);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut importer = super::Import::new(broadcast, catalog.reserve());
+		importer.decode(&input).unwrap();
+		importer.finish().unwrap();
+		assert_eq!(catalog.snapshot().text.renditions.len(), 1);
+	}
+}
+
+/// The WebVTT `Kind` header sets the role, and lone CR line terminators are accepted.
+#[tokio::test(start_paused = true)]
+async fn webvtt_kind_and_lone_cr_terminators() {
+	let mut input = webvtt_init("WEBVTT\rKind: captions\r");
+	input.extend(webvtt_fragment(
+		250,
+		&[subtitle_box(b"vttc", &subtitle_box(b"payl", b"Hello\rworld"))],
+		1250,
+	));
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&input).unwrap();
+	importer.finish().unwrap();
+	let snapshot = catalog.snapshot();
+	let (name, config) = snapshot.text.renditions.iter().next().unwrap();
+	assert_eq!(config.role, hang::catalog::TextRole::Caption);
+	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+	let mut reader = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
+	let frame = reader.read().await.unwrap().unwrap();
+	assert_eq!(
+		&frame.payload[..],
+		b"WEBVTT\nKind: captions\n\n00:00:00.250 --> 00:00:01.500\nHello\nworld\n\n"
+	);
+}
+
+/// Text closes a group per cue, so a segment seek must not rewind onto a cue group already written.
+#[test]
+fn webvtt_seek_after_several_cues_does_not_reuse_a_group() {
+	let cue = subtitle_box(b"vttc", &subtitle_box(b"payl", b"hello"));
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&webvtt_init("WEBVTT")).unwrap();
+	importer.seek(100).unwrap();
+	importer
+		.decode(&webvtt_fragment(0, &[cue.clone(), cue.clone(), cue.clone()], 1000))
+		.unwrap();
+	// Segment 101 was missed; groups 100..=102 already hold the three cues.
+	importer.seek(102).unwrap();
+	importer.decode(&webvtt_fragment(4000, &[cue], 1000)).unwrap();
+	importer.finish().unwrap();
+}
+
+/// A text fragment may not start inside the decode span of the previous fragment's samples.
+#[test]
+fn webvtt_fragment_overlapping_previous_samples_is_refused() {
+	let cue = subtitle_box(b"vttc", &subtitle_box(b"payl", b"hello"));
+	for (start, valid) in [(1500, false), (2000, true)] {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut importer = super::Import::new(broadcast, catalog.reserve());
+		importer.decode(&webvtt_init("WEBVTT")).unwrap();
+		importer
+			.decode(&webvtt_fragment(0, &[cue.clone(), cue.clone()], 1000))
+			.unwrap();
+		let result = importer.decode(&webvtt_fragment(start, std::slice::from_ref(&cue), 1000));
+		assert_eq!(result.is_ok(), valid, "start {start}: {result:?}");
+	}
+}
+
+#[test]
+#[tracing_test::traced_test]
+fn emsg_metadata_drops_warn_once() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut import = super::Import::new(broadcast, catalog.reserve());
+	let event = mp4_atom::Emsg {
+		timescale: 1000,
+		presentation_time: mp4_atom::EmsgTimestamp::Absolute(0),
+		event_duration: 1000,
+		id: 1,
+		scheme_id_uri: "urn:test:event".into(),
+		value: "cue".into(),
+		message_data: b"metadata".to_vec(),
+	};
+	let mut data = Vec::new();
+	event.encode(&mut data).unwrap();
+	event.encode(&mut data).unwrap();
+	let fixture = include_bytes!("test_data/bbb.mp4");
+	let mut cursor = std::io::Cursor::new(fixture.as_slice());
+	mp4_atom::Ftyp::decode(&mut cursor).unwrap();
+	mp4_atom::Moov::decode(&mut cursor).unwrap();
+	data.extend_from_slice(&fixture[..cursor.position() as usize]);
+	data.extend_from_slice(&audio_fragment(0, 1024, 327));
+	import.decode(&data).unwrap();
+	import.finish().unwrap();
+	assert_eq!(import.dropped_metadata(), 2);
+	assert_eq!(catalog.snapshot().video.renditions.len(), 1);
+	assert_eq!(catalog.snapshot().audio.renditions.len(), 1);
+	logs_assert(|lines| {
+		let warnings = lines
+			.iter()
+			.filter(|line| line.contains("discarding fMP4 emsg metadata"))
+			.count();
+		if warnings == 1 {
+			Ok(())
+		} else {
+			Err(format!("expected one metadata warning, got {warnings}"))
+		}
+	});
+}
+
+/// A cue shorter than a millisecond keeps a positive WebVTT duration.
+#[tokio::test(start_paused = true)]
+async fn webvtt_sub_millisecond_cue_stays_positive() {
+	// A 1 MHz track, so the cue can last 400 us.
+	let (ftyp, mut moov) = decode_init(&webvtt_init("WEBVTT"));
+	moov.trak[0].mdia.mdhd.timescale = 1_000_000;
+	let mut init = Vec::new();
+	ftyp.encode(&mut init).unwrap();
+	moov.encode(&mut init).unwrap();
+	init.extend(webvtt_fragment(
+		250_200,
+		&[subtitle_box(b"vttc", &subtitle_box(b"payl", b"hi"))],
+		400,
+	));
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&init).unwrap();
+	importer.finish().unwrap();
+	let snapshot = catalog.snapshot();
+	let name = snapshot.text.renditions.keys().next().unwrap();
+	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+	let mut reader = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
+	let frame = reader.read().await.unwrap().unwrap();
+	assert_eq!(&frame.payload[..], b"WEBVTT\n\n00:00:00.250 --> 00:00:00.251\nhi\n\n");
 }

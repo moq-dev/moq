@@ -1,6 +1,7 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import type * as Moq from "@moq/net";
+import { Time } from "@moq/net";
 import { Effect } from "@moq/signals";
 
 /**
@@ -56,7 +57,8 @@ export class CatalogProducer {
 		this.#pending?.close();
 		this.#pending = undefined;
 		if (estimate) this.#lastEstimate = performance.now();
-		for (const output of this.#outputs) output.update(this.#value);
+		const at = Time.Timestamp.now();
+		for (const output of this.#outputs) output.update({ value: this.#value, at });
 	}
 
 	/**
@@ -71,7 +73,7 @@ export class CatalogProducer {
 			compression: opts?.compression ? "deflate" : "none",
 			deltaRatio: 0,
 		});
-		output.update(this.#value);
+		output.update({ value: this.#value, at: Time.Timestamp.now() });
 
 		this.#outputs.add(output);
 		effect.cleanup(() => {

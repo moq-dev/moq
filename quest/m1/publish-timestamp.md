@@ -53,8 +53,10 @@ Swift wrappers default them to 0.
   `= 0` defaults go with it.
 - Go (`go/wrapper/moq`) and Python (`py/moq-rs`) wrap only the JSON
   producers; [#4137](https://github.com/moq-dev/moq/pull/4137) added
-  `publish_binary_snapshot` / `publish_binary_stream` (now
-  `publish_flate_*`) to moq-ffi without them. Add hand-written flate wrappers there. The maintainer asked for this.
+  `publish_binary_snapshot` / `publish_binary_stream` (now the
+  `MoqFlateSnapshotProducer` / `MoqFlateStreamProducer` constructors) to
+  moq-ffi without them. Add hand-written flate wrappers there, in a `flate`
+  namespace beside each wrapper's `json` one (see `rs/moq-ffi/AGENTS.md`). The maintainer asked for this.
   Each wrapper gets a test that a timestamp round-trips and an untimed payload
   arrives untimed.
 - Docs: "stamped when written" in `doc/lib/rs/{moq-json,moq-flate}.md` and
@@ -63,11 +65,6 @@ Swift wrappers default them to 0.
 Public API: breaking. Wire: none here; absence on the wire lands
 with the untimed implementation quests.
 
-## Required
-
-- [An undeclared Rust timescale means untimed](/quest/m1/rust-untimed-default.md) - each track declares its timescale first, so a publisher that stops stamping writes onto a track that already says whether it is timed
-
 ## Related
 
-- [JS publishing never invents a timestamp](/quest/m1/js-publish-timestamp.md) - the same change in the JS packages
 - [FFI shape](/quest/m1/ffi-shape/README.md) - moves the data producers this changes into `json` and `flate` namespaces in the same merge, so this is ready once #4519 lands rather than waiting on the codec child (2026-10-06 audit)

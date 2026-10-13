@@ -29,8 +29,10 @@ covers the encode producers and `moq import --echo`, which need no ladder.
   - It folds the reports into one signal: the share of viewers stalled over
     the last interval and their late frame rate, weighted equally per viewer.
   - The counters are cumulative, so the handle keeps the previous snapshot
-    per viewer and diffs it. A counter that goes backwards means a restarted
-    viewer and resets that baseline.
+    per viewer, keyed by (path, epoch) like `moq_stats::aggregate`, and diffs
+    it. A restarted viewer announces a new epoch and gets a fresh baseline.
+    Only on a route without an epoch does a counter that goes backwards mean
+    a restart and reset that baseline.
   - A viewer counts toward a rendition while its latest snapshot has a row
     for that ID, so viewers of other rungs, or ones that switched away,
     never dilute the share. The announcement, not the age of its last

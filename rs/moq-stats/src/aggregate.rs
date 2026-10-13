@@ -362,6 +362,15 @@ impl<V: Mergeable> Merged<V> {
 				Poll::Ready(Some(moq_net::announce::Event::End(update))) => {
 					changed |= self.apply_announce(update, false)
 				}
+				// Another publisher instance: the one tracked at the path ends, then the
+				// new one starts, so its reader resolves afresh.
+				Poll::Ready(Some(moq_net::announce::Event::Restart(update))) => {
+					let mut ended = update.clone();
+					let absolute = self.announce.absolute(&update.prefix).to_owned();
+					ended.route.epoch = self.last_announced.get(&absolute).cloned().flatten();
+					changed |= self.apply_announce(ended, false);
+					changed |= self.apply_announce(update, true);
+				}
 				Poll::Ready(None) => return Poll::Ready(Ok(None)),
 				Poll::Pending => break,
 			}
@@ -616,6 +625,11 @@ fn resolve<V: Mergeable>(origin: &origin::Consumer, path: &PathOwned, epoch: Opt
 
 #[cfg(test)]
 mod tests {
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
 		let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
@@ -632,7 +646,9 @@ mod tests {
 	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+			moq_net::announce::Event::Start(route)
+			| moq_net::announce::Event::Update(route)
+			| moq_net::announce::Event::Restart(route) => Some((route, true)),
 			moq_net::announce::Event::End(route) => Some((route, false)),
 		}
 	}
@@ -679,7 +695,7 @@ mod tests {
 		let mut announced = egress.announced();
 		let source = feed_origin.create_broadcast(path).expect("create_broadcast");
 		source.announce(origin::Route::default()).expect("announce");
-		let track = source.create_track("video", None).expect("create_track");
+		let track = source.create_track("video", timed()).expect("create_track");
 
 		let (_, active) = next_update(&mut announced).await.expect("announce");
 		assert!(active);
@@ -753,7 +769,7 @@ mod tests {
 			let source = origin.create_broadcast(path.as_str()).expect("create broadcast");
 			source.announce(origin::Route::default()).expect("announce");
 			let name = traffic_track(&Tier::default(), Role::Publisher, false);
-			let track = source.create_track(name, None).expect("create track");
+			let track = source.create_track(name, timed()).expect("create track");
 			let config = moq_json::snapshot::Config::default().with_delta_ratio(0);
 			Self {
 				traffic: moq_json::snapshot::Producer::new(track.clone(), config),
@@ -1013,7 +1029,10 @@ mod tests {
 		use std::sync::Barrier;
 
 		let now = std::time::Instant::now();
-		let (origin, mut driver) = origin::Producer::new(origin::Config::default());
+		// The clock never advances here, so nothing may wait out the update hold.
+		let mut config = origin::Config::default();
+		config.update_hold = std::time::Duration::ZERO;
+		let (origin, mut driver) = origin::Producer::new(config);
 		let epoch_a: Epoch = "01900000-0000-7000-8000-000000000001".parse().unwrap();
 		let epoch_b: Epoch = "01900000-0000-7000-8000-000000000002".parse().unwrap();
 		let mut old = NodeBroadcast::new(&origin, "acme", "a");

@@ -9,6 +9,8 @@
 export * as Signals from "@moq/signals";
 /** Broadcast announcement streams. */
 export * as Announce from "./announce.ts";
+/** In-band authorization: tokens presented to the peer and the grants they earn. */
+export * as Auth from "./auth.ts";
 /** Send-side bandwidth estimates split among the tracks sharing a connection. */
 export * as Bandwidth from "./bandwidth_api.ts";
 /** Broadcast role handles. */
@@ -28,6 +30,7 @@ export * as Origin from "./origin.ts";
 export * as Path from "./path.ts";
 /** Branded time types (nanoseconds, microseconds, milliseconds, seconds) with conversions. */
 export * as Time from "./time.ts";
+export type { Timed } from "./timed.ts";
 /** Track role handles. */
 export * as Track from "./track.ts";
 /** Varint encoding and decoding, in QUIC's format and moq-transport's leading-ones format. */

@@ -284,6 +284,8 @@ Sent when terminating the session, via the transport's session close.
 | ------- | ------------- | ----------- |
 |  0x3   | PROTOCOL_VIOLATION | The peer violated this specification. |
 | ------- | ------------- | ----------- |
+|  0x4   | INVALID_REQUEST_ID | A moq-transport request ID was reused or violated that draft’s order or parity rules; moq-lite has no request IDs. |
+| ------- | ------------- | ----------- |
 |  0x6   | KEY_VALUE_FORMATTING_ERROR | A key-value pair was malformed, or repeated more than allowed. |
 | ------- | ------------- | ----------- |
 |  0x7   | TOO_MANY_REQUESTS | The peer held more announcements or subscriptions than the endpoint allows. |
@@ -292,7 +294,13 @@ Sent when terminating the session, via the transport's session close.
 | ------- | ------------- | ----------- |
 |  0x11  | CONTROL_MESSAGE_TIMEOUT | The peer took too long to respond to a control message. |
 | ------- | ------------- | ----------- |
+|  0x13  | AUTH_TOKEN_CACHE_OVERFLOW | A token registration would exceed the advertised token cache size. |
+| ------- | ------------- | ----------- |
 |  0x15  | VERSION_NEGOTIATION_FAILED | No version could be negotiated. |
+| ------- | ------------- | ----------- |
+|  0x17  | UNKNOWN_AUTH_TOKEN_ALIAS | A token named an alias that was never registered. |
+| ------- | ------------- | ----------- |
+|  0x30  | NOT_SUPPORTED | The requested feature, token, or grant is unsupported. |
 | ------- | ------------- | ----------- |
 
 ### Stream Error Codes
@@ -334,6 +342,8 @@ Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (ST
 | ------- | ------------- | ----------- |
 |  0x3A  | NOT_FETCHABLE | The FETCH named a group delivered only as a datagram, which is never cached (see [Datagrams](#datagrams)). It has no moq-transport value; a bridge refuses the FETCH with DOES_NOT_EXIST. |
 | ------- | ------------- | ----------- |
+|  0x3B  | UNAUTHORIZED | The endpoint does not authorize this request, or no longer does, such as when the [scope](#auth-stream) does not cover it. The session stays up. |
+| ------- | ------------- | ----------- |
 
 Note that CANCELLED is 0x1, not 0x0: a stream reset with 0x0 is an INTERNAL_ERROR, not a routine cancellation.
 An endpoint terminating a stream because the session is ending SHOULD use SESSION_CLOSED rather than the session's own code, since the two spaces are disjoint.
@@ -364,6 +374,8 @@ There's a 1-byte STREAM_TYPE at the beginning of each stream.
 | ------- | ------------- | ----------- |
 |    0x6  | Track        | Subscriber  |
 | ------- | ------------- | ----------- |
+|    0x7  | Auth         | Either      |
+| ------- | ------------- | ----------- |
 
 ### Announce
 A subscriber can open an Announce Stream to discover routes matching a prefix.
@@ -375,17 +387,18 @@ The publisher replies with a single ANNOUNCE_OK message followed by announcement
 - ANNOUNCE_START: a matching route over a path prefix is available.
 - ANNOUNCE_END: a previously started route is no longer advertised.
 - ANNOUNCE_UPDATE: a previously started advertisement was atomically updated (new hops or cost).
+- ANNOUNCE_RESTART: another publisher instance now serves a previously started advertisement.
 
 ANNOUNCE_OK carries metadata that applies to every announcement on the stream: the publisher's own `Hop ID` (the implicit trailing entry of every announcement's path) and the number of initial announcements, which lets the subscriber deliver the initial set as a batch (see [ANNOUNCE_OK](#announce-ok)).
 
 Each ANNOUNCE_START implicitly assigns the next Announce ID on the stream: a counter starting at 0 that increments by 1 per advertisement.
 The id never appears on the wire; both endpoints derive it from the message order on the (reliable, ordered) stream.
-ANNOUNCE_END and ANNOUNCE_UPDATE reference the Announce ID instead of repeating the route's prefix.
+ANNOUNCE_END, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART reference the Announce ID instead of repeating the route's prefix.
 
 Each route has at most one current advertisement per stream.
-A second ANNOUNCE_START for an already-advertised route is a protocol violation; an ANNOUNCE_UPDATE atomically updates the current advertisement's metadata while keeping its id live.
+A second ANNOUNCE_START for an already-advertised route is a protocol violation; an ANNOUNCE_UPDATE or ANNOUNCE_RESTART atomically replaces the current advertisement while keeping its id live.
 
-The subscriber MUST close the session with a PROTOCOL_VIOLATION if it receives an ANNOUNCE_END or ANNOUNCE_UPDATE referencing an Announce ID that was never assigned or already retired, an ANNOUNCE_START for a route that is already advertised, or any announcement before ANNOUNCE_OK.
+The subscriber MUST close the session with a PROTOCOL_VIOLATION if it receives an ANNOUNCE_END, ANNOUNCE_UPDATE, or ANNOUNCE_RESTART referencing an Announce ID that was never assigned or already retired, an ANNOUNCE_START for a route that is already advertised, or any announcement before ANNOUNCE_OK.
 When the stream is closed, the subscriber MUST assume that all routes are now unavailable.
 
 A route covers a path when its prefix is a leading run of the path's segments; matching is per path segment, so a prefix never matches half a segment, and equality is byte-by-byte within each segment.
@@ -393,7 +406,7 @@ A publisher answering a request stream presents each of its routes clamped to th
 There MAY be multiple Announce Streams, potentially containing overlapping prefixes, that get their own ANNOUNCE_OK + announcements.
 
 #### Compression {#announce-compression}
-An ANNOUNCE_START or ANNOUNCE_UPDATE MAY copy the head of a path or the tail of a Hop ID list from a live advertisement on the same stream, its base.
+An ANNOUNCE_START, ANNOUNCE_UPDATE, or ANNOUNCE_RESTART MAY copy the head of a path or the tail of a Hop ID list from a live advertisement on the same stream, its base.
 A `Base` field names it by distance: the base's Announce ID is the next unassigned Announce ID minus `Base`, so 1 names the latest ANNOUNCE_START, and 0 names no base.
 The receiver resolves every base against the advertisements live when the message arrives, and the result is identical to the literal encoding: a base ending later changes nothing.
 A publisher MAY always send a `Base` of 0.
@@ -422,12 +435,14 @@ A publisher MUST NOT advertise a path whose entries contain the Hop ID the subsc
 The receiver can only discard it, and acting on it would form a loop, so sending one is never useful.
 Of the paths that remain a publisher SHOULD advertise the best, and nothing when every known path contains that Hop ID.
 Selection is per subscriber, so a subscriber that the serving path flows through still receives the best standby path, which is what lets it fail over if its own copy dies.
-The per-subscriber winner changing travels as an ANNOUNCE_UPDATE; the last qualifying path appearing or disappearing travels as an ANNOUNCE_START or ANNOUNCE_END.
+The per-subscriber winner changing travels as an ANNOUNCE_UPDATE when the new winner serves the same Broadcast, and as an ANNOUNCE_RESTART when it does not: another Epoch, or, between routes without one, another route; the last qualifying path appearing or disappearing travels as an ANNOUNCE_START or ANNOUNCE_END.
+A relay whose resolution of a path beneath a prefix moves to another route without an Epoch while the prefix's own winner stays (see the Spread Hash below) sends an ANNOUNCE_RESTART of that prefix.
+Before moq-lite-07, a publisher sends an ANNOUNCE_END and then an ANNOUNCE_START where it would send an ANNOUNCE_RESTART.
 
 When serving a subscription, a publisher MUST select the source by that same exclusion; if only excluded sources remain, the subscription is unroutable.
 Applying one rule to both advertisement and dispatch keeps advertised paths truthful, which is what prevents subscription cycles of any length.
 
-When resolving a path covered by several routes (across any number of streams), the subscriber SHOULD prefer the most specific covering route (see [Resolution](#resolution)), then the newest Epoch, ranking a route without one last, then a path that contains no 0 Hop ID over one that does, then the lowest Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the shortest path, then toward the lowest Spread Hash, and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
+When resolving a path covered by several routes (across any number of streams), the subscriber SHOULD prefer the most specific covering route (see [Resolution](#resolution)), then the newest Epoch, ranking a route without one last, then the higher preference the subscriber locally assigns to the arriving link, neutral unless assigned and either promoted above or demoted below that, then a path that contains no 0 Hop ID over one that does, then the lowest Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the shortest path, then toward the lowest Spread Hash, and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
 
 The Spread Hash is the 64-bit FNV-1a hash, with offset basis `0x420C0DECB00B` and the standard FNV-64 prime, of the requested path's UTF-8 bytes followed by each Hop ID of the route's path, oldest first, as 8 little-endian bytes.
 It is keyed on the requested path rather than the route's prefix, so equal-cost advertisers of one prefix share its paths instead of the first one taking them all, while one path resolves to the same advertiser on every relay that holds the same routes.
@@ -435,7 +450,8 @@ When choosing which route to advertise for a prefix, the requested path is the p
 
 Routes with the same Epoch serve the same Broadcast, so a relay MAY move a live subscription between them, continuing from the first frame the subscriber lacks, and a route change (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
 A relay MUST NOT move a subscription to a route with a different Epoch, or between routes without one: it stays on its route and ends with it.
-When a newer Epoch wins the path, the relay SHOULD end subscriptions to the older one, even ones in flight, with UNROUTABLE, so subscribers request the new Broadcast rather than stall on one that was replaced.
+When another Broadcast wins the path, subscriptions already open stay on theirs until the subscriber drops them or the route goes; new requests resolve the winner, and the ANNOUNCE_RESTART tells subscribers to request again.
+A receiver of an ANNOUNCE_RESTART (or of the ANNOUNCE_END and ANNOUNCE_START standing in for one) MUST NOT serve a new request under its prefix from anything resolved through the replaced advertisement.
 Epochs compare as their 16 bytes, which for a UUIDv7 orders them by creation time.
 Ordering Epochs minted on different hosts therefore trusts their clocks: a restart on a host whose clock runs behind loses to the older instance until that one is retracted.
 
@@ -500,6 +516,7 @@ A subscriber opens a Track Stream (0x6) to learn a Track's immutable publisher p
 
 The subscriber sends a TRACK message containing the broadcast path and track name.
 The publisher replies with a single TRACK_INFO message and then FINs the stream, or resets the stream on error (e.g. the track does not exist).
+The open stream is interest in the Track, which the publisher holds until the subscriber closes its side, and a subscriber that goes on to subscribe keeps it open until its Subscribe Stream's first response or reset, so demand never lapses between the two streams at any hop.
 The returned properties are fixed for the lifetime of the track, so the subscriber SHOULD cache TRACK_INFO keyed by broadcast path and track name, and reuse it across every SUBSCRIBE and FETCH of the same track over the session that served it.
 The properties are fixed for one track, not for the path it arrived on: a path outlives the broadcast on it, and a different broadcast reaching the same path brings its own.
 Anything cached against a path, on either side, is therefore scoped to the announcement that carried it and is discarded when that announcement is retracted.
@@ -518,6 +535,26 @@ A publisher that advertised Report but not Increase ignores the target and only 
 In either case the publisher periodically replies with PROBE messages on the same bidirectional stream containing the current estimated bitrate and smoothed RTT.
 
 If the publisher advertised no Probe capability (e.g., the congestion controller is not exposed), it MUST reset the stream.
+
+### Auth {#auth-stream}
+Either endpoint can open an Auth Stream (0x7) to present a token and learn what it grants.
+
+The opener sends a single AUTH message and keeps its side open for as long as the token applies.
+Each endpoint SHOULD open one Auth Stream with an empty token right after the session starts, so both learn what the credential the connection already presented (the request URI, a client certificate, or nothing) allows.
+The acceptor replies with an AUTH_OK carrying the grant, or an AUTH_ERROR refusing the token.
+It MAY send further AUTH_OK messages to replace the grant, such as with a lowered expiry, and MAY send an AUTH_ERROR after an AUTH_OK to revoke it; the latest AUTH_OK is the token's grant.
+After an AUTH_ERROR the acceptor closes its side of the stream.
+The opener withdraws a token by closing or resetting its side of the stream, and the acceptor then closes its own.
+
+A grant names the paths the opener may publish to the acceptor and subscribe to from it, relative to the session.
+An endpoint's scope is the union of the grants of its open Auth Streams, and a stream that ends removes its grant from the union.
+When the union shrinks, an endpoint SHOULD withdraw its announcements and cancel its subscriptions that the union no longer covers, keeping the session and everything still covered.
+An endpoint that cancels a subscription, or refuses or stops serving a request, because the union does not cover it resets the stream with UNAUTHORIZED.
+An endpoint that announces a broadcast outside the union once its own setup tokens are answered SHOULD close the session with UNAUTHORIZED, rather than wait for a subscription that will never come.
+
+An acceptor that does not verify a token in band, or cannot express its grant in AUTH_OK, MUST send AUTH_ERROR with NOT_SUPPORTED and close its side of the stream.
+This applies before or after an AUTH_OK, including when a grant exceeds the message size limit.
+A presenter receiving a stream reset before any reply treats it as unsupported, for compatibility with peers that do not support the Auth Stream (see [STREAM_TYPE](#stream_type)).
 
 ### Goaway
 Either endpoint can open a Goaway Stream (0x5) to initiate a graceful session shutdown.
@@ -858,7 +895,7 @@ Indicate interest for any broadcasts with a path that starts with this prefix.
 1 to also receive hidden routes (see [Hidden Paths](#hidden)), 0 otherwise.
 Any other value is a PROTOCOL_VIOLATION.
 
-The publisher MUST respond with an ANNOUNCE_OK message followed by ANNOUNCE_START messages for any matching routes, followed by ANNOUNCE_START, ANNOUNCE_END, and ANNOUNCE_UPDATE messages for any future updates, subject to [Routing](#routing).
+The publisher MUST respond with an ANNOUNCE_OK message followed by ANNOUNCE_START messages for any matching routes, followed by ANNOUNCE_START, ANNOUNCE_END, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART messages for any future updates, subject to [Routing](#routing).
 Implementations SHOULD consider reasonable limits on the number of matching broadcasts to prevent resource exhaustion.
 
 
@@ -876,7 +913,7 @@ ANNOUNCE_OK Message {
 
 **Hop ID**:
 The publisher's own Hop ID.
-This is treated as the implicit trailing entry of every ANNOUNCE_START and ANNOUNCE_UPDATE Hop ID list on this stream; those messages MUST NOT repeat this value as the last entry of their `Hop ID` list.
+This is treated as the implicit trailing entry of every ANNOUNCE_START, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART Hop ID list on this stream; those messages MUST NOT repeat this value as the last entry of their `Hop ID` list.
 The value 0 is reserved to mean "unknown": either no Hop ID was assigned (e.g. when bridging from an older protocol version) or the endpoint deliberately withholds it to obscure the underlying routing.
 A publisher that assigns a Hop ID MUST choose a non-zero value, and SHOULD assign itself one (a fresh random value per session suffices), so downstream receivers can detect loops through it.
 Receivers reconstruct the full path as `Hop IDs ++ [ANNOUNCE_OK.Hop ID]`.
@@ -890,7 +927,7 @@ A value of `0` is valid and means the publisher is offering no initial available
 
 ## ANNOUNCE_START {#announce-start}
 A publisher sends an ANNOUNCE_START message to advertise a route: a claim that paths under a prefix can be served.
-Each ANNOUNCE_START implicitly assigns the next Announce ID on the stream, later referenced by ANNOUNCE_END and ANNOUNCE_UPDATE (see [Announce](#announce)).
+Each ANNOUNCE_START implicitly assigns the next Announce ID on the stream, later referenced by ANNOUNCE_END, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART (see [Announce](#announce)).
 
 Only the suffix is encoded on the wire, as the full route prefix can be constructed by prepending the requested prefix.
 
@@ -928,7 +965,7 @@ An empty suffix advertises the requested prefix itself, which is how a route cov
 The publisher instance the route serves: 16 bytes holding a UUIDv7 [RFC9562], or empty when unknown.
 Any other length, or a UUID of another version or variant, is a PROTOCOL_VIOLATION.
 A relay forwards the Epoch unchanged and MUST NOT invent one for a route that arrived without one.
-The Epoch is fixed for the advertisement's lifetime: a publisher replacing it sends ANNOUNCE_END and a new ANNOUNCE_START, and ANNOUNCE_UPDATE never changes it.
+Only an ANNOUNCE_RESTART changes it; ANNOUNCE_UPDATE never does.
 
 **Hop Base** and **Hop Keep**:
 The Hop ID list ends with the last `Hop Keep` entries of the list advertised by the base that `Hop Base` names (see [Compression](#announce-compression)), following the literal `Hop ID` entries.
@@ -1013,6 +1050,33 @@ As defined for [ANNOUNCE_START](#announce-start).
 An update whose only change is a Route Cost is valid: it is how a relay re-prices a route without disturbing it.
 
 
+## ANNOUNCE_RESTART {#announce-restart}
+A publisher sends an ANNOUNCE_RESTART message when another publisher instance replaces a previously started advertisement (see [Routing](#routing)), referencing its Announce ID.
+The route's prefix is unchanged and the id stays live.
+Whatever the subscriber resolved under the prefix through the advertisement is the old instance: in-flight subscriptions on it are undisturbed, and a new request resolves afresh.
+
+~~~
+ANNOUNCE_RESTART Message {
+  Type (i) = 0x3
+  Message Length (i)
+  Announce ID (i),
+  Epoch (b),
+  Hops (..),
+  Route Cost (i),
+}
+~~~
+
+**Type**:
+Set to 0x3 to indicate an ANNOUNCE_RESTART message.
+
+**Announce ID**:
+As defined for [ANNOUNCE_UPDATE](#announce-update).
+
+**Epoch**, **Hops**, and **Route Cost**:
+As defined for [ANNOUNCE_START](#announce-start), replacing the advertisement's.
+`Hop Base` may name this advertisement itself, which resolves against the list being replaced.
+
+
 ## SUBSCRIBE
 SUBSCRIBE is sent by a subscriber to start a subscription.
 
@@ -1076,7 +1140,7 @@ A value of 0 means the whole group (default).
 A non-zero value is the absolute frame index + 1, matching `Group End`.
 MUST be 0 when `Group End` is 0, since an unbounded subscription has no end group to qualify.
 
-`Group Start` and `Group End` are offset by 1 only so 0 can mean "absent"; every other group field in this document is a plain absolute sequence.
+`Group End` and `Frame End` are offset by 1 so 0 can mean "absent". `Group Start` is an absolute sequence, and 0 is group 0.
 
 ## SUBSCRIBE_UPDATE
 A subscriber can modify a subscription with a SUBSCRIBE_UPDATE message.
@@ -1185,9 +1249,13 @@ SUBSCRIBE_OK Message {
 Set to 0x0 to indicate a SUBSCRIBE_OK message.
 
 **Group**:
-The absolute sequence number of the first group that will be delivered.
-It MUST be greater than or equal to the requested start group; any groups in between are unavailable.
-A subscriber that requested the latest group learns the resolved sequence here.
+The absolute sequence number where delivery starts when the subscription resolves.
+Group streams can arrive out of order, so it need not be the first group sent.
+It MUST be greater than or equal to the requested `Group Start`.
+This group is not a new floor.
+A subscriber SHOULD NOT wait for a group between the requested floor and this group.
+The publisher still delivers such a group if it is created or becomes available later, while it is within `Subscriber Max Age`.
+A subscriber whose `Subscriber Max Age` resolves the start to the latest group learns that sequence here.
 
 There is no matching frame field, because the start frame is never in doubt: a partial group is only delivered when it was asked for, so the subscription starts either exactly where it asked or at the beginning of a later group (see [Positions](#positions)).
 The subscriber derives the start frame from `Group` and its own request:
@@ -1329,6 +1397,89 @@ A peer that reconnects to a provided URI SHOULD keep using that URI for subseque
 A relay that receives a GOAWAY SHOULD treat the announcements that arrived on that session as the most expensive routes available, so a subscription it can serve from another session moves at the next Group boundary rather than when the draining session finally closes.
 The routes stay usable: a broadcast reachable only over the draining session MUST keep being served until the session ends, which is what makes the sender's deadline a handover window rather than a cutoff.
 
+## AUTH {#auth-message}
+AUTH is the first message on an Auth Stream, presenting a token.
+
+~~~
+AUTH Message {
+  Message Length (i)
+  Token (b)
+}
+~~~
+
+**Token**:
+The credential to verify, opaque to moq-lite.
+An empty token presents the credential the connection already carried, or nothing.
+
+## AUTH_OK {#auth-ok}
+AUTH_OK grants a token, and replaces any grant sent before it on the same stream.
+
+~~~
+AUTH_OK Message {
+  Type (i) = 0x0
+  Message Length (i)
+  Publish Count (i)
+  Publish Pattern (s) ...
+  Subscribe Count (i)
+  Subscribe Pattern (s) ...
+  Expires (i)
+}
+~~~
+
+**Publish Pattern**:
+A [pattern](#path-pattern) matching broadcast paths the opener may announce and serve.
+A count of zero grants none.
+
+**Subscribe Pattern**:
+A [pattern](#path-pattern) matching broadcast paths the opener may subscribe to.
+
+**Expires**:
+The number of milliseconds until the grant lapses, or 0 for never.
+A value greater than 2^53 - 1 is invalid and MUST close the session with PROTOCOL_VIOLATION.
+The acceptor revokes a lapsed grant with AUTH_ERROR; the opener uses Expires to present a replacement token in time.
+
+### Path Pattern {#path-pattern}
+A pattern is a set of broadcast paths, written as `/`-separated segments.
+Each segment is one of:
+
+- a literal, matching that segment exactly;
+- `*`, matching any one segment;
+- a literal with one `*` inside it, such as `cam-*.hang`, matching any segment that starts with the bytes before the `*` and ends with the bytes after it, without overlapping them;
+- `**`, matching zero or more segments.
+
+A pattern matches a path when its segments match the path's segments in order, covering the whole path.
+The empty pattern matches only the empty path, `room/**` matches `room` and every path beneath it, and `**` matches every path.
+
+A pattern has at most 32 segments and at most one `**`.
+It has no leading, trailing, or repeated `/`, no segment with more than one `*`, and no `**` combined with other bytes in a segment.
+It is canonical: a `**` is never immediately preceded by a `*` segment, since `*/**` and `**/*` match the same paths and only `**/*` is valid.
+A pattern that breaks any of these rules is a PROTOCOL_VIOLATION.
+
+A grant covers a request when one of its patterns matches the path.
+
+An endpoint MUST close the session with PROTOCOL_VIOLATION when an AUTH stream message fails to decode, has trailing body bytes, or has an unexpected type for its direction.
+The opener sends exactly one AUTH; any additional message on its side is a PROTOCOL_VIOLATION.
+
+## AUTH_ERROR {#auth-error}
+AUTH_ERROR refuses a token, or revokes it after an AUTH_OK.
+
+~~~
+AUTH_ERROR Message {
+  Type (i) = 0x1
+  Message Length (i)
+  Error Code (i)
+  Reason Phrase (s)
+}
+~~~
+
+**Error Code**:
+A code from the [session error registry](#session-error-codes), such as UNAUTHORIZED.
+A code that does not fit in 32 bits is a PROTOCOL_VIOLATION that closes the session.
+
+**Reason Phrase**:
+A human-readable reason, at most 8,192 bytes.
+Invalid UTF-8 or a reason longer than 8,192 bytes is a PROTOCOL_VIOLATION that closes the session.
+
 ## GROUP
 The GROUP message contains information about a Group, as well as a reference to the subscription being served.
 
@@ -1387,6 +1538,10 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
+- Listed the shared INVALID_REQUEST_ID (0x4) session code used by moq-transport drafts 14 through 16.
+
+- SUBSCRIBE_OK `Group` names where delivery starts when the subscription resolves, which need not be the first group sent. It is not a new floor. A subscriber does not wait for a group between the requested floor and it, but a publisher still delivers one that arrives later within Subscriber Max Age.
+- Corrected the SUBSCRIBE note that offset `Group Start` by 1. Only `Group End` and `Frame End` are offset so 0 can mean absent. `Group Start` is an absolute sequence, and 0 is group 0.
 - A subscription's range bounds datagrams like groups, and FETCH never returns a datagram.
 - Assigned 0x3A NOT_FETCHABLE in the stream error table: a FETCH for a group delivered only as a datagram.
 - The subscriber FINs its Subscribe Stream after settling its tail; graceful session close waits for that FIN or reset.
@@ -1395,8 +1550,10 @@ The `Message Length` describes the payload size on the wire.
 - Replaced Warm and Cold Route Cost with one static Route Cost in moq-lite-07-wip; lite-06 retains both fields, reading Warm and writing Cold at saturation.
 - Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
 - Added `Largest Group` and `Largest Frame` to SUBSCRIBE_OK: the publisher's largest position when it answers, which a subscriber takes as where the live feed is. A publisher MUST answer at once when the requested start is past it. Earlier versions carry no such position, so a subscriber takes the first frame instead.
-- Added `Epoch` to ANNOUNCE_START, SUBSCRIBE, TRACK, and FETCH: a UUIDv7 naming the publisher instance, or empty. A path and an Epoch name one Broadcast. A relay MAY move a subscription between routes with the same Epoch, continuing from the first frame the subscriber lacks instead of at a group boundary, and never between routes with different Epochs or none. The newest Epoch wins a path and ends subscriptions to the older one. Replaces the first-hop identity.
+- Added `Epoch` to ANNOUNCE_START, SUBSCRIBE, TRACK, and FETCH: a UUIDv7 naming the publisher instance, or empty. A path and an Epoch name one Broadcast. A relay MAY move a subscription between routes with the same Epoch, continuing from the first frame the subscriber lacks instead of at a group boundary, and never between routes with different Epochs or none. The newest Epoch wins a path for new requests, while subscriptions to the older one stay until their route goes. Replaces the first-hop identity.
+- Added ANNOUNCE_RESTART (0x3): another publisher instance replaces a live advertisement, under a new Epoch or, without one, through another route, including a path beneath a prefix moving to another route. Older versions send ANNOUNCE_END then ANNOUNCE_START for it.
 - An untimed Track's frames and datagrams carry their send time. lite-05 and lite-06 publishers do the same.
+- An open Track Stream is interest in the Track until the subscriber closes it, which a subscriber does once its Subscribe Stream has a response. lite-05 and lite-06 implementations do the same.
 
 - Assigned `moq-lite-07-wip` as this draft's protocol identifier until it is finalized as `moq-lite-07`.
 - Switched every variable-length integer, including SETUP parameter values, from QUIC's two-bit length prefix to moq-transport's leading-ones encoding, widening the range to 64 bits.
@@ -1405,9 +1562,16 @@ The `Message Length` describes the payload size on the wire.
 - Removed SUBSCRIBE_DROP and its type 0x2; a group without a Group Stream is not counted.
 - The Subscribe Stream FIN now follows once every counted Group Stream has finished or been reset.
 - Added the Spread Hash tie-break after the shortest path: a hash of the requested path and the route's Hop IDs, so equal-cost advertisers of one prefix share its paths.
+- Added a local link preference to route selection, after the newest Epoch and before the 0 Hop ID check: the higher preference a subscriber assigns to the arriving link wins, and an unassigned link is neutral. Not carried on the wire.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live advertisement's suffix, and ANNOUNCE_START and ANNOUNCE_UPDATE gain `Hop Base` and `Hop Keep` to copy the tail of a live advertisement's Hop ID list.
 - Capped the Message Length of every message except FRAME at 65,535 bytes.
 - Added the TOO_MANY_REQUESTS (0x7) session code, closing a session whose peer goes past the endpoint's bound on subscriptions or announcements.
+- Added the AUTH_TOKEN_CACHE_OVERFLOW (0x13) and UNKNOWN_AUTH_TOKEN_ALIAS (0x17) session codes, with moq-transport's meaning.
+- Limited AUTH_OK Expires to 2^53 - 1 milliseconds, with an out-of-range value closing the session with PROTOCOL_VIOLATION.
+- Invalid UTF-8 or an oversized AUTH_ERROR reason closes the session with PROTOCOL_VIOLATION.
+- An Auth Stream message that fails to decode, has trailing body bytes, or has an unexpected type, or a second AUTH from the opener, closes the session with PROTOCOL_VIOLATION.
+- Added NOT_SUPPORTED (0x30) to session errors; unsupported Auth Stream tokens and grants use AUTH_ERROR before or after a grant.
+- Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path patterns](#path-pattern) it may publish and subscribe to. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
 
 ## moq-lite-06
 
@@ -1423,6 +1587,7 @@ The `Message Length` describes the payload size on the wire.
 - Split the reserved stream error range: 32 through 47 stays reserved, and 48 through 63 is moq-lite's own, assigned by the tables and mapped rather than forwarded across a bridge. Assigned 0x32 GROUP_TOO_LARGE: a group that grew past the publisher's cache budget is aborted. Every code is terminal.
 - Assigned 0x33 NOT_FOUND, 0x34 OLD, and 0x35 EVICTED in the stream error table: a group the publisher cannot serve because it was never here, has been superseded, or was dropped under memory pressure.
 - Assigned 0x36 UNROUTABLE, 0x37 WRONG_SIZE, 0x38 FRAME_TOO_LARGE, and 0x39 TIMESTAMP_MISMATCH in the stream error table, moving them out of the reserved 32 through 47 range, which no longer carries provisional placeholders.
+- Assigned 0x3B UNAUTHORIZED in the stream error table: a request reset because the endpoint does not authorize it, or no longer does, distinct from SESSION_CLOSED.
 - Assigned 0x31 CONTROL_TIMEOUT in the stream error table: a request stream torn down because the peer never answered, which DELIVERY_TIMEOUT described as late content. It has no moq-transport value and bridges to INTERNAL_ERROR.
 - A disallowed stream type, a role mismatch, or a missing extension is a PROTOCOL_VIOLATION; the session table gains no code for them, so nothing is sent from the reserved 32 through 47 range in either registry.
 - Added implicit Announce IDs: each ANNOUNCE_START assigns the next per-stream ordinal.
@@ -1574,6 +1739,10 @@ moq-lite inherits the transport security of the underlying connection: QUIC and 
 
 ## Bandwidth Probing
 The `Increase` Probe level (see [Probe Parameter](#probe-parameter)) lets a subscriber ask the publisher to pad the connection up to a target bitrate. A publisher MUST NOT treat the target as authorization to send beyond what congestion control allows: padding is bounded by the congestion window, so probing cannot be used to amplify traffic toward the subscriber or a spoofed address. A publisher that only advertised `Report` MUST NOT pad above its current sending rate. Because all data flows on an established, congestion-controlled session to the connecting peer, moq-lite offers no off-path amplification vector.
+
+## Authorization
+An AUTH_OK tells the opener what the acceptor will allow; it does not replace the acceptor's own enforcement, which MUST still refuse what the grant does not cover.
+A token presented on an Auth Stream is as sensitive as one in the request URI, and relies on the same transport confidentiality.
 
 ## Session Redirection
 GOAWAY carries an optional New Session URI that asks the peer to reconnect elsewhere. A malicious or compromised peer could use this to redirect a client to an attacker-controlled server. A recipient MUST validate the URI against local policy (scheme, authority, and port) before reconnecting, and MUST NOT reconnect if validation fails (see [GOAWAY](#goaway)). Migrated subscriptions carry no implicit trust from the prior session; the new session is authenticated independently.

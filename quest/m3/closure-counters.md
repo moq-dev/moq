@@ -2,10 +2,11 @@
 
 ## Goal
 
-`moq_stats::aggregate` documents, and one test pins, what a same-lifetime
+`moq_stats::aggregate` documents, and one test pins, what a same-epoch
 rejoin within the grace does to the `*_ended` counters that `Traffic`'s
-`Mergeable::retire` advanced on departure, beside the existing restart
-contract in `rs/moq-stats/src/aggregate.rs`.
+`Mergeable::retire` advanced on departure: they may regress. A restart is not
+this case: since #4904 it announces a new epoch, whose counters add to the
+old one's kept contribution (`rs/moq-stats/src/aggregate.rs`).
 
 ## Plan
 
@@ -24,8 +25,9 @@ counters intact, can show a lower `*_ended` value. The stickiness fix
 P2.
 
 Decided 2026-10-08: keep the current behavior (retire on departure, accept an
-`*_ended` regression on rejoin), since it follows the same fresh-segment rule
-as a restart and no consumer has asked for anything else. Rejected: keeping
+`*_ended` regression on a same-epoch rejoin within the grace), since the
+regression is bounded by the closures retire assumed, it ends once the node's
+own counters pass them, and no consumer has asked for anything else. Rejected: keeping
 the retired values as a floor until the node's own counters pass them, which
 suppresses a still-live node's closures after a transient reader failure.
 Document it in the consumer-facing contract and add one test of a rejoin

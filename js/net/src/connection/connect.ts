@@ -1,5 +1,5 @@
 import Session, { type Version as QmuxVersion } from "@moq/qmux";
-import { error, fromClose } from "../error.ts";
+import { error, fromClose, sessionCause } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
@@ -9,6 +9,7 @@ import * as Hex from "../util/hex.ts";
 import { redact } from "../util/log.ts";
 import { isWebTransportSupported } from "./browser.ts";
 import type { Established } from "./established.ts";
+import * as Extensions from "./extensions.ts";
 import { forwardAnnounced } from "./forward.ts";
 import { exchangeSetup } from "./handshake.ts";
 
@@ -110,6 +111,9 @@ export interface ConnectProps {
 	 */
 	consume?: OriginProducer;
 
+	/** The moq-transport extensions to offer, each on unless set to `false`. */
+	extensions?: Extensions.Extensions;
+
 	/**
 	 * Aborts the connection attempt with the signal's reason. An already-aborted
 	 * signal rejects before anything opens, and aborting after the connection is
@@ -122,6 +126,10 @@ export interface ConnectProps {
 type SessionProps = {
 	discovery: boolean;
 	publish?: OriginConsumer;
+	/** Whether this side dialed; only the dialing side aborts on a publication its grant does not cover. */
+	client: boolean;
+	/** The moq-transport extensions this side offers. */
+	extensions: Extensions.Offered;
 };
 
 // Save if WebSocket won the last race, so we won't give QUIC a head start next time.
@@ -167,6 +175,8 @@ async function connectInner(url: URL, props: Omit<ConnectProps, "url">, abort: P
 	const wiring: SessionProps = {
 		discovery: props.discovery ?? true,
 		publish: props.publish,
+		client: true,
+		extensions: Extensions.offered(props.extensions),
 	};
 
 	if (props.transport) {
@@ -232,6 +242,9 @@ async function connectTransport(url: URL, session: WebTransport, wiring: Session
 	try {
 		return await Promise.race([terminal, negotiate(url, session, wiring)]);
 	} catch (cause) {
+		// A session failure already guarantees a terminal close; its authoritative code
+		// must not be overwritten by the reset-only fallback while the browser delivers it.
+		cause = await sessionCause(session, cause);
 		// A session shutdown can reject its SETUP stream before `closed` publishes the
 		// peer's close code. Wait briefly without closing locally, since a local clean close
 		// could overwrite that code. A reset-only peer is cleaned up after the grace period.
@@ -304,7 +317,7 @@ async function negotiate(url: URL, session: WebTransport, wiring: SessionProps):
 	const params = new Ietf.SetupOptions();
 	params.setVarint(Ietf.SetupOption.MaxRequestId, Ietf.initialMaxRequestId(false));
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
-	Ietf.solicitIntoSetup(params);
+	Extensions.intoSetup(params, wiring.extensions, setupVersion);
 	Ietf.hiddenIntoSetup(params);
 
 	const client = new Ietf.ClientSetup({
@@ -361,7 +374,12 @@ async function handshakeAlpn(
 	version: Ietf.IetfVersion,
 	wiring: SessionProps,
 ): Promise<Established> {
-	const { control, early, solicit, hidden, cluster } = await exchangeSetup(session, version, "moq-lite-js");
+	const { control, early, solicit, hidden, cluster, auth } = await exchangeSetup(
+		session,
+		version,
+		"moq-lite-js",
+		wiring.extensions,
+	);
 
 	return new Ietf.Connection({
 		...wiring,
@@ -373,6 +391,7 @@ async function handshakeAlpn(
 		solicit,
 		hidden,
 		cluster,
+		auth,
 		// v17+ uses NativeSession which manages its own request IDs; maxRequestId is unused.
 		maxRequestId: 0n,
 		version,

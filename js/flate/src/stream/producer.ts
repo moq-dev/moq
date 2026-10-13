@@ -1,6 +1,6 @@
 import type * as Moq from "@moq/net";
-import { Time } from "@moq/net";
-import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "../codec.ts";
+import { Group, Error as NetError, type Timed } from "@moq/net";
+import { Encoder as Flate } from "../codec.ts";
 
 import { type Compression, isDeflate } from "../compression.ts";
 
@@ -25,6 +25,10 @@ export class Producer {
 	#flate?: Flate;
 	// The single group carrying the whole log, opened on the first append and never rolled.
 	#group?: Moq.Group.Producer;
+	// Frames and payload bytes written to the group, checked against the group budget before each
+	// payload is encoded.
+	#frames = 0;
+	#bytes = 0;
 
 	/** Wrap a track to publish a payload log into it. */
 	constructor(config: Producer.Config) {
@@ -36,25 +40,32 @@ export class Producer {
 	/**
 	 * Append one payload to the log.
 	 *
-	 * A payload that cannot be written ends the track: a log missing a record is not the lossless
-	 * log this mode promises, so the failure is surfaced rather than papered over with a second
-	 * group. The group is aborted rather than closed cleanly, so a consumer sees the failure
+	 * A payload that might not fit in what is left of the group's budget throws `GroupTooLarge`
+	 * before anything is written, leaving the log intact. The budget covers the whole log, so once
+	 * it is spent every append throws; a publisher with more to say opens a new track.
+	 *
+	 * Any other payload that cannot be written ends the track: a log missing a record is not the
+	 * lossless log this mode promises, so the failure is surfaced rather than papered over with a
+	 * second group. The group is aborted rather than closed cleanly, so a consumer sees the failure
 	 * instead of a log that merely looks complete. Every later append fails on the closed track.
 	 *
-	 * `at` is when the payload was captured, written as its frame timestamp. Defaults to now.
+	 * `at` is when the payload was captured, written as its frame timestamp. Omit it only on an
+	 * untimed track: it is never filled in.
 	 */
-	append(payload: Uint8Array, at: Time.Timestamp = Time.Timestamp.now()): void {
-		// A payload no consumer could decode is as terminal as one the track rejects: consumers all
-		// decode with `@moq/flate`'s default cap, so this would publish a record none of them could
-		// read. Ends the track like any other lost record, and aborts the group the same way the
-		// write path below does: an earlier append may already have opened one, and leaving the two
-		// paths to tear down differently only invites a reader to wonder which is authoritative.
-		if (this.#flate && payload.byteLength > DEFAULT_MAX_FRAME_SIZE) {
-			const err = new Error(`payload larger than the decoder's ${DEFAULT_MAX_FRAME_SIZE} byte limit`);
-			this.#group?.close(err);
-			this.#group = undefined;
-			this.#track.close(err);
-			throw err;
+	append({ value: payload, at }: Timed<Uint8Array>): void {
+		// A closed track refuses every append, so say so before the budget: `GroupTooLarge` promises
+		// the log is still writable.
+		const closed = this.#track.closed.peek();
+		if (closed !== undefined) throw closed ?? new Error("track is closed");
+
+		// Check before compressing: encoding advances the window, so a payload refused afterwards
+		// would leave the encoder ahead of every reader. The worst case is checked rather than the
+		// actual size for the same reason. Also checked before the group is opened, so a refused
+		// first payload publishes nothing. The budget is below the decoder's cap, so any payload that
+		// fits is one every consumer can inflate.
+		const bound = this.#flate ? Flate.bound(payload.byteLength) : payload.byteLength;
+		if (this.#frames >= Group.MAX_GROUP_FRAMES || this.#bytes + bound > Group.MAX_GROUP_CACHE_BYTES) {
+			throw new NetError.GroupTooLarge();
 		}
 
 		// Open the group before compressing: a failure here must not leave the window ahead of a
@@ -82,6 +93,9 @@ export class Producer {
 			this.#track.close(abort);
 			throw err;
 		}
+
+		this.#frames++;
+		this.#bytes += encoded.byteLength;
 	}
 
 	/** Finish the track, closing the group. */

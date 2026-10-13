@@ -11,6 +11,9 @@
 //! route table they occupy, not a publisher writing into its own cache.
 //!
 //! `SESSION_ALLOCS=1` prints allocations per viewer-group instead of timing.
+//! `SESSION_EXPIRY_ONLY=1` uses the standalone 30s-expiry pool and reports groups
+//! written plus charged cache bytes every 10s during long profiling runs. Each round
+//! advances the cache clock by a second, so the expiry window spans 30 rounds.
 //!
 //! `session_join_*` times a new viewer connecting, resolving a broadcast, and
 //! receiving its latest group, swept over what the relays already announce.
@@ -41,6 +44,11 @@ use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_net::{Hop, Timestamp, Version, broadcast, cache, group, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
+
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> track::Info {
+	track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
 
 /// The lite draft production negotiates, the next one (opt-in), and the newest
 /// IETF draft.
@@ -81,6 +89,9 @@ struct Shape {
 	frame: usize,
 	/// Write one frame per round, as a live source does, instead of a whole group.
 	paced: bool,
+	/// Whole groups each watched broadcast writes per round, so a serve loop finds a
+	/// backlog ready: the group rate a round stands in for.
+	burst: usize,
 }
 
 impl Shape {
@@ -94,7 +105,14 @@ impl Shape {
 		watch: 1,
 		frame: 64,
 		paced: false,
+		burst: 1,
 	};
+
+	/// What each viewer subscribes with: a burst is a backlog, which the default
+	/// subscription writes off as late.
+	fn subscription(&self) -> Option<track::Subscription> {
+		(self.burst > 1).then(|| track::Subscription::default().with_max_delay(Duration::from_secs(30)))
+	}
 
 	fn total(&self) -> usize {
 		self.publishers * self.broadcasts
@@ -107,19 +125,28 @@ impl Shape {
 
 	/// Payload bytes every viewer reads in one round.
 	fn expected(&self) -> usize {
-		self.viewers * self.watch * self.frames() * self.frame
+		self.viewers * self.watch * self.burst * self.frames() * self.frame
 	}
 
 	fn id(&self, version: &str) -> String {
 		format!(
-			"{version}/relays={}/publishers={}/broadcasts={}/viewers={}/watch={}/frame={}{}",
+			"{version}/relays={}/publishers={}/broadcasts={}/viewers={}/watch={}/frame={}{}{}",
 			self.relays,
 			self.publishers,
 			self.broadcasts,
 			self.viewers,
 			self.watch,
 			self.frame,
-			if self.paced { "/paced" } else { "" },
+			if self.paced {
+				"/paced".to_string()
+			} else {
+				String::new()
+			},
+			if self.burst > 1 {
+				format!("/burst={}", self.burst)
+			} else {
+				String::new()
+			},
 		)
 	}
 }
@@ -201,6 +228,8 @@ struct Cluster {
 	_origins: Vec<origin::Producer>,
 	_pairs: Vec<MockPair>,
 	next_hop: u64,
+	/// The relay and publisher caches; each viewer owns its own.
+	pools: Vec<cache::Pool>,
 }
 
 impl Cluster {
@@ -213,11 +242,13 @@ impl Cluster {
 			_origins: Vec::new(),
 			_pairs: Vec::new(),
 			next_hop: 0,
+			pools: Vec::new(),
 		};
 
 		for _ in 0..shape.relays {
-			let relay = this.origin(RELAY_CACHE);
+			let (relay, pool) = this.origin(RELAY_CACHE);
 			this.relays.push(relay);
+			this.pools.push(pool);
 		}
 
 		// Peer every pair the way a cluster dial does: each side publishes its
@@ -236,12 +267,13 @@ impl Cluster {
 		}
 
 		for publisher in 0..shape.publishers {
-			let origin = this.origin(CLIENT_CACHE);
+			let (origin, pool) = this.origin(CLIENT_CACHE);
+			this.pools.push(pool);
 			for index in 0..shape.broadcasts {
 				let broadcast = origin
 					.publish(path(publisher * shape.broadcasts + index), Default::default())
 					.unwrap();
-				this.tracks.push(broadcast.create_track(TRACK, None).unwrap());
+				this.tracks.push(broadcast.create_track(TRACK, timed()).unwrap());
 				this._broadcasts.push(broadcast);
 			}
 
@@ -255,18 +287,23 @@ impl Cluster {
 		this
 	}
 
-	fn origin(&mut self, capacity: u64) -> origin::Producer {
+	fn origin(&mut self, capacity: u64) -> (origin::Producer, cache::Pool) {
 		self.next_hop += 1;
 		let mut config = origin::Config::new(Hop::new(self.next_hop).unwrap());
-		config.pool = cache::Pool::new(cache::Config::default().with_capacity(capacity));
+		let pool = cache::Pool::new(if std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
+			cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY)
+		} else {
+			cache::Config::default().with_capacity(capacity)
+		});
+		config.pool = pool.clone();
 		let (producer, driver) = origin::Producer::new(config);
 		support::harness::spawn(driver);
-		producer
+		(producer, pool)
 	}
 
 	/// Connect a viewer session to `relay`.
 	async fn join(&mut self, relay: usize) -> Viewer {
-		let origin = self.origin(CLIENT_CACHE);
+		let (origin, pool) = self.origin(CLIENT_CACHE);
 		let mut options = MockConnectOptions::new(self.version);
 		// Hidden included, as the dash's `.stats/` scope sees its subtree.
 		options.server_publish = Some(self.relays[relay].consume().with_hidden(true));
@@ -277,6 +314,7 @@ impl Cluster {
 			subscribers: Vec::new(),
 			_pair: pair,
 			origin,
+			pool,
 		}
 	}
 }
@@ -285,15 +323,22 @@ struct Viewer {
 	subscribers: Vec<track::Subscriber>,
 	_pair: MockPair,
 	origin: origin::Producer,
+	pool: cache::Pool,
 }
 
 impl Viewer {
 	/// Resolve `path` and subscribe to each of its `tracks`.
-	async fn watch(&mut self, path: &str, tracks: &[impl AsRef<str>]) {
+	async fn watch(&mut self, path: &str, tracks: &[impl AsRef<str>], subscription: Option<track::Subscription>) {
 		let broadcast = self.origin.consume().routed_broadcast(path).await.unwrap();
 		for track in tracks {
-			self.subscribers
-				.push(broadcast.track(track.as_ref()).unwrap().subscribe(None).await.unwrap());
+			self.subscribers.push(
+				broadcast
+					.track(track.as_ref())
+					.unwrap()
+					.subscribe(subscription.clone())
+					.await
+					.unwrap(),
+			);
 		}
 	}
 }
@@ -308,10 +353,13 @@ struct Room {
 	shape: Shape,
 	/// Frames written so far, so paced rounds know where each group starts and ends.
 	written: usize,
+	/// Groups finished so far across every watched broadcast.
+	groups: usize,
 	/// The group each watched broadcast is writing, when paced.
 	writing: Vec<Option<group::Producer>>,
 	/// The group each viewer's subscriber is reading, when paced, flattened in viewer order.
 	reading: Vec<Option<group::Consumer>>,
+	cache_now: moq_net::time::Instant,
 }
 
 impl Room {
@@ -320,6 +368,7 @@ impl Room {
 			shape.watch <= shape.total(),
 			"a viewer can't watch more broadcasts than exist"
 		);
+		assert!(!shape.paced || shape.burst == 1, "a paced round writes one frame");
 		let mut cluster = Cluster::new(version, shape).await;
 
 		// Viewer v watches a contiguous window starting at v * watch, so viewers
@@ -337,7 +386,7 @@ impl Room {
 			// publisher it watches whenever there is more than one.
 			let mut viewer = cluster.join((viewer + 1) % shape.relays).await;
 			for broadcast in broadcasts {
-				viewer.watch(&path(broadcast), &[TRACK]).await;
+				viewer.watch(&path(broadcast), &[TRACK], shape.subscription()).await;
 			}
 			viewers.push(viewer);
 		}
@@ -354,16 +403,52 @@ impl Room {
 			payload: Bytes::from(vec![0; shape.frame]),
 			shape,
 			written: 0,
+			groups: 0,
 			writing: Vec::new(),
 			reading: Vec::new(),
+			cache_now: moq_net::time::Instant::now(),
 		};
 		room.writing.resize_with(room.watched.len(), || None);
 		room.reading.resize_with(shape.viewers * shape.watch, || None);
+
+		// First measure the complete batch without eviction. The delivery benchmark must
+		// fit its working set; cache-pressure loss is a different workload.
+		let capacities: Vec<_> = room.pools().map(cache::Pool::capacity).collect();
+		for pool in room.pools() {
+			pool.resize(None);
+		}
 		// Warm every path so the timed rounds skip first-group setup.
 		for _ in 0..FRAMES / shape.frames() {
+			room.tick();
+			room.round().await;
+		}
+		for (pool, capacity) in room.pools().zip(capacities) {
+			// Keep the old and current batch resident during the handover, including
+			// bookkeeping rather than estimating a group from payload bytes alone.
+			pool.resize(capacity.map(|capacity| capacity.max(pool.used() * 2)));
+		}
+		// Exercise turnover as well as the empty cache, including Criterion's one-pass
+		// nightly smoke mode.
+		for _ in 0..4 {
+			room.tick();
 			room.round().await;
 		}
 		room
+	}
+
+	fn pools(&self) -> impl Iterator<Item = &cache::Pool> {
+		let viewers = self.viewers.iter().map(|viewer| &viewer.pool);
+		self.cluster.pools.iter().chain(viewers)
+	}
+
+	/// Unpaced rounds otherwise collapse many complete batches into one cache tick,
+	/// where yesterday's read outranks today's unread write. Sample a new recency
+	/// epoch per round without sleeping or changing protocol time.
+	fn tick(&mut self) {
+		self.cache_now += Duration::from_secs(1);
+		for pool in self.pools() {
+			pool.gc(self.cache_now);
+		}
 	}
 
 	async fn round(&mut self) {
@@ -371,15 +456,21 @@ impl Room {
 			return self.paced_round().await;
 		}
 		for &broadcast in &self.watched {
-			write_group(&self.cluster.tracks[broadcast], &self.payload, FRAMES);
+			for _ in 0..self.shape.burst {
+				write_group(&self.cluster.tracks[broadcast], &self.payload, FRAMES);
+			}
 		}
 		let mut bytes = 0;
-		for viewer in &mut self.viewers {
-			for subscriber in &mut viewer.subscribers {
-				bytes += read_group(subscriber).await;
+		// Round-robin, so no subscription's backlog waits on another's being read.
+		for _ in 0..self.shape.burst {
+			for viewer in &mut self.viewers {
+				for subscriber in &mut viewer.subscribers {
+					bytes += read_group(subscriber).await;
+				}
 			}
 		}
 		assert_eq!(bytes, self.shape.expected());
+		self.groups += self.shape.burst * self.watched.len();
 	}
 
 	/// One frame into every watched group and one frame out to every viewer, so each
@@ -395,6 +486,9 @@ impl Room {
 				group.finish().unwrap();
 				*writing = None;
 			}
+		}
+		if last {
+			self.groups += self.watched.len();
 		}
 
 		let mut bytes = 0;
@@ -413,12 +507,29 @@ impl Room {
 		assert_eq!(bytes, self.shape.expected());
 	}
 
+	/// Time `iters` rounds, excluding each round's cache tick: its cost grows with the
+	/// number of pools, not with the delivery being measured.
 	async fn measure(&mut self, iters: u64) -> Duration {
-		let start = Instant::now();
+		let mut elapsed = Duration::ZERO;
+		let report = std::env::var_os("SESSION_EXPIRY_ONLY").is_some();
+		let began = Instant::now();
+		let mut next_report = Duration::from_secs(10);
 		for _ in 0..iters {
+			self.tick();
+			let start = Instant::now();
 			self.round().await;
+			elapsed += start.elapsed();
+			if report && began.elapsed() >= next_report {
+				eprintln!(
+					"cache sample: elapsed={:.1}s groups={} charged={}",
+					began.elapsed().as_secs_f64(),
+					self.groups,
+					self.pools().map(cache::Pool::used).sum::<u64>()
+				);
+				next_report += Duration::from_secs(10);
+			}
 		}
-		start.elapsed()
+		elapsed
 	}
 }
 
@@ -472,7 +583,7 @@ fn join(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Shape>) 
 							let broadcast = hosted[iter % hosted.len()];
 							let start = Instant::now();
 							let mut viewer = cluster.join(relay).await;
-							viewer.watch(&path(broadcast), &[TRACK]).await;
+							viewer.watch(&path(broadcast), &[TRACK], None).await;
 							let bytes = read_group(&mut viewer.subscribers[0]).await;
 							elapsed += start.elapsed();
 							assert_eq!(bytes, FRAMES * shape.frame);
@@ -551,7 +662,7 @@ impl DashRoom {
 				let path = format!(".stats/{project}/node/{node}");
 				let broadcast = cluster.relays[node].publish(path.as_str(), Default::default()).unwrap();
 				for name in &names {
-					tracks.push(broadcast.create_track(name.as_str(), None).unwrap());
+					tracks.push(broadcast.create_track(name.as_str(), timed()).unwrap());
 				}
 				broadcasts.push(broadcast);
 				paths.push(path);
@@ -560,7 +671,7 @@ impl DashRoom {
 
 		let mut dash = cluster.join(0).await;
 		for path in &paths {
-			dash.watch(path, &names).await;
+			dash.watch(path, &names, None).await;
 		}
 
 		let mut room = Self {
@@ -696,7 +807,7 @@ impl ChurnRoom {
 		let mut broadcasts = Vec::new();
 		for _ in 0..shape.sessions {
 			let mut viewer = cluster.join(0).await;
-			viewer.watch(&path(0), &held).await;
+			viewer.watch(&path(0), &held, None).await;
 			broadcasts.push(viewer.origin.consume().routed_broadcast(&path(0)).await.unwrap());
 			viewers.push(viewer);
 		}
@@ -852,6 +963,20 @@ fn session(c: &mut Criterion) {
 		}),
 	);
 	delivery(c, "frame", [64, 1024, 16 * 1024].map(|frame| Shape { frame, ..base }));
+	// One session serving a backlog on each of its subscriptions: the serve loop that a
+	// `kio::coop::Budget` bounds per poll.
+	delivery(
+		c,
+		"burst",
+		[(1, 1), (1, 8), (1, 64), (8, 1), (8, 8), (16, 16), (16, 64)].map(|(watch, burst)| Shape {
+			publishers: 1,
+			broadcasts: 16,
+			viewers: 1,
+			watch,
+			burst,
+			..base
+		}),
+	);
 	delivery(
 		c,
 		"relays",

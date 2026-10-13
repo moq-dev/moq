@@ -25,6 +25,11 @@ no `NotFetchable` code, since nothing would send it. Only lite-07 has the
 code, and lite-07 drops FETCH for [ranges](/quest/m1/subscribe-ranges/lite.md);
 lite-05 and lite-06 answer `NotFound`.
 
+Since #4974, a native fetch-only request asks TRACK_STATUS before its first
+FETCH, so the `@moq/net` publisher answers TRACK_STATUS too (a #4974
+follow-up, folded in here because answering only matters once JS serves
+FETCH).
+
 Verify with an in-memory application responder: a browser publisher serves a
 native IETF subscriber after a group is evicted or was never cached. Run the
 supported-draft matrix and `just test interop --all` through CI.
@@ -40,3 +45,5 @@ claims that change.
 ## Related
 
 - [Browser archive](/quest/m3/archive-browser.md) - supplies memory or OPFS archive data through the same request surface
+- [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native timeout budgets and gap dispositions build on this responder
+- [FETCH max-delay](/quest/m1/fetch-max-delay.md) - local per-reader age limits also apply to historical data

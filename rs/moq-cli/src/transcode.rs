@@ -21,10 +21,10 @@ pub struct Args {
 	#[usage(long)]
 	pub output: Option<String>,
 
-	/// A ladder rung as `height:bitrate` (pixels : bits per second), repeatable,
-	/// e.g. `--rung 720:2500000 --rung 360:600000`. Heights and bitrates must
+	/// A ladder rung as `size:bitrate` (short-side pixels : bits per second), repeatable,
+	/// e.g. `--rung 720:2500000 --rung 360:600000`. Short sides and bitrates must
 	/// increase together; input order does not matter. Rungs above the source
-	/// are dropped; a same-height rung needs a lower known bitrate.
+	/// are dropped; a same-size rung needs a lower known bitrate.
 	/// Defaults to a 240p..1080p ladder.
 	#[usage(long = "rung")]
 	rungs: Vec<RungArg>,
@@ -45,7 +45,7 @@ pub struct Args {
 	frames: OutputArg,
 }
 
-/// A `height:bitrate` rung, e.g. `720:2500000`.
+/// A `size:bitrate` rung, e.g. `720:2500000`.
 ///
 /// A newtype because Usage builds a value through `FromStr`, and `Rung` is not ours.
 #[derive(Clone)]
@@ -55,15 +55,15 @@ impl std::str::FromStr for RungArg {
 	type Err = String;
 
 	fn from_str(arg: &str) -> Result<Self, Self::Err> {
-		let (height, bitrate) = arg
+		let (size, bitrate) = arg
 			.split_once(':')
-			.ok_or_else(|| format!("expected height:bitrate, got `{arg}`"))?;
-		let height: u32 = height.parse().map_err(|e| format!("invalid height `{height}`: {e}"))?;
+			.ok_or_else(|| format!("expected size:bitrate, got `{arg}`"))?;
+		let size: u32 = size.parse().map_err(|e| format!("invalid short side `{size}`: {e}"))?;
 		let bitrate: u64 = bitrate
 			.parse()
 			.map_err(|e| format!("invalid bitrate `{bitrate}`: {e}"))?;
 		Ok(Self(moq_transcode::Rung::new(
-			height,
+			size,
 			moq_net::bandwidth::Rate::from_bps(bitrate),
 		)))
 	}

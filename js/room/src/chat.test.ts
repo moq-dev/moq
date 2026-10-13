@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Broadcast } from "@moq/net";
+import { Broadcast, Time } from "@moq/net";
 import { HISTORY, info, Publisher, Subscriber, TRACK } from "./chat.ts";
 
 test("chat expires ten-second history and late readers only see retained messages", async () => {
@@ -34,7 +34,10 @@ test("chat rejects non-string window records and propagates track failures", asy
 	const track = broadcast.createTrack(TRACK, info());
 	const subscriber = Subscriber.subscribe(broadcast.consume());
 	try {
-		track.writeString('{"offset":0,"records":[42]}');
+		track.writeFrame({
+			payload: new TextEncoder().encode('{"offset":0,"records":[42]}'),
+			timestamp: Time.Timestamp.now(),
+		});
 		await expect(subscriber.recv()).rejects.toThrow("chat record must be a string");
 		track.close(new Error("chat aborted"));
 		await expect(subscriber.recv()).rejects.toThrow("chat aborted");

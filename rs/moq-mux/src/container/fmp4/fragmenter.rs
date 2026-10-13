@@ -302,8 +302,12 @@ mod tests {
 		);
 
 		for (fragment, expected) in fragments.iter().zip(&input) {
-			let decoded =
-				super::super::decode(fragment.data.clone(), timescale, crate::container::fmp4::Kind::Video).unwrap();
+			let decoded = super::super::decode(
+				fragment.data.clone(),
+				None,
+				super::super::Track::new(timescale, crate::container::fmp4::Kind::Video),
+			)
+			.unwrap();
 			assert_eq!(decoded.len(), 1);
 			assert_eq!(decoded[0].timestamp, expected.timestamp, "pts survives the reorder");
 		}
@@ -564,7 +568,7 @@ mod tests {
 	}
 
 	// A keyframe may open a new group, and a group boundary is never a duration: the publisher
-	// may have paused across it (the 2405 second sample of moq-dev/moq.pro#814). The pending
+	// may have paused across it (which once produced a 2405 second sample). The pending
 	// frame takes the catalog cadence, and the new group re-anchors the decode timeline at its
 	// keyframe's presentation time rather than pretending the stream was continuous.
 	#[test]

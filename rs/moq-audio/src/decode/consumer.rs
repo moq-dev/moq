@@ -541,7 +541,7 @@ fn now() -> Instant {
 /// So a packet is discontinuous when it misses `expected` by more than one unit of
 /// the coarsest timescale on the path, plus one unit of the stamp's own scale for
 /// the rounding in the arithmetic that produced `expected`. The coarsest timescale
-/// is the stamp's own scale floored at [`Timescale::default`](moq_net::Timescale):
+/// is the stamp's own scale floored at [`Timescale::MILLI`](moq_net::Timescale::MILLI):
 /// the legacy hang container re-stamps every frame in microseconds whatever the
 /// source used, and a wire that cannot carry a timescale at all (moq-lite before
 /// 05, IETF moq-transport) falls back to milliseconds, so a millisecond is the
@@ -550,7 +550,7 @@ fn now() -> Instant {
 /// swallows a lost one.
 fn discontinuous(expected: moq_net::Timestamp, timestamp: moq_net::Timestamp) -> bool {
 	let scale = expected.scale().max(timestamp.scale());
-	let quantum = scale.min(moq_net::Timescale::default());
+	let quantum = scale.min(moq_net::Timescale::MILLI);
 	let tolerance = (scale.as_u64() as u128).div_ceil(quantum.as_u64() as u128) + 1;
 	expected.as_scale(scale).abs_diff(timestamp.as_scale(scale)) > tolerance
 }
@@ -1596,9 +1596,9 @@ mod tests {
 
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let subscriber = broadcast.consume();
-		let track = broadcast
-			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
-			.unwrap();
+		// A CMAF track counts in its init's ticks.
+		let info = hang::container::track_info(hang::catalog::PRIORITY.audio).with_timescale(muxer.timescale());
+		let track = broadcast.create_track("audio", info).unwrap();
 		let container = moq_mux::catalog::hang::Container::try_from(&catalog).unwrap();
 		let mut producer = moq_mux::container::Producer::new(track, container);
 

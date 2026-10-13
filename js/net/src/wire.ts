@@ -20,7 +20,8 @@ import type * as track from "./track.ts";
 /** The protocol-facing operations behind a broadcast handle. */
 export interface Broadcast {
 	subscribe(name: string, options?: track.Subscription): track.Subscriber;
-	resolveTrackInfo(name: string): Promise<track.Info>;
+	/** The track's properties; `hold` keeps the track wanted until it aborts, the way a held TRACK stream does, and aborting it before the answer abandons the lookup. */
+	resolveTrackInfo(name: string, hold?: AbortSignal): Promise<track.Info>;
 	fetchGroup(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
 	requested(): Promise<track.Request | undefined>;
 	/**
@@ -68,6 +69,21 @@ export interface Advertised {
 	readonly route: Route;
 	/** The paths a scoped route may serve beneath its prefix, relative like its key; unset for the whole subtree. */
 	readonly claim?: Path.Patterns;
+}
+
+/** What names a publisher instance: an advertisement's identity and epoch. */
+export interface Instance {
+	readonly identity: object;
+	readonly route: Pick<Route, "epoch">;
+}
+
+/**
+ * Whether two advertisements serve one publisher instance: the same epoch, or, without one,
+ * the same advertisement, since nothing says another serves the same bytes.
+ */
+export function sameInstance(a: Instance, b: Instance): boolean {
+	if (a.route.epoch !== undefined || b.route.epoch !== undefined) return a.route.epoch === b.route.epoch;
+	return a.identity === b.identity;
 }
 
 /**

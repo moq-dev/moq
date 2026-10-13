@@ -68,11 +68,16 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	/// other importers, until they finish too).
 	initial_reservation: Option<crate::catalog::Reserved<E>>,
 
+	/// The stream's timestamp base: the first media frame anchors it, and every frame shifts by its
+	/// offset onto the catalog clock.
+	timebase: crate::catalog::Timebase<E>,
+
 	/// Accumulated unparsed input. Whole tags are drained out; a trailing partial
 	/// tag is retained for the next [`decode`](Self::decode) call.
 	buffer: BytesMut,
 	/// True once the 9-byte FLV file header and its `PreviousTagSize0` have been consumed.
 	header_seen: bool,
+	dropped_metadata: u64,
 
 	/// Demuxed video tracks keyed by RTMP track id (legacy / single-track tags use
 	/// [`DEFAULT_TRACK_ID`]).
@@ -102,12 +107,19 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			broadcast,
 			catalog: reserved.producer(),
 			container,
+			timebase: reserved.timebase(),
 			initial_reservation: Some(reserved),
 			buffer: BytesMut::new(),
 			header_seen: false,
+			dropped_metadata: 0,
 			video: BTreeMap::new(),
 			audio: BTreeMap::new(),
 		}
+	}
+
+	/// Return the number of metadata units discarded by this importer.
+	pub fn dropped_metadata(&self) -> u64 {
+		self.dropped_metadata
 	}
 
 	/// Select the container this importer wraps decoded media renditions in.
@@ -173,7 +185,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			match tag_type {
 				TAG_VIDEO => self.handle_video(&body, timestamp)?,
 				TAG_AUDIO => self.handle_audio(&body, timestamp)?,
-				TAG_SCRIPT => {} // onMetaData and friends: nothing we need.
+				TAG_SCRIPT => {
+					self.dropped_metadata += 1;
+					if self.dropped_metadata == 1 {
+						tracing::warn!(count = self.dropped_metadata, "discarding FLV script metadata");
+					}
+				}
 				other => tracing::debug!(tag_type = other, "ignoring unknown FLV tag"),
 			}
 		}
@@ -463,9 +480,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			tracing::debug!("video frame before sequence header, dropping");
 			return Ok(());
 		}
-		let timestamp = Timestamp::from_millis(pts_ms as u64)?;
-		// The first frame is live on arrival, anchored before the reservation below publishes.
-		self.catalog.anchor(timestamp)?;
+		// The first frame anchors the stream before the reservation below publishes.
+		let timestamp = self.timebase.shift(Timestamp::from_millis(pts_ms as u64)?)?;
 		// A media frame means every sequence header has arrived (FLV sends config before data), so
 		// the track set is declared; release the reservation to publish.
 		self.initial_reservation = None;
@@ -487,9 +503,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			tracing::debug!("audio frame before config, dropping");
 			return Ok(());
 		}
-		let timestamp = Timestamp::from_millis(timestamp)?;
-		// The first frame is live on arrival, anchored before the reservation below publishes.
-		self.catalog.anchor(timestamp)?;
+		// The first frame anchors the stream before the reservation below publishes.
+		let timestamp = self.timebase.shift(Timestamp::from_millis(timestamp)?)?;
 		// A media frame means every sequence header has arrived (FLV sends config before data), so
 		// the track set is declared; release the reservation to publish.
 		self.initial_reservation = None;

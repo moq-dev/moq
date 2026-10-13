@@ -42,6 +42,12 @@ pub struct Split {
 	pending: Vec<crate::container::Frame>,
 }
 
+/// A snapshot of [`Split`]'s retained parameter sets.
+pub(crate) struct Params {
+	sps: Vec<Bytes>,
+	pps: Vec<Bytes>,
+}
+
 #[derive(Default)]
 struct Avc3Frame {
 	chunks: BytesMut,
@@ -234,6 +240,21 @@ impl Split {
 		self.current = Avc3Frame::default();
 		self.tail.clear();
 		self.pending.clear();
+	}
+
+	/// The retained parameter sets, for [`restore`](Self::restore) to put back.
+	pub(crate) fn params(&self) -> Params {
+		Params {
+			sps: self.sps.clone(),
+			pps: self.pps.clone(),
+		}
+	}
+
+	/// Put back parameter sets a refused access unit replaced, so a later bare keyframe
+	/// re-injects the last good ones rather than the refused unit's.
+	pub(crate) fn restore(&mut self, params: Params) {
+		self.sps = params.sps;
+		self.pps = params.pps;
 	}
 
 	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> Result<moq_net::Timestamp> {

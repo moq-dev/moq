@@ -324,8 +324,8 @@ impl Subscriber {
 		self.reader().poll_recv_datagram(waiter)
 	}
 
-	/// Poll for the track's declared final sequence.
-	pub(crate) fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
+	/// Poll for the track's declared exclusive end.
+	pub(crate) fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
 		self.reader().poll_finished(waiter)
 	}
 
@@ -529,7 +529,7 @@ impl Reader {
 		let copy = &self.copies[index];
 		group.with_recover(Recover {
 			sequence,
-			reader: self.this.clone(),
+			reader: Some(self.this.clone()),
 			route: self.route.clone(),
 			generation: copy.generation,
 			copy: copy.track.clone(),
@@ -696,7 +696,7 @@ impl Reader {
 		self.poll_end(waiter, |copy| copy.datagrams_done.clone())
 	}
 
-	fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
+	fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
 		self.sync(waiter);
 		let groups = self.groups;
 		let concluded = self.route.end();
@@ -789,8 +789,8 @@ impl Reader {
 /// group's copy fails or stalls, so a passthrough read never touches it.
 pub(crate) struct Recover {
 	sequence: u64,
-	/// The reader it was handed out to, followed onto each new route.
-	reader: Weak<Mutex<Reader>>,
+	/// The reader it was handed out to, followed onto each new route; `None` for a fetch.
+	reader: Option<Weak<Mutex<Reader>>>,
 	route: Consumer,
 	/// The route generation of the copy being read, and that copy.
 	generation: u64,
@@ -826,12 +826,15 @@ impl Recover {
 	/// Whether to look past the copy being read: it stalled while a newer route serves, or
 	/// it failed without a verdict on the group. Only a route that serves can refuse a
 	/// group on purpose (it is too old, evicted, or the application said so).
+	///
+	/// Too old and evicted judge a subscription's delivery, not whether the group exists,
+	/// so neither is a verdict on a fetch: one answered from a group still arriving over a
+	/// subscription asks the route again for the rest when that delivery gives up on it.
 	pub(crate) fn wants(&self, err: Option<&Error>, waiter: &kio::Waiter) -> bool {
-		let verdict = err.is_some_and(|err| {
-			matches!(
-				StreamError::from(err),
-				StreamError::Old | StreamError::Evicted | StreamError::App(_)
-			)
+		let verdict = err.is_some_and(|err| match StreamError::from(err) {
+			StreamError::Old | StreamError::Evicted => self.reader.is_some(),
+			StreamError::App(_) => true,
+			_ => false,
 		});
 		match err {
 			Some(_) if !verdict || copy_failed(&self.copy) => true,
@@ -851,7 +854,7 @@ impl Recover {
 	) -> Poll<Result<Replacement>> {
 		// Subscribe the reader to a new route from its newest group, which is this one or
 		// later, so that route's subscription delivers the rest of it.
-		if let Some(reader) = self.reader.upgrade() {
+		if let Some(reader) = self.reader.as_ref().and_then(Weak::upgrade) {
 			reader.lock().expect("reader poisoned").sync(waiter);
 		}
 		loop {
@@ -974,7 +977,7 @@ impl Recover {
 	/// The reader's budget for a late group; `None` for a fetch, which has no live edge
 	/// to be late against.
 	pub(crate) fn poll_budget(&self, waiter: &kio::Waiter) -> Option<std::time::Duration> {
-		let reader = self.reader.upgrade()?;
+		let reader = self.reader.as_ref()?.upgrade()?;
 		let mut reader = reader.lock().expect("reader poisoned");
 		// A held group or frame may be the only thing being polled. Mirror and watch
 		// preferences here too, before judging its budget against the live edge.
@@ -988,7 +991,7 @@ impl Recover {
 		self.copy = replacement.copy.clone();
 		// A later switch must keep this copy subscribed while the recovered group
 		// still reads it, just like a group handed out from that copy directly.
-		self.lease = self.reader.upgrade().and_then(|reader| {
+		self.lease = self.reader.as_ref().and_then(Weak::upgrade).and_then(|reader| {
 			let reader = reader.lock().expect("reader poisoned");
 			reader
 				.copies
@@ -1054,7 +1057,7 @@ impl kio::Task for Fetching {
 			return match result {
 				Ok(group) => Poll::Ready(Ok(group.with_recover(Recover {
 					sequence: self.sequence,
-					reader: Weak::new(),
+					reader: None,
 					route: self.route.clone(),
 					generation,
 					copy: serving.clone(),
@@ -1083,14 +1086,18 @@ mod test {
 
 	/// A route's copy of the track.
 	fn copy() -> track::Producer {
-		track::Producer::new(Arc::new(broadcast::Info::default()), "video", None)
+		track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		)
 	}
 
 	/// The logical track `routes` serves.
 	fn logical(routes: &Producer) -> track::Producer {
 		track::Request::new(Arc::new(broadcast::Info::default()), "video")
 			.routes(routes.consume())
-			.accept(None)
+			.accept(crate::track::Info::timed())
 	}
 
 	fn subscribe(logical: &track::Producer, max_delay: Duration) -> track::Subscriber {
@@ -1118,6 +1125,22 @@ mod test {
 
 	fn ts(ms: u64) -> Timestamp {
 		Timestamp::from_millis(ms).unwrap()
+	}
+
+	#[test]
+	fn a_route_preserves_a_mid_group_end() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let mut source = copy();
+		routes.serve(source.consume());
+		let mut sub = subscribe(&logical, Duration::ZERO);
+		assert!(sub.poll_finished(&kio::Waiter::noop()).is_pending());
+		let end = Position { group: 5, frame: 5 };
+		source.finish_at(end).unwrap();
+		assert_eq!(
+			sub.poll_finished(&kio::Waiter::noop()).map(|result| result.unwrap()),
+			Poll::Ready(end)
+		);
 	}
 
 	#[test]
@@ -1361,6 +1384,162 @@ mod test {
 		assert!(wake.0.load(std::sync::atomic::Ordering::Relaxed));
 	}
 
+	/// A reader holding group 2, which its quiet route never finishes, after the front
+	/// switched to `copy`, a replacement that starts past it.
+	struct Held {
+		group: group::Consumer,
+		copy: track::Producer,
+		/// The replacement's groups, by sequence.
+		groups: std::collections::BTreeMap<u64, group::Producer>,
+		wake: Arc<Wake>,
+		waiter: kio::Waiter,
+		_route: (
+			Producer,
+			track::Producer,
+			track::Producer,
+			group::Producer,
+			track::Subscriber,
+		),
+	}
+
+	impl Held {
+		/// `groups` are the replacement's `(sequence, first timestamp)`, written before the
+		/// switch is noticed, so its subscription has passed the held group.
+		fn new(groups: &[(u64, Option<u64>)]) -> Self {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, Duration::from_millis(100));
+			for (sequence, ms) in [(0, 0), (1, 1000)] {
+				let mut group = a.create_group(group::Info { sequence }).unwrap();
+				group.write_frame(ts(ms), b"x".as_ref()).unwrap();
+				group.finish().unwrap();
+			}
+			assert_eq!(recv(&mut sub).sequence, 0);
+			assert_eq!(recv(&mut sub).sequence, 1);
+			let mut open = a.create_group(group::Info { sequence: 2 }).unwrap();
+			open.write_frame(ts(2000), b"held".as_ref()).unwrap();
+			let mut group = recv(&mut sub);
+			assert_eq!(read(&mut group), Some(b"held".to_vec()));
+
+			let b = copy();
+			routes.serve(b.consume());
+			let groups = groups
+				.iter()
+				.map(|&(sequence, ms)| {
+					let mut group = b.create_group(group::Info { sequence }).unwrap();
+					if let Some(ms) = ms {
+						group.write_frame(ts(ms), b"b".as_ref()).unwrap();
+					}
+					(sequence, group)
+				})
+				.collect();
+
+			let wake = Arc::new(Wake::default());
+			let waiter = kio::Waiter::new(wake.clone().into());
+			let mut held = Self {
+				group,
+				copy: b,
+				groups,
+				wake,
+				waiter,
+				_route: (routes, logical, a, open, sub),
+			};
+			assert!(!held.is_old(), "not stale yet");
+			held
+		}
+
+		/// Poll the held group, forgetting earlier wakes so only a later one shows.
+		fn is_old(&mut self) -> bool {
+			self.wake.0.store(false, std::sync::atomic::Ordering::Relaxed);
+			match self.group.poll_read_frame(&self.waiter) {
+				Poll::Ready(Err(Error::Old)) => true,
+				Poll::Pending => false,
+				other => panic!("unexpected read: {other:?}"),
+			}
+		}
+
+		/// Re-poll after the first change to the replacement. The refused recovery fetch
+		/// parked on the replacement's track state once, so that change wakes the group
+		/// whatever it is; from here on only the expiry index can.
+		fn settle(&mut self) {
+			assert!(self.woken());
+			assert!(!self.is_old());
+		}
+
+		fn woken(&self) -> bool {
+			self.wake.0.load(std::sync::atomic::Ordering::Relaxed)
+		}
+
+		fn group(&self, sequence: u64) -> group::Producer {
+			self.copy.create_group(group::Info { sequence }).unwrap()
+		}
+	}
+
+	#[test]
+	fn a_group_no_route_continues_wakes_when_its_successor_is_stamped() {
+		let mut held = Held::new(&[(3, None), (4, Some(4000))]);
+		// Group 2 ends where group 3 begins, so this is when it is known to be 1s behind.
+		held.groups
+			.get_mut(&3)
+			.unwrap()
+			.write_frame(ts(3000), b"successor".as_ref())
+			.unwrap();
+		assert!(held.woken(), "the successor's first timestamp wakes the held group");
+		assert!(held.is_old());
+	}
+
+	#[test]
+	fn a_group_no_route_continues_wakes_when_its_successor_aborts() {
+		let mut held = Held::new(&[(3, None), (4, Some(4000)), (5, Some(5000))]);
+		// Group 4 succeeds it instead, a full second behind the edge.
+		held.groups.remove(&3).unwrap().abort(Error::Dropped).unwrap();
+		assert!(held.woken(), "the successor's abort wakes the held group");
+		assert!(held.is_old());
+	}
+
+	#[test]
+	fn a_group_no_route_continues_wakes_when_the_edge_passes_it() {
+		let mut held = Held::new(&[(3, Some(3000))]);
+		let mut newer = held.group(4);
+		held.settle();
+		newer.write_frame(ts(3050), b"b".as_ref()).unwrap();
+		assert!(!held.woken(), "the edge is still within the budget");
+		newer.write_frame(ts(3100), b"b".as_ref()).unwrap();
+		assert!(held.woken(), "the edge crossing the budget wakes the held group");
+		assert!(held.is_old());
+	}
+
+	/// The held group sits below everything the replacement holds, so a landing at the
+	/// top must not forget it before an older group lands as its new successor.
+	#[test]
+	fn a_group_no_route_continues_wakes_when_an_older_successor_lands() {
+		let mut held = Held::new(&[(4, Some(4000))]);
+		held.group(5).write_frame(ts(4050), b"b".as_ref()).unwrap();
+		held.settle();
+		let _newer = held.group(6);
+		assert!(!held.woken(), "a landing above the successor changes nothing");
+
+		let mut successor = held.group(3);
+		assert!(held.woken(), "a group landing below the successor wakes the held group");
+		assert!(!held.is_old(), "its successor has no timestamp yet");
+		successor.write_frame(ts(3000), b"b".as_ref()).unwrap();
+		assert!(held.woken());
+		assert!(held.is_old());
+	}
+
+	/// The replacement passed the held group, so it looked lost, but its subscription
+	/// can still deliver it out of order: that landing is the continuation.
+	#[test]
+	fn a_group_no_route_continues_wakes_when_it_lands_late() {
+		let mut held = Held::new(&[(3, Some(3000))]);
+		let _newer = held.group(4);
+		held.settle();
+		let _late = held.group(2);
+		assert!(held.woken(), "the held group's own landing wakes it");
+	}
+
 	#[test]
 	fn a_half_read_frame_waits_for_the_replacement_header() {
 		for arrives in [true, false] {
@@ -1515,6 +1694,36 @@ mod test {
 		assert!(reading.poll_read_frame(&waiter).is_pending());
 		routes.serve(copy().consume());
 		assert!(wake.0.load(std::sync::atomic::Ordering::Relaxed));
+	}
+
+	/// A fetch answered from a group still arriving over a subscription outlives that
+	/// delivery giving up on it as too old: the route is asked for the rest instead.
+	#[test]
+	fn a_fetched_group_outlives_its_delivery_giving_up() {
+		let routes = Producer::new();
+		let a = copy();
+		let dynamic = a.dynamic();
+		routes.serve(a.consume());
+
+		let mut arriving = a.create_group(group::Info { sequence: 0 }).unwrap();
+		arriving.write_frame(ts(0), b"a".as_ref()).unwrap();
+		let mut fetched = kio::Pending::new(routes.consume().fetch_group(0, group::Fetch::default()))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(read(&mut fetched), Some(b"a".to_vec()));
+
+		// The publisher resets the subscription's stream for the group as too old.
+		arriving.abort(Error::Stream(StreamError::Old)).unwrap();
+		assert!(fetched.read_frame().now_or_never().is_none());
+
+		let request = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		assert_eq!((request.sequence(), request.frame_start()), (0, 1));
+		let mut rest = request.accept(None).unwrap();
+		rest.write_frame(ts(1), b"b".as_ref()).unwrap();
+		rest.finish().unwrap();
+		assert_eq!(read(&mut fetched), Some(b"b".to_vec()));
+		assert_eq!(read(&mut fetched), None);
 	}
 
 	#[test]

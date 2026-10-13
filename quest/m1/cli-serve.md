@@ -19,15 +19,11 @@ startup on any other invalid auth config.
 
 - Drain: on SIGTERM the listener sends GOAWAY and waits `drain_timeout` like
   the relay, through a real `shutdown::Observer` instead of the disabled one.
-  [Drain handshakes](/quest/m1/drain-handshakes.md) moves where the relay
-  takes that count; hand the observer over the way it settles.
+  The relay counts a session from admission through a shared
+  `moq_net::server::Activity`; hand the listener the same one.
 - Stats: `MoqSide` nests `stats::Config` like the relay, so `--stats-*` reads
   the same on both binaries, and `supervise` gets it instead of `None`.
 - Docs: `doc/bin/cli.md` describes listening in the relay's terms and links
   the relay's auth page rather than restating it.
 - Test: a listening import drains its viewers on SIGTERM within
   `drain_timeout`, and its sessions show up in stats.
-
-## Related
-
-- [Drain handshakes](/quest/m1/drain-handshakes.md) - moves where the drain count is taken

@@ -13,6 +13,54 @@ use crate::{
 	ietf, lite, setup, stats,
 };
 
+/// Tracks admitted connections until their handshake or session ends.
+#[derive(Clone, Debug)]
+pub struct Activity {
+	state: kio::Producer<()>,
+	// Admission goes through the weak handle: its open check shares the lock
+	// `close` commits under, so a connection is either counted or refused.
+	admit: kio::ProducerWeak<()>,
+}
+
+impl Default for Activity {
+	fn default() -> Self {
+		let state = kio::Producer::default();
+		let admit = state.weak();
+		Self { state, admit }
+	}
+}
+
+impl Activity {
+	/// Hold the server active until the returned guard is dropped, or `None` once closed.
+	pub fn enter(&self) -> Option<Active> {
+		Some(Active {
+			_guard: self.admit.try_consume()?,
+		})
+	}
+
+	/// Wait until every admitted connection has left, then refuse new ones.
+	pub async fn close(&self) {
+		loop {
+			if self.state.unused().await.is_err() {
+				return;
+			}
+			match self.state.write_unused() {
+				kio::Unused::Idle(state) => return state.close(),
+				// Admitted between the wake and the commit: wait for it too.
+				kio::Unused::Used => continue,
+				kio::Unused::Closed => return,
+			}
+		}
+	}
+}
+
+/// Keeps an admitted connection in the server's active set.
+#[derive(Debug)]
+#[must_use]
+pub struct Active {
+	_guard: kio::Consumer<()>,
+}
+
 /// A MoQ server session builder.
 #[derive(Default, Clone)]
 pub struct Server {
@@ -21,6 +69,7 @@ pub struct Server {
 	stats: stats::Session,
 	versions: Versions,
 	limits: crate::session::Limits,
+	extensions: setup::Extensions,
 }
 
 impl Server {
@@ -72,6 +121,12 @@ impl Server {
 		self
 	}
 
+	/// Choose which moq-transport extensions to offer in SETUP. Defaults to all of them.
+	pub fn with_extensions(mut self, extensions: setup::Extensions) -> Self {
+		self.extensions = extensions;
+		self
+	}
+
 	/// The configured origin pair, each tagged with the stats context so the
 	/// model attributes reads (egress) and writes (ingress) for this session.
 	/// One shared context across both halves keeps presence and viewer counts
@@ -94,6 +149,7 @@ impl Server {
 		version: lite::Version,
 		client_setup: Option<lite::AcceptedSetup<S>>,
 		peer_hop: Option<crate::Hop>,
+		auth: crate::auth::Handle,
 	) -> Result<(Session, crate::Driver<S>), Error>
 	where
 		S: crate::transport::poll::Session,
@@ -118,6 +174,7 @@ impl Server {
 
 		let start = lite::start(lite::Config {
 			runtime: runtime.clone(),
+			client: false,
 			limits: self.limits,
 			session: session.clone(),
 			setup_stream: None,
@@ -127,6 +184,7 @@ impl Server {
 			version,
 			our_setup,
 			peer_setup: client_setup,
+			auth,
 		})?;
 
 		Ok(Session::new(
@@ -135,8 +193,11 @@ impl Server {
 			version.into(),
 			start.recv_bandwidth,
 			crate::driver::Protocol::Lite(Box::new(start.driver)),
-			start.goaway,
-			start.setup,
+			crate::session::Handles {
+				goaway: start.goaway,
+				auth: start.auth,
+				setup: start.setup,
+			},
 		))
 	}
 
@@ -167,7 +228,7 @@ impl Server {
 		let mut refused = session.clone();
 		self.handshake_lite(now, session)
 			.await
-			.inspect_err(|err| close(&mut refused, err))
+			.inspect_err(|err| close(&mut refused, err, None))
 	}
 
 	async fn handshake_lite<S>(&self, now: Instant, mut session: S) -> Result<Handshake<S>, Error>
@@ -230,6 +291,12 @@ impl Server {
 			_ => return Err(Error::Version),
 		};
 
+		let auth = crate::auth::Handle::new(match &handshake {
+			PausedHandshake::LiteBare { version, .. } | PausedHandshake::LiteSetup { version, .. } => {
+				version.has_auth()
+			}
+			PausedHandshake::Boxed(_) => false,
+		});
 		Ok(Handshake {
 			path,
 			role,
@@ -237,6 +304,7 @@ impl Server {
 			// moq-lite carries no SETUP token.
 			token: None,
 			assigned_hop: crate::Hop::random(),
+			auth,
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -283,7 +351,7 @@ impl Server {
 		let mut refused = session.clone();
 		self.handshake(now, session)
 			.await
-			.inspect_err(|err| close(&mut refused, err))
+			.inspect_err(|err| close(&mut refused, err, None))
 	}
 
 	async fn handshake<S>(&self, now: Instant, mut session: S) -> Result<Handshake<S>, Error>
@@ -387,6 +455,8 @@ impl Server {
 			origin: None,
 			token,
 			assigned_hop: crate::Hop::random(),
+			// Lite 01/02 and moq-transport 14-16 carry no AUTH.
+			auth: crate::auth::Handle::new(false),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -423,6 +493,9 @@ impl Server {
 			origin: peer_setup.declared.cluster.hop.filter(|h| *h != crate::Hop::UNKNOWN),
 			token: peer_setup.token.clone(),
 			assigned_hop: crate::Hop::random(),
+			// The client's SETUP already settled whether it offered MoQ Auth, so it is
+			// negotiated exactly when we offer it too.
+			auth: crate::auth::Handle::new(peer_setup.declared.auth && self.extensions.auth),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -452,6 +525,9 @@ pub struct Handshake<S: crate::transport::poll::Session> {
 	/// peer declares none on the wire; it never enters a hop chain. Fresh per request unless the caller overrides it
 	/// ([`Handshake::with_peer_hop`]).
 	assigned_hop: crate::Hop,
+	/// The session's auth handle, available before [`Handshake::ok`] so the caller can
+	/// take the peer's token requests before any arrive.
+	auth: crate::auth::Handle,
 	// Taken by `ok`/`close`; `Drop` rejects the handshake if neither ran.
 	inner: Option<RequestInner<S>>,
 }
@@ -495,7 +571,13 @@ type Accept<S> = crate::util::MaybeSendBox<'static, Result<(Session, crate::Driv
 /// `&Handshake: Send`, which is `Handshake: Sync`, which is this.
 trait Paused<S: crate::transport::poll::Session>: MaybeSend + MaybeSync {
 	/// Complete the handshake with the final server config.
-	fn ok(self: Box<Self>, server: Server, runtime: Clock, peer_hop: Option<crate::Hop>) -> Accept<S>;
+	fn ok(
+		self: Box<Self>,
+		server: Server,
+		runtime: Clock,
+		peer_hop: Option<crate::Hop>,
+		auth: crate::auth::Handle,
+	) -> Accept<S>;
 
 	/// Reject the handshake, closing the transport with `err`'s wire code.
 	fn close(self: Box<Self>, err: Error);
@@ -516,7 +598,13 @@ where
 	S::SendStream: MaybeSync,
 	S::RecvStream: MaybeSync,
 {
-	fn ok(self: Box<Self>, server: Server, runtime: Clock, peer_hop: Option<crate::Hop>) -> Accept<S> {
+	fn ok(
+		self: Box<Self>,
+		server: Server,
+		runtime: Clock,
+		peer_hop: Option<crate::Hop>,
+		auth: crate::auth::Handle,
+	) -> Accept<S> {
 		use crate::util::MaybeBoxedExt as _;
 		async move {
 			let Self {
@@ -545,7 +633,9 @@ where
 				authority: None,
 				peer_setup_stream: Some(peer_setup.stream),
 				peer_declared: Some(peer_setup.declared),
+				auth: auth.clone(),
 				early_unis: peer_setup.early,
+				extensions: server.extensions,
 			})?;
 			tracing::debug!(?version, "connected");
 			Ok(Session::new(
@@ -554,15 +644,14 @@ where
 				version.into(),
 				None,
 				crate::driver::Protocol::Ietf(protocol),
-				goaway,
-				setup,
+				crate::session::Handles { goaway, auth, setup },
 			))
 		}
 		.maybe_boxed()
 	}
 
 	fn close(mut self: Box<Self>, err: Error) {
-		close(&mut self.session, &err);
+		close(&mut self.session, &err, Some(self.version.into()));
 	}
 }
 
@@ -584,7 +673,13 @@ where
 	S::SendStream: MaybeSync,
 	S::RecvStream: MaybeSync,
 {
-	fn ok(self: Box<Self>, server: Server, runtime: Clock, peer_hop: Option<crate::Hop>) -> Accept<S> {
+	fn ok(
+		self: Box<Self>,
+		server: Server,
+		runtime: Clock,
+		peer_hop: Option<crate::Hop>,
+		auth: crate::auth::Handle,
+	) -> Accept<S> {
 		use crate::util::MaybeBoxedExt as _;
 		async move {
 			let Self {
@@ -606,7 +701,9 @@ where
 						ietf::initial_max_request_id(server.limits.requests(), true),
 					);
 					parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
-					ietf::solicit::into_setup(&mut parameters, v);
+					if server.extensions.solicit {
+						ietf::solicit::into_setup(&mut parameters, v);
+					}
 					ietf::hidden::into_setup(&mut parameters, v);
 					ietf::active_count::into_setup(&mut parameters, v);
 					parameters.encode_bytes(v)?
@@ -620,12 +717,13 @@ where
 			};
 			stream.writer.encode(&server_setup).await?;
 
-			let (recv_bw, protocol, goaway, setup) = match version {
+			let (recv_bw, protocol, goaway, auth, setup) = match version {
 				Version::Lite(v) => {
 					let stream = stream.with_version(v);
 					// Pre-lite-05: no Setup Stream, so nothing to advertise or seed.
 					let start = lite::start(lite::Config {
 						runtime: runtime.clone(),
+						client: false,
 						limits: server.limits,
 						session: session.clone(),
 						setup_stream: Some(stream),
@@ -635,11 +733,13 @@ where
 						version: v,
 						our_setup: lite::Setup::default(),
 						peer_setup: None,
+						auth,
 					})?;
 					(
 						start.recv_bandwidth,
 						crate::driver::Protocol::Lite(Box::new(start.driver)),
 						start.goaway,
+						start.auth,
 						start.setup,
 					)
 				}
@@ -662,21 +762,28 @@ where
 						authority: None,
 						peer_setup_stream: None,
 						peer_declared: Some(peer_declared),
+						auth: auth.clone(),
 						early_unis: Vec::new(),
+						extensions: server.extensions,
 					})?;
-					(None, crate::driver::Protocol::Ietf(protocol), goaway, setup)
+					(None, crate::driver::Protocol::Ietf(protocol), goaway, auth, setup)
 				}
 			};
 
 			Ok(Session::new(
-				runtime, session, version, recv_bw, protocol, goaway, setup,
+				runtime,
+				session,
+				version,
+				recv_bw,
+				protocol,
+				crate::session::Handles { goaway, auth, setup },
 			))
 		}
 		.maybe_boxed()
 	}
 
 	fn close(mut self: Box<Self>, err: Error) {
-		close(&mut self.session, &err);
+		close(&mut self.session, &err, Some(self.version));
 	}
 }
 
@@ -716,6 +823,14 @@ where
 	/// authenticated identity: authorize on the token or client certificate.
 	pub fn peer_hop(&self) -> Option<crate::Hop> {
 		self.origin
+	}
+
+	/// The session's auth handle, the same one [`Session::auth`] returns once accepted.
+	///
+	/// Take [`requests`](crate::auth::Handle::requests) here to answer the client's
+	/// tokens yourself; the choice is fixed once the session's driver first runs.
+	pub fn auth(&self) -> crate::auth::Handle {
+		self.auth.clone()
 	}
 
 	/// The credential the client presented in its SETUP's `AUTHORIZATION TOKEN` option.
@@ -772,6 +887,7 @@ where
 	/// Poll or spawn the returned driver to run the session.
 	pub async fn ok(mut self) -> Result<(Session, crate::Driver<S>), Error> {
 		let peer_hop = Some(self.assigned_hop);
+		let auth = self.auth.clone();
 		let RequestInner {
 			server,
 			runtime,
@@ -780,14 +896,14 @@ where
 
 		match handshake {
 			PausedHandshake::LiteBare { session, version } => {
-				server.start_lite(runtime, session, version, None, peer_hop)
+				server.start_lite(runtime, session, version, None, peer_hop, auth)
 			}
 			PausedHandshake::LiteSetup {
 				session,
 				version,
 				client_setup,
-			} => server.start_lite(runtime, session, version, Some(client_setup), peer_hop),
-			PausedHandshake::Boxed(paused) => paused.ok(server, runtime, peer_hop).await,
+			} => server.start_lite(runtime, session, version, Some(client_setup), peer_hop, auth),
+			PausedHandshake::Boxed(paused) => paused.ok(server, runtime, peer_hop, auth).await,
 		}
 	}
 
@@ -800,18 +916,20 @@ where
 
 impl<S: crate::transport::poll::Session> RequestInner<S> {
 	fn close(self, err: Error) {
-		let mut session = match self.handshake {
-			PausedHandshake::LiteBare { session, .. } => session,
-			PausedHandshake::LiteSetup { session, .. } => session,
+		let (mut session, version) = match self.handshake {
+			PausedHandshake::LiteBare { session, version } => (session, version),
+			PausedHandshake::LiteSetup { session, version, .. } => (session, version),
 			PausedHandshake::Boxed(paused) => return paused.close(err),
 		};
-		close(&mut session, &err);
+		close(&mut session, &err, Some(version.into()));
 	}
 }
 
 /// Close `session` with `err`'s wire code.
-fn close<S: crate::transport::poll::Session>(session: &mut S, err: &Error) {
-	session.close(SessionError::from(err).to_code(), &err.to_string());
+fn close<S: crate::transport::poll::Session>(session: &mut S, err: &Error, version: Option<Version>) {
+	let error = SessionError::from(err);
+	let code = version.map_or_else(|| error.to_code(), |version| version.session_code(&error));
+	session.close(code, &err.to_string());
 }
 
 impl<S: crate::transport::poll::Session> Drop for Handshake<S> {
@@ -1274,6 +1392,7 @@ mod tests {
 			origin: None,
 			token: None,
 			assigned_hop: Hop::random(),
+			auth: crate::auth::Handle::new(false),
 			inner: Some(RequestInner {
 				server: Server::new().with_publisher(&origin),
 				runtime: Clock::new(moq_net_sim::now()),

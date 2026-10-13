@@ -9,9 +9,8 @@ wrappers, moq-ffi, and every binding wrapper.
 
 ## Plan
 
-Requested by an external consumer (OneTooMany, Discord), who translates
-MAVLink into application telemetry and must keep its timestamps to stay in
-sync with video.
+An application that translates MAVLink into its own telemetry must keep
+each value's timestamp to stay in sync with video.
 
 Every `moq_net::Frame` carries an optional timestamp (`None` when untimed,
 since #4822), but the consumers decode only `frame.payload` and drop it: `moq_mux::{json,binary}::Consumer::next` and the
@@ -38,9 +37,11 @@ playhead needs the newest state at or before it.
   value.
 - Same names in the moq-mux wrappers, moq-ffi, and every binding.
 
-moq-ffi's json/flate consumers return the timestamp too, and the py, swift,
-kt, go, and dart wrappers and `doc/lib/*` follow. JS is
-[JS data consumer timestamps](/quest/m1/js-data-consumer-timestamps.md).
+Existing moq-ffi consumers return the timestamp too, and the py, swift,
+kt, go, and dart wrappers and `doc/lib/*` follow. Flate FFI consumers do not
+yet exist: [Flate bindings](/quest/m2/flate.md) creates them directly with
+this contract, so this quest neither duplicates that work nor waits on m2. `@moq/json` and `@moq/flate`
+already return `Timed<T>` with the same `next()` and `latest()`.
 
 Public API: breaking. Wire: none.
 

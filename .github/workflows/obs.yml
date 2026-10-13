@@ -5,35 +5,35 @@ name: OBS
 # multi-hundred-MB obs-deps bundle on macOS and Windows.
 #
 # Linux is the platform that needs no bundle at all -- nixpkgs has obs-studio,
-# Qt6 and ffmpeg, so the `.#obs` shell is the whole dependency set. The plugin is
-# platform-independent C++ over moq-c's C ABI, so a Linux compile catches the
-# breakage a macOS developer would otherwise ship uncompiled. The macOS and
-# Windows release builds cover the rest: each platform's link line and the
-# obs-deps bundle.
+# Qt6 and ffmpeg, so the `.#obs` shell is the whole dependency set. The plugin
+# is platform-independent C++ over the generated moq-ffi bindings (cpp/moq), so
+# a Linux compile catches the breakage a macOS developer would otherwise ship
+# uncompiled. The macOS and Windows release builds cover the rest: each
+# platform's link line and the obs-deps bundle.
 #
-# Narrow trigger, like swift.yml: the plugin's own sources, the moq-c header
-# they call through, and the flake that supplies the toolchain.
+# Narrow trigger, like swift.yml: the plugin's own sources, the C++ package and
+# the moq-ffi API it is generated from, and the flake that supplies the
+# toolchain, including uniffi-bindgen-cpp.
 #
 # moq-c's own C fixtures (`just rs c-tests`) run here too. They link libmoq.a
-# from outside cargo the same way, which is too slow for nextest's hang budget
-# and needs the debug staticlib this job has just built, so this is the one
-# PR gate that already has everything they need. They also compile the C doc
-# samples, hence `doc/lib/c/**` in the trigger.
+# from outside cargo the same way the plugin links moq-ffi, which is too slow
+# for nextest's hang budget, so this job, which already does that kind of link,
+# is where they gate PRs. They also compile the C doc samples, hence
+# `doc/lib/c/**` in the trigger.
 #
 # The manifests and Cargo.lock are in there for the one way a crate the plugin
-# never names can break it: linking libmoq.a from outside cargo needs the native
-# libraries in `rs/moq-c/native-libs/*.txt`, which are maintained by hand. A
-# dependency that starts pulling in a new one leaves that list stale, and every
-# Rust gate stays green, because cargo passes the flag itself and only this job
-# links without it.
+# never names can break it: linking a Rust staticlib from outside cargo needs
+# the native libraries in `rs/moq-c/native-libs/*.txt`, which moq-ffi and
+# moq-c share and which are maintained by hand. A dependency that starts
+# pulling in a new one leaves that list stale, and every Rust gate stays green,
+# because cargo passes the flag itself and only this job links without it.
 #
 # Manifests and build scripts rather than Cargo.lock alone, because neither a
-# feature toggle nor a build script has to touch the lockfile. moq-c takes
-# moq-native with default features, so flipping one of those defaults on
-# (`jemalloc` gates `dep:tikv-jemallocator`) changes what libmoq.a needs at link
-# time while Cargo.lock stays byte-identical, since moq-relay already put that
-# package in the graph; a build.rs emitting `cargo::rustc-link-lib` needs no
-# manifest change at all.
+# feature toggle nor a build script has to touch the lockfile. Flipping a
+# default feature on (`jemalloc` gates `dep:tikv-jemallocator`) changes what
+# the staticlib needs at link time while Cargo.lock stays byte-identical, since
+# moq-relay already put that package in the graph; a build.rs emitting
+# `cargo::rustc-link-lib` needs no manifest change at all.
 #
 # A list of paths still can't be complete here -- a vendored C source or a
 # .cargo/config.toml could do it too -- and `rs/**` would run this on nearly
@@ -51,6 +51,7 @@ on:
     paths:
       - "rs/**"
       - "cpp/obs/**"
+      - "cpp/moq/**"
       - "doc/lib/c/**"
       - "doc/lib/samples.sh"
       - ".cargo/**"
@@ -66,7 +67,9 @@ on:
     types: [opened, synchronize, reopened, closed]
     paths:
       - "cpp/obs/**"
+      - "cpp/moq/**"
       - "sh/obs/**"
+      - "rs/moq-ffi/**"
       - "rs/moq-c/**"
       - "doc/lib/c/**"
       - "doc/lib/samples.sh"
@@ -115,7 +118,7 @@ jobs:
 
       # cache.yml warms the default-branch store on `main`. Pull requests restore
       # it; the action refuses to publish from a pull request. It holds
-      # dev-profile artifacts, which is why `just obs ci` builds moq-c in debug
+      # dev-profile artifacts, which is why `just obs ci` builds moq-ffi in debug
       # rather than the preset's release.
       - name: Rust cache
         uses: ./.github/actions/rust-cache
@@ -125,15 +128,13 @@ jobs:
       - name: Build
         run: nix develop .#obs --command just obs ci
 
-      # The plugin build above already produced the debug libmoq.a, so the
-      # cargo step inside is a no-op and this is just a cc and a run.
       - name: moq-c C fixtures
         run: nix develop .#obs --command just rs c-tests
 
-  # The release build of the OBS plugin, minus the published moq-c: build.sh
-  # without `--moq-c-release` links the in-tree rs/moq-c instead, so a PR is
-  # checked against its own C ABI. The obs-deps bundle (libobs, Qt6, ffmpeg)
-  # comes from buildspec.json at configure time, same as a tag build.
+  # The release build of the OBS plugin, minus the published C++ package:
+  # build.sh without `--moq-release` builds the in-tree cpp/moq instead, so a PR
+  # is checked against its own moq-ffi API. The obs-deps bundle (libobs, Qt6,
+  # ffmpeg) comes from buildspec.json at configure time, same as a tag build.
   release:
     name: OBS (${{ matrix.name }})
     if: github.event.action != 'closed'
@@ -161,6 +162,19 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - uses: ./.github/actions/just
+
+      # aws-lc-rs assembles its x86_64 crypto with NASM on Windows.
+      - name: Install NASM
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nasm -y --no-progress
+          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # The tag flake.nix pins; see the comment there.
+      - name: Install uniffi-bindgen-cpp
+        shell: bash
+        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.4+v0.32.2
 
       - name: Build
         shell: bash

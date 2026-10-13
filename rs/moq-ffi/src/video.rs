@@ -1,7 +1,7 @@
 //! Raw-video publishing via [`moq_video`].
 //!
 //! Sibling to [`audio`](crate::audio)'s producer, and the video counterpart to
-//! [`producer::MoqMediaProducer`](crate::producer::MoqMediaProducer): that one
+//! [`media::MoqMediaTrackProducer`](crate::media::MoqMediaTrackProducer): that one
 //! takes already-encoded frames, this one takes raw pictures and runs the H.264
 //! / H.265 encode inside the FFI boundary (VideoToolbox on macOS and iOS, Media
 //! Foundation on Windows, openh264 as the software fallback; no ffmpeg).
@@ -232,7 +232,7 @@ impl VideoProducer {
 
 /// Producer for a raw-video track.
 ///
-/// Built via [`MoqBroadcastProducer::publish_video`]. Each
+/// Built via [`MoqBroadcastProducer::encode_video`]. Each
 /// [`write`](Self::write) accepts a [`MoqVideoFrame`] whose `data` is in the
 /// pixel format declared by the [`MoqVideoEncoderInput`] passed at publish time.
 #[derive(uniffi::Object)]
@@ -653,7 +653,9 @@ impl MoqVideoDecodedFrame {
 				.to_rgba(&moq_video::convert::Config::default())
 				.map(|rgba| rgba.into_data()),
 		}
-		.map_err(|err| MoqError::Codec(err.to_string()))
+		.map_err(|err| MoqError::Codec {
+			reason: err.to_string(),
+		})
 	}
 
 	/// A borrowed handle to the decoder's surface, or `None` when the frame is
@@ -710,6 +712,9 @@ impl MoqVideoConsumer {
 /// is rejected here; a recognized one the native backends can't open is rejected when the decoder
 /// opens, which is still before the first frame.
 fn video_config(catalog_video: crate::media::MoqVideo) -> Result<hang::catalog::VideoConfig, MoqError> {
+	if !catalog_video.enabled {
+		return Err(MoqError::NotFound);
+	}
 	let codec: hang::catalog::VideoCodec = catalog_video.codec.parse().map_err(|_| MoqError::Unsupported)?;
 	// Parsing is total: an unrecognized name becomes `Unknown` rather than failing. Reject it here
 	// so a typo in the catalog is an error at subscribe, not an opaque backend failure later.
@@ -754,7 +759,7 @@ impl MoqBroadcastConsumer {
 	/// Subscribe to a video track and decode it inside the bindings.
 	///
 	/// `catalog_video` comes from the catalog (see
-	/// [`MoqCatalogConsumer::next`](crate::consumer::MoqCatalogConsumer::next)); the codec is read
+	/// [`MoqMediaCatalogConsumer::next`](crate::media::MoqMediaCatalogConsumer::next)); the codec is read
 	/// from it. Errors if no native backend handles that codec, rather than failing on the first
 	/// frame. Also fails with [`MoqError::Unsupported`] when
 	/// [`surface`](MoqVideoDecoderOutput::surface) is set on a platform with no surface to expose.
@@ -810,6 +815,15 @@ mod decode_tests {
 			framerate: Some(30.0),
 			container: MoqContainer::Legacy,
 		}
+	}
+
+	#[test]
+	fn video_config_refuses_disabled_renditions() {
+		let mut config = catalog_video("avc1.64001f");
+		config.enabled = false;
+		assert!(matches!(video_config(config.clone()), Err(MoqError::NotFound)));
+		config.enabled = true;
+		assert!(video_config(config).is_ok());
 	}
 
 	#[test]

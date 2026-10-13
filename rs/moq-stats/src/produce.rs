@@ -530,10 +530,15 @@ struct TrackPair<V> {
 	wrote_compressed: usize,
 }
 
+/// Stats frames are stamped with the wall clock, so their tracks are timed.
+fn info() -> track::Info {
+	track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 impl<V: Serialize> TrackPair<V> {
 	fn create(broadcast: &broadcast::Producer, name: &str, sequence: Arc<AtomicU64>) -> Result<Self, moq_net::Error> {
-		let plain_track = broadcast.create_track(name, None)?;
-		let compressed_track = broadcast.create_track(format!("{name}{COMPRESSED_SUFFIX}").as_str(), None)?;
+		let plain_track = broadcast.create_track(name, info())?;
+		let compressed_track = broadcast.create_track(format!("{name}{COMPRESSED_SUFFIX}").as_str(), info())?;
 		Ok(Self::from_tracks(plain_track, compressed_track, sequence))
 	}
 
@@ -627,12 +632,12 @@ impl PendingPair {
 	) -> Result<TrackPair<V>, moq_net::Error> {
 		let PendingPair { plain, compressed } = self;
 		let plain_track = match plain {
-			Some(request) => request.accept(None),
-			None => broadcast.create_track(name, None)?,
+			Some(request) => request.accept(info()),
+			None => broadcast.create_track(name, info())?,
 		};
 		let compressed_track = match compressed {
-			Some(request) => request.accept(None),
-			None => broadcast.create_track(format!("{name}{COMPRESSED_SUFFIX}").as_str(), None)?,
+			Some(request) => request.accept(info()),
+			None => broadcast.create_track(format!("{name}{COMPRESSED_SUFFIX}").as_str(), info())?,
 		};
 		Ok(TrackPair::from_tracks(plain_track, compressed_track, sequence))
 	}
@@ -1185,6 +1190,11 @@ fn advertised_path(prefix: &Path, group: &Path, node: Option<&str>) -> PathOwned
 
 #[cfg(test)]
 mod tests {
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn reclaimed_requested_tracks_resume_after_the_last_group() {
 		use futures::FutureExt;
@@ -1246,7 +1256,9 @@ mod tests {
 	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+			moq_net::announce::Event::Start(route)
+			| moq_net::announce::Event::Update(route)
+			| moq_net::announce::Event::Restart(route) => Some((route, true)),
 			moq_net::announce::Event::End(route) => Some((route, false)),
 		}
 	}
@@ -1300,7 +1312,7 @@ mod tests {
 		let mut announced = egress.announced();
 		let source = origin.create_broadcast(path).expect("create_broadcast");
 		source.announce(origin::Route::default()).expect("announce");
-		let producer = source.create_track("video", None).expect("create_track");
+		let producer = source.create_track("video", timed()).expect("create_track");
 
 		let (_, active) = next_update(&mut announced).await.expect("announce");
 		assert!(active);
@@ -1474,9 +1486,9 @@ mod tests {
 	}
 
 	/// A restart while the old instance is still announced (a route the mesh
-	/// has not withdrawn yet) takes the path at once: the newer epoch replaces
-	/// the old one and ends its subscriptions, so a reader re-requests the new
-	/// broadcast instead of stalling on the old one.
+	/// has not withdrawn yet) takes the path at once: the newer epoch restarts
+	/// it, so a reader re-requests the new broadcast instead of stalling on the
+	/// old one, while the old subscription stays on the old instance.
 	#[tokio::test(start_paused = true)]
 	async fn restart_replaces_a_still_announced_instance() {
 		let origin = produce_origin();
@@ -1499,18 +1511,12 @@ mod tests {
 		let second = node_producer(&origin);
 		let _f2 = feed(second.registry(), Tier::default(), "foo/bar", true, 1, 30).await;
 		drive_tick().await;
-		let [(ended, false, ended_epoch), (started, true, after)] = &take_epochs(&mut events)[..] else {
-			panic!("expected the old epoch to end and the new one to start");
+		let [(started, true, after)] = &take_epochs(&mut events)[..] else {
+			panic!("expected the new epoch to restart the path");
 		};
-		assert_eq!((ended, ended_epoch), (path, before));
 		assert_eq!(started, path);
 		assert!(after > before);
-
-		// The old instance keeps publishing, but its subscription ended.
-		drive_tick().await;
-		use futures::FutureExt;
-		let end = old.next_group().now_or_never().expect("the old subscription ended");
-		assert!(!matches!(end, Ok(Some(_))), "still reading the old epoch");
+		drop(old);
 
 		let stats = origin
 			.consume()
@@ -1637,7 +1643,7 @@ mod tests {
 			.with_stats(registry.tier(Tier::default()).session("publisher"))
 			.publish("foo/bar", origin::Route::default())
 			.expect("publish");
-		let mut video = source.create_track("video", None).expect("create_track");
+		let mut video = source.create_track("video", timed()).expect("create_track");
 		let egress = data
 			.consume()
 			.with_stats(registry.tier(Tier::default()).session("viewer"));
