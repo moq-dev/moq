@@ -15,10 +15,12 @@ them.
 
 Where a group's start is stamped:
 
-- Rust: `GroupState::stamp` (`rs/moq-net/src/model/group.rs`), called from
-  `group::Producer::write_frame` and `write_frames`, sets a group's
-  start from its first frame. The track keeps groups by sequence in its
-  `lookup` map (`rs/moq-net/src/model/track.rs`).
+- Rust: `GroupState::stamp` (`rs/moq-net/src/model/group.rs`) sets a
+  group's start from its first frame. Every write path calls it:
+  `group::Producer::write_frame`, `write_frames`, and `open_frame` behind
+  `create_frame` and `create_frame_owned`, which lite and IETF ingress use.
+  The track keeps groups by sequence in its `lookup` map
+  (`rs/moq-net/src/model/track.rs`).
 - JS: `state.timestamp ??= frame.timestamp` in `js/net/src/group.ts` stamps
   the start; the track keeps groups by sequence in its sorted `timeline`
   (`js/net/src/track.ts`).
@@ -28,11 +30,11 @@ the nearest cached, stamped, non-aborted group below it, and at or before
 the nearest one above it. Both sides are checked because groups can be
 created and received out of sequence order. An equal start is allowed, as
 moq-mux's `container::Producer` already allows a keyframe at the previous
-group's start. Groups no longer cached are not checked. The write fails
-without writing: Rust's `write_frame` and `write_frames` commit the frame
-before `stamp` today, so the check runs before any cache, frame, or index
-change, and the start is stamped only once it passes. A session receiving such a group aborts the track with
-that error and keeps the session.
+group's start. The write fails without writing: every Rust write path
+commits the frame (or installs the partial one) before `stamp` today, so
+the check runs before any cache, frame, or index change, and the start is
+stamped only once it passes. A session receiving such a group aborts the
+track with that error and keeps the session.
 
 Cases the rule must cover (from review):
 
@@ -49,6 +51,12 @@ Cases the rule must cover (from review):
 - A JS `GroupProducer` can hold frames before `track.writeGroup` attaches
   it, so its start is stamped with no timeline to check. Check an already
   started group when it is attached, before it is cached or fanned out.
+- Eviction must not drop the bound. An unstamped group whose stamped
+  predecessor expires (Rust's `evict_expired_scan`, JS's `#prune`) would
+  otherwise have no lower neighbor and accept a rewind. The track keeps the
+  sequence and original start of the highest-sequence group it evicted, and
+  a group above it with no cached lower neighbor is checked against that.
+  One entry, so no history grows with the cache.
 
 The check costs one ordered neighbor lookup per group, not per frame. The
 existing `group_write_frames` benchmark writes into an otherwise empty
@@ -93,8 +101,9 @@ Reconcile the docs:
   rewind is unspecified.
 
 Regression tests in both languages: a timed track refuses a group whose
-first frame rewinds, whether appended, created out of order, received, or
-(JS) written before `writeGroup`; an equal start is accepted; a resumed
+first frame rewinds, whether appended, created out of order, received
+through the streamed-frame path, written after its predecessor was evicted,
+or (JS) written before `writeGroup`; an equal start is accepted; a resumed
 partial group of a valid overlapping pair is accepted; an untimed track
 accepts groups in any order.
 
