@@ -26,6 +26,10 @@ const PAYLOAD: usize = TsPacket::SIZE - 4;
 /// this the media had an outage rather than a coarse cadence, and a dense clock history for
 /// a span that carried no bytes only stalls anything pacing on the asserted values.
 const BACKFILL: u128 = 40;
+/// The longest a transport buffer may go without emptying (ISO 13818-1 2.4.2.3).
+const TB_EMPTY: Duration = Duration::from_secs(1);
+/// One tick of the system clock, in whole nanoseconds rounded up.
+const TICK: i128 = 1_000_000_000_u128.div_ceil(SYSTEM_CLOCK) as i128;
 /// The system clock in Hz, the unit of a PCR.
 const SYSTEM_CLOCK: u128 = 27_000_000;
 /// A PCR wraps at 2^33 ticks of 90 kHz, each 300 ticks of the system clock.
@@ -407,8 +411,9 @@ pub(super) struct Schedule {
 	pmt: Option<u16>,
 	/// Units sent into a decoder buffer: their PID, decode nanoseconds and bytes held.
 	decoding: VecDeque<(u16, u128, usize)>,
-	/// When each transport buffer's last admitted packet finishes leaving it.
-	transport: HashMap<u16, i128>,
+	/// When each transport buffer's last admitted packet finishes leaving it, and when it
+	/// last started filling from empty.
+	transport: HashMap<u16, (i128, i128)>,
 	/// Every source has ended, so a unit that misses its deadline is the tail going out late
 	/// rather than an output that cannot keep up.
 	ended: bool,
@@ -668,7 +673,10 @@ impl Schedule {
 		{
 			let duration = (TsPacket::SIZE as u128 * 8 * 1_000_000_000).div_ceil(u128::from(buffer.rate));
 			let tb = self.transport_buffer(pid);
-			let free = self.transport.entry(tb).or_insert(time(0));
+			let (free, since) = self.transport.entry(tb).or_insert((time(0), time(0)));
+			if *free + TICK <= time(0) {
+				*since = time(0);
+			}
 			*free = ((*free).max(time(0)) + duration as i128).max(time(1));
 		}
 		// One head per PID preserves decode order without walking all future units at every
@@ -726,8 +734,12 @@ impl Schedule {
 					(TsPacket::SIZE as u128 * 8 * 1_000_000_000).div_ceil(u128::from(buffer.rate))
 				});
 				let tb = self.transport_buffer(pid);
-				let free = self.transport.get(&tb).copied().unwrap_or(now).max(now);
-				let drained = free + duration as i128;
+				let (last, since) = self.transport.get(&tb).copied().unwrap_or((now, now));
+				// A receiver reads time off the PCR, to a system clock tick, so the buffer counts as
+				// empty only once its last packet has left a tick before this one arrives.
+				let empty = last + TICK <= now;
+				let since = if empty { now } else { since };
+				let drained = last.max(now) + duration as i128;
 				if let Some(buffer) = buffer {
 					let capacity = buffer.transport as u128 * 8 * 1_000_000_000 / u128::from(buffer.rate);
 					if drained - now > capacity as i128 {
@@ -743,6 +755,12 @@ impl Schedule {
 				// No byte leaves the transport buffer before it has arrived: below Rx, the
 				// multiplex rate decides when the packet's last byte gets there.
 				let done = drained.max(time(position + 1));
+				// A transport buffer must empty at least once a second (2.4.2.3), so a PID kept
+				// busy that long waits for it to.
+				if done - since > TB_EMPTY.as_nanos() as i128 {
+					waiting.push(Reverse((last + TICK, lane)));
+					continue;
+				}
 				let held = if pid == unit.pid && buffer.is_some_and(|buffer| buffer.size.is_some()) {
 					payload(packet).len()
 				} else {
@@ -762,7 +780,7 @@ impl Schedule {
 						"MPEG-TS output missed a decode deadline on PID {pid} at {rate} b/s; raise the delay or the multiplex rate"
 					);
 				}
-				self.transport.insert(tb, done);
+				self.transport.insert(tb, (done, since));
 				out.positions.as_mut().unwrap().push(position);
 				out.packets.extend_from_slice(packet);
 				out.nulls -= 1;
@@ -1077,6 +1095,44 @@ mod tests {
 		}
 		assert_eq!(sent, 40);
 		assert!(peak <= 480.5, "teletext transport buffer holds {peak:.1} bytes");
+	}
+
+	/// A PID with more than a second's backlog at its Rx still lets its transport buffer
+	/// empty once a second, as the receiver sees it.
+	#[test]
+	fn a_busy_transport_buffer_empties_every_second() {
+		let rate = 10_000_000;
+		let slow = Buffer {
+			rate: 1_000_000,
+			size: Some(1_000_000),
+			transport: 512,
+		};
+		let mut schedule = Schedule::new(Duration::from_secs(4));
+		schedule.set_rate(Some(rate));
+		schedule.set_clock(7);
+		schedule.set_buffer(7, VIDEO);
+		schedule.set_buffer(9, slow);
+		// Three seconds of packets at the PID's Rx.
+		schedule.push(9, timing(5_000), unit(9, 2_000), false).unwrap();
+		let wire = 1504.0 / rate as f64;
+		let drain = 1504.0 / slow.rate as f64;
+		let (mut leave, mut since, mut longest, mut sent) = (f64::MIN, 0.0, 0.0f64, 0);
+		while let Some(slot) = schedule.next(None).unwrap() {
+			for (position, packet) in slot.layout(&unit(7, 1), 100, &[0xff; 188]).chunks(188).enumerate() {
+				if pid(packet) != 9 {
+					continue;
+				}
+				let start = slot.pcr as f64 / SYSTEM_CLOCK as f64 + position as f64 * wire;
+				if leave <= start {
+					since = start;
+				}
+				leave = (start + wire).max(leave.max(start) + drain);
+				longest = longest.max(leave - since);
+				sent += 1;
+			}
+		}
+		assert_eq!(sent, 2_000);
+		assert!(longest <= 1.0, "the transport buffer stayed busy for {longest:.3} s");
 	}
 
 	/// A unit goes out a window ahead of its due slot, as soon as it is released.
