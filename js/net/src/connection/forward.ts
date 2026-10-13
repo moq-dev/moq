@@ -157,20 +157,24 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 		})();
 	};
 
-	const reconcile = (wanted: readonly Path.Valid[]) => {
+	// How many reports want each prefix; overlapping watches can name one prefix twice.
+	const wanted = new Map<Path.Valid, number>();
+
+	const unsubscribe = originWire.interests((prefix, want) => {
 		if (dead) return;
-		const want = new Set(wanted);
-		for (const prefix of want) {
-			const interest = interests.get(prefix);
+		const count = (wanted.get(prefix) ?? 0) + (want ? 1 : -1);
+		if (count > 0) wanted.set(prefix, count);
+		else wanted.delete(prefix);
+
+		const interest = interests.get(prefix);
+		if (count === 1 && want) {
 			if (interest) {
 				clearTimeout(interest.linger);
 				interest.linger = undefined;
 			} else if (!blind) {
 				open(prefix);
 			}
-		}
-		for (const [prefix, interest] of interests) {
-			if (want.has(prefix) || interest.linger !== undefined) continue;
+		} else if (count === 0 && interest) {
 			interest.linger = setTimeout(() => {
 				// Forgotten now rather than once its stream winds down, so a watch arriving
 				// meanwhile opens a fresh request instead of reviving this one.
@@ -179,10 +183,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 				interest.announced.close();
 			}, LINGER);
 		}
-	};
-
-	const unsubscribe = originWire.interests.subscribe(reconcile);
-	reconcile(originWire.interests.peek());
+	});
 
 	void conn.closed.then(() => {
 		dead = true;

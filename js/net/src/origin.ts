@@ -29,7 +29,15 @@ import {
 	spreadHash,
 } from "./internal.ts";
 import * as Path from "./path.ts";
-import { type Advertised, type Advertisements, type Instance, registerWire, sameInstance, wireOf } from "./wire.ts";
+import {
+	type Advertised,
+	type Advertisements,
+	type Instance,
+	type InterestListener,
+	registerWire,
+	sameInstance,
+	wireOf,
+} from "./wire.ts";
 
 export type { Cost, Hop, Route } from "./hop.ts";
 export { isAnonymous } from "./hop.ts";
@@ -108,26 +116,21 @@ class Scope {
 	#headsCache?: Path.Valid[];
 
 	/**
-	 * The root-relative prefixes a session asks its peer about for the `watched` absolute
-	 * prefixes: a watch above a head requests the head, since this scope may not ask for more,
-	 * and a watch inside one requests itself.
+	 * The root-relative prefixes a session asks its peer about for one watched absolute prefix:
+	 * a watch above a head requests the head, since this scope may not ask for more, and a
+	 * watch inside one requests itself.
 	 */
-	interests(watched: readonly Path.Valid[]): readonly Path.Valid[] {
-		if (this === Scope.all) return watched;
+	interests(absolute: Path.Valid): Path.Valid[] {
+		if (this === Scope.all) return [absolute];
 		this.#headsCache ??= this.#heads();
-		const out = new Set<Path.Valid>();
-		for (const absolute of watched) {
-			const relative = Path.stripPrefix(this.root, absolute);
-			if (relative === null) {
-				if (Path.hasPrefix(absolute, this.root)) for (const head of this.#headsCache) out.add(head);
-				continue;
-			}
-			for (const head of this.#headsCache) {
-				if (Path.hasPrefix(relative, head)) out.add(head);
-				else if (Path.hasPrefix(head, relative) && this.overlaps(absolute)) out.add(relative);
-			}
+		const relative = Path.stripPrefix(this.root, absolute);
+		if (relative === null) return Path.hasPrefix(absolute, this.root) ? [...this.#headsCache] : [];
+		const out: Path.Valid[] = [];
+		for (const head of this.#headsCache) {
+			if (Path.hasPrefix(relative, head)) out.push(head);
+			else if (Path.hasPrefix(head, relative) && this.overlaps(absolute)) return [relative];
 		}
-		return [...out].sort();
+		return out;
 	}
 
 	/** Whether this scope allows anything beneath the absolute `prefix`. */
@@ -190,14 +193,28 @@ function advertOverlaps(advert: Advertised, prefix: Path.Valid, pattern: Path.Pa
 	return advert.claim ? advert.claim.overlaps(pattern) : scopeOverlaps(pattern, prefix);
 }
 
-/** Whether a strict ancestor of `head` is watched. */
-function watchedAbove(watched: ReadonlyMap<Path.Valid, number>, head: Path.Valid): boolean {
-	if (head === Path.empty()) return false;
-	if (watched.has(Path.empty())) return true;
-	for (let end = head.indexOf("/"); end >= 0; end = head.indexOf("/", end + 1)) {
-		if (watched.has(head.slice(0, end) as Path.Valid)) return true;
-	}
+/** One segment of the watched-prefix trie, kept while it or anything beneath it is watched. */
+interface WatchNode {
+	readonly path: Path.Valid;
+	readonly parent?: WatchNode;
+	readonly children: Map<string, WatchNode>;
+	/** How many open watchers name exactly this prefix. */
+	count: number;
+}
+
+/** Whether something strictly above `node` is watched, so `node` rides its request. */
+function coveredAbove(node: WatchNode): boolean {
+	for (let above = node.parent; above; above = above.parent) if (above.count > 0) return true;
 	return false;
+}
+
+/** The broadest watched prefixes strictly beneath `node`: the ones it covers. */
+function frontier(node: WatchNode, out: Path.Valid[] = []): Path.Valid[] {
+	for (const child of node.children.values()) {
+		if (child.count > 0) out.push(child.path);
+		else frontier(child, out);
+	}
+	return out;
 }
 
 /**
@@ -592,40 +609,68 @@ class OriginState {
 	// What backs the public `discovery` getter.
 	sessions = new Signal({ total: 0, discovery: 0 });
 
-	// The literal heads readers are watching, counted: announcement streams and announced
-	// requests. Sessions ask their peer for announcements under these and nothing else.
-	watched = new VersionedSignal(new Map<Path.Valid, number>());
-
-	#coveringVersion = -1;
-	#covering: Path.Valid[] = [];
+	// The literal heads readers are watching, counted, as a trie: announcement streams and
+	// announced requests. Sessions ask their peer for announcements under the broadest of
+	// these and nothing else, and hear each change to that covering set as it happens, so a
+	// watch coming or going touches only its prefix and the watches directly above or below.
+	#watches: WatchNode = { path: Path.empty(), children: new Map(), count: 0 };
+	#interests = new Set<InterestListener>();
 
 	/** Count `heads` as watched until the returned dispose runs. */
 	watch(heads: readonly Path.Valid[]): Dispose {
-		this.watched.mutate((watched) => {
-			for (const head of heads) watched.set(head, (watched.get(head) ?? 0) + 1);
-		});
+		for (const head of heads) this.#watchOne(head);
 		let released = false;
 		return () => {
 			if (released) return;
 			released = true;
-			this.watched.mutate((watched) => {
-				for (const head of heads) {
-					const count = (watched.get(head) ?? 0) - 1;
-					if (count > 0) watched.set(head, count);
-					else watched.delete(head);
-				}
-			});
+			for (const head of heads) this.#unwatchOne(head);
 		};
 	}
 
-	/** The broadest watched heads, sorted: a narrower watch rides its ancestor's request. */
-	covering(): Path.Valid[] {
-		if (this.#coveringVersion !== this.watched.version) {
-			const watched = this.watched.peek();
-			this.#covering = [...watched.keys()].filter((head) => !watchedAbove(watched, head)).sort();
-			this.#coveringVersion = this.watched.version;
+	#watchOne(head: Path.Valid): void {
+		let node = this.#watches;
+		for (const part of head === Path.empty() ? [] : head.split("/")) {
+			let child = node.children.get(part);
+			if (!child) {
+				child = { path: Path.join(node.path, part as Path.Valid), parent: node, children: new Map(), count: 0 };
+				node.children.set(part, child);
+			}
+			node = child;
 		}
-		return this.#covering;
+		if (node.count++ > 0 || coveredAbove(node)) return;
+		// Opened before the narrower ones it covers are released, so nothing retracts.
+		this.#emit(node.path, true);
+		for (const narrower of frontier(node)) this.#emit(narrower, false);
+	}
+
+	#unwatchOne(head: Path.Valid): void {
+		let node: WatchNode | undefined = this.#watches;
+		for (const part of head === Path.empty() ? [] : head.split("/")) node = node?.children.get(part);
+		if (!node || node.count === 0) throw new Error("unwatched prefix released");
+		if (--node.count === 0 && !coveredAbove(node)) {
+			for (const narrower of frontier(node)) this.#emit(narrower, true);
+			this.#emit(node.path, false);
+		}
+		// Prune the segments nothing watches any more.
+		while (node.parent && node.count === 0 && node.children.size === 0) {
+			node.parent.children.delete(node.path.slice(node.path.lastIndexOf("/") + 1));
+			node = node.parent;
+		}
+	}
+
+	#emit(prefix: Path.Valid, wanted: boolean): void {
+		for (const listener of this.#interests) listener(prefix, wanted);
+	}
+
+	/**
+	 * Hear every change to the covering set of watches, starting with each prefix in it now.
+	 * Returns the unsubscribe.
+	 */
+	interests(listener: InterestListener): Dispose {
+		this.#interests.add(listener);
+		if (this.#watches.count > 0) listener(this.#watches.path, true);
+		else for (const prefix of frontier(this.#watches)) listener(prefix, true);
+		return () => this.#interests.delete(listener);
 	}
 
 	// How many things are prepared to answer a request: attached sessions, plus reconnecting
@@ -1056,7 +1101,6 @@ export class Producer implements Table {
 	#scope = Scope.all;
 	#preference = Preference.default;
 	#requests?: Getter<ReadonlyMap<Path.Valid, RequestSlot> | undefined>;
-	#interests?: Getter<readonly Path.Valid[]>;
 
 	// The reader backing the passthroughs, so holding a Producer never requires the
 	// consume().x() stutter for everyday reads. One instance, so `discovery` keeps its
@@ -1067,12 +1111,10 @@ export class Producer implements Table {
 		const thisProducer = this;
 		registerWire(this, {
 			receive: (prefix, route) => this.#receive(prefix, route),
-			get interests() {
-				thisProducer.#interests ??= new Derived([thisProducer.#state.watched], () =>
-					thisProducer.#scope.interests(thisProducer.#state.covering()),
-				);
-				return thisProducer.#interests;
-			},
+			interests: (listener) =>
+				this.#state.interests((absolute, wanted) => {
+					for (const prefix of this.#scope.interests(absolute)) listener(prefix, wanted);
+				}),
 			accepts: (prefix) => this.#scope.overlaps(Path.join(this.#scope.root, prefix)),
 			attach: (discovery) => this.#attach(discovery),
 			expect: () => this.#expect(),

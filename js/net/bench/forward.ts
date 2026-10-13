@@ -96,8 +96,11 @@ for (const touched of ["covering", "single"] as const) {
 	}
 }
 
-// One watch opening and closing updates every attached session's covering set. Held watches
-// and sessions are the two fan-out axes; the touched path is always a fresh one.
+// One watch opening and closing reaches every attached session, but only as the change to its
+// own prefix. Held watches and sessions are the two fan-out axes. The sweep spans 256x in held
+// watches, so a cost that rescans them lands well past this loose margin on a noisy machine.
+const maxSlope = 5;
+const baselines = new Map<number, number>();
 console.log("watchers,sessions,watch_us");
 for (const watchers of [8, 128, 2048]) {
 	for (const sessions of [1, 8, 32]) {
@@ -128,7 +131,15 @@ for (const watchers of [8, 128, 2048]) {
 		// Each touched prefix opens once; the linger keeps it for the next round.
 		if (opened !== watchers + 64) throw new Error(`expected ${watchers + 64} requests, saw ${opened}`);
 		checksum += opened;
-		console.log(`${watchers},${sessions},${samples[2].toFixed(2)}`);
+		const us = samples[2];
+		console.log(`${watchers},${sessions},${us.toFixed(2)}`);
+		const baseline = baselines.get(sessions) ?? us;
+		baselines.set(sessions, baseline);
+		if (us > baseline * maxSlope) {
+			throw new Error(
+				`${watchers} held watches cost ${us.toFixed(2)} us, over ${maxSlope}x ${baseline.toFixed(2)}`,
+			);
+		}
 
 		for (const watch of held) watch.close();
 		for (const session of attached) session.die();

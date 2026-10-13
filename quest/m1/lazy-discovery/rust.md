@@ -28,9 +28,11 @@ Facts (2026-10-10, `origin/main` e5446b036):
   internal, and cluster paths, so a relay's watch set is the root.
 
 The JS shape to mirror (`js/net/src/connection/forward.ts`): the origin
-counts watched literal heads and hands sessions the covering set; a session
-inserts a route reported by overlapping requests once, driven by the first
-reporter, so a hand-over never retracts; a request closes 2s after its last
+counts watched literal heads in a trie and hands each session only the
+covering-set changes a watch causes, so the cost per session stays flat over
+held watches (`js/net/bench/forward.ts`); a session inserts a route reported
+by overlapping requests once, driven by the first reporter, so a hand-over
+never retracts; a request closes 2s after its last
 watcher (a fixed constant, since one-shot connections have no `linger`); a
 refused or reset request downgrades the whole session to blind answers.
 

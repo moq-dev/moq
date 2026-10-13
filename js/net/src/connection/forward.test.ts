@@ -171,16 +171,49 @@ test("a watch arriving as the linger expires opens a fresh request", async () =>
 	watch.close();
 	await settle();
 
-	// The next watch and the expiry land before either is noticed, so the old request is
-	// already closing when its prefix is wanted again.
-	const again = origin.announced(Path.Pattern.subtree(Path.from("room")));
+	// The expiry closes the old request, and the next watch lands before its stream winds down.
 	jest.advanceTimersByTime(LINGER);
+	const again = origin.announced(Path.Pattern.subtree(Path.from("room")));
 	await settle();
 	expect(session.requests.length).toBe(2);
 	expect(session.open()).toEqual(["room/**"]);
 
 	again.close();
 	session.die();
+	origin.close();
+});
+
+test("a watch change reports only its prefix and the watches it covers", () => {
+	const origin = new OriginProducer();
+	const events: string[] = [];
+	const unlisten = wireOf(origin).interests((prefix, wanted) => events.push(`${wanted ? "+" : "-"}${prefix}`));
+	const state = origin.consume();
+
+	const ab = state.request(Path.from("a/b"), { announced: true });
+	const ac = state.request(Path.from("a/c"), { announced: true });
+	const x = state.request(Path.from("x"), { announced: true });
+	expect(events.splice(0)).toEqual(["+a/b", "+a/c", "+x"]);
+
+	// The broader watch opens first, then releases the ones it now covers; unrelated `x` is untouched.
+	const a = state.request(Path.from("a"), { announced: true });
+	expect(events.splice(0)).toEqual(["+a", "-a/b", "-a/c"]);
+
+	// A watch beneath a covered prefix changes nothing.
+	const abd = state.request(Path.from("a/b/d"), { announced: true });
+	abd.close();
+	expect(events.splice(0)).toEqual([]);
+
+	a.close();
+	expect(events.splice(0)).toEqual(["+a/b", "+a/c", "-a"]);
+
+	// A late listener hears the current covering set first.
+	const late: string[] = [];
+	const stop = wireOf(origin).interests((prefix, wanted) => late.push(`${wanted ? "+" : "-"}${prefix}`));
+	expect(late).toEqual(["+a/b", "+a/c", "+x"]);
+
+	stop();
+	unlisten();
+	for (const request of [ab, ac, x]) request.close();
 	origin.close();
 });
 
@@ -268,7 +301,7 @@ test("a reconnect re-opens every live watch and skips a lingering one", async ()
 	const kept = origin.announced(Path.Pattern.subtree(Path.from("kept")));
 	const dropped = origin.announced(Path.Pattern.subtree(Path.from("dropped")));
 	await settle();
-	expect(first.open()).toEqual(["dropped/**", "kept/**"]);
+	expect(first.open()).toEqual(["kept/**", "dropped/**"]);
 
 	// Still lingering on the first session when it dies.
 	dropped.close();
