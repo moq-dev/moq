@@ -335,6 +335,10 @@ impl Handle {
 	/// origin handles allow for the connection's credential, and refuses any other
 	/// token as unsupported.
 	///
+	/// At most 128 unanswered tokens queue, not counting withdrawn ones; more are
+	/// refused with [`SessionError::TooManyRequests`] (`UNAUTHORIZED` on moq-transport,
+	/// whose AUTH_ERROR registry has no such code).
+	///
 	/// # Errors
 	///
 	/// [`Error::Duplicate`] if the requests were already taken, or the driver

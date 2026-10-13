@@ -524,6 +524,9 @@ impl Lease {
 	/// since the routes it already announced would be misreported as entering here or
 	/// from a peer, or offered to the wrong links. A changed tier keeps the session and
 	/// moves its [stats](Self::with_stats) to the new tier.
+	///
+	/// Once the relay answers the session's AUTH requests itself, each of
+	/// these ends only that credential's grant; the lease ends when no credential remains.
 	pub async fn ended(&mut self) -> lease::Reason {
 		if let Some(refresh) = &mut self.refresh {
 			return refresh.ended().await;

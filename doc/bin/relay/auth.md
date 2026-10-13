@@ -46,9 +46,10 @@ same way: what falls outside a narrower grant resets with `Unauthorized`, the
 broadcasts the session published outside it abort, and everything else keeps
 flowing. A wider grant brings those paths back within the admitted root and
 SETUP role. A one-shot HTTP `/fetch` ends on a narrower grant instead. A
-changed `root`, `mounts`, `peer`, or `upstream` closes the session. A changed
-`tier` keeps the session and moves its stats from then on. A 401 or
-403 closes it. Any other failure retries with backoff and the session lives
+changed `root`, `mounts`, `peer`, or `upstream`, or a 401 or 403, ends that
+credential's grant, which closes the session unless an
+[in-band](#in-band-renewal) credential still holds it. A changed `tier` keeps
+the session and moves its stats from then on. Any other failure retries with backoff and the session lives
 until `expires`, so an outage always has the bound the server chose. A grant
 with `revalidate` must set `expires` for that reason.
 
@@ -133,13 +134,13 @@ The grant reports its real expiry so the client can renew in time.
 The relay verifies a presented JWT through the same admission path, replacing
 `jwt` in the original query and preserving the connection's identity. The auth
 server sees another `connect` for the same session id. Attached grants revalidate
-independently but never report `end` or free a session-limit slot; only the
-connection reports its end, even if its first credential expired earlier.
-The initial credential remains responsible for the connection's stats tier.
+independently but never report `end`; only the connection reports its end, even
+if its first credential expired earlier, after its attached grants stop. Each
+attached JWT counts against its own `--limit-token` cap until the connection
+ends. The initial credential remains responsible for the connection's stats tier.
 Certificate sessions cannot renew a certificate in band, and public rules
-cannot verify a presented token; both refuse it as unsupported. A session may
-have 128 tokens queued and 128 being verified; more are refused with
-`TOO_MANY_REQUESTS` on moq-lite and `UNAUTHORIZED` on moq-transport.
+cannot verify a presented token; both refuse it as unsupported. A burst of
+tokens past the session's pending-verification bound is refused.
 
 ### Claims
 

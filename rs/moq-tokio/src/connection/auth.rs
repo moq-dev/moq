@@ -200,7 +200,15 @@ async fn present(
 		let token = tokio::select! {
 			biased;
 			changed = next(&connection, Some((connects, true))) => { snapshot = changed?; continue; }
-			token = handle.add(bytes.clone()) => token?,
+			token = handle.add(bytes.clone()) => match token {
+				Ok(token) => token,
+				// The session ending is no verdict on the token: replay it on the next one.
+				Err(_) if session.closed().now_or_never().is_some() => {
+					snapshot = next(&connection, Some((connects, true))).await?;
+					continue;
+				}
+				Err(err) => return Err(err.into()),
+			},
 		};
 		if let Some(answered) = answered.take() {
 			let _ = answered.send(Ok(()));
@@ -218,8 +226,17 @@ async fn present(
 					snapshot = next(&connection, Some((connects, true))).await?;
 					break;
 				}
-				grant = watch.changed() => {
-					if let Ok(mut state) = producer.write() { state.grant = grant?; }
+				grant = watch.changed() => match grant {
+					Ok(grant) => {
+						if let Ok(mut state) = producer.write() { state.grant = grant; }
+					}
+					// The stream ended with its session, not by the peer's verdict.
+					Err(_) if session.closed().now_or_never().is_some() => {
+						if let Ok(mut state) = producer.write() { state.grant = None; }
+						snapshot = next(&connection, Some((connects, true))).await?;
+						break;
+					}
+					Err(err) => return Err(err.into()),
 				}
 			}
 		}
@@ -337,6 +354,35 @@ mod tests {
 		);
 		drop(token);
 		let _ = tokio::join!(first_grant.closed(), second_grant.closed());
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_session_closing_mid_replay_keeps_the_token() {
+		let connection = kio::Producer::<State>::default();
+		let auth = Auth {
+			connection: connection.consume(),
+		};
+		let mut first = pair().await;
+		attach(&connection, &first.client);
+		let (token, _first_grant) = tokio::join!(auth.add("renew"), async {
+			first.requests.recv().await.unwrap().accept(auth::Grant::all())
+		});
+		let token = token.unwrap();
+		let mut second = pair().await;
+		attach(&connection, &second.client);
+		// Close the replacement while its replayed token is still unanswered, before
+		// the connection notices.
+		let _unanswered = second.requests.recv().await.unwrap();
+		second.client.abort(moq_net::Error::Cancel);
+		second.client.closed().await;
+		let mut third = pair().await;
+		attach(&connection, &third.client);
+		let request = tokio::time::timeout(std::time::Duration::from_secs(5), third.requests.recv())
+			.await
+			.expect("the token was not replayed after its session closed")
+			.unwrap();
+		assert_eq!(request.token().as_ref(), b"renew");
+		drop(token);
 	}
 
 	#[tokio::test(start_paused = true)]

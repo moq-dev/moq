@@ -200,36 +200,39 @@ where
 	// Keep the driver in this task so cancellation tears down the transport.
 	let ws = moq_tokio::transport::Session::new(ws);
 	let mut refused = ws.clone();
-	let accept = server.accept_request(tokio::time::Instant::now().into_std(), ws);
-	let accept = async move {
+	let handshake = async move {
+		let request = server
+			.accept_request(tokio::time::Instant::now().into_std(), ws)
+			.await?;
+		let lease = lease.preparing(request.auth(), request.role())?;
+		let (session, driver) = request.ok().await?;
+		Ok::<_, moq_net::Error>((lease, session, driver))
+	};
+	// The handshake timeout covers the SETUP reply too, so a peer that sends SETUP
+	// and then withholds flow-control credit is dropped like one that never sends it.
+	let handshake = async move {
 		match timeout {
-			None => Ok(accept.await),
-			Some(timeout) => tokio::time::timeout(timeout, accept)
+			None => handshake.await,
+			Some(timeout) => tokio::time::timeout(timeout, handshake)
 				.await
-				.map_err(|_| moq_net::Error::Timeout),
+				.unwrap_or(Err(moq_net::Error::Timeout)),
 		}
 	};
-	// The drain deadline bounds SETUP too, so a peer that never sends it cannot
-	// outlive the relay.
-	let accepted = shutdown
-		.until_deadline(accept)
+	// The drain deadline bounds the handshake too, so a stalled peer cannot outlive
+	// the relay.
+	let handshake = shutdown
+		.until_deadline(handshake)
 		.await
 		.unwrap_or(Err(moq_net::Error::GoawayTimeout));
-	let request = match accepted {
-		Ok(accepted) => accepted?,
-		// A peer that upgraded and never sent SETUP in time; tell it why it is dropped.
+	let (lease, session, driver) = match handshake {
+		Ok(handshake) => handshake,
+		// Tell the peer why it is dropped.
 		Err(err) => {
 			use web_transport_trait::poll::Session as _;
 			refused.close(moq_net::SessionError::from(&err).to_code(), &err.to_string());
 			return Err(err.into());
 		}
 	};
-
-	let lease = lease.preparing(request.auth(), request.role())?;
-	let (session, driver) = shutdown
-		.until_deadline(request.ok())
-		.await
-		.ok_or_else(|| anyhow::anyhow!("the SETUP reply was still pending at the drain deadline"))??;
 
 	let driver = moq_net::time::run(driver);
 	tokio::pin!(driver);

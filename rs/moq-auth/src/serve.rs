@@ -256,7 +256,8 @@ fn remote(request: &Request) -> Option<IpAddr> {
 
 /// One live session's share of the limits.
 struct Slot {
-	token: Option<u64>,
+	/// Every JWT presented for this session: its connect, plus each one attached in band.
+	tokens: Vec<u64>,
 	remote: Option<IpAddr>,
 	seen: Instant,
 }
@@ -275,20 +276,25 @@ impl Sessions {
 			.retain(|_, slot| now.saturating_duration_since(slot.seen) < cadence.saturating_mul(2));
 	}
 
-	/// Admit a `connect`, refusing over the cap. A known id refreshes instead.
+	/// Admit a `connect`, refusing over the cap. A known id is the same session
+	/// attaching another credential: it holds no new remote slot, but a JWT new to
+	/// it counts against that JWT's cap until the session ends.
 	fn connect(&mut self, request: &Request, limits: Limits) -> Result<(), Refusal> {
-		if let Some(slot) = self.slots.get_mut(&request.id) {
-			slot.seen = Instant::now();
-			return Ok(());
-		}
 		// Decided before counting, so the credential is already known to be one JWT.
 		let token = jwt(request).ok().flatten().map(hash);
-		let remote = remote(request);
-		if let (Some(cap), Some(token)) = (limits.token, token)
-			&& self.slots.values().filter(|slot| slot.token == Some(token)).count() >= cap
+		let known = self.slots.get(&request.id);
+		let new_token = token.filter(|token| !known.is_some_and(|slot| slot.tokens.contains(token)));
+		if let (Some(cap), Some(token)) = (limits.token, new_token)
+			&& self.slots.values().filter(|slot| slot.tokens.contains(&token)).count() >= cap
 		{
 			return Err(Refusal::TokenLimit);
 		}
+		if let Some(slot) = self.slots.get_mut(&request.id) {
+			slot.tokens.extend(new_token);
+			slot.seen = Instant::now();
+			return Ok(());
+		}
+		let remote = remote(request);
 		if let (Some(cap), Some(remote)) = (limits.remote, remote)
 			&& self.slots.values().filter(|slot| slot.remote == Some(remote)).count() >= cap
 		{
@@ -297,7 +303,7 @@ impl Sessions {
 		self.slots.insert(
 			request.id.clone(),
 			Slot {
-				token,
+				tokens: token.into_iter().collect(),
 				remote,
 				seen: Instant::now(),
 			},
@@ -309,11 +315,17 @@ impl Sessions {
 	/// lost to a restart. The cap is not enforced here: the session was admitted, and
 	/// which survivor to revoke would be an accident of arrival order.
 	fn revalidate(&mut self, request: &Request) {
+		let token = jwt(request).ok().flatten().map(hash);
 		let slot = self.slots.entry(request.id.clone()).or_insert_with(|| Slot {
-			token: jwt(request).ok().flatten().map(hash),
+			tokens: Vec::new(),
 			remote: remote(request),
 			seen: Instant::now(),
 		});
+		if let Some(token) = token
+			&& !slot.tokens.contains(&token)
+		{
+			slot.tokens.push(token);
+		}
 		slot.seen = Instant::now();
 	}
 
@@ -1116,6 +1128,50 @@ mod tests {
 		let mut same_host = with_token(request("/demo"), &other);
 		same_host.remote = Some("[::ffff:203.0.113.9]:9".parse().unwrap());
 		assert_eq!(server.answer(&same_host).await.unwrap_err(), Refusal::RemoteLimit);
+	}
+
+	/// An in-band credential arrives as a `connect` for a live session id. It takes
+	/// no new remote slot, but counts against its own JWT's cap like a session would.
+	#[tokio::test]
+	async fn attached_tokens_count_against_their_own_cap() {
+		let (dir, key) = key_dir();
+		let server = Server::new(Policy {
+			keys: Some(Keys::Dir(dir.path().into())),
+			limits: Limits {
+				token: Some(1),
+				remote: None,
+			},
+			..limited()
+		})
+		.unwrap();
+		let exp = Some(SystemTime::now() + Duration::from_secs(60));
+		let a = sign(&key, "demo", &["**"], &[], None);
+		let b = sign(&key, "demo", &["**"], &[], exp);
+		let c = sign(
+			&key,
+			"demo",
+			&["**"],
+			&[],
+			Some(SystemTime::now() + Duration::from_secs(61)),
+		);
+
+		let mut first = with_token(request("/demo"), &a);
+		first.id = "first".into();
+		let mut second = with_token(request("/demo"), &c);
+		second.id = "second".into();
+		server.answer(&first).await.unwrap();
+		server.answer(&second).await.unwrap();
+
+		let attach = |session: &Request| {
+			let mut attach = with_token(session.clone(), &b);
+			attach.id = session.id.clone();
+			attach
+		};
+		server.answer(&attach(&first)).await.unwrap();
+		// Re-presenting a JWT the session already holds is not another use of it.
+		server.answer(&attach(&first)).await.unwrap();
+		assert_eq!(server.answer(&attach(&second)).await.unwrap_err(), Refusal::TokenLimit);
+		assert_eq!(server.sessions.lock().unwrap().slots.len(), 2);
 	}
 
 	#[tokio::test]

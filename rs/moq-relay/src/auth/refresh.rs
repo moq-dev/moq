@@ -16,6 +16,8 @@ pub(super) struct Refresh {
 	stats: moq_net::stats::Session,
 	role: Option<Role>,
 	credentials: BTreeMap<u64, Credential>,
+	/// At most 128 tokens being verified; more are refused with `TooManyRequests`.
+	/// A withdrawn token keeps its slot until the auth server answers.
 	pending: FuturesUnordered<BoxFuture<'static, Option<Verified>>>,
 	next: u64,
 }
@@ -145,21 +147,26 @@ impl Refresh {
 
 	fn request(&mut self, request: auth::Request) {
 		if request.token().is_empty() {
-			if let Some(initial) = self.credentials.get_mut(&0) {
-				let issued = request.accept(initial.wire(self.role));
-				if initial.issued.is_none() {
-					initial.issued = Some(issued);
-				} else {
-					let mut credential = Credential::new(initial.consumer.clone());
-					credential.expires = initial.expires;
-					credential.initial = true;
-					credential.issued = Some(issued);
-					self.credentials.insert(self.next, credential);
-					self.next += 1;
-				}
-			} else {
+			// The connection's own lease answers an empty token while it lives, even
+			// after an earlier empty-token stream was withdrawn.
+			if self.owner.closed().now_or_never().is_some() {
 				request.reject(SessionError::Unauthorized, "connection credential ended");
+				return;
 			}
+			let unissued = self
+				.credentials
+				.values_mut()
+				.find(|credential| credential.initial && credential.issued.is_none());
+			if let Some(initial) = unissued {
+				initial.issued = Some(request.accept(initial.wire(self.role)));
+				return;
+			}
+			let mut credential = Credential::new(self.owner.clone());
+			credential.initial = true;
+			credential.issued = Some(request.accept(credential.wire(self.role)));
+			self.credentials.insert(self.next, credential);
+			self.next += 1;
+			self.authorize();
 			return;
 		}
 		let Some(source) = self.source.as_ref().filter(|source| source.auth.in_band) else {
@@ -283,7 +290,9 @@ fn with_jwt(query: Option<&str>, token: &str) -> String {
 	);
 	let mut pairs = Vec::new();
 	let mut replaced = false;
-	for pair in query.unwrap_or_default().split('&').filter(|pair| !pair.is_empty()) {
+	let query = query.unwrap_or_default();
+	let segments = query.split('&').filter(|_| !query.is_empty());
+	for pair in segments {
 		let is_jwt = url::form_urlencoded::parse(pair.as_bytes())
 			.next()
 			.is_some_and(|(key, _)| key == "jwt");
@@ -491,7 +500,9 @@ mod tests {
 			with_jwt(Some("flag&a=%2f&jwt=old&b=x+y&j%77t=dup"), "new token"),
 			"flag&a=%2f&jwt=new+token&b=x+y"
 		);
+		assert_eq!(with_jwt(Some("flag&&jwt=old&"), "t"), "flag&&jwt=t&");
 		assert_eq!(with_jwt(Some("a=1"), "t"), "a=1&jwt=t");
+		assert_eq!(with_jwt(Some(""), "t"), "jwt=t");
 		assert_eq!(with_jwt(None, "t"), "jwt=t");
 	}
 

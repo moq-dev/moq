@@ -102,7 +102,8 @@ struct Lifecycle {
 	pending: usize,
 }
 
-/// End must follow every Connect already being verified for this connection id.
+/// End must follow every request an attached credential has in flight for this
+/// connection id: its Connect, and each Revalidate until its driver stops.
 struct Admission(Arc<Connection>);
 
 impl Drop for Admission {
@@ -173,6 +174,24 @@ impl Context {
 		}
 	}
 
+	/// Resolve with the connection's end reason, for an attached credential only.
+	async fn connection_ended(&self) -> Reason {
+		if self.owner {
+			return std::future::pending().await;
+		}
+		kio::wait(|waiter| {
+			let lifecycle = std::task::ready!(self.connection.lifecycle.poll(waiter, |lifecycle| {
+				if lifecycle.ended.is_some() {
+					std::task::Poll::Ready(())
+				} else {
+					std::task::Poll::Pending
+				}
+			}));
+			std::task::Poll::Ready(lifecycle.ended.as_ref().expect("waited for connection end").0.clone())
+		})
+		.await
+	}
+
 	async fn end(&self) -> Option<(Reason, Bytes, Instant)> {
 		if !self.owner {
 			return None;
@@ -234,7 +253,7 @@ impl Post for Client {
 /// Admit a session through `server` and spawn the driver behind its lease.
 async fn admit<S: Post>(server: S, mut request: Request, context: Context) -> crate::Result<lease::Consumer> {
 	request.event = Event::Connect;
-	let _admission = context.admitting()?;
+	let admission = context.admitting()?;
 
 	let grant = ask(&server, &request).await?;
 	if context.connection.lifecycle.read().ended.is_some() {
@@ -245,6 +264,7 @@ async fn admit<S: Post>(server: S, mut request: Request, context: Context) -> cr
 
 	let driver = Driver {
 		context,
+		_admission: admission,
 		server,
 		request,
 		producer: Some(producer),
@@ -280,6 +300,8 @@ fn redact(url: &Url) -> String {
 /// The task behind a lease: re-checks on cadence and reports the end.
 struct Driver<S> {
 	context: Context,
+	/// Held by an attached credential's driver, so the connection's End waits for it.
+	_admission: Option<Admission>,
 	server: S,
 	request: Request,
 	producer: Option<lease::Producer>,
@@ -325,6 +347,14 @@ impl<S: Post> Driver<S> {
 			tokio::select! {
 				biased;
 				ended = producer.closed() => return ended,
+				// An attached credential ends with its connection, after its in-flight
+				// Revalidate lands, so End is the last request for this id.
+				reason = self.context.connection_ended() => {
+					if let Some(request) = inflight.take() {
+						let _ = request.await;
+					}
+					return producer.finish(reason, Bytes::default());
+				},
 				due = producer.due() => match due {
 					Due::Expired => return producer.finish(Reason::Expired, Bytes::default()),
 					Due::Revalidate if inflight.is_some() => pending = true,
@@ -536,6 +566,28 @@ mod tests {
 			other => panic!("expected connection end, got {other:?}"),
 		}
 		drop(retained);
+	}
+
+	#[tokio::test]
+	async fn an_attached_lease_ends_with_its_connection() {
+		let log = Log::default();
+		let script = Script::new(log.clone(), |_| Some(Ok(grant(None, None))));
+		let owner = script.connect().await.unwrap();
+		let mut request = request();
+		request.query = Some("jwt=replacement".into());
+		let attached = script.attach(&owner, request).await.unwrap();
+		owner.close(Reason::Shutdown, Bytes::default());
+		assert_eq!(attached.closed().await, Reason::Shutdown);
+		log.end().await;
+		attached.revalidate();
+		tokio::task::yield_now().await;
+		assert!(
+			matches!(
+				log.events().as_slice(),
+				[Event::Connect, Event::Connect, Event::End { .. }]
+			),
+			"an attached lease outlived its connection's End"
+		);
 	}
 
 	#[tokio::test]
