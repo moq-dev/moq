@@ -4,7 +4,7 @@ import { ARCHIVE_VERSION } from "./archive.ts";
 import { u53 } from "./integers.ts";
 import type { RelativeBroadcast } from "./path.ts";
 import { checkRenditions, DuplicateRendition, RootSchema } from "./root.ts";
-import { trackName } from "./track.ts";
+import { track } from "./track.ts";
 
 // The base catalog carries the media sections (`video`/`audio`) and the data track sections
 // (`json`/`binary`). Applications add their own root sections (e.g. `scte35`) without modifying
@@ -207,8 +207,8 @@ test("a rendition without a track name subscribes to its ID", () => {
 	const video = parsed.video?.renditions.hd;
 	const audio = parsed.audio?.renditions.en;
 	if (!video || !audio) throw new Error("missing rendition");
-	expect(trackName("hd", video)).toBe("hd");
-	expect(trackName("en", audio)).toBe("en");
+	expect(track("hd", video)).toBe("hd");
+	expect(track("en", audio)).toBe("en");
 	expect(JSON.stringify(parsed)).not.toContain('"track"');
 });
 
@@ -225,7 +225,7 @@ test("one track name in two broadcasts keeps both renditions", () => {
 	for (const id of ["left", "right"]) {
 		const config = parsed.video?.renditions[id];
 		if (!config) throw new Error(`missing ${id}`);
-		expect(trackName(id, config)).toBe("video");
+		expect(track(id, config)).toBe("video");
 		expect(config.broadcast as string).toBe(id);
 	}
 	expect(RootSchema.parse(JSON.parse(JSON.stringify(parsed)))).toEqual(parsed);

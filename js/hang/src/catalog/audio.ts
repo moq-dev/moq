@@ -19,7 +19,7 @@ export const AudioConfigSchema = z.object({
 	// If unset, the track lives in the same broadcast as the catalog.
 	broadcast: z.optional(RelativeBroadcastSchema),
 	// The track's name in its broadcast, when it differs from this entry's ID (its key in the
-	// catalog). Absent means the ID is the track name. Resolve it with `trackName`.
+	// catalog). Absent means the ID is the track name. Resolve it with `track`.
 	track: z.optional(z.string()),
 
 	// Human-readable rendition name for track pickers.

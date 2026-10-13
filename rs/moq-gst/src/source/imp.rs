@@ -839,11 +839,11 @@ fn reconcile(
 			Err(err) => gst::warning!(CAT, "ignoring {kind:?} rendition {name}: {err:?}"),
 		};
 	for (name, config) in catalog.video.enabled() {
-		let track = hang::catalog::Reference::track_name(config, name);
+		let track = hang::catalog::Reference::track(config, name);
 		insert(name, TrackKind::Video, video_caps(config), &config.container, track);
 	}
 	for (name, config) in catalog.audio.enabled() {
-		let track = hang::catalog::Reference::track_name(config, name);
+		let track = hang::catalog::Reference::track(config, name);
 		insert(name, TrackKind::Audio, audio_caps(config), &config.container, track);
 	}
 

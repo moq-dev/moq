@@ -268,8 +268,8 @@ mod test {
 			}"#,
 		)
 		.unwrap();
-		assert_eq!(catalog.video.renditions["hd"].track_name("hd"), "hd");
-		assert_eq!(catalog.audio.renditions["en"].track_name("en"), "en");
+		assert_eq!(catalog.video.renditions["hd"].track("hd"), "hd");
+		assert_eq!(catalog.audio.renditions["en"].track("en"), "en");
 		assert!(!catalog.to_json().unwrap().contains("\"track\""));
 	}
 
@@ -287,7 +287,7 @@ mod test {
 		assert!(catalog.check_renditions().is_ok());
 		for id in ["left", "right"] {
 			let config = &catalog.video.renditions[id];
-			assert_eq!(config.track_name(id), "video");
+			assert_eq!(config.track(id), "video");
 			assert_eq!(config.broadcast().map(|b| b.as_str()), Some(id));
 		}
 		assert_eq!(Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap(), catalog);

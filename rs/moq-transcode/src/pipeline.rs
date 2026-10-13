@@ -72,7 +72,7 @@ impl Pipeline {
 		// share one subscription and one decoder instead of N.
 		let feed = Feed::new(
 			source.clone(),
-			rendition.track_name(&name).to_string(),
+			rendition.track(&name).to_string(),
 			rendition.clone(),
 			config.feed_decoder(),
 		);
@@ -157,7 +157,7 @@ impl Pipeline {
 		self.serving.insert(published.rung.name.clone(), retired);
 
 		Some(rung::Rung {
-			source: self.rendition.track_name(&self.name).to_string(),
+			source: self.rendition.track(&self.name).to_string(),
 			feed: self.feed.clone(),
 			broadcast: self.source.clone(),
 			config: self.rendition.clone(),
@@ -190,7 +190,7 @@ impl Pipeline {
 		// A different track, or a different codec on the same one: every rung is
 		// decoding the wrong thing, so all of them retire whatever they resolve to
 		// and none of their names carries forward.
-		let rebuilt = rendition.track_name(&name) != self.rendition.track_name(&self.name)
+		let rebuilt = rendition.track(&name) != self.rendition.track(&self.name)
 			|| !catalog::same_stream(&self.rendition, &rendition);
 		let carry = match rebuilt {
 			true => Vec::new(),
@@ -217,7 +217,7 @@ impl Pipeline {
 			self.serving.clear();
 			self.feed = Feed::new(
 				self.source.clone(),
-				rendition.track_name(&name).to_string(),
+				rendition.track(&name).to_string(),
 				rendition.clone(),
 				self.config.feed_decoder(),
 			);

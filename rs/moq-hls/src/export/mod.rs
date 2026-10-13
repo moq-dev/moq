@@ -438,13 +438,13 @@ fn reference(catalog: &moq_mux::catalog::hang::Catalog, current: Option<&Referen
 		.video
 		.renditions
 		.iter()
-		.map(|(id, config)| (Kind::Video, id, config.track_name(id)))
+		.map(|(id, config)| (Kind::Video, id, config.track(id)))
 		.find(|(_, _, track)| indexed(track));
 	if let Some(current) = current {
 		let (kind, id, _) = current.as_ref();
 		let track = match kind {
-			Kind::Video => catalog.video.renditions.get(id).map(|config| config.track_name(id)),
-			Kind::Audio if video.is_none() => catalog.audio.renditions.get(id).map(|config| config.track_name(id)),
+			Kind::Video => catalog.video.renditions.get(id).map(|config| config.track(id)),
+			Kind::Audio if video.is_none() => catalog.audio.renditions.get(id).map(|config| config.track(id)),
 			Kind::Audio => None,
 		};
 		if let Some(track) = track.filter(indexed) {
@@ -456,7 +456,7 @@ fn reference(catalog: &moq_mux::catalog::hang::Catalog, current: Option<&Referen
 			.audio
 			.renditions
 			.iter()
-			.map(|(id, config)| (Kind::Audio, id, config.track_name(id)))
+			.map(|(id, config)| (Kind::Audio, id, config.track(id)))
 			.find(|(_, _, track)| indexed(track))
 	};
 	video

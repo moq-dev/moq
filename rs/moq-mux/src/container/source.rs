@@ -158,7 +158,7 @@ impl ExportSource {
 		};
 
 		let mut source = Self {
-			state: SourceState::Requesting(request, config.track_name(name).to_string()),
+			state: SourceState::Requesting(request, config.track(name).to_string()),
 			media: Some(media),
 			max_delay,
 			live: false,
@@ -189,7 +189,7 @@ impl ExportSource {
 		};
 
 		Ok(Some(Self {
-			state: SourceState::Requesting(request, config.track_name(name).to_string()),
+			state: SourceState::Requesting(request, config.track(name).to_string()),
 			media: Some(media),
 			max_delay,
 			live: false,

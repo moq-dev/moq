@@ -229,7 +229,7 @@ export class Decoder {
 			sync: this.sync,
 			broadcast: active,
 			track,
-			name: Catalog.trackName(track, identity),
+			name: Catalog.track(track, identity),
 			config: identity.decoder,
 			identity: key,
 			stats: this.#out.stats,

@@ -1105,7 +1105,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog) -> moq_msf::Catalog<E> {
 		};
 
 		let sap_type = video_sap_type(&config.codec);
-		let wire = config.track_name(name);
+		let wire = config.track(name);
 		if !claim(name, wire) {
 			continue;
 		}
@@ -1141,7 +1141,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog) -> moq_msf::Catalog<E> {
 				.map(|d| base64::engine::general_purpose::STANDARD.encode(d.as_ref())),
 		};
 
-		let wire = config.track_name(name);
+		let wire = config.track(name);
 		if !claim(name, wire) {
 			continue;
 		}
@@ -1166,7 +1166,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog) -> moq_msf::Catalog<E> {
 		let Some(packaging) = packaging_of(&config.container) else {
 			continue;
 		};
-		let wire = config.track_name(name);
+		let wire = config.track(name);
 		if !claim(name, wire) {
 			continue;
 		}

@@ -78,7 +78,7 @@ pub struct BinaryConfig {
 	///
 	/// Set it only when the ID can't be the name, such as two renditions of same-named tracks
 	/// from different broadcasts. Readers resolve the name with
-	/// [`Reference::track_name`](crate::catalog::Reference::track_name); one that predates the
+	/// [`Reference::track`](crate::catalog::Reference::track); one that predates the
 	/// field subscribes to the ID instead.
 	#[serde(default)]
 	pub track: Option<String>,

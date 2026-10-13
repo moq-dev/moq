@@ -203,10 +203,7 @@ async fn pick_track(source: &moq_mux::Source, catalog: &Catalog, codec: Codec) -
 				return Ok(None);
 			};
 			let track = source
-				.subscribe_track(
-					config.broadcast.as_ref(),
-					hang::catalog::Reference::track_name(config, name),
-				)
+				.subscribe_track(config.broadcast.as_ref(), hang::catalog::Reference::track(config, name))
 				.await?;
 			Ok(Some(codec::Track::opus(track, config)?))
 		}
@@ -223,10 +220,7 @@ async fn pick_track(source: &moq_mux::Source, catalog: &Catalog, codec: Codec) -
 				return Ok(None);
 			};
 			let track = source
-				.subscribe_track(
-					config.broadcast.as_ref(),
-					hang::catalog::Reference::track_name(config, name),
-				)
+				.subscribe_track(config.broadcast.as_ref(), hang::catalog::Reference::track(config, name))
 				.await?;
 			Ok(Some(codec::Track::video(track, config)?))
 		}

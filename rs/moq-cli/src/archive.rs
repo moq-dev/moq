@@ -232,7 +232,7 @@ impl Tracks {
 			(id, config): (&'a String, &'a C),
 			media: bool,
 		) -> (&'a str, Option<&'a moq_net::path::RelativeOwned>, bool) {
-			(config.track_name(id), config.broadcast(), media)
+			(config.track(id), config.broadcast(), media)
 		}
 		let video = catalog.video.renditions.iter().map(|e| entry(e, true));
 		let audio = catalog.audio.renditions.iter().map(|e| entry(e, true));

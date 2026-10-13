@@ -847,8 +847,8 @@ impl Rendition {
 	/// The media track's name in its broadcast, which can differ from the rendition's ID.
 	fn track_name(&self) -> &str {
 		match &self.config {
-			Config::Video(config) => config.track_name(&self.name),
-			Config::Audio(config) => config.track_name(&self.name),
+			Config::Video(config) => config.track(&self.name),
+			Config::Audio(config) => config.track(&self.name),
 		}
 	}
 
