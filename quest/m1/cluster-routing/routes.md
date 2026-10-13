@@ -185,6 +185,12 @@ passing. On `main` an epochless switch to a stale path is a Restart, which a
 lite-06 client sees as a retraction and an announcement; the release sent an
 in-place update.
 
+Publishing toggles too, decided 2026-10-13: add a time-mocked fixture where,
+on some rings, a longer path arrives first and the better route then replaces
+it as a Restart, so a lite-06 client sees `Start, End, Start` while the
+broadcast stays live. Pin today's sequence beside the `residual_*` tests;
+the epochless Restart rule above decides what it becomes.
+
 Tests, time mocked: #4644's live-graph withdrawal and failover tests
 (`quest/m0/path-hunting` branch) as acceptance, run on the wip version; a
 link flap with many broadcasts behind one origin costs one ROUTE change per
