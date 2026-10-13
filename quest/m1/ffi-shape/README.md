@@ -57,7 +57,7 @@ Settled shape:
   submodules, Go subpackages (`moq.dev/moq/json`, aliased on import next to
   `encoding/json`), Kotlin packages, Dart libraries, Swift caseless-enum
   namespaces. A per-layer crate split, reopened 2026-10-13 to move the
-  namespaces below the wrappers, was spiked and rejected (PR_PLACEHOLDER): UniFFI
+  namespaces below the wrappers, was spiked and rejected (#5460): UniFFI
   0.32 keys a crate's types by bare name, so `media.GroupConsumer` cannot
   take the net `GroupConsumer` it wraps. Python drops the media type
   silently; every other generator refuses. Revisit only if UniFFI
