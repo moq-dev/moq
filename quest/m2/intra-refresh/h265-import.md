@@ -31,9 +31,11 @@ that machinery in parallel.
   recovery point's plus the count and measures `warmup` from its timestamp
   exactly as the H.264 quest does, sharing the measurement and catalog
   mutation.
-- Fixture: synthetic NAL sequences beside the existing suffix-SEI tests, since
-  x265's intra refresh emits no recovery-point SEI. Verify by hand with an
-  externally encoded clip (ffmpeg `hevc_nvenc` with intra refresh).
+- Fixtures: synthetic NAL sequences beside the existing suffix-SEI tests,
+  since x265's intra refresh emits no recovery-point SEI, and a
+  redistributable externally encoded clip when available. An NVENC-generated
+  fixture may supply that input, but validation must be a repeatable
+  software-decode test in CI, not a manual check or a hardware-only gate.
 
 ## Required
 

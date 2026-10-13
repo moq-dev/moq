@@ -11,10 +11,7 @@ const BYTES: usize = 256 * 1024;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
 	let args: Vec<_> = std::env::args().collect();
-	ensure!(
-		args.len() == 4,
-		"usage: interop-tail publish|subscribe URL BROADCAST"
-	);
+	ensure!(args.len() == 4, "usage: interop-tail publish|subscribe URL BROADCAST");
 	let url: url::Url = args[2].parse()?;
 	let mut config = moq_tokio::connect::Config::default();
 	config.websocket.enabled = Some(false);
@@ -29,11 +26,7 @@ async fn main() -> anyhow::Result<()> {
 				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 			)?;
 			broadcast.announce(Default::default())?;
-			let _session = client
-				.with_publisher(&origin)
-				.connect(url)
-				.established()
-				.await?;
+			let _session = client.with_publisher(&origin).connect(url).established().await?;
 			track.demand().used().await?;
 			// Declare the end before the final group's payload is even available.
 			track.finish_at(moq_net::track::Position::group(GROUPS))?;
@@ -48,20 +41,13 @@ async fn main() -> anyhow::Result<()> {
 			tokio::io::BufReader::new(tokio::io::stdin())
 				.read_line(&mut ack)
 				.await?;
-			ensure!(
-				ack == "clean end\n",
-				"reader did not acknowledge a clean end"
-			);
+			ensure!(ack == "clean end\n", "reader did not acknowledge a clean end");
 			broadcast.close();
 			eprintln!("tail acknowledged");
 		}
 		"subscribe" => {
 			let consumer = origin.consume();
-			let _session = client
-				.with_subscriber(origin)
-				.connect(url)
-				.established()
-				.await?;
+			let _session = client.with_subscriber(origin).connect(url).established().await?;
 			let broadcast = consumer.routed_broadcast(&args[3]).await?;
 			let options = moq_net::track::Subscription::default()
 				.with_max_delay(Duration::from_secs(5))
@@ -77,17 +63,11 @@ async fn main() -> anyhow::Result<()> {
 					frame.payload.iter().all(|byte| *byte == sequence as u8),
 					"corrupt group {sequence}"
 				);
-				ensure!(
-					group.read_frame().await?.is_none(),
-					"extra frame in group {sequence}"
-				);
+				ensure!(group.read_frame().await?.is_none(), "extra frame in group {sequence}");
 				seen.push(sequence);
 			}
 			seen.sort_unstable();
-			ensure!(
-				seen == (0..GROUPS).collect::<Vec<_>>(),
-				"wrong groups: {seen:?}"
-			);
+			ensure!(seen == (0..GROUPS).collect::<Vec<_>>(), "wrong groups: {seen:?}");
 			ensure!(
 				track.finished().await? == moq_net::track::Position::group(GROUPS),
 				"wrong declared end"

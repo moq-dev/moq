@@ -1,30 +1,51 @@
 # drill: cancel_under_backpressure_releases_the_reader::loopback
 # expect: the cancelled subscriber's broadcast never closed
 #
-# Removes the release a subscribing session performs when it ends: each announce
-# stream's `Announced` collection owns the routes and source guards for every
-# broadcast the session fed, and dropping it retracts and closes them. Wrapping
-# it in `ManuallyDrop` keeps every handle downstream of it alive after the session
-# is gone, so a cancelled reader's broadcast parks forever instead of closing.
+# Removes the release a subscribing session performs when it ends. The origin
+# front a reader holds closes when its route is retracted or its source closes,
+# and the session owns both: each announce stream's `Announced` collection owns
+# the routes, and each minted source's `SourceServe` machine owns its guard.
+# Wrapping both in `ManuallyDrop` keeps every route and source alive after the
+# session is gone, so a cancelled reader's broadcast parks forever instead of
+# closing. Leaking only one is not a leak: the other still closes the front.
 diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
-index 8a0259fec..92febbcdf 100644
 --- a/rs/moq-net/src/lite/subscriber.rs
 +++ b/rs/moq-net/src/lite/subscriber.rs
-@@ -1142,7 +1142,8 @@ struct PrefixRun {
+@@ -1305,7 +1305,8 @@ struct PrefixRun {
  	/// it comes from the connect config or the peer's SETUP, neither of which
  	/// changes for the life of the session.
  	link_cost: u64,
 -	announced: Announced,
-+	// MUTATION: never dropped, so a session that ends keeps every route and source alive.
++	// MUTATION: never dropped, so a session that ends keeps every route alive.
 +	announced: std::mem::ManuallyDrop<Announced>,
  	// Lite06+: announce ids. Each received `active` implicitly assigns the next
  	// per-stream ordinal; `ended`/`restart` reference it instead of repeating the
  	// path, and lite-07 bases name it too. Tracked even for announces we drop
-@@ -1373,6 +1374,6 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
+@@ -1399,7 +1400,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
  					let run = PrefixRun {
  						responder_origin,
  						link_cost,
 -						announced: Announced::new(self.subscriber.announces.clone()),
 +						announced: std::mem::ManuallyDrop::new(Announced::new(self.subscriber.announces.clone())),
  						decoder: lite::AnnounceDecoder::default(),
- 						landing,
+ 						auth_epoch: 0,
+ 					};
+@@ -1505,7 +1506,8 @@ struct SourceServe<S: crate::transport::poll::Session> {
+ 	subscriber: Subscriber<S>,
+ 	path: PathOwned,
+ 	epoch: Option<crate::Epoch>,
+-	source: crate::model::broadcast::SourceGuard,
++	// MUTATION: never dropped, so a session that ends keeps every source it minted alive.
++	source: std::mem::ManuallyDrop<crate::model::broadcast::SourceGuard>,
+ 	dynamic: crate::broadcast::Dynamic,
+ 	route: kio::Consumer<()>,
+ 	// A dedicated close-watch handle, since each pending operation needs its own.
+@@ -1523,7 +1525,7 @@ impl<S: crate::transport::poll::Session> SourceServe<S> {
+ 			validity: minted.validity,
+ 			path: minted.path,
+ 			epoch: minted.epoch,
+-			source: minted.source,
++			source: std::mem::ManuallyDrop::new(minted.source),
+ 			dynamic: minted.dynamic,
+ 			route: minted.route,
+ 			closed,

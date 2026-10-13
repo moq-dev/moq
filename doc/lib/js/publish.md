@@ -66,8 +66,11 @@ timeline. The catalog's `clock` maps it to wall time. Stamp your own tracks
 ## Custom tracks
 
 `broadcast.net` is the underlying `Moq.Broadcast.Producer`, so an application
-can serve its own tracks alongside the media. It is recreated on each
-reconnect, so acquire it from an effect and reseed the track each time:
+can serve its own tracks alongside the media. It is recreated when the origin, name,
+`enabled`, or `maxAge` changes, or when a failed rendition track must be
+replaced, so acquire it from an effect and create each
+track once per `net`. A track name always means the same content, so a track
+re-created on the same `net` throws on an append that would reuse its sequences:
 
 ```ts
 import * as Json from "@moq/json";

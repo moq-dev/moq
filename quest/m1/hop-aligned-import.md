@@ -12,6 +12,13 @@ failover `export ts` sees a timestamp rewind and exits (#4354).
 
 ## Plan
 
+The 2026-10-11 audit adds a planning prerequisite for the shared source
+coordinate. The group-number and wall-anchor proposals below are provisional
+until it settles how the input supplies a common anchor and wrap era. A
+shared epoch or raw PTS/PCR value alone does not supply that mapping. Also
+resolve raw passthrough explicitly: today's `--epoch` accepts whole MPTS
+there, whereas the semantic importer scope below says one program.
+
 Decided: every publisher of one path and epoch MUST publish the same
 broadcasts and tracks, since routes with the same epoch resume each other's
 subscriptions. A redundant pair is keyed by a shared explicit epoch (decided
@@ -60,6 +67,10 @@ issues' 1+1 setup (one relay, two `import ts` sharing one `--epoch`, two
 
 - [#4352](https://github.com/moq-dev/moq/issues/4352) - close this issue when the quest finishes
 - [#4354](https://github.com/moq-dev/moq/issues/4354) - close this issue when the quest finishes
+
+## Required
+
+- [Plan: redundant TS alignment](/quest/m1/plan-ts-alignment.md) - settle the source-to-wall anchor, wrap era and raw group coordinate that a shared epoch alone does not provide
 
 ## Related
 

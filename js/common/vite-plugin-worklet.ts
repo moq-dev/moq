@@ -1,5 +1,5 @@
 import { basename } from "node:path";
-import { build } from "esbuild";
+import { rolldown } from "rolldown";
 import type { Plugin } from "vite";
 
 const SUFFIX = "?worklet";
@@ -18,18 +18,20 @@ const BLOB = "?worklet-blob";
 export function worklet(alias?: Record<string, string>): Plugin {
 	let production = false;
 
+	// Rolldown is Vite's own bundler and runs in-process, so nothing outlives the build.
 	const compile = async (path: string) => {
-		const result = await build({
-			entryPoints: [path],
-			bundle: true,
-			write: false,
-			format: "esm",
-			target: "esnext",
-			// A consumer can't minify code inlined as a string, so builds do it here; dev stays readable.
-			minify: production,
-			alias: alias,
-		});
-		return result.outputFiles[0].text;
+		const bundle = await rolldown({ input: path, platform: "browser", resolve: { alias } });
+		try {
+			const { output } = await bundle.generate({
+				format: "es",
+				codeSplitting: false,
+				// A consumer can't minify code inlined as a string, so builds do it here; dev stays readable.
+				minify: production,
+			});
+			return output[0].code;
+		} finally {
+			await bundle.close();
+		}
 	};
 
 	return {
