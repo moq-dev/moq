@@ -24,8 +24,6 @@ case $MODE in
         BASE=
         LOCK_WORKLOAD=${MOQ_BENCH_LOCK_WORKLOAD:-fanout}
         LOCK_WORKERS=${MOQ_BENCH_LOCK_WORKERS:-1 4 16}
-        # For frame-pointer profilers; the lock capture itself unwinds by DWARF (see profile.py).
-        export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C force-frame-pointers=yes"
         ;;
     --runtime)
         BASE=
@@ -500,7 +498,7 @@ run_lock_profile() {
     python3 "$ROOT/bench/profile.py" check
     generate_certificate
 
-    printf 'Building the relay with the profiling profile and frame pointers...\n'
+    printf 'Building the relay with the profiling profile...\n'
     CARGO_TARGET_DIR=$TARGET/profile cargo build --locked --profile profiling -p moq-relay -p moq-bench
     LOAD_BIN=$TARGET/profile/profiling/moq-bench
     HOST_BIN=$TARGET/profile/profiling/moq-bench-host

@@ -31,10 +31,11 @@ Shared by every mode:
 - Reuse `bench/run.sh`'s lifecycle (builds, relay PID, workload, host
   samples) rather than adding a second launcher. Select workload, duration,
   and mode through one configuration.
-- Build the relay with `[profile.profiling]` and
-  `RUSTFLAGS="-C force-frame-pointers=yes"`: the release build `bench/run.sh`
-  uses has neither debug info nor frame pointers, so stacks would stop at the
-  libc frame.
+- Build the relay with `[profile.profiling]`: the release build
+  `bench/run.sh` uses has no debug info to symbolize or unwind with. Add
+  `RUSTFLAGS="-C force-frame-pointers=yes"` only for a mode that unwinds by
+  frame pointers; lock wait unwinds by DWARF, so it builds without them
+  (decided 2026-10-12).
 - Capture the relay process and all its workers, never the load generator.
   Start after readiness and mark a steady window. Keep an uninstrumented
   control run to quantify profiler overhead.
@@ -53,18 +54,21 @@ three crates plus five Prometheus families):
 
 - Measure from outside the process, aggregated by thread name and user
   stack. No instrumentation in `kio`, no new public API, no metrics.
-- perf records each worker switch-out on `sched:sched_switch` with its
-  stack, and `--switch-events` adds the switch-in, so each off-CPU interval
-  has an exact duration; `/proc` schedstat supplies CPU (decided by the
-  maintainer 2026-10-12, replacing bpftrace and an eu-stack sampler; its
-  ptrace stops likely inflated waits, reading 0.15 wait/CPU on fanout-heavy
-  at 4 workers where exact intervals read 0.0013). It needs
-  `kernel.perf_event_paranoid=-1`, `kernel.kptr_restrict=0` and a readable
-  `/sys/kernel/tracing`, and refuses with the commands until they hold; the
-  nightly sets them with sudo. User stacks unwind by DWARF, because glibc's
-  frameless `syscall` wrapper hides `Mutex::lock_contended` from
-  frame-pointer unwinding. `perf script --inline` expands inlined frames such
-  as `Consumer::poll`.
+- perf samples each worker switch-out with its stack, and `--switch-events`
+  adds the switch-in, so each off-CPU interval has an exact duration;
+  `/proc` schedstat supplies CPU (decided by the maintainer 2026-10-12,
+  replacing bpftrace and an eu-stack sampler; its ptrace stops likely
+  inflated waits, reading 0.15 wait/CPU on fanout-heavy at 4 workers where
+  exact intervals read 0.0013). It samples the `context-switches` software
+  event with a period of 1, not the `sched:sched_switch` tracepoint, since
+  it records the same switch-outs without tracefs access (decided
+  2026-10-12). It needs `kernel.perf_event_paranoid` at 1 or lower for
+  kernel-context samples, and refuses with the command until then; the
+  nightly sets it with sudo. Kernel frames are discarded, so `kptr_restrict`
+  does not matter. User stacks unwind by DWARF, because glibc's frameless
+  `syscall` wrapper hides `Mutex::lock_contended` from frame-pointer
+  unwinding. `perf script --inline` expands inlined frames such as
+  `Consumer::poll`.
 - Count only stacks under the std mutex's contended path (`kio::Lock` is a
   `std::sync::Mutex`): futex waits also include allocator, condvar, and tokio
   waits, and a contended acquire that resolves while spinning never reaches

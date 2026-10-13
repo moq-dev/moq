@@ -56,12 +56,12 @@ nix develop --command just bench-lock
 nix develop --command just bench-lock fanout-heavy "4 16"
 ```
 
-This builds the relay with `[profile.profiling]` and frame pointers, then runs
-the workload on Tokio workers at each count twice: an unprofiled control, then
-a profiled run, so the throughput and CPU difference shows the profiler's
-overhead. During the profiled run's steady window, `perf record` captures every
-worker switch-out on the `sched:sched_switch` tracepoint with a DWARF-unwound
-stack, plus each switch-in, so every off-CPU interval has an exact duration.
+This builds the relay with `[profile.profiling]`, then runs the workload on
+Tokio workers at each count twice: an unprofiled control, then a profiled run,
+so the throughput and CPU difference shows the profiler's overhead. During the
+profiled run's steady window, `perf record` samples every worker switch-out
+(the `context-switches` event with a period of 1) with a DWARF-unwound stack,
+plus each switch-in, so every off-CPU interval has an exact duration.
 glibc's `syscall` wrapper keeps no frame pointer, so frame-pointer unwinding
 would drop `Mutex::lock_contended`, which is why the stacks are unwound by
 DWARF. An interval counts as a mutex wait only when the worker is blocked in
@@ -71,12 +71,12 @@ allocator and parking waits are counted separately, and spinning is excluded.
 `lock/mutex.folded` holds the blocking stacks, weighted by microseconds
 waited, in flamegraph folded format.
 
-Linux only. The kernel must expose the tracepoint and kernel stacks, and the
-recipe refuses before building until it does:
+Linux only. A switch-out is sampled in kernel context, which perf allows only
+at `perf_event_paranoid` 1 or lower, so the recipe refuses before building
+until then:
 
 ```bash
-sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
-sudo mount -o remount,mode=755 /sys/kernel/tracing
+sudo sysctl -w kernel.perf_event_paranoid=1
 ```
 
 ## Workloads

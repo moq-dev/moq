@@ -91,12 +91,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just bench-audio
 
-      # perf needs the sched_switch tracepoint and kernel stacks; bench-lock refuses without them.
-      - name: Allow perf tracing
+      # perf samples worker switch-outs in kernel context; bench-lock refuses without it.
+      - name: Allow perf kernel sampling
         if: ${{ !cancelled() }}
-        run: |
-          sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
-          sudo mount -o remount,mode=755 /sys/kernel/tracing
+        run: sudo sysctl -w kernel.perf_event_paranoid=1
 
       # Smoke-tests the capture path: exact off-CPU waits, resolved worker stacks and CPU.
       - name: Relay lock-wait profile

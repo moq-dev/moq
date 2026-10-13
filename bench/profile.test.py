@@ -14,7 +14,7 @@ IDLE, MUTEX, ALLOCATOR = '2152705', '2152709', '2152707'
 class Parse(unittest.TestCase):
     def test_recorded_switches_pair_into_exact_waits(self):
         records = profile.parse(FIXTURE)
-        self.assertEqual([event for _, _, event, _ in records], ['sched:sched_switch', 'PERF_RECORD_SWITCH IN'] * 3)
+        self.assertEqual([event for _, _, event, _ in records], ['context-switches', 'PERF_RECORD_SWITCH IN'] * 3)
         # Kernel frames are dropped; inlined user frames are kept innermost first.
         self.assertFalse(any('__schedule' in frame for _, _, _, frames in records for frame in frames))
         stacks = {tid: (wait, stack) for tid, wait, stack in profile.waits(records)}
@@ -26,7 +26,7 @@ class Parse(unittest.TestCase):
                                                 '<std::sys::sync::mutex::futex::Mutex>::lock_contended'])
 
     def test_open_wait_runs_to_the_last_event(self):
-        records = [('1', 10, 'sched:sched_switch', ['a']), ('2', 50, 'PERF_RECORD_SWITCH IN', [])]
+        records = [('1', 10, 'context-switches', ['a']), ('2', 50, 'PERF_RECORD_SWITCH IN', [])]
         self.assertEqual(profile.waits(records), [('1', 40, ['a'])])
 
 
@@ -71,19 +71,18 @@ class Reduce(unittest.TestCase):
 
 
 class Require(unittest.TestCase):
-    def check(self, paranoid, kptr, tracing):
-        values = {'perf_event_paranoid': paranoid, 'kptr_restrict': kptr}
-        with patch.object(profile.Path, 'read_text', lambda path: values[path.name] + '\n'), \
-                patch.object(profile.os, 'access', return_value=tracing):
+    def check(self, paranoid):
+        with patch.object(profile.Path, 'read_text', return_value=paranoid + '\n'):
             profile.require()
 
-    def test_missing_setup_names_the_commands(self):
-        for case in [('2', '0', True), ('-1', '1', True), ('-1', '0', False)]:
+    def test_kernel_sampling_refusal_names_the_command(self):
+        # Ubuntu's default is 4; 2 already forbids kernel samples.
+        for paranoid in ['4', '2']:
             with self.assertRaises(ValueError) as refused:
-                self.check(*case)
-            self.assertIn('sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0', str(refused.exception))
-            self.assertIn('sudo mount -o remount,mode=755 /sys/kernel/tracing', str(refused.exception))
-        self.check('-1', '0', True)
+                self.check(paranoid)
+            self.assertIn('sudo sysctl -w kernel.perf_event_paranoid=1', str(refused.exception))
+        for paranoid in ['1', '0', '-1']:
+            self.check(paranoid)
 
 
 if __name__ == '__main__':

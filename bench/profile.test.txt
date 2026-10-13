@@ -1,8 +1,6 @@
 # `perf script --show-switch-events --inline --ns -F tid,time,event,ip,sym,dso` cut to three
 # switch-outs of a fanout-heavy relay: epoll idle, a std mutex wait and a malloc arena wait.
-# Recorded with the context-switches software event, since tracefs was not readable on the
-# recording host, and relabeled sched:sched_switch; the stacks are what perf printed.
-2152705 271706.866241331: sched:sched_switch:
+2152705 271706.866241331: context-switches:
 	    7ffff7ca84f2 __syscall_cancel_arch_end (/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6)
 	    7ffff7d2c07a epoll_wait (/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6)
 	    5555569d8ae4 select (inlined)
@@ -45,7 +43,7 @@
 	ffffffff91d30d97 schedule ([kernel.kallsyms])
 
 2152705 271706.866262992: PERF_RECORD_SWITCH IN         
-2152709 271706.880076160: sched:sched_switch: 
+2152709 271706.880076160: context-switches: 
 	    7ffff7d2966d syscall (/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6)
 	    55555698c3f5 std::sys::pal::unix::futex::futex_wait (inlined)
 	    55555698c3f5 <std::sys::sync::mutex::futex::Mutex>::lock_contended (/moq/moq-relay)
@@ -65,7 +63,7 @@
 	ffffffff91d30d97 schedule ([kernel.kallsyms])
 
 2152709 271706.880082475: PERF_RECORD_SWITCH IN         
-2152707 271706.914931010: sched:sched_switch: 
+2152707 271706.914931010: context-switches: 
 	    7ffff7c9c218 __lll_lock_wait_private (/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6)
 	    7ffff7cae500 _int_free_chunk (/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6)
 	    5555558b0e87 <std::alloc::System as core::alloc::global::GlobalAlloc>::dealloc (inlined)

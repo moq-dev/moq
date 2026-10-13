@@ -9,7 +9,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
-EVENT = 'sched:sched_switch'
+EVENT = 'context-switches'
 WORKER = re.compile(r"moq-(?:uring|quic)-[0-9]+")
 # The blocking call itself: std's futex wrapper or glibc's (allocator, pthread).
 BLOCKED = re.compile(r"futex_wait|futex_abstimed_wait|lll_lock_wait")
@@ -18,18 +18,15 @@ BLOCKED = re.compile(r"futex_wait|futex_abstimed_wait|lll_lock_wait")
 MUTEX = re.compile(r"(?:\bMutex>?::|^)lock_contended$")
 HEADER = re.compile(r"\s*(\d+)\s+(\d+)\.(\d+):\s+(.*)")
 FRAME = re.compile(r"\s+[0-9a-f]+\s+(.*?)\s+\((.*)\)$")
-# Without these, perf refuses the tracepoint or records unresolvable stacks.
-SETUP = """sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
-sudo mount -o remount,mode=755 /sys/kernel/tracing"""
+# A switch-out is sampled in kernel context, which perf allows only at paranoid <= 1.
+SETUP = 'sudo sysctl -w kernel.perf_event_paranoid=1'
 
 
 def require():
-    """Refuse to record unless the kernel exposes the tracepoint and stacks to this user."""
-    settings = {name: Path('/proc/sys/kernel', name).read_text().strip() for name in ('perf_event_paranoid', 'kptr_restrict')}
-    tracing = os.access(f'/sys/kernel/tracing/events/{EVENT.replace(":", "/")}/format', os.R_OK)
-    if settings != {'perf_event_paranoid': '-1', 'kptr_restrict': '0'} or not tracing:
-        state = ', '.join(f'{name}={value}' for name, value in settings.items())
-        raise ValueError(f'perf needs {EVENT} and kernel stacks ({state}, tracefs readable={tracing}); run:\n{SETUP}')
+    """Refuse to record unless perf may sample this user's processes in kernel context."""
+    paranoid = int(Path('/proc/sys/kernel/perf_event_paranoid').read_text())
+    if paranoid > 1:
+        raise ValueError(f'perf needs kernel samples of the relay (perf_event_paranoid={paranoid}); run:\n{SETUP}')
 
 
 def parse(text):
@@ -111,10 +108,11 @@ def record(pid, delay, duration, directory):
     time.sleep(delay)
     data = directory / 'perf.data'
     before, start = schedstat(pid, names), time.monotonic_ns()
-    # The tracepoint fires in the outgoing thread, so -p never sees a worker's switch-in;
-    # --switch-events records it. glibc's syscall wrapper keeps no frame pointer, so
-    # frame-pointer unwinding drops its caller, lock_contended; DWARF unwinding keeps it.
-    subprocess.run(['perf', 'record', '--quiet', '--no-buildid-cache', '-e', EVENT, '--call-graph', 'dwarf', '--switch-events',
+    # A period of 1 samples every switch-out. The sample fires in the outgoing thread, so -p
+    # never sees a worker's switch-in; --switch-events records it. glibc's syscall wrapper
+    # keeps no frame pointer, so frame-pointer unwinding drops its caller, lock_contended;
+    # DWARF unwinding keeps it.
+    subprocess.run(['perf', 'record', '--quiet', '--no-buildid-cache', '-e', EVENT, '-c', '1', '--call-graph', 'dwarf', '--switch-events',
                     '-p', str(pid), '-o', str(data), '--', 'sleep', str(duration)], check=True)
     after, window = schedstat(pid, names), time.monotonic_ns() - start
     # Symbols come from the local binaries; never wait on a debuginfod server.
@@ -129,7 +127,7 @@ def record(pid, delay, duration, directory):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
-    commands.add_parser('check', help='refuse unless perf can record the tracepoint with kernel stacks')
+    commands.add_parser('check', help='refuse unless perf can sample the relay in kernel context')
     capture = commands.add_parser('record', help='record worker off-CPU stacks of PID into DIRECTORY')
     capture.add_argument('pid', type=int)
     capture.add_argument('directory', type=Path)
