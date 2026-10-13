@@ -327,8 +327,12 @@ mod tests {
 			let (surface, timestamp) = delivery.next(now).unwrap().unwrap();
 			let frame = crate::Frame::new(crate::Surface::I420(surface.clone()), timestamp);
 			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
-			let received = subscriber.read().await.unwrap().unwrap();
-			assert_eq!(received.frame.timestamp.as_micros(), u128::from(step) * 20_000);
+			let received = loop {
+				if let moq_mux::container::Read::Frame { frame, .. } = subscriber.read().await.unwrap().unwrap() {
+					break frame;
+				}
+			};
+			assert_eq!(received.timestamp.as_micros(), u128::from(step) * 20_000);
 		}
 	}
 

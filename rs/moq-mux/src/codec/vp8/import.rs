@@ -206,13 +206,13 @@ mod tests {
 			subscriber,
 			crate::catalog::hang::Container::Loc(crate::container::Kind::Data),
 		);
-		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read())
+		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read_frame())
 			.await
 			.unwrap()
 			.unwrap()
 			.unwrap();
-		assert_eq!(frame.frame.payload, keyframe);
-		assert_eq!(frame.frame.timestamp, Timestamp::from_micros(0).unwrap());
+		assert_eq!(frame.payload, keyframe);
+		assert_eq!(frame.timestamp, Timestamp::from_micros(0).unwrap());
 
 		import.finish().unwrap();
 	}

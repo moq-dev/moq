@@ -119,7 +119,7 @@ export class Decoder {
 	// The rendition is absent and the ring has drained its tail, so the graph has nothing to play.
 	readonly #idle: Computed<boolean>;
 
-	// Ordered discontinuity and endpoint state from the container consumer.
+	// Ordered epoch and endpoint state from the container consumer.
 	#terminal = new Terminal();
 
 	// The container consumer's arrival estimate, unset while nothing is subscribed.
@@ -471,16 +471,12 @@ export class Decoder {
 			for (;;) {
 				const next = await nextMedia(consumer);
 				if (!next) break;
-				if (this.#onNext(next)) {
+				if (this.#onRead(next)) {
 					decoder.reset();
 					decoder.configure(decoderConfig);
 				}
-				if (next.end !== undefined) {
-					continue;
-				}
-
+				if (next.kind !== "frame") continue;
 				const { frame } = next;
-				if (!frame) continue;
 
 				// Mark that we received this frame right now.
 				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
@@ -581,13 +577,12 @@ export class Decoder {
 				if (!next) break;
 
 				// Reset and re-anchor before decoding the first frame of a new codec epoch.
-				if (this.#onNext(next)) {
+				if (this.#onRead(next)) {
 					decoder.reset();
 					decoder.configure(decoderConfig);
 				}
-
+				if (next.kind !== "frame") continue;
 				const { frame } = next;
-				if (!frame) continue;
 
 				const timestamp = Time.Milli.fromMicro(frame.timestamp);
 				this.sync.received(timestamp, "audio");
@@ -732,15 +727,10 @@ export class Decoder {
 		this.#ring.peek()?.reset();
 	}
 
-	// Apply ordered container metadata before handling the result. An endpoint that also
-	// starts a new epoch must survive the reset so its following drain is trimmed.
-	#onNext(next: {
-		discontinuity: number;
-		group: number;
-		end?: Time.Micro;
-		frame?: { timestamp: Time.Micro };
-	}): boolean {
-		if (!this.#terminal.update(next)) return false;
+	// Apply an ordered container read before handling it, reporting whether a codec epoch ended:
+	// a gap, or a later group after a declared end.
+	#onRead(read: Container.Read): boolean {
+		if (!this.#terminal.update(read)) return false;
 		this.#ring.peek()?.reset();
 		this.sync.reset();
 		return true;

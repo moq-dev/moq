@@ -1050,13 +1050,13 @@ mod tests {
 			.decode(&payload, Some(Timestamp::from_micros(1_000).unwrap()))
 			.unwrap();
 
-		let frame = tokio::time::timeout(Duration::from_secs(1), media.read())
+		let frame = tokio::time::timeout(Duration::from_secs(1), media.read_frame())
 			.await
 			.unwrap()
 			.unwrap()
 			.unwrap();
-		assert_eq!(frame.frame.payload, payload);
-		assert_eq!(frame.frame.timestamp, Timestamp::from_micros(1_000).unwrap());
+		assert_eq!(frame.payload, payload);
+		assert_eq!(frame.timestamp, Timestamp::from_micros(1_000).unwrap());
 
 		import.finish().unwrap();
 	}
@@ -1378,14 +1378,14 @@ mod tests {
 			.decode(&au, Some(Timestamp::from_micros(1_000).unwrap()))
 			.unwrap();
 
-		let frame = tokio::time::timeout(Duration::from_secs(1), media.read())
+		let frame = tokio::time::timeout(Duration::from_secs(1), media.read_frame())
 			.await
 			.unwrap()
 			.unwrap()
 			.unwrap();
-		assert!(frame.frame.keyframe, "an IDR access unit must open a group");
-		assert_eq!(frame.frame.payload, au, "the payload must pass through verbatim");
-		assert_eq!(frame.frame.timestamp, Timestamp::from_micros(1_000).unwrap());
+		assert!(frame.keyframe, "an IDR access unit must open a group");
+		assert_eq!(frame.payload, au, "the payload must pass through verbatim");
+		assert_eq!(frame.timestamp, Timestamp::from_micros(1_000).unwrap());
 
 		import.finish().unwrap();
 	}

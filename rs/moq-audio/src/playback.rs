@@ -18,7 +18,7 @@
 //! let mut sink = engine.sink(input)?;
 //!
 //! while let Some(frame) = audio.read().await? {
-//!     let write = sink.write(&frame.frame.data)?;
+//!     let write = sink.write(&frame.data)?;
 //!     if write.dropped_sample_frames > 0 {
 //!         eprintln!("dropped {} live audio frames", write.dropped_sample_frames);
 //!     }

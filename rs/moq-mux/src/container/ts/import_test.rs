@@ -96,13 +96,13 @@ async fn public_container_preserves_loc_for_ts() {
 		track,
 		crate::catalog::hang::Container::Loc(crate::container::Kind::Data),
 	);
-	let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read())
+	let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read_frame())
 		.await
 		.unwrap()
 		.unwrap()
 		.unwrap();
-	assert!(frame.frame.keyframe);
-	assert!(!frame.frame.payload.is_empty());
+	assert!(frame.keyframe);
+	assert!(!frame.payload.is_empty());
 }
 
 /// The Kyrion capture is H.264 1080i with B-frames (open-GOP, ~5-frame reorder despite only
@@ -262,9 +262,9 @@ async fn import_opus_frames() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 	let mut frames = Vec::new();
-	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
+	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read_frame()).await {
 		let Some(frame) = res.unwrap() else { break };
-		frames.push(frame.frame.payload);
+		frames.push(frame.payload);
 	}
 
 	assert!(frames.len() > 5, "expected a run of Opus packets, got {}", frames.len());
@@ -541,14 +541,13 @@ async fn survives_midstream_join() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 	let mut frames = Vec::new();
-	while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
+	while let Ok(Ok(Some(frame))) =
+		tokio::time::timeout(std::time::Duration::from_millis(50), reader.read_frame()).await
+	{
 		frames.push(frame);
 	}
 	assert_eq!(frames.len(), 1, "expected only the post-join IDR, got {}", frames.len());
-	assert!(
-		frames[0].frame.keyframe,
-		"the first surviving frame must be the keyframe"
-	);
+	assert!(frames[0].keyframe, "the first surviving frame must be the keyframe");
 }
 
 /// A real Ateme Kyrion broadcast captured mid-stream with `nc`, so it opens dirty:
@@ -598,8 +597,10 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 	let mut cues = Vec::new();
-	while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
-		cues.push((frame.frame.payload.to_vec(), frame.frame.timestamp));
+	while let Ok(Ok(Some(frame))) =
+		tokio::time::timeout(std::time::Duration::from_millis(50), reader.read_frame()).await
+	{
+		cues.push((frame.payload.to_vec(), frame.timestamp));
 	}
 	assert_eq!(cues.len(), 6, "expected the six real splice_inserts");
 	assert!(

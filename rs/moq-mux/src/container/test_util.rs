@@ -152,12 +152,12 @@ pub(crate) async fn published<E>(
 		let track = consumer.track(&name).unwrap().subscribe(replay).await.unwrap();
 		let mut reader = crate::container::Consumer::new(track, container);
 		let mut timestamps = Vec::new();
-		while let Some(frame) = tokio::time::timeout(std::time::Duration::from_secs(5), reader.read())
+		while let Some(frame) = tokio::time::timeout(std::time::Duration::from_secs(5), reader.read_frame())
 			.await
 			.expect("the importer finished its tracks")
 			.unwrap()
 		{
-			timestamps.push(frame.frame.timestamp.as_micros());
+			timestamps.push(frame.timestamp.as_micros());
 		}
 		out.insert(name, timestamps);
 	}

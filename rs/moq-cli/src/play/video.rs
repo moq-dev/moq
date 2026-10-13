@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use moq_mux::container::Frame;
+use moq_mux::container::{Frame, Read};
 use tokio::time::Instant;
 
 use super::buffer::Buffer;
@@ -73,31 +73,34 @@ impl<O: Output> Video<O> {
 	pub async fn run(self, mut track: Track, mut decoder: impl Decoder) -> anyhow::Result<()> {
 		let buffer = Mutex::new(Buffer::default());
 		let receive = async {
-			let mut discontinuity = track.discontinuity();
 			loop {
-				let frame = track.read().await?;
+				let read = track.read().await?;
 				let mut buffer = buffer.lock().unwrap();
 				let before = buffer.generation;
-				if track.discontinuity() != discontinuity {
-					discontinuity = track.discontinuity();
-					buffer.clear();
-					self.presentation.lock().unwrap().video_restarted();
-				}
-				let ended = frame.is_none();
-				if let Some(delivery) = frame {
-					let frame = delivery.frame;
-					if self
-						.presentation
-						.lock()
-						.unwrap()
-						.video(frame.timestamp, Instant::now().into_std())
-					{
-						self.output.send(Event::Wake);
+				let ended = match read {
+					Some(Read::Frame { frame, .. }) => {
+						if self
+							.presentation
+							.lock()
+							.unwrap()
+							.video(frame.timestamp, Instant::now().into_std())
+						{
+							self.output.send(Event::Wake);
+						}
+						buffer.push(frame, self.max_delay);
+						false
 					}
-					buffer.push(frame, self.max_delay);
-				} else {
-					buffer.ended = true;
-				}
+					// Applied in delivery order, so the restart lands before the frame after it.
+					Some(Read::Gap | Read::End { .. }) => {
+						buffer.clear();
+						self.presentation.lock().unwrap().video_restarted();
+						false
+					}
+					None => {
+						buffer.ended = true;
+						true
+					}
+				};
 				if buffer.generation != before {
 					self.frames.lock().unwrap().clear();
 					self.output.send(Event::Wake);

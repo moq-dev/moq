@@ -376,16 +376,17 @@ mod test {
 			let (name, config) = renditions[0];
 			let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
 			let container = Container::try_from(config).unwrap();
-			let frame = Consumer::new(track, container).read().await.unwrap().expect("a frame");
-			assert!(
-				fills.contains(&frame.frame.payload[4]),
-				"{path} carries only its own program"
-			);
+			let frame = Consumer::new(track, container)
+				.read_frame()
+				.await
+				.unwrap()
+				.expect("a frame");
+			assert!(fills.contains(&frame.payload[4]), "{path} carries only its own program");
 			let skew = Duration::from_secs(2);
 			let wall = catalog
 				.clock
 				.expect("the catalog advertises a clock")
-				.wall_clock(frame.frame.timestamp)
+				.wall_clock(frame.timestamp)
 				.unwrap();
 			assert!(
 				before - skew <= wall && wall <= after + skew,
