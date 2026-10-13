@@ -33,7 +33,8 @@ has to plan for a lite-07 without hop lists. Only
 not the later federation/P2P integrations. Decided 2026-10-13: routes now
 owns the tier/partition correctness tests, so they run before the cut. Peer
 grants and metadata-only subscriptions do not gate it: neither is clustering
-stability, and both are additive wire for the next lite version.
+stability. Both are additive and, per the freeze policy, target whichever lite
+wip is current when they land.
 
 Decided 2026-10-08: Restart and AUTH join Required, since both change the
 lite-07 wire. SUBSCRIBE_OK carrying live media time was dropped: no reader

@@ -3,7 +3,7 @@
 ## Goal
 
 Rust and JS can subscribe to group/frame progression without receiving media
-payload, through the shared subscription model and the next lite version after lite-07. Relay
+payload, through the shared subscription model and whichever lite wip is current when it lands. Relay
 chains forward and aggregate that demand without secretly pulling full media.
 
 ## Plan
@@ -46,7 +46,7 @@ Run `just check`, `just drafts check`, and `just test interop --all`; add the
 new mode to cross-language interop and existing CI.
 
 Public API: `Subscription.meta` and any corresponding binding surface.
-Wire: a metadata delivery mode in the next lite version; exact encoding is settled by Health design.
+Wire: a metadata delivery mode in the current lite wip; exact encoding is settled by Health design.
 
 ## Required
 

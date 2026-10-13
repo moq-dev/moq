@@ -32,7 +32,8 @@ copies that JWK into `cnf`. Then, after AUTH_OK:
 
 AUTH_KEYS and AUTH_PEER may repeat for refresh and key rotation. The lite
 draft and both language codecs gain AUTH_CNF, AUTH_KEYS, AUTH_PEER, and
-AUTH_POP; `just drafts check` passes. Reissue before expiry; the client
+AUTH_POP in whichever lite wip is current when this lands; it does not gate
+the lite-07 cut (decided 2026-10-13); `just drafts check` passes. Reissue before expiry; the client
 replaces the grant on each live peer session with `auth().add` and drops
 the old one. A node-id or key change mints a new grant; the old node id is
 dead.

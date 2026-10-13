@@ -29,8 +29,8 @@ Decided with the maintainer, 2026-10-13:
   must not recursively
   create their own backups at every relay or multiply into a network-wide
   monitoring tree. Monitor at endpoints and relays from the first implementation.
-- A new mode in the next lite version after lite-07, which it does not
-  gate. The preferred API is `Subscription.meta: true`: a live stream of
+- A new mode in whichever lite wip is current when it lands; it does not
+  gate lite-07. The preferred API is `Subscription.meta: true`: a live stream of
   group/frame headers with payload omitted, so a standby notices a live
   failure such as a dead old connection whose keep-alives stopped. `largest()`
   alone cannot: on a payload-less standby it is only the SUBSCRIBE_OK
@@ -70,7 +70,7 @@ Add a route-health section to the routing concept page.
 ## Required
 
 - [Health design](/quest/m2/route-health/design.md) - prove useful progress, aggregation, switching evidence, and bounded recovery
-- [Metadata subscriptions](/quest/m2/route-health/meta.md) - the next lite version and the shared model observe frames without payload in Rust and JS
+- [Metadata subscriptions](/quest/m2/route-health/meta.md) - the current lite wip and the shared model observe frames without payload in Rust and JS
 - [Track route selection](/quest/m2/route-health/selection.md) - share broadcast identity/candidates while tracks choose sources independently
 - [Automatic recovery](/quest/m2/route-health/recovery.md) - epoch-only promotion and evidence-based failback in endpoints and relays
 
