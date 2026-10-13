@@ -55,12 +55,21 @@ Audio playout: the jitter target is default in both languages (#4162); the
 2026-10-08 audit, since only a manual browser proof and a native trace replay
 remain and no release waits on them.
 
+Nightly on main (triaged 2026-10-13): two build breaks from 2026-10-11 get
+quests here. The nixpkgs bump broke the Linux zigbuild release builds, and
+fat LTO in the release profile broke the fuzz build. The other red jobs
+have fixes on `main` or in open PRs: macOS tests (#5335),
+drill-sensitivity (#5338), loom (#5389) and Windows tests (#5339). Interop
+is planned separately.
+
 ## Required
 
 - [Self-hosted CI](/quest/m0/self-hosted-ci.md) - same-repo Check and Test run on a self-hosted NixOS runner with a main-written local cache, behind a `CI_RUNNER` kill switch
 - [CI host](/quest/m0/ci-host.md) - the maintainer brings up the spare desktop as the `moq-ci` and `moq-gpu` runner host
 - [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.5, before Seattle, then draft-20+ FETCH
 - [TS duration fidelity](/quest/m0/ts-duration-fidelity.md) - Interop's TS compliance captures the whole round-tripped stream again, fixing a regression that turns Interop red on main
+- [Release builds link](/quest/m0/release-link.md) - the Linux zigbuild release binaries and moq-gst packages link again after the 2026-10-11 nixpkgs bump, so the next release cut can publish
+- [Fuzz builds under LTO](/quest/m0/fuzz-lto.md) - the nightly fuzz targets build again despite the release profile's fat LTO
 - [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on moq-dev/web-transport#412 and #413 to merge and ship, which qmux credit bumps to
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
