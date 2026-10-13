@@ -30,4 +30,7 @@ carving alone should cut it by about one delay, not to 0.5 s.
   it (the existing `a_joiner_runs_at_the_delay_from_its_first_output`, tightened
   from two delays to one). `hrd9m` passes strict `tstd` at the 1 s default,
   and a delay below its buffer delay fails loud.
-- Ask t0ms to re-grade the CNN capture: latency should drop by about a delay.
+- Prove the latency change with generated or redistributable fixtures and
+  automated assertions in CI. A third-party capture re-grade can supplement
+  that evidence, but is not a completion dependency or a substitute for the
+  automated test.
