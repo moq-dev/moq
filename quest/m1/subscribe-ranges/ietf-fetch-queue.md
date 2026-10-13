@@ -24,9 +24,11 @@ The work:
   the way JS already ranks it (`js/net/src/ietf/publisher.ts`, `#runFill`).
   A joining FETCH, used before draft-20, ranks the same way within the
   subscription it joins.
-- A standalone FETCH gets its own queue entry: its subscriber priority, its
-  own request id, and its group, ordered by the FETCH's GROUP_ORDER. It
-  follows priority changes the way a group stream's `Rank` does.
+- A standalone FETCH gets its own queue entry, keyed by its own request id.
+  `Priority::cmp` compares that id before order or group, so the FETCH ranks
+  against group streams by subscriber priority alone, with the id breaking
+  ties. Its group and GROUP_ORDER do not affect the rank. It follows
+  priority changes the way a group stream's `Rank` does.
 - JS parity (decided 2026-10-13 in #5400). JS already ranks its fill through
   the subscription's `Priority`. It serves no standalone FETCH: `runFetch`
   (`js/net/src/ietf/publisher.ts`) refuses every one. So JS has nothing to
@@ -40,8 +42,8 @@ The work:
   does.
 
 This is unblocked and lands before [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md),
-which makes a FETCH span several groups. That quest then advances a FETCH
-stream's entry as it moves from group to group.
+which makes a FETCH span several groups on one stream that keeps this one
+entry.
 
 Out of scope: lite FETCH. lite-07 removes it, and published lite versions
 answer FETCH through the range model that [Model ranges](/quest/m1/subscribe-ranges/model.md)
