@@ -20,17 +20,21 @@ subscriber caps its range below arriving groups and later raises the cap;
 live players and default relay forwarding set no end cap, so production's
 parked set is empty today.
 
-Recommended: validate lazily. On every poll, cap raised or not, pop aborted
-groups off the low end of `parked` until the lowest is live, and wake the
-subscriber from the track (one registration) when a cached group is evicted
-or expires, rather than registering on every parked group per poll. Each pop
-is paid for by its insertion, and the `BTreeMap`'s O(log P) removal is
-accepted rather than swapping the structure. Keep the existing
-guarantees: a raised `start_at` drops overtaken entries, eviction bounds the
-parked set to what the cache retains, a finished track with only aborted
-parked groups ends, and an abort between check and registration still wakes
-the reader. Extend the benchmark with a parked-count sweep that shows the fix
-flattens it.
+Recommended: validate lazily. Wake the subscriber from the track (one
+registration) when a cached group aborts, rather than registering on every
+parked group per poll, and on that wake remove exactly the parked entries
+that aborted, cap raised or not, for example by walking a per-track log of
+aborted sequences from the subscriber's own position. Aborted entries are not
+a low-end prefix: eviction rotates recently read groups to the back and
+expiry follows last access. Each removal is paid for by its insertion, and
+the `BTreeMap`'s O(log P) removal is accepted rather than swapping the
+structure. Keep the existing guarantees: a raised `start_at` drops overtaken
+entries, eviction bounds the parked set to what the cache retains, a
+finished track with only aborted parked groups ends, and an abort between
+check and registration still wakes the reader. A track-wide wake fans out to
+every capped subscriber, so extend the benchmark to sweep parked count
+against capped subscribers per track: the parked axis flattens, and a
+per-abort cost that grows with subscribers shows up as a slope.
 
 Public API: none. Wire: none.
 
