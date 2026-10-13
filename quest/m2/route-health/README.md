@@ -13,6 +13,10 @@ and keep their existing Restart behavior.
 
 Decided with the maintainer, 2026-10-13:
 
+- Ranked in m2, after clustering stability, federation, and P2P. Health
+  design must first reproduce a stall that transport failure and ordinary
+  reconnect do not recover, or the line is abandoned.
+
 - Application-assigned connection priority remains ahead of additive cost.
   Deterministic hashing still chooses distinct equal routes; a new connection
   wins only when routes otherwise match. Stalled delivery is addressed by
@@ -25,9 +29,14 @@ Decided with the maintainer, 2026-10-13:
   must not recursively
   create their own backups at every relay or multiply into a network-wide
   monitoring tree. Monitor at endpoints and relays from the first implementation.
-- New lite-07 support is required. The preferred API is `Subscription.meta:
-  true`: group/frame progression with payload omitted. It is not PROBE,
-  repeated TRACK_STATUS snapshots, or a full media subscription hidden locally.
+- A new mode in the next lite version after lite-07, which it does not
+  gate. The preferred API is `Subscription.meta: true`: a live stream of
+  group/frame headers with payload omitted, so a standby notices a live
+  failure such as a dead old connection whose keep-alives stopped. `largest()`
+  alone cannot: on a payload-less standby it is only the SUBSCRIBE_OK
+  snapshot. A one-shot TRACK_STATUS on a new route's announcement is racy,
+  since a switch needs the candidate to stay meaningfully ahead. It is not
+  PROBE or a full media subscription hidden locally.
 - Prefer per-track failover. The existing track resume layer can support it,
   but shared broadcast source selection must be separated from per-track
   active/standby selection. The maintainer permits broadcast-level fallback
@@ -52,16 +61,18 @@ Test epochless exclusion, an active/standby shared bottleneck with a healthy
 third route, simultaneous relay decisions,
 loss/reordering, cancelled demand, and stale/replayed progress. Wire these into
 CI. Report actual media overlap, control traffic, wakes, switches, and memory
-across tracks, candidate connections, and downstream readers. Real browser/native
-P2P health integration belongs to the P2P harness, which Requires Automatic
-recovery; this line can complete without waiting for P2P transports.
+across tracks, candidate connections, and downstream readers. Extend the
+[P2P harness](/quest/m1/p2p/harness.md) with real browser/native cases:
+metadata-only standby, stalled payload with advancing control, same-epoch
+promotion with bounded overlap, verified failback, and epochless exclusion.
+Add a route-health section to the routing concept page.
 
 ## Required
 
-- [Health design](/quest/m1/route-health/design.md) - prove useful progress, aggregation, switching evidence, and bounded recovery
-- [Metadata subscriptions](/quest/m1/route-health/meta.md) - lite-07 and the shared model observe frames without payload in Rust and JS
-- [Track route selection](/quest/m1/route-health/selection.md) - share broadcast identity/candidates while tracks choose sources independently
-- [Automatic recovery](/quest/m1/route-health/recovery.md) - epoch-only promotion and evidence-based failback in endpoints and relays
+- [Health design](/quest/m2/route-health/design.md) - prove useful progress, aggregation, switching evidence, and bounded recovery
+- [Metadata subscriptions](/quest/m2/route-health/meta.md) - the next lite version and the shared model observe frames without payload in Rust and JS
+- [Track route selection](/quest/m2/route-health/selection.md) - share broadcast identity/candidates while tracks choose sources independently
+- [Automatic recovery](/quest/m2/route-health/recovery.md) - epoch-only promotion and evidence-based failback in endpoints and relays
 
 ## Related
 

@@ -9,7 +9,9 @@ do not add speculative production code or choose arbitrary timing thresholds.
 
 ## Plan
 
-The [line's decisions](/quest/m1/route-health/README.md) are settled. Preserve
+The [line's decisions](/quest/m2/route-health/README.md) are settled. Start by
+reproducing a stall that transport failure and ordinary reconnect miss; if
+none exists, bring abandoning the line back to the maintainer. Preserve
 application priorities, automatic health-driven switching and failback, a
 payload-free steady standby, and bounded payload overlap to verify delivery.
 The mechanism is entirely excluded for epochless broadcasts.

@@ -10,7 +10,7 @@ copies cannot revive a claim after its withdrawal is known.
 
 Reliability, federation, and P2P are independently shippable milestones of
 this architecture. Active/passive delivery health is a separate
-[route-health line](/quest/m1/route-health/README.md), shared by endpoints
+[route-health line](/quest/m2/route-health/README.md), shared by endpoints
 and relays, and applies only to broadcasts with epochs.
 
 ## Plan
@@ -91,7 +91,7 @@ setup after the capabilities land.
 
 ## Related
 
-- [Route health](/quest/m1/route-health/README.md) - epoch-only active/passive delivery monitoring and automatic recovery
+- [Route health](/quest/m2/route-health/README.md) - epoch-only active/passive delivery monitoring and automatic recovery
 - [P2P](/quest/m1/p2p/README.md) - application-selected peer sessions feed the shared routing model
 - [Routing guide](/quest/m1/routing-guide.md) - concept page and practical federation/P2P setup
 - [Cross-node flapping](/quest/m1/cross-node-flapping.md) - incident-sensitive regressions for residual withdrawal hunting

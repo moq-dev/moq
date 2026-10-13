@@ -49,7 +49,7 @@ demand after a same-epoch handoff, except bounded overlap while validating a
 replacement. If a peer dies, drains, or was never reachable, the shared
 origin selects the best remaining eligible route. This is ordinary transport
 fallback; nothing TURN-shaped is built. Still-open delivery stalls
-are handled by [Route health](/quest/m1/route-health/README.md), only with a
+are handled by [Route health](/quest/m2/route-health/README.md), only with a
 matching explicit epoch. Epochless source changes restart instead of resume.
 
 A relay that also answers STUN on its QUIC port is the lowest-RTT STUN
@@ -146,5 +146,5 @@ Backend choice does not change the policy that watching tabs never re-serve.
 
 ## Related
 
-- [Route health](/quest/m1/route-health/README.md) - epoch-only active/passive delivery recovery on selected connections
+- [Route health](/quest/m2/route-health/README.md) - epoch-only active/passive delivery recovery on selected connections
 - [E2EE](/quest/m2/e2ee/README.md) - what a peer would need if the token scope stopped being the trust boundary

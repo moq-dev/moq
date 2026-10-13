@@ -28,7 +28,7 @@ the default and measured cost is opt-in, so the line ships without it.
   opt-in on links the operator chooses.
 - A lossy-link fixture over the mock transport with mocked time.
 
-[Route health](/quest/m1/route-health/README.md) is separate: it detects
+[Route health](/quest/m2/route-health/README.md) is separate: it detects
 stalled epoch-bound track delivery using metadata-only standby observations,
 without repricing the whole network from local health evidence.
 

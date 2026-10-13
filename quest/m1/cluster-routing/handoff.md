@@ -21,15 +21,14 @@ state. Route loss is not withdrawal by the origin. An END withdraws that
 origin's claim, including wildcard capability claims, not every replica of
 an epoch. No promise of learning an unseen withdrawal during a partition.
 
-Compare complete designs, not a barrier against tombstones as alternatives:
+Decided 2026-10-13: no origin-confirmed reconciliation, since a relay never
+waits on an origin round trip before trusting a new next hop. Prove the
+remaining candidate against its failing control:
 
 - Origin-versioned claim changes with scoped complete snapshots and retained
   freshness floors. A snapshot must certify both its coverage and which
   changes it incorporates; a high revision for one path proves nothing about
-  an unwatched path. This is the recommended candidate to investigate.
-- Origin-confirmed reconciliation during handoff, carrying the known
-  freshness floor. Measure its round trips and replay traffic, including
-  whether it is useful only when a neighbor falls behind retained history.
+  an unwatched path. This is the candidate to prove.
 - A neighbor snapshot barrier alone is a failing control: completeness does
   not reject an older complete snapshot after an END arrived elsewhere.
 

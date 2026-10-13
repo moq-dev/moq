@@ -1,15 +1,17 @@
-# [L] Metadata-only subscriptions in lite-07
+# [L] Metadata-only subscriptions
 
 ## Goal
 
 Rust and JS can subscribe to group/frame progression without receiving media
-payload, through the shared subscription model and moq-lite-07-wip. Relay
+payload, through the shared subscription model and the next lite version after lite-07. Relay
 chains forward and aggregate that demand without secretly pulling full media.
 
 ## Plan
 
 Decided 2026-10-13: prefer a `meta: true` field on `Subscription`, defaulting
-to normal payload delivery. Preserve normal group/frame progression with
+to normal payload delivery. It must be a live stream: `largest()` on a
+payload-less standby is only the SUBSCRIBE_OK snapshot, and a one-shot
+TRACK_STATUS on announcement races the active route. It does not gate lite-07. Preserve normal group/frame progression with
 payload omitted. Follow the proven mode/framing contract from Health design,
 including updates on an existing subscription. Mirror the public field and
 semantics across Rust, JS, and any bindings exposing Subscription.
@@ -33,7 +35,7 @@ for matching explicit epochs; the field itself does not authorize resume.
 Older negotiated protocols must not silently emulate metadata-only mode by
 fetching and discarding media. Explicitly report unsupported mode; ordinary
 media and epochless Restart continue unchanged. An IETF counterpart is not
-required for this lite-07 feature.
+required for this lite feature.
 
 Tests: metadata-only multi-hop traffic has no media payload; mixed demand;
 promotion/demotion during an open group; empty frames; late old-mode frames;
@@ -44,10 +46,10 @@ Run `just check`, `just drafts check`, and `just test interop --all`; add the
 new mode to cross-language interop and existing CI.
 
 Public API: `Subscription.meta` and any corresponding binding surface.
-Wire: a lite-07 metadata delivery mode; exact encoding is settled by Health design.
+Wire: a metadata delivery mode in the next lite version; exact encoding is settled by Health design.
 
 ## Required
 
-- [Health design](/quest/m1/route-health/design.md) - progress and mode-transition contract
+- [Health design](/quest/m2/route-health/design.md) - progress and mode-transition contract
 - [Live largest location](/quest/m1/largest.md) - the shared live progress surface
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - final subscription range shape this extends

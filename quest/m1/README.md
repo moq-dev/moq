@@ -40,7 +40,7 @@ acceptance belong to the downstream operator.
 The 2026-10-13 clustering interview brings P2P back to m1 with a required
 consumer: application-selected peer paths alongside persistent CDN sessions.
 Routing proofs precede the shared wire; federation and P2P ship independently,
-with epoch-only active/passive route health in a separate line.
+while epoch-only active/passive route health follows in m2.
 
 Keep one owner per shared code area. Order each prerequisite before its
 consumer; targeted benchmarks and controlled-time regressions remain part of
@@ -60,7 +60,6 @@ above them, since the epoch anchor requires it.
 
 - [Cross-node flapping](/quest/m1/cross-node-flapping.md) - incident-sensitive baseline and residual stale-revival counterexamples before the route rewrite
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
-- [Route health](/quest/m1/route-health/README.md) - epoch-only active/passive track recovery using lite-07 metadata-only subscriptions
 - [P2P](/quest/m1/p2p/README.md) - application-selected peer sessions use shared priorities, routing, and same-epoch handover
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation/P2P setup
 - [Controlled time](/quest/m1/time/README.md) - every crate and package reads time through moq-time or @moq/time, with regression tests for the changed contracts; ranks above the fork, whose switch adopts its instant

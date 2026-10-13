@@ -47,4 +47,4 @@ Decided with the maintainer (2026-10-13), after moq-dev/moq#5369 proposed
 
 ## Related
 
-- [Metadata subscriptions](/quest/m1/route-health/meta.md) - lite-07 observes group/frame progress without payload
+- [Metadata subscriptions](/quest/m2/route-health/meta.md) - a live group/frame progress stream without payload

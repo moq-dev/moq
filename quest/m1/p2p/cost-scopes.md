@@ -46,4 +46,4 @@ native configuration. Wire: none beyond shared routing and existing resume.
 
 ## Related
 
-- [Route health](/quest/m1/route-health/README.md) - automatic epoch-only stalled-delivery recovery
+- [Route health](/quest/m2/route-health/README.md) - automatic epoch-only stalled-delivery recovery

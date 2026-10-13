@@ -49,5 +49,5 @@ Metadata subscriptions, with no separate health-specific route protocol.
 
 ## Required
 
-- [Metadata subscriptions](/quest/m1/route-health/meta.md) - progress-only standby and safe promotion
-- [Track route selection](/quest/m1/route-health/selection.md) - independent copies and shared resume
+- [Metadata subscriptions](/quest/m2/route-health/meta.md) - progress-only standby and safe promotion
+- [Track route selection](/quest/m2/route-health/selection.md) - independent copies and shared resume

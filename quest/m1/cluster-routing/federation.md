@@ -44,5 +44,5 @@ Rust/JS parity. Run `just check`, `just test interop --all`, and `just drafts ch
 
 ## Related
 
-- [Route health](/quest/m1/route-health/README.md) - epoch-only detection of stalled delivery on still-open links
+- [Route health](/quest/m2/route-health/README.md) - epoch-only detection of stalled delivery on still-open links
 - [Routing guide](/quest/m1/routing-guide.md) - runnable operator setup after integration

@@ -32,10 +32,8 @@ full-mesh selection, roster churn, pending negotiations and cancellation.
 Report connection counts, signaling bytes, wakes, CPU and retained state;
 the STUN roster gate alone does not bound pairing. Verify the CDN control
 session survives peer handover while unused CDN payload demand stops.
-This harness owns real CDN/P2P route-health integration: metadata-only standby,
-stalled payload with advancing control, same-epoch promotion with bounded
-overlap, verified failback, and epochless exclusion. Shared relay/model cases
-belong to Route health; transport-only measurements can be collected earlier.
+Real CDN/P2P route-health cases extend this harness from the m2
+[Route health](/quest/m2/route-health/README.md) line, not here.
 
 Metrics: sustained throughput ceiling, per-frame latency p50 and p99 from the
 timestamp `moq-bench` stamps into each keyframe (same host, so one clock),
@@ -49,8 +47,6 @@ nothing about multicast-filtered venues or many-tab fan-out on real access
 points.
 
 ## Required
-
-- [Automatic recovery](/quest/m1/route-health/recovery.md) - real CDN/P2P health integration uses the shared epoch-only policy
 
 - [moq-cli joins](/quest/m1/p2p/cli.md)
 - [Signaling and policy](/quest/m1/p2p/signal.md)
