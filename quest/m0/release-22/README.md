@@ -31,14 +31,11 @@ Decided 2026-10-08:
 
 The backports shipped in moq-relay 0.17.3 (#5119) and `@moq/net` 0.4.3
 (refreshed 2026-10-12). Draft-22 interop on 2026-10-12 then found FETCH still
-refused on draft-20+ sessions. This README's remaining work: once the children
-land, cut the next 0.17 patch, `@moq/net`, and `@moq/publish` with them (`/bump`, then the
-release-plz PR), and tell the testers and the reporters of #5407 and #5413.
+refused on draft-20+ sessions; its backport landed on `release` in #5402.
+This README's remaining work: cut the next 0.17 patch, `@moq/net`, and
+`@moq/publish` with it (`/bump`, then the release-plz PR), and tell the testers
+and the reporters of #5407 and #5413.
 
 Decided 2026-10-13: the same patch also carries two crash and availability
 fixes reported against the release line, an unset host clock and a quiet
 track's latest group lost after rejoin.
-
-## Required
-
-- [Draft-20+ FETCH](/quest/m0/release-22/fetch.md) - backport #4971 so a draft-22 FETCH is served, not refused
