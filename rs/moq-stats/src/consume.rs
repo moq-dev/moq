@@ -1,9 +1,12 @@
 //! The consuming half: typed readers over one published stats broadcast.
 
-use moq_net::broadcast;
 use moq_net::stats::{Role, Tier};
+use moq_net::{AsPath, broadcast};
 
-use crate::{Result, SessionsFrame, TrafficFrame, sessions_track, traffic_track};
+use crate::{
+	PresenceFrame, Result, SessionsFrame, TotalsFrame, TrafficFrame, presence_track, sessions_track, totals_track,
+	traffic_track,
+};
 
 /// Configuration for a [`Consumer`]. Construct with [`Config::new`]
 /// and chain the `with_*` setters.
@@ -32,10 +35,10 @@ impl Config {
 /// Reads one published stats broadcast (a `<prefix>/node/<node>` announce),
 /// yielding typed frames per track.
 ///
-/// Subscribe to the traffic and session tracks you care about with
-/// [`Self::traffic`] / [`Self::sessions`]; a track that the producer never
-/// created (e.g. a named tier that saw no traffic) fails to subscribe or ends
-/// immediately, so callers typically subscribe the tiers they know exist.
+/// Subscribe to the tracks you care about with [`Self::totals`],
+/// [`Self::traffic`], [`Self::sessions`], and [`Self::presence`]. A named
+/// tier's tracks are held open with an empty frame until the tier records, and
+/// a root's presence track is produced only while subscribed.
 pub struct Consumer {
 	broadcast: broadcast::Consumer,
 	config: Config,
@@ -46,6 +49,14 @@ impl Consumer {
 	/// stats path resolved to; parse the path with [`crate::parse_node_path`].
 	pub fn new(broadcast: broadcast::Consumer, config: Config) -> Self {
 		Self { broadcast, config }
+	}
+
+	/// Subscribe to the totals track, awaiting the subscription handshake.
+	pub async fn totals(&self) -> Result<Totals> {
+		let name = totals_track(self.config.compression);
+		Ok(Totals {
+			inner: self.subscribe(&name).await?,
+		})
 	}
 
 	/// Subscribe to the traffic track for `(tier, role)`, awaiting the
@@ -62,6 +73,16 @@ impl Consumer {
 	pub async fn sessions(&self, tier: &Tier) -> Result<Sessions> {
 		let name = sessions_track(tier, self.config.compression);
 		Ok(Sessions {
+			inner: self.subscribe(&name).await?,
+		})
+	}
+
+	/// Subscribe to the presence track for auth `root`, awaiting the
+	/// subscription handshake. Fails with
+	/// [`NotFound`](moq_net::Error::NotFound) for a root outside the group.
+	pub async fn presence(&self, root: impl AsPath) -> Result<Presence> {
+		let name = presence_track(root, self.config.compression);
+		Ok(Presence {
 			inner: self.subscribe(&name).await?,
 		})
 	}
@@ -98,6 +119,31 @@ pub struct Sessions {
 impl Sessions {
 	/// The next frame, or `None` once the track ends (the producer went away).
 	pub async fn next(&mut self) -> Result<Option<SessionsFrame>> {
+		Ok(self.inner.next().await?)
+	}
+}
+
+/// A typed reader over the totals track; see [`Traffic`].
+pub struct Totals {
+	inner: moq_json::snapshot::Consumer<TotalsFrame>,
+}
+
+impl Totals {
+	/// The next frame, or `None` once the track ends (the producer went away).
+	pub async fn next(&mut self) -> Result<Option<TotalsFrame>> {
+		Ok(self.inner.next().await?)
+	}
+}
+
+/// A typed reader over one root's presence track; see [`Traffic`].
+pub struct Presence {
+	inner: moq_json::snapshot::Consumer<PresenceFrame>,
+}
+
+impl Presence {
+	/// The next frame, or `None` once the track ends (the producer went away
+	/// or its group unannounced).
+	pub async fn next(&mut self) -> Result<Option<PresenceFrame>> {
 		Ok(self.inner.next().await?)
 	}
 }
@@ -253,5 +299,19 @@ mod tests {
 		let mut sessions = compressed.sessions(&tier).await.expect("subscribe sessions");
 		let frame = sessions.next().await.expect("read").expect("frame");
 		assert_eq!(frame.get("acme").expect("root").active(), 1);
+
+		let mut totals = compressed.totals().await.expect("subscribe totals");
+		let frame = totals.next().await.expect("read").expect("frame");
+		let totals = frame.get("").expect("default tier");
+		assert_eq!(totals.publisher.bytes, 50);
+		assert_eq!(totals.sessions.active(), 1);
+
+		// A presence track is produced once requested, so drive a drain.
+		let mut presence = std::pin::pin!(compressed.presence("acme"));
+		assert!(futures::poll!(presence.as_mut()).is_pending());
+		drive_tick().await;
+		let mut presence = presence.await.expect("subscribe presence");
+		let frame = presence.next().await.expect("read").expect("frame");
+		assert_eq!(frame.get("").expect("default tier").active(), 1);
 	}
 }

@@ -17,10 +17,9 @@ use std::{
 use crate::{
 	Error, Hop, Hops,
 	coding::{Decode, DecodeError, Decoder, Encode, Stream, Writer},
-	lite::{
-		self,
-		priority::{Priority, PriorityHandle, PriorityQueue},
-	},
+	lite,
+	priority::{Priority, PriorityHandle, PriorityQueue},
+	track::Order,
 };
 
 use super::Version;
@@ -1942,6 +1941,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 		let subscription = crate::track::Subscription {
 			priority: msg.priority,
 			max_delay: serving_max_delay(shared.version, msg.max_delay),
+			order: msg.order,
 			..Bounds::from(&msg).positions()
 		};
 
@@ -2016,19 +2016,23 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 						writer.buffer(&lite::SubscribeResponse::Ok(info))?;
 					}
 
-					// Track-level subscriber priority. SUBSCRIBE_UPDATE messages broadcast
-					// new values to the run loop (so future groups inherit the new priority)
-					// and the in-flight group machines (so they update via
-					// PriorityHandle::set_track).
-					let track_priority_tx = kio::Producer::new(msg.priority);
+					// Track-level subscriber priority and group order. SUBSCRIBE_UPDATE
+					// messages broadcast new values to the run loop (so future groups inherit
+					// them) and the in-flight group machines (so they update via
+					// PriorityHandle::steer).
+					let steer = Steer {
+						priority: msg.priority,
+						order: msg.order,
+					};
+					let steer_tx = kio::Producer::new(steer);
 
 					let sub = Subscription {
 						session: shared.session.clone(),
 						id: msg.id,
 						track_name: Arc::from(track.name()),
 						priority: shared.priority.clone(),
-						track_priority: track_priority_tx.consume(),
-						track_priority_seen: msg.priority,
+						steer: steer_tx.consume(),
+						steer_seen: steer,
 						version: shared.version,
 						timescale,
 						runtime: shared.runtime.clone(),
@@ -2037,7 +2041,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 
 					let bounds = Bounds::from(msg.as_ref());
 					position_cursor(&mut track, shared.version, bounds.start_group, latest);
-					let mut run = TrackRun::new(sub, track, bounds, track_priority_tx);
+					let mut run = TrackRun::new(sub, track, bounds, steer_tx);
 					if let Some(update) = update {
 						run.update(update);
 					}
@@ -3120,9 +3124,16 @@ impl From<&lite::SubscribeUpdate> for Bounds {
 	}
 }
 
+/// The part of each group's rank a SUBSCRIBE_UPDATE can move.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Steer {
+	priority: u8,
+	order: Order,
+}
+
 /// Shared per-subscription state for the publisher side. Cloned cheaply. Every
 /// field is either small or already Arc-backed for each in-flight serve_group task
-/// so each in-flight group reads the latest SUBSCRIBE_UPDATE priority via its own
+/// so each in-flight group reads the latest SUBSCRIBE_UPDATE steer via its own
 /// consumer cursor.
 #[derive(Clone)]
 struct Subscription<S: crate::transport::poll::Session> {
@@ -3130,9 +3141,9 @@ struct Subscription<S: crate::transport::poll::Session> {
 	id: u64,
 	track_name: Arc<str>,
 	priority: PriorityQueue,
-	track_priority: kio::Consumer<u8>,
-	/// Last track priority observed by this clone, so a change only fires once.
-	track_priority_seen: u8,
+	steer: kio::Consumer<Steer>,
+	/// Last steer observed by this clone, so a change only fires once.
+	steer_seen: Steer,
 	version: Version,
 	/// Negotiated timestamp scale for this track. `Some(_)` on lite-05+ after
 	/// TRACK_INFO; used to validate per-frame timestamps before encoding.
@@ -3199,10 +3210,10 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 		true
 	}
 
-	/// Read the latest SUBSCRIBE_UPDATE track priority, marking it seen.
-	fn track_priority_current(&mut self) -> u8 {
-		self.track_priority_seen = *self.track_priority.read();
-		self.track_priority_seen
+	/// Read the latest SUBSCRIBE_UPDATE steer, marking it seen.
+	fn steer_current(&mut self) -> Steer {
+		self.steer_seen = *self.steer.read();
+		self.steer_seen
 	}
 
 	/// Remember an encode failure the group stream could not carry.
@@ -3241,7 +3252,7 @@ struct TrackRun<S: crate::transport::poll::Session> {
 	ctx: Subscription<S>,
 	track: track::Subscriber,
 	/// Broadcasts SUBSCRIBE_UPDATE priorities to the in-flight group machines.
-	track_priority_tx: kio::Producer<u8>,
+	steer_tx: kio::Producer<Steer>,
 	// Frame bounds qualify the start and end group only; everything in between is
 	// served whole. Each is `(group, frame)`, or `None` for no offset at all.
 	start_frame: Option<(u64, u64)>,
@@ -3275,12 +3286,7 @@ struct TrackRun<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> TrackRun<S> {
-	fn new(
-		ctx: Subscription<S>,
-		mut track: track::Subscriber,
-		bounds: Bounds,
-		track_priority_tx: kio::Producer<u8>,
-	) -> Self {
+	fn new(ctx: Subscription<S>, mut track: track::Subscriber, bounds: Bounds, steer_tx: kio::Producer<Steer>) -> Self {
 		// Apply the initial cap from the original Subscribe. Subsequent updates
 		// flow through the SUBSCRIBE_UPDATE arm below.
 		track.end_at(bounds.end_group.map_or(Bound::Unbounded, Bound::Included));
@@ -3296,7 +3302,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			end_frame: bounds.end_frame(),
 			ctx,
 			track,
-			track_priority_tx,
+			steer_tx,
 			emit_range,
 			start: None,
 			first: None,
@@ -3317,8 +3323,11 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 	/// subscription. This is what lets relays pause an upstream subscription across
 	/// consumer churn without tearing it down.
 	fn update(&mut self, upd: lite::SubscribeUpdate) {
-		if let Ok(mut value) = self.track_priority_tx.write() {
-			*value = upd.priority;
+		if let Ok(mut value) = self.steer_tx.write() {
+			*value = Steer {
+				priority: upd.priority,
+				order: upd.order,
+			};
 		}
 		// Feed the full update into the model subscriber so the producer's
 		// aggregate reflects it (and a relay re-forwards it upstream).
@@ -3329,6 +3338,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		let _ = self.track.update(crate::track::Subscription {
 			priority: upd.priority,
 			max_delay: serving_max_delay(self.ctx.version, upd.max_delay),
+			order: upd.order,
 			..bounds.positions()
 		});
 		// An explicit start moves the read cursor. Lite-06+ encodes an absent
@@ -3598,15 +3608,15 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		self.mark_served(sequence);
 		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "serving group");
 
-		// Use the latest priority for new groups so SUBSCRIBE_UPDATE applies to them too.
-		let current_priority = self.ctx.track_priority_current();
+		// Use the latest steer for new groups so SUBSCRIBE_UPDATE applies to them too.
+		let steer = self.ctx.steer_current();
 		// The subscribe id scopes the group tie-break: one queue serves every
 		// subscription on the session, and only groups of the same one may be
-		// ranked against each other by sequence.
+		// ranked against each other by sequence, in that subscription's order.
 		let handle = self
 			.ctx
 			.priority
-			.insert(Priority::new(current_priority, self.ctx.id, sequence));
+			.insert(Priority::new(steer.priority, self.ctx.id, sequence).with_order(steer.order));
 		self.children
 			.push(GroupServe::new(self.ctx.clone(), sequence, frame_start, handle, group));
 	}
@@ -3695,17 +3705,17 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 				while let Poll::Ready(rank) = self.priority.poll_next(waiter) {
 					writer.set_priority(PriorityHandle::send_order_of(rank));
 				}
-				let seen = self.ctx.track_priority_seen;
+				let seen = self.ctx.steer_seen;
 				// A dropped producer just disables this arm, like the queue arm above.
-				if let Poll::Ready(Ok(value)) = self.ctx.track_priority.poll(waiter, |value| {
+				if let Poll::Ready(Ok(value)) = self.ctx.steer.poll(waiter, |value| {
 					if **value != seen {
 						Poll::Ready(**value)
 					} else {
 						Poll::Pending
 					}
 				}) {
-					self.ctx.track_priority_seen = value;
-					let rank = self.priority.set_track(value);
+					self.ctx.steer_seen = value;
+					let rank = self.priority.steer(value.priority, value.order);
 					writer.set_priority(PriorityHandle::send_order_of(rank));
 				}
 			}
@@ -4054,14 +4064,14 @@ mod serve_group_test {
 		let log = Log::default();
 		let session = SinkSession::new(log.clone());
 
-		let track_priority = kio::Producer::new(0u8);
+		let steer = kio::Producer::new(Steer::default());
 		let subscription = Subscription {
 			session,
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
-			track_priority: track_priority.consume(),
-			track_priority_seen: 0,
+			steer: steer.consume(),
+			steer_seen: Steer::default(),
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::Clock::sim(),
@@ -4098,14 +4108,14 @@ mod serve_group_test {
 		let gate = kio::Producer::new(false);
 		let session = SinkSession::gated_uni(gate.consume());
 		let log = session.log.clone();
-		let track_priority = kio::Producer::new(0u8);
+		let steer = kio::Producer::new(Steer::default());
 		let subscription = Subscription {
 			session,
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
-			track_priority: track_priority.consume(),
-			track_priority_seen: 0,
+			steer: steer.consume(),
+			steer_seen: Steer::default(),
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::Clock::sim(),
@@ -4146,14 +4156,14 @@ mod serve_group_test {
 		let gate = kio::Producer::new(true);
 		let session = SinkSession::gated_uni(gate.consume());
 		let log = session.log.clone();
-		let track_priority = kio::Producer::new(0u8);
+		let steer = kio::Producer::new(Steer::default());
 		let subscription = Subscription {
 			session,
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
-			track_priority: track_priority.consume(),
-			track_priority_seen: 0,
+			steer: steer.consume(),
+			steer_seen: Steer::default(),
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::Clock::sim(),
@@ -4212,14 +4222,14 @@ mod serve_group_test {
 	async fn blocked_transport_open_expires_with_the_group() {
 		let gate = kio::Producer::new(false);
 		let session = SinkSession::gated_open_uni(gate.consume());
-		let track_priority = kio::Producer::new(0u8);
+		let steer = kio::Producer::new(Steer::default());
 		let subscription = Subscription {
 			session,
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
-			track_priority: track_priority.consume(),
-			track_priority_seen: 0,
+			steer: steer.consume(),
+			steer_seen: Steer::default(),
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::Clock::sim(),
@@ -4287,14 +4297,14 @@ mod serve_group_test {
 		let log = Log::default();
 		let session = SinkSession::new(log.clone());
 
-		let track_priority = kio::Producer::new(0u8);
+		let steer = kio::Producer::new(Steer::default());
 		let subscription = Subscription {
 			session,
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
-			track_priority: track_priority.consume(),
-			track_priority_seen: 0,
+			steer: steer.consume(),
+			steer_seen: Steer::default(),
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::Clock::sim(),
@@ -4334,14 +4344,14 @@ mod serve_group_test {
 	async fn unacknowledged_fin_expires_with_the_group() {
 		let session = SinkSession::new(Log::default()).with_unacked_fin();
 		let log = session.log.clone();
-		let track_priority = kio::Producer::new(0u8);
+		let steer = kio::Producer::new(Steer::default());
 		let subscription = Subscription {
 			session,
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
-			track_priority: track_priority.consume(),
-			track_priority_seen: 0,
+			steer: steer.consume(),
+			steer_seen: Steer::default(),
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::Clock::sim(),
@@ -4380,14 +4390,14 @@ mod serve_group_test {
 	async fn unacknowledged_fin_follows_priority_changes() {
 		let session = SinkSession::new(Log::default()).with_unacked_fin();
 		let log = session.log.clone();
-		let track_priority = kio::Producer::new(0u8);
+		let steer = kio::Producer::new(Steer::default());
 		let subscription = Subscription {
 			session,
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
-			track_priority: track_priority.consume(),
-			track_priority_seen: 0,
+			steer: steer.consume(),
+			steer_seen: Steer::default(),
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::Clock::sim(),
@@ -4416,7 +4426,7 @@ mod serve_group_test {
 		assert_eq!(log.priorities().last(), Some(&254));
 
 		// A SUBSCRIBE_UPDATE raising this track reranks it above the newer group.
-		*track_priority.write().ok().expect("the group watches the priority") = 1;
+		steer.write().ok().expect("the group watches the priority").priority = 1;
 		assert!(futures::poll!(serve.as_mut()).is_pending());
 		assert_eq!(log.priorities().last(), Some(&255));
 		assert!(log.resets().is_empty());
@@ -4438,14 +4448,14 @@ mod serve_group_test {
 	) -> (TrackRun<SinkSession>, Writer<SinkSend, Version>, Log) {
 		let log = Log::default();
 		let writer = Writer::new(SinkSend::new(log.clone()), version);
-		let track_priority = kio::Producer::new(0u8);
+		let steer = kio::Producer::new(Steer::default());
 		let ctx = Subscription {
 			session,
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
-			track_priority: track_priority.consume(),
-			track_priority_seen: 0,
+			steer: steer.consume(),
+			steer_seen: Steer::default(),
 			version,
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::Clock::sim(),
@@ -4457,7 +4467,7 @@ mod serve_group_test {
 			end_group: None,
 			end_frame: None,
 		};
-		(TrackRun::new(ctx, track, bounds, track_priority), writer, log)
+		(TrackRun::new(ctx, track, bounds, steer), writer, log)
 	}
 
 	fn write_group(track: &mut track::Producer, sequence: u64, millis: u64) {
@@ -4618,6 +4628,7 @@ mod serve_group_test {
 		assert_eq!(run.start, Some(5));
 
 		run.update(lite::SubscribeUpdate {
+			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(60),
 			start_group: Some(0),
@@ -4659,6 +4670,7 @@ mod serve_group_test {
 
 		moq_net_sim::advance(Duration::from_secs(2)).await;
 		run.update(lite::SubscribeUpdate {
+			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(1),
 			start_group: Some(0),
@@ -4699,6 +4711,7 @@ mod serve_group_test {
 		}
 
 		let update = |start_group| lite::SubscribeUpdate {
+			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(1),
 			start_group: Some(start_group),
@@ -4747,6 +4760,7 @@ mod serve_group_test {
 		assert_eq!(settle(&mut run), 1);
 
 		run.update(lite::SubscribeUpdate {
+			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(60),
 			start_group: None,
@@ -4777,6 +4791,7 @@ mod serve_group_test {
 		);
 		let (mut run, mut writer, _log) = lite_run(Version::Lite05, SinkSession::new(Log::default()), subscriber);
 		run.update(lite::SubscribeUpdate {
+			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(60),
 			start_group: None,
@@ -4844,15 +4859,15 @@ mod serve_group_test {
 
 			let session = ScriptedSession::new(Vec::new());
 			let writer = Writer::new(SinkSend::new(session.log.clone()), Version::Lite07);
-			let track_priority = kio::Producer::new(0u8);
+			let steer = kio::Producer::new(Steer::default());
 			let opens = Arc::<Opens>::default();
 			let ctx = Subscription {
 				session: session.clone(),
 				id: 0,
 				track_name: "test".into(),
 				priority: PriorityQueue::default(),
-				track_priority: track_priority.consume(),
-				track_priority_seen: 0,
+				steer: steer.consume(),
+				steer_seen: Steer::default(),
 				version: Version::Lite07,
 				timescale: Some(crate::Timescale::MILLI),
 				runtime: crate::time::Clock::sim(),
@@ -4865,7 +4880,7 @@ mod serve_group_test {
 				end_frame: None,
 			};
 			Self {
-				run: TrackRun::new(ctx, subscriber, bounds, track_priority),
+				run: TrackRun::new(ctx, subscriber, bounds, steer),
 				writer,
 				session,
 				opens,
@@ -4911,6 +4926,7 @@ mod serve_group_test {
 		assert_eq!(relay.opened(), 0, "the resume is past the only group");
 
 		relay.run.update(lite::SubscribeUpdate {
+			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(30),
 			start_group: None,
@@ -4941,6 +4957,7 @@ mod serve_group_test {
 		assert_eq!(relay.opened(), 2, "groups 1 and 2 are at or above the floor");
 
 		relay.run.update(lite::SubscribeUpdate {
+			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(30),
 			start_group: None,
@@ -4968,6 +4985,7 @@ mod serve_group_test {
 
 		// The subscriber moves its start past the held group before the source resolves.
 		let update = lite::SubscribeUpdate {
+			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::ZERO,
 			start_group: Some(7),
@@ -5630,6 +5648,7 @@ mod tests {
 					leave_request::<TrackInfoServe>(version, &track, wait, close).await;
 
 					let subscribe = lite::Subscribe {
+						order: crate::track::Order::Descending,
 						epoch: None,
 						id: 0,
 						broadcast: broadcast.clone(),
@@ -5772,6 +5791,7 @@ mod tests {
 
 		let mut script = Vec::new();
 		lite::Subscribe {
+			order: crate::track::Order::Descending,
 			epoch: None,
 			id: 0,
 			broadcast: crate::Path::new("room"),
@@ -5799,6 +5819,7 @@ mod tests {
 		assert!(!drive(&mut serve).await);
 
 		let update = lite::SubscribeUpdate {
+			order: crate::track::Order::Descending,
 			priority: 7,
 			max_delay: Duration::ZERO,
 			start_group: None,
@@ -5820,7 +5841,7 @@ mod tests {
 		let RequestState::Serve(SubscribeServe::Run(run)) = &serve.state else {
 			panic!("the subscription is not running");
 		};
-		assert_eq!(*run.track_priority_tx.read(), 7, "the update was lost");
+		assert_eq!(run.steer_tx.read().priority, 7, "the update was lost");
 	}
 
 	/// A subscription that always has another group ready yields within its budget, so a
@@ -5862,6 +5883,7 @@ mod tests {
 
 		let mut script = Vec::new();
 		lite::Subscribe {
+			order: crate::track::Order::Descending,
 			epoch: None,
 			id: 0,
 			broadcast: crate::Path::new("room"),
@@ -5966,6 +5988,7 @@ mod tests {
 		};
 		let subscribe = encode(lite::ControlType::Subscribe, &|script| {
 			lite::Subscribe {
+				order: crate::track::Order::Descending,
 				epoch: None,
 				id: 0,
 				broadcast: crate::Path::new("room"),

@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
-import { Producer as BroadcastProducer } from "../broadcast.ts";
-import { type SendStream, Writer } from "../stream.ts";
-import { Timescale } from "../time.ts";
-
+import { Producer as BroadcastProducer } from "./broadcast.ts";
+import { Version } from "./lite/version.ts";
 import { Priority, sendOrder } from "./priority.ts";
-import { Version } from "./version.ts";
+import { type SendStream, Writer } from "./stream.ts";
+import { Timescale } from "./time.ts";
+import type { Subscription } from "./track.ts";
 
 // The last position that still fits below the track priority.
 const MAX_POSITION = 2 ** 44 - 1;
@@ -56,7 +56,7 @@ test("out of range ranks stay inside their own bits", () => {
 
 // The ranking itself, driven directly: a subscription outlives its own serving loop, since a
 // group already on the wire keeps writing after the track stops handing out new ones.
-function ranking(options: { priority?: number; ordered?: boolean } = {}) {
+function ranking(options: Subscription = {}) {
 	const broadcast = new BroadcastProducer();
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const subscriber = track.subscribe(options);
@@ -69,7 +69,7 @@ function ranking(options: { priority?: number; ordered?: boolean } = {}) {
 		return new Writer(stream, Version.DRAFT_06);
 	};
 
-	return { priority: new Priority(subscriber), open, streams, broadcast };
+	return { priority: new Priority(subscriber), subscriber, open, streams, broadcast };
 }
 
 // A track that finishes while several groups are still draining leaves them as the only data
@@ -93,5 +93,30 @@ test("groups still draining are promoted after the subscription closes", () => {
 	expect(streams[0].sendOrder).toBe(sendOrder({ priority: 7, position: 0 }));
 
 	priority.remove(older);
+	broadcast.close();
+});
+
+// An ascending subscription drains its backlog oldest first, and changing the order re-ranks
+// the groups already on the wire rather than only the ones opened after.
+test("the subscription's order picks which group goes first", async () => {
+	const { priority, subscriber, open, streams, broadcast } = ranking({ priority: 7, order: "ascending" });
+
+	const writers = [5, 1, 10].map((sequence) => {
+		const writer = open();
+		priority.add(writer, sequence);
+		return writer;
+	});
+	const at = (...positions: number[]) => positions.map((position) => sendOrder({ priority: 7, position }));
+
+	// Groups 5, 1, 10: oldest first.
+	expect(streams.map((stream) => stream.sendOrder)).toEqual(at(1, 0, 2));
+
+	const changed = subscriber.subscription.changed();
+	subscriber.update({ priority: 7, order: "descending" });
+	await changed;
+	expect(streams.map((stream) => stream.sendOrder)).toEqual(at(1, 2, 0));
+
+	priority.close();
+	for (const writer of writers) priority.remove(writer);
 	broadcast.close();
 });

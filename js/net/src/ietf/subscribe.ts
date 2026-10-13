@@ -1,5 +1,6 @@
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import type { Order } from "../track.ts";
 import * as Filter from "./filter.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
@@ -7,8 +8,41 @@ import { type MessageLocation, Parameters } from "./parameters.ts";
 import * as Properties from "./properties.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
-// we only support Group Order descending
-const GROUP_ORDER = 0x02;
+/**
+ * The GROUP_ORDER wire values.
+ *
+ * `Default` (0x0) is the wire's "no preference": the publisher picks, which in practice
+ * means its own DEFAULT_PUBLISHER_GROUP_ORDER track property. It decodes as descending, the
+ * order this publisher prefers, so the model never sees it and this client never sends it.
+ * Only drafts 14 to 16 can carry it; {@link Parameters} rejects it as a protocol violation
+ * on later drafts.
+ */
+export const GroupOrder = {
+	Default: 0x00,
+	Ascending: 0x01,
+	Descending: 0x02,
+} as const;
+
+/** A GROUP_ORDER wire value. */
+export type GroupOrder = (typeof GroupOrder)[keyof typeof GroupOrder];
+
+/** The GROUP_ORDER byte for a model {@link Order}. */
+function encodeGroupOrder(order: Order): GroupOrder {
+	return order === "ascending" ? GroupOrder.Ascending : GroupOrder.Descending;
+}
+
+/** The model {@link Order} for a GROUP_ORDER byte, refusing a value the draft does not define. */
+function decodeGroupOrder(value: number): Order {
+	switch (value) {
+		case GroupOrder.Ascending:
+			return "ascending";
+		case GroupOrder.Default:
+		case GroupOrder.Descending:
+			return "descending";
+		default:
+			throw new Error(`unknown group order: ${value}`);
+	}
+}
 
 /**
  * The filter this implementation joins a live track with.
@@ -28,6 +62,9 @@ export class Subscribe {
 	trackNamespace: Path.Valid;
 	trackName: string;
 	subscriberPriority: number;
+
+	/** The order the publisher is asked to deliver groups in (GROUP_ORDER). Defaults to descending. */
+	groupOrder: Order;
 
 	/** Which Objects the subscription delivers, resolved by the publisher against the live edge. */
 	filter: Filter.Filter;
@@ -49,6 +86,7 @@ export class Subscribe {
 		trackNamespace,
 		trackName,
 		subscriberPriority,
+		groupOrder,
 		filter,
 		fill,
 		propertiesWanted,
@@ -59,6 +97,7 @@ export class Subscribe {
 		trackNamespace: Path.Valid;
 		trackName: string;
 		subscriberPriority: number;
+		groupOrder?: Order;
 		filter?: Filter.Filter;
 		fill?: Filter.Fill;
 		propertiesWanted?: boolean;
@@ -69,6 +108,7 @@ export class Subscribe {
 		this.trackNamespace = trackNamespace;
 		this.trackName = trackName;
 		this.subscriberPriority = subscriberPriority;
+		this.groupOrder = groupOrder ?? "descending";
 		this.filter = filter ?? { kind: "unfiltered" };
 		this.fill = fill;
 		this.propertiesWanted = propertiesWanted ?? true;
@@ -86,7 +126,7 @@ export class Subscribe {
 
 		if (version === Version.DRAFT_14) {
 			await w.u8(this.subscriberPriority);
-			await w.u8(GROUP_ORDER);
+			await w.u8(encodeGroupOrder(this.groupOrder));
 			await w.bool(this.forward);
 			await w.write(Filter.encode(this.filter, version));
 			await w.u53(0); // no parameters
@@ -94,7 +134,7 @@ export class Subscribe {
 			// v15+: fields moved into parameters
 			const params = new Parameters();
 			params.subscriberPriority = this.subscriberPriority;
-			params.groupOrder = GROUP_ORDER;
+			params.groupOrder = encodeGroupOrder(this.groupOrder);
 			params.forward = this.forward;
 			params.subscriptionFilter = this.filter;
 
@@ -134,31 +174,27 @@ export class Subscribe {
 		if (version === Version.DRAFT_14) {
 			const subscriberPriority = await r.u8();
 
-			let groupOrder = await r.u8();
-			if (groupOrder > 2) {
-				throw new Error(`unknown group order: ${groupOrder}`);
-			}
-			if (groupOrder === 0) {
-				groupOrder = GROUP_ORDER; // default to descending
-			}
+			const groupOrder = decodeGroupOrder(await r.u8());
 
 			const forward = await r.bool();
 			const filter = await Filter.decodeInline(r);
 
 			await Parameters.decode(r, version); // ignore parameters
 
-			return new Subscribe({ requestId, trackNamespace, trackName, subscriberPriority, filter, forward });
+			return new Subscribe({
+				requestId,
+				trackNamespace,
+				trackName,
+				subscriberPriority,
+				groupOrder,
+				filter,
+				forward,
+			});
 		}
 		// v15+: fields are in parameters
 		const params = await Parameters.decode(r, version, "subscribe");
 		const subscriberPriority = params.subscriberPriority ?? 128;
-		let groupOrder = params.groupOrder ?? GROUP_ORDER;
-		if (groupOrder > 2) {
-			throw new Error(`unknown group order: ${groupOrder}`);
-		}
-		if (groupOrder === 0) {
-			groupOrder = GROUP_ORDER; // default to descending
-		}
+		const groupOrder = decodeGroupOrder(params.groupOrder ?? GroupOrder.Descending);
 
 		// FILL_PARAMETERS and INCLUDE_PROPERTIES are draft-20 additions, and the Range
 		// Filters draft-19 ones. An unknown message parameter is a protocol violation, so
@@ -185,6 +221,7 @@ export class Subscribe {
 			trackNamespace,
 			trackName,
 			subscriberPriority,
+			groupOrder,
 			filter,
 			fill,
 			// Defaults to 1, so an absent parameter means the subscriber wants them.
@@ -242,7 +279,7 @@ export class SubscribeOk {
 
 		if (version === Version.DRAFT_14) {
 			await w.u62(0n); // expires = 0
-			await w.u8(this.properties.groupOrder ?? GROUP_ORDER);
+			await w.u8(this.properties.groupOrder ?? GroupOrder.Descending);
 			await w.bool(this.largest !== undefined);
 			if (this.largest !== undefined) {
 				await w.u62(this.largest.groupId);
@@ -291,7 +328,7 @@ export class SubscribeOk {
 			// arrives as PUBLISH_DONE regardless, so there is nothing to act on.
 			await r.u62();
 
-			await r.u8(); // Don't care about group order
+			properties.groupOrder = await r.u8();
 
 			const contentExists = await r.bool();
 			if (contentExists) {
@@ -308,7 +345,10 @@ export class SubscribeOk {
 			const params = await Parameters.decode(r, version, "subscribe-ok");
 			largest = params.largest;
 			properties = await Properties.decode(r, version);
-			if (version === Version.DRAFT_15) properties.maxCacheDuration = params.maxCacheDuration;
+			if (version === Version.DRAFT_15) {
+				properties.maxCacheDuration = params.maxCacheDuration;
+				properties.groupOrder = params.groupOrder;
+			}
 		}
 
 		return new SubscribeOk({ requestId, trackAlias, largest, properties });

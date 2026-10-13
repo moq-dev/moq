@@ -35,12 +35,13 @@ The per-broadcast verdict combining client reports, the relay's starvation,
 and publisher timeliness lives downstream. This line only reports the
 counters.
 
-Decided (2026-10-06 audit): [stats totals and prefix
-tracks](/quest/m0/broadcast-epoch/stats-split.md) lands first, since it is m0
-and gates the release; the lag histogram lands on stats-split's totals and
+Decided (2026-10-06 audit): [stats prefix
+tracks](/quest/m0/broadcast-epoch/prefix-tracks.md) lands first, since it is
+m0 and gates the release; the lag histogram lands on the stats totals and
 prefix tracks rather than the per-path `publisher.json` and
-`subscriber.json` map rows, which stats-split retires.
-Rejected: the histogram first, which would make stats-split carry the lag
+`subscriber.json` map rows, which stay unchanged for existing readers
+(2026-10-12).
+Rejected: the histogram first, which would make prefix tracks carry the lag
 histogram and dropped counters across.
 
 Decided (2026-10-08): the egress histogram is its own quest,
@@ -56,7 +57,7 @@ on `main`.
 ## Required
 
 - [Viewer lag histogram](/quest/m1/qos/lag-histogram.md) - the egress `lag`
-  histogram and `dropped` counters land on stats-split's totals and prefix
+  histogram and `dropped` counters land on the stats totals and prefix
   tracks
 - [Lag dashboard](/quest/m1/qos/lag-dashboard.md) - the demo stats
   dashboard shows viewer lag percentiles and dropped media
@@ -66,8 +67,8 @@ on `main`.
 
 ## Related
 
-- [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) -
-  lands first and replaces the map rows; this line's histograms move onto its
+- [Stats prefix tracks](/quest/m0/broadcast-epoch/prefix-tracks.md) -
+  lands first beside the map rows; this line's histograms land on the
   totals and prefix tracks
 - [Media stats](/quest/m1/stats/README.md) - publishers and viewers report
   their own media, transport, and playback health, the media half of a verdict
