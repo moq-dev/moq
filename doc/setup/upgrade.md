@@ -34,6 +34,14 @@ These land with the next breaking release, not the 2026-09-23 train.
   moq-lite 06 and older and moq-transport. moq-lite 07 adds `ANNOUNCE_RESTART`
   (0x3), and lite-06's `ANNOUNCE_RESTART` is named `ANNOUNCE_UPDATE`, as it
   always meant.
+- **@moq/net announced requests follow restarts, and `broadcasts()` is gone.**
+  An unpinned `request(path, { announced: true })` now stays open across
+  publisher instances: its `active` moves to each new instance's broadcast and
+  clears between them, instead of the request ending with `Unroutable`. Read
+  `active` reactively and close the request when done; add `epoch` to keep the
+  old single-instance behavior. `Origin.Producer` and `Origin.Consumer` drop
+  `broadcasts(scope)`; iterate `announced(scope)` and keep the entries you need.
+  `@moq/watch` with `announced` off no longer moves to a later publisher.
 - **"Epoch" means only the publisher epoch.** The reconnect counter is
   `connects()`: `moq_tokio::Connection::epoch()` and moq-ffi's
   `MoqSession::epoch()` are `connects()`, which is Python's `connects()`, Go's

@@ -114,3 +114,4 @@ and bench readiness. Refusal reasons folded the same day into
 - [Runtime trait](/quest/m2/runtime-trait.md) - one runtime trait for spawn and time replaces web-async, with tokio, browser, io_uring, and sim implementations
 - [QUIC on the sim](/quest/m2/quic-sim.md) - the sim drives `moq-quic` over in-memory datagrams with latency and loss
 - [Seeded sim](/quest/m2/sim-seed.md) - sim tests draw every jitter from one seeded generator and replay bit-exact
+- [Sibling broadcasts on one clock](/quest/m2/sibling-broadcasts.md) - one broadcast per source (webcam, screen, each camera, each language) under a shared prefix, sharing one clock, documented and tested in Rust and JS

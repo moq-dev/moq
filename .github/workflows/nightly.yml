@@ -109,6 +109,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just js bench request-ids
 
+      # A restart should cost the same whether one or many requests follow the path,
+      # and an unrelated route should wake none of them.
+      - name: JS origin request restart benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just js bench requests
+
       # A route above several interest heads lands once per head, so its re-price
       # should expose any slope over heads times received routes.
       - name: JS origin announce forwarding benchmark

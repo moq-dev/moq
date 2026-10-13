@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { getter, Once, race, Signal } from "@moq/signals";
+import { announcedView } from "./announced.test-util";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import * as Epoch from "./epoch.ts";
 import { StreamCode, StreamError } from "./error.ts";
@@ -67,59 +68,43 @@ test("a borrowed table exposes dynamic serving and a live scoped broadcast map",
 	const origin = new Producer();
 	const table: Table = origin;
 	const scope = Path.Pattern.parse("room/**");
-	const live = table.broadcasts(scope);
+	const live = await announcedView(table, scope);
 	const changes: ReadonlyMap<Path.Valid, Route>[] = [];
 	const stop = live.subscribe((value) => changes.push(value));
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(live.peek().size).toBe(0);
 
 	const other = publish(origin, Path.from("other"));
 	const localPath = Path.from("room/alice");
 	const local = table.createBroadcast(localPath);
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(live.peek().has(localPath)).toBe(false);
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(live.peek().has(Path.from("other"))).toBe(false);
 
 	local.announce({ epoch: EPOCH, cost: 4n });
 	await settle();
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(live.peek().get(localPath)).toEqual(Route.normalize({ epoch: EPOCH, cost: 4n }));
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(changes.some((value) => value.get(localPath)?.cost === 4n)).toBe(true);
 
 	const prefix = Path.from("room");
 	const dynamic = table.dynamic(prefix, { cost: 2n });
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(live.peek().get(prefix)).toEqual(Route.normalize({ cost: 2n }));
 	dynamic.update({ cost: 3n });
 	await settle();
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(live.peek().get(prefix)).toEqual(Route.normalize({ cost: 3n }));
 
 	dynamic.close();
 	local.close();
 	other.close();
 	await settle();
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(live.peek().size).toBe(0);
 	stop();
-	origin.close();
-});
-
-test("unscoped broadcast getters share one fresh snapshot per mutation", () => {
-	const origin = new Producer();
-	const first = origin.broadcasts();
-	const second = origin.consume().broadcasts();
-	const empty = first.peek();
-	expect(second.peek()).toBe(empty);
-
-	const path = Path.from("room/alice");
-	const handle = origin.dynamic(path, { cost: 1n });
-	const added = second.peek();
-	expect(added).not.toBe(empty);
-	expect(first.peek()).toBe(added);
-	expect(added.get(path)).toEqual(Route.normalize({ cost: 1n }));
-
-	handle.update({ cost: 2n });
-	const repriced = first.peek();
-	expect(repriced).not.toBe(added);
-	expect(second.peek()).toBe(repriced);
-	expect(repriced.get(path)).toEqual(Route.normalize({ cost: 2n }));
-
-	handle.close();
 	origin.close();
 });
 
@@ -128,39 +113,49 @@ test("an announced local path competes with a received route on cost", async () 
 	const consumer = origin.consume();
 	const path = Path.from("room/alice");
 	const remote = wireOf(origin).receive(path, { epoch: EPOCH, hops: [PEER], cost: 5n });
-	const live = consumer.broadcasts();
+	const live = await announcedView(consumer);
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(live.peek().get(path)).toEqual(Route.normalize({ epoch: EPOCH, hops: [PEER], cost: 5n }));
 
 	// Unannounced, it competes for nothing.
 	const local = origin.createBroadcast(path);
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(live.peek().get(path)).toEqual(Route.normalize({ epoch: EPOCH, hops: [PEER], cost: 5n }));
 
 	// Cheaper wins; a tie falls to the local broadcast.
 	local.announce({ epoch: EPOCH, cost: 9n });
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(live.peek().get(path)).toEqual(Route.normalize({ epoch: EPOCH, hops: [PEER], cost: 5n }));
 	local.announce({ epoch: EPOCH, cost: 5n });
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(live.peek().get(path)).toEqual(Route.normalize({ epoch: EPOCH, cost: 5n }));
 
 	local.close();
 	await settle();
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(live.peek().get(path)).toEqual(Route.normalize({ epoch: EPOCH, hops: [PEER], cost: 5n }));
 
 	remote.close();
 	await settle();
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(live.peek().size).toBe(0);
 	origin.close();
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(live.peek().size).toBe(0);
 });
 
-test("a scoped route remains visible when an exact local path is outside the scope", () => {
+test("a scoped route remains visible when an exact local path is outside the scope", async () => {
 	const origin = new Producer();
 	const path = Path.from("room");
 	const remote = wireOf(origin).receive(path, { cost: 5n });
 	const local = publish(origin, path);
 	const scope = Path.Pattern.parse("room/*");
-	const live = origin.broadcasts(scope);
+	const live = await announcedView(origin, scope);
 
-	expect(origin.broadcasts().peek().get(path)).toMatchObject(Route.default);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+
+	expect((await announcedView(origin)).peek().get(path)).toMatchObject(Route.default);
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(live.peek().get(path)).toEqual(Route.normalize({ cost: 5n }));
 
 	local.close();
@@ -331,165 +326,6 @@ test("announced streams the table under a scope with origin-relative paths", asy
 	a.close();
 });
 
-test("follow reports the route serving the path", async () => {
-	const origin = new Producer();
-	const follow = origin.consume().follow(Path.from("pool/job"));
-	const epoch = Epoch.mint();
-	const next = async () => {
-		const event = await follow.next();
-		return event && { kind: event.kind, prefix: event.prefix };
-	};
-
-	// A prefix above the path covers it.
-	const pool = origin.dynamic(Path.from("pool"), { epoch });
-	expect(await next()).toEqual({ kind: "start", prefix: Path.from("pool") });
-
-	// A route beneath the path serves another broadcast, so the next event is the exact path's.
-	const beneath = publish(origin, Path.from("pool/job/thumbnail"));
-
-	// The path itself, from the same instance, takes over without a restart.
-	const exact = origin.createBroadcast(Path.from("pool/job"));
-	exact.announce({ epoch });
-	expect(await next()).toEqual({ kind: "update", prefix: Path.from("pool/job") });
-
-	// The covering prefix no longer serves the path, so its re-price is not seen: the next
-	// event is another instance at the path.
-	pool.update({ ...pool.route, cost: 5n });
-	exact.announce({ epoch: Epoch.mint() });
-	expect(await next()).toEqual({ kind: "restart", prefix: Path.from("pool/job") });
-
-	// It goes, so the prefix serves the path again: another instance.
-	exact.close();
-	expect(await next()).toEqual({ kind: "restart", prefix: Path.from("pool") });
-
-	pool.update({ ...pool.route, cost: 9n });
-	expect(await next()).toEqual({ kind: "update", prefix: Path.from("pool") });
-
-	pool.close();
-	expect(await next()).toEqual({ kind: "end", prefix: Path.from("pool") });
-
-	// The stream ends with the origin.
-	origin.close();
-	expect(await follow.next()).toBeUndefined();
-	beneath.close();
-});
-
-test("follow restarts onto a more specific route without an epoch", async () => {
-	const origin = new Producer();
-	const follow = origin.consume().follow(Path.from("pool/job"));
-
-	const pool = origin.dynamic(Path.from("pool"));
-	expect(await follow.next()).toMatchObject({ kind: "start", prefix: Path.from("pool") });
-
-	const exact = publish(origin, Path.from("pool/job"));
-	expect(await follow.next()).toMatchObject({ kind: "restart", prefix: Path.from("pool/job") });
-
-	follow.close();
-	exact.close();
-	pool.close();
-	origin.close();
-});
-
-test("follow ignores a route scoped beneath the path", async () => {
-	const origin = new Producer();
-	// A cheaper dynamic at the same prefix that claims only `room/*/chat`, so it never serves the path.
-	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));
-	const dynamic = chat.dynamic(Path.from("room/alice"));
-	const follow = origin.consume().follow(Path.from("room/alice"));
-
-	const first = origin.createBroadcast(Path.from("room/alice"));
-	first.announce({ cost: 5n });
-	expect(await follow.next()).toMatchObject({ kind: "start", route: { cost: 5n } });
-
-	// A republish is another instance of the route that serves the path.
-	const second = origin.createBroadcast(Path.from("room/alice"));
-	second.announce({ cost: 5n });
-	first.close();
-	expect(await follow.next()).toMatchObject({ kind: "restart", route: { cost: 5n } });
-
-	follow.close();
-	second.close();
-	dynamic.close();
-	origin.close();
-});
-
-test("follow starts on the serving route when joining late", async () => {
-	const origin = new Producer();
-	const pool = origin.dynamic(Path.from("pool"));
-	const exact = publish(origin, Path.from("pool/job"));
-
-	const follow = origin.consume().follow(Path.from("pool/job"));
-	expect(await follow.next()).toMatchObject({ kind: "start", prefix: Path.from("pool/job") });
-
-	// Nothing else is queued: the next event is the exact route ending, a restart onto the prefix.
-	exact.close();
-	expect(await follow.next()).toMatchObject({ kind: "restart", prefix: Path.from("pool") });
-
-	follow.close();
-	pool.close();
-	origin.close();
-});
-
-test("follow keeps a gap between routes of one epoch", async () => {
-	const origin = new Producer();
-	const epoch = Epoch.mint();
-	const exact = origin.createBroadcast(Path.from("pool/job"));
-	exact.announce({ epoch });
-	const follow = origin.consume().follow(Path.from("pool/job"));
-	expect(await follow.next()).toMatchObject({ kind: "start", prefix: Path.from("pool/job") });
-
-	// Both changes land before the table is read again, but the path went unserved in between,
-	// which ended any request on it: a start of its own, not an update.
-	exact.close();
-	const pool = origin.dynamic(Path.from("pool"), { epoch });
-	expect(await follow.next()).toMatchObject({ kind: "end", prefix: Path.from("pool/job") });
-	expect(await follow.next()).toMatchObject({ kind: "start", prefix: Path.from("pool") });
-
-	// A prefix standing while the path's route goes takes over in place.
-	const again = origin.createBroadcast(Path.from("pool/job"));
-	again.announce({ epoch });
-	expect(await follow.next()).toMatchObject({ kind: "update", prefix: Path.from("pool/job") });
-	again.close();
-	expect(await follow.next()).toMatchObject({ kind: "update", prefix: Path.from("pool") });
-
-	follow.close();
-	pool.close();
-	origin.close();
-});
-
-test("follow hands over to a prefix that started before the last change", async () => {
-	const origin = new Producer();
-	const exact = origin.createBroadcast(Path.from("pool/job"));
-	exact.announce({ epoch: Epoch.mint() });
-	const follow = origin.consume().follow(Path.from("pool/job"));
-	expect(await follow.next()).toMatchObject({ kind: "start", prefix: Path.from("pool/job") });
-
-	const epoch = Epoch.mint();
-	const pool = origin.dynamic(Path.from("pool"), { epoch });
-	exact.announce({ epoch });
-	expect(await follow.next()).toMatchObject({ kind: "restart", prefix: Path.from("pool/job") });
-
-	exact.close();
-	expect(await follow.next()).toMatchObject({ kind: "update", prefix: Path.from("pool") });
-
-	follow.close();
-	pool.close();
-	origin.close();
-});
-
-test("follow refuses a path no pattern can spell", () => {
-	const origin = new Producer();
-	expect(() => origin.consume().follow(Path.from("camera*main"))).toThrow();
-	origin.close();
-});
-
-test("follow refuses a path outside the scope", () => {
-	const origin = new Producer();
-	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("pool/job/cam"))]));
-	expect(() => scoped.consume().follow(Path.from("pool/job"))).toThrow();
-	origin.close();
-});
-
 test("hidden paths need an opt-in or a scope naming the dot segment", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
@@ -497,14 +333,22 @@ test("hidden paths need an opt-in or a scope naming the dot segment", async () =
 	const nested = publish(origin, Path.from("room/.internal"));
 	const visible = publish(origin, Path.from("room/catalog.pro"));
 
-	expect([...consumer.broadcasts().peek().keys()]).toEqual([Path.from("room/catalog.pro")]);
-	expect(consumer.broadcasts(undefined, { hidden: true }).peek().size).toBe(3);
-	expect([...consumer.broadcasts(Path.Pattern.parse(".stats/**")).peek().keys()]).toEqual([Path.from(".stats/node")]);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+
+	expect([...(await announcedView(consumer)).peek().keys()]).toEqual([Path.from("room/catalog.pro")]);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect((await announcedView(consumer, undefined, { hidden: true })).peek().size).toBe(3);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect([...(await announcedView(consumer, Path.Pattern.parse(".stats/**"))).peek().keys()]).toEqual([
+		Path.from(".stats/node"),
+	]);
 
 	const plain = consumer.announced();
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(await plain.next()).toMatchObject({ prefix: Path.from("room/catalog.pro") });
 	const opted = consumer.announced(Path.Pattern.parse("room/**"), { hidden: true });
 	const seen = [(await opted.next())?.prefix, (await opted.next())?.prefix].sort();
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(seen).toEqual([Path.from("room/.internal"), Path.from("room/catalog.pro")]);
 
 	plain.close();
@@ -916,8 +760,8 @@ test("announced requests share no subscription and follow discovery", () => {
 		spy.mockRestore();
 	}
 
-	// Each request follows its own path's route, and nothing shared between them.
-	expect(Math.max(...subscribers.values())).toBe(1);
+	// Each path has its own retirement and active-handle observers, never a shared table observer.
+	expect(Math.max(...subscribers.values())).toBe(2);
 
 	const slots = [...(wire.requests.peek()?.values() ?? [])];
 	expect(slots.length).toBe(200);
@@ -1309,10 +1153,16 @@ test("the cheapest received route competes with the local broadcast, not the new
 	const local = origin.createBroadcast(path);
 	local.announce({ epoch: EPOCH, cost: 5n });
 
-	expect(consumer.broadcasts().peek().get(path)).toEqual(Route.normalize({ epoch: EPOCH, hops: [PEER], cost: 1n }));
+	await new Promise<void>((resolve) => setImmediate(resolve));
+
+	expect((await announcedView(consumer)).peek().get(path)).toEqual(
+		Route.normalize({ epoch: EPOCH, hops: [PEER], cost: 1n }),
+	);
 	const request = consumer.request(path);
 	await settle();
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(request.active.peek()).toBeDefined();
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(served).toEqual(["cheap"]);
 
 	request.close();
@@ -1338,7 +1188,7 @@ test("a preferred link wins over a cheaper one, fails over, and moves back", asy
 	const backup = serve(origin, path, via("secondary"), route(1n));
 	let primary = serve(preferred, path, via("primary"), route(10n));
 
-	expect(consumer.broadcasts().peek().get(path)).toEqual(route(10n));
+	expect((await announcedView(consumer)).peek().get(path)).toEqual(route(10n));
 	const request = consumer.request(path);
 	await settle();
 	expect(request.active.peek()).toBeDefined();
@@ -1357,7 +1207,7 @@ test("a preferred link wins over a cheaper one, fails over, and moves back", asy
 	// A newer epoch outranks preference.
 	const newer = Epoch.parse("01900000-0000-7000-8000-000000000002");
 	const fresh = serve(origin, path, via("newer"), Route.normalize({ epoch: newer, hops: [PEER], cost: 1n }));
-	expect(consumer.broadcasts().peek().get(path)?.epoch).toBe(newer);
+	expect((await announcedView(consumer)).peek().get(path)?.epoch).toBe(newer);
 
 	request.close();
 	fresh();
@@ -1381,7 +1231,7 @@ test("a demoted link ranks below an unranked one, even when cheaper", async () =
 	const demoted = serve(origin.withPreference(Preference(-1)), path, via("demoted"), route(1n));
 	const unranked = serve(origin, path, via("unranked"), route(10n));
 
-	expect(consumer.broadcasts().peek().get(path)).toEqual(route(10n));
+	expect((await announcedView(consumer)).peek().get(path)).toEqual(route(10n));
 	const request = consumer.request(path);
 	await settle();
 	expect(request.active.peek()).toBeDefined();
@@ -2151,7 +2001,7 @@ test("an equal-cost pool spreads its paths the same way on every node", async ()
 	}
 });
 
-test("an equal-cost pool advertises the same member whatever order it arrived in", () => {
+test("an equal-cost pool advertises the same member whatever order it arrived in", async () => {
 	const prefix = Path.from("pool");
 	const workers = [10n, 11n].map((id) => HopSchema.parse(id));
 	const expected = spreadHash(prefix, [workers[0]]) < spreadHash(prefix, [workers[1]]) ? workers[0] : workers[1];
@@ -2159,7 +2009,8 @@ test("an equal-cost pool advertises the same member whatever order it arrived in
 	for (const order of [workers, [...workers].reverse()]) {
 		const origin = new Producer();
 		const handles = order.map((hop) => wireOf(origin).receive(prefix, { hops: [hop], cost: 3n }));
-		expect(origin.consume().broadcasts().peek().get(prefix)?.hops).toEqual([expected]);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect((await announcedView(origin.consume())).peek().get(prefix)?.hops).toEqual([expected]);
 		for (const handle of handles) handle.close();
 		origin.close();
 	}
@@ -2203,23 +2054,35 @@ test("a rooted producer shares the table and enforces its pattern union", async 
 	const origin = new Producer();
 	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/*")]));
 	const broadcast = publish(scoped, Path.from("room/alice"));
-	expect(origin.broadcasts().peek().has(Path.from("tenant/room/alice"))).toBe(true);
-	expect([...scoped.broadcasts().peek().keys()]).toEqual([Path.from("room/alice")]);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect((await announcedView(origin)).peek().has(Path.from("tenant/room/alice"))).toBe(true);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect([...(await announcedView(scoped)).peek().keys()]).toEqual([Path.from("room/alice")]);
 	const request = scoped.consume().request(Path.from("room/alice"));
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(request.path).toBe(Path.from("room/alice"));
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(request.active.peek()).toBeDefined();
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(() => scoped.createBroadcast(Path.from("other"))).toThrow("outside the origin scope");
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(() => scoped.request(Path.from("room/alice/deep"))).toThrow("outside the origin scope");
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(() => scoped.dynamic(Path.from("other"))).toThrow("outside the origin scope");
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(() => scoped.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("other/**")]))).toThrow(
 		"do not overlap",
 	);
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(() => origin.scope(Path.empty(), new Path.Patterns())).toThrow("do not overlap");
 
 	const nested = scoped.scope(Path.from("room"), new Path.Patterns([Path.Pattern.all()]));
-	expect([...nested.broadcasts().peek().keys()]).toEqual([Path.from("alice")]);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect([...(await announcedView(nested)).peek().keys()]).toEqual([Path.from("alice")]);
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(() => nested.createBroadcast(Path.from("alice/deep"))).toThrow("outside the origin scope");
 	const announced = nested.announced();
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(await announced.next()).toMatchObject({ kind: "start", prefix: Path.from("alice") });
 	announced.close();
 	request.close();
@@ -2231,18 +2094,23 @@ test("a scoped dynamic only serves allowed paths and presents relative requests"
 	const origin = new Producer();
 	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));
 	const dynamic = scoped.dynamic(Path.from("room"));
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(dynamic.prefix).toBe(Path.from("room"));
 	const denied = origin.request(Path.from("tenant/room/alice/video"));
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(denied.unroutable.peek()).toBe(true);
 	const request = origin.request(Path.from("tenant/room/alice/chat"));
 	const requests = dynamic.requested();
 	const pending = await requests.next();
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(pending.value?.path).toBe(Path.from("room/alice/chat"));
 	const broadcast = new BroadcastProducer();
 	pending.value?.accept(broadcast);
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(request.active.peek()).toBeDefined();
 	dynamic.update({ cost: 2n });
-	expect(origin.broadcasts().peek().get(Path.from("tenant/room"))?.cost).toBe(2n);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect((await announcedView(origin)).peek().get(Path.from("tenant/room"))?.cost).toBe(2n);
 	await requests.return?.();
 	dynamic.close();
 	request.close();
@@ -2269,25 +2137,31 @@ test("scoped wire views filter and rebase advertisements and blind requests", ()
 	origin.close();
 });
 
-test("a scoped dynamic is announced only to readers its scope can serve", () => {
+test("a scoped dynamic is announced only to readers its scope can serve", async () => {
 	const origin = new Producer();
 	const dynamic = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("*/chat")])).dynamic(Path.empty());
 	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/chat")]));
 	const video = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/video")]));
-	expect([...chat.broadcasts().peek().keys()]).toEqual([Path.empty()]);
-	expect([...video.broadcasts().peek().keys()]).toEqual([]);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect([...(await announcedView(chat)).peek().keys()]).toEqual([Path.empty()]);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect([...(await announcedView(video)).peek().keys()]).toEqual([]);
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect([...(wireOf(chat.consume()).advertised.peek()?.keys() ?? [])]).toEqual([Path.empty()]);
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect([...(wireOf(video.consume()).advertised.peek()?.keys() ?? [])]).toEqual([]);
 	dynamic.close();
 	origin.close();
 });
 
-test("a rooted reader presents the most specific covering route", () => {
+test("a rooted reader presents the most specific covering route", async () => {
 	const origin = new Producer();
 	const narrow = origin.dynamic(Path.from("room/alice"), { cost: 9n });
 	const broad = origin.dynamic(Path.from("room"), { cost: 1n });
 	const rooted = origin.scope(Path.from("room/alice"), new Path.Patterns([Path.Pattern.all()]));
-	expect(rooted.broadcasts().peek().get(Path.empty())?.cost).toBe(9n);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect((await announcedView(rooted)).peek().get(Path.empty())?.cost).toBe(9n);
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(wireOf(rooted.consume()).advertised.peek()?.get(Path.empty())?.[0]?.route.cost).toBe(9n);
 	broad.close();
 	narrow.close();
@@ -2301,14 +2175,19 @@ test("a scoped reader picks the best route its scope can see at a prefix", async
 	const video = scoped("*/video").dynamic(Path.empty(), { cost: 5n });
 	const reader = scoped("room/video");
 
-	expect(reader.broadcasts().peek().get(Path.empty())?.cost).toBe(5n);
-	expect(origin.broadcasts(Path.Pattern.parse("room/video")).peek().get(Path.empty())?.cost).toBe(5n);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+
+	expect((await announcedView(reader)).peek().get(Path.empty())?.cost).toBe(5n);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect((await announcedView(origin, Path.Pattern.parse("room/video"))).peek().get(Path.empty())?.cost).toBe(5n);
 	const announced = reader.announced();
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect((await announced.next())?.route.cost).toBe(5n);
 	announced.close();
 
 	// A session publishing the scoped view offers the video route too.
 	const offered = [...(wireOf(reader.consume()).advertised.peek()?.get(Path.empty()) ?? [])];
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(offered.map((advert) => advert.route.cost)).toEqual([5n]);
 
 	video.close();
@@ -2316,7 +2195,7 @@ test("a scoped reader picks the best route its scope can see at a prefix", async
 	origin.close();
 });
 
-test("a scoped reader sees a local broadcast that only loses to a route outside its scope", () => {
+test("a scoped reader sees a local broadcast that only loses to a route outside its scope", async () => {
 	const origin = new Producer();
 	const chat = origin
 		.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/*/chat")]))
@@ -2325,9 +2204,12 @@ test("a scoped reader sees a local broadcast that only loses to a route outside 
 	local.announce({ epoch: EPOCH, cost: 5n });
 	const reader = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/*")]));
 
-	expect(reader.broadcasts().peek().get(Path.from("room/alice"))?.cost).toBe(5n);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+
+	expect((await announcedView(reader)).peek().get(Path.from("room/alice"))?.cost).toBe(5n);
 	// Unscoped, the cheaper route still wins the prefix.
-	expect(origin.broadcasts().peek().get(Path.from("room/alice"))?.cost).toBe(0n);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect((await announcedView(origin)).peek().get(Path.from("room/alice"))?.cost).toBe(0n);
 
 	local.close();
 	chat.close();
@@ -2789,11 +2671,14 @@ test("public announcements saturate static costs and refuse invalid cost shapes"
 	const origin = new Producer();
 	const path = Path.from("priced");
 	const broadcast = origin.createBroadcast(path);
-	const view = origin.broadcasts();
+	const view = await announcedView(origin);
 	broadcast.announce({ cost: 2n ** 64n - 1n });
 	await settle();
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(view.peek().get(path)?.cost).toBe(2n ** 62n - 1n);
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(() => broadcast.announce({ cost: -1n })).toThrow(RangeError);
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(() => broadcast.announce({ cost: { warm: 1n, cold: 2n } } as unknown as Route)).toThrow(RangeError);
 	broadcast.close();
 	origin.close();

@@ -1,4 +1,5 @@
 import { afterEach, expect, jest, test } from "bun:test";
+import { announcedView } from "../announced.test-util";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
 import { SessionCode, SessionError } from "../error.ts";
 import * as Lite from "../lite/index.ts";
@@ -237,11 +238,13 @@ test("a borrowed connection origin exposes live routes and dynamic serving", asy
 		await waitUntil(() => handle.origin.peek() !== undefined);
 		const table = handle.origin.peek();
 		if (!table) throw new Error("expected an origin");
-		const live = table.broadcasts();
+		const live = await announcedView(table);
 		const prefix = Path.from("on-demand");
 		const route = table.dynamic(prefix);
+		await new Promise<void>((resolve) => setImmediate(resolve));
 		expect(live.peek().get(prefix)).toBeDefined();
 		route.close();
+		await new Promise<void>((resolve) => setImmediate(resolve));
 		expect(live.peek().has(prefix)).toBe(false);
 	} finally {
 		handle.close();
