@@ -64,7 +64,10 @@ Spike, splitting `media` from `net` alone:
 
 If the spike passes, migrate:
 
-- Split moq-ffi into one crate per ffi-shape layer.
+- Split moq-ffi into one crate per ffi-shape layer. Every layer keeps the
+  one runtime in `ffi.rs`, so `moq_ffi_shutdown` (Python's `atexit` hook)
+  still stops tasks from every layer; add an exit regression with a live
+  non-`net` task.
 - Point each wrapper at the generated modules, and delete any wrapper code
   that only existed to rename types. This includes every `rs/moq-ffi`
   consumer in AGENTS.md's Cross-Package Sync table; `cpp/moq`'s alias list
