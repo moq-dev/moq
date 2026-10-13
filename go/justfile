@@ -48,3 +48,8 @@ publish-ffi *args:
 [positional-arguments]
 publish-wrapper *args:
     {{ quote(justfile_directory() / "sh/go/publish-wrapper.sh") }} "$@"
+
+# Measure delivered QUIC payload across independent publisher/subscriber counts.
+[positional-arguments]
+bench *args:
+    bash ../sh/go/bench.sh "$@"

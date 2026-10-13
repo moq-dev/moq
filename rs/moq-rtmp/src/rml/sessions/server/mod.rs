@@ -982,78 +982,43 @@ impl ServerSession {
 
 	fn handle_amf0_data(
 		&mut self,
-		mut data: Vec<Amf0Value>,
+		data: Vec<Amf0Value>,
 		stream_id: u32,
 	) -> Result<Vec<ServerSessionResult>, ServerSessionError> {
-		if data.len() == 0 {
-			// No data so just do nothing
-			return Ok(Vec::new());
-		}
-
-		let first_element = data.remove(0);
-		match first_element {
-			Amf0Value::Utf8String(ref value) if value == "@setDataFrame" => {
-				self.handle_amf0_data_set_data_frame(data, stream_id)
-			}
-			_ => Ok(Vec::new()),
-		}
-	}
-
-	fn handle_amf0_data_set_data_frame(
-		&mut self,
-		mut data: Vec<Amf0Value>,
-		stream_id: u32,
-	) -> Result<Vec<ServerSessionResult>, ServerSessionError> {
-		if data.len() < 2 {
-			// We are expecting a "onMetaData" value and then a property with the actual metadata.  Since
-			// this wasn't provided we don't know how to deal with this message. Returning also avoids the
-			// `data[0]` index panic below on empty untrusted input.
-			return Ok(Vec::new());
-		}
-
-		match data[0] {
-			Amf0Value::Utf8String(ref value) if value == "onMetaData" => (),
-			_ => return Ok(Vec::new()),
-		}
-
-		if self.connected_app_name.is_none() {
-			return Ok(Vec::new()); // setDataFrame has no meaning until they are conneted and publishing
-		}
-
-		let app_name = match self.connected_app_name {
-			Some(ref name) => name.clone(),
-			None => return Ok(Vec::new()), // Not connected on a known app name.  Shouldn't really happen.
-		};
-
-		let publish_stream_key = match self.active_streams.get(&stream_id) {
-			Some(ref stream) => {
-				match stream.current_state {
-					StreamState::Publishing {
-						ref stream_key,
-						mode: _,
-					} => stream_key,
-					_ => return Ok(Vec::new()), // Return nothing since we aren't publishing
-				}
-			}
-
-			None => return Ok(Vec::new()), // Return nothing since this was not sent on an active stream
-		};
-
-		let mut metadata = StreamMetadata::new();
-		let object = data.remove(1);
-		let properties_option = object.get_object_properties();
-		match properties_option {
-			Some(properties) => metadata.apply_metadata_values(properties),
-			_ => (),
-		}
-
-		let event = ServerSessionEvent::StreamMetadataChanged {
-			stream_key: publish_stream_key.clone(),
-			app_name,
-			metadata,
+		// Anything that isn't stream metadata is still raised, so the caller can
+		// account for script data it doesn't carry instead of losing it silently.
+		let event = match self.stream_metadata(&data, stream_id) {
+			Some(event) => event,
+			None => ServerSessionEvent::UnhandleableAmf0Data { values: data },
 		};
 
 		Ok(vec![ServerSessionResult::RaisedEvent(event)])
+	}
+
+	/// Parse `@setDataFrame("onMetaData", {...})` sent on a stream that is publishing.
+	fn stream_metadata(&self, data: &[Amf0Value], stream_id: u32) -> Option<ServerSessionEvent> {
+		let [Amf0Value::Utf8String(command), Amf0Value::Utf8String(name), object, ..] = data else {
+			return None;
+		};
+		if command != "@setDataFrame" || name != "onMetaData" {
+			return None;
+		}
+
+		let app_name = self.connected_app_name.clone()?;
+		let StreamState::Publishing { ref stream_key, .. } = self.active_streams.get(&stream_id)?.current_state else {
+			return None;
+		};
+
+		let mut metadata = StreamMetadata::new();
+		if let Some(properties) = object.clone().get_object_properties() {
+			metadata.apply_metadata_values(properties);
+		}
+
+		Some(ServerSessionEvent::StreamMetadataChanged {
+			stream_key: stream_key.clone(),
+			app_name,
+			metadata,
+		})
 	}
 
 	fn handle_audio_data(

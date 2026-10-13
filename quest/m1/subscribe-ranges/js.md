@@ -2,7 +2,8 @@
 
 ## Goal
 
-`@moq/net` matches Rust: `Subscription` carries ranges and order, the lite-07
+`@moq/net` matches Rust: `Subscription` carries ranges beside the order from
+[Subscription order](/quest/m1/subscribe-ranges/order.md), the lite-07
 SUBSCRIBE carries them on the wire, FETCH is gone from lite-07, and
 `fetchGroup` becomes a one-range subscription or is removed. A JavaScript
 publisher serves requested ranges that are no longer in its live cache.

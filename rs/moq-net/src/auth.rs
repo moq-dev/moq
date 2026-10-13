@@ -30,6 +30,19 @@ use bytes::Bytes;
 
 use crate::{Error, Patterns, Result, SessionError, time::Instant};
 
+/// Classify malformed AUTH messages separately from transport and local failures.
+pub(crate) fn protocol_error(err: Error) -> Error {
+	match err {
+		Error::Decode(_)
+		| Error::BoundsExceeded(_)
+		| Error::WrongSize
+		| Error::TooManyParameters
+		| Error::UnexpectedMessage
+		| Error::UnexpectedStream => Error::ProtocolViolation,
+		err => err,
+	}
+}
+
 /// `ready!` for a `kio::Shared` poll, which yields a guard rather than a result.
 macro_rules! ready_or {
 	($e:expr) => {
@@ -255,6 +268,12 @@ impl Handle {
 				..Default::default()
 			}),
 		}
+	}
+
+	/// Whether this side speaks AUTH: false on a version without it, on a side that does
+	/// not offer it, and once the peer turns out not to.
+	pub(crate) fn supported(&self) -> bool {
+		self.state.lock().supported
 	}
 
 	/// The union of every grant this side holds: `None` until the peer first

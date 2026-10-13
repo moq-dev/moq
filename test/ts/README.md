@@ -47,8 +47,8 @@ The default arm runs `pcr-timing.py` over its capture too, after `compliance.py`
 for the PCR checks `compliance.py` leaves to it: the value interval (hard), and
 whether the bytes between consecutive PCRs are the ones the mux rate implies
 ([`pcr-schedule`](#byte-schedule), which gates whenever the rate is known, as the
-generated clip's is). With the rate known it also runs TSDuck's `pcrverify` past
-the first three seconds, failing on any PCR more than 500 ns off its byte position
+generated clip's is). With the rate known it also runs TSDuck's `pcrverify` from
+the first PCR, failing on any PCR more than 500 ns off its byte position
 at the rate: the `PCR_accuracy_error` an IRD or a TR 101 290 probe reports, which
 `pcr-schedule`'s packet of slack lets through.
 
@@ -350,16 +350,13 @@ correct 2 Mb/s stream on a 25 ms grid reads −0.74 % and +2.27 % on alternate
 intervals, which a percentage alone would fail.
 
 Give the rate whenever it is known. The estimate is total bytes over total time,
-so a transient biases every interval by the same amount: over a 20 s live window,
-the exporter's unpadded first half-second pulled it ~3 % low and read every padded
-interval after it as off schedule. `run.sh` passes the generated clip's rate
-(`--bitrate`) with `--schedule-pct-min 99`, and lets the grader estimate, and only
-report, for `--source`.
+so a transient biases every interval by the same amount. `run.sh` passes the generated
+clip's rate (`--bitrate`) with `--schedule-pct-min 99`, and lets the grader estimate,
+and only report, for `--source`.
 
-With the rate given, the intervals before the first null packet are not graded. The
-exporter pads only once its catalog records the rate, which import measures over the
-source's first two seconds, so a subscriber that starts with the publisher begins
-unpadded; the report counts those intervals as `unpadded_lead`.
+Every PCR interval is graded. Import holds the catalog until its initial two-second
+PCR window has measured a stable rate or established that the input is variable-rate.
+A constant-rate exporter therefore has the rate before it sends its first PCR.
 
 At the default 10 Mb/s the generated clip compresses to almost nothing, so padding
 dominates and no keyframe outgrows its 31 kB slot. At 2 Mb/s its 13-19 kB keyframes

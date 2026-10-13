@@ -73,7 +73,7 @@ Decided:
   [catalog references quest](/quest/m0/broadcast-epoch/catalog-references.md)
   owns the schemas, readers, and compatibility documentation.
 - Every first-party publisher that can restart mints its own: the apps,
-  moq-boy, the ingest gateways, moqsink, and the bindings below. Players
+  moq-boy, the ingest gateways, moqsink, and the bindings. Players
   (`moq play`, `@moq/watch`, demo/web) follow the announce `Restart`. moq-stats mints one per
   [group announcement](/doc/concept/stats.md#broadcasts), which also gated
   the release (decided 2026-10-04).
@@ -123,12 +123,9 @@ End+Start. The child quests own their focused regressions.
 
 ## Required
 
-- [Retired requests](/quest/m0/broadcast-epoch/retired-requests.md) - a held broadcast or track cannot open unpinned wire work against its replacement
 - [Resume duplicates](/quest/m0/broadcast-epoch/resume-duplicates.md) - a delayed group is delivered once even beyond the old 1024-entry history
-- [Source pin](/quest/m0/broadcast-epoch/source-pin.md) - `Source` is built from the resolved catalog broadcast and every later request stays on it, so an epochless replacement never splices into the old program
 - [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - players and exporters pin siblings consistently, with optional reference epochs and documented legacy best effort
 - [Publish catalog restart](/quest/m0/broadcast-epoch/publish-catalog-restart.md) - `@moq/publish` never reuses catalog group numbers under one name and epoch after a re-announce
-- [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and let a publisher announce one
 - [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the same release retires the per-path stats maps for totals and on-demand prefix tracks (decided 2026-10-05)
 
 ## Related

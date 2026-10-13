@@ -1,6 +1,6 @@
 //! Accepting: everything one incoming connection needs.
 
-use super::{Connection, Error, Identity};
+use super::{Connection, Error};
 use crate::udp;
 
 /// Whether connecting clients are asked for a certificate, and against what.
@@ -37,42 +37,23 @@ impl ClientAuth {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Config {
-	/// The certificate chain and key this server presents. Not optional: a
-	/// QUIC server without an identity cannot complete a handshake.
-	pub identity: Identity,
-	/// ALPN protocols to accept, in preference order. Required: QUIC without
-	/// an application protocol is refused.
-	pub alpn: Vec<String>,
-	/// Whether to ask connecting clients for a certificate.
-	pub client_auth: ClientAuth,
+	/// The TLS policy every handshake uses: identity, ALPNs, and client
+	/// authentication. Build one from an [`Identity`](super::Identity) with
+	/// [`Identity::server`](super::Identity::server), or share a resolver with
+	/// other listeners. It must allow TLS 1.3 and name at least one ALPN.
+	pub tls: std::sync::Arc<rustls::ServerConfig>,
 	/// The per-connection transport settings (timeouts, stream limits,
 	/// congestion control).
 	pub transport: super::Transport,
 }
 
 impl Config {
-	/// Serve `identity`, speaking no ALPN and asking no client for a
-	/// certificate until told otherwise.
-	pub fn new(identity: Identity) -> Self {
+	/// Serve `tls` with the default transport settings.
+	pub fn new(tls: std::sync::Arc<rustls::ServerConfig>) -> Self {
 		Self {
-			identity,
-			alpn: Vec::new(),
-			client_auth: ClientAuth::default(),
+			tls,
 			transport: super::Transport::default(),
 		}
-	}
-
-	/// Refuse a configuration no client could satisfy.
-	///
-	/// An empty store rejects every chain, so asking for a certificate with
-	/// nothing to check it against refuses exactly the clients that obey.
-	pub(crate) fn check(&self) -> Result<(), Error> {
-		if self.client_auth.roots().is_some_and(|(roots, _)| roots.is_empty()) {
-			return Err(Error::Tls(
-				"client authentication needs at least one root certificate".to_string(),
-			));
-		}
-		Ok(())
 	}
 }
 

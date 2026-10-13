@@ -3,13 +3,18 @@ import type { Getter } from "@moq/signals";
 import { type Grant, type Issued, Unsupported } from "./auth.ts";
 import { accept as acceptSession, connect as connectSession, type Established } from "./connection/index.ts";
 import { SessionCode, SessionError, StreamCode, toStreamCode } from "./error.ts";
+import { AuthMessage as IetfAuthMessage, IetfAuthWire } from "./ietf/auth.ts";
 import * as Ietf from "./ietf/index.ts";
-import { LiteAuthWire } from "./lite/auth.ts";
+import * as IetfMessage from "./ietf/message.ts";
+import { TrackStatusRequest } from "./ietf/track.ts";
+import { Version as IetfVersion } from "./ietf/version.ts";
+import { AuthMessage as LiteAuthMessage, LiteAuthWire } from "./lite/auth.ts";
 import * as Lite from "./lite/index.ts";
+import * as LiteMessage from "./lite/message.ts";
 import { createMockTransportPair, type MockTransport } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
-import { Writer } from "./stream.ts";
+import { type Stream, Writer } from "./stream.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
 
@@ -81,6 +86,35 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 		server.abort();
 	});
 
+	test("an oversized grant update reports Unsupported and revokes only its token", async () => {
+		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
+		const requests = server.auth.requests();
+		const issued: Issued[] = [];
+		const answering = (async () => {
+			for (;;) {
+				const request = await requests.next();
+				if (!request) break;
+				issued.push(request.accept(grant([request.token.byteLength === 0 ? "a" : "b"], [])));
+			}
+		})();
+		try {
+			await waitFor(client.auth.grant, (g) => g?.publish.equals(patterns("a")) === true);
+			const token = await client.auth.add("update");
+			await waitFor(client.auth.grant, (g) => g?.publish.equals(patterns("a", "b")) === true);
+			const publish = new Path.Patterns(
+				Array.from({ length: 20 }, (_, i) => Path.Pattern.subtree(`${i}${"x".repeat(4000)}`)),
+			);
+			issued[issued.length - 1].update({ publish, subscribe: patterns() });
+			expect(await token.closed).toBeInstanceOf(Unsupported);
+			expect(token.grant.peek()).toBeUndefined();
+			await waitFor(client.auth.grant, (g) => g?.publish.equals(patterns("a")) === true);
+		} finally {
+			client.abort();
+			server.abort();
+			await answering;
+		}
+	});
+
 	test("an out-of-scope broadcast closes the session and names the path", async () => {
 		const origin = new OriginProducer();
 		const { client, server, transport } = await connect({ publish: origin, protocol });
@@ -148,6 +182,26 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 		announced.close();
 		client.abort();
 		server.abort();
+	});
+
+	test("an explicit unsupported token uses the negotiated AUTH registry", async () => {
+		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
+		const requests = server.auth.requests();
+		const answering = (async () => {
+			for (;;) {
+				const request = await requests.next();
+				if (!request) break;
+				if (request.token.byteLength === 0) request.accept(grant([], []));
+				else request.reject(SessionCode.Unsupported, "credential kind unsupported");
+			}
+		})();
+		try {
+			await expect(client.auth.add("unsupported")).rejects.toBeInstanceOf(Unsupported);
+		} finally {
+			client.abort();
+			server.abort();
+			await answering;
+		}
 	});
 
 	test("a refused token surfaces the acceptor's code and reason", async () => {
@@ -394,3 +448,205 @@ test("a revoked grant resets its subscriptions with UNAUTHORIZED", async () => {
 		server.abort();
 	}
 });
+
+// Capture the acceptor's actual AUTH writer after a valid setup grant. The following
+// bytes travel through the same connection dispatcher and presenter as a real peer.
+describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("AUTH violations %s", (protocol) => {
+	test("a second presenter message closes the session", async () => {
+		const streams: Stream[] = [];
+		const prototype = protocol === Lite.ALPN_07_WIP ? LiteAuthWire.prototype : IetfAuthWire.prototype;
+		const original = prototype.present;
+		const spy = spyOn(prototype, "present").mockImplementation(async function (
+			this: LiteAuthWire & IetfAuthWire,
+			token,
+		) {
+			const stream = await original.call(this, token);
+			streams.push(stream);
+			return stream;
+		});
+		let pair: Pair | undefined;
+		try {
+			pair = await connect({ protocol });
+			await waitFor(pair.client.auth.grant, (g) => g !== undefined);
+			await waitFor(pair.server.auth.grant, (g) => g !== undefined);
+			await streams[0]?.writer.u53(0);
+			expect((await withTimeout(pair.transport.closed, 100, "second AUTH did not close")).closeCode).toBe(
+				SessionCode.ProtocolViolation,
+			);
+		} finally {
+			spy.mockRestore();
+			pair?.client.abort();
+			pair?.server.abort();
+		}
+	});
+
+	test("a malformed presenter AUTH closes the session", async () => {
+		const pair = await connect({ protocol });
+		await waitFor(pair.client.auth.grant, (g) => g !== undefined);
+		await waitFor(pair.server.auth.grant, (g) => g !== undefined);
+		const lite = protocol === Lite.ALPN_07_WIP;
+		const prototype = lite ? LiteAuthMessage.prototype : IetfAuthMessage.prototype;
+		const spy = spyOn(prototype, "encode").mockImplementation(async (writer: Writer) => {
+			const body = async (w: Writer) => {
+				if (!lite) await w.u62(2n);
+				await w.u53(2);
+			};
+			if (lite) await LiteMessage.encode(writer, body);
+			else await IetfMessage.encode(writer, body, IetfAuthMessage.id);
+		});
+		const added = pair.client.auth.add("bad").catch(() => undefined);
+		try {
+			expect((await withTimeout(pair.transport.closed, 100, "malformed AUTH did not close")).closeCode).toBe(
+				SessionCode.ProtocolViolation,
+			);
+		} finally {
+			spy.mockRestore();
+			pair.client.abort();
+			pair.server.abort();
+			await added;
+		}
+	});
+
+	for (const fault of [
+		"unknown reply",
+		"oversized code",
+		"truncated error",
+		"extra body",
+		"oversized expiry",
+	] as const) {
+		test(`${fault} closes the session`, async () => {
+			const streams: Stream[] = [];
+			const lite = protocol === Lite.ALPN_07_WIP;
+			const prototype = lite ? LiteAuthWire.prototype : IetfAuthWire.prototype;
+			const original = prototype.grant;
+			const spy = spyOn(prototype, "grant").mockImplementation(async function (
+				this: LiteAuthWire & IetfAuthWire,
+				stream,
+				value,
+			) {
+				streams.push(stream);
+				await original.call(this, stream, value);
+			});
+			let pair: Pair | undefined;
+			try {
+				pair = await connect({ protocol });
+				await waitFor(pair.client.auth.grant, (g) => g !== undefined);
+				await waitFor(pair.server.auth.grant, (g) => g !== undefined);
+				const stream = streams[0];
+				if (!stream) throw new Error("setup AUTH writer missing");
+				if (fault === "unknown reply") {
+					await stream.writer.u53(99);
+				} else {
+					const body = async (writer: Writer) => {
+						if (fault === "oversized expiry") {
+							await writer.u53(0);
+							await writer.u53(0);
+							await writer.u62(1n << 53n);
+						} else {
+							await writer.u62(fault === "oversized code" ? 1n << 32n : 1n);
+							if (fault !== "truncated error") await writer.string("");
+							if (fault === "extra body") await writer.u53(0);
+						}
+					};
+					const id = fault === "oversized expiry" ? (lite ? 0 : 0x40b62) : lite ? 1 : 0x40b63;
+					if (lite) await LiteMessage.encode(stream.writer, body, { id });
+					else await IetfMessage.encode(stream.writer, body, id);
+				}
+				expect((await withTimeout(pair.transport.closed, 100, "malformed AUTH did not close")).closeCode).toBe(
+					SessionCode.ProtocolViolation,
+				);
+			} finally {
+				spy.mockRestore();
+				pair?.client.abort();
+				pair?.server.abort();
+			}
+		});
+	}
+});
+
+// AUTH shares its ID space with every other request from the same peer.
+describe.each([Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("AUTH request IDs %s", (protocol) => {
+	for (const client of [true, false]) {
+		for (const fault of ["reused", "wrong parity"] as const) {
+			test(`${client ? "client" : "server"} ${fault} closes the session`, async () => {
+				const pair = await connect({ protocol });
+				await waitFor(pair.client.auth.grant, (g) => g !== undefined);
+				await waitFor(pair.server.auth.grant, (g) => g !== undefined);
+				const original = IetfAuthMessage.prototype.encode;
+				const spy = spyOn(IetfAuthMessage.prototype, "encode").mockImplementation(async function (
+					this: IetfAuthMessage,
+					writer,
+					version,
+				) {
+					this.requestId = fault === "reused" ? (client ? 0n : 1n) : client ? 1n : 0n;
+					await original.call(this, writer, version);
+				});
+				const added = (client ? pair.client : pair.server).auth.add("bad ID").catch(() => undefined);
+				try {
+					expect(
+						(await withTimeout(pair.transport.closed, 100, "invalid AUTH ID left session open")).closeCode,
+					).toBe(SessionCode.InvalidRequestId);
+				} finally {
+					spy.mockRestore();
+					pair.client.abort();
+					pair.server.abort();
+					await added;
+				}
+			});
+		}
+	}
+});
+
+for (const [protocol, version] of [
+	[Ietf.ALPN.DRAFT_17, IetfVersion.DRAFT_17],
+	[Ietf.ALPN.DRAFT_22, IetfVersion.DRAFT_22],
+] as const) {
+	test(`TRACK_STATUS cannot reuse setup AUTH ID on ${protocol}`, async () => {
+		const pair = await connect({ protocol });
+		await waitFor(pair.client.auth.grant, (g) => g !== undefined);
+		try {
+			const raw = await pair.transport.createBidirectionalStream();
+			const writer = new Writer(raw.writable, version);
+			await writer.u53(TrackStatusRequest.id);
+			await new TrackStatusRequest({
+				requestId: 0n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+			}).encode(writer, version);
+			expect(
+				(await withTimeout(pair.transport.closed, 100, "cross-request reuse left session open")).closeCode,
+			).toBe(SessionCode.InvalidRequestId);
+		} finally {
+			pair.client.abort();
+			pair.server.abort();
+		}
+	});
+}
+
+for (const protocol of [Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22]) {
+	test(`AUTH accepts reordered IDs on ${protocol}`, async () => {
+		const pair = await connect({ protocol });
+		await waitFor(pair.client.auth.grant, (g) => g !== undefined);
+		await waitFor(pair.server.auth.grant, (g) => g !== undefined);
+		const original = IetfAuthMessage.prototype.encode;
+		const spy = spyOn(IetfAuthMessage.prototype, "encode").mockImplementation(async function (
+			this: IetfAuthMessage,
+			writer,
+			version,
+		) {
+			// Swap the next two independently opened request IDs, preserving endpoint parity.
+			this.requestId = this.requestId < 4n ? this.requestId + 2n : this.requestId - 2n;
+			await original.call(this, writer, version);
+		});
+		try {
+			for (const endpoint of [pair.client, pair.server]) {
+				await expect(endpoint.auth.add("first")).rejects.toBeInstanceOf(Unsupported);
+				await expect(endpoint.auth.add("second")).rejects.toBeInstanceOf(Unsupported);
+			}
+		} finally {
+			spy.mockRestore();
+			pair.client.abort();
+			pair.server.abort();
+		}
+	});
+}

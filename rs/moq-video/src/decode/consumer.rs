@@ -248,17 +248,10 @@ mod tests {
 		}
 
 		let origin = produce_origin();
-		let requests = origin.dynamic("", Default::default()).unwrap();
-		let served = source_subscriber.clone();
-		tokio::spawn(async move {
-			while let Ok(request) = requests.requested_broadcast().await {
-				request.accept(served.clone());
-			}
-		});
 		let catalog = moq_mux::catalog::Consumer::<()>::new(&source_subscriber, moq_mux::catalog::CatalogFormat::Hang)
 			.await
 			.unwrap();
-		let source = moq_mux::Source::new(origin.consume(), "test");
+		let source = moq_mux::Source::new(origin.consume(), source_subscriber.clone());
 		// Both frames are encoded before the export runs, so the exporter needs a budget
 		// wide enough to read them: its REAL_TIME default keeps only the live edge, and
 		// the second `next()` would then block forever waiting for a group that was

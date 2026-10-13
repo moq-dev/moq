@@ -97,7 +97,7 @@ pub struct SelectArgs {
 	#[usage(long, value_enum)]
 	pub video_codec: Option<VideoCodecArg>,
 
-	/// Leave video out (audio only).
+	/// Leave video out (audio only); native playback opens no window.
 	#[usage(long, conflicts("--video-name", "--video-codec", "--no-audio"))]
 	pub no_video: bool,
 
@@ -253,18 +253,27 @@ pub struct Subscribe {
 }
 
 impl Subscribe {
-	/// Export the broadcast at `path` on `origin` with the resolved settings; [`run`](Self::run)
-	/// drives it.
-	pub fn new(origin: moq_net::origin::Consumer, path: &str, catalog: CatalogFormat, args: SubscribeArgs) -> Self {
+	/// Resolve the broadcast at `path` on `origin` to export it with the resolved settings;
+	/// [`run`](Self::run) drives it.
+	pub async fn new(
+		origin: moq_net::origin::Consumer,
+		path: &str,
+		catalog: CatalogFormat,
+		args: SubscribeArgs,
+	) -> anyhow::Result<Self> {
 		let path = moq_net::Path::new(path).to_owned();
-		let source = moq_mux::Source::new(origin.clone(), &path);
-		Self {
+		let broadcast = origin
+			.request_broadcast(&path, None)
+			.await
+			.with_context(|| format!("failed to resolve broadcast `{path}`"))?;
+		let source = moq_mux::Source::new(origin.clone(), broadcast);
+		Ok(Self {
 			origin,
 			path,
 			source,
 			catalog,
 			args,
-		}
+		})
 	}
 
 	/// Build the catalog stream, narrowed by the rendition selection flags. The

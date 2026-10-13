@@ -45,10 +45,10 @@ is also a cross-implementation interop check.
 The page loads `js/wasm/dist/moq.js` from a URL rather than an import the
 bundler can follow, so what runs is the generated output exactly as it ships:
 the glue, the `.wasm` it fetches, and the JS names `#[wasm_bindgen]` chose.
-`run.sh` also type-checks the harness against the generated `moq.d.ts`, which is
-the only thing in the repo that reads it. That is worth doing: wasm-bindgen
-resolves a type in a signature by its Rust identifier alone, so a binding can
-compile, run, and still publish typings that name the wrong class.
+`just check` and `run.sh` both type-check the harness against the generated
+`moq.d.ts`. That is worth doing: wasm-bindgen resolves a type in a signature
+by its Rust identifier alone, so a binding can compile, run, and still publish
+typings that name the wrong class.
 
 ### Relays
 

@@ -2,7 +2,7 @@
 
 import asyncio
 import struct
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import cast
 
 import moq
@@ -138,7 +138,9 @@ def test_protocol_error_helper_covers_known_app_and_unknown():
 
 def test_error_str_is_rust_display():
     assert str(moq.Error.Closed()) == "closed"  # type: ignore[attr-defined]
-    assert str(moq.Error.Transport("reset")) == "transport: reset"  # type: ignore[attr-defined]
+    error = moq.Error.Transport(reason="reset")  # type: ignore[attr-defined]
+    assert error.reason == "reset"
+    assert str(error) == "transport: reset"
     details = moq.ProtocolError(scope=moq.ErrorScope.STREAM, code=468, kind=moq.ProtocolKind.APP, message="gone")
     assert str(moq.Error.Protocol(details)) == "gone"  # type: ignore[attr-defined]
 
@@ -371,6 +373,35 @@ async def test_announced_broadcast():
         break
 
 
+async def test_announced_epoch_restarts():
+    origin = moq.OriginProducer()
+    consumer = origin.consume()
+    announced = consumer.announced()
+    broadcast = origin.create_broadcast("epoch")
+
+    first = moq.mint_epoch()
+    fixed = datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
+    assert moq.epoch_time("018bcfe5-6800-7000-8000-000000000000") == fixed
+    broadcast.announce(moq.Route(epoch=first))
+    start = await next_route(announced)
+    assert isinstance(start, moq.AnnounceEventStart)
+    assert start.announce.route.epoch == first
+
+    second = moq.mint_epoch()
+    broadcast.announce(moq.Route(epoch=second))
+    restart = await next_route(announced)
+    assert isinstance(restart, moq.AnnounceEventRestart)
+    assert restart.announce.route.epoch == second
+
+    with pytest.raises(moq.Error.InvalidEpoch):  # type: ignore[attr-defined]
+        moq.epoch_time(first.upper())
+    with pytest.raises(OverflowError):
+        moq.epoch_time("ffffffff-ffff-7000-8000-000000000000")
+    with pytest.raises(moq.Error.InvalidEpoch):  # type: ignore[attr-defined]
+        broadcast.announce(moq.Route(epoch="not-an-epoch"))
+    broadcast.close()
+
+
 def test_publish_lifecycle():
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("status")
@@ -506,6 +537,8 @@ async def test_dynamic_track_request():
 
     request = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
     assert request.name == "events"
+    demand = request.demand()
+    assert demand.is_used()
 
     # Accept the request as a raw track (which unblocks the subscribe), then write.
     track = request.accept()
@@ -517,7 +550,13 @@ async def test_dynamic_track_request():
     assert frame is not None
     assert frame.payload == payload
 
+    track_consumer.cancel()
+    await asyncio.wait_for(demand.unused(), timeout=5.0)
     track.finish()
+    broadcast.close()
+    del track
+    with pytest.raises(moq.Error.Closed):  # type: ignore[attr-defined]
+        await asyncio.wait_for(demand.used(), timeout=5.0)
 
 
 async def test_dynamic_track_request_can_publish_media():

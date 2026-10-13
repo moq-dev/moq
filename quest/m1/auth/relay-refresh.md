@@ -12,6 +12,14 @@ expiry, an expiry that leaves the union intact ends only that token, and
 
 ## Plan
 
+- Coordinate shared plumbing with [Request tokens](/quest/m1/auth/request-token.md)
+  and #5148. The 2026-10-12 request-token plan chooses one queue with explicit
+  session/request event variants and distinct acceptance handles. The relay
+  accepts session events here and explicitly refuses request verification
+  as `Unsupported`; it must never attach a request token as a session grant.
+  Share cancellation, pending-work bounds, and persistent connection handles
+  whichever implementation lands first. #5282 already implements this shared
+  plumbing; its separate open API and limit-policy decisions remain open.
 - `Connection::run` in `rs/moq-relay/src/connection.rs` takes `requests()`
   from `moq_net::server::Handshake::auth()` before `.ok()`, so the relay owns
   the initial empty AUTH too and the driver's fallback never races it.
@@ -71,9 +79,11 @@ expiry, an expiry that leaves the union intact ends only that token, and
 - Bound pending tokens: `auth::Handle::requests()` hands out an unbounded
   queue today, and a closed AUTH stream leaves its request queued, so a peer
   that finishes AUTH streams faster than the relay verifies them grows it
-  without limit (Codex security review on #4039). This quest is the first
-  consumer, so bound it per session here and refuse what overflows; dropping a
-  `Request` already refuses its token.
+  without limit (Codex security review on #4039). Bound it per session and
+  refuse what overflows; share the bound and withdrawal support with the
+  request-token hook whichever lands first. Neither consumer may land with
+  unbounded pending verification. Dropping a `Request` already refuses its
+  token.
 - Docs: `doc/bin/relay/auth.md` gains an "in-band tokens" section beside
   revalidation stating that grants union, that a token needs the admitted
   root, what an expiry does to the union today, and that the grant's expiry

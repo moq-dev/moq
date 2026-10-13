@@ -32,8 +32,7 @@ quest.
 
 Decided 2026-10-08: this does not wait for the
 [switch](/quest/m1/quic/fork/switch.md). The core and its BBR3 are already in
-`rs/moq-quic`, and local fixes there land on their own, as
-[input validation](/quest/m1/quic/fork/input-validation.md) does.
+`rs/moq-quic`, and local fixes there land on their own.
 
 ## Closes
 
