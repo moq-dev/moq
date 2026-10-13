@@ -104,7 +104,7 @@ async fn play(consumer: moq_net::origin::Consumer, announce: moq_net::announce::
 	// Subscribe to the video track.
 	let latency = Duration::from_millis(500);
 	let track_consumer = broadcast
-		.track(name)?
+		.track(hang::catalog::Reference::track(config, name))?
 		.subscribe(
 			moq_net::track::Subscription::default()
 				.with_priority(1)

@@ -202,7 +202,9 @@ async fn pick_track(source: &moq_mux::Source, catalog: &Catalog, codec: Codec) -
 			let Some((name, config)) = pick_audio(source, catalog) else {
 				return Ok(None);
 			};
-			let track = source.subscribe_track(config.broadcast.as_ref(), name).await?;
+			let track = source
+				.subscribe_track(config.broadcast.as_ref(), hang::catalog::Reference::track(config, name))
+				.await?;
 			Ok(Some(codec::Track::opus(track, config)?))
 		}
 		Codec::H264 | Codec::H265 | Codec::Vp8 | Codec::Vp9 | Codec::Av1 => {
@@ -217,7 +219,9 @@ async fn pick_track(source: &moq_mux::Source, catalog: &Catalog, codec: Codec) -
 			let Some((name, config)) = pick_video(source, catalog, target) else {
 				return Ok(None);
 			};
-			let track = source.subscribe_track(config.broadcast.as_ref(), name).await?;
+			let track = source
+				.subscribe_track(config.broadcast.as_ref(), hang::catalog::Reference::track(config, name))
+				.await?;
 			Ok(Some(codec::Track::video(track, config)?))
 		}
 		other => Err(Error::UnsupportedCodec(format!("{other:?}"))),

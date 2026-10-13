@@ -268,8 +268,9 @@ class BroadcastConsumer:
         anything else names a sibling relative to it (e.g. ``./source``). Call it on
         a rendition that carries one before :meth:`~moq.media.ContainerConsumer.subscribe`,
         :meth:`subscribe_track`, :meth:`fetch_group`, or :meth:`~moq.media.ContainerGroupConsumer.fetch`,
-        which take a track name rather than a rendition; :meth:`decode_audio` and
-        :meth:`decode_video` resolve it themselves.
+        which take a track name rather than a rendition: the rendition's ``track``, or its
+        catalog key when unset. :meth:`decode_audio` and :meth:`decode_video` resolve both
+        themselves.
 
         Raises if this broadcast came from a local producer rather than an origin,
         since a standalone broadcast has no sibling to name.

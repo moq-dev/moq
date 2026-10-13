@@ -79,6 +79,16 @@ pub struct TextConfig {
 	#[serde(default)]
 	pub broadcast: Option<moq_net::path::RelativeOwned>,
 
+	/// The track's name in its broadcast, when it differs from this entry's ID: its key in the
+	/// catalog. Absent means the ID is the track name, as in every catalog before this field.
+	///
+	/// Set it only when the ID can't be the name, such as two renditions of same-named tracks
+	/// from different broadcasts. Readers resolve the name with
+	/// [`Reference::track`](crate::catalog::Reference::track); one that predates the
+	/// field subscribes to the ID instead.
+	#[serde(default)]
+	pub track: Option<String>,
+
 	/// The serialization format of each cue payload.
 	#[serde_as(as = "DisplayFromStr")]
 	pub format: TextFormat,
@@ -130,6 +140,7 @@ impl TextConfig {
 	pub fn new(format: TextFormat) -> Self {
 		Self {
 			broadcast: None,
+			track: None,
 			format,
 			role: TextRole::default(),
 			lang: None,

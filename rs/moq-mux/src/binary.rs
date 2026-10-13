@@ -75,7 +75,7 @@ use std::marker::PhantomData;
 use bytes::Bytes;
 use moq_net::Timed;
 
-use hang::catalog::{BinaryConfig, Compression, Mode};
+use hang::catalog::{BinaryConfig, Compression, Mode, Reference};
 
 use crate::catalog::hang::CatalogExt;
 use crate::catalog::{IntoRendition, Listing, RenditionConfig};
@@ -380,7 +380,7 @@ impl crate::catalog::Entry<'_, BinaryConfig> {
 	/// Errors if the entry declares a mode or compression this build doesn't implement.
 	pub async fn subscribe(&self, source: &crate::Source) -> crate::Result<Consumer> {
 		let track = source
-			.subscribe_track(self.config().broadcast.as_ref(), self.name())
+			.subscribe_track(self.config().broadcast.as_ref(), self.config().track(self.name()))
 			.await?;
 		Consumer::from_track(track, self.config())
 	}

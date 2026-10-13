@@ -655,6 +655,14 @@ int main()
 			moq_source_subscribe_video(ctx, conn, *snapshot);
 			moq_source_subscribe_audio(ctx, conn, *snapshot);
 			CHECK(!conn->pending_video && !conn->pending_audio);
+			// Keyed apart from its track, the rendition still names the track already playing.
+			auto rekeyed = *snapshot;
+			auto entry = rekeyed.video.extract(rekeyed.video.begin());
+			entry.mapped().track = entry.key();
+			entry.key() = "main";
+			rekeyed.video.insert(std::move(entry));
+			moq_source_subscribe_video(ctx, conn, rekeyed);
+			CHECK(!conn->pending_video);
 			video.coded = moq::Dimensions{(video.coded ? video.coded->width : 0) + 16, 16};
 			audio.sample_rate += 1;
 			moq_source_subscribe_video(ctx, conn, *snapshot);
