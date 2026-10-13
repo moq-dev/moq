@@ -25,7 +25,8 @@ Two independent causes, both on the scheduled Interop run of 2026-10-12
 - The released JS lanes run this checkout's client. `compat.sh` copies
   `test/interop/clients/js-native/subscribe.ts` into the released `@moq/*`
   environment. #5099 (2026-10-10) changed that script to call
-  `catalog.latest()`, which released `@moq/hang` 0.5.2 lacks. Every
+  `catalog.latest()` on a `Json.Snapshot.Consumer`, a method released
+  `@moq/json` 0.4.2 lacks (`js/json/src/snapshot/consumer.ts`). Every
   `publisher=released fetch` cell has failed with `catalog.latest is not a
   function` since the 2026-10-11 nightly. Decided by the maintainer
   2026-10-13 on #5388: the compat lanes run their own observer in
