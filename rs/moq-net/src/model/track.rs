@@ -3803,9 +3803,10 @@ struct Cursor {
 	datagram_index: usize,
 	/// Minimum sequence to return from any `recv` method. Set by `start_at`.
 	min_sequence: u64,
-	/// One past the highest sequence returned by `next_group`.
+	/// One past the highest sequence returned by `next_group`, or `None` once it returned
+	/// `u64::MAX` and no group can follow.
 	/// Used only by that method to skip late arrivals; does not affect `recv_group`.
-	next_sequence: u64,
+	next_sequence: Option<u64>,
 	/// Exclusive upper sequence bound for `next_group` and `recv_group`, in the form
 	/// [`Cap::exclusive`] produces. `None` means no cap. Set by `end_at`;
 	/// can be raised, lowered, or unset at any time. Groups at or past the cap stay in
@@ -3873,7 +3874,7 @@ impl Cursor {
 			min_sequence,
 			index: 0,
 			datagram_index,
-			next_sequence: 0,
+			next_sequence: Some(0),
 			end_sequence: None,
 			parked: BTreeMap::new(),
 			drift_cap: kio::Producer::new(None),
@@ -4069,7 +4070,10 @@ impl Cursor {
 	/// The lowest servable group past the last one returned, walking off everything the
 	/// drift budget has convicted on the way.
 	fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
-		let mut floor = self.next_sequence.max(self.min_sequence);
+		let Some(next) = self.next_sequence else {
+			return Poll::Ready(Ok(None));
+		};
+		let mut floor = next.max(self.min_sequence);
 		let end = self.end_sequence;
 		// One scan for the whole poll, so walking a backlog off stays linear in its size.
 		let drift = ready!(self.poll_drift(end, waiter))?;
@@ -4102,9 +4106,9 @@ impl Cursor {
 			break self.with_expiry(group);
 		};
 
-		self.next_sequence = group.sequence.saturating_add(1);
+		self.next_sequence = group.sequence.checked_add(1);
 		// The delivery commits everything the seek stepped over to reach this group.
-		self.commit_seek_stale(self.next_sequence);
+		self.commit_seek_stale(self.next_sequence.unwrap_or(u64::MAX));
 		// Delivery is a cache access, same as the arrival-order path.
 		group.cache_refresh();
 		Poll::Ready(Ok(Some(group)))
@@ -9076,6 +9080,8 @@ mod test {
 			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
 			u64::MAX
 		);
+		// Nothing can follow the maximum sequence.
+		assert!(consumer.next_group().now_or_never().unwrap().unwrap().is_none());
 	}
 
 	#[test]
