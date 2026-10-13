@@ -172,7 +172,7 @@ Each rendition field falls in one of three classes:
 - Ceilings: video `codedWidth` and `codedHeight` bound every picture the track carries, and `codec` names a profile and level that covers them. The picture size MAY change at any keyframe within both bounds, which a `description` carrying parameter sets rules out. A publisher MAY fill an absent ceiling once, and MUST NOT change it afterward.
 - Maxima: `bitrate` and `framerate` are the most the track has carried or is configured to carry. A publisher MAY raise them and MUST NOT lower them.
 
-Every other rendition field is live state that MAY change in any update, as MAY the video section's `display`, `rotation`, and `flip`, which describe presentation rather than decoding.
+Every other rendition field is live state that MAY change in any update within its own rules (`jitter` and `delay` never fall), as MAY the video section's `display`, `rotation`, and `flip`, which describe presentation rather than decoding.
 A publisher that changes an identity field or exceeds a ceiling MUST publish the media under a new track name, or as a new broadcast under a new Epoch {{moql}}.
 A track name removed from the catalog MUST NOT return with a different identity.
 A consumer MAY configure a decoder once per track from the catalog.

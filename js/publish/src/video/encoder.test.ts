@@ -1172,9 +1172,74 @@ test("a new broadcast starts the ceiling and maxima over", async () => {
 		expect(encoder.out.catalog.peek()).toMatchObject({ codedWidth: 1920, codedHeight: 1072, framerate: 60 });
 
 		broadcast.set({ video: rendition, baseline: new Baseline() });
+		// The previous broadcast's probe never describes the new track, even while its own runs.
+		for (let i = 0; i < 5; i++) await Promise.resolve();
+		expect(encoder.out.catalog.peek()).toBeUndefined();
 		await settle();
 		expect(encoder.out.catalog.peek()).toMatchObject({ codedWidth: 1280, codedHeight: 720, framerate: 30 });
 	} finally {
 		encoder.close();
+	}
+});
+
+// A raised knob outruns the probe that validated the live config, so until its re-probe lands the
+// live bitrate stays within what the hardware accepted and the catalog advertises.
+test("a pending re-probe never raises the live bitrate past the accepted probe", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+	const capture = {
+		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
+		out: { display: new Signal({ width: 1280, height: 720 }) },
+	};
+	const encoder = new Encoder("video", { enabled: true, capture: capture as never });
+
+	try {
+		await settle();
+		const accepted = encoder.out.resolved.peek()?.bitrate;
+		expect(accepted).toBeGreaterThan(0);
+
+		encoder.config.set({ frameRate: 60 });
+		for (let i = 0; i < 5; i++) await Promise.resolve();
+		expect(encoder.out.resolved.peek()?.bitrate).toBe(accepted);
+
+		await settle();
+		expect(encoder.out.resolved.peek()?.bitrate).toBeGreaterThan(accepted ?? 0);
+	} finally {
+		encoder.close();
+	}
+});
+
+// Outgrowing the ceiling to a size the hardware refuses keeps the accepted ceiling rather than
+// leaving a ceiling no probe can satisfy, so the rendition stays up and a shrink recovers in band.
+test("an unsupported ceiling growth keeps the accepted ceiling", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+	const probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockImplementation(async (config) => ({
+		supported: config.codec.startsWith("avc1") && config.width <= 1280,
+	}));
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const capture = {
+		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
+		out: { display: new Signal({ width: 1280, height: 720 }) },
+	};
+	const encoder = new Encoder("video", { enabled: true, capture: capture as never });
+
+	try {
+		await settle();
+		const before = encoder.out.catalog.peek();
+		expect(before).toMatchObject({ codedWidth: 1280, codedHeight: 720 });
+
+		capture.out.display.set({ width: 1920, height: 1080 });
+		await settle();
+		expect(warn).toHaveBeenCalled();
+		expect(encoder.out.catalog.peek()).toEqual(before);
+		expect(encoder.out.resolved.peek()).toMatchObject({ width: 1280, height: 704 });
+
+		capture.out.display.set({ width: 1280, height: 720 });
+		await settle();
+		expect(encoder.out.catalog.peek()).toEqual(before);
+		expect(encoder.out.resolved.peek()).toMatchObject({ width: 1280, height: 720 });
+	} finally {
+		encoder.close();
+		probe.mockRestore();
+		warn.mockRestore();
 	}
 });

@@ -8,8 +8,8 @@ served, a change to a rendition's identity (`codec`, `description`,
 `codedWidth`/`codedHeight` ceiling republishes the broadcast under a new
 epoch rather than mutating the track, per the hang draft's
 [Track Identity](/drafts/draft-lcurley-moq-hang.md#identity) section. Live
-state, ceilings shrinking in band, and rising maxima stay plain catalog
-updates.
+state and rising maxima stay plain catalog updates, and a picture that shrinks
+below its fixed ceiling resizes in band with no update at all.
 
 ## Plan
 

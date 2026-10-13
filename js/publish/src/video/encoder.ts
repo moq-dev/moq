@@ -493,10 +493,27 @@ export class Encoder {
 		effect.spawn(async () => {
 			try {
 				const detected = await this.#bestCodec(dimensions, target);
-				if (!superseded.aborted) this.#codec.set(detected);
+				if (!superseded.aborted) this.#codec.set({ ...detected, broadcast: dimensions.broadcast });
 			} catch (err) {
 				// A newer probe reports its own outcome.
 				if (superseded.aborted) return;
+
+				// A capture that outgrew the ceiling to a size the hardware refuses keeps the last accepted
+				// ceiling and encodes scaled down to fit it, so a later shrink still has a probe to run under.
+				const previous = this.#codec.peek();
+				if (
+					previous &&
+					previous.broadcast === dimensions.broadcast &&
+					(dimensions.width > previous.config.width || dimensions.height > previous.config.height)
+				) {
+					const { width, height } = previous.config;
+					console.warn(
+						`video ${dimensions.width}x${dimensions.height} unsupported, keeping ${width}x${height}:`,
+						err,
+					);
+					this.#coded.set({ broadcast: previous.broadcast, width, height });
+					return;
+				}
 
 				this.#codec.set(undefined);
 				this.#fail(effect);
@@ -512,10 +529,12 @@ export class Encoder {
 	#runResolved(effect: Effect): void {
 		if (!effect.get(this.in.enabled)) return;
 
+		// A probe for another broadcast describes another track, so wait for this one's.
+		const broadcast = effect.get(this.in.broadcast);
 		const detected = effect.get(this.#codec);
 		const dimensions = effect.get(this.#dimensions);
 		const target = effect.get(this.#target);
-		if (!detected || !dimensions || !target) return;
+		if (!detected || detected.broadcast !== broadcast || !dimensions || !target) return;
 
 		// A capture that outgrew the probe encodes scaled down to fit until the re-probe at the new
 		// ceiling lands, so the live config never exceeds what the catalog advertises.
@@ -523,8 +542,8 @@ export class Encoder {
 
 		// The reservation's ceiling is what we can ever send at this size, not the grant: a grant that
 		// followed our own output would hand the room away on a still picture and not have it back when
-		// the picture moved.
-		let bitrate = ceiling(detected.config.codec, { width, height }, target);
+		// the picture moved. It never exceeds the probe's, which a raised knob outruns until it re-probes.
+		let bitrate = Math.min(ceiling(detected.config.codec, { width, height }, target), detected.config.bitrate);
 		effect.set(this.#ceiling, bitrate);
 
 		const reservation = effect.get(this.#reservation);
@@ -714,6 +733,8 @@ type Detected = {
 	config: VideoEncoderConfig & { framerate: number; bitrate: number };
 	// The codec string the encoder reported for it, which the catalog advertises.
 	reported: string;
+	// The broadcast the probe ran for; another one starts its own ceiling.
+	broadcast?: Broadcast;
 };
 
 // The most this rendition ever sends with `codec`, before a bandwidth grant caps it.
