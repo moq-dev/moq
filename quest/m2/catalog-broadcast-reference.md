@@ -42,7 +42,8 @@ All three gaps predate #5367, which added the per-rendition `track` name and the
 shared `hang::catalog::Reference` resolver these readers should use. Start
 after it merges.
 
-Public API: `moq_msf::Track` gains `namespace`. Wire: MSF catalogs carry
+Public API: `moq_msf::Track` in Rust and `@moq/msf`'s `TrackSchema` and
+`Track` in JS gain `namespace`. Wire: MSF catalogs carry
 `namespace` for cross-broadcast renditions; hang is unchanged.
 
 ## Related

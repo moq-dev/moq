@@ -27,7 +27,11 @@ that track ends) while the catalog names the new one.
   state mid-stream.
 - Tests per exporter: a rendition `main` moved from `video-a` to
   `video-b` exports `video-b`'s frames after the update and none of
-  `video-a`'s, and a `broadcast`-only change does the same.
+  `video-a`'s, and a `broadcast`-only change does the same. Each test also
+  asserts the output across the switch: TS continuity counters keep
+  counting on the reused PID, fMP4 fragment sequence numbers and the
+  timestamp frontier never step back, and the format's discontinuity signal
+  is present, or else the export ends with an error.
 
 Raised by a Codex review of #5367, which added the per-rendition `track`
 field; the `broadcast` gap predates it. Deferred from that PR by the
