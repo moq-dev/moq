@@ -249,7 +249,7 @@ impl Slot {
 			}
 			return out;
 		}
-				let mut tables = VecDeque::new();
+		let mut tables = VecDeque::new();
 		// Each PID's packets in mux order: the clock's PID first, then the rest as they appear.
 		let mut lanes: Vec<(u16, VecDeque<usize>)> = vec![(pid(clock), VecDeque::new())];
 		for (i, packet) in packets.iter().enumerate() {
@@ -473,27 +473,27 @@ impl Schedule {
 		if !self.ended
 			&& let Some(size) = self.buffers.get(&pid).and_then(|buffer| buffer.size)
 		{
-			let bytes: usize = packets
-				.as_chunks::<{ TsPacket::SIZE }>()
-				.0
-				.iter()
-				.filter(|packet| self::pid(*packet) == pid)
-				.map(|packet| payload(packet).len())
-				.sum();
-			let headers: usize = packets
-				.as_chunks::<{ TsPacket::SIZE }>()
-				.0
-				.iter()
-				.filter(|packet| self::pid(*packet) == pid && packet[1] & 0x40 != 0)
-				.map(|packet| payload(packet))
-				.filter(|body| body.starts_with(&[0, 0, 1]) && body.len() >= 9)
-				.map(|body| 9 + usize::from(body[8]))
-				.sum();
-			let elementary = bytes.saturating_sub(headers);
-			anyhow::ensure!(
-				bytes <= size,
-				"MPEG-TS access unit on PID {pid} has {elementary} payload bytes ({bytes} bytes with PES headers), exceeding its {size}-byte decoder buffer"
-			);
+			let on_pid = || {
+				packets
+					.as_chunks::<{ TsPacket::SIZE }>()
+					.0
+					.iter()
+					.filter(|packet| self::pid(*packet) == pid)
+			};
+			let bytes: usize = on_pid().map(|packet| payload(packet).len()).sum();
+			if bytes > size {
+				// Only the error names the elementary size, so the PES headers are parsed here.
+				let headers: usize = on_pid()
+					.filter(|packet| packet[1] & 0x40 != 0)
+					.map(|packet| payload(packet))
+					.filter(|body| body.starts_with(&[0, 0, 1]) && body.len() >= 9)
+					.map(|body| 9 + usize::from(body[8]))
+					.sum();
+				let elementary = bytes.saturating_sub(headers);
+				anyhow::bail!(
+					"MPEG-TS access unit on PID {pid} has {elementary} payload bytes ({bytes} bytes with PES headers), exceeding its {size}-byte decoder buffer"
+				);
+			}
 		}
 		self.horizon = self.horizon.max(Some(timing.by.div_ceil(PCR_INTERVAL.as_nanos())));
 		let start = self.last.map_or(due, |last| (last + 1).min(due));

@@ -56,4 +56,3 @@ public API and wire changes are not expected.
 - [Same-instance resume](/quest/m1/ts-same-instance-resume.md) - independent full-check failure
 - [Transport upgrade](/quest/m1/transport-upgrade/README.md) - existing session handover and epoch contract
 - [Mux-rate hold #5287](https://github.com/moq-dev/moq/pull/5287) - initial rate publication, and a finished import lingering for its max-age
-- [TS AC-3 scheduling](/quest/m1/ts-atsc-ac3.md) - #5306 owns decoder deadlines and unknown-rate startup overflow
