@@ -2329,7 +2329,7 @@ mod tests {
 	async fn an_unsupported_scheme_ends_unlimited_reconnects() {
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
-		config.backoff.timeout = Duration::ZERO;
+		config.backoff.timeout = Some(Duration::ZERO);
 		let client = config.init(Default::default()).expect("build client");
 		let started = tokio::time::Instant::now();
 		let connection = client.connect(url("moqz://localhost/"));
@@ -2347,7 +2347,7 @@ mod tests {
 	async fn an_invalid_tls_server_name_ends_unlimited_reconnects() {
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
-		config.backoff.timeout = Duration::ZERO;
+		config.backoff.timeout = Some(Duration::ZERO);
 		let client = config.init(Default::default()).expect("build client");
 		for target in [
 			"https://a!b:1/",
@@ -2378,7 +2378,7 @@ mod tests {
 		let mut client = client();
 		client.backoff.initial = Duration::from_millis(50);
 		client.backoff.max = Duration::from_millis(50);
-		client.backoff.timeout = Duration::from_millis(200);
+		client.backoff.timeout = Some(Duration::from_millis(200));
 		let started = tokio::time::Instant::now();
 		let connection = client.connect(target);
 		let err = connection.closed().await.expect_err("refused socket connected");
