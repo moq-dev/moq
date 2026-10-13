@@ -13,6 +13,8 @@ import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Milli, Timescale } from "../time.ts";
 import type { Location as TrackLocation, Subscriber as TrackSubscriber } from "../track.ts";
+import { untilAborted } from "../util/abort.ts";
+import { LIMITS, type Limits, Slots } from "../util/limits.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
@@ -239,6 +241,8 @@ export class Publisher {
 	#quic: WebTransport;
 	#session: Session;
 	#requiresSolicitation: boolean;
+	// Subscriptions the peer holds live on this session.
+	#subscriptions: Slots;
 
 	// The one writer for the outbound datagram stream, shared by every subscription since a
 	// second getWriter would throw. Undefined when the transport carries no datagrams, which
@@ -282,6 +286,7 @@ export class Publisher {
 		cluster,
 		grant = new Signal<Grant | undefined>(undefined),
 		ready = Promise.resolve(),
+		limits = LIMITS,
 	}: {
 		/** The WebTransport session, for uni streams. */
 		quic: WebTransport;
@@ -299,8 +304,11 @@ export class Publisher {
 		grant?: Getter<Grant | undefined>;
 		/** Resolves once the setup tokens are answered (MoQ Auth). */
 		ready?: Promise<void>;
+		/** How many live requests the peer may hold. */
+		limits?: Limits;
 	}) {
 		this.#quic = quic;
+		this.#subscriptions = new Slots(limits.subscriptions, { quic, reason: "too many subscriptions" });
 		this.#grant = grant;
 		this.#ready = ready;
 		this.#session = session;
@@ -331,10 +339,29 @@ export class Publisher {
 	 * @internal
 	 */
 	async runSubscribe(msg: Subscribe, stream: Stream) {
+		// Only a subscription we would serve holds a slot, as in Rust: a refused one ends at
+		// once. A peer past the cap loses the session.
+		const charged = msg.forward && !msg.rangeFilters && !this.#denied(msg.trackNamespace);
+		if (charged) this.#subscriptions.acquire();
+		try {
+			await this.#serveSubscribe(msg, stream);
+		} finally {
+			if (charged) this.#subscriptions.release();
+		}
+	}
+
+	async #serveSubscribe(msg: Subscribe, stream: Stream) {
 		const version = this.#session.version;
 		const name = msg.trackNamespace;
 		let broadcast: broadcast.Consumer | undefined;
 		let refusal: { errorCode: number; reasonPhrase: string } | undefined;
+
+		// The requester leaving while the broadcast and track resolve ends the request, so a
+		// cancelled subscription gives back its slot instead of holding it until the track
+		// is answered, which may be never.
+		const left = new AbortController();
+		const cancel = new StreamError(StreamCode.Cancel, { message: "cancel" });
+		void cancelled(stream, version).then(() => left.abort(cancel));
 
 		// Legal requests we can't honor are refused one at a time. A subscription that
 		// forwards nothing is only useful to a subscriber that later turns forwarding on,
@@ -354,7 +381,9 @@ export class Publisher {
 		} else {
 			try {
 				broadcast =
-					this.#publish && (wireOf(this.#publish).local(name) ?? (await wireOf(this.#publish).demand(name)));
+					this.#publish &&
+					(wireOf(this.#publish).local(name) ??
+						(await untilAborted(wireOf(this.#publish).demand(name), left.signal)));
 				if (!broadcast) {
 					refusal = {
 						errorCode: toRequestCode("does_not_exist", "subscribe", version),
@@ -362,6 +391,11 @@ export class Publisher {
 					};
 				}
 			} catch (err: unknown) {
+				// Nobody is left to refuse.
+				if (left.signal.aborted) {
+					stream.abort(cancel);
+					return;
+				}
 				const e = error(err);
 				const condition =
 					e instanceof StreamError && (e.code === StreamCode.NotFound || e.code === StreamCode.Unroutable)
@@ -407,7 +441,7 @@ export class Publisher {
 		let cache: TrackSubscriber | undefined;
 
 		try {
-			const info = await track.info();
+			const info = await untilAborted(track.info(), left.signal);
 			// A Timestamp goes out only when this SUBSCRIBE_OK actually carries TIMESCALE.
 			// Drafts 14-16 never write that property, so their objects stay unstamped.
 			const timescale =
@@ -710,7 +744,8 @@ export class Publisher {
 		} catch (err: unknown) {
 			if (err instanceof ProtocolViolation) throw err;
 			const e = error(err);
-			console.warn(`publish error: broadcast=${name} track=${track.name} error=${reason(e)}`);
+			if (e === cancel) console.debug(`publish cancelled: broadcast=${name} track=${track.name}`);
+			else console.warn(`publish error: broadcast=${name} track=${track.name} error=${reason(e)}`);
 			stream.abort(e);
 		} finally {
 			track.close();
