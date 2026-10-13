@@ -26,9 +26,13 @@ and cancels each one grows that state without bound, while #5214's caps hand
 the slots back.
 
 `demand` takes an `AbortSignal` on the internal wire interface
-(`js/net/src/wire.ts`). On abort the waiter drops its count, and the last one
-out withdraws the request the way `ServeState.reset` does, but for one path:
-out of `pending` and the queue, finished so a late answer closes its front.
+(`js/net/src/wire.ts`). On abort the waiter drops its count. The request is
+withdrawn the way `ServeState.reset` does, but for one path (out of `pending`
+and the queue, finished so a late answer closes its front), only when nobody
+else needs it. `demanding` counts wire waiters alone: a local
+`Consumer.request()` reaches the same pending request through
+`OriginState.route()`, which enqueues without counting, so the withdrawal
+must also see that no local request or failover still routes to the path.
 Callers pass the signal they already hold (`left.signal`, `hold`, or one tied
 to the FETCH stream) instead of wrapping the call in `untilAborted`. Check
 Rust's behavior (`Requests::remove_if` and `ServeState::forget` in
@@ -42,7 +46,9 @@ public API; the bound doesn't depend on it.
 Regression: a dynamic handler that never answers; in both protocol families,
 subscribe to many distinct paths and cancel each before an answer, then check
 that the origin holds nothing for them. Also check that a second requester on
-a shared path still resolves after the first cancels. Drive it on events, and
+a shared path still resolves after the first cancels, both a second peer and a
+local `Consumer.request()`, with the handler answering after the peer
+cancels. Drive it on events, and
 use fake timers for any wait. It must fail on main.
 
 Public API: none, since `demand` is internal. Wire: none.
