@@ -21,12 +21,17 @@ async function video(bc: Moq.Broadcast.Consumer): Promise<[string, Catalog.Video
 		if (!group) throw new Error("catalog ended without a video track");
 		// Each group opens with a snapshot; the frames after it are deltas.
 		let first = true;
-		for (let frame = await group.readFrame(); frame; frame = await group.readFrame()) {
-			if (first) decoder.snapshot(frame.payload);
-			else decoder.delta(frame.payload);
-			first = false;
-			const rendition = Object.entries(decoder.decode()?.video?.renditions ?? {})[0];
-			if (rendition) return rendition;
+		try {
+			for (let frame = await group.readFrame(); frame; frame = await group.readFrame()) {
+				if (first) decoder.snapshot(frame.payload);
+				else decoder.delta(frame.payload);
+				first = false;
+				const rendition = Object.entries(decoder.decode()?.video?.renditions ?? {})[0];
+				if (rendition) return rendition;
+			}
+		} catch (err) {
+			// The relay resets a group a newer snapshot supersedes; resync from the next.
+			if (!(err instanceof Moq.Error.Stream)) throw err;
 		}
 	}
 }
