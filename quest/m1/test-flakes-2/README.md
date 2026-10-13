@@ -34,7 +34,7 @@ Public API: none. Wire: none.
 
 - [Interop close code](/quest/m1/test-flakes-2/interop-close-code.md) - the browser close-code test reliably sees `unauthorized` for a refused session
 - [Handshake ACK](/quest/m1/test-flakes-2/handshake-ack.md) - the impaired cluster drill's connect survives a lost handshake ACK
-- [Auth refresh expiry](/quest/m1/test-flakes-2/auth-refresh-expiry.md) - the auth refresh outage test measures the grant's life on one clock
+- [Auth refresh mocks time](/quest/m1/test-flakes-2/auth-refresh-mock-time.md) - moq-relay's auth refresh and fixed-lease tests measure a grant's life on one mocked clock
 
 ## Related
 
