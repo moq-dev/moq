@@ -1297,7 +1297,11 @@ where
 		// on the announce goes to the application to verify for this announce alone (MoQ
 		// request-token), and a verified one is exempt from the limit while it lasts.
 		let token = match &msg.authorization_token {
-			Some(token) if self.auth.token_decides(crate::auth::Direction::Subscribe, path.as_str()) => {
+			Some(token)
+				if self
+					.auth
+					.token_decides(crate::auth::Direction::Subscribe, path.as_str()) =>
+			{
 				Some(token.0.clone())
 			}
 			_ => None,
@@ -1419,6 +1423,7 @@ where
 	/// only what changed. Each one is answered with REQUEST_OK, or REQUEST_ERROR and a
 	/// closed stream when it cannot be applied, which withdraws the advertisement
 	/// (moq-transport Section 9.5.1).
+	#[allow(clippy::too_many_arguments)]
 	async fn run_publish_namespace_updates(
 		&mut self,
 		stream: &mut Stream<S, Version>,
@@ -1661,7 +1666,8 @@ where
 									Some(_) => Admit::Token(None),
 									None => Admit::Session,
 								};
-								self.start_announce(path.clone(), advert, admit).map(|()| *attached = true)
+								self.start_announce(path.clone(), advert, admit)
+									.map(|()| *attached = true)
 							}
 						}
 					}
@@ -7516,7 +7522,9 @@ mod tests {
 				&peer,
 			)
 			.expect("route");
-		subscriber.start_announce(path.clone(), advertised, Admit::Session).unwrap();
+		subscriber
+			.start_announce(path.clone(), advertised, Admit::Session)
+			.unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// The peer re-advertises the same path cheaper: it started carrying it.
@@ -8730,7 +8738,11 @@ mod tests {
 			}
 			settle().await;
 		}
-		assert_eq!(consulted.load(std::sync::atomic::Ordering::Relaxed), 1, "the verifier ran");
+		assert_eq!(
+			consulted.load(std::sync::atomic::Ordering::Relaxed),
+			1,
+			"the verifier ran"
+		);
 		assert!(ended, "the refused announce ends");
 		assert!(routed_now(&consumer, "room/alice").is_none(), "and is never attached");
 	}
@@ -8892,7 +8904,6 @@ mod tests {
 		}
 	}
 
-
 	/// Per drafts 16 section 9.11.1 / 18 section 10.9.1, a refused PUBLISH_NAMESPACE
 	/// renewal ends only that announce at once, by closing its stream (and cancelling it on
 	/// draft-16), not by waiting for the old 60s grant to lapse. The session stays up.
@@ -8961,7 +8972,11 @@ mod tests {
 						.encode_message(&ietf::PublishNamespaceCancel {
 							track_namespace: crate::Path::new("room/alice"),
 							request_id: RequestId(1),
-							error_code: request::to_code(&Error::Unauthorized, request::Kind::PublishNamespace, version),
+							error_code: request::to_code(
+								&Error::Unauthorized,
+								request::Kind::PublishNamespace,
+								version,
+							),
 							reason_phrase: "renewal not granted".into(),
 						})
 						.await
@@ -9391,7 +9406,8 @@ mod tests {
 		// Accepted: the acceptor is consulted (proving the token path, not the permissive
 		// default, which the origin model would also route) and its grant admits the announce.
 		{
-			let (mut subscriber, mut requests, consumer, session) = auth_announce_harness_no_ext(VERSION, Some(crate::auth::Grant::default()));
+			let (mut subscriber, mut requests, consumer, session) =
+				auth_announce_harness_no_ext(VERSION, Some(crate::auth::Grant::default()));
 			let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 			let consulted = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 			let acceptor = {
@@ -9437,7 +9453,8 @@ mod tests {
 
 		// Refused: not admitted by the permissive default.
 		{
-			let (mut subscriber, mut requests, consumer, session) = auth_announce_harness_no_ext(VERSION, Some(crate::auth::Grant::default()));
+			let (mut subscriber, mut requests, consumer, session) =
+				auth_announce_harness_no_ext(VERSION, Some(crate::auth::Grant::default()));
 			let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 			let acceptor = async move {
 				let request = requests.next().await.expect("a request reaches the acceptor").scoped();
@@ -9537,7 +9554,8 @@ mod tests {
 			expires: None,
 		};
 		for (grant, admitted) in [(read_only, false), (write_only, true)] {
-			let (mut subscriber, mut requests, consumer, session) = auth_announce_harness_no_ext(VERSION, Some(crate::auth::Grant::default()));
+			let (mut subscriber, mut requests, consumer, session) =
+				auth_announce_harness_no_ext(VERSION, Some(crate::auth::Grant::default()));
 			let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 			let acceptor = async move {
 				let request = requests.next().await.expect("a request reaches the acceptor").scoped();

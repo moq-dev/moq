@@ -542,7 +542,11 @@ async fn a_request_token_renews_a_legacy_announce_through_the_driver() {
 
 		moq_net_sim::sleep(Duration::from_millis(100)).await;
 		wait_announced(&relay.consume(), "room/alice", true).await;
-		assert_eq!(pair.client_transport.close_reason(), None, "renewal never touches the session");
+		assert_eq!(
+			pair.client_transport.close_reason(),
+			None,
+			"renewal never touches the session"
+		);
 		assert_eq!(pair.server_transport.close_reason(), None);
 	})
 	.await

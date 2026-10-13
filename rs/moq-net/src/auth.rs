@@ -415,6 +415,10 @@ impl Handle {
 
 	/// Answer every token the peer presents, instead of the default acceptor.
 	///
+	/// Session tokens arrive as [`Event::Session`]. An `AUTHORIZATION TOKEN` on a SUBSCRIBE
+	/// or PUBLISH_NAMESPACE that [`authorize`](Self::authorize) does not cover arrives as
+	/// [`Event::Scoped`] and decides that request alone. Experimental.
+	///
 	/// Call it before running the session's driver: whoever answers is decided
 	/// once, on the driver's first poll, so a later call cannot take over tokens
 	/// already in flight. Without it the session grants the peer what its own
@@ -582,6 +586,9 @@ impl Handle {
 	/// Authorize the peer for `grant` on this session, in the session's own paths.
 	/// Calling it again re-authorizes, narrower or wider, replacing the last grant. The
 	/// session's origin handles still bound it, so it never grants more than they allow.
+	///
+	/// A request outside it that carries its own token is decided by that token through
+	/// [`requests`](Self::requests), or refused as unsupported when nothing answers them.
 	///
 	/// A narrower grant ends what falls outside at once, with [`Error::Unauthorized`]
 	/// where it has a reader: announcements to the peer retract, its new requests are
@@ -1686,10 +1693,16 @@ mod tests {
 		let queue = handle.acceptor().unwrap();
 		let expired = kio::Shared::<Issue>::default();
 		for _ in 0..128 {
-			queue.push(Event::Session(Request::new(Bytes::from_static(b"withdrawn"), expired.clone())));
+			queue.push(Event::Session(Request::new(
+				Bytes::from_static(b"withdrawn"),
+				expired.clone(),
+			)));
 		}
 		expired.lock().peer = Some(Error::Cancel);
-		queue.push(Event::Session(Request::new(Bytes::from_static(b"live"), Default::default())));
+		queue.push(Event::Session(Request::new(
+			Bytes::from_static(b"live"),
+			Default::default(),
+		)));
 		let Poll::Ready(Some(request)) = requests.poll_next(&kio::Waiter::noop()) else {
 			panic!("live request missing")
 		};
@@ -1845,7 +1858,12 @@ mod request_token_tests {
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().unwrap();
 		let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), RequestKind::Subscribe, None);
-		requests.next().await.unwrap().scoped().reject(SessionError::Unauthorized, "no");
+		requests
+			.next()
+			.await
+			.unwrap()
+			.scoped()
+			.reject(SessionError::Unauthorized, "no");
 		let err = verdict.grant().await.expect_err("refused");
 		assert!(matches!(err, Error::Session(SessionError::Unauthorized)), "{err:?}");
 	}
@@ -1899,7 +1917,15 @@ mod request_token_tests {
 		let expires = grant.expires;
 		let _issued = requests.next().await.unwrap().scoped().accept(grant);
 		let answered = verdict.grant().await.unwrap();
-		let request_grant = RequestGrant::new(&runtime, verdict, Ok(answered), subscribe_path(), RequestKind::Subscribe, None).unwrap();
+		let request_grant = RequestGrant::new(
+			&runtime,
+			verdict,
+			Ok(answered),
+			subscribe_path(),
+			RequestKind::Subscribe,
+			None,
+		)
+		.unwrap();
 		assert_eq!(request_grant.grant().expires, expires);
 		assert!(expires.is_some());
 	}
@@ -1916,8 +1942,15 @@ mod request_token_tests {
 		let first_expires = first.expires;
 		let _issued = requests.next().await.unwrap().scoped().accept(first);
 		let answered = verdict.grant().await.unwrap();
-		let mut request_grant =
-			RequestGrant::new(&runtime, verdict, Ok(answered), subscribe_path(), RequestKind::Subscribe, None).unwrap();
+		let mut request_grant = RequestGrant::new(
+			&runtime,
+			verdict,
+			Ok(answered),
+			subscribe_path(),
+			RequestKind::Subscribe,
+			None,
+		)
+		.unwrap();
 
 		// A REQUEST_UPDATE carrying a fresh token the acceptor accepts with a later expiry.
 		let renewal = handle.verify_request(token(b"jwt2", 0), subscribe_path(), RequestKind::Subscribe, None);
@@ -1942,8 +1975,15 @@ mod request_token_tests {
 		// Held for the request's life, so only the deadline (not a drop) ends it.
 		let _issued = requests.next().await.unwrap().scoped().accept(grant_in(&runtime, 60));
 		let answered = verdict.grant().await.unwrap();
-		let mut request_grant =
-			RequestGrant::new(&runtime, verdict, Ok(answered), subscribe_path(), RequestKind::Subscribe, None).unwrap();
+		let mut request_grant = RequestGrant::new(
+			&runtime,
+			verdict,
+			Ok(answered),
+			subscribe_path(),
+			RequestKind::Subscribe,
+			None,
+		)
+		.unwrap();
 
 		let err = kio::wait(|waiter| request_grant.poll_ended(waiter)).await;
 		assert!(matches!(err, Error::Unauthorized), "{err:?}");
@@ -1964,8 +2004,15 @@ mod request_token_tests {
 		let first_expires = first.expires;
 		let _issued = requests.next().await.unwrap().scoped().accept(first);
 		let answered = verdict.grant().await.unwrap();
-		let mut request_grant =
-			RequestGrant::new(&runtime, verdict, Ok(answered), subscribe_path(), RequestKind::Subscribe, None).unwrap();
+		let mut request_grant = RequestGrant::new(
+			&runtime,
+			verdict,
+			Ok(answered),
+			subscribe_path(),
+			RequestKind::Subscribe,
+			None,
+		)
+		.unwrap();
 
 		// The renewal token is refused, so it renews nothing and the old grant is untouched.
 		let renewal = handle.verify_request(token(b"bad", 0), subscribe_path(), RequestKind::Subscribe, None);
@@ -1996,8 +2043,15 @@ mod request_token_tests {
 		let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), RequestKind::Subscribe, None);
 		let issued = requests.next().await.unwrap().scoped().accept(Grant::all());
 		let answered = verdict.grant().await.unwrap();
-		let mut request_grant =
-			RequestGrant::new(&runtime, verdict, Ok(answered), subscribe_path(), RequestKind::Subscribe, None).unwrap();
+		let mut request_grant = RequestGrant::new(
+			&runtime,
+			verdict,
+			Ok(answered),
+			subscribe_path(),
+			RequestKind::Subscribe,
+			None,
+		)
+		.unwrap();
 
 		// A covering update (everything, still unexpiring) leaves the request standing.
 		issued.update(Grant::all());
@@ -2045,8 +2099,15 @@ mod request_token_tests {
 		// A grant that never expires, so only the revoke can end the request.
 		let issued = requests.next().await.unwrap().scoped().accept(Grant::all());
 		let answered = verdict.grant().await.unwrap();
-		let mut request_grant =
-			RequestGrant::new(&runtime, verdict, Ok(answered), subscribe_path(), RequestKind::Subscribe, None).unwrap();
+		let mut request_grant = RequestGrant::new(
+			&runtime,
+			verdict,
+			Ok(answered),
+			subscribe_path(),
+			RequestKind::Subscribe,
+			None,
+		)
+		.unwrap();
 
 		issued.revoke(SessionError::Unauthorized, "revoked");
 		let err = kio::wait(|waiter| request_grant.poll_ended(waiter)).await;

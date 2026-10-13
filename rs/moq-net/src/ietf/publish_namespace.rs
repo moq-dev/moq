@@ -148,7 +148,9 @@ impl Message for PublishNamespaceUpdate {
 			Version::Draft14 | Version::Draft15 => return Err(EncodeError::Version),
 			Version::Draft16 => {
 				self.request_id.encode(w, version)?;
-				self.namespace_request_id.ok_or(EncodeError::Version)?.encode(w, version)?;
+				self.namespace_request_id
+					.ok_or(EncodeError::Version)?
+					.encode(w, version)?;
 			}
 			Version::Draft17 => {
 				self.request_id.encode(w, version)?;
@@ -622,7 +624,8 @@ mod tests {
 		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
 			let mut buf = Vec::new();
 			assert!(
-				msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version).is_err(),
+				msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
+					.is_err(),
 				"{version:?}"
 			);
 		}

@@ -5,9 +5,8 @@
 moq-relay verifies a moq-transport request token through `moq_auth::Client`,
 each request getting a lease of its own that is never counted as a session
 grant and ends when the request ends. Until this lands the relay explicitly
-refuses request-token verification as `Unsupported`, even if it consumes
-session-token events and once [Request tokens](/quest/m1/auth/request-token.md)
-merges. Requests independently covered by locally verified session permission
+refuses request-token verification as `Unsupported`, though it consumes
+session-token events. Requests independently covered by locally verified session permission
 do not require request-token verification.
 
 ## Plan
@@ -19,8 +18,8 @@ the lease integration below is future work, not a capability of the hook.
 
 An application acceptor built on moq-net answers request tokens through
 the explicit request variant of `requests()` itself and does not need this;
-it is the relay's half of
-[Request tokens](/quest/m1/auth/request-token.md).
+it is the relay's half of the request-token hook from
+[#5148](https://github.com/moq-dev/moq/pull/5148).
 
 - A per-request call on `moq_auth::Client`, not the `Client::attach` that
   session tokens use. `attach` connects
@@ -39,8 +38,3 @@ it is the relay's half of
   session grant and sees its lease end with the request.
 
 Public API: additive on `moq_auth::Client`. Wire: none.
-
-## Required
-
-- [Request tokens](/quest/m1/auth/request-token.md) - the per-request grant
-  this lease backs

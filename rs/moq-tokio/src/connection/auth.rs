@@ -14,9 +14,21 @@ use crate::{Error, abort::AbortOnDrop};
 pub struct Auth {
 	pub(super) connection: kio::Consumer<State>,
 	pub(super) pacing: Pacing,
+	pub(super) request: RequestToken,
 }
 
 impl Auth {
+	/// Present `token` as the `AUTHORIZATION TOKEN` on this connection's SUBSCRIBE and
+	/// PUBLISH_NAMESPACE requests, now and after reconnects. Experimental: the peer's
+	/// application must verify it, and success means only that the token was set.
+	///
+	/// Replacing it renews the live session's token-authorized requests in band. Errors
+	/// with [`moq_net::Error::Unsupported`] when the live session speaks moq-lite, whose
+	/// requests carry no token; later sessions are still seeded with it.
+	pub fn set_request_token(&self, token: moq_net::setup::Token) -> Result<(), moq_net::Error> {
+		self.request.set(token)
+	}
+
 	/// Watch the current session's union, clearing it while disconnected.
 	pub fn grant(&self) -> Watch {
 		Watch {
@@ -47,6 +59,84 @@ impl Auth {
 		}));
 		answer.await.map_err(|_| Error::from(moq_net::Error::Cancel))??;
 		Ok(Token { _task: task, state })
+	}
+}
+
+/// The request token a connection presents and the session it presents it on, shared
+/// across its sessions and shown by length only so it stays out of logs.
+///
+/// Seeding a new session ([`attach`](Self::attach)) and replacing the token
+/// ([`set`](Self::set)) each read and write under one lock, so neither can leave a session
+/// on an older token than the one set last, and a token set while a session is still
+/// handshaking is the one it starts with. The lock is held only across synchronous work.
+#[derive(Clone, Default)]
+pub(crate) struct RequestToken(std::sync::Arc<std::sync::Mutex<Presenting>>);
+
+#[derive(Default)]
+struct Presenting {
+	token: Option<moq_net::setup::Token>,
+	/// The newest session, which a renewal reaches; `None` while nothing is live.
+	session: Option<Box<dyn Present>>,
+}
+
+/// Where a request token is presented: a session's auth handle.
+pub(crate) trait Present: Send {
+	/// Present `token` on this session's requests from now on, or refuse it when the session
+	/// cannot carry one (moq-lite).
+	fn present(&self, token: moq_net::setup::Token) -> Result<(), moq_net::Error>;
+}
+
+impl Present for auth::Handle {
+	fn present(&self, token: moq_net::setup::Token) -> Result<(), moq_net::Error> {
+		self.set_request_token(token)
+	}
+}
+
+impl RequestToken {
+	pub(crate) fn new(token: Option<moq_net::setup::Token>) -> Self {
+		Self(std::sync::Arc::new(std::sync::Mutex::new(Presenting {
+			token,
+			session: None,
+		})))
+	}
+
+	/// Replace the token, on the newest session too, and seed every later session with it.
+	///
+	/// Errors when the newest session cannot carry it; later sessions are still seeded.
+	fn set(&self, token: moq_net::setup::Token) -> Result<(), moq_net::Error> {
+		let mut presenting = self.0.lock().unwrap();
+		presenting.token = Some(token.clone());
+		match &presenting.session {
+			Some(session) => session.present(token),
+			None => Ok(()),
+		}
+	}
+
+	/// Seed `session` with the current token and make it the session later renewals reach.
+	///
+	/// Errors when the session cannot carry the token set, which leaves it unattached.
+	pub(crate) fn attach(&self, session: impl Present + 'static) -> Result<(), moq_net::Error> {
+		let mut presenting = self.0.lock().unwrap();
+		if let Some(token) = &presenting.token {
+			session.present(token.clone())?;
+		}
+		presenting.session = Some(Box::new(session));
+		Ok(())
+	}
+
+	/// Stop reaching the session once nothing is live; renewals then only update the seed.
+	pub(crate) fn detach(&self) {
+		// Also runs from `Shared`'s drop, so take a poisoned lock rather than panic while unwinding.
+		self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).session = None;
+	}
+}
+
+impl std::fmt::Debug for RequestToken {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match &self.0.lock().unwrap().token {
+			Some(token) => write!(f, "kind={} <{} bytes>", token.kind, token.value.len()),
+			None => write!(f, "<none>"),
+		}
 	}
 }
 
@@ -279,6 +369,180 @@ async fn present(
 	}
 }
 
+#[cfg(test)]
+mod request_token_tests {
+	use super::*;
+
+	impl RequestToken {
+		fn get(&self) -> Option<moq_net::setup::Token> {
+			self.0.lock().unwrap().token.clone()
+		}
+	}
+
+	/// A request token of kind 0 carrying `value`.
+	fn tok(value: &[u8]) -> moq_net::setup::Token {
+		moq_net::setup::Token {
+			kind: 0,
+			value: value.to_vec(),
+		}
+	}
+
+	/// The request token is shown by length only, never printed.
+	#[test]
+	fn request_token_debug_is_redacted() {
+		let token = RequestToken::new(Some(tok(b"s3cr3t")));
+		assert_eq!(format!("{token:?}"), "kind=0 <6 bytes>");
+		assert_eq!(format!("{:?}", RequestToken::default()), "<none>");
+	}
+
+	/// A session double that records every token it is presented and parks inside its first
+	/// [`Present::present`] until the test releases it: exactly where a seed or a renewal
+	/// writes the session, after reading the token it writes.
+	struct Parked {
+		presented: std::sync::Arc<std::sync::Mutex<Vec<moq_net::setup::Token>>>,
+		/// Taken by the first present, which reports that it parked and waits to be released.
+		park: std::sync::Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::Arc<std::sync::Barrier>)>>,
+	}
+
+	impl Parked {
+		fn new(presented: &std::sync::Arc<std::sync::Mutex<Vec<moq_net::setup::Token>>>) -> Self {
+			Self {
+				presented: presented.clone(),
+				park: Default::default(),
+			}
+		}
+	}
+
+	impl Present for Parked {
+		fn present(&self, token: moq_net::setup::Token) -> Result<(), moq_net::Error> {
+			let park = self.park.lock().unwrap().take();
+			if let Some((parked, release)) = park {
+				parked.send(()).unwrap();
+				release.wait();
+			}
+			self.presented.lock().unwrap().push(token);
+			Ok(())
+		}
+	}
+
+	/// Park the first present `write` makes on another thread, then race `renew` against it,
+	/// returning every token the session was presented in order.
+	///
+	/// While `write` is parked mid-present, the cell's lock must still be held, so `renew`
+	/// cannot land between `write`'s read and its write and be overwritten by the older token.
+	fn race_renewal(
+		token: &RequestToken,
+		write: impl FnOnce(&RequestToken, Parked) + Send + 'static,
+		renew: moq_net::setup::Token,
+	) -> Vec<moq_net::setup::Token> {
+		let presented = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+		let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+		let (step, steps) = std::sync::mpsc::channel();
+		let parked = Parked::new(&presented);
+		*parked.park.lock().unwrap() = Some((step, release.clone()));
+
+		let writer = {
+			let token = token.clone();
+			std::thread::spawn(move || write(&token, parked))
+		};
+		steps.recv().expect("the write under test never presented a token");
+		assert!(
+			token.0.try_lock().is_err(),
+			"a renewal could land between the parked write's read and its write"
+		);
+
+		let renewer = {
+			let token = token.clone();
+			std::thread::spawn(move || token.set(renew).unwrap())
+		};
+		release.wait();
+		writer.join().expect("writer panicked");
+		renewer.join().expect("renewer panicked");
+		std::mem::take(&mut *presented.lock().unwrap())
+	}
+
+	/// A session that cannot carry a request token (moq-lite).
+	struct Refuses;
+
+	impl Present for Refuses {
+		fn present(&self, _token: moq_net::setup::Token) -> Result<(), moq_net::Error> {
+			Err(moq_net::Error::Unsupported)
+		}
+	}
+
+	/// A session that cannot carry the token refuses it loudly: attaching fails, so the dial
+	/// does too, and a renewal reaching it fails while still seeding later sessions.
+	#[test]
+	fn a_session_that_cannot_carry_the_token_refuses_it() {
+		let token = RequestToken::new(Some(tok(b"token-a")));
+		assert!(matches!(token.attach(Refuses), Err(moq_net::Error::Unsupported)));
+
+		let token = RequestToken::new(None);
+		token.attach(Refuses).expect("nothing to present");
+		assert!(matches!(token.set(tok(b"token-b")), Err(moq_net::Error::Unsupported)));
+		assert_eq!(token.get(), Some(tok(b"token-b")), "later sessions are still seeded");
+	}
+
+	/// A reconnect seeding its new session cannot replay the token it read over a renewal that
+	/// lands meanwhile: the session ends on the renewal, as the reconnect seed does.
+	#[test]
+	fn a_renewal_racing_the_reconnect_seed_is_not_replayed() {
+		let a = tok(b"token-a");
+		let b = tok(b"token-b");
+		let token = RequestToken::new(Some(a.clone()));
+
+		let presented = race_renewal(&token, |token, session| token.attach(session).unwrap(), b.clone());
+
+		assert_eq!(presented, [a, b.clone()], "seeded with A, then renewed to B");
+		assert_eq!(token.get(), Some(b), "the next reconnect is seeded with B too");
+	}
+
+	/// Two renewals present in the order they land, so the session ends on the one that landed
+	/// last, the same token the next reconnect is seeded with.
+	#[test]
+	fn concurrent_renewals_leave_the_session_on_the_last() {
+		let a = tok(b"token-a");
+		let b = tok(b"token-b");
+		let token = RequestToken::new(None);
+
+		let presented = race_renewal(
+			&token,
+			{
+				let a = a.clone();
+				move |token, session| {
+					// Nothing to seed, so the attach presents nothing and the renewal parks.
+					token.attach(session).unwrap();
+					token.set(a).unwrap();
+				}
+			},
+			b.clone(),
+		);
+
+		assert_eq!(presented, [a, b.clone()], "renewed to A, then to B");
+		assert_eq!(token.get(), Some(b), "the next reconnect is seeded with B too");
+	}
+
+	/// Once nothing is live a renewal only updates the seed, and the next attach picks it up.
+	#[test]
+	fn a_renewal_between_sessions_seeds_the_next() {
+		let presented = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+		let session = || Parked::new(&presented);
+		let token = RequestToken::new(Some(tok(b"token-a")));
+
+		token.attach(session()).unwrap();
+		token.detach();
+		token.set(tok(b"token-b")).unwrap();
+		assert_eq!(
+			presented.lock().unwrap().len(),
+			1,
+			"a renewal reached a detached session"
+		);
+
+		token.attach(session()).unwrap();
+		assert_eq!(presented.lock().unwrap().last().cloned(), Some(tok(b"token-b")));
+	}
+}
+
 #[cfg(all(test, feature = "tcp"))]
 mod tests {
 	use super::*;
@@ -417,6 +681,7 @@ mod tests {
 		Auth {
 			connection: connection.consume(),
 			pacing: Pacing::new(&super::super::Backoff::default()),
+			request: RequestToken::default(),
 		}
 	}
 

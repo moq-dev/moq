@@ -22,7 +22,7 @@ Decisions settled while planning (2026-10-09):
   reset once FETCH_OK is out). Racing the whole handler future and dropping it
   was rejected because it loses those graceful refusals.
 - **Rust and JS together**, so the shape and names stay mirrored.
-- **Effective authorization.** Land after request-token support. Dispatch
+- **Effective authorization.** Dispatch
   uses independently verified local session permission first, then the
   admitted request grant; peer-issued AUTH_OK grants cannot authorize incoming
   requests. Preserve
@@ -47,10 +47,6 @@ to continue a dependent join after the subscription ends.
 Test token-only admission outside the session union, session-union changes
 without revoking a still-valid request grant, request revoke/renewal/expiry,
 and dependent joining FETCH. Keep graceful terminal messages.
-
-## Required
-
-- [Request tokens](/quest/m1/auth/request-token.md) - both admission lifetimes exist before this refactor
 
 ## Related
 
