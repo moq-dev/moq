@@ -5,13 +5,15 @@
 
 namespace MoQError {
 
-enum class Kind { Unauthorized, Forbidden, Certificate, Timeout, Network, Connect, Offline, Other };
+enum class Kind { Unauthorized, Forbidden, Certificate, Timeout, Network, Connect, Offline, Other, TooManyRequests };
 
 // What the output recorded a failure as, beside its text. None means no failure.
-enum Code : int { None = 0, Unauthorized, Forbidden, Connect, Offline, Other };
+enum Code : int { None = 0, Unauthorized, Forbidden, Connect, Offline, Other, TooManyRequests };
 
 inline Kind Classify(int code, std::string reason)
 {
+	if (code == Code::TooManyRequests)
+		return Kind::TooManyRequests;
 	for (char &c : reason) {
 		if (c >= 'A' && c <= 'Z')
 			c = static_cast<char>(c - 'A' + 'a');

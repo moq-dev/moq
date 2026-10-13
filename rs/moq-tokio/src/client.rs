@@ -219,6 +219,12 @@ impl Client {
 		self
 	}
 
+	/// Cap the announcements and subscriptions this peer can hold on a session.
+	pub fn with_limits(mut self, limits: moq_net::session::Limits) -> Self {
+		self.moq = self.moq.with_limits(limits);
+		self
+	}
+
 	/// Attach a per-connection [`moq_net::stats::Session`] context to all sessions
 	/// opened by this client.
 	pub fn with_stats(mut self, stats: moq_net::stats::Session) -> Self {

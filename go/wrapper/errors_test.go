@@ -107,3 +107,13 @@ func TestErrorSentinels(t *testing.T) {
 		})
 	}
 }
+
+func TestSessionLimitProtocolKind(t *testing.T) {
+	err := ffi.NewMoqErrorProtocol(ffi.MoqProtocolError{
+		Scope: moq.ErrorScopeSession, Code: 7, Kind: moq.ProtocolKindTooManyRequests, Message: "request limit",
+	})
+	details, ok := moq.ProtocolError(err)
+	if !ok || details.Kind != moq.ProtocolKindTooManyRequests || moq.IsAuthError(err) {
+		t.Fatalf("session limit lost its kind: %+v, %v", details, err)
+	}
+}

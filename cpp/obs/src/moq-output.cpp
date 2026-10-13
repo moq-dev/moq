@@ -65,6 +65,8 @@ MoQError::Code FailureCode(const moq::Error &error)
 	if (std::holds_alternative<moq::Error::kConnect>(variant))
 		return MoQError::Code::Connect;
 	if (const auto *protocol = std::get_if<moq::Error::kProtocol>(&variant)) {
+		if (protocol->details.kind == moq::ProtocolKind::kTooManyRequests)
+			return MoQError::Code::TooManyRequests;
 		if (protocol->details.kind == moq::ProtocolKind::kUnauthorized)
 			return MoQError::Code::Unauthorized;
 	}

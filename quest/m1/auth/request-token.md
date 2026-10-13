@@ -43,12 +43,10 @@ Continue [#5148](https://github.com/moq-dev/moq/pull/5148), which carries
   capacity before awaiting the application and observes request/session
   cancellation. Withdrawal must cancel pending work and make late answers
   ineffective; any verifier work still in flight remains counted until it
-  ends. Renewal has the same ownership discipline. Coordinate queue
-  bounds and cancellation with [Relay tokens](/quest/m1/auth/relay-refresh.md)
-  and #5282, which already adds shared pending-AUTH support; do not defer the
-  initial-admission fix to the later request-gate refactor. Reuse shared
-  primitives whichever PR lands first, without approving #5282's separate
-  API or limit-policy decisions here.
+  ends. Renewal has the same ownership discipline. Reuse the bounded
+  pending-AUTH queue and `Request::closed` withdrawal that session tokens
+  already use; do not defer the initial-admission fix to the later
+  request-gate refactor.
 - **Documentation.** Minimal Rust API comments only: experimental hook,
   application verification required, no per-request relay integration, and
   setter success is not peer authorization. No feature page, guide, or guide
@@ -83,8 +81,9 @@ Retained decisions:
   for each request. Replacement renews live eligible requests, and success
   means local configuration accepted, not authentication acknowledged.
   `Connection::auth()` owns it across reconnects and
-  `connect::Config::with_request_token` seeds it. Share the persistent handle
-  and server passthrough with #5282; add no parallel `Client` methods.
+  `connect::Config::with_request_token` seeds it. Extend the existing
+  `Connection::auth()` handle and `server::Request::auth()` passthrough; add no
+  parallel `Client` methods.
 - **Update credit.** Advertise and enforce MAX_REQUEST_UPDATES on draft 19+,
   with TOO_MANY_REQUEST_UPDATES (0x1B) in the shared Rust/JS session registry
   and moq-lite's registry. Earlier drafts keep a local guard that ends only
@@ -118,7 +117,5 @@ promised by these mechanisms.
 
 - [#5106](https://github.com/moq-dev/moq/pull/5106) - landed setup extension
   configuration; no remaining prerequisite for starting this hook
-- [Relay tokens](/quest/m1/auth/relay-refresh.md) - shared pending-AUTH and
-  persistent connection plumbing, with session verification kept separate
 - [Request leases](/quest/m3/auth-request-lease.md) - deferred relay
   verification, not a prerequisite for this experimental hook

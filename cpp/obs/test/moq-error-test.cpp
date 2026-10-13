@@ -22,7 +22,8 @@ int main()
 		    Kind::Certificate ||
 	    Classify(MoQError::Unauthorized, "reconnect timed out after 10s") != Kind::Unauthorized ||
 	    Classify(MoQError::Forbidden, "forbidden") != Kind::Forbidden ||
-	    Classify(MoQError::Offline, "offline") != Kind::Offline) {
+	    Classify(MoQError::Offline, "offline") != Kind::Offline ||
+	    Classify(MoQError::TooManyRequests, "reconnect timed out") != Kind::TooManyRequests) {
 		std::fprintf(stderr, "FAIL: connection failure classification\n");
 		return 1;
 	}

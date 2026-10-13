@@ -162,10 +162,9 @@ impl<S: Stream> Client<S> {
 		})
 	}
 
-	/// Set how long [`publish`](Self::publish)'s FLV muxer waits for a stalled group
-	/// before skipping to a newer one (the moq-level frame-drop latency). Defaults
-	/// to [`DEFAULT_MAX_DELAY`](crate::DEFAULT_MAX_DELAY); pass
-	/// [`Duration::ZERO`] to drop stale groups aggressively.
+	/// Set the FLV release delay and stalled-group budget for [`publish`](Self::publish).
+	/// Defaults to [`DEFAULT_MAX_DELAY`](crate::DEFAULT_MAX_DELAY); zero releases
+	/// available frames immediately without deadline drops.
 	pub fn with_export_max_delay(mut self, max_delay: Duration) -> Self {
 		self.export_max_delay = max_delay;
 		self
@@ -236,7 +235,7 @@ impl<S: Stream> Client<S> {
 			.catalog::<()>(moq_mux::catalog::CatalogFormat::default())
 			.await
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?;
-		let mut export = FlvExport::new(source, catalog).with_max_delay(self.export_max_delay);
+		let mut export = FlvExport::new(source, catalog).with_delay(self.export_max_delay);
 		let mut tags = flv::TagReader::new();
 		let mut buffer = [0u8; READ_BUFFER];
 

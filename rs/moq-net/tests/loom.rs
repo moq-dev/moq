@@ -80,6 +80,9 @@ fn frame_reaches_a_parked_subscriber() {
 /// Two groups written back to back must both reach the subscriber in order. This is
 /// the path where the producer takes the waiter list for group 1 and wakes outside
 /// the lock while group 2 is already being written.
+///
+/// The subscription starts at group 0: an unfloored subscriber on an untimed track
+/// starts at the latest group, so one opened after both writes would only see the second.
 #[test]
 fn back_to_back_groups_arrive_in_order() {
 	model(|| {
@@ -96,7 +99,8 @@ fn back_to_back_groups_arrive_in_order() {
 			track.finish().expect("finish track");
 		});
 
-		let mut subscriber = block_on(track_consumer.subscribe(None)).expect("subscribe");
+		let from_start = moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(0));
+		let mut subscriber = block_on(track_consumer.subscribe(from_start)).expect("subscribe");
 		let first = block_on(subscriber.recv_group()).expect("recv").expect("first group");
 		let second = block_on(subscriber.recv_group()).expect("recv").expect("second group");
 		assert!(second.sequence > first.sequence, "groups arrived out of order");

@@ -36,8 +36,9 @@ Decided with the maintainer (2026-10-13):
   tracks. Native publishers' apps own each track directly.
 - **Fail locally and at once.** End the track with the encoder's error,
   advertise the rendition as `enabled: false` with its last config (which
-  `@moq/watch` already skips; WHEP and HLS egress still serve a disabled
-  rendition, a consumer gap outside this quest), and expose the failure to
+  `@moq/watch` already skips; native egress follows in
+  [Native egress skips disabled renditions](/quest/m1/egress-enabled.md)),
+  and expose the failure to
   the application, for example as an error signal on the encoder or the
   `Rendition`. Failing never republishes the network broadcast, so remove or
   narrow the `#restart` path that does today.
@@ -68,4 +69,5 @@ Also:
 ## Related
 
 - [Simulcast rung disable](/quest/m1/simulcast-rung-disable.md) - the other driver of a rendition's `enabled` state
+- [Native egress skips disabled renditions](/quest/m1/egress-enabled.md) - WHEP, HLS and moq-mux exports honor `enabled: false`
 - [Catalog rendition IDs](/quest/m1/catalog-track-id.md) - lets a rendition move to a new track name without changing its catalog ID

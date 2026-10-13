@@ -194,6 +194,9 @@ pub struct SubscribeArgs {
 	/// overriding the catalog's recorded multiplex rate.
 	pub mux_rate: Option<u64>,
 
+	/// Write the `m2ts` passthrough track back out instead of muxing the media (TS only).
+	pub passthrough: bool,
+
 	/// Catalog format for track discovery (default: detect from the broadcast suffix).
 	pub catalog: Option<CatalogFormatArg>,
 
@@ -321,7 +324,7 @@ impl Subscribe {
 		// shape internally (synthesizing avcC/hvcC from inline parameter sets).
 		let stream = self.stream().await?;
 		let mut mkv = moq_mux::container::mkv::Export::new(self.source, stream)
-			.with_max_delay(self.args.max_delay)
+			.with_delay(self.args.max_delay)
 			.with_fragment_duration(self.args.fragment_duration);
 
 		while let Some(chunk) = mkv.next().await? {
@@ -369,6 +372,9 @@ impl Subscribe {
 				self.path
 			)
 		})?;
+		if self.args.passthrough {
+			return self.run_ts_passthrough().await;
+		}
 
 		// TS emits PAT/PMT then a continuous PES stream (re-emitting PAT/PMT at
 		// keyframes for tune-in). Avc3/Hev1 sources pass through as Annex-B; AAC
@@ -432,6 +438,40 @@ impl Subscribe {
 		}
 	}
 
+	/// Write the multiplex the broadcast's `m2ts` track carries, each run of packets as its
+	/// time on the source's PCR comes round.
+	async fn run_ts_passthrough(self) -> anyhow::Result<()> {
+		let mut stdout = tokio::io::stdout();
+		let mut release = moq_mux::container::ts::Release::new(self.source, self.catalog)
+			.await?
+			.with_delay(self.args.max_delay);
+		let log = |release: &moq_mux::container::ts::Release| {
+			tracing::info!(
+				dropped = release.dropped(),
+				drift_ppm = ?release.drift().map(|drift| drift * 1e6),
+				out_of_tolerance = release.out_of_tolerance(),
+				"TS passthrough release clock"
+			);
+		};
+		let mut sampled = tokio::time::Instant::now();
+		let mut reported = (0, 0);
+		while let Some(object) = release.next().await? {
+			stdout.write_all(&object.payload).await?;
+			stdout.flush().await?;
+
+			if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
+				sampled = tokio::time::Instant::now();
+				let counts = (release.dropped(), release.out_of_tolerance());
+				if counts != reported {
+					reported = counts;
+					log(&release);
+				}
+			}
+		}
+		log(&release);
+		Ok(())
+	}
+
 	async fn run_flv(self) -> anyhow::Result<()> {
 		let mut stdout = tokio::io::stdout();
 
@@ -440,7 +480,7 @@ impl Subscribe {
 		// internally (synthesizing avcC from inline parameter sets). Only H.264 video
 		// and AAC audio are supported; `fragment_duration` does not apply to FLV.
 		let stream = self.stream().await?;
-		let mut flv = moq_mux::container::flv::Export::new(self.source, stream).with_max_delay(self.args.max_delay);
+		let mut flv = moq_mux::container::flv::Export::new(self.source, stream).with_delay(self.args.max_delay);
 
 		while let Some(chunk) = flv.next().await? {
 			stdout.write_all(&chunk).await?;

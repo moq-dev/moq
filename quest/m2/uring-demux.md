@@ -39,15 +39,20 @@ Keep the cross-thread hop off the QUIC path: a QUIC datagram never leaves its
 worker. Bound the channel per class with a drop counter, as the tokio demux
 does.
 
-Tests: the existing uring relay integration test gains a WebRTC-class
-datagram echoed back through the remote-send path, on the QUIC port with a
-QUIC session active. QUIC-bit greasing is
-already off on the ring, from shard steering.
+Decided in the quest audit: functional parity requires the RTC and SRT feed
+implementations, not only packet classification. Reuse their integration
+tests through the uring remote-send path with a QUIC session active on the
+same port, proving real WebRTC and SRT traffic reaches each stack and its
+replies return through the owning worker. An echoed packet can test the
+channel but does not prove stack integration. QUIC-bit greasing is already
+off on the ring, from shard steering.
 
 ## Required
 
 - [UDP demux](/quest/m2/one-port/udp-demux.md) - the classifier and flow table this runs on the ring
 - [Steer only QUIC by connection ID](/quest/m2/one-port/shard-steering.md) - keeps each non-QUIC flow on one worker
+- [WebRTC on the shared socket](/quest/m2/one-port/rtc-feed.md) - the fed RTC socket and transmit contract the ring integrates
+- [SRT on the shared socket](/quest/m2/one-port/srt-demux.md) - the SRT state machines fed through the shared demux
 
 ## Related
 
