@@ -31,7 +31,7 @@ impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
 	where
 		V: Clone,
 	{
-		let (send, recv) = ready!(session.poll_open_bi(cx)).map_err(Error::from_transport)?;
+		let (send, recv) = ready!(session.poll_open_bi(cx)).map_err(|err| version.transport_error(err))?;
 		Poll::Ready(Ok(Self::build(send, recv, version)))
 	}
 
@@ -40,7 +40,7 @@ impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
 	where
 		V: Clone,
 	{
-		let (send, recv) = session.open_bi().await.map_err(Error::from_transport)?;
+		let (send, recv) = session.open_bi().await.map_err(|err| version.transport_error(err))?;
 		Ok(Self::build(send, recv, version))
 	}
 
@@ -49,7 +49,7 @@ impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
 	where
 		V: Clone,
 	{
-		let (send, recv) = ready!(session.poll_accept_bi(cx)).map_err(Error::from_transport)?;
+		let (send, recv) = ready!(session.poll_accept_bi(cx)).map_err(|err| version.transport_error(err))?;
 		Poll::Ready(Ok(Self::build(send, recv, version)))
 	}
 
@@ -58,7 +58,7 @@ impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
 	where
 		V: Clone,
 	{
-		let (send, recv) = session.accept_bi().await.map_err(Error::from_transport)?;
+		let (send, recv) = session.accept_bi().await.map_err(|err| version.transport_error(err))?;
 		Ok(Self::build(send, recv, version))
 	}
 

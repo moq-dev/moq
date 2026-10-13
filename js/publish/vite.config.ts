@@ -1,9 +1,10 @@
 import { resolve } from "path";
 import { defineConfig } from "vite";
 import { worklet } from "../common/vite-plugin-worklet";
+import { lazyMedia } from "./bundle";
 
 export default defineConfig({
-	plugins: [worklet()],
+	plugins: [worklet(), lazyMedia()],
 	build: {
 		lib: {
 			entry: {

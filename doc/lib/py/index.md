@@ -30,7 +30,8 @@ async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
         # The filter is relative to the literal prefix; prefixes stay origin-relative.
         async for event in client.announced("live/", filter="*/camera"):
-            if not isinstance(event, moq.AnnounceEventStart):
+            # A restart is a new publisher run at the same path: request it again.
+            if not isinstance(event, (moq.AnnounceEventStart, moq.AnnounceEventRestart)):
                 continue  # AnnounceEventUpdate or AnnounceEventEnd
             announcement = event.announce
             print(announcement.captures)  # what * matched, or None for a partial overlap
@@ -73,7 +74,7 @@ async def main():
         status = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("status"), compression=True)
         status.update({"state": "live", "viewers": 42})
 
-        broadcast.announce()
+        broadcast.announce(moq.Route(epoch=moq.mint_epoch()))  # a fresh epoch per run
         audio.finish()
         video.finish()
         events.finish()
@@ -94,6 +95,22 @@ one to one; the API reference has the names.
 - **Decoded frames hold decoder buffers.** Drop each frame from `decode_video` promptly, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
 - **Closing.** `await session.shutdown()` gives finished tracks up to one second to deliver and raises if they did not. `cancel(code)` closes at once. Finish or abort live tracks first.
 - **Stats.** `session.stats()` reports `rtt`, `estimated_send_rate_bps`, `estimated_recv_rate_bps`, and the byte and packet counters (`bytes_sent`, `bytes_received`, `bytes_lost`, `packets_sent`, `packets_received`, `packets_lost`). A field is `None` when the transport does not report it, which is not the same as zero.
+- **Errors.** Read diagnostic payloads from `reason` and structured protocol failures from `details`.
+- **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
+- **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
+
+## Runtime
+
+Native I/O and background tasks run on a Tokio worker pool. Calls awaited by the
+host still poll in place; independent native wake callbacks can run concurrently.
+The generated bindings wake Python futures through the asyncio event loop. The
+package exit hook joins native workers before interpreter finalization.
+
+A session closed for exceeding the relay's request caps reports the protocol
+kind `ProtocolKind.TOO_MANY_REQUESTS`. Reduce
+the simultaneous announcements or subscriptions, or ask the relay operator
+to adjust the [session limits](/bin/relay/config#session-and-peer), before
+reconnecting with the same workload.
 
 ## Reference
 

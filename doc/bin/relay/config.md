@@ -7,8 +7,9 @@ description: TOML reference for moq-relay
 
 `moq-relay relay.toml`. Every key is also a CLI flag and environment variable
 that joins the section and key: `listen.tls.cert` is `--listen-tls-cert` /
-`MOQ_LISTEN_TLS_CERT`. The exception is `listen.bind`, spelled `--listen` /
-`MOQ_LISTEN`. Precedence is CLI, then env, then file, then defaults.
+`MOQ_LISTEN_TLS_CERT`. The exceptions: `listen.bind` is spelled `--listen` /
+`MOQ_LISTEN`, and `listen.extensions` and `connect.extensions` are TOML only.
+Precedence is CLI, then env, then file, then defaults.
 `moq-relay --help` lists every flag.
 
 ## \[listen]
@@ -32,6 +33,10 @@ bind = "127.0.0.1:4444"
 [listen.unix]                        # Plaintext qmux over a Unix socket, gated by peer credentials.
 bind = "/run/moq/internal.sock"
 allow.uid = [1001]
+
+[listen.extensions]                  # moq-transport SETUP extensions to offer, each on by default.
+auth = false                         # Decline MoQ Auth (draft 17+).
+solicit = false                      # Decline MoQ Solicit, so peers may announce unasked.
 ```
 
 `timeout` bounds the whole handshake, transport through MoQ SETUP, so a peer
@@ -54,7 +59,7 @@ Transport tuning, applied to accepted and dialed connections alike.
 congestion_control = "delay"         # "delay" (BBR, the default) or "loss" (CUBIC).
 max_streams = 10000                  # Concurrent streams per connection, bidi and uni. Default.
 idle_timeout = "10s"                 # Drop a connection after this long with nothing on it. Default.
-keep_alive = "3s"                    # Ping interval; "0s" disables it. Ignored by iroh. Default.
+keep_alive = "3s"                    # Ping interval; "0s" disables it. iroh still pings at least every 5s. Default.
 gso = true                           # UDP segmentation offload. iroh cannot turn it off.
 mtu_discovery = false                # Path MTU discovery. Default.
 receive_window = 67108864            # Whole-connection window, in bytes. Default (64 MiB).
@@ -74,6 +79,31 @@ how much unread data one peer can make the relay buffer. Keep
 `stream_receive_window` well under it so one slow group cannot starve the
 connection.
 
+## \[session] and \[peer]
+
+Request caps apply separately to each session on every transport. The relay
+uses `[peer]` for an admitted grant marked `peer` or `upstream`, including
+verified LAN membership, and for links it dials through the cluster. A client
+certificate, route hop, or cluster-looking URL alone does not select peer caps.
+
+```toml
+[session]
+announces = 1000                     # Simultaneous broadcasts or namespaces.
+subscriptions = 1000                # Simultaneously held subscriptions.
+
+[peer]
+announces = 100000
+subscriptions = 10000
+```
+
+These are the defaults. For example, `--peer-subscriptions=50000` raises the
+subscription cap on cluster links. Size peer caps for the combined traffic
+they carry, and use session peak counters to check headroom. Exceeding a cap
+closes the session with `TOO_MANY_REQUESTS`; reconnecting with the same load
+will exceed it again. Zero admits no entries of that kind, not unlimited
+entries. On moq-transport drafts 14 to 16 these caps also size the request
+window, so very small values can prevent other requests from progressing.
+
 ## \[runtime]
 
 By default one work-stealing runtime serves every connection off one UDP
@@ -89,10 +119,13 @@ io_uring = false                     # Drive them with io_uring instead of tokio
 ```
 
 Packets are steered by connection ID, so a client that migrates stays with its
-worker. `workers` needs the `noq` feature and real certificate files rather
-than `tls.generate`. `io_uring` additionally needs Linux 6.12+, the `io-uring`
-cargo feature, and exactly one certificate; it serves moq-lite only, and
-refuses `mtu_discovery`. A setting the build or host cannot deliver refuses to
+worker. `workers` needs the `noq` feature. Every worker and the TLS stream
+listener serve one shared identity, generated or file-backed, so a certificate
+rotation reaches them together and `/certificate.sha256` stays accurate.
+
+`io_uring` additionally needs Linux 6.12+ and the `io-uring` cargo feature; it
+shares the same reloadable TLS identity, serves moq-lite only, and refuses
+`mtu_discovery`. A setting the build or host cannot deliver refuses to
 start rather than being ignored. If io\_uring workers fail to start naming
 `RLIMIT_MEMLOCK`, raise it (`LimitMEMLOCK=` under systemd).
 
@@ -110,6 +143,11 @@ key = "key.pem"
 [internal]
 listen = "127.0.0.1:9101"            # Unauthenticated /health, /metrics, /nodes, /sessions, POST /sessions/revalidate. Keep private.
 ```
+
+`listen.timeout` also closes HTTP connections with no complete request in flight,
+including HTTPS peers that stall the TLS handshake
+and HTTP/2 peers that acknowledge keep-alive PINGs. Active response bodies
+keep the connection open; a WebSocket upgrade hands its lifetime to MoQ.
 
 See [HTTP endpoints](/bin/relay/http).
 
@@ -158,6 +196,8 @@ tls.cert = "relay.pem"               # Present a client certificate (mTLS to pee
 tls.key = "relay.key"
 goaway.redirect = "same-host"        # How far to trust a draining peer's redirect URI.
 goaway.handover = "10s"              # Cap on how long the drained upstream keeps serving.
+extensions.auth = false              # Decline MoQ Auth on outbound moq-transport sessions.
+extensions.solicit = false           # Decline MoQ Solicit. Both default to on, as in [listen.extensions].
 ```
 
 A draining upstream may name a replacement URI. `same-host` follows it only
@@ -197,9 +237,12 @@ Each node publishes its traffic and session counters as MoQ tracks, split by a
 relay dials and LAN peers it admits), which is what makes billing per customer or per region possible.
 Each run, and each group returning after its linger, announces under a fresh
 [epoch](/concept/moq-lite#publisher-epochs), so a restart is a new broadcast at
-the same path. Session rows report how close sessions come to the per-session
-limits, past which one is closed with `TOO_MANY_REQUESTS`. [Stats](/concept/stats) describes the paths, tracks, and
-encodings; read them with the [`moq-stats`](https://docs.rs/moq-stats) crate.
+the same path. Each group's totals count everything since its epoch began, so
+billing reads those; per-path traffic and per-root sessions are for
+dashboards. Session counters report how close sessions come to the
+per-session limits, past which one is closed with `TOO_MANY_REQUESTS`.
+[Stats](/concept/stats) describes the paths, tracks, and encodings; read them
+with the [`moq-stats`](https://docs.rs/moq-stats) crate.
 
 ## \[iroh]
 
@@ -222,11 +265,15 @@ drain_timeout = "10s"                # Top-level key, as --drain-timeout / MOQ_D
 
 The first SIGTERM or SIGINT starts a drain: every session is sent a GOAWAY
 asking it to reconnect elsewhere, including any that connect during the drain,
-and is force-closed if it is still connected when the window ends. The relay
-exits as soon as every session has left, when the window ends, or immediately
-on a second signal. `0` skips the GOAWAY. Only moq-lite-04+ and moq-transport
-clients act on a GOAWAY; older ones are closed when the window ends. An
-embedder can take over the signals; see [Embed](/bin/relay/#embed).
+and is force-closed if it is still connected when the window ends. Accepted
+connections still handshaking or awaiting authorization hold the drain until
+they finish, fail, or reach that same deadline, where any still pending is
+refused or closed. The relay exits as soon as
+every admitted connection has left (refusing any that arrive after), when
+the window ends, or immediately on a second signal. `0` skips the GOAWAY.
+Only moq-lite-04+ and moq-transport clients act on a GOAWAY; older ones are
+closed when the window ends. An embedder can take over the signals; see
+[Embed](/bin/relay/#embed).
 
 ## \[log]
 

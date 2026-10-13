@@ -7,15 +7,28 @@ set -euo pipefail
 # runtime with the same number of independent Tokio/epoll and io_uring workers
 # on the current tree. The current load generator drives every relay so the
 # workloads stay identical. `--audio` isolates the audio grouping/load-shape matrix.
+# `--lock` records relay worker off-CPU stacks to attribute std mutex waits.
 
 MODE=${1:-}
+ROUNDS=${MOQ_BENCH_RUNTIME_ROUNDS:-3}
+if [[ ! $ROUNDS =~ ^[0-9]+$ ]] || ((10#$ROUNDS < 1)); then
+    printf 'MOQ_BENCH_RUNTIME_ROUNDS must be a positive integer, got %q\n' "$ROUNDS" >&2
+    exit 1
+fi
+ROUNDS=$((10#$ROUNDS))
 case $MODE in
     --audio)
         BASE=
         ;;
+    --lock)
+        BASE=
+        LOCK_WORKLOAD=${MOQ_BENCH_LOCK_WORKLOAD:-fanout}
+        LOCK_WORKERS=${MOQ_BENCH_LOCK_WORKERS:-1 4 16}
+        # Without frame pointers, perf's DWARF unwinder stops at the first relay frame.
+        export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C force-frame-pointers=yes"
+        ;;
     --runtime)
         BASE=
-        RUNTIME_ROUNDS=${MOQ_BENCH_RUNTIME_ROUNDS:-3}
         RUNTIME_WORKERS=${MOQ_BENCH_RUNTIME_WORKERS:-}
         if [[ -z $RUNTIME_WORKERS ]]; then
             RUNTIME_WORKERS=$(getconf _NPROCESSORS_ONLN)
@@ -23,15 +36,10 @@ case $MODE in
                 RUNTIME_WORKERS=256
             fi
         fi
-        if [[ ! $RUNTIME_ROUNDS =~ ^[0-9]+$ ]] || ((10#$RUNTIME_ROUNDS < 1)); then
-            printf 'runtime benchmark rounds must be a positive integer, got %q\n' "$RUNTIME_ROUNDS" >&2
-            exit 1
-        fi
         if [[ ! $RUNTIME_WORKERS =~ ^[0-9]+$ ]] || ((10#$RUNTIME_WORKERS < 1 || 10#$RUNTIME_WORKERS > 256)); then
             printf 'runtime benchmark workers must be an integer from 1 to 256, got %q\n' "$RUNTIME_WORKERS" >&2
             exit 1
         fi
-        RUNTIME_ROUNDS=$((10#$RUNTIME_ROUNDS))
         RUNTIME_WORKERS=$((10#$RUNTIME_WORKERS))
         ;;
     *)
@@ -46,12 +54,36 @@ fi
 BASE_TARGET=$TARGET/base
 CURRENT_TARGET=$TARGET/current
 
-RUN=$(mktemp -d "${TMPDIR:-/tmp}/moq-bench.XXXXXX")
+ARTIFACTS=${MOQ_BENCH_ARTIFACTS:-$TARGET/runs}
+mkdir -p "$ARTIFACTS"
+ARTIFACTS=$(cd "$ARTIFACTS" && pwd -P)
+# Each run copies bench/ and untracked sources, so it must land in neither.
+if [[ $ARTIFACTS/ == "$ROOT"/bench/* ]] ||
+    { [[ $ARTIFACTS/ == "$ROOT"/* ]] && ! git -C "$ROOT" check-ignore -q "$ARTIFACTS"; }; then
+    printf 'MOQ_BENCH_ARTIFACTS must be outside the repository, or git-ignored and outside bench/: %s\n' \
+        "$ARTIFACTS" >&2
+    exit 1
+fi
+RUN=$(mktemp -d "$ARTIFACTS/run.XXXXXX")
+printf 'Benchmark evidence: %s\n' "$RUN"
 WORKTREE=
 RELAY_PID=
 HOST_PID=
+LOAD_PID=
+PROFILE_PID=
+STDOUT_PID=
+STDERR_PID=
 
 cleanup() {
+    if [[ -n $PROFILE_PID ]]; then
+        # setsid made the profiler a group leader without forking, so its PID is the group.
+        kill -- -"$PROFILE_PID" 2>/dev/null || true
+        wait "$PROFILE_PID" 2>/dev/null || true
+    fi
+    if [[ -n $LOAD_PID ]]; then
+        kill "$LOAD_PID" 2>/dev/null || true
+        wait "$LOAD_PID" 2>/dev/null || true
+    fi
     if [[ -n $HOST_PID ]]; then
         kill "$HOST_PID" 2>/dev/null || true
         wait "$HOST_PID" 2>/dev/null || true
@@ -63,9 +95,27 @@ cleanup() {
     if [[ -n $WORKTREE ]]; then
         git -C "$ROOT" worktree remove --force "$WORKTREE" >/dev/null 2>&1 || true
     fi
-    rm -rf -- "$RUN"
+    # Close both pipe writers before waiting for the owned log copiers.
+    if [[ -n $STDOUT_PID ]]; then
+        exec 1>&3 2>&4
+        wait "$STDOUT_PID" || true
+        wait "$STDERR_PID" || true
+        exec 3>&- 4>&-
+    fi
+    printf 'Benchmark evidence retained: %s\n' "$RUN"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+exec 3>&1 4>&2
+exec > >(tee "$RUN/stdout.log")
+STDOUT_PID=$!
+exec 2> >(tee "$RUN/stderr.log" >&4)
+STDERR_PID=$!
+
+python3 "$ROOT/bench/metadata.py" "$RUN" "$BASE" "$MODE" "${RUNTIME_WORKERS:-}" "$ROUNDS"
+cp -R "$ROOT/bench/workloads" "$RUN/workloads"
+cp -R "$ROOT/bench" "$RUN/harness"
 
 export CRITERION_HOME=$RUN/criterion
 
@@ -251,37 +301,6 @@ print_current_relay() {
     done
 }
 
-print_relay_comparison() {
-    printf '\nRelay comparison (change is current versus base)\n'
-    printf '%-10s %-16s %12s %12s %10s\n' workload metric base current change
-    for workload in video fanout; do
-        jq -r -s '
-			.[0] as $base | .[1] as $current
-			| def change($a; $b): if $a == null or $a == 0 or $b == null then "n/a" else
-				((($b / $a - 1) * 10000 | round) / 100 | tostring) + "%"
-			end;
-			[
-				["send Mbps", $base.send_mbps, $current.send_mbps],
-				["recv Mbps", $base.recv_mbps, $current.recv_mbps],
-				["send fps", $base.send_fps, $current.send_fps],
-				["recv fps", $base.recv_fps, $current.recv_fps],
-				["loss %", $base.loss_pct, $current.loss_pct],
-				["latency p50 ms", $base.latency_p50_ms, $current.latency_p50_ms],
-				["latency p99 ms", $base.latency_p99_ms, $current.latency_p99_ms],
-				["CPU cores", $base.cpu_cores, $current.cpu_cores],
-				["RSS MiB", (($base.rss_bytes // null) | if . then . / 1048576 else null end),
-					(($current.rss_bytes // null) | if . then . / 1048576 else null end)]
-			]
-			| .[]
-			| [.[0], (.[1] // "n/a" | tostring), (.[2] // "n/a" | tostring), change(.[1]; .[2])]
-			| @tsv
-		' "$RUN/relay/base/$workload/summary.json" "$RUN/relay/current/$workload/summary.json" |
-            while IFS=$'\t' read -r metric base current change; do
-                printf '%-10s %-16s %12s %12s %10s\n' "$workload" "$metric" "$base" "$current" "$change"
-            done
-    done
-}
-
 aggregate_runtime() {
     local runtime=$1
     local workload=$2
@@ -322,7 +341,7 @@ print_runtime_comparison() {
         done
     done
 
-    printf '\nRuntime comparison (%d workers, median of %d rounds)\n' "$RUNTIME_WORKERS" "$RUNTIME_ROUNDS"
+    printf '\nRuntime comparison (%d workers, median of %d rounds)\n' "$RUNTIME_WORKERS" "$ROUNDS"
     printf 'tokio-shared uses %d runtime threads; worker modes use %d data threads plus one control thread.\n' \
         "$RUNTIME_WORKERS" "$RUNTIME_WORKERS"
     printf '%-13s %-16s %10s %8s %7s %8s %8s %9s %9s %9s %9s %7s\n' \
@@ -414,13 +433,10 @@ print_audio_sample() {
     ] | @tsv' "$RUN/relay/$label/$workload/summary.json"
 }
 
-run_runtime_comparison() {
-    if [[ $(uname -s) != Linux ]]; then
-        printf 'runtime comparison needs Linux for io_uring and /proc metrics\n' >&2
-        return 1
-    fi
+# Worker runtimes read their certificate from disk instead of generating one.
+generate_certificate() {
     if ! command -v openssl >/dev/null; then
-        printf 'runtime comparison needs openssl to generate its temporary certificate\n' >&2
+        printf 'worker runtimes need openssl to generate a temporary certificate\n' >&2
         return 1
     fi
 
@@ -434,6 +450,14 @@ run_runtime_comparison() {
         cat "$RUN/openssl.log" >&2
         return 1
     fi
+}
+
+run_runtime_comparison() {
+    if [[ $(uname -s) != Linux ]]; then
+        printf 'runtime comparison needs Linux for io_uring and /proc metrics\n' >&2
+        return 1
+    fi
+    generate_certificate
 
     printf 'Building one relay binary with the Tokio and io_uring paths...\n'
     CARGO_TARGET_DIR=$CURRENT_TARGET cargo build --locked --release \
@@ -452,13 +476,13 @@ run_runtime_comparison() {
     local round workload offset index runtime
     for workload in video fanout video-heavy fanout-heavy; do
         printf '\nRelay runtime workload: %s\n' "$workload"
-        for ((round = 1; round <= RUNTIME_ROUNDS; round++)); do
+        for ((round = 1; round <= ROUNDS; round++)); do
             # Rotate the order so thermal drift and other time-dependent noise do
             # not consistently favor the same runtime.
             offset=$(((round - 1) % ${#runtimes[@]}))
             for ((index = 0; index < ${#runtimes[@]}; index++)); do
                 runtime=${runtimes[$(((index + offset) % ${#runtimes[@]}))]}
-                printf '  round %d/%d: %s\n' "$round" "$RUNTIME_ROUNDS" "$runtime"
+                printf '  round %d/%d: %s\n' "$round" "$ROUNDS" "$runtime"
                 run_workload "$runtime/round-$round" "$CURRENT_TARGET/release/moq-relay" \
                     "$workload" "$runtime" "$RUNTIME_WORKERS"
             done
@@ -466,6 +490,46 @@ run_runtime_comparison() {
     done
 
     print_runtime_comparison
+}
+
+run_lock_profile() {
+    if [[ $(uname -s) != Linux ]]; then
+        printf 'lock profiling needs Linux for perf and /proc schedstat\n' >&2
+        return 1
+    fi
+    # Refuse before the build when the kernel would refuse the capture.
+    python3 "$ROOT/bench/profile.py" check
+    generate_certificate
+
+    printf 'Building the relay with the profiling profile and frame pointers...\n'
+    CARGO_TARGET_DIR=$TARGET/profile cargo build --locked --profile profiling -p moq-relay -p moq-bench
+    LOAD_BIN=$TARGET/profile/profiling/moq-bench
+    HOST_BIN=$TARGET/profile/profiling/moq-bench-host
+    local relay=$TARGET/profile/profiling/moq-relay
+
+    printf '\nLock wait: %s, tokio workers; each profiled run follows an unprofiled control\n' "$LOCK_WORKLOAD"
+    printf '%-8s %5s %8s %13s %13s %10s %10s %13s %9s\n' \
+        workers idle switches control-fps profiled-fps control-CPU profiled-CPU mutex-wait-ms wait/CPU
+    local workers
+    for workers in $LOCK_WORKERS; do
+        run_workload "control-$workers" "$relay" "$LOCK_WORKLOAD" tokio-workers "$workers"
+        PROFILE_LOCK=true
+        run_workload "lock-$workers" "$relay" "$LOCK_WORKLOAD" tokio-workers "$workers"
+        PROFILE_LOCK=
+        jq -r -s '[
+            .[0].recv_fps, .[1].recv_fps, .[0].cpu_cores, .[1].cpu_cores, (.[2].idle | length),
+            ([.[2].workers[].switches] | min),
+            ([.[2].workers[].mutex_wait_ns] | add / 1000000),
+            ([.[2].workers[].mutex_wait_ns] | add) / ([.[2].workers[].cpu_ns] | add)
+        ] | @tsv' "$RUN/relay/control-$workers/$LOCK_WORKLOAD/summary.json" \
+            "$RUN/relay/lock-$workers/$LOCK_WORKLOAD/summary.json" \
+            "$RUN/relay/lock-$workers/$LOCK_WORKLOAD/lock/lock.json" |
+            while IFS=$'\t' read -r control profiled control_cpu profiled_cpu idle switches wait share; do
+                printf '%-8s %5s %8s %13.1f %13.1f %10.3f %10.3f %13.1f %9.4f\n' \
+                    "$workers" "$idle" "$switches" "$control" "$profiled" "$control_cpu" "$profiled_cpu" "$wait" "$share"
+            done
+    done
+    printf '\nMutex stacks (flamegraph folded format): %s/relay/lock-*/%s/lock/mutex.folded\n' "$RUN" "$LOCK_WORKLOAD"
 }
 
 cd "$ROOT"
@@ -476,10 +540,18 @@ if [[ $MODE == --audio ]]; then
 elif [[ $MODE == --runtime ]]; then
     run_runtime_comparison
     exit 0
+elif [[ $MODE == --lock ]]; then
+    run_lock_profile
+    exit 0
 elif [[ -n $BASE ]]; then
     BASE_COMMIT=$(git rev-parse --verify "$BASE^{commit}")
     WORKTREE=$RUN/base
     git worktree add --detach "$WORKTREE" "$BASE_COMMIT" >/dev/null
+    mkdir -p "$RUN/base-context"
+    (
+        cd "$WORKTREE"
+        python3 "$ROOT/bench/metadata.py" "$RUN/base-context" "$BASE_COMMIT" comparison-base
+    )
 
     printf 'Criterion comparison: %s (%s) versus current\n' "$BASE" "$BASE_COMMIT"
     compare_criterion "$WORKTREE" "$ROOT"
@@ -504,16 +576,22 @@ HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
 
 if [[ -n $BASE ]]; then
     printf '\nRelay workloads: paired base/current\n'
-    for workload in video fanout; do
-        run_workload base "$RUN/moq-relay-base" "$workload"
-        run_workload current "$CURRENT_TARGET/release/moq-relay" "$workload"
+    for ((round = 1; round <= ROUNDS; round++)); do
+        if ((round % 2)); then order=(base current); else order=(current base); fi
+        printf '%s\t%s\n' "$round" "${order[*]}" >>"$RUN/execution-order.tsv"
+        for workload in video fanout; do
+            for label in "${order[@]}"; do
+                if [[ $label == base ]]; then relay=$RUN/moq-relay-base; else relay=$CURRENT_TARGET/release/moq-relay; fi
+                run_workload "$label/round-$round" "$relay" "$workload"
+            done
+        done
     done
 else
     run_relay_suite current "$CURRENT_TARGET/release/moq-relay"
 fi
 
 if [[ -n $BASE ]]; then
-    print_relay_comparison
+    python3 "$ROOT/bench/compare.py" "$RUN"
 else
     print_current_relay
 fi

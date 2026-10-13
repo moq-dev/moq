@@ -1,11 +1,17 @@
 /** Sweep observers against routes for one route update, and against tracks for one demand edge. */
 
+import { Signal } from "@moq/signals";
+import type { Grant } from "../src/auth.ts";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { BroadcastCache } from "../src/consume.ts";
 import * as Epoch from "../src/epoch.ts";
-import { Route } from "../src/hop.ts";
+import { HopSchema, Route } from "../src/hop.ts";
+import { Subscriber } from "../src/lite/subscriber.ts";
+import { TrackInfo } from "../src/lite/track.ts";
+import { Version } from "../src/lite/version.ts";
 import { Producer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
+import { Writer } from "../src/stream.ts";
 
 const routeCounts = [8, 32, 128];
 const observerCounts = [1, 8, 32];
@@ -22,32 +28,36 @@ for (const scope of ["unscoped", "distinct-scopes", "producer-scopes", "rooted-p
 			);
 			const touched = Path.from(scope === "rooted-producers" ? "0" : "room/0");
 			let notifications = 0;
-			const disposes = Array.from({ length: observerCount }, (_, index) =>
+			const streams = Array.from({ length: observerCount }, (_, index) =>
 				(scope === "producer-scopes"
 					? origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse(`room/**/tag-${index}`)]))
 					: scope === "rooted-producers"
 						? origin.scope(Path.from("room"), new Path.Patterns([Path.Pattern.parse(`**/tag-${index}`)]))
 						: origin
-				)
-					.broadcasts(scope === "distinct-scopes" ? Path.Pattern.parse(`room/**/tag-${index}`) : undefined)
-					.subscribe((routes) => {
-						if (routes.get(touched) === undefined) throw new Error("touched route disappeared");
-						notifications++;
-						checksum += routes.size;
-					}),
+				).announced(scope === "distinct-scopes" ? Path.Pattern.parse(`room/**/tag-${index}`) : undefined),
 			);
+			const readers = streams.map(async (stream) => {
+				for await (const event of stream) {
+					if (event.kind !== "update") continue;
+					if (event.prefix !== touched) throw new Error("unexpected touched route");
+					notifications++;
+					checksum++;
+				}
+			});
+			await new Promise<void>((resolve) => setImmediate(resolve));
 
 			const start = performance.now();
 			for (let index = 0; index < updates; index++) {
 				handles[0].update({ cost: BigInt(index + 1) });
-				await Promise.resolve(); // Flush the route signal and every observing getter.
+				await new Promise<void>((resolve) => setImmediate(resolve));
 			}
 			const elapsed = performance.now() - start;
 			if (notifications !== updates * observerCount) {
 				throw new Error(`expected ${updates * observerCount} notifications, got ${notifications}`);
 			}
 			console.log(`${scope},${routeCount},${observerCount},${((elapsed * 1000) / updates).toFixed(1)}`);
-			for (const dispose of disposes) dispose();
+			for (const stream of streams) stream.close();
+			await Promise.all(readers);
 			for (const handle of handles) handle.close();
 			origin.close();
 		}
@@ -120,6 +130,77 @@ for (const pinned of [false, true]) {
 			for (const request of [...requests, ...background]) request.close();
 			origin.close();
 		}
+	}
+}
+
+// Grant updates touch every live fetch, with pattern lookup as the independent table axis.
+const info: Uint8Array[] = [];
+const writer = new Writer(
+	new WritableStream<Uint8Array>({
+		write: (chunk) => {
+			info.push(new Uint8Array(chunk));
+		},
+	}),
+	Version.DRAFT_05,
+);
+await new TrackInfo({}).encode(writer, Version.DRAFT_05);
+writer.close();
+await writer.closed;
+const quic = {
+	createBidirectionalStream: async () => {
+		let inbound!: ReadableStreamDefaultController<Uint8Array>;
+		let first = true;
+		return {
+			readable: new ReadableStream<Uint8Array>({
+				start: (controller) => {
+					inbound = controller;
+				},
+			}),
+			writable: new WritableStream<Uint8Array>({
+				write: (chunk) => {
+					if (!first) return;
+					first = false;
+					if (chunk[0] === 6) {
+						for (const bytes of info) inbound.enqueue(bytes);
+						inbound.close();
+					} else if (chunk[0] === 3) inbound.enqueue(Uint8Array.of(0, 1, 42));
+					else throw new Error("unexpected benchmark stream");
+				},
+			}),
+		};
+	},
+} as unknown as WebTransport;
+console.log("auth,patterns,fetches,grant_update_us");
+for (const patternCount of [8, 32, 128]) {
+	for (const fetchCount of [1, 8, 32]) {
+		const subscribe = new Path.Patterns([
+			Path.Pattern.subtree("room"),
+			...Array.from({ length: patternCount - 1 }, (_, i) => Path.Pattern.literal(`other/${i}`)),
+		]);
+		const grant = new Signal<Grant | undefined>({ publish: new Path.Patterns(), subscribe });
+		const subscriber = new Subscriber(
+			quic,
+			Version.DRAFT_05,
+			HopSchema.parse(1n),
+			undefined,
+			undefined,
+			undefined,
+			grant,
+		);
+		const groups = await Promise.all(
+			Array.from({ length: fetchCount }, (_, i) => subscriber.fetchGroup(Path.from(`room/${i}`), "video", 0)),
+		);
+		const start = performance.now();
+		for (let i = 0; i < 1024; i++) {
+			grant.set({ publish: new Path.Patterns(), subscribe, expires: i });
+			await Promise.resolve();
+		}
+		console.log(`fetch,${patternCount},${fetchCount},${(((performance.now() - start) * 1000) / 1024).toFixed(2)}`);
+		for (const group of groups) {
+			if (group.closed.peek() !== undefined) throw new Error("allowed fetch ended");
+			group.close();
+		}
+		subscriber.close();
 	}
 }
 
@@ -248,5 +329,43 @@ for (const routeCount of routeCounts) {
 		console.log(`blind,${routeCount},${consumerCount},${((elapsed * 1000) / 256).toFixed(2)},${stale}`);
 		keeper.close();
 		source.close();
+	}
+}
+
+// Retiring a covering route cancels its pending descendants, not unrelated consumers.
+console.log("retirement,routes,consumers,retire_us,refused");
+for (const routeCount of routeCounts) {
+	for (const consumerCount of observerCounts) {
+		let elapsed = 0;
+		let refused = 0;
+		for (let round = 0; round < 256; round++) {
+			const cache = new BroadcastCache();
+			const source = new BroadcastProducer();
+			const owners = Array.from({ length: routeCount }, () => ({}));
+			const held = [];
+			for (let route = 0; route < routeCount; route++) {
+				const prefix = Path.from(`route/${route}`);
+				cache.announce(prefix, owners[route], Route.default);
+				for (let consumer = 0; consumer < (route === 0 ? consumerCount : 1); consumer++) {
+					const path = Path.from(`${prefix}/job/${consumer}`);
+					const instance = cache.instance(path);
+					if (route === 0)
+						instance.validity?.signal.addEventListener(
+							"abort",
+							() => {
+								refused++;
+							},
+							{ once: true },
+						);
+					held.push(cache.insert(path, instance, source.consume()));
+				}
+			}
+			const start = performance.now();
+			cache.withdraw(Path.from("route/0"), owners[0]);
+			elapsed += performance.now() - start;
+			for (const consumer of held) consumer.close();
+			source.close();
+		}
+		console.log(`retirement,${routeCount},${consumerCount},${((elapsed * 1000) / 256).toFixed(2)},${refused}`);
 	}
 }

@@ -165,7 +165,7 @@ impl Publisher {
 pub(crate) struct Options {
 	/// The muxer's jitter-buffer delay ([`Subscriber::new`]).
 	pub latency: Duration,
-	/// How long to wait for the same publisher instance to come back once its broadcast ends.
+	/// How long a return or stitched replacement has to supply its first catalog.
 	pub linger: Duration,
 	/// Follow another instance replacing the broadcast, as a full program switch.
 	pub stitch: bool,
@@ -204,9 +204,10 @@ impl Subscriber {
 			return Ok(None);
 		}
 
-		// The export resolves the broadcast (and any referenced sibling broadcast, via the
-		// catalog `broadcast` field) through the origin, joining the one just announced.
-		let source = moq_mux::Source::new(origin.consume(), path);
+		// Join the broadcast just announced. The export resolves any referenced sibling
+		// broadcast (the catalog `broadcast` field) through the same origin.
+		let broadcast = origin.request_broadcast(path, None).await?;
+		let source = moq_mux::Source::new(origin.clone(), broadcast);
 		let export = ts::Export::with_ts(source, moq_mux::catalog::CatalogFormat::Hang)
 			.await?
 			.with_delay(options.latency);
@@ -425,7 +426,7 @@ mod tests {
 	}
 
 	/// A two-program multiplex, each program carrying one private PES stream (carried
-	/// verbatim) and its first PES, which anchors the clock and so publishes the catalog:
+	/// verbatim) and its first PES plus a complete PCR measurement window:
 	/// program 1's on PID 0x101, program 2's on 0x201.
 	fn two_programs() -> Bytes {
 		let mut ts = psi_packet(0x0000, &pat(&[(1, 0x0100), (2, 0x0200)]));
@@ -433,6 +434,23 @@ mod tests {
 		ts.extend_from_slice(&psi_packet(0x0200, &pmt(2, 0x06, 0x0201)));
 		ts.extend_from_slice(&pes_packet(0x0101, 90_000));
 		ts.extend_from_slice(&pes_packet(0x0201, 90_000));
+		// Complete the startup rate window before expecting a live catalog.
+		for index in 0..=8u64 {
+			let base = index * 22_500;
+			for pid in [0x0101u16, 0x0201] {
+				let mut packet = vec![0x47, (pid >> 8) as u8, pid as u8, 0x20, 183, 0x10];
+				packet.extend_from_slice(&[
+					(base >> 25) as u8,
+					(base >> 17) as u8,
+					(base >> 9) as u8,
+					(base >> 1) as u8,
+					((base & 1) as u8) << 7 | 0x7e,
+					0,
+				]);
+				packet.resize(188, 0xff);
+				ts.extend_from_slice(&packet);
+			}
+		}
 		ts.into()
 	}
 

@@ -99,9 +99,9 @@ struct BroadcastState {
 	requests: Requests<Arc<str>, track::Request>,
 
 	// Each name's sequence namespace, outliving the producers that serve it: a name means
-	// the same content for the broadcast's whole life, so a replacement producer continues
-	// where the last one stopped instead of reusing its sequences. Entries nothing holds or
-	// wrote are swept as the map grows, so requests for names never served stay bounded.
+	// the same content for the broadcast's whole life, so a replacement producer that would
+	// append a sequence an earlier one wrote is refused. Entries nothing holds or wrote are
+	// swept as the map grows, so requests for names never served stay bounded.
 	sequences: HashMap<Arc<str>, track::Sequence>,
 
 	// Set once the broadcast ends: `Producer::close()` or the last producer-side
@@ -285,7 +285,7 @@ impl Producer {
 	/// Produce a new track and insert it into the broadcast.
 	///
 	/// Pass a name and an optional [`track::Info`], so a bare name works:
-	/// `create_track("video", None)`.
+	/// `create_track("video", None)` creates an untimed track.
 	pub fn create_track(
 		&self,
 		name: impl Into<Arc<str>>,
@@ -524,6 +524,57 @@ impl Alive {
 impl Drop for Alive {
 	fn drop(&mut self) {
 		self.close();
+	}
+}
+
+/// Whether a path request still names the source that handed out its track.
+#[derive(Clone, Default)]
+pub(crate) enum RequestValidity {
+	#[default]
+	Unrestricted,
+	Route(kio::Consumer<()>),
+	Selected(std::sync::Arc<crate::model::origin_impl::Selection>),
+}
+
+impl RequestValidity {
+	pub(crate) fn token(route: Option<kio::Consumer<()>>) -> Self {
+		route.map(Self::Route).unwrap_or_default()
+	}
+
+	pub(crate) fn for_source(route: &crate::origin::Dynamic, path: &crate::Path) -> Self {
+		route
+			.request_validity(path)
+			.map(|selected| Self::Selected(std::sync::Arc::new(selected)))
+			.unwrap_or_else(|| Self::Route(kio::Producer::new(()).consume()))
+	}
+
+	/// Capture one selection period so a pending request never revives after a replacement.
+	pub(crate) fn start(&self) -> Self {
+		match self {
+			Self::Selected(selected) => Self::Route(selected.current()),
+			other => other.clone(),
+		}
+	}
+
+	pub(crate) fn check(&self, waiter: &kio::Waiter) -> Result<(), crate::Error> {
+		match self {
+			Self::Route(route) if route.poll_closed(waiter).is_ready() => Err(crate::Error::Unroutable),
+			Self::Selected(_) => self.start().check(waiter),
+			_ => Ok(()),
+		}
+	}
+
+	pub(crate) async fn run<T>(
+		&self,
+		future: impl std::future::Future<Output = Result<T, crate::Error>>,
+	) -> Result<T, crate::Error> {
+		let validity = self.start();
+		let mut future = std::pin::pin!(future);
+		kio::wait(|waiter| {
+			validity.check(waiter)?;
+			waiter.poll_future(future.as_mut())
+		})
+		.await
 	}
 }
 
@@ -1025,7 +1076,9 @@ mod test {
 		let producer = Info::new().produce();
 		let name = producer.unique_name(".opus");
 		assert_eq!(name, "0.opus");
-		let track = producer.create_track(name.clone(), None).unwrap();
+		let track = producer
+			.create_track(name.clone(), crate::track::Info::timed())
+			.unwrap();
 		assert_eq!(producer.unique_name(".opus"), "1.opus");
 		drop(track);
 	}
@@ -1034,7 +1087,7 @@ mod test {
 	fn unique_names_survive_closed_track_pruning() {
 		let producer = Info::new().produce();
 		let consumer = producer.consume();
-		let track = producer.unique_track(".opus", None).unwrap();
+		let track = producer.unique_track(".opus", crate::track::Info::timed()).unwrap();
 		assert_eq!(track.name(), "0.opus");
 		drop(track);
 		assert!(matches!(consumer.track_inner("0.opus"), Err(Error::NotFound)));
@@ -1044,7 +1097,7 @@ mod test {
 	#[test]
 	fn unique_name_skips_a_live_collision() {
 		let producer = Info::new().produce();
-		let track = producer.create_track("0.opus", None).unwrap();
+		let track = producer.create_track("0.opus", crate::track::Info::timed()).unwrap();
 		assert_eq!(producer.unique_name(".opus"), "1.opus");
 		drop(track);
 		assert_eq!(producer.unique_name(".opus"), "2.opus");
@@ -1092,7 +1145,7 @@ mod test {
 		demand.unused().await.unwrap();
 
 		// Producing alone is not demand.
-		let _track = producer.create_track("a", None).unwrap();
+		let _track = producer.create_track("a", crate::track::Info::timed()).unwrap();
 		assert!(!demand.is_used());
 
 		// A consumer appearing wakes a parked `used`.
@@ -1137,7 +1190,7 @@ mod test {
 		let producer = Info::new().produce();
 		let consumer = producer.consume();
 		let watched = consumer.demand();
-		let _video = producer.create_track("video", None).unwrap();
+		let _video = producer.create_track("video", crate::track::Info::timed()).unwrap();
 
 		let track = consumer.track("video").unwrap();
 		assert!(watched.is_used());
@@ -1168,7 +1221,7 @@ mod test {
 		let mut producer = Info::new().produce();
 
 		// Create the track before any consumer exists.
-		let track1 = producer.assert_create_track("track1", None);
+		let track1 = producer.assert_create_track("track1", crate::track::Info::timed());
 		track1.append_group().unwrap();
 
 		let consumer = producer.consume();
@@ -1177,7 +1230,7 @@ mod test {
 		let mut track1_sub = consumer.track("track1").unwrap().subscribe(None).await.unwrap();
 		track1_sub.assert_group();
 
-		let track2 = producer.assert_create_track("track2", None);
+		let track2 = producer.assert_create_track("track2", crate::track::Info::timed());
 
 		let consumer2 = producer.consume();
 		let mut track2_consumer = consumer2.track("track2").unwrap().subscribe(None).await.unwrap();
@@ -1197,7 +1250,7 @@ mod test {
 		consumer.assert_not_closed();
 
 		// Create a new track and insert it into the broadcast (resolves immediately).
-		let track1 = producer.assert_create_track("track1", None);
+		let track1 = producer.assert_create_track("track1", crate::track::Info::timed());
 		let mut track1c = consumer.track("track1").unwrap().subscribe(None).await.unwrap();
 
 		// A track nobody publishes stays pending until accepted.
@@ -1258,7 +1311,7 @@ mod test {
 		assert_eq!(request.name(), "track1");
 
 		// Accept it, which resolves both waiting subscribers.
-		let track3 = request.accept(None);
+		let track3 = request.accept(crate::track::Info::timed());
 		let mut track1 = track1_fut.await.unwrap();
 		let mut track2 = track2_fut.await.unwrap();
 
@@ -1288,7 +1341,7 @@ mod test {
 
 		// Subscribe to a track and serve it.
 		let track1_fut = subscribe_pending!(consumer, "track1");
-		let producer1 = broadcast.assert_request().accept(None);
+		let producer1 = broadcast.assert_request().accept(crate::track::Info::timed());
 		let mut track1 = track1_fut.await.unwrap();
 
 		// Close the producer (simulating publisher disconnect).
@@ -1301,27 +1354,27 @@ mod test {
 
 		// Subscribe again to the same track: should get a NEW producer, not the stale one.
 		let track2_fut = subscribe_pending!(consumer, "track1");
-		let producer2 = broadcast.assert_request().accept(None);
+		let producer2 = broadcast.assert_request().accept(crate::track::Info::timed());
 		let mut track2 = track2_fut.await.unwrap();
 		track2.assert_not_closed();
 		track2.assert_not_clone(&track1);
 
-		// The new consumer should receive the new group.
-		producer2.append_group().unwrap();
+		// The new consumer should receive the new group, which continues past the first's.
+		producer2.create_group(crate::group::Info { sequence: 1 }).unwrap();
 		track2.assert_group();
 	}
 
-	/// A name keeps one sequence namespace for the broadcast's life: a replacement producer
-	/// appends past everything an earlier one wrote, explicit writes included, while a new
-	/// broadcast starts over.
+	/// A name keeps one sequence namespace for the broadcast's life. The application owns
+	/// where a replacement starts: an append that would reuse an earlier producer's sequence,
+	/// explicit writes included, is refused, while a new broadcast starts over.
 	#[test]
-	fn replacement_continues_sequences() {
+	fn replacement_refuses_reused_sequences() {
 		let producer = Info::new().produce();
 		let mut dynamic = producer.dynamic();
 		let consumer = producer.consume();
 
 		let track = consumer.track("media").unwrap();
-		let mut first = dynamic.assert_request().accept(None);
+		let mut first = dynamic.assert_request().accept(crate::track::Info::timed());
 		assert_eq!(first.append_group().unwrap().sequence, 0);
 		assert_eq!(first.append_datagram(crate::Timestamp::ZERO, b"x").unwrap(), 1);
 		first.create_group(crate::group::Info { sequence: 8 }).unwrap();
@@ -1330,19 +1383,33 @@ mod test {
 		drop((first, track));
 
 		let track = consumer.track("media").unwrap();
-		let mut second = dynamic.assert_request().accept(None);
-		assert_eq!(second.append_group().unwrap().sequence, 13);
+		let mut second = dynamic.assert_request().accept(crate::track::Info::timed());
+		assert!(matches!(second.append_group(), Err(Error::Duplicate)));
+		assert!(matches!(
+			second.append_datagram(crate::Timestamp::ZERO, b"x"),
+			Err(Error::Duplicate)
+		));
+
+		// An explicit first write picks the start, and appends continue from there.
+		second.create_group(crate::group::Info { sequence: 13 }).unwrap();
 		assert_eq!(second.append_datagram(crate::Timestamp::ZERO, b"x").unwrap(), 14);
 		second.finish().unwrap();
 		drop((second, track));
 
-		// A track the producer creates itself continues the same namespace.
-		let third = producer.create_track("media", None).unwrap();
-		assert_eq!(third.append_group().unwrap().sequence, 15);
+		// A track the producer creates itself checks the same namespace.
+		let third = producer.create_track("media", crate::track::Info::timed()).unwrap();
+		assert!(matches!(third.append_group(), Err(Error::Duplicate)));
+		assert_eq!(
+			third
+				.create_group(crate::group::Info { sequence: 15 })
+				.unwrap()
+				.sequence,
+			15
+		);
 
 		let next = Info::new().produce();
 		assert_eq!(
-			next.create_track("media", None)
+			next.create_track("media", crate::track::Info::timed())
 				.unwrap()
 				.append_group()
 				.unwrap()
@@ -1373,7 +1440,7 @@ mod test {
 
 		// Subscribe to a track that doesn't exist yet, then serve it.
 		let c1_fut = subscribe_pending!(bc, "unknown_track");
-		let producer1 = broadcast.assert_request().accept(None);
+		let producer1 = broadcast.assert_request().accept(crate::track::Info::timed());
 		let consumer1 = c1_fut.await.unwrap();
 
 		// The producer should NOT be unused yet because there's a consumer.
@@ -1411,7 +1478,7 @@ mod test {
 		producer1.abort(Error::Cancel).unwrap();
 
 		let c4_fut = subscribe_pending!(bc, "unknown_track");
-		let producer2 = broadcast.assert_request().accept(None);
+		let producer2 = broadcast.assert_request().accept(crate::track::Info::timed());
 		let consumer4 = c4_fut.await.unwrap();
 		drop(consumer4);
 		assert!(
@@ -1435,7 +1502,7 @@ mod test {
 		let subscribing = subscribe_pending!(bc, "video");
 
 		// The producer creates the track before any handler drains the queue.
-		let track = producer.create_track("video", None).unwrap();
+		let track = producer.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut sub = subscribing.await.expect("fulfilled by create_track");
 
 		// The fulfilled subscription is live against this very producer.
@@ -1574,7 +1641,7 @@ mod test {
 			"close rejected a claimed request"
 		);
 
-		let _track = request.accept(None);
+		let _track = request.accept(crate::track::Info::timed());
 		assert!(accepted.await.is_ok(), "the handler's accept reaches the consumer");
 		drop(abandoned);
 		assert!(dropped.await.is_err(), "the handler dropping it rejects the consumer");
@@ -1595,7 +1662,7 @@ mod test {
 		let track = consumer.track("track1").unwrap();
 		let pending_fetch = track.fetch_group(0, None);
 		let fetch = dynamic.requested_group().await.unwrap();
-		let group = fetch.accept(None).unwrap();
+		let group = fetch.accept(crate::track::Info::timed()).unwrap();
 		group.finish().unwrap();
 		pending_fetch.await.unwrap();
 
@@ -1603,7 +1670,7 @@ mod test {
 		producer.close();
 		assert!(matches!(subscriber.recv_group().await, Err(Error::Unroutable)));
 
-		let stale = request.accept(None);
+		let stale = request.accept(crate::track::Info::timed());
 		assert!(stale.append_group().is_err());
 	}
 
@@ -1614,7 +1681,7 @@ mod test {
 		let producer = Info::new().produce();
 		let consumer = producer.consume();
 
-		let track = producer.create_track("track1", None).unwrap();
+		let track = producer.create_track("track1", crate::track::Info::timed()).unwrap();
 		let mut subscriber = consumer.track("track1").unwrap().subscribe(None).await.unwrap();
 
 		producer.close();
@@ -1639,7 +1706,7 @@ mod test {
 		producer.close();
 		assert!(matches!(pending.await, Err(Error::Unroutable)));
 
-		let track = request.accept(None);
+		let track = request.accept(crate::track::Info::timed());
 		assert!(track.append_group().is_err());
 		let mut subscriber = track.subscribe(None);
 		assert!(matches!(subscriber.recv_group().await, Err(Error::Unroutable)));
@@ -1686,7 +1753,7 @@ mod test {
 	async fn an_idle_teardown_yields_to_a_returning_viewer() {
 		let producer = Info::new().produce();
 		let consumer = producer.consume();
-		let track = producer.create_track("video", None).unwrap();
+		let track = producer.create_track("video", crate::track::Info::timed()).unwrap();
 
 		// The unused wake a teardown acts on.
 		assert!(track.demand().poll_unused(&kio::Waiter::noop()).is_ready());
@@ -1718,7 +1785,7 @@ mod test {
 	fn abort_unused_accepts_an_already_closed_track_with_consumers() {
 		let producer = Info::new().produce();
 		let consumer = producer.consume();
-		let track = producer.create_track("video", None).unwrap();
+		let track = producer.create_track("video", crate::track::Info::timed()).unwrap();
 		let _viewer = consumer.track("video").unwrap();
 		assert!(track.demand().is_used());
 		track.clone().abort(Error::Cancel).unwrap();

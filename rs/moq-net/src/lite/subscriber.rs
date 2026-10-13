@@ -354,7 +354,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 	/// including a restart of one already attached: a connection on its way out must
 	/// not win selection, however good the path it advertises looks.
 	///
-	/// The epoch is the one the peer announced at `path`: a restart carries none,
+	/// The epoch is the one the peer announced at `path`: an update carries none,
 	/// since it never changes the content.
 	fn announced_route(
 		&self,
@@ -423,7 +423,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		tracing::debug!(route = %self.log_path(&path), hops = hops.len(), "update");
 		let metadata = self.announced_route(&path, hops, cost, link_cost, responder_origin, announced);
 
-		// A restart is a metadata update: the route keeps its prefix (and its
+		// A re-price keeps the route's prefix (and its
 		// served paths) and re-prices in place. In-flight tracks keep flowing.
 		if let Some(entry) = announced.attached(&path) {
 			entry.update(metadata);
@@ -512,8 +512,8 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			return Ok(());
 		};
 
-		// Datagrams are lite-05+, which always negotiates a timescale; default defensively.
-		let scale = entry.timescale.unwrap_or_default();
+		// Datagrams are lite-05+, which always negotiates a timescale; fall back to milliseconds defensively.
+		let scale = entry.timescale.unwrap_or(crate::Timescale::MILLI);
 		let timestamp =
 			Timestamp::new(dg.timestamp, scale).map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 
@@ -704,7 +704,7 @@ impl<S: crate::transport::poll::Session> UniAccept<S> {
 						},
 					});
 				}
-				Poll::Ready(Err(err)) => return Poll::Ready(Err(Error::from_transport(err))),
+				Poll::Ready(Err(err)) => return Poll::Ready(Err(crate::lite::error::from_transport(err))),
 				Poll::Pending => break,
 			}
 		}
@@ -1125,7 +1125,7 @@ impl<S: crate::transport::poll::Session> DatagramRecv<S> {
 		}
 		let mut cx = waiter.context();
 		loop {
-			let payload = ready!(self.recv.poll_recv_datagram(&mut cx)).map_err(Error::from_transport)?;
+			let payload = ready!(self.recv.poll_recv_datagram(&mut cx)).map_err(crate::lite::error::from_transport)?;
 			if let Err(err) = self.subscriber.route_datagram(payload) {
 				tracing::debug!(%err, "dropping datagram");
 			}
@@ -1484,6 +1484,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 
 /// A source the announce half minted for one requested path, for the driver to serve.
 struct MintedSource {
+	validity: crate::model::broadcast::RequestValidity,
 	path: PathOwned,
 	/// The publisher instance the route announced, asked for on every request.
 	epoch: Option<crate::Epoch>,
@@ -1500,6 +1501,7 @@ struct MintedSource {
 /// retraction does not disturb subscriptions already in flight); the session
 /// dying drops them.
 struct SourceServe<S: crate::transport::poll::Session> {
+	validity: crate::model::broadcast::RequestValidity,
 	subscriber: Subscriber<S>,
 	path: PathOwned,
 	epoch: Option<crate::Epoch>,
@@ -1518,6 +1520,7 @@ impl<S: crate::transport::poll::Session> SourceServe<S> {
 		let closed = subscriber.session.clone();
 		Self {
 			subscriber,
+			validity: minted.validity,
 			path: minted.path,
 			epoch: minted.epoch,
 			source: minted.source,
@@ -1549,6 +1552,7 @@ impl<S: crate::transport::poll::Session> kio::Task for SourceServe<S> {
 			match self.dynamic.poll_requested_track(waiter) {
 				Poll::Ready(Ok(request)) => {
 					let serve = TrackServe {
+						validity: self.validity.clone(),
 						subscriber: self.subscriber.clone(),
 						path: self.path.clone(),
 						epoch: self.epoch.clone(),
@@ -1611,6 +1615,7 @@ mod tests {
 	async fn feed_sub(tail: &kio::Producer<Tail>) -> Sub<crate::lite::test_transport::ScriptedSession> {
 		let mut session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
 		Sub::Active(SubStream {
+			order: crate::track::Order::Descending,
 			stream: Stream::open(&mut session, Version::Lite04).await.unwrap(),
 			id: 0,
 			max_delay: Duration::ZERO,
@@ -1708,6 +1713,7 @@ mod tests {
 		let mut session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
 		let stream = Stream::open(&mut session, VERSION).await.unwrap();
 		let mut sub = SubStream {
+			order: crate::track::Order::Descending,
 			stream,
 			id: 0,
 			max_delay: Duration::ZERO,
@@ -1803,13 +1809,17 @@ mod tests {
 					going_away: Default::default(),
 					auth: crate::auth::Handle::new(false),
 				});
-				let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+				let track = track::Producer::new(
+					std::sync::Arc::new(crate::broadcast::Info::default()),
+					"video",
+					crate::track::Info::timed(),
+				);
 				let mut consumer = track.consume().subscribe(None).await.unwrap();
 				subscriber.subscribes.lock().insert(
 					7,
 					TrackEntry {
 						producer: track,
-						timescale: Some(Timescale::default()),
+						timescale: Some(Timescale::MILLI),
 						tail: Default::default(),
 					},
 				);
@@ -1855,13 +1865,17 @@ mod tests {
 				auth: crate::auth::Handle::new(false),
 			});
 
-			let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
-			track.finish_at(3).unwrap();
+			let mut track = track::Producer::new(
+				std::sync::Arc::new(crate::broadcast::Info::default()),
+				"video",
+				crate::track::Info::timed(),
+			);
+			track.finish_at(Position::group(3)).unwrap();
 			subscriber.subscribes.lock().insert(
 				7,
 				TrackEntry {
 					producer: track.clone(),
-					timescale: Some(Timescale::default()),
+					timescale: Some(Timescale::MILLI),
 					tail: Default::default(),
 				},
 			);
@@ -1916,7 +1930,11 @@ mod tests {
 			auth: crate::auth::Handle::new(false),
 		});
 
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		);
 		let mut cached = track.receive_group(group::Info { sequence: 3 }).unwrap();
 		cached.write_frame(Timestamp::ZERO, &b"x"[..]).unwrap();
 		cached.finish().unwrap();
@@ -1925,7 +1943,7 @@ mod tests {
 			7,
 			TrackEntry {
 				producer: track.clone(),
-				timescale: Some(Timescale::default()),
+				timescale: Some(Timescale::MILLI),
 				tail: tail.clone(),
 			},
 		);
@@ -1977,6 +1995,7 @@ mod tests {
 				auth: crate::auth::Handle::new(false),
 			});
 			let serve = TrackServe {
+				validity: Default::default(),
 				subscriber,
 				path: Path::new("room").to_owned(),
 				epoch: None,
@@ -1984,7 +2003,7 @@ mod tests {
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
 			let request = broadcast.reserve_track("video").unwrap();
-			let serving = ServeLoop::new(&serve, request, Default::default(), Some(Timescale::default()));
+			let serving = ServeLoop::new(&serve, request, crate::track::Info::timed(), Some(Timescale::MILLI));
 			let mut group = serving.serving.create_group(group::Info { sequence: 2 }).unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"2".as_slice()).unwrap();
 			group.finish().unwrap();
@@ -2033,6 +2052,7 @@ mod tests {
 			auth: crate::auth::Handle::new(false),
 		});
 		let serve = TrackServe {
+			validity: Default::default(),
 			subscriber,
 			path: Path::new("room").to_owned(),
 			epoch: None,
@@ -2040,7 +2060,7 @@ mod tests {
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
 		let request = broadcast.reserve_track("video").unwrap();
-		let serving = ServeLoop::new(&serve, request, Default::default(), Some(Timescale::default()));
+		let serving = ServeLoop::new(&serve, request, crate::track::Info::timed(), Some(Timescale::MILLI));
 		let mut reader = broadcast
 			.consume()
 			.track("video")
@@ -2133,13 +2153,15 @@ mod tests {
 		let broadcast = crate::broadcast::Info::new().produce();
 		// The broadcast keeps only a weak handle, so the map below owns the only strong
 		// `track::Producer`: dropping it is what ends the track.
-		let producer = broadcast.create_track("datagrams", None).unwrap();
+		let producer = broadcast
+			.create_track("datagrams", crate::track::Info::timed())
+			.unwrap();
 		let mut received = producer.subscribe(None);
 		subscriber.subscribes.lock().insert(
 			7,
 			TrackEntry {
 				producer,
-				timescale: Some(Timescale::default()),
+				timescale: Some(Timescale::MILLI),
 				tail: Default::default(),
 			},
 		);
@@ -2206,6 +2228,7 @@ mod tests {
 
 		let run = TrackServeRun::new(
 			TrackServe {
+				validity: Default::default(),
 				subscriber: subscriber.clone(),
 				path: Path::new("room").to_owned(),
 				epoch: None,
@@ -2264,6 +2287,7 @@ mod tests {
 
 			let mut run = TrackServeRun::new(
 				TrackServe {
+					validity: Default::default(),
 					subscriber,
 					path: Path::new("room").to_owned(),
 					epoch: None,
@@ -2314,6 +2338,7 @@ mod tests {
 		});
 		let subscribes = subscriber.subscribes.clone();
 		let serve = TrackServe {
+			validity: Default::default(),
 			subscriber,
 			path: Path::new("room/host").to_owned(),
 			epoch: None,
@@ -2321,14 +2346,12 @@ mod tests {
 		};
 
 		let broadcast = crate::broadcast::Info::new().produce();
-		let mut producer = broadcast.create_track("catalog.json", None).unwrap();
+		let mut producer = broadcast
+			.create_track("catalog.json", crate::track::Info::timed())
+			.unwrap();
 		let mut sub = Sub::None;
-		let mut establish = std::pin::pin!(serve.establish(
-			&mut producer,
-			&mut sub,
-			Subscription::default(),
-			Some(Timescale::default()),
-		));
+		let mut establish =
+			std::pin::pin!(serve.establish(&mut producer, &mut sub, Subscription::default(), Some(Timescale::MILLI),));
 
 		// Parked on the first write: the stream is open and nothing has been sent yet.
 		assert!(futures::poll!(establish.as_mut()).is_pending());
@@ -2382,6 +2405,7 @@ mod tests {
 		});
 		let subscribes = subscriber.subscribes.clone();
 		let serve = TrackServe {
+			validity: Default::default(),
 			subscriber,
 			path: Path::new("room/host").to_owned(),
 			epoch: None,
@@ -2390,12 +2414,8 @@ mod tests {
 
 		let broadcast = crate::broadcast::Info::new().produce();
 		let request = broadcast.reserve_track("audio").unwrap();
-		let mut serving = ServeLoop::new(&serve, request, Default::default(), Some(Timescale::default()));
-		let establish = serve.prepare_establish(
-			&mut serving.serving,
-			Subscription::default(),
-			Some(Timescale::default()),
-		);
+		let mut serving = ServeLoop::new(&serve, request, Default::default(), Some(Timescale::MILLI));
+		let establish = serve.prepare_establish(&mut serving.serving, Subscription::default(), Some(Timescale::MILLI));
 		serving.mode = ServeMode::Establish(establish);
 		let gate_run = serve.gate();
 		let mut running = TrackServeRun {
@@ -2446,10 +2466,13 @@ mod tests {
 				auth: crate::auth::Handle::new(false),
 			});
 			let broadcast = crate::broadcast::Info::new().produce();
-			let producer = broadcast.create_track("catalog.json", None).unwrap();
+			let producer = broadcast
+				.create_track("catalog.json", crate::track::Info::timed())
+				.unwrap();
 
 			Self {
 				serve: TrackServe {
+					validity: Default::default(),
 					subscriber,
 					path: Path::new("room/host").to_owned(),
 					epoch: None,
@@ -2494,7 +2517,7 @@ mod tests {
 				&mut sub,
 				Some(mid_group_demand()),
 				true,
-				Some(Timescale::default()),
+				Some(Timescale::MILLI),
 			)
 			.await
 			.expect("an older peer must not fail the subscribe");
@@ -2527,7 +2550,7 @@ mod tests {
 					&mut sub,
 					Some(mid_group_demand()),
 					true,
-					Some(Timescale::default()),
+					Some(Timescale::MILLI),
 				)
 				.await
 				.unwrap();
@@ -2597,7 +2620,7 @@ mod tests {
 
 		let empty = Subscription::default().with_end(Position::group(0));
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::default()))
+			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::MILLI))
 			.await
 			.unwrap();
 
@@ -2618,7 +2641,7 @@ mod tests {
 				&mut sub,
 				Some(Subscription::default()),
 				true,
-				Some(Timescale::default()),
+				Some(Timescale::MILLI),
 			)
 			.await
 			.unwrap();
@@ -2627,7 +2650,7 @@ mod tests {
 
 		let empty = Subscription::default().with_end(Position::group(0));
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::default()))
+			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::MILLI))
 			.await
 			.unwrap();
 
@@ -2650,7 +2673,7 @@ mod tests {
 			.with_start(Position::group(5))
 			.with_end(Position::group(5));
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::default()))
+			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::MILLI))
 			.await
 			.unwrap();
 
@@ -2671,7 +2694,7 @@ mod tests {
 				&mut sub,
 				Some(Subscription::default()),
 				true,
-				Some(Timescale::default()),
+				Some(Timescale::MILLI),
 			)
 			.await
 			.unwrap();
@@ -2682,7 +2705,7 @@ mod tests {
 			.with_start(Position::group(5))
 			.with_end(Position::group(5));
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::default()))
+			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::MILLI))
 			.await
 			.unwrap();
 
@@ -2727,7 +2750,7 @@ mod tests {
 				&mut sub,
 				Some(Subscription::default()),
 				true,
-				Some(Timescale::default()),
+				Some(Timescale::MILLI),
 			)
 			.await
 			.unwrap();
@@ -2740,7 +2763,7 @@ mod tests {
 				&mut sub,
 				Some(mid_group_demand()),
 				true,
-				Some(Timescale::default()),
+				Some(Timescale::MILLI),
 			)
 			.await
 			.expect("a downstream frame offset must not tear down an older upstream");
@@ -2769,7 +2792,7 @@ mod tests {
 
 		// Establish from group 3; the peer's START is considered in flight.
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, demand(3), true, Some(Timescale::default()))
+			.handle_subscription(&mut h.producer, &mut sub, demand(3), true, Some(Timescale::MILLI))
 			.await
 			.unwrap();
 		assert!(applies(&sub), "a fresh subscription accepts its START");
@@ -2785,7 +2808,7 @@ mod tests {
 						.with_end(Position::group(9)),
 				),
 				true,
-				Some(Timescale::default()),
+				Some(Timescale::MILLI),
 			)
 			.await
 			.unwrap();
@@ -2793,7 +2816,7 @@ mod tests {
 
 		// The start moves: a buffered START is stale while it sits elsewhere.
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, demand(8), true, Some(Timescale::default()))
+			.handle_subscription(&mut h.producer, &mut sub, demand(8), true, Some(Timescale::MILLI))
 			.await
 			.unwrap();
 		assert!(!applies(&sub), "a moved start must invalidate a buffered START");
@@ -2801,7 +2824,7 @@ mod tests {
 		// The start returns: the declaration matches the demand again, so the
 		// publisher's skip (it sends no replacement START) must land.
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, demand(3), true, Some(Timescale::default()))
+			.handle_subscription(&mut h.producer, &mut sub, demand(3), true, Some(Timescale::MILLI))
 			.await
 			.unwrap();
 		assert!(applies(&sub), "demand returning restores the START");
@@ -2820,21 +2843,21 @@ mod tests {
 
 		// Establish from group 5: the floor tracks the request until START lands.
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, demand(5), true, Some(Timescale::default()))
+			.handle_subscription(&mut h.producer, &mut sub, demand(5), true, Some(Timescale::MILLI))
 			.await
 			.unwrap();
 		assert_eq!(h.producer.start_sequence(), Some(5));
 
 		// Forward: a reader waiting in [5, 8) must fail over, not stall.
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, demand(8), true, Some(Timescale::default()))
+			.handle_subscription(&mut h.producer, &mut sub, demand(8), true, Some(Timescale::MILLI))
 			.await
 			.unwrap();
 		assert_eq!(h.producer.start_sequence(), Some(8));
 
 		// Backward: the reopened range must stop being a permanent miss.
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, demand(3), true, Some(Timescale::default()))
+			.handle_subscription(&mut h.producer, &mut sub, demand(3), true, Some(Timescale::MILLI))
 			.await
 			.unwrap();
 		assert_eq!(h.producer.start_sequence(), Some(3));
@@ -2847,7 +2870,7 @@ mod tests {
 				&mut sub,
 				Some(Subscription::default()),
 				true,
-				Some(Timescale::default()),
+				Some(Timescale::MILLI),
 			)
 			.await
 			.unwrap();
@@ -3261,7 +3284,7 @@ mod tests {
 		let assigned = crate::Hop::new(777).unwrap();
 
 		let local = origin.publish("room/host", origin::Route::default()).unwrap();
-		let track = local.create_track("video", None).unwrap();
+		let track = local.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"local".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -3787,6 +3810,7 @@ struct SubStream<S: crate::transport::poll::Session> {
 	max_delay: Duration,
 	start: Option<Position>,
 	priority: u8,
+	order: crate::track::Order,
 	/// The start the SUBSCRIBE itself carried, fixed for the stream's life. A
 	/// SUBSCRIBE_START describes this demand and no fresh one follows an update,
 	/// so a buffered START only applies while `start` still equals it: while the
@@ -4005,8 +4029,14 @@ impl Announced {
 				// `NotFound`. Accepted before the push, so the requester holds the source
 				// before its serve machine can see it unheld.
 				let dynamic = source.dynamic();
+				let validity = if entry.route.epoch.is_some() {
+					Default::default()
+				} else {
+					crate::model::broadcast::RequestValidity::for_source(&entry.dynamic, request.path())
+				};
 				request.accept(&source);
 				let _ = subscriber.sources.try_push(MintedSource {
+					validity,
 					path,
 					epoch: entry.route.epoch.clone(),
 					source: crate::model::broadcast::SourceGuard::new(source),
@@ -4092,7 +4122,7 @@ impl AnnouncedRoute {
 		}
 	}
 
-	/// Update the announced route in place (a restart).
+	/// Update the route metadata without changing its content identity.
 	fn update(&mut self, route: crate::origin::Route) {
 		self.route = route.clone();
 		self.drained = false;
@@ -4150,6 +4180,7 @@ enum ServeEnd {
 /// the last one leaves) concurrently with any number of one-shot fetches.
 #[derive(Clone)]
 struct TrackServe<S: crate::transport::poll::Session> {
+	validity: crate::model::broadcast::RequestValidity,
 	subscriber: Subscriber<S>,
 	path: PathOwned,
 	/// The publisher instance to ask for; the peer refuses a request for another.
@@ -4245,6 +4276,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						// SUBSCRIBE_UPDATE (Lite03+ only; older peers can't carry one).
 						let start_moved = active.start != subscription.start;
 						active.priority = subscription.priority;
+						active.order = subscription.order;
 						active.max_delay = subscription.max_delay;
 						if let Ok(mut tail) = active.tail.write() {
 							tail.set_grace(tail::grace(subscription.max_delay));
@@ -4336,6 +4368,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 
 		let session = self.subscriber.session.clone();
 		Establish {
+			validity: self.validity.start(),
 			serve: self.clone(),
 			closed: session.clone(),
 			session,
@@ -4428,6 +4461,7 @@ fn buffer_update<S: crate::transport::poll::Session>(
 		end_group: bounds.end_group,
 		start_frame: bounds.start_frame,
 		end_frame: bounds.end_frame,
+		order: active.order,
 	})
 }
 
@@ -4435,6 +4469,7 @@ fn buffer_update<S: crate::transport::poll::Session>(
 /// lite-05) wait for the SUBSCRIBE_OK. Resolves with the live [`SubStream`];
 /// the caller deregisters the id on failure.
 struct Establish<S: crate::transport::poll::Session> {
+	validity: crate::model::broadcast::RequestValidity,
 	serve: TrackServe<S>,
 	session: S,
 	// A dedicated close-watch handle for the SUBSCRIBE_OK wait.
@@ -4460,6 +4495,7 @@ enum EstablishState<S: crate::transport::poll::Session> {
 
 impl<S: crate::transport::poll::Session> Establish<S> {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<SubStream<S>, Error>> {
+		self.validity.check(waiter)?;
 		let mut cx = waiter.context();
 		loop {
 			match &mut self.state {
@@ -4482,6 +4518,7 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 						end_group: bounds.end_group,
 						start_frame: bounds.start_frame,
 						end_frame: bounds.end_frame,
+						order: self.subscription.order,
 					};
 					stream.writer.buffer(&lite::ControlType::Subscribe)?;
 					stream.writer.buffer(&msg)?;
@@ -4501,7 +4538,7 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 				}
 				EstablishState::WaitOk { stream } => {
 					if let Poll::Ready(err) = self.closed.poll_closed(&mut cx) {
-						return Poll::Ready(Err(Error::from_transport(err)));
+						return Poll::Ready(Err(crate::lite::error::from_transport(err)));
 					}
 					let resp = ready!(stream.reader.poll_decode::<lite::SubscribeResponse>(&mut cx))?;
 					if !matches!(resp, lite::SubscribeResponse::Ok(_)) {
@@ -4532,6 +4569,7 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 			max_delay: self.subscription.max_delay,
 			start: self.subscription.start,
 			priority: self.subscription.priority,
+			order: self.subscription.order,
 			requested: self.subscription.start,
 			tail: self.tail.clone(),
 			served: None,
@@ -4728,6 +4766,7 @@ impl<S: crate::transport::poll::Session> Drop for TrackServeRun<S> {
 /// model's [`track::Info`], handing back the stream to hold. Lite05+ only. Bails if the
 /// session dies meanwhile.
 struct TrackInfoFetch<S: crate::transport::poll::Session> {
+	validity: crate::model::broadcast::RequestValidity,
 	session: S,
 	// A dedicated close-watch handle for the read.
 	closed: S,
@@ -4744,6 +4783,7 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 	fn new(serve: &TrackServe<S>) -> Self {
 		let session = serve.subscriber.session.clone();
 		Self {
+			validity: serve.validity.start(),
 			closed: session.clone(),
 			session,
 			state: TrackInfoState::Open,
@@ -4755,6 +4795,7 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 		serve: &TrackServe<S>,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<(track::Info, HeldTrack<S>), Error>> {
+		self.validity.check(waiter)?;
 		let mut cx = waiter.context();
 		loop {
 			match &mut self.state {
@@ -4778,7 +4819,7 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 				}
 				TrackInfoState::Read { stream } => {
 					if let Poll::Ready(err) = self.closed.poll_closed(&mut cx) {
-						return Poll::Ready(Err(Error::from_transport(err)));
+						return Poll::Ready(Err(crate::lite::error::from_transport(err)));
 					}
 					let info = ready!(stream.reader.poll_decode::<lite::TrackInfo>(&mut cx))?;
 					let TrackInfoState::Read { stream } = std::mem::replace(&mut self.state, TrackInfoState::Open)
@@ -5116,7 +5157,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 										// only costs the early boundary: warn, and let the FIN
 										// finish the track. Later drafts made it exclusive, so
 										// the publisher contradicted its own end.
-										if let Err(err) = self.serving.finish_at_pending(end.group) {
+										if let Err(err) = self.serving.finish_at_pending(Position::group(end.group)) {
 											match serve.subscriber.version {
 												Version::Lite05 => {
 													tracing::warn!(track = %serve.name, group = end.group, %err, "invalid subscribe end")
@@ -5224,7 +5265,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 					// (5) The session died: hand the track back for another route, with
 					// the session's error in case none takes it.
 					if let Poll::Ready(err) = self.closed.poll_closed(&mut cx) {
-						return Poll::Ready(ServeEnd::GiveBack(Error::from_transport(err)));
+						return Poll::Ready(ServeEnd::GiveBack(crate::lite::error::from_transport(err)));
 					}
 
 					return Poll::Pending;
@@ -5239,6 +5280,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 /// comes from this track's TRACK_INFO (already known), and the group sequence
 /// is implicit from the request.
 struct FetchServeRun<S: crate::transport::poll::Session> {
+	validity: crate::model::broadcast::RequestValidity,
 	serve: TrackServe<S>,
 	session: S,
 	timescale: Option<Timescale>,
@@ -5288,6 +5330,7 @@ impl<S: crate::transport::poll::Session> FetchServeRun<S> {
 		let session = serve.subscriber.session.clone();
 		let group = request.sequence();
 		Self {
+			validity: serve.validity.start(),
 			serve,
 			session,
 			timescale,
@@ -5340,6 +5383,19 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		if self.state.request().is_some()
+			&& let Err(err) = self.validity.check(waiter)
+		{
+			match std::mem::replace(&mut self.state, FetchRunState::Done) {
+				FetchRunState::Open { request } => request.expect("request pending").reject(err),
+				FetchRunState::Send { request, stream, .. } | FetchRunState::Answer { request, stream, .. } => {
+					stream.writer.abort(&err);
+					request.expect("request pending").reject(err);
+				}
+				_ => unreachable!(),
+			}
+			return Poll::Ready(());
+		}
 		let mut cx = waiter.context();
 		loop {
 			// A fetch nobody waits on any more is cancelled upstream, so the publisher stops
@@ -5468,9 +5524,10 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 					// it. The track::Info only takes effect if the track isn't accepted yet
 					// (a fetch with no live subscription); otherwise the group inherits the
 					// accepted timescale. Relay-served FETCH is lite-05+, so `timescale` is
-					// `Some`; fall back to the default scale defensively rather than
+					// `Some`; fall back to milliseconds defensively rather than
 					// panicking.
-					let group_info = track::Info::default().with_timescale(self.timescale.unwrap_or_default());
+					let group_info =
+						track::Info::default().with_timescale(self.timescale.unwrap_or(crate::Timescale::MILLI));
 					// The joined fetches pick the group up from the cache only when next
 					// polled, so their demand outlives the request until then.
 					let joined = request.result.clone();

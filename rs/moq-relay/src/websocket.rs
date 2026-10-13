@@ -15,7 +15,7 @@ use axum::{
 use moq_net::origin;
 use moq_net::stats::Session;
 
-use crate::{auth, refusals::Refusal, web::MtlsPeer, web::WebState, web::landing_response};
+use crate::{auth, web::MtlsPeer, web::WebState, web::landing_response};
 
 // One axum extractor per fact the upgrade needs; there is no struct to fold them into.
 #[allow(clippy::too_many_arguments)]
@@ -29,6 +29,7 @@ pub(crate) async fn serve_ws(
 	ConnectInfo(remote): ConnectInfo<crate::listener::Peer>,
 	socket_stats: Option<Extension<crate::web::SocketStats>>,
 	Extension(versions): Extension<moq_net::Versions>,
+	Extension(extensions): Extension<moq_net::setup::Extensions>,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<Response> {
 	// If this isn't a WebSocket upgrade (e.g. a plain browser visit), serve
@@ -37,6 +38,8 @@ pub(crate) async fn serve_ws(
 		return Ok(landing_response());
 	};
 
+	// Closed for drain: refuse before the upgrade so the client redials elsewhere.
+	let active = state.shutdown.activity.enter().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 	let alpns = versions.alpns();
 	let ws = negotiate_subprotocol(ws, &alpns)?;
 
@@ -59,31 +62,25 @@ pub(crate) async fn serve_ws(
 	request.alpn = ws.selected_protocol().and_then(|p| p.to_str().ok()).map(str::to_owned);
 	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| auth::peer(&identity));
 	let session_id = request.id.clone();
+	// Abandoned at the drain deadline, as on the native path.
 	let lease = state
-		.auth
-		.admit(request.clone())
+		.shutdown
+		.admit(state.auth.admit(request.clone()))
 		.await
 		.inspect_err(|err| state.cluster.refusals.record(err.into()))?;
-	let token = lease.token();
-	let publish = state.cluster.publisher(token);
-	// A verified client certificate marks a cluster peer, which discovers hidden
-	// routes; see `Cluster::scope`.
-	let subscribe = state
+	let limits = state.cluster.limits(&lease);
+	let crate::cluster::Admitted {
+		lease,
+		publisher: publish,
+		subscriber: subscribe,
+		stats,
+	} = state
 		.cluster
-		.subscriber(token)
-		.map(|subscribe| subscribe.consume().with_hidden(request.tls.is_some()));
-
-	if publish.is_none() && subscribe.is_none() {
-		// Bad token, we can't publish or subscribe.
-		state.cluster.refusals.record(Refusal::Forbidden);
-		return Err(StatusCode::UNAUTHORIZED.into());
-	}
-
-	// Only an admitted session counts as present, as on the native path.
-	let stats = state.cluster.stats.tier(token.tier.clone()).session(&token.root);
-	let lease = lease.with_stats(stats.clone());
+		.scope_session(lease, &request)
+		.inspect_err(|err| state.cluster.refusals.record(err.into()))?;
 
 	Ok(ws.on_upgrade(async move |socket| {
+		let _active = active;
 		let id = state.conn_id.fetch_add(1, Ordering::Relaxed);
 
 		// Capture the negotiated subprotocol before we erase the WebSocket type
@@ -99,6 +96,8 @@ pub(crate) async fn serve_ws(
 			remote: remote.0,
 			alpn,
 			versions,
+			extensions,
+			limits,
 			publish,
 			subscribe,
 			stats,
@@ -117,6 +116,10 @@ struct SessionInputs {
 	remote: SocketAddr,
 	alpn: Option<String>,
 	versions: moq_net::Versions,
+	/// The moq-transport extensions this side offers in SETUP.
+	extensions: moq_net::setup::Extensions,
+	/// The request caps selected by the admitted grant.
+	limits: moq_net::session::Limits,
 	publish: Option<origin::Producer>,
 	subscribe: Option<origin::Consumer>,
 	stats: Session,
@@ -153,6 +156,8 @@ where
 		remote: _,
 		alpn,
 		versions,
+		extensions,
+		limits,
 		publish,
 		subscribe,
 		stats,
@@ -187,7 +192,11 @@ where
 	// Only set the side the token actually grants. moq-net defaults the
 	// unset side to a fresh no-op origin, which is fine for a
 	// publish-only or subscribe-only token.
-	let mut server = moq_net::Server::new().with_versions(versions).with_stats(stats);
+	let mut server = moq_net::Server::new()
+		.with_versions(versions)
+		.with_extensions(extensions)
+		.with_stats(stats)
+		.with_limits(limits);
 	if let Some(subscribe) = subscribe {
 		server = server.with_publisher(subscribe);
 	}
@@ -197,19 +206,38 @@ where
 	// Keep the driver in this task so cancellation tears down the transport.
 	let ws = moq_tokio::transport::Session::new(ws);
 	let mut refused = ws.clone();
-	let accept = server.accept(tokio::time::Instant::now().into_std(), ws);
-	let (session, driver) = match timeout {
-		None => accept.await?,
-		Some(timeout) => match tokio::time::timeout(timeout, accept).await {
-			Ok(accepted) => accepted?,
-			// A peer that upgraded and never sent SETUP; tell it why it is dropped.
-			Err(_) => {
-				use web_transport_trait::poll::Session as _;
-				let err = moq_net::Error::Timeout;
-				refused.close(moq_net::SessionError::from(&err).to_code(), &err.to_string());
-				return Err(err.into());
-			}
-		},
+	let handshake = async move {
+		let request = server
+			.accept_request(tokio::time::Instant::now().into_std(), ws)
+			.await?;
+		let lease = lease.preparing(request.auth(), request.role())?;
+		let (session, driver) = request.ok().await?;
+		Ok::<_, moq_net::Error>((lease, session, driver))
+	};
+	// The handshake timeout covers the SETUP reply too, so a peer that sends SETUP
+	// and then withholds flow-control credit is dropped like one that never sends it.
+	let handshake = async move {
+		match timeout {
+			None => handshake.await,
+			Some(timeout) => tokio::time::timeout(timeout, handshake)
+				.await
+				.unwrap_or(Err(moq_net::Error::Timeout)),
+		}
+	};
+	// The drain deadline bounds the handshake too, so a stalled peer cannot outlive
+	// the relay.
+	let handshake = shutdown
+		.until_deadline(handshake)
+		.await
+		.unwrap_or(Err(moq_net::Error::GoawayTimeout));
+	let (lease, session, driver) = match handshake {
+		Ok(handshake) => handshake,
+		// Tell the peer why it is dropped.
+		Err(err) => {
+			use web_transport_trait::poll::Session as _;
+			refused.close(moq_net::SessionError::from(&err).to_code(), &err.to_string());
+			return Err(err.into());
+		}
 	};
 
 	let driver = moq_net::time::run(driver);
@@ -971,11 +999,13 @@ mod tests {
 		let frozen = Arc::new(AtomicBool::new(false));
 
 		let session = SessionInputs {
+			limits: Default::default(),
 			id: 0,
 			session: String::new(),
 			remote: "127.0.0.1:0".parse().unwrap(),
 			alpn: Some(alpn.clone()),
 			versions: moq_net::Versions::all(),
+			extensions: Default::default(),
 			publish: None,
 			subscribe: None,
 			stats: Session::default(),
@@ -1037,11 +1067,13 @@ mod tests {
 		let timeout = Duration::from_secs(10);
 
 		let session = SessionInputs {
+			limits: Default::default(),
 			id: 0,
 			session: String::new(),
 			remote: "127.0.0.1:0".parse().unwrap(),
 			alpn: Some(alpn.clone()),
 			versions: moq_net::Versions::all(),
+			extensions: Default::default(),
 			publish: None,
 			subscribe: None,
 			stats: Session::default(),

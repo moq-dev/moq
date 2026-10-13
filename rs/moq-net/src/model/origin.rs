@@ -5,8 +5,8 @@ use std::{
 	collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
 	fmt,
 	sync::Arc,
-	sync::atomic::{AtomicU64, Ordering},
-	task::{Poll, ready},
+	sync::atomic::{AtomicBool, AtomicU64, Ordering},
+	task::{Context, Poll, Wake, Waker, ready},
 	time::Duration,
 };
 
@@ -125,12 +125,23 @@ pub struct Config {
 	/// retraction, instead of advertising each stale path in turn. It must outlast
 	/// the wave's spread across the mesh. Defaults to [`DEFAULT_UPDATE_HOLD`];
 	/// zero delivers updates at once.
+	///
+	/// A relay further out can still pass a stale path to a cursor that already
+	/// retracted the prefix, which would announce it anew. So for two seconds after
+	/// a retraction, an announcement from the same publisher (first hop and epoch)
+	/// on a strictly worse route waits. A republish ranks the same and a new
+	/// instance carries a new epoch, so neither waits. Zero disables this too.
 	pub update_hold: Duration,
 }
 
 /// The default [`Config::update_hold`]: longer than a withdrawal takes to cross a
 /// global mesh, with margin.
 pub const DEFAULT_UPDATE_HOLD: Duration = Duration::from_millis(300);
+
+/// How long a cursor holds back a stale path to a prefix it retracted; see
+/// [`Config::update_hold`]. Path hunting after a withdrawal settles within it on
+/// random meshes with links of up to 250 ms.
+const RETRACT_QUARANTINE: Duration = Duration::from_secs(2);
 
 impl Default for Config {
 	/// A fresh random hop with no byte target and the default idle expiry.
@@ -382,6 +393,32 @@ impl From<u64> for Cost {
 	}
 }
 
+/// How much an endpoint prefers a link over its others; higher wins.
+///
+/// Every link starts at the neutral [`Preference::default`] (0), which is also what
+/// a broadcast published locally ranks. A positive value promotes a link and a
+/// negative one demotes it. See [`Producer::with_preference`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Preference(i8);
+
+impl Preference {
+	/// Rank a link.
+	pub const fn new(preference: i8) -> Self {
+		Self(preference)
+	}
+
+	/// The rank.
+	pub const fn value(self) -> i8 {
+		self.0
+	}
+}
+
+impl From<i8> for Preference {
+	fn from(preference: i8) -> Self {
+		Self::new(preference)
+	}
+}
+
 /// The path a route took through the mesh and what using it costs.
 ///
 /// The metadata half of an advertisement: [`Producer::dynamic`] pairs it with
@@ -539,7 +576,8 @@ fn fnv_key(name: &str, origins: impl IntoIterator<Item = Hop>) -> u64 {
 
 /// Ordering key for a route entry resolving `path`. Lower wins: the newest epoch
 /// first, since an older one is a publisher that was replaced, and a route with no
-/// epoch last. Then an identified chain (no 0) outranks an anonymous one regardless of cost, then the cheapest
+/// epoch last. Then the higher link [`Preference`], so metrics from different
+/// operators are never compared. Then an identified chain (no 0) outranks an anonymous one regardless of cost, then the cheapest
 /// cost, then a broadcast published on this origin (it serves what is here, not a
 /// claim that has to ask), then the shortest hop chain, then a deterministic hash
 /// of `path` and the chain so every node converges on the same winner, and finally
@@ -556,6 +594,7 @@ fn route_order<'a>(
 	entry: &'a RouteEntry,
 ) -> (
 	Reverse<Option<&'a crate::Epoch>>,
+	Reverse<Preference>,
 	bool,
 	Cost,
 	bool,
@@ -565,6 +604,7 @@ fn route_order<'a>(
 ) {
 	(
 		Reverse(entry.epoch.as_ref()),
+		Reverse(entry.preference),
 		entry.is_anonymous(),
 		entry.cost,
 		!entry.local,
@@ -577,13 +617,43 @@ fn route_order<'a>(
 /// The `(hops, cost, source, epoch)` metadata an announce cursor delivers alongside a prefix.
 type RouteMeta = (Hops, Cost, Source, Option<crate::Epoch>);
 
+/// The earlier of two optional deadlines.
+fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+	match (a, b) {
+		(Some(a), Some(b)) => Some(a.min(b)),
+		(a, b) => a.or(b),
+	}
+}
+
+/// A retraction's quarantine, keyed by prefix in its [`AnnounceConsumer`]: the
+/// retracted route's publisher (none for an anonymous route, which holds
+/// nothing), epoch, and rank, and when the quarantine ends.
+#[derive(Clone)]
+struct Quarantine {
+	held: Held,
+	publisher: Option<Hop>,
+	epoch: Option<crate::Epoch>,
+	rank: (Cost, usize),
+}
+
+impl Quarantine {
+	/// Whether `meta` could be a stale path to the retracted publisher: the same
+	/// first hop and epoch, ranked strictly worse. A republish ranks the same and a
+	/// new instance carries a new epoch, so neither waits.
+	fn holds(&self, meta: &RouteMeta) -> bool {
+		self.publisher.is_some_and(|hop| meta.0.iter().next() == Some(&hop))
+			&& meta.3 == self.epoch
+			&& (meta.1, meta.0.len()) > self.rank
+	}
+}
+
 /// A pending update's hold, keyed by prefix in its [`AnnounceConsumer`].
 ///
 /// A consumer reads the origin's clock outside the driver, where it holds the
 /// driver's last reading, not the time the update arrived. So a hold first waits
 /// for the driver's next reading (armed a nanosecond past the stale one, which
 /// wakes the driver at once), and counts from there.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Held {
 	Anchoring(Instant),
 	Until(Instant),
@@ -687,19 +757,33 @@ impl OriginConsumerState {
 	}
 
 	/// The first pending prefix ready to deliver, or when the next held one is.
-	/// See [`Config::update_hold`]; a hold starts the first time a scan sees it.
+	/// See [`Config::update_hold`]; a hold starts the first time a scan sees it,
+	/// and a quarantine in `retracted` (settled against `now`) holds until it ends.
 	fn scan(
 		&self,
 		held: &mut HashMap<PathOwned, Held>,
+		retracted: &HashMap<PathOwned, Quarantine>,
 		now: Option<Instant>,
 		hold: Duration,
 	) -> Result<PathOwned, Option<Instant>> {
 		let mut wake = None;
 		for (prefix, update) in &self.pending {
-			let holds = !hold.is_zero() && !self.ended && self.is_update(prefix, update);
-			let Some(now) = now.filter(|_| holds) else {
+			let Some(now) = now.filter(|_| !hold.is_zero() && !self.ended) else {
 				return Ok(prefix.clone());
 			};
+			if !self.is_update(prefix, update) {
+				let quarantine = match update {
+					PendingUpdate::Announce((meta, _)) => retracted.get(prefix).filter(|q| q.holds(meta)),
+					_ => None,
+				};
+				let until = match quarantine.map(|q| q.held) {
+					Some(Held::Anchoring(seen)) => seen + Duration::from_nanos(1),
+					Some(Held::Until(until)) if now < until => until,
+					_ => return Ok(prefix.clone()),
+				};
+				wake = Some(wake.map_or(until, |w: Instant| w.min(until)));
+				continue;
+			}
 			// The clock reads the driver's last advance, which may be stale: anchor the
 			// hold on the first advance after the update arrived, by waking the driver.
 			let until = match held.get(prefix).copied() {
@@ -795,6 +879,8 @@ struct RouteEntry {
 	scope: Patterns,
 	hops: Hops,
 	cost: Cost,
+	/// The rank of the link the entry arrived on; see [`Producer::with_preference`].
+	preference: Preference,
 	/// The announcing session's declared or assigned identity. Split-horizon
 	/// matches this as well as [`Self::hops`], so an anonymous hop 0 still
 	/// cannot echo back to the session it came from.
@@ -1421,6 +1507,9 @@ pub struct Producer {
 	// [`Self::peer`] and [`Self::upstream`]).
 	link: Link,
 
+	// The rank of that link; see [`Self::with_preference`].
+	preference: Preference,
+
 	// Submission handle to the origin's [`Driver`]: source watchers, fronts, and
 	// serve tasks queued here run when the driver is polled. Closed once the
 	// driver drops, which is what makes later mutations fail with `Closed`.
@@ -1452,6 +1541,7 @@ impl Producer {
 			cache_duration: config.cache_duration,
 			stats: stats::Session::default(),
 			link: Link::Local,
+			preference: Preference::default(),
 			tasks,
 			timers: timers.clone(),
 		};
@@ -1507,6 +1597,20 @@ impl Producer {
 		self
 	}
 
+	/// Rank the link this handle (and any handle derived from it) is given to:
+	/// higher wins, and every handle starts at the neutral [`Preference::default`].
+	///
+	/// Applies to what [`Self::dynamic`] advertises, which is how a session lands its
+	/// peer's routes, not to a broadcast published here. A route with a newer epoch still wins,
+	/// but among the rest preference decides before cost, so links to different
+	/// operators rank by this instead of comparing their metrics. Hand each CDN's
+	/// session its own rank to use the primary while it has a route and fail over to
+	/// the next.
+	pub fn with_preference(mut self, preference: Preference) -> Self {
+		self.preference = preference;
+		self
+	}
+
 	/// This origin's construction config.
 	pub fn config(&self) -> Config {
 		Config {
@@ -1539,6 +1643,7 @@ impl Producer {
 			cache_duration: Duration::MAX,
 			stats: stats::Session::default(),
 			link: Link::Local,
+			preference: Preference::default(),
 			tasks,
 			timers: Clock::default(),
 		}
@@ -1606,6 +1711,7 @@ impl Producer {
 			scope: self.scope.allowed.clone(),
 			local: true,
 			link: self.link,
+			preference: Preference::default(),
 			stats: self.stats.clone(),
 		};
 		let info = broadcast::Info {
@@ -1735,6 +1841,7 @@ impl Producer {
 			cache_duration: self.cache_duration,
 			stats: self.stats.clone(),
 			link: self.link,
+			preference: self.preference,
 			tasks: self.tasks.clone(),
 			timers: self.timers.clone(),
 		})
@@ -1848,6 +1955,8 @@ struct Announcing {
 	local: bool,
 	/// The link the producer's routes arrive on.
 	link: Link,
+	/// The rank of that link; a broadcast published here is on none, so it ranks at the default.
+	preference: Preference,
 	stats: stats::Session,
 }
 
@@ -1870,6 +1979,7 @@ impl Announcing {
 			scope: producer.scope.allowed.clone(),
 			local: false,
 			link: producer.link,
+			preference: producer.preference,
 			stats: producer.stats.clone(),
 		})
 	}
@@ -1901,6 +2011,7 @@ impl Announcing {
 				scope: self.scope.clone(),
 				hops: route.hops.clone(),
 				cost: route.cost,
+				preference: self.preference,
 				via,
 				local: self.local,
 				link: self.link,
@@ -2291,9 +2402,30 @@ struct Asked {
 	sub: Option<kio::Pending<track::Subscribing>>,
 }
 
+/// Queues just the logical track whose watched resource changed.
+struct TrackReady {
+	name: Arc<str>,
+	queue: kio::Queue<Arc<str>>,
+	queued: AtomicBool,
+}
+
+impl Wake for TrackReady {
+	fn wake(self: Arc<Self>) {
+		self.wake_by_ref();
+	}
+
+	fn wake_by_ref(self: &Arc<Self>) {
+		if !self.queued.swap(true, Ordering::AcqRel) {
+			let _ = self.queue.try_push(self.name.clone());
+		}
+	}
+}
+
 /// The driver's side of one logical track: the handles behind the names the
 /// machine uses.
 struct TrackIo {
+	ready: Arc<TrackReady>,
+	park: kio::Park,
 	/// The logical track, until the first copy says what it is.
 	request: Option<track::Request>,
 	/// The logical track once accepted. Nothing writes it: its readers read the
@@ -2320,6 +2452,7 @@ struct TrackIo {
 impl TrackIo {
 	/// Serve the track from `asked`'s copy, accepting it with that copy's info first.
 	fn splice(&mut self, asked: Asked) {
+		self.ready.wake_by_ref();
 		if let Some(request) = self.request.take() {
 			let info = asked.info.clone().unwrap_or_default();
 			self.accepted = Some(request.routes(self.routes.consume()).accept(info));
@@ -2332,6 +2465,7 @@ impl TrackIo {
 	/// End the track: cleanly with `Ok`, or failed for good. Readers drain what the
 	/// serving copy still holds.
 	fn end(&mut self, result: Result<(), Error>) {
+		self.ready.wake_by_ref();
 		self.query = None;
 		self.staged = None;
 		self.copy = None;
@@ -2351,6 +2485,18 @@ impl TrackIo {
 			}
 		}
 	}
+}
+
+/// A track the ended front left in flight, held until its last reader leaves. It
+/// keeps none of the driver's wake state, which would queue its name for a driver
+/// that is gone.
+struct InFlight {
+	weak: track::TrackWeak,
+	routes: super::resume::Producer,
+	// Kept for its readers: the logical track, its copy, and the copy's subscription.
+	_accepted: Option<track::Producer>,
+	_copy: Option<track::Consumer>,
+	_held: Option<kio::Pending<track::Subscribing>>,
 }
 
 /// Drives one front until it ends, then holds the tracks it left in flight until
@@ -2415,7 +2561,7 @@ fn pick<'a>(
 /// until the front ends; returns the tracks it ended in flight. The decisions live
 /// in the machine; this only waits and executes, so nothing here decides anything
 /// twice.
-async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
+async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 	let FrontTask {
 		shared,
 		broadcast,
@@ -2463,6 +2609,7 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 	}
 	let mut upstream: Option<Upstream> = None;
 	let mut tracks: HashMap<Arc<str>, TrackIo> = HashMap::new();
+	let ready: kio::Queue<Arc<str>> = kio::Queue::new();
 	let mut deadline = crate::time::Deadline::new(&timers);
 	// The watch generation the last selection saw.
 	let mut seen = 0;
@@ -2698,6 +2845,7 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 					}
 					Action::Query { track: name, source } => {
 						let Some(io) = tracks.get_mut(&name) else { continue };
+						io.ready.wake_by_ref();
 						let closing = sources.get(&source).is_some_and(|s| s.is_closing());
 						match sources.get(&source).map(|s| s.track(&name)) {
 							Some(Ok(copy)) => {
@@ -2736,6 +2884,7 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 					}
 					Action::Park { track: name } => {
 						let Some(io) = tracks.get_mut(&name) else { continue };
+						io.ready.wake_by_ref();
 						// Drop the copy so its source goes idle at once. A returning
 						// reader gets a fresh one, so nothing cached can be stale.
 						io.routes.park();
@@ -2831,7 +2980,21 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 								continue;
 							}
 							io.routes.conclude();
-							in_flight.push(io);
+							let TrackIo {
+								weak,
+								routes,
+								accepted,
+								copy,
+								held,
+								..
+							} = io;
+							in_flight.push(InFlight {
+								weak,
+								routes,
+								_accepted: accepted,
+								_copy: copy.map(|(_, copy)| copy),
+								_held: held,
+							});
 						}
 						return in_flight;
 					}
@@ -2869,43 +3032,56 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 			{
 				return Poll::Ready(Step::SourceClosed(id));
 			}
-			for (name, io) in &mut tracks {
-				if let Some((asked, query)) = &mut io.query
-					&& let Poll::Ready(result) = query.poll(waiter)
-				{
-					return Poll::Ready(Step::Info(name.clone(), asked.source, result));
-				}
-				// The query's subscription goes with the last reader.
-				if io.held.is_some()
-					&& let Some(accepted) = &mut io.accepted
-				{
-					while let Poll::Ready(Ok(_)) = accepted.poll_subscription_changed(waiter) {}
-					if accepted.subscription().is_none() {
-						io.held = None;
+			while let Poll::Ready(Ok(name)) = ready.poll_pop(waiter) {
+				let Some(io) = tracks.get_mut(&name) else { continue };
+				io.ready.queued.store(false, Ordering::Release);
+				let waker = Waker::from(io.ready.clone());
+				let waiter = io.park.hold(&Context::from_waker(&waker));
+				let step = (|| {
+					if let Some((asked, query)) = &mut io.query
+						&& let Poll::Ready(result) = query.poll(waiter)
+					{
+						return Some(Step::Info(name.clone(), asked.source, result));
 					}
-				}
-				// Settled once the copy closes: a group still open below a declared end is
-				// owed until then, and a session closing first means it never came.
-				if let Some((source, copy)) = &io.copy
-					&& copy.poll_closed(waiter).is_ready()
-				{
-					let result = match copy.poll_complete(&kio::Waiter::noop()) {
-						Poll::Ready(result) => result,
-						Poll::Pending => Err(Error::Dropped),
+					// The query's subscription goes with the last reader.
+					if io.held.is_some()
+						&& let Some(accepted) = &mut io.accepted
+					{
+						while let Poll::Ready(Ok(_)) = accepted.poll_subscription_changed(waiter) {}
+						if accepted.subscription().is_none() {
+							io.held = None;
+						}
+					}
+					// Settled once the copy closes: a group still open below a declared end is
+					// owed until then, and a session closing first means it never came.
+					if let Some((source, copy)) = &io.copy
+						&& copy.poll_closed(waiter).is_ready()
+					{
+						let result = match copy.poll_complete(&kio::Waiter::noop()) {
+							Poll::Ready(result) => result,
+							Poll::Pending => Err(Error::Dropped),
+						};
+						let delivered = copy.latest().is_some();
+						return Some(Step::Ended(name.clone(), *source, result, delivered));
+					}
+					// Watch the demand edge in whichever direction is unmet. Only `Pending`
+					// parks, so an answer steps and the handler looks again, polling anew when
+					// nothing changed. A closed track is unread: it owes one `Unused` if
+					// recorded read, and is no edge after.
+					let edge = match io.used {
+						true => io.weak.poll_unused(waiter).is_ready(),
+						false => matches!(io.weak.poll_used(waiter), Poll::Ready(Ok(()))),
 					};
-					let delivered = copy.latest().is_some();
-					return Poll::Ready(Step::Ended(name.clone(), *source, result, delivered));
-				}
-				// Watch the demand edge in whichever direction is unmet. Only `Pending`
-				// parks, so an answer steps and the handler looks again, polling anew when
-				// nothing changed. A closed track is unread: it owes one `Unused` if
-				// recorded read, and is no edge after.
-				let edge = match io.used {
-					true => io.weak.poll_unused(waiter).is_ready(),
-					false => matches!(io.weak.poll_used(waiter), Poll::Ready(Ok(()))),
-				};
-				if edge {
-					return Poll::Ready(Step::Demand(name.clone()));
+					if edge {
+						return Some(Step::Demand(name.clone()));
+					}
+					None
+				})();
+				if let Some(step) = step {
+					// A ready answer did not park on its next edge. Revisit this track
+					// once the machine has consumed the event and applied its actions.
+					io.ready.wake_by_ref();
+					return Poll::Ready(step);
 				}
 			}
 			// The same for whoever holds the broadcast itself.
@@ -2929,9 +3105,17 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 		let event = match step {
 			Step::Assigned(request) => {
 				let name: Arc<str> = request.name().into();
+				let track_ready = Arc::new(TrackReady {
+					name: name.clone(),
+					queue: ready.clone(),
+					queued: AtomicBool::new(false),
+				});
+				track_ready.wake_by_ref();
 				tracks.insert(
 					name.clone(),
 					TrackIo {
+						ready: track_ready,
+						park: Default::default(),
 						weak: request.weak(),
 						request: Some(request),
 						accepted: None,
@@ -3112,7 +3296,7 @@ struct RouteNode {
 	cursors_below: usize,
 	/// Who is waiting on the routes covering this prefix: the fronts serving it
 	/// and the requesters parked on it (see [`Watch`]).
-	watches: Vec<(u64, kio::Producer<Watched>)>,
+	watches: Vec<(u64, WatchProducer)>,
 	/// Watches at this node or below, so a route change walks only the subtrees
 	/// holding one.
 	watches_below: usize,
@@ -3124,6 +3308,43 @@ struct RouteNode {
 #[derive(Default)]
 struct Watched {
 	generation: u64,
+}
+
+enum WatchProducer {
+	Changes(kio::Producer<Watched>),
+	Selection(kio::Producer<Selected>),
+}
+
+struct Selected {
+	path: PathOwned,
+	via: Hop,
+	instance: Instance,
+	current: Option<kio::Producer<()>>,
+}
+
+/// The lifetime of path requests while this peer still selects the held instance.
+pub(crate) struct Selection {
+	shared: kio::Shared<OriginState>,
+	path: PathOwned,
+	id: u64,
+	signal: kio::Consumer<Selected>,
+}
+
+impl Selection {
+	pub(crate) fn current(&self) -> kio::Consumer<()> {
+		self.signal
+			.read()
+			.current
+			.as_ref()
+			.map(kio::Producer::consume)
+			.unwrap_or_else(|| kio::Producer::new(()).consume())
+	}
+}
+
+impl Drop for Selection {
+	fn drop(&mut self) {
+		self.shared.lock().routes.remove_watch(&self.path, self.id);
+	}
 }
 
 /// A registration in the route table for changes to the routes covering one
@@ -3226,24 +3447,48 @@ impl RouteNode {
 		Some(result)
 	}
 
-	/// Wake the watches at this node.
-	fn poke(&self) {
+	/// Wake route watchers, and revoke only leases whose selected instance changed.
+	fn poke(&self, routes: Option<&RouteTable>) {
 		for (_, watch) in &self.watches {
-			if let Ok(mut watched) = watch.write() {
-				watched.generation += 1;
+			match watch {
+				WatchProducer::Changes(watch) => {
+					if let Ok(mut watched) = watch.write() {
+						watched.generation += 1;
+					}
+				}
+				WatchProducer::Selection(watch) => {
+					if let Ok(mut selected) = watch.write() {
+						let active = routes
+							.and_then(|routes| {
+								routes.best_route(
+									&selected.path,
+									Horizon {
+										exclude: None,
+										local: false,
+										upstream: false,
+									},
+									&HashSet::new(),
+									|entry| entry.via == selected.via,
+								)
+							})
+							.is_some_and(|entry| entry.instance() == selected.instance);
+						if active != selected.current.is_some() {
+							selected.current = active.then(kio::Producer::default);
+						}
+					}
+				}
 			}
 		}
 	}
 
-	/// Wake the watches at this node and below: a route here covers every one
-	/// of their paths. Skips subtrees holding none.
-	fn poke_below(&self) {
+	/// Wake only the watched subtrees covered by this route.
+	fn poke_below(&self, routes: &RouteTable) {
 		if self.watches_below == 0 {
 			return;
 		}
-		self.poke();
+		self.poke(Some(routes));
 		for child in self.children.values() {
-			child.poke_below();
+			child.poke_below(routes);
 		}
 	}
 
@@ -3268,6 +3513,37 @@ impl RouteNode {
 }
 
 impl RouteTable {
+	fn best_route(
+		&self,
+		path: &Path,
+		horizon: Horizon,
+		excluded: &HashSet<u64>,
+		only: impl Fn(&RouteEntry) -> bool,
+	) -> Option<&RouteEntry> {
+		// Covering prefixes of one path form a chain, so the deepest node with a
+		// candidate holds the unique longest prefix; walking down, the last such
+		// node decides.
+		let (above, at) = self.split(path);
+		let mut best = None;
+		for node in above.into_iter().chain(at) {
+			let mut candidates = node
+				.entries
+				.iter()
+				.filter(|entry| entry.live())
+				.filter(|entry| entry.scope.matches(path.as_str()))
+				.filter(|entry| horizon.admits(entry))
+				.filter(|entry| !excluded.contains(&entry.id))
+				.filter(|entry| only(entry))
+				.peekable();
+			if candidates.peek().is_some() {
+				best = candidates
+					.filter(|entry| entry.serves(path))
+					.min_by_key(|entry| route_order(path, entry));
+			}
+		}
+		best
+	}
+
 	/// The nodes above `path` and the node at it, as far as the table has them.
 	/// The entries of those nodes are exactly the routes covering `path`.
 	fn split(&self, path: &Path) -> (Vec<&RouteNode>, Option<&RouteNode>) {
@@ -3369,7 +3645,10 @@ impl RouteTable {
 	fn add_watch(&mut self, path: &Path, id: u64) -> kio::Consumer<Watched> {
 		let producer = kio::Producer::<Watched>::default();
 		let consumer = producer.consume();
-		self.root.reach(path.parts(), Below::WATCH).watches.push((id, producer));
+		self.root
+			.reach(path.parts(), Below::WATCH)
+			.watches
+			.push((id, WatchProducer::Changes(producer)));
 		consumer
 	}
 
@@ -3384,13 +3663,13 @@ impl RouteTable {
 	/// Wake the watches of every path a route at `prefix` covers.
 	fn poke_below(&self, prefix: &Path) {
 		if let (_, Some(node)) = self.split(prefix) {
-			node.poke_below();
+			node.poke_below(self);
 		}
 	}
 
 	/// Wake every watch: the origin is tearing down.
 	fn poke_all(&self) {
-		self.root.walk(&mut |node| node.poke());
+		self.root.walk(&mut |node| node.poke(None));
 	}
 
 	/// The cursors a route at `prefix` can present on: a cursor sees a route
@@ -3676,28 +3955,7 @@ impl OriginState {
 		excluded: &HashSet<u64>,
 		only: impl Fn(&RouteEntry) -> bool,
 	) -> Option<&RouteEntry> {
-		// Covering prefixes of one path form a chain, so the deepest node with a
-		// candidate holds the unique longest prefix; walking down, the last such
-		// node decides.
-		let (above, at) = self.routes.split(path);
-		let mut best = None;
-		for node in above.into_iter().chain(at) {
-			let mut candidates = node
-				.entries
-				.iter()
-				.filter(|entry| entry.live())
-				.filter(|entry| entry.scope.matches(path.as_str()))
-				.filter(|entry| horizon.admits(entry))
-				.filter(|entry| !excluded.contains(&entry.id))
-				.filter(|entry| only(entry))
-				.peekable();
-			if candidates.peek().is_some() {
-				best = candidates
-					.filter(|entry| entry.serves(path))
-					.min_by_key(|entry| route_order(path, entry));
-			}
-		}
-		best
+		self.routes.best_route(path, horizon, excluded, only)
 	}
 
 	/// Whether every cursor presenting `prefix` restarted it since
@@ -3814,6 +4072,64 @@ pub struct Dynamic {
 }
 
 impl Dynamic {
+	pub(crate) fn request_validity(&self, path: &Path) -> Option<Selection> {
+		let shared = &self.announcement.shared;
+		let mut table = shared.lock();
+		if table.closed {
+			return None;
+		}
+		let entry = table.best_route(
+			path,
+			Horizon {
+				exclude: None,
+				local: false,
+				upstream: false,
+			},
+			&HashSet::new(),
+			|entry| {
+				entry
+					.server
+					.as_ref()
+					.is_some_and(|server| server.same_channel(&self.state))
+			},
+		)?;
+		let via = entry.via;
+		let instance = entry.instance();
+		let active = table
+			.best_route(
+				path,
+				Horizon {
+					exclude: None,
+					local: false,
+					upstream: false,
+				},
+				&HashSet::new(),
+				|entry| entry.via == via,
+			)
+			.is_some_and(|entry| entry.instance() == instance);
+		let producer = kio::Producer::new(Selected {
+			path: path.to_owned(),
+			via,
+			instance,
+			current: active.then(kio::Producer::default),
+		});
+		let signal = producer.consume();
+		let id = table.next_watch;
+		table.next_watch += 1;
+		table
+			.routes
+			.root
+			.reach(path.parts(), Below::WATCH)
+			.watches
+			.push((id, WatchProducer::Selection(producer)));
+		Some(Selection {
+			shared: shared.clone(),
+			path: path.to_owned(),
+			id,
+			signal,
+		})
+	}
+
 	/// Retire an explicit peer withdrawal, hiding derived paths only once its
 	/// last live advertisement at the prefix is gone. A lost session just drops.
 	pub(crate) fn withdrawn(self) {
@@ -4624,7 +4940,8 @@ impl Consumer {
 	/// path resolves through a front the origin's [`Driver`] runs: the request
 	/// mints one or joins the one already serving the path, and the front picks
 	/// the best announced route covering it (the most specific prefix, then the
-	/// newest [`Route::epoch`], then the cheapest, a broadcast published on this
+	/// newest [`Route::epoch`], then the preferred link ([`Producer::with_preference`]),
+	/// then the cheapest, a broadcast published on this
 	/// origin winning ties) and materializes it, from the broadcast itself or from
 	/// the peer that announced the route.
 	///
@@ -4831,6 +5148,11 @@ pub struct AnnounceConsumer {
 	// clock they count on, and the timer that wakes the next.
 	update_hold: Duration,
 	held: HashMap<PathOwned, Held>,
+	// Quarantines by prefix, and their retractions in clock order: first waiting
+	// for a fresh reading (by the stale one), then quarantined (by when each ends).
+	retracted: HashMap<PathOwned, Quarantine>,
+	anchoring: VecDeque<(Instant, PathOwned)>,
+	expiring: VecDeque<(Instant, PathOwned)>,
 	timers: Clock,
 	hold: crate::time::Deadline,
 }
@@ -4873,9 +5195,79 @@ impl AnnounceConsumer {
 			park: kio::Park::default(),
 			update_hold,
 			held: HashMap::new(),
+			retracted: HashMap::new(),
+			anchoring: VecDeque::new(),
+			expiring: VecDeque::new(),
 			hold: crate::time::Deadline::new(&timers),
 			timers,
 		}
+	}
+
+	/// Start a retraction's quarantine. A delivered announcement leaves it to
+	/// expire: later ones for the prefix are updates, which it never holds.
+	fn quarantine(&mut self, event: &AnnounceEvent, now: Option<Instant>) {
+		let AnnounceEvent::End(update) = event else {
+			return;
+		};
+		let Some(now) = now.filter(|_| !self.update_hold.is_zero()) else {
+			return;
+		};
+		// An anonymous route names no publisher, so its quarantine holds nothing.
+		let publisher = update
+			.route
+			.hops
+			.iter()
+			.next()
+			.copied()
+			.filter(|hop| *hop != Hop::UNKNOWN);
+		// The reading may be stale; [`Self::settle`] starts the quarantine on a fresh one.
+		let quarantine = Quarantine {
+			held: Held::Anchoring(now),
+			publisher,
+			epoch: update.route.epoch.clone(),
+			rank: (update.route.cost, update.route.hops.len()),
+		};
+		let replaced = self.retracted.insert(update.prefix.clone(), quarantine);
+		// A prefix retracted again at the same reading is already queued, so churn
+		// between clock readings can't grow the queue past one entry per prefix.
+		if !replaced.is_some_and(|q| q.held == Held::Anchoring(now)) {
+			self.anchoring.push_back((now, update.prefix.clone()));
+		}
+	}
+
+	/// Start the quarantines of retractions the clock has since moved past, and
+	/// forget ended ones. Returns when to wake to read the clock again, if any remain.
+	fn settle(&mut self, now: Option<Instant>) -> Option<Instant> {
+		let now = now?;
+		// Both queues are in clock order, so only their fronts can be due. An entry
+		// whose prefix was since announced or retracted again no longer matches.
+		while let Some((seen, prefix)) = self.anchoring.front() {
+			if *seen >= now {
+				break;
+			}
+			if let Some(quarantine) = self.retracted.get_mut(prefix)
+				&& quarantine.held == Held::Anchoring(*seen)
+			{
+				quarantine.held = Held::Until(now + RETRACT_QUARANTINE);
+				self.expiring.push_back((now + RETRACT_QUARANTINE, prefix.clone()));
+			}
+			self.anchoring.pop_front();
+		}
+		while let Some((until, prefix)) = self.expiring.front() {
+			if *until > now {
+				break;
+			}
+			if self
+				.retracted
+				.get(prefix)
+				.is_some_and(|q| q.held == Held::Until(*until))
+			{
+				self.retracted.remove(prefix);
+			}
+			self.expiring.pop_front();
+		}
+		let anchoring = self.anchoring.front().map(|(seen, _)| *seen + Duration::from_nanos(1));
+		earliest(anchoring, self.expiring.front().map(|(until, _)| *until))
 	}
 
 	/// Drive the egress announce guards for one update.
@@ -4913,8 +5305,10 @@ impl AnnounceConsumer {
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<AnnounceEvent>> {
 		loop {
 			let now = self.timers.try_now();
+			let settling = self.settle(now);
 			let hold = self.update_hold;
 			let held = &mut self.held;
+			let retracted = &self.retracted;
 			let mut ready = None;
 			let mut wake = None;
 			let event = match self.state.poll(waiter, |state| {
@@ -4924,7 +5318,7 @@ impl AnnounceConsumer {
 						false => Poll::Pending,
 					};
 				}
-				match state.scan(held, now, hold) {
+				match state.scan(held, retracted, now, hold) {
 					Ok(prefix) => {
 						ready = Some(prefix);
 						Poll::Ready(())
@@ -4947,7 +5341,7 @@ impl AnnounceConsumer {
 				// Closed: discard the Ref so its MutexGuard doesn't escape this call.
 				Poll::Ready(Err(_)) => None,
 				Poll::Pending => {
-					self.hold.set(wake);
+					self.hold.set(earliest(wake, settling));
 					ready!(self.hold.poll(waiter));
 					continue;
 				}
@@ -4960,6 +5354,7 @@ impl AnnounceConsumer {
 			| AnnounceEvent::Restart(announce)
 			| AnnounceEvent::End(announce)) = &event;
 			self.held.remove(&announce.prefix);
+			self.quarantine(&event, now);
 			return Poll::Ready(Some(self.hand_out(event)));
 		}
 	}
@@ -4970,10 +5365,12 @@ impl AnnounceConsumer {
 	/// Use [`Self::is_closed`] to check if the cursor is closed.
 	pub fn try_next(&mut self) -> Option<AnnounceEvent> {
 		let now = self.timers.try_now();
+		let settling = self.settle(now);
 		let mut state = self.state.write().ok()?;
-		let prefix = match state.scan(&mut self.held, now, self.update_hold) {
+		let prefix = match state.scan(&mut self.held, &self.retracted, now, self.update_hold) {
 			Ok(prefix) => prefix,
 			Err(wake) => {
+				let wake = earliest(wake, settling);
 				// Arm the hold even though nothing polls it: the armed timer wakes the
 				// driver, so its clock reaches the deadline for a later call to see.
 				drop(state);
@@ -4984,6 +5381,7 @@ impl AnnounceConsumer {
 		self.held.remove(&prefix);
 		let event = state.take_prefix(prefix);
 		drop(state);
+		self.quarantine(&event, now);
 		Some(self.hand_out(event))
 	}
 
@@ -5149,7 +5547,7 @@ mod tests {
 	fn a_finished_logical_track_does_not_warn() {
 		let warns = count_drop_warnings("track::Producer dropped without finish", || {
 			let broadcast = Arc::new(broadcast::Info::default());
-			let source = track::Producer::new(broadcast.clone(), "catalog.json", None);
+			let source = track::Producer::new(broadcast.clone(), "catalog.json", crate::track::Info::timed());
 			let mut group = source.create_group(7u64.into()).unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"snapshot".as_ref()).unwrap();
 			group.finish().unwrap();
@@ -5162,6 +5560,12 @@ mod tests {
 			let weak = request.weak();
 			let accepted = request.routes(routes.consume()).accept(None);
 			let mut io = TrackIo {
+				ready: Arc::new(TrackReady {
+					name: "catalog.json".into(),
+					queue: kio::Queue::new(),
+					queued: AtomicBool::new(false),
+				}),
+				park: Default::default(),
 				request: None,
 				accepted: Some(accepted),
 				weak,
@@ -6169,6 +6573,29 @@ mod tests {
 		);
 	}
 
+	#[moq_net_sim::test]
+	async fn request_avoids_a_demoted_link_even_when_cheaper() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+
+		let demoted = producer
+			.clone()
+			.with_preference(Preference::new(-1))
+			.dynamic("room", Route::default().with_hops(hops(&[10])).with_cost(1))
+			.unwrap();
+		let unranked = producer
+			.dynamic("room", Route::default().with_hops(hops(&[11])).with_cost(5))
+			.unwrap();
+
+		let _pending = consumer.request_broadcast("room/alice", None);
+		let request = queued(&unranked).await;
+		assert_eq!(request.path().as_str(), "room/alice");
+		assert!(
+			demoted.poll_requested_broadcast(&kio::Waiter::noop()).is_pending(),
+			"the cheaper demoted link must not serve"
+		);
+	}
+
 	#[test]
 	fn update_reprices_in_place() {
 		let producer = origin(1).produce();
@@ -6505,7 +6932,7 @@ mod tests {
 		broadcast.unannounce();
 		settle(|| resolved.is_closed()).await;
 
-		let source = request.accept(None);
+		let source = request.accept(crate::track::Info::timed());
 		let mut group = source.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"late".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -6546,7 +6973,7 @@ mod tests {
 			.await
 			.expect("the front asked the source")
 			.expect("request");
-		let source = request.resolving_start().accept(None);
+		let source = request.resolving_start().accept(crate::track::Info::timed());
 		let mut group = source.create_group(0u64.into()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"snapshot".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -6605,7 +7032,7 @@ mod tests {
 			.dynamic("room", Route::default().with_hops(hops(&[10])))
 			.unwrap();
 		let upstream = broadcast::Info::new().produce();
-		let source = upstream.create_track("video", None).unwrap();
+		let source = upstream.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = source.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"live".as_ref()).unwrap();
 
@@ -6683,7 +7110,7 @@ mod tests {
 			.dynamic("room", Route::default().with_hops(hops(&[10])))
 			.unwrap();
 		let upstream = broadcast::Info::new().produce();
-		let source = upstream.create_track("video", None).unwrap();
+		let source = upstream.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = source.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"live".as_ref()).unwrap();
 		let fronts = || producer.shared.lock().fronts.len();
@@ -6813,7 +7240,7 @@ mod tests {
 			.dynamic("room", Route::default().with_hops(hops(&[10, 7])).with_cost(100))
 			.unwrap();
 		let upstream = broadcast::Info::new().produce();
-		let source = upstream.create_track("video", None).unwrap();
+		let source = upstream.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = source.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"live".as_ref()).unwrap();
 		let fronts = || producer.shared.lock().fronts.len();
@@ -6906,7 +7333,11 @@ mod tests {
 		// A reader is mid-way through the open group when the route changes.
 		let track = resolved.track("log").unwrap();
 		let subscribing = moq_net_sim::spawn(async move { track.subscribe(None).await });
-		let source = dynamic.requested_track().await.unwrap().accept(None);
+		let source = dynamic
+			.requested_track()
+			.await
+			.unwrap()
+			.accept(crate::track::Info::timed());
 		let mut group = source.create_group(0u64.into()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"a".as_ref()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"b".as_ref()).unwrap();
@@ -6954,14 +7385,14 @@ mod tests {
 		let serving = fetched.clone();
 		let _fetching = moq_net_sim::spawn(async move {
 			while let Ok(request) = fetches.requested_group().await {
-				let mut group = request.accept(None).unwrap();
+				let mut group = request.accept(crate::track::Info::timed()).unwrap();
 				for frame in [b"a", b"b", b"c"] {
 					group.write_frame(crate::Timestamp::ZERO, frame.as_ref()).unwrap();
 				}
 				serving.lock().unwrap().push(group);
 			}
 		});
-		let mut next = request.resolving_start().accept(None);
+		let mut next = request.resolving_start().accept(crate::track::Info::timed());
 		next.start_at(0).unwrap();
 		let mut next_group = next.create_group(0u64.into()).unwrap();
 		next_group.start_at(2).unwrap();
@@ -7054,7 +7485,7 @@ mod tests {
 			.await
 			.expect("the front asked the source")
 			.expect("request");
-		let source = request.accept(None);
+		let source = request.accept(crate::track::Info::timed());
 		let mut group = source.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"cached".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -7080,7 +7511,7 @@ mod tests {
 		settle(|| resolved.is_closed()).await;
 
 		// A fresh source copy numbers groups past what the cache already delivered.
-		let source = request.accept(None);
+		let source = request.accept(crate::track::Info::timed());
 		let mut group = source.create_group(1u64.into()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"late".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -7632,6 +8063,62 @@ mod tests {
 		announced.assert_next_ended("room");
 	}
 
+	/// After a retraction, a worse path to the same publisher waits out the
+	/// quarantine. An anonymous route names no publisher, so one after it is not held.
+	#[moq_net_sim::test]
+	async fn a_retraction_quarantines_a_named_publisher() {
+		let producer = origin(1).produce();
+		let peer = producer.clone().peer();
+		let mut announced = producer.consume().announced();
+		moq_net_sim::sleep(Duration::from_millis(1)).await;
+
+		let route = |chain: &[u64], via| Route::default().with_hops(hops(chain)).with_via(origin(via));
+
+		let near = peer.dynamic("named", route(&[9, 2], 2)).unwrap();
+		announced.assert_next_active("named");
+		drop(near);
+		announced.assert_next_ended("named");
+		let start = moq_net_sim::now();
+		let _stale = peer.dynamic("named", route(&[9, 3, 4], 4)).unwrap();
+		match announced.next().await.unwrap() {
+			AnnounceEvent::Start(announce) => assert_eq!(announce.route.hops, hops(&[9, 3, 4])),
+			other => panic!("should be a start: got {other:?}"),
+		}
+		assert!(moq_net_sim::now() - start >= RETRACT_QUARANTINE);
+
+		let near = peer.dynamic("anonymous", route(&[0, 2], 2)).unwrap();
+		announced.assert_next_active("anonymous");
+		drop(near);
+		announced.assert_next_ended("anonymous");
+		let _other = peer.dynamic("anonymous", route(&[0, 3, 4], 4)).unwrap();
+		announced.assert_next_active("anonymous");
+
+		// Retract and announce cycles at one clock reading queue the prefix once,
+		// whether or not the route names its publisher.
+		let queued = announced.anchoring.len();
+		for chain in [[9, 2], [0, 2], [9, 2], [0, 2]] {
+			let churn = peer.dynamic("churn", route(&chain, 2)).unwrap();
+			announced.assert_next_active("churn");
+			drop(churn);
+			announced.assert_next_ended("churn");
+		}
+		assert_eq!(announced.anchoring.len(), queued + 1);
+
+		// A quarantine is forgotten once it ends: the cursor wakes to anchor it,
+		// then again to drop it.
+		let gone = peer.dynamic("gone", route(&[9, 2], 2)).unwrap();
+		announced.assert_next_active("gone");
+		drop(gone);
+		announced.assert_next_ended("gone");
+		assert!(!announced.retracted.is_empty());
+		for _ in 0..2 {
+			announced.assert_next_wait();
+			moq_net_sim::sleep(RETRACT_QUARANTINE).await;
+		}
+		announced.assert_next_wait();
+		assert!(announced.retracted.is_empty(), "the ended quarantine is still held");
+	}
+
 	/// A peer withdrawing a prefix hides the routes there through it, so the next
 	/// best is never a path derived from the one withdrawn. Announcing again
 	/// revives them, and nothing is remembered once no route passes through it.
@@ -8049,7 +8536,7 @@ mod tests {
 
 		let source = broadcast::Info::new().produce();
 		for name in ["a", "b"] {
-			let track = source.create_track(name, None).unwrap();
+			let track = source.create_track(name, crate::track::Info::timed()).unwrap();
 			let mut group = track.append_group().unwrap();
 			group.write_frame(crate::Timestamp::ZERO, name.as_bytes()).unwrap();
 			group.finish().unwrap();
@@ -8273,7 +8760,7 @@ mod tests {
 			let pending = consumer.request_broadcast("room/alice", None);
 			let request = queued(&server).await;
 			let source = broadcast::Info::new().produce();
-			let track = source.create_track("video", None).unwrap();
+			let track = source.create_track("video", crate::track::Info::timed()).unwrap();
 			let mut group = track.append_group().unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
 			group.finish().unwrap();
@@ -8322,7 +8809,7 @@ mod tests {
 	async fn assert_resumes(rig: &mut ResumeRig, server: &Dynamic) {
 		let request = queued(server).await;
 		let replacement = broadcast::Info::new().produce();
-		let track = replacement.create_track("video", None).unwrap();
+		let track = replacement.create_track("video", crate::track::Info::timed()).unwrap();
 		// The same content: group 0 was already delivered through the old route,
 		// so the track resumes at group 1.
 		let mut group = track.append_group().unwrap();
@@ -8365,7 +8852,7 @@ mod tests {
 			.unwrap();
 		let pending = consumer.request_broadcast("room/alice", None);
 		let source = broadcast::Info::new().produce();
-		let track = source.create_track("video", None).unwrap();
+		let track = source.create_track("video", crate::track::Info::timed()).unwrap();
 		queued(&first).await.accept(&source);
 		let resolved = pending.await.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
@@ -8402,7 +8889,7 @@ mod tests {
 				Route::default().with_epoch(crate::Epoch::mint()).with_cost(1),
 			)
 			.unwrap();
-		let old_track = old.create_track("video", None).unwrap();
+		let old_track = old.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		deliver(&old_track, &mut subscription, b"old").await;
@@ -8413,7 +8900,7 @@ mod tests {
 				Route::default().with_epoch(crate::Epoch::mint()).with_cost(9),
 			)
 			.unwrap();
-		let new_track = new.create_track("video", None).unwrap();
+		let new_track = new.create_track("video", crate::track::Info::timed()).unwrap();
 		deliver(&old_track, &mut subscription, b"sticky").await;
 
 		let replaced = consumer.request_broadcast("room/alice", None).await.expect("resolves");
@@ -8443,7 +8930,7 @@ mod tests {
 		let old = producer
 			.publish("room/alice", Route::default().with_epoch(first.clone()))
 			.unwrap();
-		let _old_track = old.create_track("video", None).unwrap();
+		let _old_track = old.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		assert_eq!(
 			resolved.info().epoch.as_ref(),
@@ -8455,7 +8942,7 @@ mod tests {
 		let new = producer
 			.publish("room/alice", Route::default().with_epoch(epoch.clone()))
 			.unwrap();
-		let new_track = new.create_track("video", None).unwrap();
+		let new_track = new.create_track("video", crate::track::Info::timed()).unwrap();
 		let named = consumer.request_broadcast("room/alice", epoch.clone());
 		let bare = consumer.request_broadcast("room/alice", None);
 
@@ -8492,9 +8979,9 @@ mod tests {
 		let new = producer
 			.publish("room/alice", Route::default().with_epoch(crate::Epoch::mint()))
 			.unwrap();
-		let new_track = new.create_track("video", None).unwrap();
+		let new_track = new.create_track("video", crate::track::Info::timed()).unwrap();
 		let stale = broadcast::Info::new().produce();
-		let _stale_track = stale.create_track("video", None).unwrap();
+		let _stale_track = stale.create_track("video", crate::track::Info::timed()).unwrap();
 		request.accept(&stale);
 
 		let resolved = pending.await.expect("resolves the winner");
@@ -8519,7 +9006,7 @@ mod tests {
 		let request = queued(&dynamic).await;
 
 		let stale = broadcast::Info::new().produce();
-		let _stale_track = stale.create_track("video", None).unwrap();
+		let _stale_track = stale.create_track("video", crate::track::Info::timed()).unwrap();
 		let epoch = crate::Epoch::mint();
 		if answer_first {
 			request.accept(&stale);
@@ -8531,7 +9018,7 @@ mod tests {
 
 		let request = queued(&dynamic).await;
 		let fresh = broadcast::Info::new().produce();
-		let fresh_track = fresh.create_track("video", None).unwrap();
+		let fresh_track = fresh.create_track("video", crate::track::Info::timed()).unwrap();
 		request.accept(&fresh);
 		let resolved = pending.await.expect("the request carries over to the new instance");
 		assert_eq!(resolved.info().epoch.as_ref(), Some(&epoch));
@@ -8573,7 +9060,7 @@ mod tests {
 		dynamic.update(dynamic.route().with_epoch(epoch.clone())).unwrap();
 
 		let fresh = broadcast::Info::new().produce();
-		let fresh_track = fresh.create_track("video", None).unwrap();
+		let fresh_track = fresh.create_track("video", crate::track::Info::timed()).unwrap();
 		queued(&dynamic).await.accept(&fresh);
 		let resolved = pending.await.expect("the request carries over");
 		assert_eq!(resolved.info().epoch.as_ref(), Some(&epoch));
@@ -8599,11 +9086,11 @@ mod tests {
 			.unwrap();
 		dynamic.update(dynamic.route().with_epoch(old.clone())).unwrap();
 		let stale = broadcast::Info::new().produce();
-		let _stale_track = stale.create_track("video", None).unwrap();
+		let _stale_track = stale.create_track("video", crate::track::Info::timed()).unwrap();
 		request.accept(&stale);
 
 		let fresh = broadcast::Info::new().produce();
-		let fresh_track = fresh.create_track("video", None).unwrap();
+		let fresh_track = fresh.create_track("video", crate::track::Info::timed()).unwrap();
 		queued(&dynamic).await.accept(&fresh);
 		let resolved = pending.await.expect("the request carries over");
 		assert_eq!(resolved.info().epoch.as_ref(), Some(&old));
@@ -8621,7 +9108,7 @@ mod tests {
 		let dynamic = producer.dynamic("room", Route::default()).unwrap();
 		let pending = consumer.request_broadcast("room/alice", None);
 		let old = broadcast::Info::new().produce();
-		let _old_track = old.create_track("video", None).unwrap();
+		let _old_track = old.create_track("video", crate::track::Info::timed()).unwrap();
 		queued(&dynamic).await.accept(&old);
 		let resolved = pending.await.expect("resolves");
 
@@ -8634,7 +9121,7 @@ mod tests {
 
 		let retry = consumer.request_broadcast("room/alice", None);
 		let fresh = broadcast::Info::new().produce();
-		let _fresh_track = fresh.create_track("video", None).unwrap();
+		let _fresh_track = fresh.create_track("video", crate::track::Info::timed()).unwrap();
 		queued(&dynamic).await.accept(&fresh);
 		let replaced = retry.await.expect("the new instance resolves");
 		assert!(!replaced.is_clone(&resolved), "rejoined the first instance's front");
@@ -8721,8 +9208,8 @@ mod tests {
 	async fn incompatible_successor_is_refused() {
 		for replacement in [
 			track::Info::default().with_timescale(crate::Timescale::MICRO),
-			track::Info::default().with_priority(7),
-			track::Info::default().with_max_age(Duration::from_secs(7)),
+			track::Info::timed().with_priority(7),
+			track::Info::timed().with_max_age(Duration::from_secs(7)),
 		] {
 			let (mut rig, incumbent, source) = ResumeRig::new(&[10]).await;
 			let standby_server = rig.standby(&[10, 20]);
@@ -8831,7 +9318,7 @@ mod tests {
 			let pending = consumer.request_broadcast("room/alice", None);
 			let request = queued(&incumbent).await;
 			let source = broadcast::Info::new().produce();
-			let track = source.create_track("video", None).unwrap();
+			let track = source.create_track("video", crate::track::Info::timed()).unwrap();
 			let mut group = track.append_group().unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
 			group.finish().unwrap();
@@ -8859,7 +9346,7 @@ mod tests {
 				None => {
 					let request = queued(&echo).await;
 					let replacement = broadcast::Info::new().produce();
-					let track = replacement.create_track("video", None).unwrap();
+					let track = replacement.create_track("video", crate::track::Info::timed()).unwrap();
 					let mut group = track.append_group().unwrap();
 					group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
 					group.finish().unwrap();
@@ -8896,7 +9383,7 @@ mod tests {
 		let pending = consumer.request_broadcast("room/alice", None);
 		let request = queued(&server_a).await;
 		let source_a = broadcast::Info::new().produce();
-		let track_a = source_a.create_track("video", None).unwrap();
+		let track_a = source_a.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = track_a.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"from-a".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -8948,7 +9435,7 @@ mod tests {
 		let pending = consumer.request_broadcast("room/alice", None);
 		let request = queued(&server_b).await;
 		let source_b = broadcast::Info::new().produce();
-		let track_b = source_b.create_track("video", None).unwrap();
+		let track_b = source_b.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = track_b.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"from-b".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -8987,7 +9474,7 @@ mod tests {
 			.update(Route::default().with_hops(hops(&[10])).with_cost(9))
 			.unwrap();
 
-		let track = source.create_track("audio", None).unwrap();
+		let track = source.create_track("audio", crate::track::Info::timed()).unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"steady".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -9070,7 +9557,7 @@ mod tests {
 		let consumer = producer.consume();
 
 		let broadcast = producer.publish("room/alice", Route::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let mut subscription = resolved
@@ -9117,7 +9604,7 @@ mod tests {
 		let pending = consumer.request_broadcast("room/alice", None);
 		let request = queued(&server).await;
 		let source = broadcast::Info::new().produce();
-		let track = source.create_track("video", None).unwrap();
+		let track = source.create_track("video", crate::track::Info::timed()).unwrap();
 		request.accept(&source);
 
 		let resolved = pending.await.expect("resolves");
@@ -9183,7 +9670,7 @@ mod tests {
 		let consumer = producer.consume();
 
 		let broadcast = producer.publish("room/alice", Route::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"cached".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -9247,7 +9734,7 @@ mod tests {
 			.unwrap();
 		let pending = producer.consume().request_broadcast("live", None);
 		let source = broadcast::Info::new().produce();
-		let track = source.create_track("video", None).unwrap();
+		let track = source.create_track("video", crate::track::Info::timed()).unwrap();
 		queued(&server).await.accept(&source);
 		let resolved = pending.await.unwrap();
 
@@ -9283,7 +9770,7 @@ mod tests {
 	async fn a_group_the_source_aborts_ends_while_the_track_lives() {
 		let producer = origin(1).produce();
 		let broadcast = producer.publish("live", Route::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = producer.consume().request_broadcast("live", None).await.unwrap();
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 
@@ -9317,7 +9804,7 @@ mod tests {
 		let leaf_consumer = leaf.consume();
 
 		let broadcast = leaf.publish("room/alice", Route::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"cached".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -9413,7 +9900,7 @@ mod tests {
 		let first = producer
 			.publish("room/alice", Route::default().with_epoch(epoch()))
 			.unwrap();
-		let track = first.create_track("video", None).unwrap();
+		let track = first.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let mut subscription = resolved
 			.track("video")
@@ -9466,7 +9953,7 @@ mod tests {
 			.unwrap();
 		let pending = producer.consume().request_broadcast("room/alice", None);
 		let upstream = broadcast::Info::new().produce();
-		let old = upstream.create_track("video", None).unwrap();
+		let old = upstream.create_track("video", crate::track::Info::timed()).unwrap();
 		queued(&server).await.accept(&upstream);
 		let resolved = pending.await.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
@@ -9567,7 +10054,7 @@ mod tests {
 		let first = producer
 			.publish("room/alice", Route::default().with_epoch(epoch()))
 			.unwrap();
-		let track = first.create_track("video", None).unwrap();
+		let track = first.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.append_group().unwrap();
@@ -9603,7 +10090,7 @@ mod tests {
 		let first = producer
 			.publish("room/alice", Route::default().with_epoch(epoch()))
 			.unwrap();
-		let track = first.create_track("video", None).unwrap();
+		let track = first.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.append_group().unwrap();
@@ -9658,7 +10145,7 @@ mod tests {
 		let first = producer
 			.publish("room/alice", Route::default().with_epoch(epoch()))
 			.unwrap();
-		let track = first.create_track("video", None).unwrap();
+		let track = first.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.append_group().unwrap();
@@ -9816,7 +10303,7 @@ mod tests {
 		let run = moq_net_sim::spawn(crate::time::run_sim(driver));
 		let consumer = producer.consume();
 		let broadcast = producer.publish("room/alice", Route::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let sub = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 
@@ -9840,7 +10327,7 @@ mod tests {
 		let run = moq_net_sim::spawn(crate::time::run_sim(driver));
 		let consumer = producer.consume();
 		let broadcast = producer.publish("room/alice", Route::default()).unwrap();
-		let mut track = broadcast.create_track("video", None).unwrap();
+		let mut track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let sub = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let pending = resolved.track("video").unwrap().subscribe(None);
@@ -9867,7 +10354,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let broadcast = producer.publish("room/alice", Route::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let sub = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		moq_net_sim::timeout(Duration::from_secs(1), track.demand().used())
@@ -9885,6 +10372,49 @@ mod tests {
 			.await
 			.expect("the ended copy must not keep the source subscribed")
 			.unwrap();
+	}
+
+	#[test]
+	fn source_selection_leases_survive_reprices_but_never_revive_pending_work() {
+		let producer = origin(1).produce();
+		let broad = producer.dynamic("room", Route::default().with_via(origin(2))).unwrap();
+		let selected = broad.request_validity(&Path::new("room/a")).unwrap();
+		let pending = selected.current();
+		assert!(!pending.is_closed());
+		broad.update(broad.route().with_cost(Cost::from(7))).unwrap();
+		assert!(!pending.is_closed());
+		// Another peer's winning route cannot change what a request on peer 2 names.
+		let other = producer
+			.dynamic("room/a", Route::default().with_via(origin(3)))
+			.unwrap();
+		assert!(!pending.is_closed());
+		let replacement = producer
+			.dynamic("room/a", Route::default().with_via(origin(2)))
+			.unwrap();
+		assert!(pending.is_closed());
+		assert!(selected.current().is_closed());
+		// No waiter has polled between these changes: the old lease must still be dead.
+		drop(replacement);
+		let fresh = selected.current();
+		assert!(!fresh.is_closed());
+		assert!(pending.is_closed());
+		drop(other);
+		assert!(!fresh.is_closed());
+		drop(broad);
+		assert!(fresh.is_closed());
+	}
+
+	#[test]
+	fn source_selection_unregisters_without_retaining_the_source() {
+		let producer = origin(1).produce();
+		let route = producer.dynamic("room", Route::default().with_via(origin(2))).unwrap();
+		let path = Path::new("room/a");
+		let selected = route.request_validity(&path).unwrap();
+		let lease = selected.current();
+		drop(selected);
+		assert!(lease.is_closed());
+		let table = producer.shared.lock();
+		assert_eq!(table.routes.root.watches_below, 0);
 	}
 
 	#[test]
@@ -10107,7 +10637,7 @@ mod tests {
 		let expiry = Duration::from_secs(1);
 		let origin = expiring_origin(expiry);
 		let broadcast = origin.create_broadcast("test").unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 
 		let mut stalled = track.append_group().unwrap();
 		stalled.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
@@ -10139,7 +10669,7 @@ mod tests {
 		}
 		.produce();
 		let broadcast = origin.create_broadcast("test").unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 
 		let mut stalled = track.append_group().unwrap();
 		stalled.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();

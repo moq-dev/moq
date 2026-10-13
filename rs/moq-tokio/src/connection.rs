@@ -1,5 +1,8 @@
 //! The reconnect loop around a session, and the [`Monitor`] that observes it.
 
+pub mod auth;
+pub use auth::Auth;
+
 use std::task::{Poll, ready};
 use std::time::Duration;
 
@@ -26,61 +29,33 @@ const CONNECT_ATTEMPT: Duration = Duration::from_secs(5);
 /// wait. Only an attempt with a later candidate to fall back on is worth
 /// bounding: cutting the last one short just turns a slow connect into a failed
 /// one, on every reconnect cycle.
+///
+/// The same goes for the retry window from [`Backoff::timeout`]: it decides
+/// whether a new walk starts, not how long one may take, so a walk under way
+/// tries every candidate and a handshake slower than the window still gets
+/// [`crate::connect::Config::timeout`](crate::connect::Config::timeout).
 fn attempt_timeout(index: usize, total: usize) -> Option<Duration> {
 	(index + 1 < total).then_some(CONNECT_ATTEMPT)
 }
 
-/// The retry window as a deadline for the address walk, or `None` to leave each
-/// attempt to the client's own connect timeout.
+/// Whether a failed candidate is the peer's answer for every candidate, ending the walk.
 ///
-/// Only when reconnecting. `Backoff::timeout` is how long to keep *retrying*, so
-/// applying it to a one-shot dial would cut short the single attempt there will
-/// ever be: a handshake slower than the retry window but well inside
-/// [`crate::connect::Config::timeout`](crate::connect::Config::timeout) would fail for a
-/// reason that does not apply. That deadline is the one governing a one-shot
-/// dial, and it already does.
-fn retry_budget(reconnect: bool, retry_start: tokio::time::Instant, timeout: Duration) -> Option<tokio::time::Instant> {
-	(reconnect && !timeout.is_zero()).then(|| retry_start + timeout)
-}
-
-/// When the attempt at candidate `index` of `total` must be given up, or `None`
-/// to let it run.
-///
-/// Two bounds, whichever comes first. [`attempt_timeout`] keeps one slow
-/// candidate from eating the others' turn, and `budget` is the retry window from
-/// [`Backoff::timeout`], which the walk has to respect too: bounding only the
-/// non-final attempts left the last one to run to the client's connect timeout,
-/// so a handful of black-holed addresses could blow through a give-up budget
-/// several times over before reporting anything.
-fn attempt_deadline(
-	index: usize,
-	total: usize,
-	now: tokio::time::Instant,
-	budget: Option<tokio::time::Instant>,
-) -> Option<tokio::time::Instant> {
-	// An equal share of what's left, not all of it. Handing each candidate the
-	// whole remaining window lets the first couple spend it between them and
-	// strand a reachable address further down the list, which is the opposite of
-	// what walking the list is for. Recomputed per attempt, so one that fails fast
-	// leaves more for the rest.
-	let share = budget.map(|budget| {
-		let remaining = total - index;
-		now + budget.saturating_duration_since(now) / remaining as u32
-	});
-	let bound = attempt_timeout(index, total).map(|limit| now + limit);
-
-	match (bound, share) {
-		(Some(bound), Some(share)) => Some(bound.min(share)),
-		(Some(only), None) | (None, Some(only)) => Some(only),
-		(None, None) => None,
-	}
+/// An auth rejection arrives as [`Error::Connect`] with its status already consumed, so it
+/// is checked alongside the statuses that do not invite another attempt.
+fn settles_walk(err: &Error) -> bool {
+	err.is_auth()
+		|| err
+			.status()
+			.is_some_and(|status| !crate::error::status_retryable(status))
 }
 
 /// Exponential backoff configuration for reconnection attempts.
 ///
 /// The delays carry jitter, so a fleet
 /// knocked offline together does not reconnect in lockstep. The timeout bounds every failure;
-/// only a settled response from the server short-circuits it.
+/// a settled rejection or invalid local configuration stops retrying. A GOAWAY naming no new URI
+/// is no failure: a restarting peer sends one to each session until it goes, and each of those
+/// serves, so it restarts the timeout instead.
 #[derive(Clone, Debug, usage::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
@@ -134,19 +109,32 @@ pub struct Backoff {
 
 	/// Maximum time to spend retrying before giving up. Defaults to 10s.
 	///
+	/// No new walk of the peer's addresses starts once it has passed, but one under way finishes:
+	/// each candidate but the last gets up to 5s, and the last runs to
+	/// [`crate::connect::Config::timeout`](crate::connect::Config::timeout), so a handshake
+	/// slower than this still lands. Giving up can therefore take up to one whole walk longer.
+	///
 	/// Resets after a stable connection (one that outlives the initial backoff), so a flapping
-	/// session that reconnects then immediately drops still counts toward the timeout. Set to 0 for
-	/// unlimited retries.
+	/// session that reconnects then immediately drops still counts toward the timeout. Set to
+	/// `Some(Duration::ZERO)` for unlimited retries. `None` takes the default. When this config was
+	/// parsed from the command line, a `--backoff-timeout` given there wins over this field.
+	///
+	/// An `Option` because zero is a real setting: a command-line parse leaves this field at its
+	/// type's default, and only `None` tells "unset" apart from "retry forever".
 	#[usage(skip)]
-	#[serde(with = "crate::cli::duration::serde_duration")]
-	pub timeout: Duration,
+	#[serde(
+		default,
+		with = "crate::cli::duration::serde_duration::option",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub timeout: Option<Duration>,
 
+	// No parser default: the parser stores one as if it were given, and it would then beat a
+	// window set in code. The default lives in [`Backoff::window`] instead.
 	#[usage(
 		name = "backoff-timeout",
 		long,
 		env = "MOQ_BACKOFF_TIMEOUT",
-		default_value_t = CliDuration::fallback(DEFAULT_TIMEOUT),
-		default = "10s",
 		setting = "connect.backoff.timeout"
 	)]
 	#[serde(default, rename = "__cli_timeout", skip_serializing_if = "Option::is_none")]
@@ -161,9 +149,20 @@ impl Default for Backoff {
 			multiplier: DEFAULT_MULTIPLIER,
 			max: DEFAULT_MAX,
 			max_arg: None,
-			timeout: DEFAULT_TIMEOUT,
+			timeout: Some(DEFAULT_TIMEOUT),
 			timeout_arg: None,
 		}
+	}
+}
+
+impl Backoff {
+	/// The retry window in effect, where zero means unlimited: the flag, then the typed field, then
+	/// the default.
+	fn window(&self) -> Duration {
+		self.timeout_arg
+			.map(Into::into)
+			.or(self.timeout)
+			.unwrap_or(DEFAULT_TIMEOUT)
 	}
 }
 
@@ -391,6 +390,7 @@ const MIN_BACKOFF: Duration = Duration::from_millis(50);
 /// grows it, and `max` caps it, so a zero anywhere collapses the whole schedule.
 /// Resolving them once, here, keeps that from having to be re-argued at each of
 /// the three places the loop reaches for them.
+#[derive(Clone, Copy)]
 struct Pacing {
 	/// The first delay, and the bar a session must clear to count as healthy. At
 	/// zero every session looks healthy, which resets the give-up window forever.
@@ -453,8 +453,8 @@ struct State {
 	status: Option<Status>,
 	/// How many sessions have been live on this handle, counting the current one.
 	/// Advanced by `Shared::connected` with the same write that publishes `status`,
-	/// so a reader can't see `Connected` without its epoch.
-	epoch: u64,
+	/// so a reader can't see `Connected` without its count.
+	connects: u64,
 	/// Cumulative connects and disconnects, bumped by the reconnect loop itself so a session that
 	/// connects and drops before a consumer polls still counts.
 	presence: moq_net::stats::Presence,
@@ -507,7 +507,7 @@ impl Shared {
 				state.presence.sessions_ended += 1;
 			}
 			state.status = Some(Status::Connected);
-			state.epoch += 1;
+			state.connects += 1;
 			state.presence.sessions_started += 1;
 			state.version = Some(session.version());
 			state.transport = Some(transport);
@@ -533,7 +533,12 @@ impl Shared {
 	/// The session in [`State`] keeps serving while its replacement comes up, so
 	/// only the status moves.
 	fn migrating(&self) {
-		self.status(Status::Migrating);
+		// A closed fallback stays disconnected while its pending dial finishes.
+		if let Ok(mut state) = self.state.write()
+			&& state.status != Some(Status::Disconnected)
+		{
+			state.status = Some(Status::Migrating);
+		}
 	}
 
 	/// The replacement did not come up after all: the session in [`State`] was
@@ -550,7 +555,7 @@ impl Shared {
 
 	/// Nothing is live. Clears the session so a handle can't be handed a closed one,
 	/// and drops the estimates that belonged to it.
-	fn disconnected(&self) {
+	fn clear_session(&self) {
 		if let Ok(mut state) = self.state.write() {
 			// Count one close per live session; a second call without an
 			// intervening connect (e.g. Drop after the loop already reported
@@ -562,10 +567,15 @@ impl Shared {
 			state.version = None;
 			state.transport = None;
 			state.session = None;
-			state.upgrade = None;
 		}
 		let _ = self.send_bw.set(None);
 		let _ = self.recv_bw.set(None);
+	}
+
+	/// No live session or pending upgrade remains.
+	fn disconnected(&self) {
+		self.clear_session();
+		self.upgrading(None);
 	}
 
 	/// Record the error the loop gave up with, for [`Connection::closed`].
@@ -664,7 +674,7 @@ pub struct Snapshot {
 /// and [`recv_bandwidth`](Self::recv_bandwidth) track the live session and reset while disconnected.
 /// The extra toggle a plain session doesn't have is the connection lifecycle: [`established`](Self::established)
 /// waits for the first session, [`connected`](Self::connected) reads the current state synchronously,
-/// [`epoch`](Self::epoch) counts the sessions so far, and [`status`](Self::status) waits for the
+/// [`connects`](Self::connects) counts the sessions so far, and [`status`](Self::status) waits for the
 /// next change. [`closed`](Self::closed) waits for the loop to stop. Clones share the loop; it
 /// stops when the last clone drops (or on an explicit [`abort`](Self::abort)).
 #[derive(Clone)]
@@ -672,6 +682,8 @@ pub struct Snapshot {
 pub struct Connection {
 	task: std::sync::Arc<Task>,
 	state: kio::Consumer<State>,
+	/// The reconnect pacing, which retained tokens reuse to retry a transient refusal.
+	pacing: Pacing,
 	/// Persistent send-bitrate estimate, fed by the loop from each live session.
 	send_bandwidth: BandwidthConsumer,
 	/// Persistent recv-bitrate estimate, fed by the loop from each live session.
@@ -702,6 +714,7 @@ impl Connection {
 	pub(crate) fn new(client: Client, addrs: Addrs) -> Self {
 		let producer = kio::Producer::<State>::default();
 		let state = producer.consume();
+		let pacing = Pacing::new(&client.backoff);
 
 		// The loop feeds these across every reconnect, so a consumer's handle survives session churn
 		// (unlike a session's own bandwidth consumer, which dies with the session).
@@ -738,6 +751,7 @@ impl Connection {
 				closed,
 			}),
 			state,
+			pacing,
 			send_bandwidth,
 			recv_bandwidth,
 			last_reported: None,
@@ -826,7 +840,7 @@ impl Connection {
 		let backoff = client.backoff.clone();
 		let goaway = client.goaway.resolve();
 		let pacing = Pacing::new(&backoff);
-		let timeout = CliDuration::resolve(backoff.timeout_arg, backoff.timeout);
+		let timeout = backoff.window();
 		let initial = pacing.initial;
 		let mut retry = Retry::new(initial);
 		// Sticky across migrations: a redirect is an assignment, not a detour, so a
@@ -841,9 +855,7 @@ impl Connection {
 				return Err(timeout_error(timeout, retry.last_error.as_ref()));
 			}
 
-			let budget = retry_budget(client.reconnect, retry.start, timeout);
-
-			match Self::dial_any(shared, &client, &addrs, &mut draining, budget).await {
+			match Self::dial_any(shared, &client, &addrs, &mut draining).await {
 				Ok((addr, dialed)) => {
 					let url = addr.url().clone();
 					tracing::info!(peer = %Endpoint(&url), transport = %dialed.transport, "connected");
@@ -856,15 +868,25 @@ impl Connection {
 					// persistent producers meanwhile so consumers track the live stats across the
 					// connection, and draining any predecessor left over from a migration. A QUIC
 					// dial that lands after WebSocket won takes over here without a redial.
-					let ended = loop {
-						match run_session(shared, &session, &mut draining, &mut upgrade).await {
-							Next::Ended(ended) => break ended,
+					let (ended, tenure) = loop {
+						let next = run_session(shared, &session, &mut draining, &mut upgrade).await;
+						let tenure = connected.elapsed();
+						let transport = match next {
+							// A short-lived fallback has not won the race against the QUIC
+							// attempt we already started. Its existing connect deadline bounds
+							// this wait, including in one-shot mode.
+							#[cfg(all(feature = "websocket", feature = "noq"))]
+							Next::Ended(Ended::Closed(closed)) if tenure < initial && upgrade.is_some() => {
+								match finish_upgrade(shared, &mut upgrade, &mut draining, closed).await {
+									Ok((next, transport)) => {
+										session = next;
+										transport
+									}
+									Err(err) => break (Ended::Closed(Err(err)), tenure),
+								}
+							}
+							Next::Ended(ended) => break (ended, tenure),
 							Next::Upgraded(next, transport) => {
-								tracing::info!(peer = %Endpoint(&url), %transport, "upgraded from WebSocket");
-								// UDP gets through after all, so the next dial gives QUIC its head start.
-								#[cfg(feature = "websocket")]
-								crate::websocket::forget(&url);
-
 								// The same handover as a peer's GOAWAY, initiated by us: the new session
 								// is live, and the old one serves until its routes splice over at a group
 								// boundary or the cap closes it.
@@ -880,20 +902,25 @@ impl Connection {
 									old.retire();
 								}
 								draining = Some(Draining::new(old, goaway.handover, &shared.state));
-								// Score the WebSocket tenure like any session's, so a QUIC session that
-								// drops right away retries in a fresh window, not one that opened
-								// before WebSocket served.
-								retry.settle(connected, initial);
-								connected = tokio::time::Instant::now();
+								transport
 							}
-						}
+						};
+						tracing::info!(peer = %Endpoint(&url), %transport, "upgraded from WebSocket");
+						// UDP gets through after all, so the next dial gives QUIC its head start.
+						#[cfg(feature = "websocket")]
+						crate::websocket::forget(&url);
+						// Score the WebSocket tenure like any session's, so a QUIC session that
+						// drops right away retries in a fresh window, not one that opened
+						// before WebSocket served.
+						retry.settle(tenure, initial);
+						connected = tokio::time::Instant::now();
 					};
 					// Any upgrade still coming up is dropped with the session it was replacing.
 					shared.upgrading(None);
 
 					// A session that stayed up past the initial backoff is healthy; one that
 					// ended sooner counts as a failed attempt however it ended.
-					let healthy = retry.settle(connected, initial);
+					let healthy = retry.settle(tenure, initial);
 
 					// The connected target owns the policy, including in one-shot mode. A
 					// refused redirect is terminal: the peer is leaving and named somewhere we
@@ -954,19 +981,33 @@ impl Connection {
 							continue;
 						}
 
-						// Redirected almost immediately. Still follow it, but score it as a
-						// failed attempt so two peers bouncing us between them escalate
-						// through backoff and eventually give up. The old session serves
-						// across the sleep, so the redirect loop costs time, not data.
-						retry.last_error = Some(Error::Reconnect("peer redirected immediately".to_string()));
-						let Some(wait) = retry_wait(retry.delay, retry.start, timeout) else {
+						// Drained almost immediately. The backoff still escalates, so the redials
+						// cannot hammer the peer, and the old session serves across the sleep.
+						//
+						// An empty URI is "reconnect to me": the peer is restarting and drains
+						// each new session until it goes, which is no failure, since every one
+						// serves. A named URI is a redirect, scored as a failed attempt so two
+						// peers bouncing us between them eventually give up.
+						let restarting = msg.uri().is_empty();
+						if !restarting {
+							retry.last_error = Some(Error::Reconnect("peer redirected immediately".to_string()));
+						}
+						// A restart's pacing is not capped by the window: a delay longer than the
+						// window would otherwise spend it all and end the loop without a redial.
+						let window = if restarting { Duration::ZERO } else { timeout };
+						let Some(wait) = retry_wait(retry.delay, retry.start, window) else {
 							return Err(timeout_error(timeout, retry.last_error.as_ref()));
 						};
-						tracing::warn!(peer = %Endpoint(&url), ?wait, "peer redirected immediately; retrying after backoff");
+						tracing::warn!(peer = %Endpoint(&url), ?wait, "peer drained the session immediately; retrying after backoff");
 						// Keep the handover bounded across the sleep: nothing else polls the
 						// predecessor while the loop is between connections.
 						sleep_draining(wait, &mut draining, shared).await;
 						retry.delay = pacing.next(retry.delay);
+						if restarting {
+							// After the sleep, so the window counts only the time after the
+							// peer stops answering.
+							retry.start = tokio::time::Instant::now();
+						}
 						continue;
 					}
 
@@ -977,7 +1018,7 @@ impl Connection {
 					// specified, so this is the peer telling us these credentials will
 					// never work, not a code we guessed at.
 					if let Ended::Closed(Err(err)) = &ended {
-						let err = Error::from(err.clone());
+						let err = err.clone();
 						if err.is_auth() {
 							return Err(err);
 						}
@@ -988,7 +1029,7 @@ impl Connection {
 					// A GOAWAY already returned above.
 					if !client.reconnect {
 						return match ended {
-							Ended::Closed(res) => res.map_err(Error::from),
+							Ended::Closed(res) => res,
 							Ended::Goaway(_) => unreachable!("handled before the migration branch"),
 						};
 					}
@@ -1004,7 +1045,7 @@ impl Connection {
 						// escalate instead of spinning the CPU. This is what bounds a redirect
 						// loop between two peers.
 						let err = match ended {
-							Ended::Closed(Err(err)) => Some(Error::from(err)),
+							Ended::Closed(Err(err)) => Some(err),
 							Ended::Closed(Ok(())) => None,
 							// Handled above: a GOAWAY never reaches here.
 							Ended::Goaway(_) => None,
@@ -1026,12 +1067,7 @@ impl Connection {
 					}
 				}
 				Err(err) => {
-					if err.is_auth()
-						|| err
-							.status()
-							.is_some_and(|status| !crate::error::status_retryable(status))
-						|| !client.reconnect
-					{
+					if err.is_terminal() || !client.reconnect {
 						return Err(err);
 					}
 					retry.last_error = Some(err);
@@ -1070,19 +1106,13 @@ impl Connection {
 		client: &Client,
 		addrs: &Addrs,
 		draining: &mut Option<Draining>,
-		budget: Option<tokio::time::Instant>,
 	) -> crate::Result<(crate::connect::Addr, crate::client::Dialed)> {
 		let candidates = addrs.as_slice();
 		let mut last = None;
+		let mut transient = None;
 
 		for (index, addr) in candidates.iter().enumerate() {
 			let url = addr.url();
-			// The retry window can run out mid-walk. Stop rather than starting an
-			// attempt with no time to finish; the caller reports the budget error.
-			if budget.is_some_and(|budget| tokio::time::Instant::now() >= budget) {
-				break;
-			}
-
 			tracing::info!(peer = %Endpoint(url), "connecting");
 
 			let mut dial = std::pin::pin!(client.dial(addr.clone()));
@@ -1093,10 +1123,9 @@ impl Connection {
 				waiter.poll_future(dial.as_mut())
 			});
 
-			let deadline = attempt_deadline(index, candidates.len(), tokio::time::Instant::now(), budget);
-			let dialed = match deadline {
+			let dialed = match attempt_timeout(index, candidates.len()) {
 				None => dialed.await,
-				Some(deadline) => match tokio::time::timeout_at(deadline, dialed).await {
+				Some(limit) => match tokio::time::timeout(limit, dialed).await {
 					Ok(dialed) => dialed,
 					Err(_) => Err(Error::Reconnect(format!("timed out connecting to {}", Endpoint(url)))),
 				},
@@ -1109,23 +1138,19 @@ impl Connection {
 				// on would offer the same rejected credentials at the peer's other
 				// addresses, and worse, a later transport failure would overwrite the
 				// real reason and leave the outer loop retrying until its budget ran out.
-				Err(err)
-					if err
-						.status()
-						.is_some_and(|status| !crate::error::status_retryable(status)) =>
-				{
-					return Err(err);
-				}
+				Err(err) if settles_walk(&err) => return Err(err),
 				Err(err) => {
 					tracing::debug!(peer = %Endpoint(url), %err, "address unreachable");
+					if !err.is_terminal() {
+						transient = Some(err.clone());
+					}
 					last = Some(err);
 				}
 			}
 		}
 
-		// `Addrs` is never empty, so the only way to get here without a failure is
-		// the budget running out before the first attempt started.
-		Err(last.unwrap_or_else(|| Error::Reconnect("retry window elapsed before dialing".to_string())))
+		// One unusable candidate must not turn another candidate's transient failure terminal.
+		Err(transient.or(last).expect("Addrs is never empty"))
 	}
 
 	/// Poll until a session is established (the first connect, or the current one).
@@ -1202,8 +1227,8 @@ impl Connection {
 	/// Advanced in the same write that publishes [`Status::Connected`], so reading
 	/// after a `Connected` status never returns a stale count. Zero only if no
 	/// session has connected yet, which [`established`](Self::established) rules out.
-	pub fn epoch(&self) -> u64 {
-		self.state.read().epoch
+	pub fn connects(&self) -> u64 {
+		self.state.read().connects
 	}
 
 	/// The negotiated MoQ version of the live session, or `None` while disconnected.
@@ -1271,6 +1296,14 @@ impl Connection {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
+	/// Present tokens that survive session replacement and observe the live grant union.
+	pub fn auth(&self) -> Auth {
+		Auth {
+			connection: self.state.clone(),
+			pacing: self.pacing,
+		}
+	}
+
 	/// Observe the connection's statistics and presence across reconnects.
 	///
 	/// The handle keeps working across reconnects without keeping the connection loop alive.
@@ -1301,10 +1334,10 @@ impl Retry {
 		}
 	}
 
-	/// Score a session live since `connected`: one that outlived `initial` was healthy,
-	/// so the window starts over. Returns whether it was healthy.
-	fn settle(&mut self, connected: tokio::time::Instant, initial: Duration) -> bool {
-		let healthy = connected.elapsed() >= initial;
+	/// Score captured live time, excluding any wait after the session closed.
+	/// A tenure past `initial` is healthy and starts a fresh retry window.
+	fn settle(&mut self, tenure: Duration, initial: Duration) -> bool {
+		let healthy = tenure >= initial;
 		if healthy {
 			*self = Self::new(initial);
 		}
@@ -1342,7 +1375,7 @@ enum Next {
 /// Why a session stopped being the live one.
 enum Ended {
 	/// The transport closed.
-	Closed(Result<(), moq_net::Error>),
+	Closed(crate::Result<()>),
 	/// The peer sent a GOAWAY; the session is still up and serving.
 	Goaway(moq_net::goaway::Goaway),
 }
@@ -1457,7 +1490,7 @@ async fn sleep_draining(delay: Duration, draining: &mut Option<Draining>, shared
 /// `upgrade` is a QUIC dial still in flight after the WebSocket fallback won. It reports
 /// [`Status::Migrating`] once the QUIC transport is up and returns [`Next::Upgraded`] once
 /// the peer's SETUP arrives. A failure leaves this session serving. It is dropped with
-/// the session otherwise: the redial races QUIC again.
+/// a healthy session otherwise; an early close still finishes the pending dial.
 async fn run_session(
 	shared: &Shared,
 	session: &moq_net::Session,
@@ -1491,12 +1524,49 @@ async fn run_session(
 		}
 
 		if let Poll::Ready(err) = waiter.poll_future(closed.as_mut()) {
-			return Poll::Ready(Next::Ended(Ended::Closed(Err(err))));
+			return Poll::Ready(Next::Ended(Ended::Closed(Err(err.into()))));
 		}
 
-		poll_upgrade(shared, upgrade, waiter).map(|(session, transport)| Next::Upgraded(session, transport))
+		match poll_upgrade(shared, upgrade, waiter) {
+			Poll::Ready(Ok((session, transport))) => Poll::Ready(Next::Upgraded(session, transport)),
+			Poll::Ready(Err(err)) => {
+				tracing::debug!(%err, "QUIC upgrade failed; staying on WebSocket");
+				shared.stayed();
+				Poll::Pending
+			}
+			Poll::Pending => Poll::Pending,
+		}
 	})
 	.await
+}
+
+/// Finish a closed fallback's pending dial, still enforcing the predecessor's handover
+/// cap, and install it as the live session. Nothing serves in between, so unlike an
+/// upgrade there is no fallback to send GOAWAY or drain. A failed dial folds both
+/// arms' errors as the original race does.
+#[cfg(all(feature = "websocket", feature = "noq"))]
+async fn finish_upgrade(
+	shared: &Shared,
+	upgrade: &mut Option<crate::client::Upgrade>,
+	draining: &mut Option<Draining>,
+	closed: crate::Result<()>,
+) -> crate::Result<(moq_net::Session, crate::Transport)> {
+	shared.clear_session();
+	let finished = kio::wait(|waiter| {
+		poll_draining(draining, waiter);
+		poll_upgrade(shared, upgrade, waiter)
+	})
+	.await;
+	match finished {
+		Ok((session, transport)) => {
+			shared.connected(&session, transport);
+			Ok((session, transport))
+		}
+		Err(quic) => Err(crate::client::race_error(
+			quic,
+			closed.err().unwrap_or_else(|| moq_net::Error::Cancel.into()),
+		)),
+	}
 }
 
 /// Drive a pending upgrade, `Ready` with the QUIC session once the peer's SETUP arrives.
@@ -1504,22 +1574,19 @@ fn poll_upgrade(
 	shared: &Shared,
 	upgrade: &mut Option<crate::client::Upgrade>,
 	waiter: &kio::Waiter,
-) -> Poll<(moq_net::Session, crate::Transport)> {
+) -> Poll<crate::Result<(moq_net::Session, crate::Transport)>> {
 	while let Some(pending) = upgrade.as_mut() {
 		match ready!(pending.poll(waiter)) {
 			Ok(crate::client::Step::Handshaking) => shared.migrating(),
 			Ok(crate::client::Step::Session(session)) => shared.upgrading(Some(&session)),
 			Ok(crate::client::Step::Done(session, transport)) => {
 				*upgrade = None;
-				return Poll::Ready((session, transport));
+				return Poll::Ready(Ok((session, transport)));
 			}
 			Err(err) => {
-				// Only the Handshaking stage moved the status, but restoring it is harmless
-				// either way: this session was serving throughout.
-				tracing::debug!(%err, "QUIC upgrade failed; staying on WebSocket");
-				shared.stayed();
 				shared.upgrading(None);
 				*upgrade = None;
+				return Poll::Ready(Err(err));
 			}
 		}
 	}
@@ -1568,6 +1635,11 @@ fn terminal(state: &State) -> Error {
 mod tests {
 	use super::*;
 
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	/// Updating with an empty CLI preserves a standing TOML value over typed defaults.
 	#[test]
 	fn cli_does_not_clobber_toml_backoff() {
@@ -1584,13 +1656,13 @@ mod tests {
 		parsed.backoff.initial = Duration::from_secs(7);
 		parsed.backoff.multiplier = 5;
 		parsed.backoff.max = Duration::from_secs(11);
-		parsed.backoff.timeout = Duration::ZERO;
+		parsed.backoff.timeout = Some(Duration::ZERO);
 		parsed.update_from(&[]);
 
 		assert_eq!(parsed.backoff.initial, Duration::from_secs(7));
 		assert_eq!(parsed.backoff.multiplier, 5);
 		assert_eq!(parsed.backoff.max, Duration::from_secs(11));
-		assert_eq!(parsed.backoff.timeout, Duration::ZERO, "0 means retry forever");
+		assert_eq!(parsed.backoff.window(), Duration::ZERO, "0 means retry forever");
 
 		// With no flags, the parser defaults resolve to the typed defaults.
 		let parsed = Wrapper::parse_from(&[]).unwrap();
@@ -1598,15 +1670,53 @@ mod tests {
 		let pacing = Pacing::new(&parsed.backoff);
 		assert_eq!(pacing.initial, DEFAULT_INITIAL);
 		assert_eq!(pacing.max, DEFAULT_MAX);
-		assert_eq!(
-			CliDuration::resolve(parsed.backoff.timeout_arg, parsed.backoff.timeout),
-			DEFAULT_TIMEOUT
-		);
+		assert_eq!(parsed.backoff.window(), DEFAULT_TIMEOUT);
 
 		// And a flag still lands where the merge can see it.
 		let parsed =
 			Wrapper::parse_from(&[std::ffi::OsStr::new("--backoff-initial"), std::ffi::OsStr::new("3s")]).unwrap();
 		assert_eq!(Pacing::new(&parsed.backoff).initial, Duration::from_secs(3));
+	}
+
+	/// A window set in code wins on a config the command line built, including zero.
+	///
+	/// The parser stored its 10s default exactly as if `--backoff-timeout 10s` had been given, so
+	/// it beat the typed field, and a zero there was indistinguishable from the field left unset.
+	#[test]
+	fn a_timeout_set_in_code_beats_the_parser_default() {
+		#[derive(usage::Cli)]
+		#[usage(unknown_flags = "error", args_override_self = false)]
+		#[usage(settings)]
+		struct Wrapper {
+			#[usage(flatten)]
+			backoff: Backoff,
+		}
+
+		let mut parsed = Wrapper::parse_from(&[]).unwrap().backoff;
+		assert_eq!(parsed.window(), DEFAULT_TIMEOUT);
+		parsed.timeout = Some(Duration::ZERO);
+		assert_eq!(parsed.window(), Duration::ZERO, "a parsed config");
+
+		let merged = |backoff: &Backoff| -> Backoff { toml::Value::try_from(backoff).unwrap().try_into().unwrap() };
+		let mut config = merged(&Wrapper::parse_from(&[]).unwrap().backoff);
+		assert_eq!(config.window(), DEFAULT_TIMEOUT, "the default survives the round-trip");
+		config.timeout = Some(Duration::ZERO);
+		assert_eq!(config.window(), Duration::ZERO, "a merged config");
+		config.timeout = Some(Duration::from_secs(3));
+		assert_eq!(config.window(), Duration::from_secs(3), "a merged config, nonzero");
+
+		// An explicit flag still wins, through the round-trip too.
+		let flag = [std::ffi::OsStr::new("--backoff-timeout"), std::ffi::OsStr::new("0s")];
+		let mut config = merged(&Wrapper::parse_from(&flag).unwrap().backoff);
+		config.timeout = Some(Duration::from_secs(3));
+		assert_eq!(config.window(), Duration::ZERO, "the flag beats the field");
+
+		// A config built in code was never affected.
+		let config = Backoff {
+			timeout: Some(Duration::ZERO),
+			..Default::default()
+		};
+		assert_eq!(config.window(), Duration::ZERO);
 	}
 
 	/// GOAWAY typed defaults remain overrideable by a standing TOML layer.
@@ -1983,12 +2093,31 @@ mod tests {
 
 		let websocket = tokio::time::Instant::now();
 		tokio::time::advance(TIMEOUT * 2).await;
-		assert!(retry.settle(websocket, INITIAL));
+		assert!(retry.settle(websocket.elapsed(), INITIAL));
 
 		let quic = tokio::time::Instant::now();
 		tokio::time::advance(INITIAL / 2).await;
-		assert!(!retry.settle(quic, INITIAL));
+		assert!(!retry.settle(quic.elapsed(), INITIAL));
 		assert!(retry_wait(retry.delay, retry.start, TIMEOUT).is_some());
+	}
+
+	/// Waiting after a short-lived session closes must not turn it into a healthy tenure.
+	#[tokio::test(start_paused = true)]
+	async fn pending_dial_time_does_not_reset_the_retry_window() {
+		const INITIAL: Duration = Duration::from_secs(1);
+		const TIMEOUT: Duration = Duration::from_secs(10);
+		let mut retry = Retry::new(INITIAL);
+		let connected = tokio::time::Instant::now();
+		tokio::time::advance(INITIAL / 2).await;
+		let tenure = connected.elapsed();
+		assert!(tenure < INITIAL);
+		// The fallback is already closed while the original dial is still pending.
+		tokio::time::advance(TIMEOUT * 2).await;
+		assert!(
+			!retry.settle(tenure, INITIAL),
+			"pending dial time made a closed session healthy"
+		);
+		assert!(retry_wait(retry.delay, retry.start, TIMEOUT).is_none());
 	}
 
 	#[test]
@@ -1997,7 +2126,7 @@ mod tests {
 		assert_eq!(backoff.initial, Duration::from_secs(1));
 		assert_eq!(backoff.multiplier, 2);
 		assert_eq!(backoff.max, Duration::from_secs(5));
-		assert_eq!(backoff.timeout, Duration::from_secs(10));
+		assert_eq!(backoff.timeout, Some(Duration::from_secs(10)));
 	}
 
 	#[test]
@@ -2044,22 +2173,24 @@ mod tests {
 		value.parse().expect("valid url")
 	}
 
-	/// A loopback TCP port with nothing listening on it, which refuses instantly.
+	/// A loopback TCP port that hangs up on every connection, so dialing it fails fast.
 	///
-	/// A dead address that *refuses* rather than black-holes is what keeps these
+	/// A dead address that fails fast rather than black-holes is what keeps these
 	/// tests fast and deterministic: the walk itself is what's under test, and
 	/// bounding a black-holed attempt is covered by
 	/// [`only_a_candidate_with_a_fallback_is_bounded`] as a pure function.
 	///
-	/// The returned socket is bound but never listens, so the port refuses while
-	/// staying reserved: no other listener (or an ephemeral self-connect) can take
-	/// it mid-test. Hold it for as long as the URL is dialed.
+	/// It listens rather than leaving the port merely bound: only Linux refuses a
+	/// SYN to a socket that is bound but not listening, while macOS drops it and
+	/// each attempt waits out its timeout. Listening also keeps the port reserved,
+	/// so no other listener (or an ephemeral self-connect) can take it mid-test.
 	#[cfg(feature = "tcp")]
-	fn refused() -> (tokio::net::TcpSocket, Url) {
-		let socket = tokio::net::TcpSocket::new_v4().expect("tcp socket");
-		socket.bind("127.0.0.1:0".parse().unwrap()).expect("bind");
-		let addr = socket.local_addr().expect("local addr");
-		(socket, url(&format!("tcp://{addr}/")))
+	async fn dead() -> Url {
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+		let addr = listener.local_addr().expect("local addr");
+		// Dropping each stream unread hangs up before the qmux handshake completes.
+		tokio::spawn(async move { while listener.accept().await.is_ok() {} });
+		url(&format!("tcp://{addr}/"))
 	}
 
 	/// A bound stream listener and the URL that reaches it.
@@ -2106,15 +2237,15 @@ mod tests {
 		let (mut server, live) = live().await;
 		tokio::spawn(async move { while server.accept().await.is_some() {} });
 
-		let (_a, dead_a) = refused();
-		let (_b, dead_b) = refused();
+		let dead_a = dead().await;
+		let dead_b = dead().await;
 		let addrs = Addrs::collect([dead_a, dead_b, live.clone()]).expect("not empty");
 		let shared = shared();
 		let mut draining = None;
 
 		let (connected, _session) = tokio::time::timeout(
 			WALK_TIMEOUT,
-			Connection::dial_any(&shared, &client, &addrs, &mut draining, None),
+			Connection::dial_any(&shared, &client, &addrs, &mut draining),
 		)
 		.await
 		.expect("the walk must not hang")
@@ -2128,19 +2259,19 @@ mod tests {
 	async fn dial_any_reports_failure_when_nothing_answers() {
 		let client = client();
 
-		let (_a, dead_a) = refused();
-		let (_b, dead_b) = refused();
+		let dead_a = dead().await;
+		let dead_b = dead().await;
 		let addrs = Addrs::collect([dead_a, dead_b]).expect("not empty");
 		let shared = shared();
 		let mut draining = None;
 
 		let result = tokio::time::timeout(
 			WALK_TIMEOUT,
-			Connection::dial_any(&shared, &client, &addrs, &mut draining, None),
+			Connection::dial_any(&shared, &client, &addrs, &mut draining),
 		)
 		.await
 		.expect("the walk must not hang");
-		assert!(result.is_err(), "every address refused, so the walk must fail");
+		assert!(result.is_err(), "every address hung up, so the walk must fail");
 	}
 
 	/// Dialing must not write the LAN mesh's membership credential to the log.
@@ -2157,21 +2288,85 @@ mod tests {
 		const SECRET: &str = "b91d7fe20c4a";
 
 		let client = client();
-		let (_dead, mut target) = refused();
+		let mut target = dead().await;
 		target.set_path(&format!("/.cluster/{SECRET}"));
 
 		let addrs = Addrs::new(target);
 		let shared = shared();
 		let mut draining = None;
 		// `Session` isn't `Debug`, so unwrap the failure by hand.
-		let Err(err) = Connection::dial_any(&shared, &client, &addrs, &mut draining, None).await else {
-			panic!("a refused address must fail");
+		let Err(err) = Connection::dial_any(&shared, &client, &addrs, &mut draining).await else {
+			panic!("a dead address must fail");
 		};
 
 		// The log line did happen, so the assertion below isn't vacuously true.
 		assert!(logs_contain("connecting"), "the dial never logged at all");
 		assert!(!logs_contain(SECRET), "a log line leaked the credential");
 		assert!(!format!("{err}").contains(SECRET), "the error leaked it: {err}");
+	}
+
+	/// Invalid local configuration must end an unlimited reconnect loop without waiting.
+	#[cfg(all(feature = "noq", feature = "websocket"))]
+	#[tokio::test(start_paused = true)]
+	async fn an_unsupported_scheme_ends_unlimited_reconnects() {
+		let mut config = crate::connect::Config::default();
+		config.tls.insecure = Some(true);
+		config.backoff.timeout = Some(Duration::ZERO);
+		let client = config.init(Default::default()).expect("build client");
+		let started = tokio::time::Instant::now();
+		let connection = client.connect(url("moqz://localhost/"));
+		let err = tokio::time::timeout(Duration::from_secs(1), connection.closed())
+			.await
+			.expect("invalid scheme kept retrying")
+			.expect_err("invalid scheme connected");
+		assert!(err.is_terminal(), "{err}");
+		assert_eq!(started.elapsed(), Duration::ZERO);
+	}
+
+	/// A URL host that parses but can never be a TLS server name ends an unlimited reconnect loop.
+	#[cfg(all(feature = "noq", feature = "websocket"))]
+	#[tokio::test(start_paused = true)]
+	async fn an_invalid_tls_server_name_ends_unlimited_reconnects() {
+		let mut config = crate::connect::Config::default();
+		config.tls.insecure = Some(true);
+		config.backoff.timeout = Some(Duration::ZERO);
+		let client = config.init(Default::default()).expect("build client");
+		for target in [
+			"https://a!b:1/",
+			"wss://a!b:1/",
+			"moqt://a!b:1/",
+			#[cfg(feature = "tcp")]
+			"tls://a!b:1/",
+		] {
+			let connection = client.connect(url(target));
+			let err = tokio::time::timeout(Duration::from_secs(1), connection.closed())
+				.await
+				.unwrap_or_else(|_| panic!("{target} kept retrying"))
+				.expect_err("invalid server name connected");
+			assert!(err.is_terminal(), "{target}: {err}");
+		}
+	}
+
+	/// A refused socket still spends the retry budget rather than stopping on its first error.
+	#[cfg(feature = "tcp")]
+	#[tokio::test(start_paused = true)]
+	async fn a_refused_tcp_dial_keeps_retrying() {
+		// Refusal is what's under test, so this can't use [`dead`]. A port nothing is
+		// bound to refuses on every OS, unlike one that is bound but not listening.
+		let target = {
+			let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+			url(&format!("tcp://{}/", listener.local_addr().expect("local addr")))
+		};
+		let mut client = client();
+		client.backoff.initial = Duration::from_millis(50);
+		client.backoff.max = Duration::from_millis(50);
+		client.backoff.timeout = Some(Duration::from_millis(200));
+		let started = tokio::time::Instant::now();
+		let connection = client.connect(target);
+		let err = connection.closed().await.expect_err("refused socket connected");
+		assert!(matches!(err, Error::Reconnect(_)), "{err}");
+		assert!(err.to_string().contains("Connection refused"), "{err}");
+		assert!(started.elapsed() >= Duration::from_millis(200));
 	}
 
 	/// A settled answer from one candidate ends the walk instead of being buried.
@@ -2201,67 +2396,15 @@ mod tests {
 		}
 	}
 
-	/// The retry window bounds the walk only when there are retries.
-	///
-	/// It is a budget for *retrying*, so spending it on the single attempt a
-	/// one-shot dial gets would fail a handshake that is merely slower than the
-	/// retry window while well inside the connect timeout that actually governs it.
+	/// An auth rejection settles the walk like the status it came from, so a transient
+	/// failure from another candidate cannot replace it and keep an unlimited loop retrying.
 	#[test]
-	fn only_a_reconnecting_dial_spends_the_retry_window() {
-		let start = tokio::time::Instant::now();
-		let timeout = Duration::from_secs(10);
-
-		assert_eq!(retry_budget(true, start, timeout), Some(start + timeout));
-		assert_eq!(
-			retry_budget(false, start, timeout),
-			None,
-			"a one-shot dial is bounded by the connect timeout, not the retry window"
-		);
-		assert_eq!(
-			retry_budget(true, start, Duration::ZERO),
-			None,
-			"zero means retry forever, so nothing bounds the walk"
-		);
-	}
-
-	/// Whichever of the two bounds comes first wins, and the retry window applies
-	/// to every candidate including the last.
-	#[test]
-	fn the_retry_window_bounds_the_walk_too() {
-		let now = tokio::time::Instant::now();
-
-		// No budget: only the fixed per-candidate bound applies, and the last
-		// candidate runs free.
-		assert_eq!(attempt_deadline(0, 2, now, None), Some(now + CONNECT_ATTEMPT));
-		assert_eq!(attempt_deadline(1, 2, now, None), None);
-
-		// A tight budget is split, not spent by whoever asks first. Two seconds
-		// across two candidates is a second each, so the second one still gets a
-		// turn; handing the first the whole window would strand it.
-		let tight = now + Duration::from_secs(2);
-		assert_eq!(
-			attempt_deadline(0, 2, now, Some(tight)),
-			Some(now + Duration::from_secs(1))
-		);
-		// The last candidate gets what is actually left, which here is all of it
-		// because nothing has been spent yet in this synthetic call.
-		assert_eq!(attempt_deadline(1, 2, now, Some(tight)), Some(tight));
-
-		// The share is what a black-holed pair used to exhaust: with the default
-		// 10s window and the 5s bound, two candidates ate it and a reachable third
-		// was never dialed. Now each gets a third.
-		let default_window = now + Duration::from_secs(10);
-		assert_eq!(
-			attempt_deadline(0, 3, now, Some(default_window)),
-			Some(now + Duration::from_secs(10) / 3),
-			"a reachable third candidate must still get a turn"
-		);
-
-		// A budget with room to spare leaves the per-candidate bound in charge, so
-		// one slow address still cannot eat the others' turn.
-		let loose = now + Duration::from_secs(60);
-		assert_eq!(attempt_deadline(0, 2, now, Some(loose)), Some(now + CONNECT_ATTEMPT));
-		assert_eq!(attempt_deadline(1, 2, now, Some(loose)), Some(loose));
+	fn an_auth_rejection_stops_the_walk() {
+		assert!(settles_walk(&Error::Connect(crate::ConnectError::Unauthorized)));
+		assert!(settles_walk(&Error::Connect(crate::ConnectError::Forbidden)));
+		assert!(!settles_walk(&Error::Io(std::sync::Arc::new(
+			std::io::ErrorKind::ConnectionRefused.into()
+		))));
 	}
 
 	/// Only an attempt with somewhere to fall back on gets the fixed bound.
@@ -2285,6 +2428,8 @@ mod tests {
 		accepted: tokio::sync::mpsc::UnboundedReceiver<(crate::Transport, moq_net::Session)>,
 		/// QUIC requests held unanswered in [`Quic::Refused`] mode.
 		held: tokio::sync::mpsc::UnboundedReceiver<crate::server::Request>,
+		/// Keep the fallback bound but unaccepted when the test requires QUIC to win.
+		_websocket: Option<crate::websocket::Listener>,
 	}
 
 	/// When a [`Fallback`] lets QUIC through.
@@ -2329,9 +2474,10 @@ mod tests {
 
 			// With no MoQ server behind it, the fallback's session gets as far as the MoQ
 			// handshake and no further.
-			let (websocket, failing) = match quic {
-				Quic::AfterWebSocketFails => (None, Some(websocket)),
-				_ => (Some(websocket), None),
+			let (websocket, failing, held_websocket) = match quic {
+				Quic::Open => (None, None, Some(websocket)),
+				Quic::AfterWebSocketFails => (None, Some(websocket), None),
+				_ => (Some(websocket), None, None),
 			};
 
 			let config = crate::server::Config {
@@ -2378,6 +2524,7 @@ mod tests {
 				forwarder,
 				accepted,
 				held,
+				_websocket: held_websocket,
 			}
 		}
 
@@ -2479,6 +2626,83 @@ mod tests {
 		group.sequence
 	}
 
+	/// A replacement's pending dial cannot extend an older session's handover cap.
+	#[cfg(all(feature = "tcp", feature = "websocket", feature = "noq"))]
+	#[tokio::test]
+	async fn closed_fallback_keeps_the_predecessor_deadline() {
+		let (mut server, url) = live().await;
+		let client = client();
+		let (connection, request) = tokio::join!(client.connect(url).established(), server.accept());
+		let connection = connection.unwrap();
+		let _peer = request.unwrap().ok().await.unwrap();
+		let session = connection.state.read().session.clone().unwrap();
+		// Real sockets establish the fixture; only the handover timer is under test.
+		tokio::time::pause();
+		let shared = shared();
+		let mut draining = Some(Draining::new(session, Duration::from_secs(1), &shared.state));
+		let mut upgrade = Some(crate::client::Upgrade::new(
+			Box::pin(std::future::pending()),
+			crate::Transport::WebTransport,
+		));
+		let deadline = draining.as_ref().unwrap().deadline.deadline();
+		let waiter = kio::Waiter::noop();
+		let mut finishing = std::pin::pin!(finish_upgrade(&shared, &mut upgrade, &mut draining, Ok(())));
+		assert!(waiter.poll_future(finishing.as_mut()).is_pending());
+		assert!(shared.state.consume().read().predecessor.is_some());
+		// Await the paused clock's timer driver, not only its clock adjustment.
+		tokio::time::sleep_until(deadline).await;
+		assert!(waiter.poll_future(finishing.as_mut()).is_pending());
+		assert!(
+			shared.state.consume().read().predecessor.is_none(),
+			"pending QUIC kept the predecessor past its cap"
+		);
+	}
+
+	/// A closed fallback's dial takes over with nothing to drain, so a close racing
+	/// the takeover cannot wait on the dead fallback and return its error.
+	#[cfg(all(feature = "tcp", feature = "websocket", feature = "noq"))]
+	#[tokio::test]
+	async fn closed_fallback_takes_over_without_a_predecessor() {
+		let (mut server, url) = live().await;
+		let client = client().with_reconnect(false);
+		let mut held = Vec::new();
+		let mut sessions = Vec::new();
+		for _ in 0..2 {
+			let (connection, request) = tokio::join!(client.connect(url.clone()).established(), server.accept());
+			let connection = connection.unwrap();
+			sessions.push(connection.state.read().session.clone().unwrap());
+			held.push((connection, request.unwrap().ok().await.unwrap()));
+		}
+		let quic = sessions.pop().unwrap();
+		let fallback = sessions.pop().unwrap();
+
+		let shared = shared();
+		shared.connected(&fallback, crate::Transport::WebSocket);
+		fallback.abort(moq_net::Error::Unauthorized);
+		let handshake: crate::client::Handshake = Box::pin(async move { Ok(quic) });
+		let mut upgrade = Some(crate::client::Upgrade::new(
+			Box::pin(async move { Ok(handshake) }),
+			crate::Transport::WebTransport,
+		));
+		let mut draining = None;
+		let closed = Err(moq_net::Error::Unauthorized.into());
+		let (_, transport) = finish_upgrade(&shared, &mut upgrade, &mut draining, closed)
+			.await
+			.unwrap();
+		assert_eq!(transport, crate::Transport::WebTransport);
+
+		// The state a close woken by `Connected` reads.
+		let state = shared.state.consume();
+		let state = state.read();
+		assert_eq!(state.status, Some(Status::Connected));
+		assert_eq!(state.transport, Some(crate::Transport::WebTransport));
+		assert!(
+			state.predecessor.is_none(),
+			"the closed fallback was published as a predecessor"
+		);
+		assert!(draining.is_none());
+	}
+
 	/// The upgrade reports [`Status::Migrating`] while the MoQ handshake runs on the
 	/// QUIC session, and a failure there puts the status back: the WebSocket session
 	/// served throughout.
@@ -2506,7 +2730,13 @@ mod tests {
 		assert!(upgrade.is_some());
 
 		fail.send(()).unwrap();
-		assert!(poll_upgrade(&shared, &mut upgrade, &waiter).is_pending());
+		assert!(matches!(
+			poll_upgrade(&shared, &mut upgrade, &waiter),
+			Poll::Ready(Err(Error::ConnectFailed))
+		));
+		// The caller decides whether a live WebSocket stays or an ended arm loses
+		// the transport race. Polling the upgrade itself only reports the failure.
+		shared.stayed();
 		assert_eq!(shared.state.consume().read().status, Some(Status::Connected));
 		assert!(upgrade.is_none(), "a failed upgrade is not retried");
 	}
@@ -2522,7 +2752,7 @@ mod tests {
 		let origin = crate::origin::spawn();
 		let broadcast = origin.create_broadcast("cam").unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", timed()).unwrap();
 		let write = |payload: &'static [u8]| {
 			let mut group = track.append_group().unwrap();
 			group.write_frame(moq_net::Timestamp::ZERO, payload).unwrap();
@@ -2583,7 +2813,7 @@ mod tests {
 		);
 		assert!(connection.connected());
 		assert_eq!(connection.transport(), Some(crate::Transport::WebTransport));
-		assert_eq!(connection.epoch(), 2);
+		assert_eq!(connection.connects(), 2);
 		let (transport, _quic) = fallback.accept().await;
 		assert_eq!(transport, crate::Transport::WebTransport);
 		// QUIC works on this network, so the next dial gives it the head start again.
@@ -2623,7 +2853,7 @@ mod tests {
 		let origin = crate::origin::spawn();
 		let broadcast = origin.create_broadcast("cam").unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", timed()).unwrap();
 		let write = |payload: &'static [u8]| {
 			let mut group = track.append_group().unwrap();
 			group.write_frame(moq_net::Timestamp::ZERO, payload).unwrap();
@@ -2672,7 +2902,7 @@ mod tests {
 		let status = tokio::time::timeout(UPGRADE_WAIT, connection.status()).await.unwrap();
 		assert_eq!(status.unwrap(), Status::Connected);
 		assert_eq!(connection.transport(), Some(crate::Transport::WebSocket));
-		assert_eq!(connection.epoch(), 1);
+		assert_eq!(connection.connects(), 1);
 		assert!(
 			websocket.draining().peek().is_none(),
 			"the refused upgrade drained WebSocket"
@@ -2692,44 +2922,60 @@ mod tests {
 	#[cfg(all(feature = "websocket", feature = "noq"))]
 	#[tokio::test]
 	async fn abort_ends_an_upgrade_in_flight() {
-		let origin = crate::origin::spawn();
-		let mut fallback = Fallback::start(&origin, Quic::Refused).await;
+		for close_fallback in [false, true] {
+			let origin = crate::origin::spawn();
+			let mut fallback = Fallback::start(&origin, Quic::Refused).await;
 
-		let mut config = crate::connect::Config::default();
-		config.tls.insecure = Some(true);
-		let client = config
-			.init(Default::default())
-			.unwrap()
-			.with_subscriber(crate::origin::spawn());
-		let mut connection = tokio::time::timeout(UPGRADE_WAIT, client.connect(fallback.url.clone()).established())
-			.await
-			.expect("never connected")
-			.unwrap();
-		assert_eq!(connection.transport(), Some(crate::Transport::WebSocket));
-		let _websocket = fallback.accept().await;
+			let mut config = crate::connect::Config::default();
+			config.tls.insecure = Some(true);
+			let client = config
+				.init(Default::default())
+				.unwrap()
+				.with_subscriber(crate::origin::spawn());
+			let mut connection = tokio::time::timeout(UPGRADE_WAIT, client.connect(fallback.url.clone()).established())
+				.await
+				.expect("never connected")
+				.unwrap();
+			assert_eq!(connection.transport(), Some(crate::Transport::WebSocket));
+			let (_, websocket) = fallback.accept().await;
 
-		// The QUIC transport comes up and its handshake waits on the server's answer.
-		fallback.forwarder.open();
-		let request = fallback.held().await;
-		let status = tokio::time::timeout(UPGRADE_WAIT, connection.status()).await.unwrap();
-		assert_eq!(status.unwrap(), Status::Migrating);
+			// The QUIC transport comes up and its handshake waits on the server's answer.
+			fallback.forwarder.open();
+			let request = fallback.held().await;
+			let status = tokio::time::timeout(UPGRADE_WAIT, connection.status()).await.unwrap();
+			assert_eq!(status.unwrap(), Status::Migrating);
 
-		connection.abort(moq_net::Error::GoawayTimeout);
-		let closed = async {
-			match request.ok().await {
-				Ok(session) => session.closed().await,
-				Err(err) => panic!("the server could not answer the upgrade: {err}"),
+			if close_fallback {
+				let mut monitor = connection.monitor();
+				websocket.abort(moq_net::Error::Cancel);
+				loop {
+					let presence = tokio::time::timeout(UPGRADE_WAIT, monitor.presence_changed())
+						.await
+						.expect("closed fallback remains live")
+						.unwrap();
+					if presence.sessions_ended == 1 {
+						break;
+					}
+				}
+				assert_eq!(connection.transport(), None);
 			}
-		};
-		let err = tokio::time::timeout(UPGRADE_WAIT, closed)
-			.await
-			.expect("the upgrade's connection was left open");
-		let code = |err: &moq_net::Error| moq_net::SessionError::from(err).to_code();
-		assert_eq!(
-			code(&err),
-			code(&moq_net::Error::GoawayTimeout),
-			"the upgrade ended without the abort's error: {err}"
-		);
+			connection.abort(moq_net::Error::GoawayTimeout);
+			let closed = async {
+				match request.ok().await {
+					Ok(session) => session.closed().await,
+					Err(err) => panic!("the server could not answer the upgrade: {err}"),
+				}
+			};
+			let err = tokio::time::timeout(UPGRADE_WAIT, closed)
+				.await
+				.expect("the upgrade's connection was left open");
+			let code = |err: &moq_net::Error| moq_net::SessionError::from(err).to_code();
+			assert_eq!(
+				code(&err),
+				code(&moq_net::Error::GoawayTimeout),
+				"the upgrade ended without the abort's error: {err}"
+			);
+		}
 	}
 
 	/// Closing while a QUIC upgrade is still in its MoQ handshake ends the upgrade too, and
@@ -2793,7 +3039,7 @@ mod tests {
 			.expect("a failed WebSocket handshake must fall back to the pending QUIC dial");
 
 		assert_eq!(connection.transport(), Some(crate::Transport::WebTransport));
-		assert_eq!(connection.epoch(), 1);
+		assert_eq!(connection.connects(), 1);
 		let (transport, _session) = fallback.accept().await;
 		assert_eq!(transport, crate::Transport::WebTransport);
 		// QUIC works on this network, so the next dial gives it the head start again.
@@ -2801,6 +3047,59 @@ mod tests {
 			!crate::websocket::won(&fallback.url),
 			"the fallback kept WebSocket's win"
 		);
+	}
+
+	/// One-shot proves this reuses the held dial rather than redialing QUIC.
+	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[tokio::test]
+	async fn closed_websocket_session_falls_back_to_pending_quic() {
+		for error in [moq_net::Error::Cancel, moq_net::Error::Unauthorized] {
+			let origin = crate::origin::spawn();
+			let mut fallback = Fallback::start(&origin, Quic::Held).await;
+			let mut config = crate::connect::Config::default();
+			config.tls.insecure = Some(true);
+			let client = config.init(Default::default()).unwrap().with_reconnect(false);
+			let mut connection = tokio::time::timeout(UPGRADE_WAIT, client.connect(fallback.url.clone()).established())
+				.await
+				.expect("never connected")
+				.unwrap();
+			assert_eq!(connection.transport(), Some(crate::Transport::WebSocket));
+			let (_, websocket) = fallback.accept().await;
+			websocket.abort(error.clone());
+			let _ = websocket.closed().await;
+			loop {
+				let status = tokio::time::timeout(UPGRADE_WAIT, connection.status())
+					.await
+					.expect("closed fallback never reported its pending dial")
+					.expect("connection ended before pending QUIC dial");
+				if status == Status::Disconnected {
+					break;
+				}
+			}
+			assert_eq!(connection.transport(), None, "the closed fallback is no longer live");
+			assert!(
+				connection.monitor().stats().is_none(),
+				"closed fallback stats remain visible"
+			);
+			fallback.forwarder.open();
+			loop {
+				if connection.transport() == Some(crate::Transport::WebTransport) {
+					break;
+				}
+				tokio::time::timeout(UPGRADE_WAIT, connection.status())
+					.await
+					.expect("pending QUIC dial never took over")
+					.expect("connection ended before pending QUIC dial");
+			}
+			let (transport, _quic) = fallback.accept().await;
+			assert_eq!(transport, crate::Transport::WebTransport);
+			assert_eq!(connection.connects(), 2);
+			// The dead fallback's error does not leak into closing the QUIC session.
+			tokio::time::timeout(UPGRADE_WAIT, connection.close())
+				.await
+				.expect("close never finished")
+				.expect("close returned the closed fallback's error");
+		}
 	}
 
 	/// When QUIC wins the race nothing changes: one session, over QUIC, and no
@@ -2811,13 +3110,16 @@ mod tests {
 		let origin = crate::origin::spawn();
 		let broadcast = origin.create_broadcast("cam").unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", timed()).unwrap();
 
 		let mut fallback = Fallback::start(&origin, Quic::Open).await;
 
 		let subscriber = crate::origin::spawn();
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
+		// Both dials start now; the fixture holds the fallback handshake so load
+		// cannot decide which transport this test exercises.
+		config.websocket.delay = Duration::ZERO;
 		let client = config
 			.init(Default::default())
 			.unwrap()
@@ -2840,10 +3142,10 @@ mod tests {
 		group.finish().unwrap();
 		assert_eq!(next_group(&mut sub).await, 0);
 
-		// QUIC's win dropped the fallback before it dialed, so there is nothing else to
+		// QUIC's win dropped the fallback before it handshook, so there is nothing else to
 		// accept and nothing to upgrade from.
 		assert!(fallback.accepted.try_recv().is_err(), "a second session was opened");
-		assert_eq!(connection.epoch(), 1);
+		assert_eq!(connection.connects(), 1);
 		assert!(!crate::websocket::won(&fallback.url));
 	}
 
@@ -2891,7 +3193,7 @@ mod tests {
 		let origin = crate::origin::spawn();
 		let broadcast = origin.create_broadcast("cam").unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", timed()).unwrap();
 		let (addr_a, mut accepted_a, _task_a) = serve(origin.clone()).await;
 		let (addr_b, mut accepted_b, _task_b) = serve(origin.clone()).await;
 

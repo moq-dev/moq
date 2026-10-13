@@ -1,5 +1,6 @@
 import { expect, jest, mock, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
+import type { Grant } from "../auth.ts";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
 import * as Epoch from "../epoch.ts";
 import { error } from "../error.ts";
@@ -8,19 +9,20 @@ import { type Hop, HopSchema } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
-import { Reader, Stream } from "../stream.ts";
+import { Reader, Stream, Writer } from "../stream.ts";
 import { Milli, Timescale, Timestamp } from "../time.ts";
 import type { Producer as TrackProducer } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import { ControlStreamAdapter, NativeSession, type Session } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
+import { toRequestCode } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
 import { PublishDone } from "./publish.ts";
 import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
 import { RequestError, RequestOk } from "./request.ts";
-import { Subscribe, SubscribeOk, SubscribeUpdate, Unsubscribe } from "./subscribe.ts";
+import { GroupOrder, Subscribe, SubscribeOk, SubscribeUpdate, Unsubscribe } from "./subscribe.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
 import { TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
@@ -115,7 +117,13 @@ function publisher(
 		requiresSolicitation = false,
 		session,
 		cluster,
-	}: { requiresSolicitation?: boolean; session?: Session; cluster?: Cluster.Hops } = {},
+		grant,
+	}: {
+		requiresSolicitation?: boolean;
+		session?: Session;
+		cluster?: Cluster.Hops;
+		grant?: Signal<Grant | undefined>;
+	} = {},
 ): { pub: Publisher; origin: OriginProducer } {
 	const origin = new OriginProducer();
 	const inner = session ?? new NativeSession(transport, VERSION, true);
@@ -126,6 +134,7 @@ function publisher(
 			publish: origin.consume(),
 			requiresSolicitation,
 			cluster,
+			grant,
 		}),
 		origin,
 	};
@@ -217,6 +226,49 @@ test("FETCH and a non-forwarding SUBSCRIBE get NOT_SUPPORTED", async () => {
 		);
 		expect(paused[0]).toBe(0x05);
 		expect(paused[version <= Version.DRAFT_16 ? 4 : 3]).toBe(0x3);
+	}
+});
+
+/** A request's USE_VALUE token decodes but grants nothing yet, so a SUBSCRIBE outside the grant is still refused. */
+test("a request token does not widen the grant", async () => {
+	for (const version of [Version.DRAFT_14, Version.DRAFT_22] as const) {
+		const pair = createMockTransportPair(ALPNS[version]);
+		const session = new NativeSession(pair.server, version, true);
+		const nothing = new Signal<Grant | undefined>({
+			publish: new Path.Patterns([]),
+			subscribe: new Path.Patterns([]),
+		});
+		const { pub, origin } = publisher(pair.server, { session, grant: nothing });
+		publish(origin, Path.from("room"));
+
+		const ascii = (text: string) => [...new TextEncoder().encode(text)];
+		// Draft-14 carries priority, group order, forward, and a Largest Object filter inline.
+		const fields = version === Version.DRAFT_14 ? [0x80, 0x02, 0x01, 0x02] : [];
+		const token = [0x03, 0x00, 0xaa]; // USE_VALUE, type 0
+		const body = [0, 1, 4, ...ascii("room"), 5, ...ascii("video"), ...fields, 1, 0x03, token.length, ...token];
+		const msg = await Subscribe.decode(
+			new Reader(undefined, new Uint8Array([0, body.length, ...body]), version),
+			version,
+		);
+
+		const written: Uint8Array[] = [];
+		const stream = new Stream({
+			readable: new ReadableStream<Uint8Array>(),
+			writable: new WritableStream<Uint8Array>({
+				write: (chunk) => {
+					written.push(new Uint8Array(chunk));
+				},
+			}),
+			version,
+		});
+		await pub.runSubscribe(msg, stream);
+		await stream.writer.closed;
+		origin.close();
+
+		// SUBSCRIBE_ERROR on draft-14, REQUEST_ERROR after; the code follows the Length and any Request ID.
+		const wire = written.flatMap((chunk) => Array.from(chunk));
+		expect(wire[0]).toBe(0x05);
+		expect(wire[version === Version.DRAFT_14 ? 4 : 3]).toBe(toRequestCode("unauthorized", "subscribe", version));
 	}
 });
 
@@ -550,6 +602,7 @@ test("a failed stream open does not kill the announce loop", async () => {
 		version: inner.version,
 		acceptBi: () => inner.acceptBi(),
 		nextRequestId: () => inner.nextRequestId(),
+		spendRequest: (id) => inner.spendRequest(id),
 		close: () => inner.close(),
 		openBi: () => {
 			if (failures-- > 0) throw new Error("no stream credit");
@@ -595,6 +648,7 @@ test("a namespace refused once is retried without anything else changing", async
 		version: inner.version,
 		acceptBi: () => inner.acceptBi(),
 		nextRequestId: () => inner.nextRequestId(),
+		spendRequest: (id) => inner.spendRequest(id),
 		close: () => inner.close(),
 		openBi: () => {
 			if (failures-- > 0) throw new Error("no stream credit");
@@ -631,6 +685,7 @@ test("a solicited legacy advertisement refused once is retried", async () => {
 		version: inner.version,
 		acceptBi: () => inner.acceptBi(),
 		nextRequestId: () => inner.nextRequestId(),
+		spendRequest: (id) => inner.spendRequest(id),
 		close: () => inner.close(),
 		openBi: () => {
 			if (failures-- > 0) throw new Error("no stream credit");
@@ -1615,7 +1670,7 @@ function fixture(version: IetfVersion = V20): {
 	close: () => void;
 } {
 	const pair = createMockTransportPair(ALPNS[version]);
-	const session = new NativeSession(pair.server, version, true);
+	const session = new NativeSession(pair.server, version, false);
 	const { pub, origin } = publisher(pair.server, { session });
 	const broadcast = publish(origin, Path.from("test"));
 	const uni = pair.client.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
@@ -1709,6 +1764,7 @@ async function readGroup(stream: ReadableStream<Uint8Array>): Promise<ServedGrou
 async function readEndOfTrack(stream: ReadableStream<Uint8Array>): Promise<number> {
 	const reader = new Reader(stream, undefined, V20);
 	const header = await GroupMessage.decode(reader, V20);
+	expect(header.flags.hasEnd).toBe(false);
 	const frame = await reader.decode((c) => Frame.decode(c, header.flags, undefined));
 	expect(frame.endOfTrack).toBe(true);
 	expect(await reader.done()).toBe(true);
@@ -2118,6 +2174,34 @@ test("draft-20: an opt-out peer gets no track properties", async () => {
 });
 
 /**
+ * Through draft-15 SUBSCRIBE_OK restates the order the subscription is served in; later
+ * drafts announce the publisher's default, newest first.
+ */
+test.each([
+	[Version.DRAFT_14, GroupOrder.Ascending],
+	[Version.DRAFT_15, GroupOrder.Ascending],
+	[Version.DRAFT_17, GroupOrder.Descending],
+] as const)("%s: SUBSCRIBE_OK announces the served order", async (version, announced) => {
+	const fx = fixture(version);
+	fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+
+	const { client, ok } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			groupOrder: "ascending",
+		}),
+	);
+	expect(ok.properties.groupOrder).toBe(announced);
+
+	fx.close();
+	client.close();
+});
+
+/**
  * Drafts 14-16 cannot send TIMESCALE, so a subscribed group carries no Timestamp even though
  * the track has units. Draft-17 declares the units and stamps the object.
  */
@@ -2153,6 +2237,130 @@ test("drafts 14-16 send no Timestamp without TIMESCALE", async () => {
 		}
 		expect(await reader.read(await reader.u53())).toEqual(new TextEncoder().encode("0.0"));
 
+		fx.close();
+		client.close();
+	}
+});
+
+test.each([false, true])("draft-20: exact terminal 5/5 survives group FIN=%s", async (finished) => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video");
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 0n, startObject: 0n },
+		}),
+	);
+	try {
+		const group = new GroupProducer(5);
+		track.writeGroup(group);
+		for (let i = 0; i < 5; i++) group.writeFrame({ payload: new Uint8Array([i]) });
+		const uni = await fx.uni.read();
+		if (!uni.value) throw new Error("missing group stream");
+		const reader = new Reader(uni.value, undefined, V20);
+		const header = await GroupMessage.decode(reader, V20);
+		expect(header.groupId).toBe(5);
+		for (let i = 0; i < 5; i++) {
+			const frame = await reader.decode((c) => Frame.decode(c, header.flags, undefined));
+			expect(frame.payload).toEqual(new Uint8Array([i]));
+		}
+		if (finished) {
+			group.close();
+			expect(await reader.done()).toBe(true);
+		}
+		track.finishAt({ group: 5, frame: 5 });
+		group.close();
+		track.close();
+		if (finished) {
+			const marker = await fx.uni.read();
+			if (!marker.value) throw new Error("missing terminal stream");
+			const end = new Reader(marker.value, undefined, V20);
+			const endHeader = await GroupMessage.decode(end, V20);
+			expect(endHeader.groupId).toBe(5);
+			expect(endHeader.flags.hasEnd).toBe(false);
+			expect(endHeader.flags.firstObject).toBe(false);
+			const frame = await end.decode((c) => Frame.decode(c, endHeader.flags, undefined));
+			expect(frame.endOfTrack).toBe(true);
+			expect(frame.idDelta).toBe(5);
+			expect(await end.done()).toBe(true);
+		} else {
+			const frame = await reader.decode((c) => Frame.decode(c, header.flags, undefined));
+			expect(frame.endOfTrack).toBe(true);
+			expect(frame.idDelta).toBe(0);
+			expect(await reader.done()).toBe(true);
+		}
+		expect(await client.reader.u53()).toBe(PublishDone.id);
+		expect((await PublishDone.decode(client.reader, V20)).streamCount).toBe(finished ? 2n : 1n);
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
+/** An inline END_OF_TRACK on a stream reset after its FIN may never arrive, so it is resent. */
+test("draft-20: an inline terminal reset after its FIN falls back to a standalone marker", async () => {
+	const opened: Writer[] = [];
+	const tryOpen = Writer.tryOpen.bind(Writer);
+	const spy = spyOn(Writer, "tryOpen").mockImplementation(async (...args) => {
+		const writer = await tryOpen(...args);
+		if (writer) opened.push(writer);
+		return writer;
+	});
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video");
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 0n, startObject: 0n },
+		}),
+	);
+	try {
+		const group = new GroupProducer(5);
+		track.writeGroup(group);
+		for (let i = 0; i < 5; i++) group.writeFrame({ payload: new Uint8Array([i]) });
+		const uni = await fx.uni.read();
+		if (!uni.value) throw new Error("missing group stream");
+		const reader = new Reader(uni.value, undefined, V20);
+		const header = await GroupMessage.decode(reader, V20);
+		for (let i = 0; i < 5; i++) await reader.decode((c) => Frame.decode(c, header.flags, undefined));
+
+		// The group stream's close fails from here on, like a reset after its FIN.
+		const closed = Object.getOwnPropertyDescriptor(Writer.prototype, "closed")?.get;
+		if (!closed) throw new Error("Writer.closed is not a getter");
+		let reset = false;
+		Object.defineProperty(opened[0], "closed", {
+			get(this: Writer) {
+				return reset ? Promise.reject(new Error("reset after FIN")) : closed.call(this);
+			},
+		});
+		reset = true;
+
+		track.finishAt({ group: 5, frame: 5 });
+		group.close();
+		track.close();
+
+		const inline = await reader.decode((c) => Frame.decode(c, header.flags, undefined));
+		expect(inline.endOfTrack).toBe(true);
+		const marker = await fx.uni.read();
+		if (!marker.value) throw new Error("missing standalone terminal stream");
+		const end = new Reader(marker.value, undefined, V20);
+		const endHeader = await GroupMessage.decode(end, V20);
+		expect(endHeader.groupId).toBe(5);
+		const frame = await end.decode((c) => Frame.decode(c, endHeader.flags, undefined));
+		expect(frame.endOfTrack).toBe(true);
+		expect(frame.idDelta).toBe(5);
+		expect(await client.reader.u53()).toBe(PublishDone.id);
+		expect((await PublishDone.decode(client.reader, V20)).streamCount).toBe(2n);
+	} finally {
+		spy.mockRestore();
 		fx.close();
 		client.close();
 	}

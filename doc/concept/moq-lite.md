@@ -87,6 +87,8 @@ authorization and hidden names work exactly as without one.
   winning the path, is announced as a restart. Subscriptions already open stay
   on the old instance until dropped or its route goes, while new requests get
   the new one, so a player follows the restart by requesting the path again.
+  Held handles can still read their old cached content, but cannot open new
+  epochless requests after retirement. Request the path again for new content.
   That is how a restarted encoder, whose group numbers start over, takes the
   name instead of stalling viewers on the old sequence. A relay drops its copy
   of the old instance, so a new subscriber never sees its cached groups.
@@ -101,6 +103,20 @@ path, since nothing says it serves the same bytes.
 RTMP, SRT, and WHIP ingests mint one per connection. Replicas share one by
 passing the same `moq --epoch`, except under [encryption](/concept/hang#encryption). See [Clustering](/bin/relay/cluster) for how a
 relay uses this.
+
+### Multiple CDNs
+
+An endpoint can hold sessions to several CDNs at once, each feeding one shared
+origin, and rank them: moq.pro as primary, another CDN as secondary. The rank is
+a per-link preference the endpoint sets (higher wins, 0 is neutral, negative demotes), never sent on the wire. It decides after
+the newest epoch and before cost, so metrics from different operators are never
+compared. A subscription uses the preferred link that has a route and moves to the
+next when that route goes; a publisher pushes the same broadcast to every CDN.
+
+The move resumes without a seam only between routes with the same epoch, which
+needs moq-lite 07 on both links. A CDN speaking moq-transport carries no epoch, so
+moving onto it, or back off it, is a restart and the player requests the path
+again.
 
 ### Hidden broadcasts
 
@@ -150,7 +166,13 @@ to a prefix. Right after setup both sides present the credential the connection
 already carried (the URL token, a client certificate, or nothing), so a
 publisher learns before anyone subscribes whether its broadcasts can reach the
 peer. More tokens can be added without reconnecting; the session's scope is the
-union of every open token's grant.
+union of every open token's grant. A token the peer has no verifier for, or
+whose grant is too large to send, fails with `Unsupported` and ends only that
+token; the session and its other grants stay up. A relay with an
+[auth server](/bin/relay/auth#in-band-renewal) verifies these tokens through it,
+so a fresh grant can keep the connection alive after its original credential
+expires; under public rules or a client certificate it refuses them as
+`Unsupported`.
 
 A subscription or fetch that loses access resets with the `UNAUTHORIZED` stream
 code and the session stays up. A client that publishes outside its grant closes
@@ -173,8 +195,14 @@ Each subscription carries the knobs that decide behavior under congestion:
 | Knob | Effect |
 | --- | --- |
 | **Priority** (0..255) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. |
-| **Order** | Which group to send first when several are pending. Newest first for live, oldest first for catch-up. |
+| **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
 | **Max delay** | How far a non-latest group may fall behind the live edge before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
+
+Order only decides what goes first, never what is skipped, so catching up oldest
+first needs a max delay that covers the backlog. When a relay serves subscribers of
+both orders from one upstream subscription, it asks upstream for newest first, and
+still sends each subscriber its groups in that subscriber's own order. Over
+moq-transport the upstream order is fixed by whichever subscriber arrived first.
 
 Max delay is measured on the media timeline, not the wall clock, so a backlog
 delivered as a burst is still late while a congestion stall never expires

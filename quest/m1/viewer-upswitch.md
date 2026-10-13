@@ -10,12 +10,14 @@ a larger rendition, without pinning by name.
 
 `js/watch/src/video/source.ts` caps automatic selection at 0.8 times
 `estimatedRecvRate`. The estimate only follows what is being sent, so it stays
-app-limited, and `js/net` never sends a PROBE target, so the relay never pads
-above it.
+app-limited, and `js/net` never sends a PROBE target to request headroom above
+it.
 
 Decided (2026-10-04): its own quest, after the transport can validate
-headroom. The viewer sends a PROBE target, the relay pads up to it, and
-selection uses the validated estimate. If [quic-probe](/quest/m1/quic-probe.md)
+headroom. The viewer sends a PROBE target and selection uses the validated
+estimate. Decided in the quest audit: use the mechanism selected by the
+capacity measurements, without requiring padding before that comparison.
+If [quic-probe](/quest/m1/quic-probe.md)
 ends in a measured no-go, revisit this quest rather than leaving it blocked.
 
 Promoted from m2 on 2026-10-09 by maintainer priority, with the capacity

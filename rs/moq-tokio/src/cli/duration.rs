@@ -111,4 +111,29 @@ pub(crate) mod serde_duration {
 		let value = String::deserialize(deserializer)?;
 		humantime::parse_duration(&value).map_err(::serde::de::Error::custom)
 	}
+
+	/// The same format for an optional duration.
+	pub mod option {
+		use ::serde::{Deserialize, Deserializer, Serializer};
+		use std::time::Duration;
+
+		pub fn serialize<S>(value: &Option<Duration>, serializer: S) -> Result<S::Ok, S::Error>
+		where
+			S: Serializer,
+		{
+			match value {
+				Some(value) => super::serialize(value, serializer),
+				None => serializer.serialize_none(),
+			}
+		}
+
+		pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
+		where
+			D: Deserializer<'de>,
+		{
+			Option::<String>::deserialize(deserializer)?
+				.map(|value| humantime::parse_duration(&value).map_err(::serde::de::Error::custom))
+				.transpose()
+		}
+	}
 }

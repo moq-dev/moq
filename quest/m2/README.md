@@ -13,8 +13,15 @@ feature. A study may end with a measured no-go. Work gated on hardware, a
 partner, a consumer, a provider, or an upstream release, or with no named
 consumer yet, waits in [m3](/quest/m3/README.md).
 
+Added 2026-10-10 by maintainer priority, ranked first: the grant stats label
+and bench readiness. Refusal reasons folded the same day into
+[Session outcomes](/quest/m1/session-outcomes.md) and
+[Typed refusal reason](/quest/m1/refusal-reason.md).
+
 ## Required
 
+- [Grant stats label](/quest/m2/grant-label.md) - an auth grant's optional `label` names what its session's presence and live bytes count under in stats, apart from the path scope it may access
+- [moq-bench readiness](/quest/m2/bench-ready.md) - every JSONL line carries the rolled targets and a `ready` flag, so a harness opens its window on readiness
 - [RTSP import](/quest/m2/rtsp-import.md) - `moq import rtsp` publishes an IP camera from its own network, through a `moq-rtsp` crate whose one-session ingest a caller can supervise itself
 - [One port](/quest/m2/one-port/README.md) - one UDP port carries QUIC, SRT, and WebRTC media through an embedder hook, and one TCP port carries HTTP, RTMP, and RTMPS
 - [Bitrate claim](/quest/m2/rate-claim.md) - tokens and auth grants cap a session's upload and download bitrate, refused where unenforced and always on HTTP
@@ -24,19 +31,19 @@ consumer yet, waits in [m3](/quest/m3/README.md).
 - [One port on the io_uring workers](/quest/m2/uring-demux.md) - `moq-uring`'s workers host the UDP demux, so a ring relay keeps WebRTC media and SRT on its QUIC port
 - [Synced data playback](/quest/m2/watch-data-sync.md) - js/watch releases JSON and binary payloads on the media playhead, and a slow data track holds media back
 - [Watch decode gate](/quest/m2/watch-decode-gate.md) - video lookahead stays encoded until it is near presentation, like audio
-- [Hitless TS legs](/quest/m2/ts-hitless.md) - two `--sync` export legs emit packet-identical TS for ST 2022-7
+- [Deterministic TS legs](/quest/m2/ts-hitless.md) - two export legs preserve common TS packet identity; coordinated RTP is a separate prerequisite for ST 2022-7
 - [DVB E-AC-3](/quest/m2/ts-eac3.md) - E-AC-3 private data is split per access unit (independent frame plus its dependent substreams) and buffer-modelled in TS export
 - [T-STD controls](/quest/m2/tstd-controls.md) - the harness gains an MB-overflow control and an AAC broadcast reference
 - [MP4 export](/quest/m2/mp4-export.md) - `moq export mp4 --output` records crash-safe fragments, then finishes a regular MP4 with moov at the end
 - [fMP4 edit lists](/quest/m2/fmp4-edit-lists.md) - the fMP4 importer applies edit lists to frame timestamps
 - [Shared timebase in the bindings](/quest/m2/ffi-timebase.md) - binding apps publish several containers from one source on one shared offset
+- [One UniFFI crate per binding layer](/quest/m2/ffi-crate-split.md) - a generator spike, then per-layer UniFFI crates in one library so generated names drop the `Moq` and layer prefixes; reopens the one-crate decision
 - [Linux decoded frames](/quest/m2/obs-decode-linux.md) - present supported native decoded surfaces with visible CPU fallback
 - [Windows decoded frames](/quest/m2/obs-decode-windows.md) - present decoded D3D11 surfaces in OBS without CPU readback
 - [macOS GPU input](/quest/m2/obs-macos.md) - feed the encoder from the OBS compositor without CPU readback
 - [Windows GPU input](/quest/m2/obs-windows.md) - import or blit OBS D3D11 textures with explicit synchronization
-- [Sans-IO IETF session](/quest/m2/rs2ts-sans-io-ietf.md) - the moq-transport session is driven by bytes and tick(now), so it can translate
-- [IETF parameters](/quest/m2/rs2ts-ietf-params.md) - the IETF codec drops its `Param` trait on primitives, so it translates like lite
-- [Generated IETF](/quest/m2/rs2ts-ietf.md) - @moq/net's moq-transport session is generated too
+- [WASM-to-JS evaluation](/quest/m2/rs2ts-wasm2js.md) - try the production Rust browser implementation as JS-only output and compare source-translator alternatives if needed
+- [JS-only @moq/net](/quest/m2/rs2ts-js.md) - adopt the selected Rust-to-JS route after browser parity and measured tradeoffs are accepted
 - [Per-stream deadlines](/quest/m2/quic-deadline.md) - hopeless retransmits
   become resets, and a tail loss probe fires early while there is still time
 - [qmux on the QUIC stream state machine](/quest/m2/quic-qmux.md) - qmux is a
@@ -55,10 +62,9 @@ consumer yet, waits in [m3](/quest/m3/README.md).
 - [#3199](/quest/m2/3199-moq-uring-remove-sq-indirection-and-per-enter-ring-fd.md) - moq-uring: remove SQ indirection and per-enter ring fd lookup, if a profile shows the win
 - [#3200](/quest/m2/3200-moq-uring-batch-completion-wakeups-with-min-timeout.md) - moq-uring: batch completion wakeups with MIN_TIMEOUT
 - [Send depth](/quest/m2/send-depth.md) - moq-net futures prove Send at the default recursion limit, so downstream crates see no nightly lint
-- [Refusal reasons](/quest/m2/refusal-reasons.md) - refused-session metrics tell an expired token from an invalid one, and count gateway admissions
 - [Bench coverage](/quest/m2/bench-coverage.md) - Criterion targets for moq-pattern matching first, then moq-mux containers
 - [Browser benchmarks](/quest/m2/browser-benchmarks.md) - measure JS transport, container, decode, and render costs in an identified browser
-- [Generated lite browser report](/quest/m2/rs2ts-browser-report.md) - compare generated and hand-written js/net on bundle size, per-frame CPU, and first-frame latency
+- [Browser media report](/quest/m2/rs2ts-browser-report.md) - compare Rust-backed and handwritten @moq/net through full media workloads, supplementing the pre-adoption comparisons
 - [mTLS on tls://](/quest/m2/tls-listener-mtls.md) - a `tls://` listener can identify a cluster peer by its client certificate
 - [Link quality](/quest/m2/link-quality.md) - a radio link's cost follows its measured quality without flapping routes
 - [One transport adapter](/quest/m2/transport-adapter-dedup.md) - the poll transport adapter exists once, and the 64 KiB cap in moq-net's default `poll_read_buf` (not in the adapter) has a test
@@ -109,3 +115,7 @@ consumer yet, waits in [m3](/quest/m3/README.md).
 - [Runtime trait](/quest/m2/runtime-trait.md) - one runtime trait for spawn and time replaces web-async, with tokio, browser, io_uring, and sim implementations
 - [QUIC on the sim](/quest/m2/quic-sim.md) - the sim drives `moq-quic` over in-memory datagrams with latency and loss
 - [Seeded sim](/quest/m2/sim-seed.md) - sim tests draw every jitter from one seeded generator and replay bit-exact
+- [Sibling broadcasts on one clock](/quest/m2/sibling-broadcasts.md) - one broadcast per source (webcam, screen, each camera, each language) under a shared prefix, sharing one clock, documented and tested in Rust and JS
+- [Catalog broadcast references in MSF and GStreamer](/quest/m2/catalog-broadcast-reference.md) - MSF conversion and the GStreamer source honor a rendition's `broadcast` or refuse it, instead of resolving it in the catalog's own broadcast
+- [Binding track resolver](/quest/m2/binding-track-helper.md) - binding apps subscribe to a rendition without inlining `track` or the key
+- [Exporters follow a rendition to a new track](/quest/m2/export-rendition-rebind.md) - the fMP4, TS, MKV and FLV exporters rebuild a rendition whose resolved `track` or `broadcast` changes under the same ID

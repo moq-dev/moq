@@ -55,15 +55,33 @@ Audio playout: the jitter target is default in both languages (#4162); the
 2026-10-08 audit, since only a manual browser proof and a native trace replay
 remain and no release waits on them.
 
+Interop on main (2026-10-13): the cross-client matrix fails with `unroutable`
+whenever WebSocket wins the connect race: since #5294, #4180's upgrade
+retires epochless handles before its held `Restart` reaches anyone. The
+released wire-compat step aborts on planned breaks the last release made
+stale. Both stay in m0 (maintainer, 2026-10-13) and rank with TS duration
+fidelity: a red Interop hides real regressions.
+
+Nightly on main (triaged 2026-10-13): two build breaks from 2026-10-11 get
+quests here. The nixpkgs bump broke the Linux zigbuild release builds, and
+fat LTO in the release profile broke the fuzz build. Audio quality has been
+red since it landed, against budgets recorded locally; re-measuring them on
+the runner moved here from Watch (maintainer, 2026-10-13). The other red jobs
+have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
+(#5389) and Windows tests (#5339).
+
 ## Required
 
+- [CI cache release](/quest/m0/ci-cache-release.md) - a stable cache server supports anonymous reads and OIDC writes restricted to the main warmer
 - [Self-hosted CI](/quest/m0/self-hosted-ci.md) - same-repo Check and Test run on a self-hosted NixOS runner with a main-written local cache, behind a `CI_RUNNER` kill switch
 - [CI host](/quest/m0/ci-host.md) - the maintainer brings up the spare desktop as the `moq-ci` and `moq-gpu` runner host
-- [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.5, before Seattle
+- [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.5, before Seattle, then draft-20+ FETCH
 - [TS duration fidelity](/quest/m0/ts-duration-fidelity.md) - Interop's TS compliance captures the whole round-tripped stream again, fixing a regression that turns Interop red on main
-- [Interop latecomer control](/quest/m0/interop-latecomer-control.md) - the lagging-latecomer control fails as designed, and a red Interop step no longer skips the TS steps
-- [Paused spinner](/quest/m0/watch-paused-spinner.md) - the watch buffering spinner never covers the paused play button, so Interop's resume step can click it
+- [Upgrade restarts epochless broadcasts](/quest/m0/upgrade-unroutable.md) - a WebSocket-to-QUIC upgrade retires epochless handles only once their `Restart` is delivered, and first-party consumers follow it, fixing Interop's `unroutable` rounds
+- [Wire compat on main](/quest/m0/wire-compat-green.md) - the nightly released-wire step runs again: planned breaks re-measured against the new releases, and a released-API client for the released JS lanes
+- [Release builds link](/quest/m0/release-link.md) - the Linux zigbuild release binaries and moq-gst packages link again after the 2026-10-11 nixpkgs bump, so the next release cut can publish
+- [Fuzz builds under LTO](/quest/m0/fuzz-lto.md) - the nightly fuzz targets build again despite the release profile's fat LTO
+- [Audio quality budgets](/quest/m0/audio-quality-budgets.md) - the nightly Audio quality job grades against ceilings measured on its own runner, so a breach means a regression again
 - [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on moq-dev/web-transport#412 and #413 to merge and ship, which qmux credit bumps to
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines
-- [JS track takeover](/quest/m0/js-track-takeover.md) - JS `createTrack` answers a queued request and continues its sequences, as Rust does, so a re-announced `@moq/publish` catalog never restarts its groups
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription

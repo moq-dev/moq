@@ -145,6 +145,7 @@ Both bounds may be refined to a Frame within their Group, so a subscription can 
 
 The subscriber and publisher both indicate their delivery preference:
 - `Priority` indicates if Track A should be transmitted instead of Track B.
+- `Group Order` indicates if the newest or oldest pending Group of a Track should be transmitted first.
 - `Subscriber Max Age` indicates how far a non-latest Group may fall behind the latest Group before it is dropped from live delivery; `Publisher Max Age` indicates the maximum age before a non-latest Group is dropped from the publisher's cache.
 
 The combination of these preferences enables the most important content to arrive during network degradation while still respecting encoding dependencies.
@@ -284,6 +285,8 @@ Sent when terminating the session, via the transport's session close.
 | ------- | ------------- | ----------- |
 |  0x3   | PROTOCOL_VIOLATION | The peer violated this specification. |
 | ------- | ------------- | ----------- |
+|  0x4   | INVALID_REQUEST_ID | A moq-transport request ID was reused or violated that draft’s order or parity rules; moq-lite has no request IDs. |
+| ------- | ------------- | ----------- |
 |  0x6   | KEY_VALUE_FORMATTING_ERROR | A key-value pair was malformed, or repeated more than allowed. |
 | ------- | ------------- | ----------- |
 |  0x7   | TOO_MANY_REQUESTS | The peer held more announcements or subscriptions than the endpoint allows. |
@@ -292,7 +295,13 @@ Sent when terminating the session, via the transport's session close.
 | ------- | ------------- | ----------- |
 |  0x11  | CONTROL_MESSAGE_TIMEOUT | The peer took too long to respond to a control message. |
 | ------- | ------------- | ----------- |
+|  0x13  | AUTH_TOKEN_CACHE_OVERFLOW | A token registration would exceed the advertised token cache size. |
+| ------- | ------------- | ----------- |
 |  0x15  | VERSION_NEGOTIATION_FAILED | No version could be negotiated. |
+| ------- | ------------- | ----------- |
+|  0x17  | UNKNOWN_AUTH_TOKEN_ALIAS | A token named an alias that was never registered. |
+| ------- | ------------- | ----------- |
+|  0x30  | NOT_SUPPORTED | The requested feature, token, or grant is unsupported. |
 | ------- | ------------- | ----------- |
 
 ### Stream Error Codes
@@ -434,7 +443,7 @@ Before moq-lite-07, a publisher sends an ANNOUNCE_END and then an ANNOUNCE_START
 When serving a subscription, a publisher MUST select the source by that same exclusion; if only excluded sources remain, the subscription is unroutable.
 Applying one rule to both advertisement and dispatch keeps advertised paths truthful, which is what prevents subscription cycles of any length.
 
-When resolving a path covered by several routes (across any number of streams), the subscriber SHOULD prefer the most specific covering route (see [Resolution](#resolution)), then the newest Epoch, ranking a route without one last, then a path that contains no 0 Hop ID over one that does, then the lowest Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the shortest path, then toward the lowest Spread Hash, and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
+When resolving a path covered by several routes (across any number of streams), the subscriber SHOULD prefer the most specific covering route (see [Resolution](#resolution)), then the newest Epoch, ranking a route without one last, then the higher preference the subscriber locally assigns to the arriving link, neutral unless assigned and either promoted above or demoted below that, then a path that contains no 0 Hop ID over one that does, then the lowest Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the shortest path, then toward the lowest Spread Hash, and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
 
 The Spread Hash is the 64-bit FNV-1a hash, with offset basis `0x420C0DECB00B` and the standard FNV-64 prime, of the requested path's UTF-8 bytes followed by each Hop ID of the route's path, oldest first, as 8 little-endian bytes.
 It is keyed on the requested path rather than the route's prefix, so equal-cost advertisers of one prefix share its paths instead of the first one taking them all, while one path resolves to the same advertiser on every relay that holds the same routes.
@@ -544,8 +553,9 @@ When the union shrinks, an endpoint SHOULD withdraw its announcements and cancel
 An endpoint that cancels a subscription, or refuses or stops serving a request, because the union does not cover it resets the stream with UNAUTHORIZED.
 An endpoint that announces a broadcast outside the union once its own setup tokens are answered SHOULD close the session with UNAUTHORIZED, rather than wait for a subscription that will never come.
 
-An acceptor that does not verify a token in band, or cannot express its grant in AUTH_OK, resets the stream, the same as a peer that does not support the Auth Stream (see [STREAM_TYPE](#stream_type)).
-An opener that sees the stream reset before any reply treats the token as unsupported rather than refused.
+An acceptor that does not verify a token in band, or cannot express its grant in AUTH_OK, MUST send AUTH_ERROR with NOT_SUPPORTED and close its side of the stream.
+This applies before or after an AUTH_OK, including when a grant exceeds the message size limit.
+A presenter receiving a stream reset before any reply treats it as unsupported, for compatibility with peers that do not support the Auth Stream (see [STREAM_TYPE](#stream_type)).
 
 ### Goaway
 Either endpoint can open a Goaway Stream (0x5) to initiate a graceful session shutdown.
@@ -569,7 +579,7 @@ How these streams get transmitted over the network is very important, and yet ha
 
 ## Prioritization
 The Publisher and Subscriber both exchange a `Priority` value, which determines which Track should be transmitted next.
-Group order within a Track is fixed: newest first.
+The subscriber's `Group Order` determines which Group within the Track is transmitted next.
 
 A publisher SHOULD attempt to transmit streams based on these rules.
 This depends on the QUIC implementation and it may not be possible to get fine-grained control.
@@ -607,12 +617,14 @@ ali/video: subscriber_priority=1 publisher_priority=1
 The subscriber priority takes precedence, so the subscriber can likewise full-screen Ali's window by raising the subscriber priority of Ali's tracks above Bob's.
 
 ### Group Order
-Within a Track, a publisher SHOULD transmit the newest Group first.
-Under congestion this sheds the backlog rather than the live edge, which is what a Group boundary exists to make possible.
+Within a subscription, a publisher SHOULD transmit pending Groups in the subscriber's `Group Order`: newest first when descending (the default), oldest first when ascending.
+Descending sheds the backlog rather than the live edge under congestion, which is what a Group boundary exists to make possible; ascending drains a backlog in sequence order, for catch-up.
 
-There is no field to invert it.
-A subscriber that wants Groups in sequence order gets them by reading in sequence order: reordering is a local decision, it costs the network nothing, and encoding it on the wire only lets one subscriber's preference reach a Track that a relay is fanning out to many.
-Such a subscriber SHOULD raise its `Subscriber Max Age` so the Groups it intends to read in order are still being delivered when it reaches them.
+`Group Order` only orders transmission; it never decides whether a Group is delivered, which is [Expiration](#expiration)'s job.
+An ascending subscriber SHOULD raise its `Subscriber Max Age` so the backlog it intends to drain is not expired first.
+
+A relay serving several subscriptions from one upstream subscription SHOULD request descending upstream unless every one of them is ascending, so a live subscriber is never held behind another's backlog.
+Each downstream subscription is still transmitted in its own `Group Order`.
 
 A subscriber MUST support gaps and out-of-order delivery regardless.
 
@@ -1079,6 +1091,7 @@ SUBSCRIBE Message {
   Epoch (b)
   Track Name (s)
   Subscriber Priority (8)
+  Group Order (8)
   Subscriber Max Age (i)
   Group Start (i)
   Group End (i)
@@ -1095,6 +1108,11 @@ A Subscribe ID MUST NOT be reused within the same session, even if the prior sub
 The priority of the subscription within the session, represented as a u8.
 The publisher SHOULD transmit *higher* values first during congestion.
 See the [Prioritization](#prioritization) section for more information.
+
+**Group Order**:
+Which pending Group the publisher SHOULD transmit first: descending (0x0), newest first, or ascending (0x1), oldest first.
+Any other value is a PROTOCOL_VIOLATION.
+See the [Group Order](#group-order) section for more information.
 
 **Subscriber Max Age**:
 The subscriber's preference, in milliseconds, for how long a non-latest group may remain in flight before being considered stale and dropped from live delivery.
@@ -1142,6 +1160,7 @@ The start and end group can be changed in either direction (growing or shrinking
 SUBSCRIBE_UPDATE Message {
   Message Length (i)
   Subscriber Priority (8)
+  Group Order (8)
   Subscriber Max Age (i)
   Group Start (i)
   Group End (i)
@@ -1426,6 +1445,7 @@ A [pattern](#path-pattern) matching broadcast paths the opener may subscribe to.
 
 **Expires**:
 The number of milliseconds until the grant lapses, or 0 for never.
+A value greater than 2^53 - 1 is invalid and MUST close the session with PROTOCOL_VIOLATION.
 The acceptor revokes a lapsed grant with AUTH_ERROR; the opener uses Expires to present a replacement token in time.
 
 ### Path Pattern {#path-pattern}
@@ -1447,6 +1467,9 @@ A pattern that breaks any of these rules is a PROTOCOL_VIOLATION.
 
 A grant covers a request when one of its patterns matches the path.
 
+An endpoint MUST close the session with PROTOCOL_VIOLATION when an AUTH stream message fails to decode, has trailing body bytes, or has an unexpected type for its direction.
+The opener sends exactly one AUTH; any additional message on its side is a PROTOCOL_VIOLATION.
+
 ## AUTH_ERROR {#auth-error}
 AUTH_ERROR refuses a token, or revokes it after an AUTH_OK.
 
@@ -1465,6 +1488,7 @@ A code that does not fit in 32 bits is a PROTOCOL_VIOLATION that closes the sess
 
 **Reason Phrase**:
 A human-readable reason, at most 8,192 bytes.
+Invalid UTF-8 or a reason longer than 8,192 bytes is a PROTOCOL_VIOLATION that closes the session.
 
 ## GROUP
 The GROUP message contains information about a Group, as well as a reference to the subscription being served.
@@ -1524,6 +1548,9 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
+- Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1). A relay requests descending upstream unless every subscription it serves is ascending.
+- Listed the shared INVALID_REQUEST_ID (0x4) session code used by moq-transport drafts 14 through 16.
+
 - SUBSCRIBE_OK `Group` names where delivery starts when the subscription resolves, which need not be the first group sent. It is not a new floor. A subscriber does not wait for a group between the requested floor and it, but a publisher still delivers one that arrives later within Subscriber Max Age.
 - Corrected the SUBSCRIBE note that offset `Group Start` by 1. Only `Group End` and `Frame End` are offset so 0 can mean absent. `Group Start` is an absolute sequence, and 0 is group 0.
 - A subscription's range bounds datagrams like groups, and FETCH never returns a datagram.
@@ -1546,9 +1573,15 @@ The `Message Length` describes the payload size on the wire.
 - Removed SUBSCRIBE_DROP and its type 0x2; a group without a Group Stream is not counted.
 - The Subscribe Stream FIN now follows once every counted Group Stream has finished or been reset.
 - Added the Spread Hash tie-break after the shortest path: a hash of the requested path and the route's Hop IDs, so equal-cost advertisers of one prefix share its paths.
+- Added a local link preference to route selection, after the newest Epoch and before the 0 Hop ID check: the higher preference a subscriber assigns to the arriving link wins, and an unassigned link is neutral. Not carried on the wire.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live advertisement's suffix, and ANNOUNCE_START and ANNOUNCE_UPDATE gain `Hop Base` and `Hop Keep` to copy the tail of a live advertisement's Hop ID list.
 - Capped the Message Length of every message except FRAME at 65,535 bytes.
 - Added the TOO_MANY_REQUESTS (0x7) session code, closing a session whose peer goes past the endpoint's bound on subscriptions or announcements.
+- Added the AUTH_TOKEN_CACHE_OVERFLOW (0x13) and UNKNOWN_AUTH_TOKEN_ALIAS (0x17) session codes, with moq-transport's meaning.
+- Limited AUTH_OK Expires to 2^53 - 1 milliseconds, with an out-of-range value closing the session with PROTOCOL_VIOLATION.
+- Invalid UTF-8 or an oversized AUTH_ERROR reason closes the session with PROTOCOL_VIOLATION.
+- An Auth Stream message that fails to decode, has trailing body bytes, or has an unexpected type, or a second AUTH from the opener, closes the session with PROTOCOL_VIOLATION.
+- Added NOT_SUPPORTED (0x30) to session errors; unsupported Auth Stream tokens and grants use AUTH_ERROR before or after a grant.
 - Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path patterns](#path-pattern) it may publish and subscribe to. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
 
 ## moq-lite-06
@@ -1698,7 +1731,6 @@ Some of these fields occur in multiple messages.
 
 - Request ID
 - Track Alias
-- Group Order
 - Filter Type
 - StartObject
 - Expires
