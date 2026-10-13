@@ -659,8 +659,10 @@ fn bench_handoff(c: &mut Criterion) {
 						standby.announce(origin::Route::default()).unwrap();
 						let replaced = consumer.request_broadcast("room/live", None).await.unwrap();
 						let mut replacement = replaced.track("video").unwrap().subscribe(None).await.unwrap();
-						replacement.recv_group().await.unwrap().expect("standby group");
+						let group = replacement.recv_group().await.unwrap().expect("standby group");
 						total += started.elapsed();
+						// Rejoining the incumbent would replay its cached group 0 instead.
+						assert_eq!(group.sequence, 1, "standby group");
 
 						drop(subscription);
 						drop(replacement);
