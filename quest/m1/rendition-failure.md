@@ -17,7 +17,7 @@ as long as its network broadcast.
 Current behaviour:
 
 - A video encoder error aborts its track (`producer.close(err)` in
-  `js/publish/src/video/encoder.ts`) and nothing else reacts. The catalog
+  `js/publish/src/video/encoder.ts`) and nothing reacts right away. The catalog
   keeps advertising the rendition as enabled, so viewers keep selecting a
   track that has ended.
 - A fatal audio encoder error closes the current track and every later one
