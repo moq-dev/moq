@@ -21,7 +21,7 @@ the catalog declares a usable target:
   (grep it, including `doc/`), and the JS catalog schema
   (`js/hang/src/catalog/archive.ts`) in the same PR, since `@moq/watch` refuses
   a catalog it cannot parse. The rest of the JS port happens in
-  [JS per-track timelines](/quest/m1/archive/js-timelines.md).
+  [JS per-track timelines](/quest/m2/archive-js-timelines.md).
 - **A 4s minimum.** `duration_min` defaults to 4s (from 2s), so an archive
   doesn't write a stream of tiny objects to S3. A record still ends at the
   first group boundary at or past the minimum. This also packs audio, where

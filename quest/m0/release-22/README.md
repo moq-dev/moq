@@ -7,6 +7,8 @@ on 2026-10-12 with draft-22 media working both ways: the draft-22
 LOCATION_FILTER form (#4847), a clear FIRST_OBJECT at object 0 accepted
 (#5027), and moq-noq 1.3.5. A draft-22 peer (imquic main 925e3d83) can
 subscribe with any of the six filters and publish through the relay.
+The next 0.17 patch also fixes #5407's unset-clock crash and #5413's lost
+quiet edge.
 
 ## Plan
 
@@ -29,10 +31,16 @@ Decided 2026-10-08:
 
 The backports shipped in moq-relay 0.17.3 (#5119) and `@moq/net` 0.4.3
 (refreshed 2026-10-12). Draft-22 interop on 2026-10-12 then found FETCH still
-refused on draft-20+ sessions. This README's remaining work: once the child
-lands, cut the next 0.17 patch and `@moq/net` with it (`/bump`, then the
-release-plz PR), and tell the testers.
+refused on draft-20+ sessions. This README's remaining work: once the children
+land, cut the next 0.17 patch, `@moq/net`, and `@moq/publish` with them (`/bump`, then the
+release-plz PR), and tell the testers and the reporters of #5407 and #5413.
+
+Decided 2026-10-13: the same patch also carries two crash and availability
+fixes reported against the release line, an unset host clock and a quiet
+track's latest group lost after rejoin.
 
 ## Required
 
 - [Draft-20+ FETCH](/quest/m0/release-22/fetch.md) - backport #4971 so a draft-22 FETCH is served, not refused
+- [Unset host clock](/quest/m0/release-22/wall-clock-omit.md) - a publisher whose wall clock reads before 2020 omits the catalog clock instead of aborting the host
+- [Quiet latest group](/quest/m0/release-22/quiet-edge.md) - a late subscriber to a quiet track gets its latest group after rejoin, cache expiry, or takeover

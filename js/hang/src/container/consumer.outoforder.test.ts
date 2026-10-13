@@ -5,6 +5,14 @@ import { Format as LegacyFormat } from "./legacy.ts";
 
 // Standalone from consumer.test.ts so it only pulls the Legacy format, not the CMAF decoder.
 
+/** The next frame, passing over gaps and ends. */
+async function nextFrame(consumer: Consumer) {
+	for (;;) {
+		const next = await consumer.next();
+		if (!next || next.kind === "frame") return next;
+	}
+}
+
 function encodeLegacyFrame(timestamp: Time.Micro, payload: Uint8Array): Uint8Array {
 	const tsBytes = Varint.encode(timestamp);
 	const data = new Uint8Array(tsBytes.byteLength + payload.byteLength);
@@ -29,14 +37,16 @@ function publish(track: Track.Producer, sequence: number, millis: number) {
 	group.close();
 }
 
-/** Every group and frame the consumer will hand over right now, as [group, payload] pairs. */
+/** Every frame the consumer will hand over right now, as [group, payload] pairs. */
 async function drain(consumer: Consumer): Promise<[number, number | undefined][]> {
 	const seen: [number, number | undefined][] = [];
 	for (;;) {
-		const next = await Promise.race([consumer.next(), new Promise((resolve) => setTimeout(resolve, 50))]);
+		const next = await Promise.race([
+			consumer.next(),
+			new Promise<undefined>((resolve) => setTimeout(resolve, 50)),
+		]);
 		if (!next) break;
-		const { group, frame } = next as { group: number; frame?: { payload: Uint8Array } };
-		seen.push([group, frame?.payload[0]]);
+		if (next.kind === "frame") seen.push([next.group, next.frame.payload[0]]);
 	}
 	return seen;
 }
@@ -55,7 +65,7 @@ test("out-of-order groups are delivered rather than dropped", async () => {
 
 	// The live edge lands first, and delivery starts there rather than waiting.
 	publish(track, 3, 30);
-	expect((await consumer.next())?.frame?.payload).toEqual(new Uint8Array([3]));
+	expect((await nextFrame(consumer))?.frame.payload).toEqual(new Uint8Array([3]));
 
 	// The window's head follows it. Every group is still within both budgets, so all three
 	// are handed over even though each sits below the group already delivered.
@@ -63,8 +73,7 @@ test("out-of-order groups are delivered rather than dropped", async () => {
 	publish(track, 1, 10);
 	publish(track, 2, 20);
 
-	const delivered = (await drain(consumer)).filter(([, payload]) => payload !== undefined);
-	expect(delivered).toEqual([
+	expect(await drain(consumer)).toEqual([
 		[0, 0],
 		[1, 1],
 		[2, 2],
@@ -87,25 +96,25 @@ test("a below-cursor group still downloading is not truncated", async () => {
 	const live = new Group.Producer(3);
 	track.writeGroup(live);
 	publishFrame(live, 3000, 30);
-	expect((await consumer.next())?.frame?.payload[0]).toBe(30);
+	expect((await nextFrame(consumer))?.frame.payload[0]).toBe(30);
 
 	// A backlog group lands below the cursor, one frame at a time (mid-download).
 	const backlog = new Group.Producer(1);
 	track.writeGroup(backlog);
 	publishFrame(backlog, 1000, 10);
-	const first = await consumer.next();
+	const first = await nextFrame(consumer);
 	expect(first?.group).toBe(1);
-	expect(first?.frame?.payload[0]).toBe(10);
+	expect(first?.frame.payload[0]).toBe(10);
 
 	// The consumer finds the group's buffer empty while it is still open. It must wait
 	// rather than shift the group out, so the second frame still arrives.
-	const pending = consumer.next();
+	const pending = nextFrame(consumer);
 	publishFrame(backlog, 1500, 11);
 	backlog.close();
 
-	const second = (await pending) as { group: number; frame?: { payload: Uint8Array } };
-	expect(second.group).toBe(1);
-	expect(second.frame?.payload[0]).toBe(11);
+	const second = await pending;
+	expect(second?.group).toBe(1);
+	expect(second?.frame.payload[0]).toBe(11);
 
 	live.close();
 	track.close();
@@ -120,30 +129,24 @@ test("delayed older groups survive a floor established by two newer groups", asy
 		format: new LegacyFormat("data"),
 		maxDelay: Time.Milli(5000),
 	});
-	async function nextFrame() {
-		for (;;) {
-			const next = await consumer.next();
-			if (!next || next.frame) return next;
-		}
-	}
 	try {
 		publish(track, 3, 30);
-		expect((await nextFrame())?.group).toBe(3);
+		expect((await nextFrame(consumer))?.group).toBe(3);
 
 		const latest = new Group.Producer(4);
 		track.writeGroup(latest);
 		publishFrame(latest, 40, 4);
-		expect((await nextFrame())?.group).toBe(4);
+		expect((await nextFrame(consumer))?.group).toBe(4);
 
 		// Group 1's 10ms frame is valid history, below group 4's 30ms floor.
 		publish(track, 1, 10);
-		const backlog = await nextFrame();
+		const backlog = await nextFrame(consumer);
 		expect(backlog?.group).toBe(1);
-		expect(backlog?.frame?.timestamp).toBe(Time.Micro(10_000));
+		expect(backlog?.frame.timestamp).toBe(Time.Micro(10_000));
 
 		// Delivering the backlog must not erase the floor for group 4 itself.
 		publishFrame(latest, 29, 5);
-		await expect(nextFrame()).rejects.toThrow("below the previous group start");
+		await expect(nextFrame(consumer)).rejects.toThrow("below the previous group start");
 	} finally {
 		consumer.close();
 		track.close();

@@ -1111,7 +1111,14 @@ struct Media {
 
 impl Media {
 	async fn next(&mut self) -> Result<Option<MoqMediaFrame>, MoqError> {
-		self.inner.read().await?.map(media_frame).transpose()
+		loop {
+			match self.inner.read().await? {
+				Some(moq_mux::container::Read::Frame { frame, .. }) => return media_frame(frame).map(Some),
+				// The bindings carry frames only.
+				Some(moq_mux::container::Read::Gap | moq_mux::container::Read::End { .. }) => continue,
+				None => return Ok(None),
+			}
+		}
 	}
 }
 

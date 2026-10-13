@@ -68,11 +68,11 @@ async fn idle_viewer_does_not_wake_the_server() {
 		let polls = polls.load(Ordering::Relaxed) - start_polls;
 		let reads = reads.stats_reads() - start_reads;
 
-		// Nothing moves, so the only work left is the max-age refresh: one sample,
-		// and the deadline's poll plus the re-poll its own wake schedules.
+		// Nothing moves, so the only work left is the max-age refresh: one sample and
+		// one driver poll each. The deadline fires and re-arms inside that poll.
 		let refreshes = (IDLE.as_secs() / PROBE_MAX_AGE.as_secs()) as usize;
 		assert!(reads <= refreshes, "{version}: {reads} stats reads over {IDLE:?}");
-		assert!(polls <= 2 * refreshes, "{version}: {polls} driver polls over {IDLE:?}");
+		assert!(polls <= refreshes, "{version}: {polls} driver polls over {IDLE:?}");
 	}
 }
 

@@ -129,7 +129,7 @@ async function run(): Promise<void> {
 			for (;;) {
 				const next = await consumer.next();
 				if (!next) break;
-				const bytes = next.frame?.payload.byteLength ?? 0;
+				const bytes = next.kind === "frame" ? next.frame.payload.byteLength : 0;
 				if (bytes > 0) {
 					// The harness judges success by this marker, not the exit code: the
 					// @moq/web-transport NAPI addon can segfault during the runtime's exit

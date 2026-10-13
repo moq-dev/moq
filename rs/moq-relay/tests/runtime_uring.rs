@@ -759,3 +759,117 @@ async fn uring_auth_reports_distinct_quic_and_webtransport() {
 	running.abort();
 	let _ = running.await;
 }
+
+/// `listen.timeout` bounds every handshake phase from the first packet: TLS,
+/// HTTP/3 before CONNECT, and MoQ SETUP over raw QUIC and WebTransport. Each
+/// phase closes in its own error space.
+#[cfg(feature = "noq")]
+#[tokio::test]
+async fn uring_workers_bound_stalled_handshakes() {
+	use web_transport_moq::noq;
+	use web_transport_trait::Error as _;
+
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	if !supported() {
+		return;
+	}
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+	let mut config = uring_config(&cert, &key);
+	config.listen.timeout = Duration::from_millis(200);
+	let relay = Relay::load(config).await.expect("load relay");
+	let port = relay.addr().expect("workers bound an address").port();
+	let addr = SocketAddr::from(([127, 0, 0, 1], port));
+	let running = tokio::spawn(relay.run());
+
+	let mut config = moq_tokio::connect::Config::default();
+	config.tls.insecure = Some(true);
+	let tls = config.tls.build().expect("tls config");
+	let crypto = |alpn: &[u8]| {
+		let mut tls = tls.clone();
+		tls.alpn_protocols = vec![alpn.to_vec()];
+		let crypto = noq::crypto::rustls::QuicClientConfig::try_from(tls).expect("QUIC crypto");
+		noq::ClientConfig::new(std::sync::Arc::new(crypto))
+	};
+	let client = noq::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("client");
+
+	// TLS: the relay never hears more than the ClientHello, so only its own
+	// deadline can end the handshake before the idle timeout does.
+	let hop = stall_after_hello(addr).await;
+	let stalled = client.connect_with(crypto(b"moq-lite-06"), hop, "localhost").unwrap();
+	let error = tokio::time::timeout(TIMEOUT, async {
+		match stalled.await {
+			Ok(conn) => conn.closed().await,
+			Err(err) => err,
+		}
+	})
+	.await
+	.expect("listener did not bound the QUIC handshake");
+	assert!(
+		!matches!(error, noq::ConnectionError::TimedOut),
+		"the relay must close a stalled QUIC handshake: {error}"
+	);
+
+	// `h3` stalls before CONNECT, where only HTTP/3 codes apply.
+	const H3_GENERAL_PROTOCOL_ERROR: u32 = 0x0101;
+	let timeout = moq_net::SessionError::Timeout.to_code();
+	for (scheme, code) in [("moql", timeout), ("https", timeout), ("h3", H3_GENERAL_PROTOCOL_ERROR)] {
+		let session = tokio::time::timeout(TIMEOUT, async {
+			let alpn: &[u8] = if scheme == "moql" { b"moq-lite-06" } else { b"h3" };
+			let conn = client
+				.connect_with(crypto(alpn), addr, "localhost")
+				.unwrap()
+				.await
+				.unwrap();
+			if scheme == "https" {
+				let url: url::Url = format!("https://{addr}/stalled").parse().unwrap();
+				let request =
+					web_transport_moq::proto::ConnectRequest::new(url).with_protocol("moq-lite-06".to_string());
+				web_transport_moq::Session::connect(conn, request).await.unwrap()
+			} else {
+				web_transport_moq::Session::raw(conn)
+			}
+		})
+		.await
+		.expect("transport handshake timeout");
+		let error = tokio::time::timeout(TIMEOUT, session.closed())
+			.await
+			.expect("listener did not enforce its handshake deadline");
+		// The WebTransport wrapper translates its close code back to the MoQ value.
+		assert_eq!(
+			error.session_error().map(|(code, _)| code),
+			Some(code),
+			"{scheme}: {error}"
+		);
+	}
+	client.close(noq::VarInt::from_u32(0), b"test complete");
+	client.wait_idle().await;
+	running.abort();
+	let _ = running.await;
+}
+
+/// A UDP hop to `server` that forwards one client's datagrams until the server
+/// first answers, and every answer back, so the server never sees the client
+/// finish its handshake. Returns the address to dial.
+#[cfg(feature = "noq")]
+async fn stall_after_hello(server: SocketAddr) -> SocketAddr {
+	let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind hop");
+	let addr = socket.local_addr().expect("hop address");
+	tokio::spawn(async move {
+		let mut client = None;
+		let mut answered = false;
+		let mut buf = vec![0; usize::from(u16::MAX)];
+		while let Ok((len, from)) = socket.recv_from(&mut buf).await {
+			if from == server {
+				answered = true;
+				if let Some(client) = client {
+					let _ = socket.send_to(&buf[..len], client).await;
+				}
+			} else if !answered {
+				client = Some(from);
+				let _ = socket.send_to(&buf[..len], server).await;
+			}
+		}
+	});
+	addr
+}

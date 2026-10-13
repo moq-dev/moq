@@ -1173,12 +1173,7 @@ pub(crate) mod tests {
 		let (name, config) = catalog.video.renditions.iter().next().expect("a video rendition");
 		let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
 		let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
-		let first = Consumer::new(track, container)
-			.read()
-			.await
-			.unwrap()
-			.expect("a video frame")
-			.timestamp;
+		let first = next_frame(&mut Consumer::new(track, container)).await.timestamp;
 		assert!(
 			first.as_micros() < Duration::from_secs(5).as_micros(),
 			"the feed's own PTS: {first:?}"
@@ -1454,11 +1449,22 @@ pub(crate) mod tests {
 	async fn read_frame(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<u8> {
 		let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy(moq_mux::container::Kind::Data));
-		let frame = tokio::time::timeout(Duration::from_secs(1), reader.read())
+		let frame = tokio::time::timeout(Duration::from_secs(1), next_frame(&mut reader))
 			.await
-			.expect("verbatim read timed out")
-			.unwrap()
-			.expect("a published verbatim frame");
+			.expect("verbatim read timed out");
 		frame.payload.to_vec()
+	}
+
+	/// The next frame, passing over gaps and ends.
+	async fn next_frame<C: moq_mux::container::Container>(reader: &mut Consumer<C>) -> moq_mux::container::Frame
+	where
+		C::Error: std::fmt::Debug,
+	{
+		loop {
+			let read = reader.read().await.unwrap().expect("a published frame");
+			if let moq_mux::container::Read::Frame { frame, .. } = read {
+				return frame;
+			}
+		}
 	}
 }

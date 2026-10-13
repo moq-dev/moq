@@ -3,8 +3,7 @@
 ## Goal
 
 The work in flight now, in two independent tracks. Relay hardening: legal
-moq-transport input never fails a session ahead of Seattle interop on
-2026-10-12, every resource a peer can make the relay hold is bounded by what
+moq-transport input never fails a session in current interop coverage, every resource a peer can make the relay hold is bounded by what
 it sent or by a budget, and no peer input panics the process. Identity: nothing treats who published a route as what it carries; a path and
 the epoch on its route are the only content identity, and every first-party
 publisher that can restart mints a fresh epoch, so #4741 stalls nobody.
@@ -53,7 +52,8 @@ connection idles out.
 Audio playout: the jitter target is default in both languages (#4162); the
 [line](/quest/m1/audio-jitter-target/README.md) moved to m1 in the
 2026-10-08 audit, since only a manual browser proof and a native trace replay
-remain and no release waits on them.
+remain and the release only requires the production clock and playback contracts
+that depend on them.
 
 Interop on main (2026-10-13): the cross-client matrix fails with `unroutable`
 whenever WebSocket wins the connect race: since #5294, #4180's upgrade
@@ -61,6 +61,11 @@ retires epochless handles before its held `Restart` reaches anyone. The
 released wire-compat step aborts on planned breaks the last release made
 stale. Both stay in m0 (maintainer, 2026-10-13) and rank with TS duration
 fidelity: a red Interop hides real regressions.
+
+Crashes (2026-10-13, #5407): a publisher on a host whose wall clock reads
+before 2020 panics, and `panic = "abort"` turns any library panic into a
+dead host app. Both joined m0 (maintainer): fix the unset clock at its
+source, then unwind so a panic closes only its connection.
 
 Nightly on main (triaged 2026-10-13): two build breaks from 2026-10-11 get
 quests here. The nixpkgs bump broke the Linux zigbuild release builds, and
@@ -72,12 +77,11 @@ have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
 
 ## Required
 
-- [CI cache release](/quest/m0/ci-cache-release.md) - a stable cache server supports anonymous reads and OIDC writes restricted to the main warmer
-- [Self-hosted CI](/quest/m0/self-hosted-ci.md) - same-repo Check and Test run on a self-hosted NixOS runner with a main-written local cache, behind a `CI_RUNNER` kill switch
-- [CI host](/quest/m0/ci-host.md) - the maintainer brings up the spare desktop as the `moq-ci` and `moq-gpu` runner host
-- [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.5, before Seattle, then draft-20+ FETCH
+- [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.5, then draft-20+ FETCH
 - [TS duration fidelity](/quest/m0/ts-duration-fidelity.md) - Interop's TS compliance captures the whole round-tripped stream again, fixing a regression that turns Interop red on main
 - [Upgrade restarts epochless broadcasts](/quest/m0/upgrade-unroutable.md) - a WebSocket-to-QUIC upgrade retires epochless handles only once their `Restart` is delivered, and first-party consumers follow it, fixing Interop's `unroutable` rounds
+- [Unset host clock](/quest/m0/wall-clock-omit.md) - a publisher whose wall clock reads before 2020 publishes without a catalog clock instead of panicking
+- [Panic isolation](/quest/m0/panic-isolation.md) - unwind, ignore lock poison, and supervise every task, so a panic closes only its connection or exits on a long-lived task
 - [Wire compat on main](/quest/m0/wire-compat-green.md) - the nightly released-wire step runs again: planned breaks re-measured against the new releases, and a released-API client for the released JS lanes
 - [Release builds link](/quest/m0/release-link.md) - the Linux zigbuild release binaries and moq-gst packages link again after the 2026-10-11 nixpkgs bump, so the next release cut can publish
 - [Fuzz builds under LTO](/quest/m0/fuzz-lto.md) - the nightly fuzz targets build again despite the release profile's fat LTO

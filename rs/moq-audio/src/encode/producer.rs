@@ -565,6 +565,18 @@ mod tests {
 	use crate::decode::{Consumer as AudioConsumer, Options as DecodeOptions};
 	use crate::{Activity, Format, Layout};
 
+	/// The next published packet, passing over gaps and ends.
+	async fn packet<F: moq_mux::container::Container>(reader: &mut moq_mux::container::Consumer<F>) -> Option<MuxFrame>
+	where
+		F::Error: std::fmt::Debug,
+	{
+		loop {
+			if let moq_mux::container::Read::Frame { frame, .. } = reader.read().await.unwrap()? {
+				return Some(frame);
+			}
+		}
+	}
+
 	#[tokio::test]
 	async fn demand_follows_subscribers_and_closes_with_the_producer() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -699,7 +711,7 @@ mod tests {
 		producer.finish().unwrap();
 
 		let mut packets = 0;
-		while track.read().await.unwrap().is_some() {
+		while packet(&mut track).await.is_some() {
 			packets += 1;
 		}
 		assert_eq!(packets, 11);
@@ -782,8 +794,8 @@ mod tests {
 		producer.reanchor();
 		producer.finish().unwrap();
 
-		assert!(track.read().await.unwrap().is_some());
-		assert!(track.read().await.unwrap().is_none());
+		assert!(packet(&mut track).await.is_some());
+		assert!(packet(&mut track).await.is_none());
 	}
 
 	/// A codec reset starts a new pre-skip interval at the receiver too.
@@ -928,7 +940,7 @@ mod tests {
 				producer.reanchor();
 			}
 			producer.write(frame).unwrap();
-			let read = reader.read().await.unwrap().expect("a packet per full frame");
+			let read = packet(&mut reader).await.expect("a packet per full frame");
 			pts.push(read.timestamp.as_micros());
 		}
 		pts
@@ -1118,7 +1130,7 @@ mod tests {
 			producer.write(&pcm_frame(&[0.1; 4 * 1024], anchor_us)).unwrap();
 			let mut pts = Vec::new();
 			for _ in 0..4 {
-				pts.push(reader.read().await.unwrap().expect("a packet").timestamp.as_micros());
+				pts.push(packet(&mut reader).await.expect("a packet").timestamp.as_micros());
 			}
 			pts
 		}
@@ -1167,7 +1179,7 @@ mod tests {
 		// A second of audio, so the filter's delay is nowhere near the whole write.
 		producer.write(&pcm_frame(&vec![0.1; 44_100], 1_000_000)).unwrap();
 
-		let first = reader.read().await.unwrap().expect("a packet");
+		let first = packet(&mut reader).await.expect("a packet");
 		assert_eq!(first.timestamp.as_micros(), 1_000_000);
 	}
 
@@ -1219,7 +1231,7 @@ mod tests {
 
 		producer.write(&full_frame(0)).unwrap();
 		producer.finish().unwrap();
-		assert!(track.read().await.unwrap().is_some());
+		assert!(packet(&mut track).await.is_some());
 		producer.abort(moq_net::Error::Cancel);
 	}
 

@@ -69,7 +69,7 @@ offering both:
 - No JS or binding mirror. js/publish derives its clock from
   `performance.timeOrigin`, so every broadcast on a page already shares one,
   and no binding exposes a mux `Clock`; bindings get theirs through
-  [the shared timebase](/quest/m2/ffi-timebase.md).
+  [the shared timebase](/quest/m1/ffi-timebase.md).
 
 Tests: a micro catalog clock written before anything fixes the clock is
 advertised unchanged and `Producer::clock().wall()` equals it; a millisecond

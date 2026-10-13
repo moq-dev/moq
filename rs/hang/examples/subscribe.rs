@@ -115,13 +115,17 @@ async fn play(consumer: moq_net::origin::Consumer, announce: moq_net::announce::
 		moq_mux::container::Consumer::new(track_consumer, moq_mux::catalog::hang::Container::try_from(config)?);
 
 	// Read frames in latency-bounded presentation order.
-	while let Some(frame) = ordered.read().await? {
-		tracing::info!(
-			timestamp = ?frame.timestamp,
-			keyframe = frame.keyframe,
-			bytes = frame.payload.len(),
-			"received frame"
-		);
+	while let Some(read) = ordered.read().await? {
+		match read {
+			moq_mux::container::Read::Frame { frame, .. } => tracing::info!(
+				timestamp = ?frame.timestamp,
+				keyframe = frame.keyframe,
+				bytes = frame.payload.len(),
+				"received frame"
+			),
+			moq_mux::container::Read::Gap => tracing::info!("media skipped"),
+			moq_mux::container::Read::End { end, .. } => tracing::info!(?end, "media stopped"),
+		}
 	}
 
 	Ok(())

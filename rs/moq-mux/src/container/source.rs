@@ -315,7 +315,7 @@ impl ExportSource {
 		loop {
 			match ready!(self.poll_event(waiter))? {
 				Some(Event::Frame(frame)) => return Poll::Ready(Ok(Some(frame))),
-				Some(Event::GroupEnd | Event::FrameEnd(_)) => continue,
+				Some(Event::GroupEnd | Event::FrameEnd { .. }) => continue,
 				None => return Poll::Ready(Ok(None)),
 			}
 		}

@@ -230,8 +230,11 @@ impl Track {
 	/// Pull the next RTP-ready frame. Returns `None` when the track ends.
 	pub async fn next(&mut self) -> Result<Option<PacketizedFrame>> {
 		loop {
-			let Some(frame) = self.consumer.read().await? else {
-				return Ok(None);
+			let frame = match self.consumer.read().await? {
+				Some(moq_mux::container::Read::Frame { frame, .. }) => frame,
+				// RTP sequence numbers and timestamps already show the hole to a receiver.
+				Some(moq_mux::container::Read::Gap | moq_mux::container::Read::End { .. }) => continue,
+				None => return Ok(None),
 			};
 			let payload = match &self.convert {
 				TrackConvert::Passthrough => frame.payload,

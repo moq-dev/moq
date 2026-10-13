@@ -1815,7 +1815,7 @@ async fn webvtt_samples_become_timed_text_with_source_metadata() {
 		track,
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
-	let frame = reader.read().await.unwrap().unwrap();
+	let frame = reader.read_frame().await.unwrap().unwrap();
 	assert_eq!(frame.timestamp.as_micros(), 250_000);
 	assert_eq!(
 		&frame.payload[..],
@@ -1885,7 +1885,7 @@ async fn webvtt_kind_and_lone_cr_terminators() {
 		track,
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
-	let frame = reader.read().await.unwrap().unwrap();
+	let frame = reader.read_frame().await.unwrap().unwrap();
 	assert_eq!(
 		&frame.payload[..],
 		b"WEBVTT\nKind: captions\n\n00:00:00.250 --> 00:00:01.500\nHello\nworld\n\n"
@@ -1996,6 +1996,6 @@ async fn webvtt_sub_millisecond_cue_stays_positive() {
 		track,
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
-	let frame = reader.read().await.unwrap().unwrap();
+	let frame = reader.read_frame().await.unwrap().unwrap();
 	assert_eq!(&frame.payload[..], b"WEBVTT\n\n00:00:00.250 --> 00:00:00.251\nhi\n\n");
 }
