@@ -8,7 +8,7 @@ import type * as Epoch from "./epoch.ts";
 import { NotFound } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import { Route } from "./hop.ts";
-import { hooks, type TrackSequence } from "./internal.ts";
+import { hooks, TrackSequences } from "./internal.ts";
 import * as Path from "./path.ts";
 import * as track from "./track.ts";
 import { untilAborted } from "./util/abort.ts";
@@ -57,7 +57,8 @@ class BroadcastState {
 	// publisher that has started pulling them. The counterpart of a live Rust `broadcast::Dynamic`;
 	// without one, a track nobody publishes is `NotFound` rather than a request nobody will answer.
 	served = false;
-	sequences = new Map<string, TrackSequence>();
+	// Each name's sequence namespace, shared by every producer of the name, created or requested.
+	sequences = new TrackSequences();
 	// Live consumer handles sharing this state (see {@link Consumer.clone}). The broadcast
 	// closes once the last one closes, so a shared consumer can be handed to several callers.
 	consumers = 0;
@@ -169,7 +170,7 @@ function lookup(state: BroadcastState, name: string): track.Producer | undefined
 // weak-dedup: a requested producer is cached in `state.requests` so every subscription and info
 // lookup fans out from one request instead of opening another. Whoever serves it closes it once
 // unused (the consuming wire tears the upstream down when its last subscriber leaves), which evicts
-// the entry so a later subscribe requests the track again, continuing its sequences.
+// the entry so a later subscribe requests the track again.
 function logical(state: BroadcastState, name: string): { producer: track.Producer; requested: boolean } {
 	if (state.closed.peek() !== undefined) {
 		throw new Error("broadcast is closed");
@@ -279,6 +280,31 @@ async function fetchGroup(
 	}
 }
 
+// Remove and return the request queued for `name`, if no handler has taken it yet.
+function takeQueued(state: BroadcastState, name: string): track.Request | undefined {
+	const queued = state.requested.peek().find((request) => request.name === name);
+	if (!queued) return undefined;
+	state.requested.mutate((requests) => {
+		requests.splice(requests.indexOf(queued), 1);
+	});
+	return queued;
+}
+
+// Serve `producer` as the broadcast's track for its name.
+function adopt(state: BroadcastState, producer: track.Producer): void {
+	const lookups = state.lookups.get(producer) ?? new Lookups();
+	state.lookups.set(producer, lookups);
+	watchDemand(state, producer, lookups);
+	state.tracks.set(producer.name, producer);
+
+	// A finished track keeps serving its cache, so only an abort evicts it.
+	void producer.closed.then((closed) => {
+		if (closed instanceof Error && state.tracks.get(producer.name) === producer) {
+			state.tracks.delete(producer.name);
+		}
+	});
+}
+
 let makeDemand: (state: BroadcastState) => Demand;
 
 /** A watch-only view of demand for any track in a broadcast. */
@@ -357,35 +383,41 @@ export class Producer {
 		return makeConsumer({ state: this.#state, path: this.#path });
 	}
 
-	/** Insert a track that is served directly, without an on-demand request round-trip. */
-	insertTrack(track: track.Producer): void {
+	/**
+	 * Create a track, insert it into the broadcast, and return its producer.
+	 *
+	 * A request still queued for the name is answered with this track, so its subscribers read
+	 * from the returned producer. A request a handler has already taken stays a duplicate.
+	 * An append on the track throws if it would reuse a sequence an earlier track of the name
+	 * wrote in this broadcast, so a replacement writes its first group explicitly. Throws if an
+	 * open track or a live request already holds the name.
+	 */
+	createTrack(name: string, info: Partial<track.Info> = {}): track.Producer {
 		if (this.#state.closed.peek() !== undefined) {
 			throw new Error("broadcast is closed");
 		}
 
-		// One logical track per name: an open inserted track or a live request already serves it.
-		const live = [this.#state.tracks.get(track.name), this.#state.requests.get(track.name)];
-		if (live.some((existing) => existing && existing.closed.peek() === undefined)) {
-			throw new Error(`duplicate track: ${track.name}`);
+		const request = takeQueued(this.#state, name);
+		if (request) {
+			const producer = request.accept(info);
+			// The application owns it now: a lookup that opened the request must not close it.
+			const lookups = this.#state.lookups.get(producer);
+			if (lookups) lookups.opened = false;
+			this.#state.requests.delete(name);
+			adopt(this.#state, producer);
+			return producer;
 		}
 
-		const lookups = this.#state.lookups.get(track) ?? new Lookups();
-		this.#state.lookups.set(track, lookups);
-		watchDemand(this.#state, track, lookups);
-		this.#state.tracks.set(track.name, track);
+		// One logical track per name: an open track or a live request already serves it.
+		// A request a handler already pulled stays duplicate, as in Rust.
+		const live = [this.#state.tracks.get(name), this.#state.requests.get(name)];
+		if (live.some((existing) => existing && existing.closed.peek() === undefined)) {
+			throw new Error(`duplicate track: ${name}`);
+		}
 
-		// A finished track keeps serving its cache, so only an abort evicts it.
-		void track.closed.then((closed) => {
-			if (closed instanceof Error && this.#state.tracks.get(track.name) === track) {
-				this.#state.tracks.delete(track.name);
-			}
-		});
-	}
-
-	/** Create a track, insert it into the broadcast, and return its producer. */
-	createTrack(name: string, info: Partial<track.Info> = {}): track.Producer {
 		const producer = new track.Producer(name).accept(info);
-		this.insertTrack(producer);
+		hooks.bindSequence(producer, this.#state.sequences.get(name));
+		adopt(this.#state, producer);
 		return producer;
 	}
 

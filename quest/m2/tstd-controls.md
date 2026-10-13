@@ -4,8 +4,8 @@
 
 `just test ts-tstd` has a negative control that overflows the video multiplex
 buffer (MB), and a positive reference that carries AAC the way a broadcast
-encoder does. Every buffer and codec the export emits then has a control on
-each side.
+encoder does. These close the named MB/AAC gaps; they do not establish
+coverage of every buffer, codec or layout the exporter can encounter.
 
 ## Plan
 
@@ -22,3 +22,8 @@ The only positive reference carries MPEG audio, but the export emits AAC.
     shared.
 - Each control fails or passes for the stated reason, and `interop.yml`
   runs them.
+
+## Related
+
+- [TS validation](/quest/m1/ts-reliability/validation.md) - reports supported model coverage and assumptions without claiming full conformance
+- [PSI system buffer](/quest/m1/tstd/psi-runs.md) - owns the separate system-buffer assertion and regression
