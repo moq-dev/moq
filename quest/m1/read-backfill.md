@@ -15,9 +15,17 @@ delivers a group that arrives below the cursor as a late backfill; Rust
 
 - ✅ Decided 2026-10-13: both drop, matching Rust. Not chosen: both deliver,
   flagged so readers can skip; leave it open.
-- Change the JS consumer to discard groups below the cursor, and add a test
-  mirroring Rust's: a reordered group older than the cursor is never yielded
-  and no extra `Gap` appears.
+- Match Rust's startup first. Groups are served newest-first, so the head of a
+  retained window can arrive after the live edge; JS sets its cursor from the
+  first arrival, so dropping alone would lose valid startup media
+  (`consumer.outoforder.test.ts` covers that order). Rust keeps it by waiting
+  for an explicit start floor under the max-delay budget
+  (`startup_keeps_late_arriving_head_group_within_max_delay`); give JS the same
+  startup so the window head is never below the cursor. If that is not enough
+  to keep startup media, stop and re-plan rather than drop it.
+- Then change the JS consumer to discard groups below the cursor, and add a
+  test mirroring Rust's: a reordered group older than the cursor is never
+  yielded and no extra `Gap` appears.
 - Check JS readers that relied on backfill (watch's audio/video decoders,
   `Sync`, the arrivals handle from #5311 if it has landed) and adjust them.
 
