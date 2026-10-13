@@ -14,7 +14,9 @@ platform break still blocks the merge.
 - The merge queue builds up to five entries at once and macOS is capped at
   five concurrent jobs, so one macOS job per entry is what keeps the queue
   from waiting on runners. Share one target directory across the checks
-  inside it.
+  inside it. Nightly and release macOS jobs share the cap; measure how often
+  they overlap the queue before reserving capacity or lowering the queue's
+  build limit.
 - `merge_group` has no path filters. A cheap Linux job can ask the existing
   dispatcher whether the merge touches anything platform code compiles, and
   the OS jobs skip otherwise. A skipped job satisfies a required check.
