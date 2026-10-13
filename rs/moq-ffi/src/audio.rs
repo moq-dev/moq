@@ -1,7 +1,7 @@
 //! Raw-audio import/export via [`moq_audio`].
 //!
 //! Sibling to [`media::MoqMediaTrackProducer`](crate::media::MoqMediaTrackProducer)
-//! and [`media::MoqMediaContainerConsumer`](crate::media::MoqMediaContainerConsumer):
+//! and [`media::MoqMediaTrackConsumer`](crate::media::MoqMediaTrackConsumer):
 //! those deal in already-encoded frames, these deal in PCM and run
 //! Opus encode/decode inside the FFI boundary.
 

@@ -31,7 +31,7 @@ Rust-to-Rust and Rust-to-JS sessions never hit these; third-party peers do.
   buffered target probably hides the subscriber's FIN; read targets there
   too. Decided 2026-10-12: our subscribers keep sending no target. Unit-test
   the publishers; the Increase-level response belongs to
-  [Discover capacity](/quest/m1/quic-probe.md).
+  [Discover capacity](/quest/m2/quic-probe.md).
 - Control decode errors (#5259). Decided 2026-10-12: any decode error on a
   control stream closes the session with PROTOCOL_VIOLATION, not just the two
   cases cited (GOAWAY URI over 8,192 bytes, Message Length mismatch).
@@ -63,4 +63,4 @@ Public API: none. Wire: none; the behavior now matches the draft.
 
 ## Related
 
-- [Malformed moq-transport input](/quest/m2/ietf-malformed-close.md) - the same rule for draft-18 and draft-21
+- [Malformed moq-transport input](/quest/m1/ietf-malformed-close.md) - the same rule for draft-18 and draft-21

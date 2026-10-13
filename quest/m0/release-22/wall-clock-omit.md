@@ -25,10 +25,6 @@ before. Rejected: a breaking moq-mux 0.11.0 cut from `release`, which takes
 the number `main`'s next breaking release needs, and an additive public
 accessor, the shim pattern the repo avoids.
 
-## Required
-
-- [Unset host clock](/quest/m0/wall-clock-omit.md) - lands the fix on `main` first
-
 ## Closes
 
 - [#5407](https://github.com/moq-dev/moq/issues/5407) - moq-mux panics when the system clock is before 2020

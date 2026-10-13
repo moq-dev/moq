@@ -36,16 +36,6 @@ recovery-point SEI does not always promise immediate recovery, and HEVC CRA,
 RADL and RASL do not have identical reference rules. Continuous subscribers
 must retain valid pictures.
 
-For raw fallback, reuse the passthrough quest's packet/position and schedule
-oracle. Extend its fault coverage to compare surviving packets against their exact positions
-in the admitted source interval, including null packets, tables, unknown
-PIDs and adaptation bytes. Assert preserved gaps in the release schedule,
-no rewriting or duplication, and observed loss counters. A dropped object
-may contain part of a PES or the next acquisition information; record when
-decode is unavailable rather than claiming an unchanged-byte proof also
-proves decoder conformance. Whole MPTS coverage includes programs with
-unaligned recovery points and clocks.
-
 Short deterministic arms run on relevant PRs. Long drift and impairment
 arms run nightly with failure artifacts. Keep byte-position PCR accuracy
 and measured release timing as separate checks.
@@ -53,8 +43,6 @@ and measured release timing as separate checks.
 ## Required
 
 - [Automated validation](/quest/m1/ts-reliability/validation.md) - shared graders, profiles and known-bad controls
-- [TS passthrough export](/quest/m1/ts-passthrough-export.md) - supplies the raw egress exercised by the loss matrix
-
 ## Related
 
 - [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - trims after a gap

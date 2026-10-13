@@ -2,27 +2,21 @@
 
 ## Goal
 
-The `release` branch and crates.io carry the neutral `Surface::Vulkan`, the
-Vulkan Video encoder, VA-API import of an external Vulkan image, and the
-vendor-neutral GPU capacity and health report, so a consumer pinned to
-`release` (moq.pro is) can drop its vendor code, its GPU admission included.
+The next breaking release carries the neutral `Surface::Vulkan`, Vulkan
+Video encode on AMD, and VA-API import of external Vulkan images on Intel.
+Both vendor proofs validate the input surface before publication.
 
 ## Plan
 
-Release them together: the VA-API and AMD proofs are what show the
-surface is right, and shipping it before them risks a second breaking change.
-
-The surface is a breaking `moq-video` change on `main`, and releases are
-patch-only for now (decided 2026-10-02). Open, for the
-maintainer at release time:
-
-- Backport the moq-video change set onto `release` as a moq-video minor bump
-  (recommended if no other crate's public API exposes the changed types).
-- Wait for the next cut of `main` into `release`, which also brings its other
-  breaking changes to every consumer.
+Decided 2026-10-13: ship these changes in the next main-to-release cut.
+GPU capacity and health reporting is additive and remains separate. This is
+a publication condition; the implementation and vendor proofs gate m1.
 
 ## Required
 
-- [Vulkan Video encode on AMD](/quest/m2/vulkan-encode.md) - the AMD encoder
-- [VA-API encodes an external Vulkan image](/quest/m2/vaapi-vulkan-import.md) - the Intel proof
-- [GPU capacity and health](/quest/m2/gpu-health.md) - keyed by the same device identity; moq.pro's admission still needs vendor code without it
+- [Vulkan Video encode on AMD](/quest/m1/vulkan-encode.md) - AMD proof
+- [VA-API Vulkan import](/quest/m1/vaapi-vulkan-import.md) - Intel proof
+
+## Related
+
+- [GPU health](/quest/m2/gpu-health.md) - later reporting, not a surface release gate

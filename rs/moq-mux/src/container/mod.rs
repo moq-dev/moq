@@ -90,7 +90,8 @@ pub struct Frame {
 	/// Sample duration in the frame's own scale, when the container reports it.
 	///
 	/// CMAF carries a per-sample duration (trun sample-duration). Legacy and LOC
-	/// can fill it from a duration marker when reading a fetched group. Streaming
+	/// can fill it from a duration marker that has already landed when a
+	/// [`GroupConsumer`] reads the frame, as in a fetched group. Streaming
 	/// muxers receive the later endpoint separately, so media stays immediately available.
 	/// The [`Consumer`] adds it to `timestamp` to learn how far a group has
 	/// presented, so it can advance to a newer group as soon as the gap is

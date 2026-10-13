@@ -120,7 +120,12 @@ jobs:
       # it; the action refuses to publish from a pull request. It holds
       # dev-profile artifacts, which is why `just obs ci` builds moq-ffi in debug
       # rather than the preset's release.
+      #
+      # Skipped on a `main` push, where the action would save: this job builds a
+      # sliver of the workspace, and its entry, being newest, is the one every
+      # pull request then restores in place of the warmer's.
       - name: Rust cache
+        if: github.ref != 'refs/heads/main'
         uses: ./.github/actions/rust-cache
 
       # The same recipe a developer runs on Linux. Warnings are errors here, via

@@ -30,4 +30,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Benchmark regressions in CI](/quest/m1/bench-ci.md) - tracks these targets on PRs and nightly
+- [Benchmark regressions in CI](/quest/m2/bench-ci.md) - tracks these targets on PRs and nightly

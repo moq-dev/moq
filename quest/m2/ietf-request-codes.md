@@ -73,4 +73,4 @@ drafts.
 
 ## Related
 
-- [Malformed moq-transport input](/quest/m2/ietf-malformed-close.md) - the session-level half of the same validator report
+- [Malformed moq-transport input](/quest/m1/ietf-malformed-close.md) - the session-level half of the same validator report
