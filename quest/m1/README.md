@@ -51,6 +51,9 @@ Imported 2026-10-12 from GitHub issues: the 0.17 warm FETCH stall and the
 moq-lite malformed-input closes rank just below Dropped sources, and #5347
 folded into Dropped sources.
 
+Added 2026-10-13 as a #5084 follow-up: Stats traffic resume, ranked between
+QoS and HTTP fetch stats with the other stats work.
+
 Added 2026-10-12 as PR follow-ups: fake timers for the JS pool
 tests (#5355), duration parser defaults (#5350), and cancelled origin
 demand (#5214), each ranked beside the work it shares code with.
@@ -139,6 +142,7 @@ demand (#5214), each ranked beside the work it shares code with.
 - [JS PROBE on demand](/quest/m1/probe-on-demand-js.md) - js/net opens PROBE only while something reads the estimate
 - [Own the QUIC stack](/quest/m1/quic/README.md) - quinn hard-forked in-tree as `moq-quic`, carrying BBR, reliable reset, hierarchical scheduling, peer limits, and endpoint sharding
 - [QoS](/quest/m1/qos/README.md) - broadcast health: relay starvation and timeliness histograms
+- [Stats traffic resume](/quest/m1/stats-traffic-resume.md) - the aggregator's merged per-path traffic never lowers a counter when a departed node resumes in the same epoch
 - [HTTP fetch stats](/quest/m1/http-fetch-stats.md) - each HTTP `/fetch` counts one `requests` and its bytes under the token's tier and root, not a session
 - [Session outcomes](/quest/m1/session-outcomes.md) - the relay's session stats count refusals by reason and ends by kind, per root and tier, including refusals an embedder records on its stats handle
 - [Typed refusal reason](/quest/m1/refusal-reason.md) - an auth server's 403 names the reason (including `expired`) and the root and tier, so the relay's session outcomes count and attribute refusals
