@@ -1300,8 +1300,10 @@ impl StreamListeners {
 		let rx = self.rx.as_mut()?;
 		// Never empty: `serve` spawns a loop per listener before setting `rx`.
 		let died = futures::future::select_all(self.tasks.iter_mut());
+		// The channel closes only once every loop is gone, which can be seen before
+		// the dead loop's handle resolves, so wait for that handle to say why.
 		let (res, index, _) = tokio::select! {
-			request = rx.recv() => return request.map(Ok),
+			Some(request) = rx.recv() => return Some(Ok(request)),
 			died = died => died,
 		};
 		// Stop for good, so a later call never polls the finished handle; `shutdown`
@@ -1805,6 +1807,28 @@ impl Request {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A dead loop's channel closes before its handle resolves; that close must not
+	/// read as a clean stop, or `accept` would disable the stream arm and hang.
+	#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+	#[tokio::test]
+	async fn a_closed_channel_still_reports_the_dead_loop() {
+		let mut streams = StreamListeners::new(
+			Vec::new(),
+			Default::default(),
+			None,
+			#[cfg(all(feature = "uds", unix))]
+			None,
+		);
+		let (tx, rx) = tokio::sync::mpsc::channel(1);
+		drop(tx);
+		streams.rx = Some(rx);
+		// Not polled until `recv` yields on this single-threaded runtime.
+		streams.tasks.push(tokio::spawn(async { panic!("injected") }));
+
+		let died = streams.recv().await;
+		assert!(matches!(died, Some(Err(err)) if err.is_panic()));
+	}
 
 	#[cfg(all(not(feature = "noq"), feature = "_certs"))]
 	#[test]
