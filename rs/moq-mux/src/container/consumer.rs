@@ -192,6 +192,11 @@ impl<F: Container> Consumer<F> {
 		self.markers
 	}
 
+	/// The group sequence of the last event read.
+	pub(crate) fn group(&self) -> u64 {
+		self.group
+	}
+
 	/// Read the next frame from the track.
 	///
 	/// This method handles timestamp decoding, group ordering, and age management

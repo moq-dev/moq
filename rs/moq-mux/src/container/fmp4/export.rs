@@ -47,12 +47,11 @@ const INIT_QUEUE: Duration = Duration::from_secs(30);
 /// and H.265 whose catalog codec string and dimensions determine the sample entry are
 /// described at the first catalog, as avc3 or hev1 with parameter sets in the samples. From
 /// then on the track set is fixed: a rendition that leaves the catalog, as a disabled one
-/// (`enabled: false`) does, keeps its track and subscription and is read to its own end, so
-/// it idles until it returns. One whose track ended meanwhile is resubscribed on its return,
-/// under the track it was declared as, when its sample entry is unchanged. That comparison
-/// covers the catalog-derived record, so an Annex-B encoder that restarts with a new
-/// parameter set can return. A new rendition, a changed sample entry, or a return that
-/// replays media already written fails the export.
+/// (`enabled: false`) does, is unsubscribed and idles. On its return it is resubscribed after
+/// the last group read, under the track it was declared as, when its sample entry is
+/// unchanged. That comparison covers the catalog-derived record, so an Annex-B encoder that
+/// restarts with a new parameter set can return. A new rendition, a changed sample entry, or
+/// a return that replays media already written fails the export.
 ///
 /// [`next_chunk`](Self::next_chunk) returns the same bytes as a [`Chunk`], which
 /// separates the init segment from a [`Fragment`] carrying whether it begins at a
@@ -194,12 +193,8 @@ struct Declaration {
 }
 
 struct Fmp4Track {
-	/// The rendition's subscription. One that leaves the catalog after the init keeps it and
-	/// is read to its own end, so a disabled rendition idles until it re-enables.
-	source: ExportSource,
-
-	/// The rendition is in the latest catalog snapshot.
-	listed: bool,
+	/// The subscription while the rendition is in the catalog.
+	source: Option<ExportSource>,
 
 	config: Rendition,
 
@@ -233,8 +228,10 @@ struct Fmp4Track {
 	/// (Legacy / LOC sources). Derived from the catalog framerate / sample rate.
 	default_frame: Duration,
 
-	/// Whether the source has signalled end-of-track.
+	/// Whether the source has signalled end-of-track, or the rendition left the catalog.
 	finished: bool,
+	/// The group of the last frame read, where a resubscription resumes after.
+	group: Option<u64>,
 	/// The source group closed, so its buffered fragment can be emitted.
 	group_finished: bool,
 
@@ -259,8 +256,7 @@ impl Fmp4Track {
 			Rendition::Audio(config) => catalog_timescale_audio(config)?,
 		};
 		Ok(Self {
-			source,
-			listed: true,
+			source: Some(source),
 			is_video: config.is_video(),
 			opus: matches!(&config, Rendition::Audio(config) if matches!(config.codec, AudioCodec::Opus)),
 			default_frame: config.default_frame(),
@@ -271,6 +267,7 @@ impl Fmp4Track {
 			buffer: Vec::new(),
 			buffer_independent: false,
 			finished: false,
+			group: None,
 			group_finished: false,
 			written: None,
 			backlog: None,
@@ -297,8 +294,8 @@ impl Fmp4Track {
 		if config.is_video() != self.is_video {
 			return Err(Error::TrackChanged(name.to_string()).into());
 		}
-		if let Rendition::Video(video) = &config
-			&& !self.source.note_catalog(video)
+		if let (Rendition::Video(video), Some(source)) = (&config, self.source.as_mut())
+			&& !source.note_catalog(video)
 		{
 			return Err(Error::TrackChanged(name.to_string()).into());
 		}
@@ -307,9 +304,9 @@ impl Fmp4Track {
 		self.describe(name)
 	}
 
-	/// Resubscribe a rendition whose track ended after it left the catalog, now that it came back.
+	/// Resubscribe a rendition that left the catalog after the init and came back.
 	fn rejoin(&mut self, name: &str, config: Rendition, source: ExportSource) -> Result<()> {
-		self.source = source;
+		self.source = Some(source);
 		self.finished = false;
 		self.described = false;
 		self.reconfigure(name, config)
@@ -350,7 +347,9 @@ impl Fmp4Track {
 			Rendition::Video(config) => match &config.container {
 				Container::Cmaf { init, .. } => init,
 				Container::Legacy | Container::Loc => {
-					let source = &self.source;
+					let Some(source) = self.source.as_ref() else {
+						return Ok(None);
+					};
 					if !source.header_ready() || !source.video_geometry_ready(config) {
 						return Ok(None);
 					}
@@ -555,9 +554,10 @@ impl<S: Stream> Export<S> {
 				if track.pending.is_some() || track.finished || track.group_finished {
 					continue;
 				}
-				loop {
-					match track.source.poll_event(waiter)? {
+				while let Some(source) = track.source.as_mut() {
+					match source.poll_event(waiter)? {
 						Poll::Ready(Some(Event::Frame(frame))) => {
+							track.group = source.group();
 							// A keyframe may carry new parameter sets, so check it still matches.
 							if !track.described || frame.keyframe {
 								track.describe(name)?;
@@ -804,17 +804,17 @@ impl<S: Stream> Export<S> {
 				continue;
 			}
 			match self.tracks.get_mut(&name) {
-				// A rendition returning after its track ended needs a new subscription.
-				Some(track) if track.finished && !track.listed => {
-					let Some(source) = config.subscribe(&self.source, &name, self.max_delay)? else {
+				Some(track) if track.source.is_some() => track.reconfigure(&name, config)?,
+				Some(track) => {
+					let Some(mut source) = config.subscribe(&self.source, &name, self.max_delay)? else {
 						continue;
 					};
+					// The publisher still caches the group the rendition left on, which a
+					// fresh subscription would start at, so resume after the last group read.
+					if let Some(group) = track.group {
+						source = source.after(group);
+					}
 					track.rejoin(&name, config, source)?;
-					track.listed = true;
-				}
-				Some(track) => {
-					track.reconfigure(&name, config)?;
-					track.listed = true;
 				}
 				None => {
 					// Subscribe via ExportSource, which applies any per-codec transform
@@ -835,12 +835,13 @@ impl<S: Stream> Export<S> {
 		}
 
 		if self.init_emitted {
-			// The init declared these tracks, so keep them for a rendition that returns. One
-			// that left (disabled, or retired) is read to its own end: a publisher retires a
-			// rendition as its track finishes or drops, and the catalog update races that end,
-			// so only the track's end can say which it was.
+			// The init declared these tracks, so keep them for a rendition that returns.
+			// Ending the subscription writes out what was already read.
 			for (name, track) in &mut self.tracks {
-				track.listed = active.contains(name);
+				if !active.contains(name) && track.source.take().is_some() {
+					track.finished = true;
+					track.described = false;
+				}
 			}
 		} else {
 			self.tracks.retain(|name, _| active.contains(name));

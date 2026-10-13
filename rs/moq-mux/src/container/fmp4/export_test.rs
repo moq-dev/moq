@@ -1970,16 +1970,14 @@ async fn an_incompatible_return_fails() {
 	);
 }
 
-/// A rendition whose track ended is resubscribed when it returns. A resubscription that
-/// replays groups already written would write the track's history twice under one id, so it
-/// fails the export.
+/// A returning rendition is resubscribed after the last group read, so the group the
+/// publisher still caches is not written twice, and its new groups follow.
 #[tokio::test(start_paused = true)]
-async fn a_replayed_return_fails() {
+async fn a_return_resumes_after_its_last_group() {
 	let (mut live, mut audio) = live_av();
 	let name = audio.name().to_string();
 	live.track.write(video_frame(0, true)).unwrap();
 	write_audio(&mut audio, 0, 11);
-	audio.finish().unwrap();
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
 		.with_max_delay(RECORDING_MAX_DELAY);
 	chunk_now(&mut exporter).await.init().expect("init");
@@ -1993,10 +1991,15 @@ async fn a_replayed_return_fails() {
 		.audio
 		.renditions
 		.insert(name.clone(), config);
-	let err = error_now(&mut exporter).await;
 	assert!(
-		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackRewound { track, .. }) if *track == name),
-		"{err:?}"
+		drain_now(&mut exporter).await.is_empty(),
+		"the cached group was replayed"
+	);
+
+	write_audio(&mut audio, 220_000, 6);
+	assert!(
+		!drain_now(&mut exporter).await.is_empty(),
+		"the new group was not written"
 	);
 }
 
