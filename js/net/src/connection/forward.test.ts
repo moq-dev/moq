@@ -299,6 +299,41 @@ for (const epoch of [undefined, Epoch.mint()]) {
 	});
 }
 
+test("a lingering request waits for a slow replacement before it closes", async () => {
+	const origin = new OriginProducer();
+	const session = new FakeSession();
+	forwardAnnounced(session.session, origin);
+	const route = { ...Route.default, epoch: Epoch.mint() };
+
+	const broad = origin.announced(Path.Pattern.subtree(Path.from("a")));
+	const narrow = origin.announced(Path.Pattern.subtree(Path.from("a/b")));
+	const events = record(narrow);
+	start(session.stream("a/**"), "a/b/x", route);
+	start(session.stream("a/**"), "a/c", route);
+	await settle();
+
+	// The narrow request has not answered when the broad one lingers out, so the broad stays
+	// open for the route only it reports beneath the narrow, and retracts nothing.
+	broad.close();
+	await settle();
+	jest.advanceTimersByTime(LINGER);
+	await settle();
+	expect(session.open()).toEqual(["a/**", "a/b/**"]);
+	expect(wireOf(origin).routes(Path.from("a/b/x"))).toBe(true);
+
+	// Once the narrow request reports it, the broad one closes and takes only its own route.
+	start(session.stream("a/b/**"), "a/b/x", route);
+	await settle();
+	expect(session.open()).toEqual(["a/b/**"]);
+	expect(wireOf(origin).routes(Path.from("a/b/x"))).toBe(true);
+	expect(wireOf(origin).routes(Path.from("a/c"))).toBe(false);
+	expect(events).toEqual(["start a/b/x"]);
+
+	narrow.close();
+	session.die();
+	origin.close();
+});
+
 test("a hand-over to another epoch restarts the route", async () => {
 	const origin = new OriginProducer();
 	const session = new FakeSession();

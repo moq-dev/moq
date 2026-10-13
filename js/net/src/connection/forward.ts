@@ -47,7 +47,8 @@ interface Reported {
  * Discovery is lazy. One announce request opens per prefix in the origin's covering set of
  * watches (`announced(scope)` and `request(path, { announced: true })`), and closes
  * {@link LINGER} after its last watcher leaves. A broader watch opens its request before the
- * narrower ones close, and a route both report stays inserted, so nothing retracts. An
+ * narrower ones close, a lingering request stays open until the narrower ones report what it
+ * alone carries beneath them, and a route both report stays inserted, so nothing retracts. An
  * epochless route restarts when it changes hands, since nothing proves both requests saw
  * one instance.
  *
@@ -147,6 +148,21 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 		detach = originWire.attach(false);
 	};
 
+	// Requests that lingered out but still alone report a route a narrower open request covers.
+	// They close once that request reports it too, so a slow replacement never retracts a route.
+	const draining = new Set<Interest>();
+
+	const drain = (interest: Interest) => {
+		for (const path of interest.reported) {
+			if (routes.get(path)?.reporters.size !== 1) continue;
+			for (const prefix of interests.keys()) {
+				if (Path.hasPrefix(prefix, path)) return;
+			}
+		}
+		draining.delete(interest);
+		interest.announced.close();
+	};
+
 	const open = (prefix: Path.Valid) => {
 		// Hidden routes are mirrored too; each local reader opts in on its own.
 		const interest: Interest = {
@@ -163,6 +179,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 					const event = await interest.announced.next();
 					if (!event) break;
 					if (originWire.accepts(event.prefix)) report(interest, event);
+					for (const other of [...draining]) drain(other);
 				}
 			} catch (err) {
 				// The session died mid-stream, or the peer refused or reset the request.
@@ -171,8 +188,11 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 				for (const reported of [...interest.reported]) unreport(interest, reported);
 				interest.announced.close();
 				clearTimeout(interest.linger);
+				draining.delete(interest);
 				if (interests.get(prefix) === interest) interests.delete(prefix);
 				if (!dead && !interest.closing) downgrade(failure);
+				// A covering request that ended no longer holds a draining one open.
+				for (const other of [...draining]) drain(other);
 			}
 		})();
 	};
@@ -200,7 +220,8 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 				// meanwhile opens a fresh request instead of reviving this one.
 				interests.delete(prefix);
 				interest.closing = true;
-				interest.announced.close();
+				draining.add(interest);
+				drain(interest);
 			}, LINGER);
 		}
 	});
@@ -210,7 +231,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 		unsubscribe();
 		// End every request the moment the session closes rather than waiting for the wire to
 		// error it, so the retractions land promptly.
-		for (const interest of interests.values()) interest.announced.close();
+		for (const interest of [...interests.values(), ...draining]) interest.announced.close();
 		detach();
 	});
 }

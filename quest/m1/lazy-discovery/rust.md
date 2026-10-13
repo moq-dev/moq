@@ -29,14 +29,17 @@ Facts (2026-10-10, `origin/main` e5446b036):
 
 The JS shape to mirror (`js/net/src/connection/forward.ts`): the origin
 counts watched literal heads in a trie and hands each session only the
-covering-set changes a watch causes, so the cost per session stays flat over
-held watches (`js/net/bench/forward.ts`); a session inserts a route reported
-by overlapping requests once, driven by the first reporter, so a hand-over
-never retracts, and restarts it unless one epoch proves both requests saw one
-instance; closing an announce request ends its stream; a plain request
-resolved through a discovered route watches its path until closed; a request closes 2s after its last
-watcher (a fixed constant, since one-shot connections have no `linger`); a
-refused or reset request downgrades the whole session to blind answers.
+covering-set changes a watch causes, so a change costs the prefixes it covers
+or uncovers and stays flat over unrelated held watches
+(`js/net/bench/forward.ts`); a session inserts a route reported by
+overlapping requests once, driven by the first reporter, so a hand-over never
+retracts, and restarts it unless one epoch proves both requests saw one
+instance; a lingering request stays open until the narrower requests report
+the routes it alone carries beneath them; closing an announce request ends its
+stream; a plain request resolved through a discovered route watches its path
+until closed; a request closes 2s after its last watcher (a fixed constant,
+since one-shot connections have no `linger`); a refused or reset request
+downgrades the whole session to blind answers.
 
 Open for the plan round: the Rust equivalent of an announced request, how the
 watch set crosses the poll-based session driver, and moq-ffi and binding
