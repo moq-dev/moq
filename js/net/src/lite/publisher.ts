@@ -7,7 +7,7 @@ import * as DatagramStream from "../datagram_stream.ts";
 import { error, NotFound, ProtocolViolation, reason, StreamCode, StreamError, unauthorized } from "../error.ts";
 import type * as group from "../group.ts";
 import { Cost, type Hop, type Route, routesEqual } from "../hop.ts";
-import { hiddenBelow, hooks, presented } from "../internal.ts";
+import { finalSequence, hiddenBelow, hooks, presented } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
@@ -965,7 +965,12 @@ export class Publisher {
 		// datagram sequences too), not the delivered range: a subscription cap can hold
 		// produced groups back. The latest() fallback covers a subscription torn down
 		// before the producer declared it.
-		const boundary = () => track.final() ?? (track.latest() ?? -1) + 1;
+		// Lite cannot name a frame, so a mid-group end rounds up past its group, whose own
+		// stream FIN says where it stops.
+		const boundary = () => {
+			const end = track.end();
+			return end ? finalSequence(end) : (track.latest() ?? -1) + 1;
+		};
 
 		// Before lite-07, SUBSCRIBE_END names that boundary, which a cap can hold groups back
 		// from, so it goes out as soon as the producer finishes and the subscription keeps
@@ -1074,7 +1079,7 @@ export class Publisher {
 						// Before lite-07, an end declared ahead of the live edge goes out as
 						// soon as it is known, while the remaining groups are still being
 						// produced. The lite-07 count is not final until those groups open.
-						if (!endSent && !countStreams && track.final() !== undefined) {
+						if (!endSent && !countStreams && track.end() !== undefined) {
 							if (!(await sendEnd())) return false;
 							continue;
 						}

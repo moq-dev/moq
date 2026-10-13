@@ -29,6 +29,9 @@ check:
     bun install --frozen-lockfile
     bun common/deps.ts
     bun run --filter='*' --elide-lines=0 check
+    # The harnesses import wasm-bindgen's generated types as well as JS sources.
+    just wasm
+    bunx tsc --noEmit --project ../test/tsconfig.json
     bun biome check
     just build
     just dist-imports
@@ -48,7 +51,7 @@ test:
     bun test common/declarations.test.ts common/deps.test.ts common/worklet.test.ts
     bun run --filter='*' --elide-lines=0 test
 
-# Run one net benchmark: broadcasts, forward, reader, frames, track, varint, or lite-varint.
+# Run one net benchmark: broadcasts, forward, reader, frames, track, varint, lite-varint, or request-ids.
 bench name:
     bun install --frozen-lockfile
     bun net/bench/{{ name }}.ts

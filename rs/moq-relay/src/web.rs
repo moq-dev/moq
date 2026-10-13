@@ -194,6 +194,7 @@ pub struct Web {
 	state: Arc<WebState>,
 	config: Config,
 	versions: moq_net::Versions,
+	extensions: moq_net::setup::Extensions,
 	health: moq_tokio::accept::Health,
 	http_listener: Option<net::TcpListener>,
 	https_listener: Option<net::TcpListener>,
@@ -224,6 +225,7 @@ impl Web {
 			state,
 			config,
 			versions: moq_net::Versions::all(),
+			extensions: Default::default(),
 			health: moq_tokio::accept::Health::new("web"),
 			http_listener: None,
 			https_listener: None,
@@ -283,6 +285,12 @@ impl Web {
 	/// Restrict which MoQ versions WebSocket sessions accept, in preference order.
 	pub fn with_versions(mut self, versions: moq_net::Versions) -> Self {
 		self.versions = versions;
+		self
+	}
+
+	/// Choose which moq-transport extensions WebSocket sessions offer in SETUP.
+	pub fn with_extensions(mut self, extensions: moq_net::setup::Extensions) -> Self {
+		self.extensions = extensions;
 		self
 	}
 
@@ -375,6 +383,7 @@ impl Web {
 		};
 
 		app.layer(Extension(self.versions.clone()))
+			.layer(Extension(self.extensions))
 			.with_state(self.state.clone())
 	}
 

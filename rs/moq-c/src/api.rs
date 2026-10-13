@@ -1201,7 +1201,7 @@ unsafe fn connect_session(
 /// since the origins outlive the underlying connection.
 ///
 /// `on_status` reports the session lifecycle through its status code:
-/// - `> 0` on every (re)connect, carrying the connection epoch (`1` = first connect,
+/// - `> 0` on every (re)connect, carrying the connect count (`1` = first connect,
 ///   `2` = first reconnect, and so on), so a reconnect is distinguishable from the
 ///   initial connect. May fire repeatedly. Transient disconnects are not reported.
 /// - `0` when the session is closed cleanly via [moq_session_close] (terminal).

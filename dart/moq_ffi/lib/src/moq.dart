@@ -8,9 +8,7 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
-
 import "package:ffi/ffi.dart";
-
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -1913,7 +1911,13 @@ class MoqRoute {
   final List<int> hops;
   final int cost;
   final bool anonymous;
-  MoqRoute({this.hops = const [], this.cost = 0, this.anonymous = false});
+  final String? epoch;
+  MoqRoute({
+    this.hops = const [],
+    this.cost = 0,
+    this.anonymous = false,
+    this.epoch = null,
+  });
 }
 
 class FfiConverterMoqRoute {
@@ -1938,8 +1942,13 @@ class FfiConverterMoqRoute {
     );
     final anonymous = anonymous_lifted.value;
     new_offset += anonymous_lifted.bytesRead;
+    final epoch_lifted = FfiConverterOptionalString.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final epoch = epoch_lifted.value;
+    new_offset += epoch_lifted.bytesRead;
     return LiftRetVal(
-      MoqRoute(hops: hops, cost: cost, anonymous: anonymous),
+      MoqRoute(hops: hops, cost: cost, anonymous: anonymous, epoch: epoch),
       new_offset - buf.offsetInBytes,
     );
   }
@@ -1949,6 +1958,7 @@ class FfiConverterMoqRoute {
         FfiConverterSequenceUInt64.allocationSize(value.hops) +
         FfiConverterUInt64.allocationSize(value.cost) +
         FfiConverterBool.allocationSize(value.anonymous) +
+        FfiConverterOptionalString.allocationSize(value.epoch) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -1969,6 +1979,10 @@ class FfiConverterMoqRoute {
       value.anonymous,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterOptionalString.write(
+      value.epoch,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     return new_offset - buf.offsetInBytes;
   }
 
@@ -1976,6 +1990,7 @@ class FfiConverterMoqRoute {
     return FfiConverterSequenceUInt64.allocationSize(value.hops) +
         FfiConverterUInt64.allocationSize(value.cost) +
         FfiConverterBool.allocationSize(value.anonymous) +
+        FfiConverterOptionalString.allocationSize(value.epoch) +
         0;
   }
 }
@@ -3081,18 +3096,24 @@ class FfiConverterMoqException {
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 27:
-        final lifted = UnresolvableBroadcastMoqException.read(subview);
+        final lifted = InvalidEpochMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 28:
-        final lifted = LogMoqException.read(subview);
+        final lifted = UnresolvableBroadcastMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 29:
+        final lifted = LogMoqException.read(subview);
+        return LiftRetVal<MoqException>(
+          lifted.value,
+          lifted.bytesRead - subview.offsetInBytes + 4,
+        );
+      case 30:
         final lifted = ConfigMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
@@ -3158,17 +3179,17 @@ class ProtocolMoqException extends MoqException {
 }
 
 class TransportMoqException extends MoqException {
-  final String v0;
-  TransportMoqException(String this.v0);
-  TransportMoqException._(String this.v0);
+  final String reason;
+  TransportMoqException(String this.reason);
+  TransportMoqException._(String this.reason);
   static LiftRetVal<TransportMoqException> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final v0_lifted = FfiConverterString.read(
+    final reason_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final v0 = v0_lifted.value;
-    new_offset += v0_lifted.bytesRead;
-    return LiftRetVal(TransportMoqException._(v0), new_offset);
+    final reason = reason_lifted.value;
+    new_offset += reason_lifted.bytesRead;
+    return LiftRetVal(TransportMoqException._(reason), new_offset);
   }
 
   @override
@@ -3180,7 +3201,7 @@ class TransportMoqException extends MoqException {
 
   @override
   int allocationSize() {
-    return FfiConverterString.allocationSize(v0) + 4;
+    return FfiConverterString.allocationSize(reason) + 4;
   }
 
   @override
@@ -3188,7 +3209,7 @@ class TransportMoqException extends MoqException {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 2);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
-      v0,
+      reason,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
@@ -3196,17 +3217,17 @@ class TransportMoqException extends MoqException {
 }
 
 class InternalMoqException extends MoqException {
-  final String v0;
-  InternalMoqException(String this.v0);
-  InternalMoqException._(String this.v0);
+  final String reason;
+  InternalMoqException(String this.reason);
+  InternalMoqException._(String this.reason);
   static LiftRetVal<InternalMoqException> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final v0_lifted = FfiConverterString.read(
+    final reason_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final v0 = v0_lifted.value;
-    new_offset += v0_lifted.bytesRead;
-    return LiftRetVal(InternalMoqException._(v0), new_offset);
+    final reason = reason_lifted.value;
+    new_offset += reason_lifted.bytesRead;
+    return LiftRetVal(InternalMoqException._(reason), new_offset);
   }
 
   @override
@@ -3218,7 +3239,7 @@ class InternalMoqException extends MoqException {
 
   @override
   int allocationSize() {
-    return FfiConverterString.allocationSize(v0) + 4;
+    return FfiConverterString.allocationSize(reason) + 4;
   }
 
   @override
@@ -3226,7 +3247,7 @@ class InternalMoqException extends MoqException {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 3);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
-      v0,
+      reason,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
@@ -3234,17 +3255,17 @@ class InternalMoqException extends MoqException {
 }
 
 class MediaMoqException extends MoqException {
-  final String v0;
-  MediaMoqException(String this.v0);
-  MediaMoqException._(String this.v0);
+  final String reason;
+  MediaMoqException(String this.reason);
+  MediaMoqException._(String this.reason);
   static LiftRetVal<MediaMoqException> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final v0_lifted = FfiConverterString.read(
+    final reason_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final v0 = v0_lifted.value;
-    new_offset += v0_lifted.bytesRead;
-    return LiftRetVal(MediaMoqException._(v0), new_offset);
+    final reason = reason_lifted.value;
+    new_offset += reason_lifted.bytesRead;
+    return LiftRetVal(MediaMoqException._(reason), new_offset);
   }
 
   @override
@@ -3256,7 +3277,7 @@ class MediaMoqException extends MoqException {
 
   @override
   int allocationSize() {
-    return FfiConverterString.allocationSize(v0) + 4;
+    return FfiConverterString.allocationSize(reason) + 4;
   }
 
   @override
@@ -3264,7 +3285,7 @@ class MediaMoqException extends MoqException {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 4);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
-      v0,
+      reason,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
@@ -3272,17 +3293,17 @@ class MediaMoqException extends MoqException {
 }
 
 class MuxMoqException extends MoqException {
-  final String v0;
-  MuxMoqException(String this.v0);
-  MuxMoqException._(String this.v0);
+  final String reason;
+  MuxMoqException(String this.reason);
+  MuxMoqException._(String this.reason);
   static LiftRetVal<MuxMoqException> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final v0_lifted = FfiConverterString.read(
+    final reason_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final v0 = v0_lifted.value;
-    new_offset += v0_lifted.bytesRead;
-    return LiftRetVal(MuxMoqException._(v0), new_offset);
+    final reason = reason_lifted.value;
+    new_offset += reason_lifted.bytesRead;
+    return LiftRetVal(MuxMoqException._(reason), new_offset);
   }
 
   @override
@@ -3294,7 +3315,7 @@ class MuxMoqException extends MoqException {
 
   @override
   int allocationSize() {
-    return FfiConverterString.allocationSize(v0) + 4;
+    return FfiConverterString.allocationSize(reason) + 4;
   }
 
   @override
@@ -3302,7 +3323,7 @@ class MuxMoqException extends MoqException {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 5);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
-      v0,
+      reason,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
@@ -3310,17 +3331,17 @@ class MuxMoqException extends MoqException {
 }
 
 class JsonTrackMoqException extends MoqException {
-  final String v0;
-  JsonTrackMoqException(String this.v0);
-  JsonTrackMoqException._(String this.v0);
+  final String reason;
+  JsonTrackMoqException(String this.reason);
+  JsonTrackMoqException._(String this.reason);
   static LiftRetVal<JsonTrackMoqException> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final v0_lifted = FfiConverterString.read(
+    final reason_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final v0 = v0_lifted.value;
-    new_offset += v0_lifted.bytesRead;
-    return LiftRetVal(JsonTrackMoqException._(v0), new_offset);
+    final reason = reason_lifted.value;
+    new_offset += reason_lifted.bytesRead;
+    return LiftRetVal(JsonTrackMoqException._(reason), new_offset);
   }
 
   @override
@@ -3332,7 +3353,7 @@ class JsonTrackMoqException extends MoqException {
 
   @override
   int allocationSize() {
-    return FfiConverterString.allocationSize(v0) + 4;
+    return FfiConverterString.allocationSize(reason) + 4;
   }
 
   @override
@@ -3340,7 +3361,7 @@ class JsonTrackMoqException extends MoqException {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 6);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
-      v0,
+      reason,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
@@ -3348,17 +3369,17 @@ class JsonTrackMoqException extends MoqException {
 }
 
 class UrlMoqException extends MoqException {
-  final String v0;
-  UrlMoqException(String this.v0);
-  UrlMoqException._(String this.v0);
+  final String reason;
+  UrlMoqException(String this.reason);
+  UrlMoqException._(String this.reason);
   static LiftRetVal<UrlMoqException> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final v0_lifted = FfiConverterString.read(
+    final reason_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final v0 = v0_lifted.value;
-    new_offset += v0_lifted.bytesRead;
-    return LiftRetVal(UrlMoqException._(v0), new_offset);
+    final reason = reason_lifted.value;
+    new_offset += reason_lifted.bytesRead;
+    return LiftRetVal(UrlMoqException._(reason), new_offset);
   }
 
   @override
@@ -3370,7 +3391,7 @@ class UrlMoqException extends MoqException {
 
   @override
   int allocationSize() {
-    return FfiConverterString.allocationSize(v0) + 4;
+    return FfiConverterString.allocationSize(reason) + 4;
   }
 
   @override
@@ -3378,7 +3399,7 @@ class UrlMoqException extends MoqException {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 7);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
-      v0,
+      reason,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
@@ -3414,17 +3435,17 @@ class TimeOverflowMoqException extends MoqException {
 }
 
 class LogLevelMoqException extends MoqException {
-  final String v0;
-  LogLevelMoqException(String this.v0);
-  LogLevelMoqException._(String this.v0);
+  final String reason;
+  LogLevelMoqException(String this.reason);
+  LogLevelMoqException._(String this.reason);
   static LiftRetVal<LogLevelMoqException> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final v0_lifted = FfiConverterString.read(
+    final reason_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final v0 = v0_lifted.value;
-    new_offset += v0_lifted.bytesRead;
-    return LiftRetVal(LogLevelMoqException._(v0), new_offset);
+    final reason = reason_lifted.value;
+    new_offset += reason_lifted.bytesRead;
+    return LiftRetVal(LogLevelMoqException._(reason), new_offset);
   }
 
   @override
@@ -3436,7 +3457,7 @@ class LogLevelMoqException extends MoqException {
 
   @override
   int allocationSize() {
-    return FfiConverterString.allocationSize(v0) + 4;
+    return FfiConverterString.allocationSize(reason) + 4;
   }
 
   @override
@@ -3444,7 +3465,7 @@ class LogLevelMoqException extends MoqException {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 9);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
-      v0,
+      reason,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
@@ -3452,17 +3473,17 @@ class LogLevelMoqException extends MoqException {
 }
 
 class TaskMoqException extends MoqException {
-  final String v0;
-  TaskMoqException(String this.v0);
-  TaskMoqException._(String this.v0);
+  final String reason;
+  TaskMoqException(String this.reason);
+  TaskMoqException._(String this.reason);
   static LiftRetVal<TaskMoqException> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final v0_lifted = FfiConverterString.read(
+    final reason_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final v0 = v0_lifted.value;
-    new_offset += v0_lifted.bytesRead;
-    return LiftRetVal(TaskMoqException._(v0), new_offset);
+    final reason = reason_lifted.value;
+    new_offset += reason_lifted.bytesRead;
+    return LiftRetVal(TaskMoqException._(reason), new_offset);
   }
 
   @override
@@ -3474,7 +3495,7 @@ class TaskMoqException extends MoqException {
 
   @override
   int allocationSize() {
-    return FfiConverterString.allocationSize(v0) + 4;
+    return FfiConverterString.allocationSize(reason) + 4;
   }
 
   @override
@@ -3482,7 +3503,7 @@ class TaskMoqException extends MoqException {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 10);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
-      v0,
+      reason,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
@@ -3490,17 +3511,17 @@ class TaskMoqException extends MoqException {
 }
 
 class JsonMoqException extends MoqException {
-  final String v0;
-  JsonMoqException(String this.v0);
-  JsonMoqException._(String this.v0);
+  final String reason;
+  JsonMoqException(String this.reason);
+  JsonMoqException._(String this.reason);
   static LiftRetVal<JsonMoqException> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final v0_lifted = FfiConverterString.read(
+    final reason_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final v0 = v0_lifted.value;
-    new_offset += v0_lifted.bytesRead;
-    return LiftRetVal(JsonMoqException._(v0), new_offset);
+    final reason = reason_lifted.value;
+    new_offset += reason_lifted.bytesRead;
+    return LiftRetVal(JsonMoqException._(reason), new_offset);
   }
 
   @override
@@ -3512,7 +3533,7 @@ class JsonMoqException extends MoqException {
 
   @override
   int allocationSize() {
-    return FfiConverterString.allocationSize(v0) + 4;
+    return FfiConverterString.allocationSize(reason) + 4;
   }
 
   @override
@@ -3520,7 +3541,7 @@ class JsonMoqException extends MoqException {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 11);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
-      v0,
+      reason,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
@@ -3612,17 +3633,17 @@ class BusyMoqException extends MoqException {
 }
 
 class ConnectMoqException extends MoqException {
-  final String v0;
-  ConnectMoqException(String this.v0);
-  ConnectMoqException._(String this.v0);
+  final String reason;
+  ConnectMoqException(String this.reason);
+  ConnectMoqException._(String this.reason);
   static LiftRetVal<ConnectMoqException> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final v0_lifted = FfiConverterString.read(
+    final reason_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final v0 = v0_lifted.value;
-    new_offset += v0_lifted.bytesRead;
-    return LiftRetVal(ConnectMoqException._(v0), new_offset);
+    final reason = reason_lifted.value;
+    new_offset += reason_lifted.bytesRead;
+    return LiftRetVal(ConnectMoqException._(reason), new_offset);
   }
 
   @override
@@ -3634,7 +3655,7 @@ class ConnectMoqException extends MoqException {
 
   @override
   int allocationSize() {
-    return FfiConverterString.allocationSize(v0) + 4;
+    return FfiConverterString.allocationSize(reason) + 4;
   }
 
   @override
@@ -3642,7 +3663,7 @@ class ConnectMoqException extends MoqException {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 15);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
-      v0,
+      reason,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
@@ -3650,17 +3671,17 @@ class ConnectMoqException extends MoqException {
 }
 
 class BindMoqException extends MoqException {
-  final String v0;
-  BindMoqException(String this.v0);
-  BindMoqException._(String this.v0);
+  final String reason;
+  BindMoqException(String this.reason);
+  BindMoqException._(String this.reason);
   static LiftRetVal<BindMoqException> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final v0_lifted = FfiConverterString.read(
+    final reason_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final v0 = v0_lifted.value;
-    new_offset += v0_lifted.bytesRead;
-    return LiftRetVal(BindMoqException._(v0), new_offset);
+    final reason = reason_lifted.value;
+    new_offset += reason_lifted.bytesRead;
+    return LiftRetVal(BindMoqException._(reason), new_offset);
   }
 
   @override
@@ -3672,7 +3693,7 @@ class BindMoqException extends MoqException {
 
   @override
   int allocationSize() {
-    return FfiConverterString.allocationSize(v0) + 4;
+    return FfiConverterString.allocationSize(reason) + 4;
   }
 
   @override
@@ -3680,7 +3701,7 @@ class BindMoqException extends MoqException {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 16);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
-      v0,
+      reason,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
@@ -3688,17 +3709,17 @@ class BindMoqException extends MoqException {
 }
 
 class RejectMoqException extends MoqException {
-  final String v0;
-  RejectMoqException(String this.v0);
-  RejectMoqException._(String this.v0);
+  final String reason;
+  RejectMoqException(String this.reason);
+  RejectMoqException._(String this.reason);
   static LiftRetVal<RejectMoqException> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final v0_lifted = FfiConverterString.read(
+    final reason_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final v0 = v0_lifted.value;
-    new_offset += v0_lifted.bytesRead;
-    return LiftRetVal(RejectMoqException._(v0), new_offset);
+    final reason = reason_lifted.value;
+    new_offset += reason_lifted.bytesRead;
+    return LiftRetVal(RejectMoqException._(reason), new_offset);
   }
 
   @override
@@ -3710,7 +3731,7 @@ class RejectMoqException extends MoqException {
 
   @override
   int allocationSize() {
-    return FfiConverterString.allocationSize(v0) + 4;
+    return FfiConverterString.allocationSize(reason) + 4;
   }
 
   @override
@@ -3718,7 +3739,7 @@ class RejectMoqException extends MoqException {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 17);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
-      v0,
+      reason,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
@@ -3754,17 +3775,17 @@ class AlreadyRespondedMoqException extends MoqException {
 }
 
 class CodecMoqException extends MoqException {
-  final String v0;
-  CodecMoqException(String this.v0);
-  CodecMoqException._(String this.v0);
+  final String reason;
+  CodecMoqException(String this.reason);
+  CodecMoqException._(String this.reason);
   static LiftRetVal<CodecMoqException> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final v0_lifted = FfiConverterString.read(
+    final reason_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final v0 = v0_lifted.value;
-    new_offset += v0_lifted.bytesRead;
-    return LiftRetVal(CodecMoqException._(v0), new_offset);
+    final reason = reason_lifted.value;
+    new_offset += reason_lifted.bytesRead;
+    return LiftRetVal(CodecMoqException._(reason), new_offset);
   }
 
   @override
@@ -3776,7 +3797,7 @@ class CodecMoqException extends MoqException {
 
   @override
   int allocationSize() {
-    return FfiConverterString.allocationSize(v0) + 4;
+    return FfiConverterString.allocationSize(reason) + 4;
   }
 
   @override
@@ -3784,7 +3805,7 @@ class CodecMoqException extends MoqException {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 19);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
-      v0,
+      reason,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
@@ -3932,17 +3953,17 @@ class AlreadyCommittedMoqException extends MoqException {
 }
 
 class InvalidRouteMoqException extends MoqException {
-  final String v0;
-  InvalidRouteMoqException(String this.v0);
-  InvalidRouteMoqException._(String this.v0);
+  final String reason;
+  InvalidRouteMoqException(String this.reason);
+  InvalidRouteMoqException._(String this.reason);
   static LiftRetVal<InvalidRouteMoqException> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final v0_lifted = FfiConverterString.read(
+    final reason_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final v0 = v0_lifted.value;
-    new_offset += v0_lifted.bytesRead;
-    return LiftRetVal(InvalidRouteMoqException._(v0), new_offset);
+    final reason = reason_lifted.value;
+    new_offset += reason_lifted.bytesRead;
+    return LiftRetVal(InvalidRouteMoqException._(reason), new_offset);
   }
 
   @override
@@ -3954,7 +3975,7 @@ class InvalidRouteMoqException extends MoqException {
 
   @override
   int allocationSize() {
-    return FfiConverterString.allocationSize(v0) + 4;
+    return FfiConverterString.allocationSize(reason) + 4;
   }
 
   @override
@@ -3962,7 +3983,7 @@ class InvalidRouteMoqException extends MoqException {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 25);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
-      v0,
+      reason,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
@@ -3970,17 +3991,17 @@ class InvalidRouteMoqException extends MoqException {
 }
 
 class InvalidPatternMoqException extends MoqException {
-  final String v0;
-  InvalidPatternMoqException(String this.v0);
-  InvalidPatternMoqException._(String this.v0);
+  final String reason;
+  InvalidPatternMoqException(String this.reason);
+  InvalidPatternMoqException._(String this.reason);
   static LiftRetVal<InvalidPatternMoqException> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final v0_lifted = FfiConverterString.read(
+    final reason_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final v0 = v0_lifted.value;
-    new_offset += v0_lifted.bytesRead;
-    return LiftRetVal(InvalidPatternMoqException._(v0), new_offset);
+    final reason = reason_lifted.value;
+    new_offset += reason_lifted.bytesRead;
+    return LiftRetVal(InvalidPatternMoqException._(reason), new_offset);
   }
 
   @override
@@ -3992,7 +4013,7 @@ class InvalidPatternMoqException extends MoqException {
 
   @override
   int allocationSize() {
-    return FfiConverterString.allocationSize(v0) + 4;
+    return FfiConverterString.allocationSize(reason) + 4;
   }
 
   @override
@@ -4000,25 +4021,25 @@ class InvalidPatternMoqException extends MoqException {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 26);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
-      v0,
+      reason,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
   }
 }
 
-class UnresolvableBroadcastMoqException extends MoqException {
-  final String v0;
-  UnresolvableBroadcastMoqException(String this.v0);
-  UnresolvableBroadcastMoqException._(String this.v0);
-  static LiftRetVal<UnresolvableBroadcastMoqException> read(Uint8List buf) {
+class InvalidEpochMoqException extends MoqException {
+  final String reason;
+  InvalidEpochMoqException(String this.reason);
+  InvalidEpochMoqException._(String this.reason);
+  static LiftRetVal<InvalidEpochMoqException> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final v0_lifted = FfiConverterString.read(
+    final reason_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final v0 = v0_lifted.value;
-    new_offset += v0_lifted.bytesRead;
-    return LiftRetVal(UnresolvableBroadcastMoqException._(v0), new_offset);
+    final reason = reason_lifted.value;
+    new_offset += reason_lifted.bytesRead;
+    return LiftRetVal(InvalidEpochMoqException._(reason), new_offset);
   }
 
   @override
@@ -4030,7 +4051,7 @@ class UnresolvableBroadcastMoqException extends MoqException {
 
   @override
   int allocationSize() {
-    return FfiConverterString.allocationSize(v0) + 4;
+    return FfiConverterString.allocationSize(reason) + 4;
   }
 
   @override
@@ -4038,25 +4059,25 @@ class UnresolvableBroadcastMoqException extends MoqException {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 27);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
-      v0,
+      reason,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
   }
 }
 
-class LogMoqException extends MoqException {
-  final String v0;
-  LogMoqException(String this.v0);
-  LogMoqException._(String this.v0);
-  static LiftRetVal<LogMoqException> read(Uint8List buf) {
+class UnresolvableBroadcastMoqException extends MoqException {
+  final String reason;
+  UnresolvableBroadcastMoqException(String this.reason);
+  UnresolvableBroadcastMoqException._(String this.reason);
+  static LiftRetVal<UnresolvableBroadcastMoqException> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final v0_lifted = FfiConverterString.read(
+    final reason_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final v0 = v0_lifted.value;
-    new_offset += v0_lifted.bytesRead;
-    return LiftRetVal(LogMoqException._(v0), new_offset);
+    final reason = reason_lifted.value;
+    new_offset += reason_lifted.bytesRead;
+    return LiftRetVal(UnresolvableBroadcastMoqException._(reason), new_offset);
   }
 
   @override
@@ -4068,7 +4089,7 @@ class LogMoqException extends MoqException {
 
   @override
   int allocationSize() {
-    return FfiConverterString.allocationSize(v0) + 4;
+    return FfiConverterString.allocationSize(reason) + 4;
   }
 
   @override
@@ -4076,25 +4097,25 @@ class LogMoqException extends MoqException {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 28);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
-      v0,
+      reason,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
   }
 }
 
-class ConfigMoqException extends MoqException {
-  final String v0;
-  ConfigMoqException(String this.v0);
-  ConfigMoqException._(String this.v0);
-  static LiftRetVal<ConfigMoqException> read(Uint8List buf) {
+class LogMoqException extends MoqException {
+  final String reason;
+  LogMoqException(String this.reason);
+  LogMoqException._(String this.reason);
+  static LiftRetVal<LogMoqException> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final v0_lifted = FfiConverterString.read(
+    final reason_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final v0 = v0_lifted.value;
-    new_offset += v0_lifted.bytesRead;
-    return LiftRetVal(ConfigMoqException._(v0), new_offset);
+    final reason = reason_lifted.value;
+    new_offset += reason_lifted.bytesRead;
+    return LiftRetVal(LogMoqException._(reason), new_offset);
   }
 
   @override
@@ -4106,7 +4127,7 @@ class ConfigMoqException extends MoqException {
 
   @override
   int allocationSize() {
-    return FfiConverterString.allocationSize(v0) + 4;
+    return FfiConverterString.allocationSize(reason) + 4;
   }
 
   @override
@@ -4114,7 +4135,45 @@ class ConfigMoqException extends MoqException {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 29);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
-      v0,
+      reason,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset;
+  }
+}
+
+class ConfigMoqException extends MoqException {
+  final String reason;
+  ConfigMoqException(String this.reason);
+  ConfigMoqException._(String this.reason);
+  static LiftRetVal<ConfigMoqException> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final reason_lifted = FfiConverterString.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final reason = reason_lifted.value;
+    new_offset += reason_lifted.bytesRead;
+    return LiftRetVal(ConfigMoqException._(reason), new_offset);
+  }
+
+  @override
+  RustBuffer lower() {
+    final buf = Uint8List(allocationSize());
+    write(buf);
+    return toRustBuffer(buf);
+  }
+
+  @override
+  int allocationSize() {
+    return FfiConverterString.allocationSize(reason) + 4;
+  }
+
+  @override
+  int write(Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 30);
+    int new_offset = buf.offsetInBytes + 4;
+    new_offset += FfiConverterString.write(
+      reason,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
@@ -8830,8 +8889,8 @@ abstract class MoqSessionInterface {
   MoqBandwidth bandwidth();
   void cancel({required int code});
   Future<void> closed();
+  int connects();
   MoqOriginConsumer consume();
-  int epoch();
   MoqOriginProducer publish();
   Future<void> shutdown();
   MoqConnectionStats stats();
@@ -8893,6 +8952,17 @@ class MoqSession implements MoqSessionInterface {
     );
   }
 
+  int connects() {
+    return rustCallWithLifter(
+      (status) => uniffi_moq_ffi_fn_method_moqsession_connects(
+        uniffiClonePointer(),
+        status,
+      ),
+      FfiConverterUInt64.lift,
+      null,
+    );
+  }
+
   MoqOriginConsumer consume() {
     return rustCallWithLifter(
       (status) => uniffi_moq_ffi_fn_method_moqsession_consume(
@@ -8900,17 +8970,6 @@ class MoqSession implements MoqSessionInterface {
         status,
       ),
       FfiConverterMoqOriginConsumer.lift,
-      null,
-    );
-  }
-
-  int epoch() {
-    return rustCallWithLifter(
-      (status) => uniffi_moq_ffi_fn_method_moqsession_epoch(
-        uniffiClonePointer(),
-        status,
-      ),
-      FfiConverterUInt64.lift,
       null,
     );
   }
@@ -10333,6 +10392,25 @@ void moqLogLevel({required String level}) {
       status,
     );
   }, moqExceptionErrorHandler);
+}
+
+int moqEpochTimeMs({required String epoch}) {
+  return rustCallWithLifter(
+    (status) => uniffi_moq_ffi_fn_func_moq_epoch_time_ms(
+      FfiConverterString.lower(epoch),
+      status,
+    ),
+    FfiConverterUInt64.lift,
+    moqExceptionErrorHandler,
+  );
+}
+
+String moqMintEpoch() {
+  return rustCallWithLifter(
+    (status) => uniffi_moq_ffi_fn_func_moq_mint_epoch(status),
+    FfiConverterString.lift,
+    null,
+  );
 }
 
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
@@ -12204,18 +12282,18 @@ external Pointer<Void> uniffi_moq_ffi_fn_method_moqsession_closed(
   Pointer<Void> ptr,
 );
 
-@Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+@Native<Uint64 Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
-external Pointer<Void> uniffi_moq_ffi_fn_method_moqsession_consume(
+external int uniffi_moq_ffi_fn_method_moqsession_connects(
   Pointer<Void> ptr,
   Pointer<RustCallStatus> uniffiStatus,
 );
 
-@Native<Uint64 Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+@Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
-external int uniffi_moq_ffi_fn_method_moqsession_epoch(
+external Pointer<Void> uniffi_moq_ffi_fn_method_moqsession_consume(
   Pointer<Void> ptr,
   Pointer<RustCallStatus> uniffiStatus,
 );
@@ -12259,6 +12337,19 @@ external RustBuffer uniffi_moq_ffi_fn_method_moqerror_uniffi_trait_display(
 )
 external void uniffi_moq_ffi_fn_func_moq_log_level(
   RustBuffer level,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Uint64 Function(RustBuffer, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external int uniffi_moq_ffi_fn_func_moq_epoch_time_ms(
+  RustBuffer epoch,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<RustBuffer Function(Pointer<RustCallStatus>)>(assetId: _uniffiAssetId)
+external RustBuffer uniffi_moq_ffi_fn_func_moq_mint_epoch(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
@@ -12588,6 +12679,12 @@ external void ffi_moq_ffi_rust_future_complete_void(
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_func_moq_log_level();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_func_moq_epoch_time_ms();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_func_moq_mint_epoch();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqbandwidth_reserve();
@@ -13001,10 +13098,10 @@ external int uniffi_moq_ffi_checksum_method_moqsession_cancel();
 external int uniffi_moq_ffi_checksum_method_moqsession_closed();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_checksum_method_moqsession_consume();
+external int uniffi_moq_ffi_checksum_method_moqsession_connects();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_checksum_method_moqsession_epoch();
+external int uniffi_moq_ffi_checksum_method_moqsession_consume();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqsession_publish();
@@ -13096,6 +13193,12 @@ void _checkApiVersion() {
 
 void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_func_moq_log_level() != 24625) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_func_moq_epoch_time_ms() != 13125) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_func_moq_mint_epoch() != 34550) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbandwidth_reserve() != 60458) {
@@ -13357,7 +13460,7 @@ void _checkApiChecksums() {
       54021) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqorigindynamic_update() != 7304) {
+  if (uniffi_moq_ffi_checksum_method_moqorigindynamic_update() != 15163) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqoriginproducer_consume() != 52357) {
@@ -13516,7 +13619,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqclient_cancel() != 29949) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqclient_connect() != 61750) {
+  if (uniffi_moq_ffi_checksum_method_moqclient_connect() != 18055) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqsession_bandwidth() != 8006) {
@@ -13528,10 +13631,10 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqsession_closed() != 7901) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqsession_consume() != 57909) {
+  if (uniffi_moq_ffi_checksum_method_moqsession_connects() != 18791) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqsession_epoch() != 32695) {
+  if (uniffi_moq_ffi_checksum_method_moqsession_consume() != 57909) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqsession_publish() != 15240) {

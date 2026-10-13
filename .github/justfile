@@ -8,6 +8,9 @@ check:
 
 # Tests of repository tooling; nightly, not on every pull request.
 test:
+    python3 sh/size/report.test.py
+    python3 sh/size/release.test.py
+    python3 sh/size/nightly.test.py
     python3 bench/compare.test.py
     python3 bench/summary.test.py
     python3 bench/relay.test.py
@@ -44,6 +47,19 @@ install-formula *args:
 [positional-arguments]
 trigger-repo-publish *args:
     sh/gh/trigger-repo-publish.sh "$@"
+
+# Measure a workflow run's release uploads, the minimal FFI build, and bundled first-load JS entries.
+size-collect output run="":
+    sh/size/collect.sh '{{ output }}' '{{ run }}'
+
+# Compare a size report with its retained nightly history.
+[positional-arguments]
+size-report *args:
+    python3 sh/size/report.py "$@"
+
+# Collect and compare nightly shipping sizes through the existing alert path.
+size-nightly output run:
+    sh/size/nightly.sh '{{ output }}' '{{ run }}'
 
 # Install the rendered GStreamer formula against the current macOS tarball.
 [positional-arguments]

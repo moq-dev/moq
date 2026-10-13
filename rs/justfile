@@ -353,3 +353,7 @@ bench-rtmp *args:
 [positional-arguments]
 bench-stats *args:
     cargo bench --locked -p moq-stats --features bench --bench producer_tick --bench decode -- "$@"
+
+# Sweep latency observations against writer count and report density.
+bench-latency:
+    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-bench --run-ignored only -E 'test(benchmark_observation_contention)' --success-output immediate

@@ -560,25 +560,33 @@ impl ClientSession {
 		Ok(vec![ClientSessionResult::RaisedEvent(event)])
 	}
 
-	fn handle_amf0_data(&mut self, mut data: Vec<Amf0Value>, stream_id: u32) -> ClientResult {
-		if data.len() == 0 {
-			// No data so just do nothing
-			return Ok(Vec::new());
+	fn handle_amf0_data(&mut self, data: Vec<Amf0Value>, stream_id: u32) -> ClientResult {
+		// Anything that isn't stream metadata is still raised, so the caller can
+		// account for script data it doesn't carry instead of losing it silently.
+		let event = match self.stream_metadata(&data, stream_id) {
+			Some(metadata) => ClientSessionEvent::StreamMetadataReceived { metadata },
+			None => ClientSessionEvent::UnhandleableAmf0Data { values: data },
+		};
+
+		Ok(vec![ClientSessionResult::RaisedEvent(event)])
+	}
+
+	/// Parse `onMetaData({...})` sent on the active stream.
+	fn stream_metadata(&self, data: &[Amf0Value], stream_id: u32) -> Option<StreamMetadata> {
+		if self.active_stream_id != Some(stream_id) {
+			return None;
 		}
 
-		// Validate we are active on the stream this message came from
-		match self.active_stream_id {
-			None => return Ok(Vec::new()), // not active on any stream
-			Some(active_stream_id) if active_stream_id != stream_id => return Ok(Vec::new()), // not active on this stream
-			Some(_) => (),
+		let [Amf0Value::Utf8String(name), Amf0Value::Object(properties), ..] = data else {
+			return None;
+		};
+		if name != "onMetaData" {
+			return None;
 		}
 
-		let first_element = data.remove(0);
-		match first_element {
-			Amf0Value::Utf8String(ref value) if value == "onMetaData" => self.handle_amf0_data_on_meta_data(data),
-
-			_ => Ok(Vec::new()),
-		}
+		let mut metadata = StreamMetadata::new();
+		metadata.apply_metadata_values(properties.clone());
+		Some(metadata)
 	}
 
 	fn handle_amf0_command(
@@ -827,24 +835,6 @@ impl ClientSession {
 
 		self.current_state = ClientState::Publishing;
 		let event = ClientSessionEvent::PublishRequestAccepted;
-		Ok(vec![ClientSessionResult::RaisedEvent(event)])
-	}
-
-	fn handle_amf0_data_on_meta_data(&mut self, mut data: Vec<Amf0Value>) -> ClientResult {
-		if data.len() < 1 {
-			// No data so ignore it
-			return Ok(Vec::new());
-		}
-
-		let properties = match data.remove(0) {
-			Amf0Value::Object(properties) => properties,
-			_ => return Ok(Vec::new()), // malformed so ignore it
-		};
-
-		let mut metadata = StreamMetadata::new();
-		metadata.apply_metadata_values(properties);
-
-		let event = ClientSessionEvent::StreamMetadataReceived { metadata };
 		Ok(vec![ClientSessionResult::RaisedEvent(event)])
 	}
 

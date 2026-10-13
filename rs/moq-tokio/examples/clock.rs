@@ -67,7 +67,8 @@ async fn main() -> anyhow::Result<()> {
 			let broadcast = origin
 				.create_broadcast(&config.broadcast)
 				.context("failed to create broadcast")?;
-			let track = broadcast.create_track(track, None)?;
+			let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+			let track = broadcast.create_track(track, info)?;
 			// Announced once the track exists, so a subscriber acting on the
 			// announcement finds it.
 			broadcast
