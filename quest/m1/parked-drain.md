@@ -1,10 +1,11 @@
-# [S] Draining parked groups is linear in the backlog
+# [S] Draining parked groups is near-linear in the backlog
 
 ## Goal
 
 Once a subscriber's raised cap releases its parked groups, each delivery
-costs O(1) amortized, so draining P parked groups is linear in P. The
-`origin/resume_overlap` benchmark shows no slope over the parked count.
+costs at most O(log P), so draining P parked groups is O(P log P), not
+quadratic. The `origin/resume_overlap` benchmark's per-group drain time no
+longer grows linearly with the parked count.
 
 ## Plan
 
@@ -19,15 +20,17 @@ subscriber caps its range below arriving groups and later raises the cap;
 live players and default relay forwarding set no end cap, so production's
 parked set is empty today.
 
-Recommended: validate lazily. Check only the lowest parked group for an
-abort when it is about to be re-offered, and wake the subscriber from the
-track (one registration) when a cached group is evicted or expires, rather
-than registering on every parked group per poll. Keep the existing
+Recommended: validate lazily. On every poll, cap raised or not, pop aborted
+groups off the low end of `parked` until the lowest is live, and wake the
+subscriber from the track (one registration) when a cached group is evicted
+or expires, rather than registering on every parked group per poll. Each pop
+is paid for by its insertion, and the `BTreeMap`'s O(log P) removal is
+accepted rather than swapping the structure. Keep the existing
 guarantees: a raised `start_at` drops overtaken entries, eviction bounds the
 parked set to what the cache retains, a finished track with only aborted
 parked groups ends, and an abort between check and registration still wakes
-the reader. Extend the benchmark with a parked-count sweep and assert the
-fix flattens it.
+the reader. Extend the benchmark with a parked-count sweep that shows the fix
+flattens it.
 
 Public API: none. Wire: none.
 
