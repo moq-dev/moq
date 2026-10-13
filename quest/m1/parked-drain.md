@@ -23,10 +23,11 @@ parked set is empty today.
 Recommended: validate lazily. Wake the subscriber from the track (one
 registration) when a cached group aborts, rather than registering on every
 parked group per poll, and on that wake remove exactly the parked entries
-that aborted, cap raised or not, for example by walking a per-track log of
-aborted sequences from the subscriber's own position. Aborted entries are not
-a low-end prefix: eviction rotates recently read groups to the back and
-expiry follows last access. Each removal is paid for by its insertion, and
+that aborted, cap raised or not. Aborted entries are not a low-end prefix:
+eviction rotates recently read groups to the back and expiry follows last
+access. A sequence can name both a live group and a fetched head, so confirm
+the parked consumer itself aborted before dropping it, and keep any abort
+bookkeeping bounded by what the cache retains, not by lifetime churn. Each removal is paid for by its insertion, and
 the `BTreeMap`'s O(log P) removal is accepted rather than swapping the
 structure. Keep the existing guarantees: a raised `start_at` drops overtaken
 entries, eviction bounds the parked set to what the cache retains, a
