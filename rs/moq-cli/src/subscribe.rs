@@ -324,7 +324,7 @@ impl Subscribe {
 		// shape internally (synthesizing avcC/hvcC from inline parameter sets).
 		let stream = self.stream().await?;
 		let mut mkv = moq_mux::container::mkv::Export::new(self.source, stream)
-			.with_max_delay(self.args.max_delay)
+			.with_delay(self.args.max_delay)
 			.with_fragment_duration(self.args.fragment_duration);
 
 		while let Some(chunk) = mkv.next().await? {
@@ -480,7 +480,7 @@ impl Subscribe {
 		// internally (synthesizing avcC from inline parameter sets). Only H.264 video
 		// and AAC audio are supported; `fragment_duration` does not apply to FLV.
 		let stream = self.stream().await?;
-		let mut flv = moq_mux::container::flv::Export::new(self.source, stream).with_max_delay(self.args.max_delay);
+		let mut flv = moq_mux::container::flv::Export::new(self.source, stream).with_delay(self.args.max_delay);
 
 		while let Some(chunk) = flv.next().await? {
 			stdout.write_all(&chunk).await?;

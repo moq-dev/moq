@@ -54,6 +54,71 @@ async fn a_transient_failure_retries_until_the_budget_runs_out() {
 	);
 }
 
+/// The retry window decides whether a new attempt starts, not how long one may take: a handshake
+/// slower than the window, but inside the connect timeout, lands on the first dial. Cutting it at
+/// the window would only fail it, and every redial the same way.
+#[tokio::test]
+async fn a_handshake_slower_than_the_retry_window_still_lands() {
+	const WINDOW: Duration = Duration::from_millis(300);
+	const HANDSHAKE: Duration = Duration::from_secs(1);
+
+	// `tls://`, so the dial waits on the server's half of the TLS handshake.
+	let mut listen = moq_tokio::listen::Config::default();
+	listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
+	listen.tcp.tls = Some(true);
+	listen.tls.generate = vec!["localhost".into()];
+	let mut server = listen
+		.init(Default::default())
+		.expect("init server")
+		.listen()
+		.await
+		.expect("bind tcp listener");
+	let server_addr = server.tcp_local_addr().expect("tcp listener bound");
+	let (accepted, mut sessions) = tokio::sync::mpsc::unbounded_channel();
+	let _server = tokio::spawn(async move {
+		let origin = moq_tokio::origin::spawn();
+		while let Some(request) = server.accept().await {
+			if let Ok(session) = request.with_publisher(&origin).ok().await {
+				let _ = accepted.send(session);
+			}
+		}
+	});
+
+	// Holds each connection for the handshake's length before forwarding it to the server.
+	let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind proxy");
+	let port = proxy.local_addr().expect("proxy bound").port();
+	let (dialed, mut dials) = tokio::sync::mpsc::unbounded_channel();
+	let _proxy = tokio::spawn(async move {
+		while let Ok((mut client, _)) = proxy.accept().await {
+			let _ = dialed.send(());
+			tokio::spawn(async move {
+				tokio::time::sleep(HANDSHAKE).await;
+				let mut upstream = tokio::net::TcpStream::connect(server_addr)
+					.await
+					.expect("connect to the server");
+				let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+			});
+		}
+	});
+
+	let mut config = moq_tokio::connect::Config::default();
+	config.tls.insecure = Some(true);
+	config.backoff.timeout = Some(WINDOW);
+	let client = config.init(Default::default()).expect("failed to init client");
+	let url: url::Url = format!("tls://127.0.0.1:{port}/").parse().expect("parse url");
+	let connection = client.connect(url);
+
+	tokio::select! {
+		session = sessions.recv() => {
+			session.expect("server stopped accepting");
+		}
+		res = connection.closed() => panic!("gave up mid-handshake: {res:?}"),
+		_ = tokio::time::sleep(Duration::from_secs(30)) => panic!("never connected"),
+	}
+	dials.recv().await.expect("proxy stopped");
+	assert!(dials.try_recv().is_err(), "the first dial was cut short and redialed");
+}
+
 /// The connect count advances in the same write that reports `Connected`, so a caller
 /// pairing [`Connection::status`] with [`Connection::connects`] never sees a stale
 /// count, however fast the redial.

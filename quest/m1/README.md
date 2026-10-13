@@ -199,7 +199,7 @@ disabled rung strands WHEP, HLS, and moq-mux export viewers.
 - [moqsink first catalog](/quest/m1/gst-first-catalog.md) - a restarted `moqsink` lists every requested pad in its first catalog, so `moqsrc` resumes each on its held pad
 - [moqsrc A/V alignment](/quest/m1/gst-src-av-sync.md) - every `moqsrc` pad of a run shares one timestamp reference and segment base
 - [TS passthrough export](/quest/m1/ts-passthrough-export.md) - `export ts --passthrough` writes the `m2ts` track back byte-identical (less late drops) on a fixed delay
-- [FLV and MKV export delay](/quest/m1/export-delay.md) - FLV and MKV interleave through the shared jitter buffer on a fixed delay, breaking the CLI once
+- [TS export backlog](/quest/m1/ts-export-backlog.md) - `export ts` reads a track only until a frame is due, like FLV and MKV, so a backlog stays in the source
 - [Bindings size profile](/quest/m1/ffi-size-profile.md) - a benchmark decides whether the moq-ffi builds ship at opt-level "s", which halves the dylib
 - [Go mirror delivery](/quest/m1/go-mirror-delivery.md) - the Go binding's staticlibs stop growing git history by ~210 MiB per release
 - [Dart on iOS](/quest/m1/dart-ios.md) - prove the shipped iOS native asset actually loads on a device, which no CI can

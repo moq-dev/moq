@@ -906,9 +906,11 @@ impl Export {
 			found.flag("--name", None, "--broadcast");
 		}
 		match &self.sink {
-			ExportSink::Fmp4(args) | ExportSink::Mkv(args) => found.extend(args.container.deprecated()),
+			ExportSink::Fmp4(args) => found.extend(args.container.deprecated()),
+			ExportSink::Mkv(args) => found.extend(args.container.deprecated()),
 			ExportSink::Ts(args) => found.extend(args.deprecated()),
-			ExportSink::Flv(args) | ExportSink::H264(args) | ExportSink::H265(args) => found.extend(args.deprecated()),
+			ExportSink::Flv(args) => found.extend(args.deprecated()),
+			ExportSink::H264(args) | ExportSink::H265(args) => found.extend(args.deprecated()),
 			ExportSink::Hls(hls) => found.extend(hls.tls.deprecated()),
 			ExportSink::Rtmp(rtmp) => found.extend(rtmp.deprecated()),
 			_ => {}
@@ -924,11 +926,11 @@ pub enum ExportSink {
 	/// Fragmented MP4 / CMAF to stdout.
 	Fmp4(Fragmented),
 	/// Matroska / WebM to stdout.
-	Mkv(Fragmented),
+	Mkv(BufferedFragmented),
 	/// MPEG-TS to stdout.
 	Ts(Transport),
 	/// FLV / RTMP container to stdout.
-	Flv(Container),
+	Flv(Buffered),
 	/// H.264 Annex-B elementary stream to stdout.
 	H264(Container),
 	/// H.265 Annex-B elementary stream to stdout.
@@ -976,6 +978,15 @@ impl ExportSink {
 			mux_rate: None,
 			passthrough: false,
 		};
+		let buffered = |format, args: &Buffered| Stdout {
+			format,
+			max_delay: args.delay.into_std(),
+			linger: args.linger.into_std(),
+			stitch: false,
+			fragment_duration: None,
+			mux_rate: None,
+			passthrough: false,
+		};
 		Some(match self {
 			Self::Fmp4(args) => Stdout {
 				fragment_duration: args.fragment_duration.map(crate::duration::Duration::into_std),
@@ -983,7 +994,7 @@ impl ExportSink {
 			},
 			Self::Mkv(args) => Stdout {
 				fragment_duration: args.fragment_duration.map(crate::duration::Duration::into_std),
-				..container(SubscribeFormat::Mkv, &args.container)
+				..buffered(SubscribeFormat::Mkv, &args.container)
 			},
 			Self::Ts(args) => Stdout {
 				format: SubscribeFormat::Ts,
@@ -994,7 +1005,7 @@ impl ExportSink {
 				mux_rate: args.mux_rate,
 				passthrough: args.passthrough,
 			},
-			Self::Flv(args) => container(SubscribeFormat::Flv, args),
+			Self::Flv(args) => buffered(SubscribeFormat::Flv, args),
 			Self::H264(args) => container(SubscribeFormat::H264, args),
 			Self::H265(args) => container(SubscribeFormat::H265, args),
 			_ => return None,
@@ -1005,7 +1016,7 @@ impl ExportSink {
 /// A stdout sink's format and the options that apply to it.
 pub struct Stdout {
 	pub format: SubscribeFormat,
-	/// The staleness budget, which `ts` also holds every frame for (`--delay`).
+	/// The staleness budget, also used as the TS/FLV/MKV release delay.
 	pub max_delay: Duration,
 	pub linger: Duration,
 	/// Follow a replacement as a program switch (`ts` only).
@@ -1016,7 +1027,7 @@ pub struct Stdout {
 	pub passthrough: bool,
 }
 
-/// Options shared by the stdout container sinks other than `ts`.
+/// Staleness options for stdout sinks without a fixed release delay.
 #[derive(usage::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Container {
@@ -1049,6 +1060,56 @@ impl Container {
 		}
 		found
 	}
+}
+
+/// A stdout container with a fixed release delay.
+#[derive(usage::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+pub struct Buffered {
+	/// How long after its decode time each frame is written (e.g. `500ms`); late frames are dropped.
+	/// The same delay bounds source staleness. Zero writes each frame as soon as it is read and
+	/// drops none as late, but still skips a stalled group once a newer one is ready.
+	#[usage(long, default = "500ms")]
+	pub delay: crate::duration::Duration,
+	/// Accepted only to refuse a nonzero value: only TS can mark a broadcast restart.
+	#[usage(long, default = "0s", hide = true)]
+	pub linger: crate::duration::Duration,
+	/// The retired staleness-only setting.
+	#[usage(long, hide = true)]
+	max_delay: Option<crate::duration::Duration>,
+	/// An older spelling of the staleness setting.
+	#[usage(long = "max-age", hide = true)]
+	max_age: Option<crate::duration::Duration>,
+	/// An older spelling of the staleness setting.
+	#[usage(long = "latency-max", hide = true)]
+	latency_max: Option<crate::duration::Duration>,
+}
+
+impl Buffered {
+	fn deprecated(&self) -> moq_tokio::cli::Deprecated {
+		let mut found = moq_tokio::cli::Deprecated::default();
+		for (present, flag) in [
+			(self.max_delay.is_some(), "--max-delay"),
+			(self.max_age.is_some(), "--max-age"),
+			(self.latency_max.is_some(), "--latency-max"),
+		] {
+			if present {
+				found.flag(flag, None, "--delay");
+			}
+		}
+		found
+	}
+}
+
+/// A buffered Matroska output with an optional cluster cap.
+#[derive(usage::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+pub struct BufferedFragmented {
+	#[usage(flatten)]
+	pub container: Buffered,
+	/// Cap the output cluster duration (e.g. `2s`); defaults to video GOPs.
+	#[usage(long)]
+	pub fragment_duration: Option<crate::duration::Duration>,
 }
 
 /// The MPEG-TS stdout container.
@@ -1108,7 +1169,7 @@ impl Transport {
 	}
 }
 
-/// The fmp4 / mkv stdout containers: [`Container`] plus a fragment cap.
+/// The fMP4 stdout container with a fragment cap.
 #[derive(usage::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Fragmented {
@@ -1116,7 +1177,7 @@ pub struct Fragmented {
 	pub container: Container,
 
 	/// Cap the output fragment/cluster duration (e.g. `2s`).
-	/// Defaults to publisher groups for fMP4 and video GOPs for MKV.
+	/// Defaults to publisher groups.
 	#[usage(long)]
 	pub fragment_duration: Option<crate::duration::Duration>,
 }
@@ -1157,7 +1218,7 @@ mod tests {
 				.unwrap()
 		};
 		assert!(parse("ts", "10s").validate().is_ok());
-		for format in ["fmp4", "mkv", "flv", "h264", "h265"] {
+		for format in ["fmp4", "h264", "h265"] {
 			let err = parse(format, "10s").validate().unwrap_err().to_string();
 			assert!(err.contains("--linger"), "{format}: {err}");
 			assert!(
@@ -1873,11 +1934,11 @@ mod tests {
 		else {
 			panic!("--latency-max must not start a run");
 		};
-		assert!(err.to_string().contains("--latency-max -> --max-delay"), "{}", err);
+		assert!(err.to_string().contains("--latency-max -> --delay"), "{}", err);
 	}
 
 	/// A publisher's retention is `--max-age` on `import`; a subscriber's staleness budget is
-	/// `--max-delay` on `export`, except `export ts`, which spells it `--delay`.
+	/// `--max-delay` for immediate exports and `--delay` for buffered exports.
 	#[test]
 	fn export_staleness_is_max_delay_and_import_retention_is_max_age() {
 		let export = |args: &[&str]| {
@@ -1893,7 +1954,7 @@ mod tests {
 			export.sink.stdout().unwrap().max_delay
 		};
 
-		for format in ["fmp4", "mkv", "flv", "h264", "h265"] {
+		for format in ["fmp4", "h264", "h265"] {
 			assert_eq!(stdout(&[format]), Duration::from_millis(500), "{format}");
 			assert_eq!(
 				stdout(&[format, "--max-delay", "2s"]),
@@ -1904,6 +1965,20 @@ mod tests {
 				panic!("{format}: --max-age must not start a run");
 			};
 			assert!(err.to_string().contains("--max-age -> --max-delay"), "{format}: {err}");
+		}
+
+		for format in ["flv", "mkv"] {
+			assert_eq!(stdout(&[format]), Duration::from_millis(500));
+			assert_eq!(stdout(&[format, "--delay", "2s"]), Duration::from_secs(2));
+			for old in ["--max-delay", "--max-age", "--latency-max"] {
+				let Err(err) = export(&[format, old, "2s"]) else {
+					panic!("{old} must be refused")
+				};
+				assert!(
+					err.to_string().contains(&format!("{old} -> --delay")),
+					"{format}: {err}"
+				);
+			}
 		}
 
 		assert_eq!(stdout(&["ts", "--delay", "2s"]), Duration::from_secs(2));
