@@ -74,8 +74,6 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
 - [Mark BBR starvation wherever the source runs dry](/quest/m1/quic/bbr-app-limited-edges.md) - partial polls count, local send caps do not, receiver credit is pinned
 - [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - `RESET_STREAM_AT`,
   so a reset WebTransport stream still delivers its header
-- [Pin retransmits to stream priority](/quest/m1/quic/retransmit-priority.md) - a test
-  proves a lost low-priority range waits behind higher-priority new data
 - [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - strict
   subscription priority, fair buckets, and newest-first group order replace
   the lossy scalar; retransmits follow the same order

@@ -1603,6 +1603,68 @@ mod tests {
     }
 
     #[test]
+    fn retransmit_stream_priority() {
+        for fair in [true, false] {
+            let mut server = make(Side::Server);
+            server.set_params(&TransportParameters {
+                initial_max_streams_bidi: 2u32.into(),
+                initial_max_data: 10u32.into(),
+                initial_max_stream_data_bidi_remote: 10u32.into(),
+                ..TransportParameters::default()
+            });
+
+            let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+            let mut streams = Streams {
+                state: &mut server,
+                conn_state: &state,
+            };
+            let id_low = streams.open(Dir::Bi).unwrap();
+            let id_high = streams.open(Dir::Bi).unwrap();
+
+            let mut low = SendStream {
+                id: id_low,
+                state: &mut server,
+                pending: &mut pending,
+                conn_state: &state,
+            };
+            low.set_priority(-1).unwrap();
+            assert_eq!(low.write(b"low").unwrap(), 3);
+
+            let mut buf = Vec::with_capacity(40);
+            let mut sent = server.write_stream_frames(&mut buf, 40, fair);
+            assert_eq!(sent.len(), 1);
+            let lost = sent.pop().unwrap();
+            assert_eq!(lost.id, id_low);
+            assert_eq!(lost.offsets, 0..3);
+            // An existing queue entry would skip retransmit's priority assignment.
+            assert!(!server.can_send_stream_data());
+            assert_eq!(server.pending.len(), 0);
+
+            server.retransmit(lost);
+            assert_eq!(server.pending.len(), 1);
+
+            let mut high = SendStream {
+                id: id_high,
+                state: &mut server,
+                pending: &mut pending,
+                conn_state: &state,
+            };
+            high.set_priority(1).unwrap();
+            assert_eq!(high.write(b"high").unwrap(), 4);
+
+            buf.clear();
+            let sent = server.write_stream_frames(&mut buf, 40, fair);
+            assert_eq!(sent.len(), 2);
+            assert_eq!(sent[0].id, id_high);
+            assert_eq!(sent[0].offsets, 0..4);
+            assert_eq!(sent[1].id, id_low);
+            assert_eq!(sent[1].offsets, 0..3);
+            assert!(!server.can_send_stream_data());
+            assert_eq!(server.pending.len(), 0);
+        }
+    }
+
+    #[test]
     fn requeue_stream_priority() {
         let mut server = make(Side::Server);
         server.set_params(&TransportParameters {
