@@ -125,12 +125,23 @@ pub struct Config {
 	/// retraction, instead of advertising each stale path in turn. It must outlast
 	/// the wave's spread across the mesh. Defaults to [`DEFAULT_UPDATE_HOLD`];
 	/// zero delivers updates at once.
+	///
+	/// A relay further out can still pass a stale path to a cursor that already
+	/// retracted the prefix, which would announce it anew. So for two seconds after
+	/// a retraction, an announcement from the same publisher (first hop and epoch)
+	/// on a strictly worse route waits. A republish ranks the same and a new
+	/// instance carries a new epoch, so neither waits. Zero disables this too.
 	pub update_hold: Duration,
 }
 
 /// The default [`Config::update_hold`]: longer than a withdrawal takes to cross a
 /// global mesh, with margin.
 pub const DEFAULT_UPDATE_HOLD: Duration = Duration::from_millis(300);
+
+/// How long a cursor holds back a stale path to a prefix it retracted; see
+/// [`Config::update_hold`]. Path hunting after a withdrawal settles within it on
+/// random meshes with links of up to 250 ms.
+const RETRACT_QUARANTINE: Duration = Duration::from_secs(2);
 
 impl Default for Config {
 	/// A fresh random hop with no byte target and the default idle expiry.
@@ -606,13 +617,40 @@ fn route_order<'a>(
 /// The `(hops, cost, source, epoch)` metadata an announce cursor delivers alongside a prefix.
 type RouteMeta = (Hops, Cost, Source, Option<crate::Epoch>);
 
+/// The earlier of two optional deadlines.
+fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+	match (a, b) {
+		(Some(a), Some(b)) => Some(a.min(b)),
+		(a, b) => a.or(b),
+	}
+}
+
+/// A retraction's quarantine, keyed by prefix in its [`AnnounceConsumer`]: the
+/// retracted route's publisher, epoch, and rank, and when the quarantine ends.
+#[derive(Clone)]
+struct Quarantine {
+	held: Held,
+	publisher: Hop,
+	epoch: Option<crate::Epoch>,
+	rank: (Cost, usize),
+}
+
+impl Quarantine {
+	/// Whether `meta` could be a stale path to the retracted publisher: the same
+	/// first hop and epoch, ranked strictly worse. A republish ranks the same and a
+	/// new instance carries a new epoch, so neither waits.
+	fn holds(&self, meta: &RouteMeta) -> bool {
+		meta.0.iter().next() == Some(&self.publisher) && meta.3 == self.epoch && (meta.1, meta.0.len()) > self.rank
+	}
+}
+
 /// A pending update's hold, keyed by prefix in its [`AnnounceConsumer`].
 ///
 /// A consumer reads the origin's clock outside the driver, where it holds the
 /// driver's last reading, not the time the update arrived. So a hold first waits
 /// for the driver's next reading (armed a nanosecond past the stale one, which
 /// wakes the driver at once), and counts from there.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Held {
 	Anchoring(Instant),
 	Until(Instant),
@@ -716,19 +754,33 @@ impl OriginConsumerState {
 	}
 
 	/// The first pending prefix ready to deliver, or when the next held one is.
-	/// See [`Config::update_hold`]; a hold starts the first time a scan sees it.
+	/// See [`Config::update_hold`]; a hold starts the first time a scan sees it,
+	/// and a quarantine in `retracted` (settled against `now`) holds until it ends.
 	fn scan(
 		&self,
 		held: &mut HashMap<PathOwned, Held>,
+		retracted: &HashMap<PathOwned, Quarantine>,
 		now: Option<Instant>,
 		hold: Duration,
 	) -> Result<PathOwned, Option<Instant>> {
 		let mut wake = None;
 		for (prefix, update) in &self.pending {
-			let holds = !hold.is_zero() && !self.ended && self.is_update(prefix, update);
-			let Some(now) = now.filter(|_| holds) else {
+			let Some(now) = now.filter(|_| !hold.is_zero() && !self.ended) else {
 				return Ok(prefix.clone());
 			};
+			if !self.is_update(prefix, update) {
+				let quarantine = match update {
+					PendingUpdate::Announce((meta, _)) => retracted.get(prefix).filter(|q| q.holds(meta)),
+					_ => None,
+				};
+				let until = match quarantine.map(|q| q.held) {
+					Some(Held::Anchoring(seen)) => seen + Duration::from_nanos(1),
+					Some(Held::Until(until)) if now < until => until,
+					_ => return Ok(prefix.clone()),
+				};
+				wake = Some(wake.map_or(until, |w: Instant| w.min(until)));
+				continue;
+			}
 			// The clock reads the driver's last advance, which may be stale: anchor the
 			// hold on the first advance after the update arrived, by waking the driver.
 			let until = match held.get(prefix).copied() {
@@ -5093,6 +5145,11 @@ pub struct AnnounceConsumer {
 	// clock they count on, and the timer that wakes the next.
 	update_hold: Duration,
 	held: HashMap<PathOwned, Held>,
+	// Quarantines by prefix, and their retractions in clock order: first waiting
+	// for a fresh reading (by the stale one), then quarantined (by when each ends).
+	retracted: HashMap<PathOwned, Quarantine>,
+	anchoring: VecDeque<(Instant, PathOwned)>,
+	expiring: VecDeque<(Instant, PathOwned)>,
 	timers: Clock,
 	hold: crate::time::Deadline,
 }
@@ -5135,9 +5192,74 @@ impl AnnounceConsumer {
 			park: kio::Park::default(),
 			update_hold,
 			held: HashMap::new(),
+			retracted: HashMap::new(),
+			anchoring: VecDeque::new(),
+			expiring: VecDeque::new(),
 			hold: crate::time::Deadline::new(&timers),
 			timers,
 		}
+	}
+
+	/// Start a retraction's quarantine, or end it with a delivered announcement.
+	fn quarantine(&mut self, event: &AnnounceEvent, now: Option<Instant>) {
+		let update = match event {
+			AnnounceEvent::End(announce) => announce,
+			AnnounceEvent::Start(announce) | AnnounceEvent::Update(announce) | AnnounceEvent::Restart(announce) => {
+				self.retracted.remove(&announce.prefix);
+				return;
+			}
+		};
+		let Some(now) = now.filter(|_| !self.update_hold.is_zero()) else {
+			return;
+		};
+		// An anonymous route names no publisher to tie a later stale path to.
+		let Some(&publisher) = update.route.hops.iter().next().filter(|hop| **hop != Hop::UNKNOWN) else {
+			return;
+		};
+		// The reading may be stale; [`Self::settle`] starts the quarantine on a fresh one.
+		let quarantine = Quarantine {
+			held: Held::Anchoring(now),
+			publisher,
+			epoch: update.route.epoch.clone(),
+			rank: (update.route.cost, update.route.hops.len()),
+		};
+		self.retracted.insert(update.prefix.clone(), quarantine);
+		self.anchoring.push_back((now, update.prefix.clone()));
+	}
+
+	/// Start the quarantines of retractions the clock has since moved past, and
+	/// forget ended ones. Returns when to wake to read the clock again, if any remain.
+	fn settle(&mut self, now: Option<Instant>) -> Option<Instant> {
+		let now = now?;
+		// Both queues are in clock order, so only their fronts can be due. An entry
+		// whose prefix was since announced or retracted again no longer matches.
+		while let Some((seen, prefix)) = self.anchoring.front() {
+			if *seen >= now {
+				break;
+			}
+			if let Some(quarantine) = self.retracted.get_mut(prefix)
+				&& quarantine.held == Held::Anchoring(*seen)
+			{
+				quarantine.held = Held::Until(now + RETRACT_QUARANTINE);
+				self.expiring.push_back((now + RETRACT_QUARANTINE, prefix.clone()));
+			}
+			self.anchoring.pop_front();
+		}
+		while let Some((until, prefix)) = self.expiring.front() {
+			if *until > now {
+				break;
+			}
+			if self
+				.retracted
+				.get(prefix)
+				.is_some_and(|q| q.held == Held::Until(*until))
+			{
+				self.retracted.remove(prefix);
+			}
+			self.expiring.pop_front();
+		}
+		let anchoring = self.anchoring.front().map(|(seen, _)| *seen + Duration::from_nanos(1));
+		earliest(anchoring, self.expiring.front().map(|(until, _)| *until))
 	}
 
 	/// Drive the egress announce guards for one update.
@@ -5175,8 +5297,10 @@ impl AnnounceConsumer {
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<AnnounceEvent>> {
 		loop {
 			let now = self.timers.try_now();
+			let settling = self.settle(now);
 			let hold = self.update_hold;
 			let held = &mut self.held;
+			let retracted = &self.retracted;
 			let mut ready = None;
 			let mut wake = None;
 			let event = match self.state.poll(waiter, |state| {
@@ -5186,7 +5310,7 @@ impl AnnounceConsumer {
 						false => Poll::Pending,
 					};
 				}
-				match state.scan(held, now, hold) {
+				match state.scan(held, retracted, now, hold) {
 					Ok(prefix) => {
 						ready = Some(prefix);
 						Poll::Ready(())
@@ -5209,7 +5333,7 @@ impl AnnounceConsumer {
 				// Closed: discard the Ref so its MutexGuard doesn't escape this call.
 				Poll::Ready(Err(_)) => None,
 				Poll::Pending => {
-					self.hold.set(wake);
+					self.hold.set(earliest(wake, settling));
 					ready!(self.hold.poll(waiter));
 					continue;
 				}
@@ -5222,6 +5346,7 @@ impl AnnounceConsumer {
 			| AnnounceEvent::Restart(announce)
 			| AnnounceEvent::End(announce)) = &event;
 			self.held.remove(&announce.prefix);
+			self.quarantine(&event, now);
 			return Poll::Ready(Some(self.hand_out(event)));
 		}
 	}
@@ -5232,10 +5357,12 @@ impl AnnounceConsumer {
 	/// Use [`Self::is_closed`] to check if the cursor is closed.
 	pub fn try_next(&mut self) -> Option<AnnounceEvent> {
 		let now = self.timers.try_now();
+		let settling = self.settle(now);
 		let mut state = self.state.write().ok()?;
-		let prefix = match state.scan(&mut self.held, now, self.update_hold) {
+		let prefix = match state.scan(&mut self.held, &self.retracted, now, self.update_hold) {
 			Ok(prefix) => prefix,
 			Err(wake) => {
+				let wake = earliest(wake, settling);
 				// Arm the hold even though nothing polls it: the armed timer wakes the
 				// driver, so its clock reaches the deadline for a later call to see.
 				drop(state);
@@ -5246,6 +5373,7 @@ impl AnnounceConsumer {
 		self.held.remove(&prefix);
 		let event = state.take_prefix(prefix);
 		drop(state);
+		self.quarantine(&event, now);
 		Some(self.hand_out(event))
 	}
 
@@ -7925,6 +8053,51 @@ mod tests {
 		// The last route goes: retracted at once.
 		drop(farther);
 		announced.assert_next_ended("room");
+	}
+
+	/// After a retraction, a worse path to the same publisher waits out the
+	/// quarantine. An anonymous route names no publisher, so one after it is not held.
+	#[moq_net_sim::test]
+	async fn a_retraction_quarantines_a_named_publisher() {
+		let producer = origin(1).produce();
+		let peer = producer.clone().peer();
+		let mut announced = producer.consume().announced();
+		moq_net_sim::sleep(Duration::from_millis(1)).await;
+
+		let route = |chain: &[u64], via| Route::default().with_hops(hops(chain)).with_via(origin(via));
+
+		let near = peer.dynamic("named", route(&[9, 2], 2)).unwrap();
+		announced.assert_next_active("named");
+		drop(near);
+		announced.assert_next_ended("named");
+		let start = moq_net_sim::now();
+		let _stale = peer.dynamic("named", route(&[9, 3, 4], 4)).unwrap();
+		match announced.next().await.unwrap() {
+			AnnounceEvent::Start(announce) => assert_eq!(announce.route.hops, hops(&[9, 3, 4])),
+			other => panic!("should be a start: got {other:?}"),
+		}
+		assert!(moq_net_sim::now() - start >= RETRACT_QUARANTINE);
+
+		let near = peer.dynamic("anonymous", route(&[0, 2], 2)).unwrap();
+		announced.assert_next_active("anonymous");
+		drop(near);
+		announced.assert_next_ended("anonymous");
+		let _other = peer.dynamic("anonymous", route(&[0, 3, 4], 4)).unwrap();
+		announced.assert_next_active("anonymous");
+
+		// A quarantine nothing announces again is forgotten once it ends: the cursor
+		// wakes to anchor it, then again to drop it.
+		let gone = peer.dynamic("gone", route(&[9, 2], 2)).unwrap();
+		announced.assert_next_active("gone");
+		drop(gone);
+		announced.assert_next_ended("gone");
+		assert_eq!(announced.retracted.len(), 1);
+		for _ in 0..2 {
+			announced.assert_next_wait();
+			moq_net_sim::sleep(RETRACT_QUARANTINE).await;
+		}
+		announced.assert_next_wait();
+		assert!(announced.retracted.is_empty(), "the ended quarantine is still held");
 	}
 
 	/// A peer withdrawing a prefix hides the routes there through it, so the next

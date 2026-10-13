@@ -7,7 +7,7 @@ The Rust client session requests announcements only for prefixes its
 [JS behavior](/quest/m1/lazy-discovery/js.md) and the
 [line's shared rules](/quest/m1/lazy-discovery/README.md). Rust's `follow`
 folds into its request path as in the
-[JS read API](/quest/m1/lazy-discovery/read-api.md). Relays keep watching the
+[JS read API](/doc/lib/js/net.md). Relays keep watching the
 root, so relay behavior and cluster routing are unchanged.
 
 ## Plan

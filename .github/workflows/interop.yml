@@ -149,6 +149,11 @@ jobs:
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
+      - name: TS pair controls
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: nix develop --command just test ts-pair-controls
+        shell: bash -leo pipefail {0}
+
       # Round-trips a PCR-paced TS through a relay and checks the subscriber's
       # `export ts` output with TSDuck (tsp/tsanalyze from the nix devShell).
       - name: TS compliance

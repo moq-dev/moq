@@ -1,11 +1,13 @@
-# [L] Two TS export legs emit identical packets for ST 2022-7
+# [L] Redundant TS exports preserve common packet identity
 
 ## Goal
 
 Two `moq export ts --sync` legs of one broadcast, joined at different
 moments, emit packet-identical TS from their first common packet, across
-skips and source drift, continuity counters included, within one epoch. A ST 2022-7 selector
-can then switch between them hitlessly.
+skips and source drift, continuity counters included, within one epoch.
+This establishes TS identity only. ST 2022-7 also requires matching RTP
+headers and payloads; coordinated RTP egress and receiver recovery need
+their own scope and tests before claiming selector compatibility.
 
 Non-goal: identity across a replaced broadcast. A leg ends on a replacement, or
 starts a fresh stream with `--stitch`,
@@ -28,8 +30,12 @@ requirement, so this waits until the T-STD line settles.
   there, so it comes from the media and not from what a leg has sent. The PCR
   moves to its own PID, because a discontinuity flag on the PCR PID would
   declare a time-base break. Loss is still detected within a group.
-- Once anchored identically, both legs must make the same skip decision and
-  lay out the same slots. t0ms's `two_legs_render_a_skip_the_same_way`
+- For content both legs release, the shared schedule must lay out the same
+  slots. Independent late delivery can leave complementary gaps; forcing both
+  legs to drop the same content would defeat redundant-path recovery. The
+  alignment planning prerequisite settles how the TS scheduler and any RTP
+  egress preserve common coordinates through those gaps.
+  t0ms's `two_legs_render_a_skip_the_same_way`
   (`rs/moq-mux/src/container/ts/export_timing_test.rs`) stays ignored until
   this lands. With the audio late, it also showed a
   PES header byte that differs at the skip; find and fix that.
@@ -41,6 +47,7 @@ requirement, so this waits until the T-STD line settles.
 
 ## Required
 
+- [Plan: redundant TS alignment](/quest/m1/plan-ts-alignment.md) - settle shared coordinates and coordinated RTP scope before implementing the public sync contract
 - [T-STD TS export](/quest/m1/tstd/README.md) - the export, clock recovery, and schedule these legs share
 
 ## Related
