@@ -28,8 +28,8 @@ const CONNECT_ATTEMPT: Duration = Duration::from_secs(5);
 /// one, on every reconnect cycle.
 ///
 /// The same goes for the retry window from [`Backoff::timeout`]: it decides
-/// whether a new attempt starts, not how long one may take, so a handshake
-/// slower than the window still gets
+/// whether a new walk starts, not how long one may take, so a walk under way
+/// tries every candidate and a handshake slower than the window still gets
 /// [`crate::connect::Config::timeout`](crate::connect::Config::timeout).
 fn attempt_timeout(index: usize, total: usize) -> Option<Duration> {
 	(index + 1 < total).then_some(CONNECT_ATTEMPT)
@@ -104,9 +104,10 @@ pub struct Backoff {
 
 	/// Maximum time to spend retrying before giving up. Defaults to 10s.
 	///
-	/// No attempt starts once it has passed, but one already dialing runs to
+	/// No new walk of the peer's addresses starts once it has passed, but one under way finishes:
+	/// each candidate but the last gets up to 5s, and the last runs to
 	/// [`crate::connect::Config::timeout`](crate::connect::Config::timeout), so a handshake
-	/// slower than this still lands. Giving up can therefore take up to one dial longer.
+	/// slower than this still lands. Giving up can therefore take up to one whole walk longer.
 	///
 	/// Resets after a stable connection (one that outlives the initial backoff), so a flapping
 	/// session that reconnects then immediately drops still counts toward the timeout. Set to
