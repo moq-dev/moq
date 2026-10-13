@@ -2,10 +2,11 @@
 
 ## Goal
 
-A joining importer, such as a TS standby that has not parsed its PMT yet,
-announces its broadcast only once it can serve its tracks, so a relay that
-queries it the moment it connects never gets `not found` and never aborts the
-subscribers already watching the incumbent (#4352).
+An importer starting beside a live partner, such as the second `import ts`
+of a pair that has not parsed its PMT yet, announces its broadcast only once
+it can serve its tracks, so a relay that queries it the moment it connects
+never gets `not found` and never aborts the subscribers already watching the
+partner (#4352).
 
 ## Plan
 
@@ -21,7 +22,7 @@ the other formats, whatever first declares their tracks. An importer that
 never learns its tracks never announces, and fails loud at its own deadline
 rather than announcing an empty broadcast.
 
-Test: the #4352 setup, one relay, an incumbent `import ts` with two `export
+Test: the #4352 setup, one relay, a running `import ts` with two `export
 ts` subscribers, then a second `import ts` on the same path connecting before
 its PMT arrives; both subscribers keep running. Repeat for one other importer
 format.
