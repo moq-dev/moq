@@ -70,6 +70,9 @@ pub(super) struct Buffer {
 	/// first packet until it decodes. `None` bounds nothing, so the PID's units go out only
 	/// in the slot before their own.
 	pub size: Option<usize>,
+	/// The transport buffer in bytes: 512 (ISO 13818-1 2.4.2.3), 480 for teletext (ETSI EN
+	/// 300 472 5).
+	pub transport: usize,
 }
 
 impl Buffer {
@@ -77,6 +80,7 @@ impl Buffer {
 	pub const SYSTEM: Self = Self {
 		rate: 1_000_000,
 		size: None,
+		transport: 512,
 	};
 
 	/// The packets one slot may carry on the PID: what its transport buffer passes on within
@@ -725,7 +729,7 @@ impl Schedule {
 				let free = self.transport.get(&tb).copied().unwrap_or(now).max(now);
 				let drained = free + duration as i128;
 				if let Some(buffer) = buffer {
-					let capacity = 512 * 8 * 1_000_000_000 / u128::from(buffer.rate);
+					let capacity = buffer.transport as u128 * 8 * 1_000_000_000 / u128::from(buffer.rate);
 					if drained - now > capacity as i128 {
 						let ready = drained - capacity as i128;
 						waiting.push(Reverse((ready, lane)));
@@ -924,6 +928,7 @@ mod tests {
 	const VIDEO: Buffer = Buffer {
 		rate: 100_000_000,
 		size: Some(1_000_000),
+		transport: 512,
 	};
 
 	/// Every slot until the schedule is empty: (index, packets per PID, nulls).
@@ -1040,6 +1045,40 @@ mod tests {
 		}
 	}
 
+	/// A teletext burst at a high multiplex rate keeps within its 480-byte transport buffer,
+	/// measured as the receiver sees it: each packet arriving over its time on the wire.
+	#[test]
+	fn teletext_keeps_within_its_smaller_transport_buffer() {
+		let rate = 50_000_000;
+		let teletext = Buffer {
+			rate: 6_750_000,
+			size: None,
+			transport: 480,
+		};
+		let mut schedule = Schedule::new(Duration::from_millis(100));
+		schedule.set_rate(Some(rate));
+		schedule.set_clock(7);
+		schedule.set_buffer(7, VIDEO);
+		schedule.set_buffer(9, teletext);
+		schedule.push(9, timing(1_000), unit(9, 40), false).unwrap();
+		let wire = 1504.0 / rate as f64;
+		let drain = 1504.0 / teletext.rate as f64;
+		let (mut leave, mut peak, mut sent) = (f64::MIN, 0.0f64, 0);
+		while let Some(slot) = schedule.next(None).unwrap() {
+			for (position, packet) in slot.layout(&unit(7, 1), 100, &[0xff; 188]).chunks(188).enumerate() {
+				if pid(packet) != 9 {
+					continue;
+				}
+				let start = slot.pcr as f64 / SYSTEM_CLOCK as f64 + position as f64 * wire;
+				leave = (start + wire).max(leave.max(start) + drain);
+				peak = peak.max((leave - start - wire) * teletext.rate as f64 / 8.0);
+				sent += 1;
+			}
+		}
+		assert_eq!(sent, 40);
+		assert!(peak <= 480.5, "teletext transport buffer holds {peak:.1} bytes");
+	}
+
 	/// A unit goes out a window ahead of its due slot, as soon as it is released.
 	#[test]
 	fn a_unit_goes_out_as_soon_as_it_is_released() {
@@ -1106,6 +1145,7 @@ mod tests {
 		let small = Buffer {
 			rate: 100_000_000,
 			size: Some(10 * PAYLOAD),
+			transport: 512,
 		};
 		schedule.set_buffer(1, small);
 		schedule.set_ended(true);
@@ -1155,6 +1195,7 @@ mod tests {
 		let audio = Buffer {
 			rate: 2_000_000,
 			size: Some(100_000),
+			transport: 512,
 		};
 		schedule.set_buffer(1, audio);
 		for at in 0..20 {
@@ -1173,6 +1214,7 @@ mod tests {
 		let audio = Buffer {
 			rate: 2_000_000,
 			size: Some(100_000),
+			transport: 512,
 		};
 		schedule.set_buffer(1, audio);
 		schedule.set_clock(1);
@@ -1192,6 +1234,7 @@ mod tests {
 		let slow = Buffer {
 			rate: 76_800,
 			size: Some(100_000),
+			transport: 512,
 		};
 		schedule.set_buffer(1, slow);
 		schedule.set_clock(1);
@@ -1211,6 +1254,7 @@ mod tests {
 			Buffer {
 				rate: 76_800,
 				size: Some(100_000),
+				transport: 512,
 			},
 		);
 		schedule.push(1, timing(1_000), unit(1, 4), false).unwrap();
@@ -1231,6 +1275,7 @@ mod tests {
 		let small = Buffer {
 			rate: 100_000_000,
 			size: Some(10 * PAYLOAD),
+			transport: 512,
 		};
 		schedule.set_buffer(1, small);
 		schedule.push(1, timing(1_000), unit(1, 8), true).unwrap();
@@ -1270,6 +1315,7 @@ mod tests {
 			Buffer {
 				rate: 2_000_000,
 				size: Some(2_592),
+				transport: 512,
 			},
 		);
 		let error = schedule
@@ -1313,6 +1359,7 @@ mod tests {
 			Buffer {
 				rate: 2_000_000,
 				size: Some(2 * PAYLOAD),
+				transport: 512,
 			},
 		);
 		schedule
@@ -1359,6 +1406,7 @@ mod tests {
 				Buffer {
 					rate: 2_000_000,
 					size: Some(2_592),
+					transport: 512,
 				},
 			);
 			let bytes = bitrate / 8 * 32 / 1_000;
@@ -1491,6 +1539,7 @@ mod tests {
 			Buffer {
 				rate: 2_000_000,
 				size: Some(100_000),
+				transport: 512,
 			},
 		);
 		schedule.push(1, timing(1_000), unit(1, 50), true).unwrap();
@@ -1619,7 +1668,15 @@ mod tests {
 				packets,
 				keyframe: true,
 				units: vec![video.into()],
-				caps: HashMap::from([(video.into(), Buffer { rate: RX, size: None }.per_slot())]),
+				caps: HashMap::from([(
+					video.into(),
+					Buffer {
+						rate: RX,
+						size: None,
+						transport: 512,
+					}
+					.per_slot(),
+				)]),
 				positions: None,
 			};
 			let mut null = unit(0, 1);
@@ -1658,10 +1715,12 @@ mod tests {
 			Buffer {
 				rate: 7_833_600,
 				size: None,
+				transport: 512,
 			},
 			Buffer {
 				rate: 8_160_000,
 				size: None,
+				transport: 512,
 			},
 		);
 		let slot = Slot {
