@@ -85,6 +85,6 @@ Update the egress docs (`doc/bin/cli.md`, `rtc.md`, `hls.md`, `rtmp.md`,
 
 ## Related
 
-- [Simulcast rung disable](/quest/m1/simulcast-rung-disable.md) - publishers disabling top rungs, which strands WHEP and HLS viewers until this lands
+- [Simulcast rung disable](/quest/m2/simulcast-rung-disable.md) - publishers disabling top rungs, which strands WHEP and HLS viewers until this lands
 - [Rendition preference](/quest/m1/rendition-preference.md) - reworks WHEP's pick across negotiated codecs; land the two picks together or rebase one on the other
-- [Viewer up-switch](/quest/m1/viewer-upswitch.md) - the viewer side of moving between renditions as capacity changes
+- [Viewer up-switch](/quest/m2/viewer-upswitch.md) - the viewer side of moving between renditions as capacity changes

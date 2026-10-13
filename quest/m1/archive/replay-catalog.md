@@ -43,7 +43,7 @@ this by hand-building a catalog.
   advertising the URL at all. `replay` stays unset: the timelines live on this broadcast.
 - The logic lives in `moq-archive` (`moq_archive::Reader`), so any host of
   the archive behind the root claim republishes and stamps the catalog, not
-  only `moq-cli` (decided 09-29 in [DVR rewind](/quest/m1/archive/dvr.md)).
+  only `moq-cli` (decided 09-29 in [DVR rewind](/quest/m2/archive-dvr.md)).
   `moq-cli` only passes the URL and the opt-out. Select the catalog track by
   catalog format as `export archive` does: hang and hang.z are stamped, MSF
   is refused.

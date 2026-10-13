@@ -9,7 +9,7 @@ microbenchmarks do not exercise.
 ## Plan
 
 Decided 2026-10-12: keep this broader transport/media suite in m2. The
-[backend baseline](/quest/m1/rs2ts/spike.md) adds the focused browser harness
+[backend baseline](/quest/m2/rs2ts/spike.md) adds the focused browser harness
 in m1, and each backend adoption includes its own comparison before switching.
 Reuse that work here; backend adoption does not wait for this broader suite.
 

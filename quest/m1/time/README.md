@@ -3,8 +3,8 @@
 ## Goal
 
 Every MoQ crate and package reads time and arms timers only through
-`moq-time` (Rust) or `@moq/time` (JS), and every behavioral test runs on a
-controlled clock: no wall-clock reads and no real sleeps. The backend is
+`moq-time` (Rust) or `@moq/time` (JS), with the production and public API migrations completed in m1. Tests
+needed to prove these changes use controlled time. The backend is
 the current runtime's (tokio, browser, io_uring, or the simulator), so the
 same logic runs on each and a test can swap in simulated time.
 
@@ -56,7 +56,7 @@ reasons, so later sessions don't reopen them:
   backend of the ambient clock, starts at zero, keeps deadlock detection, and
   seeds the later runtime trait. `#[moq_time::test]` replaces
   `#[moq_net_sim::test]`.
-- **Tests move onto the sim wherever possible.** A test with no real I/O
+- **Tests for migrated contracts use the sim wherever possible.** A test with no real I/O
   that cannot run on the sim yet uses paused tokio, whose clock `moq-time`
   reads. A real-I/O test never uses paused tokio, which auto-advances to the
   next timer while the OS event is still in flight; it syncs on events, with
@@ -71,20 +71,20 @@ reasons, so later sessions don't reopen them:
 - **Lint ratchet.** Each migration quest bans direct clock reads and timers in
   the crates and packages it finishes: clippy `disallowed-methods` and
   `disallowed-types` in a per-crate `clippy.toml`, and a biome
-  `noRestrictedGlobals` override, allowing only the backend modules. This
-  README flips the ban workspace-wide at the end.
+  `noRestrictedGlobals` override, allowing only the backend modules. The
+  workspace-wide test and lint sweep follows in m2.
 - **Consolidation.** perf/3122 (one clock read per io_uring turn) merged into
   [moq-uring on moq-time](/quest/m1/time/uring.md). The relay seam
-  [bench-relay](/quest/m1/bench-relay.md) needed is
+  [bench-relay](/quest/m2/bench-relay.md) needed is
   [the relay seam](/quest/m1/time/relay-seam.md). Quests that already asked
   for "mocked time" Require the core quest. moq-quic adopts the logical
   instant in the [switch](/quest/m1/quic/fork/switch.md), which Requires the
   crate.
 
-This README's own work, after the children: flip the lint ban workspace-wide;
-state the real-I/O rule and the `moq-time` testing rule in `AGENTS.md`,
-`rs/AGENTS.md`, `rs/moq-net/AGENTS.md`, and `js/AGENTS.md`; and run
-`just check --all` several times on a loaded machine.
+This milestone verifies the exported clock contract and production consumers
+needed by the QUIC switch and clustering regressions. Unrelated test/private
+cleanup and the global lint ratchet belong to
+[the follow-up sweep](/quest/m2/time-test-sweep.md).
 
 ## Required
 
@@ -92,12 +92,12 @@ state the real-I/O rule and the `moq-time` testing rule in `AGENTS.md`,
 - [@moq/time](/quest/m1/time/js.md) - the same model in JS, with an installable clock
 - [moq-net on moq-time](/quest/m1/time/net.md) - moq-net, moq-mux, moq-stats, moq-room, and moq-ffi run on moq-time and moq-net-sim is gone
 - [JS on @moq/time](/quest/m1/time/js-migrate.md) - every JS package reads time only through `@moq/time`
-- [Every crate on moq-time](/quest/m1/time/crates.md) - every remaining crate reads time only through moq-time, and its tests run on the sim, paused tokio, or events
+- [Every crate on moq-time](/quest/m1/time/crates.md) - every remaining crate reads time only through moq-time, with controlled tests for the production/public API migrations
 - [moq-uring on moq-time](/quest/m1/time/uring.md) - one clock read per worker turn and moq-time's deadline queue replace the private timer heap
 - [The relay seam](/quest/m1/time/relay-seam.md) - one in-memory session and a generic `moq_relay::Connection`, so relay tests run on the sim
 
 ## Related
 
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the per-flake fixes this line makes systemic
-- [Rust-backed @moq/net](/quest/m1/rs2ts/README.md) - Rust and JS clocks must agree across either browser backend
+- [Rust-backed @moq/net](/quest/m2/rs2ts/README.md) - Rust and JS clocks must agree across either browser backend
 - [The async feature](/quest/m1/net-async-feature.md) - the core keeps explicit instants; ambient time stays behind `async`

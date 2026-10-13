@@ -28,7 +28,7 @@ explicit instants. Decided 2026-10-10 from review: this waits for
 [the async feature](/quest/m1/net-async-feature.md), so the
 migration lands gated rather than exposing ambient time to the sans-IO core.
 Coordinate clock origin, units, and controlled-time behavior with the
-[browser backend](/quest/m1/rs2ts/README.md) if it has landed. Source-level
+[browser backend](/quest/m2/rs2ts/README.md) if it has landed. Source-level
 `Instant` mappings depend on the selected backend; WASM retains Rust time types.
 
 moq-mux's paused-clock test (`paused_clock_preserves_native_boundaries`) moves

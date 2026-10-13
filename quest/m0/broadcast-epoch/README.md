@@ -125,8 +125,9 @@ End+Start. The child quests own their focused regressions.
 
 - [Resume duplicates](/quest/m0/broadcast-epoch/resume-duplicates.md) - a delayed group is delivered once even beyond the old 1024-entry history
 - [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - players and exporters pin siblings consistently, with optional reference epochs and documented legacy best effort
-- [Stats prefix tracks](/quest/m0/broadcast-epoch/prefix-tracks.md) - the same release adds on-demand prefix tracks beside the per-path stats maps, which stay for existing readers (decided 2026-10-05, maps kept 2026-10-12)
 
 ## Related
 
 - [JS consume identity](https://github.com/moq-dev/moq/pull/5254) - requests carry the serving prefix's epoch and new winners cannot reuse an old cached broadcast
+
+- [Stats prefix tracks](/quest/m1/stats-prefix-tracks.md) - remains in the breaking release with QoS, independently of epoch correctness

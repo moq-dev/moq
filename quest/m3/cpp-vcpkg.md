@@ -28,7 +28,7 @@ CI on Windows, macOS, and Linux.
 
 ## Required
 
-- [First C++ package release](/quest/m1/cpp-release.md) - the tarballs the port fetches
+- [First C++ package release](/quest/m2/release/cpp-release.md) - the tarballs the port fetches
 
 ## Related
 

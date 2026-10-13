@@ -26,7 +26,7 @@ planned. Keep the NVIDIA backend optional and loaded at runtime.
 
 Validate decoded pixels, bit depth, profile, resource lifetime, drain, and
 refusal on unsupported devices. Wire fixtures and contract tests into CI, and
-run the hardware tests on the [GPU CI](/quest/m1/gpu-ci.md) host.
+run the hardware tests on the [GPU CI](/quest/m2/gpu-ci.md) host.
 
 Public API: additive capabilities on the extension points settled on main. Wire: existing
 codec signaling, with cross-language fixtures for any metadata change.
@@ -37,6 +37,6 @@ codec signaling, with cross-language fixtures for any metadata change.
 
 ## Related
 
-- [GPU CI](/quest/m1/gpu-ci.md) - the RTX 3070 Ti host that verifies Main10
+- [GPU CI](/quest/m2/gpu-ci.md) - the RTX 3070 Ti host that verifies Main10
 - [NVENC AV1](/quest/m3/nvenc-av1.md) - the AV1 half of #2147, hardware-gated
 - [Codec coverage study](/quest/m3/video-codec-coverage.md) - measure optional software and other native backends separately
