@@ -197,7 +197,8 @@ Each subscription carries the knobs that decide behavior under congestion:
 Order only decides what goes first, never what is skipped, so catching up oldest
 first needs a max delay that covers the backlog. When a relay serves subscribers of
 both orders from one upstream subscription, it asks upstream for newest first, and
-still sends each subscriber its groups in that subscriber's own order.
+still sends each subscriber its groups in that subscriber's own order. Over
+moq-transport the upstream order is fixed by whichever subscriber arrived first.
 
 Max delay is measured on the media timeline, not the wall clock, so a backlog
 delivered as a burst is still late while a congestion stall never expires
