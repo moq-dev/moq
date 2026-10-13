@@ -470,9 +470,8 @@ impl Schedule {
 	/// with its exact transport deadline and decoder removal time.
 	pub fn push(&mut self, pid: u16, timing: Timing, packets: Vec<u8>, keyframe: bool) -> anyhow::Result<()> {
 		let due = slot(timing.by);
-		if !self.ended
-			&& let Some(size) = self.buffers.get(&pid).and_then(|buffer| buffer.size)
-		{
+		// An ended source relaxes deadlines, never buffer sizes: such a unit never fits.
+		if let Some(size) = self.buffers.get(&pid).and_then(|buffer| buffer.size) {
 			let on_pid = || {
 				packets
 					.as_chunks::<{ TsPacket::SIZE }>()
@@ -662,7 +661,7 @@ impl Schedule {
 		{
 			let duration = (TsPacket::SIZE as u128 * 8 * 1_000_000_000).div_ceil(u128::from(buffer.rate));
 			let free = self.transport.entry(pid).or_insert(time(0));
-			*free = (*free).max(time(0)) + duration as i128;
+			*free = ((*free).max(time(0)) + duration as i128).max(time(1));
 		}
 		// One head per PID preserves decode order without walking all future units at every
 		// transport position. Removal events keep occupancy work proportional to units.
@@ -720,26 +719,28 @@ impl Schedule {
 				});
 				let tb = self.transport_buffer(pid);
 				let free = self.transport.get(&tb).copied().unwrap_or(now).max(now);
-				let done = free + duration as i128;
+				let drained = free + duration as i128;
 				if let Some(buffer) = buffer {
 					let capacity = 512 * 8 * 1_000_000_000 / u128::from(buffer.rate);
-					if done - now > capacity as i128 {
-						let ready = done - capacity as i128;
+					if drained - now > capacity as i128 {
+						let ready = drained - capacity as i128;
 						waiting.push(Reverse((ready, lane)));
 						continue;
 					}
 					// The next slot's mandatory clock packet must fit even at a full media PID.
-					if self.clock == Some(pid) && done > time(count) + capacity as i128 - duration as i128 {
+					if self.clock == Some(pid) && drained > time(count) + capacity as i128 - duration as i128 {
 						continue;
 					}
 				}
+				// No byte leaves the transport buffer before it has arrived: below Rx, the
+				// multiplex rate decides when the packet's last byte gets there.
+				let done = drained.max(time(position + 1));
 				let held = if pid == unit.pid && buffer.is_some_and(|buffer| buffer.size.is_some()) {
 					payload(packet).len()
 				} else {
 					0
 				};
 				if let Some(size) = buffer.and_then(|buffer| buffer.size)
-					&& !(self.ended && (unit.timing.decode as i128) < now)
 					&& occupancy.get(&pid).copied().unwrap_or(0) + held > size
 				{
 					if let Some(event) = removals.peek() {
@@ -849,14 +850,7 @@ impl Schedule {
 			if stopped.contains(&unit.pid) {
 				continue;
 			}
-			// Once every source has ended, a unit past its deadline goes out whatever its decoder
-			// buffer holds: it is late already, and one bigger than the buffer would otherwise
-			// never finish, holding the end of the stream open on clock packets.
-			let size = self
-				.buffers
-				.get(&unit.pid)
-				.and_then(|buffer| buffer.size)
-				.filter(|_| !(self.ended && unit.due < index));
+			let size = self.buffers.get(&unit.pid).and_then(|buffer| buffer.size);
 			let mut n = 0;
 			if self.release(unit) <= index {
 				while n < unit.remaining() && budget > 0 {
@@ -1069,10 +1063,10 @@ mod tests {
 		assert_eq!(sent, 200, "the whole unit goes out");
 	}
 
-	/// Once every source has ended, a last unit bigger than its decoder buffer still goes out,
-	/// late, and the stream ends rather than run on with clock packets.
+	/// A unit bigger than its decoder buffer fails even once every source has ended: an ended
+	/// source relaxes deadlines, not buffer sizes.
 	#[test]
-	fn a_last_unit_bigger_than_its_buffer_ends_the_stream() {
+	fn an_oversized_last_unit_fails_after_the_end() {
 		let mut schedule = Schedule::new(Duration::from_millis(100));
 		schedule.set_rate(Some(RATE));
 		// Room for ten packets.
@@ -1082,16 +1076,23 @@ mod tests {
 		};
 		schedule.set_buffer(1, small);
 		schedule.set_ended(true);
-		schedule.push(1, timing(1_000), unit(1, 11), true).unwrap();
-		let mut sent = 0;
-		for _ in 0..100 {
-			let Some(slot) = schedule.next(None).unwrap() else {
-				break;
-			};
-			sent += slot.packets.len() / TsPacket::SIZE;
-		}
-		assert_eq!(sent, 11, "the whole unit goes out");
-		assert!(schedule.is_empty(), "and the stream ends");
+		let error = schedule.push(1, timing(1_000), unit(1, 11), true).unwrap_err();
+		assert!(error.to_string().contains("decoder buffer"), "{error}");
+	}
+
+	/// Below the PID's Rx, a packet's last byte arrives only at the end of its position on the
+	/// wire, so a unit still arriving at its decode time misses its deadline.
+	#[test]
+	fn a_packet_still_on_the_wire_at_decode_misses_its_deadline() {
+		// Four positions a slot, each 6.25 ms on the wire.
+		let mut schedule = Schedule::new(Duration::ZERO);
+		schedule.set_rate(Some(4 * PACKET));
+		schedule.set_buffer(1, VIDEO);
+		// Slot 40 carries three packets; the fourth starts at 1,006.25 ms in slot 41 and
+		// arrives whole at 1,012.5 ms, after the unit decodes.
+		schedule.push(1, timing(1_010), unit(1, 4), true).unwrap();
+		let error = std::iter::from_fn(|| schedule.next(None).transpose()).find_map(Result::err);
+		assert!(error.is_some(), "the last byte arrives after the decode time");
 	}
 
 	/// The unit due first goes first, whatever order the PIDs were pushed in.
