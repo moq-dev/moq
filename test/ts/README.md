@@ -13,14 +13,15 @@ puts a PCR on its own packet every 25 ms of media time, so several
 broadcast-shape checks are expected to flag. The report quantifies exactly where
 and by how much.
 
-Four instruments live here. `compliance.py` (via `run.sh`) grades a captured file
+Five instruments live here. `compliance.py` (via `run.sh`) grades a captured file
 against the IRD model. [`pcr-timing.py`](#pcr-timing-pcr-timingpy) grades a live
 pipe, which is the only way to see *when* the exporter released each PCR.
 [`table-anchor.py`](#table-anchoring-table-anchorpy) grades two exporters of one
 broadcast against each other, which is the only way to see whether a table's
 emission points come from the media or from the exporter's own clock.
 [`open-gop.py`](#open-gop-open-goppy) grades an open-GOP capture against its
-source, access unit by access unit.
+source, access unit by access unit. [`overhead.py`](#mux-overhead-overheadpy)
+counts the packets a capture spends on clocks and audio framing against its source.
 
 ## Running
 
@@ -36,6 +37,7 @@ just test ts --open-gop         # open-GOP clip; its leading pictures must survi
 just test ts --hrd              # 1080p video filling a broadcast-sized 9 Mbit CPB
 just test ts --headroom         # the same with four audio PIDs, muxed above the video's Rx
 just test ts --leak             # 1080p video with no HRD, filling its level's 24 Mb/s leak
+just test ts --full             # the same with two audio PIDs, filling its multiplex with no nulls
 just test ts --delay 1s         # pass the exporter's --delay
 ```
 
@@ -466,6 +468,22 @@ rebase.
 | `recovery-point-sei` | shape | each recovery point keeps its SEI |
 | `dts-before-pts` | shape | no access unit is stamped to decode after it presents |
 
+## Mux overhead (`overhead.py`)
+
+A source that fills its multiplex with no null packets leaves the export no room
+to spend more than it does on PES headers, part-filled audio packets, and PCRs
+outside media packets (moq-dev/moq#5362). `--full` exports at 900 ms, above its
+source's lead of about 0.65 s, which absorbs a small excess for a while, so it also
+runs `overhead.py` on the source and capture before the compliance report.
+
+```bash
+./overhead.py source.ts capture.ts
+```
+
+It counts the packets on each audio PID and the PCR-only packets on each PID,
+scaling the capture's counts by how much of the source's elementary stream on the
+PID it carries, and fails when their total exceeds the source's.
+
 ## EIT fixtures
 
 No capture in this repository carries EIT (PID 0x0012), so nothing exercises the
@@ -564,8 +582,9 @@ exporter re-emits SI on its own repetition cadence rather than the source's.
 ## CI
 
 `.github/workflows/interop.yml` runs `just test ts`, `just test ts --bitrate
-2000000`, `just test ts --hrd`, `just test ts --leak`, `just test ts --headroom`,
-`just test ts --open-gop`, `just test ts-eit`, and `just test ts-tstd` after the
+2000000`, `just test ts --hrd`, `just test ts --leak`, `just test ts --full`,
+`just test ts --headroom`, `just test ts --open-gop`, `just test ts-eit`, and
+`just test ts-tstd` after the
 interop matrix (nightly, on demand, and on PRs touching `test/ts/`).
 `ts-eit` is `eit-roundtrip.sh`: it builds the sparse-schedule and
 pending-version fixtures from a generated clip, round-trips them through a

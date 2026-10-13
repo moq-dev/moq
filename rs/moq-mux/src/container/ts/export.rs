@@ -123,6 +123,9 @@ pub struct Export<E: catalog::Catalog = ()> {
 	generation: u64,
 
 	tracks: HashMap<String, Track>,
+	/// Tables muxed with frames still packed, which ride ahead of the next unit queued, so
+	/// they go out in the order they were written.
+	tables: Vec<u8>,
 	/// The next continuity counter per PID, numbered as packets go out.
 	counters: HashMap<u16, u8>,
 	/// PMT program-level descriptors captured on import, re-emitted in the PMT.
@@ -241,6 +244,8 @@ struct Track {
 	buffer: Option<Buffer>,
 	/// The AC-3 sync frame a passed-through PES left unfinished, for the next PES to complete.
 	ac3_carry: Option<Ac3Carry>,
+	/// The audio frames muxed into a PES that has yet to go out.
+	pack: Option<Pack>,
 }
 
 impl Track {
@@ -260,6 +265,7 @@ impl Track {
 			timing: Timing::default(),
 			buffer: None,
 			ac3_carry: None,
+			pack: None,
 		}
 	}
 
@@ -350,6 +356,23 @@ impl Track {
 			.descriptors
 			.iter()
 			.any(|descriptor| descriptor.tag == AC3_DESCRIPTOR)
+	}
+
+	/// The samples an audio frame of `payload` lasts and their rate, if it may share a PES with
+	/// the frames around it: one whole frame of audio whose receiver removes each frame from
+	/// its buffer at the frame's own decode time.
+	fn samples(&self, payload: &[u8]) -> Option<(u64, u32)> {
+		let parse = match &self.kind {
+			Kind::Aac { config, .. } => return (config.sample_rate > 0).then_some((1024, config.sample_rate)),
+			Kind::Mp2 { .. } => crate::codec::mp2::parse_header,
+			Kind::Ac3 => crate::codec::ac3::parse_header,
+			Kind::Eac3 => crate::codec::eac3::parse_header,
+			_ if self.carries_ac3() => crate::codec::ac3::parse_header,
+			_ => return None,
+		};
+		let header = parse(payload).ok()?;
+		(header.len == payload.len() && header.sample_rate > 0 && header.samples > 0)
+			.then_some((header.samples, header.sample_rate))
 	}
 
 	/// The receiver's buffers for the track's PID, if the T-STD gives it any.
@@ -588,6 +611,29 @@ struct PesUnit {
 	dts: Option<u64>,
 	/// Explicit PES stream_id (verbatim PES); `None` derives it from `is_video`.
 	stream_id: Option<u8>,
+}
+
+/// Consecutive audio frames muxed into one PES still to go out ([`Export::pack`]).
+struct Pack {
+	/// The first frame's PES fields: its PTS times the frames after it too.
+	unit: PesUnit,
+	/// When the first frame decodes, the PES's deadline.
+	decode: Timestamp,
+	/// The frames' elementary stream bytes.
+	payload: Vec<u8>,
+	/// Each frame's decode nanoseconds and bytes, which leave the decoder buffer as it decodes.
+	frames: Vec<(u128, usize)>,
+	/// The frames' samples so far, and their sample rate.
+	samples: u64,
+	rate: u32,
+}
+
+impl Pack {
+	/// When the frame after the last presents, in microseconds, if the frames run on without
+	/// a gap.
+	fn end(&self) -> u128 {
+		self.unit.timestamp.as_micros() + u128::from(self.samples) * 1_000_000 / u128::from(self.rate)
+	}
 }
 
 /// One SI entry's subscription: resolves the snapshot track named by the catalog,
@@ -831,6 +877,7 @@ impl<E: catalog::Catalog> Export<E> {
 			stale: HashSet::new(),
 			version: VersionNumber::default(),
 			flagged: None,
+			tables: Vec::new(),
 			delay: Duration::ZERO,
 			jitter: jitter::Buffer::new(Duration::ZERO),
 			held: None,
@@ -1033,7 +1080,7 @@ impl<E: catalog::Catalog> Export<E> {
 				},
 			};
 			if ready.generation > self.generation {
-				if !self.schedule.is_empty() {
+				if !self.schedule.is_empty() || self.packing() {
 					// A boundary ends valid media rather than reneging it.
 					// Return that tail under the old generation before adopting the new one.
 					self.lay(None)?;
@@ -1055,6 +1102,7 @@ impl<E: catalog::Catalog> Export<E> {
 				.context("frame for an unknown PID")?;
 			self.last_timestamp = Some(ready.item.frame.timestamp);
 			let decode = ready.item.decode.as_nanos();
+			self.lay_before(decode)?;
 			self.mux(&name, ready.item)?;
 			if self.delay.is_zero() {
 				// Without a clock to lay slots on, a frame settles every slot before its own: a
@@ -1503,7 +1551,7 @@ impl<E: catalog::Catalog> Export<E> {
 		let finished = !self.tracks.is_empty() && self.tracks.values().all(|track| track.finished);
 		let slot = self
 			.slot_due()
-			.filter(|_| self.schedule.queued() || finished)
+			.filter(|_| self.schedule.queued() || self.packing() || finished)
 			.map(|(_, at)| at);
 		self.jitter.next_deadline().into_iter().chain(slot).min()
 	}
@@ -1626,6 +1674,10 @@ impl<E: catalog::Catalog> Export<E> {
 		}
 		self.video_start = None;
 		self.pcr_discontinuity = true;
+		self.tables.clear();
+		for track in self.tracks.values_mut() {
+			track.pack = None;
+		}
 	}
 
 	/// Header is ready when every track's [`ExportSource`] has resolved its
@@ -1657,8 +1709,8 @@ impl<E: catalog::Catalog> Export<E> {
 	}
 
 	/// Whether `pid`'s next packet is its first since a switch to another instance, so it has
-	/// to flag the break. The PCR PID's first packet is always a clock packet, flagged on its
-	/// own ([`Self::lay`]).
+	/// to flag the break. The PCR PID's first packet always opens a slot with its PCR, flagged
+	/// on its own ([`Self::lay`]).
 	fn breaks(&mut self, pid: u16) -> bool {
 		let pcr = self.psi.as_ref().map(|psi| psi.pcr_pid);
 		match &mut self.flagged {
@@ -1964,13 +2016,120 @@ impl<E: catalog::Catalog> Export<E> {
 					dts,
 					stream_id,
 				};
+				// Only a delay leaves the frames time to wait for the ones after them.
+				let track = self.tracks.get(name).context("missing track")?;
+				if let Some(samples) = track.samples(&es_payload).filter(|_| !self.delay.is_zero()) {
+					return self.pack(name, unit, decode, out, es_payload, samples);
+				}
+				self.flush(name)?;
 				self.write_pes(&mut out, &unit, &es_payload)?;
 			}
 		}
-		self.push_unit(name, pid, decode, out, keyframe)
+		self.push_unit(name, pid, decode, out, keyframe, Vec::new())
 	}
 
-	/// Queue one unit of `name`'s packets on `pid`, decoding at `decode`, on the [`Schedule`].
+	/// Mux an audio frame into `name`'s PES, sending the PES on first if the frame cannot join
+	/// it, and leave the tables muxed ahead of it to ride the next unit queued. A PES carries
+	/// frames while they run on from its PTS without a gap and fit the PID's decoder buffer
+	/// whole with its header, so it arrives by its first frame's decode time as one frame
+	/// would, and they span at most half the delay, so the PES has at least that long to go
+	/// out in.
+	///
+	/// A PES starts at every frame whose place on the media timeline, counted in frames, is a
+	/// multiple of the frames the buffer holds, so exporters of the broadcast that joined at
+	/// different frames still cut the same PESs from the first such frame, like [`due`].
+	fn pack(
+		&mut self,
+		name: &str,
+		unit: PesUnit,
+		decode: Timestamp,
+		tables: Vec<u8>,
+		payload: Vec<u8>,
+		(samples, rate): (u64, u32),
+	) -> anyhow::Result<()> {
+		let budget = self.budget().as_nanos();
+		let track = self.tracks.get(name).context("missing track")?;
+		// B holds the PES header with the frames (ISO 13818-1 2.4.2.3).
+		let size = track
+			.buffer()
+			.and_then(|buffer| buffer.size)
+			.unwrap_or(0)
+			.saturating_sub(PES_PREFIX_LEN + PES_OPTIONAL_LEN);
+		let fit = (size / payload.len().max(1)).max(1) as u128;
+		// Rounded, since a frame need not last whole microseconds: AAC's 1,024 samples at 48 kHz.
+		let frame = 1_000_000 * u128::from(samples);
+		let place = (unit.timestamp.as_micros() * u128::from(rate) + frame / 2) / frame;
+		// A PTS is a whole 90 kHz tick, so the frames run on within one of where they end.
+		let joins = !place.is_multiple_of(fit)
+			&& track.pack.as_ref().is_some_and(|pack| {
+				pack.rate == rate
+					&& pack.payload.len() + payload.len() <= size
+					&& decode.as_nanos().saturating_sub(pack.decode.as_nanos()) <= budget
+					&& pack.end().abs_diff(unit.timestamp.as_micros()) <= 12
+			});
+		if !joins {
+			self.flush(name)?;
+		}
+		self.tables.extend_from_slice(&tables);
+		let track = self.tracks.get_mut(name).context("missing track")?;
+		let pack = track.pack.get_or_insert(Pack {
+			unit,
+			decode,
+			payload: Vec::new(),
+			frames: Vec::new(),
+			samples: 0,
+			rate,
+		});
+		pack.frames.push((decode.as_nanos(), payload.len()));
+		pack.payload.extend_from_slice(&payload);
+		pack.samples += samples;
+		// The next frame starts a PES of its own anyway, and without slots running on an
+		// empty schedule, nothing would send this one on before it is due.
+		if (place + 1).is_multiple_of(fit) || self.schedule.is_empty() {
+			self.flush(name)?;
+		}
+		Ok(())
+	}
+
+	/// Send `name`'s packed frames on as one PES.
+	fn flush(&mut self, name: &str) -> anyhow::Result<()> {
+		let Some(pack) = self.tracks.get_mut(name).and_then(|track| track.pack.take()) else {
+			return Ok(());
+		};
+		let Pack {
+			unit,
+			decode,
+			payload,
+			frames,
+			..
+		} = pack;
+		let mut out = Vec::new();
+		self.write_pes(&mut out, &unit, &payload)?;
+		self.push_unit(name, unit.pid, decode, out, unit.keyframe, frames)
+	}
+
+	/// Send on, in decode order, the packed frames of each track for which `done` holds, given
+	/// the slot its first frame is due in.
+	fn flush_packs(&mut self, done: impl Fn(u128) -> bool) -> anyhow::Result<()> {
+		let mut due: Vec<(Timestamp, String)> = self
+			.tracks
+			.iter()
+			.filter_map(|(name, track)| {
+				let pack = track.pack.as_ref()?;
+				let by = pack.decode.as_nanos().saturating_sub(track.drain().as_nanos());
+				done(schedule::slot(by)).then(|| (pack.decode, name.clone()))
+			})
+			.collect();
+		due.sort();
+		for (_, name) in due {
+			self.flush(&name)?;
+		}
+		Ok(())
+	}
+
+	/// Queue one unit of `name`'s packets on `pid`, decoding at `decode`, on the [`Schedule`],
+	/// behind the tables still waiting: with `frames`, each packed frame's decode nanoseconds
+	/// and bytes.
 	fn push_unit(
 		&mut self,
 		name: &str,
@@ -1978,13 +2137,22 @@ impl<E: catalog::Catalog> Export<E> {
 		decode: Timestamp,
 		out: Vec<u8>,
 		keyframe: bool,
+		frames: Vec<(u128, usize)>,
 	) -> anyhow::Result<()> {
+		let mut tables = std::mem::take(&mut self.tables);
+		let out = match tables.is_empty() {
+			true => out,
+			false => {
+				tables.extend_from_slice(&out);
+				tables
+			}
+		};
 		let track = self.tracks.get(name).context("missing track")?;
 		if let Some(buffer) = track.buffer() {
 			self.schedule.set_buffer(pid, buffer);
 		}
 		let by = decode.as_nanos().saturating_sub(track.drain().as_nanos());
-		self.schedule.push(
+		self.schedule.push_frames(
 			pid,
 			super::schedule::Timing {
 				by,
@@ -1992,6 +2160,7 @@ impl<E: catalog::Catalog> Export<E> {
 			},
 			out,
 			keyframe,
+			frames,
 		)?;
 		Ok(())
 	}
@@ -2006,13 +2175,33 @@ impl<E: catalog::Catalog> Export<E> {
 	/// never on when they arrived, and the output keeps the clock's pace while media is queued
 	/// or still to decode. `None` without a delay, where frames settle the slots instead.
 	fn slot_due(&self) -> Option<(u128, web_async::time::Instant)> {
-		if self.delay.is_zero() || self.psi.is_none() || self.schedule.is_empty() {
+		let (known, settled) = self.slot_settled()?;
+		let settled = Timestamp::from_micros(u64::try_from(settled / 1_000).ok()?).ok()?;
+		Some((known, self.jitter.at(settled)?))
+	}
+
+	/// The `known` that settles the next grid slot, and the decode time, in nanoseconds, by
+	/// which every frame that could ride it has gone out of the jitter buffer.
+	fn slot_settled(&self) -> Option<(u128, u128)> {
+		if self.delay.is_zero() || self.psi.is_none() || (self.schedule.is_empty() && !self.packing()) {
 			return None;
 		}
 		let (_, known) = self.schedule.upcoming()?;
-		let settled = known * PCR_INTERVAL.as_nanos() + self.max_drain().as_nanos();
-		let settled = Timestamp::from_micros(u64::try_from(settled / 1_000).ok()?).ok()?;
-		Some((known, self.jitter.at(settled)?))
+		Some((known, known * PCR_INTERVAL.as_nanos() + self.max_drain().as_nanos()))
+	}
+
+	/// Whether a track holds frames packed for a PES still to go out.
+	fn packing(&self) -> bool {
+		self.tracks.values().any(|track| track.pack.is_some())
+	}
+
+	/// Lay out every grid slot settled before a frame decoding at `decode` goes out, so frames
+	/// and slots follow each other in the same order however often the exporter is polled.
+	fn lay_before(&mut self, decode: u128) -> anyhow::Result<()> {
+		while let Some((known, _)) = self.slot_settled().filter(|&(_, settled)| settled < decode) {
+			self.lay(Some(known))?;
+		}
+		Ok(())
 	}
 
 	/// How far a stalled group may fall behind the newest content before each source skips it:
@@ -2046,13 +2235,14 @@ impl<E: catalog::Catalog> Export<E> {
 	/// the first slot a frame still to be muxed could be due in, or `None` when nothing
 	/// more is coming.
 	///
-	/// Each frame opens with its slot's clock packet. At a multiplex rate its value is the
-	/// time of its own byte position at the rate, so a consumer holding only the byte stream
-	/// (which is every MPEG-TS tool) recovers the same clock the values assert. Each frame is
-	/// stamped at its slot boundary, so a pacing caller releases the clock at the instant it
-	/// asserts.
+	/// Each frame opens with its slot's PCR: at a multiplex rate, in the adaptation field of
+	/// the clock PID's packet when one can go out there, else in a clock packet of its own.
+	/// At a multiplex rate its value is the time of its own byte position at the rate, so a
+	/// consumer holding only the byte stream (which is every MPEG-TS tool) recovers the same
+	/// clock the values assert. Each frame is stamped at its slot boundary, so a pacing
+	/// caller releases the clock at the instant it asserts.
 	///
-	/// The PES units cannot carry the clock themselves: a PCR sampled from the DTS would
+	/// The PCR's value never comes from the PES units: a PCR sampled from the DTS would
 	/// step with the frame cadence, and no downstream CBR stage can repair that, because a
 	/// groomer can only place the clock samples it receives. So the PCR follows its own
 	/// grid instead: slots on the media timeline, shared by every exporter of the
@@ -2062,13 +2252,29 @@ impl<E: catalog::Catalog> Export<E> {
 			return Ok(());
 		};
 		let (pcr_pid, pmt_pid) = (psi.pcr_pid, psi.pmt_pid);
-		while let Some(slot) = self.schedule.next(known)? {
-			let mut clock = pcr_packet(pcr_pid, slot.pcr)?;
+		if known.is_none() {
+			self.flush_packs(|_| true)?;
+		}
+		let lead = schedule::slot(self.budget().as_nanos());
+		loop {
+			// A PES of packed frames goes out half the delay before its first is due, so it
+			// has that long to reach the decoder.
+			if known.is_some()
+				&& let Some((index, _)) = self.schedule.upcoming()
+			{
+				self.flush_packs(|due| due <= index + lead)?;
+			}
+			let Some(slot) = self.schedule.next(known)? else {
+				break;
+			};
+			let clock = pcr_packet(pcr_pid, slot.pcr)?;
+			let mut payload = slot.layout(&clock, pmt_pid, &NULL_PACKET);
+			// The slot opens with its PCR, in the clock packet or the clock PID's packet that
+			// carries it, whose adaptation field flags the break.
 			let discontinuity = std::mem::take(&mut self.pcr_discontinuity);
 			if discontinuity {
-				clock[5] |= 0x80;
+				payload[5] |= 0x80;
 			}
-			let mut payload = slot.layout(&clock, pmt_pid, &NULL_PACKET);
 			self.number(&mut payload);
 			let frame = Frame {
 				timestamp: slot_stamp(slot.index)?,
@@ -2259,7 +2465,6 @@ impl<E: catalog::Catalog> Export<E> {
 /// is numbered when it goes out ([`Export::number`]).
 fn pcr_packet(pid: u16, pcr: u64) -> anyhow::Result<Vec<u8>> {
 	anyhow::ensure!(pid <= 0x1FFF, "PID out of range: {pid}");
-	let (base, extension) = ((pcr / 300) & TS_TIMESTAMP_MASK, pcr % 300);
 	let mut p = Vec::with_capacity(TsPacket::SIZE);
 	p.push(0x47);
 	p.push((pid >> 8) as u8);
@@ -2270,17 +2475,13 @@ fn pcr_packet(pid: u16, pcr: u64) -> anyhow::Result<Vec<u8>> {
 	p.push(183);
 	// PCR_flag alone.
 	p.push(0x10);
-	// program_clock_reference_base (33 bits), 6 reserved '1' bits, and the 9-bit extension.
-	p.push((base >> 25) as u8);
-	p.push((base >> 17) as u8);
-	p.push((base >> 9) as u8);
-	p.push((base >> 1) as u8);
-	p.push(((base as u8) << 7) | 0x7e | (extension >> 8) as u8);
-	p.push(extension as u8);
+	p.extend_from_slice(&super::schedule::pcr_field(pcr));
 	p.resize(TsPacket::SIZE, 0xff);
 	Ok(p)
 }
 
+/// PES header bytes ahead of the optional region: start code, stream id and packet length.
+const PES_PREFIX_LEN: usize = 6;
 /// Optional PES header region carrying PTS only: 2 flag bytes + 1 length byte + 5 PTS bytes.
 const PES_OPTIONAL_LEN: usize = 3 + 5;
 /// Extra bytes when the optional region also carries a DTS (5 DTS bytes).
