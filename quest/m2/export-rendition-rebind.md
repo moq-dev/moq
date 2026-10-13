@@ -16,10 +16,15 @@ that track ends) while the catalog names the new one.
   source and builds a new one, through the same path a newly added
   rendition takes in that muxer: fMP4 `Fmp4Track::reconfigure`, the TS
   `old.remove(name)` reuse, and the MKV and FLV bound-ID checks.
-- A track change is a new track, so nothing carries over from the old one:
-  no resumed sequence numbers, timestamps or continuity counters. Each
-  muxer signals the switch the way it signals a removed and re-added
-  rendition.
+- Separate source state from output state. Source state (the subscription,
+  group and frame cursors, the codec description) resets, because the new
+  track is new content. Output state already emitted continues: TS
+  continuity counters live per PID outside each `Track` for this reason,
+  and fMP4's fragment sequence, declared track ID and written timestamp
+  frontier belong to the ongoing output. Each muxer either signals a
+  format-specific discontinuity on the continuing output, or ends the export
+  loudly where its format cannot express the switch; it never resets output
+  state mid-stream.
 - Tests per exporter: a rendition `main` moved from `video-a` to
   `video-b` exports `video-b`'s frames after the update and none of
   `video-a`'s, and a `broadcast`-only change does the same.

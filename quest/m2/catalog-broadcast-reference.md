@@ -3,7 +3,7 @@
 ## Goal
 
 A hang rendition can live in another broadcast (`broadcast`, relative to the
-catalog's own). Two readers ignore that today and resolve the track in the
+catalog's own). Three readers ignore that today and resolve the track in the
 catalog's own broadcast instead, so they silently play or advertise the wrong
 track:
 
@@ -12,8 +12,12 @@ track:
   namespace, and `from_msf` ignores an MSF track's `namespace`.
 - The GStreamer source (`rs/moq-gst/src/source/imp.rs`) subscribes every
   rendition on the catalog's broadcast.
+- The browser MSF reader: `js/msf/src/catalog.ts` drops `namespace`, so
+  `toHang` in `js/watch/src/msf.ts` builds renditions without `broadcast`,
+  and `@moq/watch` subscribes them on the catalog's broadcast whenever the
+  catalog format is MSF.
 
-Each either honors the reference or refuses the rendition loudly. Neither
+Each either honors the reference or refuses the rendition loudly. None
 guesses.
 
 ## Plan
@@ -27,11 +31,14 @@ guesses.
 - GStreamer: subscribe through the same relative-path resolution the moq-mux
   container sources use (`subscribe_track(config.broadcast, track)`), so a
   pad's identity includes the broadcast as well as the track.
+- JS: model `namespace` in `js/msf` and map it to `broadcast` in `toHang`,
+  mirroring the Rust mapping.
 - Tests: a rendition with `broadcast: "./left"` round-trips through MSF with
-  its namespace, and the GStreamer source subscribes on the referenced
-  broadcast.
+  its namespace in Rust and JS, the GStreamer source subscribes on the
+  referenced broadcast, and `@moq/watch` subscribes a cross-broadcast MSF
+  rendition on its own broadcast.
 
-Both gaps predate #5367, which added the per-rendition `track` name and the
+All three gaps predate #5367, which added the per-rendition `track` name and the
 shared `hang::catalog::Reference` resolver these readers should use. Start
 after it merges.
 
