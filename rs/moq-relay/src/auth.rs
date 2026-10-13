@@ -648,7 +648,8 @@ impl Decider {
 				match &self {
 					Self::Server(client) => {
 						let client = client.clone();
-						tokio::spawn(async move {
+						// A panic drops the admission, which answers it as unavailable.
+						tokio::spawn(moq_tokio::panic::isolate(async move {
 							let lease = match &admission.connection {
 								Some(connection) => client.attach(connection, admission.request.clone()).await,
 								None => client.connect(admission.request.clone()).await,
@@ -657,7 +658,7 @@ impl Decider {
 								Ok(lease) => admission.grant(lease),
 								Err(err) => admission.refuse(err.into()),
 							}
-						});
+						}));
 					}
 					// Nothing here can verify a token, so one is refused rather than ignored:
 					// its holder expects it to count, and the public grant is not what it says.

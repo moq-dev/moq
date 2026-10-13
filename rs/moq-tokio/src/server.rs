@@ -492,11 +492,11 @@ impl Server {
 			tracing::info!(%addr, "listening");
 		}
 		while let Some(request) = listener.accept().await {
-			tokio::spawn(async move {
+			tokio::spawn(crate::panic::isolate(async move {
 				if let Err(err) = serve_session(request).await {
 					tracing::warn!(%err, "session ended with error");
 				}
-			});
+			}));
 		}
 		Ok(())
 	}
@@ -645,11 +645,13 @@ impl Server {
 			let local = self.local_addr().ok();
 
 			// tokio::select! does not support cfg directives on arms, so we need to create the futures here.
+			// `Some(None)` once a configured endpoint stops, which only losing its
+			// driver does while we accept.
 			#[cfg(feature = "noq")]
 			let noq_accept = async {
 				#[cfg(feature = "noq")]
 				if let Some(noq) = self.noq.as_mut() {
-					return noq.accept().await;
+					return Some(noq.accept().await);
 				}
 				None
 			};
@@ -695,15 +697,32 @@ impl Server {
 			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 			let stream_accept = self.streams.recv();
 			#[cfg(not(any(feature = "tcp", all(feature = "uds", unix))))]
-			let stream_accept = std::future::ready(None::<Request>);
+			let stream_accept = std::future::ready(None::<Result<Request, tokio::task::JoinError>>);
 
 			tokio::select! {
 				Some(request) = stream_accept => {
-					return Some(request);
+					#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+					match request {
+						Ok(request) => return Some(request),
+						// The process would keep its other listeners and silently drop
+						// this one, so stop accepting at all and let the owner fail loudly.
+						Err(err) => {
+							tracing::error!(%err, "a stream accept loop died");
+							return None;
+						}
+					}
+					#[cfg(not(any(feature = "tcp", all(feature = "uds", unix))))]
+					let _ = request;
 				}
 				Some(_conn) = noq_accept => {
 					#[cfg(feature = "noq")]
 					{
+						// The process would keep its other listeners and silently drop
+						// QUIC, so stop accepting at all and let the owner fail loudly.
+						let Some(_conn) = _conn else {
+							tracing::error!("QUIC endpoint stopped accepting");
+							return None;
+						};
 						let alpns = versions.alpns();
 						let deadline = setup.deadline();
 						// Closed for drain: refuse so the peer redials elsewhere at once.
@@ -1161,7 +1180,7 @@ struct StreamListeners {
 	#[cfg(feature = "tcp")]
 	tcp_local_addr: Option<net::SocketAddr>,
 	rx: Option<tokio::sync::mpsc::Receiver<Request>>,
-	tasks: Vec<tokio::task::JoinHandle<()>>,
+	tasks: Vec<tokio::task::JoinHandle<std::convert::Infallible>>,
 }
 
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
@@ -1273,11 +1292,23 @@ impl StreamListeners {
 	}
 
 	/// Yield the next stream [`Request`], or `None` if no listener is running:
-	/// either none was configured, or every accept loop has ended.
-	async fn recv(&mut self) -> Option<Request> {
-		match self.rx.as_mut() {
-			Some(rx) => rx.recv().await,
-			None => None,
+	/// either none was configured, or every accept loop has ended. An accept loop
+	/// only ends early by panicking, which yields its error.
+	async fn recv(&mut self) -> Option<Result<Request, tokio::task::JoinError>> {
+		let rx = self.rx.as_mut()?;
+		// Never empty: `serve` spawns a loop per listener before setting `rx`.
+		let died = futures::future::select_all(self.tasks.iter_mut());
+		let (res, index, _) = tokio::select! {
+			request = rx.recv() => return request.map(Ok),
+			died = died => died,
+		};
+		// Stop for good, so a later call never polls the finished handle; `shutdown`
+		// still aborts the loops left.
+		self.tasks.swap_remove(index);
+		self.rx = None;
+		match res {
+			Ok(never) => match never {},
+			Err(err) => Some(Err(err)),
 		}
 	}
 
@@ -1310,7 +1341,7 @@ fn spawn_tcp_loop(
 	listener: crate::tcp::Listener,
 	setup: Setup,
 	tx: tokio::sync::mpsc::Sender<Request>,
-) -> tokio::task::JoinHandle<()> {
+) -> tokio::task::JoinHandle<std::convert::Infallible> {
 	let local = listener.local_addr().ok();
 	tokio::spawn(async move {
 		// Owned by the loop so stopping it (listener close or drop) also aborts
@@ -1328,7 +1359,7 @@ fn spawn_tcp_loop(
 			let deadline = setup.deadline();
 			let setup = setup.clone();
 			let tx = tx.clone();
-			handshakes.spawn(async move {
+			handshakes.spawn(crate::panic::isolate(async move {
 				match within(deadline, pending).await {
 					Ok((session, remote)) => {
 						let link = Link {
@@ -1353,7 +1384,7 @@ fn spawn_tcp_loop(
 					// classify and pace, and never surfaces here.
 					Err(err) => tracing::warn!(%err, "tcp qmux handshake failed"),
 				}
-			});
+			}));
 		}
 	})
 }
@@ -1364,7 +1395,7 @@ fn spawn_unix_loop(
 	setup: Setup,
 	allow: Option<crate::unix::Allow>,
 	tx: tokio::sync::mpsc::Sender<Request>,
-) -> tokio::task::JoinHandle<()> {
+) -> tokio::task::JoinHandle<std::convert::Infallible> {
 	tokio::spawn(async move {
 		// Owned by the loop, as in `spawn_tcp_loop`.
 		let mut handshakes = tokio::task::JoinSet::new();
@@ -1381,7 +1412,7 @@ fn spawn_unix_loop(
 			let setup = setup.clone();
 			let tx = tx.clone();
 			let allow = allow.clone();
-			handshakes.spawn(async move {
+			handshakes.spawn(crate::panic::isolate(async move {
 				match within(deadline, pending).await {
 					Ok((session, cred)) => {
 						// Enforce the allowlist (if any) before reading SETUP bytes from the peer.
@@ -1407,7 +1438,7 @@ fn spawn_unix_loop(
 					// Per-connection, as in `spawn_tcp_loop`.
 					Err(err) => tracing::warn!(%err, "unix qmux handshake failed"),
 				}
-			});
+			}));
 		}
 	})
 }
@@ -1638,10 +1669,10 @@ impl Request {
 			Ok(request_into!(kind, request => {
 				let (session, driver) = request.ok().await?;
 				use tracing::Instrument;
-				tokio::spawn(async move {
+				tokio::spawn(crate::panic::isolate(async move {
 					let _active = active;
 					moq_net::time::run(driver).await
-				}.instrument(tracing::Span::current()));
+				}).instrument(tracing::Span::current()));
 				session
 			}))
 		};

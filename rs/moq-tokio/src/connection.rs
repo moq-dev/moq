@@ -696,7 +696,8 @@ pub struct Connection {
 /// The connection loop, shared by every [`Connection`] clone and aborted when the
 /// last one drops.
 struct Task {
-	handle: AbortOnDrop,
+	/// `None` if the loop panicked.
+	handle: AbortOnDrop<Option<()>>,
 	closed: CloseGuard,
 }
 
@@ -726,7 +727,7 @@ impl Connection {
 		let closed: CloseGuard = Default::default();
 		let task_closed = closed.clone();
 
-		let task = tokio::spawn(async move {
+		let task = tokio::spawn(crate::panic::isolate(async move {
 			let reconnect = client.reconnect;
 			let shared = Shared {
 				state: producer,
@@ -744,7 +745,7 @@ impl Connection {
 				shared.failed(err);
 			}
 			// Dropping the producers here closes the channels, signaling consumers.
-		});
+		}));
 		Self {
 			task: std::sync::Arc::new(Task {
 				handle: AbortOnDrop::new(task),

@@ -63,9 +63,9 @@ stale. Both stay in m0 (maintainer, 2026-10-13): a red Interop hides real
 regressions.
 
 Crashes (2026-10-13, #5407): a publisher on a host whose wall clock reads
-before 2020 panics, and `panic = "abort"` turns any library panic into a
-dead host app. Both joined m0 (maintainer). The unset clock is fixed at its
-source on `main`; unwinding remains, so a panic closes only its connection.
+before 2020 panics, and `panic = "abort"` turned any library panic into a
+dead host app. Both joined m0 (maintainer) and are fixed: the clock at its
+source, and unwinding so a panic closes only its connection.
 
 Nightly on main (triaged 2026-10-13): two build breaks from 2026-10-11 get
 quests here. The nixpkgs bump broke the Linux zigbuild release builds, and
@@ -80,7 +80,6 @@ have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
 - [CI cost and latency](/quest/m0/ci/README.md) - PRs stop queueing behind hosted runner caps: macOS and Windows move to the merge queue, caches move to R2, and setup is skipped when no work is selected
 - [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.5, then draft-20+ FETCH
 - [Upgrade restarts epochless broadcasts](/quest/m0/upgrade-unroutable.md) - a WebSocket-to-QUIC upgrade retires epochless handles only once their `Restart` is delivered, and first-party consumers follow it, fixing Interop's `unroutable` rounds
-- [Panic isolation](/quest/m0/panic-isolation.md) - unwind, ignore lock poison, and supervise every task, so a panic closes only its connection or exits on a long-lived task
 - [Wire compat on main](/quest/m0/wire-compat-green.md) - the nightly released-wire step runs again: planned breaks re-measured against the new releases, and a released-API client for the released JS lanes
 - [Release builds link](/quest/m0/release-link.md) - the Linux zigbuild release binaries and moq-gst packages link again after the 2026-10-11 nixpkgs bump, so the next release cut can publish
 - [Fuzz builds under LTO](/quest/m0/fuzz-lto.md) - the nightly fuzz targets build again despite the release profile's fat LTO

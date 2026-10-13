@@ -252,7 +252,6 @@ zeroize = { version = "1", features = ["derive"] }
 kio = { path = "rs/kio" }
 
 [profile.dev]
-panic = "abort"
 # Full DWARF is what makes a debug build enormous: the debug `libmoq_ffi.a`
 # measured 619 MiB against a 100 MiB ceiling for the published one, and a
 # workspace of those fills a laptop (and a CI runner) fast. Line tables keep
@@ -310,7 +309,6 @@ opt-level = 3
 # The Go mirror stores native staticlibs in Git, whose per-file limit is 100 MB.
 # Keep all release entry points on the same compact native profile.
 [profile.release]
-panic = "abort"
 lto = "fat"
 codegen-units = 1
 strip = "symbols"

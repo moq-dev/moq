@@ -2,7 +2,7 @@ use std::{
 	collections::HashMap,
 	path::PathBuf,
 	sync::{
-		Arc, Mutex,
+		Arc, Mutex, PoisonError,
 		atomic::{AtomicU64, Ordering},
 	},
 	time::Duration,
@@ -451,7 +451,10 @@ struct DialMap {
 impl DialMap {
 	/// True if `peer` is already being dialed.
 	fn contains(&self, peer: &str) -> bool {
-		self.inner.lock().expect("dial map poisoned").contains_key(peer)
+		self.inner
+			.lock()
+			.unwrap_or_else(PoisonError::into_inner)
+			.contains_key(peer)
 	}
 
 	/// Record an already-spawned dial under `source`. If the source is redundant,
@@ -471,7 +474,7 @@ impl DialMap {
 	where
 		F: FnMut(DialTarget) -> AbortHandle,
 	{
-		let mut map = self.inner.lock().expect("dial map poisoned");
+		let mut map = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
 		if let Some(entry) = map.get_mut(&target.key) {
 			let replace = entry.active == source && entry.sources.get(source) != Some(&target);
 			entry.sources.set(source, target.clone());
@@ -502,7 +505,7 @@ impl DialMap {
 	where
 		F: FnMut(DialTarget) -> AbortHandle,
 	{
-		let mut map = self.inner.lock().expect("dial map poisoned");
+		let mut map = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
 		let Some(entry) = map.get_mut(peer) else { return };
 		if entry.sources.get(source).is_none() {
 			return;
@@ -540,7 +543,7 @@ impl DialMap {
 		let removed: Vec<String> = self
 			.inner
 			.lock()
-			.expect("dial map poisoned")
+			.unwrap_or_else(PoisonError::into_inner)
 			.iter()
 			.filter(|(peer, entry)| entry.sources.api.is_some() && !desired.contains_key(*peer))
 			.map(|(peer, _)| peer.clone())
@@ -856,23 +859,31 @@ impl Options {
 /// live, so dropping it without running retires that advertisement.
 pub struct Started {
 	cluster: Cluster,
-	/// `None` when nothing is configured, so [`run`](Self::run) returns immediately.
+	/// `None` when nothing is configured, so [`run`](Self::run) dials nothing.
 	work: Option<Work>,
 }
 
 impl Started {
-	/// True when nothing is configured, so [`run`](Self::run) returns immediately.
+	/// True when nothing is configured, so [`run`](Self::run) dials nothing.
 	pub fn standalone(&self) -> bool {
 		self.work.is_none()
 	}
 
-	/// Run the cluster until it stops.
+	/// Run the cluster until it stops, or until a task it cannot serve without (its
+	/// origin driver, cache governor, or certificate reload) panics.
 	///
-	/// Returns immediately when nothing is configured (standalone).
+	/// Standalone, this only waits for such a panic.
 	pub async fn run(self) -> anyhow::Result<()> {
-		match self.work {
-			Some(work) => self.cluster.run_work(work).await,
-			None => Ok(()),
+		let critical = self.cluster.critical.clone();
+		let work = async move {
+			match self.work {
+				Some(work) => self.cluster.run_work(work).await,
+				None => std::future::pending().await,
+			}
+		};
+		tokio::select! {
+			res = work => res,
+			err = critical.failed() => Err(err),
 		}
 	}
 }
@@ -939,6 +950,10 @@ pub struct Cluster {
 	/// peer-list fetches present the same cluster cert the QUIC dials do. `Arc` so
 	/// cloning a `Cluster` per connection stays cheap.
 	client_tls: Option<Arc<rustls::ClientConfig>>,
+
+	/// The origin driver, cache governor, and certificate reload: a panic in any
+	/// of them stops [`Relay::run`](crate::Relay::run).
+	pub(crate) critical: crate::critical::Critical,
 
 	/// All broadcasts, local and remote. Downstream sessions read from here
 	/// (filtered by their auth token) and remote dials both read and write here.
@@ -1022,12 +1037,19 @@ impl Cluster {
 		// matching the `--cluster-connect-api` validation, instead of silently
 		// keeping the first entry when dials spawn.
 		parse_peer_list(config.connect.clone(), None).context("invalid --cluster-connect peer list")?;
+		let critical = crate::critical::Critical::default();
 		let mut origin_config = origin::Config::new(id);
 		if let Some(cache) = cache {
 			origin_config.pool = cache.pool;
 			origin_config.cache_duration = cache.duration;
+			if let Some(governor) = cache.governor {
+				critical.spawn("cache governor", governor);
+			}
 		}
-		let origin = moq_tokio::origin::spawn_config(origin_config);
+		let (origin, driver) = origin::Producer::new(origin_config);
+		critical.spawn("origin driver", async move {
+			moq_net::time::run(driver).await;
+		});
 		let nodes = crate::nodes::Nodes::default();
 		tracing::info!(hop_id = %origin.hop(), configured = config.id.is_some(), "cluster initialized");
 		Ok(Cluster {
@@ -1044,6 +1066,7 @@ impl Cluster {
 			refusals: Default::default(),
 			connection_ids: Arc::default(),
 			client_tls: None,
+			critical,
 			origin,
 			stats: moq_net::stats::Registry::disabled(),
 			_stats_publisher: None,
@@ -1493,8 +1516,11 @@ impl Cluster {
 				// A supervised task ending at all is a failure, so its result decides
 				// the cluster's. A panic surfaces too rather than being swallowed.
 				Some(res) = supervised.join_next() => res.context("cluster task panicked")??,
-				// A dial task ending is ordinary: that peer went away.
-				Some(_) = tasks.join_next() => {}
+				// A dial task ending is ordinary: that peer went away. A panic is not:
+				// each dial attempt contains its own, so one here is in the loop itself.
+				Some(res) = tasks.join_next() => if let Err(err) = res && err.is_panic() {
+					return Err(err).context("cluster task panicked");
+				},
 				else => break,
 			}
 		}
@@ -1745,9 +1771,11 @@ impl Cluster {
 		// Each attempt is its own session, so it gets its own id. Matches the span an
 		// accepted connection runs under, so both directions log the same way.
 		let id = self.next_connection_id();
-		self.run_remote_session(id, addrs, target)
+		// A panic fails this attempt like any other error, so the peer is redialed.
+		moq_tokio::panic::isolate(self.run_remote_session(id, addrs, target))
 			.instrument(tracing::info_span!("conn", id))
 			.await
+			.context("cluster peer session panicked")?
 	}
 
 	async fn run_remote_session(&self, id: u64, addrs: &moq_tokio::Addrs, target: &DialTarget) -> anyhow::Result<()> {

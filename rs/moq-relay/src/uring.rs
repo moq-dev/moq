@@ -16,10 +16,11 @@
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::Poll;
 
 use anyhow::Context as _;
+use futures::FutureExt as _;
 
 use crate::{auth, cluster, refusals::Refusal, shutdown};
 
@@ -36,7 +37,7 @@ impl Stop {
 			if self.stopped.load(Ordering::Acquire) {
 				return Poll::Ready(());
 			}
-			*self.waker.lock().unwrap() = Some(cx.waker().clone());
+			*self.waker.lock().unwrap_or_else(PoisonError::into_inner) = Some(cx.waker().clone());
 			if self.stopped.load(Ordering::Acquire) {
 				return Poll::Ready(());
 			}
@@ -47,7 +48,7 @@ impl Stop {
 
 	fn stop(&self) {
 		self.stopped.store(true, Ordering::Release);
-		if let Some(waker) = self.waker.lock().unwrap().take() {
+		if let Some(waker) = self.waker.lock().unwrap_or_else(PoisonError::into_inner).take() {
 			waker.wake();
 		}
 	}
@@ -568,11 +569,12 @@ fn serve_worker(spawn: Spawn) -> bool {
 					let id = serve.cluster.next_connection_id();
 					let conn_handle = accept_handle.clone();
 					let serve = serve.clone();
-					accept_handle.spawn(async move {
+					let connection = async move {
 						if let Err(err) = serve_connection(conn_handle, conn, id, serve).await {
 							tracing::warn!(id, %err, "connection closed");
 						}
-					});
+					};
+					accept_handle.spawn(moq_tokio::panic::isolate(connection).map(drop));
 				}
 				Err(err) => {
 					let _ = accept_failures
@@ -820,12 +822,13 @@ async fn serve_connection(
 	let lease = lease.preparing(request.auth(), request.role())?;
 	let (session, driver) = deadline.bound(request.ok()).await?;
 	let driver_handle = handle.clone();
-	handle.spawn(async move {
+	let driver = async move {
 		match driver_handle.run(driver).await {
 			moq_net::Error::Closed => {}
 			err => tracing::debug!(%err, "session driver ended"),
 		}
-	});
+	};
+	handle.spawn(moq_tokio::panic::isolate(driver).map(drop));
 
 	tracing::info!(id, version = %session.version(), %transport, "negotiated");
 
@@ -833,14 +836,14 @@ async fn serve_connection(
 	// its lifecycle (credential expiry, GOAWAY drain) lives with the timers
 	// and the shutdown broadcast on the shared runtime.
 	let shutdown = serve.shutdown.clone();
-	serve.tokio.spawn(async move {
+	serve.tokio.spawn(moq_tokio::panic::isolate(async move {
 		match crate::connection::supervise(session, lease, shutdown, registration).await {
 			// A lease or shutdown ending the session closes it too: logged, so every
 			// accepted connection pairs with its end.
 			Ok(()) => tracing::info!(id, "connection closed"),
 			Err(err) => tracing::warn!(id, %err, "connection closed"),
 		}
-	});
+	}));
 
 	Ok(())
 }
