@@ -25,9 +25,10 @@ nothing a leg mints.
   from the datagram's position on the broadcast's media timeline, modulo
   their field widths, so they survive the 33-bit source wrap and a late
   join. The SSRC derives from the broadcast path and the route's epoch, so
-  a replacement is a new RTP stream and two broadcasts sharing one epoch
-  (a multi-stage import clones its process epoch across paths) never
-  collide. An epochless route (a session whose version carries no
+  a replacement is a new RTP stream and two broadcasts sharing one epoch (a
+  multi-stage import clones its process epoch across paths) differ, barring
+  a 32-bit hash collision. RFC 3550's collision resolution would split the
+  legs, so it does not apply. An epochless route (a session whose version carries no
   epoch) gives two legs nothing shared to derive it from, so synchronized
   RTP refuses one; settle whether an explicit SSRC lifts that.
 - A leg never sends a datagram it cannot fill exactly. A packetizer that
