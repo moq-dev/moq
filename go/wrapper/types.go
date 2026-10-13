@@ -215,6 +215,8 @@ const (
 	ProtocolKindApp = ffi.MoqProtocolKindApp
 	// ProtocolKindUnknown identifies unknown.
 	ProtocolKindUnknown = ffi.MoqProtocolKindUnknown
+	// ProtocolKindTooManyRequests identifies an exceeded session request cap.
+	ProtocolKindTooManyRequests = ffi.MoqProtocolKindTooManyRequests
 )
 
 // AudioSampleFormat values: the raw PCM sample layout fed to or returned from the

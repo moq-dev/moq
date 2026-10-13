@@ -91,6 +91,12 @@ host still poll in place; independent native wake callbacks can run concurrently
 The generated bindings resume Kotlin coroutines through their dispatcher. Use
 the UI dispatcher when updating UI state.
 
+A session closed for exceeding the relay's request caps reports the protocol
+kind `ProtocolKind.TOO_MANY_REQUESTS`. Reduce
+the simultaneous announcements or subscriptions, or ask the relay operator
+to adjust the [session limits](/bin/relay/config#session-and-peer), before
+reconnecting with the same workload.
+
 ## Reference
 
 - API reference: [javadoc.io/doc/dev.moq/moq](https://javadoc.io/doc/dev.moq/moq)

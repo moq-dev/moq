@@ -38,4 +38,15 @@ observation had the same cause. The server HTTP/3 control-stream lifetime is
 still another candidate. Preserve this quest until a failing browser trace
 paired with relay logs establishes that cause and its regression.
 
+Seen again 2026-10-11 on #5310's Interop run
+[38121507310](https://github.com/moq-dev/moq/actions/runs/38121507310), whose
+`interop-failure` artifact keeps the run directory and browser traces. The
+relay log pins the refusal at admission, before the relay answered SETUP:
+connection 64 closed with "the auth server refused the session"
+(07:50:07.583), through `Connection::run`'s reject path, and the harness
+reported "Connection lost" by 07:50:07.79. Pair this relay log with the
+artifact's browser trace to tell whether the close capsule raced the
+server's HTTP/3 control stream or connection teardown. #5310's next push
+passed the same check.
+
 Public API: none expected. Wire: none expected.

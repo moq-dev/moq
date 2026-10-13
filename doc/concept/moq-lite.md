@@ -168,7 +168,11 @@ publisher learns before anyone subscribes whether its broadcasts can reach the
 peer. More tokens can be added without reconnecting; the session's scope is the
 union of every open token's grant. A token the peer has no verifier for, or
 whose grant is too large to send, fails with `Unsupported` and ends only that
-token; the session and its other grants stay up.
+token; the session and its other grants stay up. A relay with an
+[auth server](/bin/relay/auth#in-band-renewal) verifies these tokens through it,
+so a fresh grant can keep the connection alive after its original credential
+expires; under public rules or a client certificate it refuses them as
+`Unsupported`.
 
 A subscription or fetch that loses access resets with the `UNAUTHORIZED` stream
 code and the session stays up. A client that publishes outside its grant closes

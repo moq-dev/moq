@@ -146,7 +146,7 @@ pub struct ResolvedSettings {
 pub(super) fn connect_config(settings: &ResolvedSettings) -> moq_tokio::connect::Config {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(settings.tls_disable_verify);
-	config.backoff.timeout = std::time::Duration::ZERO;
+	config.backoff.timeout = Some(std::time::Duration::ZERO);
 	config
 }
 

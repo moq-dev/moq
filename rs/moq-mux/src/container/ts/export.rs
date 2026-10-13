@@ -42,6 +42,7 @@ use crate::catalog::hang::Catalog;
 use crate::catalog::{CatalogFormat, Stream};
 use crate::codec::video::{Hrd, Reorder};
 use crate::codec::{aac, annexb, opus};
+use crate::container::decode::{DecodeClock, MAX_REORDER};
 use crate::container::{ExportSource, Frame};
 use crate::jitter::{self, Arrival, Push};
 
@@ -493,15 +494,7 @@ impl Timing {
 		let Some(declared) = self.declared else {
 			return (0, 0);
 		};
-		let period = match declared.period {
-			Some((units, scale)) => units.saturating_mul(90_000).div_ceil(scale),
-			None => self.framerate.map_or(0, |fps| (90_000.0 / fps).ceil() as u64),
-		};
-		let delay = u64::from(declared.depth).saturating_mul(period);
-		let lookahead = 1u64
-			.checked_shl(declared.depth)
-			.unwrap_or(u64::MAX)
-			.saturating_mul(period);
+		let (delay, lookahead) = declared.timing(self.framerate);
 		(delay.min(MAX_REORDER), lookahead.min(MAX_REORDER))
 	}
 }
@@ -2278,11 +2271,6 @@ fn pcr_packet(pid: u16, pcr: u64) -> anyhow::Result<Vec<u8>> {
 const PES_OPTIONAL_LEN: usize = 3 + 5;
 /// Extra bytes when the optional region also carries a DTS (5 DTS bytes).
 const PES_DTS_LEN: usize = 5;
-/// Largest reorder delay or lookahead an SPS or observed reordering can raise a video decode
-/// clock to (2 s, in 90 kHz ticks): far past any real reorder depth, so a corrupt SPS or a
-/// timestamp stepping back within a timeline cannot hold frames or drag the DTS back without
-/// bound.
-const MAX_REORDER: u64 = 2 * 90_000;
 
 /// Whether `timestamp` has crossed into a later repetition slot than `last`.
 ///
@@ -2897,101 +2885,6 @@ fn ensure_raw(container: &Container, kind: &str, name: &str) -> anyhow::Result<(
 			"TS export does not support container '{}' on {kind} track '{name}'",
 			unknown.kind().unwrap_or("<missing>")
 		),
-	}
-}
-
-/// A video rendition's decode clock: a decode timestamp (DTS) for each frame from its PTS.
-///
-/// [`Frame`] carries only a presentation timestamp and frames reach the muxer in decode order,
-/// so a B-frame stream arrives with non-monotonic PTS and no decode time. An encoder decodes
-/// the n-th frame in decode order at the n-th presentation time, a fixed reorder delay early,
-/// so that is the DTS authored here: with decode-order PTS 0, 120, 40, 80 and a delay of one
-/// 40 ms frame, the frames decode at -40, 0, 40, 80. It keeps the encoder's own spacing, a
-/// frame's or a field's, through any switch between frame and field coding, and the delay is
-/// a time, the least that keeps every DTS at or before its PTS (or the SPS's declared depth,
-/// when that is more). On a source muxed that way this is its DTS, frame for frame.
-///
-/// A frame's slot is settled once no frame still to come can be presented before it. A later
-/// frame decodes after this one, and is presented at most the catalog `jitter` after it
-/// decodes, so the slot is settled once the highest PTS read is that far past it. Frames wait
-/// here until then, as long as the reordering spans and well inside the jitter buffer's delay.
-/// Without a `jitter`, the SPS's depth bounds it, and so does how far a frame was presented
-/// below the highest PTS read before it. A frame that still comes in below a settled slot
-/// (reordering deeper than all of those) is nudged one tick past the last DTS, so the clock
-/// stays strictly increasing.
-///
-/// Ticks are continuous (unwrapped) 90 kHz, so the clock never wraps mid-stream; the 33-bit
-/// wire wrap happens once at emission.
-struct DecodeClock<T> {
-	/// Frames read but not yet given a DTS, in decode order, with their PTS.
-	held: VecDeque<(T, u64)>,
-	/// The held frames' PTS, ascending: the slots they decode in, in turn.
-	slots: Vec<u64>,
-	/// The highest PTS read.
-	high: Option<u64>,
-	/// The furthest a frame was presented below the highest PTS read before it, plus a tick.
-	reach: u64,
-	/// The reorder delay in effect. It never shrinks: that would step the clock back.
-	delay: u64,
-	/// The last DTS handed out.
-	last: Option<u64>,
-}
-
-impl<T> Default for DecodeClock<T> {
-	fn default() -> Self {
-		Self {
-			held: VecDeque::new(),
-			slots: Vec::new(),
-			high: None,
-			reach: 0,
-			delay: 0,
-			last: None,
-		}
-	}
-}
-
-impl<T> DecodeClock<T> {
-	/// Hold the next frame in decode order, presented at `pts`.
-	fn push(&mut self, item: T, pts: u64) {
-		if let Some(high) = self.high
-			&& pts < high
-		{
-			self.reach = self.reach.max(high - pts + 1).min(MAX_REORDER);
-		}
-		self.high = Some(self.high.map_or(pts, |high| high.max(pts)));
-		let at = self.slots.partition_point(|&slot| slot <= pts);
-		self.slots.insert(at, pts);
-		self.held.push_back((item, pts));
-	}
-
-	/// The next frame and its DTS, once its slot is settled `lookahead` past (the catalog
-	/// `jitter`), or at once when `flush`. `floor` is the least reorder delay, in ticks.
-	fn pop(&mut self, lookahead: u64, floor: u64, flush: bool) -> Option<(T, u64)> {
-		let high = self.high?;
-		let lookahead = lookahead.max(self.reach);
-		let settled = |slot: u64| flush || high >= slot.saturating_add(lookahead);
-		if !settled(*self.slots.first()?) {
-			return None;
-		}
-		// Every settled frame bounds the delay, so one decoding later never steps it back.
-		let mut delay = self.delay.max(floor);
-		for (&slot, (_, pts)) in self.slots.iter().zip(&self.held) {
-			if !settled(slot) {
-				break;
-			}
-			delay = delay.max(slot.saturating_sub(*pts));
-		}
-		self.delay = delay.min(MAX_REORDER);
-
-		let slot = self.slots.remove(0);
-		let (item, _) = self.held.pop_front()?;
-		let dts = slot.saturating_sub(self.delay);
-		let dts = match self.last {
-			Some(last) if dts <= last => last + 1,
-			_ => dts,
-		};
-		self.last = Some(dts);
-		Some((item, dts))
 	}
 }
 

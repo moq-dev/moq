@@ -4266,8 +4266,8 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	assert_eq!(config.backoff_max_us, expected.connect.backoff.max.as_micros() as u64);
 	assert!(config.has_backoff_timeout);
 	assert_eq!(
-		config.backoff_timeout_us,
-		expected.connect.backoff.timeout.as_micros() as u64
+		expected.connect.backoff.timeout,
+		Some(std::time::Duration::from_micros(config.backoff_timeout_us))
 	);
 
 	let websocket = expected.connect.websocket.resolve();
@@ -4313,12 +4313,12 @@ fn zero_with_a_flag_set_is_a_real_value() {
 	config.has_quic_keep_alive = true;
 
 	let explicit = parsed(&config);
-	assert_eq!(explicit.connect.backoff.timeout, std::time::Duration::ZERO);
+	assert_eq!(explicit.connect.backoff.timeout, Some(std::time::Duration::ZERO));
 	assert_eq!(explicit.quic.keep_alive, std::time::Duration::ZERO);
 
 	// Without the flags the same zeroes mean nothing at all.
 	let defaults = parsed(&client_config());
-	assert_ne!(defaults.connect.backoff.timeout, std::time::Duration::ZERO);
+	assert_ne!(defaults.connect.backoff.timeout, Some(std::time::Duration::ZERO));
 	assert_eq!(defaults.quic.keep_alive, std::time::Duration::from_secs(3));
 }
 

@@ -329,7 +329,7 @@ fn dial() -> moq_tokio::connect::Config {
 	// budget, paced enough that the loop is still a backoff.
 	config.backoff.initial = Duration::from_millis(50);
 	config.backoff.max = Duration::from_millis(200);
-	config.backoff.timeout = Duration::from_secs(5);
+	config.backoff.timeout = Some(Duration::from_secs(5));
 	config
 }
 
@@ -999,7 +999,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	config.connect = dial();
 	// Retry forever: a give-up after a slow impaired handshake would look exactly
 	// like the never-redialed regression, and a stall still fails the drill.
-	config.connect.backoff.timeout = Duration::ZERO;
+	config.connect.backoff.timeout = Some(Duration::ZERO);
 	if link == PeerLink::Transport {
 		config.connect.version = vec!["moq-transport-19".parse().expect("parse version")];
 	}

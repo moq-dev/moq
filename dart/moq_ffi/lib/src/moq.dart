@@ -4279,6 +4279,7 @@ enum MoqProtocolKind {
   timestampMismatch,
   app,
   unknown,
+  tooManyRequests,
 }
 
 class FfiConverterMoqProtocolKind {
@@ -4329,6 +4330,8 @@ class FfiConverterMoqProtocolKind {
         return LiftRetVal(MoqProtocolKind.app, 4);
       case 22:
         return LiftRetVal(MoqProtocolKind.unknown, 4);
+      case 23:
+        return LiftRetVal(MoqProtocolKind.tooManyRequests, 4);
       default:
         throw UniffiInternalError(
           UniffiInternalError.unexpectedEnumCase,
