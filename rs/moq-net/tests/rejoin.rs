@@ -190,3 +190,122 @@ async fn leaving_after_the_cache_window_keeps_the_latest_group() {
 		.unwrap_or_else(|_| panic!("{version}: timed out"));
 	}
 }
+
+/// A quiet track's latest group outlives the cache window while it stays the live edge.
+///
+/// A catalog is published once. A reader reads it and leaves, so the relay parks the
+/// track, and the next reader re-splices the upstream copy after the cached group. The
+/// group must stay protected while that reader holds the track open: a reader joining
+/// after the cache window needs it, and no newer group may ever come. Once a newer group
+/// supersedes it, it expires like any other.
+#[tokio::test(start_paused = true)]
+async fn rejoined_quiet_catalog_survives_cache_expiry() {
+	for version in ["moq-lite-05", "moq-lite-06"] {
+		quiet_catalog_survives_cache_expiry(version.parse().unwrap(), false).await;
+	}
+}
+
+/// A quiet track's latest group outlives the cache window across a publisher takeover.
+///
+/// The publisher reconnects while a reader holds the catalog: the relay retires the old
+/// upstream copy and resumes from the new one past the cached group, which must stay
+/// protected as the live edge.
+#[tokio::test(start_paused = true)]
+async fn taken_over_quiet_catalog_survives_cache_expiry() {
+	for version in ["moq-lite-05", "moq-lite-06"] {
+		quiet_catalog_survives_cache_expiry(version.parse().unwrap(), true).await;
+	}
+}
+
+async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
+	tokio::time::timeout(TEST_TIMEOUT + moq_net::cache::DEFAULT_EXPIRY * 5, async {
+		let publisher = produce_origin(1);
+		let relay = produce_origin(2);
+		let broadcast = publisher.create_broadcast("bench").unwrap();
+		let track = broadcast.create_track("catalog", None).unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(Timestamp::ZERO, b"catalog".as_ref()).unwrap();
+		group.finish().unwrap();
+
+		let upstream = || {
+			let mut options = MockConnectOptions::new(version);
+			options.server_publish = Some(publisher.consume());
+			options.client_subscribe = Some(relay.clone());
+			connect_mock(options)
+		};
+		let mut upstream_session = upstream().await;
+
+		// Each session gets its own hop, so the relay serves it through its own front.
+		let session = |hop| {
+			let relay = relay.clone();
+			async move {
+				let client = produce_origin(hop);
+				let mut options = MockConnectOptions::new(version);
+				options.server_publish = Some(relay.consume());
+				options.client_subscribe = Some(client.clone());
+				let pair = connect_mock(options).await;
+				let consumer = client.consume();
+				consumer.routed("bench").await.unwrap();
+				let remote = consumer.request_broadcast("bench").await.unwrap();
+				let sub = remote.track("catalog").unwrap().subscribe(None).await.unwrap();
+				(sub, remote, pair)
+			}
+		};
+
+		let (mut holder, holder_remote, _holder_pair) = if takeover {
+			// The publisher reconnects while the holder reads, and the old connection goes:
+			// the relay takes the track over from the new one.
+			let (mut holder, remote, pair) = session(3).await;
+			assert_eq!(holder.recv_group().await.unwrap().unwrap().sequence, 0, "{version}");
+			let replacement = upstream().await;
+			// An equal route changes no announcement to wait on. The paused clock only
+			// advances once every task is idle, so this lets its announce land.
+			tokio::time::sleep(Duration::from_millis(100)).await;
+			upstream_session = replacement;
+			(holder, remote, pair)
+		} else {
+			// A reader leaves, so the relay parks the track; the holder re-splices it.
+			let (mut first, remote, pair) = session(3).await;
+			assert_eq!(first.recv_group().await.unwrap().unwrap().sequence, 0, "{version}");
+			drop((first, remote, pair));
+			track.unused().await.unwrap();
+			let (mut holder, remote, pair) = session(4).await;
+			assert_eq!(holder.recv_group().await.unwrap().unwrap().sequence, 0, "{version}");
+			(holder, remote, pair)
+		};
+
+		tokio::time::sleep(moq_net::cache::DEFAULT_EXPIRY * 2 + Duration::from_secs(2)).await;
+		let (mut later, _later_remote, _later_pair) = session(5).await;
+		let mut group = tokio::time::timeout(Duration::from_secs(1), later.recv_group())
+			.await
+			.unwrap_or_else(|_| panic!("{version} takeover={takeover}: late reader lost the latest catalog"))
+			.unwrap()
+			.unwrap();
+		assert_eq!(read_all(&mut group).await.unwrap(), [b"catalog"], "{version}");
+		drop(group);
+
+		// A newer catalog supersedes it, so the old one expires like any other group.
+		let mut newer = track.append_group().unwrap();
+		newer
+			.write_frame(Timestamp::from_millis(1000).unwrap(), b"newer".as_ref())
+			.unwrap();
+		newer.finish().unwrap();
+		assert_eq!(holder.recv_group().await.unwrap().unwrap().sequence, 1, "{version}");
+		tokio::time::sleep(moq_net::cache::DEFAULT_EXPIRY * 2 + Duration::from_secs(2)).await;
+		let old = async {
+			let mut group = holder_remote.track("catalog").unwrap().fetch_group(0, None).await?;
+			group.read_frame().await
+		};
+		assert!(
+			tokio::time::timeout(Duration::from_secs(1), old)
+				.await
+				.unwrap()
+				.is_err(),
+			"{version} takeover={takeover}: the superseded catalog never expired"
+		);
+		drop(upstream_session);
+	})
+	.await
+	.unwrap_or_else(|_| panic!("{version} takeover={takeover}: timed out"));
+}

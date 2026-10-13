@@ -2271,8 +2271,9 @@ const TRACK_IDLE_LINGER: Duration = Duration::from_secs(30);
 
 /// A local copy of groups the front already delivered, so resume stays spliced
 /// after the source track is dropped. Cache misses stay pending while demand
-/// re-splices the upstream source. Finished on drop so an idle linger does not
-/// warn about an abandoned producer.
+/// re-splices the upstream source. While it lives, its newest group is a live edge the
+/// cache never expires (see [`TrackIo::prior`]). Finished on drop so an idle linger
+/// does not warn about an abandoned producer.
 struct WarmCopy {
 	track: track::Producer,
 	_dynamic: track::Dynamic,
@@ -2493,6 +2494,11 @@ struct TrackIo {
 	/// The last warm copy's newest group, outliving it so the copy spliced after it
 	/// can continue the group (see [`WarmGroup`]). Released at the next park.
 	head: Option<WarmGroup>,
+	/// The warm copy the spliced copy took over from, and its newest group's sequence.
+	/// The copy resumes past that group, so nothing re-sends it. Kept unfinished until
+	/// the copy delivers a newer group, so the cache still protects it as the live edge;
+	/// finished early, a quiet track's latest group expires.
+	prior: Option<(u64, WarmCopy)>,
 	/// The spliced copy's newest group. A route that ends abruptly releases its open
 	/// groups, and the takeover after it asks the next copy only for the frames past
 	/// the break, so without this handle no route holds the group's head for a reader
@@ -2514,8 +2520,18 @@ impl TrackIo {
 		self.copy = None;
 		self.warm = None;
 		self.head = None;
+		self.prior = None;
 		self.held = None;
 		self.dead = None;
+	}
+
+	/// Hold the spliced copy's newest `group`. Past the prior warm copy's edge, that
+	/// edge is history and ages out like any other group.
+	fn hold(&mut self, group: group::Producer) {
+		if self.prior.as_ref().is_some_and(|(edge, _)| group.sequence > *edge) {
+			self.prior = None;
+		}
+		self.held = Some(HeldGroup(group));
 	}
 
 	/// Keep the spliced copy as dead. The front only refreshes `held` between wakes, so
@@ -2524,22 +2540,20 @@ impl TrackIo {
 		let Some((_, copy)) = self.copy.take() else { return };
 		let after = self.held.as_ref().map(|held| held.0.sequence);
 		if let Poll::Ready(group) = copy.poll_latest_group(after, &kio::Waiter::noop()) {
-			self.held = Some(HeldGroup(group));
+			self.hold(group);
 		}
 		self.dead = Some(copy);
 	}
 
-	/// Retire `copy` as a takeover replaces it. Mid-group, park its delivery warm, open
-	/// group included, so a reader arriving later still gets the group's head and the
-	/// takeover continues it. Between groups its own cache keeps everything finished, so
-	/// there is nothing to do.
+	/// Retire `copy` as a takeover replaces it: park its delivery warm, so a reader
+	/// arriving later still gets its newest group. Mid-group, the takeover continues the
+	/// open group from the head kept here. Between groups, the takeover resumes past the
+	/// finished one, which the retired copy's ended cache would let expire, so the warm
+	/// copy keeps it the live edge (see [`Self::prior`]).
 	fn retire(&mut self, copy: &track::Consumer) -> Result<(), Error> {
 		let Some(held) = self.held.take() else {
 			return Ok(());
 		};
-		if held.0.is_finished() {
-			return Ok(());
-		}
 		let Some(warm) = warm_copy(copy, self.head.as_ref(), Some(&held.0)) else {
 			return Ok(());
 		};
@@ -2779,7 +2793,10 @@ async fn run_front(task: FrontTask) {
 							tracks.remove(&name);
 							continue;
 						}
-						if let Some(head) = io.warm.take().and_then(|mut warm| warm.edge.take()) {
+						if let Some(mut warm) = io.warm.take()
+							&& let Some(head) = warm.edge.take()
+						{
+							io.prior = Some((head.0.sequence, warm));
 							io.head = Some(head);
 						}
 						// The new segment has produced nothing yet: this is the
@@ -2797,6 +2814,7 @@ async fn run_front(task: FrontTask) {
 						let warm = warm_copy(&copy, io.head.as_ref(), io.held.as_ref().map(|held| &held.0));
 						drop(copy);
 						io.head = None;
+						io.prior = None;
 						io.held = None;
 						io.dead = None;
 						let parked = match &warm {
@@ -2947,6 +2965,7 @@ async fn run_front(task: FrontTask) {
 						edge: None,
 						warm: None,
 						head: None,
+						prior: None,
 						held: None,
 						dead: None,
 						used: false,
@@ -3020,7 +3039,7 @@ async fn run_front(task: FrontTask) {
 			}
 			Step::Held(name, group) => {
 				if let Some(io) = tracks.get_mut(&name) {
-					io.held = Some(HeldGroup(group));
+					io.hold(group);
 				}
 				continue;
 			}
