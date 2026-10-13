@@ -6039,10 +6039,9 @@ fn bbr_burst_after_long_idle_keeps_learned_bandwidth() {
 
     let idle_end = pair.time + Duration::from_secs(300);
     while pair.time < idle_end {
-        if !pair.step()
-            && let Some(time) = min_opt(pair.client.next_wakeup(), pair.server.next_wakeup())
-        {
-            pair.time = time;
+        if !pair.step() {
+            pair.time = min_opt(pair.client.next_wakeup(), pair.server.next_wakeup())
+                .expect("keep-alive timer stopped during the idle");
         }
     }
     assert!(!pair.client_conn_mut(client_ch).is_closed());
