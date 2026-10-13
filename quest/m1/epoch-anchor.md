@@ -52,13 +52,19 @@ and the subscribe grant a joiner needs.
   own first value as the reference. Today each stream's `PtsUnwrap` starts
   at era 0, so a first importer started at a wrap, with one stream's first
   PTS still just before it, places that stream 26.5 h from the others, and
-  every joiner would adopt the broken coordinate.
+  every joiner would adopt the broken coordinate. Timestamps are unsigned,
+  so the pre-wrap stream's nearest candidate can be negative: resolve the
+  initial bases together before placing the clock, and lift the whole
+  coordinate by a period when one would land below zero.
 - The joiner verifies its era against the incumbent's objects before
   announcing, one per independently mapped timestamp base (each track): the
   incumbent's object at the joiner's first group's time must match it in
   timestamp and payload. One object would let a matching video track
-  approve an audio track a period off. A mismatch exits with an
-  error, and so does an incumbent that leaves before the check. Decided
+  approve an audio track a period off. A sparse base with no cadence
+  (verbatim subtitles or teletext, each with its own `PtsUnwrap`) must not
+  hold the announcement until its next cue: resolve it against its
+  program's verified PCR base instead. A mismatch exits with an error, and
+  so does an incumbent that leaves before the check. Decided
   2026-10-13 by the maintainer, over documenting a bound: the latest
   timestamp alone is wrong when flagged breaks totalling half a period fall
   within the delivery skew (a joiner one second behind, while the incumbent

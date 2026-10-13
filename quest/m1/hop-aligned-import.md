@@ -37,7 +37,11 @@ wrap.
 - A group's sequence derives from its first frame's time on the epoch
   timeline (the keyframe in the demultiplexed lane, the group's first object
   in passthrough), not a per-process counter, so two importers number the
-  same group alike wherever each started.
+  same group alike wherever each started. A source may start consecutive
+  groups at one timestamp (`container::Producer` accepts a keyframe at the
+  previous group's start), which time alone cannot number without a
+  history-derived counter: settle a tie-breaker the source carries, or
+  refuse equal starts under a shared epoch, and cover it in the pair test.
 - Frame timestamps derive from the input and the epoch's coordinate alone,
   never from `clock.now()` (2026-10-06 audit), and importers refuse a rewind.
 - The catalog's root `clock` is the epoch's, never an importer's arrival
