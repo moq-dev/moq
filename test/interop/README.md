@@ -141,7 +141,7 @@ just test interop --all
 # Pick your own axes:
 just test interop --publishers rust,python --subscribers rust,c,js-native-bun
 
-# Finite track tails only: Rust-to-Rust and Rust/Node/Bun in both directions.
+# CLI FETCH close and finite track tails only: Rust-to-Rust and Rust/Node/Bun in both directions.
 just test interop --tail
 
 # Subscription termination: Rust/JS response bytes over in-memory transports.
