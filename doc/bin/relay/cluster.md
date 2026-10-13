@@ -24,7 +24,9 @@ unasked. moxygen announces nothing unasked on draft 14.
 When a moq-lite-04 or later peer withdraws a broadcast, the routes relayed
 through it go with it at once. A change of best route is announced after
 300 ms, so stale paths are retracted once instead of advertised in turn;
-requests follow the new best route immediately.
+requests follow the new best route immediately. For 2 s after a relay retracts
+a broadcast, it holds back a worse path to the same publisher that a peer still
+hunting offers, instead of announcing the broadcast again.
 
 Routes carrying the same [publisher epoch](/concept/moq-lite#publisher-epochs)
 serve one broadcast. When the route serving it dies, withdraws, or is beaten by

@@ -35,7 +35,9 @@ Decided 2026-10-01 (see the [line's decisions](/quest/m1/cluster-routing/README.
   route stays up. An announce never changes its Route ID: another origin
   serving the same path is another ANNOUNCE. An ANNOUNCE naming an unknown
   Route ID is a protocol violation, and ROUTE_END ends that stream's
-  ANNOUNCEs on the route. The hop list leaves lite-07, and with it the
+  ANNOUNCEs on the route. ROUTE_REQUEST (node id, seqno, hop count) travels
+  the other way on the same stream, toward the neighbour that sent the route.
+  The hop list leaves lite-07, and with it the
   `Hop Base`/`Hop Keep` compression.
 
   ```text
@@ -68,6 +70,20 @@ Decided 2026-10-01 (see the [line's decisions](/quest/m1/cluster-routing/README.
   accept a route if its seqno is newer, or equal with a metric below the
   feasibility distance. Only the origin advances its seqno. Retraction is an
   infinite metric or ROUTE_END; there is no count to infinity.
+- Starvation recovery is Babel's seqno request (RFC 8966 s3.8, decided
+  2026-10-12). A node whose routes to an origin are all infeasible sends
+  ROUTE_REQUEST for that origin, with its feasibility seqno plus one, to the
+  neighbour it would use. A node holding a route at least that new answers
+  with it, and only the origin advances its seqno to answer. Otherwise, while
+  the hop count is at least two, it forwards the request with the hop count
+  decremented, never to the requesting neighbour (RFC 8966 s3.8.1.2): through
+  a feasible route's next hop if one avoids the requester, else through an
+  infeasible route's, else it drops the request. A node keeps one request
+  per origin and seqno pending, suppressing duplicates, and resends its own
+  a small number of times; the pending entry expires when answered, when the
+  route is gone, or when the retries run out, and only a later infeasible
+  update starts a new one. Feasibility is never
+  reset to accept a longer route after a retraction or a session replay.
 - Next-hop authority: store every neighbour's ANNOUNCEs, but a prefix is live
   at a node only as its current next hop toward the origin announces it, the
   neighbour a subscribe for that path would go to (metric, then the path-keyed
@@ -102,27 +118,42 @@ Separating "the path changed" (ROUTE) from "the broadcast ended" (ANNOUNCE)
 removes that trade, and the failover tests must show no front loses its
 route while a working one exists. Decide whether #4642's hold can then go.
 
-Simulator findings so far (awaiting the maintainer's decision on a design
-revision):
+Simulator findings (2026-10-12), measured with seed 1 on a tiered
+45-node topology (four regions of two upstream nodes and their edges, plus
+five single-node regions), tiered synthetic graphs of 347 and 1024 nodes,
+and a six-node radio mesh with two uplinks. Bytes are uncompressed estimates
+with eight-byte ids; these are protocol metrics in virtual time, not runtime
+benchmarks.
 
-- Live origin-end costs 134.5 KiB against path vector's 3668.1/1243.0 KiB,
-  but still emits 2150 client updates against an 840 once-only minimum and
-  re-announces 655 times. The Goal's "reaches each node about once" is not
-  met yet; find where the extra updates come from before the wire is written.
-- A deterministic five-node ring keeps a working longer backup yet stays
-  starved until the origin advances its seqno. The simulator recommends
-  Babel seqno requests.
+- Starvation: a five-node ring loses its preferred origin link while a
+  working four-hop backup remains. The backup's same-seqno route stays
+  infeasible for good, and restarting the backup's session does not help;
+  only an origin seqno advance does. Hence the seqno request above.
+- Ending a broadcast on the 45-node topology costs 124.8 KiB against path
+  vector's 2817.0 KiB (1304.0 KiB with #4399's withdrawal hiding), but still
+  2000 client updates against a 900 once-only minimum (up to 11 per node
+  and path), with 550 re-announcements. The synthetic graphs reach about
+  three times the minimum (20640 against 6940, 62182 against 20480).
+  Next-hop authority alone does not meet the Goal's "reaches each node
+  about once".
+- Losing one of an edge's two upstream links leaves live broadcasts reported
+  as gone for 722.8 aggregate seconds before restoration, where path vector
+  reports none: the route moves, but the announces behind it trail.
+- The down-only bit holds: with an uplink edge cut off from both of its
+  upstream nodes but still linked to the mesh, path vector routes its
+  subscriptions through the radio mesh and the split refuses, and after a
+  partition each island reaches the other through its uplink.
 
 Open, for the implementer to settle and record:
 
 - Seqno lifetime across restarts of a node with a configured stable id
-  (persist it, fold an incarnation into the id, or Babel's seqno request).
-- Starvation recovery: the simulator's ring says session restart does not
-  cover it; confirm a seqno request message or record why not.
+  (persist it, fold an incarnation into the id, or rely on the seqno
+  request). The simulator persisted each origin's counter across restarts to
+  keep this choice from hiding starvation.
 - The window where an origin's ANNOUNCE_END and a next-hop change cross in
-  flight, and whether it needs more than the next END to arrive. The
-  simulator keeps this open until snapshot authority has deterministic
-  acceptance tests.
+  flight, and what makes a replacement next hop's announce set current. Kept
+  open: [Next-hop handoff](/quest/m1/cluster-routing/handoff.md) settles it
+  with deterministic acceptance tests before the wire is written.
 - How much of today's route trie, fronts, and `route_order` survives intact.
 
 Tests, time mocked: #4644's live-graph withdrawal and failover tests
@@ -131,7 +162,15 @@ link flap with many broadcasts behind one origin costs one ROUTE change per
 link; a ring of three where a stale neighbour cannot revive an ended
 broadcast; a two-uplink mesh that never carries CDN routes back to the CDN;
 an island reached through the CDN after a partition; an unknown Route ID
-refused.
+refused; a five-node ring whose preferred origin link fails recovers its
+longer backup through a seqno request, duplicates suppressed, while that
+backup never loses its session; a ring where a node's own preferred route
+points back at the requester forwards the request around it instead, and an
+unanswerable request stops after its retries. Failover is measured
+on broadcast liveness while the next hop changes, including a new next hop
+whose ROUTE arrives before its ANNOUNCE set, and reports per-path
+retractions and re-announcements beside the ROUTE budget; eventual route
+recovery alone does not show it is seamless.
 
 Wire: `drafts/draft-lcurley-moq-lite.md` in the same PR, and `js/net`
 encodes, decodes, and resolves it (JS transit stays in
@@ -142,5 +181,5 @@ release.
 
 ## Required
 
-- [Simulate the split](/quest/m1/cluster-routing/sim.md) - the numbers that confirm the design before the wire is written
+- [Next-hop handoff](/quest/m1/cluster-routing/handoff.md) - what keeps an END final and a replacement next hop's announces current across the handoff
 

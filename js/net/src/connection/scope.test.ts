@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { announcedView } from "../announced.test-util";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
@@ -36,8 +37,10 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_19]) {
 				if (update?.kind !== "start") throw new Error(`expected an announcement, got ${update?.kind}`);
 				received.push(update.prefix);
 			}
+			await new Promise<void>((resolve) => setImmediate(resolve));
 			expect(received.sort()).toEqual(["client/other/live", "client/room/.hidden", "client/room/live"]);
-			expect([...consume.broadcasts().peek().keys()].sort()).toEqual([
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect([...(await announcedView(consume)).peek().keys()].sort()).toEqual([
 				Path.from("other/live"),
 				Path.from("room/live"),
 			]);

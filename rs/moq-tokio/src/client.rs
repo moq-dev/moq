@@ -877,7 +877,7 @@ where
 /// answers the fallback with 403 while QUIC is still in flight, and reconnect
 /// treats is_auth() as terminal, so a mixed pair reports the retryable error.
 #[cfg(all(feature = "websocket", feature = "noq"))]
-fn race_error(quic: Error, websocket: Error) -> Error {
+pub(crate) fn race_error(quic: Error, websocket: Error) -> Error {
 	match (quic.is_auth(), websocket.is_auth()) {
 		(false, false) => Error::TransportRace {
 			quic: std::sync::Arc::new(quic),

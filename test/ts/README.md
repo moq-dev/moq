@@ -386,76 +386,52 @@ checks to hard.
 
 ## Table anchoring (`table-anchor.py`)
 
-Every other check here grades one stream in isolation, and no single stream can
-answer the question this one asks: **are a table's emission points a property of
-the broadcast, or of the exporter that happened to emit them?**
-
-It matters because two exporters of one broadcast are how redundancy is built. A
-receiver merging two legs, or cutting from one to the other, needs them to agree
-about where the tables sit. If each leg emits to its own clock the two outputs
-are not interchangeable, and the divergence is permanent rather than something a
-longer run settles.
-
-One stream cannot show this because a timer and an anchor look identical from
-inside: both produce a table every so often. Only a second leg, joining at a
-different moment, separates them.
+Two exporters of the same broadcast must converge after acquisition. `--pair`
+starts the second subscriber five seconds late and checks table placement on the
+shared PCR timeline. This measures table alignment; it does not establish packet
+identity, `--sync`, or ST 2022-7 compatibility.
 
 ```bash
-just test ts --pair                      # round-trip twice, grade the pair
-just test ts --pair --pair-join 20 --duration 60   # join the second leg 20s in
-./table-anchor.py a.ts b.ts              # grade two captures you already have
+just test ts --pair
+just test ts --pair --pair-join 20 --duration 60
+just test ts-pair-controls
+./table-anchor.py a.ts b.ts --report-json pair.json
 ```
 
-The second subscriber joins late on purpose. Two exporters started together can
-agree on a cadence by having started together, which is the confound; a leg that
-joins mid-broadcast has to derive its emission points from the media, because it
-has no shared history to derive them from.
+The CBR slot scheduler interleaves tables and PES, so the next PES timestamp does not
+identify when a table was sent. The grader interpolates each table's packet
+position between PCR samples. A match allows one packet of placement quantization
+plus one PCR tick of rounding. Matching is one-to-one, so duplicates count.
 
-**What gets graded is the overlap, not the run**, so `--pair` defaults to a 45 s
-duration rather than the 20 s the other arms use, and refuses a run leaving less
-than 25 s of it. At 20 s with a 5 s join the legs share 15 s, which is about
-seven SDT emissions against a floor of eight — the table this mode exists to
-check would quietly drop to report-only. Raise `--duration` when you raise
-`--pair-join`. `--pair` cannot be combined with `--live`: they grade different
-things.
+The comparison starts at the later leg's **second video random-access PES**,
+after its first acquired group, matching the exporter's late-join convergence
+regression. This boundary comes from media markers, never from the tables under
+test or a fixed time allowance. The end is the earlier leg's final PCR. Tables
+that disappear cannot shorten their own scoring window. Captures with multiple
+program clocks, variable bitrate, midstream PCR discontinuities, missing acquisition markers, or
+broken packet framing are refused. PCR wrap is supported.
 
-The measurement is the PTS of the frame each table was emitted against. `export
-ts` writes the tables that are due and then the frame's PES packets into one
-buffer, so the first PES header after a table gives the PTS of the frame that
-triggered it. **Agreement** is the emission points both legs used over those
-either used, counted only inside the media time the two captures share, so a
-late join costs nothing. 100 % means the emission points are a function of the
-broadcast.
+The default run lasts 45 seconds and requires 20 seconds of acquired shared
+clock. PAT, declared PMTs, and every observed non-clock table must each have at
+least eight emissions **on both legs**, with at least 90% agreement. Missing or
+sparse tables fail rather than quietly becoming report-only. TDT/TOT remains
+informational because its content follows wall-clock time; `--strict` grades it
+as well. `--source` also requires the source's SI tables and PAT-declared PMTs, catching loss on both legs. These checks do not diagnose a process timer from cadence alone.
 
 | Option | Meaning |
 |---|---|
-| `--min-agreement` | percent of shared emission points required per table (default 90) |
-| `--min-emissions` | a table with fewer emissions in the overlap is reported, not graded (default 8) |
-| `--min-window` | seconds of shared media required before any verdict is given (default 20) |
-| `--strict` | fail on report-only tables too |
-| `--report-json` | write the full report |
+| `--min-agreement` | Required percentage of matched emissions (default 90) |
+| `--min-emissions` | Required emissions per leg and table (default 8) |
+| `--min-window` | Required seconds of acquired shared clock (default 20) |
+| `--source` | Require the source's SI tables on both legs |
+| `--strict` | Grade TDT/TOT too |
+| `--report-json` | Save the window, tolerance, counts, and verdicts |
 
-`--min-window` exists because a capture that came up short is the commonest way
-this grades clean: too little shared media puts the slower tables under the
-emission floor, and a table reported without a verdict reads as a pass. The
-window is taken from the media the two captures carry, **not** from the
-emissions being scored — deriving it from the emissions is itself a false pass,
-since a leg that stops emitting a table halfway through would pull the upper
-bound back to its own last emission and score its desertion as 100 %.
-
-Two things are deliberately not graded. A table seen on only one leg is reported
-without a verdict, because that is a carriage question rather than an anchoring
-one. TDT/TOT is report-only whatever its agreement, since it carries wall-clock
-time and is *supposed* to track a clock rather than the media.
-
-Where both legs run the same period at different phase, the report says so
-rather than leaving a percentage to interpret:
-
-```
-  FAIL  SDT/BAT          10      10      19       1      5.26%
-                    both legs emit every 2.000s, 0.480s out of phase
-                    -> a timer started with the exporter, not an anchor in the media
-```
+`just test ts-pair-controls` runs deterministic transport fixtures through the
+actual grader. Identical streams, different PES interleave, late acquisition with
+bootstrap tables, and PCR wrap must pass. Persistent phase shifts, accumulating
+drift, disappearing/absent/sparse tables, and insufficient shared media must fail.
+Controls run in PR CI; the real pair runs nightly and on manual TS validation.
 
 ## Open GOP (`open-gop.py`)
 
