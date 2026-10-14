@@ -41,6 +41,16 @@ data channel. A failed ICE check is terminal for the pair, like signaling's
 rule; no retry loop. The QUIC connection's path never migrates; ICE
 restarts are out of scope.
 
+Open question for the implementer: `is` may re-nominate a different pair
+without an ICE restart (a late trickled candidate, a network change), while
+QUIC stays on the old tuple. Either freeze nomination once the QUIC
+handshake starts, keeping consent checks on that pair, or follow the new
+pair by migrating or recreating the QUIC path. Recommendation: freeze, and
+if `is` cannot hold a pair, close the session on a nomination change rather
+than migrate; it matches the no-retry rule and keeps QUIC on one path.
+Either way, a test trickles a better candidate after QUIC starts and shows
+the session never stalls on a stale tuple.
+
 Ordered qmux stays the only data channel mode: native pairs have
 independent QUIC streams here, so unordered reassembly would serve nobody.
 
