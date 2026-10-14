@@ -48,13 +48,15 @@ instead host sessions with `--listen`, or both at once, admitting clients the
 way the relay does (see [Authentication](/bin/relay/auth)). Listening imports and
 exports share the relay's shutdown behavior: SIGINT or SIGTERM sends accepted
 sessions a reconnect-to-me GOAWAY and waits up to `--drain-timeout` (default
-`10s`), exiting once they have all left. A second signal exits immediately;
-`--drain-timeout 0s` closes sessions immediately. Pending handshakes and admission
-requests share the same drain window, and an open stdin pipe does not keep the
-process alive afterward.
+`10s`), exiting once they have all left. Sessions on versions without GOAWAY,
+such as `moq-lite-03`, get none and are closed when the window ends. A second
+signal exits immediately; `--drain-timeout 0s` closes sessions immediately.
+Pending handshakes and admission requests share the same drain window, and an
+open stdin pipe does not keep the process alive afterward.
 
 Add `--stats-enabled` before the first stage to publish accepted-session and
-traffic counters with the relay's `--stats-*` settings. These listener settings
+traffic counters with the relay's `--stats-*` settings; an export-only listener
+publishes these stats to its sessions and nothing else. These listener settings
 require a MoQ listener. Grants still scope which broadcasts each session can
 publish or subscribe to, including stats; see the relay's
 [statistics configuration](/bin/relay/config#stats).
