@@ -163,16 +163,41 @@ impl Clock {
 		let unmappable = |why: &str| crate::Error::UnmappableTimestamp(format!("{pts:?} at {wall:?} {why}"));
 		let zero = wall
 			.checked_sub(pts)
+			.and_then(|zero| wall_clock(zero).ok())
 			.ok_or_else(|| unmappable("puts PTS zero before 2020"))?;
+		Self::mapped(zero, unmappable)
+	}
+
+	/// A clock on a catalog's root `clock`: a derivative republishing its input's timestamps runs
+	/// on its input's mapping, stored exactly.
+	///
+	/// Refuses a wall that is no whole number of [`TIMESCALE`](Self::TIMESCALE) units (some 90 kHz
+	/// values), a PTS zero after now, and a host whose wall clock is unset.
+	pub(crate) fn adopted(wall: hang::catalog::Clock) -> crate::Result<Self> {
+		let unmappable = |why: &str| crate::Error::UnmappableTimestamp(format!("root clock {wall:?} {why}"));
+		let scale = wall.wall.scale().as_u64() as u128;
+		let scaled = wall.wall.value() as u128 * Self::TIMESCALE.as_u64() as u128;
+		if !scaled.is_multiple_of(scale) {
+			return Err(unmappable("is no whole microsecond"));
+		}
+		let micros = u64::try_from(scaled / scale).map_err(|_| unmappable("overflows the clock"))?;
+		let zero = hang::catalog::Clock::new(moq_net::Timestamp::from_micros(micros)?)?;
+		Self::mapped(zero, unmappable)
+	}
+
+	/// A clock whose PTS zero is `zero`, anchored now at however long ago that was on the host.
+	///
+	/// No `Instant` arithmetic, so a PTS zero before this host booted still maps.
+	fn mapped(zero: hang::catalog::Clock, unmappable: impl Fn(&str) -> crate::Error) -> crate::Result<Self> {
 		let instant = web_async::time::Instant::now();
 		let now = host_wall().ok_or_else(|| unmappable("needs the host wall clock, which is unset"))?;
-		let reading = now
-			.duration_since(zero)
+		// Saturating would stamp everything early by the skew without saying so.
+		let reading = u64::try_from(moq_micros(now) - zero.wall.as_micros() as i128)
 			.map_err(|_| unmappable("puts PTS zero after now"))?;
 		Ok(Self {
 			instant,
-			reading: u64::try_from(reading.as_micros()).map_err(|_| unmappable("overflows the clock"))?,
-			wall: Some(wall_clock(zero).map_err(|_| unmappable("puts PTS zero before 2020"))?),
+			reading,
+			wall: Some(zero),
 		})
 	}
 

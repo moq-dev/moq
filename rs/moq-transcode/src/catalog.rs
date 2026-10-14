@@ -955,4 +955,49 @@ mod tests {
 		assert_eq!(out.archive, Some(archive), "a derivative keeps the child's archive");
 		assert_eq!(out.clock, Some(clock), "a derivative keeps the child's clock");
 	}
+
+	/// A derivative runs on its source's mapping: `populate` writes the source's root clock through
+	/// `modify()`, so what the derivative stamps lands where the source's own clock would.
+	#[test]
+	fn a_derivative_stamps_on_its_source_clock() {
+		use std::time::{Duration, Instant, SystemTime};
+
+		// A minute in, the source reads far from the ten seconds a fresh clock starts at.
+		let ago = Duration::from_secs(60);
+		let clock = moq_mux::Clock::at(Instant::now() - ago, SystemTime::now() - ago).unwrap();
+		let mut input = moq_net::broadcast::Info::default().produce();
+		let source =
+			moq_mux::catalog::Producer::new(&mut input, moq_mux::catalog::Config::default().with_clock(clock)).unwrap();
+
+		let mut output = moq_net::broadcast::Info::default().produce();
+		let mut derived = moq_mux::catalog::Producer::new(&mut output, moq_mux::catalog::Config::default()).unwrap();
+		let mut guard = derived.modify().unwrap();
+		populate(&mut guard, &source.snapshot(), &[], None).unwrap();
+		guard.commit().unwrap();
+		assert_eq!(derived.clock().wall(), clock.wall());
+
+		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+		let mut status = derived
+			.json_snapshot::<u32>(
+				output.create_track("status", info).unwrap(),
+				moq_mux::json::Config::default(),
+			)
+			.unwrap();
+		let mut subscriber = status.consume();
+		status.update(&1).unwrap();
+		let now = clock.now();
+
+		let waiter = kio::Waiter::noop();
+		let std::task::Poll::Ready(Ok(Some(mut group))) = subscriber.poll_recv_group(&waiter) else {
+			panic!("the update is published");
+		};
+		let std::task::Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+			panic!("the update is published");
+		};
+		let stamped = frame.timestamp.unwrap().as_micros();
+		assert!(
+			now.as_micros().abs_diff(stamped) < Duration::from_secs(1).as_micros(),
+			"stamped at {stamped}us, the source reads {now:?}"
+		);
+	}
 }
