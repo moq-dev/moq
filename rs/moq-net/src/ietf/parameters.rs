@@ -89,7 +89,13 @@ impl Decode<Version> for Parameters {
 			// Unknown SETUP options may repeat, including GREASE; their values still
 			// have to be well-formed Key-Value-Pairs (draft-21 section 9.1).
 			if kind % 2 == 0 {
-				let kind = ParameterVarInt::from(kind);
+				let kind = match ParameterVarInt::from(kind) {
+					// Undefined before draft 19, so there an unknown option that may repeat.
+					ParameterVarInt::MaxRequestUpdates if !super::request_update::supported(version) => {
+						ParameterVarInt::Unknown(kind)
+					}
+					kind => kind,
+				};
 				if !matches!(kind, ParameterVarInt::Unknown(_)) && params.get_varint(kind).is_some() {
 					return Err(DecodeError::Duplicate);
 				}
@@ -612,6 +618,22 @@ macro_rules! decode_params {
 mod tests {
 	use super::super::Filter;
 	use super::*;
+
+	/// Before draft 19, 0x08 is an unknown SETUP option, so a peer may repeat it.
+	#[test]
+	fn max_request_updates_is_unknown_before_draft_19() {
+		// Draft 18: no count prefix, delta-encoded types, so the repeat is a delta of 0.
+		let block = [0x08, 0x01, 0x00, 0x02];
+		let mut r = Decoder::new(&block, Version::Draft18.into());
+		let params = Parameters::decode(&mut r, Version::Draft18).expect("a repeated unknown option is legal");
+		assert_eq!(params.get_varint(ParameterVarInt::MaxRequestUpdates), None);
+
+		let mut r = Decoder::new(&block, Version::Draft19.into());
+		assert!(matches!(
+			Parameters::decode(&mut r, Version::Draft19),
+			Err(DecodeError::Duplicate)
+		));
+	}
 
 	#[test]
 	fn setup_allows_repeated_unknown_options() {
