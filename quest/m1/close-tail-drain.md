@@ -51,7 +51,12 @@ Decided (maintainer, 2026-10-14):
   and subscription cleanup can remove a track a data stream still needs.
   Keep the subscription state the draining streams depend on, and settle
   anything that can't complete after the close (such as IETF children waiting
-  on control state) so the no-timer argument holds.
+  on control state) so the no-timer argument holds. That argument needs a
+  closed transport: a non-transport terminal error (such as legacy lite's
+  session-stream FIN returning `Cancel`, `rs/moq-net/src/lite/session.rs:652-660`)
+  must not start a drain over a live connection that could hang. Close the
+  transport first, or abort as today if buffered data does not survive a
+  local close.
 - Tests ack a FIN on delivery, as QUIC does, so the regression for lite-01
   through lite-06 and IETF (one draft from each `start` arm) asserts the
   reader got the tail and fails before the fix. Cover both the buffered-tail
