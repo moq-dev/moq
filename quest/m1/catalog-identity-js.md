@@ -33,7 +33,9 @@ Track identities per network broadcast in `CatalogProducer` (keyed by section
 and name, kept across a rendition's removal so a returning name is compared
 too), recorded from the first serve and cleared when every served track ends.
 An absent ceiling may be filled once. Bitrate and framerate decreases are
-refused like jitter and delay.
+refused like jitter and delay. The encoders' ceiling and maxima are keyed by
+the `Broadcast` component today, so a restart under a new epoch inherits the
+old run's limits; key them per epoch with the identities.
 
 What then republishes: video ceiling growth, a codec knob or re-probe that
 changes the codec string, an audio capture that changes rate or channel count,
