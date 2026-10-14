@@ -23,7 +23,7 @@ use super::Cap;
 pub use super::subscription::{Order, Position, Subscription};
 
 use std::{
-	collections::{BTreeMap, VecDeque},
+	collections::{BTreeMap, HashMap, VecDeque},
 	ops::{Bound, RangeBounds},
 	sync::Arc,
 	sync::OnceLock,
@@ -233,6 +233,10 @@ pub(crate) struct TrackState {
 	// Ordered so an in-range subscriber can seek to its cursor instead of scanning
 	// every cached group for each delivery.
 	lookup: BTreeMap<u64, Slot>,
+
+	// Runs of `lookup` that cannot present, shared by every reader; see [`Quiet`].
+	// Behind its own lock because walks record them under a read guard.
+	quiet: kio::Lock<Quiet>,
 
 	// Publisher-produced groups in arrival order as (sequence, stamp), walked by
 	// subscriptions; an entry only resolves while its stamp matches the slot's.
@@ -454,6 +458,48 @@ impl Slot {
 	fn abort(&self, err: Error) {
 		for group in self.copies() {
 			let _ = group.clone().abort(err.clone());
+		}
+	}
+}
+
+/// Where walks for a group's successor stopped, so a run of groups that cannot present
+/// (hidden, aborted, or finished without a frame) is walked once, not once for every
+/// group judged against it. A publisher can make that run as long as the cache.
+///
+/// Each entry maps a group a walk passed to where that walk stopped: no group strictly
+/// between the two could present. A group stops presenting on its own, but only starts
+/// by landing, so an entry holds until a group lands inside it. A stop itself is looked
+/// at again, so a walk past one that stopped presenting records the further stop.
+#[derive(Default)]
+struct Quiet {
+	next: HashMap<u64, u64>,
+	/// The highest recorded stop. A live group lands at or past it, keeping every entry.
+	end: u64,
+	/// Groups walked past in total, so tests can bound the work.
+	#[cfg(test)]
+	passed: usize,
+}
+
+impl Quiet {
+	/// Point every group in `walked` at `stop`. Entries left by evicted groups are dropped
+	/// once they could outnumber the `cached` groups, so this stays bounded by the cache.
+	fn record(&mut self, walked: Vec<u64>, stop: u64, cached: usize) {
+		#[cfg(test)]
+		{
+			self.passed += walked.len();
+		}
+		if self.next.len() >= cached.saturating_mul(2) {
+			self.next.clear();
+		}
+		self.end = self.end.max(stop);
+		self.next.extend(walked.into_iter().map(|at| (at, stop)));
+	}
+
+	/// A group landed at `sequence`: a run recorded across it no longer holds.
+	fn landed(&mut self, sequence: u64) {
+		if sequence < self.end {
+			self.next.clear();
+			self.end = 0;
 		}
 	}
 }
@@ -776,13 +822,38 @@ impl TrackState {
 
 	/// The first servable group above `sequence` and below `cap` that could still
 	/// present, stamped or not.
+	///
+	/// Jumps over runs an earlier walk recorded in [`Self::quiet`], and records the groups
+	/// it walks past, so judging every group of a run costs one walk over it, not one each.
 	fn successor(&self, sequence: u64, cap: Option<u64>) -> Option<&group::Producer> {
-		self.lookup
-			.range(sequence.checked_add(1)?..)
-			.map(|(_, slot)| slot)
-			.take_while(|slot| super::subscription::before_end(slot.group.sequence, cap))
-			.find(|slot| slot.is_shown() && !slot.group.ended_empty())
-			.map(|slot| &slot.group)
+		let mut walked = Vec::new();
+		// The next sequence to look at, and where this walk stops once it breaks.
+		let mut from = sequence.checked_add(1)?;
+		let found = loop {
+			let Some((&at, slot)) = self.lookup.range(from..).next() else {
+				break None;
+			};
+			if !super::subscription::before_end(at, cap) {
+				from = at;
+				break None;
+			}
+			if slot.is_shown() && !slot.group.ended_empty() {
+				from = at;
+				break Some(&slot.group);
+			}
+			// Not held across `ended_empty`, which takes the group's lock.
+			let jump = self.quiet.lock().next.get(&at).copied();
+			let Some(next) = jump.or_else(|| at.checked_add(1)) else {
+				from = at;
+				break None;
+			};
+			walked.push(at);
+			from = next;
+		};
+		if !walked.is_empty() {
+			self.quiet.lock().record(walked, from, self.lookup.len());
+		}
+		found
 	}
 
 	/// Whether the group at `sequence` has drifted further behind `edge` than `budget`
@@ -1251,6 +1322,7 @@ impl TrackState {
 	/// Content at `sequence` became servable: wake the reads it succeeds, and show an answer
 	/// waiting on it.
 	fn landed(&mut self, sequence: u64) {
+		self.quiet.lock().landed(sequence);
 		let below = self
 			.lookup
 			.range(..sequence)
@@ -10898,6 +10970,64 @@ mod test {
 			most = most.max(subscriber.delivered_runs());
 		}
 		assert_eq!(most, 6, "the floor and the gaps within the budget");
+	}
+
+	/// Write a finished one-frame group at `sequence`, presented at `millis`.
+	fn write_group_at(producer: &Producer, sequence: u64, millis: u64) {
+		let mut group = producer.create_group(group::Info { sequence }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(millis).unwrap(), &b"x"[..])
+			.unwrap();
+		group.finish().unwrap();
+	}
+
+	/// Judging every group of a run that finished without a frame walks the run once,
+	/// whether one poll writes it all off or each poll hands one out, and however many
+	/// readers judge it. Without the recorded runs, each group walks the rest of the run:
+	/// two million groups here.
+	#[test]
+	fn a_run_of_empty_groups_is_walked_once() {
+		const RUN: u64 = 1000;
+		const READERS: usize = 4;
+		// Stamped groups after the run, and how many groups each reader is handed.
+		for (after, handed) in [(&[50, 100][..], 2), (&[5][..], RUN as usize + 2)] {
+			let producer = track_producer("test", Info::timed());
+			write_group_at(&producer, 0, 0);
+			for sequence in 1..=RUN {
+				write_empty_group(&producer, sequence);
+			}
+			for (sequence, millis) in (RUN + 1..).zip(after) {
+				write_group_at(&producer, sequence, *millis);
+			}
+			for _ in 0..READERS {
+				let mut subscriber =
+					producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(10)));
+				assert_eq!(drain_groups(&mut subscriber).len(), handed);
+			}
+			let passed = producer.state.read().quiet.lock().passed;
+			assert!(passed <= 2 * RUN as usize * READERS, "walked past {passed} groups");
+		}
+	}
+
+	/// A group landing inside a run an earlier walk passed bounds the groups below it,
+	/// rather than the walk's recorded stop.
+	#[test]
+	fn a_group_landing_inside_a_walked_run_bounds_the_groups_below() {
+		let producer = track_producer("test", Info::timed());
+		write_group_at(&producer, 0, 0);
+		for sequence in 1..=3 {
+			write_empty_group(&producer, sequence);
+		}
+		write_group_at(&producer, 5, 50);
+		write_group_at(&producer, 6, 100);
+		let budget = Subscription::default().with_max_delay(Duration::from_millis(10));
+		let mut first = producer.subscribe(budget.clone());
+		assert_eq!(drain_groups(&mut first), [5, 6]);
+
+		// Open without a frame, so everything below it could present until it does.
+		let _open = producer.create_group(group::Info { sequence: 4 }).unwrap();
+		let mut second = producer.subscribe(budget);
+		assert_eq!(drain_groups(&mut second), [0, 1, 2, 3, 5, 6]);
 	}
 
 	/// An untimed track has nothing past the budget, so a sparse feed keeps every gap

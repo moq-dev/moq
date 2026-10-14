@@ -27,6 +27,10 @@
 //! holding a fixed number of gaps the reader still remembers: each hand-out must cost the
 //! same however many gaps it holds, so a walk over them shows up as a slope.
 //!
+//! `track_empty_run` drains a run of groups that finished without a frame, written off in
+//! one poll or handed out a group per poll, across readers: judging each group must not
+//! walk the rest of the run, so a per-group walk shows up as a slope over it.
+//!
 //! Run with `cargo bench -p moq-net --bench track`.
 
 use std::hint::black_box;
@@ -571,6 +575,85 @@ fn bench_sparse_read(c: &mut Criterion) {
 	group.finish();
 }
 
+/// Readers on one track holding group 0, a run of groups that finished without a frame,
+/// and the groups after it.
+struct EmptyRun {
+	_broadcast: broadcast::Producer,
+	_track: track::Producer,
+	readers: Vec<track::Subscriber>,
+	/// Groups each reader should be handed.
+	handed: usize,
+}
+
+impl EmptyRun {
+	/// `stale` stamps the groups after the run 50 ms and 100 ms in, so a 10 ms budget writes
+	/// off group 0 and the run in one poll. Otherwise one group 5 ms in follows the run and
+	/// keeps it within the budget, so each poll hands out one group of it.
+	fn new(run: u64, readers: usize, stale: bool) -> Self {
+		let broadcast = broadcast::Info::default().produce();
+		let track = broadcast.create_track("bench", timed()).unwrap();
+		let append = |millis: Option<u64>| {
+			let mut group = track.append_group().unwrap();
+			if let Some(millis) = millis {
+				group
+					.write_frame(Timestamp::from_millis(millis).unwrap(), Bytes::from_static(b"x"))
+					.unwrap();
+			}
+			group.finish().unwrap();
+		};
+		append(Some(0));
+		for _ in 0..run {
+			append(None);
+		}
+		let after: &[u64] = if stale { &[50, 100] } else { &[5] };
+		for millis in after {
+			append(Some(*millis));
+		}
+		let budget = track::Subscription::default().with_max_delay(Duration::from_millis(10));
+		Self {
+			readers: (0..readers).map(|_| track.subscribe(budget.clone())).collect(),
+			_broadcast: broadcast,
+			_track: track,
+			handed: if stale { 2 } else { run as usize + 2 },
+		}
+	}
+
+	fn drain(&mut self) {
+		for reader in &mut self.readers {
+			let mut handed = 0;
+			while let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&kio::Waiter::noop()) {
+				black_box(group);
+				handed += 1;
+			}
+			assert_eq!(handed, self.handed);
+		}
+	}
+}
+
+/// Readers draining a run of groups that finished without a frame, swept over the run and
+/// the readers. `stale` writes the run off in one poll; `fresh` hands it out a group per
+/// poll. Either way a reader's cost must stay linear in the run, so a walk over the rest of
+/// the run per group shows up as a slope over it.
+fn bench_empty_run(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_empty_run");
+	group.sample_size(10);
+	for (name, stale) in [("stale", true), ("fresh", false)] {
+		for readers in [1usize, 8, 64] {
+			for run in [64u64, 512, 4096] {
+				group.throughput(Throughput::Elements(run * readers as u64));
+				group.bench_function(BenchmarkId::new(format!("{name}/{readers}"), run), |b| {
+					b.iter_batched_ref(
+						|| EmptyRun::new(run, readers, stale),
+						EmptyRun::drain,
+						BatchSize::PerIteration,
+					);
+				});
+			}
+		}
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_fanout,
@@ -582,6 +665,7 @@ criterion_group!(
 	bench_subscriber_join,
 	bench_datagram_subscriber_join,
 	bench_parked_read,
-	bench_sparse_read
+	bench_sparse_read,
+	bench_empty_run
 );
 criterion_main!(benches);
