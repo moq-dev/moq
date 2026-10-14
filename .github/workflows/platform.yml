@@ -24,7 +24,8 @@ on:
       - "**/justfile"
       - ".github/**"
   pull_request:
-    types: [opened, synchronize, reopened, closed]
+    # `edited` runs the gates when a main PR is retargeted to release; see check.yml.
+    types: [opened, synchronize, reopened, edited, closed]
   merge_group:
     types: [checks_requested]
   workflow_call:

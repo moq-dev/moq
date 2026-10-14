@@ -8,7 +8,7 @@ set working-directory := '.'
 default:
     just check
 
-# Skips cleanly on non-macOS hosts, which is why swift.yml runs it on a Mac.
+# Skips cleanly on non-macOS hosts, which is why platform.yml runs it on a Mac.
 # This runs the tests too, so there is no separate `just swift test`.
 
 # Build moq-ffi for the host, regenerate uniffi bindings, run swift test.
@@ -56,4 +56,4 @@ publish-ffi *args:
 
 # Check the FFI with the Apple simulator backends enabled.
 simulator:
-    sh/swift/simulator.sh
+    bash ../sh/swift/simulator.sh

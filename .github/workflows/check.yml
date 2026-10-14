@@ -8,7 +8,9 @@ on:
   pull_request:
     # `closed` is here only so merging/closing a PR cancels its in-flight run
     # via the concurrency group below; the job itself is skipped on close.
-    types: [opened, synchronize, reopened, closed]
+    # `edited` covers retargeting a main PR to release, which must run the gates
+    # main skips. Any edit reruns them, since a skipped rerun would mask a failure.
+    types: [opened, synchronize, reopened, edited, closed]
   merge_group:
     types: [checks_requested]
 

@@ -6,7 +6,7 @@ name: WASM
 # compile gate: it catches a moq-net change that stops the bindings building,
 # never one that stops them working. See test/wasm/README.md.
 #
-# Narrow trigger, like obs.yml and swift.yml. The filter covers what the bindings
+# Narrow trigger, like obs.yml. The filter covers what the bindings
 # are built out of: moq-net, because that is the break this exists to catch in
 # review (they are a thin wrapper over it, and every other gate compiles them to
 # nothing), and kio underneath it, because a lost wakeup or a timer regression

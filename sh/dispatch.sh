@@ -127,7 +127,7 @@ fi
 # The tools each module needs. A module missing one is skipped locally, so an
 # incomplete toolchain checks less; under MOQ_STRICT (CI) it is an error, up
 # front, because there a skip is indistinguishable from a pass. swift needs
-# none: it skips off macOS by design, and swift.yml is its real gate.
+# none: it skips off macOS by design, and platform.yml is its real gate.
 declare -A tools=(
     [js]='bun python3'
     [workers]='bun'

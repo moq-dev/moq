@@ -11,7 +11,7 @@ name: OBS
 # uncompiled. The macOS and Windows platform.yml jobs cover the rest: each
 # platform's link line and the obs-deps bundle.
 #
-# Narrow trigger, like swift.yml: the plugin's own sources, the C++ package and
+# Narrow trigger: the plugin's own sources, the C++ package and
 # the moq-ffi API it is generated from, and the flake that supplies the
 # toolchain, including uniffi-bindgen-cpp.
 #

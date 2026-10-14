@@ -9,9 +9,9 @@ const dart = await workflow("release-dart-ffi");
 const swift = await workflow("release-swift-lib");
 const nightly = await workflow("nightly");
 
-function condition(expression: string, event: string, base: string, selected = true): unknown {
+function condition(expression: string, event: string, base: string, selected = true, action = "opened"): unknown {
 	const source = expression.replace(/^\$\{\{\s*|\s*\}\}$/g, "");
-	const github = { event_name: event, base_ref: base, event: { action: "opened" } };
+	const github = { event_name: event, base_ref: base, event: { action } };
 	const outputs = Object.fromEntries(
 		["needed", "rs", "swift", "cpp", "obs", "moq_sh"].map((key) => [key, String(selected)]),
 	);
@@ -27,6 +27,11 @@ for (const job of [check.jobs.check, check.jobs.test, platform.jobs.scope]) {
 	assert.equal(condition(job.if, "pull_request", "main"), false);
 	assert.equal(condition(job.if, "pull_request", "release"), true);
 	assert.equal(condition(job.if, "merge_group", ""), true);
+	// Retargeting a main PR to release emits `edited`, which must run the gates.
+	assert.equal(condition(job.if, "pull_request", "release", true, "edited"), true);
+}
+for (const config of [check, platform, dart, swift]) {
+	assert.ok(config.on.pull_request.types.includes("edited"), "retargeting to release must rerun");
 }
 assert.deepEqual(Object.keys(platform.jobs).sort(), ["macos", "scope", "windows"]);
 for (const job of [platform.jobs.macos, platform.jobs.windows]) {

@@ -28,6 +28,8 @@ on:
       - "sh/gh/release.sh"
   pull_request:
     branches: [release]
+    # `edited` catches a main PR retargeted to release.
+    types: [opened, synchronize, reopened, edited]
     paths:
       - "swift/VERSION"
       - "swift/Package.swift.template"
@@ -114,7 +116,7 @@ jobs:
         run: just gh release git-tag-exists moq-dev/moq-swift-ffi "$FFI_VERSION"
 
       - name: Unpublished FFI notice
-        if: steps.ffi-diff.outputs.unreleased != 'true' && steps.ffi-gate.outputs.exists != 'true' && github.event_name != 'pull_request'
+        if: steps.ffi-diff.outputs.unreleased != 'true' && steps.ffi-gate.outputs.exists != 'true' && (github.event_name == 'push' || github.event_name == 'workflow_run')
         env:
           FFI_VERSION: ${{ steps.version.outputs.ffi_version }}
         run: echo "::warning::moq-swift-ffi ${FFI_VERSION} is not published; deferring to the Release Swift FFI chain."
