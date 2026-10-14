@@ -740,9 +740,13 @@ impl TrackState {
 	}
 
 	/// This track's own edge under the exclusive `cap`, for measuring drift.
+	///
+	/// None on an untimed track, where nothing is ever stale: its groups carry no
+	/// timestamp, so looking for one would scan the whole cache on every poll.
 	fn drift_edge(&self, cap: Option<u64>) -> Edge {
+		let untimed = self.info.as_ref().is_some_and(|info| info.timescale.is_none());
 		Edge {
-			presentation: self.live_edge(cap),
+			presentation: if untimed { None } else { self.live_edge(cap) },
 			cap,
 		}
 	}
@@ -764,18 +768,20 @@ impl TrackState {
 	/// so a later stamped group proves nothing about where an unstamped successor will
 	/// begin, and shrinking the bound is the unsafe direction. An unstamped successor
 	/// therefore leaves the reach unbounded until it presents its first frame, and so
-	/// does having no servable successor below `cap` at all.
+	/// does having no servable successor below `cap` at all. A successor that finished
+	/// without a frame never presents, so it is skipped and the next one bounds both.
 	fn reach(&self, sequence: u64, cap: Option<u64>) -> Option<Timestamp> {
-		self.first_servable(sequence.saturating_add(1), cap)?.timestamp()
+		self.successor(sequence, cap)?.timestamp()
 	}
 
-	/// The first servable group in `from..cap`, stamped or not.
-	fn first_servable(&self, from: u64, cap: Option<u64>) -> Option<&group::Producer> {
+	/// The first servable group above `sequence` and below `cap` that could still
+	/// present, stamped or not.
+	fn successor(&self, sequence: u64, cap: Option<u64>) -> Option<&group::Producer> {
 		self.lookup
-			.range(from..)
+			.range(sequence.checked_add(1)?..)
 			.map(|(_, slot)| slot)
 			.take_while(|slot| super::subscription::before_end(slot.group.sequence, cap))
-			.find(|slot| slot.is_shown())
+			.find(|slot| slot.is_shown() && !slot.group.ended_empty())
 			.map(|slot| &slot.group)
 	}
 
@@ -836,7 +842,7 @@ impl TrackState {
 			// An abort only closes the group, never touching the track, so one that
 			// landed before registering must re-select or the replacement goes unwatched.
 			let successor = loop {
-				let successor = self.first_servable(sequence.saturating_add(1), cap);
+				let successor = self.successor(sequence, cap);
 				match successor {
 					Some(group) if group.poll_closed(waiter).is_ready() && group.is_aborted() => continue,
 					successor => break successor,
@@ -849,7 +855,12 @@ impl TrackState {
 			if let Some(reach) = successor.timestamp() {
 				break reach;
 			}
-			if successor.poll_started(waiter).is_pending() || successor.timestamp().is_none() {
+			if successor.poll_started(waiter).is_pending() {
+				return false;
+			}
+			// An untimed successor stays unbounded. One that finished without a frame since
+			// it was selected is skipped on the next pass.
+			if successor.timestamp().is_none() && !successor.ended_empty() {
 				return false;
 			}
 		};
@@ -4274,15 +4285,10 @@ impl Subscriber {
 			self.delivered.forget_below(sequence);
 		}
 		self.delivered.insert(sequence);
-		// Newest first: a group followed by an empty one never falls past the budget, so
-		// the oldest alone could pin every gap above it.
-		let floor = self
-			.delivered
-			.above_gaps()
-			.rev()
-			.find(|above| self.is_past_budget(*above));
-		if let Some(floor) = floor {
-			self.delivered.forget_below(floor);
+		while let Some(oldest) = self.delivered.above_gap()
+			&& self.is_past_budget(oldest)
+		{
+			self.delivered.forget_below(oldest);
 		}
 	}
 
@@ -6492,6 +6498,35 @@ mod test {
 		assert!(
 			woken.load(Ordering::SeqCst),
 			"the stamped successor's abort lost its wakeup"
+		);
+		let result = next.as_mut().poll(&mut cx);
+		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+	}
+
+	/// An open empty successor leaves a held group's reach unbounded. Once it finishes
+	/// without a frame, the held read wakes and is bounded by the group after it.
+	#[moq_net_sim::test]
+	async fn an_empty_successor_finishing_wakes_a_parked_read() {
+		let mut producer = track_producer("test", Info::timed());
+		let mut head = producer.append_group().unwrap();
+		head.write_frame(Timestamp::ZERO, b"head".as_slice()).unwrap();
+		let successor = producer.append_group().unwrap();
+		append_at(&mut producer, 1000);
+		append_at(&mut producer, 20_000);
+		let mut sub = producer.subscribe(None);
+		let mut reading = sub.recv_group().await.unwrap().unwrap();
+		assert_eq!(reading.sequence, 0, "the open successor leaves the reach unbounded");
+		assert!(reading.read_frame().await.unwrap().is_some());
+
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waker = futures::task::waker(Arc::new(FlagWake(woken.clone())));
+		let mut cx = std::task::Context::from_waker(&waker);
+		let mut next = std::pin::pin!(reading.read_frame());
+		assert!(next.as_mut().poll(&mut cx).is_pending());
+		successor.finish().unwrap();
+		assert!(
+			woken.load(Ordering::SeqCst),
+			"the empty successor's finish lost its wakeup"
 		);
 		let result = next.as_mut().poll(&mut cx);
 		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
@@ -10799,19 +10834,37 @@ mod test {
 		assert_eq!(drain_groups(&mut subscriber), [2998]);
 	}
 
-	/// An empty group leaves the group below it unbounded, so it never falls past the
-	/// budget. Gaps above it are still forgotten once a group above them is past it.
+	/// Write a finished group with no frames.
+	fn write_empty_group(producer: &Producer, sequence: u64) {
+		producer
+			.create_group(group::Info { sequence })
+			.unwrap()
+			.finish()
+			.unwrap();
+	}
+
+	/// A group followed by one that finished without a frame is bounded by the next
+	/// group instead, so it falls past the budget like any other.
+	#[test]
+	fn a_group_before_an_empty_one_can_drift() {
+		let producer = track_producer("test", Info::timed());
+		write_group(&producer, 0);
+		write_empty_group(&producer, 1);
+		write_group(&producer, 50);
+		write_group(&producer, 100);
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(10)));
+		assert_eq!(drain_groups(&mut subscriber), [50, 100]);
+	}
+
+	/// A group that finished without a frame never presents, so the group below it is
+	/// bounded by the next one instead, and gaps above it are still forgotten.
 	#[test]
 	fn an_empty_group_does_not_pin_later_gaps() {
 		let producer = track_producer("test", Info::timed());
 		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(10)));
 		write_group(&producer, 0);
 		write_group(&producer, 2);
-		producer
-			.create_group(group::Info { sequence: 3 })
-			.unwrap()
-			.finish()
-			.unwrap();
+		write_empty_group(&producer, 3);
 		assert_eq!(drain_groups(&mut subscriber), [0, 2, 3]);
 		let mut most = 0;
 		for sequence in 5..3000u64 {
@@ -10823,7 +10876,42 @@ mod test {
 			assert_eq!(drain_groups(&mut subscriber), [sequence]);
 			most = most.max(subscriber.delivered_runs());
 		}
-		// One more than the endless track: the gap at 1 waits for a group above it to fall past the budget.
+		// One more than the endless track: group 2 reaches until group 5, past the empty 3.
 		assert_eq!(most, 6, "the floor and the gaps within the budget");
+	}
+
+	/// Every run starting with a stamped group followed by an empty one still falls past
+	/// the budget, so the record stays bounded.
+	#[test]
+	fn repeated_empty_groups_do_not_pin_gaps() {
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(10)));
+		write_group(&producer, 0);
+		assert_eq!(drain_groups(&mut subscriber), [0]);
+		let mut most = 0;
+		for k in 0..1000u64 {
+			// 3k + 1 never arrives.
+			write_group(&producer, 3 * k + 2);
+			write_empty_group(&producer, 3 * k + 3);
+			assert_eq!(drain_groups(&mut subscriber), [3 * k + 2, 3 * k + 3]);
+			most = most.max(subscriber.delivered_runs());
+		}
+		assert_eq!(most, 6, "the floor and the gaps within the budget");
+	}
+
+	/// An untimed track has nothing past the budget, so a sparse feed keeps every gap
+	/// and still hands out every group. The hand-out cost stays flat over the retained
+	/// gaps; `track_sparse_read` measures it.
+	#[test]
+	fn an_untimed_sparse_feed_keeps_its_gaps() {
+		let producer = untimed_producer();
+		let mut subscriber = producer.subscribe(replay());
+		for sequence in (0..2000u64).step_by(2) {
+			let mut group = producer.create_group(group::Info { sequence }).unwrap();
+			group.write_frame(None, &b"x"[..]).unwrap();
+			group.finish().unwrap();
+			assert_eq!(drain_groups(&mut subscriber), [sequence]);
+		}
+		assert_eq!(subscriber.delivered_runs(), 1000);
 	}
 }

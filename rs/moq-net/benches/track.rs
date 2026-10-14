@@ -23,6 +23,10 @@
 //! each append must wake only the reads it can expire, so waking the backlog shows up
 //! as a slope over it.
 //!
+//! `track_sparse_read` hands out groups from a feed with every other sequence missing,
+//! after a backlog of such gaps the reader still remembers: each hand-out must cost the
+//! same however many gaps it holds, so a walk over them shows up as a slope.
+//!
 //! Run with `cargo bench -p moq-net --bench track`.
 
 use std::hint::black_box;
@@ -521,6 +525,48 @@ fn bench_parked_read(c: &mut Criterion) {
 	group.finish();
 }
 
+/// One hand-out from a sparse feed past `gaps` remembered gaps, on an untimed track and
+/// on a timed one whose budget never writes a gap off. Swept over the gaps so a per-hand-out
+/// cost that grows with them shows up as a slope.
+fn bench_sparse_read(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_sparse_read");
+	group.throughput(Throughput::Elements(1));
+	for (name, info) in [("untimed", track::Info::default()), ("timed", timed())] {
+		for gaps in [16u64, 256, 4096] {
+			group.bench_function(BenchmarkId::new(name, gaps), |b| {
+				b.iter_custom(|iterations| {
+					let broadcast = broadcast::Info::default().produce();
+					let track = broadcast.create_track("bench", info.clone()).unwrap();
+					let mut sub =
+						track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+					let timestamp = |sequence: u64| info.timescale.map(|_| Timestamp::from_millis(sequence).unwrap());
+					let mut hand_out = |sequence: u64| {
+						let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+						group
+							.write_frame(timestamp(sequence), Bytes::from_static(b"x"))
+							.unwrap();
+						group.finish().unwrap();
+						let Poll::Ready(Ok(Some(read))) = sub.poll_recv_group(&kio::Waiter::noop()) else {
+							panic!("the group is cached");
+						};
+						black_box(read);
+					};
+					// Every odd sequence never arrives.
+					for gap in 0..gaps {
+						hand_out(gap * 2);
+					}
+					let start = Instant::now();
+					for iteration in 0..iterations {
+						hand_out((gaps + iteration) * 2);
+					}
+					start.elapsed()
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_fanout,
@@ -531,6 +577,7 @@ criterion_group!(
 	bench_subscriber_churn_after_peak,
 	bench_subscriber_join,
 	bench_datagram_subscriber_join,
-	bench_parked_read
+	bench_parked_read,
+	bench_sparse_read
 );
 criterion_main!(benches);
