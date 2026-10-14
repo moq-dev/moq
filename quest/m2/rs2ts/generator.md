@@ -20,15 +20,20 @@ Decided with the maintainer on 2026-10-13:
 - Bind `moq-ffi` as it is, not a browser-only UniFFI crate:
   [#5460](https://github.com/moq-dev/moq/pull/5460) rejected per-layer crate
   splits. The generated TS tree-shakes, but the `.wasm` does not. The linker
-  keeps every UniFFI export, so only cargo features reduce size. Measure
-  `default-features` on and off. If size decides the result, propose a
-  net-only feature rather than a new crate.
+  keeps every UniFFI export, so only cargo features reduce size. Toggling
+  `default-features` changes nothing on wasm32 (`audio` and `video` are
+  already native-only), so report each module's share of the `.wasm`
+  instead. If size decides the result, propose a net-only feature rather
+  than a new crate.
 - Use [uniffi-bindgen-react-native](https://github.com/jhugman/uniffi-bindgen-react-native)
   (ubrn), whose `wasm2` flavour is a plain wasm32 cargo build driven by a
   generic JS player. Upstream UniFFI will not ship a JS generator and points
   to ubrn. ubrn pins UniFFI 0.31, while `moq-ffi` is on 0.32. The spike
   branch therefore pins `moq-ffi` to 0.31 for measurement only and does not
-  land that pin. If UniFFI wins, add a waiting quest for ubrn 0.32 support
+  land that pin. `wasm2` also needs the matching `uniffi-runtime-wasm`
+  dependency and an `extern crate uniffi_runtime_wasm as _` to force its
+  link (the player looks for `__ubrn_alloc`). Add both on the spike branch
+  and count the runtime in the shipped size. If UniFFI wins, add a waiting quest for ubrn 0.32 support
   ([#468](https://github.com/jhugman/uniffi-bindgen-react-native/pull/468)),
   required by adoption but not by this report.
 - [BoltFFI](https://github.com/boltffi/boltffi) is the third candidate
@@ -38,14 +43,18 @@ Decided with the maintainer on 2026-10-13:
   that spike's slice crate, which binds both generators via `cfg_attr`,
   and measure UniFFI on the same slice so the per-call numbers compare
   like for like. Full `moq-ffi` through UniFFI still provides the size and
-  coverage numbers. BoltFFI ships its own wasm loader and
+  coverage numbers. The slice is a feasibility filter for BoltFFI, not
+  selection evidence: if BoltFFI passes and is favored, port the harness
+  workload to it and rerun the parity, size, startup, and memory cases
+  before the maintainer picks it. BoltFFI ships its own wasm loader and
   `.d.ts` files for web, node, and bundlers. Async uses poll plus a
   continuation, like UniFFI. Crates using `web-sys` trapped at runtime
   until [boltffi#943](https://github.com/boltffi/boltffi/pull/943)
   (2026-09-28, released in v0.31.0). Async constructors and static async
   methods are dropped
-  ([boltffi#95](https://github.com/boltffi/boltffi/issues/95), open),
-  which `connect` hits. TypeScript streams are experimental
+  ([boltffi#95](https://github.com/boltffi/boltffi/issues/95), open).
+  `MoqClient::connect` takes `&self` and works, but async constructors
+  such as the media catalog consumer's `subscribe` hit it. TypeScript streams are experimental
   ([boltffi#40](https://github.com/boltffi/boltffi/issues/40)). Roughly
   one maintainer.
 
@@ -66,8 +75,10 @@ Measure on the [baseline harness](/quest/m2/rs2ts/spike.md):
   Sweep publisher and subscriber counts.
 - Parity on the harness cases: exact u64 above 2^53, cancellation through
   `AbortSignal`, close/error propagation, and freeing a handle mid-call.
-- On wasm, `ffi::Task` cancels when the caller drops it, whereas native
-  detaches. Check that `@moq/net` semantics hold under that difference.
+- `ffi::Task::run` awaits in place on every target: a cancelled foreign
+  call stops polling, and its future drops at `rust_future_free`. Test that
+  aborting or freeing a pending call releases its state without stealing
+  the next call's event.
 - Things the binding cannot do. `JsValue` cannot cross the boundary, so
   Rust constructs the WebTransport, as `moq-ffi` already does. Cover the
   supported fallback transport as well.
