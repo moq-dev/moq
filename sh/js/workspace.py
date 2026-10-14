@@ -83,17 +83,22 @@ def run(action, plan):
         missing = [tool for tool in ("cargo", "wasm-bindgen") if not shutil.which(tool)]
         if missing:
             raise RuntimeError("selected JS consumers require missing tools: " + " ".join(missing))
-    filters = [f"--filter={name}" for name in packages]
+    def scripts(verb):
+        filters = [f"--filter={name}" for name, package in packages.items()
+                   if verb in package["manifest"].get("scripts", {})]
+        if filters:
+            command("bun", "run", *filters, "--elide-lines=0", verb)
+
     command("bun", "install", "--frozen-lockfile")
     if action == "test":
         command("bun", "test", "js/common/declarations.test.ts", "js/common/deps.test.ts",
                 "js/common/worklet.test.ts")
-        command("bun", "run", *filters, "--elide-lines=0", "test")
+        scripts("test")
         return
     if action == "build":
         if plan["wasm"]:
             command("just", "js", "wasm")
-        command("bun", "run", *filters, "--elide-lines=0", "build")
+        scripts("build")
         return
 
     command("python3", "sh/rs/stats-docs.py")
@@ -106,7 +111,7 @@ def run(action, plan):
     command("bun", "js/common/deps.ts")
     if plan["wasm"]:
         command("just", "js", "wasm")
-    command("bun", "run", *filters, "--elide-lines=0", "check")
+    scripts("check")
     if plan["all"]:
         command("bunx", "tsc", "--noEmit", "--project", "test/tsconfig.json")
     else:
@@ -126,7 +131,7 @@ def run(action, plan):
             Path(name).unlink()
     command("bun", "biome", "check", *[p["directory"] for p in packages.values()
                                           if p["directory"].startswith("js/")], "js/common")
-    command("bun", "run", *filters, "--elide-lines=0", "build")
+    scripts("build")
     for name in ("@moq/watch", "@moq/publish"):
         if name in packages:
             path = "./" + packages[name]["directory"] + "/dist/index.js"

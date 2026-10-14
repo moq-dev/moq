@@ -4,7 +4,8 @@
 `just js check-changed|test-changed`. The selector reads the root Bun workspace
 list and each package manifest, then selects changed packages and their
 transitive dependents across runtime, development, peer and optional dependencies.
-Deleted files still belong to their package directory. Package names and edges
+Only scripts declared by a selected package run; harnesses without scripts still
+get the shared type-check. Deleted files still belong to their package directory. Package names and edges
 are never maintained separately from these manifests.
 
 An input outside every current workspace selects all packages, including shared

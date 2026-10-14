@@ -29,6 +29,9 @@ class SelectionTest(unittest.TestCase):
             "test/browser": {"name": "browser", "optionalDependencies": {"@moq/wasm": "workspace:*"}},
             "demo/nested": {"name": "demo", "peerDependencies": {"browser": "workspace:*"}},
         }
+        for package in self.packages.values():
+            if package["name"] != "@moq/wasm":
+                package["scripts"] = {action: "fixture" for action in ("check", "test", "build")}
         self.write()
         (self.root / "test/tsconfig.json").write_text('{"exclude":["**/dist"]}')
 
@@ -151,6 +154,15 @@ class SelectionTest(unittest.TestCase):
         calls = self.calls(["doc/index.md"], "test")
         self.assertIn(["bun", "run", "--filter=docs", "--elide-lines=0", "test"], calls)
         self.assertFalse(any(c[0] == "just" for c in calls))
+
+    def test_owned_package_without_scripts_keeps_harness_check(self):
+        self.packages["doc"].pop("scripts")
+        self.write()
+        calls = self.calls(["doc/index.md"])
+        self.assertFalse(any(c[:2] == ["bun", "run"] for c in calls))
+        self.assertTrue(any(c[:2] == ["bunx", "tsc"] for c in calls))
+        self.assertFalse(any(c[:2] == ["bun", "run"] for c in self.calls(["doc/index.md"], "test")))
+        self.assertFalse(any(c[:2] == ["bun", "run"] for c in self.calls(["doc/index.md"], "build")))
 
     def test_empty_selection_runs_nothing(self):
         self.assertEqual(self.calls([]), [])
