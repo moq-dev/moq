@@ -1517,10 +1517,7 @@ where
 						// Drafts below 19 negotiate no limit, so this is a local memory guard, not a
 						// protocol fault: end this announce, never the session.
 						Err(request_update::Overflow::Request) => {
-							// Release the route first: the withdrawal waits on the peer.
-							if std::mem::take(attached) {
-								self.stop_announce(path.clone(), token_grant.is_some())?;
-							}
+							self.release_announce(path, attached, token_grant.is_some())?;
 							if stream.writer.finish().is_ok() {
 								let _ = stream.writer.closed().await;
 							}
@@ -1551,11 +1548,8 @@ where
 				}
 				Turn::Failed(err) => return Err(err),
 				Turn::Ended(refusal) => {
-					// Retract the route before the withdrawal, which waits on the peer: a lapsed
-					// grant serves nothing more, however slowly the peer reads.
-					if std::mem::take(attached) {
-						self.stop_announce(path.clone(), true)?;
-					}
+					// A lapsed grant serves nothing more, however slowly the peer reads.
+					self.release_announce(path, attached, true)?;
 					self.cancel_announce(stream, request_id, path, &refusal.error, &refusal.reason)
 						.await?;
 					return Err(refusal.error);
@@ -1575,9 +1569,7 @@ where
 					// Per drafts 16 section 9.11.1 / 18 section 10.9.1, a refused or uncovered
 					// renewal ends only this announce. Answer REQUEST_ERROR, then close the stream;
 					// the session stays up and the old grant does not survive.
-					if std::mem::take(attached) {
-						self.stop_announce(path.clone(), true)?;
-					}
+					self.release_announce(path, attached, true)?;
 					self.write_error(stream, rid, &refusal.error, &refusal.reason).await?;
 					self.cancel_announce(stream, request_id, path, &refusal.error, &refusal.reason)
 						.await?;
@@ -1626,6 +1618,7 @@ where
 				// refused update does.
 				Err(DecodeError::MalformedAuthToken) => {
 					let err = Error::Decode(DecodeError::MalformedAuthToken);
+					self.release_announce(path, attached, token_grant.is_some())?;
 					self.write_error(stream, update_id, &err, "repeated AUTHORIZATION TOKEN")
 						.await?;
 					self.cancel_announce(stream, request_id, path, &err, "repeated AUTHORIZATION TOKEN")
@@ -1716,6 +1709,15 @@ where
 			// No token rides this update: acknowledge it now.
 			self.write_ok(stream, msg.request_id).await?;
 		}
+	}
+
+	/// Retract an advertisement's route ahead of a withdrawal that waits on the peer, so a peer
+	/// that stops reading cannot keep it routed. `attached` makes it once only.
+	fn release_announce(&mut self, path: &PathOwned, attached: &mut bool, token: bool) -> Result<(), Error> {
+		if std::mem::take(attached) {
+			self.stop_announce(path.clone(), token)?;
+		}
+		Ok(())
 	}
 
 	/// End an advertisement we accepted, leaving the session up: a closed stream from draft-17,
@@ -9190,6 +9192,54 @@ mod tests {
 			retracted,
 			"a lapsed grant must retract the route without waiting on the peer"
 		);
+	}
+
+	/// An update repeating its token withdraws a token-authorized announce, retracting the route
+	/// at once even while the withdrawal waits on a peer that never acknowledges it.
+	#[moq_net_sim::test]
+	async fn a_repeated_token_update_retracts_before_the_peer_reads() {
+		const VERSION: Version = Version::Draft18;
+		const TOKEN: &[u8] = &[0x03, 0x00, 0xAA];
+		// REQUEST_UPDATE 3 carrying the same AUTHORIZATION TOKEN twice: a count, then two
+		// delta-encoded token parameters.
+		let mut body = vec![3, 2, 0x03, TOKEN.len() as u8];
+		body.extend(TOKEN);
+		body.extend([0, TOKEN.len() as u8]);
+		body.extend(TOKEN);
+		let mut script = vec![ietf::PublishNamespaceUpdate::ID as u8, 0, body.len() as u8];
+		script.extend(body);
+
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![script]).with_unacked_fin();
+		let (mut subscriber, mut requests, _cred, consumer, session) = auth_announce_harness_on(VERSION, session);
+		let rt = subscriber.runtime.clone();
+		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+
+		let acceptor = async move {
+			let request = requests.next().await.expect("a request").request();
+			let _held = request.accept(publish_grant_expiring(&rt, None));
+			std::future::pending::<()>().await
+		};
+		let mut acceptor = std::pin::pin!(acceptor);
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
+			stream,
+			token_publish_namespace(),
+			cluster::Peer::default(),
+			None,
+		));
+
+		for _ in 0..200 {
+			let _ = futures::poll!(acceptor.as_mut());
+			assert!(
+				futures::poll!(run.as_mut()).is_pending(),
+				"the withdrawal waits on the peer's acknowledgement"
+			);
+			settle().await;
+		}
+		assert!(
+			routed_now(&consumer, "room/alice").is_none(),
+			"a repeated token must retract the route without waiting on the peer"
+		);
+		assert!(session.log.closes().is_empty(), "the session stays up");
 	}
 
 	/// Per drafts 16 section 9.11.1 / 18 section 10.9.1, a refused PUBLISH_NAMESPACE
