@@ -65,7 +65,7 @@ above them.
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
 - [P2P](/quest/m1/p2p/README.md) - application-selected peer sessions use shared priorities, routing, and same-epoch handover
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation/P2P setup
-- [Controlled time](/quest/m1/time/README.md) - every crate and package reads time through moq-time or @moq/time, with regression tests for the changed contracts; ranks above the fork, whose switch adopts its instant
+- [Controlled time](/quest/m1/time/README.md) - every crate and package reads time through moq-clock or @moq/clock, with regression tests for the changed contracts; ranks above the fork, whose switch adopts its instant
 - [Hard fork](/quest/m1/quic/fork/README.md) - quinn hard-forked in-tree as `moq-quic`, ranked ahead of perf; the rest of the QUIC line follows it
 - [Own the QUIC stack](/quest/m1/quic/README.md) - quinn hard-forked in-tree as `moq-quic`, carrying BBR, reliable reset, hierarchical scheduling, peer limits, and endpoint sharding
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it

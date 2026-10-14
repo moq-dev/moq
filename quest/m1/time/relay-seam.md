@@ -20,7 +20,7 @@ Decided 2026-10-10: in-memory, on moq-net's poll transport traits, not a
 moq-dev/web-transport. Backend-only methods (`poll_acked`, `set_deadline`,
 `set_limits`) answer "unsupported", as
 [one adapter](/quest/m2/transport-adapter-dedup.md) decided. Optional latency
-and loss run on the moq-time clock. It waits for the switch, which reshapes
+and loss run on the moq-clock clock. It waits for the switch, which reshapes
 moq-tokio's server types the seam abstracts over.
 
 Find the smallest seam that keeps `moq_relay`'s public API narrow. Propose
@@ -32,5 +32,5 @@ Public API: the in-memory session and the relay seam. Wire: none.
 
 ## Required
 
-- [moq-net on moq-time](/quest/m1/time/net.md) - the sim and instant the relay tests run on
+- [moq-net on moq-clock](/quest/m1/time/net.md) - the sim and instant the relay tests run on
 - [Switch](/quest/m1/quic/fork/switch.md) - moq-tokio's server types settle first
