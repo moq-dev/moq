@@ -306,6 +306,24 @@ std::optional<moq::Catalog> relayCatalog(const std::shared_ptr<moq::BroadcastCon
 // The production commit boundary lets a real stats call race retirement without
 // callbacks or branches in the output's hot path.
 struct MoQOutputStatsTest {
+	static std::optional<std::string> Epoch(MoQOutput &output)
+	{
+		std::shared_ptr<moq::OriginProducer> origin;
+		{
+			std::lock_guard<std::mutex> lock(output.media_mutex);
+			origin = output.origin;
+		}
+		auto announced = TestOk(origin->consume()->announced(moq::AnnounceConfig{}), "announced");
+		auto next = announced->next();
+		if (next.wait_for(std::chrono::seconds(10)) != std::future_status::ready)
+			return std::nullopt;
+		auto event = TestOk(next.get(), "announcement");
+		if (!event)
+			return std::nullopt;
+		const auto *start = std::get_if<moq::AnnounceEvent::kStart>(&event->get_variant());
+		return start ? start->announce.route.epoch : std::nullopt;
+	}
+
 	static std::shared_ptr<moq::Session> Session(MoQOutput &output)
 	{
 		std::lock_guard<std::mutex> lock(output.mutex);
@@ -328,6 +346,30 @@ struct MoQOutputStatsTest {
 
 int main()
 {
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		MoQOutput output(nullptr, OUTPUT);
+		CHECK(output.Start());
+		const auto first = MoQOutputStatsTest::Epoch(output);
+		CHECK(first.has_value());
+		CHECK(first == output.GetEpoch());
+		CHECK(WaitFor([&] { return output.IsLiveSession() && relay.Accepted() == 1; }));
+		relay.DropSessions();
+		CHECK(WaitFor([&] { return output.GetReconnectCount() == 1 && output.IsLiveSession(); }));
+		CHECK(MoQOutputStatsTest::Epoch(output) == first);
+		CHECK(first == output.GetEpoch());
+		output.Stop();
+		CHECK(output.GetEpoch().empty());
+		CHECK(output.Start());
+		const auto second = MoQOutputStatsTest::Epoch(output);
+		CHECK(second.has_value());
+		CHECK(second != first);
+		CHECK(second == output.GetEpoch());
+		output.Stop();
+	}
+	printf("each start announces a fresh epoch, reconnect preserves it: ok\n");
+
 	for (int retirement = 0; retirement < 3; ++retirement) {
 		TestRelay relay;
 		reset(relay.Url());

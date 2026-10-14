@@ -172,7 +172,9 @@ bool MoQOutput::Start()
 		LOG_ERROR("Failed to create broadcast: %s", next_broadcast.error().to_string().c_str());
 		return false;
 	}
-	if (auto announced = (*next_broadcast)->announce(moq::Route{}); !announced) {
+	moq::Route route;
+	route.epoch = moq::mint_epoch();
+	if (auto announced = (*next_broadcast)->announce(route); !announced) {
 		LOG_ERROR("Failed to announce broadcast: %s", announced.error().to_string().c_str());
 		return false;
 	}
@@ -212,6 +214,7 @@ bool MoQOutput::Start()
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		url = server;
+		epoch = *route.epoch;
 	}
 	{
 		std::lock_guard<std::mutex> lock(media_mutex);
@@ -366,6 +369,7 @@ void MoQOutput::Reset()
 		connected = false;
 		live = false;
 		url.clear();
+		epoch.clear();
 		last_failure_code = MoQError::None;
 		last_failure_reason.clear();
 	}
@@ -403,6 +407,12 @@ void MoQOutput::Reset()
 			       draining.end());
 		draining.push_back(retired->shutdown());
 	}
+}
+
+std::string MoQOutput::GetEpoch()
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	return epoch;
 }
 
 bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
