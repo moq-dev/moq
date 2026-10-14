@@ -14,7 +14,7 @@ to the codec itself unless the test finds a bug.
 ## Plan
 
 Decided 2026-10-14, alongside
-[Snapshot codec property tests](/quest/m2/json-snapshot-properties.md),
+[Snapshot codec property tests](/test/json-properties.md),
 which carries the reasoning for each choice:
 
 - **Codec sequences** through `Encoder` -> `Decoder`, per implementation, at
@@ -37,4 +37,4 @@ which carries the reasoning for each choice:
 
 ## Related
 
-- [Snapshot codec property tests](/quest/m2/json-snapshot-properties.md) - the same treatment for the Snapshot codec
+- [Snapshot codec property tests](/test/json-properties.md) - the same treatment for the Snapshot codec

@@ -18,6 +18,15 @@ function isObject(value: unknown): value is Obj {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// Assignment to __proto__ invokes an inherited setter; JSON requires an own data field.
+function set(object: Obj, key: string, value: unknown): void {
+	if (key === "__proto__") {
+		Object.defineProperty(object, key, { value, enumerable: true, configurable: true, writable: true });
+	} else {
+		object[key] = value;
+	}
+}
+
 /**
  * Generate an RFC 7396 merge patch transforming `oldVal` into `newVal`.
  *
@@ -36,13 +45,13 @@ export function diff(oldVal: unknown, newVal: unknown): Diff {
 function diffObjects(oldObj: Obj, newObj: Obj, patch: Obj, forced: { value: boolean }): void {
 	// Keys present in old but missing from new become explicit null deletions.
 	for (const key of Object.keys(oldObj)) {
-		if (!(key in newObj)) patch[key] = null;
+		if (!Object.hasOwn(newObj, key)) set(patch, key, null);
 	}
 
 	for (const key of Object.keys(newObj)) {
 		const newV = newObj[key];
-		const oldV = oldObj[key];
-		const inOld = key in oldObj;
+		const inOld = Object.hasOwn(oldObj, key);
+		const oldV = inOld ? oldObj[key] : undefined;
 
 		if (inOld && deepEqual(oldV, newV)) continue;
 
@@ -50,7 +59,7 @@ function diffObjects(oldObj: Obj, newObj: Obj, patch: Obj, forced: { value: bool
 		if (isObject(oldV) && isObject(newV)) {
 			const sub: Obj = {};
 			diffObjects(oldV, newV, sub, forced);
-			if (Object.keys(sub).length > 0) patch[key] = sub;
+			if (Object.keys(sub).length > 0) set(patch, key, sub);
 			continue;
 		}
 
@@ -60,7 +69,7 @@ function diffObjects(oldObj: Obj, newObj: Obj, patch: Obj, forced: { value: bool
 		if (newV === null || hasNullMember(newV)) {
 			forced.value = true;
 		}
-		patch[key] = newV;
+		set(patch, key, newV);
 	}
 }
 
@@ -84,7 +93,7 @@ export function merge(target: unknown, patch: unknown): unknown {
 		if (value === null) {
 			delete base[key];
 		} else {
-			base[key] = merge(base[key], value);
+			set(base, key, merge(Object.hasOwn(base, key) ? base[key] : undefined, value));
 		}
 	}
 	return base;
@@ -101,7 +110,7 @@ export function deepEqual(a: unknown, b: unknown): boolean {
 	if (isObject(a) && isObject(b)) {
 		const keys = Object.keys(a);
 		if (keys.length !== Object.keys(b).length) return false;
-		return keys.every((key) => key in b && deepEqual(a[key], b[key]));
+		return keys.every((key) => Object.hasOwn(b, key) && deepEqual(a[key], b[key]));
 	}
 
 	return false;
