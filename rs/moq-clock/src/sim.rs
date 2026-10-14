@@ -800,15 +800,19 @@ mod tests {
 	/// A pending sleep reset by another task wakes its poller to re-arm.
 	#[crate::test]
 	async fn a_sleep_reset_by_another_task_rearms() {
-		let sleep = Rc::new(RefCell::new(crate::sleep(Duration::from_secs(10))));
-		let polled = sleep.clone();
-		let task = spawn(std::future::poll_fn(move |cx| {
-			Pin::new(&mut *polled.borrow_mut()).poll(cx)
-		}));
-		yield_now().await;
-		sleep.borrow_mut().reset(at(3));
-		task.await.unwrap();
-		assert_eq!(crate::now(), at(3));
+		// Armed, and past the clock's range so never firing.
+		for duration in [Duration::from_secs(10), Duration::MAX] {
+			let sleep = Rc::new(RefCell::new(crate::sleep(duration)));
+			let polled = sleep.clone();
+			let task = spawn(std::future::poll_fn(move |cx| {
+				Pin::new(&mut *polled.borrow_mut()).poll(cx)
+			}));
+			yield_now().await;
+			let target = crate::now() + Duration::from_secs(3);
+			sleep.borrow_mut().reset(target);
+			task.await.unwrap();
+			assert_eq!(crate::now(), target);
+		}
 	}
 
 	/// A source reporting a deadline it already reached fails loud instead of spinning.

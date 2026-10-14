@@ -2,7 +2,7 @@ use std::{
 	fmt,
 	future::{Future, IntoFuture},
 	pin::Pin,
-	task::{Context, Poll},
+	task::{Context, Poll, Waker},
 	time::Duration,
 };
 
@@ -16,6 +16,8 @@ pub struct Sleep {
 	/// `None` past the clock's range: the timer is never polled, so it never fires.
 	at: Option<Instant>,
 	timer: Timer,
+	/// Who polled it while it never fires, woken when a reset re-arms it.
+	parked: Option<Waker>,
 }
 
 enum Timer {
@@ -31,11 +33,13 @@ pub fn sleep_until(at: Instant) -> Sleep {
 		return Sleep {
 			at: Some(at),
 			timer: Timer::Sim(timer),
+			parked: None,
 		};
 	}
 	Sleep {
 		at: Some(at),
 		timer: Timer::Host(crate::runtime::Timer::new(at)),
+		parked: None,
 	}
 }
 
@@ -70,6 +74,10 @@ impl Sleep {
 			#[cfg(feature = "sim")]
 			Timer::Sim(timer) => timer.reset(at),
 		}
+		// The reset may come from another task than the one parked here.
+		if let Some(parked) = self.parked.take() {
+			parked.wake();
+		}
 	}
 }
 
@@ -78,6 +86,7 @@ impl Future for Sleep {
 
 	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
 		if self.at.is_none() {
+			self.parked = Some(cx.waker().clone());
 			return Poll::Pending;
 		}
 		// Each backend compares against its own clock, not the poller's.
