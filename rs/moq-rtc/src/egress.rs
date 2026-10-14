@@ -315,6 +315,11 @@ struct Serving {
 /// is the stale group it stopped on. With nothing enabled it serves nothing until a
 /// rendition re-enables. There is no ABR on the peer, so a re-enabled top rendition wins
 /// the line back.
+///
+/// While a switch is pending, the current rendition runs one frame behind: each of its
+/// frames is held until its next frame arrives or the new rendition reaches the same time.
+/// Simulcast rungs share timestamps, so otherwise a current rung that delivers first would
+/// claim every shared keyframe and the switch would never happen.
 struct Pump {
 	mid: Mid,
 	pt: Pt,
@@ -332,6 +337,8 @@ impl Pump {
 		let mut serving: Option<Serving> = None;
 		// The rendition to switch to at its first keyframe.
 		let mut next: Option<Serving> = None;
+		// The current rendition's latest frame, withheld while a switch is pending.
+		let mut held: Option<codec::PacketizedFrame> = None;
 		let mut following = true;
 		let mut repick = true;
 
@@ -364,6 +371,13 @@ impl Pump {
 				}
 			}
 
+			if next.is_none()
+				&& let Some(frame) = held.take()
+				&& !self.write(frame).await
+			{
+				return;
+			}
+
 			// The catalog ended, so nothing new will be picked: serve what is left.
 			if !following && serving.is_none() && next.is_none() {
 				tracing::debug!(mid = ?self.mid, "egress track ended");
@@ -377,7 +391,13 @@ impl Pump {
 				},
 				frame = read(self.mid, &mut serving) => match frame {
 					Some(frame) => {
-						if !self.write(frame).await {
+						let frame = match next {
+							Some(_) => held.replace(frame),
+							None => Some(frame),
+						};
+						if let Some(frame) = frame
+							&& !self.write(frame).await
+						{
 							return;
 						}
 					}
@@ -385,12 +405,26 @@ impl Pump {
 				},
 				frame = read(self.mid, &mut next) => match frame {
 					Some(frame) if self.joins(&frame) => {
+						// The held frame plays out first unless the new rendition covers its time.
+						if let Some(prev) = held.take_if(|prev| prev.timestamp_us < frame.timestamp_us)
+							&& !self.write(prev).await
+						{
+							return;
+						}
+						held = None;
 						serving = next.take();
 						if !self.write(frame).await {
 							return;
 						}
 					}
-					Some(_) => {}
+					Some(frame) => {
+						// The new rendition reached the held frame's time without a keyframe.
+						if let Some(prev) = held.take_if(|prev| prev.timestamp_us <= frame.timestamp_us)
+							&& !self.write(prev).await
+						{
+							return;
+						}
+					}
 					None => next = None,
 				},
 			}
@@ -700,6 +734,64 @@ mod tests {
 		idle(&mut writes).await;
 		high.write(frame(200, b"high-1", true)).unwrap();
 		assert_eq!(written(&mut writes).await.as_ref(), b"high-1");
+	}
+
+	/// A switch wins a keyframe time it shares with the current rendition, even when the
+	/// current one keeps sending and delivers that time first.
+	#[tokio::test(start_paused = true)]
+	async fn a_switch_takes_a_shared_keyframe() {
+		let origin = produce_origin();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut high = vp8(&mut broadcast, &mut catalog, "high", 1080);
+		let mut low = vp8(&mut broadcast, &mut catalog, "low", 360);
+		let set_enabled = |catalog: &mut moq_mux::catalog::Producer, enabled: bool| {
+			catalog
+				.modify()
+				.unwrap()
+				.video
+				.renditions
+				.get_mut("high")
+				.unwrap()
+				.enabled = enabled;
+		};
+		set_enabled(&mut catalog, false);
+
+		let mut egress = EgressSource::new(moq_mux::Source::new(origin.consume(), broadcast.consume()))
+			.await
+			.unwrap();
+		let mut writes = egress.take_writes();
+		egress
+			.on_track(
+				Mid::from("0"),
+				Codec::Vp8,
+				Pt::new_with_value(96),
+				Frequency::NINETY_KHZ,
+			)
+			.unwrap();
+
+		high.write(frame(0, b"high-0", true)).unwrap();
+		low.write(frame(0, b"low-0", true)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"low-0");
+
+		set_enabled(&mut catalog, true);
+		idle(&mut writes).await;
+
+		// The current rendition plays out one frame behind while the switch is pending.
+		low.write(frame(33, b"low-1", false)).unwrap();
+		idle(&mut writes).await;
+		high.write(frame(33, b"high-1", false)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"low-1");
+
+		// Both rungs open a group at 66 and the low one arrives first: the high one still wins.
+		low.write(frame(66, b"low-2", true)).unwrap();
+		idle(&mut writes).await;
+		high.write(frame(66, b"high-2", true)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"high-2");
+		low.write(frame(100, b"low-3", false)).unwrap();
+		high.write(frame(100, b"high-3", false)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"high-3");
+		idle(&mut writes).await;
 	}
 
 	#[test]
