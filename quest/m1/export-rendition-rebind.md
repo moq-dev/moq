@@ -45,7 +45,3 @@ field; the `broadcast` gap predates it. Deferred from that PR by the
 maintainer's recommended option. Starts after #5367 merges.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Catalog broadcast references in MSF and GStreamer](/quest/m1/catalog-broadcast-reference.md) - other readers that mishandle a rendition's `broadcast`

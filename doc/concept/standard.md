@@ -88,6 +88,14 @@ The MoQ Streaming Format is a catalog, playing the role HLS playlists and SDP
 do elsewhere. It overlaps with the [hang catalog](/concept/hang) and the two
 will likely converge. The tools track draft-01 and hide the version on the
 wire, so draft-00 catalogs still decode and init data always arrives inline.
+Cross-broadcast renditions keep their MSF namespace when converted to hang;
+a gateway publishing them as MSF resolves the relative reference against the
+catalog broadcast's path, including the empty root path. MSF namespaces are
+absolute while each side sees paths under its own connection root, so a
+namespace matching the catalog's path on its trailing segments is read as the
+catalog's own broadcast. That keeps draft catalogs, which repeat the publisher's
+namespace on every track, playing from any root. A reference to a different
+broadcast resolves only when both sides share a root.
 
 ## LOC
 

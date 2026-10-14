@@ -385,12 +385,13 @@ impl MoqSrc {
 
 /// The identity we reconcile a rendition on: a change to any field tears the pad down and
 /// recreates it. Caps cover codec/resolution; the container descriptor covers the wire framing
-/// (e.g. legacy -> cmaf); the track is the name subscribed, which can differ from the ID.
+/// (e.g. legacy -> cmaf); the broadcast and track identify the media, apart from its catalog ID.
 #[derive(Clone, PartialEq)]
 struct Shape {
 	caps: gst::Caps,
 	container: hang::catalog::Container,
 	track: String,
+	broadcast: Option<moq_net::path::RelativeOwned>,
 }
 
 /// A pump's progress, shared with its [`ActiveTrack`] so teardown and pad creation can't both
@@ -669,7 +670,8 @@ fn play(
 					Err(err) => return Err(anyhow::Error::from(err).context("broadcast refused")),
 				},
 			};
-			follow_catalog(broadcast, &pads, task_element, &shutdown, &mut cancelled).await
+			let source = moq_mux::Source::new(origin, broadcast);
+			follow_catalog(source, &pads, task_element, &shutdown, &mut cancelled).await
 		}),
 		RUNTIME.handle(),
 	);
@@ -695,12 +697,13 @@ fn catalog_lost(err: &moq_mux::Error) -> bool {
 /// Returns once the catalog closes and the last pump drains, or `cancel` fires. The pads stay with
 /// the session, except those of renditions the catalog retired.
 async fn follow_catalog(
-	broadcast: moq_net::broadcast::Consumer,
+	source: moq_mux::Source,
 	pads: &Pads,
 	element: glib::WeakRef<super::MoqSrc>,
 	shutdown: &watch::Receiver<bool>,
 	cancel: &mut watch::Receiver<bool>,
 ) -> Result<()> {
+	let broadcast = source.broadcast();
 	let catalog_track = broadcast.track(hang::catalog::Catalog::DEFAULT_NAME)?;
 	// A publisher that never answers would otherwise hold the run until it is cancelled.
 	let catalog_track = tokio::select! {
@@ -758,7 +761,7 @@ async fn follow_catalog(
 			next = catalog_consumer.next(), if !catalog_closed => {
 				match next {
 					Ok(Some(catalog)) => {
-						listed = reconcile(&catalog, &mut active, &mut pumps, &broadcast, pads, &element, shutdown);
+						listed = reconcile(&catalog, &mut active, &mut pumps, &source, pads, &element, shutdown);
 					}
 					// Catalog track closed. Don't cancel the pumps: let each reach its natural end,
 					// and just stop reconciling while they drain.
@@ -809,7 +812,7 @@ fn reconcile(
 	catalog: &moq_mux::catalog::hang::Catalog,
 	active: &mut HashMap<String, ActiveTrack>,
 	pumps: &mut tokio::task::JoinSet<Option<Rendition>>,
-	broadcast: &moq_net::broadcast::Consumer,
+	source: &moq_mux::Source,
 	pads: &Pads,
 	element: &glib::WeakRef<super::MoqSrc>,
 	shutdown: &watch::Receiver<bool>,
@@ -826,25 +829,27 @@ fn reconcile(
 	// skipped rather than failing the whole run, so one bad rendition can't tear down the
 	// others we're already serving.
 	let mut desired: HashMap<String, Desired> = HashMap::new();
-	let mut insert =
-		|name: &String, kind, caps: Result<gst::Caps>, container: &hang::catalog::Container, track: &str| match caps {
-			Ok(caps) => {
-				let shape = Shape {
-					caps,
-					container: container.clone(),
-					track: track.to_string(),
-				};
-				desired.insert(name.clone(), Desired { kind, shape });
-			}
-			Err(err) => gst::warning!(CAT, "ignoring {kind:?} rendition {name}: {err:?}"),
-		};
+	let mut insert = |name: &String,
+	                  kind,
+	                  caps: Result<gst::Caps>,
+	                  container: &hang::catalog::Container,
+	                  reference: &dyn hang::catalog::Reference| match caps {
+		Ok(caps) => {
+			let shape = Shape {
+				caps,
+				container: container.clone(),
+				track: reference.track(name).to_string(),
+				broadcast: reference.broadcast().cloned(),
+			};
+			desired.insert(name.clone(), Desired { kind, shape });
+		}
+		Err(err) => gst::warning!(CAT, "ignoring {kind:?} rendition {name}: {err:?}"),
+	};
 	for (name, config) in catalog.video.enabled() {
-		let track = hang::catalog::Reference::track(config, name);
-		insert(name, TrackKind::Video, video_caps(config), &config.container, track);
+		insert(name, TrackKind::Video, video_caps(config), &config.container, config);
 	}
 	for (name, config) in catalog.audio.enabled() {
-		let track = hang::catalog::Reference::track(config, name);
-		insert(name, TrackKind::Audio, audio_caps(config), &config.container, track);
+		insert(name, TrackKind::Audio, audio_caps(config), &config.container, config);
 	}
 
 	// A disabled rendition stays listed: its pump stops, but its pad waits idle for a re-enable,
@@ -927,13 +932,10 @@ fn reconcile(
 			}
 		};
 
-		// Only the handle is resolved here; the pump awaits the subscription itself. That wait
-		// ends when the publisher answers with the track info, which for a rendition nobody
-		// serves is never, so doing it here would park the catalog loop and leave every other
-		// rendition unstarted. A name the broadcast refuses outright skips just this rendition,
-		// same as an unsupported codec or a malformed init above.
-		let track = match broadcast.track(&d.shape.track) {
-			Ok(track) => track,
+		// Bind without waiting: an unavailable sibling or track must not park the catalog loop
+		// and hold up every other rendition. The pump resolves both under its cancellation scope.
+		let binding = match source.bind(d.shape.broadcast.as_ref()) {
+			Ok(binding) => binding,
 			Err(err) => {
 				gst::warning!(CAT, "ignoring rendition {name}: {err:?}");
 				continue;
@@ -950,7 +952,8 @@ fn reconcile(
 					kind: d.kind,
 					name: name.clone(),
 					caps: d.shape.caps.clone(),
-					track,
+					binding,
+					track: d.shape.track.clone(),
 					container,
 					pads: pads.clone(),
 					state: state.clone(),
@@ -1007,11 +1010,12 @@ fn plan_reconcile<S: PartialEq>(desired: &HashMap<String, S>, active: &HashMap<S
 struct Pump {
 	element: glib::WeakRef<super::MoqSrc>,
 	kind: TrackKind,
-	/// The moq track name, which is also the pad's stream id. The pad's own name comes from a
+	/// The rendition ID, which is also the pad's stream id. The pad's own name comes from a
 	/// per-kind counter instead, and isn't known until the subscription resolves.
 	name: String,
 	caps: gst::Caps,
-	track: moq_net::track::Consumer,
+	binding: moq_mux::Binding,
+	track: String,
 	container: moq_mux::catalog::hang::Container,
 	pads: Pads,
 	/// Shared with this rendition's [`ActiveTrack::state`].
@@ -1032,6 +1036,7 @@ impl Pump {
 			kind,
 			name,
 			caps,
+			binding,
 			track,
 			container,
 			pads,
@@ -1046,7 +1051,11 @@ impl Pump {
 		// rendition.
 		let subscriber = tokio::select! {
 			_ = cancel.changed() => return None,
-			subscriber = track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1))) => match subscriber {
+			subscriber = async {
+				let broadcast = binding.broadcast().await?;
+				let track = broadcast.track(&track)?;
+				Ok::<_, moq_mux::Error>(track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1))).await?)
+			} => match subscriber {
 				Ok(subscriber) => subscriber,
 				Err(err) => {
 					gst::warning!(CAT, "track {name} failed to subscribe: {err:?}");
@@ -1440,7 +1449,9 @@ mod session_tests {
 	) -> tokio::task::JoinHandle<anyhow::Result<()>> {
 		super::RUNTIME.spawn(async move {
 			let stopping = shutdown.clone();
-			follow_catalog(broadcast, &Pads::default(), element, &stopping, &mut shutdown).await
+			let (origin, _driver) = moq_net::origin::Producer::new(Default::default());
+			let source = moq_mux::Source::new(origin.consume(), broadcast);
+			follow_catalog(source, &Pads::default(), element, &stopping, &mut shutdown).await
 		})
 	}
 
@@ -1490,6 +1501,63 @@ mod session_tests {
 			std::thread::sleep(Duration::from_millis(50));
 		}
 		panic!("no {kind} pad ever appeared");
+	}
+
+	#[test]
+	fn rendition_subscribes_on_its_referenced_broadcast() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let origin = origin();
+		let mut catalog_broadcast = origin.create_broadcast("room/catalog").unwrap();
+		let mut local = catalog_broadcast.dynamic();
+		let left = origin.create_broadcast("room/left").unwrap();
+		let mut remote = left.dynamic();
+		let right = origin.create_broadcast("room/right").unwrap();
+		let mut replacement = right.dynamic();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut catalog_broadcast, Default::default()).unwrap();
+		let mut config = video_rendition();
+		config.broadcast = Some("./left".into());
+		config.track = Some("encoded".into());
+		catalog.modify().unwrap().video.renditions.insert("view".into(), config);
+		catalog_broadcast.announce(Default::default()).unwrap();
+		left.announce(Default::default()).unwrap();
+		right.announce(Default::default()).unwrap();
+		let (stopping, shutdown) = watch::channel(false);
+		let consumer = origin.consume();
+		let weak = element.downgrade();
+		let following = super::RUNTIME
+			.spawn(async move { follow_path(&consumer, "room/catalog", weak, shutdown, std::future::pending()).await });
+		let (path, request) = super::RUNTIME.block_on(async {
+			tokio::select! {
+				request = local.requested_track() => ("catalog", request.unwrap()),
+				request = remote.requested_track() => ("left", request.unwrap()),
+			}
+		});
+		if path != "left" {
+			stopping.send(true).unwrap();
+			super::RUNTIME.block_on(following).unwrap().unwrap();
+			panic!("the rendition was requested on the catalog's broadcast");
+		}
+		assert_eq!(request.name(), "encoded");
+		// The ID and wire track stay the same; only its broadcast changes.
+		catalog
+			.modify()
+			.unwrap()
+			.video
+			.renditions
+			.get_mut("view")
+			.unwrap()
+			.broadcast = Some("./right".into());
+		let next = super::RUNTIME
+			.block_on(async { tokio::time::timeout(Duration::from_secs(10), replacement.requested_track()).await });
+		stopping.send(true).unwrap();
+		super::RUNTIME.block_on(following).unwrap().unwrap();
+		assert_eq!(
+			next.expect("the broadcast change did not replace its pump")
+				.unwrap()
+				.name(),
+			"encoded"
+		);
 	}
 
 	/// A catalog can name a rendition its publisher never serves: the browser announces audio a
@@ -2226,7 +2294,8 @@ mod session_tests {
 			kind: super::TrackKind::Video,
 			name: "video".into(),
 			caps: gst::Caps::new_empty_simple("video/x-h264"),
-			track: publisher.broadcast.consume().track("video").unwrap(),
+			binding: moq_mux::Binding::new(publisher.broadcast.consume()),
+			track: "video".into(),
 			container: moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
 			pads: Pads::default(),
 			state: std::sync::Arc::new(super::PumpState::new()),
@@ -2804,6 +2873,121 @@ mod session_tests {
 		let mut new = Publisher::new(&relay.origin, epoch(), video_rendition());
 		rendered(&sink, &mut new, 2);
 		assert_played_cleanly(pipeline);
+	}
+
+	/// A real moqsink restart negotiates audio after video, keeping both held moqsrc pads.
+	#[test]
+	fn a_moqsink_restart_keeps_pads_when_caps_arrive_at_different_times() {
+		let _pad_ids = pad_ids();
+		let relay = Relay::new();
+		let element = element();
+		let (sent, received) = std::sync::mpsc::channel();
+		let added = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+		let count = added.clone();
+		element.connect_pad_added(move |_, pad| {
+			count.fetch_add(1, Ordering::Relaxed);
+			let sent = sent.clone();
+			let generation = std::sync::atomic::AtomicUsize::new(0);
+			pad.add_probe(
+				gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM,
+				move |pad, info| {
+					match &info.data {
+						Some(gst::PadProbeData::Event(event)) => match event.view() {
+							gst::EventView::StreamStart(_) => {
+								generation.fetch_add(1, Ordering::Relaxed);
+							}
+							gst::EventView::Eos(_) => {
+								sent.send((pad.name().to_string(), generation.load(Ordering::Relaxed), true))
+									.unwrap();
+							}
+							_ => {}
+						},
+						Some(gst::PadProbeData::Buffer(_)) => {
+							sent.send((pad.name().to_string(), generation.load(Ordering::Relaxed), false))
+								.unwrap();
+							return gst::PadProbeReturn::Drop;
+						}
+						_ => {}
+					}
+					gst::PadProbeReturn::Ok
+				},
+			);
+		});
+		let session = follow(&element, &relay.origin);
+		let sink = glib::Object::builder::<crate::sink::MoqSink>()
+			.property("url", relay.url.as_str())
+			.property("broadcast", "room")
+			.build();
+		let video = sink.request_pad_simple("sink_%u").unwrap();
+		video.set_property("track", "video");
+		let audio = sink.request_pad_simple("sink_%u").unwrap();
+		audio.set_property("track", "audio");
+		let caps = gst::Caps::builder("video/x-h264")
+			.field("stream-format", "byte-stream")
+			.field("alignment", "au")
+			.build();
+		let audio_caps = gst::Caps::builder("audio/x-opus")
+			.field("rate", 48_000i32)
+			.field("channels", 2i32)
+			.build();
+		let mut held = std::collections::BTreeSet::new();
+		for generation in 0..3 {
+			if generation == 2 {
+				sink.release_request_pad(&audio);
+			}
+			sink.set_state(gst::State::Paused).unwrap();
+			assert!(video.send_event(gst::event::StreamStart::new("video")));
+			assert!(video.send_event(gst::event::Caps::new(&caps)));
+			assert!(video.send_event(gst::event::Segment::new(&gst::FormattedSegment::<gst::ClockTime>::new())));
+			let keyframe = crate::sink::h264_keyframe_au();
+			for pts in [0, 20, 40] {
+				let mut frame = gst::Buffer::from_slice(keyframe.clone());
+				frame.get_mut().unwrap().set_pts(gst::ClockTime::from_mseconds(pts));
+				assert_eq!(video.chain(frame), Ok(gst::FlowSuccess::Ok));
+			}
+			if generation < 2 {
+				assert!(audio.send_event(gst::event::StreamStart::new("audio")));
+				assert!(audio.send_event(gst::event::Caps::new(&audio_caps)));
+				assert!(audio.send_event(gst::event::Segment::new(&gst::FormattedSegment::<gst::ClockTime>::new())));
+				for pts in [0, 20, 40] {
+					let mut frame = gst::Buffer::from_slice([0xf8, 0xff, 0xfe]);
+					frame.get_mut().unwrap().set_pts(gst::ClockTime::from_mseconds(pts));
+					assert_eq!(audio.chain(frame), Ok(gst::FlowSuccess::Ok));
+				}
+			}
+			let mut playing = std::collections::BTreeSet::new();
+			let mut dropped = false;
+			let returning = if generation == 2 { 1 } else { 2 };
+			while playing.len() < returning || (generation == 2 && !dropped) {
+				let (pad, run, eos) = received
+					.recv_timeout(Duration::from_secs(10))
+					.expect("both renditions should resume");
+				if eos {
+					assert_eq!(generation, 2, "a returning rendition received EOS");
+					assert!(pad.starts_with("audio_"), "the returning video received EOS");
+					assert!(!dropped, "the dropped rendition ended twice");
+					dropped = true;
+				} else if run == generation {
+					playing.insert(pad);
+				}
+			}
+			if generation == 0 {
+				held = playing;
+			} else if generation == 1 {
+				assert_eq!(playing, held, "restart replaced a linked pad");
+			} else {
+				assert!(
+					playing
+						.iter()
+						.all(|pad| held.contains(pad) && pad.starts_with("video_"))
+				);
+			}
+			sink.set_state(gst::State::Ready).unwrap();
+		}
+		assert_eq!(added.load(Ordering::Relaxed), 2);
+		sink.set_state(gst::State::Null).unwrap();
+		stop(session);
+		assert!(received.try_iter().all(|(_, _, eos)| !eos));
 	}
 
 	/// End to end through a relay: the publisher's session closes without finishing its
