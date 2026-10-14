@@ -1157,7 +1157,8 @@ mod test {
 		let resumed = logical.consume();
 		let source = copy();
 		let mut warm = source.create_group(group::Info { sequence: 2 }).unwrap();
-		warm.write_frame(ts(0), b"2-0".as_ref()).unwrap();
+		warm.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"2-0".as_ref())
+			.unwrap();
 		warm.finish().unwrap();
 		routes.serve(source.consume());
 		assert!(resumed.is_live(), "a serving live copy is live");
