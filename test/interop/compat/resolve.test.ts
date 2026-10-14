@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { matrix, newest, planned, versions } from "./resolve";
+import { matrix, mediaControls, newest, planned, versions } from "./resolve";
 
 test("a yanked or prerelease version cannot replace the installable release", () => {
 	expect(
@@ -33,9 +33,7 @@ test("removing a published draft fails, while current-only drafts are logged", (
 test("an approved wire break can retain its protocol name, but new drafts still fail", () => {
 	const exception = { reason: "Unpublished wire changed", releases: { "@moq/net": "0.4.1" } };
 	expect(matrix([OLD], [OLD], { [OLD]: exception }, { "@moq/net": "0.4.1" }).shared).toEqual([]);
-	expect(() => matrix([OLD], [OLD, NEW], { [OLD]: exception }, { "@moq/net": "0.4.1" })).toThrow(
-		"removed published",
-	);
+	expect(() => matrix([OLD], [OLD, NEW], { [OLD]: exception }, { "@moq/net": "0.4.1" })).toThrow("removed published");
 });
 
 test("IETF drafts never enter the released comparison", () => {
@@ -57,4 +55,26 @@ test("a cell-scoped break skips only its cells and expires with its releases", (
 	expect(planned(breaks, cell)).toBe("hang");
 	expect(planned(breaks, { ...cell, relay: "current" })).toBeUndefined();
 	expect(planned(breaks, { ...cell, lane: "media" })).toBeUndefined();
+});
+
+test("media controls always use a published lite baseline on both sources", () => {
+	expect(mediaControls(["moq-lite-06", "moq-lite-07-wip"], ["moq-lite-06"])).toEqual([
+		{ source: "current", version: "moq-lite-06" },
+		{ source: "released", version: "moq-lite-06" },
+	]);
+	expect(() => mediaControls(["moq-lite-07-wip"], ["moq-lite-06"])).toThrow("media controls require");
+});
+
+test("planned breaks never skip same-source media controls", () => {
+	const breaks = {
+		archive: { reason: "catalog break", releases: { hang: "1.0.0" }, cells: { lanes: ["media", "media-control"] } },
+	};
+	for (const source of ["current", "released"]) {
+		expect(
+			planned(breaks, { lane: "media-control", version: "moq-lite-06", relay: source, publisher: source }),
+		).toBeUndefined();
+	}
+	expect(() =>
+		planned(breaks, { lane: "media-control", version: "moq-lite-06", relay: "current", publisher: "released" }),
+	).toThrow("one source");
 });
