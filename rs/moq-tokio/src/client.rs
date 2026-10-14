@@ -517,7 +517,8 @@ impl Client {
 		Q: Future<Output = crate::Result<S>>,
 		S: moq_net::transport::poll::Boxable,
 	{
-		let transport = quic_transport(addr.url());
+		let url = addr.url().clone();
+		let transport = quic_transport(&url);
 		let alpns = self.versions.alpns();
 		let ws_config = self.websocket.clone();
 		let ws_tls = self.tls.clone();
@@ -528,7 +529,7 @@ impl Client {
 				.map(|res| res.map_err(Error::from))
 		};
 
-		match race_transport_connect(quic, websocket).await? {
+		match race_transport_connect(&url, quic, websocket).await? {
 			TransportRace::Quic(quic) => Ok(Dialed::new(connect_session(moq, quic).await?, transport)),
 			TransportRace::WebSocket(session) => {
 				let session = connect_session(&self.moq, crate::transport::Session::new(session)).await?;
@@ -658,8 +659,10 @@ enum TransportRace<Q, W> {
 	WebSocket(W),
 }
 
+/// Race the QUIC dial to `url` against the WebSocket fallback, returning whichever
+/// transport comes up first.
 #[cfg(all(feature = "websocket", feature = "noq"))]
-async fn race_transport_connect<Q, W, QT, WT>(quic: Q, websocket: W) -> crate::Result<TransportRace<QT, WT>>
+async fn race_transport_connect<Q, W, QT, WT>(url: &Url, quic: Q, websocket: W) -> crate::Result<TransportRace<QT, WT>>
 where
 	Q: Future<Output = crate::Result<QT>>,
 	W: Future<Output = Option<crate::Result<WT>>>,
@@ -676,7 +679,10 @@ where
 		tokio::select! {
 			res = &mut quic, if !quic_done => {
 				match res {
-					Ok(session) => return Ok(TransportRace::Quic(session)),
+					Ok(session) => {
+						crate::websocket::forget(url);
+						return Ok(TransportRace::Quic(session));
+					}
 					Err(err) => {
 						tracing::warn!(%err, "QUIC connection failed");
 						quic_err = Some(err);
@@ -1327,7 +1333,9 @@ mod tests {
 			Some(Ok(1usize))
 		};
 
-		let value = super::race_transport_connect(quic, websocket).await.unwrap();
+		let value = super::race_transport_connect(&race_url(), quic, websocket)
+			.await
+			.unwrap();
 		assert!(matches!(value, super::TransportRace::WebSocket(1)));
 	}
 
@@ -1340,7 +1348,9 @@ mod tests {
 		};
 		let websocket = async { Some(Err::<usize, _>(crate::ConnectError::Forbidden.into())) };
 
-		let value = super::race_transport_connect(quic, websocket).await.unwrap();
+		let value = super::race_transport_connect(&race_url(), quic, websocket)
+			.await
+			.unwrap();
 		assert!(matches!(value, super::TransportRace::Quic(3)));
 	}
 
@@ -1542,7 +1552,7 @@ mod tests {
 		let quic = async { Err::<usize, _>(crate::ConnectError::Unauthorized.into()) };
 		let websocket = async { Some(Err::<usize, _>(crate::ConnectError::Forbidden.into())) };
 
-		let Err(err) = super::race_transport_connect(quic, websocket).await else {
+		let Err(err) = super::race_transport_connect(&race_url(), quic, websocket).await else {
 			panic!("the race must fail");
 		};
 		assert!(err.is_auth(), "unexpected error: {err}");
@@ -1557,7 +1567,7 @@ mod tests {
 		};
 		let websocket = async { Some(Err::<usize, _>(crate::ConnectError::Forbidden.into())) };
 
-		let Err(err) = super::race_transport_connect(quic, websocket).await else {
+		let Err(err) = super::race_transport_connect(&race_url(), quic, websocket).await else {
 			panic!("the race must fail");
 		};
 		assert!(matches!(err, Error::ConnectFailed), "unexpected error: {err}");
@@ -1570,8 +1580,36 @@ mod tests {
 		let quic = async { Err::<usize, _>(Error::ConnectFailed) };
 		let websocket = async { Some(Ok(7usize)) };
 
-		let value = super::race_transport_connect(quic, websocket).await.unwrap();
+		let value = super::race_transport_connect(&race_url(), quic, websocket)
+			.await
+			.unwrap();
 		assert!(matches!(value, super::TransportRace::WebSocket(7)));
+	}
+
+	/// The URL a race unit test dials. Each test runs in its own process under nextest,
+	/// so the process-wide [`crate::websocket::won`] memo starts empty.
+	#[cfg(all(feature = "websocket", feature = "noq"))]
+	fn race_url() -> Url {
+		Url::parse("https://race.invalid/").unwrap()
+	}
+
+	/// QUIC winning a race clears WebSocket's earlier win, so the next dial gives QUIC
+	/// its head start again.
+	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[tokio::test(start_paused = true)]
+	async fn quic_winning_restores_its_head_start() {
+		crate::websocket::remember(&race_url());
+		let quic = async { Ok("quic") };
+		let (websocket, _dropped) = loser::<Option<crate::Result<&str>>>();
+
+		let won = super::race_transport_connect(&race_url(), quic, websocket)
+			.await
+			.unwrap();
+		assert!(matches!(won, super::TransportRace::Quic("quic")));
+		assert!(
+			!crate::websocket::won(&race_url()),
+			"QUIC won, yet the next dial still skips its head start"
+		);
 	}
 
 	/// A race arm that never finishes, and reports through `dropped` once it is dropped.
@@ -1596,7 +1634,9 @@ mod tests {
 		let (quic, mut dropped) = loser::<crate::Result<&str>>();
 		let websocket = async { Some(Ok("websocket")) };
 
-		let won = super::race_transport_connect(quic, websocket).await.unwrap();
+		let won = super::race_transport_connect(&race_url(), quic, websocket)
+			.await
+			.unwrap();
 		assert!(matches!(won, super::TransportRace::WebSocket("websocket")));
 		assert_eq!(
 			dropped.try_recv(),
@@ -1612,7 +1652,9 @@ mod tests {
 		let quic = async { Ok("quic") };
 		let (websocket, mut dropped) = loser::<Option<crate::Result<&str>>>();
 
-		let won = super::race_transport_connect(quic, websocket).await.unwrap();
+		let won = super::race_transport_connect(&race_url(), quic, websocket)
+			.await
+			.unwrap();
 		assert!(matches!(won, super::TransportRace::Quic("quic")));
 		assert_eq!(
 			dropped.try_recv(),
@@ -1629,7 +1671,7 @@ mod tests {
 
 		let value = tokio::time::timeout(
 			std::time::Duration::from_secs(1),
-			super::race_transport_connect(quic, websocket),
+			super::race_transport_connect(&race_url(), quic, websocket),
 		)
 		.await
 		.expect("race waited for WebSocket after QUIC transport connected")

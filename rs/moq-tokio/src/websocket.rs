@@ -110,9 +110,40 @@ type Result<T> = std::result::Result<T, Error>;
 
 /// Servers (host, port) where WebSocket won the race, so later dials skip QUIC's head start.
 ///
-/// Never cleared: an entry lasts for the process. Both arms still race on those dials, so
-/// QUIC can win one, but that does not restore the head start.
+/// Both arms still race on those dials, and a QUIC win clears the entry through [`forget`],
+/// since UDP gets through after all.
 static WEBSOCKET_WON: LazyLock<Mutex<HashSet<(String, u16)>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// The [`WEBSOCKET_WON`] key for a dial URL: the host and port the fallback dials.
+fn won_key(url: &Url) -> Result<(String, u16)> {
+	let host = url.host_str().ok_or(Error::MissingHostname)?.to_string();
+	let port = url.port().unwrap_or_else(|| match url.scheme() {
+		"https" | "wss" | "moql" | "moqt" => 443,
+		"http" | "ws" => 80,
+		_ => 443,
+	});
+	Ok((host, port))
+}
+
+/// Forget that WebSocket won for `url`, giving QUIC its head start again.
+#[cfg(feature = "noq")]
+pub(crate) fn forget(url: &Url) {
+	if let Ok(key) = won_key(url) {
+		WEBSOCKET_WON.lock().unwrap().remove(&key);
+	}
+}
+
+/// Record that WebSocket won for `url`, as a fallback dial that lands does.
+#[cfg(all(test, feature = "noq"))]
+pub(crate) fn remember(url: &Url) {
+	WEBSOCKET_WON.lock().unwrap().insert(won_key(url).unwrap());
+}
+
+/// Whether the next dial to `url` skips QUIC's head start.
+#[cfg(all(test, feature = "noq"))]
+pub(crate) fn won(url: &Url) -> bool {
+	won_key(url).is_ok_and(|key| WEBSOCKET_WON.lock().unwrap().contains(&key))
+}
 
 /// WebSocket configuration for the client.
 #[derive(Clone, Debug, usage::Args, serde::Serialize, serde::Deserialize)]
@@ -302,13 +333,8 @@ pub(crate) async fn connect(
 		_ => return Err(Error::UnsupportedScheme(url.scheme().to_string())),
 	};
 
-	let host = url.host_str().ok_or(Error::MissingHostname)?.to_string();
-	let port = url.port().unwrap_or_else(|| match url.scheme() {
-		"https" | "wss" | "moql" | "moqt" => 443,
-		"http" | "ws" => 80,
-		_ => 443,
-	});
-	let key = (host.clone(), port);
+	let key = won_key(&url)?;
+	let (host, port) = key.clone();
 
 	// A secure dial presents this name on every attempt; the override was checked when the client was built.
 	if needs_tls && tls_host_name.is_none() {
