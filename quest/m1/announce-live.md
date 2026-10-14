@@ -8,8 +8,8 @@ yet": a player shows offline instead of loading, and lazy discovery can hand
 a watch from a broad announce request to a narrower one only once the
 narrower one has caught up.
 
-Non-goals: global completeness across a cluster, and any wire change. Every
-version that can carry the boundary already does.
+Non-goals: global completeness across a cluster, and any new wire format.
+Every version that can carry the boundary already does.
 
 ## Plan
 
@@ -68,8 +68,9 @@ Work:
   count and mark the point where the initial set has been read, and the
   origin's announce consumers expose it. Mirror names across languages.
 - JS MoQ Active Count: declare the setup option, record the negotiation,
-  validate the parameter against it, and send the count as a publisher, so
-  JS IETF sessions get the exact boundary too.
+  validate the parameter against it (and refuse it on any REQUEST_OK but
+  SUBSCRIBE_NAMESPACE's), and send the count as a publisher, so JS IETF
+  sessions get the exact boundary too.
 - `doc/concept`: what caught up means to a subscriber, including the
   best-effort versions.
 - A benchmark sweeping announce streams and announce consumers, so
@@ -86,7 +87,8 @@ Work:
   `just test interop --all`.
 
 Public API: new caught-up surface on Rust and JS announce consumers. Wire:
-none.
+no new format or draft change; JS adopts the existing MoQ Active Count
+extension.
 
 ## Related
 
