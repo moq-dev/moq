@@ -222,11 +222,13 @@ export class Encoder {
 	#estimator = new Estimator();
 	// The estimator's jitter and delay, republished whenever either rises.
 	#estimate = new Signal<Estimator["estimate"]>({});
-	// The last config published while enabled, which a disabled rendition keeps advertising.
-	#last?: Catalog.AudioConfig;
-	// Whether the rendition was disabled since a config last resolved, so it keeps advertising `#last`
-	// as disabled until the re-enabled capture resolves a new one. A capture that never reopens leaves
-	// it disabled, which is accurate: no frames are coming.
+	// What this rendition advertised on each broadcast, keyed by the broadcast or, with none, the
+	// encoder. A broadcast keeps a rendition's track when it re-registers, so returning to one
+	// continues its bitrate maximum and last config, while another broadcast starts its own.
+	#advertised = new WeakMap<object, { bitrate: number; last?: Catalog.AudioConfig }>();
+	// Whether the rendition was disabled since a config last resolved, so it keeps advertising its last
+	// config as disabled until the re-enabled capture resolves a new one. A capture that never reopens
+	// leaves it disabled, which is accurate: no frames are coming.
 	#paused = false;
 
 	constructor(name: string, props?: EncoderProps) {
@@ -431,10 +433,16 @@ export class Encoder {
 	#runCatalog(effect: Effect): void {
 		const estimate = effect.get(this.#estimate);
 		const enabled = effect.get(this.in.enabled);
+		const key = effect.get(this.in.broadcast) ?? this;
+		let track = this.#advertised.get(key);
+		if (!track) {
+			track = { bitrate: 0 };
+			this.#advertised.set(key, track);
+		}
 		if (!enabled) this.#paused = true;
 		const config = enabled ? effect.get(this.#config)?.catalog : undefined;
 		if (!config) {
-			const last = this.#paused ? this.#last : undefined;
+			const last = this.#paused ? track.last : undefined;
 			effect.set(this.#out.catalog, last && { ...last, ...estimate, enabled: false });
 			return;
 		}
@@ -442,8 +450,12 @@ export class Encoder {
 
 		const decoder = effect.get(this.#decoderDescription);
 		const catalog = decoder?.config === config ? { ...config, description: decoder.description } : config;
-		this.#last = { ...catalog, ...estimate };
-		effect.set(this.#out.catalog, this.#last);
+		// The catalog bitrate is the most this track has been configured for, so lowering the knob
+		// retunes the encoder without lowering what the catalog advertises.
+		track.bitrate = Math.max(track.bitrate, catalog.bitrate ?? 0);
+		const bitrate = track.bitrate > 0 ? Catalog.u53(track.bitrate) : undefined;
+		track.last = { ...catalog, bitrate, ...estimate };
+		effect.set(this.#out.catalog, track.last);
 	}
 
 	// Collect the encode-only Opus knobs that are set, reading the codec through the effect so the

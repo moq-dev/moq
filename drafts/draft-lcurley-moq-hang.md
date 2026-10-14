@@ -164,6 +164,19 @@ A zero `timescale` is invalid, as is a `wall` outside the JSON-safe integer rang
 The mapping is fixed for the broadcast and independent of `archive`: a live-only publisher exposes its clock without creating a timeline.
 A discontinuity marker is a delivery event, not a new epoch, and a system-clock adjustment never retimes the mapping.
 
+## Track Identity {#identity}
+A track name always means the same content, so a catalog update never redefines an audio or video track.
+Each rendition field falls in one of three classes:
+
+- Identity: `codec`, `description`, and `container`, plus `sampleRate` and `numberOfChannels` for audio. A publisher MUST NOT change them for a track once a catalog lists it.
+- Ceilings: video `codedWidth` and `codedHeight` bound every picture the track carries, and `codec` names a profile and level that covers them. The picture size MAY change at any keyframe within both bounds, which a `description` carrying parameter sets rules out. A publisher MAY fill an absent ceiling once, and MUST NOT change it afterward.
+- Maxima: `bitrate` and `framerate` are the most the track has carried or is configured to carry. A publisher MAY raise them and MUST NOT lower them.
+
+Every other rendition field is live state that MAY change in any update within its own rules (`jitter` and `delay` never fall), as MAY the video section's `display`, `rotation`, and `flip`, which describe presentation rather than decoding.
+A publisher that changes an identity field or exceeds a ceiling MUST publish the media under a new track name, or as a new broadcast under a new Epoch {{moql}}.
+A track name removed from the catalog MUST NOT return with a different identity.
+A consumer MAY configure a decoder once per track from the catalog.
+
 ## Video
 A video track contains the necessary information to decode a video stream.
 
@@ -1103,6 +1116,7 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- Fixed a track's identity for its name ({{identity}}): codec, description, container, sample rate, and channel count never change; `codedWidth` and `codedHeight` are ceilings below which the picture resizes in band; `bitrate` and `framerate` are maxima that only rise. A change of identity takes a new track name or a new Epoch.
 - Specified MSF text metadata preservation and refusal of unrepresentable text packaging during gateway conversion.
 
 - Added optional audio and video `warmup` durations, rounded up to whole milliseconds, and allowed video groups to start at convergent random access pictures.
