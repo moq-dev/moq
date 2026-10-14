@@ -299,6 +299,11 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		}
 	}
 
+	/// How long past its decode time each frame is held.
+	pub fn delay(&self) -> Duration {
+		self.delay
+	}
+
 	/// The tracks an acquisition waits to hear from, two delays at most, before it anchors: any
 	/// of them may be the one sent latest against its decode time.
 	pub fn expect(&mut self, keys: impl IntoIterator<Item = K>) {
@@ -311,6 +316,11 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 	pub fn replay(mut self) -> Self {
 		self.replay = true;
 		self
+	}
+
+	/// Whether each clock anchors on its first frame ([`Self::replay`]).
+	pub fn replaying(&self) -> bool {
+		self.replay
 	}
 
 	/// Queue a frame, or drop it if it cannot make its deadline. Fails once the source's clock
