@@ -758,7 +758,7 @@ export class Subscriber {
 			// flight, so the track ends only once the tail is accounted for. A reset rejects
 			// instead, so the track ends with that error rather than a clean tail.
 			const responses = supportsTrackStream(this.version)
-				? this.#runResponses(stream, entry)
+				? this.runResponses(stream, entry)
 				: stream.reader.closed;
 			let tailSettled = false;
 			const closed = responses.then(async () => {
@@ -1153,15 +1153,15 @@ export class Subscriber {
 	// Reads SUBSCRIBE_START/END/DROP on the subscribe stream until FIN (lite-05+), recording
 	// the range the tail is accounted against. SUBSCRIBE_END declares the track's end right
 	// away, so a consumer learns it before the last groups arrive. The publisher must declare
-	// the end before FIN; resets and malformed responses reject with their failure.
-	async #runResponses(stream: Stream, entry: SubscribeEntry): Promise<void> {
+	// the end before FIN unless we cancelled locally; resets and malformed responses reject.
+	private async runResponses(stream: Stream, entry: SubscribeEntry): Promise<void> {
 		for (;;) {
 			const resp = await decodeSubscribeResponseMaybe(stream.reader, this.version);
 			// The publisher answered, so its demand stands on the subscription from here.
 			entry.held?.close();
 			entry.held = undefined;
 			if (!resp) {
-				if (entry.end === undefined)
+				if (entry.end === undefined && entry.track.closed.peek() === undefined)
 					throw new ProtocolViolation("subscribe stream ended without SUBSCRIBE_END");
 				return;
 			}
