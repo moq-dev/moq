@@ -48,7 +48,7 @@ measured no-win abandons it.
   lock-free multi-reader log only pays off if the shared model survives.
   Across threads the log becomes a flow-controlled byte stream, single writer
   and single reader, which the
-  [in-memory transport](/quest/m2/perf/kio-channel-contention/bridge.md)
+  in-memory transport (`moq_net::transport::memory`)
   already provides.
 - Breaking moq-net's model internals is allowed; check whether any public
   moq-net API changes and sync `js/net` if so.

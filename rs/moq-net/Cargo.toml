@@ -157,3 +157,8 @@ required-features = ["fuzz"]
 name = "auth"
 harness = false
 required-features = ["async"]
+
+[[bench]]
+name = "memory"
+harness = false
+required-features = ["async"]

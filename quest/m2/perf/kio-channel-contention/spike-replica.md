@@ -5,7 +5,7 @@
 Measure whether per-worker data-plane replicas cut lock wait on the
 thread-per-core relay (`--runtime-workers`). Each worker serves tracks and
 groups from its own origin, fed once per worker over the
-[in-memory transport](/quest/m2/perf/kio-channel-contention/bridge.md), while
+in-memory transport (`moq_net::transport::memory`), while
 announcements and routes stay in one shared origin. The spike is a draft PR
 that never merges; its numbers and a recommendation go in the
 [epic](/quest/m2/perf/kio-channel-contention/README.md).
@@ -17,7 +17,7 @@ that never merges; its numbers and a recommendation go in the
   (`rs/moq-relay/src/relay.rs`), so a subscriber on worker B reads state
   written on worker A.
 - With replicas, a track subscribed on worker B is subscribed once over a
-  bridge session to the worker that holds it, then fanned out locally. Every
+  memory session to the worker that holds it, then fanned out locally. Every
   consumer of a replica is on one thread, so its kio mutex is uncontended, and
   cross-core readers per frame drop from the subscriber count to the worker
   count.
@@ -37,7 +37,3 @@ that never merges; its numbers and a recommendation go in the
   instead of reading it from chat.
 - A win goes to `/quest-plan` for a real implementation quest; a no-win
   restores the perf epic's no-sharding rule.
-
-## Required
-
-- [In-memory transport](/quest/m2/perf/kio-channel-contention/bridge.md) - the hop between workers

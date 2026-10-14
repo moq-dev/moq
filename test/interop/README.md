@@ -191,6 +191,10 @@ decode to a video frame through ffmpeg. The JS reader is
 `compat/client.ts`, not the interop subscriber, whose API follows the
 checkout. One copy runs against each package set, using only API both have,
 and it reconstructs the catalog and decodes the container.
+Before cross-version sessions, current and released media controls each run
+with their own relay, publisher, and Rust/JS readers on moq-lite-06. These
+controls always run, including when a planned break skips cross-version lanes,
+so a broken reader cannot make compatibility failures ambiguous.
 
 Each `moq-net` library states whether a draft has FETCH (lite-05 onward
 today). A draft without it in both is logged and its FETCH lanes skipped; one

@@ -20,6 +20,7 @@ test:
     python3 sh/dispatch-query.test.py
     python3 sh/dispatch-query.test.py --bench
     bun test sh/gh/setup.test.ts
+    bun sh/gh/queue.test.ts
     python3 sh/gh/install-formula.test.py
     sh/gh/release.test.sh
     python3 sh/rs/package-rename.test.py

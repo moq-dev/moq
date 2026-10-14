@@ -1,11 +1,14 @@
 //! The poll transport interface owned by `moq-net`.
 //!
 //! Implement these traits for a transport, or wrap a backend at the application
-//! boundary. `moq-tokio`, `moq-wasm`, and `moq-uring` provide their own adapters.
+//! boundary. `moq-tokio`, `moq-wasm`, and `moq-uring` provide their own adapters, and
+//! [`memory`] links two peers in one process.
 //! The async helpers only drive the required poll methods. Thread-local transports
 //! stay supported; [`poll::Boxable`] adds native thread bounds for boxed drivers.
 
 use std::time::Duration;
+
+pub mod memory;
 
 /// A trait that is Send on native targets and empty on WASM.
 #[cfg(not(target_family = "wasm"))]
