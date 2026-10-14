@@ -13198,6 +13198,80 @@ mod tests {
 		assert_eq!(occurrences(&log, &token), 1, "the token carries the withheld namespace");
 	}
 
+	/// A token cleared while an advertisement outside the grant waits for its stream leaves
+	/// it carrying none: it is withdrawn, and setting a token again offers it afresh.
+	#[moq_net_sim::test]
+	async fn a_token_cleared_before_the_advertisement_goes_out_withdraws_it() {
+		const VERSION: Version = Version::Draft18;
+		let token = bytes::Bytes::from_static(&[0x03, 0x00, b'o', b'k']);
+
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
+		// A connection grant of "other", which does not cover "cam".
+		let auth = crate::auth::Handle::new(true);
+		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
+		auth.granted(
+			0,
+			crate::auth::Grant {
+				publish: crate::Pattern::subtree("other").unwrap().into(),
+				subscribe: crate::Patterns::new(),
+				expires: None,
+			},
+		);
+		let ok = publish_namespace_ok(VERSION).await;
+		let open = kio::Producer::new(false);
+		let session = crate::lite::test_transport::ScriptedSession::gated_open(vec![ok.clone(), ok], open.consume());
+		let log = session.log.clone();
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer::default());
+		let request_token = crate::RequestToken::new(Some(typed(&token)));
+		let publisher = Publisher::new(
+			crate::time::Clock::sim(),
+			session,
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			peer_setup,
+			VERSION,
+		)
+		.with_auth(auth)
+		.with_request_token(request_token.clone());
+
+		// Offered under the token, then parked opening its stream while the token is cleared.
+		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+		for _ in 0..50 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			settle().await;
+		}
+		assert!(log.writes.lock().unwrap().is_empty(), "the advertisement was not held");
+		request_token.set(None);
+		let Ok(mut opened) = open.write() else {
+			panic!("stream gate closed");
+		};
+		*opened = true;
+		drop(opened);
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if !log.resets().is_empty() {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(occurrences(&log, b"cam"), 1, "the advertisement went out");
+		assert_eq!(occurrences(&log, &token), 0, "carrying no token");
+		assert!(!log.resets().is_empty(), "and was withdrawn");
+
+		request_token.set(Some(typed(&token)));
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, &token) > 0 {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(occurrences(&log, &token), 1, "a token set again offers it afresh");
+	}
+
 	/// The typed form of a raw USE_VALUE Token structure with a one-byte Token Type.
 	fn typed(raw: &[u8]) -> crate::setup::Token {
 		assert_eq!(raw[0], 0x03, "USE_VALUE");
