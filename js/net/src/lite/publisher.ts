@@ -12,7 +12,7 @@ import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Priority, sendOrder } from "../priority.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
-import { Milli, Timescale, Timestamp } from "../time.ts";
+import { Milli, type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { Interests, LIMITS, type Limits, Slots } from "../util/limits.ts";
@@ -44,6 +44,7 @@ import {
 	resolvesStart,
 	Version,
 	waitsForSubscriberFin,
+	wireTimescale,
 } from "./version.ts";
 
 const PROBE_INTERVAL = 100; // ms
@@ -57,16 +58,8 @@ function zigzag(delta: bigint): bigint {
 }
 
 /**
- * The timescale TRACK_INFO declares for a track. Lite05+ requires one, so an untimed track
- * declares milliseconds, the scale its frames' send times go out at.
- */
-function wireTimescale(info: track.Info): Timescale {
-	return info.timescale ?? Timescale.MILLI;
-}
-
-/**
- * A frame or datagram timestamp as its raw value at the wire `timescale`. No lite version
- * encodes an absent timestamp yet, so an untimed payload carries its send time instead.
+ * A frame or datagram timestamp as its raw value at the wire `timescale`. Lite-05/06 cannot
+ * encode an untimed track, so its payloads carry their send time instead.
  */
 function wireTime(timestamp: Timestamp | undefined, timescale: Timescale): number {
 	return Math.round((timestamp ?? Timestamp.now()).as(timescale));
@@ -99,8 +92,8 @@ interface RunGroup {
 	/** The group to serve. */
 	group: group.Consumer;
 
-	/** The track's advertised timescale, applied to every frame timestamp. */
-	timescale: Timescale;
+	/** The track's wire timescale, applied to every frame timestamp, or undefined to send none. */
+	timescale: Timescale | undefined;
 
 	/** The subscription's ranking, which this stream joins for as long as it runs. */
 	priority: Priority;
@@ -169,8 +162,8 @@ function frameRange(bounds: FrameBounds, sequence: number): { start: number; end
 type ServeGroup = {
 	/** The Subscribe ID the GROUP message references. */
 	sub: bigint;
-	/** The track's advertised timescale, which every frame timestamp is converted to. */
-	timescale: Timescale;
+	/** The track's wire timescale, which every frame timestamp is converted to, or undefined to send none. */
+	timescale: Timescale | undefined;
 	/** First frame to send; anything below it was excluded by the subscription. */
 	start: number;
 	/** Last frame to send (inclusive), or undefined for the rest of the group. */
@@ -768,7 +761,8 @@ export class Publisher {
 		let controls: SubscriptionControls | undefined;
 
 		try {
-			let timescale: Timescale = Timescale.MILLI;
+			// Older drafts carry no timestamps.
+			let timescale: Timescale | undefined;
 
 			if (supportsTrackStream(this.version)) {
 				// Lite-05+ accepts implicitly: no SUBSCRIBE_OK (the immutable
@@ -781,7 +775,7 @@ export class Publisher {
 				// (accept never called, track closed) as an error here, which resets the
 				// stream.
 				const info = await untilAborted(track.info(), left.signal);
-				timescale = wireTimescale(info);
+				timescale = wireTimescale(this.version, info.timescale);
 			} else {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
 				const ok = new SubscribeOk({
@@ -935,7 +929,7 @@ export class Publisher {
 					return;
 				}
 				await this.#runFetchGroup(group, stream.writer, {
-					timescale: Timescale(info.timescale),
+					timescale: wireTimescale(this.version, info.timescale),
 					start: msg.startFrame,
 					end: msg.endFrame,
 				});
@@ -971,7 +965,7 @@ export class Publisher {
 		track: track.Subscriber,
 		stream: Writer,
 		controls: SubscriptionControls,
-		serving: { sub: bigint; broadcast: Path.Valid; timescale: Timescale; bounds: FrameBounds },
+		serving: { sub: bigint; broadcast: Path.Valid; timescale: Timescale | undefined; bounds: FrameBounds },
 	): Promise<boolean> {
 		const { sub, broadcast, timescale, bounds } = serving;
 		// Lite-05+ resolves the range on the subscribe stream: SUBSCRIBE_START once the
@@ -1292,9 +1286,8 @@ export class Publisher {
 					// Publisher Max Age: the publisher's retention bound, advertised so
 					// relays re-serve with the same window.
 					maxAge: info.maxAge,
-					// Lite05 mandates per-frame timestamps. Advertise the track's timescale;
 					// `#serveGroup` emits each frame converted to it.
-					timescale: wireTimescale(info),
+					timescale: info.timescale ?? undefined,
 				});
 			})();
 
@@ -1334,7 +1327,7 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async #runDatagrams(sub: bigint, track: track.Subscriber, timescale: Timescale) {
+	async #runDatagrams(sub: bigint, track: track.Subscriber, timescale: Timescale | undefined) {
 		const writer = this.#datagramWriter;
 		if (!writer) return; // Only reached with a writer (see the #datagramWriter gate).
 		const maxSize = DatagramStream.maxDatagramSize(this.#quic);
@@ -1345,7 +1338,7 @@ export class Publisher {
 				if (!datagram) return; // Track finished; #runTrack tears the subscription down.
 
 				// Convert the timestamp to the track's advertised timescale, matching #serveGroup.
-				const ts = wireTime(datagram.timestamp, timescale);
+				const ts = timescale === undefined ? undefined : wireTime(datagram.timestamp, timescale);
 				const body = new DatagramMessage(sub, datagram.sequence, ts, datagram.payload).encode(this.version);
 
 				// No group fallback: drop anything that doesn't fit a single datagram.
@@ -1364,7 +1357,7 @@ export class Publisher {
 	}
 
 	// Serialize a fetched group's frames onto the FETCH stream as bare records: each a
-	// zigzag-delta timestamp (at the track's advertised timescale) followed by size + bytes.
+	// zigzag-delta timestamp (at the track's wire timescale, if any) followed by size + bytes.
 	async #runFetchGroup(
 		group: group.Consumer,
 		stream: Writer,
@@ -1384,9 +1377,11 @@ export class Publisher {
 			const frame = await race([group.readFrame(), stream.closed]);
 			if (!frame) break;
 
-			const ts = BigInt(wireTime(frame.timestamp, timescale));
-			await stream.u62(zigzag(ts - prevTs));
-			prevTs = ts;
+			if (timescale !== undefined) {
+				const ts = BigInt(wireTime(frame.timestamp, timescale));
+				await stream.u62(zigzag(ts - prevTs));
+				prevTs = ts;
+			}
 
 			await stream.u53(frame.payload.byteLength);
 			await stream.write(frame.payload);
@@ -1445,9 +1440,6 @@ export class Publisher {
 				await msg.encode(stream, this.version);
 			});
 
-			// Lite05+ prefixes every frame with a zigzag-delta timestamp at the track's
-			// advertised timescale; older drafts omit it.
-			const timestamps = supportsTrackStream(this.version);
 			let prevTs = 0n;
 			// Whether the cursor ever reached the requested start, which decides how the
 			// end of the group is read below.
@@ -1472,8 +1464,8 @@ export class Publisher {
 					if (read.sequence < startFrame) continue;
 					if (endFrame !== undefined && read.sequence > endFrame) break;
 
-					if (timestamps) {
-						// Convert each frame to the track's advertised timescale.
+					if (timescale !== undefined) {
+						// Convert each frame to the track's wire timescale.
 						const ts = BigInt(wireTime(read.frame.timestamp, timescale));
 						await hooks.guardGroup(group, () => stream.u62(zigzag(ts - prevTs)));
 						prevTs = ts;

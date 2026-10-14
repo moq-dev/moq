@@ -1197,8 +1197,10 @@ where
 						// cluster draft requires closing the session on those; a stream
 						// the peer simply reset is not the peer's fault.
 						if is_protocol_violation(&err) {
-							this.session
-								.close(SessionError::from(&err).to_code(), err.to_string().as_ref());
+							this.session.close(
+								super::error::to_session_code(&SessionError::from(&err)),
+								err.to_string().as_ref(),
+							);
 						}
 						tracing::debug!(%err, "publish_namespace stream error");
 					}
@@ -1609,9 +1611,10 @@ where
 			if self.version != Version::Draft16
 				&& let Err(err) = self.control.accept(update_id)
 			{
-				self.session
-					.clone()
-					.close(crate::SessionError::from(&err).to_code(), "invalid request ID");
+				self.session.clone().close(
+					super::error::to_session_code(&crate::SessionError::from(&err)),
+					"invalid request ID",
+				);
 				return Err(err);
 			}
 			let msg = match ietf::PublishNamespaceUpdate::decode_msg(&mut data, self.version) {
@@ -2050,9 +2053,10 @@ where
 	/// Take one slot of the session's announce cap. A peer past it loses the session.
 	fn acquire_announce(&self) -> Result<crate::session::Slot, Error> {
 		self.announces.acquire().inspect_err(|err| {
-			self.session
-				.clone()
-				.close(crate::SessionError::from(err).to_code(), "too many announcements");
+			self.session.clone().close(
+				super::error::to_session_code(&crate::SessionError::from(err)),
+				"too many announcements",
+			);
 		})
 	}
 
@@ -2704,8 +2708,10 @@ where
 		if let Err(err) = self.register_alias(request_id, alias) {
 			if matches!(err, Error::Duplicate) {
 				tracing::warn!(track_alias = %alias, "publisher reused a live track alias for another track");
-				self.session
-					.close(SessionError::from(&err).to_code(), err.to_string().as_ref());
+				self.session.close(
+					super::error::to_session_code(&SessionError::from(&err)),
+					err.to_string().as_ref(),
+				);
 			} else {
 				tracing::warn!(track_alias = %alias, %err, "could not bind track alias");
 				self.cancel_subscribe(stream, request_id).await;
@@ -3522,7 +3528,7 @@ where
 	}
 
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
-		let mut group: ietf::GroupHeader = stream.decode().await?;
+		let group: ietf::GroupHeader = stream.decode().await?;
 
 		if group.sub_group_id != 0 {
 			tracing::warn!(sub_group_id = %group.sub_group_id, "subgroup ID is not supported, dropping stream");
@@ -3565,12 +3571,6 @@ where
 				Reading::open(&track.tail, Some(group.group_id), self.runtime.now()),
 			)
 		};
-
-		// An omitted header priority inherits the track property, then wire 128.
-		// The track info carries that fallback after SUBSCRIBE_OK (draft-21 section 10.4).
-		if !group.flags.has_priority {
-			group.publisher_priority = super::priority::to_wire(track.publisher_priority());
-		}
 
 		// Whether a FIRST_OBJECT-clear stream is a group with no head is decided in
 		// [`Self::open_group`], after it peeks the first Object ID. The bit is only the
@@ -3638,11 +3638,16 @@ where
 			Err(err @ (Error::Cancel | Error::Stream(crate::StreamError::Cancel))) => {
 				let _ = producer.abort(err);
 			}
+			// The peer's fault: a group we cannot carry, or one it sent malformed.
 			Err(
 				err @ (Error::Unsupported
 				| Error::Session(SessionError::ProtocolViolation)
-				| Error::Decode(DecodeError::MessageTooLarge { .. })),
+				| Error::Decode(_)
+				| Error::WrongSize
+				| Error::FrameTooLarge
+				| Error::GroupTooLarge),
 			) => {
+				tracing::warn!(%err, group = %producer.sequence, "refusing group");
 				let _ = producer.abort(err.clone());
 				// Return the refusal to the dispatcher so it sends STOP_SENDING.
 				return Err(err);
@@ -3654,6 +3659,7 @@ where
 				let _ = track.abort(Error::MalformedTrack);
 				return Err(Error::MalformedTrack);
 			}
+			// The peer reset the stream, the transport failed, or the track went away.
 			Err(err) => {
 				tracing::debug!(%err, group = %producer.sequence, "group error");
 				let _ = producer.abort(err);
@@ -4525,9 +4531,10 @@ where
 		if draft20 && (end.group, end.object) <= (sequence, start) {
 			let err = Error::ProtocolViolation;
 			tracing::warn!(group = sequence, ?end, "FETCH_OK's End Location is before its start");
-			self.session
-				.clone()
-				.close(SessionError::from(&err).to_code(), err.to_string().as_ref());
+			self.session.clone().close(
+				super::error::to_session_code(&SessionError::from(&err)),
+				err.to_string().as_ref(),
+			);
 			request.reject(err);
 			return;
 		}
@@ -10306,6 +10313,21 @@ mod stitch_tests {
 			self
 		}
 
+		/// Run the next scripted stream through `recv_group` and the dispatcher's handling of
+		/// its result, asserting that stream alone was refused with STOP_SENDING.
+		async fn dispatch_refused(&self) {
+			let mut stream = self.stream().await;
+			let res = self.subscriber.clone().recv_group(&mut stream).await;
+			let detail = format!("{res:?}");
+			super::super::session::stop_on_error(&mut stream, res).expect("the session survives");
+			assert_eq!(
+				self.session.log.stops().len(),
+				1,
+				"the stream was not refused: {detail}"
+			);
+			assert!(self.session.log.closes().is_empty());
+		}
+
 		/// A reader over the next scripted stream, standing in for one the peer opened.
 		async fn stream(&self) -> Reader<<ScriptedSession as crate::transport::poll::Session>::RecvStream, Version> {
 			let mut session = self.session.clone();
@@ -10514,6 +10536,74 @@ mod stitch_tests {
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].1, b"ok");
 		assert!(h.session.log.closes().is_empty());
+	}
+
+	/// A subgroup stream for `sequence` without extension headers, starting at object 0: the
+	/// header, then `varints`, then `payload` verbatim.
+	fn raw_stream(sequence: u64, varints: &[u64], payload: &[u8]) -> Vec<u8> {
+		let mut buf = Vec::new();
+		ietf::GroupHeader {
+			track_alias: ALIAS,
+			group_id: sequence,
+			sub_group_id: 0,
+			publisher_priority: 0,
+			flags: ietf::GroupFlags {
+				first_object: true,
+				..Default::default()
+			},
+		}
+		.encode(&mut crate::coding::Encoder::new(&mut buf, VERSION.into()), VERSION)
+		.unwrap();
+		let mut encoder = crate::coding::Encoder::new(&mut buf, VERSION.into());
+		for value in varints {
+			encoder.varint(*value).unwrap();
+		}
+		buf.extend_from_slice(payload);
+		buf
+	}
+
+	/// A truncated property inside a later object's extension block is a malformed group.
+	#[moq_net_sim::test]
+	async fn a_malformed_extension_block_is_refused() {
+		// Delta 0, then a 1-byte extension block holding half of a 2-byte varint.
+		let mut stream = tail_stream(SEQUENCE, 0, &[b"ok"]);
+		stream.extend_from_slice(&[0, 1, 0x40]);
+		let h = Harness::new(Fill::Done, vec![stream]);
+		h.dispatch_refused().await;
+	}
+
+	/// A FIN before the declared payload ends.
+	#[moq_net_sim::test]
+	async fn a_payload_cut_short_is_refused() {
+		let h = Harness::with_timescale(Fill::Done, vec![raw_stream(SEQUENCE, &[0, 4], &[1, 2])], None);
+		h.dispatch_refused().await;
+	}
+
+	/// A declared object size past what a group may hold.
+	#[moq_net_sim::test]
+	async fn an_oversized_frame_is_refused() {
+		let size = crate::group::MAX_CACHE_BYTES + 1;
+		let h = Harness::with_timescale(Fill::Done, vec![raw_stream(SEQUENCE, &[0, size], &[])], None);
+		h.dispatch_refused().await;
+	}
+
+	/// More objects than a group may hold.
+	#[moq_net_sim::test]
+	async fn an_oversized_group_is_refused() {
+		// Each empty object is its delta, a zero size, and the Normal status.
+		let objects = vec![0u64; 3 * (crate::group::MAX_GROUP_FRAMES + 1)];
+		let h = Harness::with_timescale(Fill::Done, vec![raw_stream(SEQUENCE, &objects, &[])], None);
+		h.dispatch_refused().await;
+	}
+
+	/// A second stream for a group the track already holds.
+	#[moq_net_sim::test]
+	async fn a_second_stream_for_a_group_is_refused() {
+		let whole = raw_stream(SEQUENCE, &[0, 1], &[42]);
+		let h = Harness::with_timescale(Fill::Done, vec![whole.clone(), whole], None);
+		let mut stream = h.stream().await;
+		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
+		h.dispatch_refused().await;
 	}
 
 	#[moq_net_sim::test]

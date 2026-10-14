@@ -1744,6 +1744,7 @@ pub struct Producer {
 
 impl Producer {
 	/// The immutable publisher priority committed when this track was accepted.
+	#[cfg(test)]
 	pub(crate) fn publisher_priority(&self) -> u8 {
 		self.info.priority
 	}
@@ -5385,20 +5386,20 @@ mod test {
 		let body = lite::Datagram {
 			subscribe: 5,
 			sequence: d.sequence,
-			timestamp: d.timestamp.unwrap().value(),
+			timestamp: Some(d.timestamp.unwrap().value()),
 			payload: d.payload.clone(),
 		}
 		.encode_bytes(version)
 		.unwrap();
 
 		// Subscriber decodes the body and writes it downstream, preserving the sequence.
-		let wire = lite::Datagram::decode(body, version).unwrap();
+		let wire = lite::Datagram::decode(body, version, |_| true).unwrap();
 		let mut downstream = track_producer("test", Info::timed());
 		let mut downstream_dg = downstream.subscribe(None);
 		downstream
 			.insert_datagram(
 				wire.sequence,
-				Timestamp::new(wire.timestamp, Timescale::MILLI).unwrap(),
+				Timestamp::new(wire.timestamp.unwrap(), Timescale::MILLI).unwrap(),
 				wire.payload,
 			)
 			.unwrap();

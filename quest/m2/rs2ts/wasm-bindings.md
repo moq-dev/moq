@@ -4,7 +4,7 @@
 
 The Rust browser bindings support publishing and consumption for lite and
 moq-transport, including the model behavior required by `@moq/net` consumers.
-The existing consume-only experiment becomes a tested replacement candidate;
+The chosen binding becomes a tested replacement candidate;
 this quest does not switch the public package's default implementation.
 
 ## Plan
@@ -16,7 +16,8 @@ close/error behavior, cancellation, and backpressure. Validate supported
 versions and transports with the browser fixtures and `just test interop --all`.
 Wire new tests into CI, at least nightly.
 
-Start with the existing bindings. Measure boundary calls, Promise allocation,
+Complete the binding the [generator quest](/quest/m2/rs2ts/generator.md)
+chose: `moq-ffi` through UniFFI or BoltFFI, or the consume-only `moq-wasm`. Measure boundary calls, Promise allocation,
 payload copies, and retained memory. Compare a batched poll/event-drain
 boundary if these dominate, including latency and backpressure effects;
 do not require a sans-IO rewrite or impose batching latency to win throughput.
@@ -34,4 +35,5 @@ Public API: extends the unpublished browser bindings; any changes needed to
 
 ## Required
 
+- [Binding generator](/quest/m2/rs2ts/generator.md) - which binding this completes
 - [Browser backend baseline](/quest/m2/rs2ts/spike.md) - the measurements and parity harness this extends

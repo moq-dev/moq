@@ -138,7 +138,7 @@ pub(super) struct Verdict {
 /// that ends the request.
 pub(super) fn too_many<S: crate::transport::poll::Session>(session: &mut S) -> Error {
 	let err = SessionError::TooManyRequestUpdates;
-	session.close(err.to_code(), "too many request updates");
+	session.close(super::error::to_session_code(&err), "too many request updates");
 	Error::Session(err)
 }
 

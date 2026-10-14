@@ -75,9 +75,6 @@ pub enum Error {
 	#[error("MKV track layout changed after header was emitted: track '{0}' added")]
 	HeaderAddedTrack(String),
 
-	#[error("MKV track layout changed after header was emitted: track '{0}' removed")]
-	HeaderRemovedTrack(String),
-
 	#[error("MKV export does not support CMAF {kind} track '{name}'")]
 	UnsupportedCmafTrack { kind: String, name: String },
 

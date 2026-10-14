@@ -206,9 +206,10 @@ impl Broadcaster {
 	/// holding different tokens; a credential in `Config` would embed one viewer's in
 	/// another's playlist.
 	///
-	/// Lists only renditions a player can start: a video rendition appears once a listed segment
-	/// starts at a group start that is a sync point, so an early render may list audio alone, or
-	/// nothing at all.
+	/// Lists only enabled renditions a player can start: a video rendition appears once a listed
+	/// segment starts at a group start that is a sync point, so an early render may list audio
+	/// alone, or nothing at all. A disabled rendition (catalog `enabled: false`) is left out until
+	/// it re-enables, while its media playlist keeps serving.
 	pub fn master_playlist(&self, query: Option<&str>) -> String {
 		let (video, audio) = self.variants(query);
 		master::render(&video, &audio)
@@ -219,7 +220,7 @@ impl Broadcaster {
 		let mut video = Vec::new();
 		let mut audio = Vec::new();
 		for rendition in self.renditions.snapshot() {
-			if !rendition.is_advertised() {
+			if !rendition.is_enabled() || !rendition.is_advertised() {
 				continue;
 			}
 			match rendition.kind {
@@ -250,8 +251,8 @@ impl Broadcaster {
 	/// finished broadcast renders `static`. `query` propagates to every child URL exactly as
 	/// in [`master_playlist`](Self::master_playlist).
 	///
-	/// Each representation names its init by a hash of the bytes, so a rendition is left out
-	/// until its init is known. An inline-parameter-set codec only learns it from media: await
+	/// A disabled rendition is left out, as in the master playlist. Each representation names
+	/// its init by a hash of the bytes, so a rendition is left out until its init is known. An inline-parameter-set codec only learns it from media: await
 	/// each rendition's [`init`](Rendition::init) first.
 	pub fn manifest(&self, query: Option<&str>) -> Option<String> {
 		let mut video = Vec::new();
@@ -262,6 +263,9 @@ impl Broadcaster {
 			// supply the declared wall anchor.
 			if availability_start.is_none() {
 				availability_start = rendition.wall_clock(moq_net::Timestamp::ZERO);
+			}
+			if !rendition.is_enabled() {
+				continue;
 			}
 			// Without its init there is nothing to name in `initialization`; the serve path
 			// builds every init before rendering (see `build_inits`).
@@ -1034,6 +1038,78 @@ mod tests {
 			.await
 			.expect("broadcaster becomes ready with a complete segment");
 		assert!(broadcaster.master_playlist(None).contains("video/video0/media.m3u8"));
+
+		drop((media, registration, broadcast));
+	}
+
+	/// A disabled rendition leaves the master playlist but keeps its window and media playlist,
+	/// so a re-enable lists it again without resetting `EXT-X-MEDIA-SEQUENCE`. The master's
+	/// long-poll wakes for a re-enable even though the rendition set is unchanged.
+	#[tokio::test(start_paused = true)]
+	async fn a_disabled_rendition_leaves_the_master_and_keeps_its_playlist() {
+		let origin = produce_origin();
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		broadcast.announce(Default::default()).expect("publish allowed");
+		settle().await;
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+
+		let reserved = catalog.reserve();
+		let mut registration = catalog.test_video("video0").unwrap();
+		registration.set(video_config()).unwrap();
+		drop(reserved);
+
+		let track = broadcast.create_track("video0", timed()).unwrap();
+		let mut media = catalog
+			.media_producer(
+				track,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+			)
+			.unwrap();
+		for i in 0..3 {
+			media.write(vp8_frame(i * 2_000_000, true)).unwrap();
+		}
+
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		tokio::time::timeout(Duration::from_secs(5), broadcaster.advertised())
+			.await
+			.expect("the rendition is advertised");
+		let rendition = broadcaster.rendition(Kind::Video, "video0").unwrap();
+		let sequence = |rendition: &Rendition| {
+			let playlist = rendition.media_playlist(None).expect("the media playlist serves");
+			between(&playlist, "#EXT-X-MEDIA-SEQUENCE:", "\n").to_string()
+		};
+		let before = sequence(&rendition);
+		let listed = || broadcaster.master_playlist(None).contains("video/video0/media.m3u8");
+		assert!(listed());
+
+		let mut disabled = video_config();
+		disabled.enabled = false;
+		registration.set(disabled).unwrap();
+		tokio::time::timeout(Duration::from_secs(5), async {
+			while listed() {
+				tokio::task::yield_now().await;
+			}
+		})
+		.await
+		.expect("the disabled rendition leaves the master");
+		let kept = broadcaster.rendition(Kind::Video, "video0").unwrap();
+		assert!(Arc::ptr_eq(&rendition, &kept), "the rendition is kept, not rebuilt");
+		assert_eq!(sequence(&kept), before, "its media playlist keeps serving");
+
+		// A task of its own, so nothing but the long-poll's own registration can wake it.
+		let waiting = tokio::spawn({
+			let broadcaster = broadcaster.clone();
+			async move { broadcaster.advertised().await }
+		});
+		tokio::time::sleep(Duration::from_millis(10)).await;
+		assert!(!waiting.is_finished(), "nothing enabled is advertised");
+		registration.set(video_config()).unwrap();
+		tokio::time::timeout(Duration::from_secs(5), waiting)
+			.await
+			.expect("a re-enable wakes the master's long-poll")
+			.unwrap();
+		assert!(listed());
+		assert_eq!(sequence(&rendition), before, "the media sequence did not reset");
 
 		drop((media, registration, broadcast));
 	}

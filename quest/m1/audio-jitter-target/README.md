@@ -36,9 +36,9 @@ the native decode path too, asserting the same target series the browser's
 
 ## Required
 
-- [AAC bursty re-stall](/quest/m1/audio-jitter-target/aac-bursty-restall.md) - AAC under bursty delivery plays without a re-stall loop
 - [Opus isolated-ring target](/quest/m1/audio-jitter-target/opus-isolated-target.md) - the isolated ring holds the target at near-zero jitter
 - [Watch](/quest/m1/audio-jitter-target/watch.md) - the browser's measured target, proven on Chrome and Safari against the public relay
+- [AAC bursty budgets](/quest/m1/audio-jitter-target/aac-bursty-budgets.md) - post-fix nightlies confirm AAC no longer re-stalls, and its budgets are tightened from them
 
 ## Closes
 

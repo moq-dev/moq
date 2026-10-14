@@ -129,6 +129,10 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 	]);
 
 	const announced = client.announced();
+	// Watching the origin has the session discover routes into it. Request once the route
+	// lands, so the request resolves through the table rather than blind.
+	const watching = consume.announced();
+	expect((await watching.next())?.kind).toBe("start");
 	const request = consume.request(Path.from("room"));
 	let replacement: Awaited<ReturnType<typeof connect>> | undefined;
 	let fresh: ReturnType<typeof consume.request> | undefined;
@@ -216,6 +220,7 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 		video.close();
 	} finally {
 		announced.close();
+		watching.close();
 		request.close();
 		fresh?.close();
 		replacement?.abort();

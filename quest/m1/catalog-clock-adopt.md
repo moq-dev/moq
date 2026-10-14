@@ -22,11 +22,9 @@ caller has to invent an `Instant` for the input's PTS zero, and on Windows,
 whose `Instant` cannot go below its origin, that fails for a PTS zero before
 the host's boot.
 
-Non-goals: the sub-millisecond loss in `hang::catalog::Clock::wall_clock`,
-owned by [its own quest](/quest/m1/catalog-wall-clock-precision.md); JS
-publishers, which derive their clock from `performance.timeOrigin`; browser
-support. Every `moq_mux::Clock` reads `SystemTime::now()`, which panics in
-the browser, so none works there today (moq-mux is only compile-checked for
+Non-goals: JS publishers, which derive their clock from
+`performance.timeOrigin`; browser support. Every `moq_mux::Clock` reads
+`SystemTime::now()`, which panics in the browser, so none works there today (moq-mux is only compile-checked for
 wasm32). Browser wall time comes with
 [moq-net on moq-time](/quest/m1/time/net.md) (decided 2026-10-12 from
 review, over adding a browser wall source here or waiting on moq-time).
@@ -86,5 +84,4 @@ accept silently. Wire: none.
 
 ## Related
 
-- [Exact catalog wall clock](/quest/m1/catalog-wall-clock-precision.md) - the same mapping read back at full precision
 - [moq-net on moq-time](/quest/m1/time/net.md) - moves this clock's reads to moq-time

@@ -21,8 +21,8 @@ ts with one program, ts `--passthrough` (a whole multiplex included), fmp4,
 flv, and the HLS pull that reuses them. RTMP and SRT imports, the WHIP
 listener, and `ts --program all` are out: they mint an epoch per ingest
 connection (#4962), so two of them never share one. Publishers whose
-timestamps or bytes come from the instance refuse a shared epoch
-([Epoch refusals](/quest/m1/epoch-refusals.md)).
+timestamps or bytes come from the instance (avc3, capture, `rtc --connect`,
+archive, and transcode) refuse a shared epoch.
 
 Decided 2026-10-13 by the maintainer: every importer of an epoch stays live
 and derives one coordinate from the epoch and its source alone
@@ -80,7 +80,6 @@ stopping and restarting; repeat it with `--passthrough`.
 ## Required
 
 - [Announce once tracks are known](/quest/m1/import-announce-tracks.md) - a starting importer never answers `not found` for tracks its partner serves
-- [Epoch refusals](/quest/m1/epoch-refusals.md) - publishers that cannot meet the contract refuse a shared epoch
 - [Epoch anchor](/quest/m1/epoch-anchor.md) - every importer derives one catalog clock and timestamp era from the epoch
 - [Raw TS cuts on the epoch timeline](/quest/m1/ts-passthrough-epoch-cuts.md) - passthrough groups start where every instance cuts
 
