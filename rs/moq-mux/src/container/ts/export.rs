@@ -1,11 +1,13 @@
 //! MPEG-TS muxer.
 //!
 //! [`Export`] subscribes to a MoQ broadcast and produces MPEG-TS: PAT/PMT program
-//! tables and PES packets, packetized into 188-byte TS packets, with the PCR
-//! riding its own adaptation-field-only packets on a fixed media-time grid.
-//! Output is sliced on that grid rather than per media frame (the schedule):
-//! each [`Frame`] is one slot's clock packet plus the bytes belonging to it,
-//! stamped at the slot boundary, so the clock a receiver recovers from byte
+//! tables and PES packets, packetized into 188-byte TS packets, with a PCR on a
+//! fixed media-time grid. Output is sliced on that grid rather than per media
+//! frame (the schedule): each [`Frame`] is one slot, opened by its PCR, plus the
+//! bytes belonging to it. At a multiplex rate the PCR rides the adaptation field
+//! of the clock PID's packet when one can open the slot; otherwise it takes an
+//! adaptation-field-only packet of its own. Each frame is stamped at the slot
+//! boundary, so the clock a receiver recovers from byte
 //! position agrees with the values, and a pacing caller releases each slot at
 //! the instant it asserts. Video is carried as Annex-B, audio as ADTS AAC.
 //!
@@ -2030,8 +2032,9 @@ impl<E: catalog::Catalog> Export<E> {
 	/// out in.
 	///
 	/// A PES starts at every frame whose place on the media timeline, counted in frames, is a
-	/// multiple of the frames the buffer holds, so exporters of the broadcast that joined at
-	/// different frames still cut the same PESs from the first such frame, like [`due`].
+	/// multiple of the frames the buffer holds, and at every frame the tables ride on, so
+	/// exporters of the broadcast that joined at different frames still cut the same PESs from
+	/// the first such frame, like [`due`].
 	fn pack(
 		&mut self,
 		name: &str,
@@ -2053,8 +2056,11 @@ impl<E: catalog::Catalog> Export<E> {
 		// Rounded, since a frame need not last whole microseconds: AAC's 1,024 samples at 48 kHz.
 		let frame = 1_000_000 * u128::from(samples);
 		let place = (unit.timestamp.as_micros() * u128::from(rate) + frame / 2) / frame;
-		// A PTS is a whole 90 kHz tick, so the frames run on within one of where they end.
-		let joins = !place.is_multiple_of(fit)
+		// A PTS is a whole 90 kHz tick, so the frames run on within one of where they end. A
+		// frame bearing the tables starts a PES, since a receiver tunes in there and AAC's
+		// program config element rides that frame only.
+		let joins = tables.is_empty()
+			&& !place.is_multiple_of(fit)
 			&& track.pack.as_ref().is_some_and(|pack| {
 				pack.rate == rate
 					&& pack.payload.len() + payload.len() <= size

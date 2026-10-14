@@ -1028,13 +1028,14 @@ impl Schedule {
 				}
 				out.positions.as_mut().unwrap().push(position);
 				out.packets.extend_from_slice(packet);
-				out.nulls -= 1;
 				let unit = &mut self.units[i];
+				// A packet carrying the PCR takes the clock packet's position, any other a null's.
 				if let Some(rest) = opening {
 					unit.packets.truncate(unit.sent * TsPacket::SIZE);
 					unit.packets.extend_from_slice(&rest);
 					out.clocked = true;
-					out.nulls += 1;
+				} else {
+					out.nulls -= 1;
 				}
 				if unit.sent == 0 {
 					out.keyframe |= unit.keyframe;
@@ -2314,6 +2315,34 @@ mod tests {
 				.all(|&(_, clocked)| !clocked),
 			"another PID's slot has its own clock packet"
 		);
+	}
+
+	/// At 90 kb/s a slot alternates between one and two packets. In a one-packet slot, the
+	/// clock PID's packet carrying the PCR takes the only position, the one its clock packet
+	/// would have.
+	#[test]
+	fn the_pcr_rides_the_only_packet_of_a_one_packet_slot() {
+		let mut schedule = Schedule::new(Duration::from_millis(500));
+		schedule.set_rate(Some(90_000));
+		schedule.set_buffer(1, VIDEO);
+		schedule.set_clock(1);
+		for at in 0..8 {
+			schedule.push(1, timing(1_000 + 125 * at), audio(100), at == 0).unwrap();
+		}
+		let mut clock = unit(1, 1);
+		(clock[3], clock[4]) = (0x20, 183);
+		let mut null = unit(0, 1);
+		(null[1], null[2]) = (0x1f, 0xff);
+		let mut carried = Vec::new();
+		while let Some(slot) = schedule.next(None).unwrap() {
+			let laid = slot.layout(&clock, 100, &null);
+			if slot.clocked {
+				assert_eq!(pcr_of(&laid), Some(slot.pcr), "slot {}", slot.index);
+				carried.push(laid.len() / TsPacket::SIZE);
+			}
+		}
+		assert_eq!(carried.len(), 8, "every PES carries its slot's PCR");
+		assert!(carried.contains(&1), "some ride a one-packet slot: {carried:?}");
 	}
 
 	/// Each frame of a PES that packs several leaves B at its own decode time, the PES header
