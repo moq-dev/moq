@@ -64,9 +64,8 @@ jobs:
       - name: Select platform checks
         id: scope
         env:
-          MOQ_ALLOW_HOST: 1
           CI_BASE: ${{ (github.event_name != 'pull_request' && github.event_name != 'merge_group') && '--all' || github.event.merge_group.base_sha }}
-        run: just ci platform "$CI_BASE" >> "$GITHUB_OUTPUT"
+        run: just ci-select platform "$CI_BASE" >> "$GITHUB_OUTPUT"
 
   windows:
     name: Windows

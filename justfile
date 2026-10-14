@@ -78,11 +78,11 @@ check $BASE="":
 # CI runs `check` as two parallel jobs, since one runner doing both takes about
 # the sum of their times. Same dispatch, with MOQ_STRICT=1.
 
-# CI: JOB `check` lints and compiles, `test` runs tests, `platform` prints OS impact.
+# Run half of `check` for CI: JOB `check` lints and compiles, `test` runs the tests.
 ci $JOB $BASE="":
     sh/dispatch.sh "ci-$JOB" "$BASE"
 
-# Report whether a CI job selects work, before installing the dev shell or build caches.
+# Report what a CI job (`check`, `test`, `platform`) selects, before installing the dev shell or build caches.
 ci-select $JOB $BASE="":
     sh/dispatch.sh "ci-$JOB" "$BASE" --query
 

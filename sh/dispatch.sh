@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Run `just check`, `just fix`, or `just ci check|test` over the branch diff.
-# `just ci platform` prints platform suite selection without running checks.
+# `--query` prints the selection instead; `ci-platform` exists only as a query.
 #
-# Usage: sh/dispatch.sh check|fix|ci-check|ci-test|ci-platform [BASE|--all] [--query]
+# Usage: sh/dispatch.sh check|fix|ci-check|ci-test [BASE|--all] [--query]
+#        sh/dispatch.sh ci-platform BASE|--all --query
 #
 # The branch diff is resolved once and matched against the impact map below,
 # the one place that says which paths put which module in scope. `check` is
@@ -10,11 +11,11 @@
 # so there is no second definition of "checked".
 set -euo pipefail
 
-usage="usage: sh/dispatch.sh check|fix|ci-check|ci-test|ci-platform [BASE|--all] [--query]"
+usage="usage: sh/dispatch.sh check|fix|ci-check|ci-test [BASE|--all] [--query], or ci-platform BASE|--all --query"
 action=${1:?$usage}
 base=${2:-}
 query=${3:-}
-if [[ $# -gt 3 || (-n "$query" && "$query" != --query) ]]; then
+if [[ $# -gt 3 || (-n "$query" && "$query" != --query) || ("$action" == ci-platform && -z "$query") ]]; then
     echo "$usage" >&2
     exit 2
 fi
@@ -100,8 +101,9 @@ declare -A scope=(
     [gh]=''
 )
 
-# Query the same impact map without installing the platform toolchains. Rust
-# dependencies can break external consumers too, so include them in each build.
+# Report each native suite from the same impact map, before any toolchain is
+# installed. Rust dependencies can break external consumers too, so include
+# them in each build.
 if [[ "$action" == ci-platform ]]; then
     needed=false
     shared=$all

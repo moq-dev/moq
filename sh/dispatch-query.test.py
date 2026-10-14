@@ -133,6 +133,48 @@ class QueryTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("run inside the Nix dev shell", result.stderr)
 
+    def platform(self, base="origin/main"):
+        result = self.run_query("platform", base)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return dict(line.split("=") for line in result.stdout.splitlines())
+
+    def test_platform_skips_quest_and_js(self):
+        for path in ("quest/m1/example.md", "js/net/src/example.ts"):
+            with self.subTest(path=path):
+                self.change(path)
+                self.assertEqual(self.platform()["needed"], "false")
+                (self.repo / path).unlink()
+
+    def test_platform_rust_change_rebuilds_external_consumers(self):
+        self.change("rs/moq-net/src/lib.rs")
+        result = self.platform()
+        for suite in ("rs", "swift", "cpp", "obs_compile", "needed"):
+            self.assertEqual(result[suite], "true", suite)
+        self.assertEqual(result["moq_sh"], "false")
+
+    def test_platform_selects_only_the_touched_suite(self):
+        self.change("doc/lib/swift/index.md")
+        result = self.platform()
+        self.assertEqual((result["swift"], result["rs"]), ("true", "false"))
+        (self.repo / "doc/lib/swift/index.md").unlink()
+        self.change("infra/moq-sh/install.sh")
+        result = self.platform()
+        self.assertEqual((result["moq_sh"], result["rs"]), ("true", "false"))
+
+    def test_platform_shared_configuration_selects_everything(self):
+        for path in (".cargo/config.toml", ".github/workflows/platform.yml", "rs/justfile"):
+            with self.subTest(path=path):
+                self.change(path)
+                self.assertEqual(set(self.platform().values()), {"true"})
+                (self.repo / path).unlink()
+        self.assertEqual(set(self.platform("--all").values()), {"true"})
+
+    def test_platform_is_only_a_query(self):
+        result = subprocess.run(["bash", "sh/dispatch.sh", "ci-platform", "origin/main"],
+                                cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+
 
 def benchmark():
     # Sweep path count and both job selections. No timing threshold: hosted setup

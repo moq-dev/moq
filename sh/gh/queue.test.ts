@@ -34,6 +34,8 @@ for (const config of [check, platform, dart, swift]) {
 	assert.ok(config.on.pull_request.types.includes("edited"), "retargeting to release must rerun");
 }
 assert.deepEqual(Object.keys(platform.jobs).sort(), ["macos", "scope", "windows"]);
+// The selector runs before any toolchain, through the same query as Check and Test.
+assert.equal(platform.jobs.scope.steps.at(-1).run, 'just ci-select platform "$CI_BASE" >> "$GITHUB_OUTPUT"');
 for (const job of [platform.jobs.macos, platform.jobs.windows]) {
 	assert.equal(condition(job.if, "merge_group", "", false), false);
 	assert.equal(condition(job.if, "merge_group", "", true), true);

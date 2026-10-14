@@ -11,10 +11,16 @@ the implementation PR.
 - Main ruleset 2420853 already requires `Check` and `Test`. Keep both and add
   `Platform scope`, `macOS`, and `Windows`, from the GitHub Actions integration
   (15368). The workflow reports skipped contexts on main PRs, then executes
-  the combined change in the merge queue.
+  the combined change in the merge queue. Add them right after the workflow
+  lands, before enqueuing anything else; an older open PR reports them after
+  its next push or edit.
 - Release ruleset 24392632 has no merge queue. Keep its `Check` and `Test`
   contexts and add the same three platform contexts; release-targeting PRs
-  execute them before merging.
+  execute them before merging. A release PR runs the workflows merged with
+  `release`, so wait until the next cut carries this workflow there; earlier,
+  backports would wait forever on contexts the old workflow never reports.
+- The queue's 60-minute check timeout now covers one serial job per OS.
+  Raise it if the first full Windows runs approach it.
 - Require `Platform scope` too: a failed selector skips its OS dependents,
   and skipped jobs alone satisfy required checks.
 - Confirm a platform-affecting main merge group runs at most one macOS job
