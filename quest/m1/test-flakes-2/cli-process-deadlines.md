@@ -15,16 +15,18 @@ to end.
 Seen 2026-10-13 on #5458 and #5481 at load averages near 47 on 24 cores:
 each timed out and passed alone. The tests spawn real `moq` processes and
 bound them with wall-clock deadlines (`TIMEOUT` of 10 s, and the export's
-"exited within 10 s" check), so a slow spawn under load reads as a failure.
+"exited within 10 s" check), so a slow process under load reads as a failure.
 `the_same_instance_within_the_linger_continues` failed beside them but is
 tracked by [TS same-instance resume](/quest/m1/ts-same-instance-resume.md).
 
-Reproduce under load first. Then assert on an event instead of a deadline
-where the deadline isn't the property under test: the auth tests already wait
-for "auth server listening", so their exit wait can follow the same pattern.
-The export test's 10 s check is the property (no lingering), so measure it
-from an event the process logs rather than from the parent's spawn. If the
-process itself is slow under load, fix that. Never widen a timeout or add a
-retry.
+Reproduce under load first and record which wait expired. Some deadlines are
+the property under test and must stay bounded, so a regression fails at its
+assertion instead of hanging CI: the auth tests' exit wait after the signal,
+and the export's 10 s check. The auth tests' wait for "auth server listening"
+only gates setup. The export check starts after both spawns, just before the
+AV1 write, so it covers the import, the export's catalog read, and its exit,
+not process startup. Find what in the expired interval is slow under load and
+fix it, or move a check to a deterministic in-process test if the process
+boundary isn't what it proves. Never widen a timeout or add a retry.
 
 Public API: none. Wire: none.
