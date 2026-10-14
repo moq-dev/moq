@@ -418,7 +418,17 @@ export class Subscriber {
 		// v14/v15: SubscribeNamespace on control stream (via adapter virtual stream)
 		// v16+: SubscribeNamespace on its own real bidi stream
 
-		const requestId = await this.#session.nextRequestId();
+		// A consumer that leaves while waiting on request-ID credit takes no ID, so a granted one
+		// never opens a request nobody wants.
+		const left = new AbortController();
+		void announced.closed.then(() => left.abort());
+		let requestId: bigint | undefined;
+		try {
+			requestId = await this.#session.nextRequestId(left.signal);
+		} catch (err) {
+			if (left.signal.aborted) return;
+			throw err;
+		}
 		if (requestId === undefined) return;
 
 		try {

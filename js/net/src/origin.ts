@@ -1857,7 +1857,10 @@ export class Consumer {
 		// Any other request watches its path once it resolves through a discovered route, so that
 		// route stays discovered after whatever watch found it, such as a listing, is gone.
 		const discovered = (resolution: Resolution | undefined) => {
-			if (unwatch || !resolution?.front || !resolution.source || resolution.source === resolution.front) return;
+			if (unwatch || !resolution?.front) return;
+			// Only a route a session received; a local broadcast or dynamic route needs no discovery.
+			const entry = this.#state.materialized.get(path)?.entry;
+			if (!entry || entry.identity !== resolution.source || !received(entry)) return;
 			unwatch = this.#state.watch([path]);
 		};
 		discovered(route.peek());
