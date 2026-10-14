@@ -16,10 +16,10 @@ hour; each passed on rerun. Neither PR touched the TS path.
 This check guards real delivery, so treat it as a possible product bug first,
 not a harness flake. Reproduce it by looping `just test ts` beside a CPU hog,
 keep the source and capture from a failing run, and diff the picture digests
-to see whether pictures are missing, duplicated, or the suffix start is
-misjudged. Then fix the side at fault: the export or relay losing a picture,
-or the harness picking the wrong admitted start. Never loosen the comparison,
-widen a timeout, or add a retry. Land a regression that fails without the fix
-where one is easy.
+to see whether pictures are missing, duplicated, corrupted, or the suffix
+start is misjudged. Then fix the side at fault: the import, relay, or export
+losing or altering a picture, or the harness picking the wrong admitted
+start. Never loosen the comparison, widen a timeout, or add a retry. Land a
+regression that fails without the fix where one is easy.
 
 Public API: none expected. Wire: none.
