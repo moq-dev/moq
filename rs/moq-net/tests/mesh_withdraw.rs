@@ -9,13 +9,23 @@ mod support;
 
 use std::{collections::HashMap, time::Duration};
 
-use futures::{StreamExt, channel::mpsc};
+use futures::channel::mpsc;
 
-use moq_net::{Hop, Version, announce, broadcast, origin};
+use moq_net::{Hop, Version, announce, broadcast, cache, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock, peer, peer_with_latency};
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	produce(hop, origin::DEFAULT_UPDATE_HOLD)
+}
+
+/// An origin holding route updates for `hold`. Its cache never expires idle
+/// groups: nothing here carries media, and the expiry sweep would keep a timer
+/// armed forever, so [`moq_net_sim::idle`] could never see the mesh settle.
+fn produce(hop: u64, hold: Duration) -> origin::Producer {
+	let mut config = origin::Config::new(Hop::new(hop).unwrap());
+	config.pool = cache::Pool::unbounded();
+	config.update_hold = hold;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
 	producer
 }
@@ -29,12 +39,11 @@ enum Kind {
 	End,
 }
 
-/// Every update per prefix until the watcher goes quiet. Time is paused, so the
-/// timeout fires only once every task is idle. Quiet means longer than a
-/// retraction's two-second quarantine, which could release a stale path late.
-async fn drain(watched: &mut mpsc::UnboundedReceiver<(String, Kind)>) -> HashMap<String, Vec<Kind>> {
+/// Every update per prefix the watcher has seen. Await [`moq_net_sim::idle`]
+/// first, so every link, hold and quarantine in the mesh has settled.
+fn drain(watched: &mut mpsc::UnboundedReceiver<(String, Kind)>) -> HashMap<String, Vec<Kind>> {
 	let mut updates = HashMap::<String, Vec<Kind>>::new();
-	while let Ok(Some((prefix, kind))) = moq_net_sim::timeout(Duration::from_secs(3), watched.next()).await {
+	while let Ok((prefix, kind)) = watched.try_recv() {
 		updates.entry(prefix).or_default().push(kind);
 	}
 	updates
@@ -97,7 +106,8 @@ impl Mesh {
 				broadcast
 			})
 			.collect();
-		let updates = drain(&mut self.watched).await;
+		moq_net_sim::idle().await;
+		let updates = drain(&mut self.watched);
 		assert_eq!(updates.len(), count);
 		for (prefix, kinds) in updates {
 			assert_eq!(kinds[0], Kind::Start, "{prefix}: {kinds:?}");
@@ -133,7 +143,8 @@ async fn full_mesh_withdraw_retracts_once(version: &str) {
 	let mut mesh = Mesh::new(version, 8, &full_mesh(8)).await;
 	let broadcasts = mesh.publish(100, 0).await;
 	drop(broadcasts);
-	let updates = drain(&mut mesh.watched).await;
+	moq_net_sim::idle().await;
+	let updates = drain(&mut mesh.watched);
 	assert_eq!(updates.len(), 100);
 	for (prefix, kinds) in updates {
 		assert_eq!(kinds, [Kind::End], "{prefix}");
@@ -151,7 +162,8 @@ async fn partial_mesh_withdraw_then_republish() {
 	let mut mesh = Mesh::new("moq-lite-06", 12, &ring_with_chords(12)).await;
 	let broadcasts = mesh.publish(100, 0).await;
 	drop(broadcasts);
-	let updates = drain(&mut mesh.watched).await;
+	moq_net_sim::idle().await;
+	let updates = drain(&mut mesh.watched);
 	assert_eq!(updates.len(), 100);
 	for (prefix, kinds) in updates {
 		assert_eq!(kinds.last(), Some(&Kind::End), "{prefix}: {kinds:?}");
@@ -212,8 +224,9 @@ async fn partial_mesh_withdraw_retracts_once() {
 	for publisher in [5, 13, 22, 26, 32] {
 		let broadcast = nodes[publisher].create_broadcast(format!("room/{publisher}")).unwrap();
 		broadcast.announce(Default::default()).unwrap();
+		moq_net_sim::idle().await;
 		for (relay, watched) in watched.iter_mut().enumerate() {
-			let updates = drain(watched).await;
+			let updates = drain(watched);
 			assert!(
 				updates.values().all(|kinds| kinds.last() != Some(&Kind::End)),
 				"relay {relay}: {updates:?}"
@@ -221,9 +234,10 @@ async fn partial_mesh_withdraw_retracts_once() {
 		}
 
 		drop(broadcast);
+		moq_net_sim::idle().await;
 		let mut hunted = Vec::new();
 		for (relay, watched) in watched.iter_mut().enumerate() {
-			let updates = drain(watched).await;
+			let updates = drain(watched);
 			let kinds = &updates[&format!("room/{publisher}")];
 			if kinds != &[Kind::End] {
 				hunted.push((relay, kinds.clone()));
@@ -264,14 +278,16 @@ async fn retracted_relay_ignores_a_stale_path() {
 
 	let broadcast = nodes[7].create_broadcast("room/7").unwrap();
 	broadcast.announce(Default::default()).unwrap();
+	moq_net_sim::idle().await;
 	for watched in watched.iter_mut() {
-		drain(watched).await;
+		drain(watched);
 	}
 
 	drop(broadcast);
+	moq_net_sim::idle().await;
 	let mut revived = Vec::new();
 	for (relay, watched) in watched.iter_mut().enumerate() {
-		let kinds = drain(watched).await.remove("room/7").unwrap();
+		let kinds = drain(watched).remove("room/7").unwrap();
 		assert_eq!(kinds.last(), Some(&Kind::End), "relay {relay}: {kinds:?}");
 		if kinds.windows(2).any(|w| w == [Kind::End, Kind::Start]) {
 			revived.push((relay, kinds));
@@ -299,13 +315,6 @@ struct Cluster {
 impl Cluster {
 	async fn new(version: &str, edges: &[Link], hold: Duration, publisher: usize, watcher: usize) -> Self {
 		let version: Version = version.parse().unwrap();
-		let produce = |id: u64, hold: Duration| {
-			let mut config = origin::Config::new(Hop::new(id).unwrap());
-			config.update_hold = hold;
-			let (producer, driver) = origin::Producer::new(config);
-			support::harness::spawn(driver);
-			producer
-		};
 		let n = edges.iter().map(|&((a, b), _)| a.max(b) + 1).max().unwrap();
 		let relays: Vec<_> = (1..=n as u64).map(|id| produce(id, hold)).collect();
 		let mut pairs = Vec::new();
@@ -332,7 +341,8 @@ impl Cluster {
 			relays: relays.iter().map(|relay| watch(relay.consume().announced())).collect(),
 		};
 		// Let every session's announce interest land before anything is published.
-		assert!(drain(&mut cluster.client).await.is_empty());
+		moq_net_sim::idle().await;
+		assert!(drain(&mut cluster.client).is_empty());
 		cluster
 	}
 
@@ -341,10 +351,11 @@ impl Cluster {
 	async fn publish(&mut self, path: &str) -> (broadcast::Producer, Vec<Kind>) {
 		let broadcast = self.publisher.create_broadcast(path).unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		let client = drain(&mut self.client).await.remove(path).unwrap();
+		moq_net_sim::idle().await;
+		let client = drain(&mut self.client).remove(path).unwrap();
 		assert_ne!(client.last(), Some(&Kind::End), "client: {client:?}");
 		for (relay, watched) in self.relays.iter_mut().enumerate() {
-			let kinds = drain(watched).await.remove(path).unwrap();
+			let kinds = drain(watched).remove(path).unwrap();
 			assert_ne!(kinds.last(), Some(&Kind::End), "relay {relay}: {kinds:?}");
 		}
 		(broadcast, client)
@@ -353,10 +364,11 @@ impl Cluster {
 	/// Close `broadcast` cleanly: what the watching client, then each relay, saw.
 	async fn close(&mut self, path: &str, broadcast: broadcast::Producer) -> (Vec<Kind>, Vec<Vec<Kind>>) {
 		drop(broadcast);
-		let client = drain(&mut self.client).await.remove(path).unwrap();
+		moq_net_sim::idle().await;
+		let client = drain(&mut self.client).remove(path).unwrap();
 		let mut relays = Vec::new();
 		for watched in self.relays.iter_mut() {
-			relays.push(drain(watched).await.remove(path).unwrap());
+			relays.push(drain(watched).remove(path).unwrap());
 		}
 		(client, relays)
 	}
