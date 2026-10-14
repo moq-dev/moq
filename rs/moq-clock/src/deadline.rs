@@ -150,10 +150,13 @@ impl Deadline {
 		self.at = at;
 		let Some(at) = at else { return };
 		if at <= state.now {
-			// Already reached: wake whoever is parked on it, so it fires now.
+			// Already reached: wake whoever is parked on it, and the owner in case
+			// nobody polled it yet, so it fires now.
+			let mut owner = state.owner.take();
 			drop(state);
 			let mut ready = self.waiters.lock().unwrap().take();
 			ready.wake();
+			owner.wake();
 			return;
 		}
 		let key = (at, state.next);
@@ -337,6 +340,19 @@ mod tests {
 		deadline.set(Some(clock.now()));
 		assert_eq!(wakes.count.load(Ordering::SeqCst), 1, "the parked waiter was not woken");
 		assert!(deadline.poll(&waiter).is_ready());
+	}
+
+	#[test]
+	fn arming_an_unpolled_deadline_to_a_reached_instant_wakes_the_owner() {
+		let clock = Manual::new();
+		let deadlines = Deadlines::new(clock.now());
+		let (wakes, owner) = counter();
+		deadlines.advance(clock.now());
+		assert_eq!(deadlines.park(&owner), None);
+
+		let mut deadline = Deadline::new(&deadlines);
+		deadline.set(Some(clock.now()));
+		assert_eq!(wakes.count.load(Ordering::SeqCst), 1, "the parked owner was not woken");
 	}
 
 	#[test]
