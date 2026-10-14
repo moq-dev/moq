@@ -147,7 +147,6 @@ above them.
 - [Audio warmup](/quest/m1/audio-warmup.md) - a viewer joining an Opus rendition mid-stream never hears the unconverged first 80 ms
 - [#3021](/quest/m1/3021-moq-gst-anchor-generated-media-timelines-to-wall-clock.md) - moq-gst picks the broadcast wall epoch; a restarted source is a new epoch, not a forward re-anchor
 - [moqsrc A/V alignment](/quest/m1/gst-src-av-sync.md) - every `moqsrc` pad of a run shares one timestamp reference and segment base
-- [TS export backlog](/quest/m1/ts-export-backlog.md) - `export ts` reads a track only until a frame is due, like FLV and MKV, so a backlog stays in the source
 - [CLI stdin shutdown on release](/quest/m1/cli-stdin-release.md) - backport only the runtime-teardown fix so a stopped CLI exits while its stdin writer stays open
 - [Draft 14-16 updates](/quest/m1/ietf-legacy-updates.md) - Rust and JS apply and answer moq-transport 14-16 request updates without ending or leaking the request
 - [Tail arrivals](/quest/m1/tail-arrivals.md) - a track judges its pending tail from recorded arrivals, not a cache scan, and errors a reader whose tail ends short
