@@ -27,7 +27,6 @@ These land with the next breaking release, not the 2026-09-23 train.
   now take effect on parsed and merged configs unless the flag or environment
   variable was actually given. TOML keys, C ABI, binding records, and wire
   formats are unchanged.
-
 - **A QUIC load-balancer nonce needs its server id.** `listen.lb_nonce`,
   `--listen-quic-lb-nonce`, and `MOQ_LISTEN_QUIC_LB_NONCE` without `lb_id` stop
   startup. Setting `lb_id` (or `lb_nonce`) and `load_balancer` together also
