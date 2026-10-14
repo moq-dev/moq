@@ -96,8 +96,22 @@ windows $BASE="":
 windows-test:
     just rs test -p moq-auth -p hang -p moq-tokio -p moq-sock
 
+# Refuse a host that cannot run the mandatory io_uring CI tests.
+uring-kernel:
+    bash sh/rs/uring-kernel.sh
+
+# Run io_uring tests when the branch affects the relay or its dependencies.
+[positional-arguments]
+uring-changed base="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    changed=$(mktemp)
+    trap 'rm -f "$changed"' EXIT
+    bash sh/changed.sh "$1" > "$changed"
+    bash sh/rs/select.sh uring "$changed"
+
 # Compile and test the io_uring relay path, which is off the default feature set.
-# Linux-only, and the tests below the 6.12 kernel floor skip themselves.
+# Linux-only; MOQ_STRICT requires a supported kernel instead of skipping tests.
 [positional-arguments]
 uring *args:
     just rs uring-check "$@"

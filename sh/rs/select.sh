@@ -2,13 +2,13 @@
 # Run `just rs check|check-test|fix|test` on the crates a diff touches, plus
 # their dependents. `platform` is the Windows and macOS compile.
 #
-# Usage: sh/rs/select.sh check|check-test|fix|test|platform LISTFILE|--all
+# Usage: sh/rs/select.sh check|check-test|fix|test|platform|uring LISTFILE|--all
 #
 # LISTFILE holds the changed paths, one per line. `--all` is the whole
 # workspace, as is a change to anything every crate is built or tested by.
 set -euo pipefail
 
-usage="usage: sh/rs/select.sh check|check-test|fix|test|platform LISTFILE|--all"
+usage="usage: sh/rs/select.sh check|check-test|fix|test|platform|uring LISTFILE|--all"
 action=${1:?$usage}
 list=${2:?$usage}
 
@@ -16,6 +16,10 @@ cd "$(git rev-parse --show-toplevel)"
 
 # Print `ALL`, nothing (no crate affected), or cargo package ids.
 select_packages() {
+    if [[ "$action" == uring && -f "$list" ]] && grep -qE '^(justfile|flake\.(nix|lock)|sh/changed\.sh|sh/rs/uring-kernel\.sh|\.github/workflows/uring\.yml|\.cargo/.*|\.github/actions/.*)$' "$list"; then
+        echo ALL
+        return
+    fi
     if [[ "$list" == --all ]] || grep -qE '^(Cargo\.(toml|lock)|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|nextest)\.sh|\.config/nextest\.toml)$' "$list"; then
         echo ALL
         return
@@ -119,6 +123,9 @@ else
 fi
 
 case "$action" in
+    uring)
+        if wants '(moq-uring|moq-relay)'; then just rs uring; fi
+        ;;
     check | check-test)
         just rs "$action" "${flags[@]}"
         # Workspace feature unification hides a broken moq-tokio feature set
