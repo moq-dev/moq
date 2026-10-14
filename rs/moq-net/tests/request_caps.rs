@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A server's [`moq_net::session::Limits`] bound what one client can make it hold: a client
 //! past a cap loses the session with TOO_MANY_REQUESTS, and on moq-transport drafts 14 to 16
 //! the MAX_REQUEST_ID window they size is granted back as requests close, so a client that

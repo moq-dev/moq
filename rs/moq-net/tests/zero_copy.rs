@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A frame crosses an in-memory session as the same allocation it was written as: the
 //! publisher hands the payload to the transport, and the subscriber reads it back,
 //! without a copy on either side.

@@ -196,6 +196,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command cargo bench --locked -p moq-net --features fuzz --bench '*' -- --test
 
+      # Runs each kio Criterion routine once, including the contended bench's
+      # worker threads, so one that deadlocks or panics fails here. Timing is
+      # not compared.
+      - name: kio benchmark smoke
+        if: ${{ !cancelled() }}
+        run: nix develop --command cargo bench --locked -p kio --bench '*' -- --test
+
       - name: HTTP idle accounting benchmark smoke
         if: ${{ !cancelled() }}
         run: nix develop --command cargo bench --locked -p moq-relay --bench http_idle -- --test

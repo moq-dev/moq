@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A side may decline a moq-transport extension with `setup::Extensions`, and then
 //! connects as a peer that does not speak it.
 //!

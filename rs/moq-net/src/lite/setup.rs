@@ -341,6 +341,7 @@ mod tests {
 	/// draft makes such a publisher reset any Probe Stream a subscriber opens. It
 	/// must advertise `None` so the subscriber never opens one.
 	#[test]
+	#[cfg(feature = "async")]
 	fn detect_reports_nothing_without_stats() {
 		use crate::lite::test_transport::{SinkSession, SinkStats};
 		let session = SinkSession::new(Default::default()).with_stats(SinkStats::default());
@@ -350,6 +351,7 @@ mod tests {
 	/// Either metric alone is enough to report, since the two PROBE fields are
 	/// independent on the wire.
 	#[test]
+	#[cfg(feature = "async")]
 	fn detect_reports_with_either_metric() {
 		use crate::lite::test_transport::{SinkSession, SinkStats};
 

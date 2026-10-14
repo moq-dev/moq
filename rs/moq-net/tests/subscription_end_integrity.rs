@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A subscription ends cleanly only when every group in its range has been accounted
 //! for; a session closing with a group still in flight ends it with an error.
 //!

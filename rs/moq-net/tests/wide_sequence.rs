@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A group sequence only moq-lite 07 can carry, relayed to a moq-lite 06 reader.
 
 mod support;

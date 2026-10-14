@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A FETCH nobody wants anymore is cancelled all the way to the publisher.
 //!
 //! Each relay on the path holds a FETCH stream and the group behind it. When the

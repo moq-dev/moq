@@ -88,15 +88,18 @@ wants() {
     [[ "$packages" == ALL ]] || grep -qwE "$1" <<<"$names"
 }
 
-# The media feature contract script is no crate, so its own diff selects
-# nothing and still has to reach the gate below.
+# The feature contract scripts are no crate, so their own diff selects
+# nothing and still has to reach the gates below.
 media_script=
 if [[ -f "$list" ]] && grep -qx 'sh/rs/media-features.sh' "$list"; then media_script=1; fi
+net_script=
+if [[ -f "$list" ]] && grep -qx 'sh/rs/net-features.sh' "$list"; then net_script=1; fi
 
 case "$packages" in
     "")
-        if [[ "$action" == check* && -n "$media_script" ]]; then
-            just rs media-features
+        if [[ "$action" == check* && -n "$media_script$net_script" ]]; then
+            if [[ -n "$media_script" ]]; then just rs media-features; fi
+            if [[ -n "$net_script" ]]; then just rs net-features; fi
         else
             echo "rs: no crates affected; skipping."
         fi
@@ -121,6 +124,8 @@ case "$action" in
         # Workspace feature unification hides a broken moq-tokio feature set
         # whenever any dependent enables a transport.
         if wants moq-tokio; then just rs tokio-features; fi
+        # Likewise every dependent turns moq-net's default `async` feature back on.
+        if [[ -n "$net_script" ]] || wants moq-net; then just rs net-features; fi
         # moq-wasm's crate root is `#![cfg(target_arch = "wasm32")]`, so only a
         # wasm32 pass checks it. moq-mux, moq-ffi, and moq-clock ride along in that pass, and
         # nothing depends on moq-ffi, so each has to reach it on its own.

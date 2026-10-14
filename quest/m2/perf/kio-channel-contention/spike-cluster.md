@@ -15,8 +15,8 @@ numbers and a recommendation go in the
 
 - Cluster links dial only by URL over QUIC today
   (`run_remote_session`, `rs/moq-relay/src/cluster.rs`); the spike adds a
-  throwaway seam to hand a cluster a pre-made bridge session.
-  `moq_net::Client::connect` and `Server::accept` already take the bridge,
+  throwaway seam to hand a cluster a pre-made memory session.
+  `moq_net::Client::connect` and `Server::accept` already take a `memory::Session`,
   which meets their `Boxable` and `MaybeSync` bounds.
 - Everything crosses workers through moq-lite: announcements, routes, and
   groups. That isolates what sharing the control plane saves, and exercises
@@ -26,7 +26,3 @@ numbers and a recommendation go in the
   between workers and the memory of W announce tables.
 - A win goes to `/quest-plan` for a real implementation quest; a no-win
   restores the perf epic's no-sharding rule.
-
-## Required
-
-- [Contended bench](/quest/m2/perf/kio-channel-contention/bench.md) - the baseline and the named channels

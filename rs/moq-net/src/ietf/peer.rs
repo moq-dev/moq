@@ -57,6 +57,7 @@ impl PeerSetup {
 	/// The peer MUST send exactly one, so this resolves once that stream is read. Waits
 	/// forever if it never does; the caller is a session task, cancelled when the driver
 	/// drops.
+	#[cfg(feature = "async")]
 	pub async fn get(&self) -> Peer {
 		let slot = self
 			.0
@@ -69,7 +70,7 @@ impl PeerSetup {
 	}
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "async"))]
 mod tests {
 	use super::*;
 

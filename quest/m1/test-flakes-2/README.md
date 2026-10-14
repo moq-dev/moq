@@ -39,7 +39,7 @@ Public API: none. Wire: none.
 - [Auth refresh mocks time](/quest/m1/test-flakes-2/auth-refresh-mock-time.md) - moq-relay's auth refresh and fixed-lease tests measure a grant's life on one mocked clock
 - [uring teardown close](/quest/m1/test-flakes-2/uring-teardown-close.md) - moq-uring's published-close teardown test holds under load, fixed at its cause
 - [Auth serve signals](/quest/m1/test-flakes-2/auth-serve-signals.md) - moq-cli's auth serve signal tests hold under load
-- [Export failure exit](/quest/m1/test-flakes-2/export-failure-exit.md) - moq-cli's failed-export exit test holds under load
+- [Export exit tests](/quest/m1/test-flakes-2/export-failure-exit.md) - moq-cli's failed-export and interrupted-publisher exit tests hold under load
 - [FFI shutdown](/quest/m1/test-flakes-2/ffi-shutdown.md) - moq-ffi's graceful shutdown tests hold under load
 
 ## Related

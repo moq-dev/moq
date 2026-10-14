@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! `broadcast::Producer::close()` ends a broadcast the same way for a local consumer
 //! and a remote one: the handle closes, every new track lookup answers
 //! [`Error::Unroutable`](moq_net::Error::Unroutable), a fresh request for the path
