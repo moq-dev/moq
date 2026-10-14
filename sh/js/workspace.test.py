@@ -128,11 +128,20 @@ class SelectionTest(unittest.TestCase):
         self.reader('const corpus = join(import.meta.dir, "../../../doc/corpus");\n'
                     'import { view } from "../../view/src/index";\n'
                     'expect(resolve("../../..", "../../../missing")).toBe(`../${name}`);\n')
-        self.assertEqual(self.plan(None)["inputs"], ["doc/corpus", "js/view/src/index.ts"])
+        self.assertEqual(self.plan(None)["inputs"], ["doc/corpus", "js/view/src/index", "missing"])
         self.assertEqual(set(self.plan(["doc/corpus/case.json"])["packages"]), {"docs", "reader"})
         self.assertEqual(set(self.plan(["js/view/src/index.ts"])["packages"]),
                          {"@example/view", "docs", "reader"})
         self.assertEqual(list(self.plan(["doc/index.md"])["packages"]), ["docs"])
+        self.assertEqual(selector.unmapped(self.root, ["doc/corpus", "js/view/src/index", "missing"]), [])
+
+    def test_deleted_cross_tree_inputs_keep_their_readers(self):
+        # The diff removed the directory and the file, but the reader still names them.
+        self.reader('const corpus = join(import.meta.dir, "../../../doc/corpus");\n'
+                    'import { view } from "../../view/src/index";\n')
+        self.assertEqual(set(self.plan(["doc/corpus/case.json"])["packages"]), {"docs", "reader"})
+        self.assertEqual(set(self.plan(["js/view/src/index.ts"])["packages"]),
+                         {"@example/view", "docs", "reader"})
 
     def test_unowned_cross_tree_input_still_falls_back(self):
         (self.root / "rs").mkdir()

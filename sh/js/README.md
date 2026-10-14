@@ -10,9 +10,9 @@ are never maintained separately from these manifests.
 
 Sources can also read another tree's files, like `@moq/hang` grading itself against
 the `doc/concept/audio-jitter/` corpus. The selector scans each workspace for string
-literals that climb out of it (`../`) and name an existing path, and a change under
-one also selects its readers. A check fails when such an input is missing from the
-dispatcher's static JS pattern, which would otherwise never run the readers.
+literals that climb out of it (`../`), and a change to or under such a path, even a
+deletion, also selects its readers. A check fails when an existing input is missing
+from the dispatcher's static JS pattern, which would otherwise never run the readers.
 
 An input outside every current workspace selects all packages, including shared
 inputs such as `js/common/`, `js/justfile`, `test/tsconfig.json`, `drafts/`, Rust's

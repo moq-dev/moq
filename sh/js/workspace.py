@@ -20,7 +20,11 @@ RELATIVE = re.compile(r"""["'`]((?:\.\./)+[^"'`$?\s]*)""")
 
 
 def inputs(root, directory):
-    """Existing files and directories outside a workspace that its sources name by relative path."""
+    """Paths outside a workspace that its sources name relative to themselves.
+
+    These include path-algebra test strings that name nothing, which can only
+    over-select, and inputs a diff deletes, whose readers must still run.
+    """
     found = set()
     for folder, children, files in os.walk(root / directory):
         children[:] = [child for child in children if child not in ("node_modules", "dist")]
@@ -30,14 +34,18 @@ def inputs(root, directory):
             for literal in RELATIVE.findall((Path(folder) / file).read_text(errors="replace")):
                 path = os.path.relpath(os.path.normpath(os.path.join(folder, literal)), root)
                 # Skip paths in this workspace or its ancestors, outside the repository, and
-                # installed packages (the lockfile covers them). Requiring an existing file,
-                # including an extensionless import's, drops path-algebra test strings.
+                # installed packages (the lockfile covers them).
                 if (path in (".", "..") or path.startswith("../") or "node_modules" in path.split("/")
                         or path == directory or path.startswith(directory + "/")
                         or directory.startswith(path + "/")):
                     continue
-                found.update(c for c in (path, *(path + e for e in SOURCES)) if (root / c).exists())
+                found.add(path)
     return found
+
+
+def reads(path, target):
+    """Whether a changed path is an input, lies under it, or is an extensionless import's file."""
+    return path == target or path.startswith(target + "/") or os.path.splitext(path)[0] == target
 
 
 def selection(root, paths):
@@ -67,7 +75,7 @@ def selection(root, paths):
         selected.add(max(owners, key=lambda owner: len(owner[1]))[0])
         # Manifests miss a package reading another tree's files, so add those readers too.
         selected |= {name for name, package in packages.items()
-                     if any(path == i or path.startswith(i + "/") for i in package["inputs"])}
+                     if any(reads(path, i) for i in package["inputs"])}
 
     if fallback:
         selected = set(packages)
@@ -98,10 +106,13 @@ def selection(root, paths):
 
 
 def unmapped(root, paths):
-    """Inputs the dispatcher's static JS impact map misses, so changing one would skip its readers."""
-    impact = re.search(r"^\s*\[js\]='([^']*)'", (root / "sh/dispatch.sh").read_text(), re.M)
-    # A directory input matches through the files under it.
-    return [path for path in paths if not any(re.search(impact.group(1), p) for p in (path, path + "/"))]
+    """Existing inputs the dispatcher's static JS impact map misses, so changing one would skip its readers."""
+    impact = re.compile(re.search(r"^\s*\[js\]='([^']*)'", (root / "sh/dispatch.sh").read_text(),
+                                  re.M).group(1))
+    # A directory input matches through the files under it, and an import through its file.
+    return [path for path in paths
+            if any((root / c).exists() for c in (path, *(path + e for e in SOURCES)))
+            and not any(impact.search(c) for c in (path, path + "/", *(path + e for e in SOURCES)))]
 
 
 def run(action, plan):
