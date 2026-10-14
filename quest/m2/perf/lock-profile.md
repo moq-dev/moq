@@ -22,9 +22,10 @@ Linux; the CPU and heap modes remain.
 
 Decided 2026-10-08: the reproducible CPU and allocation profile quest merged
 here, so the relay has one profiling recipe with capture modes rather than
-two launchers. The lock-wait mode lands first, since
-[kio channel contention](/quest/m2/perf/kio-channel-contention.md) waits on
-it; the CPU and heap modes follow in the same recipe.
+two launchers. The lock-wait mode landed first, since
+[kio channel contention](/quest/m2/perf/kio-channel-contention/README.md)
+needed it; the CPU and heap modes follow in the same recipe. Decided
+2026-10-14: kio channel contention no longer waits on the remaining modes.
 
 Shared by every mode:
 
@@ -101,5 +102,5 @@ CPU and heap:
 
 ## Related
 
-- [kio channel contention](/quest/m2/perf/kio-channel-contention.md) - requires this for its before and after
+- [kio channel contention](/quest/m2/perf/kio-channel-contention/README.md) - measures its before and after with the lock-wait mode
 - [Benchmark reporting](/bench/README.md) - shares the workload lifecycle and artifact conventions
