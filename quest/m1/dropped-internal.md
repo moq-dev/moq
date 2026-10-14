@@ -31,10 +31,14 @@ Decided with the maintainer on 2026-10-13:
   - The `moq-transcode` rung whose source closes while idle passes on the
     source's own end, or `Cancel` if it ended cleanly.
 - Use existing variants; no new public variant.
-- Paths that cannot happen (the lite subscriber's "our own producer is alive"
-  arms, an IETF alias or fill `write()` on a closed table) return the nearest
-  real cause plus `debug_assert!(false, ...)`, so tests catch a broken
-  invariant without panicking a release relay.
+- Error arms that swallow a cause (the lite subscriber's "our own producer is
+  alive" arms) propagate the error they received. They are reachable: a live
+  clone can abort with a real cause, such as `ProtocolViolation` for a group
+  past the declared end.
+- Only states proven unreachable (perhaps an IETF alias or fill `write()` on a
+  closed table) return the nearest real cause plus `debug_assert!(false, ...)`,
+  so tests catch a broken invariant without panicking a release relay. Prove
+  it first; never assert on a path peer input can reach.
 - Audit the consumers that match `Dropped` (`moq-c` publish, `moq-ffi`
   demand, `moq-hls` rendition export, the TS follower, audio capture, video
   producer). Each either keeps the arm with a comment that it handles the
@@ -44,9 +48,9 @@ Decided with the maintainer on 2026-10-13:
 - Guard with tests only: one regression test per fixed site asserting the
   specific error. No runtime check on the refcount fallback.
 
-Public API: none; error values consumers observe change. Wire: none (these
-still map through the existing catch-alls until Dropped sources gives them
-arms).
+Public API: none; error values consumers observe change. Wire: no new wire
+format or codes, though replacing `Dropped` with `Cancel` or `Closed` can
+change which existing codes are emitted.
 
 ## Related
 
