@@ -4665,6 +4665,10 @@ mod serve_group_test {
 		});
 		{
 			let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
+			// Group 2's successor arrives with it: group 5 arrived a full budget before
+			// the update, so group 2 bounded by it would be stale on the wall clock. Group 4
+			// is, and goes unserved.
+			write_group(&mut track, 4, 0);
 			write_group(&mut track, 2, 0);
 			assert!(futures::poll!(run.as_mut()).is_pending());
 			track.finish_at(track::Position::group(6)).unwrap();

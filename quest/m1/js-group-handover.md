@@ -57,8 +57,8 @@ Things to settle along the way:
   in Rust, so `drain.ts`'s publisher mints an epoch.
 - `js/watch` and `js/hang` consumers that re-subscribe on `active` changes.
   Check whether they still need to.
-- Giving up a resumed group no route continues. Mirror Rust's rule from
-  [One max_age meaning](/quest/m1/cache-max-age.md): give it up once its
+- Giving up a resumed group no route continues. Mirror Rust's rule, which
+  js/net's `#isStale` already applies to subscriptions: give it up once its
   wall-clock age since its successor arrived, or its media-time drift,
   reaches the reader's budget.
 
@@ -71,10 +71,6 @@ mirrors their final shape instead of chasing it.
 
 Public API: likely a behavior change to `Origin.Requesting.active` and track
 subscriptions across a swap. Report it in the PR.
-
-## Required
-
-- [One max_age meaning](/quest/m1/cache-max-age.md) - the rule that gives up a resumed group no route continues
 
 ## Related
 

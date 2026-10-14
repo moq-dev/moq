@@ -1488,12 +1488,17 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Data));
 		write_group(&mut track, 0, &[ts(0), ts(33_000)]);
+		// Read the first group before the second arrives: a superseded group is skipped
+		// for latency, which is not what this checks.
+		for expected in [0, 33_000] {
+			assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(expected));
+		}
 		write_group(&mut track, 1, &[ts(66_000), ts(50_000)]);
 		track.finish().unwrap();
 		let frames = continuous_frames(&mut consumer).await;
 		assert_eq!(
 			frames.iter().map(|f| f.timestamp.as_micros()).collect::<Vec<_>>(),
-			vec![0, 33_000, 66_000, 50_000]
+			vec![66_000, 50_000]
 		);
 	}
 

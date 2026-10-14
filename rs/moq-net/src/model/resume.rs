@@ -1627,6 +1627,76 @@ mod test {
 		assert!(matches!(reading.read_frame().now_or_never(), Some(Err(Error::Old))));
 	}
 
+	/// An untimed track has no media time to convict a group no route continues, so only
+	/// the wall clock gives it up. Nothing is written after the replacement's successor
+	/// arrives, so only the deadline wake can release the reader: against a cold route, and
+	/// against one whose copy already caches groups past the held one, so a cursor that
+	/// skips ahead cannot hide the stall.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_untimed_group_no_route_continues_is_given_up_by_wall_clock() {
+		let untimed = || {
+			track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"video",
+				crate::track::Info::default(),
+			)
+		};
+		for warm in [false, true] {
+			let routes = Producer::new();
+			let logical = track::Request::new(Arc::new(broadcast::Info::default()), "video")
+				.routes(routes.consume())
+				.accept(crate::track::Info::default());
+			let a = untimed();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, Duration::from_secs(1));
+			let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+			open.write_frame(None, b"a".as_ref()).unwrap();
+			let mut reading = recv(&mut sub);
+			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+
+			let b = untimed();
+			let pool = b.broadcast().pool.clone();
+			// A driver collects the replacement's pool, so its wall deadlines fire.
+			pool.step(Duration::ZERO);
+			let write = |sequence| {
+				let mut group = b.create_group(group::Info { sequence }).unwrap();
+				group.write_frame(None, b"b".as_ref()).unwrap();
+				group.finish().unwrap();
+			};
+			if warm {
+				(1..=3).for_each(write);
+			}
+			routes.serve(b.consume());
+			if !warm {
+				write(1);
+			}
+
+			let wake = Arc::new(Wake::default());
+			let waiter = kio::Waiter::new(wake.clone().into());
+			assert!(
+				reading.poll_read_frame(&waiter).is_pending(),
+				"warm {warm}: not stale yet"
+			);
+			wake.0.store(false, std::sync::atomic::Ordering::Relaxed);
+			assert!(
+				reading.poll_read_frame(&waiter).is_pending(),
+				"warm {warm}: not stale yet"
+			);
+
+			pool.step(Duration::from_secs(1));
+			assert!(
+				wake.0.load(std::sync::atomic::Ordering::Relaxed),
+				"warm {warm}: the deadline never woke the reader"
+			);
+			let result = reading.poll_read_frame(&waiter);
+			assert!(
+				matches!(result, Poll::Ready(Err(Error::Old))),
+				"warm {warm}: {result:?}"
+			);
+		}
+	}
+
 	#[test]
 	#[cfg(feature = "async")]
 	fn datagrams_a_new_copy_replays_are_handed_out_once() {

@@ -220,9 +220,13 @@ export const hooks: {
 	 * Throws `ProtocolViolation` if a frame at or past the cap already exists.
 	 */
 	limitGroup: (group: GroupProducer, frames: number) => void;
+	/** Stamp a group's arrival at this hop as now, when it joins a track. */
+	arriveGroup: (group: GroupProducer) => void;
 	/** Return a group's first timestamp, retained even after its first frame is read. */
 	groupTimestamp: (group: GroupConsumer) => Timestamp | undefined;
 	groupLatest: (group: GroupConsumer) => Timestamp | undefined;
+	/** Return when a group joined its track at this hop, in `performance.now()` milliseconds. */
+	groupArrived: (group: GroupConsumer) => number;
 	/** Keep applying a subscription's drift policy after it hands a group out. */
 	expireGroup: (
 		group: GroupConsumer,
@@ -277,10 +281,16 @@ export const hooks: {
 	limitGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
+	arriveGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
 	groupTimestamp: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupLatest: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupArrived: () => {
 		throw new Error("group.ts not loaded");
 	},
 	expireGroup: () => {

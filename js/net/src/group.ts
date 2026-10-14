@@ -68,6 +68,9 @@ class GroupState {
 	timestamp?: Timestamp;
 	// The newest frame's timestamp: where a reader that has taken every frame sits.
 	latest?: Timestamp;
+	// When the group joined its track at this hop, in `performance.now()` milliseconds:
+	// the wall clock a superseded predecessor ages from.
+	arrived = 0;
 
 	constructor(sequence: number) {
 		this.sequence = sequence;
@@ -170,6 +173,9 @@ export class Producer {
 			for (const frame of state.frames.peek()) checkTimed(timed, frame);
 			state.timed = timed;
 		};
+		hooks.arriveGroup = (group) => {
+			group.#state.arrived = performance.now();
+		};
 		hooks.limitGroup = (group, frames) => {
 			// A closed group takes no more frames, but one already past the cap still
 			// contradicts the end.
@@ -214,6 +220,7 @@ export class Producer {
 		const dst = new GroupState(this.sequence);
 		dst.timestamp = this.#state.timestamp;
 		dst.latest = this.#state.latest;
+		dst.arrived = this.#state.arrived;
 		for (const frame of this.#state.frames.peek()) appendFrame(dst, frame);
 		dst.start = this.#state.start;
 		// The replay only covers what is still buffered, so the count has to come from the
@@ -428,6 +435,7 @@ export class Consumer {
 		makeConsumer = (state) => new Consumer(state);
 		hooks.groupTimestamp = (group) => group.#state.timestamp;
 		hooks.groupLatest = (group) => group.#state.latest;
+		hooks.groupArrived = (group) => group.#state.arrived;
 		hooks.expireGroup = (group, expiry) => {
 			group.#expiry = expiry;
 		};
