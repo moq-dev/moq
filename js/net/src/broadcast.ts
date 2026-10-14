@@ -247,6 +247,12 @@ async function resolveTrackInfo(state: BroadcastState, name: string, hold?: Abor
 	return untilAborted(info, hold);
 }
 
+// The newest frame cached for `name`, without subscribing: undefined when nobody serves it yet.
+function largest(state: BroadcastState, name: string): track.Location | undefined {
+	const producer = lookup(state, name);
+	return producer && hooks.cachedLargest(producer);
+}
+
 // Serve a group from the local retained window by subscribing and scanning to the
 // requested sequence. The default for a produced broadcast; the consuming wire layer
 // overrides it to fetch over the network (or to reject when the transport has no FETCH).
@@ -350,6 +356,7 @@ export class Producer {
 		registerWire(this, {
 			subscribe: (name, options) => subscribe(this.#state, name, options),
 			resolveTrackInfo: (name, hold) => resolveTrackInfo(this.#state, name, hold),
+			largest: (name) => largest(this.#state, name),
 			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
 			requested: () => requested(this.#state),
 		});
@@ -519,6 +526,7 @@ export class Consumer {
 		registerWire(this, {
 			subscribe: (name, options) => subscribe(this.#state, name, options),
 			resolveTrackInfo: (name, hold) => resolveTrackInfo(this.#state, name, hold),
+			largest: (name) => largest(this.#state, name),
 			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
 			requested: () => requested(this.#state),
 		});

@@ -205,8 +205,9 @@ Error cases carrying a diagnostic expose it as `reason`; protocol failures expos
 `std::holds_alternative<moq::Error::kUnauthorized>(error.get_variant())`. Auth
 rejections are their own cases, so you don't retry them. `error.to_string()`
 gives the message Rust's `Display` does, for logs; branch on the case, not the
-text. A Rust panic or a misused future (`get()` twice) aborts with a message on
-stderr instead of throwing.
+text. A Rust panic inside a call, or a misused future (`get()` twice), aborts
+with a message on stderr instead of throwing. A panic in a session's background
+work closes only that session.
 
 A session closed for exceeding the relay's request caps reports the protocol
 kind `ProtocolKind::kTooManyRequests`. Reduce

@@ -734,7 +734,12 @@ impl Connection {
 				recv_bw,
 				closed: task_closed,
 			};
-			if let Err(err) = Self::run(&shared, client, addrs).await {
+			// Isolated inside `shared`, so a panic still records a terminal error
+			// instead of closing the channels as if the caller had stopped it.
+			let res = crate::panic::isolate(Self::run(&shared, client, addrs))
+				.await
+				.unwrap_or(Err(Error::Panic));
+			if let Err(err) = res {
 				// In one-shot mode the session ending is the expected lifecycle, and
 				// its close reason arrives here; don't dress it up as a loop failure.
 				match reconnect {

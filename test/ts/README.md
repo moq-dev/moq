@@ -5,26 +5,25 @@ what an Integrated Receiver/Decoder (IRD) expects. It round-trips a stream
 through a relay (`import ts` -> relay -> `export ts`), captures the output, and
 runs [TSDuck](https://tsduck.io) plus a custom analyzer over it.
 
-This is a diagnostic gate, not just a pass/fail: the exporter
-([`rs/moq-mux/src/container/ts/export.rs`](../../rs/moq-mux/src/container/ts/export.rs))
-pads with null packets to the multiplex rate the source recorded (or `--mux-rate`),
-leaves a source without one unpadded, never delays media to fit the rate, and
-puts a PCR on its own packet every 25 ms of media time, so several
-broadcast-shape checks are expected to flag. The report quantifies exactly where
-and by how much.
+The harness keeps software decoding, transport structure, decoder-buffer models,
+and release timing as separate assertions. Passing them establishes the named
+software profiles below; it does not certify a hardware IRD or every TS layout.
 
-Four instruments live here. `compliance.py` (via `run.sh`) grades a captured file
-against the IRD model. [`pcr-timing.py`](#pcr-timing-pcr-timingpy) grades a live
-pipe, which is the only way to see *when* the exporter released each PCR.
-[`table-anchor.py`](#table-anchoring-table-anchorpy) grades two exporters of one
-broadcast against each other, which is the only way to see whether a table's
-emission points come from the media or from the exporter's own clock.
-[`open-gop.py`](#open-gop-open-goppy) grades an open-GOP capture against its
-source, access unit by access unit.
+- `decode.py` runs strict software FFmpeg decoding and compares captured content
+  with the source for generated closed-GOP H.264/AAC-LC streams.
+- `compliance.py` uses TSDuck for structure and a custom elementary-stream T-STD
+  model for supported profiles.
+- `accuracy.py` requires measured PCRs within 500 ns of their CBR byte position.
+- `pcr-timing.py` checks PCR values and byte schedules from files, and release
+  timing from a live pipe.
+- `table-anchor.py` compares table emission points between two subscribers.
+- `open-gop.py` checks the coded access units and leading pictures of open GOPs.
 
 ## Running
 
 ```bash
+just test ts-controls           # real FFmpeg/TSDuck positive and negative controls
+just test ts-tstd               # buffer-model controls
 just test ts                    # generate a clip, round-trip, analyze
 just test ts --source cap.ts    # round-trip a real capture instead
 just test ts --analyze-only x.ts # skip the round-trip, analyze a file
@@ -52,10 +51,11 @@ the first PCR, failing on any PCR more than 500 ns off its byte position
 at the rate: the `PCR_accuracy_error` an IRD or a TR 101 290 probe reports, which
 `pcr-schedule`'s packet of slack lets through.
 
-The live arm passes only when the grader's verdict *and* the publisher's exit status
-are clean. The grader can only speak for what reached it, and the sample floor
-rejects a window that came up short, so a publisher dying late in the run leaves
-enough behind to pass every check: a broken round-trip reported as a good one.
+Publisher and captured subscriber processes must exit successfully. Captures drain
+through EOF within the existing process deadline; a nonempty partial file cannot
+hide a failed pipeline or timeout. The live arm also requires its grader to pass;
+after its measurement window, the reader drains through source EOF so neither a
+broken pipe nor another exporter failure needs to be ignored.
 
 `--analyze-only` needs only TSDuck + Python, so you can point it at any captured
 subscriber output:
@@ -66,7 +66,7 @@ moq --connect http://localhost:4443 --broadcast live.hang export ts > sub.ts
 ```
 
 Requirements: `tsp`, `tsanalyze` and `tstables` (TSDuck) and `python3` for every mode; the
-round-trip modes also need `cargo`, `ffmpeg`, `curl`, and `timeout`.
+round-trip modes also need `cargo`, `ffmpeg`, `ffprobe`, `curl`, and `timeout`.
 
 ## Checks
 
@@ -89,7 +89,7 @@ Severities: **hard** checks fail the run by default; **shape** checks report as
 | `pcr-monotonic` | hard | PCR strictly increases (one 33-bit wrap tolerated), except into a PCR that signals `discontinuity_indicator` |
 | `duration-fidelity` | hard | exported PCR span tracks the source's duration (round-trip only) |
 | `service-descriptors` | shape | an SDT naming the service is present |
-| `tstd` | hard | the full T-STD buffer model: no TB, MB, EB or B overflow, no access unit incomplete at its decoding time (see [T-STD](#t-std)) |
+| `tstd` | hard | the supported elementary-stream T-STD models: no TB, MB, EB or B overflow, no access unit incomplete at its decoding time (see [T-STD](#t-std)) |
 
 Every timing check reads the stream's own PCR, so a PCR emitted on the wrong
 clock rate stays internally consistent and passes them all. `duration-fidelity`
@@ -105,7 +105,7 @@ machine-readable report.
 
 ## T-STD
 
-`tstd` runs every audio and video stream through the ISO 13818-1 system target
+`tstd` models supported audio and video streams using the ISO 13818-1 system target
 decoder (2.4.2; Rec. ITU-T H.222.0, whose 10/2014 edition is a free download),
 fed on the stream's own PCR clock:
 
@@ -120,9 +120,9 @@ second, where an access unit is not wholly in EB/B at its decoding time
 AVC/HEVC). The report gives each stream's peak fill per buffer, how late the worst
 underflowed access unit finished arriving, and the longest any access unit waited.
 
-No maintained tool implements this. TSDuck has no T-STD analyzer, and nothing else
-in nixpkgs does either, so the model is hand-rolled and its parameters are
-transcribed from the specs: H.264 Table A-1 and H.265 Table A.8 for the level, the
+TSDuck supplies the transport analysis, not this decoder-buffer model. Commercial
+analyzers advertise T-STD checks; no suitable maintained open-source replacement
+was established for this harness. Its parameters are transcribed from the specs: H.264 Table A-1 and H.265 Table A.8 for the level, the
 ADTS and "other audio" rates and sizes in H.222.0 2.4.2.3, and ATSC A/52 and A/53
 Part 5 for AC-3 and E-AC-3. TSDuck does the parsing: `tstables` decodes the PMT
 and `tsp -P pes --avc-access-unit` the SPS, AVC and HEVC alike.
@@ -141,9 +141,9 @@ Opus is graded against ADTS's buffers for the same channel count: the Opus-in-TS
 draft gives Rx (2 Mb/s for 1-2 channels, matching ADTS) but leaves the buffer size
 unset, so that size is borrowed rather than specified. A stream with no parameters
 at all is refused by name rather than skipped, which fails the check: MPEG-1/2
-video, DVB E-AC-3, and HEVC beyond Main/Main 10. Sections and private data
-(SCTE-35, teletext) have no elementary-stream buffers and are listed as not
-graded. A signalled PCR discontinuity starts fresh buffers, since the timestamps
+video, DVB E-AC-3, and HEVC beyond Main/Main 10. The PSI system buffer is not implemented. Sections and private data
+(SCTE-35, teletext) are listed as not graded; passing elementary-stream buffers
+does not establish conformance for them. A signalled PCR discontinuity starts fresh buffers, since the timestamps
 on either side of it are on different clocks.
 
 Every packet on an elementary stream's PID enters TB, including adaptation-only
@@ -560,27 +560,64 @@ than by malfunction; the census makes that visible instead of leaving it to be
 inferred from the code. Counts differ for a table that *did* survive because the
 exporter re-emits SI on its own repetition cadence rather than the source's.
 
+## Decoded content (`decode.py`)
+
+The generated closed-GOP H.264/AAC-LC profile, at both 10 and 2 Mb/s, fully
+decodes every expected video/audio stream with software FFmpeg. Missing streams,
+empty output, decoder errors (including error logs with a zero exit status), and
+configuration changes fail. Video frame hashes must match an intact source
+suffix through EOF; frame timestamps must keep one common rebase.
+
+Audio timestamps must remain contiguous, allowing the 90 kHz PTS quantization
+and FFmpeg's conversion to the sample clock. Audio sample counts pin the admitted
+source offset against the same video rebase, so a shifted audio track or a lost
+tail fails. Exact PCM comparison uses a fresh decode of source AAC starting at
+the same access unit: AAC overlap and perceptual-noise state differ between a
+cold decoder and a decoder that saw earlier frames. No arbitrary warmup samples
+are discarded. PES boundaries and TS packetization may change.
+
+`just test ts-controls` exercises unchanged input, remuxing with new timestamps
+and PES sizes, timestamp quantization, and a cold join. Negative controls require
+the intended failure for missing audio, changed pictures, changed audio, a lost
+tail, A/V skew, video clock drift, an audio gap, corrupted coded payload, and
+empty input. Real TSDuck controls remove PAT, break continuity, set TEI, and check
+PCR against a wrong rate or an empty measurement. Process controls also require
+nonzero/timeout exit codes to fail despite nonempty output. A missing tool or
+an unexpected failure category is a failing test, not a successful negative.
+
+Other codecs, open-GOP acquisition, loss/recovery, raw carriage, and arbitrary
+source captures do not yet have decoded-content comparisons. Their existing
+specific checks remain active and the harness explicitly reports the narrower
+coverage. VBR and independent-clock MPTS need applicable timing models before
+claiming the CBR PCR-accuracy profile.
+
 ## CI
 
-`.github/workflows/interop.yml` runs `just test ts`, `just test ts --bitrate
-2000000`, `just test ts --hrd`, `just test ts --headroom`,
-`just test ts --open-gop`, `just test ts-eit`, and `just test ts-tstd` after the
-interop matrix (nightly, on demand, and on PRs touching `test/ts/`).
-`ts-eit` is `eit-roundtrip.sh`: it builds the sparse-schedule and
-pending-version fixtures from a generated clip, round-trips them through a
-relay, and censuses the capture, so a break in the generators or in the SI
-carriage they pin fails a PR instead of landing silently. TSDuck comes from the
-`nix develop` shell, so the run uses the same `tsp`/`tsanalyze` a local
-developer would.
+The round-trip rig explicitly negotiates `moq-lite-07-wip` on the relay,
+publisher and subscribers. Its publisher epochs allow acquisition to continue
+when WebSocket upgrades to QUIC. Production defaults remain unchanged: Lite-06
+cannot prove publisher identity across session replacement and must refuse a
+pending acquisition. `rs/moq-net/tests/catalog_acquisition.rs` covers both
+outcomes deterministically in Rust CI, without retries or implicit `--stitch`.
+Actual transport teardown coverage belongs to the transport-upgrade tests; a
+clean TS run alone does not prove that an upgrade occurred.
 
-`.github/workflows/nightly.yml` runs `just test ts --live --duration 120` as
-well. It stays off the PR path because release timing needs a real-time window to
-measure: the grader has to sit on the pipe for the length of the capture, which
-no per-PR gate should be paying for, and a scheduled arm on a quiet runner is a
-better place to notice the exporter drifting off its own clock anyway. The window
-is 120 s rather than the 20 s default because that is what the drift term costs
-to read: under a minute it catches the mux buffer still filling and cannot tell
-that from a pipe running slow.
+[`.github/workflows/ts.yml`](../../.github/workflows/ts.yml) is independent of
+browser interop. Relevant mux, Hang, CLI, transport, harness and toolchain PRs run
+`just test ts-controls`, `just test ts-pair-controls`, the default and 2 Mb/s round trips, HRD, headroom,
+open-GOP, EIT, and T-STD controls. Each step runs even after another test fails.
+All recipes use the same pinned Nix FFmpeg and TSDuck locally and in CI.
+
+Nightly and manual runs also invoke `just test ts --pair` and
+`just test ts --live --duration 120`. The pair exercises late-joining subscribers;
+the live window distinguishes ongoing clock drift from initial buffer filling.
+These are actual test invocations, not optional tools installed on a runner.
+
+Failed runs retain source/capture files, process logs and statuses, tool versions,
+decoder commands, frame hashes, PCM, and grader reports under the harness run
+directory. CI uploads that directory for seven days. `MOQ_TEST_KEEP=1` preserves
+successful local evidence too. `ts-eit` retains its sparse-schedule and pending
+version fixtures; `ts-tstd` retains its existing model controls.
 
 ## Caveats
 

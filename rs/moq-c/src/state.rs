@@ -1,4 +1,4 @@
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 
 use crate::bandwidth::Bandwidth;
 use crate::{Consume, Origin, Publish, Server, Session, audio::Audio, video::Video};
@@ -29,7 +29,7 @@ impl State {
 	}
 
 	pub fn lock<'a>() -> MutexGuard<'a, Self> {
-		STATE.lock().unwrap()
+		STATE.lock().unwrap_or_else(PoisonError::into_inner)
 	}
 }
 
@@ -60,7 +60,7 @@ impl<T> Shared<T> {
 	/// under the global lock at the same moment, so that is only what a call which
 	/// resolved the handle just before the end sees.
 	pub fn lock(&self) -> MutexGuard<'_, Option<T>> {
-		self.0.lock().unwrap()
+		self.0.lock().unwrap_or_else(PoisonError::into_inner)
 	}
 
 	/// Take the resource, for the call that ends it and needs to consume it.

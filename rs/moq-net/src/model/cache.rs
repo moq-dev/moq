@@ -39,7 +39,7 @@
 //! every origin so the whole process caches into a single policy.
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::Duration;
 
 use super::track::{self, TrackState};
@@ -277,7 +277,7 @@ impl Pool {
 
 	fn advance(&self, now: crate::time::Instant, sweep: bool) -> Option<crate::time::Instant> {
 		// Shared origins must not run overlapping collection passes.
-		let mut clock = self.inner.clock.lock().unwrap();
+		let mut clock = self.inner.clock.lock().unwrap_or_else(PoisonError::into_inner);
 		let clock = clock.get_or_insert(Clock {
 			epoch: now,
 			now,
@@ -301,7 +301,13 @@ impl Pool {
 	/// side without collecting, as if that much time passed between two passes.
 	#[cfg(test)]
 	pub(crate) fn step(&self, duration: Duration) {
-		let now = self.inner.clock.lock().unwrap().as_ref().map(|clock| clock.now);
+		let now = self
+			.inner
+			.clock
+			.lock()
+			.unwrap_or_else(PoisonError::into_inner)
+			.as_ref()
+			.map(|clock| clock.now);
 		let now = now.unwrap_or_else(crate::time::Instant::now);
 		self.date(now);
 		self.date(now + duration);

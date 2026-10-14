@@ -60,7 +60,11 @@ Settled shape:
   namespaces below the wrappers, was spiked and rejected (#5460): UniFFI
   0.32 keys a crate's types by bare name, so `media.GroupConsumer` cannot
   take the net `GroupConsumer` it wraps. Python drops the media type
-  silently; every other generator refuses. Revisit only if UniFFI
+  silently; every other generator refuses. Distinct Rust names renamed
+  back per language work only in Python and Go: Kotlin, Swift, Dart, and
+  C++ shadow or misplace the external type, and generated C refuses
+  external types. Revisit only once
+  [mozilla/uniffi-rs#3026](https://github.com/mozilla/uniffi-rs/issues/3026)
   namespaces external types.
 - `demand()` is the one way to watch subscribers; producers drop their
   `name`/`is_used`/`used`/`unused` duplicates.
