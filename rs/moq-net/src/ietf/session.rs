@@ -1448,7 +1448,13 @@ async fn enforce_grant<S: crate::transport::poll::Session>(
 			// The token changed: recheck whether announces now carry it.
 			None => continue,
 			Some(None) => return Ok(()),
-			Some(Some(path)) => break path,
+			Some(Some(path)) => {
+				// Another thread may have set a token after the change check in that same poll.
+				if request_token.peek().is_some() && announces_carry_token(&peer_setup, version).await {
+					return Ok(());
+				}
+				break path;
+			}
 		}
 	};
 	tracing::error!(broadcast = %origin.absolute(&path), "publishing outside our grant; closing the session");
