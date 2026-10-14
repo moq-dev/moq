@@ -116,6 +116,16 @@ impl RequestToken {
 	/// Seed `session` with the current token and make it the session later renewals reach.
 	///
 	/// Errors when the session cannot carry the token set, which leaves it unattached.
+	#[cfg_attr(
+		not(any(
+			feature = "noq",
+			feature = "iroh",
+			feature = "websocket",
+			feature = "tcp",
+			all(feature = "uds", unix)
+		)),
+		allow(dead_code)
+	)]
 	pub(crate) fn attach(&self, session: impl Present + 'static) -> Result<(), moq_net::Error> {
 		let mut presenting = self.0.lock().unwrap();
 		if let Some(token) = &presenting.token {

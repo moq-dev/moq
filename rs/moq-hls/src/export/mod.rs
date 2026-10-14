@@ -1655,27 +1655,33 @@ mod tests {
 	#[tokio::test]
 	async fn manifest_falls_back_to_arrival_anchor_without_a_clock() {
 		let origin = produce_origin();
-		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let broadcast = origin.create_broadcast("live").expect("publish allowed");
 		broadcast.announce(Default::default()).expect("publish allowed");
 		settle().await;
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
-		let reserved = catalog.reserve();
-		// Stage the clock's removal before the first snapshot publishes, so no consumer ever
-		// sees a clock on this broadcast.
-		catalog.modify().unwrap().clock = None;
-		let mut registration = catalog.test_video("video0").unwrap();
-		registration.set(video_config()).unwrap();
-		drop(reserved);
-		assert_eq!(catalog.snapshot().clock, None);
+		// Write the catalog track directly: a moq-mux catalog producer always advertises its clock,
+		// as a publisher on a host whose wall clock is set does.
+		let timelines = moq_mux::timeline::Timelines::new(&broadcast);
+		let recorder = timelines.track("video0", moq_mux::timeline::Config::default()).unwrap();
+		let mut snapshot = moq_mux::catalog::hang::Catalog::<()>::default();
+		snapshot.video.renditions.insert("video0".to_string(), video_config());
+		snapshot.archive = Some(timelines.section());
+		let mut json = moq_json::snapshot::Config::default();
+		json.delta_ratio = 0;
+		let mut catalog = moq_json::snapshot::Producer::new(
+			broadcast
+				.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
+				.unwrap(),
+			json,
+		);
+		catalog.update(&snapshot).unwrap();
 
 		let track = broadcast.create_track("video0", timed()).unwrap();
-		let mut media = catalog
-			.media_producer(
-				track,
-				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
-			)
-			.unwrap();
+		let mut media = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+		)
+		.with_recorder(recorder);
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
 		media.write(frame(4_000_000, true)).unwrap(); // live edge
@@ -1695,7 +1701,7 @@ mod tests {
 			"pts 0 is anchored even without a catalog clock"
 		);
 
-		drop((media, registration, broadcast));
+		drop((media, catalog, broadcast));
 	}
 
 	// The playlist copies the root clock when it first sees a rendition, so an fMP4 import must

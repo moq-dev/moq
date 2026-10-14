@@ -22,8 +22,6 @@ pub(crate) struct SessionStart<S: crate::transport::poll::Session> {
 	pub goaway: crate::goaway::Handle,
 	/// The session's AUTH tokens and grants, stored on the public [`crate::Session`].
 	pub auth: crate::auth::Handle,
-	/// Whether the peer's SETUP arrived, read by [`crate::Session::setup`].
-	pub setup: crate::session::Setup,
 }
 
 /// Server: read the peer's single SETUP message off its Setup Stream before starting
@@ -276,16 +274,6 @@ where
 	};
 	let peer_setup = peer_setup_slot;
 
-	// Lite-05+ records the peer's SETUP from its Setup Stream. Before that, only the
-	// legacy bidi handshake carries one, and it was read before the session started.
-	let setup = if version.has_setup_stream() {
-		crate::session::Setup::Lite(peer_setup.clone())
-	} else if setup_stream.is_some() {
-		crate::session::Setup::Read
-	} else {
-		crate::session::Setup::Never
-	};
-
 	// GOAWAY wiring: the public Session holds one half (send trigger, received
 	// signal), the protocol tasks below hold the other. moq-lite lets either side
 	// name a redirect URI, unlike moq-transport.
@@ -362,7 +350,6 @@ where
 		driver,
 		goaway: goaway_handle,
 		auth,
-		setup,
 	})
 }
 
