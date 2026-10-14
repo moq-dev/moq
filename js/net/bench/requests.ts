@@ -1,4 +1,6 @@
 /** Sweep request restart and cancellation over independent origin and waiter dimensions. */
+import { Producer as Broadcast } from "../src/broadcast";
+import * as Epoch from "../src/epoch";
 import { Producer } from "../src/origin";
 import * as Path from "../src/path";
 import { wireOf } from "../src/wire";
@@ -72,6 +74,83 @@ for (const unrelated of [8, 128, 2048])
 		console.log(`${unrelated},${waiters},${samples[3].toFixed(2)}`);
 		for (const request of held) request.close();
 		origin.close();
+	}
+
+// Keep old instances on distinct same-epoch failovers, then cancel new demand.
+// This exercises ownership checks inside one cleanup, independently of wire sharing.
+console.log("failovers,extra_routes,cancel_us");
+for (const failovers of [0, 1, 16, 128])
+	for (const extraRoutes of [0, 128]) {
+		const samples: number[] = [];
+		for (let round = 0; round < 7; round++) {
+			const origin = new Producer();
+			const prefix = Path.from("room");
+			const path = Path.from("room/video");
+			const entries = [];
+			const sources: Broadcast[] = [];
+			for (let i = 0; i < failovers; i++) {
+				const epoch = Epoch.mint();
+				const primary = origin.dynamic(prefix, { epoch, cost: 0n });
+				const ar = primary.requested();
+				const br = origin.dynamic(prefix, { epoch, cost: 1n }).requested();
+				const held = origin.request(path);
+				const source = new Broadcast();
+				sources.push(source);
+				(await ar.next()).value?.accept(source);
+				await settle();
+				entries.push({ primary, ar, br, held });
+			}
+			const epoch = Epoch.mint();
+			origin.dynamic(prefix, { epoch });
+			for (let i = 0; i < extraRoutes; i++) origin.dynamic(prefix, { epoch, cost: BigInt(i + 1) });
+			const pending = [];
+			for (const entry of entries) {
+				entry.primary.close();
+				const request = (await entry.br.next()).value;
+				if (!request) throw new Error("missing failover request");
+				pending.push(request);
+			}
+			const wire = wireOf(origin.consume());
+			let active = 0;
+			try {
+				for (let i = 0; i < 128; i++) {
+					const hold = new AbortController();
+					const reason = new Error("cancelled");
+					const wait = wire.demand(path, undefined, hold.signal).then(
+						() => {
+							throw new Error("cancelled demand resolved");
+						},
+						(error) => {
+							if (error !== reason) throw error;
+						},
+					);
+					const start = performance.now();
+					hold.abort(reason);
+					active += (performance.now() - start) * 1000;
+					await wait;
+				}
+				// An ownership check must preserve every old instance, not just the winning one.
+				for (let i = 0; i < entries.length; i++) {
+					const source = new Broadcast();
+					sources.push(source);
+					pending[i].accept(source);
+					await settle();
+					if (entries[i].held.active.peek()?.closed !== source.closed) throw new Error("lost failover");
+				}
+				if (round > 1) samples.push(active / 128);
+			} finally {
+				for (const entry of entries) entry.held.close();
+				origin.close();
+				for (const source of sources) source.close();
+				for (const entry of entries) {
+					await entry.ar.return?.();
+					await entry.br.return?.();
+				}
+			}
+			await settle();
+		}
+		samples.sort((a, b) => a - b);
+		console.log(`${failovers},${extraRoutes},${samples[2].toFixed(2)}`);
 	}
 
 // Batch teardown exposes repeated queue scans; draining checks that fast removal

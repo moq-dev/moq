@@ -704,13 +704,22 @@ class OriginState {
 		const best = slot ? this.bestEntry(path) : undefined;
 		const wanted = best && !this.localWins(path, best) ? best.server : undefined;
 		const failovers = this.detached.get(path);
+		let held: Set<RouteEntry> | undefined;
 		for (const prefix of coveringPrefixes(path)) {
 			for (const entry of this.routes.peek()?.get(prefix) ?? []) {
 				const server = entry.server;
 				const pending = server?.pending.get(path);
 				if (!server || !pending || server.demanding.has(path) || server === wanted) continue;
-				if (failovers && [...failovers].some((slot) => slot.handles.size > 0 && slot.failover === entry))
-					continue;
+				if (failovers) {
+					// Build once, only when pending work needs a failover ownership check.
+					if (!held) {
+						held = new Set();
+						for (const slot of failovers) {
+							if (slot.handles.size > 0 && slot.failover) held.add(slot.failover);
+						}
+					}
+					if (held.has(entry)) continue;
+				}
 				server.forget(path, pending);
 			}
 		}
