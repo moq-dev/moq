@@ -16,12 +16,15 @@ it timed out and passed alone.
 tracked by [TS same-instance resume](/quest/m1/ts-same-instance-resume.md).
 
 The test runs an in-process relay with real `moq import` and `moq export`
-processes. Its "exited within 10 s" check is the property (no lingering) and
-must stay bounded. It starts after both spawns, just before the AV1 write, so
-it covers the import, the export's catalog read, and its exit, not process
-startup; the exit wait also has its own 10 s `TIMEOUT`.
+processes. Two bounds apply. The exit wait has a 30 s `TIMEOUT`, so a child
+that lingers fails there. The "exited within 10 s" assertion runs only after
+the child exits, so a slow but completed exit fails there. That 10 s is the
+property (no lingering) and must stay bounded. It starts after both `spawn()`
+calls return, just before the AV1 write, so it excludes the parent's spawn
+but still covers each child's own startup and relay connection, the import,
+the export's catalog read, and its exit.
 
-Reproduce under load first and record which check expired. Find what in that
+Reproduce under load first and record which bound fired. Find what in that
 interval is slow under load and fix it, or move the check to a deterministic
 in-process test if the process boundary isn't what it proves. Never widen a
 timeout or add a retry.
