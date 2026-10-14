@@ -44,9 +44,11 @@ dropping it. Fix the cause, not the sleep: preferably the publisher exits on
 SIGINT without waiting for its stdin read, so the test never closes stdin.
 [Listening CLI sessions](/quest/m1/cli-serve.md) lands that runtime-teardown
 fix on main; if it has merged, drop the stdin close and the sleep here;
-otherwise the test waits for an observable sign that SIGINT was handled
-before closing it. `interrupted` (`export.rs:264`) also sleeps 1 s after the
-interrupt; replace that with an event too.
+otherwise the test waits for an observable sign that SIGINT's cancellation
+took effect, not merely that the signal arrived, before closing it.
+`interrupted` (`export.rs:264`) also sleeps 1 s after the interrupt; replace
+it with the exporter's paced tail draining, not the publisher's exit. Fixing
+this race alone does not resolve the failed-export timing above.
 
 Public API: none. Wire: none.
 
