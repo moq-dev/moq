@@ -878,16 +878,18 @@ it("subscribes a cross-broadcast MSF rendition on its namespace", async () => {
 	const effect = new Effect();
 	try {
 		await settle();
-		const config = source.out.catalog.peek()!.video!.renditions.video!;
+		const config = source.out.catalog.peek()?.video?.renditions.video;
+		if (!config) throw new Error("MSF rendition missing");
 		let active: Moq.Broadcast.Consumer | undefined;
 		effect.run((inner) => {
 			active = source.relativeBroadcast(inner, config.broadcast);
 		});
 		await settle();
-		const track = active!.track("video").subscribe();
+		if (!active) throw new Error("referenced broadcast did not resolve");
+		const track = active.track("video").subscribe();
 		try {
 			const frame = await track.ordered().readFrame();
-			expect(frame!.payload).toEqual(new Uint8Array([2]));
+			expect(frame?.payload).toEqual(new Uint8Array([2]));
 		} finally {
 			track.close();
 		}

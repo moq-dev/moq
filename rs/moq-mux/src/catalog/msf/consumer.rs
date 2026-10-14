@@ -125,12 +125,13 @@ pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>, base: &moq_net:
 			.namespace
 			.as_ref()
 			.map(|namespace| {
-				moq_net::Path::new(namespace)
-					.relative(base)
-					.ok_or_else(|| Error::UnresolvableNamespace {
-						name: track.name.clone(),
-						namespace: namespace.clone(),
-					})
+				let target = moq_net::Path::new(namespace);
+				// An MSF namespace names content; normalizing it must not select another namespace.
+				let relative = (target.as_str() == namespace).then(|| target.relative(base)).flatten();
+				relative.ok_or_else(|| Error::UnresolvableNamespace {
+					name: track.name.clone(),
+					namespace: namespace.clone(),
+				})
 			})
 			.transpose()?
 			.filter(|rel| !rel.is_empty());
@@ -495,12 +496,14 @@ mod test {
 				expected
 			);
 		}
-		let mut track = moq_msf::Track::new("video", moq_msf::Packaging::Loc);
-		track.namespace = Some("room/..".into());
-		assert!(matches!(
-			from_msf(&moq_msf::Catalog::<()>::new(vec![track]), &base),
-			Err(crate::Error::Msf(Error::UnresolvableNamespace { .. }))
-		));
+		for namespace in ["room/..", "room//left", "/room/left", "room/left/"] {
+			let mut track = moq_msf::Track::new("video", moq_msf::Packaging::Loc);
+			track.namespace = Some(namespace.into());
+			assert!(matches!(
+				from_msf(&moq_msf::Catalog::<()>::new(vec![track]), &base),
+				Err(crate::Error::Msf(Error::UnresolvableNamespace { .. }))
+			));
+		}
 	}
 
 	use super::*;

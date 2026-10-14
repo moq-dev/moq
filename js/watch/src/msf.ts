@@ -112,7 +112,9 @@ export function toHang(msf: Msf.Catalog, base?: Path.Valid): Catalog.Root {
 		if (track.namespace !== undefined) {
 			if (base === undefined)
 				throw new Error(`MSF track ${track.name} namespace requires the catalog broadcast path`);
-			const relative = Path.relative(Path.from(track.namespace), base);
+			const target = Path.from(track.namespace);
+			// Normalizing an MSF namespace must not select different content.
+			const relative = target === track.namespace ? Path.relative(target, base) : undefined;
 			if (relative === undefined)
 				throw new Error(`MSF track ${track.name} namespace cannot be referenced from the catalog`);
 			broadcast = relative || undefined;

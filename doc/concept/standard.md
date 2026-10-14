@@ -89,8 +89,8 @@ do elsewhere. It overlaps with the [hang catalog](/concept/hang) and the two
 will likely converge. The tools track draft-01 and hide the version on the
 wire, so draft-00 catalogs still decode and init data always arrives inline.
 Cross-broadcast renditions keep their MSF namespace when converted to hang;
-a gateway publishing them as MSF needs the catalog's named broadcast to resolve
-the relative reference.
+a gateway publishing them as MSF resolves the relative reference against the
+catalog broadcast's path, including the empty root path.
 
 ## LOC
 
