@@ -18,9 +18,11 @@ registers a second stream for the live group's sequence, so the two tie.
 Decided 2026-10-13 (maintainer): rank streams, not groups.
 `Priority.add` takes the stream's start object, and `#position` also counts a
 same-group stream with an earlier start as ahead. `sendOrder`'s packing is
-unchanged, which avoids bounding the start object. Group streams pass their
-first object, a fill its start. Lite always starts at 0, so it keeps its
-order.
+unchanged, which avoids bounding the start object. Every stream passes the
+object it starts at: an IETF group stream its first object, a fill its start,
+and a Lite group its `frameRange` start (nonzero for a draft-06+
+`startFrame`). Lite never registers two streams for one sequence, so its
+order is unchanged.
 
 Add a regression in `js/net/src/priority.test.ts` like Rust's
 `a_fill_outranks_the_rest_of_its_group`: register the live rest first, then
