@@ -85,9 +85,15 @@ freshness before coding:
   while connected; do not encode drain by saturating the metric. Feasibility
   still gates alternatives, so an infeasible alternative waits for a sequence
   refresh while the draining peer keeps serving
-  (`goaway_fails_over_and_keeps_the_draining_peer_last`,
-  `goaway_keeps_serving_until_a_refresh_makes_the_alternative_feasible`).
-  Existing readers resume only
+  (`goaway_fails_over_and_keeps_the_draining_peer_last`). Decided 2026-10-14:
+  the refresh reaches the node through both peers, and if the draining peer's
+  arrives first the node selects it at the new seqno, so it stays on the
+  still-serving draining peer until that session closes and then waits for one
+  more refresh, which the accepted recovery pause covers
+  (`goaway_keeps_serving_until_a_refresh_makes_the_alternative_feasible` pins
+  both orders). Using a draining peer's routes locally without advertising
+  them was rejected: downstream nodes would lose their only route during the
+  drain. Existing readers resume only
   across a matching explicit epoch; epochless changes preserve Restart.
 - Fresh routing identity per process/tab restart, shared across its
   authenticated live sessions, decided 2026-10-13. It is the hash of a
@@ -122,7 +128,16 @@ freshness before coding:
   it, a forger or a misconfigured uplink only affects its own scope. The
   `peer` claim no longer decides transit trust. Legitimate scoped delivery
   survives losing one of two uplinks under one key
-  (`scoped_delivery_through_two_uplinks_reaches_one_key`).
+  (`scoped_delivery_through_two_uplinks_reaches_one_key`). Decided
+  2026-10-14: scoped keys carry a marker every relay recognizes, and a scoped
+  connection forwarding an already scoped identity has that route refused,
+  with no wire change. Otherwise a key sent down through a misconfigured
+  uplink comes back and is filed again as a new identity on every lap
+  (`scoped_connections_cannot_rescope_a_scoped_identity`). Nested scoped
+  federation is therefore out: the inner level must be unscoped. Revisit with
+  a wire change if a use case appears. Rejected: keying a forwarded identity
+  by its bare id and the narrowest scope it crossed, which needs the scope in
+  ROUTE, and accepting growth bounded only by metric overflow.
 - Loop freedom is Babel's feasibility condition (RFC 8966) keyed by node:
   accept a route if its seqno is newer, or equal with a metric below the
   feasibility distance. Only the origin advances its seqno. Retraction is an
@@ -274,17 +289,6 @@ Open, for the implementer to settle and record:
   open: [Next-hop handoff](/quest/m1/cluster-routing/handoff.md) settles it
   with deterministic acceptance tests before the wire is written.
 - How much of today's route trie, fronts, and `route_order` survives intact.
-- A GOAWAY failover to an infeasible alternative completes only when the
-  alternative's refresh arrives before the draining peer's; otherwise the node
-  selects the draining peer at the new seqno, lowers its feasibility distance,
-  and needs another refresh once that session closes
-  (`goaway_keeps_serving_until_a_refresh_makes_the_alternative_feasible`).
-- `hash(scope, id)` never settles behind a misconfigured uplink: a scoped key
-  sent down comes back up and is filed again as a new identity on every lap
-  (`scoped_keys_rewrap_on_every_lap_of_a_misconfigured_uplink`). Bounding it
-  needs a rule such as keying a forwarded identity by its bare id and the
-  narrowest scope it crossed, which re-filing under the same scope leaves
-  unchanged, or refusing an already scoped identity on a scoped connection.
 
 The #4349 counterexamples are the `residual_*` tests in
 `rs/moq-net/tests/mesh_withdraw.rs`. They pin today's hunting on lite-06:

@@ -18,7 +18,9 @@ Use authenticated, namespace-scoped admission: the CDN scopes the local
 relay's connection to a path prefix, and identities it forwards for its local
 publishers are filed under `hash(scope, id)`, so a forger or a misconfigured
 uplink only affects its own scope (decided 2026-10-14; see
-[Routes and announces](/quest/m1/cluster-routing/routes.md)). The local relay
+[Routes and announces](/quest/m1/cluster-routing/routes.md)). A scoped
+connection cannot forward an already scoped identity, so nested scoped
+federation is out: a relay behind the local relay connects unscoped. The local relay
 marks its CDN links `upstream`, so CDN relays never shortcut through the
 local network, and keeps its local `proxy` preference on toward the CDN. One
 route selection per identity; a cheaper exportable alternative hidden behind

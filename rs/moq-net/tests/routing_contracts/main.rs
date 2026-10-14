@@ -545,15 +545,9 @@ fn goaway_keeps_serving_until_a_refresh_makes_the_alternative_feasible() {
 /// Two CDN relays, each the uplink of one relay in a local mesh, reaching a CDN
 /// origin claiming `cdn/`. The CDN admits each local relay under `scope`. The
 /// caller runs it.
-fn two_uplinks(export: Export, l2_marks_upstream: bool, scope: Option<&'static str>) -> Net {
+fn two_uplinks(cfg: Config, l2_marks_upstream: bool, scope: Option<&'static str>) -> Net {
 	let (c1, c2, l1, l2, origin) = (0, 1, 2, 3, 4);
-	let mut net = Net::new(
-		Config {
-			export,
-			..Config::default()
-		},
-		5,
-	);
+	let mut net = Net::new(cfg, 5);
 	net.join(c1, c2, 10);
 	net.join(l1, l2, 1);
 	let admit = Link { scope, ..Link::cost(1) };
@@ -578,10 +572,17 @@ fn two_uplinks(export: Export, l2_marks_upstream: bool, scope: Option<&'static s
 fn two_uplinks_never_carry_cdn_transit() {
 	let (c1, c2, l2) = (0, 1, 3);
 	let next = |net: &Net| net.route(c2, 7).and_then(|route| route.next);
-	let mut net = two_uplinks(Export::Anything, true, None);
+	let mut net = two_uplinks(
+		Config {
+			export: Export::Anything,
+			..Config::default()
+		},
+		true,
+		None,
+	);
 	assert!(net.run());
 	assert_eq!(next(&net), Some(l2));
-	let mut net = two_uplinks(Export::DownOnly, true, None);
+	let mut net = two_uplinks(Config::default(), true, None);
 	assert!(net.run());
 	assert_eq!(next(&net), Some(c1));
 	assert!(net.route(l2, 7).is_some());
@@ -945,7 +946,7 @@ fn scoped_delivery_through_two_uplinks_reaches_one_key() {
 #[test]
 fn misconfigured_uplink_is_contained_by_scoped_identities() {
 	let (c1, c2, l1, l2, origin) = (0, 1, 2, 3, 4);
-	let mut net = two_uplinks(Export::DownOnly, false, None);
+	let mut net = two_uplinks(Config::default(), false, None);
 	assert!(net.run());
 	assert_eq!(net.route(c2, 7).and_then(|route| route.next), Some(l2));
 	assert_eq!(
@@ -956,39 +957,45 @@ fn misconfigured_uplink_is_contained_by_scoped_identities() {
 		}
 	);
 
-	// The scoped run never settles; see the next fixture.
-	let mut net = two_uplinks(Export::DownOnly, false, Some("local/"));
-	for _ in 0..5 {
-		net.settle(10);
-		assert_eq!(net.route(c2, 7).and_then(|route| route.next), Some(c1));
-		assert_eq!(
-			net.route(c2, scoped("local/", 7)).and_then(|route| route.next),
-			Some(l2),
-			"the leak is filed apart"
-		);
-		assert_eq!(
-			net.request(c2, "cdn/x", Forward::Pinned),
-			Outcome::Served {
-				by: 7,
-				path: vec![c2, c1, origin]
-			}
-		);
-	}
+	let mut net = two_uplinks(Config::default(), false, Some("local/"));
+	assert!(net.run());
+	assert_eq!(net.route(c2, 7).and_then(|route| route.next), Some(c1));
+	assert_eq!(
+		net.route(c2, scoped("local/", 7)).and_then(|route| route.next),
+		Some(l2),
+		"the leak is filed apart"
+	);
+	assert_eq!(
+		net.request(c2, "cdn/x", Forward::Pinned),
+		Outcome::Served {
+			by: 7,
+			path: vec![c2, c1, origin]
+		}
+	);
 }
 
-/// Open: the same leak never settles under `hash(scope, id)`. A scoped key the
-/// CDN sent down comes back up through the misconfigured uplink, and the CDN
-/// files it again as `hash(scope, hash(scope, id))`, a new identity, on every
-/// lap. Correctly marked uplinks settle, so the hole is that containment of a
-/// misconfiguration is unbounded, not that it leaks.
+/// A scoped key the CDN sent down comes back up through the misconfigured
+/// uplink. Filed again as `hash(scope, hash(scope, id))`, it is a new identity
+/// on every lap, so the CDN never settles. Scoped keys are recognizable, and a
+/// scoped connection forwarding one has that route refused, so the lap ends and
+/// the CDN holds what correctly marked uplinks give it. Nested scoped
+/// federation is therefore out: the inner level must be unscoped.
 #[test]
-fn scoped_keys_rewrap_on_every_lap_of_a_misconfigured_uplink() {
+fn scoped_connections_cannot_rescope_a_scoped_identity() {
 	let c2 = 1;
-	let mut net = two_uplinks(Export::DownOnly, true, Some("local/"));
+	let mut net = two_uplinks(Config::default(), true, Some("local/"));
 	assert!(net.run());
 	let marked = net.identities(c2);
 
-	let mut net = two_uplinks(Export::DownOnly, false, Some("local/"));
+	let mut net = two_uplinks(Config::default(), false, Some("local/"));
+	assert!(net.run());
+	assert_eq!(net.identities(c2), marked + 1, "the leak is filed once, never again");
+
+	let cfg = Config {
+		rescope: true,
+		..Config::default()
+	};
+	let mut net = two_uplinks(cfg, false, Some("local/"));
 	let mut known = Vec::new();
 	for _ in 0..4 {
 		assert!(!net.settle(10));

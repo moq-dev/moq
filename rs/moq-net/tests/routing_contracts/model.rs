@@ -25,7 +25,8 @@ pub type Node = usize;
 /// An opaque routing identity: the hash of a per-process key, or [`scoped`].
 pub type Id = u64;
 
-/// Set on every [`scoped`] identity and never on a key-derived one.
+/// Set on every [`scoped`] identity and never on a key-derived one, so any
+/// relay recognizes a scoped key.
 const SCOPED: Id = 1 << 63;
 
 /// A route metric: the sum of the configured link costs.
@@ -91,6 +92,9 @@ pub struct Config {
 	/// A relay that accepted a request from an upstream link ends it once its
 	/// route turns down-only. Without it the relay keeps following that route.
 	pub recheck: bool,
+	/// A scoped connection may forward an already scoped identity, which the
+	/// receiver files again under its own scope. Otherwise that route is refused.
+	pub rescope: bool,
 }
 
 impl Default for Config {
@@ -100,6 +104,7 @@ impl Default for Config {
 			export: Export::DownOnly,
 			tie: TieBreak::PathIdentity,
 			recheck: true,
+			rescope: false,
 		}
 	}
 }
@@ -504,6 +509,9 @@ impl Net {
 		if let Some(scope) = self.links[&(at, from)].scope
 			&& self.nodes[from].proven != Some(id)
 		{
+			if id & SCOPED != 0 && !self.cfg.rescope {
+				return;
+			}
 			let key = scoped(scope, id);
 			self.nodes[at].filed.insert((from, key), id);
 			id = key;
