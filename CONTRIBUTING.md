@@ -83,7 +83,7 @@ For an advisory against noq or Quinn, compare the pinned release's `PARENT` with
 `main` is the trunk; `release` is what ships, and release-plz and every branch-triggered publish run only there.
 
 - A release is cut by hand: a PR merging `main` into `release`, with a merge commit.
-- Consider a backport for any critical bug fix (crash, security, data loss, broken interop): land it on `main` first, then cherry-pick it onto `release` as a separate PR.
+- Suggest a `release` backport for any serious bug fix (crash, security, data loss, broken interop), whether found on `main` or reported against a release. Land it on `main` first, then port it onto `release` as a separate PR that keeps the published API, so it ships as a patch.
 - Nothing merges `release` into `main` automatically. Before cutting a minor or breaking release, the maintainer merges `release` into `main` once, so trunk carries the published versions, CHANGELOGs, and any `release`-only commits. It lands as a merge commit with `--admin`, never squashed, so the cut starts from an advanced merge base.
 
 # Versions
@@ -91,7 +91,7 @@ For an advisory against noq or Quinn, compare the pinned release's `PARENT` with
 Releases are cut separately; bump only when asked. Each package's version lives in one place:
 
 - **Rust**: release-plz owns crate versions and Rust dependency requirements.
-- **JavaScript**: `js/*/package.json` packages with a `scripts.release` entry (skip private ones like `@moq/clock`, `@moq/wasm`), plus the matching workspace version in `bun.lock`.
+- **JavaScript**: `js/*/package.json` packages with a `scripts.release` entry (skip private ones like `@moq/wasm`), plus the matching workspace version in `bun.lock`.
 - **Python**: `py/moq-rs/pyproject.toml`, plus the matching `moq-rs` entry in the root `uv.lock`; `py/moq-ffi` follows the `moq-ffi-v*` tag and Rust crate.
 - **Swift**: `swift/VERSION`. **Kotlin**: `moq.version` in `kt/gradle.properties`. **Dart**: `version` in `dart/moq/pubspec.yaml`. Their FFI counterparts track the Rust crate.
 - **Go**: `go/wrapper/VERSION` holds a human-owned `MAJOR.MINOR` line; CI derives the patch, so only edit it for a breaking API. Leave the placeholder FFI version in `go.mod` alone.

@@ -30,7 +30,11 @@ lite-07, decided 2026-10-05. That removes lite-07's `Hop Base`/`Hop Keep`
 announce compression along with the hop list, and moq.pro's lite-07 rollout
 has to plan for a lite-07 without hop lists. Only
 [Routes and announces](/quest/m1/cluster-routing/routes.md) gates the cut,
-not the rest of the cluster-routing line (decided 2026-10-08).
+not the later federation/P2P integrations. Decided 2026-10-13: routes now
+owns the tier/partition correctness tests, so they run before the cut. Peer
+grants and metadata-only subscriptions do not gate it: neither is clustering
+stability. Both are additive and, per the freeze policy, target whichever lite
+wip is current when they land.
 
 Decided 2026-10-08: Restart and AUTH join Required, since both change the
 lite-07 wire. SUBSCRIBE_OK carrying live media time was dropped: no reader
@@ -75,9 +79,9 @@ is published; older versions are unchanged.
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - lite-07 restores SUBSCRIBE_DROP in place of `Stream Count`
 - [FETCH max-delay](/quest/m1/fetch-max-delay.md) - historical requests have a reader budget, carried by FETCH while present and by ranges after its removal
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
-- [Untimed lite-07](/quest/m1/lite-untimed.md) - an untimed track crosses the wire untimed
 - [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
 
 ## Related
 
+- [Relay hops](/quest/m1/ietf-extension/lite.md) - the `ietf` SETUP extension targets lite-07 wip and does not gate the cut
 - [The moq.pro mesh runs lite-07](/quest/m3/lite07-mesh.md) - the deployment condition that follows this

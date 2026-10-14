@@ -711,7 +711,7 @@ mod tests {
 		loop {
 			match reader.read().await.unwrap()? {
 				moq_mux::container::Read::Frame { frame, .. } => return Some(frame),
-				moq_mux::container::Read::Gap | moq_mux::container::Read::End { .. } => continue,
+				moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. } => continue,
 			}
 		}
 	}

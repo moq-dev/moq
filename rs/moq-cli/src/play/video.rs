@@ -98,7 +98,7 @@ impl<O: Output> Video<O> {
 						false
 					}
 					// Applied in delivery order, so the restart lands before the frame after it.
-					Some(Read::Gap) => {
+					Some(Read::Gap { .. }) => {
 						end = None;
 						buffer.clear();
 						self.presentation.lock().unwrap().video_restarted();

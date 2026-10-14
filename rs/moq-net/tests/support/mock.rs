@@ -495,6 +495,8 @@ struct SessionSide {
 	stats: Mutex<MockStats>,
 	/// How many times the stats were read.
 	stats_reads: AtomicUsize,
+	/// Whether reading the stats panics; see [`MockSession::panic_on_stats`].
+	panic_on_stats: AtomicBool,
 }
 
 /// The connection statistics a [`MockSession`] reports. Unavailable by default.
@@ -653,6 +655,10 @@ impl poll::Session for MockSession {
 	}
 
 	fn stats(&self) -> impl moq_net::transport::Stats {
+		assert!(
+			!self.side.panic_on_stats.load(Ordering::Relaxed),
+			"injected transport panic"
+		);
 		self.side.stats_reads.fetch_add(1, Ordering::Relaxed);
 		*self.side.stats.lock().unwrap()
 	}
@@ -674,6 +680,12 @@ impl MockSession {
 	/// How many times the stats were read.
 	pub fn stats_reads(&self) -> usize {
 		self.side.stats_reads.load(Ordering::Relaxed)
+	}
+
+	/// Panic on the driver's next stats sample, which a [`moq_net::Session::stats`]
+	/// read requests.
+	pub fn panic_on_stats(&self) {
+		self.side.panic_on_stats.store(true, Ordering::Relaxed);
 	}
 
 	/// Drop the FIN of the bidi streams this side opens, keeping them open.
@@ -870,6 +882,7 @@ pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession,
 		bidi_types: StreamTypes::default(),
 		stats: Mutex::default(),
 		stats_reads: AtomicUsize::default(),
+		panic_on_stats: AtomicBool::default(),
 	});
 
 	let server_side = Arc::new(SessionSide {
@@ -892,6 +905,7 @@ pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession,
 		bidi_types: StreamTypes::default(),
 		stats: Mutex::default(),
 		stats_reads: AtomicUsize::default(),
+		panic_on_stats: AtomicBool::default(),
 	});
 
 	let new = |side| MockSession {

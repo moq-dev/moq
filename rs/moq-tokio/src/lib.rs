@@ -43,6 +43,7 @@ mod log;
 #[cfg(feature = "noq")]
 pub mod noq;
 pub mod origin;
+pub mod panic;
 pub mod quic;
 #[cfg(any(feature = "noq", feature = "tcp", feature = "websocket"))]
 mod resolve;

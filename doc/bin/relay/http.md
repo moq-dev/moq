@@ -54,6 +54,10 @@ A few worth alerting on:
   a subscriber's latency budget.
 - `moq_relay_draining_sessions`: sessions sent a GOAWAY during a
   [shutdown drain](/bin/relay/config#shutdown) that have not left yet.
+- `moq_relay_panics_total`: bugs that closed one session instead of the
+  relay. Each logs an error with the message and the session's span. A panic
+  in a task every session depends on (the origin, the cache governor, the
+  certificate reload) exits the relay instead.
 
 With `--runtime-io-uring`, each QUIC worker also reports `moq_relay_uring_*`
 counters under a `worker` label. A dead worker shows stuck zeros rather than

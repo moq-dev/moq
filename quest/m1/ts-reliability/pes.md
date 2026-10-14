@@ -40,5 +40,5 @@ retain its regression rather than duplicating that fix.
 
 ## Related
 
-- [Automated validation](/quest/m1/ts-reliability/validation.md) - independent parsing and decoding of the reassembled output
+- [Automated validation](/test/ts/README.md) - independent parsing and decoding of the reassembled output
 - [PES timing and headers](/quest/m1/plan-ts-pes-untimed.md) - defines semantics retained after assembly

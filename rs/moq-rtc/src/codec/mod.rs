@@ -170,6 +170,8 @@ impl<I: DeferredImport> DeferredVideo<I> {
 pub struct PacketizedFrame {
 	pub timestamp_us: u64,
 	pub payload: Bytes,
+	/// The frame opens a group, so a peer can start decoding the rendition here.
+	pub keyframe: bool,
 }
 
 /// A subscribed moq-mux track, normalized to the bitstream shape str0m's
@@ -233,7 +235,7 @@ impl Track {
 			let frame = match self.consumer.read().await? {
 				Some(moq_mux::container::Read::Frame { frame, .. }) => frame,
 				// RTP sequence numbers and timestamps already show the hole to a receiver.
-				Some(moq_mux::container::Read::Gap | moq_mux::container::Read::End { .. }) => continue,
+				Some(moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. }) => continue,
 				None => return Ok(None),
 			};
 			let payload = match &self.convert {
@@ -253,6 +255,7 @@ impl Track {
 			return Ok(Some(PacketizedFrame {
 				timestamp_us: frame.timestamp.as_micros() as u64,
 				payload,
+				keyframe: frame.keyframe,
 			}));
 		}
 	}

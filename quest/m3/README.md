@@ -54,7 +54,6 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [SITL proof and browser ground station](/quest/m3/teleop-proof.md) - ArduPilot
   SITL and a synthetic camera flown from a browser ground station, reproducible
   in five minutes
-- [P2P](/quest/m3/p2p/README.md) - opted-in clients serve each other over data channels and iroh while the relay stays the rendezvous and the fallback, under application policy
 - [Ladder](/quest/m3/ladder/README.md) - a transcode ladder adapts to the uplink it publishes over, instead of encoding every live rung at its ceiling
 - [fMP4 emsg](/quest/m3/emsg.md) - settles the shared framing and missing-data semantics before this section adopts them
 - [ID3 catalog section](/quest/m3/id3.md) - timed ID3 as a first-class container-neutral catalog section

@@ -41,8 +41,6 @@ export interface ConnectionProps {
 	version: Version;
 	/** The session stream, absent on drafts that have none. */
 	session?: Stream;
-	/** Whether the relay supports broadcast discovery. Defaults to true. */
-	discovery?: boolean;
 	/** The origin whose broadcasts are served to the peer. Omit to publish nothing. */
 	publish?: OriginConsumer;
 	/**
@@ -68,9 +66,6 @@ export class Connection implements Established {
 
 	// The wire transport this session runs over.
 	readonly transport: Transport;
-
-	/** Whether the relay supports broadcast discovery; see {@link Established.discovery}. */
-	readonly discovery: boolean;
 
 	// The version used for encoding/decoding.
 	#version: Version;
@@ -133,7 +128,7 @@ export class Connection implements Established {
 	 *
 	 * @internal
 	 */
-	constructor({ url, quic, version, session, discovery = true, publish, client = true }: ConnectionProps) {
+	constructor({ url, quic, version, session, publish, client = true }: ConnectionProps) {
 		this.url = url;
 		this.#quic = quic;
 		this.#session = session;
@@ -145,7 +140,6 @@ export class Connection implements Established {
 		this.version = versionName(version);
 		this.#version = version;
 		this.transport = transportOf(quic);
-		this.discovery = discovery;
 
 		this.probe = this.#probe;
 

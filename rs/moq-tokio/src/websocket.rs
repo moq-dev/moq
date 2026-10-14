@@ -3,8 +3,8 @@
 //! Used when QUIC is unreachable: UDP blocked by a firewall, a proxy in the way, a
 //! network that only passes TCP/443. The client races this against QUIC and gives QUIC
 //! a small head start ([`Config::delay`]), so WebSocket only wins when QUIC can't get
-//! through. A [`crate::Connection`] that lands on WebSocket keeps the QUIC dial going and
-//! moves onto it if it completes. Servers accept it on a separate TCP port via [`Listener`].
+//! through. A session that lands on WebSocket stays on it for its lifetime. Servers
+//! accept it on a separate TCP port via [`Listener`].
 
 use qmux::ws::tokio_tungstenite;
 use qmux::ws::tokio_tungstenite::tungstenite::{self, client::IntoClientRequest, http};
@@ -108,7 +108,10 @@ impl Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-// Track servers (hostname:port) where WebSocket won the race, so we won't give QUIC a headstart next time
+/// Servers (host, port) where WebSocket won the race, so later dials skip QUIC's head start.
+///
+/// Both arms still race on those dials, and a QUIC win clears the entry through [`forget`],
+/// since UDP gets through after all.
 static WEBSOCKET_WON: LazyLock<Mutex<HashSet<(String, u16)>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// The [`WEBSOCKET_WON`] key for a dial URL: the host and port the fallback dials.
@@ -123,12 +126,17 @@ fn won_key(url: &Url) -> Result<(String, u16)> {
 }
 
 /// Forget that WebSocket won for `url`, giving QUIC its head start again.
-///
-/// Called once a QUIC dial to `url` lands after all, which proves UDP gets through.
+#[cfg(feature = "noq")]
 pub(crate) fn forget(url: &Url) {
 	if let Ok(key) = won_key(url) {
 		WEBSOCKET_WON.lock().unwrap().remove(&key);
 	}
+}
+
+/// Record that WebSocket won for `url`, as a fallback dial that lands does.
+#[cfg(all(test, feature = "noq"))]
+pub(crate) fn remember(url: &Url) {
+	WEBSOCKET_WON.lock().unwrap().insert(won_key(url).unwrap());
 }
 
 /// Whether the next dial to `url` skips QUIC's head start.

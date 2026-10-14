@@ -14,7 +14,9 @@ counters, and those counters are deleted.
 the raw H.264/H.265 exports) still learn of a gap after the fact.
 
 - Map `Gap` to the exporter's discontinuity handling and `End` to its
-  declared-end handling, in delivery order.
+  declared-end handling, in delivery order. A join reads no `Gap` (#5311),
+  though `discontinuity()` still counts losses before the first item; a fresh
+  exporter has nothing to cut there.
 - Keep the events `Read` filters reaching the exporters. fMP4 cuts a fragment
   on `Event::GroupEnd` while the track stays live, and sizes a durationless
   final sample from a trailing `Event::FrameEnd { opens: false }`; losing

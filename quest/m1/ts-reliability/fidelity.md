@@ -52,5 +52,5 @@ section/PES bytes only where the settled contract actually promises that.
 ## Related
 
 - [PES timing and headers](/quest/m1/plan-ts-pes-untimed.md) - separate placement, decode and presentation semantics
-- [Automated validation](/quest/m1/ts-reliability/validation.md) - profile declarations link to executable evidence
+- [Automated validation](/test/ts/README.md) - profile declarations link to executable evidence
 - [Typed SCTE-35](/quest/m3/2279-hang-typed-scte-35-ad-cue-signaling-carried-opaquely.md) - application cue APIs follow basic opaque carriage

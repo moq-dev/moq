@@ -198,6 +198,10 @@ pub enum Error {
 	#[error("connection stopped")]
 	Stopped,
 
+	/// A task serving this connection panicked. The panic itself is logged.
+	#[error("panicked")]
+	Panic,
+
 	/// Loading certificates or building the TLS config failed.
 	#[error(transparent)]
 	Tls(Arc<crate::tls::Error>),

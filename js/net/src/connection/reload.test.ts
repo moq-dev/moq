@@ -506,14 +506,16 @@ test("origins span reconnects: local re-announces, remote re-populates", async (
 
 	// Each connect attempt gets a fresh server session that publishes "remote" and records
 	// what the client announced to it.
-	const servers: { session: { abort: () => void }; saw: OriginProducer }[] = [];
+	const servers: { session: { abort: () => void }; saw: OriginProducer; watching: { close(): void } }[] = [];
 	const stub = function StubWebTransport() {
 		const pair = createMockTransportPair(Lite.ALPN_05);
 		const saw = new OriginProducer();
+		// The server watches everything, so it asks the client for announcements.
+		const watching = saw.announced();
 		const serverOrigin = new OriginProducer();
 		void accept(pair.server, url, { publish: serverOrigin.consume(), consume: saw }).then((session) => {
 			publish(serverOrigin, Path.from("remote"));
-			servers.push({ session, saw });
+			servers.push({ session, saw, watching });
 		});
 		return pair.client;
 	};
@@ -528,6 +530,8 @@ test("origins span reconnects: local re-announces, remote re-populates", async (
 		consume: subscribeOrigin,
 	});
 	const reader = subscribeOrigin.consume();
+	// A watch held across the reconnect: each session re-opens its announce request.
+	const watching = reader.announced();
 
 	try {
 		// First session: the server's broadcast lands in the client origin, and the client's
@@ -544,6 +548,8 @@ test("origins span reconnects: local re-announces, remote re-populates", async (
 		await waitUntil(() => wireOf(reader).routes(Path.from("remote")));
 		await waitUntil(() => (servers[1] ? wireOf(servers[1].saw).routes(Path.from("mine")) : false));
 	} finally {
+		watching.close();
+		for (const server of servers) server.watching.close();
 		reload.close();
 		publishOrigin.close();
 		subscribeOrigin.close();
@@ -557,7 +563,6 @@ test("closing an announce consumer during upstream teardown does not append retr
 	const reload = new Reload({ enabled: false });
 	reload.established.set({
 		probe: new Signal(undefined),
-		discovery: true,
 		announced: () => upstream.consume(),
 		stats: async () => undefined,
 	} as unknown as import("./established.ts").Established);

@@ -59,6 +59,7 @@ any necessary breaks. Wire: no changes intended.
 ## Required
 
 - [Browser backend baseline](/quest/m2/rs2ts/spike.md) - reproducible browser fixtures and measurements before choosing or adopting a backend
+- [Binding generator](/quest/m2/rs2ts/generator.md) - the maintainer picks UniFFI- or BoltFFI-generated moq-ffi, or hand-written moq-wasm, from measurements
 - [Complete WASM bindings](/quest/m2/rs2ts/wasm-bindings.md) - Rust publishing and consumption cover the browser protocol and model surface
 - [Adopt WASM in @moq/net](/quest/m2/rs2ts/wasm-adopt.md) - the TypeScript interface uses Rust, with measured tradeoffs accepted before replacement
 

@@ -5981,7 +5981,7 @@ fn bbr_marking_versus_dropping() {
         client_cfg.transport = transport;
         let (client_ch, server_ch) = pair.connect_with(client_cfg);
         pair.bottleneck = Some(Bottleneck::new(BPS_LIMIT, 20_000, marks_ce));
-        let time = upload(&mut pair, client_ch, server_ch, TOTAL_BYTES);
+        let time = upload(&mut pair, client_ch, server_ch, TOTAL_BYTES, |_| {});
         let goodput = TOTAL_BYTES as f64 / time.as_secs_f64();
         let ecn = pair.client_conn_mut(client_ch).using_ecn();
         let queue = pair.bottleneck.take().unwrap().stats;
@@ -6012,12 +6012,62 @@ fn bbr_marking_versus_dropping() {
     assert!(marking_goodput > 0.9 * dropping_goodput);
 }
 
-/// Uploads `total` bytes on a fresh stream from client to server, returning how long it took.
+/// A BBR upload learns a 2 MB/s bottleneck at a 50ms RTT, then the connection idles on
+/// keep-alives for five minutes. The next 250 KB must be paced near the bandwidth learned before
+/// the idle, not at the rate of the keep-alives (#4219).
+#[test]
+fn bbr_burst_after_long_idle_keeps_learned_bandwidth() {
+    const BPS_LIMIT: u64 = 2_000_000;
+    const BURST: usize = 250_000;
+
+    let _guard = subscribe();
+    let mut transport = TransportConfig::default();
+    transport.congestion_controller_factory(Arc::new(congestion::Bbr3Config::default()));
+    // Only the sender pings. A ping from the receiver would reset the sender's keep-alive timer,
+    // leaving its controller nothing to sample during the idle.
+    transport.keep_alive_interval(Some(Duration::from_secs(10)));
+    let mut pair = Pair::default();
+    pair.latency = Duration::from_millis(25);
+    let mut client_cfg = client_config();
+    client_cfg.transport = Arc::new(transport);
+    let (client_ch, server_ch) = pair.connect_with(client_cfg);
+    pair.bottleneck = Some(Bottleneck::new(BPS_LIMIT, 100_000, false));
+
+    let metrics = |pair: &mut Pair| pair.client_conn_mut(client_ch).congestion_state().metrics();
+    upload(&mut pair, client_ch, server_ch, 4_000_000, |_| {});
+    let learned = metrics(&mut pair).bandwidth_estimate.unwrap();
+
+    let idle_end = pair.time + Duration::from_secs(300);
+    while pair.time < idle_end {
+        if !pair.step() {
+            pair.time = min_opt(pair.client.next_wakeup(), pair.server.next_wakeup())
+                .expect("keep-alive timer stopped during the idle");
+        }
+    }
+    assert!(!pair.client_conn_mut(client_ch).is_closed());
+
+    let mut min_pacing = u64::MAX;
+    let time = upload(&mut pair, client_ch, server_ch, BURST, |pair| {
+        min_pacing = min_pacing.min(metrics(pair).pacing_rate.unwrap());
+    });
+    info!(learned, min_pacing, ?time);
+    // Measured at 0.99x the learned 2 MB/s and 154ms. Without the starvation callback,
+    // non-app-limited keep-alive samples age the max-bw filter down to about 530 B/s, and the
+    // burst takes 720ms.
+    assert!(
+        min_pacing * 10 >= learned * 9,
+        "paced at {min_pacing} B/s after learning {learned} B/s"
+    );
+}
+
+/// Uploads `total` bytes on a fresh stream from client to server, calling `on_step` after every
+/// step, and returns how long it took.
 fn upload(
     pair: &mut Pair,
     client_ch: ConnectionHandle,
     server_ch: ConnectionHandle,
     total: usize,
+    mut on_step: impl FnMut(&mut Pair),
 ) -> Duration {
     const CHUNK: [u8; 10_000] = [0; 10_000];
 
@@ -6056,6 +6106,7 @@ fn upload(
         if received == total || !pair.step() {
             break;
         }
+        on_step(pair);
     }
     assert_eq!(received, total);
     pair.time.saturating_duration_since(start)

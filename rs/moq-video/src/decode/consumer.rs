@@ -168,7 +168,7 @@ impl Consumer {
 				Some(Read::Frame { frame, .. }) => Some(frame),
 				// The next group starts on a keyframe with parameter sets, so neither a
 				// gap nor a declared end flushes the decoder.
-				Some(Read::Gap | Read::End { .. }) => continue,
+				Some(Read::Gap { .. } | Read::End { .. }) => continue,
 				None => None,
 			};
 

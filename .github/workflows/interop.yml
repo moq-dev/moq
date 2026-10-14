@@ -3,8 +3,7 @@ name: Interop
 # Cross-language interop test built from THIS checkout (not the published
 # packages, unlike the moq-dev/smoke repo). Stands up a relay and runs the
 # publish x subscribe matrix across rust / python / go / browser / native-js / c,
-# then browser-to-browser media QA and the TS/IRD compliance harness over the
-# exporter's output.
+# then browser-to-browser media QA. TS validation has its own workflow.
 on:
   # Manual on-demand runs.
   workflow_dispatch:
@@ -20,10 +19,6 @@ on:
       - "test/max-age/**"
       - "test/portrait/**"
       - "rs/moq-tokio/tests/max_age.rs"
-      # The TS/IRD compliance harness runs in the same job (see below).
-      - "test/ts/**"
-      # The live TS round trip also checks stdin ingestion keeps up with its source.
-      - "rs/moq-cli/src/publish.rs"
       # The interop job also depends on the recipe that invokes it and the
       # workspace membership that links the JS clients to source.
       - "test/justfile"
@@ -148,74 +143,6 @@ jobs:
         shell: bash -leo pipefail {0}
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
-
-      - name: TS pair controls
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
-        run: nix develop --command just test ts-pair-controls
-        shell: bash -leo pipefail {0}
-
-      # Round-trips a PCR-paced TS through a relay and checks the subscriber's
-      # `export ts` output with TSDuck (tsp/tsanalyze from the nix devShell).
-      - name: TS compliance
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
-        run: nix develop --command just test ts
-        shell: bash -leo pipefail {0}
-        env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
-
-      # The same round-trip at 2 Mb/s, where every keyframe outgrows a 25 ms PCR slot,
-      # so the export has to spread it over the slots before its DTS and still keep
-      # the constant-rate schedule.
-      - name: TS keyframe bursts
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
-        run: nix develop --command just test ts --bitrate 2000000
-        shell: bash -leo pipefail {0}
-        env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
-
-      # 1080p video filling a broadcast-sized 9 Mbit CPB, at the default delay: the
-      # source sends pictures most of a second ahead of their decode time, and the
-      # export has to as well without overflowing the receiver's buffers.
-      - name: TS broadcast-sized CPB
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
-        run: nix develop --command just test ts --hrd
-        shell: bash -leo pipefail {0}
-        env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
-
-      # The same video beside four audio PIDs in a multiplex faster than its Rx: each slot
-      # has to interleave the video with the rest, or its transport buffer overflows.
-      - name: TS multiplex above the video's Rx
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
-        run: nix develop --command just test ts --headroom
-        shell: bash -leo pipefail {0}
-        env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
-
-      # The same round-trip over an open-GOP clip: every leading picture after a
-      # recovery point must come back, in decode order.
-      - name: TS open GOP
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
-        run: nix develop --command just test ts --open-gop
-        shell: bash -leo pipefail {0}
-        env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
-
-      # Builds the sparse-EPG and pending-version fixtures and round-trips
-      # them, asserting the schedule survives and pending sections are dropped.
-      - name: EIT fixtures
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
-        run: nix develop --command just test ts-eit
-        shell: bash -leo pipefail {0}
-        env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
-
-      # The T-STD model must pass a broadcast capture and fail the same capture
-      # delivered too slowly, too early, or in a burst.
-      - name: T-STD controls
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
-        run: nix develop --command just test ts-tstd
-        shell: bash -leo pipefail {0}
 
       # A failing harness run keeps its directory, holding the process logs, the
       # relay config, and a Playwright trace of the failing page. Upload it for a

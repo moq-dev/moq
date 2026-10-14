@@ -88,7 +88,8 @@ authorization and hidden names work exactly as without one.
   on the old instance until dropped or its route goes, while new requests get
   the new one, so a player follows the restart by requesting the path again.
   Held handles can still read their old cached content, but cannot open new
-  epochless requests after retirement. Request the path again for new content.
+  epochless requests once the restart is delivered. Request the path again for
+  new content.
   That is how a restarted encoder, whose group numbers start over, takes the
   name instead of stalling viewers on the old sequence. A relay drops its copy
   of the old instance, so a new subscriber never sees its cached groups.
@@ -101,7 +102,7 @@ path, since nothing says it serves the same bytes.
 
 `moq` and `moqsink` mint a fresh epoch per run, kept across reconnects, and the
 RTMP, SRT, and WHIP ingests mint one per connection. Replicas share one by
-passing the same `moq --epoch`, except under [encryption](/concept/hang#encryption). See [Clustering](/bin/relay/cluster) for how a
+passing the same [`moq --epoch`](/bin/cli#publisher-runs), which only the importers that derive their tracks from the input accept, except under [encryption](/concept/hang#encryption). See [Clustering](/bin/relay/cluster) for how a
 relay uses this.
 
 ### Multiple CDNs
@@ -215,8 +216,9 @@ doesn't match is refused. No receiver fills in an arrival time. An untimed
 group never falls past max delay, so a new subscriber starts at its latest
 group unless it names a start. Tracks from moq-lite before 05, or from
 moq-transport without a `TIMESCALE` (every track on drafts 14-16), arrive
-untimed. No moq-lite version can declare an untimed track, so on 05 and later
-its frames go out stamped with their send time.
+untimed. moq-lite 05 and 06 cannot declare an untimed track, so there its
+frames go out stamped with their send time; the work-in-progress 07 carries it
+untimed.
 
 A relay cancels its upstream subscription once nobody subscribes, but keeps its
 copy of the track for 30 seconds after the last reader leaves, so a returning

@@ -57,9 +57,10 @@ RELEASED="$HARNESS_RUN/released/bin/moq"
 bun "$DIR/compat/resolve.ts" matrix "$HARNESS_RUN/current-help" "$HARNESS_RUN/released-help" "$DIR/compat/planned-breaks.json" "$HARNESS_RUN/shared" "$HARNESS_RUN/versions.json"
 
 # A separate package root prevents bun workspaces from replacing released deps
-# with the checkout. Copy exactly the same clients into both environments.
+# with the checkout. Copy exactly the same client into both environments; it uses
+# only API both package sets have, so it never follows the checkout's interop client.
 mkdir -p "$HARNESS_RUN/js"
-cp "$DIR/compat/client.ts" "$DIR/compat/transport.ts" "$DIR/clients/js-native/subscribe.ts" "$HARNESS_RUN/js/"
+cp "$DIR/compat/client.ts" "$DIR/compat/transport.ts" "$HARNESS_RUN/js/"
 python3 - "$HARNESS_RUN/versions.json" "$HARNESS_RUN/js/package.json" <<'PY'
 import json, sys
 versions = json.load(open(sys.argv[1]))
@@ -157,9 +158,9 @@ cell() {
 }
 
 fetch() {
-    local relay="$1" pub="$2" sub="$3" js="$4" transport="$5" version="$6"
+    local relay="$1" pub="$2" sub="$3" js="$4" version="$5"
     RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
-        INTEROP_NATIVE_CLIENT="$js" INTEROP_COMPAT_TRANSPORT="$transport" INTEROP_FETCH_TRACK=1 \
+        INTEROP_COMPAT_CLIENT="$js" INTEROP_FETCH_TRACK=1 \
         bash "$DIR/interop.sh" --publishers rust --subscribers rust
 }
 
@@ -186,29 +187,24 @@ while read -r version <&3; do
     for relay_source in current released; do
         if [[ "$relay_source" == current ]]; then relay="$TARGET/debug/moq-relay"; else relay="$released_relay"; fi
         for source in current released; do
-            # Each side's JS environment and the version-pinning transport beside it.
+            # Each side's compat client, with its version-pinning transport beside it.
             if [[ "$source" == current ]]; then
-                pub="$CURRENT" sub="$RELEASED" publisher_js="$DIR/compat"
-                own_js="$DIR/clients/js-native" own_transport="$DIR/compat/transport.ts"
-                other_js="$HARNESS_RUN/js" other_transport="$HARNESS_RUN/js/transport.ts"
+                pub="$CURRENT" sub="$RELEASED" own_js="$DIR/compat" other_js="$HARNESS_RUN/js"
             else
-                pub="$RELEASED" sub="$CURRENT" publisher_js="$HARNESS_RUN/js"
-                own_js="$HARNESS_RUN/js" own_transport="$HARNESS_RUN/js/transport.ts"
-                other_js="$DIR/clients/js-native" other_transport="$DIR/compat/transport.ts"
+                pub="$RELEASED" sub="$CURRENT" own_js="$HARNESS_RUN/js" other_js="$DIR/compat"
             fi
             cell media "$version" "$relay_source" "$source" env RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
-                INTEROP_NATIVE_CLIENT="$other_js" INTEROP_COMPAT_TRANSPORT="$other_transport" INTEROP_DECODE=1 bash "$DIR/interop.sh" --subscribers rust,js-native-node
+                INTEROP_COMPAT_CLIENT="$other_js" INTEROP_DECODE=1 bash "$DIR/interop.sh" --subscribers rust,js-native-node
             [[ "$released_fetch" == true && "$current_fetch" == true ]] || continue
             # Drive JS publication from actual subscriber demand: the publisher's own JS
             # subscribes and observes the group, which the opposite Rust CLI then
             # FETCHes by ID. Reading the newest group races its live delivery.
             cell js-publish "$version" "$relay_source" "$source" env RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
-                INTEROP_JS_PUBLISH_CLIENT="$publisher_js" INTEROP_NATIVE_CLIENT="$own_js" INTEROP_COMPAT_TRANSPORT="$own_transport" \
-                INTEROP_FETCH_DATA=1 bash "$DIR/interop.sh" --publishers js-native --subscribers rust
+                INTEROP_COMPAT_CLIENT="$own_js" INTEROP_FETCH_DATA=1 bash "$DIR/interop.sh" --publishers js-native --subscribers rust
             # Both Rust sources fetch the same group and compare exact payloads. The
             # publisher's own JS finds the group, so a catalog break fails only the
             # media cell.
-            cell fetch "$version" "$relay_source" "$source" fetch "$relay" "$pub" "$sub" "$own_js" "$own_transport" "$version"
+            cell fetch "$version" "$relay_source" "$source" fetch "$relay" "$pub" "$sub" "$own_js" "$version"
         done
     done
 done 3<"$HARNESS_RUN/shared"

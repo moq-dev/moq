@@ -85,11 +85,10 @@ before publishing the API.
 
 Retransmissions follow the same hierarchy. `moq-quic` already re-queues a lost
 range through the stream's priority (`StreamsState::retransmit`), so a lost
-video range waits behind new audio at a higher priority; keep that
-([pinned](/quest/m1/quic/retransmit-priority.md) by a test), and add one
-proving a retransmission is never starved
-indefinitely by an equal-priority group's new data (the fair tier's byte
-credit covers retransmits too).
+video range waits behind new audio at a higher priority. Keep
+`retransmit_stream_priority` passing, and add a test proving a retransmission
+is never starved indefinitely by an equal-priority group's new data (the
+fair tier's byte credit covers retransmits too).
 
 Tests saturate the sender with differently sized audio and video groups and
 prove byte fairness over a bounded window, strict preemption by a higher
