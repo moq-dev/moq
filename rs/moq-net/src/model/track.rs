@@ -815,17 +815,16 @@ impl TrackState {
 	/// [`Self::is_stale`] for group `sequence`, whether this track holds it or not: its
 	/// successor here starts a full `budget` behind the edge.
 	fn drifted(&self, sequence: u64, edge: &Edge, budget: Duration) -> bool {
-		// The edge was resolved under an earlier lock, so confirm it still names the
-		// same servable incarnation before it convicts a candidate. Failing safe
-		// (delivering) is right, since the next poll resolves a fresh edge.
-		let Some(live) = edge
-			.presentation
+		self.live_above(sequence, edge)
+			.is_some_and(|live| live.behind(self.reach(sequence, edge.cap), budget))
+	}
+
+	/// The edge that could convict group `sequence`: above it, and still holding the
+	/// servable incarnation it was resolved from. It was resolved under an earlier lock,
+	/// and failing safe (delivering) is right, since the next poll resolves a fresh edge.
+	fn live_above(&self, sequence: u64, edge: &Edge) -> Option<PresentationEdge> {
+		edge.presentation
 			.filter(|live| live.sequence > sequence && self.holds(live.sequence, live.stamp))
-		else {
-			return false;
-		};
-		self.reach(sequence, edge.cap)
-			.is_some_and(|reach| matches!(live.timestamp.checked_sub(reach), Ok(age) if Duration::from(age) >= budget))
 	}
 
 	/// [`Self::drifted`] under `cap`, parking `waiter` on exactly what else can move the
@@ -3801,6 +3800,13 @@ struct PresentationEdge {
 	timestamp: Timestamp,
 }
 
+impl PresentationEdge {
+	/// Whether a group that can present until `reach` is a full `budget` behind this edge.
+	fn behind(&self, reach: Option<Timestamp>, budget: Duration) -> bool {
+		reach.is_some_and(|reach| matches!(self.timestamp.checked_sub(reach), Ok(age) if Duration::from(age) >= budget))
+	}
+}
+
 /// The read cursor behind a [`Subscriber`].
 struct Cursor {
 	state: kio::Consumer<TrackState>,
@@ -3963,9 +3969,18 @@ impl Cursor {
 		let state = self.state.read();
 		let budget = clamp_max_delay(max_delay, state.max_age_bound());
 		let edge = state.drift_edge(self.end_sequence);
+		// Every group below the last successor found shares it, so a run of cached groups
+		// that cannot serve is walked once per pass, not once per gap.
+		let mut successor: Option<&group::Producer> = None;
 		while let Some(oldest) = delivered.above_gap()
-			&& state.drifted(oldest, &edge, budget)
+			&& let Some(live) = state.live_above(oldest, &edge)
 		{
+			if successor.is_none_or(|group| group.sequence <= oldest) {
+				successor = state.first_servable(oldest.saturating_add(1), edge.cap);
+			}
+			if !live.behind(successor.and_then(|group| group.timestamp()), budget) {
+				break;
+			}
 			delivered.forget_below(oldest);
 		}
 	}
@@ -10915,6 +10930,36 @@ mod test {
 		write_group(&producer, 2998);
 		write_group(&producer, 2500);
 		assert_eq!(drain_groups(&mut subscriber), [2998]);
+	}
+
+	/// Gaps below groups aborted since, but still cached, share the successor past them, so
+	/// one hand-out that puts them all past the budget forgets every one. The gap below a
+	/// group still within it is kept. `track_gap_flush` measures the cost.
+	#[test]
+	fn gaps_below_aborted_groups_are_forgotten_together() {
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(1)));
+		let mut handed = Vec::new();
+		for sequence in (0..20).step_by(2) {
+			let mut group = producer.create_group(group::Info { sequence }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(sequence).unwrap(), &b"x"[..])
+				.unwrap();
+			handed.push(group);
+		}
+		assert_eq!(drain_groups(&mut subscriber).len(), 10);
+		for group in handed.drain(..5) {
+			group.abort(Error::Cancel).unwrap();
+		}
+		// Groups 0 to 8 reach until group 10 at 10ms, which a group at 1.01s puts past the
+		// budget. Group 10 reaches until 12ms, so the gap at 9 is kept.
+		write_group(&producer, 1010);
+		assert_eq!(drain_groups(&mut subscriber), [1010]);
+		assert_eq!(
+			subscriber.delivered_runs(),
+			7,
+			"the floor at 8, then 10 to 18 and 1010 apart"
+		);
 	}
 
 	/// An untimed track has nothing past the budget, so a sparse feed keeps every gap

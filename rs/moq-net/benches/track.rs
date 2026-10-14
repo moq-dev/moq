@@ -27,6 +27,9 @@
 //! holding a fixed number of gaps the reader still remembers: each hand-out must cost the
 //! same however many gaps it holds, so a walk over them shows up as a slope.
 //!
+//! `track_gap_flush` forgets every remembered gap in one hand-out, each below an aborted
+//! group still cached: the successor they share must be found once, not once per gap.
+//!
 //! `track_empty_run` drains a run of groups that finished without a frame across readers,
 //! with the groups after it past the budget or within it: each empty group is handed out
 //! like any other, so a walk over the rest of the run per group shows up as a slope over it.
@@ -575,6 +578,78 @@ fn bench_sparse_read(c: &mut Criterion) {
 	group.finish();
 }
 
+/// A reader remembering `gaps` gaps, each below a handed-out group since aborted but still
+/// cached, then a stamped survivor after them all.
+struct GapFlush {
+	_broadcast: broadcast::Producer,
+	track: track::Producer,
+	sub: track::Subscriber,
+	gaps: u64,
+}
+
+impl GapFlush {
+	fn new(gaps: u64) -> Self {
+		let broadcast = broadcast::Info::default().produce();
+		let track = broadcast.create_track("bench", timed()).unwrap();
+		let mut sub = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+		let mut hand_out = |sequence: u64, millis: u64| {
+			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(millis).unwrap(), Bytes::from_static(b"x"))
+				.unwrap();
+			let Poll::Ready(Ok(Some(read))) = sub.poll_recv_group(&kio::Waiter::noop()) else {
+				panic!("the group is cached");
+			};
+			black_box(read);
+			group
+		};
+		// Every odd sequence is missing.
+		let handed: Vec<_> = (0..gaps).map(|gap| hand_out(gap * 2, gap)).collect();
+		hand_out(gaps * 2, gaps).finish().unwrap();
+		for group in handed {
+			group.abort(Error::Cancel).unwrap();
+		}
+		Self {
+			_broadcast: broadcast,
+			track,
+			sub,
+			gaps,
+		}
+	}
+
+	/// Hand out a group two hours on, which puts every remembered gap past the budget.
+	fn flush(&mut self) {
+		let mut group = self
+			.track
+			.create_group(moq_net::group::Info {
+				sequence: self.gaps * 2 + 1,
+			})
+			.unwrap();
+		group
+			.write_frame(Timestamp::from_millis(7_200_000).unwrap(), Bytes::from_static(b"x"))
+			.unwrap();
+		let Poll::Ready(Ok(Some(read))) = self.sub.poll_recv_group(&kio::Waiter::noop()) else {
+			panic!("the group is cached");
+		};
+		black_box(read);
+	}
+}
+
+/// One hand-out forgetting every remembered gap at once, each below a group that was
+/// aborted but is still cached, swept over the gaps. The groups judged share one
+/// successor past the aborted run, so finding it once per gap shows up as a slope.
+fn bench_gap_flush(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_gap_flush");
+	group.sample_size(10);
+	for gaps in [64u64, 512, 4096] {
+		group.throughput(Throughput::Elements(gaps));
+		group.bench_function(BenchmarkId::from_parameter(gaps), |b| {
+			b.iter_batched_ref(|| GapFlush::new(gaps), GapFlush::flush, BatchSize::PerIteration);
+		});
+	}
+	group.finish();
+}
+
 /// Readers on one track holding group 0, a run of groups that finished without a frame,
 /// and the groups after it.
 struct EmptyRun {
@@ -667,6 +742,7 @@ criterion_group!(
 	bench_datagram_subscriber_join,
 	bench_parked_read,
 	bench_sparse_read,
+	bench_gap_flush,
 	bench_empty_run
 );
 criterion_main!(benches);
