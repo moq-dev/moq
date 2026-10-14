@@ -462,10 +462,7 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 				let issue = serving.issue.clone();
 				match self.shared.auth.acceptor() {
 					Some(requests) => {
-						requests.push(crate::auth::Event::Session(crate::auth::Request::new(
-							msg.token,
-							issue.clone(),
-						)));
+						requests.push(crate::auth::Request::new(msg.token, issue.clone()));
 					}
 					// Only the connection's own credential has a default answer; a token
 					// needs someone to verify it. Tell the presenter explicitly.

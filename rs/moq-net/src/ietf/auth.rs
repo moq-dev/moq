@@ -433,7 +433,7 @@ impl Serve {
 		let mut default = None;
 		match self.handle.acceptor() {
 			Some(requests) => {
-				requests.push(crate::auth::Event::Session(Request::new(msg.token, issue.clone())));
+				requests.push(Request::new(msg.token, issue.clone()));
 			}
 			// Only the connection's own credential has a default answer; a token needs
 			// someone to verify it.

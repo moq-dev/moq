@@ -2048,7 +2048,7 @@ mod tests {
 			"seeded by the config"
 		);
 
-		conn.auth().set_request_token(tok(b"token-three")).unwrap();
+		conn.auth().set_request_token(Some(tok(b"token-three"))).unwrap();
 		assert_eq!(
 			format!("{:?}", conn.request_token),
 			"kind=0 <11 bytes>",
@@ -2127,22 +2127,15 @@ mod tests {
 			let _ = release.await;
 
 			let request = request.with_subscriber(crate::origin::spawn());
-			let mut requests = request.auth().requests().expect("requests are taken before ok");
+			let mut requests = request.auth().scoped().expect("request tokens are taken before ok");
 			let _session = request.ok().await.expect("accept");
 			let mut first_tx = Some(first_tx);
-			let mut sessions = Vec::new();
 			let mut scoped = Vec::new();
-			while let Some(event) = requests.next().await {
-				match event {
-					moq_net::auth::Event::Session(req) => sessions.push(req.accept(moq_net::auth::Grant::all())),
-					moq_net::auth::Event::Request(req) => {
-						if let Some(tx) = first_tx.take() {
-							let _ = tx.send(req.token().value.clone());
-						}
-						scoped.push(req.accept(moq_net::auth::Grant::all()));
-					}
-					_ => {}
+			while let Some(req) = requests.next().await {
+				if let Some(tx) = first_tx.take() {
+					let _ = tx.send(req.token().value.clone());
 				}
+				scoped.push(req.accept(moq_net::auth::Grant::all()));
 			}
 		});
 		(url, first_rx)
@@ -2203,7 +2196,7 @@ mod tests {
 
 		let (conn, _broadcast) = announcing_client(tok(b"a"), url);
 		paused.await.expect("the client's SETUP reached the server");
-		conn.auth().set_request_token(tok(b"b")).unwrap();
+		conn.auth().set_request_token(Some(tok(b"b"))).unwrap();
 		release.send(()).unwrap();
 
 		let first = tokio::time::timeout(Duration::from_secs(10), first)

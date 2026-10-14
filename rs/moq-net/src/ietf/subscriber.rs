@@ -577,6 +577,19 @@ enum Admit {
 	Token(Option<crate::auth::Hold>),
 }
 
+/// How a live advertisement ends, written once its route is released.
+#[derive(Debug)]
+enum Withdraw {
+	/// Nothing more to write: the peer withdrew it, or the stream ended.
+	Done,
+	/// Close our side and wait for the peer to read everything.
+	Close,
+	/// Refuse the request with this ID, then close.
+	Reject(RequestId, crate::auth::Refusal),
+	/// Refuse the update with this ID, then cancel the advertisement.
+	Cancel(RequestId, crate::auth::Refusal),
+}
+
 /// What one advertisement said, once its parameters are resolved against the session.
 struct Advertised {
 	/// The route it describes, with this link's price already charged. The prefix
@@ -1360,46 +1373,74 @@ where
 		};
 		let token = token_grant.is_some();
 
-		match self.start_announce(path.clone(), advert, admit) {
-			Ok(_) => {
-				if let Err(err) = self.write_ok(&mut stream, request_id).await {
-					// Local rollback, not a peer unannounce: don't count announce bytes.
-					let _ = self.stop_announce(path, token);
-					return Err(err);
-				}
+		// Everything the advertisement does once admitted runs under its grant: one that ends
+		// at any await, the first answer included, drops it right there. `attached` says the
+		// route is up, and `acked` that the OK went out, which decides how the peer is told.
+		let mut attached = false;
+		let mut acked = false;
+		let lived = crate::auth::RequestGrant::guard(token_grant.as_ref(), async {
+			if let Err(err) = self.start_announce(path.clone(), advert, admit) {
+				return Ok(Withdraw::Reject(request_id, err.into()));
 			}
-			Err(err) => {
-				self.write_error(&mut stream, request_id, &err, &err.to_string())
-					.await?;
-				let _ = stream.writer.close().await;
-				return Ok(());
-			}
-		}
+			attached = true;
+			// Buffered whole before its first await, so however this is dropped from here, the
+			// advertisement can still end on the wire.
+			acked = true;
+			self.write_ok(&mut stream, request_id).await?;
 
-		// An endpoint updates an advertisement with REQUEST_UPDATE on the stream that
-		// already carries it, so keep reading until the stream ends: a close on
-		// draft-17+, or v14-16's PublishNamespaceDone (see `terminal_publish_namespace`).
-		//
-		// `attached` survives the call so a stream that detached mid-flight (a reflected
-		// update) is not released twice here.
-		let mut attached = true;
-		let res = self
-			.run_publish_namespace_updates(
+			// An endpoint updates an advertisement with REQUEST_UPDATE on the stream that
+			// already carries it, so keep reading until the stream ends: a close on
+			// draft-17+, or v14-16's PublishNamespaceDone (see `terminal_publish_namespace`).
+			self.run_publish_namespace_updates(
 				&mut stream,
-				request_id,
 				&path,
 				msg.cluster,
 				peer,
 				&mut attached,
-				token_grant,
+				token_grant.clone(),
 			)
-			.await;
+			.await
+		})
+		.await;
 
-		if attached {
-			self.stop_announce(path, token)?;
+		// The route goes before anything waits on the peer, so a peer that stops reading
+		// cannot keep it routed. A stream that detached mid-flight (a reflected update) has
+		// nothing left to release.
+		self.release_announce(&path, &mut attached, token)?;
+
+		let withdraw = match lived {
+			Ok(withdraw) => withdraw?,
+			Err(refusal) => {
+				tracing::info!(%path, err = %refusal.error, reason = %refusal.reason, "request token grant ended");
+				if !acked {
+					self.write_error(&mut stream, request_id, &refusal.error, &refusal.reason)
+						.await?;
+					let _ = stream.writer.close().await;
+					return Ok(());
+				}
+				self.cancel_announce(&mut stream, request_id, &path, &refusal.error, &refusal.reason)
+					.await?;
+				return Err(refusal.error);
+			}
+		};
+		match withdraw {
+			Withdraw::Done => {}
+			Withdraw::Close => {
+				let _ = stream.writer.close().await;
+			}
+			Withdraw::Reject(id, refusal) => {
+				self.write_error(&mut stream, id, &refusal.error, &refusal.reason)
+					.await?;
+				let _ = stream.writer.close().await;
+			}
+			Withdraw::Cancel(id, refusal) => {
+				self.write_error(&mut stream, id, &refusal.error, &refusal.reason)
+					.await?;
+				self.cancel_announce(&mut stream, request_id, &path, &refusal.error, &refusal.reason)
+					.await?;
+			}
 		}
-
-		res
+		Ok(())
 	}
 
 	/// Whether `type_id` retracts a PUBLISH_NAMESPACE rather than updating it.
@@ -1419,29 +1460,27 @@ where
 		}
 	}
 
-	/// Read advertisement updates off a live PUBLISH_NAMESPACE stream until it closes.
+	/// Read advertisement updates off a live PUBLISH_NAMESPACE stream until it closes, and
+	/// return how it ends, which the caller writes once the route is released.
 	///
 	/// `held` is what the peer advertised, kept current because a REQUEST_UPDATE carries
 	/// only what changed. Each one is answered with REQUEST_OK, or REQUEST_ERROR and a
 	/// closed stream when it cannot be applied, which withdraws the advertisement
 	/// (moq-transport Section 9.5.1).
-	#[allow(clippy::too_many_arguments)]
 	async fn run_publish_namespace_updates(
 		&mut self,
 		stream: &mut Stream<S, Version>,
-		request_id: RequestId,
 		path: &PathOwned,
 		mut held: Option<cluster::Advert>,
 		peer: cluster::Peer,
 		attached: &mut bool,
-		mut token_grant: Option<crate::auth::RequestGrant>,
-	) -> Result<(), Error> {
+		token_grant: Option<crate::auth::RequestGrant>,
+	) -> Result<Withdraw, Error> {
 		// A REQUEST_UPDATE carrying a fresh token refreshes the announce's request grant (MoQ
-		// request-token); its verify is raced against the stream and the old grant's deadline in
-		// the loop's single wait (never a bare await), so the old deadline still fires while a
-		// slow acceptor decides and a peer ending the announce ends it whatever the acceptor
-		// does. Messages behind a pending verdict wait in `renewal`, handled in order once it
-		// resolves.
+		// request-token); its verify is raced against the stream in the loop's single wait
+		// (never a bare await), so a peer ending the announce ends it whatever the acceptor
+		// does, and the caller's guard ends it when the old grant does. Messages behind a
+		// pending verdict wait in `renewal`, handled in order once it resolves.
 		let mut renewal = request_update::Renewal::<(u64, ietf::Body)>::default();
 		// Draft-19+ only: the peer finished its send direction, which does not withdraw the
 		// advertisement there, so stop reading and keep watching the writer.
@@ -1457,8 +1496,6 @@ where
 			WriterClosed(Result<(), Error>),
 			// The read failed.
 			Failed(Error),
-			// The request grant lapsed or was revoked: the announce ends, never the session.
-			Ended(crate::auth::Refusal),
 			// A pending renewal's verdict resolved, for the update with this request id.
 			Renewal(request_update::Verdict),
 		}
@@ -1475,11 +1512,6 @@ where
 						&& let Poll::Ready(result) = stream.writer.poll_closed(&mut cx)
 					{
 						return Poll::Ready(Turn::WriterClosed(result));
-					}
-					if let Some(rg) = token_grant.as_mut()
-						&& let Poll::Ready(refusal) = rg.poll_ended(waiter)
-					{
-						return Poll::Ready(Turn::Ended(refusal));
 					}
 					if let Poll::Ready(renewed) = renewal.poll(waiter) {
 						return Poll::Ready(Turn::Renewal(renewed));
@@ -1516,13 +1548,7 @@ where
 						}
 						// Drafts below 19 negotiate no limit, so this is a local memory guard, not a
 						// protocol fault: end this announce, never the session.
-						Err(request_update::Overflow::Request) => {
-							self.release_announce(path, attached, token_grant.is_some())?;
-							if stream.writer.finish().is_ok() {
-								let _ = stream.writer.closed().await;
-							}
-							return Ok(());
-						}
+						Err(request_update::Overflow::Request) => return Ok(Withdraw::Close),
 					}
 				}
 				// A terminal read while a verdict is pending is handled now, ahead of any queued
@@ -1530,37 +1556,30 @@ where
 				Turn::Message(id, body) => (id, body),
 				Turn::Fin => {
 					if super::request_stream::fin_cancels(self.version) {
-						return Ok(());
+						return Ok(Withdraw::Done);
 					}
 					// The advertisement outlives the peer's send direction.
 					finished = true;
 					continue;
 				}
 				// Already finished: the advertisement outlived the peer's send direction until now.
-				Turn::WriterClosed(result) if finished => return result,
+				Turn::WriterClosed(result) if finished => return result.map(|()| Withdraw::Done),
 				Turn::WriterClosed(result) => {
 					stream.reader.abort(&Error::Cancel);
 					result?;
-					if super::request_stream::fin_cancels(self.version) {
-						return Ok(());
+					if !super::request_stream::fin_cancels(self.version) {
+						stream.writer.closed().await?;
 					}
-					return stream.writer.closed().await;
+					return Ok(Withdraw::Done);
 				}
 				Turn::Failed(err) => return Err(err),
-				Turn::Ended(refusal) => {
-					// A lapsed grant serves nothing more, however slowly the peer reads.
-					self.release_announce(path, attached, true)?;
-					self.cancel_announce(stream, request_id, path, &refusal.error, &refusal.reason)
-						.await?;
-					return Err(refusal.error);
-				}
 				Turn::Renewal(request_update::Verdict {
 					verdict,
 					grant: res,
 					request_id: rid,
 				}) => {
 					// Only a token-authorized announce starts a renewal.
-					let rg = token_grant.as_mut().expect("a renewal without a request grant");
+					let rg = token_grant.as_ref().expect("a renewal without a request grant");
 					// On accept the old grant is dropped and the deadline re-armed (REQUEST_OK).
 					let Err(refusal) = rg.renew(verdict, res) else {
 						self.write_ok(stream, rid).await?;
@@ -1569,11 +1588,7 @@ where
 					// Per drafts 16 section 9.11.1 / 18 section 10.9.1, a refused or uncovered
 					// renewal ends only this announce. Answer REQUEST_ERROR, then close the stream;
 					// the session stays up and the old grant does not survive.
-					self.release_announce(path, attached, true)?;
-					self.write_error(stream, rid, &refusal.error, &refusal.reason).await?;
-					self.cancel_announce(stream, request_id, path, &refusal.error, &refusal.reason)
-						.await?;
-					return Ok(());
+					return Ok(Withdraw::Cancel(rid, refusal));
 				}
 			};
 
@@ -1598,7 +1613,7 @@ where
 					return Err(Error::WrongSize);
 				}
 				tracing::debug!(%path, "publish_namespace_done");
-				return Ok(());
+				return Ok(Withdraw::Done);
 			}
 
 			// An update spends its own request ID, even one refused below. On draft-16 the
@@ -1617,13 +1632,11 @@ where
 				// Section 8.9 rejects the update, which withdraws the advertisement as any
 				// refused update does.
 				Err(DecodeError::MalformedAuthToken) => {
-					let err = Error::Decode(DecodeError::MalformedAuthToken);
-					self.release_announce(path, attached, token_grant.is_some())?;
-					self.write_error(stream, update_id, &err, "repeated AUTHORIZATION TOKEN")
-						.await?;
-					self.cancel_announce(stream, request_id, path, &err, "repeated AUTHORIZATION TOKEN")
-						.await?;
-					return Ok(());
+					let refusal = crate::auth::Refusal {
+						error: Error::Decode(DecodeError::MalformedAuthToken),
+						reason: "repeated AUTHORIZATION TOKEN".to_string(),
+					};
+					return Ok(Withdraw::Cancel(update_id, refusal));
 				}
 				msg => msg?,
 			};
@@ -1684,14 +1697,10 @@ where
 			};
 
 			// An unroutable apply withdraws the announce whether or not a token also rides it.
-			if let Err(err) = &applied {
+			// The close is the withdrawal.
+			if let Err(err) = applied {
 				tracing::warn!(%path, %err, "publish_namespace update refused");
-				self.write_error(stream, msg.request_id, err, &err.to_string()).await?;
-				// The close is the withdrawal; the caller releases what was attached.
-				if stream.writer.finish().is_ok() {
-					let _ = stream.writer.closed().await;
-				}
-				return Ok(());
+				return Ok(Withdraw::Reject(msg.request_id, err.into()));
 			}
 
 			// A REQUEST_UPDATE carrying a fresh token refreshes the announce's request grant
@@ -1741,6 +1750,8 @@ where
 				})
 				.await?;
 		}
+		// An OK cut short by the grant ending is still buffered, and goes out ahead of the FIN.
+		std::future::poll_fn(|cx| stream.writer.poll_flush(cx)).await?;
 		if stream.writer.finish().is_ok() {
 			let _ = stream.writer.closed().await;
 		}
@@ -1790,11 +1801,11 @@ where
 	async fn write_ok(&self, stream: &mut Stream<S, Version>, request_id: RequestId) -> Result<(), Error> {
 		match self.version {
 			Version::Draft14 => {
-				stream.writer.varint(ietf::PublishNamespaceOk::ID).await?;
+				stream.writer.buffer_varint(ietf::PublishNamespaceOk::ID)?;
 				stream.writer.encode(&ietf::PublishNamespaceOk { request_id }).await?;
 			}
 			Version::Draft15 | Version::Draft16 => {
-				stream.writer.varint(ietf::RequestOk::ID).await?;
+				stream.writer.buffer_varint(ietf::RequestOk::ID)?;
 				stream
 					.writer
 					.encode(&ietf::RequestOk {
@@ -1804,7 +1815,7 @@ where
 					.await?;
 			}
 			_ => {
-				stream.writer.varint(ietf::RequestOk::ID).await?;
+				stream.writer.buffer_varint(ietf::RequestOk::ID)?;
 				stream
 					.writer
 					.encode(&ietf::RequestOk {
@@ -1829,7 +1840,7 @@ where
 
 		match self.version {
 			Version::Draft14 => {
-				stream.writer.varint(ietf::PublishNamespaceError::ID).await?;
+				stream.writer.buffer_varint(ietf::PublishNamespaceError::ID)?;
 				stream
 					.writer
 					.encode(&ietf::PublishNamespaceError {
@@ -1840,7 +1851,7 @@ where
 					.await?;
 			}
 			Version::Draft15 | Version::Draft16 => {
-				stream.writer.varint(ietf::RequestError::ID).await?;
+				stream.writer.buffer_varint(ietf::RequestError::ID)?;
 				stream
 					.writer
 					.encode(&ietf::RequestError {
@@ -1852,7 +1863,7 @@ where
 					.await?;
 			}
 			_ => {
-				stream.writer.varint(ietf::RequestError::ID).await?;
+				stream.writer.buffer_varint(ietf::RequestError::ID)?;
 				stream
 					.writer
 					.encode(&ietf::RequestError {
@@ -7812,7 +7823,6 @@ mod tests {
 		let err = subscriber
 			.run_publish_namespace_updates(
 				&mut stream,
-				RequestId(1),
 				&crate::Path::new("room/host"),
 				Some(clean),
 				peer,
@@ -7844,7 +7854,6 @@ mod tests {
 		{
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
-				RequestId(1),
 				&path,
 				Some(clean.clone()),
 				peer,
@@ -7892,7 +7901,6 @@ mod tests {
 		{
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
-				RequestId(1),
 				&path,
 				Some(clean.clone()),
 				peer,
@@ -7951,7 +7959,7 @@ mod tests {
 		let path = crate::Path::new("room/host").to_owned();
 		let hold: crate::auth::Hold = std::sync::Arc::new(subscriber.announces.acquire().unwrap());
 		let auth = crate::auth::Handle::new(true);
-		let mut requests = auth.requests().unwrap();
+		let mut requests = auth.scoped().unwrap();
 		let token = crate::setup::Token {
 			kind: 300,
 			value: vec![0x00, 0xff],
@@ -7962,12 +7970,7 @@ mod tests {
 			crate::auth::RequestKind::PublishNamespace,
 			Some(hold.clone()),
 		);
-		let _issued = requests
-			.next()
-			.await
-			.unwrap()
-			.request()
-			.accept(crate::auth::Grant::all());
+		let _issued = requests.next().await.unwrap().accept(crate::auth::Grant::all());
 		let answered = verdict.grant().await;
 		let grant = crate::auth::RequestGrant::new(
 			&subscriber.runtime,
@@ -7988,7 +7991,6 @@ mod tests {
 		{
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
-				RequestId(1),
 				&path,
 				Some(clean.clone()),
 				peer,
@@ -8058,7 +8060,6 @@ mod tests {
 		{
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
-				RequestId(1),
 				&path,
 				Some(held.clone()),
 				peer,
@@ -8108,7 +8109,6 @@ mod tests {
 		{
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
-				RequestId(1),
 				&path,
 				Some(clean.clone()),
 				peer,
@@ -8125,11 +8125,15 @@ mod tests {
 		}
 
 		assert!(
-			matches!(result, Some(Ok(()))),
+			matches!(result, Some(Ok(Withdraw::Reject(..)))),
 			"a refused update ends the stream cleanly, got {result:?}"
 		);
 		assert!(attached, "the caller releases the route it attached");
-		assert_eq!(replies(&log, ietf::RequestError::ID), 1, "REQUEST_ERROR went out");
+		assert_eq!(
+			replies(&log, ietf::RequestError::ID),
+			0,
+			"the caller answers once the route is released"
+		);
 		assert_eq!(replies(&log, ietf::RequestOk::ID), 0);
 	}
 
@@ -8156,7 +8160,6 @@ mod tests {
 		{
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
-				RequestId(1),
 				&path,
 				Some(clean.clone()),
 				peer,
@@ -8217,7 +8220,6 @@ mod tests {
 		let mut attached = true;
 		let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 			&mut stream,
-			RequestId(1),
 			&path,
 			Some(clean.clone()),
 			peer,
@@ -8684,7 +8686,7 @@ mod tests {
 		first_script: Vec<u8>,
 	) -> (
 		Subscriber<crate::lite::test_transport::ScriptedSession>,
-		crate::auth::Requests,
+		crate::auth::Requests<crate::auth::Scoped>,
 		crate::auth::Token,
 		origin::Consumer,
 		crate::lite::test_transport::ScriptedSession,
@@ -8697,15 +8699,15 @@ mod tests {
 
 	/// [`auth_announce_harness`] over a given session, such as one that finishes the stream
 	/// after its script.
-	fn auth_announce_harness_on(
+	fn auth_announce_harness_on<S: crate::transport::poll::Boxable + Clone>(
 		version: Version,
-		session: crate::lite::test_transport::ScriptedSession,
+		session: S,
 	) -> (
-		Subscriber<crate::lite::test_transport::ScriptedSession>,
-		crate::auth::Requests,
+		Subscriber<S>,
+		crate::auth::Requests<crate::auth::Scoped>,
 		crate::auth::Token,
 		origin::Consumer,
-		crate::lite::test_transport::ScriptedSession,
+		S,
 	) {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
@@ -8715,7 +8717,7 @@ mod tests {
 		peer_setup.set(peer::Peer::default());
 
 		let auth = crate::auth::Handle::new(true);
-		let requests = auth.requests().unwrap();
+		let requests = auth.scoped().unwrap();
 		let cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 		auth.granted(
 			0,
@@ -8827,7 +8829,7 @@ mod tests {
 		let acceptor = async {
 			let mut held = Vec::new();
 			loop {
-				let request = requests.next().await.expect("a request").request();
+				let request = requests.next().await.expect("a request");
 				held.push(request.accept(crate::auth::Grant::all()));
 			}
 		};
@@ -8850,6 +8852,95 @@ mod tests {
 			settle().await;
 		}
 		assert!(announced, "a valid request token must authorize the announce");
+	}
+
+	/// An announce's grant ending while its first answer waits on a peer that stopped
+	/// reading retracts the route at once, not once the answer drains: the peer is told
+	/// only afterwards, and on drafts 14-16 with a PUBLISH_NAMESPACE_CANCEL after the OK.
+	#[moq_net_sim::test]
+	async fn a_revoked_token_retracts_an_announce_whose_ok_is_blocked() {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft22,
+		] {
+			let gate = kio::Producer::new(false);
+			let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
+			let (mut subscriber, mut requests, _cred, consumer, session) = auth_announce_harness_on(version, session);
+			let stream = Stream::open(&mut session.clone(), version).await.unwrap();
+			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
+				stream,
+				token_publish_namespace(),
+				cluster::Peer::default(),
+				None,
+			));
+
+			let accepted = async { requests.next().await.expect("a request") };
+			let request = match futures::future::select(std::pin::pin!(accepted), run.as_mut()).await {
+				futures::future::Either::Left((request, _)) => request,
+				futures::future::Either::Right((res, _)) => panic!("{version}: ended unverified: {res:?}"),
+			};
+			let enforced = request.accept(crate::auth::Grant::all());
+			for _ in 0..50 {
+				assert!(futures::poll!(run.as_mut()).is_pending(), "{version}: ended early");
+				settle().await;
+			}
+			assert!(routed_now(&consumer, "room/alice").is_some(), "{version}: never routed");
+			assert!(
+				session.log.writes.lock().unwrap().is_empty(),
+				"{version}: the OK was not held"
+			);
+
+			enforced.revoke(crate::SessionError::Unauthorized, "revoked");
+			for _ in 0..10 {
+				assert!(
+					futures::poll!(run.as_mut()).is_pending(),
+					"{version}: told a peer that cannot read"
+				);
+				settle().await;
+			}
+			assert!(
+				routed_now(&consumer, "room/alice").is_none(),
+				"{version}: routed until the peer could be told"
+			);
+
+			let Ok(mut open) = gate.write() else {
+				panic!("request stream gate closed");
+			};
+			*open = true;
+			drop(open);
+			let _ = moq_net_sim::timeout(std::time::Duration::from_secs(1), run.as_mut())
+				.await
+				.unwrap_or_else(|_| panic!("{version}: outlived its grant"));
+
+			let bytes: Vec<u8> = session
+				.log
+				.trail()
+				.into_iter()
+				.filter_map(|(_, sent)| match sent {
+					crate::lite::test_transport::Sent::Write(buf) => Some(buf),
+					_ => None,
+				})
+				.flatten()
+				.collect();
+			let mut sent = Vec::new();
+			let mut rest = bytes.as_slice();
+			while !rest.is_empty() {
+				sent.push(crate::coding::decode_varint(&mut rest, version).unwrap());
+				let len = usize::from(u16::from_be_bytes([rest[0], rest[1]]));
+				rest = &rest[2 + len..];
+			}
+			let expected = match version {
+				Version::Draft14 => vec![ietf::PublishNamespaceOk::ID, ietf::PublishNamespaceCancel::ID],
+				Version::Draft15 | Version::Draft16 => vec![ietf::RequestOk::ID, ietf::PublishNamespaceCancel::ID],
+				_ => vec![ietf::RequestOk::ID],
+			};
+			assert_eq!(sent, expected, "{version}");
+			assert!(session.log.closes().is_empty(), "{version}: the session stays up");
+		}
 	}
 
 	/// On drafts 14-16 the withdrawal arrives as a message before the FIN: a
@@ -8907,7 +8998,7 @@ mod tests {
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 
 		let acceptor = async {
-			let request = requests.next().await.expect("a request").request();
+			let request = requests.next().await.expect("a request");
 			request.reject(crate::SessionError::Unauthorized, "no");
 			std::future::pending::<()>().await
 		};
@@ -8951,7 +9042,7 @@ mod tests {
 		let acceptor = {
 			let consulted = consulted.clone();
 			async move {
-				let request = requests.next().await.expect("a request").request();
+				let request = requests.next().await.expect("a request");
 				consulted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 				request.reject(crate::SessionError::Unauthorized, "no");
 				std::future::pending::<()>().await
@@ -9025,7 +9116,7 @@ mod tests {
 		let (mut subscriber, mut requests, consumer, session) = announce_harness_with(VERSION, auth.clone());
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		let acceptor = async move {
-			let request = requests.next().await.expect("a request").request();
+			let request = requests.next().await.expect("a request");
 			let _held = request.accept(crate::auth::Grant::all());
 			std::future::pending::<()>().await
 		};
@@ -9081,10 +9172,10 @@ mod tests {
 				async move {
 					let mut held = Vec::new();
 					// The first grant lapses in 60s; the renewal never expires.
-					let first = requests.next().await.expect("a request").request();
+					let first = requests.next().await.expect("a request");
 					held.push(first.accept(publish_grant_expiring(&rt, Some(60))));
 					answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-					let renewal = requests.next().await.expect("a renewal").request();
+					let renewal = requests.next().await.expect("a renewal");
 					held.push(renewal.accept(publish_grant_expiring(&rt, None)));
 					answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 					std::future::pending::<()>().await
@@ -9150,7 +9241,7 @@ mod tests {
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 
 		let acceptor = async move {
-			let request = requests.next().await.expect("a request").request();
+			let request = requests.next().await.expect("a request");
 			let _held = request.accept(publish_grant_expiring(&rt, Some(60)));
 			std::future::pending::<()>().await
 		};
@@ -9215,7 +9306,7 @@ mod tests {
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 
 		let acceptor = async move {
-			let request = requests.next().await.expect("a request").request();
+			let request = requests.next().await.expect("a request");
 			let _held = request.accept(publish_grant_expiring(&rt, None));
 			std::future::pending::<()>().await
 		};
@@ -9258,10 +9349,10 @@ mod tests {
 				let answered = answered.clone();
 				async move {
 					// The first grant lasts 60s; the renewal is refused.
-					let first = requests.next().await.expect("a request").request();
+					let first = requests.next().await.expect("a request");
 					let _issued = first.accept(publish_grant_expiring(&rt, Some(60)));
 					answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-					let renewal = requests.next().await.expect("a renewal").request();
+					let renewal = requests.next().await.expect("a renewal");
 					renewal.reject(crate::SessionError::Unauthorized, "no");
 					answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 					std::future::pending::<()>().await
@@ -9358,9 +9449,9 @@ mod tests {
 			let rt = rt.clone();
 			async move {
 				let mut held = Vec::new();
-				let first = requests.next().await.expect("a request").request();
+				let first = requests.next().await.expect("a request");
 				held.push(first.accept(publish_grant_expiring(&rt, Some(60))));
-				let renewal = requests.next().await.expect("a renewal").request();
+				let renewal = requests.next().await.expect("a renewal");
 				held.push(renewal.accept(publish_grant_expiring(&rt, None)));
 				std::future::pending::<()>().await
 			}
@@ -9443,15 +9534,15 @@ mod tests {
 			let answered = answered.clone();
 			let release = release.clone();
 			async move {
-				let first = requests.next().await.expect("a request").request();
+				let first = requests.next().await.expect("a request");
 				let mut held = vec![first.accept(publish_grant_expiring(&rt, None))];
 				answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-				let a = requests.next().await.expect("a renewal").request();
+				let a = requests.next().await.expect("a renewal");
 				release.notified().await;
 				held.push(a.accept(publish_grant_expiring(&rt, None)));
 				answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 				loop {
-					let renewal = requests.next().await.expect("a renewal").request();
+					let renewal = requests.next().await.expect("a renewal");
 					held.push(renewal.accept(publish_grant_expiring(&rt, None)));
 					answered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 				}
@@ -9505,7 +9596,7 @@ mod tests {
 
 		// Accept the initial token, then never answer a renewal, so the buffer only grows.
 		let acceptor = async move {
-			let first = requests.next().await.expect("a request").request();
+			let first = requests.next().await.expect("a request");
 			let _held = first.accept(publish_grant_expiring(&rt, None));
 			std::future::pending::<()>().await
 		};
@@ -9562,7 +9653,7 @@ mod tests {
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 
 		let acceptor = async move {
-			let first = requests.next().await.expect("a request").request();
+			let first = requests.next().await.expect("a request");
 			let _held = first.accept(publish_grant_expiring(&rt, None));
 			std::future::pending::<()>().await
 		};
@@ -9605,7 +9696,7 @@ mod tests {
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 
 		let acceptor = async move {
-			let first = requests.next().await.expect("a request").request();
+			let first = requests.next().await.expect("a request");
 			let _held = first.accept(publish_grant_expiring(&rt, None));
 			std::future::pending::<()>().await
 		};
@@ -9647,7 +9738,7 @@ mod tests {
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 
 		let acceptor = async move {
-			let first = requests.next().await.expect("a request").request();
+			let first = requests.next().await.expect("a request");
 			let _held = first.accept(publish_grant_expiring(&rt, None));
 			std::future::pending::<()>().await
 		};
@@ -9695,7 +9786,7 @@ mod tests {
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 
 		let acceptor = async move {
-			let first = requests.next().await.expect("a request").request();
+			let first = requests.next().await.expect("a request");
 			let _held = first.accept(publish_grant_expiring(&rt, None));
 			std::future::pending::<()>().await
 		};
@@ -9733,7 +9824,7 @@ mod tests {
 		limit: Option<crate::auth::Grant>,
 	) -> (
 		Subscriber<crate::lite::test_transport::ScriptedSession>,
-		crate::auth::Requests,
+		crate::auth::Requests<crate::auth::Scoped>,
 		origin::Consumer,
 		crate::lite::test_transport::ScriptedSession,
 	) {
@@ -9750,7 +9841,7 @@ mod tests {
 		auth: crate::auth::Handle,
 	) -> (
 		Subscriber<crate::lite::test_transport::ScriptedSession>,
-		crate::auth::Requests,
+		crate::auth::Requests<crate::auth::Scoped>,
 		origin::Consumer,
 		crate::lite::test_transport::ScriptedSession,
 	) {
@@ -9762,7 +9853,7 @@ mod tests {
 		let peer_setup = peer::PeerSetup::default();
 		peer_setup.set(peer::Peer::default());
 
-		let requests = auth.requests().unwrap();
+		let requests = auth.scoped().unwrap();
 
 		let subscriber = Subscriber::new(
 			crate::time::Clock::sim(),
@@ -9801,7 +9892,7 @@ mod tests {
 				async move {
 					let mut held = Vec::new();
 					loop {
-						let request = requests.next().await.expect("a request reaches the acceptor").request();
+						let request = requests.next().await.expect("a request reaches the acceptor");
 						consulted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 						held.push(request.accept(crate::auth::Grant::all()));
 					}
@@ -9843,7 +9934,7 @@ mod tests {
 				auth_announce_harness_no_ext(VERSION, Some(crate::auth::Grant::default()));
 			let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 			let acceptor = async move {
-				let request = requests.next().await.expect("a request reaches the acceptor").request();
+				let request = requests.next().await.expect("a request reaches the acceptor");
 				request.reject(crate::SessionError::Unauthorized, "no");
 				std::future::pending::<()>().await
 			};
@@ -9886,10 +9977,10 @@ mod tests {
 		let acceptor = {
 			let popped = popped.clone();
 			async move {
-				let first = requests.next().await.expect("a request").request();
+				let first = requests.next().await.expect("a request");
 				let _issued = first.accept(crate::auth::Grant::all());
 				popped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-				let _never_answered = requests.next().await.expect("a renewal").request();
+				let _never_answered = requests.next().await.expect("a renewal");
 				popped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 				std::future::pending::<()>().await
 			}
@@ -9944,7 +10035,7 @@ mod tests {
 				auth_announce_harness_no_ext(VERSION, Some(crate::auth::Grant::default()));
 			let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 			let acceptor = async move {
-				let request = requests.next().await.expect("a request reaches the acceptor").request();
+				let request = requests.next().await.expect("a request reaches the acceptor");
 				let _issued = request.accept(grant);
 				std::future::pending::<()>().await
 			};

@@ -1219,14 +1219,14 @@ mod tests {
 		params
 	}
 
-	/// An acceptor taken with `Request::auth().requests()` BEFORE `ok()` must govern the
+	/// A verifier taken with `Request::auth().scoped()` BEFORE `ok()` must govern the
 	/// session the driver then runs, through the REAL accept path (`accept_request` -> `ok`).
 	/// The session's own `auth()` (the handle the driver polls) routes a request token to that
 	/// pre-ok consumer instead of falling to the `Unsupported` default, and granting admits.
 	/// Both a no-AUTH-extension legacy session (draft-14, `Handle::new(false)`) and the modern
-	/// uni-SETUP path (draft-18); a QUIC server has no other point to install the acceptor.
+	/// uni-SETUP path (draft-18); a QUIC server has no other point to install the verifier.
 	#[moq_net_sim::test]
-	async fn a_pre_ok_requests_consumer_governs_the_session_acceptor() {
+	async fn a_pre_ok_verifier_governs_the_session() {
 		let cases = [
 			(
 				FakeSession::new(ALPN_14, [])
@@ -1245,8 +1245,8 @@ mod tests {
 				.await
 				.unwrap_or_else(|e| panic!("accept at {version:?}: {e}"));
 
-			// Install the acceptor before ok(), as a QUIC server must.
-			let mut requests = request.auth().requests().expect("requests() pre-ok");
+			// Install the verifier before ok(), as a QUIC server must.
+			let mut requests = request.auth().scoped().expect("scoped() pre-ok");
 			let (net_session, _driver) = request.ok().await.unwrap_or_else(|e| panic!("ok at {version:?}: {e}"));
 
 			// The session's own handle is the one the driver polls. Verifying a request token on
@@ -1261,11 +1261,7 @@ mod tests {
 				crate::auth::RequestKind::PublishNamespace,
 				None,
 			);
-			let received = requests
-				.next()
-				.await
-				.expect("the pre-ok consumer receives the request")
-				.request();
+			let received = requests.next().await.expect("the pre-ok consumer receives the request");
 			assert_eq!(received.path().as_str(), "room/alice", "{version:?}");
 			assert_eq!(
 				received.kind(),
@@ -1388,7 +1384,7 @@ mod tests {
 			value: b"jwt".to_vec(),
 		};
 		assert!(matches!(
-			request.auth().set_request_token(token),
+			request.auth().set_request_token(Some(token)),
 			Err(Error::Unsupported)
 		));
 	}

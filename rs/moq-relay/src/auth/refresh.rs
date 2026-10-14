@@ -230,7 +230,7 @@ impl Refresh {
 	pub(super) async fn ended(&mut self) -> lease::Reason {
 		loop {
 			enum Event {
-				Request(Option<auth::Event>),
+				Request(Option<auth::Request>),
 				Verified(Option<Verified>, Option<Settling>),
 				Settled,
 				Changed(u64, Change),
@@ -250,14 +250,7 @@ impl Refresh {
 				}
 			};
 			match event {
-				Event::Request(Some(auth::Event::Session(request))) => self.request(request),
-				// A request token would authorize one request beyond every credential, which
-				// the relay's grants do not model.
-				Event::Request(Some(auth::Event::Request(scoped))) => {
-					scoped.reject(SessionError::Unsupported, "request tokens are not verified")
-				}
-				// Dropping a token of a kind added later refuses it.
-				Event::Request(Some(_)) => {}
+				Event::Request(Some(request)) => self.request(request),
 				Event::Request(None) => self.requests_open = false,
 				Event::Settled => {}
 				Event::Verified(verdict, settling) => {

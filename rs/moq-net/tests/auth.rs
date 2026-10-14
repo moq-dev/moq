@@ -233,7 +233,10 @@ struct Pair {
 	server: Session,
 	client_transport: MockSession,
 	server_transport: MockSession,
+	/// The server's session tokens, when it took them.
 	requests: Option<auth::Requests>,
+	/// The server's request tokens, when it took them.
+	scoped: Option<auth::Requests<auth::Scoped>>,
 	/// Aborting it drops the server's driver without letting it finish.
 	server_driver: moq_net_sim::JoinHandle<Error>,
 }
@@ -278,7 +281,7 @@ async fn connect(opts: Options) -> Pair {
 		if let Some(token) = client_token {
 			session
 				.auth()
-				.set_request_token(token)
+				.set_request_token(Some(token))
 				.expect("a moq-transport session carries a request token");
 		}
 		spawn(driver);
@@ -293,13 +296,15 @@ async fn connect(opts: Options) -> Pair {
 		let requests = opts
 			.server_requests
 			.then(|| handshake.auth().requests().expect("requests available before ok()"));
+		// moq-lite carries no request token, so it has none to verify.
+		let scoped = opts.server_requests.then(|| handshake.auth().scoped().ok()).flatten();
 		let (session, mut driver) = handshake.ok().await.expect("server accept");
 		let driver = moq_net_sim::spawn(moq_net_sim::drive(move |now, waiter| {
 			moq_net::time::Driver::poll(&mut driver, now, waiter)
 		}));
-		(session, requests, driver)
+		(session, requests, scoped, driver)
 	};
-	let (client, (server, requests, server_driver)) = futures::join!(client_fut, server_fut);
+	let (client, (server, requests, scoped, server_driver)) = futures::join!(client_fut, server_fut);
 
 	Pair {
 		client,
@@ -307,7 +312,17 @@ async fn connect(opts: Options) -> Pair {
 		client_transport: observe,
 		server_transport: observe_server,
 		requests,
+		scoped,
 		server_driver,
+	}
+}
+
+impl Pair {
+	/// The server's token queues, which it took before `ok()`: request tokens only where the
+	/// version carries them.
+	fn verifiers(&mut self) -> (auth::Requests, Option<auth::Requests<auth::Scoped>>) {
+		let requests = self.requests.take().expect("server took its requests pre-ok");
+		(requests, self.scoped.take())
 	}
 }
 
@@ -343,20 +358,42 @@ impl Answered {
 /// Answer the peer's tokens from a table, holding every grant (and any request the
 /// table leaves unanswered) for as long as the returned task lives.
 fn serve(
-	mut requests: auth::Requests,
+	(mut requests, mut scoped): (auth::Requests, Option<auth::Requests<auth::Scoped>>),
 	answer: impl Fn(&[u8]) -> Option<Grant> + 'static,
 ) -> futures::channel::mpsc::UnboundedReceiver<(Vec<u8>, Answered)> {
+	enum Next {
+		Session(auth::Request),
+		Request(auth::Scoped),
+	}
 	let (tx, rx) = futures::channel::mpsc::unbounded();
 	moq_net_sim::spawn(async move {
 		let mut unanswered = Vec::new();
-		while let Some(event) = requests.next().await {
-			let (token, answered) = match event {
-				auth::Event::Session(request) => {
+		// A session without AUTH closes its session queue at once; request tokens still arrive.
+		let (mut sessions, mut requested) = (true, scoped.is_some());
+		while sessions || requested {
+			let next = kio::wait(|waiter| {
+				if sessions && let std::task::Poll::Ready(next) = requests.poll_next(waiter) {
+					sessions = next.is_some();
+					return std::task::Poll::Ready(next.map(Next::Session));
+				}
+				if requested
+					&& let Some(scoped) = scoped.as_mut()
+					&& let std::task::Poll::Ready(next) = scoped.poll_next(waiter)
+				{
+					requested = next.is_some();
+					return std::task::Poll::Ready(next.map(Next::Request));
+				}
+				std::task::Poll::Pending
+			})
+			.await;
+			let (token, answered) = match next {
+				None => continue,
+				Some(Next::Session(request)) => {
 					let token = request.token().to_vec();
 					let answered = answer(&token).map(|grant| Answered::Session(request.accept(grant)));
 					(token, answered)
 				}
-				auth::Event::Request(request) => {
+				Some(Next::Request(request)) => {
 					let token = request.token().value.clone();
 					let answered = match answer(&token) {
 						Some(grant) => Some(Answered::Request(request.accept(grant))),
@@ -367,7 +404,6 @@ fn serve(
 					};
 					(token, answered)
 				}
-				_ => unreachable!("an unknown token kind"),
 			};
 			if let Some(answered) = answered {
 				let _ = tx.unbounded_send((token, answered));
@@ -489,8 +525,7 @@ async fn a_request_token_authorizes_a_legacy_announce_through_the_driver() {
 
 		// The server answers the request token from its acceptor with a grant covering the
 		// announced path. Held for the test by the returned receiver.
-		let requests = pair.requests.take().expect("server took its requests pre-ok");
-		let mut answered = serve(requests, |_token| Some(grant(&["room/alice"], &["room/alice"])));
+		let mut answered = serve(pair.verifiers(), |_token| Some(grant(&["room/alice"], &["room/alice"])));
 
 		// The client announces under the token. On the legacy path there is no session grant,
 		// so the token is the only authorization for the announce.
@@ -527,8 +562,7 @@ async fn a_request_token_renews_a_legacy_announce_through_the_driver() {
 			..Default::default()
 		})
 		.await;
-		let requests = pair.requests.take().expect("server took its requests pre-ok");
-		let mut answered = serve(requests, |_token| Some(grant(&["room/alice"], &[])));
+		let mut answered = serve(pair.verifiers(), |_token| Some(grant(&["room/alice"], &[])));
 
 		let bc = publisher.create_broadcast("room/alice").unwrap();
 		bc.announce(Default::default()).unwrap();
@@ -536,7 +570,10 @@ async fn a_request_token_renews_a_legacy_announce_through_the_driver() {
 		assert_eq!(token, b"aa");
 		wait_announced(&relay.consume(), "room/alice", true).await;
 
-		pair.client.auth().set_request_token(request_token(b"bb")).unwrap();
+		pair.client
+			.auth()
+			.set_request_token(Some(request_token(b"bb")))
+			.unwrap();
 		let (token, _renewed) = answered.recv().await.expect("the renewal reached the acceptor");
 		assert_eq!(token, b"bb", "the replaced token rides the REQUEST_UPDATE");
 
@@ -596,8 +633,7 @@ async fn a_client_may_decline_the_auth_extension() {
 		// The client's token-bearing SUBSCRIBE reaches the acceptor: on the `None`-union
 		// session the covers-gate does not short-circuit, so the token is verified rather
 		// than admitted by a covering connection grant.
-		let requests = pair.requests.take().expect("server took its requests pre-ok");
-		let mut answered = serve(requests, |_token| Some(grant(&["room/alice"], &["room/alice"])));
+		let mut answered = serve(pair.verifiers(), |_token| Some(grant(&["room/alice"], &["room/alice"])));
 
 		let remote = received.consume().routed_broadcast("room/alice").await.unwrap();
 		let mut sub = remote.track("video").unwrap().subscribe(prefs()).await.unwrap();
@@ -633,7 +669,7 @@ async fn a_client_may_decline_the_auth_extension() {
 async fn a_moq_lite_session_refuses_a_request_token() {
 	within(async {
 		let lite = connect(Options::default()).await;
-		let refused = lite.client.auth().set_request_token(request_token(b"ok"));
+		let refused = lite.client.auth().set_request_token(Some(request_token(b"ok")));
 		assert!(matches!(refused, Err(Error::Unsupported)), "{refused:?}");
 
 		let ietf = connect(Options {
@@ -643,7 +679,7 @@ async fn a_moq_lite_session_refuses_a_request_token() {
 		.await;
 		ietf.client
 			.auth()
-			.set_request_token(request_token(b"ok"))
+			.set_request_token(Some(request_token(b"ok")))
 			.expect("a moq-transport session takes a request token");
 	})
 	.await
@@ -675,8 +711,7 @@ async fn a_legacy_renewal_answer_reaches_its_subscription() {
 				..Default::default()
 			})
 			.await;
-			let requests = pair.requests.take().expect("server took its requests pre-ok");
-			let mut answered = serve(requests, |_token| Some(grant(&[], &["room/alice"])));
+			let mut answered = serve(pair.verifiers(), |_token| Some(grant(&[], &["room/alice"])));
 
 			let remote = received.consume().routed_broadcast("room/alice").await.unwrap();
 			let mut sub = remote.track("video").unwrap().subscribe(prefs()).await.unwrap();
@@ -687,13 +722,19 @@ async fn a_legacy_renewal_answer_reaches_its_subscription() {
 			assert_eq!(token, b"aa", "{version}");
 			sub.recv_group().await.unwrap().unwrap();
 
-			pair.client.auth().set_request_token(request_token(b"bb")).unwrap();
+			pair.client
+				.auth()
+				.set_request_token(Some(request_token(b"bb")))
+				.unwrap();
 			let (token, _second) = answered.next().await.expect("the first renewal reached the acceptor");
 			assert_eq!(token, b"bb", "{version}");
 
 			// Sent only once the first renewal's answer came back to the subscription.
 			moq_net_sim::sleep(Duration::from_millis(100)).await;
-			pair.client.auth().set_request_token(request_token(b"cc")).unwrap();
+			pair.client
+				.auth()
+				.set_request_token(Some(request_token(b"cc")))
+				.unwrap();
 			let (token, _third) = answered.next().await.expect("the second renewal reached the acceptor");
 			assert_eq!(token, b"cc", "{version}");
 		})
@@ -735,8 +776,7 @@ async fn a_request_token_renews_a_subscription_through_the_driver() {
 		let expires = Some(now() + Duration::from_secs(1));
 		// The acceptor sees the token's value.
 		let renewal = second.value.clone();
-		let requests = pair.requests.take().expect("server took its requests pre-ok");
-		let mut answered = serve(requests, move |token| {
+		let mut answered = serve(pair.verifiers(), move |token| {
 			let mut granted = grant(&[], &["room/alice"]);
 			if token != renewal.as_slice() {
 				granted.expires = expires;
@@ -753,7 +793,7 @@ async fn a_request_token_renews_a_subscription_through_the_driver() {
 		assert_eq!(token, first.value);
 		sub.recv_group().await.unwrap().unwrap();
 
-		pair.client.auth().set_request_token(second.clone()).unwrap();
+		pair.client.auth().set_request_token(Some(second.clone())).unwrap();
 		let (token, _renewed) = answered.recv().await.expect("the renewal reached the acceptor");
 		assert_eq!(token, second.value, "the replaced token rides the REQUEST_UPDATE");
 
@@ -826,14 +866,14 @@ async fn a_held_renewal_coalesces_a_burst_without_tripping_the_credit() {
 		// SUBSCRIBE, so nothing reaches it until we subscribe). It reports every token it
 		// verifies and holds the first renewal's verifier until released, the way a relay with
 		// a slow authorizer would.
-		let mut requests = pair.requests.take().expect("server took its requests pre-ok");
+		let mut requests = pair.scoped.take().expect("server took its request tokens pre-ok");
 		let (seen_tx, mut seen) = futures::channel::mpsc::unbounded::<Vec<u8>>();
 		let (release, release_waiter) = futures::channel::oneshot::channel::<()>();
 		let acceptor = moq_net_sim::spawn(async move {
 			let mut issued = Vec::new();
 			let mut count = 0u64;
 			let mut release_waiter = Some(release_waiter);
-			while let Some(auth::Event::Request(request)) = requests.next().await {
+			while let Some(request) = requests.next().await {
 				let token = request.token().value.clone();
 				count += 1;
 				seen_tx.unbounded_send(token).ok();
@@ -864,7 +904,7 @@ async fn a_held_renewal_coalesces_a_burst_without_tripping_the_credit() {
 
 		// Replace the token once and let that one renewal reach the held acceptor, so the held
 		// renewal is deterministic regardless of scheduling.
-		pair.client.auth().set_request_token(token(1)).unwrap();
+		pair.client.auth().set_request_token(Some(token(1))).unwrap();
 		assert_eq!(
 			seen.next().await.expect("first renewal"),
 			token(1).value,
@@ -878,7 +918,7 @@ async fn a_held_renewal_coalesces_a_burst_without_tripping_the_credit() {
 		// would close the session with TOO_MANY_REQUEST_UPDATES, losing every request on it;
 		// the one-in-flight rule coalesces them behind the held one instead.
 		for n in 2..=64u8 {
-			pair.client.auth().set_request_token(token(n)).unwrap();
+			pair.client.auth().set_request_token(Some(token(n))).unwrap();
 			moq_net_sim::sleep(Duration::from_millis(5)).await;
 		}
 
@@ -957,8 +997,7 @@ async fn a_server_that_declines_solicit_gets_a_token_bearing_unsolicited_announc
 		let bc = publisher.create_broadcast("room/alice").unwrap();
 		bc.announce(Default::default()).unwrap();
 
-		let requests = pair.requests.take().expect("server took its requests pre-ok");
-		let mut answered = serve(requests, |_token| Some(grant(&["room/alice"], &["room/alice"])));
+		let mut answered = serve(pair.verifiers(), |_token| Some(grant(&["room/alice"], &["room/alice"])));
 		// The announce is admitted once the token is granted.
 		wait_announced(&relay.consume(), "room/alice", true).await;
 		let (tok, _issued) = answered
@@ -986,8 +1025,7 @@ async fn a_server_that_declines_solicit_gets_a_token_bearing_unsolicited_announc
 		let bc = publisher.create_broadcast("room/carol").unwrap();
 		bc.announce(Default::default()).unwrap();
 
-		let requests = pair.requests.take().expect("server took its requests pre-ok");
-		let mut answered = serve(requests, |_token| Some(grant(&["room/carol"], &[])));
+		let mut answered = serve(pair.verifiers(), |_token| Some(grant(&["room/carol"], &[])));
 		wait_announced(&relay.consume(), "room/carol", true).await;
 		assert!(
 			answered.try_recv().is_err(),
@@ -1039,9 +1077,7 @@ async fn an_unanswered_token_does_not_suspend_the_check(version: &'static str) {
 			..Default::default()
 		})
 		.await;
-		let _issued = serve(pair.requests.take().unwrap(), |token| {
-			token.is_empty().then(|| grant(&["baz"], &[]))
-		});
+		let _issued = serve(pair.verifiers(), |token| token.is_empty().then(|| grant(&["baz"], &[])));
 
 		let auth = pair.client.auth();
 		let pending = moq_net_sim::spawn(async move { auth.add("never answered").await.map(|_| ()) });
@@ -1074,7 +1110,7 @@ async fn tokens_union_and_withdrawing_one_shrinks_it(version: &'static str) {
 			..Default::default()
 		})
 		.await;
-		let mut issued = serve(pair.requests.take().unwrap(), |token| match token {
+		let mut issued = serve(pair.verifiers(), |token| match token {
 			b"" => Some(grant(&["a"], &[])),
 			b"t1" => Some(grant(&["b"], &[])),
 			_ => None,
@@ -1117,7 +1153,7 @@ async fn an_update_replaces_one_tokens_grant(version: &'static str) {
 			..Default::default()
 		})
 		.await;
-		let mut issued = serve(pair.requests.take().unwrap(), |token| match token {
+		let mut issued = serve(pair.verifiers(), |token| match token {
 			b"" => Some(grant(&["a"], &[])),
 			b"t1" => Some(grant(&["b"], &[])),
 			_ => None,
@@ -1148,7 +1184,7 @@ async fn a_revoked_grant_withdraws_and_can_be_restored(version: &'static str) {
 			..Default::default()
 		})
 		.await;
-		let mut issued = serve(pair.requests.take().unwrap(), |token| match token {
+		let mut issued = serve(pair.verifiers(), |token| match token {
 			b"" | b"again" => Some(grant(&["a"], &[])),
 			_ => None,
 		});
@@ -1185,7 +1221,7 @@ async fn a_refused_token_reports_the_code(version: &'static str) {
 		.await;
 		let mut requests = pair.requests.take().unwrap();
 		moq_net_sim::spawn(async move {
-			while let Some(auth::Event::Session(request)) = requests.next().await {
+			while let Some(request) = requests.next().await {
 				match request.token().is_empty() {
 					true => {
 						std::mem::forget(request.accept(Grant::default()));
@@ -1220,7 +1256,7 @@ async fn a_refused_setup_token_grants_nothing(version: &'static str) {
 		.await;
 		let mut requests = pair.requests.take().unwrap();
 		moq_net_sim::spawn(async move {
-			while let Some(auth::Event::Session(request)) = requests.next().await {
+			while let Some(request) = requests.next().await {
 				request.reject(SessionError::Unauthorized, "bad credential");
 			}
 		});
@@ -1243,7 +1279,7 @@ async fn dropping_the_requests_refuses_queued_tokens(version: &'static str) {
 		.await;
 		let mut requests = pair.requests.take().unwrap();
 		// Wait for the setup token to be queued, then hand it back to the queue's owner.
-		let Some(auth::Event::Session(first)) = requests.next().await else {
+		let Some(first) = requests.next().await else {
 			panic!("setup token")
 		};
 		drop(first.accept(Grant::default()));
@@ -1292,7 +1328,7 @@ async fn an_issued_grant_ends_with_its_session(version: &'static str) {
 		})
 		.await;
 		let mut requests = pair.requests.take().unwrap();
-		let Some(auth::Event::Session(setup)) = requests.next().await else {
+		let Some(setup) = requests.next().await else {
 			panic!("setup token")
 		};
 		let issued = setup.accept(Grant::default());
@@ -1398,7 +1434,7 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 			..Default::default()
 		})
 		.await;
-		let mut issued = serve(pair.requests.take().unwrap(), |token| {
+		let mut issued = serve(pair.verifiers(), |token| {
 			token.is_empty().then(|| grant(&["up"], &["room"]))
 		});
 		let (_, setup) = issued.next().await.unwrap();
@@ -1465,7 +1501,7 @@ async fn an_unrepresentable_grant_is_unsupported(version: &'static str) {
 			..Default::default()
 		})
 		.await;
-		let mut issued = serve(pair.requests.take().unwrap(), |token| match token {
+		let mut issued = serve(pair.verifiers(), |token| match token {
 			b"" => Some(grant(&["a"], &[])),
 			b"exact" => Some(Grant {
 				publish: Patterns::from(Pattern::try_from("room/alice").unwrap()),
@@ -1514,7 +1550,7 @@ async fn an_unrepresentable_update_revokes_only_its_token(version: &'static str)
 			..Default::default()
 		})
 		.await;
-		let mut issued = serve(pair.requests.take().unwrap(), |token| match token {
+		let mut issued = serve(pair.verifiers(), |token| match token {
 			b"" => Some(grant(&["a"], &[])),
 			b"t1" => Some(grant(&["b"], &[])),
 			_ => None,
@@ -1557,7 +1593,7 @@ async fn a_grant_too_large_for_one_message_is_unsupported(version: &'static str)
 		let huge: Patterns = (0..count)
 			.map(|i| Pattern::subtree(&format!("{i}{}", "x".repeat(len))).unwrap())
 			.collect();
-		let mut issued = serve(pair.requests.take().unwrap(), move |token| match token {
+		let mut issued = serve(pair.verifiers(), move |token| match token {
 			b"" => Some(grant(&["a"], &[])),
 			b"huge" => Some(Grant {
 				publish: huge.clone(),
@@ -1589,7 +1625,7 @@ async fn a_grant_update_too_large_for_one_message_is_unsupported(version: &'stat
 			..Default::default()
 		})
 		.await;
-		let mut issued = serve(pair.requests.take().unwrap(), |token| {
+		let mut issued = serve(pair.verifiers(), |token| {
 			Some(grant(if token.is_empty() { &["a"] } else { &["b"] }, &[]))
 		});
 		let (_, _setup) = issued.next().await.unwrap();
@@ -1645,7 +1681,7 @@ async fn pattern_grants_arrive_exactly(version: &'static str) {
 				expires: None,
 			})
 		};
-		let mut issued = serve(pair.requests.take().unwrap(), table);
+		let mut issued = serve(pair.verifiers(), table);
 		let (_, _setup) = issued.next().await.unwrap();
 		assert_eq!(granted(&pair.client).await, table(b"").unwrap());
 
@@ -1723,7 +1759,7 @@ async fn nothing_outside_the_grant_reaches_the_peer(version: &'static str) {
 
 		// Hold the answer, so the peer's discovery request is in long before the grant.
 		let mut requests = pair.requests.take().unwrap();
-		let Some(auth::Event::Session(setup)) = requests.next().await else {
+		let Some(setup) = requests.next().await else {
 			panic!("setup token")
 		};
 		let leaked = moq_net_sim::timeout(
