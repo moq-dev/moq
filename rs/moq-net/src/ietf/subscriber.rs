@@ -2996,7 +2996,7 @@ where
 	}
 
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
-		let mut group: ietf::GroupHeader = stream.decode().await?;
+		let group: ietf::GroupHeader = stream.decode().await?;
 
 		// SUBSCRIBE_OK or PUBLISH can be reordered behind this stream. Hold only the
 		// subgroup header while waiting so the data stream cannot consume flow control.
@@ -3045,12 +3045,6 @@ where
 			);
 			let _ = track.abort(Error::Unsupported);
 			return Err(Error::Unsupported);
-		}
-
-		// An omitted header priority inherits the track property, then wire 128.
-		// The track info carries that fallback after SUBSCRIBE_OK (draft-21 section 10.4).
-		if !group.flags.has_priority {
-			group.publisher_priority = super::priority::to_wire(track.publisher_priority());
 		}
 
 		// Whether a FIRST_OBJECT-clear stream is a group with no head is decided in
