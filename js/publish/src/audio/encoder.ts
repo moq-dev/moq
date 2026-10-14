@@ -9,11 +9,13 @@ import {
 	type Getter,
 	getter,
 	type Inputs,
+	Once,
 	type Readonlys,
 	readonlys,
 	Signal,
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
+import { errors } from "../internal";
 import { type Baseline, Estimator } from "../jitter";
 import type { AudioFrame, Capture, Format } from "./capture";
 import { Gain } from "./gain";
@@ -110,6 +112,8 @@ export type EncoderProps = Inputs<EncoderInput> & {
 };
 
 type EncoderOutput = {
+	/** The encoder failure, cleared only by a new capture source or format, or new encoder settings. */
+	error: Signal<Error | undefined>;
 	// The catalog config published for this rendition, `enabled: false` while disabled, or undefined
 	// while there's no capture.
 	catalog: Signal<Catalog.AudioConfig | undefined>;
@@ -171,6 +175,7 @@ export class Encoder {
 	#decoderDescription = new Signal<{ config: Catalog.AudioConfig; description: Catalog.Hex } | undefined>(undefined);
 
 	readonly #out: EncoderOutput = {
+		error: new Signal<Error | undefined>(undefined),
 		catalog: new Signal<Catalog.AudioConfig | undefined>(undefined),
 		root: new Signal<AudioNode | undefined>(undefined),
 		active: new Signal<boolean>(false),
@@ -203,10 +208,6 @@ export class Encoder {
 	// The last valid group duration, validated by #runConfig the same way as #fade.
 	#groupDuration = Time.Micro(20_000);
 
-	// The fatal error an AudioEncoder reported, if any. That instance can never encode again and
-	// reconfiguring it would be a retry, so the rendition stays down for the life of this encoder.
-	#fatal = new Signal<Error | undefined>(undefined);
-
 	// How many resolution runs threw for their current inputs (e.g. invalid codec settings), so no
 	// config is coming until one reruns.
 	#failures = new Signal(0);
@@ -218,6 +219,10 @@ export class Encoder {
 	 */
 	readonly settled: Computed<boolean>;
 
+	// Each registration keeps its terminal failure even after the public error clears.
+	#failure = new Signal(new Once<Error>());
+	// The capture inputs #runCaptureRecovery last saw, carried across a gap in the source or format.
+	#seen?: { capture?: Capture; source?: unknown; format?: Format };
 	#signals = new Effect();
 	#estimator = new Estimator();
 	// The estimator's jitter and delay, republished whenever either rises.
@@ -260,7 +265,7 @@ export class Encoder {
 
 		this.settled = this.#signals.computed((effect) => {
 			if (effect.get(this.#out.catalog) !== undefined) return true;
-			if (effect.get(this.#fatal) !== undefined || effect.get(this.#failures) > 0) return true;
+			if (effect.get(this.#out.error) !== undefined || effect.get(this.#failures) > 0) return true;
 			const capture = effect.get(this.in.capture);
 			return capture !== undefined && !!effect.get(capture.blocked);
 		});
@@ -280,6 +285,8 @@ export class Encoder {
 				}
 			});
 		}
+		this.#signals.run(this.#runSettingsRecovery.bind(this));
+		this.#signals.run(this.#runCaptureRecovery.bind(this));
 		this.#signals.run(this.#runRegister.bind(this));
 	}
 
@@ -318,18 +325,61 @@ export class Encoder {
 				// The config rebuilds when the channel count moves, so skip anything that arrives
 				// mid-swap rather than framing it wrong.
 				const pipeline = this.#pipeline;
-				if (pipeline && pipeline.channelCount === frame.channels.length) pipeline.push(frame);
+				if (pipeline && pipeline.channelCount === frame.channels.length) {
+					try {
+						pipeline.push(frame);
+					} catch (error) {
+						this.#abort(error);
+					}
+				}
 			}
 		});
+	}
+
+	// Any notification of the encoder settings re-arms a failure, including a setting mutated in place.
+	#runSettingsRecovery(effect: Effect): void {
+		effect.get(this.codec);
+		this.#rearm();
+	}
+
+	// Read only capture inputs here, never bandwidth grants or the error itself; demand is not a retry.
+	// A gap in the source or format (a capture disabled or interrupted) keeps the last ones, so only a
+	// different capture re-arms a failure, such as the new track a re-enabled microphone opens.
+	#runCaptureRecovery(effect: Effect): void {
+		const capture = effect.get(this.in.capture);
+		const seen = this.#seen;
+		const same = seen !== undefined && seen.capture === capture;
+		const source = (capture && effect.get(capture.in.source)) ?? (same ? seen.source : undefined);
+		const format = (capture && effect.get(capture.out.format)) ?? (same ? seen.format : undefined);
+		this.#seen = { capture, source, format };
+		if (
+			same &&
+			seen.source === source &&
+			seen.format?.sampleRate === format?.sampleRate &&
+			seen.format?.channelCount === format?.channelCount
+		) {
+			return;
+		}
+		this.#rearm();
+	}
+
+	// Clear a latched failure so a fresh registration retries.
+	#rearm(): void {
+		if (!this.#out.error.peek()) return;
+		this.#out.error.set(undefined);
+		this.#floor = undefined;
+		this.#failure.set(new Once<Error>());
 	}
 
 	// Register the rendition on the broadcast, publish its config, and encode only while a subscriber
 	// is attached (the demand gate). Re-registers cleanly when the broadcast swaps.
 	#runRegister(effect: Effect): void {
+		const failure = effect.get(this.#failure);
 		const broadcast = effect.get(this.in.broadcast);
 		if (!broadcast) return;
 
 		const rendition = broadcast.audio(this.name);
+		errors.set(rendition, failure);
 		effect.cleanup(() => rendition.close());
 
 		// Publish the resolved config; undefined (no capture) drops it from the catalog.
@@ -343,7 +393,7 @@ export class Encoder {
 			const enabled = effect.get(this.in.enabled);
 			const capture = effect.get(this.in.capture);
 			const format = capture ? effect.get(capture.out.format) : undefined;
-			const fatal = effect.get(this.#fatal);
+			const fatal = effect.get(this.#out.error);
 			if (!enabled || !format || fatal) return;
 
 			this.#encode(broadcast.baseline, format, effect);
@@ -371,7 +421,7 @@ export class Encoder {
 			const capture = effect.get(this.in.capture);
 			const format = capture ? effect.get(capture.out.format) : undefined;
 			const track = effect.get(rendition.track);
-			const fatal = effect.get(this.#fatal);
+			const fatal = effect.get(this.#out.error);
 
 			// A dead encoder can't serve anyone, so the current subscriber and every later one get
 			// the real error rather than a track that stays silent.
@@ -387,7 +437,7 @@ export class Encoder {
 			const enabled = effect.get(this.in.enabled);
 			const track = effect.get(rendition.track);
 			const allocator = effect.get(this.in.bandwidth);
-			if (!enabled || !track || !allocator) return;
+			if (!enabled || !track || !allocator || effect.get(this.#out.error)) return;
 
 			let reservation: Moq.Bandwidth.Reservation | undefined;
 			effect.subscribe(this.#config, (config) => {
@@ -432,7 +482,7 @@ export class Encoder {
 	// disabled after re-enabling until the reopened capture reports its format.
 	#runCatalog(effect: Effect): void {
 		const estimate = effect.get(this.#estimate);
-		const enabled = effect.get(this.in.enabled);
+		const enabled = effect.get(this.in.enabled) && !effect.get(this.#out.error);
 		const key = effect.get(this.in.broadcast) ?? this;
 		let track = this.#advertised.get(key);
 		if (!track) {
@@ -486,13 +536,14 @@ export class Encoder {
 	}
 
 	// Encode captured audio frames into whichever track producer is live. The broadcast owns the
-	// track's lifetime, so this never closes it; a fatal encoder error is reported through #fatal.
+	// track's lifetime, so this never closes it; a fatal encoder error aborts only the live track.
 	#encode(baseline: Baseline, format: Format, effect: Effect): void {
 		effect.spawn(async () => {
 			// We're using an async polyfill temporarily for Safari support.
 			await Util.Libav.polyfill();
 
 			effect.run((effect: Effect) => {
+				const aborted = effect.abort;
 				const resolved = effect.get(this.#config);
 				if (!resolved) return;
 				const config = resolved.catalog;
@@ -547,10 +598,7 @@ export class Encoder {
 						}
 					},
 					error: (err) => {
-						console.error("encoder error", err);
-						// #runRegister owns the abort, so the current producer and every later one
-						// are closed with this in one place.
-						this.#fatal.set(err);
+						if (!aborted.aborted) this.#abort(err);
 					},
 				});
 				// A fatal error already closed the codec, and closing it twice throws.
@@ -559,7 +607,12 @@ export class Encoder {
 				});
 
 				console.debug("encoding audio", encoderConfig);
-				encoder.configure(encoderConfig);
+				try {
+					encoder.configure(encoderConfig);
+				} catch (error) {
+					this.#abort(error);
+					return;
+				}
 
 				// Where the next frame starts if it continues the last one encoded.
 				let contiguous: Time.Micro | undefined;
@@ -628,6 +681,14 @@ export class Encoder {
 				});
 			});
 		});
+	}
+
+	#abort(error: unknown): void {
+		if (this.#out.error.peek()) return;
+		const cause = error instanceof Error ? error : new Error(String(error));
+		this.#failure.peek().set(cause);
+		this.#out.error.set(cause);
+		this.#live?.track.close(cause);
 	}
 
 	#setDecoderDescription(config: Catalog.AudioConfig, source: AllowSharedBufferSource | undefined): void {

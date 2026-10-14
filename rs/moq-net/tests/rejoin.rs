@@ -4,7 +4,7 @@ mod support;
 
 use std::time::Duration;
 
-use moq_net::{Hop, Timestamp, Version, group, track};
+use moq_net::{Hop, Timestamp, Version, announce, group, track};
 use support::harness::{MockConnectOptions, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -602,4 +602,148 @@ async fn rejoin_keeps_source_timestamps() {
 		.await
 		.unwrap_or_else(|_| panic!("{version}: timed out"));
 	}
+}
+
+/// A quiet track's latest group outlives the cache window while it stays the live edge.
+///
+/// A catalog is published once. A reader reads it and leaves, so the relay parks the
+/// track, and the next reader re-splices the upstream copy after the cached group. The
+/// group must stay protected while that reader holds the track open: a reader joining
+/// after the cache window needs it, and no newer group may ever come. Once a newer group
+/// supersedes it, it expires like any other.
+#[moq_net_sim::test]
+async fn rejoined_quiet_catalog_survives_cache_expiry() {
+	for version in [
+		"moq-lite-05",
+		"moq-lite-06",
+		"moq-lite-07-wip",
+		"moq-transport-19",
+		"moq-transport-22",
+	] {
+		quiet_catalog_survives_cache_expiry(version.parse().unwrap(), false).await;
+	}
+}
+
+/// A quiet track's latest group outlives the cache window across a publisher takeover.
+///
+/// The publisher reconnects while a reader holds the catalog. A late reader through the
+/// new connection still needs the quiet catalog, even on a wire without epochs where
+/// the old reader ends with its route.
+#[moq_net_sim::test]
+async fn taken_over_quiet_catalog_survives_cache_expiry() {
+	for version in [
+		"moq-lite-05",
+		"moq-lite-06",
+		"moq-lite-07-wip",
+		"moq-transport-19",
+		"moq-transport-22",
+	] {
+		quiet_catalog_survives_cache_expiry(version.parse().unwrap(), true).await;
+	}
+}
+
+async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
+	moq_net_sim::timeout(TEST_TIMEOUT + moq_net::cache::DEFAULT_EXPIRY * 5, async {
+		let publisher = produce_origin(1);
+		let relay = produce_origin(2);
+		let broadcast = publisher.create_broadcast("bench").unwrap();
+		let track = broadcast.create_track("catalog", timed()).unwrap();
+		broadcast
+			.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+			.unwrap();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(Timestamp::ZERO, b"catalog".as_ref()).unwrap();
+		group.finish().unwrap();
+
+		let upstream = |cost| {
+			let mut options = MockConnectOptions::new(version);
+			options.server_publish = Some(publisher.consume());
+			options.client_subscribe = Some(relay.clone());
+			options.cost = Some(cost);
+			connect_mock(options)
+		};
+		let mut upstream_session = upstream(2).await;
+
+		// Each session gets its own hop, so the relay serves it through its own front.
+		let session = |hop| {
+			let relay = relay.clone();
+			async move {
+				let client = produce_origin(hop);
+				let mut options = MockConnectOptions::new(version);
+				options.server_publish = Some(relay.consume());
+				options.client_subscribe = Some(client.clone());
+				let pair = connect_mock(options).await;
+				let consumer = client.consume();
+				consumer.routed("bench").await.unwrap();
+				let remote = consumer.request_broadcast("bench", None).await.unwrap();
+				let sub = remote.track("catalog").unwrap().subscribe(None).await.unwrap();
+				(sub, remote, pair)
+			}
+		};
+
+		let (_holder, _holder_remote, _holder_pair) = if takeover {
+			// The publisher reconnects while the holder reads, and the old connection goes:
+			// the relay takes the track over from the new one.
+			let (mut holder, remote, pair) = session(3).await;
+			assert_eq!(holder.recv_group().await.unwrap().unwrap().sequence, 0, "{version}");
+			// The new connection is cheaper, so the relay reports its route taking over.
+			let mut follow = relay.consume().follow("bench").unwrap();
+			assert!(
+				matches!(follow.next().await, Some(announce::Event::Start(_))),
+				"{version}"
+			);
+			let replacement = upstream(1).await;
+			let event = follow.next().await;
+			assert!(
+				matches!(event, Some(announce::Event::Update(_) | announce::Event::Restart(_))),
+				"{version}: {event:?}"
+			);
+			upstream_session = replacement;
+			(holder, remote, pair)
+		} else {
+			// A reader leaves, so the relay parks the track; the holder re-splices it.
+			let (mut first, remote, pair) = session(3).await;
+			assert_eq!(first.recv_group().await.unwrap().unwrap().sequence, 0, "{version}");
+			drop((first, remote, pair));
+			track.demand().unused().await.unwrap();
+			let (mut holder, remote, pair) = session(4).await;
+			assert_eq!(holder.recv_group().await.unwrap().unwrap().sequence, 0, "{version}");
+			(holder, remote, pair)
+		};
+
+		moq_net_sim::sleep(moq_net::cache::DEFAULT_EXPIRY * 2 + Duration::from_secs(2)).await;
+		let (mut later, later_remote, _later_pair) = session(5).await;
+		let mut group = moq_net_sim::timeout(Duration::from_secs(1), later.recv_group())
+			.await
+			.unwrap_or_else(|_| panic!("{version} takeover={takeover}: late reader lost the latest catalog"))
+			.unwrap()
+			.unwrap();
+		assert_eq!(read_all(&mut group).await.unwrap(), [b"catalog"], "{version}");
+		drop(group);
+
+		// A newer catalog supersedes it, so the old one expires like any other group.
+		let mut newer = track.append_group().unwrap();
+		newer
+			.write_frame(Timestamp::from_millis(1000).unwrap(), b"newer".as_ref())
+			.unwrap();
+		newer.finish().unwrap();
+		// Epochless wires end the old holder on takeover. The late reader uses the
+		// current route on every version, and keeps that copy live for the expiry check.
+		assert_eq!(later.recv_group().await.unwrap().unwrap().sequence, 1, "{version}");
+		moq_net_sim::sleep(moq_net::cache::DEFAULT_EXPIRY * 2 + Duration::from_secs(2)).await;
+		let old = async {
+			let mut group = later_remote.track("catalog").unwrap().fetch_group(0, None).await?;
+			group.read_frame().await
+		};
+		assert!(
+			moq_net_sim::timeout(Duration::from_secs(1), old)
+				.await
+				.unwrap()
+				.is_err(),
+			"{version} takeover={takeover}: the superseded catalog never expired"
+		);
+		drop(upstream_session);
+	})
+	.await
+	.unwrap_or_else(|_| panic!("{version} takeover={takeover}: timed out"));
 }

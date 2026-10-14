@@ -1,4 +1,5 @@
 use crate::{frame, group, origin, track};
+use futures::FutureExt as _;
 use std::{
 	collections::HashMap,
 	ops::Bound,
@@ -79,7 +80,7 @@ struct FetchedGroup {
 	/// The Object ID of the first frame.
 	first: u64,
 	frames: Vec<frame::Frame>,
-	/// The group ended within the range, so every frame it will ever hold was read.
+	/// The fetched range reached the finished group's final object.
 	complete: bool,
 	/// The track's info, which FETCH_OK describes and whose units stamp the objects.
 	info: track::Info,
@@ -125,19 +126,19 @@ async fn read_fetch(
 	// longer holds it.
 	let first = group.index();
 	let mut frames = Vec::new();
-	let mut complete = false;
 	// A long cached group is read a slice per poll, so the session's other tasks still run.
 	let mut budget = kio::coop::Budget::new(32);
 	while until.is_none_or(|until| first + (frames.len() as u64) < until) {
 		kio::wait(|waiter| budget.poll_yield(waiter)).await;
-		match group.read_frame().await? {
-			Some(frame) => frames.push(frame),
-			None => {
-				complete = true;
-				break;
-			}
-		}
+		let Some(frame) = group.read_frame().await? else {
+			break;
+		};
+		frames.push(frame);
 	}
+	// A bounded range can reach the group's end without reading its terminal None, and a
+	// start past the end is already there.
+	let complete =
+		matches!(group.finished().now_or_never(), Some(Ok(_))) && group.index() >= group.frame_count() as u64;
 
 	Ok(FetchedGroup {
 		sequence,
@@ -7176,6 +7177,8 @@ mod serve_tests {
 		Idle,
 		/// An idle copy that learned a later end of track: still unknown.
 		IdleEnded,
+		/// An idle copy whose track ends after its newest group: that group's last object.
+		IdleFinished,
 		/// A live feed whose newest group is a datagram the cache cannot read: unknown.
 		Datagram,
 		/// A live feed whose newest group was aborted mid-write: unknown.
@@ -7200,6 +7203,11 @@ mod serve_tests {
 				h.track.finish_at(track::Position::group(10)).unwrap();
 				None
 			}
+			Largest::IdleFinished => {
+				h.track.set_idle();
+				h.track.finish().unwrap();
+				None
+			}
 			Largest::Datagram => {
 				h.track.append_datagram(timestamp(), b"d".as_slice()).unwrap();
 				None
@@ -7214,7 +7222,8 @@ mod serve_tests {
 	}
 
 	/// On draft 20, a start past Largest Object is refused INVALID_RANGE (section 10.13),
-	/// wherever the publisher knows it. Where it does not, it answers empty.
+	/// wherever the publisher knows it. Where it does not, it answers empty. A start beyond
+	/// the final group's last object still finds the track's end there.
 	#[moq_net_sim::test]
 	async fn a_draft20_fetch_past_the_largest_object_is_refused() {
 		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
@@ -7223,34 +7232,40 @@ mod serve_tests {
 				Largest::Live,
 				Largest::Idle,
 				Largest::IdleEnded,
+				Largest::IdleFinished,
 				Largest::Datagram,
 				Largest::Aborted,
 			] {
-				let mut h = serve(version);
-				let _newer = publish_largest(&mut h, largest);
-				settle().await;
+				for start in [2, 3] {
+					let mut h = serve(version);
+					let _newer = publish_largest(&mut h, largest);
+					settle().await;
 
-				let buf = standalone_fetch(
-					&h,
-					Location { group: 4, object: 2 },
-					Location { group: 4, object: 6 },
-					GroupOrder::Ascending,
-				)
-				.await;
-				match largest {
-					Largest::Finished | Largest::Live => assert_eq!(
-						fetch_refusal(buf, version),
-						invalid_range(version),
-						"{version} {largest:?}"
-					),
-					_ => {
-						let (ok, objects) = fetch_answer(buf, version);
-						assert_eq!(
-							ok.end_location,
-							Location { group: 4, object: 5 },
-							"{version} {largest:?}"
-						);
-						assert_eq!(objects, Vec::new(), "{version} {largest:?}");
+					let buf = standalone_fetch(
+						&h,
+						Location {
+							group: 4,
+							object: start,
+						},
+						Location { group: 4, object: 6 },
+						GroupOrder::Ascending,
+					)
+					.await;
+					match largest {
+						Largest::Finished | Largest::Live | Largest::IdleFinished => assert_eq!(
+							fetch_refusal(buf, version),
+							invalid_range(version),
+							"{version} {largest:?} start={start}"
+						),
+						_ => {
+							let (ok, objects) = fetch_answer(buf, version);
+							assert_eq!(
+								ok.end_location,
+								Location { group: 4, object: 5 },
+								"{version} {largest:?} start={start}"
+							);
+							assert_eq!(objects, Vec::new(), "{version} {largest:?} start={start}");
+						}
 					}
 				}
 			}
@@ -7341,6 +7356,32 @@ mod serve_tests {
 			assert_eq!(ok.end_location, end_location(version, 4, 1), "{version}");
 			assert!(ok.end_of_track, "{version}");
 			assert_eq!(objects, pairs([4])[1..].to_vec(), "{version}");
+		}
+	}
+
+	/// A bounded range ending at the last object still reports the track's end; a
+	/// shorter prefix must not claim that the track ends there.
+	#[moq_net_sim::test]
+	async fn a_fetch_ending_at_the_final_object_reports_the_end_of_track() {
+		for version in FETCH_DRAFTS {
+			for end in [1, 2] {
+				let mut h = serve(version);
+				publish_pairs(&mut h, 5, None);
+				h.track.finish().unwrap();
+				settle().await;
+
+				let buf = standalone_fetch(
+					&h,
+					Location { group: 4, object: 0 },
+					Location { group: 4, object: end },
+					GroupOrder::Ascending,
+				)
+				.await;
+				let (ok, objects) = fetch_answer(buf, version);
+				assert_eq!(ok.end_location, end_location(version, 4, end - 1), "{version}");
+				assert_eq!(ok.end_of_track, end == 2, "{version}: exclusive end {end}");
+				assert_eq!(objects, pairs([4])[..end as usize].to_vec(), "{version}");
+			}
 		}
 	}
 

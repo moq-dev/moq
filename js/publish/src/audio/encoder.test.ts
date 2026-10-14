@@ -1,7 +1,10 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
+import type * as Catalog from "@moq/hang/catalog";
+import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Signal } from "@moq/signals";
+import { Broadcast } from "../broadcast";
 import { Baseline } from "../jitter";
 import type { AudioFrame, Format } from "./capture";
 import { type Codec, Encoder, resolve, toEncoderConfig } from "./encoder";
@@ -66,6 +69,7 @@ describe("toEncoderConfig", () => {
 // stamps each chunk from the first input's timestamp plus the audio encoded since, so a jump in
 // input timestamps never reaches the output.
 class LaggingAudioEncoder {
+	static instances: LaggingAudioEncoder[] = [];
 	static readonly LAG = 2;
 
 	// Called on configure; the encoder publishes its pipeline synchronously right after.
@@ -76,9 +80,17 @@ class LaggingAudioEncoder {
 	#held: { timestamp: number; duration: number }[] = [];
 	#base: number | undefined;
 	#encoded = 0;
+	#error: AudioEncoderInit["error"];
 
 	constructor(init: AudioEncoderInit) {
 		this.#output = init.output;
+		this.#error = init.error;
+		LaggingAudioEncoder.instances.push(this);
+	}
+
+	fail(error: Error): void {
+		this.state = "closed";
+		this.#error(error as DOMException);
 	}
 
 	configure(config: AudioEncoderConfig): void {
@@ -132,6 +144,7 @@ class FakeAudioData {
 }
 
 function installFakeWebCodecs() {
+	LaggingAudioEncoder.instances = [];
 	const names = ["AudioEncoder", "AudioDecoder", "AudioData"] as const;
 	const originals = names.map((name) => Object.getOwnPropertyDescriptor(globalThis, name));
 	const fakes = [LaggingAudioEncoder, class {}, FakeAudioData];
@@ -192,6 +205,18 @@ class Feed {
 	}
 }
 
+function fakeCapture(feed: Feed) {
+	return {
+		in: { source: new Signal(undefined) },
+		out: {
+			root: new Signal(undefined),
+			format: new Signal<Format>({ sampleRate: 48_000, channelCount: 1 }),
+			frames: new Signal({ subscribe: () => feed.stream }),
+		},
+		blocked: new Signal(false),
+	};
+}
+
 // Resolves on the next AudioEncoder configure; the encoder publishes its pipeline synchronously after.
 function configured(): Promise<AudioEncoderConfig> {
 	return new Promise((resolve) => {
@@ -235,15 +260,7 @@ async function setup(baseline = new Baseline(), codec?: Codec, groupDuration?: T
 	};
 
 	const feed = new Feed();
-	const capture = {
-		in: { source: new Signal(undefined) },
-		out: {
-			root: new Signal(undefined),
-			format: new Signal<Format>({ sampleRate: 48_000, channelCount: 1 }),
-			frames: new Signal({ subscribe: () => feed.stream }),
-		},
-		blocked: new Signal(false),
-	};
+	const capture = fakeCapture(feed);
 
 	const enabled = new Signal(true);
 	const encoder = new Encoder("audio", {
@@ -654,3 +671,197 @@ test("settles while the capture waits on a gesture", async () => {
 async function settle(times = 5): Promise<void> {
 	for (let i = 0; i < times; i++) await new Promise<void>((resolve) => queueMicrotask(resolve));
 }
+
+test("a failed audio encoder keeps its last catalog config disabled", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using _now = spyOn(performance, "now").mockReturnValue(0);
+	using _error = spyOn(console, "error").mockImplementation(() => {});
+	using env = await setup();
+	const live = LaggingAudioEncoder.instances.at(-1);
+	if (!live) throw new Error("expected live audio encoder");
+	const failure = new Error("audio encoder failed");
+	live.fail(failure);
+	for (let i = 0; i < 10; i++) await Promise.resolve();
+	expect(env.track.closed.peek()).toBe(failure);
+	expect(env.encoder.out.error.peek()).toBe(failure);
+	expect(env.encoder.out.catalog.peek()).toMatchObject({ codec: "opus", enabled: false });
+	expect(env.encoder.out.active.peek()).toBe(false);
+	expect(LaggingAudioEncoder.instances).toHaveLength(1);
+});
+
+test("audio failure stays local through demand changes and capture format re-arms a fresh track", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using _now = spyOn(performance, "now").mockReturnValue(0);
+	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("failure.hang") });
+	const feed = new Feed();
+	const capture = fakeCapture(feed);
+	const estimate = new Signal<number | undefined>(10_000_000);
+	const bandwidth = new Moq.Bandwidth.Allocator(estimate);
+	const enabled = new Signal(true);
+	const configuring = configured();
+	const encoder = new Encoder("audio", { broadcast, capture: capture as never, bandwidth, enabled });
+	let subscriber: Moq.Track.Subscriber | undefined;
+	let siblingSubscriber: Moq.Track.Subscriber | undefined;
+	let catalogSubscriber: Moq.Track.Subscriber | undefined;
+	let recovered: Moq.Track.Subscriber | undefined;
+	const push = async (first: number, channels: number) => {
+		for (let i = 0; i < 3; i++) {
+			await feed.push({
+				timestamp: Time.Micro((first + i) * 20_000),
+				channels: Array.from({ length: channels }, () => new Float32Array(960)),
+			});
+		}
+		await feed.drain();
+	};
+	try {
+		await configuring;
+		await settle();
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		const epoch = net.route?.epoch;
+		const sibling = broadcast.video("video");
+		sibling.config.set({ codec: "avc1.640028", container: { kind: "legacy" } });
+		await settle();
+		siblingSubscriber = net.track("video").subscribe();
+		subscriber = net.track("audio").subscribe();
+		await settle();
+		const siblingTrack = sibling.track.peek();
+		if (!siblingTrack) throw new Error("expected demanded sibling track");
+		expect(siblingTrack.appendGroup().sequence).toBe(0);
+		await push(0, 1);
+		expect(subscriber.latest()).toBe(0);
+		catalogSubscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
+		const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: catalogSubscriber });
+		expect((await catalog.latest())?.value.audio?.renditions.audio?.enabled).not.toBe(false);
+		const live = LaggingAudioEncoder.instances.at(-1);
+		if (!live) throw new Error("expected live audio encoder");
+		const failure = new Error("audio codec failed");
+		live.fail(failure);
+		await settle();
+		expect(subscriber.closed.peek()).toBe(failure);
+		expect(encoder.out.error.peek()).toBe(failure);
+		expect((await catalog.latest())?.value.audio?.renditions.audio?.enabled).toBe(false);
+		expect(encoder.out.active.peek()).toBe(false);
+		const instances = LaggingAudioEncoder.instances.length;
+		subscriber.close();
+		subscriber = net.track("audio").subscribe();
+		broadcast.audio("audio/new");
+		estimate.set(20_000_000);
+		enabled.set(false);
+		await settle();
+		enabled.set(true);
+		await settle();
+		expect(subscriber.closed.peek()).toBeDefined();
+		expect(encoder.out.error.peek()).toBe(failure);
+		expect(encoder.out.catalog.peek()?.enabled).toBe(false);
+		expect(LaggingAudioEncoder.instances).toHaveLength(instances);
+		expect(broadcast.net.peek()).toBe(net);
+		expect(net.route?.epoch).toBe(epoch);
+		expect(siblingTrack.appendGroup().sequence).toBe(1);
+
+		const reconfiguring = configured();
+		capture.out.format.set({ sampleRate: 48_000, channelCount: 2 });
+		await reconfiguring;
+		await settle();
+		expect(encoder.out.error.peek()).toBeUndefined();
+		const config = (await catalog.latest())?.value.audio?.renditions.audio;
+		if (!config?.track) throw new Error("expected recovered track name");
+		expect(config.track).not.toBe("audio");
+		expect(config.enabled).not.toBe(false);
+		recovered = net.track(config.track).subscribe();
+		await settle();
+		await push(3, 2);
+		expect(recovered.latest()).toBe(0);
+		expect(encoder.out.active.peek()).toBe(true);
+		expect(recovered.closed.peek()).toBeUndefined();
+		expect(broadcast.net.peek()).toBe(net);
+		expect(net.route?.epoch).toBe(epoch);
+		expect(siblingTrack.appendGroup().sequence).toBe(2);
+	} finally {
+		subscriber?.close();
+		siblingSubscriber?.close();
+		catalogSubscriber?.close();
+		recovered?.close();
+		encoder.close();
+		bandwidth.close();
+		broadcast.close();
+	}
+});
+
+test("an audio failure without demand still recovers under a fresh track name", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using _now = spyOn(performance, "now").mockReturnValue(0);
+	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("idle.hang") });
+	const configuring = configured();
+	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(new Feed()) as never });
+	let catalogSubscriber: Moq.Track.Subscriber | undefined;
+	try {
+		await configuring;
+		await settle();
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		const live = LaggingAudioEncoder.instances.at(-1);
+		if (!live) throw new Error("expected audio encoder without demand");
+		const failure = new Error("idle audio encoder failed");
+		live.fail(failure);
+		await settle();
+		expect(encoder.out.error.peek()).toBe(failure);
+		expect(encoder.out.catalog.peek()?.enabled).toBe(false);
+		const failed = net.track("audio").subscribe();
+		expect(failed.closed.peek()).toBeDefined();
+		failed.close();
+		const reconfiguring = configured();
+		encoder.codec.set({ mime: "opus", bitrate: 64_000 });
+		await reconfiguring;
+		await settle();
+		catalogSubscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
+		const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: catalogSubscriber });
+		const config = (await catalog.latest())?.value.audio?.renditions.audio;
+		expect(config?.track).toBeDefined();
+		expect(config?.track).not.toBe("audio");
+		expect(encoder.out.error.peek()).toBeUndefined();
+		expect(broadcast.net.peek()).toBe(net);
+	} finally {
+		catalogSubscriber?.close();
+		encoder.close();
+		broadcast.close();
+	}
+});
+
+test.each(["failure first", "config first"])(
+	"same-turn audio failure and config recovery keep a fresh track: %s",
+	async (order) => {
+		using _webcodecs = installFakeWebCodecs();
+		using _now = spyOn(performance, "now").mockReturnValue(0);
+		const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("coalesced.hang") });
+		const configuring = configured();
+		const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(new Feed()) as never });
+		let catalogSubscriber: Moq.Track.Subscriber | undefined;
+		try {
+			await configuring;
+			await settle();
+			const net = broadcast.net.peek();
+			if (!net) throw new Error("expected network broadcast");
+			const live = LaggingAudioEncoder.instances.at(-1);
+			if (!live) throw new Error("expected idle audio encoder");
+			const reconfiguring = configured();
+			if (order === "config first") encoder.codec.set({ mime: "opus", bitrate: 64_000 });
+			live.fail(new Error("idle encoder failed"));
+			if (order === "failure first") encoder.codec.set({ mime: "opus", bitrate: 64_000 });
+			await reconfiguring;
+			await settle();
+			catalogSubscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
+			const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: catalogSubscriber });
+			const config = (await catalog.latest())?.value.audio?.renditions.audio;
+			expect(config?.track).toBeDefined();
+			expect(config?.track).not.toBe("audio");
+			expect(encoder.out.error.peek()).toBeUndefined();
+			expect(encoder.out.active.peek()).toBe(false);
+			expect(broadcast.net.peek()).toBe(net);
+		} finally {
+			catalogSubscriber?.close();
+			encoder.close();
+			broadcast.close();
+		}
+	},
+);

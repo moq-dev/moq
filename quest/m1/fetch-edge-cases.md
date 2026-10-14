@@ -1,11 +1,10 @@
-# [S] Draft-20 FETCH edge cases, main first
+# [S] Backport draft-20 FETCH edge cases to 0.17
 
 ## Goal
 
-Two edge cases in the draft-20+ single-group FETCH from
-[#4971](https://github.com/moq-dev/moq/pull/4971) are fixed on `main`, each
-with a regression test that fails without its fix, and then backported to
-`release` in a later 0.17 patch:
+After the main fixes have merged, backport the two draft-20+ single-group
+FETCH edge cases to `release` in a later 0.17 patch, preserving its published
+API and carrying regression tests:
 
 - A range ending exactly at the final object of a finished track answers
   FETCH_OK with End of Track set, so a relay handling it finishes its copy.
@@ -20,13 +19,18 @@ Found by Codex on the release backport
 [#5402](https://github.com/moq-dev/moq/pull/5402#discussion_r4260963190)); the
 same code is on `main`.
 
-- Publisher (`rs/moq-net/src/ietf/publisher.rs`): `read_fetch` stops at
-  `until` without seeing the group's end, so `group.complete` stays false.
-  Derive End of Track from the track's final sequence and the group's last
-  object rather than from having read the group's end.
-- Subscriber (`rs/moq-net/src/ietf/subscriber.rs`, `run_group_fetch`): the
-  draft-20 check refuses an End Location before the start only. Also refuse
-  one whose group differs from the requested group.
+The main fixes and regression tests landed in
+[#5487](https://github.com/moq-dev/moq/pull/5487). Port them in a separate
+backport PR targeting `release`:
+
+- Publisher: a bounded FETCH reaches the end only if the group is finished
+  and the read cursor reached or passed its final frame count. A start past
+  the final object must still be refused INVALID_RANGE on draft 20+.
+- Subscriber: validate End Location stays within the requested group before
+  accepting the group or applying End of Track.
+
+The regression tests cover drafts 20 through 22, including a shorter-prefix
+control and rejecting malformed responses both with and without End of Track.
 
 Decided 2026-10-13 (maintainer): this does not gate the next 0.17 cut on
 [the release line](/quest/m0/release-22/README.md); the backport ships in a
