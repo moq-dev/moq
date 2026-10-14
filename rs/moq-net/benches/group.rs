@@ -334,7 +334,9 @@ fn bench_relay_frames(c: &mut Criterion) {
 						b.iter_batched(
 							|| (0..subscribers).map(|_| context.2.consume()).collect::<Vec<_>>(),
 							|mut readers| {
-								let mut buffer = frame::Buffer::<8>::new();
+								// A capacity `group_read_frames` doesn't sweep: sharing its readers'
+								// instantiation moves them out of line and shifts that sweep.
+								let mut buffer = frame::Buffer::<16>::new();
 								for reader in &mut readers {
 									drain_batched(reader, &mut buffer);
 								}
