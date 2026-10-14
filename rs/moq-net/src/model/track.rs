@@ -23,7 +23,7 @@ use super::Cap;
 pub use super::subscription::{Order, Position, Subscription};
 
 use std::{
-	collections::{BTreeMap, HashMap, VecDeque},
+	collections::{BTreeMap, VecDeque},
 	ops::{Bound, RangeBounds},
 	sync::Arc,
 	sync::OnceLock,
@@ -466,13 +466,14 @@ impl Slot {
 /// (hidden, aborted, or finished without a frame) is walked once, not once for every
 /// group judged against it. A publisher can make that run as long as the cache.
 ///
-/// Each entry maps a group a walk passed to where that walk stopped: no group strictly
-/// between the two could present. A group stops presenting on its own, but only starts
-/// by landing, so an entry holds until a group lands inside it. A stop itself is looked
-/// at again, so a walk past one that stopped presenting records the further stop.
+/// Each entry maps a cached group a walk passed to where that walk stopped: no group
+/// strictly between the two could present. A group stops presenting on its own, but only
+/// starts by landing, so an entry holds until a group lands inside it.
+/// A stop itself is looked at again, so a walk past one that stopped presenting records
+/// the further stop. Removing a group from the cache removes its entry.
 #[derive(Default)]
 struct Quiet {
-	next: HashMap<u64, u64>,
+	next: BTreeMap<u64, u64>,
 	/// The highest recorded stop. A live group lands at or past it, keeping every entry.
 	end: u64,
 	/// Groups walked past in total, so tests can bound the work.
@@ -481,25 +482,21 @@ struct Quiet {
 }
 
 impl Quiet {
-	/// Point every group in `walked` at `stop`. Entries left by evicted groups are dropped
-	/// once they could outnumber the `cached` groups, so this stays bounded by the cache.
-	fn record(&mut self, walked: Vec<u64>, stop: u64, cached: usize) {
+	/// Point every group in `walked` at `stop`.
+	fn record(&mut self, walked: Vec<u64>, stop: u64) {
 		#[cfg(test)]
 		{
 			self.passed += walked.len();
-		}
-		if self.next.len() >= cached.saturating_mul(2) {
-			self.next.clear();
 		}
 		self.end = self.end.max(stop);
 		self.next.extend(walked.into_iter().map(|at| (at, stop)));
 	}
 
-	/// A group landed at `sequence`: a run recorded across it no longer holds.
+	/// A group landed at `sequence`. Only an entry below it can stop past it, so those go
+	/// and the runs above it stay.
 	fn landed(&mut self, sequence: u64) {
 		if sequence < self.end {
-			self.next.clear();
-			self.end = 0;
+			self.next = self.next.split_off(&sequence);
 		}
 	}
 }
@@ -507,12 +504,13 @@ impl Quiet {
 /// Heap the track keeps per cached group, excluding the group itself
 /// ([`group::CACHE_OVERHEAD`]).
 ///
-/// One [`Slot`] under its sequence in `lookup`, plus a hint in each of `arrival` and
-/// `evict`. Doubled because both containers run half empty in the worst case: a
-/// `BTreeMap` node sits between half and fully packed, and a `VecDeque` holds up to
-/// twice the entries in it. Half of [`cache::ENTRY_OVERHEAD`]; see it for why this is
-/// derived rather than measured.
-pub(crate) const CACHE_OVERHEAD: u64 = 2 * (size_of::<u64>() + size_of::<Slot>() + 2 * size_of::<(u64, u32)>()) as u64;
+/// One [`Slot`] under its sequence in `lookup`, a hint in each of `arrival` and `evict`,
+/// and at most one [`Quiet`] entry. Doubled because these containers run half empty in
+/// the worst case: a `BTreeMap` node sits between half and fully packed, and a
+/// `VecDeque` holds up to twice the entries in it. Half of [`cache::ENTRY_OVERHEAD`];
+/// see it for why this is derived rather than measured.
+pub(crate) const CACHE_OVERHEAD: u64 =
+	2 * (size_of::<u64>() + size_of::<Slot>() + 2 * size_of::<(u64, u32)>() + size_of::<(u64, u64)>()) as u64;
 
 /// The registered subscriptions, aggregated by the producer.
 type Subscriptions = Vec<kio::Consumer<Subscription>>;
@@ -851,7 +849,7 @@ impl TrackState {
 			from = next;
 		};
 		if !walked.is_empty() {
-			self.quiet.lock().record(walked, from, self.lookup.len());
+			self.quiet.lock().record(walked, from);
 		}
 		found
 	}
@@ -1103,7 +1101,7 @@ impl TrackState {
 				// Already aborted: the frames are gone, reclaim the slot so a
 				// later fetch can serve the sequence again.
 				if slot.is_aborted() {
-					self.lookup.remove(&sequence);
+					self.remove_slot(sequence);
 					continue;
 				}
 				if self.protects(sequence) || !slot.is_expired(&scan) {
@@ -1118,7 +1116,7 @@ impl TrackState {
 				// Take the group out of the cache and abort it, so any consumer
 				// still reading surfaces `Error::Old` instead of blocking forever
 				// on a frame that will never arrive.
-				self.lookup.remove(&sequence).unwrap().abort(Error::Old);
+				self.remove_slot(sequence).unwrap().abort(Error::Old);
 			}
 		}
 
@@ -1237,12 +1235,18 @@ impl TrackState {
 	/// A group that starts above `frame_start` is also replaceable: it cannot answer a
 	/// request from there, so the wider producer takes the slot. Readers already
 	/// draining the old one keep their own handle.
+	/// Take `sequence` out of the cache, with any run recorded from it.
+	fn remove_slot(&mut self, sequence: u64) -> Option<Slot> {
+		self.quiet.lock().next.remove(&sequence);
+		self.lookup.remove(&sequence)
+	}
+
 	fn claim_sequence(&mut self, sequence: u64, frame_start: u64) -> Result<()> {
 		// Either copy that can still answer from `frame_start` takes the sequence.
 		if self.covering_group(sequence, frame_start).is_some() {
 			return Err(Error::Duplicate);
 		}
-		self.lookup.remove(&sequence);
+		self.remove_slot(sequence);
 		Ok(())
 	}
 
@@ -1434,7 +1438,7 @@ impl TrackState {
 			}
 			if slot.is_aborted() {
 				// Aborted upstream: the frames are already gone, reclaim the slot.
-				self.lookup.remove(&sequence);
+				self.remove_slot(sequence);
 				continue;
 			}
 			if self.protects(sequence) {
@@ -1461,7 +1465,7 @@ impl TrackState {
 
 			self.debt -= size;
 			paid = paid.saturating_add(size);
-			self.lookup.remove(&sequence).unwrap().abort(Error::Evicted);
+			self.remove_slot(sequence).unwrap().abort(Error::Evicted);
 		}
 	}
 
@@ -11028,6 +11032,54 @@ mod test {
 		let _open = producer.create_group(group::Info { sequence: 4 }).unwrap();
 		let mut second = producer.subscribe(budget);
 		assert_eq!(drain_groups(&mut second), [0, 1, 2, 3, 5, 6]);
+	}
+
+	/// A group landing inside a walked run keeps the part of it above: a pending run
+	/// revealed one group at a time, read in between, is still walked once.
+	#[test]
+	fn revealing_a_run_one_group_at_a_time_walks_it_once() {
+		const RUN: u64 = 1000;
+		let producer = track_producer("test", Info::timed());
+		write_group_at(&producer, 0, 0);
+		let pending: Vec<_> = (1..=RUN)
+			.map(|sequence| producer.receive_group(group::Info { sequence }).unwrap())
+			.collect();
+		write_group_at(&producer, RUN + 1, 50);
+		write_group_at(&producer, RUN + 2, 100);
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(10)));
+		assert_eq!(drain_groups(&mut subscriber), [RUN + 1, RUN + 2]);
+		for group in pending {
+			group.finish().unwrap();
+			producer.reveal_group(&group);
+			assert!(
+				drain_groups(&mut subscriber).is_empty(),
+				"group {} is past the budget",
+				group.sequence
+			);
+		}
+		let passed = producer.state.read().quiet.lock().passed;
+		assert!(passed <= 2 * RUN as usize, "walked past {passed} groups");
+	}
+
+	/// What was recorded for a walked run goes with the run when the cache drops it, even
+	/// with no read after.
+	#[test]
+	fn expiring_a_walked_run_forgets_it() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(1)));
+		let producer = track_producer_pooled("test", pool.clone());
+		write_group_at(&producer, 0, 0);
+		for sequence in 1..=100 {
+			write_empty_group(&producer, sequence);
+		}
+		write_group_at(&producer, 101, 50);
+		write_group_at(&producer, 102, 100);
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(10)));
+		assert_eq!(drain_groups(&mut subscriber), [101, 102]);
+		assert_eq!(producer.state.read().quiet.lock().next.len(), 100);
+
+		elapse(&producer, Duration::from_secs(2));
+		pool.sweep();
+		assert!(producer.state.read().quiet.lock().next.is_empty());
 	}
 
 	/// An untimed track has nothing past the budget, so a sparse feed keeps every gap
