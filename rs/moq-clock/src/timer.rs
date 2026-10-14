@@ -21,20 +21,25 @@ enum Timer {
 	Host(crate::runtime::Timer),
 	#[cfg(feature = "sim")]
 	Sim(crate::sim::Timer),
+	/// A [`sleep`] past the clock's range: arms nothing and never fires.
+	Never,
+}
+
+impl Timer {
+	fn new(at: Instant) -> Self {
+		#[cfg(feature = "sim")]
+		if let Some(timer) = crate::sim::Timer::new(at) {
+			return Self::Sim(timer);
+		}
+		Self::Host(crate::runtime::Timer::new(at))
+	}
 }
 
 /// Complete once the ambient clock reaches `at`; at once if it already has.
 pub fn sleep_until(at: Instant) -> Sleep {
-	#[cfg(feature = "sim")]
-	if let Some(timer) = crate::sim::Timer::new(at) {
-		return Sleep {
-			at,
-			timer: Timer::Sim(timer),
-		};
-	}
 	Sleep {
 		at,
-		timer: Timer::Host(crate::runtime::Timer::new(at)),
+		timer: Timer::new(at),
 	}
 }
 
@@ -42,9 +47,13 @@ pub fn sleep_until(at: Instant) -> Sleep {
 ///
 /// A duration past the clock's range never completes.
 pub fn sleep(duration: Duration) -> Sleep {
-	// Instant's range is 584 years, so a saturated deadline is never reached.
-	let at = crate::now().checked_add(duration).unwrap_or(Instant::MAX);
-	sleep_until(at)
+	match crate::now().checked_add(duration) {
+		Some(at) => sleep_until(at),
+		None => Sleep {
+			at: Instant::MAX,
+			timer: Timer::Never,
+		},
+	}
 }
 
 impl Sleep {
@@ -60,6 +69,7 @@ impl Sleep {
 			Timer::Host(timer) => timer.reset(at),
 			#[cfg(feature = "sim")]
 			Timer::Sim(timer) => timer.reset(at),
+			Timer::Never => self.timer = Timer::new(at),
 		}
 	}
 }
@@ -73,6 +83,7 @@ impl Future for Sleep {
 			Timer::Host(timer) => timer.poll(cx),
 			#[cfg(feature = "sim")]
 			Timer::Sim(timer) => timer.poll(cx),
+			Timer::Never => Poll::Pending,
 		}
 	}
 }

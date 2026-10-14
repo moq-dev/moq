@@ -313,10 +313,6 @@ impl Timer {
 			}
 			return Poll::Ready(());
 		}
-		// A deadline past the clock's range never fires, so it arms nothing to jump to.
-		if self.at == Instant::MAX {
-			return Poll::Pending;
-		}
 		let key = *self.key.get_or_insert_with(|| {
 			let id = time.next;
 			time.next += 1;
@@ -741,6 +737,17 @@ mod tests {
 	#[should_panic(expected = "deadlock")]
 	fn a_sleep_past_the_range_never_fires() {
 		run(async { crate::sleep(Duration::MAX).await });
+	}
+
+	/// The last instant is a real deadline, not the never-firing overflow.
+	#[crate::test]
+	async fn the_last_instant_is_reachable() {
+		// From the epoch, so the wall clock has room to reach it too.
+		step_wall(Wall::UNIX_EPOCH);
+		let task = spawn(crate::sleep_until(Instant::MAX));
+		yield_now().await;
+		advance(Duration::from_nanos(u64::MAX)).await;
+		task.await.unwrap();
 	}
 
 	/// A run drops its pending tasks, so a handle that escapes it reports the task
