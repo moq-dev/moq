@@ -486,18 +486,19 @@ pub(crate) struct PendingFetch {
 	// has taken it, its range is already on the wire.
 	frame_start: u64,
 
-	// Result channel back to the joined fetches. Written only on rejection; a
-	// successful accept resolves them through the track cache instead. Dropping
-	// every producer without writing (a vanished handler) closes the channel,
-	// which a [`Fetching`] reads as [`Error::NotFound`].
+	// Result channel for joined fetches. An accept resolves covered callers through
+	// the track cache and refuses uncovered ones. Dropping every producer closes
+	// an unserved attempt, which a [`Fetching`] reads as [`Error::NotFound`].
 	result: kio::Producer<FetchOutcome>,
 }
 
-/// The result of a fetch attempt. Stays empty on success (the group lands in the
-/// track cache); a handler writes `rejected` to fail every joined fetch.
+/// Whether a fetch attempt was accepted, or why it was rejected.
 #[derive(Default)]
 pub(crate) struct FetchOutcome {
 	pub(crate) rejected: Option<Error>,
+	// An accept still refuses joined fetches the cached group cannot cover, without
+	// giving the request's demand watcher a rejection reason.
+	accepted: bool,
 }
 
 impl TrackState {
@@ -3443,7 +3444,7 @@ impl group::Request {
 		// the range went on the wire) fails rather than waits. Closing the channel says
 		// the same, but a handler tracking the joined demand keeps it open.
 		if let Ok(mut outcome) = self.result.write() {
-			outcome.rejected = Some(Error::NotFound);
+			outcome.accepted = true;
 		}
 		res
 	}
@@ -3626,10 +3627,11 @@ impl kio::Task for Fetching {
 			};
 		};
 
-		// A written rejection fails every joined fetch. The channel closing without
-		// one means the attempt was dropped unserved (its handlers went away).
+		// An answered attempt fails joined fetches the cache cannot cover. The channel
+		// closing without an answer means its handlers went away.
 		let err = match result.outcome.poll(waiter, |outcome| match &outcome.rejected {
 			Some(err) => Poll::Ready(err.clone()),
+			None if outcome.accepted => Poll::Ready(Error::NotFound),
 			None => Poll::Pending,
 		}) {
 			Poll::Ready(Ok(err)) => err,
@@ -10617,6 +10619,44 @@ mod test {
 		assert!(matches!(demand.poll_unused(&kio::Waiter::noop()), Poll::Ready(Ok(()))));
 		request.reject(Error::Cancel);
 		assert!(matches!(demand.used().now_or_never(), Some(Err(Error::Cancel))));
+	}
+
+	#[test]
+	fn accepted_group_request_demand_ends_cleanly() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let fetch = consumer.fetch_group(3, None);
+		let request = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		let demand = request.demand();
+		let group = request.accept(Info::timed()).unwrap();
+
+		assert!(!demand.is_used());
+		assert!(matches!(demand.used().now_or_never(), Some(Err(Error::Dropped))));
+		assert!(matches!(demand.unused().now_or_never(), Some(Err(Error::Dropped))));
+		assert!(matches!(demand.closed().now_or_never(), Some(Error::Dropped)));
+		assert!(
+			fetch.now_or_never().unwrap().is_ok(),
+			"the fetch still gets the accepted group"
+		);
+		group.finish().unwrap();
+	}
+
+	#[test]
+	fn rejected_group_request_demand_keeps_its_reason() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let fetch = consumer.fetch_group(3, None);
+		let request = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		let demand = request.demand();
+		request.reject(Error::NotFound);
+
+		assert!(!demand.is_used());
+		assert!(matches!(demand.used().now_or_never(), Some(Err(Error::NotFound))));
+		assert!(matches!(demand.unused().now_or_never(), Some(Err(Error::NotFound))));
+		assert!(matches!(demand.closed().now_or_never(), Some(Error::NotFound)));
+		assert!(matches!(fetch.now_or_never(), Some(Err(Error::NotFound))));
 	}
 
 	#[moq_net_sim::test]

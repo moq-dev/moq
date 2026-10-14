@@ -1659,33 +1659,26 @@ async fn group_request_demand_ends_when_the_fetcher_leaves() {
 	assert!(matches!(request.demand(), Err(MoqError::Closed)));
 }
 
-/// An accepted request's demand ends with the `NotFound` the accept leaves for joined fetches
-/// it can't cover, not `Closed`.
+/// An accepted request's demand closes cleanly while its fetch gets the group.
 #[tokio::test]
-async fn group_request_demand_fails_after_accept() {
+async fn group_request_demand_closes_after_accept() {
+	tokio::time::pause();
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("events".into(), None).unwrap();
 	let dynamic = track.dynamic().unwrap();
 	let consumer = broadcast.consume().unwrap();
 
 	let fetch = tokio::spawn(async move { consumer.fetch_group("events".into(), 5, None).await });
-	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_group())
-		.await
-		.expect("timed out waiting for group request")
-		.unwrap();
+	let request = dynamic.requested_group().await.unwrap();
 	let demand = request.demand().unwrap();
 	let group = request.accept().unwrap();
 	group.finish().unwrap();
 
-	let used = tokio::time::timeout(TIMEOUT, demand.used())
-		.await
-		.expect("timed out waiting for an accepted demand to end");
-	assert!(matches!(used, Err(MoqError::NotFound)), "got {used:?}");
-	tokio::time::timeout(TIMEOUT, fetch)
-		.await
-		.expect("timed out waiting for fetch")
-		.expect("fetch task panicked")
-		.unwrap();
+	for result in [demand.used().await, demand.unused().await] {
+		assert!(matches!(result, Err(MoqError::Closed)), "got {result:?}");
+	}
+	assert!(!demand.is_used());
+	fetch.await.expect("fetch task panicked").unwrap();
 }
 
 #[tokio::test]
