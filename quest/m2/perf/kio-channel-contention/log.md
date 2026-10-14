@@ -4,9 +4,9 @@
 
 kio exports an append-only log channel whose consumers read committed entries
 by cursor without taking a lock, and the hottest moq-net channels the
-[contended bench](/quest/m2/perf/kio-channel-contention/bench.md) names
+[epic](/quest/m2/perf/kio-channel-contention/README.md)'s baseline names
 (expected: `GroupState` frames, `TrackState` arrival order) move onto it.
-Lands with the contended bench and `just bench-lock` before and after; a
+Lands with the contended bench (`rs/kio/benches/contended.rs`) and `just bench-lock` before and after; a
 measured no-win abandons it.
 
 ## Plan
@@ -53,4 +53,3 @@ measured no-win abandons it.
 
 - [Replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md) - if per-worker replicas win, each channel's cross-core readers collapse to one flow-controlled stream per worker and this log is likely abandoned
 - [Cluster spike](/quest/m2/perf/kio-channel-contention/spike-cluster.md) - the same question with nothing shared
-- [Contended bench](/quest/m2/perf/kio-channel-contention/bench.md) - names which channels to move and gives the before numbers

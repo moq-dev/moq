@@ -1,0 +1,5 @@
+connections = 2001
+fanout = "chat"
+fps = 10
+frame_size = "200:400"
+group_size = 0

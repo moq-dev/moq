@@ -4,8 +4,9 @@
 
 A `Consumer` re-poll that opts into version tracking and finds nothing
 changed returns without taking the channel mutex, and parking a waiter no
-longer contends with readers of the value. Lands with the [contended bench](/quest/m2/perf/kio-channel-contention/bench.md)
-and `just bench-lock` before and after; a measured no-win abandons it.
+longer contends with readers of the value. Lands with the contended bench (`rs/kio/benches/contended.rs`) and
+`just bench-lock` before and after, against the
+[epic](/quest/m2/perf/kio-channel-contention/README.md)'s baseline; a measured no-win abandons it.
 
 ## Plan
 
@@ -32,6 +33,3 @@ and `just bench-lock` before and after; a measured no-win abandons it.
 - Every new atomic protocol gets a loom model in `rs/kio/src/loom.rs`.
 - Generic across every `T`, with no moq-net restructure.
 
-## Required
-
-- [Contended bench](/quest/m2/perf/kio-channel-contention/bench.md) - the before numbers and the bench this is measured on

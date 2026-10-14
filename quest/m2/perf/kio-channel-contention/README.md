@@ -33,6 +33,50 @@ pool's shared counters are not among the hot sites.
 `Shared::lock` (`rs/kio/src/shared.rs:47`) shows up too, but stays flat with
 the worker count.
 
+Baseline (2026-10-14), the before numbers the fix quests compare against.
+Measured on a 24-core Core Ultra 7 270K Plus shared with other jobs (load
+average 25 to 42), so rerun the baseline on the same host as any after.
+
+`cargo bench -p kio --bench contended` (`rs/kio/benches/contended.rs`), one
+producer and 4,096 consumers on one channel, ns per consumer:
+
+| workload | 1 thread | 4 threads | 16 threads |
+| --- | --- | --- | --- |
+| notify cycle (`Producer<u64>`) | 37 | 227 | 438 |
+| unchanged re-poll | 8.4 | 61 | 76 |
+| append log (`GroupState`-shaped) | 44 | 276 | 527 |
+
+Spreading the same consumers over more cores makes the whole cycle slower,
+not faster: each acquire that changes cores costs 50 to 500 ns.
+
+`just bench-lock`, mutex wait over worker CPU in the 5 s steady window, tokio
+workers (`chat` is `bench/workloads/chat.toml`, pinned at 10 messages/s):
+
+| shape | 1 worker | 4 workers | 16 workers |
+| --- | --- | --- | --- |
+| fanout | 0% | 1.2% (4 ms) | 9.1% (47 ms) |
+| chat | 0% | 5.6% (487 ms) | 30% (3,061 ms) |
+
+Chat saturates its one worker (1.0 core). Neither row is comparable with
+#5031's table, which used a different ramp and window.
+
+Contended channels at 16 workers, by share of mutex wait (`moq_net::model`):
+
+| channel | fanout | chat | callers |
+| --- | --- | --- | --- |
+| `track::TrackState` | 77% | 75% | `GroupExpiry::is_expired` read (32% of all wait in both), `Subscriber::poll_recv_group`, `poll_finished`, `poll_recv_datagram` |
+| `resume::Route` | 21% | 23% | `resume::Reader::sync` and `resume::Consumer::end` reads, `poll_changed` |
+| `group::GroupState` | 2.3% | 1.6% | frame reads, `drift_edge` |
+| `subscription::Subscription` | 0% | 0.6% | `GroupExpiry::is_expired` |
+
+Origin and broadcast state never appear. Every hot site is a read or re-poll
+of a per-track channel that all of a track's subscribers share, which is the
+[version counter](/quest/m2/perf/kio-channel-contention/version.md)'s target.
+`GroupState` is not contended here because both shapes send one-frame
+groups; a multi-frame shape is unmeasured, so the
+[append-only log](/quest/m2/perf/kio-channel-contention/log.md) should measure
+one before naming `GroupState` frames as its target.
+
 Decided (maintainer, 2026-10-07):
 
 - Decide the fix from the stacks. First run the
@@ -94,7 +138,6 @@ Decided (maintainer, 2026-10-14, per-thread follow-up):
 
 ## Required
 
-- [Contended bench](/quest/m2/perf/kio-channel-contention/bench.md) - a multi-threaded kio bench swept over threads and consumers, plus the contended channels named from `just bench-lock` stacks
 - [Version counter](/quest/m2/perf/kio-channel-contention/version.md) - an opted-in re-poll skips the mutex when nothing changed, and parking no longer contends with readers
 - [In-memory transport](/quest/m2/perf/kio-channel-contention/bridge.md) - a zero-copy, flow-controlled `poll::Session` pair in moq-net, with the test mock rebuilt on it
 - [Replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md) - measures per-worker data-plane replicas linked over the in-memory transport, announcements shared
