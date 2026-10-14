@@ -27,6 +27,7 @@ test:
     python3 sh/rs/select.test.py
     python3 sh/js/workspace.test.py
     python3 sh/rs/test-lints.test.py
+    python3 sh/gh/nightly.test.py
     sh/go/publish-wrapper.test.sh
     bash .claude/hooks/direnv.test.sh
     python3 sh/rs/uring.test.py
@@ -73,3 +74,7 @@ size-nightly output run:
 [positional-arguments]
 gst-formula *args:
     python3 sh/gh/gst-formula.py "$@"
+
+# Run related Nightly benchmarks in one build environment, reporting every failure.
+nightly group:
+    sh/gh/nightly.sh {{ quote(group) }}

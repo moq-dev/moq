@@ -57,5 +57,4 @@ Measure each change against the numbers above and record the result in its PR.
 - [Require platform gates](/quest/m0/ci/platform-queue.md) - activate the consolidated platform checks in the main and release rulesets after the workflow lands
 - [mbx on R2](/quest/m0/ci/mbx-r2.md) - Rust builds on every OS read an R2 cache that only `main` writes, escaping the 10 GB Actions cache
 - [Nix cache](/quest/m0/ci/nix-cache.md) - `nix.moq.dev` on R2 replaces Cachix for CI and releases
-- [Nightly finishes](/quest/m0/ci/nightly-split.md) - every Nightly step runs within its timeout
 - [FFI artifact reuse](/quest/m0/ci/ffi-reuse.md) - identical FFI release builds are built once and shared across the language packages
