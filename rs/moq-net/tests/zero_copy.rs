@@ -32,7 +32,7 @@ async fn frames_cross_without_a_copy() {
 		let (client, server) = memory::pair(config);
 		let client_config = Client::new()
 			.with_versions(version.into())
-			.with_publisher(&publisher.consume());
+			.with_publisher(publisher.consume());
 		let server_config = Server::new()
 			.with_versions(version.into())
 			.with_subscriber(subscriber.clone());

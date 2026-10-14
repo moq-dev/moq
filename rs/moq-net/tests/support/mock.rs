@@ -186,7 +186,11 @@ pub struct MockSendStream {
 
 impl MockSendStream {
 	/// Log the first byte, then stamp each accepted write with its arrival.
-	fn wrote(&mut self, first: Option<u8>, written: Poll<Result<usize, memory::Error>>) -> Poll<Result<usize, memory::Error>> {
+	fn wrote(
+		&mut self,
+		first: Option<u8>,
+		written: Poll<Result<usize, memory::Error>>,
+	) -> Poll<Result<usize, memory::Error>> {
 		if let Poll::Ready(Ok(size)) = written
 			&& size > 0
 		{
@@ -219,7 +223,11 @@ impl poll::SendStream for MockSendStream {
 	}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
-		if self.withhold_fin.as_ref().is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+		if self
+			.withhold_fin
+			.as_ref()
+			.is_some_and(|flag| flag.load(Ordering::Relaxed))
+		{
 			self.withheld = true;
 			return Ok(());
 		}
@@ -372,7 +380,11 @@ impl poll::RecvStream for MockRecvStream {
 		Poll::Ready(Ok(Some(chunk.len())))
 	}
 
-	fn poll_read_buf<B: BufMut>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<Option<usize>, Self::Error>> {
+	fn poll_read_buf<B: BufMut>(
+		&mut self,
+		cx: &mut Context<'_>,
+		buf: &mut B,
+	) -> Poll<Result<Option<usize>, Self::Error>> {
 		let max = buf.remaining_mut().min(64 * 1024);
 		let Some(chunk) = ready!(self.poll_read_chunk(cx, max))? else {
 			return Poll::Ready(Ok(None));
@@ -682,9 +694,9 @@ impl MockSession {
 	/// Deliver the held uni streams highest send order first, as a congested sender
 	/// would transmit them, and stop holding. Equal send orders keep their open order.
 	pub fn release_unis_by_priority(&self) {
-		self.side
-			.out
-			.release_unis(|held| held.sort_by_key(|(_, line)| std::cmp::Reverse(line.priority.load(Ordering::Relaxed))));
+		self.side.out.release_unis(|held| {
+			held.sort_by_key(|(_, line)| std::cmp::Reverse(line.priority.load(Ordering::Relaxed)))
+		});
 	}
 
 	/// Lose the held uni streams, as if each were reset before its header arrived, and

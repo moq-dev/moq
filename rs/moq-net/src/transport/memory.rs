@@ -71,7 +71,10 @@ pub fn pair(config: Config) -> (Session, Session) {
 	let conn = Arc::new(Conn {
 		close: Default::default(),
 		windows: Default::default(),
-		incoming: [Incoming::new(config.datagram_queue), Incoming::new(config.datagram_queue)],
+		incoming: [
+			Incoming::new(config.datagram_queue),
+			Incoming::new(config.datagram_queue),
+		],
 		config,
 	});
 
@@ -502,10 +505,12 @@ impl poll::SendStream for SendStream {
 			return Poll::Ready(Ok(()));
 		}
 		let waiter = self.park.hold(cx);
-		if let Poll::Ready(state) = self.state.poll(waiter, |state| match state.acked || state.stop.is_some() {
-			true => Poll::Ready(()),
-			false => Poll::Pending,
-		}) {
+		if let Poll::Ready(state) = self
+			.state
+			.poll(waiter, |state| match state.acked || state.stop.is_some() {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			}) {
 			return Poll::Ready(match state.stop {
 				Some(code) => Err(Error::Stopped(code)),
 				None => Ok(()),
@@ -632,10 +637,12 @@ impl poll::RecvStream for RecvStream {
 		}
 		// The FIN counts once it is written: QUIC's receipt, not the reader's.
 		let waiter = self.park.hold(cx);
-		if let Poll::Ready(state) = self.state.poll(waiter, |state| match state.fin || state.reset.is_some() {
-			true => Poll::Ready(()),
-			false => Poll::Pending,
-		}) {
+		if let Poll::Ready(state) = self
+			.state
+			.poll(waiter, |state| match state.fin || state.reset.is_some() {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			}) {
 			return Poll::Ready(match state.reset {
 				Some(code) => Err(Error::Reset(code)),
 				None => Ok(()),
@@ -751,7 +758,10 @@ mod tests {
 
 		let count = Arc::new(Count::default());
 		let waker = Waker::from(count.clone());
-		assert!(send.poll_write_buf(&mut Context::from_waker(&waker), &mut buf).is_pending());
+		assert!(
+			send.poll_write_buf(&mut Context::from_waker(&waker), &mut buf)
+				.is_pending()
+		);
 
 		// Reading frees the window and wakes the writer.
 		assert_eq!(text(read(&mut recv, 3)), "012");
@@ -936,7 +946,10 @@ mod tests {
 		drop(a);
 		assert!(b.poll_closed(&mut noop()).is_pending());
 		drop(clone);
-		assert!(matches!(ready(b.poll_closed(&mut noop())), Error::Session { code: 0, .. }));
+		assert!(matches!(
+			ready(b.poll_closed(&mut noop())),
+			Error::Session { code: 0, .. }
+		));
 	}
 
 	#[test]

@@ -96,7 +96,8 @@ impl Link {
 		let origin = |hop: u64| {
 			let mut config = origin::Config::new(Hop::new(hop).unwrap());
 			// Hold one round's groups, with room for the handover, and no more.
-			config.pool = cache::Pool::new(cache::Config::default().with_capacity((4 * streams * FRAMES * size) as u64));
+			config.pool =
+				cache::Pool::new(cache::Config::default().with_capacity((4 * streams * FRAMES * size) as u64));
 			let (producer, driver) = origin::Producer::new(config);
 			tokio::spawn(moq_net::time::run(driver));
 			producer
@@ -109,7 +110,7 @@ impl Link {
 		let (client, server) = memory::pair(config);
 		let client_config = Client::new()
 			.with_versions(version.into())
-			.with_publisher(&publisher.consume());
+			.with_publisher(publisher.consume());
 		let server_config = Server::new()
 			.with_versions(version.into())
 			.with_subscriber(subscriber.clone());
@@ -226,10 +227,13 @@ fn bench(c: &mut Criterion) {
 		for size in SIZES {
 			group.throughput(Throughput::Bytes((streams * FRAMES * size) as u64));
 			let mut link = None;
-			group.bench_function(BenchmarkId::from_parameter(format!("streams={streams}/size={size}")), |b| {
-				let link = link.get_or_insert_with(|| rt.block_on(Link::new(streams, size)));
-				b.iter_custom(|iters| rt.block_on(link.measure(iters)))
-			});
+			group.bench_function(
+				BenchmarkId::from_parameter(format!("streams={streams}/size={size}")),
+				|b| {
+					let link = link.get_or_insert_with(|| rt.block_on(Link::new(streams, size)));
+					b.iter_custom(|iters| rt.block_on(link.measure(iters)))
+				},
+			);
 		}
 	}
 	group.finish();
