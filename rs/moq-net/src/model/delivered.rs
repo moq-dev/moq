@@ -55,14 +55,11 @@ impl Delivered {
 		self.runs.insert(0, last);
 	}
 
-	/// The lowest sequence handed out above a gap: once it is past the reader's budget,
-	/// so is the gap, since group timestamps on a track never rewind.
-	pub fn above_gap(&self) -> Option<u64> {
-		let mut runs = self.runs.keys();
-		match runs.next()? {
-			0 => runs.next().copied(),
-			first => Some(*first),
-		}
+	/// Each sequence handed out right above a gap, lowest first: once one is past the
+	/// reader's budget, so is every gap below it, since group timestamps on a track never
+	/// rewind.
+	pub fn above_gaps(&self) -> impl DoubleEndedIterator<Item = u64> + '_ {
+		self.runs.keys().copied().filter(|first| *first != 0)
 	}
 
 	/// How many runs it holds: one per gap, plus the floor.
@@ -113,14 +110,14 @@ mod test {
 		for sequence in [3, 5, 6, 9, 12] {
 			delivered.insert(sequence);
 		}
-		assert_eq!(delivered.above_gap(), Some(3));
+		assert_eq!(delivered.above_gaps().collect::<Vec<_>>(), [3, 5, 9, 12]);
 		delivered.forget_below(0);
 		assert_eq!(delivered.runs(), 4);
 
 		// A floor at a run's start takes the run along.
 		delivered.forget_below(5);
 		assert_eq!(runs(&delivered), [(0, 6), (9, 9), (12, 12)]);
-		assert_eq!(delivered.above_gap(), Some(9));
+		assert_eq!(delivered.above_gaps().collect::<Vec<_>>(), [9, 12]);
 		assert!(delivered.contains(4), "below the floor counts as handed out");
 
 		// A floor inside a gap keeps the run above it.
@@ -128,6 +125,6 @@ mod test {
 		assert_eq!(runs(&delivered), [(0, 10), (12, 12)]);
 		delivered.forget_below(13);
 		assert_eq!(runs(&delivered), [(0, 12)]);
-		assert_eq!(delivered.above_gap(), None);
+		assert_eq!(delivered.above_gaps().next(), None);
 	}
 }

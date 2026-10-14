@@ -4274,10 +4274,15 @@ impl Subscriber {
 			self.delivered.forget_below(sequence);
 		}
 		self.delivered.insert(sequence);
-		while let Some(oldest) = self.delivered.above_gap()
-			&& self.is_past_budget(oldest)
-		{
-			self.delivered.forget_below(oldest);
+		// Newest first: a group followed by an empty one never falls past the budget, so
+		// the oldest alone could pin every gap above it.
+		let floor = self
+			.delivered
+			.above_gaps()
+			.rev()
+			.find(|above| self.is_past_budget(*above));
+		if let Some(floor) = floor {
+			self.delivered.forget_below(floor);
 		}
 	}
 
@@ -10792,5 +10797,33 @@ mod test {
 		write_group(&producer, 2998);
 		write_group(&producer, 2500);
 		assert_eq!(drain_groups(&mut subscriber), [2998]);
+	}
+
+	/// An empty group leaves the group below it unbounded, so it never falls past the
+	/// budget. Gaps above it are still forgotten once a group above them is past it.
+	#[test]
+	fn an_empty_group_does_not_pin_later_gaps() {
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(10)));
+		write_group(&producer, 0);
+		write_group(&producer, 2);
+		producer
+			.create_group(group::Info { sequence: 3 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		assert_eq!(drain_groups(&mut subscriber), [0, 2, 3]);
+		let mut most = 0;
+		for sequence in 5..3000u64 {
+			// Every third group never arrives.
+			if sequence % 3 == 1 {
+				continue;
+			}
+			write_group(&producer, sequence);
+			assert_eq!(drain_groups(&mut subscriber), [sequence]);
+			most = most.max(subscriber.delivered_runs());
+		}
+		// One more than the endless track: the gap at 1 waits for a group above it to fall past the budget.
+		assert_eq!(most, 6, "the floor and the gaps within the budget");
 	}
 }
