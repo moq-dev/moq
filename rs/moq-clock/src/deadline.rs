@@ -48,11 +48,24 @@ impl Deadlines {
 	///
 	/// When `now` is earlier than the queue's current instant.
 	pub fn advance(&self, now: Instant) {
+		self.advance_to(now, true);
+	}
+
+	/// Move to `now` from outside the owner's poll, as the simulator does, leaving
+	/// the owner registered.
+	#[cfg(feature = "sim")]
+	pub(crate) fn sync(&self, now: Instant) {
+		self.advance_to(now, false);
+	}
+
+	fn advance_to(&self, now: Instant, polling: bool) {
 		let due = {
 			let mut state = self.0.lock().unwrap();
 			assert!(now >= state.now, "time moved backwards");
 			state.now = now;
-			drop(state.owner.take());
+			if polling {
+				drop(state.owner.take());
+			}
 			let mut due = Vec::new();
 			while state.armed.first_key_value().is_some_and(|((at, _), _)| *at <= now) {
 				due.push(state.armed.pop_first().unwrap().1);

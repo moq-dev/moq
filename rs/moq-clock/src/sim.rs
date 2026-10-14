@@ -93,7 +93,7 @@ impl Runtime {
 		};
 		live.iter()
 			.filter_map(|queue| {
-				queue.advance(now);
+				queue.sync(now);
 				queue.next()
 			})
 			.min()
@@ -803,6 +803,30 @@ mod tests {
 			task.await.unwrap();
 			assert_eq!(crate::now(), target);
 		}
+	}
+
+	/// Keeping a queue in step leaves its parked owner registered, so a deadline
+	/// armed afterwards still wakes it.
+	#[crate::test]
+	async fn keeping_a_queue_in_step_leaves_its_owner_parked() {
+		struct Count(std::sync::atomic::AtomicUsize);
+		impl Wake for Count {
+			fn wake(self: Arc<Self>) {
+				self.0.fetch_add(1, Ordering::SeqCst);
+			}
+		}
+		let count = Arc::new(Count(Default::default()));
+		let owner = kio::Waiter::new(Waker::from(count.clone()));
+
+		let deadlines = Deadlines::new(crate::now());
+		attach(&deadlines);
+		deadlines.advance(crate::now());
+		deadlines.park(&owner);
+		crate::sleep(Duration::from_secs(1)).await;
+
+		let mut deadline = Deadline::new(&deadlines);
+		deadline.set(Some(crate::now() + Duration::from_secs(1)));
+		assert_eq!(count.0.load(Ordering::SeqCst), 1, "the parked owner was not woken");
 	}
 
 	/// The run holds an attached queue weakly and forgets it once its owner drops it.
