@@ -62,51 +62,61 @@ jobs:
             shell: ""
             perf: false
             cache: true
+            profile: ci
           - name: Go publisher runtime benchmark
             recipe: "go bench -benchtime=1x"
             shell: ""
             perf: false
             cache: true
+            profile: default
           - name: Audio grouping relay benchmark
             recipe: "bench-audio"
             shell: ""
             perf: false
             cache: true
+            profile: default
           - name: Relay lock-wait profile
             recipe: "bench-lock fanout-heavy 4"
             shell: ""
             perf: true
             cache: true
+            profile: default
           - name: Rust benchmarks
             recipe: "gh nightly rust"
             shell: ""
             perf: false
             cache: true
+            profile: default
           - name: JS benchmarks
             recipe: "gh nightly js"
             shell: ""
             perf: false
             cache: false
+            profile: default
           - name: BBB rendition alignment
             recipe: "pub check-bbb"
             shell: ""
             perf: false
             cache: false
+            profile: default
           - name: Audit
             recipe: "rs audit"
             shell: ""
             perf: false
             cache: false
+            profile: default
           - name: OBS
             recipe: "obs ci"
             shell: ".#obs"
             perf: false
             cache: true
+            profile: default
           - name: moq-c C fixtures
             recipe: "rs c-tests"
             shell: ""
             perf: false
             cache: true
+            profile: default
 
     steps:
       - name: Free disk space
@@ -142,7 +152,7 @@ jobs:
       - name: Run workload
         run: nix develop ${{ matrix.shell }} --command just ${{ matrix.recipe }}
         env:
-          NEXTEST_PROFILE: ci
+          NEXTEST_PROFILE: ${{ matrix.profile }}
 
   tests:
     name: Tests (${{ matrix.recipe }})
