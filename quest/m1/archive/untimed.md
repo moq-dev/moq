@@ -27,5 +27,7 @@ the format so a timestamp is optional, rather than keep refusing.
 - Consumers that need media time refuse an untimed track loudly:
   `moq-hls` can't derive segments from it, and the clock mapping does not
   apply.
-- Update the draft's Recording section
-  (`drafts/draft-lcurley-moq-hang.md`) in the same PR.
+- Mirror the change in the Hang format and its docs in the same PR:
+  `js/hang` (`timeline.ts`, the version in `catalog/archive.ts`), the
+  draft's Recording section (`drafts/draft-lcurley-moq-hang.md`), and
+  `doc/concept/hang.md`.
