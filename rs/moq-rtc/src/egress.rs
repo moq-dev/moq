@@ -259,8 +259,8 @@ impl Rendition {
 
 	/// Subscribe to the rendition, honoring its cross-broadcast reference (the catalog
 	/// `broadcast` field).
-	async fn subscribe(&self, source: &moq_mux::Source) -> Result<codec::Track> {
-		match self {
+	async fn subscribe(self, source: moq_mux::Source) -> Result<codec::Track> {
+		match &self {
 			Self::Audio(name, config) => {
 				let track = source
 					.subscribe_track(config.broadcast.as_ref(), hang::catalog::Reference::track(config, name))
@@ -306,6 +306,12 @@ struct Serving {
 	track: codec::Track,
 }
 
+/// A rendition whose subscription is still resolving.
+struct Subscribing {
+	name: String,
+	track: std::pin::Pin<Box<dyn Future<Output = Result<codec::Track>> + Send>>,
+}
+
 /// Serves one negotiated media line from the best enabled rendition in its codec.
 ///
 /// The pump re-picks on every catalog change. A better or newly enabled rendition is
@@ -335,6 +341,8 @@ struct Pump {
 impl Pump {
 	async fn run(mut self) {
 		let mut serving: Option<Serving> = None;
+		// The rendition to switch to, while its subscription resolves.
+		let mut subscribing: Option<Subscribing> = None;
 		// The rendition to switch to at its first keyframe.
 		let mut next: Option<Serving> = None;
 		// The current rendition's latest frame, withheld while a switch is pending.
@@ -348,26 +356,27 @@ impl Pump {
 				let pick = self.target.pick(&self.source, &self.catalog.borrow_and_update());
 				match pick {
 					None => {
-						if serving.is_some() || next.is_some() {
+						if serving.is_some() || next.is_some() || subscribing.is_some() {
 							tracing::debug!(mid = ?self.mid, "no enabled rendition; egress track idle");
 						}
 						serving = None;
 						next = None;
+						subscribing = None;
 					}
-					Some(pick) if serving.as_ref().is_some_and(|s| s.name == pick.name()) => next = None,
-					Some(pick) if next.as_ref().is_some_and(|s| s.name == pick.name()) => {}
-					Some(pick) => match pick.subscribe(&self.source).await {
-						Ok(track) => {
-							next = Some(Serving {
-								name: pick.name().to_string(),
-								track,
-							})
-						}
-						Err(err) => {
-							tracing::warn!(mid = ?self.mid, rendition = pick.name(), %err, "egress track subscribe failed");
-							next = None;
-						}
-					},
+					Some(pick) if serving.as_ref().is_some_and(|s| s.name == pick.name()) => {
+						next = None;
+						subscribing = None;
+					}
+					Some(pick)
+						if next.as_ref().is_some_and(|s| s.name == pick.name())
+							|| subscribing.as_ref().is_some_and(|s| s.name == pick.name()) => {}
+					Some(pick) => {
+						next = None;
+						subscribing = Some(Subscribing {
+							name: pick.name().to_string(),
+							track: Box::pin(pick.subscribe(self.source.clone())),
+						});
+					}
 				}
 			}
 
@@ -379,12 +388,21 @@ impl Pump {
 			}
 
 			// The catalog ended, so nothing new will be picked: serve what is left.
-			if !following && serving.is_none() && next.is_none() {
+			if !following && serving.is_none() && next.is_none() && subscribing.is_none() {
 				tracing::debug!(mid = ?self.mid, "egress track ended");
 				return;
 			}
 
 			tokio::select! {
+				// The session is gone, even if this line is idle.
+				_ = self.tx.closed() => return,
+				subscribed = subscribe(&mut subscribing) => {
+					let name = subscribing.take().expect("a subscription resolved").name;
+					match subscribed {
+						Ok(track) => next = Some(Serving { name, track }),
+						Err(err) => tracing::warn!(mid = ?self.mid, rendition = name, %err, "egress track subscribe failed"),
+					}
+				},
 				changed = self.catalog.changed(), if following => match changed {
 					Ok(()) => repick = true,
 					Err(_) => following = false,
@@ -449,6 +467,14 @@ impl Pump {
 			payload: frame.payload,
 		};
 		self.tx.send(request).await.is_ok()
+	}
+}
+
+/// The resolved subscription of `subscribing`. Pending forever without one.
+async fn subscribe(subscribing: &mut Option<Subscribing>) -> Result<codec::Track> {
+	match subscribing {
+		Some(subscribing) => subscribing.track.as_mut().await,
+		None => std::future::pending().await,
 	}
 }
 
@@ -792,6 +818,90 @@ mod tests {
 		high.write(frame(100, b"high-3", false)).unwrap();
 		assert_eq!(written(&mut writes).await.as_ref(), b"high-3");
 		idle(&mut writes).await;
+	}
+
+	/// A better rendition whose subscription never resolves doesn't stall the line, nor
+	/// stop it following the catalog.
+	#[tokio::test(start_paused = true)]
+	async fn a_pending_subscription_keeps_the_line_serving() {
+		let origin = produce_origin();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut low = vp8(&mut broadcast, &mut catalog, "low", 360);
+
+		let mut egress = EgressSource::new(moq_mux::Source::new(origin.consume(), broadcast.consume()))
+			.await
+			.unwrap();
+		let mut writes = egress.take_writes();
+		egress
+			.on_track(
+				Mid::from("0"),
+				Codec::Vp8,
+				Pt::new_with_value(96),
+				Frequency::NINETY_KHZ,
+			)
+			.unwrap();
+		low.write(frame(0, b"low-0", true)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"low-0");
+
+		// The better rendition lives in a broadcast whose request is never answered.
+		let _handler = origin.dynamic("missing", Default::default()).unwrap();
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.container = hang::catalog::Container::Legacy;
+		config.coded_width = Some(1920);
+		config.coded_height = Some(1080);
+		config.broadcast = Some(Relative::new("./missing").to_owned());
+		catalog
+			.modify()
+			.unwrap()
+			.video
+			.renditions
+			.insert("high".to_string(), config);
+		idle(&mut writes).await;
+		low.write(frame(33, b"low-1", false)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"low-1");
+
+		catalog
+			.modify()
+			.unwrap()
+			.video
+			.renditions
+			.get_mut("high")
+			.unwrap()
+			.enabled = false;
+		idle(&mut writes).await;
+		low.write(frame(66, b"low-2", false)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"low-2");
+	}
+
+	/// An idle line ends with its session rather than holding its subscription.
+	#[tokio::test(start_paused = true)]
+	async fn a_closed_session_ends_an_idle_line() {
+		let origin = produce_origin();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut low = vp8(&mut broadcast, &mut catalog, "low", 360);
+
+		let mut egress = EgressSource::new(moq_mux::Source::new(origin.consume(), broadcast.consume()))
+			.await
+			.unwrap();
+		let mut writes = egress.take_writes();
+		egress
+			.on_track(
+				Mid::from("0"),
+				Codec::Vp8,
+				Pt::new_with_value(96),
+				Frequency::NINETY_KHZ,
+			)
+			.unwrap();
+		low.write(frame(0, b"low-0", true)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"low-0");
+
+		drop(writes);
+		tokio::time::timeout(Duration::from_secs(1), low.demand().unused())
+			.await
+			.expect("the line unsubscribes")
+			.unwrap();
 	}
 
 	#[test]
