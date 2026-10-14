@@ -33,11 +33,11 @@ covering-set changes a watch causes, so a change costs the prefixes it covers
 or uncovers and stays flat over unrelated held watches
 (`js/net/bench/forward.ts`); an announce request stays open while anything at
 or beneath its prefix is watched, so a narrower watch rides it and never takes
-its routes over (nothing tells when a fresh request has caught up); a broader
-watch opens its own request, and a route reported by overlapping requests is
-inserted once, driven by the first reporter, so a hand-over to the broader
-request never retracts and restarts unless one epoch proves both saw one
-instance; closing an announce request ends its stream; a plain request
+its routes over (nothing tells when a fresh request has caught up); a narrower
+request already open when a broader watch arrives stays open until the broader
+request goes; a route reported by overlapping requests is inserted once,
+driven by the first reporter, and if it changes hands anyway (a request
+failing) it restarts unless one epoch proves both saw one instance; closing an announce request ends its stream; a plain request
 resolved through a discovered route watches its path until closed; a request
 closes 2s after nothing beneath it is watched (a fixed constant, since one-shot
 connections have no `linger`); a refused or reset request downgrades the
