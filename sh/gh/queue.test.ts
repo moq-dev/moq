@@ -1,0 +1,61 @@
+// Exercise the event policy: skipped PR contexts, one OS job per merge group,
+// and release PR coverage despite release having no merge queue.
+import assert from "node:assert/strict";
+
+const workflow = async (name: string) => Bun.YAML.parse(await Bun.file(`.github/workflows/${name}.yml`).text());
+const check = await workflow("check");
+const platform = await workflow("platform");
+const dart = await workflow("release-dart-ffi");
+const swift = await workflow("release-swift-lib");
+const nightly = await workflow("nightly");
+
+function condition(expression: string, event: string, base: string, selected = true): unknown {
+	const source = expression.replace(/^\$\{\{\s*|\s*\}\}$/g, "");
+	const github = { event_name: event, base_ref: base, event: { action: "opened" } };
+	const outputs = Object.fromEntries(
+		["needed", "rs", "swift", "cpp", "obs", "moq_sh"].map((key) => [key, String(selected)]),
+	);
+	return new Function("github", "needs", `return (${source});`)(github, { scope: { outputs } });
+}
+
+for (const config of [check, platform]) {
+	assert.ok(config.on.pull_request);
+	assert.equal(config.on.pull_request.paths, undefined, "required PR contexts must always report");
+	assert.ok(config.on.merge_group);
+}
+for (const job of [check.jobs.check, check.jobs.test, platform.jobs.scope]) {
+	assert.equal(condition(job.if, "pull_request", "main"), false);
+	assert.equal(condition(job.if, "pull_request", "release"), true);
+	assert.equal(condition(job.if, "merge_group", ""), true);
+}
+assert.deepEqual(Object.keys(platform.jobs).sort(), ["macos", "scope", "windows"]);
+for (const job of [platform.jobs.macos, platform.jobs.windows]) {
+	assert.equal(condition(job.if, "merge_group", "", false), false);
+	assert.equal(condition(job.if, "merge_group", "", true), true);
+}
+assert.equal((await workflow("obs")).jobs.release, undefined);
+assert.equal((await workflow("cpp")).jobs.msvc, undefined);
+assert.deepEqual((await workflow("moq-sh")).jobs.test.strategy.matrix.os, ["ubuntu-latest"]);
+assert.equal(await Bun.file(".github/workflows/swift.yml").exists(), false);
+assert.deepEqual(swift.on.pull_request.branches, ["release"]);
+assert.ok(nightly.jobs["release-swift-lib"]);
+assert.equal(nightly.jobs.platform.uses, "./.github/workflows/platform.yml");
+assert.deepEqual(platform.on.push.branches, ["release"]);
+const targets = dart.jobs.ffi.with.targets;
+assert.ok(
+	JSON.parse(condition(targets, "pull_request", "main") as string).every(
+		(target: string) => !/-apple-|-windows-/.test(target),
+	),
+);
+for (const [event, base] of [
+	["pull_request", "release"],
+	["schedule", ""],
+]) {
+	assert.ok(
+		JSON.parse(condition(targets, event, base) as string).some((target: string) => target.includes("-apple-")),
+	);
+	assert.ok(
+		JSON.parse(condition(targets, event, base) as string).some((target: string) => target.includes("-windows-")),
+	);
+}
+console.log("queue event policy passed");

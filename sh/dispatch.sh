@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Run `just check`, `just fix`, or `just ci check|test` over what the branch
-# changed.
+# Run `just check`, `just fix`, or `just ci check|test` over the branch diff.
+# `just ci platform` prints platform suite selection without running checks.
 #
-# Usage: sh/dispatch.sh check|fix|ci-check|ci-test [BASE|--all] [--query]
+# Usage: sh/dispatch.sh check|fix|ci-check|ci-test|ci-platform [BASE|--all] [--query]
 #
 # The branch diff is resolved once and matched against the impact map below,
 # the one place that says which paths put which module in scope. `check` is
@@ -10,7 +10,7 @@
 # so there is no second definition of "checked".
 set -euo pipefail
 
-usage="usage: sh/dispatch.sh check|fix|ci-check|ci-test [BASE|--all] [--query]"
+usage="usage: sh/dispatch.sh check|fix|ci-check|ci-test|ci-platform [BASE|--all] [--query]"
 action=${1:?$usage}
 base=${2:-}
 query=${3:-}
@@ -19,7 +19,7 @@ if [[ $# -gt 3 || (-n "$query" && "$query" != --query) ]]; then
     exit 2
 fi
 case "$action" in
-    check | fix | ci-check | ci-test) ;;
+    check | fix | ci-check | ci-test | ci-platform) ;;
     *)
         echo "$usage" >&2
         exit 2
@@ -99,6 +99,30 @@ declare -A scope=(
     [justfile]=''
     [gh]=''
 )
+
+# Query the same impact map without installing the platform toolchains. Rust
+# dependencies can break external consumers too, so include them in each build.
+if [[ "$action" == ci-platform ]]; then
+    needed=false
+    shared=$all
+    if grep -qE '^(\.cargo/|\.github/|[^/]+/justfile$|justfile$)' "$changed"; then
+        shared=1
+    fi
+    for module in rs swift cpp obs_compile moq_sh; do
+        enabled=false
+        pattern=${scope[$module]}
+        case "$module" in
+            swift | cpp | obs_compile) pattern+="|${scope[rs]}" ;;
+        esac
+        if [[ -n "$shared" ]] || grep -qE "$pattern" "$changed"; then
+            enabled=true
+            needed=true
+        fi
+        echo "$module=$enabled"
+    done
+    echo "needed=$needed"
+    exit
+fi
 
 # The tools each module needs. A module missing one is skipped locally, so an
 # incomplete toolchain checks less; under MOQ_STRICT (CI) it is an error, up

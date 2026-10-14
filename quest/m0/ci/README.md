@@ -37,8 +37,9 @@ compile-only warm can follow if the warm's runtime matters.
 
 Decisions (maintainer, 2026-10-13):
 
-- macOS and Windows run in the merge queue, not on every PR push. The fast
-  platform test suites move with them; the rest of Nightly stays nightly.
+- Main PRs rely on strict local validation; Check, Test, macOS and Windows
+  run in the merge queue. Release PRs retain these checks because release has
+  no queue. The fast platform test suites move too; the rest stays nightly.
 - Caches move to Cloudflare R2: mbx's S3 backend for Rust, and `nix.moq.dev`
   replacing Cachix for Nix. The infra lives in `infra/` beside apt and rpm,
   checked in where wrangler allows; one-time commands where it does not.
@@ -54,7 +55,7 @@ Measure each change against the numbers above and record the result in its PR.
 
 ## Required
 
-- [Platform in the merge queue](/quest/m0/ci/platform-queue.md) - macOS and Windows run once per merge in one job per OS, off the PR path
+- [Require platform gates](/quest/m0/ci/platform-queue.md) - activate the consolidated platform checks in the main and release rulesets after the workflow lands
 - [mbx on R2](/quest/m0/ci/mbx-r2.md) - Rust builds on every OS read an R2 cache that only `main` writes, escaping the 10 GB Actions cache
 - [Nix cache](/quest/m0/ci/nix-cache.md) - `nix.moq.dev` on R2 replaces Cachix for CI and releases
 - [Clippy in Test](/quest/m0/ci/clippy-test.md) - Test's clippy-driver compile denies warnings, so Check stops repeating the default Clippy pass

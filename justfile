@@ -78,7 +78,7 @@ check $BASE="":
 # CI runs `check` as two parallel jobs, since one runner doing both takes about
 # the sum of their times. Same dispatch, with MOQ_STRICT=1.
 
-# Run half of `check` for CI: JOB `check` lints and compiles, `test` runs the tests.
+# CI: JOB `check` lints and compiles, `test` runs tests, `platform` prints OS impact.
 ci $JOB $BASE="":
     sh/dispatch.sh "ci-$JOB" "$BASE"
 

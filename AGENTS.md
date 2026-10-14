@@ -92,6 +92,14 @@ just fix          # Auto-fix lint/formatting, same scope
 
 These diff the branch against its base and only run the affected packages.
 
+Main PRs report skipped Check, Test, and platform checks; the merge queue runs
+those gates on the combined change. Release has no queue, so release-targeting
+PRs still run them. Before pushing a completed change, commit it and run
+`MOQ_STRICT=1 just check` in the Nix dev shell against the current base on that
+final commit, plus the integration checks this file requires for its scope.
+`just check` includes the standard tests. Record the tested commit SHA, base,
+and results in the PR; validate again after changing the commit or base.
+
 Quests: when work mentions a quest, run `quest guide` and follow it.
 The `quest` binary comes from the kixelated/quest flake input and serves the quest skills; change them upstream and bump the input.
 

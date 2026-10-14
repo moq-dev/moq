@@ -85,14 +85,14 @@ tokio-features:
 
 # Runs the `#[cfg(windows)]` code past the compiler, which the Linux gate
 # skips; platform.yml runs it on a Windows runner, scoped like `check-changed`
-# so a one-crate PR compiles one crate on these slow runners too. Default
+# so the merge queue compiles only the affected crates. Default
 # features, since jemalloc doesn't build on MSVC.
 
 # Compile what the branch changed since BASE on a Windows host, or everything with `--all`.
 windows $BASE="":
     sh/rs/platform.sh "$BASE"
 
-# Test the platform-sensitive crates nightly on Windows, independent of the diff.
+# Test the platform-sensitive crates on Windows, independent of the diff.
 windows-test:
     just rs test -p moq-auth -p hang -p moq-tokio -p moq-sock
 
@@ -117,7 +117,7 @@ uring-check *args:
 macos $BASE="":
     sh/rs/platform.sh "$BASE"
 
-# Test the platform-sensitive crates nightly on macOS, independent of the diff.
+# Test the platform-sensitive crates on macOS, independent of the diff.
 macos-test:
     just rs test -p moq-auth -p hang -p moq-tokio -p moq-sock
     just rs test -p moq-sock --features fast-apple-datapath

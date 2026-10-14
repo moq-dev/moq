@@ -53,3 +53,7 @@ publish *args:
 [positional-arguments]
 publish-ffi *args:
     {{ quote(justfile_directory() / "sh/swift/publish-ffi.sh") }} "$@"
+
+# Check the FFI with the Apple simulator backends enabled.
+simulator:
+    sh/swift/simulator.sh

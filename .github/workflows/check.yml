@@ -27,9 +27,9 @@ jobs:
   # of the two rather than their sum.
   check:
     name: Check
-    # Skip the actual work on close/merge: this run exists only to cancel the
-    # superseded in-flight build via the concurrency group above.
-    if: github.event.action != 'closed'
+    # Main validates the combined merge group after local validation.
+    # Release has no queue, so its PRs keep the same gates.
+    if: github.event.action != 'closed' && (github.event_name == 'merge_group' || github.base_ref == 'release')
     runs-on: ubuntu-24.04-arm
     # Backstop a hang instead of holding the runner for the 6-hour default.
     timeout-minutes: 60
@@ -102,7 +102,7 @@ jobs:
 
   test:
     name: Test
-    if: github.event.action != 'closed'
+    if: github.event.action != 'closed' && (github.event_name == 'merge_group' || github.base_ref == 'release')
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
 

@@ -21,11 +21,8 @@ on:
     # are omitted so they don't spawn a skipped Alert run on every
     # push to every PR. `just gh check` enforces both halves of that.
     #
-    # Swift, OBS, and Platform are here despite also running on pull requests:
-    # Swift warms its own Rust cache on `main`, and OBS and Platform build every
-    # merge to `main` and `release`. Those push runs are nobody's check, so a break in them
-    # would otherwise go unseen. The cost is a skipped Alert run per pull
-    # request.
+    # Check and Platform also run for merge groups, and OBS and Platform can
+    # run on release pushes. Failures outside PRs need an explicit alert.
     workflows:
       - apt-repo
       - Cache
@@ -58,7 +55,6 @@ on:
       - Release Swift Lib
       - release-winget
       - rpm-repo
-      - Swift
       - TS
       - Video
     types:
