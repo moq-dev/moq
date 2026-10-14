@@ -34,6 +34,8 @@ class SelectionTest(unittest.TestCase):
                 package["scripts"] = {action: "fixture" for action in ("check", "test", "build")}
         self.write()
         (self.root / "test/tsconfig.json").write_text('{"exclude":["**/dist"]}')
+        (self.root / "sh").mkdir()
+        (self.root / "sh/dispatch.sh").write_text("    [js]='^(js/|doc/|demo/|test/)'\n")
 
     def write(self):
         (self.root / "package.json").write_text(json.dumps({"workspaces": list(self.packages)}))
@@ -47,7 +49,6 @@ class SelectionTest(unittest.TestCase):
 
     def test_dispatcher_passes_only_js_impact_paths(self):
         sh = self.root / "sh"
-        sh.mkdir()
         shutil.copy(selector.ROOT / "sh/dispatch.sh", sh / "dispatch.sh")
         changed = sh / "changed.sh"
         changed.write_text("#!/bin/sh\nprintf '%s\\n' js/auth/src/token.ts quest/unrelated.md\n")
@@ -114,6 +115,38 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(set(self.plan(["test/browser/src/index.ts"])["packages"]),
                          {"browser", "demo", "docs"})
 
+    def reader(self, source):
+        self.packages["js/reader"] = {"name": "reader"}
+        self.write()
+        (self.root / "js/reader/src").mkdir()
+        (self.root / "js/reader/src/x.test.ts").write_text(source)
+
+    def test_cross_tree_readers_without_manifest_edges(self):
+        (self.root / "doc/corpus").mkdir()
+        (self.root / "js/view/src").mkdir()
+        (self.root / "js/view/src/index.ts").touch()
+        self.reader('const corpus = join(import.meta.dir, "../../../doc/corpus");\n'
+                    'import { view } from "../../view/src/index";\n'
+                    'expect(resolve("../../..", "../../../missing")).toBe(`../${name}`);\n')
+        self.assertEqual(self.plan(None)["inputs"], ["doc/corpus", "js/view/src/index.ts"])
+        self.assertEqual(set(self.plan(["doc/corpus/case.json"])["packages"]), {"docs", "reader"})
+        self.assertEqual(set(self.plan(["js/view/src/index.ts"])["packages"]),
+                         {"@example/view", "docs", "reader"})
+        self.assertEqual(list(self.plan(["doc/index.md"])["packages"]), ["docs"])
+
+    def test_unowned_cross_tree_input_still_falls_back(self):
+        (self.root / "rs").mkdir()
+        (self.root / "rs/vectors.json").touch()
+        self.reader('Bun.file(new URL("../../../rs/vectors.json", import.meta.url));\n')
+        self.assertTrue(self.plan(["rs/vectors.json"])["all"])
+        with self.assertRaisesRegex(RuntimeError, "rs/vectors.json"):
+            self.calls(["js/reader/src/x.test.ts"])
+
+    def test_repository_inputs_reach_their_readers(self):
+        plan = selector.selection(selector.ROOT, ["doc/concept/audio-jitter/fixed.json"])
+        self.assertIn("@moq/hang", plan["packages"])
+        self.assertEqual(selector.unmapped(selector.ROOT, plan["inputs"]), [])
+
     def test_cycles_terminate(self):
         self.packages["js/core"]["dependencies"] = {"docs": "workspace:*"}
         self.write()
@@ -144,6 +177,17 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(self.configurations, [{"extends": "./tsconfig.json", "exclude":
                           ["**/dist", str(self.root / "test/browser")]}])
         self.assertEqual(list((self.root / "test").glob("tmp*.json")), [])
+
+    def test_biome_covers_unowned_js_files_in_fallback(self):
+        def biome(paths):
+            return next(c for c in self.calls(paths) if c[:3] == ["bun", "biome", "check"])
+        self.assertEqual(biome(["js/tsconfig.json"]), ["bun", "biome", "check", "js"])
+        self.assertEqual(biome(["js/core/src/index.ts"]),
+                         ["bun", "biome", "check", "js/core", "js/view", "js/common"])
+
+    def test_build_never_generates_wasm(self):
+        self.assertNotIn(["just", "js", "wasm"], self.calls(None, "build"))
+        self.assertIn(["just", "js", "wasm"], self.calls(None, "check"))
 
     def test_executor_builds_wasm_before_consumer_check(self):
         calls = self.calls(["demo/nested/src/index.ts"])

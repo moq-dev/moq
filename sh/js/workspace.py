@@ -14,6 +14,30 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 DEPENDENCIES = ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies")
+SOURCES = (".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs")
+# A string literal climbing out of its directory, like a test reading a shared corpus.
+RELATIVE = re.compile(r"""["'`]((?:\.\./)+[^"'`$?\s]*)""")
+
+
+def inputs(root, directory):
+    """Existing files and directories outside a workspace that its sources name by relative path."""
+    found = set()
+    for folder, children, files in os.walk(root / directory):
+        children[:] = [child for child in children if child not in ("node_modules", "dist")]
+        for file in files:
+            if not file.endswith(SOURCES):
+                continue
+            for literal in RELATIVE.findall((Path(folder) / file).read_text(errors="replace")):
+                path = os.path.relpath(os.path.normpath(os.path.join(folder, literal)), root)
+                # Skip paths in this workspace or its ancestors, outside the repository, and
+                # installed packages (the lockfile covers them). Requiring an existing file,
+                # including an extensionless import's, drops path-algebra test strings.
+                if (path in (".", "..") or path.startswith("../") or "node_modules" in path.split("/")
+                        or path == directory or path.startswith(directory + "/")
+                        or directory.startswith(path + "/")):
+                    continue
+                found.update(c for c in (path, *(path + e for e in SOURCES)) if (root / c).exists())
+    return found
 
 
 def selection(root, paths):
@@ -29,7 +53,8 @@ def selection(root, paths):
         name = package["name"]
         if name in packages:
             raise ValueError(f"duplicate workspace name: {name}")
-        packages[name] = {"directory": directory, "manifest": package}
+        packages[name] = {"directory": directory, "manifest": package,
+                          "inputs": inputs(root, directory)}
 
     selected = set()
     fallback = paths is None
@@ -40,6 +65,9 @@ def selection(root, paths):
             fallback = True
             break
         selected.add(max(owners, key=lambda owner: len(owner[1]))[0])
+        # Manifests miss a package reading another tree's files, so add those readers too.
+        selected |= {name for name, package in packages.items()
+                     if any(path == i or path.startswith(i + "/") for i in package["inputs"])}
 
     if fallback:
         selected = set(packages)
@@ -65,7 +93,15 @@ def selection(root, paths):
 
     return {"packages": {name: packages[name] for name in sorted(selected)},
             "workspaces": [p["directory"] for p in packages.values()],
+            "inputs": sorted(set().union(*(p["inputs"] for p in packages.values()))),
             "all": fallback, "wasm": "@moq/wasm" in dependencies}
+
+
+def unmapped(root, paths):
+    """Inputs the dispatcher's static JS impact map misses, so changing one would skip its readers."""
+    impact = re.search(r"^\s*\[js\]='([^']*)'", (root / "sh/dispatch.sh").read_text(), re.M)
+    # A directory input matches through the files under it.
+    return [path for path in paths if not any(re.search(impact.group(1), p) for p in (path, path + "/"))]
 
 
 def run(action, plan):
@@ -79,7 +115,7 @@ def run(action, plan):
     def command(*args, cwd=ROOT):
         subprocess.run(args, cwd=cwd, check=True)
 
-    if action != "test" and plan["wasm"]:
+    if action == "check" and plan["wasm"]:
         missing = [tool for tool in ("cargo", "wasm-bindgen") if not shutil.which(tool)]
         if missing:
             raise RuntimeError("selected JS consumers require missing tools: " + " ".join(missing))
@@ -96,11 +132,14 @@ def run(action, plan):
         scripts("test")
         return
     if action == "build":
-        if plan["wasm"]:
-            command("just", "js", "wasm")
+        # No build script reads the WASM bindings, and `just js wasm` builds them.
         scripts("build")
         return
 
+    missing = unmapped(ROOT, plan["inputs"])
+    if missing:
+        raise RuntimeError("add these cross-tree JS inputs to the js pattern in sh/dispatch.sh: "
+                           + " ".join(missing))
     command("python3", "sh/rs/stats-docs.py")
     # These inexpensive shared checks still protect every package's imports.
     result = subprocess.run(["grep", "-rn", "--include=*.ts", "--include=*.tsx",
@@ -129,8 +168,10 @@ def run(action, plan):
             command("bunx", "tsc", "--noEmit", "--project", name)
         finally:
             Path(name).unlink()
-    command("bun", "biome", "check", *[p["directory"] for p in packages.values()
-                                          if p["directory"].startswith("js/")], "js/common")
+    # The fallback covers files outside every workspace, like js/tsconfig.json.
+    command("bun", "biome", "check", *(["js"] if plan["all"] else
+                                       [p["directory"] for p in packages.values()
+                                        if p["directory"].startswith("js/")] + ["js/common"]))
     scripts("build")
     for name in ("@moq/watch", "@moq/publish"):
         if name in packages:
@@ -145,7 +186,7 @@ def main():
     paths = None if source == "--all" else Path(source).read_text().splitlines()
     plan = selection(ROOT, paths)
     if action == "plan":
-        print(json.dumps(plan))
+        print(json.dumps(plan, default=sorted))
     else:
         started = time.monotonic()
         run(action, plan)
