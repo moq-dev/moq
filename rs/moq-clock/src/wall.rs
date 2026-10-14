@@ -55,7 +55,7 @@ impl Add<Duration> for Wall {
 	/// Panics past 2554; see [`Wall::checked_add`].
 	fn add(self, duration: Duration) -> Self {
 		self.checked_add(duration)
-			.expect("overflow when adding duration to timestamp")
+			.expect("overflow when adding duration to wall time")
 	}
 }
 
@@ -65,7 +65,7 @@ impl Sub<Duration> for Wall {
 	/// Panics before 1970; see [`Wall::checked_sub`].
 	fn sub(self, duration: Duration) -> Self {
 		self.checked_sub(duration)
-			.expect("overflow when subtracting duration from timestamp")
+			.expect("overflow when subtracting duration from wall time")
 	}
 }
 
@@ -81,7 +81,7 @@ pub struct OutOfRange;
 
 impl fmt::Display for OutOfRange {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.write_str("system time out of the timestamp range")
+		f.write_str("system time out of the wall time range")
 	}
 }
 
