@@ -4,7 +4,7 @@ mod support;
 
 use std::time::Duration;
 
-use moq_net::{Hop, Timestamp, Version, group, track};
+use moq_net::{Hop, Timestamp, Version, announce, group, track};
 use support::harness::{MockConnectOptions, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -655,13 +655,14 @@ async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
 		group.write_frame(Timestamp::ZERO, b"catalog".as_ref()).unwrap();
 		group.finish().unwrap();
 
-		let upstream = || {
+		let upstream = |cost| {
 			let mut options = MockConnectOptions::new(version);
 			options.server_publish = Some(publisher.consume());
 			options.client_subscribe = Some(relay.clone());
+			options.cost = Some(cost);
 			connect_mock(options)
 		};
-		let mut upstream_session = upstream().await;
+		let mut upstream_session = upstream(2).await;
 
 		// Each session gets its own hop, so the relay serves it through its own front.
 		let session = |hop| {
@@ -685,10 +686,18 @@ async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
 			// the relay takes the track over from the new one.
 			let (mut holder, remote, pair) = session(3).await;
 			assert_eq!(holder.recv_group().await.unwrap().unwrap().sequence, 0, "{version}");
-			let replacement = upstream().await;
-			// An equal route changes no announcement to wait on. The paused clock only
-			// advances once every task is idle, so this lets its announce land.
-			moq_net_sim::sleep(Duration::from_millis(100)).await;
+			// The new connection is cheaper, so the relay reports its route taking over.
+			let mut follow = relay.consume().follow("bench").unwrap();
+			assert!(
+				matches!(follow.next().await, Some(announce::Event::Start(_))),
+				"{version}"
+			);
+			let replacement = upstream(1).await;
+			let event = follow.next().await;
+			assert!(
+				matches!(event, Some(announce::Event::Update(_) | announce::Event::Restart(_))),
+				"{version}: {event:?}"
+			);
 			upstream_session = replacement;
 			(holder, remote, pair)
 		} else {
