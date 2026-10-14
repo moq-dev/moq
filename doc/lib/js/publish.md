@@ -138,9 +138,11 @@ authorizes it. Audio waits for the page's first click or keypress, since
 browsers suspend Web Audio until then. Every input and output is a signal from
 [`@moq/signals`](/lib/js/signals). A failed encoder exposes the cause through
 `out.error` and disables only its rendition; siblings and the broadcast keep
-running. It does not retry on demand or bandwidth changes. Change its capture
-or encoder settings, or replace the encoder, to recover. Recovery keeps the
-catalog ID and uses a fresh `track` name.
+running. It does not retry on demand or bandwidth changes, and enable cycles
+that keep the same capture do not retry. A new capture source (such as the
+track a camera or microphone reopens on unmute), changed encoder settings, or
+a replacement encoder recovers it. Recovery keeps the catalog ID and uses a
+fresh `track` name.
 
 ## Strict CSP
 

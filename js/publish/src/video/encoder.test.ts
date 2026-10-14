@@ -1032,6 +1032,19 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 		expect(FakeVideoEncoder.instances).toHaveLength(instances);
 		expect(broadcast.net.peek()).toBe(net);
 
+		// The same capture handed back, as Video.Capture does when its source is released and restored,
+		// is a gap rather than a change.
+		const source = capture.in.source.peek();
+		capture.in.source.set(undefined as never);
+		capture.out.display.set(undefined as never);
+		await flush();
+		expect(encoder.out.error.peek()).toBe(failure);
+		capture.in.source.set(source);
+		capture.out.display.set({ width: 640, height: 480 });
+		await flush();
+		expect(encoder.out.error.peek()).toBe(failure);
+		expect(FakeVideoEncoder.instances).toHaveLength(instances);
+
 		// Only a changed caller input re-arms it, under a fresh track name.
 		encoder.config.set({ maxPixels: 320 * 240 });
 		await flush();

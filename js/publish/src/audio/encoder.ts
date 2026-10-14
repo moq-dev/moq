@@ -112,7 +112,7 @@ export type EncoderProps = Inputs<EncoderInput> & {
 };
 
 type EncoderOutput = {
-	/** The encoder failure, cleared only when capture or encoder settings change. */
+	/** The encoder failure, cleared only by a new capture source or format, or new encoder settings. */
 	error: Signal<Error | undefined>;
 	// The catalog config published for this rendition, `enabled: false` while disabled, or undefined
 	// while there's no capture.
@@ -221,6 +221,8 @@ export class Encoder {
 
 	// Each registration keeps its terminal failure even after the public error clears.
 	#failure = new Signal(new Once<Error>());
+	// The inputs #runRecovery last saw, carried across a gap in the source or format.
+	#seen?: { codec: Codec; capture?: Capture; source?: unknown; format?: Format };
 	#signals = new Effect();
 	#estimator = new Estimator();
 	// The estimator's jitter and delay, republished whenever either rises.
@@ -334,15 +336,25 @@ export class Encoder {
 	}
 
 	// Read only caller/capture inputs here, never bandwidth grants or the error itself.
-	// A fatal failure stays latched until these inputs change; demand is not a retry.
+	// A fatal failure stays latched until these inputs change; demand is not a retry. A gap in the
+	// source or format (a capture disabled or interrupted) keeps the last ones, so only a different
+	// capture re-arms it, such as the new track a re-enabled microphone opens.
 	#runRecovery(effect: Effect): void {
-		effect.get(this.codec);
+		const codec = effect.get(this.codec);
 		const capture = effect.get(this.in.capture);
-		if (capture) {
-			effect.get(capture.in.source);
-			effect.get(capture.out.format);
-		}
-		if (!this.#out.error.peek()) return;
+		const seen = this.#seen;
+		const same = seen?.capture === capture;
+		const source = (capture && effect.get(capture.in.source)) ?? (same ? seen?.source : undefined);
+		const format = (capture && effect.get(capture.out.format)) ?? (same ? seen?.format : undefined);
+		this.#seen = { codec, capture, source, format };
+		const changed =
+			!seen ||
+			!same ||
+			seen.codec !== codec ||
+			seen.source !== source ||
+			seen.format?.sampleRate !== format?.sampleRate ||
+			seen.format?.channelCount !== format?.channelCount;
+		if (!changed || !this.#out.error.peek()) return;
 		this.#out.error.set(undefined);
 		this.#floor = undefined;
 		this.#failure.set(new Once<Error>());
