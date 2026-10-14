@@ -234,7 +234,7 @@ pub struct Connection {
     receiving_ecn: bool,
     /// Number of packets authenticated
     total_authed_packets: u64,
-    /// Whether the last `poll_transmit` call yielded no data because there was
+    /// Whether the last `poll_transmit` call ran out of data because there was
     /// no outgoing application data.
     app_limited: bool,
 
@@ -990,7 +990,11 @@ impl Connection {
             );
         }
 
-        self.app_limited = buf.is_empty() && !send_blocked;
+        // Exhausting the packet spaces also catches a partial poll that drains the source.
+        // A full local send buffer prevents writes from reaching this queue; it is a sender
+        // limit, not evidence that the application has no more data.
+        self.app_limited =
+            space_idx == spaces.len() && !send_blocked && !self.streams.send_window_full();
         if self.app_limited {
             self.path
                 .congestion
