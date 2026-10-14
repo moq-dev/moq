@@ -30,4 +30,4 @@ Public API: none in moq until the crate split is re-decided. Wire: none.
 
 ## Required
 
-- [Hard-fork UniFFI](/quest/m1/uniffi-fork.md) - the repository the fix lands in
+- [Hard fork](/quest/m1/uniffi-fork.md) - the repository the fix lands in

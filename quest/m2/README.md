@@ -64,7 +64,6 @@ ranked just below deterministic TS legs, which it requires.
 - [fMP4 WebVTT ctim and vtta](/quest/m2/wvtt-ctim-vtta.md) - `wvtt` samples with `ctim` cue times or `vtta` comments import instead of failing
 - [TS passthrough export](/quest/m2/ts-passthrough-export.md) - `export ts --passthrough` writes the `m2ts` track back byte-identical (less late drops) on a fixed delay
 - [Bindings size profile](/quest/m2/ffi-size-profile.md) - a benchmark decides whether the moq-ffi builds ship at opt-level "s", which halves the dylib
-- [BoltFFI spike](/quest/m2/boltffi.md) - BoltFFI vs UniFFI on a moq-ffi slice in Python, Kotlin, and Swift: call cost, payloads, async, and output size
 - [Zero-copy byte returns](/quest/m2/ffi-bytes-return.md) - returned payloads reach the host without a copy, if the payload numbers justify it
 - [Namespaced external types](/quest/m2/uniffi-namespaces.md) - the UniFFI fork lets two crates export the same type name, reopening the per-layer crate split
 - [Go mirror delivery](/quest/m2/go-mirror-delivery.md) - the Go binding's staticlibs stop growing git history by ~210 MiB per release

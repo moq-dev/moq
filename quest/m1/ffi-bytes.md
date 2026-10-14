@@ -18,8 +18,7 @@ Decided with the maintainer on 2026-10-13:
   of UniFFI's lift and lower for `Vec<u8>`. Wire them all into nightly CI.
   Every wrapper, because each lowers bytes differently and a generator
   regression only shows in its own language. The
-  [poll spike](/quest/m1/ffi-poll.md), the
-  [BoltFFI spike](/quest/m2/boltffi.md), and the
+  [poll spike](/quest/m1/ffi-poll.md) and the
   [size profile](/quest/m2/ffi-size-profile.md) reuse this harness.
 - **Bulk copy in the fork's core.** UniFFI lifts and lowers `Vec<u8>`
   through the generic `Vec<T>` path, one byte at a time with a bounds check
@@ -46,4 +45,4 @@ type. Wire: none.
 
 ## Required
 
-- [Hard-fork UniFFI](/quest/m1/uniffi-fork.md) - the repository the core patch lands in
+- [Hard fork](/quest/m1/uniffi-fork.md) - the repository the core patch lands in
