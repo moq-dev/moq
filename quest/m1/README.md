@@ -124,6 +124,9 @@ above them.
 - [Generated C++ shape](/quest/m1/cpp-generated-shape.md) - `moq::Client` is the generated type itself and `moq::expected` is one type at every C++ standard
 - [OBS publishes under epochs](/quest/m1/obs-epoch.md) - each OBS Start Streaming is a fresh epoch, through the generated C++
 - [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
+- [Hard-fork UniFFI](/quest/m1/uniffi-fork.md) - one moq-dev/uniffi repo holds UniFFI's core and every generator, released under one tag and one pin
+- [Payload bytes](/quest/m1/ffi-bytes.md) - payloads cross the FFI in one bulk copy, proven by a nightly benchmark in every wrapper
+- [Poll-native async spike](/quest/m1/ffi-poll.md) - measure kio poll-native exports and foreign poll against `ffi::Task`, then pick the shape
 - [A failed rendition fails alone](/quest/m1/rendition-failure.md) - when one `@moq/publish` rendition's encoder fails, only that rendition ends, loudly, while the others and the broadcast keep running under the same epoch
 - [Rendition preference](/quest/m1/rendition-preference.md) - automatic selection by `<moq-watch>`, `Video::ranked`, and WHEP keeps the highest `preference` that decodes, so a compatibility transcode is only picked when nothing preferred decodes
 - [Rust PROBE on demand](/quest/m1/probe-on-demand-rs.md) - a Rust client opens PROBE only while a `recv_bandwidth()` consumer is held, and `Stats` drops `estimated_recv_rate`
