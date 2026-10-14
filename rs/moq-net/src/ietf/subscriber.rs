@@ -2998,11 +2998,6 @@ where
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		let mut group: ietf::GroupHeader = stream.decode().await?;
 
-		if group.sub_group_id != 0 {
-			tracing::warn!(sub_group_id = %group.sub_group_id, "subgroup ID is not supported, dropping stream");
-			return Err(Error::Unsupported);
-		}
-
 		// SUBSCRIBE_OK or PUBLISH can be reordered behind this stream. Hold only the
 		// subgroup header while waiting so the data stream cannot consume flow control.
 		let aliases = self.state.lock().aliases.consume();
@@ -3039,6 +3034,18 @@ where
 				Reading::open(&track.tail, Some(group.group_id), self.runtime.now()),
 			)
 		};
+
+		// The model has one subgroup per group, so another subgroup means subgroup 0 is not
+		// the whole group. Abort the track rather than deliver truncated groups.
+		if group.sub_group_id != 0 {
+			tracing::warn!(
+				group = group.group_id,
+				sub_group_id = group.sub_group_id,
+				"subgroups are not supported"
+			);
+			let _ = track.abort(Error::Unsupported);
+			return Err(Error::Unsupported);
+		}
 
 		// An omitted header priority inherits the track property, then wire 128.
 		// The track info carries that fallback after SUBSCRIBE_OK (draft-21 section 10.4).
@@ -3112,11 +3119,16 @@ where
 			Err(err @ (Error::Cancel | Error::Stream(crate::StreamError::Cancel))) => {
 				let _ = producer.abort(err);
 			}
+			// The peer's fault: a group we cannot carry, or one it sent malformed.
 			Err(
 				err @ (Error::Unsupported
 				| Error::Session(SessionError::ProtocolViolation)
-				| Error::Decode(DecodeError::MessageTooLarge { .. })),
+				| Error::Decode(_)
+				| Error::WrongSize
+				| Error::FrameTooLarge
+				| Error::GroupTooLarge),
 			) => {
+				tracing::warn!(%err, group = %producer.sequence, "refusing group");
 				let _ = producer.abort(err.clone());
 				// Return the refusal to the dispatcher so it sends STOP_SENDING.
 				return Err(err);
@@ -3128,6 +3140,7 @@ where
 				let _ = track.abort(Error::MalformedTrack);
 				return Err(Error::MalformedTrack);
 			}
+			// The peer reset the stream, the transport failed, or the track went away.
 			Err(err) => {
 				tracing::debug!(%err, group = %producer.sequence, "group error");
 				let _ = producer.abort(err);
@@ -3154,26 +3167,14 @@ where
 	/// Deliver one OBJECT_DATAGRAM as a datagram on its subscription's track: a
 	/// single-frame group at the Group ID.
 	///
-	/// A malformed datagram is the peer breaking the protocol, so it errors. One the model
-	/// cannot carry is dropped like any lost datagram: an Object past ID 0 (the group would
-	/// need a second object), a status other than Normal, or an alias that is not bound
-	/// yet (the draft lets us drop rather than buffer).
+	/// A malformed datagram is the peer breaking the protocol, so it errors. An Object past
+	/// ID 0 means its group holds more than the one object a datagram group carries, so it
+	/// aborts the track with [`Error::Unsupported`]. A status other than Normal, or an
+	/// alias that is not bound yet (the draft lets us drop rather than buffer), is dropped
+	/// like any lost datagram.
 	pub fn recv_datagram(&self, payload: bytes::Bytes) -> Result<(), Error> {
 		let (datagram, _) = ietf::ObjectDatagram::decode_slice(&payload, self.version)?;
 		let (alias, sequence) = (datagram.track_alias, datagram.group_id);
-
-		if datagram.object_id.unwrap_or(0) != 0 {
-			tracing::debug!(alias, sequence, "dropping a datagram past object 0");
-			return Ok(());
-		}
-		let payload = match datagram.body {
-			ietf::DatagramBody::Payload(payload) => payload,
-			ietf::DatagramBody::Status(0) => bytes::Bytes::new(),
-			ietf::DatagramBody::Status(status) => {
-				tracing::debug!(alias, sequence, status, "dropping a datagram status");
-				return Ok(());
-			}
-		};
 
 		let mut state = self.state.lock();
 		let request_id = match state.aliases.read().map.get(&alias) {
@@ -3186,10 +3187,28 @@ where
 		let Some(track) = state.subscribes.get_mut(&request_id) else {
 			return Ok(());
 		};
+		let timescale = track.timescale;
+		let Some(producer) = track.producer.as_mut() else {
+			return Ok(());
+		};
+
+		if datagram.object_id.unwrap_or(0) != 0 {
+			tracing::warn!(alias, sequence, "datagram groups past object 0 are not supported");
+			let _ = producer.clone().abort(Error::Unsupported);
+			return Ok(());
+		}
+		let payload = match datagram.body {
+			ietf::DatagramBody::Payload(payload) => payload,
+			ietf::DatagramBody::Status(0) => bytes::Bytes::new(),
+			ietf::DatagramBody::Status(status) => {
+				tracing::debug!(alias, sequence, status, "dropping a datagram status");
+				return Ok(());
+			}
+		};
 
 		// Like a subgroup object: a track that declared no timescale is untimed. One on a
 		// timed track without a Timestamp is refused by the model and dropped below.
-		let timestamp = match (track.timescale, &datagram.properties) {
+		let timestamp = match (timescale, &datagram.properties) {
 			(Some(timescale), Some(properties)) => {
 				let mut properties = Decoder::new(properties, self.version.into());
 				ietf::decode_object_time(&mut properties, timescale, self.version)?
@@ -3197,9 +3216,6 @@ where
 			_ => None,
 		};
 
-		let Some(producer) = track.producer.as_mut() else {
-			return Ok(());
-		};
 		if let Err(err) = producer.insert_datagram(sequence, timestamp, payload) {
 			tracing::debug!(%err, alias, sequence, "dropping datagram");
 		}
@@ -5181,8 +5197,8 @@ mod tests {
 		);
 	}
 
-	/// An OBJECT_DATAGRAM at object 0 is a datagram group at its Group ID; anything the model
-	/// cannot carry as one is dropped, and a malformed one is the peer's violation.
+	/// An OBJECT_DATAGRAM at object 0 is a datagram group at its Group ID; a status the model
+	/// cannot carry is dropped, and a malformed one is the peer's violation.
 	#[moq_net_sim::test]
 	async fn an_object_datagram_is_a_datagram_group() {
 		use crate::coding::Encode as _;
@@ -5222,10 +5238,7 @@ mod tests {
 		};
 		let payload = |bytes: &'static [u8]| ietf::DatagramBody::Payload(bytes::Bytes::from_static(bytes));
 
-		// Dropped: a second object in the group, an unbound alias, and a status.
-		subscriber
-			.recv_datagram(datagram(7, 4, Some(1), payload(b"no")))
-			.unwrap();
+		// Dropped: an unbound alias and a status.
 		subscriber.recv_datagram(datagram(8, 4, None, payload(b"no"))).unwrap();
 		subscriber
 			.recv_datagram(datagram(7, 4, None, ietf::DatagramBody::Status(END_OF_TRACK)))
@@ -5246,6 +5259,37 @@ mod tests {
 		// A status datagram cannot end the group.
 		let malformed = bytes::Bytes::from_static(&[0x22, 0x07, 0x04, 0x00]);
 		assert!(is_protocol_violation(&subscriber.recv_datagram(malformed).unwrap_err()));
+	}
+
+	/// A datagram past object 0 means its group holds more than the one object a datagram
+	/// group carries, so the track aborts rather than deliver object 0 as the whole group.
+	#[moq_net_sim::test]
+	async fn a_datagram_past_object_zero_aborts_the_track() {
+		use crate::coding::Encode as _;
+
+		let subscriber = subscriber_with_tracks(&[(RequestId(11), "cam", "audio")]);
+		subscriber.register_alias(RequestId(11), 7).unwrap();
+		let mut consumer = subscriber.state.lock().subscribes[&RequestId(11)]
+			.producer
+			.as_ref()
+			.unwrap()
+			.subscribe(None);
+
+		let datagram = ietf::ObjectDatagram {
+			track_alias: 7,
+			group_id: 4,
+			object_id: Some(1),
+			publisher_priority: None,
+			end_of_group: true,
+			properties: None,
+			body: ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"no")),
+		}
+		.encode_bytes(Version::Draft19)
+		.unwrap();
+		subscriber.recv_datagram(datagram).unwrap();
+
+		let result = futures::FutureExt::now_or_never(consumer.recv_group()).and_then(Result::err);
+		assert!(matches!(result, Some(Error::Unsupported)), "{result:?}");
 	}
 
 	/// A datagram that lands before SUBSCRIBE_OK binds its alias is dropped, not held for the
@@ -8296,6 +8340,21 @@ mod stitch_tests {
 			self
 		}
 
+		/// Run the next scripted stream through `recv_group` and the dispatcher's handling of
+		/// its result, asserting that stream alone was refused with STOP_SENDING.
+		async fn dispatch_refused(&self) {
+			let mut stream = self.stream().await;
+			let res = self.subscriber.clone().recv_group(&mut stream).await;
+			let detail = format!("{res:?}");
+			super::super::session::stop_on_error(&mut stream, res).expect("the session survives");
+			assert_eq!(
+				self.session.log.stops().len(),
+				1,
+				"the stream was not refused: {detail}"
+			);
+			assert!(self.session.log.closes().is_empty());
+		}
+
 		/// A reader over the next scripted stream, standing in for one the peer opened.
 		async fn stream(&self) -> Reader<<ScriptedSession as crate::transport::poll::Session>::RecvStream, Version> {
 			let mut session = self.session.clone();
@@ -8472,9 +8531,10 @@ mod stitch_tests {
 		}
 	}
 
-	/// A subgroup 1 stream costs only itself: the track's subgroup 0 stream still arrives.
+	/// The model has one subgroup per group, so a subgroup 1 stream means subgroup 0 is not
+	/// the whole group. The track aborts rather than deliver subgroup 0 as if it were.
 	#[moq_net_sim::test]
-	async fn a_non_zero_subgroup_leaves_the_track_flowing() {
+	async fn a_non_zero_subgroup_aborts_the_track() {
 		let mut refused = Vec::new();
 		ietf::GroupHeader {
 			track_alias: ALIAS,
@@ -8490,20 +8550,80 @@ mod stitch_tests {
 		.encode(&mut crate::coding::Encoder::new(&mut refused, VERSION.into()), VERSION)
 		.unwrap();
 
-		let h = Harness::new(Fill::Done, vec![refused, tail_stream(SEQUENCE, 0, &[b"ok"])]);
+		let h = Harness::new(Fill::Done, vec![refused]);
 		let mut consumer = h.track.subscribe(None);
+		h.dispatch_refused().await;
+		assert_eq!(h.session.log.stops(), vec![crate::ietf::error::INTERNAL_ERROR]);
+		let result = futures::FutureExt::now_or_never(consumer.recv_group()).and_then(Result::err);
+		assert!(matches!(result, Some(Error::Unsupported)), "{result:?}");
+	}
 
-		let mut stream = h.stream().await;
-		let result = h.subscriber.clone().recv_group(&mut stream).await;
-		assert!(matches!(result, Err(Error::Unsupported)), "{result:?}");
+	/// A subgroup stream for `sequence` without extension headers, starting at object 0: the
+	/// header, then `varints`, then `payload` verbatim.
+	fn raw_stream(sequence: u64, varints: &[u64], payload: &[u8]) -> Vec<u8> {
+		let mut buf = Vec::new();
+		ietf::GroupHeader {
+			track_alias: ALIAS,
+			group_id: sequence,
+			sub_group_id: 0,
+			publisher_priority: 0,
+			flags: ietf::GroupFlags {
+				first_object: true,
+				..Default::default()
+			},
+		}
+		.encode(&mut crate::coding::Encoder::new(&mut buf, VERSION.into()), VERSION)
+		.unwrap();
+		let mut encoder = crate::coding::Encoder::new(&mut buf, VERSION.into());
+		for value in varints {
+			encoder.varint(*value).unwrap();
+		}
+		buf.extend_from_slice(payload);
+		buf
+	}
 
+	/// A truncated property inside a later object's extension block is a malformed group.
+	#[moq_net_sim::test]
+	async fn a_malformed_extension_block_is_refused() {
+		// Delta 0, then a 1-byte extension block holding half of a 2-byte varint.
+		let mut stream = tail_stream(SEQUENCE, 0, &[b"ok"]);
+		stream.extend_from_slice(&[0, 1, 0x40]);
+		let h = Harness::new(Fill::Done, vec![stream]);
+		h.dispatch_refused().await;
+	}
+
+	/// A FIN before the declared payload ends.
+	#[moq_net_sim::test]
+	async fn a_payload_cut_short_is_refused() {
+		let h = Harness::with_timescale(Fill::Done, vec![raw_stream(SEQUENCE, &[0, 4], &[1, 2])], None);
+		h.dispatch_refused().await;
+	}
+
+	/// A declared object size past what a group may hold.
+	#[moq_net_sim::test]
+	async fn an_oversized_frame_is_refused() {
+		let size = crate::group::MAX_CACHE_BYTES + 1;
+		let h = Harness::with_timescale(Fill::Done, vec![raw_stream(SEQUENCE, &[0, size], &[])], None);
+		h.dispatch_refused().await;
+	}
+
+	/// More objects than a group may hold.
+	#[moq_net_sim::test]
+	async fn an_oversized_group_is_refused() {
+		// Each empty object is its delta, a zero size, and the Normal status.
+		let objects = vec![0u64; 3 * (crate::group::MAX_GROUP_FRAMES + 1)];
+		let h = Harness::with_timescale(Fill::Done, vec![raw_stream(SEQUENCE, &objects, &[])], None);
+		h.dispatch_refused().await;
+	}
+
+	/// A second stream for a group the track already holds.
+	#[moq_net_sim::test]
+	async fn a_second_stream_for_a_group_is_refused() {
+		let whole = raw_stream(SEQUENCE, &[0, 1], &[42]);
+		let h = Harness::with_timescale(Fill::Done, vec![whole.clone(), whole], None);
 		let mut stream = h.stream().await;
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-		let (sequence, frames) = read_group(&mut consumer).await;
-		assert_eq!(sequence, SEQUENCE);
-		assert_eq!(frames.len(), 1);
-		assert_eq!(frames[0].1, b"ok");
-		assert!(h.session.log.closes().is_empty());
+		h.dispatch_refused().await;
 	}
 
 	#[moq_net_sim::test]

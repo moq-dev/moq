@@ -1108,7 +1108,7 @@ where
 }
 
 /// Stop a refused data stream, propagating a session-scoped error to session teardown.
-fn stop_on_error<R: crate::transport::poll::RecvStream>(
+pub(super) fn stop_on_error<R: crate::transport::poll::RecvStream>(
 	reader: &mut Reader<R, Version>,
 	res: Result<(), Error>,
 ) -> Result<(), Error> {
@@ -2372,7 +2372,7 @@ mod tests {
 	/// The bytes a publisher writes at the head of a group's unidirectional stream. Built
 	/// with the crate's own encoder so the framing can't drift from the decoder the
 	/// dispatch loop runs.
-	async fn subgroup_header(version: Version, track_alias: u64, sub_group_id: u64) -> Vec<u8> {
+	async fn subgroup_header(version: Version, track_alias: u64) -> Vec<u8> {
 		let log = crate::lite::test_transport::Log::default();
 		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
 
@@ -2380,12 +2380,9 @@ mod tests {
 			.encode(&ietf::GroupHeader {
 				track_alias,
 				group_id: 0,
-				sub_group_id,
+				sub_group_id: 0,
 				publisher_priority: 128,
-				flags: ietf::GroupFlags {
-					has_subgroup: sub_group_id != 0,
-					..Default::default()
-				},
+				flags: ietf::GroupFlags::default(),
 			})
 			.await
 			.unwrap();
@@ -2472,8 +2469,7 @@ mod tests {
 	/// A late group must reach the dispatch loop and stop with CANCELLED.
 	#[moq_net_sim::test]
 	async fn a_group_for_a_retired_alias_is_stopped_with_cancelled() {
-		let (log, result) =
-			dispatch_uni(Version::Draft19, subgroup_header(Version::Draft19, 7, 0).await, Some(7)).await;
+		let (log, result) = dispatch_uni(Version::Draft19, subgroup_header(Version::Draft19, 7).await, Some(7)).await;
 
 		assert_eq!(
 			log.stops(),
@@ -2492,7 +2488,7 @@ mod tests {
 	/// before reading them deadlocks the connection.
 	#[moq_net_sim::test]
 	async fn a_silent_stream_does_not_hold_up_the_next() {
-		let header = subgroup_header(Version::Draft19, 7, 0).await;
+		let header = subgroup_header(Version::Draft19, 7).await;
 		let session =
 			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![Vec::new(), header]);
 		let (log, result) = drive_unis(Version::Draft19, session, None, Some(7)).await;
@@ -2597,16 +2593,6 @@ mod tests {
 		.0
 	}
 
-	/// A non-zero subgroup is refused on its own stream, never by closing the session.
-	#[moq_net_sim::test]
-	async fn a_non_zero_subgroup_is_stopped_without_closing_the_session() {
-		let (log, result) = dispatch_uni(Version::Draft19, subgroup_header(Version::Draft19, 7, 1).await, None).await;
-
-		assert_eq!(log.stops(), vec![crate::ietf::error::INTERNAL_ERROR]);
-		assert!(result.is_none(), "one refused subgroup ended the session: {result:?}");
-		assert_eq!(log.closes(), vec![], "one refused subgroup may not close the session");
-	}
-
 	/// A stream type encoded for `version`, followed by a few bytes of body.
 	fn uni_stream(version: Version, kind: u64) -> Vec<u8> {
 		let mut buf = Vec::new();
@@ -2657,7 +2643,7 @@ mod tests {
 
 		let mut session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![
 			uni_stream(VERSION, PADDING),
-			subgroup_header(VERSION, 7, 0).await,
+			subgroup_header(VERSION, 7).await,
 			setup,
 		]);
 		let accepted = accept_setup(&mut session, VERSION).await.expect("accept the SETUP");

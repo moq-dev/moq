@@ -31,7 +31,7 @@ subset drops. What a peer actually observes against this implementation:
 - **Strict SETUP and parameters.** Repeated unknown `SETUP` options, GREASE included, are accepted if well-formed; a repeated known option is rejected. On draft 17 and later, a `GROUP_ORDER` other than Ascending (1) or Descending (2) closes the session. Message parameters follow the negotiated draft's lists: drafts 14 and 15 ignore an unknown or misplaced parameter, draft 16 ignores one defined only for another message but closes the session on an unknown one, and draft 17 and later close it on both.
 - **One `SETUP` credential**, forwarded to the [auth server](/bin/relay/auth#the-contract) unverified. A second `SETUP` token closes the session. We advertise no token cache, so an alias reference in `SETUP` closes it with `PROTOCOL_VIOLATION`, one on a request with `UNKNOWN_AUTH_TOKEN_ALIAS`, and a registration on a request with `AUTH_TOKEN_CACHE_OVERFLOW`. A token attached to an individual request is otherwise decoded and grants nothing, and a request repeating one is refused with `MALFORMED_AUTH_TOKEN`. `SUBSCRIBE_TRACKS` is refused unread, so its token is not decoded. On draft 17 and later, the negotiated [MoQ Auth extension](/concept/moq-lite#authorization) accepts additional session tokens in band.
 - **Refused, not fatal.** A legal request this stack does not serve is rejected on its own and the session stays up: `FORWARD=0`, range filters, `TRACK_STATUS` to a JavaScript publisher, `SUBSCRIBE_TRACKS`, and the fetch forms above. On draft 19 and later, and in Rust on drafts 14 through 16, a subscription update may change only priority; any other update ends that subscription.
-- **Datagrams** are a single normal object at object 0, forwarded without renumbering. Anything else is dropped, and a malformed one closes the session. Rust and JavaScript both carry them on every draft.
+- **Datagrams** are a single normal object at object 0, forwarded without renumbering. A status is dropped, one past object 0 aborts its track in Rust (JavaScript drops it), and a malformed one closes the session. Rust and JavaScript both carry them on every draft.
 - **Priority.** Higher is served first. The IETF default of 128 is this stack's 127, and a track that never sets one is 127.
 - **Size.** An object extension block larger than 64 KiB ends that subgroup stream. The session stays up. This cap is ours, not the draft's.
 
@@ -52,7 +52,7 @@ See [Encryption](/concept/hang#encryption).
 
 ### Deliberate deviations
 
-These four answers differ from the draft on purpose. They are the
+These five answers differ from the draft on purpose. They are the
 product's model, not bugs, and the relay does not change them.
 
 - **One publisher per path.** A broadcast path names one piece of content, so a
@@ -67,6 +67,12 @@ product's model, not bugs, and the relay does not change them.
   it. The model keeps a payload and a timestamp, and
   [leaves other per-object metadata out](/concept/moq-lite#what-moq-lite-leaves-out),
   so a property it does not understand stops at the session that delivered it.
+- **One subgroup per group.** A group arrives as subgroup 0, or as one datagram
+  at object 0. In Rust, a subgroup other than 0, or a datagram past object 0,
+  aborts the track rather than deliver groups missing part of themselves;
+  JavaScript drops that stream or datagram. The model keeps
+  priority per track, not per group, so a subgroup's or datagram's publisher
+  priority is replaced by the track's.
 - **`SUBSCRIBE_OK` before an old source answers.** moq-lite 01 through 04 have
   no track stream, so the relay cannot learn from that source whether the track
   exists before answering. A moq-transport subscriber gets `SUBSCRIBE_OK`
