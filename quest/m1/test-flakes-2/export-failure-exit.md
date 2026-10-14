@@ -22,9 +22,12 @@ the child exits, so a slow but completed exit fails there. That 10 s is the
 property (no lingering) and must stay bounded. It starts after both `spawn()`
 calls return, just before the AV1 write, so it excludes the parent's spawn
 but still covers each child's own startup and relay connection, the import,
-the export's catalog read, and its exit.
+the export's catalog read, and its exit. Cleanup then closes the import's
+stdin and waits on it with the same 30 s guard, which fails with the same
+"moq never exited" message.
 
-Reproduce under load first and record which bound fired. Find what in that
+Reproduce under load first and record which bound fired, and for "moq never
+exited" which process. Find what in that
 interval is slow under load and fix it, or move the check to a deterministic
 in-process test if the process boundary isn't what it proves. Never widen a
 timeout or add a retry.
