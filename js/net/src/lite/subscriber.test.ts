@@ -1597,3 +1597,19 @@ test.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])(
 		subscriber.close();
 	},
 );
+
+test("a cancelled queued PROBE open sends no request and releases its slot", async () => {
+	const { quic, streams, opened } = fakeSession([0]);
+	const signal = new Signal<ProbeStats>({});
+	const subscriber = new Subscriber(quic, Version.DRAFT_03, HopSchema.parse(1n), signal);
+	const abort = new AbortController();
+	const probing = subscriber.runProbe(abort.signal);
+	await opened(0);
+	abort.abort();
+	await probing;
+	expect(streams[0].written).toEqual([]);
+	streams[0].release();
+	await streams[0].finished;
+	expect(streams[0].written).toEqual([]);
+	subscriber.close();
+});
