@@ -94,17 +94,6 @@ jobs:
           SCOPE: ${{ github.event_name == 'push' && '--all' || '' }}
         run: just rs windows "$SCOPE"
 
-      # TEMPORARY (reverted before merge): run the Windows tests on this PR.
-      - name: Install nextest
-        uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
-        with:
-          tool: nextest@0.9.146
-      - name: Test
-        shell: bash
-        run: just rs test -p moq-auth -p hang -p moq-tokio -p moq-sock --no-fail-fast
-        env:
-          NEXTEST_PROFILE: ci
-
   macos:
     name: macOS
     if: github.event.action != 'closed'
