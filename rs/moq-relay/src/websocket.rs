@@ -1,3 +1,4 @@
+use anyhow::Context as _;
 use futures::{Sink, Stream};
 use qmux::ws::tungstenite;
 use std::{
@@ -136,8 +137,30 @@ struct SessionInputs {
 /// completes: listing it earlier would answer 202 for a push this handler
 /// cannot service until SETUP. `pending` carries what to register with, or
 /// `None` for a session that is served but not listed.
+///
+/// A panic ends only this session, as an error.
 #[tracing::instrument("ws", err, skip_all, fields(id = session.id, remote = %session.remote, session = %session.session))]
 async fn handle_socket<T>(
+	socket: T,
+	session: SessionInputs,
+	lease: auth::Lease,
+	pending: Option<(crate::session::Registry, moq_auth::Request)>,
+) -> anyhow::Result<()>
+where
+	T: futures::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
+		+ futures::Sink<tungstenite::Message, Error = tungstenite::Error>
+		+ Send
+		+ Unpin
+		+ 'static,
+{
+	// Boxed: debug builds copy the session's large future through each wrapper's
+	// stack frame, which overflows a test thread.
+	moq_tokio::panic::isolate(Box::pin(serve_socket(socket, session, lease, pending)))
+		.await
+		.context("connection panicked")?
+}
+
+async fn serve_socket<T>(
 	socket: T,
 	session: SessionInputs,
 	lease: auth::Lease,

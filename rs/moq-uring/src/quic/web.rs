@@ -133,21 +133,26 @@ impl Request {
 	/// take the CONNECT request.
 	///
 	/// Everything the session later spawns runs on the worker already driving
-	/// `conn`. There is no timeout here; a peer that stalls mid-handshake is
-	/// bounded by the connection's idle timeout.
-	pub async fn accept(conn: Connection) -> Result<Self, Error> {
+	/// `conn`. No deadline here: a caller bounding the handshake, say by
+	/// [`Info::deadline`](super::handshake::Info::deadline), drops this
+	/// future, which closes the connection with an HTTP/3 error, even if it
+	/// was never polled.
+	pub fn accept(conn: Connection) -> impl Future<Output = Result<Self, Error>> {
 		// The endpoint and driver retain this connection after the future is
-		// dropped. Own its close before the first await; the returned Request
-		// takes over that duty once the handshake succeeds.
+		// dropped. Own its close before returning, not at the first poll, so a
+		// deadline that has already passed cannot drop the future unguarded.
+		// The returned Request takes over that duty once the handshake succeeds.
 		let mut guard = Guard::new(conn.clone());
-		match Self::handshake(conn).await {
-			Ok(request) => {
-				guard.disarm();
-				Ok(request)
-			}
-			Err(err) => {
-				guard.close(&err.to_string());
-				Err(err)
+		async move {
+			match Self::handshake(conn).await {
+				Ok(request) => {
+					guard.disarm();
+					Ok(request)
+				}
+				Err(err) => {
+					guard.close(&err.to_string());
+					Err(err)
+				}
 			}
 		}
 	}

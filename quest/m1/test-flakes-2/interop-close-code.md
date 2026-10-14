@@ -1,52 +1,46 @@
-# [S] Interop close-code test sees the refusal it expects
+# [S] Adopt reliable WebTransport refusal delivery
 
 ## Goal
 
-The Interop browser close-code test (`test/interop/clients/js/close.ts`)
-reliably reports a refused session as `unauthorized`, never as
-"Connection lost", fixed at its cause.
+MoQ uses a published `web-transport-moq` release containing the acknowledged
+close fix, and the Interop browser close-code test reliably reports a refused
+session as `unauthorized`, never as "Connection lost".
 
 ## Plan
 
-Seen 2026-10-10 on #5158's first Interop run (`refused session`: "Connection
-lost" instead of "unauthorized"); it passed on rerun and the PR didn't touch
-that code. Planned under this questline's cause-first rules (decided
-2026-10-10): find whether the refusal's close code is lost on the wire (a
-close frame racing the connection teardown, as in the qmux close-flush work)
-or the client reads the connection's state before the close arrives. Fix
-that at its source, with a regression that fails without it. No retry and no
-accepting either message.
+The cause is established in [moq-dev/noq#40](https://github.com/moq-dev/noq/pull/40):
+the adapter started its 100 ms force-close grace before the reliable CLOSE
+capsule was acknowledged. An auth-response barrier and UDP fault gate paired
+Chromium netlog with relay logs: refusal packets were still dropped when the
+server sent APPLICATION CONNECTION_CLOSE, and raw `WebTransport.closed`
+rejected without a local JavaScript close. The earlier HTTP/3 stream-lifetime
+and client `sessionCause` fixes were already present.
 
-Investigation (2026-10-10): five independent Chromium refusals through an
-isolated relay all resolved `WebTransport.closed` with code 2 and reason
-`unauthorized`. The browser logged the same remote session error during SETUP.
-The full Rust/Python/Go/C++/JS/C/GStreamer interop matrices for catalog warmup
-and captions also passed the existing exact refusal assertion. No failing
-observation was retried or accepted as an alternate result.
+The source fix waits for reliable capsule delivery before the existing
+teardown grace and cancels when the connection ends. Its delivery regression
+fails without the fix; its cancellation regression bounds the close task's
+lifetime. Source formatting, Clippy, docs, 535 tests, and publish dry-run
+passed. Full `just test interop --all` passed with an adapter-only temporary
+patch, including Chromium's exact code 2 and `unauthorized`. That patch was
+removed; no unpublished dependency belongs in this adoption.
 
-The harness reads the raw WebTransport close result rather than the client
-library's error translation. A mocked-clock regression now proves one client
-failure: when a SETUP operation rejects with `source: "session"`, the existing
-100 ms reset-only fallback closes locally before a delayed authoritative
-session close arrives. The draft reuses `sessionCause` to await that guaranteed
-session close first. A remote unauthorized code survives a one-second mocked
-delay; the regression fails without the change. Stream-only failures retain
-the existing cleanup behavior, with no timeout increase or retry.
+- Once the release condition clears, update the compatible published adapter
+  requirement and lockfile on `main`. The current requirement is 2.0.4.
+- Run strict `just check` and `just test interop --all` on the committed pin,
+  preserving the exact refusal assertion and the source regression. Do not
+  retry for green, increase the grace, or accept alternate errors.
+- Recommend a `release` backport after main lands. That branch pins the
+  1.3.5 adapter, so verify its exposure and use a compatible 1.3.x source
+  backport/release if needed; never move the published line to 2.x as a fix.
+  Split any required source-release condition before starting its pin PR.
 
-This does not establish that the historical Chromium `Connection lost`
-observation had the same cause. The server HTTP/3 control-stream lifetime is
-still another candidate. Preserve this quest until a failing browser trace
-paired with relay logs establishes that cause and its regression.
+Public API: none expected. Wire: existing CLOSE capsule framing and codes
+are unchanged; refusal delivery is corrected.
 
-Seen again 2026-10-11 on #5310's Interop run
-[38121507310](https://github.com/moq-dev/moq/actions/runs/38121507310), whose
-`interop-failure` artifact keeps the run directory and browser traces. The
-relay log pins the refusal at admission, before the relay answered SETUP:
-connection 64 closed with "the auth server refused the session"
-(07:50:07.583), through `Connection::run`'s reject path, and the harness
-reported "Connection lost" by 07:50:07.79. Pair this relay log with the
-artifact's browser trace to tell whether the close capsule raced the
-server's HTTP/3 control stream or connection teardown. #5310's next push
-passed the same check.
+## Required
 
-Public API: none expected. Wire: none expected.
+- [WebTransport publishes the close fix](/quest/m1/test-flakes-2/interop-close-release.md) - a compatible stable adapter release contains the acknowledged-close fix
+
+## Related
+
+- [Source fix](https://github.com/moq-dev/noq/pull/40) - deterministic delivery and cancellation regressions, plus the paired browser/relay evidence

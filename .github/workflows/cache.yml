@@ -117,14 +117,22 @@ jobs:
       # Both halves, so the saved cache carries the lint artifacts (clippy rmeta)
       # and the test artifacts (codegen + linked test binaries). They share
       # little, and a PR usually needs both.
+      #
+      # `continue-on-error` because the action saves only from a successful
+      # job, and the artifacts are worth saving whatever a lint or test on
+      # `main` says: a formatting slip or one flaky test otherwise left every
+      # pull request restoring a store days stale. The pull request gates are
+      # what report those failures.
       - name: Check
         if: matrix.rust
+        continue-on-error: true
         run: nix develop --command just ci check --all
         env:
           MOQ_STRICT: 1
 
       - name: Test
         if: ${{ matrix.rust && !cancelled() }}
+        continue-on-error: true
         run: nix develop --command just ci test --all
         env:
           MOQ_STRICT: 1

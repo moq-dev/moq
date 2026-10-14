@@ -21,7 +21,8 @@ codecs, relay propagation, and publisher clamps. The
 `moq-auth` and `js/auth`; reuse their admitted caps here.
 
 Update the AUTH grant in `drafts/draft-lcurley-moq-lite.md` and run
-`just drafts check`. Rates ride only the wip lite version's grant. Leave the
+`just drafts check`. Rates target the next unpublished lite version after finalized lite-07,
+not lite-07 or its old wip identifier. Leave the
 negotiated IETF AUTH extension and `drafts/draft-lcurley-moq-auth.md`
 unchanged: extending cap reporting to IETF is outside this quest. Keeping
 that boundary avoids expanding the agreed lite-only wire change.
@@ -31,7 +32,7 @@ target never exceeds the cap minus overhead; a raised cap lets it climb back.
 
 Public API: the in-band grant types in `rs/moq-net` and `js/net` gain the two
 rates, and the publishers gain a clamp. Wire: the AUTH grant gains optional
-rates, on the wip lite version only.
+rates, on the next unpublished lite version after lite-07 only.
 
 ## Required
 

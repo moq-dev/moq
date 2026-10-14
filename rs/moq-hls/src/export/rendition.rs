@@ -1,12 +1,13 @@
 //! One rendition: playlists from its view of the broadcast's segments, resolved against its own
 //! timeline, and segments fetched on demand.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::task::Poll;
 use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
-use hang::catalog::{Archive, AudioConfig, Clock, VideoConfig};
+use hang::catalog::{Archive, AudioConfig, Clock, Reference, VideoConfig};
 use moq_mux::container::fmp4::Muxer;
 use moq_mux::timeline::Entry;
 use sha2::{Digest, Sha256};
@@ -230,7 +231,7 @@ fn normalize_audio(config: &AudioConfig) -> AudioConfig {
 /// A single HLS rendition: master-playlist metadata, its view of the broadcast timeline (which
 /// renders its media playlist), and on-demand segment fetching.
 pub struct Rendition {
-	/// Rendition name (the catalog track name; also its URL path component).
+	/// The rendition's catalog ID, also its URL path component.
 	pub name: String,
 	/// Whether this rendition is video or audio.
 	pub kind: Kind,
@@ -240,6 +241,10 @@ pub struct Rendition {
 	/// The latest catalog framerate (video only), refreshed in place by [`refresh`](Self::refresh):
 	/// the muxer's fallback sample cadence and the DASH `frameRate`.
 	framerate: RwLock<Option<f64>>,
+	/// Whether the catalog currently enables the rendition, refreshed in place by
+	/// [`refresh`](Self::refresh). A disabled rendition keeps its window and media playlist but
+	/// is left out of the master playlist and the DASH manifest.
+	enabled: AtomicBool,
 	/// Coded width, for the master playlist `RESOLUTION` (video only).
 	pub width: Option<u32>,
 	/// Coded height, for the master playlist `RESOLUTION` (video only).
@@ -301,15 +306,24 @@ impl Rendition {
 		self.bitrate().unwrap_or(default_bandwidth(self.kind))
 	}
 
-	/// Take the advertised bitrate and framerate from a catalog update that
-	/// [`matches`](Self::matches_video) this rendition (audio passes no framerate).
+	/// Take the advertised bitrate, framerate, and `enabled` flag from a catalog update that
+	/// [`matches`](Self::matches_video) this rendition (audio passes no framerate). Returns whether
+	/// the rendition was enabled or disabled, which changes what the master playlist lists.
 	///
 	/// The publisher's estimator republishes the catalog whenever its measured bitrate moves, so
 	/// this is the common update by far: rebuilding the rendition for it would reset the playlist
-	/// window, the cached init segment, and `EXT-X-MEDIA-SEQUENCE` several times a minute.
-	pub(crate) fn refresh(&self, bitrate: Option<u64>, framerate: Option<f64>) {
+	/// window, the cached init segment, and `EXT-X-MEDIA-SEQUENCE` several times a minute. A
+	/// disable keeps all three too, so a rendition that re-enables resumes where it was.
+	pub(crate) fn refresh(&self, bitrate: Option<u64>, framerate: Option<f64>, enabled: bool) -> bool {
 		*self.bitrate.write().expect("bitrate lock poisoned") = bitrate;
 		*self.framerate.write().expect("framerate lock poisoned") = framerate;
+		self.enabled.swap(enabled, Ordering::Relaxed) != enabled
+	}
+
+	/// Whether the catalog enables this rendition, so the master playlist and DASH manifest
+	/// list it. The media playlist serves either way.
+	pub(crate) fn is_enabled(&self) -> bool {
+		self.enabled.load(Ordering::Relaxed)
 	}
 
 	/// The latest catalog bitrate, preserving `None` for muxer-specific fallback behavior.
@@ -339,6 +353,7 @@ impl Rendition {
 			kind: Kind::Video,
 			bitrate: RwLock::new(config.bitrate),
 			framerate: RwLock::new(config.framerate),
+			enabled: AtomicBool::new(config.enabled),
 			width: config.coded_width,
 			height: config.coded_height,
 			codec: config.codec.to_string(),
@@ -369,6 +384,7 @@ impl Rendition {
 			kind: Kind::Audio,
 			bitrate: RwLock::new(config.bitrate),
 			framerate: RwLock::new(None),
+			enabled: AtomicBool::new(config.enabled),
 			width: None,
 			height: None,
 			codec: config.codec.to_string(),
@@ -390,14 +406,15 @@ impl Rendition {
 	///
 	/// A rendition the catalog indexes no timeline for resolves nothing but the reference's rows.
 	pub(crate) fn watch(&self, history: bool) {
-		let Some(_) = self.section.timelines.get(&self.name) else {
+		let track = self.track_name();
+		if !self.section.timelines.contains_key(track) {
 			self.spans.end();
 			return;
-		};
+		}
 		let watcher = tokio::spawn(watch_spans(
 			self.catalog.clone(),
 			self.section.clone(),
-			self.name.clone(),
+			track.to_string(),
 			self.spans.clone(),
 			history,
 		));
@@ -466,8 +483,8 @@ impl Rendition {
 	}
 
 	/// Whether this rendition is `reference`.
-	fn is(&self, reference: &(Kind, String)) -> bool {
-		reference.0 == self.kind && reference.1 == self.name
+	fn is(&self, reference: &segments::ReferenceKey) -> bool {
+		reference.0 == self.kind && reference.1 == self.name && reference.2 == self.track_name()
 	}
 
 	/// Remove source timeline records in `range` from this rendition's window.
@@ -822,7 +839,7 @@ impl Rendition {
 		let Ok(broadcast) = std::task::ready!(binding.poll_broadcast(waiter)) else {
 			return Poll::Ready(None);
 		};
-		let track = broadcast.track(&self.name).ok();
+		let track = broadcast.track(self.track_name()).ok();
 		let subscription = moq_net::track::Subscription::default().with_max_delay(FEED_MAX_DELAY);
 		Poll::Ready(track.map(|track| track.subscribe(subscription).into_inner()))
 	}
@@ -839,8 +856,16 @@ impl Rendition {
 		binding: &moq_mux::Binding,
 	) -> Option<(moq_net::broadcast::Consumer, moq_net::track::Consumer)> {
 		let broadcast = binding.broadcast().await.ok()?;
-		let track = broadcast.track(&self.name).ok()?;
+		let track = broadcast.track(self.track_name()).ok()?;
 		Some((broadcast, track))
+	}
+
+	/// The media track's name in its broadcast, which can differ from the rendition's ID.
+	fn track_name(&self) -> &str {
+		match &self.config {
+			Config::Video(config) => config.track(&self.name),
+			Config::Audio(config) => config.track(&self.name),
+		}
 	}
 
 	/// The rendition's CMAF init segment, built on first request and cached.
@@ -900,7 +925,7 @@ impl Rendition {
 		let bytes = match muxer.init()? {
 			Some(bytes) => bytes,
 			None => {
-				let reference = (self.kind, self.name.clone());
+				let reference = (self.kind, self.name.clone(), self.track_name().to_string());
 				let latest = self.spans.latest_keyframe_group();
 				let Some(sequence) = latest.or_else(|| self.live.latest_keyframe_group(&reference)) else {
 					return Ok(None);

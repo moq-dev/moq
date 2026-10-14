@@ -15,10 +15,12 @@ import { Effect } from "@moq/signals";
  *
  * The root `clock` is advertised from the first snapshot: every js/publish timestamp is
  * `performance.now()` in microseconds, so PTS zero is `performance.timeOrigin`. The mapping is fixed
- * for the page, so a system-clock adjustment never retimes the broadcast.
+ * for the page, so a system-clock adjustment never retimes the broadcast. A page whose wall clock
+ * reads before 2020 has not set it yet (a device booted before it synced), so it omits `clock`
+ * rather than advertise a false one.
  */
 export class CatalogProducer {
-	#value: Catalog.Root = { clock: pageClock() };
+	#value: Catalog.Root = pageRoot();
 	#outputs = new Set<Json.Snapshot.Producer<Catalog.Root>>();
 	#lastEstimate: number | undefined;
 	#pending: Effect | undefined;
@@ -27,6 +29,8 @@ export class CatalogProducer {
 	mutate(fn: (catalog: Catalog.Root) => void): void {
 		const value = structuredClone(this.#value);
 		fn(value);
+		// Every consumer refuses a catalog that fails this, so refuse the edit before it reaches one.
+		Catalog.checkRenditions(value);
 		for (const field of ["jitter", "delay"] as const) {
 			const previous = advertised(this.#value, field);
 			for (const [section, next] of Object.entries(advertised(value, field))) {
@@ -123,8 +127,10 @@ function advertised(
 	};
 }
 
-// The wall time of `performance.now() === 0`, the zero every js/publish timestamp counts from.
-function pageClock(): Catalog.Clock {
+// An empty root advertising the wall time of `performance.now() === 0`, the zero every js/publish
+// timestamp counts from, when the page's wall clock is set.
+function pageRoot(): Catalog.Root {
 	const wall = Math.round((performance.timeOrigin - Catalog.MOQ_EPOCH_UNIX_MILLIS) * 1000);
-	return { wall: Catalog.u53(wall), timescale: 1_000_000 };
+	if (wall < 0) return {};
+	return { clock: { wall: Catalog.u53(wall), timescale: 1_000_000 } };
 }

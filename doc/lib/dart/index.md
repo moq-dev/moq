@@ -17,8 +17,10 @@ Import `package:moq/media.dart` with a prefix for catalogs, encoded-media import
 container consumers. `TrackProducer.audio` / `.video` take a broadcast, an init record,
 and a `Named` or `Requested` target. `CatalogProducer(broadcast: ...)` owns catalog properties
 and sections; it holds the broadcast weakly and fails after the broadcast closes.
-`CatalogConsumer.subscribe`, `ContainerConsumer.subscribe`, and `ContainerGroupConsumer.fetch`
-construct the read side from a broadcast.
+`media.CatalogConsumer.subscribe`, `media.TrackConsumer.subscribe`, and `media.GroupConsumer.fetch`
+construct the read side from a broadcast. For arrival-order reads, decode each group from
+`TrackConsumer.recvGroup()` with `media.GroupConsumer(group: ..., container: ...)`; frames
+carry container media time as they land.
 
 ```bash
 dart pub add moq        # or: flutter pub add moq
@@ -70,7 +72,7 @@ await moq.close();
 The rest of the [shared feature list](/lib/#what-every-binding-can-do) maps
 one to one; the API reference has the names.
 
-- **No codecs.** Unlike the other bindings, the published Dart binaries carry no encoder or decoder. Already-encoded frames flow through `media.TrackProducer` and `media.ContainerConsumer`; encoding is up to `package:camera`, platform channels, or another codec package.
+- **No codecs.** Unlike the other bindings, the published Dart binaries carry no encoder or decoder. Already-encoded frames flow through `media.TrackProducer` and `media.TrackConsumer`; encoding is up to `package:camera`, platform channels, or another codec package.
 - **Names.** Types drop the `Moq` prefix (`Session`, `BroadcastProducer`) as aliases, so the generated names still work. `Container`, `Route`, and the exceptions keep it, since Flutter owns those names. `dynamic` is reserved, so the origin method is `dynamic_`.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or at a segment cadence to align with video.
 - **Live encoder timing.** After writing a frame you encoded yourself, call `flush(timestampUs: ...)` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.

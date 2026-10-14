@@ -1,3 +1,5 @@
+import { Timescale } from "../time.ts";
+
 export const Version = {
 	DRAFT_01: 0xff0dad01,
 	DRAFT_02: 0xff0dad02,
@@ -406,5 +408,25 @@ export function hasLargest(version: Version): boolean {
 			return false;
 		default:
 			return true;
+	}
+}
+
+/**
+ * The timescale the wire carries for a track with `timescale`, or `undefined` when its frames
+ * and datagrams carry no timestamp. Lite-05 and lite-06 always carry one, so an untimed track
+ * declares milliseconds there and its payloads carry their send times instead.
+ */
+export function wireTimescale(version: Version, timescale: Timescale | null | undefined): Timescale | undefined {
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+			return undefined;
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return timescale ?? Timescale.MILLI;
+		default:
+			return timescale ?? undefined;
 	}
 }

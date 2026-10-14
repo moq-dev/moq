@@ -4,7 +4,7 @@ import { Effect, type Getter, type GetterInit, getter, Once, Signal } from "@moq
 
 import type { Format } from "./format";
 import { Jitter } from "./jitter";
-import type { BufferedRanges, Frame } from "./types";
+import type { BufferedRanges, ReceivedFrame } from "./types";
 
 /** Options for constructing a {@link Consumer}; the obsolete `maxAge` prop is refused. */
 export interface ConsumerProps {
@@ -21,9 +21,30 @@ export interface ConsumerProps {
 	maxDelay?: GetterInit<Time.Milli>;
 }
 
+/** One item of a {@link Consumer.next} read, in delivery order. Mirrors Rust's `container::Read`. */
+export type Read =
+	/** A media frame from `group`. Only group equality means anything: numbers may skip. */
+	| { kind: "frame"; group: number; frame: ReceivedFrame }
+	/**
+	 * Media after an item already read will never reach this reader: a group was skipped, evicted,
+	 * truncated, or never arrived. A decoder resumes without the references or state that media
+	 * built. Joining mid-track is not a gap: nothing was read before it.
+	 *
+	 * The span is an upper bound. `timestamp` is the furthest point already read; without a
+	 * per-frame duration that is the last frame's timestamp, one frame early. `duration` runs to
+	 * where the next item resumes, so it also covers any declared pause in between.
+	 */
+	| { kind: "gap"; timestamp: Time.Micro; duration: Time.Micro }
+	/**
+	 * The publisher declared that its media stops at `end`: it paused, switched source, or finished.
+	 * Frames that follow from the same `group` are the stopped encoder's final packets (an audio
+	 * codec's drain), whose output at or past `end` is padding. The next group starts fresh.
+	 */
+	| { kind: "end"; group: number; end: Time.Micro };
+
 interface Group {
 	consumer: Moq.Group.Consumer;
-	frames: Frame[]; // decode order
+	frames: ReceivedFrame[]; // decode order
 	empty: boolean; // no wire frame was published; empty groups mean nothing
 	media: boolean; // a decodable (non-marker) frame was buffered
 	start?: Time.Micro; // First decoded timestamp
@@ -78,21 +99,20 @@ export class Consumer {
 	// promotion guard can tell a timeline-continuous next group from one sitting after a gap.
 	// Maintained only via #recordPresented; see its comment for the invariant.
 	#presentedEnd?: Time.Micro;
-	// Group of the last frame next() returned, so it can report whether the following result
-	// continues that frame's timeline. Undefined until the first delivery and after a playhead event.
-	#deliveredGroup?: number;
-	// Set whenever the consumer throws content away: a group that fell `maxDelay` behind,
-	// a group truncated by a decode error. Reported (and
-	// cleared) on the first frame delivered from the next group, which is where the missing span
-	// sits. Only the consumer can know this, which is why next() reports it instead of leaving
-	// callers to guess from group numbers.
-	#gap = false;
+	// Group of the last media frame next() returned, so an endpoint after it reads as that frame's
+	// duration rather than a declared stop.
+	#mediaGroup?: number;
+	// Media went missing since the last item read, so the next one is preceded by a gap.
+	#lost = false;
+	// The furthest presentation point read so far: max(timestamp + duration), endpoints included.
+	// Undefined until the first item, so a loss before it is no gap.
+	#edge?: Time.Micro;
+	// The item a gap was returned ahead of.
+	#next?: Read;
 	// The first media timestamp of the latest delivered group, and its predecessor's start.
 	// Endpoints and later frames can overlap the next group without moving this floor.
 	#start?: { group: number; timestamp: Time.Micro };
 	#floor?: Time.Micro;
-	// Increments on a declared marker, an unproven delivered hole, and a latency skip.
-	#discontinuity = 0;
 	// A group below the previous group start aborts the track.
 	#error?: Error;
 
@@ -199,7 +219,8 @@ export class Consumer {
 						this.#jitter.observe(arrival, Moq.Time.Milli.fromMicro(sample.timestamp));
 						this.#spread.set(this.#jitter.measured);
 					}
-					const frame: Frame = {
+					const frame: ReceivedFrame = {
+						arrival,
 						payload: sample.payload,
 						timestamp: sample.timestamp,
 						// Protocol invariant: groups always start at a keyframe.
@@ -313,22 +334,11 @@ export class Consumer {
 		if (group.end !== undefined) this.#presentedEnd = group.end;
 	}
 
-	// Whether delivering from group `sequence` continues the timeline of the last frame returned.
-	// Frames within a group are consecutive by protocol, so only a group boundary can break it, and
-	// there it comes down to whether anything was dropped in between. Deliberately not derived from
-	// group numbers: they need not be sequential, so adjacency neither proves continuity nor catches
-	// a group the max delay check truncated on the way past.
-	#continuesDelivery(sequence: number): boolean {
-		if (this.#deliveredGroup === undefined) return false;
-		return sequence === this.#deliveredGroup || !this.#gap;
-	}
-
 	#checkMaxDelay() {
 		if (this.#active === undefined) return;
 
 		let skipped = 0;
 		const start = this.#groups[0]?.consumer.sequence;
-		let hole = false;
 
 		// Keep skipping the oldest group while the buffered span exceeds the max delay.
 		// This also handles gaps in group sequence numbers: if #active points to a missing
@@ -357,18 +367,22 @@ export class Consumer {
 			this.#groups.shift();
 			this.#active = this.#groups[0]?.consumer.sequence;
 
-			const nextStart = this.#groups[0]?.frames.at(0)?.timestamp ?? this.#groups[0]?.end;
+			const next = this.#groups[0];
+			const nextStart = next?.frames.at(0)?.timestamp ?? next?.end;
 			const marker = !first.empty && !first.media;
-			if (marker || !ptsContiguous(first.end ?? this.#presentedEnd, nextStart)) {
-				hole = true;
-			}
+			// Unread media is thrown away, and `first.end` counts it, so contiguity alone would hide it.
+			// A trailing endpoint carries no media, so leaving it unread discards nothing.
+			const discarded = first.frames.some((frame) => this.#format.end?.(frame) === undefined);
+			// Adjacency proves nothing is missing only once the group finished cleanly: a truncated
+			// or still-open group may have lost its tail.
+			const finished = first.done && !first.truncated;
+			const adjacent = next?.consumer.sequence === first.consumer.sequence + 1;
+			const continued = (finished && adjacent) || ptsContiguous(first.end ?? this.#presentedEnd, nextStart);
+			if (marker || discarded || first.truncated || !continued) this.#lost = true;
 			first.consumer.close();
 			first.frames.length = 0;
 			skipped++;
-			this.#gap = true;
 		}
-
-		if (hole) this.#markPlayhead();
 
 		if (skipped) {
 			console.warn(
@@ -441,35 +455,17 @@ export class Consumer {
 	}
 
 	/**
-	 * Returns the next frame in order along with its group number and the current
-	 * {@link discontinuity} count, awaiting one if needed. A `frame` of undefined signals either
-	 * the end of that group or, when `end` is present, an exclusive media endpoint carried by a
-	 * legacy marker. The overall result is undefined once closed. When `discontinuity`
-	 * jumps relative to the previous call, re-apply startup delay and skip: it is a playhead
-	 * event, and the next frame may be a delta that continues the interrupted group.
-	 *
-	 * `continuous` is true when this result picks up exactly where the previous frame left off, so
-	 * the span between them can be treated as delivered. It is false on the first frame, after a
-	 * playhead event, and whenever the consumer threw content away to keep up: a slow group skipped
-	 * for the max delay, a group truncated by a decode error. Use it rather than comparing group
-	 * numbers, which are not required to be sequential: adjacency neither proves the timeline is
-	 * unbroken nor catches a group dropped on the way past.
-	 *
-	 * It reports what this consumer dropped plus marker groups the publisher declared.
-	 * An unmarked forward timestamp jump still reads as continuous because nothing on the wire says
-	 * the missing span will never arrive.
+	 * Returns the next {@link Read} in delivery order, awaiting one if needed: a frame, a gap where
+	 * media after an earlier item will never arrive, or an end the publisher declared.
+	 * An unmarked forward timestamp jump is not a gap, since nothing on the wire says media is missing.
 	 * After buffered groups drain, a finished track returns undefined and an aborted track throws.
 	 */
-	async next(): Promise<
-		| {
-				frame: Frame | undefined;
-				group: number;
-				discontinuity: number;
-				continuous: boolean;
-				end?: Time.Micro;
-		  }
-		| undefined
-	> {
+	async next(): Promise<Read | undefined> {
+		if (this.#next) {
+			const next = this.#next;
+			this.#next = undefined;
+			return next;
+		}
 		for (;;) {
 			if (this.#error) throw this.#error;
 			this.#checkMalformed();
@@ -487,8 +483,8 @@ export class Consumer {
 			// fallback fired because no later group was buffered yet, and the real (large-gap,
 			// non-sequential) next group has since arrived -- promote #active to the first real
 			// group so delivery resumes instead of stalling on a nonexistent sequence.
-			// Before any media is delivered there is no timeline hole to wait for. #start survives
-			// playhead events, unlike #deliveredGroup, so this exception only applies at startup.
+			// Before any media is delivered there is no timeline hole to wait for, so this exception
+			// only applies at startup.
 			// Otherwise promote #active when the first buffered group continues the timeline we left off at,
 			// when a completed empty group can be walked (empty groups mean nothing), or when the hole
 			// is proven: the head already reaches past where presentation left off by more than the
@@ -511,9 +507,7 @@ export class Consumer {
 								head.latest !== undefined &&
 								head.latest - this.#presentedEnd > maxDelay));
 					if (startup || empty || contiguous || skipHole || ended !== undefined) {
-						if (!startup && (skipHole || ended !== undefined) && !contiguous && !empty)
-							this.#markPlayhead();
-						if (!contiguous) this.#gap = true;
+						if (!contiguous && !empty) this.#lost = true;
 						this.#active = head.consumer.sequence;
 					}
 				}
@@ -529,19 +523,15 @@ export class Consumer {
 					const seq = this.#groups[0].consumer.sequence;
 					const end = this.#format.end?.(frame);
 					if (end !== undefined) {
-						if (!this.#groups[0].media) this.#markPlayhead();
 						this.#updateBuffered();
-						return {
-							frame: undefined,
-							group: seq,
-							discontinuity: this.#discontinuity,
-							continuous: this.#continuesDelivery(seq),
-							end,
-						};
+						// A trailing endpoint is the last frame's duration: it moves the edge, nothing else.
+						if (seq === this.#mediaGroup) {
+							this.#advance(end);
+							continue;
+						}
+						return this.#emit({ kind: "end", group: seq, end });
 					}
-					const continuous = this.#continuesDelivery(seq);
-					if (seq !== this.#deliveredGroup) this.#gap = false;
-					this.#deliveredGroup = seq;
+					this.#mediaGroup = seq;
 
 					if (this.#start === undefined || seq > this.#start.group) {
 						this.#floor = this.#start?.timestamp;
@@ -553,7 +543,7 @@ export class Consumer {
 						throw this.#error;
 					}
 					this.#updateBuffered();
-					return { frame, group: seq, discontinuity: this.#discontinuity, continuous };
+					return this.#emit({ kind: "frame", group: seq, frame });
 				}
 
 				// Check if the group is done and then remove it. A group is removable only
@@ -575,17 +565,9 @@ export class Consumer {
 
 					const group = this.#groups.shift();
 					if (group) {
-						const seq = group.consumer.sequence;
-						if (group.truncated) this.#gap = true;
+						if (group.truncated) this.#lost = true;
 						this.#updateBuffered();
-						return {
-							frame: undefined,
-							group: seq,
-							discontinuity: this.#discontinuity,
-							// A marker carries no content of its own, so this just reports whether
-							// the group it closes was itself reached without a gap.
-							continuous: this.#continuesDelivery(seq),
-						};
+						continue;
 					}
 				}
 
@@ -616,10 +598,25 @@ export class Consumer {
 		}
 	}
 
-	#markPlayhead(): void {
-		this.#discontinuity++;
-		this.#deliveredGroup = undefined;
-		this.#gap = true;
+	// Return `read`, or a gap ahead of it when media went missing after an earlier item.
+	#emit(read: Exclude<Read, { kind: "gap" }>): Read {
+		const resume = read.kind === "frame" ? read.frame.timestamp : read.end;
+		const edge = this.#edge;
+		const lost = this.#lost;
+		this.#lost = false;
+		this.#advance(
+			read.kind === "frame" ? Moq.Time.Micro.add(resume, read.frame.duration ?? Moq.Time.Micro.zero) : resume,
+		);
+		if (!lost || edge === undefined) return read;
+
+		// A next group may start before the edge (an overlapping endpoint), so the span bottoms out at zero.
+		const timestamp = Moq.Time.Micro.min(edge, resume);
+		this.#next = read;
+		return { kind: "gap", timestamp, duration: Moq.Time.Micro.sub(resume, timestamp) };
+	}
+
+	#advance(end: Time.Micro): void {
+		if (this.#edge === undefined || end > this.#edge) this.#edge = end;
 	}
 
 	#updateBuffered(): void {
@@ -648,16 +645,10 @@ export class Consumer {
 		this.#buffered.set(ranges);
 	}
 
-	/**
-	 * A counter that increments at each playhead event: a declared marker group, an unproven
-	 * delivered hole, or a latency skip. Also surfaced per-read via {@link next}.
-	 */
-	get discontinuity(): number {
-		return this.#discontinuity;
-	}
-
 	/** Stop consuming and release the track and all buffered groups. */
 	close(): void {
+		// The item a gap was returned ahead of is buffered media too.
+		this.#next = undefined;
 		this.#finish(null);
 		this.#signals.close();
 	}

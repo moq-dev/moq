@@ -4,7 +4,9 @@ use std::sync::{Arc, Weak};
 use bytes::Buf;
 use moq_mux::catalog::hang::Extra;
 
-use crate::consumer::{MoqBroadcastConsumer, MoqFetchGroupOptions, MoqSubscription, map_fetch_error, timestamp_us};
+use crate::consumer::{
+	MoqBroadcastConsumer, MoqFetchGroupOptions, MoqGroupConsumer, MoqSubscription, map_fetch_error, timestamp_us,
+};
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::Task;
@@ -97,6 +99,10 @@ pub struct MoqVideo {
 	/// (e.g. `./source`). Absent or empty means the catalog's broadcast.
 	#[uniffi(default = None)]
 	pub broadcast: Option<String>,
+	/// The track's name in its broadcast, when it differs from the rendition's key. Absent means
+	/// the key is the track name.
+	#[uniffi(default = None)]
+	pub track: Option<String>,
 	pub codec: String,
 	pub description: Option<Vec<u8>>,
 	pub coded: Option<MoqDimensions>,
@@ -118,6 +124,10 @@ pub struct MoqAudio {
 	/// (e.g. `./source`). Absent or empty means the catalog's broadcast.
 	#[uniffi(default = None)]
 	pub broadcast: Option<String>,
+	/// The track's name in its broadcast, when it differs from the rendition's key. Absent means
+	/// the key is the track name.
+	#[uniffi(default = None)]
+	pub track: Option<String>,
 	pub codec: String,
 	pub description: Option<Vec<u8>>,
 	pub sample_rate: u32,
@@ -376,6 +386,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 				MoqVideo {
 					label: config.label.clone(),
 					broadcast: config.broadcast.as_ref().map(|path| path.as_str().to_string()),
+					track: config.track.clone(),
 					codec: config.codec.to_string(),
 					description: config.description.as_ref().map(|d| d.to_vec()),
 					coded: match (config.coded_width, config.coded_height) {
@@ -405,6 +416,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 				MoqAudio {
 					label: config.label.clone(),
 					broadcast: config.broadcast.as_ref().map(|path| path.as_str().to_string()),
+					track: config.track.clone(),
 					codec: config.codec.to_string(),
 					description: config.description.as_ref().map(|d| d.to_vec()),
 					sample_rate: config.sample_rate,
@@ -1024,7 +1036,7 @@ fn reserve_track(
 
 /// A media track's name, container, and live delivery options.
 #[derive(Clone, uniffi::Record)]
-pub struct MoqMediaContainerConfig {
+pub struct MoqMediaTrackConfig {
 	/// The track name.
 	pub name: String,
 	/// How to decode the track's frames.
@@ -1036,7 +1048,7 @@ pub struct MoqMediaContainerConfig {
 
 /// A fetched media group's name, sequence, container, and delivery options.
 #[derive(Clone, uniffi::Record)]
-pub struct MoqMediaContainerGroupConfig {
+pub struct MoqMediaGroupConfig {
 	/// The track name.
 	pub name: String,
 	/// The group sequence.
@@ -1091,7 +1103,7 @@ impl Catalog {
 
 /// Reads container-decoded frames from a live media track.
 #[derive(uniffi::Object)]
-pub struct MoqMediaContainerConsumer {
+pub struct MoqMediaTrackConsumer {
 	task: Task<Media>,
 }
 
@@ -1101,7 +1113,14 @@ struct Media {
 
 impl Media {
 	async fn next(&mut self) -> Result<Option<MoqMediaFrame>, MoqError> {
-		self.inner.read().await?.map(media_frame).transpose()
+		loop {
+			match self.inner.read().await? {
+				Some(moq_mux::container::Read::Frame { frame, .. }) => return media_frame(frame).map(Some),
+				// The bindings carry frames only.
+				Some(moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. }) => continue,
+				None => return Ok(None),
+			}
+		}
 	}
 }
 
@@ -1115,15 +1134,14 @@ impl MediaGroupInner {
 	}
 }
 
-/// A finite, container-decoded media group returned by
-/// [`MoqMediaContainerGroupConsumer::fetch`].
+/// A finite, container-decoded media group, fetched or decoded from a raw group.
 #[derive(uniffi::Object)]
-pub struct MoqMediaContainerGroupConsumer {
+pub struct MoqMediaGroupConsumer {
 	sequence: u64,
 	task: Task<MediaGroupInner>,
 }
 
-impl MoqMediaContainerGroupConsumer {
+impl MoqMediaGroupConsumer {
 	fn from_inner(group: moq_net::group::Consumer, container: moq_mux::catalog::hang::Container) -> Self {
 		let inner = moq_mux::container::GroupConsumer::new(group, container);
 		Self {
@@ -1134,7 +1152,7 @@ impl MoqMediaContainerGroupConsumer {
 }
 
 #[uniffi::export]
-impl MoqMediaContainerGroupConsumer {
+impl MoqMediaGroupConsumer {
 	/// The sequence number of this group within the track.
 	pub fn sequence(&self) -> u64 {
 		self.sequence
@@ -1173,7 +1191,7 @@ impl MoqMediaCatalogConsumer {
 // ---- Media Consumer ----
 
 #[uniffi::export]
-impl MoqMediaContainerConsumer {
+impl MoqMediaTrackConsumer {
 	/// Get the next frame. Returns `None` when the track ends or is closed.
 	pub async fn next(&self) -> Result<Option<MoqMediaFrame>, MoqError> {
 		self.task.run(|mut state| async move { state.next().await }).await
@@ -1205,14 +1223,14 @@ impl MoqMediaCatalogConsumer {
 }
 
 #[uniffi::export]
-impl MoqMediaContainerConsumer {
+impl MoqMediaTrackConsumer {
 	/// Subscribe to a media track and decode its container.
 	#[uniffi::constructor]
 	pub async fn subscribe(
 		broadcast: &MoqBroadcastConsumer,
-		config: MoqMediaContainerConfig,
-	) -> Result<Arc<MoqMediaContainerConsumer>, MoqError> {
-		let MoqMediaContainerConfig {
+		config: MoqMediaTrackConfig,
+	) -> Result<Arc<MoqMediaTrackConsumer>, MoqError> {
+		let MoqMediaTrackConfig {
 			name,
 			container,
 			subscription,
@@ -1223,21 +1241,35 @@ impl MoqMediaContainerConsumer {
 		let subscription = subscription.map(moq_net::track::Subscription::from).unwrap_or_default();
 		let track = broadcast.inner.track(&name)?.subscribe(subscription).await?;
 		let consumer = moq_mux::container::Consumer::new(track, media);
-		Ok(Arc::new(MoqMediaContainerConsumer {
+		Ok(Arc::new(MoqMediaTrackConsumer {
 			task: Task::new(Media { inner: consumer }),
 		}))
 	}
 }
 
 #[uniffi::export]
-impl MoqMediaContainerGroupConsumer {
+impl MoqMediaGroupConsumer {
+	/// Decode `group` with the track's container, as each frame lands.
+	///
+	/// Pair it with [`MoqTrackConsumer::recv_group`](crate::consumer::MoqTrackConsumer::recv_group)
+	/// to read media in arrival order: frame timestamps are container media time, not the
+	/// transport's. Which groups arrive, and how long a stalled one stays readable, is the
+	/// subscription's `max_delay_us`. Takes over `group`, whose handle is closed afterward; errors
+	/// if it has already read a frame.
+	#[uniffi::constructor]
+	pub fn new(group: &MoqGroupConsumer, container: MoqContainer) -> Result<Arc<Self>, MoqError> {
+		// Parse the container first, so a bad init leaves the raw group readable.
+		let media = media_container(container)?;
+		Ok(Arc::new(Self::from_inner(group.take()?, media)))
+	}
+
 	/// Fetch and decode exactly one media group.
 	#[uniffi::constructor]
 	pub async fn fetch(
 		broadcast: &MoqBroadcastConsumer,
-		config: MoqMediaContainerGroupConfig,
-	) -> Result<Arc<MoqMediaContainerGroupConsumer>, MoqError> {
-		let MoqMediaContainerGroupConfig {
+		config: MoqMediaGroupConfig,
+	) -> Result<Arc<MoqMediaGroupConsumer>, MoqError> {
+		let MoqMediaGroupConfig {
 			name,
 			sequence,
 			container,
@@ -1249,7 +1281,7 @@ impl MoqMediaContainerGroupConsumer {
 		let options = options.map(moq_net::group::Fetch::from);
 		let track = broadcast.inner.track(&name).map_err(map_fetch_error)?;
 		let group = track.fetch_group(sequence, options).await.map_err(map_fetch_error)?;
-		Ok(Arc::new(MoqMediaContainerGroupConsumer::from_inner(group, media)))
+		Ok(Arc::new(MoqMediaGroupConsumer::from_inner(group, media)))
 	}
 }
 

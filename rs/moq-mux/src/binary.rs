@@ -75,7 +75,7 @@ use std::marker::PhantomData;
 use bytes::Bytes;
 use moq_net::Timed;
 
-use hang::catalog::{BinaryConfig, Compression, Mode};
+use hang::catalog::{BinaryConfig, Compression, Mode, Reference};
 
 use crate::catalog::hang::CatalogExt;
 use crate::catalog::{IntoRendition, Listing, RenditionConfig};
@@ -380,7 +380,7 @@ impl crate::catalog::Entry<'_, BinaryConfig> {
 	/// Errors if the entry declares a mode or compression this build doesn't implement.
 	pub async fn subscribe(&self, source: &crate::Source) -> crate::Result<Consumer> {
 		let track = source
-			.subscribe_track(self.config().broadcast.as_ref(), self.name())
+			.subscribe_track(self.config().broadcast.as_ref(), self.config().track(self.name()))
 			.await?;
 		Consumer::from_track(track, self.config())
 	}
@@ -617,6 +617,43 @@ mod test {
 		assert!(
 			jitter.is_none_or(|jitter| jitter < std::time::Duration::from_secs(1)),
 			"{jitter:?}"
+		);
+	}
+
+	/// On a host whose wall clock reads before 2020, no clock has a wall mapping, so the data track
+	/// tells an importer's re-anchor apart by the whole clock. While the catalog is withheld the
+	/// importer's first frame, an hour in, places the clock; measured across that jump, the first
+	/// payload would read as a near-zero bitrate.
+	#[test]
+	fn an_unset_host_clock_still_marks_a_reanchor() {
+		use std::time::{Duration, SystemTime};
+
+		crate::clock::fake_host_wall(SystemTime::UNIX_EPOCH + Duration::from_secs(86_400));
+		let (mut broadcast, catalog) = catalog();
+		let reserved = catalog.reserve();
+		let mut stream = catalog
+			.binary_stream(track(&mut broadcast, "telemetry"), Config::default())
+			.unwrap();
+		let mut subscriber = stream.consume();
+		stream.append(&b"before"[..]).unwrap();
+
+		let hour = moq_net::Timestamp::from_secs(3600).unwrap();
+		assert_eq!(
+			catalog.timebase().shift(hour).unwrap(),
+			hour,
+			"the importer placed the clock"
+		);
+		stream.append(&b"after"[..]).unwrap();
+		drop(reserved);
+
+		assert_eq!(catalog.snapshot().clock, None);
+		let stamps = stamps(&mut subscriber);
+		assert_eq!(stamps.len(), 2);
+		assert!(stamps[0] < 3_600_000 && 3_600_000 <= stamps[1], "{stamps:?}");
+		assert_eq!(
+			entry(&catalog, "telemetry").bitrate,
+			None,
+			"nothing is timed across the re-anchor"
 		);
 	}
 

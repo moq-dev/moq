@@ -15,6 +15,9 @@ export const VideoConfigSchema = z.object({
 	// relative to the broadcast that served this catalog (e.g. "./source").
 	// If unset, the track lives in the same broadcast as the catalog.
 	broadcast: z.optional(RelativeBroadcastSchema),
+	// The track's name in its broadcast, when it differs from this entry's ID (its key in the
+	// catalog). Absent means the ID is the track name. Resolve it with `track`.
+	track: z.optional(z.string()),
 
 	// Human-readable rendition name for track pickers.
 	label: z.optional(z.string()),
@@ -30,8 +33,8 @@ export const VideoConfigSchema = z.object({
 	// Otherwise, the initialization information is (repeated) before each key-frame.
 	description: z.optional(hexSchema),
 
-	// The width and height of the video in pixels.
-	// NOTE: formats that don't use a description can adjust these values in-band.
+	// The largest width and height the track carries in pixels, fixed for its name. The picture
+	// resizes in band at a keyframe below these ceilings, unless the description pins it.
 	codedWidth: z.optional(u53Schema),
 	codedHeight: z.optional(u53Schema),
 
@@ -41,10 +44,10 @@ export const VideoConfigSchema = z.object({
 	displayAspectWidth: z.optional(u53Schema),
 	displayAspectHeight: z.optional(u53Schema),
 
-	// The frame rate of the video in frames per second
+	// The maximum frame rate of the video in frames per second. It only rises.
 	framerate: z.optional(z.number()),
 
-	// The bitrate of the video in bits per second
+	// The maximum bitrate of the video in bits per second. It only rises.
 	// TODO: Support up to Number.MAX_SAFE_INTEGER
 	bitrate: z.optional(u53Schema),
 

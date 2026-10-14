@@ -8,7 +8,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::task::{Poll, ready};
 
 use arrayvec::ArrayVec;
@@ -31,8 +31,8 @@ pub struct Info {
 	/// [`group::Producer::create_frame`] converts it into the parent track's
 	/// timescale, so the scale you build it with doesn't have to match the track.
 	/// No receiver fills one in, so an untimed track stays untimed across hops, except
-	/// over moq-lite 05 and later, which can't mark a track untimed yet and carries the
-	/// encoder's send time instead.
+	/// over moq-lite 05 and 06, which can't mark a track untimed and carry the encoder's
+	/// send time instead.
 	pub timestamp: Option<Timestamp>,
 }
 
@@ -334,7 +334,7 @@ impl FrameBuf {
 			FrameStorage::Shared(_) => return,
 			FrameStorage::Fixed(segment) => unsafe { segment.write(prev, src) },
 			FrameStorage::Growing(current) => {
-				let mut current = current.lock().expect("mutex poisoned");
+				let mut current = current.lock().unwrap_or_else(PoisonError::into_inner);
 				let needed = prev + src.len();
 				if current.capacity < needed {
 					// Doubling keeps the copies linear in the frame size, and the cap makes
@@ -370,7 +370,7 @@ impl FrameBuf {
 		let segment = match self.0.storage.get() {
 			Some(FrameStorage::Shared(bytes)) => return bytes.slice(start..end),
 			Some(FrameStorage::Fixed(segment)) => segment.clone(),
-			Some(FrameStorage::Growing(current)) => current.lock().expect("mutex poisoned").clone(),
+			Some(FrameStorage::Growing(current)) => current.lock().unwrap_or_else(PoisonError::into_inner).clone(),
 			// Nothing written, so the range is empty.
 			None => return Bytes::new(),
 		};
@@ -384,7 +384,7 @@ impl FrameBuf {
 		match self.0.storage.get() {
 			Some(FrameStorage::Shared(bytes)) => bytes.len(),
 			Some(FrameStorage::Fixed(segment)) => segment.capacity,
-			Some(FrameStorage::Growing(current)) => current.lock().expect("mutex poisoned").capacity,
+			Some(FrameStorage::Growing(current)) => current.lock().unwrap_or_else(PoisonError::into_inner).capacity,
 			None => 0,
 		}
 	}

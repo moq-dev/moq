@@ -27,6 +27,11 @@ set -euo pipefail
 INTEROP_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORKSPACE=$(cd "$INTEROP_DIR/../.." && pwd)
 CLIENTS="$INTEROP_DIR/clients"
+# The native-JS subscriber. A released-compat run swaps in its own client, which runs
+# against either the checkout's or the released packages (see compat/client.ts).
+NATIVE_DIR="${INTEROP_COMPAT_CLIENT:-$CLIENTS/js-native}"
+NATIVE_SCRIPT=subscribe.ts
+[[ -z "${INTEROP_COMPAT_CLIENT:-}" ]] || NATIVE_SCRIPT=client.ts
 
 # Run directory, reserved ports, and process-group ownership. See test/README.md.
 # shellcheck source-path=SCRIPTDIR source=../lib/harness.sh
@@ -34,7 +39,7 @@ source "$INTEROP_DIR/../lib/harness.sh"
 
 # Captured before the parse below consumes it, so the rerun command carries every
 # flag and every environment override this run was actually given.
-RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE RELAY_BIN MOQ_BIN INTEROP_SUB_MOQ INTEROP_VERSION INTEROP_NATIVE_CLIENT INTEROP_DECODE INTEROP_JS_PUBLISH_CLIENT INTEROP_COMPAT_TRANSPORT INTEROP_FETCH_DATA INTEROP_FETCH_TRACK)just test interop$(harness_argv "$@")"
+RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE RELAY_BIN MOQ_BIN INTEROP_SUB_MOQ INTEROP_VERSION INTEROP_COMPAT_CLIENT INTEROP_DECODE INTEROP_FETCH_DATA INTEROP_FETCH_TRACK)just test interop$(harness_argv "$@")"
 
 PUBLISHERS="rust"
 SUBSCRIBERS="rust"
@@ -43,7 +48,7 @@ SUBSCRIBERS="rust"
 # can't be held to them: a released client may not close cleanly, a released relay names no
 # connection when one closes, and the tail clients are built from this checkout only.
 IN_TREE=1
-if [[ -n "${RELAY_BIN:-}${MOQ_BIN:-}${INTEROP_SUB_MOQ:-}${INTEROP_NATIVE_CLIENT:-}${INTEROP_JS_PUBLISH_CLIENT:-}" ]]; then
+if [[ -n "${RELAY_BIN:-}${MOQ_BIN:-}${INTEROP_SUB_MOQ:-}${INTEROP_COMPAT_CLIENT:-}" ]]; then
     IN_TREE=0
 fi
 TIMEOUT="${INTEROP_TIMEOUT:-20}"
@@ -282,14 +287,10 @@ prepare_js() {
         for v in js js-native js-native-node js-native-bun; do needs "$v" && mark_broken "$v" "bun not found"; done
         return
     }
-    # Staged released-compat clients bring their own packages; check every one given.
-    if [[ -n "${INTEROP_NATIVE_CLIENT:-}${INTEROP_JS_PUBLISH_CLIENT:-}" ]]; then
-        [[ -z "${INTEROP_NATIVE_CLIENT:-}" || -f "$INTEROP_NATIVE_CLIENT/subscribe.ts" ]] || {
-            echo "missing staged native client" >&2
-            exit 1
-        }
-        [[ -z "${INTEROP_JS_PUBLISH_CLIENT:-}" || -f "$INTEROP_JS_PUBLISH_CLIENT/client.ts" ]] || {
-            echo "missing staged publisher" >&2
+    # A staged released-compat client brings its own packages.
+    if [[ -n "${INTEROP_COMPAT_CLIENT:-}" ]]; then
+        [[ -f "$INTEROP_COMPAT_CLIENT/client.ts" ]] || {
+            echo "missing staged compat client" >&2
             exit 1
         }
         return
@@ -658,7 +659,7 @@ run_publisher() {
             ;;
         js-native)
             # exec, so the client leads the group and `stop_publisher` waits for its own close.
-            exec bun "$INTEROP_JS_PUBLISH_CLIENT/client.ts" publish "$url" "$broadcast"
+            exec bun "$INTEROP_COMPAT_CLIENT/client.ts" publish "$url" "$broadcast"
             ;;
         js)
             # Headless Chromium encodes its own H.264 from a fake camera via
@@ -717,18 +718,18 @@ relay_next_line() {
 # shellcheck disable=SC2329  # reached from a function 'harness_spawn' invokes
 run_native() {
     local out
-    out=$( (cd "${INTEROP_NATIVE_CLIENT:-$CLIENTS/js-native}" && "$@") 2>&1) || true
+    out=$( (cd "$NATIVE_DIR" && "$@") 2>&1) || true
     printf '%s\n' "$out" >&2
     printf '%s\n' "$out" | grep -q '^received '
 }
 
-# Write a track name and the group a live JS subscriber saw on it to
-# $HARNESS_RUN/<broadcast>.track. Extra args go to subscribe.ts (e.g. --track).
+# Write a track name and the group the compat client's live subscription saw on it to
+# $HARNESS_RUN/<broadcast>.track. Extra args go to its subscribe (e.g. --track).
 # shellcheck disable=SC2329  # reached from run_subscriber, which 'harness_spawn' invokes
 observe_group() {
     local broadcast="$1"
     shift
-    (cd "${INTEROP_NATIVE_CLIENT:-$CLIENTS/js-native}" && node --import tsx subscribe.ts subscribe --url "$URL" --broadcast "$broadcast" \
+    (cd "$INTEROP_COMPAT_CLIENT" && node --import tsx client.ts subscribe --url "$URL" --broadcast "$broadcast" \
         --timeout "$TIMEOUT" --track-file "$HARNESS_RUN/$broadcast.track" "$@")
 }
 
@@ -845,12 +846,12 @@ PYCODE
             ;;
         js-native-bun)
             # Native @moq/net via moq's WebTransport polyfill, under bun.
-            run_native bun subscribe.ts subscribe \
+            run_native bun "$NATIVE_SCRIPT" subscribe \
                 --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT"
             ;;
         js-native-node)
             # Same, under node (tsx runs the TS directly).
-            run_native node --import tsx subscribe.ts subscribe \
+            run_native node --import tsx "$NATIVE_SCRIPT" subscribe \
                 --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT"
             ;;
         *)

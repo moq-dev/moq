@@ -41,10 +41,10 @@ last frame is cut off by the end of the capture:
 A model that passes everything, or fails everything, cannot tell these apart.
 """
 
+import json
 import os
 import subprocess
 import sys
-import tempfile
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, DIR)
@@ -276,30 +276,32 @@ def grade(path: str) -> dict[str, compliance.Check]:
     return {check.name: check for check in compliance.analyze(path)}
 
 
-def main() -> int:
+def main(tmp: str) -> int:
     """Run every case and exit non-zero if any verdict is not the expected one."""
     failed = 0
-    with tempfile.TemporaryDirectory() as tmp:
-        for n, (name, build, expected) in enumerate(CASES):
-            checks = grade(build(os.path.join(tmp, f"{n}.ts")))
-            check = checks["tstd"]
-            streams = check.metrics.get("streams", {})
-            seen = {v for s in streams.values() for v in s["violations"]}
-            if expected == "pass":
-                # Not vacuous: every stream must have had access units to grade.
-                ok = check.status == compliance.Status.PASS and all(s["access_units"] for s in streams.values())
-                ok = ok and checks["pcr-presence"].status == compliance.Status.PASS
-            elif isinstance(expected, tuple):
-                check = checks[expected[1]]
-                ok = check.status == compliance.Status.FAIL
-            elif isinstance(expected, str):
-                ok = any(expected in why for why in check.metrics.get("refused", {}).values())
-            else:
-                ok = expected <= seen
-            failed += not ok
-            want = " ".join(reversed(expected)) if isinstance(expected, tuple) else expected
-            want = want if isinstance(want, str) else ", ".join(sorted(want))
-            print(f"  {'ok  ' if ok else 'FAIL'}  {name:<18} want {want:<40} got {check.detail}")
+    for n, (name, build, expected) in enumerate(CASES):
+        checks = grade(build(os.path.join(tmp, f"{n}.ts")))
+        with open(os.path.join(tmp, f"{n}.json"), "w") as report:
+            json.dump({key: {"status": value.status.value, "detail": value.detail, "metrics": value.metrics}
+                       for key, value in checks.items()}, report, indent=2)
+        check = checks["tstd"]
+        streams = check.metrics.get("streams", {})
+        seen = {v for s in streams.values() for v in s["violations"]}
+        if expected == "pass":
+            # Not vacuous: every stream must have had access units to grade.
+            ok = check.status == compliance.Status.PASS and all(s["access_units"] for s in streams.values())
+            ok = ok and checks["pcr-presence"].status == compliance.Status.PASS
+        elif isinstance(expected, tuple):
+            check = checks[expected[1]]
+            ok = check.status == compliance.Status.FAIL
+        elif isinstance(expected, str):
+            ok = any(expected in why for why in check.metrics.get("refused", {}).values())
+        else:
+            ok = expected <= seen
+        failed += not ok
+        want = " ".join(reversed(expected)) if isinstance(expected, tuple) else expected
+        want = want if isinstance(want, str) else ", ".join(sorted(want))
+        print(f"  {'ok  ' if ok else 'FAIL'}  {name:<18} want {want:<40} got {check.detail}")
     if failed:
         print(f"tstd controls: {failed} of {len(CASES)} cases wrong", file=sys.stderr)
         return 1
@@ -308,4 +310,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1]))

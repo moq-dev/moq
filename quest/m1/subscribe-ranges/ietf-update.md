@@ -64,4 +64,3 @@ at a higher priority raises the upstream priority, and leaving lowers it again.
 ## Related
 
 - [Scope and sign track priority](/quest/m1/track-priority-scope.md) - may stop forwarding downstream priority upstream on relay-to-relay links, which changes what this sends
-- [moq-transport FETCH and fill streams in the session queue](/quest/m1/subscribe-ranges/ietf-fetch-queue.md) - the same publisher queue the updated priority lands in

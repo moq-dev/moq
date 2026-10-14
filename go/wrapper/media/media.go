@@ -185,41 +185,55 @@ func NewCatalogConsumer(ctx context.Context, broadcast *moq.BroadcastConsumer) (
 	return &CatalogConsumer{inner: inner}, nil
 }
 
-// ContainerConfig names a media track, its container, and live delivery options.
-type ContainerConfig struct {
+// TrackConfig names a media track, its container, and live delivery options.
+type TrackConfig struct {
 	Name         string
 	Container    Container
 	Subscription *moq.Subscription
 }
 
-// NewContainerConsumer subscribes to and decodes a media track.
-func NewContainerConsumer(ctx context.Context, broadcast *moq.BroadcastConsumer, config ContainerConfig) (*ContainerConsumer, error) {
+// NewTrackConsumer subscribes to and decodes a media track.
+func NewTrackConsumer(ctx context.Context, broadcast *moq.BroadcastConsumer, config TrackConfig) (*TrackConsumer, error) {
 	sub, err := bridge.Subscription(config.Subscription)
 	if err != nil {
 		return nil, err
 	}
-	inner, err := ffi.MoqMediaContainerConsumerSubscribe(ctx, bridge.BroadcastConsumer(broadcast), ffi.MoqMediaContainerConfig{Name: config.Name, Container: config.Container, Subscription: sub})
+	inner, err := ffi.MoqMediaTrackConsumerSubscribe(ctx, bridge.BroadcastConsumer(broadcast), ffi.MoqMediaTrackConfig{Name: config.Name, Container: config.Container, Subscription: sub})
 	if err != nil {
 		return nil, err
 	}
-	return &ContainerConsumer{inner: inner}, nil
+	return &TrackConsumer{inner: inner}, nil
 }
 
-// ContainerGroupConfig names a group, its container, and fetch delivery options.
-type ContainerGroupConfig struct {
+// GroupConfig names a group, its container, and fetch delivery options.
+type GroupConfig struct {
 	Name      string
 	Sequence  uint64
 	Container Container
 	Options   *moq.FetchGroupOptions
 }
 
-// NewContainerGroupConsumer fetches and decodes exactly one media group.
-func NewContainerGroupConsumer(ctx context.Context, broadcast *moq.BroadcastConsumer, config ContainerGroupConfig) (*ContainerGroupConsumer, error) {
-	inner, err := ffi.MoqMediaContainerGroupConsumerFetch(ctx, bridge.BroadcastConsumer(broadcast), ffi.MoqMediaContainerGroupConfig{Name: config.Name, Sequence: config.Sequence, Container: config.Container, Options: config.Options})
+// FetchGroup fetches and decodes exactly one media group.
+func FetchGroup(ctx context.Context, broadcast *moq.BroadcastConsumer, config GroupConfig) (*GroupConsumer, error) {
+	inner, err := ffi.MoqMediaGroupConsumerFetch(ctx, bridge.BroadcastConsumer(broadcast), ffi.MoqMediaGroupConfig{Name: config.Name, Sequence: config.Sequence, Container: config.Container, Options: config.Options})
 	if err != nil {
 		return nil, err
 	}
-	return &ContainerGroupConsumer{inner: inner}, nil
+	return &GroupConsumer{inner: inner}, nil
+}
+
+// NewGroupConsumer decodes a raw group with the track's container, as each frame lands.
+//
+// Pair it with moq.TrackConsumer.RecvGroup to read media in arrival order: frame timestamps are
+// container media time, not the transport's. Which groups arrive, and how long a stalled one
+// stays readable, is the subscription's MaxDelay. Takes over group, whose handle is closed
+// afterward; errors if it has already read a frame.
+func NewGroupConsumer(group *moq.GroupConsumer, container Container) (*GroupConsumer, error) {
+	inner, err := ffi.NewMoqMediaGroupConsumer(bridge.GroupConsumer(group), container)
+	if err != nil {
+		return nil, err
+	}
+	return &GroupConsumer{inner: inner}, nil
 }
 
 // LegacyContainer selects the legacy hang container for a media subscription.
@@ -414,13 +428,13 @@ func (m *TrackStreamProducer) Finish() error {
 	return m.inner.Finish()
 }
 
-// ContainerConsumer is a stream of decoded media frames.
-type ContainerConsumer struct {
-	inner *ffi.MoqMediaContainerConsumer
+// TrackConsumer is a stream of decoded media frames.
+type TrackConsumer struct {
+	inner *ffi.MoqMediaTrackConsumer
 }
 
 // Next returns the next frame, or (nil, nil) when the track ends.
-func (m *ContainerConsumer) Next(ctx context.Context) (*MediaFrame, error) {
+func (m *TrackConsumer) Next(ctx context.Context) (*MediaFrame, error) {
 	frame, err := bridge.Call(ctx, m.inner.Cancel, m.inner.Next)
 	if frame == nil || err != nil {
 		return nil, err
@@ -429,28 +443,28 @@ func (m *ContainerConsumer) Next(ctx context.Context) (*MediaFrame, error) {
 }
 
 // All ranges over frames until the track ends or the loop breaks.
-func (m *ContainerConsumer) All(ctx context.Context) iter.Seq2[*MediaFrame, error] {
+func (m *TrackConsumer) All(ctx context.Context) iter.Seq2[*MediaFrame, error] {
 	return bridge.Seq(ctx, m.Next)
 }
 
 // Cancel stops the stream.
-func (m *ContainerConsumer) Cancel() {
+func (m *TrackConsumer) Cancel() {
 	m.inner.Cancel()
 }
 
-// ContainerGroupConsumer is a finite stream of decoded media frames from one fetched
-// group. It ends after the group's last frame.
-type ContainerGroupConsumer struct {
-	inner *ffi.MoqMediaContainerGroupConsumer
+// GroupConsumer is a finite stream of decoded media frames from one group,
+// fetched or decoded from a raw group. It ends after the group's last frame.
+type GroupConsumer struct {
+	inner *ffi.MoqMediaGroupConsumer
 }
 
 // Sequence is this group's sequence number within the track.
-func (m *ContainerGroupConsumer) Sequence() uint64 {
+func (m *GroupConsumer) Sequence() uint64 {
 	return m.inner.Sequence()
 }
 
 // Next returns the next decoded frame, or (nil, nil) when the group ends.
-func (m *ContainerGroupConsumer) Next(ctx context.Context) (*MediaFrame, error) {
+func (m *GroupConsumer) Next(ctx context.Context) (*MediaFrame, error) {
 	frame, err := bridge.Call(ctx, m.inner.Cancel, m.inner.Next)
 	if frame == nil || err != nil {
 		return nil, err
@@ -459,12 +473,12 @@ func (m *ContainerGroupConsumer) Next(ctx context.Context) (*MediaFrame, error) 
 }
 
 // All ranges over decoded frames until the group ends or the loop breaks.
-func (m *ContainerGroupConsumer) All(ctx context.Context) iter.Seq2[*MediaFrame, error] {
+func (m *GroupConsumer) All(ctx context.Context) iter.Seq2[*MediaFrame, error] {
 	return bridge.Seq(ctx, m.Next)
 }
 
 // Cancel stops the stream.
-func (m *ContainerGroupConsumer) Cancel() {
+func (m *GroupConsumer) Cancel() {
 	m.inner.Cancel()
 }
 

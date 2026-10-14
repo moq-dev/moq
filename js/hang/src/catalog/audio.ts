@@ -18,6 +18,9 @@ export const AudioConfigSchema = z.object({
 	// relative to the broadcast that served this catalog (e.g. "./source").
 	// If unset, the track lives in the same broadcast as the catalog.
 	broadcast: z.optional(RelativeBroadcastSchema),
+	// The track's name in its broadcast, when it differs from this entry's ID (its key in the
+	// catalog). Absent means the ID is the track name. Resolve it with `track`.
+	track: z.optional(z.string()),
 
 	// Human-readable rendition name for track pickers.
 	label: z.optional(z.string()),
@@ -40,7 +43,7 @@ export const AudioConfigSchema = z.object({
 	// The number of channels in the audio
 	numberOfChannels: u53Schema,
 
-	// The bitrate of the audio in bits per second
+	// The maximum bitrate of the audio in bits per second. It only rises.
 	// TODO: Support up to Number.MAX_SAFE_INTEGER
 	bitrate: z.optional(u53Schema),
 

@@ -40,7 +40,7 @@ the win is unmeasured on noq, and io_uring ships in no package.
 
 ## Required
 
-- [One enter per turn](/quest/m1/perf/uring-one-enter.md) - reshapes the same park and enter path, and adds the per-enter metrics this measures
+- [One enter per turn](/quest/m2/perf/uring-one-enter.md) - reshapes the same park and enter path, and adds the per-enter metrics this measures
 
 ## Closes
 

@@ -25,10 +25,13 @@ no `NotFetchable` code, since nothing would send it. Only lite-07 has the
 code, and lite-07 drops FETCH for [ranges](/quest/m1/subscribe-ranges/lite.md);
 lite-05 and lite-06 answer `NotFound`.
 
-Since #4974, a native fetch-only request asks TRACK_STATUS before its first
-FETCH, so the `@moq/net` publisher answers TRACK_STATUS too (a #4974
-follow-up, folded in here because answering only matters once JS serves
-FETCH).
+The JS publisher already answers the TRACK_STATUS a native fetch-only request
+asks before its first FETCH, so after that answer the FETCH is all that is
+refused today.
+
+Decided 2026-10-13: once this lands, check whether the Rust IETF subscriber's
+fallback to SUBSCRIBE on a NOT_SUPPORTED TRACK_STATUS is still needed, and
+delete it if no in-tree publisher refuses anymore.
 
 Verify with an in-memory application responder: a browser publisher serves a
 native IETF subscriber after a group is evicted or was never cached. Run the

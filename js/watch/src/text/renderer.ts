@@ -253,7 +253,7 @@ export class Renderer {
 
 			const sub = subscribeMedia(effect, {
 				broadcast: active,
-				track,
+				track: Catalog.track(track, config),
 				priority: Catalog.PRIORITY.text,
 				maxDelay: this.sync.out.maxDelay,
 			});

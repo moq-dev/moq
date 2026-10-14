@@ -101,6 +101,16 @@ pub struct AudioConfig {
 	#[serde(default)]
 	pub broadcast: Option<moq_net::path::RelativeOwned>,
 
+	/// The track's name in its broadcast, when it differs from this entry's ID: its key in the
+	/// catalog. Absent means the ID is the track name, as in every catalog before this field.
+	///
+	/// Set it only when the ID can't be the name, such as two renditions of same-named tracks
+	/// from different broadcasts. Readers resolve the name with
+	/// [`Reference::track`](crate::catalog::Reference::track); one that predates the
+	/// field subscribes to the ID instead.
+	#[serde(default)]
+	pub track: Option<String>,
+
 	/// Human-readable rendition name for track pickers.
 	#[serde(default)]
 	pub label: Option<String>,
@@ -117,7 +127,7 @@ pub struct AudioConfig {
 	#[serde(rename = "numberOfChannels")]
 	pub channel_count: u32,
 
-	// The bitrate of the audio track in bits per second
+	// The maximum bitrate of the audio track in bits per second. It only rises.
 	#[serde(default)]
 	pub bitrate: Option<u64>,
 
@@ -184,6 +194,7 @@ impl AudioConfig {
 	pub fn new(codec: impl Into<AudioCodec>, sample_rate: u32, channel_count: u32) -> Self {
 		Self {
 			broadcast: None,
+			track: None,
 			label: None,
 			codec: codec.into(),
 			sample_rate,

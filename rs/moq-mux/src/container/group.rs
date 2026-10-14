@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::task::{Poll, ready};
+use std::task::Poll;
 
 use super::{Container, Frame};
 
@@ -8,8 +8,8 @@ use super::{Container, Frame};
 /// This is the group-scoped counterpart to [`Consumer`](super::Consumer). Where that one
 /// subscribes to a track and juggles group ordering, age skipping, and rewinds, this one
 /// reads exactly the group it was handed, in arrival order, and ends. That is what a caller
-/// wants after a FETCH: a group already chosen by sequence, with no live subscription and no
-/// max delay budget that could skip the very group being asked for.
+/// wants after a FETCH, a group already chosen by sequence, or for a live group taken from
+/// [`recv_group`](moq_net::track::Subscriber::recv_group), whose frames return as they land.
 ///
 /// A batch of frames decoded from one wire frame (a CMAF fragment carrying several samples) is
 /// handed back one frame at a time.
@@ -47,12 +47,17 @@ impl<F: Container> GroupConsumer<F> {
 
 	/// Poll for the next frame, without blocking.
 	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Frame>, F::Error>> {
-		// Hold the latest media frame until a marker or FIN times it. FETCH groups are
-		// already finished, so this look-ahead does not add latency there.
+		// Peek past an untimed video frame for a marker or successor that times it, but only
+		// at what has already landed: a live group returns the frame now rather than waiting.
 		while self.pending.front().is_none_or(|frame| {
 			self.format.kind() == super::Kind::Video && frame.duration.is_none() && self.pending.len() < 2
 		}) {
-			match ready!(self.format.poll_read(&mut self.group, waiter)?) {
+			let next = match self.format.poll_read(&mut self.group, waiter)? {
+				Poll::Ready(next) => next,
+				Poll::Pending if self.pending.is_empty() => return Poll::Pending,
+				Poll::Pending => break,
+			};
+			match next {
 				Some(frames) => {
 					for frame in frames {
 						if let Some(bound) = self.format.end(&frame) {
@@ -144,11 +149,11 @@ mod tests {
 				subscription,
 				Hang::new(&config, crate::container::Kind::Data).unwrap(),
 			);
-			let first = live.read().await.unwrap().unwrap();
+			let first = live.read_frame().await.unwrap().unwrap();
 			assert!(first.payload.is_empty());
 			assert!(first.keyframe);
-			assert_eq!(live.read().await.unwrap().unwrap().payload, b"data".as_slice());
-			assert!(live.read().await.unwrap().is_none());
+			assert_eq!(live.read_frame().await.unwrap().unwrap().payload, b"data".as_slice());
+			assert!(live.read_frame().await.unwrap().is_none());
 			let group = consumer.track("data").unwrap().fetch_group(0, None).await.unwrap();
 			let mut fetched = GroupConsumer::new(group, Hang::new(&config, crate::container::Kind::Data).unwrap());
 			assert!(fetched.read().await.unwrap().unwrap().payload.is_empty());
@@ -184,6 +189,34 @@ mod tests {
 		assert_eq!(second.duration, Some(moq_net::Timestamp::from_micros(33_000).unwrap()));
 
 		assert!(group.read().await.unwrap().is_none());
+	}
+
+	/// A live video group hands back each frame as it lands, rather than holding it until a
+	/// successor or the group's end times it.
+	#[tokio::test]
+	async fn a_live_video_frame_is_not_held_for_its_successor() {
+		use futures::FutureExt;
+
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast.create_track("media", timed()).unwrap();
+		let format = Hang::Legacy(crate::container::Kind::Video);
+		let mut group = track.append_group().unwrap();
+		let mut live = GroupConsumer::new(group.consume(), Hang::Legacy(crate::container::Kind::Video));
+
+		format
+			.write(&mut group, &[frame(1_000_000, b"keyframe", true)])
+			.unwrap();
+		let first = live.read().now_or_never().expect("held the frame").unwrap().unwrap();
+		assert_eq!(first.payload, b"keyframe".as_slice());
+		assert_eq!(first.duration, None);
+
+		format.write(&mut group, &[frame(1_020_000, b"delta", false)]).unwrap();
+		let second = live.read().now_or_never().expect("held the frame").unwrap().unwrap();
+		assert_eq!(second.payload, b"delta".as_slice());
+		assert!(live.read().now_or_never().is_none(), "the open group has nothing more");
+
+		group.finish().unwrap();
+		assert!(live.read().await.unwrap().is_none());
 	}
 
 	/// One CMAF fragment decodes to several samples, which are handed back one at a time.

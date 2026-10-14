@@ -1,7 +1,7 @@
 //! Raw-audio import/export via [`moq_audio`].
 //!
 //! Sibling to [`media::MoqMediaTrackProducer`](crate::media::MoqMediaTrackProducer)
-//! and [`media::MoqMediaContainerConsumer`](crate::media::MoqMediaContainerConsumer):
+//! and [`media::MoqMediaTrackConsumer`](crate::media::MoqMediaTrackConsumer):
 //! those deal in already-encoded frames, these deal in PCM and run
 //! Opus encode/decode inside the FFI boundary.
 
@@ -384,6 +384,7 @@ fn audio_config(catalog_audio: crate::media::MoqAudio) -> Result<hang::catalog::
 
 	let mut config = hang::catalog::AudioConfig::new(codec, catalog_audio.sample_rate, catalog_audio.channel_count);
 	config.label = catalog_audio.label;
+	config.track = catalog_audio.track;
 	config.bitrate = catalog_audio.bitrate;
 	config.description = catalog_audio.description.map(Into::into);
 	config.container = catalog_audio.container.into();
@@ -434,6 +435,7 @@ mod tests {
 		MoqAudio {
 			label: None,
 			broadcast: None,
+			track: None,
 			codec: codec.to_string(),
 			description: None,
 			sample_rate: 48_000,

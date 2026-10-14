@@ -50,8 +50,8 @@ impl Size {
 	/// before anything else looks at them. That overflows the two things every
 	/// encoder derives from a size: the default bitrate (pixels x framerate) and
 	/// a packed frame's byte count (up to 4 bytes per pixel for RGBA). Both would
-	/// panic, which for a binding is an aborted host process rather than an
-	/// error return, so refuse the config here instead.
+	/// panic, which a binding reports as a bug rather than an invalid config, so
+	/// refuse the config here instead.
 	///
 	/// This is arithmetic, not policy: it rejects only what cannot be represented,
 	/// leaving "no encoder handles a frame that large" to the backend.

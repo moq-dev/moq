@@ -142,9 +142,28 @@ const traces: Omit<Case, "target">[] = [
 	},
 	{
 		name: "reorder",
-		about: "Every other run of five frames delivered after the run that follows it. The media-time gap between the runs must not land in the delay measurement.",
+		about: "Every other run of five frames delivered after the run that follows it, as newest-first delivery does to a sender's flush. Each held-back run is measured against the fastest frame before it, so the target covers waiting for it; the first one precedes every frame observed and is not measured.",
 		frame: FRAME,
 		...reordered(paced(1000, FRAME, 50), 5, 2),
+	},
+	{
+		name: "backlog",
+		about: "The live edge, then the 1.5 s backlog behind it delivered newest first, then 30 s of even audio, as a subscription's start arrives. The backlog precedes every frame observed, so it is not measured, and the target stays near the frame duration.",
+		frame: FRAME,
+		...(() => {
+			const live = 75 * FRAME;
+			const arrival = [50];
+			const media = [live];
+			for (let i = 1; i <= 75; i++) {
+				arrival.push(50 + i * 0.25);
+				media.push(live - i * FRAME);
+			}
+			const even = paced(1500, FRAME, 50 + FRAME);
+			return {
+				arrival: [...arrival, ...even.arrival],
+				media: [...media, ...even.media.map((v) => v + live + FRAME)],
+			};
+		})(),
 	},
 	{
 		name: "idle",

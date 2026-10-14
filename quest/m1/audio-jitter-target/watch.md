@@ -32,9 +32,8 @@ about 22 s with skip-aheads on the way down.
 
 - Decide whether those re-stall refills are what the goal wants, using the
   replay rows as the measurement. Tighten the replay budgets with any fix.
-  Tighten the browser rows only from the ceilings
-  [Audio quality budgets](/quest/m0/audio-quality-budgets.md) measures on the
-  nightly runner.
+  Tighten the browser rows only from nightly runner measurements, re-measured
+  as `test/audio-quality/budgets.json`'s note describes.
 - The replay sizes every frame as the trace's median spacing, which a trace
   missing most of its frames defeats; record the codec's frame duration in the
   trace and replay that instead.
@@ -56,7 +55,11 @@ Decided 2026-10-08: moves to m1 with the rest of the line. The estimator
 defaults on and only this manual proof is left, so it no longer gates a
 release.
 
+## Required
+
+- [Opus isolated-ring target](/quest/m1/audio-jitter-target/opus-isolated-target.md) - the isolated ring holds the target at near-zero jitter
+
 ## Related
 
 - [A/V clock](/quest/m1/av-clock.md) - reshapes `SyncInput` around the per-track target this line produces
-- [Audio quality budgets](/quest/m0/audio-quality-budgets.md) - measures the browser rows' ceilings on the nightly runner, which this quest tightens
+- [AAC bursty budgets](/quest/m1/audio-jitter-target/aac-bursty-budgets.md) - confirms the AAC reorder fix on the nightlies, no gate on this proof

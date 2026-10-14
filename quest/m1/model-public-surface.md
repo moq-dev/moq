@@ -36,9 +36,17 @@ public instead of a crate-private field, and this quest finds the rest.
   transport against only the public API, in Rust and JS. The inventory, not
   the sketch, defines scope: every inventoried item gets a decision even if
   the sketch never touches it.
+- Decided 2026-10-13: the moq-transport passthrough fields (subgroups,
+  object `skip`, object and unknown track properties, END_OF_GROUP status
+  objects, datagram object IDs) stay crate-private on purpose. Mark them
+  "deliberately private: moq-transport passthrough only". A relay built on
+  the public model drops them, as plain moq-lite does.
+  Dynamic-group capability and upstream request signaling are part of this
+  private relay-only carve-out too.
 - Write the implementation quests (likely one Rust and one JS, or one per
   group) under m1, each listing its public API additions for review.
 
 ## Related
 
+- [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - the deliberate exception to this rule
 - [#5283](https://github.com/moq-dev/moq/pull/5283) - makes the END_OF_TRACK location public, the first item under this rule

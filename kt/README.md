@@ -57,7 +57,7 @@ The `dev.moq` package is intentionally thin: Kotlin has extension functions, so 
 - **Typealiases** (`Aliases.kt`): re-export the `Moq*`-prefixed FFI types under clean `dev.moq` names (`OriginProducer`, `BroadcastConsumer`, `Frame`, ...), so you import `dev.moq.*` only. `MoqException` is not aliased because Kotlin can't resolve its subtypes through a typealias; use `uniffi.moq.*` for it.
 - **Flow extensions** (`Flows.kt`): `updates()`, `groups()`, and `frames()` turn the pull-based consumers into coroutine `Flow`s with cancellation wired through.
 - **Media** (`dev.moq.media`): catalog, importers, and container consumers, with `catalog(broadcast)` for a one-shot catalog read and `frames()` for container-decoded media.
-- **Fetched media**: `ContainerGroupConsumer.fetch(...).frames()` streams the decoded frames of one retained group, then completes.
+- **Fetched media**: `dev.moq.media.GroupConsumer.fetch(...).frames()` streams the decoded frames of one retained group, then completes. `dev.moq.media.GroupConsumer(group, container)` decodes a raw group instead, such as one from `recvGroup()` for arrival-order reads.
 - **Duration extensions** (`Durations.kt`): the FFI carries microseconds as integers, so `stats.rtt`, `backoff.initial`, `frame.timestamp`, and their siblings read back as a `kotlin.time.Duration`.
 - **`logLevel(...)`**: configures native Rust tracing without importing the raw bindings package.
 - **Raw datagrams**: `TrackProducer.appendDatagram(Frame(payload, timestampUs))` sends one best-effort frame and returns its sequence; `TrackConsumer.recvDatagram()` and `datagrams()` receive them. Payloads are capped at 1200 bytes, require a datagram-capable transport plus lite-05 or newer moq-lite or moq-transport, and have no stream fallback.

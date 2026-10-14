@@ -200,6 +200,7 @@ struct Track {
 
 	// "Video" or "Audio", for the log.
 	const char *kind;
+	// The track's name in its broadcast, which can differ from the rendition's catalog ID.
 	std::string name;
 	// The rendition the decoder was built from.
 	std::optional<moq::Video> video_config;
@@ -208,7 +209,7 @@ struct Track {
 	std::unique_ptr<AudioDecoder> audio_decoder;
 	moq::Container container;
 
-	std::shared_ptr<moq::MediaContainerConsumer> consumer;
+	std::shared_ptr<moq::MediaTrackConsumer> consumer;
 	std::optional<moq::Continuation> call;
 };
 
@@ -574,9 +575,16 @@ moq_source_first_rendition(const std::unordered_map<std::string, Rendition> &ren
 	return first;
 }
 
+// The track a rendition names in its broadcast: its `track` when set, else its catalog ID.
+template<typename Rendition>
+static std::string moq_source_track_name(const std::pair<const std::string, Rendition> &rendition)
+{
+	return rendition.second.track.value_or(rendition.first);
+}
+
 static void moq_source_on_subscribed(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				     const std::shared_ptr<Track> &track,
-				     moq::expected<std::shared_ptr<moq::MediaContainerConsumer>> result);
+				     moq::expected<std::shared_ptr<moq::MediaTrackConsumer>> result);
 static void moq_source_read_track(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				  const std::shared_ptr<Track> &track);
 static void moq_source_on_frame(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
@@ -628,16 +636,15 @@ static void moq_source_on_resolved(struct moq_source *ctx, const std::shared_ptr
 		moq_source_discard_candidate(conn, track);
 		return;
 	}
-	track->call =
-		moq::MediaContainerConsumer::subscribe(*result, {track->name, track->container})
-			.then(ctx->worker.Executor(),
-			      moq_source_track_current<moq::expected<std::shared_ptr<moq::MediaContainerConsumer>>>(
-				      ctx, conn, track, moq_source_on_subscribed));
+	track->call = moq::MediaTrackConsumer::subscribe(*result, {track->name, track->container})
+			      .then(ctx->worker.Executor(),
+				    moq_source_track_current<moq::expected<std::shared_ptr<moq::MediaTrackConsumer>>>(
+					    ctx, conn, track, moq_source_on_subscribed));
 }
 
 static void moq_source_on_subscribed(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				     const std::shared_ptr<Track> &track,
-				     moq::expected<std::shared_ptr<moq::MediaContainerConsumer>> result)
+				     moq::expected<std::shared_ptr<moq::MediaTrackConsumer>> result)
 {
 	if (!result) {
 		LOG_ERROR("Failed to subscribe to %s track: %s", track->kind, result.error().to_string().c_str());
@@ -758,11 +765,12 @@ static void moq_source_subscribe_video(struct moq_source *ctx, const std::shared
 		return;
 	}
 
-	if (moq_source_same_video(conn->video.get(), rendition->first, rendition->second)) {
+	const auto name = moq_source_track_name(*rendition);
+	if (moq_source_same_video(conn->video.get(), name, rendition->second)) {
 		conn->pending_video.reset();
 		return;
 	}
-	if (moq_source_same_video(conn->pending_video.get(), rendition->first, rendition->second))
+	if (moq_source_same_video(conn->pending_video.get(), name, rendition->second))
 		return;
 	conn->pending_video.reset();
 
@@ -773,7 +781,7 @@ static void moq_source_subscribe_video(struct moq_source *ctx, const std::shared
 		return;
 	}
 
-	auto track = std::make_shared<Track>("Video", rendition->first, rendition->second.container);
+	auto track = std::make_shared<Track>("Video", name, rendition->second.container);
 	track->video_config = rendition->second;
 	track->video_decoder = std::move(decoder);
 	conn->pending_video = track;
@@ -791,11 +799,12 @@ static void moq_source_subscribe_audio(struct moq_source *ctx, const std::shared
 		moq_source_clear_audio_locked(ctx);
 		return;
 	}
-	if (moq_source_same_audio(conn->audio.get(), rendition->first, rendition->second)) {
+	const auto name = moq_source_track_name(*rendition);
+	if (moq_source_same_audio(conn->audio.get(), name, rendition->second)) {
 		conn->pending_audio.reset();
 		return;
 	}
-	if (moq_source_same_audio(conn->pending_audio.get(), rendition->first, rendition->second))
+	if (moq_source_same_audio(conn->pending_audio.get(), name, rendition->second))
 		return;
 	conn->pending_audio.reset();
 	auto decoder = moq_source_prepare_audio_decoder(rendition->second);
@@ -805,7 +814,7 @@ static void moq_source_subscribe_audio(struct moq_source *ctx, const std::shared
 	}
 
 	LOG_INFO("Subscribing to audio track (%u Hz, %u ch)", decoder->sample_rate, decoder->channels);
-	auto track = std::make_shared<Track>("Audio", rendition->first, rendition->second.container);
+	auto track = std::make_shared<Track>("Audio", name, rendition->second.container);
 	track->audio_config = rendition->second;
 	track->audio_decoder = std::move(decoder);
 	conn->pending_audio = track;

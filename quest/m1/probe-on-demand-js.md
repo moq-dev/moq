@@ -25,4 +25,4 @@ Reconnects (`connection/reload.ts`) carry demand to the new connection.
 ## Related
 
 - [Rust PROBE on demand](/quest/m1/probe-on-demand-rs.md) - the same outcome for Rust clients
-- [Viewer up-switch](/quest/m1/viewer-upswitch.md) - also sends PROBE targets, so it reads the estimate while choosing renditions
+- [Viewer up-switch](/quest/m2/viewer-upswitch.md) - also sends PROBE targets, so it reads the estimate while choosing renditions
