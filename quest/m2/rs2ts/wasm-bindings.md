@@ -17,7 +17,7 @@ versions and transports with the browser fixtures and `just test interop --all`.
 Wire new tests into CI, at least nightly.
 
 Complete the binding the [generator quest](/quest/m2/rs2ts/generator.md)
-chose: `moq-ffi` through UniFFI, or the consume-only `moq-wasm`. Measure boundary calls, Promise allocation,
+chose: `moq-ffi` through UniFFI or BoltFFI, or the consume-only `moq-wasm`. Measure boundary calls, Promise allocation,
 payload copies, and retained memory. Compare a batched poll/event-drain
 boundary if these dominate, including latency and backpressure effects;
 do not require a sans-IO rewrite or impose batching latency to win throughput.
