@@ -310,15 +310,8 @@ async fn export_packs_aac_frames_up_to_their_buffer() {
 			pts += 1_920;
 		}
 	}
-	// And one more from each frame the tables ride on, which starts a PES of its own.
-	let tables = ts
-		.as_chunks::<188>()
-		.0
-		.iter()
-		.filter(|packet| packet[1] & 0x1f == 0 && packet[2] == 0)
-		.count();
 	assert!(
-		count <= frames.len().div_ceil(11) + 1 + tables,
+		count <= frames.len().div_ceil(11) + 1,
 		"{count} PES for {} frames",
 		frames.len()
 	);
@@ -1324,18 +1317,16 @@ async fn export_drops_an_ac3_frame_cut_by_a_marker() {
 async fn export_packs_ac3_frames_up_to_their_buffer() {
 	let stream: Vec<u8> = (0..100).flat_map(ac3_frame).collect();
 	let pes = exported_ac3_pes(vec![Ac3Write::Pes(0, stream.clone())]).await;
-	// 44 of the 128-byte frames to a PES, the first frame alone, sent as it starts, and a PES
-	// from each frame the tables ride on.
-	let tables = pes.iter().filter(|(_, _, tables)| *tables).count();
+	// 44 of the 128-byte frames to a PES, and the first frame alone, sent as it starts.
 	assert!(
-		pes.len() <= 100usize.div_ceil(44) + 1 + tables,
+		pes.len() <= 100usize.div_ceil(44) + 1,
 		"{} PES for 100 frames",
 		pes.len()
 	);
-	for (_, payload, _) in &pes {
+	for (_, payload) in &pes {
 		assert!(14 + payload.len() <= 5_696, "a {}-byte PES overflows B", payload.len());
 	}
-	let bytes: Vec<u8> = pes.into_iter().flat_map(|(_, payload, _)| payload).collect();
+	let bytes: Vec<u8> = pes.into_iter().flat_map(|(_, payload)| payload).collect();
 	assert_eq!(bytes, stream, "every frame whole and in order");
 	let timed = exported_ac3_frames(vec![Ac3Write::Pes(0, stream)]).await;
 	assert!(
@@ -1377,8 +1368,8 @@ enum Ac3Write {
 }
 
 /// Export `input` on an AC-3 passthrough PID beside bbb's media, and return the PTS and
-/// payload of every PES on that PID, and whether a PAT went out since the PES before it.
-async fn exported_ac3_pes(input: Vec<Ac3Write>) -> Vec<(u64, Vec<u8>, bool)> {
+/// payload of every PES on that PID.
+async fn exported_ac3_pes(input: Vec<Ac3Write>) -> Vec<(u64, Vec<u8>)> {
 	const AC3_PID: u16 = 0x104;
 	let data = include_bytes!("test_data/bbb.ts");
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -1440,12 +1431,10 @@ async fn exported_ac3_pes(input: Vec<Ac3Write>) -> Vec<(u64, Vec<u8>, bool)> {
 	)
 	.await;
 
-	// The PTS of every PES on the AC-3 PID, its payload, and whether a PAT leads it.
-	let mut pes: Vec<(u64, Vec<u8>, bool)> = Vec::new();
-	let mut tables = false;
+	// The PTS of every PES on the AC-3 PID, and its payload.
+	let mut pes: Vec<(u64, Vec<u8>)> = Vec::new();
 	for packet in ts.as_chunks::<188>().0 {
 		let pid = (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2]);
-		tables |= pid == 0;
 		if pid != AC3_PID || packet[3] & 0x10 == 0 {
 			continue;
 		}
@@ -1462,11 +1451,7 @@ async fn exported_ac3_pes(input: Vec<Ac3Write>) -> Vec<(u64, Vec<u8>, bool)> {
 				| u64::from(b[2] >> 1) << 15
 				| u64::from(b[3]) << 7
 				| u64::from(b[4] >> 1);
-			pes.push((
-				pts,
-				body[9 + usize::from(body[8])..].to_vec(),
-				std::mem::take(&mut tables),
-			));
+			pes.push((pts, body[9 + usize::from(body[8])..].to_vec()));
 		} else if let Some(last) = pes.last_mut() {
 			last.1.extend_from_slice(body);
 		}
@@ -1478,7 +1463,7 @@ async fn exported_ac3_pes(input: Vec<Ac3Write>) -> Vec<(u64, Vec<u8>, bool)> {
 /// timed by its PES's PTS and the frames ahead of it there.
 async fn exported_ac3_frames(input: Vec<Ac3Write>) -> Vec<(u64, Vec<u8>)> {
 	let mut frames = Vec::new();
-	for (mut pts, mut payload, _) in exported_ac3_pes(input).await {
+	for (mut pts, mut payload) in exported_ac3_pes(input).await {
 		while !payload.is_empty() {
 			let header = crate::codec::ac3::parse_header(&payload).expect("the PES carries whole sync frames");
 			let rest = payload.split_off(header.len);
@@ -2133,8 +2118,8 @@ async fn aac_program_config_follows_each_table() {
 	);
 }
 
-/// AAC frames that run on share a PES, but the frame the tables ride on starts one: a receiver
-/// tuning in at a PAT/PMT reads the program config element first, not earlier raw blocks.
+/// AAC frames that run on share a PES, but every PID's frame repeating the program config
+/// element after the tables starts one, whichever PID's frame the tables rode on.
 #[tokio::test(start_paused = true)]
 async fn aac_program_config_leads_a_packed_pes() {
 	let mut quad = vec![0x11, 0x80, 0x04, 0xC4, 0x04, 0x00, 0x21, 0x10, 0x0C];
@@ -2143,38 +2128,73 @@ async fn aac_program_config_leads_a_packed_pes() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-	let track = broadcast
-		.create_track("a.aac", hang::container::track_info(hang::catalog::PRIORITY.audio))
-		.unwrap();
-	let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 4);
-	cfg.container = Container::Legacy;
-	cfg.description = Some(Bytes::from(quad));
-	catalog
-		.modify()
-		.unwrap()
-		.audio
-		.renditions
-		.insert("a.aac".to_string(), cfg);
-	let mut producer = Producer::new(track, HangContainer::Legacy(Kind::Audio));
-	// 1,024 samples at 48 kHz: 21.33 ms each, so the 500 ms table cadence lands mid-PES.
-	for i in 0..96u64 {
-		producer
-			.write(Frame {
-				timestamp: Timestamp::from_micros(i * 1_024 * 1_000_000 / 48_000).unwrap(),
-				duration: None,
-				payload: Bytes::from_static(&[0x20; 10]),
-				keyframe: true,
-			})
+	// Offset, so the tables ride one PID's frame while the other's PES is open.
+	let mut producers = Vec::new();
+	for (name, bytes, offset) in [("a.aac", 10, 0), ("b.aac", 40, 7_000)] {
+		let track = broadcast
+			.create_track(name, hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
-		producer.cut(None).unwrap();
+		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 4);
+		cfg.container = Container::Legacy;
+		cfg.description = Some(Bytes::from(quad.clone()));
+		catalog.modify().unwrap().audio.renditions.insert(name.to_string(), cfg);
+		producers.push((Producer::new(track, HangContainer::Legacy(Kind::Audio)), bytes, offset));
 	}
-	producer.finish().unwrap();
+	// 1,024 samples at 48 kHz: 21.33 ms each, so the 500 ms table cadence lands mid-PES.
+	for (producer, bytes, offset) in &mut producers {
+		for i in 0..96u64 {
+			producer
+				.write(Frame {
+					timestamp: Timestamp::from_micros(*offset + i * 1_024 * 1_000_000 / 48_000).unwrap(),
+					duration: None,
+					payload: Bytes::from(vec![0x20; *bytes]),
+					keyframe: true,
+				})
+				.unwrap();
+			producer.cut(None).unwrap();
+		}
+		producer.finish().unwrap();
+	}
 	let ts = drain(consumer).await;
 
-	let units = aac_program_configs(&ts);
-	assert!(units.len() < 96, "the frames share PESs: {}", units.len());
-	for (i, (after_pat, pce)) in units.iter().enumerate() {
-		assert_eq!(after_pat, pce, "PES {i}: the element leads the PES after the tables");
+	// Each PID's PESs, and each PES's frames: whether the element leads its raw data block.
+	let mut pes: std::collections::HashMap<u16, Vec<Vec<u8>>> = Default::default();
+	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		let pid = packet.header.pid.as_u16();
+		match packet.payload {
+			Some(TsPayload::PesStart(start)) => pes.entry(pid).or_default().push(start.data.to_vec()),
+			Some(TsPayload::PesContinuation(rest)) => {
+				pes.get_mut(&pid).unwrap().last_mut().unwrap().extend_from_slice(&rest)
+			}
+			_ => {}
+		}
+	}
+	assert_eq!(pes.len(), 2);
+	for (pid, pes) in pes {
+		let frames: Vec<Vec<bool>> = pes
+			.iter()
+			.map(|data| {
+				let (mut data, mut frames) = (&data[..], Vec::new());
+				while !data.is_empty() {
+					let header = super::adts::Header::parse(data).unwrap();
+					// ID_PCE in the first three bits of the raw data block.
+					frames.push(data[header.header_len] >> 5 == 5);
+					data = &data[header.frame_len..];
+				}
+				frames
+			})
+			.collect();
+		assert_eq!(frames.iter().map(Vec::len).sum::<usize>(), 96, "PID {pid}");
+		assert!(frames.len() < 96, "PID {pid}: the frames share PESs");
+		assert!(
+			frames.iter().filter(|frames| frames[0]).count() > 2,
+			"PID {pid}: the element repeats after the tables"
+		);
+		assert!(
+			frames.iter().all(|frames| !frames[1..].contains(&true)),
+			"PID {pid}: a PES carries the element after older raw blocks: {frames:?}"
+		);
 	}
 }
 

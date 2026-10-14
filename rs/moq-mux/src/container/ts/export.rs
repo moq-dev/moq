@@ -1885,6 +1885,12 @@ impl<E: catalog::Catalog> Export<E> {
 		// Refresh PSI at keyframes or after the interval lapses.
 		let psi = (is_video && frame.keyframe) || due(frame.timestamp, self.last_psi, PSI_INTERVAL);
 		if psi {
+			// A receiver tunes in at the tables, so each AAC PID's next frame repeats its program
+			// config element. Its older frames go on ahead of the tables, so that frame starts a
+			// PES rather than following raw blocks that lack the element.
+			self.flush_packs(
+				|track, _| matches!(&track.kind, Kind::Aac { config, .. } if config.program_config.is_some()),
+			)?;
 			for track in self.tracks.values_mut() {
 				if let Kind::Aac { repeat, .. } = &mut track.kind {
 					*repeat = true;
@@ -2032,9 +2038,8 @@ impl<E: catalog::Catalog> Export<E> {
 	/// out in.
 	///
 	/// A PES starts at every frame whose place on the media timeline, counted in frames, is a
-	/// multiple of the frames the buffer holds, and at every frame the tables ride on, so
-	/// exporters of the broadcast that joined at different frames still cut the same PESs from
-	/// the first such frame, like [`due`].
+	/// multiple of the frames the buffer holds, so exporters of the broadcast that joined at
+	/// different frames still cut the same PESs from the first such frame, like [`due`].
 	fn pack(
 		&mut self,
 		name: &str,
@@ -2056,11 +2061,8 @@ impl<E: catalog::Catalog> Export<E> {
 		// Rounded, since a frame need not last whole microseconds: AAC's 1,024 samples at 48 kHz.
 		let frame = 1_000_000 * u128::from(samples);
 		let place = (unit.timestamp.as_micros() * u128::from(rate) + frame / 2) / frame;
-		// A PTS is a whole 90 kHz tick, so the frames run on within one of where they end. A
-		// frame bearing the tables starts a PES, since a receiver tunes in there and AAC's
-		// program config element rides that frame only.
-		let joins = tables.is_empty()
-			&& !place.is_multiple_of(fit)
+		// A PTS is a whole 90 kHz tick, so the frames run on within one of where they end.
+		let joins = !place.is_multiple_of(fit)
 			&& track.pack.as_ref().is_some_and(|pack| {
 				pack.rate == rate
 					&& pack.payload.len() + payload.len() <= size
@@ -2109,15 +2111,15 @@ impl<E: catalog::Catalog> Export<E> {
 	}
 
 	/// Send on, in decode order, the packed frames of each track for which `done` holds, given
-	/// the slot its first frame is due in.
-	fn flush_packs(&mut self, done: impl Fn(u128) -> bool) -> anyhow::Result<()> {
+	/// the track and the slot its first frame is due in.
+	fn flush_packs(&mut self, done: impl Fn(&Track, u128) -> bool) -> anyhow::Result<()> {
 		let mut due: Vec<(Timestamp, String)> = self
 			.tracks
 			.iter()
 			.filter_map(|(name, track)| {
 				let pack = track.pack.as_ref()?;
 				let by = pack.decode.as_nanos().saturating_sub(track.drain().as_nanos());
-				done(schedule::slot(by)).then(|| (pack.decode, name.clone()))
+				done(track, schedule::slot(by)).then(|| (pack.decode, name.clone()))
 			})
 			.collect();
 		due.sort();
@@ -2253,7 +2255,7 @@ impl<E: catalog::Catalog> Export<E> {
 		};
 		let (pcr_pid, pmt_pid) = (psi.pcr_pid, psi.pmt_pid);
 		if known.is_none() {
-			self.flush_packs(|_| true)?;
+			self.flush_packs(|_, _| true)?;
 		}
 		let lead = schedule::slot(self.budget().as_nanos());
 		loop {
@@ -2262,7 +2264,7 @@ impl<E: catalog::Catalog> Export<E> {
 			if known.is_some()
 				&& let Some((index, _)) = self.schedule.upcoming()
 			{
-				self.flush_packs(|due| due <= index + lead)?;
+				self.flush_packs(|_, due| due <= index + lead)?;
 			}
 			let Some(slot) = self.schedule.next(known)? else {
 				break;
