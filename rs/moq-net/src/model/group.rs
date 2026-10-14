@@ -138,13 +138,8 @@ pub(crate) struct GroupState {
 	// Completed frames, each a contiguous payload. `offset` is the first frame this
 	// handle holds, raised by [`Producer::start_at`].
 	pub(crate) frames: VecDeque<Frame>,
-	// Relay metadata for `frames`, at the same local index. Frames past its end carry
-	// none, so a group that never sees a field never allocates it or pays to skip it.
-	objects: VecDeque<Option<Arc<super::object::Fields>>>,
-	// Known before frames arrive; the terminal object is learned at the stream tail.
-	pub(crate) wire: Option<Wire>,
-	pub(crate) end_object: Option<Arc<super::object::Fields>>,
-	metadata_bytes: u64,
+	// IETF relay state, boxed so a group that never carries any pays one pointer.
+	relay: Option<Box<Relay>>,
 
 	// The single in-flight frame, if one is open.
 	pub(crate) partial: Option<Partial>,
@@ -188,6 +183,19 @@ pub(crate) struct GroupState {
 	// `Alive::aborted`, so [`Producer::abort`] stays the only writer: anything else
 	// setting this would leave track scans reading a group as live.
 	pub(crate) abort: Option<Error>,
+}
+
+/// What an IETF relay keeps beside a group's frames.
+#[derive(Default)]
+struct Relay {
+	// Known before frames arrive.
+	wire: Option<Wire>,
+	// The terminal object, learned at the stream tail.
+	end_object: Option<Arc<super::object::Fields>>,
+	// Fields for `frames`, at the same local index. Frames past its end carry none.
+	objects: VecDeque<Option<Arc<super::object::Fields>>>,
+	// Heap charged for this box, its fields, and the terminal object.
+	bytes: u64,
 }
 
 /// The IETF header state that cannot be inferred from a plain frame list.
@@ -364,9 +372,35 @@ impl GroupState {
 		self.next_index.saturating_sub(self.offset).saturating_add(extra_frames) > MAX_GROUP_FRAMES
 			|| self
 				.cache
-				.saturating_add(self.metadata_bytes)
+				.saturating_add(self.relay.as_ref().map_or(0, |relay| relay.bytes))
 				.saturating_add(extra_bytes)
 				> MAX_CACHE_BYTES
+	}
+
+	/// The relay state, charging its box the first time a group needs it.
+	fn relay(&mut self) -> &mut Relay {
+		let charge = &mut self.charge;
+		self.relay.get_or_insert_with(|| {
+			let bytes = size_of::<Relay>() as u64;
+			charge.add(bytes);
+			Box::new(Relay {
+				bytes,
+				..Default::default()
+			})
+		})
+	}
+
+	pub(crate) fn wire(&self) -> Option<&Wire> {
+		self.relay.as_ref()?.wire.as_ref()
+	}
+
+	fn wire_mut(&mut self) -> Option<&mut Wire> {
+		self.relay.as_mut()?.wire.as_mut()
+	}
+
+	/// Whether Object IDs left the frame ordinals, so ordinal recovery cannot stitch.
+	pub(crate) fn sparse(&self) -> bool {
+		self.wire().is_some_and(|wire| wire.sparse)
 	}
 
 	/// Reserve the next completed frame, returning growth not covered by the fixed overhead.
@@ -379,15 +413,22 @@ impl GroupState {
 
 	/// Reserve a metadata slot for the next completed frame, returning the growth.
 	fn reserve_fields(&mut self) -> u64 {
-		let before = self.objects.capacity();
-		self.objects.resize(self.frames.len(), None);
-		self.objects.reserve(1);
-		((self.objects.capacity() - before) * size_of::<Option<Arc<super::object::Fields>>>()) as u64
+		let len = self.frames.len();
+		let objects = &mut self.relay().objects;
+		let before = objects.capacity();
+		objects.resize(len, None);
+		objects.reserve(1);
+		((objects.capacity() - before) * size_of::<Option<Arc<super::object::Fields>>>()) as u64
+	}
+
+	/// How many completed frames, from the first, the fields table covers.
+	fn objects(&self) -> usize {
+		self.relay.as_ref().map_or(0, |relay| relay.objects.len())
 	}
 
 	/// The relay metadata of the completed frame at `local`, if it carried any.
 	fn fields(&self, local: usize) -> Option<Arc<super::object::Fields>> {
-		self.objects.get(local).cloned().flatten()
+		self.relay.as_ref()?.objects.get(local).cloned().flatten()
 	}
 
 	/// Charge the in-flight frame's bytes written since its last charge, as a write access.
@@ -413,12 +454,15 @@ impl GroupState {
 	/// Drop the cached frames (and any in-flight tail) and release their pool charge.
 	fn release(&mut self) {
 		self.frames = VecDeque::new();
-		self.objects = VecDeque::new();
 		self.partial = None;
-		self.metadata_bytes = self.end_object.as_ref().map_or(0, |fields| fields.heap());
 		self.cache = 0;
 		self.charge.clear();
-		self.charge.add(self.metadata_bytes);
+		// The header state and terminal object outlive the frames.
+		if let Some(relay) = &mut self.relay {
+			relay.objects = VecDeque::new();
+			relay.bytes = size_of::<Relay>() as u64 + relay.end_object.as_ref().map_or(0, |fields| fields.heap());
+			self.charge.add(relay.bytes);
+		}
 	}
 }
 
@@ -539,11 +583,11 @@ impl std::ops::Deref for Producer {
 
 impl Producer {
 	pub(crate) fn wire(&self) -> Option<Wire> {
-		self.state.read().wire.clone()
+		self.state.read().wire().cloned()
 	}
 
 	pub(crate) fn set_wire(&self, wire: Wire) -> Result<()> {
-		modify(&self.state)?.wire = Some(wire);
+		modify(&self.state)?.relay().wire = Some(wire);
 		Ok(())
 	}
 
@@ -553,7 +597,7 @@ impl Producer {
 		}
 		let mut state = modify(&self.state)?;
 		let offset = state.offset as u64;
-		if let Some(wire) = &mut state.wire {
+		if let Some(wire) = state.wire_mut() {
 			let missing = match wire.last {
 				None => id.checked_sub(offset).ok_or(Error::MalformedTrack)?,
 				Some(prior) => id
@@ -571,7 +615,7 @@ impl Producer {
 
 	pub(crate) fn set_end_object(&self, fields: super::object::Fields) -> Result<()> {
 		let mut state = modify(&self.state)?;
-		if state.fin.is_some() || state.end_object.is_some() {
+		if state.fin.is_some() || state.relay.as_ref().is_some_and(|relay| relay.end_object.is_some()) {
 			return Err(Error::MalformedTrack);
 		}
 		let bytes = fields.heap();
@@ -579,11 +623,12 @@ impl Producer {
 			return Err(Error::GroupTooLarge);
 		}
 		state.charge.add(bytes);
-		state.metadata_bytes += bytes;
-		if let Some(wire) = &mut state.wire {
+		let relay = state.relay();
+		relay.bytes += bytes;
+		if let Some(wire) = &mut relay.wire {
 			wire.last = Some(fields.id);
 		}
-		state.end_object = Some(Arc::new(fields));
+		relay.end_object = Some(Arc::new(fields));
 		Ok(())
 	}
 
@@ -860,14 +905,16 @@ impl Producer {
 			buf: buf.clone(),
 			charged: 0,
 		});
-		state.metadata_bytes += metadata_bytes;
-		state.charge.add(metadata_bytes);
+		if metadata_bytes > 0 {
+			state.relay().bytes += metadata_bytes;
+			state.charge.add(metadata_bytes);
+		}
 		let object_id = state
 			.partial
 			.as_ref()
 			.and_then(|partial| partial.fields.as_ref())
 			.map_or(state.next_index as u64, |fields| fields.id);
-		if let Some(wire) = &mut state.wire {
+		if let Some(wire) = state.wire_mut() {
 			wire.last = Some(object_id);
 			wire.sparse |= object_id != (next_index - 1) as u64;
 		}
@@ -921,8 +968,9 @@ impl Producer {
 		if let Some(fields) = state.partial.take().and_then(|partial| partial.fields) {
 			// The slot was reserved and charged by `charge_partial` above.
 			let len = state.frames.len();
-			state.objects.resize(len, None);
-			state.objects.push_back(Some(fields));
+			let objects = &mut state.relay().objects;
+			objects.resize(len, None);
+			objects.push_back(Some(fields));
 		}
 		state.frames.push_back(frame);
 		state.committed = state.next_index;
@@ -1067,7 +1115,7 @@ impl Producer {
 	/// tail, and the count outlives the released cache.
 	pub(crate) fn resume_frame(&self) -> Option<usize> {
 		let state = self.state.read();
-		if state.fin.is_some() || state.wire.as_ref().is_some_and(|wire| wire.sparse) {
+		if state.fin.is_some() || state.sparse() {
 			return None;
 		}
 		(state.committed > state.offset).then_some(state.committed)
@@ -1376,7 +1424,7 @@ impl Prefetch {
 			self.len += 1;
 		}
 		// Plain frames never reach the metadata table, so they skip this entirely.
-		if local < state.objects.len() {
+		if local < state.objects() {
 			let fields = self.fields.get_or_insert_default();
 			for (i, slot) in fields.iter_mut().enumerate() {
 				*slot = if i < self.len { state.fields(local + i) } else { None };
@@ -1530,18 +1578,18 @@ impl std::ops::Deref for Consumer {
 impl Consumer {
 	pub(crate) fn last_object(&self) -> Option<u64> {
 		let state = self.cursor.state.read();
-		match &state.wire {
+		match state.wire() {
 			Some(wire) => wire.last,
 			None => (state.next_index as u64).checked_sub(1),
 		}
 	}
 
 	pub(crate) fn wire(&self) -> Option<Wire> {
-		self.cursor.state.read().wire.clone()
+		self.cursor.state.read().wire().cloned()
 	}
 
 	pub(crate) fn end_object(&self) -> Option<Arc<super::object::Fields>> {
-		self.cursor.state.read().end_object.clone()
+		self.cursor.state.read().relay.as_ref()?.end_object.clone()
 	}
 
 	/// Fill a private batch without losing metadata through the public frame view.
@@ -1619,7 +1667,7 @@ impl Consumer {
 				return res;
 			}
 			// An ordinal FETCH would request different content after an Object ID gap.
-			if self.cursor.state.read().wire.as_ref().is_some_and(|wire| wire.sparse) {
+			if self.cursor.state.read().sparse() {
 				return Poll::Ready(Err(Error::Unsupported));
 			}
 			let replacement = match recover.poll(self.cursor.index as u64, failed.as_ref(), waiter) {
@@ -2298,7 +2346,7 @@ mod test {
 			id: 4,
 			properties: Default::default(),
 		};
-		let charged = fields.heap();
+		let charged = size_of::<Relay>() as u64 + fields.heap();
 		group.set_end_object(fields.clone()).unwrap();
 		assert!(matches!(group.set_end_object(fields), Err(Error::MalformedTrack)));
 		group.finish().unwrap();

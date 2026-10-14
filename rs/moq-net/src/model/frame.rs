@@ -780,7 +780,7 @@ impl Consumer {
 			if !recover.wants(failed.as_ref(), waiter) {
 				return res;
 			}
-			if self.state.read().wire.as_ref().is_some_and(|wire| wire.sparse) {
+			if self.state.read().sparse() {
 				return Poll::Ready(Err(Error::Unsupported));
 			}
 			let mut replacement = match recover.poll(*index, failed.as_ref(), waiter) {
