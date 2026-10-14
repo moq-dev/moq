@@ -7243,7 +7243,10 @@ mod serve_tests {
 
 					let buf = standalone_fetch(
 						&h,
-						Location { group: 4, object: start },
+						Location {
+							group: 4,
+							object: start,
+						},
 						Location { group: 4, object: 6 },
 						GroupOrder::Ascending,
 					)

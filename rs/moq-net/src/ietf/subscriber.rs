@@ -4004,7 +4004,11 @@ where
 		// accepting the group or letting End of Track mark where the track ends.
 		if draft20 && (end.group != sequence || end.object <= start) {
 			let err = Error::ProtocolViolation;
-			tracing::warn!(group = sequence, ?end, "FETCH_OK's End Location is outside the requested range");
+			tracing::warn!(
+				group = sequence,
+				?end,
+				"FETCH_OK's End Location is outside the requested range"
+			);
 			self.session.clone().close(
 				super::error::to_session_code(&SessionError::from(&err)),
 				err.to_string().as_ref(),
