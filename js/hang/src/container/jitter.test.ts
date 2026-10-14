@@ -34,6 +34,7 @@ describe("audio jitter conformance", () => {
 	it("reads the whole corpus", () => {
 		expect(cases.map((c) => c.name).sort()).toEqual([
 			"advertised",
+			"backlog",
 			"buildup",
 			"fixed",
 			"flush",

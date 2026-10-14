@@ -3,16 +3,30 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import { type Group, Error as NetError, Time } from "@moq/net";
 import { Effect, type Getter } from "@moq/signals";
-import type { Broadcast } from "@moq/watch";
+import type { Broadcast, Delay } from "@moq/watch";
 import type { Arrival } from "./schema.ts";
+
+/**
+ * The least max delay the decoder subscribes with at "auto": the estimator's 2 s ceiling, so a frame
+ * later than the target is still observed (doc/concept/audio-jitter.md). The observer asks for the
+ * same, or it would drop exactly the late frames the estimator measures.
+ */
+const AUTO_MAX_DELAY = Time.Milli(2000);
 
 /** The public player inputs needed to observe its existing subscription. */
 export type Input = {
 	broadcast: Getter<Broadcast | undefined>;
 	track: Getter<string | undefined>;
 	config: Getter<Catalog.AudioConfig | undefined>;
+	/** The configured delay, which decides whether the decoder subscribes past `maxDelay`. */
+	delay: Getter<Delay>;
 	maxDelay: Getter<Time.Milli>;
 };
+
+/** The max delay the decoder subscribes with, which the observer matches. */
+function subscribed(delay: Delay, maxDelay: Time.Milli): Time.Milli {
+	return delay === "auto" ? Time.Milli.max(maxDelay, AUTO_MAX_DELAY) : maxDelay;
+}
 
 /** Record frames on the player's connection with its subscription settings. */
 export class Capture {
@@ -34,14 +48,20 @@ export class Capture {
 				if (!active) return;
 				const track = active
 					.track(name)
-					.subscribe({ priority: Catalog.PRIORITY.audio, maxDelay: input.maxDelay.peek() });
+					.subscribe({
+						priority: Catalog.PRIORITY.audio,
+						maxDelay: subscribed(input.delay.peek(), input.maxDelay.peek()),
+					});
 				const groups = new Set<Group.Consumer>();
 				effect.cleanup(() => {
 					track.close();
 					for (const group of groups) group.close();
 				});
 				effect.run((inner) =>
-					track.update({ priority: Catalog.PRIORITY.audio, maxDelay: inner.get(input.maxDelay) }),
+					track.update({
+						priority: Catalog.PRIORITY.audio,
+						maxDelay: subscribed(inner.get(input.delay), inner.get(input.maxDelay)),
+					}),
 				);
 				effect.spawn(async () => {
 					try {

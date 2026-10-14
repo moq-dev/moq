@@ -34,9 +34,10 @@ const PRIOR = Float64Array.from({ length: BUCKETS }, (_, i) => 0.5 ** (i + 1));
 /**
  * How much buffer late arrivals need, measured from arrival timing alone.
  *
- * Each frame's delay is measured against the fastest frame in the last `WINDOW` of media time, the
- * largest delay per `RESAMPLE` interval lands in a decaying histogram, and the estimate is its 95th
- * percentile. Excludes the codec frame and any advertised floor, which the caller composes on top.
+ * Each frame's delay is measured against the fastest frame at or before it in the last `WINDOW` of
+ * media time, the largest delay per `RESAMPLE` interval lands in a decaying histogram, and the
+ * estimate is its 95th percentile. Excludes the codec frame and any advertised floor, which the
+ * caller composes on top.
  */
 export class Jitter {
 	/** Arrivals still inside the reference window, in media order. */
@@ -57,24 +58,30 @@ export class Jitter {
 
 	/** Fold one frame in: `arrival` on the receiver's monotonic clock, `media` its timestamp. */
 	observe(arrival: Time.Milli, media: Time.Milli): void {
-		// A reordered frame is excluded rather than measured: the media-time gap back to the frame
-		// that overtook it would otherwise be added to the delay.
-		if (media <= this.#newest) return;
-		this.#newest = media;
+		// A reordered frame is measured but never joins the window: it arrived after a newer frame,
+		// so it can never be the fastest, and a later frame must not be measured against it.
+		if (media > this.#newest) {
+			this.#newest = media;
 
-		// Pruning by media time is what makes a timestamp jump self-correcting: everything before it
-		// leaves the window at once and the new frame becomes its own reference.
-		let stale = 0;
-		while (stale < this.#history.length && this.#history[stale].media < media - WINDOW) stale++;
-		if (stale > 0) this.#history.splice(0, stale);
-		this.#history.push({ arrival, media });
-
-		// Delay against the fastest frame in the window, not the previous one, so a queue that
-		// fills a little per frame reads as the build-up it is.
-		let reference = this.#history[0];
-		for (const entry of this.#history) {
-			if (entry.arrival - entry.media < reference.arrival - reference.media) reference = entry;
+			// Pruning by media time is what makes a timestamp jump self-correcting: everything before
+			// it leaves the window at once and the new frame becomes its own reference.
+			let stale = 0;
+			while (stale < this.#history.length && this.#history[stale].media < media - WINDOW) stale++;
+			if (stale > 0) this.#history.splice(0, stale);
+			this.#history.push({ arrival, media });
 		}
+
+		// Delay against the fastest frame in the window at or before this one, not the previous one,
+		// so a queue that fills a little per frame reads as the build-up it is, and an older frame
+		// held behind newer ones reads as the wait playing it in order costs. A frame older than the
+		// whole window, such as the backlog a subscription delivers after its live edge, has no
+		// reference and is not measured.
+		let reference: { arrival: number; media: number } | undefined;
+		for (const entry of this.#history) {
+			if (entry.media > media) break;
+			if (!reference || entry.arrival - entry.media < reference.arrival - reference.media) reference = entry;
+		}
+		if (!reference) return;
 		const delay = Math.max(0, arrival - reference.arrival - (media - reference.media));
 
 		if (this.#origin === undefined) {

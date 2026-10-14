@@ -83,26 +83,30 @@ export class Estimator {
 
 	/** Fold one frame's arrival into the estimate. */
 	observe({ arrival, media }: Arrival): void {
-		// A reordered arrival is excluded rather than measured: the media-time gap back
-		// to the frame that overtook it would otherwise be added to the delay.
-		if (media <= this.#newest) return;
-		this.#newest = media;
+		// A reordered arrival is measured but never joins the window: it arrived after a
+		// newer frame, so it is never the fastest, and nothing later is measured against it.
+		if (media > this.#newest) {
+			this.#newest = media;
 
-		// Pruning by media time rather than by arrival is what makes a timestamp jump
-		// self-correcting: everything before it leaves the window at once.
-		while (this.#history.length > 0 && this.#history[0].media < media - WINDOW) {
-			this.#history.shift();
+			// Pruning by media time rather than by arrival is what makes a timestamp jump
+			// self-correcting: everything before it leaves the window at once.
+			while (this.#history.length > 0 && this.#history[0].media < media - WINDOW) {
+				this.#history.shift();
+			}
+			this.#history.push({ arrival, media });
 		}
-		this.#history.push({ arrival, media });
 
-		// The fastest frame still in the window, so delay is measured against the
-		// best-case path instead of against the previous frame.
-		let reference = this.#history[0];
+		// The fastest frame in the window at or before this one, so delay is measured
+		// against the best-case path instead of against the previous frame. A frame
+		// older than the whole window has nothing to be measured against.
+		let reference: Arrival | undefined;
 		for (const entry of this.#history) {
-			if (entry.arrival - entry.media < reference.arrival - reference.media) {
+			if (entry.media > media) break;
+			if (reference === undefined || entry.arrival - entry.media < reference.arrival - reference.media) {
 				reference = entry;
 			}
 		}
+		if (reference === undefined) return;
 
 		const delay = Math.max(0, arrival - reference.arrival - (media - reference.media));
 
