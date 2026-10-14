@@ -94,6 +94,11 @@ jobs:
           SCOPE: ${{ github.event_name == 'push' && '--all' || '' }}
         run: just rs windows "$SCOPE"
 
+      # TEMPORARY (reverted before merge): run the Windows tests on this PR.
+      - name: Test
+        shell: bash
+        run: just rs windows-test
+
   macos:
     name: macOS
     if: github.event.action != 'closed'
