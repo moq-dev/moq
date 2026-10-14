@@ -25,7 +25,9 @@ Decided with the maintainer on 2026-10-13:
   crates using wasm-bindgen.
 - **BoltFFI's known gaps**: no Go or C++, Dart is unfinished, C is
   sync-only, and async constructors and static async methods are dropped
-  (boltffi/boltffi#95, which `connect` hits). One maintainer wrote about 80%
+  (boltffi/boltffi#95). `MoqClient::connect` takes `&self` and works, but
+  async constructors such as the media catalog consumer's `subscribe` hit
+  it. One maintainer wrote about 80%
   of the code. Same-name types in one target probably collide (RFC #700).
   Put each gap in the report with what closing it in a fork would cost.
 - **UniFFI's known costs**: three generator forks broken by every minor

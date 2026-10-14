@@ -1,9 +1,10 @@
-# [L] Binding payloads cross the FFI in one copy
+# [L] Binding payloads cross the FFI without per-byte copies
 
 ## Goal
 
-A binding moves a frame payload across the FFI with at most one bulk copy in
-each direction, proven by a payload benchmark in every wrapper (Python, Go,
+A binding moves a frame payload across the FFI with no per-byte loop: every
+copy on the path is a bulk copy, and the report counts them per direction.
+Proven by a payload benchmark in every wrapper (Python, Go,
 Kotlin, Swift, Dart, and C++) that runs nightly. The benchmark is the shared
 harness later binding performance quests reuse.
 
@@ -26,7 +27,10 @@ Decided with the maintainer on 2026-10-13:
   path covers arguments, record fields (`MoqFrame.payload`, video and audio
   frames), and returns (`read_frame`, `recv_datagram`). Make it one
   `memcpy` in [moq-dev/uniffi](/quest/m1/uniffi-fork.md). The serialized
-  format is unchanged, so no generator or binding API changes.
+  format is unchanged, so no generator or binding API changes. Two copies
+  remain for records and returns (the wrapper's container to `RustBuffer`,
+  then `RustBuffer` to `Vec<u8>`); removing the second needs the ownership
+  change in [zero-copy returns](/quest/m2/ffi-bytes-return.md).
   #2946 already removed the per-byte copy on the Python side.
 - **`&[u8]` arguments only if the numbers say so.** UniFFI 0.32 makes
   `&[u8]` arguments zero-copy, but only for sync calls that take bytes

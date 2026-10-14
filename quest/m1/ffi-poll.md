@@ -18,14 +18,18 @@ Decided with the maintainer on 2026-10-13:
   cancel bugs (#2932, the swallowed-event fix) came from that machinery.
 - **Shape A, poll-native exports**: an async export is a `kio::wait` over the
   underlying `poll_*`, and UniFFI's `RustFuture` polls it directly. No
-  per-handle mutex and no spawned task. Cancelling the foreign future drops
-  the waiter. Measure what remains of `Task` (cancel, shutdown).
+  per-handle mutex and no spawned task. UniFFI's cancel only stops polling
+  and keeps the future until `rust_future_free`
+  (mozilla/uniffi-rs#2771), and `ffi::Task::run` depends on that today. So
+  Shape A includes the core change that drops the future on cancel,
+  prototyped on a UniFFI branch if [the fork](/quest/m1/uniffi-fork.md)
+  does not exist yet, and measures with and without it. Measure what
+  remains of `Task` (cancel, shutdown).
 - **Shape B, foreign poll**: export a sync `poll_x(waker)` whose waker is a
   foreign callback interface, and let each wrapper build its own future
   around it (asyncio, a Go channel, a coroutine). This works with UniFFI as
-  it is. Since moq owns [the fork](/quest/m1/uniffi-fork.md), a
-  generator-level poll protocol, or a `RustFuture` that drops the future on
-  cancel instead of at free, is a candidate too if the numbers justify it.
+  it is. A generator-level poll protocol in the fork is a candidate too if
+  the numbers justify it.
 - **Hot path**: track `next` and group `read_frame`, prototyped in both
   shapes beside the existing `Task` version.
 - **Measure** in Python and Go, on the [payload harness](/quest/m1/ffi-bytes.md):
