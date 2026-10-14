@@ -2094,8 +2094,9 @@ export class Consumer {
 						if (n <= 0) {
 							server.demanding.delete(path);
 							server.rejected.delete(path);
+							// Only the final waiter changes which pending routes are still needed.
+							this.#state.forget(path);
 						} else server.demanding.set(path, n);
-						this.#state.forget(path);
 					}
 				};
 				try {

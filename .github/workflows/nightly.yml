@@ -120,8 +120,9 @@ jobs:
         run: nix develop --command just js bench request-ids
 
       # A restart should cost the same whether one or many requests follow the path,
-      # and an unrelated route should wake none of them.
-      - name: JS origin request restart benchmark
+      # and an unrelated route should wake none of them. Cancellation also varies
+      # competing routes independently of cancelled waiters on the same path.
+      - name: JS origin request lifecycle benchmark
         if: ${{ !cancelled() }}
         run: nix develop --command just js bench requests
 

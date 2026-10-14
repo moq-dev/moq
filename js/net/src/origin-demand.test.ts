@@ -185,9 +185,16 @@ test.each([true, false])(
 	},
 );
 
-test.each(["peer", "local"] as const)("cancelling one waiter preserves a second %s requester", async (other) => {
+test.each([
+	["peer", 1],
+	["peer", 16],
+	["local", 1],
+	["local", 16],
+] as const)("cancelling one waiter preserves a second %s requester across %i routes", async (other, routes) => {
 	const origin = new Producer();
-	const dynamic = origin.dynamic(Path.from("room"));
+	const prefix = Path.from("room");
+	const dynamic = origin.dynamic(prefix, { cost: 0n });
+	for (let i = 1; i < routes; i++) origin.dynamic(prefix, { cost: BigInt(i) });
 	const requests = dynamic.requested();
 	const hold = new AbortController();
 	const wire = wireOf(origin.consume());
