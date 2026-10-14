@@ -182,6 +182,56 @@ test("resolves an MSF namespace relative to its catalog broadcast", () => {
 	expect(root.video?.renditions.video?.broadcast).toBe(Path.normalizeRelative("./left"));
 });
 
+// Example 1 from draft-ietf-moq-msf-00 repeats the publisher's full namespace on every track. A
+// subscriber under a different root still reads them from the catalog's own broadcast. The example's
+// truncated AV1 codec string is shortened to one the AV1 codecs parameter allows.
+test("a draft catalog repeating its own namespace plays from any root", () => {
+	const namespace = "conference.example.com/conference123/alice";
+	const catalog = Msf.decode(
+		new TextEncoder().encode(
+			JSON.stringify({
+				version: 1,
+				generatedAt: 1746104606044,
+				tracks: [
+					{
+						name: "1080p-video",
+						namespace,
+						packaging: "loc",
+						isLive: true,
+						targetLatency: 2000,
+						role: "video",
+						renderGroup: 1,
+						codec: "av01.0.08M.10",
+						width: 1920,
+						height: 1080,
+						framerate: 30,
+						bitrate: 1500000,
+					},
+					{
+						name: "audio",
+						namespace,
+						packaging: "loc",
+						isLive: true,
+						targetLatency: 2000,
+						role: "audio",
+						codec: "opus",
+						samplerate: 48000,
+						channelConfig: "2",
+						bitrate: 32000,
+					},
+				],
+			}),
+		),
+	);
+	for (const base of [namespace, `anon/${namespace}`, "conference123/alice", "alice"]) {
+		const root = toHang(catalog, Path.from(base));
+		expect(root.video?.renditions["1080p-video"]).toBeDefined();
+		expect(root.video?.renditions["1080p-video"]?.broadcast).toBeUndefined();
+		expect(root.audio?.renditions.audio).toBeDefined();
+		expect(root.audio?.renditions.audio?.broadcast).toBeUndefined();
+	}
+});
+
 test("MSF namespaces preserve self and root references and refuse unrepresentable names", () => {
 	const track: Msf.Track = { name: "video", packaging: "loc", role: "video", codec: "vp8" };
 	const base = Path.from("room/catalog");

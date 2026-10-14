@@ -1075,8 +1075,9 @@ fn to_msf<E: CatalogExt>(catalog: &Catalog<E>, base: &moq_net::Path) -> moq_msf:
 
 /// Convert the base media sections of a hang catalog into MSF tracks.
 ///
-/// MSF names a track by its absolute namespace and wire name. An unresolvable reference or
-/// duplicate identity is refused instead of advertising the track on the catalog's broadcast.
+/// MSF names a track by its absolute namespace and wire name. An unresolvable reference, one
+/// a reader would take as the catalog itself ([`names_catalog`](crate::catalog::msf::names_catalog)),
+/// or a duplicate identity is refused instead of advertising the track on the catalog's broadcast.
 fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) -> moq_msf::Catalog<E> {
 	let mut tracks = Vec::new();
 	let mut names = BTreeSet::new();
@@ -1089,7 +1090,14 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 					tracing::error!(rendition = id, %rel, %base, "MSF broadcast reference escapes the root");
 					return None;
 				};
-				(target != *base).then(|| target.to_string())
+				if target == *base {
+					None
+				} else if crate::catalog::msf::names_catalog(&target, base) {
+					tracing::error!(rendition = id, %rel, %base, "MSF readers would take this namespace as the catalog's own");
+					return None;
+				} else {
+					Some(target.to_string())
+				}
 			}
 		};
 		if !names.insert((namespace.clone(), name.to_string())) {
@@ -1362,6 +1370,21 @@ mod test {
 			catalog.video.renditions.insert("video".into(), config);
 			assert!(to_msf_media::<()>(&catalog, &base).tracks.is_empty());
 			assert!(to_msf_media::<()>(&catalog, &moq_net::Path::empty()).tracks.is_empty());
+		}
+	}
+
+	/// A reader takes a namespace aligned with the catalog's tail as the catalog itself, so a
+	/// reference to such a broadcast is refused rather than read from the catalog's broadcast.
+	#[test]
+	fn msf_refuses_references_readers_would_take_as_the_catalog() {
+		let base = moq_net::Path::new("room/catalog");
+		for reference in ["../catalog", "./catalog/room/catalog"] {
+			let mut catalog = hang::Catalog::<()>::default();
+			let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+			config.container = Container::Loc;
+			config.broadcast = Some(reference.into());
+			catalog.video.renditions.insert("video".into(), config);
+			assert!(to_msf_media::<()>(&catalog, &base).tracks.is_empty(), "{reference}");
 		}
 	}
 

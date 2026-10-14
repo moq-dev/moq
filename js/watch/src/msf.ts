@@ -97,6 +97,19 @@ function toAudioConfig(track: Msf.Track): Catalog.AudioConfig | undefined {
 	};
 }
 
+// MSF namespaces are absolute, but each side sees paths under its own connection root. Draft
+// catalogs repeat the publisher's full namespace on every track, so a namespace matching the
+// catalog's path on whole trailing segments is the catalog seen from a different root.
+function namesCatalog(namespace: Path.Valid, base: Path.Valid): boolean {
+	if (namespace === base) return true;
+	const a = Path.parts(namespace);
+	const b = Path.parts(base);
+	if (a.length === 0 || b.length === 0) return false;
+	const endsWith = (long: string[], short: string[]) =>
+		short.length <= long.length && short.every((part, i) => part === long[long.length - short.length + i]);
+	return endsWith(a, b) || endsWith(b, a);
+}
+
 /** Convert an MSF catalog to a hang catalog Root. */
 export function toHang(msf: Msf.Catalog, base?: Path.Valid): Catalog.Root {
 	// Track names are untrusted keys; a null prototype keeps `__proto__` an ordinary rendition.
@@ -114,10 +127,14 @@ export function toHang(msf: Msf.Catalog, base?: Path.Valid): Catalog.Root {
 				throw new Error(`MSF track ${track.name} namespace requires the catalog broadcast path`);
 			const target = Path.from(track.namespace);
 			// Normalizing an MSF namespace must not select different content.
-			const relative = target === track.namespace ? Path.relative(target, base) : undefined;
-			if (relative === undefined)
+			if (target !== track.namespace)
 				throw new Error(`MSF track ${track.name} namespace cannot be referenced from the catalog`);
-			broadcast = relative || undefined;
+			if (!namesCatalog(target, base)) {
+				const relative = Path.relative(target, base);
+				if (relative === undefined)
+					throw new Error(`MSF track ${track.name} namespace cannot be referenced from the catalog`);
+				broadcast = relative;
+			}
 		}
 		if (track.role === "video") {
 			const config = toVideoConfig(track);

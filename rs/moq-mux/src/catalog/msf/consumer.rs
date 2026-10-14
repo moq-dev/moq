@@ -126,15 +126,21 @@ pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>, base: &moq_net:
 			.as_ref()
 			.map(|namespace| {
 				let target = moq_net::Path::new(namespace);
-				// An MSF namespace names content; normalizing it must not select another namespace.
-				let relative = (target.as_str() == namespace).then(|| target.relative(base)).flatten();
-				relative.ok_or_else(|| Error::UnresolvableNamespace {
+				let unresolvable = || Error::UnresolvableNamespace {
 					name: track.name.clone(),
 					namespace: namespace.clone(),
-				})
+				};
+				// An MSF namespace names content; normalizing it must not select another namespace.
+				if target.as_str() != namespace {
+					return Err(unresolvable());
+				}
+				if super::names_catalog(&target, base) {
+					return Ok(None);
+				}
+				target.relative(base).map(Some).ok_or_else(unresolvable)
 			})
 			.transpose()?
-			.filter(|rel| !rel.is_empty());
+			.flatten();
 		let Some(role) = track.role.as_ref() else {
 			tracing::warn!(track = %track.name, "skipping MSF track with no role");
 			continue;
@@ -496,6 +502,15 @@ mod test {
 				expected
 			);
 		}
+		// A namespace aligned with the catalog's tail is the catalog seen from another root.
+		for namespace in ["catalog", "x/room/catalog"] {
+			let mut track = moq_msf::Track::new("video", moq_msf::Packaging::Loc);
+			track.namespace = Some(namespace.into());
+			track.role = Some(moq_msf::Role::Video);
+			track.codec = Some("vp8".into());
+			let catalog = from_msf(&moq_msf::Catalog::<()>::new(vec![track]), &base).unwrap();
+			assert!(catalog.video.renditions["video"].broadcast.is_none(), "{namespace}");
+		}
 		for namespace in ["room/..", "room//left", "/room/left", "room/left/"] {
 			let mut track = moq_msf::Track::new("video", moq_msf::Packaging::Loc);
 			track.namespace = Some(namespace.into());
@@ -503,6 +518,39 @@ mod test {
 				from_msf(&moq_msf::Catalog::<()>::new(vec![track]), &base),
 				Err(crate::Error::Msf(Error::UnresolvableNamespace { .. }))
 			));
+		}
+	}
+
+	/// Example 1 from draft-ietf-moq-msf-00 repeats the publisher's full namespace on every
+	/// track. A subscriber under a different root still reads both tracks from the catalog's
+	/// own broadcast instead of a path it cannot see. The example's truncated AV1 codec string
+	/// omits fields the AV1 codecs parameter requires all or none of, so it is shortened here.
+	#[test]
+	fn draft_namespace_is_the_catalog_from_any_root() {
+		let msf = moq_msf::Catalog::<()>::from_str(
+			r#"{
+			"version": 1,
+			"generatedAt": 1746104606044,
+			"tracks": [
+				{"name": "1080p-video", "namespace": "conference.example.com/conference123/alice", "packaging": "loc",
+				 "isLive": true, "targetLatency": 2000, "role": "video", "renderGroup": 1,
+				 "codec": "av01.0.08M.10", "width": 1920, "height": 1080, "framerate": 30, "bitrate": 1500000},
+				{"name": "audio", "namespace": "conference.example.com/conference123/alice", "packaging": "loc",
+				 "isLive": true, "targetLatency": 2000, "role": "audio",
+				 "codec": "opus", "samplerate": 48000, "channelConfig": "2", "bitrate": 32000}
+			]
+		}"#,
+		)
+		.unwrap();
+		for base in [
+			"conference.example.com/conference123/alice",
+			"anon/conference.example.com/conference123/alice",
+			"conference123/alice",
+			"alice",
+		] {
+			let catalog = from_msf(&msf, &moq_net::Path::new(base)).unwrap();
+			assert!(catalog.video.renditions["1080p-video"].broadcast.is_none(), "{base}");
+			assert!(catalog.audio.renditions["audio"].broadcast.is_none(), "{base}");
 		}
 	}
 
