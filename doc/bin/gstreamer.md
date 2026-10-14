@@ -105,7 +105,8 @@ rewound timestamps forward.
 ## moqsrc
 
 Pads are named by kind and appear as the catalog announces renditions:
-`video_0`, `video_1`, `audio_0`. Link the pad you want by name; the terse
+`video_0`, `video_1`, `audio_0`. A rendition referencing another broadcast reads
+that broadcast on the same connection. Link the pad you want by name; the terse
 `moqsrc ! decodebin3` form links only the first pad offered, which may be
 audio. `moqsrc` follows the broadcast's announcements: when the publisher
 restarts, it switches to the new broadcast on the same pads, kept by rendition

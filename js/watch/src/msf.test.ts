@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { u53 } from "@moq/hang/catalog";
-import type * as Msf from "@moq/msf";
+import * as Msf from "@moq/msf";
+import { Path } from "@moq/net";
 import { toHang } from "./msf";
 
 test("copies delay onto the hang rendition", () => {
@@ -165,4 +166,44 @@ test("unsupported text packaging is skipped before its codec is required", () =>
 test("a text track named __proto__ is kept as a rendition", () => {
 	const catalog = toHang({ tracks: [{ name: "__proto__", packaging: "loc", role: "caption", codec: "vtt" }] });
 	expect(Object.keys(catalog.text?.renditions ?? {})).toEqual(["__proto__"]);
+});
+
+test("resolves an MSF namespace relative to its catalog broadcast", () => {
+	const catalog = Msf.decode(
+		new TextEncoder().encode(
+			JSON.stringify({
+				version: "draft-01",
+				tracks: [{ name: "video", namespace: "room/left", packaging: "loc", role: "video", codec: "vp8" }],
+			}),
+		),
+	);
+	const base = Path.from("room/catalog");
+	const root = toHang(catalog, base);
+	expect(Path.tryResolve(base, root.video!.renditions.video!.broadcast!)).toBe(Path.from("room/left"));
+});
+
+test("MSF namespaces preserve self and root references and refuse unrepresentable names", () => {
+	const track: Msf.Track = { name: "video", packaging: "loc", role: "video", codec: "vp8" };
+	const base = Path.from("room/catalog");
+	expect(
+		toHang({ tracks: [{ ...track, namespace: base }] }, base).video!.renditions.video!.broadcast,
+	).toBeUndefined();
+	expect(toHang({ tracks: [{ ...track, namespace: "" }] }, base).video!.renditions.video!.broadcast).toBe(
+		Path.normalizeRelative(".."),
+	);
+	expect(() => toHang({ tracks: [{ ...track, namespace: "room/.." }] }, base)).toThrow("cannot be referenced");
+	expect(() => toHang({ tracks: [{ ...track, namespace: "room/left" }] })).toThrow(
+		"requires the catalog broadcast path",
+	);
+	expect(() =>
+		toHang(
+			{
+				tracks: [
+					{ ...track, namespace: "room/left" },
+					{ ...track, namespace: "room/right" },
+				],
+			},
+			base,
+		),
+	).toThrow("ambiguous");
 });

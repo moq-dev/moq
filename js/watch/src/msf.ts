@@ -1,6 +1,7 @@
 import type * as Catalog from "@moq/hang/catalog";
 import { u53 } from "@moq/hang/catalog";
 import type * as Msf from "@moq/msf";
+import { Path } from "@moq/net";
 import { base64ToBytes } from "./base64";
 
 const DEFAULT_SAMPLE_RATE = 48000;
@@ -97,19 +98,31 @@ function toAudioConfig(track: Msf.Track): Catalog.AudioConfig | undefined {
 }
 
 /** Convert an MSF catalog to a hang catalog Root. */
-export function toHang(msf: Msf.Catalog): Catalog.Root {
+export function toHang(msf: Msf.Catalog, base?: Path.Valid): Catalog.Root {
 	// Track names are untrusted keys; a null prototype keeps `__proto__` an ordinary rendition.
 	const videoRenditions: Record<string, Catalog.VideoConfig> = Object.create(null);
 	const audioRenditions: Record<string, Catalog.AudioConfig> = Object.create(null);
 	const textRenditions: Record<string, Catalog.TextConfig> = Object.create(null);
 
+	const names = new Set<string>();
 	for (const track of msf.tracks) {
+		if (names.has(track.name)) throw new Error(`MSF track name ${track.name} is ambiguous as a hang rendition ID`);
+		names.add(track.name);
+		let broadcast: Path.Relative | undefined;
+		if (track.namespace !== undefined) {
+			if (base === undefined)
+				throw new Error(`MSF track ${track.name} namespace requires the catalog broadcast path`);
+			const relative = Path.relative(Path.from(track.namespace), base);
+			if (relative === undefined)
+				throw new Error(`MSF track ${track.name} namespace cannot be referenced from the catalog`);
+			broadcast = relative || undefined;
+		}
 		if (track.role === "video") {
 			const config = toVideoConfig(track);
-			if (config) videoRenditions[track.name] = config;
+			if (config) videoRenditions[track.name] = { ...config, broadcast };
 		} else if (track.role === "audio") {
 			const config = toAudioConfig(track);
-			if (config) audioRenditions[track.name] = config;
+			if (config) audioRenditions[track.name] = { ...config, broadcast };
 		} else if (
 			track.role === "caption" ||
 			track.role === "subtitle" ||
@@ -123,6 +136,7 @@ export function toHang(msf: Msf.Catalog): Catalog.Root {
 			if (!info) continue;
 			if (!track.codec) throw new Error(`MSF text track ${track.name} missing codec`);
 			textRenditions[track.name] = {
+				broadcast,
 				format: track.codec,
 				role: track.role,
 				lang: track.lang,

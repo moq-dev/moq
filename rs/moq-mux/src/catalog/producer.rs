@@ -165,7 +165,9 @@ impl<E: CatalogExt> Outputs<E> {
 		// The MSF catalog is derived from our own types, so a serialize failure means an extension broke
 		// the shape; report it like any other JSON failure rather than panicking. `abort` below is
 		// what keeps the tracks consistent if this fails after the hang tracks were updated.
-		let msf = to_msf(catalog).to_json().map_err(moq_json::Error::from)?;
+		let msf = to_msf(catalog, &self.msf_track.broadcast().path)
+			.to_json()
+			.map_err(moq_json::Error::from)?;
 		let mut group = self.msf_track.append_group()?;
 		group.write_frame(moq_net::Timestamp::now(), msf)?;
 		group.finish()?;
@@ -1065,29 +1067,45 @@ fn packaging_of(container: &hang::catalog::Container) -> Option<moq_msf::Packagi
 
 /// Convert a catalog to its MSF equivalent: the media sections become MSF tracks and the
 /// extension rides the MSF root under the same member names it uses in the hang catalog.
-fn to_msf<E: CatalogExt>(catalog: &Catalog<E>) -> moq_msf::Catalog<E> {
-	let mut msf = to_msf_media(&catalog.media());
+fn to_msf<E: CatalogExt>(catalog: &Catalog<E>, base: &moq_net::Path) -> moq_msf::Catalog<E> {
+	let mut msf = to_msf_media(&catalog.media(), (!base.is_empty()).then_some(base));
 	msf.ext = catalog.ext.clone();
 	msf
 }
 
 /// Convert the base media sections of a hang catalog into MSF tracks.
 ///
-/// An MSF track is named by its wire name. MSF has no rendition ID or broadcast reference, so a
-/// second rendition of a wire name already taken is left out rather than made ambiguous.
-fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog) -> moq_msf::Catalog<E> {
+/// MSF names a track by its absolute namespace and wire name. An unresolvable reference or
+/// duplicate identity is refused instead of advertising the track on the catalog's broadcast.
+fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: Option<&moq_net::Path>) -> moq_msf::Catalog<E> {
 	let mut tracks = Vec::new();
 	let mut names = BTreeSet::new();
-	let mut claim = |id: &str, name: &str| {
-		let fresh = names.insert(name.to_string());
-		if !fresh {
-			tracing::warn!(
+	let mut reference = |id: &str, config: &dyn Reference| {
+		let name = config.track(id);
+		let namespace = match config.broadcast().filter(|rel| !rel.is_empty()) {
+			None => None,
+			Some(rel) => {
+				let Some(base) = base else {
+					tracing::error!(rendition = id, %rel, "MSF broadcast reference has no catalog path");
+					return None;
+				};
+				let Some(target) = base.try_resolve(rel) else {
+					tracing::error!(rendition = id, %rel, %base, "MSF broadcast reference escapes the root");
+					return None;
+				};
+				(target != *base).then(|| target.to_string())
+			}
+		};
+		if !names.insert((namespace.clone(), name.to_string())) {
+			tracing::error!(
 				rendition = id,
 				track = name,
-				"leaving a duplicate track name out of MSF"
+				?namespace,
+				"refusing duplicate MSF track identity"
 			);
+			return None;
 		}
-		fresh
+		Some((name.to_string(), namespace))
 	};
 
 	let has_multiple_video = catalog.video.renditions.len() > 1;
@@ -1105,11 +1123,11 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog) -> moq_msf::Catalog<E> {
 		};
 
 		let sap_type = video_sap_type(&config.codec);
-		let wire = config.track(name);
-		if !claim(name, wire) {
+		let Some((wire, namespace)) = reference(name, config) else {
 			continue;
-		}
-		let mut track = moq_msf::Track::new(wire.to_string(), packaging);
+		};
+		let mut track = moq_msf::Track::new(wire, packaging);
+		track.namespace = namespace;
 		track.is_live = true;
 		track.role = Some(moq_msf::Role::Video);
 		track.codec = Some(config.codec.to_string());
@@ -1141,11 +1159,11 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog) -> moq_msf::Catalog<E> {
 				.map(|d| base64::engine::general_purpose::STANDARD.encode(d.as_ref())),
 		};
 
-		let wire = config.track(name);
-		if !claim(name, wire) {
+		let Some((wire, namespace)) = reference(name, config) else {
 			continue;
-		}
-		let mut track = moq_msf::Track::new(wire.to_string(), packaging);
+		};
+		let mut track = moq_msf::Track::new(wire, packaging);
+		track.namespace = namespace;
 		track.is_live = true;
 		track.role = Some(moq_msf::Role::Audio);
 		track.codec = Some(config.codec.to_string());
@@ -1166,11 +1184,11 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog) -> moq_msf::Catalog<E> {
 		let Some(packaging) = packaging_of(&config.container) else {
 			continue;
 		};
-		let wire = config.track(name);
-		if !claim(name, wire) {
+		let Some((wire, namespace)) = reference(name, config) else {
 			continue;
-		}
-		let mut track = moq_msf::Track::new(wire.to_string(), packaging);
+		};
+		let mut track = moq_msf::Track::new(wire, packaging);
+		track.namespace = namespace;
 		track.is_live = true;
 		track.role = Some(config.role.to_string().parse().unwrap());
 		track.codec = Some(config.format.to_string());
@@ -1197,6 +1215,36 @@ mod test {
 	use hang::catalog::{AudioCodec, AudioConfig, Container, H264, VideoConfig};
 
 	use super::*;
+
+	#[tokio::test(start_paused = true)]
+	async fn msf_publishes_the_referenced_namespace() {
+		let (origin, driver) = moq_net::origin::Producer::new(Default::default());
+		let driver = tokio::spawn(moq_net::time::run(driver));
+		let mut broadcast = origin.create_broadcast("room/catalog").unwrap();
+		let mut producer = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.container = Container::Loc;
+		config.broadcast = Some("./left".into());
+		producer
+			.modify()
+			.unwrap()
+			.video
+			.renditions
+			.insert("video".into(), config);
+		let mut track = broadcast
+			.consume()
+			.track(moq_msf::DEFAULT_NAME)
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap()
+			.ordered();
+		let mut group = track.next_group().await.unwrap().unwrap();
+		let frame = group.read_frame().await.unwrap().unwrap();
+		let wire: serde_json::Value = serde_json::from_slice(&frame.payload).unwrap();
+		assert_eq!(wire["tracks"][0]["namespace"], "room/left");
+		driver.abort();
+	}
 
 	/// The catalog, its MSF twin, and the timeline all rank above media. They're the
 	/// index a player reads before any media is useful, and they're small enough that
@@ -1243,17 +1291,17 @@ mod test {
 			config.container = Container::Loc;
 			let mut catalog = hang::Catalog::<()>::default();
 			catalog.text.insert("text", config.clone()).unwrap();
-			let msf = to_msf_media::<()>(&catalog);
+			let msf = to_msf_media::<()>(&catalog, None);
 			assert_eq!(msf.tracks.len(), 1);
 			let wire = msf.to_json().unwrap();
 			assert!(wire.contains(r#""lang":"es-419""#));
 			assert!(wire.contains(r#""label":"Español""#));
 			let msf = moq_msf::Catalog::<()>::from_str(&wire).unwrap();
-			let decoded = crate::catalog::msf::from_msf(&msf).unwrap();
+			let decoded = crate::catalog::msf::from_msf(&msf, &moq_net::Path::empty()).unwrap();
 			assert_eq!(decoded.text.renditions["text"], config);
 			let mut roundtrip = hang::Catalog::<()>::default();
 			roundtrip.text = decoded.text;
-			assert_eq!(to_msf_media::<()>(&roundtrip).tracks, msf.tracks);
+			assert_eq!(to_msf_media::<()>(&roundtrip, None).tracks, msf.tracks);
 		}
 	}
 
@@ -1267,13 +1315,72 @@ mod test {
 			}}}"#,
 		)
 		.unwrap();
-		let msf = to_msf_media::<()>(&catalog);
+		let msf = to_msf_media::<()>(&catalog, None);
 		let names: Vec<_> = msf.tracks.iter().map(|track| track.name.as_str()).collect();
-		assert_eq!(names, ["hd", "video"]);
+		assert_eq!(names, ["hd"]);
 
-		let decoded = crate::catalog::msf::from_msf(&msf).unwrap();
+		let decoded = crate::catalog::msf::from_msf(&msf, &moq_net::Path::empty()).unwrap();
 		let ids: Vec<_> = decoded.video.renditions.keys().map(String::as_str).collect();
-		assert_eq!(ids, ["hd", "video"]);
+		assert_eq!(ids, ["hd"]);
+	}
+
+	#[test]
+	fn cross_broadcast_renditions_round_trip_through_msf() {
+		let base = moq_net::Path::new("room/catalog");
+		let catalog = hang::Catalog::<()>::from_str(r#"{
+			"video": {"renditions": {"view": {"broadcast": "./left", "track": "video", "codec": "vp8", "container": {"kind": "loc"}}}},
+			"audio": {"renditions": {"sound": {"broadcast": "./right", "track": "audio", "codec": "opus", "sampleRate": 48000, "numberOfChannels": 2, "container": {"kind": "loc"}}}},
+			"text": {"renditions": {"words": {"broadcast": "../captions", "track": "text", "format": "vtt", "role": "caption", "container": {"kind": "loc"}}}}
+		}"#).unwrap();
+		let msf = to_msf_media::<()>(&catalog, Some(&base));
+		let wire = msf.to_json().unwrap();
+		let msf = moq_msf::Catalog::<()>::from_str(&wire).unwrap();
+		let restored = crate::catalog::msf::from_msf(&msf, &base).unwrap();
+		assert_eq!(
+			base.try_resolve(restored.video.renditions["video"].broadcast.as_ref().unwrap()),
+			Some("room/left".into())
+		);
+		assert_eq!(
+			base.try_resolve(restored.audio.renditions["audio"].broadcast.as_ref().unwrap()),
+			Some("room/right".into())
+		);
+		assert_eq!(
+			base.try_resolve(restored.text.renditions["text"].broadcast.as_ref().unwrap()),
+			Some("captions".into())
+		);
+	}
+
+	#[test]
+	fn msf_refuses_unresolvable_broadcast_references() {
+		let base = moq_net::Path::new("room/catalog");
+		for reference in ["../../left", "../../../left"] {
+			let mut catalog = hang::Catalog::<()>::default();
+			let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+			config.broadcast = Some(reference.into());
+			catalog.video.renditions.insert("video".into(), config);
+			assert!(to_msf_media::<()>(&catalog, Some(&base)).tracks.is_empty());
+			assert!(to_msf_media::<()>(&catalog, None).tracks.is_empty());
+		}
+	}
+
+	#[test]
+	fn msf_names_are_unique_per_namespace_but_ambiguous_hang_ids_are_refused() {
+		let base = moq_net::Path::new("room/catalog");
+		let mut catalog = hang::Catalog::<()>::default();
+		for (id, broadcast) in [("left", "./left"), ("right", "./right")] {
+			let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+			config.track = Some("video".into());
+			config.broadcast = Some(broadcast.into());
+			catalog.video.renditions.insert(id.into(), config);
+		}
+		let msf = to_msf_media::<()>(&catalog, Some(&base));
+		assert_eq!(msf.tracks.len(), 2);
+		assert_eq!(msf.tracks[0].namespace.as_deref(), Some("room/left"));
+		assert_eq!(msf.tracks[1].namespace.as_deref(), Some("room/right"));
+		assert!(matches!(
+			crate::catalog::msf::from_msf(&msf, &base),
+			Err(crate::Error::Msf(crate::catalog::msf::Error::DuplicateTrackName(_)))
+		));
 	}
 
 	#[test]
@@ -1922,7 +2029,7 @@ mod test {
 		catalog.video.renditions = video_renditions;
 		catalog.audio.renditions = audio_renditions;
 
-		let msf = to_msf_media::<()>(&catalog);
+		let msf = to_msf_media::<()>(&catalog, None);
 
 		assert_eq!(msf.tracks.len(), 2);
 
@@ -1972,7 +2079,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.video.renditions = video_renditions;
 
-		let msf = to_msf_media::<()>(&catalog);
+		let msf = to_msf_media::<()>(&catalog, None);
 		assert_eq!(msf.tracks.len(), 1);
 		assert_eq!(msf.tracks[0].packaging, moq_msf::Packaging::Loc);
 	}
@@ -1988,7 +2095,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.audio.renditions = audio_renditions;
 
-		let msf = to_msf_media::<()>(&catalog);
+		let msf = to_msf_media::<()>(&catalog, None);
 		assert_eq!(msf.tracks.len(), 1);
 		assert_eq!(msf.tracks[0].packaging, moq_msf::Packaging::Loc);
 	}
@@ -2009,7 +2116,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.audio.renditions = audio_renditions;
 
-		let msf = to_msf_media::<()>(&catalog);
+		let msf = to_msf_media::<()>(&catalog, None);
 		assert_eq!(msf.tracks.len(), 1);
 		assert_eq!(
 			msf.tracks[0].packaging,
@@ -2036,7 +2143,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.video.renditions = video_renditions;
 
-		let msf = to_msf_media::<()>(&catalog);
+		let msf = to_msf_media::<()>(&catalog, None);
 		let video = &msf.tracks[0];
 		assert_eq!(video.init_data, Some("AQID".to_string()));
 	}
@@ -2044,7 +2151,7 @@ mod test {
 	#[test]
 	fn convert_empty() {
 		let catalog = hang::Catalog::default();
-		let msf = to_msf_media::<()>(&catalog);
+		let msf = to_msf_media::<()>(&catalog, None);
 		assert!(msf.tracks.is_empty());
 	}
 
@@ -2071,7 +2178,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.video.renditions = video_renditions;
 
-		let msf = to_msf_media::<()>(&catalog);
+		let msf = to_msf_media::<()>(&catalog, None);
 		let video = &msf.tracks[0];
 		assert_eq!(video.packaging, moq_msf::Packaging::Cmaf);
 		assert_eq!(video.init_data, Some("AAAYZ2Z0eXA=".to_string()));
@@ -2107,7 +2214,7 @@ mod test {
 		catalog.video.renditions = video_renditions;
 		catalog.audio.renditions = audio_renditions;
 
-		let msf = to_msf_media::<()>(&catalog);
+		let msf = to_msf_media::<()>(&catalog, None);
 
 		let video = &msf.tracks[0];
 		assert_eq!(video.role, Some(moq_msf::Role::Video));
@@ -2149,7 +2256,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.video.renditions = video_renditions;
 
-		let msf = to_msf_media::<()>(&catalog);
+		let msf = to_msf_media::<()>(&catalog, None);
 		let video = &msf.tracks[0];
 		// H.265 SAP behavior isn't validated end-to-end yet, so we omit the
 		// SAP fields rather than advertise something we haven't verified.
@@ -2171,7 +2278,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.video.renditions = video_renditions;
 
-		let msf = to_msf_media::<()>(&catalog);
+		let msf = to_msf_media::<()>(&catalog, None);
 		let video = &msf.tracks[0];
 		assert_eq!(video.max_grp_sap_starting_type, None);
 		assert_eq!(video.max_obj_sap_starting_type, None);

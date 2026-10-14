@@ -17,6 +17,14 @@ pub(crate) use consumer::from_msf;
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// The namespace cannot be represented by a relative broadcast reference.
+	#[error("MSF track {name:?} namespace {namespace:?} cannot be referenced from the catalog")]
+	UnresolvableNamespace { name: String, namespace: String },
+
+	/// Multiple namespaces use a track name that would overwrite one hang rendition ID.
+	#[error("MSF track name {0:?} is ambiguous as a hang rendition ID")]
+	DuplicateTrackName(String),
+
 	#[error("MSF catalog frame is not valid UTF-8")]
 	InvalidUtf8,
 
