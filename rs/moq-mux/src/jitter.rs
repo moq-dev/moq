@@ -130,11 +130,11 @@ pub(crate) struct Buffer<K, T> {
 	/// What the clock is steered on, since it last started.
 	steer: Steer<K>,
 	/// How much more slack each track had than the track sent latest, in seconds, in the last
-	/// steering step that heard it. How far ahead of its decode time a source sends each track
-	/// belongs to its mux, not to one generation, so a new generation keeps the track sent
-	/// latest at the delay even before that track reaches it, and a step that does not hear
-	/// that track still measures against it.
-	leads: BTreeMap<K, f64>,
+	/// [`LEADS`] steering steps that heard it; [`Buffer::lead`] is their median. How far ahead
+	/// of its decode time a source sends each track belongs to its mux, not to one generation,
+	/// so a new generation keeps the track sent latest at the delay even before that track
+	/// reaches it, and a step that does not hear that track still measures against it.
+	leads: BTreeMap<K, VecDeque<f64>>,
 	timer: Option<Pin<Box<Sleep>>>,
 	dropped: u64,
 	/// Steps at which the source's clock ran further off ours than the clock may follow.
@@ -147,6 +147,9 @@ const STEER: Duration = Duration::from_secs(2);
 /// How far back the floors are kept, in decode time: a spell of queueing shorter than half
 /// of it moves neither the rate nor the slack.
 const RATE_WINDOW: f64 = 600.0;
+/// How many steering steps a track's lead is the median of: a window's worth, so a spell of
+/// queueing shorter than half of it does not move the lead either.
+const LEADS: usize = (RATE_WINDOW / STEER.as_secs_f64()) as usize;
 /// How quickly the clock pulls the slack back to the delay: it closes the gap over this
 /// many seconds, or slower where the slew limit could not stop it in time.
 const RESPONSE: f64 = 600.0;
@@ -550,23 +553,45 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			return Ok(());
 		};
 		let floor = self.steer.floor.take().expect("a floor");
-		// A track not heard this step, as audio that ended before its video, may still be the
-		// one sent latest: its lead puts it below the track heard that was sent least ahead of
+		let (mut phase, mut at) = floor
+			.tracks
+			.values()
+			.copied()
+			.min_by(|a, b| a.0.total_cmp(&b.0))
+			.expect("a floor holds a track");
+		// A track not heard this step, as audio that ended before its video, may be sent later
+		// than every track heard: its lead places it below the heard track sent least ahead of
 		// it. Without that the floor would leap when it stopped, which reads as a source far
 		// faster than ours.
-		let lead = |key: &K| self.leads.get(key).copied().unwrap_or(0.0);
-		let latest = floor
+		let lead = |key: &K| self.lead(key).unwrap_or(0.0);
+		let unheard = self
+			.leads
+			.keys()
+			.filter(|key| !floor.tracks.contains_key(*key))
+			.map(lead)
+			.reduce(f64::min);
+		let (heard, &(heard_phase, heard_at)) = floor
 			.tracks
 			.iter()
 			.min_by(|a, b| lead(a.0).total_cmp(&lead(b.0)))
-			.map(|(key, &(phase, at))| (phase - lead(key), at))
 			.expect("a floor holds a track");
-		let (phase, at) = floor
-			.tracks
-			.values()
-			.fold(latest, |floor, &track| if track.0 < floor.0 { track } else { floor });
+		// Where the floor sits among the leads.
+		let mut base = 0.0;
+		if let Some(unheard) = unheard
+			&& unheard < lead(heard)
+		{
+			let placed = heard_phase - (lead(heard) - unheard);
+			if placed < phase {
+				(phase, at) = (placed, heard_at);
+			}
+			base = unheard + (phase - placed);
+		}
 		for (key, (track, _)) in &floor.tracks {
-			self.leads.insert(key.clone(), track - phase);
+			let leads = self.leads.entry(key.clone()).or_default();
+			leads.push_back(track - phase + base);
+			if leads.len() > LEADS {
+				leads.pop_front();
+			}
 		}
 		self.steer.steered += elapsed * clock.drift;
 		let phases = &mut self.steer.phase;
@@ -667,17 +692,25 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 	/// not heard from is sent, by the leads the previous generation measured: anchoring that
 	/// much later keeps that track at the delay when it reaches the new generation.
 	fn unheard_lag(&self, acquire: &Acquire<K, T>, fresh: &K) -> Duration {
-		let Some(lead) = self.leads.get(fresh) else {
+		let Some(lead) = self.lead(fresh) else {
 			return Duration::ZERO;
 		};
 		let lag = self
 			.expect
 			.iter()
 			.filter(|key| !acquire.tracks.contains_key(key))
-			.filter_map(|key| self.leads.get(key))
+			.filter_map(|key| self.lead(key))
 			.map(|other| lead - other)
 			.fold(0.0, f64::max);
 		Duration::from_secs_f64(lag)
+	}
+
+	/// How much more slack a track has than the track sent latest, in seconds: the median of
+	/// its last [`LEADS`], so a spell of queueing does not move it.
+	fn lead(&self, key: &K) -> Option<f64> {
+		let mut leads: Vec<f64> = self.leads.get(key)?.iter().copied().collect();
+		leads.sort_by(f64::total_cmp);
+		Some(leads[leads.len() / 2])
 	}
 
 	/// When `acquire` ends: a track not yet heard from may be the one sent latest, so until
@@ -1506,16 +1539,20 @@ mod tests {
 	/// The track sent latest stopping, as audio sent 700 ms after its video ending first, keeps
 	/// the clock: each floor is still measured against that track, by how much earlier than it
 	/// the others are sent, rather than leap 700 ms, which would read as a source far faster
-	/// than ours.
+	/// than ours. That holds when its last frames were queued 400 ms more on their way, since
+	/// a spell of queueing does not move the lead.
 	#[tokio::test(start_paused = true)]
 	async fn the_track_sent_latest_stopping_keeps_the_clock() {
-		let fed = feed(0.0, 300.0, |track, sent| match track {
-			1 => Some(sent),
-			_ => (sent < 60.0).then_some(sent + 0.7),
-		})
-		.await;
-		assert!(fed.err.is_none(), "{:?}", fed.err);
-		assert_eq!(fed.dropped, 0);
+		for queued in [0.0, 0.4] {
+			let fed = feed(0.0, 300.0, |track, sent| match track {
+				1 => Some(sent),
+				_ if sent < 56.0 => Some(sent + 0.7),
+				_ => (sent < 60.0).then_some(sent + 0.7 + queued),
+			})
+			.await;
+			assert!(fed.err.is_none(), "{queued} s queued: {:?}", fed.err);
+			assert_eq!(fed.dropped, 0, "{queued} s queued");
+		}
 	}
 
 	/// A joiner is handed its group at once. The clock is anchored on the freshest frame, so
