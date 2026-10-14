@@ -1228,9 +1228,7 @@ where
 
 		match res {
 			Ok(()) => {
-				// Close waits for the acknowledgement, and consuming the writer disarms
-				// the Drop fallback that would reset a finished stream.
-				if let Err(err) = stream.close().await {
+				if let Err(err) = settle(&mut stream).await {
 					tracing::debug!(%err, fill = %request_id, "fill stream close failed");
 				} else {
 					tracing::debug!(fill = %request_id, "fill complete");
@@ -1820,7 +1818,7 @@ where
 				.await?;
 				Self::write_fetch_payload(&mut writer, frame.payload, self.version).await?;
 			}
-			writer.close().await?;
+			settle(&mut writer).await?;
 			Ok::<(), Error>(())
 		};
 		let res = {
@@ -3064,7 +3062,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		writer.buffer_varint(end.frame)?;
 		writer.buffer_varint(0)?;
 		writer.varint(END_OF_TRACK).await?;
-		writer.close().await
+		settle(&mut writer).await
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -3305,6 +3303,16 @@ impl<T: crate::transport::poll::SendStream> crate::transport::poll::SendStream f
 		self.follow(cx);
 		self.stream.poll_closed(cx)
 	}
+}
+
+/// Finish a ranked stream and wait for the peer to acknowledge it, holding its rank until then.
+///
+/// Unlike [`Writer::close`], the writer keeps the stream while it waits, so cancelling resets
+/// the stream as a cancelled group stream's is, rather than leaving it sending once its rank
+/// is released. Once acknowledged, the stream is released and dropping the writer resets nothing.
+async fn settle<T: crate::transport::poll::SendStream>(writer: &mut Writer<Ranked<T>, Version>) -> Result<(), Error> {
+	writer.finish()?;
+	std::future::poll_fn(|cx| writer.poll_close(cx)).await
 }
 
 /// A group stream's place in the session's send order: its subscription's priority, then
@@ -3793,6 +3801,42 @@ mod group_priority_test {
 		let _higher = queue.insert(Priority::new(u8::MAX, 0, 0));
 		serve.write_end_of_track(track::Position::group(0)).await.unwrap();
 		assert_eq!(log.priorities(), [254], "second, behind the higher priority");
+	}
+
+	/// Cancelled while its FIN waits for the acknowledgement, a ranked stream resets as it
+	/// gives up its rank, rather than sending on with a send order the queue has reused.
+	#[moq_net_sim::test]
+	async fn a_ranked_stream_cancelled_after_its_fin_resets() {
+		let log = crate::lite::test_transport::Log::default();
+		let queue = PriorityQueue::default();
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let mut serve = TrackServe::new(
+			SinkSession::new(log.clone()).with_unacked_fin(),
+			track.subscribe(None),
+			RequestId(0),
+			Version::Draft22,
+			ServeRange::default(),
+			None,
+		)
+		.ranked(queue.clone());
+		let mut rival = queue.insert(Priority::new(0, 1, 0));
+		assert_eq!(rival.current(), 0);
+
+		{
+			let mut marker = std::pin::pin!(serve.write_end_of_track(track::Position::group(0)));
+			assert!(
+				futures::poll!(marker.as_mut()).is_pending(),
+				"the FIN is unacknowledged"
+			);
+			assert_eq!(rival.current(), 1, "the marker holds its rank until acknowledged");
+		}
+
+		assert_eq!(log.resets().len(), 1, "cancelling reset the unacknowledged stream");
+		assert_eq!(rival.current(), 0, "and released its rank");
 	}
 
 	#[moq_net_sim::test]
