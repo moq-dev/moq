@@ -1429,19 +1429,22 @@ async fn enforce_grant<S: crate::transport::poll::Session>(
 	// announce carries it, which is when it rides its own PUBLISH_NAMESPACE request: always on
 	// draft-14/15, and on later drafts unless the peer requires solicitation, which turns every
 	// advertisement into an inline NAMESPACE entry with no token slot. Then the grant still
-	// bounds what we publish. The token can be set at any time, so each change is rechecked.
+	// bounds what we publish. The token can be set or cleared at any time, so each change is
+	// rechecked. A broadcast announced while the token rode the announces stays exempt after it
+	// is cleared, since its advertisement still stands on that token.
 	let mut announced = origin.announced();
 	let mut check = crate::auth::Enforce::default();
 	let path = loop {
 		let token = request_token.peek();
-		if token.is_some() && announces_carry_token(&peer_setup, version).await {
-			return Ok(());
-		}
+		let exempt = token.is_some() && announces_carry_token(&peer_setup, version).await;
 		let next = kio::wait(|waiter| {
 			if request_token.poll_changed(&token, waiter).is_ready() {
 				return std::task::Poll::Ready(None);
 			}
-			check.poll(&auth, &mut announced, waiter).map(Some)
+			match exempt {
+				true => check.poll_exempt(&mut announced, waiter).map(|()| Some(None)),
+				false => check.poll(&auth, &mut announced, waiter).map(Some),
+			}
 		})
 		.await;
 		match next {
@@ -1451,7 +1454,8 @@ async fn enforce_grant<S: crate::transport::poll::Session>(
 			Some(Some(path)) => {
 				// Another thread may have set a token after the change check in that same poll.
 				if request_token.peek().is_some() && announces_carry_token(&peer_setup, version).await {
-					return Ok(());
+					check.admit(path);
+					continue;
 				}
 				break path;
 			}
@@ -1956,7 +1960,7 @@ mod tests {
 			..Default::default()
 		});
 
-		let result = enforce_grant(
+		let mut enforce = std::pin::pin!(enforce_grant(
 			auth,
 			origin.consume(),
 			session,
@@ -1966,13 +1970,14 @@ mod tests {
 			})),
 			peer_setup,
 			Version::Draft18,
-		)
-		.await;
-
-		assert!(
-			result.is_ok(),
-			"a token-bearing client must not be closed by grant enforcement"
-		);
+		));
+		for _ in 0..ANNOUNCE_TURNS {
+			assert!(
+				futures::poll!(enforce.as_mut()).is_pending(),
+				"a token-bearing client must not be closed by grant enforcement"
+			);
+			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+		}
 		assert!(
 			log.closes().is_empty(),
 			"the session must stay open for a token-bearing client"
@@ -1982,7 +1987,7 @@ mod tests {
 	/// A request token set after the session started stands enforcement down just the same:
 	/// the announce that follows carries it, so the peer decides, not the connection grant.
 	#[moq_net_sim::test]
-	async fn a_request_token_set_later_stands_enforcement_down() {
+	async fn a_request_token_stands_enforcement_down_until_cleared() {
 		let auth = crate::auth::Handle::new(true);
 		let setup = auth.present(bytes::Bytes::new(), true).unwrap();
 		auth.granted(
@@ -2020,14 +2025,36 @@ mod tests {
 		let _cam = origin
 			.announce("room/bob/cam", crate::origin::Route::default())
 			.unwrap();
-		let result = moq_net_sim::timeout(std::time::Duration::from_secs(1), enforce)
-			.await
-			.expect("enforcement never noticed the token");
-		assert!(result.is_ok(), "{result:?}");
+		for _ in 0..ANNOUNCE_TURNS {
+			assert!(
+				futures::poll!(enforce.as_mut()).is_pending(),
+				"enforcement closed the session"
+			);
+			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+		}
 		assert!(
 			log.closes().is_empty(),
 			"the session stays open for the token-bearing announce"
 		);
+
+		// Clearing the token leaves that announce standing on it, but the next one outside the
+		// grant carries no token, so the grant decides again.
+		request_token.set(None);
+		for _ in 0..ANNOUNCE_TURNS {
+			assert!(
+				futures::poll!(enforce.as_mut()).is_pending(),
+				"an announce made under the token was rechecked"
+			);
+			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+		}
+		let _carol = origin
+			.announce("room/carol/cam", crate::origin::Route::default())
+			.unwrap();
+		let result = moq_net_sim::timeout(std::time::Duration::from_secs(1), enforce)
+			.await
+			.expect("clearing the token never resumed enforcement");
+		assert!(matches!(result, Err(Error::Unauthorized)), "{result:?}");
+		assert_eq!(log.closes().len(), 1, "the session closes for the token-less announce");
 		drop(setup);
 	}
 

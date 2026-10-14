@@ -342,8 +342,9 @@ impl Handle {
 	/// either: live requests keep the token they last presented, and later ones carry none.
 	/// Independent of the MoQ Auth extension.
 	///
-	/// Once a token is set, this side stops closing the session over a broadcast its own
+	/// While a token is set, this side stops closing the session over a broadcast its own
 	/// grant does not cover, since each announce carries the token for the peer to verify.
+	/// Clearing it resumes that check for broadcasts announced afterwards.
 	///
 	/// # Errors
 	///
@@ -1809,6 +1810,30 @@ impl Enforce {
 				_ => {}
 			}
 		}
+	}
+
+	/// Admit every broadcast announced while our announces carry a request token, unchecked,
+	/// so clearing the token checks only what is announced after it. Ready once the origin ends.
+	pub(crate) fn poll_exempt(&mut self, announced: &mut crate::announce::Consumer, waiter: &kio::Waiter) -> Poll<()> {
+		loop {
+			let Some(event) = ready_or!(announced.poll_next(waiter)) else {
+				return Poll::Ready(());
+			};
+			match event {
+				crate::announce::Event::Start(update) | crate::announce::Event::Update(update) => {
+					self.live.insert(update.prefix);
+				}
+				crate::announce::Event::End(update) => {
+					self.live.remove(&update.prefix);
+				}
+				_ => {}
+			}
+		}
+	}
+
+	/// Admit one broadcast unchecked, such as one a token set mid-check now carries.
+	pub(crate) fn admit(&mut self, path: crate::PathOwned) {
+		self.live.insert(path);
 	}
 }
 
