@@ -283,8 +283,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # `rs uring` is a separate feature compile (off the default set) and
-        # kernel-gated below 6.12. The embedding tests for io_uring live there.
+        # `rs uring` is a separate feature compile (off the default set), and
+        # MOQ_STRICT fails it below the 6.12 kernel floor. The embedding tests for
+        # io_uring live there; uring.yml also runs it on affected PRs.
         # `test drain` stands up two relays and drains one under a live JS
         # viewer: diff-independent, since a break can arrive through the relay,
         # js/net, or the wire between them.
