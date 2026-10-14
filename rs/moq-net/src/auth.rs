@@ -1256,7 +1256,9 @@ impl RequestVerdict {
 
 	/// Poll for the acceptor's first answer: the grant it issued, or its refusal, which the
 	/// caller sends the peer. No consumer is [`Error::Unsupported`]; an unanswered (dropped)
-	/// request is [`SessionError::Unauthorized`].
+	/// request is [`SessionError::Unauthorized`]. Whatever the acceptor did since accepting
+	/// is folded in, so a grant already updated, revoked or dropped is never admitted as it
+	/// first stood.
 	pub(crate) fn poll_grant(&self, waiter: &kio::Waiter) -> Poll<std::result::Result<Grant, Refusal>> {
 		let Some(issue) = &self.issue else {
 			return Poll::Ready(Err(Error::Unsupported.into()));
@@ -1267,11 +1269,21 @@ impl RequestVerdict {
 				false => Poll::Ready(()),
 			})
 		);
-		Poll::Ready(match guard.outbox.pop_front() {
-			Some(Reply::Grant(grant)) => Ok(grant),
-			Some(Reply::Refuse { code, reason }) => Err(Refusal::new(Error::Session(code), &reason)),
+		let mut grant = None;
+		while let Some(reply) = guard.outbox.pop_front() {
+			match reply {
+				Reply::Grant(next) => grant = Some(next),
+				Reply::Refuse { code, reason } => return Poll::Ready(Err(Refusal::new(Error::Session(code), &reason))),
+			}
+		}
+		Poll::Ready(match (grant, guard.done) {
+			(Some(grant), false) => Ok(grant),
+			(Some(_), true) => Err(Refusal::new(
+				Error::Session(SessionError::Unauthorized),
+				"grant dropped",
+			)),
 			// Done with nothing written: the acceptor dropped the request unanswered.
-			None => Err(Error::Session(SessionError::Unauthorized).into()),
+			(None, _) => Err(Error::Session(SessionError::Unauthorized).into()),
 		})
 	}
 
@@ -1920,6 +1932,37 @@ mod request_token_tests {
 		assert!(
 			matches!(err.error, Error::Session(SessionError::Unauthorized)),
 			"{err:?}"
+		);
+	}
+
+	/// A grant the acceptor revoked, dropped or replaced before the verdict was read is admitted
+	/// as it stands now, never as first issued.
+	#[moq_net_sim::test]
+	async fn a_grant_ended_before_admission_is_refused() {
+		let handle = Handle::new(true);
+		let mut requests = handle.requests().unwrap();
+
+		let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), RequestKind::Subscribe, None);
+		let issued = requests.next().await.unwrap().request().accept(Grant::all());
+		issued.revoke(SessionError::Unauthorized, "revoked");
+		let err = verdict.grant().await.expect_err("revoked before admission");
+		assert_eq!(err.reason, "revoked");
+
+		let verdict = handle.verify_request(token(b"jwt", 1), subscribe_path(), RequestKind::Subscribe, None);
+		drop(requests.next().await.unwrap().request().accept(Grant::all()));
+		let err = verdict.grant().await.expect_err("dropped before admission");
+		assert!(
+			matches!(err.error, Error::Session(SessionError::Unauthorized)),
+			"{err:?}"
+		);
+
+		let verdict = handle.verify_request(token(b"jwt", 2), subscribe_path(), RequestKind::Subscribe, None);
+		let issued = requests.next().await.unwrap().request().accept(Grant::all());
+		issued.update(Grant::default());
+		let grant = verdict.grant().await.expect("still granted");
+		assert!(
+			!grant.publish.matches("room/alice"),
+			"the replacement is what is admitted"
 		);
 	}
 
