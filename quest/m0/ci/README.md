@@ -55,7 +55,6 @@ Measure each change against the numbers above and record the result in its PR.
 ## Required
 
 - [Platform in the merge queue](/quest/m0/ci/platform-queue.md) - macOS and Windows run once per merge in one job per OS, off the PR path
-- [Skip setup without work](/quest/m0/ci/setup-skip.md) - a job whose diff selects nothing skips disk cleanup, Nix and cache restore but still reports its required check
 - [mbx on R2](/quest/m0/ci/mbx-r2.md) - Rust builds on every OS read an R2 cache that only `main` writes, escaping the 10 GB Actions cache
 - [Nix cache](/quest/m0/ci/nix-cache.md) - `nix.moq.dev` on R2 replaces Cachix for CI and releases
 - [JS selection](/quest/m0/ci/js-select.md) - a JS change tests only the changed packages and their dependents
