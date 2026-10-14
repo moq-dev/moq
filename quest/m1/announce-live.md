@@ -66,7 +66,9 @@ Work:
 
 - Rust `rs/moq-net` and JS `js/net`: the lite and IETF subscribers keep the
   count and mark the point where the initial set has been read, and the
-  origin's announce consumers expose it. Mirror names across languages.
+  origin's announce consumers expose it. A counted snapshot cut short, by
+  another message or the stream ending, is a protocol violation. Mirror
+  names across languages.
 - JS MoQ Active Count: declare the setup option, record the negotiation,
   validate the parameter against it (and refuse it on any REQUEST_OK but
   SUBSCRIBE_NAMESPACE's), and send the count as a publisher, so JS IETF
@@ -81,6 +83,7 @@ Work:
   request. Do that here or in a follow-up, as the implementer judges.
 - Regressions with mocked time: caught up after the counted snapshot and
   never before an earlier event is read; a count of 0 is caught up at once;
+  a snapshot cut short is refused;
   a relay reports caught up without waiting on a silent upstream; IETF
   waits for the counted NAMESPACE messages, or reports on the OK without
   the extension; a session with no OK still reports caught up; a reconnect
