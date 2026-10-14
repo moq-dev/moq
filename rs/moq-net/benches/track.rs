@@ -27,9 +27,9 @@
 //! holding a fixed number of gaps the reader still remembers: each hand-out must cost the
 //! same however many gaps it holds, so a walk over them shows up as a slope.
 //!
-//! `track_empty_run` drains a run of groups that finished without a frame, written off in
-//! one poll or handed out a group per poll, across readers: judging each group must not
-//! walk the rest of the run, so a per-group walk shows up as a slope over it.
+//! `track_empty_run` drains a run of groups that finished without a frame across readers,
+//! with the groups after it past the budget or within it: each empty group is handed out
+//! like any other, so a walk over the rest of the run per group shows up as a slope over it.
 //!
 //! Run with `cargo bench -p moq-net --bench track`.
 
@@ -587,8 +587,8 @@ struct EmptyRun {
 
 impl EmptyRun {
 	/// `stale` stamps the groups after the run 50 ms and 100 ms in, so a 10 ms budget writes
-	/// off group 0 and the run in one poll. Otherwise one group 5 ms in follows the run and
-	/// keeps it within the budget, so each poll hands out one group of it.
+	/// off the run's last group, the only one they bound. Otherwise one group 5 ms in follows
+	/// the run and keeps all of it within the budget.
 	fn new(run: u64, readers: usize, stale: bool) -> Self {
 		let broadcast = broadcast::Info::default().produce();
 		let track = broadcast.create_track("bench", timed()).unwrap();
@@ -614,7 +614,8 @@ impl EmptyRun {
 			readers: (0..readers).map(|_| track.subscribe(budget.clone())).collect(),
 			_broadcast: broadcast,
 			_track: track,
-			handed: if stale { 2 } else { run as usize + 2 },
+			// The run's last group is written off when stale, but two groups follow it.
+			handed: run as usize + 2,
 		}
 	}
 
@@ -631,9 +632,9 @@ impl EmptyRun {
 }
 
 /// Readers draining a run of groups that finished without a frame, swept over the run and
-/// the readers. `stale` writes the run off in one poll; `fresh` hands it out a group per
-/// poll. Either way a reader's cost must stay linear in the run, so a walk over the rest of
-/// the run per group shows up as a slope over it.
+/// the readers, with the groups after it past the budget (`stale`) or within it (`fresh`).
+/// A reader's cost must stay linear in the run, so a walk over the rest of the run per
+/// group shows up as a slope over it.
 fn bench_empty_run(c: &mut Criterion) {
 	let mut group = c.benchmark_group("track_empty_run");
 	group.sample_size(10);

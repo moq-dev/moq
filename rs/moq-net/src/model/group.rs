@@ -959,12 +959,6 @@ impl Producer {
 		self.state.read().started()
 	}
 
-	/// Whether the group finished without a frame, so it never presents anything.
-	pub(crate) fn ended_empty(&self) -> bool {
-		let state = self.state.read();
-		state.fin.is_some() && matches!(state.timeline, Timeline::Empty)
-	}
-
 	/// Where the group starts in presentation time: its first frame's timestamp, or
 	/// `None` while no frame has been opened or when that frame is untimed.
 	///
