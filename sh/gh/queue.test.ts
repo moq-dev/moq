@@ -1,5 +1,5 @@
-// Exercise the event policy: skipped PR contexts, one OS job per merge group,
-// and release PR coverage despite release having no merge queue.
+// Exercise the event policy: skipped native PR contexts, one OS job per merge
+// group, and release PR coverage despite release having no merge queue.
 import assert from "node:assert/strict";
 
 const workflow = async (name: string) => Bun.YAML.parse(await Bun.file(`.github/workflows/${name}.yml`).text());
@@ -23,16 +23,20 @@ for (const config of [check, platform]) {
 	assert.equal(config.on.pull_request.paths, undefined, "required PR contexts must always report");
 	assert.ok(config.on.merge_group);
 }
-for (const job of [check.jobs.check, check.jobs.test, platform.jobs.scope]) {
-	assert.equal(condition(job.if, "pull_request", "main"), false);
-	assert.equal(condition(job.if, "pull_request", "release"), true);
+// Check and Test run on every PR as well as in the queue.
+for (const job of [check.jobs.check, check.jobs.test]) {
+	for (const base of ["main", "release"]) assert.equal(condition(job.if, "pull_request", base), true);
 	assert.equal(condition(job.if, "merge_group", ""), true);
-	// Retargeting a main PR to release emits `edited`, which must run the gates.
-	assert.equal(condition(job.if, "pull_request", "release", true, "edited"), true);
 }
-// Release Dart FFI also runs on main PRs, where an edit would only cancel and
-// repeat its build; nightly covers the targets a retarget would add.
-for (const config of [check, platform, swift]) {
+// Native jobs skip main PRs; release has no queue, so its PRs run them.
+assert.equal(condition(platform.jobs.scope.if, "pull_request", "main"), false);
+assert.equal(condition(platform.jobs.scope.if, "pull_request", "release"), true);
+assert.equal(condition(platform.jobs.scope.if, "merge_group", ""), true);
+// Retargeting a main PR to release emits `edited`, which must run the native gates.
+assert.equal(condition(platform.jobs.scope.if, "pull_request", "release", true, "edited"), true);
+// Check, Test and Release Dart FFI already run on main PRs, where an edit would
+// only cancel and repeat their builds.
+for (const config of [platform, swift]) {
 	assert.ok(config.on.pull_request.types.includes("edited"), "retargeting to release must rerun");
 }
 assert.deepEqual(Object.keys(platform.jobs).sort(), ["macos", "scope", "windows"]);

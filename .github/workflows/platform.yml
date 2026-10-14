@@ -1,7 +1,7 @@
 name: Platform
 
-# Main uses the merge queue's combined diff. Release has no queue, so its PRs
-# retain these gates. Every PR reports skipped OS checks without path filters,
+# The native macOS and Windows gates run once per main merge, in the merge queue,
+# rather than on every PR push. Release has no queue, so its PRs retain them. Every PR reports skipped OS checks without path filters,
 # allowing the same check names to be required before and inside the queue.
 permissions:
   contents: read
@@ -24,7 +24,9 @@ on:
       - "**/justfile"
       - ".github/**"
   pull_request:
-    # `edited` runs the gates when a main PR is retargeted to release; see check.yml.
+    # `closed` only cancels an in-flight run. `edited` runs the gates when a main
+    # PR is retargeted to release. Any edit reruns them, since a skipped rerun
+    # would post a passing context over a failed one; on main PRs that is free.
     types: [opened, synchronize, reopened, edited, closed]
   merge_group:
     types: [checks_requested]

@@ -31,8 +31,8 @@ the implementation PR.
 - Confirm a platform-affecting main merge group runs at most one macOS job
   and one Windows job, while an unrelated diff skips both. Confirm a
   release-targeting PR runs the selected platform checks.
-- Main PRs rely on strict local validation on the final committed head,
-  recorded in the PR; the merge queue also runs Check and Test. Linux-only
+- Check and Test keep running on every PR and again in the merge queue; only
+  the native jobs move off main PRs (maintainer, 2026-10-14). Linux-only
   platform jobs remain on PRs, and release packaging remains nightly.
 - Nightly and releases share the five-job macOS cap. Measure overlap with
   queue runs before reserving capacity or reducing the queue build limit.

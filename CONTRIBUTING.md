@@ -22,21 +22,14 @@ Have at least these sections:
 When pushing additional commits to an existing PR, update the title and description if needed.
 When taking over someone else's PR, push commits on top of theirs so they keep credit.
 
-Main PRs rely on local validation before the merge queue runs Check, Test,
-and the platform gates on the combined change. Release-targeting PRs retain
-these checks because release has no merge queue. Commit the final change, then
-run `MOQ_STRICT=1 just check` in the Nix dev shell against the current base,
-plus any integration checks required by `AGENTS.md`. This already includes the
-standard tests. Record the tested commit SHA, base, and results in the PR, and
-validate again after changing the commit or base.
-
 Create a draft PR.
 Switch it to "Ready for review" when you're finished and local `just check` passes.
 Fix any merge conflicts and failing CI checks.
 
 # Merge queue
 
-PRs into `main` land through a merge queue, which runs **Check**, **Test**, **Platform scope**, **Windows**, and **macOS** on the PR combined with the latest `main` and the PRs queued ahead of it.
+PRs into `main` land through a merge queue, which re-runs **Check** and **Test** on the PR combined with the latest `main` and the PRs queued ahead of it.
+The **macOS** and **Windows** platform gates (selected by **Platform scope**) run only there; main PRs report them as skipped.
 Enqueue a reviewed PR with `gh pr merge <number>`.
 
 A dequeued PR means the combination failed checks, timed out, or no longer meets the ruleset.

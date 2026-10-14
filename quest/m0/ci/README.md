@@ -37,9 +37,8 @@ compile-only warm can follow if the warm's runtime matters.
 
 Decisions (maintainer, 2026-10-13):
 
-- Main PRs rely on strict local validation; Check, Test, macOS and Windows
-  run in the merge queue. Release PRs retain these checks because release has
-  no queue. The fast platform test suites move too; the rest stays nightly.
+- macOS and Windows run in the merge queue, not on every PR push. The fast
+  platform test suites move with them; the rest of Nightly stays nightly.
 - Caches move to Cloudflare R2: mbx's S3 backend for Rust, and `nix.moq.dev`
   replacing Cachix for Nix. The infra lives in `infra/` beside apt and rpm,
   checked in where wrangler allows; one-time commands where it does not.

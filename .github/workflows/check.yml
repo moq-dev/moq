@@ -8,9 +8,7 @@ on:
   pull_request:
     # `closed` is here only so merging/closing a PR cancels its in-flight run
     # via the concurrency group below; the job itself is skipped on close.
-    # `edited` covers retargeting a main PR to release, which must run the gates
-    # main skips. Any edit reruns them, since a skipped rerun would mask a failure.
-    types: [opened, synchronize, reopened, edited, closed]
+    types: [opened, synchronize, reopened, closed]
   merge_group:
     types: [checks_requested]
 
@@ -29,9 +27,9 @@ jobs:
   # of the two rather than their sum.
   check:
     name: Check
-    # Main validates the combined merge group after local validation.
-    # Release has no queue, so its PRs keep the same gates.
-    if: github.event.action != 'closed' && (github.event_name == 'merge_group' || github.base_ref == 'release')
+    # Skip the actual work on close/merge: this run exists only to cancel the
+    # superseded in-flight build via the concurrency group above.
+    if: github.event.action != 'closed'
     runs-on: ubuntu-24.04-arm
     # Backstop a hang instead of holding the runner for the 6-hour default.
     timeout-minutes: 60
@@ -104,7 +102,7 @@ jobs:
 
   test:
     name: Test
-    if: github.event.action != 'closed' && (github.event_name == 'merge_group' || github.base_ref == 'release')
+    if: github.event.action != 'closed'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
 
