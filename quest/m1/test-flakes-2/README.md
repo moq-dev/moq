@@ -37,7 +37,8 @@ Public API: none. Wire: none.
 - [Handshake ACK](/quest/m1/test-flakes-2/handshake-ack.md) - the impaired cluster drill's connect survives a lost handshake ACK
 - [Auth refresh mocks time](/quest/m1/test-flakes-2/auth-refresh-mock-time.md) - moq-relay's auth refresh and fixed-lease tests measure a grant's life on one mocked clock
 - [uring teardown close](/quest/m1/test-flakes-2/uring-teardown-close.md) - moq-uring's published-close teardown test holds under load, fixed at its cause
-- [CLI process deadlines](/quest/m1/test-flakes-2/cli-process-deadlines.md) - moq-cli's auth serve signal tests and failed-export exit test hold under load
+- [Auth serve signals](/quest/m1/test-flakes-2/auth-serve-signals.md) - moq-cli's auth serve signal tests hold under load
+- [Export failure exit](/quest/m1/test-flakes-2/export-failure-exit.md) - moq-cli's failed-export exit test holds under load
 - [FFI shutdown](/quest/m1/test-flakes-2/ffi-shutdown.md) - moq-ffi's graceful shutdown tests hold under load
 
 ## Related
