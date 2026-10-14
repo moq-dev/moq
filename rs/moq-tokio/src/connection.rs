@@ -2144,7 +2144,9 @@ mod tests {
 			.local_addr()
 			.expect("local addr");
 		// The OS's own wording, which differs on Windows.
-		let refused = std::net::TcpStream::connect(addr).expect_err("nothing listens").to_string();
+		let refused = std::net::TcpStream::connect(addr)
+			.expect_err("nothing listens")
+			.to_string();
 
 		let mut config = crate::connect::Config::default();
 		config.backoff.initial = Duration::from_millis(50);
