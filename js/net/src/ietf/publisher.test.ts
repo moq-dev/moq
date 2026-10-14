@@ -1,7 +1,7 @@
 import { expect, jest, mock, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
-import type { Producer as BroadcastProducer } from "../broadcast.ts";
+import { Producer as BroadcastProducer } from "../broadcast.ts";
 import * as Epoch from "../epoch.ts";
 import { error } from "../error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "../group.ts";
@@ -18,13 +18,14 @@ import type * as Cluster from "./cluster.ts";
 import { toRequestCode } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
+import { toWire } from "./priority.ts";
 import { PublishDone } from "./publish.ts";
 import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
 import { RequestError, RequestOk } from "./request.ts";
-import { GroupOrder, Subscribe, SubscribeOk, SubscribeUpdate, Unsubscribe } from "./subscribe.ts";
+import { GroupOrder, Subscribe, SubscribeError, SubscribeOk, SubscribeUpdate, Unsubscribe } from "./subscribe.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
-import { TrackStatusRequest } from "./track.ts";
+import { TRACK_STATUS_ERROR_14, TrackStatusOk, TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
@@ -140,46 +141,217 @@ function publisher(
 	};
 }
 
-test("TRACK_STATUS gets exact NOT_SUPPORTED refusal bytes on every draft", async () => {
-	const phrase = new TextEncoder().encode("TRACK_STATUS is not supported");
-	for (const version of [
-		Version.DRAFT_14,
-		Version.DRAFT_15,
-		Version.DRAFT_16,
-		Version.DRAFT_17,
-		Version.DRAFT_18,
-		Version.DRAFT_19,
-		Version.DRAFT_20,
-		Version.DRAFT_21,
-		Version.DRAFT_22,
-	] as const) {
-		const pair = createMockTransportPair(ALPN.DRAFT_19);
+const IETF_VERSIONS = [
+	Version.DRAFT_14,
+	Version.DRAFT_15,
+	Version.DRAFT_16,
+	Version.DRAFT_17,
+	Version.DRAFT_18,
+	Version.DRAFT_19,
+	Version.DRAFT_20,
+	Version.DRAFT_21,
+	Version.DRAFT_22,
+] as const;
+
+/** A request stream recording what the publisher writes, with the requester's side under test control. */
+function requestStream(version: IetfVersion) {
+	let input!: ReadableStreamDefaultController<Uint8Array>;
+	const written: number[] = [];
+	const stream = new Stream({
+		readable: new ReadableStream<Uint8Array>({
+			start(c) {
+				input = c;
+			},
+		}),
+		writable: new WritableStream<Uint8Array>({
+			write: (chunk) => {
+				written.push(...chunk);
+			},
+		}),
+		version,
+	});
+	return {
+		stream,
+		written,
+		wire: () => new Reader(undefined, Uint8Array.from(written), version),
+		cancel: () => input.error(new Error("request cancelled")),
+	};
+}
+
+function trackStatus(namespace: string, propertiesWanted = true) {
+	return new TrackStatusRequest({
+		requestId: 7n,
+		trackNamespace: Path.from(namespace),
+		trackName: "video",
+		propertiesWanted,
+	});
+}
+
+/** The error code of the refusal on `wire`. */
+async function refusalCode(wire: Reader, version: IetfVersion): Promise<number> {
+	if (version === Version.DRAFT_14) {
+		expect(await wire.u53()).toBe(TRACK_STATUS_ERROR_14);
+		return (await SubscribeError.decode(wire, version)).errorCode;
+	}
+	expect(await wire.u53()).toBe(RequestError.id);
+	return (await RequestError.decode(wire, version)).errorCode;
+}
+
+// TRACK_STATUS gets what a SUBSCRIBE_OK would carry, as far as each draft's answer has room,
+// without subscribing to the track. INCLUDE_PROPERTIES=0 empties the properties.
+test("TRACK_STATUS is answered on every draft without subscribing", async () => {
+	for (const version of IETF_VERSIONS) {
+		for (const wanted of [true, false]) {
+			const pair = createMockTransportPair(ALPNS[version]);
+			const session = new NativeSession(pair.server, version, true);
+			const { pub, origin } = publisher(pair.server, { session });
+			const broadcast = publish(origin, Path.from("room"));
+			const track = broadcast.createTrack("video", {
+				timescale: Timescale.MILLI,
+				maxAge: Milli(5000),
+				priority: 2,
+			});
+			const group = new GroupProducer(4);
+			group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(0) });
+			group.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.fromMillis(1) });
+			track.writeGroup(group);
+			const subscribed = spyOn(track, "subscribe");
+
+			const { stream, wire } = requestStream(version);
+			// Only draft-20 can carry the opt-out.
+			await pub.runTrackStatusRequest(trackStatus("room", wanted || version < Version.DRAFT_20), stream);
+			expect(subscribed).not.toHaveBeenCalled();
+
+			const r = wire();
+			expect(await r.u53()).toBe(TrackStatusOk.id(version));
+			const ok = await TrackStatusOk.decode(r, version);
+			expect(await r.done()).toBe(true);
+
+			const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
+			expect(ok.requestId).toBe(legacy ? 7n : undefined);
+			expect(ok.largest).toEqual({ groupId: 4n, objectId: 1n });
+			const expected =
+				version === Version.DRAFT_14 || version === Version.DRAFT_15
+					? { groupOrder: GroupOrder.Descending }
+					: version < Version.DRAFT_18 || (!wanted && version >= Version.DRAFT_20)
+						? {}
+						: {
+								timescale: Timescale.MILLI,
+								priority: toWire(2),
+								groupOrder: GroupOrder.Descending,
+								maxCacheDuration: 5000n,
+							};
+			expect(ok.properties).toEqual(expected);
+			origin.close();
+		}
+	}
+});
+
+// A track that has published nothing answers without LARGEST_OBJECT.
+test("TRACK_STATUS for an empty track names no largest", async () => {
+	const version = Version.DRAFT_22;
+	const pair = createMockTransportPair(ALPNS[version]);
+	const session = new NativeSession(pair.server, version, true);
+	const { pub, origin } = publisher(pair.server, { session });
+	publish(origin, Path.from("room")).createTrack("video");
+
+	const { stream, wire } = requestStream(version);
+	await pub.runTrackStatusRequest(trackStatus("room"), stream);
+	const r = wire();
+	expect(await r.u53()).toBe(TrackStatusOk.id(version));
+	expect((await TrackStatusOk.decode(r, version)).largest).toBeUndefined();
+	origin.close();
+});
+
+// Refused before anything resolves when the grant excludes the broadcast, and refused when
+// the grant narrows while the broadcast resolves.
+test("TRACK_STATUS outside the grant is refused on every draft", async () => {
+	const nothing = (): Grant => ({ publish: new Path.Patterns([]), subscribe: new Path.Patterns([]) });
+	for (const version of IETF_VERSIONS) {
+		const unauthorized = toRequestCode("unauthorized", "track_status", version);
+		const pair = createMockTransportPair(ALPNS[version]);
+		const session = new NativeSession(pair.server, version, true);
+		const grant = new Signal<Grant | undefined>(nothing());
+		const { pub, origin } = publisher(pair.server, { session, grant });
+		const requests = origin.dynamic(Path.from("room")).requested();
+
+		const outside = requestStream(version);
+		await pub.runTrackStatusRequest(trackStatus("room"), outside.stream);
+		expect(await refusalCode(outside.wire(), version)).toBe(unauthorized);
+
+		// Granted, so it reaches the handler, which has not answered when the grant narrows.
+		grant.set(undefined);
+		const narrowed = requestStream(version);
+		const task = pub.runTrackStatusRequest(trackStatus("room"), narrowed.stream);
+		expect((await requests.next()).value?.path).toBe(Path.from("room"));
+		grant.set(nothing());
+		await task;
+		expect(await refusalCode(narrowed.wire(), version)).toBe(unauthorized);
+
+		await requests.return?.();
+		origin.close();
+	}
+});
+
+test("TRACK_STATUS for a missing broadcast or track is refused DOES_NOT_EXIST", async () => {
+	for (const version of IETF_VERSIONS) {
+		const missing = toRequestCode("does_not_exist", "track_status", version);
+		const pair = createMockTransportPair(ALPNS[version]);
 		const session = new NativeSession(pair.server, version, true);
 		const { pub, origin } = publisher(pair.server, { session });
-		const written: Uint8Array[] = [];
-		const stream = new Stream({
-			readable: new ReadableStream<Uint8Array>(),
-			writable: new WritableStream<Uint8Array>({
-				write: (chunk) => {
-					written.push(new Uint8Array(chunk));
-				},
-			}),
-			version,
-		});
-		await pub.runTrackStatusRequest(
-			new TrackStatusRequest({ requestId: 7n, trackNamespace: Path.from("test"), trackName: "video" }),
-			stream,
-		);
-		await stream.writer.closed;
-		const body = [
-			...(version <= Version.DRAFT_16 ? [7] : []),
-			3,
-			...(version >= Version.DRAFT_16 ? [0] : []),
-			phrase.length,
-			...phrase,
-		];
-		const expected = [version === Version.DRAFT_14 ? 0x0f : 0x05, 0, body.length, ...body];
-		expect(written.flatMap((chunk) => Array.from(chunk))).toEqual(expected);
+
+		const absent = requestStream(version);
+		await pub.runTrackStatusRequest(trackStatus("absent"), absent.stream);
+		expect(await refusalCode(absent.wire(), version)).toBe(missing);
+
+		// A produced broadcast serves only the tracks it created.
+		publish(origin, Path.from("room"));
+		const untracked = requestStream(version);
+		await pub.runTrackStatusRequest(trackStatus("room"), untracked.stream);
+		expect(await refusalCode(untracked.wire(), version)).toBe(missing);
+		origin.close();
+	}
+});
+
+// The requester leaving is owed nothing, and gives back the origin demand or the track
+// lookup it held, whichever was still resolving.
+test("a cancelled TRACK_STATUS releases its demand on every draft", async () => {
+	for (const version of IETF_VERSIONS) {
+		const pair = createMockTransportPair(ALPNS[version]);
+		const session = new NativeSession(pair.server, version, true);
+		const { pub, origin } = publisher(pair.server, { session });
+		const requests = origin.dynamic(Path.from("room")).requested();
+
+		// The broadcast is still resolving: its handler never answers.
+		const early = requestStream(version);
+		const resolving = pub.runTrackStatusRequest(trackStatus("room/early"), early.stream);
+		const pending = (await requests.next()).value;
+		expect(pending?.path).toBe(Path.from("room/early"));
+		early.cancel();
+		await resolving;
+		expect(early.written).toEqual([]);
+		// Withdrawn, so a late answer is closed rather than served.
+		const answer = new BroadcastProducer().consume();
+		pending?.accept(answer);
+		expect(answer.closed.peek()).toBeNull();
+
+		// The broadcast resolves, but its track is never answered.
+		const late = requestStream(version);
+		const looking = pub.runTrackStatusRequest(trackStatus("room/late"), late.stream);
+		const request = (await requests.next()).value;
+		if (!request) throw new Error("no request for room/late");
+		const served = new BroadcastProducer();
+		const trackRequest = wireOf(served).requested();
+		request.accept(served);
+		expect((await trackRequest)?.name).toBe("video");
+		expect(served.demand().used.peek()).toBe(true);
+		late.cancel();
+		await looking;
+		expect(late.written).toEqual([]);
+		await served.demand().unused();
+
+		await requests.return?.();
+		served.close();
 		origin.close();
 	}
 });

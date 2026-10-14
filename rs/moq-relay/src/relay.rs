@@ -869,6 +869,23 @@ mod tests {
 		);
 	}
 
+	/// A long-lived task's panic ends `run` with that panic, instead of leaving a
+	/// relay that accepts sessions it can no longer serve.
+	#[tokio::test]
+	async fn a_critical_panic_stops_the_relay() {
+		let mut config = crate::Config::default();
+		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		let mut relay = super::Relay::load(config).await.unwrap().with_signals(false);
+		let _admissions = relay.admissions().unwrap();
+		relay
+			.cluster()
+			.critical
+			.spawn("injected task", async { panic!("injected") });
+
+		let err = relay.run().await.expect_err("the relay kept running");
+		assert_eq!(err.root_cause().to_string(), "injected task panicked: injected");
+	}
+
 	#[cfg(not(feature = "_quic"))]
 	#[tokio::test]
 	async fn workers_require_a_quic_backend() {

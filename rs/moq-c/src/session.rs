@@ -119,11 +119,16 @@ impl Session {
 			let _publish = publish;
 			let _consume = consume;
 
-			let res = tokio::select! {
-				// close() requested: drain what the session queued, then close it.
-				_ = closed.1 => reconnect.clone().close().await.map_err(map_connect_error),
-				res = Self::report(callback, reconnect.clone()) => res,
-			};
+			// A panic ends only this session, reported through the terminal callback.
+			let res = moq_tokio::panic::isolate(async move {
+				tokio::select! {
+					// close() requested: drain what the session queued, then close it.
+					_ = closed.1 => reconnect.clone().close().await.map_err(map_connect_error),
+					res = Self::report(callback, reconnect.clone()) => res,
+				}
+			})
+			.await
+			.unwrap_or(Err(Error::Panic));
 			// The terminal callback waits for the close to reach the peer, so a caller that exits
 			// on it doesn't leave the peer to time the connection out.
 			client.close().await;
@@ -169,10 +174,15 @@ impl Session {
 			let _publish = publish;
 			let _consume = consume;
 
-			let res = tokio::select! {
-				_ = closed.1 => Ok(()),
-				res = Self::serve(id, callback, request) => res,
-			};
+			// A panic ends only this session, reported through the terminal callback.
+			let res = moq_tokio::panic::isolate(async move {
+				tokio::select! {
+					_ = closed.1 => Ok(()),
+					res = Self::serve(id, callback, request) => res,
+				}
+			})
+			.await
+			.unwrap_or(Err(Error::Panic));
 
 			let entry = State::lock().session.task.remove(id).flatten();
 			if let Some(entry) = entry {
@@ -289,6 +299,7 @@ fn map_connect_error(err: moq_tokio::Error) -> Error {
 		// Local auth stays the dedicated C status. A scoped protocol close is `Error::Moq`
 		// so `moq_error_protocol` can recover the registry and code.
 		moq_tokio::Error::MoqNet(moq_net::Error::Unauthorized) => Error::Unauthorized,
+		moq_tokio::Error::Panic => Error::Panic,
 		moq_tokio::Error::MoqNet(err) => err.into(),
 		err => match err.connect_error() {
 			Some(moq_tokio::ConnectError::Unauthorized) => Error::Unauthorized,

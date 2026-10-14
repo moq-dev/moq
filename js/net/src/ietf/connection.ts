@@ -34,7 +34,7 @@ import {
 } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
 import { MalformedAuthToken } from "./token.ts";
-import { TrackStatusRequest } from "./track.ts";
+import { TRACK_STATUS_ERROR_14, TrackStatusRequest } from "./track.ts";
 import { type IetfVersion, Version, versionName } from "./version.ts";
 
 // The PADDING stream type (draft-18+): bytes a peer sends to probe for bandwidth.
@@ -519,8 +519,7 @@ export class Connection implements Established {
 			publish: PublishError.id,
 			publish_namespace: PublishNamespaceError.id,
 			subscribe_namespace: SubscribeNamespaceError.id,
-			// TRACK_STATUS_ERROR
-			track_status: 0x0f,
+			track_status: TRACK_STATUS_ERROR_14,
 		}[kind];
 		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
 		await stream.writer.u53(version === Version.DRAFT_14 ? id14 : RequestError.id);

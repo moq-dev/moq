@@ -1,3 +1,5 @@
+use anyhow::Context;
+
 use crate::{auth, cluster, refusals::Refusal};
 
 use axum::http;
@@ -78,9 +80,18 @@ impl Connection {
 		self
 	}
 
-	/// Admits and serves this connection until it closes.
+	/// Admits and serves this connection until it closes. A panic ends only this
+	/// connection, as an error.
 	#[tracing::instrument("conn", skip_all, fields(id = self.id, remote = self.request.remote_addr().map(tracing::field::display), session = tracing::field::Empty))]
 	pub async fn run(self) -> anyhow::Result<()> {
+		// Boxed: debug builds copy the session's large future through each wrapper's
+		// stack frame, which overflows a test thread.
+		moq_tokio::panic::isolate(Box::pin(self.serve()))
+			.await
+			.context("connection panicked")?
+	}
+
+	async fn serve(self) -> anyhow::Result<()> {
 		// Abandoned at the drain deadline, so the deadline bounds this task and its
 		// socket like it bounds a session.
 		let admitted = self.shutdown.admit(self.admit()).await;

@@ -8,15 +8,15 @@ summary, exiting non-zero on failure.
 Division of labour: TSDuck does the transport-stream parsing (we shell out to
 `tsanalyze --json` for PSI/service/structure and `tstables` for the PMT), and
 this script does what TSDuck does not cover: the ISO 13818-1 T-STD buffer
-model, which no maintained tool implements, and the PCR checks that need the
+model for supported elementary streams, and the PCR checks that need the
 time-base discontinuities a 188/204-byte header scan here recovers. PCR value
 intervals, byte schedule and release timing live in `pcr-timing.py`.
 
 Checks split into two severities:
   - HARD (structural): fail the run by default. PAT/PMT, packet size, sync,
-    continuity counters, PSI CRC, PCR presence, PCR monotonicity.
+    continuity counters, PSI CRC, PCR presence, PCR monotonicity, T-STD buffers.
   - SHAPE (broadcast profile): reported as WARN and only fail the run under
-    `--strict`. Service descriptors (SDT), T-STD buffer model.
+    `--strict`. Service descriptors (SDT).
 
 Timing basis is the stream's own PCR clock (an IRD locks to PCR), so the harness
 needs no wall-clock capture and results are deterministic for a given file.
@@ -77,7 +77,7 @@ def run_tsanalyze(ts_path: str) -> dict:
         text=True,
         check=False,
     )
-    if proc.returncode != 0 and not proc.stdout:
+    if proc.returncode != 0:
         raise RuntimeError(f"tsanalyze failed: {proc.stderr.strip()}")
     data = json.loads(proc.stdout)
     data["_stderr"] = proc.stderr

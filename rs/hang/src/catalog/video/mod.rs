@@ -207,10 +207,10 @@ pub struct VideoConfig {
 	#[serde_as(as = "Option<Hex>")]
 	pub description: Option<Bytes>,
 
-	/// The encoded width/height of the media.
+	/// The largest encoded width/height the track carries, fixed for its name.
 	///
-	/// This is optional because it can be changed in-band for some codecs.
-	/// It's primarily a hint to allocate the correct amount of memory up-front.
+	/// The picture resizes in band at a keyframe below these ceilings, unless the
+	/// `description` pins it. Absent means unknown; a publisher may fill it once.
 	pub coded_width: Option<u32>,
 	pub coded_height: Option<u32>,
 
@@ -227,7 +227,7 @@ pub struct VideoConfig {
 	pub display_aspect_height: Option<u32>,
 
 	// TODO color space
-	/// The maximum bitrate of the video track, if known.
+	/// The maximum bitrate of the video track, if known. It only rises.
 	#[serde(default)]
 	pub bitrate: Option<u64>,
 
@@ -239,7 +239,7 @@ pub struct VideoConfig {
 	)]
 	pub enabled: bool,
 
-	/// The frame rate of the video track, if known.
+	/// The maximum frame rate of the video track, if known. It only rises.
 	#[serde(default)]
 	pub framerate: Option<f64>,
 

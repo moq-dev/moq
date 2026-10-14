@@ -427,12 +427,15 @@ impl Web {
 
 		let https = if let Some(listener) = https_listener {
 			let rustls_config = https_tls.expect("HTTPS config was built before binding");
-			tokio::spawn(reload_https_config(
-				rustls_config.clone(),
-				config.https.cert,
-				config.https.key,
-				config.https.root,
-			));
+			state.cluster.critical.spawn(
+				"HTTPS certificate reload",
+				reload_https_config(
+					rustls_config.clone(),
+					config.https.cert,
+					config.https.key,
+					config.https.root,
+				),
+			);
 			let server = crate::listener::server(
 				listener,
 				crate::listener::Config {
