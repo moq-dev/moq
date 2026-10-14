@@ -4,7 +4,7 @@
 
 The `moq-time` sim drives two `moq-quic` endpoints over in-memory datagrams
 with configurable latency, loss, reordering, and bandwidth, so QUIC behavior
-(BBR, reliable reset, stream deadlines, the transport upgrade) and MoQ over
+(BBR, reliable reset, stream deadlines, the transport race) and MoQ over
 real QUIC are tested deterministically with no sockets.
 
 ## Plan

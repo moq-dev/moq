@@ -6,7 +6,7 @@ An export whose source arrives further off real time than the output's
 clock may follow ends with an error naming the measured rate, once it has
 used half its delay. It no longer drops nearly every frame for hours with
 only per-frame "missed its deadline" warnings. A short stall, such as a
-WebSocket-to-QUIC upgrade, still drops late frames and recovers.
+reconnect, still drops late frames and recovers.
 
 ## Plan
 
