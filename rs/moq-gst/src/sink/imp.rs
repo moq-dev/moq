@@ -856,13 +856,19 @@ impl MoqSink {
 			}
 			// A pad that starts flushing stops counting towards EOS immediately, not when the flush
 			// finishes. Waiting for FLUSH_STOP lets another pad's EOS complete the element inside the
-			// flush window, and the finalize that follows is not something FLUSH_STOP can undo.
+			// flush window, and the finalize that follows is not something FLUSH_STOP can undo. The
+			// first-catalog slot returns now for the same reason: a sibling resolving inside the window
+			// would otherwise publish a first catalog without this pad.
 			gst::EventView::FlushStart(_) => {
 				let control = self.control.lock().unwrap();
-				if control.live.as_ref().is_some_and(|state| state.is_open()) {
+				if let Some(state) = control.live.as_ref().filter(|state| state.is_open()) {
+					let _rt = RUNTIME.enter();
 					let mut lifecycle = sink_pad.lifecycle();
 					if !lifecycle.releasing {
 						lifecycle.ended = false;
+						if let Some(catalog) = &state.catalog {
+							lifecycle.media.reserve(catalog);
+						}
 					}
 				}
 				drop(control);
@@ -1479,15 +1485,19 @@ mod tests {
 			let video = run.pad("video");
 			let mut catalog = run.start();
 			assert!(video.send_event(gst::event::Eos::new()));
+			// The sibling resolves inside the flush window, where the pad already counts as live.
 			match resume {
 				"flush" => {
 					assert!(video.send_event(gst::event::FlushStart::new()));
+					assert!(negotiate(&audio, &opus_caps()));
 					assert!(video.send_event(gst::event::FlushStop::new(true)));
 				}
-				"stream-start" => assert!(video.send_event(gst::event::StreamStart::new("second"))),
+				"stream-start" => {
+					assert!(video.send_event(gst::event::StreamStart::new("second")));
+					assert!(negotiate(&audio, &opus_caps()));
+				}
 				_ => unreachable!(),
 			}
-			assert!(negotiate(&audio, &opus_caps()));
 			assert!(
 				next_catalog(&mut catalog).is_pending(),
 				"the resumed pad still owes its rendition ({resume})"
