@@ -23,7 +23,3 @@ refusal as final.
 
 Moved from m2 into the auth line: without this, a client renewing in band
 cannot tell an expired token apart from a refused one.
-
-## Required
-
-- [WebSocket refusal](/quest/m1/auth/ws-unauthorized.md) - both transports refuse a token at the session level

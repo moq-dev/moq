@@ -1146,7 +1146,8 @@ elif [[ "$TAIL_ONLY" -eq 0 ]]; then
     done
 
     # The relay refuses a token on its public rules, and Chromium has to read the close code and
-    # reason it sends. Chromium is the strict peer here, so no Rust client stands in for it.
+    # reason it sends. WebSocket must surface Unauthorized and stop reconnecting too.
+    # Chromium is the strict peer here, so no Rust client stands in for it.
     if needs js; then
         echo "=== browser close code ==="
         if is_broken js; then

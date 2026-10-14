@@ -36,6 +36,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 enum Answer {
 	Grant(Grant),
 	Status(u16),
+	Token(Grant, moq_auth::Token),
 }
 
 /// A server whose answers the test changes mid-session, recording every request.
@@ -96,6 +97,8 @@ impl Script {
 		};
 		match answer {
 			Answer::Grant(grant) => Json(grant).into_response(),
+			Answer::Token(grant, token) if request.token.as_ref() == Some(&token) => Json(grant).into_response(),
+			Answer::Token(..) => StatusCode::UNAUTHORIZED.into_response(),
 			Answer::Status(code) => StatusCode::from_u16(code).unwrap().into_response(),
 		}
 	}
@@ -383,43 +386,62 @@ async fn admits_and_reports_the_session() {
 async fn forwards_the_setup_token() {
 	use web_transport_trait::{RecvStream as _, SendStream as _, Session as _};
 
-	let script = Script::new(grant(Duration::from_secs(3600)));
-	let (port, relay) = spawn_relay(build_auth(script.spawn().await)).await;
-
-	// No client presents a SETUP token yet, so write a draft-16 CLIENT_SETUP by hand. One
-	// parameter, AUTHORIZATION TOKEN (3), holding USE_VALUE (3), Token Type 0, then a
-	// value that is not text, so any lossy step on the way shows.
-	let value = [0x00, 0xff, 0x80, b'x'];
-	let token = [&[0x03, 0x00][..], &value].concat();
-	let params = [&[0x01, 0x03, token.len() as u8][..], &token].concat();
-	let setup = [&[0x20][..], &(params.len() as u16).to_be_bytes(), &params].concat();
-
-	let session = qmux::tcp::Config::new(qmux::Version::QMux01)
-		.protocols(["moqt-16"])
-		.connect(("127.0.0.1", port))
-		.await
-		.expect("connect");
-	let (mut send, mut recv) = session.open_bi().await.expect("open the control stream");
-	send.write_all(&setup).await.expect("send CLIENT_SETUP");
-
-	// The relay answers SERVER_SETUP only once the auth server has admitted the session.
-	let mut reply = [0u8; 1];
-	tokio::time::timeout(TIMEOUT, recv.read(&mut reply))
-		.await
-		.expect("SERVER_SETUP timeout")
-		.expect("SERVER_SETUP");
-
-	let seen = script.seen.lock().unwrap().clone();
-	let connect = seen.iter().find(|r| r.event == Event::Connect).expect("a connect");
-	assert_eq!(
-		connect.token,
-		Some(moq_auth::Token {
+	for websocket in [false, true] {
+		let value = [0x00, 0xff, 0x80, b'x'];
+		let token = moq_auth::Token {
 			kind: moq_auth::Token::OUT_OF_BAND,
 			value: value.to_vec(),
-		})
-	);
+		};
+		let script = Script::new(grant(Duration::from_secs(3600)));
+		// Anonymous admission fails, so a SERVER_SETUP proves the token's grant was used.
+		script.on_connect(Answer::Token(grant(Duration::from_secs(3600)), token.clone()));
+		let auth = build_auth(script.spawn().await);
+		let (port, relay) = if websocket {
+			spawn_ws_relay(auth).await
+		} else {
+			spawn_relay(auth).await
+		};
 
-	relay.abort();
+		// Draft-16 CLIENT_SETUP: AUTHORIZATION TOKEN (3), USE_VALUE (3), Token Type 0.
+		let encoded = [&[0x03, 0x00][..], &value].concat();
+		let params = [&[0x01, 0x03, encoded.len() as u8][..], &encoded].concat();
+		let setup = [&[0x20][..], &(params.len() as u16).to_be_bytes(), &params].concat();
+		let session = if websocket {
+			qmux::ws::Client::new()
+				.with_protocol("moqt-16", &[qmux::Version::QMux01])
+				.connect(&format!("ws://127.0.0.1:{port}/room?source=setup"))
+				.await
+				.expect("connect WebSocket")
+		} else {
+			qmux::tcp::Config::new(qmux::Version::QMux01)
+				.protocols(["moqt-16"])
+				.connect(("127.0.0.1", port))
+				.await
+				.expect("connect TCP")
+		};
+		let (mut send, mut recv) = session.open_bi().await.expect("open the control stream");
+		send.write_all(&setup).await.expect("send CLIENT_SETUP");
+		let mut reply = [0u8; 1];
+		assert_eq!(
+			tokio::time::timeout(TIMEOUT, recv.read(&mut reply))
+				.await
+				.expect("SERVER_SETUP timeout")
+				.expect("SERVER_SETUP"),
+			Some(1)
+		);
+		let seen = script.seen.lock().unwrap().clone();
+		let connect = seen.iter().find(|r| r.event == Event::Connect).expect("a connect");
+		assert_eq!(connect.token, Some(token));
+		if websocket {
+			assert_eq!(connect.transport, moq_auth::Transport::WebSocket);
+			assert_eq!(connect.path, "/room");
+			assert_eq!(connect.query.as_deref(), Some("source=setup"));
+			assert_eq!(connect.server_name.as_deref(), Some("127.0.0.1"));
+			assert!(connect.remote.is_some_and(|addr| addr.ip().is_loopback()));
+			assert_eq!(connect.alpn.as_deref(), Some("qmux-01.moqt-16"));
+		}
+		relay.abort();
+	}
 }
 
 /// A refusal at connect, a 5xx, and a garbage reply all refuse the session.
@@ -1551,4 +1573,92 @@ async fn relay_request_limits_distinguish_clients_and_peers() {
 			let _ = relay.await;
 		}
 	}
+}
+
+/// Browser-visible policy refusals happen after the WebSocket upgrade, in MoQ's close registry.
+#[tokio::test]
+async fn websocket_refusal_is_in_band() {
+	use web_transport_trait::{Error as _, SendStream as _, Session as _};
+	for (status, code) in [
+		(401, moq_net::SessionError::Unauthorized),
+		(403, moq_net::SessionError::Unauthorized),
+		(502, moq_net::SessionError::App(502)),
+	] {
+		let script = Script::new(grant(Duration::from_secs(3600)));
+		script.on_connect(Answer::Status(status));
+		let (port, relay) = spawn_ws_relay(build_auth(script.spawn().await)).await;
+		let session = qmux::ws::Client::new()
+			.with_protocol("moq-lite-06", &[qmux::Version::QMux01])
+			.connect(&format!("ws://127.0.0.1:{port}/room"))
+			.await
+			.expect("policy refusal must not reject the browser-opaque HTTP upgrade");
+		let mut send = session.open_uni().await.expect("open SETUP");
+		send.write_all(&[1, 1, 0]).await.expect("send empty SETUP");
+		send.finish().expect("finish SETUP");
+		let closed = tokio::time::timeout(TIMEOUT, session.closed())
+			.await
+			.expect("refused session stayed open");
+		assert_eq!(closed.session_error().map(|(code, _)| code), Some(code.to_code()));
+		relay.abort();
+	}
+}
+
+/// The role seen at SETUP reaches the shared admission gate on the WebSocket path.
+#[tokio::test]
+async fn websocket_publisher_role_is_refused_by_a_subscribe_only_grant() {
+	let script = Script::new(Grant::new(Patterns::new(), all()));
+	let (port, relay) = spawn_ws_relay(build_auth(script.spawn().await)).await;
+	let url = room_url("ws", port);
+	let origin = moq_tokio::origin::spawn();
+	let result = tokio::time::timeout(
+		TIMEOUT,
+		client()
+			.with_publisher(origin.consume())
+			.with_reconnect(false)
+			.connect(url)
+			.established(),
+	)
+	.await
+	.expect("publisher handshake timed out");
+
+	let error = match result {
+		Ok(session) => tokio::time::timeout(TIMEOUT, session.closed())
+			.await
+			.expect("mismatched publisher stayed open")
+			.unwrap_err(),
+		Err(error) => error,
+	};
+	assert_eq!(error.connect_error(), Some(moq_tokio::ConnectError::Unauthorized));
+	let seen = script.seen.lock().unwrap().clone();
+	let connect = seen
+		.iter()
+		.find(|request| request.event == Event::Connect)
+		.expect("auth saw no connection");
+	assert_eq!(connect.role, Some(moq_auth::Role::Publisher));
+	relay.abort();
+}
+
+/// The native reconnect loop treats an in-band unauthorized refusal as terminal too.
+#[tokio::test]
+async fn websocket_unauthorized_stops_native_reconnect() {
+	let script = Script::new(grant(Duration::from_secs(3600)));
+	script.on_connect(Answer::Status(401));
+	let (port, relay) = spawn_ws_relay(build_auth(script.spawn().await)).await;
+	let connection = client().with_reconnect(true).connect(room_url("ws", port));
+	let error = tokio::time::timeout(TIMEOUT, connection.closed())
+		.await
+		.expect("unauthorized reconnect loop did not stop")
+		.unwrap_err();
+	assert_eq!(error.connect_error(), Some(moq_tokio::ConnectError::Unauthorized));
+	assert_eq!(
+		script
+			.seen
+			.lock()
+			.unwrap()
+			.iter()
+			.filter(|request| request.event == Event::Connect)
+			.count(),
+		1
+	);
+	relay.abort();
 }

@@ -37,7 +37,9 @@ The fields are documented on `moq_auth::Request` and `moq_auth::Grant`
 including a timeout or an unparseable body, refuses and logs an error, so
 nothing is admitted because the server was down. A grant that names nothing
 refuses, and so does one already expired: expiry is exact, with no grace for
-clock skew, so keep the auth server's clock in sync.
+clock skew, so keep the auth server's clock in sync. WebSocket admission
+happens after SETUP, just like QUIC: a refusal reaches the client as a session
+error, and rejected credentials stop its reconnect loop.
 
 **Revalidate.** On the grant's cadence the relay asks again. A grant with the
 same `root` and `mounts` resizes the live session in place, narrower or wider,

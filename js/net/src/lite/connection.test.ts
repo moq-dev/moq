@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
-import { SessionCode } from "../error.ts";
+import { SessionCode, SessionError } from "../error.ts";
 import { createMockTransportPair, type MockTransport, textFrame } from "../mock.ts";
 import { Producer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -473,3 +473,53 @@ test("close waits for a request served while withdrawals are in flight", async (
 		destination.close();
 	}
 });
+
+for (const peerClosed of [true, false]) {
+	test(`driver distinguishes peer close from an open-transport failure: ${peerClosed}`, async () => {
+		const pair = createMockTransportPair(ALPN_06);
+		let incoming!: ReadableStreamDefaultController<WebTransportBidirectionalStream>;
+		Object.defineProperty(pair.client, "incomingBidirectionalStreams", {
+			value: new ReadableStream<WebTransportBidirectionalStream>({
+				start(controller) {
+					incoming = controller;
+				},
+			}),
+		});
+		let stopped!: () => void;
+		const terminal = new Promise<void>((resolve) => {
+			stopped = resolve;
+		});
+		const original = pair.client.close.bind(pair.client);
+		const close = spyOn(pair.client, "close").mockImplementation((info) => {
+			original(info);
+			stopped();
+		});
+		const logged = spyOn(console, "error").mockImplementation(() => {});
+		const connection = new Connection({
+			url: new URL("https://example.com/"),
+			quic: pair.client,
+			version: Version.DRAFT_06,
+		});
+		const failure = new Error(peerClosed ? "Connection closed: 2 unauthorized" : "local accept failed");
+		try {
+			// QMux fulfills closed before it rejects pending accepts with its raw teardown error.
+			if (peerClosed) pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
+			incoming.error(failure);
+			// The driver's final abort is the barrier, so the spy cannot outlive this fixture.
+			await terminal;
+			if (peerClosed) {
+				const reason = await connection.closed;
+				expect(reason).toBeInstanceOf(SessionError);
+				expect((reason as SessionError).code).toBe(SessionCode.Unauthorized);
+				expect(logged).not.toHaveBeenCalled();
+			} else {
+				expect(logged).toHaveBeenCalledWith("fatal error running connection", failure);
+			}
+		} finally {
+			connection.abort();
+			pair.server.close();
+			close.mockRestore();
+			logged.mockRestore();
+		}
+	});
+}
