@@ -137,3 +137,56 @@ test("video warmup round trips as optional integer milliseconds", () => {
 		expect(() => VideoConfigSchema.parse({ ...base, warmup })).toThrow();
 	}
 });
+
+const section = (fields: object) => ({ renditions: {}, ...fields });
+
+test("projection parses the known kinds", () => {
+	for (const [json, projection] of [
+		['{"kind":"rectilinear"}', { kind: "rectilinear" }],
+		['{"kind":"equirectangular"}', { kind: "equirectangular" }],
+		['{"kind":"equirectangular","fov":180.0}', { kind: "equirectangular", fov: 180 }],
+	] as const) {
+		expect(VideoSchema.parse(section({ projection: JSON.parse(json) })).projection).toEqual(projection);
+	}
+});
+
+test("projection is optional", () => {
+	expect(VideoSchema.parse(section({})).projection).toBeUndefined();
+});
+
+test("unknown projection is preserved instead of throwing", () => {
+	const raw = JSON.parse('{"face":"front","kind":"cubemap"}');
+	expect(VideoSchema.parse(section({ projection: raw })).projection).toEqual({ kind: "unknown", raw });
+});
+
+test("malformed known projection throws", () => {
+	for (const json of ['{"kind":"equirectangular","fov":"wide"}', '{"kind":"rectilinear","fov":90}']) {
+		expect(() => VideoSchema.parse(section({ projection: JSON.parse(json) }))).toThrow();
+	}
+});
+
+test("projection fov must be in (0, 360]", () => {
+	for (const fov of [0, -90, 360.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+		expect(() => VideoSchema.parse(section({ projection: { kind: "equirectangular", fov } }))).toThrow();
+	}
+	for (const fov of [0.5, 180, 360]) {
+		expect(VideoSchema.parse(section({ projection: { kind: "equirectangular", fov } })).projection).toEqual({
+			kind: "equirectangular",
+			fov,
+		});
+	}
+});
+
+test("stereo parses known layouts and keeps unknown ones verbatim", () => {
+	for (const stereo of ["mono", "side-by-side", "top-bottom", "interleaved"]) {
+		expect(VideoSchema.parse(section({ stereo })).stereo).toBe(stereo);
+	}
+	expect(VideoSchema.parse(section({})).stereo).toBeUndefined();
+	expect(() => VideoSchema.parse(section({ stereo: 2 }))).toThrow();
+});
+
+test("legacy array catalogs have no projection or stereo", () => {
+	const parsed = VideoSchema.parse([{ track: { name: "v" }, config: rendition() }]);
+	expect(parsed.projection).toBeUndefined();
+	expect(parsed.stereo).toBeUndefined();
+});

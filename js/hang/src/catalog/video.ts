@@ -90,8 +90,41 @@ export const VideoConfigSchema = z.object({
 	),
 });
 
+// projection kinds this build knows how to render.
+const KNOWN_PROJECTIONS = ["rectilinear", "equirectangular"];
+
+// projection this build does not recognized, not to be rendered
+export const UnknownProjectionSchema = z.pipe(
+	z.looseObject({
+		kind: z.string().check(
+			z.refine((kind) => !KNOWN_PROJECTIONS.includes(kind), {
+				message: "recognized projection kind must match its own schema",
+			}),
+		),
+	}),
+	z.transform((raw) => ({ kind: "unknown" as const, raw })),
+);
+
+// How the coded picture maps onto the viewer's FOV.
+export const ProjectionSchema = z.union([
+	z.discriminatedUnion("kind", [
+		// A flat picture
+		z.strictObject({ kind: z.literal("rectilinear") }),
+		// Longitude across the width and latitude down the height, wrapped onto a sphere.
+		z.strictObject({
+			kind: z.literal("equirectangular"),
+			// Degrees of longitude the picture spans from 0..360.
+			fov: z.optional(z.number().check(z.positive(), z.lte(360))),
+		}),
+	]),
+	UnknownProjectionSchema,
+]);
+
+// How the viewer's pictures share each frame.
+export const StereoSchema = z.union([z.enum(["mono", "side-by-side", "top-bottom"]), z.string()]);
+
 /**
- * Schema for the catalog video section: renditions plus display size, rotation, and flip.
+ * Schema for the catalog video section: renditions plus display size, rotation, flip, projection, and stereo.
  * Renditions mirror WebCodecs VideoDecoderConfig (https://w3c.github.io/webcodecs/#video-decoder-config).
  */
 export const VideoSchema = z.union([
@@ -116,6 +149,14 @@ export const VideoSchema = z.union([
 		// If true, the decoder will flip the video horizontally
 		// Default: false
 		flip: z.optional(z.boolean()),
+
+		// How the picture maps onto the viewer's field of view.
+		// Default: rectilinear
+		projection: z.optional(ProjectionSchema),
+
+		// How the two eyes' pictures share each frame.
+		// Default: mono
+		stereo: z.optional(StereoSchema),
 	}),
 	// Backwards compatibility: transform old array of {track, config} to new object format
 	z.pipe(
@@ -135,6 +176,8 @@ export const VideoSchema = z.union([
 						: undefined,
 				rotation: undefined,
 				flip: undefined,
+				projection: undefined,
+				stereo: undefined,
 			};
 		}),
 	),
@@ -144,6 +187,10 @@ export const VideoSchema = z.union([
 export type Video = z.infer<typeof VideoSchema>;
 /** Decoder config for a single video rendition. */
 export type VideoConfig = z.infer<typeof VideoConfigSchema>;
+/** How the coded picture maps onto the viewer's FOV. */
+export type Projection = z.infer<typeof ProjectionSchema>;
+/** How the two eyes' pictures share each frame. */
+export type Stereo = z.infer<typeof StereoSchema>;
 
 /**
  * Rank video renditions best first: largest picture, then highest bitrate, then name.
