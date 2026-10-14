@@ -175,3 +175,4 @@ ranked just below deterministic TS legs, which it requires.
 - [IETF driver double poll](/quest/m2/ietf-driver-double-poll.md) - a fired deadline costs a moq-transport session's driver one poll, as #5393 makes moq-lite's
 - [Play resume](/quest/m2/play-resume.md) - `moq-cli play` plays out pictures buffered before a declared end when new media arrives quickly
 - [Task supervision](/quest/m2/task-supervision.md) - the auth decider loop, stats publisher, and moq-tokio's token and WebSocket internals are supervised like #5447's tasks
+- [JS fill first](/quest/m2/js-fill-first.md) - the JS publisher sends a group's fill ahead of its live rest, matching Rust
