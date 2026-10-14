@@ -177,6 +177,7 @@ pub struct Config {
 	)]
 	pub delay: Option<time::Duration>,
 
+	/// Head start given to the QUIC dial before the WebSocket fallback joins the race. Defaults to 200ms.
 	#[usage(
 		name = "connect-websocket-delay",
 		long = "connect-websocket-delay",

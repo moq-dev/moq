@@ -149,6 +149,7 @@ pub struct Config {
 	)]
 	pub idle_timeout: Option<Duration>,
 
+	/// Idle timeout before an inactive connection is dropped. Defaults to 10s.
 	#[usage(
 		name = "quic-idle-timeout",
 		long = "quic-idle-timeout",
@@ -172,6 +173,7 @@ pub struct Config {
 	)]
 	pub keep_alive: Option<Duration>,
 
+	/// Keep-alive ping interval. Defaults to 3s; 0s disables it.
 	#[usage(
 		name = "quic-keep-alive",
 		long = "quic-keep-alive",

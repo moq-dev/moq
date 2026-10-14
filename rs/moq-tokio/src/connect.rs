@@ -540,6 +540,7 @@ pub struct Config {
 	)]
 	pub race: Option<std::time::Duration>,
 
+	/// Delay before also dialing the next resolved address. Defaults to 250ms; 0s dials every address at once.
 	#[usage(
 		name = "connect-race",
 		long = "connect-race",
@@ -570,6 +571,7 @@ pub struct Config {
 	)]
 	pub resolution_delay: Option<std::time::Duration>,
 
+	/// Delay before dialing IPv4 while the full DNS answer is outstanding. Defaults to 50ms.
 	#[usage(
 		name = "connect-resolution-delay",
 		long = "connect-resolution-delay",
@@ -597,6 +599,7 @@ pub struct Config {
 	)]
 	pub timeout: Option<std::time::Duration>,
 
+	/// Maximum time for one connect, covering the dial and the MoQ handshake. Defaults to 30s; 0s waits forever.
 	#[usage(
 		name = "connect-timeout",
 		long = "connect-timeout",

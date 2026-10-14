@@ -75,6 +75,7 @@ pub struct Backoff {
 	)]
 	pub initial: Option<Duration>,
 
+	/// Initial delay before the first reconnect attempt. Defaults to 1s, floored at 50ms.
 	#[usage(
 		name = "backoff-initial",
 		long,
@@ -104,6 +105,7 @@ pub struct Backoff {
 	)]
 	pub max: Option<Duration>,
 
+	/// Maximum delay between reconnect attempts. Defaults to 5s.
 	#[usage(name = "backoff-max", long, env = "MOQ_BACKOFF_MAX", setting = "connect.backoff.max")]
 	#[serde(default, rename = "__cli_max", skip_serializing_if = "Option::is_none")]
 	max_arg: Option<CliDuration>,
@@ -132,6 +134,7 @@ pub struct Backoff {
 
 	// No parser default: the parser stores one as if it were given, and it would then beat a
 	// window set in code. The default lives in [`Backoff::window`] instead.
+	/// Maximum time to spend retrying before giving up. Defaults to 10s; 0s retries forever.
 	#[usage(
 		name = "backoff-timeout",
 		long,
@@ -355,6 +358,7 @@ pub struct Goaway {
 	)]
 	pub handover: Option<Duration>,
 
+	/// How long the old session keeps serving after its replacement connects. Defaults to 10s.
 	#[usage(
 		name = "goaway-handover",
 		long,

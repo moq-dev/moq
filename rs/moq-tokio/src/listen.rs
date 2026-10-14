@@ -168,6 +168,7 @@ pub struct Config {
 	)]
 	pub timeout: Option<std::time::Duration>,
 
+	/// Maximum time for an accepted connection to finish its handshake. Defaults to 10s; 0s waits forever.
 	#[usage(
 		name = "listen-timeout",
 		long = "listen-timeout",
