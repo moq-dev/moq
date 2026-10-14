@@ -76,8 +76,9 @@ Work:
 - A benchmark sweeping announce streams and announce consumers, so
   propagating the boundary costs the touched path, not the table.
 - Use it in lazy discovery: once both halves have landed, a narrower
-  request may take over from a broad one after it reports caught up. Do
-  that here or in a follow-up, as the implementer judges.
+  request may take over from a broad one after it reports caught up. Only
+  an exact boundary qualifies; a best-effort session keeps the broad
+  request. Do that here or in a follow-up, as the implementer judges.
 - Regressions with mocked time: caught up after the counted snapshot and
   never before an earlier event is read; a count of 0 is caught up at once;
   a relay reports caught up without waiting on a silent upstream; IETF
