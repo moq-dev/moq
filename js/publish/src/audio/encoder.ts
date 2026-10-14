@@ -15,7 +15,7 @@ import {
 	Signal,
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { errors } from "../internal";
+import { type CatalogState, catalogs, errors } from "../internal";
 import { type Baseline, Estimator } from "../jitter";
 import type { AudioFrame, Capture, Format } from "./capture";
 import { Gain } from "./gain";
@@ -169,10 +169,8 @@ export class Encoder {
 		return this.in.capture.peek();
 	}
 
-	// The encode settings known before encoding starts. Opus adds its decoder description from the
-	// first encoder output without feeding that catalog-only update back into the encoder.
-	#config = new Signal<Resolved | undefined>(undefined);
-	#decoderDescription = new Signal<{ config: Catalog.AudioConfig; description: Catalog.Hex } | undefined>(undefined);
+	// The exact encoder settings and probed decoder description advertised before demand arrives.
+	#config = new Signal<(Resolved & { encoder: AudioEncoderConfig }) | undefined>(undefined);
 
 	readonly #out: EncoderOutput = {
 		error: new Signal<Error | undefined>(undefined),
@@ -227,9 +225,8 @@ export class Encoder {
 	#estimator = new Estimator();
 	// The estimator's jitter and delay, republished whenever either rises.
 	#estimate = new Signal<Estimator["estimate"]>({});
-	// What this rendition advertised on each broadcast, keyed by the broadcast or, with none, the
-	// encoder. A broadcast keeps a rendition's track when it re-registers, so returning to one
-	// continues its bitrate maximum and last config, while another broadcast starts its own.
+	// The network epoch owns its bitrate maximum and last config; local previews use the encoder.
+	#catalog = new Signal<CatalogState | undefined>(undefined);
 	#advertised = new WeakMap<object, { bitrate: number; last?: Catalog.AudioConfig }>();
 	// Whether the rendition was disabled since a config last resolved, so it keeps advertising its last
 	// config as disabled until the re-enabled capture resolves a new one. A capture that never reopens
@@ -279,8 +276,8 @@ export class Encoder {
 				try {
 					run.call(this, effect);
 				} catch (err) {
-					this.#failures.update((n) => n + 1);
-					effect.cleanup(() => this.#failures.update((n) => n - 1));
+					if (run === this.#runConfig) this.#config.set(undefined);
+					this.#fail(effect);
 					throw err;
 				}
 			});
@@ -380,6 +377,7 @@ export class Encoder {
 
 		const rendition = broadcast.audio(this.name);
 		errors.set(rendition, failure);
+		catalogs.set(rendition, this.#catalog);
 		effect.cleanup(() => rendition.close());
 
 		// Publish the resolved config; undefined (no capture) drops it from the catalog.
@@ -394,7 +392,8 @@ export class Encoder {
 			const capture = effect.get(this.in.capture);
 			const format = capture ? effect.get(capture.out.format) : undefined;
 			const fatal = effect.get(this.#out.error);
-			if (!enabled || !format || fatal) return;
+			const resolved = effect.get(this.#config);
+			if (!enabled || !format || fatal || !resolved) return;
 
 			this.#encode(broadcast.baseline, format, effect);
 		});
@@ -469,21 +468,91 @@ export class Encoder {
 		const capture = effect.get(this.in.capture);
 		const captured = capture ? effect.get(capture.out.format) : undefined;
 		if (!effect.get(this.in.enabled) || !captured) {
-			effect.set(this.#config, undefined);
+			this.#config.set(undefined);
 			return;
 		}
 
-		effect.set(this.#config, resolve(captured, effect.get(this.codec)));
+		const resolved = resolve(captured, effect.get(this.codec));
+		const source = capture ? effect.get(capture.in.source) : undefined;
+		const kind = source ? sourceKind(source) : "auto";
+		const encoderConfig = toEncoderConfig(resolved, kind, this.#opusOptions(effect));
+		if (resolved.catalog.codec !== "opus") {
+			this.#config.set({ ...resolved, encoder: encoderConfig });
+			return;
+		}
+
+		const superseded = effect.abort;
+		effect.spawn(async () => {
+			try {
+				await Util.Libav.polyfill();
+				if (superseded.aborted) return;
+				let description: Catalog.Hex | undefined;
+				let failure: Error | undefined;
+				const encoder = new AudioEncoder({
+					output: (_frame, metadata) => {
+						const source = metadata?.decoderConfig?.description;
+						if (!source) return;
+						const bytes = ArrayBuffer.isView(source)
+							? new Uint8Array(source.buffer, source.byteOffset, source.byteLength)
+							: new Uint8Array(source);
+						description = Util.Hex.fromBytes(bytes);
+					},
+					error: (error) => {
+						failure = error;
+					},
+				});
+				effect.cleanup(() => {
+					if (encoder.state !== "closed") encoder.close();
+				});
+				encoder.configure(encoderConfig);
+				const samples = Math.round(
+					(encoderConfig.sampleRate * (resolved.frameDuration ?? Time.Micro(20_000))) / 1_000_000,
+				);
+				const frame = new AudioData({
+					format: "f32-planar",
+					sampleRate: encoderConfig.sampleRate,
+					numberOfChannels: encoderConfig.numberOfChannels,
+					numberOfFrames: samples,
+					timestamp: 0,
+					data: new Float32Array(samples * encoderConfig.numberOfChannels),
+				});
+				try {
+					encoder.encode(frame);
+				} finally {
+					frame.close();
+				}
+				await effect.race(encoder.flush());
+				if (superseded.aborted) return;
+				if (failure) throw failure;
+				encoder.close();
+				this.#config.set({
+					...resolved,
+					catalog: { ...resolved.catalog, ...(description === undefined ? {} : { description }) },
+					encoder: encoderConfig,
+				});
+			} catch (error) {
+				if (superseded.aborted) return;
+				this.#config.set(undefined);
+				this.#fail(effect);
+				throw error;
+			}
+		});
 	}
 
-	// Publish the config immediately so a consumer can request the demand-gated track. Once encoding
-	// starts, republish Opus with the exact decoder description reported for that encoder config. A
+	#fail(effect: Effect): void {
+		this.#failures.update((n) => n + 1);
+		effect.cleanup(() => this.#failures.update((n) => n - 1));
+	}
+
+	// Publish the probed config before a consumer can request the demand-gated track. A
 	// disabled rendition keeps its last config, since muting also releases the capture, and stays
 	// disabled after re-enabling until the reopened capture reports its format.
 	#runCatalog(effect: Effect): void {
 		const estimate = effect.get(this.#estimate);
 		const enabled = effect.get(this.in.enabled) && !effect.get(this.#out.error);
-		const key = effect.get(this.in.broadcast) ?? this;
+		const broadcast = effect.get(this.in.broadcast);
+		const epoch = broadcast ? effect.get(broadcast.net) : undefined;
+		const key = epoch ?? this;
 		let track = this.#advertised.get(key);
 		if (!track) {
 			track = { bitrate: 0 };
@@ -493,19 +562,21 @@ export class Encoder {
 		const config = enabled ? effect.get(this.#config)?.catalog : undefined;
 		if (!config) {
 			const last = this.#paused ? track.last : undefined;
-			effect.set(this.#out.catalog, last && { ...last, ...estimate, enabled: false });
+			const catalog = last && { ...last, ...estimate, enabled: false };
+			effect.set(this.#out.catalog, catalog);
+			effect.set(this.#catalog, { epoch, config: catalog });
 			return;
 		}
 		this.#paused = false;
 
-		const decoder = effect.get(this.#decoderDescription);
-		const catalog = decoder?.config === config ? { ...config, description: decoder.description } : config;
+		const catalog = config;
 		// The catalog bitrate is the most this track has been configured for, so lowering the knob
 		// retunes the encoder without lowering what the catalog advertises.
 		track.bitrate = Math.max(track.bitrate, catalog.bitrate ?? 0);
 		const bitrate = track.bitrate > 0 ? Catalog.u53(track.bitrate) : undefined;
 		track.last = { ...catalog, bitrate, ...estimate };
 		effect.set(this.#out.catalog, track.last);
+		effect.set(this.#catalog, { epoch, config: track.last });
 	}
 
 	// Collect the encode-only Opus knobs that are set, reading the codec through the effect so the
@@ -538,20 +609,18 @@ export class Encoder {
 	// Encode captured audio frames into whichever track producer is live. The broadcast owns the
 	// track's lifetime, so this never closes it; a fatal encoder error aborts only the live track.
 	#encode(baseline: Baseline, format: Format, effect: Effect): void {
+		// The parent owns the config subscription before the async codec scope is opened.
+		const resolved = this.#config.peek();
+		if (!resolved) return;
 		effect.spawn(async () => {
 			// We're using an async polyfill temporarily for Safari support.
 			await Util.Libav.polyfill();
 
 			effect.run((effect: Effect) => {
 				const aborted = effect.abort;
-				const resolved = effect.get(this.#config);
-				if (!resolved) return;
 				const config = resolved.catalog;
 
-				const capture = effect.get(this.in.capture);
-				const source = capture ? effect.get(capture.in.source) : undefined;
-				const kind: Kind = source ? sourceKind(source) : "auto";
-				const encoderConfig = toEncoderConfig(resolved, kind, this.#opusOptions(effect));
+				const encoderConfig = resolved.encoder;
 
 				// WebCodecs rejects input whose rate doesn't match the encoder config outright, so
 				// anything arriving at a rate the codec can't carry (a 44.1kHz file as Opus) has to
@@ -569,12 +638,10 @@ export class Encoder {
 				const framer = createFramer(resolved, config.sampleRate);
 
 				const encoder = new AudioEncoder({
-					output: (frame, metadata) => {
+					output: (frame) => {
 						if (frame.type !== "key") {
 							throw new Error("only key frames are supported");
 						}
-
-						this.#setDecoderDescription(config, metadata?.decoderConfig?.description);
 
 						this.#out.stats.update((stats) => ({
 							frames: stats.frames + 1,
@@ -689,19 +756,6 @@ export class Encoder {
 		this.#failure.peek().set(cause);
 		this.#out.error.set(cause);
 		this.#live?.track.close(cause);
-	}
-
-	#setDecoderDescription(config: Catalog.AudioConfig, source: AllowSharedBufferSource | undefined): void {
-		if (config.codec !== "opus" || !source) return;
-
-		const bytes = ArrayBuffer.isView(source)
-			? new Uint8Array(source.buffer, source.byteOffset, source.byteLength)
-			: new Uint8Array(source);
-		const description = Util.Hex.fromBytes(bytes);
-		const current = this.#decoderDescription.peek();
-		if (current?.config === config && current.description === description) return;
-
-		this.#decoderDescription.set({ config, description });
 	}
 
 	close() {

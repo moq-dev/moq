@@ -398,3 +398,28 @@ test("registering a sibling after an encoder failure keeps the network broadcast
 		broadcast.close();
 	}
 });
+
+test("a served decoder identity change creates a new broadcast epoch", async () => {
+	const origin = new Origin.Producer();
+	const broadcast = new Broadcast({ origin, name: Path.from("identity.hang") });
+	const video = broadcast.video("video");
+	video.config.set(videoConfig);
+	await settle();
+	const before = broadcast.net.peek();
+	if (!before) throw new Error("expected an initial broadcast");
+	const oldCatalog = new Json.Snapshot.Consumer<Catalog.Root>({
+		track: before.track(Broadcast.CATALOG_TRACK).subscribe(),
+	});
+	expect((await oldCatalog.latest())?.value.video?.renditions.video.codec).toBe(videoConfig.codec);
+	video.config.set({ ...videoConfig, codec: "vp09.00.10.08" });
+	await settle(12);
+	const after = broadcast.net.peek();
+	expect(after).toBeDefined();
+	expect(after).not.toBe(before);
+	expect(before.closed.peek()).toBeNull();
+	expect(await oldCatalog.latest()).toBeUndefined();
+	if (!after) throw new Error("expected a replacement broadcast");
+	const next = new Json.Snapshot.Consumer<Catalog.Root>({ track: after.track(Broadcast.CATALOG_TRACK).subscribe() });
+	expect((await next.latest())?.value.video?.renditions.video.codec).toBe("vp09.00.10.08");
+	broadcast.close();
+});

@@ -14,15 +14,14 @@ every group of the tracks it lists.
 
 - ✅ Decided 2026-10-13 (maintainer, #5459): split from the catalog identity
   quest. The contract, docs, and the `js/publish` ceiling landed there;
-  [JS identity enforcement](/quest/m1/catalog-identity-js.md) owns the
-  browser side.
+  `@moq/publish` enforces the browser side.
 - ✅ Decided 2026-10-13 (maintainer, #5459): JS enforces identity by
   republishing under a new epoch with the Opus description probed up front,
   and the `js/publish` video ceiling keeps growing per side.
 
 Open: whether each Rust violator mints a new rendition name (as FLV, HLS
 import, and transcode rungs already do) or restarts under a new epoch (as JS
-will). Recommended: mint a name where the catalog can keep both, and take a
+does). Recommended: mint a name where the catalog can keep both, and take a
 new epoch only for a whole-broadcast restart.
 
 Guard `moq-mux` `Rendition::set`, `replace`, and `stage`
@@ -62,6 +61,5 @@ of buffer when no `jitter` is advertised.
 
 ## Related
 
-- [JS identity enforcement](/quest/m1/catalog-identity-js.md) - the same contract for `@moq/publish`
 - [Archive](/quest/m1/archive/README.md) - storage and replay consume the identity contract
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - a restart is a new epoch rather than a changed track

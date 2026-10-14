@@ -328,7 +328,7 @@ describe("estimate publication window", () => {
 				if (!catalog.video) throw new Error("video missing");
 				catalog.video.renditions.v.jitter = Catalog.u53(jitter);
 			});
-		return { producer, effect, track: subscriber, consumer, estimate };
+		return { producer, effect, served: track, track: subscriber, consumer, estimate };
 	}
 
 	test("estimate rises publish at the leading edge and coalesce to the latest trailing value", async () => {
@@ -385,6 +385,17 @@ describe("estimate publication window", () => {
 		expect(track.latest()).toBe(removed);
 	});
 
+	test("ending the last served track cancels a trailing estimate", async () => {
+		const { served, consumer, estimate } = fixture();
+		await consumer.latest();
+		estimate(1);
+		await consumer.latest();
+		estimate(2);
+		served.close();
+		expect(() => advance(1000)).not.toThrow();
+		expect(timers).toHaveLength(0);
+	});
+
 	test("closing the last output cancels its trailing timer", async () => {
 		const { effect, consumer, estimate } = fixture();
 		await consumer.latest();
@@ -433,4 +444,136 @@ describe("estimate publication window", () => {
 		advance(100);
 		expect((await consumer.latest())?.value.video?.renditions.v.jitter).toBe(Catalog.u53(3));
 	});
+});
+
+// A served catalog's old track must never carry a different decoder identity.
+test("a served identity edit ends the old catalog before advertising the replacement", async () => {
+	const catalog = new CatalogProducer();
+	catalog.mutate((value) => {
+		value.video = { renditions: { video: { codec: "avc1.640028", container: { kind: "legacy" } } } };
+	});
+	const effect = new Effect();
+	const track = new Track.Producer("catalog.json");
+	catalog.serve(track, effect);
+	const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track: track.subscribe() });
+	try {
+		expect((await consumer.latest())?.value.video?.renditions.video.codec).toBe("avc1.640028");
+		catalog.mutate((value) => {
+			if (value.video) value.video.renditions.video.codec = "avc1.640033";
+		});
+		expect(track.closed.peek()).toBeNull();
+		expect(await consumer.latest()).toBeUndefined();
+		const next = new Track.Producer("catalog.json");
+		catalog.serve(next, effect);
+		const replacement = new Json.Snapshot.Consumer<Catalog.Root>({ track: next.subscribe() });
+		expect((await replacement.latest())?.value.video?.renditions.video.codec).toBe("avc1.640033");
+	} finally {
+		effect.close();
+	}
+});
+
+test("a removed rendition name keeps its served identity", async () => {
+	const catalog = new CatalogProducer();
+	const initial: Catalog.VideoConfig = { codec: "avc1.640028", container: { kind: "legacy" } };
+	catalog.mutate((value) => {
+		value.video = { renditions: { video: initial } };
+	});
+	const effect = new Effect();
+	const track = new Track.Producer("catalog.json");
+	catalog.serve(track, effect);
+	try {
+		catalog.mutate((value) => {
+			delete value.video;
+		});
+		catalog.mutate((value) => {
+			value.video = { renditions: { video: initial } };
+		});
+		expect(track.closed.peek()).toBeUndefined();
+		catalog.mutate((value) => {
+			delete value.video;
+		});
+		catalog.mutate((value) => {
+			value.video = { renditions: { video: { ...initial, codec: "vp09.00.10.08" } } };
+		});
+		expect(track.closed.peek()).toBeNull();
+	} finally {
+		effect.close();
+	}
+});
+
+for (const field of ["bitrate", "framerate"] as const) {
+	test(`served ${field} rises in place and refuses a decrease`, () => {
+		const catalog = new CatalogProducer();
+		catalog.mutate((value) => {
+			value.video = {
+				renditions: { video: { codec: "avc1.640028", container: { kind: "legacy" }, [field]: 100 } },
+			};
+		});
+		const effect = new Effect();
+		const track = new Track.Producer("catalog.json");
+		catalog.serve(track, effect);
+		try {
+			catalog.mutate((value) => {
+				if (value.video) value.video.renditions.video[field] = Catalog.u53(200);
+			});
+			expect(track.closed.peek()).toBeUndefined();
+			expect(() =>
+				catalog.mutate((value) => {
+					if (value.video) value.video.renditions.video[field] = Catalog.u53(100);
+				}),
+			).toThrow(`${field} cannot decrease`);
+			expect(track.closed.peek()).toBeUndefined();
+		} finally {
+			effect.close();
+		}
+	});
+}
+
+test("an unknown ceiling fills once before any later change ends both catalog encodings", () => {
+	const catalog = new CatalogProducer();
+	catalog.mutate((value) => {
+		value.video = { renditions: { video: { codec: "avc1.640028", container: { kind: "legacy" } } } };
+	});
+	const effect = new Effect();
+	const plain = new Track.Producer("catalog.json");
+	const compressed = new Track.Producer("catalog.json.z");
+	catalog.serve(plain, effect);
+	catalog.serve(compressed, effect, { compression: true });
+	try {
+		catalog.mutate((value) => {
+			if (value.video) value.video.renditions.video.codedWidth = Catalog.u53(1280);
+		});
+		expect(plain.closed.peek()).toBeUndefined();
+		expect(compressed.closed.peek()).toBeUndefined();
+		catalog.mutate((value) => {
+			if (value.video) value.video.renditions.video.codedWidth = Catalog.u53(1920);
+		});
+		expect(plain.closed.peek()).toBeNull();
+		expect(compressed.closed.peek()).toBeNull();
+	} finally {
+		effect.close();
+	}
+});
+
+test("the last served track ending releases the next epoch's maxima", () => {
+	const catalog = new CatalogProducer();
+	catalog.mutate((root) => {
+		root.video = {
+			renditions: {
+				video: { codec: "vp8", container: { kind: "legacy" }, framerate: 60, bitrate: Catalog.u53(1000) },
+			},
+		};
+	});
+	const scope = new Effect();
+	const track = new Track.Producer("catalog.json");
+	catalog.serve(track, scope);
+	track.close();
+	expect(() =>
+		catalog.mutate((root) => {
+			if (!root.video) throw new Error("missing video");
+			root.video.renditions.video.framerate = 15;
+			root.video.renditions.video.bitrate = Catalog.u53(100);
+		}),
+	).not.toThrow();
+	scope.close();
 });

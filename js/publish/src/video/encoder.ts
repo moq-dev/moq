@@ -14,7 +14,7 @@ import {
 	Signal,
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { errors } from "../internal";
+import { type CatalogState, catalogs, errors } from "../internal";
 import { type Baseline, Estimator } from "../jitter";
 import { hardwareReliable } from "../support/video";
 import type { Capture } from "./capture";
@@ -111,7 +111,7 @@ type EncoderOutput = {
  * attached (the demand gate). Rename by constructing a new encoder; the name is not a signal.
  *
  * The catalog advertises the largest size encoded so far as the coded-size ceiling, so a capture that
- * shrinks resizes in band at a keyframe. Outgrowing the ceiling re-probes and advertises a larger one.
+ * shrinks resizes in band at a keyframe. Outgrowing the ceiling re-probes and publishes a new broadcast epoch.
  */
 export class Encoder {
 	/** The full track name of this rendition, e.g. `"video/hd"`. */
@@ -147,7 +147,7 @@ export class Encoder {
 	// The coded-size ceiling to probe for the current broadcast: each side's largest of its accepted
 	// ceiling and the current size. A smaller capture resizes in band below it without changing what
 	// the catalog advertises.
-	#coded = new Signal<{ broadcast?: Broadcast; width: number; height: number } | undefined>(undefined);
+	#coded = new Signal<{ epoch?: Moq.Broadcast.Producer; width: number; height: number } | undefined>(undefined);
 
 	// The config the browser accepted and encoded a probe frame with, and the codec string it reported.
 	// Kept through a re-probe, so the rendition stays in the catalog until the new probe replaces it.
@@ -192,9 +192,9 @@ export class Encoder {
 	#estimator = new Estimator();
 	// The estimator's jitter and delay, republished whenever either rises.
 	#estimate = new Signal<Estimator["estimate"]>({});
-	// What this rendition advertised on each broadcast, keyed by the broadcast or, for a local preview,
-	// the encoder. A broadcast keeps a rendition's track when it re-registers, so returning to one
-	// continues its ceiling, maxima, and last config, while another broadcast starts its own.
+	// A network epoch owns its ceiling, maxima, and last config. A restart of the same
+	// Broadcast component gets a fresh entry; local previews use the encoder.
+	#catalog = new Signal<CatalogState | undefined>(undefined);
 	#advertised = new WeakMap<object, Advertised>();
 	// Whether the rendition was disabled since a config last resolved, so it keeps advertising its last
 	// config as disabled until the re-enabled capture resolves a new one. A capture that never reopens
@@ -258,8 +258,8 @@ export class Encoder {
 	}
 
 	// What this rendition advertised on `broadcast`'s track.
-	#track(broadcast: Broadcast | undefined): Advertised {
-		const key = broadcast ?? this;
+	#track(epoch: Moq.Broadcast.Producer | undefined): Advertised {
+		const key = epoch ?? this;
 		let track = this.#advertised.get(key);
 		if (!track) {
 			track = { bitrate: 0, framerate: 0 };
@@ -318,6 +318,7 @@ export class Encoder {
 
 		const rendition = broadcast.video(this.name);
 		errors.set(rendition, failure);
+		catalogs.set(rendition, this.#catalog);
 		effect.cleanup(() => rendition.close());
 
 		// Publish the resolved catalog config; undefined (until one resolves) leaves it out of the catalog.
@@ -533,12 +534,17 @@ export class Encoder {
 	#runCatalog(effect: Effect): void {
 		const estimate = effect.get(this.#estimate);
 		const enabled = effect.get(this.in.enabled) && !effect.get(this.#out.error);
-		const track = this.#track(effect.get(this.in.broadcast));
+		const broadcast = effect.get(this.in.broadcast);
+		const epoch = broadcast ? effect.get(broadcast.net) : undefined;
+		const track = this.#track(epoch);
 		if (!enabled) this.#paused = true;
-		const live = enabled ? effect.get(this.#live) : undefined;
+		const candidate = enabled ? effect.get(this.#live) : undefined;
+		const live = candidate?.detected.epoch === epoch ? candidate : undefined;
 		if (!live) {
 			const last = this.#paused ? track.last : undefined;
-			effect.set(this.#out.catalog, last && { ...last, ...estimate, enabled: false });
+			const catalog = last && { ...last, ...estimate, enabled: false };
+			effect.set(this.#out.catalog, catalog);
+			effect.set(this.#catalog, { epoch, config: catalog });
 			return;
 		}
 		this.#paused = false;
@@ -561,6 +567,7 @@ export class Encoder {
 
 		track.last = catalog;
 		effect.set(this.#out.catalog, catalog);
+		effect.set(this.#catalog, { epoch, config: catalog });
 	}
 
 	// Probe the hardware for the best codec at the coded-size ceiling. Deliberately depends on as little
@@ -580,7 +587,7 @@ export class Encoder {
 		// Captured now: the run's signal is replaced once a rerun starts.
 		const superseded = effect.abort;
 		effect.spawn(async () => {
-			const track = this.#track(dimensions.broadcast);
+			const track = this.#track(dimensions.epoch);
 			try {
 				let detected: Detected;
 				try {
@@ -609,7 +616,7 @@ export class Encoder {
 				// Only an accepted probe commits a ceiling, so a size the hardware refuses never sticks.
 				const { width, height } = detected.config;
 				track.ceiling = { width, height };
-				this.#codec.set({ ...detected, broadcast: dimensions.broadcast });
+				this.#codec.set({ ...detected, epoch: dimensions.epoch });
 			} catch (err) {
 				// A newer probe reports its own outcome.
 				if (superseded.aborted) return;
@@ -630,10 +637,11 @@ export class Encoder {
 
 		// A probe for another broadcast describes another track, so wait for this one's.
 		const broadcast = effect.get(this.in.broadcast);
+		const epoch = broadcast ? effect.get(broadcast.net) : undefined;
 		const detected = effect.get(this.#codec);
 		const dimensions = effect.get(this.#dimensions);
 		const target = effect.get(this.#target);
-		if (!detected || detected.broadcast !== broadcast || !dimensions || !target) return;
+		if (!detected || detected.epoch !== epoch || !dimensions || !target) return;
 
 		// A capture that outgrew the probe encodes scaled down to fit until the re-probe at the new
 		// ceiling lands, so the live config never exceeds what the catalog advertises.
@@ -703,10 +711,11 @@ export class Encoder {
 		if (!dimensions) return;
 
 		const broadcast = effect.get(this.in.broadcast);
+		const epoch = broadcast ? effect.get(broadcast.net) : undefined;
 		effect.get(this.#codec);
-		const ceiling = this.#track(broadcast).ceiling;
+		const ceiling = this.#track(epoch).ceiling;
 		effect.set(this.#coded, {
-			broadcast,
+			epoch,
 			width: Math.max(ceiling?.width ?? 0, dimensions.width),
 			height: Math.max(ceiling?.height ?? 0, dimensions.height),
 		});
@@ -842,8 +851,8 @@ type Detected = {
 	config: VideoEncoderConfig & { framerate: number; bitrate: number };
 	// The codec string the encoder reported for it, which the catalog advertises.
 	reported: string;
-	// The broadcast the probe ran for; another one starts its own ceiling.
-	broadcast?: Broadcast;
+	// The network epoch the probe ran for; another one starts its own ceiling.
+	epoch?: Moq.Broadcast.Producer;
 };
 
 // What a rendition advertised on one broadcast's track.

@@ -3,7 +3,7 @@ import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
 import { CatalogProducer } from "./catalog";
-import { errors } from "./internal";
+import { catalogs, errors } from "./internal";
 import { Baseline } from "./jitter";
 import { type Kind, Rendition } from "./rendition";
 
@@ -67,7 +67,7 @@ export class Broadcast {
 	// root sections (e.g. `scte35`) by locking it too.
 	readonly catalog = new CatalogProducer();
 
-	// The underlying network broadcast, recreated when the name, enabled state, or maxAge changes,
+	// The underlying network broadcast, recreated when its name, enabled state, maxAge, or a served media identity changes,
 	// and is `undefined` in between. It lives in the origin rather than any session, so it spans
 	// reconnects. Exposed so an application can serve its own tracks alongside the built-in
 	// catalog/audio/video, e.g. `net.createTrack("meta.json")` plus a matching `catalog` section.
@@ -95,6 +95,8 @@ export class Broadcast {
 	readonly #names = new Signal<Record<string, string>>({});
 
 	#signals = new Effect();
+	#restart = new Signal(0);
+	#catalogReady = new Signal<Moq.Broadcast.Producer | undefined>(undefined);
 
 	constructor(props?: Inputs<BroadcastInput>) {
 		this.in = {
@@ -175,13 +177,20 @@ export class Broadcast {
 		const enabled = effect.get(this.in.enabled);
 		const renditions = effect.get(this.#renditions);
 		const names = effect.get(this.#names);
+		const epoch = effect.get(this.net);
 
 		const video: Record<string, Catalog.VideoConfig> = {};
 		const audio: Record<string, Catalog.AudioConfig> = {};
 		const text: Record<string, Catalog.TextConfig> = {};
 
 		for (const rendition of Object.values(renditions)) {
-			const source = enabled ? effect.get(rendition.config) : undefined;
+			const encoder = catalogs.get(rendition);
+			const state = encoder && effect.get(encoder);
+			if (enabled && encoder && (!state || state.epoch !== epoch)) {
+				this.#catalogReady.set(undefined);
+				return;
+			}
+			const source = enabled ? (encoder ? state?.config : effect.get(rendition.config)) : undefined;
 			if (source === undefined) continue;
 			const track = names[rendition.name];
 			const config = track ? { ...(source as object), track } : source;
@@ -223,9 +232,11 @@ export class Broadcast {
 				delete catalog.text;
 			}
 		});
+		this.#catalogReady.set(epoch);
 	}
 
 	#run(effect: Effect) {
+		effect.get(this.#restart);
 		const values = effect.getAll([this.in.enabled, this.in.origin]);
 		if (!values) return;
 		const [_enabled, origin] = values;
@@ -267,7 +278,7 @@ export class Broadcast {
 
 		let serving = false;
 		effect.run((inner) => {
-			if (!inner.get(this.in.announce)) {
+			if (!inner.get(this.in.announce) || inner.get(this.#catalogReady) !== broadcast) {
 				broadcast.unannounce();
 				return;
 			}
@@ -292,6 +303,9 @@ export class Broadcast {
 					});
 					effect.cleanup(() => track.close());
 					this.catalog.serve(track, effect, { compression });
+					effect.run((health) => {
+						if (health.get(track.closed) !== undefined) this.#restart.update((value) => value + 1);
+					});
 				}
 			}
 

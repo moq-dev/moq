@@ -82,7 +82,18 @@ async function measure(tracks: number, viewers: number) {
 	if (publishes !== 2 || updates !== 2 * tracks * viewers) {
 		throw new Error(`estimate churn regression: ${publishes} publishes, ${updates} subscribe updates`);
 	}
-	console.log(`${tracks},${viewers},${publishes},${updates},${1000 * tracks * viewers},${elapsed.toFixed(1)}`);
+	const identityStart = realNow();
+	catalog.mutate((root) => {
+		if (!root.video) throw new Error("video missing");
+		for (const config of Object.values(root.video.renditions)) config.codec = "vp8";
+	});
+	for (const viewer of subscribers) {
+		if ((await viewer.catalog.latest()) !== undefined) throw new Error("old catalog received a new identity");
+	}
+	const identity = realNow() - identityStart;
+	console.log(
+		`${tracks},${viewers},${publishes},${updates},${1000 * tracks * viewers},${elapsed.toFixed(1)},${identity.toFixed(3)}`,
+	);
 	scope.close();
 	output.close();
 	for (const viewer of subscribers) {
@@ -93,7 +104,9 @@ async function measure(tracks: number, viewers: number) {
 }
 
 try {
-	console.log("tracks,viewers,catalog_publishes,subscribe_updates,unlimited_subscribe_updates,elapsed_ms");
+	console.log(
+		"tracks,viewers,catalog_publishes,subscribe_updates,unlimited_subscribe_updates,elapsed_ms,identity_ms",
+	);
 	for (const tracks of [1, 4, 16]) for (const viewers of [1, 4, 16]) await measure(tracks, viewers);
 } finally {
 	performance.now = realNow;

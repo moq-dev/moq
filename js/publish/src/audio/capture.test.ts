@@ -504,6 +504,10 @@ function installFailableAudioEncoder() {
 			this.state = "configured";
 		}
 		encode(): void {}
+		async flush(): Promise<void> {
+			// The throwaway description probe is not a live capture encoder.
+			instances.splice(instances.indexOf(this), 1);
+		}
 		close(): void {
 			this.state = "closed";
 		}
@@ -559,7 +563,11 @@ test("a failed encoder stays failed until the capture source changes", async () 
 		close: () => {},
 	};
 	const encoder = new Encoder("audio", {
-		broadcast: { audio: () => rendition, baseline: new Baseline() } as never,
+		broadcast: {
+			audio: () => rendition,
+			baseline: new Baseline(),
+			net: new Signal(new Moq.Broadcast.Producer()),
+		} as never,
 		capture,
 		enabled,
 	});
@@ -572,6 +580,7 @@ test("a failed encoder stays failed until the capture source changes", async () 
 
 	try {
 		await render();
+		if (!encoder.out.catalog.peek()) await encoder.out.catalog.changed();
 		expect(codecs.instances).toHaveLength(1);
 		const failure = new Error("audio encoder failed");
 		codecs.instances[0].fail(failure);
