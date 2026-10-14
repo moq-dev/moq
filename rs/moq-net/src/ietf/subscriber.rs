@@ -2494,6 +2494,17 @@ where
 		let subscriber_priority = super::priority::to_wire(priority);
 		// What the SUBSCRIBE carries, which a replacement set before SUBSCRIBE_OK must renew.
 		let sent_token = self.request_token.peek();
+		// The peer holds the request to the token it carries, or to our grant without one, so
+		// the gate follows what is sent rather than what admission saw.
+		let gate_for = match sent_token.is_some() {
+			true => crate::auth::Gate::limit,
+			false => crate::auth::Gate::new,
+		};
+		*gate = gate_for(
+			self.auth.clone(),
+			broadcast_path.to_owned(),
+			crate::auth::Direction::Subscribe,
+		);
 		let written = async {
 			stream.writer.varint(ietf::Subscribe::ID).await?;
 			stream
@@ -8576,6 +8587,89 @@ mod tests {
 			drop(track);
 			drop(consumer);
 		}
+	}
+
+	/// A token set after admission but before the SUBSCRIBE goes out rides it, and the
+	/// subscription is then held to the token, not the connection grant: narrowing that grant
+	/// does not cancel what the peer admitted on the token.
+	#[moq_net_sim::test]
+	async fn a_token_set_before_the_subscribe_goes_out_governs_it() {
+		const VERSION: Version = Version::Draft18;
+		let token = bytes::Bytes::from_static(&[0x03, 0x00, b'o', b'k']);
+		let grant = |subtree: &str| crate::auth::Grant {
+			publish: crate::Patterns::new(),
+			subscribe: crate::Pattern::subtree(subtree).unwrap().into(),
+			expires: None,
+		};
+
+		let auth = crate::auth::Handle::new(true);
+		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
+		auth.granted(0, grant("room"));
+		let open = kio::Producer::new(false);
+		let session = crate::lite::test_transport::ScriptedSession::gated_open(
+			vec![subscribe_ok_bytes(VERSION).await],
+			open.consume(),
+		);
+		let log = session.log.clone();
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let request_token = crate::RequestToken::new(None);
+		let mut subscriber = Subscriber::new(
+			crate::time::Clock::sim(),
+			session,
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Hop::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+			Default::default(),
+		)
+		.with_auth(auth.clone())
+		.with_request_token(request_token.clone());
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let track = consumer.track("video").unwrap();
+		let subscription = track.subscribe(None);
+		let request = dynamic.requested_track().await.expect("no track requested");
+		let serving = moq_net_sim::spawn(async move {
+			subscriber.run_subscribe(Path::new("room/x"), dynamic, request).await;
+		});
+
+		// Admitted by the grant, then parked opening its stream while the token is set.
+		for _ in 0..20 {
+			settle().await;
+		}
+		assert!(log.writes.lock().unwrap().is_empty(), "the SUBSCRIBE was not held");
+		request_token.set(Some(typed(&token)));
+		let Ok(mut opened) = open.write() else {
+			panic!("stream gate closed");
+		};
+		*opened = true;
+		drop(opened);
+		for _ in 0..200 {
+			if occurrences(&log, &token) >= 1 {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(occurrences(&log, &token), 1, "the SUBSCRIBE carries the token");
+
+		auth.granted(0, grant("other"));
+		for _ in 0..100 {
+			settle().await;
+		}
+		assert!(
+			!serving.is_finished(),
+			"narrowing the connection grant cancelled a token-admitted subscription"
+		);
+
+		drop(subscription);
+		drop(track);
+		drop(consumer);
+		serving.abort();
 	}
 
 	/// A token-bearing client does not self-censor on its connection grant: the
