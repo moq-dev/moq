@@ -1500,6 +1500,8 @@ where
 			Renewal(request_update::Verdict),
 		}
 
+		// Request IDs of updates queued behind a pending verdict, already spent.
+		let mut spent = std::collections::HashSet::new();
 		loop {
 			// Handle one buffered update before reading the next, so answers stay in order.
 			let turn = if let Some((id, body)) = renewal.next() {
@@ -1539,6 +1541,12 @@ where
 			let (type_id, body) = match turn {
 				// A non-terminal message read while a verdict is pending waits for it.
 				Turn::Message(id, body) if renewal.pending() && !self.terminal_publish_namespace(id) => {
+					// Its request ID is spent on arrival, so one dropped with the queue stays spent.
+					if id == ietf::PublishNamespaceUpdate::ID && self.version != Version::Draft16 {
+						let update_id = ietf::RequestId::decode(&mut body.decoder(self.version), self.version)?;
+						self.spend(update_id)?;
+						spent.insert(update_id);
+					}
 					match renewal.queue((id, body), self.version) {
 						Ok(()) => continue,
 						// The dispatcher closes only on is_protocol_violation, which excludes
@@ -1617,16 +1625,11 @@ where
 			}
 
 			// An update spends its own request ID, even one refused below. On draft-16 the
-			// adapter already spent it when it routed the update here.
+			// adapter already spent it when it routed the update here, and a queued one was
+			// spent when it arrived.
 			let update_id = ietf::RequestId::decode(&mut body.decoder(self.version), self.version)?;
-			if self.version != Version::Draft16
-				&& let Err(err) = self.control.accept(update_id)
-			{
-				self.session.clone().close(
-					super::error::to_session_code(&crate::SessionError::from(&err)),
-					"invalid request ID",
-				);
-				return Err(err);
+			if self.version != Version::Draft16 && !spent.remove(&update_id) {
+				self.spend(update_id)?;
 			}
 			let msg = match ietf::PublishNamespaceUpdate::decode_msg(&mut data, self.version) {
 				// Section 8.9 rejects the update, which withdraws the advertisement as any
@@ -1798,6 +1801,18 @@ where
 	}
 
 	/// Send OK on the bidi stream.
+	/// Spend a peer's request ID, closing the session on one it already used.
+	fn spend(&self, id: RequestId) -> Result<(), Error> {
+		if let Err(err) = self.control.accept(id) {
+			self.session.clone().close(
+				super::error::to_session_code(&crate::SessionError::from(&err)),
+				"invalid request ID",
+			);
+			return Err(err);
+		}
+		Ok(())
+	}
+
 	async fn write_ok(&self, stream: &mut Stream<S, Version>, request_id: RequestId) -> Result<(), Error> {
 		match self.version {
 			Version::Draft14 => {
@@ -10012,6 +10027,63 @@ mod tests {
 		assert!(
 			routed_now(&consumer, "room/alice").is_none(),
 			"the announce is withdrawn"
+		);
+	}
+
+	/// An update queued behind a pending renewal spends its request ID on arrival, so the
+	/// announce ending before the queue drains leaves no ID the peer could reuse.
+	#[moq_net_sim::test]
+	async fn a_queued_update_spends_its_request_id_when_the_announce_ends() {
+		const VERSION: Version = Version::Draft18;
+		let queued = {
+			let log = crate::lite::test_transport::Log::default();
+			let mut writer =
+				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+			writer.varint(ietf::PublishNamespaceUpdate::ID).await.unwrap();
+			writer
+				.encode(&ietf::PublishNamespaceUpdate {
+					request_id: RequestId(5),
+					namespace_request_id: None,
+					hops: None,
+					cost: None,
+					authorization_token: None,
+				})
+				.await
+				.unwrap();
+			log.writes.lock().unwrap().clone()
+		};
+		let session = crate::lite::test_transport::ScriptedSession::per_stream_eof(vec![
+			[publish_namespace_update_with_token(VERSION).await, queued].concat(),
+		]);
+		let (mut subscriber, mut requests, _cred, _consumer, session) = auth_announce_harness_on(VERSION, session);
+		let control = subscriber.control.clone();
+		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let acceptor = async move {
+			let first = requests.next().await.expect("a request");
+			let _issued = first.accept(crate::auth::Grant::all());
+			let _never_answered = requests.next().await.expect("a renewal");
+			std::future::pending::<()>().await
+		};
+		let mut acceptor = std::pin::pin!(acceptor);
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
+			stream,
+			token_publish_namespace(),
+			cluster::Peer::default(),
+			None,
+		));
+		let mut ended = false;
+		for _ in 0..500 {
+			let _ = futures::poll!(acceptor.as_mut());
+			if futures::poll!(run.as_mut()).is_ready() {
+				ended = true;
+				break;
+			}
+			settle().await;
+		}
+		assert!(ended, "closing the stream ends the announce");
+		assert!(
+			control.accept(RequestId(5)).is_err(),
+			"the queued update's request ID was left unspent"
 		);
 	}
 
