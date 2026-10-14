@@ -18,7 +18,7 @@ bash sh/rs/nextest.sh cargo nextest run --locked -p moq-net --no-default-feature
 consumer=$(mktemp -d)
 trap 'rm -rf "$consumer"' EXIT
 mkdir "$consumer/src"
-cat > "$consumer/Cargo.toml" <<EOF
+cat >"$consumer/Cargo.toml" <<EOF
 [workspace]
 [package]
 name = "moq-net-model-check"
@@ -28,7 +28,7 @@ edition = "2024"
 moq-net = { path = "$PWD/rs/moq-net", default-features = false }
 getrandom = { version = "0.4", features = ["wasm_js"] }
 EOF
-cat > "$consumer/src/lib.rs" <<'EOF'
+cat >"$consumer/src/lib.rs" <<'EOF'
 pub fn poll(driver: &mut moq_net::origin::Driver, now: moq_net::time::Instant) {
     let _ = driver.poll(now, &moq_net::kio::Waiter::noop());
 }
