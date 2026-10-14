@@ -30,8 +30,8 @@ import { VideoSchema } from "./video";
 export const RootSchema = z.looseObject({
 	video: z.optional(VideoSchema),
 	audio: z.optional(AudioSchema),
-	// The broadcast's segment index and any durable archive, if the publisher offers one.
-	archive: z.optional(ArchiveSchema),
+	// An incompatible archive disables seeking/recording, not the rest of the catalog.
+	archive: z.catch(z.optional(ArchiveSchema), undefined),
 	// The broadcast's one continuous clock, if the publisher exposes one. Independent of
 	// `archive`: a live-only publisher exposes its mapping without creating a segment index.
 	clock: z.optional(ClockSchema),

@@ -655,6 +655,8 @@ type ArchiveSchema = {
 }
 ~~~
 
+A consumer that cannot decode the `archive` entry MUST ignore that entry without rejecting the catalog.
+
 The `track` field names the MoQ track carrying the segment records.
 The name `timeline.z` is RECOMMENDED; a consumer MUST use the advertised name rather than assuming it.
 A live publisher without a store advertises `archive` with the timeline fields (`track`, `timescale`, `durationMax`) alone.
@@ -1109,6 +1111,7 @@ A publisher MAY estimate an unknown final duration from the frame cadence, but M
 - Added the optional `delay` rendition field: how far a rendition's minimum flush lateness trails the broadcast's earliest rendition, never lowered once advertised and never subtracted across renditions.
 - Recommended namespaced keys for application root sections.
 - Added the optional `delay` field to `json` and `binary` track entries, measured only from payloads stamped with their capture time on the broadcast clock.
+- Required consumers to ignore an undecodable `archive` entry without rejecting the catalog.
 
 # Acknowledgments
 {:numbered="false"}

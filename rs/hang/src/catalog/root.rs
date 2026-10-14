@@ -44,6 +44,8 @@ pub struct Catalog<E = ()> {
 
 	/// The broadcast's segment index and any durable archive, if the publisher offers one.
 	/// See [`Archive`](crate::catalog::Archive) and the [`timeline`](crate::timeline) module.
+	/// An undecodable entry is absent so incompatible archive metadata cannot reject media.
+	#[serde_as(as = "serde_with::DefaultOnError<_>")]
 	pub archive: Option<crate::catalog::Archive>,
 
 	/// The broadcast's one continuous clock, if the publisher exposes one.
@@ -721,6 +723,37 @@ mod test {
 			Catalog::<()>::from_str(&json).expect("failed to decode").archive,
 			Some(archive)
 		);
+	}
+
+	#[test]
+	fn an_incompatible_archive_leaves_media_playable() {
+		let video = serde_json::json!({
+			"renditions": {"video": {"codec": "avc1.64001f", "container": {"kind": "legacy"}}}
+		});
+		let media = Catalog::<()>::from_str(&serde_json::json!({"video": video}).to_string()).unwrap();
+		for archive in [
+			serde_json::json!({"timelines": {"video": "video.timeline.z"}, "timescale": 1000}),
+			serde_json::json!({"track": "timeline.z", "store": "not a url"}),
+			serde_json::json!({"track": 42}),
+			serde_json::json!({"future": "archive"}),
+			serde_json::json!("archive"),
+			serde_json::json!([]),
+			serde_json::Value::Null,
+		] {
+			let json = serde_json::json!({"video": video, "archive": archive}).to_string();
+			let catalog = Catalog::<()>::from_str(&json).expect("archive metadata must not reject media");
+			assert_eq!(catalog.archive, None);
+			assert_eq!(catalog.video, media.video);
+			assert!(!catalog.to_json().unwrap().contains("\"archive\""));
+		}
+	}
+
+	#[test]
+	fn an_incompatible_archive_does_not_hide_invalid_media() {
+		Catalog::<()>::from_str(
+			r#"{"archive":{"timelines":{}},"video":{"renditions":{"video":{"codec":42,"container":{"kind":"legacy"}}}}}"#,
+		)
+		.expect_err("invalid media must still reject the catalog");
 	}
 
 	#[test]

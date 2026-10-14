@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import * as z from "@zod/mini";
-import { ARCHIVE_VERSION } from "./archive.ts";
+import { ARCHIVE_VERSION, ArchiveSchema } from "./archive.ts";
 import { u53 } from "./integers.ts";
 import type { RelativeBroadcast } from "./path.ts";
 import { RootSchema } from "./root.ts";
@@ -160,8 +160,33 @@ test("a legacy root timeline is not an archive", () => {
 	expect(parsed.archive).toBeUndefined();
 });
 
-test("an invalid store URL is refused", () => {
-	expect(() => RootSchema.parse({ archive: { track: "timeline.z", store: "not a url" } })).toThrow();
+test("an incompatible archive leaves media playable", () => {
+	const video = { renditions: { video: { codec: "avc1.64001f", container: { kind: "legacy" } } } };
+	const media = RootSchema.parse({ video });
+	for (const archive of [
+		{ timelines: { video: "video.timeline.z" }, timescale: 1000 },
+		{ track: "timeline.z", store: "not a url" },
+		{ track: 42 },
+		{ future: "archive" },
+		"archive",
+		[],
+		null,
+	]) {
+		expect(() => ArchiveSchema.parse(archive)).toThrow();
+		const parsed = RootSchema.parse({ video, archive });
+		expect(parsed.archive).toBeUndefined();
+		expect(parsed.video).toEqual(media.video);
+		expect(JSON.stringify(parsed)).not.toContain('"archive"');
+	}
+});
+
+test("an incompatible archive does not hide invalid media", () => {
+	expect(() =>
+		RootSchema.parse({
+			archive: { timelines: {} },
+			video: { renditions: { video: { codec: 42, container: { kind: "legacy" } } } },
+		}),
+	).toThrow();
 });
 
 test("an absent or foreign text section parses to empty", () => {
