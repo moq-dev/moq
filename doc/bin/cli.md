@@ -332,8 +332,9 @@ keyframe. The delay also bounds how stale a group may get, so `--delay 0` writes
 frame as soon as it is read and drops none as late, but still skips a stalled
 group once a newer one is ready.
 FLV and MKV reject their former `--max-delay` spelling with a migration
-message. TS output's PCR follows the source's clock within what ISO/IEC
-13818-1 allows.
+message. The output follows the source's clock within what ISO/IEC 13818-1
+allows a TS PCR. A source further off fails the export, naming its rate, once
+it has used half the delay; a brief network stall only drops what it made late.
 
 `export ts --passthrough` reads the track an `import ts --passthrough` published
 and writes its packets back out unchanged, from its first group on, each run

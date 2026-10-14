@@ -88,11 +88,14 @@ pub(crate) enum Push {
 /// The clock follows the source's: a source clock running slower than ours would make
 /// every frame late in the end, and a faster one would hold more and more. So the clock
 /// measures the source's rate and runs its decode timeline at it, holding the freshest
-/// frames of the track sent latest a delay. Each [`STEER`] of decode time gives a floor, the
+/// frames of the track sent latest a delay. Each [`STEER`] of our time gives a floor, the
 /// most slack a frame of that track arrived with (the least across tracks of each one's
 /// most), which queueing and retransmission only ever lower; the upper envelope of
 /// the floors over [`RATE_WINDOW`] gives the rate (its slope) and the slack now, so a
-/// spell of queueing shorter than half the window moves neither. The decode timeline is
+/// spell of queueing shorter than half the window moves neither. The backlog a network
+/// stall releases is read at once, so it gives one floor, its freshest frame's: stepped on
+/// decode time it would give one per step of the media it held, and early on, before the
+/// window fills, those would read as a source far slower than ours. The decode timeline is
 /// the output's system clock, so it keeps to what ISO/IEC 13818-1 2.4.2.1 allows one:
 /// within [`MAX_DRIFT`] of ours, changing by at most [`MAX_SLEW`]. A source past that is
 /// counted, and once it has used half the delay [`Buffer::push`] fails.
@@ -135,7 +138,7 @@ pub(crate) struct Buffer<K, T> {
 	out_of_tolerance: u64,
 }
 
-/// How often the clock is steered, in decode time: long enough that the floor covers a
+/// How often the clock is steered, in our time: long enough that the floor covers a
 /// group's worth of frames sent ahead by different amounts.
 const STEER: Duration = Duration::from_secs(2);
 /// How far back the floors are kept, in decode time: a spell of queueing shorter than half
@@ -240,8 +243,8 @@ struct Floor<K> {
 	/// Per track, its slack past the delay, less how far the drift has moved its deadline, and
 	/// when it decodes, in seconds.
 	tracks: BTreeMap<K, (f64, f64)>,
-	/// When the step's first frame decodes.
-	began: Timestamp,
+	/// When the step's first frame was read.
+	began: Instant,
 }
 
 struct Track<T> {
@@ -509,7 +512,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		arrived.max(self.horizon.unwrap_or(arrived)) + self.delay
 	}
 
-	/// Account for the slack a frame arrived with, and every [`STEER`] of decode time step the
+	/// Account for the slack a frame arrived with, and every [`STEER`] of our time step the
 	/// clock's drift toward the source's rate plus a pull back to the delay, as far as
 	/// [`MAX_SLEW`] allows.
 	fn steer(&mut self, key: &K, deadline: Option<Instant>, arrival: &Arrival<T>) -> anyhow::Result<()> {
@@ -525,13 +528,13 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		let phase = slack - delay - (self.steer.steered + elapsed * clock.drift);
 		let floor = self.steer.floor.get_or_insert_with(|| Floor {
 			tracks: BTreeMap::new(),
-			began: arrival.decode,
+			began: arrival.read,
 		});
 		let best = floor.tracks.entry(key.clone()).or_insert((phase, now));
 		if phase > best.0 {
 			*best = (phase, now);
 		}
-		if arrival.decode.as_nanos().saturating_sub(floor.began.as_nanos()) < STEER.as_nanos() {
+		if arrival.read.saturating_duration_since(floor.began) < STEER {
 			return Ok(());
 		}
 		// Re-anchor where this frame decodes, so the new drift starts from there.
@@ -582,8 +585,8 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		// To a hundredth of a ppm, so a source right at the limit is not out by rounding.
 		if (slow.abs() * 1e8).round() > (MAX_DRIFT * 1e8).round() {
 			self.out_of_tolerance += 1;
-			// At the limit and still losing ground, with half the delay gone.
-			if drift == MAX_DRIFT.copysign(slow) && gap * slow.signum() < -delay / 2.0 {
+			// The clock can never catch up, so fail once half the delay is gone.
+			if gap * slow.signum() < -delay / 2.0 {
 				anyhow::bail!(
 					"the source's clock runs {:+.1} ppm off ours, past the {:.0} ppm the output's may follow",
 					rate * 1e6,
@@ -1201,6 +1204,8 @@ mod tests {
 		clock: f64,
 		clock_before: f64,
 		out_of_tolerance: u64,
+		/// How far off the delay the frame the run failed on would have been held, in seconds.
+		off: f64,
 	}
 
 	/// Feed `hours` of 2 fps frames from a source whose clock runs `ppm` slower than ours
@@ -1219,6 +1224,7 @@ mod tests {
 			clock: 0.0,
 			clock_before: 0.0,
 			out_of_tolerance: 0,
+			off: 0.0,
 		};
 		let mut last: Option<(f64, Timestamp)> = None;
 		let mut stepped = false;
@@ -1243,9 +1249,13 @@ mod tests {
 				sync: true,
 				item: "v",
 			};
+			let held = buffer
+				.at(frame.decode)
+				.map(|deadline| since(arrived, deadline) as f64 / 1e9);
 			match buffer.push(1, frame) {
 				Ok(push) => assert_eq!(push, Push::Queued, "{ppm} ppm: frame {k} was late"),
 				Err(err) => {
+					run.off = held.expect("a clock") - delay.as_secs_f64();
 					run.err = Some(err);
 					break;
 				}
@@ -1326,13 +1336,93 @@ mod tests {
 	}
 
 	/// A source further off than the clock may follow is counted, and fails once it has used
-	/// half the delay, before any frame goes late.
+	/// half the delay, before any frame goes late, though the clock has not reached its limit.
 	#[tokio::test(start_paused = true)]
 	async fn a_source_past_the_drift_limit_fails() {
-		for ppm in [40.0, -40.0] {
+		for ppm in [40.0, -40.0, 400.0, -400.0] {
 			let run = drift(ppm, 6.0, 6.0, |_| Duration::ZERO).await;
 			assert!(run.err.is_some(), "{ppm} ppm: no error");
 			assert!(run.out_of_tolerance > 0, "{ppm} ppm: not counted");
+			assert!(
+				(0.25..0.26).contains(&run.off.abs()),
+				"{ppm} ppm: failed {} s off the delay",
+				run.off
+			);
+		}
+	}
+
+	/// What [`feed`] saw.
+	struct Fed {
+		/// The decode time a push failed at, in seconds, and its error.
+		err: Option<(f64, anyhow::Error)>,
+		dropped: u64,
+		/// What the last push did.
+		last: Option<Push>,
+	}
+
+	/// Feed `secs` of 10 fps frames through a 500 ms buffer from a source whose clock runs
+	/// `ppm` slower than ours, the frames it sends during `stall` (seconds of our clock)
+	/// reaching us together at its end, until a push fails.
+	async fn feed(ppm: f64, secs: f64, stall: std::ops::Range<f64>) -> Fed {
+		let start = Instant::now();
+		let mut buffer = Buffer::new(Duration::from_millis(500));
+		let mut fed = Fed {
+			err: None,
+			dropped: 0,
+			last: None,
+		};
+		for k in 0..(secs * 10.0) as u64 {
+			let decode = Duration::from_millis(k * 100);
+			let mut sent = decode.as_secs_f64() * (1.0 + ppm * 1e-6);
+			if stall.contains(&sent) {
+				sent = stall.end;
+			}
+			let arrived = start + Duration::from_secs_f64(sent);
+			tokio::time::advance(arrived.saturating_duration_since(Instant::now())).await;
+			let frame = Arrival {
+				arrived,
+				read: arrived,
+				decode: Timestamp::from_micros(decode.as_micros() as u64).unwrap(),
+				restart: 0,
+				skip: 0,
+				sync: true,
+				item: "v",
+			};
+			match buffer.push(1, frame) {
+				Ok(push) => fed.last = Some(push),
+				Err(err) => {
+					fed.err = Some((decode.as_secs_f64(), err));
+					break;
+				}
+			}
+			due(&mut buffer);
+		}
+		fed.dropped = buffer.dropped();
+		fed
+	}
+
+	/// A source far slower than real time, as an importer starved of CPU, fails within a few
+	/// seconds, naming its rate, rather than drop nearly every frame for hours.
+	#[tokio::test(start_paused = true)]
+	async fn a_source_far_off_real_time_fails_within_seconds() {
+		let fed = feed(220_000.0, 3_600.0, 0.0..0.0).await;
+		let (at, err) = fed.err.expect("no error");
+		assert!(at < 10.0, "failed {at} s in");
+		let err = err.to_string();
+		assert!(err.contains("-220000.0 ppm"), "the error names the wrong rate: {err}");
+	}
+
+	/// A stall shorter than half [`RATE_WINDOW`] drops what it made late and recovers, even
+	/// early, when only a few floors were measured before it.
+	#[tokio::test(start_paused = true)]
+	async fn a_stall_drops_late_frames_and_recovers() {
+		for at in [5.0, 9.0, 1_200.0] {
+			for length in [3.0, 10.0, 60.0, 290.0] {
+				let fed = feed(0.0, at + length + 30.0, at..at + length).await;
+				assert!(fed.err.is_none(), "{length} s stall at {at} s: {:?}", fed.err);
+				assert!(fed.dropped > 0, "{length} s stall at {at} s: nothing dropped");
+				assert_eq!(fed.last, Some(Push::Queued), "{length} s stall at {at} s");
+			}
 		}
 	}
 

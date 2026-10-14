@@ -736,6 +736,23 @@ async fn a_source_past_the_limit_is_counted() {
 	assert!(stats.out_of_tolerance > 0, "not counted");
 }
 
+/// The same source fails the export once it has used half the delay, about ten minutes in,
+/// rather than drop nearly every frame from then on.
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "past the 30 ppm the output's may follow")]
+async fn a_source_past_the_limit_fails_once_half_the_delay_is_gone() {
+	on_a_scaled_clock(1.0004, 900_000_000 / VIDEO_US).await;
+}
+
+/// A source 22% slow, as an importer starved of CPU, fails the export within seconds.
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "the source's clock runs -220")]
+async fn a_source_far_off_real_time_fails_within_seconds() {
+	let mut live = Live::new(1.0 / 1.22, 0).await;
+	let mut leg = live.join(Duration::ZERO).await;
+	live.run(10_000_000 / VIDEO_US, &mut [&mut leg], |_| false).await;
+}
+
 // A 1+1 pair is two receivers of one broadcast whose outputs a seamless switch compares packet
 // for packet. They join at different times and read with different cadences, and from the moment
 // they overlap they must render the same bytes. The continuity counters are the known exception
