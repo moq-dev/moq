@@ -790,7 +790,7 @@ async fn import_publishes_tag_timestamps_on_an_arrival_clock() {
 	let first = import.published[&import.video][0];
 	assert_eq!(first, (start_ms as u128 + 40) * 1000, "the source's own timestamp");
 
-	let tick = Duration::from_millis(1);
+	let tick = Duration::from_micros(1);
 	let wall = import
 		.clock
 		.wall_clock(moq_net::Timestamp::from_micros(first as u64).unwrap())
