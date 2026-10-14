@@ -1379,13 +1379,18 @@ impl TrackState {
 	/// Content at `sequence` became servable: wake the reads it succeeds, and show an answer
 	/// waiting on it.
 	fn landed(&mut self, sequence: u64) {
-		// A group revealed after finishing without a frame still cannot present. Read
-		// apart from the group's lock, which never nests under this one.
-		let inside = self.quiet.lock().stop(sequence).is_some();
-		if inside && self.lookup.get(&sequence).is_some_and(|slot| !slot.group.ended_empty()) {
-			self.quiet.lock().landed(sequence, &self.lookup);
-		}
-		let below = self.predecessor(sequence);
+		// A group revealed after finishing without a frame still cannot present, so it
+		// succeeds no read and only continues a held copy of itself.
+		let empty = self.lookup.get(&sequence).is_some_and(|slot| slot.group.ended_empty());
+		let below = if empty {
+			Some(sequence)
+		} else {
+			// Read apart from the group's lock, which never nests under this one.
+			if self.quiet.lock().stop(sequence).is_some() {
+				self.quiet.lock().landed(sequence, &self.lookup);
+			}
+			self.predecessor(sequence)
+		};
 		let oldest = self.lookup.first_key_value().map_or(sequence, |(oldest, _)| *oldest);
 		self.cache.wakes().landed(below, sequence, oldest);
 		self.shown(sequence);
@@ -7085,6 +7090,37 @@ mod test {
 			.unwrap();
 		let result = next.as_mut().poll(&mut cx);
 		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+	}
+
+	/// A group revealed after finishing without a frame succeeds no read, so it leaves a
+	/// read parked below it asleep: waking every such read per empty reveal is quadratic.
+	#[test]
+	fn an_empty_reveal_leaves_the_read_below_it_parked() {
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(10)));
+		let mut head = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
+			.unwrap();
+		let empty = producer.receive_group(group::Info { sequence: 1 }).unwrap();
+		write_group_at(&producer, 3, 100);
+
+		let mut held = subscriber
+			.recv_group()
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.expect("head group");
+		assert_eq!(held.sequence, 0);
+		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_some());
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waker = futures::task::waker(Arc::new(FlagWake(woken.clone())));
+		let mut cx = std::task::Context::from_waker(&waker);
+		let mut next = std::pin::pin!(held.read_frame());
+		assert!(next.as_mut().poll(&mut cx).is_pending(), "group 3 bounds the head");
+
+		empty.finish().unwrap();
+		producer.reveal_group(&empty);
+		assert!(!woken.load(Ordering::SeqCst), "the empty group moves no edge");
 	}
 
 	/// A route can declare the end, then land every group's header before its first frame.
