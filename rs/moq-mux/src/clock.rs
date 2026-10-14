@@ -163,16 +163,49 @@ impl Clock {
 		let unmappable = |why: &str| crate::Error::UnmappableTimestamp(format!("{pts:?} at {wall:?} {why}"));
 		let zero = wall
 			.checked_sub(pts)
+			.and_then(|zero| wall_clock(zero).ok())
 			.ok_or_else(|| unmappable("puts PTS zero before 2020"))?;
+		Self::mapped(zero, unmappable)
+	}
+
+	/// A catalog root `clock` in [`TIMESCALE`](Self::TIMESCALE), the units [`wall`](Self::wall)
+	/// reports, so equal mappings compare equal.
+	///
+	/// Refuses a wall that is no whole number of those units (some 90 kHz values).
+	pub(crate) fn exact(wall: hang::catalog::Clock) -> crate::Result<hang::catalog::Clock> {
+		let unmappable = |why: &str| crate::Error::UnmappableTimestamp(format!("root clock {wall:?} {why}"));
+		let scale = wall.wall.scale().as_u64() as u128;
+		let scaled = wall.wall.value() as u128 * Self::TIMESCALE.as_u64() as u128;
+		if !scaled.is_multiple_of(scale) {
+			return Err(unmappable("is no whole microsecond"));
+		}
+		let micros = u64::try_from(scaled / scale).map_err(|_| unmappable("overflows the clock"))?;
+		Ok(hang::catalog::Clock::new(moq_net::Timestamp::from_micros(micros)?)?)
+	}
+
+	/// A clock on an [`exact`](Self::exact) catalog root `clock`: a derivative republishing its
+	/// input's timestamps runs on its input's mapping.
+	///
+	/// Refuses a PTS zero after now, and a host whose wall clock is unset.
+	pub(crate) fn adopted(wall: hang::catalog::Clock) -> crate::Result<Self> {
+		Self::mapped(wall, |why| {
+			crate::Error::UnmappableTimestamp(format!("root clock {wall:?} {why}"))
+		})
+	}
+
+	/// A clock whose PTS zero is `zero`, anchored now at however long ago that was on the host.
+	///
+	/// No `Instant` arithmetic, so a PTS zero before this host booted still maps.
+	fn mapped(zero: hang::catalog::Clock, unmappable: impl Fn(&str) -> crate::Error) -> crate::Result<Self> {
 		let instant = web_async::time::Instant::now();
 		let now = host_wall().ok_or_else(|| unmappable("needs the host wall clock, which is unset"))?;
-		let reading = now
-			.duration_since(zero)
+		// Saturating would stamp everything early by the skew without saying so.
+		let reading = u64::try_from(moq_micros(now) - zero.wall.as_micros() as i128)
 			.map_err(|_| unmappable("puts PTS zero after now"))?;
 		Ok(Self {
 			instant,
-			reading: u64::try_from(reading.as_micros()).map_err(|_| unmappable("overflows the clock"))?,
-			wall: Some(wall_clock(zero).map_err(|_| unmappable("puts PTS zero before 2020"))?),
+			reading,
+			wall: Some(zero),
 		})
 	}
 

@@ -218,7 +218,8 @@ pub enum Error {
 	InvalidTimescale(u32),
 
 	/// A timestamp cannot be mapped between the broadcast clock and the wall: PTS zero would land
-	/// before the moq epoch (2020), or the host's wall clock was unset so the clock has no mapping.
+	/// before the moq epoch (2020) or after now, the host's wall clock was unset so the clock has no
+	/// mapping, or a catalog root `clock` would change or clear the producer's fixed clock.
 	#[error("timestamp cannot be mapped onto the broadcast clock: {0}")]
 	UnmappableTimestamp(String),
 	/// Tried to set an application catalog section whose name collides with a

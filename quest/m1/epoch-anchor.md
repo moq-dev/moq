@@ -123,5 +123,4 @@ breaking grant for publish-only tokens is dropped). Wire: none.
 ## Related
 
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - group sequences and the end-to-end pair on this coordinate
-- [The catalog root clock is the producer clock](/quest/m1/catalog-clock-adopt.md) - exact clock adoption, which a derived clock no longer needs
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - same-epoch routes resume each other's subscriptions

@@ -23,7 +23,9 @@ Decided 2026-10-09 while reworking #5088:
   always-ready writes. Add an end-to-end FETCH test that checks a sibling
   still gets its turns (found by the OpenAI review of #5088).
 - The count is test-only, so kio's hot path stays untouched: a feature or
-  `cfg` that only the sim runtime enables, reset on each task poll.
+  `cfg` that only the sim runtime enables, reset on each task poll. The hook
+  goes in `moq_clock::sim`, where every poll passes through two places: the
+  task wrapper `spawn` builds and `run`'s poll of the root future.
 - A loop takes a `Budget` only where its `Pending` goes straight up to the
   task. Three known sites need care: lite `FetchServeRun` reads a
   `FrameIngest` yield as "still short" and may `abort_unused`;
@@ -34,7 +36,7 @@ Decided 2026-10-09 while reworking #5088:
 
 ## Required
 
-- [moq-net on moq-time](/quest/m1/time/net.md) - moq-net's tests reach the moq-time sim, which hosts the poll counter
+- [moq-net on moq-clock](/quest/m1/time/net.md) - moq-net's tests reach the moq-clock sim, which hosts the poll counter
 
 ## Related
 

@@ -8,11 +8,13 @@ import {
 	type Getter,
 	getter,
 	type Inputs,
+	Once,
 	type Readonlys,
 	readonlys,
 	Signal,
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
+import { errors } from "../internal";
 import { type Baseline, Estimator } from "../jitter";
 import { hardwareReliable } from "../support/video";
 import type { Capture } from "./capture";
@@ -87,6 +89,8 @@ export type EncoderProps = Inputs<EncoderInput> & {
 };
 
 type EncoderOutput = {
+	/** The encoder failure, cleared only by a new capture source or format, or new encoder settings. */
+	error: Signal<Error | undefined>;
 	// The catalog config published for this rendition, `enabled: false` while disabled, or undefined
 	// until one resolves.
 	catalog: Signal<Catalog.VideoConfig | undefined>;
@@ -129,6 +133,7 @@ export class Encoder {
 	}
 
 	readonly #out: EncoderOutput = {
+		error: new Signal<Error | undefined>(undefined),
 		catalog: new Signal<Catalog.VideoConfig | undefined>(undefined),
 		resolved: new Signal<VideoEncoderConfig | undefined>(undefined),
 		active: new Signal<boolean>(false),
@@ -175,6 +180,14 @@ export class Encoder {
 	 */
 	readonly settled: Computed<boolean>;
 
+	// Each registration keeps its terminal failure even after the public error clears.
+	#failure = new Signal(new Once<Error>());
+	// The capture inputs #runCaptureRecovery last saw, carried across a gap in the source or display.
+	#seen?: {
+		capture?: Capture;
+		source?: unknown;
+		display?: { width: number; height: number; scale?: number };
+	};
 	#signals = new Effect();
 	#estimator = new Estimator();
 	// The estimator's jitter and delay, republished whenever either rises.
@@ -215,7 +228,10 @@ export class Encoder {
 			};
 		});
 		this.settled = this.#signals.computed(
-			(effect) => effect.get(this.#out.catalog) !== undefined || effect.get(this.#failures) > 0,
+			(effect) =>
+				effect.get(this.#out.catalog) !== undefined ||
+				effect.get(this.#out.error) !== undefined ||
+				effect.get(this.#failures) > 0,
 		);
 
 		// Every step that resolves the config counts a throw as a failure, so a bad input settles the
@@ -236,6 +252,8 @@ export class Encoder {
 				}
 			});
 		}
+		this.#signals.run(this.#runSettingsRecovery.bind(this));
+		this.#signals.run(this.#runCaptureRecovery.bind(this));
 		this.#signals.run(this.#runRegister.bind(this));
 	}
 
@@ -256,13 +274,50 @@ export class Encoder {
 		effect.cleanup(() => this.#failures.update((n) => n - 1));
 	}
 
+	// Any notification of the encoder settings re-arms a failure, including a setting mutated in place.
+	#runSettingsRecovery(effect: Effect): void {
+		effect.get(this.config);
+		this.#rearm();
+	}
+
+	// Read only capture inputs here, never bandwidth grants or the error itself; demand is not a retry.
+	// A gap in the source or display (a capture released and handed back) keeps the last ones, so only
+	// a different capture re-arms a failure, such as the new track a re-enabled camera opens.
+	#runCaptureRecovery(effect: Effect): void {
+		const capture = effect.get(this.in.capture);
+		const seen = this.#seen;
+		const same = seen !== undefined && seen.capture === capture;
+		const source = (capture && effect.get(capture.in.source)) ?? (same ? seen.source : undefined);
+		const display = (capture && effect.get(capture.out.display)) ?? (same ? seen.display : undefined);
+		this.#seen = { capture, source, display };
+		if (
+			same &&
+			seen.source === source &&
+			seen.display?.width === display?.width &&
+			seen.display?.height === display?.height &&
+			seen.display?.scale === display?.scale
+		) {
+			return;
+		}
+		this.#rearm();
+	}
+
+	// Clear a latched failure so a fresh registration retries.
+	#rearm(): void {
+		if (!this.#out.error.peek()) return;
+		this.#out.error.set(undefined);
+		this.#failure.set(new Once<Error>());
+	}
+
 	// Register the rendition on the broadcast and drive its catalog + encode loop. Re-registers cleanly
 	// when the broadcast swaps.
 	#runRegister(effect: Effect): void {
+		const failure = effect.get(this.#failure);
 		const broadcast = effect.get(this.in.broadcast);
 		if (!broadcast) return;
 
 		const rendition = broadcast.video(this.name);
+		errors.set(rendition, failure);
 		effect.cleanup(() => rendition.close());
 
 		// Publish the resolved catalog config; undefined (until one resolves) leaves it out of the catalog.
@@ -272,8 +327,9 @@ export class Encoder {
 		effect.run((effect) => {
 			const enabled = effect.get(this.in.enabled);
 			const track = effect.get(rendition.track);
-			effect.set(this.#out.active, enabled && !!track, false);
-			if (!enabled || !track) return;
+			const error = effect.get(this.#out.error);
+			effect.set(this.#out.active, enabled && !!track && !error, false);
+			if (!enabled || !track || error) return;
 
 			this.#encode(track, broadcast.baseline, effect);
 		});
@@ -286,7 +342,7 @@ export class Encoder {
 			const enabled = effect.get(this.in.enabled);
 			const track = effect.get(rendition.track);
 			const allocator = effect.get(this.in.bandwidth);
-			if (!enabled || !track || !allocator) return;
+			if (!enabled || !track || !allocator || effect.get(this.#out.error)) return;
 
 			let reservation: Moq.Bandwidth.Reservation | undefined;
 			effect.subscribe(this.#ceiling, (ceiling) => {
@@ -337,8 +393,10 @@ export class Encoder {
 				},
 				error: (err: Error) => {
 					// The black keyframe is cosmetic; failing it must not end the track the broadcast owns.
-					if (tearingDown) console.warn("video encoder failed while stopping:", err);
-					else producer.close(err);
+					if (tearingDown || effect.abort.aborted) console.warn("video encoder failed while stopping:", err);
+					else {
+						this.#abort(err, track);
+					}
 				},
 			});
 
@@ -354,8 +412,12 @@ export class Encoder {
 				if (configured && (configured.width !== config.width || configured.height !== config.height)) {
 					resized = true;
 				}
-				encoder.configure(config);
-				configured = config;
+				try {
+					encoder.configure(config);
+					configured = config;
+				} catch (error) {
+					this.#abort(error, track);
+				}
 			});
 
 			effect.run((effect) => {
@@ -410,6 +472,9 @@ export class Encoder {
 							}
 
 							encoder.encode(frame, { keyFrame });
+						} catch (error) {
+							this.#abort(error, track);
+							return;
 						} finally {
 							frame.close();
 						}
@@ -446,10 +511,18 @@ export class Encoder {
 				if (encoder.state !== "closed") encoder.close();
 				// The broadcast owns this static track across demand gaps. Close the current group, marking
 				// the break so a later subscriber resumes on the same track without the pre-gap group reading
-				// as live. A fatal encoder error still aborts the track through producer.close(err) above.
+				// as live. A fatal encoder error aborts the track instead.
 				if (track.closed.peek() === undefined) producer.discontinuity();
 			}
 		});
+	}
+
+	#abort(error: unknown, track: Moq.Track.Producer): void {
+		if (this.#out.error.peek()) return;
+		const cause = error instanceof Error ? error : new Error(String(error));
+		this.#failure.peek().set(cause);
+		this.#out.error.set(cause);
+		track.close(cause);
 	}
 
 	// Publishes the catalog for the probe: its codec string, the coded-size ceiling, and the bitrate and
@@ -459,7 +532,7 @@ export class Encoder {
 	// changing too.
 	#runCatalog(effect: Effect): void {
 		const estimate = effect.get(this.#estimate);
-		const enabled = effect.get(this.in.enabled);
+		const enabled = effect.get(this.in.enabled) && !effect.get(this.#out.error);
 		const track = this.#track(effect.get(this.in.broadcast));
 		if (!enabled) this.#paused = true;
 		const live = enabled ? effect.get(this.#live) : undefined;
@@ -495,6 +568,7 @@ export class Encoder {
 	// place meanwhile, so a re-probe swaps the catalog entry in one update, or not at all when nothing
 	// changed.
 	#runCodec(effect: Effect): void {
+		if (effect.get(this.#out.error)) return;
 		const enabled = effect.get(this.in.enabled);
 		const dimensions = effect.get(this.#coded);
 		const target = effect.get(this.#target);

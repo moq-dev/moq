@@ -11,8 +11,6 @@ to slow start without hurting the path.
 ## Plan
 
 Decided in the 2026-10-10 audit: scope this to remembered QUIC connections.
-Transferring TCP estimates into a WebSocket-to-QUIC upgrade is out of scope;
-that upgrade starts without a seed.
 
 Follow the shape of draft-ietf-ccwg-careful-resume: the sender keeps a
 per-destination record of the last validated bandwidth estimate and minimum
