@@ -61,7 +61,12 @@ impl Deadlines {
 	fn advance_to(&self, now: Instant, polling: bool) {
 		let due = {
 			let mut state = self.0.lock().unwrap();
-			assert!(now >= state.now, "time moved backwards");
+			if now < state.now {
+				// Unlocked first: a poisoned queue would turn every armed deadline's
+				// drop into a second panic, aborting the unwind.
+				drop(state);
+				panic!("time moved backwards");
+			}
 			state.now = now;
 			if polling {
 				drop(state.owner.take());
@@ -468,5 +473,17 @@ mod tests {
 	fn time_cannot_move_backwards() {
 		let deadlines = Deadlines::new(Instant::ZERO + Duration::from_secs(1));
 		deadlines.advance(Instant::ZERO);
+	}
+
+	/// The panic leaves the queue usable, so an armed deadline dropped while
+	/// unwinding does not panic a second time.
+	#[test]
+	fn moving_backwards_leaves_the_queue_unpoisoned() {
+		let deadlines = Deadlines::new(Instant::ZERO + Duration::from_secs(1));
+		let deadline = Deadline::after(&deadlines, Duration::from_secs(1));
+		let moved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| deadlines.advance(Instant::ZERO)));
+		assert!(moved.is_err());
+		drop(deadline);
+		assert_eq!(deadlines.next(), None);
 	}
 }
