@@ -57,7 +57,6 @@ Measure each change against the numbers above and record the result in its PR.
 - [Platform in the merge queue](/quest/m0/ci/platform-queue.md) - macOS and Windows run once per merge in one job per OS, off the PR path
 - [mbx on R2](/quest/m0/ci/mbx-r2.md) - Rust builds on every OS read an R2 cache that only `main` writes, escaping the 10 GB Actions cache
 - [Nix cache](/quest/m0/ci/nix-cache.md) - `nix.moq.dev` on R2 replaces Cachix for CI and releases
-- [JS selection](/quest/m0/ci/js-select.md) - a JS change tests only the changed packages and their dependents
 - [Clippy in Test](/quest/m0/ci/clippy-test.md) - Test's clippy-driver compile denies warnings, so Check stops repeating the default Clippy pass
 - [Nightly finishes](/quest/m0/ci/nightly-split.md) - every Nightly step runs within its timeout
 - [FFI artifact reuse](/quest/m0/ci/ffi-reuse.md) - identical FFI release builds are built once and shared across the language packages

@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""Run checks, builds and tests for changed Bun workspaces and their dependents."""
+
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+
+ROOT = Path(__file__).resolve().parents[2]
+DEPENDENCIES = ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies")
+
+
+def selection(root, paths):
+    """Read ownership and dependency edges from the current workspace manifests."""
+    manifest = json.loads((root / "package.json").read_text())
+    packages = {}
+    for directory in manifest["workspaces"]:
+        # This workspace uses literal directories, like common/deps.ts. Refuse a
+        # new manifest shape rather than silently checking an incomplete graph.
+        if re.search(r"[*?\[\]{}!]", directory):
+            raise ValueError(f"unsupported workspace pattern: {directory}")
+        package = json.loads((root / directory / "package.json").read_text())
+        name = package["name"]
+        if name in packages:
+            raise ValueError(f"duplicate workspace name: {name}")
+        packages[name] = {"directory": directory, "manifest": package}
+
+    selected = set()
+    fallback = paths is None
+    for path in paths or []:
+        owners = [(name, p["directory"]) for name, p in packages.items()
+                  if path == p["directory"] or path.startswith(p["directory"] + "/")]
+        if not owners:
+            fallback = True
+            break
+        selected.add(max(owners, key=lambda owner: len(owner[1]))[0])
+
+    if fallback:
+        selected = set(packages)
+    else:
+        while True:
+            dependents = {name for name, package in packages.items()
+                          if any(dep in selected for field in DEPENDENCIES
+                                 for dep in package["manifest"].get(field, {}))}
+            expanded = selected | dependents
+            if expanded == selected:
+                break
+            selected = expanded
+
+    # A selected consumer can need an unchanged dependency's generated bindings.
+    dependencies = set(selected)
+    while True:
+        expanded = dependencies | {dep for name in dependencies for field in DEPENDENCIES
+                                   for dep in packages[name]["manifest"].get(field, {})
+                                   if dep in packages}
+        if expanded == dependencies:
+            break
+        dependencies = expanded
+
+    return {"packages": {name: packages[name] for name in sorted(selected)},
+            "workspaces": [p["directory"] for p in packages.values()],
+            "all": fallback, "wasm": "@moq/wasm" in dependencies}
+
+
+def run(action, plan):
+    packages = plan["packages"]
+    if not packages:
+        print("js: no packages affected; skipping.")
+        return
+    print("js: selecting " + " ".join(packages), flush=True)
+    os.chdir(ROOT)
+
+    def command(*args, cwd=ROOT):
+        subprocess.run(args, cwd=cwd, check=True)
+
+    if action != "test" and plan["wasm"]:
+        missing = [tool for tool in ("cargo", "wasm-bindgen") if not shutil.which(tool)]
+        if missing:
+            raise RuntimeError("selected JS consumers require missing tools: " + " ".join(missing))
+    filters = [f"--filter={name}" for name in packages]
+    command("bun", "install", "--frozen-lockfile")
+    if action == "test":
+        command("bun", "test", "js/common/declarations.test.ts", "js/common/deps.test.ts",
+                "js/common/worklet.test.ts")
+        command("bun", "run", *filters, "--elide-lines=0", "test")
+        return
+    if action == "build":
+        if plan["wasm"]:
+            command("just", "js", "wasm")
+        command("bun", "run", *filters, "--elide-lines=0", "build")
+        return
+
+    command("python3", "sh/rs/stats-docs.py")
+    # These inexpensive shared checks still protect every package's imports.
+    result = subprocess.run(["grep", "-rn", "--include=*.ts", "--include=*.tsx",
+                             "--exclude-dir=node_modules", "--exclude-dir=dist",
+                             r"import\.meta\.env", "js"])
+    if result.returncode != 1:
+        raise RuntimeError("import.meta.env scan found a reference or failed")
+    command("bun", "js/common/deps.ts")
+    if plan["wasm"]:
+        command("just", "js", "wasm")
+    command("bun", "run", *filters, "--elide-lines=0", "check")
+    if plan["all"]:
+        command("bunx", "tsc", "--noEmit", "--project", "test/tsconfig.json")
+    else:
+        # Unowned harnesses have no manifest dependency edges, so keep checking
+        # them. Exclude only workspace harnesses outside this selection.
+        selected_dirs = {p["directory"] for p in packages.values()}
+        excluded = [str(ROOT / directory) for directory in plan["workspaces"]
+                    if directory.startswith("test/") and directory not in selected_dirs]
+        harness = json.loads((ROOT / "test/tsconfig.json").read_text())
+        descriptor, name = tempfile.mkstemp(suffix=".json", dir=ROOT / "test")
+        try:
+            with os.fdopen(descriptor, "w") as config:
+                json.dump({"extends": "./tsconfig.json",
+                           "exclude": harness.get("exclude", []) + excluded}, config)
+            command("bunx", "tsc", "--noEmit", "--project", name)
+        finally:
+            Path(name).unlink()
+    command("bun", "biome", "check", *[p["directory"] for p in packages.values()
+                                          if p["directory"].startswith("js/")], "js/common")
+    command("bun", "run", *filters, "--elide-lines=0", "build")
+    for name in ("@moq/watch", "@moq/publish"):
+        if name in packages:
+            path = "./" + packages[name]["directory"] + "/dist/index.js"
+            command("bun", "-e", f"await import({json.dumps(path)})")
+
+
+def main():
+    action, source = sys.argv[1:]
+    if action not in ("check", "test", "build", "plan"):
+        raise ValueError(f"unsupported action: {action}")
+    paths = None if source == "--all" else Path(source).read_text().splitlines()
+    plan = selection(ROOT, paths)
+    if action == "plan":
+        print(json.dumps(plan))
+    else:
+        started = time.monotonic()
+        run(action, plan)
+        print(f"js: {action} finished in {time.monotonic() - started:.2f}s", flush=True)
+
+
+if __name__ == "__main__":
+    main()
