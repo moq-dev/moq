@@ -1468,6 +1468,7 @@ export class Subscriber {
 		abort.addEventListener("abort", stop, { once: true });
 		if (abort.aborted) stop();
 		try {
+			// Lite-05+ gates PROBE on the peer advertising Probe >= Report in its SETUP.
 			if (this.#peerSetup) {
 				const level = await this.#peerProbeLevel(this.#peerSetup, scope);
 				if (level === undefined || level < ProbeLevel.Report) return;
@@ -1489,6 +1490,7 @@ export class Subscriber {
 				const prev = this.#probe.peek();
 				const rtt = probe.rtt !== undefined ? Time.Milli(probe.rtt) : undefined;
 				this.#probe.set({
+					// `undefined` is the peer reporting "unknown"; a 0 would become a real ABR target.
 					estimatedRecvRate: probe.bitrate,
 					rtt: hasProbeRtt(this.version) ? rtt : (rtt ?? prev.rtt),
 				});
