@@ -7,8 +7,10 @@ does not have. Continuous groups keep every frame. The rule is the same for H.26
 recovery-point keyframes with `recovery_frame_cnt = 0` (the broadcast
 contribution case, and what the reference capture carries) and H.265 CRA
 pictures. Gradual recovery (`recovery_frame_cnt > 0`) is out of scope: unsafe pictures
-there sit at or after the keyframe timestamp, and the catalog `warmup` rule in
-[consumer warmup](/quest/m2/intra-refresh/consumer-warmup.md) covers them.
+there sit at or after the keyframe timestamp, and the intra-refresh epic covers
+them: players use the [dual decoder](/quest/m2/intra-refresh/dual-decoder.md)
+and the transcoder decodes history per
+[consumer warmup](/quest/m2/intra-refresh/consumer-warmup.md).
 
 ## Plan
 

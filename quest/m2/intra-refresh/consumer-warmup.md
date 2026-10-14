@@ -1,65 +1,63 @@
-# [M] Transcoder honours warmup: join earlier, withhold output until recovery
+# [M] Transcoder decodes refresh history before each group
 
 ## Goal
 
 The transcoder, given a source rendition with `warmup` set, never encodes a
-picture its decoder has not fully recovered, and never pays for that with
-extra startup delay: it subscribes `warmup` further back than its latency
-target, decodes the extra frames as fast as they arrive, and forwards from the
-first recovered frame. A transcoder already running that skips a group,
-whether by a latency skip or because the relay shed it, holds its last good
-frame for one cycle instead of encoding corrupt stripes. A group whose first
-frame is a true IDR forwards at once. Players stay live with stripes instead,
-via the browser [dual decoder](/quest/m2/intra-refresh/dual-decoder.md) and
-the [native dual decoder](/quest/m2/intra-refresh/native-dual-decoder.md).
+picture its decoder has not fully recovered. Every group it transcodes,
+whether fetched on demand for a rung or read live after a skip, is preceded
+by enough earlier groups decoded as history that its first picture is clean.
+Players stay live with stripes instead, via the browser
+[dual decoder](/quest/m2/intra-refresh/dual-decoder.md) and the
+[native dual decoder](/quest/m2/intra-refresh/native-dual-decoder.md).
 Renditions without `warmup` behave exactly as today.
 
 ## Plan
 
 This absorbs the old gradual-recovery quest, which planned to carry
 `recovery_frame_cnt` on the wire and count `frame_num`. The catalog duration
-replaces both: the rule is timestamp arithmetic on the group start.
+replaces both.
 
-The 2026-10-14 planning interview moved every player to two decoders, so this
-quest is the transcoder only. The transcoder drives `decode::Sink` directly
-in `rs/moq-transcode/src/feed.rs` and the rung pipeline in
-`rs/moq-transcode/src/rung.rs`, not `decode::Consumer`, so the rule lives in
-those loops.
+Decided in the 2026-10-14 planning interview and its review: the transcoder is
+the only consumer that must never show stripes, and it does not use
+`decode::Consumer`. Both of its paths assume every group decodes on its own,
+which intra refresh breaks:
 
-- Withhold rule, keyed on the first frame a loop reads and on the gap item the
-  container read yields after any skip (a join yields no gap): `Read::Gap`
-  from the `moq_mux::container::Consumer` it reads. A declared end is not a
-  gap and keeps everything. For the first group read and the first group
-  after a gap, every frame is decoded (the decoder needs them to build
-  reference state) and frames stamped below `group.start + warmup` are not
-  forwarded; frames stamped at or above that boundary are, so the recovery
-  picture itself is never withheld. Share the rule between the feed and rung
-  loops rather than writing it twice.
-- IDR exception: before withholding, check the first slice NAL type of the
-  group's first frame (H.264 type 5; H.265 `IDR_W_RADL`, `IDR_N_LP`, the BLA
-  types), with the NAL walkers in `rs/moq-mux/src/codec/{h264,h265}`. Other
-  codecs never set `warmup`, so no check is needed there.
-- Join earlier: the subscription's maximum delay becomes the latency target plus
-  `warmup`, so the group start lands `warmup` before the target and the first
-  forwarded frame is on time. Set it through `Subscription::with_max_delay`,
-  not `Subscription::start`, which is aggregated across subscribers and
-  rewinds the track for everyone.
-- Max-delay skipping must not shed the warmup span it deliberately joined:
-  the max delay budget (`Consumer::poll_read`, set by `set_max_delay`)
-  compares the buffered span against the target, and frames still inside a
-  withheld warmup count as decode-only, not buffered.
-- Regression tests in `rs/moq-transcode` over a synthetic three-group track
-  with `warmup`: a cold join forwards nothing before start plus `warmup` and
-  everything after; a continuous feed forwards every frame; a skip into a
-  later group holds the last forwarded frame through that group's warmup; a
-  group opening on an IDR forwards immediately; a rendition without `warmup`
-  is untouched.
+- `rs/moq-transcode/src/rung.rs` fetches one exact group with `fetch_group`
+  and opens a fresh pipeline for it, so the decoder has no reference history.
+- `rs/moq-transcode/src/feed.rs` reads the live track in arrival order with
+  `recv_group()` and `Container::read`, so it never sees `Read::Gap` and has
+  no way to tell a skip from continuity.
+
+The fix is history rather than a withhold rule:
+
+- History: before decoding group N, decode the K preceding groups as
+  decode-only input, where K is the fewest groups whose span covers `warmup`.
+  With one group per sweep that is one group. The history is fed to the
+  decoder and never forwarded to the encoder, so group N's first picture is
+  recovered. A group that opens on a true IDR needs no history: check the first
+  slice NAL type (H.264 type 5; H.265 `IDR_W_RADL`, `IDR_N_LP`, the BLA types)
+  with the NAL walkers in `rs/moq-mux/src/codec/{h264,h265}`. Other codecs
+  never set `warmup`.
+- Rung fetch: fetch groups N-K through N-1 alongside N, decode them first, and
+  start the encoder at N. If history is no longer available, fail the fetch
+  loudly instead of encoding stripes.
+- Live feed: for a `warmup` rendition, read groups in sequence order, not
+  arrival order. Treat a skipped sequence as a discontinuity and decode the K
+  groups before the next one as history before forwarding it, the same as a
+  cold start. Share the history logic between the feed and rung paths rather
+  than writing it twice.
+- Regression tests in `rs/moq-transcode` over a synthetic multi-group track
+  with `warmup`: a fetched group's first output picture is decoded with its
+  history and forwarded clean; a fetch whose history is gone fails; a cold
+  feed start and a feed skip both decode history before forwarding; an IDR
+  group needs no history; a rendition without `warmup` fetches and reads
+  exactly as today.
 
 ## Required
 
-- [Plan: recovery boundaries](/quest/m2/intra-refresh/plan-boundary.md) - consumers need a safe boundary before presenting the affected pictures
+- [Plan: recovery boundaries](/quest/m2/intra-refresh/plan-boundary.md) - K derives from `warmup`, which must be a safe upper bound
 
 ## Related
 
-- [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - trims frames stamped before the keyframe where this trims frames after the start
-- [Native dual decoder](/quest/m2/intra-refresh/native-dual-decoder.md) - the player path, which shows stripes instead of freezing
+- [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - trims frames stamped before the keyframe, the other tune-in case
+- [Native dual decoder](/quest/m2/intra-refresh/native-dual-decoder.md) - the player path, which shows stripes instead
