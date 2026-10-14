@@ -26,7 +26,7 @@ hot-path survey, so quests don't re-litigate them:
 - `moq-uring`'s only backend is noq. Every profile names its backend. The
   historical quiche-flavor numbers cited in
   [Run to quiescence](/quest/m2/perf/uring-quiescence.md) and
-  [moq-uring on moq-time](/quest/m1/time/uring.md) are re-measured on noq.
+  [moq-uring on moq-clock](/quest/m1/time/uring.md) are re-measured on noq.
 - Cross-thread wakeups are already cheap: one futex word per worker, at most
   one `futex(FUTEX_WAKE)` per park cycle, wake bursts coalesce through the
   `kio::Tasks` bitset. No eventfd, no MSG_RING, by design (`SINGLE_ISSUER`).
@@ -61,8 +61,8 @@ equally unmeasured ring micro-opt; cache shard was deleted, since #5031's
 profile shows no pool contention.
 
 Decided 2026-10-10: #3122's per-turn clock read merged into
-[moq-uring on moq-time](/quest/m1/time/uring.md), where the worker's turn
-sample becomes its `moq-time` clock; it keeps #3122's measurement bar.
+[moq-uring on moq-clock](/quest/m1/time/uring.md), where the worker's turn
+sample becomes its `moq-clock` clock; it keeps #3122's measurement bar.
 
 ## Required
 
@@ -80,4 +80,4 @@ sample becomes its `moq-time` clock; it keeps #3122's measurement bar.
 
 ## Related
 
-- [moq-uring on moq-time](/quest/m1/time/uring.md) - one clock read per worker turn, formerly #3122
+- [moq-uring on moq-clock](/quest/m1/time/uring.md) - one clock read per worker turn, formerly #3122

@@ -3836,15 +3836,15 @@ fn video_raw_publish_rejects_invalid_config() {
 	assert!(unsafe { moq_encode_video(broadcast, &zero_framerate, &valid_output, 0) } < 0);
 
 	// Regression: dimensions arrive as a raw `u32` pair, and their product used to
-	// overflow the default-bitrate estimate inside the encoder. A panic here is an
-	// aborted host process, not an error return, since release builds are
-	// `panic = "abort"`. It has to come back as a negative code.
+	// overflow the default-bitrate estimate inside the encoder. It has to be refused
+	// as invalid, not reach the host as a caught panic.
 	let unrepresentable = moq_video_encoder_input {
 		width: u32::MAX - 1,
 		height: u32::MAX - 1,
 		..valid_input
 	};
-	assert!(unsafe { moq_encode_video(broadcast, &unrepresentable, &valid_output, 0) } < 0);
+	let refused = unsafe { moq_encode_video(broadcast, &unrepresentable, &valid_output, 0) };
+	assert!(refused < 0 && refused != MOQ_ERROR_PANIC, "{refused}");
 
 	// A size no encoder can take, but whose arithmetic is fine, is the backend's
 	// call rather than the boundary's: it must not be swept up by the check above.

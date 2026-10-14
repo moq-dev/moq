@@ -229,7 +229,6 @@ impl Client {
 			crate::session::Handles {
 				goaway: start.goaway,
 				auth: start.auth,
-				setup: start.setup,
 				estimate: Some(start.estimate),
 			},
 		))
@@ -292,7 +291,7 @@ impl Client {
 				// The peer's SETUP decides whether AUTH is negotiated. A handle that does not
 				// offer it keeps the option out of our SETUP and presents no credential.
 				let auth = crate::auth::Handle::new(self.extensions.auth);
-				let (protocol, goaway, setup) = ietf::start(ietf::Config {
+				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
 					limits: self.limits,
 					session: session.clone(),
@@ -323,7 +322,6 @@ impl Client {
 					crate::session::Handles {
 						goaway,
 						auth,
-						setup,
 						estimate: None,
 					},
 				));
@@ -418,7 +416,7 @@ impl Client {
 			.copied()
 			.ok_or(Error::Version)?;
 
-		let (recv_bw, protocol, goaway, auth, setup, estimate) = match version {
+		let (recv_bw, protocol, goaway, auth, estimate) = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
 				let start = lite::start(lite::Config {
@@ -444,7 +442,6 @@ impl Client {
 					crate::driver::Protocol::Lite(Box::new(start.driver)),
 					start.goaway,
 					start.auth,
-					start.setup,
 					Some(start.estimate),
 				)
 			}
@@ -466,7 +463,7 @@ impl Client {
 				// Draft 14-16 carry no AUTH, but the session is still limited through this handle.
 				let auth = crate::auth::Handle::new(false);
 				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
-				let (protocol, goaway, setup) = ietf::start(ietf::Config {
+				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
 					limits: self.limits,
 					session: session.clone(),
@@ -486,7 +483,7 @@ impl Client {
 					early_unis: Vec::new(),
 					extensions: self.extensions,
 				})?;
-				(None, crate::driver::Protocol::Ietf(protocol), goaway, auth, setup, None)
+				(None, crate::driver::Protocol::Ietf(protocol), goaway, auth, None)
 			}
 		};
 
@@ -496,12 +493,7 @@ impl Client {
 			version,
 			recv_bw,
 			protocol,
-			crate::session::Handles {
-				goaway,
-				auth,
-				setup,
-				estimate,
-			},
+			crate::session::Handles { goaway, auth, estimate },
 		))
 	}
 }

@@ -10,7 +10,7 @@ use http_body::Body as _;
 use std::{
 	io,
 	pin::Pin,
-	sync::{Arc, Mutex},
+	sync::{Arc, Mutex, PoisonError},
 	task::{Context, Poll},
 	time::Duration,
 };
@@ -85,14 +85,14 @@ struct State {
 struct Active(Arc<State>);
 impl Active {
 	fn new(state: Arc<State>) -> Self {
-		state.activity.lock().unwrap().active += 1;
+		state.activity.lock().unwrap_or_else(PoisonError::into_inner).active += 1;
 		state.wake.wake();
 		Self(state)
 	}
 }
 impl Drop for Active {
 	fn drop(&mut self) {
-		let mut activity = self.0.activity.lock().unwrap();
+		let mut activity = self.0.activity.lock().unwrap_or_else(PoisonError::into_inner);
 		activity.active -= 1;
 		if activity.active == 0 {
 			activity.since = Instant::now();
@@ -127,7 +127,12 @@ where
 			let response = response.await?;
 			// Once HTTP hands its stream to another protocol, that protocol owns its lifetime.
 			if response.status() == StatusCode::SWITCHING_PROTOCOLS || (connect && response.status().is_success()) {
-				active.0.activity.lock().unwrap().upgraded = true;
+				active
+					.0
+					.activity
+					.lock()
+					.unwrap_or_else(PoisonError::into_inner)
+					.upgraded = true;
 			}
 			Ok(response.map(|body| {
 				let active = (!body.is_end_stream()).then_some(active);
@@ -170,7 +175,7 @@ pub(crate) struct Io<I> {
 impl<I> Io<I> {
 	fn poll_deadline(&mut self, cx: &mut Context<'_>) -> io::Result<()> {
 		self.state.wake.register(cx.waker());
-		let activity = self.state.activity.lock().unwrap();
+		let activity = self.state.activity.lock().unwrap_or_else(PoisonError::into_inner);
 		let at = self
 			.state
 			.timeout

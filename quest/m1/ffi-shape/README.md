@@ -56,9 +56,17 @@ Settled shape:
   the wrappers supply real namespaces in each language's idiom: Python
   submodules, Go subpackages (`moq.dev/moq/json`, aliased on import next to
   `encoding/json`), Kotlin packages, Dart libraries, Swift caseless-enum
-  namespaces. Reopened 2026-10-13:
-  [Binding namespace feasibility](/quest/m1/ffi-crate-spike.md) spikes
-  a per-layer split that would move the namespaces below the wrappers.
+  namespaces. A per-layer crate split, reopened 2026-10-13 to move the
+  namespaces below the wrappers, was spiked and rejected (#5460): UniFFI
+  0.32 keys a crate's types by bare name, so `media.GroupConsumer` cannot
+  take the net `GroupConsumer` it wraps. Python drops the media type
+  silently; every other generator refuses. Distinct Rust names renamed
+  back per language work only in Python and Go: Kotlin, Swift, Dart, and
+  C++ shadow or misplace the external type, and generated C refuses
+  external types. Revisit once
+  [namespaced external types](/quest/m2/uniffi-namespaces.md) fixes
+  [mozilla/uniffi-rs#3026](https://github.com/mozilla/uniffi-rs/issues/3026)
+  in the moq-dev/uniffi fork.
 - `demand()` is the one way to watch subscribers; producers drop their
   `name`/`is_used`/`used`/`unused` duplicates.
 - moq-ffi and its generated consumers, including `cpp/obs` (above). The
@@ -79,4 +87,5 @@ runs `just test interop --all`.
 ## Required
 
 - [Codecs](/quest/m1/ffi-shape/codec.md) - audio and video producers, codec-only encoders, and decoders move under their own namespaces, named as in Rust; binding releases wait for it
+- [Stream importer name](/quest/m1/ffi-shape/stream-producer-name.md) - the maintainer settles `media.ContainerStreamProducer`'s name before the binding release
 - [Layers guide](/quest/m1/ffi-shape/layers-guide.md) - a `doc/lib` page maps each Rust layer to every binding's module, once Codecs adds `audio` and `video`

@@ -1976,3 +1976,32 @@ test.each(["waiting", "allocated"] as const)(
 		}
 	},
 );
+
+test("an announce consumer closed while waiting on request-ID credit takes no ID", async () => {
+	const version = Version.DRAFT_15;
+	const pair = createMockTransportPair(ALPN.DRAFT_15);
+	const control = await Stream.open(pair.server, { version });
+	const session = new ControlStreamAdapter(pair.server, control, version, 0n, true);
+	const running = session.run().catch(() => undefined);
+	// Stand in for exhausted credit: the allocation waits until its signal aborts.
+	let cancelled = false;
+	spyOn(session, "nextRequestId").mockImplementation(
+		(signal) =>
+			new Promise((_, reject) => {
+				signal?.addEventListener("abort", () => {
+					cancelled = true;
+					reject(signal.reason);
+				});
+			}),
+	);
+	const subscriber = new Subscriber({ session });
+
+	const announced = subscriber.announced(Path.Pattern.subtree(Path.from("room")));
+	await Promise.resolve();
+	announced.close();
+	for (let i = 0; i < 8; i++) await Promise.resolve();
+	expect(cancelled).toBe(true);
+
+	session.close();
+	void running;
+});

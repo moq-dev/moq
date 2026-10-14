@@ -57,9 +57,9 @@ release.
 
 ## Required
 
-- [AAC bursty re-stall](/quest/m1/audio-jitter-target/aac-bursty-restall.md) - AAC under bursty delivery plays without a re-stall loop
 - [Opus isolated-ring target](/quest/m1/audio-jitter-target/opus-isolated-target.md) - the isolated ring holds the target at near-zero jitter
 
 ## Related
 
 - [A/V clock](/quest/m1/av-clock.md) - reshapes `SyncInput` around the per-track target this line produces
+- [AAC bursty budgets](/quest/m1/audio-jitter-target/aac-bursty-budgets.md) - confirms the AAC reorder fix on the nightlies, no gate on this proof

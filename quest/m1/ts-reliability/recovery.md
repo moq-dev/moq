@@ -40,10 +40,8 @@ Short deterministic arms run on relevant PRs. Long drift and impairment
 arms run nightly with failure artifacts. Keep byte-position PCR accuracy
 and measured release timing as separate checks.
 
-## Required
-
-- [Automated validation](/quest/m1/ts-reliability/validation.md) - shared graders, profiles and known-bad controls
 ## Related
 
+- [Automated validation](/test/ts/README.md) - shared graders, profiles and known-bad controls
 - [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - trims after a gap
 - [Gradual recovery](/quest/m2/intra-refresh/README.md) - recovery counts and per-group warmup

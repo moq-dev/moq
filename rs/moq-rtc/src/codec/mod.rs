@@ -170,6 +170,8 @@ impl<I: DeferredImport> DeferredVideo<I> {
 pub struct PacketizedFrame {
 	pub timestamp_us: u64,
 	pub payload: Bytes,
+	/// The frame opens a group, so a peer can start decoding the rendition here.
+	pub keyframe: bool,
 }
 
 /// A subscribed moq-mux track, normalized to the bitstream shape str0m's
@@ -253,6 +255,7 @@ impl Track {
 			return Ok(Some(PacketizedFrame {
 				timestamp_us: frame.timestamp.as_micros() as u64,
 				payload,
+				keyframe: frame.keyframe,
 			}));
 		}
 	}

@@ -134,6 +134,35 @@ const PUBLISHER_B = HopSchema.parse(8n);
 const PUBLISHER_C = HopSchema.parse(9n);
 const PEER = HopSchema.parse(2n);
 
+test("an announce consumer closed while its stream opens sends nothing on it", async () => {
+	const opening = Promise.withResolvers<void>();
+	let written = 0;
+	let closed = false;
+	const quic = {
+		createBidirectionalStream: async () => {
+			await opening.promise;
+			return {
+				readable: new ReadableStream<Uint8Array>(),
+				writable: new WritableStream<Uint8Array>({
+					write: () => void written++,
+					close: () => {
+						closed = true;
+					},
+				}),
+			};
+		},
+	} as unknown as WebTransport;
+	const subscriber = new Subscriber(quic, Version.DRAFT_06, HopSchema.parse(1n));
+
+	const announced = subscriber.announced(Path.Pattern.subtree(Path.from("room")));
+	announced.close();
+	// The slot frees up only after the consumer left.
+	opening.resolve();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	expect(written).toBe(0);
+	expect(closed).toBe(true);
+});
+
 test("a local empty hop chain is not anonymous", () => {
 	expect(isAnonymous(Route.default)).toBe(false);
 	expect(isAnonymous({ hops: [UNKNOWN_HOP], cost: Route.default.cost })).toBe(true);

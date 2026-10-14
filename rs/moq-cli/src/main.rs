@@ -192,7 +192,8 @@ fn spawn_cluster_serve(
 			let auth = auth.clone();
 			let origin = origin.clone();
 			sessions.spawn(async move {
-				if let Err(err) = serve_client(request, &auth, &origin, directions).await {
+				let served = moq_tokio::panic::isolate(serve_client(request, &auth, &origin, directions)).await;
+				if let Some(Err(err)) = served {
 					tracing::warn!(%err, "session ended with error");
 				}
 			});
@@ -277,12 +278,13 @@ fn spawn_serve(
 			let auth = auth.clone();
 			let origin = origin.clone();
 			tokio::spawn(async move {
-				if let Err(err) = serve_client(request, &auth, &origin, directions).await {
+				let served = moq_tokio::panic::isolate(serve_client(request, &auth, &origin, directions)).await;
+				if let Some(Err(err)) = served {
 					tracing::warn!(%err, "session ended with error");
 				}
 			});
 		}
-		Ok(())
+		anyhow::bail!("the MoQ listener stopped accepting")
 	});
 }
 
@@ -447,9 +449,8 @@ async fn spawn_moq(
 
 	let started =
 		notify_when_initialized(spawn_server(tasks, moq, &cluster, net, directions), moq::notify_ready).await?;
-	if !started.standalone() {
-		tasks.spawn(async move { started.run().await });
-	}
+	// Even standalone: it is what reports a panic in the origin driver.
+	tasks.spawn(async move { started.run().await });
 
 	Ok(Attached {
 		bandwidth,

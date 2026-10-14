@@ -354,3 +354,8 @@ and JS refuses them on lite-06.
 drafts 14 through 22: `ietf-datagram.ts` decodes Rust's datagrams and their
 Timestamps and re-encodes them byte for byte, and Rust decodes the datagram the
 JS publisher sends.
+
+`ietf_track_status_interop` sends Rust's `TRACK_STATUS` to the JS publisher on
+drafts 14 through 22 through `track-status.ts`, and Rust decodes each
+`TRACK_STATUS_OK` and the refusal for a missing broadcast the way its
+subscriber reads them.

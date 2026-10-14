@@ -176,6 +176,21 @@ Open, for the implementer to settle and record:
   with deterministic acceptance tests before the wire is written.
 - How much of today's route trie, fronts, and `route_order` survives intact.
 
+The #4349 counterexamples are the `residual_*` tests in
+`rs/moq-net/tests/mesh_withdraw.rs`. They pin today's hunting on lite-06:
+a stale path outlasting the 300 ms hold, a revival the quarantine misses,
+and 179 hunting relays (3 reviving) over 200 seeded meshes. Turn each into a
+single retraction everywhere, and keep `cross_node_close_retracts_once`
+passing. On `main` an epochless switch to a stale path is a Restart, which a
+lite-06 client sees as a retraction and an announcement; the release sent an
+in-place update.
+
+Publishing toggles too, decided 2026-10-13: add a time-mocked fixture where,
+on some rings, a longer path arrives first and the better route then replaces
+it as a Restart, so a lite-06 client sees `Start, End, Start` while the
+broadcast stays live. Pin today's sequence beside the `residual_*` tests;
+the epochless Restart rule above decides what it becomes.
+
 Tests, time mocked: #4644's live-graph withdrawal and failover tests
 (`quest/m0/path-hunting` branch) as acceptance, run on the wip version; a
 link flap with many broadcasts behind one origin costs one ROUTE change per
@@ -219,11 +234,10 @@ release.
 
 - [Routing contracts](/quest/m1/cluster-routing/contracts.md) - authenticated incarnation, local priorities, forwarding progress, and export views
 - [Next-hop handoff](/quest/m1/cluster-routing/handoff.md) - complete and fresh claims with bounded state
-- [Cross-node flapping](/quest/m1/cross-node-flapping.md) - incident-sensitive baseline and residual counterexamples
 
 ## Closes
 
-- [#4349](https://github.com/moq-dev/moq/issues/4349) - close once the residual cross-node flapping counterexamples pass
+- [#4349](https://github.com/moq-dev/moq/issues/4349) - close once the `residual_*` tests in `mesh_withdraw.rs` retract once everywhere
 
 ## Related
 

@@ -24,8 +24,11 @@ moq --connect https://relay.example.com/anon --broadcast cam.hang export rtc --l
 
 Peers reach the broadcast at `http://host:8080/<broadcast>`. Opus, H.264,
 H.265, VP8, VP9, and AV1 are negotiated in both directions. A WHEP peer
-receives the largest video rendition (then highest bitrate) in its negotiated codec, and
-the highest-bitrate Opus rendition (then sample rate, then channels). `--cors-origin`
+receives the largest enabled video rendition (then highest bitrate) in its negotiated codec, and
+the highest-bitrate enabled Opus rendition (then sample rate, then channels). It
+follows the catalog: a peer whose rendition is disabled moves to the next best at
+that rendition's first keyframe, a better one that re-enables wins the peer back,
+and with none enabled the peer receives nothing until one is. `--cors-origin`
 opens the endpoint to browsers on other origins, and `--udp-bind` plus
 `--public-addr` pin one media port for firewalls. The listener is plain HTTP;
 put a TLS-terminating proxy in front for WHIP clients that require HTTPS. A fresh WHEP peer joins at the current group, so it

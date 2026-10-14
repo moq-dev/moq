@@ -69,7 +69,7 @@ Public API: one new error. Wire: none.
 
 ## Required
 
-- [@moq/time](/quest/m1/time/js.md) - the installable clock this tests on
+- [@moq/clock](/quest/m1/time/js.md) - the installable clock this tests on
 
 ## Related
 

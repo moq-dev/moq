@@ -93,8 +93,14 @@ moq ... export --no-video fmp4 > audio.mp4
 moq ... export --video-name hd --no-audio mkv > hd.mkv
 ```
 
+Every export skips a disabled rendition (catalog `enabled: false`). `h264` and
+`h265` move to an enabled sibling when theirs is disabled, and back at its next
+keyframe when it re-enables. The muxed exports declare only enabled renditions
+in their header; one disabled afterwards keeps its track, idle until it
+re-enables.
+
 fMP4 writes one fragment per publisher group; `--fragment-duration` caps it.
-The init segment declares every rendition, so it is written only once each can
+The init segment declares every enabled rendition, so it is written only once each can
 be described, and the track set is then fixed: a new rendition or a changed
 codec configuration ends the export. Restart it to pick up the change.
 Annex-B H.264 and H.265 whose catalog codec string and dimensions fix the sample
@@ -267,7 +273,11 @@ or a better one.
 On moq-lite 07, two processes that pass the same `--epoch` (a UUIDv7, such as
 `uuidgen -7` prints) are one publisher: relays fail over between them
 mid-group, so they must produce identical tracks with aligned groups, which no
-importer guarantees yet. The ingests that mint their own refuse `--epoch`.
+importer guarantees yet. Only `import fmp4`, `flv`, `hls`, and `ts` (one
+program, or `--passthrough`) accept it. The RTMP, SRT, and WHIP ingests and
+`import ts --program all` refuse it because they mint their own, and `import
+avc3`, `capture`, `rtc --connect`, `archive`, and `transcode` because their
+timestamps or bytes come from the instance rather than the input.
 
 ## Cluster
 

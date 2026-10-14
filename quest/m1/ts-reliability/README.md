@@ -55,7 +55,6 @@ remain with their current quests.
 
 ## Required
 
-- [Automated TS validation](/quest/m1/ts-reliability/validation.md) - software decode, structure, timing, and controls run in CI
 - [Bounded PES assembly](/quest/m1/ts-reliability/pes.md) - split headers work and damaged input cannot grow staging indefinitely
 - [Plan: semantic fidelity](/quest/m1/ts-reliability/fidelity.md) - explicit profiles and PMT lifecycle contracts produce implementation quests
 - [Plan: PES timing and headers](/quest/m1/plan-ts-pes-untimed.md) - private PES semantics have a settled carriage and placement contract

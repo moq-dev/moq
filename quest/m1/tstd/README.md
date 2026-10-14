@@ -57,5 +57,5 @@ MB/AAC controls. Do not relabel the current subset a full standards check.
 ## Related
 
 - [TS passthrough export](/quest/m2/ts-passthrough-export.md) - the passthrough lane named in the Goal
-- [Automated validation](/quest/m1/ts-reliability/validation.md) - independent decode, profile coverage and CI ownership
+- [Automated validation](/test/ts/README.md) - independent decode, profile coverage and CI ownership
 - [Loss and recovery](/quest/m1/ts-reliability/recovery.md) - actual object/group omissions and recovery

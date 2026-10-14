@@ -9,7 +9,7 @@ its recorded catalog live, stamped with the recording's `store` and `version`,
 so an exporter in history mode treats its timeline as durable and lists past
 `--window`. A `--follow` replay grows like an event playlist.
 
-[Catalog track identity](/quest/m1/catalog-tracks.md) guarantees a track's
+[Track Identity](/drafts/draft-lcurley-moq-hang.md#identity) guarantees a track's
 identity never changes for its name, and resolution changes in band below
 its ceilings, so one catalog describes every group of the tracks it lists;
 nothing here picks a catalog per group.
@@ -54,8 +54,7 @@ this by hand-building a catalog.
   `<track>.timeline.z` groups under the live names, and this quest rewrites
   catalog groups, so the same name, epoch, and group number could carry
   different bytes. Revisit only once replayed metadata is byte- and
-  sequence-identical to live. So `moq import archive` refuses `--epoch`
-  ([Epoch refusals](/quest/m1/epoch-refusals.md) lands that), and any
+  sequence-identical to live. So `moq import archive` refuses `--epoch`, and any
   `moq-archive` host mints its own epoch or takes one from its caller, never
   defaulting to `.info`'s.
 - The recorded catalog's `archive` entry describes the source's live
@@ -83,4 +82,4 @@ loudly on a recording with no catalog.
 
 ## Required
 
-- [Catalog track identity](/quest/m1/catalog-tracks.md) - the guarantee that one recorded catalog describes every group
+- [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - Rust publishers keep the guarantee that one recorded catalog describes every group

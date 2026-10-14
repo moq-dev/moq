@@ -42,6 +42,15 @@ These land with the next breaking release, not the 2026-09-23 train.
   old single-instance behavior. `Origin.Producer` and `Origin.Consumer` drop
   `broadcasts(scope)`; iterate `announced(scope)` and keep the entries you need.
   `@moq/watch` with `announced` off no longer moves to a later publisher.
+- **@moq/net discovers only what something watches, and `discovery` is gone.**
+  A `consume` origin stays empty until a reader watches it with
+  `announced(scope)` or `request(path, { announced: true })`; the session then
+  asks the relay about those prefixes only. Code that peeked the table
+  (`request(path)` expecting a route) without watching should hold an
+  `announced(scope)` stream. The `discovery` option on `connect`, `accept`, and
+  `Connection` and `Established.discovery` are removed, and passing the option
+  throws a `TypeError`: drop it. A relay that refuses an announce request
+  downgrades that session to blind requests on its own.
 - **"Epoch" means only the publisher epoch.** The reconnect counter is
   `connects()`: `moq_tokio::Connection::epoch()` and moq-ffi's
   `MoqSession::epoch()` are `connects()`, which is Python's `connects()`, Go's

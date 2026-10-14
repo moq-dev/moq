@@ -119,10 +119,12 @@ impl<O: Output> Media<O> {
 			.await
 			.context("failed to subscribe to the broadcast")?;
 		let source = moq_mux::Source::new(self.origin.clone(), broadcast.clone());
-		let catalog = catalog::Consumer::<()>::new(&broadcast, self.args.catalog_format(&self.broadcast))
+		let mut catalogs = catalog::Consumer::<()>::new(&broadcast, self.args.catalog_format(&self.broadcast))
 			.await
 			.context("failed to subscribe to the catalog")?;
-		let mut catalogs = catalog.select(self.args.select.selection(None));
+		// Applied by hand rather than with `select`, which drops disabled renditions: a disabled
+		// rendition stops now, while one that leaves the catalog plays out its tail.
+		let selection = self.args.select.selection(None);
 		let mut tasks = tokio::task::JoinSet::new();
 		let mut playback = Playback::default();
 		let mut video_demand: Option<(String, tokio::sync::oneshot::Sender<()>)> = None;
@@ -176,9 +178,10 @@ impl<O: Output> Media<O> {
 					// are still running.
 					snapshot = catalogs.next(), if playback.following() => {
 						match snapshot.context("failed to read the catalog")? {
-							Some(snapshot) => {
+							Some(mut snapshot) => {
 								stop_disabled(&mut video_demand, snapshot.video.renditions.iter().filter(|(_, config)| !config.enabled).map(|(name, _)| name));
 								stop_disabled(&mut audio_demand, snapshot.audio.renditions.iter().filter(|(_, config)| !config.enabled).map(|(name, _)| name));
+								selection.retain(&mut snapshot);
 								playback.received(snapshot);
 							},
 							None => {
