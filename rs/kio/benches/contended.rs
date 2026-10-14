@@ -99,7 +99,11 @@ impl Crew {
 		self.control.passes.store(passes, Ordering::Relaxed);
 		self.control.round.fetch_add(1, Ordering::Release);
 		let threads = self.threads.len();
-		spin(|| (self.control.done.load(Ordering::Acquire) == threads).then_some(()));
+		spin(|| {
+			// A panicked worker never reports done, so fail instead of spinning forever.
+			assert!(!self.threads.iter().any(|t| t.is_finished()), "worker panicked");
+			(self.control.done.load(Ordering::Acquire) == threads).then_some(())
+		});
 	}
 }
 
@@ -107,7 +111,11 @@ impl Drop for Crew {
 	fn drop(&mut self) {
 		self.control.round.store(STOP, Ordering::Release);
 		for thread in self.threads.drain(..) {
-			thread.join().expect("worker panicked");
+			let result = thread.join();
+			// Already unwinding from `run`'s check: a second panic would abort.
+			if !thread::panicking() {
+				result.expect("worker panicked");
+			}
 		}
 	}
 }

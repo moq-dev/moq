@@ -52,7 +52,8 @@ Spreading the same consumers over more cores makes the whole cycle slower,
 not faster: each acquire that changes cores costs 50 to 500 ns.
 
 `just bench-lock`, mutex wait over worker CPU in the 5 s steady window, tokio
-workers (`chat` is `bench/workloads/chat.toml`, pinned at 10 messages/s):
+workers (`chat` is `bench/workloads/chat.toml`, pinned at 10 messages/s; its
+frame size, then rolled once per run from 200 to 400 bytes, is now pinned at 300):
 
 | shape | 1 worker | 4 workers | 16 workers |
 | --- | --- | --- | --- |
@@ -128,7 +129,7 @@ Decided (maintainer, 2026-10-14, baseline follow-up):
 - The append-only log measures a multi-frame (video-heavy) shape before it
   picks targets, since both shapes above send one-frame groups.
 - The 10 messages/s pin lives only in `bench/workloads/chat.toml`;
-  `rs/moq-bench/config/chat.toml` keeps its random rate.
+  `rs/moq-bench/config/chat.toml` keeps its random rate and frame size.
 
 Decided (maintainer, 2026-10-14, per-thread follow-up):
 
