@@ -5,8 +5,7 @@
 `track::Ordered` waits within `max_delay` for a missing group only while that
 sequence is still owed, and moves past it as soon as the track knows it was
 dropped, evicted, or skipped. A reader that got every group behaves as today.
-Only a subscription owes sequences, so a locally produced track has nothing
-owed and its ordered reads are unchanged. No new public API.
+No new public API.
 
 ## Plan
 
@@ -32,6 +31,17 @@ sequence until the budget elapsed. The model cannot tell "not yet" from
   consumer) already waits for reordered groups within `max_delay`, and the
   archive writer reads media in arrival order.
 
+Open: what "owed" means on a locally produced track, which gets no drops or
+dispositions. The motivating case is the archive's local timeline, read in
+order with an unlimited budget.
+
+- Only a subscription owes sequences, so local tracks keep today's ordered
+  reads (recommended: no local reader needs to wait, and the archive
+  timeline can never hang on a hole).
+- A local producer's unreleased sequences also count as owed, until it
+  writes, skips, or aborts them. Every local skip must then be marked, or
+  the archive timeline hangs.
+
 Watch for:
 
 - Untimed tracks: the budget can never expire a group, so a hole nothing
@@ -45,10 +55,6 @@ Watch for:
   archive's local timeline): an evicted or never-produced group must not hang
   them. `history_mode_recovers_evicted_timeline_groups` and
   `history_mode_refuses_a_retained_recording` failed on #5475.
-- Locally produced tracks (the archive's timeline, say) receive no drops or
-  dispositions, so they never wait. If a consumer later needs a local
-  producer to reorder, bring that to the maintainer rather than inferring
-  owed sequences.
 
 Reuse from #5475: its reorder regressions (exact deadline and wakeup, explicit
 starts, capped reads, a changed budget), and its snapshot-reader change:
