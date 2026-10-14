@@ -291,6 +291,11 @@ export class Subscriber {
 			announced.close(error(err));
 			return;
 		}
+		// The consumer left while the open waited for a slot: give the slot back unused.
+		if (announced.closed.peek() !== undefined) {
+			stream.close();
+			return;
+		}
 
 		// Every advertisement the peer currently has live, keyed by suffix (at most one
 		// per path is current, and every announce on this stream shares `prefix`).
