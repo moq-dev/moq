@@ -34,9 +34,8 @@ number is what justifies the rest of the line.
 
 Decided in the 2026-09-30 audit: moved to m2, since no fleet demand asks
 for ring TCP. (Decided 2026-10-13: the WebSocket-to-QUIC upgrade that would
-have shrunk the WebSocket hot path is being removed by
-[Keep the winning transport](/quest/m0/drop-ws-upgrade.md), so a WebSocket
-session will stay on TCP for its lifetime.)
+have shrunk the WebSocket hot path is removed, so a WebSocket session stays
+on TCP for its lifetime.)
 
 Decided 2026-10-08: moved to m3. No fleet demand asks for ring TCP; the
 ablation stays the gate for the rest of the line.

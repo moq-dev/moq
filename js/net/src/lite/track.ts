@@ -4,7 +4,7 @@ import type { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { decodeEpoch, encodeEpoch } from "./epoch.ts";
 import * as Message from "./message.ts";
-import { hasGroupOrder, Version } from "./version.ts";
+import { hasGroupOrder, Version, wireTimescale } from "./version.ts";
 
 // The Track Stream (0x6) is draft-05+ only.
 function guardTrack(version: Version) {
@@ -73,16 +73,16 @@ export class TrackInfo {
 	 */
 	maxAge?: number;
 	/**
-	 * Per-frame timestamp scale (units per second). Mandatory on Lite05: a real
-	 * (non-zero) scale, and every frame on the wire is prefixed with a zigzag-delta
-	 * timestamp at this scale.
+	 * Per-frame timestamp scale (units per second), or undefined for an untimed track.
+	 * Lite-07 encodes undefined as zero; lite-05/06 have no untimed encoding, so it goes
+	 * out as milliseconds (see {@link wireTimescale}).
 	 */
-	timescale: number;
+	timescale?: Timescale;
 
 	constructor({
 		priority = 0,
 		maxAge,
-		timescale = Timescale.MILLI,
+		timescale,
 	}: {
 		priority?: number;
 		maxAge?: number;
@@ -96,7 +96,7 @@ export class TrackInfo {
 		}
 		this.priority = priority;
 		this.maxAge = maxAge;
-		this.timescale = Timescale(timescale);
+		this.timescale = timescale === undefined ? undefined : Timescale(timescale);
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -106,7 +106,7 @@ export class TrackInfo {
 		const legacy = version === Version.DRAFT_05 || version === Version.DRAFT_06;
 		const age = this.maxAge === undefined ? undefined : BigInt(this.maxAge);
 		await w.u62(legacy ? (age ?? BigInt(Number.MAX_SAFE_INTEGER)) : age === undefined ? 0n : age + 1n);
-		await w.u53(this.timescale);
+		await w.u53(wireTimescale(version, this.timescale) ?? 0);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<TrackInfo> {
@@ -124,7 +124,9 @@ export class TrackInfo {
 		if (age !== undefined && age > BigInt(Number.MAX_SAFE_INTEGER))
 			throw new RangeError("maxAge exceeds safe milliseconds");
 		const maxAge = age === undefined ? undefined : Number(age);
-		const timescale = await r.u53();
+		// Lite-05/06 have no untimed encoding, so zero is malformed there.
+		const scale = await r.u53();
+		const timescale = scale === 0 && !legacy ? undefined : Timescale(scale);
 		return new TrackInfo({ priority, maxAge, timescale });
 	}
 
@@ -138,7 +140,7 @@ export class TrackInfo {
 		if (this.maxAge !== undefined && (!Number.isSafeInteger(this.maxAge) || this.maxAge < 0)) {
 			throw new RangeError(`maxAge must be a safe non-negative integer: ${this.maxAge}`);
 		}
-		Timescale(this.timescale);
+		if (this.timescale !== undefined) Timescale(this.timescale);
 		return Message.encode(w, (w) => this.#encode(w, version));
 	}
 

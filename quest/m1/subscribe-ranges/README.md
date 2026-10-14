@@ -76,7 +76,6 @@ every sequence delivered or dropped.
 - [Model ranges](/quest/m1/subscribe-ranges/model.md) - `Subscription` carries ranges, and `Dynamic` fills misses by range
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - publishers name every group they won't deliver
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft
-- [moq-transport FETCH and fill streams in the session queue](/quest/m1/subscribe-ranges/ietf-fetch-queue.md) - Rust FETCH and fill streams ranked against group streams; JS already ranks its fill and serves no FETCH
 - [moq-transport upstream updates](/quest/m1/subscribe-ranges/ietf-update.md) - the upstream request follows the aggregate priority; its order stays fixed, as every draft requires
 - [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md) - range FETCH upstream per missing run, and non-blocking FETCH served downstream
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - `@moq/net` model and lite-07 parity

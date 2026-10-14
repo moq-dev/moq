@@ -3,7 +3,7 @@
 ## Goal
 
 Every MoQ crate and package reads time and arms timers only through
-`moq-time` (Rust) or `@moq/time` (JS), with the production and public API migrations completed in m1. Tests
+`moq-clock` (Rust) or `@moq/clock` (JS), with the production and public API migrations completed in m1. Tests
 needed to prove these changes use controlled time. The backend is
 the current runtime's (tokio, browser, io_uring, or the simulator), so the
 same logic runs on each and a test can swap in simulated time.
@@ -29,10 +29,18 @@ reasons, so later sessions don't reopen them:
   tokio sleep) advances one clock and not the other.
 - **One clock supplies both now and deadlines.** Wrapping `Instant` alone does
   not make tests deterministic.
-- **A new published crate, `moq-time`,** extracted from moq-net's private
+- **A new published crate, `moq-clock`,** extracted from moq-net's private
   `Clock`/`Deadline`, not a public `moq_net::time` (mux, downstream apps, and other
   crates would depend on moq-net for time) and not web-async (a separate repo,
   and the thing the runtime trait replaces).
+- **Named `moq-clock`,** with its proc-macro helper `moq-clock-macros`
+  (decided 2026-10-13 by the maintainer, replacing `moq-time`). The crates.io
+  name is ours: the "CLOCK over QUIC" demo binary held it until 0.10.21 and
+  stopped publishing when #1488 and #1494 made it the moq-tokio `clock`
+  example. The library publishes as 0.11.0, a semver break from the demo.
+  The JS mirror is `@moq/clock` (same decision), and the private JS CLOCK
+  demo that held that name is gone. Wall time is `moq_clock::Wall`, so it
+  never reads as `moq_net::Timestamp` (media time).
 - **The instant is logical:** `Instant(u64)` nanoseconds from the clock's
   origin, so a test starts at zero with fixed coordinates and never reads the
   host clock. Native, wasm, and io_uring instants convert at the backend.
@@ -47,17 +55,17 @@ reasons, so later sessions don't reopen them:
   prove a clock correction never manufactures elapsed (billable) time.
 - **Runtime-ambient access.** State machines keep taking `now` (moq-net's
   `Driver::poll(now, waiter)`). Async glue
-  calls `moq_time::now()`, `sleep()`, `timeout()`, and `interval()`, which
+  calls `moq_clock::now()`, `sleep()`, `timeout()`, and `interval()`, which
   resolve to the current runtime's clock: one clock per runtime, nothing to
   plumb, no process-global test override. The ambient functions stay behind
   moq-net's `async` feature, so the sans-IO core keeps explicit instants.
-- **The simulator folds into `moq-time`** behind a `sim` feature (a
+- **The simulator folds into `moq-clock`** behind a `sim` feature (a
   dev-dependency only, so production builds never compile it). It is one
   backend of the ambient clock, starts at zero, keeps deadlock detection, and
-  seeds the later runtime trait. `#[moq_time::test]` replaces
+  seeds the later runtime trait. `#[moq_clock::test]` replaces
   `#[moq_net_sim::test]`.
 - **Tests for migrated contracts use the sim wherever possible.** A test with no real I/O
-  that cannot run on the sim yet uses paused tokio, whose clock `moq-time`
+  that cannot run on the sim yet uses paused tokio, whose clock `moq-clock`
   reads. A real-I/O test never uses paused tokio, which auto-advances to the
   next timer while the OS event is still in flight; it syncs on events, with
   wall time only for its watchdog.
@@ -66,7 +74,7 @@ reasons, so later sessions don't reopen them:
   type (moq-net's `time::Instant`, moq-mux's `Clock`, `@moq/net`'s time
   units) follow as breaking changes. No backport: `release` is touched only
   to cut a release or backport a critical fix, so pinned consumers adopt
-  `moq-time` from the next cut (decided 2026-10-10 from review, replacing an
+  `moq-clock` from the next cut (decided 2026-10-10 from review, replacing an
   earlier backport plan).
 - **Lint ratchet.** Each migration quest bans direct clock reads and timers in
   the crates and packages it finishes: clippy `disallowed-methods` and
@@ -74,7 +82,7 @@ reasons, so later sessions don't reopen them:
   `noRestrictedGlobals` override, allowing only the backend modules. The
   workspace-wide test and lint sweep follows in m2.
 - **Consolidation.** perf/3122 (one clock read per io_uring turn) merged into
-  [moq-uring on moq-time](/quest/m1/time/uring.md). The relay seam
+  [moq-uring on moq-clock](/quest/m1/time/uring.md). The relay seam
   [bench-relay](/quest/m2/bench-relay.md) needed is
   [the relay seam](/quest/m1/time/relay-seam.md). Quests that already asked
   for "mocked time" Require the core quest. moq-quic adopts the logical
@@ -88,12 +96,12 @@ cleanup and the global lint ratchet belong to
 
 ## Required
 
-- [The moq-time crate](/quest/m1/time/crate.md) - a logical clock, deadlines, ambient tokio and browser backends, and the simulator, published on `main`
-- [@moq/time](/quest/m1/time/js.md) - the same model in JS, with an installable clock
-- [moq-net on moq-time](/quest/m1/time/net.md) - moq-net, moq-mux, moq-stats, moq-room, and moq-ffi run on moq-time and moq-net-sim is gone
-- [JS on @moq/time](/quest/m1/time/js-migrate.md) - every JS package reads time only through `@moq/time`
-- [Every crate on moq-time](/quest/m1/time/crates.md) - every remaining crate reads time only through moq-time, with controlled tests for the production/public API migrations
-- [moq-uring on moq-time](/quest/m1/time/uring.md) - one clock read per worker turn and moq-time's deadline queue replace the private timer heap
+- [@moq/clock](/quest/m1/time/js.md) - the same model in JS, with an installable clock
+- [moq-clock's browser backend runs in CI](/quest/m1/time/wasm-test.md) - a wasm-bindgen-test suite runs the browser backend in headless Chromium
+- [moq-net on moq-clock](/quest/m1/time/net.md) - moq-net, moq-mux, moq-stats, moq-room, and moq-ffi run on moq-clock and moq-net-sim is gone
+- [JS on @moq/clock](/quest/m1/time/js-migrate.md) - every JS package reads time only through `@moq/clock`
+- [Every crate on moq-clock](/quest/m1/time/crates.md) - every remaining crate reads time only through moq-clock, with controlled tests for the production/public API migrations
+- [moq-uring on moq-clock](/quest/m1/time/uring.md) - one clock read per worker turn and moq-clock's deadline queue replace the private timer heap
 - [The relay seam](/quest/m1/time/relay-seam.md) - one in-memory session and a generic `moq_relay::Connection`, so relay tests run on the sim
 
 ## Related

@@ -56,9 +56,6 @@ export class Connection implements Established {
 	// The wire transport this session runs over.
 	readonly transport: Transport;
 
-	/** Whether the relay supports broadcast discovery; see {@link Established.discovery}. */
-	readonly discovery: boolean;
-
 	/** moq-transport has no PROBE, so this stays empty; see {@link Established.probe}. */
 	readonly probe: Getter<Probe> = new Signal<Probe>({});
 
@@ -120,7 +117,6 @@ export class Connection implements Established {
 		maxRequestId,
 		version,
 		client,
-		discovery = true,
 		publish,
 		solicit,
 		hidden = false,
@@ -137,7 +133,6 @@ export class Connection implements Established {
 		version: IetfVersion;
 		/** Whether this peer initiated the session, selecting the even request-ID space. */
 		client: boolean;
-		discovery?: boolean;
 		/** The origin whose broadcasts are served to the peer. Omit to publish nothing. */
 		publish?: OriginConsumer;
 		/**
@@ -162,7 +157,6 @@ export class Connection implements Established {
 		extensions?: { solicit: boolean };
 	}) {
 		this.url = url;
-		this.discovery = discovery;
 		this.version = versionName(version);
 		this.transport = transportOf(quic);
 		this.#quic = quic;

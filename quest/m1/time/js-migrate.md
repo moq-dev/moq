@@ -1,10 +1,10 @@
-# [XL] JS on @moq/time
+# [XL] JS on @moq/clock
 
 ## Goal
 
 Every JS package (net, signals, hang, watch, publish, room, auth,
 json, flate, and the rest under `js/`) reads time and arms timers only
-through `@moq/time`. `@moq/net`'s `Time` units move to `@moq/time`.
+through `@moq/clock`. `@moq/net`'s `Time` units move to `@moq/clock`.
 `@moq/signals`' `Effect.timer`, `timeout`, and `interval` run on the ambient
 clock. Tests needed to prove these production and exported API migrations use
 the Manual clock or events. Unrelated existing test-only real waits and
@@ -26,7 +26,7 @@ Public API: breaking (`@moq/net`'s time exports move). Wire: none.
 
 ## Required
 
-- [@moq/time](/quest/m1/time/js.md) - the package this adopts
+- [@moq/clock](/quest/m1/time/js.md) - the package this adopts
 
 ## Related
 

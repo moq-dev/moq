@@ -1,10 +1,11 @@
-//! A transport upgrade, end to end over real sessions: a second session from the
-//! same peer re-announces every route while the first one is still open.
+//! A replacement session, end to end over real sessions: a second session from the
+//! same peer re-announces every route while the first one is still open, as a GOAWAY
+//! drain does.
 //!
 //! Without an epoch the re-announced routes are new instances, so announce consumers
-//! get a `Restart`. A handle resolved before the upgrade keeps serving new requests
+//! get a `Restart`. A handle resolved before the replacement keeps serving new requests
 //! until that `Restart` is deliverable, so its holder can follow the `Restart` instead
-//! of failing `Unroutable`. With an epoch the upgrade continues the instance: no
+//! of failing `Unroutable`. With an epoch the replacement continues the instance: no
 //! `Restart`, and the old handle keeps working.
 
 mod support;
@@ -67,13 +68,13 @@ async fn subscribe(broadcast: &broadcast::Consumer, name: &str) -> Result<track:
 		.expect("subscribe hung")
 }
 
-/// Shorter than the default update hold, so the upgrade's `Restart` is still held.
+/// Shorter than the default update hold, so the replacement's `Restart` is still held.
 const WITHIN_HOLD: Duration = Duration::from_millis(10);
 
 /// Longer than the default update hold.
 const PAST_HOLD: Duration = Duration::from_millis(500);
 
-async fn upgrade(version: &str, epoch: Option<Epoch>) {
+async fn replace(version: &str, epoch: Option<Epoch>) {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
 	let viewer = produce_origin(3);
@@ -85,7 +86,7 @@ async fn upgrade(version: &str, epoch: Option<Epoch>) {
 	let audio = cam.create_track("audio", timed()).unwrap();
 	let meta = cam.create_track("meta", timed()).unwrap();
 
-	let _websocket = link(version, &publisher, &viewer).await;
+	let _first = link(version, &publisher, &viewer).await;
 	let mut announced = viewer.consume().announced();
 	match next_event(&mut announced).await {
 		announce::Event::Start(announce) => assert_eq!(announce.prefix.as_str(), "cam"),
@@ -97,12 +98,12 @@ async fn upgrade(version: &str, epoch: Option<Epoch>) {
 	write(&video, "video:0");
 	assert_eq!(read(&mut sticky).await, "video:0", "{version}");
 
-	// The upgrade: the same peer re-announces everything over a second session,
+	// The replacement: the same peer re-announces everything over a second session,
 	// while the first one is still open.
-	let _quic = link(version, &publisher, &viewer).await;
+	let _second = link(version, &publisher, &viewer).await;
 	moq_net_sim::sleep(WITHIN_HOLD).await;
 
-	// A request through the old handle right after the upgrade is still served.
+	// A request through the old handle right after the replacement is still served.
 	let mut late = subscribe(&old, "audio")
 		.await
 		.unwrap_or_else(|err| panic!("{version}: the old handle refused a request before any restart: {err}"));
@@ -110,10 +111,10 @@ async fn upgrade(version: &str, epoch: Option<Epoch>) {
 	assert_eq!(read(&mut late).await, "audio:0", "{version}");
 
 	if epoch.is_some() {
-		// The epoch continues across the upgrade: nothing to restart, and the old
+		// The epoch continues across the replacement: nothing to restart, and the old
 		// handle keeps serving.
 		if let Ok(event) = moq_net_sim::timeout(PAST_HOLD, announced.next()).await {
-			panic!("{version}: an epoch route restarted on upgrade: {event:?}");
+			panic!("{version}: an epoch route restarted on replacement: {event:?}");
 		}
 		let mut later = subscribe(&old, "meta").await.unwrap();
 		write(&meta, "meta:0");
@@ -121,7 +122,7 @@ async fn upgrade(version: &str, epoch: Option<Epoch>) {
 		return;
 	}
 
-	// Without an epoch the upgrade is a restart: once the hold releases it, the old
+	// Without an epoch the replacement is a restart: once the hold releases it, the old
 	// handle refuses new requests, and the restart is already there to follow.
 	moq_net_sim::sleep(PAST_HOLD).await;
 	let Err(err) = subscribe(&old, "meta").await else {
@@ -141,21 +142,21 @@ async fn upgrade(version: &str, epoch: Option<Epoch>) {
 	assert_eq!(read(&mut followed).await, "meta:0", "{version}");
 }
 
-/// The epoch an upgraded route carries on both sessions.
+/// The epoch a replaced route carries on both sessions.
 fn epoch() -> Epoch {
 	"01900000-0000-7000-8000-000000000001".parse().unwrap()
 }
 
 #[moq_net_sim::test]
 async fn epochless_lite06() {
-	moq_net_sim::timeout(TEST_TIMEOUT, upgrade("moq-lite-06", None))
+	moq_net_sim::timeout(TEST_TIMEOUT, replace("moq-lite-06", None))
 		.await
 		.expect("timed out");
 }
 
 #[moq_net_sim::test]
 async fn epochless_lite07() {
-	moq_net_sim::timeout(TEST_TIMEOUT, upgrade("moq-lite-07-wip", None))
+	moq_net_sim::timeout(TEST_TIMEOUT, replace("moq-lite-07-wip", None))
 		.await
 		.expect("timed out");
 }
@@ -163,7 +164,7 @@ async fn epochless_lite07() {
 /// Only lite-07 carries the epoch.
 #[moq_net_sim::test]
 async fn epoch_lite07() {
-	moq_net_sim::timeout(TEST_TIMEOUT, upgrade("moq-lite-07-wip", Some(epoch())))
+	moq_net_sim::timeout(TEST_TIMEOUT, replace("moq-lite-07-wip", Some(epoch())))
 		.await
 		.expect("timed out");
 }

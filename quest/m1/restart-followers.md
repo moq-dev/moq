@@ -11,13 +11,13 @@ then costs a long-lived consumer nothing but the restart.
 ## Plan
 
 Moved to m1 on 2026-10-13 (maintainer): the WebSocket-to-QUIC upgrade is
-being removed (separate m0 quest), so an epochless Restart no longer follows
+removed, so an epochless Restart no longer follows
 every connect; it remains for GOAWAY drains and publisher replacement.
 
 The origin side is done: a handle resolved through a peer keeps serving new
 requests while the peer's epochless replacement is held, and refuses them
 with `Unroutable` only once the `Restart` is deliverable (`Release` in `rs/moq-net/src/model/origin.rs`,
-`rs/moq-net/tests/upgrade.rs`). So a consumer that never follows `Restart`
+`rs/moq-net/tests/replacement.rs`). So a consumer that never follows `Restart`
 works through the hold (300 ms by default), and its open subscriptions stay
 sticky on the old session until it closes, where they end cleanly. A
 consumer that opens a request after the hold, or reads past the old
@@ -45,9 +45,9 @@ Audit and fix:
 - The interop clients under `test/interop/clients`, where they resolve a
   broadcast themselves.
 
-Regression: extend `rs/moq-net/tests/upgrade.rs` (or the consumer's own
+Regression: extend `rs/moq-net/tests/replacement.rs` (or the consumer's own
 tests) so each follower reads past the old session's close after an
-epochless upgrade. Then run `just test interop --all`.
+epochless replacement. Then run `just test interop --all`.
 
 If a failing client still leaves its connection to idle out, fix that
 client's error path to close its session, as a separate commit. The C
@@ -59,5 +59,4 @@ Wire: none.
 
 ## Related
 
-- [Keep the winning transport](/quest/m0/drop-ws-upgrade.md) - removes the upgrade, so `Restart` no longer follows every WebSocket connect
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - the players that already follow `Restart`

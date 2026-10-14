@@ -193,6 +193,69 @@ async fn export_aac_roundtrip() {
 	}
 }
 
+/// A disabled rendition (catalog `enabled: false`) gets no PMT entry and none of its media
+/// is written.
+#[tokio::test(start_paused = true)]
+async fn export_skips_a_disabled_rendition() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+
+	let mut rendition = |suffix: &str, enabled: bool, payload: &'static [u8]| {
+		let track = broadcast
+			.create_track(
+				broadcast.unique_name(suffix),
+				hang::container::track_info(hang::catalog::PRIORITY.audio),
+			)
+			.unwrap();
+		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.container = Container::Legacy;
+		cfg.enabled = enabled;
+		catalog
+			.modify()
+			.unwrap()
+			.audio
+			.renditions
+			.insert(track.name().to_string(), cfg);
+		let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+		for i in 0..3u64 {
+			producer
+				.write(Frame {
+					timestamp: Timestamp::from_micros(i * 20_000).unwrap(),
+					duration: None,
+					payload: Bytes::from_static(payload),
+					keyframe: true,
+				})
+				.unwrap();
+			producer.cut(None).unwrap();
+		}
+		producer.finish().unwrap();
+		producer
+	};
+	let _on = rendition(".on", true, &[0x01, 0x02, 0x03]);
+	let _off = rendition(".off", false, &[0x0f, 0x0f, 0x0f]);
+
+	let ts = drain(consumer).await;
+	assert_packet_aligned(&ts);
+
+	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
+	let mut saw_pmt = false;
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(TsPayload::Pmt(pmt)) = packet.payload {
+			saw_pmt = true;
+			assert_eq!(pmt.es_info.len(), 1, "only the enabled rendition is declared");
+		}
+	}
+	assert!(saw_pmt, "missing PMT");
+
+	let mut pes = PesPacketReader::new(TsPacketReader::new(Cursor::new(ts.as_ref())));
+	let mut payloads = Vec::new();
+	while let Some(packet) = pes.read_pes_packet().unwrap() {
+		payloads.push(packet.data[7..].to_vec());
+	}
+	assert_eq!(payloads, vec![vec![0x01, 0x02, 0x03]; 3]);
+}
+
 /// Collect PES presentation timestamps per elementary stream (video H.264, audio AAC),
 /// keyed off the PMT's PID assignments.
 fn collect_pes_pts(ts: &[u8]) -> (Vec<u64>, Vec<u64>) {

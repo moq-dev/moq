@@ -33,10 +33,18 @@ export interface Broadcast {
 	fromSession?: boolean;
 }
 
+/** Receives one change to the watched prefixes: `prefix` is now (or no longer) wanted. */
+export type InterestListener = (prefix: Path.Valid, wanted: boolean) => void;
+
 /** The protocol-facing operations behind an origin producer. */
 export interface OriginProducer {
-	/** Minimal root-relative namespace prefixes that cover this origin scope. */
-	interests(): readonly Path.Valid[];
+	/**
+	 * Hear the root-relative prefixes readers of this origin are watching, narrowed to its
+	 * scope: each one currently wanted first, then every change. A prefix may be reported
+	 * wanted more than once, by overlapping watches, and is released as many times. Sessions
+	 * ask their peer for announcements under exactly these. Returns the unsubscribe.
+	 */
+	interests(listener: InterestListener): Dispose;
 	/** Whether an advertised prefix overlaps the handle's allowed paths. */
 	accepts(prefix: Path.Valid): boolean;
 	receive(

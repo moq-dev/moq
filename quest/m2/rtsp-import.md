@@ -44,7 +44,7 @@ Decided 2026-10-01:
   [Broadcast epochs](/quest/m0/broadcast-epoch/README.md), with a fresh
   catalog, tracks, and importers starting on a keyframe. The CLI publishes
   each run (each reconnect) under a fresh epoch, so `moq import rtsp` refuses
-  `--epoch` (`takes_epoch` is false for it, as for the other gateways); test
+  `--epoch` (`ImportSource::epoch_refusal` names why, as for the other gateways); test
   the refusal. Decided 2026-10-02 and
   2026-10-05; shifting timestamps onto the existing catalog clock behind a
   `discontinuity()` marker was rejected.

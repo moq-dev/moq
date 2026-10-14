@@ -61,9 +61,6 @@ cannot answer unambiguously is refused.
   does.
 - **Verification:** Rust integration tests per feature in each child, plus
   the nightly moxygen job owned here.
-- [IETF group ingest](/quest/m1/ietf-ingest-refusal.md) no longer aborts a
-  track on a subgroup other than 0 or a datagram past object 0. Its
-  malformed-group routing still lands on its own.
 
 Work owned by this README, after the children land:
 

@@ -87,7 +87,7 @@ impl Version {
 	pub(crate) fn session_code(self, error: &crate::SessionError) -> u32 {
 		match self {
 			Self::Lite(_) => crate::lite::error::to_session_code(error),
-			Self::Ietf(_) => error.to_code(),
+			Self::Ietf(_) => crate::ietf::error::to_session_code(error),
 		}
 	}
 

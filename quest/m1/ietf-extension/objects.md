@@ -74,7 +74,3 @@ list with multiple property types.
 
 Public API: none. Wire: none new; moq-transport fields that were dropped are
 now forwarded.
-
-## Related
-
-- [IETF group ingest](/quest/m1/ietf-ingest-refusal.md) - narrows the catch-all on the same receive paths; land either first and rebase

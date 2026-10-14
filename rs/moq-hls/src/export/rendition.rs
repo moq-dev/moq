@@ -1,6 +1,7 @@
 //! One rendition: playlists from its view of the broadcast's segments, resolved against its own
 //! timeline, and segments fetched on demand.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::task::Poll;
 use std::time::{Duration, SystemTime};
@@ -240,6 +241,10 @@ pub struct Rendition {
 	/// The latest catalog framerate (video only), refreshed in place by [`refresh`](Self::refresh):
 	/// the muxer's fallback sample cadence and the DASH `frameRate`.
 	framerate: RwLock<Option<f64>>,
+	/// Whether the catalog currently enables the rendition, refreshed in place by
+	/// [`refresh`](Self::refresh). A disabled rendition keeps its window and media playlist but
+	/// is left out of the master playlist and the DASH manifest.
+	enabled: AtomicBool,
 	/// Coded width, for the master playlist `RESOLUTION` (video only).
 	pub width: Option<u32>,
 	/// Coded height, for the master playlist `RESOLUTION` (video only).
@@ -301,15 +306,24 @@ impl Rendition {
 		self.bitrate().unwrap_or(default_bandwidth(self.kind))
 	}
 
-	/// Take the advertised bitrate and framerate from a catalog update that
-	/// [`matches`](Self::matches_video) this rendition (audio passes no framerate).
+	/// Take the advertised bitrate, framerate, and `enabled` flag from a catalog update that
+	/// [`matches`](Self::matches_video) this rendition (audio passes no framerate). Returns whether
+	/// the rendition was enabled or disabled, which changes what the master playlist lists.
 	///
 	/// The publisher's estimator republishes the catalog whenever its measured bitrate moves, so
 	/// this is the common update by far: rebuilding the rendition for it would reset the playlist
-	/// window, the cached init segment, and `EXT-X-MEDIA-SEQUENCE` several times a minute.
-	pub(crate) fn refresh(&self, bitrate: Option<u64>, framerate: Option<f64>) {
+	/// window, the cached init segment, and `EXT-X-MEDIA-SEQUENCE` several times a minute. A
+	/// disable keeps all three too, so a rendition that re-enables resumes where it was.
+	pub(crate) fn refresh(&self, bitrate: Option<u64>, framerate: Option<f64>, enabled: bool) -> bool {
 		*self.bitrate.write().expect("bitrate lock poisoned") = bitrate;
 		*self.framerate.write().expect("framerate lock poisoned") = framerate;
+		self.enabled.swap(enabled, Ordering::Relaxed) != enabled
+	}
+
+	/// Whether the catalog enables this rendition, so the master playlist and DASH manifest
+	/// list it. The media playlist serves either way.
+	pub(crate) fn is_enabled(&self) -> bool {
+		self.enabled.load(Ordering::Relaxed)
 	}
 
 	/// The latest catalog bitrate, preserving `None` for muxer-specific fallback behavior.
@@ -339,6 +353,7 @@ impl Rendition {
 			kind: Kind::Video,
 			bitrate: RwLock::new(config.bitrate),
 			framerate: RwLock::new(config.framerate),
+			enabled: AtomicBool::new(config.enabled),
 			width: config.coded_width,
 			height: config.coded_height,
 			codec: config.codec.to_string(),
@@ -369,6 +384,7 @@ impl Rendition {
 			kind: Kind::Audio,
 			bitrate: RwLock::new(config.bitrate),
 			framerate: RwLock::new(None),
+			enabled: AtomicBool::new(config.enabled),
 			width: None,
 			height: None,
 			codec: config.codec.to_string(),

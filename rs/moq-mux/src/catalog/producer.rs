@@ -70,6 +70,24 @@ impl Throttle {
 	}
 }
 
+/// The producer's `clock` under a root `clock` of `advertised`: re-based on a changed mapping while
+/// nothing has `anchored` the clock, and refused once something has. Clearing it is always refused.
+fn adopt(clock: crate::Clock, anchored: bool, advertised: Option<hang::catalog::Clock>) -> crate::Result<crate::Clock> {
+	if advertised == clock.wall() {
+		return Ok(clock);
+	}
+	let refuse = |why: &str| crate::Error::UnmappableTimestamp(format!("root clock {advertised:?} {why}"));
+	let wall = crate::Clock::exact(advertised.ok_or_else(|| refuse("clears the producer's clock"))?)?;
+	// The same mapping in other units needs no host time, which may be unset or behind PTS zero.
+	if Some(wall) == clock.wall() {
+		return Ok(clock);
+	}
+	if anchored {
+		return Err(refuse("changes the producer's clock after it was fixed"));
+	}
+	crate::Clock::adopted(wall)
+}
+
 /// Take the shared state, ignoring a poisoned lock.
 ///
 /// A panic under this lock comes from code we hand the catalog to: a [`RenditionConfig::insert`]
@@ -276,7 +294,8 @@ impl Default for Config<()> {
 impl<E: CatalogExt> Config<E> {
 	/// Start from an extended catalog rather than the media-only one, e.g. the untyped
 	/// [`Extra`] for the by-name / FFI path. Set application sections through
-	/// [`Producer::modify`](Producer::modify) afterwards.
+	/// [`Producer::modify`](Producer::modify) afterwards. A root `clock` in it is adopted, not
+	/// replaced (see [`Producer::new`]).
 	pub fn with_catalog<F: CatalogExt>(self, catalog: Catalog<F>) -> Config<F> {
 		Config {
 			catalog,
@@ -294,6 +313,9 @@ impl<E: CatalogExt> Config<E> {
 	/// its first frame landing at the clock's reading on arrival. Without this, the catalog starts
 	/// a fresh clock, and the first importer to receive a frame before anything fixes the clock
 	/// places it there instead, keeping its own timestamps verbatim (see [`Timebase`](super::Timebase)).
+	///
+	/// The root `clock` is this clock: a derivative that only learns its input's mapping later
+	/// writes it through [`Producer::modify`] instead, before anything fixes the clock.
 	pub fn with_clock(mut self, clock: crate::Clock) -> Self {
 		self.clock = Some(clock);
 		self
@@ -336,7 +358,24 @@ impl<E: CatalogExt> Config<E> {
 
 impl<E: CatalogExt> Producer<E> {
 	/// Create a new catalog producer from a full [`Config`].
-	pub fn new(broadcast: &mut moq_net::broadcast::Producer, config: Config<E>) -> Result<Self, moq_net::Error> {
+	///
+	/// A root `clock` seeded through [`Config::with_catalog`] is adopted under the same rules as
+	/// [`modify`](Self::modify): the producer runs on it, unless [`Config::with_clock`] fixed a
+	/// different mapping, which is refused.
+	pub fn new(broadcast: &mut moq_net::broadcast::Producer, config: Config<E>) -> crate::Result<Self> {
+		// The broadcast clock is advertised at the catalog root from the first snapshot,
+		// independently of any archive timeline: a live-only publisher exposes its mapping
+		// without creating a segment index. A host with an unset wall clock advertises none.
+		// Resolved before any track exists, so a refused seed leaves the broadcast untouched.
+		let anchored = config.clock.is_some();
+		let mut catalog = config.catalog;
+		let clock = match catalog.clock {
+			// An unseeded catalog runs on the configured clock, or a fresh one.
+			None => config.clock.unwrap_or_default(),
+			seeded => adopt(config.clock.unwrap_or_default(), anchored, seeded)?,
+		};
+		catalog.clock = clock.wall();
+
 		let hang_track = broadcast.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())?;
 		let hangz_track =
 			broadcast.create_track(hang::Catalog::COMPRESSED_NAME, hang::Catalog::default_track_info())?;
@@ -359,14 +398,6 @@ impl<E: CatalogExt> Producer<E> {
 		let timeline = crate::timeline::Timelines::new(broadcast);
 		#[allow(clippy::arc_with_non_send_sync)]
 		let catalog_timeline = Arc::new(Mutex::new(CatalogTimeline::default()));
-
-		// The broadcast clock is advertised at the catalog root from the first snapshot,
-		// independently of any archive timeline: a live-only publisher exposes its mapping
-		// without creating a segment index. A host with an unset wall clock advertises none.
-		let anchored = config.clock.is_some();
-		let clock = config.clock.unwrap_or_default();
-		let mut catalog = config.catalog;
-		catalog.clock = clock.wall();
 
 		// The contents are `Send + Sync` natively; on wasm moq-net's handles are
 		// `Rc`-backed, so clippy sees a pointlessly atomic `Arc`. Keeping one type for
@@ -450,6 +481,14 @@ impl<E: CatalogExt> Producer<E> {
 	///
 	/// The in-memory catalog is already mutated, so a panic while the guard is held still
 	/// publishes: skipping would leave `snapshot` ahead of the wire with no dirty flag to catch up.
+	///
+	/// The root `clock` is the producer's [`clock`](Self::clock). Writing a different one re-bases
+	/// the clock on it until something fixes the clock ([`Config::with_clock`], taking
+	/// [`clock`](Self::clock), an importer's first frame, or the first publish), so a derivative
+	/// adopts its input's mapping. After that a changed `clock` is refused, as is clearing it at any
+	/// time; writing the same mapping again is no change. Writes through
+	/// [`Reserved::video`](super::Reserved::video) and the codec producers keep their timestamps
+	/// verbatim, so they mean something only under the mapping they were written for.
 	pub fn modify(&mut self) -> crate::Result<Guard<'_, E>> {
 		let state = take(&self.current);
 		if let Some(err) = &state.closed {
@@ -914,6 +953,18 @@ impl<E: CatalogExt> Guard<'_, E> {
 			return Ok(());
 		}
 		self.updated = false;
+
+		// The root `clock` is the producer's clock: never advertise one it disagrees with.
+		match adopt(self.state.clock, self.state.anchored, self.state.catalog.clock) {
+			Ok(clock) => {
+				self.state.clock = clock;
+				self.state.catalog.clock = clock.wall();
+			}
+			Err(err) => {
+				self.state.catalog.clock = self.state.clock.wall();
+				return Err(err);
+			}
+		}
 
 		{
 			let r = &mut self.state.reservations;
@@ -1694,6 +1745,143 @@ mod test {
 			timebase.place(pts, wall),
 			Err(crate::Error::UnmappableTimestamp(_))
 		));
+	}
+
+	/// Fake this thread's host now a day past the moq epoch, returning a root `clock` an hour
+	/// before it in `scale` units.
+	fn an_hour_ago(scale: moq_net::Timescale) -> hang::catalog::Clock {
+		use std::time::{Duration, SystemTime};
+
+		let now = Duration::from_secs(86_400);
+		crate::clock::fake_host_wall(
+			SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS) + now,
+		);
+		let zero = moq_net::Timestamp::from_secs(now.as_secs() - 3600).unwrap();
+		hang::catalog::Clock::new(zero.convert(scale).unwrap()).unwrap()
+	}
+
+	/// A derivative writes its input's mapping through `modify()` before anything fixes the clock,
+	/// and the producer's clock re-bases on it: what it stamps lands under the input's mapping.
+	#[tokio::test(start_paused = true)]
+	async fn a_root_clock_written_before_the_clock_is_fixed_rebases_it() {
+		let input = an_hour_ago(moq_net::Timescale::MICRO);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		catalog.mutate(|c| c.clock = Some(input)).unwrap();
+
+		assert_eq!(catalog.snapshot().clock, Some(input), "advertised unchanged");
+		let clock = catalog.clock();
+		assert_eq!(clock.wall(), Some(input));
+		assert_eq!(
+			clock.now(),
+			moq_net::Timestamp::from_secs(3600)
+				.unwrap()
+				.convert(crate::Clock::TIMESCALE)
+				.unwrap()
+		);
+
+		tokio::time::advance(std::time::Duration::from_secs(3)).await;
+		assert_eq!(
+			catalog.timestamp(None).unwrap(),
+			moq_net::Timestamp::from_micros(3_603_000_000).unwrap()
+		);
+
+		// Re-applying the same mapping once fixed changes nothing.
+		catalog.mutate(|c| c.clock = Some(input)).unwrap();
+		assert_eq!(catalog.clock(), clock);
+	}
+
+	/// A root `clock` seeded through `with_catalog` is adopted like one written through `modify()`,
+	/// never replaced by a fresh clock; one that disagrees with `with_clock` is refused.
+	#[test]
+	fn a_seeded_root_clock_is_adopted() {
+		use std::time::{Duration, Instant, SystemTime};
+
+		let input = an_hour_ago(moq_net::Timescale::MICRO);
+		let mut seed = Catalog::<()>::default();
+		seed.clock = Some(input);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast, Config::default().with_catalog(seed.clone())).unwrap();
+		assert_eq!(catalog.snapshot().clock, Some(input));
+		assert_eq!(catalog.clock().wall(), Some(input));
+
+		// The same mapping from `with_clock` agrees in any units, without reading the host's wall
+		// clock, which may be unset.
+		let zero = SystemTime::UNIX_EPOCH
+			+ Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS)
+			+ Duration::from_micros(input.wall.as_micros() as u64);
+		let fixed = crate::Clock::at(Instant::now(), zero).unwrap();
+		seed.clock = Some(an_hour_ago(moq_net::Timescale::MILLI));
+		crate::clock::fake_host_wall(SystemTime::UNIX_EPOCH + Duration::from_secs(86_400));
+		let config = Config::default().with_catalog(seed.clone()).with_clock(fixed);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, config).unwrap();
+		assert_eq!(catalog.clock(), fixed);
+		catalog.mutate(|c| c.clock = seed.clock).unwrap();
+		assert_eq!(catalog.snapshot().clock, Some(input));
+
+		// A different one is refused before any catalog track exists.
+		let other = crate::Clock::at(Instant::now(), zero + Duration::from_secs(1)).unwrap();
+		let config = Config::default().with_catalog(seed).with_clock(other);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		assert!(matches!(
+			Producer::new(&mut broadcast, config),
+			Err(crate::Error::UnmappableTimestamp(_))
+		));
+		broadcast
+			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
+			.expect("a refused seed leaves the broadcast untouched");
+	}
+
+	/// A millisecond wall is the same mapping in the clock's microseconds, advertised as such.
+	#[test]
+	fn a_millisecond_root_clock_converts() {
+		let input = an_hour_ago(moq_net::Timescale::MILLI);
+		let micro = an_hour_ago(moq_net::Timescale::MICRO);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		catalog.mutate(|c| c.clock = Some(input)).unwrap();
+		assert_eq!(catalog.snapshot().clock, Some(micro));
+		assert_eq!(catalog.clock().wall(), Some(micro));
+
+		// The millisecond spelling of the fixed mapping is no change.
+		catalog.mutate(|c| c.clock = Some(input)).unwrap();
+		assert_eq!(catalog.snapshot().clock, Some(micro));
+	}
+
+	/// A root `clock` the producer cannot run on is refused, and the catalog keeps advertising the
+	/// producer's own.
+	#[test]
+	fn an_unadoptable_root_clock_is_refused() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let own = catalog.current_clock().wall();
+		let refused = |catalog: &mut Producer, clock: Option<hang::catalog::Clock>| {
+			let err = catalog.mutate(|c| c.clock = clock).unwrap_err();
+			assert!(matches!(err, crate::Error::UnmappableTimestamp(_)), "{err}");
+			assert_eq!(catalog.snapshot().clock, own);
+		};
+
+		// One 90 kHz tick is no whole microsecond.
+		let inexact = an_hour_ago(moq_net::Timescale::MICRO)
+			.wall
+			.convert(moq_net::Timescale::new(90_000).unwrap());
+		let inexact = moq_net::Timestamp::new(inexact.unwrap().value() + 1, moq_net::Timescale::new(90_000).unwrap());
+		refused(&mut catalog, Some(hang::catalog::Clock::new(inexact.unwrap()).unwrap()));
+
+		// PTS zero a minute after this host's now.
+		let future = an_hour_ago(moq_net::Timescale::SECOND).wall.value() + 3660;
+		let future = hang::catalog::Clock::new(moq_net::Timestamp::from_secs(future).unwrap()).unwrap();
+		refused(&mut catalog, Some(future));
+
+		// Clearing it, even before anything fixed it.
+		refused(&mut catalog, None);
+		assert_eq!(catalog.current_clock().wall(), own, "nothing re-based");
+
+		// A change once the clock is handed out.
+		let taken = catalog.clock();
+		refused(&mut catalog, Some(an_hour_ago(moq_net::Timescale::MICRO)));
+		assert_eq!(catalog.clock(), taken);
 	}
 
 	/// A host whose wall clock reads before 2020 (booted before NTP sync) publishes its media on the

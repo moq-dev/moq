@@ -16,7 +16,7 @@ just test audio-quality --profiles bursty --capture --out ~/runs/burst # keep ar
 just test audio-quality --replays                              # the replays only, in seconds
 ```
 
-The matrix is codec x profile x ring: 24 browser rows, about 30 minutes, plus 6 [replay
+The matrix is codec x profile x ring: 24 browser rows, about 30 minutes, plus 8 [replay
 rows](#traces) of recorded arrivals. `--profiles`, `--rings`, and `--codecs` take comma-separated
 lists; `--seed` replays a given impairment. The table prints either way, and only `--enforce` (which
 the nightly job passes) turns a breach into a failed run.
@@ -80,7 +80,9 @@ configuration.
 
 `--capture` also writes `<tag>.arrivals.ndjson`: `[at, timestamp, group]` on the same viewer clock as
 `<tag>.ndjson`, before the container orders or skips groups. The observer shares the player's
-connection and track, priority, and maximum age, so it adds no upstream subscription demand.
+connection and track, priority, and subscription max delay (at least 2 s at "auto", as the decoder
+asks, not the target), so it adds no upstream subscription demand and still sees a frame later than
+the target.
 Groups drain concurrently, so an earlier stalled group cannot hide a later arrival. Capture
 errors void the row. Capture adds local decoding and recording work; it is off by default and
 on in nightly so a run preserves the inputs for diagnosis.
@@ -103,6 +105,7 @@ The shaper's profiles are synthetic. [`traces/`](traces) holds real arrivals, ea
 | `relay-bbb` | the public relay's `bbb.hang`: one AAC frame per group, flushed in bursts of about seven, the flush-span shape #3477 measured |
 | `local-aac` | this harness's AAC publisher through a local relay: the shallow control |
 | `relay-mic` | `<moq-publish>` in headless Chromium, publishing its fake capture device through the public relay |
+| `bursty-aac` | a nightly `bursty` AAC row's capture: each flush delivered newest first, which kept the player re-stalling until the estimator measured reordered frames |
 
 A trace is a [`Trace`](clients/js/src/schema.ts): the catalog's audio rendition, the smallest
 PROBE round trip the session saw, how long it observed, and every frame's `[at, timestamp, group]`,
@@ -123,14 +126,15 @@ and clock checks have nothing to void. Decoding is taken as instant. A replay is
 its budgets are exactly what it measured.
 
 ```bash
-just test audio-quality-record                        # all three, 35 s each, needs the network
+just test audio-quality-record                        # the three recorded lanes, 35 s each, needs the network
 just test audio-quality-record --lanes relay-bbb
 ```
 
 Recording is by hand: the public relay and a browser publisher are not something a nightly run
 should depend on. Re-measure the replay budgets after re-recording. The recorder asks the relay for
 ten seconds of backlog so a late group is kept, which makes a trace's tune-in heavier than a
-player's; the warmup excludes it from the grade.
+player's; the warmup excludes it from the grade. `bursty-aac` is not recorded here: it is a nightly
+capture converted by the recipe [above](#diagnosing-live-rows).
 
 ## The metric contract
 

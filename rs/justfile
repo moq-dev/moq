@@ -173,18 +173,19 @@ android *args:
 # build sees the code. Not to be confused with `just js wasm`, which builds the
 # shippable `@moq/wasm` package. `moq-mux` and `moq-ffi` share the invocation
 # because moq-mux needs the getrandom backend only its siblings declare, and
-# features unify only within one cargo invocation.
+# features unify only within one cargo invocation. `moq-clock` rides along to
+# compile its browser clock backend.
 
 # Compile and lint the browser/WASM bindings, which the host-target check skips.
 [positional-arguments]
 wasm *args:
-    cargo clippy --locked -p moq-wasm -p moq-mux -p moq-ffi --target wasm32-unknown-unknown --lib "$@" -- -D warnings
+    cargo clippy --locked -p moq-wasm -p moq-mux -p moq-ffi -p moq-clock --target wasm32-unknown-unknown --lib "$@" -- -D warnings
 
 # Auto-fix the browser/WASM bindings.
 [positional-arguments]
 wasm-fix *args:
-    cargo clippy --locked --fix --allow-staged --allow-dirty -p moq-wasm -p moq-mux -p moq-ffi --target wasm32-unknown-unknown --lib "$@"
-    cargo fmt -p moq-wasm -p moq-mux -p moq-ffi
+    cargo clippy --locked --fix --allow-staged --allow-dirty -p moq-wasm -p moq-mux -p moq-ffi -p moq-clock --target wasm32-unknown-unknown --lib "$@"
+    cargo fmt -p moq-wasm -p moq-mux -p moq-ffi -p moq-clock
 
 # Audit dependencies against deny.toml. Nightly: advisories land without a diff.
 audit:

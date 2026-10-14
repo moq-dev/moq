@@ -10,6 +10,8 @@ members = [
     "rs/moq-boy",
     "rs/moq-c",
     "rs/moq-cli",
+    "rs/moq-clock",
+    "rs/moq-clock/macros",
     "rs/moq-e2ee",
     "rs/moq-ffi",
     "rs/moq-flate",
@@ -47,6 +49,8 @@ default-members = [
     "rs/kio",
     "rs/hang",
     # "rs/moq-c",     # requires C toolchain
+    "rs/moq-clock",
+    "rs/moq-clock/macros",
     "rs/moq-archive",
     "rs/moq-auth",
     "rs/moq-boy",
@@ -145,6 +149,7 @@ mdns-sd = { version = "0.21", features = ["async"] }
 moq-archive = { version = "0.0.11", path = "rs/moq-archive" }
 moq-audio = { version = "0.1.10", path = "rs/moq-audio", default-features = false }
 moq-auth = { version = "0.2.1", path = "rs/moq-auth" }
+moq-clock-macros = { version = "0.1.0", path = "rs/moq-clock/macros" }
 moq-flate = { version = "0.2.0", path = "rs/moq-flate" }
 moq-hls = { version = "0.5.11", path = "rs/moq-hls", default-features = false }
 moq-json = { version = "0.5.8", path = "rs/moq-json" }

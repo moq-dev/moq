@@ -54,8 +54,7 @@ this by hand-building a catalog.
   `<track>.timeline.z` groups under the live names, and this quest rewrites
   catalog groups, so the same name, epoch, and group number could carry
   different bytes. Revisit only once replayed metadata is byte- and
-  sequence-identical to live. So `moq import archive` refuses `--epoch`
-  ([Epoch refusals](/quest/m1/epoch-refusals.md) lands that), and any
+  sequence-identical to live. So `moq import archive` refuses `--epoch`, and any
   `moq-archive` host mints its own epoch or takes one from its caller, never
   defaulting to `.info`'s.
 - The recorded catalog's `archive` entry describes the source's live
