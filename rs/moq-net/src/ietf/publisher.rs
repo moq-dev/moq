@@ -2877,6 +2877,14 @@ where
 					tracing::debug!(broadcast = %absolute, "no answer to the token refresh");
 					None
 				}
+				// A malformed answer is the peer's violation, not a closed stream, and ends the
+				// session. A stream that ends mid-message reads as Short, which is a closure.
+				Err(err)
+					if super::subscriber::is_protocol_violation(&err)
+						&& !matches!(err, Error::Decode(DecodeError::Short)) =>
+				{
+					return Err(err);
+				}
 				Err(err) => {
 					tracing::debug!(broadcast = %absolute, %err, "advertisement ended during the token refresh");
 					None
@@ -12711,6 +12719,64 @@ mod tests {
 			);
 			assert!(log.closes().is_empty(), "{version}: the session stays up");
 		}
+	}
+
+	/// A malformed answer to a token refresh is the peer's violation, not a closed stream: it
+	/// still ends the namespace loop, and with it the session.
+	#[moq_net_sim::test]
+	async fn a_malformed_token_refresh_answer_stays_fatal() {
+		const VERSION: Version = Version::Draft17;
+		let first = bytes::Bytes::from_static(&[0x03, 0x00, b'a', b'a']);
+		let second = bytes::Bytes::from_static(&[0x03, 0x00, b'b', b'b']);
+
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
+		settle().await;
+
+		// The PUBLISH_NAMESPACE is accepted, then the renewal is answered with a message type in
+		// the seven-byte varint form draft-17 forbids.
+		let mut stream1 = publish_namespace_ok(VERSION).await;
+		stream1.extend([0xfc, 0, 0, 0, 0, 0, 0]);
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![stream1]);
+		let log = session.log.clone();
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer::default());
+
+		let token = crate::RequestToken::new(Some(typed(&first)));
+		let publisher = Publisher::new(
+			crate::time::Clock::sim(),
+			session,
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			peer_setup,
+			VERSION,
+		)
+		.with_request_token(token.clone());
+
+		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, &first) >= 1 {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(occurrences(&log, &first), 1, "the initial token rode the announce");
+
+		token.set(Some(typed(&second)));
+		let mut result = None;
+		for _ in 0..100 {
+			if let Poll::Ready(res) = futures::poll!(run.as_mut()) {
+				result = Some(res);
+				break;
+			}
+			settle().await;
+		}
+		assert!(
+			matches!(result, Some(Err(Error::Decode(DecodeError::InvalidValue)))),
+			"a malformed answer must stay fatal, got {result:?}"
+		);
 	}
 
 	/// A token-bearing client's reprice carries only the cluster change, never the unchanged
