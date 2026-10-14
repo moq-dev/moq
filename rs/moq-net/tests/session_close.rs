@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! `Session::close` delivers what the session queued before closing, within a deadline,
 //! while `abort` still closes at once.
 //!

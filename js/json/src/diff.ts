@@ -5,9 +5,10 @@ export interface Diff {
 	patch: unknown;
 
 	// Set when the change can't be faithfully expressed as a merge patch, so the caller should
-	// publish a full snapshot instead. This happens when a value is set to null, which merge
-	// patch reads as a key deletion. Arrays are fine: merge patch replaces them wholesale, which
-	// is still typically smaller than a full snapshot.
+	// publish a full snapshot instead. This happens when a value is set to null, or an object
+	// holding a null is written whole, since merge patch reads a null as a key deletion. Arrays are
+	// fine: merge patch replaces them wholesale, which is still typically smaller than a full
+	// snapshot.
 	forcedSnapshot: boolean;
 }
 
@@ -53,13 +54,20 @@ function diffObjects(oldObj: Obj, newObj: Obj, patch: Obj, forced: { value: bool
 			continue;
 		}
 
-		// Added or replaced with a non-object value. A literal null can't be stored: merge patch
-		// would delete the key. Arrays are kept in the patch and replace the target wholesale.
-		if (newV === null) {
+		// Added, or replaced by a value of another type, so it's written whole. A literal null can't be
+		// stored, not even nested in an object: merge patch would delete the key. Arrays are kept in the
+		// patch and replace the target wholesale.
+		if (newV === null || hasNullMember(newV)) {
 			forced.value = true;
 		}
 		patch[key] = newV;
 	}
+}
+
+// Whether an object holds a null member at any depth. Nulls inside arrays are data, since merge patch
+// replaces an array wholesale.
+function hasNullMember(value: unknown): boolean {
+	return isObject(value) && Object.values(value).some((v) => v === null || hasNullMember(v));
 }
 
 /**

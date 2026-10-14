@@ -38,4 +38,4 @@ Decided 2026-10-13 (maintainer AFK, recommended option taken):
 ## Related
 
 - [Relay profiling](/quest/m2/perf/lock-profile.md) - the recipe this corrects
-- [kio channel contention](/quest/m2/perf/kio-channel-contention.md) - reads these wait/CPU numbers
+- [kio channel contention](/quest/m2/perf/kio-channel-contention/README.md) - reads these wait/CPU numbers

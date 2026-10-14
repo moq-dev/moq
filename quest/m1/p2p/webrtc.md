@@ -13,7 +13,7 @@ with a browser peer across a NAT.
 
 str0m is already a dependency through `moq-rtc` and mdns-sd through the
 `mdns` feature; no new stack. The feature is off by default in `moq-tokio`
-and on in `moq-cli`, like iroh.
+and on in `moq-cli`.
 
 ICE: a full agent with host candidates on every non-loopback interface as raw
 addresses, a dual-stack socket per session, and a STUN Binding client for
@@ -41,4 +41,5 @@ candidate is offered and selected. Browser interop is the harness's job.
 
 - [Data channel transport](/quest/m1/p2p/transport.md) - the browser side of the same binding
 - [moq-cli joins](/quest/m1/p2p/cli.md) - the first consumer
-- [P2P](/quest/m1/p2p/README.md) - owns the relay-side public STUN responder this client could be pointed at, moved out of the one-port demux
+- [Relay STUN](/quest/m1/p2p/relay-stun.md) - a relay-side STUN responder this client can be pointed at
+- [Native pairs over ICE and QUIC](/quest/m1/p2p/native-quic.md) - reuses the ICE gathering module this lifts out of `moq-rtc`

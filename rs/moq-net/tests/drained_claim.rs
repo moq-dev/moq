@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A relay's front for a path ends once unread, end to end over real sessions.
 //!
 //! Two workers each claim the `pool` prefix with `origin::Producer::dynamic` and

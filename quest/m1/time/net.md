@@ -24,9 +24,8 @@ arm timers only through `moq-clock`:
 
 Breaking; it lands on `main` after the crate (see [the line's README](/quest/m1/time/README.md)).
 The ambient functions sit behind moq-net's `async` feature; the core takes
-explicit instants. Decided 2026-10-10 from review: this waits for
-[the async feature](/quest/m1/net-async-feature.md), so the
-migration lands gated rather than exposing ambient time to the sans-IO core.
+explicit instants. The migration preserves that boundary rather than exposing
+ambient time to the sans-IO core.
 Coordinate clock origin, units, and controlled-time behavior with the
 [browser backend](/quest/m2/rs2ts/README.md) if it has landed. Source-level
 `Instant` mappings depend on the selected backend; WASM retains Rust time types.
@@ -60,7 +59,3 @@ instant has no general conversion back: `time::Instant`, `moq_mux::Clock`,
 and moq-mux's `flush`/`update` family among them (`container::Producer`,
 `catalog::Estimator`, `rate::Control`, the codec and import producers). The
 PR enumerates each break and migrates its in-tree callers. Wire: none.
-
-## Required
-
-- [The async feature](/quest/m1/net-async-feature.md) - the feature the ambient functions sit behind

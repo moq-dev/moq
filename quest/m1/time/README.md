@@ -108,4 +108,3 @@ cleanup and the global lint ratchet belong to
 
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the per-flake fixes this line makes systemic
 - [Rust-backed @moq/net](/quest/m2/rs2ts/README.md) - Rust and JS clocks must agree across either browser backend
-- [The async feature](/quest/m1/net-async-feature.md) - the core keeps explicit instants; ambient time stays behind `async`

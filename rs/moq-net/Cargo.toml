@@ -16,15 +16,19 @@ categories = ["multimedia", "network-programming", "web-programming"]
 ignored = ["getrandom"]
 
 [features]
+default = ["async"]
+# Runtime-backed helpers and Lite/IETF sessions; explicit-time model drivers stay available.
+async = ["dep:futures", "dep:web-async"]
+
 # Exposes the wire codecs to the `fuzz/` harness and the announce, codec, varint, and frame benches,
 # and session views of an origin to the viewers bench, through the hidden `fuzz` module. Off by
 # default and hidden from the docs.
-fuzz = []
+fuzz = ["async"]
 
 [dependencies]
 arrayvec = "0.7"
 bytes = { workspace = true }
-futures = { workspace = true }
+futures = { workspace = true, optional = true }
 kio = { workspace = true }
 moq-pattern = { workspace = true, features = ["serde"] }
 num_enum = { workspace = true }
@@ -34,10 +38,15 @@ slab = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["js"] }
+web-async = { workspace = true, optional = true }
+
+# The browser instant shim is needed even by explicit-time drivers.
+[target.'cfg(target_family = "wasm")'.dependencies]
 web-async = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+futures = { workspace = true }
 # The tests' executor, with simulated time.
 moq-net-sim = { path = "sim" }
 serde_json = { workspace = true }
@@ -71,6 +80,7 @@ required-features = ["fuzz"]
 [[bench]]
 name = "origin"
 harness = false
+required-features = ["async"]
 
 # Reaches the crate-private session view of an origin through the hidden `fuzz` module.
 [[bench]]
@@ -105,26 +115,32 @@ required-features = ["fuzz"]
 [[bench]]
 name = "group"
 harness = false
+required-features = ["async"]
 
 [[bench]]
 name = "track"
 harness = false
+required-features = ["async"]
 
 [[bench]]
 name = "priority"
 harness = false
+required-features = ["async"]
 
 [[bench]]
 name = "stats"
 harness = false
+required-features = ["async"]
 
 [[bench]]
 name = "session"
 harness = false
+required-features = ["async"]
 
 [[bench]]
 name = "admission"
 harness = false
+required-features = ["async"]
 
 [[bench]]
 name = "request-ids"
@@ -140,3 +156,4 @@ required-features = ["fuzz"]
 [[bench]]
 name = "auth"
 harness = false
+required-features = ["async"]

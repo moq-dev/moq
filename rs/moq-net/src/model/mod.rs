@@ -45,7 +45,7 @@ pub use timed::Timed;
 pub mod origin {
 	pub use super::origin_impl::{
 		Config, Consumer, Cost, DEFAULT_UPDATE_HOLD, Driver, Dynamic, Preference, Producer, Request, Requesting, Route,
-		Source,
+		Routing, Source,
 	};
 }
 
@@ -60,11 +60,12 @@ pub mod announce {
 pub use origin_impl::{Consume, Hop, Hops, InvalidHop};
 
 // The announce-interest prefixes a scope needs on a prefix-shaped wire.
+#[cfg(feature = "async")]
 pub(crate) use origin_impl::interest_prefixes;
 
 // The advertise-only route guard, for tests shaping the route table.
-#[cfg(test)]
+#[cfg(all(test, feature = "async"))]
 pub(crate) use origin_impl::AnnounceProducer;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "async"))]
 pub(crate) use origin_impl::ProduceTest;

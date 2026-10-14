@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A relay that fetches the head of a group it is receiving mid-group keeps delivering
 //! that group to arrival-order subscribers, along with the frames written into it after.
 //!

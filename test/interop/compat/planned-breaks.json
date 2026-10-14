@@ -8,14 +8,15 @@
 		}
 	},
 	"catalog-archive": {
-		"reason": "Re-accepted by the maintainer (2026-10-13), until a release carries #4034: #4034 reshaped the catalog `archive` entry in place (`timelines` replaced the required `track`), so released and current hang/@moq/hang reject each other's live catalogs. Remeasured 2026-10-13 against these releases: all 24 media cells fail, Rust and JS readers alike (missing field `track` / `timelines`).",
+		"reason": "#4034 replaced the required archive `track` with `timelines`. Released consumers reject current catalogs; current consumers ignore an incompatible archive entry. Keep the approved exception for current publishers until a release carries the tolerant parser.",
 		"releases": {
 			"moq-cli": "0.14.4",
 			"hang": "0.21.13",
 			"@moq/hang": "0.5.2"
 		},
 		"cells": {
-			"lanes": ["media"]
+			"lanes": ["media"],
+			"publisher": "current"
 		}
 	}
 }

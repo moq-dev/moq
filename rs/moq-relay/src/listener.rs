@@ -15,13 +15,48 @@
 //! sleep is unreachable.
 
 mod idle;
+pub(crate) use idle::Admission;
 
-use std::io;
-use std::net::SocketAddr;
+use std::{
+	io,
+	net::SocketAddr,
+	pin::Pin,
+	task::{Context, Poll},
+};
 
 use axum_server::{AddrListener, Address};
 use moq_tokio::accept::Health;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
+
+/// An accepted socket keeps its admission until HTTP classifies or upgrades it.
+pub(crate) struct Accepted {
+	stream: TcpStream,
+	pub(crate) admission: Option<Admission>,
+}
+
+impl AsyncRead for Accepted {
+	fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+		Pin::new(&mut self.stream).poll_read(cx, buf)
+	}
+}
+impl AsyncWrite for Accepted {
+	fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+		Pin::new(&mut self.stream).poll_write(cx, buf)
+	}
+	fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+		Pin::new(&mut self.stream).poll_flush(cx)
+	}
+	fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+		Pin::new(&mut self.stream).poll_shutdown(cx)
+	}
+}
+#[cfg(unix)]
+impl std::os::fd::AsFd for Accepted {
+	fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+		std::os::fd::AsFd::as_fd(&self.stream)
+	}
+}
 
 /// The peer address of an accepted connection.
 ///
@@ -32,7 +67,7 @@ use tokio::net::{TcpListener, TcpStream};
 pub(crate) struct Peer(pub(crate) SocketAddr);
 
 impl Address for Peer {
-	type Stream = TcpStream;
+	type Stream = Accepted;
 	type Listener = Listener;
 }
 
@@ -49,15 +84,21 @@ impl axum::extract::connect_info::Connected<Peer> for Peer {
 pub(crate) struct Listener {
 	inner: TcpListener,
 	health: Health,
+	activity: Option<moq_net::server::Activity>,
 }
 
 impl Listener {
 	/// Adopt an already-bound listener (from [`moq_tokio::bind::tcp`], which sets
 	/// the dual-stack and keepalive options), reporting into `health`.
-	pub(crate) fn new(listener: std::net::TcpListener, health: Health) -> io::Result<Self> {
+	pub(crate) fn new(
+		listener: std::net::TcpListener,
+		health: Health,
+		activity: Option<moq_net::server::Activity>,
+	) -> io::Result<Self> {
 		Ok(Self {
 			inner: TcpListener::from_std(listener)?,
 			health,
+			activity,
 		})
 	}
 }
@@ -65,6 +106,8 @@ impl Listener {
 /// Policy shared by the public and internal HTTP listeners.
 pub(crate) struct Config {
 	pub health: Health,
+	/// Count public web sockets from TCP accept through their first request.
+	pub activity: Option<moq_net::server::Activity>,
 	pub timeout: Option<std::time::Duration>,
 }
 
@@ -82,11 +125,16 @@ pub(crate) fn server<A>(
 	config: Config,
 	acceptor: A,
 ) -> io::Result<axum_server::Server<Peer, idle::Acceptor<A>>> {
-	let Config { health, timeout } = config;
-	let mut server = axum_server::Server::from_listener(Listener::new(listener, health)?).acceptor(idle::Acceptor {
-		inner: acceptor,
+	let Config {
+		health,
 		timeout,
-	});
+		activity,
+	} = config;
+	let mut server =
+		axum_server::Server::from_listener(Listener::new(listener, health, activity)?).acceptor(idle::Acceptor {
+			inner: acceptor,
+			timeout,
+		});
 	server
 		.http_builder()
 		.http1()
@@ -102,13 +150,14 @@ pub(crate) fn server<A>(
 	Ok(server)
 }
 
-impl AddrListener<TcpStream, Peer> for Listener {
+impl AddrListener<Accepted, Peer> for Listener {
 	/// Only reachable through `axum_server::Server::bind`, which nothing here uses:
 	/// both listeners come pre-bound so their socket options are ours to set.
 	async fn bind_to(addr: Peer) -> io::Result<Self> {
 		Ok(Self {
 			inner: TcpListener::bind(addr.0).await?,
 			health: Health::new("tcp"),
+			activity: None,
 		})
 	}
 
@@ -118,12 +167,19 @@ impl AddrListener<TcpStream, Peer> for Listener {
 	/// `axum_server` would only sleep and drop it. The failure leaves through
 	/// [`Health`] instead, which survives the episode that a log line during it may
 	/// not.
-	async fn accept_stream(&self) -> io::Result<(TcpStream, Peer)> {
+	async fn accept_stream(&self) -> io::Result<(Accepted, Peer)> {
 		loop {
 			match self.inner.accept().await {
 				Ok((stream, peer)) => {
+					// Enter before returning the socket: axum_server spawns the TLS
+					// acceptor, and waiting for that task would leave an uncounted gap.
+					let admission = self
+						.activity
+						.as_ref()
+						.and_then(|activity| activity.enter())
+						.map(Admission::new);
 					self.health.accepted();
-					return Ok((stream, Peer(peer)));
+					return Ok((Accepted { stream, admission }, Peer(peer)));
 				}
 				Err(err) => {
 					if let Some(delay) = self.health.failed(&err) {
@@ -151,7 +207,7 @@ mod tests {
 		let bound = moq_tokio::bind::tcp("127.0.0.1:0".parse().unwrap()).unwrap();
 		let addr = bound.local_addr().unwrap();
 		let health = Health::new("test");
-		let listener = Listener::new(bound, health.clone()).unwrap();
+		let listener = Listener::new(bound, health.clone(), None).unwrap();
 
 		assert_eq!(listener.get_local_addr().unwrap().0, addr);
 

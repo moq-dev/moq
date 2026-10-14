@@ -20,6 +20,20 @@ use tokio::{
 };
 use tower_service::Service;
 
+/// A connection's accept guard, handed off once to a WebSocket upgrade.
+#[derive(Clone)]
+pub(crate) struct Admission(Arc<Mutex<Option<moq_net::server::Active>>>);
+
+impl Admission {
+	pub(crate) fn new(active: moq_net::server::Active) -> Self {
+		Self(Arc::new(Mutex::new(Some(active))))
+	}
+
+	pub(crate) fn take(&self) -> Option<moq_net::server::Active> {
+		self.0.lock().unwrap_or_else(PoisonError::into_inner).take()
+	}
+}
+
 #[derive(Clone)]
 pub(crate) struct Acceptor<A> {
 	pub inner: A,

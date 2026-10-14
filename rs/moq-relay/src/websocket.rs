@@ -29,6 +29,7 @@ pub(crate) async fn serve_ws(
 	mtls: Option<Extension<MtlsPeer>>,
 	ConnectInfo(remote): ConnectInfo<crate::listener::Peer>,
 	socket_stats: Option<Extension<crate::web::SocketStats>>,
+	admission: Option<Extension<crate::listener::Admission>>,
 	Extension(versions): Extension<moq_net::Versions>,
 	Extension(extensions): Extension<moq_net::setup::Extensions>,
 	State(state): State<Arc<WebState>>,
@@ -39,8 +40,12 @@ pub(crate) async fn serve_ws(
 		return Ok(landing_response());
 	};
 
-	// Closed for drain: refuse before the upgrade so the client redials elsewhere.
-	let active = state.shutdown.activity.enter().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+	// Carry the TCP accept guard through the upgrade. A later keep-alive
+	// upgrade enters here; after the drain commits, it receives 503 instead.
+	let active = admission
+		.and_then(|Extension(admission)| admission.take())
+		.or_else(|| state.shutdown.activity.enter())
+		.ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 	let alpns = versions.alpns();
 	let ws = negotiate_subprotocol(ws, &alpns)?;
 

@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! An idle viewer session costs its server nothing per tick: no driver wakes and
 //! no transport stats reads while nothing moves. A server holds thousands of these,
 //! so a fixed-interval timer per session adds up to whole cores.

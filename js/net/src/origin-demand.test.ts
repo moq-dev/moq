@@ -185,13 +185,22 @@ test.each([true, false])(
 	},
 );
 
-test.each(["peer", "local"] as const)("cancelling one waiter preserves a second %s requester", async (other) => {
+test.each([
+	["peer", 1],
+	["peer", 16],
+	["local", 1],
+	["local", 16],
+] as const)("cancelling one waiter preserves a second %s requester across %i routes", async (other, routes) => {
 	const origin = new Producer();
-	const dynamic = origin.dynamic(Path.from("room"));
-	const requests = dynamic.requested();
+	const prefix = Path.from("room");
+	const dynamics = Array.from({ length: routes }, (_, i) => origin.dynamic(prefix, { cost: BigInt(i) }));
 	const hold = new AbortController();
 	const wire = wireOf(origin.consume());
 	const first = wire.demand(path, undefined, hold.signal).catch(() => undefined);
+	// With competing routes, re-price the cancelled waiter's route so the survivor pends on another.
+	const cancelled = dynamics[0];
+	if (routes > 1) cancelled.update({ ...cancelled.route, cost: BigInt(routes) });
+	const requests = dynamics[routes > 1 ? 1 : 0].requested();
 	const second = other === "peer" ? wire.demand(path) : undefined;
 	const local = other === "local" ? origin.request(path) : undefined;
 	const request = (await requests.next()).value;
@@ -382,6 +391,64 @@ test.each(["answer", "release"] as const)(
 			late.close();
 			await ar.return?.();
 			await br.return?.();
+		}
+	},
+);
+
+test.each([0, 1])(
+	"failover cleanup excludes released slot %s without withdrawing another instance",
+	async (released) => {
+		const origin = new Producer();
+		const prefix = Path.from("room");
+		const entries = [];
+		const sources: Broadcast[] = [];
+		for (let i = 0; i < 2; i++) {
+			const epoch = Epoch.parse(`00000000-0000-7000-8000-00000000000${i + 1}`);
+			const primary = origin.dynamic(prefix, { epoch, cost: 0n });
+			const standby = origin.dynamic(prefix, { epoch, cost: 1n });
+			const ar = primary.requested();
+			const br = standby.requested();
+			const held = origin.request(path);
+			const source = new Broadcast();
+			sources.push(source);
+			(await ar.next()).value?.accept(source);
+			await settle();
+			entries.push({ primary, ar, br, held });
+		}
+		origin.dynamic(prefix, { epoch: Epoch.parse("00000000-0000-7000-8000-000000000003") });
+		const pending = [];
+		for (const entry of entries) {
+			entry.primary.close();
+			const request = (await entry.br.next()).value;
+			if (!request) throw new Error("expected same-epoch failover");
+			pending.push(request);
+		}
+		const hold = new AbortController();
+		const wait = wireOf(origin.consume())
+			.demand(path, undefined, hold.signal)
+			.catch(() => undefined);
+		const late = new Broadcast();
+		const front = late.consume();
+		const close = spyOn(front, "close");
+		const replacement = new Broadcast();
+		try {
+			// The slot is still detached until its microtask runs, but no longer owns demand.
+			entries[released].held.close();
+			hold.abort();
+			pending[released].accept(front);
+			expect(close).toHaveBeenCalledTimes(1);
+			pending[1 - released].accept(replacement);
+			await wait;
+			expect(entries[1 - released].held.active.peek()?.closed).toBe(replacement.closed);
+		} finally {
+			close.mockRestore();
+			for (const entry of entries) entry.held.close();
+			origin.close();
+			for (const source of [...sources, late, replacement]) source.close();
+			for (const entry of entries) {
+				await entry.ar.return?.();
+				await entry.br.return?.();
+			}
 		}
 	},
 );

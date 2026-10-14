@@ -11,7 +11,7 @@ export type Kind = "video" | "audio" | "text";
  * producer (usually an encoder) writes {@link config} and encodes into {@link track} while it's set.
  */
 export class Rendition<Config> {
-	/** The full track name, e.g. `"video/hd"`. */
+	/** The stable catalog ID and initial track name, e.g. `"video/hd"`. */
 	readonly name: string;
 
 	/** Which catalog section this rendition lands in. */
@@ -42,7 +42,8 @@ export class Rendition<Config> {
 
 	/**
 	 * Unregister: removes the catalog entry and detaches the track. The broadcast keeps the
-	 * network track open, so registering the name again continues it. Idempotent.
+	 * network track open, so registering the name again continues it. A closed track is
+	 * replaced under a fresh catalog `track` name instead. Idempotent.
 	 */
 	close(): void {
 		if (this.#closed) return;
