@@ -4421,6 +4421,8 @@ dependencies = [
  "moq-clock",
  "moq-clock-macros",
  "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-test",
  "web-async",
 ]
 

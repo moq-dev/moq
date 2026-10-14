@@ -39,5 +39,10 @@ tokio = { workspace = true, features = ["rt", "time"] }
 # Enable the simulator so its tests run in the merge gate.
 moq-clock = { path = ".", features = ["sim"] }
 
+[target.'cfg(all(target_arch = "wasm32", not(target_os = "wasi")))'.dev-dependencies]
+# Match the wasm-bindgen CLI schema used by the browser runner.
+wasm-bindgen = "=0.2.127"
+wasm-bindgen-test = "=0.3.77"
+
 [target.'cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))'.dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "test-util", "time"] }
