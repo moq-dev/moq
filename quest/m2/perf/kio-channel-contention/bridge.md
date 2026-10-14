@@ -32,7 +32,9 @@ Decided (maintainer, 2026-10-14):
   and lost datagrams become knobs over the bridge, deleting the duplicate,
   copying stream plumbing, so tests exercise the zero-copy path. Check
   `rs/moq-e2ee/tests/support/mock.rs`, which carries a similar pair.
-- `Send`, so the two ends can live on different worker threads.
+- `Send`, so the two ends can live on different worker threads, and it
+  meets the bounds the handshakes need: `Client::connect` requires
+  `poll::Boxable`, and `Server::accept` also requires `MaybeSync` streams.
 - A bench of frame throughput over the bridge, swept over streams and frame
   size, with an allocation count that proves payloads aren't copied.
 

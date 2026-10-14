@@ -16,8 +16,8 @@ numbers and a recommendation go in the
 - Cluster links dial only by URL over QUIC today
   (`run_remote_session`, `rs/moq-relay/src/cluster.rs`); the spike adds a
   throwaway seam to hand a cluster a pre-made bridge session.
-  `moq_net::Client::connect` and `Server::accept` already take any
-  `poll::Session`.
+  `moq_net::Client::connect` and `Server::accept` already take the bridge,
+  which meets their `Boxable` and `MaybeSync` bounds.
 - Everything crosses workers through moq-lite: announcements, routes, and
   groups. That isolates what sharing the control plane saves, and exercises
   the cluster path the relay must keep working anyway.
