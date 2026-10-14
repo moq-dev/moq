@@ -2905,9 +2905,13 @@ where
 									seen_answers = *answers.lock();
 								}
 								Ok(_) => {}
-								// A failed send does not end the subscription: it continues on the old
-								// grant until that lapses, and the next change re-presents the token.
-								Err(err) => tracing::debug!(%err, "failed to re-present the request token"),
+								// The token went unpresented, so the subscription ends now rather than
+								// run on the old grant with nothing left to retry it.
+								Err(err) => {
+									tracing::warn!(%err, "failed to re-present the request token");
+									let _ = track.clone().abort(err);
+									break true;
+								}
 							}
 						}
 					}
@@ -2930,7 +2934,11 @@ where
 								.await
 							{
 								Ok(follow_up) => in_flight = Some((token, follow_up)),
-								Err(err) => tracing::debug!(%err, "failed to re-present the request token"),
+								Err(err) => {
+									tracing::warn!(%err, "failed to re-present the request token");
+									let _ = track.clone().abort(err);
+									break true;
+								}
 							}
 						}
 					}
@@ -8535,6 +8543,70 @@ mod tests {
 			drop(consumer);
 			serving.abort();
 		}
+	}
+
+	/// A replaced token that cannot be presented, for want of request ID credit, ends the
+	/// subscription instead of leaving it on the old grant with no retry.
+	#[moq_net_sim::test]
+	async fn a_renewal_without_request_id_credit_ends_the_subscription() {
+		const VERSION: Version = Version::Draft14;
+		let first = bytes::Bytes::from_static(&[0x03, 0x00, b'a', b'a']);
+		let second = bytes::Bytes::from_static(&[0x03, 0x00, b'b', b'b']);
+
+		let session = crate::lite::test_transport::ScriptedSession::new(subscribe_ok_bytes(VERSION).await);
+		let log = session.log.clone();
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let token = crate::RequestToken::new(Some(typed(&first)));
+		// Credit for the SUBSCRIBE alone, none for a renewal.
+		let mut subscriber = Subscriber::new(
+			crate::time::Clock::sim(),
+			session,
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			Control::new(Some(RequestId(2)), false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Hop::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+			Default::default(),
+		)
+		.with_request_token(token.clone());
+
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let track = consumer.track("video").unwrap();
+		let _subscription = track.subscribe(None);
+		let request = dynamic.requested_track().await.expect("no track requested");
+		let mut run = std::pin::pin!(subscriber.run_subscribe(Path::new("broadcast"), dynamic, request));
+
+		for _ in 0..200 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, &first) >= 1 {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(occurrences(&log, &first), 1, "the initial token rides the SUBSCRIBE");
+
+		token.set(Some(typed(&second)));
+		// Through the wait for request ID credit, which gives up after ten seconds.
+		let mut ended = None;
+		for _ in 0..30 {
+			let _ = futures::poll!(run.as_mut());
+			if let Poll::Ready(result) = track.poll_complete(&kio::Waiter::noop()) {
+				ended = result.err();
+				break;
+			}
+			settle().await;
+			moq_net_sim::advance(std::time::Duration::from_secs(1)).await;
+		}
+		assert!(
+			matches!(ended, Some(Error::Cancel)),
+			"a token that cannot be presented ends the subscription: {ended:?}"
+		);
+		assert_eq!(occurrences(&log, &second), 0, "the token never went out");
 	}
 
 	/// A token replaced while SUBSCRIBE_OK is outstanding still goes out as a renewal: the

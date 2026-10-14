@@ -407,7 +407,7 @@ impl Handle {
 	/// Set it before running the session's driver to present it on the first request.
 	/// Replacing it later re-presents the new token on every live request as a
 	/// REQUEST_UPDATE, renewing a token-authorized request in place; setting the same value
-	/// again sends nothing. Only drafts 14 and 15 cannot renew an advertisement, which has
+	/// again sends nothing. A subscription whose renewal cannot be sent ends. Only drafts 14 and 15 cannot renew an advertisement, which has
 	/// no update there, so it keeps the token it was offered with. `None` sends nothing
 	/// either: live requests keep the token they last presented, and later ones carry none.
 	/// Independent of the MoQ Auth extension.
