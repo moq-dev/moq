@@ -46,10 +46,17 @@ pub(super) fn poll_withdrawn<S: crate::transport::poll::Session>(
 	version: Version,
 	cx: &mut Context<'_>,
 ) -> Poll<()> {
-	// Virtual writers on drafts 14-16 are already closed while their control request lives.
-	if !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
-		&& stream.writer.poll_closed(cx).is_ready()
-	{
+	// Drafts 14-16 deliver the terminal message (UNSUBSCRIBE, PUBLISH_NAMESPACE_DONE) ahead of
+	// the FIN, so a waiting message that is not an update already withdraws the request. Their
+	// virtual writers are closed while the control request lives, so only the reader counts.
+	if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
+		return match stream.reader.poll_varint_peek(cx) {
+			Poll::Ready(Ok(id)) if id == super::SubscribeUpdate::ID => Poll::Pending,
+			Poll::Ready(_) => Poll::Ready(()),
+			Poll::Pending => Poll::Pending,
+		};
+	}
+	if stream.writer.poll_closed(cx).is_ready() {
 		return Poll::Ready(());
 	}
 	match stream.reader.poll_has_more(cx) {

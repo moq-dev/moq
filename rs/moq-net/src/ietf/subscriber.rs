@@ -2464,6 +2464,8 @@ where
 		let order = aggregate.map(|s| s.order).unwrap_or_default();
 		// Re-sent unchanged on a draft-14 request-token renewal, whose fields are all mandatory.
 		let subscriber_priority = super::priority::to_wire(priority);
+		// What the SUBSCRIBE carries, which a replacement set before SUBSCRIBE_OK must renew.
+		let sent_token = self.request_token.peek();
 		let written = async {
 			stream.writer.varint(ietf::Subscribe::ID).await?;
 			stream
@@ -2480,7 +2482,7 @@ where
 					properties_wanted: matches!(target, Target::Request(_)),
 					forward: true,
 					range_filters: false,
-					authorization_token: self.request_token.peek().map(crate::ietf::token::RequestToken),
+					authorization_token: sent_token.clone().map(crate::ietf::token::RequestToken),
 				})
 				.await
 		}
@@ -2752,8 +2754,8 @@ where
 		let demand = track.demand();
 		// Nobody subscribing at all (only fetches asked) needs no subscription.
 		let mut subscribed = track.subscription().is_some();
-		// The request token last presented on this subscription (its initial value).
-		let mut last_token = self.request_token.peek();
+		// The request token last presented on this subscription: the one its SUBSCRIBE carried.
+		let mut last_token = sent_token;
 		// At most one renewal (SUBSCRIBE_UPDATE) is left unanswered at a time: a replacement
 		// that arrives while one is in flight is coalesced into `last_token` and sent once
 		// the outstanding one is answered, so the sender never outruns the receiver's
@@ -8486,6 +8488,77 @@ mod tests {
 		}
 	}
 
+	/// A token replaced while SUBSCRIBE_OK is outstanding still goes out as a renewal: the
+	/// subscription tracks the token its SUBSCRIBE carried, not the one current at SUBSCRIBE_OK.
+	#[moq_net_sim::test]
+	async fn a_token_replaced_before_subscribe_ok_is_renewed() {
+		for version in [Version::Draft14, Version::Draft18] {
+			let first = bytes::Bytes::from_static(&[0x03, 0x00, b'a', b'a']);
+			let second = bytes::Bytes::from_static(&[0x03, 0x00, b'b', b'b']);
+
+			// SUBSCRIBE_OK is withheld until the token is replaced.
+			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+			let peer = session.clone();
+			let log = session.log.clone();
+			let (tasks, _task_set) = crate::util::TaskSet::new();
+			let token = crate::RequestToken::new(Some(typed(&first)));
+			let mut subscriber = Subscriber::new(
+				crate::time::Clock::sim(),
+				session,
+				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				Control::new(None, false),
+				None,
+				peer::PeerSetup::default(),
+				crate::Hop::new(1).unwrap(),
+				None,
+				version,
+				tasks,
+				Default::default(),
+			)
+			.with_request_token(token.clone());
+
+			let producer = crate::broadcast::Info::default().produce();
+			let mut dynamic = producer.dynamic();
+			let consumer = producer.consume();
+			let track = consumer.track("video").unwrap();
+			// Held for the test so the track never reads as unused (which would cancel it).
+			let subscription = track.subscribe(None);
+			let request = dynamic.requested_track().await.expect("no track requested");
+			let mut serving = std::pin::pin!(subscriber.run_subscribe(Path::new("broadcast"), dynamic, request));
+
+			let mut sent = false;
+			for _ in 0..200 {
+				let _ = futures::poll!(serving.as_mut());
+				if occurrences(&log, &first) >= 1 {
+					sent = true;
+					break;
+				}
+				settle().await;
+			}
+			assert!(sent, "{version}: the initial token must ride the SUBSCRIBE");
+
+			token.set(Some(typed(&second)));
+			peer.push(&subscribe_ok_bytes(version).await);
+			let mut renewed = false;
+			for _ in 0..200 {
+				let _ = futures::poll!(serving.as_mut());
+				if occurrences(&log, &second) >= 1 {
+					renewed = true;
+					break;
+				}
+				settle().await;
+			}
+			assert!(
+				renewed,
+				"{version}: a token replaced before SUBSCRIBE_OK must be renewed"
+			);
+
+			drop(subscription);
+			drop(track);
+			drop(consumer);
+		}
+	}
+
 	/// A token-bearing client does not self-censor on its connection grant: the
 	/// subscriber sends a SUBSCRIBE for a path its connection grant does not cover, carrying the
 	/// token; a token-less client with the same grant rejects it locally, as before.
@@ -8775,6 +8848,52 @@ mod tests {
 			settle().await;
 		}
 		assert!(announced, "a valid request token must authorize the announce");
+	}
+
+	/// On drafts 14-16 the withdrawal arrives as a message before the FIN: a
+	/// PUBLISH_NAMESPACE_DONE waiting behind an unanswered verification ends the announce at
+	/// once, giving its slot back before the application ever takes the token.
+	#[moq_net_sim::test]
+	async fn a_legacy_withdrawal_during_verification_ends_the_announce() {
+		const VERSION: Version = Version::Draft16;
+		let done = {
+			let log = crate::lite::test_transport::Log::default();
+			crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION)
+				.encode_message(&ietf::PublishNamespaceDone {
+					track_namespace: crate::Path::new("room/alice"),
+					request_id: RequestId(1),
+				})
+				.await
+				.unwrap();
+			log.writes.lock().unwrap().clone()
+		};
+		// The application never takes the token, so only the withdrawal can end the wait.
+		let (mut subscriber, _requests, _cred, consumer, session) = auth_announce_harness(VERSION, done);
+		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
+			stream,
+			token_publish_namespace(),
+			cluster::Peer::default(),
+			None,
+		));
+
+		let mut result = None;
+		for _ in 0..100 {
+			if let Poll::Ready(res) = futures::poll!(run.as_mut()) {
+				result = Some(res);
+				break;
+			}
+			settle().await;
+		}
+		assert!(
+			matches!(result, Some(Ok(()))),
+			"a withdrawal during verification ends the announce: {result:?}"
+		);
+		assert!(
+			routed_now(&consumer, "room/alice").is_none(),
+			"and it was never attached"
+		);
+		assert!(session.log.closes().is_empty(), "the session stays up");
 	}
 
 	/// A refused request token is answered UNAUTHORIZED and the announce is not attached; the

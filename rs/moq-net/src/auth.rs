@@ -912,6 +912,21 @@ impl Event {
 		issue.as_ref().expect("unanswered request").read().peer.is_some()
 	}
 
+	/// Hand the event to the application, or `false` when its request already ended. A
+	/// request token is marked taken under the same lock its withdrawal checks, so from here
+	/// the application owns its slot until it answers.
+	fn take(&self) -> bool {
+		let Self::Request(scoped) = self else {
+			return !self.ended();
+		};
+		let mut issue = scoped.issue.as_ref().expect("unanswered request").lock();
+		if issue.peer.is_some() {
+			return false;
+		}
+		issue.taken = true;
+		true
+	}
+
 	fn reject(self, code: SessionError, reason: &str) {
 		match self {
 			Self::Session(request) => request.reject(code, reason),
@@ -985,15 +1000,9 @@ impl Pending {
 				}
 			}));
 			while let Some(event) = state.requests.pop_front() {
-				if event.ended() {
-					continue;
+				if event.take() {
+					return Poll::Ready(Some(event));
 				}
-				// From here the application owns the verification, so a withdrawal no longer
-				// releases what it holds against the request cap.
-				if let Event::Request(scoped) = &event {
-					scoped.issue.as_ref().expect("unanswered request").lock().taken = true;
-				}
-				return Poll::Ready(Some(event));
 			}
 			if state.closed {
 				return Poll::Ready(None);
