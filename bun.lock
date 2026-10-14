@@ -93,6 +93,15 @@
         "typescript": "7.0.2",
       },
     },
+    "js/clock": {
+      "name": "@moq/clock",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@types/bun": "^1.4.2",
+        "rimraf": "^6.1.3",
+        "typescript": "7.0.2",
+      },
+    },
     "js/flate": {
       "name": "@moq/flate",
       "version": "0.1.3",
@@ -662,6 +671,8 @@
     "@moq/auth": ["@moq/auth@workspace:js/auth"],
 
     "@moq/boy": ["@moq/boy@workspace:js/moq-boy"],
+
+    "@moq/clock": ["@moq/clock@workspace:js/clock"],
 
     "@moq/demo": ["@moq/demo@workspace:demo/web"],
 

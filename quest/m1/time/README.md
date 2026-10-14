@@ -96,7 +96,6 @@ cleanup and the global lint ratchet belong to
 
 ## Required
 
-- [@moq/clock](/quest/m1/time/js.md) - the same model in JS, with an installable clock
 - [moq-net on moq-clock](/quest/m1/time/net.md) - moq-net, moq-mux, moq-stats, moq-room, and moq-ffi run on moq-clock and moq-net-sim is gone
 - [JS on @moq/clock](/quest/m1/time/js-migrate.md) - every JS package reads time only through `@moq/clock`
 - [Every crate on moq-clock](/quest/m1/time/crates.md) - every remaining crate reads time only through moq-clock, with controlled tests for the production/public API migrations

@@ -96,3 +96,8 @@ qmux-bench:
 arrivals-bench:
     bun install --frozen-lockfile
     bun watch/bench/arrivals.ts
+
+# Sweep manual-clock armed timers x due timers, with independent and shared abort scopes.
+clock-bench:
+    bun install --frozen-lockfile
+    bun clock/bench/timers.ts
