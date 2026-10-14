@@ -126,9 +126,10 @@ impl Default for Config {
 /// presence track held again from zero), so its previous readout is kept as a
 /// baseline the new one adds to. A node that resumes after its departure
 /// closed its open pairs reopens them as new starts rather than lowering their
-/// ends. A per-path traffic track keeps the reset
-/// contract of a single node: a route without an epoch that returns within the
-/// grace with a lower counter regresses the merged counter.
+/// ends. Per-path traffic also reopens pairs when a node resumes without
+/// regressing, but keeps the reset contract of a single node: a route without
+/// an epoch that returns within the grace with a lower counter regresses the
+/// merged counter.
 pub struct Consumer {
 	origin: origin::Consumer,
 	config: Config,
@@ -454,7 +455,8 @@ struct Node<V: Mergeable> {
 	epoch: Option<Epoch>,
 	/// The last known publisher identity, retained while route metadata vanishes.
 	identity: Option<Epoch>,
-	/// The node's readouts from before each reset, with their pairs closed.
+	/// Previous reset readouts with closed pairs, plus starts and ends added
+	/// when stale pairs reopen. Traffic discards its additions on a reset.
 	base: BTreeMap<String, V>,
 	/// The last frame the node produced, as read.
 	last: Option<BTreeMap<String, V>>,
@@ -485,12 +487,11 @@ impl<V: Mergeable> Node<V> {
 		self.last.iter().flatten().any(|(_, value)| value.retire() != *value)
 	}
 
-	/// Take a fresh frame. Where the node reset, the previous readout becomes
-	/// part of its baseline. Where it resumed after a departure closed its open
-	/// pairs, those pairs reopen as new starts. Either way the merged counters
-	/// never go down.
+	/// Take a fresh frame. A resume reopens closed pairs as new starts. On a
+	/// reset, totals and presence keep the closed readout as a baseline, while
+	/// traffic discards its additions to preserve per-path resets.
 	fn observe(&mut self, frame: BTreeMap<String, V>) {
-		if V::RESETS
+		if (V::RESETS || self.stale || !self.base.is_empty())
 			&& let Some(last) = self.last.take()
 		{
 			for (key, prev) in last {
@@ -499,9 +500,15 @@ impl<V: Mergeable> Node<V> {
 						true => prev.reopen(),
 						false => continue,
 					},
-					_ => prev.retire(),
+					_ if V::RESETS => prev.retire(),
+					_ => {
+						self.base.remove(&key);
+						continue;
+					}
 				};
-				V::merge(self.base.entry(key).or_default(), base);
+				if base != V::default() {
+					V::merge(self.base.entry(key).or_default(), base);
+				}
 			}
 		}
 		self.last = Some(frame);
@@ -1861,6 +1868,108 @@ mod tests {
 		let node = merged.nodes.get_mut(&key).expect("node");
 		node.observe(BTreeMap::from([(String::new(), presence(1, 0))]));
 		assert_eq!(merged.merged()[""], presence(9, 8));
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn traffic_resume_reopens_closed_pairs_without_going_down() {
+		let origin = produce_origin();
+		let mut node = NodeBroadcast::new(&origin, "acme", "a");
+		let mut route = origin::Route::default();
+		route.epoch = Some("01900000-0000-7000-8000-000000000001".parse().unwrap());
+		node.source.announce(route.clone()).expect("announce epoch");
+		let mut raw = Traffic::default();
+		raw.announces_started = 5;
+		raw.announces_ended = 3;
+		raw.broadcasts_started = 4;
+		raw.broadcasts_ended = 1;
+		raw.subscriptions_started = 6;
+		raw.subscriptions_ended = 2;
+		raw.bytes = 100;
+		node.frame.insert("acme/room".into(), raw);
+		node.publish("acme/room", 0);
+
+		let agg = Consumer::new(origin.consume(), Config::new().with_depth(1));
+		let mut traffic = agg.traffic(&Tier::default(), Role::Publisher);
+		let grew = |before: &Traffic, after: &Traffic| !after.regressed(before);
+		read_until(&mut traffic.inner, grew, |frame| frame.get("acme/room") == Some(&raw)).await;
+		node.source.unannounce();
+		let departed = raw.retire();
+		read_until(&mut traffic.inner, grew, |frame| {
+			assert!(!frame["acme/room"].regressed(&raw));
+			frame["acme/room"] == departed
+		})
+		.await;
+
+		// The same publisher epoch returns with all three pairs still open.
+		node.source.announce(route).expect("reannounce epoch");
+		let mut expected = raw;
+		expected.announces_started = 7;
+		expected.announces_ended = 5;
+		expected.broadcasts_started = 7;
+		expected.broadcasts_ended = 4;
+		expected.subscriptions_started = 10;
+		expected.subscriptions_ended = 6;
+		let resumed = read_until(&mut traffic.inner, grew, |frame| {
+			assert!(!frame["acme/room"].regressed(&departed), "{departed:?} -> {frame:?}");
+			frame["acme/room"] == expected
+		})
+		.await;
+		let resumed = resumed["acme/room"];
+		assert_eq!(resumed.announces_started - resumed.announces_ended, 2);
+		assert_eq!(resumed.active_broadcasts(), raw.active_broadcasts());
+		assert_eq!(resumed.active_subscriptions(), raw.active_subscriptions());
+		assert_eq!(resumed.bytes, raw.bytes, "flow counters are not reopened");
+
+		node.publish("acme/room", 20);
+		expected.bytes = 120;
+		read_until(&mut traffic.inner, grew, |frame| {
+			assert!(!frame["acme/room"].regressed(&resumed));
+			frame["acme/room"] == expected
+		})
+		.await;
+	}
+
+	#[test]
+	fn traffic_reset_discards_reopened_pairs() {
+		let (mut merged, key) = hand_merged::<Traffic>();
+		let mut raw = Traffic::default();
+		raw.subscriptions_started = 4;
+		raw.subscriptions_ended = 1;
+		raw.bytes = 100;
+		let frame = || BTreeMap::from([("room".into(), raw)]);
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.observe(frame());
+		node.depart();
+		node.observe(frame());
+		let mut expected = raw;
+		expected.subscriptions_started = 7;
+		expected.subscriptions_ended = 4;
+		assert_eq!(merged.merged()["room"], expected);
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.depart();
+		node.observe(frame());
+		expected.subscriptions_started = 10;
+		expected.subscriptions_ended = 7;
+		assert_eq!(merged.merged()["room"], expected);
+
+		// A route without an epoch still resets, including after a resume.
+		let mut reset = Traffic::default();
+		reset.subscriptions_started = 1;
+		reset.bytes = 10;
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.depart();
+		node.observe(BTreeMap::from([("room".into(), reset)]));
+		assert_eq!(merged.merged()["room"], reset);
+
+		// Removing a path also resets its counters when it returns.
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.depart();
+		node.observe(BTreeMap::from([("room".into(), reset)]));
+		node.observe(BTreeMap::new());
+		assert!(merged.merged().is_empty());
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.observe(BTreeMap::from([("room".into(), reset)]));
+		assert_eq!(merged.merged()["room"], reset);
 	}
 
 	#[test]
