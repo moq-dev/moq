@@ -11,6 +11,10 @@ measured no-win abandons it.
 
 ## Plan
 
+- First measure a multi-frame (video-heavy) shape with `just bench-lock`,
+  since the baseline's chat and fanout shapes both send one-frame groups and
+  leave `GroupState` frame contention unmeasured. Choose the target channels
+  from that.
 - Fan-out readers already read by cursor into an append-only log and clone
   one cheap item out (`Bytes`, `FrameBuf`, `group::Producer`). The mutex
   serializes every one of N woken readers; an atomic committed length lets

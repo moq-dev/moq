@@ -34,8 +34,10 @@ pool's shared counters are not among the hot sites.
 the worker count.
 
 Baseline (2026-10-14), the before numbers the fix quests compare against.
-Measured on a 24-core Core Ultra 7 270K Plus shared with other jobs (load
-average 25 to 42), so rerun the baseline on the same host as any after.
+Measured on a loaded 24-core Core Ultra 7 270K Plus shared with other jobs
+(load average 25 to 42), so these numbers only rank the targets. Each fix
+quest reruns its baseline on a quiet host and takes its after on that same
+host.
 
 `cargo bench -p kio --bench contended` (`rs/kio/benches/contended.rs`), one
 producer and 4,096 consumers on one channel, ns per consumer:
@@ -69,7 +71,9 @@ Contended channels at 16 workers, by share of mutex wait (`moq_net::model`):
 | `group::GroupState` | 2.3% | 1.6% | frame reads, `drift_edge` |
 | `subscription::Subscription` | 0% | 0.6% | `GroupExpiry::is_expired` |
 
-Origin and broadcast state never appear. Every hot site is a read or re-poll
+Origin and broadcast state never appear. The `GroupExpiry::is_expired` read
+is its own fix, [Group expiry](/quest/m2/perf/kio-channel-contention/group-expiry.md).
+Every hot site is a read or re-poll
 of a per-track channel that all of a track's subscribers share, which is the
 [version counter](/quest/m2/perf/kio-channel-contention/version.md)'s target.
 `GroupState` is not contended here because both shapes send one-frame
@@ -117,6 +121,15 @@ Decided (maintainer, 2026-10-14):
   - `RwLock`: the critical sections are a few loads, so the reader count's
     cache line bounces between cores just like the mutex.
 
+Decided (maintainer, 2026-10-14, baseline follow-up):
+
+- `GroupExpiry::is_expired` gets its own quest, ranked ahead of the version
+  counter, rather than waiting on it.
+- The append-only log measures a multi-frame (video-heavy) shape before it
+  picks targets, since both shapes above send one-frame groups.
+- The 10 messages/s pin lives only in `bench/workloads/chat.toml`;
+  `rs/moq-bench/config/chat.toml` keeps its random rate.
+
 Decided (maintainer, 2026-10-14, per-thread follow-up):
 
 - Per-worker sharding is no longer ruled out; two spikes decide. Both run on
@@ -138,6 +151,7 @@ Decided (maintainer, 2026-10-14, per-thread follow-up):
 
 ## Required
 
+- [Group expiry](/quest/m2/perf/kio-channel-contention/group-expiry.md) - a group poll decides expiry without locking the track state, the largest single wait site
 - [Version counter](/quest/m2/perf/kio-channel-contention/version.md) - an opted-in re-poll skips the mutex when nothing changed, and parking no longer contends with readers
 - [In-memory transport](/quest/m2/perf/kio-channel-contention/bridge.md) - a zero-copy, flow-controlled `poll::Session` pair in moq-net, with the test mock rebuilt on it
 - [Replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md) - measures per-worker data-plane replicas linked over the in-memory transport, announcements shared
