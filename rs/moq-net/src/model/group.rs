@@ -57,7 +57,7 @@ pub(crate) const CACHE_OVERHEAD: u64 = (kio::Producer::<GroupState>::HEAP
 	// straight after.
 	+ 2 * size_of::<usize>()
 	+ size_of::<Alive>()
-	+ FRAME_SLOTS * size_of::<frame::Stored>()) as u64;
+	+ FRAME_SLOTS * size_of::<Frame>()) as u64;
 
 /// A group contains a sequence number because they can arrive out of order.
 ///
@@ -137,7 +137,10 @@ pub(crate) struct Partial {
 pub(crate) struct GroupState {
 	// Completed frames, each a contiguous payload. `offset` is the first frame this
 	// handle holds, raised by [`Producer::start_at`].
-	pub(crate) frames: VecDeque<frame::Stored>,
+	pub(crate) frames: VecDeque<Frame>,
+	// Relay metadata for `frames`, at the same local index. Frames past its end carry
+	// none, so a group that never sees a field never allocates it or pays to skip it.
+	objects: VecDeque<Option<Arc<super::object::Fields>>>,
 	// Known before frames arrive; the terminal object is learned at the stream tail.
 	pub(crate) wire: Option<Wire>,
 	pub(crate) end_object: Option<Arc<super::object::Fields>>,
@@ -296,7 +299,7 @@ impl GroupState {
 			return Poll::Ready(Ok(Some((
 				frame::Header {
 					info,
-					fields: f.fields.clone(),
+					fields: self.fields(local),
 				},
 				frame::Source::Complete(f.payload.clone()),
 			))));
@@ -371,7 +374,20 @@ impl GroupState {
 		let before = self.frames.capacity().saturating_sub(FRAME_SLOTS);
 		self.frames.reserve(1);
 		let after = self.frames.capacity().saturating_sub(FRAME_SLOTS);
-		((after - before) * size_of::<frame::Stored>()) as u64
+		((after - before) * size_of::<Frame>()) as u64
+	}
+
+	/// Reserve a metadata slot for the next completed frame, returning the growth.
+	fn reserve_fields(&mut self) -> u64 {
+		let before = self.objects.capacity();
+		self.objects.resize(self.frames.len(), None);
+		self.objects.reserve(1);
+		((self.objects.capacity() - before) * size_of::<Option<Arc<super::object::Fields>>>()) as u64
+	}
+
+	/// The relay metadata of the completed frame at `local`, if it carried any.
+	fn fields(&self, local: usize) -> Option<Arc<super::object::Fields>> {
+		self.objects.get(local).cloned().flatten()
 	}
 
 	/// Charge the in-flight frame's bytes written since its last charge, as a write access.
@@ -386,10 +402,10 @@ impl GroupState {
 			None => 0,
 		};
 		self.cache += written;
-		let slots = if self.partial.is_some() {
-			self.reserve_frame()
-		} else {
-			0
+		let slots = match &self.partial {
+			Some(partial) if partial.fields.is_some() => self.reserve_frame() + self.reserve_fields(),
+			Some(_) => self.reserve_frame(),
+			None => 0,
 		};
 		self.charge.add(written + slots)
 	}
@@ -397,6 +413,7 @@ impl GroupState {
 	/// Drop the cached frames (and any in-flight tail) and release their pool charge.
 	fn release(&mut self) {
 		self.frames = VecDeque::new();
+		self.objects = VecDeque::new();
 		self.partial = None;
 		self.metadata_bytes = self.end_object.as_ref().map_or(0, |fields| fields.heap());
 		self.cache = 0;
@@ -684,7 +701,7 @@ impl Producer {
 		state.cache += size;
 		let slots = state.reserve_frame();
 		let now = state.charge.add(size + slots);
-		state.frames.push_back(Frame { timestamp, payload }.into());
+		state.frames.push_back(Frame { timestamp, payload });
 		state.next_index = next_index;
 		state.committed = state.next_index;
 		state.stamp(timestamp);
@@ -751,7 +768,7 @@ impl Producer {
 			now = state.charge.add(size + slots);
 			state.stamp(frame.timestamp);
 			latest = frame.timestamp;
-			state.frames.push_back(frame.into());
+			state.frames.push_back(frame);
 		}
 		state.next_index = next_index;
 		state.committed = next_index;
@@ -901,8 +918,13 @@ impl Producer {
 		// Without this, a group whose payload streamed in across an idle gap would expire
 		// the instant it finished.
 		let now = state.charge_partial();
-		let fields = state.partial.take().and_then(|partial| partial.fields);
-		state.frames.push_back(frame::Stored { frame, fields });
+		if let Some(fields) = state.partial.take().and_then(|partial| partial.fields) {
+			// The slot was reserved and charged by `charge_partial` above.
+			let len = state.frames.len();
+			state.objects.resize(len, None);
+			state.objects.push_back(Some(fields));
+		}
+		state.frames.push_back(frame);
 		state.committed = state.next_index;
 		drop(state);
 
@@ -1317,7 +1339,9 @@ impl Clone for Producer {
 /// reads whole frames, or drains through a higher-level buffer, pays nothing.
 struct Prefetch {
 	// Initialized, not-yet-taken frames are `frames[pos..len]`; the rest are uninitialized.
-	frames: [MaybeUninit<frame::Stored>; Self::CAP],
+	frames: [MaybeUninit<Frame>; Self::CAP],
+	// Relay metadata for `frames`, allocated by the first batch that carries any.
+	fields: Option<Box<[Option<Arc<super::object::Fields>>; Self::CAP]>>,
 	pos: usize,
 	len: usize,
 }
@@ -1326,7 +1350,7 @@ impl Prefetch {
 	const CAP: usize = 8;
 
 	/// Take the next buffered frame, or `None` if the batch is drained.
-	fn pop(&mut self) -> Option<frame::Stored> {
+	fn pop(&mut self) -> Option<Frame> {
 		if self.pos == self.len {
 			return None;
 		}
@@ -1336,14 +1360,29 @@ impl Prefetch {
 		Some(frame)
 	}
 
-	/// Refill with up to `CAP` frames. Must be drained first (`pop` returned `None`).
-	fn fill(&mut self, frames: impl Iterator<Item = frame::Stored>) {
+	/// The relay metadata of the frame [`Self::pop`] just returned.
+	fn take_fields(&mut self) -> Option<Arc<super::object::Fields>> {
+		self.fields.as_mut()?.get_mut(self.pos.checked_sub(1)?)?.take()
+	}
+
+	/// Refill with up to `budget` of the completed frames from `local` on. Must be
+	/// drained first (`pop` returned `None`).
+	fn fill(&mut self, state: &GroupState, local: usize, budget: usize) {
 		debug_assert_eq!(self.pos, self.len, "fill on a non-empty batch would leak frames");
 		self.pos = 0;
 		self.len = 0;
-		for frame in frames.take(Self::CAP) {
-			self.frames[self.len].write(frame);
+		for frame in state.frames.range(local..).take(budget.min(Self::CAP)) {
+			self.frames[self.len].write(frame.clone());
 			self.len += 1;
+		}
+		// Plain frames never reach the metadata table, so they skip this entirely.
+		if local < state.objects.len() {
+			let fields = self.fields.get_or_insert_default();
+			for (i, slot) in fields.iter_mut().enumerate() {
+				*slot = if i < self.len { state.fields(local + i) } else { None };
+			}
+		} else if let Some(fields) = &mut self.fields {
+			fields.fill(None);
 		}
 	}
 
@@ -1363,6 +1402,7 @@ impl Default for Prefetch {
 	fn default() -> Self {
 		Self {
 			frames: [const { MaybeUninit::uninit() }; Self::CAP],
+			fields: None,
 			pos: 0,
 			len: 0,
 		}
@@ -1508,7 +1548,7 @@ impl Consumer {
 	pub(crate) fn poll_read_objects<const N: usize>(
 		&mut self,
 		waiter: &kio::Waiter,
-		out: &mut arrayvec::ArrayVec<frame::Stored, N>,
+		out: &mut arrayvec::ArrayVec<frame::Object, N>,
 	) -> Poll<Result<usize>> {
 		out.clear();
 		while !out.is_full() {
@@ -1805,18 +1845,23 @@ impl Consumer {
 
 	/// Read the next frame (timestamp and payload) all at once, without blocking.
 	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
-		self.poll_read_object(waiter)
-			.map(|res| res.map(|frame| frame.map(|frame| frame.frame)))
-	}
-
-	pub(crate) fn poll_read_object(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Stored>>> {
 		if self.recover.is_none() {
 			return self.poll_read_frame_once(waiter);
 		}
 		self.poll_resumed(waiter, Self::poll_read_frame_once)
 	}
 
-	fn poll_read_frame_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Stored>>> {
+	/// Read the next frame with its relay metadata, for wire egress.
+	pub(crate) fn poll_read_object(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Object>>> {
+		// Every frame is served through the cursor's prefetch, which holds its fields.
+		let frame = ready!(self.poll_read_frame(waiter))?;
+		Poll::Ready(Ok(frame.map(|frame| frame::Object {
+			frame,
+			fields: self.cursor.prefetch.take_fields(),
+		})))
+	}
+
+	fn poll_read_frame_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
 		if self.ended {
 			return Poll::Ready(Ok(None));
 		}
@@ -1843,7 +1888,7 @@ impl Consumer {
 		{
 			self.cursor.refresh_if_stale();
 			self.cursor.index += 1;
-			return Ok(Some(frame.frame));
+			return Ok(Some(frame));
 		}
 		kio::wait(|waiter| self.poll_read_frame(waiter)).await
 	}
@@ -2023,10 +2068,10 @@ impl Cursor {
 				size: frame.payload.len() as u64,
 				timestamp: frame.timestamp,
 			};
-			let source = frame::Source::Complete(frame.frame.payload);
+			let source = frame::Source::Complete(frame.payload);
 			let header = frame::Header {
 				info,
-				fields: frame.fields,
+				fields: self.prefetch.take_fields(),
 			};
 			let frame = frame::Consumer::new(self.state.clone(), header, source);
 			return Poll::Ready(Ok(Some(match expiry {
@@ -2051,7 +2096,7 @@ impl Cursor {
 		})))
 	}
 
-	fn poll_read_frame(&mut self, waiter: &kio::Waiter, stats: &stats::Meter) -> Poll<Result<Option<frame::Stored>>> {
+	fn poll_read_frame(&mut self, waiter: &kio::Waiter, stats: &stats::Meter) -> Poll<Result<Option<Frame>>> {
 		if self.capped() {
 			return Poll::Ready(Ok(None));
 		}
@@ -2079,7 +2124,7 @@ impl Cursor {
 			// out-of-bounds start. `fill` always resets the batch, so an empty range
 			// leaves `len == 0` and the terminal checks below resolve abort/fin/pending.
 			let local = (index - state.offset).min(state.frames.len());
-			prefetch.fill(state.frames.range(local..).take(budget).cloned());
+			prefetch.fill(state, local, budget);
 			if prefetch.len > 0 {
 				// One stamp covers the whole batch: frames popped from the prefetch
 				// don't re-stamp until the next refill, which `CAP` bounds.
@@ -2174,6 +2219,75 @@ mod test {
 	#[cfg(feature = "async")]
 	use futures::FutureExt;
 
+	/// Fields sit beside the frames only from the first fielded one, so every read path
+	/// must line them up by index across plain frames and prefetch batches.
+	#[test]
+	fn object_fields_follow_their_frames_through_every_read() {
+		let pool = cache::Pool::unbounded();
+		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
+		let mut group = Producer::new(Info::from(0u64), track::Info::default(), cache);
+		group.write_frame(None, Bytes::from_static(b"p")).unwrap();
+		let plain = pool.used();
+		// Ten fielded frames span two prefetch batches, then plain frames follow.
+		for id in 1..=10u64 {
+			let header = frame::Header {
+				info: frame::Info {
+					size: 1,
+					timestamp: None,
+				},
+				fields: Some(Arc::new(super::super::object::Fields {
+					id: id * 10,
+					properties: Default::default(),
+				})),
+			};
+			let mut frame = group.create_frame_owned(header, &frame::Budget::default()).unwrap();
+			frame.write(Bytes::from_static(b"f")).unwrap();
+			frame.finish().unwrap();
+		}
+		assert!(pool.used() > plain + 10, "the metadata table is charged");
+		for _ in 0..Prefetch::CAP {
+			group.write_frame(None, Bytes::from_static(b"p")).unwrap();
+		}
+		group.finish().unwrap();
+		let expected = |index: u64| (1..=10).contains(&index).then_some(index * 10);
+
+		let mut objects = group.consume();
+		let waiter = kio::Waiter::noop();
+		for index in 0..(11 + Prefetch::CAP as u64) {
+			let Poll::Ready(Ok(Some(object))) = objects.poll_read_object(&waiter) else {
+				panic!("frame {index} is ready");
+			};
+			assert_eq!(object.fields.map(|fields| fields.id), expected(index), "frame {index}");
+		}
+
+		// A public read leaves the batch's fields for a later streamed read to find.
+		let mut mixed = group.consume();
+		mixed.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		for index in 1..Prefetch::CAP as u64 {
+			let frame = mixed.next_frame().now_or_never().unwrap().unwrap().unwrap();
+			assert_eq!(
+				frame.fields.as_ref().map(|fields| fields.id),
+				expected(index),
+				"frame {index}"
+			);
+		}
+		// Public reads never take a batch's fields, so a plain batch after them must not
+		// hand the stale ones to a wire read.
+		for _ in 0..Prefetch::CAP {
+			mixed.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		}
+		for index in (2 * Prefetch::CAP as u64)..(11 + Prefetch::CAP as u64) {
+			let Poll::Ready(Ok(Some(object))) = mixed.poll_read_object(&waiter) else {
+				panic!("frame {index} is ready");
+			};
+			assert_eq!(object.fields.map(|fields| fields.id), None, "frame {index}");
+		}
+
+		drop((objects, mixed));
+		group.abort(Error::Cancel).unwrap();
+		assert_eq!(pool.used(), 0);
+	}
+
 	#[test]
 	fn terminal_metadata_stays_charged_after_frames_are_released() {
 		let pool = cache::Pool::unbounded();
@@ -2251,7 +2365,7 @@ mod test {
 			assert!(capacity > FRAME_SLOTS);
 			assert_eq!(
 				pool.used() - before,
-				((capacity - FRAME_SLOTS) * size_of::<frame::Stored>()) as u64
+				((capacity - FRAME_SLOTS) * size_of::<Frame>()) as u64
 			);
 			let consumer = group.consume();
 			group.abort(Error::Cancel).unwrap();
@@ -2263,14 +2377,11 @@ mod test {
 	/// would undercharge every cached group without touching a line of this crate.
 	#[test]
 	fn one_frame_fits_the_charged_slots() {
-		let mut frames: VecDeque<frame::Stored> = VecDeque::new();
-		frames.push_back(
-			Frame {
-				timestamp: Some(Timestamp::ZERO),
-				payload: Bytes::new(),
-			}
-			.into(),
-		);
+		let mut frames: VecDeque<Frame> = VecDeque::new();
+		frames.push_back(Frame {
+			timestamp: Some(Timestamp::ZERO),
+			payload: Bytes::new(),
+		});
 		let capacity = frames.capacity();
 		assert!(
 			capacity <= FRAME_SLOTS,

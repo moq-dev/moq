@@ -79,7 +79,7 @@ struct FetchedGroup {
 	sequence: u64,
 	/// The Object ID of the first frame.
 	first: u64,
-	frames: Vec<frame::Stored>,
+	frames: Vec<frame::Object>,
 	/// The fetched range reached the finished group's final object.
 	complete: bool,
 	/// The track's info, which FETCH_OK describes and whose units stamp the objects.
@@ -1315,7 +1315,7 @@ where
 		let mut index: u64 = 0;
 		let mut prior = None;
 
-		let mut buf = arrayvec::ArrayVec::<frame::Stored, 8>::new();
+		let mut buf = arrayvec::ArrayVec::<frame::Object, 8>::new();
 		if group.wire().is_some_and(|wire| !wire.fetchable) {
 			return Err(Error::Unsupported);
 		}
@@ -3543,7 +3543,7 @@ enum GroupState<S: crate::transport::poll::Session> {
 		writer: Writer<S::SendStream, Version>,
 		frame: Option<frame::Consumer>,
 		chunk: Option<bytes::Bytes>,
-		batch: Box<arrayvec::ArrayVec<frame::Stored, 8>>,
+		batch: Box<arrayvec::ArrayVec<frame::Object, 8>>,
 		batch_pos: usize,
 	},
 	/// Every frame is written and the FIN sent: wait for the acknowledgement so a

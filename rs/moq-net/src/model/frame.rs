@@ -48,20 +48,14 @@ pub struct Frame {
 	pub payload: Bytes,
 }
 
-/// Cached frames retain relay metadata without changing public struct literals.
+/// A frame with the relay metadata its group keeps beside it, read only by wire egress.
 #[derive(Clone, Debug)]
-pub(crate) struct Stored {
+pub(crate) struct Object {
 	pub frame: Frame,
 	pub fields: Option<Arc<super::object::Fields>>,
 }
 
-impl From<Frame> for Stored {
-	fn from(frame: Frame) -> Self {
-		Self { frame, fields: None }
-	}
-}
-
-impl std::ops::Deref for Stored {
+impl std::ops::Deref for Object {
 	type Target = Frame;
 	fn deref(&self) -> &Self::Target {
 		&self.frame
