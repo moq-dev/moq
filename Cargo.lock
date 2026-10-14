@@ -4413,6 +4413,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-clock"
+version = "0.11.0"
+dependencies = [
+ "futures",
+ "kio 0.6.2",
+ "moq-clock",
+ "moq-clock-macros",
+ "tokio",
+ "web-async",
+]
+
+[[package]]
+name = "moq-clock-macros"
+version = "0.1.0"
+
+[[package]]
 name = "moq-e2ee"
 version = "0.0.11"
 dependencies = [

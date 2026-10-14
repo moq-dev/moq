@@ -55,5 +55,4 @@ bounded seqno-request attempt ends and no further unsolicited update arrives.
 
 ## Related
 
-- [Cross-node flapping](/quest/m1/cross-node-flapping.md) - residual stale-revival fixtures
 - [Lazy discovery](/quest/m1/lazy-discovery/README.md) - interest changes must not erase freshness protection

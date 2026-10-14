@@ -106,18 +106,22 @@ where
 
 /// [`roundtrip`] for a datagram body, which runs to the end of its buffer.
 fn datagram(data: &[u8], version: lite::Version) -> bool {
-	let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version) else {
-		return false;
-	};
+	// The body doesn't say whether it carries a timestamp, so try both readings.
+	let mut any = false;
+	for timed in [true, false] {
+		let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version, |_| timed) else {
+			continue;
+		};
+		any = true;
 
-	let Ok(first) = decoded.encode_bytes(version) else {
-		return true;
-	};
+		let Ok(first) = decoded.encode_bytes(version) else {
+			continue;
+		};
 
-	let echo = lite::Datagram::decode(first, version).expect("could not decode our own encoding");
-	assert_eq!(echo, decoded, "datagram did not survive a round trip");
-
-	true
+		let echo = lite::Datagram::decode(first, version, |_| timed).expect("could not decode our own encoding");
+		assert_eq!(echo, decoded, "datagram did not survive a round trip");
+	}
+	any
 }
 
 /// Decode one moq-lite wire object from arbitrary bytes.
@@ -356,7 +360,7 @@ impl LiteSample {
 			Self::Datagram => lite::Datagram {
 				subscribe: 3,
 				sequence: 1_234,
-				timestamp: 1_234_567_890,
+				timestamp: Some(1_234_567_890),
 				payload: bytes::Bytes::new(),
 			}
 			.encode(w, version)
@@ -389,7 +393,7 @@ impl LiteSample {
 			}
 			Self::Group => lite::Group::decode(r, version).map(|_| 1).unwrap(),
 			Self::Subscribe => lite::Subscribe::decode(r, version).map(|_| 1).unwrap(),
-			Self::Datagram => lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version)
+			Self::Datagram => lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, |_| true)
 				.map(|_| 1)
 				.unwrap(),
 			Self::Setup => lite::Setup::decode(r, version).map(|_| 1).unwrap(),
@@ -552,7 +556,7 @@ impl Default for Messages {
 			lite_info: lite::TrackInfo {
 				priority: 1,
 				max_age: Some(Duration::from_secs(10)),
-				timescale: crate::Timescale::MICRO,
+				timescale: Some(crate::Timescale::MICRO),
 			},
 			lite_group: lite::Group {
 				subscribe: 7,

@@ -16,7 +16,7 @@ timestamp is optional end to end, on the wire and in every API, and absent
 means untimed. A library never substitutes now, wall clock, or arrival time.
 How absence travels through the model and over the wire is the untimed model
 ([#4822](https://github.com/moq-dev/moq/pull/4822)) and
-[lite-07 encodes an absent timestamp](/quest/m1/lite-untimed.md); this quest
+lite-07's untimed encoding; this quest
 removes every place that fills one in.
 
 Today `Timed.at: None` means "stamp when written": moq-json and moq-flate

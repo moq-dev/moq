@@ -1366,7 +1366,7 @@ async fn import_publishes_decode_times_on_an_arrival_clock() {
 	);
 
 	// The advertised clock is micros, so allow its rounding.
-	let tick = std::time::Duration::from_millis(1);
+	let tick = std::time::Duration::from_micros(1);
 	let wall = import.clock.wall_clock(import.record).unwrap();
 	assert!(
 		*import.arrival.start() - tick <= wall && wall <= *import.arrival.end() + tick,

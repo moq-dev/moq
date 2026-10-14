@@ -122,9 +122,9 @@ case "$action" in
         # whenever any dependent enables a transport.
         if wants moq-tokio; then just rs tokio-features; fi
         # moq-wasm's crate root is `#![cfg(target_arch = "wasm32")]`, so only a
-        # wasm32 pass checks it. moq-mux and moq-ffi ride along in that pass, and
+        # wasm32 pass checks it. moq-mux, moq-ffi, and moq-clock ride along in that pass, and
         # nothing depends on moq-ffi, so each has to reach it on its own.
-        if wants '(moq-wasm|moq-mux|moq-ffi)'; then just rs wasm; fi
+        if wants '(moq-wasm|moq-mux|moq-ffi|moq-clock)'; then just rs wasm; fi
         # Device code behind the off-by-default `capture` feature. check-test
         # lints it through the test build, as for the default features.
         if wants '(moq-video|moq-audio)'; then
@@ -139,7 +139,7 @@ case "$action" in
         ;;
     fix)
         just rs fix "${flags[@]}"
-        if wants '(moq-wasm|moq-mux|moq-ffi)'; then just rs wasm-fix; fi
+        if wants '(moq-wasm|moq-mux|moq-ffi|moq-clock)'; then just rs wasm-fix; fi
         ;;
     test)
         # A selection can hold nothing testable, and

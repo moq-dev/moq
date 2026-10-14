@@ -196,7 +196,6 @@ impl Server {
 			crate::session::Handles {
 				goaway: start.goaway,
 				auth: start.auth,
-				setup: start.setup,
 				estimate: Some(start.estimate),
 			},
 		))
@@ -617,7 +616,7 @@ where
 
 			// The client's SETUP was read at the pause; hand the stream back
 			// for GOAWAY. A server never advertises a path, hence `None`.
-			let (protocol, goaway, setup) = ietf::start(ietf::Config {
+			let (protocol, goaway) = ietf::start(ietf::Config {
 				runtime: runtime.clone(),
 				limits: server.limits,
 				session: session.clone(),
@@ -648,7 +647,6 @@ where
 				crate::session::Handles {
 					goaway,
 					auth,
-					setup,
 					estimate: None,
 				},
 			))
@@ -723,7 +721,7 @@ where
 			};
 			stream.writer.encode(&server_setup).await?;
 
-			let (recv_bw, protocol, goaway, auth, setup, estimate) = match version {
+			let (recv_bw, protocol, goaway, auth, estimate) = match version {
 				Version::Lite(v) => {
 					let stream = stream.with_version(v);
 					// Pre-lite-05: no Setup Stream, so nothing to advertise or seed.
@@ -746,14 +744,13 @@ where
 						crate::driver::Protocol::Lite(Box::new(start.driver)),
 						start.goaway,
 						start.auth,
-						start.setup,
 						Some(start.estimate),
 					)
 				}
 				Version::Ietf(v) => {
 					let stream = stream.with_version(v);
 					// Draft 14-16: path came in the bidi SETUP, no uni SETUP to hand back.
-					let (protocol, goaway, setup) = ietf::start(ietf::Config {
+					let (protocol, goaway) = ietf::start(ietf::Config {
 						runtime: runtime.clone(),
 						limits: server.limits,
 						session: session.clone(),
@@ -773,7 +770,7 @@ where
 						early_unis: Vec::new(),
 						extensions: server.extensions,
 					})?;
-					(None, crate::driver::Protocol::Ietf(protocol), goaway, auth, setup, None)
+					(None, crate::driver::Protocol::Ietf(protocol), goaway, auth, None)
 				}
 			};
 
@@ -783,12 +780,7 @@ where
 				version,
 				recv_bw,
 				protocol,
-				crate::session::Handles {
-					goaway,
-					auth,
-					setup,
-					estimate,
-				},
+				crate::session::Handles { goaway, auth, estimate },
 			))
 		}
 		.maybe_boxed()

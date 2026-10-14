@@ -1361,8 +1361,9 @@ mod tests {
 
 	/// The decode path measures what the corpus says it should: arrival when the
 	/// container hands a packet over, media from its timestamp, and the frame term
-	/// from what the codec decoded. `reorder` is left to the estimator's own test,
-	/// since the container refuses a timestamp that runs backwards.
+	/// from what the codec decoded. `reorder` and `backlog` are left to the
+	/// estimator's own test, since the container refuses a timestamp that runs
+	/// backwards.
 	#[tokio::test]
 	async fn the_decode_path_conforms_to_the_corpus() {
 		for name in [

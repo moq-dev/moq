@@ -125,8 +125,9 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just js bench requests
 
-      # A route above several interest heads lands once per head, so its re-price
-      # should expose any slope over heads times received routes.
+      # A route above several interest heads lands once, so its re-price should
+      # expose any slope over heads times received routes. A watch coming and going
+      # sweeps held watches against attached sessions.
       - name: JS origin announce forwarding benchmark
         if: ${{ !cancelled() }}
         run: nix develop --command just js bench forward

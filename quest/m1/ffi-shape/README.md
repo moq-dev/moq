@@ -63,9 +63,10 @@ Settled shape:
   silently; every other generator refuses. Distinct Rust names renamed
   back per language work only in Python and Go: Kotlin, Swift, Dart, and
   C++ shadow or misplace the external type, and generated C refuses
-  external types. Revisit only once
+  external types. Revisit once
+  [namespaced external types](/quest/m2/uniffi-namespaces.md) fixes
   [mozilla/uniffi-rs#3026](https://github.com/mozilla/uniffi-rs/issues/3026)
-  namespaces external types.
+  in the moq-dev/uniffi fork.
 - `demand()` is the one way to watch subscribers; producers drop their
   `name`/`is_used`/`used`/`unused` duplicates.
 - moq-ffi and its generated consumers, including `cpp/obs` (above). The

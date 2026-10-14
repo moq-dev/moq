@@ -54,6 +54,7 @@ export function probe(watch: MoqWatch, capture = false): Probe {
 				broadcast: audio.source.in.broadcast,
 				track: audio.source.out.track,
 				config: audio.source.out.config,
+				delay: sync.in.delay,
 				maxDelay: sync.out.maxDelay,
 			})
 		: undefined;

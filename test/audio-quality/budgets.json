@@ -1,5 +1,5 @@
 {
-	"note": "The browser rows are measured on the nightly runner (ubuntu-24.04-arm, headless Chromium, seed 7, 60 s a row): the audio-quality-run artifacts of the seven scheduled Nightly runs on main from 2026-10-07 to 2026-10-13 (37633358782, 37790146216, 37940662573, 38054566400, 38143901976, 38276133321, 38415278161). Each ceiling is the worst of the seven nights times 1.25, plus one runner hiccup, rounded up to two significant figures. The hiccup is sized from the single gaps the 2026-10-08 night put on otherwise clean rows, the fixed-250 control among them: 250 underruns/min, 700 gap ms/min, 3.3 skips/min, 280 discarded ms/min, 0.01 stalled, 0.015 silence, and one 20 ms bucket of target. Budgeted this way, every one of the seven nights passes when it is held out of the measurement except 2026-10-08, whose two-second stall on the Opus mild isolated row is beyond one hiccup; that row's own ceilings include it. These ceilings record today's player as the runner hears it, not target audio quality: the AAC bursty rows stall for about a third of the window and the Opus near-zero isolated row drops up to a second at a time, and both are budgeted as measured. To re-measure, download the same artifact from the latest scheduled nightlies (`gh run download <id> -n audio-quality-run`), which keep every run, and apply the same rule. The replay rows are deterministic, so their ceilings are exactly what they measured, through the end of each recording, with no headroom: any regression fails them, and an improvement should be tightened in. They were last re-measured on 2026-10-04, when they began resolving \"auto\" from the measured arrival estimator instead of the round trip.",
+	"note": "The browser rows are measured on the nightly runner (ubuntu-24.04-arm, headless Chromium, seed 7, 60 s a row): the audio-quality-run artifacts of the seven scheduled Nightly runs on main from 2026-10-07 to 2026-10-13 (37633358782, 37790146216, 37940662573, 38054566400, 38143901976, 38276133321, 38415278161). Each ceiling is the worst of the seven nights times 1.25, plus one runner hiccup, rounded up to two significant figures. The hiccup is sized from the single gaps the 2026-10-08 night put on otherwise clean rows, the fixed-250 control among them: 250 underruns/min, 700 gap ms/min, 3.3 skips/min, 280 discarded ms/min, 0.01 stalled, 0.015 silence, and one 20 ms bucket of target. Budgeted this way, every one of the seven nights passes when it is held out of the measurement except 2026-10-08, whose two-second stall on the Opus mild isolated row is beyond one hiccup; that row's own ceilings include it. These ceilings record today's player as the runner hears it, not target audio quality: the AAC bursty rows stall for about a third of the window and the Opus near-zero isolated row drops up to a second at a time, and both are budgeted as measured. To re-measure, download the same artifact from the latest scheduled nightlies (`gh run download <id> -n audio-quality-run`), which keep every run, and apply the same rule. The replay rows are deterministic, so their ceilings are exactly what they measured, through the end of each recording, with no headroom: any regression fails them, and an improvement should be tightened in. They were last re-measured on 2026-10-13, when the estimator began measuring a reordered frame against the frames before it, which raised the AAC targets and ended the bursty-aac re-stall loop. The browser rows predate that change, except the AAC bursty target_ms_p95 ceilings: replaying that night's captures through the new estimator settles at up to 483.2 ms, so both are that times 1.25, rounded up, until the next re-measure.",
 	"rows": [
 		{
 			"runtime": "chromium",
@@ -13,7 +13,7 @@
 			"discarded_ms_per_min": 4000,
 			"stalled_share": 0.55,
 			"silence_share": 0.56,
-			"target_ms_p95": 450
+			"target_ms_p95": 610
 		},
 		{
 			"runtime": "chromium",
@@ -27,7 +27,7 @@
 			"discarded_ms_per_min": 3400,
 			"stalled_share": 0.47,
 			"silence_share": 0.48,
-			"target_ms_p95": 530
+			"target_ms_p95": 610
 		},
 		{
 			"runtime": "chromium",
@@ -341,29 +341,57 @@
 			"runtime": "replay",
 			"codec": "aac",
 			"rate": 44100,
-			"profile": "local-aac",
+			"profile": "bursty-aac",
 			"ring": "isolated",
 			"underruns_per_min": 0,
 			"underrun_ms_per_min": 0,
-			"skip_aheads_per_min": 2,
-			"discarded_ms_per_min": 81.1,
-			"stalled_share": 0.025,
-			"silence_share": 0.025,
-			"target_ms_p95": 203.2
+			"skip_aheads_per_min": 3.3,
+			"discarded_ms_per_min": 393.4,
+			"stalled_share": 0.086,
+			"silence_share": 0.091,
+			"target_ms_p95": 483.2
+		},
+		{
+			"runtime": "replay",
+			"codec": "aac",
+			"rate": 44100,
+			"profile": "bursty-aac",
+			"ring": "plain",
+			"underruns_per_min": 0,
+			"underrun_ms_per_min": 0,
+			"skip_aheads_per_min": 4.4,
+			"discarded_ms_per_min": 501.3,
+			"stalled_share": 0.077,
+			"silence_share": 0.085,
+			"target_ms_p95": 483.2
 		},
 		{
 			"runtime": "replay",
 			"codec": "aac",
 			"rate": 44100,
 			"profile": "local-aac",
-			"ring": "plain",
-			"underruns_per_min": 2,
-			"underrun_ms_per_min": 4.9,
+			"ring": "isolated",
+			"underruns_per_min": 0,
+			"underrun_ms_per_min": 0,
 			"skip_aheads_per_min": 0,
 			"discarded_ms_per_min": 0,
-			"stalled_share": 0.017,
+			"stalled_share": 0.008,
 			"silence_share": 0.015,
-			"target_ms_p95": 203.2
+			"target_ms_p95": 283.2
+		},
+		{
+			"runtime": "replay",
+			"codec": "aac",
+			"rate": 44100,
+			"profile": "local-aac",
+			"ring": "plain",
+			"underruns_per_min": 0,
+			"underrun_ms_per_min": 0,
+			"skip_aheads_per_min": 2,
+			"discarded_ms_per_min": 81.2,
+			"stalled_share": 0.008,
+			"silence_share": 0.01,
+			"target_ms_p95": 283.2
 		},
 		{
 			"runtime": "replay",
@@ -371,13 +399,13 @@
 			"rate": 44100,
 			"profile": "relay-bbb",
 			"ring": "isolated",
-			"underruns_per_min": 2,
-			"underrun_ms_per_min": 0.5,
+			"underruns_per_min": 0,
+			"underrun_ms_per_min": 0,
 			"skip_aheads_per_min": 0,
 			"discarded_ms_per_min": 0,
-			"stalled_share": 0.033,
-			"silence_share": 0.024,
-			"target_ms_p95": 223.2
+			"stalled_share": 0.025,
+			"silence_share": 0.019,
+			"target_ms_p95": 243.2
 		},
 		{
 			"runtime": "replay",
@@ -387,11 +415,11 @@
 			"ring": "plain",
 			"underruns_per_min": 0,
 			"underrun_ms_per_min": 0,
-			"skip_aheads_per_min": 2,
-			"discarded_ms_per_min": 87.9,
+			"skip_aheads_per_min": 0,
+			"discarded_ms_per_min": 0,
 			"stalled_share": 0.017,
-			"silence_share": 0.017,
-			"target_ms_p95": 223.2
+			"silence_share": 0.016,
+			"target_ms_p95": 243.2
 		},
 		{
 			"runtime": "replay",

@@ -500,22 +500,26 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 
 	/// Decode one datagram body and hand it to the matching subscription's producer.
 	fn route_datagram(&self, payload: bytes::Bytes) -> Result<(), Error> {
-		let dg = lite::Datagram::decode(payload, self.version)?;
-
 		// Write through the map rather than cloning the entry out: a `TrackEntry` clone
 		// is a handful of atomic bumps on every datagram, and a producer held past its
 		// removal would keep the track (its cached groups, its stats subscription) alive.
 		// The group path already writes to a producer under this lock.
 		let mut subscribes = self.subscribes.lock();
+		// An unknown subscription's datagram is dropped below, however it parses.
+		let dg = lite::Datagram::decode(payload, self.version, |id| {
+			subscribes.get(&id).is_some_and(|entry| entry.timescale.is_some())
+		})?;
 		let Some(entry) = subscribes.get_mut(&dg.subscribe) else {
 			// Unknown or already-closed subscription: drop the datagram.
 			return Ok(());
 		};
 
-		// Datagrams are lite-05+, which always negotiates a timescale; fall back to milliseconds defensively.
-		let scale = entry.timescale.unwrap_or(crate::Timescale::MILLI);
-		let timestamp =
-			Timestamp::new(dg.timestamp, scale).map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+		let timestamp = dg
+			.timestamp
+			.zip(entry.timescale)
+			.map(|(value, scale)| Timestamp::new(value, scale))
+			.transpose()
+			.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 
 		// A datagram is never owed a stream, so it never holds the subscription's end open.
 		if let Ok(mut tail) = entry.tail.write() {
@@ -2170,7 +2174,7 @@ mod tests {
 			lite::Datagram {
 				subscribe: 7,
 				sequence,
-				timestamp: sequence,
+				timestamp: Some(sequence),
 				payload: bytes::Bytes::from_static(b"x"),
 			}
 			.encode_bytes(VERSION)
@@ -5523,11 +5527,8 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 					// Make the group available (resolving the downstream fetch) and fill
 					// it. The track::Info only takes effect if the track isn't accepted yet
 					// (a fetch with no live subscription); otherwise the group inherits the
-					// accepted timescale. Relay-served FETCH is lite-05+, so `timescale` is
-					// `Some`; fall back to milliseconds defensively rather than
-					// panicking.
-					let group_info =
-						track::Info::default().with_timescale(self.timescale.unwrap_or(crate::Timescale::MILLI));
+					// accepted timescale.
+					let group_info = track::Info::default().with_timescale(self.timescale);
 					// The joined fetches pick the group up from the cache only when next
 					// polled, so their demand outlives the request until then.
 					let joined = request.result.clone();

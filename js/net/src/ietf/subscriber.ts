@@ -418,7 +418,17 @@ export class Subscriber {
 		// v14/v15: SubscribeNamespace on control stream (via adapter virtual stream)
 		// v16+: SubscribeNamespace on its own real bidi stream
 
-		const requestId = await this.#session.nextRequestId();
+		// A consumer that leaves while waiting on request-ID credit takes no ID, so a granted one
+		// never opens a request nobody wants.
+		const left = new AbortController();
+		void announced.closed.then(() => left.abort());
+		let requestId: bigint | undefined;
+		try {
+			requestId = await this.#session.nextRequestId(left.signal);
+		} catch (err) {
+			if (left.signal.aborted) return;
+			throw err;
+		}
 		if (requestId === undefined) return;
 
 		try {
@@ -451,16 +461,37 @@ export class Subscriber {
 				}
 				console.debug(`subscribe_namespace written: requestId=${requestId}`);
 
-				// Read response
-				const respTypeId = await stream.reader.u53();
-				if (respTypeId === RequestOk.id) {
-					await RequestOk.decode(stream.reader, version);
-				} else if (respTypeId === SubscribeNamespaceOk.id) {
-					// v14: SubscribeNamespaceOk
-					const size = await stream.reader.u16();
-					await stream.reader.read(size);
-				} else {
-					throw new Error(`SubscribeNamespace rejected: typeId=0x${respTypeId.toString(16)}`);
+				const end = async () => {
+					// For v14/v15: send UnsubscribeNamespace before closing
+					if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
+						try {
+							await stream.writer.u53(UnsubscribeNamespace.id);
+							const unsub = new UnsubscribeNamespace({ requestId });
+							await unsub.encode(stream.writer, version);
+						} catch {
+							// Stream might already be closed
+						}
+					}
+					stream.close();
+				};
+
+				const response = (async () => {
+					const respTypeId = await stream.reader.u53();
+					if (respTypeId === RequestOk.id) {
+						await RequestOk.decode(stream.reader, version);
+					} else if (respTypeId === SubscribeNamespaceOk.id) {
+						// v14: SubscribeNamespaceOk
+						const size = await stream.reader.u16();
+						await stream.reader.read(size);
+					} else {
+						throw new Error(`SubscribeNamespace rejected: typeId=0x${respTypeId.toString(16)}`);
+					}
+					return true;
+				})();
+				// A consumer that leaves before the peer answers ends the request now, not on the answer.
+				if (!(await race([response, announced.closed.then(() => false)]))) {
+					await end();
+					return;
 				}
 
 				// Loop reading Namespace/NamespaceDone entries
@@ -527,19 +558,7 @@ export class Subscriber {
 
 				// Wait for either the read loop or the announced to close
 				await race([readLoop, announced.closed]);
-
-				// For v14/v15: send UnsubscribeNamespace before closing
-				if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
-					try {
-						await stream.writer.u53(UnsubscribeNamespace.id);
-						const unsub = new UnsubscribeNamespace({ requestId });
-						await unsub.encode(stream.writer, version);
-					} catch {
-						// Stream might already be closed
-					}
-				}
-
-				stream.close();
+				await end();
 			} catch (err) {
 				stream.abort(error(err));
 				throw err;

@@ -38,4 +38,4 @@ Public API: none expected. Wire: none.
 ## Related
 
 - [Watch](/quest/m1/audio-jitter-target/watch.md) - the manual browser proof that follows this fix
-- [AAC bursty re-stall](/quest/m1/audio-jitter-target/aac-bursty-restall.md) - the other defect the same measurement found
+- [AAC bursty budgets](/quest/m1/audio-jitter-target/aac-bursty-budgets.md) - the other defect the same measurement found, fixed and awaiting its nightlies

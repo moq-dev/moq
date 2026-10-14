@@ -499,6 +499,27 @@ test("never enables Opus DTX", async () => {
 	expect(env.config.opus?.usedtx).toBeUndefined();
 });
 
+// The catalog bitrate is a maximum: lowering the knob retunes the encoder, raising it raises both.
+test("the catalog bitrate only rises", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup(new Baseline(), { mime: "opus", bitrate: 64_000 });
+	const { encoder } = env;
+	expect(env.config.bitrate).toBe(64_000);
+	expect(encoder.out.catalog.peek()?.bitrate as number | undefined).toBe(64_000);
+
+	let reconfigured = configured();
+	encoder.codec.set({ mime: "opus", bitrate: 32_000 });
+	expect((await reconfigured).bitrate).toBe(32_000);
+	await settle();
+	expect(encoder.out.catalog.peek()?.bitrate as number | undefined).toBe(64_000);
+
+	reconfigured = configured();
+	encoder.codec.set({ mime: "opus", bitrate: 96_000 });
+	expect((await reconfigured).bitrate).toBe(96_000);
+	await settle();
+	expect(encoder.out.catalog.peek()?.bitrate as number | undefined).toBe(96_000);
+});
+
 // Another rendition on the same broadcast flushing with far less lateness leaves this one trailing
 // it, which the catalog advertises as `delay`.
 test("a rendition trailing the broadcast's earliest advertises delay", async () => {

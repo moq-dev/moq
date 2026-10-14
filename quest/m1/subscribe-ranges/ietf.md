@@ -24,6 +24,8 @@ groups not supported") in `run_fetch_stream`
 `FetchType::Filtered`. Capping at the Largest Object also lifts the draft-20
 refusal of a filter bounded by it ("FETCH relative to Largest Object not
 supported"): no filter, a relative start, or an absolute start with no end.
+A multi-group FETCH keeps its one queue entry and moves with priority updates
+(decided 2026-10-13).
 
 The same FETCH-end path sets End of Track only when the read hits FIN, so a
 bounded FETCH that ends exactly at the track's last object reports
