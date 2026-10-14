@@ -1517,6 +1517,10 @@ where
 						// Drafts below 19 negotiate no limit, so this is a local memory guard, not a
 						// protocol fault: end this announce, never the session.
 						Err(request_update::Overflow::Request) => {
+							// Release the route first: the withdrawal waits on the peer.
+							if std::mem::take(attached) {
+								self.stop_announce(path.clone(), token_grant.is_some())?;
+							}
 							if stream.writer.finish().is_ok() {
 								let _ = stream.writer.closed().await;
 							}
@@ -9498,6 +9502,54 @@ mod tests {
 		assert!(
 			matches!(result, Some(Ok(()))),
 			"a flood past the guard ends the announce with Ok: {result:?}"
+		);
+		assert!(
+			session.log.closes().is_empty(),
+			"the guard ends the announce, not the session"
+		);
+	}
+
+	/// A flood past the guard retracts the announce at once, even while the withdrawal waits on
+	/// a peer that never acknowledges the finished stream.
+	#[moq_net_sim::test]
+	async fn a_flood_past_the_guard_retracts_before_the_peer_reads() {
+		const VERSION: Version = Version::Draft18;
+
+		let last = 0x41 + 2 * (request_update::UNNEGOTIATED_GUARD as u64 + 1);
+		let mut script = Vec::new();
+		for rid in (0x41..=last).step_by(2) {
+			script.extend(publish_namespace_update_token_rid(VERSION, rid, None, None).await);
+		}
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![script]).with_unacked_fin();
+		let (mut subscriber, mut requests, _cred, consumer, session) = auth_announce_harness_on(VERSION, session);
+		let rt = subscriber.runtime.clone();
+		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+
+		let acceptor = async move {
+			let first = requests.next().await.expect("a request").request();
+			let _held = first.accept(publish_grant_expiring(&rt, None));
+			std::future::pending::<()>().await
+		};
+		let mut acceptor = std::pin::pin!(acceptor);
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
+			stream,
+			token_publish_namespace(),
+			cluster::Peer::default(),
+			None,
+		));
+
+		// The announce attaches, then the flood overflows the guard, possibly within one poll.
+		for _ in 0..200 {
+			let _ = futures::poll!(acceptor.as_mut());
+			assert!(
+				futures::poll!(run.as_mut()).is_pending(),
+				"the withdrawal waits on the peer's acknowledgement"
+			);
+			settle().await;
+		}
+		assert!(
+			routed_now(&consumer, "room/alice").is_none(),
+			"a flood past the guard must retract the route without waiting on the peer"
 		);
 		assert!(
 			session.log.closes().is_empty(),

@@ -451,14 +451,19 @@ impl Server {
 			Version::Lite(_) => (None, None, None, ietf::peer::Peer::default()),
 		};
 
+		// Lite 01/02 and moq-transport 14-16 carry no AUTH.
+		let auth = crate::auth::Handle::new(false);
+		// Refuse a request token set before `ok()` too.
+		if matches!(version, Version::Lite(_)) {
+			auth.lite();
+		}
 		Ok(Handshake {
 			path,
 			role: None,
 			origin: None,
 			token,
 			assigned_hop: crate::Hop::random(),
-			// Lite 01/02 and moq-transport 14-16 carry no AUTH.
-			auth: crate::auth::Handle::new(false),
+			auth,
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
