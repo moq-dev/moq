@@ -335,7 +335,11 @@ export class Subscriber {
 				case Version.DRAFT_01:
 				case Version.DRAFT_02: {
 					// Receive ANNOUNCE_INIT first
-					const init = await AnnounceInit.decode(stream.reader, this.version);
+					const init = await race([AnnounceInit.decode(stream.reader, this.version), announced.closed]);
+					if (!(init instanceof AnnounceInit)) {
+						stream.close();
+						return;
+					}
 
 					// Process initial announcements. These are advertisements like any other, so
 					// they go on record and obey the same one-per-path rule: the initial set

@@ -2413,6 +2413,33 @@ test("moq-lite-07-wip: a plain request outlives the listing it resolved through"
 	clientOrigin.close();
 });
 
+test.each([Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_18])(
+	"%s: closing an announce consumer before the namespace answer ends the peer's stream",
+	async (alpn) => {
+		// The peer never answers, and returns only once the request stream closes.
+		let started = 0;
+		let ended = 0;
+		spyOn(IetfPublisher.prototype, "runSubscribeNamespace").mockImplementation(async (_msg, stream) => {
+			started++;
+			await stream.reader.closed.catch(() => {});
+			ended++;
+		});
+		const pair = createMockTransportPair(alpn);
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client }),
+			accept(pair.server, url, { publish: new OriginProducer().consume() }),
+		]);
+
+		const announced = client.announced(Path.Pattern.subtree(Path.from("room")));
+		await until(() => started === 1);
+		announced.close();
+		await until(() => ended === 1);
+
+		client.abort();
+		server.abort();
+	},
+);
+
 test.each([Lite.ALPN_06, Lite.ALPN_07_WIP])(
 	"%s: a following request keeps serving tracks after discovery hands over",
 	async (alpn) => {
