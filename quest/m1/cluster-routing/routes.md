@@ -77,13 +77,17 @@ freshness before coding:
   saturated, using checked arithmetic. No hop-count component is needed
   because each link strictly increases the metric, as Babel's feasibility
   requires (RFC 8966 s3.5.2); a zero-cost or saturated link would leave a
-  route equal to its own feasibility distance. Update `?cost=0` examples with
+  route equal to its own feasibility distance (`zero_cost_links_are_refused`,
+  `overflow_is_unreachable`). Update `?cost=0` examples with
   the implementation and report the breaking configuration change.
 - Decided 2026-10-13: GOAWAY gives the peer lowest preference, below every
   eligible non-draining peer, and triggers failover. Retain it as a last resort
   while connected; do not encode drain by saturating the metric. Feasibility
   still gates alternatives, so an infeasible alternative waits for a sequence
-  refresh while the draining peer keeps serving. Existing readers resume only
+  refresh while the draining peer keeps serving
+  (`goaway_fails_over_and_keeps_the_draining_peer_last`,
+  `goaway_keeps_serving_until_a_refresh_makes_the_alternative_feasible`).
+  Existing readers resume only
   across a matching explicit epoch; epochless changes preserve Restart.
 - Fresh routing identity per process/tab restart, shared across its
   authenticated live sessions, decided 2026-10-13. It is the hash of a
@@ -116,10 +120,9 @@ freshness before coding:
   namespace and leaves a seqno the real origin cannot pass after the forger
   leaves (`forged_identity_hijacks_claims_outside_the_forgers_scope`); with
   it, a forger or a misconfigured uplink only affects its own scope. The
-  `peer` claim no longer decides transit trust. Replace the fixture's
-  per-ingress OR alias, which never translated back, split one origin across
-  ingress peers, could collide with a bare id, and enforced no namespace, and
-  prove legitimate scoped delivery through two uplinks beside the forgery.
+  `peer` claim no longer decides transit trust. Legitimate scoped delivery
+  survives losing one of two uplinks under one key
+  (`scoped_delivery_through_two_uplinks_reaches_one_key`).
 - Loop freedom is Babel's feasibility condition (RFC 8966) keyed by node:
   accept a route if its seqno is newer, or equal with a metric below the
   feasibility distance. Only the origin advances its seqno. Retraction is an
@@ -203,11 +206,13 @@ freshness before coding:
   (`preferred_down_only_route_hides_the_exportable_alternative`); this is
   accepted, and ranking local peers above a backup uplink avoids it. The
   two-view model it replaces lost its export restriction one LAN hop after an
-  upstream ingress, and identity-only aggregation deadlocked across views. A
+  upstream ingress, and identity-only aggregation deadlocked across views
+  (`cdn_never_reaches_its_own_relay_through_the_lan`,
+  `upstream_ingress_ends_a_request_whose_route_turns_down_only`,
+  `dead_uplink_consumes_and_publishes_through_a_lan_peer`). A
   misconfigured uplink that leaks CDN routes back is contained by scoped
   identities rather than a downstream mark
-  (`misconfigured_uplink_leaks_unless_the_cdn_marks_its_downstream` becomes
-  that containment).
+  (`misconfigured_uplink_is_contained_by_scoped_identities`).
 - Decided 2026-10-14: a local per-connection `proxy` preference decides
   whether a connection is sent routes learned from other connections; it is
   never on the wire. Relays default on; applications choose per P2P
@@ -269,6 +274,17 @@ Open, for the implementer to settle and record:
   open: [Next-hop handoff](/quest/m1/cluster-routing/handoff.md) settles it
   with deterministic acceptance tests before the wire is written.
 - How much of today's route trie, fronts, and `route_order` survives intact.
+- A GOAWAY failover to an infeasible alternative completes only when the
+  alternative's refresh arrives before the draining peer's; otherwise the node
+  selects the draining peer at the new seqno, lowers its feasibility distance,
+  and needs another refresh once that session closes
+  (`goaway_keeps_serving_until_a_refresh_makes_the_alternative_feasible`).
+- `hash(scope, id)` never settles behind a misconfigured uplink: a scoped key
+  sent down comes back up and is filed again as a new identity on every lap
+  (`scoped_keys_rewrap_on_every_lap_of_a_misconfigured_uplink`). Bounding it
+  needs a rule such as keying a forwarded identity by its bare id and the
+  narrowest scope it crossed, which re-filing under the same scope leaves
+  unchanged, or refusing an already scoped identity on a scoped connection.
 
 The #4349 counterexamples are the `residual_*` tests in
 `rs/moq-net/tests/mesh_withdraw.rs`. They pin today's hunting on lite-06:
