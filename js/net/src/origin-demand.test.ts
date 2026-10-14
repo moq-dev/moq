@@ -193,12 +193,14 @@ test.each([
 ] as const)("cancelling one waiter preserves a second %s requester across %i routes", async (other, routes) => {
 	const origin = new Producer();
 	const prefix = Path.from("room");
-	const dynamic = origin.dynamic(prefix, { cost: 0n });
-	for (let i = 1; i < routes; i++) origin.dynamic(prefix, { cost: BigInt(i) });
-	const requests = dynamic.requested();
+	const dynamics = Array.from({ length: routes }, (_, i) => origin.dynamic(prefix, { cost: BigInt(i) }));
 	const hold = new AbortController();
 	const wire = wireOf(origin.consume());
 	const first = wire.demand(path, undefined, hold.signal).catch(() => undefined);
+	// With competing routes, re-price the cancelled waiter's route so the survivor pends on another.
+	const cancelled = dynamics[0];
+	if (routes > 1) cancelled.update({ ...cancelled.route, cost: BigInt(routes) });
+	const requests = dynamics[routes > 1 ? 1 : 0].requested();
 	const second = other === "peer" ? wire.demand(path) : undefined;
 	const local = other === "local" ? origin.request(path) : undefined;
 	const request = (await requests.next()).value;
