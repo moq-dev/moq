@@ -303,17 +303,19 @@ impl Timer {
 	}
 
 	pub(crate) fn reset(&mut self, at: Instant) {
-		self.disarm();
 		self.at = at;
+		// Wake whoever is parked on the old deadline, so it re-arms for the new one;
+		// the reset may come from another task.
+		if let Some(waker) = self.disarm() {
+			waker.wake();
+		}
 	}
 
-	fn disarm(&mut self) {
+	/// Remove the armed entry, returning the waker parked on it.
+	fn disarm(&mut self) -> Option<Waker> {
 		// A run that already ended cleared its timers.
-		if let Some(key) = self.key.take()
-			&& let Some(runtime) = self.runtime()
-		{
-			runtime.time.borrow_mut().timers.remove(&key);
-		}
+		let key = self.key.take()?;
+		self.runtime()?.time.borrow_mut().timers.remove(&key)
 	}
 
 	pub(crate) fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
@@ -793,6 +795,20 @@ mod tests {
 		});
 		task.await.unwrap();
 		assert_eq!(crate::now(), at(10));
+	}
+
+	/// A pending sleep reset by another task wakes its poller to re-arm.
+	#[crate::test]
+	async fn a_sleep_reset_by_another_task_rearms() {
+		let sleep = Rc::new(RefCell::new(crate::sleep(Duration::from_secs(10))));
+		let polled = sleep.clone();
+		let task = spawn(std::future::poll_fn(move |cx| {
+			Pin::new(&mut *polled.borrow_mut()).poll(cx)
+		}));
+		yield_now().await;
+		sleep.borrow_mut().reset(at(3));
+		task.await.unwrap();
+		assert_eq!(crate::now(), at(3));
 	}
 
 	/// A source reporting a deadline it already reached fails loud instead of spinning.
