@@ -1541,11 +1541,26 @@ where
 			let (type_id, body) = match turn {
 				// A non-terminal message read while a verdict is pending waits for it.
 				Turn::Message(id, body) if renewal.pending() && !self.terminal_publish_namespace(id) => {
-					// Its request ID is spent on arrival, so one dropped with the queue stays spent.
-					if id == ietf::PublishNamespaceUpdate::ID && self.version != Version::Draft16 {
-						let update_id = ietf::RequestId::decode(&mut body.decoder(self.version), self.version)?;
-						self.spend(update_id)?;
-						spent.insert(update_id);
+					if id == ietf::PublishNamespaceUpdate::ID {
+						// Its request ID is spent on arrival, so one dropped with the queue stays spent.
+						if self.version != Version::Draft16 {
+							let update_id = ietf::RequestId::decode(&mut body.decoder(self.version), self.version)?;
+							self.spend(update_id)?;
+							spent.insert(update_id);
+						}
+						// Decoded on arrival too, so a session-fatal update still closes the session
+						// when a withdrawal drops the queue. A repeated token only refuses this
+						// announce, which waits for the update's turn.
+						let mut data = body.decoder(self.version);
+						match ietf::PublishNamespaceUpdate::decode_msg(&mut data, self.version) {
+							Err(DecodeError::MalformedAuthToken) => {}
+							msg => {
+								msg?;
+								if !data.is_empty() {
+									return Err(Error::WrongSize);
+								}
+							}
+						}
 					}
 					match renewal.queue((id, body), self.version) {
 						Ok(()) => continue,
@@ -10182,6 +10197,82 @@ mod tests {
 		assert!(
 			control.accept(RequestId(5)).is_err(),
 			"the queued update's request ID was left unspent"
+		);
+	}
+
+	/// An update queued behind a pending renewal is decoded on arrival, so a session-fatal one
+	/// still closes the session when the peer withdraws before the queue drains.
+	#[moq_net_sim::test]
+	async fn a_queued_malformed_update_is_fatal_despite_a_withdrawal() {
+		const VERSION: Version = Version::Draft18;
+		let queued = {
+			let log = crate::lite::test_transport::Log::default();
+			let mut writer =
+				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+			writer.varint(ietf::PublishNamespaceUpdate::ID).await.unwrap();
+			writer
+				.encode(&ietf::PublishNamespaceUpdate {
+					request_id: RequestId(5),
+					namespace_request_id: None,
+					hops: None,
+					cost: None,
+					authorization_token: Some(crate::ietf::token::RequestToken(crate::setup::Token {
+						kind: 0,
+						value: Vec::new(),
+					})),
+				})
+				.await
+				.unwrap();
+			let bytes = log.writes.lock().unwrap().clone();
+			// Rewrite the by-value token (length 2: USE_VALUE, type 0) as a reference to alias 7,
+			// which was never registered.
+			let at: Vec<_> = bytes
+				.windows(3)
+				.enumerate()
+				.filter(|(_, w)| *w == [0x02, 0x03, 0x00])
+				.collect();
+			assert_eq!(at.len(), 1, "the token parameter is found once");
+			let at = at[0].0;
+			[&bytes[..at], &[0x02, 0x02, 0x07], &bytes[at + 3..]].concat()
+		};
+		let session = crate::lite::test_transport::ScriptedSession::per_stream_eof(vec![
+			[publish_namespace_update_with_token(VERSION).await, queued].concat(),
+		]);
+		let (mut subscriber, mut requests, _cred, _consumer, session) = auth_announce_harness_on(VERSION, session);
+		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let acceptor = async move {
+			let first = requests.next().await.expect("a request");
+			let _issued = first.accept(crate::auth::Grant::all());
+			let _never_answered = requests.next().await.expect("a renewal");
+			std::future::pending::<()>().await
+		};
+		let mut acceptor = std::pin::pin!(acceptor);
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
+			stream,
+			token_publish_namespace(),
+			cluster::Peer::default(),
+			None,
+		));
+		let mut ended = None;
+		for _ in 0..500 {
+			let _ = futures::poll!(acceptor.as_mut());
+			if let Poll::Ready(result) = futures::poll!(run.as_mut()) {
+				ended = Some(result);
+				break;
+			}
+			settle().await;
+		}
+		let Some(result) = ended else {
+			panic!("closing the stream ends the announce");
+		};
+		assert!(
+			matches!(
+				result,
+				Err(Error::Decode(DecodeError::Session(
+					crate::SessionError::UnknownAuthTokenAlias
+				)))
+			),
+			"the queued update's unknown alias closes the session: {result:?}"
 		);
 	}
 
