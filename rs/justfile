@@ -373,3 +373,8 @@ bench-ts-schedule *args:
 [positional-arguments]
 bench-export *args:
     cargo bench --locked -p moq-mux --bench export -- "$@"
+
+# Requested-pad catalog gating and resolved EOS lookup across renditions x touched pads.
+[positional-arguments]
+bench-gst-catalog *args:
+    cargo bench -p moq-gst --bench catalog "$@"

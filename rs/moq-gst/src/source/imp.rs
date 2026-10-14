@@ -2806,6 +2806,121 @@ mod session_tests {
 		assert_played_cleanly(pipeline);
 	}
 
+	/// A real moqsink restart negotiates audio after video, keeping both held moqsrc pads.
+	#[test]
+	fn a_moqsink_restart_keeps_pads_when_caps_arrive_at_different_times() {
+		let _pad_ids = pad_ids();
+		let relay = Relay::new();
+		let element = element();
+		let (sent, received) = std::sync::mpsc::channel();
+		let added = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+		let count = added.clone();
+		element.connect_pad_added(move |_, pad| {
+			count.fetch_add(1, Ordering::Relaxed);
+			let sent = sent.clone();
+			let generation = std::sync::atomic::AtomicUsize::new(0);
+			pad.add_probe(
+				gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM,
+				move |pad, info| {
+					match &info.data {
+						Some(gst::PadProbeData::Event(event)) => match event.view() {
+							gst::EventView::StreamStart(_) => {
+								generation.fetch_add(1, Ordering::Relaxed);
+							}
+							gst::EventView::Eos(_) => {
+								sent.send((pad.name().to_string(), generation.load(Ordering::Relaxed), true))
+									.unwrap();
+							}
+							_ => {}
+						},
+						Some(gst::PadProbeData::Buffer(_)) => {
+							sent.send((pad.name().to_string(), generation.load(Ordering::Relaxed), false))
+								.unwrap();
+							return gst::PadProbeReturn::Drop;
+						}
+						_ => {}
+					}
+					gst::PadProbeReturn::Ok
+				},
+			);
+		});
+		let session = follow(&element, &relay.origin);
+		let sink = glib::Object::builder::<crate::sink::MoqSink>()
+			.property("url", relay.url.as_str())
+			.property("broadcast", "room")
+			.build();
+		let video = sink.request_pad_simple("sink_%u").unwrap();
+		video.set_property("track", "video");
+		let audio = sink.request_pad_simple("sink_%u").unwrap();
+		audio.set_property("track", "audio");
+		let caps = gst::Caps::builder("video/x-h264")
+			.field("stream-format", "byte-stream")
+			.field("alignment", "au")
+			.build();
+		let audio_caps = gst::Caps::builder("audio/x-opus")
+			.field("rate", 48_000i32)
+			.field("channels", 2i32)
+			.build();
+		let mut held = std::collections::BTreeSet::new();
+		for generation in 0..3 {
+			if generation == 2 {
+				sink.release_request_pad(&audio);
+			}
+			sink.set_state(gst::State::Paused).unwrap();
+			assert!(video.send_event(gst::event::StreamStart::new("video")));
+			assert!(video.send_event(gst::event::Caps::new(&caps)));
+			assert!(video.send_event(gst::event::Segment::new(&gst::FormattedSegment::<gst::ClockTime>::new())));
+			let keyframe = crate::sink::h264_keyframe_au();
+			for pts in [0, 20, 40] {
+				let mut frame = gst::Buffer::from_slice(keyframe.clone());
+				frame.get_mut().unwrap().set_pts(gst::ClockTime::from_mseconds(pts));
+				assert_eq!(video.chain(frame), Ok(gst::FlowSuccess::Ok));
+			}
+			if generation < 2 {
+				assert!(audio.send_event(gst::event::StreamStart::new("audio")));
+				assert!(audio.send_event(gst::event::Caps::new(&audio_caps)));
+				assert!(audio.send_event(gst::event::Segment::new(&gst::FormattedSegment::<gst::ClockTime>::new())));
+				for pts in [0, 20, 40] {
+					let mut frame = gst::Buffer::from_slice([0xf8, 0xff, 0xfe]);
+					frame.get_mut().unwrap().set_pts(gst::ClockTime::from_mseconds(pts));
+					assert_eq!(audio.chain(frame), Ok(gst::FlowSuccess::Ok));
+				}
+			}
+			let mut playing = std::collections::BTreeSet::new();
+			let mut dropped = false;
+			let returning = if generation == 2 { 1 } else { 2 };
+			while playing.len() < returning || (generation == 2 && !dropped) {
+				let (pad, run, eos) = received
+					.recv_timeout(Duration::from_secs(10))
+					.expect("both renditions should resume");
+				if eos {
+					assert_eq!(generation, 2, "a returning rendition received EOS");
+					assert!(pad.starts_with("audio_"), "the returning video received EOS");
+					assert!(!dropped, "the dropped rendition ended twice");
+					dropped = true;
+				} else if run == generation {
+					playing.insert(pad);
+				}
+			}
+			if generation == 0 {
+				held = playing;
+			} else if generation == 1 {
+				assert_eq!(playing, held, "restart replaced a linked pad");
+			} else {
+				assert!(
+					playing
+						.iter()
+						.all(|pad| held.contains(pad) && pad.starts_with("video_"))
+				);
+			}
+			sink.set_state(gst::State::Ready).unwrap();
+		}
+		assert_eq!(added.load(Ordering::Relaxed), 2);
+		sink.set_state(gst::State::Null).unwrap();
+		stop(session);
+		assert!(received.try_iter().all(|(_, _, eos)| !eos));
+	}
+
 	/// End to end through a relay: the publisher's session closes without finishing its
 	/// broadcast, so the relay loses the source. The pads hold until the path is announced again,
 	/// and the next broadcast renders on the same pad.
