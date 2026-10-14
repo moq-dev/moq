@@ -49,3 +49,10 @@ test("an untimed datagram body carries no timestamp", async () => {
 	expect(decoded.timestamp).toBeUndefined();
 	expect(dec.decode(decoded.payload)).toBe("world");
 });
+
+test("an untimed datagram body is refused before lite-07", () => {
+	const dg = new Datagram(1n, 2, undefined, enc.encode("world"));
+	for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
+		expect(() => dg.encode(version)).toThrow("has no untimed datagram");
+	}
+});

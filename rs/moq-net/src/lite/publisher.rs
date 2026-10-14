@@ -3174,7 +3174,8 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 			timestamp,
 			payload: datagram.payload,
 		};
-		// has_datagrams is checked before this runs, so encoding never hits the version guard.
+		// has_datagrams is checked before this runs, and the timescale is set wherever the
+		// version needs a timestamp, so encoding never hits a version guard.
 		let Ok(body) = body.encode_bytes(self.version) else {
 			return false;
 		};

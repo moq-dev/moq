@@ -32,6 +32,11 @@ impl Encode<Version> for Datagram {
 			return Err(EncodeError::Version);
 		}
 
+		// A version that always carries a timescale has no untimed body.
+		if self.timestamp.is_none() && version.wire_timescale(None).is_some() {
+			return Err(EncodeError::Version);
+		}
+
 		w.varint(self.subscribe)?;
 		w.varint(self.sequence)?;
 		if let Some(timestamp) = self.timestamp {
@@ -134,6 +139,22 @@ mod test {
 		})
 		.unwrap();
 		assert_eq!(decoded, dg);
+	}
+
+	#[test]
+	fn untimed_needs_lite07() {
+		let dg = Datagram {
+			subscribe: 1,
+			sequence: 2,
+			timestamp: None,
+			payload: Bytes::from_static(b"world"),
+		};
+		for version in [Version::Lite05, Version::Lite06] {
+			assert!(
+				matches!(dg.encode_bytes(version), Err(EncodeError::Version)),
+				"{version}"
+			);
+		}
 	}
 
 	#[test]

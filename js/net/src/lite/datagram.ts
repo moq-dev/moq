@@ -4,7 +4,7 @@
  * @module
  */
 import { encodeVarint, Reader } from "../stream.ts";
-import type { Version } from "./version.ts";
+import { type Version, wireTimescale } from "./version.ts";
 
 /**
  * A QUIC datagram body: `subscribe (i) | sequence (i) | [timestamp (i)] | payload (b)`, with the
@@ -33,6 +33,11 @@ export class Datagram {
 
 	/** Encode the body to a single `Uint8Array` (no length prefix; the datagram boundary delimits it). */
 	encode(version: Version): Uint8Array {
+		// A version that always carries a timescale has no untimed body.
+		if (this.timestamp === undefined && wireTimescale(version, undefined) !== undefined) {
+			throw new Error(`version ${version} has no untimed datagram`);
+		}
+
 		const subscribe = encodeVarint(this.subscribe, version);
 		const sequence = encodeVarint(this.sequence, version);
 		const timestamp = this.timestamp === undefined ? new Uint8Array() : encodeVarint(this.timestamp, version);

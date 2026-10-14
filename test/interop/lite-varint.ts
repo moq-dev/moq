@@ -67,9 +67,17 @@ const setupBytes = await write((w) => setup.encode(w, version));
 const datagram = await Datagram.decode(Uint8Array.from(input.datagram), version, () => true);
 const datagramBytes = [...datagram.encode(version)];
 
-const untimed = await Datagram.decode(Uint8Array.from(input.untimedDatagram), version, () => false);
-assert.equal(untimed.timestamp, undefined);
-const untimedDatagramBytes = [...untimed.encode(version)];
+// Only lite-07 can carry an untimed track; lite-06 stamps it, so it has no untimed bytes.
+const untimed = version === Version.DRAFT_07;
+
+let untimedDatagramBytes: number[] = [];
+if (untimed) {
+	const datagram = await Datagram.decode(Uint8Array.from(input.untimedDatagram), version, () => false);
+	assert.equal(datagram.timestamp, undefined);
+	untimedDatagramBytes = [...datagram.encode(version)];
+} else {
+	assert.throws(() => new Datagram(9n, 1, undefined, new Uint8Array()).encode(version));
+}
 
 const trackInfo = await TrackInfo.decode(reader(input.trackInfo), version);
 assert.equal(trackInfo.timescale, version === Version.DRAFT_07 ? undefined : 1_000);
@@ -99,22 +107,25 @@ const groupBytes = await write(async (w) => {
 });
 
 // The same frames on an untimed track: no timestamp delta.
-const u = reader(input.untimedGroup);
-const untimedGroup = await Group.decode(u, version);
-const untimedFrames: Uint8Array[] = [];
-for (;;) {
-	const frame = await u.decodeMaybe(frameDecoder(0));
-	if (!frame) break;
-	assert.equal(frame.timestamp, undefined);
-	untimedFrames.push(frame.payload);
-}
-const untimedGroupBytes = await write(async (w) => {
-	await untimedGroup.encode(w, version);
-	for (const payload of untimedFrames) {
-		await w.u53(payload.byteLength);
-		await w.write(payload);
+let untimedGroupBytes: number[] = [];
+if (untimed) {
+	const u = reader(input.untimedGroup);
+	const untimedGroup = await Group.decode(u, version);
+	const untimedFrames: Uint8Array[] = [];
+	for (;;) {
+		const frame = await u.decodeMaybe(frameDecoder(0));
+		if (!frame) break;
+		assert.equal(frame.timestamp, undefined);
+		untimedFrames.push(frame.payload);
 	}
-});
+	untimedGroupBytes = await write(async (w) => {
+		await untimedGroup.encode(w, version);
+		for (const payload of untimedFrames) {
+			await w.u53(payload.byteLength);
+			await w.write(payload);
+		}
+	});
+}
 
 console.log(
 	JSON.stringify({

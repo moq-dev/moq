@@ -202,18 +202,14 @@ for (const wire of WIRES.filter((wire) => wire.name === "lite-06" || wire.name =
 		const producer = broadcast.createTrack("video", {});
 		const subscriber = wireOf(client).consume(Path.from("test")).track("video").subscribe();
 
-		// Datagrams aren't cached, so the first few may race the subscription setup.
-		const received = subscriber.recvDatagram();
-		let stop = false;
-		const pump = (async () => {
-			while (!stop) {
-				producer.appendDatagram(undefined, new Uint8Array([7]));
-				await new Promise((resolve) => setTimeout(resolve, 2));
-			}
-		})();
-		const datagram = await received;
-		stop = true;
-		await pump;
+		// Datagrams aren't cached, so a group read back first proves the subscription is live.
+		const group = producer.appendGroup();
+		group.writeFrame({ payload: new Uint8Array([0]) });
+		group.close();
+		expect(await subscriber.recvGroup()).toBeDefined();
+
+		producer.appendDatagram(undefined, new Uint8Array([7]));
+		const datagram = await subscriber.recvDatagram();
 
 		expect(datagram?.payload).toEqual(new Uint8Array([7]));
 		if (wire.stamps) expect(datagram?.timestamp).toBeDefined();
