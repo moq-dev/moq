@@ -33,9 +33,11 @@ Decided in the 2026-10-14 planning interview:
   stripes, never a dirty frame the min-delay decoder wasn't also showing.
   This quest therefore does not wait on
   [plan-boundary](/quest/m2/intra-refresh/plan-boundary.md).
-- Selection is monotonic: show the max-delay frame once its timestamp is at
-  or beyond the last displayed timestamp, else the min-delay frame, and never
-  display a timestamp below the last one shown. Do not reuse `caughtUp` from
+- Selection is a small frame selector over the two current candidates: show
+  the max-delay frame when its timestamp is at or beyond the min-delay frame's,
+  so it wins ties, else the min-delay frame. Separately, never display a
+  timestamp below the last one shown. A max-delay decoder that stops producing
+  therefore loses as soon as the min-delay one advances. Do not reuse `caughtUp` from
   `js/watch/src/video/playhead.ts`: its 100 ms slack tolerates one backwards
   step per rendition switch, and applied per frame it would alternate
   backwards and forwards. Keep the pair per rendition, inside or beside
@@ -67,7 +69,9 @@ Decided in the 2026-10-14 planning interview:
   a stall longer than one sweep skips both; a rendition without `warmup` opens
   one subscription and one decoder; only the min-delay decoder moves `Sync`;
   a selector regression that repeatedly crosses a 100 ms trailing gap and a
-  recovery boundary never displays a lower timestamp.
+  recovery boundary never displays a lower timestamp; a max-delay decoder that
+  stops producing while the min-delay one continues hands the picture back on
+  the next min-delay frame.
 - Measure the cost of always running two decoders: CPU, decoder memory, and
   dropped frames for one versus two decoders on a 1080p rendition, in a
   browser, recorded in the PR.
