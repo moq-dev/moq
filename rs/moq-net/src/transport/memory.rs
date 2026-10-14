@@ -37,7 +37,8 @@ const DATAGRAM_QUEUE: usize = 1024;
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Config {
-	/// Queued bytes one stream holds before its writer pends.
+	/// Queued bytes one stream holds before its writer pends. An empty stream always takes
+	/// one write, so 0 holds one message at a time.
 	pub stream_buffer: usize,
 	/// The application protocol both sides report, standing in for a negotiated ALPN.
 	pub protocol: Option<String>,
@@ -246,11 +247,12 @@ impl Session {
 
 	/// Pop from an incoming queue, failing with the close once it is empty.
 	fn poll_accept<T>(queue: &kio::Queue<T>, close: &Close, waiter: &kio::Waiter) -> Poll<Result<T, Error>> {
-		// Streams opened before a close are still handed out, like the data on them.
+		// Check the close first, so anything queued before it is still handed out below.
+		let closed = poll_close(close, waiter);
 		if let Poll::Ready(Ok(item)) = queue.poll_pop(waiter) {
 			return Poll::Ready(Ok(item));
 		}
-		Poll::Ready(Err(ready!(poll_close(close, waiter))))
+		closed.map(Err)
 	}
 
 	/// Hand `item` to the peer's `queue`, unless the session closed.
@@ -402,7 +404,7 @@ impl poll::SendStream for SendStream {
 
 		let buffer = self.buffer;
 		let mut channel = ready!(self.channel.poll(waiter, |channel| {
-			match channel.end.is_some() || channel.queued < buffer {
+			match channel.end.is_some() || channel.messages.is_empty() || channel.queued < buffer {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
 			}
@@ -442,9 +444,11 @@ impl poll::SendStream for SendStream {
 		if std::mem::replace(&mut self.done, true) {
 			return;
 		}
-		// A closed session leaves its streams as they were, so the peer drains them.
+		// A closed session leaves its streams as they were, so the peer drains them. The
+		// close is checked under the channel lock so a concurrent close can't land between.
+		let mut channel = self.channel.lock();
 		if closed(&self.close).is_none() {
-			self.channel.lock().abort(End::Reset(code));
+			channel.abort(End::Reset(code));
 		}
 	}
 
@@ -453,10 +457,12 @@ impl poll::SendStream for SendStream {
 	/// writer that waits for it before closing the session knows the peer has the data.
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
 		let waiter = self.park.hold(cx);
+		// Check the close first, so a drain that happened before it is still seen below.
+		let closed = poll_close(&self.close, waiter);
 		if let Poll::Ready(channel) = self.channel.poll(waiter, |channel| channel.sent().map(drop)) {
 			return channel.sent();
 		}
-		Poll::Ready(Err(ready!(poll_close(&self.close, waiter))))
+		closed.map(Err)
 	}
 }
 
@@ -508,6 +514,8 @@ impl poll::RecvStream for RecvStream {
 		}
 
 		let waiter = self.park.hold(cx);
+		// Check the close first, so a message queued before it is still read below.
+		let closed = poll_close(&self.close, waiter);
 		let Poll::Ready(mut channel) = self.channel.poll(waiter, |channel| {
 			match !channel.messages.is_empty() || channel.end.is_some() {
 				true => Poll::Ready(()),
@@ -515,7 +523,7 @@ impl poll::RecvStream for RecvStream {
 			}
 		}) else {
 			// Queued messages drain first; only an idle stream fails with the close.
-			return Poll::Ready(Err(ready!(poll_close(&self.close, waiter))));
+			return closed.map(Err);
 		};
 
 		let Some(front) = channel.messages.front_mut() else {
@@ -538,9 +546,11 @@ impl poll::RecvStream for RecvStream {
 		if std::mem::replace(&mut self.stopped, true) {
 			return;
 		}
-		// A closed session leaves its streams as they were.
+		// A closed session leaves its streams as they were; checked under the channel lock,
+		// as in `reset`.
+		let mut channel = self.channel.lock();
 		if closed(&self.close).is_none() {
-			self.channel.lock().abort(End::Stop(code));
+			channel.abort(End::Stop(code));
 		}
 	}
 
@@ -550,6 +560,8 @@ impl poll::RecvStream for RecvStream {
 			return Poll::Ready(Ok(()));
 		}
 		let waiter = self.park.hold(cx);
+		// Check the close first, so an end that came before it is still seen below.
+		let closed = poll_close(&self.close, waiter);
 		if let Poll::Ready(channel) = self.channel.poll(waiter, |channel| match channel.end.is_some() {
 			true => Poll::Ready(()),
 			false => Poll::Pending,
@@ -559,7 +571,7 @@ impl poll::RecvStream for RecvStream {
 				_ => Ok(()),
 			});
 		}
-		Poll::Ready(Err(ready!(poll_close(&self.close, waiter))))
+		closed.map(Err)
 	}
 }
 
@@ -685,6 +697,17 @@ mod tests {
 		assert_eq!(text(read(&mut recv, usize::MAX)), "23456789");
 		assert!(count.0.load(Ordering::Relaxed) > 0);
 		assert_eq!(ready(send.poll_write_buf(&mut noop(), &mut next)).unwrap(), 1);
+	}
+
+	#[test]
+	fn zero_buffer_holds_one_message() {
+		let (mut a, mut b) = pair(buffer(0));
+		let (mut send, mut recv) = uni(&mut a, &mut b);
+
+		assert_eq!(ready(write(&mut send, &Bytes::from_static(b"one"))).unwrap(), 3);
+		assert!(write(&mut send, &Bytes::from_static(b"two")).is_pending());
+		assert_eq!(text(read(&mut recv, usize::MAX)), "one");
+		assert_eq!(ready(write(&mut send, &Bytes::from_static(b"two"))).unwrap(), 3);
 	}
 
 	#[test]
