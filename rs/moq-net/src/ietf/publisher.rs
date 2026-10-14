@@ -1189,7 +1189,10 @@ where
 		let priority = *ranking.priority.read();
 		let rank = match fill {
 			FillServe::Empty => return,
-			FillServe::Group { sequence, .. } => Some(ranking.rank(sequence)),
+			FillServe::Group { sequence, skip, .. } => Some(ranking.rank(Location {
+				group: sequence,
+				object: skip,
+			})),
 			// Only the refusal goes out on its stream, so it competes with nothing.
 			FillServe::Unsupported => None,
 		};
@@ -1797,7 +1800,7 @@ where
 				.await?;
 
 			let uni = self.session.open_uni().await.map_err(Error::from_transport)?;
-			let mut writer = Writer::new(Ranked::new(uni, Some(ranking.rank(start.group))), self.version);
+			let mut writer = Writer::new(Ranked::new(uni, Some(ranking.rank(start))), self.version);
 			writer.varint(FetchHeader::TYPE).await?;
 			writer
 				.encode(&FetchHeader {
@@ -3046,7 +3049,13 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			.await
 			.map_err(Error::from_transport)?;
 		self.opened.fetch_add(1, Ordering::Relaxed);
-		let stream = Ranked::new(stream, Some(self.ranking.rank(end.group)));
+		let stream = Ranked::new(
+			stream,
+			Some(self.ranking.rank(Location {
+				group: end.group,
+				object: end.frame,
+			})),
+		);
 		let mut writer = Writer::new(stream, self.version);
 		writer.buffer(&ietf::GroupHeader {
 			track_alias: self.request_id.0,
@@ -3122,7 +3131,10 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						},
 					};
 
-					let rank = self.ranking.rank(sequence);
+					let rank = self.ranking.rank(Location {
+						group: sequence,
+						object: slice.skip,
+					});
 					self.children.push(
 						GroupServe::new(
 							self.session.clone(),
@@ -3222,13 +3234,15 @@ struct Ranking {
 }
 
 impl Ranking {
-	/// A stream carrying group `sequence`, ranked among the request's others.
-	fn rank(&self, sequence: u64) -> Rank {
+	/// A stream carrying a group from `start` on, ranked among the request's others.
+	fn rank(&self, start: Location) -> Rank {
 		let applied = *self.priority.read();
 		Rank {
-			handle: self
-				.queue
-				.insert(Priority::new(applied, self.request_id.0, sequence).with_order(self.order)),
+			handle: self.queue.insert(
+				Priority::new(applied, self.request_id.0, start.group)
+					.with_order(self.order)
+					.with_start(start.object),
+			),
 			priority: self.priority.clone(),
 			applied,
 			order: self.order,
@@ -6229,7 +6243,7 @@ mod serve_tests {
 		};
 		let [higher, _older, _later, _lower] = rival_streams(&queue, ranking.request_id);
 		// Newest first: the subscription's group 5 goes ahead of the fill, and group 3 after.
-		let _groups = [ranking.rank(5), ranking.rank(3)];
+		let _groups = [5, 3].map(|group| ranking.rank(Location { group, object: 0 }));
 
 		let opened = AtomicU64::new(0);
 		let fill = FillServe::Group {
@@ -6265,6 +6279,37 @@ mod serve_tests {
 		fill.await;
 		assert_eq!(occurrences(&h.log, b"fill"), 1);
 		assert!(h.log.resets().is_empty(), "a served fill must not reset");
+	}
+
+	/// A fill of the current group outranks the live stream carrying the rest of that group,
+	/// which the subscriber cannot use without the fill's objects first.
+	#[moq_net_sim::test]
+	async fn a_fill_outranks_the_rest_of_its_group() {
+		let h = serve(Version::Draft20);
+		let mut group = h.track.create_group(group::Info { sequence: 4 }).unwrap();
+		group.write_frame(timestamp(), b"head".as_slice()).unwrap();
+
+		let ranking = Ranking {
+			queue: h.publisher.priority.clone(),
+			request_id: RequestId(REQUEST_ID),
+			priority: kio::Producer::new(PRIORITY).consume(),
+			order: Order::Descending,
+		};
+		// The live stream, from object 1 on, queued first so the slab id alone would favor it.
+		let mut live = ranking.rank(Location { group: 4, object: 1 });
+		assert_eq!(live.handle.send_order(), 255);
+
+		let opened = AtomicU64::new(0);
+		let fill = FillServe::Group {
+			sequence: 4,
+			skip: 0,
+			until: Some(1),
+		};
+		h.publisher
+			.run_fill(fill, &ranking, h.track.consume(), None, &opened)
+			.await;
+		assert_eq!(h.log.priorities(), [255], "the start of the group goes first");
+		assert_eq!(occurrences(&h.log, b"head"), 1);
 	}
 
 	/// A standalone FETCH competes with group streams by its subscriber priority alone, its
