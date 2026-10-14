@@ -230,7 +230,8 @@ impl Clock {
 	/// The wall-clock time of `pts` under this broadcast's mapping.
 	///
 	/// Pure in the stored mapping: a system-clock adjustment after construction changes nothing.
-	/// Refuses an unrepresentable result rather than truncating it, and a clock without a mapping.
+	/// Exact down to the nanosecond; an instant finer than that (a 90 kHz tick) is floored.
+	/// Refuses an unrepresentable result, and a clock without a mapping.
 	pub fn wall_clock(&self, pts: moq_net::Timestamp) -> crate::Result<SystemTime> {
 		Ok(self.mapping()?.wall_clock(pts)?)
 	}
@@ -423,6 +424,14 @@ mod tests {
 			moq_epoch() + Duration::from_secs(2),
 			"archive records keep their wall times"
 		);
+	}
+
+	/// Regression: a wall with a sub-millisecond part came back up to 999 µs early.
+	#[test]
+	fn wall_clock_roundtrips_a_microsecond_wall() {
+		let wall = moq_epoch() + Duration::from_micros(1_000_999);
+		let clock = Clock::at(epoch(), wall).unwrap();
+		assert_eq!(clock.wall_clock(moq_net::Timestamp::ZERO).unwrap(), wall);
 	}
 
 	#[test]
