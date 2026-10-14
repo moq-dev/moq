@@ -21,7 +21,7 @@ use gst::subclass::prelude::*;
 use hang::moq_net;
 
 use super::pad::{CapsOutcome, ProducerOptions, PushOutcome, caps_supported};
-use super::request_pad::{MoqSinkPad, Notifications};
+use super::request_pad::{MoqSinkPad, Notifications, PadLifecycle};
 use super::session::{
 	CAT, Completion, CompletionHandle, ConnectionStatus, RUNTIME, ResolvedSettings, Session, SessionRegistration,
 	notify, sessions_structure,
@@ -790,25 +790,11 @@ impl MoqSink {
 					if let Some(state) = control.live.as_ref().filter(|state| state.is_open())
 						&& let Some(catalog) = state.catalog.as_ref()
 					{
-						let completion = state.session.completion();
 						let mut lifecycle = sink_pad.lifecycle();
 						if lifecycle.releasing {
 							return false;
 						}
-						let requested = lifecycle.requested().map(str::to_owned);
-						let mut options = ProducerOptions::new(&caps)
-							.with_container(lifecycle.container().into())
-							.with_encoder(lifecycle.encoder());
-						if let Some(track) = requested.as_deref() {
-							options = options.with_track(track);
-						}
-						let outcome = lifecycle.media.observe_caps(&state.broadcast, catalog, options);
-						lifecycle.completion = Some(completion);
-						Some(match outcome {
-							CapsOutcome::Active(track) => (Some(lifecycle.commit(track)), true),
-							CapsOutcome::Failed(reason) => (Some(lifecycle.fail(reason)), false),
-							CapsOutcome::Unchanged => (None, true),
-						})
+						Some(observe_caps(state, catalog, &mut lifecycle, &caps))
 					} else {
 						None
 					}
@@ -882,32 +868,35 @@ impl MoqSink {
 				drop(control);
 				gst::Pad::event_default(pad, Some(&*self.obj()), event)
 			}
-			gst::EventView::FlushStop(_) => {
-				let control = self.control.lock().unwrap();
-				if control.live.as_ref().is_some_and(|state| state.is_open()) {
-					let mut lifecycle = sink_pad.lifecycle();
-					if !lifecycle.releasing {
-						lifecycle.ended = false;
-						lifecycle.media.flush();
+			// A new stream on this pad is a fresh start like a flush: it no longer counts as ended, and its
+			// timeline is re-anchored. Without that the old stream's segment base stays current, and a new
+			// stream restarting at zero reads as a rewind, which invalidates the pad and silently drops
+			// its buffers. An importer its EOS finished unresolved is rebuilt from the sticky caps.
+			gst::EventView::FlushStop(_) | gst::EventView::StreamStart(_) => {
+				let changes = {
+					let control = self.control.lock().unwrap();
+					match control.live.as_ref().filter(|state| state.is_open()) {
+						Some(state) => {
+							let _rt = RUNTIME.enter();
+							let mut lifecycle = sink_pad.lifecycle();
+							match lifecycle.releasing {
+								true => None,
+								false => {
+									lifecycle.ended = false;
+									lifecycle.media.flush();
+									let caps = lifecycle.media.resumable_caps();
+									caps.zip(state.catalog.as_ref()).and_then(|(caps, catalog)| {
+										observe_caps(state, catalog, &mut lifecycle, &caps).0
+									})
+								}
+							}
+						}
+						None => None,
 					}
+				};
+				if let Some(changes) = changes {
+					sink_pad.notify_changes(changes);
 				}
-				drop(control);
-				gst::Pad::event_default(pad, Some(&*self.obj()), event)
-			}
-			// A new stream on this pad is a fresh start: it no longer counts as ended, and its timeline is
-			// re-anchored like a flush. Without that the old stream's segment base stays current, and a
-			// new stream restarting at zero reads as a rewind, which invalidates the pad and silently
-			// drops its buffers.
-			gst::EventView::StreamStart(_) => {
-				let control = self.control.lock().unwrap();
-				if control.live.as_ref().is_some_and(|state| state.is_open()) {
-					let mut lifecycle = sink_pad.lifecycle();
-					if !lifecycle.releasing {
-						lifecycle.ended = false;
-						lifecycle.media.flush();
-					}
-				}
-				drop(control);
 				gst::Pad::event_default(pad, Some(&*self.obj()), event)
 			}
 			_ => gst::Pad::event_default(pad, Some(&*self.obj()), event),
@@ -1120,6 +1109,30 @@ impl MoqSink {
 				gst::element_error!(self.obj(), gst::CoreError::Failed, ("session error"), ["{err}"]);
 			}
 		}
+	}
+}
+
+/// Build a pad's producer for `caps` in the open publication, returning its status changes and whether
+/// the caps were accepted.
+fn observe_caps(
+	state: &State,
+	catalog: &moq_mux::catalog::Producer,
+	lifecycle: &mut PadLifecycle,
+	caps: &gst::Caps,
+) -> (Option<Notifications>, bool) {
+	let requested = lifecycle.requested().map(str::to_owned);
+	let mut options = ProducerOptions::new(caps)
+		.with_container(lifecycle.container().into())
+		.with_encoder(lifecycle.encoder());
+	if let Some(track) = requested.as_deref() {
+		options = options.with_track(track);
+	}
+	let outcome = lifecycle.media.observe_caps(&state.broadcast, catalog, options);
+	lifecycle.completion = Some(state.session.completion());
+	match outcome {
+		CapsOutcome::Active(track) => (Some(lifecycle.commit(track)), true),
+		CapsOutcome::Failed(reason) => (Some(lifecycle.fail(reason)), false),
+		CapsOutcome::Unchanged => (None, true),
 	}
 }
 
@@ -1385,6 +1398,72 @@ mod tests {
 		);
 		assert!(first.video.renditions.contains_key("pending"));
 		assert!(completion_of(&run.0).is_open());
+	}
+
+	// GStreamer keeps CAPS sticky across a flush, so a resumed pad gets no new CAPS event.
+	#[test]
+	fn an_unresolved_pad_resumed_after_eos_publishes_without_new_caps() {
+		use futures::FutureExt;
+		for resume in ["flush", "stream-start"] {
+			let run = CatalogRun::new();
+			let audio = run.pad("audio");
+			let video = run.pad("video");
+			let mut catalog = run.start();
+			assert!(negotiate(&audio, &opus_caps()));
+			assert!(negotiate(&video, &h264_caps()));
+			assert!(video.send_event(gst::event::Eos::new()));
+			let std::task::Poll::Ready(Ok(Some(first))) = next_catalog(&mut catalog) else {
+				panic!("the ended pad must release the first catalog ({resume})")
+			};
+			assert!(first.video.renditions.is_empty());
+
+			match resume {
+				"flush" => {
+					assert!(video.send_event(gst::event::FlushStart::new()));
+					assert!(video.send_event(gst::event::FlushStop::new(true)));
+				}
+				"stream-start" => assert!(video.send_event(gst::event::StreamStart::new("second"))),
+				_ => unreachable!(),
+			}
+			video_frame(&video);
+
+			let std::task::Poll::Ready(Ok(Some(next))) = next_catalog(&mut catalog) else {
+				panic!("the resumed pad must publish its rendition ({resume})")
+			};
+			assert!(next.video.renditions.contains_key("video"), "{resume}");
+			let broadcast = run
+				.0
+				.imp()
+				.control
+				.lock()
+				.unwrap()
+				.live
+				.as_ref()
+				.unwrap()
+				.broadcast
+				.consume();
+			let mut track = broadcast
+				.track("video")
+				.expect("the resumed track is published")
+				.subscribe(None)
+				.now_or_never()
+				.expect("subscribed without waiting")
+				.expect("subscribe to the resumed track")
+				.ordered();
+			let mut group = track
+				.next_group()
+				.now_or_never()
+				.expect("a group is ready")
+				.unwrap()
+				.expect("the resumed keyframe opens a group");
+			let frame = group
+				.read_frame()
+				.now_or_never()
+				.expect("a frame is ready")
+				.unwrap()
+				.expect("the resumed keyframe is published");
+			assert!(!frame.payload.is_empty(), "{resume}");
+		}
 	}
 
 	#[test]

@@ -310,6 +310,15 @@ impl Pad {
 		Ok(())
 	}
 
+	/// The caps to rebuild from when [`end_unresolved`](Self::end_unresolved) finished this pad and its
+	/// stream resumes: CAPS stay sticky across a flush, so none arrives to rebuild it.
+	pub(super) fn resumable_caps(&self) -> Option<gst::Caps> {
+		match (&self.track, self.failed) {
+			(None, false) => self.caps.clone(),
+			_ => None,
+		}
+	}
+
 	/// True once this pad has been invalidated by a bad caps/bitstream; the caller drops its buffers.
 	pub fn is_failed(&self) -> bool {
 		self.failed
