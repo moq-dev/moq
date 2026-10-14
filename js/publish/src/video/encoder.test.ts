@@ -1267,6 +1267,73 @@ test("an unsupported ceiling growth keeps the accepted ceiling", async () => {
 	}
 });
 
+// Outgrowing the ceiling while disabled behaves as it does while enabled: the unmute encodes scaled
+// to the accepted ceiling instead of staying down.
+test("an unsupported ceiling growth while disabled keeps the accepted ceiling", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+	const probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockImplementation(async (config) => ({
+		supported: config.codec.startsWith("avc1") && config.width <= 1280,
+	}));
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const capture = {
+		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
+		out: { display: new Signal({ width: 1280, height: 720 }) },
+	};
+	const enabled = new Signal(true);
+	const encoder = new Encoder("video", { enabled, capture: capture as never });
+
+	try {
+		await settle();
+		const before = encoder.out.catalog.peek();
+		expect(before).toMatchObject({ codedWidth: 1280, codedHeight: 720 });
+
+		enabled.set(false);
+		capture.out.display.set({ width: 1920, height: 1080 });
+		await settle();
+		enabled.set(true);
+		await settle();
+		expect(encoder.out.catalog.peek()).toEqual(before);
+		expect(encoder.out.resolved.peek()).toMatchObject({ width: 1280, height: 704 });
+	} finally {
+		encoder.close();
+		probe.mockRestore();
+		warn.mockRestore();
+	}
+});
+
+// The scaled fallback only covers a refused size. A codec the hardware refuses still fails loud
+// rather than leaving the old codec in place.
+test("an unsupported codec fails even after a refused ceiling growth", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+	const probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockImplementation(async (config) => ({
+		supported: config.codec.startsWith("avc1") && config.width <= 1280,
+	}));
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const error = spyOn(console, "error").mockImplementation(() => {});
+	const capture = {
+		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
+		out: { display: new Signal({ width: 1280, height: 720 }) },
+	};
+	const encoder = new Encoder("video", { enabled: true, capture: capture as never });
+
+	try {
+		await settle();
+		capture.out.display.set({ width: 1920, height: 1080 });
+		await settle();
+		expect(encoder.out.resolved.peek()).toMatchObject({ width: 1280, height: 704 });
+
+		encoder.config.set({ codec: "av01" });
+		await settle();
+		expect(encoder.out.catalog.peek()).toBeUndefined();
+		expect(encoder.out.resolved.peek()).toBeUndefined();
+	} finally {
+		encoder.close();
+		probe.mockRestore();
+		warn.mockRestore();
+		error.mockRestore();
+	}
+});
+
 // A refused first size commits no ceiling, so a smaller one recovers the rendition.
 test("a refused first ceiling recovers at a smaller size", async () => {
 	using _videoEncoder = installFakeVideoEncoder();

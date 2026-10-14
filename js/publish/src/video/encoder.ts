@@ -506,33 +506,39 @@ export class Encoder {
 		// Captured now: the run's signal is replaced once a rerun starts.
 		const superseded = effect.abort;
 		effect.spawn(async () => {
+			const track = this.#track(dimensions.broadcast);
 			try {
-				const detected = await this.#bestCodec(dimensions, target);
+				let detected: Detected;
+				try {
+					detected = await this.#bestCodec(dimensions, target);
+				} catch (err) {
+					// A capture that outgrew the accepted ceiling to a size the hardware refuses encodes scaled
+					// down to fit it, until a smaller capture reruns the probe. Re-probing the ceiling with the
+					// current target, rather than reusing the old probe, still refuses a target the hardware
+					// can't meet and survives a disable that dropped the old probe.
+					const accepted = track.ceiling;
+					if (
+						superseded.aborted ||
+						!accepted ||
+						(dimensions.width <= accepted.width && dimensions.height <= accepted.height)
+					) {
+						throw err;
+					}
+					console.warn(
+						`video ${dimensions.width}x${dimensions.height} unsupported, keeping ${accepted.width}x${accepted.height}:`,
+						err,
+					);
+					detected = await this.#bestCodec(accepted, target);
+				}
 				if (superseded.aborted) return;
 
 				// Only an accepted probe commits a ceiling, so a size the hardware refuses never sticks.
 				const { width, height } = detected.config;
-				this.#track(dimensions.broadcast).ceiling = { width, height };
+				track.ceiling = { width, height };
 				this.#codec.set({ ...detected, broadcast: dimensions.broadcast });
 			} catch (err) {
 				// A newer probe reports its own outcome.
 				if (superseded.aborted) return;
-
-				// A capture that outgrew the ceiling to a size the hardware refuses keeps the accepted probe
-				// and encodes scaled down to fit it, until a smaller capture reruns the probe.
-				const previous = this.#codec.peek();
-				if (
-					previous &&
-					previous.broadcast === dimensions.broadcast &&
-					(dimensions.width > previous.config.width || dimensions.height > previous.config.height)
-				) {
-					const { width, height } = previous.config;
-					console.warn(
-						`video ${dimensions.width}x${dimensions.height} unsupported, keeping ${width}x${height}:`,
-						err,
-					);
-					return;
-				}
 
 				this.#codec.set(undefined);
 				this.#fail(effect);
