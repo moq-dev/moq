@@ -86,6 +86,21 @@ impl Deadlines {
 	}
 }
 
+/// A queue the simulator keeps in step without keeping it alive.
+#[cfg(feature = "sim")]
+pub(crate) struct WeakDeadlines(std::sync::Weak<Mutex<State>>);
+
+#[cfg(feature = "sim")]
+impl WeakDeadlines {
+	pub(crate) fn new(deadlines: &Deadlines) -> Self {
+		Self(Arc::downgrade(&deadlines.0))
+	}
+
+	pub(crate) fn upgrade(&self) -> Option<Deadlines> {
+		self.0.upgrade().map(Deadlines)
+	}
+}
+
 /// A re-armable deadline on [`Deadlines`].
 ///
 /// Arm it, poll it from a `poll_*` function, re-arm or disarm as the deadline

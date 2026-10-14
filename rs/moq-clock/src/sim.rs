@@ -11,7 +11,7 @@
 //!
 //! Caller-driven state machines take time from their caller:
 //! [`drive`](crate::drive) polls one with the simulated instant, and [`attach`]
-//! keeps an externally owned clock, such as [`Deadlines`](crate::Deadlines), in step.
+//! keeps a [`Deadlines`] queue in step.
 
 use std::{
 	cell::RefCell,
@@ -29,15 +29,11 @@ use std::{
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 
-use crate::{Instant, Manual, Wall};
+use crate::{Deadlines, Instant, Manual, Wall, deadline::WeakDeadlines};
 
 thread_local! {
 	static CURRENT: RefCell<Option<Rc<Runtime>>> = const { RefCell::new(None) };
 }
-
-/// A source of deadlines kept in step with simulated time: called with the new
-/// instant whenever time moves, it returns its earliest deadline still pending.
-type Source = Box<dyn FnMut(Instant) -> Option<Instant>>;
 
 type Task = Pin<Box<dyn Future<Output = ()>>>;
 
@@ -47,7 +43,8 @@ struct Runtime {
 	/// Spawned since the run loop last collected them.
 	spawned: RefCell<Vec<Task>>,
 	time: RefCell<Time>,
-	sources: RefCell<Vec<Source>>,
+	/// Queues kept in step with simulated time, until their owners drop them.
+	queues: RefCell<Vec<WeakDeadlines>>,
 }
 
 struct Time {
@@ -62,7 +59,7 @@ impl Runtime {
 		self.time.borrow().clock.now()
 	}
 
-	/// Move time to `at` (never backwards), waking every timer and source due by then.
+	/// Move time to `at` (never backwards), waking every timer and queued deadline due by then.
 	fn advance_to(&self, at: Instant) {
 		let due = {
 			let mut time = self.time.borrow_mut();
@@ -79,36 +76,34 @@ impl Runtime {
 			due
 		};
 		due.into_iter().for_each(Waker::wake);
-		self.poll_sources();
+		self.advance_queues();
 	}
 
-	/// Bring every source up to the current instant, returning the earliest deadline they report.
-	fn poll_sources(&self) -> Option<Instant> {
+	/// Bring every attached queue to the current instant, forgetting dropped ones,
+	/// and return their earliest deadline, which is always still ahead.
+	fn advance_queues(&self) -> Option<Instant> {
 		let now = self.now();
-		let mut polled = Vec::new();
-		let mut next = None;
-		// Taken out so a source may attach another while it runs, which is polled next.
-		loop {
-			let mut sources = std::mem::take(&mut *self.sources.borrow_mut());
-			if sources.is_empty() {
-				break;
-			}
-			let reported = sources.iter_mut().filter_map(|source| source(now)).inspect(|at| {
-				// A deadline it already reached would stall the run without moving time.
-				assert!(*at > now, "an attached source reported a deadline it already reached");
-			});
-			next = reported.chain(next).min();
-			polled.append(&mut sources);
-		}
-		*self.sources.borrow_mut() = polled;
-		next
+		// Upgraded first, so no borrow is held while advancing wakes tasks.
+		let live: Vec<Deadlines> = {
+			let mut live = Vec::new();
+			self.queues
+				.borrow_mut()
+				.retain(|queue| queue.upgrade().map(|queue| live.push(queue)).is_some());
+			live
+		};
+		live.iter()
+			.filter_map(|queue| {
+				queue.advance(now);
+				queue.next()
+			})
+			.min()
 	}
 
-	/// Jump to the earliest armed timer or `source`, the sources' earliest deadline.
+	/// Jump to the earliest armed timer or `queued`, the queues' earliest deadline.
 	/// False when nothing is armed.
-	fn advance(&self, source: Option<Instant>) -> bool {
+	fn advance(&self, queued: Option<Instant>) -> bool {
 		let timer = self.time.borrow().timers.first_key_value().map(|((at, _), _)| *at);
-		match timer.into_iter().chain(source).min() {
+		match timer.into_iter().chain(queued).min() {
 			Some(at) => {
 				self.advance_to(at);
 				true
@@ -177,7 +172,7 @@ pub fn run<F: IntoFuture>(future: F) -> F::Output {
 			next: 0,
 			timers: BTreeMap::new(),
 		}),
-		sources: RefCell::new(Vec::new()),
+		queues: RefCell::new(Vec::new()),
 	});
 	CURRENT.with(|current| {
 		let mut current = current.borrow_mut();
@@ -207,14 +202,14 @@ pub fn run<F: IntoFuture>(future: F) -> F::Output {
 		tasks.extend(runtime.spawned.take());
 		pool.0.store(false, Ordering::SeqCst);
 		while let Poll::Ready(Some(())) = tasks.poll_next_unpin(&mut pool_cx) {}
-		// Bring sources to the current instant before deciding to stall: one attached
+		// Bring queues to the current instant before deciding to stall: one attached
 		// behind the clock may wake a task without time moving.
-		let source = runtime.poll_sources();
+		let queued = runtime.advance_queues();
 		if root.0.load(Ordering::SeqCst) || pool.0.load(Ordering::SeqCst) || !runtime.spawned.borrow().is_empty() {
 			continue;
 		}
 		assert!(
-			runtime.advance(source),
+			runtime.advance(queued),
 			"deadlock: every task is parked and no timer is armed"
 		);
 	};
@@ -222,23 +217,22 @@ pub fn run<F: IntoFuture>(future: F) -> F::Output {
 	drop(tasks);
 	drop(runtime.spawned.take());
 	drop(enter);
-	// Sources and timers may hold wakers into the dropped tasks.
-	runtime.sources.borrow_mut().clear();
+	// Timers may hold wakers into the dropped tasks.
+	runtime.queues.borrow_mut().clear();
 	runtime.time.borrow_mut().timers.clear();
 	output
 }
 
-/// Keep an externally owned clock in step with simulated time.
+/// Keep `deadlines` in step with simulated time until every clone of it is dropped.
 ///
-/// `source` is called with the new instant whenever time moves and returns its
-/// earliest pending deadline, which [`run`] treats like an armed timer.
+/// Whenever time moves, the queue is advanced to the new instant, and its earliest
+/// deadline counts as an armed timer.
 ///
 /// # Panics
 ///
-/// Outside [`run`], and when `source` returns a deadline at or before the instant
-/// it was handed.
-pub fn attach(source: impl FnMut(Instant) -> Option<Instant> + 'static) {
-	expect_current().sources.borrow_mut().push(Box::new(source));
+/// Outside [`run`]. The run panics if the queue is ahead of the simulated clock.
+pub fn attach(deadlines: &Deadlines) {
+	expect_current().queues.borrow_mut().push(WeakDeadlines::new(deadlines));
 }
 
 /// Let `duration` of simulated time pass, moving both the instant and the wall
@@ -779,20 +773,16 @@ mod tests {
 		});
 	}
 
-	/// A source attached behind the clock catches up before the run decides it stalled.
+	/// A queue attached behind the clock catches up before the run decides it stalled.
 	#[crate::test]
-	async fn a_source_attached_behind_the_clock_wakes_at_once() {
+	async fn a_queue_attached_behind_the_clock_wakes_at_once() {
 		let deadlines = Deadlines::new(crate::now());
 		let mut deadline = Deadline::after(&deadlines, Duration::from_secs(5));
 		advance(Duration::from_secs(10)).await;
 		let task = spawn(async move { kio::wait(|waiter| deadline.poll(waiter)).await });
 		yield_now().await;
 
-		let driven = deadlines.clone();
-		attach(move |now| {
-			driven.advance(now);
-			driven.next()
-		});
+		attach(&deadlines);
 		task.await.unwrap();
 		assert_eq!(crate::now(), at(10));
 	}
@@ -815,33 +805,14 @@ mod tests {
 		}
 	}
 
-	/// A source reporting a deadline it already reached fails loud instead of spinning.
-	#[test]
-	#[should_panic(expected = "already reached")]
-	fn a_stale_source_deadline_panics() {
-		run(async {
-			attach(Some);
-			std::future::pending::<()>().await;
-		});
-	}
-
-	/// A source attached from inside another is polled in the same pass.
+	/// The run holds an attached queue weakly and forgets it once its owner drops it.
 	#[crate::test]
-	async fn a_source_attached_by_a_source_is_polled() {
+	async fn an_attached_queue_detaches_once_dropped() {
 		let deadlines = Deadlines::new(crate::now());
-		let mut deadline = Deadline::after(&deadlines, Duration::from_secs(3));
-		let mut inner = Some(deadlines.clone());
-		attach(move |_| {
-			if let Some(driven) = inner.take() {
-				attach(move |now| {
-					driven.advance(now);
-					driven.next()
-				});
-			}
-			None
-		});
-		kio::wait(|waiter| deadline.poll(waiter)).await;
-		assert_eq!(crate::now(), at(3));
+		attach(&deadlines);
+		drop(deadlines);
+		crate::sleep(Duration::from_secs(1)).await;
+		assert!(expect_current().queues.borrow().is_empty());
 	}
 
 	/// A run drops its pending tasks, so a handle that escapes it reports the task
@@ -868,11 +839,7 @@ mod tests {
 	#[crate::test]
 	async fn attached_deadlines_advance_with_time() {
 		let deadlines = Deadlines::new(crate::now());
-		let driven = deadlines.clone();
-		attach(move |now| {
-			driven.advance(now);
-			driven.next()
-		});
+		attach(&deadlines);
 		let mut deadline = Deadline::after(&deadlines, Duration::from_secs(4));
 		// Nothing else is armed, so the stall jumps straight to the queue's deadline.
 		kio::wait(|waiter| deadline.poll(waiter)).await;

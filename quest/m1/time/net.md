@@ -33,8 +33,8 @@ Coordinate clock origin, units, and controlled-time behavior with the
 
 What moq-clock landed with, mapped onto moq-net: `time::Clock` becomes
 `moq_clock::Deadlines` (built with its first `now`, so no `try_now`), and
-`Clock::sim()` becomes `sim::attach` over `Deadlines::advance` and
-`Deadlines::next`. `time::run` and `run_sim` both become `moq_clock::drive`.
+`Clock::sim()` becomes `sim::attach(&deadlines)`, which keeps the queue in
+step until it drops. `time::run` and `run_sim` both become `moq_clock::drive`.
 `moq_net_sim::{now, sleep, sleep_until, timeout}` become the ambient
 `moq_clock` functions; `spawn`, `advance`, and `yield_now` move to
 `moq_clock::sim`. The sim's and `Manual`'s wall clock start at the fixed

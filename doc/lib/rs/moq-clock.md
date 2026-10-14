@@ -68,8 +68,9 @@ Inside the simulator the clock starts at `Instant::ZERO` and 2025-01-01 UTC
 (`Manual::WALL_START`), like a new `Manual`. Time moves only when every task
 has stalled: the clock jumps to the earliest armed timer, so a test of a 30
 second timeout takes no real time. A run where every task is parked and no
-timer is armed panics as a deadlock instead of hanging. `sim::advance()` and `sim::step_wall()` move time by hand, and
-`sim::attach()` keeps a `Deadlines` queue in step.
+timer is armed panics as a deadlock instead of hanging. `sim::advance()` and
+`sim::step_wall()` move time by hand, and `sim::attach(&deadlines)` keeps a
+`Deadlines` queue in step until it drops.
 
 Tests that do real I/O (sockets, browsers, codecs) can't use the simulator.
 They wait on events and use the host clock only for a watchdog.
