@@ -492,8 +492,13 @@ impl Quiet {
 
 	/// Where the run holding `sequence` stops, if one does.
 	fn stop(&self, sequence: u64) -> Option<u64> {
-		let (_, &stop) = self.runs.range(..=sequence).next_back()?;
-		(stop > sequence).then_some(stop)
+		Some(self.holding(sequence)?.end)
+	}
+
+	/// The run holding `sequence`, if one does.
+	fn holding(&self, sequence: u64) -> Option<Range<u64>> {
+		let (&first, &stop) = self.runs.range(..=sequence).next_back()?;
+		(stop > sequence).then_some(first..stop)
 	}
 
 	/// No group in `run` could present: record it, merged with the runs it overlaps.
@@ -1379,15 +1384,37 @@ impl TrackState {
 		if inside && self.lookup.get(&sequence).is_some_and(|slot| !slot.group.ended_empty()) {
 			self.quiet.lock().landed(sequence, &self.lookup);
 		}
-		let below = self
-			.lookup
-			.range(..sequence)
-			.rev()
-			.find(|(_, slot)| slot.is_shown())
-			.map(|(below, _)| *below);
+		let below = self.predecessor(sequence);
 		let oldest = self.lookup.first_key_value().map_or(sequence, |(oldest, _)| *oldest);
 		self.cache.wakes().landed(below, sequence, oldest);
 		self.shown(sequence);
+	}
+
+	/// The nearest group below `sequence` that could present: the one whose successor
+	/// a landing at `sequence` becomes, with every group between.
+	///
+	/// [`Self::successor`] in reverse, so it jumps over the runs in [`Self::quiet`] and
+	/// records the one it walks, which `sequence` stops.
+	fn predecessor(&self, sequence: u64) -> Option<u64> {
+		// The lowest group this walk passed, and the bound of the next look.
+		let mut passed = None;
+		let mut to = sequence;
+		let found = loop {
+			let Some((&at, slot)) = self.lookup.range(..to).next_back() else {
+				break None;
+			};
+			if slot.is_shown() && !slot.group.ended_empty() {
+				break Some(at);
+			}
+			// Not held across `ended_empty`, which takes the group's lock.
+			let run = self.quiet.lock().holding(at);
+			to = run.map_or(at, |run| run.start);
+			passed = Some(to);
+		};
+		if let Some(passed) = passed {
+			self.quiet.lock().record(passed..sequence, &self.lookup);
+		}
+		found
 	}
 
 	/// Content at `sequence` became readable: an answer waiting on it now shows.
@@ -7016,6 +7043,42 @@ mod test {
 
 		producer.reveal_group(&received);
 		assert!(woken.load(Ordering::SeqCst), "the reveal wakes the expired read");
+		let result = next.as_mut().poll(&mut cx);
+		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+	}
+
+	/// A group landing past a finished empty one becomes the successor of the group below
+	/// that, so it wakes a read parked there, which then finds the group stale.
+	#[test]
+	fn a_landing_past_an_empty_group_wakes_the_read_below_it() {
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(10)));
+		let mut head = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
+			.unwrap();
+		write_empty_group(&producer, 1);
+		write_group_at(&producer, 3, 100);
+		write_group_at(&producer, 4, 105);
+
+		let mut held = subscriber
+			.recv_group()
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.expect("head group");
+		assert_eq!(held.sequence, 0);
+		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_some());
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waker = futures::task::waker(Arc::new(FlagWake(woken.clone())));
+		let mut cx = std::task::Context::from_waker(&waker);
+		let mut next = std::pin::pin!(held.read_frame());
+		assert!(next.as_mut().poll(&mut cx).is_pending(), "group 3 bounds the head");
+
+		let mut late = producer.create_group(group::Info { sequence: 2 }).unwrap();
+		assert!(woken.load(Ordering::SeqCst), "group 2 is the head's successor now");
+		assert!(next.as_mut().poll(&mut cx).is_pending(), "group 2 has no frame yet");
+		late.write_frame(Timestamp::from_millis(50).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
 		let result = next.as_mut().poll(&mut cx);
 		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
 	}
