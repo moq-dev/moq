@@ -29,5 +29,4 @@ numbers and a recommendation go in the
 
 ## Required
 
-- [Contended bench](/quest/m2/perf/kio-channel-contention/bench.md) - the baseline and the named channels
 - [In-memory transport](/quest/m2/perf/kio-channel-contention/bridge.md) - the hop between relays

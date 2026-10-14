@@ -5,9 +5,12 @@
 //! type selects. We advertise no `MAX_AUTH_TOKEN_CACHE_SIZE`, so its default of 0 means
 //! no alias is ever registered and every token arrives by value.
 
+#[cfg(feature = "async")]
+use crate::coding::Stream;
+
 use crate::{
 	DecodeError, Error, SessionError,
-	coding::{Decode as _, Decoder, EncodeError, Encoder, Stream},
+	coding::{Decode as _, Decoder, EncodeError, Encoder},
 	setup::Token,
 };
 
@@ -76,6 +79,7 @@ pub fn unique(tokens: &[RequestToken]) -> Result<(), DecodeError> {
 ///
 /// Section 8.9 rejects the message rather than the session. Every request starts with its
 /// Request ID, so it is read from the undecoded `body`.
+#[cfg(feature = "async")]
 pub(super) async fn reject<S: crate::transport::poll::Session>(
 	mut stream: Stream<S, Version>,
 	kind: request::Kind,

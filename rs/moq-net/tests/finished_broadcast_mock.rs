@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! Regression: a publisher that finishes its track and then its broadcast, over one
 //! direct session with no relay, has the subscription reset with
 //! [`Error::Dropped`](moq_net::Error::Dropped) and the track's content lost.

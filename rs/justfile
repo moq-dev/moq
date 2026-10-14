@@ -208,6 +208,7 @@ c-tests:
 
 # Compile the workspace at the feature extremes.
 features:
+    just rs net-features
     cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
     cargo hack check --locked -p moq-tokio --each-feature --exclude-features _transport --features aws-lc-rs
     cargo check --locked -p moq-relay --no-default-features
@@ -219,6 +220,10 @@ features:
     cargo clippy --locked --workspace {{ no_fuzz }} --all-targets --all-features -- -D warnings
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace {{ no_fuzz }} --all-features --no-deps
     bash sh/rs/nextest.sh cargo nextest run --locked --workspace {{ no_fuzz }} --all-targets --all-features
+
+# Compile and test the explicit-time model without async helpers or sessions.
+net-features:
+    bash sh/rs/net-features.sh
 
 # Compile the media crates at supported feature boundaries and prove expensive
 # native/render dependencies are absent when their features are excluded.

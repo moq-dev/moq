@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! An endpoint linked to two CDNs uses its preferred one and fails over to the next.
 //!
 //! A publisher `P` pushes one broadcast, under one epoch, to CDN relays `A` and `B`. A

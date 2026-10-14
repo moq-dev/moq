@@ -33,6 +33,55 @@ pool's shared counters are not among the hot sites.
 `Shared::lock` (`rs/kio/src/shared.rs:47`) shows up too, but stays flat with
 the worker count.
 
+Baseline (2026-10-14), the before numbers the fix quests compare against.
+Measured on a loaded 24-core Core Ultra 7 270K Plus shared with other jobs
+(load average 25 to 42), so these numbers only rank the targets. Each fix
+quest reruns its baseline on a quiet host and takes its after on that same
+host.
+
+`cargo bench -p kio --bench contended` (`rs/kio/benches/contended.rs`), one
+producer and 4,096 consumers on one channel, ns per consumer:
+
+| workload | 1 thread | 4 threads | 16 threads |
+| --- | --- | --- | --- |
+| notify cycle (`Producer<u64>`) | 37 | 227 | 438 |
+| unchanged re-poll | 8.4 | 61 | 76 |
+| append log (`GroupState`-shaped) | 44 | 276 | 527 |
+
+Spreading the same consumers over more cores makes the whole cycle slower,
+not faster: each acquire that changes cores costs 50 to 500 ns.
+
+`just bench-lock`, mutex wait over worker CPU in the 5 s steady window, tokio
+workers (`chat` is `bench/workloads/chat.toml`, pinned at 10 messages/s; its
+frame size, then rolled once per run from 200 to 400 bytes, is now pinned at 300):
+
+| shape | 1 worker | 4 workers | 16 workers |
+| --- | --- | --- | --- |
+| fanout | 0% | 1.2% (4 ms) | 9.1% (47 ms) |
+| chat | 0% | 5.6% (487 ms) | 30% (3,061 ms) |
+
+Chat saturates its one worker (1.0 core). Neither row is comparable with
+#5031's table, which used a different ramp and window.
+
+Contended channels at 16 workers, by share of mutex wait (`moq_net::model`):
+
+| channel | fanout | chat | callers |
+| --- | --- | --- | --- |
+| `track::TrackState` | 77% | 75% | `GroupExpiry::is_expired` read (32% of all wait in both), `Subscriber::poll_recv_group`, `poll_finished`, `poll_recv_datagram` |
+| `resume::Route` | 21% | 23% | `resume::Reader::sync` and `resume::Consumer::end` reads, `poll_changed` |
+| `group::GroupState` | 2.3% | 1.6% | frame reads, `drift_edge` |
+| `subscription::Subscription` | 0% | 0.6% | `GroupExpiry::is_expired` |
+
+Origin and broadcast state never appear. The `GroupExpiry::is_expired` read
+is its own fix, [Group expiry](/quest/m2/perf/kio-channel-contention/group-expiry.md).
+Every hot site is a read or re-poll
+of a per-track channel that all of a track's subscribers share, which is the
+[version counter](/quest/m2/perf/kio-channel-contention/version.md)'s target.
+`GroupState` is not contended here because both shapes send one-frame
+groups; a multi-frame shape is unmeasured, so the
+[append-only log](/quest/m2/perf/kio-channel-contention/log.md) should measure
+one before naming `GroupState` frames as its target.
+
 Decided (maintainer, 2026-10-07):
 
 - Decide the fix from the stacks. First run the
@@ -73,6 +122,15 @@ Decided (maintainer, 2026-10-14):
   - `RwLock`: the critical sections are a few loads, so the reader count's
     cache line bounces between cores just like the mutex.
 
+Decided (maintainer, 2026-10-14, baseline follow-up):
+
+- `GroupExpiry::is_expired` gets its own quest, ranked ahead of the version
+  counter, rather than waiting on it.
+- The append-only log measures a multi-frame (video-heavy) shape before it
+  picks targets, since both shapes above send one-frame groups.
+- The 10 messages/s pin lives only in `bench/workloads/chat.toml`;
+  `rs/moq-bench/config/chat.toml` keeps its random rate and frame size.
+
 Decided (maintainer, 2026-10-14, per-thread follow-up):
 
 - Per-worker sharding is no longer ruled out; two spikes decide. Both run on
@@ -94,7 +152,7 @@ Decided (maintainer, 2026-10-14, per-thread follow-up):
 
 ## Required
 
-- [Contended bench](/quest/m2/perf/kio-channel-contention/bench.md) - a multi-threaded kio bench swept over threads and consumers, plus the contended channels named from `just bench-lock` stacks
+- [Group expiry](/quest/m2/perf/kio-channel-contention/group-expiry.md) - a group poll decides expiry without locking the track state, the largest single wait site
 - [Version counter](/quest/m2/perf/kio-channel-contention/version.md) - an opted-in re-poll skips the mutex when nothing changed, and parking no longer contends with readers
 - [In-memory transport](/quest/m2/perf/kio-channel-contention/bridge.md) - a zero-copy, flow-controlled `poll::Session` pair in moq-net, with the test mock rebuilt on it
 - [Replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md) - measures per-worker data-plane replicas linked over the in-memory transport, announcements shared

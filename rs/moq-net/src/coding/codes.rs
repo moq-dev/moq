@@ -13,6 +13,7 @@ use crate::{Error, StreamError, ietf, lite};
 ///
 /// Encoding and decoding live on one trait so a peer cannot be told a code from one table
 /// and read against another: implement both halves or neither.
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub trait StreamCodes {
 	/// The code to reset a stream, or send STOP_SENDING, with.
 	fn encode_stream_code(&self, err: &StreamError) -> u32;

@@ -48,7 +48,7 @@ pub struct Frame {
 	pub payload: Bytes,
 }
 
-/// A reusable batch of frames, filled by [`group::Consumer::read_frames`] and drained
+/// A reusable batch of frames, filled by [`group::Consumer::poll_read_frames`] and drained
 /// by [`group::Producer::write_frames`].
 ///
 /// A fixed-capacity inline buffer: `N` frames of stack storage, never a heap
@@ -139,17 +139,21 @@ impl<const N: usize> Buffer<N> {
 /// size fits what remains is allocated up front; past that, its buffer grows with the
 /// bytes received. Each frame returns its share once it completes or aborts.
 #[derive(Clone)]
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) struct Budget(Arc<AtomicUsize>);
 
 impl Budget {
 	/// Enough for a handful of large keyframes in flight at once.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	const DEFAULT: usize = 16 * 1024 * 1024;
 
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn new(bytes: usize) -> Self {
 		Self(Arc::new(AtomicUsize::new(bytes)))
 	}
 
 	/// Take `size` bytes of the budget, or `None` if that is more than remains.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn reserve(&self, size: usize) -> Option<Reservation> {
 		self.0
 			.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| left.checked_sub(size))
@@ -168,6 +172,7 @@ impl Default for Budget {
 }
 
 /// A frame's share of a [`Budget`], returned on drop.
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) struct Reservation {
 	budget: Budget,
 	size: usize,
@@ -271,6 +276,7 @@ impl FrameBuf {
 	}
 
 	/// A buffer for a frame of `size` bytes that allocates only as bytes arrive.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn growing(size: usize) -> Self {
 		Self::with_growth(size, true)
 	}
@@ -548,6 +554,7 @@ impl<'a> Producer<'a> {
 /// frame on the group until this one is finished or aborted.
 ///
 /// Holds the frame's share of the session's [`Budget`], if it got one, until then.
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) struct ProducerOwned {
 	raw: Raw<group::Producer>,
 	_reserved: Option<Reservation>,
@@ -562,6 +569,7 @@ impl std::ops::Deref for ProducerOwned {
 }
 
 impl ProducerOwned {
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn new(group: group::Producer, buf: FrameBuf, info: Info, reserved: Option<Reservation>) -> Self {
 		Self {
 			raw: Raw {
@@ -576,12 +584,14 @@ impl ProducerOwned {
 	}
 
 	/// Attach the parent group's ingress meter, so written chunks bump `bytes`.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn with_meter(mut self, meter: stats::Meter) -> Self {
 		self.raw.stats = meter;
 		self
 	}
 
 	/// Bytes still needed to complete the frame.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn remaining(&self) -> usize {
 		self.raw.remaining()
 	}
@@ -594,21 +604,25 @@ impl ProducerOwned {
 	/// to publish bytes nobody can observe yet.
 	///
 	/// `coding::Reader::poll_read_frame` owns the pairing and is the only caller.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn write<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
 		self.raw.write(chunk)
 	}
 
 	/// Publish what has been written so far, waking consumers parked on the group.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn notify(&self) {
 		self.raw.group.frame_notify();
 	}
 
 	/// Commit the frame, verifying that all bytes were written.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn finish(mut self) -> Result<()> {
 		self.raw.finish()
 	}
 
 	/// Abort the frame (and its group) with the given error.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn abort(mut self, err: Error) -> Result<()> {
 		self.raw.abort(err)
 	}
@@ -877,6 +891,7 @@ impl Consumer {
 	}
 
 	/// Return the next chunk of bytes since the last read.
+	#[cfg(feature = "async")]
 	pub async fn read_chunk(&mut self) -> Result<Option<Bytes>> {
 		kio::wait(|waiter| self.poll_read_chunk(waiter)).await
 	}
@@ -926,6 +941,7 @@ impl Consumer {
 	}
 
 	/// Return all remaining bytes, blocking until the frame is finished.
+	#[cfg(feature = "async")]
 	pub async fn read_all(&mut self) -> Result<Bytes> {
 		kio::wait(|waiter| self.poll_read_all(waiter)).await
 	}
