@@ -1,7 +1,8 @@
 //! The moq-transport error code registries, per negotiated draft.
 //!
-//! This module holds the stream reset registry; [`request`] holds the one for rejecting a
-//! request. The two are disjoint, so the same integer means different things in each.
+//! This module holds the stream reset registry and the session close encoder; [`request`]
+//! holds the one for rejecting a request. The reset and request registries are disjoint, so
+//! the same integer means different things in each.
 //!
 //! # Stream reset codes
 //!
@@ -114,6 +115,17 @@ pub fn from_stream_code(code: u32, version: Version) -> StreamError {
 		TOO_FAR_BEHIND if has_too_far_behind(version) => StreamError::TooFarBehind,
 		MALFORMED_TRACK if has_malformed_track(version) => StreamError::MalformedTrack,
 		code => StreamError::Unknown(code),
+	}
+}
+
+/// The code to close the session with.
+///
+/// The shared session registry, except moq-lite's own 0x30-0x3f range: a bridge must not
+/// carry those codes onto this wire, so an unknown one closes as unspecified instead.
+pub(crate) fn to_session_code(error: &SessionError) -> u32 {
+	match error {
+		SessionError::Unknown(0x30..=0x3f) => SessionError::Internal.to_code(),
+		error => error.to_code(),
 	}
 }
 
@@ -654,6 +666,26 @@ mod tests {
 			"the two spaces disagree about 0"
 		);
 		assert_eq!(SessionError::Cancel.to_code(), INTERNAL_ERROR);
+	}
+
+	/// moq-lite's own session range never reaches this wire, while the shared registry and
+	/// its reserved range pass through as on moq-lite.
+	#[test]
+	fn the_lite_session_range_is_not_sent() {
+		for code in 0x30..=0x3f {
+			assert_eq!(to_session_code(&SessionError::Unknown(code)), 0x1);
+			assert_eq!(
+				SessionError::Unknown(code).to_code(),
+				code,
+				"the shared encoder is unchanged"
+			);
+		}
+		assert_eq!(to_session_code(&SessionError::Unknown(0x20)), 0x20);
+		assert_eq!(
+			to_session_code(&SessionError::Unauthorized),
+			SessionError::Unauthorized.to_code()
+		);
+		assert_eq!(to_session_code(&SessionError::App(7)), 64 + 7);
 	}
 
 	/// Every code we send must decode back to what we meant on the same draft, or two

@@ -75,6 +75,8 @@ pub(crate) struct ExportSource {
 	/// Start at the newest group, rather than the oldest the max delay still reaches, and
 	/// apply the max delay once it is read.
 	live: bool,
+	/// The first group to read, so a resubscription skips groups already read.
+	start: Option<u64>,
 	transform: Option<VideoTransform>,
 	/// Resolved codec configuration record (avcC / hvcC / AudioSpecificConfig /
 	/// OpusHead). Some once the codec config is available — from the catalog
@@ -162,6 +164,7 @@ impl ExportSource {
 			media: Some(media),
 			max_delay,
 			live: false,
+			start: None,
 			transform,
 			description,
 			video_codec: Some(config.codec.clone()),
@@ -193,6 +196,7 @@ impl ExportSource {
 			media: Some(media),
 			max_delay,
 			live: false,
+			start: None,
 			transform: None,
 			description,
 			video_codec: None,
@@ -217,6 +221,7 @@ impl ExportSource {
 			media: Some(HangContainer::Legacy(crate::container::Kind::Data)),
 			max_delay,
 			live: false,
+			start: None,
 			transform: None,
 			description: None,
 			video_codec: None,
@@ -231,6 +236,22 @@ impl ExportSource {
 	pub fn live(mut self) -> Self {
 		self.live = true;
 		self
+	}
+
+	/// Start after `group`, so a resubscription never replays a group already read, such as
+	/// the one the publisher still caches from before the rendition left.
+	pub(crate) fn after(mut self, group: u64) -> Self {
+		self.start = Some(group + 1);
+		self
+	}
+
+	/// The group sequence of the last frame read, or None until the subscription resolves.
+	/// Meaningful only once a frame was read.
+	pub(crate) fn group(&self) -> Option<u64> {
+		match &self.state {
+			SourceState::Active(consumer) => Some(consumer.group()),
+			_ => None,
+		}
 	}
 
 	/// The underlying consumer's playhead generation, or 0 until the subscription resolves:
@@ -336,7 +357,10 @@ impl ExportSource {
 				true => std::time::Duration::ZERO,
 				false => self.max_delay,
 			};
-			let subscription = moq_net::track::Subscription::default().with_max_delay(max_delay);
+			let mut subscription = moq_net::track::Subscription::default().with_max_delay(max_delay);
+			if let Some(start) = self.start {
+				subscription = subscription.with_groups(start..);
+			}
 			self.state = SourceState::Subscribing(broadcast.track(&name)?.subscribe(subscription));
 		}
 

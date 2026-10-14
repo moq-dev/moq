@@ -210,7 +210,10 @@ where
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
 				let Some(setup) = setup else {
 					let err = Error::ProtocolViolation;
-					session.close(SessionError::from(&err).to_code(), "setup stream required");
+					session.close(
+						super::error::to_session_code(&SessionError::from(&err)),
+						"setup stream required",
+					);
 					return Err(err);
 				};
 				let control = Control::new(request_id_max, client).with_window(limits.requests(), client, version);
@@ -602,15 +605,18 @@ where
 		match &res {
 			Err(err @ Error::Transport(_)) => {
 				tracing::info!(%err, "session terminated");
-				session.close(SessionError::Internal.to_code(), "");
+				session.close(super::error::to_session_code(&SessionError::Internal), "");
 			}
 			Err(err) => {
 				tracing::warn!(%err, "session error");
-				session.close(SessionError::from(err).to_code(), err.to_string().as_ref());
+				session.close(
+					super::error::to_session_code(&SessionError::from(err)),
+					err.to_string().as_ref(),
+				);
 			}
 			_ => {
 				tracing::info!("session closed");
-				session.close(SessionError::Cancel.to_code(), "");
+				session.close(super::error::to_session_code(&SessionError::Cancel), "");
 			}
 		}
 
@@ -1037,7 +1043,10 @@ impl<S: crate::transport::poll::Boxable> Uni<S> {
 					Ok(msg) => msg,
 					Err(err) => {
 						tracing::warn!(%err, "setup decode error");
-						session.close(SessionError::ProtocolViolation.to_code(), "invalid setup");
+						session.close(
+							super::error::to_session_code(&SessionError::ProtocolViolation),
+							"invalid setup",
+						);
 						return Ok(());
 					}
 				};
@@ -1047,7 +1056,10 @@ impl<S: crate::transport::poll::Boxable> Uni<S> {
 						Ok(peer) => peer,
 						Err(err) => {
 							tracing::warn!(%err, "setup parameter decode error");
-							session.close(SessionError::ProtocolViolation.to_code(), "invalid setup parameters");
+							session.close(
+								super::error::to_session_code(&SessionError::ProtocolViolation),
+								"invalid setup parameters",
+							);
 							return Ok(());
 						}
 					};
@@ -1414,7 +1426,7 @@ async fn enforce_grant<S: crate::transport::poll::Session>(
 	tracing::error!(broadcast = %origin.absolute(&path), "publishing outside our grant; closing the session");
 	let err = Error::Unauthorized;
 	session.close(
-		SessionError::from(&err).to_code(),
+		super::error::to_session_code(&SessionError::from(&err)),
 		&crate::auth::unauthorized_reason(&path),
 	);
 	Err(err)
