@@ -21,7 +21,7 @@ use std::{
 	rc::Rc,
 	sync::{
 		Arc,
-		atomic::{AtomicBool, Ordering},
+		atomic::{AtomicBool, AtomicU64, Ordering},
 	},
 	task::{Context, Poll, Wake, Waker},
 	time::Duration,
@@ -42,6 +42,8 @@ type Source = Box<dyn FnMut(Instant) -> Option<Instant>>;
 type Task = Pin<Box<dyn Future<Output = ()>>>;
 
 struct Runtime {
+	/// Tells this run from earlier ones on the thread, so a timer finds its own.
+	id: u64,
 	/// Spawned since the run loop last collected them.
 	spawned: RefCell<Vec<Task>>,
 	time: RefCell<Time>,
@@ -156,7 +158,9 @@ impl Drop for Enter {
 /// When called inside another `run`, and when every task is parked with no timer
 /// armed, which is a deadlock.
 pub fn run<F: IntoFuture>(future: F) -> F::Output {
+	static RUNS: AtomicU64 = AtomicU64::new(0);
 	let runtime = Rc::new(Runtime {
+		id: RUNS.fetch_add(1, Ordering::Relaxed),
 		spawned: RefCell::new(Vec::new()),
 		time: RefCell::new(Time {
 			clock: Manual::new(),
@@ -260,8 +264,11 @@ pub fn yield_now() -> impl Future<Output = ()> {
 }
 
 /// A simulated timer behind [`Sleep`](crate::Sleep).
+///
+/// Holds plain data rather than the runtime, so enabling `sim` in a test build
+/// leaves [`Sleep`](crate::Sleep) `Send`. It finds its run as the thread's current one.
 pub(crate) struct Timer {
-	runtime: Rc<Runtime>,
+	run: u64,
 	at: Instant,
 	key: Option<(Instant, u64)>,
 }
@@ -270,10 +277,15 @@ impl Timer {
 	/// A timer for `at`, or `None` outside [`run`].
 	pub(crate) fn new(at: Instant) -> Option<Self> {
 		Some(Self {
-			runtime: current()?,
+			run: current()?.id,
 			at,
 			key: None,
 		})
+	}
+
+	/// The run this timer belongs to, while it is still the thread's current one.
+	fn runtime(&self) -> Option<Rc<Runtime>> {
+		current().filter(|runtime| runtime.id == self.run)
 	}
 
 	pub(crate) fn reset(&mut self, at: Instant) {
@@ -282,18 +294,28 @@ impl Timer {
 	}
 
 	fn disarm(&mut self) {
-		if let Some(key) = self.key.take() {
-			self.runtime.time.borrow_mut().timers.remove(&key);
+		// A run that already ended cleared its timers.
+		if let Some(key) = self.key.take()
+			&& let Some(runtime) = self.runtime()
+		{
+			runtime.time.borrow_mut().timers.remove(&key);
 		}
 	}
 
 	pub(crate) fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-		let mut time = self.runtime.time.borrow_mut();
+		let runtime = self
+			.runtime()
+			.expect("a simulated sleep polled outside its moq_clock::sim::run");
+		let mut time = runtime.time.borrow_mut();
 		if time.clock.now() >= self.at {
 			if let Some(key) = self.key.take() {
 				time.timers.remove(&key);
 			}
 			return Poll::Ready(());
+		}
+		// A deadline past the clock's range never fires, so it arms nothing to jump to.
+		if self.at == Instant::MAX {
+			return Poll::Pending;
 		}
 		let key = *self.key.get_or_insert_with(|| {
 			let id = time.next;
@@ -690,6 +712,14 @@ mod tests {
 	#[should_panic(expected = "deadlock")]
 	fn a_deadlock_panics() {
 		run(std::future::pending::<()>());
+	}
+
+	/// A sleep past the clock's range is never armed, so waiting on it alone is a
+	/// deadlock rather than a jump to the end of time.
+	#[test]
+	#[should_panic(expected = "deadlock")]
+	fn a_sleep_past_the_range_never_fires() {
+		run(async { crate::sleep(Duration::MAX).await });
 	}
 
 	#[crate::test]

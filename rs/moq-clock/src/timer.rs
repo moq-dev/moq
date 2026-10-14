@@ -226,3 +226,18 @@ pub async fn drive<E>(mut poll: impl FnMut(Instant, &kio::Waiter) -> Result<Opti
 	})
 	.await
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Test builds enable `sim`, so this also proves the simulator backend does not
+	/// make the ambient timers `!Send` for code that spawns them on tokio.
+	#[test]
+	fn timers_are_send() {
+		fn send<T: Send>() {}
+		send::<Sleep>();
+		send::<Interval>();
+		send::<Timeout<std::future::Ready<()>>>();
+	}
+}
