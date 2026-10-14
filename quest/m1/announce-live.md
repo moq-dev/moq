@@ -60,7 +60,9 @@ Decided with the maintainer, 2026-10-13:
   sources (a reconnecting or pooled connection, an origin fed by several
   sessions or prefix requests): reset per source generation, or wait for
   every current source. "Ready once, then stays ready" is wrong after a
-  reconnect.
+  reconnect. Readiness is a watermark over the coalesced queue, since an
+  unseen start and end cancel out, and the origin keeps it so a consumer
+  created after the boundary is caught up once it drains its replay.
 
 Work:
 
@@ -83,7 +85,9 @@ Work:
   request. Do that here or in a follow-up, as the implementer judges.
 - Regressions with mocked time: caught up after the counted snapshot and
   never before an earlier event is read; a count of 0 is caught up at once;
-  a snapshot cut short is refused;
+  a snapshot cut short is refused; a start and end that cancel before the
+  poll still reach caught up; a consumer created after the boundary is
+  caught up after its replay;
   a relay reports caught up without waiting on a silent upstream; IETF
   waits for the counted NAMESPACE messages, or reports on the OK without
   the extension; a session with no OK still reports caught up; a reconnect
