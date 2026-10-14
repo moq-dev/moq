@@ -108,12 +108,13 @@ export class Fixture {
 		// then requires an audio catalog after the click, which covers the capture resuming its own
 		// suspended graph.
 		//
-		// Pinning mono puts the worklet behind Web Audio's explicit downmix of the stereo destination
-		// track, so the tone checks also cover that path.
+		// No sampleRate or channelCount override: the graph already runs at SAMPLE_RATE, and asking
+		// the capture for one channel puts the AudioWorklet behind an explicit Web Audio downmix that
+		// makes the player stall far more often, though the captured PCM stays continuous; see
+		// /quest/m1/publish-audio-channel-count.md. Publishing the destination node's own format
+		// costs nothing here, since the tone is the same in both channels.
 		const audioCapture = new Publish.Audio.Capture({
 			source: { track: audioTrack, kind: "music" },
-			sampleRate: SAMPLE_RATE,
-			channelCount: 1,
 		});
 		this.#signals.cleanup(() => audioCapture.close());
 
