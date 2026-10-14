@@ -1,6 +1,8 @@
 //! Private relay metadata; public readers see only the frame or datagram payload.
 use bytes::Bytes;
 
+use crate::Timescale;
+
 /// How the publisher serialized the keys inside immutable properties.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Encoding {
@@ -27,6 +29,11 @@ pub(crate) struct Properties {
 	pub timestamp: Option<u64>,
 	pub values: Vec<Property>,
 	pub immutable: Option<Encoding>,
+	/// The units of the Timestamps above, when the track declared any. The cache keeps the
+	/// track in its own units, so egress converts mutable ones to the units it declares.
+	pub timescale: Option<Timescale>,
+	/// The immutable block holds a Timestamp, which keeps its ingress units.
+	pub sealed_time: bool,
 }
 
 impl Properties {

@@ -31,7 +31,7 @@ That decline's cache-fragmentation concern does not apply here, because
 private Object IDs distinguish gaps from frame ordinals, and a FETCH it
 cannot answer unambiguously is refused.
 
-- **Carried:** subgroups with their publisher priority, object ID gaps as a
+- **Carried:** subgroups with their publisher priority, object ID gaps as
   crate-private absolute Object IDs, object properties as a decoded KVP list,
   END_OF_GROUP status objects at their object ID, datagrams past object 0,
   and unknown track properties.

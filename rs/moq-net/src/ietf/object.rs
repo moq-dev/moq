@@ -26,6 +26,7 @@ struct List {
 	properties: Properties,
 	time: Option<u64>,
 	gap: Option<u64>,
+	sealed_time: bool,
 }
 
 fn list(data: &Bytes, version: Version, immutable: bool) -> Result<List, Error> {
@@ -35,6 +36,7 @@ fn list(data: &Bytes, version: Version, immutable: bool) -> Result<List, Error> 
 		properties: Properties::default(),
 		time: None,
 		gap: None,
+		sealed_time: false,
 	};
 	let mut previous = 0u64;
 	while !decoder.is_empty() {
@@ -71,6 +73,7 @@ fn list(data: &Bytes, version: Version, immutable: bool) -> Result<List, Error> 
 					return Err(Error::MalformedTrack);
 				}
 				let nested = list(&bytes, version, true).map_err(|_| Error::MalformedTrack)?;
+				result.sealed_time = nested.time.is_some();
 				result.time = result.time.or(nested.time);
 				if let Some(gap) = nested.gap
 					&& result.gap.replace(gap).is_some()
@@ -86,7 +89,9 @@ fn list(data: &Bytes, version: Version, immutable: bool) -> Result<List, Error> 
 }
 
 pub(super) fn read(data: &Bytes, version: Version, timescale: Option<Timescale>) -> Result<Decoded, Error> {
-	let parsed = list(data, version, false)?;
+	let mut parsed = list(data, version, false)?;
+	parsed.properties.timescale = timescale.filter(|_| parsed.time.is_some());
+	parsed.properties.sealed_time = parsed.sealed_time;
 	let timestamp = match (parsed.time, timescale) {
 		(Some(value), Some(timescale)) => Some(Timestamp::new(value, timescale).map_err(|_| Error::MalformedTrack)?),
 		_ => None,
@@ -98,18 +103,62 @@ pub(super) fn read(data: &Bytes, version: Version, timescale: Option<Timescale>)
 	})
 }
 
-pub(super) fn write(properties: &Properties, version: Version) -> Result<Vec<u8>, Error> {
+/// Serialize relayed properties for `version`, with Timestamps in the `timescale` the
+/// egress declares, if any.
+pub(super) fn write(properties: &Properties, version: Version, timescale: Option<Timescale>) -> Result<Vec<u8>, Error> {
 	if properties
 		.immutable
 		.is_some_and(|original| original != encoding(version))
 	{
 		return Err(Error::Unsupported);
 	}
-	let timestamp = properties.timestamp.map(|value| Property {
-		id: 0x10,
-		value: Value::Int(value),
-	});
-	let mut sorted: Vec<_> = properties.values.iter().chain(timestamp.as_ref()).collect();
+	// Without both units there is nothing to convert: an untimed track forwards them as is.
+	let convert = match (properties.timescale, timescale) {
+		(Some(from), Some(to)) if from != to => Some((from, to)),
+		_ => None,
+	};
+	let time = |value: u64| -> Result<Value, Error> {
+		Ok(Value::Int(match convert {
+			Some((from, to)) => Timestamp::new(value, from)
+				.and_then(|timestamp| timestamp.convert(to))
+				.map_err(|_| Error::Unsupported)?
+				.value(),
+			None => value,
+		}))
+	};
+	// Rewriting an immutable Timestamp would break it; forwarding it would change its meaning.
+	if properties.sealed_time && convert.is_some() {
+		return Err(Error::Unsupported);
+	}
+	let timestamp = properties
+		.timestamp
+		.map(|value| {
+			Ok::<_, Error>(Property {
+				id: 0x10,
+				value: time(value)?,
+			})
+		})
+		.transpose()?;
+	// The draft-03 Timestamp key carries the same units.
+	let legacy = properties
+		.values
+		.iter()
+		.filter(|property| property.id == 0x06)
+		.map(|property| match property.value {
+			Value::Int(value) => Ok(Property {
+				id: 0x06,
+				value: time(value)?,
+			}),
+			_ => Err(Error::MalformedTrack),
+		})
+		.collect::<Result<Vec<_>, _>>()?;
+	let mut sorted: Vec<_> = properties
+		.values
+		.iter()
+		.filter(|property| property.id != 0x06)
+		.chain(&legacy)
+		.chain(timestamp.as_ref())
+		.collect();
 	// Delta keys require ascending order. Equal keys retain the publisher's order.
 	sorted.sort_by_key(|property| property.id);
 	let mut out = Vec::new();
@@ -176,11 +225,35 @@ mod tests {
 		let decoded = read(&bytes, Version::Draft22, Some(Timescale::MILLI)).unwrap();
 		assert_eq!(decoded.timestamp, Some(Timestamp::from_millis(42).unwrap()));
 		assert_eq!(decoded.properties.timestamp, None);
-		assert_eq!(write(&decoded.properties, Version::Draft18).unwrap(), bytes);
+		let milli = Some(Timescale::MILLI);
+		assert_eq!(write(&decoded.properties, Version::Draft18, milli).unwrap(), bytes);
 		assert!(matches!(
-			write(&decoded.properties, Version::Draft17),
+			write(&decoded.properties, Version::Draft17, milli),
 			Err(Error::Unsupported)
 		));
+		// Its units cannot follow the egress's without rewriting the block.
+		assert!(matches!(
+			write(&decoded.properties, Version::Draft18, Some(Timescale::MICRO)),
+			Err(Error::Unsupported)
+		));
+	}
+
+	/// The cache keeps a timed track in its own units, so a relayed Timestamp must leave
+	/// in the units the egress declares, not the ones it arrived in.
+	#[test]
+	fn mutable_timestamps_follow_the_egress_units() {
+		for key in [0x10, 0x06] {
+			let bytes = Bytes::copy_from_slice(&[key, 42, 0x20, 7]);
+			let decoded = read(&bytes, Version::Draft22, Some(Timescale::MILLI)).unwrap();
+			let written = write(&decoded.properties, Version::Draft22, Some(Timescale::MICRO)).unwrap();
+			let again = read(&Bytes::from(written), Version::Draft22, Some(Timescale::MICRO)).unwrap();
+			let micros = Timestamp::new(42_000, Timescale::MICRO).unwrap();
+			assert_eq!(again.timestamp, Some(micros), "key {key:#x}");
+			assert_eq!(again.properties.values.last().unwrap().value, Value::Int(7));
+
+			// An egress that declares no units forwards the value untouched.
+			assert_eq!(write(&decoded.properties, Version::Draft22, None).unwrap(), bytes);
+		}
 	}
 
 	#[test]
@@ -191,10 +264,10 @@ mod tests {
 		// Draft-18 permits this nonminimal seven-byte value; draft-17 cannot read it.
 		let bytes = Bytes::from_static(&[0x0b, 8, 2, 0xfc, 0, 0, 0, 0, 0, 1]);
 		let decoded = read(&bytes, Version::Draft18, None).unwrap();
-		assert_eq!(write(&decoded.properties, Version::Draft22).unwrap(), bytes);
+		assert_eq!(write(&decoded.properties, Version::Draft22, None).unwrap(), bytes);
 		assert!(read(&bytes, Version::Draft17, None).is_err());
 		assert!(matches!(
-			write(&decoded.properties, Version::Draft17),
+			write(&decoded.properties, Version::Draft17, None),
 			Err(Error::Unsupported)
 		));
 	}

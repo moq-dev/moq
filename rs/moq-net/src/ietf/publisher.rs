@@ -1475,7 +1475,7 @@ where
 		// timestamp only on drafts that can declare its units.
 		let timescale = timescale.filter(|_| ietf::Properties::sends_timescale(version));
 		let properties = if let Some(fields) = fields {
-			let properties = super::object::write(&fields.properties, version)?;
+			let properties = super::object::write(&fields.properties, version, timescale)?;
 			(!properties.is_empty()).then_some(properties)
 		} else {
 			match timescale {
@@ -1770,9 +1770,15 @@ where
 			Some(Err(err)) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
 			None => return Ok(()),
 		};
+		// FETCH keeps each object's Timestamp, in the units FETCH_OK declares wherever the
+		// draft can declare them. Opting out of the properties strips nothing from the objects.
+		let timescale = group
+			.info
+			.timescale
+			.filter(|_| ietf::Properties::sends_timescale(self.version));
 		for frame in &group.frames {
 			if let Some(fields) = &frame.fields
-				&& let Err(err) = super::object::write(&fields.properties, self.version)
+				&& let Err(err) = super::object::write(&fields.properties, self.version, timescale)
 			{
 				return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await;
 			}
@@ -1808,13 +1814,6 @@ where
 				)
 				.await;
 		}
-
-		// FETCH keeps each object's Timestamp, in the units FETCH_OK declares wherever the
-		// draft can declare them. Opting out of the properties strips nothing from the objects.
-		let timescale = group
-			.info
-			.timescale
-			.filter(|_| ietf::Properties::sends_timescale(self.version));
 
 		let (end_location, end_of_track) = if joined {
 			// The subscription starts at the saved Largest Object, so the prefix of that
@@ -3291,18 +3290,29 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			}
 			let (object_id, priority, end_of_group, status, properties) = match &datagram.wire {
 				Some(wire) => {
+					// A datagram this draft cannot carry is dropped like an oversized one: it
+					// is best-effort, and the track's groups do not depend on it.
 					if wire.status == Some(1) && !matches!(self.version, Version::Draft14 | Version::Draft15) {
-						return Err(Error::Unsupported);
+						tracing::debug!(sequence, "dropping a datagram status this draft cannot carry");
+						continue;
 					}
-					let properties = super::object::write(&wire.properties, self.version)?;
+					let properties = match super::object::write(&wire.properties, self.version, self.timescale) {
+						Ok(properties) => properties,
+						Err(err) => {
+							tracing::debug!(%err, sequence, "dropping a datagram whose properties cannot be forwarded");
+							continue;
+						}
+					};
 					let object = if self.version == Version::Draft14 && wire.status.is_some() {
 						Some(wire.object_id.unwrap_or(0))
 					} else {
 						wire.object_id
 					};
-					let priority = wire.priority.or_else(|| {
-						(self.version == Version::Draft14).then(|| super::priority::to_wire(self.track.info().priority))
-					});
+					// An omitted priority inherited the source track's default, which this
+					// response may not carry (or carry the same), so resolve it here.
+					let priority = wire
+						.priority
+						.or_else(|| Some(super::priority::to_wire(self.track.info().priority)));
 					(
 						object,
 						priority,
@@ -3342,8 +3352,14 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 					Some(status) => ietf::DatagramBody::Status(status),
 					None => ietf::DatagramBody::Payload(datagram.datagram.payload),
 				},
-			}
-			.encode_bytes(self.version)?;
+			};
+			let body = match body.encode_bytes(self.version) {
+				Ok(body) => body,
+				Err(err) => {
+					tracing::debug!(%err, sequence, "dropping a datagram this draft cannot encode");
+					continue;
+				}
+			};
 			let max = self.session.max_datagram_size();
 			if body.len() > max {
 				tracing::debug!(
@@ -3812,7 +3828,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 												},
 												ObjectEncoding {
 													extensions: self.msg.flags.has_extensions,
-													timescale: None,
+													timescale: self.timescale,
 													version: self.version,
 												},
 											)?;
@@ -3932,7 +3948,7 @@ fn buffer_object<W: crate::transport::poll::SendStream>(
 	writer.buffer_varint(object.delta)?;
 	if encoding.extensions {
 		let ext = match object.fields {
-			Some(fields) => super::object::write(&fields.properties, encoding.version)?,
+			Some(fields) => super::object::write(&fields.properties, encoding.version, encoding.timescale)?,
 			None => {
 				let mut ext = Vec::new();
 				if let Some(timescale) = encoding.timescale {

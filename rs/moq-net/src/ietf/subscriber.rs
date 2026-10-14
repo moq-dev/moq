@@ -8500,11 +8500,25 @@ mod stitch_tests {
 		egress: Version,
 		fetch: Option<(u64, u64)>,
 	) -> (Vec<u8>, crate::lite::test_transport::Log) {
+		relay_passthrough_timed(script, ingress, egress, fetch, None).await
+	}
+
+	/// Relay `script` through a track the ingress times in `timescale`, which the cache
+	/// normalizes to microseconds like [`accepted_info`].
+	async fn relay_passthrough_timed(
+		script: Vec<u8>,
+		ingress: Version,
+		egress: Version,
+		fetch: Option<(u64, u64)>,
+		timescale: Option<Timescale>,
+	) -> (Vec<u8>, crate::lite::test_transport::Log) {
 		use crate::lite::test_transport::Sent;
 		let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
 		let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
-		let mut h = Harness::with_timescale(Fill::Done, vec![script], None);
+		let track = broadcast
+			.create_track("video", accepted_info(timescale, None, None))
+			.unwrap();
+		let mut h = Harness::with_timescale(Fill::Done, vec![script], timescale);
 		h.subscriber.version = ingress;
 		h.subscriber.state.lock().subscribes.get_mut(&REQUEST).unwrap().producer = Some(track.clone());
 		let mut stream = h.stream().await.with_version(ingress);
@@ -8650,6 +8664,28 @@ mod stitch_tests {
 			assert_eq!(decoder.varint().unwrap(), 1);
 			assert_eq!(decoder.slice(1).unwrap(), &[99]);
 		}
+	}
+
+	/// A relayed Timestamp leaves in the units the egress declares: the cache holds the
+	/// track in microseconds, whatever the publisher used.
+	#[moq_net_sim::test]
+	async fn passthrough_converts_relayed_timestamps_to_the_egress_units() {
+		let version = Version::Draft22;
+		// Timestamp 42 (ms), then an unknown property that must survive beside it.
+		let properties = [0x10, 42, 0x70, 7];
+		let script = object_stream(version, true, &[(0, &properties, None)]);
+		let (bytes, log) = relay_passthrough_timed(script, version, version, None, Some(Timescale::MILLI)).await;
+		assert!(log.resets().is_empty());
+		let mut decoder = Decoder::new(&bytes, version.into());
+		ietf::GroupHeader::decode(&mut decoder, version).unwrap();
+		assert_eq!(decoder.varint().unwrap(), 0);
+		let relayed = bytes::Bytes::copy_from_slice(decoder.bytes().unwrap());
+		let decoded = super::super::object::read(&relayed, version, Some(Timescale::MICRO)).unwrap();
+		assert_eq!(
+			decoded.timestamp,
+			Some(Timestamp::new(42_000, Timescale::MICRO).unwrap())
+		);
+		assert_eq!(decoded.properties.values.len(), 1);
 	}
 
 	fn object_stream(version: Version, first: bool, objects: &[(u64, &[u8], Option<u64>)]) -> Vec<u8> {
@@ -8921,7 +8957,9 @@ mod stitch_tests {
 						track_alias: ALIAS,
 						group_id: SEQUENCE,
 						object_id: Some(id),
-						publisher_priority: Some(200),
+						// An omitted priority inherits the track default, which the
+						// downstream response need not carry.
+						publisher_priority: (id != 6).then_some(200),
 						end_of_group: false,
 						properties: (id != 8).then(|| properties.clone()),
 						body: if id == 8 {
@@ -8985,8 +9023,10 @@ mod stitch_tests {
 				let sent = downstream.log.datagrams.lock().unwrap();
 				original.retain(|datagram| !ranged || datagram.object_id == Some(7));
 				assert_eq!(sent.len(), original.len());
+				let inherited = super::super::priority::to_wire(track.publisher_priority());
 				for (bytes, mut expected) in sent.iter().zip(original) {
 					expected.track_alias = 3;
+					expected.publisher_priority = expected.publisher_priority.or(Some(inherited));
 					let (actual, _) = ietf::ObjectDatagram::decode_slice(bytes, version).unwrap();
 					assert_eq!(actual, expected);
 				}
