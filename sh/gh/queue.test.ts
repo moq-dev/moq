@@ -30,7 +30,9 @@ for (const job of [check.jobs.check, check.jobs.test, platform.jobs.scope]) {
 	// Retargeting a main PR to release emits `edited`, which must run the gates.
 	assert.equal(condition(job.if, "pull_request", "release", true, "edited"), true);
 }
-for (const config of [check, platform, dart, swift]) {
+// Release Dart FFI also runs on main PRs, where an edit would only cancel and
+// repeat its build; nightly covers the targets a retarget would add.
+for (const config of [check, platform, swift]) {
 	assert.ok(config.on.pull_request.types.includes("edited"), "retargeting to release must rerun");
 }
 assert.deepEqual(Object.keys(platform.jobs).sort(), ["macos", "scope", "windows"]);

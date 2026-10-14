@@ -17,8 +17,6 @@ on:
   # compiles it and regenerates the Dart bindings, platform.yml compiles it for
   # macOS, Windows, and iOS, and nightly runs this full matrix.
   pull_request:
-    # `edited` widens the targets when a main PR is retargeted to release.
-    types: [opened, synchronize, reopened, edited]
     paths:
       - ".github/workflows/release-dart-ffi.yml"
       - ".github/workflows/release-ffi.yml"
