@@ -46,6 +46,10 @@ Keep one owner per shared code area. Order each prerequisite before its
 consumer; targeted benchmarks and controlled-time regressions remain part of
 the feature that needs them.
 
+Added 2026-10-13: moq-transport passthrough, ranked beside interop, keeps
+the fields a relay must forward crate-private, an explicit exception to the
+public model plan.
+
 Added 2026-10-13 by the redundant TS alignment plan: epoch refusals, the
 epoch anchor, and raw TS cuts on the epoch timeline, ranked just above
 same-epoch importers, which requires them. Catalog clock adoption ranks
@@ -67,6 +71,7 @@ above them.
 - [Own the QUIC stack](/quest/m1/quic/README.md) - quinn hard-forked in-tree as `moq-quic`, carrying BBR, reliable reset, hierarchical scheduling, peer limits, and endpoint sharding
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Interop close logs](/quest/m1/interop-close-log.md) - logging fix landed; delete once the required Interop run is green
+- [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - subgroups, object IDs, properties, end status, datagram objects, and unknown track properties survive moq-transport -> moq-relay (and a relay cluster) -> moq-transport; moxygen's moq-test passes nightly
 - [One max_age meaning](/quest/m1/cache-max-age.md) - a superseded group goes stale on wall clock since its successor arrived or on media time, whichever is first, in Rust and js/net; fixes the untimed failover stall
 - [Quiet latest group test](/quest/m1/quiet-edge-test.md) - pins on `main` that a quiet track's latest group survives rejoin, expiry, and takeover
 - [FETCH max-delay](/quest/m1/fetch-max-delay.md) - historical readers obey publisher max-age and an optional tighter reader budget, including while holding a group
@@ -106,7 +111,7 @@ above them.
 - [JavaScript answers TRACK_STATUS](/quest/m1/js-track-status.md) - a browser publisher answers IETF TRACK_STATUS like Rust, so a native fetch-only request needs no SUBSCRIBE fallback
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native FILL_TIMEOUT bounds upstream waiting on drafts 18-22, alongside local content-age enforcement
-- [IETF group ingest refuses loudly](/quest/m1/ietf-ingest-refusal.md) - a subgroup other than 0 or a datagram past object 0 aborts the track, and a peer's malformed group is refused rather than dropped at debug
+- [IETF ingest refuses a malformed group](/quest/m1/ietf-ingest-refusal.md) - a peer's malformed group is refused with STOP_SENDING rather than dropped at debug
 - [Draft 17-18 withdraw by reset](/quest/m1/ietf-withdraw-reset.md) - withdrawing a PUBLISH_NAMESPACE on drafts 17 and 18 resets the request instead of FIN-ing it
 - [Catalog track identity](/quest/m1/catalog-tracks.md) - a track's codec and description never change for its name; resolution changes in band below ceilings fixed at creation, and anything else mints a new rendition or epoch
 - [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS; the catalog entry and format may break in place, since no archives exist
