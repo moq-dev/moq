@@ -2,9 +2,9 @@
 
 ## Goal
 
-A `Consumer` re-poll that finds nothing changed returns without taking the
-channel mutex, and parking a waiter no longer contends with readers of the
-value. Lands with the [contended bench](/quest/m2/perf/kio-channel-contention/bench.md)
+A `Consumer` re-poll that opts into version tracking and finds nothing
+changed returns without taking the channel mutex, and parking a waiter no
+longer contends with readers of the value. Lands with the [contended bench](/quest/m2/perf/kio-channel-contention/bench.md)
 and `just bench-lock` before and after; a measured no-win abandons it.
 
 ## Plan
@@ -19,10 +19,16 @@ and `just bench-lock` before and after; a measured no-win abandons it.
 - This attacks spurious polls, not the wake-all herd: a woken consumer whose
   data really changed still locks to read `T`. The
   [append-only log](/quest/m2/perf/kio-channel-contention/log.md) covers that.
-- Open: where the last-seen version lives (the `Consumer`, the `Waiter`, or a
-  caller-held cursor). The `Consumer` is shared by `&self` across waiters, so
-  the answer decides whether this stays API-compatible. Settle it first, with
-  options and a recommendation.
+- The skip is opt-in, never a silent change to `poll`: a predicate may read
+  state outside the channel. `Settle::poll` (`rs/moq-net/src/tail.rs`)
+  captures a deadline's `expired` in its closure, so skipping it on an
+  unchanged version after the deadline's wake would park the task forever.
+  Only callers whose predicate depends solely on `T` use the version-aware
+  path.
+- Open: the shape of that path and where the last-seen version lives (the
+  `Consumer`, the `Waiter`, or a caller-held cursor). The `Consumer` is shared
+  by `&self` across waiters, which argues for a caller-held cursor. Settle it
+  first, with options and a recommendation.
 - Every new atomic protocol gets a loom model in `rs/kio/src/loom.rs`.
 - Generic across every `T`, with no moq-net restructure.
 
