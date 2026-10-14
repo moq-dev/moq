@@ -362,6 +362,7 @@ impl Pump {
 						serving = None;
 						next = None;
 						subscribing = None;
+						held = None;
 					}
 					Some(pick) if serving.as_ref().is_some_and(|s| s.name == pick.name()) => {
 						next = None;
@@ -818,6 +819,65 @@ mod tests {
 		high.write(frame(100, b"high-3", false)).unwrap();
 		assert_eq!(written(&mut writes).await.as_ref(), b"high-3");
 		idle(&mut writes).await;
+	}
+
+	/// A frame held for a pending switch is dropped once nothing is enabled, so it neither
+	/// plays nor moves the playhead.
+	#[tokio::test(start_paused = true)]
+	async fn nothing_enabled_drops_a_held_frame() {
+		let origin = produce_origin();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut high = vp8(&mut broadcast, &mut catalog, "high", 1080);
+		let mut low = vp8(&mut broadcast, &mut catalog, "low", 360);
+		let set_enabled = |catalog: &mut moq_mux::catalog::Producer, name: &str, enabled: bool| {
+			catalog
+				.modify()
+				.unwrap()
+				.video
+				.renditions
+				.get_mut(name)
+				.unwrap()
+				.enabled = enabled;
+		};
+		set_enabled(&mut catalog, "high", false);
+
+		let mut egress = EgressSource::new(moq_mux::Source::new(origin.consume(), broadcast.consume()))
+			.await
+			.unwrap();
+		let mut writes = egress.take_writes();
+		egress
+			.on_track(
+				Mid::from("0"),
+				Codec::Vp8,
+				Pt::new_with_value(96),
+				Frequency::NINETY_KHZ,
+			)
+			.unwrap();
+
+		high.write(frame(0, b"high-0", true)).unwrap();
+		low.write(frame(0, b"low-0", true)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"low-0");
+
+		// A switch is pending, so the low rendition's next frame is held.
+		set_enabled(&mut catalog, "high", true);
+		idle(&mut writes).await;
+		low.write(frame(33, b"low-1", true)).unwrap();
+		idle(&mut writes).await;
+
+		{
+			let mut modify = catalog.modify().unwrap();
+			for config in modify.video.renditions.values_mut() {
+				config.enabled = false;
+			}
+		}
+		idle(&mut writes).await;
+
+		// The held time was never played, so a rendition re-enabling can open there.
+		set_enabled(&mut catalog, "high", true);
+		idle(&mut writes).await;
+		high.write(frame(33, b"high-1", true)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"high-1");
 	}
 
 	/// A better rendition whose subscription never resolves doesn't stall the line, nor
