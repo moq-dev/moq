@@ -116,25 +116,13 @@ async fn spawn_server(
 	// `spawn_moq` reports readiness. The serve task only owns an already-bound
 	// listener and cannot discover a late bind failure.
 	let listener = server.listen().await.context("failed to bind listeners")?;
-	// An export-only listener publishes no media, but still serves its own stats.
-	let publish = match (directions.publish, moq.stats.enabled) {
-		(true, _) => Some(cluster.origin.clone()),
-		(false, true) => {
-			let prefix = &moq.stats.prefix;
-			let stats =
-				moq_net::Pattern::subtree(prefix).with_context(|| format!("invalid stats prefix `{prefix}`"))?;
-			Some(cluster.origin.scope("", &moq_net::Patterns::from(stats))?)
-		}
-		(false, false) => None,
-	};
 	spawn_serve(
 		tasks,
 		listener,
 		Serving {
 			cluster,
 			auth,
-			publish,
-			consume: directions.consume,
+			directions,
 			shutdown: shutdown.clone(),
 			lan: moq.lan(),
 			public_quic: moq.server.bind.is_some(),
@@ -183,22 +171,21 @@ fn attach_lan(
 struct Serving {
 	cluster: moq_relay::cluster::Cluster,
 	auth: moq_relay::auth::Auth,
-	/// What sessions may subscribe to, before their grant narrows it.
-	publish: Option<moq_net::origin::Producer>,
-	/// Whether sessions may publish into the Origin.
-	consume: bool,
+	directions: Directions,
 	shutdown: moq_relay::shutdown::Observer,
 	lan: bool,
 	public_quic: bool,
 }
 
+/// Admit one ordinary client through its lease and serve it until it closes.
+///
+/// The grant scopes the process's origin to what the session may see, then the
+/// stage's directions prune the side it does not use, so a subscribe-only export
+/// never announces what a viewer could not have had anyway.
 impl Serving {
-	/// Admit one ordinary client through its lease and serve it until it closes.
-	///
-	/// The grant scopes the process's origin to what the session may see, then the
-	/// stage's directions prune the side it does not use, so a subscribe-only export
-	/// announces nothing but its own stats.
 	async fn serve_client(&self, request: moq_tokio::server::Request) -> anyhow::Result<()> {
+		let origin = &self.cluster.origin;
+		let directions = self.directions;
 		let auth_request = moq_relay::auth::request_for(&self.auth, &request);
 		let lease = match self.auth.admit(auth_request).await {
 			Ok(lease) => lease,
@@ -216,13 +203,13 @@ impl Serving {
 
 		// What the grant allows, as origin handles rooted where the session dialed.
 		let token = lease.token();
-		let publish = self
+		let publish = directions
 			.publish
-			.as_ref()
-			.and_then(|origin| origin.scope(&token.root, &token.subscribe).ok());
-		let subscribe = self
+			.then(|| origin.scope(&token.root, &token.subscribe).ok())
+			.flatten();
+		let subscribe = directions
 			.consume
-			.then(|| self.cluster.origin.scope(&token.root, &token.publish).ok())
+			.then(|| origin.scope(&token.root, &token.publish).ok())
 			.flatten();
 		if publish.is_none() && subscribe.is_none() {
 			request.reject(moq_tokio::server::Reject::Forbidden).await.ok();

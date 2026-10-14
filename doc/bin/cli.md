@@ -55,10 +55,10 @@ Pending handshakes and admission requests share the same drain window, and an
 open stdin pipe does not keep the process alive afterward.
 
 Add `--stats-enabled` before the first stage to publish accepted-session and
-traffic counters with the relay's `--stats-*` settings; an export-only listener
-publishes these stats to its sessions and nothing else. These listener settings
-require a MoQ listener. Grants still scope which broadcasts each session can
-publish or subscribe to, including stats; see the relay's
+traffic counters with the relay's `--stats-*` settings. An export-only listener
+publishes nothing to its sessions, so they cannot read these stats. These
+listener settings require a MoQ listener. Grants still scope which broadcasts
+each session can publish or subscribe to, including stats; see the relay's
 [statistics configuration](/bin/relay/config#stats).
 
 `moq import --help` lists the sources and `moq import rtmp --help` a specific

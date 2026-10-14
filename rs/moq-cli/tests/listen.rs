@@ -188,18 +188,7 @@ async fn an_export_stage_ending_during_drain_waits_for_every_session() {
 
 #[tokio::test]
 async fn accepted_sessions_are_published_in_stats() {
-	stats("import").await;
-}
-
-/// An export listener publishes no media, but still serves its own stats.
-#[tokio::test]
-async fn export_listeners_serve_stats() {
-	stats("export").await;
-}
-
-async fn stats(stage: &str) {
-	let listening = listen(stage, &["--stats-enabled", "--stats-prefix", "stats"]).await;
-	// Viewers: they subscribe to whatever the listener publishes.
+	let listening = listen("import", &["--stats-enabled", "--stats-prefix", "stats"]).await;
 	let (connection, origin) = connects(&listening, "import").await;
 	let _announced = origin.announced();
 	let stats = tokio::time::timeout(TIMEOUT, async {
