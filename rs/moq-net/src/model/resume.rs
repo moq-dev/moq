@@ -248,7 +248,7 @@ struct Copy {
 	datagrams_done: Option<Result<()>>,
 	/// The newest datagram handed out before this copy was subscribed: a copy that
 	/// buffers datagrams replays them, and those were already handed out.
-	datagrams_seen: Option<u64>,
+	datagrams_seen: Option<(u64, u64)>,
 	/// Held by every group handed out from this copy, so a replaced copy stays
 	/// subscribed while one is still read.
 	lease: Arc<()>,
@@ -443,8 +443,8 @@ struct Reader {
 	copies: Vec<Copy>,
 	/// The newest group handed out: where a new copy is asked to start.
 	newest: Option<u64>,
-	/// The newest datagram handed out.
-	datagram: Option<u64>,
+	/// The newest datagram handed out, by Group and Object ID.
+	datagram: Option<(u64, u64)>,
 	/// The local group filter; see [`track::Subscriber::set_groups`].
 	groups: (u64, Cap),
 }
@@ -704,10 +704,15 @@ impl Reader {
 				match sub.poll_recv_wire_datagram(waiter) {
 					Poll::Pending => break,
 					Poll::Ready(Ok(Some(datagram))) => {
-						if copy.datagrams_seen.is_some_and(|seen| datagram.sequence <= seen) {
+						// A relayed group can carry several datagrams, told apart by Object ID.
+						let id = (
+							datagram.sequence,
+							datagram.wire.as_ref().and_then(|wire| wire.object_id).unwrap_or(0),
+						);
+						if copy.datagrams_seen.is_some_and(|seen| id <= seen) {
 							continue;
 						}
-						self.datagram = self.datagram.max(Some(datagram.sequence));
+						self.datagram = self.datagram.max(Some(id));
 						return Some(Poll::Ready(Ok(Some(datagram))));
 					}
 					Poll::Ready(Ok(None)) => {
@@ -1726,6 +1731,45 @@ mod test {
 		assert_eq!(recv(&mut sub), None);
 	}
 
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_new_copy_hands_out_later_objects_of_a_seen_group() {
+		let object = |id: u64| super::super::datagram::Stored {
+			datagram: super::super::datagram::Datagram {
+				sequence: 1,
+				timestamp: Some(ts(id)),
+				payload: bytes::Bytes::from_static(b"d"),
+			},
+			wire: Some(Arc::new(super::super::datagram::Wire {
+				object_id: Some(id),
+				priority: None,
+				end_of_group: false,
+				status: None,
+				properties: Default::default(),
+			})),
+		};
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let mut a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&front, Duration::from_secs(10));
+		let mut b = copy();
+		a.insert_wire_datagram(object(6)).unwrap();
+		b.insert_wire_datagram(object(6)).unwrap();
+		b.insert_wire_datagram(object(8)).unwrap();
+
+		let mut recv = || {
+			sub.poll_recv_wire_datagram(&kio::Waiter::noop()).map(|datagram| {
+				let datagram = datagram.unwrap().unwrap();
+				datagram.wire.as_ref().unwrap().object_id.unwrap()
+			})
+		};
+		assert_eq!(recv(), Poll::Ready(6));
+		routes.serve(b.consume());
+		assert_eq!(recv(), Poll::Ready(8));
+		assert!(recv().is_pending());
+	}
+
 	#[derive(Default)]
 	struct Wake(std::sync::atomic::AtomicBool);
 
@@ -2124,6 +2168,96 @@ mod test {
 			chunks.read_chunk().now_or_never(),
 			Some(Err(Error::Unsupported))
 		));
+		assert!(matches!(
+			reading.read_frame().now_or_never(),
+			Some(Err(Error::Unsupported))
+		));
+	}
+
+	/// A replacement copy that joined past a gap, holding the group from Object 6.
+	#[cfg(feature = "async")]
+	fn joined_past_a_gap(objects: &[(u64, &'static [u8])]) -> track::Producer {
+		let b = copy();
+		let mut group = b.create_group(group::Info { sequence: 0 }).unwrap();
+		group
+			.set_wire(group::Wire {
+				sparse: false,
+				first_object: false,
+				first_id: 6,
+				extensions: false,
+				has_end: true,
+				fetchable: false,
+				last: None,
+			})
+			.unwrap();
+		for &(id, payload) in objects {
+			let mut frame = group
+				.create_frame_owned(
+					crate::frame::Header {
+						info: crate::frame::Info {
+							size: payload.len() as u64,
+							timestamp: Some(ts(id)),
+						},
+						fields: Some(Arc::new(super::super::object::Fields {
+							id,
+							properties: Default::default(),
+						})),
+					},
+					&crate::frame::Budget::default(),
+				)
+				.unwrap();
+			frame.write(bytes::Bytes::from_static(payload)).unwrap();
+			frame.finish().unwrap();
+		}
+		b
+	}
+
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_replacement_past_a_gap_refuses_ordinal_recovery() {
+		// A half-read Object 0 must not continue with Object 6's bytes.
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&front, Duration::from_secs(10));
+		let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut frame = open
+			.create_frame(crate::frame::Info {
+				size: 4,
+				timestamp: Some(ts(0)),
+			})
+			.unwrap();
+		frame.write(b"ab".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		let mut chunks = reading.next_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(
+			&chunks.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..],
+			b"ab"
+		);
+		drop(frame);
+		a.clone().abort(Error::Dropped).unwrap();
+		let b = joined_past_a_gap(&[(6, b"WXYZ")]);
+		routes.serve(b.consume());
+		assert!(matches!(
+			chunks.read_chunk().now_or_never(),
+			Some(Err(Error::Unsupported))
+		));
+
+		// Ordinal 2 of that copy is Object 8, not Object 2.
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&front, Duration::from_secs(10));
+		let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+		open.write_frame(ts(0), b"a".as_ref()).unwrap();
+		open.write_frame(ts(1), b"b".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+		let b = joined_past_a_gap(&[(6, b"x"), (7, b"y"), (8, b"z")]);
+		routes.serve(b.consume());
 		assert!(matches!(
 			reading.read_frame().now_or_never(),
 			Some(Err(Error::Unsupported))

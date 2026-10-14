@@ -807,6 +807,11 @@ impl Consumer {
 					};
 				}
 			};
+			// This copy was dense through its frame, so the replacement's must be the same
+			// Object ID: a copy that begins past a gap holds different content there.
+			if frame.fields.as_ref().is_some_and(|fields| fields.id != *index) {
+				return Poll::Ready(Err(Error::Unsupported));
+			}
 			// Same name, same content: a different size is the routes disagreeing.
 			if frame.info.size != self.info.size {
 				return Poll::Ready(Err(Error::ProtocolViolation));

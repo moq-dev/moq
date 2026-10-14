@@ -8727,7 +8727,7 @@ mod stitch_tests {
 			for marked in [false, true] {
 				let properties = if marked { vec![0x3e, 6] } else { vec![] };
 				let second = if marked { vec![0x3e, 1] } else { vec![] };
-				for start in [0, 7] {
+				for start in [0, 2, 7] {
 					let script = object_stream(version, true, &[(6, &properties, None), (8, &second, None)]);
 					let (bytes, log) = relay_passthrough(script, version, version, Some((start, 9))).await;
 					let mut decoder = Decoder::new(&bytes, version.into());

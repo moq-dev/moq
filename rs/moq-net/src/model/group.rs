@@ -612,7 +612,8 @@ impl Producer {
 			if wire.last.is_some() && gap.is_some_and(|gap| gap > missing) {
 				return Err(Error::MalformedTrack);
 			}
-			wire.fetchable &= missing == 0 || gap == Some(missing);
+			// A first object's gap may also cover IDs below where this copy starts.
+			wire.fetchable &= missing == 0 || gap.is_some_and(|gap| gap >= missing);
 		}
 		Ok(())
 	}
@@ -1232,6 +1233,7 @@ impl Producer {
 			expiry: None,
 			expired: false,
 			ended: false,
+			adopted: false,
 			stale_counted: Arc::default(),
 			recover: None,
 		}
@@ -1495,6 +1497,9 @@ pub struct Consumer {
 	// clean end into `Error::Old` on the next poll, and a caller is allowed to probe
 	// again after the end.
 	ended: bool,
+	// A replacement copy was adopted and has not yet returned a frame. Its ordinals
+	// match this group's only while its Object IDs do.
+	adopted: bool,
 	// Cloned cursors are parallel views of one handed-out delivery. Whichever
 	// observes expiry first records its unread tail; the others must not repeat it.
 	stale_counted: Arc<AtomicBool>,
@@ -1566,6 +1571,7 @@ impl Clone for Consumer {
 			expiry: self.expiry.clone(),
 			expired: self.expired,
 			ended: self.ended,
+			adopted: self.adopted,
 			stale_counted: self.stale_counted.clone(),
 			recover: self.recover.clone(),
 		}
@@ -1593,6 +1599,12 @@ impl Consumer {
 	#[cfg(feature = "async")]
 	pub(crate) fn wire(&self) -> Option<Wire> {
 		self.cursor.state.read().wire().cloned()
+	}
+
+	/// The index of the first frame the group holds (see [`Producer::start_at`]).
+	#[cfg(feature = "async")]
+	pub(crate) fn first_frame(&self) -> u64 {
+		self.cursor.state.read().offset as u64
 	}
 
 	#[cfg(feature = "async")]
@@ -1663,7 +1675,13 @@ impl Consumer {
 				return res;
 			};
 			let failed = match &res {
-				Poll::Ready(Ok(Some(_))) => return res,
+				Poll::Ready(Ok(Some(_))) => {
+					// The old copy was dense through this frame, so the replacement must be too.
+					if std::mem::take(&mut self.adopted) && self.cursor.state.read().sparse() {
+						return Poll::Ready(Err(Error::Unsupported));
+					}
+					return res;
+				}
 				// Read to its end: no route is needed for it any more.
 				Poll::Ready(Ok(None)) => {
 					self.recover = None;
@@ -1692,6 +1710,7 @@ impl Consumer {
 			self.cursor = replacement.group.cursor;
 			self.cursor.index = index;
 			self.cursor.end = end;
+			self.adopted = true;
 		}
 	}
 
@@ -2368,6 +2387,28 @@ mod test {
 		assert_eq!(pool.used(), charged);
 		drop(consumer);
 		assert_eq!(pool.used(), 0);
+	}
+
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_leading_gap_may_reach_below_where_the_copy_starts() {
+		for (gap, fetchable) in [(Some(6), true), (Some(4), true), (Some(3), false), (None, false)] {
+			let mut group = Info { sequence: 0 }.produce();
+			group.start_at(2).unwrap();
+			group
+				.set_wire(Wire {
+					sparse: true,
+					first_object: false,
+					first_id: 6,
+					extensions: true,
+					has_end: true,
+					fetchable: true,
+					last: None,
+				})
+				.unwrap();
+			group.mark_gap(6, gap).unwrap();
+			assert_eq!(group.wire().unwrap().fetchable, fetchable, "{gap:?}");
+		}
 	}
 
 	#[test]

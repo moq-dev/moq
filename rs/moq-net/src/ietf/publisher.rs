@@ -142,8 +142,11 @@ async fn read_fetch(
 	if wire.as_ref().is_some_and(|wire| !wire.fetchable) {
 		return Err(Error::Unsupported);
 	}
+	// Relayed Object IDs need not match frame ordinals, so a relayed group is read from
+	// its first frame and filtered by ID. Its marked gaps cover the IDs between where it
+	// starts and its first object; a start below that misses to the upstream.
 	let frame_start = match (&wire, &cached) {
-		(Some(wire), Some(group)) if skip >= wire.first_id => group.index(),
+		(Some(_), Some(group)) => skip.min(group.first_frame()),
 		_ => skip,
 	};
 	let mut group = track
