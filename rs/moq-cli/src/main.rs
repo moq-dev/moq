@@ -496,7 +496,7 @@ async fn notify_when_initialized<T>(
 ///
 /// The playback event loop runs on this task's thread rather than a spawned one:
 /// winit can only build an event loop on the process main thread, which is where
-/// `#[tokio::main]` polls this future.
+/// the runtime polls this future.
 #[cfg(feature = "play")]
 async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()> {
 	// Before anything dials: a codec we can't decode is a blank window otherwise.
