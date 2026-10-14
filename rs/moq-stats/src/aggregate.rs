@@ -506,7 +506,7 @@ impl<V: Mergeable> Node<V> {
 						continue;
 					}
 				};
-				if base != V::default() {
+				if V::RESETS || base != V::default() {
 					V::merge(self.base.entry(key).or_default(), base);
 				}
 			}
