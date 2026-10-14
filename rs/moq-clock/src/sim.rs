@@ -93,7 +93,11 @@ impl Runtime {
 			if sources.is_empty() {
 				break;
 			}
-			next = sources.iter_mut().filter_map(|source| source(now)).chain(next).min();
+			let reported = sources.iter_mut().filter_map(|source| source(now)).inspect(|at| {
+				// A deadline it already reached would stall the run without moving time.
+				assert!(*at > now, "an attached source reported a deadline it already reached");
+			});
+			next = reported.chain(next).min();
 			polled.append(&mut sources);
 		}
 		*self.sources.borrow_mut() = polled;
@@ -231,7 +235,8 @@ pub fn run<F: IntoFuture>(future: F) -> F::Output {
 ///
 /// # Panics
 ///
-/// Outside [`run`].
+/// Outside [`run`], and when `source` returns a deadline at or before the instant
+/// it was handed.
 pub fn attach(source: impl FnMut(Instant) -> Option<Instant> + 'static) {
 	expect_current().sources.borrow_mut().push(Box::new(source));
 }
@@ -788,6 +793,16 @@ mod tests {
 		});
 		task.await.unwrap();
 		assert_eq!(crate::now(), at(10));
+	}
+
+	/// A source reporting a deadline it already reached fails loud instead of spinning.
+	#[test]
+	#[should_panic(expected = "already reached")]
+	fn a_stale_source_deadline_panics() {
+		run(async {
+			attach(Some);
+			std::future::pending::<()>().await;
+		});
 	}
 
 	/// A source attached from inside another is polled in the same pass.
