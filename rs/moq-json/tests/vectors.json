@@ -60,5 +60,42 @@
 		"old": { "a": 1 },
 		"new": { "a": null },
 		"forced": true
+	},
+	{
+		"name": "added_object_with_null_forces_snapshot",
+		"old": { "a": 1 },
+		"new": { "a": 1, "o": { "x": null } },
+		"forced": true
+	},
+	{
+		"name": "added_object_with_deep_null_forces_snapshot",
+		"old": {},
+		"new": { "o": { "p": { "x": null } } },
+		"forced": true
+	},
+	{
+		"name": "scalar_replaced_by_object_with_null_forces_snapshot",
+		"old": { "a": 5 },
+		"new": { "a": { "x": null } },
+		"forced": true
+	},
+	{
+		"name": "array_replaced_by_object_with_null_forces_snapshot",
+		"old": { "a": [1] },
+		"new": { "a": { "x": null } },
+		"forced": true
+	},
+	{
+		"name": "nested_added_object_with_null_forces_snapshot",
+		"old": { "o": { "k": 1 } },
+		"new": { "o": { "k": 1, "c": { "x": null } } },
+		"forced": true
+	},
+	{
+		"name": "null_inside_array_is_delta",
+		"old": { "a": 1 },
+		"new": { "a": [null, { "x": null }] },
+		"forced": false,
+		"patch": { "a": [null, { "x": null }] }
 	}
 ]

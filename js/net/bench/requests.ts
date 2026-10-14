@@ -1,4 +1,4 @@
-/** Sweep announced request followers against routes for one restart of a watched or unrelated path. */
+/** Sweep request restart and cancellation over independent origin and waiter dimensions. */
 import { Producer } from "../src/origin";
 import * as Path from "../src/path";
 import { wireOf } from "../src/wire";
@@ -128,4 +128,44 @@ for (const operation of ["cancel-forward", "cancel-reverse", "drain-local"])
 			active.sort((a, b) => a - b);
 			settled.sort((a, b) => a - b);
 			console.log(`${operation},${paths},${waiters},${active[1].toFixed(2)},${settled[1].toFixed(2)}`);
+		}
+
+// One path with competing dynamic routes. Separate synchronous cancellation
+// from promise settlement, and keep the surviving-waiter case distinct from
+// releasing the final waiter, which legitimately withdraws the pending request.
+console.log("survivor,routes,cancelled,active_us,settled_us");
+for (const survivor of [false, true])
+	for (const routes of [1, 16, 128])
+		for (const cancelled of [1, 64, 1024]) {
+			const active: number[] = [];
+			const settled: number[] = [];
+			for (let round = 0; round < 7; round++) {
+				const origin = new Producer();
+				const prefix = Path.from("competing");
+				const path = Path.from("competing/touched");
+				for (let i = 0; i < routes; i++) origin.dynamic(prefix, { cost: BigInt(i) });
+				const wire = wireOf(origin.consume());
+				const kept = survivor ? new AbortController() : undefined;
+				const remaining = kept ? wire.demand(path, undefined, kept.signal).catch(() => {}) : undefined;
+				const holds = Array.from({ length: cancelled }, () => new AbortController());
+				const demands = holds.map((hold) => wire.demand(path, undefined, hold.signal).catch(() => {}));
+				try {
+					const start = performance.now();
+					for (const hold of holds) hold.abort();
+					const elapsed = performance.now() - start;
+					await Promise.all(demands);
+					if (round > 0) {
+						active.push(elapsed * 1000);
+						settled.push((performance.now() - start) * 1000);
+					}
+				} finally {
+					kept?.abort();
+					await remaining;
+					origin.close();
+				}
+				await settle();
+			}
+			active.sort((a, b) => a - b);
+			settled.sort((a, b) => a - b);
+			console.log(`${survivor},${routes},${cancelled},${active[3].toFixed(2)},${settled[3].toFixed(2)}`);
 		}

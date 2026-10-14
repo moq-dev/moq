@@ -2,7 +2,7 @@
 # Run `just check`, `just fix`, or `just ci check|test` over what the branch
 # changed.
 #
-# Usage: sh/dispatch.sh check|fix|ci-check|ci-test [BASE|--all]
+# Usage: sh/dispatch.sh check|fix|ci-check|ci-test [BASE|--all] [--query]
 #
 # The branch diff is resolved once and matched against the impact map below,
 # the one place that says which paths put which module in scope. `check` is
@@ -10,9 +10,14 @@
 # so there is no second definition of "checked".
 set -euo pipefail
 
-usage="usage: sh/dispatch.sh check|fix|ci-check|ci-test [BASE|--all]"
+usage="usage: sh/dispatch.sh check|fix|ci-check|ci-test [BASE|--all] [--query]"
 action=${1:?$usage}
 base=${2:-}
+query=${3:-}
+if [[ $# -gt 3 || (-n "$query" && "$query" != --query) ]]; then
+    echo "$usage" >&2
+    exit 2
+fi
 case "$action" in
     check | fix | ci-check | ci-test) ;;
     *)
@@ -25,7 +30,7 @@ esac
 # _FORTIFY_SOURCE the dev shell disables, which breaks jemalloc's -Werror
 # configure probes. This flake's dev shell sets MOQ_DEV_SHELL. Windows has no
 # Nix, so it always runs on the host.
-if [[ -z "${MOQ_DEV_SHELL:-}" && -z "${MOQ_ALLOW_HOST:-}" && "$OSTYPE" != msys && "$OSTYPE" != cygwin ]]; then
+if [[ -z "$query" && -z "${MOQ_DEV_SHELL:-}" && -z "${MOQ_ALLOW_HOST:-}" && "$OSTYPE" != msys && "$OSTYPE" != cygwin ]]; then
     echo "error: run inside the Nix dev shell ('nix develop' or direnv) so tools match CI" >&2
     echo "       or set MOQ_ALLOW_HOST=1 to use the host toolchain anyway" >&2
     exit 1
@@ -135,6 +140,11 @@ for module in "${modules[@]}"; do
     if [[ -z "$all" && -n "$pattern" ]] && ! grep -qE "$pattern" "$changed"; then
         continue
     fi
+    # Selection must not depend on the tools setup has yet to install.
+    if [[ -n "$query" ]]; then
+        selected+=("$module")
+        continue
+    fi
     absent=()
     for tool in ${tools[$module]}; do
         command -v "$tool" >/dev/null 2>&1 || absent+=("$tool")
@@ -147,6 +157,15 @@ for module in "${modules[@]}"; do
         echo "$action: skipping $module; missing ${absent[*]}" >&2
     fi
 done
+
+# A query runs on the host before Nix, cache restore, or disk cleanup. Keep the
+# normal selection loop authoritative, including its repository-wide lints.
+if [[ -n "$query" ]]; then
+    needed=false
+    ((${#selected[@]} == 0)) || needed=true
+    echo "needed=$needed"
+    exit
+fi
 
 if ((${#missing[@]})); then
     echo "error: MOQ_STRICT is set but these tools are missing: $(printf '%s\n' "${missing[@]}" | sort -u | tr '\n' ' ')" >&2

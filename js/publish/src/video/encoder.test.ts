@@ -1,12 +1,15 @@
 import { expect, spyOn, test } from "bun:test";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
+import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { Signal } from "@moq/signals";
+import { Broadcast } from "../broadcast";
 import { Baseline } from "../jitter";
 import { Encoder } from "./encoder";
 
 class FakeVideoEncoder {
+	static instances: FakeVideoEncoder[] = [];
 	// How many times the hardware has been probed, so a test can assert it isn't re-probed.
 	static probes = 0;
 
@@ -20,9 +23,17 @@ class FakeVideoEncoder {
 	state: CodecState = "unconfigured";
 	#output: VideoEncoderInit["output"];
 	#codec?: string;
+	#error: VideoEncoderInit["error"];
 
 	constructor(init: VideoEncoderInit) {
 		this.#output = init.output;
+		this.#error = init.error;
+		FakeVideoEncoder.instances.push(this);
+	}
+
+	fail(error: Error): void {
+		this.state = "closed";
+		this.#error(error as DOMException);
 	}
 
 	static async isConfigSupported(config: VideoEncoderConfig): Promise<{ supported: boolean }> {
@@ -61,6 +72,7 @@ class FakeVideoFrame {
 }
 
 function installFakeVideoEncoder() {
+	FakeVideoEncoder.instances = [];
 	const original = Object.getOwnPropertyDescriptor(globalThis, "VideoEncoder");
 	const frame = Object.getOwnPropertyDescriptor(globalThis, "VideoFrame");
 	Object.defineProperty(globalThis, "VideoEncoder", {
@@ -953,6 +965,112 @@ test("cut forces a keyframe, coalescing requests and spacing them at least 500ms
 		else Reflect.deleteProperty(globalThis, "VideoEncoder");
 		if (videoFrame) Object.defineProperty(globalThis, "VideoFrame", videoFrame);
 		else Reflect.deleteProperty(globalThis, "VideoFrame");
+	}
+});
+
+test("a failed video encoder disables only its rendition and recovers on a fresh track", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+	using _probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockResolvedValue({ supported: true });
+	using _now = spyOn(performance, "now").mockReturnValue(0);
+	const flush = async () => {
+		for (let i = 0; i < 10; i++) await new Promise<void>((resolve) => queueMicrotask(resolve));
+	};
+	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("failure.hang") });
+	const capture = {
+		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) } as never) },
+		out: { display: new Signal({ width: 640, height: 480 }), frames: new Signal(undefined) },
+	};
+	const estimate = new Signal<number | undefined>(10_000_000);
+	const bandwidth = new Moq.Bandwidth.Allocator(estimate);
+	const enabled = new Signal(true);
+	const encoder = new Encoder("video/hd", { broadcast, capture: capture as never, bandwidth, enabled, config: {} });
+	let subscriber: Moq.Track.Subscriber | undefined;
+	let siblingSubscriber: Moq.Track.Subscriber | undefined;
+	let catalogSubscriber: Moq.Track.Subscriber | undefined;
+	let recovered: Moq.Track.Subscriber | undefined;
+	try {
+		await encoder.out.catalog.changed();
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		const epoch = net.route?.epoch;
+		const sibling = broadcast.video("video/sd");
+		sibling.config.set({ codec: "avc1.640028", container: { kind: "legacy" } });
+		await flush();
+		siblingSubscriber = net.track("video/sd").subscribe();
+		subscriber = net.track("video/hd").subscribe();
+		await encoder.out.active.changed();
+		await flush();
+		const siblingTrack = sibling.track.peek();
+		if (!siblingTrack) throw new Error("expected demanded sibling track");
+		expect(siblingTrack.appendGroup().sequence).toBe(0);
+		catalogSubscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
+		const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: catalogSubscriber });
+		expect((await catalog.latest())?.value.video?.renditions["video/hd"]?.enabled).not.toBe(false);
+		const live = FakeVideoEncoder.instances.find((instance) => instance.state === "configured");
+		if (!live) throw new Error("expected live video encoder");
+		const failure = new Error("GPU encoder failed");
+		live.fail(failure);
+		await flush();
+		expect(subscriber.closed.peek()).toBe(failure);
+		expect(encoder.out.error.peek()).toBe(failure);
+		expect(encoder.out.catalog.peek()?.enabled).toBe(false);
+		expect((await catalog.latest())?.value.video?.renditions["video/hd"]?.enabled).toBe(false);
+		expect(encoder.out.active.peek()).toBe(false);
+		expect(broadcast.net.peek()).toBe(net);
+		expect(net.route?.epoch).toBe(epoch);
+		expect(siblingTrack.closed.peek()).toBeUndefined();
+		expect(siblingTrack.appendGroup().sequence).toBe(1);
+		const instances = FakeVideoEncoder.instances.length;
+		broadcast.audio("audio/new");
+		estimate.set(20_000_000);
+		enabled.set(false);
+		await flush();
+		enabled.set(true);
+		await flush();
+		expect(encoder.out.error.peek()).toBe(failure);
+		expect(encoder.out.catalog.peek()?.enabled).toBe(false);
+		expect(FakeVideoEncoder.instances).toHaveLength(instances);
+		expect(broadcast.net.peek()).toBe(net);
+
+		// The same capture handed back, as Video.Capture does when its source is released and restored,
+		// is a gap rather than a change.
+		const source = capture.in.source.peek();
+		capture.in.source.set(undefined as never);
+		capture.out.display.set(undefined as never);
+		await flush();
+		expect(encoder.out.error.peek()).toBe(failure);
+		capture.in.source.set(source);
+		capture.out.display.set({ width: 640, height: 480 });
+		await flush();
+		expect(encoder.out.error.peek()).toBe(failure);
+		expect(FakeVideoEncoder.instances).toHaveLength(instances);
+
+		// Only a changed caller input re-arms it, under a fresh track name.
+		// Mutated in place, so the settings object keeps its identity.
+		encoder.config.mutate((config) => {
+			if (config) config.maxPixels = 320 * 240;
+		});
+		await flush();
+		expect(encoder.out.error.peek()).toBeUndefined();
+		const config = (await catalog.latest())?.value.video?.renditions["video/hd"];
+		if (!config?.track) throw new Error("expected a recovered track name");
+		expect(config.track).not.toBe("video/hd");
+		expect(config.enabled).not.toBe(false);
+		recovered = net.track(config.track).subscribe();
+		await flush();
+		expect(encoder.out.active.peek()).toBe(true);
+		expect(recovered.closed.peek()).toBeUndefined();
+		expect(broadcast.net.peek()).toBe(net);
+		expect(net.route?.epoch).toBe(epoch);
+		expect(siblingTrack.appendGroup().sequence).toBe(2);
+	} finally {
+		subscriber?.close();
+		siblingSubscriber?.close();
+		catalogSubscriber?.close();
+		recovered?.close();
+		encoder.close();
+		bandwidth.close();
+		broadcast.close();
 	}
 });
 

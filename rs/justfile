@@ -355,10 +355,10 @@ bench-rtmp *args:
 bench-relay-auth *args:
     cargo bench --locked -p moq-relay --bench auth -- "$@"
 
-# One relay's stats tick, plus the decode table. `--test` runs each tick once; decode ignores it and prints its whole table.
+# One relay's stats tick, plus the decode and aggregate tables. `--test` runs each tick once; the tables ignore it and print every configuration.
 [positional-arguments]
 bench-stats *args:
-    cargo bench --locked -p moq-stats --features bench --bench producer_tick --bench decode -- "$@"
+    cargo bench --locked -p moq-stats --features bench --bench producer_tick --bench decode --bench aggregate -- "$@"
 
 # Sweep latency observations against writer count and report density.
 bench-latency:

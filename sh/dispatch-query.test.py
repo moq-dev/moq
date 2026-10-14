@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""Exercise pre-setup selection with real diffs and no development toolchain."""
+
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import statistics
+import sys
+import time
+import tempfile
+import unittest
+
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+class QueryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.repo = self.root / "repo"
+        (self.repo / "sh").mkdir(parents=True)
+        for script in ("dispatch.sh", "changed.sh"):
+            shutil.copy(ROOT / "sh" / script, self.repo / "sh" / script)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        for command in ("bash", "git", "sort", "mktemp", "rm", "grep"):
+            (self.bin / command).symlink_to(shutil.which(command))
+        self.env = dict(os.environ, PATH=str(self.bin), GIT_CONFIG_NOSYSTEM="1",
+                        GIT_CONFIG_GLOBAL=os.devnull, MOQ_STRICT="1")
+        for key in ("MOQ_DEV_SHELL", "MOQ_ALLOW_HOST", "GITHUB_BASE_REF"):
+            self.env.pop(key, None)
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.name", "test")
+        self.git("config", "user.email", "test@example.com")
+        self.git("config", "commit.gpgsign", "false")
+        self.git("add", ".")
+        self.git("commit", "-qm", "base")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.git("update-ref", "refs/remotes/origin/release", "HEAD")
+
+    def git(self, *args):
+        return subprocess.run(["git", *args], cwd=self.repo, env=self.env,
+                              text=True, capture_output=True, check=True).stdout.strip()
+
+    def change(self, path):
+        file = self.repo / path
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(file.read_text() + "\n" if file.exists() else "changed\n")
+
+    def run_query(self, job="test", base="origin/main"):
+        return subprocess.run(["bash", "sh/dispatch.sh", f"ci-{job}", base, "--query"],
+                              cwd=self.repo, env=self.env, text=True, capture_output=True)
+
+    def expect(self, needed, job="test", base="origin/main"):
+        result = self.run_query(job, base)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, f"needed={str(needed).lower()}\n")
+        self.assertNotIn("missing", result.stderr)
+        self.assertNotIn("skipping", result.stderr)
+
+    def test_quest_only_has_no_tests_but_keeps_repository_lints(self):
+        self.change("quest/m1/example.md")
+        self.expect(False)
+        self.expect(True, "check")
+
+    def test_empty_diff_keeps_repository_lints(self):
+        self.expect(False)
+        self.expect(True, "check")
+
+    def test_selected_tests_do_not_depend_on_installed_tools(self):
+        for path in ("js/net/src/index.ts", "rs/moq-net/src/lib.rs", "py/moq-rs/example.py",
+                     "doc/concept/example.md", "rs/moq-wasm/src/lib.rs", "test/example.ts"):
+            with self.subTest(path=path):
+                self.change(path)
+                self.expect(True)
+                (self.repo / path).unlink()
+
+    def test_orchestration_and_all_select_work(self):
+        self.expect(True, base="--all")
+        self.change("justfile")
+        self.expect(True)
+
+    def test_working_tree_changes_and_deletions_count(self):
+        self.change("rs/moq-net/src/lib.rs")
+        self.git("add", ".")
+        self.git("commit", "-qm", "source")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        (self.repo / "rs/moq-net/src/lib.rs").unlink()
+        self.expect(True)
+
+    def test_release_pr_base_and_merge_group_base(self):
+        self.env["GITHUB_BASE_REF"] = "release"
+        self.expect(False, base="")
+        self.change("rs/moq-net/src/lib.rs")
+        self.git("add", ".")
+        self.git("commit", "-qm", "queued source")
+        group_base = self.git("rev-parse", "HEAD")
+        self.change("quest/m1/example.md")
+        self.expect(False, base=group_base)
+        self.expect(True, base="origin/release")
+
+    def test_invalid_base_fails_instead_of_reporting_no_work(self):
+        result = self.run_query(base="missing")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("needed=", result.stdout)
+        self.assertIn("cannot resolve merge-base", result.stderr)
+
+    def test_query_and_execution_agree_on_selected_modules(self):
+        for tool in ("bun", "python3", "cargo", "wasm-bindgen", "jq", "uv"):
+            (self.bin / tool).symlink_to(shutil.which("true"))
+        just = self.bin / "just"
+        just.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" >>"$CALLS"\n')
+        just.chmod(0o755)
+        self.env.update(MOQ_DEV_SHELL="1", CALLS=str(self.root / "calls"))
+        for path, call in (("js/net/src/index.ts", "js test"),
+                           ("rs/moq-net/src/lib.rs", "rs test-changed"),
+                           ("py/moq-rs/example.py", "py test")):
+            with self.subTest(path=path):
+                self.change(path)
+                self.expect(True)
+                subprocess.run(["bash", "sh/dispatch.sh", "ci-test", "origin/main"],
+                               cwd=self.repo, env=self.env, capture_output=True, check=True)
+                self.assertTrue((self.root / "calls").read_text().strip().startswith(call))
+                (self.root / "calls").unlink()
+                (self.repo / path).unlink()
+
+    def test_execution_still_requires_dev_shell(self):
+        result = subprocess.run(["bash", "sh/dispatch.sh", "ci-test", "origin/main"],
+                                cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("run inside the Nix dev shell", result.stderr)
+
+
+def benchmark():
+    # Sweep path count and both job selections. No timing threshold: hosted setup
+    # and checkout costs are separate, and the query must never run those actions.
+    for count in (1, 100, 1000):
+        fixture = QueryTests()
+        fixture.setUp()
+        try:
+            for index in range(count):
+                fixture.change(f"quest/m1/example-{index}.md")
+            for job in ("check", "test"):
+                samples = []
+                for _ in range(10):
+                    started = time.perf_counter()
+                    fixture.expect(job == "check", job)
+                    samples.append((time.perf_counter() - started) * 1000)
+                print(f"{job}: {count} paths, median {statistics.median(samples):.1f} ms")
+        finally:
+            fixture.doCleanups()
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--bench"]:
+        benchmark()
+    else:
+        unittest.main()

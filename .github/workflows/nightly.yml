@@ -120,8 +120,9 @@ jobs:
         run: nix develop --command just js bench request-ids
 
       # A restart should cost the same whether one or many requests follow the path,
-      # and an unrelated route should wake none of them.
-      - name: JS origin request restart benchmark
+      # and an unrelated route should wake none of them. Cancellation also varies
+      # competing routes independently of cancelled waiters on the same path.
+      - name: JS origin request lifecycle benchmark
         if: ${{ !cancelled() }}
         run: nix develop --command just js bench requests
 
@@ -201,12 +202,12 @@ jobs:
 
       # One relay's stats tick (drain plus plain and compressed encode), swept
       # over held paths, tiers, and how many of those paths changed, plus the
-      # decode table. `--test` runs each tick routine once (decode ignores it
-      # and runs its whole table), so a panic (a plain
+      # decode and aggregate tables. `--test` runs each tick routine once (the
+      # tables ignore it and run every configuration), so a panic (a plain
       # frame past the cache cap, a drain that drops a held path) fails here
       # instead of on the next manual run. Timing is not compared. `bench`
       # exposes the hidden producer hook; without it the tick target is skipped.
-      - name: moq-stats producer tick and decode benchmarks
+      - name: moq-stats producer tick, decode and aggregate benchmarks
         if: ${{ !cancelled() }}
         run: nix develop --command just rs bench-stats --test
 

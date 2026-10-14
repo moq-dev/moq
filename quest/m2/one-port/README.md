@@ -27,10 +27,16 @@ srt-tokio.
 
 Decided 2026-10-05, from moq.pro's audit: `moq-rtc` taking a fed socket
 ([rtc-feed](/quest/m2/one-port/rtc-feed.md)) and the steering filter
-([shard steering](/quest/m2/one-port/shard-steering.md)) join this line, and
+([shard steering](/quest/m1/p2p/shard-steering.md)) join this line, and
 [the io_uring demux](/quest/m2/uring-demux.md) is planned beside it, all in
 m2 rather than m3, since moq.pro's edge cutover and its uring rollout wait on
 them.
+
+Decided 2026-10-13: [UDP demux](/quest/m1/p2p/udp-demux.md) and
+[shard steering](/quest/m1/p2p/shard-steering.md) moved to m1 under P2P,
+because [native pairs](/quest/m1/p2p/native-quic.md) run QUIC and ICE's
+STUN on one socket through the same demux. The rest of this line builds on
+them from m1.
 
 ### Classifying a datagram
 
@@ -68,11 +74,9 @@ decided.
 
 Decided 2026-10-08: the public STUN responder is left to P2P (m1), its
 only consumer. Here, a Binding request carrying USERNAME is an ICE check
-and goes to WebRTC; any other is dropped and counted. Notes for whoever
-plans the responder: answer Binding with XOR-MAPPED-ADDRESS only; the reply
-outsizes the request (32 or 44 bytes against 20), so bound spoofed
-amplification with a per-source token bucket and a global budget; use a
-maintained STUN crate, not a hand-rolled codec.
+and goes to WebRTC; any other is dropped and counted. Decided 2026-10-13:
+the responder binds its own port ([relay STUN](/quest/m1/p2p/relay-stun.md)),
+so the shared port never answers public Binding requests.
 
 ### TCP
 
@@ -88,14 +92,14 @@ pre-accepted streams can stand behind.
 
 ## Required
 
-- [Steer only QUIC by connection ID](/quest/m2/one-port/shard-steering.md) - QUIC-bit greasing goes off and the reuseport filter leaves RTP, SRT, and STUN flows on one shard each
-- [UDP demux](/quest/m2/one-port/udp-demux.md) - one socket carries QUIC, with a WebRTC hook for embedders
 - [WebRTC on the shared socket](/quest/m2/one-port/rtc-feed.md) - `moq-rtc` serves WHIP and WHEP media from the WebRTC hook and pins ICE tuples
 - [TCP acceptor](/quest/m2/one-port/tcp-demux.md) - one listener carries TLS-terminated HTTP, RTMP, and RTMPS
 - [SRT on the shared socket](/quest/m2/one-port/srt-demux.md) - moq-srt drives `srt-protocol` on demuxed packets and the flow table pins its 4-tuples
 
 ## Related
 
-- [P2P](/quest/m1/p2p/README.md) - the only consumer of a public STUN responder, which it plans when it needs one
+- [UDP demux](/quest/m1/p2p/udp-demux.md) - one socket carries QUIC, with a WebRTC hook for embedders; moved to m1 for native P2P
+- [Steer only QUIC by connection ID](/quest/m1/p2p/shard-steering.md) - QUIC-bit greasing goes off and the reuseport filter leaves RTP, SRT, and STUN flows on one shard each
+- [Relay STUN](/quest/m1/p2p/relay-stun.md) - the public STUN responder, on its own port
 - [One port on the io_uring workers](/quest/m2/uring-demux.md) - the io_uring workers host the UDP demux
 - [Stream sessions](/quest/m3/uring-tcp/README.md) - the io_uring workers that would host the TCP acceptor later

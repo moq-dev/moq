@@ -276,9 +276,8 @@ test("a rendition name may change kind on a new network broadcast", async () => 
 	broadcast.close();
 });
 
-// A closed track can't be continued, and a replacement under its name would restart its sequences,
-// so the replacement goes out on a new network broadcast.
-test("replacing a closed rendition track publishes a new network broadcast", async () => {
+// A replacement encoder gets a fresh track name while its catalog ID and broadcast stay stable.
+test("replacing a closed rendition track keeps the broadcast and publishes a fresh track name", async () => {
 	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("test.hang") });
 	const video = broadcast.video("video");
 	await settle();
@@ -297,14 +296,18 @@ test("replacing a closed rendition track publishes a new network broadcast", asy
 	await settle();
 
 	const again = broadcast.video("video");
+	again.config.set(videoConfig);
 	await settle();
 	const next = broadcast.net.peek();
 	expect(next).toBeDefined();
-	expect(next).not.toBe(net);
-	if (!next) throw new Error("expected a new network producer");
+	expect(next).toBe(net);
+	if (!next) throw new Error("expected the network producer");
 
-	// The replacement starts the name over on the new broadcast.
-	const second = next.track("video").subscribe();
+	// The replacement starts its sequences over under the new track name.
+	const config = (await readCatalog(broadcast))?.video?.renditions.video;
+	if (!config?.track) throw new Error("expected replacement track in catalog");
+	expect(config.track).not.toBe("video");
+	const second = next.track(config.track).subscribe();
 	await settle();
 	const replacement = again.track.peek();
 	expect(replacement).toBeDefined();
@@ -370,5 +373,28 @@ test("keeps the current catalog snapshot for a reconnecting viewer", async () =>
 		broadcast.close();
 	} finally {
 		performance.now = real;
+	}
+});
+
+test("registering a sibling after an encoder failure keeps the network broadcast", async () => {
+	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("failure.hang") });
+	const video = broadcast.video("video");
+	video.config.set(videoConfig);
+	await settle();
+	const net = broadcast.net.peek();
+	if (!net) throw new Error("expected network broadcast");
+	const subscriber = net.track("video").subscribe();
+	try {
+		await settle();
+		const track = video.track.peek();
+		if (!track) throw new Error("expected demanded video track");
+		track.close(new Error("encoder failed"));
+		await settle();
+		broadcast.audio("audio/new").config.set(audioConfig);
+		await settle();
+		expect(broadcast.net.peek()).toBe(net);
+	} finally {
+		subscriber.close();
+		broadcast.close();
 	}
 });

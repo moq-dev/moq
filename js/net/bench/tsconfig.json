@@ -5,6 +5,7 @@
 		"noEmit": true
 	},
 	"include": [
+		"requests.ts",
 		"serve-browser.ts",
 		"serve-browser-entry.ts",
 		"serve-browser.test.ts",
