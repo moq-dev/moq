@@ -2466,7 +2466,8 @@ where
 		// The token never stands in for the limit this side set on the peer. A live request that
 		// presented one keeps standing on it after the token is cleared, as the peer still does.
 		let carries_token = matches!(ns.target, Target::Requests(_))
-			&& (self.request_token.peek().is_some() || ns.requests.get(suffix).is_some_and(|request| request.token));
+			&& (self.request_token.peek().is_some()
+				|| ns.requests.get(suffix).is_some_and(|request| request.backing.is_some()));
 		let permitted = match carries_token {
 			true => ns.permit.within_limit(path.as_str()),
 			false => ns.permitted(path),
@@ -2605,8 +2606,9 @@ where
 			return Ok(Refused::No);
 		};
 
-		let token = self.request_token.peek();
-		let presented = token.is_some();
+		// Backed from before the first byte, so grant enforcement never sees this advertisement
+		// carry a token it does not know about.
+		let (token, backing) = self.request_token.present(path);
 		request.writer.varint(ietf::PublishNamespace::ID).await?;
 		request
 			.writer
@@ -2665,7 +2667,7 @@ where
 				path: path.clone(),
 				request_id,
 				stream: request,
-				token: presented,
+				backing,
 			},
 		);
 		Ok(Refused::No)
@@ -2939,7 +2941,9 @@ where
 					let _ = ietf::RequestOk::decode_msg(&mut data, self.version)?;
 					tracing::debug!(broadcast = %absolute, "request token refreshed");
 					if let Some(request) = ns.requests.get_mut(&suffix) {
-						request.token = true;
+						request
+							.backing
+							.get_or_insert_with(|| self.request_token.back(request.path.clone()));
 					}
 				}
 				ietf::RequestError::ID => {
@@ -4201,9 +4205,9 @@ struct NamespaceRequest<S: crate::transport::poll::Session> {
 	path: crate::PathOwned,
 	request_id: RequestId,
 	stream: Stream<S, Version>,
-	/// The advertisement presented a request token, so the peer holds it on that token's
-	/// grant rather than the connection grant.
-	token: bool,
+	/// Set once the advertisement presented a request token, so the peer holds it on that
+	/// token's grant rather than the connection grant.
+	backing: Option<crate::auth::Backing>,
 }
 
 #[cfg(test)]

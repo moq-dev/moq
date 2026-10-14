@@ -22,7 +22,8 @@
 //! union of subtrees rather than widen it.
 
 use std::{
-	collections::{BTreeMap, VecDeque},
+	collections::{BTreeMap, HashMap, VecDeque},
+	sync::{Arc, Mutex},
 	task::Poll,
 };
 
@@ -269,6 +270,9 @@ impl Permit {
 #[derive(Clone, Default)]
 pub(crate) struct RequestToken {
 	token: kio::Shared<Option<crate::setup::Token>>,
+	/// Broadcasts whose live advertisement presented the token, counted per advertisement.
+	/// They keep standing on it after it is cleared, so grant enforcement leaves them be.
+	backed: Arc<Mutex<HashMap<crate::PathOwned, usize>>>,
 }
 
 impl RequestToken {
@@ -277,7 +281,36 @@ impl RequestToken {
 	pub(crate) fn new(token: Option<crate::setup::Token>) -> Self {
 		Self {
 			token: kio::Shared::new(token),
+			backed: Default::default(),
 		}
+	}
+
+	/// The token an advertisement of `path` presents now, with a guard marking `path` as backed
+	/// by it until dropped. Read under the token's lock, so a concurrent clear sees either no
+	/// token sent or the path already backed.
+	pub(crate) fn present(&self, path: &crate::PathOwned) -> (Option<crate::setup::Token>, Option<Backing>) {
+		let token = self.token.read();
+		let backing = token.is_some().then(|| self.back(path.clone()));
+		((*token).clone(), backing)
+	}
+
+	/// Mark `path` as backed by the token, such as after an accepted renewal.
+	pub(crate) fn back(&self, path: crate::PathOwned) -> Backing {
+		*self
+			.backed
+			.lock()
+			.unwrap_or_else(|e| e.into_inner())
+			.entry(path.clone())
+			.or_default() += 1;
+		Backing {
+			backed: self.backed.clone(),
+			path,
+		}
+	}
+
+	/// Whether a live advertisement of `path` presented the token.
+	pub(crate) fn backs(&self, path: &crate::PathOwned) -> bool {
+		self.backed.lock().unwrap_or_else(|e| e.into_inner()).contains_key(path)
 	}
 
 	/// Replace the token presented on this session's requests. A live request re-presents
@@ -305,6 +338,24 @@ impl RequestToken {
 			false => Poll::Ready(()),
 		}));
 		Poll::Ready((*guard).clone())
+	}
+}
+
+/// One advertisement standing on the request token it presented; dropping it ends that.
+pub(crate) struct Backing {
+	backed: Arc<Mutex<HashMap<crate::PathOwned, usize>>>,
+	path: crate::PathOwned,
+}
+
+impl Drop for Backing {
+	fn drop(&mut self) {
+		let mut backed = self.backed.lock().unwrap_or_else(|e| e.into_inner());
+		if let Some(count) = backed.get_mut(&self.path) {
+			*count -= 1;
+			if *count == 0 {
+				backed.remove(&self.path);
+			}
+		}
 	}
 }
 
@@ -1812,26 +1863,7 @@ impl Enforce {
 		}
 	}
 
-	/// Admit every broadcast announced while our announces carry a request token, unchecked,
-	/// so clearing the token checks only what is announced after it. Ready once the origin ends.
-	pub(crate) fn poll_exempt(&mut self, announced: &mut crate::announce::Consumer, waiter: &kio::Waiter) -> Poll<()> {
-		loop {
-			let Some(event) = ready_or!(announced.poll_next(waiter)) else {
-				return Poll::Ready(());
-			};
-			match event {
-				crate::announce::Event::Start(update) | crate::announce::Event::Update(update) => {
-					self.live.insert(update.prefix);
-				}
-				crate::announce::Event::End(update) => {
-					self.live.remove(&update.prefix);
-				}
-				_ => {}
-			}
-		}
-	}
-
-	/// Admit one broadcast unchecked, such as one a token set mid-check now carries.
+	/// Admit one broadcast [`Self::poll`] found uncovered, such as one a request token carries.
 	pub(crate) fn admit(&mut self, path: crate::PathOwned) {
 		self.live.insert(path);
 	}

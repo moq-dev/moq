@@ -1429,37 +1429,23 @@ async fn enforce_grant<S: crate::transport::poll::Session>(
 	// announce carries it, which is when it rides its own PUBLISH_NAMESPACE request: always on
 	// draft-14/15, and on later drafts unless the peer requires solicitation, which turns every
 	// advertisement into an inline NAMESPACE entry with no token slot. Then the grant still
-	// bounds what we publish. The token can be set or cleared at any time, so each change is
-	// rechecked. A broadcast announced while the token rode the announces stays exempt after it
-	// is cleared, since its advertisement still stands on that token.
+	// bounds what we publish. The token can be set or cleared at any time, so it is read when
+	// an uncovered broadcast turns up: one is admitted while a token is set, or once cleared, if
+	// its live advertisement already presented one, since that still stands on it. The
+	// publisher marks that before the first byte, so this cursor lagging behind its own never
+	// mistakes a token-bearing advertisement for an unauthorized one.
 	let mut announced = origin.announced();
 	let mut check = crate::auth::Enforce::default();
 	let path = loop {
-		let token = request_token.peek();
-		let exempt = token.is_some() && announces_carry_token(&peer_setup, version).await;
-		let next = kio::wait(|waiter| {
-			if request_token.poll_changed(&token, waiter).is_ready() {
-				return std::task::Poll::Ready(None);
-			}
-			match exempt {
-				true => check.poll_exempt(&mut announced, waiter).map(|()| Some(None)),
-				false => check.poll(&auth, &mut announced, waiter).map(Some),
-			}
-		})
-		.await;
-		match next {
-			// The token changed: recheck whether announces now carry it.
-			None => continue,
-			Some(None) => return Ok(()),
-			Some(Some(path)) => {
-				// Another thread may have set a token after the change check in that same poll.
-				if request_token.peek().is_some() && announces_carry_token(&peer_setup, version).await {
-					check.admit(path);
-					continue;
-				}
-				break path;
-			}
+		let Some(path) = kio::wait(|waiter| check.poll(&auth, &mut announced, waiter)).await else {
+			return Ok(());
+		};
+		let set = request_token.peek().is_some() && announces_carry_token(&peer_setup, version).await;
+		if set || request_token.backs(&path) {
+			check.admit(path);
+			continue;
 		}
+		break path;
 	};
 	tracing::error!(broadcast = %origin.absolute(&path), "publishing outside our grant; closing the session");
 	let err = Error::Unauthorized;
@@ -2055,6 +2041,68 @@ mod tests {
 			.expect("clearing the token never resumed enforcement");
 		assert!(matches!(result, Err(Error::Unauthorized)), "{result:?}");
 		assert_eq!(log.closes().len(), 1, "the session closes for the token-less announce");
+		drop(setup);
+	}
+
+	/// The publisher's announce cursor can present the token on a broadcast before this
+	/// cursor reaches it, and the token can be cleared in between: the advertisement still
+	/// stands on the token it carried, so enforcement admits it rather than close the session.
+	#[moq_net_sim::test]
+	async fn a_token_cleared_behind_a_presented_announce_keeps_the_session() {
+		let auth = crate::auth::Handle::new(true);
+		let setup = auth.present(bytes::Bytes::new(), true).unwrap();
+		auth.granted(
+			0,
+			crate::auth::Grant {
+				publish: crate::Pattern::subtree("room/alice").unwrap().into(),
+				subscribe: crate::Patterns::new(),
+				expires: None,
+			},
+		);
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let session = crate::lite::test_transport::SinkSession::new(Default::default());
+		let log = session.log.clone();
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer {
+			solicit: Some(false),
+			..Default::default()
+		});
+		let request_token = crate::RequestToken::new(Some(crate::setup::Token {
+			kind: 0,
+			value: b"jwt".to_vec(),
+		}));
+
+		let mut enforce = std::pin::pin!(enforce_grant(
+			auth,
+			origin.consume(),
+			session,
+			request_token.clone(),
+			peer_setup,
+			Version::Draft18,
+		));
+		assert!(futures::poll!(enforce.as_mut()).is_pending(), "nothing to enforce yet");
+
+		// Between two polls of this loop: the broadcast appears, the publisher advertises it
+		// carrying the token, and the token is cleared.
+		let _bob = origin
+			.announce("room/bob/cam", crate::origin::Route::default())
+			.unwrap();
+		let (presented, backing) = request_token.present(&crate::Path::new("room/bob/cam").to_owned());
+		assert!(
+			presented.is_some() && backing.is_some(),
+			"the advertisement carries the token"
+		);
+		request_token.set(None);
+
+		for _ in 0..ANNOUNCE_TURNS {
+			assert!(
+				futures::poll!(enforce.as_mut()).is_pending(),
+				"enforcement closed over a token-bearing advertisement"
+			);
+			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+		}
+		assert!(log.closes().is_empty(), "the session stays open");
+		drop(backing);
 		drop(setup);
 	}
 
