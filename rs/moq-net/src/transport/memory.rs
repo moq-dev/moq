@@ -3,10 +3,11 @@
 //! It behaves like a QUIC connection with zero latency and unlimited bandwidth. A write
 //! lands in the peer's receive buffer at once, so a stream payload crosses as the same
 //! [`Bytes`] it was written as, and each write is read back as one chunk (or split by a
-//! smaller read). Flow control bounds what that buffer holds: a writer pends once its
-//! stream, or every stream in its direction together, holds a window of unread bytes,
-//! until the reader consumes some. A slow reader therefore throttles its own streams and
-//! nothing else.
+//! smaller read). Flow control bounds what that buffer holds: a write pends until its
+//! stream, and every stream in its direction together, have a window's room for all of
+//! it, so only a write larger than a window is ever split. A slow reader throttles its
+//! own stream, and the rest of its direction only once its unread bytes fill the session
+//! window, until it reads or the writer resets.
 //!
 //! Like QUIC, a reset or a stop discards what the stream still buffers, and a finished
 //! stream has already reached the peer in full, so a later reset is ignored. Unlike QUIC,
@@ -431,29 +432,27 @@ impl poll::SendStream for SendStream {
 			return Poll::Ready(Err(err));
 		}
 
-		let stream_window = self.stream_window;
-		let mut state = ready!(
-			self.state
-				.poll(waiter, |state| match state.stop.is_some() || state.held < stream_window {
-					true => Poll::Ready(()),
-					false => Poll::Pending,
-				})
-		);
+		// Wait for room for the whole write, so one that fits a window is never split and
+		// its reader gets it back as one chunk. Only a write larger than a window is partial.
+		let (stream_window, session_window) = (self.stream_window, self.session_window);
+		let size = buf.remaining().min(stream_window).min(session_window);
+
+		let mut state = ready!(self.state.poll(waiter, |state| {
+			match state.stop.is_some() || state.held + size <= stream_window {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			}
+		}));
 		if let Some(code) = state.stop {
 			return Poll::Ready(Err(Error::Stopped(code)));
 		}
 
-		let session_window = self.session_window;
-		let mut window = ready!(self.window.poll(waiter, |held| match **held < session_window {
+		let mut window = ready!(self.window.poll(waiter, |held| match **held + size <= session_window {
 			true => Poll::Ready(()),
 			false => Poll::Pending,
 		}));
 
 		// Take ownership rather than copy: free for a `Bytes` source.
-		let size = buf
-			.remaining()
-			.min(stream_window - state.held)
-			.min(session_window - *window);
 		let chunk = buf.copy_to_bytes(size);
 		state.chunks.push_back(chunk);
 		state.held += size;
@@ -758,6 +757,21 @@ mod tests {
 		assert_eq!(text(read(&mut recv, 3)), "012");
 		assert_eq!(count.0.load(Ordering::Relaxed), 1);
 		assert_eq!(ready(send.poll_write_buf(&mut noop(), &mut buf)).unwrap(), 2);
+	}
+
+	#[test]
+	fn a_write_that_fits_is_never_split() {
+		let (mut a, mut b) = pair(config(8, 1024));
+		let (mut send, mut recv) = uni(&mut a, &mut b);
+
+		assert_eq!(ready(write(&mut send, &Bytes::from_static(b"012345"))).unwrap(), 6);
+		// Two bytes of room, but the write waits for all four rather than splitting.
+		let frame = Bytes::from_static(b"6789");
+		assert!(write(&mut send, &frame).is_pending());
+
+		assert_eq!(text(read(&mut recv, usize::MAX)), "012345");
+		assert_eq!(ready(write(&mut send, &frame)).unwrap(), 4);
+		assert_eq!(text(read(&mut recv, usize::MAX)).as_ptr(), frame.as_ptr());
 	}
 
 	#[test]

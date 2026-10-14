@@ -140,3 +140,7 @@ required-features = ["fuzz"]
 [[bench]]
 name = "auth"
 harness = false
+
+[[bench]]
+name = "memory"
+harness = false
