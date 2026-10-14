@@ -1545,6 +1545,11 @@ where
 				}
 				Turn::Failed(err) => return Err(err),
 				Turn::Ended(err) => {
+					// Retract the route before the withdrawal, which waits on the peer: a lapsed
+					// grant serves nothing more, however slowly the peer reads.
+					if std::mem::take(attached) {
+						self.stop_announce(path.clone(), true)?;
+					}
 					self.cancel_announce(stream, request_id, path, &err, "request token grant ended")
 						.await?;
 					return Err(err);
@@ -1564,6 +1569,9 @@ where
 					// Per drafts 16 section 9.11.1 / 18 section 10.9.1, a refused or uncovered
 					// renewal ends only this announce. Answer REQUEST_ERROR, then close the stream;
 					// the session stays up and the old grant does not survive.
+					if std::mem::take(attached) {
+						self.stop_announce(path.clone(), true)?;
+					}
 					self.write_error(stream, rid, &refusal.error, &refusal.reason).await?;
 					self.cancel_announce(stream, request_id, path, &refusal.error, &refusal.reason)
 						.await?;
@@ -8901,6 +8909,61 @@ mod tests {
 				"the renewed announce must still be attached"
 			);
 		}
+	}
+
+	/// A lapsed grant retracts its announce at once, even while the withdrawal waits on a peer
+	/// that never acknowledges the closed stream.
+	#[moq_net_sim::test]
+	async fn a_lapsed_announce_grant_retracts_before_the_peer_reads() {
+		const VERSION: Version = Version::Draft18;
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]).with_unacked_fin();
+		let (mut subscriber, mut requests, _cred, consumer, session) = auth_announce_harness_on(VERSION, session);
+		let rt = subscriber.runtime.clone();
+		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+
+		let acceptor = async move {
+			let request = requests.next().await.expect("a request").request();
+			let _held = request.accept(publish_grant_expiring(&rt, Some(60)));
+			std::future::pending::<()>().await
+		};
+		let mut acceptor = std::pin::pin!(acceptor);
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
+			stream,
+			token_publish_namespace(),
+			cluster::Peer::default(),
+			None,
+		));
+
+		let mut routed = false;
+		for _ in 0..500 {
+			let _ = futures::poll!(acceptor.as_mut());
+			assert!(futures::poll!(run.as_mut()).is_pending(), "the announce ended early");
+			if routed_now(&consumer, "room/alice").is_some() {
+				routed = true;
+				break;
+			}
+			settle().await;
+		}
+		assert!(routed, "the token must authorize the announce");
+
+		moq_net_sim::advance(std::time::Duration::from_secs(120)).await;
+		let mut retracted = false;
+		for _ in 0..50 {
+			let _ = futures::poll!(acceptor.as_mut());
+			assert!(
+				futures::poll!(run.as_mut()).is_pending(),
+				"the withdrawal waits on the peer's acknowledgement"
+			);
+			if routed_now(&consumer, "room/alice").is_none() {
+				retracted = true;
+				break;
+			}
+			settle().await;
+		}
+		assert!(
+			retracted,
+			"a lapsed grant must retract the route without waiting on the peer"
+		);
 	}
 
 	/// Per drafts 16 section 9.11.1 / 18 section 10.9.1, a refused PUBLISH_NAMESPACE

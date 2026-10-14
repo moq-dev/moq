@@ -652,6 +652,8 @@ pub struct ScriptedSession {
 	/// in order. See [`Self::with_incoming_unis`].
 	incoming_unis: Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
 	incoming_bidis: Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
+	/// Set by [`Self::with_unacked_fin`].
+	unacked_fin: bool,
 }
 
 impl ScriptedSession {
@@ -665,7 +667,14 @@ impl ScriptedSession {
 			park: kio::Park::default(),
 			incoming_unis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			incoming_bidis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+			unacked_fin: false,
 		}
+	}
+
+	/// Never acknowledge an opened stream's FIN, like a peer that stopped reading.
+	pub fn with_unacked_fin(mut self) -> Self {
+		self.unacked_fin = true;
+		self
 	}
 
 	/// Have the peer open one unidirectional stream per script, in order, each replaying
@@ -792,8 +801,10 @@ impl poll::Session for ScriptedSession {
 			Some(queue) => Arc::new(Mutex::new(queue.lock().unwrap().pop_front().unwrap_or_default())),
 			None => self.script.clone(),
 		};
+		let mut send = SinkSend::new(self.log.clone());
+		send.unacked_fin = self.unacked_fin;
 		Poll::Ready(Ok((
-			SinkSend::new(self.log.clone()),
+			send,
 			ScriptedRecv {
 				script,
 				close: self.close.clone(),

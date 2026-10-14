@@ -22,7 +22,8 @@ impl Auth {
 	/// PUBLISH_NAMESPACE requests, now and after reconnects. Experimental: the peer's
 	/// application must verify it, and success means only that the token was set.
 	///
-	/// Replacing it renews the live session's token-authorized requests in band. Errors
+	/// Replacing it renews the live session's token-authorized requests in band, except a
+	/// draft 14 or 15 advertisement, which has no update. Errors
 	/// with [`moq_net::Error::Unsupported`] when the live session speaks moq-lite, whose
 	/// requests carry no token; later sessions are still seeded with it.
 	pub fn set_request_token(&self, token: moq_net::setup::Token) -> Result<(), moq_net::Error> {

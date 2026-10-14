@@ -2835,12 +2835,31 @@ where
 				cost: None,
 				authorization_token: Some(crate::ietf::token::RequestToken(token.clone())),
 			};
-			request.stream.writer.encode_message(&update).await?;
+			let answer = match request.stream.writer.encode_message(&update).await {
+				Ok(()) => self.read_response(&mut request.stream).await,
+				Err(err) => Err(err),
+			};
 
 			let absolute = self.origin.absolute(&request.path).to_owned();
-			let Some((type_id, body)) = self.read_response(&mut request.stream).await? else {
-				tracing::debug!(broadcast = %absolute, "no answer to the token refresh");
-				// The peer never answered: the stream is gone, so drop the advertisement.
+			// The old grant can lapse while this waits, and the peer then ends only this
+			// advertisement: by never answering, closing the stream, or (draft-16) sending
+			// PUBLISH_NAMESPACE_CANCEL on it. That drops the advertisement, never the session.
+			let answer = match answer {
+				Ok(Some((type_id, _))) if type_id == ietf::PublishNamespaceCancel::ID && legacy => {
+					tracing::debug!(broadcast = %absolute, "advertisement cancelled during the token refresh");
+					None
+				}
+				Ok(Some(answer)) => Some(answer),
+				Ok(None) => {
+					tracing::debug!(broadcast = %absolute, "no answer to the token refresh");
+					None
+				}
+				Err(err) => {
+					tracing::debug!(broadcast = %absolute, %err, "advertisement ended during the token refresh");
+					None
+				}
+			};
+			let Some((type_id, body)) = answer else {
 				ns.requests.remove(&suffix);
 				// Forget what was sent so reconcile re-offers it with the new token, and re-arm
 				// the deferred-only retry sweep if an earlier refusal still holds it back.
@@ -12238,6 +12257,96 @@ mod tests {
 			log.bi_opens() >= 2,
 			"the re-offer opened a fresh PUBLISH_NAMESPACE stream"
 		);
+	}
+
+	/// A peer that ends the advertisement while a token refresh waits for its answer (its old
+	/// grant lapsed) ends only that advertisement: the namespace is re-offered with the new
+	/// token and the session stays up. Draft-16 cancels it on the stream, draft-17+ closes it.
+	#[moq_net_sim::test]
+	async fn an_advertisement_ended_during_a_token_refresh_is_re_offered() {
+		for version in [Version::Draft16, Version::Draft18] {
+			let first = bytes::Bytes::from_static(&[0x03, 0x00, b'a', b'a']);
+			let second = bytes::Bytes::from_static(&[0x03, 0x00, b'b', b'b']);
+
+			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
+			settle().await;
+
+			// Stream 1: the PUBLISH_NAMESPACE is accepted, then the peer ends it. Stream 2: the
+			// re-offer is accepted.
+			let mut stream1 = publish_namespace_ok(version).await;
+			let session = match version {
+				Version::Draft16 => {
+					let cancel = crate::lite::test_transport::Log::default();
+					crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(cancel.clone()), version)
+						.encode_message(&ietf::PublishNamespaceCancel {
+							track_namespace: crate::Path::new("cam"),
+							request_id: RequestId(0),
+							error_code: 0x1,
+							reason_phrase: "expired".into(),
+						})
+						.await
+						.unwrap();
+					stream1.extend(cancel.writes.lock().unwrap().iter());
+					crate::lite::test_transport::ScriptedSession::per_stream(vec![
+						stream1,
+						publish_namespace_ok(version).await,
+					])
+				}
+				_ => crate::lite::test_transport::ScriptedSession::per_stream_eof(vec![
+					stream1,
+					publish_namespace_ok(version).await,
+				]),
+			};
+			let log = session.log.clone();
+			let peer_setup = peer::PeerSetup::default();
+			peer_setup.set(peer::Peer::default());
+
+			let token = crate::RequestToken::new(Some(typed(&first)));
+			let publisher = Publisher::new(
+				crate::time::Clock::sim(),
+				session,
+				origin.consume(),
+				Control::new(None, false),
+				None,
+				peer_setup,
+				version,
+			)
+			.with_request_token(token.clone());
+
+			let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+			for _ in 0..100 {
+				assert!(futures::poll!(run.as_mut()).is_pending());
+				if occurrences(&log, &first) >= 1 {
+					break;
+				}
+				settle().await;
+			}
+			assert_eq!(
+				occurrences(&log, &first),
+				1,
+				"{version}: the initial token rode the announce"
+			);
+
+			token.set(Some(typed(&second)));
+			let mut reoffered = false;
+			for _ in 0..300 {
+				assert!(
+					futures::poll!(run.as_mut()).is_pending(),
+					"{version}: an ended advertisement must not end the namespace loop"
+				);
+				if occurrences(&log, &second) >= 2 {
+					reoffered = true;
+					break;
+				}
+				settle().await;
+			}
+			assert!(
+				reoffered,
+				"{version}: the ended namespace is re-offered with the new token"
+			);
+			assert!(log.closes().is_empty(), "{version}: the session stays up");
+		}
 	}
 
 	/// A token-bearing client's reprice carries only the cluster change, never the unchanged

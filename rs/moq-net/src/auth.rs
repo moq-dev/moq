@@ -334,7 +334,8 @@ impl Handle {
 	/// Set it before running the session's driver to present it on the first request.
 	/// Replacing it later re-presents the new token on every live request as a
 	/// REQUEST_UPDATE, renewing a token-authorized request in place; setting the same value
-	/// again sends nothing. Independent of the MoQ Auth extension.
+	/// again sends nothing. A draft 14 or 15 advertisement has no update, so it keeps the
+	/// token it was offered with. Independent of the MoQ Auth extension.
 	///
 	/// A moq-lite session has no request token to carry it, so it refuses with
 	/// [`Error::Unsupported`] rather than drop it.
