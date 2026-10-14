@@ -72,7 +72,8 @@ viewers switch to a restarted pipeline at once instead of stalling on the old
 one; reconnects within a run keep it. The first catalog waits for every requested
 pad to negotiate its rendition, including any codec config carried in its first
 buffers. A linked pad that never negotiates holds back the whole catalog until
-it is released, reaches EOS, or fails. Opaque data pads are not listed. Later
+it is released, reaches EOS, or fails; a flush or new stream after that EOS
+holds it back again. Opaque data pads are not listed. Later
 catalog updates do not wait for newly requested pads.
 
 `connection-stats` is null while disconnected. While connected it is a

@@ -871,7 +871,8 @@ impl MoqSink {
 			// A new stream on this pad is a fresh start like a flush: it no longer counts as ended, and its
 			// timeline is re-anchored. Without that the old stream's segment base stays current, and a new
 			// stream restarting at zero reads as a rewind, which invalidates the pad and silently drops
-			// its buffers. An importer its EOS finished unresolved is rebuilt from the sticky caps.
+			// its buffers. A pad its EOS left unresolved takes back its first-catalog slot, and an
+			// importer that EOS finished is rebuilt from the sticky caps.
 			gst::EventView::FlushStop(_) | gst::EventView::StreamStart(_) => {
 				let changes = {
 					let control = self.control.lock().unwrap();
@@ -884,8 +885,12 @@ impl MoqSink {
 								false => {
 									lifecycle.ended = false;
 									lifecycle.media.flush();
+									let catalog = state.catalog.as_ref();
+									if let Some(catalog) = catalog {
+										lifecycle.media.reserve(catalog);
+									}
 									let caps = lifecycle.media.resumable_caps();
-									caps.zip(state.catalog.as_ref()).and_then(|(caps, catalog)| {
+									caps.zip(catalog).and_then(|(caps, catalog)| {
 										observe_caps(state, catalog, &mut lifecycle, &caps).0
 									})
 								}
@@ -1463,6 +1468,37 @@ mod tests {
 				.unwrap()
 				.expect("the resumed keyframe is published");
 			assert!(!frame.payload.is_empty(), "{resume}");
+		}
+	}
+
+	#[test]
+	fn a_pad_resumed_before_its_caps_gates_the_first_catalog_again() {
+		for resume in ["flush", "stream-start"] {
+			let run = CatalogRun::new();
+			let audio = run.pad("audio");
+			let video = run.pad("video");
+			let mut catalog = run.start();
+			assert!(video.send_event(gst::event::Eos::new()));
+			match resume {
+				"flush" => {
+					assert!(video.send_event(gst::event::FlushStart::new()));
+					assert!(video.send_event(gst::event::FlushStop::new(true)));
+				}
+				"stream-start" => assert!(video.send_event(gst::event::StreamStart::new("second"))),
+				_ => unreachable!(),
+			}
+			assert!(negotiate(&audio, &opus_caps()));
+			assert!(
+				next_catalog(&mut catalog).is_pending(),
+				"the resumed pad still owes its rendition ({resume})"
+			);
+			assert!(negotiate(&video, &h264_caps()));
+			video_frame(&video);
+			let std::task::Poll::Ready(Ok(Some(first))) = next_catalog(&mut catalog) else {
+				panic!("the resumed pad must resolve the first catalog ({resume})")
+			};
+			assert!(first.audio.renditions.contains_key("audio"), "{resume}");
+			assert!(first.video.renditions.contains_key("video"), "{resume}");
 		}
 	}
 
