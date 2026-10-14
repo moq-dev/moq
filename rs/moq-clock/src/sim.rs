@@ -225,14 +225,16 @@ pub fn run<F: IntoFuture>(future: F) -> F::Output {
 
 /// Keep `deadlines` in step with simulated time until every clone of it is dropped.
 ///
-/// Whenever time moves, the queue is advanced to the new instant, and its earliest
-/// deadline counts as an armed timer.
+/// The queue is brought to the simulated instant at once, then advanced whenever
+/// time moves, and its earliest deadline counts as an armed timer.
 ///
 /// # Panics
 ///
-/// Outside [`run`]. The run panics if the queue is ahead of the simulated clock.
+/// Outside [`run`], and when the queue is ahead of the simulated clock.
 pub fn attach(deadlines: &Deadlines) {
-	expect_current().queues.borrow_mut().push(WeakDeadlines::new(deadlines));
+	let runtime = expect_current();
+	deadlines.sync(runtime.now());
+	runtime.queues.borrow_mut().push(WeakDeadlines::new(deadlines));
 }
 
 /// Let `duration` of simulated time pass, moving both the instant and the wall
@@ -785,6 +787,22 @@ mod tests {
 		attach(&deadlines);
 		task.await.unwrap();
 		assert_eq!(crate::now(), at(10));
+	}
+
+	/// Attaching brings the queue to the simulated instant at once, so a deadline
+	/// armed right after counts from it.
+	#[crate::test]
+	async fn attaching_syncs_the_queue() {
+		let deadlines = Deadlines::new(crate::now());
+		advance(Duration::from_secs(10)).await;
+		attach(&deadlines);
+		assert_eq!(deadlines.now(), at(10));
+	}
+
+	#[test]
+	#[should_panic(expected = "time moved backwards")]
+	fn attaching_a_queue_ahead_of_the_clock_panics() {
+		run(async { attach(&Deadlines::new(at(1))) });
 	}
 
 	/// A pending sleep reset by another task wakes its poller to re-arm.
