@@ -85,12 +85,18 @@ impl Runtime {
 	/// Bring every source up to the current instant, returning the earliest deadline they report.
 	fn poll_sources(&self) -> Option<Instant> {
 		let now = self.now();
-		// Taken out so a source may attach another while it runs.
-		let mut sources = std::mem::take(&mut *self.sources.borrow_mut());
-		let next = sources.iter_mut().filter_map(|source| source(now)).min();
-		let mut current = self.sources.borrow_mut();
-		sources.append(&mut current);
-		*current = sources;
+		let mut polled = Vec::new();
+		let mut next = None;
+		// Taken out so a source may attach another while it runs, which is polled next.
+		loop {
+			let mut sources = std::mem::take(&mut *self.sources.borrow_mut());
+			if sources.is_empty() {
+				break;
+			}
+			next = sources.iter_mut().filter_map(|source| source(now)).chain(next).min();
+			polled.append(&mut sources);
+		}
+		*self.sources.borrow_mut() = polled;
 		next
 	}
 
@@ -782,6 +788,25 @@ mod tests {
 		});
 		task.await.unwrap();
 		assert_eq!(crate::now(), at(10));
+	}
+
+	/// A source attached from inside another is polled in the same pass.
+	#[crate::test]
+	async fn a_source_attached_by_a_source_is_polled() {
+		let deadlines = Deadlines::new(crate::now());
+		let mut deadline = Deadline::after(&deadlines, Duration::from_secs(3));
+		let mut inner = Some(deadlines.clone());
+		attach(move |_| {
+			if let Some(driven) = inner.take() {
+				attach(move |now| {
+					driven.advance(now);
+					driven.next()
+				});
+			}
+			None
+		});
+		kio::wait(|waiter| deadline.poll(waiter)).await;
+		assert_eq!(crate::now(), at(3));
 	}
 
 	/// A run drops its pending tasks, so a handle that escapes it reports the task

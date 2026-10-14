@@ -50,7 +50,7 @@ pub fn sleep(duration: Duration) -> Sleep {
 }
 
 impl Sleep {
-	/// The instant this completes at, [`Instant::MAX`] for one that never does.
+	/// The instant this completes at, or the clock's last instant for one that never does.
 	pub fn deadline(&self) -> Instant {
 		self.at.unwrap_or(Instant::MAX)
 	}
