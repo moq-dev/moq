@@ -28,9 +28,11 @@ The boundary is already on the wire, and the subscribers drop it:
 - IETF: the MoQ Active Count extension
   (`drafts/draft-lcurley-moq-active-count.md`) puts the count on the
   REQUEST_OK answering SUBSCRIBE_NAMESPACE. The Rust IETF subscriber checks
-  it and drops it.
+  it and drops it. JS only decodes the parameter: it neither declares the
+  setup option nor sends the count.
 - lite-03/04, and IETF without the extension (always on draft-14/15): no
-  boundary.
+  boundary. lite-03/04 have no OK either, and an unscoped draft-14/15 peer
+  without MoQ Solicit is sent no request at all.
 
 Decided with the maintainer, 2026-10-13:
 
@@ -45,7 +47,9 @@ Decided with the maintainer, 2026-10-13:
 - ✅ Where the session has no boundary, it reports caught up on the OK, as a
   best effort. Document the gap. Rejected: never caught up, which hangs
   consumers that wait on it. With MoQ Active Count negotiated, IETF waits
-  for the counted NAMESPACE messages like lite does.
+  for the counted NAMESPACE messages like lite does. Where there is no OK
+  to wait on (lite-03/04, the unsolicited draft-14/15 case), it reports
+  caught up once the request is sent, or at once when none is.
 - Open, for the implementer to bring back with a recommendation: the API
   shape. The maintainer found an `Event::Live` enum variant ugly. The
   candidate is separate `poll_next` (route events only) and `poll_live`
@@ -58,6 +62,11 @@ Work:
 - Rust `rs/moq-net` and JS `js/net`: the lite and IETF subscribers keep the
   count and mark the point where the initial set has been read, and the
   origin's announce consumers expose it. Mirror names across languages.
+- JS MoQ Active Count: declare the setup option, record the negotiation,
+  validate the parameter against it, and send the count as a publisher, so
+  JS IETF sessions get the exact boundary too.
+- `doc/concept`: what caught up means to a subscriber, including the
+  best-effort versions.
 - Use it in lazy discovery: once both halves have landed, a narrower
   request may take over from a broad one after it reports caught up. Do
   that here or in a follow-up, as the implementer judges.
@@ -65,7 +74,8 @@ Work:
   never before an earlier event is read; a count of 0 is caught up at once;
   a relay reports caught up without waiting on a silent upstream; IETF
   waits for the counted NAMESPACE messages, or reports on the OK without
-  the extension. Run `just test interop --all`.
+  the extension; a session with no OK still reports caught up. Run
+  `just test interop --all`.
 
 Public API: new caught-up surface on Rust and JS announce consumers. Wire:
 none.
