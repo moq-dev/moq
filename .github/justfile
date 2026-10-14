@@ -26,6 +26,7 @@ test:
     python3 sh/rs/package-rename.test.py
     python3 sh/rs/select.test.py
     python3 sh/js/workspace.test.py
+    python3 sh/rs/test-lints.test.py
     sh/go/publish-wrapper.test.sh
     bash .claude/hooks/direnv.test.sh
     python3 sh/rs/uring.test.py

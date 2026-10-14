@@ -228,9 +228,9 @@ for module in "${selected[@]}"; do
         check:js) just js check-changed "$js_list" ;;
         check:workers) just js workers ;;
         check:moq_sh) just infra moq-sh test ;;
-        # `check` lints Rust through its test build, so the crates compile once;
-        # `ci-check` uses clippy, which is quicker when the tests run elsewhere.
-        check:rs) if [[ "$action" == check ]]; then just rs check-test-changed "$rs_list"; else just rs check-changed "$rs_list"; fi ;;
+        # Test enforces default-feature clippy through its compile. Check keeps
+        # the other lints and distinct feature/target builds.
+        check:rs) if [[ "$action" == check ]]; then just rs check-test-changed "$rs_list"; else just rs lint-changed "$rs_list"; fi ;;
         check:bench) cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring ;;
         check:quest) quest check ;;
         check:drill) just test drill-sensitivity --apply-only ;;

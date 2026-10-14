@@ -30,22 +30,20 @@ default:
 [positional-arguments]
 check *args:
     cargo clippy --locked --all-targets "$@" -- -D warnings
-    just rs _lint "$@"
+    just rs lint "$@"
 
-# `check` with clippy replaced by the `test` build, whose clippy-driver reports
-# the same findings. `build.warnings` turns them into errors without entering
-# cargo's fingerprint, so a later plain `test` reuses the artifacts. A
-# selection can hold nothing testable.
+# `check` with clippy enforced by the `test` build. A selection can hold
+# nothing testable.
 
 # Compile, lint, and test in one build, plus everything else `check` verifies.
 [positional-arguments]
 check-test *args:
-    CARGO_BUILD_WARNINGS=deny RUSTC_WORKSPACE_WRAPPER={{ require("clippy-driver") }} bash sh/rs/nextest.sh cargo nextest run --locked --all-targets --no-tests=pass "$@"
-    just rs _lint "$@"
+    just rs test --no-tests=pass "$@"
+    just rs lint "$@"
 
 # Everything `check` verifies besides clippy.
 [positional-arguments]
-_lint *args:
+lint *args:
     python3 sh/rs/stats-docs.py
     cargo fmt --all --check
     # quinn-udp keeps quinn's formatting; cargo fmt skips it (see moq-sock's lib.rs).
@@ -66,6 +64,10 @@ fix *args:
 # Like `check`, but only the crates in a changed-file list plus their dependents.
 check-changed $LIST:
     sh/rs/select.sh check "$LIST"
+
+# Like `lint`, with the feature and target checks for the selected crates.
+lint-changed $LIST:
+    sh/rs/select.sh lint "$LIST"
 
 # Like `check-test`, but only the crates in a changed-file list plus their dependents.
 check-test-changed $LIST:
@@ -250,14 +252,14 @@ media-features:
 
 # nextest kills a wedged test (`.config/nextest.toml` sets the timeout), but
 # skips doctests; `just rs doctest` covers those. clippy-driver as the workspace
-# wrapper reports lint findings from the same compile, as warnings: `check-test`
-# is the gate. It is part of cargo's fingerprint, and RUSTFLAGS would split the
-# artifact cache, which is why neither is set any other way.
+# wrapper enforces lint findings from the same compile, including benches and
+# examples. `build.warnings` denies warnings without changing cargo's artifact
+# fingerprint, unlike RUSTFLAGS.
 
-# Run the test suite, reporting clippy findings from the same compile.
+# Run the test suite and enforce clippy findings from the same compile.
 [positional-arguments]
 test *args:
-    RUSTC_WORKSPACE_WRAPPER="$(command -v clippy-driver || true)" bash sh/rs/nextest.sh cargo nextest run --locked --all-targets "$@"
+    CARGO_BUILD_WARNINGS=deny RUSTC_WORKSPACE_WRAPPER={{ require("clippy-driver") }} bash sh/rs/nextest.sh cargo nextest run --locked --all-targets "$@"
 
 # Exercise the ignored hardware tests for every GPU vendor on this Linux host.
 gpu:
