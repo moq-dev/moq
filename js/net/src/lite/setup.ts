@@ -8,6 +8,14 @@
 import { type Hop, HopSchema } from "../hop.ts";
 import { encodeVarint, Reader, type Writer } from "../stream.ts";
 import { decodeUtf8 } from "../util/utf8.ts";
+
+const clientParameters = new WeakSet<Setup>();
+
+// Raw presence matters even when an unknown Role decodes as Both.
+export function hasClientParameters(setup: Setup): boolean {
+	return clientParameters.has(setup);
+}
+
 import * as Message from "./message.ts";
 import { hasSetupStream, type Version } from "./version.ts";
 
@@ -262,7 +270,9 @@ export class Setup {
 		const hopRaw = await params.getVarint(PARAM_HOP, version);
 		const hop = hopRaw === undefined || hopRaw === 0n ? undefined : HopSchema.parse(hopRaw);
 
-		return new Setup({ probe, path, role, hop });
+		const setup = new Setup({ probe, path, role, hop });
+		if (pathBytes !== undefined || roleCode !== undefined) clientParameters.add(setup);
+		return setup;
 	}
 
 	/** Encode the SETUP message with its size prefix. Throws on pre-lite-05 versions. */

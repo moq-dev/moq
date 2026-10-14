@@ -26,6 +26,18 @@ pub(crate) fn from_transport(error: impl crate::transport::Error) -> Error {
 	Error::from_transport(error)
 }
 
+/// Classify control bytes at a stream boundary, keeping a transport FIN/reset distinct.
+pub(super) fn control<S: crate::transport::poll::Session>(session: &mut S, err: Error) -> Error {
+	let err = match err {
+		Error::Decode(crate::DecodeError::Short) => err,
+		err => crate::auth::protocol_error(err),
+	};
+	if matches!(err, Error::ProtocolViolation) {
+		session.close(SessionError::ProtocolViolation.to_code(), &err.to_string());
+	}
+	err
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

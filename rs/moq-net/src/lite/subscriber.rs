@@ -796,11 +796,11 @@ impl<S: crate::transport::poll::Session> UniServe<S> {
 						return Poll::Ready(Ok(()));
 					}
 					let mut cx = waiter.context();
-					let res = ready!(reader.poll_decode::<lite::Setup>(&mut cx));
+					let res = ready!(reader.poll_decode::<lite::setup::ReceivedSetup>(&mut cx));
 					match res {
 						Ok(setup) => {
 							tracing::debug!(?setup, "received peer setup");
-							self.subscriber.peer_setup.set(setup);
+							self.subscriber.peer_setup.receive(setup)?;
 							return Poll::Ready(Ok(()));
 						}
 						// The slot is claimed, so no other SETUP can arrive and the streams
@@ -1140,8 +1140,8 @@ impl<S: crate::transport::poll::Session> DatagramRecv<S> {
 /// Opens a PROBE stream on demand while a consumer is interested.
 ///
 /// Loops forever: wait for a consumer, race the probe stream against the
-/// consumer leaving, then loop back. Probe is best-effort, so stream errors are
-/// logged but never tear down the session.
+/// consumer leaving, then loop back. Transport errors stay per-stream; malformed
+/// control bytes end the session.
 struct RecvBandwidth<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
 	state: BandwidthState<S>,
@@ -1206,7 +1206,10 @@ impl<S: crate::transport::poll::Session> RecvBandwidth<S> {
 					}
 					match ready!(probe.poll(waiter)) {
 						Ok(()) => tracing::debug!("probe stream closed"),
-						Err(err) => tracing::warn!(%err, "probe stream error"),
+						Err(err) => {
+							let err = lite::error::control(&mut self.subscriber.session.clone(), err);
+							tracing::warn!(%err, "probe stream error");
+						}
 					}
 					// The stream ended (peer FIN'd or errored). Don't hammer an
 					// uncooperative peer; give up for the rest of the session.
@@ -1332,6 +1335,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 	/// announcing more than the session allows loses the session.
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		self.poll_run(waiter)
+			.map_err(|err| lite::error::control(&mut self.subscriber.session.clone(), err))
 	}
 
 	fn poll_run(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -4691,6 +4695,7 @@ impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 							self.state = TrackRunState::Serve(serve_loop);
 						}
 						Err(err) => {
+							let err = lite::error::control(&mut self.serve.subscriber.session.clone(), err);
 							tracing::warn!(broadcast = %self.serve.subscriber.log_path(&self.serve.path), track = %self.serve.name, %err, "track info failed");
 							// Rejecting the request lets the origin retry (bounded) on
 							// another source; waiting subscribers stall rather than error
@@ -4725,6 +4730,7 @@ impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 							let _ = serve_loop.serving.finish();
 						}
 						ServeEnd::GiveBack(err) => {
+							let err = lite::error::control(&mut self.serve.subscriber.session.clone(), err);
 							let _ = serve_loop.serving.abort(err);
 						}
 					}

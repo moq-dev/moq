@@ -55,6 +55,7 @@ pub(super) struct PublisherConfig<S: crate::transport::poll::Session> {
 
 /// Context shared by every control-stream child.
 struct Shared<S: crate::transport::poll::Session> {
+	client: bool,
 	withdrawal: crate::session::Withdrawal,
 	session: S,
 	origin: origin::Consumer,
@@ -185,6 +186,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 		Self {
 			enforce,
 			shared: Arc::new(Shared {
+				client: config.client,
 				withdrawal: Default::default(),
 				session: config.session,
 				origin: config.origin,
@@ -305,6 +307,7 @@ impl<S: crate::transport::poll::Session> kio::Task for Control<S> {
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		if let Err(err) = ready!(self.poll_serve(waiter)) {
+			let err = lite::error::control(&mut self.shared.session.clone(), err);
 			tracing::warn!(%err, "control stream error");
 		}
 		Poll::Ready(())
@@ -354,30 +357,21 @@ impl<S: crate::transport::poll::Session> Control<S> {
 				ControlState::Probe(serve) => return serve.poll(waiter),
 				ControlState::Auth(serve) => return serve.poll(waiter),
 				ControlState::Goaway { stream } => {
-					// A decode error propagates to the caller, which logs and continues: a
-					// malformed GOAWAY must not tear down the session it is trying to drain.
 					let mut cx = waiter.context();
 					let msg = ready!(stream.reader.poll_decode::<lite::Goaway>(&mut cx))?;
 					tracing::info!(uri = %msg.uri, "received goaway");
 
 					let uri = msg.uri.into_owned();
+					if !self.shared.client && !uri.is_empty() {
+						return Poll::Ready(Err(Error::ProtocolViolation));
+					}
 					let goaway = crate::goaway::Goaway {
 						uri: uri.clone(),
 						// moq-lite has no timeout field on the wire.
 						timeout: None,
 					};
 
-					if let Err(err) = self.shared.goaway.record(goaway) {
-						// A second Goaway stream is a protocol violation. The control loop only
-						// logs per-stream errors, so close the session here rather than letting a
-						// peer silently replace a redirect an observer may already be acting on.
-						tracing::warn!(%uri, "duplicate GOAWAY received; closing session");
-						self.shared.session.clone().close(
-							crate::lite::error::to_session_code(&SessionError::from(&err)),
-							&err.to_string(),
-						);
-						return Poll::Ready(Err(err));
-					}
+					self.shared.goaway.record(goaway)?;
 					return Poll::Ready(Ok(()));
 				}
 				ControlState::Done => return Poll::Ready(Ok(())),
@@ -442,10 +436,7 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 		}
 		if matches!(err, Error::ProtocolViolation) {
 			self.shared.auth.close(err.clone());
-			self.shared
-				.session
-				.clone()
-				.close(SessionError::ProtocolViolation.to_code(), &err.to_string());
+			return Poll::Ready(Err(err));
 		}
 		Poll::Ready(Ok(()))
 	}
@@ -694,6 +685,7 @@ impl<S: crate::transport::poll::Session> ProbeServe<S> {
 			Err(err) => {
 				tracing::warn!(%err, "probe stream error");
 				self.stream.take().expect("stream present").writer.abort(&err);
+				return Poll::Ready(Err(err));
 			}
 		}
 		Poll::Ready(Ok(()))
@@ -707,9 +699,15 @@ impl<S: crate::transport::poll::Session> ProbeServe<S> {
 			// Deliver the previous estimate before weighing the next one.
 			ready!(stream.writer.poll_flush(&mut cx))?;
 
-			// Bail as soon as the peer closes its side.
-			if let Poll::Ready(res) = stream.reader.poll_closed(&mut cx) {
-				return Poll::Ready(res);
+			// Report ignores target values, but consumes them so buffered bytes
+			// cannot hide the peer's FIN or a malformed complete message.
+			loop {
+				match stream.reader.poll_decode_maybe::<lite::Probe>(&mut cx) {
+					Poll::Ready(Ok(Some(_))) => continue,
+					Poll::Ready(Ok(None)) => return Poll::Ready(Ok(())),
+					Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+					Poll::Pending => break,
+				}
 			}
 
 			let estimate = match self.seen {
@@ -1558,9 +1556,13 @@ impl<S: crate::transport::poll::Session, R: Request<S>> RequestServe<S, R> {
 				tracing::info!(broadcast = %self.absolute, track = %self.track, "{} complete", R::KIND);
 				Poll::Ready(Ok(()))
 			}
-			// A decode error propagates so the control loop logs it; anything past the
-			// decode is answered on the stream instead.
-			Err(err) if matches!(self.state, RequestState::Decode) => Poll::Ready(Err(err)),
+			// A malformed update is still a control violation after request setup.
+			Err(err)
+				if matches!(self.state, RequestState::Decode)
+					|| matches!(err, Error::Decode(_) | Error::ProtocolViolation) =>
+			{
+				Poll::Ready(Err(err))
+			}
 			Err(err) => {
 				match &err {
 					err if is_cancel(err) => {
@@ -5297,12 +5299,12 @@ mod tests {
 
 	/// Build the poll-based PROBE server around a stream opened by the test peer,
 	/// following `estimate` as it would the supervisor's.
-	fn probe_server(
-		session: SinkSession,
-		stream: Stream<SinkSession, Version>,
+	fn probe_server<S: crate::transport::poll::Session>(
+		session: S,
+		stream: Stream<S, Version>,
 		version: Version,
 		estimate: &kio::Producer<crate::session::Estimate>,
-	) -> ProbeServe<SinkSession> {
+	) -> ProbeServe<S> {
 		let origin = Hop::random().produce();
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		let publisher = Publisher::new(PublisherConfig {
@@ -5320,6 +5322,31 @@ mod tests {
 			estimate: estimate.weak(),
 		});
 		ProbeServe::new(publisher.shared.clone(), publisher.runtime.clone(), stream)
+	}
+
+	#[moq_net_sim::test]
+	async fn malformed_complete_goaway_closes_the_session() {
+		use kio::Task;
+		for version in [Version::Lite04, Version::Lite05, Version::Lite06, Version::Lite07] {
+			// A complete two-byte body with an empty URI and one unread byte.
+			let mut session = ScriptedSession::new(vec![2, 0, 0]);
+			let log = session.log.clone();
+			let stream = Stream::open(&mut session, version).await.unwrap();
+			let estimate = kio::Producer::default();
+			let probe = probe_server(session, stream, version, &estimate);
+			let stream = probe.stream.expect("probe stream");
+			let mut control = Control {
+				shared: probe.shared,
+				runtime: crate::time::Clock::sim(),
+				state: ControlState::Goaway { stream },
+			};
+			assert!(control.poll(&kio::Waiter::noop()).is_ready());
+			assert_eq!(
+				log.closes().first().map(|(code, _)| *code),
+				Some(SessionError::ProtocolViolation.to_code()),
+				"{version}"
+			);
+		}
 	}
 
 	/// A PROBE stream served against a transport reporting `stats`.
@@ -6061,5 +6088,142 @@ mod tests {
 			interests.charge(&room, "video", Charge::Subscribe),
 			Err(Error::TooManyRequests)
 		));
+	}
+
+	#[moq_net_sim::test]
+	async fn report_consumes_probe_targets_until_fin() {
+		for version in [
+			Version::Lite03,
+			Version::Lite04,
+			Version::Lite05,
+			Version::Lite06,
+			Version::Lite07,
+		] {
+			let target = lite::Probe {
+				bitrate: Some(4_000_000),
+				rtt: Some(20),
+			};
+			let mut session = ScriptedSession::new(target.encode_bytes(version).unwrap().to_vec())
+				.with_stats(crate::lite::test_transport::SinkStats::default().with_send_rate(1_000_000));
+			let log = session.log.clone();
+			let stream = Stream::open(&mut session, version).await.unwrap();
+			let estimate = kio::Producer::default();
+			let mut serve = probe_server(session.clone(), stream, version, &estimate);
+			assert!(
+				serve.poll_probe(&kio::Waiter::noop()).is_pending(),
+				"{version}: target ended Report"
+			);
+			assert!(log.resets().is_empty(), "{version}: valid target was reset");
+			assert_eq!(
+				decode_probes(&log.writes.lock().unwrap(), version)[0].bitrate,
+				Some(1_000_000),
+				"{version}: Report used the target as its estimate"
+			);
+			session.close(Close::Fin);
+			assert!(
+				matches!(serve.poll_probe(&kio::Waiter::noop()), Poll::Ready(Ok(()))),
+				"{version}: buffered target hid FIN"
+			);
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn malformed_subscribe_update_closes_after_request_setup() {
+		use kio::Task;
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let origin = crate::origin::Config::new(Hop::random()).produce();
+			let broadcast = origin.create_broadcast("room").unwrap();
+			let _dynamic = broadcast.dynamic();
+			broadcast.announce(Default::default()).unwrap();
+			let request = lite::Subscribe {
+				order: crate::track::Order::Descending,
+				epoch: None,
+				id: 0,
+				broadcast: crate::Path::new("room"),
+				track: "video".into(),
+				priority: 0,
+				max_delay: Duration::ZERO,
+				start_group: None,
+				end_group: None,
+				start_frame: 0,
+				end_frame: None,
+			};
+			let mut session = ScriptedSession::new(request.encode_bytes(version).unwrap().to_vec());
+			let log = session.log.clone();
+			let stream = Stream::open(&mut session, version).await.unwrap();
+			let estimate = kio::Producer::default();
+			let probe = probe_server(session.clone(), stream, version, &estimate);
+			probe.shared.peer_setup.set(lite::Setup::default());
+			let mut shared = probe.shared;
+			Arc::get_mut(&mut shared).expect("one owner").origin = origin.consume();
+			let mut control = Control {
+				shared: shared.clone(),
+				runtime: crate::time::Clock::sim(),
+				state: ControlState::Subscribe(RequestServe::new(shared, probe.stream.unwrap())),
+			};
+			assert!(
+				control.poll(&kio::Waiter::noop()).is_pending(),
+				"{version}: request did not wait for its track"
+			);
+			session.push(&[0]);
+			assert!(
+				control.poll(&kio::Waiter::noop()).is_ready(),
+				"{version}: malformed update did not end control"
+			);
+			assert!(
+				log.closes()
+					.iter()
+					.any(|(code, _)| *code == SessionError::ProtocolViolation.to_code()),
+				"{version}: late decode error was swallowed"
+			);
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn goaway_roles_limits_and_transport_termination() {
+		use kio::Task;
+		for version in [Version::Lite04, Version::Lite05, Version::Lite06, Version::Lite07] {
+			for uri in ["https://other.example/".to_owned(), "a".repeat(8193)] {
+				let msg = lite::Goaway {
+					uri: std::borrow::Cow::Owned(uri),
+				};
+				let mut session = ScriptedSession::new(msg.encode_bytes(version).unwrap().to_vec());
+				let log = session.log.clone();
+				let stream = Stream::open(&mut session, version).await.unwrap();
+				let estimate = kio::Producer::default();
+				let probe = probe_server(session, stream, version, &estimate);
+				let mut control = Control {
+					shared: probe.shared,
+					runtime: crate::time::Clock::sim(),
+					state: ControlState::Goaway {
+						stream: probe.stream.unwrap(),
+					},
+				};
+				assert!(control.poll(&kio::Waiter::noop()).is_ready());
+				assert!(
+					log.closes()
+						.iter()
+						.any(|(code, _)| *code == SessionError::ProtocolViolation.to_code()),
+					"{version}"
+				);
+			}
+			for end in [Close::Fin, Close::Reset] {
+				let mut session = ScriptedSession::new(Vec::new());
+				session.close(end);
+				let log = session.log.clone();
+				let stream = Stream::open(&mut session, version).await.unwrap();
+				let estimate = kio::Producer::default();
+				let probe = probe_server(session, stream, version, &estimate);
+				let mut control = Control {
+					shared: probe.shared,
+					runtime: crate::time::Clock::sim(),
+					state: ControlState::Goaway {
+						stream: probe.stream.unwrap(),
+					},
+				};
+				assert!(control.poll(&kio::Waiter::noop()).is_ready());
+				assert!(log.closes().is_empty(), "{version}: {end:?} became a violation");
+			}
+		}
 	}
 }

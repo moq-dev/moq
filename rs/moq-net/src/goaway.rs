@@ -89,7 +89,7 @@ impl Goaway {
 /// Obtained from `Session::drain`.
 pub struct Producer {
 	trigger: kio::Producer<Option<Goaway>>,
-	/// Whether this side may name a redirect URI. A moq-transport client may not,
+	/// Whether this side may name a redirect URI. A client may not,
 	/// since it cannot tell a server to open connections (draft-19 sect 10.4).
 	redirect: bool,
 }
@@ -105,7 +105,7 @@ impl Producer {
 	///
 	/// # Errors
 	///
-	/// Returns [`Error::ProtocolViolation`] when a moq-transport client names a
+	/// Returns [`Error::ProtocolViolation`] when a client names a
 	/// redirect URI, which the peer would be required to close the session over,
 	/// or when the URI exceeds the 8,192-byte wire cap.
 	///

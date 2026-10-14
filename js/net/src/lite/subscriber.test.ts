@@ -3,7 +3,7 @@ import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import * as Epoch from "../epoch.ts";
-import { error, fromTransport, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
+import { error, fromTransport, ProtocolViolation, reason, SessionCode, StreamCode, StreamError } from "../error.ts";
 import { HopSchema, isAnonymous, MAX_HOPS, Route, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
@@ -584,7 +584,7 @@ test("an announce skipped as a reflected loop still holds its path", async () =>
 	// The draft makes this session-fatal: resetting only the stream would let the peer
 	// repeat the violation on the next one. The code has to say so too, or the peer reads
 	// the default 0 as a clean close.
-	expect((await sessionEnded())?.closeCode).toBe(15);
+	expect((await sessionEnded())?.closeCode).toBe(SessionCode.ProtocolViolation);
 
 	announced.close();
 	subscriber.close();
@@ -754,7 +754,7 @@ test("a draft-02 initial set naming a path twice is refused", async () => {
 	// The draft makes this session-fatal: resetting only the stream would let the peer
 	// repeat the violation on the next one. The code has to say so too, or the peer reads
 	// the default 0 as a clean close.
-	expect((await sessionEnded())?.closeCode).toBe(15);
+	expect((await sessionEnded())?.closeCode).toBe(SessionCode.ProtocolViolation);
 
 	announced.close();
 	subscriber.close();
@@ -780,7 +780,7 @@ test("a violation on a very long path still ends the session", async () => {
 	await expect(announced.next()).rejects.toThrow("duplicate announce");
 
 	const info = await sessionEnded();
-	expect(info?.closeCode).toBe(15);
+	expect(info?.closeCode).toBe(SessionCode.ProtocolViolation);
 	expect(new TextEncoder().encode(info?.reason ?? "").byteLength).toBeLessThanOrEqual(1024);
 });
 
@@ -801,7 +801,7 @@ test("a draft-04 duplicate start is a violation, not an update", async () => {
 
 	// Session first: it is the bounded assertion, so a version that treats this as an
 	// update fails here in 250ms instead of hanging on a rejection that never comes.
-	expect((await sessionEnded())?.closeCode).toBe(15);
+	expect((await sessionEnded())?.closeCode).toBe(SessionCode.ProtocolViolation);
 	await expect(announced.next()).rejects.toThrow("duplicate announce");
 });
 
