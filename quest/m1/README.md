@@ -74,7 +74,7 @@ above them.
 - [One max_age meaning](/quest/m1/cache-max-age.md) - a superseded group goes stale on wall clock since its successor arrived or on media time, whichever is first, in Rust and js/net; fixes the untimed failover stall
 - [Quiet latest group test](/quest/m1/quiet-edge-test.md) - pins on `main` that a quiet track's latest group survives rejoin, expiry, and takeover
 - [FETCH max-delay](/quest/m1/fetch-max-delay.md) - historical readers obey publisher max-age and an optional tighter reader budget, including while holding a group
-- [Draft-20 FETCH edge cases](/quest/m1/fetch-edge-cases.md) - an exact-final range reports End of Track and a FETCH_OK past the requested group closes the session, on main then release
+- [Draft-20 FETCH edge-case backport](/quest/m1/fetch-edge-cases.md) - backport the final-object and response-group fixes to a later 0.17 patch after main lands
 - [A local close never throws](/quest/m1/subscribe-close-throw.md) - closing a `@moq/net` lite subscription never raises ProtocolViolation for the end of stream it caused, on main
 - [Subscribe-close backport](/quest/m1/subscribe-close-backport.md) - the same fix and the `race` loser fix on `release`, so closing a subscription during setup leaves no unhandled rejection in a later 0.17 patch
 - [Main live-feed check](/quest/m1/fetch-live-feed.md) - tests pin that a fetch-only or parked warm cache never supplies Largest Object on main, fixing it if it does
