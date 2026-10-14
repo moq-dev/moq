@@ -19,8 +19,13 @@ the implementation PR.
   execute them before merging. A release PR runs the workflows merged with
   `release`, so wait until the next cut carries this workflow there; earlier,
   backports would wait forever on contexts the old workflow never reports.
-- The queue's 60-minute check timeout now covers one serial job per OS.
-  Raise it if the first full Windows runs approach it.
+- Raise the main queue's check timeout from 60 to 90 minutes with the
+  contexts: the full macOS suite took 43 minutes in one serial job, and the
+  jobs allow 90.
+- Fix `moq-tokio`'s `a_refused_tcp_dial_keeps_retrying` on Windows before
+  requiring `Windows`; it fails nightly on main, so every Rust merge group
+  would fail. Then dispatch Platform on main to see the Windows C++ and OBS
+  steps pass in the consolidated job, which that failure has so far skipped.
 - Require `Platform scope` too: a failed selector skips its OS dependents,
   and skipped jobs alone satisfy required checks.
 - Confirm a platform-affecting main merge group runs at most one macOS job

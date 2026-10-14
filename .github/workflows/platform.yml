@@ -73,7 +73,8 @@ jobs:
     if: needs.scope.outputs.rs == 'true' || needs.scope.outputs.cpp == 'true' || needs.scope.outputs.obs == 'true'
     # OBS uses the Visual Studio 17 2022 CMake generator.
     runs-on: windows-2022
-    timeout-minutes: 60
+    # The suites run serially without a Rust cache; the full macOS suite measured 43 min.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -118,7 +119,7 @@ jobs:
     needs: scope
     if: needs.scope.outputs.rs == 'true' || needs.scope.outputs.swift == 'true' || needs.scope.outputs.obs == 'true' || needs.scope.outputs.moq_sh == 'true'
     runs-on: macos-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
