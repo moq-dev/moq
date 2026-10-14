@@ -3162,6 +3162,10 @@ where
 			kio::wait(|waiter| self.auth.poll_setup_answered(waiter)).await;
 		}
 		(ns.permit, ns.epoch) = self.permit_now();
+		// The request token presented on these announces, read before the initial set goes
+		// out: a client replacing it mid-way wakes the loop, which re-presents the new one on
+		// each live announce.
+		let mut last_token = self.request_token.peek();
 		for update in initial {
 			self.apply_update(&mut ns, &prefix, update, true).await?;
 		}
@@ -3172,10 +3176,6 @@ where
 		let mut retry = crate::time::Deadline::new(&self.runtime);
 		let mut retry_at: Option<crate::time::Instant> = None;
 		let mut retry_delay = RETRY_BASE;
-
-		// The request token last presented on these announces (their initial value). A client
-		// replacing it wakes the loop, which re-presents the new one on each live announce.
-		let mut last_token = self.request_token.peek();
 
 		// Stream updates (origin route (un)announces), bailing if the peer closes
 		// its side first.
@@ -12409,6 +12409,66 @@ mod tests {
 			settle().await;
 		}
 		assert!(renewed, "a replaced token must be re-presented on the live announce");
+	}
+
+	/// A token replaced while the initial PUBLISH_NAMESPACE awaits its answer is re-presented
+	/// once that answer arrives, rather than counted as the token the announce carried.
+	#[moq_net_sim::test]
+	async fn a_token_replaced_during_the_initial_announce_is_re_presented() {
+		const VERSION: Version = Version::Draft18;
+		let first = bytes::Bytes::from_static(&[0x03, 0x00, b'a', b'a']);
+		let second = bytes::Bytes::from_static(&[0x03, 0x00, b'b', b'b']);
+
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
+		settle().await;
+
+		// The peer holds its answer until the test pushes it.
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let log = session.log.clone();
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer::default());
+
+		let token = crate::RequestToken::new(Some(typed(&first)));
+		let publisher = Publisher::new(
+			crate::time::Clock::sim(),
+			session.clone(),
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			peer_setup,
+			VERSION,
+		)
+		.with_request_token(token.clone());
+
+		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, &first) >= 1 {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(
+			occurrences(&log, &first),
+			1,
+			"the initial token rides the PUBLISH_NAMESPACE"
+		);
+
+		token.set(Some(typed(&second)));
+		let mut answers = publish_namespace_ok(VERSION).await;
+		answers.extend(publish_namespace_ok(VERSION).await);
+		session.push(&answers);
+		let mut renewed = false;
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, &second) >= 1 {
+				renewed = true;
+				break;
+			}
+			settle().await;
+		}
+		assert!(renewed, "a token replaced mid-announce must be re-presented");
 	}
 
 	/// Setting the same token again is a no-op: no second REQUEST_UPDATE is sent, so the token
