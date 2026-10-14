@@ -207,7 +207,7 @@ fn client() -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
 	config.once = Some(true);
-	config.websocket.delay = Duration::ZERO;
+	config.websocket.delay = Some(Duration::ZERO);
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 	config.init(Default::default()).expect("client init")
 }
@@ -1399,7 +1399,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			let mut config = moq_tokio::connect::Config::default();
 			config.once = Some(true);
 			config.version = vec!["moq-transport-22".parse().unwrap()];
-			config.websocket.delay = Duration::ZERO;
+			config.websocket.delay = Some(Duration::ZERO);
 			config.init(Default::default()).unwrap()
 		};
 		let origin = moq_tokio::origin::spawn();

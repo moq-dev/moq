@@ -305,8 +305,8 @@ fn quic() -> moq_tokio::quic::Config {
 	// busy runner has to stall eight times over before a live session is mistaken
 	// for a dead one.
 	let mut quic = moq_tokio::quic::Config::default();
-	quic.idle_timeout = Duration::from_secs(2);
-	quic.keep_alive = Duration::from_millis(250);
+	quic.idle_timeout = Some(Duration::from_secs(2));
+	quic.keep_alive = Some(Duration::from_millis(250));
 	quic
 }
 
@@ -327,8 +327,8 @@ fn dial() -> moq_tokio::connect::Config {
 
 	// Fast enough to keep a relay bounce or a link flap inside the drill's
 	// budget, paced enough that the loop is still a backoff.
-	config.backoff.initial = Duration::from_millis(50);
-	config.backoff.max = Duration::from_millis(200);
+	config.backoff.initial = Some(Duration::from_millis(50));
+	config.backoff.max = Some(Duration::from_millis(200));
 	config.backoff.timeout = Some(Duration::from_secs(5));
 	config
 }
@@ -981,7 +981,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	// idles out only after `relay_idle`, which the flap's waits allow for.
 	let mut config = relay_config();
 	config.quic = credit(lane, config.quic);
-	let relay_idle = config.quic.idle_timeout;
+	let relay_idle = config.quic.resolve().idle_timeout;
 	let origin = RelayHost::start(config).await;
 	let seed = seed(lane);
 	let peer = match (link, lane) {

@@ -1258,7 +1258,7 @@ mod tests {
 		"#;
 
 		let config: crate::connect::Config = toml::from_str(toml).unwrap();
-		assert_eq!(config.race, crate::connect::DEFAULT_RACE);
+		assert_eq!(config.resolve().race, crate::connect::DEFAULT_RACE);
 		assert!(
 			config.deprecated().to_string().contains("failover_delay -> race"),
 			"{}",
@@ -1279,18 +1279,18 @@ mod tests {
 		"#;
 
 		let config: crate::connect::Config = toml::from_str(toml).unwrap();
-		assert_eq!(config.resolution_delay, std::time::Duration::from_millis(10));
+		assert_eq!(config.resolution_delay, Some(std::time::Duration::from_millis(10)));
 
 		// Simulate: TOML loaded, then CLI args re-applied (no --connect-resolution-delay flag).
 		let mut cli = Cli { config };
 		cli.update_from(&[]);
-		assert_eq!(cli.config.resolution_delay, std::time::Duration::from_millis(10));
+		assert_eq!(cli.config.resolution_delay, Some(std::time::Duration::from_millis(10)));
 	}
 
 	#[test]
 	fn test_cli_resolution_delay() {
 		let config = Cli::config_from(["test", "--connect-resolution-delay", "0s"]);
-		assert_eq!(config.resolution_delay, std::time::Duration::ZERO);
+		assert_eq!(config.resolution_delay, None);
 		assert_eq!(config.resolve().resolution_delay, std::time::Duration::ZERO);
 	}
 
@@ -1608,7 +1608,7 @@ mod tests {
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
 		// No head start, so the fallback dials while QUIC waits on the 403.
-		config.websocket.delay = std::time::Duration::ZERO;
+		config.websocket.delay = Some(std::time::Duration::ZERO);
 		let client = config.init(Default::default()).unwrap();
 
 		// The same race `connect_inner` runs, except the fallback dials its own port,
@@ -1685,7 +1685,7 @@ mod tests {
 		let mut client_config = crate::connect::Config::default();
 		client_config.tls.insecure = Some(true);
 		// Dial both arms immediately; the fallback handshake is gated by QUIC.
-		client_config.websocket.delay = std::time::Duration::ZERO;
+		client_config.websocket.delay = Some(std::time::Duration::ZERO);
 
 		let client = client_config.init(Default::default()).expect("failed to init client");
 		let quic_addr: crate::connect::Addr = Url::parse(&format!("https://localhost:{quic_port}")).unwrap().into();
@@ -1841,7 +1841,7 @@ mod tests {
 	#[test]
 	fn race_defaults_to_the_rfc_8305_stagger() {
 		let config = crate::connect::Config::default();
-		assert_eq!(config.race, std::time::Duration::from_millis(250));
+		assert_eq!(config.race, Some(std::time::Duration::from_millis(250)));
 		assert_eq!(config.resolve().race, std::time::Duration::from_millis(250));
 	}
 
@@ -1874,10 +1874,10 @@ mod tests {
 
 		let timeout = crate::connect::DEFAULT_TIMEOUT;
 		let mut config = crate::connect::Config {
-			timeout,
+			timeout: Some(timeout),
 			..Default::default()
 		};
-		config.websocket.delay = std::time::Duration::ZERO;
+		config.websocket.delay = Some(std::time::Duration::ZERO);
 		let client = config.init(Default::default()).unwrap();
 
 		// Nothing is listening on UDP, so the QUIC arm fails and leaves the WebSocket
