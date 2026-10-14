@@ -22,7 +22,7 @@ numbers and a recommendation go in the
   groups. That isolates what sharing the control plane saves, and exercises
   the cluster path the relay must keep working anyway.
 - Flow control throttles only the hop, as in the replica spike.
-- Same measurements as the replica spike, plus announce propagation delay
+- Same measurements and win criteria as the replica spike, plus announce propagation delay
   between workers and the memory of W announce tables.
 - A win goes to `/quest-plan` for a real implementation quest; a no-win
   restores the perf epic's no-sharding rule.

@@ -3,8 +3,8 @@
 ## Goal
 
 moq-net ships an in-memory `poll::Session` pair: two moq-lite peers in one
-process talk without QUIC, sockets, or crypto, and a frame payload crosses as
-the same `Bytes` (no copy). Streams are flow-controlled like QUIC, so a slow
+process talk without QUIC, sockets, or crypto, and a stream frame payload
+crosses as the same `Bytes` (no copy). Streams are flow-controlled like QUIC, so a slow
 reader throttles its own stream and nothing else. The test `MockSession`
 becomes fault knobs layered over it.
 
@@ -21,7 +21,8 @@ Decided (maintainer, 2026-10-14):
   written chunk is read back as one chunk. A whole-frame chunk then lands in
   `FrameStorage::Shared` through `try_set_bytes`
   (`rs/moq-net/src/model/frame.rs`); only the small headers are copied.
-  Datagrams pass their `Bytes` through too.
+  Datagrams are copied: `poll_send_datagram` borrows a `&[u8]` it cannot
+  retain, and they are small, so changing that API is out of scope.
 - Flow control per stream and per session, counted in bytes held: a writer
   out of credit pends until the reader consumes. Reset and stop-sending work
   as in QUIC, so a lagging peer's stale groups are reset rather than

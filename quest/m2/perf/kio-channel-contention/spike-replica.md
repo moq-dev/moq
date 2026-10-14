@@ -29,9 +29,12 @@ that never merges; its numbers and a recommendation go in the
 - Measure against the [contended bench](/quest/m2/perf/kio-channel-contention/bench.md)'s
   baseline: `just bench-lock` fanout and chat at 1, 4, and 16 workers, plus
   relay CPU, resident memory (replicated group state), and glass-to-glass
-  latency added by the hop. Expect little gain on chat, whose broadcasts have
-  few subscribers each; say whether chat's contention lives in the shared
-  announce state.
+  latency added by the hop. Lower lock wait alone is not a win; weigh it
+  against the CPU, memory, and latency. Chat (`rs/moq-bench/config/chat.toml`)
+  is one broadcast to 2,000 viewers with one-frame groups, so it stresses
+  per-group track writes rather than frame fan-out. Replicas give little to
+  low-fanout load; if that matters, name a separate low-fanout workload
+  instead of reading it from chat.
 - A win goes to `/quest-plan` for a real implementation quest; a no-win
   restores the perf epic's no-sharding rule.
 
