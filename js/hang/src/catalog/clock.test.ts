@@ -58,6 +58,16 @@ test("wallClockTime converts across timescales", () => {
 	}
 });
 
+test("wallClockTime keeps a pts finer than the wall's timescale", () => {
+	// A 1 ms pts on a whole-second wall is not floored away converting into the wall's units.
+	const clock = ClockSchema.parse({ wall: 1, timescale: 1 });
+	expect(wallClockTime(clock, 1, 1000).getTime()).toBe(MOQ_EPOCH_UNIX_MILLIS + 1001);
+
+	// A fraction of a wall unit past the JSON-safe range is still past it.
+	const max = ClockSchema.parse({ wall: Number.MAX_SAFE_INTEGER, timescale: 1 });
+	expect(() => wallClockTime(max, 1, 1000)).toThrow();
+});
+
 test("wallClockTime refuses bad inputs", () => {
 	const clock = ClockSchema.parse({ wall: 0 });
 	expect(() => wallClockTime(clock, 0, 0)).toThrow();

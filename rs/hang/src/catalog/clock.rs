@@ -78,8 +78,9 @@ impl Clock {
 			.ok_or_else(overflow)?;
 		let den = wall_scale.checked_mul(pts_scale).ok_or_else(overflow)?;
 
-		let total = num / pts_scale;
-		if total > MAX_SAFE_INTEGER as u128 {
+		// `num / pts_scale` is the result in the wall's units; any fraction past the limit is past it.
+		if num > MAX_SAFE_INTEGER as u128 * pts_scale {
+			let total = num.div_ceil(pts_scale);
 			return Err(crate::Error::InvalidWall(u64::try_from(total).unwrap_or(u64::MAX)));
 		}
 
@@ -157,6 +158,17 @@ mod test {
 		serde_json::from_str::<Clock>(r#"{"wall":9007199254740992}"#).expect_err("a wall past 2^53-1 must not decode");
 		let wall = moq_net::Timestamp::new(MAX_SAFE_INTEGER + 1, moq_net::Timescale::MICRO).unwrap();
 		assert!(Clock::new(wall).is_err());
+	}
+
+	/// A fraction of a wall unit past the JSON-safe range is still past it.
+	#[test]
+	fn wall_clock_refuses_a_fraction_past_the_safe_range() {
+		let clock = Clock::new(moq_net::Timestamp::from_micros(MAX_SAFE_INTEGER).unwrap()).unwrap();
+		clock.wall_clock(moq_net::Timestamp::ZERO).unwrap();
+		assert!(matches!(
+			clock.wall_clock(moq_net::Timestamp::from_nanos(1).unwrap()),
+			Err(crate::Error::InvalidWall(_))
+		));
 	}
 
 	/// Regression: the furthest wall a catalog carries overflowed `SystemTime` on
