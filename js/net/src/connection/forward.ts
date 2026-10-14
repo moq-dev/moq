@@ -6,6 +6,7 @@
 import { type Dispose, race } from "@moq/signals";
 import type * as Announce from "../announced.ts";
 import { type Route, routesEqual } from "../hop.ts";
+import { coveringPrefixes } from "../internal.ts";
 import type { Dynamic, Producer as OriginProducer, RequestSlot } from "../origin.ts";
 import * as Path from "../path.ts";
 import * as Time from "../time.ts";
@@ -23,7 +24,7 @@ const LINGER = Time.Milli(2000);
 interface Interest {
 	readonly announced: Announce.Consumer;
 	readonly reported: Set<Path.Valid>;
-	/** The pending close, set while nothing watches the prefix. */
+	/** The pending close, set while nothing at or beneath the prefix is watched. */
 	linger?: ReturnType<typeof setTimeout>;
 	/** Closed on purpose, so its end is not a discovery failure. */
 	closing: boolean;
@@ -45,12 +46,13 @@ interface Reported {
  * requests with blind subscriptions.
  *
  * Discovery is lazy. One announce request opens per prefix in the origin's covering set of
- * watches (`announced(scope)` and `request(path, { announced: true })`), and closes
- * {@link LINGER} after its last watcher leaves. A broader watch opens its request before the
- * narrower ones close, a lingering request stays open until the narrower ones report what it
- * alone carries beneath them, and a route both report stays inserted, so nothing retracts. An
- * epochless route restarts when it changes hands, since nothing proves both requests saw
- * one instance.
+ * watches (`announced(scope)` and `request(path, { announced: true })`) that no open request
+ * already covers, and closes {@link LINGER} after nothing at or beneath its prefix is watched.
+ * A narrower watch rides an open broader request and never takes its routes over, since
+ * nothing tells when a fresh request has caught up. A broader watch opens its request before
+ * the narrower ones are released, and a route both report stays inserted, so nothing
+ * retracts; an epochless route restarts if it changes hands, since nothing proves both
+ * requests saw one instance.
  *
  * Each active announcement inserts a route covering the announced prefix, served lazily
  * through this connection, so nothing touches the wire until somebody requests a path
@@ -148,21 +150,6 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 		detach = originWire.attach(false);
 	};
 
-	// Requests that lingered out but still alone report a route a narrower open request covers.
-	// They close once that request reports it too, so a slow replacement never retracts a route.
-	const draining = new Set<Interest>();
-
-	const drain = (interest: Interest) => {
-		for (const path of interest.reported) {
-			if (routes.get(path)?.reporters.size !== 1) continue;
-			for (const prefix of interests.keys()) {
-				if (Path.hasPrefix(prefix, path)) return;
-			}
-		}
-		draining.delete(interest);
-		interest.announced.close();
-	};
-
 	const open = (prefix: Path.Valid) => {
 		// Hidden routes are mirrored too; each local reader opts in on its own.
 		const interest: Interest = {
@@ -179,7 +166,6 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 					const event = await interest.announced.next();
 					if (!event) break;
 					if (originWire.accepts(event.prefix)) report(interest, event);
-					for (const other of [...draining]) drain(other);
 				}
 			} catch (err) {
 				// The session died mid-stream, or the peer refused or reset the request.
@@ -188,42 +174,51 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 				for (const reported of [...interest.reported]) unreport(interest, reported);
 				interest.announced.close();
 				clearTimeout(interest.linger);
-				draining.delete(interest);
 				if (interests.get(prefix) === interest) interests.delete(prefix);
 				if (!dead && !interest.closing) downgrade(failure);
-				// A covering request that ended no longer holds a draining one open.
-				for (const other of [...draining]) drain(other);
 			}
 		})();
 	};
 
 	// How many reports want each prefix; overlapping watches can name one prefix twice.
 	const wanted = new Map<Path.Valid, number>();
+	// How many wanted prefixes sit at or beneath each prefix, so a request knows in a walk up
+	// its path whether anything beneath it is still watched.
+	const beneath = new Map<Path.Valid, number>();
 
 	const unsubscribe = originWire.interests((prefix, want) => {
 		if (dead) return;
 		const count = (wanted.get(prefix) ?? 0) + (want ? 1 : -1);
 		if (count > 0) wanted.set(prefix, count);
 		else wanted.delete(prefix);
+		if (count !== (want ? 1 : 0)) return;
 
-		const interest = interests.get(prefix);
-		if (count === 1 && want) {
-			if (interest) {
+		let covered = false;
+		for (const above of coveringPrefixes(prefix)) {
+			const held = (beneath.get(above) ?? 0) + (want ? 1 : -1);
+			if (held > 0) beneath.set(above, held);
+			else beneath.delete(above);
+
+			// A request stays open while anything beneath it is watched, so a narrower watch rides
+			// it rather than opening a request that would later have to take its routes over.
+			const interest = interests.get(above);
+			if (!interest) continue;
+			covered = true;
+			if (held > 0) {
 				clearTimeout(interest.linger);
 				interest.linger = undefined;
-			} else if (!blind) {
-				open(prefix);
+			} else {
+				clearTimeout(interest.linger);
+				interest.linger = setTimeout(() => {
+					// Forgotten now rather than once its stream winds down, so a watch arriving
+					// meanwhile opens a fresh request instead of reviving this one.
+					interests.delete(above);
+					interest.closing = true;
+					interest.announced.close();
+				}, LINGER);
 			}
-		} else if (count === 0 && interest) {
-			interest.linger = setTimeout(() => {
-				// Forgotten now rather than once its stream winds down, so a watch arriving
-				// meanwhile opens a fresh request instead of reviving this one.
-				interests.delete(prefix);
-				interest.closing = true;
-				draining.add(interest);
-				drain(interest);
-			}, LINGER);
 		}
+		if (want && !covered && !blind) open(prefix);
 	});
 
 	void conn.closed.then(() => {
@@ -231,7 +226,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 		unsubscribe();
 		// End every request the moment the session closes rather than waiting for the wire to
 		// error it, so the retractions land promptly.
-		for (const interest of [...interests.values(), ...draining]) interest.announced.close();
+		for (const interest of interests.values()) interest.announced.close();
 		detach();
 	});
 }
