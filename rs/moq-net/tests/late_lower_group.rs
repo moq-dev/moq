@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A subscriber with an explicit floor receives a group created below the first group
 //! that was served, while it is still inside `max_delay`.
 //!

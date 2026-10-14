@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A group finished with no frames reaches the subscriber as an empty group. On drafts 14
 //! to 17 its stream is a bare header with no FIRST_OBJECT bit, which must not read as a
 //! group missing its head.

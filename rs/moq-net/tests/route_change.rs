@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A subscription survives its route changing, end to end over real sessions.
 //!
 //! A publisher `P` is pulled by two relays `A` and `B`, both of which re-advertise

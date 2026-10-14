@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A subscription's `Order` decides which pending group a publisher sends first, directly
 //! and through a relay, and one upstream request serves subscribers of both orders.
 //!

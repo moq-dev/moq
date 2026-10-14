@@ -337,6 +337,7 @@ impl Subscriber {
 
 	/// Poll for where the serving copy's live feed starts; see
 	/// [`track::Subscriber::poll_start`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn poll_start(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		let mut reader = self.reader();
 		let sub = ready!(reader.poll_serving(waiter));
@@ -353,6 +354,7 @@ impl Subscriber {
 
 	/// Move the local read floor to `start`, including downward.
 	/// See [`track::Subscriber::start_at`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn start_at(&mut self, start: u64) {
 		self.reader().start_at(start)
 	}
@@ -389,6 +391,7 @@ impl Subscriber {
 
 	/// Poll for the serving copy's cache reflecting its live feed; see
 	/// [`track::Subscriber::poll_live`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn poll_live(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
 		let mut reader = self.reader();
 		let sub = ready!(reader.poll_serving(waiter));
@@ -730,6 +733,7 @@ impl Reader {
 
 	/// The serving copy's subscription, once it answered; `None` once the track ended
 	/// without one.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	fn poll_serving(&mut self, waiter: &kio::Waiter) -> Poll<Option<&mut track::Subscriber>> {
 		self.sync(waiter);
 		let groups = self.groups;
@@ -766,6 +770,7 @@ impl Reader {
 	/// from the mirrored subscription when it resolves; one already reading has
 	/// to be moved, or a group it skipped stays skipped. Never below a copy's own
 	/// resume point: groups under it were handed out by an earlier route, or never owed.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	fn start_at(&mut self, start: u64) {
 		self.groups.0 = start;
 		for copy in &mut self.copies {
@@ -1088,7 +1093,9 @@ mod test {
 	use futures::FutureExt;
 
 	use super::*;
-	use crate::{Timestamp, broadcast};
+	#[cfg(feature = "async")]
+	use crate::Timestamp;
+	use crate::broadcast;
 
 	/// A route's copy of the track.
 	fn copy() -> track::Producer {
@@ -1116,6 +1123,7 @@ mod test {
 			.unwrap()
 	}
 
+	#[cfg(feature = "async")]
 	fn recv(sub: &mut track::Subscriber) -> group::Consumer {
 		sub.recv_group()
 			.now_or_never()
@@ -1124,11 +1132,13 @@ mod test {
 			.expect("track ended")
 	}
 
+	#[cfg(feature = "async")]
 	fn read(group: &mut group::Consumer) -> Option<Vec<u8>> {
 		let frame = group.read_frame().now_or_never().expect("a frame").unwrap();
 		frame.map(|frame| frame.payload.to_vec())
 	}
 
+	#[cfg(feature = "async")]
 	fn ts(ms: u64) -> Timestamp {
 		Timestamp::from_millis(ms).unwrap()
 	}
@@ -1174,6 +1184,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_reader_reads_the_serving_copy() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
@@ -1191,6 +1202,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_stalled_group_continues_from_the_replacement() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
@@ -1223,6 +1235,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_half_read_frame_continues_from_the_replacement() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
@@ -1261,6 +1274,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_group_both_routes_deliver_is_handed_out_once() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
@@ -1287,6 +1301,7 @@ mod test {
 	/// floor when the reader's floor widens: an older group its route cached was
 	/// never owed, and handing it out now would be out of order.
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_widened_floor_stays_above_the_replacement_resume_point() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
@@ -1313,6 +1328,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_replaced_route_finishes_only_the_groups_it_had() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
@@ -1337,6 +1353,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_group_no_route_continues_is_given_up_once_stale() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
@@ -1365,6 +1382,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn datagrams_a_new_copy_replays_are_handed_out_once() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
@@ -1398,6 +1416,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_parked_group_wakes_when_the_route_changes() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
@@ -1416,6 +1435,7 @@ mod test {
 
 	/// A reader holding group 2, which its quiet route never finishes, after the front
 	/// switched to `copy`, a replacement that starts past it.
+	#[cfg(feature = "async")]
 	struct Held {
 		group: group::Consumer,
 		copy: track::Producer,
@@ -1432,9 +1452,11 @@ mod test {
 		),
 	}
 
+	#[cfg(feature = "async")]
 	impl Held {
 		/// `groups` are the replacement's `(sequence, first timestamp)`, written before the
 		/// switch is noticed, so its subscription has passed the held group.
+		#[cfg(feature = "async")]
 		fn new(groups: &[(u64, Option<u64>)]) -> Self {
 			let routes = Producer::new();
 			let logical = logical(&routes);
@@ -1508,6 +1530,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_group_no_route_continues_wakes_when_its_successor_is_stamped() {
 		let mut held = Held::new(&[(3, None), (4, Some(4000))]);
 		// Group 2 ends where group 3 begins, so this is when it is known to be 1s behind.
@@ -1521,6 +1544,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_group_no_route_continues_wakes_when_its_successor_aborts() {
 		let mut held = Held::new(&[(3, None), (4, Some(4000)), (5, Some(5000))]);
 		// Group 4 succeeds it instead, a full second behind the edge.
@@ -1530,6 +1554,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_group_no_route_continues_wakes_when_the_edge_passes_it() {
 		let mut held = Held::new(&[(3, Some(3000))]);
 		let mut newer = held.group(4);
@@ -1544,6 +1569,7 @@ mod test {
 	/// The held group sits below everything the replacement holds, so a landing at the
 	/// top must not forget it before an older group lands as its new successor.
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_group_no_route_continues_wakes_when_an_older_successor_lands() {
 		let mut held = Held::new(&[(4, Some(4000))]);
 		held.group(5).write_frame(ts(4050), b"b".as_ref()).unwrap();
@@ -1562,6 +1588,7 @@ mod test {
 	/// The replacement passed the held group, so it looked lost, but its subscription
 	/// can still deliver it out of order: that landing is the continuation.
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_group_no_route_continues_wakes_when_it_lands_late() {
 		let mut held = Held::new(&[(3, Some(3000))]);
 		let _newer = held.group(4);
@@ -1571,6 +1598,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_half_read_frame_waits_for_the_replacement_header() {
 		for arrives in [true, false] {
 			let routes = Producer::new();
@@ -1620,6 +1648,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn recovered_groups_and_frames_expire_against_the_new_route() {
 		for partial in [false, true] {
 			let routes = Producer::new();
@@ -1666,6 +1695,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_pending_fetch_wakes_and_moves_to_the_new_route() {
 		let routes = Producer::new();
 		let a = copy();
@@ -1687,6 +1717,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_pending_recovery_fetch_does_not_disable_expiry() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
@@ -1729,6 +1760,7 @@ mod test {
 	/// A fetch answered from a group still arriving over a subscription outlives that
 	/// delivery giving up on it as too old: the route is asked for the rest instead.
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_fetched_group_outlives_its_delivery_giving_up() {
 		let routes = Producer::new();
 		let a = copy();
@@ -1757,6 +1789,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn ending_the_front_releases_a_stalled_group() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
@@ -1774,6 +1807,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_datagram_route_failure_waits_for_replacement() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
@@ -1794,6 +1828,7 @@ mod test {
 	/// Datagrams and groups are independent channels: reading datagrams first must not
 	/// release a replaced copy whose buffered groups the reader has yet to read.
 	#[test]
+	#[cfg(feature = "async")]
 	fn datagram_reads_keep_unread_groups_on_a_replaced_copy() {
 		for datagrams_first in [false, true] {
 			let routes = Producer::new();
@@ -1816,6 +1851,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn datagram_retention_preserves_ordered_backlog() {
 		for ordered_first in [false, true] {
 			let routes = Producer::new();
@@ -1856,6 +1892,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn datagram_retention_obeys_changed_group_bounds() {
 		for ordered in [false, true] {
 			for raise_floor in [false, true] {
@@ -1902,6 +1939,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn datagram_readers_release_replaced_subscriptions() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
@@ -1933,6 +1971,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_recovered_group_keeps_its_new_copy_subscribed_during_another_switch() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
@@ -1955,6 +1994,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn held_read_preferences_follow_the_reader() {
 		enum Read {
 			Group(Box<group::Consumer>),
@@ -2085,6 +2125,7 @@ mod test {
 	/// Replay every ordering of independent actions, with the return to A following
 	/// the switch to B. The payload is the oracle, independent of route bookkeeping.
 	#[test]
+	#[cfg(feature = "async")]
 	fn route_flap_interleavings_preserve_readers() {
 		#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 		enum Event {
@@ -2096,6 +2137,7 @@ mod test {
 			Cancel,
 		}
 
+		#[cfg(feature = "async")]
 		fn run(events: &[Event], wake_only: bool) {
 			let routes = Producer::new();
 			let logical = logical(&routes);
@@ -2194,6 +2236,7 @@ mod test {
 			}
 		}
 
+		#[cfg(feature = "async")]
 		fn walk(events: &mut Vec<Event>, remaining: &[Event]) {
 			if remaining.is_empty() {
 				for wake_only in [false, true] {

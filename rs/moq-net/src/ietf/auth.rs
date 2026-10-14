@@ -14,11 +14,15 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use crate::auth::{Grant, Handle, Issue, Reply, Request, Serving};
-use crate::coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder, Stream};
+use crate::coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder};
 use crate::{Error, Path, Pattern, Patterns, SessionError};
 
+#[cfg(feature = "async")]
+use super::Control;
 use super::namespace::{decode_namespace, encode_namespace};
-use super::{Control, Message, RequestId, Version, cluster, peer};
+use super::{Message, RequestId, Version, cluster, peer};
+#[cfg(feature = "async")]
+use crate::coding::Stream;
 
 /// AUTH Setup Option: the sender speaks this extension. Even, so the value is a bare
 /// varint.
@@ -228,6 +232,7 @@ pub(super) fn peer_grant(
 /// Present every token this side adds, one AUTH request each, once the peer's SETUP
 /// says it negotiated the extension. Never returns: a session without it just fails
 /// the tokens as unsupported.
+#[cfg(feature = "async")]
 pub(super) async fn run_present<S>(
 	runtime: crate::time::Clock,
 	session: S,
@@ -293,6 +298,7 @@ where
 }
 
 /// One token's Auth request.
+#[cfg(feature = "async")]
 struct Present<S: crate::transport::poll::Session> {
 	runtime: crate::time::Clock,
 	session: S,
@@ -302,8 +308,10 @@ struct Present<S: crate::transport::poll::Session> {
 	id: u64,
 }
 
+#[cfg(feature = "async")]
 impl<S: crate::transport::poll::Boxable> Present<S> {
 	/// Send the token, then track its grant until either side ends it, resolving with why.
+	#[cfg(feature = "async")]
 	async fn run(&self, token: Bytes) -> Error {
 		let request_id = match self.control.next_request_id(&self.runtime).await {
 			Ok(id) => id,
@@ -400,6 +408,7 @@ fn decode_reply<T: Message>(body: &super::Body, version: Version) -> Result<T, E
 }
 
 /// Read one `[type][size][body]` message, or `None` once the peer finished the stream.
+#[cfg(feature = "async")]
 async fn read_message<S: crate::transport::poll::Session>(
 	stream: &mut Stream<S, Version>,
 ) -> Result<Option<(u64, super::Body)>, Error> {
@@ -422,6 +431,7 @@ pub(super) struct Serve {
 
 impl Serve {
 	/// Answer one Auth request. The stream lives as long as the token.
+	#[cfg(feature = "async")]
 	pub(super) async fn run<S: crate::transport::poll::Session>(
 		self,
 		mut stream: Stream<S, Version>,
@@ -474,6 +484,7 @@ impl Serve {
 
 /// Write the acceptor's replies until either side ends the token. `default` feeds
 /// the default acceptor's grant into the outbox as it changes.
+#[cfg(feature = "async")]
 async fn serve_issue<S: crate::transport::poll::Session>(
 	runtime: &crate::time::Clock,
 	issue: &kio::Shared<Issue>,
