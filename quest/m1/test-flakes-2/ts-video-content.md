@@ -18,18 +18,21 @@ CI: seen 2026-10-13 on #5471, #5481 and two unrelated branches within the
 same hour, each passing on rerun. Then, from `gh run list --workflow ts.yml`
 on 2026-10-14: since #5328 merged (2026-10-13 23:49 UTC), 4 of 41 completed
 PR runs failed `video-content` ("decoded pictures are not an intact suffix of
-the source"), each on a branch that does not touch TS: #5446 at f6629aac8
+the source"): #5446 at f6629aac8
 ([38506130438](https://github.com/moq-dev/moq/actions/runs/38506130438)),
 #5148 at 5adfd84a6
 ([38502761750](https://github.com/moq-dev/moq/actions/runs/38502761750)),
-`quest/m1/catalog-wall-clock-precision` at 312ac6260
-([38503267980](https://github.com/moq-dev/moq/actions/runs/38503267980)), and
 `quest/m1/cli-duration-defaults` at e7e3eb1c4
-([38502673714](https://github.com/moq-dev/moq/actions/runs/38502673714)).
+([38502673714](https://github.com/moq-dev/moq/actions/runs/38502673714)), and
+#5481's branch `quest/m1/catalog-wall-clock-precision` at 312ac6260
+([38503267980](https://github.com/moq-dev/moq/actions/runs/38503267980)).
+The first three do not touch TS; #5481 changed the shared clock this
+pipeline reads, so keep it out of any argument that narrows the cause.
 Only the default `just test ts` round failed; every later round passed in the
 same runs. Main has no run yet: the workflow runs on matching PRs and a
-nightly that had not fired. Failures on branches that predate #5471 and
-#5481 point to an older cause.
+nightly that had not fired. Failures on branches without #5471 or #5481
+point to an older cause, but check a failing capture against those diffs
+before ruling them out.
 
 Every failing capture was 24531556 bytes against 23281544 in passing runs.
 The difference, 1250012 bytes, is 1 s at the padded 10 Mb/s rate, so the
