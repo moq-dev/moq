@@ -33,19 +33,27 @@ Decided in the 2026-10-14 planning interview:
   stripes, never a dirty frame the min-delay decoder wasn't also showing.
   This quest therefore does not wait on
   [plan-boundary](/quest/m2/intra-refresh/plan-boundary.md).
-- Selection reuses the pending/active promotion idea in
-  `js/watch/src/video/decoder.ts` and `caughtUp` in
-  `js/watch/src/video/playhead.ts`: show the max-delay frame when its playhead
-  has caught up to the min-delay one, else the min-delay frame. Keep this per
-  rendition, inside or beside `DecoderTrack`, so rendition switching still
-  promotes a whole pair.
+- Selection is monotonic: show the max-delay frame once its timestamp is at
+  or beyond the last displayed timestamp, else the min-delay frame, and never
+  display a timestamp below the last one shown. Do not reuse `caughtUp` from
+  `js/watch/src/video/playhead.ts`: its 100 ms slack tolerates one backwards
+  step per rendition switch, and applied per frame it would alternate
+  backwards and forwards. Keep the pair per rendition, inside or beside
+  `DecoderTrack` in `js/watch/src/video/decoder.ts`, so rendition switching
+  still promotes a whole pair through the existing pending/active path.
 - Each decoder opens its own subscription through `subscribeMedia`
   (`js/watch/src/media.ts`); a `Container.Consumer` consumes its subscriber.
   `js/net` dedups the two into one upstream request with the larger
-  `maxDelay` (`combineSubscriptions`, `js/net/src/track.ts`), so the second
-  decoder adds decode work but no bandwidth. Verify the join with the larger
-  budget actually delivers the previous group (`#isStale` in `track.ts`). If
-  it doesn't, that is a `js/net` fix here, not a workaround.
+  `maxDelay` (`combineSubscriptions`, `js/net/src/track.ts`), so live groups
+  arrive once. The second decoder's only extra transfer is the earlier group it
+  joins on, up to one refresh group per cold join or gap.
+- The max-delay decoder reads groups oldest first. Subscriptions default to
+  descending order and aggregate that way, so a cold join can activate the
+  newest group in `Container.Consumer` first, and `DecoderTrack` then drops
+  the earlier group as stale. That would leave the max-delay decoder starting
+  mid-sweep. Its consumer must wait for the lower group within its budget
+  before emitting a newer one. Fix this at the source in `js/hang` or `js/net`
+  and test newest-first arrival.
 - H.264 recovery-point frames sent as `key` chunks pass Chromium's WebCodecs
   keyframe check (`ParseH264KeyFrame` accepts `is_sei_recovery_point`; WPT
   `videoDecoder-h264-sei`). Chromium rejects a non-IRAP H.265 frame sent as
@@ -57,7 +65,12 @@ Decided in the 2026-10-14 planning interview:
   to max-delay once it is caught up; a stall shorter than one sweep makes the
   min-delay decoder skip while max-delay stays continuous and takes over again;
   a stall longer than one sweep skips both; a rendition without `warmup` opens
-  one subscription and one decoder; only the min-delay decoder moves `Sync`.
+  one subscription and one decoder; only the min-delay decoder moves `Sync`;
+  a selector regression that repeatedly crosses a 100 ms trailing gap and a
+  recovery boundary never displays a lower timestamp.
+- Measure the cost of always running two decoders: CPU, decoder memory, and
+  dropped frames for one versus two decoders on a 1080p rendition, in a
+  browser, recorded in the PR.
 
 ## Related
 
