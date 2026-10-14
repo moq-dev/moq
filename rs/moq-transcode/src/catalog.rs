@@ -957,12 +957,12 @@ mod tests {
 	}
 
 	/// A derivative runs on its source's mapping: `populate` writes the source's root clock through
-	/// `modify()`, so what the derivative stamps lands where the source's own clock would.
-	#[test]
-	fn a_derivative_stamps_on_its_source_clock() {
+	/// `modify()`, so the derivative's clock carries that mapping and its data is stamped on it.
+	#[tokio::test(start_paused = true)]
+	async fn a_derivative_stamps_on_its_source_clock() {
 		use std::time::{Duration, Instant, SystemTime};
 
-		// A minute in, the source reads far from the ten seconds a fresh clock starts at.
+		// A minute in, the source's mapping is far from the one a fresh clock would advertise.
 		let ago = Duration::from_secs(60);
 		let clock = moq_mux::Clock::at(Instant::now() - ago, SystemTime::now() - ago).unwrap();
 		let mut input = moq_net::broadcast::Info::default().produce();
@@ -974,7 +974,8 @@ mod tests {
 		let mut guard = derived.modify().unwrap();
 		populate(&mut guard, &source.snapshot(), &[], None).unwrap();
 		guard.commit().unwrap();
-		assert_eq!(derived.clock().wall(), clock.wall());
+		let adopted = derived.clock();
+		assert_eq!(adopted.wall(), clock.wall());
 
 		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 		let mut status = derived
@@ -984,8 +985,8 @@ mod tests {
 			)
 			.unwrap();
 		let mut subscriber = status.consume();
+		tokio::time::advance(Duration::from_secs(3)).await;
 		status.update(&1).unwrap();
-		let now = clock.now();
 
 		let waiter = kio::Waiter::noop();
 		let std::task::Poll::Ready(Ok(Some(mut group))) = subscriber.poll_recv_group(&waiter) else {
@@ -994,10 +995,6 @@ mod tests {
 		let std::task::Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
 			panic!("the update is published");
 		};
-		let stamped = frame.timestamp.unwrap().as_micros();
-		assert!(
-			now.as_micros().abs_diff(stamped) < Duration::from_secs(1).as_micros(),
-			"stamped at {stamped}us, the source reads {now:?}"
-		);
+		assert_eq!(frame.timestamp.unwrap().as_millis(), adopted.now().as_millis());
 	}
 }

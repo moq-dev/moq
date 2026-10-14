@@ -168,12 +168,11 @@ impl Clock {
 		Self::mapped(zero, unmappable)
 	}
 
-	/// A clock on a catalog's root `clock`: a derivative republishing its input's timestamps runs
-	/// on its input's mapping, stored exactly.
+	/// A catalog root `clock` in [`TIMESCALE`](Self::TIMESCALE), the units [`wall`](Self::wall)
+	/// reports, so equal mappings compare equal.
 	///
-	/// Refuses a wall that is no whole number of [`TIMESCALE`](Self::TIMESCALE) units (some 90 kHz
-	/// values), a PTS zero after now, and a host whose wall clock is unset.
-	pub(crate) fn adopted(wall: hang::catalog::Clock) -> crate::Result<Self> {
+	/// Refuses a wall that is no whole number of those units (some 90 kHz values).
+	pub(crate) fn exact(wall: hang::catalog::Clock) -> crate::Result<hang::catalog::Clock> {
 		let unmappable = |why: &str| crate::Error::UnmappableTimestamp(format!("root clock {wall:?} {why}"));
 		let scale = wall.wall.scale().as_u64() as u128;
 		let scaled = wall.wall.value() as u128 * Self::TIMESCALE.as_u64() as u128;
@@ -181,8 +180,17 @@ impl Clock {
 			return Err(unmappable("is no whole microsecond"));
 		}
 		let micros = u64::try_from(scaled / scale).map_err(|_| unmappable("overflows the clock"))?;
-		let zero = hang::catalog::Clock::new(moq_net::Timestamp::from_micros(micros)?)?;
-		Self::mapped(zero, unmappable)
+		Ok(hang::catalog::Clock::new(moq_net::Timestamp::from_micros(micros)?)?)
+	}
+
+	/// A clock on an [`exact`](Self::exact) catalog root `clock`: a derivative republishing its
+	/// input's timestamps runs on its input's mapping.
+	///
+	/// Refuses a PTS zero after now, and a host whose wall clock is unset.
+	pub(crate) fn adopted(wall: hang::catalog::Clock) -> crate::Result<Self> {
+		Self::mapped(wall, |why| {
+			crate::Error::UnmappableTimestamp(format!("root clock {wall:?} {why}"))
+		})
 	}
 
 	/// A clock whose PTS zero is `zero`, anchored now at however long ago that was on the host.

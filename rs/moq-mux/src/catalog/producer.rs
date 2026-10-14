@@ -77,13 +77,15 @@ fn adopt(clock: crate::Clock, anchored: bool, advertised: Option<hang::catalog::
 		return Ok(clock);
 	}
 	let refuse = |why: &str| crate::Error::UnmappableTimestamp(format!("root clock {advertised:?} {why}"));
-	let adopted = crate::Clock::adopted(advertised.ok_or_else(|| refuse("clears the producer's clock"))?);
-	match adopted {
-		// The same mapping in other units, or written again once fixed.
-		Ok(adopted) if adopted.wall() == clock.wall() => Ok(clock),
-		_ if anchored => Err(refuse("changes the producer's clock after it was fixed")),
-		adopted => adopted,
+	let wall = crate::Clock::exact(advertised.ok_or_else(|| refuse("clears the producer's clock"))?)?;
+	// The same mapping in other units needs no host time, which may be unset or behind PTS zero.
+	if Some(wall) == clock.wall() {
+		return Ok(clock);
 	}
+	if anchored {
+		return Err(refuse("changes the producer's clock after it was fixed"));
+	}
+	crate::Clock::adopted(wall)
 }
 
 /// Take the shared state, ignoring a poisoned lock.
@@ -361,6 +363,19 @@ impl<E: CatalogExt> Producer<E> {
 	/// [`modify`](Self::modify): the producer runs on it, unless [`Config::with_clock`] fixed a
 	/// different mapping, which is refused.
 	pub fn new(broadcast: &mut moq_net::broadcast::Producer, config: Config<E>) -> crate::Result<Self> {
+		// The broadcast clock is advertised at the catalog root from the first snapshot,
+		// independently of any archive timeline: a live-only publisher exposes its mapping
+		// without creating a segment index. A host with an unset wall clock advertises none.
+		// Resolved before any track exists, so a refused seed leaves the broadcast untouched.
+		let anchored = config.clock.is_some();
+		let mut catalog = config.catalog;
+		let clock = match catalog.clock {
+			// An unseeded catalog runs on the configured clock, or a fresh one.
+			None => config.clock.unwrap_or_default(),
+			seeded => adopt(config.clock.unwrap_or_default(), anchored, seeded)?,
+		};
+		catalog.clock = clock.wall();
+
 		let hang_track = broadcast.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())?;
 		let hangz_track =
 			broadcast.create_track(hang::Catalog::COMPRESSED_NAME, hang::Catalog::default_track_info())?;
@@ -383,18 +398,6 @@ impl<E: CatalogExt> Producer<E> {
 		let timeline = crate::timeline::Timelines::new(broadcast);
 		#[allow(clippy::arc_with_non_send_sync)]
 		let catalog_timeline = Arc::new(Mutex::new(CatalogTimeline::default()));
-
-		// The broadcast clock is advertised at the catalog root from the first snapshot,
-		// independently of any archive timeline: a live-only publisher exposes its mapping
-		// without creating a segment index. A host with an unset wall clock advertises none.
-		let anchored = config.clock.is_some();
-		let mut catalog = config.catalog;
-		let clock = match catalog.clock {
-			// An unseeded catalog runs on the configured clock, or a fresh one.
-			None => config.clock.unwrap_or_default(),
-			seeded => adopt(config.clock.unwrap_or_default(), anchored, seeded)?,
-		};
-		catalog.clock = clock.wall();
 
 		// The contents are `Send + Sync` natively; on wasm moq-net's handles are
 		// `Rc`-backed, so clippy sees a pointlessly atomic `Arc`. Keeping one type for
@@ -1802,17 +1805,22 @@ mod test {
 		assert_eq!(catalog.snapshot().clock, Some(input));
 		assert_eq!(catalog.clock().wall(), Some(input));
 
-		// The same mapping from `with_clock` agrees, in any units.
+		// The same mapping from `with_clock` agrees in any units, without reading the host's wall
+		// clock, which may be unset.
 		let zero = SystemTime::UNIX_EPOCH
 			+ Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS)
 			+ Duration::from_micros(input.wall.as_micros() as u64);
 		let fixed = crate::Clock::at(Instant::now(), zero).unwrap();
 		seed.clock = Some(an_hour_ago(moq_net::Timescale::MILLI));
+		crate::clock::fake_host_wall(SystemTime::UNIX_EPOCH + Duration::from_secs(86_400));
 		let config = Config::default().with_catalog(seed.clone()).with_clock(fixed);
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		assert_eq!(Producer::new(&mut broadcast, config).unwrap().clock(), fixed);
+		let mut catalog = Producer::new(&mut broadcast, config).unwrap();
+		assert_eq!(catalog.clock(), fixed);
+		catalog.mutate(|c| c.clock = seed.clock).unwrap();
+		assert_eq!(catalog.snapshot().clock, Some(input));
 
-		// A different one is refused rather than silently replaced.
+		// A different one is refused before any catalog track exists.
 		let other = crate::Clock::at(Instant::now(), zero + Duration::from_secs(1)).unwrap();
 		let config = Config::default().with_catalog(seed).with_clock(other);
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -1820,6 +1828,9 @@ mod test {
 			Producer::new(&mut broadcast, config),
 			Err(crate::Error::UnmappableTimestamp(_))
 		));
+		broadcast
+			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
+			.expect("a refused seed leaves the broadcast untouched");
 	}
 
 	/// A millisecond wall is the same mapping in the clock's microseconds, advertised as such.
