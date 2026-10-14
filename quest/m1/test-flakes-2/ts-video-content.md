@@ -11,7 +11,12 @@ picture still fails.
 ## Plan
 
 Seen 2026-10-13 on #5471, #5481 and two unrelated branches within the same
-hour; each passed on rerun. Neither PR touched the TS path.
+hour; each passed on rerun. Both PRs have since merged and touch the path:
+#5471 changed the TS export (`rs/moq-mux/src/container/ts/export.rs`) and
+shared source and selection code, and #5481 changed `rs/moq-mux/src/clock.rs`
+and the catalog clock. The unrelated branches failing too points to an older
+cause, but check a failing capture against those diffs before ruling them
+out.
 
 This check guards real delivery, so treat it as a possible product bug first,
 not a harness flake. Reproduce it by looping `just test ts` beside a CPU hog,
