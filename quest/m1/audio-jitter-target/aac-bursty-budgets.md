@@ -3,7 +3,7 @@
 ## Goal
 
 Seven scheduled nightlies on `main` after
-[#PR](https://github.com/moq-dev/moq/pulls?q=head%3Aquest%2Fm1%2Faudio-jitter-target%2Faac-bursty-restall)
+[#5489](https://github.com/moq-dev/moq/pull/5489)
 landed show the AAC `bursty` rows' `stalled_share`, skip-aheads, and discarded
 audio at the level the Opus `bursty` rows show, on both rings, and
 `test/audio-quality/budgets.json` carries ceilings re-measured from them.
