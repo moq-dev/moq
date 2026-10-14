@@ -4,7 +4,7 @@
 
 Measure a relay per worker thread, each with its own `Cluster` and origin and
 nothing shared, clustered over the
-[in-memory transport](/quest/m2/perf/kio-channel-contention/bridge.md) instead
+in-memory transport (`moq_net::transport::memory`) instead
 of QUIC. Compare it with the
 [replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md), which
 shares the control plane. The spike is a draft PR that never merges; its
@@ -30,4 +30,3 @@ numbers and a recommendation go in the
 ## Required
 
 - [Contended bench](/quest/m2/perf/kio-channel-contention/bench.md) - the baseline and the named channels
-- [In-memory transport](/quest/m2/perf/kio-channel-contention/bridge.md) - the hop between relays

@@ -5,7 +5,7 @@
 Measure whether per-worker data-plane replicas cut lock wait on the
 thread-per-core relay (`--runtime-workers`). Each worker serves tracks and
 groups from its own origin, fed once per worker over the
-[in-memory transport](/quest/m2/perf/kio-channel-contention/bridge.md), while
+in-memory transport (`moq_net::transport::memory`), while
 announcements and routes stay in one shared origin. The spike is a draft PR
 that never merges; its numbers and a recommendation go in the
 [epic](/quest/m2/perf/kio-channel-contention/README.md).
@@ -41,4 +41,3 @@ that never merges; its numbers and a recommendation go in the
 ## Required
 
 - [Contended bench](/quest/m2/perf/kio-channel-contention/bench.md) - the baseline and the named channels
-- [In-memory transport](/quest/m2/perf/kio-channel-contention/bridge.md) - the hop between workers

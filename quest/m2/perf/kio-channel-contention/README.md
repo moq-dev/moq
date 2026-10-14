@@ -78,7 +78,7 @@ Decided (maintainer, 2026-10-14, per-thread follow-up):
 - Per-worker sharding is no longer ruled out; two spikes decide. Both run on
   the thread-per-core workers (`--runtime-workers`, the default once
   [Shard](/quest/m1/quic/shard.md) lands) and link workers over an
-  [in-memory transport](/quest/m2/perf/kio-channel-contention/bridge.md),
+  in-memory transport (`moq_net::transport::memory`),
   never real QUIC. The
   [replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md)
   replicates the data plane and shares announcements; the
@@ -96,7 +96,6 @@ Decided (maintainer, 2026-10-14, per-thread follow-up):
 
 - [Contended bench](/quest/m2/perf/kio-channel-contention/bench.md) - a multi-threaded kio bench swept over threads and consumers, plus the contended channels named from `just bench-lock` stacks
 - [Version counter](/quest/m2/perf/kio-channel-contention/version.md) - an opted-in re-poll skips the mutex when nothing changed, and parking no longer contends with readers
-- [In-memory transport](/quest/m2/perf/kio-channel-contention/bridge.md) - a zero-copy, flow-controlled `poll::Session` pair in moq-net, with the test mock rebuilt on it
 - [Replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md) - measures per-worker data-plane replicas linked over the in-memory transport, announcements shared
 - [Cluster spike](/quest/m2/perf/kio-channel-contention/spike-cluster.md) - measures a relay per thread clustered over the in-memory transport, nothing shared
 - [Append-only log](/quest/m2/perf/kio-channel-contention/log.md) - a kio log primitive with lock-free cursor reads and front eviction, if the shared model survives the spikes
