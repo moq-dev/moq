@@ -738,9 +738,10 @@ where
 			let _slot = match self.subscriptions.acquire() {
 				Ok(slot) => slot,
 				Err(err) => {
-					self.session
-						.clone()
-						.close(crate::SessionError::from(&err).to_code(), "too many subscriptions");
+					self.session.clone().close(
+						super::error::to_session_code(&crate::SessionError::from(&err)),
+						"too many subscriptions",
+					);
 					return Err(err);
 				}
 			};
@@ -1006,9 +1007,10 @@ where
 						{
 							Poll::Ready(Ok(Some(update))) => {
 								if let Err(err) = self.control.accept(update.request_id) {
-									session
-										.clone()
-										.close(crate::SessionError::from(&err).to_code(), "invalid request ID");
+									session.clone().close(
+										super::error::to_session_code(&crate::SessionError::from(&err)),
+										"invalid request ID",
+									);
 									return Poll::Ready(Err(err));
 								}
 								return Poll::Ready(Ok(Some(update)));
@@ -1044,9 +1046,10 @@ where
 				// AUTHORIZATION TOKEN names an alias, closes it rather than only ending this
 				// subscription, as the same token on the request itself would.
 				Err(err @ Error::Decode(crate::coding::DecodeError::Session(_))) => {
-					self.session
-						.clone()
-						.close(crate::SessionError::from(&err).to_code(), &err.to_string());
+					self.session.clone().close(
+						super::error::to_session_code(&crate::SessionError::from(&err)),
+						&err.to_string(),
+					);
 					return Some(Err(err));
 				}
 				Err(err) => return Some(Err(err)),
@@ -1891,7 +1894,7 @@ where
 			Ok(Some(Joined::Unsupported)) => {
 				if matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 					self.session.close(
-						crate::SessionError::ProtocolViolation.to_code(),
+						super::error::to_session_code(&crate::SessionError::ProtocolViolation),
 						"joining FETCH requires Largest Object filter",
 					);
 					return Err(Error::ProtocolViolation);
@@ -2306,7 +2309,7 @@ where
 				// errors end only that stream.
 				if msg.active.is_some() {
 					self.session.clone().close(
-						crate::SessionError::ProtocolViolation.to_code(),
+						super::error::to_session_code(&crate::SessionError::ProtocolViolation),
 						"ACTIVE_COUNT on a PUBLISH_NAMESPACE answer",
 					);
 					return Err(Error::ProtocolViolation);
@@ -2385,7 +2388,7 @@ where
 				// here for the same reason as in `advertise_namespace`.
 				if msg.active.is_some() {
 					self.session.clone().close(
-						crate::SessionError::ProtocolViolation.to_code(),
+						super::error::to_session_code(&crate::SessionError::ProtocolViolation),
 						"ACTIVE_COUNT on a REQUEST_UPDATE answer",
 					);
 					return Err(Error::ProtocolViolation);

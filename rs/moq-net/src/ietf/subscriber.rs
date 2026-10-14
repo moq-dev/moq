@@ -1182,8 +1182,10 @@ where
 						// cluster draft requires closing the session on those; a stream
 						// the peer simply reset is not the peer's fault.
 						if is_protocol_violation(&err) {
-							this.session
-								.close(SessionError::from(&err).to_code(), err.to_string().as_ref());
+							this.session.close(
+								super::error::to_session_code(&SessionError::from(&err)),
+								err.to_string().as_ref(),
+							);
 						}
 						tracing::debug!(%err, "publish_namespace stream error");
 					}
@@ -1395,9 +1397,10 @@ where
 			// An update spends its own request ID, even one refused below.
 			let request_id = ietf::RequestId::decode(&mut body.decoder(self.version), self.version)?;
 			if let Err(err) = self.control.accept(request_id) {
-				self.session
-					.clone()
-					.close(crate::SessionError::from(&err).to_code(), "invalid request ID");
+				self.session.clone().close(
+					super::error::to_session_code(&crate::SessionError::from(&err)),
+					"invalid request ID",
+				);
 				return Err(err);
 			}
 			let msg = match ietf::PublishNamespaceUpdate::decode_msg(&mut data, self.version) {
@@ -1698,9 +1701,10 @@ where
 			Entry::Vacant(entry) => {
 				// A peer past its limits loses the session, not just this namespace.
 				let slot = self.announces.acquire().inspect_err(|err| {
-					self.session
-						.clone()
-						.close(crate::SessionError::from(err).to_code(), "too many announcements");
+					self.session.clone().close(
+						super::error::to_session_code(&crate::SessionError::from(err)),
+						"too many announcements",
+					);
 				})?;
 				// Outside the session's limit: held, not refused, so a wider limit can
 				// attach it while the peer still advertises it.
@@ -2349,8 +2353,10 @@ where
 		if let Err(err) = self.register_alias(request_id, alias) {
 			if matches!(err, Error::Duplicate) {
 				tracing::warn!(track_alias = %alias, "publisher reused a live track alias for another track");
-				self.session
-					.close(SessionError::from(&err).to_code(), err.to_string().as_ref());
+				self.session.close(
+					super::error::to_session_code(&SessionError::from(&err)),
+					err.to_string().as_ref(),
+				);
 			} else {
 				tracing::warn!(track_alias = %alias, %err, "could not bind track alias");
 				self.cancel_subscribe(stream, request_id).await;
@@ -3999,9 +4005,10 @@ where
 		if draft20 && (end.group, end.object) <= (sequence, start) {
 			let err = Error::ProtocolViolation;
 			tracing::warn!(group = sequence, ?end, "FETCH_OK's End Location is before its start");
-			self.session
-				.clone()
-				.close(SessionError::from(&err).to_code(), err.to_string().as_ref());
+			self.session.clone().close(
+				super::error::to_session_code(&SessionError::from(&err)),
+				err.to_string().as_ref(),
+			);
 			request.reject(err);
 			return;
 		}
