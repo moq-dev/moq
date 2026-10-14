@@ -295,71 +295,77 @@ test("a narrower watch rides an open broader request and keeps it open", async (
 	origin.close();
 });
 
-for (const epoch of [undefined, Epoch.mint()]) {
-	test(`a narrower request hands its routes to a broader one without a retraction (epoch: ${epoch !== undefined})`, async () => {
-		const origin = new OriginProducer();
-		const session = new FakeSession();
-		forwardAnnounced(session.session, origin);
-		const route = { ...Route.default, epoch };
-
-		const narrow = origin.announced(Path.Pattern.subtree(Path.from("a/b")));
-		await settle();
-		start(session.stream("a/b/**"), "a/b/x", route);
-		await settle();
-
-		// A broader watch opens its own request, which reports the same route.
-		const broad = origin.announced(Path.Pattern.subtree(Path.from("a")));
-		const events = record(broad);
-		await settle();
-		expect(session.open()).toEqual(["a/b/**", "a/**"]);
-		start(session.stream("a/**"), "a/b/x", route);
-		await settle();
-
-		// The narrower request lingers out and the broader takes the route over. The epoch proves
-		// both report one instance; without one the route restarts rather than stitch two.
-		narrow.close();
-		await settle();
-		jest.advanceTimersByTime(LINGER);
-		await settle();
-		expect(session.open()).toEqual(["a/**"]);
-		expect(wireOf(origin).routes(Path.from("a/b/x"))).toBe(true);
-		expect(events).toEqual(epoch ? ["start a/b/x"] : ["start a/b/x", "restart a/b/x"]);
-
-		broad.close();
-		session.die();
-		origin.close();
-	});
-}
-
-test("a hand-over to another epoch restarts the route", async () => {
+test("a narrower request stays open until the broader one covering it goes", async () => {
 	const origin = new OriginProducer();
 	const session = new FakeSession();
 	forwardAnnounced(session.session, origin);
 
 	const narrow = origin.announced(Path.Pattern.subtree(Path.from("a/b")));
 	await settle();
-	start(session.stream("a/b/**"), "a/b/x", { ...Route.default, epoch: Epoch.mint() });
+	start(session.stream("a/b/**"), "a/b/x");
 	await settle();
 
-	// The publisher restarted. The broader request snapshots the newer instance while the
-	// narrower one has yet to report it.
+	// A broader watch opens its own request, which has yet to answer when the narrower watch
+	// leaves. The narrower request stays open, so the route never retracts.
 	const broad = origin.announced(Path.Pattern.subtree(Path.from("a")));
 	const events = record(broad);
 	await settle();
-	start(session.stream("a/**"), "a/b/x", { ...Route.default, epoch: Epoch.mint() });
-	await settle();
-	expect(events).toEqual(["start a/b/x"]);
-
 	narrow.close();
 	await settle();
 	jest.advanceTimersByTime(LINGER);
 	await settle();
-	expect(events).toEqual(["start a/b/x", "restart a/b/x"]);
+	expect(session.open()).toEqual(["a/b/**", "a/**"]);
+	expect(wireOf(origin).routes(Path.from("a/b/x"))).toBe(true);
+	expect(events).toEqual(["start a/b/x"]);
 
+	// Once the broader request lingers out, the narrower one it held follows.
 	broad.close();
+	await settle();
+	jest.advanceTimersByTime(LINGER);
+	await settle();
+	jest.advanceTimersByTime(LINGER);
+	await settle();
+	expect(session.open()).toEqual([]);
+	expect(wireOf(origin).routes(Path.from("a/b/x"))).toBe(false);
+
 	session.die();
 	origin.close();
 });
+
+const first = Epoch.mint();
+for (const [name, epochs] of [
+	["no epoch", [undefined, undefined]],
+	["one epoch", [first, first]],
+	["another epoch", [first, Epoch.mint()]],
+] as const) {
+	test(`a route changing hands restarts unless one epoch proves one instance (${name})`, async () => {
+		const origin = new OriginProducer();
+		const session = new FakeSession();
+		forwardAnnounced(session.session, origin);
+
+		const narrow = origin.announced(Path.Pattern.subtree(Path.from("a/b")));
+		await settle();
+		start(session.stream("a/b/**"), "a/b/x", { ...Route.default, epoch: epochs[0] });
+		await settle();
+		const broad = origin.announced(Path.Pattern.subtree(Path.from("a")));
+		const events = record(broad);
+		await settle();
+		start(session.stream("a/**"), "a/b/x", { ...Route.default, epoch: epochs[1] });
+		await settle();
+		expect(events).toEqual(["start a/b/x"]);
+
+		// The narrower request, which drives the route, fails; the broader one takes it over.
+		session.stream("a/b/**").close(new Error("reset"));
+		await settle();
+		expect(wireOf(origin).routes(Path.from("a/b/x"))).toBe(true);
+		expect(events).toEqual(name === "one epoch" ? ["start a/b/x"] : ["start a/b/x", "restart a/b/x"]);
+
+		narrow.close();
+		broad.close();
+		session.die();
+		origin.close();
+	});
+}
 
 test("a reconnect re-opens every live watch and skips a lingering one", async () => {
 	const origin = new OriginProducer();

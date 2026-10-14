@@ -28,6 +28,8 @@ interface Interest {
 	linger?: ReturnType<typeof setTimeout>;
 	/** Closed on purpose, so its end is not a discovery failure. */
 	closing: boolean;
+	/** Narrower requests nothing watches any more, kept open until this one goes. */
+	readonly held: Map<Path.Valid, Interest>;
 }
 
 /**
@@ -48,11 +50,11 @@ interface Reported {
  * Discovery is lazy. One announce request opens per prefix in the origin's covering set of
  * watches (`announced(scope)` and `request(path, { announced: true })`) that no open request
  * already covers, and closes {@link LINGER} after nothing at or beneath its prefix is watched.
- * A narrower watch rides an open broader request and never takes its routes over, since
- * nothing tells when a fresh request has caught up. A broader watch opens its request before
- * the narrower ones are released, and a route both report stays inserted, so nothing
- * retracts; an epochless route restarts if it changes hands, since nothing proves both
- * requests saw one instance.
+ * A narrower watch rides an open broader request, and a narrower request already open stays
+ * open until the broader one covering it goes, so neither takes the other's routes over:
+ * nothing tells when a fresh request has caught up. A route both report is inserted once and
+ * driven by its first reporter; if it changes hands anyway (a request failing), it restarts
+ * unless one epoch proves both requests saw one instance.
  *
  * Each active announcement inserts a route covering the announced prefix, served lazily
  * through this connection, so nothing touches the wire until somebody requests a path
@@ -156,6 +158,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 			announced: conn.announced(Path.Pattern.subtree(prefix), { hidden: true }),
 			reported: new Set(),
 			closing: false,
+			held: new Map(),
 		};
 		interests.set(prefix, interest);
 
@@ -176,6 +179,10 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 				clearTimeout(interest.linger);
 				if (interests.get(prefix) === interest) interests.delete(prefix);
 				if (!dead && !interest.closing) downgrade(failure);
+				// What this request held now settles on its own, unless it is watched again.
+				for (const [held, narrower] of interest.held) {
+					if (!dead && interests.get(held) === narrower && !beneath.has(held)) release(held, narrower);
+				}
 			}
 		})();
 	};
@@ -186,6 +193,29 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 	// its path whether anything beneath it is still watched.
 	const beneath = new Map<Path.Valid, number>();
 
+	/**
+	 * Settle a request nothing beneath it watches any more. A broader open request that is
+	 * still needed holds it until that one goes, so the broader never takes its routes over
+	 * before it has caught up; otherwise it lingers out.
+	 */
+	const release = (prefix: Path.Valid, interest: Interest) => {
+		for (const above of coveringPrefixes(prefix)) {
+			if (above === prefix) continue;
+			const holder = interests.get(above);
+			if (!holder || !beneath.has(above)) continue;
+			holder.held.set(prefix, interest);
+			return;
+		}
+		clearTimeout(interest.linger);
+		interest.linger = setTimeout(() => {
+			// Forgotten now rather than once its stream winds down, so a watch arriving
+			// meanwhile opens a fresh request instead of reviving this one.
+			interests.delete(prefix);
+			interest.closing = true;
+			interest.announced.close();
+		}, LINGER);
+	};
+
 	const unsubscribe = originWire.interests((prefix, want) => {
 		if (dead) return;
 		const count = (wanted.get(prefix) ?? 0) + (want ? 1 : -1);
@@ -193,29 +223,24 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 		else wanted.delete(prefix);
 		if (count !== (want ? 1 : 0)) return;
 
-		let covered = false;
 		for (const above of coveringPrefixes(prefix)) {
 			const held = (beneath.get(above) ?? 0) + (want ? 1 : -1);
 			if (held > 0) beneath.set(above, held);
 			else beneath.delete(above);
+		}
 
-			// A request stays open while anything beneath it is watched, so a narrower watch rides
-			// it rather than opening a request that would later have to take its routes over.
+		// A request stays open while anything beneath it is watched, so a narrower watch rides
+		// it rather than opening a request that would later have to take its routes over.
+		let covered = false;
+		for (const above of coveringPrefixes(prefix)) {
 			const interest = interests.get(above);
 			if (!interest) continue;
 			covered = true;
-			if (held > 0) {
+			if (beneath.has(above)) {
 				clearTimeout(interest.linger);
 				interest.linger = undefined;
 			} else {
-				clearTimeout(interest.linger);
-				interest.linger = setTimeout(() => {
-					// Forgotten now rather than once its stream winds down, so a watch arriving
-					// meanwhile opens a fresh request instead of reviving this one.
-					interests.delete(above);
-					interest.closing = true;
-					interest.announced.close();
-				}, LINGER);
+				release(above, interest);
 			}
 		}
 		if (want && !covered && !blind) open(prefix);
