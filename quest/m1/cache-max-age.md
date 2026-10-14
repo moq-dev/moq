@@ -53,6 +53,14 @@ Decided (2026-10-06, maintainer):
   the successor is resolved and before the early return for an unstamped one,
   so re-selecting the successor re-arms it. The deadline needs a wall-clock
   driver beside the index's write-driven ones.
+- Empty groups, finished without a frame or still open with none, are not
+  special-cased by the reader path (maintainer, 2026-10-14). They are handed
+  out like any group and retired by the wall term, as an untimed group is,
+  which also bounds a publisher flooding a run of them. Test that a long run
+  of them is retired by wall clock and that readers stay linear over the run
+  length, extending `track_empty_run` in `rs/moq-net/benches/track.rs` if it
+  has landed. [#5446](https://github.com/moq-dev/moq/pull/5446) is dropping
+  its empty-group special case to rely on this.
 - The swept benchmark measures cost and picks between evaluating the wall
   term on a timer and evaluating it lazily on access, for retention only. It
   no longer decides the semantics.
