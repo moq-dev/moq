@@ -8402,7 +8402,9 @@ mod tests {
 			assert_eq!(log.resets(), vec![cancelled], "{version}: reset");
 			assert_eq!(log.stops(), vec![cancelled], "{version}: STOP_SENDING");
 			assert!(
-				!log.trail().iter().any(|(_, sent)| *sent == crate::lite::test_transport::Sent::Finish),
+				!log.trail()
+					.iter()
+					.any(|(_, sent)| *sent == crate::lite::test_transport::Sent::Finish),
 				"{version}: FIN"
 			);
 			assert!(log.closes().is_empty(), "{version}: the session closed");
