@@ -118,6 +118,9 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 				None => return Poll::Pending,
 			},
 		};
+		if session.binding() == crate::transport::Binding::Uri && setup.path.is_some() {
+			return Poll::Ready(Err(Error::ProtocolViolation));
+		}
 		// A stream need not have delivered even its type yet. Keep it intact for the
 		// session instead of letting it block SETUP or dropping it at the handoff.
 		early.append(pending);
@@ -265,7 +268,7 @@ where
 	// reads the peer's Setup stream; capability-gated streams (PROBE) wait on it.
 	// When the caller already read it (a gated server accept), seed the slot so the
 	// Setup stream isn't expected on the wire again.
-	let peer_setup_slot = PeerSetup::new(client);
+	let peer_setup_slot = PeerSetup::new(client, session.binding());
 	let early = if let Some(accepted) = peer_setup {
 		peer_setup_slot.set(accepted.setup);
 		accepted.early

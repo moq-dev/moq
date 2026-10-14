@@ -695,8 +695,15 @@ async fn serve_connection(
 
 	deadline.close = Some(transport.clone());
 	let server = moq_net::Server::new().with_versions(serve.versions.clone());
+	let binding = match url {
+		Some(_) => moq_net::transport::Binding::Uri,
+		None => moq_net::transport::Binding::InBand,
+	};
 	let request = deadline
-		.bound(server.accept_request_lite(std::time::Instant::now(), moq_uring::transport::Session::new(transport)))
+		.bound(server.accept_request_lite(
+			std::time::Instant::now(),
+			moq_uring::transport::Session::new(transport, binding),
+		))
 		.await
 		.context("moq handshake failed")?;
 

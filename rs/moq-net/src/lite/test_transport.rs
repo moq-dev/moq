@@ -350,6 +350,9 @@ impl poll::Session for DeadStreamSession {
 		0
 	}
 
+	fn binding(&self) -> crate::transport::Binding {
+		crate::transport::Binding::InBand
+	}
 	fn protocol(&self) -> Option<&str> {
 		None
 	}
@@ -525,6 +528,9 @@ impl poll::Session for SinkSession {
 		0
 	}
 
+	fn binding(&self) -> crate::transport::Binding {
+		crate::transport::Binding::InBand
+	}
 	fn protocol(&self) -> Option<&str> {
 		self.protocol
 	}
@@ -825,6 +831,9 @@ impl poll::Session for ScriptedSession {
 		0
 	}
 
+	fn binding(&self) -> crate::transport::Binding {
+		crate::transport::Binding::InBand
+	}
 	fn protocol(&self) -> Option<&str> {
 		None
 	}

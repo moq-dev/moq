@@ -5133,7 +5133,7 @@ mod tests {
 			.unwrap();
 
 		// A SETUP that declares no origin of its own, so only the assigned one applies.
-		let peer_setup = crate::lite::PeerSetup::default();
+		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand);
 		peer_setup.set(crate::lite::Setup::default());
 		let (_, goaway) = crate::goaway::Handle::new(true);
 
@@ -5312,7 +5312,7 @@ mod tests {
 			session,
 			origin: origin.consume(),
 			version,
-			peer_setup: crate::lite::PeerSetup::default(),
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand),
 			goaway,
 			peer_hop: None,
 			auth: crate::auth::Handle::new(false),
@@ -5570,7 +5570,7 @@ mod tests {
 			}
 		}
 
-		let peer_setup = crate::lite::PeerSetup::default();
+		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand);
 		peer_setup.set(crate::lite::Setup::default());
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		let publisher = Publisher::new(PublisherConfig {
@@ -5703,7 +5703,7 @@ mod tests {
 					let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 					broadcast.announce(Default::default()).unwrap();
 
-					let peer_setup = crate::lite::PeerSetup::default();
+					let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand);
 					peer_setup.set(crate::lite::Setup::default());
 					let (_, goaway) = crate::goaway::Handle::new(true);
 					let publisher = Publisher::new(PublisherConfig {
@@ -5782,7 +5782,7 @@ mod tests {
 		let mut dynamic = broadcast.dynamic();
 		broadcast.announce(Default::default()).unwrap();
 
-		let peer_setup = crate::lite::PeerSetup::default();
+		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand);
 		peer_setup.set(crate::lite::Setup::default());
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		let version = Version::Lite07;
@@ -5874,7 +5874,7 @@ mod tests {
 		let mut dynamic = broadcast.dynamic();
 		broadcast.announce(Default::default()).unwrap();
 
-		let peer_setup = crate::lite::PeerSetup::default();
+		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand);
 		peer_setup.set(crate::lite::Setup::default());
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		let version = Version::Lite07;
@@ -6038,7 +6038,7 @@ mod tests {
 				session,
 				origin: origin.consume(),
 				version: VERSION,
-				peer_setup: crate::lite::PeerSetup::default(),
+				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand),
 				goaway,
 				peer_hop: None,
 				subscriptions: crate::session::Slots::new(0),

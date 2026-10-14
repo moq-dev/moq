@@ -7,7 +7,9 @@ closed with PROTOCOL_VIOLATION, in both `rs/moq-net` and `js/net`, and a
 Report-level publisher answers PROBE targets instead of resetting the stream.
 The rules are unchanged from lite-06 through lite-07-wip, so the fixes apply
 to every lite version. Data-stream (FRAME) decode errors stay per-stream, as
-the draft says, and a reset or FIN is never a violation.
+the draft says. Complete malformed control messages violate; a transport
+FIN/reset alone does not. Existing SETUP/AUTH truncation violations remain.
+Decided 2026-10-14: preserve this boundary without new truncation semantics.
 
 ## Plan
 
@@ -53,7 +55,11 @@ Rust-to-Rust and Rust-to-JS sessions never hit these; third-party peers do.
   including a malformed SUBSCRIBE_UPDATE and a malformed PROBE report.
   Share the session-close path that malformed AUTH messages already use.
 
-Public API: none. Wire: none; the behavior now matches the draft.
+Public API: required `transport::poll::Session::binding() -> Binding` with
+`Uri` and `InBand`, explicitly selected by every adapter. Generic native
+adapter constructors require the binding. Decided 2026-10-14: binding is a
+transport fact, so callers cannot silently omit it. Public `Setup` is unchanged.
+Wire: no encoding changes; the behavior now matches the draft.
 
 ## Closes
 

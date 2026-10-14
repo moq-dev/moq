@@ -140,7 +140,10 @@ mod linux {
 					.with_publisher(&pub_origin)
 					.accept_lite(
 						std::time::Instant::now(),
-						moq_uring::transport::Session::new(quic::web::Session::raw(conn)),
+						moq_uring::transport::Session::new(
+							quic::web::Session::raw(conn),
+							moq_net::transport::Binding::InBand,
+						),
 					)
 					.await
 					.expect("accept_lite");
@@ -156,7 +159,10 @@ mod linux {
 						.with_subscriber(sub_origin.clone())
 						.connect_lite(
 							std::time::Instant::now(),
-							moq_uring::transport::Session::new(quic::web::Session::raw(conn)),
+							moq_uring::transport::Session::new(
+								quic::web::Session::raw(conn),
+								moq_net::transport::Binding::InBand,
+							),
 						)
 						.await
 						.expect("connect_lite");

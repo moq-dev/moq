@@ -1260,7 +1260,10 @@ async fn memory_sessions() -> (moq_net::Session, moq_net::Session) {
 	let now = tokio::time::Instant::now().into_std();
 	let client = async {
 		let (session, driver) = moq_net::Client::new()
-			.connect(now, moq_tokio::transport::Session::new(client))
+			.connect(
+				now,
+				moq_tokio::transport::Session::new(client, moq_net::transport::Binding::InBand),
+			)
 			.await
 			.expect("client handshake");
 		tokio::spawn(moq_net::time::run(driver));
@@ -1268,7 +1271,10 @@ async fn memory_sessions() -> (moq_net::Session, moq_net::Session) {
 	};
 	let server = async {
 		let (session, driver) = moq_net::Server::new()
-			.accept(now, moq_tokio::transport::Session::new(server))
+			.accept(
+				now,
+				moq_tokio::transport::Session::new(server, moq_net::transport::Binding::InBand),
+			)
 			.await
 			.expect("server handshake");
 		tokio::spawn(moq_net::time::run(driver));

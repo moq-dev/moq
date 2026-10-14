@@ -163,8 +163,8 @@ pub struct Setup {
 	/// qmux over TCP/TLS, unix sockets), with `?` and the URI query appended when
 	/// there is one. Sent only by the client; a server never sends one and a relay
 	/// never forwards it. `None` on URI-carrying bindings, where it would be a
-	/// protocol violation. An empty path means the same thing as `None`; both are
-	/// on the wire so a client need not special-case the root.
+	/// protocol violation. On an in-band binding an empty path selects the root, like `None`;
+	/// a URI binding forbids even an empty Path parameter.
 	pub path: Option<String>,
 	/// The single direction the client intends to use, or `None` for a bidirectional
 	/// session. `None` is sent as the absence of the parameter, which is also how a
@@ -279,27 +279,31 @@ impl Message for ReceivedSetup {
 /// Streams whose encoding depends on a negotiated capability (e.g. the PROBE
 /// stream) wait on this before deciding what to do. Cheap to clone: every handle
 /// shares the same slot.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct PeerSetup(kio::Shared<PeerSetupState>);
 
-#[derive(Default)]
 struct PeerSetupState {
 	client: bool,
+	binding: crate::transport::Binding,
 	seen: bool,
 	setup: Option<Setup>,
 }
 
 impl PeerSetup {
-	pub fn new(client: bool) -> Self {
+	pub fn new(client: bool, binding: crate::transport::Binding) -> Self {
 		Self(kio::Shared::new(PeerSetupState {
 			client,
-			..Default::default()
+			binding,
+			seen: false,
+			setup: None,
 		}))
 	}
 
 	pub(super) fn receive(&self, received: ReceivedSetup) -> Result<(), crate::Error> {
 		let mut state = self.0.lock();
-		if state.client && (received.setup.path.is_some() || received.role_present) {
+		if ((state.client || state.binding == crate::transport::Binding::Uri) && received.setup.path.is_some())
+			|| (state.client && received.role_present)
+		{
 			return Err(crate::Error::ProtocolViolation);
 		}
 		state.seen = true;

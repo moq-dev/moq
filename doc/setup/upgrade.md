@@ -204,6 +204,10 @@ These land with the next breaking release, not the 2026-09-23 train.
   a `transport::Error`. moq-tokio's `Client` and `Server` are unchanged. A
   custom transport handed straight to moq-net implements these traits; a
   `moq-uring` session is wrapped with `moq_uring::transport::Session::new`.
+  Each session must report `binding()`: `transport::Binding::Uri` when the
+  transport handshake carries the request URI, or `InBand` when SETUP carries
+  it. The moq-tokio and moq-uring adapter constructors take this binding
+  explicitly; browser WebTransport adapters always report `Uri`.
 - **`--cluster-mesh` and `--cluster-linger` are unknown flags.** moq-relay
   0.17 refuses them by name; later relays reject them, and TOML `mesh` and
   `linger`, like any unknown setting. `MOQ_CLUSTER_MESH` and
