@@ -36,17 +36,11 @@ export interface Established {
 	readonly auth: Auth.Auth;
 
 	/**
-	 * Whether the relay supports broadcast discovery: announcing which broadcasts exist under a
-	 * prefix. When false, {@link announced} never yields, so a consumer must subscribe blind
-	 * rather than wait for an announcement. Set via `discovery` on the connect options.
-	 */
-	readonly discovery: boolean;
-
-	/**
 	 * Subscribe to broadcast announcements matching `scope`, any pattern (`foo/**`
 	 * for a subtree, `room/* /chat` for each room's chat, default `**`). Paths are
 	 * relative to the session; captures report what the scope's wildcards stood for.
-	 * Hidden routes are left out unless `options.hidden` opts in.
+	 * Hidden routes are left out unless `options.hidden` opts in. A peer without
+	 * discovery refuses or resets the stream.
 	 */
 	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer;
 

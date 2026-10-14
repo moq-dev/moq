@@ -1341,7 +1341,7 @@ mod tests {
 					let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(now.as_secs() - 3600);
 					let fixture = Fixture::start(Duration::from_secs(1), wall).await;
 					let advertised = fixture.catalog.snapshot().clock;
-					assert_eq!(advertised, Some(fixture.clock.wall()));
+					assert_eq!(advertised, fixture.clock.wall());
 
 					let mut track = fixture.subscribe().await;
 					let camera = fixture.camera();
@@ -1352,8 +1352,7 @@ mod tests {
 					// Timestamps follow the monotonic epoch and map to walls under the pinned mapping.
 					fixture.assert_acquired(published, captured);
 					let mapped = advertised.unwrap().wall_clock(us(published)).unwrap();
-					// The catalog maps to walls at millisecond precision.
-					assert_eq!(mapped, wall + Duration::from_millis(published / 1000));
+					assert_eq!(mapped, wall + Duration::from_micros(published));
 					assert_eq!(fixture.catalog.snapshot().clock, advertised);
 					fixture.finish().await;
 				})

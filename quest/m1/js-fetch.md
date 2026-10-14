@@ -25,9 +25,13 @@ no `NotFetchable` code, since nothing would send it. Only lite-07 has the
 code, and lite-07 drops FETCH for [ranges](/quest/m1/subscribe-ranges/lite.md);
 lite-05 and lite-06 answer `NotFound`.
 
-Answering TRACK_STATUS, which a native fetch-only request asks before its
-first FETCH, split out to [JavaScript answers TRACK_STATUS](/quest/m1/js-track-status.md)
-(2026-10-13): it does not need FETCH.
+The JS publisher already answers the TRACK_STATUS a native fetch-only request
+asks before its first FETCH, so after that answer the FETCH is all that is
+refused today.
+
+Decided 2026-10-13: once this lands, check whether the Rust IETF subscriber's
+fallback to SUBSCRIBE on a NOT_SUPPORTED TRACK_STATUS is still needed, and
+delete it if no in-tree publisher refuses anymore.
 
 Verify with an in-memory application responder: a browser publisher serves a
 native IETF subscriber after a group is evicted or was never cached. Run the
@@ -43,7 +47,6 @@ claims that change.
 
 ## Related
 
-- [JavaScript answers TRACK_STATUS](/quest/m1/js-track-status.md) - answers the TRACK_STATUS a native fetch-only request sends first
 - [Browser archive](/quest/m3/archive-browser.md) - supplies memory or OPFS archive data through the same request surface
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native timeout budgets and gap dispositions build on this responder
 - [FETCH max-delay](/quest/m1/fetch-max-delay.md) - local per-reader age limits also apply to historical data

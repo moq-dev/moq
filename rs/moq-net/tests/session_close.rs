@@ -324,3 +324,20 @@ async fn unsupported_close_is_decoded_by_the_negotiated_session_registry() {
 		assert!(matches!(error, Error::Session(code) if code == expected), "{protocol}");
 	}
 }
+
+/// moq-lite's own session range (0x30-0x3f) is never sent as an unknown code on either
+/// wire, while a code outside it passes through.
+#[moq_net_sim::test]
+async fn an_unknown_lite_range_abort_is_unspecified_on_every_wire() {
+	for protocol in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-17", "moq-transport-22"] {
+		for (unknown, expected) in [(0x31, 0x1), (0x20, 0x20)] {
+			let version: Version = protocol.parse().unwrap();
+			let pair = connect_mock(MockConnectOptions::new(version)).await;
+			pair.client
+				.abort(Error::Session(moq_net::SessionError::Unknown(unknown)));
+			let _ = pair.server.closed().await;
+			let (code, _) = pair.server_transport.close_reason().expect("transport closed");
+			assert_eq!(code, expected, "{protocol} {unknown:#x}");
+		}
+	}
+}

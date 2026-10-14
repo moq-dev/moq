@@ -34,6 +34,22 @@ use super::{
 use crate::catalog::Stream;
 use crate::container::{ExportSource, Frame};
 
+/// Before the header, unbind every track the catalog no longer lists (removed, or disabled),
+/// so the header declares only what the snapshot offers. A single-track stream also follows the
+/// best rendition, so a snapshot that lacks it doesn't fix the pick. Unbinding unsubscribes the
+/// track; nothing was emitted from it yet.
+fn unbind<C>(tracks: &mut Vec<FlvTrack>, renditions: &[(&String, &C)], multitrack: bool) {
+	if multitrack {
+		tracks.retain(|track| renditions.iter().any(|(name, _)| **name == track.name));
+	} else if tracks.first().map(|track| &track.name) != renditions.first().map(|(name, _)| *name) {
+		tracks.clear();
+	}
+	// Ids follow bind order, so close the gaps an unbind left.
+	for (id, track) in tracks.iter_mut().enumerate() {
+		track.track_id = id as u8;
+	}
+}
+
 /// Which FLV payload shape a bound track is muxed as: a legacy CodecID
 /// (`Avc`/`Aac`) or an enhanced-RTMP FourCC codec.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -393,7 +409,7 @@ impl<S: Stream> Export<S> {
 	}
 
 	fn update_catalog(&mut self, mut catalog: Catalog) -> anyhow::Result<()> {
-		self.source.retain_valid_media(&mut catalog);
+		self.source.retain_selectable(&mut catalog);
 
 		// A single-track FLV stream binds one rendition of each kind; multitrack
 		// binds them all.
@@ -433,15 +449,7 @@ impl<S: Stream> Export<S> {
 			ranked
 		};
 
-		// Before the header, a single-track stream follows the best rendition, so a
-		// snapshot that lacks it doesn't fix the pick. Dropping the bound track
-		// unsubscribes it; nothing was emitted from it yet.
-		if !self.multitrack
-			&& let Some((best, _)) = renditions.first()
-			&& self.video.first().is_some_and(|t| &t.name != *best)
-		{
-			self.video.clear();
-		}
+		unbind(&mut self.video, &renditions, self.multitrack);
 
 		for (name, config) in renditions {
 			if !self.multitrack && !self.video.is_empty() {
@@ -492,15 +500,7 @@ impl<S: Stream> Export<S> {
 			ranked
 		};
 
-		// Before the header, a single-track stream follows the best rendition, so a
-		// snapshot that lacks it doesn't fix the pick. Dropping the bound track
-		// unsubscribes it; nothing was emitted from it yet.
-		if !self.multitrack
-			&& let Some((best, _)) = renditions.first()
-			&& self.audio.first().is_some_and(|t| &t.name != *best)
-		{
-			self.audio.clear();
-		}
+		unbind(&mut self.audio, &renditions, self.multitrack);
 
 		for (name, config) in renditions {
 			if !self.multitrack && !self.audio.is_empty() {

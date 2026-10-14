@@ -1,0 +1,166 @@
+name: TS
+
+# Decoder, transport structure, buffer-model and release-timing gates are
+# independent of browser interop. Decoder and transport gates have real-tool controls.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 8 * * *"
+  pull_request:
+    paths:
+      - "test/ts/**"
+      - "test/lib/**"
+      - "test/justfile"
+      - "rs/moq-mux/**"
+      - "rs/hang/**"
+      - "rs/moq-cli/**"
+      - "rs/moq-net/**"
+      - "rs/moq-tokio/**"
+      - "rs/moq-relay/**"
+      - "rs/moq-loc/**"
+      - "rs/moq-json/**"
+      # Workspace dependencies of moq-net, moq-tokio and moq-mux on the TS path.
+      - "rs/kio/**"
+      - "rs/moq-flate/**"
+      - "rs/moq-msf/**"
+      - "rs/moq-pattern/**"
+      - "rs/moq-sock/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/actions/rust-cache/**"
+      - ".github/workflows/ts.yml"
+
+concurrency:
+  group: ts-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  ts:
+    name: TS validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
+        with:
+          tool-cache: false
+
+      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+        with:
+          determinate: false
+          extra-conf: |
+            extra-substituters = https://kixelated.cachix.org
+            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+
+      - name: Rust cache
+        uses: ./.github/actions/rust-cache
+
+      - name: FFmpeg and TSDuck controls
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts-controls
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
+      - name: TS pair controls
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts-pair-controls
+
+      # Round-trips a PCR-paced TS through a relay and checks the subscriber's
+      # `export ts` output with TSDuck (tsp/tsanalyze from the nix devShell).
+      - name: TS compliance
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # The same round-trip at 2 Mb/s, where every keyframe outgrows a 25 ms PCR slot,
+      # so the export has to spread it over the slots before its DTS and still keep
+      # the constant-rate schedule.
+      - name: TS keyframe bursts
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --bitrate 2000000
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # 1080p video filling a broadcast-sized 9 Mbit CPB, at the default delay: the
+      # source sends pictures most of a second ahead of their decode time, and the
+      # export has to as well without overflowing the receiver's buffers.
+      - name: TS broadcast-sized CPB
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --hrd
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # The same video beside four audio PIDs in a multiplex faster than its Rx: each slot
+      # has to interleave the video with the rest, or its transport buffer overflows.
+      - name: TS multiplex above the video's Rx
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --headroom
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # The same round-trip over an open-GOP clip: every leading picture after a
+      # recovery point must come back, in decode order.
+      - name: TS open GOP
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --open-gop
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # Builds the sparse-EPG and pending-version fixtures and round-trips
+      # them, asserting the schedule survives and pending sections are dropped.
+      - name: EIT fixtures
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts-eit
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # The T-STD model must pass a broadcast capture and fail the same capture
+      # delivered too slowly, too early, or in a burst.
+      - name: T-STD controls
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts-tstd
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # The pair needs enough overlap to grade the slower table cadences.
+      - name: TS table alignment
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        run: nix develop --command just test ts --pair
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
+      # Live timing needs the real-time window to distinguish drift from startup.
+      - name: TS live release timing
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        run: nix develop --command just test ts --live --duration 120
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
+      - name: Upload failure artifacts
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ts-failure
+          path: ${{ runner.temp }}/moq-test-runs
+          retention-days: 7
+          if-no-files-found: error

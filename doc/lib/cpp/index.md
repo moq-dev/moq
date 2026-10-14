@@ -100,11 +100,15 @@ if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the cata
     for (const auto &[name, video] : catalog->video) {
         // The track is the rendition's `track` when set, otherwise its catalog key.
         auto track = video.track.value_or(name);
-        auto media = ok(moq::MediaContainerConsumer::subscribe(broadcast, {track, video.container}).get());
+        auto media = ok(moq::MediaTrackConsumer::subscribe(broadcast, {track, video.container}).get());
         auto frame = ok(media->next().get());   // std::nullopt once the track ends
     }
 }
 ```
+
+`MediaTrackConsumer` reads in decode order. For arrival-order reads, decode each group
+from `TrackConsumer::recv_group` with `moq::MediaGroupConsumer::init(group, container)`;
+frames carry container media time as they land.
 
 ```cpp
 // Publish encoded frames, or raw pixels with the codec inside the binding.
@@ -201,8 +205,9 @@ Error cases carrying a diagnostic expose it as `reason`; protocol failures expos
 `std::holds_alternative<moq::Error::kUnauthorized>(error.get_variant())`. Auth
 rejections are their own cases, so you don't retry them. `error.to_string()`
 gives the message Rust's `Display` does, for logs; branch on the case, not the
-text. A Rust panic or a misused future (`get()` twice) aborts with a message on
-stderr instead of throwing.
+text. A Rust panic inside a call, or a misused future (`get()` twice), aborts
+with a message on stderr instead of throwing. A panic in a session's background
+work closes only that session.
 
 A session closed for exceeding the relay's request caps reports the protocol
 kind `ProtocolKind::kTooManyRequests`. Reduce

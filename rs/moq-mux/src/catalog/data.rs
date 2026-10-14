@@ -84,8 +84,9 @@ impl Listing {
 	/// given. Also returns the given time, if there was one.
 	pub(crate) fn stamp<P>(&mut self, timed: moq_net::Timed<P>) -> (moq_net::Timed<P>, Option<moq_net::Timestamp>) {
 		let clock = self.rendition.clock();
-		// A re-anchor moves this track's timeline, which measured across would read as jitter.
-		if clock.wall() != self.clock.wall() {
+		// A re-anchor moves this track's timeline, which measured across would read as jitter. The
+		// whole clock is compared: on a host with an unset wall clock, every clock has no mapping.
+		if clock != self.clock {
 			self.estimator.discontinuity();
 		}
 		self.clock = clock;

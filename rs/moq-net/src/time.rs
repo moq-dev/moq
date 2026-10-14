@@ -5,7 +5,7 @@
 use crate::Error;
 use std::{
 	collections::BTreeMap,
-	sync::{Arc, Mutex},
+	sync::{Arc, Mutex, PoisonError},
 	task::Poll,
 };
 
@@ -119,7 +119,7 @@ impl Clock {
 	/// driver's waiter its records of every other list it is parked on.
 	pub(crate) fn advance(&self, now: Instant) {
 		let due = {
-			let mut state = self.0.lock().unwrap();
+			let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
 			assert!(state.now.is_none_or(|prev| now >= prev), "driver time moved backwards");
 			state.now = Some(now);
 			drop(state.driver.take());
@@ -131,21 +131,21 @@ impl Clock {
 		};
 		for waiters in due {
 			// Take the registrations before waking: wake may immediately poll a deadline.
-			let mut ready = waiters.lock().unwrap().take();
+			let mut ready = waiters.lock().unwrap_or_else(PoisonError::into_inner).take();
 			ready.wake();
 		}
 	}
 
 	/// The latest supplied instant, or `None` before the first.
 	pub(crate) fn try_now(&self) -> Option<Instant> {
-		self.0.lock().unwrap().now
+		self.0.lock().unwrap_or_else(PoisonError::into_inner).now
 	}
 
 	/// The earliest armed deadline, registering the driver's poll to be woken when an
 	/// earlier one is armed. Ends the poll [`Self::advance`] began: one lock, so a
 	/// deadline armed elsewhere is either reported here or wakes the driver.
 	pub(crate) fn park(&self, waiter: &kio::Waiter) -> Option<Instant> {
-		let mut state = self.0.lock().unwrap();
+		let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
 		waiter.register(&mut state.driver);
 		state.deadlines.first_key_value().map(|((at, _), _)| *at)
 	}
@@ -155,7 +155,7 @@ impl Clock {
 	pub(crate) fn timeout(&self) -> Option<Instant> {
 		self.0
 			.lock()
-			.unwrap()
+			.unwrap_or_else(PoisonError::into_inner)
 			.deadlines
 			.first_key_value()
 			.map(|((at, _), _)| *at)
@@ -163,7 +163,11 @@ impl Clock {
 
 	/// The latest instant supplied by the owning driver.
 	pub(crate) fn now(&self) -> Instant {
-		self.0.lock().unwrap().now.expect("driver has not been polled")
+		self.0
+			.lock()
+			.unwrap_or_else(PoisonError::into_inner)
+			.now
+			.expect("driver has not been polled")
 	}
 }
 
@@ -182,7 +186,7 @@ pub(crate) struct Deadline {
 impl Deadline {
 	/// A disarmed deadline, which never fires until [`set`](Self::set) arms it.
 	pub(crate) fn new(clock: &Clock) -> Self {
-		let mut state = clock.0.lock().unwrap();
+		let mut state = clock.0.lock().unwrap_or_else(PoisonError::into_inner);
 		let id = state.next;
 		state.next = state.next.checked_add(1).expect("deadline identifier overflow");
 		Self {
@@ -212,7 +216,7 @@ impl Deadline {
 		if self.at == at {
 			return;
 		}
-		let mut state = self.clock.0.lock().unwrap();
+		let mut state = self.clock.0.lock().unwrap_or_else(PoisonError::into_inner);
 		if let Some(old) = self.at.take() {
 			state.deadlines.remove(&(old, self.id));
 		}
@@ -244,11 +248,11 @@ impl Deadline {
 		let Some(at) = self.at else { return Poll::Pending };
 		// Register under the clock lock, so an `advance` past `at` either happened
 		// first (and we see it) or wakes this registration.
-		let state = self.clock.0.lock().unwrap();
+		let state = self.clock.0.lock().unwrap_or_else(PoisonError::into_inner);
 		if state.now.is_some_and(|now| now >= at) {
 			return Poll::Ready(());
 		}
-		waiter.register(&mut self.waiters.lock().unwrap());
+		waiter.register(&mut self.waiters.lock().unwrap_or_else(PoisonError::into_inner));
 		Poll::Pending
 	}
 }

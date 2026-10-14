@@ -68,7 +68,7 @@ covers the encode producers and `moq import --echo`, which need no ladder.
   moq-video README.
 
 Open, to settle before starting (moved from the
-[media stats](/quest/m1/stats/README.md) line):
+[media stats](/quest/m2/stats/README.md) line):
 
 - **Referenced-rendition feedback.** A derivative catalog (a `moq-transcode`
   passthrough) collects feedback for a source rendition it lists, but owns
@@ -86,8 +86,8 @@ Open, to settle before starting (moved from the
 
 ## Required
 
-- [Schema](/quest/m1/stats/schema.md) - the `echo` section and feedback snapshot
-- [Rust reporters](/quest/m1/stats/rust.md) - the viewers that report and
+- [Schema](/quest/m2/stats/schema.md) - the `echo` section and feedback snapshot
+- [Rust reporters](/quest/m2/stats/rust.md) - the viewers that report and
   the CLI it wires
 
 ## Related

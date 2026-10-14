@@ -101,14 +101,19 @@ pub(crate) fn shutdown() {
 impl Runtime {
 	fn shutdown(&self) {
 		let runtime = self;
-		let mut owner = runtime.thread.lock().unwrap();
+		let mut owner = runtime.thread.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 		let Some(thread) = owner.take() else {
 			return;
 		};
 		// Before the thread stops, so no call awaited in place polls the runtime after it is gone.
-		let mut polls = runtime.polls.lock().unwrap();
+		let mut polls = runtime.polls.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 		polls.stopped = true;
-		drop(runtime.idle.wait_while(polls, |polls| polls.active > 0).unwrap());
+		drop(
+			runtime
+				.idle
+				.wait_while(polls, |polls| polls.active > 0)
+				.unwrap_or_else(std::sync::PoisonError::into_inner),
+		);
 		// Outside the lock: a waker may poll inline, which takes it.
 		runtime.stopped.send_replace(true);
 		let _ = thread.stop.send(());
@@ -140,7 +145,10 @@ struct Polling;
 impl Polling {
 	/// `None` once [`shutdown`] has begun.
 	fn start() -> Option<Self> {
-		let mut polls = runtime().polls.lock().unwrap();
+		let mut polls = runtime()
+			.polls
+			.lock()
+			.unwrap_or_else(std::sync::PoisonError::into_inner);
 		if polls.stopped {
 			return None;
 		}
@@ -153,7 +161,7 @@ impl Polling {
 impl Drop for Polling {
 	fn drop(&mut self) {
 		let runtime = runtime();
-		let mut polls = runtime.polls.lock().unwrap();
+		let mut polls = runtime.polls.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 		polls.active -= 1;
 		if polls.active == 0 {
 			runtime.idle.notify_all();
@@ -364,6 +372,27 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 			Ok(_) = cancel.wait_for(|&c| c) => Err(MoqError::Cancelled),
 			result = f(state) => result,
 		}
+	}
+
+	/// Move the state to a new owner, ending this handle as [Self::cancel] would.
+	///
+	/// `check` sees the state first, and an error there leaves this handle untouched.
+	/// [`MoqError::Busy`] while a [Self::run] owns the state, [`MoqError::Cancelled`] after
+	/// [Self::cancel].
+	pub fn take(&self, check: impl FnOnce(&T) -> Result<(), MoqError>) -> Result<T, MoqError> {
+		if *self.cancel.borrow() {
+			return Err(MoqError::Cancelled);
+		}
+		let mut state = self.state.clone().try_lock_owned().map_err(|_| MoqError::Busy)?;
+		// Re-read under the lock, as `lock` does: a cancel we don't see here has not taken the state.
+		if *self.cancel.borrow() {
+			return Err(MoqError::Cancelled);
+		}
+		check(state.as_ref().ok_or(MoqError::Cancelled)?)?;
+		let inner = state.take().ok_or(MoqError::Cancelled)?;
+		// The state is already gone, so this only fails later runs; nothing is left to drop.
+		self.cancel.send_replace(true);
+		Ok(inner)
 	}
 
 	/// Cancel all current and future [Self::run] calls, causing them to return [MoqError::Cancelled],
@@ -587,6 +616,51 @@ mod tests {
 
 		let err = soon(&mut run).await.expect_err("the in-flight run should be cancelled");
 		assert!(matches!(err, MoqError::Cancelled));
+	}
+
+	#[tokio::test]
+	async fn take_is_busy_while_a_run_holds_the_lock() {
+		let task = Task::new(7);
+		let (started, running) = tokio::sync::oneshot::channel();
+		let run = task.run(move |state| async move {
+			let _state = state;
+			started.send(()).expect("test should still be waiting");
+			std::future::pending::<Result<(), MoqError>>().await
+		});
+		tokio::pin!(run);
+
+		soon(async {
+			tokio::select! {
+				_ = &mut run => panic!("a pending run should not resolve"),
+				started = running => started.expect("the run should start"),
+			}
+		})
+		.await;
+		assert!(matches!(task.take(|_| Ok(())), Err(MoqError::Busy)));
+	}
+
+	#[tokio::test]
+	async fn take_moves_the_state_unless_refused() {
+		let task = Task::new(7);
+		assert!(matches!(
+			task.take(|_| Err(MoqError::AlreadyCommitted)),
+			Err(MoqError::AlreadyCommitted)
+		));
+		assert_eq!(
+			task.take(|state| {
+				assert_eq!(*state, 7);
+				Ok(())
+			})
+			.unwrap(),
+			7
+		);
+
+		let err = task
+			.run(|_| async { Ok(()) })
+			.await
+			.expect_err("taken state cannot run");
+		assert!(matches!(err, MoqError::Cancelled));
+		assert!(matches!(task.take(|_| Ok(())), Err(MoqError::Cancelled)));
 	}
 
 	#[test]

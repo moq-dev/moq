@@ -349,15 +349,15 @@ impl Producer {
 		.await;
 	}
 
-	/// Resolve once at least one rendition is [advertised](Rendition::is_advertised), so a master
-	/// playlist can list it.
+	/// Resolve once at least one enabled rendition is [advertised](Rendition::is_advertised), so a
+	/// master playlist can list it.
 	#[cfg_attr(not(feature = "server"), allow(dead_code))]
 	pub(crate) async fn advertised(&self) {
 		let _ = kio::wait(|waiter| {
 			self.state.poll_ref(waiter, |current| {
 				if current
 					.values()
-					.any(|rendition| rendition.poll_advertised(waiter).is_ready())
+					.any(|rendition| rendition.is_enabled() && rendition.poll_advertised(waiter).is_ready())
 				{
 					Poll::Ready(())
 				} else {
@@ -390,6 +390,11 @@ impl Producer {
 
 	/// Reconcile the rendition set with a complete catalog snapshot. Removed or reconfigured
 	/// renditions are closed (so cursors over them end) before replacements become visible.
+	///
+	/// A disabled rendition stays in the set, serving its window and media playlist, and is only
+	/// left out of the master playlist and the DASH manifest. Closing it would end its playlist
+	/// with `EXT-X-ENDLIST`, which reads as a finished broadcast, and a rendition that
+	/// re-enables keeps its media sequence and history.
 	///
 	/// "Reconfigured" means the media itself changed (see [`Rendition::matches_video`]). A
 	/// rendition whose entry only carries a revised estimate is kept as-is and just takes the
@@ -443,12 +448,16 @@ impl Producer {
 			}
 		}
 
+		// A rendition enabled or disabled in place changes what the master lists, so wake its
+		// long-poll even though the set itself is unchanged.
+		let mut flipped = false;
 		for (name, video) in &catalog.video.renditions {
 			let key = (Kind::Video, name.clone());
 			if let Some(rendition) = current.get(&key) {
 				// Survived the stale pass, so it decodes the same: keep its window, its cached
-				// init segment and its media sequence, and just take the new bitrate and framerate.
-				rendition.refresh(video.bitrate, video.framerate);
+				// init segment and its media sequence, and just take the new bitrate, framerate,
+				// and `enabled` flag.
+				flipped |= rendition.refresh(video.bitrate, video.framerate, video.enabled);
 				continue;
 			}
 			let rendition = match Rendition::video(name.clone(), video, source, section.clone(), clock) {
@@ -464,7 +473,7 @@ impl Producer {
 		for (name, audio) in &catalog.audio.renditions {
 			let key = (Kind::Audio, name.clone());
 			if let Some(rendition) = current.get(&key) {
-				rendition.refresh(audio.bitrate, None);
+				flipped |= rendition.refresh(audio.bitrate, None, audio.enabled);
 				continue;
 			}
 			let rendition = match Rendition::audio(name.clone(), audio, source, section.clone(), clock) {
@@ -476,6 +485,10 @@ impl Producer {
 			};
 			self.register(&rendition);
 			current.insert(key, rendition);
+		}
+		if flipped {
+			// A mutable borrow is what marks the state modified.
+			let _ = &mut *current;
 		}
 	}
 }

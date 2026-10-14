@@ -35,7 +35,7 @@ probes, which was the right trade to get it running. This quest promotes them.
 
 ## Required
 
-- [Media stats schema](/quest/m1/stats/schema.md) - adds the stats and feedback snapshots this extends
+- [Media stats schema](/quest/m2/stats/schema.md) - adds the stats and feedback snapshots this extends
 
 ## Related
 

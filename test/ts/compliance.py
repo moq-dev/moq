@@ -8,15 +8,15 @@ summary, exiting non-zero on failure.
 Division of labour: TSDuck does the transport-stream parsing (we shell out to
 `tsanalyze --json` for PSI/service/structure and `tstables` for the PMT), and
 this script does what TSDuck does not cover: the ISO 13818-1 T-STD buffer
-model, which no maintained tool implements, and the PCR checks that need the
+model for supported elementary streams, and the PCR checks that need the
 time-base discontinuities a 188/204-byte header scan here recovers. PCR value
 intervals, byte schedule and release timing live in `pcr-timing.py`.
 
 Checks split into two severities:
   - HARD (structural): fail the run by default. PAT/PMT, packet size, sync,
-    continuity counters, PSI CRC, PCR presence, PCR monotonicity.
+    continuity counters, PSI CRC, PCR presence, PCR monotonicity, T-STD buffers.
   - SHAPE (broadcast profile): reported as WARN and only fail the run under
-    `--strict`. Service descriptors (SDT), T-STD buffer model.
+    `--strict`. Service descriptors (SDT).
 
 Timing basis is the stream's own PCR clock (an IRD locks to PCR), so the harness
 needs no wall-clock capture and results are deterministic for a given file.
@@ -77,7 +77,7 @@ def run_tsanalyze(ts_path: str) -> dict:
         text=True,
         check=False,
     )
-    if proc.returncode != 0 and not proc.stdout:
+    if proc.returncode != 0:
         raise RuntimeError(f"tsanalyze failed: {proc.stderr.strip()}")
     data = json.loads(proc.stdout)
     data["_stderr"] = proc.stderr
@@ -1242,9 +1242,11 @@ def check_duration_fidelity(captured_s: float, reference_s: float) -> Check:
     Every timing check above reads the stream's own PCR, so a PCR emitted on the
     wrong clock rate stays internally consistent and passes them all. Comparing
     the exported PCR span against the source's independent duration is the one
-    check that pins the absolute rate. Keyframe alignment drops up to a GOP of
-    lead, so the captured span runs a shade short, never materially long; the
-    band is wide enough to ignore that yet catch a gross scale error.
+    check that pins the absolute rate. The exporter joins at the live edge once
+    the catalog appears, and import holds the catalog for its two-second mux-rate
+    window, so the captured span runs up to that window plus a GOP short, never
+    materially long; the band is wide enough to ignore that yet catch a gross
+    scale error.
     """
     metrics = {"captured_s": round(captured_s, 2), "reference_s": round(reference_s, 2)}
     if reference_s <= 0:

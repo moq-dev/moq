@@ -39,4 +39,4 @@ lists from the first retained segment, and a hole after it still fails.
 ## Related
 
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a range from group 0 answers from the oldest group that still exists
-- [DVR rewind](/quest/m1/archive/dvr.md) - seeks through the same bounded archive
+- [DVR rewind](/quest/m2/archive-dvr.md) - seeks through the same bounded archive

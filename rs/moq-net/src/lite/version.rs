@@ -297,6 +297,19 @@ impl Version {
 			_ => true,
 		}
 	}
+
+	/// The timescale the wire carries for a track with `timescale`, or `None` when its
+	/// frames and datagrams carry no timestamp.
+	///
+	/// Lite05 and Lite06 always carry one, so an untimed track declares milliseconds there
+	/// and its payloads carry their send times instead.
+	pub(crate) fn wire_timescale(self, timescale: Option<crate::Timescale>) -> Option<crate::Timescale> {
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 => None,
+			Self::Lite05 | Self::Lite06 => Some(timescale.unwrap_or(crate::Timescale::MILLI)),
+			_ => timescale,
+		}
+	}
 }
 
 impl fmt::Display for Version {

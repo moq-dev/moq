@@ -75,7 +75,12 @@ function frame(): Extract<Read, { kind: "frame" }> {
 	return {
 		kind: "frame",
 		group: 0,
-		frame: { timestamp: Time.Micro(frameTimestamp), payload: new Uint8Array([1]), keyframe: true },
+		frame: {
+			arrival: Time.Milli.now(),
+			timestamp: Time.Micro(frameTimestamp),
+			payload: new Uint8Array([1]),
+			keyframe: true,
+		},
 	};
 }
 
@@ -246,6 +251,7 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 		enabled,
 		decoding,
 		context: decoder.out.context,
+		arrivals: () => decoder.arrivals(),
 		error: decoder.out.error,
 		play,
 		// Remove the rendition from the catalog, then restore it.
@@ -294,12 +300,22 @@ it("decodes an audio packet inside a group after a gap", async () => {
 	const playback = await play(Time.Milli(100));
 	try {
 		await playback.play();
-		playback.push({ kind: "gap" });
+		// Opened late, so it observes only the gap and frame below.
+		const arrivals = playback.arrivals();
+		playback.push({ kind: "gap", timestamp: Time.Micro(20_000), duration: Time.Micro(40_000) });
 		const next = frame();
 		next.frame.keyframe = false;
 		playback.push(next);
 		await microtasks();
 		expect(playback.inserted()).toContain(next.frame.timestamp);
+		expect(await arrivals.next()).toEqual({ kind: "gap", timestamp: Time.Milli(20), duration: Time.Milli(40) });
+		expect(await arrivals.next()).toMatchObject({
+			kind: "frame",
+			timestamp: Time.Milli.fromMicro(next.frame.timestamp),
+			arrival: next.frame.arrival,
+		});
+		arrivals.close();
+		expect(await arrivals.next()).toBeUndefined();
 	} finally {
 		playback.close();
 		await microtasks();

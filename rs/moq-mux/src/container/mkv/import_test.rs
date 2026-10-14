@@ -517,7 +517,7 @@ async fn import_publishes_block_timestamps_on_an_arrival_clock() {
 	let first = import.published.values().next().unwrap()[0];
 	assert_eq!(first, 3_600_000_000, "the source's own timestamp");
 
-	let tick = std::time::Duration::from_millis(1);
+	let tick = std::time::Duration::from_micros(1);
 	let wall = import
 		.clock
 		.wall_clock(moq_net::Timestamp::from_micros(first as u64).unwrap())

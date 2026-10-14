@@ -5,7 +5,7 @@ import { randomHop } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
-import { Milli } from "../time.ts";
+import { Milli, Timescale } from "../time.ts";
 import type { Groups } from "../track.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { StreamId } from "./stream.ts";
@@ -61,7 +61,7 @@ async function subscribed(version: Version, maxDelay = GRACE, groups?: Groups) {
 	if (!info) throw new Error("the subscriber never asked for TRACK_INFO");
 	expect(await info.reader.u53()).toBe(StreamId.Track);
 	await TrackMessage.decode(info.reader, version);
-	await new TrackInfo({ maxAge: 60_000 }).encode(info.writer, version);
+	await new TrackInfo({ maxAge: 60_000, timescale: Timescale.MILLI }).encode(info.writer, version);
 	info.close();
 
 	const sub = await Stream.accept(pair.server, version);
