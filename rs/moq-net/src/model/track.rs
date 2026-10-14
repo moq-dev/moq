@@ -7392,7 +7392,6 @@ mod test {
 		);
 	}
 
-	#[cfg(feature = "async")]
 	fn untimed_producer() -> Producer {
 		track_producer("test", None)
 	}

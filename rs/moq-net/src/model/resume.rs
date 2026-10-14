@@ -1105,7 +1105,6 @@ mod test {
 	use futures::FutureExt;
 
 	use super::*;
-	#[cfg(feature = "async")]
 	use crate::Timestamp;
 	use crate::broadcast;
 
@@ -1150,7 +1149,6 @@ mod test {
 		frame.map(|frame| frame.payload.to_vec())
 	}
 
-	#[cfg(feature = "async")]
 	fn ts(ms: u64) -> Timestamp {
 		Timestamp::from_millis(ms).unwrap()
 	}
