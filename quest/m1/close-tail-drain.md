@@ -23,7 +23,11 @@ Found while reworking the in-memory transport (#5530). Facts at 813a92b48:
 - Real QUIC keeps that data readable: noq's `poll_accept` hands out
   already-received streams before the connection error, and reads return
   buffered chunks and the FIN, reporting `ConnectionLost` only when blocked.
-  moq-uring follows the same order.
+  moq-uring's raw QUIC follows the same order, but its WebTransport layer
+  does not: `poll_accept_uni` (`rs/moq-uring/src/quic/web.rs:566-569`)
+  returns the connection error before classifying streams already in
+  `pending_uni`, so a tail stream accepted in the same poll as the close is
+  lost below the subscriber.
 - The closer (`Session::close`, `rs/moq-net/src/session.rs:201`) waits for
   its group streams' FIN acks. An ACK only means delivery to the peer's
   transport, not that the peer processed it, so on lite-01 through lite-06
@@ -50,14 +54,20 @@ Decided (maintainer, 2026-10-14):
   on control state) so the no-timer argument holds.
 - Tests ack a FIN on delivery, as QUIC does, so the regression for lite-01
   through lite-06 and IETF (one draft from each `start` arm) asserts the
-  reader got the tail and fails before the fix. Cover both the buffered-tail case and one where a control or
-  accept error wins the poll order. Give `older_lite_close_keeps_ack_drain`
-  that reader assertion.
+  reader got the tail and fails before the fix. Cover both the buffered-tail
+  case and one where a control or accept error wins the poll order. Give
+  `older_lite_close_keeps_ack_drain` that reader assertion.
 - Once #5530 has landed, switch `moq_net::transport::memory`'s
   `SendStream::poll_closed` to resolve on `finish` (delivery into the
   channel), dropping its "finished and empty" rule. Do this unless the
   memory bench (`rs/moq-net/benches/memory.rs`) shows a regression; if it
   does, change only the tests.
+
+The receiver drain also needs moq-uring WebTransport to classify and hand
+out its pending uni streams before reporting the connection error, with a
+regression for a tail stream and CONNECTION_CLOSE arriving in the same poll.
+Check the other `poll_accept_uni` adapters (such as `rs/moq-ffi` and the
+noq WebTransport path) for the same ordering.
 
 Public API: none. Wire: none.
 
