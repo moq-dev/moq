@@ -17,21 +17,26 @@ lowering the tone floor.
 
 What is known:
 
-- The capture's PCM is not the problem. The real-worklet matrix in
+- The real-worklet matrix in
   `test/interop/clients/js/capture-channel-count.browser.ts` (in
-  `just test harness`) shows every override case continuous, with no timestamp
-  gaps and audible output in every channel, on Linux and macOS. Every case,
-  the no-override baseline included, drops one short run of silent quanta
-  during startup.
-- The player is. In CI (#5270), the pinned fixture failed the `just test media`
+  `just test harness`) finds nothing override-specific: no timestamp gaps,
+  the requested format, and audible output in every channel, on Linux and
+  macOS. It only asserts each channel is audible at least once. An uncommitted
+  per-quantum trace (#5270) found one short silent run during startup in
+  every case, the no-override baseline included, and none after. Under heavy
+  load the baseline also showed a later run, so a strict per-quantum check
+  flakes on the source. Tightening the matrix needs a baseline-relative
+  measure.
+- The player stalls. In CI (#5270), the pinned fixture failed the `just test media`
   audio-tone check in 2 of 3 runs, against ~5% of unpinned runs (5 of 108,
   all cold start). Failures look the same either way: player samples go
   `stalled` while received audio bytes keep growing, and the jitter delay jumps
   from ~77 ms to 500-700 ms.
 
-So the explicit downmix (`channelCountMode: "explicit"` in
-`js/publish/src/audio/capture.ts`) seems to change something the player
-reacts to, most likely frame cadence or burstiness, not content. Measure the
+The working hypothesis is that the explicit downmix (`channelCountMode:
+"explicit"` in `js/publish/src/audio/capture.ts`) changes something the player
+reacts to, such as frame cadence or burstiness, rather than dropping PCM.
+Neither half is proven. Measure the
 publisher's frame arrival timing pinned vs unpinned before picking a fix, and
 check whether the player's re-stall behavior
 ([watch jitter target](/quest/m1/audio-jitter-target/watch.md)) is the

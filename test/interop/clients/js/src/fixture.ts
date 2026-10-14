@@ -110,7 +110,7 @@ export class Fixture {
 		//
 		// No sampleRate or channelCount override: the graph already runs at SAMPLE_RATE, and asking
 		// the capture for one channel puts the AudioWorklet behind an explicit Web Audio downmix that
-		// makes the player stall far more often, though the captured PCM stays continuous; see
+		// made the player stall far more often in CI, with no capture loss found in isolation; see
 		// /quest/m1/publish-audio-channel-count.md. Publishing the destination node's own format
 		// costs nothing here, since the tone is the same in both channels.
 		const audioCapture = new Publish.Audio.Capture({
