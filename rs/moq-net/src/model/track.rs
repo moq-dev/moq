@@ -10619,6 +10619,30 @@ mod test {
 		assert!(matches!(demand.poll_unused(&kio::Waiter::noop()), Poll::Ready(Ok(()))));
 		request.reject(Error::Cancel);
 		assert!(matches!(demand.used().now_or_never(), Some(Err(Error::Cancel))));
+
+		// The async close helper reports clean acceptance separately from rejection.
+		for accepted in [true, false] {
+			let producer = track_producer("test", Info::timed());
+			let dynamic = producer.dynamic();
+			let consumer = producer.consume();
+			let fetch = consumer.fetch_group(3, None);
+			let request = dynamic.requested_group().now_or_never().unwrap().unwrap();
+			let demand = request.demand();
+			let group = if accepted {
+				Some(request.accept(Info::timed()).unwrap())
+			} else {
+				request.reject(Error::NotFound);
+				None
+			};
+			assert!(matches!(
+				(accepted, demand.closed().now_or_never()),
+				(true, Some(Error::Dropped)) | (false, Some(Error::NotFound))
+			));
+			drop(fetch);
+			if let Some(group) = group {
+				group.finish().unwrap();
+			}
+		}
 	}
 
 	#[test]
@@ -10626,17 +10650,19 @@ mod test {
 		let producer = track_producer("test", Info::timed());
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
-		let fetch = consumer.fetch_group(3, None);
-		let request = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		let mut fetch = consumer.fetch_group(3, None);
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(request)) = dynamic.poll_requested_group(&waiter) else {
+			panic!("the fetch request is ready");
+		};
 		let demand = request.demand();
 		let group = request.accept(Info::timed()).unwrap();
 
 		assert!(!demand.is_used());
-		assert!(matches!(demand.used().now_or_never(), Some(Err(Error::Dropped))));
-		assert!(matches!(demand.unused().now_or_never(), Some(Err(Error::Dropped))));
-		assert!(matches!(demand.closed().now_or_never(), Some(Error::Dropped)));
+		assert!(matches!(demand.poll_used(&waiter), Poll::Ready(Err(Error::Dropped))));
+		assert!(matches!(demand.poll_unused(&waiter), Poll::Ready(Err(Error::Dropped))));
 		assert!(
-			fetch.now_or_never().unwrap().is_ok(),
+			matches!(kio::Task::poll(&mut *fetch, &waiter), Poll::Ready(Ok(_))),
 			"the fetch still gets the accepted group"
 		);
 		group.finish().unwrap();
@@ -10647,16 +10673,21 @@ mod test {
 		let producer = track_producer("test", Info::timed());
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
-		let fetch = consumer.fetch_group(3, None);
-		let request = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		let mut fetch = consumer.fetch_group(3, None);
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(request)) = dynamic.poll_requested_group(&waiter) else {
+			panic!("the fetch request is ready");
+		};
 		let demand = request.demand();
 		request.reject(Error::NotFound);
 
 		assert!(!demand.is_used());
-		assert!(matches!(demand.used().now_or_never(), Some(Err(Error::NotFound))));
-		assert!(matches!(demand.unused().now_or_never(), Some(Err(Error::NotFound))));
-		assert!(matches!(demand.closed().now_or_never(), Some(Error::NotFound)));
-		assert!(matches!(fetch.now_or_never(), Some(Err(Error::NotFound))));
+		assert!(matches!(demand.poll_used(&waiter), Poll::Ready(Err(Error::NotFound))));
+		assert!(matches!(demand.poll_unused(&waiter), Poll::Ready(Err(Error::NotFound))));
+		assert!(matches!(
+			kio::Task::poll(&mut *fetch, &waiter),
+			Poll::Ready(Err(Error::NotFound))
+		));
 	}
 
 	#[moq_net_sim::test]
