@@ -352,9 +352,12 @@ enum End {
 }
 
 impl Channel {
-	/// Close with a reset or stop code, unless already closed, and drop what is queued.
+	/// Close with a reset or stop code and drop what is queued. An earlier end stands,
+	/// unless it was a finish the reader has not fully read.
 	fn abort(&mut self, end: End) {
-		self.end.get_or_insert(end);
+		if self.end.is_none() || !self.messages.is_empty() {
+			self.end = Some(end);
+		}
 		self.messages.clear();
 		self.queued = 0;
 	}
@@ -750,12 +753,16 @@ mod tests {
 		assert_eq!(text(read(&mut recv, usize::MAX)), "kept");
 		assert_eq!(ready(read(&mut recv, usize::MAX)).unwrap(), None);
 
-		// A reader that stops after the finish closes the writer cleanly too.
+		// A reader that stops after taking everything leaves the writer finished.
+		drop(recv);
+		assert!(ready(send.poll_closed(&mut noop())).is_ok());
+
+		// A reader that stops with messages unread fails the writer, finished or not.
 		let (mut send, recv) = uni(&mut a, &mut b);
 		ready(write(&mut send, &Bytes::from_static(b"unread"))).unwrap();
 		send.finish().unwrap();
 		drop(recv);
-		assert!(ready(send.poll_closed(&mut noop())).is_ok());
+		assert!(matches!(ready(send.poll_closed(&mut noop())), Err(Error::Stopped(0))));
 	}
 
 	#[test]
