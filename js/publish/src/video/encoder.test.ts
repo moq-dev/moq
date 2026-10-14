@@ -983,7 +983,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 	const estimate = new Signal<number | undefined>(10_000_000);
 	const bandwidth = new Moq.Bandwidth.Allocator(estimate);
 	const enabled = new Signal(true);
-	const encoder = new Encoder("video/hd", { broadcast, capture: capture as never, bandwidth, enabled });
+	const encoder = new Encoder("video/hd", { broadcast, capture: capture as never, bandwidth, enabled, config: {} });
 	let subscriber: Moq.Track.Subscriber | undefined;
 	let siblingSubscriber: Moq.Track.Subscriber | undefined;
 	let catalogSubscriber: Moq.Track.Subscriber | undefined;
@@ -1046,7 +1046,10 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 		expect(FakeVideoEncoder.instances).toHaveLength(instances);
 
 		// Only a changed caller input re-arms it, under a fresh track name.
-		encoder.config.set({ maxPixels: 320 * 240 });
+		// Mutated in place, so the settings object keeps its identity.
+		encoder.config.mutate((config) => {
+			if (config) config.maxPixels = 320 * 240;
+		});
 		await flush();
 		expect(encoder.out.error.peek()).toBeUndefined();
 		const config = (await catalog.latest())?.value.video?.renditions["video/hd"];

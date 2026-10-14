@@ -182,9 +182,8 @@ export class Encoder {
 
 	// Each registration keeps its terminal failure even after the public error clears.
 	#failure = new Signal(new Once<Error>());
-	// The inputs #runRecovery last saw, carried across a gap in the source or display.
+	// The capture inputs #runCaptureRecovery last saw, carried across a gap in the source or display.
 	#seen?: {
-		config?: Config;
 		capture?: Capture;
 		source?: unknown;
 		display?: { width: number; height: number; scale?: number };
@@ -253,7 +252,8 @@ export class Encoder {
 				}
 			});
 		}
-		this.#signals.run(this.#runRecovery.bind(this));
+		this.#signals.run(this.#runSettingsRecovery.bind(this));
+		this.#signals.run(this.#runCaptureRecovery.bind(this));
 		this.#signals.run(this.#runRegister.bind(this));
 	}
 
@@ -274,27 +274,37 @@ export class Encoder {
 		effect.cleanup(() => this.#failures.update((n) => n - 1));
 	}
 
-	// Read only caller/capture inputs here, never bandwidth grants or the error itself.
-	// A fatal failure stays latched until these inputs change; demand is not a retry. A gap in the
-	// source or display (a capture released and handed back) keeps the last ones, so only a different
-	// capture re-arms it, such as the new track a re-enabled camera opens.
-	#runRecovery(effect: Effect): void {
-		const config = effect.get(this.config);
+	// Any notification of the encoder settings re-arms a failure, including a setting mutated in place.
+	#runSettingsRecovery(effect: Effect): void {
+		effect.get(this.config);
+		this.#rearm();
+	}
+
+	// Read only capture inputs here, never bandwidth grants or the error itself; demand is not a retry.
+	// A gap in the source or display (a capture released and handed back) keeps the last ones, so only
+	// a different capture re-arms a failure, such as the new track a re-enabled camera opens.
+	#runCaptureRecovery(effect: Effect): void {
 		const capture = effect.get(this.in.capture);
 		const seen = this.#seen;
-		const same = seen?.capture === capture;
-		const source = (capture && effect.get(capture.in.source)) ?? (same ? seen?.source : undefined);
-		const display = (capture && effect.get(capture.out.display)) ?? (same ? seen?.display : undefined);
-		this.#seen = { config, capture, source, display };
-		const changed =
-			!seen ||
-			!same ||
-			seen.config !== config ||
-			seen.source !== source ||
-			seen.display?.width !== display?.width ||
-			seen.display?.height !== display?.height ||
-			seen.display?.scale !== display?.scale;
-		if (!changed || !this.#out.error.peek()) return;
+		const same = seen !== undefined && seen.capture === capture;
+		const source = (capture && effect.get(capture.in.source)) ?? (same ? seen.source : undefined);
+		const display = (capture && effect.get(capture.out.display)) ?? (same ? seen.display : undefined);
+		this.#seen = { capture, source, display };
+		if (
+			same &&
+			seen.source === source &&
+			seen.display?.width === display?.width &&
+			seen.display?.height === display?.height &&
+			seen.display?.scale === display?.scale
+		) {
+			return;
+		}
+		this.#rearm();
+	}
+
+	// Clear a latched failure so a fresh registration retries.
+	#rearm(): void {
+		if (!this.#out.error.peek()) return;
 		this.#out.error.set(undefined);
 		this.#failure.set(new Once<Error>());
 	}

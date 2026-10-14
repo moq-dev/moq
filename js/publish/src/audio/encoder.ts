@@ -221,8 +221,8 @@ export class Encoder {
 
 	// Each registration keeps its terminal failure even after the public error clears.
 	#failure = new Signal(new Once<Error>());
-	// The inputs #runRecovery last saw, carried across a gap in the source or format.
-	#seen?: { codec: Codec; capture?: Capture; source?: unknown; format?: Format };
+	// The capture inputs #runCaptureRecovery last saw, carried across a gap in the source or format.
+	#seen?: { capture?: Capture; source?: unknown; format?: Format };
 	#signals = new Effect();
 	#estimator = new Estimator();
 	// The estimator's jitter and delay, republished whenever either rises.
@@ -285,7 +285,8 @@ export class Encoder {
 				}
 			});
 		}
-		this.#signals.run(this.#runRecovery.bind(this));
+		this.#signals.run(this.#runSettingsRecovery.bind(this));
+		this.#signals.run(this.#runCaptureRecovery.bind(this));
 		this.#signals.run(this.#runRegister.bind(this));
 	}
 
@@ -335,26 +336,36 @@ export class Encoder {
 		});
 	}
 
-	// Read only caller/capture inputs here, never bandwidth grants or the error itself.
-	// A fatal failure stays latched until these inputs change; demand is not a retry. A gap in the
-	// source or format (a capture disabled or interrupted) keeps the last ones, so only a different
-	// capture re-arms it, such as the new track a re-enabled microphone opens.
-	#runRecovery(effect: Effect): void {
-		const codec = effect.get(this.codec);
+	// Any notification of the encoder settings re-arms a failure, including a setting mutated in place.
+	#runSettingsRecovery(effect: Effect): void {
+		effect.get(this.codec);
+		this.#rearm();
+	}
+
+	// Read only capture inputs here, never bandwidth grants or the error itself; demand is not a retry.
+	// A gap in the source or format (a capture disabled or interrupted) keeps the last ones, so only a
+	// different capture re-arms a failure, such as the new track a re-enabled microphone opens.
+	#runCaptureRecovery(effect: Effect): void {
 		const capture = effect.get(this.in.capture);
 		const seen = this.#seen;
-		const same = seen?.capture === capture;
-		const source = (capture && effect.get(capture.in.source)) ?? (same ? seen?.source : undefined);
-		const format = (capture && effect.get(capture.out.format)) ?? (same ? seen?.format : undefined);
-		this.#seen = { codec, capture, source, format };
-		const changed =
-			!seen ||
-			!same ||
-			seen.codec !== codec ||
-			seen.source !== source ||
-			seen.format?.sampleRate !== format?.sampleRate ||
-			seen.format?.channelCount !== format?.channelCount;
-		if (!changed || !this.#out.error.peek()) return;
+		const same = seen !== undefined && seen.capture === capture;
+		const source = (capture && effect.get(capture.in.source)) ?? (same ? seen.source : undefined);
+		const format = (capture && effect.get(capture.out.format)) ?? (same ? seen.format : undefined);
+		this.#seen = { capture, source, format };
+		if (
+			same &&
+			seen.source === source &&
+			seen.format?.sampleRate === format?.sampleRate &&
+			seen.format?.channelCount === format?.channelCount
+		) {
+			return;
+		}
+		this.#rearm();
+	}
+
+	// Clear a latched failure so a fresh registration retries.
+	#rearm(): void {
+		if (!this.#out.error.peek()) return;
 		this.#out.error.set(undefined);
 		this.#floor = undefined;
 		this.#failure.set(new Once<Error>());
