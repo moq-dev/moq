@@ -25,7 +25,11 @@ Model, all crate-private in `rs/moq-net/src/model`:
   frame storage.
 - Per group: the END_OF_GROUP status object's position, as a `skip` from the
   last object.
-- `Datagram` gains its object ID, properties, and END_OF_GROUP status.
+- Keep the public, exhaustive `Datagram` unchanged so downstream struct
+  literals keep compiling. Store its object ID, properties, and END_OF_GROUP
+  status in a crate-private wrapper carried by internal track storage and
+  relay accessors; public writers use default metadata and public readers
+  receive only the original `Datagram`.
 
 IETF ingest and egress in `rs/moq-net/src/ietf`:
 
