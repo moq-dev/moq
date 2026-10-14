@@ -21,11 +21,21 @@ Decided 2026-10-13 (see the [epic](/quest/m1/ietf-extension/README.md)).
   branches.
 - When negotiated, the fields are always present, with no flag bits:
   - The Group message gains the subgroup ID, the optional publisher
-    priority, and the END_OF_GROUP status position.
+    priority, and the explicit FIRST_OBJECT state. The first object ID
+    alone cannot recover the FIRST_OBJECT bit.
   - Every frame gains a `skip` varint and a length-prefixed properties block,
     2 bytes per frame when empty.
+  - A terminal record after the frames carries the END_OF_GROUP status
+    position. It is not known when a live group's opening header is sent;
+    frames must flow before the publisher ends the group.
   - Datagrams gain their object ID, properties, and status.
   - Track info gains the unknown track properties.
+  - Immutable properties carry their ingress encoding family alongside the
+    unchanged inner bytes, so downstream IETF egress can refuse incompatible
+    encodings.
+- Carry the private NEW_GROUP_REQUEST signal upstream and the dynamic-group
+  capability downstream. Coalesce requests as on a direct IETF hop. A peer
+  without the extension does not advertise dynamic-group support.
 - Each subgroup travels on its own lite group stream, keyed by (sequence,
   subgroup).
 - Write `drafts/draft-lcurley-moq-ietf.md` for the extension and pass
@@ -37,6 +47,10 @@ Decided 2026-10-13 (see the [epic](/quest/m1/ietf-extension/README.md)).
 Tests: per-feature cases through a two-relay cluster. Cover a cluster peer
 without the extension (subgroup 0, no properties), and run
 `just test interop --all`.
+Prove that frames arrive through both relays while the upstream group is
+still open, then preserve its terminal status position. Cover FIRST_OBJECT
+both set and clear with the same nonzero starting object ID, immutable
+encoding provenance, and coalesced dynamic-group requests across the cluster.
 
 Public API: `setup::Extensions::ietf`. Wire: a new lite-07 SETUP extension
 and the framing above, only when negotiated.
@@ -46,6 +60,7 @@ and the framing above, only when negotiated.
 - [Object fields](/quest/m1/ietf-extension/objects.md) - the per-object fields it frames
 - [Subgroups](/quest/m1/ietf-extension/subgroups.md) - the subgroup streams it frames
 - [Track properties](/quest/m1/ietf-extension/track-properties.md) - the track properties it frames
+- [Dynamic groups](/quest/m1/ietf-extension/dynamic-groups.md) - the upstream request signal and capability it carries
 
 ## Related
 

@@ -41,6 +41,8 @@ public instead of a crate-private field, and this quest finds the rest.
   objects, datagram object IDs) stay crate-private on purpose. Mark them
   "deliberately private: moq-transport passthrough only". A relay built on
   the public model drops them, as plain moq-lite does.
+  Dynamic-group capability and upstream request signaling are part of this
+  private relay-only carve-out too.
 - Write the implementation quests (likely one Rust and one JS, or one per
   group) under m1, each listing its public API additions for review.
 

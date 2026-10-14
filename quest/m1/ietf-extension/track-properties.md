@@ -14,10 +14,14 @@ Decided 2026-10-13 (see the [epic](/quest/m1/ietf-extension/README.md)).
 - Store the unknown properties crate-private on `track::Info`, which is
   `#[non_exhaustive]`, using the `Property` list from
   [object fields](/quest/m1/ietf-extension/objects.md). Re-encode them for each
-  egress draft. Immutable Properties keep their inner bytes verbatim.
+  egress draft. Immutable Properties keep their inner bytes verbatim and
+  their ingress encoding family; the cross-family refusal from object
+  fields applies to track properties too.
 - Unknown properties include those the draft defines but moq-net does not
-  implement, such as OBJECT_DELIVERY_TIMEOUT, SUBGROUP_DELIVERY_TIMEOUT, and
-  DYNAMIC_GROUPS. They are forwarded, not interpreted.
+  implement, such as OBJECT_DELIVERY_TIMEOUT and SUBGROUP_DELIVERY_TIMEOUT.
+  They are forwarded, not interpreted. DYNAMIC_GROUPS is handled by
+  [dynamic groups](/quest/m1/ietf-extension/dynamic-groups.md), so it is
+  advertised only when the upstream request path supports it.
 - An unknown Mandatory Track Property (0x4000-0x7FFF) refuses the track with
   UNSUPPORTED_EXTENSION, as the draft requires, instead of forwarding it.
 - Group order stays as today. The model owns serving order.
@@ -32,3 +36,4 @@ Public API: none. Wire: none new.
 ## Required
 
 - [Object fields](/quest/m1/ietf-extension/objects.md) - introduces the decoded `Property` list
+- [Dynamic groups](/quest/m1/ietf-extension/dynamic-groups.md) - makes DYNAMIC_GROUPS advertising truthful by carrying NEW_GROUP_REQUEST upstream

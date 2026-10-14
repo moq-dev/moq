@@ -6,6 +6,9 @@ A moq-transport track forwarded moq-transport -> moq-relay -> moq-transport,
 including across a relay cluster, arrives with the publisher's subgroups,
 object IDs, object properties, END_OF_GROUP status objects, datagram object
 IDs, per-subgroup publisher priority, and unknown track properties intact.
+Tracks advertising DYNAMIC_GROUPS relay NEW_GROUP_REQUEST back to the
+original publisher, including across the cluster, with redundant requests
+coalesced.
 moxygen's moq-test conformance (sections 1-7) passes through moq-relay in a
 nightly CI job.
 
@@ -43,6 +46,15 @@ cannot answer unambiguously is refused.
   named `ietf`, not a separate ALPN. It is off by default, and moq-relay
   turns it on. A non-relay peer that negotiated it would receive subgroup
   streams and properties it can only discard.
+- **Dynamic groups** are supported rather than treated as an opaque track
+  property. A private request path carries NEW_GROUP_REQUEST upstream and
+  coalesces redundant requests until the largest group advances. Plain
+  moq-lite does not advertise this capability.
+- **Immutable properties** keep their serialized inner bytes and ingress
+  encoding family, including across relay hops. Refuse forwarding between
+  absolute-key drafts 14/15 and delta-key drafts 16+ when immutable
+  properties are present; rewriting them would violate immutability and
+  forwarding them unchanged would change their meaning.
 - **Public model carve-out.** These fields stay crate-private on purpose,
   an exception to [a public model](/quest/m1/model-public-surface.md). A
   third-party relay built on the public model drops them, as plain lite
@@ -74,6 +86,7 @@ Work owned by this README, after the children land:
 
 - [Object fields](/quest/m1/ietf-extension/objects.md) - object ID gaps, object properties, END_OF_GROUP status objects, and datagrams past object 0 survive moq-transport -> moq-relay -> moq-transport
 - [Subgroups](/quest/m1/ietf-extension/subgroups.md) - a group holds several subgroups, each forwarded on its own stream with its ID and exact publisher priority; plain readers see subgroup 0
+- [Dynamic groups](/quest/m1/ietf-extension/dynamic-groups.md) - NEW_GROUP_REQUEST reaches the original publisher, coalesced across downstream subscribers
 - [Track properties](/quest/m1/ietf-extension/track-properties.md) - unknown track properties are forwarded unchanged in SUBSCRIBE_OK, FETCH_OK, and TRACK_STATUS_OK
 - [Relay hops](/quest/m1/ietf-extension/lite.md) - the `ietf` SETUP extension carries every crate-private field across a lite-07 hop between relays
 

@@ -42,6 +42,10 @@ IETF ingest and egress in `rs/moq-net/src/ietf`:
   for the negotiated draft, because KVP encoding differs across drafts 14-22.
   Immutable Properties (0x0B) keep their inner bytes verbatim. The relay adds
   or removes nothing, because moq-test fails on a changed extension count.
+- Preserve the ingress encoding family with immutable property bytes.
+  Refuse forwarding them between absolute-key drafts 14/15 and delta-key
+  drafts 16+, rather than rewriting authenticated bytes or changing their
+  meaning. The private lite carrier preserves this provenance too.
 - An END_OF_GROUP status object is written where ingest saw one. Otherwise
   egress ends the group with FIN and the header bit, as today.
 - Datagrams past object 0 are mapped onto the same model, not dropped.
@@ -64,6 +68,9 @@ publisher -> relay -> moq-transport subscriber. Cover draft 22 and one older
 draft with a different KVP encoding. Shape the cases after moq-test:
 increments of 2 and 3, a start object above 0, integer and bytes extensions,
 an END_OF_GROUP marker, and datagrams in mode 3.
+Also cover immutable byte preservation within an encoding family and
+refusal across the draft-15/16 boundary in both directions, using a nested
+list with multiple property types.
 
 Public API: none. Wire: none new; moq-transport fields that were dropped are
 now forwarded.
