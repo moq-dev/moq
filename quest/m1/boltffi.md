@@ -44,8 +44,9 @@ Decided with the maintainer on 2026-10-13:
   frame sizes from 100 B to 1 MB, and the cost of each async await.
   Re-measure UniFFI rather than trusting BoltFFI's numbers for it.
 - **Size table**: native library, generated bindings, and wasm plus JS glue
-  (gzip), each with moq-ffi's default features on and off, for both
-  generators. Put moq-wasm in the table for reference.
+  (gzip), for both generators. Measure the native library with moq-ffi's
+  default features on and off; the toggle changes nothing on wasm32, where
+  `audio` and `video` are already compiled out. Put moq-wasm in the table for reference.
 - **Carry cost**: for each base, estimate the work to reach moq's eight
   targets (Python, Go, Swift, Kotlin, Dart, C++, C, browser TS), porting
   the existing Go, Dart, and C++/C generators where needed. Also estimate
