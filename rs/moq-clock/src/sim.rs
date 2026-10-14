@@ -94,10 +94,10 @@ impl Runtime {
 		next
 	}
 
-	/// Jump to the earliest armed timer or source deadline. False when nothing is armed.
-	fn advance(&self) -> bool {
+	/// Jump to the earliest armed timer or `source`, the sources' earliest deadline.
+	/// False when nothing is armed.
+	fn advance(&self, source: Option<Instant>) -> bool {
 		let timer = self.time.borrow().timers.first_key_value().map(|((at, _), _)| *at);
-		let source = self.poll_sources();
 		match timer.into_iter().chain(source).min() {
 			Some(at) => {
 				self.advance_to(at);
@@ -197,11 +197,14 @@ pub fn run<F: IntoFuture>(future: F) -> F::Output {
 		tasks.extend(runtime.spawned.take());
 		pool.0.store(false, Ordering::SeqCst);
 		while let Poll::Ready(Some(())) = tasks.poll_next_unpin(&mut pool_cx) {}
+		// Bring sources to the current instant before deciding to stall: one attached
+		// behind the clock may wake a task without time moving.
+		let source = runtime.poll_sources();
 		if root.0.load(Ordering::SeqCst) || pool.0.load(Ordering::SeqCst) || !runtime.spawned.borrow().is_empty() {
 			continue;
 		}
 		assert!(
-			runtime.advance(),
+			runtime.advance(source),
 			"deadlock: every task is parked and no timer is armed"
 		);
 	};
@@ -748,6 +751,37 @@ mod tests {
 		yield_now().await;
 		advance(Duration::from_nanos(u64::MAX)).await;
 		task.await.unwrap();
+	}
+
+	/// A tick past the clock's range never comes, rather than firing at its end.
+	#[test]
+	#[should_panic(expected = "deadlock")]
+	fn an_interval_past_the_range_ticks_once() {
+		run(async {
+			// From the epoch, so the wall clock could reach the last instant.
+			step_wall(Wall::UNIX_EPOCH);
+			let mut interval = crate::interval(Duration::MAX);
+			interval.tick().await;
+			interval.tick().await;
+		});
+	}
+
+	/// A source attached behind the clock catches up before the run decides it stalled.
+	#[crate::test]
+	async fn a_source_attached_behind_the_clock_wakes_at_once() {
+		let deadlines = Deadlines::new(crate::now());
+		let mut deadline = Deadline::after(&deadlines, Duration::from_secs(5));
+		advance(Duration::from_secs(10)).await;
+		let task = spawn(async move { kio::wait(|waiter| deadline.poll(waiter)).await });
+		yield_now().await;
+
+		let driven = deadlines.clone();
+		attach(move |now| {
+			driven.advance(now);
+			driven.next()
+		});
+		task.await.unwrap();
+		assert_eq!(crate::now(), at(10));
 	}
 
 	/// A run drops its pending tasks, so a handle that escapes it reports the task

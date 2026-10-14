@@ -13,7 +13,8 @@ use crate::Instant;
 /// Bound to the clock current when it was created, so poll it there: instants
 /// from different clocks don't compare. Dropping it cancels it.
 pub struct Sleep {
-	at: Instant,
+	/// `None` past the clock's range: the timer is never polled, so it never fires.
+	at: Option<Instant>,
 	timer: Timer,
 }
 
@@ -21,25 +22,20 @@ enum Timer {
 	Host(crate::runtime::Timer),
 	#[cfg(feature = "sim")]
 	Sim(crate::sim::Timer),
-	/// A [`sleep`] past the clock's range: arms nothing and never fires.
-	Never,
-}
-
-impl Timer {
-	fn new(at: Instant) -> Self {
-		#[cfg(feature = "sim")]
-		if let Some(timer) = crate::sim::Timer::new(at) {
-			return Self::Sim(timer);
-		}
-		Self::Host(crate::runtime::Timer::new(at))
-	}
 }
 
 /// Complete once the ambient clock reaches `at`; at once if it already has.
 pub fn sleep_until(at: Instant) -> Sleep {
+	#[cfg(feature = "sim")]
+	if let Some(timer) = crate::sim::Timer::new(at) {
+		return Sleep {
+			at: Some(at),
+			timer: Timer::Sim(timer),
+		};
+	}
 	Sleep {
-		at,
-		timer: Timer::new(at),
+		at: Some(at),
+		timer: Timer::Host(crate::runtime::Timer::new(at)),
 	}
 }
 
@@ -47,29 +43,32 @@ pub fn sleep_until(at: Instant) -> Sleep {
 ///
 /// A duration past the clock's range never completes.
 pub fn sleep(duration: Duration) -> Sleep {
-	match crate::now().checked_add(duration) {
-		Some(at) => sleep_until(at),
-		None => Sleep {
-			at: Instant::MAX,
-			timer: Timer::Never,
-		},
-	}
+	let now = crate::now();
+	let mut sleep = sleep_until(now);
+	sleep.set(now.checked_add(duration));
+	sleep
 }
 
 impl Sleep {
-	/// The instant this completes at.
+	/// The instant this completes at, [`Instant::MAX`] for one that never does.
 	pub fn deadline(&self) -> Instant {
-		self.at
+		self.at.unwrap_or(Instant::MAX)
 	}
 
 	/// Complete at `at` instead, re-arming if it already completed.
 	pub fn reset(&mut self, at: Instant) {
+		self.set(Some(at));
+	}
+
+	/// Re-arm on the same backend, or never fire (`None`).
+	fn set(&mut self, at: Option<Instant>) {
 		self.at = at;
+		// A never-firing sleep parks its timer at the end of time, unpolled, so it arms nothing.
+		let at = at.unwrap_or(Instant::MAX);
 		match &mut self.timer {
 			Timer::Host(timer) => timer.reset(at),
 			#[cfg(feature = "sim")]
 			Timer::Sim(timer) => timer.reset(at),
-			Timer::Never => self.timer = Timer::new(at),
 		}
 	}
 }
@@ -78,12 +77,14 @@ impl Future for Sleep {
 	type Output = ();
 
 	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+		if self.at.is_none() {
+			return Poll::Pending;
+		}
 		// Each backend compares against its own clock, not the poller's.
 		match &mut self.timer {
 			Timer::Host(timer) => timer.poll(cx),
 			#[cfg(feature = "sim")]
 			Timer::Sim(timer) => timer.poll(cx),
-			Timer::Never => Poll::Pending,
 		}
 	}
 }
@@ -179,20 +180,23 @@ impl Interval {
 		}
 		let scheduled = self.sleep.deadline();
 		let now = crate::now();
-		let mut next = scheduled.checked_add(self.period).unwrap_or(Instant::MAX);
-		if next <= now {
-			next = match self.missed {
-				MissedTickBehavior::Burst => next,
-				MissedTickBehavior::Delay => now.checked_add(self.period).unwrap_or(Instant::MAX),
+		// A tick past the clock's range never comes.
+		let next = scheduled.checked_add(self.period).and_then(|next| {
+			if next > now {
+				return Some(next);
+			}
+			match self.missed {
+				MissedTickBehavior::Burst => Some(next),
+				MissedTickBehavior::Delay => now.checked_add(self.period),
 				MissedTickBehavior::Skip => {
 					// Back on the original schedule: its first tick after now.
 					let into = now.duration_since(scheduled).as_nanos() % self.period.as_nanos();
 					let into = Duration::from_nanos(into as u64);
-					now.checked_add(self.period - into).unwrap_or(Instant::MAX)
+					now.checked_add(self.period - into)
 				}
-			};
-		}
-		self.sleep.reset(next);
+			}
+		});
+		self.sleep.set(next);
 		Poll::Ready(scheduled)
 	}
 
@@ -247,5 +251,20 @@ mod tests {
 		send::<Sleep>();
 		send::<Interval>();
 		send::<Timeout<std::future::Ready<()>>>();
+	}
+
+	/// An overflowed sleep keeps the backend it was created on, so resetting it
+	/// outside its runtime re-arms that runtime's timer.
+	#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+	#[test]
+	fn an_overflowed_sleep_resets_on_its_own_clock() {
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_time()
+			.start_paused(true)
+			.build()
+			.unwrap();
+		let (mut sleep, at) = runtime.block_on(async { (sleep(Duration::MAX), crate::now() + Duration::from_secs(1)) });
+		sleep.reset(at);
+		runtime.block_on(sleep);
 	}
 }
