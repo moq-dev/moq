@@ -14,8 +14,6 @@ makes the export exit 1 once the linger expires.
 Seen 2026-10-13 on #5458 and #5481 at load averages near 47 on 24 cores,
 beside [auth serve signals](/quest/m1/test-flakes-2/auth-serve-signals.md):
 it timed out and passed alone.
-`the_same_instance_within_the_linger_continues` failed beside it but is
-tracked by [TS same-instance resume](/quest/m1/ts-same-instance-resume.md).
 
 The test runs an in-process relay with real `moq import` and `moq export`
 processes. Two bounds apply. The exit wait has a 30 s `TIMEOUT`, so a child
