@@ -81,9 +81,10 @@ fix-changed $LIST:
 test-changed $LIST:
     sh/rs/select.sh test "$LIST"
 
-# Compile moq-tokio by itself at the feature extremes and with each crypto provider.
-tokio-features:
-    sh/rs/tokio-features.sh
+# Compile moq-tokio at its feature extremes; --all also isolates crypto and transport modes.
+[positional-arguments]
+tokio-features *args:
+    sh/rs/tokio-features.sh "$@"
 
 # Runs the `#[cfg(windows)]` code past the compiler, which the Linux gate
 # skips; platform.yml runs it on a Windows runner, scoped like `check-changed`
@@ -113,9 +114,9 @@ uring-changed base="":
 [positional-arguments]
 uring *args:
     just rs uring-check "$@"
-    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets "$@"
+    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --tests "$@"
     cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring,moq-relay/qlog --all-targets "$@" -- -D warnings
-    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring --features qlog --all-targets "$@"
+    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring --features qlog --tests "$@"
 
 # Compile the io_uring relay path, off the default feature set.
 [positional-arguments]
@@ -225,6 +226,8 @@ c-tests:
 # Compile the workspace at the feature extremes.
 features:
     just rs net-features
+    just rs tokio-features --all
+    just rs media-features --all
     cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
     cargo hack check --locked -p moq-tokio --each-feature --exclude-features _transport --features aws-lc-rs
     cargo check --locked -p moq-relay --no-default-features
@@ -241,21 +244,23 @@ features:
 net-features:
     bash sh/rs/net-features.sh
 
-# Compile the media crates at supported feature boundaries and prove expensive
+# Compile media boundaries (--all isolates every mode) and prove expensive
 # native/render dependencies are absent when their features are excluded.
-media-features:
-    sh/rs/media-features.sh
+[positional-arguments]
+media-features *args:
+    sh/rs/media-features.sh "$@"
 
 # nextest kills a wedged test (`.config/nextest.toml` sets the timeout), but
 # skips doctests; `just rs doctest` covers those. clippy-driver as the workspace
-# wrapper enforces lint findings from the same compile, including benches and
-# examples. `build.warnings` denies warnings without changing cargo's artifact
-# fingerprint, unlike RUSTFLAGS.
+# wrapper enforces lint findings from the same compile. `--tests` builds library,
+# binary, and integration-test targets, including binary-only crates; benches and
+# examples compile and lint in Nightly's `features`. `build.warnings` denies
+# warnings without changing cargo's artifact fingerprint, unlike RUSTFLAGS.
 
-# Run the test suite and enforce clippy findings from the same compile.
+# Run library, binary, and integration tests, enforcing clippy from the same compile.
 [positional-arguments]
 test *args:
-    CARGO_BUILD_WARNINGS=deny RUSTC_WORKSPACE_WRAPPER={{ quote(require("clippy-driver")) }} bash sh/rs/nextest.sh cargo nextest run --locked --all-targets "$@"
+    CARGO_BUILD_WARNINGS=deny RUSTC_WORKSPACE_WRAPPER={{ quote(require("clippy-driver")) }} bash sh/rs/nextest.sh cargo nextest run --locked --tests "$@"
 
 # Exercise the ignored hardware tests for every GPU vendor on this Linux host.
 gpu:
