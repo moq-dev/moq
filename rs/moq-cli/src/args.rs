@@ -306,14 +306,15 @@ impl Invocation {
 			for command in &self.stages {
 				match command {
 					Command::Import(import) => {
-						anyhow::ensure!(
-							import.source.takes_epoch(),
-							"--epoch names one publisher instance, but the RTMP, SRT, and WHIP ingests and `import ts --program all` announce their own per connection or program"
-						);
+						if let Some(reason) = import.source.epoch_refusal() {
+							anyhow::bail!("--epoch makes instances one publisher of identical tracks, but {reason}");
+						}
 						publishes = true;
 					}
 					#[cfg(feature = "transcode")]
-					Command::Transcode(_) => publishes = true,
+					Command::Transcode(_) => anyhow::bail!(
+						"--epoch makes instances one publisher of identical tracks, but two `transcode` encoders never produce the same bytes"
+					),
 					_ => {}
 				}
 			}
@@ -422,6 +423,8 @@ pub struct MoqSide {
 	/// redundant publishers of one broadcast pass the same value and fail over
 	/// seamlessly. Leave it unset otherwise: a fresh epoch per run is what makes a
 	/// restarted publisher replace the old broadcast instead of resuming into it.
+	/// Only `import fmp4`, `flv`, `hls`, and `ts` (one program, or `--passthrough`)
+	/// accept it, since the other publishers' tracks differ between instances.
 	#[usage(long, env = "MOQ_EPOCH", help_heading = "MoQ")]
 	pub epoch: Option<hang::moq_net::Epoch>,
 
@@ -781,14 +784,23 @@ impl ImportSource {
 		})
 	}
 
-	/// Whether this source announces one publisher instance per run, which `--epoch`
-	/// can name. The ingest gateways and `ts --program all` announce their own.
-	pub fn takes_epoch(&self) -> bool {
+	/// Why `--epoch` can't name this source, or `None` when it can: the source must
+	/// announce once per run and derive its tracks from the input alone.
+	fn epoch_refusal(&self) -> Option<&'static str> {
 		match self {
-			Self::Ts(args) => args.program != Some(TsProgram::All),
-			Self::Rtmp(_) | Self::Srt(_) => false,
-			Self::Rtc(rtc) => rtc.listen.is_none(),
-			_ => true,
+			Self::Ts(args) if args.program == Some(TsProgram::All) => {
+				Some("`import ts --program all` mints an epoch per program")
+			}
+			Self::Rtmp(_) | Self::Srt(_) => Some("the RTMP and SRT imports mint an epoch per connection"),
+			Self::Rtc(rtc) if rtc.listen.is_some() => Some("the WHIP listener mints an epoch per connection"),
+			Self::Rtc(_) => Some("`import rtc --connect` timestamps frames from its own RTP session"),
+			Self::Avc3 => Some("`import avc3` timestamps frames from their arrival on stdin"),
+			Self::Archive(_) => {
+				Some("`import archive` rewrites the catalog and timeline groups it replays under the live names")
+			}
+			#[cfg(feature = "capture")]
+			Self::Capture(_) => Some("two `import capture` encoders never produce the same bytes"),
+			Self::Ts(_) | Self::Fmp4 | Self::Flv | Self::Hls(_) => None,
 		}
 	}
 }
@@ -1498,8 +1510,10 @@ mod tests {
 		}
 	}
 
-	/// `--epoch` reaches the stages that announce once per run, and is refused where
-	/// it would be ignored: an ingest that announces per connection, or no publisher.
+	/// `--epoch` reaches the importers that announce once per run and derive their tracks
+	/// from the input alone, and is refused everywhere else: an ingest that announces per
+	/// connection, a publisher whose timestamps or bytes come from the instance, or no
+	/// publisher at all.
 	#[test]
 	fn epoch_applies_only_to_a_once_per_run_publisher() {
 		let _env = crate::test_env::EnvGuard::clear(&["MOQ_EPOCH"]);
@@ -1513,9 +1527,31 @@ mod tests {
 		cli.validate().expect("a stdin import takes an epoch");
 		assert_eq!(cli.moq.epoch.map(|epoch| epoch.to_string()), Some(epoch.clone()));
 
+		for accepted in [
+			&["import", "ts"][..],
+			&["import", "ts", "--program", "1"],
+			&["import", "ts", "--passthrough"],
+			&["import", "flv"],
+			&["import", "hls", "https://example.com/live.m3u8"],
+		] {
+			parse(accepted)
+				.validate()
+				.unwrap_or_else(|err| panic!("{accepted:?} refused --epoch: {err:#}"));
+		}
+
 		for refused in [
 			&["import", "rtmp", "--listen", "[::]:1935"][..],
+			&["import", "rtmp", "--connect", "rtmp://example.com/live/key"],
+			&["import", "srt", "--connect", "srt://example.com:9000"],
+			&["import", "rtc", "--listen", "[::]:8080"],
+			&["import", "rtc", "--connect", "https://example.com/whep"],
 			&["import", "ts", "--program", "all"],
+			&["import", "avc3"],
+			&["import", "archive", "file:///tmp/recording"],
+			#[cfg(feature = "capture")]
+			&["import", "capture"],
+			#[cfg(feature = "transcode")]
+			&["transcode"],
 			&["export", "fmp4"],
 		] {
 			assert!(parse(refused).validate().is_err(), "{refused:?} accepted --epoch");

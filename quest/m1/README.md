@@ -94,7 +94,6 @@ above them.
 - [A spinning loop fails a sim test](/quest/m1/spinning-loops.md) - a sim test names any loop that holds a task poll too long, and each one yields through a budget
 - [Kotlin wrapper POMs](/quest/m1/kt-ffi-pom.md) - Maven builds of `dev.moq:moq` resolve a published moq-ffi instead of the missing `0.0.0-dev`
 - [The catalog root clock is the producer clock](/quest/m1/catalog-clock-adopt.md) - a derivative adopts its input's wall mapping through `modify()`, and a root `clock` change after the clock is fixed is refused
-- [Epoch refusals](/quest/m1/epoch-refusals.md) - capture, avc3, `rtc --connect`, archive, and transcode refuse `--epoch`, since two instances never publish identical tracks
 - [Epoch anchor](/quest/m1/epoch-anchor.md) - same-epoch importers each derive the catalog clock and timestamp era from the epoch and stay live, so they agree across a 33-bit wrap, a forward clock break, and a restart
 - [Raw TS cuts on the epoch timeline](/quest/m1/ts-passthrough-epoch-cuts.md) - passthrough fallback cuts fall on the epoch's grid and the M2ts section derives from the epoch and content, so instances started apart publish identical groups and catalogs
 - [Announce once tracks are known](/quest/m1/import-announce-tracks.md) - an importer announces only after it can serve its tracks, so starting beside a live partner never aborts its subscribers (#4352)

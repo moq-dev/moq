@@ -267,7 +267,11 @@ or a better one.
 On moq-lite 07, two processes that pass the same `--epoch` (a UUIDv7, such as
 `uuidgen -7` prints) are one publisher: relays fail over between them
 mid-group, so they must produce identical tracks with aligned groups, which no
-importer guarantees yet. The ingests that mint their own refuse `--epoch`.
+importer guarantees yet. Only `import fmp4`, `flv`, `hls`, and `ts` (one
+program, or `--passthrough`) accept it. The RTMP, SRT, and WHIP ingests and
+`import ts --program all` refuse it because they mint their own, and `import
+avc3`, `capture`, `rtc --connect`, `archive`, and `transcode` because their
+timestamps or bytes come from the instance rather than the input.
 
 ## Cluster
 
