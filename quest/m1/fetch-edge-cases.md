@@ -19,12 +19,13 @@ Found by Codex on the release backport
 [#5402](https://github.com/moq-dev/moq/pull/5402#discussion_r4260963190)); the
 same code is on `main`.
 
-The main fixes and regression tests are implemented in the PR carrying this
-quest update. Wait until that PR merges into `main` before creating a
-separate backport PR targeting `release`:
+The main fixes and regression tests landed in
+[#5487](https://github.com/moq-dev/moq/pull/5487). Port them in a separate
+backport PR targeting `release`:
 
 - Publisher: a bounded FETCH reaches the end only if the group is finished
-  and the read cursor reached its final frame count.
+  and the read cursor reached or passed its final frame count. A start past
+  the final object must still be refused INVALID_RANGE on draft 20+.
 - Subscriber: validate End Location stays within the requested group before
   accepting the group or applying End of Track.
 
