@@ -3272,6 +3272,13 @@ where
 				NamespaceEvent::TokenRefresh(token) => {
 					last_token = token.clone();
 					self.refresh_request_token(&mut ns, token).await?;
+					// What the token now carries or no longer carries changes what may be offered: a
+					// namespace withheld for lack of a grant goes out once a token can carry it.
+					let suffixes: Vec<crate::PathOwned> = ns.watched.keys().cloned().collect();
+					for suffix in suffixes {
+						let path = prefix.join(&suffix);
+						self.sync_namespace(&mut ns, &suffix, &path).await?;
+					}
 				}
 				NamespaceEvent::Retry => {
 					retry_at = None;
@@ -13134,6 +13141,61 @@ mod tests {
 			log.writes.lock().unwrap().len() > after_announce,
 			"the reprice update was never sent"
 		);
+	}
+
+	/// A namespace withheld for lack of a grant goes out as soon as a request token is set
+	/// that can carry it, not on the next unrelated route or grant change.
+	#[moq_net_sim::test]
+	async fn setting_a_token_offers_a_withheld_namespace() {
+		const VERSION: Version = Version::Draft18;
+		let token = bytes::Bytes::from_static(&[0x03, 0x00, b'o', b'k']);
+
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
+		// A connection grant of "other", which does not cover "cam".
+		let auth = crate::auth::Handle::new(true);
+		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
+		auth.granted(
+			0,
+			crate::auth::Grant {
+				publish: crate::Pattern::subtree("other").unwrap().into(),
+				subscribe: crate::Patterns::new(),
+				expires: None,
+			},
+		);
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]);
+		let log = session.log.clone();
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer::default());
+		let request_token = crate::RequestToken::new(None);
+		let publisher = Publisher::new(
+			crate::time::Clock::sim(),
+			session,
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			peer_setup,
+			VERSION,
+		)
+		.with_auth(auth)
+		.with_request_token(request_token.clone());
+
+		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+		for _ in 0..80 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			settle().await;
+		}
+		assert_eq!(occurrences(&log, b"cam"), 0, "withheld without a token");
+
+		request_token.set(Some(typed(&token)));
+		for _ in 0..80 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, &token) > 0 {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(occurrences(&log, &token), 1, "the token carries the withheld namespace");
 	}
 
 	/// The typed form of a raw USE_VALUE Token structure with a one-byte Token Type.
