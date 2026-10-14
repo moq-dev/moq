@@ -1744,6 +1744,7 @@ pub struct Producer {
 
 impl Producer {
 	/// The immutable publisher priority committed when this track was accepted.
+	#[cfg(test)]
 	pub(crate) fn publisher_priority(&self) -> u8 {
 		self.info.priority
 	}
