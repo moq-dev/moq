@@ -108,7 +108,6 @@ above them.
 - [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) - json and binary consumers return each value's timestamp, in Rust and every binding; snapshots add `latest()` beside an in-order `next()`
 - [JSON window timestamps](/quest/m1/json-window-timestamps.md) - Rust and JS window consumers return each event's frame timestamp like the snapshot and stream consumers
 - [Exact catalog wall clock](/quest/m1/catalog-wall-clock-precision.md) - `hang::catalog::Clock::wall_clock` keeps sub-millisecond precision
-- [JavaScript answers TRACK_STATUS](/quest/m1/js-track-status.md) - a browser publisher answers IETF TRACK_STATUS like Rust, so a native fetch-only request needs no SUBSCRIBE fallback
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native FILL_TIMEOUT bounds upstream waiting on drafts 18-22, alongside local content-age enforcement
 - [IETF ingest refuses a malformed group](/quest/m1/ietf-ingest-refusal.md) - a peer's malformed group is refused with STOP_SENDING rather than dropped at debug

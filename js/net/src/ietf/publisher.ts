@@ -4,7 +4,16 @@ import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
 import * as DatagramStream from "../datagram_stream.ts";
-import { controlTimeout, error, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
+import {
+	controlTimeout,
+	error,
+	NotFound,
+	ProtocolViolation,
+	reason,
+	StreamCode,
+	StreamError,
+	unauthorized,
+} from "../error.ts";
 import type * as group from "../group.ts";
 import type { Hop, Route } from "../hop.ts";
 import { hiddenBelow, hooks, presented } from "../internal.ts";
@@ -48,7 +57,7 @@ import {
 	SubscribeNamespaceOk,
 } from "./subscribe_namespace.ts";
 import { MalformedAuthToken } from "./token.ts";
-import type { TrackStatusRequest } from "./track.ts";
+import { TRACK_STATUS_ERROR_14, TrackStatusOk, type TrackStatusRequest } from "./track.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /** First wait before re-offering a namespace the peer refused or we couldn't open for. */
@@ -358,7 +367,7 @@ export class Publisher {
 		const version = this.#session.version;
 		const name = msg.trackNamespace;
 		let broadcast: broadcast.Consumer | undefined;
-		let refusal: { errorCode: number; reasonPhrase: string } | undefined;
+		let refusal: Refusal | undefined;
 
 		// The requester leaving while the broadcast and track resolve ends the request, so a
 		// cancelled subscription gives back its slot instead of holding it until the track
@@ -384,50 +393,19 @@ export class Publisher {
 			refusal = { errorCode: toRequestCode("unauthorized", "subscribe", version), reasonPhrase: "not granted" };
 		} else {
 			try {
-				broadcast =
-					this.#publish &&
-					(wireOf(this.#publish).local(name) ??
-						(await wireOf(this.#publish).demand(name, undefined, left.signal)));
-				if (!broadcast) {
-					refusal = {
-						errorCode: toRequestCode("does_not_exist", "subscribe", version),
-						reasonPhrase: "broadcast not found",
-					};
-				}
+				broadcast = await this.#resolve(name, left.signal);
 			} catch (err: unknown) {
 				// Nobody is left to refuse.
 				if (left.signal.aborted) {
 					stream.abort(cancel);
 					return;
 				}
-				const e = error(err);
-				const condition =
-					e instanceof StreamError && (e.code === StreamCode.NotFound || e.code === StreamCode.Unroutable)
-						? "does_not_exist"
-						: "internal";
-				refusal = { errorCode: toRequestCode(condition, "subscribe", version), reasonPhrase: reason(e) };
+				refusal = this.#failed(err, "subscribe");
 			}
 		}
 
 		if (refusal) {
-			if (version === Version.DRAFT_14) {
-				await stream.writer.u53(SubscribeError.id);
-				const err = new SubscribeError({
-					requestId: msg.requestId,
-					errorCode: refusal.errorCode,
-					reasonPhrase: refusal.reasonPhrase,
-				});
-				await err.encode(stream.writer, version);
-			} else {
-				await stream.writer.u53(RequestError.id);
-				const err = new RequestError({
-					requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
-					errorCode: refusal.errorCode,
-					reasonPhrase: refusal.reasonPhrase,
-				});
-				await err.encode(stream.writer, version);
-			}
-			stream.close();
+			await this.#refuse(stream, msg.requestId, SubscribeError.id, refusal);
 			return;
 		}
 		if (!broadcast) return;
@@ -1630,13 +1608,85 @@ export class Publisher {
 	}
 
 	/**
-	 * Handles an incoming TRACK_STATUS_REQUEST on a bidi stream.
+	 * Answers an incoming TRACK_STATUS with what a SUBSCRIBE_OK for the track would carry,
+	 * without subscribing.
+	 *
+	 * The track resolves as it would for a SUBSCRIBE, dynamic handlers included, and the
+	 * answer waits on its info. The Largest Location is whatever the cache holds now.
 	 *
 	 * @internal
 	 */
 	async runTrackStatusRequest(msg: TrackStatusRequest, stream: Stream) {
-		// TRACK_STATUS_ERROR is 0x0f on draft-14.
-		await this.#refuseUnsupported(stream, msg.requestId, "track_status", 0x0f, "TRACK_STATUS is not supported");
+		const version = this.#session.version;
+		const name = msg.trackNamespace;
+		const denied: Refusal = {
+			errorCode: toRequestCode("unauthorized", "track_status", version),
+			reasonPhrase: "not granted",
+		};
+
+		// Answer only for what our grant lets us publish. Checked before the track resolves,
+		// so a denied request never reaches the origin.
+		if (this.#denied(name)) {
+			await this.#refuse(stream, msg.requestId, TRACK_STATUS_ERROR_14, denied);
+			return;
+		}
+
+		// Holds the track wanted until the answer is out. The requester leaving is owed
+		// nothing, and lets go of the broadcast and track lookups.
+		const hold = new AbortController();
+		const cancel = new StreamError(StreamCode.Cancel, { message: "cancel" });
+		void cancelled(stream, version).then(() => hold.abort(cancel));
+
+		// A grant that narrows abandons the lookup, and resets an answer the transport has
+		// not taken yet rather than delivering it.
+		let answering = false;
+		const disposeGrant = this.#grant.subscribe(() => {
+			if (!this.#denied(name)) return;
+			hold.abort();
+			if (answering) stream.abort(unauthorized(name));
+		});
+
+		try {
+			let answer: TrackStatusOk;
+			try {
+				const broadcast = await this.#resolve(name, hold.signal);
+				const info = await wireOf(broadcast).resolveTrackInfo(msg.trackName, hold.signal);
+				const largest = wireOf(broadcast).largest(msg.trackName);
+				answer = new TrackStatusOk({
+					requestId:
+						version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16
+							? msg.requestId
+							: undefined,
+					largest: largest && { groupId: BigInt(largest.group), objectId: BigInt(largest.frame) },
+					properties: msg.propertiesWanted
+						? {
+								timescale: info.timescale ?? undefined,
+								priority: toWire(info.priority),
+								groupOrder: Properties.DESCENDING,
+								maxCacheDuration: info.maxAge === undefined ? undefined : BigInt(info.maxAge),
+							}
+						: {},
+				});
+			} catch (err: unknown) {
+				if (hold.signal.reason === cancel) {
+					stream.abort(cancel);
+					return;
+				}
+				const refusal = this.#denied(name) ? denied : this.#failed(err, "track_status");
+				await this.#refuse(stream, msg.requestId, TRACK_STATUS_ERROR_14, refusal);
+				return;
+			}
+
+			answering = true;
+			await stream.writer.u53(TrackStatusOk.id(version));
+			await answer.encode(stream.writer, version);
+			// The answer is all this stream carries.
+			stream.close();
+			await stream.writer.closed.catch(() => undefined);
+		} finally {
+			disposeGrant();
+			hold.abort();
+		}
 	}
 
 	/**
@@ -1679,10 +1729,7 @@ export class Publisher {
 		await this.#refuseUnsupported(stream, msg.requestId, "fetch", FetchError.id, "FETCH is not supported");
 	}
 
-	/**
-	 * Refuse a request NOT_SUPPORTED. Draft-14 gives each request its own error message,
-	 * `errorId14`, with the SUBSCRIBE_ERROR body; later drafts use REQUEST_ERROR.
-	 */
+	/** Refuse a request NOT_SUPPORTED. */
 	async #refuseUnsupported(
 		stream: Stream,
 		requestId: bigint,
@@ -1690,8 +1737,16 @@ export class Publisher {
 		errorId14: number,
 		reasonPhrase: string,
 	) {
+		const errorCode = toRequestCode("not_supported", kind, this.#session.version);
+		await this.#refuse(stream, requestId, errorId14, { errorCode, reasonPhrase });
+	}
+
+	/**
+	 * Refuse a request and end its stream. Draft-14 gives each request its own error
+	 * message, `errorId14`, with the SUBSCRIBE_ERROR body; later drafts use REQUEST_ERROR.
+	 */
+	async #refuse(stream: Stream, requestId: bigint, errorId14: number, { errorCode, reasonPhrase }: Refusal) {
 		const version = this.#session.version;
-		const errorCode = toRequestCode("not_supported", kind, version);
 		if (version === Version.DRAFT_14) {
 			await stream.writer.u53(errorId14);
 			await new SubscribeError({ requestId, errorCode, reasonPhrase }).encode(stream.writer, version);
@@ -1705,6 +1760,34 @@ export class Publisher {
 		}
 		stream.close();
 	}
+
+	/** What a request that failed to resolve is refused with. */
+	#failed(err: unknown, kind: RequestKind): Refusal {
+		const e = error(err);
+		const condition =
+			e instanceof StreamError && (e.code === StreamCode.NotFound || e.code === StreamCode.Unroutable)
+				? "does_not_exist"
+				: "internal";
+		return { errorCode: toRequestCode(condition, kind, this.#session.version), reasonPhrase: reason(e) };
+	}
+
+	/**
+	 * Resolve the broadcast a request names for serving: a local publish, or else the
+	 * origin's routes and dynamic handlers. Rejects with the abort once `signal` aborts.
+	 */
+	async #resolve(name: Path.Valid, signal: AbortSignal): Promise<broadcast.Consumer> {
+		const broadcast =
+			this.#publish &&
+			(wireOf(this.#publish).local(name) ?? (await wireOf(this.#publish).demand(name, undefined, signal)));
+		if (!broadcast) throw new NotFound(`broadcast ${name}`);
+		return broadcast;
+	}
+}
+
+/** A request's refusal: its code on this draft, and why. */
+interface Refusal {
+	errorCode: number;
+	reasonPhrase: string;
 }
 
 /** A `{group, object}` position, in the Location Filter's own units. */
