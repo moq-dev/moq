@@ -3,7 +3,7 @@
 ## Goal
 
 A group the publisher finished before a graceful session close reaches the
-subscriber on every version (lite-05, lite-06, lite-07, and IETF): after a peer
+subscriber on every version (lite-01 through lite-07, and IETF): after a peer
 close, the subscriber keeps reading the group streams its transport already
 delivered instead of aborting them. Reproduce the loss first with a regression
 test that fails without the fix. No wire change.
@@ -24,10 +24,10 @@ Found while reworking the in-memory transport (#5530). Facts at 813a92b48:
   moq-uring follows the same order.
 - The closer (`Session::close`, `rs/moq-net/src/session.rs:201`) waits for
   its group streams' FIN acks. An ACK only means delivery to the peer's
-  transport, not that the peer processed it, so on lite-05, lite-06, and IETF
-  the receiver throws away a tail its transport already holds. lite-07 already
-  avoids this at the protocol level: the closer waits for the subscriber's
-  Subscribe-stream FIN (`drafts/draft-lcurley-moq-lite.md`).
+  transport, not that the peer processed it, so on lite-01 through lite-06
+  and IETF the receiver throws away a tail its transport already holds.
+  lite-07 already avoids this at the protocol level: the closer waits for the
+  subscriber's Subscribe-stream FIN (`drafts/draft-lcurley-moq-lite.md`).
 - The test mock (`rs/moq-net/tests/support/mock.rs`) hid it: its FIN counts as
   acked only once the reading application stops or drops the stream.
   `older_lite_close_keeps_ack_drain` never checks what the reader got.
@@ -40,9 +40,17 @@ Decided (maintainer, 2026-10-14):
   Streams not yet accepted are still accepted and drained in the same way.
   The closer-side wait stays lite-07 only, since older published versions
   can't gain a wire change.
-- Tests ack a FIN on delivery, as QUIC does, so the regression for lite-05,
-  lite-06, and IETF asserts the reader got the tail and fails before the fix.
-  Give `older_lite_close_keeps_ack_drain` that reader assertion.
+  Make the drain a session-level phase, not just a change to `UniAccept` and
+  `run_unis`: a control-stream or publisher error can end the driver first,
+  and subscription cleanup can remove a track a data stream still needs.
+  Keep the subscription state the draining streams depend on, and settle
+  anything that can't complete after the close (such as IETF children waiting
+  on control state) so the no-timer argument holds.
+- Tests ack a FIN on delivery, as QUIC does, so the regression for lite-01
+  through lite-06 and IETF asserts the reader got the tail and fails before
+  the fix. Cover both the buffered-tail case and one where a control or
+  accept error wins the poll order. Give `older_lite_close_keeps_ack_drain`
+  that reader assertion.
 - Once #5530 has landed, switch `moq_net::transport::memory`'s
   `SendStream::poll_closed` to resolve on `finish` (delivery into the
   channel), dropping its "finished and empty" rule. Do this unless the
