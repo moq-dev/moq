@@ -697,7 +697,10 @@ mod tests {
 		assert!(ready(send.poll_closed(&mut noop())).is_ok());
 		assert!(matches!(ready(recv.poll_closed(&mut noop())), Err(Error::Reset(7))));
 		assert!(matches!(ready(read(&mut recv, usize::MAX)), Err(Error::Reset(7))));
-		assert!(matches!(ready(write(&mut send, &Bytes::from_static(b"x"))), Err(Error::Closed)));
+		assert!(matches!(
+			ready(write(&mut send, &Bytes::from_static(b"x"))),
+			Err(Error::Closed)
+		));
 	}
 
 	#[test]
