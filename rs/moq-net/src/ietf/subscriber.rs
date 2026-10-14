@@ -695,6 +695,12 @@ async fn resolve_track_alias(
 	.await
 }
 
+/// Wait for a request ID to carry a subscription's token renewal. Owns its handles, so the
+/// subscription loop can hold the wait across turns and drop it at any of them.
+async fn request_credit(control: Control, runtime: crate::time::Clock) -> Result<RequestId, Error> {
+	control.next_request_id(&runtime).await
+}
+
 impl<S> Subscriber<S>
 where
 	S: crate::transport::poll::Boxable,
@@ -2798,6 +2804,10 @@ where
 			/// The publisher answered the renewal in flight (REQUEST_OK / REQUEST_ERROR), so
 			/// a replacement coalesced behind it may now be sent.
 			Answered,
+			/// The wait for a request ID to carry the pending renewal ended.
+			Credit(Result<RequestId, Error>),
+			/// The buffered renewal failed to reach the stream.
+			Unsent(Error),
 			Done(Result<u64, Error>),
 			Fetch(group::Request),
 		}
@@ -2808,16 +2818,27 @@ where
 		let demand = track.demand();
 		// Nobody subscribing at all (only fetches asked) needs no subscription.
 		let mut subscribed = track.subscription().is_some();
-		// The request token last presented on this subscription: the one its SUBSCRIBE carried.
-		let mut last_token = sent_token;
+		// The client's current request token, and the one last presented on this subscription:
+		// both start as the token its SUBSCRIBE carried.
+		let mut last_token = sent_token.clone();
+		let mut presented = sent_token;
 		// At most one renewal (SUBSCRIBE_UPDATE) is left unanswered at a time: a replacement
 		// that arrives while one is in flight is coalesced into `last_token` and sent once
 		// the outstanding one is answered, so the sender never outruns the receiver's
 		// MAX_REQUEST_UPDATES credit (draft-19 section 10.3.1.7) whatever its value, without
 		// reading it. `in_flight` is the token value awaiting an answer, `None` when nothing
 		// is outstanding. Draft-14 answers no accepted renewal, so it cannot pace on answers
-		// and re-presents each change directly; it also advertises no credit to exceed.
+		// and re-presents each change once the last has gone; it also advertises no credit
+		// to exceed.
 		let throttle = !matches!(self.version, Version::Draft14);
+		// A renewal goes out in steps polled alongside the loop's terminals, so a revoked grant
+		// or a departed subscriber never waits behind one, nor on a peer that stopped reading:
+		// the wait for a request ID (`credit`, for the token in `sending`), then the buffered
+		// message draining to the stream (`unflushed`). Dropping either step midway tears
+		// nothing: no ID is taken until the wait is ready, and the writer keeps a message whole.
+		let mut sending: Option<crate::setup::Token> = None;
+		let mut credit = std::pin::pin!(futures::future::Fuse::terminated());
+		let mut unflushed = false;
 		// The token awaiting an answer, and on drafts 15 and 16 the routing that brings the
 		// answer back here.
 		let mut in_flight: Option<(crate::setup::Token, Option<super::control::FollowUp>)> = None;
@@ -2863,6 +2884,17 @@ where
 					if let Poll::Ready(token) = self.request_token.poll_changed(&last_token, waiter) {
 						return Poll::Ready(End::Renew(token));
 					}
+					if sending.is_some()
+						&& let Poll::Ready(id) = waiter.poll_future(credit.as_mut())
+					{
+						return Poll::Ready(End::Credit(id));
+					}
+					if unflushed && let Poll::Ready(flushed) = stream.writer.poll_flush(&mut waiter.context()) {
+						unflushed = false;
+						if let Err(err) = flushed {
+							return Poll::Ready(End::Unsent(err));
+						}
+					}
 					// Only wait on an answer while a renewal is actually outstanding.
 					if throttle
 						&& in_flight.is_some()
@@ -2878,69 +2910,46 @@ where
 				.await;
 
 				match end {
-					// A replaced token is re-presented as a token-only REQUEST_UPDATE; the read
-					// future above consumes the answer. The subscribe stream's writer is a
-					// disjoint borrow from its reader, so writing here does not disturb the read.
-					End::Renew(token) => {
-						last_token = token.clone();
-						// Send only when no renewal is outstanding; otherwise coalesce, leaving the
-						// newest in `last_token` to go out on End::Answered. A cleared token (`None`)
-						// is not a renewal and sends nothing.
-						let send_now = !throttle || in_flight.is_none();
-						if send_now && let Some(token) = token {
-							match self
-								.send_request_token_update(
-									&mut stream.writer,
-									request_id,
-									subscriber_priority,
-									renewal_start,
-									token.clone(),
-								)
-								.await
-							{
-								Ok(follow_up) if throttle => {
+					// The newest token goes out once nothing holds it back, below.
+					End::Renew(token) => last_token = token,
+					// The outstanding renewal was answered, so a replacement coalesced behind it
+					// may go out.
+					End::Answered => in_flight = None,
+					// A replaced token is re-presented as a token-only REQUEST_UPDATE, buffered whole
+					// and flushed by the wait above; the read future consumes the answer.
+					End::Credit(Ok(update_id)) => {
+						let token = sending.take().expect("credit without a pending renewal");
+						match self.buffer_request_token_update(
+							&mut stream.writer,
+							update_id,
+							request_id,
+							subscriber_priority,
+							renewal_start,
+							token.clone(),
+						) {
+							Ok(follow_up) => {
+								presented = Some(token.clone());
+								unflushed = true;
+								if throttle {
 									in_flight = Some((token, follow_up));
 									// Only an answer that arrives after this send releases the
 									// coalesced follow-up, so a stray earlier answer cannot.
 									seen_answers = *answers.lock();
 								}
-								Ok(_) => {}
-								// The token went unpresented, so the subscription ends now rather than
-								// run on the old grant with nothing left to retry it.
-								Err(err) => {
-									tracing::warn!(%err, "failed to re-present the request token");
-									let _ = track.clone().abort(err);
-									break true;
-								}
+							}
+							Err(err) => {
+								tracing::warn!(%err, "failed to re-present the request token");
+								let _ = track.clone().abort(err);
+								break true;
 							}
 						}
 					}
-					End::Answered => {
-						// The outstanding renewal was answered. If the credential changed while it
-						// was in flight, present the newest now (a cleared token sends nothing);
-						// otherwise the publisher already holds the latest.
-						let was = in_flight.take().map(|(token, _)| token);
-						if last_token != was
-							&& let Some(token) = last_token.clone()
-						{
-							match self
-								.send_request_token_update(
-									&mut stream.writer,
-									request_id,
-									subscriber_priority,
-									renewal_start,
-									token.clone(),
-								)
-								.await
-							{
-								Ok(follow_up) => in_flight = Some((token, follow_up)),
-								Err(err) => {
-									tracing::warn!(%err, "failed to re-present the request token");
-									let _ = track.clone().abort(err);
-									break true;
-								}
-							}
-						}
+					// The token went unpresented, so the subscription ends now rather than run on
+					// the old grant with nothing left to retry it.
+					End::Credit(Err(err)) | End::Unsent(err) => {
+						tracing::warn!(%err, "failed to re-present the request token");
+						let _ = track.clone().abort(err);
+						break true;
 					}
 					End::Revoked => {
 						tracing::info!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "subscription no longer authorized");
@@ -3009,15 +3018,40 @@ where
 						break false;
 					}
 				}
+
+				// Start the next renewal once nothing holds it back: no renewal still waiting for
+				// its request ID and, where renewals are paced, none awaiting an answer. A cleared
+				// token (`None`) is not a renewal and sends nothing.
+				if sending.is_none()
+					&& !(throttle && in_flight.is_some())
+					&& last_token.is_some()
+					&& last_token != presented
+				{
+					sending = last_token.clone();
+					credit.set(futures::FutureExt::fuse(request_credit(
+						self.control.clone(),
+						self.runtime.clone(),
+					)));
+				}
 			}
 		};
 
 		// Clean up
 		let aborted = self.remove_subscribe(request_id).is_none();
 
+		// A renewal still stuck behind a peer that stopped reading would be cut off mid-message
+		// by a FIN, so the stream is reset instead. Only a real stream can stick: drafts 14-16
+		// write to the control stream's adapter, which never parks.
+		let stuck =
+			unflushed && std::future::poll_fn(|cx| Poll::Ready(stream.writer.poll_flush(cx).is_pending())).await;
+
 		if !idle {
 			// The publisher already ended the request, so a FIN is all we owe it.
-			stream.writer.finish().ok();
+			if stuck {
+				stream.writer.abort(&Error::Cancel);
+			} else {
+				stream.writer.finish().ok();
+			}
 			return None;
 		}
 		// What the copy cached goes stale from here. Marked before the cancel, which waits
@@ -3026,7 +3060,15 @@ where
 		if !aborted && !revoked {
 			track.set_idle();
 		}
-		self.cancel_subscribe(stream, request_id).await;
+		match stuck {
+			// Resetting both directions is the cancellation on the drafts where a stream can stick.
+			true => {
+				let Stream { writer, mut reader } = stream;
+				reader.abort(&Error::Cancel);
+				writer.abort(&Error::Cancel);
+			}
+			false => self.cancel_subscribe(stream, request_id).await,
+		}
 		// A session abort took the copy too, and a revoked grant ended it.
 		if aborted || revoked {
 			return None;
@@ -3190,9 +3232,10 @@ where
 		}
 	}
 
-	/// Re-present the client's request token on a live subscription as a token-only
-	/// REQUEST_UPDATE (SUBSCRIBE_UPDATE), so a refreshed credential reaches the publisher
-	/// before the old grant lapses (MoQ request-token renewal).
+	/// Buffer a re-presentation of the client's request token on a live subscription as a
+	/// token-only REQUEST_UPDATE (SUBSCRIBE_UPDATE) carrying `request_id`, so a refreshed
+	/// credential reaches the publisher before the old grant lapses (MoQ request-token
+	/// renewal). The caller flushes it.
 	///
 	/// Token-only: draft-15+ omits the range, priority and forward flag, which an update keeps
 	/// as they are. Draft-14's fields are fixed, so it restates the subscription's own:
@@ -3200,15 +3243,15 @@ where
 	/// must not see decrease. The answer, if the version sends one, is read on the
 	/// subscription stream by [`read_publish_done`](Self::read_publish_done); on drafts 15
 	/// and 16 the returned guard routes it there until dropped.
-	async fn send_request_token_update(
+	fn buffer_request_token_update(
 		&self,
 		writer: &mut crate::coding::Writer<S::SendStream, Version>,
+		request_id: RequestId,
 		subscription_id: RequestId,
 		subscriber_priority: u8,
 		start: ietf::Location,
 		token: crate::setup::Token,
 	) -> Result<Option<super::control::FollowUp>, Error> {
-		let request_id = self.control.next_request_id(&self.runtime).await?;
 		// Drafts 15 and 16 answer naming the update itself; draft 14 answers no accepted
 		// update, and later drafts answer on the subscription's own stream.
 		let follow_up = matches!(self.version, Version::Draft15 | Version::Draft16)
@@ -3219,18 +3262,16 @@ where
 			_ => None,
 		};
 		let draft14 = self.version == Version::Draft14;
-		writer
-			.encode_message(&ietf::SubscribeUpdate {
-				request_id,
-				subscription_request_id,
-				start_location: start,
-				end_group: 0,
-				subscriber_priority: draft14.then_some(subscriber_priority),
-				forward: draft14.then_some(true),
-				filter: None,
-				authorization_token: Some(crate::ietf::token::RequestToken(token)),
-			})
-			.await?;
+		writer.buffer_message(&ietf::SubscribeUpdate {
+			request_id,
+			subscription_request_id,
+			start_location: start,
+			end_group: 0,
+			subscriber_priority: draft14.then_some(subscriber_priority),
+			forward: draft14.then_some(true),
+			filter: None,
+			authorization_token: Some(crate::ietf::token::RequestToken(token)),
+		})?;
 		Ok(follow_up)
 	}
 
@@ -8545,6 +8586,164 @@ mod tests {
 		}
 	}
 
+	/// A subscriber presenting `first` as its request token, under a limit on the peer that
+	/// covers "room", for the renewal tests below.
+	fn renewal_subscriber(
+		version: Version,
+		session: crate::lite::test_transport::ScriptedSession,
+		control: Control,
+		first: &bytes::Bytes,
+	) -> (
+		Subscriber<crate::lite::test_transport::ScriptedSession>,
+		crate::auth::Handle,
+		crate::RequestToken,
+		crate::util::TaskSet,
+	) {
+		let auth = crate::auth::Handle::new(true);
+		auth.authorize(&renewal_limit("room"));
+		let (tasks, task_set) = crate::util::TaskSet::new();
+		let token = crate::RequestToken::new(Some(typed(first)));
+		let subscriber = Subscriber::new(
+			crate::time::Clock::sim(),
+			session,
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			control,
+			None,
+			peer::PeerSetup::default(),
+			crate::Hop::new(1).unwrap(),
+			None,
+			version,
+			tasks,
+			Default::default(),
+		)
+		.with_auth(auth.clone())
+		.with_request_token(token.clone());
+		(subscriber, auth, token, task_set)
+	}
+
+	/// A limit on the peer that covers `prefix` both ways.
+	fn renewal_limit(prefix: &str) -> crate::auth::Grant {
+		crate::auth::Grant {
+			publish: crate::Pattern::subtree(prefix).unwrap().into(),
+			subscribe: crate::Pattern::subtree(prefix).unwrap().into(),
+			expires: None,
+		}
+	}
+
+	/// A narrowed limit ends a subscription whose renewal is stuck writing to a peer that
+	/// stopped reading, and the stuck stream is reset rather than cut off mid-message by a FIN.
+	#[moq_net_sim::test]
+	async fn a_revocation_ends_a_subscription_whose_renewal_is_stuck_writing() {
+		const VERSION: Version = Version::Draft18;
+		let first = bytes::Bytes::from_static(&[0x03, 0x00, b'a', b'a']);
+		let second = bytes::Bytes::from_static(&[0x03, 0x00, b'b', b'b']);
+		let writable = kio::Producer::new(true);
+		let session = crate::lite::test_transport::ScriptedSession::new(subscribe_ok_bytes(VERSION).await)
+			.with_send_gate(writable.consume());
+		let log = session.log.clone();
+		let (mut subscriber, auth, token, _task_set) =
+			renewal_subscriber(VERSION, session, Control::new(None, false), &first);
+
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let track = consumer.track("video").unwrap();
+		let _subscription = track.subscribe(None);
+		let request = dynamic.requested_track().await.expect("no track requested");
+		let mut run = std::pin::pin!(subscriber.run_subscribe(Path::new("room/x"), dynamic, request));
+		for _ in 0..200 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, &first) >= 1 {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(occurrences(&log, &first), 1, "the initial token rides the SUBSCRIBE");
+
+		// The peer stops reading, then the token is replaced: the renewal parks writing.
+		let Ok(mut open) = writable.write() else {
+			panic!("send gate closed");
+		};
+		*open = false;
+		drop(open);
+		token.set(Some(typed(&second)));
+		for _ in 0..20 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			settle().await;
+		}
+		assert_eq!(occurrences(&log, &second), 0, "the renewal is stuck");
+
+		auth.authorize(&renewal_limit("other"));
+		let mut ended = false;
+		for _ in 0..20 {
+			if futures::poll!(run.as_mut()).is_ready() {
+				ended = true;
+				break;
+			}
+			settle().await;
+		}
+		assert!(ended, "the revocation waited behind the stuck renewal");
+		assert!(
+			matches!(
+				track.poll_complete(&kio::Waiter::noop()),
+				Poll::Ready(Err(Error::Unauthorized))
+			),
+			"the subscription ends unauthorized"
+		);
+		assert!(!log.resets().is_empty(), "the stuck stream is reset");
+	}
+
+	/// A narrowed limit ends a subscription whose renewal waits for request ID credit at once,
+	/// not when the wait gives up.
+	#[moq_net_sim::test]
+	async fn a_revocation_ends_a_subscription_whose_renewal_waits_for_credit() {
+		const VERSION: Version = Version::Draft14;
+		let first = bytes::Bytes::from_static(&[0x03, 0x00, b'a', b'a']);
+		let second = bytes::Bytes::from_static(&[0x03, 0x00, b'b', b'b']);
+		let session = crate::lite::test_transport::ScriptedSession::new(subscribe_ok_bytes(VERSION).await);
+		let log = session.log.clone();
+		// Credit for the SUBSCRIBE and its joining FETCH, none for a renewal.
+		let (mut subscriber, auth, token, _task_set) =
+			renewal_subscriber(VERSION, session, Control::new(Some(RequestId(4)), false), &first);
+
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let track = consumer.track("video").unwrap();
+		let _subscription = track.subscribe(None);
+		let request = dynamic.requested_track().await.expect("no track requested");
+		let mut run = std::pin::pin!(subscriber.run_subscribe(Path::new("room/x"), dynamic, request));
+		for _ in 0..200 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, &first) >= 1 {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(occurrences(&log, &first), 1, "the initial token rides the SUBSCRIBE");
+
+		token.set(Some(typed(&second)));
+		for _ in 0..20 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			settle().await;
+		}
+
+		auth.authorize(&renewal_limit("other"));
+		let mut ended = None;
+		for _ in 0..20 {
+			let _ = futures::poll!(run.as_mut());
+			if let Poll::Ready(result) = track.poll_complete(&kio::Waiter::noop()) {
+				ended = result.err();
+				break;
+			}
+			settle().await;
+		}
+		assert!(
+			matches!(ended, Some(Error::Unauthorized)),
+			"the revocation waited for the credit wait to give up: {ended:?}"
+		);
+		assert_eq!(occurrences(&log, &second), 0, "the token never went out");
+	}
 	/// A replaced token that cannot be presented, for want of request ID credit, ends the
 	/// subscription instead of leaving it on the old grant with no retry.
 	#[moq_net_sim::test]
@@ -8557,12 +8756,12 @@ mod tests {
 		let log = session.log.clone();
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let token = crate::RequestToken::new(Some(typed(&first)));
-		// Credit for the SUBSCRIBE alone, none for a renewal.
+		// Credit for the SUBSCRIBE and its joining FETCH, none for a renewal.
 		let mut subscriber = Subscriber::new(
 			crate::time::Clock::sim(),
 			session,
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
-			Control::new(Some(RequestId(2)), false),
+			Control::new(Some(RequestId(4)), false),
 			None,
 			peer::PeerSetup::default(),
 			crate::Hop::new(1).unwrap(),
