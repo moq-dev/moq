@@ -17,7 +17,9 @@ Found while reworking the in-memory transport (#5530). Facts at 813a92b48:
   (`rs/moq-net/src/lite/session.rs:381-411`) aborts every subscription when
   `local_close` is false, then drops the accepted `UniServe` children
   mid-read. IETF `run_unis` (`rs/moq-net/src/ietf/session.rs:882`,
-  `:931-942`) does the same.
+  `:931-942`) does the same, and `ietf::session::start` aborts again after
+  the race in each of its two arms, drafts 14-16 (`:371-374`) and drafts 17+
+  (`:588-591`).
 - Real QUIC keeps that data readable: noq's `poll_accept` hands out
   already-received streams before the connection error, and reads return
   buffered chunks and the FIN, reporting `ConnectionLost` only when blocked.
@@ -47,8 +49,8 @@ Decided (maintainer, 2026-10-14):
   anything that can't complete after the close (such as IETF children waiting
   on control state) so the no-timer argument holds.
 - Tests ack a FIN on delivery, as QUIC does, so the regression for lite-01
-  through lite-06 and IETF asserts the reader got the tail and fails before
-  the fix. Cover both the buffered-tail case and one where a control or
+  through lite-06 and IETF (one draft from each `start` arm) asserts the
+  reader got the tail and fails before the fix. Cover both the buffered-tail case and one where a control or
   accept error wins the poll order. Give `older_lite_close_keeps_ack_drain`
   that reader assertion.
 - Once #5530 has landed, switch `moq_net::transport::memory`'s
