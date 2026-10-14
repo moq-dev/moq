@@ -48,6 +48,38 @@ pub struct Frame {
 	pub payload: Bytes,
 }
 
+/// Cached frames retain relay metadata without changing public struct literals.
+#[derive(Clone, Debug)]
+pub(crate) struct Stored {
+	pub frame: Frame,
+	pub fields: Option<Arc<super::object::Fields>>,
+}
+
+impl From<Frame> for Stored {
+	fn from(frame: Frame) -> Self {
+		Self { frame, fields: None }
+	}
+}
+
+impl std::ops::Deref for Stored {
+	type Target = Frame;
+	fn deref(&self) -> &Self::Target {
+		&self.frame
+	}
+}
+
+/// A streamed frame's private header, alongside the unchanged public header.
+pub(crate) struct Header {
+	pub info: Info,
+	pub fields: Option<Arc<super::object::Fields>>,
+}
+
+impl From<Info> for Header {
+	fn from(info: Info) -> Self {
+		Self { info, fields: None }
+	}
+}
+
 /// A reusable batch of frames, filled by [`group::Consumer::poll_read_frames`] and drained
 /// by [`group::Producer::write_frames`].
 ///
@@ -684,6 +716,7 @@ pub struct Consumer {
 	// The group's channel, used to park while a partial frame fills.
 	state: kio::Consumer<GroupState>,
 	info: Info,
+	pub(crate) fields: Option<Arc<super::object::Fields>>,
 	source: Source,
 	// Byte offset consumed so far.
 	read_idx: usize,
@@ -707,10 +740,12 @@ impl std::ops::Deref for Consumer {
 }
 
 impl Consumer {
-	pub(crate) fn new(state: kio::Consumer<GroupState>, info: Info, source: Source) -> Self {
+	pub(crate) fn new(state: kio::Consumer<GroupState>, header: impl Into<Header>, source: Source) -> Self {
+		let header = header.into();
 		Self {
 			state,
-			info,
+			info: header.info,
+			fields: header.fields,
 			source,
 			read_idx: 0,
 			stats: stats::Meter::default(),
@@ -750,6 +785,9 @@ impl Consumer {
 			let (recover, index) = &mut **recover;
 			if !recover.wants(failed.as_ref(), waiter) {
 				return res;
+			}
+			if self.state.read().wire.as_ref().is_some_and(|wire| wire.sparse) {
+				return Poll::Ready(Err(Error::Unsupported));
 			}
 			let mut replacement = match recover.poll(*index, failed.as_ref(), waiter) {
 				Poll::Ready(Ok(group)) => group,

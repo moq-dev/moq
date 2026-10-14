@@ -1,0 +1,61 @@
+//! Private relay metadata; public readers see only the frame or datagram payload.
+use bytes::Bytes;
+
+/// How the publisher serialized the keys inside immutable properties.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Encoding {
+	Absolute,
+	DeltaQuic,
+	Delta { seven: bool },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Value {
+	Int(u64),
+	Bytes(Bytes),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Property {
+	pub id: u64,
+	pub value: Value,
+}
+
+/// The common timestamp needs no vector allocation; all other properties stay opaque.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Properties {
+	pub timestamp: Option<u64>,
+	pub values: Vec<Property>,
+	pub immutable: Option<Encoding>,
+}
+
+impl Properties {
+	pub fn is_plain(&self) -> bool {
+		self.values.is_empty()
+	}
+
+	pub fn heap(&self) -> u64 {
+		(self.values.capacity() * size_of::<Property>()) as u64
+			+ self
+				.values
+				.iter()
+				.map(|property| match &property.value {
+					Value::Bytes(bytes) => bytes.len() as u64,
+					Value::Int(_) => 0,
+				})
+				.sum::<u64>()
+	}
+}
+
+/// Object numbering is separate from the public frame's ordinal in its group.
+#[derive(Clone, Debug)]
+pub(crate) struct Fields {
+	pub id: u64,
+	pub properties: Properties,
+}
+
+impl Fields {
+	pub fn heap(&self) -> u64 {
+		(size_of::<Self>() + 2 * size_of::<usize>()) as u64 + self.properties.heap()
+	}
+}

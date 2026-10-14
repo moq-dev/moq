@@ -319,5 +319,45 @@ fn bench_roundtrip(c: &mut Criterion) {
 	g.finish();
 }
 
-criterion_group!(benches, bench_write, bench_read, bench_roundtrip, bench_track_recv);
+/// Sweep payload depth and subscribers for both plain and property-bearing frames.
+fn bench_relay_frames(c: &mut Criterion) {
+	#[cfg(feature = "fuzz")]
+	{
+		let mut g = c.benchmark_group("group_relay_frames");
+		for frames in [4, 512, 8192] {
+			for subscribers in [1, 8, 64] {
+				for properties in [false, true] {
+					let context = moq_net::fuzz::object_group(frames, properties);
+					let mode = if properties { "properties" } else { "plain" };
+					g.throughput(Throughput::Elements((frames * subscribers) as u64));
+					g.bench_function(BenchmarkId::new(mode, format!("{frames}/{subscribers}")), |b| {
+						b.iter_batched(
+							|| (0..subscribers).map(|_| context.2.consume()).collect::<Vec<_>>(),
+							|mut readers| {
+								let mut buffer = frame::Buffer::<8>::new();
+								for reader in &mut readers {
+									drain_batched(reader, &mut buffer);
+								}
+								readers
+							},
+							BatchSize::SmallInput,
+						);
+					});
+				}
+			}
+		}
+		g.finish();
+	}
+	#[cfg(not(feature = "fuzz"))]
+	let _ = c;
+}
+
+criterion_group!(
+	benches,
+	bench_write,
+	bench_read,
+	bench_roundtrip,
+	bench_track_recv,
+	bench_relay_frames
+);
 criterion_main!(benches);

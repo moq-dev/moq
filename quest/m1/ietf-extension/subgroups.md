@@ -13,7 +13,7 @@ Decided 2026-10-13 (see the [epic](/quest/m1/ietf-extension/README.md)).
 
 - `group::Producer` and `group::Consumer` own crate-private subgroups. Subgroup
   0 is the public frame list. Every other subgroup keeps its own frames with
-  their `skip`, properties, end status, and priority.
+  their Object IDs, properties, end status, and priority.
 - Priority is stored as the wire's `Option<u8>`. `None` means the header
   omitted it and inherits the track default. It round-trips exactly, so 200
   stays 200 and never goes through the 128-to-127 track mapping.
@@ -37,7 +37,3 @@ benchmark swept over subgroups per group and subscribers, since subgroups fan
 out.
 
 Public API: none. Wire: none new.
-
-## Required
-
-- [Object fields](/quest/m1/ietf-extension/objects.md) - subgroups store the per-object skip, properties, and end status it adds

@@ -12,9 +12,8 @@ handled as today.
 Decided 2026-10-13 (see the [epic](/quest/m1/ietf-extension/README.md)).
 
 - Store the unknown properties crate-private on `track::Info`, which is
-  `#[non_exhaustive]`, using the `Property` list from
-  [object fields](/quest/m1/ietf-extension/objects.md). Re-encode them for each
-  egress draft. Immutable Properties keep their inner bytes verbatim and
+  `#[non_exhaustive]`, using the private `model::object::Property` list.
+  Re-encode them for each egress draft. Immutable Properties keep their inner bytes verbatim and
   their ingress encoding family; the cross-family refusal from object
   fields applies to track properties too.
 - Unknown properties include those the draft defines but moq-net does not
@@ -35,5 +34,4 @@ Public API: none. Wire: none new.
 
 ## Required
 
-- [Object fields](/quest/m1/ietf-extension/objects.md) - introduces the decoded `Property` list
 - [Dynamic groups](/quest/m1/ietf-extension/dynamic-groups.md) - makes DYNAMIC_GROUPS advertising truthful by carrying NEW_GROUP_REQUEST upstream

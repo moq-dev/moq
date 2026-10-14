@@ -24,6 +24,40 @@ use crate::{
 /// [`seeds`] is checked against.
 pub type Target = fn(&[u8]) -> bool;
 
+/// Build a cached group with optional private object fields for model benchmarks.
+pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, track::Producer, group::Producer) {
+	let broadcast = broadcast::Producer::new(broadcast::Info::default());
+	let track = broadcast.create_track("objects", None).unwrap();
+	let mut group = track.append_group().unwrap();
+	let payload = Bytes::from_static(&[0; 64]);
+	for id in 0..frames {
+		let fields = properties.then(|| {
+			std::sync::Arc::new(crate::model::object::Fields {
+				id: id as u64,
+				properties: crate::model::object::Properties {
+					values: vec![crate::model::object::Property {
+						id: 0x80,
+						value: crate::model::object::Value::Int(96_000),
+					}],
+					..Default::default()
+				},
+			})
+		});
+		let header = frame::Header {
+			info: frame::Info {
+				size: payload.len() as u64,
+				timestamp: None,
+			},
+			fields,
+		};
+		let mut frame = group.create_frame_owned(header, &frame::Budget::default()).unwrap();
+		frame.write(payload.clone()).unwrap();
+		frame.finish().unwrap();
+	}
+	group.finish().unwrap();
+	(broadcast, track, group)
+}
+
 /// Every target, keyed by the name of its `fuzz_targets/<name>.rs` shim.
 pub const TARGETS: &[(&str, Target)] = &[
 	("lite", lite_wire),

@@ -21,7 +21,7 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::task::{Poll, ready};
 
-use crate::{Datagram, Error, Result, StreamError, group, stats, track};
+use crate::{Error, Result, StreamError, group, stats, track};
 
 use super::delivered::Delivered;
 use super::subscription::{Cap, Position, Subscription, max_some};
@@ -341,7 +341,7 @@ impl Subscriber {
 		&mut self,
 		delivered: &Delivered,
 		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<Datagram>>> {
+	) -> Poll<Result<Option<super::datagram::Stored>>> {
 		self.reader().poll_recv_datagram(delivered, waiter)
 	}
 
@@ -667,7 +667,11 @@ impl Reader {
 		}
 	}
 
-	fn poll_recv_datagram(&mut self, delivered: &Delivered, waiter: &kio::Waiter) -> Poll<Result<Option<Datagram>>> {
+	fn poll_recv_datagram(
+		&mut self,
+		delivered: &Delivered,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<super::datagram::Stored>>> {
 		loop {
 			if let Some(res) = self.poll_datagram_once(delivered, waiter) {
 				return res;
@@ -679,7 +683,7 @@ impl Reader {
 		&mut self,
 		delivered: &Delivered,
 		waiter: &kio::Waiter,
-	) -> Option<Poll<Result<Option<Datagram>>>> {
+	) -> Option<Poll<Result<Option<super::datagram::Stored>>>> {
 		self.sync(waiter);
 		self.let_go(delivered);
 		let groups = self.groups;
@@ -697,7 +701,7 @@ impl Reader {
 					}
 					Poll::Ready(Ok(sub)) => sub,
 				};
-				match sub.poll_recv_datagram(waiter) {
+				match sub.poll_recv_wire_datagram(waiter) {
 					Poll::Pending => break,
 					Poll::Ready(Ok(Some(datagram))) => {
 						if copy.datagrams_seen.is_some_and(|seen| datagram.sequence <= seen) {
@@ -2054,6 +2058,75 @@ mod test {
 			group.finish().unwrap();
 		}
 		assert!(matches!(reading.read_frame().now_or_never(), Some(Err(Error::Old))));
+	}
+
+	#[test]
+	fn sparse_object_ids_refuse_ordinal_recovery() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		let mut group = a.create_group(group::Info { sequence: 0 }).unwrap();
+		group
+			.set_wire(group::Wire {
+				sparse: false,
+				first_object: true,
+				first_id: 6,
+				extensions: false,
+				has_end: true,
+				fetchable: false,
+				last: None,
+			})
+			.unwrap();
+		let mut frame = group
+			.create_frame_owned(
+				crate::frame::Header {
+					info: crate::frame::Info {
+						size: 1,
+						timestamp: Some(ts(0)),
+					},
+					fields: Some(Arc::new(super::super::object::Fields {
+						id: 6,
+						properties: Default::default(),
+					})),
+				},
+				&crate::frame::Budget::default(),
+			)
+			.unwrap();
+		frame.write(bytes::Bytes::from_static(b"a")).unwrap();
+		frame.finish().unwrap();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::MAX);
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+		assert_eq!(a.consume().resume_position(), Some(Position::group(1)));
+		let mut partial = group
+			.create_frame_owned(
+				crate::frame::Header {
+					info: crate::frame::Info {
+						size: 2,
+						timestamp: Some(ts(1)),
+					},
+					fields: Some(Arc::new(super::super::object::Fields {
+						id: 8,
+						properties: Default::default(),
+					})),
+				},
+				&crate::frame::Budget::default(),
+			)
+			.unwrap();
+		partial.write(bytes::Bytes::from_static(b"b")).unwrap();
+		let mut chunks = reading.next_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(chunks.read_chunk().now_or_never().unwrap().unwrap().unwrap(), b"b"[..]);
+		partial.abort(Error::Dropped).unwrap();
+		routes.serve(copy().consume());
+		assert!(matches!(
+			chunks.read_chunk().now_or_never(),
+			Some(Err(Error::Unsupported))
+		));
+		assert!(matches!(
+			reading.read_frame().now_or_never(),
+			Some(Err(Error::Unsupported))
+		));
 	}
 
 	#[test]
