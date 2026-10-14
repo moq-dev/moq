@@ -4665,6 +4665,64 @@ impl kio::Task for Requesting {
 	}
 }
 
+/// The pollable result of [`Consumer::routed_broadcast`].
+pub struct Routing {
+	consumer: Consumer,
+	path: PathOwned,
+	// The covering routes, watched since the generation the last ask saw.
+	watch: Option<(Watch, u64)>,
+	// The ask in flight, dropped once it fails `Unroutable` until the routes move.
+	request: Option<Requesting>,
+}
+
+impl kio::Task for Routing {
+	type Output = Result<broadcast::Consumer, Error>;
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
+		loop {
+			match (&self.watch, &self.request) {
+				(_, Some(request)) => match ready!(request.poll_ok(waiter)) {
+					Ok(broadcast) => return Poll::Ready(Ok(broadcast)),
+					Err(Error::Unroutable) => self.request = None,
+					// Teardown parks a pending request with `Dropped`; the contract is
+					// `Closed` once the origin is gone.
+					Err(Error::Dropped) if self.consumer.shared.lock().closed => {
+						return Poll::Ready(Err(Error::Closed));
+					}
+					Err(err) => return Poll::Ready(Err(err)),
+				},
+				(Some((watch, seen)), None) => {
+					ready!(watch.poll_changed(waiter, *seen));
+					self.watch = None;
+				}
+				(None, None) => {
+					// `Unroutable` is a verdict of the routes covering the path as they
+					// stood when the request was made. Re-asking the same routes would
+					// spin, so watch them before asking and wait for them to move (a
+					// route arriving or retracting, an identical standby swapping in, a
+					// local broadcast announcing at the path), then try again. A change
+					// between the ask and the wait bumps the watch first, so that retry
+					// is immediate; the teardown pokes every watch, so a closed origin
+					// is observed on the next pass.
+					let mut table = self.consumer.shared.lock();
+					if table.closed {
+						return Poll::Ready(Err(Error::Closed));
+					}
+					let named = self.consumer.root.join(&self.path);
+					let Some(resolved) = self.consumer.scope.resolve(&named) else {
+						return Poll::Ready(Err(BoundsExceeded.into()));
+					};
+					let watch = table.watch(&self.consumer.shared, &resolved);
+					let seen = watch.seen();
+					drop(table);
+					self.watch = Some((watch, seen));
+					self.request = Some(self.consumer.request(self.path.as_path(), None).into_inner());
+				}
+			}
+		}
+	}
+}
+
 /// Derive a read view from a handle.
 ///
 /// Lets APIs accept either a producer or a consumer (e.g.
@@ -5079,8 +5137,8 @@ impl Consumer {
 		Ok(crate::announce::Follow::new(announced, path.to_owned()))
 	}
 
-	/// Block until `path` resolves to a broadcast: [`Self::request_broadcast`],
-	/// retried whenever the routes covering the path change.
+	/// Resolve `path` to a broadcast: [`Self::request_broadcast`], retried
+	/// whenever the routes covering the path change.
 	///
 	/// A request answers for the routes as they stand, so it can miss an
 	/// announcement that has not arrived yet, lose its covering route to
@@ -5091,47 +5149,19 @@ impl Consumer {
 	/// call for resolving a path right after connecting. Returns
 	/// [`Error::Unauthorized`] for a path outside this consumer's scope,
 	/// [`Error::Closed`] once the origin closes, and any other resolution
-	/// failure as-is.
-	#[cfg(feature = "async")]
-	pub async fn routed_broadcast(&self, path: impl AsPath) -> Result<broadcast::Consumer, Error> {
-		let path = path.as_path();
+	/// failure as-is. Await it, or poll it through [`kio::Task`].
+	pub fn routed_broadcast(&self, path: impl AsPath) -> kio::Pending<Routing> {
+		let path = path.as_path().to_owned();
 
 		// `allowed` keeps narrower permissions intact: if the whole path is not
 		// reachable, no route can ever cover it, so bail rather than loop forever.
-		if !self.allowed().matches(path.as_str()) {
-			return Err(Error::Unauthorized);
-		}
-		loop {
-			// `Unroutable` is a verdict of the routes covering the path as they
-			// stood when the request was made. Re-asking the same routes would
-			// spin, so watch them before asking and wait for them to move (a
-			// route arriving or retracting, an identical standby swapping in, a
-			// local broadcast announcing at the path), then try again. A change
-			// between the ask and the wait bumps the watch first, so that retry
-			// is immediate; the teardown pokes every watch, so a closed origin
-			// is observed on the next pass.
-			let (watch, seen) = {
-				let mut table = self.shared.lock();
-				if table.closed {
-					return Err(Error::Closed);
-				}
-				let named = self.root.join(&path);
-				let resolved = self.scope.resolve(&named).ok_or(BoundsExceeded)?;
-				let watch = table.watch(&self.shared, &resolved);
-				let seen = watch.seen();
-				(watch, seen)
-			};
-			match self.request_broadcast(&path, None).await {
-				Ok(broadcast) => return Ok(broadcast),
-				Err(Error::Unroutable) => {
-					kio::wait(|waiter| watch.poll_changed(waiter, seen)).await;
-				}
-				// Teardown parks a pending request with `Dropped`; the contract is
-				// `Closed` once the origin is gone.
-				Err(Error::Dropped) if self.shared.lock().closed => return Err(Error::Closed),
-				Err(err) => return Err(err),
-			}
-		}
+		let request = (!self.allowed().matches(path.as_str())).then(|| Requesting::failed(Error::Unauthorized));
+		kio::Pending::new(Routing {
+			consumer: self.clone(),
+			path,
+			watch: None,
+			request,
+		})
 	}
 
 	/// Returns a consumer rooted at `root` and restricted to matching `patterns`.

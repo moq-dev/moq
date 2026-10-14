@@ -46,3 +46,32 @@ fn origin_front_serves_media_with_only_explicit_polls() {
 	drop(driver);
 	assert!(matches!(origin.create_broadcast("after-close"), Err(Error::Closed)));
 }
+
+#[test]
+fn routed_broadcast_resolves_with_only_explicit_polls() {
+	use kio::Task;
+
+	let now = moq_net::time::Instant::now();
+	let waiter = kio::Waiter::noop();
+	let (origin, mut driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
+	driver.poll(now, &waiter).unwrap();
+
+	// Nothing covers the path yet: the first ask fails `Unroutable` and parks on the routes.
+	let mut routing = origin.consume().routed_broadcast("room/live");
+	assert!(routing.poll(&waiter).is_pending());
+	let broadcast = origin.create_broadcast("room/live").unwrap();
+	assert!(routing.poll(&waiter).is_pending());
+
+	// Announcing moves the routes, so the next poll asks again and the driver serves it.
+	broadcast.announce(origin::Route::default()).unwrap();
+	assert!(routing.poll(&waiter).is_pending());
+	driver.poll(now, &waiter).unwrap();
+	let resolved = ready(routing.poll(&waiter)).unwrap();
+	assert_eq!(resolved.info().path.as_str(), "room/live");
+
+	// A closed origin ends a parked resolution.
+	let mut routing = origin.consume().routed_broadcast("room/other");
+	assert!(routing.poll(&waiter).is_pending());
+	drop(driver);
+	assert!(matches!(ready(routing.poll(&waiter)), Err(Error::Closed)));
+}

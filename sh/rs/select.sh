@@ -121,6 +121,8 @@ case "$action" in
         # Workspace feature unification hides a broken moq-tokio feature set
         # whenever any dependent enables a transport.
         if wants moq-tokio; then just rs tokio-features; fi
+        # Likewise every dependent turns moq-net's default `async` feature back on.
+        if wants moq-net; then just rs net-features; fi
         # moq-wasm's crate root is `#![cfg(target_arch = "wasm32")]`, so only a
         # wasm32 pass checks it. moq-mux, moq-ffi, and moq-clock ride along in that pass, and
         # nothing depends on moq-ffi, so each has to reach it on its own.
