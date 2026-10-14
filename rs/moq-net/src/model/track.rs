@@ -468,7 +468,7 @@ impl Slot {
 ///
 /// Each entry maps a cached group a walk passed to where that walk stopped: no group
 /// strictly between the two could present. A group stops presenting on its own, but only
-/// starts by landing, so an entry holds until a group lands inside it.
+/// starts by landing, so an entry holds until a group that could present lands inside it.
 /// A stop itself is looked at again, so a walk past one that stopped presenting records
 /// the further stop. Removing a group from the cache removes its entry.
 #[derive(Default)]
@@ -492,12 +492,10 @@ impl Quiet {
 		self.next.extend(walked.into_iter().map(|at| (at, stop)));
 	}
 
-	/// A group landed at `sequence`. Only an entry below it can stop past it, so those go
-	/// and the runs above it stay.
+	/// A group that could present landed at `sequence`. Only an entry below it can stop
+	/// past it, so those go and the runs above it stay.
 	fn landed(&mut self, sequence: u64) {
-		if sequence < self.end {
-			self.next = self.next.split_off(&sequence);
-		}
+		self.next = self.next.split_off(&sequence);
 	}
 }
 
@@ -1179,6 +1177,11 @@ impl TrackState {
 	fn drop_open_groups(&mut self) {
 		self.lookup
 			.retain(|_, slot| slot.copies().any(group::Producer::is_finished));
+		let lookup = &self.lookup;
+		self.quiet
+			.lock()
+			.next
+			.retain(|sequence, _| lookup.contains_key(sequence));
 	}
 
 	/// Attach the publisher's immutable metadata without replacing it with local cache policy.
@@ -1326,7 +1329,12 @@ impl TrackState {
 	/// Content at `sequence` became servable: wake the reads it succeeds, and show an answer
 	/// waiting on it.
 	fn landed(&mut self, sequence: u64) {
-		self.quiet.lock().landed(sequence);
+		// A group revealed after finishing without a frame still cannot present. Read
+		// apart from the group's lock, which never nests under this one.
+		let end = self.quiet.lock().end;
+		if sequence < end && self.lookup.get(&sequence).is_some_and(|slot| !slot.group.ended_empty()) {
+			self.quiet.lock().landed(sequence);
+		}
 		let below = self
 			.lookup
 			.range(..sequence)
@@ -11059,6 +11067,49 @@ mod test {
 		}
 		let passed = producer.state.read().quiet.lock().passed;
 		assert!(passed <= 2 * RUN as usize, "walked past {passed} groups");
+	}
+
+	/// A group revealed after finishing without a frame still cannot present, so it keeps
+	/// the run recorded across it: judging the group below the run after each of its groups
+	/// is revealed, newest first, walks the run once.
+	#[test]
+	fn revealing_empty_groups_newest_first_keeps_the_walked_run() {
+		const RUN: u64 = 1000;
+		let producer = track_producer("test", Info::timed());
+		write_group_at(&producer, 0, 0);
+		let pending: Vec<_> = (1..=RUN)
+			.map(|sequence| producer.receive_group(group::Info { sequence }).unwrap())
+			.collect();
+		write_group_at(&producer, RUN + 1, 50);
+		let successor = || producer.state.read().successor(0, None).map(|group| group.sequence);
+		assert_eq!(successor(), Some(RUN + 1));
+		for group in pending.into_iter().rev() {
+			group.finish().unwrap();
+			producer.reveal_group(&group);
+			assert_eq!(successor(), Some(RUN + 1));
+		}
+		let passed = producer.state.read().quiet.lock().passed;
+		assert!(passed <= 2 * RUN as usize, "walked past {passed} groups");
+	}
+
+	/// Open groups dropped together when a track ends abruptly take their recorded runs.
+	#[test]
+	fn dropping_open_groups_forgets_their_runs() {
+		let producer = track_producer("test", Info::timed());
+		let consumer = producer.consume();
+		write_group_at(&producer, 0, 0);
+		let _pending: Vec<_> = (1..=10)
+			.map(|sequence| producer.receive_group(group::Info { sequence }).unwrap())
+			.collect();
+		write_group_at(&producer, 11, 50);
+		assert_eq!(
+			producer.state.read().successor(0, None).map(|group| group.sequence),
+			Some(11)
+		);
+		assert_eq!(producer.state.read().quiet.lock().next.len(), 10);
+
+		producer.abort(Error::Cancel).unwrap();
+		assert!(consumer.state.read().quiet.lock().next.is_empty());
 	}
 
 	/// What was recorded for a walked run goes with the run when the cache drops it, even
