@@ -160,11 +160,11 @@ impl Deadline {
 	/// `Ready` once the queue reaches the armed instant, registering `waiter`
 	/// otherwise. Fused until re-armed; a disarmed deadline never fires.
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		let Some(at) = self.at else { return Poll::Pending };
 		// Register under the queue's lock, so an `advance` past `at` either happened
-		// first (and we see it) or wakes this registration.
+		// first (and we see it) or wakes this registration. A disarmed deadline
+		// registers too, so arming it for a reached instant wakes its poller.
 		let state = self.deadlines.0.lock().unwrap();
-		if state.now >= at {
+		if self.at.is_some_and(|at| state.now >= at) {
 			return Poll::Ready(());
 		}
 		waiter.register(&mut self.waiters.lock().unwrap());
@@ -306,6 +306,19 @@ mod tests {
 
 		clock.advance(Duration::from_secs(1));
 		deadlines.advance(clock.now());
+		deadline.set(Some(clock.now()));
+		assert_eq!(wakes.count.load(Ordering::SeqCst), 1, "the parked waiter was not woken");
+		assert!(deadline.poll(&waiter).is_ready());
+	}
+
+	#[test]
+	fn arming_a_disarmed_deadline_to_a_reached_instant_wakes_the_waiter() {
+		let clock = Manual::new();
+		let deadlines = Deadlines::new(clock.now());
+		let mut deadline = Deadline::new(&deadlines);
+		let (wakes, waiter) = counter();
+		assert!(deadline.poll(&waiter).is_pending());
+
 		deadline.set(Some(clock.now()));
 		assert_eq!(wakes.count.load(Ordering::SeqCst), 1, "the parked waiter was not woken");
 		assert!(deadline.poll(&waiter).is_ready());

@@ -451,12 +451,12 @@ where
 		task: None,
 		joiner: None,
 	}));
-	let state = join.clone();
+	let state = Cancel(join.clone());
 	let mut future = Some(Box::pin(future));
 	// Every poll of a spawned task goes through here.
 	let task = std::future::poll_fn(move |cx| {
 		let finish = |output| {
-			let mut join = state.borrow_mut();
+			let mut join = state.0.borrow_mut();
 			join.finished = true;
 			if join.detached {
 				if let Err(JoinError(Some(panic))) = output {
@@ -470,12 +470,12 @@ where
 			}
 		};
 
-		if state.borrow().aborted {
+		if state.0.borrow().aborted {
 			future = None;
 			finish(Err(JoinError(None)));
 			return Poll::Ready(());
 		}
-		state.borrow_mut().task = Some(cx.waker().clone());
+		state.0.borrow_mut().task = Some(cx.waker().clone());
 
 		let running = future.as_mut().expect("task polled after completion");
 		let output = match std::panic::AssertUnwindSafe(running.as_mut())
@@ -491,6 +491,27 @@ where
 	});
 	runtime.spawned.borrow_mut().push(Box::pin(task));
 	JoinHandle { join }
+}
+
+/// Owned by a spawned task, so dropping it unfinished, as [`run`] does with tasks
+/// still pending when it returns, tells a handle that outlives the run it was cancelled.
+struct Cancel<T>(Rc<RefCell<Join<T>>>);
+
+impl<T> Drop for Cancel<T> {
+	fn drop(&mut self) {
+		let joiner = {
+			let mut join = self.0.borrow_mut();
+			if join.finished || join.detached {
+				return;
+			}
+			join.finished = true;
+			join.output = Some(Err(JoinError(None)));
+			join.joiner.take()
+		};
+		if let Some(joiner) = joiner {
+			joiner.wake();
+		}
+	}
 }
 
 #[cfg(test)]
@@ -720,6 +741,27 @@ mod tests {
 	#[should_panic(expected = "deadlock")]
 	fn a_sleep_past_the_range_never_fires() {
 		run(async { crate::sleep(Duration::MAX).await });
+	}
+
+	/// A run drops its pending tasks, so a handle that escapes it reports the task
+	/// cancelled instead of pending forever.
+	#[test]
+	#[expect(clippy::async_yields_async, reason = "the handle escapes the run on purpose")]
+	fn a_handle_outliving_its_run_is_cancelled() {
+		let handle = run(async { spawn(std::future::pending::<()>()) });
+		assert!(run(handle).unwrap_err().is_cancelled());
+	}
+
+	/// A sleep answers to the clock it was created on, not to the poller's.
+	#[test]
+	#[should_panic(expected = "polled outside its moq_clock::sim::run")]
+	#[expect(clippy::async_yields_async, reason = "the sleep escapes the run on purpose")]
+	fn a_sleep_polled_in_another_run_panics() {
+		let mut sleep = run(async { crate::sleep(Duration::from_secs(1)) });
+		run(async move {
+			advance(Duration::from_secs(2)).await;
+			(&mut sleep).await;
+		});
 	}
 
 	#[crate::test]

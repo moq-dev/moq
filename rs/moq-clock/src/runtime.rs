@@ -49,26 +49,33 @@ pub(crate) fn wall() -> Wall {
 	Wall::UNIX_EPOCH + since
 }
 
-/// A host timer for `at`.
-pub(crate) struct Timer(Pin<Box<host::Sleep>>);
+/// A host timer for `at`, on the origin it was created with.
+pub(crate) struct Timer {
+	origin: host::Instant,
+	sleep: Pin<Box<host::Sleep>>,
+}
 
 impl Timer {
 	pub(crate) fn new(at: Instant) -> Self {
-		Self(Box::pin(host::sleep_until(to_host(at))))
+		let (origin, _) = read();
+		Self {
+			origin,
+			sleep: Box::pin(host::sleep_until(origin + at.since_origin())),
+		}
 	}
 
 	pub(crate) fn reset(&mut self, at: Instant) {
-		self.0.as_mut().reset(to_host(at));
+		self.sleep.as_mut().reset(self.origin + at.since_origin());
 	}
 
 	pub(crate) fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-		self.0.as_mut().poll(cx)
+		// Checked first, so a reached deadline fires at once rather than at the
+		// host timer's next tick.
+		if host::Instant::now() >= self.sleep.deadline() {
+			return Poll::Ready(());
+		}
+		self.sleep.as_mut().poll(cx)
 	}
-}
-
-fn to_host(at: Instant) -> host::Instant {
-	let (origin, _) = read();
-	origin + at.since_origin()
 }
 
 #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]

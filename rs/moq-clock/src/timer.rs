@@ -10,7 +10,8 @@ use crate::Instant;
 
 /// A future that completes once the ambient clock reaches an instant.
 ///
-/// Bound to the clock current when it was created. Dropping it cancels it.
+/// Bound to the clock current when it was created, so poll it there: instants
+/// from different clocks don't compare. Dropping it cancels it.
 pub struct Sleep {
 	at: Instant,
 	timer: Timer,
@@ -67,11 +68,7 @@ impl Future for Sleep {
 	type Output = ();
 
 	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-		// Checked first, so a reached deadline fires at once on every backend,
-		// rather than at the host timer's next tick.
-		if crate::now() >= self.at {
-			return Poll::Ready(());
-		}
+		// Each backend compares against its own clock, not the poller's.
 		match &mut self.timer {
 			Timer::Host(timer) => timer.poll(cx),
 			#[cfg(feature = "sim")]
