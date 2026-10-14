@@ -72,13 +72,34 @@ Decided (maintainer, 2026-10-14):
     It only fits small, rarely written channels, which are not the hot sites.
   - `RwLock`: the critical sections are a few loads, so the reader count's
     cache line bounces between cores just like the mutex.
-  - Per-worker sharding stays out of scope ([perf](/quest/m2/perf/README.md)).
+
+Decided (maintainer, 2026-10-14, per-thread follow-up):
+
+- Per-worker sharding is no longer ruled out; two spikes decide. Both run on
+  the thread-per-core workers (`--runtime-workers`, the default once
+  [Shard](/quest/m1/quic/shard.md) lands) and link workers over an
+  [in-memory transport](/quest/m2/perf/kio-channel-contention/bridge.md),
+  never real QUIC. The
+  [replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md)
+  replicates the data plane and shares announcements; the
+  [cluster spike](/quest/m2/perf/kio-channel-contention/spike-cluster.md)
+  shares nothing. A measured win reopens sharding through `/quest-plan`; a
+  no-win restores the rule.
+- Spikes are draft PRs that never merge; their numbers and recommendation
+  land here. The in-memory transport merges for real.
+- Flow control throttles only the hop between workers, never the publisher:
+  a slow worker lags and skips stale groups like any slow subscriber.
+- The append-only log waits on the spikes, since per-thread sessions would
+  leave each replica's mutex uncontended.
 
 ## Required
 
 - [Contended bench](/quest/m2/perf/kio-channel-contention/bench.md) - a multi-threaded kio bench swept over threads and consumers, plus the contended channels named from `just bench-lock` stacks
-- [Version counter](/quest/m2/perf/kio-channel-contention/version.md) - a re-poll skips the mutex when nothing changed, and parking no longer contends with readers
-- [Append-only log](/quest/m2/perf/kio-channel-contention/log.md) - a kio log primitive with lock-free cursor reads and front eviction, adopted by the group and track channels
+- [Version counter](/quest/m2/perf/kio-channel-contention/version.md) - an opted-in re-poll skips the mutex when nothing changed, and parking no longer contends with readers
+- [In-memory transport](/quest/m2/perf/kio-channel-contention/bridge.md) - a zero-copy, flow-controlled `poll::Session` pair in moq-net, with the test mock rebuilt on it
+- [Replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md) - measures per-worker data-plane replicas linked over the in-memory transport, announcements shared
+- [Cluster spike](/quest/m2/perf/kio-channel-contention/spike-cluster.md) - measures a relay per thread clustered over the in-memory transport, nothing shared
+- [Append-only log](/quest/m2/perf/kio-channel-contention/log.md) - a kio log primitive with lock-free cursor reads and front eviction, if the shared model survives the spikes
 - [Log adoption](/quest/m2/perf/kio-channel-contention/log-adoption.md) - the rest of moq-net's log-shaped state moves onto the log where it measures as a win
 
 ## Related

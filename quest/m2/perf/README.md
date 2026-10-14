@@ -35,7 +35,9 @@ hot-path survey, so quests don't re-litigate them:
   `Send` bounds. The remaining cross-thread costs live in the shared model:
   one `origin::Producer` spans all workers, so a subscriber on worker B reads
   `kio::Lock` state written on worker A. These quests shrink that cost
-  in place; they do not attempt per-worker model sharding.
+  in place; they do not attempt per-worker model sharding, unless the
+  [kio channel contention](/quest/m2/perf/kio-channel-contention/README.md)
+  spikes measure a win (decided 2026-10-14).
 - The batched write/read machinery (`frame::Buffer`, `write_frames`,
   the egress `Prefetch`) already exists in moq-net; egress is amortized,
   ingest and the stream-send path are not.
@@ -71,7 +73,7 @@ optimization.
 
 ## Required
 
-- [kio channel contention](/quest/m2/perf/kio-channel-contention/README.md) - workers spend less time blocked on kio channel-state mutexes (up to 215% of worker CPU on chat at 16 tokio workers), via a version counter and an append-only log
+- [kio channel contention](/quest/m2/perf/kio-channel-contention/README.md) - workers spend less time blocked on kio channel-state mutexes (up to 215% of worker CPU on chat at 16 tokio workers), via a version counter, per-thread spikes, and an append-only log
 - [Relay profiling](/quest/m2/perf/lock-profile.md) - one recipe captures lock wait by stack (first), CPU stacks, and heap profiles, with no code in kio
 - [Lock-wait CPU from switches](/quest/m2/perf/switch-cpu.md) - wait/CPU takes CPU from the same perf recording as the waits, removing schedstat's ~2% low bias
 - [Bench relay port](/quest/m2/perf/bench-relay-port.md) - the bench harness proves its relay owns the port before reporting ready

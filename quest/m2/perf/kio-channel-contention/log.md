@@ -39,9 +39,18 @@ measured no-win abandons it.
   [Log adoption](/quest/m2/perf/kio-channel-contention/log-adoption.md).
 - Writes that are not appends (`TrackState` demote/evict, the scalar fields
   beside the log) stay on the channel's existing state; only the log moves.
+- Waits on the spikes (decided 2026-10-14): with per-thread sessions every
+  consumer of a replica is on one thread, so its mutex is uncontended and a
+  lock-free multi-reader log only pays off if the shared model survives.
+  Across threads the log becomes a flow-controlled byte stream, single writer
+  and single reader, which the
+  [in-memory transport](/quest/m2/perf/kio-channel-contention/bridge.md)
+  already provides.
 - Breaking moq-net's model internals is allowed; check whether any public
   moq-net API changes and sync `js/net` if so.
 
 ## Required
 
+- [Replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md) - if per-worker replicas win, each channel's cross-core readers collapse to one flow-controlled stream per worker and this log is likely abandoned
+- [Cluster spike](/quest/m2/perf/kio-channel-contention/spike-cluster.md) - the same question with nothing shared
 - [Contended bench](/quest/m2/perf/kio-channel-contention/bench.md) - names which channels to move and gives the before numbers
