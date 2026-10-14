@@ -3130,12 +3130,14 @@ impl Consumer {
 	}
 
 	/// Whether the cache is fed live, so the newest object it holds is the track's largest.
-	/// A relay's copy with no upstream subscription is not, even once it learns the end.
+	/// Fetch-only, closed, and parked copies are not, even once they learn the end.
 	pub(crate) fn is_live(&self) -> bool {
-		if let Some(serving) = self.serving() {
-			return serving.is_live();
-		}
-		self.state.read().feed == Feed::Live
+		let state = self.state.read();
+		let Some(routes) = state.routes.clone() else {
+			return state.published && !state.closed && state.feed == Feed::Live;
+		};
+		drop(state);
+		routes.serving().is_some_and(|serving| serving.is_live())
 	}
 
 	/// Fetching a single past group, without holding a live subscription.
@@ -7406,6 +7408,43 @@ mod test {
 		let consumer = producer.consume();
 		let group = consumer.fetch_group(0, None).now_or_never().unwrap().unwrap();
 		assert_eq!(group.sequence, 0);
+	}
+
+	/// A fetched group installs metadata but never accepts the track's live feed.
+	#[test]
+	fn a_fetch_only_cache_is_not_live() {
+		let waiter = kio::Waiter::noop();
+		let request = Request::new(Arc::new(broadcast::Info::default()), "test");
+		let dynamic = request.dynamic();
+		let consumer = request.consume();
+		let mut pending = consumer.fetch_group(2, None);
+		let Poll::Ready(Ok(req)) = dynamic.poll_requested_group(&waiter) else {
+			panic!("fetch request should be ready");
+		};
+		let mut fetched = req.accept(None).unwrap();
+		fetched.write_frame(None, b"2-0".as_ref()).unwrap();
+		fetched.finish().unwrap();
+		let Poll::Ready(Ok(mut group)) = kio::Task::poll(&mut *pending, &waiter) else {
+			panic!("fetched group should be cached");
+		};
+		assert_eq!(group.sequence, 2);
+		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+			panic!("fetched frame should be cached");
+		};
+		assert_eq!(frame.payload.as_ref(), b"2-0");
+		assert!(!consumer.is_live(), "a fetch-only cache is not live");
+
+		let mut producer = request.accept(None);
+		assert!(consumer.is_live(), "accepting the track starts its live feed");
+		producer.set_idle();
+		assert!(!consumer.is_live(), "an idle accepted copy is not live");
+		producer.set_live(None);
+		assert!(consumer.is_live(), "the answered copy is live again");
+
+		// The fetch handler holds the same producer lifetime, so both leave.
+		drop(dynamic);
+		drop(producer);
+		assert!(!consumer.is_live(), "a track whose producer left is not live");
 	}
 
 	/// A one-shot fetch populates the shared cache but never the live arrival cursor,

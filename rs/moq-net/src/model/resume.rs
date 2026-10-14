@@ -1149,6 +1149,30 @@ mod test {
 		);
 	}
 
+	/// Retaining an old copy's cache does not keep a parked logical track live.
+	#[test]
+	fn a_parked_warm_cache_is_not_live() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let resumed = logical.consume();
+		let source = copy();
+		let mut warm = source.create_group(group::Info { sequence: 2 }).unwrap();
+		warm.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"2-0".as_ref())
+			.unwrap();
+		warm.finish().unwrap();
+		routes.serve(source.consume());
+		assert!(resumed.is_live(), "a serving live copy is live");
+
+		routes.park();
+		assert!(source.consume().peek_group(2).is_some(), "the old copy stays warm");
+		assert!(routes.consume().serving().is_none(), "no copy is spliced after it");
+		assert!(!resumed.is_live(), "a parked warm cache is not live");
+
+		let next = copy();
+		routes.serve(next.consume());
+		assert!(resumed.is_live(), "the next serving copy is live");
+	}
+
 	#[test]
 	fn a_reader_reads_the_serving_copy() {
 		let routes = Producer::new();

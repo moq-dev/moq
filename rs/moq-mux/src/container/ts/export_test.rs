@@ -256,6 +256,72 @@ async fn export_skips_a_disabled_rendition() {
 	assert_eq!(payloads, vec![vec![0x01, 0x02, 0x03]; 3]);
 }
 
+/// AAC frames that run on from each other share a PES, as many as B holds with its header
+/// (ISO 13818-1 2.4.2.3), each frame whole and in order, though none lasts whole microseconds.
+#[tokio::test(start_paused = true)]
+async fn export_packs_aac_frames_up_to_their_buffer() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let track = broadcast
+		.create_track(
+			broadcast.unique_name(".aac"),
+			hang::container::track_info(hang::catalog::PRIORITY.audio),
+		)
+		.unwrap();
+	let name = track.name().to_string();
+	{
+		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.container = Container::Legacy;
+		catalog.modify().unwrap().audio.renditions.insert(name.clone(), cfg);
+	}
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+	// 1,024 samples at 48 kHz: 21.33 ms each, 307 bytes with ADTS, 11 to B's 3,584.
+	let frames: Vec<Bytes> = (0..48u8).map(|k| Bytes::from(vec![k; 300])).collect();
+	for (i, payload) in frames.iter().enumerate() {
+		producer
+			.write(Frame {
+				timestamp: Timestamp::from_micros(i as u64 * 1_024 * 1_000_000 / 48_000).unwrap(),
+				duration: None,
+				payload: payload.clone(),
+				keyframe: true,
+			})
+			.unwrap();
+		producer.cut(None).unwrap();
+	}
+	producer.finish().unwrap();
+	let ts = drain(consumer).await;
+
+	let mut pes = PesPacketReader::new(TsPacketReader::new(Cursor::new(ts.as_ref())));
+	let (mut count, mut recovered) = (0, Vec::new());
+	while let Some(packet) = pes.read_pes_packet().unwrap() {
+		count += 1;
+		assert!(
+			14 + packet.data.len() <= 3_584,
+			"a {}-byte PES overflows B",
+			packet.data.len()
+		);
+		let mut pts = packet.header.pts.expect("PES carried no PTS").as_u64();
+		let mut data = &packet.data[..];
+		while !data.is_empty() {
+			let len = usize::from(data[3] & 3) << 11 | usize::from(data[4]) << 3 | usize::from(data[5] >> 5);
+			recovered.push((pts, data[7..len].to_vec()));
+			data = &data[len..];
+			pts += 1_920;
+		}
+	}
+	assert!(
+		count <= frames.len().div_ceil(11) + 1,
+		"{count} PES for {} frames",
+		frames.len()
+	);
+	assert_eq!(recovered.len(), frames.len());
+	for (i, (pts, raw)) in recovered.iter().enumerate() {
+		assert!(pts.abs_diff(i as u64 * 1_920) <= 1, "frame {i} at {pts}");
+		assert_eq!(raw.as_slice(), frames[i].as_ref(), "frame {i}");
+	}
+}
+
 /// Collect PES presentation timestamps per elementary stream (video H.264, audio AAC),
 /// keyed off the PMT's PID assignments.
 fn collect_pes_pts(ts: &[u8]) -> (Vec<u64>, Vec<u64>) {
@@ -1119,17 +1185,17 @@ async fn export_pcr_backfills_a_coarse_cadence() {
 
 /// AC-3 passed through as DVB private data (stream_type 0x06 with the AC-3 descriptor) can
 /// carry several sync frames in one PES, more than a receiver's 5,696-byte buffer holds at
-/// once. The export splits it a frame a PES, each presented a frame after the last, so each
-/// is due and decoded on its own.
+/// once. The export splits it into its sync frames, each presented a frame after the last, so
+/// each is due and decoded on its own.
 #[tokio::test(start_paused = true)]
 async fn export_splits_a_multi_frame_ac3_pes() {
-	let pes = exported_ac3(ac3_sync().repeat(3)).await;
-	assert_eq!(pes.len(), 3, "one PES a sync frame: {pes:?}");
-	for (k, &(pts, bytes)) in pes.iter().enumerate() {
+	let frames = exported_ac3(ac3_sync().repeat(3)).await;
+	assert_eq!(frames.len(), 3, "every sync frame: {frames:?}");
+	for (k, &(pts, bytes)) in frames.iter().enumerate() {
 		assert_eq!(bytes, 128, "frame {k} carries one sync frame");
 		assert_eq!(
 			pts,
-			pes[0].0 + k as u64 * 2_880,
+			frames[0].0 + k as u64 * 2_880,
 			"frame {k} is presented 32 ms after the last"
 		);
 	}
@@ -1142,33 +1208,33 @@ async fn export_splits_a_multi_frame_ac3_pes() {
 async fn export_drops_a_trailing_partial_ac3_frame() {
 	let mut payload = ac3_sync().repeat(2);
 	payload.extend_from_slice(&ac3_sync()[..60]);
-	let pes = exported_ac3(payload).await;
-	assert_eq!(pes.len(), 2, "the whole frames, each its own PES: {pes:?}");
-	assert!(pes.iter().all(|&(_, bytes)| bytes == 128), "{pes:?}");
+	let frames = exported_ac3(payload).await;
+	assert_eq!(frames.len(), 2, "the whole frames: {frames:?}");
+	assert!(frames.iter().all(|&(_, bytes)| bytes == 128), "{frames:?}");
 
-	let pes = exported_ac3(ac3_sync()[..60].to_vec()).await;
-	assert!(pes.is_empty(), "a lone cut frame goes nowhere: {pes:?}");
+	let frames = exported_ac3(ac3_sync()[..60].to_vec()).await;
+	assert!(frames.is_empty(), "a lone cut frame goes nowhere: {frames:?}");
 }
 
 /// A source that leaves `data_alignment_indicator` clear splits AC-3 sync frames across PES,
 /// each PES's PTS timing the first frame that begins in it. The export puts each frame back
-/// together, a frame a PES, byte for byte and presented a frame after the last.
+/// together, byte for byte and presented a frame after the last.
 #[tokio::test(start_paused = true)]
 async fn export_reassembles_ac3_frames_split_across_pes() {
 	let stream: Vec<u8> = (0..6).flat_map(ac3_frame).collect();
 	// Cut mid-frame into frames 0-1, 1-3 and 3-5, timed by frames 0, 2 and 4.
-	let pes = exported_ac3_pes(vec![
+	let frames = exported_ac3_frames(vec![
 		Ac3Write::Pes(0, stream[..200].to_vec()),
 		Ac3Write::Pes(64, stream[200..500].to_vec()),
 		Ac3Write::Pes(128, stream[500..].to_vec()),
 	])
 	.await;
-	assert_eq!(pes.len(), 6, "one PES a sync frame");
-	for (k, (pts, bytes)) in pes.iter().enumerate() {
+	assert_eq!(frames.len(), 6, "every sync frame");
+	for (k, (pts, bytes)) in frames.iter().enumerate() {
 		assert_eq!(*bytes, ac3_frame(k as u8), "frame {k} whole and in order");
 		assert_eq!(
 			*pts,
-			pes[0].0 + k as u64 * 2_880,
+			frames[0].0 + k as u64 * 2_880,
 			"frame {k} is presented 32 ms after the last"
 		);
 	}
@@ -1191,10 +1257,10 @@ async fn export_reassembles_an_ac3_header_split_across_pes() {
 		],
 	];
 	for input in cuts {
-		let pes = exported_ac3_pes(input).await;
-		let frames: Vec<&Vec<u8>> = pes.iter().map(|(_, bytes)| bytes).collect();
+		let timed = exported_ac3_frames(input).await;
+		let frames: Vec<&Vec<u8>> = timed.iter().map(|(_, bytes)| bytes).collect();
 		assert_eq!(frames, [&ac3_frame(0), &ac3_frame(1)]);
-		assert_eq!(pes[1].0 - pes[0].0, 2_880);
+		assert_eq!(timed[1].0 - timed[0].0, 2_880);
 	}
 }
 
@@ -1205,15 +1271,15 @@ async fn export_reassembles_an_ac3_header_split_across_pes() {
 async fn export_drops_ac3_fragments_at_a_join_or_a_gap() {
 	let stream: Vec<u8> = (0..6).flat_map(ac3_frame).collect();
 	// Joined 60 bytes into frame 0; the PES carrying the rest of frame 2 and most of 3 is lost.
-	let pes = exported_ac3_pes(vec![
+	let timed = exported_ac3_frames(vec![
 		Ac3Write::Pes(32, stream[60..300].to_vec()),
 		Ac3Write::Pes(128, stream[500..].to_vec()),
 	])
 	.await;
-	let frames: Vec<&Vec<u8>> = pes.iter().map(|(_, bytes)| bytes).collect();
+	let frames: Vec<&Vec<u8>> = timed.iter().map(|(_, bytes)| bytes).collect();
 	assert_eq!(frames, [&ac3_frame(1), &ac3_frame(4), &ac3_frame(5)]);
-	assert_eq!(pes[1].0 - pes[0].0, 3 * 2_880, "frame 4 at its PES's PTS");
-	assert_eq!(pes[2].0 - pes[1].0, 2_880);
+	assert_eq!(timed[1].0 - timed[0].0, 3 * 2_880, "frame 4 at its PES's PTS");
+	assert_eq!(timed[2].0 - timed[1].0, 2_880);
 }
 
 /// A sync word in the bytes ahead of the first frame at a join can pass for a header whose
@@ -1225,8 +1291,8 @@ async fn export_skips_an_unconfirmed_ac3_sync_word_at_a_join() {
 	let mut payload = vec![0x0b, 0x77, 0x00, 0x00, 0x25, 0x40, 0x40];
 	payload.resize(40, 0x00);
 	payload.extend((1..3).flat_map(ac3_frame));
-	let pes = exported_ac3_pes(vec![Ac3Write::Pes(0, payload)]).await;
-	let frames: Vec<&Vec<u8>> = pes.iter().map(|(_, bytes)| bytes).collect();
+	let timed = exported_ac3_frames(vec![Ac3Write::Pes(0, payload)]).await;
+	let frames: Vec<&Vec<u8>> = timed.iter().map(|(_, bytes)| bytes).collect();
 	assert_eq!(frames, [&ac3_frame(1), &ac3_frame(2)]);
 }
 
@@ -1235,14 +1301,38 @@ async fn export_skips_an_unconfirmed_ac3_sync_word_at_a_join() {
 #[tokio::test(start_paused = true)]
 async fn export_drops_an_ac3_frame_cut_by_a_marker() {
 	let stream: Vec<u8> = (0..4).flat_map(ac3_frame).collect();
-	let pes = exported_ac3_pes(vec![
+	let timed = exported_ac3_frames(vec![
 		Ac3Write::Pes(0, stream[..200].to_vec()),
 		Ac3Write::Marker,
 		Ac3Write::Pes(64, stream[256..].to_vec()),
 	])
 	.await;
-	let frames: Vec<&Vec<u8>> = pes.iter().map(|(_, bytes)| bytes).collect();
+	let frames: Vec<&Vec<u8>> = timed.iter().map(|(_, bytes)| bytes).collect();
 	assert_eq!(frames, [&ac3_frame(0), &ac3_frame(2), &ac3_frame(3)]);
+}
+
+/// AC-3 sync frames that run on share a PES, as many as DVB's 5,696-byte B holds with the
+/// PES header (ISO 13818-1 2.4.2.3), and still decode in order 32 ms apart.
+#[tokio::test(start_paused = true)]
+async fn export_packs_ac3_frames_up_to_their_buffer() {
+	let stream: Vec<u8> = (0..100).flat_map(ac3_frame).collect();
+	let pes = exported_ac3_pes(vec![Ac3Write::Pes(0, stream.clone())]).await;
+	// 44 of the 128-byte frames to a PES, and the first frame alone, sent as it starts.
+	assert!(
+		pes.len() <= 100usize.div_ceil(44) + 1,
+		"{} PES for 100 frames",
+		pes.len()
+	);
+	for (_, payload) in &pes {
+		assert!(14 + payload.len() <= 5_696, "a {}-byte PES overflows B", payload.len());
+	}
+	let bytes: Vec<u8> = pes.into_iter().flat_map(|(_, payload)| payload).collect();
+	assert_eq!(bytes, stream, "every frame whole and in order");
+	let timed = exported_ac3_frames(vec![Ac3Write::Pes(0, stream)]).await;
+	assert!(
+		timed.windows(2).all(|pair| pair[1].0 - pair[0].0 == 2_880),
+		"32 ms apart"
+	);
 }
 
 /// A 32 kb/s 48 kHz 2/0 AC-3 sync frame: 128 bytes, 1,536 samples (32 ms).
@@ -1260,9 +1350,9 @@ fn ac3_frame(k: u8) -> Vec<u8> {
 }
 
 /// Export one PES of `payload` on an AC-3 passthrough PID beside bbb's media, and return the
-/// PTS of every PES on that PID and how many bytes each carries.
+/// PTS of every sync frame on that PID and how many bytes each carries.
 async fn exported_ac3(payload: Vec<u8>) -> Vec<(u64, usize)> {
-	exported_ac3_pes(vec![Ac3Write::Pes(0, payload)])
+	exported_ac3_frames(vec![Ac3Write::Pes(0, payload)])
 		.await
 		.into_iter()
 		.map(|(pts, bytes)| (pts, bytes.len()))
@@ -1367,6 +1457,21 @@ async fn exported_ac3_pes(input: Vec<Ac3Write>) -> Vec<(u64, Vec<u8>)> {
 		}
 	}
 	pes
+}
+
+/// Export `input` as [`exported_ac3_pes`] does, and return each sync frame on the AC-3 PID,
+/// timed by its PES's PTS and the frames ahead of it there.
+async fn exported_ac3_frames(input: Vec<Ac3Write>) -> Vec<(u64, Vec<u8>)> {
+	let mut frames = Vec::new();
+	for (mut pts, mut payload) in exported_ac3_pes(input).await {
+		while !payload.is_empty() {
+			let header = crate::codec::ac3::parse_header(&payload).expect("the PES carries whole sync frames");
+			let rest = payload.split_off(header.len);
+			frames.push((pts, std::mem::replace(&mut payload, rest)));
+			pts += header.samples * 90_000 / u64::from(header.sample_rate);
+		}
+	}
+	frames
 }
 
 /// Full SCTE-35 round-trip: import `bbb.ts` (real H.264 + AAC) into a broadcast
@@ -2011,6 +2116,86 @@ async fn aac_program_config_follows_each_table() {
 		imported.iter().all(|frame| frame[..] == payload[..]),
 		"the repeated element leaves every frame"
 	);
+}
+
+/// AAC frames that run on share a PES, but every PID's frame repeating the program config
+/// element after the tables starts one, whichever PID's frame the tables rode on.
+#[tokio::test(start_paused = true)]
+async fn aac_program_config_leads_a_packed_pes() {
+	let mut quad = vec![0x11, 0x80, 0x04, 0xC4, 0x04, 0x00, 0x21, 0x10, 0x0C];
+	quad.extend_from_slice(b"Lavc63.1.101");
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	// Offset, so the tables ride one PID's frame while the other's PES is open.
+	let mut producers = Vec::new();
+	for (name, bytes, offset) in [("a.aac", 10, 0), ("b.aac", 40, 7_000)] {
+		let track = broadcast
+			.create_track(name, hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 4);
+		cfg.container = Container::Legacy;
+		cfg.description = Some(Bytes::from(quad.clone()));
+		catalog.modify().unwrap().audio.renditions.insert(name.to_string(), cfg);
+		producers.push((Producer::new(track, HangContainer::Legacy(Kind::Audio)), bytes, offset));
+	}
+	// 1,024 samples at 48 kHz: 21.33 ms each, so the 500 ms table cadence lands mid-PES.
+	for (producer, bytes, offset) in &mut producers {
+		for i in 0..96u64 {
+			producer
+				.write(Frame {
+					timestamp: Timestamp::from_micros(*offset + i * 1_024 * 1_000_000 / 48_000).unwrap(),
+					duration: None,
+					payload: Bytes::from(vec![0x20; *bytes]),
+					keyframe: true,
+				})
+				.unwrap();
+			producer.cut(None).unwrap();
+		}
+		producer.finish().unwrap();
+	}
+	let ts = drain(consumer).await;
+
+	// Each PID's PESs, and each PES's frames: whether the element leads its raw data block.
+	let mut pes: std::collections::HashMap<u16, Vec<Vec<u8>>> = Default::default();
+	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		let pid = packet.header.pid.as_u16();
+		match packet.payload {
+			Some(TsPayload::PesStart(start)) => pes.entry(pid).or_default().push(start.data.to_vec()),
+			Some(TsPayload::PesContinuation(rest)) => {
+				pes.get_mut(&pid).unwrap().last_mut().unwrap().extend_from_slice(&rest)
+			}
+			_ => {}
+		}
+	}
+	assert_eq!(pes.len(), 2);
+	for (pid, pes) in pes {
+		let frames: Vec<Vec<bool>> = pes
+			.iter()
+			.map(|data| {
+				let (mut data, mut frames) = (&data[..], Vec::new());
+				while !data.is_empty() {
+					let header = super::adts::Header::parse(data).unwrap();
+					// ID_PCE in the first three bits of the raw data block.
+					frames.push(data[header.header_len] >> 5 == 5);
+					data = &data[header.frame_len..];
+				}
+				frames
+			})
+			.collect();
+		assert_eq!(frames.iter().map(Vec::len).sum::<usize>(), 96, "PID {pid}");
+		assert!(frames.len() < 96, "PID {pid}: the frames share PESs");
+		assert!(
+			frames.iter().filter(|frames| frames[0]).count() > 2,
+			"PID {pid}: the element repeats after the tables"
+		);
+		assert!(
+			frames.iter().all(|frames| !frames[1..].contains(&true)),
+			"PID {pid}: a PES carries the element after older raw blocks: {frames:?}"
+		);
+	}
 }
 
 /// GStreamer 1.28 `fdkaacenc` output, 48 kHz stereo, remuxed to FLV by ffmpeg 9.0.1. Its
@@ -4901,6 +5086,26 @@ fn pes_decode_in_order(frames: &[Frame]) -> Vec<u64> {
 	out
 }
 
+/// How many access units the stream carries: one a PES, or each ADTS frame of an AAC PES.
+fn access_units(frames: &[Frame]) -> usize {
+	let bytes: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	let mut reader = PesPacketReader::new(TsPacketReader::new(Cursor::new(bytes)));
+	let mut units = 0;
+	while let Some(pes) = reader.read_pes_packet().unwrap() {
+		let mut data = &pes.data[..];
+		if !(data.len() > 6 && data[0] == 0xff && data[1] & 0xf0 == 0xf0) {
+			units += 1;
+			continue;
+		}
+		while data.len() > 6 {
+			let len = usize::from(data[3] & 3) << 11 | usize::from(data[4]) << 3 | usize::from(data[5] >> 5);
+			data = &data[len.clamp(7, data.len())..];
+			units += 1;
+		}
+	}
+	units
+}
+
 /// Whether every PES start decodes no earlier than those ahead of it, up to one grid slot:
 /// a slot spreads each PID's packets among the others, so units sharing one may swap.
 fn in_decode_order(decode: &[u64]) -> bool {
@@ -5005,7 +5210,8 @@ async fn lagging_audio(delay: Duration) -> Vec<Frame> {
 #[tokio::test(start_paused = true)]
 async fn late_audio_still_arrives_on_time() {
 	let frames = lagging_audio(Duration::from_millis(500)).await;
-	assert!(assert_on_time(&frames) > 100, "too little output to judge");
+	// 75 video frames, and the audio packed several frames a PES.
+	assert!(assert_on_time(&frames) > 80, "too little output to judge");
 }
 
 /// A zero delay holds nothing, so the interleave stays in arrival order.
@@ -5065,10 +5271,9 @@ async fn a_late_frame_is_dropped_and_the_rest_keep_their_order() {
 	out.extend(drain_frames(&mut export).await);
 
 	let written = rig.audio_index + TICKS / 2;
-	let decode = pes_decode_in_order(&out);
 	assert!(export.dropped() > 0, "the stalled audio missed its deadline");
 	assert_eq!(
-		decode.len() as u64,
+		access_units(&out) as u64,
 		written - export.dropped(),
 		"only the late frames were dropped"
 	);
@@ -5802,8 +6007,8 @@ fn collect_pcrs(frames: &[Frame]) -> Vec<(usize, u64, u128)> {
 	let mut pcrs = Vec::new();
 	for frame in frames {
 		for packet in frame.payload.chunks(188) {
-			// adaptation-field-only packets (adaptation_field_control == 0b10) are the clock.
-			if packet[3] & 0x30 == 0x20 && packet[5] & 0x10 != 0 {
+			// A clock packet, or the clock PID's packet that carries the slot's PCR.
+			if packet[3] & 0x20 != 0 && packet[4] > 0 && packet[5] & 0x10 != 0 {
 				let base = (u64::from(packet[6]) << 25)
 					| (u64::from(packet[7]) << 17)
 					| (u64::from(packet[8]) << 9)

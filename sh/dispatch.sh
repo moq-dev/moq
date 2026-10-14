@@ -39,7 +39,8 @@ fi
 cd "$(git rev-parse --show-toplevel)"
 
 changed=$(mktemp)
-trap 'rm -f "$changed"' EXIT
+js_changed=$(mktemp)
+trap 'rm -f "$changed" "$js_changed"' EXIT
 
 all=
 if [[ "$base" == --all ]]; then
@@ -58,7 +59,9 @@ fi
 # The impact map: a module is in scope when a changed path matches its
 # pattern. An empty pattern is a repository-wide lint that runs on every diff.
 declare -A scope=(
-    [js]='^(js/|doc/|drafts/|demo/(boy|web)/|test/|rs/moq-wasm/|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
+    # The JS tests also read Rust's shared JSON vectors; sh/js/workspace.py
+    # fails a check that reads a cross-tree input this pattern misses.
+    [js]='^(js/|doc/|drafts/|demo/(boy|web)/|test/|rs/moq-wasm/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
     # Workers with lockfiles outside the Bun workspace.
     [workers]='^(infra/apt/|infra/rpm/|infra/moq-sh/|demo/pub/|sh/js/workers\.sh$)'
     [moq_sh]='^infra/moq-sh/'
@@ -102,7 +105,7 @@ declare -A scope=(
 # front, because there a skip is indistinguishable from a pass. swift needs
 # none: it skips off macOS by design, and swift.yml is its real gate.
 declare -A tools=(
-    [js]='bun python3 cargo wasm-bindgen'
+    [js]='bun python3'
     [workers]='bun'
     [moq_sh]='dash'
     [rs]='cargo jq'
@@ -177,6 +180,14 @@ fi
 rs_list=$changed
 [[ -z "$all" ]] || rs_list=--all
 
+# Pass only JS-impacting paths, so an unrelated quest or Rust file does not
+# turn a narrow package selection into the shared-input fallback.
+js_list=--all
+if [[ -z "$all" ]]; then
+    grep -E "${scope[js]}" "$changed" >"$js_changed" || true
+    js_list=$js_changed
+fi
+
 # Tracked and new files, skipping whatever .gitignore does (node_modules, target).
 files() {
     git ls-files -z --cached --others --exclude-standard -- "$@"
@@ -188,7 +199,7 @@ verb=${action#ci-}
 
 for module in "${selected[@]}"; do
     case "$verb:$module" in
-        check:js) just js check ;;
+        check:js) just js check-changed "$js_list" ;;
         check:workers) just js workers ;;
         check:moq_sh) just infra moq-sh test ;;
         # `check` lints Rust through its test build, so the crates compile once;
@@ -214,6 +225,7 @@ for module in "${selected[@]}"; do
         fix:toml) RUST_LOG=error taplo format ;;
         fix:nix) files '*.nix' | xargs -0 nixfmt ;;
         fix:justfile) files justfile '*/justfile' | xargs -0 -n1 just --fmt --justfile ;;
+        test:js) just js test-changed "$js_list" ;;
         test:rs) just rs test-changed "$rs_list" ;;
         *:shell) sh/shell.sh "$verb" ;;
         *) just "$module" "$verb" ;;
@@ -225,7 +237,8 @@ done
 if [[ "$action" == check ]]; then
     for module in "${selected[@]}"; do
         case "$module" in
-            js | py) just "$module" test ;;
+            js) just js test-changed "$js_list" ;;
+            py) just py test ;;
         esac
     done
 fi

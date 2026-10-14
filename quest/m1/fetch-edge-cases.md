@@ -38,7 +38,3 @@ later 0.17 patch.
 
 Public API: none. Wire: behavior only, within the existing draft-20 through
 draft-22 FETCH form.
-
-## Related
-
-- [Main live-feed check](/quest/m1/fetch-live-feed.md) - the other follow-up from the same backport review

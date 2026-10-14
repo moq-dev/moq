@@ -175,6 +175,11 @@ class ChangedTests(unittest.TestCase):
         (self.repo / "new.txt").write_text("new")
         self.expect("origin/main", ["base.txt", "stack.txt", "feature.txt", "new.txt"])
 
+    def test_renames_list_both_sides(self):
+        self.git("mv", "base.txt", "moved.txt")
+        self.git("commit", "-qm", "move")
+        self.expect("origin/main", ["base.txt", "moved.txt", "stack.txt", "feature.txt"])
+
     def test_invalid_explicit_base_is_an_error(self):
         result = subprocess.run([str(CHANGED), "missing"], cwd=self.repo, env=self.env,
                                 text=True, capture_output=True)

@@ -7335,6 +7335,36 @@ mod serve_tests {
 		}
 	}
 
+	/// A track whose cache only ever answered a fetch has no live feed, so its newest
+	/// object is not Largest Object: a draft-20 FETCH past it echoes the requested end.
+	#[moq_net_sim::test]
+	async fn a_draft20_fetch_of_a_fetch_only_cache_is_not_capped() {
+		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
+			let h = serve(version);
+			let request = h._broadcast.reserve_track("cam").unwrap();
+			let dynamic = request.dynamic();
+			let fetching = request.consume().fetch_group(4, None);
+			let mut fetched = dynamic.requested_group().await.unwrap().accept(None).unwrap();
+			for object in 0..2 {
+				fetched.write_frame(None, format!("4-{object}").into_bytes()).unwrap();
+			}
+			fetched.finish().unwrap();
+			fetching.await.unwrap();
+
+			let fetch_type = fetch_range(
+				version,
+				"cam",
+				Location { group: 4, object: 2 },
+				Location { group: 4, object: 6 },
+			);
+			let buf = run_fetch(&h, fetch_type, GroupOrder::Ascending, true).await;
+			let (ok, objects) = fetch_answer(buf, version);
+			assert_eq!(ok.end_location, Location { group: 4, object: 5 }, "{version}");
+			assert!(!ok.end_of_track, "{version}");
+			assert_eq!(objects, Vec::new(), "{version}");
+		}
+	}
+
 	/// The last group of a finished track ends the response at its last object, with End
 	/// of Track set.
 	#[moq_net_sim::test]

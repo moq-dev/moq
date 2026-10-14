@@ -526,6 +526,11 @@ For example, a transcoder produces a catalog listing its own downstream renditio
 
 A consumer subscribes to such a rendition in the referenced broadcast, using the rendition's track name ({{field-track}}).
 
+An MSF {{moqmsf}} gateway maps the resolved broadcast path to the track's absolute `namespace`, or derives a relative `broadcast` reference from that namespace when importing.
+An absent MSF `namespace` inherits the catalog's broadcast.
+Since each endpoint sees paths under its own connection root, a `namespace` equal to the catalog broadcast's path, or matching it on whole trailing segments, also names the catalog's broadcast; a gateway MUST NOT emit a different broadcast's `namespace` that matches so.
+A gateway MUST preserve the namespace and track-name pair or refuse the rendition; it MUST NOT substitute the catalog's broadcast for an unrepresentable reference.
+
 ### track {#field-track}
 A rendition's key in its map is its ID, and by default also the name of its track.
 The `track` field overrides the name, so that the ID can stay unique when the name cannot: two renditions referencing same-named tracks in different broadcasts ({{field-broadcast}}) need different IDs.
@@ -1120,6 +1125,7 @@ This document has no IANA actions.
 
 - Fixed a track's identity for its name ({{identity}}): codec, description, container, sample rate, and channel count never change; `codedWidth` and `codedHeight` are ceilings below which the picture resizes in band; `bitrate` and `framerate` are maxima that only rise. A change of identity takes a new track name or a new Epoch.
 - Specified MSF text metadata preservation and refusal of unrepresentable text packaging during gateway conversion.
+- Specified conversion between relative broadcast references and MSF track namespaces without changing track identity, reading a namespace aligned with the catalog path's trailing segments as the catalog itself.
 
 - Added optional audio and video `warmup` durations, rounded up to whole milliseconds, and allowed video groups to start at convergent random access pictures.
 - Defined encoder `jitter` as flush lateness above the rendition's own recent minimum, replacing fixed frame-duration hints; container batches retain media-span estimates.

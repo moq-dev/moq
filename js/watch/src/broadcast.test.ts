@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import * as Catalog from "@moq/hang/catalog";
+import * as Msf from "@moq/msf";
 import * as Moq from "@moq/net";
 import { Origin, Path } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
@@ -847,4 +848,54 @@ describe("manual catalog", () => {
 			owner.close();
 		}
 	});
+});
+
+it("subscribes a cross-broadcast MSF rendition on its namespace", async () => {
+	const owner = new Origin.Producer();
+	const catalogBroadcast = publish(owner, Path.from("room/catalog.msf"));
+	const referenced = publish(owner, Path.from("room/left"));
+	catalogBroadcast.createTrack("video").writeFrame({ payload: new Uint8Array([1]) });
+	referenced.createTrack("video").writeFrame({ payload: new Uint8Array([2]) });
+	catalogBroadcast.createTrack("catalog").writeFrame({
+		payload: Msf.encode({
+			tracks: [
+				{
+					name: "video",
+					namespace: "room/left",
+					packaging: "loc",
+					role: "video",
+					codec: "vp8",
+				},
+			],
+		}),
+	});
+	const source = new Broadcast({
+		origin: owner,
+		name: Path.from("room/catalog.msf"),
+		enabled: true,
+		announced: false,
+	});
+	const effect = new Effect();
+	try {
+		await settle();
+		const config = source.out.catalog.peek()?.video?.renditions.video;
+		if (!config) throw new Error("MSF rendition missing");
+		let active: Moq.Broadcast.Consumer | undefined;
+		effect.run((inner) => {
+			active = source.relativeBroadcast(inner, config.broadcast);
+		});
+		await settle();
+		if (!active) throw new Error("referenced broadcast did not resolve");
+		const track = active.track("video").subscribe();
+		try {
+			const frame = await track.ordered().readFrame();
+			expect(frame?.payload).toEqual(new Uint8Array([2]));
+		} finally {
+			track.close();
+		}
+	} finally {
+		effect.close();
+		source.close();
+		owner.close();
+	}
 });
