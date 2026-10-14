@@ -61,7 +61,7 @@ enum Importer {
 
 impl Publisher {
 	/// Wire up the TS importer and catalog for `path` on `origin`, announcing the broadcast
-	/// now, or each program's once the PAT lists it for [`Program::All`].
+	/// now, or each program's once its PMT declares its tracks for [`Program::All`].
 	///
 	/// `config` is the catalog the importer publishes into: retention
 	/// (`with_max_age`) and the connection allocator passthrough tracks claim on

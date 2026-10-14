@@ -30,10 +30,32 @@ pub struct Programs {
 
 /// One program's broadcast.
 struct Program {
+	/// The PAT's program number.
+	number: u16,
 	/// Keeps the origin-created broadcast alive; the importer's clone doesn't.
-	_broadcast: moq_net::broadcast::Producer,
+	broadcast: moq_net::broadcast::Producer,
 	import: Import<Ext>,
 	catalog: catalog::Producer<Ext>,
+	/// The route and catalog track until the catalog first goes out, which waits for the
+	/// program's PMT: announced any sooner, a relay would ask for tracks it cannot serve yet.
+	pending: Option<(moq_net::origin::Route, moq_net::track::Consumer)>,
+}
+
+impl Program {
+	/// Announce the broadcast once its catalog has gone out.
+	fn announce_if_listed(&mut self) -> anyhow::Result<()> {
+		let Some((route, listed)) = &self.pending else {
+			return Ok(());
+		};
+		if listed.latest().is_none() {
+			return Ok(());
+		}
+		self.broadcast
+			.announce(route.clone())
+			.with_context(|| format!("failed to announce program {}", self.number))?;
+		self.pending = None;
+		Ok(())
+	}
 }
 
 impl Programs {
@@ -77,13 +99,14 @@ impl Programs {
 			import.handle_pat(&pat)?;
 			// Each program is its own publisher instance for this run, so a restart
 			// replaces it rather than resuming into it.
-			broadcast
-				.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
-				.with_context(|| format!("failed to announce broadcast {name}"))?;
+			let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+			let listed = broadcast.consume().track(hang::Catalog::DEFAULT_NAME)?;
 			self.programs.push(Program {
-				_broadcast: broadcast,
+				number: program,
+				broadcast,
 				import,
 				catalog,
+				pending: Some((route, listed)),
 			});
 		}
 		let pending = std::mem::take(&mut self.pending);
@@ -93,6 +116,7 @@ impl Programs {
 	fn feed(&mut self, data: &[u8]) -> anyhow::Result<()> {
 		for program in &mut self.programs {
 			program.import.decode(data)?;
+			program.announce_if_listed()?;
 		}
 		Ok(())
 	}
@@ -125,6 +149,13 @@ impl Programs {
 	pub fn finish(&mut self) -> anyhow::Result<()> {
 		for program in &mut self.programs {
 			program.import.finish()?;
+			program.announce_if_listed()?;
+			if program.pending.is_some() {
+				tracing::warn!(
+					program = program.number,
+					"input ended before the program declared a track; not announced"
+				);
+			}
 			program.catalog.finish()?;
 		}
 		Ok(())
@@ -300,11 +331,44 @@ mod test {
 		let epochs: Vec<_> = programs
 			.programs
 			.iter()
-			.map(|program| program._broadcast.route().and_then(|route| route.epoch))
+			.map(|program| program.broadcast.route().and_then(|route| route.epoch))
 			.collect();
 		assert_eq!(epochs.len(), 2);
 		assert!(epochs.iter().all(Option::is_some), "every program names its instance");
 		assert_ne!(epochs[0], epochs[1]);
+	}
+
+	/// A program is announced only once its catalog lists its tracks, never on the PAT alone,
+	/// so a relay that queries it the moment it is announced finds them.
+	#[test]
+	fn a_program_announces_once_it_declares_its_tracks() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let input = two_programs();
+		let mut packets = input.chunks(188);
+		while programs.programs.is_empty() {
+			programs
+				.decode(packets.next().expect("the PAT starts the programs"))
+				.unwrap();
+		}
+		assert!(
+			programs
+				.programs
+				.iter()
+				.all(|program| program.broadcast.route().is_none()),
+			"announced on the PAT alone"
+		);
+		for packet in packets {
+			programs.decode(packet).unwrap();
+		}
+		programs.finish().unwrap();
+		assert!(
+			programs
+				.programs
+				.iter()
+				.all(|program| program.broadcast.route().is_some()),
+			"every program is announced once it has declared its tracks"
+		);
 	}
 
 	/// A partial PAT holds only itself, not the multiplex that follows it.
