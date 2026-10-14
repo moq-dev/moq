@@ -2061,6 +2061,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn sparse_object_ids_refuse_ordinal_recovery() {
 		let routes = Producer::new();
 		let logical = logical(&routes);

@@ -49,12 +49,14 @@ pub struct Frame {
 }
 
 /// A frame with the relay metadata its group keeps beside it, read only by wire egress.
+#[cfg(feature = "async")]
 #[derive(Clone, Debug)]
 pub(crate) struct Object {
 	pub frame: Frame,
 	pub fields: Option<Arc<super::object::Fields>>,
 }
 
+#[cfg(feature = "async")]
 impl std::ops::Deref for Object {
 	type Target = Frame;
 	fn deref(&self) -> &Self::Target {
@@ -710,6 +712,7 @@ pub struct Consumer {
 	// The group's channel, used to park while a partial frame fills.
 	state: kio::Consumer<GroupState>,
 	info: Info,
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fields: Option<Arc<super::object::Fields>>,
 	source: Source,
 	// Byte offset consumed so far.

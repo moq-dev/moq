@@ -37,6 +37,7 @@ pub(crate) struct Properties {
 }
 
 impl Properties {
+	#[cfg(feature = "async")]
 	pub fn is_plain(&self) -> bool {
 		self.values.is_empty()
 	}

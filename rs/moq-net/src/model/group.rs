@@ -199,6 +199,7 @@ struct Relay {
 }
 
 /// The IETF header state that cannot be inferred from a plain frame list.
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 #[derive(Clone, Debug)]
 pub(crate) struct Wire {
 	/// Object IDs differ from the public frame ordinals, so ordinal recovery cannot stitch.
@@ -582,15 +583,18 @@ impl std::ops::Deref for Producer {
 }
 
 impl Producer {
+	#[cfg(feature = "async")]
 	pub(crate) fn wire(&self) -> Option<Wire> {
 		self.state.read().wire().cloned()
 	}
 
+	#[cfg(feature = "async")]
 	pub(crate) fn set_wire(&self, wire: Wire) -> Result<()> {
 		modify(&self.state)?.relay().wire = Some(wire);
 		Ok(())
 	}
 
+	#[cfg(feature = "async")]
 	pub(crate) fn mark_gap(&self, id: u64, gap: Option<u64>) -> Result<()> {
 		if gap.is_some_and(|gap| gap > id) {
 			return Err(Error::MalformedTrack);
@@ -613,6 +617,7 @@ impl Producer {
 		Ok(())
 	}
 
+	#[cfg(feature = "async")]
 	pub(crate) fn set_end_object(&self, fields: super::object::Fields) -> Result<()> {
 		let mut state = modify(&self.state)?;
 		if state.fin.is_some() || state.relay.as_ref().is_some_and(|relay| relay.end_object.is_some()) {
@@ -1576,6 +1581,7 @@ impl std::ops::Deref for Consumer {
 }
 
 impl Consumer {
+	#[cfg(feature = "async")]
 	pub(crate) fn last_object(&self) -> Option<u64> {
 		let state = self.cursor.state.read();
 		match state.wire() {
@@ -1584,15 +1590,18 @@ impl Consumer {
 		}
 	}
 
+	#[cfg(feature = "async")]
 	pub(crate) fn wire(&self) -> Option<Wire> {
 		self.cursor.state.read().wire().cloned()
 	}
 
+	#[cfg(feature = "async")]
 	pub(crate) fn end_object(&self) -> Option<Arc<super::object::Fields>> {
 		self.cursor.state.read().relay.as_ref()?.end_object.clone()
 	}
 
 	/// Fill a private batch without losing metadata through the public frame view.
+	#[cfg(feature = "async")]
 	pub(crate) fn poll_read_objects<const N: usize>(
 		&mut self,
 		waiter: &kio::Waiter,
@@ -1900,6 +1909,7 @@ impl Consumer {
 	}
 
 	/// Read the next frame with its relay metadata, for wire egress.
+	#[cfg(feature = "async")]
 	pub(crate) fn poll_read_object(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Object>>> {
 		// Every frame is served through the cursor's prefetch, which holds its fields.
 		let frame = ready!(self.poll_read_frame(waiter))?;
@@ -2270,6 +2280,7 @@ mod test {
 	/// Fields sit beside the frames only from the first fielded one, so every read path
 	/// must line them up by index across plain frames and prefetch batches.
 	#[test]
+	#[cfg(feature = "async")]
 	fn object_fields_follow_their_frames_through_every_read() {
 		let pool = cache::Pool::unbounded();
 		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
@@ -2337,6 +2348,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn terminal_metadata_stays_charged_after_frames_are_released() {
 		let pool = cache::Pool::unbounded();
 		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
