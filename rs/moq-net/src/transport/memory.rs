@@ -8,10 +8,13 @@
 //! until the reader consumes some. A slow reader therefore throttles its own streams and
 //! nothing else.
 //!
-//! Like QUIC, a reset or a stop discards what the stream still buffers, and a stream
-//! whose FIN was written counts as received, so a later reset is ignored and
-//! [`poll::SendStream::poll_closed`] resolves at once. Unlike QUIC, a session close keeps
-//! what was already written readable: the peer reads it, then the close.
+//! Like QUIC, a reset or a stop discards what the stream still buffers, and a finished
+//! stream has already reached the peer in full, so a later reset is ignored. Unlike QUIC,
+//! the FIN is acknowledged only once the reader reads through it (or stops after it), and
+//! a session close keeps what was already written readable: the peer reads it, then the
+//! close. So a writer that waits for [`poll::SendStream::poll_closed`] before closing the
+//! session never races the reader. Nothing sent after the close reaches the peer, resets
+//! and stops included.
 //!
 //! Datagrams are copied, since [`poll::Session::poll_send_datagram`] borrows them, and
 //! dropped when the peer's queue is full, as a network would.
@@ -370,6 +373,8 @@ struct State {
 	reset: Option<u32>,
 	/// The reader stopped the stream with this code.
 	stop: Option<u32>,
+	/// The reader read through the FIN, or stopped after it.
+	acked: bool,
 }
 
 impl State {
@@ -384,7 +389,7 @@ impl State {
 }
 
 /// How a stream handle ended, so later calls repeat the outcome.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Done {
 	/// Finished by the writer, or read to the end.
 	Fin,
@@ -477,27 +482,35 @@ impl poll::SendStream for SendStream {
 	}
 
 	fn reset(&mut self, code: u32) {
-		// A finished stream was received in full, so a reset has nothing left to stop.
+		// A finished stream already reached the peer in full, so there is nothing to stop.
 		if self.done.is_some() {
 			return;
 		}
 		self.done = Some(Done::Local);
+		if closed(&self.close).is_some() {
+			return;
+		}
 
 		let mut state = self.state.lock();
-		state.reset = Some(code);
-		state.discard(&self.window);
+		if state.stop.is_none() {
+			state.reset = Some(code);
+			state.discard(&self.window);
+		}
 	}
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-		if self.done.is_some() {
+		if self.done == Some(Done::Local) {
 			return Poll::Ready(Ok(()));
 		}
 		let waiter = self.park.hold(cx);
-		if let Poll::Ready(state) = self.state.poll(waiter, |state| match state.stop.is_some() {
+		if let Poll::Ready(state) = self.state.poll(waiter, |state| match state.acked || state.stop.is_some() {
 			true => Poll::Ready(()),
 			false => Poll::Pending,
 		}) {
-			return Poll::Ready(Err(Error::Stopped(state.stop.expect("stopped"))));
+			return Poll::Ready(match state.stop {
+				Some(code) => Err(Error::Stopped(code)),
+				None => Ok(()),
+			});
 		}
 		Poll::Ready(Err(ready!(poll_close(&self.close, waiter))))
 	}
@@ -578,6 +591,7 @@ impl poll::RecvStream for RecvStream {
 
 		let Some(front) = state.chunks.front_mut() else {
 			// Finished, and every chunk read.
+			state.acked = true;
 			self.done = Some(Done::Fin);
 			return Poll::Ready(Ok(None));
 		};
@@ -596,11 +610,17 @@ impl poll::RecvStream for RecvStream {
 			return;
 		}
 		self.done = Some(Done::Local);
+		if closed(&self.close).is_some() {
+			return;
+		}
 
 		let mut state = self.state.lock();
-		// A finished stream was received in full, so the writer has nothing left to stop.
-		if !state.fin && state.reset.is_none() {
-			state.stop = Some(code);
+		if state.reset.is_none() {
+			// Stopping after the FIN acknowledges it: everything the writer meant to send arrived.
+			match state.fin {
+				true => state.acked = true,
+				false => state.stop = Some(code),
+			}
 		}
 		state.discard(&self.window);
 	}
@@ -611,6 +631,7 @@ impl poll::RecvStream for RecvStream {
 			Some(_) => return Poll::Ready(Ok(())),
 			None => {}
 		}
+		// The FIN counts once it is written: QUIC's receipt, not the reader's.
 		let waiter = self.park.hold(cx);
 		if let Poll::Ready(state) = self.state.poll(waiter, |state| match state.fin || state.reset.is_some() {
 			true => Poll::Ready(()),
@@ -776,18 +797,37 @@ mod tests {
 	}
 
 	#[test]
-	fn reset_after_finish_is_ignored() {
+	fn reader_acknowledges_the_fin() {
 		let (mut a, mut b) = pair(Config::default());
 		let (mut send, mut recv) = uni(&mut a, &mut b);
 
 		ready(write(&mut send, &Bytes::from_static(b"done"))).unwrap();
 		send.finish().unwrap();
-		assert!(ready(send.poll_closed(&mut noop())).is_ok());
-		send.reset(1);
-		drop(send);
-
+		assert!(send.poll_closed(&mut noop()).is_pending());
 		assert!(ready(recv.poll_closed(&mut noop())).is_ok());
+
 		assert_eq!(text(read(&mut recv, usize::MAX)), "done");
+		assert!(send.poll_closed(&mut noop()).is_pending());
+		assert_eq!(ready(read(&mut recv, usize::MAX)).unwrap(), None);
+		assert!(ready(send.poll_closed(&mut noop())).is_ok());
+
+		// Stopping after the FIN acknowledges it too.
+		let (mut send, recv) = uni(&mut a, &mut b);
+		send.finish().unwrap();
+		drop(recv);
+		assert!(ready(send.poll_closed(&mut noop())).is_ok());
+	}
+
+	#[test]
+	fn reset_after_finish_is_ignored() {
+		let (mut a, mut b) = pair(Config::default());
+		let (mut send, mut recv) = uni(&mut a, &mut b);
+
+		ready(write(&mut send, &Bytes::from_static(b"kept"))).unwrap();
+		send.finish().unwrap();
+		send.reset(2);
+		drop(send);
+		assert_eq!(text(read(&mut recv, usize::MAX)), "kept");
 		assert_eq!(ready(read(&mut recv, usize::MAX)).unwrap(), None);
 	}
 
@@ -861,6 +901,8 @@ mod tests {
 		assert!(closed(
 			ready(write(&mut unfinished, &Bytes::from_static(b"x"))).unwrap_err()
 		));
+		// Nothing sent after the close arrives, a reset included.
+		unfinished.reset(9);
 
 		assert_eq!(text(read(&mut recv, usize::MAX)), "last");
 		assert_eq!(ready(read(&mut recv, usize::MAX)).unwrap(), None);
