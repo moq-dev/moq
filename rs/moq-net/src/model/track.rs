@@ -497,7 +497,7 @@ impl Quiet {
 	}
 
 	/// No group in `run` could present: record it, merged with the runs it overlaps.
-	fn record(&mut self, run: Range<u64>) {
+	fn record(&mut self, run: Range<u64>, cached: &BTreeMap<u64, Slot>) {
 		let mut start = run.start;
 		let mut stop = run.end;
 		if let Some((&first, &end)) = self.runs.range(..run.start).next_back()
@@ -511,10 +511,11 @@ impl Quiet {
 			stop = stop.max(end);
 		}
 		self.runs.insert(start, stop);
+		self.prune(cached);
 	}
 
 	/// A group that could present landed at `sequence`: split the run holding it.
-	fn landed(&mut self, sequence: u64) {
+	fn landed(&mut self, sequence: u64, cached: &BTreeMap<u64, Slot>) {
 		let Some((&first, &stop)) = self.runs.range(..=sequence).next_back() else {
 			return;
 		};
@@ -531,9 +532,10 @@ impl Quiet {
 		{
 			self.runs.insert(after, stop);
 		}
+		self.prune(cached);
 	}
 
-	/// Drop the runs holding no `cached` group once they could outnumber the cache. Runs are
+	/// Drop the runs holding no `cached` group once they outnumber twice the cache. Runs are
 	/// disjoint, so those left number at most the cache, and this stays within twice it.
 	fn prune(&mut self, cached: &BTreeMap<u64, Slot>) {
 		if self.runs.len() > 2 * cached.len() {
@@ -892,7 +894,7 @@ impl TrackState {
 			from = next;
 		};
 		if let Some(passed) = passed {
-			self.quiet.lock().record(passed..from);
+			self.quiet.lock().record(passed..from, &self.lookup);
 		}
 		found
 	}
@@ -1375,7 +1377,7 @@ impl TrackState {
 		// apart from the group's lock, which never nests under this one.
 		let inside = self.quiet.lock().stop(sequence).is_some();
 		if inside && self.lookup.get(&sequence).is_some_and(|slot| !slot.group.ended_empty()) {
-			self.quiet.lock().landed(sequence);
+			self.quiet.lock().landed(sequence, &self.lookup);
 		}
 		let below = self
 			.lookup
@@ -4080,13 +4082,23 @@ impl Cursor {
 		})
 	}
 
-	/// Whether a group at `sequence` is past this cursor's budget now, whether this track
-	/// holds it or not: one landing there would be written off.
-	fn is_past_budget(&self, sequence: u64) -> bool {
+	/// Forget the gaps in `delivered` below each group past this cursor's budget now,
+	/// whether this track holds it or not: one landing there would be written off.
+	///
+	/// One edge for every group judged, so forgetting N gaps never resolves it N times.
+	fn forget_past_budget(&self, delivered: &mut Delivered) {
+		if delivered.above_gap().is_none() {
+			return;
+		}
 		let max_delay = self.subscription.read().max_delay;
 		let state = self.state.read();
 		let budget = clamp_max_delay(max_delay, state.max_age_bound());
-		state.drifted(sequence, &state.drift_edge(self.end_sequence), budget)
+		let edge = state.drift_edge(self.end_sequence);
+		while let Some(oldest) = delivered.above_gap()
+			&& state.drifted(oldest, &edge, budget)
+		{
+			delivered.forget_below(oldest);
+		}
 	}
 
 	fn with_expiry(&self, group: group::Consumer) -> group::Consumer {
@@ -4412,19 +4424,17 @@ impl Subscriber {
 			self.delivered.forget_below(sequence);
 		}
 		self.delivered.insert(sequence);
-		while let Some(oldest) = self.delivered.above_gap()
-			&& self.is_past_budget(oldest)
-		{
-			self.delivered.forget_below(oldest);
-		}
+		let mut delivered = std::mem::take(&mut self.delivered);
+		self.forget_past_budget(&mut delivered);
+		self.delivered = delivered;
 	}
 
-	/// Whether a group at `sequence` is past this subscriber's budget now: one landing
-	/// there would be written off.
-	pub(crate) fn is_past_budget(&self, sequence: u64) -> bool {
+	/// Forget the gaps in `delivered` below each group past this subscriber's budget now:
+	/// one landing there would be written off.
+	pub(crate) fn forget_past_budget(&self, delivered: &mut Delivered) {
 		match &self.inner {
-			Inner::Plain(cursor) => cursor.is_past_budget(sequence),
-			Inner::Resume(resume, _) => resume.is_past_budget(sequence),
+			Inner::Plain(cursor) => cursor.forget_past_budget(delivered),
+			Inner::Resume(resume, _) => resume.forget_past_budget(delivered),
 		}
 	}
 
@@ -11181,9 +11191,21 @@ mod test {
 		record_runs(&producer, (0..100).map(|k| 2 * k));
 		assert_eq!(producer.state.read().quiet.lock().runs.len(), 100);
 		elapse(&producer, Duration::from_secs(2));
+		// Fresh groups outlive the sweep, and are walked after it.
+		for k in 101..126 {
+			write_group_at(&producer, 2 * k, k);
+			write_empty_group(&producer, 2 * k + 1);
+		}
+		write_group_at(&producer, 252, 126);
+		let within = || {
+			let state = producer.state.read();
+			let runs = state.quiet.lock().runs.len();
+			runs <= 2 * state.lookup.len()
+		};
 		pool.sweep();
-		let state = producer.state.read();
-		assert!(state.quiet.lock().runs.len() <= 2 * state.lookup.len());
+		assert!(within());
+		record_runs(&producer, (101..126).map(|k| 2 * k));
+		assert!(within());
 
 		// Dropping the open groups of a track that ends abruptly drops many at once.
 		let producer = track_producer("test", Info::timed());

@@ -339,15 +339,17 @@ impl Subscriber {
 		self.reader().poll_recv_datagram(delivered, waiter)
 	}
 
-	/// Whether a group at `sequence` is past the reader's budget, judged on the newest
-	/// copy that answered; see [`track::Subscriber::is_past_budget`].
-	pub(crate) fn is_past_budget(&self, sequence: u64) -> bool {
+	/// Forget the gaps in `delivered` below each group past the reader's budget, judged on
+	/// the newest copy that answered; see [`track::Subscriber::forget_past_budget`].
+	pub(crate) fn forget_past_budget(&self, delivered: &mut Delivered) {
 		let reader = self.reader();
 		let mut ready = reader.copies.iter().rev().filter_map(|copy| match &copy.sub {
 			Sub::Ready(sub) => Some(sub),
 			Sub::Pending(_) => None,
 		});
-		ready.next().is_some_and(|sub| sub.is_past_budget(sequence))
+		if let Some(sub) = ready.next() {
+			sub.forget_past_budget(delivered);
+		}
 	}
 
 	/// Poll for the track's declared exclusive end.
