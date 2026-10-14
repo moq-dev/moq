@@ -5,7 +5,8 @@
 `track::Ordered` waits within `max_delay` for a missing group only while that
 sequence is still owed, and moves past it as soon as the track knows it was
 dropped, evicted, or skipped. A reader that got every group behaves as today.
-No new public API.
+Only a subscription owes sequences, so a locally produced track has nothing
+owed and its ordered reads are unchanged. No new public API.
 
 ## Plan
 
@@ -44,8 +45,10 @@ Watch for:
   archive's local timeline): an evicted or never-produced group must not hang
   them. `history_mode_recovers_evicted_timeline_groups` and
   `history_mode_refuses_a_retained_recording` failed on #5475.
-- A locally produced track has no subscription to account for its gaps;
-  decide what "owed" means there.
+- Locally produced tracks (the archive's timeline, say) receive no drops or
+  dispositions, so they never wait. If a consumer later needs a local
+  producer to reorder, bring that to the maintainer rather than inferring
+  owed sequences.
 
 Reuse from #5475: its reorder regressions (exact deadline and wakeup, explicit
 starts, capped reads, a changed budget), and its snapshot-reader change:
