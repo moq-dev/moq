@@ -2463,8 +2463,10 @@ where
 		// when the announce carries it: a PUBLISH_NAMESPACE request does, an inline NAMESPACE
 		// entry has no slot for one. So the grant still filters inline entries, and stands down
 		// only for requests, where the server's covers-gate refuses a bad token per request.
-		// The token never stands in for the limit this side set on the peer.
-		let carries_token = matches!(ns.target, Target::Requests(_)) && self.request_token.peek().is_some();
+		// The token never stands in for the limit this side set on the peer. A live request that
+		// presented one keeps standing on it after the token is cleared, as the peer still does.
+		let carries_token = matches!(ns.target, Target::Requests(_))
+			&& (self.request_token.peek().is_some() || ns.requests.get(suffix).is_some_and(|request| request.token));
 		let permitted = match carries_token {
 			true => ns.permit.within_limit(path.as_str()),
 			false => ns.permitted(path),
@@ -2603,6 +2605,8 @@ where
 			return Ok(Refused::No);
 		};
 
+		let token = self.request_token.peek();
+		let presented = token.is_some();
 		request.writer.varint(ietf::PublishNamespace::ID).await?;
 		request
 			.writer
@@ -2610,7 +2614,7 @@ where
 				request_id,
 				track_namespace: path.as_path(),
 				cluster,
-				authorization_token: self.request_token.peek().map(crate::ietf::token::RequestToken),
+				authorization_token: token.map(crate::ietf::token::RequestToken),
 			})
 			.await?;
 
@@ -2661,6 +2665,7 @@ where
 				path: path.clone(),
 				request_id,
 				stream: request,
+				token: presented,
 			},
 		);
 		Ok(Refused::No)
@@ -2933,6 +2938,9 @@ where
 				ietf::RequestOk::ID => {
 					let _ = ietf::RequestOk::decode_msg(&mut data, self.version)?;
 					tracing::debug!(broadcast = %absolute, "request token refreshed");
+					if let Some(request) = ns.requests.get_mut(&suffix) {
+						request.token = true;
+					}
 				}
 				ietf::RequestError::ID => {
 					let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
@@ -4193,6 +4201,9 @@ struct NamespaceRequest<S: crate::transport::poll::Session> {
 	path: crate::PathOwned,
 	request_id: RequestId,
 	stream: Stream<S, Version>,
+	/// The advertisement presented a request token, so the peer holds it on that token's
+	/// grant rather than the connection grant.
+	token: bool,
 }
 
 #[cfg(test)]
@@ -13033,6 +13044,91 @@ mod tests {
 			occurrences(&log, &token),
 			1,
 			"the reprice must not carry the request token: it rides only the initial announce"
+		);
+	}
+
+	/// Clearing the request token leaves a live advertisement on the token it presented: a
+	/// later reprice of a namespace outside the connection grant updates it in place rather
+	/// than withdrawing what the peer still holds on that token.
+	#[moq_net_sim::test]
+	async fn a_cleared_token_keeps_its_live_announce() {
+		const VERSION: Version = Version::Draft19;
+		let token = bytes::Bytes::from_static(&[0x03, 0x00, b'o', b'k']);
+
+		// Forward the reprice at once: the update hold is not what this checks.
+		let origin = crate::origin::Config {
+			update_hold: Duration::ZERO,
+			..crate::origin::Config::new(crate::Hop::new(1).unwrap())
+		}
+		.produce();
+		// One epoch, so the warm route re-prices the instance rather than restart it.
+		let epoch = crate::Epoch::mint();
+		let _cold = origin
+			.announce(
+				"cam",
+				crate::origin::Route::default().with_epoch(epoch.clone()).with_cost(4),
+			)
+			.unwrap();
+		settle().await;
+
+		// A connection grant of "other", which does not cover "cam".
+		let auth = crate::auth::Handle::new(true);
+		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
+		auth.granted(
+			0,
+			crate::auth::Grant {
+				publish: crate::Pattern::subtree("other").unwrap().into(),
+				subscribe: crate::Patterns::new(),
+				expires: None,
+			},
+		);
+
+		let ok = publish_namespace_ok(VERSION).await;
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![[ok.clone(), ok].concat()]);
+		let log = session.log.clone();
+		let request_token = crate::RequestToken::new(Some(typed(&token)));
+		let publisher = Publisher::new(
+			crate::time::Clock::sim(),
+			session,
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			clustered(Some(false)),
+			VERSION,
+		)
+		.with_auth(auth)
+		.with_request_token(request_token.clone());
+
+		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, &token) >= 1 {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(occurrences(&log, &token), 1, "the token rides the PUBLISH_NAMESPACE");
+		for _ in 0..20 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			settle().await;
+		}
+
+		request_token.set(None);
+		let after_announce = log.writes.lock().unwrap().len();
+		let _warm = origin
+			.announce("cam", crate::origin::Route::default().with_epoch(epoch).with_cost(0))
+			.unwrap();
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if log.writes.lock().unwrap().len() > after_announce {
+				break;
+			}
+			settle().await;
+		}
+		assert!(log.resets().is_empty(), "the live announce was withdrawn");
+		assert!(
+			log.writes.lock().unwrap().len() > after_announce,
+			"the reprice update was never sent"
 		);
 	}
 
