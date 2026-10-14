@@ -22,18 +22,21 @@ roster, so a copied JWT is not enough: the presenter proves possession of
 the matching private key on the direct AUTH stream. A roster peer that
 received someone else's grant cannot replay it.
 
-Issuance: the relay owns AUTH (`rs/moq-relay/src/auth/refresh.rs`). The client writes
-`AUTH_CNF { Jwk (b) }` after AUTH on the empty-token stream; the relay
-copies that JWK into `cnf`. Then, after AUTH_OK:
+Issuance: the relay owns AUTH (`rs/moq-relay/src/auth/refresh.rs`). The
+client's routing key, announced and proven by
+[Identity proof](/quest/m1/cluster-routing/identity.md), is the `cnf`; the
+grant's routing identity is that key's hash, so a client cannot obtain a grant
+for someone else's identity. Then, after AUTH_OK:
 
 - `AUTH_KEYS { Jwks (b) }`, the relay's kid-indexed public JWKS,
   asymmetric keys only, HMAC material never included;
 - `AUTH_PEER { Grant (b) }`, the peer-grant JWT.
 
 AUTH_KEYS and AUTH_PEER may repeat for refresh and key rotation. The lite
-draft and both language codecs gain AUTH_CNF, AUTH_KEYS, AUTH_PEER, and
-AUTH_POP in whichever lite wip is current when this lands; it does not gate
-the lite-07 cut (decided 2026-10-13); `just drafts check` passes. Reissue before expiry; the client
+draft and both language codecs gain AUTH_KEYS and AUTH_PEER in whichever lite
+wip is current when this lands; they do not gate the lite-07 cut (decided
+2026-10-13). The key and its proof moved to Identity proof, which does gate
+it (decided 2026-10-14); `just drafts check` passes. Reissue before expiry; the client
 replaces the grant on each live peer session with `auth().add` and drops
 the old one. A node-id or key change mints a new grant; the old node id is
 dead.
@@ -66,5 +69,6 @@ Additive.
 
 ## Required
 
+- [Identity proof](/quest/m1/cluster-routing/identity.md) - the per-process key the grant binds as `cnf`
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - the route-layer node id a grant binds
 - [In-band auth](/quest/m1/auth/README.md) - relay tokens reach `main` with this line, so the relay owns AUTH and knows the session's paths
