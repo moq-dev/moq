@@ -1569,14 +1569,16 @@ export class Publisher {
 			return "dropped";
 		}
 
-		// The peer already closed out a refused request, and its STOP_SENDING can reject the
-		// wait on our FIN. That is the withdrawal finishing, not a reason to end the loop.
+		// Before draft-17 the peer already closed out a refused request, and its STOP_SENDING
+		// can reject the wait on our FIN. That is the withdrawal finishing, not a reason to end
+		// the loop.
 		if (answer !== "held") await this.#withdraw(path, requests).catch(() => undefined);
 		return answer;
 	}
 
 	/**
-	 * Close out a namespace's PUBLISH_NAMESPACE request with PUBLISH_NAMESPACE_DONE.
+	 * End a namespace's PUBLISH_NAMESPACE request: PUBLISH_NAMESPACE_DONE then FIN before
+	 * draft-17, a cancel in both directions after.
 	 */
 	async #withdraw(path: Path.Valid, requests: Requests) {
 		const request = requests.get(path);

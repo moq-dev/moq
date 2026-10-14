@@ -8388,6 +8388,7 @@ mod tests {
 				settle().await;
 			}
 			assert_eq!(occurrences(&log, b"local-cam"), 1, "{version}: PUBLISH_NAMESPACE");
+			let advertised = log.writes.lock().unwrap().len();
 
 			drop(local);
 			for _ in 0..100 {
@@ -8401,6 +8402,12 @@ mod tests {
 			let cancelled = crate::ietf::error::CANCELLED;
 			assert_eq!(log.resets(), vec![cancelled], "{version}: reset");
 			assert_eq!(log.stops(), vec![cancelled], "{version}: STOP_SENDING");
+			// No PUBLISH_NAMESPACE_DONE: a receiver reads its type as a protocol violation.
+			assert_eq!(
+				log.writes.lock().unwrap().len(),
+				advertised,
+				"{version}: wrote a message"
+			);
 			assert!(
 				!log.trail()
 					.iter()
@@ -9332,61 +9339,6 @@ mod tests {
 		)
 		.await;
 		assert_eq!(occurrences(&log, &update), 1, "only the one update was attempted");
-	}
-
-	/// Draft-17+ has no PUBLISH_NAMESPACE_DONE, so a withdrawal there is the FIN and
-	/// nothing else. Writing the message anyway puts its type on the wire before the body
-	/// fails to encode, which the receiver can only read as a protocol violation, so every
-	/// unannounce would kill an otherwise healthy session.
-	///
-	/// Only reachable through the unsolicited loop, which is what this branch made the
-	/// default: the solicited path answers inline and never opens a request per namespace.
-	#[moq_net_sim::test]
-	async fn a_modern_withdrawal_is_the_fin_alone() {
-		const VERSION: Version = Version::Draft17;
-
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let cam = origin.announce("solo-cam", crate::origin::Route::default()).unwrap();
-		settle().await;
-
-		let session =
-			crate::lite::test_transport::ScriptedSession::per_stream(vec![publish_namespace_ok(VERSION).await]);
-		let log = session.log.clone();
-
-		let publisher = Publisher::new(
-			crate::time::Clock::sim(),
-			session,
-			origin.consume(),
-			Control::new(None, false),
-			None,
-			declared(None),
-			VERSION,
-		);
-
-		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, b"solo-cam") > 0 {
-				break;
-			}
-			settle().await;
-		}
-		assert_eq!(occurrences(&log, b"solo-cam"), 1, "the advertisement never went out");
-
-		let advertised = log.writes.lock().unwrap().len();
-
-		// Unannounce, which retires the request the advertisement opened.
-		drop(cam);
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			settle().await;
-		}
-
-		assert_eq!(
-			log.writes.lock().unwrap().len(),
-			advertised,
-			"a draft-17+ withdrawal wrote a message; the FIN alone retracts"
-		);
 	}
 
 	#[moq_net_sim::test]
