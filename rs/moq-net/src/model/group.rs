@@ -1110,6 +1110,9 @@ impl Producer {
 }
 
 /// A cloneable, watch-only handle to a group's readers or pending fetch callers.
+///
+/// An accepted or dropped request ends waits with [`Error::Dropped`]; a rejected request keeps
+/// its rejection reason.
 #[derive(Clone)]
 pub struct Demand {
 	sequence: u64,

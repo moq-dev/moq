@@ -1,6 +1,7 @@
 //! Cost of one merged traffic frame from [`moq_stats::aggregate`], swept over live nodes and
 //! nodes that have come and gone, with and without the grace that folds departed nodes away.
-//! Compare known metadata with one touched publisher losing and recovering its epoch.
+//! Compare known metadata with one touched publisher losing and recovering its epoch,
+//! and with live nodes that resumed after their open pairs were closed.
 //!
 //! Each node reports the same broadcast paths, like a restarted node under a new name. A bounded
 //! aggregate's cost follows the live nodes; an unbounded one (`grace` never elapsing) also pays for
@@ -48,7 +49,11 @@ impl Node {
 			.unwrap();
 		let config = moq_json::snapshot::Config::default().with_delta_ratio(0);
 		let frame = (0..KEYS)
-			.map(|key| (format!("acme/room-{key:02}"), Traffic::default()))
+			.map(|key| {
+				let mut traffic = Traffic::default();
+				traffic.subscriptions_started = 1;
+				(format!("acme/room-{key:02}"), traffic)
+			})
 			.collect();
 		Self {
 			source,
@@ -78,8 +83,15 @@ async fn read_until(traffic: &mut aggregate::TrafficConsumer, want: u64) {
 	}
 }
 
+#[derive(Clone, Copy)]
+enum State {
+	Known,
+	Mixed,
+	Resumed,
+}
+
 /// Mean wall time per merged frame with `live` nodes publishing after `departed` nodes left.
-async fn measure(live: usize, departed: usize, grace: Duration, mixed: bool) -> Duration {
+async fn measure(live: usize, departed: usize, grace: Duration, state: State) -> Duration {
 	let (origin, driver) = origin::Producer::new(origin::Config::default());
 	let driver = tokio::spawn(moq_net::time::run(driver));
 	let agg = aggregate::Consumer::new(
@@ -105,6 +117,23 @@ async fn measure(live: usize, departed: usize, grace: Duration, mixed: bool) -> 
 		total += 1;
 		read_until(&mut traffic, total).await;
 	}
+	if matches!(state, State::Resumed) {
+		for node in &mut nodes {
+			node.source.unannounce();
+			loop {
+				let frame = traffic.next().await.unwrap().unwrap();
+				if frame.values().next().unwrap().active_subscriptions() == live as u64 - 1 {
+					break;
+				}
+			}
+			node.source
+				.announce(origin::Route::default().with_epoch(node.epoch.clone()))
+				.unwrap();
+			node.publish(1);
+			total += 1;
+			read_until(&mut traffic, total).await;
+		}
+	}
 	// Advance only after a read has seen the last departure, so every departed
 	// node is past its grace.
 	tokio::time::advance(GRACE * 2).await;
@@ -113,7 +142,7 @@ async fn measure(live: usize, departed: usize, grace: Duration, mixed: bool) -> 
 	for frame in 0..=FRAMES {
 		let node = &mut nodes[frame as usize % live];
 		let start = Instant::now();
-		if mixed {
+		if matches!(state, State::Mixed) {
 			node.known = !node.known;
 			let mut route = origin::Route::default();
 			if node.known {
@@ -150,8 +179,12 @@ fn main() {
 	for live in [1, 16, 128] {
 		for departed in [0, 256, 4096] {
 			for (label, grace) in [("1s", GRACE), ("never", Duration::MAX)] {
-				for (metadata, mixed) in [("known", false), ("mixed", true)] {
-					let elapsed = runtime.block_on(measure(live, departed, grace, mixed));
+				for (metadata, state) in [
+					("known", State::Known),
+					("mixed", State::Mixed),
+					("resumed", State::Resumed),
+				] {
+					let elapsed = runtime.block_on(measure(live, departed, grace, state));
 					let micros = elapsed.as_secs_f64() * 1e6;
 					println!("{live:>4} {departed:>8} {label:>5} {metadata:>8} {micros:>11.1}");
 				}

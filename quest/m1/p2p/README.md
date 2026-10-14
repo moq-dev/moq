@@ -3,7 +3,8 @@
 ## Goal
 
 Opted-in moq-lite clients serve each other directly, over WebRTC data channels
-between any two peers and over iroh between native ones, while the relay stays
+when a browser is involved and over QUIC on an ICE path between native ones,
+while the relay stays
 the rendezvous and an available fallback route. A client subscribes through the
 relay at once, negotiates peers in the background, and a subscription
 migrates when an application-selected direct connection wins the shared
@@ -19,9 +20,11 @@ about itself, decides which roster peers to dial, and sets the roster size
 above which new negotiations stop using STUN. P2P is off unless the
 application turns it on.
 
-Two endpoint pairs work: browser to browser and browser to native. Native
-pairs prefer QUIC: iroh when both advertise an endpoint, a data channel
-otherwise.
+Three endpoint pairs work: browser to browser and browser to native over a
+data channel, and native to native over QUIC on the ICE-nominated path.
+Decided 2026-10-13: no iroh. It brings discovery and relaying of its own
+beside the relay; every pair uses the same STUN and ICE, with the relay as
+rendezvous and fallback.
 
 Non-goals: TURN, since the relay already carries the media as a MoQ route and
 relaying ICE traffic would cost the same egress with worse framing; operating
@@ -52,12 +55,12 @@ fallback; nothing TURN-shaped is built. Still-open delivery stalls
 are handled by [Route health](/quest/m2/route-health/README.md), only with a
 matching explicit epoch. Epochless source changes restart instead of resume.
 
-A relay that also answers STUN on its QUIC port is the lowest-RTT STUN
-server a client can name, but this line takes ICE servers from the
-application and works with any. Decided 2026-10-08: the public STUN
-responder moved out of the [one-port](/quest/m2/one-port/README.md) UDP
-demux into this line, since P2P is its only consumer; plan it as a child
-once the harness shows the relay's STUN beats the application's servers.
+The relay is the nearest STUN server a client can name, but this line takes
+ICE servers from the application and works with any. Decided 2026-10-08: the
+public STUN responder moved out of the [one-port](/quest/m2/one-port/README.md)
+UDP demux into this line, since P2P is its only consumer. Decided 2026-10-13:
+[relay STUN](/quest/m1/p2p/relay-stun.md) is planned now on its own port,
+off by default, and used only when the application lists it.
 
 ### Policy is the application's
 
@@ -94,8 +97,8 @@ negotiated `maxMessageSize` (256 KiB in Chrome).
 The cost is head-of-line blocking: one lost chunk stalls every stream until
 SCTP retransmits it. Decided 2026-10-08: the channel is always ordered, and
 unordered qmux was dropped. Receiver reassembly would exist only in the Rust
-qmux, so it could cover native pairs alone, and a native pair already
-prefers iroh, whose QUIC streams are independent. The
+qmux, so it could cover native pairs alone, and a native pair runs QUIC,
+whose streams are independent. The
 [harness](/quest/m1/p2p/harness.md) reports the stall so the cost stays
 visible.
 
@@ -140,7 +143,11 @@ Backend choice does not change the policy that watching tabs never re-serve.
 - [Peer grants](/quest/m1/p2p/peer-grant.md) - the relay issues a node-bound, asymmetrically signed grant a browser can verify; HS256 keys issue none
 - [Signaling and policy](/quest/m1/p2p/signal.md) - opted-in peers find each other under the prefix, the application picks who to dial, and the roster-size gate decides whether STUN is used
 - [Native data channel transport](/quest/m1/p2p/webrtc.md) - `moq-tokio` holds a moq-net session with a browser over str0m with a full ICE agent
-- [moq-cli joins](/quest/m1/p2p/cli.md) - `--p2p` publishes a roster entry with its iroh endpoint, dials iroh between native peers, and serves browsers as a transit hop
+- [Shard steering](/quest/m1/p2p/shard-steering.md) - the reuseport filter steers only QUIC by connection ID, so the demux sees whole STUN flows
+- [UDP demux](/quest/m1/p2p/udp-demux.md) - one classifier splits QUIC from STUN and WebRTC on the relay's socket and on a native pair's
+- [Native pairs over ICE and QUIC](/quest/m1/p2p/native-quic.md) - two native peers connect through ICE, then `moq-quic` over the nominated path with fingerprints pinned from the offer
+- [Relay STUN](/quest/m1/p2p/relay-stun.md) - `moq-relay` answers Binding on a `[stun] bind` port, off by default, for applications that list it
+- [moq-cli joins](/quest/m1/p2p/cli.md) - `--p2p` publishes a roster entry, dials native peers over ICE and QUIC, and serves browsers as a transit hop
 - [Peer route policy](/quest/m1/p2p/cost-scopes.md) - application priorities and total cost choose eligible routes, with epoch-aware handover
 - [Watch opts in](/quest/m1/p2p/watch.md) - one attribute turns it on in the demo and the watcher migrates to the best eligible route
 - [Harness](/quest/m1/p2p/harness.md) - the Playwright harness and the numbers behind every mapping decision

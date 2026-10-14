@@ -708,6 +708,8 @@ type ArchiveSchema = {
 }
 ~~~
 
+A consumer that cannot decode the `archive` entry MUST ignore that entry without rejecting the catalog.
+
 The `timelines` field maps each indexed track to the MoQ track carrying its records.
 Any track may be indexed, including the catalog track itself and data tracks ({{data}}).
 Naming a timeline after its track with a `.timeline.z` suffix is RECOMMENDED; a consumer MUST use the advertised names rather than assuming them.
@@ -1130,6 +1132,7 @@ This document has no IANA actions.
 - Added the optional `delay` field to `json` and `binary` track entries, measured only from payloads stamped with their capture time on the broadcast clock.
 - Replaced the video `stalled` field with an optional `enabled` field on audio and video renditions. A consumer MUST NOT select a disabled rendition and ignores `stalled`. A consumer that predates `enabled` keeps selecting a disabled rendition.
 - Replaced the broadcast's one aligned timeline with one timeline per track: the catalog `archive` entry's `track` became a `timelines` map from each indexed track, the catalog included, to its timeline track.
+- Required consumers to ignore an undecodable `archive` entry without rejecting the catalog.
 - Replaced the segment record with a per-track record: `sequence`, `pts`, `duration`, and a `start`/`end` range of group and frame positions, dropping cross-track pacing and completeness.
 - One cutting rule for every track: a record ends at the first group boundary past a minimum (2 seconds RECOMMENDED, zero for sparse data such as a catalog) and splits a group between frames at a maximum (10 seconds RECOMMENDED), so a group that never closes is indexed as it grows and `durationMax` bounds every record.
 - Recording format version 2: each track stores record N at `segments/N`, beside its timeline's `segments/N`, with a `Frame Start` field in the segment object. Tracks commit and expire independently, and a DVR keeps each track's newest record.

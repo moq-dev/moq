@@ -580,18 +580,19 @@ pub(crate) struct PendingFetch {
 	// has taken it, its range is already on the wire.
 	frame_start: u64,
 
-	// Result channel back to the joined fetches. Written only on rejection; a
-	// successful accept resolves them through the track cache instead. Dropping
-	// every producer without writing (a vanished handler) closes the channel,
-	// which a [`Fetching`] reads as [`Error::NotFound`].
+	// Result channel for joined fetches. An accept resolves covered callers through
+	// the track cache and refuses uncovered ones. Dropping every producer closes
+	// an unserved attempt, which a [`Fetching`] reads as [`Error::NotFound`].
 	result: kio::Producer<FetchOutcome>,
 }
 
-/// The result of a fetch attempt. Stays empty on success (the group lands in the
-/// track cache); a handler writes `rejected` to fail every joined fetch.
+/// Whether a fetch attempt was accepted, or why it was rejected.
 #[derive(Default)]
 pub(crate) struct FetchOutcome {
 	pub(crate) rejected: Option<Error>,
+	// An accept still refuses joined fetches the cached group cannot cover, without
+	// giving the request's demand watcher a rejection reason.
+	accepted: bool,
 }
 
 impl TrackState {
@@ -3297,12 +3298,14 @@ impl Consumer {
 	}
 
 	/// Whether the cache is fed live, so the newest object it holds is the track's largest.
-	/// A relay's copy with no upstream subscription is not, even once it learns the end.
+	/// Fetch-only, closed, and parked copies are not, even once they learn the end.
 	pub(crate) fn is_live(&self) -> bool {
-		if let Some(serving) = self.serving() {
-			return serving.is_live();
-		}
-		self.state.read().feed == Feed::Live
+		let state = self.state.read();
+		let Some(routes) = state.routes.clone() else {
+			return state.published && !state.closed && state.feed == Feed::Live;
+		};
+		drop(state);
+		routes.serving().is_some_and(|serving| serving.is_live())
 	}
 
 	/// Fetching a single past group, without holding a live subscription.
@@ -3613,7 +3616,7 @@ impl group::Request {
 		// the range went on the wire) fails rather than waits. Closing the channel says
 		// the same, but a handler tracking the joined demand keeps it open.
 		if let Ok(mut outcome) = self.result.write() {
-			outcome.rejected = Some(Error::NotFound);
+			outcome.accepted = true;
 		}
 		res
 	}
@@ -3796,10 +3799,11 @@ impl kio::Task for Fetching {
 			};
 		};
 
-		// A written rejection fails every joined fetch. The channel closing without
-		// one means the attempt was dropped unserved (its handlers went away).
+		// An answered attempt fails joined fetches the cache cannot cover. The channel
+		// closing without an answer means its handlers went away.
 		let err = match result.outcome.poll(waiter, |outcome| match &outcome.rejected {
 			Some(err) => Poll::Ready(err.clone()),
+			None if outcome.accepted => Poll::Ready(Error::NotFound),
 			None => Poll::Pending,
 		}) {
 			Poll::Ready(Ok(err)) => err,
@@ -7711,6 +7715,43 @@ mod test {
 		assert_eq!(group.sequence, 0);
 	}
 
+	/// A fetched group installs metadata but never accepts the track's live feed.
+	#[test]
+	fn a_fetch_only_cache_is_not_live() {
+		let waiter = kio::Waiter::noop();
+		let request = Request::new(Arc::new(broadcast::Info::default()), "test");
+		let dynamic = request.dynamic();
+		let consumer = request.consume();
+		let mut pending = consumer.fetch_group(2, None);
+		let Poll::Ready(Ok(req)) = dynamic.poll_requested_group(&waiter) else {
+			panic!("fetch request should be ready");
+		};
+		let mut fetched = req.accept(None).unwrap();
+		fetched.write_frame(None, b"2-0".as_ref()).unwrap();
+		fetched.finish().unwrap();
+		let Poll::Ready(Ok(mut group)) = kio::Task::poll(&mut *pending, &waiter) else {
+			panic!("fetched group should be cached");
+		};
+		assert_eq!(group.sequence, 2);
+		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+			panic!("fetched frame should be cached");
+		};
+		assert_eq!(frame.payload.as_ref(), b"2-0");
+		assert!(!consumer.is_live(), "a fetch-only cache is not live");
+
+		let mut producer = request.accept(None);
+		assert!(consumer.is_live(), "accepting the track starts its live feed");
+		producer.set_idle();
+		assert!(!consumer.is_live(), "an idle accepted copy is not live");
+		producer.set_live(None);
+		assert!(consumer.is_live(), "the answered copy is live again");
+
+		// The fetch handler holds the same producer lifetime, so both leave.
+		drop(dynamic);
+		drop(producer);
+		assert!(!consumer.is_live(), "a track whose producer left is not live");
+	}
+
 	/// A one-shot fetch populates the shared cache but never the live arrival cursor,
 	/// so it cannot make content available to a subscription look stale.
 	#[moq_net_sim::test]
@@ -10925,6 +10966,75 @@ mod test {
 		assert!(matches!(demand.poll_unused(&kio::Waiter::noop()), Poll::Ready(Ok(()))));
 		request.reject(Error::Cancel);
 		assert!(matches!(demand.used().now_or_never(), Some(Err(Error::Cancel))));
+
+		// The async close helper reports clean acceptance separately from rejection.
+		for accepted in [true, false] {
+			let producer = track_producer("test", Info::timed());
+			let dynamic = producer.dynamic();
+			let consumer = producer.consume();
+			let fetch = consumer.fetch_group(3, None);
+			let request = dynamic.requested_group().now_or_never().unwrap().unwrap();
+			let demand = request.demand();
+			let group = if accepted {
+				Some(request.accept(Info::timed()).unwrap())
+			} else {
+				request.reject(Error::NotFound);
+				None
+			};
+			assert!(matches!(
+				(accepted, demand.closed().now_or_never()),
+				(true, Some(Error::Dropped)) | (false, Some(Error::NotFound))
+			));
+			drop(fetch);
+			if let Some(group) = group {
+				group.finish().unwrap();
+			}
+		}
+	}
+
+	#[test]
+	fn accepted_group_request_demand_ends_cleanly() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let mut fetch = consumer.fetch_group(3, None);
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(request)) = dynamic.poll_requested_group(&waiter) else {
+			panic!("the fetch request is ready");
+		};
+		let demand = request.demand();
+		let group = request.accept(Info::timed()).unwrap();
+
+		assert!(!demand.is_used());
+		assert!(matches!(demand.poll_used(&waiter), Poll::Ready(Err(Error::Dropped))));
+		assert!(matches!(demand.poll_unused(&waiter), Poll::Ready(Err(Error::Dropped))));
+		assert!(
+			matches!(kio::Task::poll(&mut *fetch, &waiter), Poll::Ready(Ok(_))),
+			"the fetch still gets the accepted group"
+		);
+		group.finish().unwrap();
+	}
+
+	#[test]
+	fn rejected_group_request_demand_keeps_its_reason() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let mut fetch = consumer.fetch_group(3, None);
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(request)) = dynamic.poll_requested_group(&waiter) else {
+			panic!("the fetch request is ready");
+		};
+		let demand = request.demand();
+		request.reject(Error::NotFound);
+
+		assert!(!demand.is_used());
+		assert!(matches!(demand.poll_used(&waiter), Poll::Ready(Err(Error::NotFound))));
+		assert!(matches!(demand.poll_unused(&waiter), Poll::Ready(Err(Error::NotFound))));
+		assert!(matches!(
+			kio::Task::poll(&mut *fetch, &waiter),
+			Poll::Ready(Err(Error::NotFound))
+		));
 	}
 
 	#[moq_net_sim::test]

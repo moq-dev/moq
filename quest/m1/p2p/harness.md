@@ -4,7 +4,8 @@
 
 A Playwright harness under `test/p2p` that measures moq-lite over the data
 channel against WebTransport through the relay on the same LAN and across a
-NAT, browser to browser and browser to native, in Chrome and Firefox with
+NAT, browser to browser, browser to native, and native to native over ICE
+and QUIC, in Chrome and Firefox with
 Safari best effort, and writes a JSON report each mapping or cost decision
 quotes.
 
@@ -24,8 +25,10 @@ Matrix:
 - browser to browser: a publishing tab to a watcher tab directly, and the
   same publisher to two watcher tabs directly, against the same pairs through
   the relay. A watcher tab never re-serves (decided 2026-10-01), so there is
-  no tab-transit row, and native-to-native pairs use iroh, so there is no
-  native data channel row either.
+  no tab-transit row;
+- native to native: two `moq-cli --p2p` nodes over ICE and QUIC, on the LAN
+  and across the NAT, against the same pair through the relay. There is no
+  native data channel row.
 
 Add publisher/consumer and roster/selected-pair sweeps, including explicit
 full-mesh selection, roster churn, pending negotiations and cancellation.

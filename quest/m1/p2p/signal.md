@@ -32,7 +32,8 @@ Roster: each peer publishes `<prefix><id>` with an `info.json` snapshot track:
 the moq ALPNs it accepts, `webrtc: true`, the presenter public key that
 [peer grants](/quest/m1/p2p/peer-grant.md) bind, the application's `meta`,
 and for native peers an optional WebTransport entry with an ordered list of
-URLs and the listener's certificate fingerprint, plus an `iroh` endpoint id.
+URLs and the listener's certificate fingerprint, plus the field
+[native pairs](/quest/m1/p2p/native-quic.md) add for ICE+QUIC.
 Decided in the quest audit: use a list so a native peer can advertise its
 reachable interfaces without choosing one for every browser. This quest
 owns the schema shared with [moq-cli](/quest/m1/p2p/cli.md).

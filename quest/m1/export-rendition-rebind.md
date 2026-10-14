@@ -48,5 +48,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [A failed rendition fails alone](/quest/m1/rendition-failure.md) - moves a recovered rendition to a new track name under a stable ID, which these exporters must follow
 - [Catalog broadcast references in MSF and GStreamer](/quest/m1/catalog-broadcast-reference.md) - other readers that mishandle a rendition's `broadcast`

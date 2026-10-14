@@ -885,7 +885,9 @@ impl<E: catalog::Catalog> Export<E> {
 	/// joiner runs at the delay from its first output. The output then keeps the source's
 	/// pace and muxes every track in `(DTS, PID)` order whatever the arrival skew between
 	/// them. A frame that arrives after its deadline is dropped, and a video track that
-	/// dropped one resumes at its next keyframe. A stalled group is skipped once it falls
+	/// dropped one resumes at its next keyframe. A source whose clock runs further off ours than
+	/// 13818-1 lets the PCR follow fails the export once it has used half the delay, where a
+	/// brief network stall only drops what it made late. A stalled group is skipped once it falls
 	/// half the delay behind the newest content (see [`Consumer`](crate::container::Consumer)),
 	/// so the group after it still arrives with the other half to spare.
 	///
