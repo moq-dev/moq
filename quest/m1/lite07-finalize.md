@@ -81,6 +81,7 @@ is published; older versions are unchanged.
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
 - [Untimed lite-07](/quest/m1/lite-untimed.md) - an untimed track crosses the wire untimed
 - [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
+- [Announce caught up](/quest/m1/announce-live.md) - an announce stream marks the end of its initial snapshot
 
 ## Related
 
