@@ -56,6 +56,11 @@ Decided with the maintainer, 2026-10-13:
   (ready once, then stays ready), with JS mirroring as `announced.live`.
   To avoid a race, the consumer is caught up only after it has drained
   every snapshot event before the boundary. Name the method by role.
+  The shape must also say what caught up means for a consumer that spans
+  sources (a reconnecting or pooled connection, an origin fed by several
+  sessions or prefix requests): reset per source generation, or wait for
+  every current source. "Ready once, then stays ready" is wrong after a
+  reconnect.
 
 Work:
 
@@ -67,6 +72,8 @@ Work:
   JS IETF sessions get the exact boundary too.
 - `doc/concept`: what caught up means to a subscriber, including the
   best-effort versions.
+- A benchmark sweeping announce streams and announce consumers, so
+  propagating the boundary costs the touched path, not the table.
 - Use it in lazy discovery: once both halves have landed, a narrower
   request may take over from a broad one after it reports caught up. Do
   that here or in a follow-up, as the implementer judges.
@@ -74,7 +81,8 @@ Work:
   never before an earlier event is read; a count of 0 is caught up at once;
   a relay reports caught up without waiting on a silent upstream; IETF
   waits for the counted NAMESPACE messages, or reports on the OK without
-  the extension; a session with no OK still reports caught up. Run
+  the extension; a session with no OK still reports caught up; a reconnect
+  and a second feed follow the chosen multi-source rule. Run
   `just test interop --all`.
 
 Public API: new caught-up surface on Rust and JS announce consumers. Wire:
