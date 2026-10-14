@@ -1458,7 +1458,7 @@ where
 			// The read failed.
 			Failed(Error),
 			// The request grant lapsed or was revoked: the announce ends, never the session.
-			Ended(Error),
+			Ended(crate::auth::Refusal),
 			// A pending renewal's verdict resolved, for the update with this request id.
 			Renewal(request_update::Verdict),
 		}
@@ -1477,9 +1477,9 @@ where
 						return Poll::Ready(Turn::WriterClosed(result));
 					}
 					if let Some(rg) = token_grant.as_mut()
-						&& let Poll::Ready(err) = rg.poll_ended(waiter)
+						&& let Poll::Ready(refusal) = rg.poll_ended(waiter)
 					{
-						return Poll::Ready(Turn::Ended(err));
+						return Poll::Ready(Turn::Ended(refusal));
 					}
 					if let Poll::Ready(renewed) = renewal.poll(waiter) {
 						return Poll::Ready(Turn::Renewal(renewed));
@@ -1546,15 +1546,15 @@ where
 					return stream.writer.closed().await;
 				}
 				Turn::Failed(err) => return Err(err),
-				Turn::Ended(err) => {
+				Turn::Ended(refusal) => {
 					// Retract the route before the withdrawal, which waits on the peer: a lapsed
 					// grant serves nothing more, however slowly the peer reads.
 					if std::mem::take(attached) {
 						self.stop_announce(path.clone(), true)?;
 					}
-					self.cancel_announce(stream, request_id, path, &err, "request token grant ended")
+					self.cancel_announce(stream, request_id, path, &refusal.error, &refusal.reason)
 						.await?;
-					return Err(err);
+					return Err(refusal.error);
 				}
 				Turn::Renewal(request_update::Verdict {
 					verdict,
@@ -1672,8 +1672,9 @@ where
 							true => self.update_announce(path.clone(), advert),
 							// Re-attach: a clean path replaced the reflected one we detached from.
 							false => {
-								let admit = match token_grant {
-									Some(_) => Admit::Token(None),
+								// The grant still holds the slot it was admitted with, so reuse it.
+								let admit = match &token_grant {
+									Some(grant) => Admit::Token(grant.hold()),
 									None => Admit::Session,
 								};
 								self.start_announce(path.clone(), advert, admit)
@@ -7906,6 +7907,101 @@ mod tests {
 			routed_now(&consumer, "room/host").is_some(),
 			"the namespace is routable again",
 		);
+	}
+
+	/// A token-authorized announce re-attaching after a reflection reuses the slot its grant
+	/// still holds: with a cap of one, taking a second would close the session.
+	#[moq_net_sim::test]
+	async fn a_token_announce_reattaches_on_its_own_slot() {
+		let self_origin = crate::Hop::new(5).unwrap();
+		let peer = peer_9();
+		let (clean, looped) = clean_and_looped();
+		let script = publish_namespace_updates(&[looped, clean.clone()]).await;
+		let session = crate::lite::test_transport::ScriptedSession::new(script);
+		let log = session.log.clone();
+		let (origin, driver) = crate::origin::Producer::new(crate::origin::Config::new(self_origin));
+		std::mem::forget(driver);
+		let consumer = origin.consume();
+		let (tasks, task_set) = crate::util::TaskSet::new();
+		std::mem::forget(task_set);
+		let mut subscriber = Subscriber::new(
+			crate::time::Clock::sim(),
+			session.clone(),
+			origin,
+			Control::new(None, true),
+			None,
+			peer::PeerSetup::default(),
+			self_origin,
+			None,
+			Version::Draft19,
+			tasks,
+			Default::default(),
+		);
+		subscriber.announces = crate::session::Slots::new(1);
+
+		// Admitted by its own token, which holds the one slot for the request's life.
+		let path = crate::Path::new("room/host").to_owned();
+		let hold: crate::auth::Hold = std::sync::Arc::new(subscriber.announces.acquire().unwrap());
+		let auth = crate::auth::Handle::new(true);
+		let mut requests = auth.requests().unwrap();
+		let token = crate::setup::Token {
+			kind: 300,
+			value: vec![0x00, 0xff],
+		};
+		let verdict = auth.verify_request(
+			token,
+			path.clone(),
+			crate::auth::RequestKind::PublishNamespace,
+			Some(hold.clone()),
+		);
+		let _issued = requests
+			.next()
+			.await
+			.unwrap()
+			.request()
+			.accept(crate::auth::Grant::all());
+		let answered = verdict.grant().await;
+		let grant = crate::auth::RequestGrant::new(
+			&subscriber.runtime,
+			verdict,
+			answered,
+			path.clone(),
+			crate::auth::RequestKind::PublishNamespace,
+			Some(hold.clone()),
+		)
+		.unwrap();
+		let advert = subscriber.route(Some(&clean), &peer).expect("route");
+		subscriber
+			.start_announce(path.clone(), advert, Admit::Token(Some(hold)))
+			.unwrap();
+
+		let mut stream = Stream::open(&mut session.clone(), Version::Draft19).await.unwrap();
+		let mut attached = true;
+		{
+			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
+				&mut stream,
+				RequestId(1),
+				&path,
+				Some(clean.clone()),
+				peer,
+				&mut attached,
+				Some(grant),
+			));
+			for _ in 0..20 {
+				assert!(
+					futures::poll!(run.as_mut()).is_pending(),
+					"the re-attach must not end the announce"
+				);
+				settle().await;
+			}
+		}
+
+		assert!(attached, "the clean path must re-attach");
+		assert!(
+			routed_now(&consumer, "room/host").is_some(),
+			"the namespace is routable again"
+		);
+		assert!(log.closes().is_empty(), "the session stays up: {:?}", log.closes());
 	}
 
 	/// The expected update: a relay that started carrying the namespace reprices it to

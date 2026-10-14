@@ -1368,6 +1368,11 @@ impl RequestGrant {
 		&self.grant
 	}
 
+	/// The request's slot, for re-attaching what it authorized without taking another.
+	pub(crate) fn hold(&self) -> Option<Hold> {
+		self.hold.clone()
+	}
+
 	/// Start verifying a renewal's token, holding the request's slot while it runs.
 	pub(crate) fn verify_renewal(&self, handle: &Handle, token: crate::setup::Token) -> RequestVerdict {
 		handle.verify_request(token, self.path.clone(), self.kind, self.hold.clone())
@@ -1394,20 +1399,20 @@ impl RequestGrant {
 		Ok(())
 	}
 
-	/// Resolve with the error that ends the request: the deadline lapsing
-	/// ([`Error::Unauthorized`]), the acceptor revoking or dropping the grant (its code), or an
-	/// acceptor-side update that no longer covers the request ([`Error::Unauthorized`]). A
-	/// covering update, such as a lowered expiry, is folded in and polling continues. Never
-	/// resolves while the grant still stands.
-	pub(crate) fn poll_ended(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+	/// Resolve with the refusal that ends the request: the deadline lapsing
+	/// ([`Error::Unauthorized`]), the acceptor revoking or dropping the grant (its code and
+	/// reason), or an acceptor-side update that no longer covers the request
+	/// ([`Error::Unauthorized`]). A covering update, such as a lowered expiry, is folded in and
+	/// polling continues. Never resolves while the grant still stands.
+	pub(crate) fn poll_ended(&mut self, waiter: &kio::Waiter) -> Poll<Refusal> {
 		loop {
 			if self.deadline.poll(waiter).is_ready() {
-				return Poll::Ready(Error::Unauthorized);
+				return Poll::Ready(Refusal::new(Error::Unauthorized, "request token expired"));
 			}
 			match self.verdict.poll_reply(waiter) {
 				Poll::Ready(Reply::Grant(grant)) => {
 					if !self.covers(&grant) {
-						return Poll::Ready(Error::Unauthorized);
+						return Poll::Ready(Refusal::new(Error::Unauthorized, "request token no longer granted"));
 					}
 					self.deadline.set(grant.expires);
 					self.grant = grant;
@@ -1415,7 +1420,9 @@ impl RequestGrant {
 					// be waiting.
 					continue;
 				}
-				Poll::Ready(Reply::Refuse { code, .. }) => return Poll::Ready(Error::Session(code)),
+				Poll::Ready(Reply::Refuse { code, reason }) => {
+					return Poll::Ready(Refusal::new(Error::Session(code), &reason));
+				}
 				Poll::Pending => return Poll::Pending,
 			}
 		}
@@ -2076,7 +2083,7 @@ mod request_token_tests {
 		)
 		.unwrap();
 
-		let err = kio::wait(|waiter| request_grant.poll_ended(waiter)).await;
+		let err = kio::wait(|waiter| request_grant.poll_ended(waiter)).await.error;
 		assert!(matches!(err, Error::Unauthorized), "{err:?}");
 		assert_eq!(handle.grant().peek(), None, "the session grant is untouched");
 	}
@@ -2126,7 +2133,7 @@ mod request_token_tests {
 		// The old grant still stands with its original expiry, and the request ends only
 		// when that lapses.
 		assert_eq!(request_grant.grant().expires, first_expires);
-		let err = kio::wait(|waiter| request_grant.poll_ended(waiter)).await;
+		let err = kio::wait(|waiter| request_grant.poll_ended(waiter)).await.error;
 		assert!(matches!(err, Error::Unauthorized), "{err:?}");
 	}
 
@@ -2161,7 +2168,8 @@ mod request_token_tests {
 			kio::wait(|waiter| request_grant.poll_ended(waiter)),
 		)
 		.await
-		.expect("an uncovering update must end the request");
+		.expect("an uncovering update must end the request")
+		.error;
 		assert!(matches!(err, Error::Unauthorized), "{err:?}");
 	}
 
@@ -2207,8 +2215,12 @@ mod request_token_tests {
 		.unwrap();
 
 		issued.revoke(SessionError::Unauthorized, "revoked");
-		let err = kio::wait(|waiter| request_grant.poll_ended(waiter)).await;
-		assert!(matches!(err, Error::Session(SessionError::Unauthorized)), "{err:?}");
+		let refusal = kio::wait(|waiter| request_grant.poll_ended(waiter)).await;
+		assert!(
+			matches!(refusal.error, Error::Session(SessionError::Unauthorized)),
+			"{refusal:?}"
+		);
+		assert_eq!(refusal.reason, "revoked", "the acceptor's reason is kept");
 		assert_eq!(handle.grant().peek(), None, "the session grant is untouched");
 	}
 }

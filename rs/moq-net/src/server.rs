@@ -297,6 +297,8 @@ impl Server {
 			}
 			PausedHandshake::Boxed(_) => false,
 		});
+		// Refuse a request token set before `ok()` too.
+		auth.lite();
 		Ok(Handshake {
 			path,
 			role,
@@ -1369,6 +1371,21 @@ mod tests {
 		let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
 		assert_eq!(request.path(), "/team/room");
 		assert_eq!(request.role(), None, "a client that omits the role is bidirectional");
+	}
+
+	/// moq-lite carries no request token, so setting one before `ok()` already refuses.
+	#[moq_net_sim::test]
+	async fn a_lite_handshake_refuses_a_request_token() {
+		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]);
+		let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
+		let token = crate::setup::Token {
+			kind: 0,
+			value: b"jwt".to_vec(),
+		};
+		assert!(matches!(
+			request.auth().set_request_token(token),
+			Err(Error::Unsupported)
+		));
 	}
 
 	#[moq_net_sim::test]

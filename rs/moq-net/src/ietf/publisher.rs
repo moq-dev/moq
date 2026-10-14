@@ -1149,10 +1149,11 @@ where
 					return Poll::Ready(Turn::Cancelled);
 				}
 				if let Some(rg) = request_grant.as_mut()
-					&& let Poll::Ready(err) = rg.poll_ended(waiter)
+					&& let Poll::Ready(refusal) = rg.poll_ended(waiter)
 				{
-					tracing::info!(broadcast = %namespace, %err, "request token grant ended");
-					return Poll::Ready(Turn::Ended(err));
+					// PUBLISH_DONE carries a fixed reason per status, so only the code reaches the peer.
+					tracing::info!(broadcast = %namespace, err = %refusal.error, reason = %refusal.reason, "request token grant ended");
+					return Poll::Ready(Turn::Ended(refusal.error));
 				}
 				if let Poll::Ready(renewed) = renewal.poll(waiter) {
 					return Poll::Ready(Turn::Renewal(renewed));
