@@ -301,6 +301,8 @@ Sent when terminating the session, via the transport's session close.
 | ------- | ------------- | ----------- |
 |  0x17  | UNKNOWN_AUTH_TOKEN_ALIAS | A token named an alias that was never registered. |
 | ------- | ------------- | ----------- |
+|  0x1B  | TOO_MANY_REQUEST_UPDATES | The peer left more request updates unanswered than the endpoint allows. |
+| ------- | ------------- | ----------- |
 |  0x30  | NOT_SUPPORTED | The requested feature, token, or grant is unsupported. |
 | ------- | ------------- | ----------- |
 
@@ -1590,7 +1592,7 @@ The `Message Length` describes the payload size on the wire.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live advertisement's suffix, and ANNOUNCE_START and ANNOUNCE_UPDATE gain `Hop Base` and `Hop Keep` to copy the tail of a live advertisement's Hop ID list.
 - Capped the Message Length of every message except FRAME at 65,535 bytes.
 - Added the TOO_MANY_REQUESTS (0x7) session code, closing a session whose peer goes past the endpoint's bound on subscriptions or announcements.
-- Added the AUTH_TOKEN_CACHE_OVERFLOW (0x13) and UNKNOWN_AUTH_TOKEN_ALIAS (0x17) session codes, with moq-transport's meaning.
+- Added the AUTH_TOKEN_CACHE_OVERFLOW (0x13), UNKNOWN_AUTH_TOKEN_ALIAS (0x17), and TOO_MANY_REQUEST_UPDATES (0x1B) session codes, with moq-transport's meaning.
 - Limited AUTH_OK Expires to 2^53 - 1 milliseconds, with an out-of-range value closing the session with PROTOCOL_VIOLATION.
 - Invalid UTF-8 or an oversized AUTH_ERROR reason closes the session with PROTOCOL_VIOLATION.
 - An Auth Stream message that fails to decode, has trailing body bytes, or has an unexpected type, or a second AUTH from the opener, closes the session with PROTOCOL_VIOLATION.

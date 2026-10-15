@@ -110,7 +110,10 @@ public final class Session: Sendable {
         ffi.cancel(code: code)
     }
 
-    /// Drain finished tracks within one second, throwing if delivery times out.
+    /// Drain finished tracks within one second, throwing on failure.
+    /// Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older
+    /// Lite versions, including the default lite-06, wait only for transport ACKs.
+    /// IETF also waits for transport ACKs.
     public func shutdown() async throws {
         try await ffi.shutdown()
     }

@@ -16,7 +16,7 @@ import { Connection } from "./connection.ts";
 import { ObjectDatagram } from "./datagram.ts";
 import { encodeObjectExtensions, type GroupFlags, Group as GroupMessage } from "./object.ts";
 import type { Properties } from "./properties.ts";
-import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
+import { PublishNamespace, PublishNamespaceCancel, PublishNamespaceUpdate } from "./publish_namespace.ts";
 import { MaxRequestId, RequestError, RequestOk } from "./request.ts";
 import { Subscribe, SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
@@ -675,6 +675,48 @@ test("a PUBLISH_NAMESPACE update that starts looping back is detached", async ()
 	await RequestOk.decode(peer.reader, VERSION);
 
 	peer.close();
+	await handler;
+});
+
+/**
+ * Draft-16 renews a PUBLISH_NAMESPACE with a REQUEST_UPDATE naming it, answered by the
+ * update's own Request ID. One repeating a token is refused that way too, and cancels the
+ * advertisement, which outlives its stream on that draft.
+ */
+test("a draft-16 PUBLISH_NAMESPACE update is answered by its own Request ID", async () => {
+	const version = Version.DRAFT_16;
+	const pair = createMockTransportPair(ALPN.DRAFT_16);
+	const session = new NativeSession(pair.server, version, true);
+	const subscriber = new Subscriber({ session });
+
+	const request = await Stream.open(pair.server, { version });
+	const handler = subscriber.runPublishNamespace(
+		new PublishNamespace({ requestId: 1n, trackNamespace: Path.from("theirs") }),
+		request,
+	);
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream");
+	expect(await peer.reader.u53()).toBe(RequestOk.id);
+	expect((await RequestOk.decode(peer.reader, version)).requestId).toBe(1n);
+
+	await peer.writer.u53(PublishNamespaceUpdate.id);
+	await new PublishNamespaceUpdate({ requestId: 3n, namespaceRequestId: 1n, update: {} }).encode(
+		peer.writer,
+		version,
+	);
+	expect(await peer.reader.u53()).toBe(RequestOk.id);
+	expect((await RequestOk.decode(peer.reader, version)).requestId).toBe(3n);
+
+	// Two identical AUTHORIZATION TOKENs.
+	const body = [5, 1, 2, 0x03, 3, 0x03, 0x00, 0xaa, 0, 3, 0x03, 0x00, 0xaa];
+	await peer.writer.u53(PublishNamespaceUpdate.id);
+	await peer.writer.u16(body.length);
+	for (const byte of body) await peer.writer.u8(byte);
+	expect(await peer.reader.u53()).toBe(RequestError.id);
+	expect((await RequestError.decode(peer.reader, version)).requestId).toBe(5n);
+	expect(await peer.reader.u53()).toBe(PublishNamespaceCancel.id);
+	expect((await PublishNamespaceCancel.decode(peer.reader, version)).requestId).toBe(1n);
+
 	await handler;
 });
 

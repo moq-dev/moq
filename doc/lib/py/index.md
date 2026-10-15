@@ -17,7 +17,18 @@ x64.
 Use `Named(name)` or `Requested(request)` as the target for `TrackProducer.audio` / `.video`.
 `CatalogProducer(broadcast)` holds the broadcast weakly and owns catalog properties and sections;
 its writes fail with `Error.Closed` after the broadcast closes or is released.
+Share `media.Timebase(broadcast)` through container init records when several imports
+use one source timeline. `ContainerStreamProducer` takes `ContainerStreamInit`;
+omitting its timebase keeps an independent offset. A timebase belongs to its broadcast
+and does not keep it open.
 `MediaFrame.timestamp`, media writes, and `flush` use `datetime.timedelta`.
+A missing data timestamp stays untimed; the library never substitutes zero or now.
+Raw tracks with a `None` timescale are untimed on both publish and receive.
+`moq.flate.SnapshotProducer` / `StreamProducer` publish opaque payloads; their `update` / `append`
+and the JSON producers accept `timestamp=timedelta(...)` (`None` for untimed).
+Whole-frame media writes require caller time; container imports keep their own timeline handling.
+Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
+created event on the broadcast clock; reading it fixes that clock for later media producers.
 For arrival-order reads, decode each group from `TrackConsumer.recv_group()` with
 `media.GroupConsumer(group, container)`; frames carry container media time as they land.
 
@@ -58,7 +69,7 @@ async def main():
 
         # Already-encoded frames: the catalog is filled from the bitstream
         audio = moq.media.TrackProducer.audio(broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_init_bytes))
-        audio.write_frame(payload)
+        audio.write_frame(payload, moq.media.CatalogProducer(broadcast).now())
         audio.cut()   # audio has no keyframes, so this is what gives it groups
 
         # Or raw pixels, encoded inside the binding (VideoToolbox, Media Foundation, NVENC, openh264)
@@ -97,7 +108,7 @@ one to one; the API reference has the names.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or at a segment cadence to align with video.
 - **Live encoder timing.** After writing a frame you encoded yourself, call `flush(timestamp)` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Decoded frames hold decoder buffers.** Drop each frame from `decode_video` promptly, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
-- **Closing.** `await session.shutdown()` gives finished tracks up to one second to deliver and raises if they did not. `cancel(code)` closes at once. Finish or abort live tracks first.
+- **Closing.** `await session.shutdown()` drains for up to one second and raises on failure. `cancel(code)` closes at once. Finish or abort live tracks first. Application delivery requires explicitly selecting `moq-lite-07-wip` on both peers; older Lite versions (including default lite-06) and IETF wait only for transport ACKs.
 - **Stats.** `session.stats()` reports `rtt`, `estimated_send_rate_bps`, `estimated_recv_rate_bps`, and the byte and packet counters (`bytes_sent`, `bytes_received`, `bytes_lost`, `packets_sent`, `packets_received`, `packets_lost`). A field is `None` when the transport does not report it, which is not the same as zero.
 - **Errors.** Read diagnostic payloads from `reason` and structured protocol failures from `details`.
 - **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.

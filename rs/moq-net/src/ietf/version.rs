@@ -100,6 +100,7 @@ mod tests {
 			properties_wanted: false,
 			forward: true,
 			range_filters: false,
+			authorization_token: None,
 		};
 
 		let subscribe_ok = SubscribeOk {
@@ -171,6 +172,7 @@ mod tests {
 			properties_wanted: true,
 			forward: true,
 			range_filters: false,
+			authorization_token: None,
 		};
 
 		// Draft-20 spells Next Object as a Length of 2 and two zero fields; draft-22 as type 0x05.

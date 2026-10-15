@@ -63,7 +63,10 @@ void main() {
     // the bindings leak, not frames a live track still holds.
     Future<void> roundTrip() async {
       final broadcast = MoqBroadcastProducer();
-      final track = broadcast.publishTrack(name: 'frames', info: null);
+      final track = broadcast.publishTrack(
+        name: 'frames',
+        info: MoqTrackInfo(timescale: 1000000),
+      );
       final consumer = track.consume(subscription: null);
       final producer = track.appendGroup();
       producer.writeFrame(frame: MoqFrame(payload: payload, timestampUs: 0));

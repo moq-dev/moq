@@ -5,7 +5,8 @@ Real-time pub/sub with built-in caching, fan-out, and prioritization.
 
 from moq_ffi import MoqError as Error
 
-# A submodule, not in __all__: a star import would shadow the stdlib `json`.
+# Layer namespaces stay out of __all__; json would shadow the stdlib module.
+from . import flate as flate
 from . import json as json
 from .client import Client, connect
 from .epoch import epoch_time, mint_epoch

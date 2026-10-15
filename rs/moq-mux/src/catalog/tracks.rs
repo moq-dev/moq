@@ -71,7 +71,7 @@ use super::hang::{Catalog, CatalogExt};
 /// #     broadcast: &mut moq_net::broadcast::Producer,
 /// #     catalog: &moq_mux::catalog::Producer<Ext>,
 /// # ) -> moq_mux::Result<()> {
-/// let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+/// let info = moq_net::track::Info::default();
 /// let track = broadcast.create_track("telemetry", info)?;
 /// // The producer fixes the mode, so the one passed here is only a placeholder.
 /// let entry = Mavlink { config: BinaryConfig::new(Mode::Stream), sysid: 1 };
@@ -190,9 +190,9 @@ pub struct VideoHint {
 	pub coded_width: Option<u32>,
 	/// The encoded height in pixels.
 	pub coded_height: Option<u32>,
-	/// The display aspect ratio width.
+	/// The width of the aspect ratio the whole picture is displayed at, not the sample aspect.
 	pub display_aspect_width: Option<u32>,
-	/// The display aspect ratio height.
+	/// The height of the aspect ratio the whole picture is displayed at.
 	pub display_aspect_height: Option<u32>,
 	/// The maximum bitrate in bits per second.
 	pub bitrate: Option<u64>,

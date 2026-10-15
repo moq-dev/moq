@@ -172,6 +172,7 @@ cargo install moq-cli --no-default-features --features "iroh,noq,websocket,play"
 moq --connect https://relay.example.com/anon --broadcast cam.hang import capture
 moq ... import capture --display --system-audio          # share a screen with its sound (macOS)
 moq ... import capture --window 39193 --no-audio         # one window (macOS, Windows, X11)
+moq ... import capture --window --no-audio               # system window picker (Linux Portal)
 moq ... import capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3000000 --codec h265
 ```
 
@@ -183,8 +184,15 @@ ceiling that backends with live bitrate control lower to fit the connection.
 enumeration index rather than a stable monitor id, so re-run `moq devices` if a
 saved selector picks the wrong screen.
 
+On Wayland, bare `--window` asks the system portal to choose one window;
+there is no window id to look up or supply. An explicit `--window <id>` still
+selects a native window, including XWayland windows through their X11 ids.
+The portal may reuse its grant when capture reopens within the same process;
+a new process shows the picker again. Bare `--window` requires a Linux build
+with `pipewire`; other builds require an explicit window id.
+
 Requires the `capture` feature. On Linux the microphone needs the ALSA
-headers, and `--display` and `pipewire:` cameras also need the `pipewire`
+headers, and Portal screen/window capture and `pipewire:` cameras also need the `pipewire`
 feature (links libpipewire).
 
 ## Transcode
@@ -292,7 +300,10 @@ importer guarantees yet. Only `import fmp4`, `flv`, `hls`, and `ts` (one
 program, or `--passthrough`) accept it. The RTMP, SRT, and WHIP ingests and
 `import ts --program all` refuse it because they mint their own, and `import
 avc3`, `capture`, `rtc --connect`, `archive`, and `transcode` because their
-timestamps or bytes come from the instance rather than the input.
+timestamps or bytes come from the instance rather than the input. Each that
+accepts it announces once its input has declared its tracks (for `ts`, the
+first PMT), so a standby started ahead of its feed is never asked for tracks it
+cannot serve yet; empty input exits 1 without announcing.
 
 ## Cluster
 

@@ -820,11 +820,13 @@ impl MoqSession {
 		// (with the close reason, or Ok once the connection loop stops).
 	}
 
-	/// Drain finished tracks within one second, returning any delivery error.
+	/// Drain finished tracks within one second, returning any drain error.
 	///
 	/// Finish or abort live tracks first. `cancel` stays immediate. The name
 	/// avoids Kotlin's generated `AutoCloseable.close()`, which releases the handle.
-	/// IETF media streams are not drained yet.
+	/// Explicit `moq-lite-07-wip` waits for the peer to receive the tail. Older Lite
+	/// versions, including the default lite-06, wait only for transport ACKs.
+	/// IETF also waits for transport ACKs.
 	pub async fn shutdown(&self) -> Result<(), MoqError> {
 		let inner = self.inner.clone();
 		crate::ffi::detached(async move {

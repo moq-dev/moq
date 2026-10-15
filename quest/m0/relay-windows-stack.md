@@ -37,7 +37,11 @@ Decided 2026-10-15 (maintainer):
   thread with a 1 MiB stack in a debug build. It must overflow without the fix
   on any OS, so Linux CI catches it too.
 - Windows CI adds `-p moq-relay` to `windows-test` (`rs/justfile`), so the
-  relay's tests, the regression above included, run on Windows.
+  relay's tests, the regression above included, run on Windows. That needs
+  the tests' Unix-only expectations gated first, keeping them on Unix:
+  `rs/moq-relay/tests/released_cli.rs` requires the `server-unix-*` flags and
+  their env vars, which exist only under `cfg(all(feature = "uds", unix))`
+  (`rs/moq-tokio/src/listen.rs`).
 
 No release backport is planned; release builds have smaller futures. If the
 fix shows `release` overflows too, ask the maintainer.

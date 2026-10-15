@@ -49,7 +49,10 @@ for a permission, device, or settings change instead of prompting again.
 The video encoder follows its share of the connection's send-rate estimate, so
 several publishers on one connection do not each target the whole uplink.
 Codec, resolution, framerate, and bitrate are tunable through
-`el.video.config`, and `el.video.cut()` asks for an extra keyframe. For
+`el.video.config`, and `el.video.cut()` asks for an extra keyframe. Size,
+bitrate, and framerate change in place, while a codec or audio format change
+keeps the rendition's catalog ID under a fresh `track` name that viewers
+follow through the catalog. For
 simulcast, drop the element and register several encoders on a
 `Publish.Broadcast`, as below.
 
@@ -68,8 +71,10 @@ timeline. The catalog's `clock` maps it to wall time. Stamp your own tracks
 `broadcast.net` is the underlying `Moq.Broadcast.Producer`, so an application
 can serve its own tracks alongside the media. It is recreated when the origin, name,
 `enabled`, or `maxAge` changes, so acquire it from an effect and create each
-track once per `net`. A track name always means the same content, so a track
-re-created on the same `net` throws on an append that would reuse its sequences:
+track once per `net`. Names under a rendition's ID, such as `video/1`, are
+reserved for that rendition's replacement tracks. A track name always means
+the same content, so a track re-created on the same `net` throws on an append
+that would reuse its sequences:
 
 ```ts
 import * as Json from "@moq/json";

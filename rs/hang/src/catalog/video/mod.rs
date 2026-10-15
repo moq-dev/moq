@@ -214,10 +214,11 @@ pub struct VideoConfig {
 	pub coded_width: Option<u32>,
 	pub coded_height: Option<u32>,
 
-	/// The display aspect ratio of the media.
+	/// The aspect ratio the whole picture is displayed at, as WebCodecs'
+	/// `VideoDecoderConfig.displayAspectWidth` / `displayAspectHeight`.
 	///
-	/// This allows you to stretch/shrink pixels of the video.
-	/// If not provided, the display aspect ratio is 1:1
+	/// Absent means the decoded picture's own shape. A publisher with non-square
+	/// samples sets the picture's aspect here, never the sample aspect.
 	///
 	/// The `displayRatio*` aliases decode catalogs from publishers predating the
 	/// rename to `displayAspect*`; the current name is what we emit.
@@ -227,7 +228,7 @@ pub struct VideoConfig {
 	pub display_aspect_height: Option<u32>,
 
 	// TODO color space
-	/// The maximum bitrate of the video track, if known. It only rises.
+	/// The maximum bitrate of the video track, if known.
 	#[serde(default)]
 	pub bitrate: Option<u64>,
 
@@ -239,7 +240,7 @@ pub struct VideoConfig {
 	)]
 	pub enabled: bool,
 
-	/// The maximum frame rate of the video track, if known. It only rises.
+	/// The maximum frame rate of the video track, if known.
 	#[serde(default)]
 	pub framerate: Option<f64>,
 

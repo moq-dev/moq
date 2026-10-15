@@ -109,6 +109,10 @@ if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the cata
 `MediaTrackConsumer` reads in decode order. For arrival-order reads, decode each group
 from `TrackConsumer::recv_group` with `moq::MediaGroupConsumer::init(group, container)`;
 frames carry container media time as they land.
+Share `moq::MediaTimebase::init(broadcast)` through container init records when several
+imports use one source timeline. `MediaContainerStreamProducer::init` takes
+`ContainerStreamInit`; omitting its timebase keeps an independent offset. A timebase
+belongs to its broadcast and does not keep it open.
 
 ```cpp
 // Publish encoded frames, or raw pixels with the codec inside the binding.
@@ -190,6 +194,11 @@ Audio and video convenience decoders reject a catalog configuration with `enable
 Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
 
 ## Shutdown
+
+`session->shutdown().get()` drains for up to one second and reports any error.
+Application delivery requires explicitly selecting `moq-lite-07-wip` on both
+peers; older Lite versions (including default lite-06) and IETF wait only for
+transport ACKs. Finish or abort live tracks first.
 
 `moq::shutdown()` stops the `moq-ffi` runtime workers, then the executor.
 Pending calls resolve `Cancelled`, and every object stays safe to drop. Call

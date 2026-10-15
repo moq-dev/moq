@@ -160,6 +160,7 @@ url = "http://127.0.0.1:4440/"       # An auth server asked once per session eve
 # public = "anon/**"                 # Or a static anonymous grant rooted at /, publish and subscribe alike.
 # public_subscribe = ["anon/**", "demo/**"]   # Or split them; patterns, `foo/**` for a subtree.
 # public_publish = ["anon/**"]
+verifications = 128                  # In-band tokens one session verifies at once; later ones wait.
 ```
 
 See [Authentication](/bin/relay/auth).

@@ -57,7 +57,13 @@ typedef AudioFormat = MoqAudioFormat;
 /// A container that publishes its own tracks.
 typedef ContainerFormat = MoqContainerFormat;
 
-/// A container format and its leading bytes.
+/// A shared source timestamp offset that does not keep its broadcast open.
+typedef Timebase = MoqMediaTimebase;
+
+/// A byte-stream container format and an optional shared source timebase.
+typedef ContainerStreamInit = MoqContainerStreamInit;
+
+/// A container format, its leading bytes, and an optional shared source timebase.
 typedef ContainerInit = MoqContainerInit;
 
 /// A width and height pair, in pixels.

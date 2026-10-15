@@ -17,6 +17,16 @@ slices for iOS 16+, the iOS Simulator, and macOS 12.3+.
 `.named(name:)` or `.requested(request)` target. `Media.CatalogProducer(broadcast:)`
 updates catalog properties and sections without keeping the broadcast open.
 Its writes fail after closing or releasing the broadcast.
+`Flate.SnapshotProducer` / `StreamProducer` publish opaque bytes with an optional `timestampUs`.
+A missing data timestamp stays untimed; the library never substitutes zero or now.
+Raw tracks with a `nil` timescale are untimed on both publish and receive.
+Whole-frame media writes require caller time; container imports keep their own timeline handling.
+Timed raw/data tracks require caller-supplied timestamps. Use `Media.CatalogProducer.now()` to stamp a locally
+created event on the broadcast clock; reading it fixes that clock for later media producers.
+Share `Media.Timebase(broadcast:)` through container init records when several imports
+use one source timeline. `ContainerStreamProducer` takes `ContainerStreamInit`;
+omitting its timebase keeps an independent offset. A timebase belongs to its broadcast
+and does not keep it open.
 For arrival-order reads, decode each group from `TrackConsumer.recvGroup()` with
 `Media.GroupConsumer(group:container:)`; frames carry container media time as they land.
 
@@ -81,7 +91,7 @@ one to one; the API reference has the names.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or at a segment cadence to align with video.
 - **Live encoder timing.** After writing a frame you encoded yourself, call `flush(timestampUs:)` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Decoded frames hold decoder buffers.** Release each frame from `decodeVideo` promptly, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
-- **Closing.** `try await session.shutdown()` gives finished tracks up to one second to deliver and throws if they did not. `session.cancel(code:)` closes at once. Finish or abort live tracks first.
+- **Closing.** `try await session.shutdown()` drains for up to one second and throws on failure. `session.cancel(code:)` closes at once. Finish or abort live tracks first. Application delivery requires explicitly selecting `moq-lite-07-wip` on both peers; older Lite versions (including default lite-06) and IETF wait only for transport ACKs.
 - **Stats.** `session.stats()` reports `rttUs`, `estimatedSendRateBps`, `estimatedRecvRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`). A field is `nil` when the transport does not report it, which is not the same as zero.
 - **Errors.** Diagnostic cases use the `reason:` argument label; match their associated value to inspect it. Protocol errors carry `details`.
 - **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.

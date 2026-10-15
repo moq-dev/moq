@@ -79,7 +79,11 @@ take a broadcast, a `Named` or `Requested` target, and an `AudioInit` / `VideoIn
 A `Named` target chooses a track name or lets the importer derive one; a `Requested`
 target takes over a subscriber's pending request. A duplicate name fails.
 `VideoInit.Hint` seeds fields the bitstream cannot supply. `NewContainerProducer` /
-`NewContainerStreamProducer` demux whole chunks or a byte stream into their own tracks.
+`NewContainerStreamProducer` demux whole chunks or a byte stream into their own tracks,
+using `ContainerInit` or `ContainerStreamInit`. Share `NewTimebase(broadcast)` in these
+records for containers on one source timeline; omitting it gives each an independent
+offset. Timebases belong to one broadcast and do not keep it open. Call `Close` to
+release the timebase handle on the calling goroutine.
 `NewCatalogProducer` holds its broadcast weakly and owns catalog properties and sections.
 `NewCatalogConsumer`, `NewTrackConsumer`, and `FetchGroup` read
 catalog snapshots, live media, and one fetched media group. `NewGroupConsumer`
@@ -97,6 +101,10 @@ in the broadcast's catalog, and `NewSnapshotConsumer` / `NewStreamConsumer` take
 `TrackConsumer` that has not read a group yet. Snapshots carry lossy latest state; streams
 carry every record in order. Producers accept any `encoding/json` value; consumers return
 `json.RawMessage` so callers choose their own decoded type.
+`Update` / `Append` take a final `*time.Duration` on the broadcast clock; nil publishes untimed.
+Raw tracks with a nil timescale are untimed; timed tracks require matching timestamps.
+`media.CatalogProducer.Now()` samples and fixes the catalog clock for explicit local-event stamps.
+`moq.dev/moq/flate` provides the matching snapshot and stream producers for opaque bytes.
 
 ```go
 import moqjson "moq.dev/moq/json"
@@ -104,7 +112,7 @@ import moqjson "moq.dev/moq/json"
 broadcast, _ := client.CreateBroadcast("room")
 track, _ := broadcast.PublishTrack("status", nil)
 status, _ := moqjson.NewSnapshotProducer(broadcast, track, moqjson.SnapshotOptions{Compression: true})
-_ = status.Update(map[string]any{"viewers": 42})
+_ = status.Update(map[string]any{"viewers": 42}, nil)
 ```
 
 Producers take `SnapshotOptions` or `StreamOptions`; both consumers take

@@ -104,7 +104,10 @@ func (s *Session) Consume() *OriginConsumer {
 	return &OriginConsumer{inner: s.inner.Consume()}
 }
 
-// Shutdown drains finished tracks within one second, returning any delivery error.
+// Shutdown drains finished tracks within one second, returning any drain error.
+// Explicit moq-lite-07-wip waits for the peer to receive finished tails; older Lite
+// versions, including the default lite-06, wait only for transport ACKs.
+// IETF also waits for transport ACKs.
 // Cancelling ctx aborts the session immediately.
 func (s *Session) Shutdown(ctx context.Context) error {
 	return bridge.CallErr(ctx, s.abort, s.inner.Shutdown)

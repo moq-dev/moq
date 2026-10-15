@@ -98,6 +98,9 @@ Every importer takes a broadcast; single-track imports choose a `Named` or `Requ
    TrackStreamProducer
    ContainerProducer
    ContainerStreamProducer
+   ContainerInit
+   ContainerStreamInit
+   Timebase
    TrackConsumer
    GroupConsumer
    Named
@@ -122,6 +125,19 @@ broadcast, and producers advertise it in the catalog.
    StreamProducer
    SnapshotConsumer
    StreamConsumer
+```
+
+## Opaque data
+
+```{eval-rst}
+.. currentmodule:: moq.flate
+
+.. autosummary::
+   :toctree: api
+   :nosignatures:
+
+   SnapshotProducer
+   StreamProducer
 ```
 
 ## Origin and announcements

@@ -37,3 +37,15 @@ var Subscription func(any) (*ffi.MoqSubscription, error)
 
 // Duration converts a duration into nonnegative microseconds.
 var Duration func(time.Duration, string) (uint64, error)
+
+// OptionalDuration converts a caller's time to microseconds, preserving absence.
+func OptionalDuration(value *time.Duration, name string) (*uint64, error) {
+	if value == nil {
+		return nil, nil
+	}
+	us, err := Duration(*value, name)
+	if err != nil {
+		return nil, err
+	}
+	return &us, nil
+}

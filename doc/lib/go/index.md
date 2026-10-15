@@ -17,6 +17,17 @@ linux/amd64, linux/arm64, darwin/arm64 (macOS 12.3+), windows/amd64.
 Construct `NewAudioTrackProducer` / `NewVideoTrackProducer` from a broadcast, an init record,
 and a `Named` or `Requested` target. `NewCatalogProducer` holds its broadcast weakly;
 catalog writes fail with `ErrClosed` after the broadcast closes. Media timestamps use `time.Duration`.
+A missing data timestamp stays untimed; the library never substitutes zero or now.
+Raw tracks with a `nil` timescale are untimed on both publish and receive.
+`moq.dev/moq/flate` publishes opaque snapshot and stream payloads; its `Update` / `Append`
+and the JSON producers take a final `*time.Duration` timestamp argument (`nil` for untimed).
+Whole-frame media writes require caller time; container imports keep their own timeline handling.
+Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.Now()` to stamp a locally
+created event on the broadcast clock; reading it fixes that clock for later media producers.
+Share `media.NewTimebase(broadcast)` through container init records when several imports
+use one source timeline. `NewContainerStreamProducer` takes `ContainerStreamInit`;
+omitting its timebase keeps an independent offset. Timebases belong to one broadcast
+and do not keep it open; release the handle with `Close` on the calling goroutine.
 For arrival-order reads, decode each group from `moq.TrackConsumer.RecvGroup` with
 `media.NewGroupConsumer`; frames carry container media time as they land. `media.FetchGroup`
 fetches and decodes one past group.
@@ -106,7 +117,7 @@ one to one; the API reference has the names.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `Cut()`: after every frame, or at a segment cadence to align with video.
 - **Live encoder timing.** After writing a frame you encoded yourself, call `Flush(timestamp)` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `Discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Decoded frames hold decoder buffers.** `Close` each `VideoDecodedFrame` promptly, or the decoder stalls. `Resize` is best effort, so read each frame's `Width()` and `Height()`.
-- **Closing.** `client.Close()` gives finished tracks up to one second to deliver and returns an error if they did not. `session.Shutdown(ctx)` does the same, and `session.Cancel(code)` closes at once. Finish or abort live tracks first.
+- **Closing.** `client.Close()` drains for up to one second and returns an error on failure. `session.Shutdown(ctx)` does the same, and `session.Cancel(code)` closes at once. Finish or abort live tracks first. Application delivery requires explicitly selecting `moq-lite-07-wip` on both peers; older Lite versions (including default lite-06) and IETF wait only for transport ACKs.
 - **Stats.** `Session().Stats()` reports `RTT`, `EstimatedSendRateBps`, `EstimatedRecvRateBps`, and the byte and packet counters (`BytesSent`, `BytesReceived`, `BytesLost`, `PacketsSent`, `PacketsReceived`, `PacketsLost`). A field is nil when the transport does not report it, which is not the same as zero.
 - **Errors.** Read diagnostic payloads from `Reason` and structured protocol failures from `Details`.
 - **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.

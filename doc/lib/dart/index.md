@@ -17,6 +17,16 @@ Import `package:moq/media.dart` with a prefix for catalogs, encoded-media import
 container consumers. `TrackProducer.audio` / `.video` take a broadcast, an init record,
 and a `Named` or `Requested` target. `CatalogProducer(broadcast: ...)` owns catalog properties
 and sections; it holds the broadcast weakly and fails after the broadcast closes.
+`package:moq/flate.dart` exposes opaque `SnapshotProducer` / `StreamProducer` with an optional `timestampUs`.
+A missing data timestamp stays untimed; the library never substitutes zero or now.
+Raw tracks with a `null` timescale are untimed on both publish and receive.
+Whole-frame media writes require caller time; container imports keep their own timeline handling.
+Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
+created event on the broadcast clock; reading it fixes that clock for later media producers.
+Share `media.Timebase(broadcast: ...)` through container init records when several
+imports use one source timeline. `ContainerStreamProducer` takes `ContainerStreamInit`;
+omitting its timebase keeps an independent offset. A timebase belongs to its broadcast
+and does not keep it open.
 `media.CatalogConsumer.subscribe`, `media.TrackConsumer.subscribe`, and `media.GroupConsumer.fetch`
 construct the read side from a broadcast. For arrival-order reads, decode each group from
 `TrackConsumer.recvGroup()` with `media.GroupConsumer(group: ..., container: ...)`; frames
@@ -58,7 +68,7 @@ print(await catalog.next());
 final mine = moq.createBroadcast('live/camera');
 final track = mine.publishTrack(name: 'video', info: null);
 final group = track.appendGroup();
-group.writeFrame(frame: Frame(payload: bytes, timestampUs: 0));
+group.writeFrame(frame: Frame(payload: bytes, timestampUs: null));
 group.finish();
 mine.announce(route: MoqRoute(epoch: mintEpoch())); // a fresh epoch per run
 track.finish();
@@ -76,7 +86,7 @@ one to one; the API reference has the names.
 - **Names.** Types drop the `Moq` prefix (`Session`, `BroadcastProducer`) as aliases, so the generated names still work. `Container`, `Route`, and the exceptions keep it, since Flutter owns those names. `dynamic` is reserved, so the origin method is `dynamic_`.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or at a segment cadence to align with video.
 - **Live encoder timing.** After writing a frame you encoded yourself, call `flush(timestampUs: ...)` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
-- **Closing.** `await moq.close()` or `session.shutdown()` gives finished tracks up to one second to deliver and fails if they did not. `session.cancel(code: 0)` closes at once. Finish or abort live tracks first. Cancelling a stream subscription releases its native cursor.
+- **Closing.** `await moq.close()` or `session.shutdown()` drains for up to one second and reports any error. `session.cancel(code: 0)` closes at once. Finish or abort live tracks first. Cancelling a stream subscription releases its native cursor. Application delivery requires explicitly selecting `moq-lite-07-wip` on both peers; older Lite versions (including default lite-06) and IETF wait only for transport ACKs.
 - **Stats.** `session.stats()` reports `rttUs`, `estimatedSendRateBps`, `estimatedRecvRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`). A field is `null` when the transport does not report it, which is not the same as zero.
 - **Errors.** Read diagnostic payloads from `reason` and structured protocol failures from `details`.
 - **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.

@@ -247,29 +247,20 @@ jobs:
       contents: read
       id-token: write
 
-  release-kt-ffi:
-    name: Release Kotlin FFI
-    uses: ./.github/workflows/release-kt-ffi.yml
-    permissions:
-      contents: read
-
   release-swift-lib:
     name: Release Swift Lib
     uses: ./.github/workflows/release-swift-lib.yml
+    # Its publisher check reads upstream run jobs; a called workflow can't
+    # exceed the permissions granted here.
     permissions:
       contents: read
+      actions: read
 
-  release-swift-ffi:
-    name: Release Swift FFI
-    uses: ./.github/workflows/release-swift-ffi.yml
+  release-shared-ffi:
+    name: Release FFI
+    uses: ./.github/workflows/release-shared-ffi.yml
     permissions:
       contents: write
-
-  release-go-ffi:
-    name: Release Go FFI
-    uses: ./.github/workflows/release-go-ffi.yml
-    permissions:
-      contents: read
 
   release-dart-ffi:
     name: Release Dart FFI
@@ -323,7 +314,7 @@ jobs:
   sizes:
     name: Shipping sizes
     # Measures what these release jobs upload rather than rebuilding it.
-    needs: [release-py-ffi, release-kt-ffi, release-swift-ffi, release-go-ffi, release-moq-c, release-moq-relay, release-moq-cli]
+    needs: [release-py-ffi, release-shared-ffi, release-moq-c, release-moq-relay, release-moq-cli]
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
     permissions:

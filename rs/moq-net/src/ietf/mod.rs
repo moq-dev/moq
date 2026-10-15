@@ -26,6 +26,7 @@ pub mod hidden;
 mod location;
 pub mod message;
 mod namespace;
+mod object;
 pub mod peer;
 mod priority;
 mod properties;
@@ -36,6 +37,7 @@ mod publisher;
 mod request;
 #[cfg(feature = "async")]
 mod request_stream;
+mod request_update;
 #[cfg(feature = "async")]
 mod session;
 pub mod solicit;

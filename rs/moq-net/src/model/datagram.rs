@@ -41,3 +41,31 @@ pub struct Datagram {
 	/// The datagram payload.
 	pub payload: Bytes,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Wire {
+	pub object_id: Option<u64>,
+	pub priority: Option<u8>,
+	pub end_of_group: bool,
+	pub status: Option<u64>,
+	pub properties: super::object::Properties,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Stored {
+	pub datagram: Datagram,
+	pub wire: Option<std::sync::Arc<Wire>>,
+}
+
+impl From<Datagram> for Stored {
+	fn from(datagram: Datagram) -> Self {
+		Self { datagram, wire: None }
+	}
+}
+
+impl std::ops::Deref for Stored {
+	type Target = Datagram;
+	fn deref(&self) -> &Datagram {
+		&self.datagram
+	}
+}

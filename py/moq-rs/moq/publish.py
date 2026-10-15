@@ -55,7 +55,7 @@ class GroupProducer:
 
         return GroupConsumer(self._inner.consume())
 
-    def write_frame(self, payload: bytes, timestamp: timedelta = timedelta(0)) -> None:
+    def write_frame(self, payload: bytes, timestamp: timedelta | None = None) -> None:
         """Write a frame with its presentation timestamp."""
         self._inner.write_frame(Frame(payload, timestamp)._ffi())
 
@@ -126,11 +126,11 @@ class TrackProducer:
         """Create a group with an explicit sequence number."""
         return GroupProducer(self._inner.create_group(sequence))
 
-    def write_frame(self, payload: bytes, timestamp: timedelta = timedelta(0)) -> None:
+    def write_frame(self, payload: bytes, timestamp: timedelta | None = None) -> None:
         """Write a single-frame group with its presentation timestamp."""
         self._inner.write_frame(Frame(payload, timestamp)._ffi())
 
-    def append_datagram(self, payload: bytes, timestamp: timedelta = timedelta(0)) -> int:
+    def append_datagram(self, payload: bytes, timestamp: timedelta | None = None) -> int:
         """Send a best-effort datagram and return its sequence number.
 
         Payloads are capped at 1200 bytes. Datagram delivery requires a datagram-capable

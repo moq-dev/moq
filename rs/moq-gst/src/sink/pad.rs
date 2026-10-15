@@ -250,6 +250,7 @@ pub enum PushOutcome {
 pub struct Pad {
 	/// The requested pad gates the first catalog even before CAPS can name its rendition.
 	reserved: Option<moq_mux::catalog::Reserved>,
+	wall: Option<std::sync::Arc<super::wall::Wall>>,
 	track: Option<Sink>,
 	caps: Option<gst::Caps>,
 	/// Set once a producer build rejects this pad's caps or bitstream; further buffers are dropped and
@@ -270,6 +271,7 @@ impl Pad {
 	pub fn new() -> Self {
 		Self {
 			reserved: None,
+			wall: None,
 			track: None,
 			caps: None,
 			failed: false,
@@ -281,7 +283,8 @@ impl Pad {
 	}
 
 	/// Fill a run's slot once, including a pad visible before its admission confirms.
-	pub(super) fn reserve(&mut self, catalog: &moq_mux::catalog::Producer) {
+	pub(super) fn reserve(&mut self, catalog: &moq_mux::catalog::Producer, wall: std::sync::Arc<super::wall::Wall>) {
+		self.wall = Some(wall);
 		if self.reserved.is_none() && self.track.is_none() && !self.failed {
 			self.reserved = Some(catalog.reserve());
 		}
@@ -715,6 +718,29 @@ impl Pad {
 			PadState::NoSegment => Err("buffer before a valid SEGMENT"),
 			PadState::Invalid => Err("buffer on an invalidated timeline"),
 		}
+	}
+
+	/// Place the run on the wall clock before its first valid timestamp can reach an importer.
+	pub(super) fn place_wall(&self, buffer: &gst::BufferRef, sample: super::wall::Sample) -> Result<()> {
+		let Some(wall) = &self.wall else { return Ok(()) };
+		if self.failed || self.track.is_none() {
+			return Ok(());
+		}
+		let timestamp = if matches!(self.track, Some(Sink::Opaque(_)))
+			&& buffer.pts().is_none()
+			&& self.state == PadState::Active
+		{
+			sample
+				.running
+				.map(|time| time.useconds())
+				.ok_or("no current running time")
+		} else {
+			self.frame_timestamp(buffer.pts())
+		};
+		if let Ok(micros) = timestamp {
+			wall.place(buffer, Duration::from_micros(micros), sample)?;
+		}
+		Ok(())
 	}
 
 	/// Import one buffer into the producer. A failed or producer-less pad drops the buffer; a timeline

@@ -800,20 +800,11 @@ async fn serve_listening(
 	sessions: crate::session::Registry,
 ) -> anyhow::Result<()> {
 	while let Some(request) = listener.accept().await {
-		let id = cluster.next_connection_id();
 		let conn = Connection::new(request, cluster.clone(), auth.clone())
-			.with_id(id)
+			.with_id(cluster.next_connection_id())
 			.with_shutdown(shutdown.clone())
 			.with_sessions(sessions.clone());
-
-		tokio::spawn(async move {
-			match conn.run().await {
-				// A lease or shutdown ending the session closes it too: logged, so every
-				// accepted connection pairs with its end.
-				Ok(()) => tracing::info!(id, "connection closed"),
-				Err(err) => tracing::warn!(id, %err, "connection closed"),
-			}
-		});
+		tokio::spawn(conn.run());
 	}
 
 	anyhow::bail!("stopped accepting connections")
