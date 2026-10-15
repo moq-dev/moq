@@ -27,7 +27,6 @@ fn benchmark(c: &mut criterion::Criterion) {
 			config.rx_buffer_len = 2048;
 			config.tx_buffer_len = 2048;
 			config.rx_buffers_max = 64;
-			config.tx_buffers_max = 64;
 			let bind = || UdpSocket::bind("127.0.0.1:0").expect("bind");
 			let sender = handle.udp(bind(), config.clone()).expect("sender");
 			let receivers: Vec<_> = (0..sockets)
