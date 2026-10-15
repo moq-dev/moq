@@ -54,6 +54,8 @@ export const SessionCode = Object.freeze(
 		UnknownAuthTokenAlias: 0x17 as SessionCode,
 		/** The peer cannot support the requested feature; moq-lite only. */
 		Unsupported: 0x30 as SessionCode,
+		/** The peer left more request updates unanswered than MAX_REQUEST_UPDATES allows. */
+		TooManyRequestUpdates: 0x1b as SessionCode,
 	} as const),
 );
 

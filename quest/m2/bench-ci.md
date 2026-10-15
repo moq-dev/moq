@@ -35,7 +35,8 @@ a GitHub App:
   VM, so the cross-run history is subject to the same noise as Bencher and
   stays informational: record it with
   [github-action-benchmark](https://github.com/benchmark-action/github-action-benchmark)
-  on a data branch, with its own alert disabled. The `moq-uring` socket
+  on the [trend site](/quest/m1/bench-site.md)'s `gh-pages` branch, with its
+  own alert disabled. The `moq-uring` socket
   benches run only here, and skip loudly when the runner's kernel is too old. Add the workflow's name to
   `alert.yml` if it isn't `Nightly`.
 - Validate with an A/A run (the same commit twice) and a deliberately slowed
@@ -46,4 +47,5 @@ a GitHub App:
 ## Related
 
 - [Benchmark reporting](/bench/README.md) - the existing `bench/run.sh` retains repeated paired rounds
+- [Benchmark trend site](/quest/m1/bench-site.md) - where the nightly history is charted
 - [Bench coverage](/quest/m2/bench-coverage.md) - more targets for this job to track

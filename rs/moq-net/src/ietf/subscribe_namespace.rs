@@ -79,12 +79,14 @@ impl Message for SubscribeNamespace<'_> {
 			0x03 => authorization_token: Vec<super::token::RequestToken>,
 			HIDDEN_PARAM => hidden: Option<u64>,
 		);
-		super::token::unique(&authorization_token)?;
+		let hidden = hidden_from_param(hidden)?;
+		// Last, so a malformed field closes the session before a token refusal.
+		super::token::single(authorization_token)?;
 
 		Ok(Self {
 			request_id,
 			namespace,
-			hidden: hidden_from_param(hidden)?,
+			hidden,
 		})
 	}
 }
@@ -181,13 +183,15 @@ impl Message for SubscribeNamespaceLegacy<'_> {
 			0x10 => _forward: Option<bool> where matches!(version, Version::Draft15 | Version::Draft16 | Version::Draft17),
 			HIDDEN_PARAM => hidden: Option<u64>,
 		);
-		super::token::unique(&authorization_token)?;
+		let hidden = hidden_from_param(hidden)?;
+		// Last, so a malformed field closes the session before a token refusal.
+		super::token::single(authorization_token)?;
 
 		Ok(Self {
 			request_id,
 			namespace,
 			subscribe_options,
-			hidden: hidden_from_param(hidden)?,
+			hidden,
 		})
 	}
 }
@@ -465,6 +469,7 @@ mod tests {
 				hops: hop_path(&[7]),
 				cost: 0,
 			}),
+			authorization_token: None,
 		};
 
 		let mut buf = Vec::new();
