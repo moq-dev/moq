@@ -262,7 +262,7 @@ pub(crate) struct TrackState {
 
 	// Datagrams in arrival order, bounded by `MAX_DATAGRAMS`. Shares the group
 	// sequence namespace but is otherwise independent.
-	datagrams: VecDeque<Datagram>,
+	datagrams: VecDeque<super::datagram::Stored>,
 
 	// Number of datagrams dropped off the front (over capacity), mapping a subscriber's absolute
 	// cursor to an index into `datagrams` (mirrors `offset` for groups).
@@ -569,7 +569,7 @@ impl TrackState {
 	/// Returns the datagram and its absolute index so the consumer can advance past it. A
 	/// consumer whose `index` has fallen behind `datagram_offset` (older datagrams dropped)
 	/// resumes at the oldest still-buffered datagram, skipping the lost ones.
-	fn poll_recv_datagram(&self, index: usize) -> Poll<Result<Option<(Datagram, usize)>>> {
+	fn poll_recv_datagram(&self, index: usize) -> Poll<Result<Option<(super::datagram::Stored, usize)>>> {
 		let start = index.saturating_sub(self.datagram_offset);
 		if self.readable()
 			&& let Some(datagram) = self.datagrams.get(start)
@@ -593,7 +593,7 @@ impl TrackState {
 	}
 
 	/// Push a datagram, dropping the oldest when the send buffer is full.
-	fn push_datagram(&mut self, datagram: Datagram) {
+	fn push_datagram(&mut self, datagram: super::datagram::Stored) {
 		if self.datagrams.len() == MAX_DATAGRAMS {
 			self.datagrams.pop_front();
 			self.datagram_offset += 1;
@@ -1976,11 +1976,14 @@ impl Producer {
 		}
 		state.advance(sequence);
 		meter.datagram(payload.len() as u64);
-		state.push_datagram(Datagram {
-			sequence,
-			timestamp,
-			payload,
-		});
+		state.push_datagram(
+			Datagram {
+				sequence,
+				timestamp,
+				payload,
+			}
+			.into(),
+		);
 		let cache = state.cache.clone();
 		drop(state);
 		cache.settle(None);
@@ -1998,28 +2001,36 @@ impl Producer {
 		timestamp: impl Into<Option<Timestamp>>,
 		payload: B,
 	) -> Result<()> {
-		let payload = payload.into_bytes();
-		if payload.len() > super::datagram::MAX_DATAGRAM_PAYLOAD {
+		self.insert_wire_datagram(
+			Datagram {
+				sequence,
+				timestamp: timestamp.into(),
+				payload: payload.into_bytes(),
+			}
+			.into(),
+		)
+	}
+
+	pub(crate) fn insert_wire_datagram(&mut self, mut datagram: super::datagram::Stored) -> Result<()> {
+		if datagram.payload.len() > super::datagram::MAX_DATAGRAM_PAYLOAD {
 			return Err(Error::FrameTooLarge);
 		}
-		// Resolved before the state guard borrows `self`.
 		let meter = self.stats.meter();
 		let mut state = self.modify()?;
-		// Normalize into the track's timescale, like frames (see `group::Producer::create_frame`).
 		let timescale = state.info.as_ref().unwrap().timescale;
-		let timestamp = group::on_track(timestamp.into(), timescale)?;
-		if let Some(fin) = state.final_sequence()
-			&& sequence >= fin
+		if !datagram
+			.wire
+			.as_ref()
+			.is_some_and(|wire| wire.status.is_some_and(|status| status != 0))
 		{
+			datagram.datagram.timestamp = group::on_track(datagram.timestamp, timescale)?;
+		}
+		if state.final_sequence().is_some_and(|fin| datagram.sequence >= fin) {
 			return Err(Error::Closed);
 		}
-		state.advance(sequence);
-		meter.datagram(payload.len() as u64);
-		state.push_datagram(Datagram {
-			sequence,
-			timestamp,
-			payload,
-		});
+		state.advance(datagram.sequence);
+		meter.datagram(datagram.payload.len() as u64);
+		state.push_datagram(datagram);
 		let cache = state.cache.clone();
 		drop(state);
 		cache.settle(None);
@@ -3163,6 +3174,9 @@ impl Consumer {
 	/// miss.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn peek_group(&self, sequence: u64) -> Option<group::Consumer> {
+		if let Some(serving) = self.serving() {
+			return serving.peek_group(sequence);
+		}
 		let state = self.state.read();
 		let group = state.lookup.get(&sequence)?.serving();
 		if group.is_aborted() {
@@ -4165,11 +4179,11 @@ impl Cursor {
 
 	/// The next datagram inside this subscriber's range, dropping the ones outside it.
 	///
-	/// The range is the one groups get: the floor, the cap, and a start frame past 0, which
-	/// excludes the start group's only frame. A datagram is judged when the cursor reaches
+	/// The range is the one groups get: the floor, the cap, and the start Object ID.
+	/// Plain datagrams have Object ID 0. A datagram is judged when the cursor reaches
 	/// it, against the range in force then, and one outside it is gone for good: unlike a
 	/// group past the cap, nothing holds it for a later raise.
-	fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Datagram>>> {
+	fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<super::datagram::Stored>>> {
 		loop {
 			let Some((datagram, found_index)) =
 				ready!(self.poll(waiter, |state| state.poll_recv_datagram(self.datagram_index))?)
@@ -4179,11 +4193,10 @@ impl Cursor {
 			self.datagram_index = found_index + 1;
 
 			let sequence = datagram.sequence;
-			let mid_group = self
-				.subscription
-				.read()
-				.start
-				.is_some_and(|start| start.group == sequence && start.frame > 0);
+			let mid_group = self.subscription.read().start.is_some_and(|start| {
+				start.group == sequence
+					&& start.frame > datagram.wire.as_ref().and_then(|wire| wire.object_id).unwrap_or(0)
+			});
 			if sequence >= self.min_sequence
 				&& super::subscription::before_end(sequence, self.end_sequence)
 				&& !mid_group
@@ -4475,6 +4488,25 @@ impl Subscriber {
 	/// `Poll::Ready(Ok(None))` when the track is finished, `Poll::Ready(Err(e))` when the track
 	/// is aborted, or `Poll::Pending` when none is buffered yet.
 	pub fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Datagram>>> {
+		loop {
+			let Some(datagram) = ready!(self.poll_recv_wire_datagram(waiter))? else {
+				return Poll::Ready(Ok(None));
+			};
+			if datagram
+				.wire
+				.as_ref()
+				.is_some_and(|wire| wire.status.is_some_and(|status| status != 0))
+			{
+				continue;
+			}
+			return Poll::Ready(Ok(Some(datagram.datagram)));
+		}
+	}
+
+	pub(crate) fn poll_recv_wire_datagram(
+		&mut self,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<super::datagram::Stored>>> {
 		let meter = self.stats.meter();
 		let res = match &mut self.inner {
 			Inner::Plain(cursor) => cursor.poll_recv_datagram(waiter),

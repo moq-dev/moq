@@ -26,9 +26,13 @@ accept only the existing trusted owner/push/tag inputs. Their read-only
 preflight checks the completed coordinator's own language publisher and jobs,
 so a failed Android build does not prevent a successful Go wrapper release.
 The [jobs API](https://docs.github.com/en/rest/actions/workflow-jobs#list-jobs-for-a-workflow-run)
-query includes all attempts and uses each job's latest execution, preserving
-successful publishers when only another language is rerun. Missing publisher
-names or an API error fail loudly. No publication is polled.
+query includes all attempts and uses each job's latest execution. A publisher
+counts only if it ran in the triggering attempt: a partial rerun copies earlier
+successes with their original start time, and their wrappers already ran when
+that attempt completed. Rerunning only Kotlin on an old tag therefore cannot
+re-cut the Go wrapper from old sources after a newer tag published, while a
+rerun publisher still releases its wrapper. Missing publisher names or an API
+error fail loudly. No publication is polled.
 The legacy per-language workflow names remain accepted for in-flight runs.
 
 `sh/size/release.py` reads shared native libraries under the existing Go size

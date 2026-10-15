@@ -3046,13 +3046,13 @@ where
 			)
 		};
 
-		// Whether a FIRST_OBJECT-clear stream is a group with no head is decided in
-		// [`Self::open_group`], after it peeks the first Object ID. The bit is only the
-		// publisher's claim; [`next_object_id`] holds the sequence after that.
+		// Peek before creating a group: a standalone END_OF_TRACK has no payload
+		// group, and a fill or resume may already own the prefix.
 		//
 		// The peek inside blocks until the publisher produces the group's first object, so
 		// race it against the subscription going away the same way the group read below is.
 		// Otherwise dropping the local subscriber cannot end this handler.
+		let passthrough = !fill.read().outstanding() && resume.is_none();
 		let opened = {
 			let mut opening = track.clone();
 			let mut open = std::pin::pin!(self.open_group(stream, &mut opening, &fill, resume, &group, &mut reading));
@@ -3089,12 +3089,25 @@ where
 			}
 		};
 
+		if passthrough || producer.wire().is_none() {
+			let first_id = start.max(producer.frame_count() as u64);
+			producer.set_wire(group::Wire {
+				sparse: false,
+				first_object: group.flags.first_object && first_id == start,
+				first_id,
+				extensions: group.flags.has_extensions,
+				has_end: group.flags.has_end,
+				fetchable: true,
+				last: None,
+			})?;
+		}
+
 		// Guarded: this handler can be dropped at any await below, and a group producer
 		// that dies without a terminal leaves its consumer waiting on nothing.
 		let producer = crate::recv::Group::new(producer);
 
 		let res = {
-			let mut ingest = GroupIngest::new(self, &group, timescale, start);
+			let mut ingest = GroupIngest::new(self, &group, timescale, resume.map(|_| start));
 			let mut writing = producer.clone();
 			kio::wait(|waiter| {
 				if let Poll::Ready(err) = track.poll_closed(waiter) {
@@ -3157,28 +3170,23 @@ where
 		Ok(())
 	}
 
-	/// Deliver one OBJECT_DATAGRAM as a datagram on its subscription's track: a
-	/// single-frame group at the Group ID.
+	/// Deliver an OBJECT_DATAGRAM with private relay metadata on its subscription.
 	///
-	/// A malformed datagram is the peer breaking the protocol, so it errors. One the model
-	/// cannot carry is dropped like any lost datagram: an Object past ID 0 (the group would
-	/// need a second object), a status other than Normal, or an alias that is not bound
-	/// yet (the draft lets us drop rather than buffer).
+	/// A malformed datagram is a protocol error. An unbound alias is dropped, as the
+	/// draft permits instead of buffering; public readers receive only Normal payloads.
 	pub fn recv_datagram(&self, payload: bytes::Bytes) -> Result<(), Error> {
 		let (datagram, _) = ietf::ObjectDatagram::decode_slice(&payload, self.version)?;
 		let (alias, sequence) = (datagram.track_alias, datagram.group_id);
 
-		if datagram.object_id.unwrap_or(0) != 0 {
-			tracing::debug!(alias, sequence, "dropping a datagram past object 0");
-			return Ok(());
-		}
-		let payload = match datagram.body {
-			ietf::DatagramBody::Payload(payload) => payload,
-			ietf::DatagramBody::Status(0) => bytes::Bytes::new(),
-			ietf::DatagramBody::Status(status) => {
-				tracing::debug!(alias, sequence, status, "dropping a datagram status");
-				return Ok(());
+		let (payload, status) = match datagram.body {
+			ietf::DatagramBody::Payload(payload) => (payload, None),
+			ietf::DatagramBody::Status(status @ (0 | END_OF_GROUP | END_OF_TRACK)) => {
+				(bytes::Bytes::new(), Some(status))
 			}
+			ietf::DatagramBody::Status(1) if matches!(self.version, Version::Draft14 | Version::Draft15) => {
+				(bytes::Bytes::new(), Some(1))
+			}
+			ietf::DatagramBody::Status(_) => return Err(Error::Session(SessionError::ProtocolViolation)),
 		};
 
 		let mut state = self.state.lock();
@@ -3194,21 +3202,26 @@ where
 		};
 
 		// Like a subgroup object: a track that declared no timescale is untimed. One on a
-		// timed track without a Timestamp is refused by the model and dropped below.
-		let timestamp = match (track.timescale, &datagram.properties) {
-			(Some(timescale), Some(properties)) => {
-				let mut properties = Decoder::new(properties, self.version.into());
-				ietf::decode_object_time(&mut properties, timescale, self.version)?
-			}
-			_ => None,
-		};
-
+		// timed track without a Timestamp is refused by the model.
+		let properties = bytes::Bytes::from(datagram.properties.unwrap_or_default());
+		let decoded = super::object::read(&properties, self.version, track.timescale)?;
 		let Some(producer) = track.producer.as_mut() else {
 			return Ok(());
 		};
-		if let Err(err) = producer.insert_datagram(sequence, timestamp, payload) {
-			tracing::debug!(%err, alias, sequence, "dropping datagram");
-		}
+		producer.insert_wire_datagram(crate::model::datagram::Stored {
+			datagram: crate::Datagram {
+				sequence,
+				timestamp: decoded.timestamp,
+				payload,
+			},
+			wire: Some(std::sync::Arc::new(crate::model::datagram::Wire {
+				object_id: datagram.object_id,
+				priority: datagram.publisher_priority,
+				end_of_group: datagram.end_of_group,
+				status,
+				properties: decoded.properties,
+			})),
+		})?;
 		Ok(())
 	}
 }
@@ -3328,34 +3341,8 @@ where
 			return Ok(Opened::EndOfTrack(first.id));
 		}
 
-		// FIRST_OBJECT clear is the publisher's claim that the stream starts partway
-		// through the group. The first Object ID is absolute either way, and IDs start
-		// at 0, so a clear bit on object 0 is still the head: the publisher is out of
-		// spec, not missing a keyframe. Any other first ID, or a stream with no object,
-		// has a hole at the front. Drop it before a group exists and resume at the next
-		// group, the same as a publisher that no longer holds the head.
-		//
-		// Drafts 14-17 have no FIRST_OBJECT bit, so only a non-zero first ID marks the
-		// hole there; a stream with no object is an empty group.
-		//
-		// A fill we asked for is the exception: its fetch stream is carrying the head
-		// this tail stitches onto. So is the group a resumed subscription asked to start
-		// partway through, whose head came from another route.
-		let headless = match self.version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
-				first.is_some_and(|first| first.id != 0)
-			}
-			_ => !header.flags.first_object && first.is_none_or(|first| first.id != 0),
-		};
-		if headless && !fill.read().outstanding() && resume.is_none() {
-			tracing::debug!(
-				track_alias = %header.track_alias,
-				group = %header.group_id,
-				object = first.map(|first| first.id),
-				"dropping a group with no head"
-			);
-			return Err(Error::Unsupported);
-		}
+		// Without a fill or resume, a relay preserves the subgroup's first Object ID
+		// and FIRST_OBJECT claim independently. Plain readers see only frame ordinals.
 
 		if !fill.read().outstanding() {
 			// The group a resumed subscription picks up partway through starts where it
@@ -3369,7 +3356,7 @@ where
 				producer.start_at(resume.frame)?;
 				return Ok(Opened::Group(producer, first.map_or(resume.frame, |first| first.id)));
 			}
-			return Ok(Opened::Group(create(track)?, 0));
+			return Ok(Opened::Group(create(track)?, first.map_or(0, |first| first.id)));
 		}
 
 		// The first object's ID delta is its absolute Object ID (see `next_object_id`).
@@ -3466,7 +3453,9 @@ struct GroupIngest {
 	timescale: Option<Timescale>,
 	version: Version,
 	prior_object: Option<u64>,
-	start: u64,
+	start: Option<u64>,
+	properties: crate::model::object::Properties,
+	gap: Option<u64>,
 	/// The object being read is one the group started past, so it is read and dropped.
 	dropping: bool,
 	phase: IngestPhase,
@@ -3497,7 +3486,7 @@ impl GroupIngest {
 		subscriber: &Subscriber<S>,
 		group: &ietf::GroupHeader,
 		timescale: Option<Timescale>,
-		start: u64,
+		start: Option<u64>,
 	) -> Self {
 		Self {
 			has_extensions: group.flags.has_extensions,
@@ -3505,6 +3494,8 @@ impl GroupIngest {
 			version: subscriber.version,
 			prior_object: None,
 			start,
+			properties: Default::default(),
+			gap: None,
 			dropping: false,
 			phase: IngestPhase::Delta,
 			budget: subscriber.frames.clone(),
@@ -3689,11 +3680,10 @@ where
 	/// Decode fetch objects into `head`, creating each group from the first object's
 	/// absolute IDs.
 	///
-	/// A relative join and a draft-20 fill are one group: objects numbered from the start
-	/// with no gaps. An absolute join spans whole groups up to the subscribe's Largest
-	/// Location; each complete group below that is finished, and the last one is the head
-	/// the live stream continues. Anything else is a head the model cannot represent, and
-	/// refusing the stream leaves the subscription itself alone.
+	/// A relative join and a draft-20 fill are one group. An absolute join spans whole
+	/// groups up to Largest Location; the last is the head the live stream continues.
+	/// A Prior Object ID Gap must account for every missing ID. Ordinal resume still
+	/// requires contiguous IDs; refusing its fill leaves the subscription alone.
 	///
 	/// A pre-draft-20 join resuming partway through a group asks for all of it, so the
 	/// objects below `resume` are dropped: another route already delivered them.
@@ -3744,67 +3734,75 @@ where
 				continue;
 			}
 
-			match head.as_ref().map(|(sequence, next, _)| (*sequence, *next)) {
-				None => {
-					let (Some(sequence), Some(0)) = (group, object.object) else {
-						tracing::warn!(
-							group = ?group,
-							object = ?object.object,
-							"a fill must start at a group's first object"
-						);
-						return Err(Error::Unsupported);
-					};
-					open_fill_group(track, head, sequence)?;
+			let decoded = super::object::read(
+				&bytes::Bytes::from(object.properties.unwrap_or_default()),
+				self.version,
+				timescale,
+			)?;
+			let expected = head
+				.as_ref()
+				.filter(|(sequence, _, _)| group.is_none_or(|group| group == *sequence))
+				.map_or(0, |(_, next, _)| *next);
+			let id = match (object.group.is_some(), object.object) {
+				(_, Some(id))
+					if matches!(
+						self.version,
+						Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17
+					) =>
+				{
+					id
 				}
-				Some((sequence, _)) if group.is_some_and(|group| group != sequence) => {
-					let Some(group) = group else {
-						unreachable!("the filter above proved group is Some");
-					};
-					if object.object != Some(0) {
-						tracing::warn!(
-							group,
-							object = ?object.object,
-							"a fill must start at a group's first object"
-						);
-						return Err(Error::Unsupported);
-					}
-					advance_fill_group(track, head, group, joining, largest)?;
+				(true, Some(id)) => id,
+				(false, Some(delta)) => expected
+					.checked_sub(1)
+					.and_then(|prior| prior.checked_add(delta))
+					.ok_or(Error::ProtocolViolation)?,
+				(false, None) => expected,
+				_ => return Err(Error::ProtocolViolation),
+			};
+			if id < expected {
+				return Err(Error::ProtocolViolation);
+			}
+			if id > expected && (resume.is_some() || decoded.gap.is_none_or(|gap| gap < id - expected)) {
+				return Err(Error::Unsupported);
+			}
+			match head.as_ref().map(|(sequence, _, _)| *sequence) {
+				None => open_fill_group(track, head, group.ok_or(Error::ProtocolViolation)?)?,
+				Some(sequence) if group.is_some_and(|group| group != sequence) => {
+					advance_fill_group(track, head, group.expect("new group"), joining, largest)?;
 				}
-				Some((sequence, next)) => {
-					let id = match (object.group.is_some(), object.object) {
-						(true, Some(id)) => id,
-						(false, None | Some(1)) => next,
-						_ => {
-							tracing::warn!(
-								sequence,
-								next,
-								object = ?object.object,
-								"fill object IDs must increment by 1"
-							);
-							return Err(Error::Unsupported);
-						}
-					};
-					if id != next {
-						tracing::warn!(sequence, next, object = id, "fill object IDs must increment by 1");
-						return Err(Error::Unsupported);
-					}
-				}
+				_ => {}
 			}
 
 			let (sequence, next, producer) = head.as_mut().expect("the head was created above");
+			if *next == 0
+				&& let Some(mut wire) = producer.wire()
+			{
+				wire.first_id = id;
+				producer.set_wire(wire)?;
+			}
 			if *next == 0
 				&& let Some(resume) = resume.filter(|resume| resume.group == *sequence)
 			{
 				producer.start_at(resume.frame)?;
 			}
 			let keep = *next >= producer.frame_count() as u64;
-			if !self
-				.recv_fetch_payload(stream, producer, object.properties, timescale, keep)
-				.await?
+			if self
+				.recv_fetch_payload(
+					stream,
+					producer,
+					FetchPayload {
+						decoded,
+						timescale,
+						keep,
+						id,
+					},
+				)
+				.await? != Fetched::Frame
 			{
 				return Err(Error::Unsupported);
 			}
-			*next += 1;
+			*next = id.checked_add(1).ok_or(Error::ProtocolViolation)?;
 		}
 
 		Ok(())
@@ -3812,54 +3810,68 @@ where
 
 	/// Read one fetch object's length and payload into `producer`, after its header, or
 	/// past it unless `keep`.
-	///
-	/// Returns `false` for a draft-14 or 15 end-of-group or end-of-track marker, which
-	/// is a status rather than a frame.
 	async fn recv_fetch_payload(
 		&self,
 		stream: &mut Reader<S::RecvStream, Version>,
 		producer: &mut group::Producer,
-		properties: Option<Vec<u8>>,
-		timescale: Option<Timescale>,
-		keep: bool,
-	) -> Result<bool, Error> {
-		// The properties carry the frame's presentation timestamp (the Timestamp Object
-		// Property) in the units the track declared. A track that declared none is
-		// untimed, and an object on a timed track without one is malformed.
-		let timestamp = match (properties, timescale) {
-			(Some(properties), Some(timescale)) => {
-				let mut properties = Decoder::new(&properties, self.version.into());
-				ietf::decode_object_time(&mut properties, timescale, self.version)?
-			}
-			_ => None,
-		};
-
-		// A fetch object has no status field from draft-16 on; a zero length is simply
-		// an empty object. Draft-14 and 15 still encode Normal (0) after a zero length.
+		payload: FetchPayload,
+	) -> Result<Fetched, Error> {
+		let FetchPayload {
+			decoded,
+			timescale,
+			keep,
+			id,
+		} = payload;
+		if keep {
+			producer.mark_gap(id, decoded.gap)?;
+		}
 		let size = stream.varint().await?;
 		if size == 0 && matches!(self.version, Version::Draft14 | Version::Draft15) {
-			match stream.varint().await? {
+			let status = stream.varint().await?;
+			if status != 0 {
+				super::object::check_status(self.version, &decoded.properties)?;
+			}
+			match status {
 				0 => {}
-				END_OF_GROUP | END_OF_TRACK => return Ok(false),
+				END_OF_GROUP => {
+					if keep {
+						producer.set_end_object(crate::model::object::Fields {
+							id,
+							properties: decoded.properties,
+						})?;
+					}
+					return Ok(Fetched::EndOfGroup);
+				}
+				END_OF_TRACK => return Ok(Fetched::EndOfTrack),
 				_ => return Err(Error::Unsupported),
 			}
 		}
 		if !keep {
 			let mut remaining = usize::try_from(size).map_err(|_| Error::FrameTooLarge)?;
 			std::future::poll_fn(|cx| stream.poll_skip(cx, &mut remaining)).await?;
-			return Ok(true);
+			return Ok(Fetched::Frame);
 		}
-
-		let timestamp = object_time(timescale, timestamp)?;
-		// `create_frame_owned` is the allocation chokepoint: it rejects an oversized `size`
-		// and allocates up front only within the budget, so no pre-check is needed.
-		let mut frame = producer.create_frame_owned(frame::Info { size, timestamp }, &self.frames)?;
+		let timestamp = object_time(timescale, decoded.timestamp)?;
+		let plain = id == producer.frame_count() as u64
+			&& decoded.properties.is_plain()
+			&& decoded.properties.timestamp == timestamp.map(|time| time.value());
+		let fields = (!plain).then(|| {
+			std::sync::Arc::new(crate::model::object::Fields {
+				id,
+				properties: decoded.properties,
+			})
+		});
+		let header = frame::Header {
+			info: frame::Info { size, timestamp },
+			fields,
+		};
+		let mut frame = producer.create_frame_owned(header, &self.frames)?;
 		if let Err(err) = std::future::poll_fn(|cx| stream.poll_read_frame(cx, &mut frame)).await {
 			let _ = frame.abort(err.clone());
 			return Err(err);
 		}
 		frame.finish()?;
-		Ok(true)
+		Ok(Fetched::Frame)
 	}
 
 	/// Fetch a group from the publisher to fill a cache miss, with a standalone (or
@@ -4190,6 +4202,15 @@ where
 		})
 		.await;
 		let (producer, timescale, start, end) = taken?;
+		producer.set_wire(group::Wire {
+			sparse: false,
+			first_object: start == 0,
+			first_id: start,
+			extensions: true,
+			has_end: true,
+			fetchable: true,
+			last: None,
+		})?;
 
 		let closed = producer.clone();
 		let mut producer = crate::recv::Group::new(producer);
@@ -4221,8 +4242,8 @@ where
 		res
 	}
 
-	/// Decode one group's objects: all in the producer's group, numbered from `start` with
-	/// no gaps, and never past `end` (exclusive) when FETCH_OK named one inside the group.
+	/// Decode one group's objects, preserving marked gaps and their properties, never
+	/// past `end` (exclusive) when FETCH_OK named one inside the group.
 	/// Before draft-20 they must also reach it.
 	async fn recv_group_fetch_objects(
 		&self,
@@ -4256,27 +4277,53 @@ where
 				prior_group = Some(group);
 			}
 			let id = match (object.group.is_some(), object.object) {
-				(true, Some(id)) => Some(id),
-				(false, None | Some(1)) => Some(next),
-				_ => None,
+				(_, Some(id))
+					if matches!(
+						self.version,
+						Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17
+					) =>
+				{
+					id
+				}
+				(true, Some(id)) => id,
+				(false, Some(delta)) => next
+					.checked_sub(1)
+					.and_then(|prior| prior.checked_add(delta))
+					.ok_or(Error::ProtocolViolation)?,
+				(false, None) => next,
+				_ => return Err(Error::ProtocolViolation),
 			};
-			// Another group, or an ID before the next one, is outside what was asked for.
-			if group.is_some_and(|group| group != sequence) || id.is_some_and(|id| id < next) {
-				tracing::warn!(sequence, next, group = ?group, object = ?id, "a group fetch answered outside its range");
+			if group.is_some_and(|group| group != sequence) || id < next {
 				return Err(Error::ProtocolViolation);
 			}
-			// A skipped ID is an object that does not exist, a hole the model cannot hold.
-			if id != Some(next) {
-				tracing::warn!(sequence, next, object = ?id, "a group fetch skipped an object");
+			let decoded = super::object::read(
+				&bytes::Bytes::from(object.properties.unwrap_or_default()),
+				self.version,
+				timescale,
+			)?;
+			if id > next && decoded.gap.is_none_or(|gap| gap < id - next) {
 				return Err(Error::Unsupported);
 			}
-
 			match self
-				.recv_fetch_payload(stream, producer, object.properties, timescale, true)
+				.recv_fetch_payload(
+					stream,
+					producer,
+					FetchPayload {
+						decoded,
+						timescale,
+						keep: true,
+						id,
+					},
+				)
 				.await?
 			{
-				true => next += 1,
-				false => ended = true,
+				Fetched::Frame => next = id.checked_add(1).ok_or(Error::ProtocolViolation)?,
+				// The status is an object of the group, so the End Location counts it.
+				Fetched::EndOfGroup => {
+					next = id.checked_add(1).ok_or(Error::ProtocolViolation)?;
+					ended = true;
+				}
+				Fetched::EndOfTrack => ended = true,
 			}
 			if end.is_some_and(|end| next > end) {
 				tracing::warn!(sequence, ?end, "a group fetch continued past FETCH_OK's End Location");
@@ -4299,6 +4346,23 @@ where
 
 		Ok(())
 	}
+}
+
+/// What a fetch object carried.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fetched {
+	Frame,
+	/// A draft-14 or 15 END_OF_GROUP status object.
+	EndOfGroup,
+	/// A draft-14 or 15 END_OF_TRACK marker.
+	EndOfTrack,
+}
+
+struct FetchPayload {
+	decoded: super::object::Decoded,
+	timescale: Option<Timescale>,
+	keep: bool,
+	id: u64,
 }
 
 /// One Object header on a fetch stream, after version-specific decoding.
@@ -4401,6 +4465,15 @@ fn open_fill_group(
 	sequence: u64,
 ) -> Result<(), Error> {
 	let producer = track.create_group(group::Info { sequence })?;
+	producer.set_wire(group::Wire {
+		sparse: false,
+		first_object: true,
+		first_id: 0,
+		extensions: true,
+		has_end: true,
+		fetchable: true,
+		last: None,
+	})?;
 	*head = Some((sequence, 0, crate::recv::Group::new(producer)));
 	Ok(())
 }
@@ -4497,6 +4570,21 @@ fn object_time(
 }
 
 impl GroupIngest {
+	fn header(&mut self, group: &group::Producer, info: frame::Info) -> Result<frame::Header, Error> {
+		let id = self.prior_object.expect("payload follows object ID");
+		group.mark_gap(self.prior_object.expect("properties follow Object ID"), self.gap)?;
+		let plain = id == group.frame_count() as u64
+			&& self.properties.is_plain()
+			&& self.properties.timestamp == info.timestamp.map(|time| time.value());
+		let fields = (!plain).then(|| {
+			std::sync::Arc::new(crate::model::object::Fields {
+				id,
+				properties: std::mem::take(&mut self.properties),
+			})
+		});
+		Ok(frame::Header { info, fields })
+	}
+
 	/// `Ready(Ok(_))` once the stream FINs on an object boundary, or an explicit
 	/// end-of-group or end-of-track status arrives. The caller finishes or aborts the
 	/// group; an object cut short mid-payload was already aborted here with the reason.
@@ -4515,7 +4603,9 @@ impl GroupIngest {
 					};
 					let id = next_object_id(self.prior_object, id_delta, self.start)?;
 					self.prior_object = Some(id);
-					self.dropping = id < group.frame_count() as u64;
+					self.properties = Default::default();
+					self.gap = None;
+					self.dropping = self.start.is_some() && id < group.frame_count() as u64;
 					self.phase = match self.has_extensions {
 						true => IngestPhase::ExtSize,
 						false => IngestPhase::Size { timestamp: None },
@@ -4526,18 +4616,11 @@ impl GroupIngest {
 					self.phase = IngestPhase::ExtBytes { size };
 				}
 				IngestPhase::ExtBytes { size } => {
-					// Per-object extension headers may carry the frame's presentation
-					// timestamp (the Timestamp Object Property), in the units the track
-					// declared. A track that declared no timescale is untimed, even if an
-					// object carries a Timestamp: it has no units to read it in.
 					let ext = ready!(reader.poll_read_exact(&mut cx, *size))?;
-					let timestamp = match self.timescale {
-						Some(timescale) => {
-							let mut ext = Decoder::new(&ext, self.version.into());
-							ietf::decode_object_time(&mut ext, timescale, self.version)?
-						}
-						None => None,
-					};
+					let decoded = super::object::read(&ext, self.version, self.timescale)?;
+					let timestamp = decoded.timestamp;
+					self.properties = decoded.properties;
+					self.gap = decoded.gap;
 					self.phase = IngestPhase::Size { timestamp };
 				}
 				IngestPhase::Size { timestamp } => {
@@ -4555,7 +4638,8 @@ impl GroupIngest {
 					// oversized `size` and allocates up front only within the budget, so
 					// no pre-check is needed.
 					let timestamp = object_time(self.timescale, *timestamp)?;
-					let frame = group.create_frame_owned(frame::Info { size, timestamp }, &self.budget)?;
+					let header = self.header(group, frame::Info { size, timestamp })?;
+					let frame = group.create_frame_owned(header, &self.budget)?;
 					self.phase = IngestPhase::Payload { frame };
 				}
 				IngestPhase::Status { timestamp } => {
@@ -4563,11 +4647,20 @@ impl GroupIngest {
 					if status == 0 {
 						if !self.dropping {
 							let timestamp = object_time(self.timescale, *timestamp)?;
-							let frame = group.create_frame_owned(frame::Info { size: 0, timestamp }, &self.budget)?;
+							let header = self.header(group, frame::Info { size: 0, timestamp })?;
+							let frame = group.create_frame_owned(header, &self.budget)?;
 							frame.finish()?;
 						}
 						self.phase = IngestPhase::Delta;
-					} else if status == END_OF_GROUP {
+						continue;
+					}
+					super::object::check_status(self.version, &self.properties)?;
+					if status == END_OF_GROUP {
+						group.mark_gap(self.prior_object.expect("properties follow Object ID"), self.gap)?;
+						group.set_end_object(crate::model::object::Fields {
+							id: self.prior_object.expect("status follows object ID"),
+							properties: std::mem::take(&mut self.properties),
+						})?;
 						// Allowed even when the header marks the group's end: that bit only
 						// lets a FIN imply it, and imquic sends both.
 						self.phase = IngestPhase::Finished(Ended::Group);
@@ -5233,7 +5326,7 @@ mod tests {
 		};
 		let payload = |bytes: &'static [u8]| ietf::DatagramBody::Payload(bytes::Bytes::from_static(bytes));
 
-		// Dropped: a second object in the group, an unbound alias, and a status.
+		// Nonzero objects are delivered; an unbound alias and non-payload statuses stay invisible to plain readers.
 		subscriber
 			.recv_datagram(datagram(7, 4, Some(1), payload(b"no")))
 			.unwrap();
@@ -5245,13 +5338,16 @@ mod tests {
 		subscriber
 			.recv_datagram(datagram(7, 9, Some(0), payload(b"yes")))
 			.unwrap();
+		let first = consumer.recv_datagram().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(first.sequence, 4);
+		assert_eq!(&first.payload[..], b"no");
 		let received = consumer.recv_datagram().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(received.sequence, 9, "the Group ID is the sequence");
 		assert_eq!(received.timestamp, Some(timestamp));
 		assert_eq!(&received.payload[..], b"yes");
 		assert!(
 			consumer.recv_datagram().now_or_never().is_none(),
-			"only one got through"
+			"only the payload datagrams got through"
 		);
 
 		// A status datagram cannot end the group.
@@ -7807,17 +7903,11 @@ fn subscribe_join(
 	})
 }
 
-/// The absolute Object ID for a subgroup object, given the prior one and its delta.
+/// Resolve the first absolute ID or a later ID delta without overflowing.
 ///
-/// The first object's delta is its absolute Object ID; every later one is the prior ID plus
-/// the delta plus one. moq-lite groups never skip an object, so a gap is refused: it would
-/// renumber every frame after it. Checked against the ID rather than the header's
-/// FIRST_OBJECT bit, which is only the publisher's claim.
-///
-/// `start` is where this stream picks the group up, which is 0 for a group delivered whole
-/// and the object after the fill's head for the tail of a stitched one. Anything else has a
-/// hole at the front.
-fn next_object_id(prior: Option<u64>, delta: u64, start: u64) -> Result<u64, Error> {
+/// Ordinary subgroup relay ingest preserves gaps. A fill or resume supplies `start`
+/// and requires contiguous IDs because its public frame ordinals stitch onto another copy.
+fn next_object_id(prior: Option<u64>, delta: u64, start: Option<u64>) -> Result<u64, Error> {
 	let object = match prior {
 		None => delta,
 		Some(prior) => prior
@@ -7826,8 +7916,8 @@ fn next_object_id(prior: Option<u64>, delta: u64, start: u64) -> Result<u64, Err
 			.ok_or(Error::Session(SessionError::ProtocolViolation))?,
 	};
 
-	let expected = prior.map_or(start, |prior| prior.saturating_add(1));
-	if object != expected {
+	let expected = prior.map_or(start.unwrap_or(object), |prior| prior.saturating_add(1));
+	if start.is_some() && object != expected {
 		tracing::warn!(
 			object,
 			expected,
@@ -7849,7 +7939,7 @@ mod object_id_tests {
 	fn accepts_sequential_ids_from_zero() {
 		let mut prior = None;
 		for expected in 0..4 {
-			let object = next_object_id(prior, 0, 0).expect("sequential");
+			let object = next_object_id(prior, 0, Some(0)).expect("sequential");
 			assert_eq!(object, expected);
 			prior = Some(object);
 		}
@@ -7859,23 +7949,23 @@ mod object_id_tests {
 	/// group starts partway through and has a hole at the front.
 	#[test]
 	fn rejects_a_group_that_does_not_start_at_zero() {
-		assert!(matches!(next_object_id(None, 6, 0), Err(Error::Unsupported)));
+		assert!(matches!(next_object_id(None, 6, Some(0)), Err(Error::Unsupported)));
 	}
 
 	/// The tail of a stitched group starts where the fill's head stopped, and nowhere else.
 	#[test]
 	fn accepts_a_tail_that_starts_where_the_fill_stopped() {
-		assert_eq!(next_object_id(None, 6, 6).expect("the fill's next object"), 6);
-		assert_eq!(next_object_id(Some(6), 0, 6).expect("then sequential"), 7);
-		assert!(matches!(next_object_id(None, 5, 6), Err(Error::Unsupported)));
-		assert!(matches!(next_object_id(None, 7, 6), Err(Error::Unsupported)));
+		assert_eq!(next_object_id(None, 6, Some(6)).expect("the fill's next object"), 6);
+		assert_eq!(next_object_id(Some(6), 0, Some(6)).expect("then sequential"), 7);
+		assert!(matches!(next_object_id(None, 5, Some(6)), Err(Error::Unsupported)));
+		assert!(matches!(next_object_id(None, 7, Some(6)), Err(Error::Unsupported)));
 	}
 
 	/// A later delta skips objects, which would renumber every frame after it.
 	#[test]
 	fn rejects_a_gap() {
-		assert!(matches!(next_object_id(Some(0), 1, 0), Err(Error::Unsupported)));
-		assert!(matches!(next_object_id(Some(3), 9, 0), Err(Error::Unsupported)));
+		assert!(matches!(next_object_id(Some(0), 1, Some(0)), Err(Error::Unsupported)));
+		assert!(matches!(next_object_id(Some(3), 9, Some(0)), Err(Error::Unsupported)));
 	}
 
 	/// The running ID is bounded, and the draft makes an overflow a protocol violation
@@ -7883,7 +7973,7 @@ mod object_id_tests {
 	#[test]
 	fn rejects_an_overflow() {
 		assert!(matches!(
-			next_object_id(Some(u64::MAX), 0, 0),
+			next_object_id(Some(u64::MAX), 0, Some(0)),
 			Err(Error::Session(SessionError::ProtocolViolation))
 		));
 	}
@@ -8422,22 +8512,745 @@ mod stitch_tests {
 		settled.await;
 	}
 
-	/// A gap is refused without swallowing the error the stream dispatcher needs.
-	#[moq_net_sim::test]
-	async fn a_gapped_object_leaves_the_track_flowing() {
-		let mut gapped = tail_stream(SEQUENCE, 0, &[b"head"]);
-		crate::coding::Encoder::new(&mut gapped, VERSION.into())
-			.varint(1u64)
+	/// Object numbering is relay metadata; plain readers still see consecutive frames.
+	async fn relay_passthrough(
+		script: Vec<u8>,
+		ingress: Version,
+		egress: Version,
+		fetch: Option<(u64, u64)>,
+	) -> (Vec<u8>, crate::lite::test_transport::Log) {
+		relay_passthrough_timed(script, ingress, egress, fetch, None).await
+	}
+
+	/// Relay `script` through a track the ingress times in `timescale`, which the cache
+	/// normalizes to microseconds like [`accepted_info`].
+	async fn relay_passthrough_timed(
+		script: Vec<u8>,
+		ingress: Version,
+		egress: Version,
+		fetch: Option<(u64, u64)>,
+		timescale: Option<Timescale>,
+	) -> (Vec<u8>, crate::lite::test_transport::Log) {
+		use crate::lite::test_transport::Sent;
+		let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+		let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
+		let track = broadcast
+			.create_track("video", accepted_info(timescale, None, None))
 			.unwrap();
-		let h = Harness::new(Fill::Done, vec![gapped, tail_stream(SEQUENCE + 1, 0, &[b"ok"])]);
-		let mut consumer = h.track.subscribe(None);
-		let mut stream = h.stream().await;
-		let result = h.subscriber.clone().recv_group(&mut stream).await;
-		assert!(matches!(result, Err(Error::Unsupported)), "{result:?}");
-		let mut stream = h.stream().await;
+		let mut h = Harness::with_timescale(Fill::Done, vec![script], timescale);
+		h.subscriber.version = ingress;
+		h.subscriber.state.lock().subscribes.get_mut(&REQUEST).unwrap().producer = Some(track.clone());
+		let mut stream = h.stream().await.with_version(ingress);
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-		assert_eq!(read_group(&mut consumer).await.1[0].1, b"ok");
-		assert!(h.session.log.closes().is_empty());
+		track.finish().unwrap();
+
+		let mut downstream = ScriptedSession::per_stream(vec![vec![]]);
+		let peer = peer::PeerSetup::default();
+		peer.set(peer::Peer::default());
+		let publisher = crate::ietf::Publisher::new(
+			crate::time::Clock::sim(),
+			downstream.clone(),
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			peer,
+			egress,
+		);
+		let mut body = Vec::new();
+		let id = if let Some((start, end)) = fetch {
+			let fetch_type = if Filter::is_draft20(egress) {
+				ietf::FetchType::Filtered {
+					namespace: Path::new("room"),
+					track: "video".into(),
+					filter: Filter::Absolute {
+						start: ietf::Location {
+							group: SEQUENCE,
+							object: start,
+						},
+						end: Some(ietf::EndLocation {
+							group: SEQUENCE,
+							object: Some(end - 1),
+						}),
+					},
+				}
+			} else {
+				ietf::FetchType::Standalone {
+					namespace: Path::new("room"),
+					track: "video".into(),
+					start: ietf::Location {
+						group: SEQUENCE,
+						object: start,
+					},
+					end: ietf::Location {
+						group: SEQUENCE,
+						object: end,
+					},
+				}
+			};
+			ietf::Fetch {
+				request_id: RequestId(3),
+				subscriber_priority: 128,
+				group_order: ietf::GroupOrder::Ascending,
+				fetch_type,
+				range_filters: false,
+				fill_timeout: false,
+				properties_wanted: true,
+			}
+			.encode_msg(&mut Encoder::new(&mut body, egress.into()), egress)
+			.unwrap();
+			ietf::Fetch::ID
+		} else {
+			ietf::Subscribe {
+				request_id: RequestId(3),
+				track_namespace: Path::new("room"),
+				track_name: "video".into(),
+				subscriber_priority: 128,
+				group_order: ietf::GroupOrder::Ascending,
+				filter: Filter::Unfiltered,
+				fill: None,
+				properties_wanted: true,
+				forward: true,
+				range_filters: false,
+			}
+			.encode_msg(&mut Encoder::new(&mut body, egress.into()), egress)
+			.unwrap();
+			ietf::Subscribe::ID
+		};
+		let stream = Stream::open(&mut downstream, egress).await.unwrap();
+		publisher
+			.handle_stream(id, ietf::Body(body.into()), stream)
+			.unwrap()
+			.await;
+		let mut streams = std::collections::BTreeMap::<usize, Vec<u8>>::new();
+		for (id, event) in downstream.log.trail() {
+			if let Sent::Write(bytes) = event {
+				streams.entry(id).or_default().extend(bytes);
+			}
+		}
+		let bytes = if fetch.is_some() {
+			streams.into_values().flatten().collect()
+		} else {
+			streams
+				.into_values()
+				.find(|bytes| {
+					ietf::GroupHeader::decode(&mut Decoder::new(bytes, egress.into()), egress)
+						.is_ok_and(|header| header.group_id == SEQUENCE)
+				})
+				.expect("the relay emitted the group")
+		};
+		(bytes, downstream.log)
+	}
+
+	async fn relay_passthrough_stream(
+		script: Vec<u8>,
+		ingress: Version,
+		egress: Version,
+	) -> (Vec<u8>, crate::lite::test_transport::Log) {
+		relay_passthrough(script, ingress, egress, None).await
+	}
+
+	#[moq_net_sim::test]
+	async fn passthrough_preserves_object_properties_through_dispatch() {
+		for version in [Version::Draft15, Version::Draft22] {
+			let mut script = Vec::new();
+			ietf::GroupHeader {
+				track_alias: ALIAS,
+				group_id: SEQUENCE,
+				sub_group_id: 0,
+				publisher_priority: 0,
+				flags: ietf::GroupFlags {
+					has_extensions: true,
+					..Default::default()
+				},
+			}
+			.encode(&mut Encoder::new(&mut script, version.into()), version)
+			.unwrap();
+			let properties = match version {
+				Version::Draft15 => vec![2, 7, 5, 1, 42],
+				_ => vec![2, 7, 3, 1, 42],
+			};
+			let mut encoder = Encoder::new(&mut script, version.into());
+			encoder.varint(0u64).unwrap();
+			encoder.bytes(&properties).unwrap();
+			encoder.varint(1u64).unwrap();
+			script.push(99);
+			let (bytes, _) = relay_passthrough_stream(script, version, version).await;
+			let mut decoder = Decoder::new(&bytes, version.into());
+			let header = ietf::GroupHeader::decode(&mut decoder, version).unwrap();
+			assert!(header.flags.has_extensions, "{version}: properties were dropped");
+			assert_eq!(decoder.varint().unwrap(), 0);
+			assert_eq!(decoder.bytes().unwrap(), properties);
+			assert_eq!(decoder.varint().unwrap(), 1);
+			assert_eq!(decoder.slice(1).unwrap(), &[99]);
+		}
+	}
+
+	/// A relayed Timestamp leaves in the units the egress declares: the cache holds the
+	/// track in microseconds, whatever the publisher used.
+	#[moq_net_sim::test]
+	async fn passthrough_converts_relayed_timestamps_to_the_egress_units() {
+		let version = Version::Draft22;
+		// Timestamp 42 (ms), then an unknown property that must survive beside it.
+		let properties = [0x10, 42, 0x70, 7];
+		let script = object_stream(version, true, &[(0, &properties, None)]);
+		let (bytes, log) = relay_passthrough_timed(script, version, version, None, Some(Timescale::MILLI)).await;
+		assert!(log.resets().is_empty());
+		let mut decoder = Decoder::new(&bytes, version.into());
+		ietf::GroupHeader::decode(&mut decoder, version).unwrap();
+		assert_eq!(decoder.varint().unwrap(), 0);
+		let relayed = bytes::Bytes::copy_from_slice(decoder.bytes().unwrap());
+		let decoded = super::super::object::read(&relayed, version, Some(Timescale::MICRO)).unwrap();
+		assert_eq!(
+			decoded.timestamp,
+			Some(Timestamp::new(42_000, Timescale::MICRO).unwrap())
+		);
+		assert_eq!(decoded.properties.values.len(), 1);
+	}
+
+	fn object_stream(version: Version, first: bool, objects: &[(u64, &[u8], Option<u64>)]) -> Vec<u8> {
+		let mut bytes = Vec::new();
+		ietf::GroupHeader {
+			track_alias: ALIAS,
+			group_id: SEQUENCE,
+			sub_group_id: 0,
+			publisher_priority: 128,
+			flags: ietf::GroupFlags {
+				first_object: first,
+				has_extensions: true,
+				has_end: true,
+				..Default::default()
+			},
+		}
+		.encode(&mut Encoder::new(&mut bytes, version.into()), version)
+		.unwrap();
+		let mut previous = None;
+		for &(id, properties, status) in objects {
+			let delta = previous.map_or(id, |previous| id - previous - 1);
+			previous = Some(id);
+			let mut encoder = Encoder::new(&mut bytes, version.into());
+			encoder.varint(delta).unwrap();
+			encoder.bytes(properties).unwrap();
+			encoder.varint(u64::from(status.is_none())).unwrap();
+			if let Some(status) = status {
+				encoder.varint(status).unwrap();
+			} else {
+				bytes.push(99);
+			}
+		}
+		bytes
+	}
+
+	#[moq_net_sim::test]
+	async fn passthrough_fetch_requires_marked_gaps_and_preserves_fields() {
+		for version in [Version::Draft15, Version::Draft17, Version::Draft22] {
+			for marked in [false, true] {
+				let properties = if marked { vec![0x3e, 6] } else { vec![] };
+				let second = if marked { vec![0x3e, 1] } else { vec![] };
+				for start in [0, 2, 7] {
+					let script = object_stream(version, true, &[(6, &properties, None), (8, &second, None)]);
+					let (bytes, log) = relay_passthrough(script, version, version, Some((start, 9))).await;
+					let mut decoder = Decoder::new(&bytes, version.into());
+					if !marked {
+						assert_eq!(decoder.varint().unwrap(), ietf::RequestError::ID);
+						assert_eq!(ietf::RequestError::decode(&mut decoder, version).unwrap().error_code, 3);
+						assert!(decoder.is_empty());
+						continue;
+					}
+					assert_eq!(decoder.varint().unwrap(), ietf::FetchOk::ID);
+					let ok = ietf::FetchOk::decode(&mut decoder, version).unwrap();
+					assert_eq!(
+						ok.end_location.object,
+						if Filter::is_draft20(version) { 8 } else { 9 },
+						"{version} start={start}"
+					);
+					assert_eq!(decoder.varint().unwrap(), ietf::FetchHeader::TYPE);
+					ietf::FetchHeader::decode(&mut decoder, version).unwrap();
+					let mut prior = None;
+					for (id, properties) in [(6, &properties), (8, &second)]
+						.into_iter()
+						.filter(|(id, _)| *id >= start)
+					{
+						let ietf::FetchObject::Object {
+							object,
+							properties: actual,
+							..
+						} = ietf::FetchObject::decode(&mut decoder, version).unwrap()
+						else {
+							panic!("object");
+						};
+						let wire = if version == Version::Draft22 {
+							prior.map_or(id, |prior| id - prior)
+						} else {
+							id
+						};
+						assert_eq!(object, Some(wire), "{version}");
+						assert_eq!(actual.as_ref(), Some(properties));
+						assert_eq!(decoder.varint().unwrap(), 1);
+						assert_eq!(decoder.slice(1).unwrap(), &[99]);
+						prior = Some(id);
+					}
+					assert!(decoder.is_empty());
+					assert!(log.resets().is_empty());
+				}
+			}
+		}
+	}
+
+	/// Drafts 14 and 15 carry a relayed END_OF_GROUP object through FETCH, and the next
+	/// relay fills its cache from that answer. Later drafts end the answer at the last frame.
+	#[moq_net_sim::test]
+	async fn passthrough_fetch_keeps_the_end_of_group_object() {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft22,
+		] {
+			// Only draft-14 lets a status object carry properties, so later drafts cannot mark
+			// a gap before it.
+			let legacy = version == Version::Draft14;
+			let terminal = if legacy { (11, &[0x3e, 2][..]) } else { (9, &[][..]) };
+			let objects = [
+				(6, &[0x3e, 6][..], None),
+				(8, &[0x3e, 1][..], None),
+				(terminal.0, terminal.1, Some(END_OF_GROUP)),
+			];
+			let script = object_stream(version, true, &objects);
+			let (bytes, log) = relay_passthrough(script, version, version, Some((0, 12))).await;
+			assert!(log.resets().is_empty());
+			let mut decoder = Decoder::new(&bytes, version.into());
+			assert_eq!(decoder.varint().unwrap(), ietf::FetchOk::ID, "{version}");
+			let ok = ietf::FetchOk::decode(&mut decoder, version).unwrap();
+			let carried = matches!(version, Version::Draft14 | Version::Draft15);
+			let last = match () {
+				_ if carried => terminal.0 + 1,
+				_ if Filter::is_draft20(version) => 8,
+				_ => 9,
+			};
+			assert_eq!(ok.end_location.object, last, "{version}");
+			assert_eq!(decoder.varint().unwrap(), ietf::FetchHeader::TYPE);
+			ietf::FetchHeader::decode(&mut decoder, version).unwrap();
+
+			// The next relay reads the same objects into its cache, up to the same end.
+			let end = last + u64::from(Filter::is_draft20(version));
+			let mut run = GroupFetchRun::new(version, decoder.rest().to_vec()).await;
+			let mut producer = run.track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
+			run.subscriber
+				.recv_group_fetch_objects(&mut run.stream, &mut producer, 0, Some(end), None)
+				.await
+				.unwrap_or_else(|err| panic!("{version}: {err}"));
+			producer.finish().unwrap();
+			let mut reader = producer.consume();
+			for id in [6, 8] {
+				let frame = kio::wait(|waiter| reader.poll_read_object(waiter))
+					.await
+					.unwrap()
+					.unwrap();
+				assert_eq!(frame.fields.as_ref().unwrap().id, id, "{version}");
+			}
+			assert!(reader.read_frame().await.unwrap().is_none());
+			let end_object = reader.end_object();
+			assert_eq!(
+				end_object.as_ref().map(|end| end.id),
+				carried.then_some(terminal.0),
+				"{version}"
+			);
+			if let Some(end) = end_object {
+				assert_eq!(
+					end.properties.values.first().map(|property| property.id),
+					legacy.then_some(0x3e)
+				);
+			}
+		}
+	}
+
+	/// Draft-15 on, only a Normal object may carry properties: a status object with them is
+	/// refused on ingest, and one relayed from draft-14 leaves without them.
+	#[moq_net_sim::test]
+	async fn passthrough_keeps_properties_off_status_objects() {
+		for version in [Version::Draft15, Version::Draft22] {
+			for status in [END_OF_GROUP, END_OF_TRACK] {
+				let script = object_stream(version, true, &[(0, &[], None), (1, &[0x20, 7], Some(status))]);
+				let mut h = Harness::with_timescale(Fill::Done, vec![script], None);
+				h.subscriber.version = version;
+				let mut stream = h.stream().await.with_version(version);
+				let result = h.subscriber.clone().recv_group(&mut stream).await;
+				assert!(
+					matches!(result, Err(Error::Session(SessionError::ProtocolViolation))),
+					"{version} {status}: {result:?}"
+				);
+			}
+		}
+
+		let script = object_stream(
+			Version::Draft14,
+			true,
+			&[(0, &[], None), (1, &[0x20, 7], Some(END_OF_GROUP))],
+		);
+		let (bytes, log) = relay_passthrough_stream(script, Version::Draft14, Version::Draft15).await;
+		assert!(log.resets().is_empty());
+		let mut decoder = Decoder::new(&bytes, Version::Draft15.into());
+		ietf::GroupHeader::decode(&mut decoder, Version::Draft15).unwrap();
+		assert_eq!(decoder.varint().unwrap(), 0);
+		decoder.bytes().unwrap();
+		assert_eq!(decoder.varint().unwrap(), 1);
+		assert_eq!(decoder.slice(1).unwrap(), &[99]);
+		assert_eq!(decoder.varint().unwrap(), 0);
+		assert!(
+			decoder.bytes().unwrap().is_empty(),
+			"the status object kept its properties"
+		);
+		assert_eq!(decoder.varint().unwrap(), 0);
+		assert_eq!(decoder.varint().unwrap(), END_OF_GROUP);
+		assert!(decoder.is_empty());
+	}
+
+	#[moq_net_sim::test]
+	async fn passthrough_refuses_contradictory_gap_properties() {
+		for properties in [vec![0x3e, 2], vec![0x3e, 3], vec![0x3e, 1, 0, 1]] {
+			let script = object_stream(VERSION, true, &[(0, &[], None), (2, &properties, None)]);
+			let h = Harness::with_timescale(Fill::Done, vec![script], None);
+			let mut stream = h.stream().await;
+			assert!(matches!(
+				h.subscriber.clone().recv_group(&mut stream).await,
+				Err(Error::MalformedTrack)
+			));
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn passthrough_fetch_ingest_keeps_marked_gaps_and_stitches_its_tail() {
+		for version in [Version::Draft15, Version::Draft17, Version::Draft22] {
+			let mut objects = Vec::new();
+			for (index, id) in [6u64, 8].into_iter().enumerate() {
+				let properties = vec![0x3e, if index == 0 { 6 } else { 1 }];
+				ietf::FetchObject::Object {
+					subgroup: ietf::FetchSubgroup::Zero,
+					group: (index == 0).then_some(SEQUENCE),
+					object: Some(if version == Version::Draft22 && index > 0 {
+						2
+					} else {
+						id
+					}),
+					priority: (index == 0).then_some(128),
+					properties: Some(properties),
+				}
+				.encode(&mut Encoder::new(&mut objects, version.into()), version)
+				.unwrap();
+				Encoder::new(&mut objects, version.into()).varint(1u64).unwrap();
+				objects.push(99);
+			}
+			let mut run = GroupFetchRun::new(version, objects.clone()).await;
+			let mut producer = run.track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
+			run.subscriber
+				.recv_group_fetch_objects(&mut run.stream, &mut producer, 0, Some(9), None)
+				.await
+				.unwrap();
+			producer.finish().unwrap();
+			let mut reader = producer.consume();
+			for id in [6, 8] {
+				let frame = kio::wait(|waiter| reader.poll_read_object(waiter))
+					.await
+					.unwrap()
+					.unwrap();
+				assert_eq!(frame.fields.as_ref().unwrap().id, id);
+				assert_eq!(frame.fields.as_ref().unwrap().properties.values[0].id, 0x3e);
+			}
+
+			let tail = object_stream(version, false, &[(9, &[], None)]);
+			let mut h = Harness::with_timescale(Fill::Serving(None), vec![tail], None);
+			h.subscriber.version = version;
+			let mut run = GroupFetchRun::new(version, objects).await;
+			let fill = h
+				.subscriber
+				.run_fill(&mut run.stream, &mut h.track, None, None, None, None)
+				.await
+				.unwrap();
+			*h.fill.write().ok().expect("fill open") = fill;
+			let mut consumer = h.track.subscribe(None);
+			let mut tail = h.stream().await.with_version(version);
+			h.subscriber.clone().recv_group(&mut tail).await.unwrap();
+			let mut group = consumer.recv_group().await.unwrap().unwrap();
+			assert_eq!(group.wire().unwrap().first_id, 6);
+			assert!(
+				group.wire().unwrap().fetchable,
+				"a contiguous tail adds no gap to the FETCH head"
+			);
+			for id in [6, 8, 9] {
+				let frame = kio::wait(|waiter| group.poll_read_object(waiter))
+					.await
+					.unwrap()
+					.unwrap();
+				assert_eq!(frame.fields.as_ref().unwrap().id, id);
+			}
+			assert!(group.read_frame().await.unwrap().is_none());
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn passthrough_preserves_ids_first_object_and_end_status() {
+		for version in [Version::Draft15, Version::Draft22] {
+			for first in [false, true] {
+				let objects = [
+					(6, &[][..], None),
+					(8, &[][..], None),
+					(11, &[][..], Some(END_OF_GROUP)),
+				];
+				let script = object_stream(version, first, &objects);
+				let (bytes, log) = relay_passthrough_stream(script, version, version).await;
+				assert!(log.resets().is_empty());
+				let mut decoder = Decoder::new(&bytes, version.into());
+				let header = ietf::GroupHeader::decode(&mut decoder, version).unwrap();
+				assert_eq!(header.flags.first_object, version == Version::Draft15 || first);
+				for (delta, status) in [(6, None), (1, None), (2, Some(END_OF_GROUP))] {
+					assert_eq!(decoder.varint().unwrap(), delta);
+					assert!(decoder.bytes().unwrap().is_empty());
+					assert_eq!(decoder.varint().unwrap(), u64::from(status.is_none()));
+					if let Some(status) = status {
+						assert_eq!(decoder.varint().unwrap(), status);
+					} else {
+						assert_eq!(decoder.slice(1).unwrap(), &[99]);
+					}
+				}
+				assert!(decoder.is_empty());
+			}
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn passthrough_preserves_immutable_bytes_and_refuses_incompatible_drafts() {
+		for ingress in [
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft22,
+		] {
+			let mut inner = Vec::new();
+			let mut encoder = Encoder::new(&mut inner, ingress.into());
+			for value in [2u64, 96_000, if ingress == Version::Draft15 { 4 } else { 2 }, 128] {
+				encoder.varint(value).unwrap();
+			}
+			encoder
+				.varint(if ingress == Version::Draft15 { 5u64 } else { 1u64 })
+				.unwrap();
+			encoder.bytes(&[42; 130]).unwrap();
+			let mut properties = Vec::new();
+			let mut encoder = Encoder::new(&mut properties, ingress.into());
+			encoder.varint(0x0bu64).unwrap();
+			encoder.bytes(&inner).unwrap();
+			for egress in [
+				Version::Draft15,
+				Version::Draft16,
+				Version::Draft17,
+				Version::Draft18,
+				Version::Draft22,
+			] {
+				let script = object_stream(ingress, true, &[(0, &properties, None)]);
+				let (bytes, log) = relay_passthrough_stream(script, ingress, egress).await;
+				if super::super::object::encoding(ingress) != super::super::object::encoding(egress) {
+					assert!(!log.resets().is_empty(), "incompatible immutable bytes must be refused");
+					continue;
+				}
+				assert!(log.resets().is_empty());
+				let mut decoder = Decoder::new(&bytes, egress.into());
+				ietf::GroupHeader::decode(&mut decoder, egress).unwrap();
+				assert_eq!(decoder.varint().unwrap(), 0);
+				assert_eq!(decoder.bytes().unwrap(), properties);
+			}
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn passthrough_preserves_datagram_objects_through_dispatch() {
+		for version in [Version::Draft15, Version::Draft22] {
+			for ranged in [false, true]
+				.into_iter()
+				.filter(|ranged| !*ranged || version == Version::Draft22)
+			{
+				let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+				let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
+				let track = broadcast.create_track("video", None).unwrap();
+				let mut h = Harness::with_timescale(Fill::Done, vec![], None);
+				h.subscriber.version = version;
+				h.subscriber.state.lock().subscribes.get_mut(&REQUEST).unwrap().producer = Some(track.clone());
+				let properties = if version == Version::Draft15 {
+					vec![2, 7, 5, 1, 42]
+				} else {
+					vec![2, 7, 3, 1, 42]
+				};
+				let mut original = Vec::new();
+				for id in [6, 7, 8] {
+					let datagram = ietf::ObjectDatagram {
+						track_alias: ALIAS,
+						group_id: SEQUENCE,
+						object_id: Some(id),
+						// An omitted priority inherits the track default, which the
+						// downstream response need not carry.
+						publisher_priority: (id != 6).then_some(200),
+						end_of_group: false,
+						properties: (id != 8).then(|| properties.clone()),
+						body: if id == 8 {
+							ietf::DatagramBody::Status(END_OF_GROUP)
+						} else {
+							ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"object"))
+						},
+					};
+					h.subscriber
+						.recv_datagram(datagram.encode_bytes(version).unwrap())
+						.unwrap();
+					original.push(datagram);
+				}
+				track.finish().unwrap();
+				let mut downstream = ScriptedSession::per_stream(vec![vec![]]).with_datagrams(65535);
+				let peer = peer::PeerSetup::default();
+				peer.set(peer::Peer::default());
+				let publisher = crate::ietf::Publisher::new(
+					crate::time::Clock::sim(),
+					downstream.clone(),
+					origin.consume(),
+					Control::new(None, false),
+					None,
+					peer,
+					version,
+				);
+				let subscribe = ietf::Subscribe {
+					request_id: RequestId(3),
+					track_namespace: Path::new("room"),
+					track_name: "video".into(),
+					subscriber_priority: 128,
+					group_order: ietf::GroupOrder::Ascending,
+					filter: if ranged {
+						Filter::Absolute {
+							start: ietf::Location {
+								group: SEQUENCE,
+								object: 7,
+							},
+							end: Some(ietf::EndLocation {
+								group: SEQUENCE,
+								object: Some(7),
+							}),
+						}
+					} else {
+						Filter::Unfiltered
+					},
+					fill: None,
+					properties_wanted: true,
+					forward: true,
+					range_filters: false,
+				};
+				let mut body = Vec::new();
+				subscribe
+					.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
+					.unwrap();
+				let stream = Stream::open(&mut downstream, version).await.unwrap();
+				publisher
+					.handle_stream(ietf::Subscribe::ID, ietf::Body(body.into()), stream)
+					.unwrap()
+					.await;
+				let sent = downstream.log.datagrams.lock().unwrap();
+				original.retain(|datagram| !ranged || datagram.object_id == Some(7));
+				assert_eq!(sent.len(), original.len());
+				let inherited = super::super::priority::to_wire(track.publisher_priority());
+				for (bytes, mut expected) in sent.iter().zip(original) {
+					expected.track_alias = 3;
+					expected.publisher_priority = expected.publisher_priority.or(Some(inherited));
+					let (actual, _) = ietf::ObjectDatagram::decode_slice(bytes, version).unwrap();
+					assert_eq!(actual, expected);
+				}
+			}
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn passthrough_translates_mutable_property_encodings() {
+		for ingress in [Version::Draft14, Version::Draft15, Version::Draft17, Version::Draft22] {
+			let mut properties = Vec::new();
+			let mut encoder = Encoder::new(&mut properties, ingress.into());
+			encoder.varint(0x80u64).unwrap();
+			encoder.varint(96_000u64).unwrap();
+			encoder
+				.varint(if matches!(ingress, Version::Draft14 | Version::Draft15) {
+					0x81u64
+				} else {
+					1u64
+				})
+				.unwrap();
+			encoder.bytes(&[42; 130]).unwrap();
+			for egress in [Version::Draft15, Version::Draft17, Version::Draft22] {
+				let script = object_stream(ingress, true, &[(0, &properties, None)]);
+				let (bytes, log) = relay_passthrough_stream(script, ingress, egress).await;
+				assert!(log.resets().is_empty());
+				let mut decoder = Decoder::new(&bytes, egress.into());
+				ietf::GroupHeader::decode(&mut decoder, egress).unwrap();
+				assert_eq!(decoder.varint().unwrap(), 0);
+				let mut props = Decoder::new(decoder.bytes().unwrap(), egress.into());
+				assert_eq!(props.varint().unwrap(), 0x80);
+				assert_eq!(props.varint().unwrap(), 96_000);
+				assert_eq!(
+					props.varint().unwrap(),
+					if egress == Version::Draft15 { 0x81 } else { 1 }
+				);
+				assert_eq!(props.bytes().unwrap(), &[42; 130]);
+				assert!(props.is_empty());
+			}
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn passthrough_accepts_nonzero_first_objects_and_gaps() {
+		for version in [Version::Draft15, Version::Draft22] {
+			let mut script = Vec::new();
+			ietf::GroupHeader {
+				track_alias: ALIAS,
+				group_id: SEQUENCE,
+				sub_group_id: 0,
+				publisher_priority: 0,
+				flags: ietf::GroupFlags::default(),
+			}
+			.encode(&mut Encoder::new(&mut script, version.into()), version)
+			.unwrap();
+			for delta in [6u64, 1, 2] {
+				let mut encoder = Encoder::new(&mut script, version.into());
+				encoder.varint(delta).unwrap();
+				encoder.varint(1u64).unwrap();
+				script.push(42);
+			}
+			let mut h = Harness::with_timescale(Fill::Done, vec![script], None);
+			h.subscriber.version = version;
+			let mut consumer = h.track.subscribe(None);
+			let mut stream = h.stream().await.with_version(version);
+			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
+			assert_eq!(read_group(&mut consumer).await, (SEQUENCE, vec![(None, vec![42]); 3]));
+		}
+	}
+
+	/// A datagram's object number does not change its public payload view.
+	#[moq_net_sim::test]
+	async fn passthrough_accepts_datagrams_past_object_zero() {
+		for version in [Version::Draft15, Version::Draft22] {
+			let mut h = Harness::with_timescale(Fill::Done, vec![], None);
+			h.subscriber.version = version;
+			let mut consumer = h.track.subscribe(None);
+			let bytes = ietf::ObjectDatagram {
+				track_alias: ALIAS,
+				group_id: SEQUENCE,
+				object_id: Some(6),
+				publisher_priority: Some(128),
+				end_of_group: false,
+				properties: None,
+				body: ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"object-six")),
+			}
+			.encode_bytes(version)
+			.unwrap();
+			h.subscriber.recv_datagram(bytes).unwrap();
+			let received = consumer.poll_recv_datagram(&kio::Waiter::noop());
+			assert!(
+				matches!(&received, Poll::Ready(Ok(Some(data))) if data.payload == b"object-six"[..]),
+				"{version}: {received:?}"
+			);
+		}
 	}
 
 	#[moq_net_sim::test]
@@ -8455,9 +9268,9 @@ mod stitch_tests {
 		);
 	}
 
-	/// Drafts without FIRST_OBJECT still identify a headless stream by its first ID.
+	/// Old drafts preserve a nonzero first Object ID without inventing missing frames.
 	#[moq_net_sim::test]
-	async fn old_drafts_drop_a_headless_group_before_creating_it() {
+	async fn old_drafts_accept_a_nonzero_first_object() {
 		for version in [Version::Draft14, Version::Draft16] {
 			let scripts = [2u64, 0]
 				.into_iter()
@@ -8487,11 +9300,9 @@ mod stitch_tests {
 			h.subscriber.version = version;
 			let mut consumer = h.track.subscribe(None);
 			let mut stream = h.stream().await.with_version(version);
-			assert!(matches!(
-				h.subscriber.clone().recv_group(&mut stream).await,
-				Err(Error::Unsupported)
-			));
-			assert_eq!(h.track.latest(), None);
+			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
+			assert_eq!(h.track.latest(), Some(SEQUENCE));
+			assert_eq!(read_group(&mut consumer).await, (SEQUENCE, vec![(None, vec![42])]));
 			let mut stream = h.stream().await.with_version(version);
 			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
 			assert_eq!(read_group(&mut consumer).await, (SEQUENCE + 1, vec![(None, vec![42])]));
@@ -9048,28 +9859,14 @@ mod stitch_tests {
 		assert_eq!(frames, [b"2".to_vec(), b"3".to_vec()]);
 	}
 
-	/// Without a head there is nothing to stitch onto, so a stream that starts part way
-	/// through a group is dropped and the join degrades to the next group boundary. This is
-	/// what a strict publisher gives a subscriber that asks for no fill.
+	/// A standalone subgroup tail keeps its identity while plain readers see its payload.
 	#[moq_net_sim::test]
-	async fn a_tail_without_a_fill_is_dropped() {
+	async fn a_tail_without_a_fill_is_preserved() {
 		let h = Harness::new(Fill::Done, vec![tail_stream(SEQUENCE, 2, &[b"tail-2"])]);
 		let mut consumer = h.track.subscribe(None);
 		let mut tail = h.stream().await;
-
-		// The stream goes, not the session.
-		assert!(matches!(
-			h.subscriber.clone().recv_group(&mut tail).await,
-			Err(Error::Unsupported)
-		));
-
-		// Nothing usable reaches the model: the group is never offered at all.
-		let delivered = moq_net_sim::timeout(Duration::from_millis(50), async {
-			let mut group = consumer.recv_group().await.ok().flatten()?;
-			group.read_frame().await.ok().flatten()
-		})
-		.await;
-		assert!(matches!(delivered, Err(_) | Ok(None)), "no frame is delivered");
+		h.subscriber.clone().recv_group(&mut tail).await.unwrap();
+		assert_eq!(read_group(&mut consumer).await.1[0].1, b"tail-2");
 	}
 
 	/// Object IDs are absolute whatever FIRST_OBJECT says, and they start at 0, so a
@@ -9127,10 +9924,9 @@ mod stitch_tests {
 		assert!(matches!(end, Ok(None)), "the group is finished, not aborted: {end:?}");
 	}
 
-	/// A clear FIRST_OBJECT whose first ID is not 0 still has a hole at the front, so
-	/// the stream is dropped and the track resumes at the next group.
+	/// FIRST_OBJECT and the starting ID are independent relay metadata.
 	#[moq_net_sim::test]
-	async fn a_clear_first_object_past_zero_is_dropped() {
+	async fn a_clear_first_object_past_zero_is_preserved() {
 		let partial = draft18_subgroup(SEQUENCE, false, 3, &[b"tail-3"]);
 		let whole = draft18_subgroup(SEQUENCE + 1, true, 0, &[b"next"]);
 		assert_eq!(u64::from(partial[0]) & ietf::GroupFlags::FIRST_OBJECT_BIT, 0);
@@ -9140,10 +9936,10 @@ mod stitch_tests {
 		let mut consumer = h.track.subscribe(None);
 
 		let mut partial = read_draft18(&h.session).await;
-		assert!(matches!(
-			h.subscriber.clone().recv_group(&mut partial).await,
-			Err(Error::Unsupported)
-		));
+		h.subscriber.clone().recv_group(&mut partial).await.unwrap();
+		let (sequence, frames) = read_group(&mut consumer).await;
+		assert_eq!(sequence, SEQUENCE);
+		assert_eq!(frames[0].1, b"tail-3");
 
 		let mut whole = read_draft18(&h.session).await;
 		h.subscriber
@@ -9374,22 +10170,24 @@ mod stitch_tests {
 			],
 		)
 		.with_joining(JoiningFetch::Absolute { group_id: START }, FETCH, largest);
-		let mut consumer = h.track.subscribe(None);
+		let mut consumer = h
+			.track
+			.subscribe(track::Subscription::default().with_start(track::Position::group(START)));
 
 		let mut fill = h.stream().await;
 		let mut tail = h.stream().await;
 
 		h.subscriber.clone().recv_fill(&mut fill).await.expect("short fetch");
-		assert!(matches!(
-			h.subscriber.clone().recv_group(&mut tail).await,
-			Err(Error::Unsupported)
-		));
 
 		let (sequence, frames) = read_group(&mut consumer).await;
 		assert_eq!(sequence, START);
 		assert_eq!(frames.len(), 2, "the prefix that arrived is published");
 		assert_eq!(frames[0].1, b"g7-0");
 		assert_eq!(frames[1].1, b"g7-1");
+		h.subscriber.clone().recv_group(&mut tail).await.unwrap();
+		let (sequence, frames) = read_group(&mut consumer).await;
+		assert_eq!(sequence, 10);
+		assert_eq!(frames[0].1, b"g10-2");
 	}
 
 	/// A draft-14/15 end-of-group marker ends a group fetch, so an object after it is a

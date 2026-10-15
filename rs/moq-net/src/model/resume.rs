@@ -21,7 +21,7 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::task::{Poll, ready};
 
-use crate::{Datagram, Error, Result, StreamError, group, stats, track};
+use crate::{Error, Result, StreamError, group, stats, track};
 
 use super::delivered::Delivered;
 use super::subscription::{Cap, Position, Subscription, max_some};
@@ -248,7 +248,7 @@ struct Copy {
 	datagrams_done: Option<Result<()>>,
 	/// The newest datagram handed out before this copy was subscribed: a copy that
 	/// buffers datagrams replays them, and those were already handed out.
-	datagrams_seen: Option<u64>,
+	datagrams_seen: Option<(u64, u64)>,
 	/// Held by every group handed out from this copy, so a replaced copy stays
 	/// subscribed while one is still read.
 	lease: Arc<()>,
@@ -341,7 +341,7 @@ impl Subscriber {
 		&mut self,
 		delivered: &Delivered,
 		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<Datagram>>> {
+	) -> Poll<Result<Option<super::datagram::Stored>>> {
 		self.reader().poll_recv_datagram(delivered, waiter)
 	}
 
@@ -443,8 +443,8 @@ struct Reader {
 	copies: Vec<Copy>,
 	/// The newest group handed out: where a new copy is asked to start.
 	newest: Option<u64>,
-	/// The newest datagram handed out.
-	datagram: Option<u64>,
+	/// The newest datagram handed out, by Group and Object ID.
+	datagram: Option<(u64, u64)>,
 	/// The local group filter; see [`track::Subscriber::set_groups`].
 	groups: (u64, Cap),
 }
@@ -667,7 +667,11 @@ impl Reader {
 		}
 	}
 
-	fn poll_recv_datagram(&mut self, delivered: &Delivered, waiter: &kio::Waiter) -> Poll<Result<Option<Datagram>>> {
+	fn poll_recv_datagram(
+		&mut self,
+		delivered: &Delivered,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<super::datagram::Stored>>> {
 		loop {
 			if let Some(res) = self.poll_datagram_once(delivered, waiter) {
 				return res;
@@ -679,7 +683,7 @@ impl Reader {
 		&mut self,
 		delivered: &Delivered,
 		waiter: &kio::Waiter,
-	) -> Option<Poll<Result<Option<Datagram>>>> {
+	) -> Option<Poll<Result<Option<super::datagram::Stored>>>> {
 		self.sync(waiter);
 		self.let_go(delivered);
 		let groups = self.groups;
@@ -697,13 +701,18 @@ impl Reader {
 					}
 					Poll::Ready(Ok(sub)) => sub,
 				};
-				match sub.poll_recv_datagram(waiter) {
+				match sub.poll_recv_wire_datagram(waiter) {
 					Poll::Pending => break,
 					Poll::Ready(Ok(Some(datagram))) => {
-						if copy.datagrams_seen.is_some_and(|seen| datagram.sequence <= seen) {
+						// A relayed group can carry several datagrams, told apart by Object ID.
+						let id = (
+							datagram.sequence,
+							datagram.wire.as_ref().and_then(|wire| wire.object_id).unwrap_or(0),
+						);
+						if copy.datagrams_seen.is_some_and(|seen| id <= seen) {
 							continue;
 						}
-						self.datagram = self.datagram.max(Some(datagram.sequence));
+						self.datagram = self.datagram.max(Some(id));
 						return Some(Poll::Ready(Ok(Some(datagram))));
 					}
 					Poll::Ready(Ok(None)) => {
@@ -1722,6 +1731,45 @@ mod test {
 		assert_eq!(recv(&mut sub), None);
 	}
 
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_new_copy_hands_out_later_objects_of_a_seen_group() {
+		let object = |id: u64| super::super::datagram::Stored {
+			datagram: super::super::datagram::Datagram {
+				sequence: 1,
+				timestamp: Some(ts(id)),
+				payload: bytes::Bytes::from_static(b"d"),
+			},
+			wire: Some(Arc::new(super::super::datagram::Wire {
+				object_id: Some(id),
+				priority: None,
+				end_of_group: false,
+				status: None,
+				properties: Default::default(),
+			})),
+		};
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let mut a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&front, Duration::from_secs(10));
+		let mut b = copy();
+		a.insert_wire_datagram(object(6)).unwrap();
+		b.insert_wire_datagram(object(6)).unwrap();
+		b.insert_wire_datagram(object(8)).unwrap();
+
+		let mut recv = || {
+			sub.poll_recv_wire_datagram(&kio::Waiter::noop()).map(|datagram| {
+				let datagram = datagram.unwrap().unwrap();
+				datagram.wire.as_ref().unwrap().object_id.unwrap()
+			})
+		};
+		assert_eq!(recv(), Poll::Ready(6));
+		routes.serve(b.consume());
+		assert_eq!(recv(), Poll::Ready(8));
+		assert!(recv().is_pending());
+	}
+
 	#[derive(Default)]
 	struct Wake(std::sync::atomic::AtomicBool);
 
@@ -2054,6 +2102,196 @@ mod test {
 			group.finish().unwrap();
 		}
 		assert!(matches!(reading.read_frame().now_or_never(), Some(Err(Error::Old))));
+	}
+
+	#[test]
+	#[cfg(feature = "async")]
+	fn sparse_object_ids_refuse_ordinal_recovery() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		let mut group = a.create_group(group::Info { sequence: 0 }).unwrap();
+		group
+			.set_wire(group::Wire {
+				sparse: false,
+				first_object: true,
+				first_id: 6,
+				extensions: false,
+				has_end: true,
+				fetchable: false,
+				last: None,
+			})
+			.unwrap();
+		let mut frame = group
+			.create_frame_owned(
+				crate::frame::Header {
+					info: crate::frame::Info {
+						size: 1,
+						timestamp: Some(ts(0)),
+					},
+					fields: Some(Arc::new(super::super::object::Fields {
+						id: 6,
+						properties: Default::default(),
+					})),
+				},
+				&crate::frame::Budget::default(),
+			)
+			.unwrap();
+		frame.write(bytes::Bytes::from_static(b"a")).unwrap();
+		frame.finish().unwrap();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::MAX);
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+		assert_eq!(a.consume().resume_position(), Some(Position::group(1)));
+		let mut partial = group
+			.create_frame_owned(
+				crate::frame::Header {
+					info: crate::frame::Info {
+						size: 2,
+						timestamp: Some(ts(1)),
+					},
+					fields: Some(Arc::new(super::super::object::Fields {
+						id: 8,
+						properties: Default::default(),
+					})),
+				},
+				&crate::frame::Budget::default(),
+			)
+			.unwrap();
+		partial.write(bytes::Bytes::from_static(b"b")).unwrap();
+		let mut chunks = reading.next_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(chunks.read_chunk().now_or_never().unwrap().unwrap().unwrap(), b"b"[..]);
+		partial.abort(Error::Dropped).unwrap();
+		routes.serve(copy().consume());
+		assert!(matches!(
+			chunks.read_chunk().now_or_never(),
+			Some(Err(Error::Unsupported))
+		));
+		assert!(matches!(
+			reading.read_frame().now_or_never(),
+			Some(Err(Error::Unsupported))
+		));
+	}
+
+	/// A replacement copy that joined past a gap, holding the group from Object 6.
+	#[cfg(feature = "async")]
+	fn joined_past_a_gap(objects: &[(u64, &'static [u8])]) -> track::Producer {
+		let b = copy();
+		let mut group = b.create_group(group::Info { sequence: 0 }).unwrap();
+		group
+			.set_wire(group::Wire {
+				sparse: false,
+				first_object: false,
+				first_id: 6,
+				extensions: false,
+				has_end: true,
+				fetchable: false,
+				last: None,
+			})
+			.unwrap();
+		for &(id, payload) in objects {
+			let mut frame = group
+				.create_frame_owned(
+					crate::frame::Header {
+						info: crate::frame::Info {
+							size: payload.len() as u64,
+							timestamp: Some(ts(id)),
+						},
+						fields: Some(Arc::new(super::super::object::Fields {
+							id,
+							properties: Default::default(),
+						})),
+					},
+					&crate::frame::Budget::default(),
+				)
+				.unwrap();
+			frame.write(bytes::Bytes::from_static(payload)).unwrap();
+			frame.finish().unwrap();
+		}
+		b
+	}
+
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_replacement_past_a_gap_refuses_ordinal_recovery() {
+		// A half-read Object 0 must not continue with Object 6's bytes.
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&front, Duration::from_secs(10));
+		let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut frame = open
+			.create_frame(crate::frame::Info {
+				size: 4,
+				timestamp: Some(ts(0)),
+			})
+			.unwrap();
+		frame.write(b"ab".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		let mut chunks = reading.next_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(
+			&chunks.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..],
+			b"ab"
+		);
+		drop(frame);
+		a.clone().abort(Error::Dropped).unwrap();
+		let b = joined_past_a_gap(&[(6, b"WXYZ")]);
+		routes.serve(b.consume());
+		assert!(matches!(
+			chunks.read_chunk().now_or_never(),
+			Some(Err(Error::Unsupported))
+		));
+
+		// Ordinal 2 of that copy is Object 8, not Object 2.
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&front, Duration::from_secs(10));
+		let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+		open.write_frame(ts(0), b"a".as_ref()).unwrap();
+		open.write_frame(ts(1), b"b".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+		let b = joined_past_a_gap(&[(6, b"x"), (7, b"y"), (8, b"z")]);
+		routes.serve(b.consume());
+		assert!(matches!(
+			reading.read_frame().now_or_never(),
+			Some(Err(Error::Unsupported))
+		));
+
+		// A batch holding the old copy's frame hides the refusal, but the next read sees it,
+		// whether a batch or a single frame served from what that batch prefetched.
+		for single in [false, true] {
+			let routes = Producer::new();
+			let front = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&front, Duration::from_secs(10));
+			let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+			open.write_frame(ts(0), b"a".as_ref()).unwrap();
+			let mut reading = recv(&mut sub);
+			let b = joined_past_a_gap(&[(6, b"x"), (7, b"y"), (8, b"z")]);
+			routes.serve(b.consume());
+			let mut batch = crate::frame::Buffer::<4>::new();
+			let waiter = kio::Waiter::noop();
+			assert!(matches!(
+				reading.poll_read_frames(&waiter, &mut batch),
+				Poll::Ready(Ok(1))
+			));
+			assert_eq!(&batch.filled_mut()[0].payload[..], b"a");
+			let next = match single {
+				true => reading.read_frame().now_or_never().unwrap().map(|_| ()),
+				false => match reading.poll_read_frames(&waiter, &mut batch) {
+					Poll::Ready(res) => res.map(|_| ()),
+					Poll::Pending => panic!("the batch parked"),
+				},
+			};
+			assert!(matches!(next, Err(Error::Unsupported)), "single={single}");
+		}
 	}
 
 	#[test]

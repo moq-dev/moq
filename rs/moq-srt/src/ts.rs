@@ -55,13 +55,14 @@ enum Importer {
 		// (prompt unannounce) even though the importer owns it.
 		broadcast: moq_net::broadcast::Producer,
 	},
-	/// Each program's broadcast is created and announced once the first PAT names it.
+	/// Each program's broadcast is created once the first PAT names it, and announced once its PMT
+	/// declares its tracks.
 	All(Box<ts::Programs>),
 }
 
 impl Publisher {
 	/// Wire up the TS importer and catalog for `path` on `origin`, announcing the broadcast
-	/// now, or each program's once the PAT lists it for [`Program::All`].
+	/// now, or each program's once its PMT declares its tracks for [`Program::All`].
 	///
 	/// `config` is the catalog the importer publishes into: retention
 	/// (`with_max_age`) and the connection allocator passthrough tracks claim on

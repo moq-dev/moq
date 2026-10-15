@@ -60,6 +60,27 @@ impl Sps {
 impl SpsHead {
 	fn from_rbsp(rbsp: &scuffle_h265::SpsRbsp) -> Result<Self> {
 		let profile = &rbsp.profile_tier_level.general_profile;
+		// scuffle_h265's `cropped_width` subtracts unchecked, so crop here and refuse a conformance
+		// window that leaves no picture, as `read` does.
+		let window = &rbsp.conformance_window;
+		let crop = |size: u64, sub: u8, start: u64, end: u64| {
+			let offset = start.checked_add(end)?.checked_mul(sub.into())?;
+			u32::try_from(size.checked_sub(offset)?).ok().filter(|size| *size > 0)
+		};
+		let width = crop(
+			rbsp.pic_width_in_luma_samples.get(),
+			rbsp.sub_width_c(),
+			window.conf_win_left_offset,
+			window.conf_win_right_offset,
+		)
+		.ok_or(Error::SpsParse)?;
+		let height = crop(
+			rbsp.pic_height_in_luma_samples.get(),
+			rbsp.sub_height_c(),
+			window.conf_win_top_offset,
+			window.conf_win_bottom_offset,
+		)
+		.ok_or(Error::SpsParse)?;
 		Ok(Self {
 			profile_space: profile.profile_space,
 			tier_flag: profile.tier_flag,
@@ -72,8 +93,8 @@ impl SpsHead {
 			chroma_format_idc: rbsp.chroma_format_idc,
 			bit_depth_luma_minus8: rbsp.bit_depth_luma_minus8,
 			bit_depth_chroma_minus8: rbsp.bit_depth_chroma_minus8,
-			width: rbsp.cropped_width() as u32,
-			height: rbsp.cropped_height() as u32,
+			width,
+			height,
 		})
 	}
 
@@ -239,6 +260,25 @@ mod tests {
 				height: 1080,
 			}
 		);
+	}
+
+	/// A conformance window that crops away the whole picture, or past it, is refused rather than
+	/// handing a zero (or wrapped) size to the display aspect.
+	#[test]
+	fn empty_conformance_window_is_refused() {
+		let rbsp = SpsNALUnit::parse(&mut &fixtures::SPS[..]).unwrap().rbsp;
+		let width = rbsp.pic_width_in_luma_samples.get() / u64::from(rbsp.sub_width_c());
+		for right in [width, width + 1] {
+			let mut rbsp = rbsp.clone();
+			rbsp.conformance_window.conf_win_left_offset = 0;
+			rbsp.conformance_window.conf_win_right_offset = right;
+			assert!(SpsHead::from_rbsp(&rbsp).is_err());
+		}
+		let height = rbsp.pic_height_in_luma_samples.get() / u64::from(rbsp.sub_height_c());
+		let mut rbsp = rbsp.clone();
+		rbsp.conformance_window.conf_win_top_offset = 0;
+		rbsp.conformance_window.conf_win_bottom_offset = height;
+		assert!(SpsHead::from_rbsp(&rbsp).is_err());
 	}
 
 	/// The fallback covers a refusal after the head, not a truncated or invalid head.

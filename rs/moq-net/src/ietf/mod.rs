@@ -26,6 +26,7 @@ pub mod hidden;
 mod location;
 pub mod message;
 mod namespace;
+mod object;
 pub mod peer;
 mod priority;
 mod properties;

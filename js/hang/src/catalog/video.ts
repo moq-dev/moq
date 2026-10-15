@@ -38,9 +38,8 @@ export const VideoConfigSchema = z.object({
 	codedWidth: z.optional(u53Schema),
 	codedHeight: z.optional(u53Schema),
 
-	// Ratio of display width/height to coded width/height
-	// Allows stretching/squishing individual "pixels" of the video
-	// If not provided, the display ratio is 1:1
+	// The aspect ratio the whole picture is displayed at, as WebCodecs' VideoDecoderConfig
+	// displayAspectWidth/displayAspectHeight. Absent means the decoded picture's own shape.
 	displayAspectWidth: z.optional(u53Schema),
 	displayAspectHeight: z.optional(u53Schema),
 

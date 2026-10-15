@@ -28,11 +28,11 @@ Boundaries:
 Decided with the maintainer on 2026-10-13. This revisits the
 [#4926](https://github.com/moq-dev/moq/issues/4926) decline for relays only.
 That decline's cache-fragmentation concern does not apply here, because
-an explicit `skip` tells the cache a gap is intentional, and a FETCH it
+private Object IDs distinguish gaps from frame ordinals, and a FETCH it
 cannot answer unambiguously is refused.
 
-- **Carried:** subgroups with their publisher priority, object ID gaps as a
-  crate-private `skip: u64`, object properties as a decoded KVP list,
+- **Carried:** subgroups with their publisher priority, object ID gaps as
+  crate-private absolute Object IDs, object properties as a decoded KVP list,
   END_OF_GROUP status objects at their object ID, datagrams past object 0,
   and unknown track properties.
 - **Plain readers** see subgroup 0 only. A track with no subgroup 0 reads as
@@ -52,9 +52,11 @@ cannot answer unambiguously is refused.
   moq-lite does not advertise this capability.
 - **Immutable properties** keep their serialized inner bytes and ingress
   encoding family, including across relay hops. Refuse forwarding between
-  absolute-key drafts 14/15 and delta-key drafts 16+ when immutable
-  properties are present; rewriting them would violate immutability and
-  forwarding them unchanged would change their meaning.
+  the absolute-key/QUIC-varint drafts 14/15, delta-key/QUIC-varint draft 16,
+  and delta-key/leading-ones-varint drafts 17+ when immutable properties
+  are present. Draft 17 is a separate family because it forbids 7-byte varints.
+  Rewriting them would violate immutability; forwarding unchanged
+  across those families would change their meaning.
 - **Public model carve-out.** These fields stay crate-private on purpose,
   an exception to [a public model](/quest/m1/model-public-surface.md). A
   third-party relay built on the public model drops them, as plain lite
@@ -81,7 +83,6 @@ Work owned by this README, after the children land:
 
 ## Required
 
-- [Object fields](/quest/m1/ietf-extension/objects.md) - object ID gaps, object properties, END_OF_GROUP status objects, and datagrams past object 0 survive moq-transport -> moq-relay -> moq-transport
 - [Subgroups](/quest/m1/ietf-extension/subgroups.md) - a group holds several subgroups, each forwarded on its own stream with its ID and exact publisher priority; plain readers see subgroup 0
 - [Dynamic groups](/quest/m1/ietf-extension/dynamic-groups.md) - NEW_GROUP_REQUEST reaches the original publisher, coalesced across downstream subscribers
 - [Track properties](/quest/m1/ietf-extension/track-properties.md) - unknown track properties are forwarded unchanged in SUBSCRIBE_OK, FETCH_OK, and TRACK_STATUS_OK
