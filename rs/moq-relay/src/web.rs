@@ -908,8 +908,11 @@ fn request_host(uri: &http::Uri, headers: &http::HeaderMap) -> Option<String> {
 		.filter(|host| !host.is_empty())
 }
 
-/// Admit a one-shot HTTP request: the auth server sees the
-/// path, the raw query, the host it was addressed to, the peer, and any certificate.
+/// Admit a one-shot HTTP read: the auth server sees the path, the raw query, the
+/// host it was addressed to, the peer, and any certificate. Only a grant that may
+/// subscribe counts as a request; the returned origin meters reads under its token.
+// The `Err` is axum's own `ErrorResponse`, so there is nothing here to box.
+#[expect(clippy::result_large_err, reason = "the error type is axum's, not ours")]
 async fn admit_http(
 	state: &WebState,
 	path: String,
@@ -918,7 +921,7 @@ async fn admit_http(
 	headers: &http::HeaderMap,
 	remote: crate::listener::Peer,
 	mtls: Option<Extension<MtlsPeer>>,
-) -> Result<(auth::Lease, moq_net::stats::Session), auth::Error> {
+) -> axum::response::Result<(auth::Lease, moq_net::origin::Consumer)> {
 	// The public request API represents a missing or root path as empty; the
 	// contract says what was dialed, and a URL always starts with `/`.
 	let mut request = state
@@ -937,8 +940,13 @@ async fn admit_http(
 		.await
 		.inspect_err(|err| state.cluster.refusals.record(err.into()))?;
 	let token = lease.token();
+	let Some(origin) = state.cluster.subscriber(token) else {
+		state.cluster.refusals.record(crate::refusals::Refusal::Forbidden);
+		return Err(StatusCode::UNAUTHORIZED.into());
+	};
 	let stats = state.cluster.stats.tier(token.tier.clone()).request(&token.root);
-	Ok((lease.with_stats(stats.clone()), stats))
+	let origin = origin.consume().with_stats(stats.clone());
+	Ok((lease.with_stats(stats), origin))
 }
 
 /// Serve the announced broadcasts for a given prefix.
@@ -958,13 +966,8 @@ async fn serve_announced(
 		None => String::new(),
 	};
 
-	let (lease, stats) = admit_http(&state, prefix, query, &uri, &headers, remote, mtls).await?;
-	let Some(origin) = state.cluster.subscriber(lease.token()) else {
-		state.cluster.refusals.record(crate::refusals::Refusal::Forbidden);
-		return Err(StatusCode::UNAUTHORIZED.into());
-	};
-
-	let mut announced = origin.consume().with_stats(stats).announced();
+	let (lease, origin) = admit_http(&state, prefix, query, &uri, &headers, remote, mtls).await?;
+	let mut announced = origin.announced();
 	let mut broadcasts = Vec::new();
 
 	while let Some(event) = announced.try_next() {
@@ -1005,14 +1008,9 @@ async fn serve_fetch(
 		return Err(StatusCode::BAD_REQUEST.into());
 	}
 
-	let (lease, stats) = admit_http(&state, path.join("/"), params.auth, &uri, &headers, remote, mtls).await?;
+	let (lease, origin) = admit_http(&state, path.join("/"), params.auth, &uri, &headers, remote, mtls).await?;
 	// The token's root is the canonical (alias-resolved) broadcast path.
 	let broadcast = lease.token().root.to_string();
-
-	let Some(origin) = state.cluster.subscriber(lease.token()) else {
-		state.cluster.refusals.record(crate::refusals::Refusal::Forbidden);
-		return Err(StatusCode::UNAUTHORIZED.into());
-	};
 
 	tracing::info!(%broadcast, %track, "fetching track");
 
@@ -1024,8 +1022,7 @@ async fn serve_fetch(
 		// NOTE: The auth token is already scoped to the broadcast.
 		// Block until a route covers the broadcast (within the fetch deadline) so
 		// freshly-connected subscribers don't get a spurious 404 before the announce arrives.
-		let consumer = origin.consume().with_stats(stats);
-		let broadcast = consumer.routed_broadcast("").await.map_err(|_| StatusCode::NOT_FOUND)?;
+		let broadcast = origin.routed_broadcast("").await.map_err(|_| StatusCode::NOT_FOUND)?;
 		let sequence = match params.group {
 			FetchGroup::Num(sequence) => Some(sequence),
 			FetchGroup::Latest => None,
@@ -1314,6 +1311,65 @@ mod tests {
 				(0, 0)
 			);
 		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn http_refused_subscribe_counts_no_request() {
+		let dir = TempDir::new().unwrap();
+		let (_, cert, _) = make_certs(&dir);
+		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(cert).unwrap()).unwrap();
+		let (auth, mut admissions) = auth::Auth::embedded("test");
+		let decider = tokio::spawn(async move {
+			let mut leases = Vec::new();
+			for _ in 0..2 {
+				let admission = admissions.next().await.unwrap();
+				// Publish-only: admitted by auth, but forbidden from reading.
+				let grant = moq_auth::Grant::new(moq_auth::Pattern::all().into(), Default::default());
+				let (producer, consumer) = moq_auth::lease::Producer::new(grant);
+				leases.push(producer);
+				admission.grant(consumer);
+			}
+			leases
+		});
+		let mut cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		cluster.stats = moq_net::stats::Registry::new(Default::default());
+		let state = Web::new(auth, cluster, certificates, Config::default()).state;
+		let peer = || ConnectInfo(crate::listener::Peer("127.0.0.1:1234".parse().unwrap()));
+		let fetched = serve_fetch(
+			Path("room/video".into()),
+			Query(FetchParams {
+				auth: AuthQuery { jwt: None },
+				group: FetchGroup::Latest,
+			}),
+			None,
+			peer(),
+			"/fetch/room/video".parse().unwrap(),
+			http::HeaderMap::new(),
+			State(state.clone()),
+		)
+		.await;
+		assert!(fetched.is_err());
+		let announced = serve_announced(
+			Some(Path("room".into())),
+			Query(AuthQuery { jwt: None }),
+			None,
+			peer(),
+			"/announced/room".parse().unwrap(),
+			http::HeaderMap::new(),
+			State(state.clone()),
+		)
+		.await;
+		assert!(announced.is_err());
+		let _leases = decider.await.unwrap();
+		let requests: u64 = state
+			.cluster
+			.stats
+			.snapshot()
+			.sessions()
+			.iter()
+			.map(|(_, presence)| presence.requests)
+			.sum();
+		assert_eq!(requests, 0, "a refused read is not an admitted request");
 	}
 
 	fn make_certs(dir: &TempDir) -> (PathBuf, PathBuf, PathBuf) {
