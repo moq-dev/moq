@@ -163,7 +163,8 @@ bind = "[::]:3478"                  # Or --stun-bind / MOQ_STUN_BIND.
 List `stun:relay.example.com:3478` in the application's ICE servers. Clients
 never infer a STUN server from their relay session. This provides Binding
 responses with the sender's mapped address, without TURN relaying or ICE
-signaling.
+signaling. It is plain STUN over UDP, so it needs no TLS certificate;
+`stuns:` (STUN over TLS) is not served.
 
 The private limits are 10 requests/second per source IP with a burst of 20,
 and 1000/second globally with a burst of 2000. The source table retains at most
