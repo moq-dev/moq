@@ -465,6 +465,23 @@ test("a served identity change moves the rendition to a fresh track name", async
 	}
 });
 
+// The served identity is a snapshot, so a producer mutating a container it shares can't rewrite it.
+test("mutating a shared container still takes a fresh track name", async () => {
+	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("shared.hang") });
+	const video = broadcast.video("video");
+	const container = { kind: "cmaf" as const, init: "AAAA" };
+	video.config.set({ ...videoConfig, container });
+	await settle();
+	expect((await readCatalog(broadcast))?.video?.renditions.video?.track).toBeUndefined();
+
+	container.init = "BBBB";
+	video.config.set({ ...videoConfig, container, bitrate: Catalog.u53(1_000_000) });
+	await settle();
+	expect((await readCatalog(broadcast))?.video?.renditions.video?.track).toStartWith("video/");
+
+	broadcast.close();
+});
+
 test("a name returning with a different identity takes a fresh track name", async () => {
 	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("returning.hang") });
 	let audio = broadcast.audio("audio");

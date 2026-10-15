@@ -386,7 +386,8 @@ export class Broadcast {
 }
 
 // The fields a consumer may configure its decoder from once per track name, plus the coded-size
-// ceilings: changing any of them takes a new track name.
+// ceilings: changing any of them takes a new track name. Cloned, so a producer mutating a config it
+// shares (such as its container) can't rewrite what a name was served with.
 type Identity = Pick<
 	Partial<Catalog.AudioConfig & Catalog.VideoConfig>,
 	"codec" | "description" | "container" | "sampleRate" | "numberOfChannels" | "codedWidth" | "codedHeight"
@@ -394,5 +395,5 @@ type Identity = Pick<
 
 function identity(config: unknown): Identity {
 	const { codec, description, container, sampleRate, numberOfChannels, codedWidth, codedHeight } = config as Identity;
-	return { codec, description, container, sampleRate, numberOfChannels, codedWidth, codedHeight };
+	return structuredClone({ codec, description, container, sampleRate, numberOfChannels, codedWidth, codedHeight });
 }
