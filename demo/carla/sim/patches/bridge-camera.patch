@@ -1,0 +1,219 @@
+diff --git a/Unreal/CarlaUE4/Plugins/Carla/Carla.uplugin b/Unreal/CarlaUE4/Plugins/Carla/Carla.uplugin
+--- a/Unreal/CarlaUE4/Plugins/Carla/Carla.uplugin
++++ b/Unreal/CarlaUE4/Plugins/Carla/Carla.uplugin
+@@ -21,6 +21,11 @@
+ 			"AdditionalDependencies": [
+ 				"Engine"
+ 			]
++		},
++		{
++			"Name": "MoqBridge",
++			"Type": "Runtime",
++			"LoadingPhase": "PostConfigInit"
+ 		}
+ 	],
+ 	"Plugins": [
+diff --git a/Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Carla.Build.cs b/Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Carla.Build.cs
+--- a/Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Carla.Build.cs
++++ b/Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Carla.Build.cs
+@@ -115,6 +115,7 @@
+         "PhysXVehicles",
+         "PhysXVehicleLib",
+         "Projects",
++        "MoqBridge",
+         "Slate",
+         "SlateCore",
+         "PhysicsCore",
+diff --git a/Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Sensor/Sensor.h b/Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Sensor/Sensor.h
+--- a/Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Sensor/Sensor.h
++++ b/Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Sensor/Sensor.h
+@@ -72,6 +72,10 @@
+   // Small interface to notify sensors when no clients are listening
+   virtual void OnLastClientDisconnected() {};
+ 
++  /// Every tick, on the game thread: whether a consumer other than a
++  /// streaming client wants this tick's data. Such a sensor ticks without one.
++  virtual bool UpdateExternalConsumer() { return false; }
++
+ 
+   void PostPhysTickInternal(UWorld *World, ELevelTick TickType, float DeltaSeconds);
+ 
+diff --git a/Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Sensor/Sensor.cpp b/Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Sensor/Sensor.cpp
+--- a/Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Sensor/Sensor.cpp
++++ b/Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Sensor/Sensor.cpp
+@@ -76,7 +76,8 @@
+       bClientsListening = true;
+     }
+   }
+-  if(!bClientsListening)
++  const bool bExternalConsumer = UpdateExternalConsumer();
++  if(!bClientsListening && !bExternalConsumer)
+   {
+     return;
+   }
+diff --git a/Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Sensor/SensorFactory.cpp b/Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Sensor/SensorFactory.cpp
+--- a/Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Sensor/SensorFactory.cpp
++++ b/Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Sensor/SensorFactory.cpp
+@@ -157,5 +157,5 @@
+      }
+   }
+   UGameplayStatics::FinishSpawningActor(Sensor, Transform);
+-  return FActorSpawnResult{Sensor};
++  return FActorSpawnResult{IsValid(Sensor) ? Sensor : nullptr};
+ }
+diff --git a/Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Sensor/SceneCaptureCamera.h b/Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Sensor/SceneCaptureCamera.h
+--- a/Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Sensor/SceneCaptureCamera.h
++++ b/Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Sensor/SceneCaptureCamera.h
+@@ -13,6 +13,8 @@
+ 
+ #include "SceneCaptureCamera.generated.h"
+ 
++class IMoqBridgeCamera;
++
+ /// A sensor that captures images from the scene.
+ UCLASS()
+ class CARLA_API ASceneCaptureCamera : public AShaderBasedSensor
+@@ -26,6 +28,8 @@
+ 
+   ASceneCaptureCamera(const FObjectInitializer &ObjectInitializer);
+ 
++  void Set(const FActorDescription &Description) override;
++
+ protected:
+ 	
+   virtual void SendGBufferTextures(FGBufferRequest& GBuffer) override;
+@@ -37,6 +41,16 @@
+   
+   virtual void OnFirstClientConnected() override;
+   virtual void OnLastClientDisconnected() override;
++  bool UpdateExternalConsumer() override;
+ 
+ private:
++
++  /// The MoQ bridge stream this camera renders for (`truck1/front`), from
++  /// the `moq_bridge_stream` attribute. Such a camera never sends pixels
++  /// to CARLA clients: its frames stay on the GPU and leave encoded.
++  FString BridgeStream;
++
++  TSharedPtr<IMoqBridgeCamera, ESPMode::ThreadSafe> Bridge;
++
++  void CloseBridge();
+ };
+diff --git a/Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Sensor/SceneCaptureCamera.cpp b/Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Sensor/SceneCaptureCamera.cpp
+--- a/Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Sensor/SceneCaptureCamera.cpp
++++ b/Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Sensor/SceneCaptureCamera.cpp
+@@ -10,15 +10,32 @@
+ #include <chrono>
+ 
+ #include "Actor/ActorBlueprintFunctionLibrary.h"
++#include "MoqBridgeCamera.h"
+ 
+ #include "Runtime/RenderCore/Public/RenderingThread.h"
+ 
+ FActorDefinition ASceneCaptureCamera::GetSensorDefinition()
+ {
+     constexpr bool bEnableModifyingPostProcessEffects = true;
+-    return UActorBlueprintFunctionLibrary::MakeCameraDefinition(
++    FActorDefinition Definition = UActorBlueprintFunctionLibrary::MakeCameraDefinition(
+         TEXT("rgb"),
+         bEnableModifyingPostProcessEffects);
++    FActorVariation BridgeStream;
++    BridgeStream.Id = TEXT("moq_bridge_stream");
++    BridgeStream.Type = EActorAttributeType::String;
++    BridgeStream.RecommendedValues = { TEXT("") };
++    BridgeStream.bRestrictToRecommended = false;
++    Definition.Variations.Add(BridgeStream);
++    return Definition;
++}
++
++void ASceneCaptureCamera::Set(const FActorDescription &Description)
++{
++  Super::Set(Description);
++  BridgeStream = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToString(
++      TEXT("moq_bridge_stream"),
++      Description.Variations,
++      TEXT(""));
+ }
+ 
+ ASceneCaptureCamera::ASceneCaptureCamera(const FObjectInitializer& ObjectInitializer)
+@@ -31,6 +48,19 @@
+ void ASceneCaptureCamera::BeginPlay()
+ {
+   Super::BeginPlay();
++  if (BridgeStream.IsEmpty())
++  {
++    return;
++  }
++  FString Error;
++  Bridge = IMoqBridgeCamera::Open(BridgeStream, *CaptureRenderTarget, Error);
++  if (!Bridge.IsValid())
++  {
++    // Refuse the spawn: a bridge camera that cannot reach the bridge would
++    // otherwise sit in the world producing nothing.
++    UE_LOG(LogCarla, Error, TEXT("MoQ bridge camera for %s: %s"), *BridgeStream, *Error);
++    Destroy();
++  }
+ }
+ 
+ void ASceneCaptureCamera::OnFirstClientConnected()
+@@ -43,9 +73,40 @@
+ 
+ void ASceneCaptureCamera::EndPlay(const EEndPlayReason::Type EndPlayReason)
+ {
++  CloseBridge();
+   Super::EndPlay(EndPlayReason);
+ }
+ 
++void ASceneCaptureCamera::CloseBridge()
++{
++  if (!Bridge.IsValid())
++  {
++    return;
++  }
++  // Every queued copy holds the camera; once they have run, this is the last
++  // reference, and dropping it closes the source before freeing its slots.
++  FlushRenderingCommands();
++  Bridge.Reset();
++}
++
++bool ASceneCaptureCamera::UpdateExternalConsumer()
++{
++  if (!Bridge.IsValid())
++  {
++    return false;
++  }
++  const FString Error = Bridge->GetError();
++  if (!Error.IsEmpty())
++  {
++    // The bridge has told the worker; free the slots now rather than at
++    // destruction.
++    UE_LOG(LogCarla, Error, TEXT("MoQ bridge camera for %s stopped: %s"), *BridgeStream, *Error);
++    CloseBridge();
++    return false;
++  }
++  return Bridge->IsWanted();
++}
++
+ void ASceneCaptureCamera::PostPhysTick(UWorld *World, ELevelTick TickType, float DeltaSeconds)
+ {
+   TRACE_CPUPROFILER_EVENT_SCOPE(ASceneCaptureCamera::PostPhysTick);
+@@ -62,6 +123,19 @@
+       TRACE_CPUPROFILER_EVENT_SCOPE_TEXT(*ProfilerText);
+     }
+   );
++  if (!BridgeStream.IsEmpty())
++  {
++    // Pixels stay on the GPU: the capture renders into the target, and the
++    // bridge copies it out on the same queue. A camera whose bridge has
++    // stopped sends clients nothing either.
++    if (Bridge.IsValid() && HasActorBegunPlay() && !IsPendingKill())
++    {
++      EnqueueRenderSceneImmediate();
++      const double Seconds = GetEpisode().GetElapsedGameTime();
++      Bridge->Capture(*CaptureRenderTarget, FCarlaEngine::GetFrameCounter(), uint64(Seconds * 1e6 + 0.5));
++    }
++    return;
++  }
+   FPixelReader::SendPixelsInRenderThread<ASceneCaptureCamera, FColor>(*this);
+ }
+ 

@@ -88,6 +88,9 @@ stating plainly because it is what a builder is comparing against.
 
 ## Related
 
+- [`demo/carla`](/demo/carla/README.md) - simulated trucks driven from a
+  browser: a per-driver control track, a lease bound to the driver's epoch,
+  and measured feedback on `status`
 - [Robot teleoperation primitive](/quest/m3/teleop-robot.md) - a `moq-robot`
   crate carrying the track shapes and discovery every teleoperated machine
   needs, parked in m3

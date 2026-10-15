@@ -1,0 +1,22 @@
+diff --git a/Engine/Source/Runtime/VulkanRHI/Private/VulkanDevice.cpp b/Engine/Source/Runtime/VulkanRHI/Private/VulkanDevice.cpp
+--- a/Engine/Source/Runtime/VulkanRHI/Private/VulkanDevice.cpp
++++ b/Engine/Source/Runtime/VulkanRHI/Private/VulkanDevice.cpp
+@@ -353,6 +353,18 @@
+ 	}
+ #endif
+ 
++	// VK_KHR_timeline_semaphore is useless without its feature, and a plugin
++	// that enables the extension through VulkanRHIBridge has no way to add the
++	// feature to this chain itself.
++	VkPhysicalDeviceTimelineSemaphoreFeaturesKHR TimelineSemaphoreFeatures;
++	if (DeviceExtensions.ContainsByPredicate([](const ANSICHAR* Name) { return FCStringAnsi::Strcmp(Name, VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME) == 0; }))
++	{
++		ZeroVulkanStruct(TimelineSemaphoreFeatures, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES_KHR);
++		TimelineSemaphoreFeatures.timelineSemaphore = VK_TRUE;
++		TimelineSemaphoreFeatures.pNext = const_cast<void*>(DeviceInfo.pNext);
++		DeviceInfo.pNext = &TimelineSemaphoreFeatures;
++	}
++
+ 	// Create the device
+ 	VkResult Result = VulkanRHI::vkCreateDevice(Gpu, &DeviceInfo, VULKAN_CPU_ALLOCATOR, &Device);
+ 	if (Result == VK_ERROR_INITIALIZATION_FAILED)
