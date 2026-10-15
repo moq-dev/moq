@@ -23,6 +23,9 @@ until it lands.
 - ✅ Decided 2026-10-15 (maintainer): one kind of auth. Each request names at
   most one (`auth=id`); moq-transport's per-request token is only an encoding
   of that model, never a separate API.
+- Settled in the #5148 design: at most one token per moq-transport request.
+  Distinct tokens are refused NOT_SUPPORTED, and a repeated identical token is
+  refused MALFORMED_AUTH_TOKEN. Test both.
 - ✅ Decided 2026-10-15 (maintainer): an unnamed request is admitted by the
   union of session-lifetime auths only, so a request-lifetime token never
   widens tokenless requests.
@@ -43,7 +46,9 @@ until it lands.
 - moq-transport: AUTH's Request ID becomes the auth id, and a new request
   parameter names it. The alias types map as: USE_VALUE registers a
   request-lifetime auth and names it; REGISTER registers a session-lifetime
-  auth; USE_ALIAS names one; DELETE withdraws one.
+  auth and names it for the carrying request, so that request ends when the
+  auth ends or narrows away from it; USE_ALIAS on a later request names it;
+  DELETE withdraws one.
 - Update `drafts/draft-lcurley-moq-lite.md` and
   `drafts/draft-lcurley-moq-auth.md`, Rust and `js/net`, and run
   `just test interop --all`. Update `doc/concept/moq-lite.md`'s

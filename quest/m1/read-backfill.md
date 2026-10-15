@@ -39,10 +39,14 @@ delivers a group that arrives below the cursor as a late backfill; Rust
   resolved from the largest location alone. Settle there whether the
   publisher reports the resolved start or that read keeps today's
   first-arrival cursor.
+- The cursor is range-aware, not just floored: with disjoint ranges it skips
+  straight across an unrequested gap (group 1, then 10 onward) instead of
+  waiting for the latency budget, since no SUBSCRIBE_DROP is owed there.
 - Once both land: set the ordered read's floor from those bounds in Rust and
   JS, then make JS discard groups below the cursor. Add a test mirroring
   Rust's: a reordered group below the floor is never yielded and no extra
-  `Gap` appears, and the out-of-order head case keeps passing.
+  `Gap` appears, and the out-of-order head case keeps passing. Add a
+  disjoint live-range regression for the skip.
 - Check JS readers that relied on backfill (watch's audio/video decoders,
   `Sync`) and adjust them; one that wants every group reads an arrival-order
   API instead.
