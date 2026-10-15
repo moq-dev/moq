@@ -736,7 +736,8 @@ impl Server {
 							// (like the stream bindings).
 							let Accepted { session, url, identity, authority, mut link } = within(deadline, super::noq::accept(_conn, alpns)).await?;
 							link.local = local;
-							let (request, deadline) = accept_request(&setup.server, session, deadline).await?;
+							let binding = match url { Some(_) => moq_net::transport::Binding::Uri, None => moq_net::transport::Binding::InBand };
+							let (request, deadline) = accept_request(&setup.server, session, binding, deadline).await?;
 							// Only WebTransport carries a request URL; raw QUIC puts the path in the SETUP.
 							let transport = match url { Some(_) => Transport::WebTransport, None => Transport::Quic };
 							Ok(Request { transport, url, identity, authority, link, kind: RequestKind::Noq(Box::new(request)), deadline, active })
@@ -754,7 +755,8 @@ impl Server {
 						};
 						self.accept.push(async move {
 							let Accepted { session, url, identity, authority, link } = within(deadline, super::iroh::accept(_conn, alpns)).await?;
-							let (request, deadline) = accept_request(&setup.server, session, deadline).await?;
+							let binding = match url { Some(_) => moq_net::transport::Binding::Uri, None => moq_net::transport::Binding::InBand };
+							let (request, deadline) = accept_request(&setup.server, session, binding, deadline).await?;
 							Ok(Request { transport: Transport::Iroh, url, identity, authority, link, kind: RequestKind::Iroh(Box::new(request)), deadline, active })
 						}.boxed());
 					}
@@ -982,6 +984,7 @@ impl Setup {
 async fn accept_request<S>(
 	server: &moq_net::Server,
 	session: S,
+	binding: moq_net::transport::Binding,
 	deadline: Option<tokio::time::Instant>,
 ) -> crate::Result<(PendingRequest<crate::transport::Session<S>>, Option<Deadline>)>
 where
@@ -990,7 +993,7 @@ where
 	<crate::transport::Session<S> as moq_net::transport::poll::Session>::SendStream: moq_net::transport::MaybeSync,
 	<crate::transport::Session<S> as moq_net::transport::poll::Session>::RecvStream: moq_net::transport::MaybeSync,
 {
-	let session = crate::transport::Session::new(session);
+	let session = crate::transport::Session::new(session, binding);
 	let deadline = deadline.map(|at| Deadline::new(at, session.clone()));
 	let accept = async {
 		Ok(server
@@ -1007,7 +1010,8 @@ pub(crate) async fn accept_websocket(
 	options: crate::websocket::Options,
 	deadline: Option<tokio::time::Instant>,
 ) -> crate::Result<Request> {
-	let (request, deadline) = accept_request(&options.server, session, deadline).await?;
+	let (request, deadline) =
+		accept_request(&options.server, session, moq_net::transport::Binding::Uri, deadline).await?;
 	let authority = options.url.host_str().filter(|h| !h.is_empty()).map(str::to_owned);
 	Ok(Request {
 		transport: Transport::WebSocket,
@@ -1494,7 +1498,7 @@ async fn stream_request(
 		deadline,
 		active,
 	} = incoming;
-	match accept_request(&setup.server, session, deadline).await {
+	match accept_request(&setup.server, session, moq_net::transport::Binding::InBand, deadline).await {
 		Ok((request, deadline)) => {
 			let request = Request {
 				transport,
@@ -1878,11 +1882,13 @@ mod tests {
 	}
 
 	/// A millisecond track: the frames written here carry timestamps.
+	#[cfg(all(feature = "uds", unix))]
 	fn timed() -> moq_net::track::Info {
 		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 	}
 
 	/// The next route and whether it is active.
+	#[cfg(all(feature = "uds", unix))]
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
 			moq_net::announce::Event::Start(route)
@@ -2298,7 +2304,14 @@ mod tests {
 			timeout: Some(timeout),
 		};
 		let start = tokio::time::Instant::now();
-		let Err(err) = accept_request(&setup.server, peer.clone(), setup.deadline()).await else {
+		let Err(err) = accept_request(
+			&setup.server,
+			peer.clone(),
+			moq_net::transport::Binding::Uri,
+			setup.deadline(),
+		)
+		.await
+		else {
 			panic!("a peer that never sent SETUP was accepted");
 		};
 		assert!(matches!(err, Error::MoqNet(moq_net::Error::Timeout)), "{err}");
@@ -2319,7 +2332,7 @@ mod tests {
 		// reply that never comes.
 		let recorder = Scripted::new("moq-00");
 		let client = tokio::spawn({
-			let recorder = crate::transport::Session::new(recorder.clone());
+			let recorder = crate::transport::Session::new(recorder.clone(), moq_net::transport::Binding::Uri);
 			async move {
 				let _ = moq_net::Client::new()
 					.connect(tokio::time::Instant::now().into_std(), recorder)
@@ -2340,7 +2353,14 @@ mod tests {
 			timeout: Some(timeout),
 		};
 		let start = tokio::time::Instant::now();
-		let Ok((request, deadline)) = accept_request(&setup.server, peer.clone(), setup.deadline()).await else {
+		let Ok((request, deadline)) = accept_request(
+			&setup.server,
+			peer.clone(),
+			moq_net::transport::Binding::Uri,
+			setup.deadline(),
+		)
+		.await
+		else {
 			panic!("a readable SETUP was refused");
 		};
 		assert_eq!(start.elapsed(), std::time::Duration::ZERO);
@@ -2373,7 +2393,7 @@ mod tests {
 		};
 		let deadline = setup.deadline();
 
-		let transport = crate::transport::Session::new(client.clone());
+		let transport = crate::transport::Session::new(client.clone(), moq_net::transport::Binding::Uri);
 		let connect = tokio::spawn(async move {
 			let (session, driver) = moq_net::Client::new()
 				.connect(tokio::time::Instant::now().into_std(), transport)
@@ -2383,7 +2403,8 @@ mod tests {
 			session
 		});
 
-		let Ok((request, _)) = accept_request(&setup.server, server, deadline).await else {
+		let Ok((request, _)) = accept_request(&setup.server, server, moq_net::transport::Binding::Uri, deadline).await
+		else {
 			panic!("a prompt SETUP was refused");
 		};
 		let (_session, driver) = request.ok().await.expect("server handshake");
@@ -2422,7 +2443,7 @@ mod tests {
 			let (_session, driver) = moq_net::Client::new()
 				.connect(
 					tokio::time::Instant::now().into_std(),
-					crate::transport::Session::new(session),
+					crate::transport::Session::new(session, moq_net::transport::Binding::Uri),
 				)
 				.await
 				.expect("client handshake");

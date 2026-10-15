@@ -675,8 +675,11 @@ async fn history_after_expiry(finished: bool) {
 	};
 	// Expire the publisher cache before any HLS consumer can retain a copy.
 	let now = moq_net::time::Instant::now();
-	broadcast.info().pool.gc(now);
-	broadcast.info().pool.gc(now + Duration::from_secs(31));
+	broadcast.info().pool.gc(now, &kio::Waiter::noop());
+	broadcast
+		.info()
+		.pool
+		.gc(now + Duration::from_secs(31), &kio::Waiter::noop());
 	let subscription = moq_net::track::Subscription::default()
 		.with_start(moq_net::track::Position::group(0))
 		.with_max_delay(Duration::from_millis((1_u64 << 62) - 1));

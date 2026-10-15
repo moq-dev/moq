@@ -1,5 +1,8 @@
 //! Wakes for group reads parked on their subscription's drift budget, and for groups held
 //! across a route switch until the serving copy leaves them behind.
+//!
+//! The budget is judged on two clocks (see `TrackState::drifted`): media time, which only a
+//! frame write advances, and the wall clock, which the cache pool's driver advances.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,6 +18,10 @@ use super::Timestamp;
 /// write presented, so the write that crosses a deadline wakes the reads behind it and
 /// nobody else. The successor itself is watched per group (its first frame, its abort),
 /// except for a group landing between the read and it, which reads park on by sequence.
+///
+/// A parked read also goes stale once the wall clock reaches its successor's arrival plus
+/// its budget. Nothing written moves that clock, so those reads park by instant and the
+/// pool's driver releases them; see `cache::Track::watch_wall`.
 ///
 /// A group held across a route switch parks in the serving copy's index the same way,
 /// although that copy need not hold it; see `track::Consumer::poll_stale`.
@@ -44,6 +51,11 @@ struct Parked {
 	held: BTreeMap<u64, kio::WaiterList>,
 	/// The `held` size that sweeps out the lists every reader has left.
 	held_sweep: usize,
+	/// Reads by wall-clock deadline, released by the pool's driver.
+	wall: BTreeMap<crate::time::Instant, kio::WaiterList>,
+	/// The earliest `wall` deadline the pool was asked to release, so arming a later one
+	/// skips the pool's lock.
+	wall_armed: Option<crate::time::Instant>,
 }
 
 /// The smallest `held` size worth sweeping.
@@ -89,6 +101,45 @@ impl Wakes {
 		let mut parked = self.parked.lock();
 		parked.deadlines.entry(deadline).or_default().register(waiter);
 		self.earliest.fetch_min(deadline, Ordering::Relaxed);
+	}
+
+	/// Park `waiter` until the wall clock reaches `at`. When `at` is earlier than any
+	/// deadline the pool already releases for this track, so the caller asks it to, returns
+	/// `Some` of the one it replaces.
+	pub(crate) fn watch_wall(
+		&self,
+		at: crate::time::Instant,
+		waiter: &kio::Waiter,
+	) -> Option<Option<crate::time::Instant>> {
+		let mut parked = self.parked.lock();
+		parked.wall.entry(at).or_default().register(waiter);
+		if parked.wall_armed.is_some_and(|armed| armed <= at) {
+			return None;
+		}
+		Some(parked.wall_armed.replace(at))
+	}
+
+	/// The wall-clock deadline the pool releases for this track next.
+	pub(crate) fn wall_armed(&self) -> Option<crate::time::Instant> {
+		self.parked.lock().wall_armed
+	}
+
+	/// The wall clock reached `now`: wake the reads due by then, returning the earliest
+	/// deadline left for the pool to release next.
+	pub(crate) fn release_wall(&self, now: crate::time::Instant) -> Option<crate::time::Instant> {
+		let mut woken = Vec::new();
+		let next = {
+			let mut parked = self.parked.lock();
+			while let Some(entry) = parked.wall.first_entry()
+				&& *entry.key() <= now
+			{
+				woken.push(entry.remove());
+			}
+			parked.wall_armed = parked.wall.first_key_value().map(|(at, _)| *at);
+			parked.wall_armed
+		};
+		woken.iter_mut().for_each(kio::WaiterList::wake);
+		next
 	}
 
 	/// Park `waiter` until a group lands above `sequence`.
@@ -149,7 +200,8 @@ impl Wakes {
 			std::mem::take(&mut *parked)
 		};
 		let lists = parked.deadlines.into_values().chain(parked.landings.into_values());
-		for mut list in lists.chain(parked.held.into_values()) {
+		let lists = lists.chain(parked.held.into_values()).chain(parked.wall.into_values());
+		for mut list in lists {
 			list.wake();
 		}
 	}

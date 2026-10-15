@@ -1845,7 +1845,7 @@ mod tests {
 				.with_publisher(origin.consume())
 				.connect(
 					tokio::time::Instant::now().into_std(),
-					moq_tokio::transport::Session::new(transport),
+					moq_tokio::transport::Session::new(transport, moq_net::transport::Binding::Uri),
 				)
 				.await
 				.unwrap();

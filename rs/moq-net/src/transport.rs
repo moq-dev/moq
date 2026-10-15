@@ -38,6 +38,15 @@ impl<T> MaybeSend for T {}
 #[cfg(target_family = "wasm")]
 impl<T> MaybeSync for T {}
 
+/// Where the transport carries the request target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Binding {
+	/// The request target is carried by the transport URI.
+	Uri,
+	/// The request target is carried by the MoQ SETUP.
+	InBand,
+}
+
 /// Connection-level statistics.
 ///
 /// Methods return `Option`: `None` means the implementation doesn't track
@@ -178,6 +187,9 @@ pub mod poll {
 		/// than defaulted: a transport that negotiates an application protocol and
 		/// forgets to report it is a silent bug, and the default hid that.
 		fn protocol(&self) -> Option<&str>;
+
+		/// Return where this transport carries the request target.
+		fn binding(&self) -> super::Binding;
 
 		/// Close the connection immediately with a code and reason.
 		///

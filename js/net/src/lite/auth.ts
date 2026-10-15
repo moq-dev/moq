@@ -1,9 +1,10 @@
 import { Unsupported } from "../auth.ts";
 import type { AuthWire, WireGrant, WireReply } from "../auth_session.ts";
-import { closeReason, ProtocolViolation, SessionCode, SessionError } from "../error.ts";
+import { ProtocolViolation, SessionCode, SessionError } from "../error.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream, type Writer } from "../stream.ts";
 import { decodeUtf8 } from "../util/utf8.ts";
+import { closeViolation } from "./error.ts";
 import * as Message from "./message.ts";
 import { StreamId } from "./stream.ts";
 import { hasAuth, type Version } from "./version.ts";
@@ -198,9 +199,7 @@ export class LiteAuthWire implements AuthWire {
 		try {
 			reply = await decodeAuthReplyMaybe(stream.reader, this.#version);
 		} catch (err) {
-			if (err instanceof ProtocolViolation) {
-				this.#quic.close({ closeCode: SessionCode.ProtocolViolation, reason: closeReason(err.message) });
-			}
+			closeViolation(this.#quic, err);
 			throw err;
 		}
 		if (!reply) return undefined;

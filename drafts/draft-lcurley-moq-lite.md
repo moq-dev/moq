@@ -535,7 +535,7 @@ The publisher advertises its Probe level in SETUP (see [Probe Parameter](#probe-
 The subscriber sends a PROBE message with a target bitrate on the bidirectional stream.
 The subscriber MAY send additional PROBE messages on the same stream to update the target bitrate; the publisher MUST treat each PROBE as a new target to attempt.
 If the publisher advertised the Increase capability, it SHOULD pad the connection (or send redundant data) to achieve the most recent target bitrate, without exceeding the congestion window.
-A publisher that advertised Report but not Increase ignores the target and only reports; it MUST NOT pad above its current sending rate.
+A publisher that advertised Report but not Increase reads and ignores the target and only reports; it MUST NOT pad above its current sending rate or reset the stream over a target.
 In either case the publisher periodically replies with PROBE messages on the same bidirectional stream containing the current estimated bitrate and smoothed RTT.
 
 If the publisher advertised no Probe capability (e.g., the congestion controller is not exposed), it MUST reset the stream.
@@ -634,19 +634,23 @@ A subscriber MUST support gaps and out-of-order delivery regardless.
 
 ## Expiration
 Expiration governs when an older group is dropped.
-The publisher SHOULD reset Group Streams for non-latest groups whose age relative to the latest group reaches `Subscriber Max Age` (see [SUBSCRIBE](#subscribe), and the age definition below); the subscriber MAY also locally drop such groups.
+The publisher SHOULD reset Group Streams for non-latest groups whose age reaches `Subscriber Max Age` (see [SUBSCRIBE](#subscribe), and the age definition below); the subscriber MAY also locally drop such groups.
 Expiration only removes the group from live delivery; the publisher MAY still retain it for FETCH or new subscriptions until its age exceeds `Publisher Max Age` (see [TRACK_INFO](#track-info)).
 
 It is not crucial to aggressively expire groups thanks to [prioritization](#prioritization), but a lower priority group still consumes RAM, bandwidth, and potentially flow control.
 It is RECOMMENDED that an application set conservative limits and only resort to expiration when data is absolutely no longer needed.
 
-A group is never expired until a later group (by sequence number) has presented a frame.
-A group of an untimed Track has no timestamps, so it is never expired.
-Once one has, the group's **timestamp age** is the difference between the *newest* frame timestamp of the latest group that has at least one frame, and this group's **reach**, defined below; the group is expired once that age meets the relevant `Max Age`.
-Timestamps are the only measure: they are consistent across relays and unaffected by buffering or jitter.
-Wall-clock reclamation of idle content is the retention cache's own policy (`Publisher Max Age`, or any implementation-defined bound), not part of this rule.
+A group is never expired until its **successor** has arrived: the next group by sequence number that has arrived at this hop and was not reset.
+The latest group has no successor, so it is never expired.
+A group is expired once either of two ages meets the relevant `Max Age`:
 
-A group is expired only once it **provably cannot overlap the Max Age window**: every frame it could still present is older than the budget allows.
+- Its **timestamp age** is the difference between the *newest* frame timestamp of the latest group that has at least one frame, and this group's **reach**, defined below.
+- Its **arrival age** is the time elapsed since its successor arrived at this hop.
+
+A group of an untimed Track has no timestamps, so arrival age alone expires it.
+
+By timestamp age, a group is expired only once it **provably cannot overlap the Max Age window**: every frame it could still present is older than the budget allows.
+Arrival age needs no such proof: it bounds how long a superseded group may still wait to be delivered.
 Being behind is not itself a reason to expire anything.
 [Prioritization](#prioritization) already transmits newer groups first, so an older group consumes only whatever capacity is left over; it therefore closes the gap faster than the live edge advances, and a receiver that is behind can converge without losing content.
 What cannot be recovered is a group with nothing left worth delivering, and that is what expiration removes.
@@ -654,13 +658,14 @@ What cannot be recovered is a group with nothing left worth delivering, and that
 A group's **reach** is the first frame timestamp of the next group by sequence number, or unbounded when no later group has presented a frame.
 A group cannot present past where its successor begins, so this is the furthest it could still reach.
 Its own frames do not bound it: frame durations are not carried on the wire, so a group's last frame timestamp is where that frame *starts* presenting, not where the group ends.
-A group whose successor has not presented a frame is therefore never expired, because nothing yet proves where it stops.
+A group whose successor has not presented a frame therefore has no timestamp age, because nothing yet proves where it stops.
 The group itself needs no timestamp: a zero-frame group (a keep-alive or gap marker) is bounded by its successor's first frame the same way.
 
 Reach is an exclusive bound, so a timestamp age **equal** to Max Age already expires the group: the freshest frame it could still hold sits strictly below its reach, and is therefore strictly older than the budget.
 A Max Age of zero follows from the same rule without a special case.
 
-Measuring in timestamps rather than arrival means a burst of groups delivered together still reads as its true age, so catching up never resets the clock.
+Timestamp age means a burst of groups delivered together still reads as its true age, so catching up never resets the clock.
+Arrival age bounds what timestamps cannot: a publisher whose timestamps stop advancing, a successor that never presents a frame, an untimed Track, and a run of empty groups.
 
 An expired group SHOULD be reset at the QUIC level to avoid consuming flow control.
 
@@ -754,7 +759,10 @@ A relay that cannot encode a value for a peer on an earlier version MUST NOT tru
 Most messages are prefixed with a variable-length integer indicating the number of bytes in the message payload that follows.
 This length field does not include the length of the varint length itself.
 
-An implementation SHOULD close the connection with a PROTOCOL_VIOLATION if it receives a message with an unexpected length.
+A message on the Setup Stream or any bidirectional stream that fails to decode, such as one whose fields disagree with its Message Length or carry a value this specification forbids, MUST close the session with a PROTOCOL_VIOLATION.
+Resetting only the stream would let the peer repeat the violation on the next one.
+A stream that ends or is reset before its message completes only terminates that stream, except on the Setup and Auth Streams.
+A GROUP or FRAME that fails to decode resets only its Group Stream, and a STREAM_TYPE the negotiated version does not define resets only its stream (see [STREAM_TYPE](#stream_type)).
 Except in FRAME, a Message Length over 65,535 bytes is unexpected: a sender MUST NOT exceed it, and a receiver MAY reject it based on the length prefix alone.
 The version and extensions should be used to support new fields, not the message length.
 
@@ -768,7 +776,7 @@ STREAM_TYPE {
 ~~~
 
 The stream ID depends on if it's a bidirectional or unidirectional stream, as indicated in the Streams section.
-A receiver MUST reset the stream if it receives an unknown stream type.
+A receiver MUST reset the stream if it receives an unknown stream type, including one the negotiated version predates.
 Unknown stream types MUST NOT be treated as fatal; this is the fallback when an extension stream is opened against a peer that did not negotiate it.
 
 
@@ -1120,7 +1128,7 @@ See the [Group Order](#group-order) section for more information.
 
 **Subscriber Max Age**:
 The subscriber's preference, in milliseconds, for how long a non-latest group may remain in flight before being considered stale and dropped from live delivery.
-The publisher SHOULD reset (at the QUIC level) Group Streams for groups whose age relative to the latest group exceeds this duration.
+The publisher SHOULD reset (at the QUIC level) Group Streams for groups whose age, as defined in [Expiration](#expiration), reaches this duration.
 Applies only to non-latest groups; the latest group is never dropped on staleness grounds.
 A value of `0` means the subscriber wants only the latest group in live delivery (older groups are immediately stale once a newer group arrives).
 This is a delivery-time preference, not a retention rule: the publisher MAY still hold these groups for FETCH or future subscriptions (see `Publisher Max Age` in [TRACK_INFO](#track-info)).
@@ -1223,7 +1231,7 @@ The publisher's priority for this Track, represented as a u8, used only to resol
 See the [Prioritization](#prioritization) section for more information.
 
 **Publisher Max Age**:
-The maximum age, in milliseconds, that the publisher caches a non-latest group past the arrival of a newer group.
+The maximum age, in milliseconds, that the publisher caches a non-latest group, with age as defined in [Expiration](#expiration).
 Applies only to non-latest groups; the latest group is always retained.
 It is an upper bound on retention, the inverse of an HTTP `Cache-Control: max-age` guarantee:
 
@@ -1570,7 +1578,7 @@ The `Message Length` describes the payload size on the wire.
 - Added `Epoch` to ANNOUNCE_START, SUBSCRIBE, TRACK, and FETCH: a UUIDv7 naming the publisher instance, or empty. A path and an Epoch name one Broadcast. A relay MAY move a subscription between routes with the same Epoch, continuing from the first frame the subscriber lacks instead of at a group boundary, and never between routes with different Epochs or none. The newest Epoch wins a path for new requests, while subscriptions to the older one stay until their route goes. Replaces the first-hop identity.
 - Added ANNOUNCE_RESTART (0x3): another publisher instance replaces a live advertisement, under a new Epoch or, without one, through another route, including a path beneath a prefix moving to another route. Older versions send ANNOUNCE_END then ANNOUNCE_START for it.
 - An untimed Track declares a `Timescale` of 0 in TRACK_INFO, and its FRAME messages and datagrams omit the timestamp. lite-05 and lite-06 publishers declare 1000 for it and send each payload's send time instead.
-- A group of an untimed Track is never expired.
+- Expiration also measures a group's arrival age, the time since its successor arrived at this hop, so a group of an untimed Track expires by arrival age alone.
 - An open Track Stream is interest in the Track until the subscriber closes it, which a subscriber does once its Subscribe Stream has a response. lite-05 and lite-06 implementations do the same.
 
 - Assigned `moq-lite-07-wip` as this draft's protocol identifier until it is finalized as `moq-lite-07`.
@@ -1588,6 +1596,8 @@ The `Message Length` describes the payload size on the wire.
 - Limited AUTH_OK Expires to 2^53 - 1 milliseconds, with an out-of-range value closing the session with PROTOCOL_VIOLATION.
 - Invalid UTF-8 or an oversized AUTH_ERROR reason closes the session with PROTOCOL_VIOLATION.
 - An Auth Stream message that fails to decode, has trailing body bytes, or has an unexpected type, or a second AUTH from the opener, closes the session with PROTOCOL_VIOLATION.
+- Any Setup Stream or bidirectional stream message that fails to decode closes the session with PROTOCOL_VIOLATION; previously only an unexpected Message Length did, as a SHOULD. A stream ending mid-message outside the Setup and Auth Streams, a malformed GROUP or FRAME, and a stream type the negotiated version predates still affect only that stream.
+- A Report-level publisher reads and ignores PROBE targets instead of resetting the Probe Stream.
 - Added NOT_SUPPORTED (0x30) to session errors; unsupported Auth Stream tokens and grants use AUTH_ERROR before or after a grant.
 - Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path patterns](#path-pattern) it may publish and subscribe to. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
 

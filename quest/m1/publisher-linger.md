@@ -25,7 +25,3 @@ landing it.
 
 Test with a mocked clock: a subscriber that requests a finished track within
 max-age gets its media, and the publisher closes once max-age passes.
-
-## Related
-
-- [One max_age meaning](/quest/m1/cache-max-age.md) - what max-age means for a superseded group

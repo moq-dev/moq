@@ -59,4 +59,3 @@ Measure each change against the numbers above and record the result in its PR.
 - [Nix cache](/quest/m0/ci/nix-cache.md) - `nix.moq.dev` on R2 replaces Cachix for CI and releases
 - [Nightly finishes](/quest/m0/ci/nightly-split.md) - every Nightly step runs within its timeout
 - [FFI artifact reuse](/quest/m0/ci/ffi-reuse.md) - identical FFI release builds are built once and shared across the language packages
-- [Feature permutations](/quest/m0/ci/features.md) - PR feature checks and test builds compile only what they run, measured first

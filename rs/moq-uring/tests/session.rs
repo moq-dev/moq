@@ -96,7 +96,7 @@ fn lite_session_over_the_worker() {
 			.with_publisher(&pub_origin)
 			.accept_lite(
 				std::time::Instant::now(),
-				moq_uring::transport::Session::new(quic::web::Session::raw(conn)),
+				moq_uring::transport::Session::new(quic::web::Session::raw(conn), moq_net::transport::Binding::InBand),
 			)
 			.await
 			.expect("accept_lite");
@@ -119,7 +119,10 @@ fn lite_session_over_the_worker() {
 				.with_subscriber(sub.clone())
 				.connect_lite(
 					std::time::Instant::now(),
-					moq_uring::transport::Session::new(quic::web::Session::raw(conn)),
+					moq_uring::transport::Session::new(
+						quic::web::Session::raw(conn),
+						moq_net::transport::Binding::InBand,
+					),
 				)
 				.await
 				.expect("connect_lite");
@@ -228,7 +231,10 @@ fn two_lite_sessions_share_the_server_socket() {
 					.with_publisher(&pub_origin)
 					.accept_lite(
 						std::time::Instant::now(),
-						moq_uring::transport::Session::new(quic::web::Session::raw(conn)),
+						moq_uring::transport::Session::new(
+							quic::web::Session::raw(conn),
+							moq_net::transport::Binding::InBand,
+						),
 					)
 					.await
 					.expect("accept_lite");
@@ -254,7 +260,10 @@ fn two_lite_sessions_share_the_server_socket() {
 					.with_subscriber(sub.clone())
 					.connect_lite(
 						std::time::Instant::now(),
-						moq_uring::transport::Session::new(quic::web::Session::raw(conn)),
+						moq_uring::transport::Session::new(
+							quic::web::Session::raw(conn),
+							moq_net::transport::Binding::InBand,
+						),
 					)
 					.await
 					.expect("connect_lite");

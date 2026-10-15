@@ -388,7 +388,10 @@ mod tests {
 			let (session, driver) = moq_net::Client::new()
 				.with_versions("moq-lite-07-wip".parse::<moq_net::Version>().unwrap().into())
 				.with_publisher(origin.consume())
-				.connect(now, moq_tokio::transport::Session::new(client))
+				.connect(
+					now,
+					moq_tokio::transport::Session::new(client, moq_net::transport::Binding::InBand),
+				)
 				.await
 				.unwrap();
 			tokio::spawn(moq_net::time::run(driver));
@@ -399,7 +402,10 @@ mod tests {
 			let request = moq_net::Server::new()
 				.with_versions("moq-lite-07-wip".parse::<moq_net::Version>().unwrap().into())
 				.with_subscriber(origin)
-				.accept_request(now, moq_tokio::transport::Session::new(server))
+				.accept_request(
+					now,
+					moq_tokio::transport::Session::new(server, moq_net::transport::Binding::InBand),
+				)
 				.await
 				.unwrap();
 			let mut lease = lease.preparing(request.auth(), request.role()).unwrap();

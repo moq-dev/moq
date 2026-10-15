@@ -3,7 +3,7 @@ import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import * as Epoch from "../epoch.ts";
-import { error, fromTransport, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
+import { error, fromTransport, ProtocolViolation, reason, SessionCode, StreamCode, StreamError } from "../error.ts";
 import { HopSchema, isAnonymous, MAX_HOPS, Route, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
@@ -584,7 +584,7 @@ test("an announce skipped as a reflected loop still holds its path", async () =>
 	// The draft makes this session-fatal: resetting only the stream would let the peer
 	// repeat the violation on the next one. The code has to say so too, or the peer reads
 	// the default 0 as a clean close.
-	expect((await sessionEnded())?.closeCode).toBe(15);
+	expect((await sessionEnded())?.closeCode).toBe(SessionCode.ProtocolViolation);
 
 	announced.close();
 	subscriber.close();
@@ -754,7 +754,7 @@ test("a draft-02 initial set naming a path twice is refused", async () => {
 	// The draft makes this session-fatal: resetting only the stream would let the peer
 	// repeat the violation on the next one. The code has to say so too, or the peer reads
 	// the default 0 as a clean close.
-	expect((await sessionEnded())?.closeCode).toBe(15);
+	expect((await sessionEnded())?.closeCode).toBe(SessionCode.ProtocolViolation);
 
 	announced.close();
 	subscriber.close();
@@ -780,7 +780,7 @@ test("a violation on a very long path still ends the session", async () => {
 	await expect(announced.next()).rejects.toThrow("duplicate announce");
 
 	const info = await sessionEnded();
-	expect(info?.closeCode).toBe(15);
+	expect(info?.closeCode).toBe(SessionCode.ProtocolViolation);
 	expect(new TextEncoder().encode(info?.reason ?? "").byteLength).toBeLessThanOrEqual(1024);
 });
 
@@ -801,7 +801,7 @@ test("a draft-04 duplicate start is a violation, not an update", async () => {
 
 	// Session first: it is the bounded assertion, so a version that treats this as an
 	// update fails here in 250ms instead of hanging on a rejection that never comes.
-	expect((await sessionEnded())?.closeCode).toBe(15);
+	expect((await sessionEnded())?.closeCode).toBe(SessionCode.ProtocolViolation);
 	await expect(announced.next()).rejects.toThrow("duplicate announce");
 });
 
@@ -874,7 +874,9 @@ function fakeSession(park: number[] = [], stall: number[] = []) {
 		while (streams.length <= index) await count.changed();
 		return streams[index];
 	}
+	const closes: (WebTransportCloseInfo | undefined)[] = [];
 	const quic = {
+		close: (info?: WebTransportCloseInfo) => void closes.push(info),
 		createBidirectionalStream: () => {
 			let inbound!: ReadableStreamDefaultController<Uint8Array>;
 			let onRead!: () => void;
@@ -924,7 +926,7 @@ function fakeSession(park: number[] = [], stall: number[] = []) {
 			return opened;
 		},
 	} as unknown as WebTransport;
-	return { quic, streams, opened };
+	return { quic, streams, opened, closes };
 }
 
 async function answerTrackInfo(stream: FakeStream, version: Version = Version.DRAFT_05): Promise<void> {
@@ -1677,7 +1679,7 @@ test("a local unsubscribe owes no SUBSCRIBE_END", async () => {
 });
 
 test("a publisher FIN without SUBSCRIBE_END still violates an open subscription", async () => {
-	const { quic, streams, opened } = fakeSession();
+	const { quic, streams, opened, closes } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
 	const track = broadcast.track("video").subscribe();
@@ -1688,6 +1690,29 @@ test("a publisher FIN without SUBSCRIBE_END still violates an open subscription"
 		streams[1].inbound.close();
 		expect(await track.closed).toBeInstanceOf(ProtocolViolation);
 		expect((track.closed.peek() as Error).message).toBe("subscribe stream ended without SUBSCRIBE_END");
+		await drainReactions();
+		expect(closes.map((info) => info?.closeCode)).toEqual([SessionCode.ProtocolViolation]);
+	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
+test("a retired subscribe response type closes the session", async () => {
+	const { quic, streams, opened, closes } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], Version.DRAFT_07);
+		await (await opened(1)).reading;
+		// lite-07 retired SUBSCRIBE_DROP (0x2), so it is no longer a response type.
+		streams[1].inbound.enqueue(new Uint8Array([2, 0]));
+		expect(await track.closed).toBeInstanceOf(ProtocolViolation);
+		await drainReactions();
+		expect(closes.map((info) => info?.closeCode)).toEqual([SessionCode.ProtocolViolation]);
 	} finally {
 		track.close();
 		broadcast.close();
