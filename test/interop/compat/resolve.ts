@@ -104,9 +104,10 @@ export interface Measured {
 
 /**
  * Re-pin each planned break that still fails to the measured releases, and delete the
- * rest. A break is judged by the cells it covers alone when it has any, so another
- * break's failures cannot keep it. A protocol-keyed break also still fails while the
- * checkout lacks its version.
+ * rest, so every failing cell stays covered. A break that fails in a cell it covers
+ * alone is kept. A failing cell several breaks cover keeps them all unless one is
+ * already kept, since passing elsewhere cannot say which break it belongs to. A
+ * protocol-keyed break also still fails while the checkout lacks its version.
  */
 export function remeasure(
 	skipped: Record<string, PlannedBreak>,
@@ -118,17 +119,22 @@ export function remeasure(
 	}: { current: string[]; released: string[]; releases: Record<string, string> },
 ) {
 	const released = releasedAll.filter(lite);
+	const failed = measured.filter((m) => !m.passed);
+	const kept = new Set(failed.filter((m) => m.names.length === 1).map((m) => m.names[0]));
+	for (const m of failed) {
+		if (!m.names.some((name) => kept.has(name))) for (const name of m.names) kept.add(name);
+	}
 	const breaks: Record<string, PlannedBreak> = {};
 	const report: string[] = [];
 	for (const [name, exception] of Object.entries(skipped)) {
 		const covered = measured.filter((m) => m.names.includes(name));
-		const alone = covered.filter((m) => m.names.length === 1);
-		const cells = alone.length ? alone : covered;
-		const failing = cells.filter((m) => !m.passed).map((m) => m.cell);
+		const failing = covered.filter((m) => !m.passed).map((m) => m.cell);
 		const removed = !exception.cells && released.includes(name) && !current.includes(name);
-		if (!failing.length && !removed) {
+		if (!kept.has(name) && !removed) {
 			report.push(
-				`${name}: ${cells.length ? `no longer fails in ${cells.length} cells` : "covers no cells"}, deleted`,
+				covered.length
+					? `${name}: ${failing.length ? `${failing.length} of ${covered.length} cells fail, each covered by a kept break` : `no longer fails in ${covered.length} cells`}; deleted`
+					: `${name}: covers no cells, deleted`,
 			);
 			continue;
 		}
@@ -150,7 +156,7 @@ export function remeasure(
 		report.push(
 			removed
 				? `${name}: still fails, the checkout no longer offers it; re-pinned`
-				: `${name}: still fails in ${failing.length} of ${cells.length} cells; re-pinned\n  ${failing.join("\n  ")}`,
+				: `${name}: still fails in ${failing.length} of ${covered.length} cells; re-pinned\n  ${failing.join("\n  ")}`,
 		);
 	}
 	return { breaks, report };

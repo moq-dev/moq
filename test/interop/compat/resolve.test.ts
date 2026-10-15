@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { matrix, mediaControls, newest, planned, remeasure, stale, versions } from "./resolve";
+import { type Measured, matrix, mediaControls, newest, planned, remeasure, stale, versions } from "./resolve";
 
 test("a yanked or prerelease version cannot replace the installable release", () => {
 	expect(
@@ -118,7 +118,7 @@ test("a re-measure re-pins each break that still fails and deletes the rest", ()
 	expect(report).toEqual([
 		`${OLD}: still fails in 1 of 2 cells; re-pinned\n  a`,
 		"archive: still fails in 1 of 1 cells; re-pinned\n  c",
-		"fixed: no longer fails in 1 cells, deleted",
+		"fixed: no longer fails in 1 cells; deleted",
 		"unused: covers no cells, deleted",
 	]);
 	// The re-pinned file passes the check a scheduled run makes.
@@ -135,7 +135,7 @@ test("a re-measure keeps a protocol break while the checkout lacks its version",
 	expect(() => remeasure(breaks, [], { current: [NEW], released: [OLD], releases: {} })).toThrow("does not resolve");
 });
 
-test("a cell two breaks cover counts for both, judged by the cells each covers alone", () => {
+test("a failing cell two breaks cover keeps one of them", () => {
 	const breaks = {
 		[NEW]: { reason: "wire changed", releases: { "moq-cli": "1.0.0" } },
 		archive: { reason: "catalog break", releases: { "@moq/hang": "1.0.0" }, cells: { lanes: ["media"] } },
@@ -144,11 +144,21 @@ test("a cell two breaks cover counts for both, judged by the cells each covers a
 	expect(planned(breaks, cell)).toEqual([NEW, "archive"]);
 	const releases = { "moq-cli": "1.0.1", "@moq/hang": "1.0.1" };
 	const context = { current: [OLD, NEW], released: [OLD, NEW], releases };
-	// Every cell the archive break covers is shared, so their failures still keep it.
+	const kept = (measured: Measured[]) => {
+		const { breaks: result } = remeasure(breaks, measured, context);
+		// The rewritten file still skips every cell that failed.
+		for (const m of measured) if (!m.passed) expect(m.names.some((name) => name in result)).toBe(true);
+		return Object.keys(result);
+	};
 	const shared = { names: [NEW, "archive"], cell: "shared", passed: false };
-	expect(Object.keys(remeasure(breaks, [shared], context).breaks)).toEqual([NEW, "archive"]);
-	// Once it has a cell to itself, the other break's failures no longer keep it.
-	const fixed = { names: ["archive"], cell: "alone", passed: true };
-	expect(Object.keys(remeasure(breaks, [shared, fixed], context).breaks)).toEqual([NEW]);
+	const archivePasses = { names: ["archive"], cell: "archive alone", passed: true };
+	const wireFails = { names: [NEW], cell: "wire alone", passed: false };
+	const wirePasses = { ...wireFails, passed: true };
+	// Nothing says which break the shared failure belongs to, so both stay.
+	expect(kept([shared])).toEqual([NEW, "archive"]);
+	expect(kept([shared, archivePasses, wirePasses])).toEqual([NEW, "archive"]);
+	// A break that fails on its own explains the shared failure, so the other goes.
+	expect(kept([shared, archivePasses, wireFails])).toEqual([NEW]);
+	expect(kept([{ ...shared, passed: true }, archivePasses, wirePasses])).toEqual([]);
 	expect(() => matrix([OLD], [OLD], { "two words": breaks.archive })).toThrow("invalid planned break");
 });
