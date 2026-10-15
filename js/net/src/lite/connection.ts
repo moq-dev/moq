@@ -1,4 +1,4 @@
-import { type Getter, Once, Signal } from "@moq/signals";
+import { Effect, type Getter, Once, Signal } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
@@ -11,6 +11,7 @@ import { type Hop, randomHop } from "../hop.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
+import { Observed } from "../util/observed.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { registerWire } from "../wire.ts";
 import { AnnounceRequest } from "./announce.ts";
@@ -103,7 +104,7 @@ export class Connection implements Established {
 	#peerRole = new Signal<Role | undefined>(undefined);
 
 	// Written by the Subscriber as PROBE messages arrive.
-	#probe = new Signal<Probe>({});
+	#probe = new Observed<Probe>({});
 
 	// Whether we dialed; see {@link ConnectionProps.client}.
 	#client: boolean;
@@ -219,7 +220,10 @@ export class Connection implements Established {
 			tasks.push(this.#sendSetup());
 		}
 
-		tasks.push(this.#subscriber.runProbe());
+		const probes = new Effect((effect) => {
+			if (!effect.get(this.#probe.used)) return;
+			effect.spawn(() => this.#subscriber.runProbe(effect.abort));
+		});
 
 		// Fail loud on a publication our grant never covers, once the peer has answered the
 		// credential we presented at setup.
@@ -241,6 +245,7 @@ export class Connection implements Established {
 			// A session-sourced failure is the peer's close, not the raw transport error.
 			fatal = await sessionCause(this.#quic, err);
 		} finally {
+			probes.close();
 			// The session died under every track it was receiving, so they end with its
 			// error. A deliberate close() already ended them cleanly, which makes this a no-op.
 			this.#subscriber.close(fatal ?? (await closeError(this.#quic)));

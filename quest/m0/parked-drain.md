@@ -39,7 +39,3 @@ against capped subscribers per track: the parked axis flattens, and a
 per-abort cost that grows with subscribers shows up as a slope.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Resume duplicates](/quest/m0/broadcast-epoch/resume-duplicates.md) - reshapes `track::Subscriber`'s delivery record in the same code

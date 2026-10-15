@@ -101,5 +101,38 @@ fn requests(c: &mut Criterion) {
 	}
 	group.finish();
 }
-criterion_group!(benches, requests);
+
+// The drain's shared counter must stay independent of the other connections
+// and handshakes it already holds. Compare handler-only admission with the
+// accept/first-header transfer, including a WebSocket's second transfer.
+fn admission(c: &mut Criterion) {
+	let mut group = c.benchmark_group("http_admission");
+	for connections in [1, 16, 256] {
+		for pending in [0, 16, 256] {
+			let activity = moq_net::server::Activity::default();
+			let _held = (0..connections + pending)
+				.map(|_| activity.enter().unwrap())
+				.collect::<Vec<_>>();
+			let shape = format!("connections={connections}/pending={pending}");
+			group.bench_function(BenchmarkId::new("handler", &shape), |b| {
+				b.iter(|| std::hint::black_box(activity.enter().unwrap()));
+			});
+			group.bench_function(BenchmarkId::new("plain", &shape), |b| {
+				b.iter(|| {
+					let accepted = idle::Admission::new(activity.enter().unwrap());
+					drop(std::hint::black_box(accepted.take().unwrap()));
+				});
+			});
+			group.bench_function(BenchmarkId::new("upgrade", &shape), |b| {
+				b.iter(|| {
+					let accepted = idle::Admission::new(activity.enter().unwrap());
+					let request = idle::Admission::new(accepted.take().unwrap());
+					drop(std::hint::black_box(request.take().unwrap()));
+				});
+			});
+		}
+	}
+	group.finish();
+}
+criterion_group!(benches, requests, admission);
 criterion_main!(benches);

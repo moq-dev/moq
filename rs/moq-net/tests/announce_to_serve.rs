@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A broadcast exists for other people only while it is announced, and a consumer
 //! in the same process sees exactly what a consumer across a session sees.
 //!

@@ -4000,11 +4000,15 @@ where
 			end.object = object;
 		}
 
-		// From draft-20 an empty answer still covers its start, so an End Location before it
-		// is malformed and closes the session (section 10.14), before it can mark the track's end.
-		if draft20 && (end.group, end.object) <= (sequence, start) {
+		// Draft-20's answer must cover its start within the requested group. Validate before
+		// accepting the group or letting End of Track mark where the track ends.
+		if draft20 && (end.group != sequence || end.object <= start) {
 			let err = Error::ProtocolViolation;
-			tracing::warn!(group = sequence, ?end, "FETCH_OK's End Location is before its start");
+			tracing::warn!(
+				group = sequence,
+				?end,
+				"FETCH_OK's End Location is outside the requested range"
+			);
 			self.session.clone().close(
 				super::error::to_session_code(&SessionError::from(&err)),
 				err.to_string().as_ref(),
@@ -10427,68 +10431,85 @@ mod joining_fetch_tests {
 		assert!(fetch.await.is_err(), "the accepted group was aborted");
 	}
 
-	/// From draft-20 an End Location before the FETCH's start is malformed (section 10.14):
+	/// From draft-20 an End Location outside the FETCH's range is malformed:
 	/// the session closes with PROTOCOL_VIOLATION rather than reading it as an empty answer.
 	#[moq_net_sim::test]
-	async fn a_draft20_end_location_before_the_start_closes_the_session() {
-		const VERSION: Version = Version::Draft20;
+	async fn a_draft20_end_location_outside_the_range_closes_the_session() {
 		const GROUP: u64 = 4;
 		const START: u64 = 3;
 
-		let ok = message_bytes(
-			ietf::FetchOk::ID,
-			&ietf::FetchOk {
-				request_id: None,
-				group_order: GroupOrder::Ascending,
-				end_of_track: false,
-				end_location: ietf::Location {
+		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
+			for end_location in [
+				ietf::Location {
 					group: GROUP,
 					object: START - 1,
 				},
-				properties: Default::default(),
-			},
-			VERSION,
-		);
+				ietf::Location {
+					group: GROUP + 1,
+					object: 0,
+				},
+			] {
+				for end_of_track in [false, true] {
+					let ok = message_bytes(
+						ietf::FetchOk::ID,
+						&ietf::FetchOk {
+							request_id: None,
+							group_order: GroupOrder::Ascending,
+							end_of_track,
+							end_location,
+							properties: Default::default(),
+						},
+						version,
+					);
 
-		let session = ScriptedSession::per_stream_eof(vec![ok]);
-		let (tasks, _task_set) = crate::util::TaskSet::new();
-		let subscriber = Subscriber::new(
-			crate::time::Clock::sim(),
-			session.clone(),
-			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
-			Control::new(None, false),
-			None,
-			peer::PeerSetup::default(),
-			crate::Hop::new(1).unwrap(),
-			None,
-			VERSION,
-			tasks,
-			Default::default(),
-		);
+					let session = ScriptedSession::per_stream_reset(vec![ok]);
+					let (tasks, _task_set) = crate::util::TaskSet::new();
+					let subscriber = Subscriber::new(
+						crate::time::Clock::sim(),
+						session.clone(),
+						crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+						Control::new(None, false),
+						None,
+						peer::PeerSetup::default(),
+						crate::Hop::new(1).unwrap(),
+						None,
+						version,
+						tasks,
+						Default::default(),
+					);
 
-		let track = track::Producer::new(
-			std::sync::Arc::new(crate::broadcast::Info::default()),
-			"video",
-			track::Info::default().with_timescale(None),
-		);
-		let dynamic = track.dynamic();
-		let consumer = track.consume();
-		let mut fetch = std::pin::pin!(consumer.fetch_group(GROUP, group::Fetch::default().with_frame_start(START)));
-		assert!(futures::poll!(fetch.as_mut()).is_pending());
-		let request = dynamic.requested_group().await.expect("no group requested");
+					let track = track::Producer::new(
+						std::sync::Arc::new(crate::broadcast::Info::default()),
+						"video",
+						track::Info::default().with_timescale(None),
+					);
+					let dynamic = track.dynamic();
+					let consumer = track.consume();
+					let mut fetch =
+						std::pin::pin!(consumer.fetch_group(GROUP, group::Fetch::default().with_frame_start(START)));
+					assert!(futures::poll!(fetch.as_mut()).is_pending());
+					let request = dynamic.requested_group().await.expect("no group requested");
 
-		subscriber
-			.clone()
-			.run_group_fetch(Path::new("broadcast").to_owned(), "video".into(), request, None)
-			.await;
+					subscriber
+						.clone()
+						.run_group_fetch(Path::new("broadcast").to_owned(), "video".into(), request, None)
+						.await;
 
-		assert!(matches!(fetch.await, Err(Error::ProtocolViolation)));
-		let violation = SessionError::from(&Error::ProtocolViolation).to_code();
-		assert!(
-			session.log.closes().iter().any(|(code, _)| *code == violation),
-			"{:?}",
-			session.log.closes()
-		);
+					assert_eq!(
+						consumer.final_sequence(),
+						None,
+						"{version}: rejected end changed the track"
+					);
+					assert!(matches!(fetch.await, Err(Error::ProtocolViolation)));
+					let violation = SessionError::from(&Error::ProtocolViolation).to_code();
+					assert!(
+						session.log.closes().iter().any(|(code, _)| *code == violation),
+						"{:?}",
+						session.log.closes()
+					);
+				}
+			}
+		}
 	}
 
 	/// A cache miss for a group's tail asks upstream from the frame the reader wants and

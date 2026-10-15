@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A SUBSCRIBE_TRACKS is refused on its own stream, and the session keeps delivering.
 //!
 //! Deterministic: paused time and a single-threaded runtime over the mock transport.

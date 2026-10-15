@@ -4421,6 +4421,8 @@ dependencies = [
  "moq-clock",
  "moq-clock-macros",
  "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-test",
  "web-async",
 ]
 
@@ -4489,6 +4491,7 @@ version = "0.4.12"
 dependencies = [
  "anyhow",
  "bytes",
+ "criterion",
  "futures",
  "gst-plugin-version-helper",
  "gstreamer",

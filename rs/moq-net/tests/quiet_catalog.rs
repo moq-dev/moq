@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A catalog publishes one finished group and then stays quiet. Media hides a
 //! subscription that starts past a group, because the next group arrives; a
 //! catalog does not produce one, so a reader that never received the snapshot

@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A relay whose last reader leaves mid-group cancels the idle upstream subscription. A later
 //! fetch of that group still gets every frame (#5348, a release-line regression).
 

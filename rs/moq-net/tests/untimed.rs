@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! An untimed track reaches every subscriber untimed, through a relay too, on every wire
 //! that can say so, and a timed track keeps its timestamps.
 //!

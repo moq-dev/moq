@@ -6,6 +6,8 @@
 //! routine asserts the rate limit holds that to two publishes (the leading and trailing edge)
 //! whatever the shape; without it the count would be `RISES x tracks x subscribers`.
 //!
+//! The MSF reference case publishes renditions in distinct sibling namespaces and converts them
+//! back for every subscriber, exercising namespace resolution over both fanout axes.
 //! The rate window runs on tokio's paused clock, so the counts are deterministic.
 //!
 //! Run with `cargo bench -p moq-mux --bench catalog`.
@@ -15,6 +17,7 @@ use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use moq_mux::catalog::Stream;
 use moq_mux::catalog::hang::Container;
 use moq_mux::container::Kind;
 use moq_net::Timestamp;
@@ -32,25 +35,41 @@ struct Fanout {
 	_broadcast: moq_net::broadcast::Producer,
 	_catalog: moq_mux::catalog::Producer,
 	tracks: Vec<moq_mux::container::Producer<Container, hang::catalog::VideoConfig>>,
-	subscribers: Vec<moq_mux::catalog::hang::Consumer>,
+	subscribers: Vec<moq_mux::catalog::Consumer>,
 	waiter: kio::Waiter,
 	anchor: Instant,
 }
 
 impl Fanout {
-	fn new(tracks: usize, subscribers: usize) -> Self {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+	async fn new(tracks: usize, subscribers: usize, references: bool) -> Self {
+		let mut info = moq_net::broadcast::Info::new();
+		info.path = "room/catalog".into();
+		let mut broadcast = info.produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 		let tracks = (0..tracks)
 			.map(|index| {
 				let info = catalog.track_info(hang::catalog::PRIORITY.video);
 				let track = broadcast.create_track(format!("v{index}"), info).unwrap();
-				let config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+				let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+				if references {
+					config.broadcast = Some(format!("./source-{index}").into());
+				}
 				catalog.video(track, Container::Legacy(Kind::Video), config).unwrap()
 			})
 			.collect();
+		let mut readers = Vec::new();
+		for _ in 0..subscribers {
+			let reader = if references {
+				moq_mux::catalog::Consumer::new(&broadcast.consume(), moq_mux::catalog::CatalogFormat::Msf)
+					.await
+					.unwrap()
+			} else {
+				moq_mux::catalog::Consumer::Hang(catalog.consume().unwrap())
+			};
+			readers.push(reader);
+		}
 		let mut fanout = Self {
-			subscribers: (0..subscribers).map(|_| catalog.consume().unwrap()).collect(),
+			subscribers: readers,
 			_broadcast: broadcast,
 			_catalog: catalog,
 			tracks,
@@ -84,6 +103,15 @@ impl Fanout {
 				// One subscription update per track, as a player re-reads each rendition's jitter.
 				for rendition in catalog.video.renditions.values() {
 					black_box(rendition.jitter);
+					if let Some(reference) = &rendition.broadcast {
+						assert!(
+							moq_net::Path::new("room/catalog")
+								.try_resolve(reference)
+								.unwrap()
+								.as_str()
+								.starts_with("room/source-")
+						);
+					}
 					updates += 1;
 				}
 			}
@@ -123,20 +151,22 @@ fn bench_estimate_fanout(c: &mut Criterion) {
 		.build()
 		.unwrap();
 	let mut group = c.benchmark_group("catalog_estimate_fanout");
-	for tracks in TRACKS {
-		for subscribers in SUBSCRIBERS {
-			group.throughput(Throughput::Elements(RISES * tracks as u64));
-			group.bench_with_input(
-				BenchmarkId::new(format!("tracks_{tracks}"), subscribers),
-				&(tracks, subscribers),
-				|b, &(tracks, subscribers)| {
-					b.iter_batched(
-						|| Fanout::new(tracks, subscribers),
-						|fanout| runtime.block_on(fanout.run()),
-						BatchSize::SmallInput,
-					);
-				},
-			);
+	for (mode, references) in [("hang", false), ("msf_references", true)] {
+		for tracks in TRACKS {
+			for subscribers in SUBSCRIBERS {
+				group.throughput(Throughput::Elements(RISES * tracks as u64));
+				group.bench_with_input(
+					BenchmarkId::new(format!("{mode}/tracks_{tracks}"), subscribers),
+					&(tracks, subscribers),
+					|b, &(tracks, subscribers)| {
+						b.iter_batched(
+							|| runtime.block_on(Fanout::new(tracks, subscribers, references)),
+							|fanout| runtime.block_on(fanout.run()),
+							BatchSize::SmallInput,
+						);
+					},
+				);
+			}
 		}
 	}
 	group.finish();

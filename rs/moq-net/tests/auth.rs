@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! In-band AUTH over the in-memory mock transport: both sides learn their grant,
 //! tokens union, and a publication outside the grant fails loud. Every case runs on
 //! moq-lite-07-wip and on moq-transport with the MoQ Auth extension.

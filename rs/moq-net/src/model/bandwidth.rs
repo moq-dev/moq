@@ -105,6 +105,7 @@ impl Producer {
 	}
 
 	/// A handle that mints consumers without being one, so holding it is not demand.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn weak(&self) -> Weak {
 		Weak(self.state.weak())
 	}
@@ -118,12 +119,14 @@ impl Producer {
 	}
 
 	/// Block until the channel is closed, returning the cause.
+	#[cfg(feature = "async")]
 	pub async fn closed(&self) -> Error {
 		self.state.closed().await;
 		self.close_error()
 	}
 
 	/// Block until there are no active consumers.
+	#[cfg(feature = "async")]
 	pub async fn unused(&self) -> Result<()> {
 		kio::wait(|waiter| self.poll_unused(waiter)).await
 	}
@@ -139,6 +142,7 @@ impl Producer {
 	}
 
 	/// Block until there is at least one active consumer.
+	#[cfg(feature = "async")]
 	pub async fn used(&self) -> Result<()> {
 		kio::wait(|waiter| self.poll_used(waiter)).await
 	}
@@ -168,10 +172,12 @@ impl Default for Producer {
 
 /// Mints [`Consumer`]s on demand without counting as one, nor keeping the channel open.
 #[derive(Clone)]
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) struct Weak(kio::ProducerWeak<State>);
 
 impl Weak {
 	/// A new consumer, which reports the closure once the producer is gone.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn consume(&self) -> Consumer {
 		Consumer {
 			inner: Inner::Whole(self.0.consume()),
@@ -201,7 +207,7 @@ pub struct Allocator {
 
 impl Allocator {
 	/// Divide `estimate`, normally a connection's
-	/// [`Session::send_bandwidth`](crate::Session::send_bandwidth).
+	/// `Session::send_bandwidth`.
 	pub fn new(estimate: Consumer) -> Self {
 		Self {
 			estimate,
@@ -313,7 +319,7 @@ pub struct Reservation {
 impl Reservation {
 	/// This reservation's slice right now.
 	///
-	/// Stateless, unlike [`Consumer::changed`], which carries a cursor over what it last
+	/// Stateless, unlike [`Consumer::poll_changed`], which carries a cursor over what it last
 	/// reported and so needs a handle of its own.
 	pub fn peek(&self) -> Option<Rate> {
 		self.share.grant()
@@ -620,6 +626,7 @@ impl Consumer {
 	///
 	/// Returns an error once the producer is closed or dropped, so a caller can
 	/// stop watching. See [`poll_changed`](Self::poll_changed).
+	#[cfg(feature = "async")]
 	pub async fn changed(&mut self) -> Result<Option<Rate>> {
 		kio::wait(|waiter| self.poll_changed(waiter)).await
 	}
@@ -730,6 +737,7 @@ mod tests {
 	/// The headline case: two encoders on one connection must not each target the
 	/// whole estimate.
 	#[moq_net_sim::test]
+	#[cfg(feature = "async")]
 	async fn concurrent_tracks_split_the_estimate() {
 		let estimate = Producer::new();
 		let allocator = Allocator::new(estimate.consume());
@@ -782,6 +790,7 @@ mod tests {
 	/// Demand transitions have to wake a parked share, not just change what a later
 	/// `peek` would see; the encoder is sitting in a `select!` on `changed`.
 	#[moq_net_sim::test]
+	#[cfg(feature = "async")]
 	async fn a_share_wakes_when_a_sibling_goes_idle() {
 		let estimate = Producer::new();
 		let allocator = Allocator::new(estimate.consume());
@@ -807,8 +816,10 @@ mod tests {
 	/// fresh `poll` can't tell you: a lost wakeup still looks correct on the next poll
 	/// and only shows up as a task that never runs again.
 	#[derive(Default)]
+	#[cfg(feature = "async")]
 	struct Woken(std::sync::atomic::AtomicBool);
 
+	#[cfg(feature = "async")]
 	impl std::task::Wake for Woken {
 		fn wake(self: std::sync::Arc<Self>) {
 			self.wake_by_ref();
@@ -819,6 +830,7 @@ mod tests {
 		}
 	}
 
+	#[cfg(feature = "async")]
 	impl Woken {
 		/// A flag and its waiter. Both are returned because a [`kio::WaiterList`]
 		/// holds only a `Weak`, so a waiter dropped at the end of the calling
@@ -839,6 +851,7 @@ mod tests {
 	/// it, and a poll that returned the value without arming anything would park the
 	/// encoder with nothing left to wake it.
 	#[moq_net_sim::test]
+	#[cfg(feature = "async")]
 	async fn an_unchanged_slice_keeps_watching_the_estimate() {
 		let estimate = Producer::new();
 		let allocator = Allocator::new(estimate.consume());
@@ -865,6 +878,7 @@ mod tests {
 
 	/// The same, for the other input: a sibling's demand.
 	#[moq_net_sim::test]
+	#[cfg(feature = "async")]
 	async fn a_parked_share_is_woken_by_sibling_demand() {
 		let estimate = Producer::new();
 		let allocator = Allocator::new(estimate.consume());
@@ -890,6 +904,7 @@ mod tests {
 	/// A share follows the estimate's own lifecycle: unavailable while disconnected
 	/// (hold the current rate), terminal once the session is gone for good.
 	#[moq_net_sim::test]
+	#[cfg(feature = "async")]
 	async fn a_share_follows_the_estimate_lifecycle() {
 		let estimate = Producer::new();
 		let allocator = Allocator::new(estimate.consume());
@@ -933,6 +948,7 @@ mod tests {
 	/// tracks that have *closed*, so a claim left behind by a track that is still
 	/// publishing would stand for the rest of the connection.
 	#[moq_net_sim::test]
+	#[cfg(feature = "async")]
 	async fn dropping_a_reservation_releases_it() {
 		let estimate = Producer::new();
 		let allocator = Allocator::new(estimate.consume());
@@ -999,6 +1015,7 @@ mod tests {
 	/// A reader parked on `changed` has to be woken by its own reservation moving, not
 	/// just by the estimate or a sibling: the encoder is sitting in a `select!` on it.
 	#[moq_net_sim::test]
+	#[cfg(feature = "async")]
 	async fn update_wakes_a_parked_reader() {
 		let estimate = Producer::new();
 		let allocator = Allocator::new(estimate.consume());
@@ -1021,6 +1038,7 @@ mod tests {
 	/// The registry is the allocator's, not a share's: a share that outlives every
 	/// allocator reports the estimate as gone rather than keeping the channel open.
 	#[moq_net_sim::test]
+	#[cfg(feature = "async")]
 	async fn a_share_outliving_the_allocator_reports_closed() {
 		let estimate = Producer::new();
 		let allocator = Allocator::new(estimate.consume());
@@ -1040,6 +1058,7 @@ mod tests {
 	/// Reporting closure as `Ok(None)` would spin any `select!` over `changed()`,
 	/// because a closed channel is always immediately ready.
 	#[moq_net_sim::test]
+	#[cfg(feature = "async")]
 	async fn closed_is_distinct_from_unavailable() {
 		let producer = Producer::new();
 		let mut consumer = producer.consume();

@@ -82,6 +82,10 @@ check $BASE="":
 ci $JOB $BASE="":
     sh/dispatch.sh "ci-$JOB" "$BASE"
 
+# Report what a CI job (`check`, `test`, `platform`) selects, before installing the dev shell or build caches.
+ci-select $JOB $BASE="":
+    sh/dispatch.sh "ci-$JOB" "$BASE" --query
+
 # Auto-fix lint and formatting for what the branch changed since BASE.
 fix $BASE="":
     sh/dispatch.sh fix "$BASE"

@@ -24,7 +24,7 @@ follows that class.
 
 Each worker's endpoint receives a batch and feeds every segment straight to
 the QUIC endpoint. The classifier and flow table from the
-[UDP demux](/quest/m2/one-port/udp-demux.md), split there into a
+[UDP demux](/quest/m1/p2p/udp-demux.md), split there into a
 runtime-agnostic piece, run first on each segment; only QUIC continues into
 the endpoint. The worker is thread-per-core and `!Send`, while the consumers
 of the other classes (`moq-rtc`, `moq-srt`) run on
@@ -33,7 +33,7 @@ replies come back through a remote-send path into the owning worker's ring,
 which is what a fed `moq-rtc` takes as its `Transmit`
 ([WebRTC on the shared socket](/quest/m2/one-port/rtc-feed.md)). A flow
 pinned on one shard must keep landing there, which
-[steering only QUIC by connection ID](/quest/m2/one-port/shard-steering.md) guarantees.
+[steering only QUIC by connection ID](/quest/m1/p2p/shard-steering.md) guarantees.
 
 Keep the cross-thread hop off the QUIC path: a QUIC datagram never leaves its
 worker. Bound the channel per class with a drop counter, as the tokio demux
@@ -49,8 +49,8 @@ off on the ring, from shard steering.
 
 ## Required
 
-- [UDP demux](/quest/m2/one-port/udp-demux.md) - the classifier and flow table this runs on the ring
-- [Steer only QUIC by connection ID](/quest/m2/one-port/shard-steering.md) - keeps each non-QUIC flow on one worker
+- [UDP demux](/quest/m1/p2p/udp-demux.md) - the classifier and flow table this runs on the ring
+- [Steer only QUIC by connection ID](/quest/m1/p2p/shard-steering.md) - keeps each non-QUIC flow on one worker
 - [WebRTC on the shared socket](/quest/m2/one-port/rtc-feed.md) - the fed RTC socket and transmit contract the ring integrates
 - [SRT on the shared socket](/quest/m2/one-port/srt-demux.md) - the SRT state machines fed through the shared demux
 

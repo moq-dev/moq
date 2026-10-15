@@ -5,6 +5,7 @@ import { error, SessionCode, SessionError } from "../error.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import * as Time from "../time.ts";
+import { Follow } from "../util/observed.ts";
 import { wireOf } from "../wire.ts";
 import { type ConnectProps, connect, type WebSocketProps, type WebTransportProps } from "./connect.ts";
 import type { Established } from "./established.ts";
@@ -120,9 +121,11 @@ export class Reload {
 	 * The current connection's PROBE estimates, spanning reconnects.
 	 *
 	 * Undefined while disconnected: the estimates belong to a single connection.
+	 * Observation requests updates; `peek()` alone is passive.
 	 * See {@link Established.probe}.
 	 */
 	readonly probe: Getter<Probe | undefined>;
+	#probeSource = new Signal<Getter<Probe> | undefined>(undefined);
 
 	/**
 	 * Divides this connection's send-rate estimate among the tracks sharing it.
@@ -256,9 +259,9 @@ export class Reload {
 			});
 		}
 
-		this.probe = this.#signals.computed((effect) => {
-			const connection = effect.get(this.established);
-			return connection && effect.get(connection.probe);
+		this.probe = new Follow(this.#probeSource);
+		this.#signals.run((effect) => {
+			effect.set(this.#probeSource, effect.get(this.established)?.probe, undefined);
 		});
 
 		this.bandwidth = new Allocator(this.#estimate);

@@ -813,7 +813,7 @@ impl ChurnRoom {
 		for _ in 0..shape.sessions {
 			let mut viewer = cluster.join(0).await;
 			viewer.watch(&path(0), &held, None).await;
-			broadcasts.push(viewer.origin.consume().routed_broadcast(&path(0)).await.unwrap());
+			broadcasts.push(viewer.origin.consume().routed_broadcast(path(0)).await.unwrap());
 			viewers.push(viewer);
 		}
 		Self {

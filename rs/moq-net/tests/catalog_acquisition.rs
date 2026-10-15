@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! Initial catalog acquisition while the same publisher gains a second session.
 
 mod support;

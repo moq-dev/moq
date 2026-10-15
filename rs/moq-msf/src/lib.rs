@@ -109,6 +109,9 @@ pub struct Track {
 	/// Unique track name (case-sensitive).
 	pub name: String,
 
+	/// The track's absolute namespace; absent inherits the catalog's namespace.
+	pub namespace: Option<String>,
+
 	/// Packaging mode.
 	pub packaging: Packaging,
 
@@ -472,6 +475,7 @@ impl Track {
 	pub fn new(name: impl Into<String>, packaging: Packaging) -> Self {
 		Self {
 			name: name.into(),
+			namespace: None,
 			packaging,
 			is_live: false,
 			role: None,
@@ -620,11 +624,24 @@ impl<'de> Deserialize<'de> for Role {
 
 #[cfg(test)]
 mod test {
+	#[test]
+	fn track_namespace_round_trips() {
+		for version in ["1", "\"draft-01\""] {
+			let wire = format!(
+				r#"{{"version": {version}, "tracks": [{{"name": "video", "namespace": "room/left", "packaging": "loc"}}]}}"#
+			);
+			let catalog = Catalog::<()>::from_str(&wire).unwrap();
+			let encoded: serde_json::Value = serde_json::from_str(&catalog.to_json().unwrap()).unwrap();
+			assert_eq!(encoded["tracks"][0]["namespace"], "room/left");
+		}
+	}
+
 	use super::*;
 
 	fn video_track() -> Track {
 		Track {
 			name: "video0".to_string(),
+			namespace: None,
 			packaging: Packaging::Legacy,
 			is_live: true,
 			role: Some(Role::Video),
@@ -651,6 +668,7 @@ mod test {
 	fn audio_track() -> Track {
 		Track {
 			name: "audio0".to_string(),
+			namespace: None,
 			packaging: Packaging::Legacy,
 			is_live: true,
 			role: Some(Role::Audio),
@@ -677,6 +695,7 @@ mod test {
 	fn track_with_sap_and_jitter() -> Track {
 		Track {
 			name: "video0".to_string(),
+			namespace: None,
 			packaging: Packaging::Cmaf,
 			is_live: true,
 			role: Some(Role::Video),
@@ -1064,7 +1083,7 @@ mod test {
 	fn draft00_example_av_decodes() {
 		// Example 1 from draft-ietf-moq-msf-00: time-aligned audio/video. Exercises the
 		// numeric version, integer framerate into an f64 field, preserved generatedAt,
-		// and unmodeled fields (namespace, targetLatency) which must be ignored.
+		// and unmodeled fields (targetLatency) which must be ignored.
 		let json = r#"{
 			"version": 1,
 			"generatedAt": 1746104606044,

@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A track aborted by its publisher while the broadcast stays announced, read by a
 //! subscriber on the far side of one session.
 

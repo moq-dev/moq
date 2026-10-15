@@ -5931,6 +5931,82 @@ fn pacing_blocked_backlog_is_not_app_limited() {
     });
 }
 
+/// The last packet in a poll can drain the application while bytes remain in flight.
+#[test]
+fn partial_poll_reports_starvation() {
+    let _guard = subscribe();
+    let (mut pair, ch, log) = recorded_pair(Default::default());
+    let stream = pair.client_streams(ch).open(Dir::Uni).unwrap();
+    pair.client_send(ch, stream).write(&[42; 1000]).unwrap();
+    log.lock().unwrap().clear();
+    let now = pair.time;
+    let mut buf = Vec::new();
+    assert!(
+        pair.client_conn_mut(ch)
+            .poll_transmit(now, 10, &mut buf)
+            .is_some()
+    );
+    assert!(
+        matches!(log.lock().unwrap().last(), Some(PacketEvent::AppLimited { in_flight }) if *in_flight > 0)
+    );
+}
+
+#[test]
+fn sender_window_is_not_starvation() {
+    let _guard = subscribe();
+    let (mut pair, ch, log) = recorded_pair(Default::default());
+    pair.client_conn_mut(ch).set_send_window(1000);
+    let stream = pair.client_streams(ch).open(Dir::Uni).unwrap();
+    assert_eq!(pair.client_send(ch, stream).write(&[42; 2000]), Ok(1000));
+    log.lock().unwrap().clear();
+    pair.drive_client();
+    assert!(
+        log.lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, PacketEvent::Sent { .. }))
+    );
+    assert!(
+        !log.lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, PacketEvent::AppLimited { .. }))
+    );
+}
+
+#[test]
+fn receiver_credit_is_starvation() {
+    let _guard = subscribe();
+    let factory = Arc::new(PacketRecorderFactory::default());
+    let mut server_transport = TransportConfig::default();
+    server_transport.receive_window(1000u32.into());
+    let mut server_cfg = server_config();
+    server_cfg.transport = Arc::new(server_transport);
+    let mut pair = Pair::new(Default::default(), server_cfg);
+    let mut client_transport = TransportConfig::default();
+    client_transport.congestion_controller_factory(factory.clone());
+    let mut client_cfg = client_config();
+    client_cfg.transport = Arc::new(client_transport);
+    let (ch, _) = pair.connect_with(client_cfg);
+    let log = factory.logs.lock().unwrap()[0].clone();
+    let stream = pair.client_streams(ch).open(Dir::Uni).unwrap();
+    assert_eq!(pair.client_send(ch, stream).write(&[42; 2000]), Ok(1000));
+    log.lock().unwrap().clear();
+    pair.drive_client();
+    assert!(
+        log.lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, PacketEvent::Sent { .. }))
+    );
+    assert!(
+        log.lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, PacketEvent::AppLimited { .. }))
+    );
+}
+
 /// A Retry acknowledges the client's first Initial packet without an ACK frame. That inferred
 /// ACK must name Initial 0 too, not packet 0 of another space.
 #[test]

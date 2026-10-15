@@ -54,7 +54,7 @@ CURRENT="$TARGET/debug/moq"
 RELEASED="$HARNESS_RUN/released/bin/moq"
 "$CURRENT" --help >"$HARNESS_RUN/current-help"
 "$RELEASED" --help >"$HARNESS_RUN/released-help"
-bun "$DIR/compat/resolve.ts" matrix "$HARNESS_RUN/current-help" "$HARNESS_RUN/released-help" "$DIR/compat/planned-breaks.json" "$HARNESS_RUN/shared" "$HARNESS_RUN/versions.json"
+bun "$DIR/compat/resolve.ts" matrix "$HARNESS_RUN/current-help" "$HARNESS_RUN/released-help" "$DIR/compat/planned-breaks.json" "$HARNESS_RUN/shared" "$HARNESS_RUN/versions.json" "$HARNESS_RUN/controls"
 
 # A separate package root prevents bun workspaces from replacing released deps
 # with the checkout. Copy exactly the same client into both environments; it uses
@@ -163,6 +163,22 @@ fetch() {
         INTEROP_COMPAT_CLIENT="$js" INTEROP_FETCH_TRACK=1 \
         bash "$DIR/interop.sh" --publishers rust --subscribers rust
 }
+
+# Same-source cells keep exercising the compat reader while version-pairing
+# exceptions skip cross-source media. A control always uses its own binary,
+# relay, and package set, and can never be covered by a planned break.
+while read -r source version <&3; do
+    case "$source" in
+        current) relay="$TARGET/debug/moq-relay" pub="$CURRENT" js="$DIR/compat" ;;
+        released) relay="$HARNESS_RUN/released/bin/moq-relay" pub="$RELEASED" js="$HARNESS_RUN/js" ;;
+        *)
+            echo "unknown media control source: $source" >&2
+            exit 1
+            ;;
+    esac
+    cell media-control "$version" "$source" "$source" env RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$pub" INTEROP_VERSION="$version" \
+        INTEROP_COMPAT_CLIENT="$js" INTEROP_DECODE=1 bash "$DIR/interop.sh" --subscribers rust,js-native-node
+done 3<"$HARNESS_RUN/controls"
 
 # Existing media drivers: current publisher -> released clients and the reverse,
 # through either relay. The relay offers only one version, so JS cannot silently

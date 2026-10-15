@@ -542,3 +542,67 @@ test("auth eviction lets a later handle dial fresh and the old lease still clean
 
 	second.close();
 });
+
+test("pooled probe readers share demand and carry it through reconnects", async () => {
+	const pairs: ReturnType<typeof createMockTransportPair>[] = [];
+	const statsCalls: number[] = [];
+	const stub = function StubWebTransport() {
+		const pair = createMockTransportPair(Lite.ALPN_06, { stats: { estimatedSendRate: 1_000_000 } });
+		const index = pairs.length;
+		statsCalls.push(0);
+		const stats = pair.server.getStats.bind(pair.server);
+		pair.server.getStats = () => {
+			statsCalls[index]++;
+			return stats();
+		};
+		pairs.push(pair);
+		void accept(pair.server, url);
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+	const settle = () =>
+		new Promise<void>((resolve) => {
+			const channel = new MessageChannel();
+			channel.port1.onmessage = () => {
+				channel.port1.close();
+				channel.port2.close();
+				resolve();
+			};
+			channel.port2.postMessage(null);
+		});
+	const first = new Connection({ url, linger });
+	const second = new Connection({ url, linger });
+	let stopFirst = () => {};
+	let stopSecond = () => {};
+	try {
+		await advance();
+		await settle();
+		expect(pairs[0].client.sendStreams.bidi).toHaveLength(0);
+		stopFirst = first.probe.subscribe(() => {});
+		stopSecond = second.probe.subscribe(() => {});
+		await advance();
+		await settle();
+		expect(pairs[0].client.sendStreams.bidi).toHaveLength(1);
+		stopFirst();
+		await advance(100);
+		expect(pairs[0].client.sendStreams.bidi).toHaveLength(1);
+		pairs[0].server.close({ closeCode: SessionCode.Internal, reason: "reconnect" });
+		await advance(2_000);
+		await settle();
+		expect(pairs).toHaveLength(2);
+		expect(pairs[1].client.sendStreams.bidi).toHaveLength(1);
+		stopSecond();
+		await advance();
+		await settle();
+		const before = statsCalls[1];
+		await advance(500);
+		expect(statsCalls[1]).toBe(before);
+	} finally {
+		stopFirst();
+		stopSecond();
+		first.close();
+		second.close();
+		await advance(linger);
+		await settle();
+	}
+});

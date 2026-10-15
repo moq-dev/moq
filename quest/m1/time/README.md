@@ -97,7 +97,6 @@ cleanup and the global lint ratchet belong to
 ## Required
 
 - [@moq/clock](/quest/m1/time/js.md) - the same model in JS, with an installable clock
-- [moq-clock's browser backend runs in CI](/quest/m1/time/wasm-test.md) - a wasm-bindgen-test suite runs the browser backend in headless Chromium
 - [moq-net on moq-clock](/quest/m1/time/net.md) - moq-net, moq-mux, moq-stats, moq-room, and moq-ffi run on moq-clock and moq-net-sim is gone
 - [JS on @moq/clock](/quest/m1/time/js-migrate.md) - every JS package reads time only through `@moq/clock`
 - [Every crate on moq-clock](/quest/m1/time/crates.md) - every remaining crate reads time only through moq-clock, with controlled tests for the production/public API migrations
@@ -108,4 +107,3 @@ cleanup and the global lint ratchet belong to
 
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the per-flake fixes this line makes systemic
 - [Rust-backed @moq/net](/quest/m2/rs2ts/README.md) - Rust and JS clocks must agree across either browser backend
-- [The async feature](/quest/m1/net-async-feature.md) - the core keeps explicit instants; ambient time stays behind `async`

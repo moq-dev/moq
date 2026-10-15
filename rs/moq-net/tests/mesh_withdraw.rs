@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! Broadcasts withdrawn from a meshed cluster retract everywhere, once.
 //!
 //! Every relay holds a route through each peer that re-advertised a broadcast.

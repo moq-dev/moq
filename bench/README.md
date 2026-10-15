@@ -91,6 +91,7 @@ interval, and output paths so every runtime receives the same load.
 - `fanout`: light one-to-many traffic.
 - `video-heavy`: multicore many-to-many video traffic.
 - `fanout-heavy`: multicore one-to-many traffic near saturation.
+- `chat`: one broadcast to 2,000 viewers, one small message per group.
 - `audio` and `audio-fanout`: small, 50 fps audio-shaped frames; `bench-audio`
   sweeps grouping and load shape through command-line overrides.
 
