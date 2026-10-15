@@ -2,8 +2,8 @@
 
 ## Goal
 
-A draft-14 END_OF_TRACK object that carries Object Properties is refused
-instead of having its properties silently dropped. An END_OF_TRACK without
+In Rust and JS, a draft-14 END_OF_TRACK object that carries Object
+Properties is refused instead of having its properties silently dropped. An END_OF_TRACK without
 properties ends the track cleanly, as today.
 
 ## Plan
@@ -20,8 +20,11 @@ Context from [#5494](https://github.com/moq-dev/moq/pull/5494):
   ingest.
 
 Draft 14 permits these properties, so a session `PROTOCOL_VIOLATION` would be
-wrong. End the subscription with an error that names it unsupported. Add a
-regression test that fails without the change.
+wrong. End the subscription with an error that names it unsupported.
+
+`js/net/src/ietf/object.ts` drops them the same way: it reads past the
+extension block and returns the END_OF_TRACK frame without them. Fix both, and
+add a regression test in each language that fails without the change.
 
 Public API: none. Wire: a draft-14 publisher that puts properties on
 END_OF_TRACK now gets an error instead of a clean end.
