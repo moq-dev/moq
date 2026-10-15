@@ -3224,8 +3224,9 @@ where
 	///
 	/// A request-token renewal we sent (SUBSCRIBE_UPDATE) is answered on this same stream
 	/// (REQUEST_OK / REQUEST_ERROR on draft-15+; draft-14 is silent on an accepted renewal and
-	/// answers a refused one with SUBSCRIBE_ERROR). Each answer bumps `answers` so the send
-	/// loop can release the renewal it coalesced behind the one in flight; the read continues
+	/// may answer a refused one with SUBSCRIBE_ERROR). Each acceptance bumps `answers` so the
+	/// send loop can release the renewal it coalesced behind the one in flight. A refusal does
+	/// not: the subscription is ending, so nothing more is presented on it. The read continues
 	/// regardless, since the subscription ends on its PUBLISH_DONE, which the publisher sends
 	/// right after a refused renewal's REQUEST_ERROR, not on the answer itself. That
 	/// PUBLISH_DONE fails with the refusal's code, as an initial refusal does, rather than its
@@ -3270,7 +3271,6 @@ where
 						}
 					};
 					refused = Some(request::from_code(code, request::Kind::Subscribe, version));
-					*answers.lock() += 1;
 				}
 				Some(_) => return Err(Error::UnexpectedMessage),
 				None => return Err(Error::ProtocolViolation),
@@ -5352,7 +5352,7 @@ mod tests {
 			let answers = kio::Shared::new(0);
 			let result = Subscriber::<ScriptedSession>::read_publish_done(&mut reader, version, &answers).await;
 			assert!(matches!(result, Err(Error::Unauthorized)), "{version}: {result:?}");
-			assert_eq!(*answers.lock(), 1, "{version}");
+			assert_eq!(*answers.lock(), 0, "{version}: a refusal releases no queued renewal");
 		}
 	}
 

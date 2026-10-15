@@ -342,7 +342,7 @@ enum Served {
 	Track(Result<(), Error>),
 	/// An update could not be applied, its parameters unsupported or its renewal refused
 	/// (drafts 16 section 9.11.1, 18 section 10.9.1). The update was already answered, and
-	/// PUBLISH_DONE says UPDATE_FAILED.
+	/// PUBLISH_DONE says UPDATE_FAILED, or on draft 14 the refusal itself.
 	UpdateFailed(Error),
 }
 
@@ -356,8 +356,11 @@ enum Subscribed {
 
 impl Served {
 	/// The PUBLISH_DONE status and reason this end reports.
-	fn status(&self) -> (ietf::PublishDoneStatus, &'static str) {
+	fn status(&self, version: Version) -> (ietf::PublishDoneStatus, &'static str) {
 		match self {
+			// Draft 14 neither answers an update nor registers UPDATE_FAILED, so the
+			// PUBLISH_DONE is the only place the subscriber learns why its renewal failed.
+			Self::UpdateFailed(err) if version == Version::Draft14 => Self::Track(Err(err.clone())).status(version),
 			Self::Track(Ok(())) => (ietf::PublishDoneStatus::TrackEnded, "track ended"),
 			Self::Track(Err(Error::Unauthorized | Error::Session(crate::SessionError::Unauthorized))) => {
 				(ietf::PublishDoneStatus::Unauthorized, "not granted")
@@ -1101,7 +1104,7 @@ where
 					}
 				},
 			};
-			let (status, reason) = served.status();
+			let (status, reason) = served.status(self.version);
 			let res = match served {
 				Served::Track(res) => res,
 				Served::UpdateFailed(err) => Err(err),
@@ -5587,10 +5590,18 @@ mod serve_tests {
 			.await
 			.expect("the track's error ends the subscription");
 		assert!(matches!(served, Served::Track(Err(Error::Unsupported))), "{served:?}");
-		assert_eq!(served.status().0, ietf::PublishDoneStatus::InternalError);
 		assert_eq!(
-			Served::UpdateFailed(Error::Unsupported).status().0,
+			served.status(Version::Draft16).0,
+			ietf::PublishDoneStatus::InternalError
+		);
+		assert_eq!(
+			Served::UpdateFailed(Error::Unsupported).status(Version::Draft16).0,
 			ietf::PublishDoneStatus::UpdateFailed
+		);
+		// Draft 14 answers no update, so its PUBLISH_DONE carries the refusal itself.
+		assert_eq!(
+			Served::UpdateFailed(Error::Unauthorized).status(Version::Draft14).0,
+			ietf::PublishDoneStatus::Unauthorized
 		);
 	}
 
@@ -9337,9 +9348,9 @@ mod serve_tests {
 		}
 	}
 
-	/// A refused renewal ends only its subscription at once (PUBLISH_DONE UPDATE_FAILED), never
-	/// the session. The update is answered first: nothing on draft-14, a keyed REQUEST_ERROR to
-	/// the update's Request ID on draft-15/16.
+	/// A refused renewal ends only its subscription at once (PUBLISH_DONE UPDATE_FAILED, or the
+	/// refusal itself on draft 14), never the session. The update is answered first: nothing on
+	/// draft-14, a keyed REQUEST_ERROR to the update's Request ID on draft-15/16.
 	#[moq_net_sim::test]
 	async fn a_refused_subscribe_update_renewal_ends_the_subscription_from_draft_14() {
 		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
@@ -9463,16 +9474,18 @@ mod serve_tests {
 				matches!(result, Some(Err(Error::Session(crate::SessionError::Unauthorized)))),
 				"{version:?}: a refused renewal ends the subscription at once, got {result:?}"
 			);
+			// Draft 14 has no UPDATE_FAILED and answers no update, so its PUBLISH_DONE
+			// carries the refusal itself.
 			let (status, _) = Wire::read(&h.log, version).publish_done.expect("PUBLISH_DONE was sent");
-			assert_eq!(
-				status,
-				ietf::PublishDoneStatus::UpdateFailed.code(version),
-				"{version:?}: UPDATE_FAILED"
-			);
+			let expected = match version {
+				Version::Draft14 => ietf::PublishDoneStatus::Unauthorized,
+				_ => ietf::PublishDoneStatus::UpdateFailed,
+			};
+			assert_eq!(status, expected.code(version), "{version:?}");
 			let written = h.log.writes.lock().unwrap()[before..].to_vec();
 			match version {
 				// draft-14 has no renewal reply: the refusal is signalled only by the subscription
-				// ending (SUBSCRIBE_DONE UPDATE_FAILED, written by the caller), with no REQUEST_ERROR.
+				// ending (SUBSCRIBE_DONE UNAUTHORIZED, written by the caller), with no REQUEST_ERROR.
 				Version::Draft14 => {}
 				// draft-15/16 answer with one keyed REQUEST_ERROR before the subscription ends.
 				_ => {
