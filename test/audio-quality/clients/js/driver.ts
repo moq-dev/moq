@@ -145,6 +145,8 @@ try {
 	}
 	if (values.trace) {
 		const session = await page.context().newCDPSession(page);
+		await session.send("Profiler.enable");
+		await session.send("Profiler.start");
 		const events: unknown[] = [];
 		session.on("Tracing.dataCollected", (event: { value: unknown[] }) => events.push(...event.value));
 		const complete = new Promise<void>((resolve) => session.once("Tracing.tracingComplete", () => resolve()));
@@ -156,6 +158,8 @@ try {
 			finishTrace = undefined;
 			await session.send("Tracing.end");
 			await complete;
+			const { profile } = await session.send("Profiler.stop");
+			await Bun.write(join(out, `${tag}.profile.json`), JSON.stringify(profile));
 			await Bun.write(join(out, `${tag}.trace.json`), JSON.stringify({ traceEvents: events }));
 			await session.detach();
 		};
