@@ -2883,14 +2883,18 @@ where
 	/// is not a renewal and sends nothing. A refusal withdraws the announce, since the receiver
 	/// closes its stream on a renewal it cannot grant; the retry re-offers it carrying the new
 	/// token, honoring any retry interval the refusal named.
+	///
+	/// Each announce waits for the previous one's answer, so the token can change midway. The
+	/// rest then carry the newest token, or nothing once it is cleared: a superseded token
+	/// never reaches an announce that had not presented it.
 	async fn refresh_request_token(
 		&self,
 		ns: &mut Namespaces<S>,
 		token: Option<crate::setup::Token>,
 	) -> Result<(), Error> {
-		let Some(token) = token else {
+		if token.is_none() {
 			return Ok(());
-		};
+		}
 		if matches!(self.version, Version::Draft14 | Version::Draft15) {
 			return Ok(());
 		}
@@ -2904,7 +2908,16 @@ where
 			.map(|(suffix, _)| suffix.clone())
 			.collect();
 		for suffix in suffixes {
+			// Checked before taking an ID, so a cleared token spends none.
+			if self.request_token.peek().is_none() {
+				return Ok(());
+			}
 			let request_id = self.control.next_request_id(&self.runtime).await?;
+			// The ID is spent, so it carries the newest token. Cleared during the wait, it goes
+			// unsent: on draft 16 that strands one ID of credit, which only that race costs.
+			let Some(token) = self.request_token.peek() else {
+				return Ok(());
+			};
 			let Some(request) = ns.requests.get_mut(&suffix) else {
 				continue;
 			};
@@ -12753,6 +12766,85 @@ mod tests {
 			settle().await;
 		}
 		assert!(renewed, "a replaced token must be re-presented on the live announce");
+	}
+
+	/// A token replaced while a refresh works through the live announces reaches the ones not
+	/// yet renewed in its place: the superseded token never goes to an announce that had not
+	/// presented it.
+	#[moq_net_sim::test]
+	async fn a_superseded_token_never_reaches_an_unrenewed_announce() {
+		const VERSION: Version = Version::Draft18;
+		let first = bytes::Bytes::from_static(&[0x03, 0x00, b'a', b'a']);
+		let second = bytes::Bytes::from_static(&[0x03, 0x00, b'b', b'b']);
+		let third = bytes::Bytes::from_static(&[0x03, 0x00, b'c', b'c']);
+
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
+		let _mic = origin.announce("mic", crate::origin::Route::default()).unwrap();
+		settle().await;
+
+		let mut script = publish_namespace_ok(VERSION).await;
+		script.extend(publish_namespace_ok(VERSION).await);
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![script.clone(), script]);
+		let log = session.log.clone();
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer::default());
+
+		// Server IDs are odd: both announces (1, 3) and the first renewal (5) fit, and the
+		// second renewal (7) waits for credit.
+		let control = Control::new(Some(RequestId(7)), false);
+		let token = crate::RequestToken::new(Some(typed(&first)));
+		let publisher = Publisher::new(
+			crate::time::Clock::sim(),
+			session,
+			origin.consume(),
+			control.clone(),
+			None,
+			peer_setup,
+			VERSION,
+		)
+		.with_request_token(token.clone());
+
+		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, &first) >= 2 {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(occurrences(&log, &first), 2, "both announces carry the first token");
+
+		token.set(Some(typed(&second)));
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, &second) >= 1 {
+				break;
+			}
+			settle().await;
+		}
+		for _ in 0..20 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			settle().await;
+		}
+		assert_eq!(
+			occurrences(&log, &second),
+			1,
+			"one announce renewed, the other waits for credit"
+		);
+
+		token.set(Some(typed(&third)));
+		control.max_request_id(RequestId(100));
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			settle().await;
+		}
+		assert_eq!(
+			occurrences(&log, &second),
+			1,
+			"the superseded token reached a second announce"
+		);
+		assert!(occurrences(&log, &third) >= 2, "both announces carry the newest token");
 	}
 
 	/// A namespace advertised without a token stands on the connection grant, so setting a
