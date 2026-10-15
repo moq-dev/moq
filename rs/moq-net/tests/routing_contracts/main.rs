@@ -222,10 +222,21 @@ fn aggregation_cycles_starve_without_a_forwarding_constraint() {
 	let net = priority_ring(1);
 	let all = [0, 1, 2];
 	assert!(loops(&net.subscribe_all("live/x", &all, PATH_ONLY, Aggregate::Path)));
-	assert!(loops(&net.subscribe_all("live/x", &all, Forward::Pinned, Aggregate::Epoch)));
-	for (mode, aggregate) in [(Forward::Pinned, Aggregate::Identity), (Forward::Bounded, Aggregate::Bound)] {
+	assert!(loops(&net.subscribe_all(
+		"live/x",
+		&all,
+		Forward::Pinned,
+		Aggregate::Epoch
+	)));
+	for (mode, aggregate) in [
+		(Forward::Pinned, Aggregate::Identity),
+		(Forward::Bounded, Aggregate::Bound),
+	] {
 		let outcomes = net.subscribe_all("live/x", &all, mode, aggregate);
-		assert!(outcomes.iter().all(|outcome| served_by(outcome).is_some()), "{outcomes:?}");
+		assert!(
+			outcomes.iter().all(|outcome| served_by(outcome).is_some()),
+			"{outcomes:?}"
+		);
 	}
 }
 
@@ -334,7 +345,12 @@ fn sweep_forwarding_progress() {
 				alone,
 				"scenario {scenario} for {path}"
 			);
-			assert!(!loops(&net.subscribe_all(path, &all, Forward::Bounded, Aggregate::Bound)));
+			assert!(!loops(&net.subscribe_all(
+				path,
+				&all,
+				Forward::Bounded,
+				Aggregate::Bound
+			)));
 			path_deadlocks += loops(&net.subscribe_all(path, &all, PATH_ONLY, Aggregate::Path)) as usize;
 		}
 	}

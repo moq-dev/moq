@@ -889,7 +889,12 @@ impl Net {
 					}
 					match fronts[at].up {
 						Up::Joined(next) => at = next,
-						Up::Serve => return Outcome::Served { by: fronts[at].id, path },
+						Up::Serve => {
+							return Outcome::Served {
+								by: fronts[at].id,
+								path,
+							};
+						}
 						Up::Stalled => return Outcome::Stalled { path },
 						Up::Pending(..) => unreachable!("every pending front is resolved"),
 					}
