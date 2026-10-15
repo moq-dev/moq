@@ -107,6 +107,12 @@ impl<T: Serialize> Inner<T> {
 		// Split the borrow so `record` can hold the encoder while `track` is written through.
 		let Inner { track, encoder } = self;
 
+		// A timestamp that doesn't match the track is refused before anything changes: found by
+		// `write`, it would be a hole that ends the whole log.
+		if payload.at.is_some() != track.inner.info().timescale.is_some() {
+			return Err(moq_net::Error::TimestampMismatch.into());
+		}
+
 		// Encode first, so a value that can't be serialized doesn't publish an empty group that
 		// subscribers would advance into and wait on. Opening the group afterwards is safe because
 		// `record` guards the window: any failure below drops it uncommitted.

@@ -103,6 +103,12 @@ impl Inner {
 			return Err(err.into());
 		}
 
+		// A timestamp that doesn't match the track is refused before anything changes: found by
+		// `write_frame`, it would be a hole that ends the whole log.
+		if timestamp.is_some() != self.track.info().timescale.is_some() {
+			return Err(moq_net::Error::TimestampMismatch.into());
+		}
+
 		// Check before compressing: encoding advances the window, so a payload refused afterwards
 		// would leave the encoder ahead of every reader. The worst case is checked rather than the
 		// actual size for the same reason. Also checked before the group is opened, so a refused

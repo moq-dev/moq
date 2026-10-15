@@ -319,7 +319,9 @@ impl<T: Serialize, E: CatalogExt> Stream<T, E> {
 		let size = match self.inner.append(value) {
 			Ok(size) => size,
 			// Refused before anything was written, so the log and its entry carry on.
-			Err(err @ moq_json::Error::Net(moq_net::Error::GroupTooLarge)) => return Err(err.into()),
+			Err(err @ moq_json::Error::Net(moq_net::Error::GroupTooLarge | moq_net::Error::TimestampMismatch)) => {
+				return Err(err.into());
+			}
 			Err(err) => {
 				// The inner producer has already ended the track. Dropping the listing retires the
 				// catalog entry: waiting for the handle to drop would keep advertising a track that

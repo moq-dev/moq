@@ -383,6 +383,10 @@ impl Track {
 		if encoded.payload.len() as u64 > moq_net::group::MAX_CACHE_BYTES {
 			return Err(moq_net::Error::FrameTooLarge.into());
 		}
+		// The same goes for a timestamp that doesn't match the track.
+		if timestamp.is_some() != self.inner.info().timescale.is_some() {
+			return Err(moq_net::Error::TimestampMismatch.into());
+		}
 
 		match encoded.keyframe {
 			true => self.write_snapshot(timestamp, encoded.payload.clone()),

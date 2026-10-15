@@ -101,13 +101,22 @@ mod test {
 		assert_eq!(frame.timestamp, Some(at));
 	}
 
+	/// Refused before a replacement group is published, so the last value stays readable.
 	#[test]
 	fn a_timed_track_refuses_a_bare_publish() {
-		let (mut producer, _) = producer_on(Config::default(), timed());
-		assert!(matches!(
-			producer.update(&json!({ "n": 1 })),
-			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
-		));
+		for delta_ratio in [0, 100] {
+			let (mut producer, track) = producer_on(cfg(delta_ratio), timed());
+			let at = moq_net::Timestamp::from_millis(100).unwrap();
+			producer
+				.update(moq_net::Timed::from(&json!({ "n": 1 })).at(at))
+				.unwrap();
+			assert!(matches!(
+				producer.update(&json!({ "n": 2 })),
+				Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
+			));
+			producer.finish().unwrap();
+			assert_eq!(drain(track), vec![json!({ "n": 1 })], "delta_ratio={delta_ratio}");
+		}
 	}
 
 	#[test]
@@ -749,16 +758,16 @@ mod test {
 		// Every frame is rejected, so each publish fails and the encoder resynchronizes.
 		let mut producer = Producer::<Doc>::new(rejecting_track(), Config::default());
 
-		let mut guard = producer.modify(None).unwrap();
+		let mut guard = producer.modify(Some(late())).unwrap();
 		guard.video = Some("v1".to_string());
 		assert!(guard.commit().is_err());
 
-		let mut guard = producer.modify(None).unwrap();
+		let mut guard = producer.modify(Some(late())).unwrap();
 		guard.scte35 = Some(42);
 		assert!(guard.commit().is_err());
 
 		// The editing baseline still carries the composed value.
-		let guard = producer.modify(None).unwrap();
+		let guard = producer.modify(Some(late())).unwrap();
 		assert_eq!(
 			guard.video,
 			Some("v1".to_string()),
@@ -793,6 +802,12 @@ mod test {
 			.unwrap()
 	}
 
+	/// A time [`rejecting_track`] can't hold: it matches the timed track, so the publish gets as
+	/// far as the group before the conversion fails.
+	fn late() -> moq_net::Timestamp {
+		moq_net::Timestamp::from_millis(10_000).unwrap()
+	}
+
 	/// `append_group` publishes the group before the frame is written, and a rejected frame does not
 	/// close the track. Dropping the handle does not close the group either, so without an explicit
 	/// close a subscriber that advanced into it waits there forever.
@@ -802,7 +817,10 @@ mod test {
 		let mut subscriber = track.subscribe(None).ordered();
 		let mut producer = Producer::<Value>::new(track, cfg(0));
 
-		assert!(matches!(producer.update(&json!({ "a": 1 })), Err(crate::Error::Net(_))));
+		assert!(matches!(
+			producer.update(moq_net::Timed::from(&json!({ "a": 1 })).at(late())),
+			Err(crate::Error::Net(_))
+		));
 
 		let waiter = kio::Waiter::noop();
 		let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_next_group(&waiter) else {

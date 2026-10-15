@@ -90,6 +90,10 @@ impl Inner {
 		if payload.len() as u64 > moq_net::group::MAX_CACHE_BYTES {
 			return Err(moq_net::Error::FrameTooLarge.into());
 		}
+		// The same goes for a timestamp that doesn't match the track.
+		if timestamp.is_some() != self.track.info().timescale.is_some() {
+			return Err(moq_net::Error::TimestampMismatch.into());
+		}
 
 		let size = payload.len();
 		let mut group = self.track.append_group()?;

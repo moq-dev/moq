@@ -190,6 +190,12 @@ struct Track {
 impl Track {
 	/// Write one encoded frame, rolling a group when it is a header.
 	fn write(&mut self, timestamp: Option<moq_net::Timestamp>, encoded: &Encoded) -> Result<()> {
+		// Check before touching a group: a header publishes a new group before its frame is
+		// written, so a mismatch found by `write_frame` would leave an empty newest group behind.
+		if timestamp.is_some() != self.inner.info().timescale.is_some() {
+			return Err(moq_net::Error::TimestampMismatch.into());
+		}
+
 		match encoded.keyframe {
 			true => self.write_header(timestamp, encoded.payload.clone()),
 			false => self.write_op(timestamp, encoded.payload.clone()),

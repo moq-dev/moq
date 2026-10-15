@@ -58,13 +58,27 @@ mod test {
 	use super::*;
 	use crate::Compression;
 
+	/// Refused before the log's group opens, so the log carries on rather than ending.
 	#[test]
 	fn a_timed_track_refuses_a_bare_publish() {
-		let (mut producer, _) = producer_on(Config::default(), timed());
+		let (mut producer, track) = producer_on(Config::default(), timed());
 		assert!(matches!(
-			producer.append(&json!({ "n": 1 })),
+			producer.append(&json!({ "n": 0 })),
 			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
 		));
+		let at = moq_net::Timestamp::from_millis(100).unwrap();
+		producer
+			.append(moq_net::Timed::from(&json!({ "n": 1 })).at(at))
+			.unwrap();
+		assert!(matches!(
+			producer.append(&json!({ "n": 2 })),
+			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
+		));
+		producer
+			.append(moq_net::Timed::from(&json!({ "n": 3 })).at(at))
+			.unwrap();
+		producer.finish().unwrap();
+		assert_eq!(drain(consume(track, false)), vec![json!({ "n": 1 }), json!({ "n": 3 })]);
 	}
 
 	#[test]
@@ -266,7 +280,11 @@ mod test {
 
 		let mut bad = std::collections::BTreeMap::new();
 		bad.insert((1, 2), 3);
-		assert!(producer.append(&bad).is_err());
+		assert!(
+			producer
+				.append(moq_net::Timed::from(&bad).at(moq_net::Timestamp::from_millis(0).unwrap()))
+				.is_err()
+		);
 
 		assert_eq!(subscriber.latest(), None, "a rejected record opened a group");
 
@@ -291,6 +309,12 @@ mod test {
 			.unwrap()
 	}
 
+	/// `value` at a time [`rejecting_track`] can't hold: it matches the timed track, so the
+	/// append gets as far as the group before the conversion fails.
+	fn late(value: &Value) -> moq_net::Timed<&Value> {
+		moq_net::Timed::from(value).at(moq_net::Timestamp::from_millis(10_000).unwrap())
+	}
+
 	/// A failed write must reach the consumer, not just the caller. A clean close drains a reader to
 	/// `None`, which is exactly what a completed log looks like, so a truncated log would be
 	/// indistinguishable from a whole one.
@@ -300,7 +324,10 @@ mod test {
 		let mut subscriber = track.subscribe(None);
 		let mut producer = Producer::<Value>::new(track, Config::default());
 
-		assert!(matches!(producer.append(&json!({ "n": 1 })), Err(crate::Error::Net(_))));
+		assert!(matches!(
+			producer.append(late(&json!({ "n": 1 }))),
+			Err(crate::Error::Net(_))
+		));
 
 		let waiter = kio::Waiter::noop();
 		assert!(
@@ -317,12 +344,15 @@ mod test {
 		let track = rejecting_track();
 		let mut producer = Producer::<Value>::new(track, compressed());
 
-		assert!(matches!(producer.append(&json!({ "n": 1 })), Err(crate::Error::Net(_))));
+		assert!(matches!(
+			producer.append(late(&json!({ "n": 1 }))),
+			Err(crate::Error::Net(_))
+		));
 
 		// The retry reports the abort rather than the `Error::Desync` the dropped record left on the
 		// encoder, which says nothing about why the log stopped.
 		assert!(
-			matches!(producer.append(&json!({ "n": 2 })), Err(crate::Error::Net(_))),
+			matches!(producer.append(late(&json!({ "n": 2 }))), Err(crate::Error::Net(_))),
 			"a second append must fail on the ended track rather than open another group"
 		);
 

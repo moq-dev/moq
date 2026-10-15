@@ -42,13 +42,20 @@ mod test {
 
 	use super::*;
 
+	/// Refused before a replacement group is published, so the last value stays readable.
 	#[test]
 	fn a_timed_track_refuses_a_bare_publish() {
-		let (mut producer, _) = producer_on(false, timed());
+		let (mut producer, track) = producer_on(false, timed());
+		let at = moq_net::Timestamp::from_millis(100).unwrap();
+		producer
+			.update(moq_net::Timed::<Bytes>::from(&b"keep"[..]).at(at))
+			.unwrap();
 		assert!(matches!(
-			producer.update(&b"payload"[..]),
+			producer.update(&b"bare"[..]),
 			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
 		));
+		producer.finish().unwrap();
+		assert_eq!(drain(consume(track, false)), vec![Bytes::from_static(b"keep")]);
 	}
 
 	#[test]

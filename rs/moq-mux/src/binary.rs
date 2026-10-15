@@ -263,7 +263,9 @@ impl<E: CatalogExt> Stream<E> {
 		let size = match self.inner.append(payload) {
 			Ok(size) => size,
 			// Refused before anything was written, so the log and its entry carry on.
-			Err(err @ moq_flate::Error::Net(moq_net::Error::GroupTooLarge)) => return Err(err.into()),
+			Err(err @ moq_flate::Error::Net(moq_net::Error::GroupTooLarge | moq_net::Error::TimestampMismatch)) => {
+				return Err(err.into());
+			}
 			Err(err) => {
 				// The inner producer has already closed the track. Dropping the listing retires the
 				// catalog entry too: waiting for the handle to drop would keep advertising a track

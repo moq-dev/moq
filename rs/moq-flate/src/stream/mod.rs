@@ -59,13 +59,30 @@ mod test {
 
 	use super::*;
 
+	/// Refused before the log's group opens, so the log carries on rather than ending.
 	#[test]
 	fn a_timed_track_refuses_a_bare_publish() {
-		let (mut producer, _) = producer_on(false, timed());
+		let (mut producer, track) = producer_on(false, timed());
 		assert!(matches!(
-			producer.append(&b"payload"[..]),
+			producer.append(&b"zero"[..]),
 			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
 		));
+		let at = moq_net::Timestamp::from_millis(100).unwrap();
+		producer
+			.append(moq_net::Timed::<Bytes>::from(&b"one"[..]).at(at))
+			.unwrap();
+		assert!(matches!(
+			producer.append(&b"two"[..]),
+			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
+		));
+		producer
+			.append(moq_net::Timed::<Bytes>::from(&b"three"[..]).at(at))
+			.unwrap();
+		producer.finish().unwrap();
+		assert_eq!(
+			drain(track, false),
+			vec![Bytes::from_static(b"one"), Bytes::from_static(b"three")]
+		);
 	}
 
 	#[test]
@@ -248,6 +265,12 @@ mod test {
 			.unwrap()
 	}
 
+	/// `payload` at a time [`rejecting_track`] can't hold: it matches the timed track, so the
+	/// append gets as far as the group before the conversion fails.
+	fn late(payload: &'static [u8]) -> moq_net::Timed<Bytes> {
+		moq_net::Timed::from(Bytes::from_static(payload)).at(moq_net::Timestamp::from_millis(10_000).unwrap())
+	}
+
 	/// A failed write must reach the consumer, not just the caller. A clean close drains a reader to
 	/// `None`, which is exactly what a completed log looks like, so a truncated log would be
 	/// indistinguishable from a whole one.
@@ -257,7 +280,7 @@ mod test {
 		let mut subscriber = track.subscribe(None);
 		let mut producer = Producer::new(track, Config::default());
 
-		assert!(producer.append(&b"rejected"[..]).is_err());
+		assert!(producer.append(late(b"rejected")).is_err());
 
 		// Aborting the group alone is not enough: the group is dropped from the cache and the reader
 		// still sees a clean end, which is exactly what a completed log looks like.
@@ -354,8 +377,8 @@ mod test {
 		};
 		assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
 
-		// Stamped now, which overflows the timescale, so the write fails and ends the log.
-		let Err(crate::Error::Net(written)) = producer.append(&b"rejected"[..]) else {
+		// Too late for the timescale, so the write fails and ends the log.
+		let Err(crate::Error::Net(written)) = producer.append(late(b"rejected")) else {
 			panic!("the write should fail");
 		};
 
@@ -382,9 +405,9 @@ mod test {
 		let track = rejecting_track();
 		let mut producer = Producer::new(track, Config::default());
 
-		assert!(producer.append(&b"rejected"[..]).is_err());
+		assert!(producer.append(late(b"rejected")).is_err());
 		assert!(
-			producer.append(&b"again"[..]).is_err(),
+			producer.append(late(b"again")).is_err(),
 			"a second append must fail on the closed track rather than open another group"
 		);
 	}
@@ -396,7 +419,7 @@ mod test {
 		let track = rejecting_track();
 		let mut producer = Producer::new(track, Config::default());
 
-		let Err(written) = producer.append(&b"rejected"[..]) else {
+		let Err(written) = producer.append(late(b"rejected")) else {
 			panic!("the write should fail");
 		};
 
