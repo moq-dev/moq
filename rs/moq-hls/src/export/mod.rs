@@ -1674,7 +1674,9 @@ mod tests {
 				.unwrap(),
 			json,
 		);
-		catalog.update(&snapshot).unwrap();
+		catalog
+			.update(moq_net::Timed::from(&snapshot).at(moq_net::Timestamp::now()))
+			.unwrap();
 
 		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = moq_mux::container::Producer::new(

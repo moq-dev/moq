@@ -42,7 +42,7 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [Conan remote](/quest/m3/cpp-conan.md) - a remote we own serves the same tarball to `conan install`
 - [Linux OBS GPU input](/quest/m3/obs-linux-gpu.md) - publish OBS compositor frames without CPU readback on a validated Linux graphics/encoder combination
 - [Routing cost domains](/quest/m3/routing-cost-domains.md) - design operator boundaries and policy without adding incomparable costs
-- [Relay request tokens](/quest/m3/auth-request-lease.md) - verify a request token with its own lease when a consumer needs relay integration
+- [Relay request tokens](/quest/m3/auth-request-lease.md) - the auth server sees a request token's lease end with its request
 - [Request tokens beyond Rust](/quest/m3/request-token-surfaces.md) - a JS, moq-ffi, or moq-cli request-token API, built only for the surface a consumer names
 - [Token on FETCH](/quest/m3/auth-token-fetch.md) - a request token authorizes TRACK_STATUS and FETCH; parked on a maintainer decision, with m1 recommended
 - [moq-transport cluster peers](/quest/m3/ietf-cluster-peers.md) - the cluster draft carries the route layer, so moq-transport relays peer again, once a moq-transport relay operator asks

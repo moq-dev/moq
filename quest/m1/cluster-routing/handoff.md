@@ -45,13 +45,17 @@ honestly without terminally retracting known presence. Measure client events,
 control bytes, replay work, and retained state against active origins, scopes,
 claims, and neighbors. Store public synthetic fixtures in CI with mocked time.
 
+The routing contract in routes.md narrows this proof. Forwarded requests
+name their identity, so forwarding needs a route, and claim freshness only
+decides what announce consumers see. A node never advertises an unreachable
+route, so a collected incarnation returns only while its retraction is in
+flight. A detour longer than the lost route starves until a seqno request
+reaches the origin, so presence must survive that window as unavailable,
+including a local mesh reaching its other half through the CDN.
+
 Bring the comparison and any remaining wire/API decision to the maintainer,
 then update routes.md. The proof must also specify eventual recovery when a
 bounded seqno-request attempt ends and no further unsolicited update arrives.
-
-## Required
-
-- [Routing contracts](/quest/m1/cluster-routing/contracts.md) - incarnation, authority, and export views the handoff preserves
 
 ## Related
 

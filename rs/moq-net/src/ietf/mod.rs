@@ -37,6 +37,7 @@ mod publisher;
 mod request;
 #[cfg(feature = "async")]
 mod request_stream;
+mod request_update;
 #[cfg(feature = "async")]
 mod session;
 pub mod solicit;

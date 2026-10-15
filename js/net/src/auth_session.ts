@@ -213,19 +213,23 @@ class IssuedGrant implements Issued {
 /** The peer's tokens, queued for the application. */
 class RequestQueue implements Requests {
 	#queue: PeerRequest[] = [];
+	// How many requests survived the last prune: pruning again only once the queue doubles
+	// keeps a push amortized O(1).
+	#survivors = 0;
 	#waiters: ((request: PeerRequest | undefined) => void)[] = [];
 	#closed = false;
 
-	/** Queue the token for the application, or refuse it when closed or full. */
+	/** Queue the token for the application, or refuse it when closed. */
 	push(request: PeerRequest): void {
 		if (this.#closed) {
 			request.reject(SessionCode.Unauthorized, "not accepting tokens");
 			return;
 		}
-		if (this.#queue.length >= 128) this.#queue = this.#queue.filter((queued) => !queued.ended);
-		if (this.#queue.length >= 128) {
-			request.reject(SessionCode.TooManyRequests, "too many pending tokens");
-			return;
+		// A withdrawn token gave its stream back, so it must not stay queued while the
+		// application is busy: that would let a peer that keeps withdrawing grow the queue.
+		if (this.#queue.length >= 2 * Math.max(this.#survivors, 1)) {
+			this.#queue = this.#queue.filter((queued) => !queued.ended);
+			this.#survivors = this.#queue.length;
 		}
 		const waiter = this.#waiters.shift();
 		if (waiter) waiter(request);

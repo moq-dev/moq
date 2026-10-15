@@ -32,14 +32,19 @@ Decided 2026-10-08:
 The backports shipped in moq-relay 0.17.3 (#5119) and `@moq/net` 0.4.3
 (refreshed 2026-10-12). Draft-22 interop on 2026-10-12 then found FETCH still
 refused on draft-20+ sessions; its backport landed on `release` in #5402.
-This README's remaining work: cut the next 0.17 patch, `@moq/net`, and
-`@moq/publish` with it (`/bump`, then the release-plz PR), and tell the testers
-and the reporters of #5407 and #5413. After it publishes, re-measure the
-planned wire-compat breaks (CONTRIBUTING.md).
+This README's remaining work: cut the next 0.17 patch, `@moq/publish`, and
+`@moq/hang` with it (`/bump`, then the release-plz PR), and tell the testers
+and the reporters of #5407 and #5413. `@moq/net` needs no publish: `release`
+builds byte-identical to the published 0.4.3. After it publishes, re-measure
+the planned wire-compat breaks (CONTRIBUTING.md).
 
-Open question: whether this patch also publishes `@moq/hang`. `release`
-carries its tolerant catalog parser (#5520), so publishing it lets that
-re-measure delete the `catalog-archive` break. Recommended: yes.
+Decided 2026-10-15 (maintainer): the same patch also publishes `@moq/hang`
+as is, with its tolerant catalog parser (#5520). Against the published 0.5.2,
+the parsed `Root` type and input type are unchanged, and every catalog 0.5.2
+accepted parses the same (audit in #5590). The only change is the zod wrapper
+on `RootSchema.shape.archive`, which the maintainer accepted as a patch on
+2026-10-15 since zod schema internals are not public API. That release's
+re-measure is expected to delete the `catalog-archive` planned break.
 
 Decided 2026-10-13: the same patch also carries two crash and availability
 fixes reported against the release line, an unset host clock and a quiet
