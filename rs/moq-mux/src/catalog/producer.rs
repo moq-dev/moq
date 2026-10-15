@@ -176,9 +176,11 @@ impl<E: CatalogExt> Outputs<E> {
 		// Every consumer refuses a catalog that fails this, so refuse it before it reaches one.
 		catalog.check_renditions()?;
 		// One snapshot per group while deltas are disabled; the `.z` track carries the identical catalog.
-		self.hang.update(catalog)?;
+		self.hang
+			.update(moq_net::Timed::from(catalog).at(moq_net::Timestamp::now()))?;
 		self.catalog_timeline.lock().unwrap().record(&self.hang_track);
-		self.hangz.update(catalog)?;
+		self.hangz
+			.update(moq_net::Timed::from(catalog).at(moq_net::Timestamp::now()))?;
 
 		// The MSF catalog is derived from our own types, so a serialize failure means an extension broke
 		// the shape; report it like any other JSON failure rather than panicking. `abort` below is

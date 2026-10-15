@@ -70,13 +70,15 @@ above them.
 - [Own the QUIC stack](/quest/m1/quic/README.md) - quinn hard-forked in-tree as `moq-quic`, carrying BBR, reliable reset, hierarchical scheduling, peer limits, and endpoint sharding
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - subgroups, object IDs, properties, end status, datagram objects, and unknown track properties survive moq-transport -> moq-relay (and a relay cluster) -> moq-transport; moxygen's moq-test passes nightly
+- [CDN smoke diagnosis](/quest/m1/smoke-cdn.md) - jsDelivr failures retain their response evidence and any first-party cause is fixed
+- [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - announce-subscribe passes and the smoke lane stops hiding its failure
+- [Public relay diagnosis](/quest/m1/smoke-relays.md) - optional failed cells get attributed causes and focused first-party follow-ups
 - [FETCH max-delay](/quest/m1/fetch-max-delay.md) - historical readers obey publisher max-age and an optional tighter reader budget, including while holding a group
 - [Draft-20 FETCH edge-case backport](/quest/m1/fetch-edge-cases.md) - backport the final-object and response-group fixes to a later 0.17 patch after main lands
 - [Subscribe-close backport](/quest/m1/subscribe-close-backport.md) - the same fix and the `race` loser fix on `release`, so closing a subscription during setup leaves no unhandled rejection in a later 0.17 patch
 - [Claim answer epochs](/quest/m1/claim-answer-epochs.md) - a claim answers each output by publishing it at its exact path under its own epoch, so a restarted output never reaches a returning reader as the old one's cache
 - [Malformed group FETCH](/quest/m1/group-fetch-malformed.md) - an object missing its Timestamp in a relay's group FETCH ends the whole TIMESCALE track, as subscribe and joining FETCH already do
 - [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, flate, audio, and video namespaces built from the handle below
-- [Publishing never invents a timestamp](/quest/m1/publish-timestamp.md) - no Rust or binding publish API fills in a timestamp; an untimed payload goes out untimed
 - [Bump web-transport-iroh for the capsule close](/quest/m1/iroh-capsule-bump.md) - condition: moq-dev/web-transport#419 ships in a release, then moq's iroh HTTP/3 client reports a peer's close capsule
 - [Early drops](/quest/m1/subscribe-drop-early.md) - Rust and JS publishers drop a sequence the moment they give it up, and forward an upstream drop
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every stream group in a lite subscription arrives or is dropped by name, and lite-07 drops its stream count for it
@@ -158,7 +160,6 @@ above them.
 - [Plan: HLS export failure signal](/quest/m1/hls-failure-signal.md) - decide what players see when the exporter's timeline fails, live or history, so a truncated recording never looks complete
 - [Close tail drain](/quest/m1/close-tail-drain.md) - after a peer close, subscribers read the group streams their transport already delivered instead of aborting them, so a finished tail arrives on every version
 - [Publisher linger](/quest/m1/publisher-linger.md) - every finishing publisher keeps its broadcast up for the media max-age so subscribers can drain it
-- [Shared timebase in the bindings](/quest/m1/ffi-timebase.md) - binding apps publish several containers from one source on one shared offset
 - [Vulkan Video encode on AMD](/quest/m1/vulkan-encode.md) - H.264 and H.265 from an external Vulkan image on RADV, hand-rolled on ash, proven on an RX 9070
 - [VA-API encodes an external Vulkan image](/quest/m1/vaapi-vulkan-import.md) - an explicit-sync DMA-BUF reaches Intel's encoder, proven on Arrow Lake
 - [Current LOC Timestamp only](/quest/m1/ietf-loc-timestamp.md) - moq-transport Timestamps are read only from LOC property 0x10, and 0x06 is opaque on every draft
@@ -172,6 +173,7 @@ above them.
 
 - [C++ and OBS package proof](/quest/m1/cpp-package-check.md) - the installed artifacts pass before their first release
 - [C++ FFI reuse](/quest/m1/cpp-ffi-reuse.md) - C++ packages link the shared default-feature FFI build once it is proven compatible
+- [Drafts type-check ignores ancestor tsconfigs](/quest/m1/drafts-ignore-config.md) - the drafts check passes when this repository is nested under another project's tsconfig
 
 ## Related
 

@@ -51,6 +51,24 @@ private fun opusHead(): ByteArray =
 
 class SmokeTest {
     @Test
+    fun `container timebase belongs to one broadcast`() {
+        BroadcastProducer().use { owner ->
+            BroadcastProducer().use { other ->
+                Timebase(owner).use { timebase ->
+                    assertFailsWith<MoqException.Codec> {
+                        ContainerProducer(other, ContainerInit(ContainerFormat.FMP4, byteArrayOf(), timebase))
+                    }
+                    assertFailsWith<MoqException.Codec> {
+                        ContainerStreamProducer(other, ContainerStreamInit(ContainerFormat.FMP4, timebase))
+                    }
+                    owner.end()
+                    assertFailsWith<MoqException.Closed> { Timebase(owner) }
+                }
+            }
+        }
+    }
+
+    @Test
     fun `diagnostic errors expose their named reason`() {
         val error = MoqException.Transport(reason = "reset")
         assertEquals("reset", error.reason)
@@ -193,7 +211,7 @@ class SmokeTest {
     @Test
     fun `broadcast consumer fetches cached group`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val track = broadcast.publishTrack("events", null)
+            val track = broadcast.publishTrack("events", TrackInfo(timescale = 1_000_000uL))
             val group = track.appendGroup()
             group.writeFrame(Frame(payload = "cached".encodeToByteArray(), timestampUs = 0uL))
             group.finish()
@@ -212,7 +230,7 @@ class SmokeTest {
     @Test
     fun `readFrame skips empty then populated groups`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val track = broadcast.publishTrack("status", null)
+            val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000_000uL))
             val consumer = track.consume(null)
             track.appendGroup().finish()
             track.appendGroup().finish()
@@ -224,12 +242,54 @@ class SmokeTest {
     }
 
     @Test
+    fun `flate preserves optional timestamps`() = runTest {
+        for (timestamp in listOf(null, 123_456uL)) {
+            for (mode in listOf("snapshot", "stream")) {
+                BroadcastProducer().use { broadcast ->
+                    val info = if (timestamp == null) null else TrackInfo(timescale = 1_000_000uL)
+                    val track = broadcast.publishTrack("data", info)
+                    val consumer = track.consume(null)
+                    val payload = "payload".encodeToByteArray()
+                    if (mode == "snapshot") {
+                        val producer = dev.moq.flate.SnapshotProducer(broadcast, track, dev.moq.flate.Config())
+                        producer.update(payload, timestamp)
+                        producer.finish()
+                    } else {
+                        val producer = dev.moq.flate.StreamProducer(broadcast, track, dev.moq.flate.Config())
+                        producer.append(payload, timestamp)
+                        producer.finish()
+                    }
+                    val frame = consumer.readFrame()
+                    assertEquals("payload", frame?.payload?.decodeToString())
+                    assertEquals(timestamp, frame?.timestampUs)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `raw writes without timestamps stay untimed`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val track = broadcast.publishTrack("untimed", null)
+            val consumer = track.consume(null)
+            track.writeFrame(Frame(payload = "payload".encodeToByteArray()))
+            val frame = consumer.readFrame()
+            assertEquals("payload", frame?.payload?.decodeToString())
+            assertNull(frame?.timestampUs)
+            assertNull(consumer.info().timescale)
+            track.finish()
+        }
+    }
+
+    @Test
     fun `catalog handle closes with its broadcast`() {
         val broadcast = BroadcastProducer()
         val catalog = CatalogProducer(broadcast)
         catalog.setSection("app", "{\"value\":42}")
+        catalog.now()
         broadcast.close()
         assertFailsWith<MoqException.Closed> { catalog.removeSection("app") }
+        assertFailsWith<MoqException.Closed> { catalog.now() }
         catalog.close()
     }
 
