@@ -17,13 +17,18 @@ draft 19 reassigns 0x06 to SUBGROUP_DELIVERY_TIMEOUT.
 Delete the loc-03 decode and everything that exists only for it:
 
 - `PROP_TIMESTAMP_DRAFT03` and its decode in `rs/moq-net/src/ietf/`.
-- The conversion, drop, and refusal of 0x06 when relaying into an egress
-  with different units, and across the draft-19 boundary (from
+- The unit conversion of 0x06 when relaying into an egress with different
+  units, and its drop for a unitless egress (from
   [#5494](https://github.com/moq-dev/moq/pull/5494)).
 - `hasDraft03Timestamp` in `js/net/src/ietf/object.ts`.
 - The tests for these paths.
 
-0x06 is then forwarded like any other unknown property.
+Keep the draft-19 boundary guard: a mutable 0x06 is dropped and a sealed one
+refused when relaying between drafts 18 and earlier and drafts 19 and later.
+That guard is about moq-transport reassigning the ID, not about LOC. Without
+it, a draft-18 publisher's 0x06 would arrive downstream as
+SUBGROUP_DELIVERY_TIMEOUT. Below and above the boundary, 0x06 is forwarded
+like any other unknown property.
 
 Public API: none. Wire: a peer still writing 0x06 Timestamps reads as untimed.
 

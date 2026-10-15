@@ -53,7 +53,8 @@ Decided with the maintainer on 2026-10-13:
 - Guard with tests only: one regression test per fixed site asserting the
   specific error. No runtime check on the refcount fallback.
 
-Public API: none; error values consumers observe change. Wire: no new wire
+Public API: adds `abort` to `moq_mux::catalog::Producer` for the import
+failure paths; error values consumers observe change. Wire: no new wire
 format or codes, though replacing `Dropped` with `Cancel` or `Closed` can
 change which existing codes are emitted.
 
