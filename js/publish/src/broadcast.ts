@@ -204,6 +204,11 @@ export class Broadcast {
 		for (const rendition of Object.values(renditions)) {
 			const source = enabled ? effect.get(rendition.config) : undefined;
 			if (source === undefined) continue;
+			// The rendition's media is this broadcast's own track, so its config can't point elsewhere.
+			const target = source as { broadcast?: string; track?: string };
+			if (target.broadcast !== undefined || target.track !== undefined) {
+				throw new Error(`rendition ${rendition.name} config sets broadcast or track, which the broadcast owns`);
+			}
 			let track = names[rendition.name] ?? rendition.name;
 			// Everything else (bitrate, frame rate, coded size, ...) updates the served track in place.
 			const media = identity(source);

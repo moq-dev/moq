@@ -22,7 +22,8 @@ export class Rendition<Config> {
 	 * `undefined` omits it from the catalog (e.g. while disabled). Changing a field a decoder must
 	 * reinitialize for (codec, description, container, sample rate, channel count, or display aspect)
 	 * ends the current track and serves the rendition under a fresh catalog `track` name, so a name
-	 * always means the same content. Every other field updates the current track in place.
+	 * always means the same content. Every other field updates the current track in place. The
+	 * broadcast owns `broadcast` and `track`, so a config setting either is refused.
 	 */
 	readonly config = new Signal<Config | undefined>(undefined);
 

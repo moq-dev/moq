@@ -573,6 +573,29 @@ test("a replacement track name is never reused, even one never served", async ()
 	broadcast.close();
 });
 
+test("a rendition config pointing at another track is refused", async () => {
+	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("remote.hang") });
+	const video = broadcast.video("video");
+	video.config.set(videoConfig);
+	await settle();
+
+	// A remote reference would send viewers to media this publisher never writes.
+	video.config.set({
+		...videoConfig,
+		codec: "vp8",
+		broadcast: "source" as Catalog.RelativeBroadcast,
+		track: "video",
+	});
+	await settle();
+	expect((await readCatalog(broadcast))?.video?.renditions.video?.codec).toBe(videoConfig.codec);
+
+	video.config.set({ ...videoConfig, codec: "vp8" });
+	await settle();
+	expect((await readCatalog(broadcast))?.video?.renditions.video?.codec).toBe("vp8");
+
+	broadcast.close();
+});
+
 // The served identity is a snapshot, so a producer mutating a container it shares can't rewrite it.
 test("mutating a shared container still takes a fresh track name", async () => {
 	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("shared.hang") });
