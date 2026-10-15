@@ -21,7 +21,7 @@ Non-goals:
   plays one broadcast; aligning siblings is the consumer's job, through the
   shared clock.
 - Sharing a clock across broadcasts from the bindings, which expose no mux
-  `Clock`; extend [the shared timebase](/quest/m1/ffi-timebase.md) when a
+  `Clock`; extend [the shared container timebase](/rs/moq-ffi/src/media.rs) when a
   binding app needs it.
 - Tying a `json` or `binary` track to one source. Those sections are
   application-defined; an application that needs the association defines it,
@@ -59,4 +59,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [Teleoperation](/quest/m2/teleop/README.md) - the robot line whose multi-camera case motivates this
-- [Shared timebase in the bindings](/quest/m1/ffi-timebase.md) - shares one offset within a binding broadcast; sharing across broadcasts would extend it
+- [Shared container timebase](/rs/moq-ffi/src/media.rs) - shares one offset within a binding broadcast; sharing across broadcasts would extend it

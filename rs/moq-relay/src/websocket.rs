@@ -79,16 +79,13 @@ pub(crate) async fn serve_ws(
 				return;
 			}
 		};
-		// Numbered and logged like a QUIC accept, so every `conn{id=...}` pairs with its close.
-		let id = state.cluster.next_connection_id();
-		let conn = crate::connection::Connection::new(request, state.cluster.clone(), state.auth.clone())
-			.with_id(id)
+		// Numbered like a QUIC accept, so its `conn{id=...}` never reuses a QUIC one's id.
+		crate::connection::Connection::new(request, state.cluster.clone(), state.auth.clone())
+			.with_id(state.cluster.next_connection_id())
 			.with_shutdown(state.shutdown.clone())
-			.with_sessions(state.sessions.clone());
-		match conn.run().await {
-			Ok(()) => tracing::info!(id, "connection closed"),
-			Err(err) => tracing::warn!(id, %err, "connection closed"),
-		}
+			.with_sessions(state.sessions.clone())
+			.run()
+			.await;
 	}))
 }
 
