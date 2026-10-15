@@ -340,9 +340,9 @@ impl Config {
 			),
 			(None, None) => unreachable!("validated above"),
 		};
-		let (mut auth, admissions) = Auth::embedded(node);
+		let (auth, admissions) = Auth::embedded(node);
+		let mut auth = auth.with_verifications(self.verifications);
 		auth.in_band = matches!(decider, Decider::Server(_));
-		auth.verifications = self.verifications;
 		decider.spawn(admissions);
 		Ok(auth)
 	}
@@ -758,6 +758,15 @@ impl Auth {
 			verifications: VERIFICATIONS,
 		};
 		(auth, Admissions(receiver))
+	}
+
+	/// Verify at most `verifications` in-band tokens per session at once, as
+	/// `--auth-verifications` does for a configured `Auth`; later ones wait for a slot.
+	/// Panics on 0, which would leave every in-band token waiting forever.
+	pub fn with_verifications(mut self, verifications: usize) -> Self {
+		assert!(verifications > 0, "an Auth must verify at least one token at a time");
+		self.verifications = verifications;
+		self
 	}
 
 	/// An `Auth` that refuses every session a server or a public grant would have

@@ -514,8 +514,8 @@ mod tests {
 
 	/// A session admitted on `initial` whose in-band tokens verify `verifications` at a time.
 	async fn admission_with(initial: Grant, verifications: usize) -> (super::super::Lease, super::super::Admissions) {
-		let (mut auth, mut admissions) = super::super::Auth::embedded("test");
-		auth.verifications = verifications;
+		let (auth, mut admissions) = super::super::Auth::embedded("test");
+		let auth = auth.with_verifications(verifications);
 		let request = auth.request(moq_auth::Transport::Quic, "/room");
 		let (lease, ()) = tokio::join!(auth.admit(request), async {
 			let admission = admissions.next().await.unwrap();
