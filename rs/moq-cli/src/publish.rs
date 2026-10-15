@@ -65,10 +65,11 @@ pub struct CaptureArgs {
 	#[usage(long, group = "video-source", alias = "screen")]
 	pub display: Option<Option<String>>,
 
-	/// Capture a single window, by the id `moq devices` reports. Supported on
-	/// macOS, Windows, and X11.
+	/// Capture a single window, by the id `moq devices` reports on macOS,
+	/// Windows, or X11. Bare `--window` opens the Linux system portal picker
+	/// (requires the `pipewire` feature); no window id is needed.
 	#[usage(long, group = "video-source")]
-	pub window: Option<String>,
+	pub window: Option<Option<String>>,
 
 	/// Capture every window of an application, by the bundle id `moq devices`
 	/// reports. Windows opened later are included. macOS only.
@@ -569,23 +570,36 @@ impl CaptureArgs {
 	/// The video source named by the flags, defaulting to the default camera.
 	/// The `video-source` arg group makes these mutually exclusive, so the order
 	/// here only decides the default.
-	fn video_source(&self) -> moq_video::capture::Source {
+	fn video_source(&self) -> anyhow::Result<moq_video::capture::Source> {
 		use moq_video::capture::Source;
 
-		if let Some(id) = &self.window {
-			Source::Window(id.clone())
+		Ok(if let Some(id) = &self.window {
+			match id {
+				Some(id) => Source::Window(id.clone()),
+				None => {
+					#[cfg(all(target_os = "linux", feature = "pipewire"))]
+					{
+						use moq_video::capture::portal::{Kind, Selection};
+						Source::Portal(Selection::new(Kind::Window))
+					}
+					#[cfg(not(all(target_os = "linux", feature = "pipewire")))]
+					anyhow::bail!(
+						"bare --window requires Linux with the pipewire feature; use --window <ID> from `moq devices`"
+					);
+				}
+			}
 		} else if let Some(id) = &self.app {
 			Source::App(id.clone())
 		} else if let Some(index) = &self.display {
 			Source::Display(index.clone())
 		} else {
 			Source::Camera(self.camera.clone().flatten())
-		}
+		})
 	}
 
 	fn video_config(&self) -> anyhow::Result<moq_video::capture::Config> {
 		let mut config = moq_video::capture::Config::default();
-		config.source = self.video_source();
+		config.source = self.video_source()?;
 		config.width = self.width;
 		config.height = self.height;
 		config.framerate = self
@@ -655,6 +669,67 @@ pub(crate) mod tests {
 	use moq_net::Timestamp;
 
 	use super::*;
+
+	#[cfg(feature = "capture")]
+	fn capture_args(flags: &[&str]) -> CaptureArgs {
+		let mut argv = vec!["moq", "--connect", "http://localhost", "import", "capture"];
+		argv.extend_from_slice(flags);
+		let cli = crate::args::Invocation::try_parse_from(argv).unwrap();
+		let crate::args::Command::Import(import) = cli.stages.into_iter().next().unwrap() else {
+			panic!("expected import");
+		};
+		let crate::args::ImportSource::Capture(args) = import.source else {
+			panic!("expected capture");
+		};
+		args
+	}
+
+	#[cfg(feature = "capture")]
+	#[test]
+	fn capture_window_picker_accepts_following_flags() {
+		let args = capture_args(&["--window", "--no-audio"]);
+		assert!(args.no_audio);
+		assert_eq!(args.window, Some(None));
+		assert_eq!(capture_args(&["--window"]).window, Some(None));
+	}
+
+	#[cfg(feature = "capture")]
+	#[test]
+	fn capture_window_id_preserves_native_selection() {
+		for id in ["39193", "x11:0x400001"] {
+			let config = capture_args(&["--window", id, "--no-audio"]).video_config().unwrap();
+			assert!(matches!(config.source, moq_video::capture::Source::Window(value) if value == id));
+		}
+	}
+
+	#[cfg(feature = "capture")]
+	#[test]
+	fn capture_window_picker_conflicts_with_other_sources() {
+		for flag in ["--camera", "--display", "--app"] {
+			assert!(
+				crate::args::Invocation::try_parse_from(["moq", "import", "capture", "--window", flag, "other",])
+					.is_err()
+			);
+		}
+	}
+
+	#[cfg(all(feature = "capture", target_os = "linux", feature = "pipewire"))]
+	#[test]
+	fn capture_window_picker_uses_portal() {
+		let config = capture_args(&["--window", "--no-audio"]).video_config().unwrap();
+		assert!(matches!(config.source, moq_video::capture::Source::Portal(_)));
+	}
+
+	#[cfg(all(feature = "capture", not(all(target_os = "linux", feature = "pipewire"))))]
+	#[test]
+	fn capture_window_picker_refuses_unsupported_builds() {
+		let error = capture_args(&["--window", "--no-audio"]).video_config().unwrap_err();
+		assert!(
+			error
+				.to_string()
+				.contains("bare --window requires Linux with the pipewire feature")
+		);
+	}
 
 	/// Real H.264 + AAC TS, reused to give the manufactured input a video clock
 	/// (section-framed verbatim export requires one) and decodable media tracks.
