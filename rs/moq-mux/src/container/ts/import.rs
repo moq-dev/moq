@@ -4162,7 +4162,7 @@ pub(super) mod test {
 		import.decode(&bytes).unwrap();
 		import.finish().unwrap();
 
-		let exporter = crate::container::ts::Export::with_ts(
+		let exporter = crate::container::ts::export_test::open_ts(
 			crate::source::announced(&consumer).await,
 			crate::catalog::CatalogFormat::Hang,
 		)
@@ -7264,7 +7264,7 @@ pub(super) mod test {
 			"the first group ends at the break, one frame after its last picture"
 		);
 
-		let mut exporter = super::super::Export::new(crate::source::announced(&consumer).await)
+		let mut exporter = crate::container::ts::export_test::open_export(crate::source::announced(&consumer).await)
 			.await
 			.unwrap()
 			.with_delay(Duration::from_secs(30))
@@ -7881,7 +7881,7 @@ pub(super) mod test {
 		// and the boundary with them. The paused clock runs out the delay and every gap in
 		// the media without a real wait.
 		let delay = std::time::Duration::from_secs(3600);
-		let mut exporter = crate::container::ts::Export::new(crate::source::announced(&consumer).await)
+		let mut exporter = crate::container::ts::export_test::open_export(crate::source::announced(&consumer).await)
 			.await
 			.unwrap()
 			.with_delay(delay)

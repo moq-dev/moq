@@ -30,6 +30,10 @@ set at the init segment, so a new rendition or a changed configuration ends the
 export. The [CLI page](/bin/cli#import) covers these and the MPEG-TS specifics:
 one program per broadcast, damaged packets, and feed checks.
 
+Exporters take a catalog stream alongside the source. Choose its encoding and
+rendition selection before exporting; the same stream shape drives every container.
+MPEG-TS metadata is retained when the stream uses `ts::Ext`.
+
 A container read yields frames plus two markers in delivery order: a gap where
 media after what was read will never arrive (a skip, a hole), carrying where it
 starts and how long it lasts as an upper bound, and an end where the publisher

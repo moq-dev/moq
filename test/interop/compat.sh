@@ -209,8 +209,11 @@ while read -r version <&3; do
             else
                 pub="$RELEASED" sub="$CURRENT" own_js="$HARNESS_RUN/js" other_js="$DIR/compat"
             fi
-            cell media "$version" "$relay_source" "$source" env RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
-                INTEROP_COMPAT_CLIENT="$other_js" INTEROP_DECODE=1 bash "$DIR/interop.sh" --subscribers rust,js-native-node
+            # One cell per reader, so a planned break in one reader's release keeps the other running.
+            for reader in rust js-native-node; do
+                cell "media-$reader" "$version" "$relay_source" "$source" env RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
+                    INTEROP_COMPAT_CLIENT="$other_js" INTEROP_DECODE=1 bash "$DIR/interop.sh" --subscribers "$reader"
+            done
             [[ "$released_fetch" == true && "$current_fetch" == true ]] || continue
             # Drive JS publication from actual subscriber demand: the publisher's own JS
             # subscribes and observes the group, which the opposite Rust CLI then

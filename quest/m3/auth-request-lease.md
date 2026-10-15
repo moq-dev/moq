@@ -5,9 +5,9 @@
 moq-relay verifies a moq-transport request token through `moq_auth::Client`,
 each request getting a lease of its own that is never counted as a session
 grant and ends when the request ends. Until this lands the relay explicitly
-refuses request-token verification as `Unsupported`, though it consumes
-session-token events. Requests independently covered by locally verified session permission
-do not require request-token verification.
+refuses request-token verification as `Unsupported`, even though it consumes
+session-token events. Every token-carrying request is verified by its token,
+even one the session's own permission covers (decided on #5148).
 
 ## Plan
 
@@ -16,10 +16,10 @@ This is not required for the experimental Rust hook or the session AUTH epic.
 Revisit the design against moq-transport's authentication model at that point;
 the lease integration below is future work, not a capability of the hook.
 
-An application acceptor built on moq-net answers request tokens through
-the explicit request variant of `requests()` itself and does not need this;
-it is the relay's half of the request-token hook from
-[#5148](https://github.com/moq-dev/moq/pull/5148).
+An application built on moq-net opts into request-token verification through
+the acceptor API #5148 ships, verifies each token-bearing request itself
+before accepting it, and does not need this. This quest is the relay's half of
+request tokens ([#5148](https://github.com/moq-dev/moq/pull/5148)).
 
 - A per-request call on `moq_auth::Client`, not the `Client::attach` that
   session tokens use. `attach` connects
@@ -31,9 +31,10 @@ it is the relay's half of the request-token hook from
   carrying the same bytes get two leases. Name the call while implementing.
 - The request is resolved against the origin with the path checked against
   that lease's grant, not through the session's scoped origin handle.
-- Docs: `doc/bin/relay/auth.md` states the order (session grant, then the
-  request's token, then `UNAUTHORIZED`) and that a request token covers only
-  its request.
+- Docs: `doc/bin/relay/auth.md` states the rule: a request carrying a token
+  is decided by its verified request grant alone, a request without one by
+  the session grant, and anything else is `UNAUTHORIZED`. It also says that a
+  request token covers only its request.
 - Tests: through the relay, the auth server never counts a request token as a
   session grant and sees its lease end with the request.
 

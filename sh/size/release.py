@@ -6,6 +6,10 @@ import subprocess
 from pathlib import Path
 
 # Each pattern must yield a shipping file, so a renamed or skipped release job fails loudly.
+# Keep the Go static-library history keys when the coordinator supplies them.
+# Android and iOS libraries are already measured inside Kotlin/Swift packages.
+GO_TARGETS = {"x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu",
+              "aarch64-apple-darwin", "x86_64-pc-windows-msvc"}
 ARTIFACTS = ["go-lib-*", "moq-c-*", "moq-cli-*", "moq-relay-*", "python-*", "kotlin-package", "swift-ffi-package"]
 # What a consumer downloads: archives, packages and the Go mirror's staticlibs.
 # Bare binaries, .deb and .rpm repeat the archives; Go's .so and .dll ship inside the packages.
@@ -14,7 +18,8 @@ VERSION = re.compile(r"[-_]v?\d+\.\d+\.\d+")
 
 
 def download(run, root):
-    patterns = [arg for pattern in ARTIFACTS for arg in ("--pattern", pattern)]
+    native = [f"default-lib-{target}" for target in sorted(GO_TARGETS)]
+    patterns = [arg for pattern in [*ARTIFACTS, *native] for arg in ("--pattern", pattern)]
     subprocess.run(["gh", "run", "download", str(run), "--dir", str(root), *patterns], check=True)
 
 
@@ -23,10 +28,16 @@ def sizes(root):
     result = {}
     for pattern in ARTIFACTS:
         found = False
-        for path in sorted(Path(root).glob(f"{pattern}/**/*")):
+        paths = list(Path(root).glob(f"{pattern}/**/*"))
+        if pattern == "go-lib-*":
+            paths.extend(path for path in Path(root).glob("default-lib-*/**/*")
+                         if path.relative_to(root).parts[0].removeprefix("default-lib-") in GO_TARGETS)
+        for path in sorted(paths):
             if not path.is_file() or not path.name.endswith(SHIPPING) or path.name.endswith(("-sources.jar", "-javadoc.jar")):
                 continue
             artifact = path.relative_to(root).parts[0]
+            if artifact.startswith("default-lib-"):
+                artifact = artifact.replace("default-lib-", "go-lib-", 1)
             key = f"release/{artifact}/{VERSION.sub('', path.name)}"
             if key in result:
                 raise ValueError(f"duplicate release artifact: {key}")
