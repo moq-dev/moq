@@ -129,7 +129,8 @@ const SHORT: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/bb
 	.0;
 
 /// A subscriber already waiting when a short import ends still receives its media: the
-/// publisher keeps the finished tracks servable for their max-age after EOF.
+/// import announces at the finish, once its catalog lists the tracks, and keeps them servable
+/// for their max-age after EOF.
 #[tokio::test]
 async fn a_short_import_drains_its_media_to_a_waiting_subscriber() {
 	let _ = moq_tokio::crypto::install_default();
@@ -157,6 +158,9 @@ async fn a_short_import_drains_its_media_to_a_waiting_subscriber() {
 		.await
 		.expect("subscriber connects");
 
+	stdin.write_all(SHORT).await.expect("write stdin");
+	drop(stdin);
+
 	running(&mut child, "the announce", announced.next())
 		.await
 		.expect("origin closed");
@@ -170,9 +174,6 @@ async fn a_short_import_drains_its_media_to_a_waiting_subscriber() {
 	)
 	.await
 	.expect("subscribe to the catalog");
-
-	stdin.write_all(SHORT).await.expect("write stdin");
-	drop(stdin);
 
 	let catalog = tokio::time::timeout(TIMEOUT, catalogs.next())
 		.await

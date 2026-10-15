@@ -11,7 +11,7 @@ fi
 
 cargo clippy --locked -p moq-net --no-default-features --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked -p moq-net --no-default-features --no-deps
-bash sh/rs/nextest.sh cargo nextest run --locked -p moq-net --no-default-features --all-targets
+bash sh/rs/nextest.sh cargo nextest run --locked -p moq-net --no-default-features --tests
 
 # A browser leaf chooses its entropy backend. Build a consumer instead of moq-net's
 # native-only bench dev-dependencies, with the same dependency versions as the repo.

@@ -70,7 +70,7 @@ enum FetchPrior {
 	/// The first object on the stream.
 	None,
 	/// The next object of the same group.
-	Same,
+	Same(Option<u64>),
 }
 
 /// The group a FETCH answers with, read out of the cache so a later eviction cannot
@@ -79,27 +79,53 @@ struct FetchedGroup {
 	sequence: u64,
 	/// The Object ID of the first frame.
 	first: u64,
-	frames: Vec<frame::Frame>,
+	frames: Vec<frame::Object>,
+	/// The group's END_OF_GROUP status object, when it falls in the range.
+	end_object: Option<Arc<crate::model::object::Fields>>,
 	/// The fetched range reached the finished group's final object.
 	complete: bool,
 	/// The track's info, which FETCH_OK describes and whose units stamp the objects.
 	info: track::Info,
 }
 
-impl FetchPrior {
-	/// The prior for the next object of a single-group stream, clearing `first`.
-	fn next(first: &mut bool) -> Self {
-		match std::mem::take(first) {
-			true => Self::None,
-			false => Self::Same,
-		}
-	}
+struct FetchObjectInfo<'a> {
+	sequence: u64,
+	object: u64,
+	prior: FetchPrior,
+	timestamp: Option<Timestamp>,
+	timescale: Option<Timescale>,
+	version: Version,
+	fields: Option<&'a crate::model::object::Fields>,
+}
+
+fn fetch_prior(version: Version, prior: Option<u64>, object: u64) -> Result<FetchPrior, Error> {
+	let Some(prior) = prior else {
+		return Ok(FetchPrior::None);
+	};
+	let step = object
+		.checked_sub(prior)
+		.filter(|step| *step > 0)
+		.ok_or(Error::MalformedTrack)?;
+	Ok(FetchPrior::Same((step != 1).then_some(match version {
+		Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => object,
+		_ => step,
+	})))
 }
 
 impl FetchedGroup {
-	/// One past the last Object ID read.
+	/// One past the last Object ID read, including the END_OF_GROUP object.
 	fn end(&self) -> u64 {
-		self.first + self.frames.len() as u64
+		if let Some(end) = &self.end_object {
+			return end.id.saturating_add(1);
+		}
+		self.frames.last().map_or(self.first, |frame| {
+			frame
+				.fields
+				.as_ref()
+				.map_or(self.first + self.frames.len() as u64, |fields| {
+					fields.id.saturating_add(1)
+				})
+		})
 	}
 }
 
@@ -116,34 +142,69 @@ async fn read_fetch(
 	priority: u8,
 ) -> Result<FetchedGroup, Error> {
 	let info = track.query().await?;
-	let fetch = group::Fetch {
-		priority,
-		frame_start: skip,
+	let cached = track.peek_group(sequence);
+	let wire = cached.as_ref().and_then(|group| group.wire());
+	if wire.as_ref().is_some_and(|wire| !wire.fetchable) {
+		return Err(Error::Unsupported);
+	}
+	// Relayed Object IDs need not match frame ordinals, so a relayed group is read from
+	// its first frame and filtered by ID. Its marked gaps cover the IDs between where it
+	// starts and its first object; a start below that misses to the upstream.
+	let frame_start = match (&wire, &cached) {
+		(Some(_), Some(group)) => skip.min(group.first_frame()),
+		_ => skip,
 	};
-	let mut group = track.fetch_group(sequence, fetch).await?;
-
-	// `fetch_group` positions the consumer at `skip`, or refuses a group that no
-	// longer holds it.
-	let first = group.index();
+	let mut group = track
+		.fetch_group(sequence, group::Fetch { priority, frame_start })
+		.await?;
+	let mut first = skip;
 	let mut frames = Vec::new();
+	// Reading an object past the range proves the range missed the group's end.
+	let mut overshot = false;
 	// A long cached group is read a slice per poll, so the session's other tasks still run.
 	let mut budget = kio::coop::Budget::new(32);
-	while until.is_none_or(|until| first + (frames.len() as u64) < until) {
+	loop {
 		kio::wait(|waiter| budget.poll_yield(waiter)).await;
-		let Some(frame) = group.read_frame().await? else {
+		if group.wire().is_some_and(|wire| !wire.fetchable) {
+			return Err(Error::Unsupported);
+		}
+		let ordinal = group.index();
+		let Some(frame) = kio::wait(|waiter| group.poll_read_object(waiter)).await? else {
 			break;
 		};
+		let id = frame.fields.as_ref().map_or(ordinal, |fields| fields.id);
+		if until.is_some_and(|until| id >= until) {
+			overshot = true;
+			break;
+		}
+		if id < skip {
+			continue;
+		}
+		if frames.is_empty() {
+			first = id;
+		}
 		frames.push(frame);
+		if until.is_some_and(|until| id.saturating_add(1) >= until) {
+			break;
+		}
 	}
 	// A bounded range can reach the group's end without reading its terminal None, and a
 	// start past the end is already there.
-	let complete =
-		matches!(group.finished().now_or_never(), Some(Ok(_))) && group.index() >= group.frame_count() as u64;
+	let complete = !overshot
+		&& matches!(group.finished().now_or_never(), Some(Ok(_)))
+		&& group.index() >= group.frame_count() as u64;
+	let end_object = group
+		.end_object()
+		.filter(|end| complete && end.id >= skip && until.is_none_or(|until| end.id < until));
 
+	if group.wire().is_some_and(|wire| !wire.fetchable) {
+		return Err(Error::Unsupported);
+	}
 	Ok(FetchedGroup {
 		sequence,
 		first,
 		frames,
+		end_object,
 		complete,
 		info,
 	})
@@ -1264,9 +1325,12 @@ where
 		version: Version,
 	) -> Result<(), Error> {
 		let mut index: u64 = 0;
-		let mut first = true;
+		let mut prior = None;
 
-		let mut buf: frame::Buffer = frame::Buffer::new();
+		let mut buf = arrayvec::ArrayVec::<frame::Object, 8>::new();
+		if group.wire().is_some_and(|wire| !wire.fetchable) {
+			return Err(Error::Unsupported);
+		}
 		// A long cached group is written a slice per poll, so the session's other tasks still run.
 		let mut budget = kio::coop::Budget::new(32);
 		'serve: loop {
@@ -1283,7 +1347,7 @@ where
 					if waiter.poll_future(closed.as_mut()).is_ready() {
 						return Poll::Ready(Err(Error::Cancel));
 					}
-					match group.poll_read_frames(waiter, &mut buf) {
+					match group.poll_read_objects(waiter, &mut buf) {
 						Poll::Pending => match group.poll_next_frame(waiter) {
 							Poll::Ready(Ok(Some(frame))) => Poll::Ready(Ok(FillStep::Partial(frame))),
 							Poll::Ready(Ok(None)) => Poll::Ready(Ok(FillStep::Done)),
@@ -1300,29 +1364,41 @@ where
 
 			match step? {
 				FillStep::Batch => {
-					for i in 0..buf.filled().len() {
+					for frame in &buf {
 						if until.is_some_and(|until| index >= until) {
 							break 'serve;
 						}
-						let frame = buf.filled()[i].clone();
+						let frame = frame.clone();
+						index = frame.fields.as_ref().map_or(index, |fields| fields.id);
+						if until.is_some_and(|until| index >= until) {
+							break 'serve;
+						}
 						if index >= skip {
 							Self::write_fetch_object(
 								stream,
-								sequence,
-								index,
-								FetchPrior::next(&mut first),
-								frame.timestamp,
-								timescale,
-								version,
+								FetchObjectInfo {
+									sequence,
+									object: index,
+									prior: fetch_prior(version, prior, index)?,
+									timestamp: frame.timestamp,
+									timescale,
+									version,
+									fields: frame.fields.as_deref(),
+								},
 							)
 							.await?;
-							Self::write_fetch_payload(stream, frame.payload, version).await?;
+							Self::write_fetch_payload(stream, frame.frame.payload, version).await?;
+							prior = Some(index);
 						}
 						index += 1;
 						group.keep_alive();
 					}
 				}
 				FillStep::Partial(mut frame) => {
+					index = frame.fields.as_ref().map_or(index, |fields| fields.id);
+					if until.is_some_and(|until| index >= until) {
+						break;
+					}
 					if index < skip {
 						// A skipped frame still has to be drained to advance the cursor.
 						loop {
@@ -1346,14 +1422,18 @@ where
 
 					Self::write_fetch_object(
 						stream,
-						sequence,
-						index,
-						FetchPrior::next(&mut first),
-						frame.timestamp,
-						timescale,
-						version,
+						FetchObjectInfo {
+							sequence,
+							object: index,
+							prior: fetch_prior(version, prior, index)?,
+							timestamp: frame.timestamp,
+							timescale,
+							version,
+							fields: frame.fields.as_deref(),
+						},
 					)
 					.await?;
+					prior = Some(index);
 					index += 1;
 
 					stream.varint(frame.size).await?;
@@ -1392,31 +1472,39 @@ where
 	/// Write one fetch object's header and timestamp properties in the negotiated layout.
 	async fn write_fetch_object(
 		stream: &mut Writer<Ranked<S::SendStream>, Version>,
-		sequence: u64,
-		object: u64,
-		prior: FetchPrior,
-		timestamp: Option<Timestamp>,
-		timescale: Option<Timescale>,
-		version: Version,
+		header: FetchObjectInfo<'_>,
 	) -> Result<(), Error> {
-		// An unstamped object has no properties at all, so the field is omitted rather
-		// than written empty: the track declared no units to read a timestamp in.
-		// Drafts 14-16 never declare TIMESCALE, so they never stamp either.
+		let FetchObjectInfo {
+			sequence,
+			object,
+			prior,
+			timestamp,
+			timescale,
+			version,
+			fields,
+		} = header;
+		// Relayed properties survive without a timescale. Plain frames generate a
+		// timestamp only on drafts that can declare its units.
 		let timescale = timescale.filter(|_| ietf::Properties::sends_timescale(version));
-		let properties = match timescale {
-			Some(timescale) => {
-				// Every frame on a timed track is timed (see `track::Info::timescale`).
-				let timestamp = timestamp.ok_or(Error::TimestampMismatch)?;
-				let mut properties = Vec::new();
-				ietf::encode_object_time(
-					&mut Encoder::new(&mut properties, version.into()),
-					timestamp,
-					timescale,
-					version,
-				)?;
-				Some(properties)
+		let properties = if let Some(fields) = fields {
+			let properties = super::object::write(&fields.properties, version, timescale)?;
+			(!properties.is_empty()).then_some(properties)
+		} else {
+			match timescale {
+				Some(timescale) => {
+					// Every frame on a timed track is timed (see `track::Info::timescale`).
+					let timestamp = timestamp.ok_or(Error::TimestampMismatch)?;
+					let mut properties = Vec::new();
+					ietf::encode_object_time(
+						&mut Encoder::new(&mut properties, version.into()),
+						timestamp,
+						timescale,
+						version,
+					)?;
+					Some(properties)
+				}
+				None => None,
 			}
-			None => None,
 		};
 
 		if version == Version::Draft14 {
@@ -1443,10 +1531,10 @@ where
 				properties,
 			},
 			// Same group and priority; the Object ID is the prior one plus one.
-			FetchPrior::Same => ietf::FetchObject::Object {
+			FetchPrior::Same(delta) => ietf::FetchObject::Object {
 				subgroup: ietf::FetchSubgroup::Zero,
 				group: None,
-				object: None,
+				object: delta,
 				priority: None,
 				properties,
 			},
@@ -1689,11 +1777,29 @@ where
 			})
 			.await
 		};
-		let group = match group {
+		let mut group = match group {
 			Some(Ok(group)) => group,
 			Some(Err(err)) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
 			None => return Ok(()),
 		};
+		// Only draft-14 and 15 FETCH objects carry a status. Later drafts end the response at
+		// the last frame, which is all a receiver can account for.
+		if !matches!(self.version, Version::Draft14 | Version::Draft15) {
+			group.end_object = None;
+		}
+		group.end_object = group.end_object.map(|end| status_fields(end, self.version));
+		// FETCH keeps each object's Timestamp, in the units FETCH_OK declares wherever the
+		// draft can declare them. Opting out of the properties strips nothing from the objects.
+		let timescale = group
+			.info
+			.timescale
+			.filter(|_| ietf::Properties::sends_timescale(self.version));
+		let fields = group.frames.iter().filter_map(|frame| frame.fields.as_deref());
+		for fields in fields.chain(group.end_object.as_deref()) {
+			if let Err(err) = super::object::write(&fields.properties, self.version, timescale) {
+				return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await;
+			}
+		}
 		let draft20 = Filter::is_draft20(self.version);
 		let end_of_track = !joined && group.complete && track.final_sequence() == group.sequence.checked_add(1);
 		// Draft-20 caps the response at Largest Object, and refuses a start past it (section
@@ -1725,13 +1831,6 @@ where
 				)
 				.await;
 		}
-
-		// FETCH keeps each object's Timestamp, in the units FETCH_OK declares wherever the
-		// draft can declare them. Opting out of the properties strips nothing from the objects.
-		let timescale = group
-			.info
-			.timescale
-			.filter(|_| ietf::Properties::sends_timescale(self.version));
 
 		let (end_location, end_of_track) = if joined {
 			// The subscription starts at the saved Largest Object, so the prefix of that
@@ -1811,19 +1910,42 @@ where
 					request_id: msg.request_id,
 				})
 				.await?;
-			let mut first = true;
-			for (object, frame) in (group.first..).zip(group.frames) {
+			let mut prior = None;
+			for (ordinal, frame) in (group.first..).zip(group.frames) {
+				let object = frame.fields.as_ref().map_or(ordinal, |fields| fields.id);
+				let position = fetch_prior(self.version, prior, object)?;
+				prior = Some(object);
 				Self::write_fetch_object(
 					&mut writer,
-					group.sequence,
-					object,
-					FetchPrior::next(&mut first),
-					frame.timestamp,
-					timescale,
-					self.version,
+					FetchObjectInfo {
+						sequence: group.sequence,
+						object,
+						prior: position,
+						timestamp: frame.timestamp,
+						timescale,
+						version: self.version,
+						fields: frame.fields.as_deref(),
+					},
 				)
 				.await?;
-				Self::write_fetch_payload(&mut writer, frame.payload, self.version).await?;
+				Self::write_fetch_payload(&mut writer, frame.frame.payload, self.version).await?;
+			}
+			if let Some(end) = group.end_object.as_deref() {
+				Self::write_fetch_object(
+					&mut writer,
+					FetchObjectInfo {
+						sequence: group.sequence,
+						object: end.id,
+						prior: fetch_prior(self.version, prior, end.id)?,
+						timestamp: None,
+						timescale,
+						version: self.version,
+						fields: Some(end),
+					},
+				)
+				.await?;
+				writer.varint(0).await?;
+				writer.varint(END_OF_GROUP).await?;
 			}
 			settle(&mut writer).await?;
 			Ok::<(), Error>(())
@@ -3115,6 +3237,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						continue;
 					}
 
+					let wire = group.wire();
 					let msg = ietf::GroupHeader {
 						track_alias: self.request_id.0,
 						group_id: sequence,
@@ -3127,11 +3250,14 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						// Object Property) only when TIMESCALE was declared for this version.
 						// Drafts 14-16 cannot, so the flag stays clear.
 						flags: ietf::GroupFlags {
-							has_extensions: self.timescale.is_some(),
-							first_object: slice.skip == 0,
+							has_extensions: self.timescale.is_some()
+								|| wire.as_ref().is_some_and(|wire| wire.extensions),
+							first_object: wire
+								.as_ref()
+								.map_or(slice.skip == 0, |wire| wire.first_object && slice.skip <= wire.first_id),
 							// A stream capped by the range stops before the group may end, so its
 							// FIN cannot claim END_OF_GROUP.
-							has_end: slice.until.is_none(),
+							has_end: slice.until.is_none() && wire.as_ref().is_none_or(|wire| wire.has_end),
 							..Default::default()
 						},
 					};
@@ -3156,7 +3282,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 				}
 				Poll::Ready(Ok(None)) => {
 					// Datagrams written before the track finished still go out.
-					self.poll_datagrams(waiter);
+					self.poll_datagrams(waiter)?;
 					self.draining = true;
 					if let Poll::Ready(Ok(end)) = self.track.poll_finished(waiter) {
 						self.end = Some(end);
@@ -3168,7 +3294,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			}
 		}
 		// Groups first, so a burst of datagrams cannot starve them.
-		self.poll_datagrams(waiter);
+		self.poll_datagrams(waiter)?;
 		// Newly created group machines start now rather than on the next wake.
 		let _ = self.children.poll(waiter);
 		Poll::Pending
@@ -3176,42 +3302,98 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 
 	/// Send every buffered datagram as an OBJECT_DATAGRAM, best-effort, like moq-lite.
 	///
-	/// A datagram is Object 0 of a group that has no other, so the Object ends its group.
+	/// Public datagrams are Object 0 and end their group; relayed ones retain their fields.
 	/// The track's end or failure surfaces through its groups, so this only stops.
-	fn poll_datagrams(&mut self, waiter: &kio::Waiter) {
+	fn poll_datagrams(&mut self, waiter: &kio::Waiter) -> Result<(), Error> {
 		if !self.datagrams {
-			return;
+			return Ok(());
 		}
-		while let Poll::Ready(Ok(Some(datagram))) = self.track.poll_recv_datagram(waiter) {
+		while let Poll::Ready(Ok(Some(datagram))) = self.track.poll_recv_wire_datagram(waiter) {
 			let sequence = datagram.sequence;
-			let properties = match self.timescale {
-				Some(timescale) => {
-					// Every datagram on a timed track is timed (see `track::Info::timescale`).
-					let Some(timestamp) = datagram.timestamp else {
-						continue;
-					};
-					let mut properties = Vec::new();
-					let mut w = Encoder::new(&mut properties, self.version.into());
-					if ietf::encode_object_time(&mut w, timestamp, timescale, self.version).is_err() {
+			let id = datagram.wire.as_ref().and_then(|wire| wire.object_id).unwrap_or(0);
+			if self
+				.range
+				.start
+				.is_some_and(|start| start.group == sequence && id < start.object)
+				|| self
+					.range
+					.end
+					.is_some_and(|end| end.group == sequence && end.object.is_some_and(|end| id > end))
+			{
+				continue;
+			}
+			let (object_id, priority, end_of_group, status, properties) = match &datagram.wire {
+				Some(wire) => {
+					// A datagram this draft cannot carry is dropped like an oversized one: it
+					// is best-effort, and the track's groups do not depend on it.
+					if wire.status == Some(1) && !matches!(self.version, Version::Draft14 | Version::Draft15) {
+						tracing::debug!(sequence, "dropping a datagram status this draft cannot carry");
 						continue;
 					}
-					Some(properties)
+					let properties = match super::object::write(&wire.properties, self.version, self.timescale) {
+						Ok(properties) => properties,
+						Err(err) => {
+							tracing::debug!(%err, sequence, "dropping a datagram whose properties cannot be forwarded");
+							continue;
+						}
+					};
+					let object = if self.version == Version::Draft14 && wire.status.is_some() {
+						Some(wire.object_id.unwrap_or(0))
+					} else {
+						wire.object_id
+					};
+					// An omitted priority inherited the source track's default, which this
+					// response may not carry (or carry the same), so resolve it here.
+					let priority = wire
+						.priority
+						.or_else(|| Some(super::priority::to_wire(self.track.info().priority)));
+					(
+						object,
+						priority,
+						wire.end_of_group,
+						wire.status,
+						(!properties.is_empty()).then_some(properties),
+					)
 				}
-				None => None,
+				None => {
+					let mut properties = Vec::new();
+					if let Some(timescale) = self.timescale {
+						let timestamp = datagram.timestamp.ok_or(Error::TimestampMismatch)?;
+						ietf::encode_object_time(
+							&mut Encoder::new(&mut properties, self.version.into()),
+							timestamp,
+							timescale,
+							self.version,
+						)?;
+					}
+					(
+						None,
+						Some(super::priority::to_wire(self.track.info().priority)),
+						true,
+						None,
+						(!properties.is_empty()).then_some(properties),
+					)
+				}
 			};
 			let body = ietf::ObjectDatagram {
 				track_alias: self.request_id.0,
 				group_id: sequence,
-				object_id: None,
-				publisher_priority: Some(super::priority::to_wire(self.track.info().priority)),
-				end_of_group: true,
+				object_id,
+				publisher_priority: priority,
+				end_of_group,
 				properties,
-				body: ietf::DatagramBody::Payload(datagram.payload),
+				body: match status {
+					Some(status) => ietf::DatagramBody::Status(status),
+					None => ietf::DatagramBody::Payload(datagram.datagram.payload),
+				},
 			};
-			let Ok(body) = body.encode_bytes(self.version) else {
-				continue;
+			let body = match body.encode_bytes(self.version) {
+				Ok(body) => body,
+				Err(err) => {
+					tracing::debug!(%err, sequence, "dropping a datagram this draft cannot encode");
+					continue;
+				}
 			};
-
 			let max = self.session.max_datagram_size();
 			if body.len() > max {
 				tracing::debug!(
@@ -3224,6 +3406,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			}
 			let _ = self.session.send_datagram(&body);
 		}
+		Ok(())
 	}
 }
 
@@ -3388,7 +3571,9 @@ struct GroupServe<S: crate::transport::poll::Session> {
 	group: group::Consumer,
 	timescale: Option<Timescale>,
 	version: Version,
-	object_delta: u64,
+	prior_object: Option<u64>,
+	slice: GroupSlice,
+	ended: bool,
 	terminal: Option<Arc<Terminal>>,
 	marked: bool,
 	state: GroupState<S>,
@@ -3408,7 +3593,7 @@ enum GroupState<S: crate::transport::poll::Session> {
 		writer: Writer<S::SendStream, Version>,
 		frame: Option<frame::Consumer>,
 		chunk: Option<bytes::Bytes>,
-		batch: Box<frame::Buffer>,
+		batch: Box<arrayvec::ArrayVec<frame::Object, 8>>,
 		batch_pos: usize,
 	},
 	/// Every frame is written and the FIN sent: wait for the acknowledgement so a
@@ -3440,9 +3625,10 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		version: Version,
 		slice: GroupSlice,
 	) -> Self {
-		group.skip_to(slice.skip);
-		group.end_at(slice.until.map_or(Bound::Unbounded, Bound::Excluded));
-		let object_delta = group.index();
+		if group.wire().is_none() {
+			group.skip_to(slice.skip);
+			group.end_at(slice.until.map_or(Bound::Unbounded, Bound::Excluded));
+		}
 		Self {
 			session,
 			opened: Default::default(),
@@ -3451,7 +3637,9 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 			group,
 			timescale,
 			version,
-			object_delta,
+			prior_object: None,
+			slice,
+			ended: false,
 			terminal: None,
 			marked: false,
 			state: GroupState::Open,
@@ -3506,7 +3694,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						writer,
 						frame: None,
 						chunk: None,
-						batch: Box::new(frame::Buffer::new()),
+						batch: Box::new(arrayvec::ArrayVec::new()),
 						batch_pos: 0,
 					};
 				}
@@ -3563,32 +3751,54 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 								}
 							} else if let Some(pending) = frame {
 								match pending.poll_read_chunk(waiter) {
-									Poll::Ready(Ok(Some(next))) => *chunk = Some(next),
+									Poll::Ready(Ok(Some(next))) => {
+										let id = pending
+											.fields
+											.as_ref()
+											.map_or(self.group.index() - 1, |fields| fields.id);
+										if id >= self.slice.skip {
+											*chunk = Some(next);
+										}
+									}
 									Poll::Ready(Ok(None)) => *frame = None,
 									Poll::Ready(Err(err)) => break 'serve Err(err),
 									Poll::Pending => return Poll::Pending,
 								}
 							} else if *batch_pos < batch.len() {
-								let batched = &mut batch.filled_mut()[*batch_pos];
-								if let Err(err) = buffer_object_info(
-									writer,
-									std::mem::take(&mut self.object_delta),
-									self.msg.flags.has_extensions,
-									batched.timestamp,
-									batched.payload.len() as u64,
-									self.timescale,
-									self.version,
-								) {
-									break 'serve Err(err);
+								let ordinal = self.group.index() - batch.len() as u64 + *batch_pos as u64;
+								let batched = &mut batch[*batch_pos];
+								let id = batched.fields.as_ref().map_or(ordinal, |fields| fields.id);
+								*batch_pos += 1;
+								if self.slice.until.is_some_and(|until| id >= until) {
+									break 'serve Ok(());
 								}
-								let payload = std::mem::take(&mut batched.payload);
+								if id < self.slice.skip {
+									continue;
+								}
+								let delta = object_delta(self.prior_object, id)?;
+								buffer_object(
+									writer,
+									Object {
+										delta,
+										timestamp: batched.timestamp,
+										size: batched.payload.len() as u64,
+										status: 0,
+										fields: batched.fields.as_deref(),
+									},
+									ObjectEncoding {
+										extensions: self.msg.flags.has_extensions,
+										timescale: self.timescale,
+										version: self.version,
+									},
+								)?;
+								self.prior_object = Some(id);
+								let payload = std::mem::take(&mut batched.frame.payload);
 								if !payload.is_empty() {
 									*chunk = Some(payload);
 								}
-								*batch_pos += 1;
 								self.group.keep_alive();
 							} else {
-								match self.group.poll_read_frames(waiter, batch) {
+								match self.group.poll_read_objects(waiter, batch) {
 									Poll::Ready(Ok(count)) if count > 0 => {
 										*batch_pos = 0;
 										continue;
@@ -3602,33 +3812,73 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 
 								match self.group.poll_next_frame(waiter) {
 									Poll::Ready(Ok(Some(next))) => {
-										if let Err(err) = buffer_object(
-											writer,
-											std::mem::take(&mut self.object_delta),
-											self.msg.flags.has_extensions,
-											&next,
-											self.timescale,
-											self.version,
-										) {
-											break 'serve Err(err);
+										let id =
+											next.fields.as_ref().map_or(self.group.index() - 1, |fields| fields.id);
+										if self.slice.until.is_some_and(|until| id >= until) {
+											break 'serve Ok(());
 										}
+										if id < self.slice.skip {
+											// The skipped partial frame still drains before the next object.
+											*frame = Some(next);
+											continue;
+										}
+										buffer_object(
+											writer,
+											Object {
+												delta: object_delta(self.prior_object, id)?,
+												timestamp: next.timestamp,
+												size: next.size,
+												status: 0,
+												fields: next.fields.as_deref(),
+											},
+											ObjectEncoding {
+												extensions: self.msg.flags.has_extensions,
+												timescale: self.timescale,
+												version: self.version,
+											},
+										)?;
+										self.prior_object = Some(id);
 										// An empty object has no payload to stream.
 										if next.size > 0 {
 											*frame = Some(next);
 										}
 									}
 									Poll::Ready(Ok(None)) => {
+										if !self.ended
+											&& let Some(end) =
+												self.group.end_object().map(|end| status_fields(end, self.version))
+											&& end.id >= self.slice.skip && self
+											.slice
+											.until
+											.is_none_or(|until| end.id < until)
+										{
+											buffer_object(
+												writer,
+												Object {
+													delta: object_delta(self.prior_object, end.id)?,
+													timestamp: None,
+													size: 0,
+													status: 3,
+													fields: Some(&end),
+												},
+												ObjectEncoding {
+													extensions: self.msg.flags.has_extensions,
+													timescale: self.timescale,
+													version: self.version,
+												},
+											)?;
+											self.ended = true;
+											self.prior_object = Some(end.id);
+											continue;
+										}
 										// The track ends right after this group's last object, so
 										// the marker rides this stream rather than a separate one.
 										if !self.marked
-											&& self
-												.terminal
-												.as_ref()
-												.and_then(|terminal| terminal.end.get())
-												.is_some_and(|end| {
-													end.group == self.msg.group_id && end.frame == self.group.index()
-												}) {
-											writer.buffer_varint(std::mem::take(&mut self.object_delta))?;
+											&& let Some(end) =
+												self.terminal.as_ref().and_then(|terminal| terminal.end.get())
+											&& end.group == self.msg.group_id && end.frame == self.group.index()
+										{
+											writer.buffer_varint(object_delta(self.prior_object, end.frame)?)?;
 											if self.msg.flags.has_extensions {
 												writer.buffer_varint(0)?;
 											}
@@ -3698,59 +3948,77 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 }
 
 /// Object status: no object at or past this location exists.
+const END_OF_GROUP: u64 = 0x3;
 const END_OF_TRACK: u64 = 0x4;
 
-/// Buffer one object's header and prefix: the id delta, optional extension
-/// headers carrying the timestamp, the size, and (for an empty object) the status.
-fn buffer_object<W: crate::transport::poll::SendStream>(
-	writer: &mut Writer<W, Version>,
+/// An object's header, with private relay fields when it came from an IETF peer.
+struct Object<'a> {
 	delta: u64,
-	has_extensions: bool,
-	frame: &frame::Consumer,
-	timescale: Option<Timescale>,
-	version: Version,
-) -> Result<(), Error> {
-	buffer_object_info(
-		writer,
-		delta,
-		has_extensions,
-		frame.timestamp,
-		frame.size,
-		timescale,
-		version,
-	)
-}
-
-fn buffer_object_info<W: crate::transport::poll::SendStream>(
-	writer: &mut Writer<W, Version>,
-	delta: u64,
-	has_extensions: bool,
 	timestamp: Option<Timestamp>,
 	size: u64,
+	status: u64,
+	fields: Option<&'a crate::model::object::Fields>,
+}
+
+struct ObjectEncoding {
+	extensions: bool,
 	timescale: Option<Timescale>,
 	version: Version,
-) -> Result<(), Error> {
-	writer.buffer_varint(delta)?;
+}
 
-	if let Some(timescale) = timescale.filter(|_| has_extensions) {
-		// Per-object extension headers carry the frame's presentation timestamp, which
-		// every frame on a timed track has (see `track::Info::timescale`).
-		let timestamp = timestamp.ok_or(Error::TimestampMismatch)?;
-		let mut ext = Vec::new();
-		ietf::encode_object_time(
-			&mut Encoder::new(&mut ext, version.into()),
-			timestamp,
-			timescale,
-			version,
-		)?;
+fn object_delta(prior: Option<u64>, id: u64) -> Result<u64, Error> {
+	match prior {
+		None => Ok(id),
+		Some(prior) => id
+			.checked_sub(prior)
+			.and_then(|step| step.checked_sub(1))
+			.ok_or(Error::MalformedTrack),
+	}
+}
+
+/// A status object's fields, without properties where its draft forbids them.
+fn status_fields(
+	end: std::sync::Arc<crate::model::object::Fields>,
+	version: Version,
+) -> std::sync::Arc<crate::model::object::Fields> {
+	match super::object::status_has_properties(version) || end.properties.is_empty() {
+		true => end,
+		false => std::sync::Arc::new(crate::model::object::Fields {
+			id: end.id,
+			properties: Default::default(),
+		}),
+	}
+}
+
+fn buffer_object<W: crate::transport::poll::SendStream>(
+	writer: &mut Writer<W, Version>,
+	object: Object<'_>,
+	encoding: ObjectEncoding,
+) -> Result<(), Error> {
+	writer.buffer_varint(object.delta)?;
+	if encoding.extensions {
+		let ext = match object.fields {
+			Some(fields) => super::object::write(&fields.properties, encoding.version, encoding.timescale)?,
+			None => {
+				let mut ext = Vec::new();
+				if let Some(timescale) = encoding.timescale {
+					let timestamp = object.timestamp.ok_or(Error::TimestampMismatch)?;
+					ietf::encode_object_time(
+						&mut Encoder::new(&mut ext, encoding.version.into()),
+						timestamp,
+						timescale,
+						encoding.version,
+					)?;
+				}
+				ext
+			}
+		};
 		writer.buffer_varint(ext.len() as u64)?;
 		writer.buffer_raw(&ext);
 	}
-
-	writer.buffer_varint(size)?;
-	if size == 0 {
-		// Have to write the object status too: Normal (0).
-		writer.buffer_varint(0)?;
+	writer.buffer_varint(object.size)?;
+	if object.size == 0 {
+		writer.buffer_varint(object.status)?;
 	}
 	Ok(())
 }
@@ -10101,8 +10369,7 @@ fn live_edge(track: &track::Consumer) -> LiveEdge {
 
 	match track.peek_latest() {
 		Some(group) if group.sequence == latest => {
-			let count = group.frame_count() as u64;
-			let largest = match count.checked_sub(1) {
+			let largest = match group.last_object() {
 				Some(object) => Some(Location { group: latest, object }),
 				// A group with no frames yet has no objects, so the largest sits in an
 				// earlier group. Walk back through the cache to find it, or a peer that
@@ -10151,7 +10418,7 @@ fn largest_before(track: &track::Consumer, sequence: u64) -> Option<Location> {
 	let mut sequence = sequence;
 	loop {
 		let group = track.peek_before(sequence)?;
-		if let Some(object) = (group.frame_count() as u64).checked_sub(1) {
+		if let Some(object) = group.last_object() {
 			return Some(Location {
 				group: group.sequence,
 				object,

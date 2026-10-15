@@ -192,7 +192,7 @@ pub struct MoqVideoHint {
 	/// The encoded pixel dimensions.
 	#[uniffi(default = None)]
 	pub coded: Option<MoqDimensions>,
-	/// The display aspect ratio.
+	/// The aspect ratio the whole picture is displayed at, not the sample aspect. Absent means the decoded shape.
 	#[uniffi(default = None)]
 	pub display_aspect: Option<MoqDimensions>,
 	/// The maximum bitrate in bits per second.

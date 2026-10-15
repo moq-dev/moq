@@ -6,10 +6,17 @@ WORKSPACE=$(cd "$DIR/../.." && pwd)
 # shellcheck source-path=SCRIPTDIR source=../lib/harness.sh
 source "$DIR/../lib/harness.sh"
 harness_begin wire-compat "just test wire-compat$(harness_argv "$@")"
-[[ $# == 0 ]] || {
-    echo "wire-compat takes no arguments" >&2
-    exit 2
-}
+# --remeasure runs the cells planned breaks cover, then rewrites planned-breaks.json
+# from the result: re-pinned to these releases if a cell still fails, else deleted.
+remeasure=
+case "$*" in
+    "") ;;
+    --remeasure) remeasure=--remeasure ;;
+    *)
+        echo "usage: just test wire-compat [--remeasure]" >&2
+        exit 2
+        ;;
+esac
 cd "$WORKSPACE"
 bun install --frozen-lockfile
 bun "$DIR/compat/resolve.ts" resolve "$HARNESS_RUN/versions.json"
@@ -54,7 +61,7 @@ CURRENT="$TARGET/debug/moq"
 RELEASED="$HARNESS_RUN/released/bin/moq"
 "$CURRENT" --help >"$HARNESS_RUN/current-help"
 "$RELEASED" --help >"$HARNESS_RUN/released-help"
-bun "$DIR/compat/resolve.ts" matrix "$HARNESS_RUN/current-help" "$HARNESS_RUN/released-help" "$DIR/compat/planned-breaks.json" "$HARNESS_RUN/shared" "$HARNESS_RUN/versions.json" "$HARNESS_RUN/controls"
+bun "$DIR/compat/resolve.ts" matrix "$HARNESS_RUN/current-help" "$HARNESS_RUN/released-help" "$DIR/compat/planned-breaks.json" "$HARNESS_RUN/shared" "$HARNESS_RUN/versions.json" "$HARNESS_RUN/controls" ${remeasure:+"$remeasure"}
 
 # A separate package root prevents bun workspaces from replacing released deps
 # with the checkout. Copy exactly the same client into both environments; it uses
@@ -133,28 +140,33 @@ for source in current released js-current js-released; do
 done
 
 # Every session cell runs, so one nightly names every break; the run fails at the
-# end. A cell a planned break covers is logged with that break's name instead.
+# end. A cell a planned break covers is logged with that break's name instead, or
+# with --remeasure runs and is recorded against that break without failing the run.
 failed=()
 ran=0
 skipped=0
+: >"$HARNESS_RUN/measured"
 cell() {
-    local lane="$1" version="$2" relay_source="$3" source="$4" planned
+    local lane="$1" version="$2" relay_source="$3" source="$4" planned result
     shift 4
     local name="$version relay=$relay_source publisher=$source $lane"
     planned=$(bun "$DIR/compat/resolve.ts" skip "$DIR/compat/planned-breaks.json" "$lane" "$version" "$relay_source" "$source")
-    if [[ -n "$planned" ]]; then
+    if [[ -n "$planned" && -z "$remeasure" ]]; then
         echo "SKIP $name: planned break $planned"
         skipped=$((skipped + 1))
         return
     fi
     ran=$((ran + 1))
-    echo "=== $name ==="
+    echo "=== $name${planned:+ (planned break $planned)} ==="
     if "$@"; then
         echo "PASS $name"
+        result=pass
     else
         echo "FAIL $name"
-        failed+=("$name")
+        result=fail
+        [[ -n "$planned" ]] || failed+=("$name")
     fi
+    [[ -z "$planned" ]] || printf '%s\t%s\t%s\n' "$planned" "$result" "$name" >>"$HARNESS_RUN/measured"
 }
 
 fetch() {
@@ -186,16 +198,20 @@ done 3<"$HARNESS_RUN/controls"
 # drafts are listed: our clients and relays always prefer lite with each other, so
 # IETF between them is not compared here (`just test interop` covers IETF).
 # Fd 3, so a child reading stdin (ffmpeg does) cannot consume the version list.
+# Dropping a released FETCH is a cell, so a planned break on its version covers it too.
+fetch_kept() {
+    [[ "$1" != true || "$2" == true ]] || {
+        echo "the checkout removed published FETCH"
+        return 1
+    }
+}
 while read -r version <&3; do
     released_relay="$HARNESS_RUN/released/bin/moq-relay"
     # Each moq-net library states whether the draft has FETCH, so a FETCH cell that
     # fails is a failure, never a skip. Dropping a released capability fails too.
     current_fetch=$("$TARGET/compat-hang-current/debug/compat-container" fetch-supported "$version")
     released_fetch=$("$TARGET/compat-hang-released/debug/compat-container" fetch-supported "$version")
-    if [[ "$released_fetch" == true && "$current_fetch" != true ]]; then
-        echo "FAIL $version: the checkout removed published FETCH"
-        failed+=("$version FETCH removed")
-    fi
+    cell fetch-capability "$version" both both fetch_kept "$released_fetch" "$current_fetch"
     if [[ "$released_fetch" != true || "$current_fetch" != true ]]; then
         echo "SKIP $version fetch and js-publish: no FETCH on this draft in both libraries"
         skipped=$((skipped + 8))
@@ -209,8 +225,11 @@ while read -r version <&3; do
             else
                 pub="$RELEASED" sub="$CURRENT" own_js="$HARNESS_RUN/js" other_js="$DIR/compat"
             fi
-            cell media "$version" "$relay_source" "$source" env RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
-                INTEROP_COMPAT_CLIENT="$other_js" INTEROP_DECODE=1 bash "$DIR/interop.sh" --subscribers rust,js-native-node
+            # One cell per reader, so a planned break in one reader's release keeps the other running.
+            for reader in rust js-native-node; do
+                cell "media-$reader" "$version" "$relay_source" "$source" env RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
+                    INTEROP_COMPAT_CLIENT="$other_js" INTEROP_DECODE=1 bash "$DIR/interop.sh" --subscribers "$reader"
+            done
             [[ "$released_fetch" == true && "$current_fetch" == true ]] || continue
             # Drive JS publication from actual subscriber demand: the publisher's own JS
             # subscribes and observes the group, which the opposite Rust CLI then
@@ -225,6 +244,11 @@ while read -r version <&3; do
     done
 done 3<"$HARNESS_RUN/shared"
 echo "session cells: $ran ran, $skipped skipped"
+if [[ -n "$remeasure" ]]; then
+    bun "$DIR/compat/resolve.ts" remeasure "$DIR/compat/planned-breaks.json" "$HARNESS_RUN/current-help" "$HARNESS_RUN/released-help" "$HARNESS_RUN/versions.json" "$HARNESS_RUN/measured"
+    bun x biome format --write "$DIR/compat/planned-breaks.json"
+    echo "rewrote compat/planned-breaks.json: review the diff and refresh each reason"
+fi
 if ((${#failed[@]})); then
     printf 'FAIL %s\n' "${failed[@]}" >&2
     exit 1

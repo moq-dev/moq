@@ -19,6 +19,20 @@ const PROP_TIMESTAMP = 0x10n;
 // so it is not accepted here.
 const PROP_TIMESTAMP_DRAFT03 = 0x06n;
 
+/** Whether 0x06 is the draft-03 Timestamp: draft-19 reassigns it to SUBGROUP_DELIVERY_TIMEOUT. */
+function hasDraft03Timestamp(version: IetfVersion | undefined): boolean {
+	switch (version) {
+		case Version.DRAFT_14:
+		case Version.DRAFT_15:
+		case Version.DRAFT_16:
+		case Version.DRAFT_17:
+		case Version.DRAFT_18:
+			return true;
+		default:
+			return false;
+	}
+}
+
 // draft-18 adds bit 0x40 (FIRST_OBJECT) to the subgroup header type per spec
 // 11.4.2. Set on emit unless a filter trimmed the group's head. On parse a
 // cleared bit is the peer's claim that the stream starts partway through;
@@ -110,6 +124,7 @@ export function decodeObjectTime(c: Cursor, timescale: Timescale): Timestamp | u
 	let timestamp: bigint | undefined;
 	let prevType = 0n;
 	let first = true;
+	const draft03 = hasDraft03Timestamp(asIetf(c.version));
 
 	while (c.remaining > 0) {
 		const step = c.u62();
@@ -119,7 +134,7 @@ export function decodeObjectTime(c: Cursor, timescale: Timescale): Timestamp | u
 
 		if (id % 2n === 0n) {
 			const value = c.u62();
-			if (id === PROP_TIMESTAMP || id === PROP_TIMESTAMP_DRAFT03) {
+			if (id === PROP_TIMESTAMP || (draft03 && id === PROP_TIMESTAMP_DRAFT03)) {
 				timestamp = value;
 			}
 		} else {

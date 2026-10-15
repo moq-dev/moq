@@ -7,12 +7,13 @@ name: Release Swift FFI
 # (release-swift-lib.yml) and versions independently.
 
 on:
-  push:
-    tags:
-      - "moq-ffi-v*"
-  # Dry-run: build everything, publish nothing. Nightly calls every release
-  # workflow this way so a broken build surfaces before the tag is cut.
+  # The tag coordinator supplies shared default-feature artifacts. Manual
+  # calls and Go PR dry-runs still build their own target subset.
   workflow_call:
+    inputs:
+      reuse-native:
+        type: boolean
+        default: false
   workflow_dispatch:
 
 permissions:
@@ -28,6 +29,7 @@ jobs:
     uses: ./.github/workflows/release-ffi.yml
     with:
       language: swift
+      reuse-native: ${{ inputs.reuse-native || false }}
       targets: '["aarch64-apple-ios", "aarch64-apple-ios-sim", "aarch64-apple-darwin"]'
 
   package:
@@ -42,20 +44,24 @@ jobs:
 
       - uses: ./.github/actions/just
 
+      - name: Select native artifacts
+        id: native
+        env:
+          LIB_PREFIX: ${{ inputs.reuse-native && 'default' || 'swift' }}
+          BUILD_TARGETS: ${{ needs.ffi.outputs.targets }}
+        run: just gh ffi pattern
+
       - name: Download per-target libs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: libs-raw
-          pattern: swift-lib-*
+          pattern: ${{ steps.native.outputs.pattern }}
 
       - name: Flatten lib layout
-        run: |
-          mkdir -p libs
-          for dir in libs-raw/swift-lib-*; do
-            target="${dir#libs-raw/swift-lib-}"
-            mv "$dir" "libs/$target"
-          done
-          ls -la libs
+        env:
+          LIB_PREFIX: ${{ inputs.reuse-native && 'default' || 'swift' }}
+          BUILD_TARGETS: ${{ needs.ffi.outputs.targets }}
+        run: just gh ffi stage
 
       - name: Download bindings
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8

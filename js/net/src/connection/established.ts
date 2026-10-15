@@ -53,7 +53,12 @@ export interface Established {
 	 */
 	stats(): Promise<Stats>;
 
-	/** Withdraw announcements and wait up to one second for delivery, then close the session. */
+	/**
+	 * Withdraw announcements and drain for up to one second, then close the session.
+	 *
+	 * Explicit lite-07-wip waits for the subscriber to receive finished tails; older
+	 * Lite versions wait only for transport ACKs. IETF media streams are not drained.
+	 */
 	close(): Promise<void>;
 
 	/** End the session immediately without waiting for delivery. */

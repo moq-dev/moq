@@ -99,6 +99,7 @@ rand = { workspace = true }
 rcgen = "0.14"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber = { workspace = true }
 web-transport-moq = { workspace = true }
 
 # Which sockets the process still holds, so the embed tests can prove a stopped

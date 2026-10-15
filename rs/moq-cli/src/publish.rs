@@ -65,10 +65,11 @@ pub struct CaptureArgs {
 	#[usage(long, group = "video-source", alias = "screen")]
 	pub display: Option<Option<String>>,
 
-	/// Capture a single window, by the id `moq devices` reports. Supported on
-	/// macOS, Windows, and X11.
+	/// Capture a single window, by the id `moq devices` reports on macOS,
+	/// Windows, or X11. Bare `--window` opens the Linux system portal picker
+	/// (requires the `pipewire` feature); no window id is needed.
 	#[usage(long, group = "video-source")]
-	pub window: Option<String>,
+	pub window: Option<Option<String>>,
 
 	/// Capture every window of an application, by the bundle id `moq devices`
 	/// reports. Windows opened later are included. macOS only.
@@ -292,13 +293,48 @@ pub struct Publish {
 	broadcast: Option<moq_net::broadcast::Producer>,
 	// How long a finished stdin import stays up; see [`Self::linger`].
 	linger: std::time::Duration,
+	// A stdin import's route, announced once its catalog lists the tracks; see [`Self::announce`].
+	route: Option<moq_net::origin::Route>,
+}
+
+/// A broadcast's announcement, held until its catalog first goes out.
+///
+/// The catalog withholds its first snapshot until the input has declared every track (for TS,
+/// the first PMT). A relay queries a broadcast's tracks the moment it is announced, so a standby
+/// announced any sooner refuses the tracks its epoch's live partner is serving, and the relay
+/// keeps those refusals.
+struct Pending {
+	broadcast: moq_net::broadcast::Producer,
+	catalog: moq_net::track::Consumer,
+	route: moq_net::origin::Route,
+}
+
+impl Pending {
+	fn new(broadcast: moq_net::broadcast::Producer, route: moq_net::origin::Route) -> anyhow::Result<Self> {
+		let catalog = broadcast.consume().track(hang::Catalog::DEFAULT_NAME)?;
+		Ok(Self {
+			broadcast,
+			catalog,
+			route,
+		})
+	}
+
+	/// Announce the broadcast if its catalog has gone out, returning whether it has.
+	fn announce(&self) -> anyhow::Result<bool> {
+		if self.catalog.latest().is_none() {
+			return Ok(false);
+		}
+		self.broadcast
+			.announce(self.route.clone())
+			.context("failed to announce broadcast")?;
+		Ok(true)
+	}
 }
 
 impl Publish {
 	/// Build a publisher decoding the given container format from stdin into
-	/// `broadcast`. Announce the broadcast afterwards: this constructor creates
-	/// the catalog tracks, so announcing after it lands the advertisement with
-	/// the tracks already in place.
+	/// `broadcast`. After [`announce`](Self::announce), [`run`](Self::run) announces it once the
+	/// input has declared its tracks.
 	///
 	/// Stdin is a live feed with its own zero: the container importers publish its timestamps
 	/// so the first frame is live on arrival, verbatim unless `config` pins the catalog clock.
@@ -317,6 +353,7 @@ impl Publish {
 				},
 				broadcast: Some(broadcast),
 				linger: Default::default(),
+				route: None,
 			});
 		}
 
@@ -358,14 +395,16 @@ impl Publish {
 			},
 			broadcast: Some(broadcast),
 			linger: Default::default(),
+			route: None,
 		})
 	}
 
 	/// Build a publisher decoding a multi-program TS from stdin into one broadcast per program,
 	/// named after `name` (`event.hang` becomes `event/1.hang`, `event/2.hang`, ...).
 	///
-	/// The programs aren't known until the PAT arrives, so each broadcast is created and
-	/// announced then, and [`announce`](Self::announce) has nothing to do.
+	/// The programs aren't known until the PAT arrives, so each broadcast is created then and
+	/// announced once its PMT has declared its tracks, and [`announce`](Self::announce) has
+	/// nothing to do.
 	pub fn ts_programs(origin: moq_net::origin::Producer, name: String, config: moq_mux::catalog::Config) -> Self {
 		Self {
 			source: Source::Stream {
@@ -374,6 +413,7 @@ impl Publish {
 			},
 			broadcast: None,
 			linger: Default::default(),
+			route: None,
 		}
 	}
 
@@ -413,6 +453,7 @@ impl Publish {
 			},
 			broadcast: Some(broadcast),
 			linger: Default::default(),
+			route: None,
 		})
 	}
 
@@ -424,20 +465,31 @@ impl Publish {
 		self
 	}
 
-	/// Advertise the broadcast's path under `epoch`, now that the catalog tracks are in place.
-	pub fn announce(&self, epoch: moq_net::Epoch) -> anyhow::Result<()> {
-		let Some(broadcast) = &self.broadcast else {
-			return Ok(());
-		};
-		broadcast
-			.announce(moq_net::origin::Route::default().with_epoch(epoch))
-			.context("failed to announce broadcast")
+	/// Advertise the broadcast's path under `epoch`.
+	///
+	/// A capture announces now. A stdin import announces from [`run`](Self::run), once the input
+	/// has declared its tracks: see [`Pending`].
+	pub fn announce(&mut self, epoch: moq_net::Epoch) -> anyhow::Result<()> {
+		let route = moq_net::origin::Route::default().with_epoch(epoch);
+		match (&self.source, &self.broadcast) {
+			(_, None) => {}
+			(Source::Stream { .. }, Some(_)) => self.route = Some(route),
+			#[cfg(feature = "capture")]
+			(Source::Capture { .. }, Some(broadcast)) => broadcast.announce(route).context("failed to announce broadcast")?,
+		}
+		Ok(())
 	}
 
 	/// Drive the source until stdin EOF (or the capture devices stop).
 	pub async fn run(self) -> anyhow::Result<()> {
 		match self.source {
-			Source::Stream { decoder, catalog } => decode(decoder, catalog, tokio::io::stdin(), self.linger).await,
+			Source::Stream { decoder, catalog } => {
+				let pending = match (&self.broadcast, self.route) {
+					(Some(broadcast), Some(route)) => Some(Pending::new(broadcast.clone(), route)?),
+					_ => None,
+				};
+				decode(decoder, catalog, tokio::io::stdin(), self.linger, pending).await
+			}
 			#[cfg(feature = "capture")]
 			Source::Capture {
 				broadcast,
@@ -501,6 +553,7 @@ async fn decode(
 	mut catalog: PublishCatalog,
 	mut input: impl tokio::io::AsyncRead + Unpin,
 	linger: std::time::Duration,
+	mut pending: Option<Pending>,
 ) -> anyhow::Result<()> {
 	// An empty BytesMut grows to only 64 bytes and clearing it keeps that capacity.
 	// Stdin dispatches every read to a blocking thread, so those tiny reads can
@@ -524,6 +577,11 @@ async fn decode(
 				return Ok(()); // EOF
 			}
 			decoder.decode_chunk(&buffer)?;
+			if let Some(announce) = &pending
+				&& announce.announce()?
+			{
+				pending = None;
+			}
 
 			if sampled.elapsed() >= ts::stats::Log::INTERVAL {
 				sampled = tokio::time::Instant::now();
@@ -539,6 +597,12 @@ async fn decode(
 	// itself) abort with the real cause so subscribers see it instead of
 	// a bare Error::Dropped.
 	let outcome = result.and_then(|()| decoder.finish());
+	// The drain can release the first catalog. Without one the input declared no track, and
+	// announcing would only advertise an empty broadcast.
+	let outcome = outcome.and_then(|()| match &pending {
+		Some(announce) if !announce.announce()? => anyhow::bail!("input ended before it declared a track"),
+		_ => Ok(()),
+	});
 	// The drain at end of input can publish a frame nothing vouched for, so the
 	// final snapshot is only complete after `finish`.
 	if let Some(stats) = decoder.stats() {
@@ -569,23 +633,36 @@ impl CaptureArgs {
 	/// The video source named by the flags, defaulting to the default camera.
 	/// The `video-source` arg group makes these mutually exclusive, so the order
 	/// here only decides the default.
-	fn video_source(&self) -> moq_video::capture::Source {
+	fn video_source(&self) -> anyhow::Result<moq_video::capture::Source> {
 		use moq_video::capture::Source;
 
-		if let Some(id) = &self.window {
-			Source::Window(id.clone())
+		Ok(if let Some(id) = &self.window {
+			match id {
+				Some(id) => Source::Window(id.clone()),
+				None => {
+					#[cfg(all(target_os = "linux", feature = "pipewire"))]
+					{
+						use moq_video::capture::portal::{Kind, Selection};
+						Source::Portal(Selection::new(Kind::Window))
+					}
+					#[cfg(not(all(target_os = "linux", feature = "pipewire")))]
+					anyhow::bail!(
+						"bare --window requires Linux with the pipewire feature; use --window <ID> from `moq devices`"
+					);
+				}
+			}
 		} else if let Some(id) = &self.app {
 			Source::App(id.clone())
 		} else if let Some(index) = &self.display {
 			Source::Display(index.clone())
 		} else {
 			Source::Camera(self.camera.clone().flatten())
-		}
+		})
 	}
 
 	fn video_config(&self) -> anyhow::Result<moq_video::capture::Config> {
 		let mut config = moq_video::capture::Config::default();
-		config.source = self.video_source();
+		config.source = self.video_source()?;
 		config.width = self.width;
 		config.height = self.height;
 		config.framerate = self
@@ -656,6 +733,67 @@ pub(crate) mod tests {
 
 	use super::*;
 
+	#[cfg(feature = "capture")]
+	fn capture_args(flags: &[&str]) -> CaptureArgs {
+		let mut argv = vec!["moq", "--connect", "http://localhost", "import", "capture"];
+		argv.extend_from_slice(flags);
+		let cli = crate::args::Invocation::try_parse_from(argv).unwrap();
+		let crate::args::Command::Import(import) = cli.stages.into_iter().next().unwrap() else {
+			panic!("expected import");
+		};
+		let crate::args::ImportSource::Capture(args) = import.source else {
+			panic!("expected capture");
+		};
+		args
+	}
+
+	#[cfg(feature = "capture")]
+	#[test]
+	fn capture_window_picker_accepts_following_flags() {
+		let args = capture_args(&["--window", "--no-audio"]);
+		assert!(args.no_audio);
+		assert_eq!(args.window, Some(None));
+		assert_eq!(capture_args(&["--window"]).window, Some(None));
+	}
+
+	#[cfg(feature = "capture")]
+	#[test]
+	fn capture_window_id_preserves_native_selection() {
+		for id in ["39193", "x11:0x400001"] {
+			let config = capture_args(&["--window", id, "--no-audio"]).video_config().unwrap();
+			assert!(matches!(config.source, moq_video::capture::Source::Window(value) if value == id));
+		}
+	}
+
+	#[cfg(feature = "capture")]
+	#[test]
+	fn capture_window_picker_conflicts_with_other_sources() {
+		for flag in ["--camera", "--display", "--app"] {
+			assert!(
+				crate::args::Invocation::try_parse_from(["moq", "import", "capture", "--window", flag, "other",])
+					.is_err()
+			);
+		}
+	}
+
+	#[cfg(all(feature = "capture", target_os = "linux", feature = "pipewire"))]
+	#[test]
+	fn capture_window_picker_uses_portal() {
+		let config = capture_args(&["--window", "--no-audio"]).video_config().unwrap();
+		assert!(matches!(config.source, moq_video::capture::Source::Portal(_)));
+	}
+
+	#[cfg(all(feature = "capture", not(all(target_os = "linux", feature = "pipewire"))))]
+	#[test]
+	fn capture_window_picker_refuses_unsupported_builds() {
+		let error = capture_args(&["--window", "--no-audio"]).video_config().unwrap_err();
+		assert!(
+			error
+				.to_string()
+				.contains("bare --window requires Linux with the pipewire feature")
+		);
+	}
+
 	/// Real H.264 + AAC TS, reused to give the manufactured input a video clock
 	/// (section-framed verbatim export requires one) and decodable media tracks.
 	const BBB: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/bbb.ts");
@@ -675,10 +813,18 @@ pub(crate) mod tests {
 	const VERBATIM_PES_PID: u16 = 0x104;
 	const VERBATIM_PES_STREAM_ID: u8 = 0xC0;
 
+	async fn open_export(
+		source: moq_mux::Source,
+		format: CatalogFormat,
+	) -> moq_mux::Result<Export<moq_mux::catalog::Consumer<tscat::Ext>>> {
+		let catalog = source.catalog::<tscat::Ext>(format).await?;
+		Ok(Export::new(source, catalog))
+	}
+
 	/// Drain an exporter, concatenating every frame's payload until output stops. The
 	/// producers stay alive (retained tracks), so the stream never hard-ends; pull until a
 	/// `next()` blocks, surfaced here as a timeout once the buffered frames are gone.
-	async fn drain(mut exporter: Export<tscat::Ext>) -> Vec<u8> {
+	async fn drain(mut exporter: Export<moq_mux::catalog::Consumer<tscat::Ext>>) -> Vec<u8> {
 		let mut out = Vec::new();
 		// Past the export's release delay and the send-ahead window behind it, so the first
 		// frame goes out before it ends.
@@ -780,7 +926,7 @@ pub(crate) mod tests {
 		// `catalog`, the producers, and `import` stay alive: the exporter subscribes to
 		// the retained tracks.
 		drain(
-			Export::with_ts(resolved(&origin, "cli").await, CatalogFormat::Hang)
+			open_export(resolved(&origin, "cli").await, CatalogFormat::Hang)
 				.await
 				.unwrap()
 				.with_delay(RECORDING_MAX_AGE),
@@ -812,7 +958,7 @@ pub(crate) mod tests {
 	}
 
 	/// Full CLI round-trip: a TS feed with undecoded streams goes through `Publish`
-	/// (which selects the `mpegts` catalog) and the subscribe-side `Export::with_ts`,
+	/// (which selects the `mpegts` catalog) and the subscribe-side catalog stream,
 	/// and the SCTE-35 section and the verbatim PES survive with their PIDs, framing,
 	/// PES stream_id, and byte-exact payloads.
 	async fn ts_verbatim_round_trip(format: CatalogFormat) {
@@ -835,10 +981,10 @@ pub(crate) mod tests {
 		decoder.decode_chunk(&input).unwrap();
 		decoder.finish().unwrap();
 
-		// Subscribe side: the same `with_ts` call `run_ts` makes, re-emitting the
+		// Subscribe side: the same catalog stream `run_ts` selects, re-emitting the
 		// ancillary streams verbatim.
 		let output = drain(
-			Export::with_ts(resolved(&origin, "cli").await, format)
+			open_export(resolved(&origin, "cli").await, format)
 				.await
 				.unwrap()
 				.with_delay(RECORDING_MAX_AGE),
@@ -1219,7 +1365,9 @@ pub(crate) mod tests {
 			remaining: BBB,
 			reads: 0,
 		};
-		decode(decoder, catalog, &mut input, Duration::ZERO).await.unwrap();
+		decode(decoder, catalog, &mut input, Duration::ZERO, None)
+			.await
+			.unwrap();
 		assert_eq!(
 			input.reads,
 			BBB.len().div_ceil(188) + 1,
@@ -1252,7 +1400,7 @@ pub(crate) mod tests {
 				panic!("expected a stream source");
 			};
 			let start = std::time::Instant::now();
-			decode(decoder, catalog, input, Duration::ZERO).await.unwrap();
+			decode(decoder, catalog, input, Duration::ZERO, None).await.unwrap();
 			let elapsed = start.elapsed();
 			let bytes = INPUT.len() * copies;
 			println!(
@@ -1275,7 +1423,7 @@ pub(crate) mod tests {
 		let Source::Stream { decoder, catalog } = publish.source else {
 			panic!("expected a stream source");
 		};
-		decode(decoder, catalog, BBB, Duration::ZERO).await.unwrap();
+		decode(decoder, catalog, BBB, Duration::ZERO, None).await.unwrap();
 		drop(publish.broadcast);
 
 		let mut last = None;
@@ -1308,7 +1456,7 @@ pub(crate) mod tests {
 			panic!("expected a stream source");
 		};
 		let started = tokio::time::Instant::now();
-		let mut import = std::pin::pin!(decode(decoder, catalog, BBB, LINGER));
+		let mut import = std::pin::pin!(decode(decoder, catalog, BBB, LINGER, None));
 		let name = tokio::select! {
 			res = &mut import => panic!("the import returned before its linger: {res:?}"),
 			name = async {
@@ -1336,6 +1484,90 @@ pub(crate) mod tests {
 		import.await.unwrap();
 		assert!(started.elapsed() >= LINGER, "returned after {:?}", started.elapsed());
 		drop(publish.broadcast);
+	}
+
+	/// A stdin import announces only once its input has declared its tracks, so whoever
+	/// resolves the broadcast the moment it is announced finds them (#4352).
+	#[tokio::test(start_paused = true)]
+	async fn an_import_announces_once_its_input_declares_its_tracks() {
+		// Longer than the two seconds a live TS catalog waits on to measure its mux rate.
+		const TS: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/scte35/bbb5s.ts");
+		const FMP4: &[u8] = include_bytes!("../../moq-mux/src/container/fmp4/test_data/av1.mp4");
+		for (format, input) in [
+			(PublishFormat::Ts { program: None }, TS),
+			(PublishFormat::TsPassthrough { pcr_pid: None }, TS),
+			(PublishFormat::Fmp4, FMP4),
+		] {
+			let origin = moq_tokio::origin::spawn();
+			let consumer = origin.consume();
+			let mut announced = consumer.announced();
+			let broadcast = origin.create_broadcast("demo").unwrap();
+			let publish = Publish::new(broadcast.clone(), &format, Default::default()).unwrap();
+			#[allow(irrefutable_let_patterns)]
+			let Source::Stream { decoder, catalog } = publish.source else {
+				panic!("expected a stream source");
+			};
+			let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+			let pending = Pending::new(broadcast, route).unwrap();
+			let (mut stdin, input_end) = tokio::io::duplex(input.len());
+			let mut import = std::pin::pin!(decode(decoder, catalog, input_end, Duration::ZERO, Some(pending)));
+
+			tokio::select! {
+				res = &mut import => panic!("the import returned before its input ended: {res:?}"),
+				event = tokio::time::timeout(Duration::from_secs(5), announced.next()) => {
+					assert!(event.is_err(), "announced before any input: {event:?}");
+				}
+			}
+
+			tokio::io::AsyncWriteExt::write_all(&mut stdin, input).await.unwrap();
+			let resolved = tokio::select! {
+				res = &mut import => panic!("the import returned before its input ended: {res:?}"),
+				_ = tokio::time::sleep(Duration::from_secs(30)) => panic!("never announced"),
+				resolved = async {
+					let event = announced.next().await.expect("origin closed");
+					assert!(matches!(event, moq_net::announce::Event::Start(_)), "{event:?}");
+					let broadcast = consumer.request_broadcast("demo", None).await.unwrap();
+					let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast).await.unwrap();
+					let catalog = catalogs.next().await.unwrap().expect("a catalog");
+					// A passthrough carries the multiplex on one track, named by its m2ts section.
+					let name = match catalog.m2ts {
+						Some(m2ts) => m2ts.track,
+						None => catalog.video.renditions.keys().next().expect("a video rendition").clone(),
+					};
+					broadcast.track(&name).unwrap().subscribe(None).await
+				} => resolved,
+			};
+			assert!(resolved.is_ok(), "the announced track serves: {:?}", resolved.err());
+
+			drop(stdin);
+			import.await.unwrap();
+		}
+	}
+
+	/// Input that ends before declaring any track fails, rather than announcing a broadcast
+	/// with nothing in it.
+	#[tokio::test(start_paused = true)]
+	async fn an_import_with_no_track_fails_unannounced() {
+		let origin = moq_tokio::origin::spawn();
+		let mut announced = origin.consume().announced();
+		let broadcast = origin.create_broadcast("demo").unwrap();
+		let publish = Publish::new(
+			broadcast.clone(),
+			&PublishFormat::Ts { program: None },
+			Default::default(),
+		)
+		.unwrap();
+		#[allow(irrefutable_let_patterns)]
+		let Source::Stream { decoder, catalog } = publish.source else {
+			panic!("expected a stream source");
+		};
+		let pending = Pending::new(broadcast, Default::default()).unwrap();
+		let err = decode(decoder, catalog, &[][..], Duration::ZERO, Some(pending))
+			.await
+			.unwrap_err();
+		assert!(err.to_string().contains("declared"), "{err:#}");
+		let event = tokio::time::timeout(Duration::from_secs(1), announced.next()).await;
+		assert!(event.is_err(), "announced an empty broadcast: {event:?}");
 	}
 
 	/// A PAT listing two programs, then one MP2 PES of each: program 1 on PID `0x61` at 1 s

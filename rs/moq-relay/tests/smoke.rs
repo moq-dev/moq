@@ -42,11 +42,16 @@ async fn build_web(ws: bool) -> web::Web {
 	let mut config = web::Config::default();
 	config.ws = ws;
 	config.http.listen = Some("127.0.0.1:0".parse().expect("parse listen"));
-	build_web_with(config).await
+	build_web_with(config, new_cluster()).await
 }
 
-/// [`build_web`] for a test that configures the listeners itself (e.g. HTTPS).
-async fn build_web_with(web_config: web::Config) -> web::Web {
+/// A standalone cluster with default options.
+fn new_cluster() -> cluster::Cluster {
+	cluster::Cluster::new(cluster::Options::default()).expect("cluster init")
+}
+
+/// [`build_web`] for a test that configures the listeners or the cluster itself (e.g. HTTPS).
+async fn build_web_with(web_config: web::Config, cluster: cluster::Cluster) -> web::Web {
 	// Crypto provider is process-global; reinstalls after the first one are
 	// no-ops, but the test binary may run before any other moq code does.
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -57,8 +62,6 @@ async fn build_web_with(web_config: web::Config) -> web::Web {
 	let auth = auth_config
 		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.expect("auth init");
-
-	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
 
 	// moq_tokio::Server is needed for `certificates`, even though we never
 	// expose HTTPS or QUIC in this test. Binding QUIC to `[::]:0` picks an
@@ -208,6 +211,90 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 
 	drop(pub_connection);
 	drop(sub_connection);
+	web_handle.abort();
+}
+
+/// Relay log output as text, waking every waiter on each write.
+#[derive(Clone, Default)]
+struct Logs {
+	text: std::sync::Arc<std::sync::Mutex<String>>,
+	written: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl Logs {
+	/// Wait until the output contains `needle`.
+	async fn wait_for(&self, needle: &str) {
+		loop {
+			// Created before the check, so a write in between still wakes it.
+			let written = self.written.notified();
+			if self.text.lock().unwrap().contains(needle) {
+				return;
+			}
+			written.await;
+		}
+	}
+}
+
+impl std::io::Write for Logs {
+	fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+		self.text.lock().unwrap().push_str(&String::from_utf8_lossy(data));
+		self.written.notify_waiters();
+		Ok(data.len())
+	}
+
+	fn flush(&mut self) -> std::io::Result<()> {
+		Ok(())
+	}
+}
+
+impl tracing_subscriber::fmt::MakeWriter<'_> for Logs {
+	type Writer = Self;
+
+	fn make_writer(&self) -> Self {
+		self.clone()
+	}
+}
+
+/// A WebSocket session takes its id from the cluster-wide counter and logs its close, like
+/// a QUIC one, so the interop harness can pair its `conn{id=N}` span with that close.
+#[tokio::test]
+async fn relay_websocket_logs_its_close_under_a_cluster_id() {
+	let logs = Logs::default();
+	let subscriber = tracing_subscriber::fmt()
+		.with_ansi(false)
+		.with_writer(logs.clone())
+		.finish();
+	// Thread-local, which covers the relay: the test's current-thread runtime runs its tasks.
+	let _logging = tracing::subscriber::set_default(subscriber);
+
+	let cluster = new_cluster();
+	// Take an id as a QUIC accept would, so a WebSocket counter of its own would reuse it.
+	let id = cluster.next_connection_id() + 1;
+	let mut config = web::Config::default();
+	config.ws = true;
+	config.http.listen = Some("127.0.0.1:0".parse().expect("parse listen"));
+	let web = build_web_with(config, cluster).await;
+	let port = web.addrs().http.expect("HTTP listener is configured").port();
+	let web_handle = tokio::spawn(async move { web.run().await.expect("relay web server") });
+
+	let url: url::Url = format!("ws://127.0.0.1:{port}/smoke").parse().expect("parse url");
+	let (client, connection) = tokio::time::timeout(
+		TIMEOUT,
+		connect_once(client().with_subscriber(moq_tokio::origin::spawn()), url),
+	)
+	.await
+	.expect("connect timeout")
+	.expect("connect failed");
+	tokio::time::timeout(TIMEOUT, logs.wait_for(&format!("conn{{id={id} ")))
+		.await
+		.expect("the WebSocket session was not numbered on the cluster counter");
+
+	let _ = connection.close().await;
+	drop(client);
+	tokio::time::timeout(TIMEOUT, logs.wait_for(&format!("connection closed id={id}")))
+		.await
+		.expect("the WebSocket session's close was not logged");
+
 	web_handle.abort();
 }
 
@@ -398,7 +485,7 @@ async fn relay_https_terminates_tls() {
 	config.https.listen = Some("127.0.0.1:0".parse().expect("parse listen"));
 	config.https.cert = vec![cert_path];
 	config.https.key = vec![key_path];
-	let web = build_web_with(config).await;
+	let web = build_web_with(config, new_cluster()).await;
 	let port = web.addrs().https.expect("HTTPS listener is configured").port();
 
 	// Held past `serve`, which consumes the server: this is the whole point of

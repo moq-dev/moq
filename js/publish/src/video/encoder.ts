@@ -111,7 +111,8 @@ type EncoderOutput = {
  * attached (the demand gate). Rename by constructing a new encoder; the name is not a signal.
  *
  * The catalog advertises the largest size encoded so far as the coded-size ceiling, so a capture that
- * shrinks resizes in band at a keyframe. Outgrowing the ceiling re-probes and advertises a larger one.
+ * shrinks resizes in band at a keyframe. Outgrowing the ceiling re-probes and advertises a larger one,
+ * in place unless the codec string changes, which the broadcast serves under a new track name.
  */
 export class Encoder {
 	/** The full track name of this rendition, e.g. `"video/hd"`. */

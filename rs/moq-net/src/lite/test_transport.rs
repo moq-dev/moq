@@ -39,6 +39,7 @@ impl crate::transport::Error for SinkError {
 /// stray second reset (a drop fallback firing behind an abort) is visible.
 #[derive(Clone, Default)]
 pub struct Log {
+	pub datagrams: Arc<Mutex<Vec<bytes::Bytes>>>,
 	pub writes: Arc<Mutex<Vec<u8>>>,
 	pub resets: Arc<Mutex<Vec<u32>>>,
 	/// Every write, FIN and reset on every send stream, in call order. See [`Self::trail`].
@@ -659,11 +660,17 @@ pub struct ScriptedSession {
 	/// in order. See [`Self::with_incoming_unis`].
 	incoming_unis: Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
 	incoming_bidis: Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
+	datagram_size: usize,
 }
 
 impl ScriptedSession {
 	pub fn with_stats(mut self, stats: SinkStats) -> Self {
 		self.stats = stats;
+		self
+	}
+
+	pub fn with_datagrams(mut self, max_size: usize) -> Self {
+		self.datagram_size = max_size;
 		self
 	}
 
@@ -678,6 +685,7 @@ impl ScriptedSession {
 			park: kio::Park::default(),
 			incoming_unis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			incoming_bidis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+			datagram_size: 0,
 		}
 	}
 
@@ -819,7 +827,12 @@ impl poll::Session for ScriptedSession {
 		Poll::Ready(Ok(SinkSend::new(self.log.clone())))
 	}
 
-	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+		self.log
+			.datagrams
+			.lock()
+			.unwrap()
+			.push(bytes::Bytes::copy_from_slice(payload));
 		Poll::Ready(Ok(()))
 	}
 
@@ -828,7 +841,7 @@ impl poll::Session for ScriptedSession {
 	}
 
 	fn max_datagram_size(&self) -> usize {
-		0
+		self.datagram_size
 	}
 
 	fn binding(&self) -> crate::transport::Binding {

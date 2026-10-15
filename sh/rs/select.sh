@@ -95,14 +95,25 @@ wants() {
 # The feature contract scripts are no crate, so their own diff selects
 # nothing and still has to reach the gates below.
 media_script=
-if [[ -f "$list" ]] && grep -qx 'sh/rs/media-features.sh' "$list"; then media_script=1; fi
+tokio_script=
 net_script=
-if [[ -f "$list" ]] && grep -qx 'sh/rs/net-features.sh' "$list"; then net_script=1; fi
+if [[ -f "$list" ]]; then
+    if grep -qx 'sh/rs/media-features.sh' "$list"; then media_script=1; fi
+    if grep -qx 'sh/rs/tokio-features.sh' "$list"; then tokio_script=1; fi
+    if grep -qx 'sh/rs/net-features.sh' "$list"; then net_script=1; fi
+fi
+
+# Global build inputs select ALL. Otherwise isolate permutations when their
+# owning crate changes; dependency-only diffs keep the cheaper boundary checks.
+feature_owner_changed() {
+    [[ "$packages" == ALL ]] || grep -qE "$1" "$list"
+}
 
 case "$packages" in
     "")
-        if [[ ("$action" == check* || "$action" == lint) && -n "$media_script$net_script" ]]; then
-            if [[ -n "$media_script" ]]; then just rs media-features; fi
+        if [[ ("$action" == check* || "$action" == lint) && -n "$media_script$tokio_script$net_script" ]]; then
+            if [[ -n "$media_script" ]]; then just rs media-features --all; fi
+            if [[ -n "$tokio_script" ]]; then just rs tokio-features --all; fi
             if [[ -n "$net_script" ]]; then just rs net-features; fi
         else
             echo "rs: no crates affected; skipping."
@@ -130,7 +141,11 @@ case "$action" in
         just rs "$action" "${flags[@]}"
         # Workspace feature unification hides a broken moq-tokio feature set
         # whenever any dependent enables a transport.
-        if wants moq-tokio; then just rs tokio-features; fi
+        if [[ -n "$tokio_script" ]] || wants moq-tokio; then
+            args=()
+            if feature_owner_changed '^(rs/moq-tokio/|sh/rs/tokio-features\.sh$)'; then args+=(--all); fi
+            just rs tokio-features "${args[@]}"
+        fi
         # Likewise every dependent turns moq-net's default `async` feature back on.
         if [[ -n "$net_script" ]] || wants moq-net; then just rs net-features; fi
         # moq-wasm's crate root is `#![cfg(target_arch = "wasm32")]`, so only a
@@ -147,7 +162,11 @@ case "$action" in
         # The relay's io_uring listener, off the default feature set.
         if wants moq-relay; then just rs uring-check; fi
         # Each media feature shape compiles on its own, about two minutes.
-        if [[ -n "$media_script" ]] || wants '(moq-video|moq-audio|moq-transcode)'; then just rs media-features; fi
+        if [[ -n "$media_script" ]] || wants '(moq-video|moq-audio|moq-transcode)'; then
+            args=()
+            if feature_owner_changed '^(rs/moq-(video|audio|transcode)/|sh/rs/media-features\.sh$)'; then args+=(--all); fi
+            just rs media-features "${args[@]}"
+        fi
         ;;
     fix)
         just rs fix "${flags[@]}"

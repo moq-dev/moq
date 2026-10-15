@@ -188,7 +188,8 @@ offers only the cell's version, and JavaScript checks the negotiated version.
 The relay is anonymous here, since released binaries may predate AUTH; the
 default matrix covers tokens and grants.
 Current Rust media publishers feed released Rust and JS readers, then released
-publishers feed current readers, through both relay sources. Rust exports must
+publishers feed current readers, through both relay sources. Each reader is its
+own lane, `media-rust` and `media-js-native-node`. Rust exports must
 decode to a video frame through ffmpeg. The JS reader is
 `compat/client.ts`, not the interop subscriber, whose API follows the
 checkout. One copy runs against each package set, using only API both have,
@@ -200,7 +201,8 @@ so a broken reader cannot make compatibility failures ambiguous.
 
 Each `moq-net` library states whether a draft has FETCH (lite-05 onward
 today). A draft without it in both is logged and its FETCH lanes skipped; one
-the release supports and the checkout dropped fails. Both Rust versions FETCH the group the
+the release supports and the checkout dropped fails, unless a planned break covers
+the `fetch-capability` cell for that version. Both Rust versions FETCH the group the
 publisher's own compat client observed and compare every frame's exact
 payload. JS publishers write one group after that subscriber's demand, and the
 opposite-source Rust CLI FETCHes it by the same observed ID.
@@ -210,12 +212,19 @@ skipped, then lists each failing cell before it fails.
 Checkout-only versions are logged and omitted. Removing a released version
 fails before sessions start. A maintainer-approved break belongs in
 `compat/planned-breaks.json` with its reason and the exact affected release
-versions. Keyed by a protocol name it drops that version; with `cells` it
-skips only the named lanes, optionally narrowed to versions, a relay source,
-or a publisher source. Every skipped cell is logged with the break's name.
-Entries become errors once an affected release changes or no longer offers a
-listed version, forcing removal or a fresh review. Future WIP drafts receive
-no automatic exception.
+versions. Keyed by a protocol name it skips every cell of that version, and
+excuses the checkout removing it; with `cells` it skips only the named lanes,
+optionally narrowed to versions, a relay source, or a publisher source. Every
+skipped cell is logged with the break's name. Entries become errors once an
+affected release changes or no longer offers a listed version, forcing a
+re-measure. Future WIP drafts receive no automatic exception.
+
+`just test wire-compat --remeasure` is that re-measure, run after each release
+publishes (see `CONTRIBUTING.md`). It runs the cells planned breaks cover
+without letting them fail the run, then rewrites `compat/planned-breaks.json`:
+a break with a failing cell is re-pinned to the releases just measured, and one
+with none is deleted. It prints each break's failing cells. Review the diff and
+refresh each reason before committing.
 
 ## Media QA
 

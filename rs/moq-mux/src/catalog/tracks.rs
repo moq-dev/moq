@@ -190,9 +190,9 @@ pub struct VideoHint {
 	pub coded_width: Option<u32>,
 	/// The encoded height in pixels.
 	pub coded_height: Option<u32>,
-	/// The display aspect ratio width.
+	/// The width of the aspect ratio the whole picture is displayed at, not the sample aspect.
 	pub display_aspect_width: Option<u32>,
-	/// The display aspect ratio height.
+	/// The height of the aspect ratio the whole picture is displayed at.
 	pub display_aspect_height: Option<u32>,
 	/// The maximum bitrate in bits per second.
 	pub bitrate: Option<u64>,

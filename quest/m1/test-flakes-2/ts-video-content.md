@@ -58,6 +58,20 @@ failed 3 of 4 runs, in two other ways:
 So in each case the checks saw real loss. The flake is what makes the
 exporter lose content, and the loss goes unreported.
 
+2026-10-15: the same `video-content` failure blocked unrelated #5566 twice in
+one run ([38725177110](https://github.com/moq-dev/moq/actions/runs/38725177110),
+both attempts), and hit #5553 and #5148 again, so the rate is above the 4 in
+41 estimate. In each of #5553's and #5566's `sub.log`, about 20 ms after the
+video subscribe: `current group evicted ... group=1
+error=Hang(Moq(Stream(Old)))`, and `relay.log` and `pub.log` show
+`max_delay: 0ns` on `0.avc3`. The publisher serves group 1, group 2's first
+frame lands about 17 ms later, `poll_drifted` judges group 1 zero behind the
+edge, and it resets group 1's stream `Old` before the raised budget reaches
+it through the relay. That confirms hypothesis 1's first candidate (analysis
+on #5565). Capture size does not separate the cases at a 1 s `--delay`: a
+passing local run captured 25156468 bytes, like a failing CI run, so use the
+log signature.
+
 ### Hypotheses
 
 1. Startup truncation (CI). The importer holds the catalog for its 2 s PCR
@@ -114,6 +128,10 @@ pre-IDR content in group 0 (the importer opens a group only at a keyframe).
 
 Public API: none expected; the drop count may surface in the exporter's
 summary. Wire: none.
+
+## Closes
+
+- [#5565](https://github.com/moq-dev/moq/issues/5565) - the TS compliance video-content flake
 
 ## Related
 
