@@ -34,7 +34,12 @@ The backports shipped in moq-relay 0.17.3 (#5119) and `@moq/net` 0.4.3
 refused on draft-20+ sessions; its backport landed on `release` in #5402.
 This README's remaining work: cut the next 0.17 patch, `@moq/net`, and
 `@moq/publish` with it (`/bump`, then the release-plz PR), and tell the testers
-and the reporters of #5407 and #5413.
+and the reporters of #5407 and #5413. After it publishes, re-measure the
+planned wire-compat breaks (CONTRIBUTING.md).
+
+Open question: whether this patch also publishes `@moq/hang`. `release`
+carries its tolerant catalog parser (#5520), so publishing it lets that
+re-measure delete the `catalog-archive` break. Recommended: yes.
 
 Decided 2026-10-13: the same patch also carries two crash and availability
 fixes reported against the release line, an unset host clock and a quiet

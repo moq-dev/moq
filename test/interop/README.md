@@ -211,12 +211,19 @@ skipped, then lists each failing cell before it fails.
 Checkout-only versions are logged and omitted. Removing a released version
 fails before sessions start. A maintainer-approved break belongs in
 `compat/planned-breaks.json` with its reason and the exact affected release
-versions. Keyed by a protocol name it drops that version; with `cells` it
-skips only the named lanes, optionally narrowed to versions, a relay source,
-or a publisher source. Every skipped cell is logged with the break's name.
-Entries become errors once an affected release changes or no longer offers a
-listed version, forcing removal or a fresh review. Future WIP drafts receive
-no automatic exception.
+versions. Keyed by a protocol name it skips every cell of that version, and
+excuses the checkout removing it; with `cells` it skips only the named lanes,
+optionally narrowed to versions, a relay source, or a publisher source. Every
+skipped cell is logged with the break's name. Entries become errors once an
+affected release changes or no longer offers a listed version, forcing a
+re-measure. Future WIP drafts receive no automatic exception.
+
+`just test wire-compat --remeasure` is that re-measure, run after each release
+publishes (see `CONTRIBUTING.md`). It runs the cells planned breaks cover
+without letting them fail the run, then rewrites `compat/planned-breaks.json`:
+a break with a failing cell is re-pinned to the releases just measured, and one
+with none is deleted. It prints each break's failing cells. Review the diff and
+refresh each reason before committing.
 
 ## Media QA
 

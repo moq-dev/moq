@@ -51,38 +51,103 @@ export interface Cell {
 // compares only lite. IETF drafts are for third-party interop, covered by `just test interop`.
 const lite = (version: string) => version.startsWith("moq-lite-");
 
-/** Refuse removed released versions unless a maintainer acknowledged the exact releases. */
-export function matrix(
-	currentAll: string[],
-	releasedAll: string[],
-	skipped: Record<string, PlannedBreak>,
-	releases: Record<string, string> = {},
-) {
+/** The command that re-measures planned breaks against the newest releases. */
+const REMEASURE = "just test wire-compat --remeasure";
+
+/** Refuse removed released versions unless a planned break covers them. */
+export function matrix(currentAll: string[], releasedAll: string[], skipped: Record<string, PlannedBreak>) {
 	const current = currentAll.filter(lite);
 	const released = releasedAll.filter(lite);
 	for (const [name, exception] of Object.entries(skipped)) {
-		const versions = exception.cells ? (exception.cells.versions ?? []) : [name];
 		if (
 			!exception.reason?.trim() ||
 			!Object.keys(exception.releases).length ||
-			(exception.cells && !exception.cells.lanes.length) ||
-			versions.some((v) => !released.includes(v))
+			(exception.cells && !exception.cells.lanes.length)
 		) {
-			throw new Error(`invalid or stale planned break: ${name}`);
-		}
-		for (const [pkg, expected] of Object.entries(exception.releases)) {
-			if (releases[pkg] !== expected)
-				throw new Error(`stale planned break: ${name}, ${pkg} changed from ${expected} to ${releases[pkg]}`);
+			throw new Error(`invalid planned break: ${name}`);
 		}
 	}
-	const dropped = (v: string) => !!skipped[v] && !skipped[v].cells;
-	const missing = released.filter((v) => !current.includes(v) && !dropped(v));
+	const missing = released.filter((v) => !current.includes(v) && !(skipped[v] && !skipped[v].cells));
 	if (missing.length) throw new Error(`checkout removed published versions: ${missing.join(", ")}`);
 	return {
-		shared: released.filter((v) => current.includes(v) && !dropped(v)),
+		shared: released.filter((v) => current.includes(v)),
 		currentOnly: current.filter((v) => !released.includes(v)),
 		planned: skipped,
 	};
+}
+
+/** Refuse a planned break measured against other releases, so a release forces its re-measure. */
+export function stale(skipped: Record<string, PlannedBreak>, releasedAll: string[], releases: Record<string, string>) {
+	const released = releasedAll.filter(lite);
+	for (const [name, exception] of Object.entries(skipped)) {
+		const versions = exception.cells ? (exception.cells.versions ?? []) : [name];
+		const gone = versions.find((v) => !released.includes(v));
+		if (gone) throw new Error(`stale planned break: ${name}, ${gone} is no longer released; run \`${REMEASURE}\``);
+		for (const [pkg, expected] of Object.entries(exception.releases)) {
+			if (releases[pkg] !== expected) {
+				throw new Error(
+					`stale planned break: ${name}, ${pkg} changed from ${expected} to ${releases[pkg]}; run \`${REMEASURE}\``,
+				);
+			}
+		}
+	}
+}
+
+/** One session cell a planned break covered, run anyway by a re-measure. */
+export interface Measured {
+	name: string;
+	cell: string;
+	passed: boolean;
+}
+
+/**
+ * Re-pin each planned break that still fails to the measured releases, and delete the
+ * rest. A protocol-keyed break also still fails while the checkout lacks its version.
+ */
+export function remeasure(
+	skipped: Record<string, PlannedBreak>,
+	measured: Measured[],
+	{
+		current,
+		released: releasedAll,
+		releases,
+	}: { current: string[]; released: string[]; releases: Record<string, string> },
+) {
+	const released = releasedAll.filter(lite);
+	const breaks: Record<string, PlannedBreak> = {};
+	const report: string[] = [];
+	for (const [name, exception] of Object.entries(skipped)) {
+		const cells = measured.filter((m) => m.name === name);
+		const failing = cells.filter((m) => !m.passed).map((m) => m.cell);
+		const removed = !exception.cells && released.includes(name) && !current.includes(name);
+		if (!failing.length && !removed) {
+			report.push(
+				`${name}: ${cells.length ? `no longer fails in ${cells.length} cells` : "covers no cells"}, deleted`,
+			);
+			continue;
+		}
+		const pins = Object.fromEntries(
+			Object.keys(exception.releases).map((pkg) => {
+				const version = releases[pkg];
+				if (!version) throw new Error(`planned break ${name} pins ${pkg}, which the harness does not resolve`);
+				return [pkg, version];
+			}),
+		);
+		const entry: PlannedBreak = { ...exception, releases: pins };
+		if (exception.cells?.versions) {
+			entry.cells = {
+				...exception.cells,
+				versions: exception.cells.versions.filter((v) => released.includes(v)),
+			};
+		}
+		breaks[name] = entry;
+		report.push(
+			removed
+				? `${name}: still fails, the checkout no longer offers it; re-pinned`
+				: `${name}: still fails in ${failing.length} of ${cells.length} cells; re-pinned\n  ${failing.join("\n  ")}`,
+		);
+	}
+	return { breaks, report };
 }
 
 /** Build same-source media controls on the published lite-06 baseline. */
@@ -104,14 +169,14 @@ export function planned(skipped: Record<string, PlannedBreak>, cell: Cell): stri
 		return undefined;
 	}
 	for (const [name, { cells }] of Object.entries(skipped)) {
-		if (
-			cells?.lanes.includes(cell.lane) &&
-			(!cells.versions || cells.versions.includes(cell.version)) &&
-			(!cells.relay || cells.relay === cell.relay) &&
-			(!cells.publisher || cells.publisher === cell.publisher)
-		) {
-			return name;
-		}
+		// A break keyed by protocol version covers every cell of that version.
+		const covers = cells
+			? cells.lanes.includes(cell.lane) &&
+				(!cells.versions || cells.versions.includes(cell.version)) &&
+				(!cells.relay || cells.relay === cell.relay) &&
+				(!cells.publisher || cells.publisher === cell.publisher)
+			: name === cell.version;
+		if (covers) return name;
 	}
 	return undefined;
 }
@@ -142,17 +207,37 @@ if (import.meta.main) {
 		writeFileSync(args[0], JSON.stringify(result, null, 2));
 		console.log(JSON.stringify(result, null, 2));
 	} else if (command === "matrix") {
-		const skipped = JSON.parse(readFileSync(args[2], "utf8"));
-		const current = versions(readFileSync(args[0], "utf8"));
-		const released = versions(readFileSync(args[1], "utf8"));
-		const result = matrix(current, released, skipped, JSON.parse(readFileSync(args[4], "utf8")));
+		const [currentHelp, releasedHelp, breaks, shared, releases, controlsFile, mode] = args;
+		const skipped = JSON.parse(readFileSync(breaks, "utf8"));
+		const current = versions(readFileSync(currentHelp, "utf8"));
+		const released = versions(readFileSync(releasedHelp, "utf8"));
+		const result = matrix(current, released, skipped);
+		// A re-measure runs every planned break against new releases, so it skips the pin check.
+		if (mode !== "--remeasure") stale(skipped, released, JSON.parse(readFileSync(releases, "utf8")));
 		const controls = mediaControls(current, released);
 		console.log(JSON.stringify({ ...result, controls }, null, 2));
-		writeFileSync(args[3], `${result.shared.join("\n")}\n`);
-		writeFileSync(args[5], `${controls.map(({ source, version }) => `${source} ${version}`).join("\n")}\n`);
+		writeFileSync(shared, `${result.shared.join("\n")}\n`);
+		writeFileSync(controlsFile, `${controls.map(({ source, version }) => `${source} ${version}`).join("\n")}\n`);
+	} else if (command === "remeasure") {
+		// Rewrites the planned breaks in place, for the maintainer to review as a diff.
+		const [breaks, currentHelp, releasedHelp, releases, measuredFile] = args;
+		const measured = readFileSync(measuredFile, "utf8")
+			.split("\n")
+			.filter(Boolean)
+			.map((line) => {
+				const [name, result, cell] = line.split("\t");
+				return { name, cell, passed: result === "pass" };
+			});
+		const result = remeasure(JSON.parse(readFileSync(breaks, "utf8")), measured, {
+			current: versions(readFileSync(currentHelp, "utf8")),
+			released: versions(readFileSync(releasedHelp, "utf8")),
+			releases: JSON.parse(readFileSync(releases, "utf8")),
+		});
+		writeFileSync(breaks, `${JSON.stringify(result.breaks, null, "\t")}\n`);
+		console.log(result.report.join("\n"));
 	} else if (command === "skip") {
 		const [file, lane, version, relay, publisher] = args;
 		const name = planned(JSON.parse(readFileSync(file, "utf8")), { lane, version, relay, publisher });
 		if (name) console.log(name);
-	} else throw new Error("expected resolve, matrix, or skip");
+	} else throw new Error("expected resolve, matrix, remeasure, or skip");
 }
