@@ -56,67 +56,40 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Unset keys default to the plain dev shell, the Rust cache, no perf
+        # sampling, and nextest's default profile.
         include:
           - name: Features
-            recipe: "rs features"
-            shell: ""
-            perf: false
-            cache: true
+            recipe: rs features
             profile: ci
           - name: Go publisher runtime benchmark
-            recipe: "go bench -benchtime=1x"
-            shell: ""
-            perf: false
-            cache: true
-            profile: default
+            recipe: go bench -benchtime=1x
           - name: Audio grouping relay benchmark
-            recipe: "bench-audio"
-            shell: ""
-            perf: false
-            cache: true
-            profile: default
+            recipe: bench-audio
+          # Smoke-tests the capture path: exact off-CPU waits, resolved worker stacks and CPU.
           - name: Relay lock-wait profile
-            recipe: "bench-lock fanout-heavy 4"
-            shell: ""
+            recipe: bench-lock fanout-heavy 4
             perf: true
-            cache: true
-            profile: default
           - name: Rust benchmarks
-            recipe: "gh nightly rust"
-            shell: ""
-            perf: false
-            cache: true
-            profile: default
+            recipe: gh nightly rust
           - name: JS benchmarks
-            recipe: "gh nightly js"
-            shell: ""
-            perf: false
-            cache: false
-            profile: default
+            recipe: gh nightly js
+            uncached: true
           - name: BBB rendition alignment
-            recipe: "pub check-bbb"
-            shell: ""
-            perf: false
-            cache: false
-            profile: default
+            recipe: pub check-bbb
+            uncached: true
           - name: Audit
-            recipe: "rs audit"
-            shell: ""
-            perf: false
-            cache: false
-            profile: default
+            recipe: rs audit
+            uncached: true
+          # OBS (over moq-ffi) and moq-c's C fixtures link a Rust staticlib from
+          # outside cargo, so a stale `rs/moq-c/native-libs/*.txt` breaks them and
+          # no cargo build. obs.yml's path filter can't list every such input;
+          # this diff-independent run catches what it misses, a day late.
           - name: OBS
-            recipe: "obs ci"
-            shell: ".#obs"
-            perf: false
-            cache: true
-            profile: default
+            recipe: obs ci
+            shell: .#obs
           - name: moq-c C fixtures
-            recipe: "rs c-tests"
-            shell: ""
-            perf: false
-            cache: true
-            profile: default
+            recipe: rs c-tests
 
     steps:
       - name: Free disk space
@@ -141,10 +114,10 @@ jobs:
       # Restore only, like `tests` below. Saving its own store cost 3.6 GB of the
       # repository's 10 GB budget and evicted the one every pull request restores.
       - name: Rust cache
-        if: matrix.cache
+        if: ${{ !matrix.uncached }}
         uses: ./.github/actions/rust-cache
 
-      # perf samples kernel worker switch-outs for the profiling workload.
+      # perf samples worker switch-outs in kernel context into a large buffer; bench-lock refuses without it.
       - name: Allow perf kernel sampling
         if: matrix.perf
         run: sudo sysctl -w kernel.perf_event_paranoid=-1
@@ -152,7 +125,7 @@ jobs:
       - name: Run workload
         run: nix develop ${{ matrix.shell }} --command just ${{ matrix.recipe }}
         env:
-          NEXTEST_PROFILE: ${{ matrix.profile }}
+          NEXTEST_PROFILE: ${{ matrix.profile || 'default' }}
 
   tests:
     name: Tests (${{ matrix.recipe }})

@@ -40,10 +40,13 @@ class NightlyTest(unittest.TestCase):
         result, calls = self.run_group("rust")
         self.assertEqual(result.returncode, 0, result.stderr)
         release = [call for call in calls if call.startswith("cargo bench")]
-        self.assertEqual(len(release), 2)  # moq-net fuzz, then the shared non-fuzz build.
-        self.assertIn("--no-fail-fast", release[1])
-        self.assertIn("--bench http_idle", release[1])
-        self.assertIn("--bench chunk_interleaving", release[1])
+        self.assertEqual(len(release), 3)  # moq-net fuzz, kio, then the shared build.
+        shared = [call for call in release if "-p moq-relay" in call]
+        self.assertEqual(len(shared), 1)
+        self.assertIn("--no-fail-fast", shared[0])
+        self.assertIn("--bench http_idle", shared[0])
+        self.assertIn("--bench chunk_interleaving", shared[0])
+        self.assertIn("just rs bench-gst-catalog -- --quick", calls)
         self.assertTrue(calls[-1].startswith("just rs test -p moq-cli"))
 
     def test_failed_release_build_does_not_hide_later_work(self):

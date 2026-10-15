@@ -20,6 +20,8 @@ case "${1:-}" in
         run just rs bench-playback
         # Fuzz exposes moq-net's codec benches; it is not a feature of the other crates.
         run cargo bench --locked --no-fail-fast -p moq-net --features fuzz --bench '*' -- --test
+        # Each kio routine once, including the contended bench's worker threads.
+        run cargo bench --locked --no-fail-fast -p kio --bench '*' -- --test
         # One invocation unifies this release build instead of rebuilding shared crates
         # independently for each target. Keep the explicit targets: '*' would add coverage.
         run cargo bench --locked --no-fail-fast -p moq-relay -p moq-stats -p moq-mux -p moq-rtmp \
@@ -29,6 +31,8 @@ case "${1:-}" in
         run just rs test -p moq-archive -p moq-mux --no-fail-fast \
             -E 'test(benchmark_timeline_fetch_fanout) | test(benchmark_damage_pid_fanout)' \
             --run-ignored only --success-output immediate
+        # moq-gst's catalog bench shares a target name with moq-mux's, so it runs on its own.
+        run just rs bench-gst-catalog -- --quick
         run just rs test -p moq-cli -E 'test(benchmark_stream_import)' --run-ignored only --success-output immediate
         ;;
     js)
