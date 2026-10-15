@@ -889,15 +889,11 @@ fn cue_payload(
 		settings = lines.next().unwrap_or_default();
 		id = lines.next().unwrap_or_default();
 		if let Some(comments) = lines.next().filter(|value| !value.is_empty()) {
-			if !comments.starts_with("NOTE") || comments.contains("-->") {
-				return Err(Error::InvalidSubtitle("invalid cue comments").into());
-			}
-			output.push_str(comments.trim_end_matches('\n'));
-			output.push_str("\n\n");
+			crate::container::text::comments(&mut output, comments).map_err(Error::InvalidSubtitle)?;
 		}
 	}
 	let body = match header {
-		Some(_) => crate::container::text::rebase(body, start, end).map_err(Error::InvalidSubtitle)?,
+		Some(_) => crate::container::text::rebase(body, start..end, Timestamp::ZERO).map_err(Error::InvalidSubtitle)?,
 		// SRT is plain text, where a literal `-->` is valid but would end a WebVTT cue.
 		None => body.replace("-->", "--&gt;"),
 	};
