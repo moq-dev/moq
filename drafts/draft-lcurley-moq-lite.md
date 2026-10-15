@@ -647,7 +647,8 @@ A group is expired once either of two ages meets the relevant `Max Age`:
 
 A group of an untimed Track has no timestamps, so arrival age alone expires it.
 
-A group is expired only once it **provably cannot overlap the Max Age window**: every frame it could still present is older than the budget allows.
+By timestamp age, a group is expired only once it **provably cannot overlap the Max Age window**: every frame it could still present is older than the budget allows.
+Arrival age needs no such proof: it bounds how long a superseded group may still wait to be delivered.
 Being behind is not itself a reason to expire anything.
 [Prioritization](#prioritization) already transmits newer groups first, so an older group consumes only whatever capacity is left over; it therefore closes the gap faster than the live edge advances, and a receiver that is behind can converge without losing content.
 What cannot be recovered is a group with nothing left worth delivering, and that is what expiration removes.
