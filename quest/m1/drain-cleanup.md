@@ -46,6 +46,9 @@ Recommendations:
 
 - Prefer one drain shared by the relay and the CLI over two copies that
   drift. Keep any new `moq_relay::shutdown` export as small as the CLI needs.
+- Each binary has its own `Signals`, installed before anything serves so a
+  signal right after a handshake drains instead of killing the process. The
+  shared drain takes one copy and keeps that ordering.
 - Bound the `end` delivery by the auth client's own request timeout. Add no
   drain-specific cap.
 - Tests on a paused clock for both binaries' drain paths. A session that
@@ -65,6 +68,5 @@ Wire: none.
 
 ## Related
 
-- [Session registration](/quest/m1/test-flakes-2/cli-drain-register.md) - the start of the same drain: a session the client sees established is one the drain waits for
 - [Handshake deadline covers admission](/quest/m1/handshake-admission-deadline.md) - bounds pending admissions, which the drain deadline must keep cutting
 - [Session outcomes](/quest/m1/session-outcomes.md) - counts how sessions end, which needs this end recorded

@@ -528,6 +528,10 @@ impl Relay {
 			..
 		} = self;
 
+		// Before anything serves or reports ready: until a handler is installed the
+		// default action kills the process, cutting off sessions without a GOAWAY.
+		let signals = signals.then(Signals::new).transpose()?;
+
 		let web_routes = web_routes.unwrap_or_else(|| web.routes());
 		let internal_routes = internal_routes.unwrap_or_else(|| internal.routes());
 
@@ -699,17 +703,14 @@ impl Relay {
 /// every session has left, which the drain deadline forces, or on a second
 /// signal, logging which ended it.
 /// Without `signals` only the trigger and the sessions count.
-async fn drain(trigger: shutdown::Trigger, mut shutdown: shutdown::Observer, signals: bool) -> anyhow::Result<()> {
+async fn drain(
+	trigger: shutdown::Trigger,
+	mut shutdown: shutdown::Observer,
+	mut signals: Option<Signals>,
+) -> anyhow::Result<()> {
 	let window = shutdown.drain_timeout;
-	let signal = || async move {
-		match signals {
-			true => shutdown_signal().await,
-			false => std::future::pending().await,
-		}
-	};
 	tokio::select! {
-		res = signal() => {
-			res?;
+		() = Signals::recv_some(&mut signals) => {
 			tracing::info!(
 				?window,
 				"shutdown signal received; draining sessions (signal again to exit immediately)"
@@ -725,8 +726,7 @@ async fn drain(trigger: shutdown::Trigger, mut shutdown: shutdown::Observer, sig
 	// without waiting for an established session to force-close.
 	let deadline = shutdown.deadline().context("drain started without a deadline")?;
 	tokio::select! {
-		res = signal() => {
-			res?;
+		() = Signals::recv_some(&mut signals) => {
 			tracing::warn!(open = shutdown.tally().live, "second shutdown signal; exiting immediately");
 			return Ok(());
 		}
@@ -754,22 +754,51 @@ async fn drain(trigger: shutdown::Trigger, mut shutdown: shutdown::Observer, sig
 	Ok(())
 }
 
-/// Resolve on a shutdown request: SIGINT (ctrl-c) or, on unix, SIGTERM (what
-/// systemd and most process supervisors send on stop).
-async fn shutdown_signal() -> anyhow::Result<()> {
+/// A shutdown request: SIGINT (ctrl-c) or, on unix, SIGTERM (what systemd and
+/// most process supervisors send on stop), caught from construction on.
+struct Signals {
 	#[cfg(unix)]
-	{
-		let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-			.context("failed to listen for SIGTERM")?;
-		tokio::select! {
-			res = tokio::signal::ctrl_c() => res.context("failed to listen for SIGINT")?,
-			_ = term.recv() => {}
-		}
-		Ok(())
-	}
+	interrupt: tokio::signal::unix::Signal,
+	#[cfg(unix)]
+	terminate: tokio::signal::unix::Signal,
 	#[cfg(not(unix))]
-	{
-		tokio::signal::ctrl_c().await.context("failed to listen for shutdown")
+	ctrl_c: tokio::signal::windows::CtrlC,
+}
+
+impl Signals {
+	fn new() -> anyhow::Result<Self> {
+		#[cfg(unix)]
+		{
+			use tokio::signal::unix::{SignalKind, signal};
+			Ok(Self {
+				interrupt: signal(SignalKind::interrupt()).context("failed to listen for SIGINT")?,
+				terminate: signal(SignalKind::terminate()).context("failed to listen for SIGTERM")?,
+			})
+		}
+		#[cfg(not(unix))]
+		{
+			let ctrl_c = tokio::signal::windows::ctrl_c().context("failed to listen for Ctrl-C")?;
+			Ok(Self { ctrl_c })
+		}
+	}
+
+	/// Resolve on the next signal, including one caught before this was polled.
+	async fn recv(&mut self) {
+		#[cfg(unix)]
+		tokio::select! {
+			_ = self.interrupt.recv() => {}
+			_ = self.terminate.recv() => {}
+		}
+		#[cfg(not(unix))]
+		self.ctrl_c.recv().await;
+	}
+
+	/// [`recv`](Self::recv), or never without signals.
+	async fn recv_some(signals: &mut Option<Self>) {
+		match signals {
+			Some(signals) => signals.recv().await,
+			None => std::future::pending().await,
+		}
 	}
 }
 
@@ -828,7 +857,7 @@ mod tests {
 		let (trigger, shutdown) = crate::shutdown::Observer::new(window);
 		let _pending = shutdown.activity.enter();
 		trigger.start();
-		let draining = super::drain(trigger, shutdown, false);
+		let draining = super::drain(trigger, shutdown, None);
 		tokio::pin!(draining);
 		assert!(draining.as_mut().now_or_never().is_none());
 		tokio::time::advance(window).await;
@@ -836,6 +865,24 @@ mod tests {
 			matches!(draining.as_mut().now_or_never(), Some(Ok(()))),
 			"pending handshake extended the fixed deadline"
 		);
+	}
+
+	/// A signal caught before the drain first polls, such as one sent right after a
+	/// client counted its session established, still drains that session. The
+	/// default action would otherwise kill the process with no GOAWAY.
+	#[cfg(unix)]
+	#[tokio::test(start_paused = true)]
+	async fn a_signal_before_the_drain_polls_starts_it() {
+		let (trigger, mut shutdown) = crate::shutdown::Observer::new(std::time::Duration::from_secs(10));
+		let session = shutdown.activity.enter().expect("admission open before the drain");
+		let signals = super::Signals::new().unwrap();
+		// SAFETY: raise has no memory-safety preconditions.
+		assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0);
+		let draining = tokio::spawn(super::drain(trigger, shutdown.clone(), Some(signals)));
+		shutdown.started().await;
+		assert!(!draining.is_finished(), "drain ended under an established session");
+		drop(session);
+		draining.await.unwrap().unwrap();
 	}
 
 	/// A connection arriving as the last admitted one leaves is either counted
@@ -848,7 +895,7 @@ mod tests {
 		let activity = shutdown.activity.clone();
 		let last = activity.enter().expect("admission open before the drain");
 		trigger.start();
-		let draining = super::drain(trigger, shutdown, false);
+		let draining = super::drain(trigger, shutdown, None);
 		tokio::pin!(draining);
 		assert!(draining.as_mut().now_or_never().is_none());
 
