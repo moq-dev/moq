@@ -1308,8 +1308,8 @@ impl RequestKind {
 
 /// A token on one SUBSCRIBE or PUBLISH_NAMESPACE, waiting for an answer. Experimental.
 ///
-/// The session asks only when its own authorization of the peer does not cover the request,
-/// and the application verifies the token: carrying one proves nothing. The grant must cover
+/// The session asks for every request carrying a token, even one its own authorization of
+/// the peer already covers, and the application verifies the token: carrying one proves nothing. The grant must cover
 /// the request, never joins the session's grant, and ends with the request.
 ///
 /// Dropping it unanswered refuses the request with [`SessionError::Unauthorized`].
