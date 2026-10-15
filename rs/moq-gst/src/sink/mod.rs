@@ -1,12 +1,12 @@
 use gst::glib;
 use gst::prelude::*;
 
-mod wall;
 mod imp;
 mod pad;
 mod request_pad;
 mod session;
 mod timeline;
+mod wall;
 
 #[cfg(test)]
 pub(crate) use pad::h264_keyframe_au;

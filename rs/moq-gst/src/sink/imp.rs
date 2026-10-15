@@ -1286,7 +1286,10 @@ mod tests {
 		let pad = run.pad("audio");
 		let mut catalog = run.start_unplaced();
 		assert!(negotiate(&pad, &opus_caps()));
-		assert!(next_catalog(&mut catalog).is_pending(), "CAPS must wait for the wall clock");
+		assert!(
+			next_catalog(&mut catalog).is_pending(),
+			"CAPS must wait for the wall clock"
+		);
 		assert!(pad.send_event(gst::event::Segment::new(&gst::FormattedSegment::<gst::ClockTime>::new())));
 		let mut buffer = gst::Buffer::from_slice([0xf8, 0xff, 0xfe]);
 		let buffer_mut = buffer.get_mut().unwrap();
