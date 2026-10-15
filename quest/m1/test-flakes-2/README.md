@@ -33,6 +33,7 @@ Public API: none. Wire: none.
 ## Required
 
 - [TS decoded content](/quest/m1/test-flakes-2/ts-video-content.md) - CI's TS compliance decoded-content checks fail only on real loss, and the exporter names every frame it drops
+- [TS resume late frames](/quest/m1/test-flakes-2/ts-resume-late-frames.md) - the same-instance TS resume test keeps its late frames, fixed in production or the fixture as the evidence says
 - [WebTransport close release](/quest/m1/test-flakes-2/interop-close-release.md) - a compatible published adapter contains the acknowledged-close fix
 - [Interop close code](/quest/m1/test-flakes-2/interop-close-code.md) - adopt that release so the browser reliably sees `unauthorized` for a refused session
 - [Handshake ACK](/quest/m1/test-flakes-2/handshake-ack.md) - the impaired cluster drill's connect survives a lost handshake ACK
@@ -42,6 +43,7 @@ Public API: none. Wire: none.
 - [Export exit tests](/quest/m1/test-flakes-2/export-failure-exit.md) - moq-cli's failed-export and interrupted-publisher exit tests hold under load
 - [Session registration](/quest/m1/test-flakes-2/cli-drain-register.md) - a session the client sees established is one the CLI's drain waits for, so a SIGTERM right after the handshake still sends GOAWAY
 - [noq client close](/quest/m1/test-flakes-2/noq-client-close.md) - moq-tokio's client close test orders its close after the server's accept instead of racing it
+- [BBR marking seed](/quest/m1/test-flakes-2/bbr-marking-seed.md) - the BBR marking test seeds its probe schedule, replays a failing seed, and its rare drop is fixed at the cause
 
 ## Related
 

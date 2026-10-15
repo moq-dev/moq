@@ -42,6 +42,19 @@ Decisions settled while planning, recorded so review does not relitigate them:
   lite request names an AUTH stream instead of carrying a token. Step 3
   adds outgoing request tokens through `add()` with automatic naming, sent
   as `USE_VALUE` on plain moq-transport.
+- ✅ Decided 2026-10-15 (maintainer, #5148): `auth::Handle::authorize`
+  keeps its name and now means the connection credential's grant; the
+  session adds every grant it issued to an AUTH token itself.
+- ✅ Decided 2026-10-15 (maintainer, #5148): a typed (CAT etc.) or empty
+  request token is refused `NOT_SUPPORTED`. An AUTH token has no type, and
+  an empty one means the connection's own credential.
+- ✅ Decided 2026-10-15 (maintainer, #5148): moq-relay verifies request
+  tokens in band like any token; ending a request token's lease with its
+  request at the auth server stays in
+  [Request leases](/quest/m3/auth-request-lease.md).
+- ✅ Decided 2026-10-15 (maintainer, #5148): no cap on pending tokens. The
+  peer's credit bounds them: each AUTH token holds its stream open, and each
+  request token its request's slot, until answered or withdrawn.
 - **One AUTH stream per token, opened by whoever presents it.** Either side of
   a session may open one; the acceptor answers with the grant that token
   earns. A moq-net session opens one on both sides right after SETUP with an
@@ -117,6 +130,8 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 
 ## Required
 
+- [Live requests follow their auth](/quest/m1/auth/request-update.md) - a route or subscription swaps its auth and the session sends the update, keeping the request up
+- [Requests name their auth](/quest/m1/auth/request-auth-id.md) - lite-07 AUTH carries an ID and each request names the auth that admits it
 - [Request gate](/quest/m1/auth/request-gate.md) - every incoming request is
   refused up front and held to the grant through a gate its dispatcher owns
 - [Expired token error](/quest/m1/auth/expired-error.md) - an expired token
