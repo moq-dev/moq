@@ -5923,7 +5923,9 @@ mod tests {
 		drop(consumer);
 
 		let serving = moq_net_sim::spawn(async move {
-			subscriber.run_subscribe(Path::new("broadcast"), dynamic, None, request).await;
+			subscriber
+				.run_subscribe(Path::new("broadcast"), dynamic, None, request)
+				.await;
 		});
 
 		moq_net_sim::timeout(std::time::Duration::from_secs(1), serving)
@@ -5973,7 +5975,9 @@ mod tests {
 		let request = dynamic.requested_track().await.expect("no track requested");
 
 		let serving = moq_net_sim::spawn(async move {
-			subscriber.run_subscribe(Path::new("broadcast"), dynamic, None, request).await;
+			subscriber
+				.run_subscribe(Path::new("broadcast"), dynamic, None, request)
+				.await;
 		});
 
 		// Let the SUBSCRIBE go out. No SUBSCRIBE_OK is coming, so the subscription never
@@ -6037,7 +6041,9 @@ mod tests {
 		let request = dynamic.requested_track().await.expect("no track requested");
 
 		let serving = moq_net_sim::spawn(async move {
-			subscriber.run_subscribe(Path::new("broadcast"), dynamic, None, request).await;
+			subscriber
+				.run_subscribe(Path::new("broadcast"), dynamic, None, request)
+				.await;
 		});
 
 		// Let the SUBSCRIBE go out, then retract the broadcast before any response.
@@ -6095,7 +6101,9 @@ mod tests {
 			let mut fetch = None;
 			let serving = match kind {
 				Allocated::Subscribe => moq_net_sim::spawn(async move {
-					subscriber.run_subscribe(Path::new("broadcast"), dynamic, None, request).await;
+					subscriber
+						.run_subscribe(Path::new("broadcast"), dynamic, None, request)
+						.await;
 				}),
 				Allocated::TrackStatus => moq_net_sim::spawn(async move {
 					assert!(
@@ -6221,7 +6229,9 @@ mod tests {
 		let request = dynamic.requested_track().await.expect("no track requested");
 
 		let serving = moq_net_sim::spawn(async move {
-			subscriber.run_subscribe(Path::new("broadcast"), dynamic, None, request).await;
+			subscriber
+				.run_subscribe(Path::new("broadcast"), dynamic, None, request)
+				.await;
 		});
 
 		settle().await;
@@ -6364,7 +6374,9 @@ mod tests {
 		let probe = subscriber.clone();
 
 		let serving = moq_net_sim::spawn(async move {
-			subscriber.run_subscribe(Path::new("broadcast"), dynamic, None, request).await;
+			subscriber
+				.run_subscribe(Path::new("broadcast"), dynamic, None, request)
+				.await;
 		});
 
 		// Let the SUBSCRIBE go out and the SUBSCRIBE_OK come back, so the subscription is
@@ -6443,7 +6455,9 @@ mod tests {
 
 		let probe = subscriber.clone();
 		let serving = moq_net_sim::spawn(async move {
-			subscriber.run_subscribe(Path::new("broadcast"), dynamic, None, request).await;
+			subscriber
+				.run_subscribe(Path::new("broadcast"), dynamic, None, request)
+				.await;
 		});
 
 		settle().await;
@@ -6533,7 +6547,9 @@ mod tests {
 			let request = dynamic.requested_track().await.expect("no track requested");
 
 			let serving = moq_net_sim::spawn(async move {
-				subscriber.run_subscribe(Path::new("broadcast"), dynamic, None, request).await;
+				subscriber
+					.run_subscribe(Path::new("broadcast"), dynamic, None, request)
+					.await;
 			});
 			settle().await;
 
@@ -6611,7 +6627,9 @@ mod tests {
 
 			let probe = subscriber.clone();
 			let serving = moq_net_sim::spawn(async move {
-				subscriber.run_subscribe(Path::new("broadcast"), dynamic, None, request).await;
+				subscriber
+					.run_subscribe(Path::new("broadcast"), dynamic, None, request)
+					.await;
 			});
 			settle().await;
 			let _subscription = track.subscribe(None);
