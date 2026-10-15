@@ -1,5 +1,5 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
-import type * as Catalog from "@moq/hang/catalog";
+import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
@@ -70,6 +70,8 @@ describe("toEncoderConfig", () => {
 // input timestamps never reaches the output.
 class LaggingAudioEncoder {
 	static instances: LaggingAudioEncoder[] = [];
+	static probes: AudioEncoderConfig[] = [];
+	static description: ((config: AudioEncoderConfig) => Uint8Array) | undefined;
 	static readonly LAG = 2;
 
 	// Called on configure; the encoder publishes its pipeline synchronously right after.
@@ -80,6 +82,8 @@ class LaggingAudioEncoder {
 	#held: { timestamp: number; duration: number }[] = [];
 	#base: number | undefined;
 	#encoded = 0;
+	#probe = false;
+	#config?: AudioEncoderConfig;
 	#error: AudioEncoderInit["error"];
 
 	constructor(init: AudioEncoderInit) {
@@ -95,7 +99,10 @@ class LaggingAudioEncoder {
 
 	configure(config: AudioEncoderConfig): void {
 		this.state = "configured";
-		LaggingAudioEncoder.onConfigure?.(config);
+		this.#config = config;
+		queueMicrotask(() => {
+			if (!this.#probe) LaggingAudioEncoder.onConfigure?.(config);
+		});
 	}
 
 	encode(data: AudioData): void {
@@ -104,16 +111,34 @@ class LaggingAudioEncoder {
 		this.#held.push({ timestamp: this.#base + this.#encoded, duration });
 		this.#encoded += duration;
 		while (this.#held.length > LaggingAudioEncoder.LAG) {
-			const { timestamp, duration } = this.#held.shift() as { timestamp: number; duration: number };
-			const chunk = {
-				type: "key",
-				timestamp,
-				duration,
-				byteLength: 1,
-				copyTo: (dest: Uint8Array) => dest.set([1]),
-			};
-			this.#output(chunk as unknown as EncodedAudioChunk);
+			this.#emit(this.#held.shift() as { timestamp: number; duration: number });
 		}
+	}
+
+	#emit({ timestamp, duration }: { timestamp: number; duration: number }): void {
+		const chunk = { type: "key", timestamp, duration, byteLength: 1, copyTo: (dest: Uint8Array) => dest.set([1]) };
+		const config = this.#config;
+		const description = config && LaggingAudioEncoder.description?.(config);
+		const metadata =
+			config && description
+				? {
+						decoderConfig: {
+							codec: config.codec,
+							sampleRate: config.sampleRate,
+							numberOfChannels: config.numberOfChannels,
+							description,
+						},
+					}
+				: undefined;
+		this.#output(chunk as unknown as EncodedAudioChunk, metadata);
+	}
+
+	async flush(): Promise<void> {
+		this.#probe = true;
+		if (this.#config) LaggingAudioEncoder.probes.push(structuredClone(this.#config));
+		const index = LaggingAudioEncoder.instances.indexOf(this);
+		if (index !== -1) LaggingAudioEncoder.instances.splice(index, 1);
+		for (const chunk of this.#held.splice(0)) this.#emit(chunk);
 	}
 
 	reset(): void {
@@ -145,6 +170,8 @@ class FakeAudioData {
 
 function installFakeWebCodecs() {
 	LaggingAudioEncoder.instances = [];
+	LaggingAudioEncoder.probes = [];
+	LaggingAudioEncoder.description = undefined;
 	const names = ["AudioEncoder", "AudioDecoder", "AudioData"] as const;
 	const originals = names.map((name) => Object.getOwnPropertyDescriptor(globalThis, name));
 	const fakes = [LaggingAudioEncoder, class {}, FakeAudioData];
@@ -573,6 +600,7 @@ test("a rendition trailing the broadcast's earliest advertises delay", async () 
 // Regression: codec settings that can't resolve left the encoder unsettled, so `<moq-publish>` never
 // announced and withheld every other rendition with it.
 test("settles when the codec settings can't resolve", async () => {
+	using _webcodecs = installFakeWebCodecs();
 	const error = spyOn(console, "error").mockImplementation(() => {});
 	const capture = {
 		in: { source: new Signal(undefined) },
@@ -595,7 +623,9 @@ test("settles when the codec settings can't resolve", async () => {
 		expect(error).toHaveBeenCalled();
 
 		// A valid duration resolves, and the config keeps it settled.
+		const ready = encoder.out.catalog.changed();
 		encoder.codec.set({ mime: "opus", frameDuration: Time.Milli(20) });
+		await ready;
 		await settle();
 		expect(encoder.out.catalog.peek()).toBeDefined();
 		expect(encoder.settled.peek()).toBe(true);
@@ -607,6 +637,7 @@ test("settles when the codec settings can't resolve", async () => {
 
 // A fade the gain can't ramp over is refused like any other bad setting, rather than ramping wrong.
 test("refuses the rendition while the fade is invalid", async () => {
+	using _webcodecs = installFakeWebCodecs();
 	const error = spyOn(console, "error").mockImplementation(() => {});
 	const capture = {
 		in: { source: new Signal(undefined) },
@@ -625,8 +656,9 @@ test("refuses the rendition while the fade is invalid", async () => {
 		expect(encoder.settled.peek()).toBe(true);
 		expect(error).toHaveBeenCalled();
 
+		const ready = encoder.out.catalog.changed();
 		encoder.fade.set(Time.Milli(0));
-		await settle();
+		await ready;
 		expect(encoder.out.catalog.peek()).toBeDefined();
 
 		encoder.fade.set(Time.Milli(Number.NaN));
@@ -767,6 +799,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 		const config = (await catalog.latest())?.value.audio?.renditions.audio;
 		if (!config?.track) throw new Error("expected recovered track name");
 		expect(config.track).not.toBe("audio");
+		expect(config.numberOfChannels).toBe(Catalog.u53(2));
 		expect(config.enabled).not.toBe(false);
 		recovered = net.track(config.track).subscribe();
 		await settle();
@@ -865,3 +898,26 @@ test.each(["failure first", "config first"])(
 		}
 	},
 );
+
+test("Opus description is probed with the exact live config before advertising", async () => {
+	using _codecs = installFakeWebCodecs();
+	LaggingAudioEncoder.description = (config) => new TextEncoder().encode(JSON.stringify(config));
+	using env = await setup(new Baseline(), {
+		mime: "opus",
+		frameDuration: Time.Milli(2.5),
+		complexity: 3,
+		packetlossperc: 7,
+		useinbandfec: true,
+		bitrate: 64000,
+	});
+	expect(env.encoder.out.catalog.peek()?.description).toBe(Buffer.from(JSON.stringify(env.config)).toString("hex"));
+	expect(LaggingAudioEncoder.probes).toEqual([env.config]);
+	expect(LaggingAudioEncoder.instances).toHaveLength(1);
+	expect(env.written).toHaveLength(0);
+	const configuring = configured();
+	env.capture.in.source.set({ track: {}, kind: "voice" } as never);
+	const voice = await configuring;
+	expect(voice.opus).toMatchObject({ application: "voip", signal: "voice" });
+	expect(LaggingAudioEncoder.probes.at(-1)).toEqual(voice);
+	expect(env.encoder.out.catalog.peek()?.description).toBe(Buffer.from(JSON.stringify(voice)).toString("hex"));
+});
