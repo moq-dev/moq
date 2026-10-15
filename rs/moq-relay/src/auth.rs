@@ -24,7 +24,7 @@ const ADMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Where every session's grant comes from. Exactly one of `url` and the public
 /// patterns is set; [`validate`](Self::validate) refuses anything else.
 #[serde_as]
-#[derive(usage::Args, Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(usage::Args, Clone, Debug, Serialize, Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default)]
 #[non_exhaustive]
@@ -72,6 +72,17 @@ pub struct Config {
 	#[serde_as(as = "OneOrMany<_>")]
 	pub public_publish: Vec<Pattern>,
 
+	/// Maximum in-band tokens one session has the auth server verifying at once,
+	/// counting checks still running past the admission timeout. Later tokens wait
+	/// for a slot. Defaults to 128.
+	#[usage(
+		long = "auth-verifications",
+		env = "MOQ_AUTH_VERIFICATIONS",
+		default = "128",
+		setting = "auth.verifications"
+	)]
+	pub verifications: usize,
+
 	/// The 0.14 flags and env vars #3688 removed, kept parsing but hidden. Never
 	/// read as settings: [`deprecated`](Self::deprecated) names what replaced each.
 	#[usage(flatten)]
@@ -99,6 +110,28 @@ pub struct Config {
 	#[serde(skip_serializing)]
 	pub(crate) tls: Option<serde::de::IgnoredAny>,
 }
+
+impl Default for Config {
+	fn default() -> Self {
+		Self {
+			url: None,
+			public: Vec::new(),
+			public_subscribe: Vec::new(),
+			public_publish: Vec::new(),
+			verifications: VERIFICATIONS,
+			legacy: Legacy::default(),
+			key: None,
+			key_dir: None,
+			auth_api: None,
+			domains: None,
+			mtls_tier: None,
+			tls: None,
+		}
+	}
+}
+
+/// The default for [`Config::verifications`].
+const VERIFICATIONS: usize = 128;
 
 /// The `--auth-*` flags 0.14 had and #3688 removed, with their env vars: a relay
 /// deployed through the environment would otherwise ignore them without a word.
@@ -276,8 +309,12 @@ impl Config {
 			(None, Some(_)) if client_ca => anyhow::bail!(
 				"a client CA (--listen-tls-root, --web-https-root) verifies client certificates, which --auth-public ignores; remove it, or grant certificates with --auth-url to `moq auth serve --mtls-*`"
 			),
-			_ => Ok(()),
+			_ => {}
 		}
+		if self.verifications == 0 {
+			anyhow::bail!("--auth-verifications must be at least 1, or no in-band token is ever verified");
+		}
+		Ok(())
 	}
 
 	/// Build the [`Auth`] this configuration describes, after [`validate`](Self::validate)
@@ -305,6 +342,7 @@ impl Config {
 		};
 		let (mut auth, admissions) = Auth::embedded(node);
 		auth.in_band = matches!(decider, Decider::Server(_));
+		auth.verifications = self.verifications;
 		decider.spawn(admissions);
 		Ok(auth)
 	}
@@ -703,6 +741,8 @@ pub struct Auth {
 	node: Arc<str>,
 	/// Whether the decider can verify a token presented in band; public rules cannot.
 	in_band: bool,
+	/// How many in-band tokens one session may have the decider verifying at once.
+	verifications: usize,
 }
 
 impl Auth {
@@ -715,6 +755,7 @@ impl Auth {
 			admissions: sender,
 			node: Arc::from(node.into()),
 			in_band: true,
+			verifications: VERIFICATIONS,
 		};
 		(auth, Admissions(receiver))
 	}
@@ -800,8 +841,9 @@ fn answered_with(
 /// The transport has already accepted each one; it waits for its answer, so a
 /// slow decider holds connects the way a slow auth server would, and one that
 /// takes longer than a server may (ten seconds) is refused as unavailable. An
-/// [attached](Admission::attached) token keeps its place in the session's
-/// verification bound until the decider answers or drops it, even past that.
+/// [attached](Admission::attached) token holds one of its session's verification
+/// slots until the decider answers or drops it, even past that, and the session's
+/// later tokens wait for a slot before they reach the decider.
 /// Answer in place or hand each [`Admission`] to its own task; nothing here
 /// serializes them.
 pub struct Admissions(mpsc::UnboundedReceiver<Admission>);
@@ -941,6 +983,21 @@ mod tests {
 		let grant = split.public_grant().unwrap();
 		assert_eq!(grant.subscribe, patterns(&["anon/**"]));
 		assert!(grant.publish.is_empty());
+	}
+
+	/// The verification concurrency defaults to 128, reads from `[auth]`, and refuses 0,
+	/// which would leave every in-band token waiting forever.
+	#[test]
+	fn verifications_default_and_refuse_zero() {
+		let config = config(Some("http://127.0.0.1:4440/"), &[]);
+		assert_eq!(config.verifications, 128);
+		let parsed: Config = toml::from_str("url = \"http://127.0.0.1:4440/\"\nverifications = 4\n").unwrap();
+		assert_eq!(parsed.verifications, 4);
+		let zero = Config {
+			verifications: 0,
+			..config
+		};
+		assert!(zero.validate(false).is_err());
 	}
 
 	/// Public rules grant a certificate what they grant anyone, so a client CA
