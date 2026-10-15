@@ -11,7 +11,7 @@ use crate::media::MoqFrame;
 /// Publisher-side track properties, mirroring [`moq_net::track::Info`].
 ///
 /// Construct with the fields you care about; the rest use raw-track defaults
-/// (priority 127, no publisher age limit, microsecond timescale).
+/// (priority 127, no publisher age limit, untimed).
 #[derive(Clone, uniffi::Record)]
 pub struct MoqTrackInfo {
 	/// Priority, used only to break ties between subscriptions of equal subscriber priority.
@@ -23,8 +23,7 @@ pub struct MoqTrackInfo {
 	/// [`MoqSubscription::max_delay_us`](crate::consumer::MoqSubscription::max_delay_us).
 	#[uniffi(default = None)]
 	pub max_age_us: Option<u64>,
-	/// Per-frame timescale in ticks per second. Null uses microseconds when publishing, and
-	/// means the source declared no timeline on a received track.
+	/// Per-frame timescale in ticks per second, or null for an untimed track.
 	#[uniffi(default = None)]
 	pub timescale: Option<u64>,
 }
@@ -33,9 +32,7 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 	type Error = MoqError;
 
 	fn try_from(info: MoqTrackInfo) -> Result<Self, MoqError> {
-		let mut out = moq_net::track::Info::default()
-			.with_timescale(moq_net::Timescale::MICRO)
-			.with_priority(info.priority);
+		let mut out = moq_net::track::Info::default().with_priority(info.priority);
 		if let Some(us) = info.max_age_us {
 			out = out.with_max_age(std::time::Duration::from_micros(us));
 		}
@@ -52,7 +49,7 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 fn raw_track_info(info: Option<MoqTrackInfo>) -> Result<moq_net::track::Info, MoqError> {
 	info.map(moq_net::track::Info::try_from)
 		.transpose()
-		.map(|info| info.unwrap_or_else(|| moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO)))
+		.map(|info| info.unwrap_or_default())
 }
 
 impl TryFrom<&moq_net::track::Info> for MoqTrackInfo {
@@ -530,10 +527,9 @@ impl MoqTrackProducer {
 
 	/// Write `frame` as a single-frame group.
 	///
-	/// Raw tracks default to a microsecond timescale. Custom timescales may round
-	/// the timestamp during conversion. A frame without one is refused with
-	/// [`MoqProtocolKind::TimestampMismatch`](crate::error::MoqProtocolKind::TimestampMismatch): raw
-	/// tracks are timed.
+	/// Custom timescales may round the timestamp during conversion. The frame must
+	/// match its track's timedness, otherwise it is refused with
+	/// [`MoqProtocolKind::TimestampMismatch`](crate::error::MoqProtocolKind::TimestampMismatch).
 	pub fn write_frame(&self, frame: MoqFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let timestamp = frame.timestamp_us.map(moq_net::Timestamp::from_micros).transpose()?;
@@ -546,8 +542,8 @@ impl MoqTrackProducer {
 	/// Send `frame` as a best-effort datagram, returning the sequence number assigned to it.
 	///
 	/// The payload must be at most 1200 bytes. Datagrams are only delivered on transports and
-	/// wire versions with a datagram channel; there is no stream fallback. Like a frame, a
-	/// datagram without a timestamp is refused.
+	/// wire versions with a datagram channel; there is no stream fallback. Like a frame,
+	/// its timestamp must match the track's timedness.
 	pub fn append_datagram(&self, frame: MoqFrame) -> Result<u64, MoqError> {
 		let _guard = crate::ffi::enter();
 		let timestamp = frame.timestamp_us.map(moq_net::Timestamp::from_micros).transpose()?;
@@ -616,10 +612,9 @@ impl MoqGroupProducer {
 
 	/// Write `frame` into this group.
 	///
-	/// Raw tracks default to a microsecond timescale. Custom timescales may round
-	/// the timestamp during conversion. A frame without one is refused with
-	/// [`MoqProtocolKind::TimestampMismatch`](crate::error::MoqProtocolKind::TimestampMismatch): raw
-	/// tracks are timed.
+	/// Custom timescales may round the timestamp during conversion. The frame must
+	/// match its track's timedness, otherwise it is refused with
+	/// [`MoqProtocolKind::TimestampMismatch`](crate::error::MoqProtocolKind::TimestampMismatch).
 	pub fn write_frame(&self, frame: MoqFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let timestamp = frame.timestamp_us.map(moq_net::Timestamp::from_micros).transpose()?;
@@ -662,6 +657,14 @@ impl MoqGroupProducer {
 #[cfg(test)]
 mod metadata_tests {
 	use super::*;
+
+	#[test]
+	fn untimed_info_round_trips_through_the_binding() {
+		let original = moq_net::track::Info::default();
+		let info = MoqTrackInfo::try_from(&original).unwrap();
+		assert_eq!(moq_net::track::Info::try_from(info).unwrap().timescale, None);
+		assert_eq!(raw_track_info(None).unwrap().timescale, None);
+	}
 
 	#[test]
 	fn optional_retention_survives_binding_conversion() {

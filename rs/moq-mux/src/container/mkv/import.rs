@@ -742,7 +742,7 @@ fn build_audio_config(
 					}
 					config
 				}
-				None => AudioConfig::new(AudioCodec::Opus, 48_000, channels),
+				None => crate::codec::opus::Config::new(48_000, channels).into(),
 			};
 			config.description = codec_private.cloned();
 			Ok(config)

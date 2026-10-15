@@ -18,6 +18,13 @@ Use `Named(name)` or `Requested(request)` as the target for `TrackProducer.audio
 `CatalogProducer(broadcast)` holds the broadcast weakly and owns catalog properties and sections;
 its writes fail with `Error.Closed` after the broadcast closes or is released.
 `MediaFrame.timestamp`, media writes, and `flush` use `datetime.timedelta`.
+A missing data timestamp stays untimed; the library never substitutes zero or now.
+Raw tracks with a `None` timescale are untimed on both publish and receive.
+`moq.flate.SnapshotProducer` / `StreamProducer` publish opaque payloads; their `update` / `append`
+and the JSON producers accept `timestamp=timedelta(...)` (`None` for untimed).
+Whole-frame media writes require caller time; container imports keep their own timeline handling.
+Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
+created event on the broadcast clock; reading it fixes that clock for later media producers.
 For arrival-order reads, decode each group from `TrackConsumer.recv_group()` with
 `media.GroupConsumer(group, container)`; frames carry container media time as they land.
 
@@ -58,7 +65,7 @@ async def main():
 
         # Already-encoded frames: the catalog is filled from the bitstream
         audio = moq.media.TrackProducer.audio(broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_init_bytes))
-        audio.write_frame(payload)
+        audio.write_frame(payload, moq.media.CatalogProducer(broadcast).now())
         audio.cut()   # audio has no keyframes, so this is what gives it groups
 
         # Or raw pixels, encoded inside the binding (VideoToolbox, Media Foundation, NVENC, openh264)

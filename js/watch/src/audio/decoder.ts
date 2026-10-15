@@ -26,10 +26,7 @@ import { AUTO_MAX_DELAY, ringSamples, target } from "./latency";
 // A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
-import { type DecodedSpan, Terminal } from "./terminal";
-import { Warmup } from "./warmup";
-
-const LEGACY_WARMUP_CALLBACKS = 3;
+import { Terminal } from "./terminal";
 
 export type DecoderInput = {
 	// Whether to download the audio track. Defaults to true.
@@ -128,6 +125,7 @@ export class Decoder {
 
 	// The subscription's max delay: the shared budget, raised to the estimator's ceiling in "auto".
 	#subscribeMaxDelay = new Signal<Time.Milli>(Time.Milli.zero);
+	#maxDelay = new Signal<Time.Milli>(Time.Milli.zero);
 
 	// The codec's frame duration: the catalog constant, refined by each frame's own duration.
 	#frame = new Signal<Time.Milli | undefined>(undefined);
@@ -189,7 +187,9 @@ export class Decoder {
 	#runSubscribeMaxDelay(effect: Effect): void {
 		const maxDelay = effect.get(this.sync.out.maxDelay);
 		const auto = effect.get(this.sync.in.delay) === "auto";
-		this.#subscribeMaxDelay.set(auto ? Time.Milli.max(maxDelay, AUTO_MAX_DELAY) : maxDelay);
+		const warmup = Time.Milli(effect.get(this.source.out.config)?.warmup ?? 0);
+		this.#maxDelay.set(Time.Milli.add(maxDelay, warmup));
+		this.#subscribeMaxDelay.set(Time.Milli.add(auto ? Time.Milli.max(maxDelay, AUTO_MAX_DELAY) : maxDelay, warmup));
 	}
 
 	#runShape(effect: Effect): void {
@@ -412,14 +412,14 @@ export class Decoder {
 	): void {
 		const preSkip =
 			config.codec === "opus" && config.description ? Util.Opus.preSkip(Util.Hex.toBytes(config.description)) : 0;
-		this.#terminal.clear(preSkip);
+		this.#terminal.clear(preSkip, Time.Micro.fromMilli(Time.Milli(config.warmup ?? 0)));
 		const format =
 			config.container.kind === "loc" ? new Container.Loc.Format("audio") : new Container.Legacy.Format(config);
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
 		// TODO include JITTER_UNDERHEAD
 		const consumer = new Container.Consumer(sub, {
 			format,
-			maxDelay: this.sync.out.maxDelay,
+			maxDelay: this.#maxDelay,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -439,18 +439,8 @@ export class Decoder {
 			const loaded = await Util.Libav.polyfill();
 			if (!loaded) return; // cancelled
 
-			const warmup = new Warmup(LEGACY_WARMUP_CALLBACKS);
-
 			const decoder = new AudioDecoder({
-				output: (data) => {
-					const decoded = this.#terminal.span(data);
-					if (warmup.drop()) {
-						// Drop initial callbacks to prime the decoder.
-						data.close();
-						return;
-					}
-					this.#emit(data, decoded);
-				},
+				output: (data) => this.#emit(data),
 				error: (error) => failure.set(error),
 			});
 			effect.cleanup(() => {
@@ -529,7 +519,7 @@ export class Decoder {
 		const init = Container.Cmaf.decodeInitSegment(initSegment);
 		const opusDescription = config.description ? Util.Hex.toBytes(config.description) : init.description;
 		const preSkip = config.codec === "opus" && opusDescription ? Util.Opus.preSkip(opusDescription) : 0;
-		this.#terminal.clear(preSkip);
+		this.#terminal.clear(preSkip, Time.Micro.fromMilli(Time.Milli(config.warmup ?? 0)));
 		// Opus in CMAF uses raw packets (not OGG-wrapped), so description must be omitted.
 		// The dOps box from the init segment is not a valid OGG Identification Header.
 		const description =
@@ -541,7 +531,7 @@ export class Decoder {
 
 		const consumer = new Container.Consumer(sub, {
 			format: new Container.Cmaf.Format(init),
-			maxDelay: this.sync.out.maxDelay,
+			maxDelay: this.#maxDelay,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -634,8 +624,8 @@ export class Decoder {
 		}
 	}
 
-	#emit(sample: AudioData, decoded: DecodedSpan = this.#terminal.span(sample)) {
-		const { timestamp, frameOffset, frames } = decoded;
+	#emit(sample: AudioData) {
+		const { timestamp, frameOffset, frames } = this.#terminal.span(sample);
 		const timestampMilli = Time.Milli.fromMicro(timestamp);
 		if (frames === 0) {
 			sample.close();
