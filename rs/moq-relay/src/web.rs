@@ -908,7 +908,7 @@ fn request_host(uri: &http::Uri, headers: &http::HeaderMap) -> Option<String> {
 		.filter(|host| !host.is_empty())
 }
 
-/// Admit a one-shot HTTP request as a session of its own: the auth server sees the
+/// Admit a one-shot HTTP request: the auth server sees the
 /// path, the raw query, the host it was addressed to, the peer, and any certificate.
 async fn admit_http(
 	state: &WebState,
@@ -918,7 +918,7 @@ async fn admit_http(
 	headers: &http::HeaderMap,
 	remote: crate::listener::Peer,
 	mtls: Option<Extension<MtlsPeer>>,
-) -> Result<auth::Lease, auth::Error> {
+) -> Result<(auth::Lease, moq_net::stats::Session), auth::Error> {
 	// The public request API represents a missing or root path as empty; the
 	// contract says what was dialed, and a URL always starts with `/`.
 	let mut request = state
@@ -931,11 +931,14 @@ async fn admit_http(
 	request.server_name = request_host(uri, headers);
 	request.remote = Some(remote.0);
 	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| auth::peer(&identity));
-	state
+	let lease = state
 		.auth
 		.admit(request)
 		.await
-		.inspect_err(|err| state.cluster.refusals.record(err.into()))
+		.inspect_err(|err| state.cluster.refusals.record(err.into()))?;
+	let token = lease.token();
+	let stats = state.cluster.stats.tier(token.tier.clone()).request(&token.root);
+	Ok((lease.with_stats(stats.clone()), stats))
 }
 
 /// Serve the announced broadcasts for a given prefix.
@@ -955,13 +958,13 @@ async fn serve_announced(
 		None => String::new(),
 	};
 
-	let lease = admit_http(&state, prefix, query, &uri, &headers, remote, mtls).await?;
+	let (lease, stats) = admit_http(&state, prefix, query, &uri, &headers, remote, mtls).await?;
 	let Some(origin) = state.cluster.subscriber(lease.token()) else {
 		state.cluster.refusals.record(crate::refusals::Refusal::Forbidden);
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
 
-	let mut announced = origin.consume().announced();
+	let mut announced = origin.consume().with_stats(stats).announced();
 	let mut broadcasts = Vec::new();
 
 	while let Some(event) = announced.try_next() {
@@ -1002,7 +1005,7 @@ async fn serve_fetch(
 		return Err(StatusCode::BAD_REQUEST.into());
 	}
 
-	let lease = admit_http(&state, path.join("/"), params.auth, &uri, &headers, remote, mtls).await?;
+	let (lease, stats) = admit_http(&state, path.join("/"), params.auth, &uri, &headers, remote, mtls).await?;
 	// The token's root is the canonical (alias-resolved) broadcast path.
 	let broadcast = lease.token().root.to_string();
 
@@ -1021,7 +1024,7 @@ async fn serve_fetch(
 		// NOTE: The auth token is already scoped to the broadcast.
 		// Block until a route covers the broadcast (within the fetch deadline) so
 		// freshly-connected subscribers don't get a spurious 404 before the announce arrives.
-		let consumer = origin.consume();
+		let consumer = origin.consume().with_stats(stats);
 		let broadcast = consumer.routed_broadcast("").await.map_err(|_| StatusCode::NOT_FOUND)?;
 		let sequence = match params.group {
 			FetchGroup::Num(sequence) => Some(sequence),
@@ -1194,6 +1197,122 @@ mod tests {
 					"fetch={fetch}, publish_only={publish_only}"
 				);
 			}
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn http_fetch_meters_bytes_without_session_presence() {
+		use moq_net::stats::{Registry, Report, Tier};
+		let dir = TempDir::new().unwrap();
+		let (_, cert, _) = make_certs(&dir);
+		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(cert).unwrap()).unwrap();
+		let (auth, mut admissions) = auth::Auth::embedded("test");
+		let decider = tokio::spawn(async move {
+			let mut leases = Vec::new();
+			for _ in 0..6 {
+				let admission = admissions.next().await.unwrap();
+				assert_eq!(admission.request.transport, moq_auth::Transport::Http);
+				let mut grant = moq_auth::Grant::new(Default::default(), moq_auth::Pattern::all().into());
+				grant.tier = Some(
+					admission
+						.request
+						.query
+						.as_deref()
+						.unwrap()
+						.strip_prefix("tier=")
+						.unwrap()
+						.to_owned(),
+				);
+				let (producer, consumer) = moq_auth::lease::Producer::new(grant);
+				leases.push(producer);
+				admission.grant(consumer);
+			}
+			leases
+		});
+		let mut cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		cluster.stats = Registry::new(Default::default());
+		let broadcast = cluster.origin.create_broadcast("room").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let track = broadcast
+			.create_track(
+				"video",
+				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			)
+			.unwrap();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref()).unwrap();
+		group.finish().unwrap();
+		let state = Web::new(auth, cluster, certificates, Config::default()).state;
+		for tier in ["first", "second"] {
+			for selector in [FetchGroup::Num(0), FetchGroup::Latest] {
+				let mut served = serve_fetch(
+					Path("room/video".into()),
+					Query(FetchParams {
+						auth: AuthQuery { jwt: None },
+						group: selector,
+					}),
+					None,
+					ConnectInfo(crate::listener::Peer("127.0.0.1:1234".parse().unwrap())),
+					format!("/fetch/room/video?tier={tier}").parse().unwrap(),
+					http::HeaderMap::new(),
+					State(state.clone()),
+				)
+				.await
+				.unwrap();
+				assert_eq!(served.next().await.unwrap().unwrap(), "hello");
+				assert!(served.next().await.unwrap().is_none());
+				served.end("done");
+			}
+			let before = state.cluster.stats.snapshot();
+			serve_announced(
+				Some(Path("room".into())),
+				Query(AuthQuery { jwt: None }),
+				None,
+				ConnectInfo(crate::listener::Peer("127.0.0.1:1234".parse().unwrap())),
+				format!("/announced/room?tier={tier}").parse().unwrap(),
+				http::HeaderMap::new(),
+				State(state.clone()),
+			)
+			.await
+			.unwrap();
+			assert_eq!(
+				before
+					.traffic()
+					.iter()
+					.map(|(_, _, traffic)| traffic.bytes)
+					.sum::<u64>(),
+				state
+					.cluster
+					.stats
+					.snapshot()
+					.traffic()
+					.iter()
+					.map(|(_, _, traffic)| traffic.bytes)
+					.sum::<u64>(),
+				"announced serves no media"
+			);
+		}
+		let _leases = decider.await.unwrap();
+		let mut report = Report::default();
+		state.cluster.stats.report(&mut report);
+		assert_eq!(report.traffic.len(), 2);
+		assert_eq!(report.sessions.len(), 2);
+		for label in ["first", "second"] {
+			let tier = Tier::new(label);
+			let traffic = report.traffic.iter().find(|entry| entry.tier == tier).unwrap();
+			assert_eq!(traffic.path.as_str(), "room");
+			assert_eq!(
+				traffic.publisher.bytes, 10,
+				"numbered and latest payload on the token's tier"
+			);
+			assert_eq!(traffic.subscriber.bytes, 0);
+			let presence = report.sessions.iter().find(|entry| entry.tier == tier).unwrap();
+			assert_eq!(presence.root.as_str(), "room");
+			assert_eq!(presence.presence.requests, 3);
+			assert_eq!(
+				(presence.presence.sessions_started, presence.presence.sessions_ended),
+				(0, 0)
+			);
 		}
 	}
 

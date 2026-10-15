@@ -25,6 +25,10 @@ curl http://localhost:4443/fetch/demo/bbb.hang/catalog.json
 `moq announced` and `moq fetch` answer the same questions over MoQ; see
 [Inspect a relay](/bin/inspect).
 
+With [stats](/concept/stats) enabled, `/fetch` and `/announced` count as requests
+on the token's tier and root. Fetched payload counts against its broadcast path;
+neither endpoint counts as a connected session.
+
 GET routes on the public router, including ones an embedder merges in, get a
 wildcard CORS origin unless the route sets its own. Tokens sent over plain HTTP
 are visible on the wire, so use HTTPS in production.
@@ -38,7 +42,7 @@ listen = "127.0.0.1:9101"
 
 ### GET /metrics
 
-Prometheus text: bytes, frames, groups, subscriptions, viewers, and sessions
+Prometheus text: bytes, frames, groups, subscriptions, viewers, requests, and sessions
 split by `tier` and `role`, plus accept-loop counters per TCP listener. Traffic
 counters accumulate for the node's lifetime and leave out the stats feed's own
 traffic. Host CPU and memory belong to a node exporter.

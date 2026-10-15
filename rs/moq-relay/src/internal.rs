@@ -476,6 +476,20 @@ fn render_metrics(
 		|c| c.broadcasts_ended,
 	);
 
+	let _ = writeln!(
+		out,
+		"# HELP moq_relay_requests_total Admitted request/response exchanges."
+	);
+	let _ = writeln!(out, "# TYPE moq_relay_requests_total counter");
+	for (tier, presence) in &snap.sessions() {
+		let _ = writeln!(
+			out,
+			"moq_relay_requests_total{{tier=\"{}\"}} {}",
+			tier.as_str(),
+			presence.requests
+		);
+	}
+
 	// Sessions are per-tier only (no role), so they don't fit the helper above.
 	let _ = writeln!(out, "# HELP moq_relay_sessions_opened_total Connected sessions opened.");
 	let _ = writeln!(out, "# TYPE moq_relay_sessions_opened_total counter");
@@ -1022,6 +1036,24 @@ mod tests {
 			);
 			assert!(body.contains(&row), "missing {row}:\n{body}");
 		}
+	}
+
+	#[test]
+	fn request_metrics_never_open_a_session() {
+		let stats = moq_net::stats::Registry::new(Default::default());
+		let request = stats.tier(moq_net::stats::Tier::new("http")).request("root");
+		drop(request);
+		let body = render_metrics(&stats.snapshot(), &[], &[]);
+		assert!(body.contains("# TYPE moq_relay_requests_total counter"), "{body}");
+		assert!(body.contains("moq_relay_requests_total{tier=\"http\"} 1"), "{body}");
+		assert!(
+			body.contains("moq_relay_sessions_opened_total{tier=\"http\"} 0"),
+			"{body}"
+		);
+		assert!(
+			body.contains("moq_relay_sessions_closed_total{tier=\"http\"} 0"),
+			"{body}"
+		);
 	}
 
 	/// The `/metrics` renderer emits well-formed Prometheus exposition: a
