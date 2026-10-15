@@ -3227,19 +3227,25 @@ where
 	/// answers a refused one with SUBSCRIBE_ERROR). Each answer bumps `answers` so the send
 	/// loop can release the renewal it coalesced behind the one in flight; the read continues
 	/// regardless, since the subscription ends on its PUBLISH_DONE, which the publisher sends
-	/// right after a refused renewal's REQUEST_ERROR, not on the answer itself.
+	/// right after a refused renewal's REQUEST_ERROR, not on the answer itself. That
+	/// PUBLISH_DONE fails with the refusal's code, as an initial refusal does, rather than its
+	/// own generic status.
 	async fn read_publish_done(
 		reader: &mut Reader<S::RecvStream, Version>,
 		version: Version,
 		answers: &kio::Shared<u64>,
 	) -> Result<u64, Error> {
+		let mut refused = None;
 		loop {
 			match reader.varint_maybe().await? {
 				Some(ietf::PublishDone::ID) => {
 					let msg: ietf::PublishDone = reader.decode().await?;
 					tracing::debug!(message = ?msg, "received publish done");
-					msg.end(version)?;
-					return Ok(msg.stream_count);
+					return match (msg.end(version), refused) {
+						(Ok(()), _) => Ok(msg.stream_count),
+						(Err(_), Some(refusal)) => Err(refusal),
+						(Err(err), None) => Err(err),
+					};
 				}
 				Some(ietf::RequestOk::ID) => {
 					let msg: ietf::RequestOk = reader.decode().await?;
@@ -3251,16 +3257,19 @@ where
 					// draft-14 still frames it as SUBSCRIBE_ERROR. Either way it refuses the
 					// renewal; the subscription then ends on the PUBLISH_DONE that follows, not
 					// on this answer.
-					match version {
+					let code = match version {
 						Version::Draft14 => {
 							let msg: ietf::SubscribeError = reader.decode().await?;
 							tracing::warn!(message = ?msg, "request token renewal refused");
+							msg.error_code
 						}
 						_ => {
 							let msg: ietf::RequestError = reader.decode().await?;
 							tracing::warn!(message = ?msg, "request token renewal refused");
+							msg.error_code
 						}
-					}
+					};
+					refused = Some(request::from_code(code, request::Kind::Subscribe, version));
 					*answers.lock() += 1;
 				}
 				Some(_) => return Err(Error::UnexpectedMessage),
@@ -5288,6 +5297,64 @@ mod tests {
 	use futures::poll;
 
 	use super::*;
+
+	/// A refused renewal ends the subscription with the refusal's own error, as an initial
+	/// refusal does, not the generic status of the PUBLISH_DONE that follows it.
+	#[moq_net_sim::test]
+	async fn a_refused_renewal_ends_the_subscription_with_its_refusal() {
+		use crate::lite::test_transport::ScriptedSession;
+		use crate::transport::poll::Session as _;
+		for version in [Version::Draft14, Version::Draft16, Version::Draft19, Version::Draft22] {
+			let log = crate::lite::test_transport::Log::default();
+			let mut writer =
+				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+			let code = request::to_code(&Error::Unauthorized, request::Kind::Subscribe, version);
+			match version {
+				Version::Draft14 => {
+					writer.varint(ietf::SubscribeError::ID).await.unwrap();
+					writer
+						.encode(&ietf::SubscribeError {
+							request_id: RequestId(2),
+							error_code: code,
+							reason_phrase: "no".into(),
+						})
+						.await
+						.unwrap();
+				}
+				_ => {
+					writer.varint(ietf::RequestError::ID).await.unwrap();
+					writer
+						.encode(&ietf::RequestError {
+							request_id: (version == Version::Draft16).then_some(RequestId(2)),
+							error_code: code,
+							reason_phrase: "no".into(),
+							retry_interval: 0,
+						})
+						.await
+						.unwrap();
+				}
+			}
+			writer.varint(ietf::PublishDone::ID).await.unwrap();
+			writer
+				.encode(&ietf::PublishDone {
+					request_id: (version != Version::Draft19 && version != Version::Draft22).then_some(RequestId(0)),
+					status_code: 0x8,
+					stream_count: 0,
+					reason_phrase: "update failed".into(),
+				})
+				.await
+				.unwrap();
+			let script = log.writes.lock().unwrap().clone();
+
+			let mut session = ScriptedSession::eof(script);
+			let (_, recv) = session.open_bi().await.unwrap();
+			let mut reader = Reader::new(recv, version);
+			let answers = kio::Shared::new(0);
+			let result = Subscriber::<ScriptedSession>::read_publish_done(&mut reader, version, &answers).await;
+			assert!(matches!(result, Err(Error::Unauthorized)), "{version}: {result:?}");
+			assert_eq!(*answers.lock(), 1, "{version}");
+		}
+	}
 
 	async fn check_publish_fin(responses: Vec<u8>, clean: bool) {
 		use crate::lite::test_transport::ScriptedSession;
