@@ -45,6 +45,11 @@ Test a served identity change reaching a new epoch with the old catalog track
 ending on the old identity, a returning name, the Opus description present
 from the first catalog, and a shrink or maxima rise staying in place.
 
+Before landing, run a real browser through both renames: a codec change and
+a `Video.Encoder` growing past its ceiling. Confirm `js/watch` follows the
+rendition to its new `track` without a stall. Unit tests do not show what
+WebCodecs and the watch path do across the switch.
+
 ## Related
 
 - [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - the same contract for the Rust publishers

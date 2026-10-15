@@ -24,6 +24,11 @@ frames decode independently and set nothing; HE-AAC is out of scope.
   which drops the first three decoded frames of every legacy or LOC
   subscription, CMAF excepted. That is the start loss left on a rendition's
   return after an absence: 60 ms of 20 ms Opus.
+- Name the 80 ms pre-roll once in Rust and once in JS. Every site that
+  advertises or derives it uses that constant: the encoder catalog, the
+  shared Opus conversion, and the MSF consumer. Add a test that the audio
+  catalog `Producer` publishes exactly `Encoder::catalog()`, because the two
+  have drifted before.
 - Tests in both languages: a mid-stream join discards exactly the warmup span
   and a continuous listener loses nothing.
 
