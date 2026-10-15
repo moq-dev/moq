@@ -82,7 +82,7 @@ check $BASE="":
 ci $JOB $BASE="":
     sh/dispatch.sh "ci-$JOB" "$BASE"
 
-# Report whether a CI job selects work, before installing the dev shell or build caches.
+# Report what a CI job (`check`, `test`, `platform`) selects, before installing the dev shell or build caches.
 ci-select $JOB $BASE="":
     sh/dispatch.sh "ci-$JOB" "$BASE" --query
 

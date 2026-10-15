@@ -58,7 +58,8 @@ merge_base=$(git merge-base "$base" HEAD) || {
 echo "changed: base $base" >&2
 
 # Untracked files count too: a brand new crate or module is the whole change.
+# A rename lists both sides, since a reader of the old path is affected too.
 {
-    git diff --name-only "$merge_base"
+    git diff --name-only --no-renames "$merge_base"
     git ls-files --others --exclude-standard
 } | sort -u

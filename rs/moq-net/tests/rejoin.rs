@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A reader leaving and rejoining a track relayed over the in-memory mock transport.
 
 mod support;

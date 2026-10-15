@@ -15,6 +15,12 @@ Live media is built on top of this layer using something like [hang](https://git
 - **Groups**: A sequential collection of frames, usually starting with a keyframe.
 - **Frame**: A timed chunk of data.
 
+The default `async` feature includes Lite/IETF sessions, async convenience methods,
+and the announcement `Stream` adapter.
+Use `default-features = false` for the model's `poll_*` APIs and origin driver,
+polled with explicit time without a native runtime. This excludes sessions and
+`time::run`; the origin's core serving logic remains available.
+
 ## Examples
 
 - [Publishing a chat track](https://github.com/moq-dev/moq/blob/main/rs/moq-tokio/examples/chat.rs)

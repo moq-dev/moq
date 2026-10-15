@@ -2,9 +2,9 @@
 //!
 //! Each side of a session presents the credential its connection
 //! already carried (the URL, a client certificate, or nothing) right after
-//! setup, and learns the [`Grant`] it earned. [`Session::auth`](crate::Session::auth)
+//! setup, and learns the [`Grant`] it earned. `Session::auth`
 //! returns the [`Handle`]: [`grant`](Handle::grant) is the union of every token
-//! this side presented, and [`add`](Handle::add) presents another without
+//! this side presented, and `add` presents another without
 //! reconnecting. Dropping the returned [`Token`] withdraws it.
 //!
 //! The other direction, answering the peer's tokens, is automatic: the session
@@ -16,7 +16,7 @@
 //!
 //! moq-transport draft-17+ carries the same exchange when both sides negotiate the
 //! MoQ Auth extension. Older versions, and peers that do not negotiate it, carry no
-//! AUTH exchange: there the grant stays `None` and [`add`](Handle::add) fails with
+//! AUTH exchange: there the grant stays `None` and `add` fails with
 //! [`Error::Unsupported`]. moq-lite carries a grant's patterns as they are;
 //! moq-transport carries namespace prefixes, so it refuses a grant that is not a
 //! union of subtrees rather than widen it.
@@ -31,6 +31,7 @@ use bytes::Bytes;
 use crate::{Error, Patterns, Result, SessionError, time::Instant};
 
 /// Classify malformed AUTH messages separately from transport and local failures.
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) fn protocol_error(err: Error) -> Error {
 	match err {
 		Error::Decode(_)
@@ -88,6 +89,7 @@ impl Grant {
 	/// The paths both grants allow, lapsing at the earlier expiry.
 	///
 	/// Fails closed: an intersection too large to hold grants nothing, never more.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	fn intersect(&self, other: &Self) -> Self {
 		let both = |a: &Patterns, b: &Patterns| {
 			a.intersect(b).unwrap_or_else(|err| {
@@ -118,6 +120,7 @@ pub(crate) struct State {
 	supported: bool,
 	/// Set once the session ends; every waiter resolves with it.
 	closed: Option<Error>,
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	next_id: u64,
 	/// Every token this side presented that has not ended.
 	tokens: BTreeMap<u64, Slot>,
@@ -139,12 +142,15 @@ pub(crate) struct State {
 
 /// One presented token.
 pub(crate) struct Slot {
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	token: Bytes,
 	/// Presented by the session itself at setup, so enforcement waits on it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	setup: bool,
 	/// The latest AUTH_OK, `None` before the first and after the token ends.
 	grant: Option<Grant>,
 	/// The first reply: `Ok` for an AUTH_OK, the refusal otherwise.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	answered: Option<Result<()>>,
 	/// Why the token ended, once it has.
 	ended: Option<Error>,
@@ -159,8 +165,10 @@ enum Acceptor {
 	#[default]
 	Undecided,
 	/// The app answers every token.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	App(Pending),
 	/// The session answers from its own origin handles.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	Default,
 }
 
@@ -187,6 +195,7 @@ impl State {
 
 	/// The union's and the limit's patterns for `direction`, each `None` while
 	/// unrestricted.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	fn parts(&self, direction: Direction) -> (Option<&Patterns>, Option<&Patterns>) {
 		// The peer's grant names what we may do; the limit names what the peer may,
 		// so what we send is what the peer may subscribe to, and the other way around.
@@ -203,6 +212,7 @@ impl State {
 	}
 
 	/// What `direction` allows right now.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	fn permit(&self, direction: Direction) -> Permit {
 		let (granted, limit) = self.parts(direction);
 		Permit {
@@ -212,6 +222,7 @@ impl State {
 	}
 
 	/// Whether `direction` allows `path` right now, without copying the patterns.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	fn allows(&self, direction: Direction, path: &str) -> bool {
 		let (granted, limit) = self.parts(direction);
 		granted.is_none_or(|granted| granted.matches(path)) && limit.is_none_or(|limit| limit.matches(path))
@@ -222,6 +233,7 @@ impl State {
 /// union of its tokens) and the limit this side set on the peer, each `None`
 /// while unrestricted.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) struct Permit {
 	granted: Option<Patterns>,
 	limit: Option<Patterns>,
@@ -229,18 +241,21 @@ pub(crate) struct Permit {
 
 impl Permit {
 	/// Whether both allow `path`.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn matches(&self, path: &str) -> bool {
 		self.granted.as_ref().is_none_or(|granted| granted.matches(path)) && self.within_limit(path)
 	}
 
 	/// Whether the limit alone allows `path`: for what the peer offers us, which our
 	/// own grant does not decide.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn within_limit(&self, path: &str) -> bool {
 		self.limit.as_ref().is_none_or(|limit| limit.matches(path))
 	}
 
 	/// Whether this allows everything `other` does, judged part by part, so a `false`
 	/// may be spurious but a `true` never is.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn covers(&self, other: &Self) -> bool {
 		let covers = |this: &Option<Patterns>, other: &Option<Patterns>| match (this, other) {
 			(None, _) => true,
@@ -251,7 +266,7 @@ impl Permit {
 	}
 }
 
-/// The session's auth handle, returned by [`Session::auth`](crate::Session::auth).
+/// The session's auth handle, returned by `Session::auth`.
 ///
 /// Cheap to clone; every clone shares the session's tokens.
 #[derive(Clone)]
@@ -261,6 +276,7 @@ pub struct Handle {
 
 impl Handle {
 	/// A handle for a session that speaks AUTH (`supported`) or never will.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn new(supported: bool) -> Self {
 		Self {
 			state: kio::Shared::new(State {
@@ -272,6 +288,7 @@ impl Handle {
 
 	/// Whether this side speaks AUTH: false on a version without it, on a side that does
 	/// not offer it, and once the peer turns out not to.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn supported(&self) -> bool {
 		self.state.lock().supported
 	}
@@ -292,6 +309,7 @@ impl Handle {
 	/// [`Error::Unsupported`] when the version or the peer carries no AUTH (or the
 	/// peer takes no tokens in band), the peer's refusal as
 	/// [`Error::Session`], or the session's close.
+	#[cfg(feature = "async")]
 	pub async fn add(&self, token: impl Into<Bytes>) -> Result<Token> {
 		let token = self.present(token.into(), false)?;
 		kio::wait(|waiter| token.poll_answered(waiter)).await?;
@@ -299,6 +317,7 @@ impl Handle {
 	}
 
 	/// Queue a token for the driver to present.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn present(&self, token: Bytes, setup: bool) -> Result<Token> {
 		let mut state = self.state.lock();
 		if !state.supported {
@@ -360,6 +379,7 @@ impl Handle {
 
 	/// Decide who answers the peer's tokens: the app if it took the requests,
 	/// otherwise the session itself (`None`). Idempotent.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn acceptor(&self) -> Option<Pending> {
 		let mut state = self.state.lock();
 		match &state.acceptor {
@@ -373,6 +393,7 @@ impl Handle {
 	}
 
 	/// The next token to open a stream for, or `Ready(None)` once the session ends.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn poll_opening(&self, waiter: &kio::Waiter) -> Poll<Option<(u64, Bytes)>> {
 		let mut state = ready_or!(self.state.poll(waiter, |state| {
 			match state.opening.is_empty() && state.closed.is_none() {
@@ -396,6 +417,7 @@ impl Handle {
 	}
 
 	/// Whether the token's handle dropped, so its stream should close.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn poll_withdrawn(&self, id: u64, waiter: &kio::Waiter) -> Poll<()> {
 		let _ = ready_or!(self.state.poll(waiter, |state| match state.tokens.get(&id) {
 			Some(slot) if !slot.withdrawn => Poll::Pending,
@@ -405,6 +427,7 @@ impl Handle {
 	}
 
 	/// Record an AUTH_OK for the token.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn granted(&self, id: u64, grant: Grant) {
 		// One parseable line per AUTH_OK, so the grant the peer actually sent is observable
 		// without an API; the interop harness checks it against the token it minted.
@@ -427,6 +450,7 @@ impl Handle {
 	/// Record an AUTH_ERROR for the token: a reply that grants nothing, so a refused
 	/// setup token leaves an empty union rather than an unknown (unrestricted) one.
 	/// The driver still ends the token with [`ended`](Self::ended).
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn refused(&self, id: u64) {
 		let mut state = self.state.lock();
 		if state.tokens.contains_key(&id) {
@@ -436,6 +460,7 @@ impl Handle {
 
 	/// End the token: refused or revoked by the peer, withdrawn by us, or its
 	/// stream lost. A token that was never answered records `err` as its answer.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn ended(&self, id: u64, err: Error) {
 		let mut state = self.state.lock();
 		let Some(slot) = state.tokens.get_mut(&id) else {
@@ -453,6 +478,7 @@ impl Handle {
 
 	/// Resolve once every token the session presented at setup has its first
 	/// reply, so enforcement never waits on a token the app added later.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn poll_setup_answered(&self, waiter: &kio::Waiter) -> Poll<()> {
 		let _ = ready_or!(self.state.poll(waiter, |state| {
 			match state.tokens.values().any(|slot| slot.setup && slot.answered.is_none()) {
@@ -488,6 +514,7 @@ impl Handle {
 
 	/// The union once it changed since `epoch` last saw it, advancing `epoch`. It
 	/// only ever changes into `Some`: no answer yet is the initial state.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn poll_union(&self, epoch: &mut u64, waiter: &kio::Waiter) -> Poll<Option<Grant>> {
 		let state = ready_or!(self.poll_epoch(*epoch, waiter));
 		*epoch = state.epoch;
@@ -496,6 +523,7 @@ impl Handle {
 
 	/// What `direction` allows once it may have changed since `epoch` last saw it,
 	/// advancing `epoch`.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn poll_permit(&self, direction: Direction, epoch: &mut u64, waiter: &kio::Waiter) -> Poll<Permit> {
 		let state = ready_or!(self.poll_epoch(*epoch, waiter));
 		*epoch = state.epoch;
@@ -503,12 +531,14 @@ impl Handle {
 	}
 
 	/// The limit once it may have changed since `epoch` last saw it, advancing `epoch`.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn poll_limit(&self, epoch: &mut u64, waiter: &kio::Waiter) -> Poll<Option<Grant>> {
 		let state = ready_or!(self.poll_epoch(*epoch, waiter));
 		*epoch = state.epoch;
 		Poll::Ready(state.limit.clone())
 	}
 
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	fn poll_epoch(&self, seen: u64, waiter: &kio::Waiter) -> Poll<kio::Mut<'_, State>> {
 		self.state.poll(waiter, |state| match state.epoch != seen {
 			true => Poll::Ready(()),
@@ -519,12 +549,14 @@ impl Handle {
 	/// Whether `direction` allows `path` right now: the union (allowing everything
 	/// while it is `None`, before an answer or on a version without AUTH) and the
 	/// limit both.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn allows(&self, direction: Direction, path: &str) -> bool {
 		self.state.read().allows(direction, path)
 	}
 
 	/// Whether the limit alone allows `direction` at `path`: for a route the peer
 	/// offers us, which our own grant does not decide.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn within_limit(&self, direction: Direction, path: &str) -> bool {
 		let state = self.state.read();
 		let (_, limit) = state.parts(direction);
@@ -533,6 +565,7 @@ impl Handle {
 
 	/// The peer turned out not to negotiate AUTH: fail every token as unsupported and
 	/// close the requests, leaving the union unknown.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn unsupported(&self) {
 		let mut state = self.state.lock();
 		state.supported = false;
@@ -550,6 +583,7 @@ impl Handle {
 
 	/// End the session: fail every pending token, end every watch, and close the
 	/// requests.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn close(&self, err: Error) {
 		let mut state = self.state.lock();
 		if state.closed.is_some() {
@@ -586,6 +620,7 @@ impl Token {
 	/// Wait for the token to end: the peer's revocation as [`Error::Session`],
 	/// [`Error::Cancel`] when the peer closed it without one, or the session's
 	/// close.
+	#[cfg(feature = "async")]
 	pub async fn closed(&self) -> Error {
 		kio::wait(|waiter| {
 			let state = ready_or!(self.state.poll(waiter, |state| match state.tokens.get(&self.id) {
@@ -598,6 +633,7 @@ impl Token {
 		.await
 	}
 
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	fn poll_answered(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		let state = ready_or!(self.state.poll(waiter, |state| match state.tokens.get(&self.id) {
 			Some(slot) if slot.answered.is_none() => Poll::Pending,
@@ -711,6 +747,7 @@ impl Watch {
 	/// # Errors
 	///
 	/// See [`poll_changed`](Self::poll_changed).
+	#[cfg(feature = "async")]
 	pub async fn changed(&mut self) -> Result<Option<Grant>> {
 		kio::wait(|waiter| self.poll_changed(waiter)).await
 	}
@@ -730,6 +767,7 @@ impl Requests {
 	}
 
 	/// Wait for the next token the peer presents, or `None` once the session ends.
+	#[cfg(feature = "async")]
 	pub async fn next(&mut self) -> Option<Request> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
@@ -761,6 +799,7 @@ impl Pending {
 	}
 
 	/// Queue the token for the application, or refuse it when closed or full.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn push(&self, request: Request) {
 		let mut state = self.state.lock();
 		// Dropping the request refuses it as unanswered.
@@ -802,7 +841,9 @@ impl Pending {
 
 /// What the acceptor writes on one peer token's stream.
 pub(crate) enum Reply {
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	Grant(Grant),
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	Refuse { code: SessionError, reason: String },
 }
 
@@ -821,6 +862,7 @@ pub(crate) struct Issue {
 ///
 /// Dropping it settles [`Issued::closed`] with the session's error, unless the task
 /// already recorded why the stream ended, so no exit path leaves the acceptor waiting.
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) struct Serving {
 	pub issue: kio::Shared<Issue>,
 	handle: Handle,
@@ -828,6 +870,7 @@ pub(crate) struct Serving {
 
 impl Serving {
 	/// A fresh stream's shared state, settled by the session `handle` if the task drops.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn new(handle: Handle) -> Self {
 		Self {
 			issue: kio::Shared::default(),
@@ -836,6 +879,7 @@ impl Serving {
 	}
 
 	/// Record why the stream ended on the peer's side; the first reason wins.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn end(&self, err: Error) {
 		self.issue.lock().peer.get_or_insert(err);
 	}
@@ -857,6 +901,7 @@ pub struct Request {
 }
 
 impl Request {
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn new(token: Bytes, issue: kio::Shared<Issue>) -> Self {
 		Self {
 			token,
@@ -875,6 +920,7 @@ impl Request {
 	}
 
 	/// Wait for the peer to withdraw this unanswered token or close the session.
+	#[cfg(feature = "async")]
 	pub async fn closed(&self) -> Error {
 		closed(self.issue.as_ref().expect("unanswered request")).await
 	}
@@ -935,11 +981,13 @@ impl Issued {
 
 	/// Wait for the peer to withdraw the token ([`Error::Cancel`]), or for its
 	/// stream or the session to end.
+	#[cfg(feature = "async")]
 	pub async fn closed(&self) -> Error {
 		closed(&self.issue).await
 	}
 }
 
+#[cfg(feature = "async")]
 async fn closed(issue: &kio::Shared<Issue>) -> Error {
 	kio::wait(|waiter| {
 		let issue = ready_or!(issue.poll(waiter, |issue| {
@@ -962,6 +1010,7 @@ impl Drop for Issued {
 
 /// Which way media flows, from this side's view.
 #[derive(Clone, Copy)]
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) enum Direction {
 	/// This side sends to the peer: our grant's `publish`, and the limit's `subscribe`.
 	Publish,
@@ -975,6 +1024,7 @@ pub(crate) enum Direction {
 /// Create it at the request's first check and hold it to the end, so a change
 /// landing in between is never missed. Cheap to poll on every wakeup: the path is
 /// only re-matched when the union or the limit changes.
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) struct Gate {
 	handle: Handle,
 	path: crate::PathOwned,
@@ -983,6 +1033,7 @@ pub(crate) struct Gate {
 }
 
 impl Gate {
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn new(handle: Handle, path: crate::PathOwned, direction: Direction) -> Self {
 		Self {
 			handle,
@@ -995,6 +1046,7 @@ impl Gate {
 	/// Resolve once the session no longer allows the path. A union that is still
 	/// `None` (no answer yet, or a version without AUTH) and a session never limited
 	/// allow everything.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn poll_denied(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		loop {
 			let permit = ready_or!(self.handle.poll_permit(self.direction, &mut self.epoch, waiter));
@@ -1007,6 +1059,7 @@ impl Gate {
 
 /// The default acceptor's answer to the peer's connection credential: the grant
 /// the session's origin handles allow, within the limit as it changes.
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) struct DefaultGrant {
 	handle: Handle,
 	base: Grant,
@@ -1017,6 +1070,7 @@ pub(crate) struct DefaultGrant {
 }
 
 impl DefaultGrant {
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn new(handle: Handle, base: Grant) -> Self {
 		let limit = handle.state.read().limit.clone();
 		Self {
@@ -1029,6 +1083,7 @@ impl DefaultGrant {
 	}
 
 	/// The grant to send next: the first, then each one a new limit changes.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Grant> {
 		while let Poll::Ready(limit) = self.handle.poll_limit(&mut self.epoch, waiter) {
 			self.limit = limit;
@@ -1047,6 +1102,7 @@ impl DefaultGrant {
 
 /// The close reason naming a broadcast published outside the grant. [`Error`] carries
 /// no payload, so the path travels here, in the session's own terms.
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) fn unauthorized_reason(path: &crate::Path) -> String {
 	format!("unauthorized: {path}")
 }
@@ -1061,6 +1117,7 @@ pub(crate) fn unauthorized_reason(path: &crate::Path) -> String {
 /// publication. Only the dialing side enforces: a server's publish origin is everything
 /// the peer may read, not what it intends to push.
 #[derive(Default)]
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) struct Enforce {
 	epoch: u64,
 	permit: Option<Patterns>,
@@ -1072,6 +1129,7 @@ pub(crate) struct Enforce {
 impl Enforce {
 	/// Resolve with the first broadcast announced outside the union, or `None` once the
 	/// origin ends.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn poll(
 		&mut self,
 		handle: &Handle,

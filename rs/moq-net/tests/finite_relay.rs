@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A finite track read through a relay: every group below the declared end, then a clean
 //! end, even when the relay's subscriber reaches the end before the groups finish.
 //!

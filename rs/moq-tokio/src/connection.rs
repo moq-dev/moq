@@ -2139,20 +2139,33 @@ mod tests {
 	async fn a_refused_tcp_dial_keeps_retrying() {
 		// Refusal is what's under test, so this can't use [`dead`]. A port nothing is
 		// bound to refuses on every OS, unlike one that is bound but not listening.
-		let target = {
-			let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-			url(&format!("tcp://{}/", listener.local_addr().expect("local addr")))
-		};
-		let mut client = client();
-		client.backoff.initial = Duration::from_millis(50);
-		client.backoff.max = Duration::from_millis(50);
-		client.backoff.timeout = Some(Duration::from_millis(200));
+		let addr = std::net::TcpListener::bind("127.0.0.1:0")
+			.expect("bind")
+			.local_addr()
+			.expect("local addr");
+		// The OS's own wording, which differs on Windows.
+		let refused = std::net::TcpStream::connect(addr)
+			.expect_err("nothing listens")
+			.to_string();
+
+		let mut config = crate::connect::Config::default();
+		config.backoff.initial = Duration::from_millis(50);
+		config.backoff.max = Duration::from_millis(50);
+		config.backoff.timeout = Some(Duration::from_millis(100));
+		// No timer may be pending while a dial is in flight, since the paused clock
+		// jumps to it whenever the runtime idles. Linux and macOS refuse a loopback
+		// connect inside the call, but Windows reports it later, after retrying the
+		// SYN, so the connect deadline or the Happy Eyeballs stagger would fire first.
+		config.timeout = Duration::ZERO;
+		config.race = Duration::ZERO;
+		let client = config.init(Default::default()).expect("build client");
+
 		let started = tokio::time::Instant::now();
-		let connection = client.connect(target);
+		let connection = client.connect(url(&format!("tcp://{addr}/")));
 		let err = connection.closed().await.expect_err("refused socket connected");
 		assert!(matches!(err, Error::Reconnect(_)), "{err}");
-		assert!(err.to_string().contains("Connection refused"), "{err}");
-		assert!(started.elapsed() >= Duration::from_millis(200));
+		assert!(err.to_string().contains(&refused), "{err}");
+		assert!(started.elapsed() >= Duration::from_millis(100));
 	}
 
 	/// A settled answer from one candidate ends the walk instead of being buried.

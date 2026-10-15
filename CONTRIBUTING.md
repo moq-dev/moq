@@ -29,6 +29,7 @@ Fix any merge conflicts and failing CI checks.
 # Merge queue
 
 PRs into `main` land through a merge queue, which re-runs **Check** and **Test** on the PR combined with the latest `main` and the PRs queued ahead of it.
+The **macOS** and **Windows** platform gates (selected by **Platform scope**) run only there; main PRs report them as skipped.
 Enqueue a reviewed PR with `gh pr merge <number>`.
 
 A dequeued PR means the combination failed checks, timed out, or no longer meets the ruleset.

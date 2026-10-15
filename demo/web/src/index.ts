@@ -488,6 +488,12 @@ $("network-graphs").append(throughputGraph.el, rttGraph.el);
 
 const allGraphs = [videoBitrateGraph, audioBitrateGraph, fpsGraph, throughputGraph, rttGraph];
 
+// The RTT graph samples with peek(), which requests no estimates, so subscribe to keep them coming.
+viz.run((effect) => {
+	const watch = effect.get(activeWatch);
+	if (watch) effect.cleanup(watch.connection.probe.subscribe(() => {}));
+});
+
 // Sample the active tile's byte/frame counters and push per-second rates.
 let prevWatch: MoqWatch | undefined;
 let prev = { frames: 0, videoBytes: 0, audioBytes: 0, when: performance.now() };

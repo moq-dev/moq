@@ -1,4 +1,4 @@
-import { type Dispose, type GetPromise, type Getter, race, Signal } from "@moq/signals";
+import { type Dispose, Effect, type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
 import * as broadcast from "../broadcast.ts";
@@ -1450,48 +1450,47 @@ export class Subscriber {
 	 */
 	// Await the peer's advertised probe level, blocking until its SETUP arrives. The peer
 	// MUST send exactly one SETUP, so this resolves once that stream is read.
-	async #peerProbeLevel(peerSetup: Signal<Setup | undefined>): Promise<ProbeLevel> {
+	async #peerProbeLevel(peerSetup: Signal<Setup | undefined>, scope: Effect): Promise<ProbeLevel | undefined> {
 		let setup = peerSetup.peek();
 		while (setup === undefined) {
-			setup = await peerSetup.changed();
+			setup = await scope.race(Signal.race(peerSetup));
+			if (setup === undefined) return;
 		}
 		return setup.probe;
 	}
 
-	async runProbe(): Promise<void> {
+	async runProbe(signal?: AbortSignal): Promise<void> {
 		if (!this.#probe) return;
 		if (this.version === Version.DRAFT_01 || this.version === Version.DRAFT_02) return;
-
-		// Lite-05+ gates the PROBE stream on the peer advertising Probe >= Report in its
-		// SETUP. Wait for the SETUP, then bail if the peer can't report bitrate. Older
-		// drafts have no SETUP, so they keep probing unconditionally.
-		if (this.#peerSetup) {
-			const probe = await this.#peerProbeLevel(this.#peerSetup);
-			if (probe < ProbeLevel.Report) return;
-		}
-
-		// A session that is going away has no use for a new estimate.
-		if (this.#goingAway()) return;
-
-		// Probe is best-effort: any failure (stream reset by peer, missing peer support,
-		// transport hiccup) MUST NOT tear down the connection. On error, drop the
-		// estimates so consumers know they're stale.
+		const scope = new Effect();
+		const abort = signal ? AbortSignal.any([signal, this.#closed.signal]) : this.#closed.signal;
+		const stop = () => scope.close();
+		abort.addEventListener("abort", stop, { once: true });
+		if (abort.aborted) stop();
 		try {
-			const stream = await Stream.open(this.#quic, { version: this.version });
-			await stream.writer.u53(StreamId.Probe);
-
+			// Lite-05+ gates PROBE on the peer advertising Probe >= Report in its SETUP.
+			if (this.#peerSetup) {
+				const level = await this.#peerProbeLevel(this.#peerSetup, scope);
+				if (level === undefined || level < ProbeLevel.Report) return;
+			}
+			if (this.#goingAway() || abort.aborted) return;
+			const opening = Stream.open(this.#quic, { version: this.version });
+			const stream = await scope.race(opening);
+			if (!stream) {
+				// A queued transport open cannot be cancelled; give its slot back unused.
+				void opening.then((stream) => stream.close()).catch(() => {});
+				return;
+			}
+			scope.cleanup(() => stream.close());
+			await scope.race(stream.writer.u53(StreamId.Probe));
 			for (;;) {
-				const probe = await Probe.decodeMaybe(stream.reader, this.version);
+				const probe = await scope.race(Probe.decodeMaybe(stream.reader, this.version));
 				if (!probe) break;
-				// lite-03 carries no RTT field, so an absent value there means "not
-				// carried" and the last reading stands. From lite-04 the field is
-				// always present and 0 explicitly means unknown, so undefined is the
-				// peer retracting a value we would otherwise hold forever.
+				// Lite-03 carries no RTT; newer drafts retract it with a zero.
 				const prev = this.#probe.peek();
 				const rtt = probe.rtt !== undefined ? Time.Milli(probe.rtt) : undefined;
 				this.#probe.set({
-					// `undefined` is the peer reporting "unknown", not an estimate of
-					// zero; letting it through would become a real 0 bps ABR target.
+					// `undefined` is the peer reporting "unknown"; a 0 would become a real ABR target.
 					estimatedRecvRate: probe.bitrate,
 					rtt: hasProbeRtt(this.version) ? rtt : (rtt ?? prev.rtt),
 				});
@@ -1501,6 +1500,8 @@ export class Subscriber {
 				console.warn("probe stream error", err);
 			}
 		} finally {
+			scope.close();
+			abort.removeEventListener("abort", stop);
 			this.#probe.set({});
 		}
 	}

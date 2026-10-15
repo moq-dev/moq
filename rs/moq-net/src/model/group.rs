@@ -704,6 +704,7 @@ impl Producer {
 	///
 	/// The declared size is the peer's claim, so the buffer is allocated up front only
 	/// while it fits the session's `budget`; otherwise it grows with the bytes received.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn create_frame_owned(
 		&mut self,
 		frame: frame::Info,
@@ -866,6 +867,7 @@ impl Producer {
 	/// Abort with `err` only while nothing consumes the group, returning whether it is
 	/// closed. Consumer creation and the check share a lock, so a reader arriving after
 	/// [`poll_unused`](Self::poll_unused) keeps the group alive instead of reading the abort.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn abort_unused(&self, err: Error) -> bool {
 		match self.state.write_unused() {
 			kio::Unused::Idle(guard) => {
@@ -950,11 +952,13 @@ impl Producer {
 	}
 
 	/// Whether `other` is a handle to this same group.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
 	}
 
 	/// Whether the group opened its first frame, or ended without one.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn is_started(&self) -> bool {
 		self.state.read().started()
 	}
@@ -1074,6 +1078,7 @@ impl Producer {
 	}
 
 	/// Block until the group is aborted, including by eviction. Finishing does not close it.
+	#[cfg(feature = "async")]
 	pub async fn closed(&self) -> Error {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
@@ -1093,6 +1098,7 @@ impl Producer {
 	}
 
 	/// Poll for the group becoming unused (every consumer dropped).
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.state.poll_unused(waiter).map(|_| ())
 	}
@@ -1141,11 +1147,13 @@ impl Demand {
 	}
 
 	/// Wait until at least one reader needs the group.
+	#[cfg(feature = "async")]
 	pub async fn used(&self) -> Result<()> {
 		kio::wait(|waiter| self.poll_used(waiter)).await
 	}
 
 	/// Wait until no reader needs the group.
+	#[cfg(feature = "async")]
 	pub async fn unused(&self) -> Result<()> {
 		kio::wait(|waiter| self.poll_unused(waiter)).await
 	}
@@ -1169,6 +1177,7 @@ impl Demand {
 	}
 
 	/// Wait until the group or fetch closes, returning its cause.
+	#[cfg(feature = "async")]
 	pub async fn closed(&self) -> Error {
 		match &self.state {
 			DemandSource::Group(state) => state.closed().await,
@@ -1516,6 +1525,7 @@ impl Consumer {
 
 	/// Whether this cursor failed because its subscription max delay budget expired.
 	#[cfg(test)]
+	#[cfg(feature = "async")]
 	pub(crate) fn latency_expired(&self) -> bool {
 		self.expired
 	}
@@ -1610,6 +1620,7 @@ impl Consumer {
 	}
 
 	/// Return a consumer for the next frame for chunked reading.
+	#[cfg(feature = "async")]
 	pub async fn next_frame(&mut self) -> Result<Option<frame::Consumer>> {
 		kio::wait(|waiter| self.poll_next_frame(waiter)).await
 	}
@@ -1676,6 +1687,7 @@ impl Consumer {
 	}
 
 	/// Read the next frame (timestamp and payload) all at once.
+	#[cfg(feature = "async")]
 	pub async fn read_frame(&mut self) -> Result<Option<frame::Frame>> {
 		// A prefetched frame is already buffered, so the drift budget (which only judges
 		// a read that would park) can never apply to it.
@@ -1726,6 +1738,7 @@ impl Consumer {
 
 	/// Fill `out` with every frame that is ready, blocking until a frame arrives or
 	/// the group ends. Returns the current batch, empty only at the end of the group.
+	#[cfg(feature = "async")]
 	pub async fn read_frames<'a, const N: usize>(
 		&mut self,
 		out: &'a mut frame::Buffer<N>,
@@ -1771,6 +1784,7 @@ impl Consumer {
 	/// clean end even if the group was aborted afterwards to release its cache, while one that
 	/// stopped short gets that abort. A prior [`Self::skip_to`] contributes to the index even
 	/// though those frames were not read. Use [`Self::frame_count`] for the producer's total.
+	#[cfg(feature = "async")]
 	pub async fn finished(&mut self) -> Result<u64> {
 		kio::wait(|waiter| self.poll_finished(waiter)).await
 	}
@@ -1984,7 +1998,7 @@ impl Fetch {
 }
 
 /// A consumer's request for a single past group, handed to a handler via
-/// [`track::Dynamic::requested_group`].
+/// [`track::Dynamic::poll_requested_group`].
 ///
 /// The handler fulfills it by calling [`Self::accept`], which inserts the group
 /// into the track cache (resolving every [`track::Consumer::fetch_group`] that joined the
@@ -2008,9 +2022,11 @@ mod test {
 	use super::*;
 	use crate::model::test_tracing::count_drop_warnings;
 	use bytes::Bytes;
+	#[cfg(feature = "async")]
 	use futures::FutureExt;
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn demand_watches_readers_without_keeping_the_group_alive() {
 		let producer = Info { sequence: 7 }.produce();
 		let demand = producer.demand();
@@ -2089,6 +2105,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn basic_frame_reading() {
 		let mut producer = Info { sequence: 0 }.produce();
 		producer
@@ -2109,6 +2126,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn read_frame_all_at_once() {
 		let mut producer = Info { sequence: 0 }.produce();
 		producer
@@ -2122,6 +2140,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn read_frame_preserves_timestamp() {
 		let mut producer = Info { sequence: 0 }.produce();
 		let timestamp = Timestamp::from_micros(20_000).unwrap();
@@ -2137,6 +2156,7 @@ mod test {
 	/// An untimed frame reads back untimed, and still counts as the group's first frame:
 	/// an empty group and a group on an untimed track are different answers.
 	#[test]
+	#[cfg(feature = "async")]
 	fn an_untimed_frame_still_starts_the_group() {
 		let mut producer = Info { sequence: 0 }.produce_untimed();
 		let waiter = kio::Waiter::noop();
@@ -2179,6 +2199,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn chunked_frame_reads_whole() {
 		let mut producer = Info { sequence: 0 }.produce();
 		{
@@ -2202,6 +2223,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn chunked_frame_streams_partial() {
 		let mut producer = Info { sequence: 0 }.produce();
 		let mut consumer = producer.consume();
@@ -2230,6 +2252,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn group_finish_returns_none() {
 		let producer = Info { sequence: 0 }.produce();
 		producer.finish().unwrap();
@@ -2240,6 +2263,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn abort_propagates() {
 		let producer = Info { sequence: 0 }.produce();
 		let mut consumer = producer.consume();
@@ -2283,6 +2307,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn drop_unfinished_clears_cached_frames() {
 		let producer = Info { sequence: 0 }.produce();
 		let mut writer = producer.clone();
@@ -2334,6 +2359,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn drop_finished_keeps_cached_frames() {
 		let mut producer = Info { sequence: 0 }.produce();
 		producer
@@ -2350,6 +2376,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn pending_then_ready() {
 		let mut producer = Info { sequence: 0 }.produce();
 		let mut consumer = producer.consume();
@@ -2367,6 +2394,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn overflow_aborts_the_group() {
 		let mut producer = Info { sequence: 0 }.produce();
 		let mut consumer = producer.consume();
@@ -2418,6 +2446,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn clone_consumer_independent() {
 		let mut producer = Info { sequence: 0 }.produce();
 		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"a")).unwrap();
@@ -2440,6 +2469,7 @@ mod test {
 		assert!(end.is_none());
 	}
 
+	#[cfg(feature = "async")]
 	fn prefetched_consumer(pool: &cache::Pool, max_age: std::time::Duration) -> (Producer, Consumer) {
 		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
 		let track = track::Info::timed().with_max_age(max_age);
@@ -2454,6 +2484,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn prefetch_refresh_honors_pool_expiry() {
 		let config = cache::Config::default().with_expiry(std::time::Duration::from_secs(1));
 		let pool = cache::Pool::new(config);
@@ -2467,6 +2498,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn prefetch_refresh_honors_track_max_age() {
 		let config = cache::Config::default().with_expiry(std::time::Duration::from_secs(30));
 		let pool = cache::Pool::new(config);
@@ -2482,6 +2514,7 @@ mod test {
 	/// Reading more than one prefetch batch drains every frame in order across the
 	/// batch boundary (the refill starts exactly where the previous batch ended).
 	#[test]
+	#[cfg(feature = "async")]
 	fn read_frame_crosses_prefetch_batches() {
 		let n = Prefetch::CAP * 3 + 5;
 		let mut producer = Info { sequence: 0 }.produce();
@@ -2504,6 +2537,7 @@ mod test {
 	/// track's max age window, or the cache pool). A reader that already drained every frame
 	/// is missing nothing, so it must see the clean end of group rather than the abort.
 	#[test]
+	#[cfg(feature = "async")]
 	fn abort_after_finish_keeps_the_clean_end_for_a_drained_reader() {
 		let mut producer = Info { sequence: 0 }.produce();
 		producer
@@ -2530,6 +2564,7 @@ mod test {
 	/// abort that released the cache, and one that stopped short gets that abort. The
 	/// producer's total stays available on `frame_count`.
 	#[test]
+	#[cfg(feature = "async")]
 	fn finished_answers_for_the_cursor() {
 		let mut producer = Info { sequence: 0 }.produce();
 		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"a")).unwrap();
@@ -2551,6 +2586,7 @@ mod test {
 	/// A cursor on a group aborted for overflowing its budget can never reach the end,
 	/// so `finished` reports that abort instead of parking forever.
 	#[test]
+	#[cfg(feature = "async")]
 	fn finished_reports_a_group_too_large() {
 		let mut producer = Info { sequence: 0 }.produce();
 		let mut consumer = producer.consume();
@@ -2570,6 +2606,7 @@ mod test {
 
 	/// `next_frame` drains frames a prior `read_frame` prefetched, preserving order.
 	#[test]
+	#[cfg(feature = "async")]
 	fn interleave_read_and_next_frame() {
 		let mut producer = Info { sequence: 0 }.produce();
 		for i in 0..5u8 {
@@ -2594,6 +2631,7 @@ mod test {
 	/// A `read_frame` whose index sits past the buffered frames (cleared by an abort)
 	/// must surface the error, not panic on an out-of-range `range(local..)`.
 	#[test]
+	#[cfg(feature = "async")]
 	fn read_frame_past_cleared_frames_does_not_panic() {
 		let mut producer = Info { sequence: 0 }.produce();
 		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"a")).unwrap();
@@ -2614,6 +2652,7 @@ mod test {
 	/// Dropping a consumer mid-batch must drop the buffered-but-untaken frames
 	/// (exercises the `MaybeUninit` Drop path; run under miri to catch leaks/UB).
 	#[test]
+	#[cfg(feature = "async")]
 	fn drop_with_partial_batch() {
 		let mut producer = Info { sequence: 0 }.produce();
 		for _ in 0..Prefetch::CAP {
@@ -2632,6 +2671,7 @@ mod test {
 	/// modified; a guard dropped untouched wakes nobody and the reader would
 	/// stall until the frame completed.
 	#[moq_net_sim::test]
+	#[cfg(feature = "async")]
 	async fn chunk_write_wakes_parked_reader() {
 		let mut producer = Info { sequence: 0 }.produce();
 		let mut consumer = producer.consume();
@@ -2697,6 +2737,7 @@ mod test {
 	/// A group can start partway in, so a route can serve the tail of a group whose
 	/// head came from somewhere else.
 	#[test]
+	#[cfg(feature = "async")]
 	fn start_at_starts_the_group_later() {
 		let mut producer = Info { sequence: 0 }.produce();
 		producer.start_at(3).unwrap();
@@ -2724,6 +2765,7 @@ mod test {
 	/// Seeking to the group's first available frame is how a front's pump picks up
 	/// the tail; a lower index clamps up rather than failing.
 	#[test]
+	#[cfg(feature = "async")]
 	fn start_at_clamps_up_to_the_first_frame() {
 		let mut producer = Info { sequence: 0 }.produce();
 		producer.start_at(3).unwrap();
@@ -2742,6 +2784,7 @@ mod test {
 	/// `end_at` ends the read cleanly at the cap, and raising it re-offers the frames
 	/// still cached behind it.
 	#[test]
+	#[cfg(feature = "async")]
 	fn end_at_caps_and_reopens() {
 		let mut producer = Info { sequence: 0 }.produce();
 		for i in 0..4u8 {
@@ -2772,6 +2815,7 @@ mod test {
 	}
 
 	#[test]
+	#[cfg(feature = "async")]
 	fn frame_ranges_preserve_progress_and_make_inclusion_explicit() {
 		let mut producer = Info { sequence: 0 }.produce();
 		for i in 0..4u8 {
@@ -2801,6 +2845,7 @@ mod test {
 	/// An exclusive cap at 0 is the empty range: no frame is delivered, and raising
 	/// it re-offers the held frames.
 	#[test]
+	#[cfg(feature = "async")]
 	fn end_at_zero_is_empty() {
 		let mut producer = Info { sequence: 0 }.produce();
 		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"x")).unwrap();

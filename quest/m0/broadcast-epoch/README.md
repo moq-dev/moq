@@ -123,7 +123,6 @@ End+Start. The child quests own their focused regressions.
 
 ## Required
 
-- [Resume duplicates](/quest/m0/broadcast-epoch/resume-duplicates.md) - a delayed group is delivered once even beyond the old 1024-entry history
 - [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - players and exporters pin siblings consistently, with optional reference epochs and documented legacy best effort
 
 ## Related

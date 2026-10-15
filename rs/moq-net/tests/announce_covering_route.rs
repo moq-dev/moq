@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A peer asking for announcements below a route's prefix hears that route as
 //! covering the prefix it asked for, the way a local consumer rooted there does.
 //!

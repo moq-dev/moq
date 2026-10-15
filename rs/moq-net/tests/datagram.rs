@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! Datagram delivery over the in-memory mock transport, on moq-lite and moq-transport.
 //!
 //! Covers the whole receive path end to end: publisher encoding, the transport's

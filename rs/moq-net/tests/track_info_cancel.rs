@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A track request nobody wants anymore is cancelled all the way to the publisher.
 //!
 //! Until a publisher answers TRACK_INFO, each relay on the path holds a task, a TRACK

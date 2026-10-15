@@ -34,5 +34,4 @@ Public API: behavior only. Wire: none.
 
 ## Related
 
-- [Resume duplicates](/quest/m0/broadcast-epoch/resume-duplicates.md) - retain once-only delivery without excluding genuinely unseen late groups
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - explicit terminal dispositions end recovery without waiting for a newer group

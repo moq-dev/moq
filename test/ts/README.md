@@ -18,6 +18,8 @@ software profiles below; it does not certify a hardware IRD or every TS layout.
   timing from a live pipe.
 - `table-anchor.py` compares table emission points between two subscribers.
 - `open-gop.py` checks the coded access units and leading pictures of open GOPs.
+- `overhead.py` counts the packets a capture spends on clocks and audio framing
+  against its source.
 
 ## Running
 
@@ -34,6 +36,8 @@ just test ts --pair             # two exporters of one broadcast, grade table an
 just test ts --open-gop         # open-GOP clip; its leading pictures must survive
 just test ts --hrd              # 1080p video filling a broadcast-sized 9 Mbit CPB
 just test ts --headroom         # the same with four audio PIDs, muxed above the video's Rx
+just test ts --leak             # 1080p video with no HRD, filling its level's 24 Mb/s leak
+just test ts --full             # the same with two audio PIDs, filling its multiplex with no nulls
 just test ts --delay 1s         # pass the exporter's --delay
 ```
 
@@ -465,6 +469,22 @@ rebase.
 | `recovery-point-sei` | shape | each recovery point keeps its SEI |
 | `dts-before-pts` | shape | no access unit is stamped to decode after it presents |
 
+## Mux overhead (`overhead.py`)
+
+A source that fills its multiplex with no null packets leaves the export no room
+to spend more than it does on PES headers, part-filled audio packets, and PCRs
+outside media packets (moq-dev/moq#5362). `--full` exports at 900 ms, above its
+source's lead of about 0.65 s, which absorbs a small excess for a while, so it also
+runs `overhead.py` on the source and capture before the compliance report.
+
+```bash
+./overhead.py source.ts capture.ts
+```
+
+It counts the packets on each audio PID and the PCR-only packets on each PID,
+scaling the capture's counts by how much of the source's elementary stream on the
+PID it carries, and fails when their total exceeds the source's.
+
 ## EIT fixtures
 
 No capture in this repository carries EIT (PID 0x0012), so nothing exercises the
@@ -602,7 +622,7 @@ outcomes deterministically in Rust CI, without retries or implicit `--stitch`.
 
 [`.github/workflows/ts.yml`](../../.github/workflows/ts.yml) is independent of
 browser interop. Relevant mux, Hang, CLI, transport, harness and toolchain PRs run
-`just test ts-controls`, `just test ts-pair-controls`, the default and 2 Mb/s round trips, HRD, headroom,
+`just test ts-controls`, `just test ts-pair-controls`, the default and 2 Mb/s round trips, HRD, leak, full, headroom,
 open-GOP, EIT, and T-STD controls. Each step runs even after another test fails.
 All recipes use the same pinned Nix FFmpeg and TSDuck locally and in CI.
 

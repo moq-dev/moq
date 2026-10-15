@@ -51,6 +51,7 @@ impl Follow {
 	}
 
 	/// The next change to the route serving the path, or `None` once the origin closes.
+	#[cfg(feature = "async")]
 	pub async fn next(&mut self) -> Option<AnnounceEvent> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
@@ -176,7 +177,7 @@ impl Follow {
 	}
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "async"))]
 mod tests {
 	use std::time::Duration;
 

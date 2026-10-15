@@ -77,10 +77,10 @@ three crates plus five Prometheus families):
   waits, and a contended acquire that resolves while spinning never reaches
   the futex.
 - Shapes and worker counts follow #5031: fanout (`bench/workloads/fanout.toml`)
-  at 1, 4, and 16 workers. Chat (`rs/moq-bench/config/chat.toml`) needs its
-  60 s startup and 2,001 connections, which the harness's fixed ramp does not
-  allow yet. Wait is off-CPU, so a thread's share can exceed 1 when it blocks
-  longer than it runs.
+  at 1, 4, and 16 workers, and chat (`bench/workloads/chat.toml`), whose
+  2,001 connections are all subscribed within the harness's 2 s ramp. Wait
+  is off-CPU, so a thread's share can exceed 1 when it blocks longer than it
+  runs.
 - Check that it roughly reproduces #5031's wait time (see kio channel
   contention), not its contended-acquire counts, and that its stacks lead to
   the same call sites.

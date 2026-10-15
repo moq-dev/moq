@@ -37,6 +37,12 @@ enum Sink {
 	Opaque(moq_net::track::Producer),
 }
 
+/// Keep finished rendition owners until a whole run's catalog has closed.
+#[must_use]
+pub(super) struct Closed {
+	track: Option<Sink>,
+}
+
 /// An audio or video pad, published through a codec importer.
 struct Media {
 	track: import::Track,
@@ -242,6 +248,8 @@ pub enum PushOutcome {
 
 /// One sink pad's producer plus its timeline policy.
 pub struct Pad {
+	/// The requested pad gates the first catalog even before CAPS can name its rendition.
+	reserved: Option<moq_mux::catalog::Reserved>,
 	track: Option<Sink>,
 	caps: Option<gst::Caps>,
 	/// Set once a producer build rejects this pad's caps or bitstream; further buffers are dropped and
@@ -261,6 +269,7 @@ impl Pad {
 	/// A fresh pad with no caps, no segment, and no producer yet.
 	pub fn new() -> Self {
 		Self {
+			reserved: None,
 			track: None,
 			caps: None,
 			failed: false,
@@ -268,6 +277,45 @@ impl Pad {
 			segment_info: None,
 			segment: None,
 			no_segment_reported: false,
+		}
+	}
+
+	/// Fill a run's slot once, including a pad visible before its admission confirms.
+	pub(super) fn reserve(&mut self, catalog: &moq_mux::catalog::Producer) {
+		if self.reserved.is_none() && self.track.is_none() && !self.failed {
+			self.reserved = Some(catalog.reserve());
+		}
+	}
+
+	/// An ended pad can no longer resolve its config, but resolved tracks keep their usual lifetime.
+	pub(super) fn end_unresolved(&mut self, catalog: &moq_mux::catalog::Producer) -> Result<()> {
+		self.reserved.take();
+		if let Some(Sink::Media(media)) = &self.track {
+			// Read current state, not the gated wire snapshot. An untouched guard emits nothing and
+			// avoids cloning every rendition. Drop it before finalize takes the catalog lock again.
+			let mut catalog = catalog.clone();
+			let resolved = {
+				let current = catalog.modify()?;
+				let name = media.track.name();
+				if media.audio {
+					current.audio.renditions.contains_key(&name)
+				} else {
+					current.video.renditions.contains_key(&name)
+				}
+			};
+			if !resolved {
+				self.finalize()?;
+			}
+		}
+		Ok(())
+	}
+
+	/// The caps to rebuild from when [`end_unresolved`](Self::end_unresolved) finished this pad and its
+	/// stream resumes: CAPS stay sticky across a flush, so none arrives to rebuild it.
+	pub(super) fn resumable_caps(&self) -> Option<gst::Caps> {
+		match (&self.track, self.failed) {
+			(None, false) => self.caps.clone(),
+			_ => None,
 		}
 	}
 
@@ -288,7 +336,8 @@ impl Pad {
 		if self.failed || (self.track.is_some() && self.caps.as_deref() == Some(options.caps)) {
 			return CapsOutcome::Unchanged;
 		}
-		match self.build(broadcast, catalog, options) {
+		let reserved = self.reserved.take().unwrap_or_else(|| catalog.reserve());
+		match self.build(broadcast, reserved, options) {
 			Ok(name) => CapsOutcome::Active(name),
 			Err(err) => {
 				gst::warning!(CAT, "invalidating pad: {err:?}");
@@ -301,7 +350,7 @@ impl Pad {
 	fn build(
 		&mut self,
 		broadcast: &moq_net::broadcast::Producer,
-		catalog: &moq_mux::catalog::Producer,
+		reserved: moq_mux::catalog::Reserved,
 		options: ProducerOptions<'_>,
 	) -> Result<String> {
 		let ProducerOptions {
@@ -338,7 +387,6 @@ impl Pad {
 			return Ok(name);
 		}
 		let mut broadcast = broadcast.clone();
-		let catalog = catalog.clone();
 		// Every codec converges on one import::Track; only the caps -> importer construction differs. The
 		// pad template fixes the structural fields (h264/h265 byte-stream/au, AAC mpegversion=4/stream-format=raw),
 		// so negotiation rejects non-conforming caps before they reach here; only fields the template can't
@@ -350,7 +398,7 @@ impl Pad {
 			let name = Self::track_name(&broadcast, requested, ".vtt");
 			self.track = Some(Sink::Text(Box::new(Self::reserve_text(
 				&mut broadcast,
-				catalog,
+				reserved,
 				name.clone(),
 				structure,
 			)?)));
@@ -362,7 +410,7 @@ impl Pad {
 			"video/x-h264" => {
 				let (track, name) = Self::reserve_video(
 					&mut broadcast,
-					catalog,
+					reserved,
 					requested,
 					import::VideoFormat::Avc3,
 					&[],
@@ -373,7 +421,7 @@ impl Pad {
 			"video/x-h265" => {
 				let (track, name) = Self::reserve_video(
 					&mut broadcast,
-					catalog,
+					reserved,
 					requested,
 					import::VideoFormat::Hev1,
 					&[],
@@ -384,7 +432,7 @@ impl Pad {
 			"video/x-av1" => {
 				let (track, name) = Self::reserve_video(
 					&mut broadcast,
-					catalog,
+					reserved,
 					requested,
 					import::VideoFormat::Av01,
 					&[],
@@ -395,7 +443,7 @@ impl Pad {
 			"video/x-vp8" => {
 				let (track, name) = Self::reserve_video(
 					&mut broadcast,
-					catalog,
+					reserved,
 					requested,
 					import::VideoFormat::Vp8,
 					&[],
@@ -406,7 +454,7 @@ impl Pad {
 			"video/x-vp9" => {
 				let (track, name) = Self::reserve_video(
 					&mut broadcast,
-					catalog,
+					reserved,
 					requested,
 					import::VideoFormat::Vp9,
 					&[],
@@ -435,12 +483,8 @@ impl Pad {
 					.with_context(|| format!("cannot reserve track {name}"))?;
 				let producer = request.accept(hang::container::track_info(hang::catalog::PRIORITY.audio));
 				(
-					moq_mux::codec::mp3::Import::new(
-						producer,
-						catalog.reserve(),
-						Self::audio_config(config.into(), container),
-					)?
-					.into(),
+					moq_mux::codec::mp3::Import::new(producer, reserved, Self::audio_config(config.into(), container))?
+						.into(),
 					true,
 					name,
 				)
@@ -453,7 +497,7 @@ impl Pad {
 				let map = codec_data.map_readable().context("failed to map AAC codec_data")?;
 				let (track, name) = Self::reserve_audio(
 					&mut broadcast,
-					catalog,
+					reserved,
 					requested,
 					import::AudioFormat::Aac,
 					map.as_slice(),
@@ -471,12 +515,8 @@ impl Pad {
 					.with_context(|| format!("cannot reserve track {name}"))?;
 				let producer = request.accept(hang::container::track_info(hang::catalog::PRIORITY.audio));
 				(
-					moq_mux::codec::opus::Import::new(
-						producer,
-						catalog.reserve(),
-						Self::audio_config(config, container),
-					)?
-					.into(),
+					moq_mux::codec::opus::Import::new(producer, reserved, Self::audio_config(config, container))?
+						.into(),
 					true,
 					name,
 				)
@@ -507,7 +547,7 @@ impl Pad {
 	/// returned guard retires it when the pad goes away.
 	fn reserve_text(
 		broadcast: &mut moq_net::broadcast::Producer,
-		catalog: moq_mux::catalog::Producer,
+		reserved: moq_mux::catalog::Reserved,
 		name: String,
 		structure: &gst::StructureRef,
 	) -> Result<Text> {
@@ -523,7 +563,7 @@ impl Pad {
 
 		// Go through the reservation like every codec pad, so the first catalog snapshot waits for
 		// this track and dropping the rendition removes it again.
-		let producer = catalog.reserve().text(
+		let producer = reserved.text(
 			producer,
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
 			config,
@@ -539,7 +579,7 @@ impl Pad {
 	/// The track suffix comes from the format itself, so the two can't disagree.
 	fn reserve_video(
 		broadcast: &mut moq_net::broadcast::Producer,
-		catalog: moq_mux::catalog::Producer,
+		reserved: moq_mux::catalog::Reserved,
 		requested: Option<&str>,
 		format: import::VideoFormat,
 		init: &[u8],
@@ -551,14 +591,14 @@ impl Pad {
 			.with_context(|| format!("cannot reserve track {name}"))?;
 		let mut video = import::VideoInit::new(format, init.to_vec());
 		video.hint.container = container;
-		let track = import::Track::video(request, catalog.reserve(), video)?;
+		let track = import::Track::video(request, reserved, video)?;
 		Ok((track, name))
 	}
 
 	/// Reserve a track for a single audio codec. See [`reserve_video`](Self::reserve_video).
 	fn reserve_audio(
 		broadcast: &mut moq_net::broadcast::Producer,
-		catalog: moq_mux::catalog::Producer,
+		reserved: moq_mux::catalog::Reserved,
 		requested: Option<&str>,
 		format: import::AudioFormat,
 		init: &[u8],
@@ -570,7 +610,7 @@ impl Pad {
 			.with_context(|| format!("cannot reserve track {name}"))?;
 		let mut audio = import::AudioInit::new(format, init.to_vec());
 		audio.container = container;
-		let track = import::Track::audio(request, catalog.reserve(), audio)?;
+		let track = import::Track::audio(request, reserved, audio)?;
 		Ok((track, name))
 	}
 
@@ -767,23 +807,26 @@ impl Pad {
 	/// whether a producer was finalized. The importer accepts its track up front (in `Track::new`), so
 	/// `finish()` is safe even when no frame was ever decoded.
 	pub fn finalize(&mut self) -> Result<bool> {
-		// take() up front makes this attempt-once: after a failed finish() the producer is already gone.
-		let Some(track) = self.track.take() else {
-			return Ok(false);
+		let (_closed, result) = self.finish();
+		result
+	}
+
+	/// Finish once, retaining rendition owners so closing a run cannot publish their removal.
+	pub(super) fn finish(&mut self) -> (Closed, Result<bool>) {
+		self.reserved.take();
+		let mut closed = Closed {
+			track: self.track.take(),
 		};
-		let closed = match track {
-			Sink::Media(mut media) => media.track.finish().map_err(anyhow::Error::from),
-			Sink::Text(mut text) => text.producer.finish().map_err(anyhow::Error::from),
-			Sink::Opaque(producer) => producer.finish().map_err(anyhow::Error::from),
+		let Some(track) = closed.track.as_mut() else {
+			return (closed, Ok(false));
 		};
-		if let Err(err) = closed {
-			// The producer is gone either way, so the pad publishes nothing from here: mark it failed so
-			// later buffers drop the way they do after any other failure, rather than looking pre-caps.
-			// The reason is not stored: the caller gets it from this `Err`.
-			self.failed = true;
-			return Err(err);
-		}
-		Ok(true)
+		let result = match track {
+			Sink::Media(media) => media.track.finish().map_err(anyhow::Error::from),
+			Sink::Text(text) => text.producer.finish().map_err(anyhow::Error::from),
+			Sink::Opaque(producer) => producer.clone().finish().map_err(anyhow::Error::from),
+		};
+		self.failed |= result.is_err();
+		(closed, result.map(|()| true))
 	}
 }
 
@@ -1033,7 +1076,7 @@ fn signed_nanos(running_time: gst::Signed<gst::ClockTime>) -> Option<i64> {
 
 /// A real Annex-B AU (SPS + PPS + IDR) so tests can resolve a rendition and publish a frame.
 #[cfg(test)]
-pub(super) fn h264_keyframe_au() -> Bytes {
+pub(crate) fn h264_keyframe_au() -> Bytes {
 	let sps: &[u8] = &[
 		0x67, 0x42, 0xc0, 0x1f, 0xda, 0x01, 0x40, 0x16, 0xe9, 0xb8, 0x08, 0x08, 0x0a, 0x00, 0x00, 0x07, 0xd0, 0x00,
 		0x01, 0xd4, 0xc0, 0x80,

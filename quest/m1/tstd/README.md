@@ -51,8 +51,6 @@ MB/AAC controls. Do not relabel the current subset a full standards check.
 
 - [Send-ahead within the delay](/quest/m1/tstd/send-ahead.md) - total lag is `--delay`, send-ahead included, with a 1 s default
 - [PSI pacing](/quest/m1/tstd/psi-runs.md) - padded output paces the PAT and PMT so TBsys and Bsys never overflow
-- [Video at its full leak](/quest/m1/tstd/video-leak.md) - a leak-bound video PID is admitted at its full Rbx, not about 3 % below it
-- [Mux overhead](/quest/m1/tstd/mux-overhead.md) - the PCR rides in the video's adaptation field and audio PES carry several frames, so a full CBR source re-muxes at its own rate
 
 ## Related
 

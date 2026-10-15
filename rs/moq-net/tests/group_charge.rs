@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! What a cached group really costs, measured against what the pool charges for it.
 //!
 //! `cache::ENTRY_OVERHEAD` is derived from `size_of`, which keeps it following the
