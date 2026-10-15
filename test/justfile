@@ -130,6 +130,7 @@ drill-sensitivity *args:
 # Check the subscriber's MPEG-TS output for IRD compliance.
 [positional-arguments]
 ts *args:
+    python3 ./ts/fragment_pes.test.py
     python3 ./ts/pcr-timing.test.py
     ./ts/run.sh "$@"
 

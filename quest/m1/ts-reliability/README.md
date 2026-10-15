@@ -55,7 +55,6 @@ remain with their current quests.
 
 ## Required
 
-- [Bounded PES assembly](/quest/m1/ts-reliability/pes.md) - split headers work and damaged input cannot grow staging indefinitely
 - [Plan: semantic fidelity](/quest/m1/ts-reliability/fidelity.md) - explicit profiles and PMT lifecycle contracts produce implementation quests
 - [Plan: PES timing and headers](/quest/m1/plan-ts-pes-untimed.md) - private PES semantics have a settled carriage and placement contract
 - [Loss and recovery tests](/quest/m1/ts-reliability/recovery.md) - actual MoQ omissions exercise reacquisition and unaffected tracks

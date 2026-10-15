@@ -38,8 +38,14 @@ just test ts --hrd              # 1080p video filling a broadcast-sized 9 Mbit C
 just test ts --headroom         # the same with four audio PIDs, muxed above the video's Rx
 just test ts --leak             # 1080p video with no HRD, filling its level's 24 Mb/s leak
 just test ts --full             # the same with two audio PIDs, filling its multiplex with no nulls
+just test ts --fragment-pes    # legal headers split across packets, with FFmpeg/TSDuck grading
 just test ts --delay 1s         # pass the exporter's --delay
 ```
+
+`--fragment-pes` shifts generated audio/video PES bursts into their following
+null slots after splitting the header. It cycles through header-byte boundaries,
+preserves packet count, PCR positions, payload bytes, and PID continuity, then
+runs the same independent decode/content and transport checks as the default arm.
 
 `--live` swaps the analyzer, not the rig: the same round-trip runs, but the
 subscriber's stdout goes straight into `pcr-timing.py` instead of a capture file.
