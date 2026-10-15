@@ -114,18 +114,26 @@ function structure(catalog: Catalog.Root): Catalog.Root {
 	return value;
 }
 
-/** Every track's advertised `field`, by section and then track name. */
+type Advertised = {
+	broadcast?: string;
+	track?: string;
+	jitter?: number;
+	delay?: number;
+	bitrate?: number;
+	framerate?: number;
+};
+
+/** Every track's advertised `field`, by section and then the track's broadcast and name. */
 function advertised(
 	catalog: Catalog.Root,
 	field: "jitter" | "delay" | "bitrate" | "framerate",
 ): Record<string, Record<string, number | undefined>> {
-	const pick = (
-		tracks:
-			| Record<string, { track?: string; jitter?: number; delay?: number; bitrate?: number; framerate?: number }>
-			| undefined,
-	) =>
+	const pick = (tracks: Record<string, Advertised> | undefined) =>
 		Object.fromEntries(
-			Object.entries(tracks ?? {}).map(([id, config]) => [Catalog.track(id, config), config[field]]),
+			Object.entries(tracks ?? {}).map(([id, config]) => [
+				JSON.stringify([config.broadcast, Catalog.track(id, config)]),
+				config[field],
+			]),
 		);
 	return {
 		audio: pick(catalog.audio?.renditions),

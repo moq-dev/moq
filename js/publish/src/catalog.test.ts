@@ -270,6 +270,28 @@ for (const field of ["bitrate", "framerate"] as const) {
 	});
 }
 
+// Same-named tracks in different broadcasts are different tracks.
+test("catalog keeps maxima apart for same-named tracks in different broadcasts", () => {
+	const catalog = new CatalogProducer();
+	const rendition = (broadcast: string, bitrate: number) => ({
+		codec: "opus",
+		container: { kind: "legacy" as const },
+		sampleRate: Catalog.u53(48000),
+		numberOfChannels: Catalog.u53(2),
+		broadcast: broadcast as Catalog.RelativeBroadcast,
+		track: "audio",
+		bitrate: Catalog.u53(bitrate),
+	});
+	catalog.mutate((value) => {
+		value.audio = { renditions: { en: rendition("../en", 64), es: rendition("../es", 128) } };
+	});
+	expect(() =>
+		catalog.mutate((value) => {
+			delete value.audio?.renditions.es;
+		}),
+	).not.toThrow();
+});
+
 for (const section of ["json", "binary"] as const) {
 	test(`catalog refuses zero or decreasing ${section} jitter without retaining it`, () => {
 		const catalog = new CatalogProducer();
