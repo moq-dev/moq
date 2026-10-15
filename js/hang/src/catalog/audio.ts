@@ -1,4 +1,5 @@
 import * as z from "@zod/mini";
+import { compareName, compareNumber } from "./compare";
 import { ContainerSchema } from "./container";
 import { hexSchema } from "./hex";
 import { u53Schema } from "./integers";
@@ -106,3 +107,15 @@ export const AudioSchema = z.union([
 export type Audio = z.infer<typeof AudioSchema>;
 /** Decoder config for a single audio rendition. */
 export type AudioConfig = z.infer<typeof AudioConfigSchema>;
+
+/** Rank audio best first: enabled, then bitrate, sample rate, channels, and name. */
+export function ranked(renditions: Record<string, AudioConfig>): [string, AudioConfig][] {
+	return Object.entries(renditions).sort(
+		(left, right) =>
+			compareNumber(Number(left[1].enabled !== false), Number(right[1].enabled !== false)) ||
+			compareNumber(left[1].bitrate, right[1].bitrate) ||
+			compareNumber(left[1].sampleRate, right[1].sampleRate) ||
+			compareNumber(left[1].numberOfChannels, right[1].numberOfChannels) ||
+			compareName(left[0], right[0]),
+	);
+}

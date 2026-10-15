@@ -755,6 +755,50 @@ mod tests {
 		catalog
 	}
 
+	#[tokio::test(start_paused = true)]
+	async fn audio_renditions_follow_catalog_quality_order() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let source = moq_mux::Source::new(produce_origin().consume(), broadcast.consume());
+		let names = ["a", "b", "c", "d", "e", "f", "g"];
+		let mut catalog = moq_mux::catalog::hang::Catalog::default();
+		catalog.archive = Some(archive(&names));
+		for (name, rate, channels, bitrate) in [
+			("a", 48_000, 2, None),
+			("b", 48_000, 1, Some(64_000)),
+			("c", 16_000, 1, Some(128_000)),
+			("d", 48_000, 2, Some(64_000)),
+			("e", 48_000, 2, Some(64_000)),
+			("f", 44_100, 2, Some(64_000)),
+			("g", 16_000, 1, None),
+		] {
+			let mut config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, rate, channels);
+			config.bitrate = bitrate;
+			catalog.audio.renditions.insert(name.to_string(), config);
+		}
+		let renditions = renditions::Producer::new(Config::default().window);
+		renditions.sync(&source, &catalog);
+		assert!(
+			!renditions.any_held_externally(),
+			"ranking must not count as a recording consumer"
+		);
+		let listed = || {
+			renditions
+				.snapshot()
+				.iter()
+				.map(|rendition| rendition.name.clone())
+				.collect::<Vec<_>>()
+		};
+		assert_eq!(listed(), ["c", "d", "e", "b", "f", "a", "g"]);
+		catalog.audio.renditions.get_mut("c").unwrap().enabled = false;
+		renditions.sync(&source, &catalog);
+		assert_eq!(listed(), ["d", "e", "b", "f", "a", "g", "c"]);
+		catalog.audio.renditions.get_mut("g").unwrap().bitrate = Some(256_000);
+		renditions.sync(&source, &catalog);
+		assert_eq!(listed(), ["g", "d", "e", "b", "f", "a", "c"]);
+		renditions.clear();
+		assert!(listed().is_empty());
+	}
+
 	/// The next rendition event, or `None` if the set is quiet.
 	async fn next_event(cursor: &mut renditions::Consumer) -> Option<renditions::Event> {
 		tokio::time::timeout(Duration::from_millis(50), cursor.next())
