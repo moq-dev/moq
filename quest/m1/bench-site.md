@@ -1,0 +1,35 @@
+# [M] Benchmark trend site
+
+## Goal
+
+A public GitHub Pages site charts every nightly benchmark over time, so a
+regression or an optimization shows as a step in the trend. On day one it
+carries the [binding benchmarks](/quest/m1/ffi-bench.md) and the existing
+nightly Rust Criterion and JS benchmarks.
+
+## Plan
+
+Decided with the maintainer on 2026-10-15:
+
+- **GitHub Pages via github-action-benchmark**: the nightly pushes each
+  run's results to a `gh-pages` branch, and the action's built-in charts are
+  the site. Its own alerting stays off; tracking is informational.
+- **Sources**: the binding benchmark's JSON and the "Rust benchmarks" and
+  "JS benchmarks" nightly jobs, converted to the action's input format where
+  they don't already emit one. Nightly size history (today a 45-day
+  artifact) is a natural extra series if it fits cheaply.
+- **One branch for everything**: [bench-ci](/quest/m2/bench-ci.md) records
+  its nightly Criterion history here instead of creating its own data
+  branch.
+- Hosted runners are noisy across runs; chart the binding / Rust ratios
+  next to the raw numbers, since those hold steady across runners.
+- Enabling Pages is a repository setting: ask the maintainer to switch it
+  on (or approve the `gh api` call) at that step.
+- Document the site URL, what each series means, and local reproduction in
+  `bench/README.md`.
+
+Public API: none. Wire: none.
+
+## Required
+
+- [Binding benchmark harness](/quest/m1/ffi-bench.md) - the first source the site charts

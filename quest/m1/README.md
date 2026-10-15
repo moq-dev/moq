@@ -116,7 +116,11 @@ above them.
 - [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
 - [BoltFFI or UniFFI](/quest/m1/boltffi.md) - BoltFFI vs UniFFI on a moq-ffi slice in Python, Kotlin, and Swift decides which one the moq-dev fork starts from
 - [Hard-fork the binding generator](/quest/m1/uniffi-fork.md) - one moq-dev repo holds the chosen generator's core and every language backend, released under one tag and one pin
-- [Payload bytes](/quest/m1/ffi-bytes.md) - payloads cross the FFI in one bulk copy, proven by a nightly benchmark in every wrapper
+- [Binding benchmark harness](/quest/m1/ffi-bench.md) - Python, Kotlin, and Go benchmark their wrappers nightly against two Rust baselines, so FFI overhead is tracked
+- [Benchmark trend site](/quest/m1/bench-site.md) - a GitHub Pages site charts every nightly benchmark over time
+- [Link the benchmark trends](/quest/m1/bench-site-doc.md) - the docs point language choosers at the trend site
+- [Swift, Dart, and C++ benchmarks](/quest/m1/ffi-bench-wrappers.md) - the other three wrappers join the nightly binding benchmark
+- [Payload bytes](/quest/m1/ffi-bytes.md) - payloads cross the FFI in one bulk copy, proven on the binding benchmark in every wrapper
 - [Poll-native async spike](/quest/m1/ffi-poll.md) - measure kio poll-native exports and foreign poll against `ffi::Task`, then pick the shape
 - [Rendition preference](/quest/m1/rendition-preference.md) - automatic selection by `<moq-watch>`, `Video::ranked`, and WHEP keeps the highest `preference` that decodes, so a compatibility transcode is only picked when nothing preferred decodes
 - [Rust PROBE on demand](/quest/m1/probe-on-demand-rs.md) - a Rust client opens PROBE only while a `recv_bandwidth()` consumer is held, and `Stats` drops `estimated_recv_rate`
