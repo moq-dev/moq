@@ -776,7 +776,7 @@ async fn uring_workers_bound_stalled_handshakes() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
 	let mut config = uring_config(&cert, &key);
-	config.listen.timeout = Duration::from_millis(200);
+	config.listen.timeout = Some(Duration::from_millis(200));
 	let relay = Relay::load(config).await.expect("load relay");
 	let port = relay.addr().expect("workers bound an address").port();
 	let addr = SocketAddr::from(([127, 0, 0, 1], port));

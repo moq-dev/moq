@@ -20,11 +20,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # `check` and `test` are separate jobs because they share almost no build
-  # artifacts: clippy emits rmeta without codegen, while nextest codegens and
-  # links every test binary. Running them in sequence meant paying both in
-  # series for no reuse, so they run concurrently and the job takes the slower
-  # of the two rather than their sum.
+  # Test enforces default-feature clippy while compiling its binaries. Check
+  # runs the other lints, docs, and distinct feature/target builds in parallel.
   check:
     name: Check
     # Skip the actual work on close/merge: this run exists only to cancel the

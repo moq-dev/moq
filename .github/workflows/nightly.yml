@@ -46,10 +46,50 @@ jobs:
   x11:
     uses: ./.github/workflows/x11.yml
 
+  # Each independent workload gets its own hour. Rust and JS benchmark groups
+  # keep one build environment each, so splitting the feature compile does not
+  # turn every benchmark into a fresh compile of the same dependencies.
   nightly:
-    name: Nightly
+    name: Nightly (${{ matrix.name }})
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Unset keys default to the plain dev shell, the Rust cache, no perf
+        # sampling, and nextest's default profile.
+        include:
+          - name: Features
+            recipe: rs features
+            profile: ci
+          - name: Go publisher runtime benchmark
+            recipe: go bench -benchtime=1x
+          - name: Audio grouping relay benchmark
+            recipe: bench-audio
+          # Smoke-tests the capture path: exact off-CPU waits, resolved worker stacks and CPU.
+          - name: Relay lock-wait profile
+            recipe: bench-lock fanout-heavy 4
+            perf: true
+          - name: Rust benchmarks
+            recipe: gh nightly rust
+          - name: JS benchmarks
+            recipe: gh nightly js
+            uncached: true
+          - name: BBB rendition alignment
+            recipe: pub check-bbb
+            uncached: true
+          - name: Audit
+            recipe: rs audit
+            uncached: true
+          # OBS (over moq-ffi) and moq-c's C fixtures link a Rust staticlib from
+          # outside cargo, so a stale `rs/moq-c/native-libs/*.txt` breaks them and
+          # no cargo build. obs.yml's path filter can't list every such input;
+          # this diff-independent run catches what it misses, a day late.
+          - name: OBS
+            recipe: obs ci
+            shell: .#obs
+          - name: moq-c C fixtures
+            recipe: rs c-tests
 
     steps:
       - name: Free disk space
@@ -74,207 +114,18 @@ jobs:
       # Restore only, like `tests` below. Saving its own store cost 3.6 GB of the
       # repository's 10 GB budget and evicted the one every pull request restores.
       - name: Rust cache
+        if: ${{ !matrix.uncached }}
         uses: ./.github/actions/rust-cache
-
-      # Runs even if the audit fails: a fresh advisory shouldn't hide a
-      # compile break in the feature permutations.
-      - name: Features
-        run: nix develop --command just rs features
-        env:
-          NEXTEST_PROFILE: ci
-
-      - name: Go publisher runtime benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just go bench -benchtime=1x
-
-      - name: GStreamer catalog EOS benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just rs bench-gst-catalog -- --quick
-
-      - name: Audio grouping relay benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just bench-audio
 
       # perf samples worker switch-outs in kernel context into a large buffer; bench-lock refuses without it.
       - name: Allow perf kernel sampling
-        if: ${{ !cancelled() }}
+        if: matrix.perf
         run: sudo sysctl -w kernel.perf_event_paranoid=-1
 
-      # Smoke-tests the capture path: exact off-CPU waits, resolved worker stacks and CPU.
-      - name: Relay lock-wait profile
-        if: ${{ !cancelled() }}
-        run: nix develop --command just bench-lock fanout-heavy 4
-
-      - name: Latency observation benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just rs bench-latency
-
-      - name: Audio mixer benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just rs bench-playback
-
-      # A single route re-price should expose any slope over the route table or
-      # over independent observers of the new live broadcast map.
-      - name: JS origin broadcast map benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just js bench broadcasts
-
-      - name: JS request ID admission benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just js bench request-ids
-
-      # A restart should cost the same whether one or many requests follow the path,
-      # and an unrelated route should wake none of them. Cancellation also varies
-      # competing routes independently of cancelled waiters on the same path.
-      - name: JS origin request lifecycle benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just js bench requests
-
-      # A route above several interest heads lands once, so its re-price should
-      # expose any slope over heads times received routes. A watch coming and going
-      # sweeps held watches against attached sessions.
-      - name: JS origin announce forwarding benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just js bench forward
-
-      # Fails if reading a fragmented frame costs more per byte as the frame grows.
-      - name: JS stream reader benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just js bench reader
-
-      # Fails if a chunk carrying many small frames costs as much per frame as one
-      # carrying a single frame, on either the lite or moq-transport group stream,
-      # which means decoding went back to a wakeup per frame.
-      - name: JS group frame benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just js bench frames
-
-      # Times one varint encode and decode per wire format. No threshold: it only
-      # has to keep running, and its numbers are the baseline for the generated codec.
-      - name: JS varint benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just js bench varint
-
-      # Bytes and time for lite-06 against lite-07 frames, groups, and requests. No
-      # threshold: it only has to keep running.
-      - name: JS lite varint benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just js bench lite-varint
-
-      # Fails if publishing a group costs more as the track retains more groups,
-      # which means the latency guard or the cache went back to scanning them all.
-      - name: JS track retention benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just js bench track
-
-      # Fails if charging a subscription costs more as the session holds more
-      # broadcasts and tracks, which means the cap accounting went back to scanning.
-      - name: JS session interest accounting benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just js bench interests
-
-      - name: JS catalog estimate fanout benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just js catalog-bench
-
-      - name: JS arrival window benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just js arrivals-bench
-
-      # Times Effect create and close beside a bare `new Error()`. No threshold: it only
-      # has to keep running, and its numbers track the creation stack's cost.
-      - name: JS signals effect benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just js signals-bench
-
-      # Runs each moq-net Criterion routine once, so a bench that panics (an
-      # unparsable version, a shape that deadlocks) fails here instead of on the
-      # next manual run. Timing is not compared; nextest never runs a
-      # `harness = false` target. `fuzz` enables the benches that require it,
-      # which the `'*'` glob otherwise refuses.
-      - name: moq-net benchmark smoke
-        if: ${{ !cancelled() }}
-        run: nix develop --command cargo bench --locked -p moq-net --features fuzz --bench '*' -- --test
-
-      # Runs each kio Criterion routine once, including the contended bench's
-      # worker threads, so one that deadlocks or panics fails here. Timing is
-      # not compared.
-      - name: kio benchmark smoke
-        if: ${{ !cancelled() }}
-        run: nix develop --command cargo bench --locked -p kio --bench '*' -- --test
-
-      - name: HTTP idle accounting benchmark smoke
-        if: ${{ !cancelled() }}
-        run: nix develop --command cargo bench --locked -p moq-relay --bench http_idle -- --test
-
-      - name: Relay auth refresh benchmark smoke
-        if: ${{ !cancelled() }}
-        run: nix develop --command just rs bench-relay-auth --test
-
-      # One relay's stats tick (drain plus plain and compressed encode), swept
-      # over held paths, tiers, and how many of those paths changed, plus the
-      # decode and aggregate tables. `--test` runs each tick routine once (the
-      # tables ignore it and run every configuration), so a panic (a plain
-      # frame past the cache cap, a drain that drops a held path) fails here
-      # instead of on the next manual run. Timing is not compared. `bench`
-      # exposes the hidden producer hook; without it the tick target is skipped.
-      - name: moq-stats producer tick, decode and aggregate benchmarks
-        if: ${{ !cancelled() }}
-        run: nix develop --command just rs bench-stats --test
-
-      # The catalog bench asserts the estimate rate limit's publish counts, so one pass is
-      # the regression check.
-      - name: moq-mux catalog estimate fanout benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command cargo bench --locked -p moq-mux --bench catalog -- --test
-
-      - name: Archive timeline FETCH fanout benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just rs test -p moq-archive benchmark_timeline_fetch_fanout --run-ignored only --success-output immediate
-
-      - name: TS damage PID benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just rs test -p moq-mux benchmark_damage_pid_fanout --run-ignored only --success-output immediate
-
-      - name: TS scheduler benchmark smoke
-        if: ${{ !cancelled() }}
-        run: nix develop --command just rs bench-ts-schedule --test
-
-      - name: Container export benchmark smoke
-        if: ${{ !cancelled() }}
-        run: nix develop --command just rs bench-export --test
-
-      - name: RTMP chunk-stream benchmark smoke
-        if: ${{ !cancelled() }}
-        run: nix develop --command just rs bench-rtmp --test
-
-      - name: Stream import throughput
-        if: ${{ !cancelled() }}
-        run: nix develop --command just rs test -p moq-cli -E 'test(benchmark_stream_import)' --run-ignored only --success-output immediate
-
-      - name: BBB rendition alignment
-        if: ${{ !cancelled() }}
-        run: nix develop --command just pub check-bbb
-
-      - name: Audit
-        if: ${{ !cancelled() }}
-        run: nix develop --command just rs audit
-
-      # The OBS plugin (over moq-ffi) and moq-c's C fixtures link a Rust
-      # staticlib from outside cargo, so a stale `rs/moq-c/native-libs/*.txt`
-      # breaks them and no cargo build. obs.yml lists the inputs that can do that,
-      # but a list of paths can't be complete: a build script emitting
-      # `cargo::rustc-link-lib` needs no manifest change, and widening that
-      # filter to `rs/**` would run a link on nearly every PR. Being
-      # diff-independent, this run covers whatever the filter misses, at the
-      # cost of surfacing a day late rather than in review.
-      - name: OBS
-        if: ${{ !cancelled() }}
-        run: nix develop .#obs --command just obs ci
-
-      - name: moq-c C fixtures
-        if: ${{ !cancelled() }}
-        run: nix develop --command just rs c-tests
+      - name: Run workload
+        run: nix develop ${{ matrix.shell }} --command just ${{ matrix.recipe }}
+        env:
+          NEXTEST_PROFILE: ${{ matrix.profile || 'default' }}
 
   tests:
     name: Tests (${{ matrix.recipe }})

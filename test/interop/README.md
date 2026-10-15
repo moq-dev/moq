@@ -188,7 +188,8 @@ offers only the cell's version, and JavaScript checks the negotiated version.
 The relay is anonymous here, since released binaries may predate AUTH; the
 default matrix covers tokens and grants.
 Current Rust media publishers feed released Rust and JS readers, then released
-publishers feed current readers, through both relay sources. Rust exports must
+publishers feed current readers, through both relay sources. Each reader is its
+own lane, `media-rust` and `media-js-native-node`. Rust exports must
 decode to a video frame through ffmpeg. The JS reader is
 `compat/client.ts`, not the interop subscriber, whose API follows the
 checkout. One copy runs against each package set, using only API both have,

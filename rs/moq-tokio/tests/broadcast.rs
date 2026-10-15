@@ -2099,7 +2099,7 @@ async fn broadcast_websocket() {
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	// Disable WebSocket delay so client connects immediately via ws://
-	client_config.websocket.delay = Duration::ZERO;
+	client_config.websocket.delay = Some(Duration::ZERO);
 
 	let client = client_config.init(Default::default()).expect("failed to init client");
 	let url: url::Url = format!("ws://localhost:{}", ws_addr.port()).parse().unwrap();
@@ -2218,7 +2218,7 @@ async fn broadcast_websocket_fallback() {
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	// No delay. Race QUIC and WebSocket simultaneously.
-	client_config.websocket.delay = Duration::ZERO;
+	client_config.websocket.delay = Some(Duration::ZERO);
 
 	let client = client_config.init(Default::default()).expect("failed to init client");
 
@@ -2341,7 +2341,7 @@ async fn broadcast_websocket_uses_newest_version() {
 	let sub_origin = moq_tokio::origin::spawn();
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
-	client_config.websocket.delay = Duration::ZERO;
+	client_config.websocket.delay = Some(Duration::ZERO);
 
 	let client = client_config.init(Default::default()).expect("failed to init client");
 	let url: url::Url = format!("ws://localhost:{}", ws_addr.port()).parse().unwrap();
@@ -2773,7 +2773,7 @@ async fn websocket_unauthorized_handshake_is_explicit() {
 	});
 
 	let mut client_config = moq_tokio::connect::Config::default();
-	client_config.websocket.delay = Duration::ZERO;
+	client_config.websocket.delay = Some(Duration::ZERO);
 	let client = client_config.init(Default::default()).expect("failed to init client");
 	let url: url::Url = format!("ws://{addr}").parse().unwrap();
 
@@ -2810,7 +2810,7 @@ async fn reconnect_stops_on_websocket_unauthorized() {
 	});
 
 	let mut client_config = moq_tokio::connect::Config::default();
-	client_config.websocket.delay = Duration::ZERO;
+	client_config.websocket.delay = Some(Duration::ZERO);
 	let client = client_config.init(Default::default()).expect("failed to init client");
 	let url: url::Url = format!("ws://{addr}").parse().unwrap();
 
@@ -2900,7 +2900,7 @@ async fn one_shot_connect_surfaces_the_session_close() {
 	client_config.tls.insecure = Some(true);
 	client_config.once = Some(true);
 	// A tiny backoff so a buggy redial happens well within the sleep below.
-	client_config.backoff.initial = Duration::from_millis(10);
+	client_config.backoff.initial = Some(Duration::from_millis(10));
 	let client = client_config.init(Default::default()).expect("failed to init client");
 
 	let connection = tokio::time::timeout(TIMEOUT, client.connect(url).established())
@@ -2962,7 +2962,7 @@ async fn a_dead_session_unannounces_while_the_reconnect_retries() {
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	// Retry forever with a fast cadence: the worst case for a stale announce.
-	client_config.backoff.initial = Duration::from_millis(10);
+	client_config.backoff.initial = Some(Duration::from_millis(10));
 	client_config.backoff.timeout = Some(Duration::ZERO);
 	let client = client_config.init(Default::default()).expect("failed to init client");
 
@@ -3638,7 +3638,7 @@ async fn zero_initial_backoff_still_gives_up_on_a_flapping_peer() {
 
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
-	client_config.backoff.initial = Duration::ZERO;
+	client_config.backoff.initial = Some(Duration::ZERO);
 	client_config.backoff.timeout = Some(Duration::from_millis(500));
 	let client = client_config.init(Default::default()).expect("failed to init client");
 

@@ -132,9 +132,10 @@ pub enum Error {
 		key: PathBuf,
 		/// Path of the certificate file it was paired with.
 		cert: PathBuf,
-		/// Why rustls says the two don't match.
+		/// Why rustls says the two don't match. Boxed since the paths are
+		/// larger on Windows, where unboxed it trips clippy's `result_large_err`.
 		#[source]
-		source: rustls::Error,
+		source: Box<rustls::Error>,
 	},
 
 	/// A rustls error with no more specific context, e.g. building a config.
@@ -3072,7 +3073,7 @@ impl ServeCerts {
 		certified.rustls.keys_match().map_err(|source| Error::KeyMismatch {
 			key: key_path.to_path_buf(),
 			cert: chain_path.to_path_buf(),
-			source,
+			source: Box::new(source),
 		})?;
 
 		Ok(certified)

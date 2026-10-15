@@ -596,6 +596,10 @@ impl poll::Session for MockSession {
 		self.inner.max_datagram_size()
 	}
 
+	fn binding(&self) -> moq_net::transport::Binding {
+		self.inner.binding()
+	}
+
 	fn protocol(&self) -> Option<&str> {
 		self.inner.protocol()
 	}

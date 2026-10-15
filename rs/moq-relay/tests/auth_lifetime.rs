@@ -210,7 +210,7 @@ fn client() -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
 	config.once = Some(true);
-	config.websocket.delay = Duration::ZERO;
+	config.websocket.delay = Some(Duration::ZERO);
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 	config.init(Default::default()).expect("client init")
 }
@@ -1260,7 +1260,10 @@ async fn memory_sessions() -> (moq_net::Session, moq_net::Session) {
 	let now = tokio::time::Instant::now().into_std();
 	let client = async {
 		let (session, driver) = moq_net::Client::new()
-			.connect(now, moq_tokio::transport::Session::new(client))
+			.connect(
+				now,
+				moq_tokio::transport::Session::new(client, moq_net::transport::Binding::InBand),
+			)
 			.await
 			.expect("client handshake");
 		tokio::spawn(moq_net::time::run(driver));
@@ -1268,7 +1271,10 @@ async fn memory_sessions() -> (moq_net::Session, moq_net::Session) {
 	};
 	let server = async {
 		let (session, driver) = moq_net::Server::new()
-			.accept(now, moq_tokio::transport::Session::new(server))
+			.accept(
+				now,
+				moq_tokio::transport::Session::new(server, moq_net::transport::Binding::InBand),
+			)
 			.await
 			.expect("server handshake");
 		tokio::spawn(moq_net::time::run(driver));
@@ -1421,7 +1427,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			let mut config = moq_tokio::connect::Config::default();
 			config.once = Some(true);
 			config.version = vec!["moq-transport-22".parse().unwrap()];
-			config.websocket.delay = Duration::ZERO;
+			config.websocket.delay = Some(Duration::ZERO);
 			config.init(Default::default()).unwrap()
 		};
 		let origin = moq_tokio::origin::spawn();

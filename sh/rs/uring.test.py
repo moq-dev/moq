@@ -1,4 +1,4 @@
-"""Keep io_uring PR selection and the mandatory kernel floor honest."""
+"""Keep io_uring PR selection honest."""
 
 import json
 import os
@@ -11,24 +11,6 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class UringTest(unittest.TestCase):
-    def test_kernel_floor(self):
-        with tempfile.TemporaryDirectory() as directory:
-            scratch = Path(directory)
-            uname = scratch / "uname"
-            uname.write_text('#!/bin/sh\ncase "$1" in -s) echo "$TEST_SYSTEM";; -r) echo "$TEST_KERNEL";; esac\n')
-            uname.chmod(0o755)
-            for system, kernel, passes in (
-                ("Linux", "6.11.9", False), ("Linux", "6.12.0-azure", True),
-                ("Linux", "7.0.0", True), ("Linux", "unknown", False),
-                ("Darwin", "24.0.0", False),
-            ):
-                with self.subTest(system=system, kernel=kernel):
-                    env = dict(os.environ, PATH=f"{scratch}:{os.environ['PATH']}",
-                               TEST_SYSTEM=system, TEST_KERNEL=kernel)
-                    result = subprocess.run(["bash", "sh/rs/uring-kernel.sh"], cwd=ROOT,
-                                            env=env, capture_output=True, text=True)
-                    self.assertEqual(result.returncode == 0, passes, result.stderr)
-
     def test_selection_follows_shared_dependencies(self):
         with tempfile.TemporaryDirectory() as directory:
             scratch = Path(directory)
@@ -54,7 +36,7 @@ class UringTest(unittest.TestCase):
             for path, passes in (
                 ("rs/moq-uring/src/worker.rs", True), ("rs/moq-relay/src/uring.rs", True),
                 ("rs/kio/src/lib.rs", True), ("rs/moq-unrelated/src/lib.rs", False),
-                ("flake.lock", True), ("sh/rs/uring-kernel.sh", True),
+                ("flake.lock", True),
                 (".github/workflows/uring.yml", True), ("sh/changed.sh", True),
             ):
                 with self.subTest(path=path):

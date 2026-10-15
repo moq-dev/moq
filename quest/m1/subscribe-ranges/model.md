@@ -24,8 +24,8 @@ Guidance:
   a `Relative(0)..` subscriber on a quiet track whose newest group is 3 (the
   live one still gets group 3); a buffering `Relative(k)..` merged with a
   range above the live edge; a frame-precise start merged with live; an
-  untimed `Absolute(0)..` (it follows
-  [One max_age meaning](/quest/m1/cache-max-age.md)); and the lite-05 relay
+  untimed `Absolute(0)..` (it replays what
+  the wall clock has not made stale); and the lite-05 relay
   case #5000 left out: a live subscriber already reading group 1, then one
   from `Absolute(0)`, and a fresh group 0 reaches only the second. The closed
   #5085 branch has reusable pieces (older-wire codec mappings, the JS fix

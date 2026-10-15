@@ -350,6 +350,9 @@ impl poll::Session for DeadStreamSession {
 		0
 	}
 
+	fn binding(&self) -> crate::transport::Binding {
+		crate::transport::Binding::InBand
+	}
 	fn protocol(&self) -> Option<&str> {
 		None
 	}
@@ -525,6 +528,9 @@ impl poll::Session for SinkSession {
 		0
 	}
 
+	fn binding(&self) -> crate::transport::Binding {
+		crate::transport::Binding::InBand
+	}
 	fn protocol(&self) -> Option<&str> {
 		self.protocol
 	}
@@ -637,6 +643,7 @@ impl poll::RecvStream for ScriptedRecv {
 #[derive(Clone)]
 pub struct ScriptedSession {
 	pub log: Log,
+	stats: SinkStats,
 	/// Shared with every stream, like `script`. See [`Self::close`].
 	close: Arc<Mutex<Option<Close>>>,
 	script: Arc<Mutex<Vec<u8>>>,
@@ -655,9 +662,15 @@ pub struct ScriptedSession {
 }
 
 impl ScriptedSession {
+	pub fn with_stats(mut self, stats: SinkStats) -> Self {
+		self.stats = stats;
+		self
+	}
+
 	pub fn new(script: Vec<u8>) -> Self {
 		Self {
 			log: Log::default(),
+			stats: SinkStats::default(),
 			close: Default::default(),
 			script: Arc::new(Mutex::new(script)),
 			queue: None,
@@ -818,6 +831,9 @@ impl poll::Session for ScriptedSession {
 		0
 	}
 
+	fn binding(&self) -> crate::transport::Binding {
+		crate::transport::Binding::InBand
+	}
 	fn protocol(&self) -> Option<&str> {
 		None
 	}
@@ -831,6 +847,6 @@ impl poll::Session for ScriptedSession {
 	}
 
 	fn stats(&self) -> impl crate::transport::Stats {
-		SinkStats::default()
+		self.stats
 	}
 }

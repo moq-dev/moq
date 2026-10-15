@@ -40,10 +40,8 @@ its stdin read returns. On a loaded runner stdin closed first, so the
 publisher logged "input ended" and finished the broadcast cleanly instead of
 dropping it. Fix the cause, not the sleep: preferably the publisher exits on
 SIGINT without waiting for its stdin read, so the test never closes stdin.
-[Listening CLI sessions](/quest/m1/cli-serve.md) lands that runtime-teardown
-fix on main; if it has merged, drop the stdin close and the sleep here;
-otherwise the test waits for an observable sign that SIGINT's cancellation
-took effect, not merely that the signal arrived, before closing it.
+#5510 landed that runtime-teardown fix on main, so drop the stdin close and
+the sleep here.
 `interrupted` (`export.rs:264`) also sleeps 1 s after the interrupt; replace
 it with the exporter's paced tail draining, not the publisher's exit. Fixing
 this race alone does not resolve the failed-export timing above.
@@ -52,5 +50,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Listening CLI sessions](/quest/m1/cli-serve.md) - its teardown fix lets a stopped CLI exit without stdin EOF, removing the interrupt race at its cause
 - [CLI stdin release](/quest/m1/cli-stdin-release.md) - the release backport of that fix

@@ -64,7 +64,7 @@ Decisions:
   promise a clamped aggregate (`track::Producer::subscription`,
   `max_age_bounds_the_budget`). Rejected: a SUBSCRIBE_UPDATE once TRACK_INFO
   lands. Narrowed 2026-10-08 from review. This agrees with
-  [One max_age meaning](/quest/m1/cache-max-age.md): both budgets apply one
+  the shared staleness rule (`Subscription::max_delay`): both budgets apply one
   staleness rule, so a group is stale under the smaller budget exactly when it
   is stale under either.
 - Publishers send a track's TRACK_INFO at a higher stream priority than that
@@ -94,5 +94,4 @@ blocks the Related quests below; whichever lands second rebases.
 ## Related
 
 - [Pipelined first FETCH](/quest/m2/pipeline-requests/fetch.md) - the same change for fetch-only readers
-- [One max_age meaning](/quest/m1/cache-max-age.md) - the staleness rule that makes the wire clamp redundant
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - replaces the SUBSCRIBE floor with ranges
