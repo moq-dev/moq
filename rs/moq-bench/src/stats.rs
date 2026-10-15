@@ -11,7 +11,7 @@ use serde::Serialize;
 const LATENCY_BUCKETS: usize = 60_001;
 
 /// Fixed sums over every connection's startup roll.
-#[derive(Clone, Copy, Default, Serialize)]
+#[derive(Clone, Copy, Default)]
 pub(crate) struct Targets {
 	pub connections: u64,
 	pub broadcasts: u64,
@@ -26,7 +26,9 @@ pub struct Stats {
 	published: AtomicU64,
 	subscribed: AtomicU64,
 	/// Active subscriptions that have read a complete group.
-	pub subscriptions_established: AtomicU64,
+	pub(crate) subscriptions_established: AtomicU64,
+	/// Active broadcasts that connected or completed their first group.
+	pub(crate) broadcasts_established: AtomicU64,
 	pub connections: AtomicU64,
 	pub broadcasts: AtomicU64,
 	pub subscriptions: AtomicU64,
@@ -61,6 +63,7 @@ impl Stats {
 			published: AtomicU64::new(0),
 			subscribed: AtomicU64::new(0),
 			subscriptions_established: AtomicU64::new(0),
+			broadcasts_established: AtomicU64::new(0),
 			connections: AtomicU64::new(0),
 			broadcasts: AtomicU64::new(0),
 			subscriptions: AtomicU64::new(0),
@@ -164,9 +167,9 @@ impl Stats {
 			};
 
 			tracing::info!(
-				connections = now.connections,
-				broadcasts = now.broadcasts,
-				subscriptions = now.subscriptions,
+				connections = now.connections.established,
+				broadcasts = now.broadcasts.active,
+				subscriptions = now.subscriptions.active,
 				send_mbps = format_args!("{send_mbps:.1}"),
 				send_fps = format_args!("{send_fps:.0}"),
 				recv_mbps = format_args!("{recv_mbps:.1}"),
@@ -227,15 +230,26 @@ impl<'a> Record<'a> {
 }
 
 #[derive(Serialize)]
+struct Connections {
+	target: u64,
+	established: u64,
+}
+
+#[derive(Serialize)]
+struct Activity {
+	target: u64,
+	active: u64,
+	established: u64,
+}
+
+#[derive(Serialize)]
 struct Snapshot {
-	targets: Targets,
 	ready: bool,
-	subscriptions_established: u64,
 	#[serde(skip)]
 	captured_at: SystemTime,
-	connections: u64,
-	broadcasts: u64,
-	subscriptions: u64,
+	connections: Connections,
+	broadcasts: Activity,
+	subscriptions: Activity,
 	frames_sent: u64,
 	bytes_sent: u64,
 	frames_recv: u64,
@@ -326,13 +340,22 @@ impl Snapshot {
 		let groups_lost = stats.groups_lost.load(Ordering::Acquire);
 		let groups_present = stats.groups_present.load(Ordering::Acquire);
 		Self {
-			targets: stats.targets,
 			ready: stats.ready(),
-			subscriptions_established: stats.subscriptions_established.load(Ordering::Relaxed),
 			captured_at: latency.captured_at,
-			connections: stats.connections.load(Ordering::Relaxed),
-			broadcasts: stats.broadcasts.load(Ordering::Relaxed),
-			subscriptions: stats.subscriptions.load(Ordering::Relaxed),
+			connections: Connections {
+				target: stats.targets.connections,
+				established: stats.connections.load(Ordering::Relaxed),
+			},
+			broadcasts: Activity {
+				target: stats.targets.broadcasts,
+				active: stats.broadcasts.load(Ordering::Relaxed),
+				established: stats.broadcasts_established.load(Ordering::Relaxed),
+			},
+			subscriptions: Activity {
+				target: stats.targets.subscriptions,
+				active: stats.subscriptions.load(Ordering::Relaxed),
+				established: stats.subscriptions_established.load(Ordering::Relaxed),
+			},
 			frames_sent: stats.frames_sent.load(Ordering::Relaxed),
 			bytes_sent: stats.bytes_sent.load(Ordering::Relaxed),
 			frames_recv: stats.frames_recv.load(Ordering::Relaxed),
@@ -470,9 +493,6 @@ mod tests {
 
 	use super::*;
 
-	/// A failed stats write must surface as an error so the run dies loudly.
-	/// Silently dropping output leaves a partial JSONL file behind a green exit,
-	/// which reads as a valid benchmark that quietly lost data.
 	#[test]
 	fn json_readiness_waits_for_each_target_and_survives_later_loss() {
 		let stats = Stats::new(Targets {
@@ -487,22 +507,47 @@ mod tests {
 			serde_json::to_value(Record::new(&previous, &now, &interval).unwrap()).unwrap()
 		};
 		assert_eq!(line(&stats)["ready"], false);
+		stats.connections.store(1, Ordering::Relaxed);
 		stats.connection_established();
+		stats.broadcasts.store(1, Ordering::Relaxed);
+		stats.broadcasts_established.store(1, Ordering::Relaxed);
 		stats.broadcast_established();
+		stats.subscriptions.store(2, Ordering::Relaxed);
+		stats.subscriptions_established.store(1, Ordering::Relaxed);
 		stats.subscription_established();
 		assert_eq!(line(&stats)["ready"], false);
+		stats.subscriptions_established.store(2, Ordering::Relaxed);
 		stats.subscription_established();
 		let ready = line(&stats);
 		assert_eq!(ready["ready"], true);
-		assert_eq!(ready["targets"]["connections"], 1);
-		assert_eq!(ready["targets"]["broadcasts"], 1);
-		assert_eq!(ready["targets"]["subscriptions"], 2);
+		assert_eq!(ready["connections"], serde_json::json!({"target": 1, "established": 1}));
+		assert_eq!(
+			ready["broadcasts"],
+			serde_json::json!({"target": 1, "active": 1, "established": 1})
+		);
+		assert_eq!(
+			ready["subscriptions"],
+			serde_json::json!({"target": 2, "active": 2, "established": 2})
+		);
+		for removed in ["targets", "established", "subscriptions_established"] {
+			assert!(ready.get(removed).is_none(), "{removed}");
+		}
 		// Gauges can fall all the way to zero after establishment without resetting readiness.
-		assert_eq!(ready["connections"], 0);
-		assert_eq!(ready["subscriptions_established"], 0);
-		assert_eq!(line(&stats)["ready"], true);
+		stats.connections.store(0, Ordering::Relaxed);
+		stats.broadcasts.store(0, Ordering::Relaxed);
+		stats.broadcasts_established.store(0, Ordering::Relaxed);
+		stats.subscriptions.store(0, Ordering::Relaxed);
+		stats.subscriptions_established.store(0, Ordering::Relaxed);
+		let lost = line(&stats);
+		assert_eq!(lost["connections"]["established"], 0);
+		assert_eq!(lost["broadcasts"]["established"], 0);
+		assert_eq!(lost["subscriptions"]["established"], 0);
+		assert_eq!(lost["ready"], true);
 	}
 
+	/// A failed stats write must surface as an error so the run dies loudly.
+	/// Silently dropping output leaves a partial JSONL file behind a green exit,
+	/// which reads as a valid benchmark that quietly lost data.
 	#[tokio::test]
 	async fn report_fails_on_output_error() {
 		tokio::time::pause();

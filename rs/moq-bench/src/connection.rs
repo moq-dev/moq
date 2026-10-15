@@ -238,6 +238,7 @@ async fn produce(
 	published: Arc<Published>,
 ) -> anyhow::Result<()> {
 	let stats = &published.stats;
+	let _gauge = Gauge::inc(&stats.broadcasts);
 
 	// Zero fps means an idle track: keep it published but never produce.
 	if rolled.fps == 0 {
@@ -631,7 +632,7 @@ impl Published {
 	}
 	fn establish(&self) {
 		if !self.established.swap(true, Ordering::Relaxed) {
-			self.stats.broadcasts.fetch_add(1, Ordering::Relaxed);
+			self.stats.broadcasts_established.fetch_add(1, Ordering::Relaxed);
 			self.stats.broadcast_established();
 		}
 	}
@@ -640,7 +641,7 @@ impl Published {
 impl Drop for Published {
 	fn drop(&mut self) {
 		if *self.established.get_mut() {
-			self.stats.broadcasts.fetch_sub(1, Ordering::Relaxed);
+			self.stats.broadcasts_established.fetch_sub(1, Ordering::Relaxed);
 		}
 	}
 }
@@ -674,13 +675,13 @@ mod tests {
 		}));
 		let published = Published::new(stats.clone());
 		assert!(!stats.ready());
-		assert_eq!(stats.broadcasts.load(Ordering::Relaxed), 0);
+		assert_eq!(stats.broadcasts_established.load(Ordering::Relaxed), 0);
 		published.establish(); // connected
 		published.establish(); // first group
-		assert_eq!(stats.broadcasts.load(Ordering::Relaxed), 1);
+		assert_eq!(stats.broadcasts_established.load(Ordering::Relaxed), 1);
 		assert!(stats.ready());
 		drop(published);
-		assert_eq!(stats.broadcasts.load(Ordering::Relaxed), 0);
+		assert_eq!(stats.broadcasts_established.load(Ordering::Relaxed), 0);
 		assert!(stats.ready());
 	}
 
@@ -722,6 +723,31 @@ mod tests {
 		assert!(stats.ready());
 	}
 
+	#[tokio::test]
+	async fn an_idle_producer_counts_before_it_establishes() {
+		tokio::time::pause();
+		let stats = Arc::new(Stats::new(crate::stats::Targets {
+			broadcasts: 1,
+			..Default::default()
+		}));
+		let broadcast = broadcast::Info::new().produce();
+		let track = broadcast.create_track(TRACK, timed()).unwrap();
+		let published = Published::new(stats.clone());
+		let connection = Arc::downgrade(&published);
+		let task = tokio::spawn(produce(0, "bench/test".into(), rolled(0, 0, 0), track, published));
+		wait_for(&stats.broadcasts, 1).await;
+		assert_eq!(stats.broadcasts_established.load(Ordering::Relaxed), 0);
+		assert!(!stats.ready());
+		connection.upgrade().unwrap().establish();
+		assert_eq!(stats.broadcasts_established.load(Ordering::Relaxed), 1);
+		assert!(stats.ready());
+		task.abort();
+		assert!(task.await.unwrap_err().is_cancelled());
+		assert_eq!(stats.broadcasts.load(Ordering::Relaxed), 0);
+		assert_eq!(stats.broadcasts_established.load(Ordering::Relaxed), 0);
+		assert!(stats.ready());
+	}
+
 	/// Sweep connection count and the broadcast fan-out touched by connection establishment.
 	#[test]
 	#[ignore = "benchmark, run nightly"]
@@ -758,7 +784,7 @@ mod tests {
 					"readiness connections={connections} broadcasts_per_connection={broadcasts} elapsed_ns={}",
 					start.elapsed().as_nanos()
 				);
-				assert_eq!(stats.broadcasts.load(Ordering::Relaxed), count);
+				assert_eq!(stats.broadcasts_established.load(Ordering::Relaxed), count);
 			}
 		}
 	}

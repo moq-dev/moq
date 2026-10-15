@@ -121,15 +121,32 @@ The `config/` directory has a few starting points:
 
 ## Machine-readable output
 
-Every line carries `targets: { "connections": N, "broadcasts": N, "subscriptions": N }`,
-fixed sums over all startup rolls, including fan-out roles.
-`ready` first becomes true after every rolled connection has connected, every
-broadcast has connected or completed its first group, and every subscription has
-read a complete group end to end. Start a measurement window on the first `ready`
-line. It stays true after a later loss; use the live gauges to see work ending.
-`subscriptions_established` counts active subscriptions that have completed a
-group, while the existing `subscriptions` gauge includes drains still waiting to
-subscribe or finish their first group.
+Every line groups load counts by resource:
+
+```json
+{
+  "connections": { "target": 2, "established": 2 },
+  "broadcasts": { "target": 2, "active": 2, "established": 2 },
+  "subscriptions": { "target": 2, "active": 2, "established": 2 },
+  "ready": true
+}
+```
+
+Targets are fixed sums over all startup rolls, including fan-out roles.
+Established counts are live: connections have connected, broadcasts have connected
+or completed their first group, and subscriptions have read a complete group end
+to end. Broadcast `active` counts producers before establishment; subscription
+`active` includes drains still waiting to subscribe or finish their first group.
+
+`ready` first becomes true after every rolled element establishes. Start a
+measurement window on the first `ready` line. It stays true after a later loss;
+use each resource's `established` count to see established work ending.
+
+This changes the previous numeric JSONL fields into objects. Migrate reads of
+`connections` to `connections.established`, `broadcasts` to `broadcasts.active`,
+and `subscriptions` to `subscriptions.active`; those gauges retain their meanings.
+Frame, byte, group and latency fields are unchanged. The human-readable stats log
+also keeps its existing numeric fields.
 
 A mesh publishing run refuses a subscription range larger than the smallest
 possible peer broadcast count: `(max(connections.min, 1) - 1) * broadcasts.min`,
@@ -163,9 +180,8 @@ independent atomic samples.
 `--output stats.jsonl` mirrors every report interval to a file as one JSON
 line, each stamped with `timestamp_ms`. The frame, byte, and group counters are
 cumulative and monotonic, so a consumer diffs successive lines to compute
-rates, the same convention as `moq-stats` frames. `connections`, `broadcasts`,
-and `subscriptions` are live gauges that fall as work ends; diff only the
-counters.
+rates, the same convention as `moq-stats` frames. Resource `active` and
+`established` counts are live gauges that fall as work ends; diff only the counters.
 
 `groups_lost` is the logged `lost_groups`, so its increase over a window is the
 groups lost inside it. `groups_expected - groups_present` is the gaps still
