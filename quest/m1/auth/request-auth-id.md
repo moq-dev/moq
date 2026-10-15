@@ -4,8 +4,8 @@
 
 In `moq-lite-07-wip`, AUTH carries an `ID (i)` the opener chooses
 (increasing, never reused), and SUBSCRIBE, SUBSCRIBE_UPDATE, FETCH,
-ANNOUNCE_REQUEST and ANNOUNCE_START carry `Auth (i)`: 0 for unnamed,
-otherwise the ID plus 1. A named request is admitted only by that auth's
+ANNOUNCE_REQUEST, ANNOUNCE_START and ANNOUNCE_UPDATE carry `Auth (i)`: 0 for
+unnamed, otherwise the ID plus 1. A named request is admitted only by that auth's
 grant and ends when the auth ends or narrows away from it. The presenter
 names auths automatically. The `draft-lcurley-moq-auth` extension mirrors it
 for moq-transport, additively.
@@ -39,7 +39,7 @@ until it lands.
   wait spends only the requester's own session budget (its stream and
   subscription limits), and ends when the AUTH arrives, the requester cancels,
   or the session closes; no timer.
-- Renewal on lite: add a new auth, SUBSCRIBE_UPDATE the request to it, drop
+- Renewal on lite: add a new auth, SUBSCRIBE_UPDATE (ANNOUNCE_UPDATE for a route) the request to it, drop
   the old one. AUTH and Subscribe streams are unordered, so dropping the old
   auth must not race the update into an UNAUTHORIZED reset: settle what tells
   the renewer the update applied before it drops the old auth, and spec it.
@@ -60,7 +60,7 @@ until it lands.
   `doc/concept/standard.md`, which says a request's token grants nothing.
 
 Public API: none beyond step 1's `requests()` and `add()`; naming is
-automatic. Wire: lite-07-wip AUTH and five request messages gain fields.
+automatic. Wire: lite-07-wip AUTH and six request messages gain fields.
 
 ## Required
 

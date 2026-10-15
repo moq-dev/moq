@@ -5,8 +5,8 @@
 A publisher or subscriber renews the credential behind a live request
 without reopening it. A `Route` or `Subscription` holds an optional
 `moq_net::Auth`; when the application swaps it, the session sends
-REQUEST_UPDATE (moq-transport) or SUBSCRIBE_UPDATE (lite) naming the new
-auth, and the request stays up. The first consumer is a client that keeps a
+REQUEST_UPDATE (moq-transport) or SUBSCRIBE_UPDATE / ANNOUNCE_UPDATE (lite)
+naming the new auth, and the request stays up. The first consumer is a client that keeps a
 PUBLISH_NAMESPACE alive past its credential's expiry by sending
 REQUEST_UPDATE with a fresh token before it expires.
 
@@ -40,7 +40,8 @@ model; read it there until it lands.
   grants nothing; the moq-transport path can land before the lite one.
 
 Public API: a new optional auth on routes and subscriptions in Rust and JS.
-Wire: none beyond existing REQUEST_UPDATE and SUBSCRIBE_UPDATE.
+Wire: none beyond existing REQUEST_UPDATE, SUBSCRIBE_UPDATE and ANNOUNCE_UPDATE,
+with lite's auth field from Requests name their auth.
 
 ## Required
 
