@@ -1,11 +1,13 @@
-# [S] moq-cli failed-export exit test holds under load
+# [S] moq-cli export exit tests hold under load
 
 ## Goal
 
 `moq-cli`'s `an_export_failure_with_the_broadcast_up_exits_without_lingering`
 (`rs/moq-cli/tests/export.rs`) passes under a loaded `just check`, fixed at
 its cause. It still proves that a failed export exits 1 without waiting for
-the broadcast to end.
+the broadcast to end. `a_drop_exits_one_once_the_linger_expires` in the same
+file also passes under load, still proving an interrupted publisher's drop
+makes the export exit 1 once the linger expires.
 
 ## Plan
 
@@ -32,4 +34,25 @@ interval is slow under load and fix it, or move the check to a deterministic
 in-process test if the process boundary isn't what it proves. Never widen a
 timeout or add a retry.
 
+Folded in 2026-10-14 (maintainer): `a_drop_exits_one_once_the_linger_expires`
+bounced #5528 from the merge queue, exiting 0 instead of 1. Its `interrupt`
+helper (`rs/moq-cli/tests/export.rs:142`) sends SIGINT, sleeps 500 ms, then
+closes the publisher's stdin, because the interrupted process only exits once
+its stdin read returns. On a loaded runner stdin closed first, so the
+publisher logged "input ended" and finished the broadcast cleanly instead of
+dropping it. Fix the cause, not the sleep: preferably the publisher exits on
+SIGINT without waiting for its stdin read, so the test never closes stdin.
+[Listening CLI sessions](/quest/m1/cli-serve.md) lands that runtime-teardown
+fix on main; if it has merged, drop the stdin close and the sleep here;
+otherwise the test waits for an observable sign that SIGINT's cancellation
+took effect, not merely that the signal arrived, before closing it.
+`interrupted` (`export.rs:264`) also sleeps 1 s after the interrupt; replace
+it with the exporter's paced tail draining, not the publisher's exit. Fixing
+this race alone does not resolve the failed-export timing above.
+
 Public API: none. Wire: none.
+
+## Related
+
+- [Listening CLI sessions](/quest/m1/cli-serve.md) - its teardown fix lets a stopped CLI exit without stdin EOF, removing the interrupt race at its cause
+- [CLI stdin release](/quest/m1/cli-stdin-release.md) - the release backport of that fix

@@ -44,6 +44,20 @@ Decided in the 2026-10-10 resume audit:
   transport evidence permitting seamless resume. Older readers can ignore
   the additive field and do not gain its guarantee.
 
+Decided by the maintainer, 2026-10-14 (from #5500's Codex review): readers
+follow a referenced broadcast's announcements, since announcement is the
+online/offline signal and `@moq/watch` already behaves this way. The "no
+retarget" rule above applies only to readers that follow no announcement.
+
+- `moqsrc`: Start binds the rendition, End idles its pad, and Restart
+  restarts its pump.
+- Exporters: a late first announcement starts the rendition and End ends
+  it. Restart behavior belongs to
+  [restart followers](/quest/m1/restart-followers.md).
+- Share this in `moq_mux` (a `Source::follow`-style API; the shape is open)
+  rather than per reader. `Source::bind` binds once today, as
+  `failed_binding_does_not_retry_a_later_publisher` asserts; that changes.
+
 Use the shared reference resolution paths rather than adding one rule per
 media type. Mirror schemas and behavior in `rs/hang`, `js/hang`, native
 readers/exporters and `@moq/watch`; carry the field through catalog producers,

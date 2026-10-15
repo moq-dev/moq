@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! Fetching a group from a moq-transport publisher never subscribes to its track.
 //!
 //! The subscriber learns the track from TRACK_STATUS instead, so a finished track is still

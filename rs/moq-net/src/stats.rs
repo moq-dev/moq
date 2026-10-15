@@ -16,8 +16,8 @@
 //! # Where counting happens
 //!
 //! Counting lives in the model layer, not the wire loops. A session tags its
-//! origin pair with a [`Session`] context ([`crate::Client::with_stats`] /
-//! [`crate::Server::with_stats`], which call `origin::{Consumer, Producer}`
+//! origin pair with a [`Session`] context (`crate::Client::with_stats` /
+//! `crate::Server::with_stats`, which call `origin::{Consumer, Producer}`
 //! `with_stats`); every derived handle (broadcast, announce, track, group, frame)
 //! then attributes its reads (egress = publisher) and writes (ingress =
 //! subscriber) through that context. So any protocol that drives the model gets
@@ -61,7 +61,7 @@
 //!   the new one.
 //! * `announces_peak` / `subscriptions_peak` ([`Presence`]): the most
 //!   announcements, or subscriptions, any one session under the auth root held
-//!   at once, to compare against its [`crate::session::Limits`]. A peak never
+//!   at once, to compare against its `crate::session::Limits`. A peak never
 //!   goes down; a rollup takes the largest rather than the sum.
 //!
 //! Counters are strictly monotonic (only `fetch_add`); a counter going
@@ -523,7 +523,7 @@ impl Traffic {
 /// Connected-session presence for one slice (an auth root on a tier, or any
 /// sum of such slices): cumulative connects and disconnects. `sessions_started
 /// - sessions_ended` is the current live session count. The peaks show how close
-/// one session came to its [`crate::session::Limits`].
+/// one session came to its `crate::session::Limits`.
 ///
 /// Like [`Traffic`], this is also the wire shape of one entry on a published
 /// sessions, presence, or totals track. Serialize writes both the canonical names and the legacy
@@ -925,6 +925,7 @@ impl Registry {
 	/// module exposes this to the stats producer bench. A report drops the entry
 	/// unless a guard still holds it.
 	#[cfg(any(test, feature = "fuzz"))]
+	#[cfg(feature = "async")]
 	pub(crate) fn bump_publisher_bytes(&self, path: impl AsPath, tier: &Tier, n: u64) {
 		let Some(entry) = self.entry(path) else {
 			return;
@@ -1078,8 +1079,8 @@ impl Default for Registry {
 	}
 }
 
-/// Tier-scoped wrapper around [`Registry`]. What [`crate::Client::with_stats`] and
-/// [`crate::Server::with_stats`] accept. Cheap to clone.
+/// Tier-scoped wrapper around [`Registry`]. What `crate::Client::with_stats` and
+/// `crate::Server::with_stats` accept. Cheap to clone.
 #[derive(Clone)]
 pub struct Handle {
 	stats: Registry,
@@ -1161,10 +1162,12 @@ pub struct Session {
 	inner: Option<Arc<SessionInner>>,
 }
 
-/// Which of a session's [`crate::session::Limits`] a [`Session::hold`] counts against.
+/// Which of a session's `crate::session::Limits` a [`Session::hold`] counts against.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Cap {
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	Announces,
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	Subscriptions,
 }
 
@@ -1251,6 +1254,7 @@ impl Session {
 	}
 
 	/// Count `live` as what this session holds against `cap`, so a tier change carries it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn track_held(&self, cap: Cap, live: &Arc<AtomicUsize>) {
 		let Some(inner) = &self.inner else { return };
 		let mut held = inner.held.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1261,6 +1265,7 @@ impl Session {
 
 	/// Record that this session holds `held` of what `cap` limits, raising that peak on its
 	/// tier and root.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn hold(&self, cap: Cap, held: u64) {
 		let Some(inner) = &self.inner else { return };
 		let current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1651,6 +1656,7 @@ mod tests {
 	/// Each root's sessions row carries the most any one of its sessions held against each
 	/// cap, which a slot released does not lower and a rollup does not sum.
 	#[test]
+	#[cfg(feature = "async")]
 	fn sessions_report_their_peaks_against_the_caps() {
 		use crate::session::Slots;
 
@@ -1683,6 +1689,7 @@ mod tests {
 	/// A session moving tiers brings the slots it still holds to the new tier's peak, but
 	/// not the old tier's history.
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_tier_change_carries_the_slots_still_held() {
 		use crate::session::Slots;
 

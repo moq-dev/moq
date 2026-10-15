@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Run `just check`, `just fix`, or `just ci check|test` over what the branch
-# changed.
+# Run `just check`, `just fix`, or `just ci check|test` over the branch diff.
+# `--query` prints the selection instead; `ci-platform` exists only as a query.
 #
-# Usage: sh/dispatch.sh check|fix|ci-check|ci-test [BASE|--all]
+# Usage: sh/dispatch.sh check|fix|ci-check|ci-test [BASE|--all] [--query]
+#        sh/dispatch.sh ci-platform BASE|--all --query
 #
 # The branch diff is resolved once and matched against the impact map below,
 # the one place that says which paths put which module in scope. `check` is
@@ -10,11 +11,16 @@
 # so there is no second definition of "checked".
 set -euo pipefail
 
-usage="usage: sh/dispatch.sh check|fix|ci-check|ci-test [BASE|--all]"
+usage="usage: sh/dispatch.sh check|fix|ci-check|ci-test [BASE|--all] [--query], or ci-platform BASE|--all --query"
 action=${1:?$usage}
 base=${2:-}
+query=${3:-}
+if [[ $# -gt 3 || (-n "$query" && "$query" != --query) || ("$action" == ci-platform && -z "$query") ]]; then
+    echo "$usage" >&2
+    exit 2
+fi
 case "$action" in
-    check | fix | ci-check | ci-test) ;;
+    check | fix | ci-check | ci-test | ci-platform) ;;
     *)
         echo "$usage" >&2
         exit 2
@@ -25,7 +31,7 @@ esac
 # _FORTIFY_SOURCE the dev shell disables, which breaks jemalloc's -Werror
 # configure probes. This flake's dev shell sets MOQ_DEV_SHELL. Windows has no
 # Nix, so it always runs on the host.
-if [[ -z "${MOQ_DEV_SHELL:-}" && -z "${MOQ_ALLOW_HOST:-}" && "$OSTYPE" != msys && "$OSTYPE" != cygwin ]]; then
+if [[ -z "$query" && -z "${MOQ_DEV_SHELL:-}" && -z "${MOQ_ALLOW_HOST:-}" && "$OSTYPE" != msys && "$OSTYPE" != cygwin ]]; then
     echo "error: run inside the Nix dev shell ('nix develop' or direnv) so tools match CI" >&2
     echo "       or set MOQ_ALLOW_HOST=1 to use the host toolchain anyway" >&2
     exit 1
@@ -34,7 +40,8 @@ fi
 cd "$(git rev-parse --show-toplevel)"
 
 changed=$(mktemp)
-trap 'rm -f "$changed"' EXIT
+js_changed=$(mktemp)
+trap 'rm -f "$changed" "$js_changed"' EXIT
 
 all=
 if [[ "$base" == --all ]]; then
@@ -53,7 +60,9 @@ fi
 # The impact map: a module is in scope when a changed path matches its
 # pattern. An empty pattern is a repository-wide lint that runs on every diff.
 declare -A scope=(
-    [js]='^(js/|doc/|drafts/|demo/(boy|web)/|test/|rs/moq-wasm/|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
+    # The JS tests also read Rust's shared JSON vectors; sh/js/workspace.py
+    # fails a check that reads a cross-tree input this pattern misses.
+    [js]='^(js/|doc/|drafts/|demo/(boy|web)/|test/|rs/moq-wasm/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
     # Workers with lockfiles outside the Bun workspace.
     [workers]='^(infra/apt/|infra/rpm/|infra/moq-sh/|demo/pub/|sh/js/workers\.sh$)'
     [moq_sh]='^infra/moq-sh/'
@@ -92,12 +101,37 @@ declare -A scope=(
     [gh]=''
 )
 
+# Report each native suite from the same impact map, before any toolchain is
+# installed. Rust dependencies can break external consumers too, so include
+# them in each build.
+if [[ "$action" == ci-platform ]]; then
+    needed=false
+    shared=$all
+    if grep -qE '^(\.cargo/|\.github/|[^/]+/justfile$|justfile$)' "$changed"; then
+        shared=1
+    fi
+    for module in rs swift cpp obs_compile moq_sh; do
+        enabled=false
+        pattern=${scope[$module]}
+        case "$module" in
+            swift | cpp | obs_compile) pattern+="|${scope[rs]}" ;;
+        esac
+        if [[ -n "$shared" ]] || grep -qE "$pattern" "$changed"; then
+            enabled=true
+            needed=true
+        fi
+        echo "$module=$enabled"
+    done
+    echo "needed=$needed"
+    exit
+fi
+
 # The tools each module needs. A module missing one is skipped locally, so an
 # incomplete toolchain checks less; under MOQ_STRICT (CI) it is an error, up
 # front, because there a skip is indistinguishable from a pass. swift needs
-# none: it skips off macOS by design, and swift.yml is its real gate.
+# none: it skips off macOS by design, and platform.yml is its real gate.
 declare -A tools=(
-    [js]='bun python3 cargo wasm-bindgen'
+    [js]='bun python3'
     [workers]='bun'
     [moq_sh]='dash'
     [rs]='cargo jq'
@@ -135,6 +169,11 @@ for module in "${modules[@]}"; do
     if [[ -z "$all" && -n "$pattern" ]] && ! grep -qE "$pattern" "$changed"; then
         continue
     fi
+    # Selection must not depend on the tools setup has yet to install.
+    if [[ -n "$query" ]]; then
+        selected+=("$module")
+        continue
+    fi
     absent=()
     for tool in ${tools[$module]}; do
         command -v "$tool" >/dev/null 2>&1 || absent+=("$tool")
@@ -148,6 +187,15 @@ for module in "${modules[@]}"; do
     fi
 done
 
+# A query runs on the host before Nix, cache restore, or disk cleanup. Keep the
+# normal selection loop authoritative, including its repository-wide lints.
+if [[ -n "$query" ]]; then
+    needed=false
+    ((${#selected[@]} == 0)) || needed=true
+    echo "needed=$needed"
+    exit
+fi
+
 if ((${#missing[@]})); then
     echo "error: MOQ_STRICT is set but these tools are missing: $(printf '%s\n' "${missing[@]}" | sort -u | tr '\n' ' ')" >&2
     echo "       run inside 'nix develop', or unset MOQ_STRICT to skip what isn't installed" >&2
@@ -157,6 +205,14 @@ fi
 # rs selects crates from the same list, or the whole workspace.
 rs_list=$changed
 [[ -z "$all" ]] || rs_list=--all
+
+# Pass only JS-impacting paths, so an unrelated quest or Rust file does not
+# turn a narrow package selection into the shared-input fallback.
+js_list=--all
+if [[ -z "$all" ]]; then
+    grep -E "${scope[js]}" "$changed" >"$js_changed" || true
+    js_list=$js_changed
+fi
 
 # Tracked and new files, skipping whatever .gitignore does (node_modules, target).
 files() {
@@ -169,7 +225,7 @@ verb=${action#ci-}
 
 for module in "${selected[@]}"; do
     case "$verb:$module" in
-        check:js) just js check ;;
+        check:js) just js check-changed "$js_list" ;;
         check:workers) just js workers ;;
         check:moq_sh) just infra moq-sh test ;;
         # `check` lints Rust through its test build, so the crates compile once;
@@ -195,6 +251,7 @@ for module in "${selected[@]}"; do
         fix:toml) RUST_LOG=error taplo format ;;
         fix:nix) files '*.nix' | xargs -0 nixfmt ;;
         fix:justfile) files justfile '*/justfile' | xargs -0 -n1 just --fmt --justfile ;;
+        test:js) just js test-changed "$js_list" ;;
         test:rs) just rs test-changed "$rs_list" ;;
         *:shell) sh/shell.sh "$verb" ;;
         *) just "$module" "$verb" ;;
@@ -206,7 +263,8 @@ done
 if [[ "$action" == check ]]; then
     for module in "${selected[@]}"; do
         case "$module" in
-            js | py) just "$module" test ;;
+            js) just js test-changed "$js_list" ;;
+            py) just py test ;;
         esac
     done
 fi

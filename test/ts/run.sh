@@ -21,6 +21,8 @@
 #   ./run.sh --open-gop            # open-GOP clip; its leading pictures must survive
 #   ./run.sh --hrd                 # 1080p video filling a broadcast-sized 9 Mbit CPB
 #   ./run.sh --headroom            # the same with four audio PIDs, muxed above the video's Rx
+#   ./run.sh --leak                # 1080p video with no HRD, filling its level's 24 Mb/s leak
+#   ./run.sh --full                # the same with two audio PIDs, filling its multiplex with no nulls
 #   ./run.sh --delay 1s            # pass the exporter's --delay
 
 # `--live` swaps the analyzer, not the rig. compliance.py grades a captured file
@@ -73,6 +75,8 @@ PAIR=""     # subscribe twice and grade the two captures against each other
 OPEN_GOP="" # publish open GOP with leading pictures, and grade them through the round-trip
 HRD=""      # publish video that fills a broadcast-sized CPB, as a contribution encoder does
 HEADROOM="" # the same plus four audio PIDs, in a multiplex faster than the video's Rx
+LEAK=""     # publish video with no HRD at its level's leak, as a full-rate feed does
+FULL=""     # the same with audio, in a multiplex the source fills with no nulls
 EXPORT=()   # extra `export ts` flags (--delay)
 # How far into the run the second subscriber joins. A late join is the point: two
 # exporters started together can share a cadence by starting together, which is
@@ -81,8 +85,8 @@ PAIR_JOIN="${TSC_PAIR_JOIN:-5}"
 # Shortest overlap worth a verdict, in seconds. Below this the slower tables fall under
 # the analyzer's emission floor and go report-only, which reads as a pass.
 PAIR_MIN_OVERLAP="${TSC_PAIR_MIN_OVERLAP:-25}"
-DURATION_SET="" # so pair mode can raise the default without overriding an explicit --duration
-BITRATE_SET=""  # so headroom mode can raise the default without overriding an explicit --bitrate
+DURATION_SET="" # so pair and leak modes can raise the default without overriding an explicit --duration
+BITRATE_SET=""  # so headroom and leak modes can raise the default without overriding an explicit --bitrate
 PASSTHRU=()     # forwarded to compliance.py (thresholds, --report-json, ...)
 
 while [[ $# -gt 0 ]]; do
@@ -145,6 +149,14 @@ while [[ $# -gt 0 ]]; do
             HEADROOM=1
             shift
             ;;
+        --leak)
+            LEAK=1
+            shift
+            ;;
+        --full)
+            FULL=1
+            shift
+            ;;
         --delay)
             EXPORT=(--delay "$2")
             shift 2
@@ -186,6 +198,28 @@ if [[ -n "$HEADROOM" && -n "$HRD$OPEN_GOP$SOURCE$ANALYZE_ONLY" ]]; then
 fi
 # Room for the audio, with the video still taking up to 86 % of the multiplex.
 [[ -n "$HEADROOM" && -z "$BITRATE_SET" && -z "${TSC_BITRATE:-}" ]] && BITRATE=12500000
+if [[ -n "$LEAK" && -n "$HRD$HEADROOM$OPEN_GOP$SOURCE$ANALYZE_ONLY" ]]; then
+    echo "error: --leak generates its own clip and cannot be combined with --hrd, --headroom, --open-gop, --source, or --analyze-only" >&2
+    exit 1
+fi
+# Room for the video's packet headers, and long enough that an export admitting video a
+# few percent below the leak exhausts the delay's lead and misses a deadline.
+[[ -n "$LEAK" && -z "$BITRATE_SET" && -z "${TSC_BITRATE:-}" ]] && BITRATE=26000000
+[[ -n "$LEAK" && -z "$DURATION_SET" && -z "${TSC_DURATION:-}" ]] && DURATION=30
+if [[ -n "$FULL" && -n "$LEAK$HRD$HEADROOM$OPEN_GOP$SOURCE$ANALYZE_ONLY" ]]; then
+    echo "error: --full generates its own clip and cannot be combined with --leak, --hrd, --headroom, --open-gop, --source, or --analyze-only" >&2
+    exit 1
+fi
+# The clip's rate is whatever its packets fill, measured once it is generated.
+if [[ -n "$FULL" && -n "$BITRATE_SET${TSC_BITRATE:-}" ]]; then
+    echo "error: --full runs at the rate its clip fills and takes no --bitrate" >&2
+    exit 1
+fi
+[[ -n "$FULL" && -z "$DURATION_SET" && -z "${TSC_DURATION:-}" ]] && DURATION=30
+# Its video arrives up to about 0.65 s ahead of decoding with no room to catch up, so the
+# export needs a longer lead than the default delay gives, yet one a unit's window and
+# slot keep under the T-STD's 1 s.
+[[ -n "$FULL" && ${#EXPORT[@]} -eq 0 ]] && EXPORT=(--delay 900ms)
 if [[ -n "$OPEN_GOP" && -n "$ANALYZE_ONLY$LIVE$PAIR" ]]; then
     echo "error: --open-gop cannot be combined with --analyze-only, --live, or --pair" >&2
     exit 1
@@ -304,6 +338,50 @@ elif [[ -n "$HRD$HEADROOM" ]]; then
         -c:v libx264 -profile:v high -level 4.0 -preset veryfast -pix_fmt yuv420p \
         -x264-params "keyint=25:min-keyint=25:scenecut=0:nal-hrd=cbr" -b:v 9M -maxrate 9M -bufsize 9M \
         -f mpegts -muxrate "$BITRATE" -pcr_period 20 -pes_payload_size 0 "$SRC_TS"
+elif [[ -n "$LEAK" ]]; then
+    echo "### generating ~${DURATION}s 1080p clip with no HRD at its level's 24 Mb/s leak with ffmpeg"
+    # A full-rate feed's shape: with no HRD, level 4.0's leak from MB into EB (Rbx, 24 Mb/s)
+    # is the video's only limit, and a target above the VBV's 24 Mb/s ceiling holds the
+    # video at it, so the export has to admit the leak's whole rate (moq-dev/moq#5362).
+    ffmpeg -y -hide_banner -loglevel error \
+        -f lavfi -i "testsrc2=size=1920x1080:rate=25,noise=alls=24:allf=t" \
+        -t "$DURATION" -an \
+        -c:v libx264 -profile:v high -level 4.0 -preset veryfast -pix_fmt yuv420p \
+        -x264-params "keyint=25:min-keyint=25:scenecut=0" -b:v 30M -maxrate 24M -bufsize 24M \
+        -f mpegts -muxrate "$BITRATE" -pcr_period 20 -pes_payload_size 0 "$SRC_TS"
+elif [[ -n "$FULL" ]]; then
+    echo "### generating ~${DURATION}s 1080p clip at its level's leak with two audio PIDs, filling its multiplex with no nulls"
+    # A full-rate contribution feed's shape: the --leak video beside an MP2 and a DVB AC-3
+    # PID, with its PCR in the video's adaptation field and several audio frames a PES, and
+    # no null packets, so the export has no room to spend more packets than the source on
+    # clocks or audio framing (moq-dev/moq#5362). ffmpeg pads any multiplex rate it is
+    # given, so mux with room to spare, drop the nulls, and stamp the clock at the rate the
+    # rest fill. The PTS and DTS stay: moving them with each PCR would move B pictures
+    # against their group's keyframe, and the video goes out far enough ahead of its DTS
+    # for its packets to arrive a little earlier or later. Muxed at most 0.5 s ahead, it
+    # arrives up to about 0.65 s ahead once the nulls are gone.
+    PADDED_TS="$HARNESS_RUN/padded.ts"
+    PADDED_RATE=27000000
+    ffmpeg -y -hide_banner -loglevel error \
+        -f lavfi -i "testsrc2=size=1920x1080:rate=25,noise=alls=24:allf=t" \
+        -f lavfi -i "sine=frequency=440:sample_rate=48000" \
+        -f lavfi -i "sine=frequency=880:sample_rate=48000" \
+        -t "$DURATION" -map 0:v -map 1:a -map 2:a -ac 2 \
+        -c:v libx264 -profile:v high -level 4.0 -preset veryfast -pix_fmt yuv420p \
+        -x264-params "keyint=25:min-keyint=25:scenecut=0" -b:v 30M -maxrate 24M -bufsize 24M \
+        -c:a:0 mp2 -b:a:0 192k -c:a:1 ac3 -b:a:1 192k \
+        -f mpegts -mpegts_flags system_b -muxrate "$PADDED_RATE" -pcr_period 20 -max_delay 500000 "$PADDED_TS"
+    PACKETS=$(($(wc -c <"$PADDED_TS") / 188))
+    NULLS=$(tsp -I file "$PADDED_TS" -P count --pid 0x1FFF --total -O drop 2>&1 |
+        sed -n 's/.*counted \([0-9,]*\) packets.*/\1/p' | tr -d ,)
+    [[ -n "$NULLS" ]] || {
+        echo "error: could not count the generated clip's null packets" >&2
+        exit 1
+    }
+    BITRATE=$((PADDED_RATE * (PACKETS - NULLS) / PACKETS))
+    tsp -I file "$PADDED_TS" -P filter --negate --pid 0x1FFF \
+        -P pcradjust --bitrate "$BITRATE" --ignore-pts --ignore-dts -O file "$SRC_TS"
+    echo "  ${NULLS} null packets dropped of ${PACKETS}: ${BITRATE} b/s"
 else
     echo "### generating ~${DURATION}s broadcast-like ${OPEN_GOP:+open-GOP }clip with ffmpeg"
     # CBR with a 20 ms PCR, like a contribution feed. Not cosmetic: `regulate`
@@ -535,7 +613,7 @@ echo "### captured $(wc -c <"$SUB_TS" | tr -d ' ') bytes -> analyzing"
 # The initial decoded-content profile is the generated closed-GOP H.264/AAC
 # pair. Other arms retain their specific structural/model oracles until their
 # acquisition and decoder-priming contracts are covered by fixtures.
-if [[ -z "$SOURCE$OPEN_GOP$HRD$HEADROOM" ]]; then
+if [[ -z "$SOURCE$OPEN_GOP$HRD$HEADROOM$LEAK$FULL" ]]; then
     python3 "$DIR/decode.py" "$SRC_TS" "$SUB_TS" --output "$HARNESS_RUN/decode"
 else
     echo "decoded-content comparison: not covered for this profile"
@@ -566,6 +644,18 @@ if [[ -n "$OPEN_GOP" ]]; then
     if ! python3 "$DIR/open-gop.py" "$SRC_TS" "$SUB_TS" $STRICT; then
         echo >&2
         echo "error: open-GOP analysis failed (see round-trip logs below)" >&2
+        dump_logs
+        exit 1
+    fi
+fi
+
+# The delay's lead over the source's hides packets the export spends beyond the source's
+# until it runs out, so they are counted outright.
+if [[ -n "$FULL" ]]; then
+    echo
+    if ! python3 "$DIR/overhead.py" "$SRC_TS" "$SUB_TS"; then
+        echo >&2
+        echo "error: the export spends more packets than its source on clocks and audio" >&2
         dump_logs
         exit 1
     fi

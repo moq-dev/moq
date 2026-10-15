@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A panic in one session's driver ends only that session.
 //!
 //! A host contains such a panic to the task driving the session (see

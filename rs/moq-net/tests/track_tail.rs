@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A track's tail: a group stream that reaches the subscriber after the publisher has
 //! ended the subscription still belongs to the track.
 //!

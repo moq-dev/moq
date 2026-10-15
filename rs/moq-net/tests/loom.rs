@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! Loom model checks for the model layer (broadcast -> track -> group -> frame).
 //!
 //! The unit tests drive these handles from one task at a time, so they can only

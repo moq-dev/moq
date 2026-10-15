@@ -819,6 +819,11 @@ impl StreamsState {
         Ok(())
     }
 
+    /// Whether the local send buffer prevents the application from writing more data.
+    pub(crate) fn send_window_full(&self) -> bool {
+        self.buffered_data >= self.send_window
+    }
+
     /// Returns the maximum amount of data this is allowed to be written on the connection
     pub(crate) fn write_limit(&self) -> u64 {
         (self.max_data - self.data_sent)

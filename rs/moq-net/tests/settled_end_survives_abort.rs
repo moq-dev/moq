@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A track whose declared end has settled holds every group it promised: the end was
 //! reached and each group below it finished. An abort that lands afterwards, such as
 //! the session dying, ends the track cleanly but must not throw those groups away: a

@@ -9,6 +9,7 @@ import type { Handle } from "../bandwidth.ts";
 import * as Origin from "../origin.ts";
 import * as Path from "../path.ts";
 import * as Time from "../time.ts";
+import { Follow } from "../util/observed.ts";
 import { type AcceptProps as AcceptPropsType, accept } from "./accept.ts";
 import { isWebTransportSupported } from "./browser.ts";
 import {
@@ -149,7 +150,7 @@ export class Connection {
 	 */
 	readonly transport: Getter<TransportType | undefined>;
 
-	/** The current connection's PROBE estimates, or undefined while disconnected. */
+	/** Receive estimates while observed, or undefined while disconnected; peek does not request them. */
 	readonly probe: Getter<ProbeType | undefined>;
 
 	/**
@@ -184,7 +185,7 @@ export class Connection {
 	#closed = new Once<Error | null>();
 	readonly #status = new Signal<ReloadStatus>("disconnected");
 	readonly #established = new Signal<EstablishedType | undefined>(undefined);
-	readonly #probe = new Signal<ProbeType | undefined>(undefined);
+	readonly #probe = new Signal<Getter<ProbeType | undefined> | undefined>(undefined);
 	readonly #origin = new Signal<Origin.Producer | undefined>(undefined);
 	readonly #bandwidth = new Signal<Handle | undefined>(undefined);
 	readonly #error = new Signal<Error | undefined>(undefined);
@@ -206,7 +207,7 @@ export class Connection {
 		this.enabled = Signal.from(props?.enabled ?? true);
 		this.status = this.#status;
 		this.error = this.#error;
-		this.probe = this.#probe;
+		this.probe = new Follow(this.#probe);
 		this.origin = this.#origin;
 		this.bandwidth = this.#bandwidth;
 		this.transport = this.#signals.computed((effect) => effect.get(this.#established)?.transport);
@@ -236,7 +237,7 @@ export class Connection {
 			// Proxy the shared loop's outputs, so this handle reads like its own connection.
 			effect.run((nested) => nested.set(this.#status, nested.get(lease.connection.status), "disconnected"));
 			effect.run((nested) => nested.set(this.#established, nested.get(lease.connection.established), undefined));
-			effect.run((nested) => nested.set(this.#probe, nested.get(lease.connection.probe), undefined));
+			effect.run((nested) => nested.set(this.#probe, lease.connection.probe, undefined));
 			effect.run((nested) => nested.set(this.#error, nested.get(lease.connection.error), undefined));
 		});
 	}
@@ -265,7 +266,7 @@ export class Connection {
 		});
 		this.#signals.run((effect) => effect.set(this.#status, effect.get(loop.status), "disconnected"));
 		this.#signals.run((effect) => effect.set(this.#established, effect.get(loop.established), undefined));
-		this.#signals.run((effect) => effect.set(this.#probe, effect.get(loop.probe), undefined));
+		this.#signals.run((effect) => effect.set(this.#probe, loop.probe, undefined));
 		this.#signals.run((effect) => effect.set(this.#error, effect.get(loop.error), undefined));
 	}
 

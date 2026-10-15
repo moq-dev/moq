@@ -1,266 +1,312 @@
-//! In-memory mock WebTransport session for deterministic testing.
+//! Fault knobs over the in-memory transport, for deterministic tests.
 //!
-//! Two `MockSession` instances form a bidirectional pair: streams opened on one
-//! side appear as accepted streams on the other. Backed by kio queues so
-//! delivery is ordered per-stream and deterministic (no real network jitter),
-//! and so the mock implements the poll interface directly, which is what
-//! moq-net requires.
+//! [`MockSession`] wraps one end of a [`memory`] pair, so stream payloads cross
+//! zero-copy and flow-controlled exactly as between two in-process peers. The knobs
+//! bend delivery the ways a real network may: link latency, streams held back or
+//! reordered, a first write split from the rest, lost datagrams, and FINs that are
+//! never sent or never acknowledged.
 //!
-//! The mock guarantees that data written and FIN'd on a stream before `close()`
-//! is readable by the peer, eliminating the Quinn CONNECTION_CLOSE race that
-//! plagues real-transport tests. Like a real CONNECTION_CLOSE, nothing written
-//! after it is delivered, and a stream left unfinished fails with the close once
-//! its earlier data is read.
+//! The transport hands streams to the acceptor in the order they were opened, so each
+//! open queues a [`Line`] that the matching accept picks up: the knobs on a stream's
+//! two ends meet there.
 
 use std::{
+	collections::VecDeque,
 	sync::{
 		Arc, Mutex,
 		atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering},
 	},
-	task::{Context, Poll},
+	task::{Context, Poll, ready},
 	time::Duration,
 };
 
-use bytes::Bytes;
-use moq_net::transport::poll;
+use bytes::{Buf, BufMut, Bytes};
+use moq_net::{
+	time::Instant,
+	transport::{memory, poll},
+};
 
-// ── Error ───────────────────────────────────────────────────────────
+use super::harness::now;
 
-/// Error type for mock transport operations: a session close or a stream reset,
-/// each reporting its code only through its own registry.
-#[derive(Debug, Clone)]
-pub struct MockError {
-	session: Option<u32>,
-	stream: Option<u32>,
-	reason: String,
+/// One direction of a stream, shared by the knobs on its writer and its reader.
+#[derive(Default)]
+struct Line {
+	/// When each write, then the FIN, reaches the reader: its send time plus the latency.
+	arrivals: Mutex<VecDeque<Instant>>,
+	/// When the reset reaches the reader.
+	reset: Mutex<Option<Instant>>,
+	/// The send order last set, for [`MockSession::release_unis_by_priority`].
+	priority: AtomicI32,
+	/// Opened while its opener held streams back.
+	held: bool,
+	/// Once released, delivers what follows the first write; see [`MockSession::split_unis`].
+	split: Option<Arc<kio::Shared<bool>>>,
 }
 
-impl MockError {
-	fn closed() -> Self {
-		Self::session(0, "session closed".into())
+/// State shared by both sides of a pair.
+#[derive(Default)]
+struct Conn {
+	finishes: AtomicUsize,
+	hold_fins: AtomicBool,
+	/// Acknowledge every FIN as soon as it is sent, before the peer reads it.
+	ack_fins: AtomicBool,
+	/// One-way delay for stream data and STOP_SENDING in each direction. Zero by default.
+	latency: Mutex<Duration>,
+}
+
+impl Conn {
+	fn latency(&self) -> Duration {
+		*self.latency.lock().unwrap()
 	}
 
-	fn session(code: u32, reason: String) -> Self {
+	fn arrival(&self) -> Instant {
+		now() + self.latency()
+	}
+}
+
+type Uni = (memory::RecvStream, Arc<Line>);
+type Bi = ((memory::SendStream, Arc<Line>), (memory::RecvStream, Arc<Line>));
+
+/// Streams flowing one way: the opener's knobs and the acceptor's queue.
+struct Link {
+	/// The lines of opened streams the acceptor has yet to take, in open order.
+	uni: Mutex<VecDeque<Arc<Line>>>,
+	/// The same for bidi streams: toward the acceptor, then back.
+	bi: Mutex<VecDeque<[Arc<Line>; 2]>>,
+	/// Accepted streams held back from the acceptor's application, while holding.
+	held_uni: Mutex<Option<Vec<Uni>>>,
+	held_bi: Mutex<Option<Vec<Bi>>>,
+	/// Accepted streams the acceptor's application may take.
+	ready_uni: kio::Queue<Uni>,
+	ready_bi: kio::Queue<Bi>,
+	/// While set, the uni streams opened hold back everything after their first write.
+	split: Mutex<Option<Arc<kio::Shared<bool>>>>,
+	/// The acceptor's transport, so a release can sort streams it has not accepted yet.
+	acceptor: Mutex<memory::Session>,
+}
+
+impl Link {
+	fn new(acceptor: memory::Session) -> Self {
 		Self {
-			session: Some(code),
-			stream: None,
-			reason,
+			uni: Default::default(),
+			bi: Default::default(),
+			held_uni: Default::default(),
+			held_bi: Default::default(),
+			ready_uni: kio::Queue::new(),
+			ready_bi: kio::Queue::new(),
+			split: Default::default(),
+			acceptor: Mutex::new(acceptor),
 		}
 	}
 
-	fn stream_reset(code: u32) -> Self {
-		Self {
-			session: None,
-			stream: Some(code),
-			reason: "stream reset".into(),
+	/// Move every stream the transport has accepted to the held or ready queue,
+	/// returning the transport's error once it has none left.
+	fn route(&self, session: &mut memory::Session, cx: &mut Context<'_>) -> Option<memory::Error> {
+		let mut unis = self.uni.lock().unwrap();
+		let uni_err = loop {
+			match poll::Session::poll_accept_uni(session, cx) {
+				Poll::Ready(Ok(recv)) => {
+					let line = unis.pop_front().expect("opened");
+					let held = line.held;
+					let stream = (recv, line);
+					match self.held_uni.lock().unwrap().as_mut() {
+						Some(list) if held => list.push(stream),
+						_ => drop(self.ready_uni.try_push(stream)),
+					}
+				}
+				Poll::Ready(Err(err)) => break Some(err),
+				Poll::Pending => break None,
+			}
+		};
+		drop(unis);
+
+		let mut bis = self.bi.lock().unwrap();
+		let bi_err = loop {
+			match poll::Session::poll_accept_bi(session, cx) {
+				Poll::Ready(Ok((send, recv))) => {
+					let [forward, back] = bis.pop_front().expect("opened");
+					let held = forward.held;
+					let stream = ((send, back), (recv, forward));
+					match self.held_bi.lock().unwrap().as_mut() {
+						Some(list) if held => list.push(stream),
+						_ => drop(self.ready_bi.try_push(stream)),
+					}
+				}
+				Poll::Ready(Err(err)) => break Some(err),
+				Poll::Pending => break None,
+			}
+		};
+		uni_err.or(bi_err)
+	}
+
+	/// Sort every stream opened so far, so a release sees them all.
+	fn settle(&self) {
+		let mut acceptor = self.acceptor.lock().unwrap();
+		self.route(&mut acceptor, &mut Context::from_waker(std::task::Waker::noop()));
+	}
+
+	/// Deliver held uni streams in the order `pick` leaves them, and stop holding.
+	fn release_unis(&self, pick: impl FnOnce(&mut Vec<Uni>)) {
+		self.settle();
+		let mut held = self.held_uni.lock().unwrap().take().unwrap_or_default();
+		pick(&mut held);
+		for stream in held {
+			let _ = self.ready_uni.try_push(stream);
 		}
-	}
-}
-
-impl std::fmt::Display for MockError {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		write!(f, "mock transport: {}", self.reason)
-	}
-}
-
-impl std::error::Error for MockError {}
-
-impl moq_net::transport::Error for MockError {
-	fn session_error(&self) -> Option<(u32, String)> {
-		self.session.map(|c| (c, self.reason.clone()))
-	}
-
-	fn stream_error(&self) -> Option<u32> {
-		self.stream
 	}
 }
 
 // ── SendStream ──────────────────────────────────────────────────────
 
-/// Internal chunk type: either data or a terminal signal.
-enum StreamChunk {
-	Data(Bytes),
-	Fin,
-	Reset(u32),
-	/// The connection closed before the stream ended; never queued.
-	Closed,
-}
-
-/// Ready once a set-once slot is filled.
-fn is_set<T>(slot: &kio::Ref<'_, Option<T>>) -> Poll<()> {
-	match slot.is_some() {
-		true => Poll::Ready(()),
-		false => Poll::Pending,
-	}
-}
-
-/// Shared closed-signal state between a paired SendStream and RecvStream.
-///
-/// Models QUIC STOP_SENDING: the recv side (or its Drop) flips the flag and
-/// wakes; the send side's `poll_closed` reads this without consuming state.
-#[derive(Default)]
-struct ClosedSignal {
-	/// Set once the peer signals stop or drops. Setting it wakes pending
-	/// `poll_closed` watches.
-	result: kio::Shared<Option<Result<(), MockError>>>,
-}
-
-impl ClosedSignal {
-	/// Signal the sender once `delay` has passed: a STOP_SENDING crosses the link like data.
-	fn set(self: &Arc<Self>, delay: Duration, result: Result<(), MockError>) {
-		if !delay.is_zero() {
-			// Only a test sets a latency, so the stop lands on the simulated clock.
-			let signal = self.clone();
-			drop(moq_net_sim::spawn(async move {
-				moq_net_sim::sleep(delay).await;
-				signal.set(Duration::ZERO, result);
-			}));
-			return;
-		}
-		let mut slot = self.result.lock();
-		if slot.is_none() {
-			*slot = Some(result);
-		}
-	}
-}
-
-/// A chunk in flight: readable by the peer once the link latency has passed.
-type Flight = (std::time::Instant, StreamChunk);
-
-/// A mock send stream backed by a queue to the peer's reader.
+/// A send stream with the knobs of the side that holds it.
 pub struct MockSendStream {
-	tx: Option<kio::Queue<Flight>>,
+	inner: memory::SendStream,
+	line: Arc<Line>,
+	conn: Arc<Conn>,
+	/// Waits for the session close while FIN acknowledgements are held.
+	session: memory::Session,
 	/// Every code the owning side reset a stream with.
 	resets: Resets,
-	closed: Arc<ClosedSignal>,
-	park: kio::Park,
-	/// Acknowledge the FIN as soon as it is sent, for a stream the peer's transport holds
-	/// back from its application (see [`MockSession::hold_unis`]).
-	ack_fin: bool,
 	/// Drop this stream's FIN, as a peer that never completes it (see
 	/// [`MockSession::withhold_bidi_fins`]).
-	withhold_fin: Arc<AtomicBool>,
+	withhold_fin: Option<Arc<AtomicBool>>,
+	/// Whether the FIN was withheld, so the drop delivers it instead of a reset.
+	withheld: bool,
 	/// Where to log the first byte written, the stream type (see
 	/// [`MockSession::bidi_types`]), until it is written.
 	first_byte: Option<StreamTypes>,
-	/// The send order last set, shared with the peer's end for
-	/// [`MockSession::release_unis_by_priority`].
-	priority: Arc<AtomicI32>,
-	conn: Arc<ConnectionState>,
+	/// Finished or reset.
+	done: bool,
+	/// Finished, so the FIN is acknowledged when [`Self::ack`] says so.
+	finished: bool,
+	/// Acknowledge the FIN as soon as it is sent, for a stream the peer's transport holds
+	/// back from its application (see [`MockSession::hold_unis`]).
+	ack: bool,
 }
 
 impl MockSendStream {
-	/// Queue a chunk for the peer, unless the connection closed: nothing sent after a
-	/// CONNECTION_CLOSE reaches the peer.
-	fn push(&mut self, chunk: StreamChunk) -> Result<(), MockError> {
-		if let Some(err) = self.conn.error() {
-			self.tx = None;
-			return Err(err);
+	/// Log the first byte, then stamp each accepted write with its arrival.
+	fn wrote(
+		&mut self,
+		first: Option<u8>,
+		written: Poll<Result<usize, memory::Error>>,
+	) -> Poll<Result<usize, memory::Error>> {
+		if let Poll::Ready(Ok(size)) = written
+			&& size > 0
+		{
+			if let Some(types) = self.first_byte.take() {
+				types.lock().unwrap().push(first.expect("non-empty write"));
+			}
+			self.line.arrivals.lock().unwrap().push_back(self.conn.arrival());
 		}
-		let tx = self.tx.as_ref().ok_or_else(MockError::closed)?;
-		let arrival = super::harness::now() + self.conn.latency();
-		tx.try_push((arrival, chunk)).map_err(|_| MockError::closed())
+		written
 	}
 }
 
 impl poll::SendStream for MockSendStream {
-	type Error = MockError;
+	type Error = memory::Error;
 
-	fn poll_write(&mut self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
-		if let Some(&first) = buf.first()
-			&& let Some(types) = self.first_byte.take()
-		{
-			types.lock().unwrap().push(first);
-		}
-		Poll::Ready(
-			self.push(StreamChunk::Data(Bytes::copy_from_slice(buf)))
-				.map(|()| buf.len()),
-		)
+	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+		let written = self.inner.poll_write(cx, buf);
+		self.wrote(buf.first().copied(), written)
+	}
+
+	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
+		let first = buf.chunk().first().copied();
+		let written = self.inner.poll_write_buf(cx, buf);
+		self.wrote(first, written)
 	}
 
 	fn set_priority(&mut self, order: i32) {
-		self.priority.store(order, Ordering::Relaxed);
+		self.line.priority.store(order, Ordering::Relaxed);
+		self.inner.set_priority(order);
 	}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
-		if self.withhold_fin.load(Ordering::Relaxed) {
+		if self
+			.withhold_fin
+			.as_ref()
+			.is_some_and(|flag| flag.load(Ordering::Relaxed))
+		{
+			self.withheld = true;
 			return Ok(());
 		}
-		if self.tx.is_some() {
-			// A FIN that never left must not look acknowledged: poll_closed
-			// trusts this signal ahead of the connection error.
-			let pushed = self.push(StreamChunk::Fin);
-			if pushed.is_ok() && (self.ack_fin || self.conn.ack_fins.load(Ordering::Relaxed)) {
-				self.closed.set(Duration::ZERO, Ok(()));
-			}
-			self.tx = None;
-			pushed?;
-			self.conn.finishes.fetch_add(1, Ordering::Relaxed);
-		}
+		self.inner.finish()?;
+		self.done = true;
+		self.finished = true;
+		self.line.arrivals.lock().unwrap().push_back(self.conn.arrival());
+		self.conn.finishes.fetch_add(1, Ordering::Relaxed);
 		Ok(())
 	}
 
 	fn reset(&mut self, code: u32) {
-		if self.tx.is_some() {
+		if !self.done {
+			self.done = true;
 			self.resets.lock().unwrap().push(code);
-			let _ = self.push(StreamChunk::Reset(code));
-			self.tx = None;
+			*self.line.reset.lock().unwrap() = Some(self.conn.arrival());
+			self.inner.reset(code);
 		}
 	}
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		let waiter = self.park.hold(cx);
-		if !self.conn.hold_fins.load(Ordering::Relaxed)
-			&& let Poll::Ready(result) = self.closed.result.poll(waiter, is_set)
-		{
-			return Poll::Ready(result.clone().expect("set"));
+		if self.conn.hold_fins.load(Ordering::Relaxed) {
+			return Poll::Ready(Err(ready!(poll::Session::poll_closed(&mut self.session, cx))));
 		}
-		drop(std::task::ready!(self.conn.close_state.poll(waiter, is_set)));
-		Poll::Ready(Err(self.conn.error().expect("closed")))
+		if self.finished && (self.ack || self.conn.ack_fins.load(Ordering::Relaxed)) {
+			return Poll::Ready(Ok(()));
+		}
+		self.inner.poll_closed(cx)
 	}
 }
 
 impl Drop for MockSendStream {
 	fn drop(&mut self) {
-		// Dropped without an explicit FIN: deliver an implicit one, matching a
-		// sender that went away cleanly.
-		if self.tx.is_some() {
-			let _ = self.push(StreamChunk::Fin);
+		// A withheld FIN goes out when the stream does, as a peer that only finishes on teardown.
+		if self.withheld && poll::SendStream::finish(&mut self.inner).is_ok() {
+			self.line.arrivals.lock().unwrap().push_back(self.conn.arrival());
 		}
 	}
 }
 
 // ── RecvStream ──────────────────────────────────────────────────────
 
-/// A mock receive stream backed by a queue from the peer's writer.
+/// What the transport handed over: a chunk, the FIN, or an error.
+type Event = Result<Option<Bytes>, memory::Error>;
+
+/// A receive stream that delivers each event once its arrival has passed.
 pub struct MockRecvStream {
-	rx: kio::Queue<Flight>,
-	/// The next chunk, popped but still crossing the link.
-	flight: Option<Flight>,
+	/// Taken once this side stops reading.
+	inner: Option<memory::RecvStream>,
+	line: Arc<Line>,
+	conn: Arc<Conn>,
+	/// The next event, read from the transport but still crossing the link.
+	flight: Option<(Instant, Event)>,
 	/// The arrival a wake is already scheduled for, so each flight schedules one.
-	landing: Option<std::time::Instant>,
-	/// Buffered bytes from a chunk that was partially consumed.
+	landing: Option<Instant>,
+	/// The rest of a chunk a smaller read split.
 	buf: Bytes,
-	/// Whether we hit FIN or reset.
-	done: bool,
-	/// Once released, delivers what follows this stream's first write; see
-	/// [`MockSession::split_unis`].
-	split: Option<Arc<kio::Shared<bool>>>,
 	/// Data chunks handed to the reader so far.
 	chunks: usize,
-	/// Shared signal to notify the peer's send-side `poll_closed`.
-	closed: Arc<ClosedSignal>,
-	/// The sender's send order; see [`MockSendStream::priority`].
-	priority: Arc<AtomicI32>,
 	park: kio::Park,
-	conn: Arc<ConnectionState>,
 }
 
 impl MockRecvStream {
-	/// Pop the next chunk, mapping queue closure to an implicit FIN. Once everything
-	/// sent before a CONNECTION_CLOSE is read, an unfinished stream fails with it.
-	fn poll_chunk(&mut self, cx: &mut Context<'_>) -> Poll<Option<StreamChunk>> {
-		if let Some(split) = &self.split
+	fn new(inner: memory::RecvStream, line: Arc<Line>, conn: Arc<Conn>) -> Self {
+		Self {
+			inner: Some(inner),
+			line,
+			conn,
+			flight: None,
+			landing: None,
+			buf: Bytes::new(),
+			chunks: 0,
+			park: Default::default(),
+		}
+	}
+
+	/// The next whole chunk, FIN, or error, once it has arrived.
+	fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<Event> {
+		if let Some(split) = &self.line.split
 			&& self.chunks > 0
 			&& split
 				.poll(self.park.hold(cx), |released| match **released {
@@ -271,20 +317,22 @@ impl MockRecvStream {
 		{
 			return Poll::Pending;
 		}
+
 		if self.flight.is_none() {
-			let waiter = self.park.hold(cx);
-			// Register on the close first so one racing the pop still wakes this poll.
-			let closed = self.conn.close_state.poll(waiter, is_set).is_ready();
-			match self.rx.poll_pop(waiter) {
-				Poll::Ready(Ok(flight)) => self.flight = Some(flight),
-				Poll::Ready(Err(_)) => return Poll::Ready(None),
-				Poll::Pending if closed => return Poll::Ready(Some(StreamChunk::Closed)),
-				Poll::Pending => return Poll::Pending,
-			}
+			let Some(inner) = self.inner.as_mut() else {
+				return Poll::Ready(Err(memory::Error::Closed));
+			};
+			let event = ready!(poll::RecvStream::poll_read_chunk(inner, cx, usize::MAX));
+			let arrival = match &event {
+				Err(memory::Error::Reset(_)) => self.line.reset.lock().unwrap().take(),
+				Ok(_) => self.line.arrivals.lock().unwrap().pop_front(),
+				Err(_) => None,
+			};
+			self.flight = Some((arrival.unwrap_or_else(now), event));
 		}
-		let (arrival, _) = self.flight.as_ref().expect("flight set above");
-		let arrival = *arrival;
-		if arrival > super::harness::now() {
+
+		let arrival = self.flight.as_ref().expect("flight set above").0;
+		if arrival > now() {
 			// Only a test sets a latency, so the flight lands on the simulated clock.
 			if self.landing != Some(arrival) {
 				self.landing = Some(arrival);
@@ -296,92 +344,89 @@ impl MockRecvStream {
 			}
 			return Poll::Pending;
 		}
-		Poll::Ready(self.flight.take().map(|(_, chunk)| chunk))
+
+		let (_, event) = self.flight.take().expect("flight set above");
+		if let Ok(Some(_)) = event {
+			self.chunks += 1;
+		}
+		Poll::Ready(event)
+	}
+
+	/// Stop reading, telling the writer once the latency has passed.
+	fn stop_after_latency(&mut self, code: u32) {
+		let Some(mut inner) = self.inner.take() else {
+			return;
+		};
+		let latency = self.conn.latency();
+		if latency.is_zero() {
+			poll::RecvStream::stop(&mut inner, code);
+			return;
+		}
+		drop(moq_net_sim::spawn(async move {
+			moq_net_sim::sleep(latency).await;
+			poll::RecvStream::stop(&mut inner, code);
+		}));
 	}
 }
 
 impl poll::RecvStream for MockRecvStream {
-	type Error = MockError;
+	type Error = memory::Error;
 
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-		if self.done {
+		let Some(chunk) = ready!(self.poll_read_chunk(cx, dst.len()))? else {
 			return Poll::Ready(Ok(None));
-		}
-
-		// Drain buffered bytes first.
-		if !self.buf.is_empty() {
-			let n = dst.len().min(self.buf.len());
-			dst[..n].copy_from_slice(&self.buf[..n]);
-			self.buf = self.buf.slice(n..);
-			return Poll::Ready(Ok(Some(n)));
-		}
-
-		match std::task::ready!(self.poll_chunk(cx)) {
-			Some(StreamChunk::Data(data)) => {
-				self.chunks += 1;
-				let n = dst.len().min(data.len());
-				dst[..n].copy_from_slice(&data[..n]);
-				if n < data.len() {
-					self.buf = data.slice(n..);
-				}
-				Poll::Ready(Ok(Some(n)))
-			}
-			Some(StreamChunk::Fin) | None => {
-				self.done = true;
-				Poll::Ready(Ok(None))
-			}
-			Some(StreamChunk::Reset(code)) => {
-				self.done = true;
-				Poll::Ready(Err(MockError::stream_reset(code)))
-			}
-			Some(StreamChunk::Closed) => {
-				self.done = true;
-				Poll::Ready(Err(self.conn.error().unwrap_or_else(MockError::closed)))
-			}
-		}
+		};
+		dst[..chunk.len()].copy_from_slice(&chunk);
+		Poll::Ready(Ok(Some(chunk.len())))
 	}
 
-	fn stop(&mut self, _code: u32) {
-		self.closed.set(self.conn.latency(), Ok(()));
-		self.done = true;
+	fn poll_read_buf<B: BufMut>(
+		&mut self,
+		cx: &mut Context<'_>,
+		buf: &mut B,
+	) -> Poll<Result<Option<usize>, Self::Error>> {
+		let max = buf.remaining_mut().min(64 * 1024);
+		let Some(chunk) = ready!(self.poll_read_chunk(cx, max))? else {
+			return Poll::Ready(Ok(None));
+		};
+		let size = chunk.len();
+		buf.put(chunk);
+		Poll::Ready(Ok(Some(size)))
+	}
+
+	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
+		if max == 0 {
+			return Poll::Ready(Ok(Some(Bytes::new())));
+		}
+		if self.buf.is_empty() {
+			match ready!(self.poll_event(cx))? {
+				Some(chunk) => self.buf = chunk,
+				None => return Poll::Ready(Ok(None)),
+			}
+		}
+		let size = max.min(self.buf.len());
+		Poll::Ready(Ok(Some(self.buf.split_to(size))))
+	}
+
+	fn stop(&mut self, code: u32) {
+		self.stop_after_latency(code);
 	}
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		if self.done {
-			return Poll::Ready(Ok(()));
-		}
-		// Drain until done.
-		loop {
-			match std::task::ready!(self.poll_chunk(cx)) {
-				Some(StreamChunk::Data(_)) => {}
-				Some(StreamChunk::Fin) | None => {
-					self.done = true;
-					return Poll::Ready(Ok(()));
-				}
-				Some(StreamChunk::Reset(code)) => {
-					self.done = true;
-					return Poll::Ready(Err(MockError::stream_reset(code)));
-				}
-				Some(StreamChunk::Closed) => {
-					self.done = true;
-					return Poll::Ready(Err(self.conn.error().unwrap_or_else(MockError::closed)));
-				}
-			}
+		match self.inner.as_mut() {
+			Some(inner) => inner.poll_closed(cx),
+			None => Poll::Ready(Ok(())),
 		}
 	}
 }
 
 impl Drop for MockRecvStream {
 	fn drop(&mut self) {
-		// Signal the paired SendStream that the receiver is gone (implicit STOP),
-		// and fail its future writes. Unlike QUIC, writes fail at once, a link
-		// latency before `poll_closed` reports the stop.
-		self.closed.set(self.conn.latency(), Ok(()));
-		self.rx.close();
+		self.stop_after_latency(0);
 	}
 }
 
-// ── Stream pair constructor ─────────────────────────────────────────
+// ── MockSession ─────────────────────────────────────────────────────
 
 /// The stream reset codes one side has sent.
 type Resets = Arc<Mutex<Vec<u32>>>;
@@ -389,108 +434,23 @@ type Resets = Arc<Mutex<Vec<u32>>>;
 /// The first byte of each bidi stream one side has opened.
 type StreamTypes = Arc<Mutex<Vec<u8>>>;
 
-/// Create a linked (send, recv) stream pair, logging the sender's resets to `resets`.
-fn new_stream_pair(conn: &Arc<ConnectionState>, resets: &Resets) -> (MockSendStream, MockRecvStream) {
-	let queue = kio::Queue::new();
-	let closed = Arc::new(ClosedSignal::default());
-	let priority = Arc::new(AtomicI32::new(0));
-
-	let send = MockSendStream {
-		tx: Some(queue.clone()),
-		resets: resets.clone(),
-		closed: closed.clone(),
-		park: kio::Park::default(),
-		ack_fin: false,
-		withhold_fin: Arc::default(),
-		first_byte: None,
-		priority: priority.clone(),
-		conn: conn.clone(),
-	};
-	let recv = MockRecvStream {
-		rx: queue,
-		flight: None,
-		landing: None,
-		buf: Bytes::new(),
-		done: false,
-		split: None,
-		chunks: 0,
-		closed,
-		priority,
-		park: kio::Park::default(),
-		conn: conn.clone(),
-	};
-	(send, recv)
-}
-
-// ── MockSession ─────────────────────────────────────────────────────
-
-/// Connection-level state shared by both sides of a mock session pair.
-///
-/// A real QUIC CONNECTION_CLOSE tears down the entire connection for both peers.
-/// This struct models that: a close on either side is visible to both.
-#[derive(Default)]
-struct ConnectionState {
-	finishes: AtomicUsize,
-	hold_fins: AtomicBool,
-	/// Acknowledge every FIN as soon as it is sent, before the peer reads it.
-	ack_fins: AtomicBool,
-	/// Set once by whichever side closes first.
-	/// Setting it wakes both sides.
-	close_state: kio::Shared<Option<(u32, String)>>,
-	/// One-way delay for stream data and STOP_SENDING in each direction. Zero by default.
-	latency: Mutex<Duration>,
-}
-
-impl ConnectionState {
-	fn latency(&self) -> Duration {
-		*self.latency.lock().unwrap()
-	}
-
-	/// The close every stream and accept fails with, once the connection closed.
-	fn error(&self) -> Option<MockError> {
-		self.close_state
-			.read()
-			.as_ref()
-			.map(|(code, reason)| MockError::session(*code, reason.clone()))
-	}
-}
-
-/// Per-side state: stream queues and a reference to the shared connection.
-struct SessionSide {
-	/// Bidi streams opened by the peer, popped by accept_bi.
-	bidi: kio::Queue<(MockSendStream, MockRecvStream)>,
-	/// Uni streams opened by the peer, popped by accept_uni.
-	uni: kio::Queue<MockRecvStream>,
-	/// Queue to deliver bidi streams TO the peer (its accept_bi pops them).
-	peer_bidi: kio::Queue<(MockSendStream, MockRecvStream)>,
-	/// Queue to deliver uni streams TO the peer (its accept_uni pops them).
-	peer_uni: kio::Queue<MockRecvStream>,
-	/// Datagrams sent by the peer.
-	datagrams: kio::Queue<Bytes>,
-	/// Queue to deliver datagrams to the peer.
-	peer_datagrams: kio::Queue<Bytes>,
-	/// The ALPN protocol string for this side.
-	protocol: Option<&'static str>,
-	/// Connection-level close state shared with the peer.
-	conn: Arc<ConnectionState>,
-	/// Stream resets sent by this side, and by the peer.
-	resets: Resets,
-	peer_resets: Resets,
-	/// Uni streams this side opened that the peer has not accepted yet, while held.
-	held: Mutex<Option<Vec<MockRecvStream>>>,
-	/// Bidi streams this side opened that the peer has not accepted yet, while held.
-	held_bidis: Mutex<Option<Vec<(MockSendStream, MockRecvStream)>>>,
+/// One side's knobs.
+struct Side {
+	conn: Arc<Conn>,
+	/// Streams this side opens.
+	out: Arc<Link>,
+	/// Streams the peer opens.
+	inc: Arc<Link>,
 	/// Whether the peer has withheld uni stream credit, parking every open.
-	withheld: Mutex<bool>,
-	/// While set, the uni streams this side opens hold back everything after their first
-	/// write until it is released; see [`MockSession::split_unis`].
-	split: Mutex<Option<Arc<kio::Shared<bool>>>>,
+	withheld: AtomicBool,
 	/// Whether the datagrams this side sends are lost.
-	lossy: Mutex<bool>,
+	lossy: AtomicBool,
 	/// Whether this side drops the FIN of the bidi streams it opens.
 	withhold_bidi_fins: Arc<AtomicBool>,
 	/// The first byte of each bidi stream this side opened.
 	bidi_types: StreamTypes,
+	/// Stream resets sent by this side.
+	resets: Resets,
 	/// What [`poll::Session::stats`] reports.
 	stats: Mutex<MockStats>,
 	/// How many times the stats were read.
@@ -518,37 +478,52 @@ impl moq_net::transport::Stats for MockStats {
 	}
 }
 
-/// An in-memory mock WebTransport session.
-///
-/// Implements [`moq_net::transport::poll::Session`]. Created in pairs via
-/// [`create_mock_session_pair`]. Streams opened on one side are delivered to
-/// the peer's accept methods deterministically via unbounded queues.
+/// One end of an in-memory session pair, with fault knobs. Created by
+/// [`create_mock_session_pair`].
 #[derive(Clone)]
 pub struct MockSession {
-	side: Arc<SessionSide>,
-	// One park per pending-operation class: a park holds a single waiter, and a
-	// clone polling two classes at once must not clobber its own registration.
+	inner: memory::Session,
+	/// Parks withheld opens on the close, apart from the session's own close poll.
+	closer: memory::Session,
+	side: Arc<Side>,
 	accept_uni: kio::Park,
 	accept_bi: kio::Park,
-	datagram: kio::Park,
-	closed: kio::Park,
-	open_uni: kio::Park,
+}
+
+impl MockSession {
+	fn send(&self, inner: memory::SendStream, line: Arc<Line>) -> MockSendStream {
+		MockSendStream {
+			inner,
+			line,
+			conn: self.side.conn.clone(),
+			session: self.inner.clone(),
+			resets: self.side.resets.clone(),
+			withhold_fin: None,
+			withheld: false,
+			first_byte: None,
+			done: false,
+			finished: false,
+			ack: false,
+		}
+	}
+
+	fn recv(&self, inner: memory::RecvStream, line: Arc<Line>) -> MockRecvStream {
+		MockRecvStream::new(inner, line, self.side.conn.clone())
+	}
 }
 
 impl poll::Session for MockSession {
 	type SendStream = MockSendStream;
 	type RecvStream = MockRecvStream;
-	type Error = MockError;
+	type Error = memory::Error;
 
 	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
 		let waiter = self.accept_uni.hold(cx);
-		if let Poll::Ready(res) = self.side.uni.poll_pop(waiter) {
-			return Poll::Ready(res.map_err(|_| self.close_error()));
+		let err = self.side.inc.route(&mut self.inner, &mut waiter.context());
+		if let Poll::Ready(Ok((recv, line))) = self.side.inc.ready_uni.poll_pop(waiter) {
+			return Poll::Ready(Ok(self.recv(recv, line)));
 		}
-		// Park on the close too, so a close with nothing queued fails instead of
-		// parking forever.
-		drop(std::task::ready!(self.side.conn.close_state.poll(waiter, is_set)));
-		Poll::Ready(Err(self.close_error()))
+		err.map_or(Poll::Pending, |err| Poll::Ready(Err(err)))
 	}
 
 	fn poll_accept_bi(
@@ -556,102 +531,81 @@ impl poll::Session for MockSession {
 		cx: &mut Context<'_>,
 	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 		let waiter = self.accept_bi.hold(cx);
-		if let Poll::Ready(res) = self.side.bidi.poll_pop(waiter) {
-			return Poll::Ready(res.map_err(|_| self.close_error()));
+		let err = self.side.inc.route(&mut self.inner, &mut waiter.context());
+		if let Poll::Ready(Ok(((send, back), (recv, forward)))) = self.side.inc.ready_bi.poll_pop(waiter) {
+			return Poll::Ready(Ok((self.send(send, back), self.recv(recv, forward))));
 		}
-		// Park on the close too, so a close with nothing queued fails instead of
-		// parking forever.
-		drop(std::task::ready!(self.side.conn.close_state.poll(waiter, is_set)));
-		Poll::Ready(Err(self.close_error()))
+		err.map_or(Poll::Pending, |err| Poll::Ready(Err(err)))
 	}
 
 	fn poll_open_bi(
 		&mut self,
-		_cx: &mut Context<'_>,
+		cx: &mut Context<'_>,
 	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
-		// Create two stream pairs: one for each direction.
-		let (mut our_send, peer_recv) = new_stream_pair(&self.side.conn, &self.side.resets);
-		our_send.withhold_fin = self.side.withhold_bidi_fins.clone();
-		our_send.first_byte = Some(self.side.bidi_types.clone());
-		let (peer_send, our_recv) = new_stream_pair(&self.side.conn, &self.side.peer_resets);
+		let link = &self.side.out;
+		let mut lines = link.bi.lock().unwrap();
+		let (send, recv) = ready!(self.inner.poll_open_bi(cx))?;
+		let held = link.held_bi.lock().unwrap().is_some();
+		let forward = Arc::new(Line {
+			held,
+			..Default::default()
+		});
+		let back = Arc::new(Line::default());
+		lines.push_back([forward.clone(), back.clone()]);
+		drop(lines);
 
-		if let Some(held) = self.side.held_bidis.lock().unwrap().as_mut() {
-			held.push((peer_send, peer_recv));
-			return Poll::Ready(Ok((our_send, our_recv)));
-		}
-
-		// Deliver (peer_send, peer_recv) to the peer's accept_bi.
-		match self.side.peer_bidi.try_push((peer_send, peer_recv)) {
-			Ok(()) => Poll::Ready(Ok((our_send, our_recv))),
-			Err(_) => Poll::Ready(Err(self.close_error())),
-		}
+		let mut send = self.send(send, forward);
+		send.withhold_fin = Some(self.side.withhold_bidi_fins.clone());
+		send.first_byte = Some(self.side.bidi_types.clone());
+		Poll::Ready(Ok((send, self.recv(recv, back))))
 	}
 
 	fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
-		if *self.side.withheld.lock().unwrap() {
-			drop(std::task::ready!(
-				self.side.conn.close_state.poll(self.open_uni.hold(cx), is_set)
-			));
-			return Poll::Ready(Err(self.close_error()));
+		if self.side.withheld.load(Ordering::Relaxed) {
+			return Poll::Ready(Err(ready!(self.closer.poll_closed(cx))));
 		}
 
-		let (mut our_send, mut peer_recv) = new_stream_pair(&self.side.conn, &self.side.resets);
-		peer_recv.split = self.side.split.lock().unwrap().clone();
+		let link = &self.side.out;
+		let mut lines = link.uni.lock().unwrap();
+		let send = ready!(self.inner.poll_open_uni(cx))?;
+		let line = Arc::new(Line {
+			held: link.held_uni.lock().unwrap().is_some(),
+			split: link.split.lock().unwrap().clone(),
+			..Default::default()
+		});
+		lines.push_back(line.clone());
+		drop(lines);
 
-		if let Some(held) = self.side.held.lock().unwrap().as_mut() {
-			our_send.ack_fin = true;
-			held.push(peer_recv);
-			return Poll::Ready(Ok(our_send));
-		}
-
-		// Deliver peer_recv to the peer's accept_uni.
-		match self.side.peer_uni.try_push(peer_recv) {
-			Ok(()) => Poll::Ready(Ok(our_send)),
-			Err(_) => Poll::Ready(Err(self.close_error())),
-		}
+		let mut send = self.send(send, line);
+		send.ack = send.line.held;
+		Poll::Ready(Ok(send))
 	}
 
-	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		if *self.side.lossy.lock().unwrap() {
+	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+		if self.side.lossy.load(Ordering::Relaxed) {
 			return Poll::Ready(Ok(()));
 		}
-		match self.side.peer_datagrams.try_push(Bytes::copy_from_slice(payload)) {
-			Ok(()) => Poll::Ready(Ok(())),
-			Err(_) => Poll::Ready(Err(self.close_error())),
-		}
+		self.inner.poll_send_datagram(cx, payload)
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
-		let waiter = self.datagram.hold(cx);
-		if let Poll::Ready(res) = self.side.datagrams.poll_pop(waiter) {
-			return Poll::Ready(res.map_err(|_| self.close_error()));
-		}
-		drop(std::task::ready!(self.side.conn.close_state.poll(waiter, is_set)));
-		Poll::Ready(Err(self.close_error()))
+		self.inner.poll_recv_datagram(cx)
 	}
 
 	fn max_datagram_size(&self) -> usize {
-		1200
+		self.inner.max_datagram_size()
 	}
 
 	fn protocol(&self) -> Option<&str> {
-		self.side.protocol
+		self.inner.protocol()
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {
-		// Set-once: a real QUIC CONNECTION_CLOSE keeps the first reason, and the
-		// GOAWAY-timeout tests rely on the server's force-close reason surviving
-		// a later local teardown close from the peer's own driver.
-		let mut state = self.side.conn.close_state.lock();
-		if state.is_none() {
-			*state = Some((code, reason.to_string()));
-		}
+		self.inner.close(code, reason);
 	}
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
-		let state = std::task::ready!(self.side.conn.close_state.poll(self.closed.hold(cx), is_set));
-		let (code, reason) = state.clone().expect("set");
-		Poll::Ready(MockError::session(code, reason))
+		self.inner.poll_closed(cx)
 	}
 
 	fn stats(&self) -> impl moq_net::transport::Stats {
@@ -710,79 +664,68 @@ impl MockSession {
 	/// order: a publisher can see a group stream acknowledged and end the subscription
 	/// before the subscriber has read the group's header.
 	pub fn hold_unis(&self) {
-		self.side.held.lock().unwrap().get_or_insert_default();
+		self.side.out.held_uni.lock().unwrap().get_or_insert_default();
 	}
 
 	/// Deliver the held uni streams to the peer in the order they were opened, and stop
 	/// holding.
 	pub fn release_unis(&self) {
-		for stream in self.side.held.lock().unwrap().take().unwrap_or_default() {
-			let _ = self.side.peer_uni.try_push(stream);
-		}
+		self.side.out.release_unis(|_| {});
 	}
 
 	/// Deliver only the newest held uni stream, and keep holding the rest. Returns how
 	/// many are still held.
 	pub fn release_newest_uni(&self) -> usize {
-		let mut held = self.side.held.lock().unwrap();
+		let link = &self.side.out;
+		link.settle();
+		let mut held = link.held_uni.lock().unwrap();
 		let held = held.as_mut().expect("not holding");
 		if let Some(stream) = held.pop() {
-			let _ = self.side.peer_uni.try_push(stream);
+			let _ = link.ready_uni.try_push(stream);
 		}
 		held.len()
 	}
 
 	/// Deliver the held uni streams newest first, and stop holding.
 	pub fn release_unis_reversed(&self) {
-		for stream in self
-			.side
-			.held
-			.lock()
-			.unwrap()
-			.take()
-			.unwrap_or_default()
-			.into_iter()
-			.rev()
-		{
-			let _ = self.side.peer_uni.try_push(stream);
-		}
+		self.side.out.release_unis(|held| held.reverse());
 	}
 
 	/// Deliver the held uni streams highest send order first, as a congested sender
 	/// would transmit them, and stop holding. Equal send orders keep their open order.
 	pub fn release_unis_by_priority(&self) {
-		let mut held = self.side.held.lock().unwrap().take().unwrap_or_default();
-		held.sort_by_key(|stream| std::cmp::Reverse(stream.priority.load(Ordering::Relaxed)));
-		for stream in held {
-			let _ = self.side.peer_uni.try_push(stream);
-		}
+		self.side.out.release_unis(|held| {
+			held.sort_by_key(|(_, line)| std::cmp::Reverse(line.priority.load(Ordering::Relaxed)))
+		});
 	}
 
 	/// Lose the held uni streams, as if each were reset before its header arrived, and
 	/// stop holding.
 	pub fn drop_unis(&self) {
-		self.side.held.lock().unwrap().take();
+		self.side.out.release_unis(|held| held.clear());
 	}
 
 	/// Hold back the bidi streams this side opens from now on, until
 	/// [`Self::release_bidis`]: QUIC does not order streams, so the peer may see a later
 	/// stream's data before an earlier stream arrives at all.
 	pub fn hold_bidis(&self) {
-		self.side.held_bidis.lock().unwrap().get_or_insert_default();
+		self.side.out.held_bi.lock().unwrap().get_or_insert_default();
 	}
 
 	/// Deliver the held bidi streams to the peer in the order they were opened, and stop
 	/// holding.
 	pub fn release_bidis(&self) {
-		for stream in self.side.held_bidis.lock().unwrap().take().unwrap_or_default() {
-			let _ = self.side.peer_bidi.try_push(stream);
+		let link = &self.side.out;
+		link.settle();
+		for stream in link.held_bi.lock().unwrap().take().unwrap_or_default() {
+			let _ = link.ready_bi.try_push(stream);
 		}
 	}
 
 	/// Park every uni stream this side opens from now on, like a peer that has granted
 	/// no more stream credit.
 	pub fn withhold_unis(&self) {
-		*self.side.withheld.lock().unwrap() = true;
+		self.side.withheld.store(true, Ordering::Relaxed);
 	}
 
 	/// Deliver only the first write of each uni stream this side opens from now on, holding
@@ -790,19 +733,19 @@ impl MockSession {
 	/// so the header lands before the group's first frame, as QUIC may split them across
 	/// packets.
 	pub fn split_unis(&self) {
-		*self.side.split.lock().unwrap() = Some(Arc::default());
+		*self.side.out.split.lock().unwrap() = Some(Arc::default());
 	}
 
 	/// Deliver what [`Self::split_unis`] held, and stop splitting.
 	pub fn release_split(&self) {
-		if let Some(split) = self.side.split.lock().unwrap().take() {
+		if let Some(split) = self.side.out.split.lock().unwrap().take() {
 			*split.lock() = true;
 		}
 	}
 
 	/// Lose every datagram this side sends from now on.
 	pub fn lose_datagrams(&self) {
-		*self.side.lossy.lock().unwrap() = true;
+		self.side.lossy.store(true, Ordering::Relaxed);
 	}
 
 	/// Delay stream data and STOP_SENDING sent from now on by `latency` in each direction,
@@ -811,33 +754,25 @@ impl MockSession {
 	pub fn set_latency(&self, latency: Duration) {
 		*self.side.conn.latency.lock().unwrap() = latency;
 	}
-}
 
-impl MockSession {
 	/// The code and reason the connection was closed with, once either side closed it.
-	// Only some test binaries inspect the reason.
-	#[allow(dead_code)]
 	pub fn close_reason(&self) -> Option<(u32, String)> {
-		self.side.conn.close_state.read().clone()
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		match poll::Session::poll_closed(&mut self.inner.clone(), &mut cx) {
+			Poll::Ready(err) => moq_net::transport::Error::session_error(&err),
+			Poll::Pending => None,
+		}
 	}
 
 	/// The first byte, the stream type, of every bidi stream this side has written to,
 	/// in the order each was first written.
-	// Only some test binaries inspect the types.
-	#[allow(dead_code)]
 	pub fn bidi_types(&self) -> Vec<u8> {
 		self.side.bidi_types.lock().unwrap().clone()
 	}
 
 	/// Every code this side has reset a stream with, in order.
-	// Only some test binaries inspect the codes.
-	#[allow(dead_code)]
 	pub fn resets(&self) -> Vec<u32> {
 		self.side.resets.lock().unwrap().clone()
-	}
-
-	fn close_error(&self) -> MockError {
-		self.side.conn.error().unwrap_or_else(MockError::closed)
 	}
 }
 
@@ -850,72 +785,36 @@ impl MockSession {
 /// [`moq_net::transport::poll::Session::protocol`], matching ALPN negotiation
 /// behavior.
 pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession, MockSession) {
-	let conn = Arc::new(ConnectionState::default());
+	let mut config = memory::Config::default();
+	config.protocol = protocol.map(str::to_string);
+	let (client, server) = memory::pair(config);
 
-	// Queues for client -> server and server -> client stream delivery.
-	let c2s_bidi = kio::Queue::new();
-	let c2s_uni = kio::Queue::new();
-	let s2c_bidi = kio::Queue::new();
-	let s2c_uni = kio::Queue::new();
-	let c2s_datagrams = kio::Queue::new();
-	let s2c_datagrams = kio::Queue::new();
-	let client_resets = Resets::default();
-	let server_resets = Resets::default();
+	let conn = Arc::new(Conn::default());
+	let to_server = Arc::new(Link::new(server.clone()));
+	let to_client = Arc::new(Link::new(client.clone()));
 
-	let client_side = Arc::new(SessionSide {
-		bidi: s2c_bidi.clone(),
-		uni: s2c_uni.clone(),
-		peer_bidi: c2s_bidi.clone(),
-		peer_uni: c2s_uni.clone(),
-		datagrams: s2c_datagrams.clone(),
-		peer_datagrams: c2s_datagrams.clone(),
-		protocol,
-		conn: conn.clone(),
-		resets: client_resets.clone(),
-		peer_resets: server_resets.clone(),
-		held: Mutex::default(),
-		held_bidis: Mutex::default(),
-		withheld: Mutex::default(),
-		split: Mutex::default(),
-		lossy: Mutex::default(),
-		withhold_bidi_fins: Arc::default(),
-		bidi_types: StreamTypes::default(),
-		stats: Mutex::default(),
-		stats_reads: AtomicUsize::default(),
-		panic_on_stats: AtomicBool::default(),
-	});
-
-	let server_side = Arc::new(SessionSide {
-		bidi: c2s_bidi,
-		uni: c2s_uni,
-		peer_bidi: s2c_bidi,
-		peer_uni: s2c_uni,
-		datagrams: c2s_datagrams,
-		peer_datagrams: s2c_datagrams,
-		protocol,
-		conn,
-		resets: server_resets,
-		peer_resets: client_resets,
-		held: Mutex::default(),
-		held_bidis: Mutex::default(),
-		withheld: Mutex::default(),
-		split: Mutex::default(),
-		lossy: Mutex::default(),
-		withhold_bidi_fins: Arc::default(),
-		bidi_types: StreamTypes::default(),
-		stats: Mutex::default(),
-		stats_reads: AtomicUsize::default(),
-		panic_on_stats: AtomicBool::default(),
-	});
-
-	let new = |side| MockSession {
-		side,
-		accept_uni: kio::Park::default(),
-		accept_bi: kio::Park::default(),
-		datagram: kio::Park::default(),
-		closed: kio::Park::default(),
-		open_uni: kio::Park::default(),
+	let side = |inner: memory::Session, out: &Arc<Link>, inc: &Arc<Link>| MockSession {
+		closer: inner.clone(),
+		inner,
+		side: Arc::new(Side {
+			conn: conn.clone(),
+			out: out.clone(),
+			inc: inc.clone(),
+			withheld: Default::default(),
+			lossy: Default::default(),
+			withhold_bidi_fins: Default::default(),
+			bidi_types: Default::default(),
+			resets: Default::default(),
+			stats: Default::default(),
+			stats_reads: Default::default(),
+			panic_on_stats: Default::default(),
+		}),
+		accept_uni: Default::default(),
+		accept_bi: Default::default(),
 	};
 
-	(new(client_side), new(server_side))
+	(
+		side(client, &to_server, &to_client),
+		side(server, &to_client, &to_server),
+	)
 }

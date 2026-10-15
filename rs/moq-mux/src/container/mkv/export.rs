@@ -218,7 +218,8 @@ impl<S: Stream> Export<S> {
 
 	/// Release frames a fixed delay after their decode time, dropping late frames.
 	///
-	/// The same delay bounds each source's staleness. Zero (the default) releases each frame as
+	/// A source whose clock runs further off ours than the output's may follow fails the export
+	/// once it has used half the delay. The same delay bounds each source's staleness. Zero (the default) releases each frame as
 	/// soon as it is read and drops none as late, but a stalled group is still skipped once a
 	/// newer one is ready.
 	pub fn with_delay(mut self, delay: Duration) -> Self {

@@ -55,6 +55,5 @@ packet-lifetime comments inline; no new user guide is needed.
 ## Related
 
 - [Switch](/quest/m1/quic/fork/switch.md) - not a blocker: the core and its BBR3 are already in `rs/moq-quic`
-- [BBR starvation edges](/quest/m1/quic/bbr-app-limited-edges.md) - also edits `bbr3/mod.rs`; one owner there at a time
 - [Benchmark reporting](/bench/README.md) - reusable measurement guidance, not a prerequisite for this fix
 - [Loss sampling](/quest/m2/quic-bbr-loss-parity.md) - preserve packet metadata needed by the separate loss-sample repair; both edit `bbr3/mod.rs`, so sequence them

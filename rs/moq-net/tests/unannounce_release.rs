@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A relay reading a broadcast that its publisher unannounced still cancels its upstream
 //! subscription once its last reader leaves, so the publisher's demand goes unused.
 
