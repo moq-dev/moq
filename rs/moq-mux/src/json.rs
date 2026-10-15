@@ -600,9 +600,10 @@ mod test {
 		full.finish().unwrap();
 		delta.finish().unwrap();
 
-		// Untimed groups have no age budget to skip them: ratio 0 gives each value its
-		// own group, while the positive ratio appends a delta to the first group.
-		assert_eq!(ready_groups(&mut full_track), vec![1, 1]);
+		// The default subscription budget keeps only the latest group, aging untimed groups by
+		// wall clock. Ratio 0 rolled a new group for the second value, so that group holds one
+		// frame. A positive ratio appends the second value to the same group.
+		assert_eq!(ready_groups(&mut full_track), vec![1]);
 		assert_eq!(ready_groups(&mut delta_track), vec![2]);
 	}
 
