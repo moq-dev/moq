@@ -147,6 +147,12 @@ freshness before coding:
   whose issuer-qualified subject differs from that of the session's current
   grants. The receiver derives the key from the token it verified, so no wire
   change.
+- ✅ Decided 2026-10-15 (maintainer): retract and re-file when a session's
+  grant union crosses the scoped boundary in either direction (a `**` token
+  added, or its expiry). Every forwarded route the session delivered is
+  retracted, and its current advertisements are re-filed under the new key,
+  so no route, feasibility distance, or alias stays under the old one.
+  Expiry cannot be refused, so refusing the transition was not an option.
 - Decided 2026-10-14: qualified keys carry a marker every relay recognizes,
   and a scoped connection forwarding an already qualified identity has that
   route refused, with no wire change. Otherwise a key sent down through a
@@ -308,13 +314,6 @@ Open, for the implementer to settle and record:
   open: [Next-hop handoff](/quest/m1/cluster-routing/handoff.md) settles it
   with deterministic acceptance tests before the wire is written.
 - How much of today's route trie, fronts, and `route_order` survives intact.
-- What happens when a session's grant union crosses the scoped boundary: a
-  `**` token added makes its forwarded identities bare, and that token
-  expiring makes them qualified again, so routes, feasibility distances, and
-  aliases filed under the old key go stale. Expiry cannot be refused.
-  Recommended: treat a crossing as retracting every forwarded route the
-  session delivered and re-filing its current advertisements under the new key, with
-  fixtures in both directions. Settle with the maintainer before coding.
 
 The #4349 counterexamples are the `residual_*` tests in
 `rs/moq-net/tests/mesh_withdraw.rs`. They pin today's hunting on lite-06:
@@ -351,7 +350,8 @@ Tiered-cluster and partition/healing end-to-end checks belong in this quest,
 not after lite-07 can be finalized: two regions with redundant cores, publish,
 claim withdrawal, core loss, and matching-epoch failover reaching a far edge;
 a two-uplink mesh reached through CDN during partition. Include overlapping
-wildcards, a hidden exportable alternative under one selection, and epochless Restart. Fixtures are
+wildcards, a hidden exportable alternative under one selection, epochless Restart, and a
+grant union crossing the scoped boundary each way (a `**` token added, then expiring). Fixtures are
 public and time-mocked, wired into CI alongside Rust/JS interop.
 
 Benchmark origins, broadcasts per origin, neighbors, active tracks/fronts,
