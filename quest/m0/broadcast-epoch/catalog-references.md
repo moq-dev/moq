@@ -87,6 +87,5 @@ guarantee and the selected legacy best-effort behavior.
 - [Source pin](https://github.com/moq-dev/moq/pull/5252) - exporters share their resolved catalog handle
 - [JS consume identity](https://github.com/moq-dev/moq/pull/5254) - JS resolves the actual serving identity
 - [Retired requests](https://github.com/moq-dev/moq/pull/5294) - held handles cannot emit unpinned requests after retirement
-- [JS identity enforcement](/quest/m1/catalog-identity-js.md) - catalog updates cannot redefine a track's content in `@moq/publish`
 - [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - the same for the Rust publishers
 - [IETF epochs](/quest/m1/ietf-epochs.md) - verified catalog identity over negotiated IETF sessions

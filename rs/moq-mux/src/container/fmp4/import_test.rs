@@ -737,6 +737,7 @@ fn opus_catalog_uses_the_decode_rate() {
 	let catalog = run_fmp4(&data);
 	let a = catalog.audio.renditions.values().next().expect("opus rendition");
 	assert_eq!(a.sample_rate, 48_000);
+	assert_eq!(a.warmup, Some(std::time::Duration::from_millis(80)));
 }
 
 /// A dOps with a channel mapping table is refused rather than imported without it.

@@ -1347,8 +1347,10 @@ mod tests {
 				subscription_request_id: Some(target_id),
 				start_location: ietf::Location { group: 1, object: 2 },
 				end_group: 100,
-				subscriber_priority: 200,
-				forward: false,
+				subscriber_priority: Some(200),
+				forward: Some(false),
+				filter: Some(ietf::Filter::NextObject),
+				authorization_token: None,
 			};
 			let body = encode_body(&update, version);
 			let raw = encode_raw(ietf::SubscribeUpdate::ID, &body, version);
@@ -1519,6 +1521,7 @@ mod tests {
 			request_id,
 			track_namespace: crate::Path::new(namespace),
 			cluster: None,
+			authorization_token: None,
 		}
 	}
 
@@ -1880,8 +1883,10 @@ mod tests {
 			subscription_request_id: Some(RequestId(0)),
 			start_location: ietf::Location { group: 0, object: 0 },
 			end_group: 0,
-			subscriber_priority: 1,
-			forward: true,
+			subscriber_priority: Some(1),
+			forward: Some(true),
+			filter: Some(ietf::Filter::NextObject),
+			authorization_token: None,
 		};
 		let update = encode_raw(ietf::SubscribeUpdate::ID, &encode_body(&update, VERSION), VERSION);
 		// The target is in the window and the update's own ID is past it.
