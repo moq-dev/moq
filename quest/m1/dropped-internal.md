@@ -28,6 +28,11 @@ Decided with the maintainer on 2026-10-13:
     (an existing `Dropped` -> `Closed` remap shows the intent), and a copy
     closed while its completion is still pending.
   - `Action::Forget` in `model/origin.rs` ends with `Cancel`; we chose to stop.
+  - `moq import` failures: the stdin decode error path in
+    `rs/moq-cli/src/publish.rs` and `Programs::abort` in
+    `rs/moq-mux/src/container/ts/programs.rs` drop their catalog producers,
+    so catalog subscribers see `Dropped` instead of the import's error.
+    `catalog::Producer` has no public abort yet, and they need one.
   - The `moq-transcode` rung whose source closes while idle passes on the
     source's own end, or `Cancel` if it ended cleanly.
 - Use existing variants; no new public variant.
@@ -48,7 +53,8 @@ Decided with the maintainer on 2026-10-13:
 - Guard with tests only: one regression test per fixed site asserting the
   specific error. No runtime check on the refcount fallback.
 
-Public API: none; error values consumers observe change. Wire: no new wire
+Public API: adds `abort` to `moq_mux::catalog::Producer` for the import
+failure paths; error values consumers observe change. Wire: no new wire
 format or codes, though replacing `Dropped` with `Cancel` or `Closed` can
 change which existing codes are emitted.
 

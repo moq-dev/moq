@@ -70,7 +70,9 @@ impl<T: Serialize> Producer<T> {
 	/// A record that might not fit in what is left of the group's budget is refused with
 	/// [`moq_net::Error::GroupTooLarge`] before anything is written, leaving the log intact. The
 	/// budget covers the whole log, so once it is spent every append is refused; a publisher with
-	/// more to say opens a new track.
+	/// more to say opens a new track. A timestamp whose presence doesn't match the track's timescale
+	/// is refused with [`moq_net::Error::TimestampMismatch`] the same way, so a corrected append
+	/// carries on.
 	///
 	/// Any other failure ends the track. A log missing a record is not the lossless log a stream
 	/// promises, and that holds whether the group rejected the record or it never encoded at all, so
@@ -107,6 +109,12 @@ impl<T: Serialize> Inner<T> {
 		// Split the borrow so `record` can hold the encoder while `track` is written through.
 		let Inner { track, encoder } = self;
 
+		// A timestamp that doesn't match the track is refused before anything changes: found by
+		// `write`, it would be a hole that ends the whole log.
+		if payload.at.is_some() != track.inner.info().timescale.is_some() {
+			return Err(moq_net::Error::TimestampMismatch.into());
+		}
+
 		// Encode first, so a value that can't be serialized doesn't publish an empty group that
 		// subscribers would advance into and wait on. Opening the group afterwards is safe because
 		// `record` guards the window: any failure below drops it uncommitted.
@@ -126,7 +134,7 @@ impl<T: Serialize> Inner<T> {
 		let opened = track.open();
 		let published = opened.is_ok();
 		let result = match opened {
-			Ok(()) => track.write(payload.at.unwrap_or_else(moq_net::Timestamp::now), record.payload()),
+			Ok(()) => track.write(payload.at, record.payload()),
 			Err(err) => Err(err),
 		};
 
@@ -182,7 +190,7 @@ impl Track {
 	/// Append one encoded record to the log's group at `timestamp`.
 	fn write(
 		&mut self,
-		timestamp: moq_net::Timestamp,
+		timestamp: Option<moq_net::Timestamp>,
 		payload: &bytes::Bytes,
 	) -> std::result::Result<(), moq_net::Error> {
 		let group = self.group.as_mut().expect("a group is open");

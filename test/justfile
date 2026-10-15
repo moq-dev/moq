@@ -46,8 +46,10 @@ interop *args:
 
 # Nightly main vs newest installable registry releases: tokens, moq-lite session
 # versions, decoded catalogs/containers, and group FETCH. See interop/README.md.
-wire-compat:
-    ./interop/compat.sh
+# --remeasure also runs the planned breaks and rewrites them, as each release does.
+[positional-arguments]
+wire-compat *args:
+    ./interop/compat.sh "$@"
 
 # Paint a short-side transcode rung from a coded portrait through moq-watch.
 portrait:

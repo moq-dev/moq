@@ -84,16 +84,33 @@ export class PublishNamespaceUpdate {
 
 	/** The update's own Request ID; every REQUEST_UPDATE consumes one. */
 	requestId: bigint;
+	/** Draft-16 only: the PUBLISH_NAMESPACE this updates, which later drafts name by stream. */
+	namespaceRequestId?: bigint;
 	update: Cluster.Update;
 
-	constructor({ requestId, update }: { requestId: bigint; update: Cluster.Update }) {
+	constructor({
+		requestId,
+		namespaceRequestId,
+		update,
+	}: {
+		requestId: bigint;
+		namespaceRequestId?: bigint;
+		update: Cluster.Update;
+	}) {
 		this.requestId = requestId;
+		this.namespaceRequestId = namespaceRequestId;
 		this.update = update;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
-		PublishNamespaceUpdate.#modern(version);
+		PublishNamespaceUpdate.#supported(version);
 		await w.u62(this.requestId);
+		if (version === Version.DRAFT_16) {
+			if (this.namespaceRequestId === undefined) {
+				throw new Error("a draft-16 REQUEST_UPDATE names its PUBLISH_NAMESPACE");
+			}
+			await w.u62(this.namespaceRequestId);
+		}
 		if (version === Version.DRAFT_17) {
 			await w.u62(0n); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
 		}
@@ -128,20 +145,21 @@ export class PublishNamespaceUpdate {
 		}
 	}
 
-	static #modern(version: IetfVersion) {
-		if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
-			throw new Error("REQUEST_UPDATE on PUBLISH_NAMESPACE requires draft-17+");
+	static #supported(version: IetfVersion) {
+		if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
+			throw new Error("REQUEST_UPDATE on PUBLISH_NAMESPACE requires draft-16+");
 		}
 	}
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<PublishNamespaceUpdate> {
-		PublishNamespaceUpdate.#modern(version);
+		PublishNamespaceUpdate.#supported(version);
 		const requestId = await r.u62();
+		const namespaceRequestId = version === Version.DRAFT_16 ? await r.u62() : undefined;
 		if (version === Version.DRAFT_17) {
 			await r.u62(); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
 		}
 		const params = await Parameters.decode(r, version, "publish-namespace");
-		return new PublishNamespaceUpdate({ requestId, update: Cluster.updateFromParams(params) });
+		return new PublishNamespaceUpdate({ requestId, namespaceRequestId, update: Cluster.updateFromParams(params) });
 	}
 }
 

@@ -1479,3 +1479,48 @@ test("a refused first ceiling recovers at a smaller size", async () => {
 		error.mockRestore();
 	}
 });
+
+// A decoder follows a resize in band, so outgrowing the advertised size re-probes for a codec that
+// covers it and updates the served track in place while the codec string holds. A shrink stays in band.
+test("ceiling growth updates the served track in place", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+	using _probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockResolvedValue({ supported: true });
+	using _now = spyOn(performance, "now").mockReturnValue(0);
+	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("ceiling.hang") });
+	const capture = {
+		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
+		out: { display: new Signal({ width: 640, height: 480 }), frames: new Signal(undefined) },
+	};
+	const encoder = new Encoder("video", { broadcast, capture: capture as never, config: { frameRate: 60 } });
+	const net = broadcast.net.peek() ?? (await broadcast.net.changed());
+	if (!net) throw new Error("expected a network broadcast");
+	const subscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
+	const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: subscriber });
+	const next = async (done: (config: Catalog.VideoConfig) => boolean) => {
+		for (;;) {
+			const config = (await catalog.latest())?.value.video?.renditions.video;
+			if (config && done(config)) return config;
+		}
+	};
+	try {
+		const initial = await next(() => true);
+		expect(initial).toMatchObject({ codedWidth: 640, codedHeight: 480, framerate: 60 });
+		expect(initial.track).toBeUndefined();
+
+		capture.out.display.set({ width: 320, height: 240 });
+		encoder.config.set({ frameRate: 15 });
+		let live = encoder.out.resolved.peek();
+		while (live?.width !== 320 || live.framerate !== 15) live = await encoder.out.resolved.changed();
+		expect(encoder.out.catalog.peek()).toMatchObject({ codedWidth: 640, codedHeight: 480, framerate: 60 });
+
+		capture.out.display.set({ width: 1280, height: 720 });
+		const grown = await next((config) => config.codedWidth === 1280);
+		expect(grown).toMatchObject({ codec: initial.codec, codedHeight: 720, framerate: 60 });
+		expect(grown.track).toBeUndefined();
+		expect(broadcast.net.peek()).toBe(net);
+	} finally {
+		subscriber.close();
+		encoder.close();
+		broadcast.close();
+	}
+});
