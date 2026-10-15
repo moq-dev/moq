@@ -3787,7 +3787,7 @@ where
 				producer.start_at(resume.frame)?;
 			}
 			let keep = *next >= producer.frame_count() as u64;
-			if !self
+			if self
 				.recv_fetch_payload(
 					stream,
 					producer,
@@ -3798,7 +3798,7 @@ where
 						id,
 					},
 				)
-				.await?
+				.await? != Fetched::Frame
 			{
 				return Err(Error::Unsupported);
 			}
@@ -3810,15 +3810,12 @@ where
 
 	/// Read one fetch object's length and payload into `producer`, after its header, or
 	/// past it unless `keep`.
-	///
-	/// Returns `false` for a draft-14 or 15 end-of-group or end-of-track marker, which
-	/// is a status rather than a frame.
 	async fn recv_fetch_payload(
 		&self,
 		stream: &mut Reader<S::RecvStream, Version>,
 		producer: &mut group::Producer,
 		payload: FetchPayload,
-	) -> Result<bool, Error> {
+	) -> Result<Fetched, Error> {
 		let FetchPayload {
 			decoded,
 			timescale,
@@ -3839,16 +3836,16 @@ where
 							properties: decoded.properties,
 						})?;
 					}
-					return Ok(false);
+					return Ok(Fetched::EndOfGroup);
 				}
-				END_OF_TRACK => return Ok(false),
+				END_OF_TRACK => return Ok(Fetched::EndOfTrack),
 				_ => return Err(Error::Unsupported),
 			}
 		}
 		if !keep {
 			let mut remaining = usize::try_from(size).map_err(|_| Error::FrameTooLarge)?;
 			std::future::poll_fn(|cx| stream.poll_skip(cx, &mut remaining)).await?;
-			return Ok(true);
+			return Ok(Fetched::Frame);
 		}
 		let timestamp = object_time(timescale, decoded.timestamp)?;
 		let plain = id == producer.frame_count() as u64
@@ -3870,7 +3867,7 @@ where
 			return Err(err);
 		}
 		frame.finish()?;
-		Ok(true)
+		Ok(Fetched::Frame)
 	}
 
 	/// Fetch a group from the publisher to fill a cache miss, with a standalone (or
@@ -4316,8 +4313,13 @@ where
 				)
 				.await?
 			{
-				true => next = id.checked_add(1).ok_or(Error::ProtocolViolation)?,
-				false => ended = true,
+				Fetched::Frame => next = id.checked_add(1).ok_or(Error::ProtocolViolation)?,
+				// The status is an object of the group, so the End Location counts it.
+				Fetched::EndOfGroup => {
+					next = id.checked_add(1).ok_or(Error::ProtocolViolation)?;
+					ended = true;
+				}
+				Fetched::EndOfTrack => ended = true,
 			}
 			if end.is_some_and(|end| next > end) {
 				tracing::warn!(sequence, ?end, "a group fetch continued past FETCH_OK's End Location");
@@ -4340,6 +4342,16 @@ where
 
 		Ok(())
 	}
+}
+
+/// What a fetch object carried.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fetched {
+	Frame,
+	/// A draft-14 or 15 END_OF_GROUP status object.
+	EndOfGroup,
+	/// A draft-14 or 15 END_OF_TRACK marker.
+	EndOfTrack,
 }
 
 struct FetchPayload {
@@ -8777,10 +8789,11 @@ mod stitch_tests {
 		}
 	}
 
-	/// A relayed END_OF_GROUP object ends the fetched group, and drafts 14 and 15 carry it.
+	/// Drafts 14 and 15 carry a relayed END_OF_GROUP object through FETCH, and the next
+	/// relay fills its cache from that answer. Later drafts end the answer at the last frame.
 	#[moq_net_sim::test]
 	async fn passthrough_fetch_keeps_the_end_of_group_object() {
-		for version in [Version::Draft15, Version::Draft22] {
+		for version in [Version::Draft15, Version::Draft16, Version::Draft17, Version::Draft22] {
 			let objects = [
 				(6, &[0x3e, 6][..], None),
 				(8, &[0x3e, 1][..], None),
@@ -8788,31 +8801,47 @@ mod stitch_tests {
 			];
 			let script = object_stream(version, true, &objects);
 			let (bytes, log) = relay_passthrough(script, version, version, Some((0, 12))).await;
+			assert!(log.resets().is_empty());
 			let mut decoder = Decoder::new(&bytes, version.into());
 			assert_eq!(decoder.varint().unwrap(), ietf::FetchOk::ID, "{version}");
 			let ok = ietf::FetchOk::decode(&mut decoder, version).unwrap();
-			let last = if Filter::is_draft20(version) { 11 } else { 12 };
+			let carried = version == Version::Draft15;
+			let last = match () {
+				_ if carried => 12,
+				_ if Filter::is_draft20(version) => 8,
+				_ => 9,
+			};
 			assert_eq!(ok.end_location.object, last, "{version}");
 			assert_eq!(decoder.varint().unwrap(), ietf::FetchHeader::TYPE);
 			ietf::FetchHeader::decode(&mut decoder, version).unwrap();
-			for _ in [6, 8] {
-				ietf::FetchObject::decode(&mut decoder, version).unwrap();
-				assert_eq!(decoder.varint().unwrap(), 1);
-				assert_eq!(decoder.slice(1).unwrap(), &[99]);
+
+			// The next relay reads the same objects into its cache, up to the same end.
+			let end = last + u64::from(Filter::is_draft20(version));
+			let mut run = GroupFetchRun::new(version, decoder.rest().to_vec()).await;
+			let mut producer = run.track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
+			run.subscriber
+				.recv_group_fetch_objects(&mut run.stream, &mut producer, 0, Some(end), None)
+				.await
+				.unwrap_or_else(|err| panic!("{version}: {err}"));
+			producer.finish().unwrap();
+			let mut reader = producer.consume();
+			for id in [6, 8] {
+				let frame = kio::wait(|waiter| reader.poll_read_object(waiter))
+					.await
+					.unwrap()
+					.unwrap();
+				assert_eq!(frame.fields.as_ref().unwrap().id, id, "{version}");
 			}
-			if version == Version::Draft15 {
-				let ietf::FetchObject::Object { object, properties, .. } =
-					ietf::FetchObject::decode(&mut decoder, version).unwrap()
-				else {
-					panic!("status object");
-				};
-				assert_eq!(object, Some(11));
-				assert_eq!(properties.as_deref(), Some(&[0x3e, 2][..]));
-				assert_eq!(decoder.varint().unwrap(), 0);
-				assert_eq!(decoder.varint().unwrap(), END_OF_GROUP);
+			assert!(reader.read_frame().await.unwrap().is_none());
+			let end_object = reader.end_object();
+			assert_eq!(
+				end_object.as_ref().map(|end| end.id),
+				carried.then_some(11),
+				"{version}"
+			);
+			if let Some(end) = end_object {
+				assert_eq!(end.properties.values[0].id, 0x3e);
 			}
-			assert!(decoder.is_empty(), "{version}");
-			assert!(log.resets().is_empty());
 		}
 	}
 

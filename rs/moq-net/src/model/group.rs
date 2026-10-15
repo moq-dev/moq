@@ -1680,6 +1680,8 @@ impl Consumer {
 					// The refusal stays: a batch that already holds frames swallows one error.
 					if self.adopted {
 						if self.cursor.state.read().sparse() {
+							// `read_frame` pops prefetched frames without coming back here.
+							self.cursor.prefetch = Prefetch::default();
 							return Poll::Ready(Err(Error::Unsupported));
 						}
 						self.adopted = false;

@@ -2263,28 +2263,35 @@ mod test {
 			Some(Err(Error::Unsupported))
 		));
 
-		// A batch holding the old copy's frame hides the refusal, but the next one sees it.
-		let routes = Producer::new();
-		let front = logical(&routes);
-		let a = copy();
-		routes.serve(a.consume());
-		let mut sub = subscribe(&front, Duration::from_secs(10));
-		let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
-		open.write_frame(ts(0), b"a".as_ref()).unwrap();
-		let mut reading = recv(&mut sub);
-		let b = joined_past_a_gap(&[(6, b"x"), (7, b"y"), (8, b"z")]);
-		routes.serve(b.consume());
-		let mut batch = crate::frame::Buffer::<4>::new();
-		let waiter = kio::Waiter::noop();
-		assert!(matches!(
-			reading.poll_read_frames(&waiter, &mut batch),
-			Poll::Ready(Ok(1))
-		));
-		assert_eq!(&batch.filled_mut()[0].payload[..], b"a");
-		assert!(matches!(
-			reading.poll_read_frames(&waiter, &mut batch),
-			Poll::Ready(Err(Error::Unsupported))
-		));
+		// A batch holding the old copy's frame hides the refusal, but the next read sees it,
+		// whether a batch or a single frame served from what that batch prefetched.
+		for single in [false, true] {
+			let routes = Producer::new();
+			let front = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&front, Duration::from_secs(10));
+			let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+			open.write_frame(ts(0), b"a".as_ref()).unwrap();
+			let mut reading = recv(&mut sub);
+			let b = joined_past_a_gap(&[(6, b"x"), (7, b"y"), (8, b"z")]);
+			routes.serve(b.consume());
+			let mut batch = crate::frame::Buffer::<4>::new();
+			let waiter = kio::Waiter::noop();
+			assert!(matches!(
+				reading.poll_read_frames(&waiter, &mut batch),
+				Poll::Ready(Ok(1))
+			));
+			assert_eq!(&batch.filled_mut()[0].payload[..], b"a");
+			let next = match single {
+				true => reading.read_frame().now_or_never().unwrap().map(|_| ()),
+				false => match reading.poll_read_frames(&waiter, &mut batch) {
+					Poll::Ready(res) => res.map(|_| ()),
+					Poll::Pending => panic!("the batch parked"),
+				},
+			};
+			assert!(matches!(next, Err(Error::Unsupported)), "single={single}");
+		}
 	}
 
 	#[test]

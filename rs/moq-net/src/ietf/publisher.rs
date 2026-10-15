@@ -1777,11 +1777,16 @@ where
 			})
 			.await
 		};
-		let group = match group {
+		let mut group = match group {
 			Some(Ok(group)) => group,
 			Some(Err(err)) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
 			None => return Ok(()),
 		};
+		// Only draft-14 and 15 FETCH objects carry a status. Later drafts end the response at
+		// the last frame, which is all a receiver can account for.
+		if !matches!(self.version, Version::Draft14 | Version::Draft15) {
+			group.end_object = None;
+		}
 		// FETCH keeps each object's Timestamp, in the units FETCH_OK declares wherever the
 		// draft can declare them. Opting out of the properties strips nothing from the objects.
 		let timescale = group
@@ -1924,10 +1929,7 @@ where
 				.await?;
 				Self::write_fetch_payload(&mut writer, frame.frame.payload, self.version).await?;
 			}
-			// Only draft-14 and 15 FETCH objects carry a status; later drafts imply the end.
-			if let Some(end) = group.end_object.as_deref()
-				&& matches!(self.version, Version::Draft14 | Version::Draft15)
-			{
+			if let Some(end) = group.end_object.as_deref() {
 				Self::write_fetch_object(
 					&mut writer,
 					FetchObjectInfo {
