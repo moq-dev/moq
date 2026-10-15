@@ -13,8 +13,9 @@ OBS Studio install.
 - **Dock**: a **MoQ** dock with Go Live, encoding that uses the OBS Output settings or custom settings for this stream only, and live stats (RTT, bandwidth, loss).
 
 Each Start Streaming publishes a fresh epoch, shown in the dock's Stats tab.
-Reconnects keep the same epoch. Peers using an epoch-capable protocol see a
-stop/start as a new publisher run.
+The client's automatic reconnects keep the same epoch. A stop/start, or an OBS
+auto-reconnect after the client gives up, republishes the broadcast under a new
+epoch, which peers using an epoch-capable protocol see as a new publisher run.
 
 MoQ Source follows catalog changes while keeping the current audio and video playing until a replacement produces decoded output. A failed replacement leaves the current rendition playing; removing a media kind from the catalog clears it.
 

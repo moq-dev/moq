@@ -58,7 +58,7 @@ public:
 	// Prefer this over obs_output_get_connect_time_ms, which stays 0 for sub-ms connects.
 	bool IsLiveSession();
 
-	// Publisher epoch of this Start(), retained through reconnects; empty when stopped.
+	// Publisher epoch of this Start(), retained through session reconnects; empty when stopped.
 	std::string GetEpoch();
 
 	// Most recent connect/reconnect failure for this Start(), or empty when none.
