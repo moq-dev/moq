@@ -719,7 +719,11 @@ async fn drain(
 	mut signals: Option<Signals>,
 ) -> anyhow::Result<()> {
 	let window = shutdown.drain_timeout;
+	// Biased: once the drain has started (startup consumed a queued signal, or
+	// the embedder fired the trigger), any signal left is the second one.
 	tokio::select! {
+		biased;
+		_ = shutdown.started() => tracing::info!(?window, "shutdown requested; draining sessions"),
 		() = Signals::recv_some(&mut signals) => {
 			tracing::info!(
 				?window,
@@ -727,7 +731,6 @@ async fn drain(
 			);
 			trigger.start();
 		}
-		_ = shutdown.started() => tracing::info!(?window, "shutdown requested; draining sessions"),
 	}
 
 	// The deadline fixed when the trigger fired, which may be earlier than this
@@ -860,6 +863,11 @@ async fn serve_listening(
 
 #[cfg(test)]
 mod tests {
+	/// Held by every test that raises a signal: it reaches each listener in the
+	/// process, and `cargo test` runs tests as threads of one.
+	#[cfg(unix)]
+	static SIGNALS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 	#[tokio::test(start_paused = true)]
 	async fn pending_handshake_cannot_extend_the_drain_deadline() {
 		use futures::FutureExt;
@@ -880,12 +888,10 @@ mod tests {
 	/// A signal caught before the drain first polls, such as one sent right after a
 	/// client counted its session established, still drains that session. The
 	/// default action would otherwise kill the process with no GOAWAY.
-	///
-	/// The raised SIGTERM reaches every listener in the process, and `cargo test`
-	/// runs tests as threads of one, so no other test here listens for signals.
 	#[cfg(unix)]
 	#[tokio::test(start_paused = true)]
 	async fn a_signal_before_the_drain_polls_starts_it() {
+		let _signals = SIGNALS.lock().await;
 		let (trigger, mut shutdown) = crate::shutdown::Observer::new(std::time::Duration::from_secs(10));
 		let session = shutdown.activity.enter().expect("admission open before the drain");
 		let signals = super::Signals::new().unwrap();
@@ -896,6 +902,36 @@ mod tests {
 		assert!(!draining.is_finished(), "drain ended under an established session");
 		drop(session);
 		draining.await.unwrap().unwrap();
+	}
+
+	/// A signal still queued once the drain has started (startup consumed the
+	/// first of two) is the second one, so the drain exits at once instead of
+	/// waiting out an open admission. Repeated because an unbiased wait would
+	/// take either arm.
+	#[cfg(unix)]
+	#[tokio::test(start_paused = true)]
+	async fn a_signal_left_after_startup_exits_at_once() {
+		let _signals = SIGNALS.lock().await;
+		for _ in 0..32 {
+			let (trigger, shutdown) = crate::shutdown::Observer::new(std::time::Duration::from_secs(10));
+			let _session = shutdown.activity.enter().expect("admission open before the drain");
+			let signals = super::Signals::new().unwrap();
+			// What the startup gate does with the first queued signal.
+			trigger.start();
+			let mut delivered = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+			// SAFETY: raise has no memory-safety preconditions.
+			assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0);
+			// Queued for `signals` too before the drain arms its deadline, which the
+			// paused clock would otherwise reach first.
+			delivered.recv().await;
+			let started = tokio::time::Instant::now();
+			super::drain(trigger, shutdown, Some(signals)).await.unwrap();
+			assert_eq!(
+				started.elapsed(),
+				std::time::Duration::ZERO,
+				"the second signal waited for the drain"
+			);
+		}
 	}
 
 	/// A stop requested before startup finishes is never reported as ready, and
