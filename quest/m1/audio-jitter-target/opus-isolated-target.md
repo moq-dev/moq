@@ -35,8 +35,6 @@ ceilings in `test/audio-quality/budgets.json` from re-measured nightly runs.
 
 Public API: none expected. Wire: none.
 
-## Investigation
-
 The 2026-10-15 ARM comparison still reproduces the defect with Opus warmup
 #5569 included. [The untraced controls](https://github.com/moq-dev/moq/actions/runs/38807783281)
 run `isolated,plain` and then `plain,isolated`, each in a fresh harness run.
