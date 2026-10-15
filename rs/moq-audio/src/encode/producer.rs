@@ -1282,4 +1282,28 @@ mod tests {
 		let second = Producer::new(&mut broadcast, catalog, Input::default(), &Options::default()).unwrap();
 		assert_eq!(second.track_name(), "1.opus");
 	}
+
+	/// The rendition a producer publishes is the encoder's own catalog, so neither can drift.
+	#[tokio::test]
+	async fn publishes_the_encoder_catalog() {
+		for codec in [crate::encode::Codec::Opus, crate::encode::Codec::Pcm] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let options = Options {
+				track: Some("audio".into()),
+				settings: Settings {
+					codec,
+					..Settings::default()
+				},
+				..Options::default()
+			};
+			let _producer = Producer::new(&mut broadcast, catalog.clone(), Input::default(), &options).unwrap();
+			let published = catalog.snapshot().audio.renditions.remove("audio").unwrap();
+			assert_eq!(
+				published,
+				Encoder::new(&options.settings).unwrap().catalog(),
+				"{codec:?}"
+			);
+		}
+	}
 }

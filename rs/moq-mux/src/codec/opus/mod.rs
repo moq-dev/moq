@@ -13,6 +13,9 @@ use bytes::{Buf, Bytes};
 
 const OPUS_HEAD: u64 = u64::from_be_bytes(*b"OpusHead");
 
+/// The decoder pre-roll a joining Opus viewer discards, per RFC 7845 section 4.6.
+pub const WARMUP: std::time::Duration = std::time::Duration::from_millis(80);
+
 /// Opus parsing errors.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]

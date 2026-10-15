@@ -656,8 +656,7 @@ impl Encoder {
 		config.description = self.description.clone();
 		config.container = hang::catalog::Container::Legacy;
 		if matches!(self.settings.codec, Codec::Opus) {
-			// RFC 7845 section 4.6: 80 ms of pre-roll converges an Opus decoder after a join.
-			config.warmup = Some(Duration::from_millis(80));
+			config.warmup = Some(moq_mux::codec::opus::WARMUP);
 		}
 		config
 	}

@@ -333,9 +333,9 @@ fn audio_config_from_msf(track: &moq_msf::Track) -> Result<Option<AudioConfig>> 
 	};
 
 	let mut config = AudioConfig::new(codec, sample_rate, channel_count);
-	// MSF cannot advertise decoder warmup, so derive Opus's 80 ms seek pre-roll.
+	// MSF cannot advertise decoder warmup, so derive Opus's seek pre-roll.
 	if matches!(config.codec, AudioCodec::Opus) {
-		config.warmup = Some(std::time::Duration::from_millis(80));
+		config.warmup = Some(crate::codec::opus::WARMUP);
 	}
 	config.bitrate = track.bitrate;
 	config.description = legacy_description(track)?;

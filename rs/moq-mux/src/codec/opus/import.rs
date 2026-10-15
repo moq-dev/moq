@@ -124,7 +124,7 @@ impl From<Config> for hang::catalog::AudioConfig {
 	/// informational input rate in [`Config::sample_rate`] claims.
 	fn from(config: Config) -> Self {
 		let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, config.channel_count);
-		audio.warmup = Some(std::time::Duration::from_millis(80));
+		audio.warmup = Some(super::WARMUP);
 		audio.description = config.encode().ok();
 		audio.container = hang::catalog::Container::Legacy;
 		audio
