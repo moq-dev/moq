@@ -390,9 +390,9 @@ impl Handle {
 	/// origin handles allow for the connection's credential, and refuses any other
 	/// token as unsupported, along with the request that carried it.
 	///
-	/// At most 128 unanswered tokens queue, not counting withdrawn ones; more are
-	/// refused with [`SessionError::TooManyRequests`] (`UNAUTHORIZED` on moq-transport,
-	/// whose AUTH_ERROR registry has no such code).
+	/// The peer's credit bounds how many tokens wait unanswered: each AUTH token holds its
+	/// stream open, and each request token holds its request's slot, until it is answered or
+	/// withdrawn. A withdrawn token leaves the queue.
 	///
 	/// # Errors
 	///
@@ -885,7 +885,7 @@ impl Drop for Requests {
 	}
 }
 
-/// Pending application decisions, bounded independently of transport stream credit.
+/// Pending application decisions, bounded by the stream and request credit each one holds.
 #[derive(Clone, Default)]
 pub(crate) struct Pending {
 	state: kio::Shared<PendingState>,
@@ -904,7 +904,7 @@ impl Pending {
 		state.requests.clear();
 	}
 
-	/// Queue the token for the application, or refuse it when closed or full.
+	/// Queue the token for the application, or refuse it when closed.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn push(&self, request: Request) {
 		let mut state = self.state.lock();
@@ -912,15 +912,9 @@ impl Pending {
 		if state.closed {
 			return;
 		}
-		// A withdrawn token must not occupy a slot while the acceptor is busy.
-		if state.requests.len() >= 128 {
-			state.requests.retain(|request| request.issue().read().peer.is_none());
-		}
-		if state.requests.len() >= 128 {
-			drop(state);
-			request.reject(SessionError::TooManyRequests, "too many pending tokens");
-			return;
-		}
+		// A withdrawn token gave its credit back, so it must not stay queued while the
+		// acceptor is busy: that would let a peer that keeps withdrawing grow the queue.
+		state.requests.retain(|request| request.issue().read().peer.is_none());
 		state.requests.push_back(request);
 	}
 
@@ -1682,61 +1676,41 @@ impl Enforce {
 mod tests {
 	use super::*;
 
+	/// A queued request token keeps its request's slot, so the peer's request credit bounds
+	/// how many wait; answering it gives the slot back.
 	#[test]
-	fn pending_tokens_are_bounded() {
+	fn a_queued_request_token_holds_its_slot() {
 		let handle = Handle::new(true);
-		let _requests = handle.requests().unwrap();
-		let queue = handle.acceptor().unwrap();
-		for _ in 0..128 {
-			queue.push(Request::new(Bytes::new(), Default::default()));
-		}
-		let overflow = kio::Shared::<Issue>::default();
-		queue.push(Request::new(Bytes::new(), overflow.clone()));
-		let overflow = overflow.lock();
-		assert!(overflow.done);
-		assert!(matches!(
-			overflow.outbox.front(),
-			Some(Reply::Refuse {
-				code: SessionError::TooManyRequests,
-				..
-			})
-		));
-	}
-
-	/// Request tokens share the session tokens' bound, so a full queue refuses one.
-	#[test]
-	fn a_full_queue_refuses_a_request_token() {
-		let handle = Handle::new(true);
-		let _requests = handle.requests().unwrap();
-		let queue = handle.acceptor().unwrap();
-		for _ in 0..128 {
-			queue.push(Request::new(Bytes::new(), Default::default()));
-		}
+		let mut requests = handle.requests().unwrap();
+		let slot: Hold = std::sync::Arc::new(());
 		let token = crate::setup::Token {
 			kind: crate::setup::Token::OUT_OF_BAND,
 			value: b"jwt".to_vec(),
 		};
-		let verdict = handle.verify_request(token, None);
-		assert!(matches!(
-			verdict.poll_grant(&kio::Waiter::noop()),
-			Poll::Ready(Err(Refusal {
-				error: Error::Session(SessionError::TooManyRequests),
-				..
-			}))
-		));
+		let _verdict = handle.verify_request(token, Some(slot.clone()));
+		assert_eq!(std::sync::Arc::strong_count(&slot), 2, "queued, the token holds the slot");
+		let Poll::Ready(Some(request)) = requests.poll_next(&kio::Waiter::noop()) else {
+			panic!("request token missing")
+		};
+		assert_eq!(std::sync::Arc::strong_count(&slot), 2, "taken, the token still holds the slot");
+		let _issued = request.accept(Grant::all());
+		assert_eq!(std::sync::Arc::strong_count(&slot), 1, "answered, the slot is released");
 	}
 
+	/// A withdrawn token leaves the queue on the next push, so a peer that keeps presenting and
+	/// withdrawing cannot grow it past what its credit holds open.
 	#[test]
-	fn withdrawn_tokens_do_not_occupy_pending_slots() {
+	fn withdrawn_tokens_leave_the_queue() {
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().unwrap();
 		let queue = handle.acceptor().unwrap();
-		let expired = kio::Shared::<Issue>::default();
-		for _ in 0..128 {
-			queue.push(Request::new(Bytes::from_static(b"withdrawn"), expired.clone()));
+		let withdrawn = kio::Shared::<Issue>::default();
+		for _ in 0..3 {
+			queue.push(Request::new(Bytes::from_static(b"withdrawn"), withdrawn.clone()));
 		}
-		expired.lock().peer = Some(Error::Cancel);
+		withdrawn.lock().peer = Some(Error::Cancel);
 		queue.push(Request::new(Bytes::from_static(b"live"), Default::default()));
+		assert_eq!(queue.state.read().requests.len(), 1, "only the live token stays queued");
 		let Poll::Ready(Some(request)) = requests.poll_next(&kio::Waiter::noop()) else {
 			panic!("live request missing")
 		};

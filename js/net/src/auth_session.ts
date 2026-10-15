@@ -216,17 +216,15 @@ class RequestQueue implements Requests {
 	#waiters: ((request: PeerRequest | undefined) => void)[] = [];
 	#closed = false;
 
-	/** Queue the token for the application, or refuse it when closed or full. */
+	/** Queue the token for the application, or refuse it when closed. */
 	push(request: PeerRequest): void {
 		if (this.#closed) {
 			request.reject(SessionCode.Unauthorized, "not accepting tokens");
 			return;
 		}
-		if (this.#queue.length >= 128) this.#queue = this.#queue.filter((queued) => !queued.ended);
-		if (this.#queue.length >= 128) {
-			request.reject(SessionCode.TooManyRequests, "too many pending tokens");
-			return;
-		}
+		// A withdrawn token gave its stream back, so it must not stay queued while the
+		// application is busy: that would let a peer that keeps withdrawing grow the queue.
+		this.#queue = this.#queue.filter((queued) => !queued.ended);
 		const waiter = this.#waiters.shift();
 		if (waiter) waiter(request);
 		else this.#queue.push(request);
