@@ -351,3 +351,54 @@ async fn an_msf_catalog_is_refused() {
 	};
 	assert!(err.to_string().contains("MSF"), "{err}");
 }
+
+/// Objects received while a sink stalls stay in the source and retain their arrival bound.
+#[tokio::test(start_paused = true)]
+async fn a_backlog_stays_in_the_source_until_due() {
+	let mut objects = import(KYRION).await.objects;
+	// Keep the capture in one retained group: joining newer groups is a separate
+	// live-edge policy, while this regression bounds an unread group itself.
+	for object in &mut objects {
+		object.group = 0;
+	}
+	let origin = objects[0].micros;
+	for delay in [Duration::ZERO, Duration::from_millis(100)] {
+		let republished = republish(objects.clone(), move |_, object| {
+			Duration::from_micros(object.micros - origin)
+		});
+		let source = crate::source::announced(&republished.consumer).await;
+		let mut release = Release::new(source, CatalogFormat::Hang)
+			.await
+			.unwrap()
+			.with_delay(delay);
+		let first = release.next().await.unwrap().unwrap();
+		let first = objects
+			.iter()
+			.position(|object| object.payload == first.payload)
+			.unwrap();
+		let acquired = release.buffered();
+
+		// The publisher keeps its capture pace while the sink stops polling. Sleeping
+		// on the paused clock lets each publication wake at its own scheduled instant.
+		tokio::time::sleep(RECORDING).await;
+		for (index, object) in objects.iter().enumerate().skip(first + 1) {
+			let output = tokio::time::timeout(STALL, release.next())
+				.await
+				.expect("every arrived object is released")
+				.unwrap()
+				.unwrap();
+			assert!(output.payload == object.payload, "{delay:?}: object {index}");
+			assert!(
+				release.buffered() <= acquired.max(1),
+				"{delay:?}: {} objects buffered after acquiring with {acquired}",
+				release.buffered()
+			);
+		}
+		assert_eq!(release.buffered(), 0);
+		assert_eq!(
+			release.dropped(),
+			0,
+			"the sink's stall does not make arrived objects late"
+		);
+	}
+}

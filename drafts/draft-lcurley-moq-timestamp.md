@@ -119,8 +119,8 @@ A track is either timed or untimed for its whole lifetime; no track mixes timed 
 A receiver MUST NOT substitute a time for an untimed object, such as its arrival time, and a relay MUST forward an untimed track untimed, declaring no TIMESCALE downstream.
 Arrival time differs at every hop and changes when a route fails over, so a substituted time would not be the same timeline downstream.
 
-Age-based dropping ({{age}}) never drops an untimed object; a relay bounds how long it keeps one with its own cache policy.
-A new subscription to an untimed track that names no start begins at the latest group, since no age says how far back to reach.
+Age-based dropping ({{age}}) does not apply to an untimed object.
+A relay MAY instead drop a group of an untimed track once a later group arrived at it longer ago than the threshold, measured on its own clock.
 
 ## Age-Based Dropping {#age}
 Given two objects on the same track, both with TIMESTAMP, a relay computes their relative age as the difference of their timestamps divided by the Timescale.
@@ -162,10 +162,9 @@ An earlier version of this document requested its own code points (`0x915C0` and
 ## moq-timestamp-02
 {:numbered="false"}
 
-- Replaced the wall-clock arrival-time fallback with untimed tracks: a track without TIMESCALE has no media time, its objects are never dropped for age, and a relay forwards it untimed.
+- Replaced the wall-clock arrival-time fallback with untimed tracks: a track without TIMESCALE has no media time, and a relay forwards it untimed. A relay MAY drop one of its groups once a later group arrived longer ago than the threshold.
 - On a track with TIMESCALE, a publisher MUST attach TIMESTAMP to every object with a payload, and a receiver treats one without it as malformed.
 - A receiver ignores an object-scope TIMESCALE, and no longer reads a bare TIMESTAMP on a track without TIMESCALE as microseconds.
-- A new subscription to an untimed track that names no start begins at the latest group.
 
 # Acknowledgments
 {:numbered="false"}

@@ -171,3 +171,65 @@ mod tests {
 		}
 	}
 }
+
+#[cfg(all(test, target_arch = "wasm32", not(target_os = "wasi")))]
+mod browser_tests {
+	use std::{future::pending, time::Duration};
+
+	use futures::FutureExt;
+	use wasm_bindgen::prelude::*;
+	use wasm_bindgen_test::*;
+
+	wasm_bindgen_test_configure!(run_in_browser);
+
+	#[wasm_bindgen(inline_js = "
+const originalNow = Date.now;
+export function setWall() { Date.now = () => 1700000000123; }
+export function restoreWall() { Date.now = originalNow; }
+")]
+	extern "C" {
+		#[wasm_bindgen(js_name = setWall)]
+		fn set_wall();
+		#[wasm_bindgen(js_name = restoreWall)]
+		fn restore_wall();
+	}
+
+	#[wasm_bindgen_test]
+	async fn sleep_advances_now_past_its_deadline() {
+		let start = crate::now();
+		let sleep = crate::sleep(Duration::from_millis(20));
+		let deadline = sleep.deadline();
+		sleep.await;
+		assert!(crate::now() >= deadline);
+		assert!(crate::now() > start);
+	}
+
+	#[wasm_bindgen_test]
+	async fn sleep_until_does_not_fire_early() {
+		let deadline = crate::now() + Duration::from_millis(20);
+		crate::sleep_until(deadline).await;
+		assert!(crate::now() >= deadline);
+	}
+
+	#[wasm_bindgen_test]
+	async fn timeout_elapses() {
+		let duration = Duration::from_millis(20);
+		let deadline = crate::now() + duration;
+		assert!(crate::timeout(duration, pending::<()>()).await.is_err());
+		assert!(crate::now() >= deadline);
+	}
+
+	#[wasm_bindgen_test]
+	fn interval_first_tick_is_immediate() {
+		let mut interval = crate::interval(Duration::from_secs(1));
+		assert!(interval.tick().now_or_never().is_some());
+	}
+
+	#[wasm_bindgen_test]
+	fn wall_reads_date_now() {
+		set_wall();
+		let wall = crate::wall();
+		restore_wall();
+		assert_eq!(wall, crate::Wall::UNIX_EPOCH + Duration::from_millis(1_700_000_000_123));
+	}
+}

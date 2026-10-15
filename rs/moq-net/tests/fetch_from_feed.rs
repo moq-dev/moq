@@ -149,8 +149,10 @@ async fn an_unfed_fetch_is_a_miss() {
 		assert!(matches!(err, moq_net::Error::NotFound), "{version}: no feed: {err}");
 
 		relay.track.write_frame(None, &b"1"[..]).unwrap();
-		relay.track.write_frame(None, &b"2"[..]).unwrap();
-		// Unfloored on an untimed track, the feed starts at the newest group.
+		// The publisher skips group 2, so the feed goes past it.
+		let mut skipped = relay.track.create_group(moq_net::group::Info { sequence: 3 }).unwrap();
+		skipped.write_frame(None, &b"3"[..]).unwrap();
+		skipped.finish().unwrap();
 		let mut subscriber = moq_net_sim::timeout(TIMEOUT, relay.remote.track("video").unwrap().subscribe(None))
 			.await
 			.expect("subscribe timeout")
@@ -161,8 +163,8 @@ async fn an_unfed_fetch_is_a_miss() {
 			.unwrap()
 			.expect("a group")
 			.sequence;
-		assert_eq!(first, 2, "{version}");
-		let err = fetch_err(&relay, 1).await;
+		assert_eq!(first, 3, "{version}");
+		let err = fetch_err(&relay, 2).await;
 		assert!(matches!(err, moq_net::Error::NotFound), "{version}: passed: {err}");
 	}
 }

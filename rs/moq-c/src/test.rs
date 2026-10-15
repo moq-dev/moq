@@ -4258,12 +4258,15 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	assert!(config.has_backoff_initial);
 	assert_eq!(
 		config.backoff_initial_us,
-		expected.connect.backoff.initial.as_micros() as u64
+		expected.connect.backoff.initial.unwrap().as_micros() as u64
 	);
 	assert!(config.has_backoff_multiplier);
 	assert_eq!(config.backoff_multiplier, expected.connect.backoff.multiplier);
 	assert!(config.has_backoff_max);
-	assert_eq!(config.backoff_max_us, expected.connect.backoff.max.as_micros() as u64);
+	assert_eq!(
+		config.backoff_max_us,
+		expected.connect.backoff.max.unwrap().as_micros() as u64
+	);
 	assert!(config.has_backoff_timeout);
 	assert_eq!(
 		expected.connect.backoff.timeout,
@@ -4314,12 +4317,12 @@ fn zero_with_a_flag_set_is_a_real_value() {
 
 	let explicit = parsed(&config);
 	assert_eq!(explicit.connect.backoff.timeout, Some(std::time::Duration::ZERO));
-	assert_eq!(explicit.quic.keep_alive, std::time::Duration::ZERO);
+	assert_eq!(explicit.quic.keep_alive, Some(std::time::Duration::ZERO));
 
 	// Without the flags the same zeroes mean nothing at all.
 	let defaults = parsed(&client_config());
 	assert_ne!(defaults.connect.backoff.timeout, Some(std::time::Duration::ZERO));
-	assert_eq!(defaults.quic.keep_alive, std::time::Duration::from_secs(3));
+	assert_eq!(defaults.quic.keep_alive, Some(std::time::Duration::from_secs(3)));
 }
 
 #[test]
@@ -4446,12 +4449,15 @@ fn config_quic_and_backoff_knobs_apply() {
 	let parsed = parsed(&config);
 	assert_eq!(
 		parsed.connect.backoff.initial,
-		std::time::Duration::from_micros(500_000)
+		Some(std::time::Duration::from_micros(500_000))
 	);
 	assert_eq!(parsed.connect.backoff.multiplier, 3);
-	assert_eq!(parsed.connect.backoff.max, std::time::Duration::from_micros(10_000_000));
+	assert_eq!(
+		parsed.connect.backoff.max,
+		Some(std::time::Duration::from_micros(10_000_000))
+	);
 	assert_eq!(parsed.quic.max_streams, Some(4096));
-	assert_eq!(parsed.quic.idle_timeout, std::time::Duration::from_millis(15_000));
+	assert_eq!(parsed.quic.idle_timeout, Some(std::time::Duration::from_millis(15_000)));
 	assert_eq!(parsed.quic.gso, Some(false));
 	assert_eq!(parsed.quic.mtu_discovery, Some(true));
 	assert_eq!(parsed.quic.qlog.as_deref(), Some(std::path::Path::new(dir)));

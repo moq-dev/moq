@@ -30,7 +30,8 @@ the UDP sockets bound through it.
   HTTP/3 CONNECT handshake (SETTINGS, subprotocol selection, capsule close)
   over the same adapter via `web-transport-proto`. `quic::web::Session` is
   a raw or web transport (`Session::raw`). Wrap it with
-  `transport::Session::new` before `connect_lite`/`accept_lite`, which return
+  `transport::Session::new(session, binding)`, using `moq_net::transport::Binding::Uri`
+  for WebTransport or `InBand` for raw QUIC, before `connect_lite`/`accept_lite`, which return
   the session and its driver; poll the driver or await it inside a
   `Handle::spawn` task to run it on the worker. Web mode maps stream and close codes through the
   HTTP/3 error space.

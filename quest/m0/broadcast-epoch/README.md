@@ -73,13 +73,10 @@ Decided:
   [catalog references quest](/quest/m0/broadcast-epoch/catalog-references.md)
   owns the schemas, readers, and compatibility documentation.
 - Every first-party publisher that can restart mints its own: the apps,
-  moq-boy, the ingest gateways, moqsink, and the bindings. Players
+  moq-boy, the ingest gateways, moqsink, OBS, and the bindings. Players
   (`moq play`, `@moq/watch`, demo/web) follow the announce `Restart`. moq-stats mints one per
   [group announcement](/doc/concept/stats.md#broadcasts), which also gated
   the release (decided 2026-10-04).
-- The m1 quests gating this line moved under it in the 2026-10-05 audit, and
-  the OBS half moved to m1 as [OBS publishes under epochs](/quest/m1/obs-epoch.md).
-
 - Until lite-07 is offered by default, default sessions (lite-06) carry no
   epoch, so a cluster GOAWAY redial or a standby takeover ends subscriptions
   instead of resuming them (accepted 2026-10-06 over negotiating the field on

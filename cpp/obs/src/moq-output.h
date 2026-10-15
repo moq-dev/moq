@@ -58,6 +58,9 @@ public:
 	// Prefer this over obs_output_get_connect_time_ms, which stays 0 for sub-ms connects.
 	bool IsLiveSession();
 
+	// Publisher epoch of this Start(), retained through session reconnects; empty when stopped.
+	std::string GetEpoch();
+
 	// Most recent connect/reconnect failure for this Start(), or empty when none.
 	// Thread-safe; the dock polls this while reconnecting and on stop.
 	void CopyLastFailure(int *code, std::string *reason);
@@ -133,6 +136,7 @@ private:
 	bool connected = false;
 	bool live = false;
 	std::string url;
+	std::string epoch;
 	int last_failure_code = 0;
 	std::string last_failure_reason;
 

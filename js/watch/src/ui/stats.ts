@@ -66,6 +66,7 @@ function track(parent: Effect, card: { el: HTMLElement; status: HTMLElement }, o
 /** The Stats tab: live codec/network detail plus rolling graphs. */
 export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	const container = DOM.create("div", { className: "tab-body stats" });
+	parent.cleanup(watch.connection.probe.subscribe(() => {}));
 
 	// Video card: static detail as rows, live bitrate/fps as graphs (no duplicate rows).
 	const videoCard = card("video", "Video", videoIcon);

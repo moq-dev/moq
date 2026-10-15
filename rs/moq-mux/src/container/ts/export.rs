@@ -251,6 +251,13 @@ struct Track {
 	pack: Option<Pack>,
 }
 
+/// Shared program state needed while reading one track.
+struct Input<'a> {
+	waiting_for_header: bool,
+	video_start: Option<Timestamp>,
+	jitter: &'a mut jitter::Buffer<u16, Queued>,
+}
+
 impl Track {
 	/// A track reading `source`, its PID filled in by the catalog.
 	fn new(source: ExportSource, kind: Kind) -> Self {
@@ -296,6 +303,58 @@ impl Track {
 		let pts = to_ticks(pending.frame.timestamp);
 		self.clock.push((pending, self.source.description().cloned()), pts);
 		self.release(name, jitter, false)
+	}
+
+	/// Read until a frame is due, or hold the first frame until the program tables are built.
+	fn fill(&mut self, name: &str, waiter: &kio::Waiter, input: &mut Input<'_>) -> crate::Result<()> {
+		if self.pending.is_some() || self.finished {
+			return Ok(());
+		}
+		let is_video = matches!(self.kind, Kind::Video(_));
+		loop {
+			if !input.waiting_for_header && input.jitter.full(&self.pid) {
+				break;
+			}
+			match self.source.poll_read(waiter)? {
+				Poll::Ready(Some(frame)) => {
+					if input.waiting_for_header && !self.source.header_ready() {
+						continue;
+					}
+					let pending = Pending {
+						frame,
+						restart: self.base.0 + self.source.markers(),
+						skip: self.base.1 + self.source.skips(),
+						arrived: self.empty,
+						read: web_async::time::Instant::now(),
+					};
+					// A new timeline must reach the reset before tune-in alignment can drop it.
+					if let Some(start) = input.video_start
+						&& !is_video && pending.restart == self.restart
+						&& pending.frame.timestamp < start
+					{
+						continue;
+					}
+					if input.waiting_for_header {
+						self.pending = Some(pending);
+						break;
+					}
+					self.queue(name, pending, input.jitter)?;
+				}
+				Poll::Ready(None) => {
+					self.finished = true;
+					break;
+				}
+				Poll::Pending => {
+					self.empty = web_async::time::Instant::now();
+					break;
+				}
+			}
+		}
+		// Nothing more can come in below the frames still held for their DTS.
+		if self.finished && !input.waiting_for_header {
+			self.release(name, input.jitter, true)?;
+		}
+		Ok(())
 	}
 
 	/// Queue each AC-3 sync frame of a passed-through PES on its own, due at its own decode
@@ -1003,8 +1062,8 @@ impl<E: catalog::Catalog> Export<E> {
 			si.poll(waiter);
 		}
 
-		// 2. Read every frame the sources have: into the jitter buffer, or before the
-		// program tables are built, one per track.
+		// 2. Read each source until it has a frame due, or before the program tables
+		// are built, hold one per track.
 		self.fill(waiter)?;
 
 		// 3. Build the program tables once the layout is resolved and every
@@ -1109,6 +1168,25 @@ impl<E: catalog::Catalog> Export<E> {
 				let drain = self.max_drain();
 				self.lay(Some(schedule::slot(decode.saturating_sub(drain.as_nanos()))))?;
 			}
+			if self.queue.is_empty() {
+				// Releasing a due frame opens room in its source. Read it before parking:
+				// a zero-delay slot may need another frame to prove the slot is complete.
+				let track = self.tracks.get_mut(&name).expect("the released frame's track");
+				let finished = track.finished;
+				track.fill(
+					&name,
+					waiter,
+					&mut Input {
+						waiting_for_header: false,
+						video_start: self.video_start,
+						jitter: &mut self.jitter,
+					},
+				)?;
+				if !finished && track.finished {
+					self.schedule
+						.set_ended(self.tracks.values().all(|track| track.finished));
+				}
+			}
 		}
 		self.lay_due(waiter)?;
 		if let Some(out) = self.pop() {
@@ -1198,7 +1276,7 @@ impl<E: catalog::Catalog> Export<E> {
 		}))
 	}
 
-	/// Read every frame the sources have ready.
+	/// Read each source until it has a frame due.
 	///
 	/// Before the program tables are built, each track holds its first frame instead,
 	/// and slices that arrive before their codec config resolves are dropped: a receiver
@@ -1206,53 +1284,13 @@ impl<E: catalog::Catalog> Export<E> {
 	/// keyframe that carries the parameter sets. [`ExportSource`] has already transformed
 	/// Annex-B avc3/hev1 into length-prefixed form and resolved the avcC/hvcC.
 	fn fill(&mut self, waiter: &kio::Waiter) -> crate::Result<()> {
-		let waiting_for_header = self.psi.is_none();
-		let video_start = self.video_start;
-		for (name, track) in self.tracks.iter_mut() {
-			if track.pending.is_some() || track.finished {
-				continue;
-			}
-			let is_video = matches!(track.kind, Kind::Video(_));
-			loop {
-				match track.source.poll_read(waiter)? {
-					Poll::Ready(Some(frame)) => {
-						if waiting_for_header && !track.source.header_ready() {
-							continue;
-						}
-						let pending = Pending {
-							frame,
-							restart: track.base.0 + track.source.markers(),
-							skip: track.base.1 + track.source.skips(),
-							arrived: track.empty,
-							read: web_async::time::Instant::now(),
-						};
-						// A new timeline must reach the reset before tune-in alignment can drop it.
-						if let Some(start) = video_start
-							&& !is_video && pending.restart == track.restart
-							&& pending.frame.timestamp < start
-						{
-							continue;
-						}
-						if waiting_for_header {
-							track.pending = Some(pending);
-							break;
-						}
-						track.queue(name, pending, &mut self.jitter)?;
-					}
-					Poll::Ready(None) => {
-						track.finished = true;
-						break;
-					}
-					Poll::Pending => {
-						track.empty = web_async::time::Instant::now();
-						break;
-					}
-				}
-			}
-			// Nothing more can come in below the frames still held for their DTS.
-			if track.finished && !waiting_for_header {
-				track.release(name, &mut self.jitter, true)?;
-			}
+		let mut input = Input {
+			waiting_for_header: self.psi.is_none(),
+			video_start: self.video_start,
+			jitter: &mut self.jitter,
+		};
+		for (name, track) in &mut self.tracks {
+			track.fill(name, waiter, &mut input)?;
 		}
 		Ok(())
 	}
@@ -1540,6 +1578,12 @@ impl<E: catalog::Catalog> Export<E> {
 			stats.streams.insert(track.pid, row);
 		}
 		stats
+	}
+
+	/// How many access units are waiting in the jitter buffer.
+	#[cfg(test)]
+	pub(super) fn buffered(&self) -> usize {
+		self.jitter.len()
 	}
 
 	/// When the next queued frame is due, or the next grid slot while media is queued or

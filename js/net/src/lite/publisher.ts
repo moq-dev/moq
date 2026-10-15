@@ -1,4 +1,4 @@
-import { type Dispose, type Getter, race, Signal } from "@moq/signals";
+import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
@@ -19,6 +19,7 @@ import { Interests, LIMITS, type Limits, Slots } from "../util/limits.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
+import { closeViolation } from "./error.ts";
 import type { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { Probe } from "./probe.ts";
@@ -183,6 +184,7 @@ type Control =
 	| { kind: "error"; error: Error };
 
 type SubscriptionControlOptions = {
+	quic: WebTransport;
 	reader: Reader;
 	writer: Writer;
 	version: Version;
@@ -214,12 +216,13 @@ class SubscriptionControls {
 	/** Settles once decoding stops, so teardown can wait for it rather than leaving it running. */
 	readonly decoding: Promise<void>;
 
-	constructor({ reader, writer, version, apply }: SubscriptionControlOptions) {
+	constructor(options: SubscriptionControlOptions) {
+		const { writer } = options;
 		this.#writer = writer;
 		this.#ended = new Promise((resolve) => {
 			this.#resolveEnd = resolve;
 		});
-		this.decoding = this.#decode(reader, version, apply);
+		this.decoding = this.#decode(options);
 		// Our own half going away ends the loop too, and has to reach it the same way: the
 		// loop looks at nothing else.
 		void writer.closed.then(
@@ -277,7 +280,7 @@ class SubscriptionControls {
 		this.#changed.update((value) => value + 1);
 	}
 
-	async #decode(reader: Reader, version: Version, apply: (update: SubscribeUpdate) => void) {
+	async #decode({ reader, version, apply, quic }: SubscriptionControlOptions) {
 		try {
 			// Runs until the peer's half ends, even past our own FIN: a lite-07 publisher waits
 			// for that end, and every other teardown stops the reader.
@@ -289,6 +292,7 @@ class SubscriptionControls {
 				this.#changed.update((value) => value + 1);
 			}
 		} catch (err: unknown) {
+			closeViolation(quic, err);
 			this.#finish(error(err));
 			return;
 		}
@@ -796,6 +800,7 @@ export class Publisher {
 			}
 
 			controls = new SubscriptionControls({
+				quic: this.#quic,
 				reader: stream.reader,
 				writer: stream.writer,
 				version: this.version,
@@ -834,6 +839,7 @@ export class Publisher {
 			// A subscriber that left is owed nothing more, and its stream may already be reset.
 			await Promise.all([datagrams, controls.decoding, finished && acknowledged(stream.writer)]);
 		} catch (err: unknown) {
+			closeViolation(this.#quic, err);
 			const e = error(err);
 			if (e === cancel) console.debug(`publish cancelled: broadcast=${msg.broadcast} track=${track.name}`);
 			else console.warn(`publish error: broadcast=${msg.broadcast} track=${track.name} error=${reason(e)}`);
@@ -1520,12 +1526,31 @@ export class Publisher {
 			return Math.abs(next - prev) / prev >= threshold;
 		};
 
+		const ended = new Once<Error | null>();
+		const reading = (async () => {
+			// Report ignores target values, but must consume them to observe the FIN.
+			while (await Probe.decodeMaybe(stream.reader, this.version)) {}
+		})().then(
+			() => ended.set(null),
+			(err: unknown) => {
+				closeViolation(this.#quic, err);
+				ended.set(error(err));
+			},
+		);
+
 		try {
 			for (;;) {
-				const timeout = new Promise<"timeout">((resolve) =>
-					setTimeout(() => resolve("timeout"), PROBE_INTERVAL),
-				);
-				const result = await race([timeout, stream.reader.closed]);
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				const timeout = new Promise<"timeout">((resolve) => {
+					timer = setTimeout(() => resolve("timeout"), PROBE_INTERVAL);
+				});
+				let result: "timeout" | Error | null;
+				try {
+					result = await race([timeout, ended]);
+				} finally {
+					clearTimeout(timer);
+				}
+				if (result instanceof Error) throw result;
 				if (result !== "timeout") break;
 
 				// The two fields are independent on the wire, each using 0 for
@@ -1574,8 +1599,11 @@ export class Publisher {
 				}
 			}
 		} catch (err: unknown) {
+			closeViolation(this.#quic, err);
 			console.warn("probe stream error", err);
+		} finally {
 			stream.close();
+			await reading;
 		}
 	}
 

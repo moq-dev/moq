@@ -163,8 +163,8 @@ pub struct Setup {
 	/// qmux over TCP/TLS, unix sockets), with `?` and the URI query appended when
 	/// there is one. Sent only by the client; a server never sends one and a relay
 	/// never forwards it. `None` on URI-carrying bindings, where it would be a
-	/// protocol violation. An empty path means the same thing as `None`; both are
-	/// on the wire so a client need not special-case the root.
+	/// protocol violation. On an in-band binding an empty path selects the root, like `None`;
+	/// a URI binding forbids even an empty Path parameter.
 	pub path: Option<String>,
 	/// The single direction the client intends to use, or `None` for a bidirectional
 	/// session. `None` is sent as the absence of the parameter, which is also how a
@@ -188,38 +188,7 @@ impl Message for Setup {
 	const MAX_SIZE: usize = crate::setup::MAX_SETUP_SIZE;
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		if !version.has_setup_stream() {
-			return Err(DecodeError::Version);
-		}
-
-		let params = Parameters::decode(r, version)?;
-		let probe = params
-			.get_varint(PARAM_PROBE, version)?
-			.map(ProbeLevel::from_code)
-			.unwrap_or_default();
-		let path = match params.get_bytes(PARAM_PATH) {
-			Some(bytes) => Some(
-				std::str::from_utf8(bytes)
-					.map_err(|_| DecodeError::InvalidValue)?
-					.to_string(),
-			),
-			None => None,
-		};
-		let role = params.get_varint(PARAM_ROLE, version)?.and_then(Role::from_code);
-		let cost = params.get_varint(PARAM_COST, version)?;
-		// 0 is legal on the wire but carries no identity (it can't be excluded),
-		// so it decodes as "not declared" rather than an error.
-		let hop = params
-			.get_varint(PARAM_HOP, version)?
-			.and_then(|id| crate::Hop::new(id).ok());
-
-		Ok(Self {
-			probe,
-			path,
-			role,
-			cost,
-			hop,
-		})
+		ReceivedSetup::decode_msg(r, version).map(|received| received.setup)
 	}
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -251,21 +220,97 @@ impl Message for Setup {
 	}
 }
 
+/// Raw presence is needed even when an unknown Role decodes as bidirectional.
+#[derive(Debug)]
+pub(super) struct ReceivedSetup {
+	pub setup: Setup,
+	role_present: bool,
+}
+
+impl Message for ReceivedSetup {
+	const MAX_SIZE: usize = Setup::MAX_SIZE;
+
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+		if !version.has_setup_stream() {
+			return Err(DecodeError::Version);
+		}
+
+		let params = Parameters::decode(r, version)?;
+		let probe = params
+			.get_varint(PARAM_PROBE, version)?
+			.map(ProbeLevel::from_code)
+			.unwrap_or_default();
+		let path = match params.get_bytes(PARAM_PATH) {
+			Some(bytes) => Some(
+				std::str::from_utf8(bytes)
+					.map_err(|_| DecodeError::InvalidValue)?
+					.to_string(),
+			),
+			None => None,
+		};
+		let role_code = params.get_varint(PARAM_ROLE, version)?;
+		let role = role_code.and_then(Role::from_code);
+		let cost = params.get_varint(PARAM_COST, version)?;
+		// 0 is legal on the wire but carries no identity (it can't be excluded),
+		// so it decodes as "not declared" rather than an error.
+		let hop = params
+			.get_varint(PARAM_HOP, version)?
+			.and_then(|id| crate::Hop::new(id).ok());
+
+		Ok(Self {
+			role_present: role_code.is_some(),
+			setup: Setup {
+				probe,
+				path,
+				role,
+				cost,
+				hop,
+			},
+		})
+	}
+
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
+		self.setup.encode_msg(w, version)
+	}
+}
+
 /// Shared slot for the peer's SETUP, written once when its Setup stream is read.
 ///
 /// Streams whose encoding depends on a negotiated capability (e.g. the PROBE
 /// stream) wait on this before deciding what to do. Cheap to clone: every handle
 /// shares the same slot.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct PeerSetup(kio::Shared<PeerSetupState>);
 
-#[derive(Default)]
 struct PeerSetupState {
+	client: bool,
+	binding: crate::transport::Binding,
 	seen: bool,
 	setup: Option<Setup>,
 }
 
 impl PeerSetup {
+	pub fn new(client: bool, binding: crate::transport::Binding) -> Self {
+		Self(kio::Shared::new(PeerSetupState {
+			client,
+			binding,
+			seen: false,
+			setup: None,
+		}))
+	}
+
+	pub(super) fn receive(&self, received: ReceivedSetup) -> Result<(), crate::Error> {
+		let mut state = self.0.lock();
+		if ((state.client || state.binding == crate::transport::Binding::Uri) && received.setup.path.is_some())
+			|| (state.client && received.role_present)
+		{
+			return Err(crate::Error::ProtocolViolation);
+		}
+		state.seen = true;
+		state.setup = Some(received.setup);
+		Ok(())
+	}
+
 	/// Record the peer's SETUP.
 	pub fn set(&self, setup: Setup) {
 		let mut state = self.0.lock();
