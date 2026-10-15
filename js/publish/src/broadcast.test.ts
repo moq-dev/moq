@@ -541,6 +541,38 @@ test("registering a replacement track's name throws", async () => {
 	broadcast.close();
 });
 
+// A replacement minted before its rendition ever had a config is never served, but still owns its name.
+test("a replacement track name is never reused, even one never served", async () => {
+	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("unserved.hang") });
+	let video = broadcast.video("video");
+	await settle();
+	const net = broadcast.net.peek();
+	if (!net) throw new Error("expected a network producer once connected");
+
+	// Fail the rendition on its current track, then register a replacement for it.
+	const fail = async (name: string) => {
+		const sub = net.track(name).subscribe();
+		await settle();
+		video.track.peek()?.close(new Error("encoder failed"));
+		video.close();
+		await settle();
+		sub.close();
+		video = broadcast.video("video");
+		await settle();
+	};
+	await fail("video");
+	await fail("video/1");
+	await fail("video/2");
+	expect(net.track("video/3").subscribe()).toBeDefined();
+	expect(() => broadcast.video("video/1")).toThrow("replacement track");
+
+	video.config.set(videoConfig);
+	await settle();
+	expect((await readCatalog(broadcast))?.video?.renditions.video?.track).toBe("video/3");
+
+	broadcast.close();
+});
+
 // The served identity is a snapshot, so a producer mutating a container it shares can't rewrite it.
 test("mutating a shared container still takes a fresh track name", async () => {
 	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("shared.hang") });

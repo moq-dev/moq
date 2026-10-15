@@ -457,6 +457,27 @@ describe("estimate publication window", () => {
 	});
 });
 
+// Each ID's estimate is checked on its own, even when two IDs alias one track.
+test("catalog refuses a falling estimate on one alias of a track", () => {
+	const catalog = new CatalogProducer();
+	const alias = (jitter: number) => ({
+		codec: "opus",
+		container: { kind: "legacy" as const },
+		sampleRate: Catalog.u53(48000),
+		numberOfChannels: Catalog.u53(2),
+		track: "audio",
+		jitter: Catalog.u53(jitter),
+	});
+	catalog.mutate((value) => {
+		value.audio = { renditions: { en: alias(100), es: alias(100) } };
+	});
+	expect(() =>
+		catalog.mutate((value) => {
+			value.audio = { renditions: { en: alias(10), es: alias(100) } };
+		}),
+	).toThrow("jitter cannot decrease");
+});
+
 // A renamed rendition's new track starts its estimates over.
 test("catalog lets a renamed track start its estimates over", () => {
 	const catalog = new CatalogProducer();

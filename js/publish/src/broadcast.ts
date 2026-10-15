@@ -98,6 +98,9 @@ export class Broadcast {
 	// catalog ID under a fresh track name, so a name always means the same content.
 	readonly #names = new Signal<Record<string, string>>({});
 
+	// Every replacement track name minted in the current network broadcast, even one never served.
+	#replacements = new Set<string>();
+
 	// The decoder identity of each track name the current network broadcast's catalog has served, or
 	// undefined before it serves one. Kept across a rendition's removal, so a name returning with
 	// different media takes a fresh name too.
@@ -156,8 +159,7 @@ export class Broadcast {
 			throw new Error(`rendition ${name} was registered as ${previous}, not ${kind}`);
 		}
 		// A replacement track holds or held the name, so another rendition's media owns it.
-		const replaced = this.#served?.has(name) && !this.#kinds.has(name);
-		if (replaced || Object.values(this.#names.peek()).includes(name)) {
+		if (this.#replacements.has(name)) {
 			throw new Error(`rendition ${name} names another rendition's replacement track`);
 		}
 
@@ -263,12 +265,11 @@ export class Broadcast {
 	// enough to never reuse one.
 	#mint(id: string): string {
 		const taken = new Set([
+			...this.#replacements,
 			...(this.#served?.keys() ?? []),
-			...this.#listed.keys(),
 			...Object.keys(this.#renditions.peek()),
 			// Every ID that held a track here, even one removed before it had a config.
 			...this.#kinds.keys(),
-			...Object.values(this.#names.peek()),
 		]);
 		// A no-op edit is the catalog's only read; it publishes nothing.
 		this.catalog.mutate((catalog) => {
@@ -287,7 +288,9 @@ export class Broadcast {
 		});
 		for (let n = 1; ; n++) {
 			const name = `${id}/${n}`;
-			if (!taken.has(name)) return name;
+			if (taken.has(name)) continue;
+			this.#replacements.add(name);
+			return name;
 		}
 	}
 
@@ -324,6 +327,7 @@ export class Broadcast {
 		// again finds its track; the catalog's stay out of reach of a colliding rendition.
 		const tracks = new Map<string, { track: Moq.Track.Producer; owner: Rendition<unknown> }>();
 		this.#names.set({});
+		this.#replacements = new Set();
 		this.#served = undefined;
 		const kinds = new Map<string, Kind>();
 		this.#kinds = kinds;
