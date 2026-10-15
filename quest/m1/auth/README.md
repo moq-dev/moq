@@ -121,11 +121,23 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 - [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave
   the URL: a session starts on what the URL carried and its AUTH streams add
   the rest, with the URL kept for peers without the AUTH stream
+- [Join revocation](/quest/m1/auth/join-revocation.md) - a revoked grant ends our
+  subscription even while its joining FETCH waits for request-ID credit
+- [Enforcement cursor](/quest/m1/auth/enforcement-cursor.md) - outgoing announce
+  enforcement reads the origin through the announcer, so an End-to-Start race
+  fails loud instead of withholding silently
+- [Concurrent renewal](/quest/m1/auth/concurrent-renewal.md) - a token refresh
+  renews every live namespace at once, benchmarked over namespaces and sessions
+- [Token on FETCH](/quest/m1/auth/token-fetch.md) - TRACK_STATUS and FETCH carry
+  and honor a request token, pending a maintainer call on reversing the
+  standalone-FETCH decision
 
 ## Related
 
 - [Request leases](/quest/m3/auth-request-lease.md) - deferred relay
   integration, to revisit when a consumer needs per-request verification
+- [Request tokens beyond Rust](/quest/m3/request-token-surfaces.md) - JS, moq-ffi,
+  and moq-cli request-token APIs, when a consumer needs one
 - [#5107](https://github.com/moq-dev/moq/pull/5107) - landed request-token
   decoding, including session-fatal REQUEST_UPDATE decode failures
 - [#5106](https://github.com/moq-dev/moq/pull/5106) - landed setup extension
