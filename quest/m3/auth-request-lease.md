@@ -17,9 +17,9 @@ This is not required for the experimental Rust hook or the session AUTH epic.
 Revisit the design against moq-transport's authentication model at that point;
 the lease integration below is future work, not a capability of the hook.
 
-An application acceptor built on moq-net answers request tokens through
-its own `scoped()` queue and does not need this;
-it is the relay's half of
+An application built on moq-net opts into request-token verification through
+the acceptor API #5148 ships, verifies each token-bearing request itself
+before accepting it, and does not need this. This quest is the relay's half of
 [Request tokens](/quest/m1/auth/request-token.md).
 
 - A per-request call on `moq_auth::Client`, not the `Client::attach` that
