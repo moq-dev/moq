@@ -40,8 +40,9 @@ use mpeg2ts::ts::{
 
 use moq_net::Timestamp;
 
+use super::catalog::Catalog as _;
+use crate::catalog::Stream;
 use crate::catalog::hang::Catalog;
-use crate::catalog::{CatalogFormat, Stream};
 use crate::codec::video::{Hrd, Reorder};
 use crate::codec::{aac, annexb, opus};
 use crate::container::decode::{DecodeClock, MAX_REORDER};
@@ -99,10 +100,14 @@ fn sanitize_mux_rate(rate: u64) -> Option<u64> {
 /// leading PAT/PMT rides on the first frame (so it inherits a real timestamp), and
 /// is re-emitted at video keyframes and periodically for mid-stream tune-in.
 /// Returns `None` when the broadcast ends.
-pub struct Export<E: catalog::Catalog = ()> {
+pub struct Export<S: Stream>
+where
+	S::Ext: catalog::Catalog,
+{
 	source: crate::Source,
-	catalog: Option<crate::catalog::Consumer<E>>,
-	catalog_format: CatalogFormat,
+	catalog: S,
+	/// Keep the concrete follower's format after EOF without polling an ended stream again.
+	catalog_ended: bool,
 	/// A snapshot arrived on `catalog` since it was subscribed.
 	cataloged: bool,
 	/// The publisher epoch of the broadcast being exported, `None` for an epochless route.
@@ -880,53 +885,21 @@ impl SiTrack {
 	}
 }
 
-impl Export {
-	/// Subscribe to `source`, using the default catalog format.
-	pub async fn new(source: crate::Source) -> Result<Self, crate::Error> {
-		Self::with_catalog_format(source, CatalogFormat::default()).await
-	}
-
-	/// Subscribe to `source`, selecting an explicit catalog format. Media only;
-	/// any catalog extension (e.g. the `mpegts` verbatim streams) is ignored.
-	pub async fn with_catalog_format(
-		source: crate::Source,
-		catalog_format: CatalogFormat,
-	) -> Result<Self, crate::Error> {
-		Self::build(source, catalog_format).await
-	}
-}
-
-impl Export<catalog::Ext> {
-	/// Subscribe to `source`, exporting its `mpegts` verbatim streams (SCTE-35,
-	/// private data, ...) back to MPEG-TS alongside the media. The `Self` type pins
-	/// the extension, so callers write `Export::with_ts(..)` with no turbofish (the
-	/// plain constructors are media-only).
-	pub async fn with_ts(source: crate::Source, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
-		Self::build(source, catalog_format).await
-	}
-}
-
-impl<E: catalog::Catalog> Export<E> {
-	/// Shared constructor. The public entry points each live on a concrete
-	/// `Export<E>` impl that pins `E`, so the extension is chosen by which one you call.
-	async fn build(source: crate::Source, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
-		let broadcast = source.broadcast();
-		let catalog = crate::catalog::Consumer::new(&broadcast, catalog_format).await?;
-		Ok(Self::build_with(source, &broadcast, catalog_format, catalog))
-	}
-
-	/// Export `broadcast`, the one `source` holds at its path, from its subscribed `catalog`.
-	fn build_with(
-		source: crate::Source,
-		broadcast: &moq_net::broadcast::Consumer,
-		catalog_format: CatalogFormat,
-		catalog: crate::catalog::Consumer<E>,
-	) -> Self {
-		let instance = broadcast.info().epoch.clone();
+impl<S: Stream> Export<S>
+where
+	S::Ext: catalog::Catalog,
+{
+	/// Export `source` as MPEG-TS, driving track subscriptions from `catalog`.
+	///
+	/// The caller chooses the catalog format and rendition selection on any [`Stream`].
+	/// The stream remains owned until the export is dropped or follows another broadcast;
+	/// concrete catalog consumers release their subscription and decoder when they end.
+	pub fn new(source: crate::Source, catalog: S) -> Self {
+		let instance = source.broadcast().info().epoch.clone();
 		Self {
 			source,
-			catalog: Some(catalog),
-			catalog_format,
+			catalog,
+			catalog_ended: false,
 			cataloged: false,
 			instance,
 			stale: HashSet::new(),
@@ -1034,14 +1007,14 @@ impl<E: catalog::Catalog> Export<E> {
 
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
 		// 1. Drain catalog updates, discovering the track layout.
-		while let Some(catalog) = self.catalog.as_mut() {
-			match catalog.poll_next(waiter)? {
+		while !self.catalog_ended {
+			match self.catalog.poll_next(waiter)? {
 				Poll::Ready(Some(snapshot)) => {
 					self.cataloged = true;
 					self.update_catalog(snapshot)?
 				}
 				Poll::Ready(None) => {
-					self.catalog = None;
+					self.catalog_ended = true;
 					break;
 				}
 				Poll::Pending => break,
@@ -1073,7 +1046,7 @@ impl<E: catalog::Catalog> Export<E> {
 		if self.psi.is_none() {
 			if self.tracks.is_empty() {
 				// No tracks yet. If the catalog is also done, the broadcast is empty.
-				if self.catalog.is_none() {
+				if self.catalog_ended {
 					return Poll::Ready(Ok(None));
 				}
 				return Poll::Pending;
@@ -1084,7 +1057,7 @@ impl<E: catalog::Catalog> Export<E> {
 				// buffered: the stream must begin on that keyframe so the in-band
 				// parameter sets lead it. An audio-only program has nothing to wait for.
 				// If every track finished without producing a config, it can't be muxed.
-				if self.catalog.is_none() && self.tracks.values().all(|t| t.finished) {
+				if self.catalog_ended && self.tracks.values().all(|t| t.finished) {
 					return Poll::Ready(Ok(None));
 				}
 				return Poll::Pending;
@@ -1213,7 +1186,7 @@ impl<E: catalog::Catalog> Export<E> {
 			}
 			// SI emission rides media frames, so a snapshot that arrived behind the
 			// last one gets one trailing flush before the stream ends.
-			if self.catalog.is_none() && !self.si_flushed {
+			if self.catalog_ended && !self.si_flushed {
 				self.si_flushed = true;
 				if let Some(out) = self.write_si_tail()? {
 					return Poll::Ready(Ok(Some(out)));
@@ -1222,7 +1195,7 @@ impl<E: catalog::Catalog> Export<E> {
 		}
 
 		// End of stream once the catalog is closed too: nothing more can appear.
-		if self.catalog.is_none() && (drained || self.tracks.is_empty()) {
+		if self.catalog_ended && (drained || self.tracks.is_empty()) {
 			return Poll::Ready(Ok(None));
 		}
 
@@ -1295,7 +1268,7 @@ impl<E: catalog::Catalog> Export<E> {
 		Ok(())
 	}
 
-	fn update_catalog(&mut self, mut catalog: Catalog<E>) -> anyhow::Result<()> {
+	fn update_catalog(&mut self, mut catalog: Catalog<S::Ext>) -> anyhow::Result<()> {
 		self.source.retain_selectable(&mut catalog);
 
 		// The MPEG-TS section lives in the extension. The trait only exposes
@@ -1515,7 +1488,7 @@ impl<E: catalog::Catalog> Export<E> {
 	/// finished, silent on its PID. The new subscription's playhead jumped from wherever the
 	/// old one stopped, so its first frame counts as a skip: late frames drop, and a leap
 	/// ahead opens a new generation.
-	fn resubscribe(&mut self, catalog: &Catalog<E>, mpegts: &catalog::Mpegts) -> anyhow::Result<()> {
+	fn resubscribe(&mut self, catalog: &Catalog<S::Ext>, mpegts: &catalog::Mpegts) -> anyhow::Result<()> {
 		let budget = self.budget();
 		for (name, track) in self.tracks.iter_mut() {
 			if !self.stale.contains(name) {
@@ -1614,7 +1587,7 @@ impl<E: catalog::Catalog> Export<E> {
 		self.instance.as_ref()
 	}
 
-	/// Carry on into `broadcast`, the one now at this export's path.
+	/// Carry on into `broadcast`, using the caller's replacement `catalog` stream.
 	///
 	/// The same publisher instance (an equal epoch) continues the stream: the program and
 	/// its PSI stay as announced, and its catalog resubscribes each track as it lists it, so a
@@ -1626,14 +1599,9 @@ impl<E: catalog::Catalog> Export<E> {
 	/// flags the break with `discontinuity_indicator`, and each stream starts on a keyframe.
 	/// The caller decides whether to follow a replacement at all; [`Follower`](super::Follower)
 	/// decides from the path's announcements.
-	pub async fn follow(mut self, broadcast: moq_net::broadcast::Consumer) -> Result<Self, crate::Error> {
-		let catalog = crate::catalog::Consumer::new(&broadcast, self.catalog_format).await?;
+	pub fn follow(mut self, broadcast: moq_net::broadcast::Consumer, catalog: S) -> Result<Self, crate::Error> {
 		self.followed(&broadcast, catalog)?;
 		Ok(self)
-	}
-
-	pub(super) fn catalog_format(&self) -> CatalogFormat {
-		self.catalog_format
 	}
 
 	/// Whether the catalog this export last subscribed has delivered a snapshot.
@@ -1645,7 +1613,7 @@ impl<E: catalog::Catalog> Export<E> {
 	pub(super) fn followed(
 		&mut self,
 		broadcast: &moq_net::broadcast::Consumer,
-		catalog: crate::catalog::Consumer<E>,
+		catalog: S,
 	) -> Result<(), crate::Error> {
 		let same = self.instance.is_some() && broadcast.info().epoch == self.instance;
 		// The same instance keeps its siblings, but the old broadcast's routes are gone. Another
@@ -1655,7 +1623,7 @@ impl<E: catalog::Catalog> Export<E> {
 			false => self.source = self.source.switched(broadcast),
 		}
 		if !same || self.psi.is_none() {
-			let mut next = Self::build_with(self.source.clone(), broadcast, self.catalog_format, catalog);
+			let mut next = Self::new(self.source.clone(), catalog);
 			next.replay = self.replay;
 			next = next.with_delay(self.delay);
 			if let Some(rate) = self.mux_rate_override {
@@ -1681,7 +1649,8 @@ impl<E: catalog::Catalog> Export<E> {
 			return Ok(());
 		}
 
-		self.catalog = Some(catalog);
+		self.catalog = catalog;
+		self.catalog_ended = false;
 		self.cataloged = false;
 		self.si_flushed = false;
 		// A name no entry carries, so the returned catalog repoints every SI entry.
@@ -2501,6 +2470,12 @@ impl<E: catalog::Catalog> Export<E> {
 		let mut writer = TsPacketWriter::new(out);
 		writer.write_ts_packet(&packet).map_err(anyhow::Error::msg)?;
 		Ok(())
+	}
+}
+
+impl<E: catalog::Catalog> Export<crate::catalog::Consumer<E>> {
+	pub(super) fn catalog_format(&self) -> crate::catalog::CatalogFormat {
+		self.catalog.format()
 	}
 }
 

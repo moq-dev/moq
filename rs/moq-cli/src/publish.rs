@@ -675,10 +675,18 @@ pub(crate) mod tests {
 	const VERBATIM_PES_PID: u16 = 0x104;
 	const VERBATIM_PES_STREAM_ID: u8 = 0xC0;
 
+	async fn open_export(
+		source: moq_mux::Source,
+		format: CatalogFormat,
+	) -> moq_mux::Result<Export<moq_mux::catalog::Consumer<tscat::Ext>>> {
+		let catalog = source.catalog::<tscat::Ext>(format).await?;
+		Ok(Export::new(source, catalog))
+	}
+
 	/// Drain an exporter, concatenating every frame's payload until output stops. The
 	/// producers stay alive (retained tracks), so the stream never hard-ends; pull until a
 	/// `next()` blocks, surfaced here as a timeout once the buffered frames are gone.
-	async fn drain(mut exporter: Export<tscat::Ext>) -> Vec<u8> {
+	async fn drain(mut exporter: Export<moq_mux::catalog::Consumer<tscat::Ext>>) -> Vec<u8> {
 		let mut out = Vec::new();
 		// Past the export's release delay and the send-ahead window behind it, so the first
 		// frame goes out before it ends.
@@ -780,7 +788,7 @@ pub(crate) mod tests {
 		// `catalog`, the producers, and `import` stay alive: the exporter subscribes to
 		// the retained tracks.
 		drain(
-			Export::with_ts(resolved(&origin, "cli").await, CatalogFormat::Hang)
+			open_export(resolved(&origin, "cli").await, CatalogFormat::Hang)
 				.await
 				.unwrap()
 				.with_delay(RECORDING_MAX_AGE),
@@ -812,7 +820,7 @@ pub(crate) mod tests {
 	}
 
 	/// Full CLI round-trip: a TS feed with undecoded streams goes through `Publish`
-	/// (which selects the `mpegts` catalog) and the subscribe-side `Export::with_ts`,
+	/// (which selects the `mpegts` catalog) and the subscribe-side catalog stream,
 	/// and the SCTE-35 section and the verbatim PES survive with their PIDs, framing,
 	/// PES stream_id, and byte-exact payloads.
 	async fn ts_verbatim_round_trip(format: CatalogFormat) {
@@ -835,10 +843,10 @@ pub(crate) mod tests {
 		decoder.decode_chunk(&input).unwrap();
 		decoder.finish().unwrap();
 
-		// Subscribe side: the same `with_ts` call `run_ts` makes, re-emitting the
+		// Subscribe side: the same catalog stream `run_ts` selects, re-emitting the
 		// ancillary streams verbatim.
 		let output = drain(
-			Export::with_ts(resolved(&origin, "cli").await, format)
+			open_export(resolved(&origin, "cli").await, format)
 				.await
 				.unwrap()
 				.with_delay(RECORDING_MAX_AGE),

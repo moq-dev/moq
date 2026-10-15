@@ -4,6 +4,7 @@ use moq_net::PathOwned;
 
 use super::{Catalog, CatalogExt};
 use crate::Result;
+use crate::catalog::CatalogFormat;
 
 /// A catalog consumer, used to receive catalog updates and discover tracks.
 ///
@@ -18,6 +19,7 @@ use crate::Result;
 /// A catalog that misuses that reference is rejected outright (see [`Self::poll_next`]).
 pub struct Consumer<E: CatalogExt = ()> {
 	inner: moq_json::snapshot::Consumer<Catalog<E>>,
+	format: CatalogFormat,
 	/// Path of the broadcast serving this catalog, which every rendition's `broadcast`
 	/// reference resolves against.
 	base: PathOwned,
@@ -27,6 +29,7 @@ impl<E: CatalogExt> Consumer<E> {
 	/// Create a new catalog consumer from a MoQ track subscriber (uncompressed `catalog.json`).
 	pub fn new(track: moq_net::track::Subscriber) -> Self {
 		Self {
+			format: CatalogFormat::Hang,
 			base: track.broadcast().path.clone(),
 			inner: moq_json::snapshot::Consumer::new(track, moq_json::snapshot::consumer::Config::default()),
 		}
@@ -39,9 +42,14 @@ impl<E: CatalogExt> Consumer<E> {
 		let mut config = moq_json::snapshot::consumer::Config::default();
 		config.compression = moq_json::Compression::Deflate;
 		Self {
+			format: CatalogFormat::HangZ,
 			base: track.broadcast().path.clone(),
 			inner: moq_json::snapshot::Consumer::new(track, config),
 		}
+	}
+
+	pub(crate) fn format(&self) -> CatalogFormat {
+		self.format
 	}
 
 	/// Poll for the next catalog update.
