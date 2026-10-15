@@ -33,14 +33,14 @@ The backports shipped in moq-relay 0.17.3 (#5119) and `@moq/net` 0.4.3
 (refreshed 2026-10-12). Draft-22 interop on 2026-10-12 then found FETCH still
 refused on draft-20+ sessions; its backport landed on `release` in #5402.
 This README's remaining work: cut the next 0.17 patch, `@moq/net`,
-`@moq/publish`, and `@moq/hang` with it (`/bump`, then the release-plz PR), and tell the testers
-and the reporters of #5407 and #5413. After it publishes, re-measure the
-planned wire-compat breaks (CONTRIBUTING.md).
+`@moq/publish`, and `@moq/hang` with it (`/bump`, then the release-plz PR),
+and tell the testers and the reporters of #5407 and #5413. After it publishes,
+re-measure the planned wire-compat breaks (CONTRIBUTING.md).
 
 Decided 2026-10-15 (maintainer): the same patch also publishes `@moq/hang`
-with its tolerant catalog parser (#5520). It is verified backwards compatible
-with the published 0.5.2 (audit: PR_LINK). That release's re-measure is
-expected to delete the `catalog-archive` planned break.
+with its tolerant catalog parser (#5520), verified backwards compatible with
+the published 0.5.2 (audit in #5590). That release's re-measure is expected to
+delete the `catalog-archive` planned break.
 
 Decided 2026-10-13: the same patch also carries two crash and availability
 fixes reported against the release line, an unset host clock and a quiet
