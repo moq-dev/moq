@@ -1,7 +1,7 @@
 //! Writes a [`Passthrough`](super::Passthrough) track back out as the multiplex it carries.
 
 use std::sync::{Arc, Mutex};
-use std::task::{Poll, Wake, Waker};
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
 use web_async::time::Instant;
@@ -99,7 +99,10 @@ pub struct Release {
 	/// The `m2ts` track, once a catalog names it.
 	track: Option<(String, ExportSource)>,
 	readable: Arc<Readable>,
-	input: kio::Waiter,
+	/// Wakes `readable`, which forwards to the caller.
+	notify: Waker,
+	/// Keeps the source's registrations alive while a sink leaves it unpolled.
+	input: kio::Park,
 	finished: bool,
 	/// An object has gone out.
 	released: bool,
@@ -120,13 +123,13 @@ impl Release {
 		}
 		let catalog = source.catalog(catalog_format).await?;
 		let readable = Arc::new(Readable::new());
-		let input = kio::Waiter::new(Waker::from(readable.clone()));
 		let mut release = Self {
 			source,
 			catalog: Some(catalog),
 			track: None,
+			notify: Waker::from(readable.clone()),
 			readable,
-			input,
+			input: kio::Park::default(),
 			finished: false,
 			released: false,
 			delay: Duration::ZERO,
@@ -208,7 +211,9 @@ impl Release {
 					break;
 				}
 				self.readable.begin(waiter);
-				let polled = track.poll_read(&self.input);
+				// The park retires a waiter whose registrations overflowed its records.
+				let input = self.input.hold(&Context::from_waker(&self.notify));
+				let polled = track.poll_read(input);
 				self.readable.end(polled.is_pending());
 				let frame = match polled {
 					Poll::Ready(Ok(Some(frame))) => frame,
