@@ -146,7 +146,8 @@ Certificate sessions cannot renew a certificate in band, and public rules
 cannot verify a presented token; both refuse it as unsupported. A moq-transport
 `AUTHORIZATION TOKEN` on a `SUBSCRIBE` or `PUBLISH_NAMESPACE` is verified the
 same way on any draft, but its grant authorizes only that request and ends with
-it; it never joins the union. A burst of
+it; it never joins the union. A `PUBLISH_NAMESPACE` grant must cover the whole
+namespace: `room/**`, not just `room`. A burst of
 tokens past the session's pending-verification bound is refused. On moq-lite, an
 auth server that cannot answer, by timeout or outage, refuses a token as a
 transient error, and `Connection::auth()` presents it again on its reconnect

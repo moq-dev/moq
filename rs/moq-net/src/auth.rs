@@ -1140,12 +1140,15 @@ pub(crate) enum RequestKind {
 impl RequestKind {
 	/// Whether `grant`, issued to the peer that presented the token, covers this request at
 	/// `path`. A grant names what its holder may do, so a request to read is covered by its
-	/// `subscribe` patterns and a request to announce by its `publish` patterns.
+	/// `subscribe` patterns and a request to announce by its `publish` patterns. An announce
+	/// routes everything beneath its namespace, so the grant must cover that whole subtree.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn covers(self, grant: &Grant, path: &str) -> bool {
 		match self {
 			Self::Subscribe => grant.subscribe.matches(path),
-			Self::PublishNamespace => grant.publish.matches(path),
+			Self::PublishNamespace => {
+				crate::Pattern::subtree(path).is_ok_and(|subtree| grant.publish.contains(&subtree))
+			}
 		}
 	}
 }
@@ -2353,6 +2356,33 @@ mod request_token_tests {
 		assert!(!RequestKind::Subscribe.covers(&write_only, "room"));
 		assert!(RequestKind::PublishNamespace.covers(&write_only, "room"));
 		assert!(!RequestKind::PublishNamespace.covers(&read_only, "room"));
+	}
+
+	/// An announce routes its whole namespace, so a grant naming only the namespace itself
+	/// does not cover it, while one naming its subtree does.
+	#[test]
+	fn an_announce_needs_its_whole_subtree() {
+		let exact = Grant {
+			publish: crate::Pattern::literal("room").unwrap().into(),
+			subscribe: Patterns::new(),
+			expires: None,
+		};
+		let subtree = Grant {
+			publish: crate::Pattern::subtree("room").unwrap().into(),
+			subscribe: Patterns::new(),
+			expires: None,
+		};
+		assert!(!RequestKind::PublishNamespace.covers(&exact, "room"));
+		assert!(RequestKind::PublishNamespace.covers(&subtree, "room"));
+		assert!(RequestKind::PublishNamespace.covers(&subtree, "room/cam"));
+		assert!(!RequestKind::PublishNamespace.covers(&subtree, "other"));
+		// A SUBSCRIBE names one broadcast, which the exact grant's twin covers.
+		let read = Grant {
+			publish: Patterns::new(),
+			subscribe: crate::Pattern::literal("room").unwrap().into(),
+			expires: None,
+		};
+		assert!(RequestKind::Subscribe.covers(&read, "room"));
 	}
 
 	/// An acceptor-side revoke ends the request before the deadline, and does not close the
