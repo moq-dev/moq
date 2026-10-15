@@ -538,9 +538,10 @@ test("identity changes before the first announce keep the catalog ID as the trac
 	const announce = new Signal(false);
 	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("unserved.hang"), announce });
 	const video = broadcast.video("video");
-	video.config.set(videoConfig);
+	video.config.set({ ...videoConfig, bitrate: Catalog.u53(1_000_000) });
 	await settle();
-	video.config.set({ ...videoConfig, codec: "vp8" });
+	// A lower maximum for the new codec keeps the higher one rather than being refused.
+	video.config.set({ ...videoConfig, codec: "vp8", bitrate: Catalog.u53(500_000) });
 	await settle();
 
 	announce.set(true);
@@ -552,10 +553,11 @@ test("identity changes before the first announce keep the catalog ID as the trac
 	});
 	const config = (await catalog.latest())?.value.video?.renditions.video;
 	expect(config?.codec).toBe("vp8");
+	expect(config?.bitrate).toBe(Catalog.u53(1_000_000));
 	expect(config?.track).toBeUndefined();
 
 	// The first snapshot fixed the name's identity.
-	video.config.set(videoConfig);
+	video.config.set({ ...videoConfig, bitrate: Catalog.u53(1_000_000) });
 	await settle();
 	expect((await catalog.latest())?.value.video?.renditions.video?.track).toStartWith("video/");
 

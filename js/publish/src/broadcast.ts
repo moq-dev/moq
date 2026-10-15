@@ -198,8 +198,10 @@ export class Broadcast {
 			if (source === undefined) continue;
 			let track = names[rendition.name] ?? rendition.name;
 			const next = served(source);
-			let previous = this.#served?.get(track);
-			if (previous && !Json.deepEqual(previous.identity, next.identity)) {
+			// Unserved, nothing is renamed, but the catalog still refuses a maximum falling below its
+			// previous fold, so carry that fold's.
+			let previous = this.#served ? this.#served.get(track) : this.#listed.get(track);
+			if (this.#served && previous && !Json.deepEqual(previous.identity, next.identity)) {
 				track = `${rendition.name}/${Moq.Epoch.mint()}`;
 				renamed[rendition.name] = track;
 				previous = undefined;
