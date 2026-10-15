@@ -894,6 +894,9 @@ pub(crate) struct Pending {
 #[derive(Default)]
 struct PendingState {
 	requests: VecDeque<Request>,
+	/// How many requests survived the last prune: pruning again only once the queue doubles
+	/// keeps a push amortized O(1).
+	survivors: usize,
 	closed: bool,
 }
 
@@ -914,7 +917,10 @@ impl Pending {
 		}
 		// A withdrawn token gave its credit back, so it must not stay queued while the
 		// acceptor is busy: that would let a peer that keeps withdrawing grow the queue.
-		state.requests.retain(|request| request.issue().read().peer.is_none());
+		if state.requests.len() >= 2 * state.survivors.max(1) {
+			state.requests.retain(|request| request.issue().read().peer.is_none());
+			state.survivors = state.requests.len();
+		}
 		state.requests.push_back(request);
 	}
 
@@ -1507,27 +1513,32 @@ pub(crate) struct Gate {
 	direction: Direction,
 	epoch: u64,
 	part: Part,
+	/// Whether the scope allowed the path at the last permit.
+	within_limit: bool,
 }
 
 /// Which part of a [`Permit`] a [`Gate`] watches.
-#[derive(Clone, Copy)]
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
 enum Part {
 	/// The peer's grant and the scope both.
 	Both,
 	/// The peer's grant alone: a token the peer presented stands in for the scope.
 	Granted,
+	/// The peer's grant, and the scope once the announce that stood in for it closes.
+	Announced(kio::Consumer<()>),
 }
 
 impl Gate {
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn new(handle: Handle, path: crate::PathOwned, direction: Direction) -> Self {
+		let within_limit = handle.within_limit(direction, path.as_str());
 		Self {
 			handle,
 			path,
 			direction,
 			epoch: 0,
 			part: Part::Both,
+			within_limit,
 		}
 	}
 
@@ -1540,21 +1551,52 @@ impl Gate {
 		}
 	}
 
+	/// A gate for a request under a namespace the peer announced, while `live` stays open:
+	/// the announce stands in for the scope, as its own token may have authorized it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn announced(
+		handle: Handle,
+		path: crate::PathOwned,
+		direction: Direction,
+		live: kio::Consumer<()>,
+	) -> Self {
+		Self {
+			part: Part::Announced(live),
+			..Self::new(handle, path, direction)
+		}
+	}
+
+	/// Whether the session allows the path right now.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn allows(&self) -> bool {
+		let path = self.path.as_str();
+		self.handle.within_grant(self.direction, path)
+			&& match &self.part {
+				Part::Both => self.within_limit,
+				Part::Granted => true,
+				Part::Announced(live) => self.within_limit || !live.is_closed(),
+			}
+	}
+
 	/// Resolve once the session no longer allows the path. A union that is still
 	/// `None` (no answer yet, or a version without AUTH) and a session never limited
 	/// allow everything.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn poll_denied(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		loop {
-			let permit = ready_or!(self.handle.poll_permit(self.direction, &mut self.epoch, waiter));
+		while let Poll::Ready(permit) = self.handle.poll_permit(self.direction, &mut self.epoch, waiter) {
 			let path = self.path.as_str();
+			self.within_limit = permit.within_limit(path);
 			let allowed = match self.part {
 				Part::Both => permit.matches(path),
-				Part::Granted => permit.granted(path),
+				Part::Granted | Part::Announced(_) => permit.granted(path),
 			};
 			if !allowed {
 				return Poll::Ready(());
 			}
+		}
+		match &self.part {
+			Part::Announced(live) if !self.within_limit => live.poll_closed(waiter),
+			_ => Poll::Pending,
 		}
 	}
 }
@@ -1705,20 +1747,20 @@ mod tests {
 		assert_eq!(std::sync::Arc::strong_count(&slot), 1, "answered, the slot is released");
 	}
 
-	/// A withdrawn token leaves the queue on the next push, so a peer that keeps presenting and
+	/// Withdrawn tokens leave the queue as it grows, so a peer that keeps presenting and
 	/// withdrawing cannot grow it past what its credit holds open.
 	#[test]
 	fn withdrawn_tokens_leave_the_queue() {
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().unwrap();
 		let queue = handle.acceptor().unwrap();
-		let withdrawn = kio::Shared::<Issue>::default();
-		for _ in 0..3 {
-			queue.push(Request::new(Bytes::from_static(b"withdrawn"), withdrawn.clone()));
-		}
-		withdrawn.lock().peer = Some(Error::Cancel);
 		queue.push(Request::new(Bytes::from_static(b"live"), Default::default()));
-		assert_eq!(queue.state.read().requests.len(), 1, "only the live token stays queued");
+		let withdrawn = kio::Shared::<Issue>::default();
+		withdrawn.lock().peer = Some(Error::Cancel);
+		for _ in 0..1000 {
+			queue.push(Request::new(Bytes::from_static(b"withdrawn"), withdrawn.clone()));
+			assert!(queue.state.read().requests.len() <= 3, "withdrawn tokens piled up");
+		}
 		let Poll::Ready(Some(request)) = requests.poll_next(&kio::Waiter::noop()) else {
 			panic!("live request missing")
 		};

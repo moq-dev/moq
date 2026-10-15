@@ -1161,6 +1161,10 @@ where
 			ietf::Publish::ID => {
 				let msg = match ietf::Publish::decode_msg(&mut data, this.version) {
 					Err(err) if super::token::refuses_request(&err) => {
+						// Junk after the fields is fatal, which a token refusal must not hide.
+						if !data.is_empty() {
+							return Err(Error::WrongSize);
+						}
 						return Ok(this.reject_token(stream, request::Kind::Publish, body.clone(), err));
 					}
 					msg => msg?,
@@ -1181,6 +1185,10 @@ where
 				// the dispatcher turns into the protocol violation the draft requires.
 				let msg = match ietf::PublishNamespace::decode_body(&mut data, this.version, peer.negotiated()) {
 					Err(err) if super::token::refuses_request(&err) => {
+						// Junk after the fields is fatal, which a token refusal must not hide.
+						if !data.is_empty() {
+							return Err(Error::WrongSize);
+						}
 						return Ok(this.reject_token(stream, request::Kind::PublishNamespace, body.clone(), err));
 					}
 					msg => msg?,
@@ -1533,10 +1541,10 @@ where
 							Err(err) if super::token::refuses_request(&err) => {}
 							msg => {
 								msg?;
-								if !data.is_empty() {
-									return Err(Error::WrongSize);
-								}
 							}
+						}
+						if !data.is_empty() {
+							return Err(Error::WrongSize);
 						}
 					}
 					match renewal.queue((id, body), self.version) {
@@ -1627,6 +1635,10 @@ where
 				// A token refusal rejects the update, which withdraws the advertisement as
 				// any refused update does.
 				Err(err) if super::token::refuses_request(&err) => {
+					// Junk after the fields is fatal, which a token refusal must not hide.
+					if !data.is_empty() {
+						return Err(Error::WrongSize);
+					}
 					let refusal = crate::auth::Refusal {
 						reason: super::token::reason(&err).to_string(),
 						error: Error::Decode(err),
@@ -2147,7 +2159,7 @@ where
 	/// Serve materialization requests for one announced namespace: mint a source
 	/// per requested path and serve its track requests until the route is
 	/// retracted or the session dies. Tracks in flight at a retraction run to
-	/// their own end.
+	/// their own end, unless the announce was what authorized them.
 	async fn run_route(&self, path: PathOwned, generation: u64) {
 		let mut broadcasts = TaskSet::owned();
 		let mut closed_session = self.session.clone();
@@ -2327,8 +2339,9 @@ where
 
 			let path = path.to_owned();
 			let broadcast = broadcast.clone();
+			let route = route.clone();
 			subscribes.push(async move {
-				this.run_subscribe(path, broadcast, request).await;
+				this.run_subscribe(path, broadcast, route, request).await;
 			});
 		}
 
@@ -2339,26 +2352,30 @@ where
 		&mut self,
 		broadcast_path: Path<'_>,
 		// Held for the subscription's lifetime but never watched: the broadcast ending
-		// is a retraction, which does not disturb a subscription already in flight.
+		// is a retraction, which does not disturb a subscription the scope allows.
 		_broadcast: broadcast::Dynamic,
+		// Open while the namespace stays announced and authorized, which its own token may
+		// have done in place of the scope. `None` once retracted.
+		route: Option<kio::Consumer<()>>,
 		request: track::Request,
 	) {
 		// Data streams wait on the alias bound by SUBSCRIBE_OK, so leave the model request
 		// pending until its immutable track metadata is known.
 		// Subscribe only to what our grant covers (MoQ Auth), and cancel once it no longer
 		// does, leaving the rest of the session alone.
-		if !self
-			.auth
-			.allows(crate::auth::Direction::Subscribe, broadcast_path.as_str())
-		{
-			request.reject(Error::Unauthorized);
-			return;
-		}
-		let mut gate = crate::auth::Gate::new(
+		let (auth, path, direction) = (
 			self.auth.clone(),
 			broadcast_path.to_owned(),
 			crate::auth::Direction::Subscribe,
 		);
+		let mut gate = match route {
+			Some(live) => crate::auth::Gate::announced(auth, path, direction, live),
+			None => crate::auth::Gate::new(auth, path, direction),
+		};
+		if !gate.allows() {
+			request.reject(Error::Unauthorized);
+			return;
+		}
 
 		let track_name = request.name().to_owned();
 		// Group FETCHes for cache misses: standalone, so they outlive each subscription.
@@ -5906,7 +5923,7 @@ mod tests {
 		drop(consumer);
 
 		let serving = moq_net_sim::spawn(async move {
-			subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+			subscriber.run_subscribe(Path::new("broadcast"), dynamic, None, request).await;
 		});
 
 		moq_net_sim::timeout(std::time::Duration::from_secs(1), serving)
@@ -5956,7 +5973,7 @@ mod tests {
 		let request = dynamic.requested_track().await.expect("no track requested");
 
 		let serving = moq_net_sim::spawn(async move {
-			subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+			subscriber.run_subscribe(Path::new("broadcast"), dynamic, None, request).await;
 		});
 
 		// Let the SUBSCRIBE go out. No SUBSCRIBE_OK is coming, so the subscription never
@@ -6020,7 +6037,7 @@ mod tests {
 		let request = dynamic.requested_track().await.expect("no track requested");
 
 		let serving = moq_net_sim::spawn(async move {
-			subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+			subscriber.run_subscribe(Path::new("broadcast"), dynamic, None, request).await;
 		});
 
 		// Let the SUBSCRIBE go out, then retract the broadcast before any response.
@@ -6078,7 +6095,7 @@ mod tests {
 			let mut fetch = None;
 			let serving = match kind {
 				Allocated::Subscribe => moq_net_sim::spawn(async move {
-					subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+					subscriber.run_subscribe(Path::new("broadcast"), dynamic, None, request).await;
 				}),
 				Allocated::TrackStatus => moq_net_sim::spawn(async move {
 					assert!(
@@ -6204,7 +6221,7 @@ mod tests {
 		let request = dynamic.requested_track().await.expect("no track requested");
 
 		let serving = moq_net_sim::spawn(async move {
-			subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+			subscriber.run_subscribe(Path::new("broadcast"), dynamic, None, request).await;
 		});
 
 		settle().await;
@@ -6347,7 +6364,7 @@ mod tests {
 		let probe = subscriber.clone();
 
 		let serving = moq_net_sim::spawn(async move {
-			subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+			subscriber.run_subscribe(Path::new("broadcast"), dynamic, None, request).await;
 		});
 
 		// Let the SUBSCRIBE go out and the SUBSCRIBE_OK come back, so the subscription is
@@ -6426,7 +6443,7 @@ mod tests {
 
 		let probe = subscriber.clone();
 		let serving = moq_net_sim::spawn(async move {
-			subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+			subscriber.run_subscribe(Path::new("broadcast"), dynamic, None, request).await;
 		});
 
 		settle().await;
@@ -6516,7 +6533,7 @@ mod tests {
 			let request = dynamic.requested_track().await.expect("no track requested");
 
 			let serving = moq_net_sim::spawn(async move {
-				subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+				subscriber.run_subscribe(Path::new("broadcast"), dynamic, None, request).await;
 			});
 			settle().await;
 
@@ -6594,7 +6611,7 @@ mod tests {
 
 			let probe = subscriber.clone();
 			let serving = moq_net_sim::spawn(async move {
-				subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+				subscriber.run_subscribe(Path::new("broadcast"), dynamic, None, request).await;
 			});
 			settle().await;
 			let _subscription = track.subscribe(None);
@@ -8790,6 +8807,100 @@ mod tests {
 		);
 	}
 
+	/// A token-authorized announce authorizes the tracks subscribed under it, outside the
+	/// limit, and only while its token lasts.
+	#[moq_net_sim::test]
+	async fn a_token_authorized_announce_admits_its_subscriptions() {
+		const VERSION: Version = Version::Draft18;
+		let auth = crate::auth::Handle::new(false);
+		auth.authorize(&crate::auth::Grant::default());
+		// The announce's peer says nothing; the subscription's accepts it.
+		let subscribe_ok = {
+			let log = crate::lite::test_transport::Log::default();
+			let mut writer =
+				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+			writer.varint(ietf::SubscribeOk::ID).await.unwrap();
+			let ok = ietf::SubscribeOk {
+				request_id: None,
+				track_alias: 7,
+				largest: None,
+				properties: Default::default(),
+			};
+			writer.encode(&ok).await.unwrap();
+			log.writes.lock().unwrap().clone()
+		};
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new(), subscribe_ok]);
+		let (mut subscriber, mut requests, consumer, session) = announce_harness_on(VERSION, auth, session);
+		// Serve the route, which the harness leaves undriven.
+		let (tasks, mut task_set) = crate::util::TaskSet::new();
+		subscriber.tasks = tasks;
+		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
+			stream,
+			token_publish_namespace(),
+			cluster::Peer::default(),
+			None,
+		));
+
+		let mut next = std::pin::pin!(requests.next());
+		let mut issued = None;
+		for _ in 0..500 {
+			assert!(futures::poll!(run.as_mut()).is_pending(), "the announce ended early");
+			if let Poll::Ready(request) = futures::poll!(next.as_mut()) {
+				issued = Some(request.expect("a request").accept(crate::auth::Grant::all()));
+				break;
+			}
+			settle().await;
+		}
+		let issued = issued.expect("the announce never presented its token");
+
+		let mut routing = std::pin::pin!(consumer.routed_broadcast("room/alice"));
+		let mut broadcast = None;
+		for _ in 0..500 {
+			assert!(futures::poll!(run.as_mut()).is_pending(), "the announce ended early");
+			let _ = task_set.poll(&kio::Waiter::noop());
+			if let Poll::Ready(routed) = futures::poll!(routing.as_mut()) {
+				broadcast = Some(routed.expect("the announce routes the broadcast"));
+				break;
+			}
+			settle().await;
+		}
+		let broadcast = broadcast.expect("the broadcast never routed");
+
+		let track = broadcast.track("video").unwrap();
+		let mut subscribing = std::pin::pin!(track.subscribe(None));
+		let mut subscribed = None;
+		for _ in 0..500 {
+			assert!(futures::poll!(run.as_mut()).is_pending(), "the announce ended early");
+			let _ = task_set.poll(&kio::Waiter::noop());
+			if let Poll::Ready(res) = futures::poll!(subscribing.as_mut()) {
+				subscribed = Some(res.expect("the token authorizes the subscription"));
+				break;
+			}
+			settle().await;
+		}
+		let mut subscribed = subscribed.expect("the subscription never started");
+
+		issued.revoke(crate::SessionError::Unauthorized, "revoked");
+		let mut ended = None;
+		let mut retracted = false;
+		for _ in 0..500 {
+			if !retracted {
+				retracted = futures::poll!(run.as_mut()).is_ready();
+			}
+			let _ = task_set.poll(&kio::Waiter::noop());
+			if let Poll::Ready(res) = subscribed.poll_recv_group(&kio::Waiter::noop()) {
+				ended = Some(res.err());
+				break;
+			}
+			settle().await;
+		}
+		assert!(
+			matches!(ended, Some(Some(Error::Unauthorized))),
+			"the subscription must end with its token: {ended:?}"
+		);
+	}
+
 	/// A REQUEST_UPDATE the acceptor renews keeps a token-authorized announce alive past the
 	/// old grant's expiry: the subscriber re-verifies the token off the announce stream and
 	/// re-arms the deadline.
@@ -9522,9 +9633,23 @@ mod tests {
 		origin::Consumer,
 		crate::lite::test_transport::ScriptedSession,
 	) {
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]);
+		announce_harness_on(version, auth, session)
+	}
+
+	/// An announce harness over `auth` and `session`, both set up by the caller.
+	fn announce_harness_on(
+		version: Version,
+		auth: crate::auth::Handle,
+		session: crate::lite::test_transport::ScriptedSession,
+	) -> (
+		Subscriber<crate::lite::test_transport::ScriptedSession>,
+		crate::auth::Requests,
+		origin::Consumer,
+		crate::lite::test_transport::ScriptedSession,
+	) {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
-		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]);
 		let (tasks, task_set) = crate::util::TaskSet::new();
 		std::mem::forget(task_set);
 		let peer_setup = peer::PeerSetup::default();
@@ -12867,7 +12992,7 @@ mod joining_fetch_tests {
 			let mut serving_subscriber = subscriber.clone();
 			let serving = moq_net_sim::spawn(async move {
 				serving_subscriber
-					.run_subscribe(Path::new("broadcast"), dynamic, request)
+					.run_subscribe(Path::new("broadcast"), dynamic, None, request)
 					.await;
 			});
 

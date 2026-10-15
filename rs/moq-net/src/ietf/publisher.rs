@@ -649,6 +649,10 @@ where
 			ietf::Subscribe::ID => {
 				let msg = match ietf::Subscribe::decode_msg(&mut data, this.version) {
 					Err(err) if super::token::refuses_request(&err) => {
+						// Junk after the fields is fatal, which a token refusal must not hide.
+						if !data.is_empty() {
+							return Err(Error::WrongSize);
+						}
 						return Ok(this.reject_token(stream, request::Kind::Subscribe, body.clone(), err, serve));
 					}
 					msg => msg?,
@@ -669,6 +673,10 @@ where
 			ietf::Fetch::ID => {
 				let msg = match ietf::Fetch::decode_msg(&mut data, this.version) {
 					Err(err) if super::token::refuses_request(&err) => {
+						// Junk after the fields is fatal, which a token refusal must not hide.
+						if !data.is_empty() {
+							return Err(Error::WrongSize);
+						}
 						return Ok(this.reject_token(stream, request::Kind::Fetch, body.clone(), err, serve));
 					}
 					msg => msg?,
@@ -704,6 +712,10 @@ where
 				};
 				let (msg, options) = match decoded {
 					Err(err) if super::token::refuses_request(&err) => {
+						// Junk after the fields is fatal, which a token refusal must not hide.
+						if !data.is_empty() {
+							return Err(Error::WrongSize);
+						}
 						let kind = request::Kind::SubscribeNamespace;
 						return Ok(this.reject_token(stream, kind, body.clone(), err, serve));
 					}
@@ -750,6 +762,10 @@ where
 			ietf::TrackStatus::ID => {
 				let msg = match ietf::TrackStatus::decode_msg(&mut data, this.version) {
 					Err(err) if super::token::refuses_request(&err) => {
+						// Junk after the fields is fatal, which a token refusal must not hide.
+						if !data.is_empty() {
+							return Err(Error::WrongSize);
+						}
 						return Ok(this.reject_token(stream, request::Kind::TrackStatus, body.clone(), err, serve));
 					}
 					msg => msg?,
@@ -5988,6 +6004,20 @@ mod serve_tests {
 			let code = refusal(version, ietf::TrackStatus::ID, request(&[TOKEN, &other])).await;
 			let unsupported = request::to_code(&Error::Unsupported, request::Kind::TrackStatus, version);
 			assert_eq!(code, unsupported, "{version}: several tokens");
+
+			// Junk after the tokens still closes the session: a token refusal must not hide it.
+			for tokens in [[TOKEN, TOKEN], [TOKEN, &other]] {
+				let mut body = request(&tokens);
+				body.push(0);
+				let h = serve(version);
+				let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+				let closed = h
+					.publisher
+					.clone()
+					.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream)
+					.err();
+				assert!(matches!(closed, Some(Error::WrongSize)), "{version}: {closed:?}");
+			}
 
 			let h = serve(version);
 			assert_eq!(answer_code(&h, request(&[TOKEN]), version).await, None, "{version}");

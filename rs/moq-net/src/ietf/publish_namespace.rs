@@ -47,8 +47,6 @@ impl PublishNamespace<'_> {
 			cluster::HOP_PATH => hops: Option<cluster::HopPath>,
 			cluster::ROUTE_COST => cost: Option<u64>,
 		);
-		let authorization_token = super::token::single(authorization_token)?;
-
 		let cluster = match negotiated {
 			true => Some(cluster::Advert {
 				hops: hops.ok_or(DecodeError::InvalidValue)?,
@@ -59,6 +57,8 @@ impl PublishNamespace<'_> {
 			false if hops.is_some() || cost.is_some() => return Err(DecodeError::InvalidValue),
 			false => None,
 		};
+		// Last, so a malformed field closes the session before a token refusal.
+		let authorization_token = super::token::single(authorization_token)?;
 
 		Ok(Self {
 			request_id,
