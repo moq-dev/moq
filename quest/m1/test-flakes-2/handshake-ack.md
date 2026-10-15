@@ -6,6 +6,9 @@ The impaired cluster drill connects its publisher and subscriber however the
 shaper drops their handshake ACKs. `MOQ_SHAPER_SEED=13876846873975217772`
 `bursts_cross_a_cluster::impaired` (`rs/moq-relay/tests/drills.rs`), which
 fails on `main` every run with `publisher connect timed out`, passes.
+`bursts_cross_a_transport_peer::impaired` failed the same way in the merge
+queue on 2026-10-15, under the same shaper. Treat it as the same bug. Open a
+separate investigation only if it still fails after this fix lands.
 
 ## Plan
 
