@@ -49,10 +49,10 @@ for a permission, device, or settings change instead of prompting again.
 The video encoder follows its share of the connection's send-rate estimate, so
 several publishers on one connection do not each target the whole uplink.
 Codec, resolution, framerate, and bitrate are tunable through
-`el.video.config`, and `el.video.cut()` asks for an extra keyframe. A
-capture that shrinks resizes in place, while a codec or audio format change,
-or video outgrowing its advertised size, keeps the rendition's catalog ID under
-a fresh `track` name that viewers follow through the catalog. For
+`el.video.config`, and `el.video.cut()` asks for an extra keyframe. Size,
+bitrate, and framerate change in place, while a codec or audio format change
+keeps the rendition's catalog ID under a fresh `track` name that viewers
+follow through the catalog. For
 simulcast, drop the element and register several encoders on a
 `Publish.Broadcast`, as below.
 

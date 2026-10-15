@@ -239,48 +239,17 @@ for (const field of ["jitter", "delay"] as const) {
 	}
 }
 
-// Maxima only rise for a track name, but a rendition moved to a fresh track name starts over.
-for (const field of ["bitrate", "framerate"] as const) {
-	test(`catalog refuses a falling ${field} per track name`, () => {
-		const catalog = new CatalogProducer();
-		const media = (value: Catalog.Root) => {
-			const config = value.video?.renditions.media;
-			if (!config) throw new Error("expected a retained video rendition");
-			return config;
-		};
-		catalog.mutate((value) => {
-			value.video = { renditions: { media: { codec: "vp8", container: { kind: "legacy" }, [field]: 100 } } };
-		});
-		catalog.mutate((value) => {
-			media(value)[field] = Catalog.u53(200);
-		});
-		for (const maximum of [Catalog.u53(100), undefined]) {
-			expect(() =>
-				catalog.mutate((value) => {
-					media(value)[field] = maximum;
-				}),
-			).toThrow(`${field} cannot decrease`);
-		}
-		catalog.mutate((value) => {
-			Object.assign(media(value), { track: "media/2", [field]: 50 });
-		});
-		catalog.mutate((value) => {
-			expect(media(value)[field]).toBe(Catalog.u53(50));
-		});
-	});
-}
-
 // Same-named tracks in different broadcasts are different tracks.
-test("catalog keeps maxima apart for same-named tracks in different broadcasts", () => {
+test("catalog keeps estimates apart for same-named tracks in different broadcasts", () => {
 	const catalog = new CatalogProducer();
-	const rendition = (broadcast: string, bitrate: number) => ({
+	const rendition = (broadcast: string, jitter: number) => ({
 		codec: "opus",
 		container: { kind: "legacy" as const },
 		sampleRate: Catalog.u53(48000),
 		numberOfChannels: Catalog.u53(2),
 		broadcast: broadcast as Catalog.RelativeBroadcast,
 		track: "audio",
-		bitrate: Catalog.u53(bitrate),
+		jitter: Catalog.u53(jitter),
 	});
 	catalog.mutate((value) => {
 		value.audio = { renditions: { en: rendition("../en", 64), es: rendition("../es", 128) } };
@@ -486,4 +455,23 @@ describe("estimate publication window", () => {
 		advance(100);
 		expect((await consumer.latest())?.value.video?.renditions.v.jitter).toBe(Catalog.u53(3));
 	});
+});
+
+// A renamed rendition's new track starts its estimates over.
+test("catalog lets a renamed track start its estimates over", () => {
+	const catalog = new CatalogProducer();
+	const config = { codec: "vp8", container: { kind: "legacy" as const } };
+	catalog.mutate((value) => {
+		value.video = { renditions: { video: { ...config, jitter: Catalog.u53(100) } } };
+	});
+	catalog.mutate((value) => {
+		value.video = { renditions: { video: { ...config, codec: "vp9", track: "video/1", jitter: Catalog.u53(10) } } };
+	});
+	expect(() =>
+		catalog.mutate((value) => {
+			value.video = {
+				renditions: { video: { ...config, codec: "vp9", track: "video/1", jitter: Catalog.u53(5) } },
+			};
+		}),
+	).toThrow("jitter cannot decrease");
 });

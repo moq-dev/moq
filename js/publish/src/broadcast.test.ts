@@ -401,10 +401,17 @@ test("registering a sibling after an encoder failure keeps the network broadcast
 
 // A name always means the same content, so a served rendition whose decoder identity changes moves to
 // a fresh track name under the same catalog ID and epoch, ending the old track on its old identity.
-test("a served identity change moves the rendition to a fresh track name", async () => {
+// Fields a decoder needn't reinitialize for update the served track in place.
+test("a served decoder identity change moves the rendition to a fresh track name", async () => {
 	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("identity.hang") });
 	const video = broadcast.video("video");
-	const sized = { ...videoConfig, codedWidth: Catalog.u53(640), codedHeight: Catalog.u53(480) };
+	const sized = {
+		...videoConfig,
+		codedWidth: Catalog.u53(1280),
+		codedHeight: Catalog.u53(720),
+		bitrate: Catalog.u53(1_000_000),
+		framerate: 30,
+	};
 	video.config.set(sized);
 	await settle();
 
@@ -422,41 +429,46 @@ test("a served identity change moves the rendition to a fresh track name", async
 		if (!track) throw new Error("expected the demanded track");
 		track.appendGroup().close();
 
-		// A rising maximum stays on the served track.
-		video.config.set({ ...sized, bitrate: Catalog.u53(1_000_000) });
-		await settle();
-		expect((await catalog.latest())?.value.video?.renditions.video?.track).toBeUndefined();
-		expect(video.track.peek()).toBe(track);
+		// Bitrate, frame rate, and coded size move either way on the served track.
+		for (const update of [
+			{ bitrate: Catalog.u53(250_000), framerate: 15 },
+			{ codedWidth: Catalog.u53(1920), codedHeight: Catalog.u53(1080), bitrate: Catalog.u53(4_000_000) },
+			{ codedWidth: Catalog.u53(640), codedHeight: Catalog.u53(360) },
+		]) {
+			video.config.set({ ...sized, ...update });
+			await settle();
+			const config = (await catalog.latest())?.value.video?.renditions.video;
+			expect(config).toMatchObject(update);
+			expect(config?.track).toBeUndefined();
+			expect(video.track.peek()).toBe(track);
+		}
 
-		// Outgrowing the coded-size ceiling is a new identity.
-		video.config.set({
-			...videoConfig,
-			codedWidth: Catalog.u53(1280),
-			codedHeight: Catalog.u53(720),
-			bitrate: Catalog.u53(1_000_000),
-		});
+		// A codec change is a new identity.
+		video.config.set({ ...sized, codec: "vp8" });
 		await settle();
 		const config = (await catalog.latest())?.value.video?.renditions.video;
-		if (!config?.track) throw new Error("expected a fresh track name");
-		expect(config.track).toStartWith("video/");
-		expect(config.codedWidth).toBe(Catalog.u53(1280));
+		expect(config?.track).toBe("video/1");
+		expect(config?.codec).toBe("vp8");
 		expect(track.closed.peek()).toBeNull();
 		expect(video.track.peek()).toBeUndefined();
 		expect(broadcast.net.peek()).toBe(net);
 		expect(net.route?.epoch).toBe(epoch);
 
-		const second = net.track(config.track).subscribe();
+		const second = net.track("video/1").subscribe();
 		await settle();
 		const replacement = video.track.peek();
-		expect(replacement?.name).toBe(config.track);
+		expect(replacement?.name).toBe("video/1");
 		expect(replacement?.appendGroup().sequence).toBe(0);
 
-		// A codec change moves it again rather than redefining the second name.
-		video.config.set({ ...config, track: undefined, codec: "vp8" });
+		// So is a display aspect change, which moves it again rather than redefining the second name.
+		video.config.set({
+			...sized,
+			codec: "vp8",
+			displayAspectWidth: Catalog.u53(4),
+			displayAspectHeight: Catalog.u53(3),
+		});
 		await settle();
-		const third = (await catalog.latest())?.value.video?.renditions.video?.track;
-		expect(third).toStartWith("video/");
-		expect(third).not.toBe(config.track);
+		expect((await catalog.latest())?.value.video?.renditions.video?.track).toBe("video/2");
 		expect(replacement?.closed.peek()).toBeNull();
 		second.close();
 	} finally {
@@ -465,28 +477,20 @@ test("a served identity change moves the rendition to a fresh track name", async
 	}
 });
 
-// A track keeps the most it has carried, even across its rendition's removal.
-test("a served track never lowers its maxima", async () => {
-	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("maxima.hang") });
-	let audio = broadcast.audio("audio");
-	audio.config.set({ ...audioConfig, bitrate: Catalog.u53(128_000) });
+// The counter skips every name this broadcast already uses, including an application's own sections.
+test("a minted track name skips names already in the catalog", async () => {
+	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("collide.hang") });
+	broadcast.audio("video/1").config.set(audioConfig);
+	broadcast.catalog.mutate((catalog) => {
+		catalog.json = { tracks: { meta: { mode: "stream", track: "video/2" } } };
+	});
+	const video = broadcast.video("video");
+	video.config.set(videoConfig);
 	await settle();
 
-	audio.close();
+	video.config.set({ ...videoConfig, codec: "vp8" });
 	await settle();
-	audio = broadcast.audio("audio");
-	audio.config.set({ ...audioConfig, bitrate: Catalog.u53(32_000) });
-	await settle();
-	let config = (await readCatalog(broadcast))?.audio?.renditions.audio;
-	expect(config?.bitrate).toBe(Catalog.u53(128_000));
-	expect(config?.track).toBeUndefined();
-
-	audio.config.set({ ...audioConfig, bitrate: Catalog.u53(256_000) });
-	await settle();
-	audio.config.set({ ...audioConfig, bitrate: Catalog.u53(64_000) });
-	await settle();
-	config = (await readCatalog(broadcast))?.audio?.renditions.audio;
-	expect(config?.bitrate).toBe(Catalog.u53(256_000));
+	expect((await readCatalog(broadcast))?.video?.renditions.video?.track).toBe("video/3");
 
 	broadcast.close();
 });
@@ -503,7 +507,7 @@ test("mutating a shared container still takes a fresh track name", async () => {
 	container.init = "BBBB";
 	video.config.set({ ...videoConfig, container, bitrate: Catalog.u53(1_000_000) });
 	await settle();
-	expect((await readCatalog(broadcast))?.video?.renditions.video?.track).toStartWith("video/");
+	expect((await readCatalog(broadcast))?.video?.renditions.video?.track).toBe("video/1");
 
 	broadcast.close();
 });
@@ -515,11 +519,11 @@ test("a name returning with a different identity takes a fresh track name", asyn
 	await settle();
 	expect((await readCatalog(broadcast))?.audio?.renditions.audio?.track).toBeUndefined();
 
-	// The same identity returns to its track.
+	// The same identity returns to its track, even at a lower bitrate.
 	audio.close();
 	await settle();
 	audio = broadcast.audio("audio");
-	audio.config.set(audioConfig);
+	audio.config.set({ ...audioConfig, bitrate: Catalog.u53(32_000) });
 	await settle();
 	expect((await readCatalog(broadcast))?.audio?.renditions.audio?.track).toBeUndefined();
 
@@ -528,7 +532,7 @@ test("a name returning with a different identity takes a fresh track name", asyn
 	audio = broadcast.audio("audio");
 	audio.config.set({ ...audioConfig, numberOfChannels: Catalog.u53(1) });
 	await settle();
-	expect((await readCatalog(broadcast))?.audio?.renditions.audio?.track).toStartWith("audio/");
+	expect((await readCatalog(broadcast))?.audio?.renditions.audio?.track).toBe("audio/1");
 
 	broadcast.close();
 });
@@ -540,7 +544,6 @@ test("identity changes before the first announce keep the catalog ID as the trac
 	const video = broadcast.video("video");
 	video.config.set({ ...videoConfig, bitrate: Catalog.u53(1_000_000) });
 	await settle();
-	// A lower maximum for the new codec keeps the higher one rather than being refused.
 	video.config.set({ ...videoConfig, codec: "vp8", bitrate: Catalog.u53(500_000) });
 	await settle();
 
@@ -553,13 +556,13 @@ test("identity changes before the first announce keep the catalog ID as the trac
 	});
 	const config = (await catalog.latest())?.value.video?.renditions.video;
 	expect(config?.codec).toBe("vp8");
-	expect(config?.bitrate).toBe(Catalog.u53(1_000_000));
+	expect(config?.bitrate).toBe(Catalog.u53(500_000));
 	expect(config?.track).toBeUndefined();
 
 	// The first snapshot fixed the name's identity.
-	video.config.set({ ...videoConfig, bitrate: Catalog.u53(1_000_000) });
+	video.config.set(videoConfig);
 	await settle();
-	expect((await catalog.latest())?.value.video?.renditions.video?.track).toStartWith("video/");
+	expect((await catalog.latest())?.value.video?.renditions.video?.track).toBe("video/1");
 
 	broadcast.close();
 });

@@ -51,15 +51,14 @@ VP9, AV1, AAC, and Opus are what the tools produce today. Properties shared by
 every video rendition (display size, rotation, flip) sit at the section root.
 
 A track name always means the same content, so a catalog update never
-redefines a track. Its codec, description, container, sample rate, and channel
-count are fixed. `codedWidth` and `codedHeight` are ceilings: the picture
-resizes in band at a keyframe below them, unless a `description` pins it.
-`bitrate` and `framerate` are maxima that only rise, like `jitter` and `delay`.
-Everything else, such as `enabled` and the section's display size, updates
-freely. A
-publisher that needs a new identity publishes a new track name, or restarts the
-broadcast under a new [epoch](/concept/moq-lite#publisher-epochs). A player can
-configure its decoder once per track.
+redefines a track. The fields a decoder can't change without reinitializing
+are fixed: codec, description, container, display aspect, sample rate, and
+channel count. Everything else, such as the coded size, `bitrate`,
+`framerate`, and `enabled`, updates in place; the picture resizes in band at a
+keyframe unless a `description` pins it. A publisher that needs a new identity
+publishes a new track name, or restarts the broadcast under a new
+[epoch](/concept/moq-lite#publisher-epochs). A player can configure its
+decoder once per track.
 
 A few things the catalog can express beyond decoder config:
 

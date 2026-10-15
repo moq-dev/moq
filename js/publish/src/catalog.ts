@@ -31,14 +31,12 @@ export class CatalogProducer {
 		fn(value);
 		// Every consumer refuses a catalog that fails this, so refuse the edit before it reaches one.
 		Catalog.checkRenditions(value);
-		// Estimates and maxima only rise for a track name; a renamed rendition starts its new track over.
-		for (const field of ["jitter", "delay", "bitrate", "framerate"] as const) {
+		// Estimates only rise for a track; a renamed rendition starts its new track over.
+		for (const field of ["jitter", "delay"] as const) {
 			const previous = advertised(this.#value, field);
 			for (const [section, next] of Object.entries(advertised(value, field))) {
 				for (const [name, estimate] of Object.entries(next)) {
-					if (estimate === 0 && (field === "jitter" || field === "delay")) {
-						throw new Error(`omit ${field} rather than advertising 0`);
-					}
+					if (estimate === 0) throw new Error(`omit ${field} rather than advertising 0`);
 					const before = previous[section]?.[name];
 					if (before !== undefined && (estimate === undefined || estimate < before)) {
 						throw new Error(`${field} cannot decrease for an existing track`);
@@ -114,19 +112,12 @@ function structure(catalog: Catalog.Root): Catalog.Root {
 	return value;
 }
 
-type Advertised = {
-	broadcast?: string;
-	track?: string;
-	jitter?: number;
-	delay?: number;
-	bitrate?: number;
-	framerate?: number;
-};
+type Advertised = { broadcast?: string; track?: string; jitter?: number; delay?: number };
 
 /** Every track's advertised `field`, by section and then the track's broadcast and name. */
 function advertised(
 	catalog: Catalog.Root,
-	field: "jitter" | "delay" | "bitrate" | "framerate",
+	field: "jitter" | "delay",
 ): Record<string, Record<string, number | undefined>> {
 	const pick = (tracks: Record<string, Advertised> | undefined) =>
 		Object.fromEntries(

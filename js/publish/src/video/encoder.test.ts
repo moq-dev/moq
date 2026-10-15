@@ -1480,9 +1480,9 @@ test("a refused first ceiling recovers at a smaller size", async () => {
 	}
 });
 
-// Outgrowing the advertised ceiling is a new identity, so the broadcast serves the larger ceiling under
-// a fresh track name while the epoch and the maxima carry on. A shrink stays in band on the old name.
-test("ceiling growth moves the rendition to a fresh track name", async () => {
+// A decoder follows a resize in band, so outgrowing the advertised size re-probes for a codec that
+// covers it and updates the served track in place while the codec string holds. A shrink stays in band.
+test("ceiling growth updates the served track in place", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
 	using _probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockResolvedValue({ supported: true });
 	using _now = spyOn(performance, "now").mockReturnValue(0);
@@ -1515,9 +1515,8 @@ test("ceiling growth moves the rendition to a fresh track name", async () => {
 
 		capture.out.display.set({ width: 1280, height: 720 });
 		const grown = await next((config) => config.codedWidth === 1280);
-		expect(grown).toMatchObject({ codedHeight: 720, framerate: 60 });
-		expect(grown.track).toStartWith("video/");
-		expect(grown.bitrate ?? 0).toBeGreaterThanOrEqual(initial.bitrate ?? 0);
+		expect(grown).toMatchObject({ codec: initial.codec, codedHeight: 720, framerate: 60 });
+		expect(grown.track).toBeUndefined();
 		expect(broadcast.net.peek()).toBe(net);
 	} finally {
 		subscriber.close();
