@@ -36,8 +36,8 @@ test("an approved wire break can retain its protocol name, but new drafts still 
 	const exception = { reason: "Unpublished wire changed", releases: { "@moq/net": "0.4.1" } };
 	expect(matrix([OLD], [OLD], { [OLD]: exception }).shared).toEqual([OLD]);
 	const cell = { lane: "fetch", version: OLD, relay: "current", publisher: "released" };
-	expect(planned({ [OLD]: exception }, cell)).toBe(OLD);
-	expect(planned({ [OLD]: exception }, { ...cell, version: NEW })).toBeUndefined();
+	expect(planned({ [OLD]: exception }, cell)).toEqual([OLD]);
+	expect(planned({ [OLD]: exception }, { ...cell, version: NEW })).toEqual([]);
 	expect(() => matrix([OLD], [OLD, NEW], { [OLD]: exception })).toThrow("removed published");
 });
 
@@ -58,9 +58,9 @@ test("a cell-scoped break skips only its cells and expires with its releases", (
 	expect(() => stale(breaks, [OLD], { "moq-relay": "1.0.1" })).toThrow("stale");
 	expect(() => stale(breaks, [NEW], { "moq-relay": "1.0.0" })).toThrow("moq-lite-01 is no longer released");
 	const cell = { lane: "fetch", version: OLD, relay: "released", publisher: "current" };
-	expect(planned(breaks, cell)).toBe("hang");
-	expect(planned(breaks, { ...cell, relay: "current" })).toBeUndefined();
-	expect(planned(breaks, { ...cell, lane: "media" })).toBeUndefined();
+	expect(planned(breaks, cell)).toEqual(["hang"]);
+	expect(planned(breaks, { ...cell, relay: "current" })).toEqual([]);
+	expect(planned(breaks, { ...cell, lane: "media" })).toEqual([]);
 });
 
 test("media controls always use a published lite baseline on both sources", () => {
@@ -78,7 +78,7 @@ test("planned breaks never skip same-source media controls", () => {
 	for (const source of ["current", "released"]) {
 		expect(
 			planned(breaks, { lane: "media-control", version: "moq-lite-06", relay: source, publisher: source }),
-		).toBeUndefined();
+		).toEqual([]);
 	}
 	expect(() =>
 		planned(breaks, { lane: "media-control", version: "moq-lite-06", relay: "current", publisher: "released" }),
@@ -100,10 +100,10 @@ test("a re-measure re-pins each break that still fails and deletes the rest", ()
 	const { breaks: result, report } = remeasure(
 		breaks,
 		[
-			{ name: OLD, cell: "a", passed: false },
-			{ name: OLD, cell: "b", passed: true },
-			{ name: "archive", cell: "c", passed: false },
-			{ name: "fixed", cell: "d", passed: true },
+			{ names: [OLD], cell: "a", passed: false },
+			{ names: [OLD], cell: "b", passed: true },
+			{ names: ["archive"], cell: "c", passed: false },
+			{ names: ["fixed"], cell: "d", passed: true },
 		],
 		{ current: [OLD], released: [OLD, "moq-transport-14"], releases },
 	);
@@ -133,4 +133,22 @@ test("a re-measure keeps a protocol break while the checkout lacks its version",
 	});
 	expect(remeasure(breaks, [], { current: [NEW], released: [NEW], releases }).breaks).toEqual({});
 	expect(() => remeasure(breaks, [], { current: [NEW], released: [OLD], releases: {} })).toThrow("does not resolve");
+});
+
+test("a cell two breaks cover counts for both, judged by the cells each covers alone", () => {
+	const breaks = {
+		[NEW]: { reason: "wire changed", releases: { "moq-cli": "1.0.0" } },
+		archive: { reason: "catalog break", releases: { "@moq/hang": "1.0.0" }, cells: { lanes: ["media"] } },
+	};
+	const cell = { lane: "media", version: NEW, relay: "current", publisher: "current" };
+	expect(planned(breaks, cell)).toEqual([NEW, "archive"]);
+	const releases = { "moq-cli": "1.0.1", "@moq/hang": "1.0.1" };
+	const context = { current: [OLD, NEW], released: [OLD, NEW], releases };
+	// Every cell the archive break covers is shared, so their failures still keep it.
+	const shared = { names: [NEW, "archive"], cell: "shared", passed: false };
+	expect(Object.keys(remeasure(breaks, [shared], context).breaks)).toEqual([NEW, "archive"]);
+	// Once it has a cell to itself, the other break's failures no longer keep it.
+	const fixed = { names: ["archive"], cell: "alone", passed: true };
+	expect(Object.keys(remeasure(breaks, [shared, fixed], context).breaks)).toEqual([NEW]);
+	expect(() => matrix([OLD], [OLD], { "two words": breaks.archive })).toThrow("invalid planned break");
 });

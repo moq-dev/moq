@@ -60,6 +60,8 @@ export function matrix(currentAll: string[], releasedAll: string[], skipped: Rec
 	const released = releasedAll.filter(lite);
 	for (const [name, exception] of Object.entries(skipped)) {
 		if (
+			// The harness logs and records covering breaks as space-separated names.
+			!/^[\w.-]+$/.test(name) ||
 			!exception.reason?.trim() ||
 			!Object.keys(exception.releases).length ||
 			(exception.cells && !exception.cells.lanes.length)
@@ -93,16 +95,18 @@ export function stale(skipped: Record<string, PlannedBreak>, releasedAll: string
 	}
 }
 
-/** One session cell a planned break covered, run anyway by a re-measure. */
+/** One session cell planned breaks covered, run anyway by a re-measure. */
 export interface Measured {
-	name: string;
+	names: string[];
 	cell: string;
 	passed: boolean;
 }
 
 /**
  * Re-pin each planned break that still fails to the measured releases, and delete the
- * rest. A protocol-keyed break also still fails while the checkout lacks its version.
+ * rest. A break is judged by the cells it covers alone when it has any, so another
+ * break's failures cannot keep it. A protocol-keyed break also still fails while the
+ * checkout lacks its version.
  */
 export function remeasure(
 	skipped: Record<string, PlannedBreak>,
@@ -117,7 +121,9 @@ export function remeasure(
 	const breaks: Record<string, PlannedBreak> = {};
 	const report: string[] = [];
 	for (const [name, exception] of Object.entries(skipped)) {
-		const cells = measured.filter((m) => m.name === name);
+		const covered = measured.filter((m) => m.names.includes(name));
+		const alone = covered.filter((m) => m.names.length === 1);
+		const cells = alone.length ? alone : covered;
 		const failing = cells.filter((m) => !m.passed).map((m) => m.cell);
 		const removed = !exception.cells && released.includes(name) && !current.includes(name);
 		if (!failing.length && !removed) {
@@ -162,23 +168,23 @@ export function mediaControls(current: string[], released: string[]) {
 	];
 }
 
-/** The planned break that skips `cell`, if any. */
-export function planned(skipped: Record<string, PlannedBreak>, cell: Cell): string | undefined {
+/** Every planned break that covers `cell`; a cell any break covers is skipped. */
+export function planned(skipped: Record<string, PlannedBreak>, cell: Cell): string[] {
 	if (cell.lane === "media-control") {
 		if (cell.relay !== cell.publisher) throw new Error("media control must use one source");
-		return undefined;
+		return [];
 	}
-	for (const [name, { cells }] of Object.entries(skipped)) {
-		// A break keyed by protocol version covers every cell of that version.
-		const covers = cells
-			? cells.lanes.includes(cell.lane) &&
-				(!cells.versions || cells.versions.includes(cell.version)) &&
-				(!cells.relay || cells.relay === cell.relay) &&
-				(!cells.publisher || cells.publisher === cell.publisher)
-			: name === cell.version;
-		if (covers) return name;
-	}
-	return undefined;
+	// A break keyed by protocol version covers every cell of that version.
+	return Object.entries(skipped)
+		.filter(([name, { cells }]) =>
+			cells
+				? cells.lanes.includes(cell.lane) &&
+					(!cells.versions || cells.versions.includes(cell.version)) &&
+					(!cells.relay || cells.relay === cell.relay) &&
+					(!cells.publisher || cells.publisher === cell.publisher)
+				: name === cell.version,
+		)
+		.map(([name]) => name);
 }
 
 async function registry(url: string) {
@@ -225,8 +231,8 @@ if (import.meta.main) {
 			.split("\n")
 			.filter(Boolean)
 			.map((line) => {
-				const [name, result, cell] = line.split("\t");
-				return { name, cell, passed: result === "pass" };
+				const [names, result, cell] = line.split("\t");
+				return { names: names.split(" "), cell, passed: result === "pass" };
 			});
 		const result = remeasure(JSON.parse(readFileSync(breaks, "utf8")), measured, {
 			current: versions(readFileSync(currentHelp, "utf8")),
@@ -237,7 +243,7 @@ if (import.meta.main) {
 		console.log(result.report.join("\n"));
 	} else if (command === "skip") {
 		const [file, lane, version, relay, publisher] = args;
-		const name = planned(JSON.parse(readFileSync(file, "utf8")), { lane, version, relay, publisher });
-		if (name) console.log(name);
+		const names = planned(JSON.parse(readFileSync(file, "utf8")), { lane, version, relay, publisher });
+		if (names.length) console.log(names.join(" "));
 	} else throw new Error("expected resolve, matrix, remeasure, or skip");
 }
