@@ -1051,10 +1051,13 @@ fn session(c: &mut Criterion) {
 	join(
 		c,
 		"broadcasts",
-		[1, 64, 1024].map(|broadcasts| Shape {
-			publishers: 1,
-			broadcasts,
-			..base
+		[1, 2, 8].into_iter().flat_map(|relays| {
+			[1, 64, 1024].map(move |broadcasts| Shape {
+				publishers: 1,
+				broadcasts,
+				relays,
+				..base
+			})
 		}),
 	);
 	join(c, "relays", [1, 2, 8].map(|relays| Shape { relays, ..base }));
