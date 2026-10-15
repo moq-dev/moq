@@ -15,10 +15,11 @@ The released Rust, Python, Kotlin, C, and GStreamer readers pass.
 
 Parser tolerance landed on main in #5485 and on the Rust release line in
 #5520. Released `@moq/hang` 0.5.2 and the Go module installed in that run
-still require the old archive shape. Verify which published artifacts carry
-the corrected parser and advance their publication through the normal
-release process. This quest does not authorize a breaking release cut or
-version bumps outside that process.
+still require the old archive shape. The next 0.17 patch publishes
+`@moq/hang` with that parser (decided in #5590, owned by the release-line
+patch). Verify which published artifacts carry the corrected parser and
+advance any others through the normal release process. This quest does not
+authorize a breaking release cut or version bumps outside that process.
 
 Complete against packages installed from their registries in smoke, keeping
 every MoQ package at latest. Do not pin an older publisher, skip these cells,
