@@ -43,6 +43,10 @@ Decided with the maintainer on 2026-10-13:
 - **Measure**: no-op and record call overhead, payload throughput across
   frame sizes from 100 B to 1 MB, and the cost of each async await.
   Re-measure UniFFI rather than trusting BoltFFI's numbers for it.
+  `just bench-ffi` gives UniFFI's numbers through the real moq-ffi. A known
+  UniFFI cost to weigh: Kotlin sync calls measured 11-22 us against 1.3 us
+  from Python on 2026-10-15, from JNA per-call structures and per-wakeup
+  thread attach ([Kotlin calls](/quest/m1/kt-ffi-calls.md)).
 - **Size table**: native library, generated bindings, and wasm plus JS glue
   (gzip), for both generators. Measure the native library with moq-ffi's
   default features on and off; the toggle changes nothing on wasm32, where
