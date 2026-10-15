@@ -49,6 +49,9 @@ Recommendations:
 - Each binary has its own `Signals`, installed before anything serves so a
   signal right after a handshake drains instead of killing the process. The
   shared drain takes one copy and keeps that ordering.
+- The relay skips READY when a stop arrives during startup. The CLI does not
+  yet: its stages report ready from many places (`notify_ready`), so the
+  shared drain should own the stop state they check.
 - Bound the `end` delivery by the auth client's own request timeout. Add no
   drain-specific cap.
 - Tests on a paused clock for both binaries' drain paths. A session that

@@ -530,7 +530,7 @@ impl Relay {
 
 		// Before anything serves or reports ready: until a handler is installed the
 		// default action kills the process, cutting off sessions without a GOAWAY.
-		let signals = signals.then(Signals::new).transpose()?;
+		let mut signals = signals.then(Signals::new).transpose()?;
 
 		let web_routes = web_routes.unwrap_or_else(|| web.routes());
 		let internal_routes = internal_routes.unwrap_or_else(|| internal.routes());
@@ -561,11 +561,21 @@ impl Relay {
 				.context("failed to start the io_uring QUIC workers")?;
 		}
 
-		ready.send_replace(true);
+		// A stop requested while starting (a queued signal or the embedder's
+		// trigger) skips readiness. The drain below still runs, and exits once
+		// nothing is left.
+		if futures::FutureExt::now_or_never(Signals::recv_some(&mut signals)).is_some() {
+			shutdown_trigger.start();
+		}
+		if shutdown.deadline().is_some() {
+			tracing::info!("shutdown requested during startup; not reporting ready");
+		} else {
+			ready.send_replace(true);
 
-		#[cfg(unix)]
-		// Notify systemd that we're ready after all initialization is complete
-		let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
+			#[cfg(unix)]
+			// Notify systemd that we're ready after all initialization is complete
+			let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
+		}
 
 		#[cfg(feature = "jemalloc")]
 		let jemalloc = moq_tokio::jemalloc::run();
@@ -886,6 +896,20 @@ mod tests {
 		assert!(!draining.is_finished(), "drain ended under an established session");
 		drop(session);
 		draining.await.unwrap().unwrap();
+	}
+
+	/// A stop requested before startup finishes is never reported as ready, and
+	/// the relay still exits cleanly.
+	#[tokio::test(start_paused = true)]
+	async fn a_stop_during_startup_skips_readiness() {
+		let mut config = crate::Config::default();
+		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.auth.public = vec![moq_auth::Pattern::all()];
+		let relay = super::Relay::load(config).await.unwrap().with_signals(false);
+		let ready = relay.ready();
+		relay.shutdown_trigger().start();
+		relay.run().await.unwrap();
+		assert!(ready.wait().await.is_err(), "reported ready after a stop was requested");
 	}
 
 	/// A connection arriving as the last admitted one leaves is either counted
