@@ -102,6 +102,7 @@ Severities: **hard** checks fail the run by default; **shape** checks report as
 | `duration-fidelity` | hard | exported PCR span tracks the source's duration (round-trip only) |
 | `service-descriptors` | shape | an SDT naming the service is present |
 | `tstd` | hard | the supported elementary-stream T-STD models: no TB, MB, EB or B overflow, no access unit incomplete at its decoding time (see [T-STD](#t-std)) |
+| `system-buffers` | hard | each program's TBsys and Bsys: neither overflows, and TBsys empties at least once a second (see [T-STD](#t-std)) |
 
 Every timing check reads the stream's own PCR, so a PCR emitted on the wrong
 clock rate stays internally consistent and passes them all. `duration-fidelity`
@@ -153,9 +154,17 @@ Opus is graded against ADTS's buffers for the same channel count: the Opus-in-TS
 draft gives Rx (2 Mb/s for 1-2 channels, matching ADTS) but leaves the buffer size
 unset, so that size is borrowed rather than specified. A stream with no parameters
 at all is refused by name rather than skipped, which fails the check: MPEG-1/2
-video, DVB E-AC-3, and HEVC beyond Main/Main 10. The PSI system buffer is not implemented. Sections and private data
+video, DVB E-AC-3, and HEVC beyond Main/Main 10. Sections and private data
 (SCTE-35, teletext) are listed as not graded; passing elementary-stream buffers
-does not establish conformance for them. A signalled PCR discontinuity starts fresh buffers, since the timestamps
+does not establish conformance for them.
+
+`system-buffers` runs each program's PIDs 0-3 and PMT through one TBsys (512 B at
+Rxsys = 1 Mb/s) and on into one Bsys (1,536 B, emptied at Rsys = max(80 kb/s,
+transport rate / 500)), on the program's PCR, as 2.4.2.3 specifies: a packet's
+bytes enter Bsys as they leave TBsys, and a duplicate (2.4.3.3) enters TBsys but
+not Bsys. The exporter paces its tables against both only when it pads to a
+multiplex rate. Unpadded output makes no system-buffer claim: its tables go out
+as muxed. A signalled PCR discontinuity starts fresh buffers, since the timestamps
 on either side of it are on different clocks.
 
 Every packet on an elementary stream's PID enters TB, including adaptation-only
@@ -217,6 +226,9 @@ a PCR packet between them. Each case fails without the handling it names:
 | four adaptation-only packets after an access unit | TB overflow |
 | an access unit's first packet sent twice | pass |
 | the PMT declares a PCR PID that carries no PCR | `pcr-presence` fails |
+| a PAT and three PMT copies back to back | TBsys overflow |
+| ten PMT copies, each arriving as TBsys passes the last on | Bsys overflow |
+| PMT copies at Rxsys for 1.5 s, one packet ahead | TBsys not emptied within 1 s, Bsys overflow |
 
 Synthetic MPEG audio streams pack several 576-byte frames per PES, so frames end
 partway through packets, and the last is cut off by the end of the capture:

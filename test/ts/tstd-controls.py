@@ -32,6 +32,11 @@ with each AU in its own PES, a PCR packet between AUs and nulls elsewhere.
     teletext burst      eight teletext packets back to back           TB overflow (EN 300 472's 480 B,
                                                                       where 2.4.2.3's 512 B holds them)
     PCR PID mismatch    the PMT declares a PID that carries no PCR    pcr-presence fails
+    table burst         a PAT and three PMT copies back to back      TBsys overflow
+    Bsys burst          ten PMT copies, each as TBsys passes the      Bsys overflow (80 kb/s Rsys)
+                        last on
+    TBsys kept busy     PMT copies at Rxsys for 1.5 s, one ahead      TBsys not emptied within 1 s,
+                                                                      Bsys overflow
 
 and an MPEG audio stream whose frames end partway through a packet, each decoded
 just after its last byte leaves TB, but before the rest of that packet has; its
@@ -139,10 +144,27 @@ def synthetic(path: str, layout: str) -> None:
 
     frames = 50
     pending = None
+    # The next position a PMT copy takes in place of a null, and how many are left to go.
+    table_at, tables = 0, 0
+    busy = layout == "TBsys kept busy"
     for k in range(frames):
         begin = len(out)
-        emit(0, b"\x00" + pat, pusi=True)
-        emit(PMT_PID, b"\x00" + pmt, pusi=True)
+        if not busy or k == 0:
+            emit(0, b"\x00" + pat, pusi=True)
+            emit(PMT_PID, b"\x00" + pmt, pusi=True)
+        if layout == "table burst" and k == 20:
+            # With the PAT and PMT, four packets at 10 Mb/s against TBsys's 1 Mb/s: 169 B
+            # stay in it per packet, 677 B by the fourth.
+            for _ in range(2):
+                emit(PMT_PID, b"\x00" + pmt, pusi=True)
+        if layout == "Bsys burst" and k == 20:
+            # Ten copies, one every 10 positions: the 1,504 us TBsys takes to pass one on, so
+            # it holds 320 B at most, while Bsys takes 2 KB against its 10 kB/s drain.
+            table_at, tables = len(out) + 10, 10
+        if busy and k == 1:
+            # Copies at TBsys's own rate for 1.5 s, one packet ahead, so it never empties.
+            emit(PMT_PID, b"\x00" + pmt, pusi=True)
+            table_at, tables = len(out), round(1.5 / (10 * SLOT_S))
         unit = b"\x00\x00\x00\x01\x09\xf0" + (b"\x00\x00\x00\x01" + SPS if k == 0 else b"")
         unit += b"\x00\x00\x01\x65" + b"\xaa" * 250
         # Each AU decodes 0.5 s after its first byte arrives.
@@ -167,6 +189,9 @@ def synthetic(path: str, layout: str) -> None:
                 pcr = round((1.0 + len(out) * SLOT_S) * compliance.PCR_HZ)
                 field = bytes([0x10]) + ((pcr // 300) << 15 | 0x7E00 | pcr % 300).to_bytes(6, "big")
                 emit(VIDEO_PID, adaptation=field)
+            elif tables and len(out) >= table_at:
+                emit(PMT_PID, b"\x00" + pmt, pusi=True)
+                table_at, tables = table_at + 10, tables - 1
             else:
                 out.append(packet(0x1FFF, 0, b"\xff" * 184))
     with open(path, "wb") as handle:
@@ -288,7 +313,8 @@ MID_PACKET_S = 19 * 6 * SLOT_S + 100 * BYTE_S
 
 
 # (name, builder, expected): violations that must all appear, "pass", a refusal's text,
-# or ("fails", check) for a check other than tstd that must fail.
+# ("fails", check) for a check other than tstd that must fail, or (check, violations)
+# for the system buffers.
 CASES = [
     ("as captured", lambda _path: FIXTURE, "pass"),
     ("restamped 1x", restamp(1.0), "pass"),
@@ -304,6 +330,13 @@ CASES = [
     ("duplicate packet", built("duplicate packet"), "pass"),
     ("teletext burst", built("teletext burst"), {"TB overflow"}),
     ("PCR PID mismatch", built("PCR PID mismatch"), ("fails", "pcr-presence")),
+    ("table burst", built("table burst"), ("system-buffers", {"TBsys overflow"})),
+    ("Bsys burst", built("Bsys burst"), ("system-buffers", {"Bsys overflow"})),
+    (
+        "TBsys kept busy",
+        built("TBsys kept busy"),
+        ("system-buffers", {"TBsys not emptied within 1 s", "Bsys overflow"}),
+    ),
     ("straddling audio", audio(4, STRADDLE_S), "pass"),
     ("mid-packet overflow", audio(7, MID_PACKET_S), {"B overflow"}),
 ]
@@ -324,20 +357,27 @@ def main(tmp: str) -> int:
         check = checks["tstd"]
         streams = check.metrics.get("streams", {})
         seen = {v for s in streams.values() for v in s["violations"]}
+        system = checks["system-buffers"]
         if expected == "pass":
             # Not vacuous: every stream must have had access units to grade.
             ok = check.status == compliance.Status.PASS and all(s["access_units"] for s in streams.values())
             ok = ok and checks["pcr-presence"].status == compliance.Status.PASS
-        elif isinstance(expected, tuple):
+            ok = ok and system.status == compliance.Status.PASS
+        elif isinstance(expected, tuple) and expected[0] == "fails":
             check = checks[expected[1]]
             ok = check.status == compliance.Status.FAIL
+        elif isinstance(expected, tuple):
+            check = system
+            ok = expected[1] <= {v for p in system.metrics.get("programs", {}).values() for v in p["violations"]}
         elif isinstance(expected, str):
             ok = any(expected in why for why in check.metrics.get("refused", {}).values())
         else:
             ok = expected <= seen
         failed += not ok
-        want = " ".join(reversed(expected)) if isinstance(expected, tuple) else expected
-        want = want if isinstance(want, str) else ", ".join(sorted(want))
+        if isinstance(expected, tuple):
+            want = f"{expected[1]} fails" if expected[0] == "fails" else ", ".join(sorted(expected[1]))
+        else:
+            want = expected if isinstance(expected, str) else ", ".join(sorted(expected))
         print(f"  {'ok  ' if ok else 'FAIL'}  {name:<18} want {want:<40} got {check.detail}")
     if failed:
         print(f"tstd controls: {failed} of {len(CASES)} cases wrong", file=sys.stderr)

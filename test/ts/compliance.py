@@ -8,13 +8,15 @@ summary, exiting non-zero on failure.
 Division of labour: TSDuck does the transport-stream parsing (we shell out to
 `tsanalyze --json` for PSI/service/structure and `tstables` for the PMT), and
 this script does what TSDuck does not cover: the ISO 13818-1 T-STD buffer
-model for supported elementary streams, and the PCR checks that need the
-time-base discontinuities a 188/204-byte header scan here recovers. PCR value
-intervals, byte schedule and release timing live in `pcr-timing.py`.
+model for supported elementary streams and each program's system buffers, and
+the PCR checks that need the time-base discontinuities a 188/204-byte header
+scan here recovers. PCR value intervals, byte schedule and release timing live
+in `pcr-timing.py`.
 
 Checks split into two severities:
   - HARD (structural): fail the run by default. PAT/PMT, packet size, sync,
-    continuity counters, PSI CRC, PCR presence, PCR monotonicity, T-STD buffers.
+    continuity counters, PSI CRC, PCR presence, PCR monotonicity, T-STD buffers,
+    system buffers.
   - SHAPE (broadcast profile): reported as WARN and only fail the run under
     `--strict`. Service descriptors (SDT).
 
@@ -359,6 +361,11 @@ TB_SIZE = 512
 TELETEXT_TB_SIZE = 480
 # 2.4.2.6: TB must empty at least once a second.
 TB_EMPTY_S = 1.0
+# 2.4.2.3: PIDs 0-3 and the program's PMT share one TBsys (TB_SIZE), which passes their
+# bytes on at Rxsys into Bsys, emptied at Rsys = max(80 kb/s, transport rate / 500).
+SYSTEM_RX = 1_000_000
+BSYS_SIZE = 1536
+RSYS_MIN = 80_000
 # PTS/DTS are 33 bits at 90 kHz.
 STAMP_WRAP_S = (1 << 33) / PTS_HZ
 # EB fill is tracked by ES offset, past 2^28 B within hours, where a double resolves
@@ -502,8 +509,8 @@ class Stream:
     sps: dict[str, str] = field(default_factory=dict)
 
 
-def read_programs(ts_path: str) -> list[tuple[int, list[Stream]]]:
-    """(PCR PID, elementary streams) of each program's first PMT, as TSDuck decodes it."""
+def read_pmts(ts_path: str) -> list[dict]:
+    """Every PMT in the file, as TSDuck decodes it."""
     proc = subprocess.run(
         ["tstables", ts_path, "--psi-si", "--tid", "2", "--json-output", "-"],
         capture_output=True,
@@ -512,8 +519,23 @@ def read_programs(ts_path: str) -> list[tuple[int, list[Stream]]]:
     )
     if proc.returncode != 0:
         raise RuntimeError(f"tstables failed: {proc.stderr.strip()}")
+    return json.loads(proc.stdout or "[]")
+
+
+def read_system_pids(ts_path: str) -> list[tuple[int, int]]:
+    """(PMT PID, PCR PID) of each program's first PMT."""
+    programs: dict[int, tuple[int, int]] = {}
+    for pmt in read_pmts(ts_path):
+        meta = next((node for node in pmt.get("#nodes", []) if node.get("#name") == "metadata"), None)
+        if meta is not None and pmt.get("service_id") not in programs:
+            programs[pmt.get("service_id")] = (meta["pid"], pmt["pcr_pid"])
+    return list(programs.values())
+
+
+def read_programs(ts_path: str) -> list[tuple[int, list[Stream]]]:
+    """(PCR PID, elementary streams) of each program's first PMT, as TSDuck decodes it."""
     programs: dict[int, tuple[int, list[Stream]]] = {}
-    for pmt in json.loads(proc.stdout or "[]"):
+    for pmt in read_pmts(ts_path):
         if pmt.get("service_id") in programs:
             continue
         streams = []
@@ -1135,6 +1157,14 @@ def simulate(
     return grade
 
 
+def time_bases(scan: Scan, pcr_pid: int) -> list[tuple[PcrClock, int, int]]:
+    """(clock, first packet, end packet) of each time base on `pcr_pid` with a timeline."""
+    samples = scan.pcr_by_pid.get(pcr_pid, [])
+    bounds = [0, *sorted(i for i, _ in samples if i in scan.pcr_new_base), scan.total_packets]
+    segments = [(PcrClock([s for s in samples if lo <= s[0] < hi]), lo, hi) for lo, hi in zip(bounds, bounds[1:])]
+    return [segment for segment in segments if segment[0].ok()]
+
+
 def check_tstd(ts_path: str, packet_size: int, scan: Scan) -> Check:
     """Full T-STD buffer model (ISO 13818-1 2.4.2) for every audio and video stream.
 
@@ -1165,10 +1195,7 @@ def check_tstd(ts_path: str, packet_size: int, scan: Scan) -> Check:
         for pid, why in read_pes(data, packet_size, modelled).items():
             refused[pid] = why
             del modelled[pid]
-        samples = scan.pcr_by_pid.get(pcr_pid, [])
-        bounds = [0, *sorted(i for i, _ in samples if i in scan.pcr_new_base), scan.total_packets]
-        segments = [(PcrClock([s for s in samples if lo <= s[0] < hi]), lo, hi) for lo, hi in zip(bounds, bounds[1:])]
-        segments = [segment for segment in segments if segment[0].ok()]
+        segments = time_bases(scan, pcr_pid)
         for stream in modelled.values():
             try:
                 if kinds[stream.pid] in ("avc", "hevc"):
@@ -1213,6 +1240,103 @@ def check_tstd(ts_path: str, packet_size: int, scan: Scan) -> Check:
         return Check("tstd", Severity.HARD, Status.FAIL, "; ".join(faults), metrics)
     peaks = ", ".join(f"PID {g.pid} " + "/".join(f"{k} {v * 100:.0f}%" for k, v in g.peaks.items()) for g in grades)
     return Check("tstd", Severity.HARD, Status.PASS, f"no overflow or underflow; peak fill {peaks}", metrics)
+
+
+def system_packets(data: bytes, packet_size: int, pmt_pid: int) -> list[tuple[int, bool]]:
+    """(index, first copy) of each packet the program on `pmt_pid` takes into TBsys: PIDs 0-3
+    and its PMT. A duplicate (2.4.3.3) repeats the packet before it on its PID byte for byte,
+    and only a first copy goes on to Bsys. Indexed as `scan_packets` counts them."""
+    out: list[tuple[int, bool]] = []
+    last: dict[int, bytes] = {}
+    index = offset = 0
+    while offset + packet_size <= len(data):
+        if data[offset] != 0x47:
+            nxt = data.find(0x47, offset + 1)
+            if nxt < 0:
+                break
+            offset = nxt
+            continue
+        packet = data[offset : offset + 188]
+        pid = ((packet[1] & 0x1F) << 8) | packet[2]
+        if pid <= 3 or pid == pmt_pid:
+            out.append((index, not (packet[3] & 0x10 and last.get(pid) == packet)))
+            last[pid] = packet
+        index += 1
+        offset += packet_size
+    return out
+
+
+def check_system_buffers(ts_path: str, packet_size: int, scan: Scan) -> Check:
+    """TBsys and Bsys (ISO 13818-1 2.4.2.3) for each program, on its PCR.
+
+    Each packet on PIDs 0-3 and the program's PMT arrives in the one TBsys over its time on
+    the wire, and its bytes leave at Rxsys once those ahead of them have, never before they
+    arrive, into the one Bsys, which empties at Rsys whenever it holds a byte. Bsys takes
+    them faster than it drains, so it peaks as a packet's last byte reaches it. Graded on
+    2.4.2.6: neither overflows, and TBsys empties at least once a second. A signalled
+    discontinuity starts fresh buffers, as in `check_tstd`.
+    """
+    with open(ts_path, "rb") as handle:
+        data = handle.read()
+    drain = 188 * 8 / SYSTEM_RX
+    programs: dict[str, dict] = {}
+    for pmt_pid, pcr_pid in read_system_pids(ts_path):
+        packets = system_packets(data, packet_size, pmt_pid)
+        indices = [index for index, _ in packets]
+        grade = Grade(pmt_pid, "system")
+        modelled = 0
+        for clock, lo, hi in time_bases(scan, pcr_pid):
+            leave = empty = float("-inf")
+            busy_since = None
+            for index, first in packets[bisect.bisect_left(indices, lo) : bisect.bisect_left(indices, hi)]:
+                modelled += 1
+                start, end = clock.time_at(index), clock.time_at(index + 1)
+                if leave <= start:
+                    busy_since = start
+                free = max(leave, start)
+                leave = max(end, free + drain)
+                fill = (leave - end) * SYSTEM_RX / 8
+                grade.peak("TBsys", fill, TB_SIZE)
+                if fill > TB_SIZE + 0.5:
+                    grade.flag("TBsys overflow")
+                if busy_since is not None and leave - busy_since > TB_EMPTY_S:
+                    grade.flag("TBsys not emptied within 1 s")
+                    busy_since = None
+                if first:
+                    rsys = max(RSYS_MIN, 188 * 8 / (end - start) / 500) if end > start else RSYS_MIN
+                    empty = max(empty, free) + 188 * 8 / rsys
+                    fill = (empty - leave) * rsys / 8
+                    grade.peak("Bsys", fill, BSYS_SIZE)
+                    if fill > BSYS_SIZE + 0.5:
+                        grade.flag("Bsys overflow")
+        programs[str(pmt_pid)] = {
+            "system_packets": modelled,
+            "violations": grade.violations,
+            "peak_fill_pct": {k: round(v * 100, 1) for k, v in grade.peaks.items()},
+        }
+    metrics = {"programs": programs}
+    if not programs:
+        return Check("system-buffers", Severity.SHAPE, Status.WARN, "no program to model", metrics)
+    if not any(program["system_packets"] for program in programs.values()):
+        return Check("system-buffers", Severity.SHAPE, Status.WARN, "no system packet inside a time base", metrics)
+    faults = [
+        f"PMT PID {pid} {name} x{count}"
+        for pid, program in programs.items()
+        for name, count in sorted(program["violations"].items())
+    ]
+    if faults:
+        return Check("system-buffers", Severity.HARD, Status.FAIL, "; ".join(faults), metrics)
+    peaks = ", ".join(
+        f"PMT PID {pid} " + "/".join(f"{k} {v:.0f}%" for k, v in program["peak_fill_pct"].items())
+        for pid, program in programs.items()
+    )
+    return Check(
+        "system-buffers",
+        Severity.HARD,
+        Status.PASS,
+        f"no overflow, TBsys emptied each second; peak fill {peaks}",
+        metrics,
+    )
 
 
 def detect_packet_size(analysis: dict) -> int:
@@ -1288,6 +1412,7 @@ def analyze(ts_path: str, reference_seconds: float | None = None) -> list[Check]
 
     checks.append(check_service_descriptors(analysis))
     checks.append(check_tstd(ts_path, packet_size, scan))
+    checks.append(check_system_buffers(ts_path, packet_size, scan))
     return checks
 
 
