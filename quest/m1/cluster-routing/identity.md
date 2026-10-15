@@ -23,7 +23,7 @@ Decided 2026-10-14 with the maintainer:
   as the session's own. A ROUTE claiming a different identity as its own is a
   protocol violation.
 - Identities a session forwards for other origins are not proven by this
-  exchange; the route layer files them under `hash(scope, id)` when the
+  exchange; the route layer files them under `hash(subject, id)` when the
   session's publish grant is scoped
   ([Routes and announces](/quest/m1/cluster-routing/routes.md)).
 - Gate lite-07 on it (decided 2026-10-14): ROUTE's safety rests on proven own

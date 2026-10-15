@@ -45,10 +45,12 @@ Decided with the maintainer, 2026-10-13:
   scoping alone cannot identify one publisher through both its CDN and P2P
   connections. (Decided 2026-10-14.)
 - A connection's own proven identity stays bare everywhere. Identities a
-  connection forwards on behalf of others are filed under `hash(scope, id)`
-  when its publish grant is scoped, and stay bare when it is unscoped. The
-  key is deterministic, so two uplinks under one scope share it, and a forger
-  only damages routes inside its own scope. (Decided 2026-10-14.)
+  connection forwards on behalf of others are filed under
+  `hash(subject, id)`, keyed by the grant's credential subject, when its
+  publish grant is scoped, and stay bare when it is unscoped. The key is
+  deterministic, so two uplinks of one subject share it across token refresh,
+  and a forger only damages routes inside its own scope. (Decided 2026-10-14;
+  subject decided 2026-10-15.)
 - Matching explicit epochs authorize resume. Epochless changes retain
   Restart and fresh resolution; neither node identity nor a healthy
   alternate grants permission to splice content.
@@ -84,7 +86,7 @@ with deterministic counterexamples: path-only subscriptions that reselect
 origins at every hop loop and deadlock, so forwarded requests name their
 identity; feasibility makes transit priorities depend on arrival order;
 export keeps one selection with a down-only bit; and scoped forwarding is
-contained by scope-qualified identities.
+contained by subject-qualified identities.
 
 The new routing model and finalized lite-07 belong to the breaking release.
 Existing mesh deployments remain supported; the full edge/core topology

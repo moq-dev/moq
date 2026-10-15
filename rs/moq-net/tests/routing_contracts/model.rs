@@ -22,12 +22,12 @@ use std::{
 
 pub type Node = usize;
 
-/// An opaque routing identity: the hash of a per-process key, or [`scoped`].
+/// An opaque routing identity: the hash of a per-process key, or [`qualified`].
 pub type Id = u64;
 
-/// Set on every [`scoped`] identity and never on a key-derived one, so any
-/// relay recognizes a scoped key.
-const SCOPED: Id = 1 << 63;
+/// Set on every [`qualified`] identity and never on a key-derived one, so any
+/// relay recognizes a qualified key.
+const QUALIFIED: Id = 1 << 63;
 
 /// A route metric: the sum of the configured link costs.
 pub type Metric = u64;
@@ -92,9 +92,10 @@ pub struct Config {
 	/// A relay that accepted a request from an upstream link ends it once its
 	/// route turns down-only. Without it the relay keeps following that route.
 	pub recheck: bool,
-	/// A scoped connection may forward an already scoped identity, which the
-	/// receiver files again under its own scope. Otherwise that route is refused.
-	pub rescope: bool,
+	/// A scoped connection may forward an already qualified identity, which
+	/// the receiver qualifies again by its own subject. Otherwise that route is
+	/// refused.
+	pub requalify: bool,
 }
 
 impl Default for Config {
@@ -104,7 +105,7 @@ impl Default for Config {
 			export: Export::DownOnly,
 			tie: TieBreak::PathIdentity,
 			recheck: true,
-			rescope: false,
+			requalify: false,
 		}
 	}
 }
@@ -117,10 +118,11 @@ pub struct Link {
 	pub priority: i8,
 	/// This side marks the neighbor upstream.
 	pub upstream: bool,
-	/// This side admitted the neighbor's publish grant under this scope: an
+	/// This side admitted the neighbor under a scoped publish grant: an
 	/// identity the neighbor forwards, other than its own, is filed under
-	/// [`scoped`], and claims count under that key only inside the scope.
-	pub scope: Option<&'static str>,
+	/// [`qualified`] by the grant's subject, and claims count under that key
+	/// only inside the grant's scope.
+	pub grant: Option<Grant>,
 }
 
 impl Default for Link {
@@ -129,7 +131,7 @@ impl Default for Link {
 			cost: 1,
 			priority: 0,
 			upstream: false,
-			scope: None,
+			grant: None,
 		}
 	}
 }
@@ -152,10 +154,18 @@ impl Link {
 		self
 	}
 
-	pub fn scope(mut self, scope: &'static str) -> Self {
-		self.scope = Some(scope);
+	pub fn grant(mut self, grant: Grant) -> Self {
+		self.grant = Some(grant);
 		self
 	}
+}
+
+/// A scoped publish grant: the credential subject that qualifies forwarded
+/// identities, and the prefix standing in for the grant's pattern union.
+#[derive(Clone, Copy, Debug)]
+pub struct Grant {
+	pub subject: &'static str,
+	pub scope: &'static str,
 }
 
 /// What a node advertises for one identity.
@@ -197,7 +207,7 @@ struct State {
 	/// Whether this node advertises identities it does not serve.
 	transit: bool,
 	rx: BTreeMap<Id, BTreeMap<Node, Advert>>,
-	/// For a key this node filed under a scope, the identity the neighbor named.
+	/// For a key this node qualified, the identity the neighbor named.
 	filed: BTreeMap<(Node, Id), Id>,
 	fd: BTreeMap<Id, (u32, Metric)>,
 	sent: BTreeMap<(Node, Id), Advert>,
@@ -412,7 +422,7 @@ impl Net {
 
 	/// `node` starts originating `id` at seqno `seqno`, proving it on every session.
 	pub fn originate(&mut self, node: Node, id: Id, seqno: u32) {
-		assert_eq!(id & SCOPED, 0, "a key-derived identity is never scoped");
+		assert_eq!(id & QUALIFIED, 0, "a key-derived identity is never qualified");
 		self.nodes[node].proven = Some(id);
 		self.nodes[node].origins.insert(id, seqno);
 		self.advertise(node);
@@ -509,13 +519,13 @@ impl Net {
 
 	fn receive(&mut self, at: Node, from: Node, update: Update) {
 		let mut id = update.id;
-		if let Some(scope) = self.links[&(at, from)].scope
+		if let Some(grant) = self.links[&(at, from)].grant
 			&& self.nodes[from].proven != Some(id)
 		{
-			if id & SCOPED != 0 && !self.cfg.rescope {
+			if id & QUALIFIED != 0 && !self.cfg.requalify {
 				return;
 			}
-			let key = scoped(scope, id);
+			let key = qualified(grant.subject, id);
 			self.nodes[at].filed.insert((from, key), id);
 			id = key;
 		}
@@ -532,7 +542,7 @@ impl Net {
 	}
 
 	/// The identity `node` names for `id` in a request it sends `next`: the one
-	/// `next` advertised, if `node` filed it under `next`'s scope.
+	/// `next` advertised, if `node` qualified it by `next`'s subject.
 	fn name(&self, node: Node, next: Node, id: Id) -> Id {
 		self.nodes[node].filed.get(&(next, id)).copied().unwrap_or(id)
 	}
@@ -668,15 +678,20 @@ impl Net {
 	}
 
 	fn candidates(&self, node: Node, path: &str, from: Option<Node>) -> Vec<Candidate> {
-		let scopes: BTreeSet<&str> = self.links.values().filter_map(|link| link.scope).collect();
+		let grants: BTreeSet<(&str, &str)> = self
+			.links
+			.values()
+			.filter_map(|link| link.grant)
+			.map(|grant| (grant.subject, grant.scope))
+			.collect();
 		let mut out = Vec::new();
 		for (index, claim) in self.claims.iter().enumerate() {
 			if !claim.covers(path) || self.hidden.contains(&(node, index)) {
 				continue;
 			}
-			// A claim counts under its bare identity, and under a scoped key only inside that scope.
-			let inside = scopes.iter().filter(|scope| claim.prefix.starts_with(**scope));
-			for id in iter::once(claim.id).chain(inside.map(|scope| scoped(scope, claim.id))) {
+			// A claim counts under its bare identity, and under a qualified key only inside that grant's scope.
+			let inside = grants.iter().filter(|(_, scope)| claim.prefix.starts_with(*scope));
+			for id in iter::once(claim.id).chain(inside.map(|(subject, _)| qualified(subject, claim.id))) {
 				let Some(route) = self.route_from(node, id, from) else {
 					continue;
 				};
@@ -904,12 +919,13 @@ impl Net {
 	}
 }
 
-/// The key a relay files `id` under when a connection admitted under `scope`
-/// forwards it. It depends on the scope, not the connection, so every uplink
-/// under one grant reaches the same key. FNV keeps the model readable; the
+/// The key a relay files `id` under when a connection admitted under a
+/// scoped grant for `subject` forwards it. It depends on the subject, not the
+/// connection or the grant's patterns, so every uplink of one subject reaches
+/// the same key across token refresh. FNV keeps the model readable; the
 /// contract needs a collision-resistant hash, since the forwarder picks `id`.
-pub fn scoped(scope: &str, id: Id) -> Id {
-	fnv(scope, &[id]) | SCOPED
+pub fn qualified(subject: &str, id: Id) -> Id {
+	fnv(subject, &[id]) | QUALIFIED
 }
 
 /// FNV-1a, as `origin::fnv_key` uses, over a path and some ids.

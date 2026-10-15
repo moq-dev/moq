@@ -114,40 +114,42 @@ freshness before coding:
   next (`collected_incarnation_returns_only_while_its_retraction_is_in_flight`).
   `cluster.id` stops naming a routing identity.
 - Decided 2026-10-14: a connection's own proven identity stays bare. An
-  identity a connection forwards for another origin is filed under
-  `hash(scope, id)` when the connection's publish grant is scoped, and stays
-  bare when it is unscoped (publish `**` at the root). The hash has its own
-  domain, so it cannot collide with a key-derived identity, and is
+  identity a connection forwards for another origin is subject-qualified:
+  filed under `hash(subject, id)` when the connection's publish grant is
+  scoped, and bare when it is unscoped (publish `**` at the root). The hash
+  has its own domain, so it cannot collide with a key-derived identity, and is
   collision-resistant at the identity width, since the forwarder picks `id`
-  and could otherwise grind another scope's key. It depends on the
-  scope, not the ingress peer, so two uplinks under one grant reach the same
-  key at any relay, and the relay that files it translates it back when
-  forwarding a request into that connection. Claims under it are refused
-  outside the scope. Routes are shared by all of an identity's claims, so
-  otherwise a scoped peer forging an identity captures claims outside its
-  namespace and leaves a seqno the real origin cannot pass after the forger
-  leaves (`forged_identity_hijacks_claims_outside_the_forgers_scope`); with
-  it, a forger or a misconfigured uplink only affects its own scope. The
-  `peer` claim no longer decides transit trust. Legitimate scoped delivery
-  survives losing one of two uplinks under one key
-  (`scoped_delivery_through_two_uplinks_reaches_one_key`). Decided
-  2026-10-14: scoped keys carry a marker every relay recognizes, and a scoped
-  connection forwarding an already scoped identity has that route refused,
-  with no wire change. Otherwise a key sent down through a misconfigured
-  uplink comes back and is filed again as a new identity on every lap
-  (`scoped_connections_cannot_rescope_a_scoped_identity`). Nested scoped
-  federation is therefore out: the inner level must be unscoped. Revisit with
-  a wire change if a use case appears. Rejected: keying a forwarded identity
-  by its bare id and the narrowest scope it crossed, which needs the scope in
-  ROUTE, and accepting growth bounded only by metric overflow.
-- ✅ Decided 2026-10-15 (maintainer): scope is the credential subject. A
+  and could otherwise grind another subject's key. The relay that files it
+  translates it back when forwarding a request into that connection. Claims
+  under it are refused outside the grant's scope. Routes are shared by all of
+  an identity's claims, so otherwise a scoped peer forging an identity
+  captures claims outside its namespace and leaves a seqno the real origin
+  cannot pass after the forger leaves
+  (`forged_identity_hijacks_claims_outside_the_forgers_scope`); with it, a
+  forger or a misconfigured uplink only affects its own scope. The `peer`
+  claim no longer decides transit trust. Legitimate scoped delivery survives
+  losing one of two uplinks under one key
+  (`scoped_delivery_through_two_uplinks_reaches_one_key`).
+- ✅ Decided 2026-10-15 (maintainer): the qualifier is the grant's credential
+  subject, and the key is named `hash(subject, id)` (previously
+  `hash(scope, id)`); "scope" now means only a grant's pattern union. A
   publish grant is a union of patterns that refresh and withdrawal change, so
   neither the whole union nor one matching pattern is a key that survives
   refresh and that two uplinks share. The subject stays stable across token
   refresh and is shared by one operator's uplinks; each claim is still checked
-  against the current pattern union. Rejected: the connection root, too coarse
-  since two scoped peers under one root would share keys. Add multi-pattern,
-  overlapping-pattern, and refresh fixtures.
+  against the current pattern union. Rejected: the connection root, too
+  coarse since two scoped peers under one root would share keys. Add
+  multi-pattern, overlapping-pattern, and refresh fixtures.
+- Decided 2026-10-14: qualified keys carry a marker every relay recognizes,
+  and a scoped connection forwarding an already qualified identity has that
+  route refused, with no wire change. Otherwise a key sent down through a
+  misconfigured uplink comes back and is filed again as a new identity on
+  every lap (`scoped_connections_cannot_requalify_a_qualified_identity`).
+  Nested scoped federation is therefore out: the inner level must be
+  unscoped. Revisit with a wire change if a use case appears. Rejected:
+  keying a forwarded identity by its bare id and the narrowest scope it
+  crossed, which needs the scope in ROUTE, and accepting growth bounded only
+  by metric overflow.
 - Loop freedom is Babel's feasibility condition (RFC 8966) keyed by node:
   accept a route if its seqno is newer, or equal with a metric below the
   feasibility distance. Only the origin advances its seqno. Retraction is an
@@ -235,9 +237,9 @@ freshness before coding:
   (`cdn_never_reaches_its_own_relay_through_the_lan`,
   `upstream_ingress_ends_a_request_whose_route_turns_down_only`,
   `dead_uplink_consumes_and_publishes_through_a_lan_peer`). A
-  misconfigured uplink that leaks CDN routes back is contained by scoped
-  identities rather than a downstream mark
-  (`misconfigured_uplink_is_contained_by_scoped_identities`).
+  misconfigured uplink that leaks CDN routes back is contained by
+  subject-qualified identities rather than a downstream mark
+  (`misconfigured_uplink_is_contained_by_qualified_identities`).
 - Decided 2026-10-14: a local per-connection `proxy` preference decides
   whether a connection is sent routes learned from other connections; it is
   never on the wire. Relays default on; applications choose per P2P
@@ -361,7 +363,7 @@ release.
 
 ## Required
 
-- [Identity proof](/quest/m1/cluster-routing/identity.md) - proven own identities and scope-qualified forwarded ones
+- [Identity proof](/quest/m1/cluster-routing/identity.md) - proven own identities and subject-qualified forwarded ones
 - [Next-hop handoff](/quest/m1/cluster-routing/handoff.md) - complete and fresh claims with bounded state
 
 ## Closes

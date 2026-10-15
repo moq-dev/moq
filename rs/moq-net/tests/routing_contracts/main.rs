@@ -9,10 +9,16 @@
 
 mod model;
 
-use model::{Aggregate, Config, Export, Forward, Link, Metric, Net, Outcome, Rule, TieBreak, scoped};
+use model::{Aggregate, Config, Export, Forward, Grant, Link, Metric, Net, Outcome, Rule, TieBreak, qualified};
 
 const PATH_ONLY: Forward = Forward::PathOnly {
 	exclude_requester: true,
+};
+
+/// The CDN's grant to a local relay: its credential subject, publishing under `local/`.
+const LOCAL: Grant = Grant {
+	subject: "local",
+	scope: "local/",
 };
 
 fn served_by(outcome: &Outcome) -> Option<(u64, usize)> {
@@ -560,14 +566,14 @@ fn goaway_keeps_serving_until_a_refresh_makes_the_alternative_feasible() {
 // Export: one selection per identity, with a down-only bit.
 
 /// Two CDN relays, each the uplink of one relay in a local mesh, reaching a CDN
-/// origin claiming `cdn/`. The CDN admits each local relay under `scope`. The
+/// origin claiming `cdn/`. The CDN admits each local relay under `grant`. The
 /// caller runs it.
-fn two_uplinks(cfg: Config, l2_marks_upstream: bool, scope: Option<&'static str>) -> Net {
+fn two_uplinks(cfg: Config, l2_marks_upstream: bool, grant: Option<Grant>) -> Net {
 	let (c1, c2, l1, l2, origin) = (0, 1, 2, 3, 4);
 	let mut net = Net::new(cfg, 5);
 	net.join(c1, c2, 10);
 	net.join(l1, l2, 1);
-	let admit = Link { scope, ..Link::cost(1) };
+	let admit = Link { grant, ..Link::cost(1) };
 	let up = if l2_marks_upstream {
 		Link::cost(1).upstream()
 	} else {
@@ -861,13 +867,13 @@ fn transit_priority_depends_on_arrival_order() {
 	assert_eq!(next(true), Some(l1));
 }
 
-// Scoped identities: a forwarded identity cannot reach beyond its admission.
+// Subject-qualified identities: a forwarded identity cannot reach beyond its admission.
 
 /// A scoped peer forwards a victim's identity with a newer seqno. Routes are
 /// shared by every claim of an identity, so unscoped, the forgery captures
 /// claims outside the forger's namespace, and its seqno outlives it: after it
 /// leaves, the victim's real routes are refused until the victim counts past
-/// the forged seqno. Filed under `hash(scope, id)`, the forgery serves only
+/// the forged seqno. Filed under `hash(subject, id)`, the forgery serves only
 /// claims inside the forger's scope. The forger's own proven identity stays
 /// bare either way.
 #[test]
@@ -880,7 +886,10 @@ fn forged_identity_hijacks_claims_outside_the_forgers_scope() {
 		net.join(victim, core, 5);
 		net.join(core, edge, 1);
 		let admission = if scoped_admission {
-			Link::cost(1).scope("forger/")
+			Link::cost(1).grant(Grant {
+				subject: "forger",
+				scope: "forger/",
+			})
 		} else {
 			Link::cost(1)
 		};
@@ -897,7 +906,7 @@ fn forged_identity_hijacks_claims_outside_the_forgers_scope() {
 		let served = served_by(&net.request(core, "other/x", Forward::Pinned));
 		if scoped_admission {
 			assert_eq!(served, Some((7, victim)));
-			assert_eq!(net.resolve(core, "forger/x"), Some(scoped("forger/", 7)));
+			assert_eq!(net.resolve(core, "forger/x"), Some(qualified("forger", 7)));
 			assert_eq!(
 				served_by(&net.request(core, "forger/x", Forward::Pinned)),
 				Some((7, forger)),
@@ -918,7 +927,7 @@ fn forged_identity_hijacks_claims_outside_the_forgers_scope() {
 }
 
 /// A local mesh publishing through two uplinks, each admitted under the same
-/// scope. Both CDN relays file the local origin under one key, so it survives
+/// subject. Both CDN relays file the local origin under one key, so it survives
 /// losing an uplink: the first hop keeps its identity and the request follows
 /// the other uplink, named as the local relay knows it. Claims outside the
 /// scope are refused under that key, and the local relay's own identity stays
@@ -929,7 +938,7 @@ fn scoped_delivery_through_two_uplinks_reaches_one_key() {
 	let mut net = Net::new(Config::default(), 5);
 	net.join(c1, c2, 10);
 	net.join(l1, l2, 1);
-	let admit = Link::cost(1).scope("local/");
+	let admit = Link::cost(1).grant(LOCAL);
 	net.link(l1, c1, Link::cost(1).upstream(), admit);
 	net.link(l2, c2, Link::cost(1).upstream(), admit);
 	net.leaf(origin);
@@ -940,7 +949,7 @@ fn scoped_delivery_through_two_uplinks_reaches_one_key() {
 	net.claim(9, "cdn/", 0, None);
 	assert!(net.run());
 
-	let key = scoped("local/", 9);
+	let key = qualified(LOCAL.subject, 9);
 	assert!(net.route(c1, 9).is_none());
 	assert_eq!(net.route(c1, key).and_then(|route| route.next), Some(l1));
 	assert_eq!(net.route(c2, key).and_then(|route| route.next), Some(l2));
@@ -970,10 +979,10 @@ fn scoped_delivery_through_two_uplinks_reaches_one_key() {
 
 /// A local relay missing its `upstream` mark leaks CDN routes back to the CDN,
 /// which then reaches its own origin through the LAN. Admitting the local relay
-/// under a scope files the leaked identity apart, where the CDN origin's claims
+/// under a scoped grant files the leaked identity apart by its subject, where the CDN origin's claims
 /// do not count, so the CDN keeps its own route.
 #[test]
-fn misconfigured_uplink_is_contained_by_scoped_identities() {
+fn misconfigured_uplink_is_contained_by_qualified_identities() {
 	let (c1, c2, l1, l2, origin) = (0, 1, 2, 3, 4);
 	let mut net = two_uplinks(Config::default(), false, None);
 	assert!(net.run());
@@ -986,11 +995,11 @@ fn misconfigured_uplink_is_contained_by_scoped_identities() {
 		}
 	);
 
-	let mut net = two_uplinks(Config::default(), false, Some("local/"));
+	let mut net = two_uplinks(Config::default(), false, Some(LOCAL));
 	assert!(net.run());
 	assert_eq!(net.route(c2, 7).and_then(|route| route.next), Some(c1));
 	assert_eq!(
-		net.route(c2, scoped("local/", 7)).and_then(|route| route.next),
+		net.route(c2, qualified(LOCAL.subject, 7)).and_then(|route| route.next),
 		Some(l2),
 		"the leak is filed apart"
 	);
@@ -1003,28 +1012,28 @@ fn misconfigured_uplink_is_contained_by_scoped_identities() {
 	);
 }
 
-/// A scoped key the CDN sent down comes back up through the misconfigured
-/// uplink. Filed again as `hash(scope, hash(scope, id))`, it is a new identity
-/// on every lap, so the CDN never settles. Scoped keys are recognizable, and a
-/// scoped connection forwarding one has that route refused, so the lap ends and
+/// A qualified key the CDN sent down comes back up through the misconfigured
+/// uplink. Filed again as `hash(subject, hash(subject, id))`, it is a new
+/// identity on every lap, so the CDN never settles. Qualified keys are
+/// recognizable, and a scoped connection forwarding one has that route refused, so the lap ends and
 /// the CDN holds what correctly marked uplinks give it. Nested scoped
 /// federation is therefore out: the inner level must be unscoped.
 #[test]
-fn scoped_connections_cannot_rescope_a_scoped_identity() {
+fn scoped_connections_cannot_requalify_a_qualified_identity() {
 	let c2 = 1;
-	let mut net = two_uplinks(Config::default(), true, Some("local/"));
+	let mut net = two_uplinks(Config::default(), true, Some(LOCAL));
 	assert!(net.run());
 	let marked = net.identities(c2);
 
-	let mut net = two_uplinks(Config::default(), false, Some("local/"));
+	let mut net = two_uplinks(Config::default(), false, Some(LOCAL));
 	assert!(net.run());
 	assert_eq!(net.identities(c2), marked + 1, "the leak is filed once, never again");
 
 	let cfg = Config {
-		rescope: true,
+		requalify: true,
 		..Config::default()
 	};
-	let mut net = two_uplinks(cfg, false, Some("local/"));
+	let mut net = two_uplinks(cfg, false, Some(LOCAL));
 	let mut known = Vec::new();
 	for _ in 0..4 {
 		assert!(!net.settle(10));
