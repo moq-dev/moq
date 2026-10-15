@@ -23,9 +23,9 @@
 //! one small frame per track per tick. Throughput counts tracks, so a flat
 //! elements/s across a sweep means the cost per track stays constant.
 //!
-//! `session_idle` times one second of idle viewer sessions, swept over sessions. Each
-//! viewer keeps a PROBE stream open, as a browser does, and nothing else happens, so
-//! the time is whatever the sessions do on their own. Paused time skips the waiting.
+//! `session_idle` times one second of idle viewer sessions, swept over sessions.
+//! Lite viewers hold PROBE open; IETF sessions demand their local transport estimate.
+//! Nothing else happens, so it measures the sessions' own work. Paused time skips waiting.
 //!
 //! `session_churn_*` times one request opened and closed by a session that already
 //! holds others open, swept over sessions and requests held per session. On
@@ -859,26 +859,30 @@ fn churn(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Churn>)
 	group.finish();
 }
 
-/// Viewer sessions to one relay, each holding a PROBE stream and otherwise idle.
+/// Idle sessions to one relay, holding PROBE or their local transport estimate.
 struct IdleRoom {
 	_viewers: Vec<(MockPair, moq_net::bandwidth::Consumer)>,
 }
 
 impl IdleRoom {
-	async fn new(sessions: usize) -> Self {
+	async fn new(version: &str, sessions: usize) -> Self {
 		let (relay, driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
 		support::harness::spawn(driver);
 		let mut viewers = Vec::new();
 		for _ in 0..sessions {
-			let mut options = MockConnectOptions::new("moq-lite-06".parse().unwrap());
+			let mut options = MockConnectOptions::new(version.parse().unwrap());
 			options.server_publish = Some(relay.consume());
-			// A QUIC backend reports both, so the relay serves PROBE.
+			// A QUIC backend reports both; Lite serves PROBE, IETF samples on demand.
 			options.stats = MockStats {
 				estimated_send_rate: Some(1_000_000),
 				rtt: Some(Duration::from_millis(40)),
 			};
 			let pair = connect_mock(options).await;
-			let mut probe = pair.client.recv_bandwidth().unwrap();
+			let mut probe = if version.parse::<Version>().unwrap().is_lite() {
+				pair.client.recv_bandwidth().unwrap()
+			} else {
+				pair.server.send_bandwidth().unwrap()
+			};
 			probe.changed().await.unwrap();
 			viewers.push((pair, probe));
 		}
@@ -897,20 +901,22 @@ impl IdleRoom {
 
 fn idle(c: &mut Criterion) {
 	let mut group = c.benchmark_group("session_idle");
-	for sessions in [1, 64, 1024] {
-		group.throughput(Throughput::Elements(sessions as u64));
-		// Its own runtime, so its paused clock and its sessions end with the shape.
-		let rt = runtime();
-		let mut room = None;
-		group.bench_function(BenchmarkId::from_parameter(format!("sessions={sessions}")), |b| {
-			let room = room.get_or_insert_with(|| {
-				rt.block_on(async {
-					tokio::time::pause();
-					IdleRoom::new(sessions).await
-				})
+	for version in ["moq-lite-06", "moq-transport-16", "moq-transport-22"] {
+		for sessions in [1, 64, 1024] {
+			group.throughput(Throughput::Elements(sessions as u64));
+			// Its own runtime, so its paused clock and sessions end with the shape.
+			let rt = runtime();
+			let mut room = None;
+			group.bench_function(format!("{version}/sessions={sessions}"), |b| {
+				let room = room.get_or_insert_with(|| {
+					rt.block_on(async {
+						tokio::time::pause();
+						IdleRoom::new(version, sessions).await
+					})
+				});
+				b.iter_custom(|iters| rt.block_on(room.measure(iters)))
 			});
-			b.iter_custom(|iters| rt.block_on(room.measure(iters)))
-		});
+		}
 	}
 	group.finish();
 }
