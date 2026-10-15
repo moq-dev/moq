@@ -138,9 +138,11 @@ impl Refresh {
 			}
 	}
 
+	/// The connection credential's grant. moq-net adds every grant issued to an AUTH token
+	/// itself, and keeps a request token's grant to that request alone.
 	fn authorize(&self) {
 		let mut union = auth::Grant::default();
-		for credential in self.credentials.values() {
+		for credential in self.credentials.values().filter(|credential| credential.initial) {
 			let grant = credential.wire(self.role);
 			union.publish.extend(grant.publish.iter().cloned());
 			union.subscribe.extend(grant.subscribe.iter().cloned());
