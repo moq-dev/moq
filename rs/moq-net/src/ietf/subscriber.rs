@@ -1279,6 +1279,9 @@ where
 		peer: cluster::Peer,
 		declared: Option<bool>,
 	) -> Result<(), Error> {
+		if let Some(error) = super::namespace::refusal(&msg.track_namespace, self.version) {
+			return super::request_stream::reject(stream, error).await;
+		}
 		let request_id = msg.request_id;
 		let path = msg.track_namespace.to_owned();
 
@@ -1793,6 +1796,9 @@ where
 		mut stream: Stream<S, Version>,
 		msg: ietf::Publish<'_>,
 	) -> Result<(), Error> {
+		if let Some(error) = super::namespace::refusal(&msg.track_namespace, self.version) {
+			return super::request_stream::reject(stream, error).await;
+		}
 		tracing::debug!(broadcast = %msg.track_namespace, track = %msg.track_name, "rejecting publish");
 
 		// We decline the method itself rather than this particular track, which would be
@@ -2512,6 +2518,7 @@ where
 					// A resumed copy already knows the track, from the answer that accepted it.
 					properties_wanted: matches!(target, Target::Request(_)),
 					forward: true,
+					rendezvous: false,
 					range_filters: false,
 					authorization_token: None,
 				})
@@ -10872,6 +10879,7 @@ mod stitch_tests {
 				fill: None,
 				properties_wanted: true,
 				forward: true,
+				rendezvous: false,
 				range_filters: false,
 				authorization_token: None,
 			}
@@ -11401,6 +11409,7 @@ mod stitch_tests {
 					fill: None,
 					properties_wanted: true,
 					forward: true,
+					rendezvous: false,
 					range_filters: false,
 					authorization_token: None,
 				};
