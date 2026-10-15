@@ -55,7 +55,8 @@ enum Importer {
 		// (prompt unannounce) even though the importer owns it.
 		broadcast: moq_net::broadcast::Producer,
 	},
-	/// Each program's broadcast is created and announced once the first PAT names it.
+	/// Each program's broadcast is created once the first PAT names it, and announced once its PMT
+	/// declares its tracks.
 	All(Box<ts::Programs>),
 }
 
