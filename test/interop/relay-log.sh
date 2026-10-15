@@ -9,7 +9,7 @@ relay_log_since() {
 # Print each relay connection opened from log line FROM on, with how it closed: the
 # relay's close error, "ended" for a close without one, or "open" while it hasn't closed yet.
 # The patterns follow the relay's `conn{id=...}` span and its `connection closed` log
-# (`rs/moq-relay/src/relay.rs`). The relay numbers connections in accept order, so an id at
+# (`rs/moq-relay/src/connection.rs`). The relay numbers connections in accept order, so an id at
 # or below the highest one logged before FROM was opened earlier: a straggler from an earlier
 # round that logs or idles out here isn't blamed on this one.
 relay_connections() {

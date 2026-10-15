@@ -111,6 +111,9 @@ export interface Auth {
 	 *
 	 * Call it as soon as connect or accept resolves, in the same task: whoever answers is
 	 * decided once, right after. Throws once that has happened.
+	 *
+	 * The peer's stream credit bounds how many tokens wait unanswered, since each holds its
+	 * stream open until answered or withdrawn. A withdrawn token leaves the queue.
 	 */
 	requests(): Requests;
 }

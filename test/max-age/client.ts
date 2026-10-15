@@ -58,6 +58,6 @@ try {
 		}
 	}
 } finally {
-	session.close();
+	await session.close();
 	origin.close();
 }

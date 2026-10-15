@@ -14,11 +14,9 @@ for moq-transport, additively.
 
 Step 2 of the unified auth model settled on
 [#5148](https://github.com/moq-dev/moq/pull/5148) on 2026-10-15. Step 1
-(#5148, [Request tokens](/quest/m1/auth/request-token.md)) makes a
-moq-transport request token an auth on the shared `requests()` queue.
-#5148 is rewriting that quest and the auth README from its older `scoped()`
-queue and `set_request_token` design to this unified model; read it there
-until it lands.
+(#5148) makes a moq-transport request token an auth on the shared
+`requests()` queue; the decisions are recorded in the
+[auth README](/quest/m1/auth/README.md).
 
 - ✅ Decided 2026-10-15 (maintainer): one kind of auth. Each request names at
   most one (`auth=id`); moq-transport's per-request token is only an encoding
@@ -57,11 +55,7 @@ until it lands.
   `drafts/draft-lcurley-moq-auth.md`, Rust and `js/net`, and run
   `just test interop --all`. Update `doc/concept/moq-lite.md`'s
   Authorization section (scope is no longer only the session union) and
-  `doc/concept/standard.md`, which says a request's token grants nothing.
+  `doc/concept/standard.md`, which describes only moq-transport request tokens.
 
 Public API: none beyond step 1's `requests()` and `add()`; naming is
 automatic. Wire: lite-07-wip AUTH and six request messages gain fields.
-
-## Required
-
-- [Request tokens](/quest/m1/auth/request-token.md) - step 1: request tokens become auths on the shared acceptor queue

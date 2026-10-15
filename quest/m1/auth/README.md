@@ -23,17 +23,38 @@ that predates the stream. Node-bound peer grants for direct sessions belong to
 
 Decisions settled while planning, recorded so review does not relitigate them:
 
-- **Per-request boundary (2026-10-12).** Request tokens are an experimental
-  Rust interoperability hook with application-owned verification, retaining
-  renewal. They are not a complete authentication scheme or a relay feature.
-  Local session permission may admit an incoming request without a token,
-  but a token on a request is always verified; grants received from the peer
-  never admit one. Request tokens arrive on their own opt-in `scoped()` queue
-  beside the unchanged session-token `requests()` (revised on #5148).
-  Per-request relay integration, JS APIs, CLI, and bindings are deferred;
-  session AUTH work continues. Document the hook only in minimal API comments,
-  with no feature page or guide. The relay request-lease quest is related
-  future work, no longer required to complete this epic.
+- ✅ Decided 2026-10-15 (maintainer, #5148): **one kind of auth.** A token
+  is presented, verified by the acceptor through `requests()`, and earns a
+  grant with a lifetime. An AUTH stream's token lives for the session and
+  its grant joins the session scope. A moq-transport `AUTHORIZATION TOKEN`
+  on a request is the same kind of auth, named by that request: it admits
+  only that request, never joins the scope, and ends with it. Renewal on
+  SUBSCRIBE_UPDATE or REQUEST_UPDATE names a new auth that replaces the old.
+  Per-request tokens are moq-transport's naive form and are not surfaced as
+  a separate API.
+- ✅ Decided 2026-10-15 (maintainer, #5148): an unnamed request is admitted
+  by the union of session-lifetime auths only. A named request outside its
+  auth's grant is refused, and ends when that auth ends.
+- ✅ Decided 2026-10-15 (maintainer, #5148): the work lands in steps.
+  Step 1 (#5148) is incoming only: request tokens arrive on `requests()`,
+  named requests are held to their issued grant, renewal is renaming, and
+  no lite wire changes. Step 2 specs `auth=id` in the wip lite version so a
+  lite request names an AUTH stream instead of carrying a token. Step 3
+  adds outgoing request tokens through `add()` with automatic naming, sent
+  as `USE_VALUE` on plain moq-transport.
+- ✅ Decided 2026-10-15 (maintainer, #5148): `auth::Handle::authorize`
+  keeps its name and now means the connection credential's grant; the
+  session adds every grant it issued to an AUTH token itself.
+- ✅ Decided 2026-10-15 (maintainer, #5148): a typed (CAT etc.) or empty
+  request token is refused `NOT_SUPPORTED`. An AUTH token has no type, and
+  an empty one means the connection's own credential.
+- ✅ Decided 2026-10-15 (maintainer, #5148): moq-relay verifies request
+  tokens in band like any token; ending a request token's lease with its
+  request at the auth server stays in
+  [Request leases](/quest/m3/auth-request-lease.md).
+- ✅ Decided 2026-10-15 (maintainer, #5148): no cap on pending tokens. The
+  peer's credit bounds them: each AUTH token holds its stream open, and each
+  request token its request's slot, until answered or withdrawn.
 - **One AUTH stream per token, opened by whoever presents it.** Either side of
   a session may open one; the acceptor answers with the grant that token
   earns. A moq-net session opens one on both sides right after SETUP with an
@@ -99,8 +120,7 @@ Decisions settled while planning, recorded so review does not relitigate them:
   SUBSCRIBE_OK. Rust is `moq_net::auth` with `auth::Grant`, `auth::Handle`,
   `auth::Token`, and `auth::Request`; JS mirrors as `connection.auth`.
 
-`Session::auth()` is additive, and so is the request-token hook: its opt-in
-`scoped()` queue sits beside the unchanged `requests()`. The relay derives the grant
+`Session::auth()` is additive. The relay derives the grant
 from the origin handles it already scopes. Decided 2026-10-05: wire
 work targets the wip lite version until the maintainer cuts it, never a
 published version in place, so AUTH lands in `moq-lite-07-wip` (or whichever
@@ -110,8 +130,6 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 
 ## Required
 
-- [Request tokens](/quest/m1/auth/request-token.md) - an experimental Rust
-  verifier hook confines a token's authority to its request and renews it
 - [Live requests follow their auth](/quest/m1/auth/request-update.md) - a route or subscription swaps its auth and the session sends the update, keeping the request up
 - [Requests name their auth](/quest/m1/auth/request-auth-id.md) - lite-07 AUTH carries an ID and each request names the auth that admits it
 - [Request gate](/quest/m1/auth/request-gate.md) - every incoming request is
@@ -125,16 +143,11 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
   the rest, with the URL kept for peers without the AUTH stream
 - [Join revocation](/quest/m1/auth/join-revocation.md) - a revoked grant ends our
   subscription even while its joining FETCH waits for request-ID credit
-- [Enforcement cursor](/quest/m1/auth/enforcement-cursor.md) - outgoing announce
-  enforcement reads the origin through the announcer, so an End-to-Start race
-  fails loud instead of withholding silently
-- [Concurrent renewal](/quest/m1/auth/concurrent-renewal.md) - a token refresh
-  renews every live namespace at once, benchmarked over namespaces and sessions
 
 ## Related
 
-- [Request leases](/quest/m3/auth-request-lease.md) - deferred relay
-  integration, to revisit when a consumer needs per-request verification
+- [Request leases](/quest/m3/auth-request-lease.md) - deferred auth-server
+  accounting that ends a request token's lease with its request
 - [Request tokens beyond Rust](/quest/m3/request-token-surfaces.md) - JS, moq-ffi,
   and moq-cli request-token APIs, when a consumer needs one
 - [Token on FETCH](/quest/m3/auth-token-fetch.md) - TRACK_STATUS and FETCH carry
