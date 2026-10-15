@@ -184,7 +184,6 @@ pub async fn run(ctx: Connection) {
 	// The status loop doubles as the keep-alive: it tracks connect/disconnect for
 	// the gauge and returns once the reconnect loop gives up.
 	let mut connected = false;
-	let mut established = false;
 	loop {
 		tokio::select! {
 			status = reconnect.status() => match status {
@@ -193,10 +192,6 @@ pub async fn run(ctx: Connection) {
 					if !connected {
 						connected = true;
 						stats.connections.fetch_add(1, Ordering::Relaxed);
-						if !established {
-							established = true;
-							stats.connection_established();
-						}
 						for published in publishing.iter().filter_map(std::sync::Weak::upgrade) {
 							published.establish();
 						}
@@ -477,7 +472,6 @@ async fn drain(broadcast: broadcast::Consumer, max_delay: Duration, stats: &Stat
 			Ok(()) => {
 				if established.is_none() {
 					established = Some(Gauge::inc(&stats.subscriptions_established));
-					stats.subscription_established();
 				}
 				gaps.complete(sequence);
 			}
@@ -633,7 +627,6 @@ impl Published {
 	fn establish(&self) {
 		if !self.established.swap(true, Ordering::Relaxed) {
 			self.stats.broadcasts_established.fetch_add(1, Ordering::Relaxed);
-			self.stats.broadcast_established();
 		}
 	}
 }
@@ -758,7 +751,7 @@ mod tests {
 				let stats = Arc::new(Stats::new(crate::stats::Targets {
 					connections,
 					broadcasts: count,
-					subscriptions: count,
+					subscriptions: 0,
 				}));
 				let publishers: Vec<_> = (0..connections)
 					.map(|_| {
@@ -773,10 +766,9 @@ mod tests {
 					.collect();
 				let start = std::time::Instant::now();
 				for connection in &weak {
-					stats.connection_established();
+					stats.connections.fetch_add(1, Ordering::Relaxed);
 					for published in connection.iter().filter_map(std::sync::Weak::upgrade) {
 						published.establish();
-						stats.subscription_established();
 					}
 				}
 				assert!(std::hint::black_box(stats.ready()));

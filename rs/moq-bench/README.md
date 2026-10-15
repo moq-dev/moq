@@ -138,9 +138,10 @@ or completed their first group, and subscriptions have read a complete group end
 to end. Broadcast `active` counts producers before establishment; subscription
 `active` includes drains still waiting to subscribe or finish their first group.
 
-`ready` first becomes true after every rolled element establishes. Start a
-measurement window on the first `ready` line. It stays true after a later loss;
-use each resource's `established` count to see established work ending.
+`ready` first becomes true on a line whose `established` counts all reach their
+targets at once. Start a measurement window on the first `ready` line. It stays
+true after a later loss; use each resource's `established` count to see
+established work ending.
 
 This changes the previous numeric JSONL fields into objects. Migrate reads of
 `connections` to `connections.established`, `broadcasts` to `broadcasts.active`,

@@ -1,6 +1,6 @@
 use std::io::Write;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
@@ -21,10 +21,8 @@ pub(crate) struct Targets {
 /// Shared counters bumped by the connection tasks and drained by the reporter.
 pub struct Stats {
 	targets: Targets,
-	/// Each rolled element increments once, so readiness survives a later loss.
-	connected: AtomicU64,
-	published: AtomicU64,
-	subscribed: AtomicU64,
+	/// Latched once the live established gauges all meet their targets together.
+	ready: AtomicBool,
 	/// Active subscriptions that have read a complete group.
 	pub(crate) subscriptions_established: AtomicU64,
 	/// Active broadcasts that connected or completed their first group.
@@ -59,9 +57,7 @@ impl Stats {
 	pub(crate) fn new(targets: Targets) -> Self {
 		Self {
 			targets,
-			connected: AtomicU64::new(0),
-			published: AtomicU64::new(0),
-			subscribed: AtomicU64::new(0),
+			ready: AtomicBool::new(false),
 			subscriptions_established: AtomicU64::new(0),
 			broadcasts_established: AtomicU64::new(0),
 			connections: AtomicU64::new(0),
@@ -79,19 +75,16 @@ impl Stats {
 		}
 	}
 
+	/// Whether the full rolled load has been live at once; a later loss only lowers the gauges.
 	pub(crate) fn ready(&self) -> bool {
-		self.connected.load(Ordering::Relaxed) >= self.targets.connections
-			&& self.published.load(Ordering::Relaxed) >= self.targets.broadcasts
-			&& self.subscribed.load(Ordering::Relaxed) >= self.targets.subscriptions
-	}
-	pub(crate) fn connection_established(&self) {
-		self.connected.fetch_add(1, Ordering::Relaxed);
-	}
-	pub(crate) fn broadcast_established(&self) {
-		self.published.fetch_add(1, Ordering::Relaxed);
-	}
-	pub(crate) fn subscription_established(&self) {
-		self.subscribed.fetch_add(1, Ordering::Relaxed);
+		if !self.ready.load(Ordering::Relaxed)
+			&& self.connections.load(Ordering::Relaxed) >= self.targets.connections
+			&& self.broadcasts_established.load(Ordering::Relaxed) >= self.targets.broadcasts
+			&& self.subscriptions_established.load(Ordering::Relaxed) >= self.targets.subscriptions
+		{
+			self.ready.store(true, Ordering::Relaxed);
+		}
+		self.ready.load(Ordering::Relaxed)
 	}
 
 	pub fn frame_sent(&self, bytes: usize) {
@@ -494,6 +487,22 @@ mod tests {
 	use super::*;
 
 	#[test]
+	fn readiness_requires_the_targets_live_at_once() {
+		let stats = Stats::new(Targets {
+			connections: 2,
+			..Default::default()
+		});
+		// One connection ends before the other connects: two established, never together.
+		stats.connections.store(1, Ordering::Relaxed);
+		assert!(!stats.ready());
+		stats.connections.store(0, Ordering::Relaxed);
+		stats.connections.store(1, Ordering::Relaxed);
+		assert!(!stats.ready());
+		stats.connections.store(2, Ordering::Relaxed);
+		assert!(stats.ready());
+	}
+
+	#[test]
 	fn json_readiness_waits_for_each_target_and_survives_later_loss() {
 		let stats = Stats::new(Targets {
 			connections: 1,
@@ -508,16 +517,12 @@ mod tests {
 		};
 		assert_eq!(line(&stats)["ready"], false);
 		stats.connections.store(1, Ordering::Relaxed);
-		stats.connection_established();
 		stats.broadcasts.store(1, Ordering::Relaxed);
 		stats.broadcasts_established.store(1, Ordering::Relaxed);
-		stats.broadcast_established();
 		stats.subscriptions.store(2, Ordering::Relaxed);
 		stats.subscriptions_established.store(1, Ordering::Relaxed);
-		stats.subscription_established();
 		assert_eq!(line(&stats)["ready"], false);
 		stats.subscriptions_established.store(2, Ordering::Relaxed);
-		stats.subscription_established();
 		let ready = line(&stats);
 		assert_eq!(ready["ready"], true);
 		assert_eq!(ready["connections"], serde_json::json!({"target": 1, "established": 1}));
