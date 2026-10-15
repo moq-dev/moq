@@ -180,7 +180,11 @@ impl<E: CatalogExt> Reserved<E> {
 			)?)
 		};
 
-		self.track.set(encoder.catalog())?;
+		let mut config = encoder.catalog();
+		if matches!(options.settings.codec, super::Codec::Opus) {
+			config.warmup = Some(std::time::Duration::from_millis(80));
+		}
+		self.track.set(config)?;
 
 		let group_samples = options.group_duration.as_nanos() * u128::from(encoder.codec_rate());
 		let group_samples = u64::try_from(group_samples.div_ceil(1_000_000_000)).unwrap_or(u64::MAX);

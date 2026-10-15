@@ -25,6 +25,7 @@ describe("resolve", () => {
 	test("defaults Opus to 20ms", () => {
 		const resolved = resolve(captured, "opus");
 		expect(resolved.frameDuration).toBe(Time.Micro(20_000));
+		expect(Number(resolved.catalog.warmup)).toBe(80);
 		expect(resolved.catalog.jitter).toBeUndefined();
 	});
 
@@ -54,6 +55,7 @@ describe("resolve", () => {
 	test("leaves AAC without a frame duration", () => {
 		const resolved = resolve(captured, "aac");
 		expect(resolved.frameDuration).toBeUndefined();
+		expect(resolved.catalog.warmup).toBeUndefined();
 		expect(resolved.catalog.jitter).toBeUndefined();
 	});
 });

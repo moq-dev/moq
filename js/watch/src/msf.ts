@@ -92,6 +92,8 @@ function toAudioConfig(track: Msf.Track): Catalog.AudioConfig | undefined {
 		sampleRate: u53(track.samplerate ?? DEFAULT_SAMPLE_RATE),
 		numberOfChannels: u53(channels),
 		bitrate: track.bitrate != null ? u53(track.bitrate) : undefined,
+		// MSF cannot advertise decoder warmup, so derive Opus's 80 ms seek pre-roll.
+		warmup: track.codec === "opus" ? u53(80) : undefined,
 		jitter: track.jitter != null ? u53(track.jitter) : undefined,
 		delay: track.delay != null ? delayMillis(track.delay) : undefined,
 	};

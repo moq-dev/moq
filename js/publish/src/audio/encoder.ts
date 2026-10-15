@@ -765,6 +765,7 @@ export function resolve(captured: Format, selected: Codec): Resolved {
 	return {
 		catalog: {
 			codec: "opus",
+			warmup: Catalog.u53(80),
 			sampleRate,
 			numberOfChannels,
 			bitrate: Catalog.u53(codec.bitrate ?? captured.channelCount * OPUS_BITRATE_PER_CHANNEL),
