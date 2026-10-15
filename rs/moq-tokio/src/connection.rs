@@ -41,9 +41,11 @@ fn attempt_timeout(index: usize, total: usize) -> Option<Duration> {
 /// Whether a failed candidate is the peer's answer for every candidate, ending the walk.
 ///
 /// An auth rejection arrives as [`Error::Connect`] with its status already consumed, so it
-/// is checked alongside the statuses that do not invite another attempt.
+/// is checked alongside the statuses that do not invite another attempt. A terminal MoQ error
+/// means the handshake reached the peer, which answered with malformed input.
 fn settles_walk(err: &Error) -> bool {
 	err.is_auth()
+		|| (matches!(err, Error::MoqNet(_)) && err.is_terminal())
 		|| err
 			.status()
 			.is_some_and(|status| !crate::error::status_retryable(status))
@@ -2171,12 +2173,14 @@ mod tests {
 		}
 	}
 
-	/// An auth rejection settles the walk like the status it came from, so a transient
+	/// An auth rejection or malformed handshake settles the walk like a status, so a transient
 	/// failure from another candidate cannot replace it and keep an unlimited loop retrying.
 	#[test]
 	fn an_auth_rejection_stops_the_walk() {
 		assert!(settles_walk(&Error::Connect(crate::ConnectError::Unauthorized)));
 		assert!(settles_walk(&Error::Connect(crate::ConnectError::Forbidden)));
+		assert!(settles_walk(&Error::MoqNet(moq_net::Error::ProtocolViolation)));
+		assert!(!settles_walk(&Error::MoqNet(moq_net::Error::Closed)));
 		assert!(!settles_walk(&Error::Io(std::sync::Arc::new(
 			std::io::ErrorKind::ConnectionRefused.into()
 		))));
