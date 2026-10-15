@@ -874,7 +874,9 @@ function fakeSession(park: number[] = [], stall: number[] = []) {
 		while (streams.length <= index) await count.changed();
 		return streams[index];
 	}
+	const closes: (WebTransportCloseInfo | undefined)[] = [];
 	const quic = {
+		close: (info?: WebTransportCloseInfo) => void closes.push(info),
 		createBidirectionalStream: () => {
 			let inbound!: ReadableStreamDefaultController<Uint8Array>;
 			let onRead!: () => void;
@@ -924,7 +926,7 @@ function fakeSession(park: number[] = [], stall: number[] = []) {
 			return opened;
 		},
 	} as unknown as WebTransport;
-	return { quic, streams, opened };
+	return { quic, streams, opened, closes };
 }
 
 async function answerTrackInfo(stream: FakeStream, version: Version = Version.DRAFT_05): Promise<void> {
@@ -1677,7 +1679,7 @@ test("a local unsubscribe owes no SUBSCRIBE_END", async () => {
 });
 
 test("a publisher FIN without SUBSCRIBE_END still violates an open subscription", async () => {
-	const { quic, streams, opened } = fakeSession();
+	const { quic, streams, opened, closes } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
 	const track = broadcast.track("video").subscribe();
@@ -1688,6 +1690,8 @@ test("a publisher FIN without SUBSCRIBE_END still violates an open subscription"
 		streams[1].inbound.close();
 		expect(await track.closed).toBeInstanceOf(ProtocolViolation);
 		expect((track.closed.peek() as Error).message).toBe("subscribe stream ended without SUBSCRIBE_END");
+		await drainReactions();
+		expect(closes.map((info) => info?.closeCode)).toEqual([SessionCode.ProtocolViolation]);
 	} finally {
 		track.close();
 		broadcast.close();

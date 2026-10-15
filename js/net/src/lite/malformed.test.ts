@@ -88,6 +88,8 @@ for (const [alpn, version] of versions) {
 	});
 	test(`${alpn}: malformed PROBE reports close the session`, async () => {
 		const f = fixture(alpn, version);
+		// PROBE opens only while someone observes the estimate.
+		const stop = f.connection.probe.subscribe(() => {});
 		try {
 			const setup = await Writer.open(f.pair.server, { version });
 			await setup.u53(DataType.Setup);
@@ -110,6 +112,7 @@ for (const [alpn, version] of versions) {
 			await settle();
 			expect(f.violated()).toBe(true);
 		} finally {
+			stop();
 			await f.dispose();
 		}
 	});

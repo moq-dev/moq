@@ -1010,7 +1010,8 @@ pub(crate) async fn accept_websocket(
 	options: crate::websocket::Options,
 	deadline: Option<tokio::time::Instant>,
 ) -> crate::Result<Request> {
-	let (request, deadline) = accept_request(&options.server, session, moq_net::transport::Binding::Uri, deadline).await?;
+	let (request, deadline) =
+		accept_request(&options.server, session, moq_net::transport::Binding::Uri, deadline).await?;
 	let authority = options.url.host_str().filter(|h| !h.is_empty()).map(str::to_owned);
 	Ok(Request {
 		transport: Transport::WebSocket,
@@ -2301,7 +2302,14 @@ mod tests {
 			timeout: Some(timeout),
 		};
 		let start = tokio::time::Instant::now();
-		let Err(err) = accept_request(&setup.server, peer.clone(), moq_net::transport::Binding::Uri, setup.deadline()).await else {
+		let Err(err) = accept_request(
+			&setup.server,
+			peer.clone(),
+			moq_net::transport::Binding::Uri,
+			setup.deadline(),
+		)
+		.await
+		else {
 			panic!("a peer that never sent SETUP was accepted");
 		};
 		assert!(matches!(err, Error::MoqNet(moq_net::Error::Timeout)), "{err}");
@@ -2343,7 +2351,14 @@ mod tests {
 			timeout: Some(timeout),
 		};
 		let start = tokio::time::Instant::now();
-		let Ok((request, deadline)) = accept_request(&setup.server, peer.clone(), moq_net::transport::Binding::Uri, setup.deadline()).await else {
+		let Ok((request, deadline)) = accept_request(
+			&setup.server,
+			peer.clone(),
+			moq_net::transport::Binding::Uri,
+			setup.deadline(),
+		)
+		.await
+		else {
 			panic!("a readable SETUP was refused");
 		};
 		assert_eq!(start.elapsed(), std::time::Duration::ZERO);
@@ -2386,7 +2401,8 @@ mod tests {
 			session
 		});
 
-		let Ok((request, _)) = accept_request(&setup.server, server, moq_net::transport::Binding::Uri, deadline).await else {
+		let Ok((request, _)) = accept_request(&setup.server, server, moq_net::transport::Binding::Uri, deadline).await
+		else {
 			panic!("a prompt SETUP was refused");
 		};
 		let (_session, driver) = request.ok().await.expect("server handshake");
