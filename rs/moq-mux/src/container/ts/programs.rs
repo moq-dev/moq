@@ -146,16 +146,27 @@ impl Programs {
 	}
 
 	/// Finish each program's tracks, then its catalog while it still lists them.
+	///
+	/// Fails, leaving the caller to [`abort`](Self::abort), when the input ended before its PAT
+	/// listed a program or before every listed program declared a track.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
+		anyhow::ensure!(!self.programs.is_empty(), "input ended before its PAT listed a program");
 		for program in &mut self.programs {
+			// The drain can release a program's first catalog.
 			program.import.finish()?;
 			program.announce_if_listed()?;
-			if program.pending.is_some() {
-				tracing::warn!(
-					program = program.number,
-					"input ended before the program declared a track; not announced"
-				);
-			}
+		}
+		let silent: Vec<u16> = self
+			.programs
+			.iter()
+			.filter(|program| program.pending.is_some())
+			.map(|program| program.number)
+			.collect();
+		anyhow::ensure!(
+			silent.is_empty(),
+			"input ended before programs {silent:?} declared a track"
+		);
+		for program in &mut self.programs {
 			program.catalog.finish()?;
 		}
 		Ok(())
@@ -369,6 +380,18 @@ mod test {
 				.all(|program| program.broadcast.route().is_some()),
 			"every program is announced once it has declared its tracks"
 		);
+	}
+
+	/// Input that ends before any PAT fails rather than exiting cleanly with nothing announced.
+	#[test]
+	fn input_ending_before_a_pat_fails() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut null = vec![0x47, 0x1f, 0xff, 0x10];
+		null.resize(188, 0xff);
+		programs.decode(&null).unwrap();
+		let err = programs.finish().expect_err("no PAT");
+		assert!(err.to_string().contains("PAT"), "{err:#}");
 	}
 
 	/// A partial PAT holds only itself, not the multiplex that follows it.

@@ -295,7 +295,7 @@ avc3`, `capture`, `rtc --connect`, `archive`, and `transcode` because their
 timestamps or bytes come from the instance rather than the input. Each that
 accepts it announces once its input has declared its tracks (for `ts`, the
 first PMT), so a standby started ahead of its feed is never asked for tracks it
-cannot serve yet; input that ends before declaring one exits 1.
+cannot serve yet; empty input exits 1 without announcing.
 
 ## Cluster
 
