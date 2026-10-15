@@ -1027,6 +1027,7 @@ impl Timeline {
 		self.0.get_or_init(|| {
 			let mut segment = gst::FormattedSegment::new();
 			segment.set_start(pts);
+			segment.set_position(pts);
 			segment.set_base(base);
 			segment
 		})
@@ -1385,6 +1386,7 @@ mod tests {
 		let base = gst::ClockTime::from_seconds(3);
 		let first = timeline.segment(start, base);
 		assert_eq!(first.start(), Some(start));
+		assert_eq!(first.position(), Some(start));
 		assert_eq!(first.base(), Some(base));
 		assert_eq!(
 			timeline.segment(gst::ClockTime::from_seconds(9), gst::ClockTime::from_seconds(8)),
