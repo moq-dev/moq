@@ -17,8 +17,8 @@ ppm), and passing runs log none.
 
 From reading the code on 5beead687 (not reproduced): `Buffer::steer`
 (`rs/moq-mux/src/jitter.rs`) takes one floor every 2 s, fits an upper convex
-hull, and reads both the rate and `gap` (extrapolated to `now`) from it, with
-no sample or significance gate. `lost` is measured against `startup`, the gap
+hull, and reads both the rate and `gap` (extrapolated to `now`) from it. A
+rate needs only two floors, with no minimum span or significance gate. `lost` is measured against `startup`, the gap
 at the second floor. The export bails when `|slow| > 30 ppm` and `lost`
 passes half the delay (450 ms at `--full`'s 900 ms). So a latency ramp after
 the second floor, on a 0 ppm source, can end the export. Before #5490
