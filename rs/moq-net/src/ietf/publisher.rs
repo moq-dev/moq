@@ -600,8 +600,8 @@ where
 		let task = match id {
 			ietf::Subscribe::ID => {
 				let msg = match ietf::Subscribe::decode_msg(&mut data, this.version) {
-					Err(DecodeError::MalformedAuthToken) => {
-						return Ok(this.reject_token(stream, request::Kind::Subscribe, body.clone(), serve));
+					Err(err) if super::token::refuses_request(&err) => {
+						return Ok(this.reject_token(stream, request::Kind::Subscribe, body.clone(), err, serve));
 					}
 					msg => msg?,
 				};
@@ -620,8 +620,8 @@ where
 			}
 			ietf::Fetch::ID => {
 				let msg = match ietf::Fetch::decode_msg(&mut data, this.version) {
-					Err(DecodeError::MalformedAuthToken) => {
-						return Ok(this.reject_token(stream, request::Kind::Fetch, body.clone(), serve));
+					Err(err) if super::token::refuses_request(&err) => {
+						return Ok(this.reject_token(stream, request::Kind::Fetch, body.clone(), err, serve));
 					}
 					msg => msg?,
 				};
@@ -655,9 +655,9 @@ where
 					})
 				};
 				let (msg, options) = match decoded {
-					Err(DecodeError::MalformedAuthToken) => {
+					Err(err) if super::token::refuses_request(&err) => {
 						let kind = request::Kind::SubscribeNamespace;
-						return Ok(this.reject_token(stream, kind, body.clone(), serve));
+						return Ok(this.reject_token(stream, kind, body.clone(), err, serve));
 					}
 					decoded => decoded?,
 				};
@@ -701,8 +701,8 @@ where
 			}
 			ietf::TrackStatus::ID => {
 				let msg = match ietf::TrackStatus::decode_msg(&mut data, this.version) {
-					Err(DecodeError::MalformedAuthToken) => {
-						return Ok(this.reject_token(stream, request::Kind::TrackStatus, body.clone(), serve));
+					Err(err) if super::token::refuses_request(&err) => {
+						return Ok(this.reject_token(stream, request::Kind::TrackStatus, body.clone(), err, serve));
 					}
 					msg => msg?,
 				};
@@ -732,12 +732,13 @@ where
 		stream: Stream<S, Version>,
 		kind: request::Kind,
 		body: ietf::Body,
+		err: DecodeError,
 		serve: Option<Serve>,
 	) -> MaybeSendBox<'static, ()> {
 		let version = self.version;
 		async move {
 			let _serve = serve;
-			if let Err(err) = super::token::reject(stream, kind, body, version).await {
+			if let Err(err) = super::token::reject(stream, kind, body, err, version).await {
 				tracing::debug!(%err, "token refusal failed");
 			}
 		}
@@ -762,15 +763,16 @@ where
 
 			// Serve only what our grant lets us publish (MoQ Auth), and stop once it no
 			// longer does. Checked before resolving, so a denied request never reaches the
-			// origin. Our own authorization of the peer (the limit) admits the request; when it
-			// does not cover it, an AUTHORIZATION TOKEN on the request goes to the application
-			// to verify for this request alone (MoQ request-token). What the peer granted us
-			// bounds what we send either way, and never stands in for our authorization of it.
+			// origin. Our own authorization of the peer (the limit) admits a request without a
+			// token; an AUTHORIZATION TOKEN on the request goes to the application to verify for
+			// this request alone (MoQ request-token), even where the limit covers it. What the
+			// peer granted us bounds what we send either way, and never stands in for our
+			// authorization of it.
 			let path = msg.track_namespace.as_str();
 			let token = match &msg.authorization_token {
 				Some(token)
 					if self.auth.within_grant(crate::auth::Direction::Publish, path)
-						&& self.auth.token_decides(crate::auth::Direction::Publish, path) =>
+						&& self.auth.token_decides(crate::auth::Direction::Publish) =>
 				{
 					Some(token.0.clone())
 				}
@@ -1330,11 +1332,24 @@ where
 		// update's own Request ID; later drafts name none.
 		let answer = self.version != Version::Draft14;
 		let failed = |err| Served::Track(Err(err));
-		if let Some(err) = update.refused {
-			let reason = match err {
-				Error::Unsupported => "REQUEST_UPDATE parameters not supported",
-				_ => "repeated AUTHORIZATION TOKEN",
-			};
+		// A token renews a token-authorized request. Where tokens decide, one arriving on a
+		// request admitted without one is refused rather than taken unread, so every token this
+		// side admits is verified.
+		let refused = match update.refused {
+			Some(Error::Decode(err)) => Some((super::token::reason(&err), Error::Decode(err))),
+			Some(err) => Some(("REQUEST_UPDATE parameters not supported", err)),
+			None if update.authorization_token.is_some()
+				&& request_grant.is_none()
+				&& self.auth.token_decides(crate::auth::Direction::Publish) =>
+			{
+				Some((
+					"AUTHORIZATION TOKEN on a request admitted without one",
+					Error::Unsupported,
+				))
+			}
+			None => None,
+		};
+		if let Some((reason, err)) = refused {
 			if answer {
 				self.write_subscribe_error(&mut stream.writer, update.request_id, &err, reason)
 					.await
@@ -2877,7 +2892,14 @@ where
 			return Ok(());
 		}
 
-		let suffixes: Vec<crate::PathOwned> = ns.requests.keys().cloned().collect();
+		// Only an advertisement that carried a token stands on one: the rest stand on the
+		// connection grant, and a token arriving on them would be refused unread.
+		let suffixes: Vec<crate::PathOwned> = ns
+			.requests
+			.iter()
+			.filter(|(_, request)| request.backing.is_some())
+			.map(|(suffix, _)| suffix.clone())
+			.collect();
 		for suffix in suffixes {
 			let request_id = self.control.next_request_id(&self.runtime).await?;
 			let Some(request) = ns.requests.get_mut(&suffix) else {
@@ -5857,10 +5879,11 @@ mod serve_tests {
 	const TOKEN: &[u8] = &[0x03, 0x00, 0xAA];
 
 	/// Section 8.9: a request whose tokens repeat is rejected MALFORMED_AUTH_TOKEN, which
-	/// draft-15 moved from 0x10 to 0x4, and the session stays open. A token with another
-	/// value is not a repeat.
+	/// draft-15 moved from 0x10 to 0x4. Distinct tokens are legal but refused NOT_SUPPORTED,
+	/// since authorizing on one would ignore the rest. Either way the session stays open, and
+	/// a single token is answered as usual.
 	#[moq_net_sim::test]
-	async fn a_repeated_request_token_rejects_only_the_request() {
+	async fn a_request_with_repeated_or_several_tokens_is_refused_alone() {
 		for (version, malformed) in [(Version::Draft14, 0x10), (Version::Draft22, 0x4)] {
 			let request = |tokens: &[&[u8]]| {
 				let mut body = track_status("room", true, version);
@@ -5872,23 +5895,30 @@ mod serve_tests {
 			let code = refusal(version, ietf::TrackStatus::ID, request(&[TOKEN, TOKEN])).await;
 			assert_eq!(code, malformed, "{version}");
 
-			let h = serve(version);
 			let other = [0x03, 0x00, 0xBB];
-			assert_eq!(
-				answer_code(&h, request(&[TOKEN, &other]), version).await,
-				None,
-				"{version}"
-			);
+			let code = refusal(version, ietf::TrackStatus::ID, request(&[TOKEN, &other])).await;
+			let unsupported = request::to_code(&Error::Unsupported, request::Kind::TrackStatus, version);
+			assert_eq!(code, unsupported, "{version}: several tokens");
+
+			let h = serve(version);
+			assert_eq!(answer_code(&h, request(&[TOKEN]), version).await, None, "{version}");
 		}
 	}
 
 	/// An update whose tokens repeat is answered MALFORMED_AUTH_TOKEN rather than
-	/// NOT_SUPPORTED, and fails only its subscription.
+	/// NOT_SUPPORTED, and one with several distinct tokens NOT_SUPPORTED. Either fails only its
+	/// subscription.
 	#[moq_net_sim::test]
-	async fn a_repeated_update_token_is_malformed() {
-		for version in [Version::Draft16, Version::Draft22] {
+	async fn a_repeated_or_several_update_tokens_are_refused() {
+		let other: &[u8] = &[0x03, 0x00, 0xBB];
+		for (version, tokens, code) in [
+			(Version::Draft16, [TOKEN, TOKEN], 0x4),
+			(Version::Draft22, [TOKEN, TOKEN], 0x4),
+			(Version::Draft16, [TOKEN, other], 0x3),
+			(Version::Draft22, [TOKEN, other], 0x3),
+		] {
 			let h = serve(version);
-			let mut session = ScriptedSession::per_stream(vec![update_with_tokens(version, &[TOKEN, TOKEN])]);
+			let mut session = ScriptedSession::per_stream(vec![update_with_tokens(version, &tokens)]);
 			let mut stream = Stream::open(&mut session, version).await.unwrap();
 			let mut serving = TrackServe::new(
 				h.session.clone(),
@@ -5899,12 +5929,21 @@ mod serve_tests {
 				None,
 			);
 			let mut finished = false;
-			let served = h
-				.publisher
-				.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None)
-				.await;
+			let mut run =
+				std::pin::pin!(
+					h.publisher
+						.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None)
+				);
+			let mut served = None;
+			for _ in 0..50 {
+				if let std::task::Poll::Ready(done) = futures::poll!(run.as_mut()) {
+					served = Some(done);
+					break;
+				}
+				settle().await;
+			}
 			assert!(
-				matches!(served, Some(Served::UpdateFailed(Error::Unsupported))),
+				matches!(served, Some(Some(Served::UpdateFailed(Error::Unsupported)))),
 				"{version}: {served:?}"
 			);
 			assert!(h.log.closes().is_empty(), "{version}: the session closed");
@@ -5913,7 +5952,7 @@ mod serve_tests {
 			let mut buf = Decoder::new(&wire, version.into());
 			assert_eq!(buf.varint().unwrap(), ietf::RequestError::ID, "{version}");
 			let error = ietf::RequestError::decode(&mut buf, version).unwrap();
-			assert_eq!(error.error_code, 0x4, "{version}");
+			assert_eq!(error.error_code, code, "{version}");
 		}
 	}
 
@@ -10372,51 +10411,85 @@ mod serve_tests {
 		assert!(ended, "the refused subscription ends");
 	}
 
-	/// A limit that covers the SUBSCRIBE admits it on its own: the token rides along unread.
+	/// Every token is verified, even on a SUBSCRIBE the limit already covers: the verifier
+	/// refusing it refuses the subscription, and one it grants stands outside the limit, so
+	/// narrowing the limit away from it leaves the subscription its token admitted.
 	#[moq_net_sim::test]
-	async fn a_covering_limit_admits_without_the_verifier() {
-		let room = crate::auth::Grant {
+	async fn a_covering_limit_still_verifies_the_token() {
+		let limit = |subtree: &str| crate::auth::Grant {
 			publish: crate::Patterns::new(),
-			subscribe: crate::Pattern::subtree("room").unwrap().into(),
+			subscribe: crate::Pattern::subtree(subtree).unwrap().into(),
 			expires: None,
 		};
-		let (auth, _h, mut serving) = serve_token_subscribe(crate::auth::Grant::default(), Some(room)).await;
-		assert!(still_serving(&mut serving).await, "the limit admits the subscription");
-		drop(auth);
+		let (_auth, _h, mut serving) = serve_token_subscribe(crate::auth::Grant::default(), Some(limit("room"))).await;
+		assert!(
+			!still_serving(&mut serving).await,
+			"the verifier refused the token the limit would have let through"
+		);
+
+		let (auth, _h, mut serving) = serve_token_subscribe(crate::auth::Grant::all(), Some(limit("room"))).await;
+		assert!(still_serving(&mut serving).await, "the verified token admits it");
+		auth.authorize(&limit("other"));
+		assert!(
+			still_serving(&mut serving).await,
+			"narrowing the limit leaves the token-verified subscription"
+		);
 	}
 
-	/// With no verifier, a token the limit leaves to decide refuses the request as unsupported
-	/// rather than unauthorized, and a session never limited ignores the token.
+	/// Where tokens decide, a token arriving on an update for a subscription admitted without
+	/// one is refused NOT_SUPPORTED rather than taken unread, failing only that subscription.
+	#[moq_net_sim::test]
+	async fn a_token_on_a_subscription_admitted_without_one_is_refused() {
+		for version in [Version::Draft16, Version::Draft22] {
+			let auth = crate::auth::Handle::new(false);
+			auth.authorize(&crate::auth::Grant::all());
+			let h = serve_with_auth(version, auth, Vec::new());
+			let mut session = ScriptedSession::per_stream(vec![update_with_tokens(version, &[TOKEN])]);
+			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut serving = TrackServe::new(
+				h.session.clone(),
+				h.track.subscribe(None),
+				RequestId(0),
+				version,
+				ServeRange::default(),
+				None,
+			);
+			let mut finished = false;
+			let mut run =
+				std::pin::pin!(
+					h.publisher
+						.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None)
+				);
+			let mut served = None;
+			for _ in 0..50 {
+				if let std::task::Poll::Ready(done) = futures::poll!(run.as_mut()) {
+					served = Some(done);
+					break;
+				}
+				settle().await;
+			}
+			assert!(
+				matches!(served, Some(Some(Served::UpdateFailed(Error::Unsupported)))),
+				"{version}: {served:?}"
+			);
+			assert!(h.log.closes().is_empty(), "{version}: the session closed");
+
+			let wire = session.log.writes.lock().unwrap().clone();
+			let mut buf = Decoder::new(&wire, version.into());
+			assert_eq!(buf.varint().unwrap(), ietf::RequestError::ID, "{version}");
+			let error = ietf::RequestError::decode(&mut buf, version).unwrap();
+			assert_eq!(error.error_code, 0x3, "{version}");
+		}
+	}
+
+	/// With no verifier, a limited session refuses a token as unsupported rather than
+	/// unauthorized, even one its limit covers, and a session never limited ignores the token.
 	#[moq_net_sim::test]
 	async fn a_token_without_a_verifier_is_unsupported() {
 		const VERSION: Version = Version::Draft18;
-		let auth = crate::auth::Handle::new(false);
-		auth.authorize(&crate::auth::Grant::default());
-		let h = serve_with_auth(VERSION, auth, Vec::new());
-		let stream = Stream::open(&mut h.session.clone(), VERSION).await.unwrap();
-		let res = h
-			.publisher
-			.clone()
-			.run_subscribe_stream(stream, token_subscribe())
-			.await;
-		assert!(res.is_ok(), "refused, not failed: {res:?}");
-		let refusal = {
-			let log = Log::default();
-			let mut writer =
-				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
-			writer.varint(ietf::RequestError::ID).await.unwrap();
-			writer
-				.encode(&ietf::RequestError {
-					request_id: None,
-					error_code: request::to_code(&Error::Unsupported, request::Kind::Subscribe, VERSION),
-					reason_phrase: Error::Unsupported.to_string().into(),
-					retry_interval: 0,
-				})
-				.await
-				.unwrap();
-			log.writes.lock().unwrap().clone()
-		};
-		assert_eq!(occurrences(&h.log, &refusal), 1, "refused NOT_SUPPORTED");
+		for limit in [crate::auth::Grant::default(), crate::auth::Grant::all()] {
+			a_token_without_a_verifier_is_refused(VERSION, limit).await;
+		}
 
 		let unlimited = crate::auth::Handle::new(false);
 		let h = serve_with_auth(VERSION, unlimited, Vec::new());
@@ -10432,6 +10505,42 @@ mod serve_tests {
 			);
 			settle().await;
 		}
+	}
+
+	/// Serve a token SUBSCRIBE on a session limited to `limit` with no verifier, and check it
+	/// is refused NOT_SUPPORTED.
+	async fn a_token_without_a_verifier_is_refused(version: Version, limit: crate::auth::Grant) {
+		let auth = crate::auth::Handle::new(false);
+		auth.authorize(&limit);
+		let h = serve_with_auth(version, auth, Vec::new());
+		let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+		let mut serving = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, token_subscribe()));
+		let mut res = None;
+		for _ in 0..50 {
+			if let std::task::Poll::Ready(done) = futures::poll!(serving.as_mut()) {
+				res = Some(done);
+				break;
+			}
+			settle().await;
+		}
+		assert!(matches!(res, Some(Ok(()))), "refused, not failed or served: {res:?}");
+		let refusal = {
+			let log = Log::default();
+			let mut writer =
+				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+			writer.varint(ietf::RequestError::ID).await.unwrap();
+			writer
+				.encode(&ietf::RequestError {
+					request_id: None,
+					error_code: request::to_code(&Error::Unsupported, request::Kind::Subscribe, version),
+					reason_phrase: Error::Unsupported.to_string().into(),
+					retry_interval: 0,
+				})
+				.await
+				.unwrap();
+			log.writes.lock().unwrap().clone()
+		};
+		assert_eq!(occurrences(&h.log, &refusal), 1, "refused NOT_SUPPORTED");
 	}
 
 	/// A token waiting on the application holds the subscription's slot. Withdrawn while still
@@ -12631,6 +12740,57 @@ mod tests {
 			settle().await;
 		}
 		assert!(renewed, "a replaced token must be re-presented on the live announce");
+	}
+
+	/// A namespace advertised without a token stands on the connection grant, so setting a
+	/// token later re-presents nothing on it: the receiver would refuse a token on an
+	/// advertisement it admitted without one.
+	#[moq_net_sim::test]
+	async fn a_token_set_later_never_renews_a_tokenless_announce() {
+		const VERSION: Version = Version::Draft18;
+		let token = bytes::Bytes::from_static(&[0x03, 0x00, b'b', b'b']);
+
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
+		settle().await;
+
+		let mut script = publish_namespace_ok(VERSION).await;
+		script.extend(publish_namespace_ok(VERSION).await);
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![script]);
+		let log = session.log.clone();
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer::default());
+
+		let request_token = crate::RequestToken::new(None);
+		let publisher = Publisher::new(
+			crate::time::Clock::sim(),
+			session,
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			peer_setup,
+			VERSION,
+		)
+		.with_request_token(request_token.clone());
+
+		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+		let mut announced = false;
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if !log.writes.lock().unwrap().is_empty() {
+				announced = true;
+				break;
+			}
+			settle().await;
+		}
+		assert!(announced, "the namespace is advertised without a token");
+
+		request_token.set(Some(typed(&token)));
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			settle().await;
+		}
+		assert_eq!(occurrences(&log, &token), 0, "the token renewed a tokenless announce");
 	}
 
 	/// A token replaced while the initial PUBLISH_NAMESPACE awaits its answer is re-presented

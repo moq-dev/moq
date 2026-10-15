@@ -405,11 +405,12 @@ impl Handle {
 	/// peer verifies this one per request. Experimental.
 	///
 	/// Set it before running the session's driver to present it on the first request.
-	/// Replacing it later re-presents the new token on every live request as a
-	/// REQUEST_UPDATE, renewing a token-authorized request in place; setting the same value
-	/// again sends nothing. A subscription whose renewal cannot be sent ends. Only drafts 14 and 15 cannot renew an advertisement, which has
-	/// no update there, so it keeps the token it was offered with. `None` sends nothing
-	/// either: live requests keep the token they last presented, and later ones carry none.
+	/// Replacing it later re-presents the new token on every live request that carried one,
+	/// as a REQUEST_UPDATE renewing it in place; a request sent without one stays without.
+	/// Setting the same value again sends nothing. A subscription whose renewal cannot be
+	/// sent ends. Only drafts 14 and 15 cannot renew an advertisement, which has no update
+	/// there, so it keeps the token it was offered with. `None` sends nothing either: live
+	/// requests keep the token they last presented, and later ones carry none.
 	/// Independent of the MoQ Auth extension.
 	///
 	/// While a token is set, this side stops closing the session over a broadcast its own
@@ -534,11 +535,12 @@ impl Handle {
 	}
 
 	/// Verify the `AUTHORIZATION TOKEN` on each of the peer's SUBSCRIBE and PUBLISH_NAMESPACE
-	/// requests that [`authorize`](Self::authorize) does not cover. Experimental.
+	/// requests, even one [`authorize`](Self::authorize) covers. Experimental.
 	///
 	/// Each token decides its request alone, with a grant that never joins the session's.
-	/// Without this, such a request is refused as unsupported, and a session never
-	/// authorized admits every request without reading its token. Take it before running the
+	/// Without this, a request carrying one is refused as unsupported, and a session never
+	/// authorized admits every request without reading its token. A request or update
+	/// carrying more than one token is refused as unsupported. Take it before running the
 	/// session's driver, so no request is admitted before it. Independent of the MoQ Auth
 	/// extension, since the token rides the request itself.
 	///
@@ -713,8 +715,8 @@ impl Handle {
 	/// Calling it again re-authorizes, narrower or wider, replacing the last grant. The
 	/// session's origin handles still bound it, so it never grants more than they allow.
 	///
-	/// A request outside it that carries its own token is decided by that token through
-	/// [`scoped`](Self::scoped), or refused as unsupported when nothing verifies them.
+	/// A request that carries its own token is decided by that token, inside it or not,
+	/// through [`scoped`](Self::scoped), or refused as unsupported when nothing verifies them.
 	///
 	/// A narrower grant ends what falls outside at once, with [`Error::Unauthorized`]
 	/// where it has a reader: announcements to the peer retract, its new requests are
@@ -777,18 +779,17 @@ impl Handle {
 		self.state.read().allows(direction, path)
 	}
 
-	/// Whether a request token decides a request at `path`, rather than this side's own
-	/// authorization of the peer: the limit does not cover it, so the application verifies the
-	/// token, or the request is refused as unsupported without a verifier. A session never
-	/// limited asks only an application that verifies request tokens, and admits otherwise.
+	/// Whether a request token decides the request carrying it, rather than this side's own
+	/// authorization of the peer: the application verifies every token, or the request is
+	/// refused as unsupported without a verifier, even where the limit already covers it. A
+	/// token admitted unread would leave the peer believing it backs a request this side holds
+	/// to its limit. A side that neither limits the peer nor verifies tokens has nothing to
+	/// check one against, and admits as it would without it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn token_decides(&self, direction: Direction, path: &str) -> bool {
+	pub(crate) fn token_decides(&self, direction: Direction) -> bool {
 		let state = self.state.read();
 		let (_, limit) = state.parts(direction);
-		match limit {
-			Some(limit) => !limit.matches(path),
-			None => state.verifier.is_some(),
-		}
+		limit.is_some() || state.verifier.is_some()
 	}
 
 	/// Whether the peer's grant alone allows `direction` at `path`, allowing everything
@@ -2010,7 +2011,7 @@ mod tests {
 			value: b"jwt".to_vec(),
 		};
 		assert!(
-			!handle.token_decides(Direction::Publish, "room"),
+			!handle.token_decides(Direction::Publish),
 			"a session never limited and with no verifier ignores the token"
 		);
 		let verdict = handle.verify_request(token(), path(), RequestKind::Subscribe, None);
@@ -2024,7 +2025,14 @@ mod tests {
 
 		let _scoped = handle.scoped().unwrap();
 		assert!(matches!(handle.scoped(), Err(Error::Duplicate)));
-		assert!(handle.token_decides(Direction::Publish, "room"));
+		assert!(handle.token_decides(Direction::Publish));
+
+		let limited = Handle::new(true);
+		limited.authorize(&Grant::all());
+		assert!(
+			limited.token_decides(Direction::Publish),
+			"a limit, even one covering everything, leaves the token to decide"
+		);
 
 		let lite = Handle::new(false);
 		lite.lite();

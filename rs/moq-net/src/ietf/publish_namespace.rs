@@ -47,7 +47,7 @@ impl PublishNamespace<'_> {
 			cluster::HOP_PATH => hops: Option<cluster::HopPath>,
 			cluster::ROUTE_COST => cost: Option<u64>,
 		);
-		super::token::unique(&authorization_token)?;
+		let authorization_token = super::token::single(authorization_token)?;
 
 		let cluster = match negotiated {
 			true => Some(cluster::Advert {
@@ -64,7 +64,7 @@ impl PublishNamespace<'_> {
 			request_id,
 			track_namespace,
 			cluster,
-			authorization_token: authorization_token.into_iter().next(),
+			authorization_token,
 		})
 	}
 }
@@ -182,13 +182,13 @@ impl Message for PublishNamespaceUpdate {
 			cluster::HOP_PATH => hops: Option<cluster::HopPath>,
 			cluster::ROUTE_COST => cost: Option<u64>,
 		);
-		super::token::unique(&authorization_token)?;
+		let authorization_token = super::token::single(authorization_token)?;
 		Ok(Self {
 			request_id,
 			namespace_request_id,
 			hops,
 			cost,
-			authorization_token: authorization_token.into_iter().next(),
+			authorization_token,
 		})
 	}
 }

@@ -125,8 +125,9 @@ pub(super) struct Update {
 	/// The first Request ID: the update's own on drafts 14-16, which their answer names.
 	pub(super) request_id: super::RequestId,
 	pub(super) priority: Option<u8>,
-	/// Why the update is refused, which fails the subscription: [`Error::Unsupported`], or a
-	/// [`DecodeError::MalformedAuthToken`] for tokens that repeat.
+	/// Why the update is refused, which fails the subscription: [`Error::Unsupported`], a
+	/// [`DecodeError::MalformedAuthToken`] for tokens that repeat, or a
+	/// [`DecodeError::MultipleAuthTokens`] for more than one token.
 	pub(super) refused: Option<Error>,
 	/// The AUTHORIZATION TOKEN renewing the request's credential.
 	pub(super) authorization_token: Option<super::token::RequestToken>,
@@ -161,11 +162,12 @@ impl Update {
 				if !data.is_empty() {
 					return Err(DecodeError::InvalidValue);
 				}
+				let (refused, authorization_token) = Self::refused(tokens, !forward);
 				return Ok(Self {
 					request_id,
 					priority: Some(priority),
-					refused: Self::refused(&tokens, !forward),
-					authorization_token: tokens.into_iter().next(),
+					refused,
+					authorization_token,
 				});
 			}
 			// The request it updates, which the adapter already routed by.
@@ -206,20 +208,25 @@ impl Update {
 			|| !property_filter.is_empty()
 			|| !track_filter.is_empty()
 			|| new_group.is_some();
+		let (refused, authorization_token) = Self::refused(token, unsupported);
 		Ok(Self {
 			request_id,
 			priority,
-			refused: Self::refused(&token, unsupported),
-			authorization_token: token.into_iter().next(),
+			refused,
+			authorization_token,
 		})
 	}
 
-	/// Section 8.9 rejects an update whose tokens repeat, which says more than that we do not
-	/// support it.
-	fn refused(tokens: &[super::token::RequestToken], unsupported: bool) -> Option<Error> {
-		match super::token::unique(tokens) {
-			Err(err) => Some(err.into()),
-			Ok(()) => unsupported.then_some(Error::Unsupported),
+	/// Why an update is refused, if it is, and the token it carries. A token refusal comes
+	/// first: section 8.9 rejects an update whose tokens repeat, which says more than that we
+	/// do not support it.
+	fn refused(
+		tokens: Vec<super::token::RequestToken>,
+		unsupported: bool,
+	) -> (Option<Error>, Option<super::token::RequestToken>) {
+		match super::token::single(tokens) {
+			Err(err) => (Some(err.into()), None),
+			Ok(token) => (unsupported.then_some(Error::Unsupported), token),
 		}
 	}
 }

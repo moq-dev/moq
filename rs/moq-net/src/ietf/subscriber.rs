@@ -1180,8 +1180,8 @@ where
 		let task = match id {
 			ietf::Publish::ID => {
 				let msg = match ietf::Publish::decode_msg(&mut data, this.version) {
-					Err(DecodeError::MalformedAuthToken) => {
-						return Ok(this.reject_token(stream, request::Kind::Publish, body.clone()));
+					Err(err) if super::token::refuses_request(&err) => {
+						return Ok(this.reject_token(stream, request::Kind::Publish, body.clone(), err));
 					}
 					msg => msg?,
 				};
@@ -1200,8 +1200,8 @@ where
 				// A negotiated session that omits HOP_PATH fails the decode here, which
 				// the dispatcher turns into the protocol violation the draft requires.
 				let msg = match ietf::PublishNamespace::decode_body(&mut data, this.version, peer.negotiated()) {
-					Err(DecodeError::MalformedAuthToken) => {
-						return Ok(this.reject_token(stream, request::Kind::PublishNamespace, body.clone()));
+					Err(err) if super::token::refuses_request(&err) => {
+						return Ok(this.reject_token(stream, request::Kind::PublishNamespace, body.clone(), err));
 					}
 					msg => msg?,
 				};
@@ -1241,10 +1241,11 @@ where
 		stream: Stream<S, Version>,
 		kind: request::Kind,
 		body: ietf::Body,
+		err: DecodeError,
 	) -> MaybeSendBox<'static, ()> {
 		let version = self.version;
 		async move {
-			if let Err(err) = super::token::reject(stream, kind, body, version).await {
+			if let Err(err) = super::token::reject(stream, kind, body, err, version).await {
 				tracing::debug!(%err, "token refusal failed");
 			}
 		}
@@ -1313,18 +1314,13 @@ where
 			return Ok(());
 		};
 
-		// Our authorization of the peer (the limit) admits the announce, and holds back one
-		// it does not cover until it does. When it does not cover it, an AUTHORIZATION TOKEN
-		// on the announce goes to the application to verify for this announce alone (MoQ
-		// request-token), and a verified one is exempt from the limit while it lasts.
+		// Our authorization of the peer (the limit) admits an announce without a token, and
+		// holds back one it does not cover until it does. An AUTHORIZATION TOKEN on the
+		// announce goes to the application to verify for this announce alone (MoQ
+		// request-token), even where the limit covers it, and a verified one is exempt from the
+		// limit while it lasts.
 		let token = match &msg.authorization_token {
-			Some(token)
-				if self
-					.auth
-					.token_decides(crate::auth::Direction::Subscribe, path.as_str()) =>
-			{
-				Some(token.0.clone())
-			}
+			Some(token) if self.auth.token_decides(crate::auth::Direction::Subscribe) => Some(token.0.clone()),
 			_ => None,
 		};
 		let (admit, token_grant) = match token {
@@ -1555,11 +1551,11 @@ where
 							spent.insert(update_id);
 						}
 						// Decoded on arrival too, so a session-fatal update still closes the session
-						// when a withdrawal drops the queue. A repeated token only refuses this
+						// when a withdrawal drops the queue. A token refusal only refuses this
 						// announce, which waits for the update's turn.
 						let mut data = body.decoder(self.version);
 						match ietf::PublishNamespaceUpdate::decode_msg(&mut data, self.version) {
-							Err(DecodeError::MalformedAuthToken) => {}
+							Err(err) if super::token::refuses_request(&err) => {}
 							msg => {
 								msg?;
 								if !data.is_empty() {
@@ -1653,12 +1649,12 @@ where
 				self.spend(update_id)?;
 			}
 			let msg = match ietf::PublishNamespaceUpdate::decode_msg(&mut data, self.version) {
-				// Section 8.9 rejects the update, which withdraws the advertisement as any
-				// refused update does.
-				Err(DecodeError::MalformedAuthToken) => {
+				// A token refusal rejects the update, which withdraws the advertisement as
+				// any refused update does.
+				Err(err) if super::token::refuses_request(&err) => {
 					let refusal = crate::auth::Refusal {
-						error: Error::Decode(DecodeError::MalformedAuthToken),
-						reason: "repeated AUTHORIZATION TOKEN".to_string(),
+						reason: super::token::reason(&err).to_string(),
+						error: Error::Decode(err),
 					};
 					return Ok(Withdraw::Cancel(update_id, refusal));
 				}
@@ -1732,11 +1728,23 @@ where
 			// awaited here: it becomes the pending renewal raced against the deadline above.
 			// The routing above is already applied, so the renewal's answer (written when its
 			// verdict resolves) is this update's single response, cluster parameters included.
-			if let Some(token) = msg.authorization_token
-				&& let Some(grant) = &token_grant
-			{
-				renewal.verify(grant.verify_renewal(&self.auth, token.0), msg.request_id);
-				continue;
+			if let Some(token) = msg.authorization_token {
+				match &token_grant {
+					Some(grant) => {
+						renewal.verify(grant.verify_renewal(&self.auth, token.0), msg.request_id);
+						continue;
+					}
+					// Where tokens decide, a token on an announce admitted without one is refused
+					// rather than taken unread, so every token this side admits is verified.
+					None if self.auth.token_decides(crate::auth::Direction::Subscribe) => {
+						let refusal = crate::auth::Refusal {
+							error: Error::Unsupported,
+							reason: "AUTHORIZATION TOKEN on an announce admitted without one".to_string(),
+						};
+						return Ok(Withdraw::Cancel(msg.request_id, refusal));
+					}
+					None => {}
+				}
 			}
 
 			// No token rides this update: acknowledge it now.
@@ -3048,9 +3056,11 @@ where
 
 				// Start the next renewal once nothing holds it back: no renewal still waiting for
 				// its request ID and, where renewals are paced, none awaiting an answer. A cleared
-				// token (`None`) is not a renewal and sends nothing.
+				// token (`None`) is not a renewal and sends nothing, and a subscription whose
+				// SUBSCRIBE carried no token stands on the connection grant, with no token to renew.
 				if sending.is_none()
 					&& !(throttle && in_flight.is_some())
+					&& presented.is_some()
 					&& last_token.is_some()
 					&& last_token != presented
 				{
@@ -8821,6 +8831,64 @@ mod tests {
 		assert_eq!(occurrences(&log, &second), 0, "the token never went out");
 	}
 
+	/// A subscription whose SUBSCRIBE carried no token stands on the connection grant, so a
+	/// token set later renews nothing on it: the receiver would refuse a token on a request it
+	/// admitted without one.
+	#[moq_net_sim::test]
+	async fn a_token_set_later_never_renews_a_tokenless_subscription() {
+		const VERSION: Version = Version::Draft18;
+		let token = bytes::Bytes::from_static(&[0x03, 0x00, b'b', b'b']);
+		let session = crate::lite::test_transport::ScriptedSession::new(subscribe_ok_bytes(VERSION).await);
+		let log = session.log.clone();
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let request_token = crate::RequestToken::new(None);
+		let mut subscriber = Subscriber::new(
+			crate::time::Clock::sim(),
+			session,
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Hop::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+			Default::default(),
+		)
+		.with_request_token(request_token.clone());
+
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let track = consumer.track("video").unwrap();
+		let _subscription = track.subscribe(None);
+		let request = dynamic.requested_track().await.expect("no track requested");
+		let mut run = std::pin::pin!(subscriber.run_subscribe(Path::new("room/x"), dynamic, request));
+		for _ in 0..200 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if !control_message_types(&log, VERSION).is_empty() {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(
+			control_message_types(&log, VERSION).first(),
+			Some(&ietf::Subscribe::ID),
+			"the SUBSCRIBE goes out"
+		);
+
+		request_token.set(Some(typed(&token)));
+		for _ in 0..50 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			settle().await;
+		}
+		assert_eq!(
+			occurrences(&log, &token),
+			0,
+			"the token renewed a tokenless subscription"
+		);
+	}
+
 	/// A token replaced or cleared while its renewal waits for a request ID never reaches the
 	/// wire: the renewal carries the newest token, or is dropped once the token is cleared.
 	#[moq_net_sim::test]
@@ -9621,17 +9689,33 @@ mod tests {
 		assert!(routed_now(&consumer, "room/alice").is_none(), "and is never attached");
 	}
 
-	/// A limit that covers the announce admits it on its own: the token rides along unread.
+	/// Every token is verified, even on an announce the limit already covers, so a verified
+	/// one stands outside the limit: narrowing the limit away from it leaves it attached, as the
+	/// publisher, which counts it token-backed, expects. Admitted on the limit instead, the
+	/// narrowing would withhold a route the publisher still believes its token backs.
 	#[moq_net_sim::test]
-	async fn a_covering_limit_admits_without_the_verifier() {
+	async fn a_covering_limit_still_verifies_the_token() {
 		const VERSION: Version = Version::Draft18;
-		let limit = crate::auth::Grant {
-			publish: crate::Pattern::subtree("room").unwrap().into(),
+		let limit = |subtree: &str| crate::auth::Grant {
+			publish: crate::Pattern::subtree(subtree).unwrap().into(),
 			subscribe: crate::Patterns::new(),
 			expires: None,
 		};
-		let (mut subscriber, mut requests, consumer, session) = auth_announce_harness_no_ext(VERSION, Some(limit));
+		let auth = crate::auth::Handle::new(false);
+		auth.authorize(&limit("room"));
+		let (mut subscriber, mut requests, consumer, session) = announce_harness_with(VERSION, auth.clone());
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let consulted = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+		let acceptor = {
+			let consulted = consulted.clone();
+			async move {
+				let request = requests.next().await.expect("a request");
+				consulted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+				let _held = request.accept(crate::auth::Grant::all());
+				std::future::pending::<()>().await
+			}
+		};
+		let mut acceptor = std::pin::pin!(acceptor);
 		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
 			stream,
 			token_publish_namespace(),
@@ -9640,6 +9724,7 @@ mod tests {
 		));
 		let mut routed = false;
 		for _ in 0..500 {
+			let _ = futures::poll!(acceptor.as_mut());
 			assert!(futures::poll!(run.as_mut()).is_pending(), "the announce ended early");
 			if routed_now(&consumer, "room/alice").is_some() {
 				routed = true;
@@ -9647,10 +9732,22 @@ mod tests {
 			}
 			settle().await;
 		}
-		assert!(routed, "the limit admits the announce");
+		assert!(routed, "the verified token admits the announce");
+		assert_eq!(
+			consulted.load(std::sync::atomic::Ordering::Relaxed),
+			1,
+			"the verifier ran though the limit covers the announce"
+		);
+
+		auth.authorize(&limit("other"));
+		for _ in 0..50 {
+			let _ = futures::poll!(acceptor.as_mut());
+			assert!(futures::poll!(run.as_mut()).is_pending(), "the announce ended");
+			settle().await;
+		}
 		assert!(
-			requests.poll_next(&kio::Waiter::noop()).is_pending(),
-			"the token never reached the verifier"
+			routed_now(&consumer, "room/alice").is_some(),
+			"narrowing the limit withheld the token-verified announce"
 		);
 	}
 
@@ -9966,6 +10063,48 @@ mod tests {
 					"a refused draft-16 renewal sends PUBLISH_NAMESPACE_CANCEL"
 				);
 			}
+		}
+	}
+
+	/// Where tokens decide, a token arriving on an update for an announce the limit admitted
+	/// without one is refused rather than taken unread: it ends only that announce, unverified.
+	#[moq_net_sim::test]
+	async fn a_token_on_an_announce_admitted_without_one_is_refused() {
+		for version in [Version::Draft16, Version::Draft18] {
+			let (mut subscriber, mut requests, _cred, consumer, session) =
+				auth_announce_harness(version, publish_namespace_update_with_token(version).await);
+			let stream = Stream::open(&mut session.clone(), version).await.unwrap();
+			let tokenless = ietf::PublishNamespace {
+				request_id: RequestId(1),
+				track_namespace: crate::Path::new("other/alice"),
+				cluster: None,
+				authorization_token: None,
+			};
+			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
+				stream,
+				tokenless,
+				cluster::Peer::default(),
+				None,
+			));
+
+			let mut result = None;
+			for _ in 0..500 {
+				if let std::task::Poll::Ready(res) = futures::poll!(run.as_mut()) {
+					result = Some(res);
+					break;
+				}
+				settle().await;
+			}
+			assert!(
+				matches!(result, Some(Ok(()))),
+				"{version}: the update's token ends the announce, got {result:?}"
+			);
+			assert!(routed_now(&consumer, "other/alice").is_none(), "{version}");
+			assert!(
+				requests.poll_next(&kio::Waiter::noop()).is_pending(),
+				"{version}: the token reached the verifier"
+			);
+			assert!(session.log.closes().is_empty(), "{version}: the session closed");
 		}
 	}
 

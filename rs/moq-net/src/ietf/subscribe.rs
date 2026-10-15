@@ -75,8 +75,7 @@ impl Message for Subscribe<'_> {
 				let filter = Filter::decode(r, version)?;
 
 				let tokens = Parameters::skip_request(r)?;
-				super::token::unique(&tokens)?;
-				let authorization_token = tokens.into_iter().next();
+				let authorization_token = super::token::single(tokens)?;
 
 				Ok(Self {
 					request_id,
@@ -114,7 +113,7 @@ impl Message for Subscribe<'_> {
 					0x32 => _new_group_request: Option<u64> where has_new_group_request(version),
 					0x35 => include_properties: Option<bool> where Filter::is_draft20(version),
 				);
-				super::token::unique(&authorization_token)?;
+				let authorization_token = super::token::single(authorization_token)?;
 
 				let range_filters = [
 					subgroup_filter,
@@ -150,7 +149,7 @@ impl Message for Subscribe<'_> {
 					// Absent means 1.
 					forward: forward.unwrap_or(true),
 					range_filters,
-					authorization_token: authorization_token.into_iter().next(),
+					authorization_token,
 				})
 			}
 		}
@@ -460,8 +459,7 @@ impl Message for SubscribeUpdate {
 				let subscriber_priority = Some(r.u8()?);
 				let forward = Some(r.bool()?);
 				let tokens = Parameters::skip_request(r)?;
-				super::token::unique(&tokens)?;
-				let authorization_token = tokens.into_iter().next();
+				let authorization_token = super::token::single(tokens)?;
 
 				Ok(Self {
 					request_id,
@@ -494,7 +492,7 @@ impl Message for SubscribeUpdate {
 					subscriber_priority,
 					forward,
 					filter,
-					authorization_token: authorization_token.into_iter().next(),
+					authorization_token: super::token::single(authorization_token)?,
 				})
 			}
 			_ => {
@@ -529,7 +527,7 @@ impl Message for SubscribeUpdate {
 					subscriber_priority,
 					forward,
 					filter,
-					authorization_token: authorization_token.into_iter().next(),
+					authorization_token: super::token::single(authorization_token)?,
 				})
 			}
 		}
@@ -1322,28 +1320,41 @@ mod tests {
 	}
 
 	/// Every parameter draft-20 lets a SUBSCRIBE carry that we don't act on still decodes,
-	/// with what we have to refuse recorded rather than failing the session.
+	/// with what we have to refuse recorded rather than failing the session. A second distinct
+	/// token, which the draft allows, refuses only the request.
 	#[test]
 	fn subscribe_decodes_every_draft20_parameter() {
+		let second: &[u8] = &[0x00, 0x03, 0x03, 0x00, 0xBB];
 		#[rustfmt::skip]
-		let body = subscribe_body(&[
-			0x06, // Number of Parameters
-			0x03, 0x03, 0x03, 0x00, 0xAA, // AUTHORIZATION TOKEN: USE_VALUE, type 0, one byte
-			0x00, 0x03, 0x03, 0x00, 0xBB, // a second one, which the draft allows
-			0x0D, 0x00, // FORWARD (0x10) = 0, a uint8
-			0x15, 0x03, 0x00, 0x00, 0x01, // SUBGROUP_FILTER (0x25): SetID 0, range 0-1
-			0x0D, 0x07, // NEW_GROUP_REQUEST (0x32), a varint
-			0x03, 0x00, // INCLUDE_PROPERTIES (0x35) = 0, a uint8
-		]);
+		let body = |second: &[u8]| subscribe_body(&<[&[u8]]>::concat(&[
+			&[0x05 + u8::from(!second.is_empty())], // Number of Parameters
+			&[0x03, 0x03, 0x03, 0x00, 0xAA], // AUTHORIZATION TOKEN: USE_VALUE, type 0, one byte
+			second, // a second, distinct one, which the draft allows
+			&[0x0D, 0x00], // FORWARD (0x10) = 0, a uint8
+			&[0x15, 0x03, 0x00, 0x00, 0x01], // SUBGROUP_FILTER (0x25): SetID 0, range 0-1
+			&[0x0D, 0x07], // NEW_GROUP_REQUEST (0x32), a varint
+			&[0x03, 0x00], // INCLUDE_PROPERTIES (0x35) = 0, a uint8
+		]));
 
 		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
-			let wire = body.clone();
+			let wire = body(&[]);
 			let mut buf = Decoder::new(&wire, version.into());
 			let msg = Subscribe::decode_msg(&mut buf, version).unwrap_or_else(|e| panic!("{version}: {e}"));
 			assert!(buf.is_empty(), "{version}: trailing bytes");
+			assert!(msg.authorization_token.is_some(), "{version}");
 			assert!(!msg.forward, "{version}");
 			assert!(msg.range_filters, "{version}");
 			assert!(!msg.properties_wanted, "{version}");
+
+			let wire = body(second);
+			let mut buf = Decoder::new(&wire, version.into());
+			assert!(
+				matches!(
+					Subscribe::decode_msg(&mut buf, version),
+					Err(DecodeError::MultipleAuthTokens)
+				),
+				"{version}"
+			);
 		}
 	}
 

@@ -596,9 +596,8 @@ async fn a_request_token_renews_a_legacy_announce_through_the_driver() {
 /// does not negotiate it (a non-moq-dev encoder or CDN). Its SETUP omits the option, so
 /// the server sees `declared.auth == false` and the session carries no connection grant
 /// (`None` union). A request-borne `AUTHORIZATION TOKEN` is then the authorizing artifact
-/// and reaches the server's acceptor, where a normal draft-18 client's connection grant
-/// would cover the request and skip the token. A token-less request on such a
-/// session is admitted by the permissive default of the ungranted session.
+/// and reaches the server's acceptor. A token-less request on such a session is admitted by
+/// the permissive default of the ungranted session.
 ///
 /// The token is exercised on a SUBSCRIBE, which is always a request and carries the token
 /// on every draft. A request token on a PUBLISH_NAMESPACE does NOT reach a moq-net peer at

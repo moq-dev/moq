@@ -79,7 +79,7 @@ impl Message for SubscribeNamespace<'_> {
 			0x03 => authorization_token: Vec<super::token::RequestToken>,
 			HIDDEN_PARAM => hidden: Option<u64>,
 		);
-		super::token::unique(&authorization_token)?;
+		super::token::single(authorization_token)?;
 
 		Ok(Self {
 			request_id,
@@ -181,7 +181,7 @@ impl Message for SubscribeNamespaceLegacy<'_> {
 			0x10 => _forward: Option<bool> where matches!(version, Version::Draft15 | Version::Draft16 | Version::Draft17),
 			HIDDEN_PARAM => hidden: Option<u64>,
 		);
-		super::token::unique(&authorization_token)?;
+		super::token::single(authorization_token)?;
 
 		Ok(Self {
 			request_id,
