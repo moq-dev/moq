@@ -161,8 +161,13 @@ does not establish conformance for them.
 `system-buffers` runs each program's PIDs 0-3 and PMT through one TBsys (512 B at
 Rxsys = 1 Mb/s) and on into one Bsys (1,536 B, emptied at Rsys = max(80 kb/s,
 transport rate / 500)), on the program's PCR, as 2.4.2.3 specifies: a packet's
-bytes enter Bsys as they leave TBsys, and a duplicate (2.4.3.3) enters TBsys but
-not Bsys. The exporter paces its tables against both only when it pads to a
+bytes enter Bsys as they leave TBsys, and a duplicate (2.4.3.3, the same bytes
+but for a refreshed PCR or OPCR) enters TBsys but not Bsys. Bsys keeps its bytes
+when the transport rate changes, and Rsys with it. Each PMT PID and PCR PID pair
+the PMTs declare is modelled, so a program that moves either is graded on both. A
+program with a PCR PID but no system packet inside a time base fails, since
+nothing was checked; one declaring no PCR (0x1FFF) has no clock to model. The
+exporter paces its tables against both buffers only when it pads to a
 multiplex rate. Unpadded output makes no system-buffer claim: its tables go out
 as muxed. A signalled PCR discontinuity starts fresh buffers, since the timestamps
 on either side of it are on different clocks.
@@ -229,6 +234,11 @@ a PCR packet between them. Each case fails without the handling it names:
 | a PAT and three PMT copies back to back | TBsys overflow |
 | ten PMT copies, each arriving as TBsys passes the last on | Bsys overflow |
 | PMT copies at Rxsys for 1.5 s, one packet ahead | TBsys not emptied within 1 s, Bsys overflow |
+| six PMT copies sent twice, the second with a refreshed OPCR | pass |
+| the PAT moves the PMT, then ten PMT copies on its new PID | Bsys overflow |
+
+A tables-only stream fills Bsys at 100 Mb/s and sends three more PMT copies once
+its rate falls to 25 Mb/s, where Rsys is 80 kb/s rather than 200: Bsys overflow.
 
 Synthetic MPEG audio streams pack several 576-byte frames per PES, so frames end
 partway through packets, and the last is cut off by the end of the capture:

@@ -170,6 +170,8 @@ struct Unit {
 	/// The decode time and bytes of each frame of a PES that packs several, which leave the
 	/// decoder buffer one by one; empty for a PES of one frame, which leaves at once.
 	frames: Vec<(u128, usize)>,
+	/// The packets it carries into TBsys, one run per PID.
+	runs: Vec<Run>,
 }
 
 impl Unit {
@@ -218,13 +220,19 @@ impl Unit {
 	}
 }
 
-/// The packets one unit carries into TBsys on one PID: the tables they hold, and how many of
-/// them have gone out.
+/// The packets one unit carries into TBsys on one PID: the tables they hold, and where in the
+/// unit each packet sits.
 struct Run {
 	pid: u16,
 	table: Vec<u8>,
-	packets: usize,
-	sent: usize,
+	at: Vec<usize>,
+}
+
+impl Run {
+	/// How many of its packets have gone out of a unit that has sent `sent`.
+	fn sent(&self, sent: usize) -> usize {
+		self.at.partition_point(|&k| k < sent)
+	}
 }
 
 /// Whether unit `i`'s next table packet must wait. One unit's tables go out at a time, so a
@@ -232,14 +240,24 @@ struct Run {
 /// it on a PID it also carries, so a changed version follows the one it replaces. A copy of
 /// the same tables may go first, as its unit may be due sooner. The unit going out is never
 /// held back, nor, while none is, the first holding tables.
-fn held_back(runs: &[Vec<Run>], i: usize) -> bool {
-	runs.iter().enumerate().any(|(j, held)| {
-		let mut pending = held.iter().filter(|run| run.sent < run.packets).peekable();
+fn held_back(units: &VecDeque<Unit>, i: usize) -> bool {
+	units.iter().enumerate().any(|(j, unit)| {
+		let mut pending = unit
+			.runs
+			.iter()
+			.filter(|run| run.sent(unit.sent) < run.at.len())
+			.peekable();
 		if j == i || pending.peek().is_none() {
 			return false;
 		}
-		held.iter().any(|run| run.sent > 0)
-			|| (j < i && pending.any(|run| runs[i].iter().any(|own| own.pid == run.pid && own.table != run.table)))
+		unit.runs.iter().any(|run| run.sent(unit.sent) > 0)
+			|| (j < i
+				&& pending.any(|run| {
+					units[i]
+						.runs
+						.iter()
+						.any(|own| own.pid == run.pid && own.table != run.table)
+				}))
 	})
 }
 
@@ -523,9 +541,9 @@ pub(super) struct Schedule {
 	/// When each transport buffer's last admitted packet finishes leaving it, and when it
 	/// last started filling from empty.
 	transport: HashMap<u16, (i128, i128)>,
-	/// When Bsys has removed every system byte admitted so far: it empties at Rsys whenever
-	/// it holds one.
-	system: Option<i128>,
+	/// When Bsys has removed every system byte admitted so far, and the Rsys it empties at
+	/// whenever it holds one.
+	system: Option<(i128, u128)>,
 	/// When each video PID's MB finishes passing its last admitted payload on into EB.
 	mb: HashMap<u16, i128>,
 	/// Every source has ended, so a unit that misses its deadline is the tail going out late
@@ -566,14 +584,25 @@ impl Schedule {
 
 	/// Hold the packets on `pid` to `buffer`.
 	pub fn set_buffer(&mut self, pid: u16, buffer: Buffer) {
+		let before = self.transport_buffer(pid);
 		self.buffers.insert(pid, buffer);
+		if self.transport_buffer(pid) != before {
+			self.remap();
+		}
 	}
 
 	/// Hold the program tables, the PAT and the PMT on `pmt_pid`, to the one TBsys they share.
 	pub fn set_tables(&mut self, pmt_pid: u16) {
+		let held = self.pmt == Some(pmt_pid)
+			&& [0, pmt_pid]
+				.iter()
+				.all(|pid| self.buffers.get(pid) == Some(&Buffer::SYSTEM));
 		self.buffers.insert(0, Buffer::SYSTEM);
 		self.buffers.insert(pmt_pid, Buffer::SYSTEM);
 		self.pmt = Some(pmt_pid);
+		if !held {
+			self.remap();
+		}
 	}
 
 	/// The transport buffer `pid`'s packets enter: TBsys for the reserved system PIDs (PAT,
@@ -586,10 +615,10 @@ impl Schedule {
 		}
 	}
 
-	/// The packets `unit` carries into TBsys, one run per PID.
-	fn runs(&self, unit: &Unit) -> Vec<Run> {
+	/// The packets of a unit carried into TBsys, one run per PID.
+	fn runs(&self, packets: &[u8]) -> Vec<Run> {
 		let mut runs: Vec<Run> = Vec::new();
-		for (k, packet) in unit.packets.as_chunks::<{ TsPacket::SIZE }>().0.iter().enumerate() {
+		for (k, packet) in packets.as_chunks::<{ TsPacket::SIZE }>().0.iter().enumerate() {
 			let pid = pid(packet);
 			if self.transport_buffer(pid) != 0 {
 				continue;
@@ -600,8 +629,7 @@ impl Schedule {
 					runs.push(Run {
 						pid,
 						table: Vec::new(),
-						packets: 0,
-						sent: 0,
+						at: Vec::new(),
 					});
 					runs.len() - 1
 				}
@@ -611,10 +639,18 @@ impl Schedule {
 			run.table.extend_from_slice(&packet[..3]);
 			run.table.push(packet[3] & 0xf0);
 			run.table.extend_from_slice(&packet[4..]);
-			run.packets += 1;
-			run.sent += usize::from(k < unit.sent);
+			run.at.push(k);
 		}
 		runs
+	}
+
+	/// Find each queued unit's TBsys runs again once the PIDs held to TBsys change.
+	fn remap(&mut self) {
+		let mut units = std::mem::take(&mut self.units);
+		for unit in &mut units {
+			unit.runs = self.runs(&unit.packets);
+		}
+		self.units = units;
 	}
 
 	/// Count every slot's clock packet, which rides on `pid`, against that PID's transport
@@ -684,6 +720,7 @@ impl Schedule {
 		self.horizon = self.horizon.max(Some(last.div_ceil(PCR_INTERVAL.as_nanos())));
 		let start = self.last.map_or(due, |last| (last + 1).min(due));
 		self.last = Some(due);
+		let runs = self.runs(&packets);
 		self.units.push_back(Unit {
 			pid,
 			due,
@@ -695,6 +732,7 @@ impl Schedule {
 			late: self.next.is_some_and(|next| due < next),
 			held: 0,
 			frames,
+			runs,
 		});
 		Ok(())
 	}
@@ -841,6 +879,14 @@ impl Schedule {
 			clocked: false,
 		};
 		let clock = self.clock.filter(|pid| self.buffers.contains_key(pid));
+		// A new multiplex rate changes Rsys from this slot on, and Bsys keeps the bytes it holds.
+		let rsys = system_rate(rate);
+		if let Some((empty, before)) = self.system
+			&& before != rsys
+		{
+			let left = (empty - time(0)).max(0) as u128;
+			self.system = Some((time(0) + (left * before).div_ceil(rsys) as i128, rsys));
+		}
 		// The transport buffer every slot's PCR rides and how long it holds the packet carrying
 		// it, which each later slot's PCR may add to a busy stretch without the chance to wait.
 		let clock_buffer = clock.map(|pid| {
@@ -882,7 +928,6 @@ impl Schedule {
 				(self.release(unit) <= index).then_some(Reverse((unit.timing.by, lane)))
 			})
 			.collect();
-		let mut runs: Vec<Vec<Run>> = self.units.iter().map(|unit| self.runs(unit)).collect();
 		let mut waiting: BinaryHeap<Reverse<(i128, usize)>> = BinaryHeap::new();
 		let mut position = 0;
 		while position < count {
@@ -927,7 +972,7 @@ impl Schedule {
 					(TsPacket::SIZE as u128 * 8 * 1_000_000_000).div_ceil(u128::from(buffer.rate))
 				});
 				let tb = self.transport_buffer(pid);
-				if tb == 0 && held_back(&runs, i) {
+				if tb == 0 && held_back(&self.units, i) {
 					passed.push(Reverse((by, lane)));
 					continue;
 				}
@@ -977,10 +1022,9 @@ impl Schedule {
 				// packet's last byte gets there. Past BSsys the packet waits for Bsys to drain:
 				// from the time this gives, it fits whatever TBsys then holds.
 				let bsys = (tb == 0).then(|| {
-					let rsys = system_rate(rate);
 					let hold = (TsPacket::SIZE as u128 * 8 * 1_000_000_000).div_ceil(rsys) as i128;
 					let room = (BSYS * 8 * 1_000_000_000 / rsys) as i128;
-					let before = self.system.unwrap_or(i128::MIN);
+					let before = self.system.map_or(i128::MIN, |(empty, _)| empty);
 					let empty = before.max(last.max(now)) + hold;
 					(
 						empty,
@@ -1029,22 +1073,27 @@ impl Schedule {
 				}
 				self.transport.insert(tb, (arrived, since));
 				if let Some((empty, _)) = bsys {
-					self.system = Some(empty);
+					self.system = Some((empty, rsys));
 				}
 				if let Some((leaked, _)) = leak {
 					self.mb.insert(pid, leaked);
 				}
 				out.positions.as_mut().unwrap().push(position);
 				out.packets.extend_from_slice(packet);
-				let unit = &mut self.units[i];
 				// A packet carrying the PCR takes the clock packet's position, any other a null's.
 				if let Some(rest) = opening {
+					let unit = &mut self.units[i];
 					unit.packets.truncate(unit.sent * TsPacket::SIZE);
 					unit.packets.extend_from_slice(&rest);
+					// The rest is all on this PID, so only a clock on a table PID rewrites a table.
+					if tb == 0 {
+						self.units[i].runs = self.runs(&self.units[i].packets);
+					}
 					out.clocked = true;
 				} else {
 					out.nulls -= 1;
 				}
+				let unit = &mut self.units[i];
 				if unit.sent == 0 {
 					out.keyframe |= unit.keyframe;
 					if unit.packets_on(0..unit.count(), unit.pid) > 0 {
@@ -1059,9 +1108,6 @@ impl Schedule {
 				}
 				if unit.remaining() == 0 {
 					lanes[lane].pop_front();
-				}
-				if bsys.is_some() {
-					runs[i] = self.runs(&self.units[i]);
 				}
 				if let Some(&i) = lanes[lane].front() {
 					let unit = &self.units[i];
@@ -1426,6 +1472,60 @@ mod tests {
 		assert!(span > 0.140, "the run spans {span:.3} s");
 	}
 
+	/// Bsys keeps the bytes it holds when the multiplex rate falls and Rsys with it, so tables
+	/// still to go wait for the slower drain rather than overflow it.
+	#[test]
+	fn bsys_keeps_its_bytes_across_a_rate_fall() {
+		let mut schedule = Schedule::new(Duration::from_millis(500));
+		schedule.set_rate(Some(100_000_000));
+		schedule.set_clock(7);
+		schedule.set_buffer(7, VIDEO);
+		schedule.set_tables(100);
+		let mut packets = Vec::new();
+		for copy in 0..12 {
+			let (mut pat, mut pmt) = (unit(0, 1), unit(100, 1));
+			(pat[4], pmt[4]) = (copy, copy);
+			packets.extend([pat, pmt].concat());
+		}
+		packets.extend(unit(7, 1));
+		schedule.push(7, timing(1_000), packets, true).unwrap();
+		let mut null = unit(0, 1);
+		(null[1], null[2]) = (0x1f, 0xff);
+		// Bsys in bytes at `at`, as each system packet's last byte reaches it. Each slot's Rsys
+		// drains it from the slot's start, where the receiver reads the new rate off the PCR.
+		let (mut leave, mut at, mut level, mut drain, mut peak) = (f64::MIN, f64::MIN, 0.0f64, 0.0f64, 0.0f64);
+		let mut fell = false;
+		while let Some(slot) = schedule.next(None).unwrap() {
+			let rate = schedule.rate.unwrap();
+			let rsys = system_rate(rate) as f64;
+			let begin = slot.pcr as f64 / SYSTEM_CLOCK as f64;
+			if at < begin {
+				level = (level - (begin - at) * drain / 8.0).max(0.0);
+			} else {
+				level += (at - begin) * (drain - rsys) / 8.0;
+			}
+			(at, drain) = (at.max(begin), rsys);
+			for (position, packet) in slot.layout(&unit(7, 1), 100, &null).chunks(TsPacket::SIZE).enumerate() {
+				if ![0, 100].contains(&pid(packet)) {
+					continue;
+				}
+				let start = begin + position as f64 * 1504.0 / rate as f64;
+				let free = leave.max(start);
+				leave = (start + 1504.0 / rate as f64).max(free + 1504.0 / 1_000_000.0);
+				level = (level - (free - at).max(0.0) * rsys / 8.0).max(0.0);
+				level += 188.0 - (leave - free) * rsys / 8.0;
+				peak = peak.max(level);
+				at = leave;
+			}
+			if !fell && level > 1_000.0 {
+				schedule.set_rate(Some(25_000_000));
+				fell = true;
+			}
+		}
+		assert!(fell, "Bsys never held 1,000 B at 100 Mb/s");
+		assert!(peak <= 1536.001, "Bsys peak {peak:.0} B");
+	}
+
 	/// A changed table never overtakes the one muxed ahead of it on another PID's unit, even
 	/// ahead of a unit due first, so a changed PMT version follows the one it replaces.
 	#[test]
@@ -1446,6 +1546,31 @@ mod tests {
 		}
 		let wire = wire(&mut schedule, &unit(7, 1));
 		let versions: Vec<(u16, u8)> = wire
+			.iter()
+			.filter(|(_, packet)| [0, 100].contains(&pid(packet)))
+			.map(|(_, packet)| (pid(packet), packet[4]))
+			.collect();
+		assert_eq!(versions, [(0, 1), (100, 1), (0, 2), (100, 2)]);
+	}
+
+	/// Units queued before their PIDs are held to TBsys keep their tables in order once they are.
+	#[test]
+	fn tables_queued_before_they_are_held_keep_their_order() {
+		let rate = 25_000_000;
+		let mut schedule = Schedule::new(Duration::from_millis(200));
+		schedule.set_rate(Some(rate));
+		schedule.set_clock(7);
+		for (pid, version, by) in [(8, 1, 1_100), (7, 2, 1_050)] {
+			let (mut pat, mut pmt) = (unit(0, 1), unit(100, 1));
+			(pat[4], pmt[4]) = (version, version);
+			let packets = [pat, pmt, unit(pid, 4)].concat();
+			schedule.push(pid.into(), timing(by), packets, true).unwrap();
+		}
+		for pid in [7, 8] {
+			schedule.set_buffer(pid, VIDEO);
+		}
+		schedule.set_tables(100);
+		let versions: Vec<(u16, u8)> = wire(&mut schedule, &unit(7, 1))
 			.iter()
 			.filter(|(_, packet)| [0, 100].contains(&pid(packet)))
 			.map(|(_, packet)| (pid(packet), packet[4]))

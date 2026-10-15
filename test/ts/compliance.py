@@ -523,13 +523,14 @@ def read_pmts(ts_path: str) -> list[dict]:
 
 
 def read_system_pids(ts_path: str) -> list[tuple[int, int]]:
-    """(PMT PID, PCR PID) of each program's first PMT."""
-    programs: dict[int, tuple[int, int]] = {}
+    """Each distinct (PMT PID, PCR PID) the PMTs declare, in order: a program that moves its
+    PMT or its PCR has one for each, so the tables sent on each are modelled on its clock."""
+    programs: list[tuple[int, int]] = []
     for pmt in read_pmts(ts_path):
         meta = next((node for node in pmt.get("#nodes", []) if node.get("#name") == "metadata"), None)
-        if meta is not None and pmt.get("service_id") not in programs:
-            programs[pmt.get("service_id")] = (meta["pid"], pmt["pcr_pid"])
-    return list(programs.values())
+        if meta is not None and (meta["pid"], pmt["pcr_pid"]) not in programs:
+            programs.append((meta["pid"], pmt["pcr_pid"]))
+    return programs
 
 
 def read_programs(ts_path: str) -> list[tuple[int, list[Stream]]]:
@@ -1242,10 +1243,27 @@ def check_tstd(ts_path: str, packet_size: int, scan: Scan) -> Check:
     return Check("tstd", Severity.HARD, Status.PASS, f"no overflow or underflow; peak fill {peaks}", metrics)
 
 
+def is_duplicate(last: bytes | None, packet: bytes) -> bool:
+    """Whether `packet` repeats `last`, the packet before it on its PID (2.4.3.3): byte for
+    byte but for a PCR or OPCR, which a duplicate may refresh. As moq-mux's health.rs."""
+    if last is None or not packet[3] & 0x10:
+        return False
+    if last == packet:
+        return True
+    # Matching the header through the adaptation flags pins every byte before the clocks.
+    if not last[3] & 0x20 or last[:6] != packet[:6]:
+        return False
+    flags = last[5]
+    clock_end = 6 + 6 * bool(flags & 0x10) + 6 * bool(flags & 0x08)
+    if clock_end == 6 or clock_end > 5 + last[4]:
+        return False
+    return last[clock_end:] == packet[clock_end:]
+
+
 def system_packets(data: bytes, packet_size: int, pmt_pid: int) -> list[tuple[int, bool]]:
     """(index, first copy) of each packet the program on `pmt_pid` takes into TBsys: PIDs 0-3
-    and its PMT. A duplicate (2.4.3.3) repeats the packet before it on its PID byte for byte,
-    and only a first copy goes on to Bsys. Indexed as `scan_packets` counts them."""
+    and its PMT. Both copies of a duplicate (2.4.3.3) enter TBsys, and only the first goes on
+    to Bsys. Indexed as `scan_packets` counts them."""
     out: list[tuple[int, bool]] = []
     last: dict[int, bytes] = {}
     index = offset = 0
@@ -1259,7 +1277,7 @@ def system_packets(data: bytes, packet_size: int, pmt_pid: int) -> list[tuple[in
         packet = data[offset : offset + 188]
         pid = ((packet[1] & 0x1F) << 8) | packet[2]
         if pid <= 3 or pid == pmt_pid:
-            out.append((index, not (packet[3] & 0x10 and last.get(pid) == packet)))
+            out.append((index, not is_duplicate(last.get(pid), packet)))
             last[pid] = packet
         index += 1
         offset += packet_size
@@ -1274,19 +1292,28 @@ def check_system_buffers(ts_path: str, packet_size: int, scan: Scan) -> Check:
     arrive, into the one Bsys, which empties at Rsys whenever it holds a byte. Bsys takes
     them faster than it drains, so it peaks as a packet's last byte reaches it. Graded on
     2.4.2.6: neither overflows, and TBsys empties at least once a second. A signalled
-    discontinuity starts fresh buffers, as in `check_tstd`.
+    discontinuity starts fresh buffers, as in `check_tstd`. A program declaring no PCR
+    (PCR_PID 0x1FFF, 2.4.4.9) has no clock to model; any other with no system packet inside
+    a time base fails, since nothing was checked.
     """
     with open(ts_path, "rb") as handle:
         data = handle.read()
     drain = 188 * 8 / SYSTEM_RX
+    tuples = read_system_pids(ts_path)
+    unclocked = sorted({pmt_pid for pmt_pid, pcr_pid in tuples if pcr_pid == 0x1FFF})
     programs: dict[str, dict] = {}
-    for pmt_pid, pcr_pid in read_system_pids(ts_path):
+    for pmt_pid, pcr_pid in tuples:
+        if pcr_pid == 0x1FFF:
+            continue
         packets = system_packets(data, packet_size, pmt_pid)
         indices = [index for index, _ in packets]
         grade = Grade(pmt_pid, "system")
         modelled = 0
         for clock, lo, hi in time_bases(scan, pcr_pid):
-            leave = empty = float("-inf")
+            leave = float("-inf")
+            # Bsys's bytes at `at`, as the last first copy's last byte reached it, then
+            # draining at that packet's Rsys.
+            level, at, rsys_at = 0.0, float("-inf"), RSYS_MIN
             busy_since = None
             for index, first in packets[bisect.bisect_left(indices, lo) : bisect.bisect_left(indices, hi)]:
                 modelled += 1
@@ -1304,25 +1331,33 @@ def check_system_buffers(ts_path: str, packet_size: int, scan: Scan) -> Check:
                     busy_since = None
                 if first:
                     rsys = max(RSYS_MIN, 188 * 8 / (end - start) / 500) if end > start else RSYS_MIN
-                    empty = max(empty, free) + 188 * 8 / rsys
-                    fill = (empty - leave) * rsys / 8
-                    grade.peak("Bsys", fill, BSYS_SIZE)
-                    if fill > BSYS_SIZE + 0.5:
+                    # Bsys holds its bytes across a change of transport rate, and Rsys with it.
+                    # Draining the stretch since the last first copy at the slower of the two
+                    # rates never reads Bsys low.
+                    level = max(0.0, level - (free - at) * min(rsys_at, rsys) / 8)
+                    level += 188 - (leave - free) * rsys / 8
+                    at, rsys_at = leave, rsys
+                    grade.peak("Bsys", level, BSYS_SIZE)
+                    if level > BSYS_SIZE + 0.5:
                         grade.flag("Bsys overflow")
-        programs[str(pmt_pid)] = {
+        shared = sum(pid == pmt_pid for pid, _ in tuples) > 1
+        programs[f"{pmt_pid}/{pcr_pid}" if shared else str(pmt_pid)] = {
             "system_packets": modelled,
             "violations": grade.violations,
             "peak_fill_pct": {k: round(v * 100, 1) for k, v in grade.peaks.items()},
         }
-    metrics = {"programs": programs}
+    metrics = {"programs": programs, "unclocked_pmt_pids": unclocked}
     if not programs:
-        return Check("system-buffers", Severity.SHAPE, Status.WARN, "no program to model", metrics)
-    if not any(program["system_packets"] for program in programs.values()):
-        return Check("system-buffers", Severity.SHAPE, Status.WARN, "no system packet inside a time base", metrics)
+        return Check("system-buffers", Severity.SHAPE, Status.WARN, "no clocked program to model", metrics)
     faults = [
         f"PMT PID {pid} {name} x{count}"
         for pid, program in programs.items()
         for name, count in sorted(program["violations"].items())
+    ]
+    faults += [
+        f"PMT PID {pid} has no system packet inside a time base"
+        for pid, program in programs.items()
+        if not program["system_packets"]
     ]
     if faults:
         return Check("system-buffers", Severity.HARD, Status.FAIL, "; ".join(faults), metrics)

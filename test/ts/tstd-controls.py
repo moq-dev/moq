@@ -37,6 +37,12 @@ with each AU in its own PES, a PCR packet between AUs and nulls elsewhere.
                         last on
     TBsys kept busy     PMT copies at Rxsys for 1.5 s, one ahead      TBsys not emptied within 1 s,
                                                                       Bsys overflow
+    duplicate tables    six PMT copies each sent twice, the second    must pass (TBsys only, not Bsys)
+                        with a refreshed OPCR
+    moved PMT burst     the PAT moves the PMT, then the Bsys burst    Bsys overflow (on the new PMT)
+                        on its new PID
+    rate-fall burst     PMT copies filling Bsys at 100 Mb/s, three    Bsys overflow (it keeps its bytes
+                        more once the rate falls to 25 Mb/s           as Rsys falls)
 
 and an MPEG audio stream whose frames end partway through a packet, each decoded
 just after its last byte leaves TB, but before the rest of that packet has; its
@@ -64,7 +70,7 @@ FIXTURE = os.path.join(DIR, "../../rs/moq-mux/src/container/ts/test_data/scte35/
 # The Kyrion SPS (High@4.0, NAL HRD 1.935 Mb/s CBR, 755 kbit CPB), so the synthetic
 # streams get the same declared buffers.
 SPS = bytes.fromhex("6764 0028 acd1 0078 044f de03 6a02 0202 8000 01f4 8000 7530 7500 0762 0002 e11f af7f 072a 1629 92")
-VIDEO_PID, TELETEXT_PID, PMT_PID = 0x100, 0x101, 0x1000
+VIDEO_PID, TELETEXT_PID, PMT_PID, MOVED_PID = 0x100, 0x101, 0x1000, 0x1001
 RATE = 10_000_000
 SLOT_S = 188 * 8 / RATE
 
@@ -80,10 +86,10 @@ def crc32_mpeg(data: bytes) -> int:
     return crc
 
 
-def section(table_id: int, extension: int, body: bytes) -> bytes:
+def section(table_id: int, extension: int, body: bytes, version: int = 0) -> bytes:
     """A long-form PSI section, CRC included."""
     head = bytes([table_id, 0xB0 | ((len(body) + 9) >> 8), (len(body) + 9) & 0xFF])
-    head += extension.to_bytes(2, "big") + bytes([0xC1, 0, 0])
+    head += extension.to_bytes(2, "big") + bytes([0xC1 | version << 1, 0, 0])
     return head + body + crc32_mpeg(head + body).to_bytes(4, "big")
 
 
@@ -97,6 +103,12 @@ def packet(pid: int, cc: int, payload: bytes = b"", pusi: bool = False, adaptati
     afc = (2 if adaptation is not None else 0) | (1 if payload else 0)
     head = bytes([0x47, (0x40 if pusi else 0) | pid >> 8, pid & 0xFF, afc << 4 | cc])
     return head + (adaptation or b"") + payload
+
+
+def clock(flag: int, ticks: int) -> bytes:
+    """An adaptation field's flags byte and the one PCR (0x10) or OPCR (0x08) it carries, in
+    27 MHz ticks."""
+    return bytes([flag]) + ((ticks // 300) << 15 | 0x7E00 | ticks % 300).to_bytes(6, "big")
 
 
 def stamp(prefix: int, ticks: int) -> bytes:
@@ -115,6 +127,8 @@ def stamp(prefix: int, ticks: int) -> bytes:
 def synthetic(path: str, layout: str) -> None:
     """Write a compliant 2 s stream, bent into `layout` at one access unit."""
     pat = section(0x00, 1, (1).to_bytes(2, "big") + (0xE000 | PMT_PID).to_bytes(2, "big"))
+    # The PAT's next version, which moves the PMT.
+    moved = section(0x00, 1, (1).to_bytes(2, "big") + (0xE000 | MOVED_PID).to_bytes(2, "big"), version=1)
     pcr_pid = 0x1FF if layout == "PCR PID mismatch" else VIDEO_PID
     streams = bytes([0x1B, 0xE1, 0x00, 0xF0, 0x00])
     if layout == "teletext burst":
@@ -149,18 +163,23 @@ def synthetic(path: str, layout: str) -> None:
     busy = layout == "TBsys kept busy"
     for k in range(frames):
         begin = len(out)
+        pmt_pid = MOVED_PID if layout == "moved PMT burst" and k >= 25 else PMT_PID
         if not busy or k == 0:
-            emit(0, b"\x00" + pat, pusi=True)
-            emit(PMT_PID, b"\x00" + pmt, pusi=True)
+            emit(0, b"\x00" + (moved if pmt_pid == MOVED_PID else pat), pusi=True)
+            emit(pmt_pid, b"\x00" + pmt, pusi=True)
         if layout == "table burst" and k == 20:
             # With the PAT and PMT, four packets at 10 Mb/s against TBsys's 1 Mb/s: 169 B
             # stay in it per packet, 677 B by the fourth.
             for _ in range(2):
                 emit(PMT_PID, b"\x00" + pmt, pusi=True)
-        if layout == "Bsys burst" and k == 20:
+        if (layout, k) in (("Bsys burst", 20), ("moved PMT burst", 30)):
             # Ten copies, one every 10 positions: the 1,504 us TBsys takes to pass one on, so
             # it holds 320 B at most, while Bsys takes 2 KB against its 10 kB/s drain.
             table_at, tables = len(out) + 10, 10
+        if layout == "duplicate tables" and k == 20:
+            # Six copies, each sent twice, every 21 positions once TBsys has passed the PMT
+            # on: 1.1 KB into Bsys, but 2.3 KB were each duplicate charged to it as well.
+            table_at, tables = len(out) + 20, 6
         if busy and k == 1:
             # Copies at TBsys's own rate for 1.5 s, one packet ahead, so it never empties.
             emit(PMT_PID, b"\x00" + pmt, pusi=True)
@@ -189,8 +208,14 @@ def synthetic(path: str, layout: str) -> None:
                 pcr = round((1.0 + len(out) * SLOT_S) * compliance.PCR_HZ)
                 field = bytes([0x10]) + ((pcr // 300) << 15 | 0x7E00 | pcr % 300).to_bytes(6, "big")
                 emit(VIDEO_PID, adaptation=field)
+            elif tables and len(out) >= table_at and layout == "duplicate tables":
+                # The duplicate repeats the copy but for a refreshed OPCR (2.4.3.3).
+                opcr = round((1.0 + len(out) * SLOT_S) * compliance.PCR_HZ)
+                emit(pmt_pid, b"\x00" + pmt, pusi=True, adaptation=clock(0x08, opcr))
+                out.append(packet(pmt_pid, cc[pmt_pid], b"\x00" + pmt, True, clock(0x08, opcr + 4_050)))
+                table_at, tables = table_at + 21, tables - 1
             elif tables and len(out) >= table_at:
-                emit(PMT_PID, b"\x00" + pmt, pusi=True)
+                emit(pmt_pid, b"\x00" + pmt, pusi=True)
                 table_at, tables = table_at + 10, tables - 1
             else:
                 out.append(packet(0x1FFF, 0, b"\xff" * 184))
@@ -231,6 +256,33 @@ def synthetic_audio(path: str, frames: int, decode_s: float) -> None:
         out.append(packet(pcr_pid, 0, adaptation=field))
     while len(out) < round(20 * frames * 0.024 / SLOT_S):
         out.append(packet(0x1FFF, 0, b"\xff" * 184))
+    with open(path, "wb") as handle:
+        handle.write(b"".join(out))
+
+
+def synthetic_rate_fall(path: str) -> None:
+    """PMT copies at 100 Mb/s, where Rsys is 200 kb/s, every 107 positions (1.6 ms, as TBsys
+    passes each on), until Bsys holds 1.3 KB; then the transport rate falls to 25 Mb/s, where
+    Rsys is 80 kb/s, and three more copies overflow it. Bsys's 54 ms to drain at the old Rsys
+    would pass them, had it drained that long at the new one."""
+    pcr_pid = 0x102
+    pat = section(0x00, 1, (1).to_bytes(2, "big") + (0xE000 | PMT_PID).to_bytes(2, "big"))
+    pmt = section(0x02, 1, (0xE000 | pcr_pid).to_bytes(2, "big") + bytes([0xF0, 0x00]))
+    fall = 6_650 + 9 * 107
+    copies = [6_650 + n * 107 for n in range(9)] + [fall + 13 + n * 27 for n in range(3)]
+    out: list[bytes] = []
+    at, cc = 0.0, 0
+    for index in range(fall + 1_700):
+        if index == 1:
+            out.append(packet(0, 0, b"\x00" + pat, pusi=True))
+        elif index == 2 or index in copies:
+            out.append(packet(PMT_PID, cc, b"\x00" + pmt, pusi=True))
+            cc = (cc + 1) & 0x0F
+        elif index % 16 == 0 or index == fall:
+            out.append(packet(pcr_pid, 0, adaptation=clock(0x10, round((1.0 + at) * compliance.PCR_HZ))))
+        else:
+            out.append(packet(0x1FFF, 0, b"\xff" * 184))
+        at += 188 * 8 / (100_000_000 if index < fall else 25_000_000)
     with open(path, "wb") as handle:
         handle.write(b"".join(out))
 
@@ -291,6 +343,12 @@ def built(layout: str):
     return build
 
 
+def rate_fall(path: str) -> str:
+    """The builder for the rate-fall stream."""
+    synthetic_rate_fall(path)
+    return path
+
+
 def audio(frames: int, decode_s: float):
     """A builder for one synthetic audio stream."""
 
@@ -337,6 +395,9 @@ CASES = [
         built("TBsys kept busy"),
         ("system-buffers", {"TBsys not emptied within 1 s", "Bsys overflow"}),
     ),
+    ("duplicate tables", built("duplicate tables"), "pass"),
+    ("moved PMT burst", built("moved PMT burst"), ("system-buffers", {"Bsys overflow"})),
+    ("rate-fall burst", rate_fall, ("system-buffers", {"Bsys overflow"})),
     ("straddling audio", audio(4, STRADDLE_S), "pass"),
     ("mid-packet overflow", audio(7, MID_PACKET_S), {"B overflow"}),
 ]
