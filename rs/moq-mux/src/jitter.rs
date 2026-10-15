@@ -258,7 +258,8 @@ impl<K> Default for Steer<K> {
 impl<K: Ord> Steer<K> {
 	/// The source's rate and the floor's phase now. The rate is the slope of the envelope of
 	/// whichever track in `heard`, of those heard in at least half the floors, lies closest
-	/// under its own on average; the phase is the floors' envelope at that slope.
+	/// under its own at the median, so a spell of queueing on it shorter than half the window
+	/// does not hand the rate to another; the phase is the floors' envelope at that slope.
 	fn measure<'a>(&self, heard: impl Iterator<Item = &'a K>, now: f64) -> Option<(f64, f64)>
 	where
 		K: 'a,
@@ -904,9 +905,11 @@ fn envelope(points: &VecDeque<(f64, f64)>, now: f64) -> Option<(f64, f64)> {
 	Some((slope, y1 + slope * (now - x1)))
 }
 
-/// How far below the line of `slope` that is at `at` at `now` `points` lie, on average.
+/// How far below the line of `slope` that is at `at` at `now` the median of `points` lies.
 fn depth(points: &VecDeque<(f64, f64)>, slope: f64, at: f64, now: f64) -> f64 {
-	points.iter().map(|&(x, y)| at - slope * (now - x) - y).sum::<f64>() / points.len() as f64
+	let mut below: Vec<f64> = points.iter().map(|&(x, y)| at - slope * (now - x) - y).collect();
+	below.sort_by(f64::total_cmp);
+	below[below.len() / 2]
 }
 
 #[cfg(test)]
@@ -1475,6 +1478,8 @@ mod tests {
 		/// The source's rate the buffer measured at the end, and how often it was out of tolerance.
 		drift: Option<f64>,
 		out_of_tolerance: u64,
+		/// The rate measured after each push, by decode time in seconds.
+		rates: Vec<(f64, f64)>,
 	}
 
 	/// Feed `secs` of 10 fps frames of tracks 1 and 2 through a 500 ms buffer from a source
@@ -1503,6 +1508,7 @@ mod tests {
 			last: None,
 			drift: None,
 			out_of_tolerance: 0,
+			rates: Vec::new(),
 		};
 		for (sent, track, decode) in frames {
 			let arrived = start + Duration::from_secs_f64(sent);
@@ -1522,6 +1528,9 @@ mod tests {
 					fed.err = Some((decode.as_secs_f64(), err));
 					break;
 				}
+			}
+			if let Some(rate) = buffer.drift() {
+				fed.rates.push((decode.as_secs_f64(), rate));
 			}
 			due(&mut buffer);
 		}
@@ -1638,6 +1647,29 @@ mod tests {
 			assert_eq!(fed.out_of_tolerance, 0, "{ppm} ppm");
 			let drift = fed.drift.expect("a measurement") * 1e6;
 			assert!((drift + ppm).abs() < 0.5, "{ppm} ppm: measured {drift} ppm");
+		}
+	}
+
+	/// A spell of queueing on the steady track, four minutes of 200 ms more, does not hand the
+	/// rate to the wandering one: a track's swing is the median of how far its slack lies under
+	/// its envelope, which a spell shorter than half the window does not move.
+	#[tokio::test(start_paused = true)]
+	async fn a_spell_on_the_steady_track_keeps_the_rate_on_it() {
+		let spell = 1_500.0..1_740.0;
+		for ppm in [-20.0, 0.0, 20.0] {
+			let fed = feed(ppm, 2_400.0, |track, sent| match track {
+				1 => Some(sent + 0.2 - 0.1 * (sent * std::f64::consts::TAU / 900.0).cos()),
+				_ => Some(sent + if spell.contains(&sent) { 0.2 } else { 0.0 }),
+			})
+			.await;
+			assert!(fed.err.is_none(), "{ppm} ppm: {:?}", fed.err);
+			let worst = fed
+				.rates
+				.iter()
+				.filter(|(at, _)| *at > RATE_WINDOW + 60.0)
+				.map(|(_, rate)| (rate * 1e6 + ppm).abs())
+				.fold(0.0, f64::max);
+			assert!(worst < 0.5, "{ppm} ppm: measured up to {worst} ppm off");
 		}
 	}
 
