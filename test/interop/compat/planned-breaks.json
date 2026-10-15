@@ -8,14 +8,12 @@
 		}
 	},
 	"catalog-archive": {
-		"reason": "#4034 replaced the required archive `track` with `timelines`. Remeasured 2026-10-15: released Rust readers (moq-cli, hang) now carry the tolerant parser and accept current catalogs, but released @moq/hang still rejects them, failing the JS reader in every current-publisher media cell. Remove once an @moq/hang release carries the tolerant parser.",
+		"reason": "#4034 replaced the required archive `track` with `timelines`. Remeasured 2026-10-15: released Rust readers (moq-cli 0.14.5, hang 0.21.14) carry the tolerant parser and accept current catalogs, but released @moq/hang still rejects them. Remove once an @moq/hang release carries the tolerant parser.",
 		"releases": {
-			"moq-cli": "0.14.5",
-			"hang": "0.21.14",
 			"@moq/hang": "0.5.2"
 		},
 		"cells": {
-			"lanes": ["media"],
+			"lanes": ["media-js-native-node"],
 			"publisher": "current"
 		}
 	}
