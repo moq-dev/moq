@@ -3,8 +3,10 @@
 ## Goal
 
 Every `moq import` input follows one rule for when it has declared a track:
-the broadcast is announced once its catalog holds at least one rendition, and
-an input that ends before then exits non-zero without announcing. Today a TS
+the broadcast is announced once its catalog names at least one servable track,
+and an input that ends before then exits non-zero without announcing. A
+servable track is a rendition, or an extension track such as `--passthrough`'s
+`m2ts` multiplex, which publishes no rendition. Today a TS
 input carrying only program tables can still announce an empty catalog at end
 of input and exit 0.
 
@@ -31,13 +33,13 @@ track". Each importer still decides on its own when to release that snapshot:
 - fMP4 releases at the moov, and FLV at its first media frame.
 
 Recommended definition: a PMT or header entry alone does not count. A track
-counts once its rendition is in the catalog, which needs a known codec
-config. Settle it in one place that every importer shares, rather than per
+counts once the catalog names it: a rendition with a known codec config, or an
+extension track. Settle it in one place that every importer shares, rather than per
 importer. Fix the `Pending` doc to match.
 
 Tests: a TS input with a PAT and PMT but no PES, an FLV with no frames, and
 an avc3 input with no SPS each fail unannounced. Each importer's normal
-fixture still announces.
+fixture still announces, and so does `--passthrough`.
 
 Update `doc/bin/cli.md` inline if it describes the exit behavior.
 
