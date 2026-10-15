@@ -21,6 +21,8 @@ WARMUP = 3
 # reclaims groups every subscriber has read, and memory stays flat over a long run.
 CACHE_BYTES = 64 << 20
 BUDGET = float(os.environ.get("MOQ_BENCH_SECONDS", "1"))
+# Far longer than any honest round, so only a lost wakeup trips it.
+ROUND_TIMEOUT = 30
 
 
 @dataclass(frozen=True)
@@ -83,7 +85,7 @@ async def throughput(case: Case, results: list[dict]) -> None:
             for f in range(case.frames):
                 group.write_frame(payload, timedelta(microseconds=n * case.frames + f))
             group.finish()
-        await asyncio.gather(*readers)
+        await asyncio.wait_for(asyncio.gather(*readers), ROUND_TIMEOUT)
 
     for n in range(WARMUP):
         await step(n)

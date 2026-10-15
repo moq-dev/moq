@@ -5,6 +5,7 @@ import java.lang.management.ManagementFactory
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.addJsonObject
@@ -31,6 +32,9 @@ private const val WARMUP = 3
 // reclaims groups every subscriber has read, and memory stays flat over a long run.
 private const val CACHE_BYTES: ULong = 67_108_864uL // 64 MiB
 private val budgetNs = ((System.getenv("MOQ_BENCH_SECONDS")?.toDouble() ?: 1.0) * 1e9).toLong()
+
+// Far longer than any honest round, so only a lost wakeup trips it.
+private const val ROUND_TIMEOUT_MS = 30_000L
 
 /** Process CPU time, user plus system, across every thread. */
 private fun cpuNs(): Long =
@@ -103,7 +107,7 @@ class FfiBench {
                     group.finish()
                 }
             }
-            readers.awaitAll()
+            withTimeout(ROUND_TIMEOUT_MS) { readers.awaitAll() }
         }
 
         repeat(WARMUP) { step(it.toLong()) }
