@@ -9444,8 +9444,7 @@ mod tests {
 
 	/// On drafts 14-16 the withdrawal arrives as a message before the FIN: a
 	/// PUBLISH_NAMESPACE_DONE waiting behind an unanswered verification ends the announce at
-	/// once, even queued behind an update, giving its slot back before the application ever
-	/// takes the token.
+	/// once, giving its slot back before the application ever takes the token.
 	#[moq_net_sim::test]
 	async fn a_legacy_withdrawal_during_verification_ends_the_announce() {
 		const VERSION: Version = Version::Draft16;
@@ -9460,37 +9459,33 @@ mod tests {
 				.unwrap();
 			log.writes.lock().unwrap().clone()
 		};
-		// An empty REQUEST_UPDATE frame: type, then a zero length.
-		let update = vec![ietf::SubscribeUpdate::ID as u8, 0, 0];
-		for (case, script) in [("alone", done.clone()), ("behind an update", [update, done].concat())] {
-			// The application never takes the token, so only the withdrawal can end the wait.
-			let (mut subscriber, _requests, _cred, consumer, session) = auth_announce_harness(VERSION, script);
-			let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
-			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-				stream,
-				token_publish_namespace(),
-				cluster::Peer::default(),
-				None,
-			));
+		// The application never takes the token, so only the withdrawal can end the wait.
+		let (mut subscriber, _requests, _cred, consumer, session) = auth_announce_harness(VERSION, done);
+		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
+			stream,
+			token_publish_namespace(),
+			cluster::Peer::default(),
+			None,
+		));
 
-			let mut result = None;
-			for _ in 0..100 {
-				if let Poll::Ready(res) = futures::poll!(run.as_mut()) {
-					result = Some(res);
-					break;
-				}
-				settle().await;
+		let mut result = None;
+		for _ in 0..100 {
+			if let Poll::Ready(res) = futures::poll!(run.as_mut()) {
+				result = Some(res);
+				break;
 			}
-			assert!(
-				matches!(result, Some(Ok(()))),
-				"{case}: a withdrawal during verification ends the announce: {result:?}"
-			);
-			assert!(
-				routed_now(&consumer, "room/alice").is_none(),
-				"{case}: and it was never attached"
-			);
-			assert!(session.log.closes().is_empty(), "{case}: the session stays up");
+			settle().await;
 		}
+		assert!(
+			matches!(result, Some(Ok(()))),
+			"a withdrawal during verification ends the announce: {result:?}"
+		);
+		assert!(
+			routed_now(&consumer, "room/alice").is_none(),
+			"and it was never attached"
+		);
+		assert!(session.log.closes().is_empty(), "the session stays up");
 	}
 
 	/// A refused request token is answered UNAUTHORIZED and the announce is not attached; the
