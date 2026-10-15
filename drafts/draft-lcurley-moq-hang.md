@@ -209,8 +209,9 @@ type VideoDecoderConfigExtensions = {
 }
 ~~~
 
-`displayAspectWidth` and `displayAspectHeight` give the display aspect ratio of the media, stretching or shrinking the coded pixels.
-A consumer that understands neither field MUST assume square pixels, a 1:1 ratio.
+`displayAspectWidth` and `displayAspectHeight` give the aspect ratio the whole decoded picture is displayed at, as in WebCodecs' `VideoDecoderConfig`.
+They are not the sample (pixel) aspect ratio: a publisher with square samples omits them, and one with non-square samples sends the picture's aspect, such as 16:9 for a 1440x1080 picture with 4:3 samples.
+A consumer that understands neither field MUST display the decoded picture at its own shape.
 Both MUST be present together; a consumer that sees only one MUST ignore it.
 
 For example:
@@ -1147,6 +1148,7 @@ This document has no IANA actions.
 - Added an optional `epoch` to `.info`: the source route's Epoch, compared on resume so a restarted source fails enrollment.
 - Audio `sampleRate` and `numberOfChannels` describe the decoded output, so HE-AAC names its SBR rate and parametric stereo names two channels.
 - Added an optional `track` field to video, audio, text, `json`, and `binary` entries naming the track in its broadcast; the entry's key is its ID and names the track when `track` is absent. A consumer MUST reject a catalog using one ID for both a video and an audio rendition.
+- Defined video `displayAspectWidth` and `displayAspectHeight` as the whole picture's display aspect, not the sample aspect.
 
 ## moq-hang-03
 {:numbered="false"}

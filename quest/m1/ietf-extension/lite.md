@@ -57,7 +57,6 @@ and the framing above, only when negotiated.
 
 ## Required
 
-- [Object fields](/quest/m1/ietf-extension/objects.md) - the per-object fields it frames
 - [Subgroups](/quest/m1/ietf-extension/subgroups.md) - the subgroup streams it frames
 - [Track properties](/quest/m1/ietf-extension/track-properties.md) - the track properties it frames
 - [Dynamic groups](/quest/m1/ietf-extension/dynamic-groups.md) - the upstream request signal and capability it carries

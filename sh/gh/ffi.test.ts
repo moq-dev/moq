@@ -84,6 +84,9 @@ test("wrapper gates preserve trusted tag inputs and inspect only their publisher
 		expect(gate.if).toContain("github.event.workflow_run.name == 'Release FFI'");
 		expect(gate.steps?.[0]?.with?.ref).toBe("${{ github.sha }}");
 		expect(gate.steps?.at(-1)?.run).toBe(`just gh ffi completed ${language}`);
+		expect(gate.steps?.at(-1)?.env?.UPSTREAM_RUN_STARTED_AT).toBe(
+			"${{ github.event.workflow_run.run_started_at }}",
+		);
 		expect(wrapper.jobs[first].needs).toEqual(["ffi-release"]);
 		expect(wrapper.jobs[first].if).toBe("needs.ffi-release.outputs.ready == 'true'");
 	}

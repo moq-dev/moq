@@ -11,6 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / "sh/gh/ffi.py"
+ATTEMPT_1, ATTEMPT_2 = "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"
 
 
 class Ffi(unittest.TestCase):
@@ -24,6 +25,7 @@ class Ffi(unittest.TestCase):
                         GITHUB_OUTPUT=str(self.root / "output"), LIB_PREFIX="default",
                         BUILD_TARGETS='["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"]',
                         GITHUB_EVENT_NAME="workflow_run", UPSTREAM_NAME="Release FFI", UPSTREAM_RUN_ID="42",
+                        UPSTREAM_RUN_STARTED_AT=ATTEMPT_2,
                         GITHUB_REPOSITORY="moq-dev/moq", TEST_ROOT=str(self.root))
 
     def tool(self, name, body):
@@ -84,7 +86,7 @@ class Ffi(unittest.TestCase):
         return [{"name": f"{group} / {publisher}", "status": "completed", "conclusion": conclusion}]
 
     def gh(self, jobs):
-        jobs = [dict(run_attempt=1, **job) if "run_attempt" not in job else job for job in jobs]
+        jobs = [dict(dict(run_attempt=2, started_at=ATTEMPT_2), **job) for job in jobs]
         (self.root / "jobs").write_text(json.dumps([{"jobs": jobs[:1]}, {"jobs": jobs[1:]}]))
         self.tool("gh", '''import os, pathlib, sys
 assert sys.argv[1:] == ["api", "repos/moq-dev/moq/actions/runs/42/jobs?filter=all", "--paginate", "--slurp"]
@@ -116,14 +118,21 @@ print((root / "jobs").read_text())
     def test_partial_reruns_use_the_latest_execution_of_each_own_job(self):
         for old, new, ready in [("failure", "success", "true"), ("success", "failure", "false")]:
             (self.root / "output").unlink(missing_ok=True)
-            jobs = [dict(self.jobs("go", old)[0], run_attempt=1),
-                    dict(self.jobs("go", new)[0], run_attempt=2)]
-            self.gh(jobs)
+            self.gh([dict(self.jobs("go", old)[0], run_attempt=1, started_at=ATTEMPT_1),
+                     dict(self.jobs("go", new)[0], run_attempt=2)])
             self.assertEqual(self.run_helper("completed", "go"), f"ready={ready}\n")
+
+    def test_publisher_copied_from_an_earlier_attempt_does_not_release_again(self):
+        # Attempt 1 published Go and failed Kotlin, so Go's wrapper already ran.
+        # A newer tag may have published since; rerunning only Kotlin must not
+        # re-cut Go's wrapper from this older tag. GitHub copies the successful
+        # job into attempt 2 with its original start time.
+        go, kotlin = self.jobs("go")[0], self.jobs("kotlin")[0]
+        self.gh([dict(go, run_attempt=1, started_at=ATTEMPT_1), dict(go, run_attempt=2, started_at=ATTEMPT_1),
+                 dict(kotlin, run_attempt=1, started_at=ATTEMPT_1, conclusion="failure"), kotlin])
+        self.assertEqual(self.run_helper("completed", "go"), "ready=false\n")
         (self.root / "output").unlink()
-        jobs = [dict(self.jobs("go")[0], run_attempt=1), dict(self.jobs("swift", "failure")[0], run_attempt=2)]
-        self.gh(jobs)
-        self.assertEqual(self.run_helper("completed", "go"), "ready=true\n")
+        self.assertEqual(self.run_helper("completed", "kotlin"), "ready=true\n")
 
     def test_missing_publisher_and_api_error_fail_loudly(self):
         self.gh(self.jobs("swift"))

@@ -48,6 +48,34 @@ pub struct Frame {
 	pub payload: Bytes,
 }
 
+/// A frame with the relay metadata its group keeps beside it, read only by wire egress.
+#[cfg(feature = "async")]
+#[derive(Clone, Debug)]
+pub(crate) struct Object {
+	pub frame: Frame,
+	pub fields: Option<Arc<super::object::Fields>>,
+}
+
+#[cfg(feature = "async")]
+impl std::ops::Deref for Object {
+	type Target = Frame;
+	fn deref(&self) -> &Self::Target {
+		&self.frame
+	}
+}
+
+/// A streamed frame's private header, alongside the unchanged public header.
+pub(crate) struct Header {
+	pub info: Info,
+	pub fields: Option<Arc<super::object::Fields>>,
+}
+
+impl From<Info> for Header {
+	fn from(info: Info) -> Self {
+		Self { info, fields: None }
+	}
+}
+
 /// A reusable batch of frames, filled by [`group::Consumer::poll_read_frames`] and drained
 /// by [`group::Producer::write_frames`].
 ///
@@ -684,6 +712,8 @@ pub struct Consumer {
 	// The group's channel, used to park while a partial frame fills.
 	state: kio::Consumer<GroupState>,
 	info: Info,
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fields: Option<Arc<super::object::Fields>>,
 	source: Source,
 	// Byte offset consumed so far.
 	read_idx: usize,
@@ -707,10 +737,12 @@ impl std::ops::Deref for Consumer {
 }
 
 impl Consumer {
-	pub(crate) fn new(state: kio::Consumer<GroupState>, info: Info, source: Source) -> Self {
+	pub(crate) fn new(state: kio::Consumer<GroupState>, header: impl Into<Header>, source: Source) -> Self {
+		let header = header.into();
 		Self {
 			state,
-			info,
+			info: header.info,
+			fields: header.fields,
 			source,
 			read_idx: 0,
 			stats: stats::Meter::default(),
@@ -751,6 +783,9 @@ impl Consumer {
 			if !recover.wants(failed.as_ref(), waiter) {
 				return res;
 			}
+			if self.state.read().sparse() {
+				return Poll::Ready(Err(Error::Unsupported));
+			}
 			let mut replacement = match recover.poll(*index, failed.as_ref(), waiter) {
 				Poll::Ready(Ok(group)) => group,
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
@@ -772,6 +807,11 @@ impl Consumer {
 					};
 				}
 			};
+			// This copy was dense through its frame, so the replacement's must be the same
+			// Object ID: a copy that begins past a gap holds different content there.
+			if frame.fields.as_ref().is_some_and(|fields| fields.id != *index) {
+				return Poll::Ready(Err(Error::Unsupported));
+			}
 			// Same name, same content: a different size is the routes disagreeing.
 			if frame.info.size != self.info.size {
 				return Poll::Ready(Err(Error::ProtocolViolation));

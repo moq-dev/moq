@@ -6,10 +6,17 @@ WORKSPACE=$(cd "$DIR/../.." && pwd)
 # shellcheck source-path=SCRIPTDIR source=../lib/harness.sh
 source "$DIR/../lib/harness.sh"
 harness_begin wire-compat "just test wire-compat$(harness_argv "$@")"
-[[ $# == 0 ]] || {
-    echo "wire-compat takes no arguments" >&2
-    exit 2
-}
+# --remeasure runs the cells planned breaks cover, then rewrites planned-breaks.json
+# from the result: re-pinned to these releases if a cell still fails, else deleted.
+remeasure=
+case "$*" in
+    "") ;;
+    --remeasure) remeasure=--remeasure ;;
+    *)
+        echo "usage: just test wire-compat [--remeasure]" >&2
+        exit 2
+        ;;
+esac
 cd "$WORKSPACE"
 bun install --frozen-lockfile
 bun "$DIR/compat/resolve.ts" resolve "$HARNESS_RUN/versions.json"
@@ -54,7 +61,7 @@ CURRENT="$TARGET/debug/moq"
 RELEASED="$HARNESS_RUN/released/bin/moq"
 "$CURRENT" --help >"$HARNESS_RUN/current-help"
 "$RELEASED" --help >"$HARNESS_RUN/released-help"
-bun "$DIR/compat/resolve.ts" matrix "$HARNESS_RUN/current-help" "$HARNESS_RUN/released-help" "$DIR/compat/planned-breaks.json" "$HARNESS_RUN/shared" "$HARNESS_RUN/versions.json" "$HARNESS_RUN/controls"
+bun "$DIR/compat/resolve.ts" matrix "$HARNESS_RUN/current-help" "$HARNESS_RUN/released-help" "$DIR/compat/planned-breaks.json" "$HARNESS_RUN/shared" "$HARNESS_RUN/versions.json" "$HARNESS_RUN/controls" ${remeasure:+"$remeasure"}
 
 # A separate package root prevents bun workspaces from replacing released deps
 # with the checkout. Copy exactly the same client into both environments; it uses
@@ -133,28 +140,33 @@ for source in current released js-current js-released; do
 done
 
 # Every session cell runs, so one nightly names every break; the run fails at the
-# end. A cell a planned break covers is logged with that break's name instead.
+# end. A cell a planned break covers is logged with that break's name instead, or
+# with --remeasure runs and is recorded against that break without failing the run.
 failed=()
 ran=0
 skipped=0
+: >"$HARNESS_RUN/measured"
 cell() {
-    local lane="$1" version="$2" relay_source="$3" source="$4" planned
+    local lane="$1" version="$2" relay_source="$3" source="$4" planned result
     shift 4
     local name="$version relay=$relay_source publisher=$source $lane"
     planned=$(bun "$DIR/compat/resolve.ts" skip "$DIR/compat/planned-breaks.json" "$lane" "$version" "$relay_source" "$source")
-    if [[ -n "$planned" ]]; then
+    if [[ -n "$planned" && -z "$remeasure" ]]; then
         echo "SKIP $name: planned break $planned"
         skipped=$((skipped + 1))
         return
     fi
     ran=$((ran + 1))
-    echo "=== $name ==="
+    echo "=== $name${planned:+ (planned break $planned)} ==="
     if "$@"; then
         echo "PASS $name"
+        result=pass
     else
         echo "FAIL $name"
-        failed+=("$name")
+        result=fail
+        [[ -n "$planned" ]] || failed+=("$name")
     fi
+    [[ -z "$planned" ]] || printf '%s\t%s\t%s\n' "$planned" "$result" "$name" >>"$HARNESS_RUN/measured"
 }
 
 fetch() {
@@ -228,6 +240,11 @@ while read -r version <&3; do
     done
 done 3<"$HARNESS_RUN/shared"
 echo "session cells: $ran ran, $skipped skipped"
+if [[ -n "$remeasure" ]]; then
+    bun "$DIR/compat/resolve.ts" remeasure "$DIR/compat/planned-breaks.json" "$HARNESS_RUN/current-help" "$HARNESS_RUN/released-help" "$HARNESS_RUN/versions.json" "$HARNESS_RUN/measured"
+    bun x biome format --write "$DIR/compat/planned-breaks.json"
+    echo "rewrote compat/planned-breaks.json: review the diff and refresh each reason"
+fi
 if ((${#failed[@]})); then
     printf 'FAIL %s\n' "${failed[@]}" >&2
     exit 1

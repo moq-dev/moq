@@ -681,7 +681,7 @@ fn spawn_import(
 			Publish::new(broadcast, &format, config)?
 		};
 		// Media stays servable at EOF until it goes stale, the same max-age relays retain it for.
-		let publish = publish.linger(max_age.unwrap_or(hang::container::MAX_AGE));
+		let mut publish = publish.linger(max_age.unwrap_or(hang::container::MAX_AGE));
 		publish.announce(epoch)?;
 		local = Some(publish);
 	} else {
@@ -733,7 +733,7 @@ fn spawn_import(
 			ImportSource::Capture(capture) => {
 				warn_if_missing_format(&name);
 				let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
-				let publish = Publish::capture(broadcast, &capture, bandwidth.clone(), max_age)?;
+				let mut publish = Publish::capture(broadcast, &capture, bandwidth.clone(), max_age)?;
 				publish.announce(epoch)?;
 				local = Some(publish);
 			}

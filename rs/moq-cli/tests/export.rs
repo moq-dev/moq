@@ -115,10 +115,36 @@ fn export(relay: &Relay, linger: &str) -> Export {
 	export_with(relay, &[], &["--linger", linger])
 }
 
+/// A container both `import` and `export` speak, with a clip of it.
+#[derive(Clone, Copy)]
+struct Format {
+	name: &'static str,
+	clip: &'static [u8],
+	/// Bytes written every 150 ms, which keeps [`CLIP`] near real time.
+	chunk: usize,
+}
+
+const TS: Format = Format {
+	name: "ts",
+	clip: CLIP,
+	chunk: 188 * 40,
+};
+
+const FMP4: Format = Format {
+	name: "fmp4",
+	clip: AV1,
+	chunk: AV1.len(),
+};
+
 /// Start `moq <global> export ts <flags>`, collecting both pipes until they close.
 fn export_with(relay: &Relay, global: &[&str], flags: &[&str]) -> Export {
+	export_as(relay, global, TS, flags)
+}
+
+/// [`export_with`] in `format`.
+fn export_as(relay: &Relay, global: &[&str], format: Format, flags: &[&str]) -> Export {
 	let mut child = moq(relay, global)
-		.args(["export", "ts"])
+		.args(["export", format.name])
 		.args(flags)
 		.stdout(Stdio::piped())
 		.stderr(Stdio::piped())
@@ -164,15 +190,20 @@ fn import(relay: &Relay) -> (Child, JoinHandle<ChildStdin>) {
 
 /// [`import`] with `global` flags, such as the session version or the epoch.
 fn import_with(relay: &Relay, global: &[&str]) -> (Child, JoinHandle<ChildStdin>) {
+	import_as(relay, global, TS)
+}
+
+/// [`import_with`] in `format`.
+fn import_as(relay: &Relay, global: &[&str], format: Format) -> (Child, JoinHandle<ChildStdin>) {
 	let mut child = moq(relay, global)
 		// A finished import lingers for its max-age; keep that short so the publisher exits promptly.
-		.args(["import", "--max-age", "1s", "ts"])
+		.args(["import", "--max-age", "1s", format.name])
 		.stdin(Stdio::piped())
 		.spawn()
 		.expect("spawn import");
 	let mut stdin = child.stdin.take().expect("stdin");
 	let feeding = tokio::spawn(async move {
-		for chunk in CLIP.chunks(188 * 40) {
+		for chunk in format.clip.chunks(format.chunk) {
 			stdin.write_all(chunk).await.expect("write stdin");
 			tokio::time::sleep(Duration::from_millis(150)).await;
 		}
@@ -505,6 +536,78 @@ fn latest_pts(ts: &[u8]) -> u64 {
 		}
 	}
 	latest.expect("the capture carries PES timestamps")
+}
+
+/// A standby joining a live partner's epoch before its input has declared a track (for TS, a
+/// PMT) is never asked for the tracks the partner's exports hold, since it announces only once
+/// it can serve them (#4352), and the exports keep running. Input that ends before declaring any
+/// track fails rather than announcing an empty broadcast.
+async fn a_standby_before_its_tracks(global: &[&str], format: Format) {
+	let relay = relay().await;
+	let epoch = hang::moq_net::Epoch::mint().to_string();
+	let publish: Vec<&str> = global.iter().copied().chain(["--epoch", epoch.as_str()]).collect();
+	let (mut active, feeding) = import_as(&relay, &publish, format);
+	let mut first = export_as(&relay, global, format, &[]);
+	let mut second = export_as(&relay, global, format, &[]);
+	first.output_past(0).await;
+	second.output_past(0).await;
+
+	let mut standby = moq(&relay, &publish)
+		.args(["import", "--max-age", "1s", format.name])
+		.stdin(Stdio::piped())
+		.stderr(Stdio::piped())
+		.spawn()
+		.expect("spawn the standby");
+	let standby_stdin = standby.stdin.take().expect("stdin");
+	tokio::time::sleep(Duration::from_secs(2)).await;
+	assert!(
+		first.child.try_wait().unwrap().is_none(),
+		"the first export survives the standby"
+	);
+	assert!(
+		second.child.try_wait().unwrap().is_none(),
+		"the second export survives the standby"
+	);
+
+	drop(standby_stdin);
+	let status = wait(&mut standby).await;
+	let mut errors = String::new();
+	standby
+		.stderr
+		.take()
+		.unwrap()
+		.read_to_string(&mut errors)
+		.await
+		.unwrap();
+	assert!(
+		!errors.contains("not found"),
+		"the relay asked the standby for a track: {errors}"
+	);
+	assert!(!status.success(), "input with no track fails, got {status}: {errors}");
+	assert!(errors.contains("declared"), "the error says why: {errors}");
+
+	drop(feeding.await.unwrap());
+	assert!(wait(&mut active).await.success());
+	for export in [first, second] {
+		let (status, errors) = export.wait().await;
+		assert!(status.success(), "the export finishes cleanly, got {status}: {errors}");
+	}
+}
+
+#[tokio::test]
+async fn a_standby_before_its_pmt_leaves_the_exports_running() {
+	a_standby_before_its_tracks(&[], TS).await;
+}
+
+/// lite-07 carries the epoch, so this is the version on which the relay queries the standby.
+#[tokio::test]
+async fn a_standby_before_its_pmt_leaves_the_exports_running_on_lite_07() {
+	a_standby_before_its_tracks(&["--connect-version", LITE_07], TS).await;
+}
+
+#[tokio::test]
+async fn a_standby_before_its_init_segment_leaves_the_fmp4_exports_running_on_lite_07() {
+	a_standby_before_its_tracks(&["--connect-version", LITE_07], FMP4).await;
 }
 
 /// Subscriptions are sticky: a replacement announced while the old publisher stays up leaves

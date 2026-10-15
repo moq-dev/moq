@@ -300,7 +300,10 @@ importer guarantees yet. Only `import fmp4`, `flv`, `hls`, and `ts` (one
 program, or `--passthrough`) accept it. The RTMP, SRT, and WHIP ingests and
 `import ts --program all` refuse it because they mint their own, and `import
 avc3`, `capture`, `rtc --connect`, `archive`, and `transcode` because their
-timestamps or bytes come from the instance rather than the input.
+timestamps or bytes come from the instance rather than the input. Each that
+accepts it announces once its input has declared its tracks (for `ts`, the
+first PMT), so a standby started ahead of its feed is never asked for tracks it
+cannot serve yet; empty input exits 1 without announcing.
 
 ## Cluster
 

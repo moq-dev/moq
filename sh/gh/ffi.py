@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Select shared native libraries and check an independent FFI publisher."""
 
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -55,11 +56,11 @@ def stage():
         source.rename(Path("libs") / target)
 
 
-def published(jobs, language):
+def published(jobs, language, started):
     group, publisher = LANGUAGES[language]
     prefix = group + " / "
-    # A partial rerun includes successful jobs from earlier attempts. Keep the
-    # latest execution of each own job, rather than losing those publications.
+    # A partial rerun copies successful jobs into the new attempt, so judge the
+    # latest record of each own job.
     latest = {}
     for job in jobs:
         name = job["name"]
@@ -74,9 +75,15 @@ def published(jobs, language):
     publishers = [job for job in own if job["name"] == prefix + publisher]
     if len(publishers) != 1:
         raise ValueError(f"expected one {group} publisher, found {len(publishers)}")
-    return publishers[0]["conclusion"] == "success" and all(
-        job["status"] == "completed" and job["conclusion"] in ("success", "skipped") for job in own
-    )
+    publisher = publishers[0]
+    if publisher["conclusion"] != "success":
+        return False
+    # A copied job keeps its original start time. Its wrapper already ran when
+    # that earlier attempt completed; re-releasing it after a newer tag published
+    # would roll the wrapper back to old sources.
+    if datetime.fromisoformat(publisher["started_at"]) < started:
+        return False
+    return all(job["status"] == "completed" and job["conclusion"] in ("success", "skipped") for job in own)
 
 
 def completed(language):
@@ -95,6 +102,7 @@ def completed(language):
     run = os.environ["UPSTREAM_RUN_ID"]
     if not re.fullmatch(r"[1-9][0-9]*", run):
         raise ValueError("invalid upstream run ID")
+    started = datetime.fromisoformat(os.environ["UPSTREAM_RUN_STARTED_AT"])
     repo = os.environ["GITHUB_REPOSITORY"]
     # A single query after workflow_run completion, never a publication poll.
     result = subprocess.run(
@@ -103,7 +111,7 @@ def completed(language):
     )
     pages = json.loads(result.stdout)
     jobs = [job for page in pages for job in page["jobs"]]
-    output("ready", str(published(jobs, language)).lower())
+    output("ready", str(published(jobs, language, started)).lower())
 
 
 def main():
