@@ -377,7 +377,7 @@ impl Pool {
 			// Outside the lock: a track re-arms its next deadline here.
 			for track in due.iter().filter_map(Weak::upgrade) {
 				if let Some(next) = track.wakes.release_wall(now) {
-					self.schedule(next, &track);
+					self.schedule(next, None, &track);
 				}
 			}
 		}
@@ -412,11 +412,15 @@ impl Pool {
 		false
 	}
 
-	/// Index `track`'s earliest wall-clock deadline `at`, waking the drivers if it is now
-	/// the pool's earliest.
-	fn schedule(&self, at: crate::time::Instant, track: &Arc<Track>) {
+	/// Index `track`'s earliest wall-clock deadline `at` in place of `replaced`, waking the
+	/// drivers if it is now the pool's earliest.
+	fn schedule(&self, at: crate::time::Instant, replaced: Option<crate::time::Instant>, track: &Arc<Track>) {
 		let mut wall = self.inner.wall.lock();
-		let key = (at, Arc::as_ptr(track) as usize);
+		let address = Arc::as_ptr(track) as usize;
+		if let Some(replaced) = replaced {
+			wall.due.remove(&(replaced, address));
+		}
+		let key = (at, address);
 		wall.due.insert(key, Arc::downgrade(track));
 		if wall.due.first_key_value().is_some_and(|(first, _)| *first == key) {
 			let mut drivers = std::mem::take(&mut wall.drivers);
@@ -671,8 +675,8 @@ impl Track {
 		if !self.pool.watch_driven(waiter) {
 			return;
 		}
-		if self.wakes.watch_wall(at, waiter) {
-			self.pool.schedule(at, self);
+		if let Some(replaced) = self.wakes.watch_wall(at, waiter) {
+			self.pool.schedule(at, replaced, self);
 		}
 	}
 
@@ -790,6 +794,11 @@ impl Drop for Track {
 	fn drop(&mut self) {
 		if let Some(key) = self.sweep.get() {
 			self.pool.unregister(*key);
+		}
+		// Its deadline would otherwise linger in a shared pool until it came due.
+		if let Some(at) = self.wakes.wall_armed() {
+			let address = std::ptr::from_ref::<Self>(self) as usize;
+			self.pool.inner.wall.lock().due.remove(&(at, address));
 		}
 	}
 }
@@ -1038,6 +1047,22 @@ mod test {
 		assert!(!read.0.load(Ordering::SeqCst), "released early");
 		assert_eq!(pool.gc(at, &driving), None);
 		assert!(read.0.load(Ordering::SeqCst), "the read was never released");
+	}
+
+	/// A track indexes one wall-clock deadline, its earliest, and takes it along when dropped.
+	#[test]
+	fn a_dropped_track_leaves_the_wall_index() {
+		let pool = Pool::unbounded();
+		let now = super::super::clock::wall();
+		pool.gc(now, &kio::Waiter::noop());
+		let track = Track::new(pool.clone(), kio::Weak::new());
+		let (_read, reading) = flag();
+		track.watch_wall(now + Duration::from_secs(2), &reading);
+		track.watch_wall(now + Duration::from_secs(1), &reading);
+		assert_eq!(pool.inner.wall.lock().due.len(), 1, "the later deadline lingers");
+
+		drop(track);
+		assert!(pool.inner.wall.lock().due.is_empty(), "the dropped track lingers");
 	}
 
 	#[test]

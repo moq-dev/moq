@@ -380,8 +380,8 @@ struct Slot {
 	// lands or its stream ends; see [`Producer::receive_group`].
 	pending: bool,
 
-	// When the group last became servable here: its successor's wall-clock clock for
-	// the group before it (see [`TrackState::drifted`]). Read on the pool's clock.
+	// When the group arrived here, withheld or not: the start of the wall clock for the
+	// group before it (see [`TrackState::arrival`]). Read on the pool's clock.
 	arrived: crate::time::Instant,
 
 	// A fetched copy of a live `group` that the feed started past the frames a fetch
@@ -773,14 +773,42 @@ impl TrackState {
 			.find(|slot| slot.is_shown())
 	}
 
+	/// The group after `sequence` that starts its wall clock: like [`Self::successor`], but
+	/// counting a group a route is still withholding. Its header arrived, so a relay ages the
+	/// group before it as the origin does, even if its first frame never comes.
+	fn arrival(&self, sequence: u64, cap: Option<u64>) -> Option<&Slot> {
+		self.lookup
+			.range(sequence.saturating_add(1)..)
+			.map(|(_, slot)| slot)
+			.take_while(|slot| super::subscription::before_end(slot.group.sequence, cap))
+			.find(|slot| slot.is_live())
+	}
+
+	/// The slot `select` picks, with `waiter` parked on its abort.
+	///
+	/// An abort only closes the group, never touching the track, so one that landed before
+	/// registering re-selects, or the replacement would go unwatched.
+	fn watch_abort<'a>(
+		&'a self,
+		waiter: &kio::Waiter,
+		select: impl Fn(&'a Self) -> Option<&'a Slot>,
+	) -> Option<&'a Slot> {
+		loop {
+			match select(self) {
+				Some(slot) if slot.group.poll_closed(waiter).is_ready() && slot.group.is_aborted() => continue,
+				slot => return slot,
+			}
+		}
+	}
+
 	/// Whether `sequence`'s successor arrived a full `budget` ago.
 	///
 	/// The wall-clock twin of [`Self::reach`], re-read the same way rather than latched:
 	/// a group that lands between the two restarts the clock, and an aborted successor
-	/// hands it to the next servable one. The clock is read only once there is a successor,
+	/// hands it to the next one. The clock is read only once there is a successor,
 	/// so judging the newest group, the common case, costs no clock read.
 	fn superseded(&self, sequence: u64, cap: Option<u64>, budget: Duration) -> bool {
-		self.successor(sequence, cap)
+		self.arrival(sequence, cap)
 			.is_some_and(|successor| self.aged(successor, budget))
 	}
 
@@ -848,30 +876,24 @@ impl TrackState {
 	/// The caller parks on a group landing above `sequence` first, in the way that fits
 	/// whether this track holds it.
 	fn poll_drifted(&self, sequence: u64, cap: Option<u64>, budget: Duration, waiter: &kio::Waiter) -> bool {
+		// Unbounded until a group lands above. Registered before judging, so a racing abort
+		// is observed or wakes us, and armed for whichever successor this pass selected, so
+		// re-selecting re-arms it.
+		let Some(arrival) = self.watch_abort(waiter, |state| state.arrival(sequence, cap)) else {
+			return false;
+		};
+		if let Some(deadline) = arrival.arrived.checked_add(budget) {
+			self.cache.watch_wall(deadline, waiter);
+		}
+		if self.aged(arrival, budget) {
+			return true;
+		}
 		let reach = loop {
-			// An abort can change reach even after the successor is stamped.
-			// Register before judging, so a racing abort is observed or wakes us.
-			// An abort only closes the group, never touching the track, so one that
-			// landed before registering must re-select or the replacement goes unwatched.
-			let successor = loop {
-				let successor = self.successor(sequence, cap);
-				match successor {
-					Some(slot) if slot.group.poll_closed(waiter).is_ready() && slot.group.is_aborted() => continue,
-					successor => break successor,
-				}
-			};
-			// Unbounded until a group lands above, or the successor presents its first frame.
-			let Some(successor) = successor else {
+			// An abort can change reach even after the successor is stamped. Unbounded
+			// until a group shows above, or the successor presents its first frame.
+			let Some(successor) = self.watch_abort(waiter, |state| state.successor(sequence, cap)) else {
 				return false;
 			};
-			// Armed for whichever successor this pass selected, so re-selecting re-arms it,
-			// and before an unstamped successor returns: the wall clock judges that one alone.
-			if let Some(deadline) = successor.arrived.checked_add(budget) {
-				self.cache.watch_wall(deadline, waiter);
-			}
-			if self.aged(successor, budget) {
-				return true;
-			}
 			let successor = &successor.group;
 			if let Some(reach) = successor.timestamp() {
 				break reach;
@@ -1238,6 +1260,9 @@ impl TrackState {
 		if visible && !pending {
 			self.arrival.push_back((sequence, stamp));
 			self.landed(sequence);
+		} else if visible {
+			// Withheld, but its arrival starts the wall clock of the reads it succeeds.
+			self.wake_landed(sequence);
 		}
 	}
 
@@ -1252,7 +1277,6 @@ impl TrackState {
 			return;
 		}
 		slot.pending = false;
-		slot.arrived = self.cache.pool().now_wall();
 		self.arrival.push_back((sequence, slot.stamp));
 		// A group reset before its first frame shows nothing of the route's feed.
 		if slot.group.is_aborted() {
@@ -1270,6 +1294,12 @@ impl TrackState {
 	/// Content at `sequence` became servable: wake the reads it succeeds, and show an answer
 	/// waiting on it.
 	fn landed(&mut self, sequence: u64) {
+		self.wake_landed(sequence);
+		self.shown(sequence);
+	}
+
+	/// Wake the reads a group landing at `sequence` succeeds.
+	fn wake_landed(&self, sequence: u64) {
 		let below = self
 			.lookup
 			.range(..sequence)
@@ -1278,7 +1308,6 @@ impl TrackState {
 			.map(|(below, _)| *below);
 		let oldest = self.lookup.first_key_value().map_or(sequence, |(oldest, _)| *oldest);
 		self.cache.wakes().landed(below, sequence, oldest);
-		self.shown(sequence);
 	}
 
 	/// Content at `sequence` became readable: an answer waiting on it now shows.
@@ -4022,19 +4051,25 @@ impl Cursor {
 		let edge = state.drift_edge(self.end_sequence);
 		// Every group below the last successor found shares it, so a run of cached groups
 		// that cannot serve is walked once per pass, not once per gap.
+		let mut arrival: Option<&Slot> = None;
 		let mut successor: Option<&Slot> = None;
 		while let Some(oldest) = delivered.above_gap() {
+			if arrival.is_none_or(|slot| slot.group.sequence <= oldest) {
+				arrival = state.arrival(oldest, edge.cap);
+			}
+			// Either clock, as `drifted` judges a group: without a successor, neither.
+			let Some(first) = arrival else {
+				break;
+			};
 			if successor.is_none_or(|slot| slot.group.sequence <= oldest) {
 				successor = state.successor(oldest, edge.cap);
 			}
-			// Either clock, as `drifted` judges a group: without a successor, neither.
-			let Some(slot) = successor else {
-				break;
-			};
-			let past = state.aged(slot, budget)
-				|| state
-					.live_above(oldest, &edge)
-					.is_some_and(|live| live.behind(slot.group.timestamp(), budget));
+			let past = state.aged(first, budget)
+				|| successor.is_some_and(|slot| {
+					state
+						.live_above(oldest, &edge)
+						.is_some_and(|live| live.behind(slot.group.timestamp(), budget))
+				});
 			if !past {
 				break;
 			}
@@ -6225,6 +6260,40 @@ mod test {
 				woken.load(Ordering::SeqCst),
 				"{info:?} primed={primed}: the wall deadline never fired"
 			);
+			let result = reading.poll_read_frame(&waiter);
+			assert!(matches!(result, Poll::Ready(Ok(None))), "{info:?}: {result:?}");
+		}
+	}
+
+	/// A route's successor whose header landed but whose first frame never does still
+	/// starts the wall clock, so a relay ages the group before it as the origin does.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_withheld_successor_ages_its_predecessor() {
+		for info in [Info::default(), Info::timed()] {
+			let producer = track_producer("test", info.clone());
+			let at = info.timescale.map(|_| Timestamp::ZERO);
+			elapse(&producer, Duration::ZERO);
+			let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(1)));
+			let mut held = producer.append_group().unwrap();
+			held.write_frame(at, bytes::Bytes::from_static(b"x")).unwrap();
+			let mut reading = subscriber.assert_group();
+			assert!(reading.read_frame().now_or_never().unwrap().unwrap().is_some());
+
+			let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+			let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
+			assert!(reading.poll_read_frame(&waiter).is_pending());
+			let _successor = producer.receive_group(group::Info { sequence: 1 }).unwrap();
+			assert!(
+				woken.swap(false, Ordering::SeqCst),
+				"{info:?}: the header never woke the read"
+			);
+			assert!(reading.poll_read_frame(&waiter).is_pending());
+
+			elapse(&producer, Duration::from_millis(900));
+			assert!(!woken.load(Ordering::SeqCst), "{info:?}: woken before the deadline");
+			elapse(&producer, Duration::from_millis(100));
+			assert!(woken.load(Ordering::SeqCst), "{info:?}: the wall deadline never fired");
 			let result = reading.poll_read_frame(&waiter);
 			assert!(matches!(result, Poll::Ready(Ok(None))), "{info:?}: {result:?}");
 		}

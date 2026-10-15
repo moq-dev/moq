@@ -103,16 +103,25 @@ impl Wakes {
 		self.earliest.fetch_min(deadline, Ordering::Relaxed);
 	}
 
-	/// Park `waiter` until the wall clock reaches `at`. Returns whether `at` is earlier
-	/// than any deadline the pool already releases for this track, so the caller asks it to.
-	pub(crate) fn watch_wall(&self, at: crate::time::Instant, waiter: &kio::Waiter) -> bool {
+	/// Park `waiter` until the wall clock reaches `at`. When `at` is earlier than any
+	/// deadline the pool already releases for this track, so the caller asks it to, returns
+	/// `Some` of the one it replaces.
+	pub(crate) fn watch_wall(
+		&self,
+		at: crate::time::Instant,
+		waiter: &kio::Waiter,
+	) -> Option<Option<crate::time::Instant>> {
 		let mut parked = self.parked.lock();
 		parked.wall.entry(at).or_default().register(waiter);
 		if parked.wall_armed.is_some_and(|armed| armed <= at) {
-			return false;
+			return None;
 		}
-		parked.wall_armed = Some(at);
-		true
+		Some(parked.wall_armed.replace(at))
+	}
+
+	/// The wall-clock deadline the pool releases for this track next.
+	pub(crate) fn wall_armed(&self) -> Option<crate::time::Instant> {
+		self.parked.lock().wall_armed
 	}
 
 	/// The wall clock reached `now`: wake the reads due by then, returning the earliest
