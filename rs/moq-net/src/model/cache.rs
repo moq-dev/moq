@@ -44,7 +44,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::Duration;
 
 use super::track::{self, TrackState};
-use super::{expiry, group};
+use super::{aborts, expiry, group};
 
 /// Fixed bookkeeping charged per cached group on top of its frame payload bytes.
 ///
@@ -639,6 +639,8 @@ pub(crate) struct Track {
 	// The track's reads parked on their drift budget. Here because this account is the
 	// link every group's frame writes already follow back to the track.
 	wakes: expiry::Wakes,
+	// Allocated only when a subscriber parks groups behind a serving cap.
+	aborts: OnceLock<Arc<aborts::Aborts>>,
 }
 
 impl Track {
@@ -652,6 +654,7 @@ impl Track {
 			state,
 			sweep: OnceLock::new(),
 			wakes: Default::default(),
+			aborts: OnceLock::new(),
 		});
 		if let Some(key) = track.pool.register(&track) {
 			let _ = track.sweep.set(key);
@@ -667,6 +670,16 @@ impl Track {
 	/// The track's reads parked on their drift budget.
 	pub(crate) fn wakes(&self) -> &expiry::Wakes {
 		&self.wakes
+	}
+
+	pub(super) fn watch_aborts(&self) -> aborts::Watch {
+		self.aborts.get_or_init(Arc::default).watch()
+	}
+
+	pub(super) fn aborted(&self, sequence: u64) {
+		if let Some(aborts) = self.aborts.get() {
+			aborts.notify(sequence);
+		}
 	}
 
 	/// Park `waiter` until the pool's wall clock reaches `at`. While no driver collects the
