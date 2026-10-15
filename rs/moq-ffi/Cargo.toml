@@ -84,4 +84,5 @@ uniffi = { workspace = true, features = ["build"] }
 [dev-dependencies]
 # One non-codec test blocks on a future; the main dep is `video`-only.
 pollster = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 web-transport-trait = { workspace = true }

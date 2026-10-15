@@ -42,8 +42,6 @@ older reader ignores and a newer one defaults to zero.
 
 ## Related
 
-- [Rust papercuts](/quest/m1/papercuts-rs.md) - counts `/fetch` refusals in
-  `/metrics`; this counts what an admitted fetch serves
 - [Bitrate claim](/quest/m2/rate-claim.md) - HTTP refuses capped tokens, so
   stats are HTTP's only byte account
 - [Session outcomes](/quest/m1/session-outcomes.md) - the session counters

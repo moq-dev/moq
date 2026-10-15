@@ -53,5 +53,4 @@ public API and wire changes are not expected.
 
 - [Validation PR #5328](https://github.com/moq-dev/moq/pull/5328#issuecomment-6114456593) - retained local failure and process-status evidence
 - [Passing full CI](https://github.com/moq-dev/moq/actions/runs/38178905198) - same-head contrast, including real live timing
-- [Same-instance resume](/quest/m1/ts-same-instance-resume.md) - independent full-check failure
 - [Mux-rate hold #5287](https://github.com/moq-dev/moq/pull/5287) - initial rate publication, and a finished import lingering for its max-age

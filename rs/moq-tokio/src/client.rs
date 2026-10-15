@@ -401,7 +401,11 @@ impl Client {
 		if url.scheme() == "tcp" {
 			let session =
 				crate::tcp::connect(url, &self.versions.alpns(), self.failover_delay, self.resolution_delay).await?;
-			let session = connect_session(&moq, crate::transport::Session::new(session)).await?;
+			let session = connect_session(
+				&moq,
+				crate::transport::Session::new(session, moq_net::transport::Binding::InBand),
+			)
+			.await?;
 			return Ok(Dialed::new(session, crate::Transport::Tcp));
 		}
 
@@ -416,7 +420,11 @@ impl Client {
 				self.resolution_delay,
 			)
 			.await?;
-			let session = connect_session(&moq, crate::transport::Session::new(session)).await?;
+			let session = connect_session(
+				&moq,
+				crate::transport::Session::new(session, moq_net::transport::Binding::InBand),
+			)
+			.await?;
 			return Ok(Dialed::new(session, crate::Transport::Tcp));
 		}
 
@@ -425,7 +433,11 @@ impl Client {
 		#[cfg(all(feature = "uds", unix))]
 		if url.scheme() == "unix" {
 			let session = crate::unix::connect(url, &self.versions.alpns()).await?;
-			let session = connect_session(&moq, crate::transport::Session::new(session)).await?;
+			let session = connect_session(
+				&moq,
+				crate::transport::Session::new(session, moq_net::transport::Binding::InBand),
+			)
+			.await?;
 			return Ok(Dialed::new(session, crate::Transport::Unix));
 		}
 
@@ -452,17 +464,25 @@ impl Client {
 				crate::iroh::Binding::H3 => self.moq.clone(),
 			};
 
-			let session = connect_session(&moq, crate::transport::Session::new(session)).await?;
+			let binding = match binding {
+				crate::iroh::Binding::Raw => moq_net::transport::Binding::InBand,
+				crate::iroh::Binding::H3 => moq_net::transport::Binding::Uri,
+			};
+			let session = connect_session(&moq, crate::transport::Session::new(session, binding)).await?;
 			return Ok(Dialed::new(session, crate::Transport::Iroh));
 		}
 
 		#[cfg(feature = "noq")]
 		if let Some(noq) = self.noq.as_ref() {
 			let quic_addr = addr.clone();
+			let binding = match quic_transport(&url) {
+				crate::Transport::Quic => moq_net::transport::Binding::InBand,
+				_ => moq_net::transport::Binding::Uri,
+			};
 			let quic_handle = async {
 				noq.connect(&self.tls, quic_addr, &self.versions)
 					.await
-					.map(crate::transport::Session::new)
+					.map(|session| crate::transport::Session::new(session, binding))
 					.map_err(Error::from)
 			};
 
@@ -493,7 +513,11 @@ impl Client {
 		let alpns = self.versions.alpns();
 		let session =
 			crate::websocket::connect(&self.websocket, &self.tls, self.tls_host_name.as_deref(), addr, &alpns).await?;
-		let session = connect_session(&self.moq, crate::transport::Session::new(session)).await?;
+		let session = connect_session(
+			&self.moq,
+			crate::transport::Session::new(session, moq_net::transport::Binding::Uri),
+		)
+		.await?;
 		Ok(Dialed::new(session, crate::Transport::WebSocket))
 	}
 
@@ -532,7 +556,11 @@ impl Client {
 		match race_transport_connect(&url, quic, websocket).await? {
 			TransportRace::Quic(quic) => Ok(Dialed::new(connect_session(moq, quic).await?, transport)),
 			TransportRace::WebSocket(session) => {
-				let session = connect_session(&self.moq, crate::transport::Session::new(session)).await?;
+				let session = connect_session(
+					&self.moq,
+					crate::transport::Session::new(session, moq_net::transport::Binding::Uri),
+				)
+				.await?;
 				Ok(Dialed::new(session, crate::Transport::WebSocket))
 			}
 		}
@@ -1079,7 +1107,7 @@ mod tests {
 		"#;
 
 		let config: crate::connect::Config = toml::from_str(toml).unwrap();
-		assert_eq!(config.race, crate::connect::DEFAULT_RACE);
+		assert_eq!(config.resolve().race, crate::connect::DEFAULT_RACE);
 		assert!(
 			config.deprecated().to_string().contains("failover_delay -> race"),
 			"{}",
@@ -1100,18 +1128,18 @@ mod tests {
 		"#;
 
 		let config: crate::connect::Config = toml::from_str(toml).unwrap();
-		assert_eq!(config.resolution_delay, std::time::Duration::from_millis(10));
+		assert_eq!(config.resolution_delay, Some(std::time::Duration::from_millis(10)));
 
 		// Simulate: TOML loaded, then CLI args re-applied (no --connect-resolution-delay flag).
 		let mut cli = Cli { config };
 		cli.update_from(&[]);
-		assert_eq!(cli.config.resolution_delay, std::time::Duration::from_millis(10));
+		assert_eq!(cli.config.resolution_delay, Some(std::time::Duration::from_millis(10)));
 	}
 
 	#[test]
 	fn test_cli_resolution_delay() {
 		let config = Cli::config_from(["test", "--connect-resolution-delay", "0s"]);
-		assert_eq!(config.resolution_delay, std::time::Duration::ZERO);
+		assert_eq!(config.resolution_delay, None);
 		assert_eq!(config.resolve().resolution_delay, std::time::Duration::ZERO);
 	}
 
@@ -1398,7 +1426,7 @@ mod tests {
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
 		// No head start, so the fallback dials while QUIC waits on the 403.
-		config.websocket.delay = std::time::Duration::ZERO;
+		config.websocket.delay = Some(std::time::Duration::ZERO);
 		let client = config.init(Default::default()).unwrap();
 
 		// The same race `connect_inner` runs, except the fallback dials its own port,
@@ -1412,7 +1440,7 @@ mod tests {
 			forbid.await.unwrap().expect("fallback listener failed");
 			noq.connect(&tls, quic_addr, &versions)
 				.await
-				.map(crate::transport::Session::new)
+				.map(|session| crate::transport::Session::new(session, moq_net::transport::Binding::Uri))
 				.map_err(Error::from)
 		});
 
@@ -1475,7 +1503,7 @@ mod tests {
 		let mut client_config = crate::connect::Config::default();
 		client_config.tls.insecure = Some(true);
 		// Dial both arms immediately; the fallback handshake is gated by QUIC.
-		client_config.websocket.delay = std::time::Duration::ZERO;
+		client_config.websocket.delay = Some(std::time::Duration::ZERO);
 
 		let client = client_config.init(Default::default()).expect("failed to init client");
 		let quic_addr: crate::connect::Addr = Url::parse(&format!("https://localhost:{quic_port}")).unwrap().into();
@@ -1505,7 +1533,10 @@ mod tests {
 			let noq = dialer.noq.as_ref().expect("QUIC backend");
 			let session = noq.connect(&dialer.tls, quic_addr, &dialer.versions).await?;
 			connected.send(()).expect("fallback listener alive");
-			Ok::<_, crate::Error>(crate::transport::Session::new(session))
+			Ok::<_, crate::Error>(crate::transport::Session::new(
+				session,
+				moq_net::transport::Binding::Uri,
+			))
 		});
 		let cc = client
 			.race_moq_connect(&client.moq, ws_addr, quic)
@@ -1684,7 +1715,7 @@ mod tests {
 	#[test]
 	fn race_defaults_to_the_rfc_8305_stagger() {
 		let config = crate::connect::Config::default();
-		assert_eq!(config.race, std::time::Duration::from_millis(250));
+		assert_eq!(config.race, Some(std::time::Duration::from_millis(250)));
 		assert_eq!(config.resolve().race, std::time::Duration::from_millis(250));
 	}
 
@@ -1717,10 +1748,10 @@ mod tests {
 
 		let timeout = crate::connect::DEFAULT_TIMEOUT;
 		let mut config = crate::connect::Config {
-			timeout,
+			timeout: Some(timeout),
 			..Default::default()
 		};
-		config.websocket.delay = std::time::Duration::ZERO;
+		config.websocket.delay = Some(std::time::Duration::ZERO);
 		let client = config.init(Default::default()).unwrap();
 
 		// Nothing is listening on UDP, so the QUIC arm fails and leaves the WebSocket

@@ -33,7 +33,7 @@ impl From<auth::Error> for StatusError {
 pub struct Connection {
 	/// A numeric identifier for logging.
 	id: u64,
-	/// The raw QUIC/WebTransport request to accept or reject.
+	/// The transport request to accept or reject.
 	request: Request,
 	/// The cluster state used to resolve origins.
 	cluster: cluster::Cluster,

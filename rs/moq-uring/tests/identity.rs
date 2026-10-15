@@ -2,8 +2,7 @@
 //! endpoint runs where its socket was adopted, whichever handle is in scope,
 //! and a socket whose worker is gone refuses to start anything.
 //!
-//! Kernel-gated: skips loudly below the Linux 6.12 floor (GitHub-hosted CI),
-//! and runs everywhere else.
+//! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
 
 #![cfg(all(target_os = "linux", feature = "noq"))]
 
@@ -19,7 +18,7 @@ use moq_uring::{Config, Error, Worker, quic, udp};
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
 		Ok(worker) => Some(worker),
-		Err(Error::Unsupported(reason)) => {
+		Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
 			eprintln!("skipping io_uring identity test: {reason}");
 			None
 		}

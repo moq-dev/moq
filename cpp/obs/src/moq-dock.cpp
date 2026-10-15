@@ -1114,6 +1114,11 @@ void MoQDock::StartStream()
 		return;
 	}
 
+	if (auto *moq = static_cast<MoQOutput *>(obs_obj_get_data(output))) {
+		const auto epoch = moq->GetEpoch();
+		if (!epoch.empty())
+			publishSummary += QStringLiteral("\nEpoch ") + QString::fromStdString(epoch);
+	}
 	pollTimer->start();
 
 	SetRunning(true);

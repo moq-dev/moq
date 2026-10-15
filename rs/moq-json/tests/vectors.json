@@ -97,5 +97,33 @@
 		"new": { "a": [null, { "x": null }] },
 		"forced": false,
 		"patch": { "a": [null, { "x": null }] }
+	},
+	{
+		"name": "removed_prototype_named_key",
+		"old": { "__proto__": 0 },
+		"new": {},
+		"forced": false,
+		"patch": { "__proto__": null }
+	},
+	{
+		"name": "added_prototype_named_key",
+		"old": {},
+		"new": { "__proto__": { "x": 1 } },
+		"forced": false,
+		"patch": { "__proto__": { "x": 1 } }
+	},
+	{
+		"name": "nested_prototype_named_key",
+		"old": { "o": {} },
+		"new": { "o": { "__proto__": 1 } },
+		"forced": false,
+		"patch": { "o": { "__proto__": 1 } }
+	},
+	{
+		"name": "prototype_named_key_is_not_inherited_equality",
+		"old": { "__proto__": {} },
+		"new": { "a": {} },
+		"forced": false,
+		"patch": { "__proto__": null, "a": {} }
 	}
 ]

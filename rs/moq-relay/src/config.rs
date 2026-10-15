@@ -920,7 +920,7 @@ timeout = "2m"
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = Config::parse_and_merge(args).expect("config load");
 
-		assert_eq!(config.connect.timeout, std::time::Duration::from_secs(120));
+		assert_eq!(config.connect.timeout, Some(std::time::Duration::from_secs(120)));
 	}
 
 	#[test]

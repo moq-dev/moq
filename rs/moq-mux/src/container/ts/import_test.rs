@@ -474,7 +474,7 @@ async fn import_export_import_roundtrip() {
 
 	// Re-export to TS. `import` and `catalog` stay alive so the exporter can
 	// subscribe to the finished, retained tracks.
-	let mut exporter = crate::container::ts::Export::new(crate::source::announced(&consumer).await)
+	let mut exporter = crate::container::ts::export_test::open_export(crate::source::announced(&consumer).await)
 		.await
 		.unwrap()
 		.with_delay(RECORDING_MAX_AGE)

@@ -4162,7 +4162,7 @@ pub(super) mod test {
 		import.decode(&bytes).unwrap();
 		import.finish().unwrap();
 
-		let exporter = crate::container::ts::Export::with_ts(
+		let exporter = crate::container::ts::export_test::open_ts(
 			crate::source::announced(&consumer).await,
 			crate::catalog::CatalogFormat::Hang,
 		)
@@ -6099,12 +6099,14 @@ pub(super) mod test {
 			crate::catalog::hang::Container::Legacy(crate::container::Kind::Audio),
 		);
 		let mut frames = Vec::new();
-		while let Ok(Ok(Some(frame))) =
-			tokio::time::timeout(std::time::Duration::from_millis(50), reader.read_frame()).await
-		{
-			frames.push(frame);
+		let mut breaks = 0;
+		while let Ok(Ok(Some(read))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
+			match read {
+				crate::container::Read::Frame { frame, .. } => frames.push(frame),
+				crate::container::Read::Gap { .. } | crate::container::Read::End { .. } => breaks += 1,
+			}
 		}
-		(frames, reader.discontinuity())
+		(frames, breaks)
 	}
 
 	/// Both [`two_stream_import`] renditions' frames and break counts, in catalog order.
@@ -7262,7 +7264,7 @@ pub(super) mod test {
 			"the first group ends at the break, one frame after its last picture"
 		);
 
-		let mut exporter = super::super::Export::new(crate::source::announced(&consumer).await)
+		let mut exporter = crate::container::ts::export_test::open_export(crate::source::announced(&consumer).await)
 			.await
 			.unwrap()
 			.with_delay(Duration::from_secs(30))
@@ -7879,7 +7881,7 @@ pub(super) mod test {
 		// and the boundary with them. The paused clock runs out the delay and every gap in
 		// the media without a real wait.
 		let delay = std::time::Duration::from_secs(3600);
-		let mut exporter = crate::container::ts::Export::new(crate::source::announced(&consumer).await)
+		let mut exporter = crate::container::ts::export_test::open_export(crate::source::announced(&consumer).await)
 			.await
 			.unwrap()
 			.with_delay(delay)

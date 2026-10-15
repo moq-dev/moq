@@ -2378,7 +2378,8 @@ pub struct Driver {
 	// Shared by this origin's lifecycle tasks; advanced only when polled.
 	timers: Clock,
 	// The cache pool this origin's groups charge into, swept on a wall-clock
-	// cadence so its idle window binds a track whose publisher stopped writing.
+	// cadence so its idle window binds a track whose publisher stopped writing, and
+	// collected at its reads' wall-clock deadlines.
 	pool: cache::Pool,
 }
 
@@ -2404,7 +2405,7 @@ impl Driver {
 		waiter.batch(|| {
 			self.timers.advance(now);
 			let result = self.state.poll(waiter);
-			let gc = self.pool.gc(now);
+			let gc = self.pool.gc(now, waiter);
 			if result.is_ready() {
 				return Err(Error::Closed);
 			}

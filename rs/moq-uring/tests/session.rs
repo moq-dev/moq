@@ -21,7 +21,7 @@ use moq_uring::{Config, Error, Worker, quic, udp};
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
 		Ok(worker) => Some(worker),
-		Err(Error::Unsupported(reason)) => {
+		Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
 			eprintln!("skipping io_uring session test: {reason}");
 			None
 		}
@@ -96,7 +96,7 @@ fn lite_session_over_the_worker() {
 			.with_publisher(&pub_origin)
 			.accept_lite(
 				std::time::Instant::now(),
-				moq_uring::transport::Session::new(quic::web::Session::raw(conn)),
+				moq_uring::transport::Session::new(quic::web::Session::raw(conn), moq_net::transport::Binding::InBand),
 			)
 			.await
 			.expect("accept_lite");
@@ -119,7 +119,10 @@ fn lite_session_over_the_worker() {
 				.with_subscriber(sub.clone())
 				.connect_lite(
 					std::time::Instant::now(),
-					moq_uring::transport::Session::new(quic::web::Session::raw(conn)),
+					moq_uring::transport::Session::new(
+						quic::web::Session::raw(conn),
+						moq_net::transport::Binding::InBand,
+					),
 				)
 				.await
 				.expect("connect_lite");
@@ -228,7 +231,10 @@ fn two_lite_sessions_share_the_server_socket() {
 					.with_publisher(&pub_origin)
 					.accept_lite(
 						std::time::Instant::now(),
-						moq_uring::transport::Session::new(quic::web::Session::raw(conn)),
+						moq_uring::transport::Session::new(
+							quic::web::Session::raw(conn),
+							moq_net::transport::Binding::InBand,
+						),
 					)
 					.await
 					.expect("accept_lite");
@@ -254,7 +260,10 @@ fn two_lite_sessions_share_the_server_socket() {
 					.with_subscriber(sub.clone())
 					.connect_lite(
 						std::time::Instant::now(),
-						moq_uring::transport::Session::new(quic::web::Session::raw(conn)),
+						moq_uring::transport::Session::new(
+							quic::web::Session::raw(conn),
+							moq_net::transport::Binding::InBand,
+						),
 					)
 					.await
 					.expect("connect_lite");

@@ -175,6 +175,29 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
 
+    def test_ci_check_leaves_default_rust_lints_to_test(self):
+        for tool in ("bun", "python3", "cargo", "wasm-bindgen", "jq", "shellcheck",
+                     "shfmt", "taplo", "nixfmt", "actionlint", "quest", "nix"):
+            path = self.bin / tool
+            path.write_text("#!/bin/sh\nexit 0\n")
+            path.chmod(0o755)
+        just = self.bin / "just"
+        just.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" >>"$CALLS"\n')
+        just.chmod(0o755)
+        self.env.update(MOQ_DEV_SHELL="1", CALLS=str(self.root / "calls"))
+        self.change("rs/moq-clock/src/lib.rs")
+        self.env["PATH"] += f":{os.environ['PATH']}"
+        for script in ("markdown.sh", "shell.sh"):
+            path = self.repo / "sh" / script
+            path.write_text("#!/bin/sh\nexit 0\n")
+            path.chmod(0o755)
+        result = subprocess.run(["bash", "sh/dispatch.sh", "ci-check", "origin/main"],
+                                cwd=self.repo, env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = (self.root / "calls").read_text().splitlines()
+        self.assertTrue(any(call.startswith("rs lint-changed ") for call in calls), calls)
+        self.assertFalse(any(call.startswith("rs check-changed ") for call in calls), calls)
+
 
 def benchmark():
     # Sweep path count and both job selections. No timing threshold: hosted setup

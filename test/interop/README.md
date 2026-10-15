@@ -42,7 +42,9 @@ released relays and clients, skip it.
 
 Whenever the browser subscriber is in the run, the matrix ends with a close-code
 case: Chromium dials the relay with a token its public rules refuse, and
-`WebTransport.closed` must carry the relay's code and reason. Chromium treats a
+`WebTransport.closed` must carry the relay's code and reason. A WebSocket-only
+`Connection` must publish the same Unauthorized session error and stop its
+unlimited reconnect loop. Chromium treats a
 server's HTTP/3 control stream ending as fatal, so a server that ends it under
 the close capsule loses both; no Rust peer is that strict.
 
@@ -186,11 +188,16 @@ offers only the cell's version, and JavaScript checks the negotiated version.
 The relay is anonymous here, since released binaries may predate AUTH; the
 default matrix covers tokens and grants.
 Current Rust media publishers feed released Rust and JS readers, then released
-publishers feed current readers, through both relay sources. Rust exports must
+publishers feed current readers, through both relay sources. Each reader is its
+own lane, `media-rust` and `media-js-native-node`. Rust exports must
 decode to a video frame through ffmpeg. The JS reader is
 `compat/client.ts`, not the interop subscriber, whose API follows the
 checkout. One copy runs against each package set, using only API both have,
 and it reconstructs the catalog and decodes the container.
+Before cross-version sessions, current and released media controls each run
+with their own relay, publisher, and Rust/JS readers on moq-lite-06. These
+controls always run, including when a planned break skips cross-version lanes,
+so a broken reader cannot make compatibility failures ambiguous.
 
 Each `moq-net` library states whether a draft has FETCH (lite-05 onward
 today). A draft without it in both is logged and its FETCH lanes skipped; one

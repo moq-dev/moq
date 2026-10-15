@@ -174,9 +174,9 @@ export function reachesLive(observation: {
 
 // ── the refused session ─────────────────────────────────────────────────────
 
-/** How a refused session ended, as `WebTransport.closed` reported it to the page. */
+/** How a refused session ended, from `WebTransport.closed` or `Connection.error`. */
 export type CloseState =
-	/** `closed` resolved: the close capsule arrived. */
+	/** The peer's session close code and description. */
 	| { closeCode: number; reason: string }
 	/** `closed` rejected, or the relay admitted the session: the close never said why. */
 	| { error: string };

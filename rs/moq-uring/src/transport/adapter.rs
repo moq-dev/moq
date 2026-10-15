@@ -46,11 +46,11 @@ impl<S: wt::Stats> moq::Stats for Stats<S> {
 }
 /// A WebTransport session adapted to moq-net.
 #[derive(Clone)]
-pub struct Session<S>(S);
+pub struct Session<S>(S, moq::Binding);
 impl<S> Session<S> {
 	/// Wrap a backend poll session.
-	pub fn new(session: S) -> Self {
-		Self(session)
+	pub fn new(session: S, binding: moq::Binding) -> Self {
+		Self(session, binding)
 	}
 }
 impl<S: backend::Session<SendStream: 'static, RecvStream: 'static> + Clone + 'static> poll::Session for Session<S> {
@@ -85,6 +85,9 @@ impl<S: backend::Session<SendStream: 'static, RecvStream: 'static> + Clone + 'st
 	}
 	fn max_datagram_size(&self) -> usize {
 		backend::Session::max_datagram_size(&self.0)
+	}
+	fn binding(&self) -> moq::Binding {
+		self.1
 	}
 	fn protocol(&self) -> Option<&str> {
 		backend::Session::protocol(&self.0)
@@ -269,7 +272,7 @@ mod tests {
 	fn forwards_thread_local_streams_and_keeps_error_codes() {
 		use moq_net::transport::Stats as _;
 		let state = Rc::new(Cell::new(0));
-		let mut session = Session::new(Backend(state.clone()));
+		let mut session = Session::new(Backend(state.clone()), moq::Binding::InBand);
 		let mut cx = Context::from_waker(std::task::Waker::noop());
 		assert_eq!(poll::Session::protocol(&session), Some("moq-lite-06"));
 		assert_eq!(

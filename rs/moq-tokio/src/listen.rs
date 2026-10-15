@@ -159,16 +159,20 @@ pub struct Config {
 	/// connection open indefinitely, since keep-alives count as activity. The
 	/// connection is closed with a timeout code once this passes. See
 	/// [`resolved_timeout`](Self::resolved_timeout) for the value in effect.
+	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(with = "crate::cli::duration::serde_duration")]
-	pub timeout: std::time::Duration,
+	#[serde(
+		default,
+		with = "crate::cli::duration::serde_duration::option",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub timeout: Option<std::time::Duration>,
 
+	/// Maximum time for an accepted connection to finish its handshake. Defaults to 10s; 0s waits forever.
 	#[usage(
 		name = "listen-timeout",
 		long = "listen-timeout",
 		env = "MOQ_LISTEN_TIMEOUT",
-		default_value_t = crate::cli::Duration::fallback(DEFAULT_TIMEOUT),
-		default = "10s",
 		setting = "listen.timeout"
 	)]
 	#[serde(default, rename = "__cli_timeout", skip_serializing_if = "Option::is_none")]
@@ -274,7 +278,7 @@ impl Default for Config {
 			unix: Default::default(),
 			version: Vec::new(),
 			extensions: Default::default(),
-			timeout: DEFAULT_TIMEOUT,
+			timeout: Some(DEFAULT_TIMEOUT),
 			timeout_arg: None,
 			tls: Default::default(),
 			preferred_v4: None,
@@ -515,7 +519,11 @@ impl Config {
 	/// How long an accepted connection has to finish its handshake, or `None` to wait
 	/// forever: for zero, and for a timeout too long for the clock to reach.
 	pub fn resolved_timeout(&self) -> Option<std::time::Duration> {
-		let timeout = crate::cli::Duration::resolve(self.timeout_arg, self.timeout);
+		let timeout = self
+			.timeout_arg
+			.map(Into::into)
+			.or(self.timeout)
+			.unwrap_or(DEFAULT_TIMEOUT);
 		(!timeout.is_zero() && std::time::Instant::now().checked_add(timeout).is_some()).then_some(timeout)
 	}
 
@@ -846,7 +854,7 @@ load_balancer = { id = "ab", nonce = 8 }
 
 		// Past the clock's range is forever, not a panic on the first accept.
 		let config = Config {
-			timeout: std::time::Duration::MAX,
+			timeout: Some(std::time::Duration::MAX),
 			..Default::default()
 		};
 		assert_eq!(config.resolved_timeout(), None);
@@ -862,4 +870,17 @@ load_balancer = { id = "ab", nonce = 8 }
 		);
 		assert_eq!(config.version, vec!["moq-lite-03".parse::<moq_net::Version>().unwrap()]);
 	}
+}
+
+#[cfg(test)]
+mod duration_tests {
+	use super::*;
+	crate::cli::duration::test_config_duration!(
+		timeout_set_in_code_beats_parser_default,
+		Config,
+		timeout,
+		"--listen-timeout",
+		|c: &Config| c.resolved_timeout(),
+		|d: std::time::Duration| (!d.is_zero()).then_some(d)
+	);
 }

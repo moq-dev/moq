@@ -172,7 +172,9 @@ bool MoQOutput::Start()
 		LOG_ERROR("Failed to create broadcast: %s", next_broadcast.error().to_string().c_str());
 		return false;
 	}
-	if (auto announced = (*next_broadcast)->announce(moq::Route{}); !announced) {
+	moq::Route route;
+	route.epoch = moq::mint_epoch();
+	if (auto announced = (*next_broadcast)->announce(route); !announced) {
 		LOG_ERROR("Failed to announce broadcast: %s", announced.error().to_string().c_str());
 		return false;
 	}
@@ -212,6 +214,7 @@ bool MoQOutput::Start()
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		url = server;
+		epoch = *route.epoch;
 	}
 	{
 		std::lock_guard<std::mutex> lock(media_mutex);
@@ -366,6 +369,7 @@ void MoQOutput::Reset()
 		connected = false;
 		live = false;
 		url.clear();
+		epoch.clear();
 		last_failure_code = MoQError::None;
 		last_failure_reason.clear();
 	}
@@ -391,9 +395,9 @@ void MoQOutput::Reset()
 	broadcast.reset();
 	origin.reset();
 
-	// Drain once the tracks are finished, so the session delivers their tails instead
-	// of cutting them off. The future holds the session until the drain settles, and
-	// dropping it would abort the drain, so keep it past this attempt.
+	// Drain once tracks finish. Default lite-06 waits for transport ACKs, not
+	// confirmation that the peer received the tail. Keep the future past this
+	// attempt because dropping it aborts the drain.
 	if (retired) {
 		draining.erase(std::remove_if(draining.begin(), draining.end(),
 					      [](const moq::Future<void> &drain) {
@@ -403,6 +407,12 @@ void MoQOutput::Reset()
 			       draining.end());
 		draining.push_back(retired->shutdown());
 	}
+}
+
+std::string MoQOutput::GetEpoch()
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	return epoch;
 }
 
 bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)

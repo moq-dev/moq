@@ -343,8 +343,8 @@ async fn a_reconnecting_client_rides_out_a_restart_inner() {
 	broadcast.announce(Default::default()).expect("announce");
 	let mut publisher = moq_tokio::connect::Config::default();
 	// Redials paced well inside the drain, under a window that ends long before it.
-	publisher.backoff.initial = Duration::from_millis(200);
-	publisher.backoff.max = Duration::from_millis(200);
+	publisher.backoff.initial = Some(Duration::from_millis(200));
+	publisher.backoff.max = Some(Duration::from_millis(200));
 	publisher.backoff.timeout = Some(DRAIN_TIMEOUT / 3);
 	let publisher = publisher
 		.init(Default::default())

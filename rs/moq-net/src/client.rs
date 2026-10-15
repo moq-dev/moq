@@ -632,6 +632,9 @@ mod tests {
 			1200
 		}
 
+		fn binding(&self) -> crate::transport::Binding {
+			crate::transport::Binding::InBand
+		}
 		fn protocol(&self) -> Option<&str> {
 			self.state.protocol
 		}
@@ -1015,6 +1018,9 @@ mod tests {
 			self.inner.max_datagram_size()
 		}
 
+		fn binding(&self) -> crate::transport::Binding {
+			crate::transport::Binding::InBand
+		}
 		fn protocol(&self) -> Option<&str> {
 			self.inner.protocol()
 		}

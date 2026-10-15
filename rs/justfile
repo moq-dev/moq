@@ -30,22 +30,20 @@ default:
 [positional-arguments]
 check *args:
     cargo clippy --locked --all-targets "$@" -- -D warnings
-    just rs _lint "$@"
+    just rs lint "$@"
 
-# `check` with clippy replaced by the `test` build, whose clippy-driver reports
-# the same findings. `build.warnings` turns them into errors without entering
-# cargo's fingerprint, so a later plain `test` reuses the artifacts. A
-# selection can hold nothing testable.
+# `check` with clippy enforced by the `test` build. A selection can hold
+# nothing testable.
 
 # Compile, lint, and test in one build, plus everything else `check` verifies.
 [positional-arguments]
 check-test *args:
-    CARGO_BUILD_WARNINGS=deny RUSTC_WORKSPACE_WRAPPER={{ require("clippy-driver") }} bash sh/rs/nextest.sh cargo nextest run --locked --all-targets --no-tests=pass "$@"
-    just rs _lint "$@"
+    just rs test --no-tests=pass "$@"
+    just rs lint "$@"
 
 # Everything `check` verifies besides clippy.
 [positional-arguments]
-_lint *args:
+lint *args:
     python3 sh/rs/stats-docs.py
     cargo fmt --all --check
     # quinn-udp keeps quinn's formatting; cargo fmt skips it (see moq-sock's lib.rs).
@@ -67,6 +65,10 @@ fix *args:
 check-changed $LIST:
     sh/rs/select.sh check "$LIST"
 
+# Like `lint`, with the feature and target checks for the selected crates.
+lint-changed $LIST:
+    sh/rs/select.sh lint "$LIST"
+
 # Like `check-test`, but only the crates in a changed-file list plus their dependents.
 check-test-changed $LIST:
     sh/rs/select.sh check-test "$LIST"
@@ -79,9 +81,10 @@ fix-changed $LIST:
 test-changed $LIST:
     sh/rs/select.sh test "$LIST"
 
-# Compile moq-tokio by itself at the feature extremes and with each crypto provider.
-tokio-features:
-    sh/rs/tokio-features.sh
+# Compile moq-tokio at its feature extremes; --all also isolates crypto and transport modes.
+[positional-arguments]
+tokio-features *args:
+    sh/rs/tokio-features.sh "$@"
 
 # Runs the `#[cfg(windows)]` code past the compiler, which the Linux gate
 # skips; platform.yml runs it on a Windows runner, scoped like `check-changed`
@@ -96,14 +99,24 @@ windows $BASE="":
 windows-test:
     just rs test -p moq-auth -p hang -p moq-tokio -p moq-sock
 
+# Run io_uring tests when the branch affects the relay or its dependencies.
+[positional-arguments]
+uring-changed base="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    changed=$(mktemp)
+    trap 'rm -f "$changed"' EXIT
+    bash sh/changed.sh "$1" > "$changed"
+    bash sh/rs/select.sh uring "$changed"
+
 # Compile and test the io_uring relay path, which is off the default feature set.
-# Linux-only, and the tests below the 6.12 kernel floor skip themselves.
+# Linux-only; MOQ_STRICT requires a supported kernel instead of skipping tests.
 [positional-arguments]
 uring *args:
     just rs uring-check "$@"
-    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets "$@"
+    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --tests "$@"
     cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring,moq-relay/qlog --all-targets "$@" -- -D warnings
-    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring --features qlog --all-targets "$@"
+    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring --features qlog --tests "$@"
 
 # Compile the io_uring relay path, off the default feature set.
 [positional-arguments]
@@ -181,6 +194,10 @@ android *args:
 wasm *args:
     cargo clippy --locked -p moq-wasm -p moq-mux -p moq-ffi -p moq-clock --target wasm32-unknown-unknown --lib "$@" -- -D warnings
 
+# Run the browser clock backend on the Playwright Chromium installed by wasm.yml.
+wasm-test:
+    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="bun {{ justfile_directory() }}/test/wasm/rust.ts" cargo test --locked -p moq-clock --lib --target wasm32-unknown-unknown
+
 # Auto-fix the browser/WASM bindings.
 [positional-arguments]
 wasm-fix *args:
@@ -209,11 +226,15 @@ c-tests:
 # Compile the workspace at the feature extremes.
 features:
     just rs net-features
+    just rs tokio-features --all
+    just rs media-features --all
     cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
     cargo hack check --locked -p moq-tokio --each-feature --exclude-features _transport --features aws-lc-rs
     cargo check --locked -p moq-relay --no-default-features
     just rs relay-minimal
     cargo check --locked -p moq-cli --no-default-features
+    just rs test -p moq-cli --no-default-features --features capture,websocket -E 'test(capture_window)'
+    just rs test -p moq-cli --no-default-features --features capture,pipewire,websocket -E 'test(capture_window)'
     cargo check --locked -p moq-bench --no-default-features
     cargo check --locked -p moq-boy --no-default-features
     cargo check --locked -p moq-hls -p moq-rtmp -p moq-rtc --no-default-features --all-targets
@@ -225,21 +246,23 @@ features:
 net-features:
     bash sh/rs/net-features.sh
 
-# Compile the media crates at supported feature boundaries and prove expensive
+# Compile media boundaries (--all isolates every mode) and prove expensive
 # native/render dependencies are absent when their features are excluded.
-media-features:
-    sh/rs/media-features.sh
+[positional-arguments]
+media-features *args:
+    sh/rs/media-features.sh "$@"
 
 # nextest kills a wedged test (`.config/nextest.toml` sets the timeout), but
 # skips doctests; `just rs doctest` covers those. clippy-driver as the workspace
-# wrapper reports lint findings from the same compile, as warnings: `check-test`
-# is the gate. It is part of cargo's fingerprint, and RUSTFLAGS would split the
-# artifact cache, which is why neither is set any other way.
+# wrapper enforces lint findings from the same compile. `--tests` builds library,
+# binary, and integration-test targets, including binary-only crates; benches and
+# examples compile and lint in Nightly's `features`. `build.warnings` denies
+# warnings without changing cargo's artifact fingerprint, unlike RUSTFLAGS.
 
-# Run the test suite, reporting clippy findings from the same compile.
+# Run library, binary, and integration tests, enforcing clippy from the same compile.
 [positional-arguments]
 test *args:
-    RUSTC_WORKSPACE_WRAPPER="$(command -v clippy-driver || true)" bash sh/rs/nextest.sh cargo nextest run --locked --all-targets "$@"
+    CARGO_BUILD_WARNINGS=deny RUSTC_WORKSPACE_WRAPPER={{ quote(require("clippy-driver")) }} bash sh/rs/nextest.sh cargo nextest run --locked --tests "$@"
 
 # Exercise the ignored hardware tests for every GPU vendor on this Linux host.
 gpu:

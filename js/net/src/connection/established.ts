@@ -23,7 +23,8 @@ export interface Established {
 
 	/**
 	 * Estimates measured by the peer, updated as PROBE messages arrive. Stays empty on
-	 * versions without PROBE. See {@link Stats} for what the local transport counts.
+	 * versions without PROBE. Observe it to request updates; `peek()` alone is passive.
+	 * See {@link Stats} for what the local transport counts.
 	 */
 	readonly probe: Getter<Probe>;
 
@@ -52,7 +53,12 @@ export interface Established {
 	 */
 	stats(): Promise<Stats>;
 
-	/** Withdraw announcements and wait up to one second for delivery, then close the session. */
+	/**
+	 * Withdraw announcements and drain for up to one second, then close the session.
+	 *
+	 * Explicit lite-07-wip waits for the subscriber to receive finished tails; older
+	 * Lite versions wait only for transport ACKs. IETF media streams are not drained.
+	 */
 	close(): Promise<void>;
 
 	/** End the session immediately without waiting for delivery. */

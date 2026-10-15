@@ -451,6 +451,9 @@ const uploadGraph = graph(viz, "Upload estimate", { color: "#34d399", format: fo
 const rttGraph = graph(viz, "Round trip", { color: "#38bdf8", format: (v) => `${Math.round(v)} ms` });
 $("publish-graphs").append(captureGraph.el, uploadGraph.el, rttGraph.el);
 
+// The RTT graph samples with peek(), which requests no estimates, so subscribe to keep them coming.
+viz.cleanup(publish.connection.probe.subscribe(() => {}));
+
 // Count captured frames; the publish API has no encoded-frame counter, so this
 // is the capture rate feeding the encoder (a good proxy for output fps). Read off our own stream:
 // a signal coalesces a burst into one notification, which undercounts the rate.

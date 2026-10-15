@@ -12,6 +12,11 @@ OBS Studio install.
 - **Subscribe**: add a "MoQ Source", enter the relay URL and broadcast path, and the stream appears in the scene.
 - **Dock**: a **MoQ** dock with Go Live, encoding that uses the OBS Output settings or custom settings for this stream only, and live stats (RTT, bandwidth, loss).
 
+Each Start Streaming publishes a fresh epoch, shown in the dock's Stats tab.
+The client's automatic reconnects keep the same epoch. A stop/start, or an OBS
+auto-reconnect after the client gives up, republishes the broadcast under a new
+epoch, which peers using an epoch-capable protocol see as a new publisher run.
+
 MoQ Source follows catalog changes while keeping the current audio and video playing until a replacement produces decoded output. A failed replacement leaves the current rendition playing; removing a media kind from the catalog clears it.
 
 Enter a relay URL explicitly. On the shared anonymous relay, use a unique path
@@ -67,7 +72,9 @@ stream limit, and the WebSocket fallback race. A rejected value stops the
 stream with the reason in the log rather than silently using a default.
 
 The plugin is C++ over the [generated C++ bindings](/lib/cpp/) and ships with
-every moq-cpp release.
+every moq-cpp release. Stopping finishes the tracks and drains for up to one
+second. The default lite-06 waits for transport ACKs, which do not confirm that
+the peer received the tail.
 
 If the relay closes the session for too many requests, reduce the broadcasts
 or subscribed tracks, or have the operator adjust its
