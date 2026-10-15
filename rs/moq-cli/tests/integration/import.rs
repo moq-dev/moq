@@ -4,6 +4,7 @@
 use std::process::Stdio;
 use std::time::Duration;
 
+use hang::moq_net;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Child;
 
@@ -27,11 +28,16 @@ async fn running<T>(child: &mut Child, what: &str, step: impl Future<Output = T>
 
 /// Start `moq import ts`, publishing `demo` from stdin to the relay at `url`.
 fn import(url: &str, fingerprint: &str) -> Child {
+	import_as(url, fingerprint, &[], "demo")
+}
+
+/// Start `moq <global> import ts`, publishing `name` from stdin to the relay at `url`.
+fn import_as(url: &str, fingerprint: &str, global: &[&str], name: &str) -> Child {
 	let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"));
 	// A `MOQ_*` variable in the developer's shell must not reconfigure the child.
-	for (name, _) in std::env::vars_os() {
-		if name.to_string_lossy().starts_with("MOQ_") {
-			command.env_remove(name);
+	for (var, _) in std::env::vars_os() {
+		if var.to_string_lossy().starts_with("MOQ_") {
+			command.env_remove(var);
 		}
 	}
 	command
@@ -41,12 +47,10 @@ fn import(url: &str, fingerprint: &str) -> Child {
 			"--connect-tls-fingerprint",
 			fingerprint,
 			"--broadcast",
-			"demo",
-			"import",
-			"--max-age",
-			MAX_AGE,
-			"ts",
+			name,
 		])
+		.args(global)
+		.args(["import", "--max-age", MAX_AGE, "ts"])
 		.stdin(Stdio::piped())
 		.kill_on_drop(true)
 		.spawn()
@@ -120,6 +124,99 @@ async fn import_delivers_the_catalog_finish_at_eof() {
 			Err(err) => panic!("the catalog ends with {err} instead of finishing"),
 		}
 	}
+}
+
+/// Two importers sharing an epoch publish one timeline from wherever each joined the source: the
+/// root clock the epoch places, PTS zero one 33-bit wrap before its time, and the same timestamp
+/// on every frame both carry.
+#[tokio::test]
+async fn importers_sharing_an_epoch_publish_identical_timestamps() {
+	let _ = moq_tokio::crypto::install_default();
+	let fixture = moq_relay::test_relay().await.expect("test relay");
+	let origin = fixture.relay.cluster().origin.consume();
+	let ready = fixture.relay.ready();
+	tokio::spawn(fixture.relay.run());
+	ready.wait().await.expect("relay ready");
+
+	let epoch = moq_net::Epoch::mint();
+	let global = ["--epoch", epoch.as_str()];
+	// The second joins a third of the way in, at the next PAT and PMT.
+	let join = BBB.len() / 188 / 3 * 188;
+	let mut published = Vec::new();
+	for (name, input) in [("first", BBB), ("second", &BBB[join..])] {
+		let mut child = import_as(fixture.url.as_str(), &fixture.fingerprint, &global, name);
+		let mut stdin = child.stdin.take().expect("stdin");
+		stdin.write_all(input).await.expect("write stdin");
+		let broadcast = running(&mut child, "the broadcast", origin.routed_broadcast(name))
+			.await
+			.expect("announced broadcast resolves");
+		let mut catalogs = running(
+			&mut child,
+			"the catalog subscription",
+			hang::catalog::Catalog::<()>::subscribe(&broadcast),
+		)
+		.await
+		.expect("subscribe to the catalog");
+		let catalog = running(&mut child, "the first catalog", catalogs.next())
+			.await
+			.expect("catalog read")
+			.expect("a catalog");
+		let video = catalog
+			.video
+			.renditions
+			.keys()
+			.next()
+			.expect("a video rendition")
+			.clone();
+		let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(60));
+		let mut track = running(
+			&mut child,
+			"the video subscription",
+			broadcast.track(&video).expect("track").subscribe(subscription),
+		)
+		.await
+		.expect("subscribe to the video");
+		drop(stdin);
+
+		let mut frames = std::collections::HashSet::new();
+		while let Some(mut group) = tokio::time::timeout(TIMEOUT, track.recv_group())
+			.await
+			.expect("the video never ended")
+			.expect("video group")
+		{
+			while let Some(frame) = group.read_frame().await.expect("video frame") {
+				let frame = hang::container::Frame::decode(frame.payload).expect("a timestamped frame");
+				frames.insert((frame.timestamp.as_micros(), frame.payload));
+			}
+		}
+		let status = tokio::time::timeout(TIMEOUT, child.wait())
+			.await
+			.expect("moq never exited")
+			.expect("wait for moq");
+		assert!(status.success(), "{name} exited with {status}");
+		published.push((catalog.clock, frames));
+	}
+
+	let zero = epoch.time() - Duration::from_micros(95_443_717_689);
+	let micros = zero.duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as u64
+		- hang::catalog::MOQ_EPOCH_UNIX_MILLIS * 1_000;
+	let clock = hang::catalog::Clock::new(moq_net::Timestamp::from_micros(micros).unwrap()).unwrap();
+	let [(first_clock, first), (second_clock, second)] = &published[..] else {
+		unreachable!("two importers");
+	};
+	assert_eq!(*first_clock, Some(clock), "the epoch places the root clock");
+	assert_eq!(second_clock, first_clock);
+	assert!(
+		!second.is_empty() && second.len() < first.len(),
+		"{} of {}",
+		second.len(),
+		first.len()
+	);
+	let moved: Vec<_> = second.difference(first).map(|(micros, _)| *micros).collect();
+	assert!(
+		moved.is_empty(),
+		"frames the second published at other timestamps: {moved:?}"
+	);
 }
 
 /// About one second of CBR HEVC and Opus: shorter than the two-second mux-rate window, so

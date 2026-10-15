@@ -439,6 +439,12 @@ pub struct MoqSide {
 	/// restarted publisher replace the old broadcast instead of resuming into it.
 	/// Only `import fmp4`, `flv`, `hls`, and `ts` (one program, or `--passthrough`)
 	/// accept it, since the other publishers' tracks differ between instances.
+	///
+	/// The epoch's wall time also fixes the catalog clock, so publishers of one stream
+	/// agree on it and on every timestamp wherever each started: PTS zero is the epoch's
+	/// time, and for `ts` one 33-bit wrap (about 26.5 hours) before it. The wall mapping is
+	/// then off by the source clock's reading at the epoch's time, which for a TS program
+	/// clock is anywhere within half a wrap.
 	#[usage(long, env = "MOQ_EPOCH", help_heading = "MoQ")]
 	pub epoch: Option<hang::moq_net::Epoch>,
 

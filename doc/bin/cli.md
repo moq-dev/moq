@@ -83,6 +83,10 @@ to the wall time the first frame arrived. A timeline that rewinds, such as a
 restarted encoder or a looping file wrapping to the top, ends the import with
 an error; run it again to publish anew. A flagged MPEG-TS discontinuity that
 jumps forward continues the broadcast and is declared on the exported clock.
+MPEG-TS timestamps run on across their 33-bit wrap (every 26.5 hours), each
+taking the wrap that lands it nearest the clock, so media that gets more than
+13.25 hours ahead of it (a jump that far, or a long file read faster than real
+time) reads as a rewind.
 
 MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3, and passes SCTE-35
 and subtitle PIDs through as tracks. SCTE-35 cues wait for a media timestamp;
@@ -304,9 +308,16 @@ or a better one.
 
 On moq-lite 07, two processes that pass the same `--epoch` (a UUIDv7, such as
 `uuidgen -7` prints) are one publisher: relays fail over between them
-mid-group, so they must produce identical tracks with aligned groups, which no
-importer guarantees yet. Only `import fmp4`, `flv`, `hls`, and `ts` (one
-program, or `--passthrough`) accept it. The RTMP, SRT, and WHIP ingests and
+mid-group, so they must produce identical tracks with aligned groups. Each
+derives its catalog clock from the epoch's wall time, so fed one stream they
+publish the same clock and timestamps wherever each started, without reading
+anything from the other; group numbering is not aligned yet. PTS zero is the
+epoch's time, and for `ts` one 33-bit wrap before it. The wall mapping is
+therefore off by the source clock's reading at the epoch's time: for a TS
+program clock, anywhere within 13.25 hours. A host whose clock reads before the
+epoch's time cannot place an `fmp4`, `flv`, or `hls` import on it, and exits 1.
+Only `import fmp4`, `flv`, `hls`, and `ts` (one program, or `--passthrough`)
+accept it. The RTMP, SRT, and WHIP ingests and
 `import ts --program all` refuse it because they mint their own, and `import
 avc3`, `capture`, `rtc --connect`, `archive`, and `transcode` because their
 timestamps or bytes come from the instance rather than the input. Each that
