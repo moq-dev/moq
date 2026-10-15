@@ -1,6 +1,7 @@
 use gst::glib;
 use gst::prelude::*;
 
+mod epoch;
 mod imp;
 mod pad;
 mod request_pad;

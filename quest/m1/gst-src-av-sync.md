@@ -12,7 +12,7 @@ arrivals happen to match their timestamps. A video track joining at a
 keyframe and an audio track joining at its latest group start apart.
 
 Non-goals: aligning to wall time across hosts, which
-[#3021](/quest/m1/3021-moq-gst-anchor-generated-media-timelines-to-wall-clock.md)
+[#3021](https://github.com/moq-dev/moq/issues/3021)
 settles on the sink side; jitter buffering.
 
 ## Plan
@@ -57,4 +57,4 @@ tracks use different timescales.
 
 ## Related
 
-- [#3021](/quest/m1/3021-moq-gst-anchor-generated-media-timelines-to-wall-clock.md) - the wall epoch on the sink side
+- [#3021](https://github.com/moq-dev/moq/issues/3021) - the wall epoch on the sink side
