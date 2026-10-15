@@ -1878,11 +1878,13 @@ mod tests {
 	}
 
 	/// A millisecond track: the frames written here carry timestamps.
+	#[cfg(all(feature = "uds", unix))]
 	fn timed() -> moq_net::track::Info {
 		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 	}
 
 	/// The next route and whether it is active.
+	#[cfg(all(feature = "uds", unix))]
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
 			moq_net::announce::Event::Start(route)
