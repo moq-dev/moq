@@ -32,9 +32,10 @@ it is the relay's half of
   carrying the same bytes get two leases. Name the call while implementing.
 - The request is resolved against the origin with the path checked against
   that lease's grant, not through the session's scoped origin handle.
-- Docs: `doc/bin/relay/auth.md` states the order (session grant, then the
-  request's token, then `UNAUTHORIZED`) and that a request token covers only
-  its request.
+- Docs: `doc/bin/relay/auth.md` states the rule: a request carrying a token
+  is decided by its verified request grant alone, a request without one by
+  the session grant, and anything else is `UNAUTHORIZED`. It also says that a
+  request token covers only its request.
 - Tests: through the relay, the auth server never counts a request token as a
   session grant and sees its lease end with the request.
 
