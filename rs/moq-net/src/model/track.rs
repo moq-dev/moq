@@ -1702,6 +1702,12 @@ impl TrackState {
 		producer.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 
+	/// Abort shared track state without extending its publisher lifetime.
+	pub(crate) fn abort(producer: &kio::Producer<Self>, err: Error) -> Result<()> {
+		commit_abort(Self::modify(producer)?, err);
+		Ok(())
+	}
+
 	/// Insert a group fetched for a [`group::Request`], setting the track's [`Info`]
 	/// if it isn't accepted yet. The group's timescale comes from that info, so a
 	/// fetch can serve an as-yet-unaccepted track (e.g. a relay with no live
@@ -2252,8 +2258,7 @@ impl Producer {
 	/// [`finish`](Self::finish) is deliberately not terminal: it declares the final
 	/// sequence, and lower-numbered groups may still be written afterwards.
 	pub fn abort(self, err: Error) -> Result<()> {
-		commit_abort(self.modify()?, err);
-		Ok(())
+		TrackState::abort(&self.state, err)
 	}
 
 	/// Abort an unused track, returning the producer unchanged if consumers remain.
