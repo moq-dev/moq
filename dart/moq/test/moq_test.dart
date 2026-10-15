@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:moq/media.dart' as moq_media;
+import 'package:moq/flate.dart' as moq_flate;
 import 'package:moq/json.dart' as moq_json;
 import 'package:moq/moq.dart';
 import 'package:test/test.dart';
@@ -25,11 +26,58 @@ void main() {
     final broadcast = BroadcastProducer();
     final catalog = moq_media.CatalogProducer(broadcast: broadcast);
     catalog.setSection(name: 'app', json: '{"value":42}');
+    catalog.now();
     broadcast.close();
     expect(
       () => catalog.removeSection(name: 'app'),
       throwsA(isA<ClosedMoqException>()),
     );
+    expect(() => catalog.now(), throwsA(isA<ClosedMoqException>()));
+  });
+
+  for (final timestamp in <int?>[null, 123456]) {
+    for (final mode in ['snapshot', 'stream']) {
+      test('flate $mode preserves timestamp $timestamp', () async {
+        final broadcast = BroadcastProducer();
+        final info = timestamp == null ? null : TrackInfo(timescale: 1000000);
+        final track = broadcast.publishTrack(name: 'data', info: info);
+        final consumer = track.consume(subscription: null);
+        final payload = utf8.encode('payload');
+        if (mode == 'snapshot') {
+          final producer = moq_flate.SnapshotProducer(
+            broadcast: broadcast,
+            track: track,
+            config: moq_flate.Config(),
+          );
+          producer.update(payload: payload, timestampUs: timestamp);
+          producer.finish();
+        } else {
+          final producer = moq_flate.StreamProducer(
+            broadcast: broadcast,
+            track: track,
+            config: moq_flate.Config(),
+          );
+          producer.append(payload: payload, timestampUs: timestamp);
+          producer.finish();
+        }
+        final frame = await consumer.readFrame().timeout(timeout);
+        expect(frame?.payload, payload);
+        expect(frame?.timestampUs, timestamp);
+        broadcast.close();
+      });
+    }
+  }
+
+  test('raw writes without timestamps stay untimed', () async {
+    final broadcast = BroadcastProducer();
+    final track = broadcast.publishTrack(name: 'untimed', info: null);
+    final consumer = track.consume(subscription: null);
+    track.writeFrame(frame: Frame(payload: utf8.encode('payload')));
+    final frame = await consumer.readFrame().timeout(timeout);
+    expect(frame?.timestampUs, isNull);
+    expect(consumer.info().timescale, isNull);
+    track.finish();
+    broadcast.close();
   });
 
   test('connects, announces, subscribes, and delivers a frame', () async {
@@ -62,7 +110,10 @@ void main() {
       (event) => event is AnnounceEventStart,
     );
     final broadcast = relay.createBroadcast(path: 'live');
-    final track = broadcast.publishTrack(name: 'events', info: null);
+    final track = broadcast.publishTrack(
+      name: 'events',
+      info: TrackInfo(timescale: 1000000),
+    );
     broadcast.announce(route: MoqRoute());
     final announced =
         (await announcement.timeout(timeout) as AnnounceEventStart).announce;

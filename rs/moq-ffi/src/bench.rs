@@ -7,7 +7,7 @@
 use crate::consumer::MoqTrackConsumer;
 use crate::media::MoqFrame;
 use crate::origin::{MoqOriginConfig, MoqOriginProducer};
-use crate::producer::{MoqBroadcastProducer, MoqTrackProducer};
+use crate::producer::{MoqBroadcastProducer, MoqTrackInfo, MoqTrackProducer};
 
 use std::future::Future;
 use std::hint::black_box;
@@ -239,8 +239,13 @@ async fn rust_ffi() {
 			cache_capacity_bytes: Some(CACHE_BYTES),
 		});
 		let broadcast = origin.create_broadcast("bench".into()).unwrap();
+		let timed = MoqTrackInfo {
+			priority: 127,
+			max_age_us: None,
+			timescale: Some(1_000_000),
+		};
 		let tracks: Vec<_> = (0..case.publishers)
-			.map(|p| broadcast.publish_track(p.to_string(), None).unwrap())
+			.map(|p| broadcast.publish_track(p.to_string(), Some(timed.clone())).unwrap())
 			.collect();
 		let consumers: Vec<_> = tracks
 			.iter()

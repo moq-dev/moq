@@ -81,7 +81,7 @@ class FfiBench {
         // Close every handle inside the case, so native teardown never lands in a later one.
         val origin = OriginProducer(OriginConfig(cacheCapacityBytes = CACHE_BYTES))
         val broadcast = origin.createBroadcast("bench")
-        val tracks = (0 until case.publishers).map { broadcast.publishTrack("$it", null) }
+        val tracks = (0 until case.publishers).map { broadcast.publishTrack("$it", TrackInfo(timescale = 1_000_000uL)) }
         val consumers = tracks.flatMap { track -> (0 until case.subscribers).map { track.consume(null) } }
         // A non-uniform payload, so a zero-filled or truncated copy fails the check.
         val payload = ByteArray(case.size) { (it % 251).toByte() }

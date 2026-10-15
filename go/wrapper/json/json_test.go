@@ -63,7 +63,7 @@ func TestTracks(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer snapshotConsumer.Cancel()
-	if err := snapshot.Update(map[string]any{"viewers": 42}); err != nil {
+	if err := snapshot.Update(map[string]any{"viewers": 42}, nil); err != nil {
 		t.Fatal(err)
 	}
 	value, err := snapshotConsumer.Next(ctx)
@@ -87,7 +87,7 @@ func TestTracks(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer streamConsumer.Cancel()
-	if err := stream.Append(map[string]any{"n": 1}); err != nil {
+	if err := stream.Append(map[string]any{"n": 1}, nil); err != nil {
 		t.Fatal(err)
 	}
 	record, err := streamConsumer.Next(ctx)

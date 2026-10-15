@@ -119,7 +119,9 @@ int main() {
     // Publisher: a server whose origin serves one broadcast with one track.
     auto origin = moq::OriginProducer::init({});
     auto broadcast = ok(origin->create_broadcast("probe"), "create_broadcast");
-    auto track = ok(broadcast->publish_track("data", std::nullopt), "publish_track");
+    moq::TrackInfo info;
+    info.timescale = 1000000;
+    auto track = ok(broadcast->publish_track("data", info), "publish_track");
     ok(broadcast->announce({}), "announce");
 
     moq::ServerConfig server_config;

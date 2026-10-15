@@ -67,7 +67,7 @@ async def main():
 
         # Write frames
         # Audio has no keyframes, so `cut` is what gives it group boundaries.
-        audio.write_frame(payload)
+        audio.write_frame(payload, timestamp=timedelta(0))
         audio.cut()
         audio.write_frame(payload, timestamp=timedelta(milliseconds=20))
         audio.cut()
@@ -167,12 +167,12 @@ client = moq.Client(
   - `await .requested_track() → TrackRequest`. Call `.accept()` on it for a `TrackProducer`, or `.abort(code)` to reject.
   - Async iterator yielding `TrackRequest`
 - **`TrackProducer` / `GroupProducer`**. Write raw payloads with no codec parsing.
-  - `.write_frame(payload, timestamp=timedelta(0))` writes a payload with its presentation timestamp.
+  - `.write_frame(payload, timestamp=None)` writes a payload with optional capture time.
   - `.create_group(sequence)` creates a sparse or replayed group at an explicit sequence.
   - `.finish()` ends at the live edge; the handle remains so `.abort(error_code)` can still run.
   - `.finish_at(final_sequence)` declares the first group that will never be produced while leaving lower groups writable.
   - `.abort(error_code)` terminates the track or group with an application error.
-  - `.append_datagram(payload, timestamp=timedelta(0)) -> sequence` (`TrackProducer`) sends a best-effort datagram. Payloads are capped at 1200 bytes and there is no stream fallback.
+  - `.append_datagram(payload, timestamp=None) -> sequence` (`TrackProducer`) sends a best-effort datagram. Payloads are capped at 1200 bytes and there is no stream fallback.
 
 ### Media
 
@@ -187,7 +187,8 @@ client = moq.Client(
   `media.ContainerStreamProducer(broadcast, format)` recovers framing from a byte stream.
 - `media.CatalogProducer(broadcast)` owns `set_video_properties`, `set_section`, and
   `remove_section`. It holds the broadcast weakly; writes fail with `Error.Closed` after closing
-  or releasing the broadcast.
+  or releasing the broadcast. `.now()` returns its current media time as `timedelta` and fixes
+  the clock for subsequent producers.
 - `await media.CatalogConsumer.subscribe(broadcast)` streams catalog snapshots;
   `await media.catalog(broadcast)` reads one snapshot and releases its subscription.
 - `await media.TrackConsumer.subscribe(broadcast, name, container, *, subscription=None)`
@@ -198,9 +199,16 @@ client = moq.Client(
   `TrackConsumer.recv_group()` for arrival-order reads, with container media time on each frame
   as it lands.
 
-`media.TrackProducer.write_frame(payload, timestamp=timedelta(0))` and `.flush(timestamp)` use
-`timedelta`; returned `media.MediaFrame.timestamp` does too. `demand()` owns the track name and
+`media.TrackProducer.write_frame(payload, timestamp)` requires the caller's capture time as
+`timedelta`; `.flush(timestamp)` and returned `media.MediaFrame.timestamp` use it too. `demand()` owns the track name and
 subscriber waits. `.cut()` / `.seek(sequence)` draw group boundaries; `.finish()` ends the import.
+
+### Data
+
+`moq.json.SnapshotProducer.update(value, timestamp=None)` and
+`moq.json.StreamProducer.append(value, timestamp=None)` preserve optional capture time.
+`moq.flate.SnapshotProducer` and `moq.flate.StreamProducer` offer the same operations for bytes.
+Omitting time leaves data untimed; choose the track's `timescale` to match.
 
 ### Subscribing
 
@@ -210,12 +218,12 @@ subscriber waits. `.cut()` / `.seek(sequence)` draw group boundaries; `.finish()
   - `await .next_group() → GroupConsumer | None`. Sequence order; what the default iteration yields.
   - `await .recv_group() → GroupConsumer | None`. Arrival order, which may be out of sequence. Prefer it when latency matters more than order.
   - `.groups_as_arrived()`. Async iterator over `recv_group()`.
-  - `.read_frame() -> Frame | None` returns the first timestamped frame of the next group. Empty groups are skipped; `None` is track EOF.
+  - `.read_frame() -> Frame | None` returns the first frame of the next group. Empty groups are skipped; `None` is track EOF.
   - `await .recv_datagram() -> Datagram | None` for best-effort raw track datagrams.
   - `.info() → TrackInfo`
   - `.update(subscription)`. Change delivery priority, staleness, or group range after subscribing.
-- **`GroupConsumer`**. Async iterator of timestamped `Frame`s.
-  - `.read_frame() -> Frame | None` returns a timestamped raw frame.
+- **`GroupConsumer`**. Async iterator of raw `Frame`s.
+  - `.read_frame() -> Frame | None` returns a raw frame with optional capture time.
 
 Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.TrackConsumer`, `media.GroupConsumer`, `TrackConsumer`, `AudioConsumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `AnnounceConsumer`, `AnnouncedBroadcast`) and the dynamic sources (`OriginDynamic`, `BroadcastDynamic`, `TrackDynamic`).
 
@@ -236,7 +244,7 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
 ### Types
 
 - **`media.Catalog`**. `.audio: dict[str, Audio]`, `.video: dict[str, Video]`, `.display`, `.rotation`, `.flip`.
-- **`Frame`**. `.payload: bytes`, `.timestamp: timedelta | None`. The unit of every write and every raw read; `None` only on a frame read from an untimed track.
+- **`Frame`**. `.payload: bytes`, `.timestamp: timedelta | None`. The unit of every write and every raw read; `None` means untimed when publishing or reading.
 - **`media.MediaFrame`**. `.payload: bytes`, `.timestamp: timedelta`, `.keyframe: bool`. Returned by media subscriptions. `keyframe` marks a group start or video keyframe; for audio it is true only at a group start.
 - **`Datagram`**. `.sequence: int`, `.timestamp: timedelta | None`, `.payload: bytes`. Delivered only on datagram-capable transports with lite-05 or newer moq-lite, or moq-transport.
 - **`media.Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.enabled`, `.description`.

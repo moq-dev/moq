@@ -162,7 +162,7 @@ func benchThroughput(b *testing.B, c benchCase) {
 	tracks := make([]*moq.TrackProducer, c.publishers)
 	consumers := make([]*moq.TrackConsumer, 0, c.publishers*c.subscribers)
 	for p := range tracks {
-		tracks[p], err = broadcast.PublishTrack(fmt.Sprint(p), nil)
+		tracks[p], err = broadcast.PublishTrack(fmt.Sprint(p), timedInfo())
 		if err != nil {
 			b.Fatal(err)
 		}

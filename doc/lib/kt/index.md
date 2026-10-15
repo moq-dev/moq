@@ -16,6 +16,12 @@ x86\_64) and desktop JVM (Linux x86\_64/aarch64, macOS arm64, Windows x64).
 `dev.moq.media` owns catalogs, encoded imports, and container consumers. `TrackProducer.audio`
 / `.video` take a broadcast, a `Named` or `Requested` target, and an init record.
 `CatalogProducer(broadcast)` holds its broadcast weakly and fails with `Closed` after it closes.
+`dev.moq.flate.SnapshotProducer` / `StreamProducer` publish opaque bytes with an optional `timestampUs`.
+A missing data timestamp stays untimed; the library never substitutes zero or now.
+Raw tracks with a `null` timescale are untimed on both publish and receive.
+Whole-frame media writes require caller time; container imports keep their own timeline handling.
+Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
+created event on the broadcast clock; reading it fixes that clock for later media producers.
 Construct readers with `CatalogConsumer.subscribe`, `TrackConsumer.subscribe`, or
 `GroupConsumer.fetch`. For arrival-order reads, decode each group from
 `dev.moq.TrackConsumer.recvGroup()` with `dev.moq.media.GroupConsumer(group, container)`; frames
