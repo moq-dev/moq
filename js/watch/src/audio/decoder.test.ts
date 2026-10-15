@@ -439,13 +439,12 @@ describe("Decoder across a rendition's absence", () => {
 			const before = playback.inserted().length;
 			const timestamps = await playback.play(6);
 
-			// One graph throughout, and the return decodes into the same ring from its first frame past
-			// the legacy warm-up.
+			// One graph throughout; a rendition without warmup keeps its entire return.
 			expect(contexts).toHaveLength(1);
 			expect(context.calls.close).toBe(0);
 			expect(playback.subscriptions()).toBe(2);
 			expect(playback.rings()).toEqual([ring]);
-			expect(playback.inserted().slice(before)).toEqual(timestamps.slice(3));
+			expect(playback.inserted().slice(before)).toEqual(timestamps);
 		} finally {
 			playback.close();
 		}
@@ -563,8 +562,8 @@ describe("Decoder across a rendition's absence", () => {
 			load();
 			await microtasks();
 
-			// Everything past the legacy warm-up reaches the ring, none of it dropped for want of one.
-			expect(playback.inserted()).toEqual(timestamps.slice(3));
+			// Every frame reaches the ring once the worklet loads.
+			expect(playback.inserted()).toEqual(timestamps);
 		} finally {
 			playback.close();
 		}

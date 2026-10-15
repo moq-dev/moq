@@ -308,19 +308,29 @@ fn test_vp9_opus_catalog() {
 #[test]
 fn test_opus_catalog_rate_is_decoder_rate() {
 	// A 44.1 kHz input rate is informational; the catalog still reports the decoder's 48 kHz.
-	let data = MkvBuilder::new()
-		.header("webm")
-		.segment_start()
-		.info(1_000_000)
-		.tracks(vec![track_entry_audio_opus(1, 44100.0, 2)])
-		.cluster(0, || vec![simple_block(1, 0, true, b"opus")])
-		.segment_end()
-		.build();
+	for header in [true, false] {
+		let MatroskaSpec::TrackEntry(Master::Full(mut fields)) = track_entry_audio_opus(1, 44100.0, 2) else {
+			unreachable!()
+		};
+		if !header {
+			fields.retain(|field| !matches!(field, MatroskaSpec::CodecPrivate(_)));
+		}
+		let data = MkvBuilder::new()
+			.header("webm")
+			.segment_start()
+			.info(1_000_000)
+			.tracks(vec![MatroskaSpec::TrackEntry(Master::Full(fields))])
+			.cluster(0, || vec![simple_block(1, 0, true, b"opus")])
+			.segment_end()
+			.build();
 
-	let catalog = run(&data);
-	let a = catalog.audio.renditions.values().next().unwrap();
-	assert_eq!(a.sample_rate, 48000);
-	assert_eq!(a.channel_count, 2);
+		let catalog = run(&data);
+		let a = catalog.audio.renditions.values().next().unwrap();
+		assert_eq!(a.sample_rate, 48000);
+		assert_eq!(a.channel_count, 2);
+		assert_eq!(a.description.is_some(), header);
+		assert_eq!(a.warmup, Some(std::time::Duration::from_millis(80)));
+	}
 }
 
 #[test]

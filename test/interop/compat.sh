@@ -198,16 +198,20 @@ done 3<"$HARNESS_RUN/controls"
 # drafts are listed: our clients and relays always prefer lite with each other, so
 # IETF between them is not compared here (`just test interop` covers IETF).
 # Fd 3, so a child reading stdin (ffmpeg does) cannot consume the version list.
+# Dropping a released FETCH is a cell, so a planned break on its version covers it too.
+fetch_kept() {
+    [[ "$1" != true || "$2" == true ]] || {
+        echo "the checkout removed published FETCH"
+        return 1
+    }
+}
 while read -r version <&3; do
     released_relay="$HARNESS_RUN/released/bin/moq-relay"
     # Each moq-net library states whether the draft has FETCH, so a FETCH cell that
     # fails is a failure, never a skip. Dropping a released capability fails too.
     current_fetch=$("$TARGET/compat-hang-current/debug/compat-container" fetch-supported "$version")
     released_fetch=$("$TARGET/compat-hang-released/debug/compat-container" fetch-supported "$version")
-    if [[ "$released_fetch" == true && "$current_fetch" != true ]]; then
-        echo "FAIL $version: the checkout removed published FETCH"
-        failed+=("$version FETCH removed")
-    fi
+    cell fetch-capability "$version" both both fetch_kept "$released_fetch" "$current_fetch"
     if [[ "$released_fetch" != true || "$current_fetch" != true ]]; then
         echo "SKIP $version fetch and js-publish: no FETCH on this draft in both libraries"
         skipped=$((skipped + 8))

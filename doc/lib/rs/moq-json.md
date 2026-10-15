@@ -17,8 +17,15 @@ generic catalog reader will not pick it up.
 - **stream**: lossless append-log in a single group. A reader that falls behind fails the read rather than resuming mid-log.
 - **window**: a bounded run of records a reader can join at any point. A new group restates what it keeps explicitly, so a reader that was keeping up is not handed a record twice.
 
-Both sides choose the same compression. A value is stamped when written,
-unless it carries its capture time.
+Both sides choose the same compression. A bare value stays untimed; publish
+`moq_net::Timed::from(&value).at(captured)` to retain a capture timestamp.
+The timestamp must match the track: an untimed track has no timescale, and a
+timed track requires a timestamp on every write. Editing guards take the
+same optional capture time when opened, including when they publish on drop.
+
+When upgrading, replace `Timed<P, T>` with `Timed<P>` and pass timestamps
+explicitly. A publisher that wants to stamp an event now samples its own
+clock; the producer never supplies one.
 
 A stream rides one group, so the whole log shares moq-net's group budget:
 32 MiB of payload and 8192 records. An append that might not fit is refused

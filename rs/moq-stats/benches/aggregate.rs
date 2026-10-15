@@ -69,7 +69,9 @@ impl Node {
 		for traffic in self.frame.values_mut() {
 			traffic.bytes += bytes;
 		}
-		self.traffic.update(&self.frame).unwrap();
+		self.traffic
+			.update(moq_net::Timed::from(&self.frame).at(moq_net::Timestamp::now()))
+			.unwrap();
 	}
 }
 

@@ -95,7 +95,7 @@ func (b *BroadcastConsumer) DecodeVideo(
 	return &VideoConsumer{inner: inner}, nil
 }
 
-// GroupConsumer is a stream of timestamped raw frames within a single group.
+// GroupConsumer is a stream of raw frames within a single group.
 type GroupConsumer struct {
 	inner *ffi.MoqGroupConsumer
 }
@@ -105,13 +105,13 @@ func (g *GroupConsumer) Sequence() uint64 {
 	return g.inner.Sequence()
 }
 
-// ReadFrame returns the next timestamped frame, or (nil, nil) when the group ends.
+// ReadFrame returns the next raw frame, or (nil, nil) when the group ends.
 func (g *GroupConsumer) ReadFrame(ctx context.Context) (*Frame, error) {
 	frame, err := bridge.Call(ctx, g.inner.Cancel, g.inner.ReadFrame)
 	return frameFromFFI(frame), err
 }
 
-// All ranges over timestamped frames until the group ends or the loop breaks.
+// All ranges over raw frames until the group ends or the loop breaks.
 func (g *GroupConsumer) All(ctx context.Context) iter.Seq2[*Frame, error] {
 	return bridge.Seq(ctx, g.ReadFrame)
 }
@@ -122,7 +122,7 @@ func (g *GroupConsumer) Cancel() {
 }
 
 // TrackConsumer is a stream of groups from a track. Each group is itself a
-// stream of timestamped raw frames.
+// stream of raw frames.
 type TrackConsumer struct {
 	inner *ffi.MoqTrackConsumer
 }
@@ -162,7 +162,7 @@ func (t *TrackConsumer) NextGroup(ctx context.Context) (*GroupConsumer, error) {
 	return &GroupConsumer{inner: res}, nil
 }
 
-// ReadFrame reads the first timestamped frame of the next group, or (nil, nil)
+// ReadFrame reads the first raw frame of the next group, or (nil, nil)
 // when the track ends. Convenient for one-frame-per-group tracks. Completed
 // empty groups are skipped; a nil frame is track EOF, not an empty group.
 // Cancelling the context cancels this consumer, not just this call: see

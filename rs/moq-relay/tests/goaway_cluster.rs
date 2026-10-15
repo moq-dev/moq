@@ -445,7 +445,7 @@ async fn spawn_relay_with_upstream(
 				.with_shutdown(moq_relay::shutdown::Observer::disabled());
 			id += 1;
 			tokio::spawn(async move {
-				let _ = conn.run().await;
+				conn.run().await;
 			});
 		}
 	});

@@ -17,6 +17,13 @@ linux/amd64, linux/arm64, darwin/arm64 (macOS 12.3+), windows/amd64.
 Construct `NewAudioTrackProducer` / `NewVideoTrackProducer` from a broadcast, an init record,
 and a `Named` or `Requested` target. `NewCatalogProducer` holds its broadcast weakly;
 catalog writes fail with `ErrClosed` after the broadcast closes. Media timestamps use `time.Duration`.
+A missing data timestamp stays untimed; the library never substitutes zero or now.
+Raw tracks with a `nil` timescale are untimed on both publish and receive.
+`moq.dev/moq/flate` publishes opaque snapshot and stream payloads; its `Update` / `Append`
+and the JSON producers take a final `*time.Duration` timestamp argument (`nil` for untimed).
+Whole-frame media writes require caller time; container imports keep their own timeline handling.
+Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.Now()` to stamp a locally
+created event on the broadcast clock; reading it fixes that clock for later media producers.
 For arrival-order reads, decode each group from `moq.TrackConsumer.RecvGroup` with
 `media.NewGroupConsumer`; frames carry container media time as they land. `media.FetchGroup`
 fetches and decodes one past group.
