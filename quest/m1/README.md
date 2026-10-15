@@ -115,7 +115,6 @@ above them.
 - [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
 - [BoltFFI or UniFFI](/quest/m1/boltffi.md) - BoltFFI vs UniFFI on a moq-ffi slice in Python, Kotlin, and Swift decides which one the moq-dev fork starts from
 - [Hard-fork the binding generator](/quest/m1/uniffi-fork.md) - one moq-dev repo holds the chosen generator's core and every language backend, released under one tag and one pin
-- [Binding benchmark harness](/quest/m1/ffi-bench.md) - Python, Kotlin, and Go benchmark their wrappers nightly against two Rust baselines, so FFI overhead is tracked
 - [Benchmark trend site](/quest/m1/bench-site.md) - a GitHub Pages site charts the binding, Rust, and JS nightly benchmarks over time
 - [Link the benchmark trends](/quest/m1/bench-site-doc.md) - the docs point language choosers at the trend site
 - [Swift, Dart, and C++ benchmarks](/quest/m1/ffi-bench-wrappers.md) - the other three wrappers join the nightly binding benchmark

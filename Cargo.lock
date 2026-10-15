@@ -4461,6 +4461,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hang",
  "kio 0.6.2",
+ "libc",
  "moq-audio",
  "moq-json",
  "moq-mux",

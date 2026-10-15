@@ -32,7 +32,7 @@ Decided with the maintainer on 2026-10-13:
   the numbers justify it.
 - **Hot path**: track `next` and group `read_frame`, prototyped in both
   shapes beside the existing `Task` version.
-- **Measure** in Python and Go, on the [binding benchmark](/quest/m1/ffi-bench.md):
+- **Measure** in Python and Go, on the [binding benchmark](/bench/README.md):
   per-call latency, wakeups per frame, throughput, and CPU. Sweep subscriber
   count so a cost that grows with the fan-out shows up. Test
   cancellation semantics too: a cancelled read must not swallow the next
@@ -41,10 +41,6 @@ Decided with the maintainer on 2026-10-13:
   quest records the chosen shape.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Binding benchmark harness](/quest/m1/ffi-bench.md) - the per-wrapper benchmark this measures on
 
 ## Related
 
