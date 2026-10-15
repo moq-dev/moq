@@ -1,7 +1,7 @@
 use std::{
 	net,
 	path::PathBuf,
-	sync::{Arc, atomic::AtomicU64},
+	sync::Arc,
 	task::{Context, Poll},
 };
 
@@ -162,9 +162,6 @@ pub(crate) struct WebState {
 	pub(crate) cluster: cluster::Cluster,
 	/// TLS certificate information served at `/certificate.sha256`.
 	pub(crate) certificates: moq_tokio::tls::Certificates,
-	/// Monotonically increasing connection counter for WebSocket sessions.
-	#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
-	pub(crate) conn_id: AtomicU64,
 	/// Relay-wide shutdown broadcast; WebSocket sessions drain with a GOAWAY
 	/// when it fires. Defaults to a handle that never fires.
 	#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
@@ -216,7 +213,6 @@ impl Web {
 			auth,
 			cluster,
 			certificates,
-			conn_id: AtomicU64::new(0),
 			shutdown: crate::shutdown::Observer::disabled(),
 			sessions: crate::session::Registry::new(),
 			timeout: moq_tokio::listen::Config::default().resolved_timeout(),
@@ -1743,7 +1739,7 @@ mod tests {
 				let (ca, cert, key) = make_certs(&certs);
 				let mut config = crate::Config::default();
 				config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
-				config.listen.timeout = std::time::Duration::ZERO;
+				config.listen.timeout = Some(std::time::Duration::ZERO);
 				config.web.ws = true;
 				config.auth.public = vec![moq_auth::Pattern::all()];
 				config.drain_timeout = DRAIN_WINDOW;
@@ -1845,7 +1841,7 @@ mod tests {
 				.with_publisher(origin.consume())
 				.connect(
 					tokio::time::Instant::now().into_std(),
-					moq_tokio::transport::Session::new(transport),
+					moq_tokio::transport::Session::new(transport, moq_net::transport::Binding::Uri),
 				)
 				.await
 				.unwrap();

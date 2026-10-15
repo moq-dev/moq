@@ -1,8 +1,8 @@
-import { expect, mock, spyOn, test } from "bun:test";
+import { expect, jest, mock, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
-import { StreamCode, toStreamCode } from "../error.ts";
+import { SessionCode, StreamCode, toStreamCode } from "../error.ts";
 import { Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
 import { hooks } from "../internal.ts";
@@ -2089,3 +2089,84 @@ test.each([0, 1])("lite draft-07 reports the cached largest position when starti
 		await running;
 	}
 });
+
+async function settleControls(): Promise<void> {
+	await new Promise<void>((resolve) => {
+		const channel = new MessageChannel();
+		channel.port1.onmessage = () => {
+			channel.port1.close();
+			channel.port2.close();
+			resolve();
+		};
+		channel.port2.postMessage(null);
+	});
+}
+
+for (const version of [Version.DRAFT_03, Version.DRAFT_04, Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
+	test(`Report consumes PROBE targets and observes their FIN (${version})`, async () => {
+		jest.useFakeTimers();
+		const pair = createMockTransportPair(ALPN_05, { stats: { estimatedSendRate: 1_000_000, smoothedRtt: 12 } });
+		const publisher = new Publisher(pair.server, version, randomHop());
+		const client = await Stream.open(pair.client, { version });
+		const server = await Stream.accept(pair.server, version);
+		if (!server) throw new Error("publisher did not accept PROBE");
+		const reset = spyOn(server.writer, "reset");
+		const close = spyOn(server.writer, "close");
+		const serving = publisher.runProbe(server);
+		try {
+			await new ProbeMessage({ bitrate: 4_000_000, rtt: 20 }).encode(client.writer, version);
+			await settleControls();
+			jest.advanceTimersByTime(100);
+			await settleControls();
+			expect((await ProbeMessage.decode(client.reader, version)).bitrate).toBe(1_000_000);
+			expect(reset).not.toHaveBeenCalled();
+			client.writer.close();
+			await settleControls();
+			expect(close).toHaveBeenCalled();
+		} finally {
+			client.close();
+			server.close();
+			pair.client.close();
+			publisher.close();
+			await serving;
+			reset.mockRestore();
+			close.mockRestore();
+			jest.useRealTimers();
+		}
+	});
+}
+
+for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
+	test(`malformed SUBSCRIBE_UPDATE closes the session after request setup (${version})`, async () => {
+		const pair = createMockTransportPair(ALPN_05);
+		const origin = new OriginProducer();
+		const broadcast = publish(origin, Path.from("test"));
+		const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+		const client = await Stream.open(pair.client, { version });
+		const server = await Stream.accept(pair.server, version);
+		if (!server) throw new Error("publisher did not accept SUBSCRIBE");
+		const close = spyOn(pair.server, "close");
+		const serving = publisher.runSubscribe(
+			new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0 }),
+			server,
+		);
+		try {
+			await settleControls();
+			// The complete zero-length update cannot hold its required fields.
+			await client.writer.write(new Uint8Array([0]));
+			await settleControls();
+			expect(close.mock.calls.some(([info]) => info?.closeCode === SessionCode.ProtocolViolation)).toBe(true);
+		} finally {
+			client.close();
+			server.close();
+			publisher.close();
+			track.close();
+			broadcast.close();
+			origin.close();
+			pair.client.close();
+			await serving;
+			close.mockRestore();
+		}
+	});
+}

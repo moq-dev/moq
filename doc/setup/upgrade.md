@@ -19,6 +19,22 @@ error lists and rerun.
 
 These land with the next breaking release, not the 2026-09-23 train.
 
+- **moq-tokio config durations are optional.** Wrap durations in `Some(...)` for
+  connect `race`, `resolution_delay`, and `timeout`; listen `timeout`; QUIC
+  `idle_timeout` and `keep_alive`; backoff `initial`, `max`, and `timeout`;
+  GOAWAY `handover`; and WebSocket `delay`. `None` uses the default, while
+  `Some(Duration::ZERO)` keeps each knob's zero behavior. Values set in code
+  now take effect on parsed and merged configs unless the flag or environment
+  variable was actually given. TOML keys, C ABI, binding records, and wire
+  formats are unchanged.
+- **Max age and max delay count wall-clock time too.** A superseded group is
+  stale once its successor arrived a full budget ago, as well as by media time,
+  so an untimed track is no longer exempt: with the default zero `max_delay`,
+  an untimed subscriber starts at the latest group and skips each superseded
+  one. Give it a budget to replay or tolerate reordering.
+- **`cache::Pool::gc` takes a waiter.** In Rust, `gc(now)` is
+  `gc(now, waiter)`, like `Driver::poll`: call it again when the waiter wakes,
+  since a parked read can arm an earlier deadline than the one returned.
 - **A QUIC load-balancer nonce needs its server id.** `listen.lb_nonce`,
   `--listen-quic-lb-nonce`, and `MOQ_LISTEN_QUIC_LB_NONCE` without `lb_id` stop
   startup. Setting `lb_id` (or `lb_nonce`) and `load_balancer` together also
@@ -209,6 +225,10 @@ These land with the next breaking release, not the 2026-09-23 train.
   a `transport::Error`. moq-tokio's `Client` and `Server` are unchanged. A
   custom transport handed straight to moq-net implements these traits; a
   `moq-uring` session is wrapped with `moq_uring::transport::Session::new`.
+  Each session must report `binding()`: `transport::Binding::Uri` when the
+  transport handshake carries the request URI, or `InBand` when SETUP carries
+  it. The moq-tokio and moq-uring adapter constructors take this binding
+  explicitly; browser WebTransport adapters always report `Uri`.
 - **`--cluster-mesh` and `--cluster-linger` are unknown flags.** moq-relay
   0.17 refuses them by name; later relays reject them, and TOML `mesh` and
   `linger`, like any unknown setting. `MOQ_CLUSTER_MESH` and

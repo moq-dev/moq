@@ -68,6 +68,10 @@ class GroupState {
 	timestamp?: Timestamp;
 	// The newest frame's timestamp: where a reader that has taken every frame sits.
 	latest?: Timestamp;
+	// When the group joined the track this mirror belongs to, at this hop, in
+	// `performance.now()` milliseconds: the wall clock a superseded predecessor ages from.
+	// Per track, since one group can join several.
+	arrived = 0;
 
 	constructor(sequence: number) {
 		this.sequence = sequence;
@@ -428,6 +432,10 @@ export class Consumer {
 		makeConsumer = (state) => new Consumer(state);
 		hooks.groupTimestamp = (group) => group.#state.timestamp;
 		hooks.groupLatest = (group) => group.#state.latest;
+		hooks.groupArrived = (group) => group.#state.arrived;
+		hooks.arriveGroup = (group, at) => {
+			group.#state.arrived = at;
+		};
 		hooks.expireGroup = (group, expiry) => {
 			group.#expiry = expiry;
 		};

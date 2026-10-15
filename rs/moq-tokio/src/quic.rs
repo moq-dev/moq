@@ -140,16 +140,20 @@ pub struct Config {
 	/// Idle timeout before an inactive connection is dropped. Defaults to 10s.
 	///
 	/// QUIC uses the smaller of both ends' timeouts, so either side can shorten it.
+	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(with = "crate::cli::duration::serde_duration")]
-	pub idle_timeout: Duration,
+	#[serde(
+		default,
+		with = "crate::cli::duration::serde_duration::option",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub idle_timeout: Option<Duration>,
 
+	/// Idle timeout before an inactive connection is dropped. Defaults to 10s.
 	#[usage(
 		name = "quic-idle-timeout",
 		long = "quic-idle-timeout",
 		env = "MOQ_QUIC_IDLE_TIMEOUT",
-		default_value_t = CliDuration::fallback(DEFAULT_IDLE_TIMEOUT),
-		default = "10s",
 		setting = "quic.idle_timeout"
 	)]
 	#[serde(default, rename = "__cli_idle_timeout", skip_serializing_if = "Option::is_none")]
@@ -160,16 +164,20 @@ pub struct Config {
 	/// The iroh backend applies this to its connection keep-alive. It also keeps
 	/// a 5s per-path heartbeat that its builder will not raise or clear, so any
 	/// interval above 5s still sends those path pings, and `0s` leaves both at 5s.
+	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(with = "crate::cli::duration::serde_duration")]
-	pub keep_alive: Duration,
+	#[serde(
+		default,
+		with = "crate::cli::duration::serde_duration::option",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub keep_alive: Option<Duration>,
 
+	/// Keep-alive ping interval. Defaults to 3s; 0s disables it.
 	#[usage(
 		name = "quic-keep-alive",
 		long = "quic-keep-alive",
 		env = "MOQ_QUIC_KEEP_ALIVE",
-		default_value_t = CliDuration::fallback(DEFAULT_KEEP_ALIVE),
-		default = "3s",
 		setting = "quic.keep_alive"
 	)]
 	#[serde(default, rename = "__cli_keep_alive", skip_serializing_if = "Option::is_none")]
@@ -264,9 +272,9 @@ impl Default for Config {
 		Self {
 			max_streams: None,
 			gso: None,
-			idle_timeout: DEFAULT_IDLE_TIMEOUT,
+			idle_timeout: Some(DEFAULT_IDLE_TIMEOUT),
 			idle_timeout_arg: None,
-			keep_alive: DEFAULT_KEEP_ALIVE,
+			keep_alive: Some(DEFAULT_KEEP_ALIVE),
 			keep_alive_arg: None,
 			mtu_discovery: None,
 			congestion_control: None,
@@ -510,7 +518,7 @@ impl Config {
 			Some(_) if cfg!(not(feature = "qlog")) => Err(crate::Error::QlogUnsupported),
 			_ => Ok(()),
 		}?;
-		validate_idle_timeout(Some(CliDuration::resolve(self.idle_timeout_arg, self.idle_timeout)))?;
+		validate_idle_timeout(Some(self.resolve().idle_timeout))?;
 		validate_windows(self)
 	}
 
@@ -522,8 +530,16 @@ impl Config {
 	pub fn resolve(&self) -> Resolved {
 		// A zero keep-alive means "disabled"; anything else (including unset) keeps
 		// the connection warm, defaulting to 3s.
-		let idle_timeout = CliDuration::resolve(self.idle_timeout_arg, self.idle_timeout);
-		let keep_alive = CliDuration::resolve(self.keep_alive_arg, self.keep_alive);
+		let idle_timeout = self
+			.idle_timeout_arg
+			.map(Into::into)
+			.or(self.idle_timeout)
+			.unwrap_or(DEFAULT_IDLE_TIMEOUT);
+		let keep_alive = self
+			.keep_alive_arg
+			.map(Into::into)
+			.or(self.keep_alive)
+			.unwrap_or(DEFAULT_KEEP_ALIVE);
 		let keep_alive = (!keep_alive.is_zero()).then_some(keep_alive);
 
 		Resolved {
@@ -690,13 +706,13 @@ mod tests {
 	#[test]
 	fn zero_keep_alive_disables_it() {
 		let disabled = Config {
-			keep_alive: Duration::ZERO,
+			keep_alive: Some(Duration::ZERO),
 			..Default::default()
 		};
 		assert_eq!(disabled.resolve().keep_alive, None);
 
 		let explicit = Config {
-			keep_alive: Duration::from_secs(2),
+			keep_alive: Some(Duration::from_secs(2)),
 			..Default::default()
 		};
 		assert_eq!(explicit.resolve().keep_alive, Some(Duration::from_secs(2)));
@@ -838,19 +854,19 @@ mod tests {
 	#[test]
 	fn idle_timeout_beyond_the_varint_is_rejected() {
 		let over = Config {
-			idle_timeout: (MAX_IDLE_TIMEOUT + Duration::from_millis(1)),
+			idle_timeout: Some(MAX_IDLE_TIMEOUT + Duration::from_millis(1)),
 			..Default::default()
 		};
 		assert!(matches!(over.validate(), Err(crate::Error::IdleTimeoutRange)));
 
 		let saturated = Config {
-			idle_timeout: Duration::from_millis(u64::MAX),
+			idle_timeout: Some(Duration::from_millis(u64::MAX)),
 			..Default::default()
 		};
 		assert!(matches!(saturated.validate(), Err(crate::Error::IdleTimeoutRange)));
 
 		let at_limit = Config {
-			idle_timeout: MAX_IDLE_TIMEOUT,
+			idle_timeout: Some(MAX_IDLE_TIMEOUT),
 			..Default::default()
 		};
 		assert!(at_limit.validate().is_ok());
@@ -977,4 +993,25 @@ mod tests {
 		assert_eq!(quic.send_window, Some(33554432));
 		assert_eq!(quic.qlog.as_deref(), Some(std::path::Path::new("/tmp/qlog")));
 	}
+}
+
+#[cfg(test)]
+mod duration_tests {
+	use super::*;
+	crate::cli::duration::test_config_duration!(
+		idle_timeout_set_in_code_beats_parser_default,
+		Config,
+		idle_timeout,
+		"--quic-idle-timeout",
+		|c: &Config| c.resolve().idle_timeout,
+		|d| d
+	);
+	crate::cli::duration::test_config_duration!(
+		keep_alive_set_in_code_beats_parser_default,
+		Config,
+		keep_alive,
+		"--quic-keep-alive",
+		|c: &Config| c.resolve().keep_alive,
+		|d: Duration| (!d.is_zero()).then_some(d)
+	);
 }

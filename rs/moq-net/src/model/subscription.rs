@@ -15,10 +15,10 @@ use std::{
 pub struct Subscription {
 	/// Delivery priority. Higher values preempt lower ones when bandwidth is constrained.
 	pub priority: u8,
-	/// How far a group may fall behind the live edge before this subscriber gives up on it.
+	/// How long a superseded group stays worth delivering to this subscriber.
 	///
 	/// [`Duration::ZERO`] (the default) skips immediately: group 8 arriving means group 7
-	/// is abandoned. A larger budget tolerates that much reordering before giving up.
+	/// is abandoned, timed or not. A larger budget tolerates that much reordering before giving up.
 	/// This never *adds* delay, since the bound is only reached once newer data is
 	/// already that far ahead.
 	///
@@ -43,24 +43,29 @@ pub struct Subscription {
 	///
 	/// # How delay is measured
 	///
-	/// In presentation time only. A group is measured by its *reach*, where its immediate
-	/// successor begins, against the newest frame of the latest group: it cannot present
-	/// past its successor, so once everything it could still hold falls outside the budget
-	/// it is provably useless. The candidate needs no timestamp of its own, so an empty or
-	/// stalled group is bounded by its stamped successor the same way. Wall-clock
-	/// reclamation of idle content is the cache's own policy, not this budget's.
+	/// By two clocks, and a group is stale once either reaches the budget. Both start at
+	/// its immediate servable successor, so the newest group is never stale.
 	///
-	/// An untimed track (pre-Lite05 moq-lite, or moq-transport without TIMESCALE) has no
-	/// media time, so none of its groups is ever stale, and a new subscriber with no
-	/// [`Self::start`] begins at its latest group instead of replaying the cache.
+	/// In presentation time, a group is measured by its *reach*, where its successor
+	/// begins, against the newest frame of the latest group: it cannot present past its
+	/// successor, so once everything it could still hold falls outside the budget it is
+	/// provably useless. The candidate needs no timestamp of its own, so an empty or
+	/// stalled group is bounded by its stamped successor the same way.
+	///
+	/// In wall-clock time, a group is measured by how long ago its successor arrived at
+	/// this hop. That bounds what media time can't: a peer whose timestamps stop
+	/// advancing, a successor that never presents a frame, and an untimed track
+	/// (pre-Lite05 moq-lite, or moq-transport without TIMESCALE), which is judged by the
+	/// wall clock alone. A read waiting in a superseded group wakes at that deadline only
+	/// when something collects the track's cache pool: an origin's driver does, and a
+	/// standalone track needs [`Pool::gc`](crate::cache::Pool::gc) called, as its idle
+	/// expiry already does. Otherwise it is judged only when something else wakes the read.
 	pub max_delay: Duration,
 	/// The lowest [`Position`] the publisher may deliver, or `None` for no floor.
 	///
 	/// A floor, not a request: only [`Self::max_delay`] asks for data, and the floor bounds
-	/// how far back it may reach. `None` and a floor of group 0 mean the same thing on a
-	/// timed track, since nothing sits below group 0. On an untimed track, which no budget
-	/// can measure, `None` starts at the latest group and a floor is honored as given.
-	/// Delivery starts at the oldest group at or above the floor that the budget still
+	/// how far back it may reach. `None` and a floor of group 0 mean the same thing, since
+	/// nothing sits below group 0. Delivery starts at the oldest group at or above the floor that the budget still
 	/// considers fresh, so a floor above the live edge simply waits there (a resumed
 	/// subscription naming where it left off).
 	///

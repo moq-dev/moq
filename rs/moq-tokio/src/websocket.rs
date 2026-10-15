@@ -224,16 +224,20 @@ pub struct Config {
 
 	/// Head start given to the QUIC dial before the WebSocket fallback joins the
 	/// race. Defaults to 200ms, and drops to zero for a server WebSocket already won.
+	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(with = "crate::cli::duration::serde_duration")]
-	pub delay: time::Duration,
+	#[serde(
+		default,
+		with = "crate::cli::duration::serde_duration::option",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub delay: Option<time::Duration>,
 
+	/// Head start given to the QUIC dial before the WebSocket fallback joins the race. Defaults to 200ms.
 	#[usage(
 		name = "connect-websocket-delay",
 		long = "connect-websocket-delay",
 		env = "MOQ_CONNECT_WEBSOCKET_DELAY",
-		default_value_t = CliDuration::fallback(DEFAULT_DELAY),
-		default = "200ms",
 		setting = "connect.websocket.delay"
 	)]
 	#[serde(default, rename = "__cli_delay", skip_serializing_if = "Option::is_none")]
@@ -249,7 +253,7 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			enabled: None,
-			delay: DEFAULT_DELAY,
+			delay: Some(DEFAULT_DELAY),
 			delay_arg: None,
 			legacy: Default::default(),
 		}
@@ -313,7 +317,7 @@ impl Config {
 	pub fn resolve(&self) -> Resolved {
 		Resolved {
 			enabled: self.enabled.unwrap_or(true),
-			delay: CliDuration::resolve(self.delay_arg, self.delay),
+			delay: self.delay_arg.map(Into::into).or(self.delay).unwrap_or(DEFAULT_DELAY),
 		}
 	}
 }
@@ -1018,4 +1022,17 @@ mod legacy_tests {
 		let config = parse(&[]);
 		assert_eq!(config.resolve().delay, DEFAULT_DELAY);
 	}
+}
+
+#[cfg(test)]
+mod duration_tests {
+	use super::*;
+	crate::cli::duration::test_config_duration!(
+		delay_set_in_code_beats_parser_default,
+		Config,
+		delay,
+		"--connect-websocket-delay",
+		|c: &Config| c.resolve().delay,
+		|d| d
+	);
 }

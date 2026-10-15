@@ -156,10 +156,10 @@ pub(super) fn quic_config(settings: &ResolvedSettings) -> moq_tokio::quic::Confi
 	// The properties are optional and the config fields are not: an unset property
 	// leaves the library default rather than overriding it with one of its own.
 	if let Some(idle_timeout) = settings.quic_idle_timeout {
-		config.idle_timeout = idle_timeout;
+		config.idle_timeout = Some(idle_timeout);
 	}
 	if let Some(keep_alive) = settings.quic_keep_alive {
-		config.keep_alive = keep_alive;
+		config.keep_alive = Some(keep_alive);
 	}
 	config
 }

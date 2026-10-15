@@ -66,16 +66,20 @@ pub struct Backoff {
 	/// Doubles as the bar a session must stay up to count as healthy, so it is
 	/// floored at 50ms: at zero every session would look healthy and the retry
 	/// pacing would collapse.
+	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(with = "crate::cli::duration::serde_duration")]
-	pub initial: Duration,
+	#[serde(
+		default,
+		with = "crate::cli::duration::serde_duration::option",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub initial: Option<Duration>,
 
+	/// Initial delay before the first reconnect attempt. Defaults to 1s, floored at 50ms.
 	#[usage(
 		name = "backoff-initial",
 		long,
 		env = "MOQ_BACKOFF_INITIAL",
-		default_value_t = CliDuration::fallback(DEFAULT_INITIAL),
-		default = "1s",
 		setting = "connect.backoff.initial"
 	)]
 	#[serde(default, rename = "__cli_initial", skip_serializing_if = "Option::is_none")]
@@ -92,18 +96,17 @@ pub struct Backoff {
 	pub multiplier: u32,
 
 	/// Maximum delay between reconnect attempts. Defaults to 5s.
+	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(with = "crate::cli::duration::serde_duration")]
-	pub max: Duration,
-
-	#[usage(
-		name = "backoff-max",
-		long,
-		env = "MOQ_BACKOFF_MAX",
-		default_value_t = CliDuration::fallback(DEFAULT_MAX),
-		default = "5s",
-		setting = "connect.backoff.max"
+	#[serde(
+		default,
+		with = "crate::cli::duration::serde_duration::option",
+		skip_serializing_if = "Option::is_none"
 	)]
+	pub max: Option<Duration>,
+
+	/// Maximum delay between reconnect attempts. Defaults to 5s.
+	#[usage(name = "backoff-max", long, env = "MOQ_BACKOFF_MAX", setting = "connect.backoff.max")]
 	#[serde(default, rename = "__cli_max", skip_serializing_if = "Option::is_none")]
 	max_arg: Option<CliDuration>,
 
@@ -131,6 +134,7 @@ pub struct Backoff {
 
 	// No parser default: the parser stores one as if it were given, and it would then beat a
 	// window set in code. The default lives in [`Backoff::window`] instead.
+	/// Maximum time to spend retrying before giving up. Defaults to 10s; 0s retries forever.
 	#[usage(
 		name = "backoff-timeout",
 		long,
@@ -144,10 +148,10 @@ pub struct Backoff {
 impl Default for Backoff {
 	fn default() -> Self {
 		Self {
-			initial: DEFAULT_INITIAL,
+			initial: Some(DEFAULT_INITIAL),
 			initial_arg: None,
 			multiplier: DEFAULT_MULTIPLIER,
-			max: DEFAULT_MAX,
+			max: Some(DEFAULT_MAX),
 			max_arg: None,
 			timeout: Some(DEFAULT_TIMEOUT),
 			timeout_arg: None,
@@ -345,16 +349,20 @@ pub struct Goaway {
 	/// "10s" or "500ms". This is a cap: a GOAWAY naming a shorter deadline wins,
 	/// since the peer force-closes at its own deadline regardless, but a longer one
 	/// does not extend it. Defaults to 10 seconds.
+	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(with = "crate::cli::duration::serde_duration")]
-	pub handover: Duration,
+	#[serde(
+		default,
+		with = "crate::cli::duration::serde_duration::option",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub handover: Option<Duration>,
 
+	/// How long the old session keeps serving after its replacement connects. Defaults to 10s.
 	#[usage(
 		name = "goaway-handover",
 		long,
 		env = "MOQ_GOAWAY_HANDOVER",
-		default_value_t = CliDuration::fallback(DEFAULT_HANDOVER),
-		default = "10s",
 		setting = "connect.goaway.handover"
 	)]
 	#[serde(default, rename = "__cli_handover", skip_serializing_if = "Option::is_none")]
@@ -365,7 +373,7 @@ impl Default for Goaway {
 	fn default() -> Self {
 		Self {
 			redirect: Redirect::SameHost,
-			handover: DEFAULT_HANDOVER,
+			handover: Some(DEFAULT_HANDOVER),
 			handover_arg: None,
 		}
 	}
@@ -403,8 +411,13 @@ struct Pacing {
 
 impl Pacing {
 	fn new(backoff: &Backoff) -> Self {
-		let initial = CliDuration::resolve(backoff.initial_arg, backoff.initial).max(MIN_BACKOFF);
-		let max = CliDuration::resolve(backoff.max_arg, backoff.max);
+		let initial = backoff
+			.initial_arg
+			.map(Into::into)
+			.or(backoff.initial)
+			.unwrap_or(DEFAULT_INITIAL)
+			.max(MIN_BACKOFF);
+		let max = backoff.max_arg.map(Into::into).or(backoff.max).unwrap_or(DEFAULT_MAX);
 		Self {
 			initial,
 			max: max.max(initial),
@@ -426,7 +439,11 @@ impl Goaway {
 	fn resolve(&self) -> Resolved {
 		Resolved {
 			redirect: self.redirect,
-			handover: CliDuration::resolve(self.handover_arg, self.handover),
+			handover: self
+				.handover_arg
+				.map(Into::into)
+				.or(self.handover)
+				.unwrap_or(DEFAULT_HANDOVER),
 		}
 	}
 }
@@ -1477,15 +1494,15 @@ mod tests {
 
 		// Stand in for the TOML layer, then re-apply the CLI with none of the flags set.
 		let mut parsed = Wrapper::parse_from(&[]).unwrap();
-		parsed.backoff.initial = Duration::from_secs(7);
+		parsed.backoff.initial = Some(Duration::from_secs(7));
 		parsed.backoff.multiplier = 5;
-		parsed.backoff.max = Duration::from_secs(11);
+		parsed.backoff.max = Some(Duration::from_secs(11));
 		parsed.backoff.timeout = Some(Duration::ZERO);
 		parsed.update_from(&[]);
 
-		assert_eq!(parsed.backoff.initial, Duration::from_secs(7));
+		assert_eq!(parsed.backoff.initial, Some(Duration::from_secs(7)));
 		assert_eq!(parsed.backoff.multiplier, 5);
-		assert_eq!(parsed.backoff.max, Duration::from_secs(11));
+		assert_eq!(parsed.backoff.max, Some(Duration::from_secs(11)));
 		assert_eq!(parsed.backoff.window(), Duration::ZERO, "0 means retry forever");
 
 		// With no flags, the parser defaults resolve to the typed defaults.
@@ -1500,47 +1517,6 @@ mod tests {
 		let parsed =
 			Wrapper::parse_from(&[std::ffi::OsStr::new("--backoff-initial"), std::ffi::OsStr::new("3s")]).unwrap();
 		assert_eq!(Pacing::new(&parsed.backoff).initial, Duration::from_secs(3));
-	}
-
-	/// A window set in code wins on a config the command line built, including zero.
-	///
-	/// The parser stored its 10s default exactly as if `--backoff-timeout 10s` had been given, so
-	/// it beat the typed field, and a zero there was indistinguishable from the field left unset.
-	#[test]
-	fn a_timeout_set_in_code_beats_the_parser_default() {
-		#[derive(usage::Cli)]
-		#[usage(unknown_flags = "error", args_override_self = false)]
-		#[usage(settings)]
-		struct Wrapper {
-			#[usage(flatten)]
-			backoff: Backoff,
-		}
-
-		let mut parsed = Wrapper::parse_from(&[]).unwrap().backoff;
-		assert_eq!(parsed.window(), DEFAULT_TIMEOUT);
-		parsed.timeout = Some(Duration::ZERO);
-		assert_eq!(parsed.window(), Duration::ZERO, "a parsed config");
-
-		let merged = |backoff: &Backoff| -> Backoff { toml::Value::try_from(backoff).unwrap().try_into().unwrap() };
-		let mut config = merged(&Wrapper::parse_from(&[]).unwrap().backoff);
-		assert_eq!(config.window(), DEFAULT_TIMEOUT, "the default survives the round-trip");
-		config.timeout = Some(Duration::ZERO);
-		assert_eq!(config.window(), Duration::ZERO, "a merged config");
-		config.timeout = Some(Duration::from_secs(3));
-		assert_eq!(config.window(), Duration::from_secs(3), "a merged config, nonzero");
-
-		// An explicit flag still wins, through the round-trip too.
-		let flag = [std::ffi::OsStr::new("--backoff-timeout"), std::ffi::OsStr::new("0s")];
-		let mut config = merged(&Wrapper::parse_from(&flag).unwrap().backoff);
-		config.timeout = Some(Duration::from_secs(3));
-		assert_eq!(config.window(), Duration::ZERO, "the flag beats the field");
-
-		// A config built in code was never affected.
-		let config = Backoff {
-			timeout: Some(Duration::ZERO),
-			..Default::default()
-		};
-		assert_eq!(config.window(), Duration::ZERO);
 	}
 
 	/// GOAWAY typed defaults remain overrideable by a standing TOML layer.
@@ -1579,7 +1555,7 @@ mod tests {
 	#[test]
 	fn handover_takes_the_earlier_deadline() {
 		let config = Goaway {
-			handover: Duration::from_secs(10),
+			handover: Some(Duration::from_secs(10)),
 			..Default::default()
 		};
 
@@ -1855,7 +1831,7 @@ mod tests {
 		// A zero initial would also make every session look healthy, resetting the
 		// give-up window forever.
 		let pacing = Pacing::new(&Backoff {
-			initial: Duration::ZERO,
+			initial: Some(Duration::ZERO),
 			..Default::default()
 		});
 		assert_eq!(pacing.initial, MIN_BACKOFF);
@@ -1863,7 +1839,7 @@ mod tests {
 
 		// A cap below the floor would clamp the delay straight back down.
 		let pacing = Pacing::new(&Backoff {
-			max: Duration::ZERO,
+			max: Some(Duration::ZERO),
 			..Default::default()
 		});
 		assert_eq!(pacing.max, pacing.initial);
@@ -1878,8 +1854,8 @@ mod tests {
 
 		// All at once: still paced.
 		let pacing = Pacing::new(&Backoff {
-			initial: Duration::ZERO,
-			max: Duration::ZERO,
+			initial: Some(Duration::ZERO),
+			max: Some(Duration::ZERO),
 			multiplier: 0,
 			..Default::default()
 		});
@@ -1894,9 +1870,9 @@ mod tests {
 	#[test]
 	fn pacing_grows_to_the_cap() {
 		let pacing = Pacing::new(&Backoff {
-			initial: Duration::from_millis(100),
+			initial: Some(Duration::from_millis(100)),
 			multiplier: 2,
-			max: Duration::from_millis(400),
+			max: Some(Duration::from_millis(400)),
 			..Default::default()
 		});
 
@@ -1909,9 +1885,9 @@ mod tests {
 	#[test]
 	fn test_backoff_default() {
 		let backoff = Backoff::default();
-		assert_eq!(backoff.initial, Duration::from_secs(1));
+		assert_eq!(backoff.initial, Some(Duration::from_secs(1)));
 		assert_eq!(backoff.multiplier, 2);
-		assert_eq!(backoff.max, Duration::from_secs(5));
+		assert_eq!(backoff.max, Some(Duration::from_secs(5)));
 		assert_eq!(backoff.timeout, Some(Duration::from_secs(10)));
 	}
 
@@ -2149,15 +2125,15 @@ mod tests {
 			.to_string();
 
 		let mut config = crate::connect::Config::default();
-		config.backoff.initial = Duration::from_millis(50);
-		config.backoff.max = Duration::from_millis(50);
+		config.backoff.initial = Some(Duration::from_millis(50));
+		config.backoff.max = Some(Duration::from_millis(50));
 		config.backoff.timeout = Some(Duration::from_millis(100));
 		// No timer may be pending while a dial is in flight, since the paused clock
 		// jumps to it whenever the runtime idles. Linux and macOS refuse a loopback
 		// connect inside the call, but Windows reports it later, after retrying the
 		// SYN, so the connect deadline or the Happy Eyeballs stagger would fire first.
-		config.timeout = Duration::ZERO;
-		config.race = Duration::ZERO;
+		config.timeout = Some(Duration::ZERO);
+		config.race = Some(Duration::ZERO);
 		let client = config.init(Default::default()).expect("build client");
 
 		let started = tokio::time::Instant::now();
@@ -2338,7 +2314,7 @@ mod tests {
 
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
-		config.websocket.delay = Duration::ZERO;
+		config.websocket.delay = Some(Duration::ZERO);
 		let client = config.init(Default::default()).unwrap();
 		let url = url(&format!("http://127.0.0.1:{port}/"));
 		let connection = tokio::time::timeout(WAIT, client.connect(url).established())
@@ -2413,10 +2389,10 @@ mod tests {
 
 		let subscriber = crate::origin::spawn();
 		let mut config = crate::connect::Config::default();
-		config.goaway.handover = HANDOVER;
+		config.goaway.handover = Some(HANDOVER);
 		// A session younger than the initial delay counts as redirected immediately and
 		// waits out a backoff, which this test is not about.
-		config.backoff.initial = MIN_BACKOFF;
+		config.backoff.initial = Some(MIN_BACKOFF);
 		let client = config
 			.init(Default::default())
 			.unwrap()
@@ -2479,4 +2455,41 @@ mod tests {
 			"a cached resolve redialed the drained relay"
 		);
 	}
+}
+
+#[cfg(test)]
+mod duration_tests {
+	use super::*;
+	crate::cli::duration::test_config_duration!(
+		initial_set_in_code_beats_parser_default,
+		Backoff,
+		initial,
+		"--backoff-initial",
+		|c: &Backoff| Pacing::new(c).initial,
+		|d: Duration| d.max(MIN_BACKOFF)
+	);
+	crate::cli::duration::test_config_duration!(
+		max_set_in_code_beats_parser_default,
+		Backoff,
+		max,
+		"--backoff-max",
+		|c: &Backoff| Pacing::new(c).max,
+		|d: Duration| d.max(DEFAULT_INITIAL)
+	);
+	crate::cli::duration::test_config_duration!(
+		timeout_set_in_code_beats_parser_default,
+		Backoff,
+		timeout,
+		"--backoff-timeout",
+		|c: &Backoff| c.window(),
+		|d| d
+	);
+	crate::cli::duration::test_config_duration!(
+		handover_set_in_code_beats_parser_default,
+		Goaway,
+		handover,
+		"--goaway-handover",
+		|c: &Goaway| c.resolve().handover,
+		|d| d
+	);
 }

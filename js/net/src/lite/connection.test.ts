@@ -523,3 +523,34 @@ for (const peerClosed of [true, false]) {
 		}
 	});
 }
+
+test("a malformed complete GOAWAY closes the session", async () => {
+	for (const [alpn, version] of [
+		[ALPN_04, Version.DRAFT_04],
+		[ALPN_05, Version.DRAFT_05],
+		[ALPN_06, Version.DRAFT_06],
+		[ALPN_07_WIP, Version.DRAFT_07],
+	] as const) {
+		const pair = createMockTransportPair(alpn);
+		const connection = new Connection({ url: new URL("https://relay.example/"), quic: pair.client, version });
+		const close = spyOn(pair.client, "close");
+		try {
+			const stream = await Stream.open(pair.server, { version });
+			await stream.writer.u53(StreamId.Goaway);
+			await stream.writer.write(new Uint8Array([2, 0, 0]));
+			await new Promise<void>((resolve) => {
+				const channel = new MessageChannel();
+				channel.port1.onmessage = () => {
+					channel.port1.close();
+					channel.port2.close();
+					resolve();
+				};
+				channel.port2.postMessage(null);
+			});
+			expect(close.mock.calls.some(([info]) => info?.closeCode === SessionCode.ProtocolViolation)).toBe(true);
+		} finally {
+			close.mockRestore();
+			connection.abort();
+		}
+	}
+});

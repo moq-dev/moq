@@ -557,16 +557,17 @@ test("the latency budget skips a buffered timeline on either cursor", async () =
 // is the unsafe direction.
 test("an unstamped immediate successor leaves reach unbounded", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(5000) });
-	const track = producer.subscribe();
+	// Any budget, so only media time judges: the wall clock barely moves here.
+	const track = producer.subscribe({ maxDelay: Milli(500) });
 
 	producer.writeFrame({ payload: enc.encode("0"), timestamp: Timestamp.fromMillis(0) });
 	producer.appendGroup(); // seq 1 stalls before its first frame
 	producer.writeFrame({ payload: enc.encode("2"), timestamp: Timestamp.fromMillis(10_000) });
+	producer.writeFrame({ payload: enc.encode("3"), timestamp: Timestamp.fromMillis(11_000) });
 
-	// Group 1's reach is group 2's start, a full edge behind: stale at zero budget.
+	// Group 1's reach is group 2's start, a second behind the edge: stale.
 	// Group 0's reach is unknown until group 1 presents its first frame, so it is kept.
-	expect((await track.recvGroup())?.sequence).toBe(0);
-	expect((await track.recvGroup())?.sequence).toBe(2);
+	expect(drain(track)).toEqual([0, 2, 3]);
 });
 
 // Groups can arrive out of sequence order; the immediate successor bounds reach even when it
@@ -1027,19 +1028,149 @@ test("a drained group finishes cleanly after the live edge advances", async () =
 	expect(group.done).toBe(true);
 });
 
-test("a stalled track retains cached groups past its media maxAge", async () => {
+// A stalled track keeps its newest group and gives up the ones before it by the wall clock:
+// maxAge measures how long ago each group's successor arrived as well as media time, so a
+// publisher that stops writing cannot pin its superseded groups.
+test("a stalled track keeps only its newest group", () => {
 	const clock = mockMonotonicTime(10_000);
-	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(100) });
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(1000) });
 	try {
-		for (const value of ["first", "second"]) {
-			producer.writeFrame({ payload: enc.encode(value), timestamp: Timestamp.fromMillis(0) });
+		for (const millis of [0, 10, 20]) {
+			producer.writeFrame({ payload: enc.encode(`${millis}`), timestamp: Timestamp.fromMillis(millis) });
 		}
-		// Media time has not advanced, even though wall-clock idleness exceeded maxAge.
-		clock.set(10_200);
-		const replay = producer.subscribe({ maxDelay: Milli(100) });
-		expect(replay.tryRecvGroup()?.sequence).toBe(0);
-		expect(replay.tryRecvGroup()?.sequence).toBe(1);
-		replay.close();
+		expect(drain(producer.subscribe({ maxDelay: Milli(1000) }))).toEqual([0, 1, 2]);
+
+		// Nothing is written again: media time stands still.
+		clock.set(12_000);
+		expect(drain(producer.subscribe({ maxDelay: Milli(1000) }))).toEqual([2]);
+	} finally {
+		producer.close();
+		clock.restore();
+	}
+});
+
+// A peer whose timestamps stop advancing never ages a group out on media time. The wall
+// clock still does.
+test("frozen timestamps still age out by wall clock", () => {
+	const clock = mockMonotonicTime(10_000);
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	const frame = () => producer.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(0) });
+	try {
+		frame();
+		clock.set(10_500);
+		frame();
+		clock.set(11_300);
+		frame();
+
+		// Group 0's successor arrived 800ms ago, group 1's just now.
+		expect(drain(producer.subscribe({ maxDelay: Milli(1000) }))).toEqual([0, 1, 2]);
+		clock.set(11_500);
+		expect(drain(producer.subscribe({ maxDelay: Milli(1000) }))).toEqual([1, 2]);
+		clock.set(12_500);
+		expect(drain(producer.subscribe({ maxDelay: Milli(1000) }))).toEqual([2]);
+	} finally {
+		producer.close();
+		clock.restore();
+	}
+});
+
+// Arrival is per track: a group joining a second track later doesn't restart the first
+// track's clock.
+test("a group shared by two tracks ages each from its own arrival", () => {
+	const clock = mockMonotonicTime(10_000);
+	const first = new TrackProducer("first").accept({});
+	const second = new TrackProducer("second").accept({});
+	try {
+		first.writeFrame({ payload: enc.encode("0") });
+		const shared = new GroupProducer(1);
+		shared.writeFrame({ payload: enc.encode("1") });
+		shared.close();
+		first.writeGroup(shared);
+		clock.set(11_000);
+		second.writeGroup(shared);
+
+		// Group 0's successor joined the first track a full budget ago.
+		expect(drain(first.subscribe({ maxDelay: Milli(1000) }))).toEqual([1]);
+	} finally {
+		first.close();
+		second.close();
+		clock.restore();
+	}
+});
+
+// Groups that arrive at once are judged by media time, which convicts them before the wall
+// clock can.
+test("a startup burst ages out by media time", () => {
+	const clock = mockMonotonicTime(10_000);
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	try {
+		for (let second = 0; second < 5; second++) {
+			producer.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(second * 1000) });
+		}
+		// Group N reaches N + 1 seconds against the 4s edge: groups 0 and 1 are 3s and 2s
+		// behind, past 1.5s. Their successors arrived just now.
+		expect(drain(producer.subscribe({ maxDelay: Milli(1500) }))).toEqual([2, 3, 4]);
+	} finally {
+		producer.close();
+		clock.restore();
+	}
+});
+
+// A read parked on a superseded group is released by the wall clock alone: nothing is
+// written after its successor arrives, so no write could wake it.
+test("a parked read wakes at its wall deadline", async () => {
+	for (const timescale of [undefined, Timescale.MILLI]) {
+		const clock = mockCacheTime(10_000);
+		const producer = new TrackProducer("test").accept({ timescale });
+		try {
+			const track = producer.subscribe({ maxDelay: Milli(1000) });
+			const held = producer.appendGroup();
+			held.writeFrame({ payload: enc.encode("x"), timestamp: timescale && Timestamp.fromMillis(0) });
+			const group = track.tryRecvGroup();
+			if (!group) throw new Error("missing group");
+			expect(await group.readString()).toBe("x");
+
+			// The successor never presents a frame, so media time never bounds the held group.
+			producer.appendGroup();
+			let woken = false;
+			const read = group.readFrame().then((frame) => {
+				woken = true;
+				return frame;
+			});
+			await Promise.resolve();
+
+			clock.advance(10_900);
+			await Promise.resolve();
+			expect(woken).toBe(false);
+			clock.advance(11_000);
+			expect(await read).toBeUndefined();
+		} finally {
+			producer.close();
+			clock.restore();
+		}
+	}
+});
+
+// Empty groups are handed out like any other and retired by the wall clock like an untimed
+// one, whether they finished without a frame or are still open with none. A publisher
+// flooding a run of them cannot pin the group before the run either.
+test("a run of empty groups ages out by wall clock", () => {
+	const RUN = 1000;
+	const clock = mockMonotonicTime(10_000);
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	try {
+		const track = producer.subscribe({ maxDelay: Milli(1000) });
+		producer.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(0) });
+		for (let sequence = 1; sequence <= RUN; sequence++) {
+			const group = producer.appendGroup();
+			if (sequence % 2 === 0) group.close();
+		}
+		producer.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(10) });
+		expect(drain(producer.subscribe({ maxDelay: Milli(1000) }))).toHaveLength(RUN + 2);
+
+		clock.set(11_000);
+		expect(drain(track)).toEqual([RUN + 1]);
+		expect(drain(producer.subscribe({ maxDelay: Milli(1000) }))).toEqual([RUN + 1]);
 	} finally {
 		producer.close();
 		clock.restore();
@@ -1176,9 +1307,10 @@ test("an idle live edge ages out once a newer group arrives", async () => {
 
 test("an abandoned open group ages out with no further write", async () => {
 	const clock = mockCacheTime(10_000);
-	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(30) });
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
 	try {
-		const track = producer.subscribe({ maxDelay: Milli(30) });
+		// A budget past the cache window, so the eviction rather than the budget ends it.
+		const track = producer.subscribe({ maxDelay: Milli(2 * CACHE_WINDOW_MS) });
 		const stalled = producer.appendGroup();
 		stalled.writeFrame(textFrame("first"));
 		producer.appendGroup();
@@ -2191,34 +2323,33 @@ test("a datagram whose timedness disagrees with its track is refused", async () 
 	expect(got?.timestamp).toBeUndefined();
 });
 
-test("an untimed track starts at its latest group", () => {
-	const producer = untimedTrack(5);
+// The wall clock judges an untimed track, so a new subscriber starts at the oldest cached
+// group it doesn't find stale, the way a timed one does: a group is stale once its
+// successor arrived a full budget ago.
+test("an untimed subscriber starts at the oldest fresh group", () => {
+	const clock = mockMonotonicTime(10_000);
+	const producer = new TrackProducer("test").accept({});
+	try {
+		// Group N's successor arrives N + 1 seconds in.
+		for (let i = 0; i < 5; i++) {
+			producer.writeFrame({ payload: enc.encode(`${i}`) });
+			clock.set(10_000 + (i + 1) * 1000);
+		}
 
-	// Nothing on an untimed track is ever stale, so no budget can say where to start.
-	const live = producer.subscribe();
-	expect(drain(live)).toEqual([4]);
-	const patient = producer.subscribe({ maxDelay: Milli(60_000) });
-	expect(drain(patient)).toEqual([4]);
+		// Four seconds after group 4 arrived, groups 0 to 2 were superseded 4, 3, and 2
+		// seconds ago: past a 1.5s budget. Group 3 was superseded 1s ago.
+		expect(drain(producer.subscribe({ maxDelay: Milli(1500) }))).toEqual([3, 4]);
+		// No budget takes the newest group alone, which is never stale.
+		const live = producer.subscribe();
+		expect(drain(live)).toEqual([4]);
+		expect(drain(producer.subscribe({ maxDelay: Milli(60_000) }))).toEqual([0, 1, 2, 3, 4]);
 
-	producer.writeFrame({ payload: enc.encode("5") });
-	expect(drain(live)).toEqual([5]);
-});
-
-test("an unfloored subscriber made before accept starts at the latest group once untimed", () => {
-	const producer = new TrackProducer("test");
-	for (let i = 0; i < 3; i++) producer.appendGroup().close();
-	const early = producer.subscribe();
-	const floored = producer.subscribe({ groups: { start: { included: 0 } } });
-	const named = producer.subscribe();
-	named.setGroups({ start: { included: 1 } });
-
-	producer.accept({});
-	// Settled at accept(), so groups written before the first read still arrive.
-	producer.writeFrame({ payload: enc.encode("3") });
-	producer.writeFrame({ payload: enc.encode("4") });
-	expect(drain(early)).toEqual([2, 3, 4]);
-	expect(drain(floored)).toEqual([0, 1, 2, 3, 4]);
-	expect(drain(named)).toEqual([1, 2, 3, 4]);
+		producer.writeFrame({ payload: enc.encode("5") });
+		expect(drain(live)).toEqual([5]);
+	} finally {
+		producer.close();
+		clock.restore();
+	}
 });
 
 test("an untimed subscriber without a start begins at the latest group under its end", () => {
@@ -2243,7 +2374,7 @@ test("accept closes the track when something written before it disagrees", async
 
 test("a single-frame write that throws aborts its group", () => {
 	const producer = new TrackProducer("test").accept({});
-	const subscriber = producer.subscribe();
+	const subscriber = producer.subscribe({ maxDelay: Milli(60_000) });
 	// A timestamped frame is refused by an untimed track.
 	expect(() => producer.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(1) })).toThrow(
 		TimestampMismatch,
@@ -2257,15 +2388,15 @@ test("a single-frame write that throws aborts its group", () => {
 	expect(drain(subscriber)).toEqual([1]);
 });
 
-test("an explicit start holds on an untimed track, and nothing there is stale", () => {
+// An explicit start is a floor, not a request: the budget still skips what it finds stale
+// above it, as on a timed track.
+test("an explicit start floors an untimed track", () => {
 	const producer = untimedTrack(5);
 
-	// A named start says how far back to reach (a resume names the group it lacks), and a
-	// zero budget convicts nothing that has no place in media time.
-	const resumed = producer.subscribe({ groups: { start: { included: 2 } } });
+	const resumed = producer.subscribe({ maxDelay: Milli(60_000), groups: { start: { included: 2 } } });
 	expect(drain(resumed)).toEqual([2, 3, 4]);
-	const replay = producer.subscribe({ groups: { start: { included: 0 } } });
-	expect(drain(replay)).toEqual([0, 1, 2, 3, 4]);
+	const live = producer.subscribe({ groups: { start: { included: 2 } } });
+	expect(drain(live)).toEqual([4]);
 });
 
 test("a mid-group end survives eviction and a filtered late reader", () => {

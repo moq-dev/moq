@@ -8,7 +8,6 @@ import { BroadcastCache } from "../consume.ts";
 import * as DatagramStream from "../datagram_stream.ts";
 import type * as Epoch from "../epoch.ts";
 import {
-	closeReason,
 	controlTimeout,
 	error,
 	ProtocolViolation,
@@ -39,6 +38,7 @@ import {
 	decodeAnnounceBroadcastMaybe,
 } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
+import { closeViolation } from "./error.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
 import { frameDecoder, type Group as GroupMessage, readFrames } from "./group.ts";
 import { Probe } from "./probe.ts";
@@ -142,18 +142,9 @@ interface SubscribeEntry {
 	held?: Stream;
 }
 
-/**
- * Handles subscribing to broadcasts and managing their lifecycle.
- *
+/** Subscribe to the peer and own its receive-side protocol tasks.
  * @internal
  */
-// What we close a session with on a protocol violation.
-//
-// The draft names the condition but assigns no numbers, so this is the Rust
-// implementation's code for `Error::ProtocolViolation`: matching it is what makes the
-// two report the same thing, where the default 0 would tell the peer it closed cleanly.
-const PROTOCOL_VIOLATION_CODE = 15;
-
 export class Subscriber {
 	#quic: WebTransport;
 	// Advertisements the peer holds live across every announce stream on this session.
@@ -593,9 +584,7 @@ export class Subscriber {
 			// A violation ends the session, not just this stream, so a nonconforming peer
 			// cannot repeat it on the next one. Matches `ietf::Subscriber` and the Rust
 			// lite subscriber, where the announce half only ever ends the session on error.
-			if (e instanceof ProtocolViolation) {
-				this.#quic.close({ closeCode: PROTOCOL_VIOLATION_CODE, reason: closeReason(reason(e)) });
-			}
+			closeViolation(this.#quic, e);
 		} finally {
 			// Release only this interest's routes. Existing consumers remain pinned.
 			for (const path of advertised.keys()) this.#consumes.withdraw(path, announced);
@@ -722,6 +711,7 @@ export class Subscriber {
 			);
 			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
+			closeViolation(this.#quic, err);
 			// The setup outlived its deadline waiting for the first response: a control
 			// timeout, not content that arrived late. A revocation says so instead.
 			const e =
@@ -766,7 +756,9 @@ export class Subscriber {
 				tailSettled = true;
 			});
 			// A reset that lands after the race below settled is moot; the race observes one before.
-			closed.catch(() => {});
+			void closed.catch((err: unknown) => {
+				closeViolation(this.#quic, err);
+			});
 			const subscriptionUpdates =
 				this.version === Version.DRAFT_01 || this.version === Version.DRAFT_02
 					? undefined
@@ -925,6 +917,7 @@ export class Subscriber {
 			closed.throwIfAborted();
 			return await untilAborted(run(stream), closed);
 		} catch (err) {
+			closeViolation(this.#quic, err);
 			stream.abort(error(err));
 			throw err;
 		} finally {
@@ -1467,6 +1460,9 @@ export class Subscriber {
 		const stop = () => scope.close();
 		abort.addEventListener("abort", stop, { once: true });
 		if (abort.aborted) stop();
+
+		// Probe is best-effort: transport failures stay per-stream, but malformed control
+		// input ends the session. Drop the estimates so consumers know they're stale.
 		try {
 			// Lite-05+ gates PROBE on the peer advertising Probe >= Report in its SETUP.
 			if (this.#peerSetup) {
@@ -1496,6 +1492,7 @@ export class Subscriber {
 				});
 			}
 		} catch (err: unknown) {
+			closeViolation(this.#quic, err);
 			if (!this.#closed.signal.aborted) {
 				console.warn("probe stream error", err);
 			}

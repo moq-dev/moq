@@ -16,17 +16,18 @@ import { withTimeout } from "../util/timeout.ts";
 import { registerWire } from "../wire.ts";
 import { AnnounceRequest } from "./announce.ts";
 import { LiteAuthWire } from "./auth.ts";
+import { closeViolation } from "./error.ts";
 import { Fetch } from "./fetch.ts";
 import { Goaway } from "./goaway.ts";
 import { Group } from "./group.ts";
 import { Publisher } from "./publisher.ts";
 import { SessionInfo } from "./session.ts";
-import { ProbeLevel, type Role, Setup } from "./setup.ts";
+import { hasClientParameters, ProbeLevel, type Role, Setup } from "./setup.ts";
 import { DataType, StreamId } from "./stream.ts";
 import { Subscribe } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { Track as TrackMessage } from "./track.ts";
-import { hasAuth, hasDatagrams, hasProbeRtt, hasSetupStream, type Version, versionName } from "./version.ts";
+import { hasAuth, hasDatagrams, hasProbeRtt, hasSetupStream, Version, versionName } from "./version.ts";
 
 /**
  * Constructor options for {@link Connection}.
@@ -156,7 +157,7 @@ export class Connection implements Established {
 		});
 		this.#auth.violated.subscribe((err) => {
 			if (!err) return;
-			this.#quic.close({ closeCode: err.code, reason: err.message });
+			closeViolation(this.#quic, err);
 			this.abort();
 		});
 
@@ -304,12 +305,8 @@ export class Connection implements Established {
 				.catch((err: unknown) => {
 					stream.writer.reset(err);
 					// A protocol violation on one stream is the peer breaking the session.
-					// Resetting that stream leaves it free to repeat the violation; a duplicate
-					// GOAWAY is the one this dispatcher raises.
-					if (err instanceof ProtocolViolation) {
-						this.#quic.close({ closeCode: err.code, reason: err.message });
-						this.abort();
-					}
+					// Resetting that stream would leave it free to repeat malformed input.
+					if (closeViolation(this.#quic, err)) this.abort();
 				})
 				.finally(() => {
 					stream.writer.close();
@@ -320,8 +317,10 @@ export class Connection implements Established {
 	async #runBidi(stream: Stream) {
 		const typ = await stream.reader.u53();
 
+		// A type this version does not know, including one it predates, is an extension stream
+		// opened without negotiating it: a plain error resets the stream and keeps the session.
 		if (typ === StreamId.Session) {
-			throw new Error("duplicate session stream");
+			throw new ProtocolViolation("duplicate session stream");
 		} else if (typ === StreamId.Announce) {
 			const msg = await AnnounceRequest.decode(stream.reader, this.#version);
 			await this.#publisher.runAnnounce(msg, stream);
@@ -334,6 +333,7 @@ export class Connection implements Established {
 				})(),
 			);
 		} else if (typ === StreamId.Fetch) {
+			if (!hasSetupStream(this.#version)) throw new Error("FETCH is not supported on this version");
 			await this.#publisher.owe(
 				(async () => {
 					const msg = await Fetch.decode(stream.reader, this.#version);
@@ -341,6 +341,7 @@ export class Connection implements Established {
 				})(),
 			);
 		} else if (typ === StreamId.Track) {
+			if (!hasSetupStream(this.#version)) throw new Error("TRACK is not supported on this version");
 			await this.#publisher.owe(
 				(async () => {
 					const msg = await TrackMessage.decode(stream.reader, this.#version);
@@ -348,13 +349,23 @@ export class Connection implements Established {
 				})(),
 			);
 		} else if (typ === StreamId.Probe) {
+			if (this.#version === Version.DRAFT_01 || this.#version === Version.DRAFT_02)
+				throw new Error("PROBE is not supported on this version");
 			await this.#publisher.runProbe(stream);
 		} else if (typ === StreamId.Auth) {
+			if (!hasAuth(this.#version)) throw new Error("AUTH is not supported on this version");
 			await this.#auth.serve(stream);
 		} else if (typ === StreamId.Goaway) {
+			if (
+				this.#version === Version.DRAFT_01 ||
+				this.#version === Version.DRAFT_02 ||
+				this.#version === Version.DRAFT_03
+			)
+				throw new Error("GOAWAY is not supported on this version");
 			const msg = await Goaway.decode(stream.reader, this.#version);
 			// A peer sends at most one; a second is a protocol violation.
 			if (this.#goaway.peek() !== undefined) throw new ProtocolViolation("duplicate GOAWAY");
+			if (!this.#client && msg.uri !== "") throw new ProtocolViolation("client GOAWAY URI must be empty");
 			this.#goaway.set({ uri: msg.uri });
 		} else {
 			throw new Error(`unknown stream type: ${typ.toString()}`);
@@ -374,9 +385,7 @@ export class Connection implements Established {
 				})
 				.catch((err: unknown) => {
 					stream.stop(err);
-					if (err instanceof ProtocolViolation) {
-						this.#quic.close({ closeCode: err.code, reason: err.message });
-					}
+					if (err instanceof ProtocolViolation) closeViolation(this.#quic, err);
 				});
 		}
 	}
@@ -397,6 +406,10 @@ export class Connection implements Established {
 			const setup = await Setup.decode(stream, this.#version).catch((err: unknown) => {
 				throw new ProtocolViolation("invalid SETUP", { cause: err });
 			});
+			if (this.#client && hasClientParameters(setup))
+				throw new ProtocolViolation("server SETUP contains Path or Role");
+			if (!this.#client && setup.path !== undefined)
+				throw new ProtocolViolation("Path on a URI-carrying binding");
 			this.#peerSetup.set(setup);
 			this.#peerRole.set(setup.role);
 		} else {
