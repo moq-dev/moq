@@ -342,6 +342,21 @@ impl Drop for MoqMediaTimebase {
 	}
 }
 
+/// Reserve a container's catalog slot under the owner lock, from `timebase` when shared, so the
+/// importer is constructed after the lock is released.
+fn reserve_container(
+	broadcast: &MoqBroadcastProducer,
+	timebase: Option<&MoqMediaTimebase>,
+) -> Result<(moq_net::broadcast::Producer, moq_mux::catalog::Reserved<Extra>), MoqError> {
+	broadcast.with_state(|state| {
+		let reserved = match timebase {
+			Some(timebase) => timebase.reserve(broadcast, state)?,
+			None => state.catalog.reserve(),
+		};
+		Ok((state.broadcast.clone(), reserved))
+	})
+}
+
 /// A container format, its leading bytes, and an optional shared source timebase.
 ///
 /// A container publishes and describes its own tracks, so there is no label or hint here: a
@@ -792,17 +807,11 @@ impl MoqMediaContainerProducer {
 	) -> Result<Arc<MoqMediaContainerProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let native = moq_mux::import::ContainerInit::new(init.format.into(), init.data);
-		let import = broadcast.with_state(|state| {
-			let reserved = init
-				.timebase
-				.as_ref()
-				.map(|timebase| timebase.reserve(broadcast, state))
-				.transpose()?
-				.unwrap_or_else(|| state.catalog.reserve());
-			moq_mux::import::Container::new(state.broadcast.clone(), reserved, &native).map_err(|err| MoqError::Codec {
+		let (target, reserved) = reserve_container(broadcast, init.timebase.as_deref())?;
+		let import =
+			moq_mux::import::Container::new(target, reserved, &native).map_err(|err| MoqError::Codec {
 				reason: format!("init failed: {err}"),
-			})
-		})?;
+			})?;
 
 		Ok(Arc::new(MoqMediaContainerProducer {
 			inner: std::sync::Mutex::new(Some(ContainerProducer { import })),
@@ -854,18 +863,11 @@ impl MoqMediaContainerStreamProducer {
 		init: MoqContainerStreamInit,
 	) -> Result<Arc<MoqMediaContainerStreamProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let import = broadcast.with_state(|state| {
-			let reserved = init
-				.timebase
-				.as_ref()
-				.map(|timebase| timebase.reserve(broadcast, state))
-				.transpose()?
-				.unwrap_or_else(|| state.catalog.reserve());
-			moq_mux::import::ContainerStream::new(state.broadcast.clone(), reserved, init.format.into()).map_err(
-				|err| MoqError::Codec {
-					reason: format!("init failed: {err}"),
-				},
-			)
+		let (target, reserved) = reserve_container(broadcast, init.timebase.as_deref())?;
+		let import = moq_mux::import::ContainerStream::new(target, reserved, init.format.into()).map_err(|err| {
+			MoqError::Codec {
+				reason: format!("init failed: {err}"),
+			}
 		})?;
 
 		Ok(Arc::new(MoqMediaContainerStreamProducer {
