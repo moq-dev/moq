@@ -16,6 +16,9 @@ use std::time::{Duration, Instant};
 
 const WARMUP: u64 = 3;
 
+/// Far longer than any honest round, so only a wedged read trips it.
+const ROUND_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Each case's origin cache budget: far above one round's groups, so eviction only
 /// reclaims groups every subscriber has read, and memory stays flat over a long run.
 const CACHE_BYTES: u64 = 64 << 20;
@@ -94,13 +97,15 @@ impl Report {
 		F: FnMut(u64) -> Fut,
 		Fut: Future<Output = ()>,
 	{
+		// The test runs many budgets back to back, so a wedged read is caught per round, not by nextest.
+		let mut run = |n| tokio::time::timeout(ROUND_TIMEOUT, round(n));
 		for n in 0..WARMUP {
-			round(n).await;
+			run(n).await.expect("round wedged");
 		}
 		let (start, cpu_start, budget) = (Instant::now(), cpu(), budget());
 		let mut n = WARMUP;
 		while start.elapsed() < budget {
-			round(n).await;
+			run(n).await.expect("round wedged");
 			n += 1;
 		}
 		let (wall, cpu) = (start.elapsed(), cpu() - cpu_start);
@@ -144,7 +149,13 @@ fn check(case: &Case, round: u64, frame: usize, want: &[u8], payload: &[u8], tim
 	assert_eq!(timestamp_us, Some(round * case.frames() as u64 + frame as u64));
 }
 
-async fn ffi_round(case: &Case, tracks: &[Arc<MoqTrackProducer>], consumers: &[Arc<MoqTrackConsumer>], n: u64) {
+async fn ffi_round(
+	case: &Case,
+	payload: &[u8],
+	tracks: &[Arc<MoqTrackProducer>],
+	consumers: &[Arc<MoqTrackConsumer>],
+	n: u64,
+) {
 	let readers: Vec<_> = consumers
 		.iter()
 		.map(|consumer| {
@@ -160,12 +171,11 @@ async fn ffi_round(case: &Case, tracks: &[Arc<MoqTrackProducer>], consumers: &[A
 			})
 		})
 		.collect();
-	let payload = case.payload();
 	for track in tracks {
 		let group = track.append_group().unwrap();
 		for f in 0..case.frames() {
 			let frame = MoqFrame {
-				payload: payload.clone(),
+				payload: payload.to_vec(),
 				timestamp_us: Some(n * case.frames() as u64 + f as u64),
 			};
 			group.write_frame(frame).unwrap();
@@ -174,7 +184,7 @@ async fn ffi_round(case: &Case, tracks: &[Arc<MoqTrackProducer>], consumers: &[A
 	}
 	for reader in readers {
 		for (f, (read, timestamp_us)) in reader.await.unwrap().into_iter().enumerate() {
-			check(case, n, f, &payload, &read, timestamp_us);
+			check(case, n, f, payload, &read, timestamp_us);
 		}
 	}
 }
@@ -182,6 +192,7 @@ async fn ffi_round(case: &Case, tracks: &[Arc<MoqTrackProducer>], consumers: &[A
 /// Subscribers are not shared handles, so each reader task borrows one for the round and returns it.
 async fn net_round(
 	case: &Case,
+	payload: &[u8],
 	mut tracks: Vec<moq_net::track::Producer>,
 	consumers: Vec<moq_net::track::Subscriber>,
 	n: u64,
@@ -201,7 +212,6 @@ async fn net_round(
 			})
 		})
 		.collect();
-	let payload = bytes::Bytes::from(case.payload());
 	for track in &mut tracks {
 		let mut group = track.append_group().unwrap();
 		for f in 0..case.frames() {
@@ -215,7 +225,7 @@ async fn net_round(
 	for reader in readers {
 		let (consumer, read) = reader.await.unwrap();
 		for (f, (read, timestamp_us)) in read.into_iter().enumerate() {
-			check(case, n, f, &payload, &read, timestamp_us);
+			check(case, n, f, payload, &read, timestamp_us);
 		}
 		consumers.push(consumer);
 	}
@@ -236,8 +246,9 @@ async fn rust_ffi() {
 			.iter()
 			.flat_map(|track| (0..case.subscribers).map(|_| track.consume(None).unwrap()))
 			.collect();
+		let payload = case.payload();
 		report
-			.throughput(&case, |n| ffi_round(&case, &tracks, &consumers, n))
+			.throughput(&case, |n| ffi_round(&case, &payload, &tracks, &consumers, n))
 			.await;
 	}
 
@@ -275,11 +286,12 @@ async fn rust_net() {
 				.flat_map(|track| (0..case.subscribers).map(|_| track.subscribe(None)))
 				.collect::<Vec<_>>(),
 		);
+		let payload = case.payload();
 		// Producers are shared handles, so each round appends through its own clones.
-		let (case, tracks, consumers) = (&case, &tracks, &consumers);
+		let (case, payload, tracks, consumers) = (&case, &payload, &tracks, &consumers);
 		report
 			.throughput(case, |n| async move {
-				let returned = net_round(case, tracks.clone(), consumers.take(), n).await;
+				let returned = net_round(case, payload, tracks.clone(), consumers.take(), n).await;
 				consumers.replace(returned);
 			})
 			.await;
