@@ -261,6 +261,8 @@ export class Broadcast {
 			...(this.#served?.keys() ?? []),
 			...this.#listed.keys(),
 			...Object.keys(this.#renditions.peek()),
+			// Every ID that held a track here, even one removed before it had a config.
+			...this.#kinds.keys(),
 			...Object.values(this.#names.peek()),
 		]);
 		// A no-op edit is the catalog's only read; it publishes nothing.

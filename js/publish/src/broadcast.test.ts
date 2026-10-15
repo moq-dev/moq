@@ -495,6 +495,29 @@ test("a minted track name skips names already in the catalog", async () => {
 	broadcast.close();
 });
 
+// A removed rendition keeps its network track, so its name stays taken even if it never had a config.
+test("a minted track name skips a removed rendition's track", async () => {
+	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("removed.hang") });
+	const removed = broadcast.video("video/1");
+	await settle();
+	removed.close();
+	const video = broadcast.video("video");
+	video.config.set(videoConfig);
+	await settle();
+
+	video.config.set({ ...videoConfig, codec: "vp8" });
+	await settle();
+	expect((await readCatalog(broadcast))?.video?.renditions.video?.track).toBe("video/2");
+	const net = broadcast.net.peek();
+	if (!net) throw new Error("expected a network producer once connected");
+	const subscriber = net.track("video/2").subscribe();
+	await settle();
+	expect(video.track.peek()?.name).toBe("video/2");
+
+	subscriber.close();
+	broadcast.close();
+});
+
 // The served identity is a snapshot, so a producer mutating a container it shares can't rewrite it.
 test("mutating a shared container still takes a fresh track name", async () => {
 	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("shared.hang") });
