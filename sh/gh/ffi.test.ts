@@ -97,5 +97,14 @@ test("Nightly and alert chains retain packaged outputs with one shared producer"
 	expect(nightly.jobs.sizes.needs).toContain("release-shared-ffi");
 	expect(nightly.jobs["release-py-ffi"]).toBeDefined();
 	expect(nightly.jobs["release-dart-ffi"]).toBeDefined();
+	// A called workflow's jobs cannot exceed the caller's grant, so a dry-run
+	// of a gated wrapper must pass on the gate's permissions.
+	for (const [name, job] of Object.entries(nightly.jobs)) {
+		const file = job.uses?.match(/^\.\/\.github\/workflows\/(.+)\.yml$/)?.[1];
+		const gate = file ? (await read(file)).jobs["ffi-release"] : undefined;
+		if (!gate) continue;
+		for (const [scope, level] of Object.entries(gate.permissions ?? {}))
+			expect([name, scope, job.permissions?.[scope]]).toEqual([name, scope, level]);
+	}
 	expect((await read("alert")).on.workflow_run?.workflows).toContain("Release FFI");
 });
