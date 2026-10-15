@@ -79,4 +79,3 @@ so the first frame read is its own trigger.
 ## Related
 
 - [Consumer warmup](/quest/m2/intra-refresh/consumer-warmup.md) - the `recovery_frame_cnt > 0` case this rule does not cover
-- [Audio warmup](/quest/m1/audio-warmup.md) - keys its Opus pre-roll trim on the same signal

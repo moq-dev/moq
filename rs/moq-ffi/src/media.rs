@@ -148,8 +148,7 @@ pub struct MoqAudio {
 pub struct MoqFrame {
 	/// The frame payload.
 	pub payload: Vec<u8>,
-	/// Presentation timestamp in microseconds, or null on a frame read from an untimed
-	/// track. A raw track published here is timed, so writing one needs it.
+	/// Presentation timestamp in microseconds, or null on an untimed track, on both publish and receive.
 	#[uniffi(default = None)]
 	pub timestamp_us: Option<u64>,
 }
@@ -174,8 +173,7 @@ pub struct MoqDatagram {
 	/// Per-track sequence number, shared with groups.
 	#[uniffi(default = 0)]
 	pub sequence: u64,
-	/// Presentation timestamp in microseconds, or null on a datagram read from an untimed
-	/// track. A raw track published here is timed, so appending one needs it.
+	/// Presentation timestamp in microseconds, or null on an untimed track, on both publish and receive.
 	#[uniffi(default = None)]
 	pub timestamp_us: Option<u64>,
 	/// Datagram payload, capped at 1200 bytes.
@@ -555,6 +553,16 @@ impl MoqMediaCatalogProducer {
 		}))
 	}
 
+	/// Read the broadcast clock in microseconds, fixing it for subsequent media producers.
+	pub fn now(&self) -> Result<u64, MoqError> {
+		let _guard = crate::ffi::enter();
+		self.broadcast.upgrade().ok_or(MoqError::Closed)?.with_state(|state| {
+			u64::try_from(state.catalog.clock().now().as_micros()).map_err(|_| MoqError::Codec {
+				reason: "broadcast clock exceeds microsecond timestamp range".into(),
+			})
+		})
+	}
+
 	/// Replace shared video properties, clearing fields that are absent.
 	///
 	/// Rotation is clockwise and normalized to the nearest quarter turn.
@@ -817,19 +825,19 @@ impl MoqMediaTrackProducer {
 	/// Write `frame` to this track.
 	///
 	/// The importer derives keyframe status from the bitstream, so a [`MoqFrame`] carries only the
-	/// payload and its timestamp.
+	/// payload and its caller-supplied timestamp. A missing timestamp is refused.
 	pub fn write_frame(&self, frame: MoqFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let media = guard.as_mut().ok_or(MoqError::Closed)?;
 
-		let timestamp = frame
-			.timestamp_us
-			.map(hang::container::Timestamp::from_micros)
-			.transpose()?;
+		let timestamp =
+			hang::container::Timestamp::from_micros(frame.timestamp_us.ok_or_else(|| MoqError::Codec {
+				reason: "whole media frames require a timestamp".into(),
+			})?)?;
 		media
 			.import
-			.decode(&frame.payload, timestamp)
+			.decode(&frame.payload, Some(timestamp))
 			.map_err(|err| MoqError::Codec {
 				reason: format!("decode failed: {err}"),
 			})?;
@@ -1299,6 +1307,7 @@ mod catalog_tests {
 			Err(MoqError::Closed)
 		));
 		assert!(matches!(catalog.remove_section("app".into()), Err(MoqError::Closed)));
+		assert!(matches!(catalog.now(), Err(MoqError::Closed)));
 	}
 
 	#[test]
@@ -1306,6 +1315,7 @@ mod catalog_tests {
 		let broadcast = MoqBroadcastProducer::new().unwrap();
 		let catalog = MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
 		broadcast.close().unwrap();
+		assert!(matches!(catalog.now(), Err(MoqError::Closed)));
 		assert!(matches!(
 			catalog.set_video_properties(MoqVideoProperties::default()),
 			Err(MoqError::Closed)

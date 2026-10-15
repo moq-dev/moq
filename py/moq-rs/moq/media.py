@@ -100,6 +100,10 @@ class CatalogProducer:
     def __init__(self, broadcast: BroadcastProducer) -> None:
         self._inner = MoqMediaCatalogProducer(broadcast._inner)
 
+    def now(self) -> timedelta:
+        """Read the broadcast clock, fixing it for subsequent media producers."""
+        return _from_us(self._inner.now())
+
     def set_video_properties(self, properties: VideoProperties) -> None:
         """Replace the video properties shared by every rendition."""
         self._inner.set_video_properties(properties)
@@ -137,7 +141,7 @@ class TrackProducer:
         """A watch-only handle to whether this media track has subscribers."""
         return TrackDemand(self._inner.demand())
 
-    def write_frame(self, payload: bytes, timestamp: timedelta = timedelta(0)) -> None:
+    def write_frame(self, payload: bytes, timestamp: timedelta) -> None:
         """Write one encoded frame with a presentation timestamp."""
         self._inner.write_frame(Frame(payload, timestamp)._ffi())
 

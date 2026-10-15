@@ -101,3 +101,8 @@ arrivals-bench:
 clock-bench:
     bun install --frozen-lockfile
     bun clock/bench/timers.ts
+
+# Sweep decoder count against PCM callback size during audio warmup.
+audio-warmup-bench:
+    bun install --frozen-lockfile
+    bun watch/bench/warmup.ts
