@@ -47,14 +47,11 @@ pub(super) fn poll_withdrawn<S: crate::transport::poll::Session>(
 	cx: &mut Context<'_>,
 ) -> Poll<()> {
 	// Drafts 14-16 deliver the terminal message (UNSUBSCRIBE, PUBLISH_NAMESPACE_DONE) ahead of
-	// the FIN, so a waiting message that is not an update already withdraws the request. Their
-	// virtual writers are closed while the control request lives, so only the reader counts.
+	// the FIN, so a waiting message that is not an update already withdraws the request, even
+	// behind updates. Their virtual writers are closed while the control request lives, so only
+	// the reader counts.
 	if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
-		return match stream.reader.poll_varint_peek(cx) {
-			Poll::Ready(Ok(id)) if id == super::SubscribeUpdate::ID => Poll::Pending,
-			Poll::Ready(_) => Poll::Ready(()),
-			Poll::Pending => Poll::Pending,
-		};
+		return stream.reader.poll_decode_peek_maybe::<LegacyEnd>(cx).map(|_| ());
 	}
 	if stream.writer.poll_closed(cx).is_ready() {
 		return Poll::Ready(());
@@ -103,6 +100,18 @@ impl Decode<Version> for FollowUp {
 			true => Self::Update(body),
 			false => Self::End,
 		})
+	}
+}
+
+/// The first draft 14-16 message that ends the request, found by skipping whole updates. Only
+/// peeked, so the updates stay queued for once the request is answered.
+#[derive(Debug)]
+struct LegacyEnd;
+
+impl Decode<Version> for LegacyEnd {
+	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+		while let FollowUp::Update(_) = FollowUp::decode(r, version)? {}
+		Ok(Self)
 	}
 }
 
