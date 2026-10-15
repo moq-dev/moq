@@ -10,13 +10,15 @@ export class Manual {
 	/** The reproducible starting wall time, 2025-01-01T00:00:00Z. */
 	static readonly WALL_START = Wall(1_735_689_600_000);
 	#now = Instant.zero;
-	#wall = Manual.WALL_START;
+	// Wall time is derived from an anchor so tiny advances don't vanish into an epoch-sized float.
+	#wallAnchor = Manual.WALL_START;
+	#wallAnchorAt = Instant.zero;
 	#timers: Timer[] = [];
 	#order = 0;
 	#revision = 0;
 	#backend: Backend = {
 		now: () => this.#now,
-		wall: () => this.#wall,
+		wall: () => this.wall(),
 		arm: (at, ready) => {
 			const timer = { at, order: this.#order++, index: this.#timers.length, ready };
 			this.#timers.push(timer);
@@ -41,15 +43,12 @@ export class Manual {
 
 	/** Read this clock's wall time without installing it. */
 	wall(): Wall {
-		return this.#wall;
+		return Wall.add(this.#wallAnchor, Instant.durationSince(this.#now, this.#wallAnchorAt));
 	}
 
 	/** Move the instant and wall time forward by a duration. */
 	advance(duration: Nano): void {
-		const next = Instant.add(this.#now, duration);
-		const wall = Wall.add(this.#wall, duration);
-		this.#now = next;
-		this.#wall = wall;
+		this.#now = Instant.add(this.#now, duration);
 		this.#fire();
 	}
 
@@ -66,7 +65,8 @@ export class Manual {
 
 	/** Set wall time forward or backward without passing monotonic time. */
 	stepWall(wall: Wall): void {
-		this.#wall = Wall(wall);
+		this.#wallAnchor = Wall(wall);
+		this.#wallAnchorAt = this.#now;
 	}
 
 	#before(a: Timer, b: Timer): boolean {

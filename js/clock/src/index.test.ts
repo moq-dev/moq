@@ -62,6 +62,13 @@ test("manual reads and wall corrections share a clock without inventing elapsed 
 	expect<number>(clock.wall()).toBe(Manual.WALL_START + 1001);
 });
 
+test("many small advances move wall time by their combined duration", () => {
+	const clock = new Manual();
+	for (let i = 0; i < 10_000; i++) clock.advance(Nano(100));
+	expect<number>(clock.now()).toBe(1_000_000);
+	expect<number>(clock.wall()).toBe(Manual.WALL_START + 1);
+});
+
 test("installation restores nested and out-of-order scopes without reviving them", () => {
 	const outer = manual();
 	outer.advance(Nano(4));
