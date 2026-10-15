@@ -99,8 +99,8 @@ Decisions settled while planning, recorded so review does not relitigate them:
   SUBSCRIBE_OK. Rust is `moq_net::auth` with `auth::Grant`, `auth::Handle`,
   `auth::Token`, and `auth::Request`; JS mirrors as `connection.auth`.
 
-`Session::auth()` is additive, while the request-token hook intentionally
-changes the Rust acceptor API as described above. The relay derives the grant
+`Session::auth()` is additive, and so is the request-token hook: its opt-in
+`scoped()` queue sits beside the unchanged `requests()`. The relay derives the grant
 from the origin handles it already scopes. Decided 2026-10-05: wire
 work targets the wip lite version until the maintainer cuts it, never a
 published version in place, so AUTH lands in `moq-lite-07-wip` (or whichever
