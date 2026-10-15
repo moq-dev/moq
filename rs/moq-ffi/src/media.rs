@@ -808,10 +808,9 @@ impl MoqMediaContainerProducer {
 		let _guard = crate::ffi::enter();
 		let native = moq_mux::import::ContainerInit::new(init.format.into(), init.data);
 		let (target, reserved) = reserve_container(broadcast, init.timebase.as_deref())?;
-		let import =
-			moq_mux::import::Container::new(target, reserved, &native).map_err(|err| MoqError::Codec {
-				reason: format!("init failed: {err}"),
-			})?;
+		let import = moq_mux::import::Container::new(target, reserved, &native).map_err(|err| MoqError::Codec {
+			reason: format!("init failed: {err}"),
+		})?;
 
 		Ok(Arc::new(MoqMediaContainerProducer {
 			inner: std::sync::Mutex::new(Some(ContainerProducer { import })),
