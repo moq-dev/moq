@@ -1405,7 +1405,9 @@ async fn join_after(earlier: Earlier, start_us: u64) {
 				)
 				.unwrap();
 			let mut stream = catalog.binary_stream(track, crate::binary::Config::default()).unwrap();
-			stream.append(&b"before"[..]).unwrap();
+			stream
+				.append(moq_net::Timed::from(&b"before"[..]).at(catalog.clock().now()))
+				.unwrap();
 			Some(stream)
 		}
 		Earlier::Capture => None,
@@ -1420,7 +1422,9 @@ async fn join_after(earlier: Earlier, start_us: u64) {
 	fmp4.decode(&live_session(start_us, 20)).unwrap();
 	let after = clock.now().as_micros();
 	if let Some(stream) = data.as_mut() {
-		stream.append(&b"after"[..]).unwrap();
+		stream
+			.append(moq_net::Timed::from(&b"after"[..]).at(catalog.clock().now()))
+			.unwrap();
 	}
 	fmp4.finish().unwrap();
 
