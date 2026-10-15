@@ -18,7 +18,7 @@ Decided in the 2026-10-14 planning interview:
 - Replaces the freeze rule for players. Live with stripes is better than a
   frozen picture. Rust players follow in
   [native dual decoder](/quest/m2/intra-refresh/native-dual-decoder.md); only
-  the transcoder keeps the freeze plan in
+  the transcoder avoids stripes, by decoding history per
   [consumer warmup](/quest/m2/intra-refresh/consumer-warmup.md).
 - Budgets: the min-delay decoder skips at the app's latency target (today's
   `sync.out.maxDelay`). The max-delay decoder skips at that target plus the
@@ -82,4 +82,4 @@ Decided in the 2026-10-14 planning interview:
 
 - [H.264 import](/quest/m2/intra-refresh/h264-import.md) - publishes the real `warmup` for an end-to-end x264 check
 - [Native dual decoder](/quest/m2/intra-refresh/native-dual-decoder.md) - the same behavior for Rust players
-- [Consumer warmup](/quest/m2/intra-refresh/consumer-warmup.md) - the transcoder's freeze, which players no longer use
+- [Consumer warmup](/quest/m2/intra-refresh/consumer-warmup.md) - the transcoder decodes history so it never encodes stripes
