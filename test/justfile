@@ -117,6 +117,11 @@ audio-quality-record *args:
 drill-sensitivity *args:
     ./drill/sensitivity.sh "$@"
 
+# Select or run the PR's affected sensitivity mutations against its base.
+[positional-arguments]
+drill-pr mode base="":
+    python3 ./drill/pr.py "$@"
+
 # Round-trips a PCR-paced TS through a relay and checks the subscriber's `export
 # ts` output with FFmpeg, TSDuck and a custom analyzer (the T-STD buffer model, PCR
 # spacing and byte schedule). Flags: `--analyze-only file.ts`
