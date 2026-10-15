@@ -5,8 +5,9 @@
 A publisher or subscriber renews the credential behind a live request
 without reopening it. A `Route` or `Subscription` holds an optional
 `moq_net::Auth`; when the application swaps it, the session sends
-REQUEST_UPDATE (moq-transport) or SUBSCRIBE_UPDATE / ANNOUNCE_UPDATE (lite)
-naming the new auth, and the request stays up. The first consumer is a client that keeps a
+REQUEST_UPDATE (moq-transport) naming the new auth; on lite a `Route` renews
+via ANNOUNCE_UPDATE and a `Subscription` via SUBSCRIBE_UPDATE. The request
+stays up. The first consumer is a client that keeps a
 PUBLISH_NAMESPACE alive past its credential's expiry by sending
 REQUEST_UPDATE with a fresh token before it expires.
 
