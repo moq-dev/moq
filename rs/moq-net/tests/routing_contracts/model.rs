@@ -457,6 +457,7 @@ impl Net {
 		let state = &mut self.nodes[node];
 		state.rx.remove(&id);
 		state.fd.remove(&id);
+		state.filed.retain(|(_, key), _| *key != id);
 		self.advertise(node);
 	}
 
@@ -526,7 +527,10 @@ impl Net {
 				return;
 			}
 			let key = qualified(grant.subject, id);
-			self.nodes[at].filed.insert((from, key), id);
+			match update.advert {
+				Some(_) => self.nodes[at].filed.insert((from, key), id),
+				None => self.nodes[at].filed.remove(&(from, key)),
+			};
 			id = key;
 		}
 		let state = &mut self.nodes[at];
@@ -545,6 +549,11 @@ impl Net {
 	/// `next` advertised, if `node` qualified it by `next`'s subject.
 	fn name(&self, node: Node, next: Node, id: Id) -> Id {
 		self.nodes[node].filed.get(&(next, id)).copied().unwrap_or(id)
+	}
+
+	/// How many qualified keys `node` remembers the forwarded name of.
+	pub fn aliases(&self, node: Node) -> usize {
+		self.nodes[node].filed.len()
 	}
 
 	/// How many identities `node` holds routes to.
@@ -638,7 +647,12 @@ impl Net {
 				continue;
 			}
 			let selected = self.route(node, id);
-			if let Some(selected) = selected {
+			// The feasibility distance tracks finite updates actually sent (RFC 8966 s3.7.3).
+			if let Some(selected) = selected
+				&& peers
+					.iter()
+					.any(|&peer| !(self.links[&(node, peer)].upstream && selected.down_only))
+			{
 				self.record(node, id, selected);
 			}
 			for &peer in &peers {

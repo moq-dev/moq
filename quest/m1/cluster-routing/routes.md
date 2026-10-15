@@ -139,7 +139,12 @@ freshness before coding:
   refresh and is shared by one operator's uplinks; each claim is still checked
   against the current pattern union. Rejected: the connection root, too
   coarse since two scoped peers under one root would share keys. Add
-  multi-pattern, overlapping-pattern, and refresh fixtures.
+  multi-pattern, overlapping-pattern, and refresh fixtures. Today
+  `moq_auth::Claims` drops `sub` and `moq_net::auth::Grant` holds only
+  patterns and expiry, so the grant gains the verified subject, qualified by
+  its issuer, in Rust and JS. Fail loud: a scoped token without a subject is
+  refused, and so is a token whose subject differs from the session's union.
+  The receiver derives the key from the token it verified, so no wire change.
 - Decided 2026-10-14: qualified keys carry a marker every relay recognizes,
   and a scoped connection forwarding an already qualified identity has that
   route refused, with no wire change. Otherwise a key sent down through a

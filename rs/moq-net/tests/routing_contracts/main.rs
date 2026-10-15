@@ -475,6 +475,28 @@ fn p2p_fallback_is_immediate_for_leaves_and_needs_a_seqno_for_transit() {
 	}
 }
 
+/// A relay whose only peers are upstream sends no update for its down-only
+/// route, so it holds no feasibility distance (RFC 8966 s3.7.3) and takes a
+/// longer route at the same seqno once its best uplink goes, with no seqno
+/// request.
+#[test]
+fn feasibility_tracks_only_updates_actually_sent() {
+	let (relay, c1, c2, origin) = (0, 1, 2, 3);
+	let mut net = Net::new(Config::default(), 4);
+	net.link(relay, c1, Link::cost(1).upstream(), Link::cost(1));
+	net.link(relay, c2, Link::cost(1).upstream(), Link::cost(1));
+	net.leaf(origin);
+	net.join(origin, c1, 1);
+	net.join(origin, c2, 5);
+	net.originate(origin, 7, 0);
+	assert!(net.run());
+	assert_eq!(net.route(relay, 7).and_then(|route| route.next), Some(c1));
+
+	net.disconnect(relay, c1);
+	assert!(net.run());
+	assert_eq!(net.route(relay, 7).and_then(|route| route.next), Some(c2));
+}
+
 // GOAWAY: the lowest preference, never a saturated metric.
 
 /// An edge with two upstream cores, preferring the first. A GOAWAY from that
@@ -975,6 +997,12 @@ fn scoped_delivery_through_two_uplinks_reaches_one_key() {
 			path: vec![c2, c1, l1, origin]
 		}
 	);
+
+	// A retracted identity leaves no alias behind.
+	assert_eq!(net.aliases(c1), 1);
+	net.kill(origin);
+	assert!(net.run());
+	assert_eq!(net.aliases(c1), 0);
 }
 
 /// A local relay missing its `upstream` mark leaks CDN routes back to the CDN,
