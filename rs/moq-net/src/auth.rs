@@ -415,16 +415,18 @@ impl Handle {
 	///
 	/// The token reaches it through [`requests`](Self::requests) like any other. The grant it
 	/// answers covers only this request, never joins the session's scope, and ends when the
-	/// returned [`RequestVerdict`] is dropped. Without an application acceptor, or for a token
-	/// type other than [`Token::OUT_OF_BAND`](crate::setup::Token::OUT_OF_BAND), which an AUTH
-	/// token cannot name, the verdict is [`Error::Unsupported`]. `hold` is the request's slot,
-	/// kept while the application verifies the token.
+	/// returned [`RequestVerdict`] is dropped. Without an application acceptor, the verdict is
+	/// [`Error::Unsupported`]. So it is for a token type other than
+	/// [`Token::OUT_OF_BAND`](crate::setup::Token::OUT_OF_BAND), which an AUTH token cannot name,
+	/// and for an empty token, which on AUTH means the connection's own credential and so would
+	/// reach the acceptor as that credential. `hold` is the request's slot, kept while the
+	/// application verifies the token.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn verify_request(&self, token: crate::setup::Token, hold: Option<Hold>) -> RequestVerdict {
 		let Some(queue) = self.acceptor() else {
 			return RequestVerdict { issue: None };
 		};
-		if token.kind != crate::setup::Token::OUT_OF_BAND {
+		if token.kind != crate::setup::Token::OUT_OF_BAND || token.value.is_empty() {
 			return RequestVerdict { issue: None };
 		}
 		let issue = kio::Shared::new(Issue {
@@ -1860,6 +1862,26 @@ mod request_token_tests {
 		let verdict = handle.verify_request(token(b"cat", crate::setup::Token::CAT), None);
 		let err = verdict.grant().await.expect_err("a typed token");
 		assert!(matches!(err.error, Error::Unsupported), "{err:?}");
+		assert!(
+			requests.poll_next(&kio::Waiter::noop()).is_pending(),
+			"nothing reached the acceptor"
+		);
+	}
+
+	/// An empty request token is refused before the acceptor, which would read it as the
+	/// connection's own credential.
+	#[test]
+	fn an_empty_request_token_is_unsupported() {
+		let handle = Handle::new(true);
+		let mut requests = handle.requests().unwrap();
+		let verdict = handle.verify_request(token(b"", crate::setup::Token::OUT_OF_BAND), None);
+		assert!(matches!(
+			verdict.poll_grant(&kio::Waiter::noop()),
+			Poll::Ready(Err(Refusal {
+				error: Error::Unsupported,
+				..
+			}))
+		));
 		assert!(
 			requests.poll_next(&kio::Waiter::noop()).is_pending(),
 			"nothing reached the acceptor"
