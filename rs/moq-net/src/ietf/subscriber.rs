@@ -2367,8 +2367,14 @@ where
 		// a token-bearing client does not self-censor on its connection grant: the token
 		// authorizes what that grant does not cover, and the server's covers-gate is the
 		// authority. The token stands in for the grant only, never for the limit this side set
-		// on the peer, which still filters and, narrowing, revokes.
-		let token_authorized = self.request_token.peek().is_some();
+		// on the peer, which still filters and, narrowing, revokes. Demand with nobody
+		// subscribing (fetches, or a TRACK_STATUS downstream) learns the track from TRACK_STATUS
+		// rather than a SUBSCRIBE: a finished track refuses one, and one made only to learn the
+		// track races the fetches it was for. Neither carries the token, so that demand needs
+		// the grant. Draft-17 still SUBSCRIBEs: its TRACK_STATUS answer cannot say whether the
+		// track is timed.
+		let status = request.subscription().is_none() && ietf::TrackStatusOk::describes_track(self.version);
+		let token_authorized = !status && self.request_token.peek().is_some();
 		let allowed = match token_authorized {
 			true => self
 				.auth
@@ -2395,27 +2401,21 @@ where
 		// Group FETCHes for cache misses: standalone, so they outlive each subscription.
 		let mut group_fetches = TaskSet::owned();
 
-		// Demand with nobody subscribing (fetches, or a TRACK_STATUS downstream) learns the
-		// track from TRACK_STATUS rather than a SUBSCRIBE: a finished track refuses one, and
-		// one made only to learn the track races the fetches it was for. Draft-17 still
-		// SUBSCRIBEs: its TRACK_STATUS answer cannot say whether the track is timed.
-		let mut target = match request.subscription() {
-			None if ietf::TrackStatusOk::describes_track(self.version) => {
-				match self.track_status(&broadcast_path, &track_name, request).await {
-					Some(Target::Resume(idle)) => {
-						let Some(next) = self
-							.linger(&broadcast_path, &track_name, idle, &mut group_fetches, &mut gate)
-							.await
-						else {
-							return;
-						};
-						Target::Resume(next)
-					}
-					Some(target) => target,
-					None => return,
+		let mut target = match status {
+			true => match self.track_status(&broadcast_path, &track_name, request).await {
+				Some(Target::Resume(idle)) => {
+					let Some(next) = self
+						.linger(&broadcast_path, &track_name, idle, &mut group_fetches, &mut gate)
+						.await
+					else {
+						return;
+					};
+					Target::Resume(next)
 				}
-			}
-			_ => Target::Request(request),
+				Some(target) => target,
+				None => return,
+			},
+			false => Target::Request(request),
 		};
 		loop {
 			let Some(idle) = self
@@ -8655,6 +8655,55 @@ mod tests {
 			subscribe: crate::Pattern::subtree(prefix).unwrap().into(),
 			expires: None,
 		}
+	}
+
+	/// A request token rides only on SUBSCRIBE, so demand that learns the track from
+	/// TRACK_STATUS, with nobody subscribing, needs the connection grant: outside it, the
+	/// request is refused here rather than sent without the token.
+	#[moq_net_sim::test]
+	async fn a_request_token_never_authorizes_a_track_status() {
+		const VERSION: Version = Version::Draft18;
+		let first = bytes::Bytes::from_static(&[0x03, 0x00, b'a', b'a']);
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let log = session.log.clone();
+		let (mut subscriber, auth, _token, _task_set) =
+			renewal_subscriber(VERSION, session, Control::new(None, false), &first);
+		// The connection grant covers only "other".
+		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
+		auth.granted(
+			0,
+			crate::auth::Grant {
+				publish: crate::Patterns::new(),
+				subscribe: crate::Pattern::subtree("other").unwrap().into(),
+				expires: None,
+			},
+		);
+
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let track = consumer.track("video").unwrap();
+		let mut query = std::pin::pin!(track.query());
+		assert!(futures::poll!(query.as_mut()).is_pending());
+		let request = dynamic.requested_track().await.expect("no track requested");
+		let mut run = std::pin::pin!(subscriber.run_subscribe(Path::new("room/x"), dynamic, request));
+		let mut ended = false;
+		for _ in 0..50 {
+			if futures::poll!(run.as_mut()).is_ready() {
+				ended = true;
+				break;
+			}
+			settle().await;
+		}
+		assert!(ended, "fetch-only demand outside the grant waits on the peer");
+		assert!(
+			matches!(query.await, Err(Error::Unauthorized)),
+			"fetch-only demand outside the grant is refused"
+		);
+		assert!(
+			control_message_types(&log, VERSION).is_empty(),
+			"nothing goes out without the token"
+		);
 	}
 
 	/// A narrowed limit ends a subscription whose renewal is stuck writing to a peer that
