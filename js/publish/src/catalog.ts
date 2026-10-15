@@ -21,53 +21,35 @@ import { Effect } from "@moq/signals";
  */
 export class CatalogProducer {
 	#value: Catalog.Root = pageRoot();
-	#outputs = new Map<Json.Snapshot.Producer<Catalog.Root>, Moq.Track.Producer>();
-	#identities = new Map<string, Map<string, Config>>();
-	#served = false;
-	#fresh = false;
+	#outputs = new Set<Json.Snapshot.Producer<Catalog.Root>>();
 	#lastEstimate: number | undefined;
 	#pending: Effect | undefined;
 
 	/** Edit the catalog; estimate-only changes publish at most once a second with a trailing update. */
 	mutate(fn: (catalog: Catalog.Root) => void): void {
-		this.#prune();
 		const value = structuredClone(this.#value);
 		fn(value);
 		// Every consumer refuses a catalog that fails this, so refuse the edit before it reaches one.
 		Catalog.checkRenditions(value);
-		const restart = this.#changedIdentity(value);
+		// Estimates and maxima only rise for a track name; a renamed rendition starts its new track over.
 		for (const field of ["jitter", "delay", "bitrate", "framerate"] as const) {
 			const previous = advertised(this.#value, field);
 			for (const [section, next] of Object.entries(advertised(value, field))) {
 				for (const [name, estimate] of Object.entries(next)) {
-					if ((field === "jitter" || field === "delay") && estimate === 0)
+					if (estimate === 0 && (field === "jitter" || field === "delay")) {
 						throw new Error(`omit ${field} rather than advertising 0`);
-					const before = previous[section]?.[name] ?? this.#identities.get(section)?.get(name)?.[field];
-					if (
-						!restart &&
-						!this.#fresh &&
-						before !== undefined &&
-						(estimate === undefined || estimate < before)
-					) {
+					}
+					const before = previous[section]?.[name];
+					if (before !== undefined && (estimate === undefined || estimate < before)) {
 						throw new Error(`${field} cannot decrease for an existing track`);
 					}
 				}
 			}
 		}
-		if (restart) {
-			// A catalog track can end, but it can never advertise a new decoder identity.
-			for (const [output, track] of this.#outputs) {
-				output.finish();
-				track.close();
-			}
-			this.#outputs.clear();
-			this.#reset();
-		}
 		const estimateOnly = Json.deepEqual(structure(this.#value), structure(value));
 		const changed = !Json.deepEqual(this.#value, value);
 		this.#value = value;
 		if (!changed || this.#outputs.size === 0) return;
-		this.#remember();
 
 		const now = performance.now();
 		if (!estimateOnly || this.#lastEstimate === undefined || now >= this.#lastEstimate + 1000) {
@@ -79,12 +61,11 @@ export class CatalogProducer {
 	}
 
 	#publish(estimate: boolean): void {
-		this.#prune();
 		this.#pending?.close();
 		this.#pending = undefined;
 		if (estimate) this.#lastEstimate = performance.now();
 		const at = Time.Timestamp.now();
-		for (const output of this.#outputs.keys()) output.update({ value: this.#value, at });
+		for (const output of this.#outputs) output.update({ value: this.#value, at });
 	}
 
 	/**
@@ -94,87 +75,24 @@ export class CatalogProducer {
 	 * served both plaintext and compressed (e.g. `catalog.json` and `catalog.json.z`).
 	 */
 	serve(track: Moq.Track.Producer, effect: Effect, opts?: { compression?: boolean }): void {
-		this.#prune();
 		const output = new Json.Snapshot.Producer<Catalog.Root>({
 			track,
 			compression: opts?.compression ? "deflate" : "none",
 			deltaRatio: 0,
 		});
-		this.#served = true;
-		this.#fresh = false;
-		this.#remember();
 		output.update({ value: this.#value, at: Time.Timestamp.now() });
 
-		this.#outputs.set(output, track);
+		this.#outputs.add(output);
 		effect.cleanup(() => {
 			this.#outputs.delete(output);
 			output.finish();
-			if (this.#outputs.size === 0) this.#reset();
+			if (this.#outputs.size === 0) {
+				this.#pending?.close();
+				this.#pending = undefined;
+				this.#lastEstimate = undefined;
+			}
 		});
 	}
-	#changedIdentity(value: Catalog.Root): boolean {
-		for (const [section, tracks] of Object.entries(renditions(value))) {
-			for (const [name, next] of Object.entries(tracks ?? {})) {
-				const before = this.#identities.get(section)?.get(name);
-				if (!before) continue;
-				for (const field of ["codec", "description", "container", "sampleRate", "numberOfChannels"] as const) {
-					if (!Json.deepEqual(before[field], next[field])) return true;
-				}
-				for (const field of ["codedWidth", "codedHeight"] as const) {
-					if (before[field] !== undefined && before[field] !== next[field]) return true;
-				}
-			}
-		}
-		return false;
-	}
-
-	#remember(): void {
-		for (const [section, tracks] of Object.entries(renditions(this.#value))) {
-			let identities = this.#identities.get(section);
-			if (!identities) {
-				identities = new Map();
-				this.#identities.set(section, identities);
-			}
-			for (const [name, config] of Object.entries(tracks ?? {})) identities.set(name, structuredClone(config));
-		}
-	}
-
-	#prune(): void {
-		for (const [output, track] of this.#outputs) {
-			if (track.closed.peek() === undefined) continue;
-			this.#outputs.delete(output);
-			output.finish();
-		}
-		if (this.#outputs.size === 0) this.#reset();
-	}
-
-	#reset(): void {
-		if (this.#served) this.#fresh = true;
-		this.#served = false;
-		this.#identities.clear();
-		this.#pending?.close();
-		this.#pending = undefined;
-		this.#lastEstimate = undefined;
-	}
-}
-
-// Identity and advertised bounds shared by the media rendition schemas.
-type Config = {
-	codec: string;
-	description?: string;
-	container: unknown;
-	sampleRate?: number;
-	numberOfChannels?: number;
-	codedWidth?: number;
-	codedHeight?: number;
-	bitrate?: number;
-	framerate?: number;
-	jitter?: number;
-	delay?: number;
-};
-
-function renditions(value: Catalog.Root): Record<string, Record<string, Config> | undefined> {
-	return { audio: value.audio?.renditions, video: value.video?.renditions };
 }
 
 // Strip only the schema's estimate fields, so config edits and arbitrary extension sections remain
@@ -202,8 +120,13 @@ function advertised(
 	field: "jitter" | "delay" | "bitrate" | "framerate",
 ): Record<string, Record<string, number | undefined>> {
 	const pick = (
-		tracks: Record<string, { jitter?: number; delay?: number; bitrate?: number; framerate?: number }> | undefined,
-	) => Object.fromEntries(Object.entries(tracks ?? {}).map(([name, config]) => [name, config[field]]));
+		tracks:
+			| Record<string, { track?: string; jitter?: number; delay?: number; bitrate?: number; framerate?: number }>
+			| undefined,
+	) =>
+		Object.fromEntries(
+			Object.entries(tracks ?? {}).map(([id, config]) => [Catalog.track(id, config), config[field]]),
+		);
 	return {
 		audio: pick(catalog.audio?.renditions),
 		video: pick(catalog.video?.renditions),

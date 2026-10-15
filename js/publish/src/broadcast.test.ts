@@ -399,27 +399,122 @@ test("registering a sibling after an encoder failure keeps the network broadcast
 	}
 });
 
-test("a served decoder identity change creates a new broadcast epoch", async () => {
-	const origin = new Origin.Producer();
-	const broadcast = new Broadcast({ origin, name: Path.from("identity.hang") });
+// A name always means the same content, so a served rendition whose decoder identity changes moves to
+// a fresh track name under the same catalog ID and epoch, ending the old track on its old identity.
+test("a served identity change moves the rendition to a fresh track name", async () => {
+	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("identity.hang") });
+	const video = broadcast.video("video");
+	const sized = { ...videoConfig, codedWidth: Catalog.u53(640), codedHeight: Catalog.u53(480) };
+	video.config.set(sized);
+	await settle();
+
+	const net = broadcast.net.peek();
+	if (!net) throw new Error("expected a network producer once connected");
+	const epoch = net.route?.epoch;
+	const catalog = new Json.Snapshot.Consumer<Catalog.Root>({
+		track: net.track(Broadcast.CATALOG_TRACK).subscribe(),
+	});
+	const first = net.track("video").subscribe();
+	try {
+		expect((await catalog.latest())?.value.video?.renditions.video?.track).toBeUndefined();
+		await settle();
+		const track = video.track.peek();
+		if (!track) throw new Error("expected the demanded track");
+		track.appendGroup().close();
+
+		// A rising maximum stays on the served track.
+		video.config.set({ ...sized, bitrate: Catalog.u53(1_000_000) });
+		await settle();
+		expect((await catalog.latest())?.value.video?.renditions.video?.track).toBeUndefined();
+		expect(video.track.peek()).toBe(track);
+
+		// Outgrowing the coded-size ceiling is a new identity.
+		video.config.set({
+			...videoConfig,
+			codedWidth: Catalog.u53(1280),
+			codedHeight: Catalog.u53(720),
+			bitrate: Catalog.u53(1_000_000),
+		});
+		await settle();
+		const config = (await catalog.latest())?.value.video?.renditions.video;
+		if (!config?.track) throw new Error("expected a fresh track name");
+		expect(config.track).toStartWith("video/");
+		expect(config.codedWidth).toBe(Catalog.u53(1280));
+		expect(track.closed.peek()).toBeNull();
+		expect(video.track.peek()).toBeUndefined();
+		expect(broadcast.net.peek()).toBe(net);
+		expect(net.route?.epoch).toBe(epoch);
+
+		const second = net.track(config.track).subscribe();
+		await settle();
+		const replacement = video.track.peek();
+		expect(replacement?.name).toBe(config.track);
+		expect(replacement?.appendGroup().sequence).toBe(0);
+
+		// A codec change moves it again rather than redefining the second name.
+		video.config.set({ ...config, track: undefined, codec: "vp8" });
+		await settle();
+		const third = (await catalog.latest())?.value.video?.renditions.video?.track;
+		expect(third).toStartWith("video/");
+		expect(third).not.toBe(config.track);
+		expect(replacement?.closed.peek()).toBeNull();
+		second.close();
+	} finally {
+		first.close();
+		broadcast.close();
+	}
+});
+
+test("a name returning with a different identity takes a fresh track name", async () => {
+	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("returning.hang") });
+	let audio = broadcast.audio("audio");
+	audio.config.set(audioConfig);
+	await settle();
+	expect((await readCatalog(broadcast))?.audio?.renditions.audio?.track).toBeUndefined();
+
+	// The same identity returns to its track.
+	audio.close();
+	await settle();
+	audio = broadcast.audio("audio");
+	audio.config.set(audioConfig);
+	await settle();
+	expect((await readCatalog(broadcast))?.audio?.renditions.audio?.track).toBeUndefined();
+
+	audio.close();
+	await settle();
+	audio = broadcast.audio("audio");
+	audio.config.set({ ...audioConfig, numberOfChannels: Catalog.u53(1) });
+	await settle();
+	expect((await readCatalog(broadcast))?.audio?.renditions.audio?.track).toStartWith("audio/");
+
+	broadcast.close();
+});
+
+// Nobody has seen an unserved catalog, so its renditions settle without minting names.
+test("identity changes before the first announce keep the catalog ID as the track name", async () => {
+	const announce = new Signal(false);
+	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("unserved.hang"), announce });
 	const video = broadcast.video("video");
 	video.config.set(videoConfig);
 	await settle();
-	const before = broadcast.net.peek();
-	if (!before) throw new Error("expected an initial broadcast");
-	const oldCatalog = new Json.Snapshot.Consumer<Catalog.Root>({
-		track: before.track(Broadcast.CATALOG_TRACK).subscribe(),
+	video.config.set({ ...videoConfig, codec: "vp8" });
+	await settle();
+
+	announce.set(true);
+	await settle();
+	const net = broadcast.net.peek();
+	if (!net) throw new Error("expected a network producer once connected");
+	const catalog = new Json.Snapshot.Consumer<Catalog.Root>({
+		track: net.track(Broadcast.CATALOG_TRACK).subscribe(),
 	});
-	expect((await oldCatalog.latest())?.value.video?.renditions.video.codec).toBe(videoConfig.codec);
-	video.config.set({ ...videoConfig, codec: "vp09.00.10.08" });
-	await settle(12);
-	const after = broadcast.net.peek();
-	expect(after).toBeDefined();
-	expect(after).not.toBe(before);
-	expect(before.closed.peek()).toBeNull();
-	expect(await oldCatalog.latest()).toBeUndefined();
-	if (!after) throw new Error("expected a replacement broadcast");
-	const next = new Json.Snapshot.Consumer<Catalog.Root>({ track: after.track(Broadcast.CATALOG_TRACK).subscribe() });
-	expect((await next.latest())?.value.video?.renditions.video.codec).toBe("vp09.00.10.08");
+	const config = (await catalog.latest())?.value.video?.renditions.video;
+	expect(config?.codec).toBe("vp8");
+	expect(config?.track).toBeUndefined();
+
+	// The first snapshot fixed the name's identity.
+	video.config.set(videoConfig);
+	await settle();
+	expect((await catalog.latest())?.value.video?.renditions.video?.track).toStartWith("video/");
+
 	broadcast.close();
 });

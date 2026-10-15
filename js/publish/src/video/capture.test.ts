@@ -232,11 +232,7 @@ test("an encoder resuming on a still source encodes a keyframe of the current pi
 	const rendition = { config: new Signal(undefined), track: live, close: () => {} };
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: {
-			video: () => rendition,
-			baseline: new Baseline(),
-			net: new Signal(new Moq.Broadcast.Producer()),
-		} as never,
+		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
 		capture,
 	});
 

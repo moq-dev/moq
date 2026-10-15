@@ -291,7 +291,7 @@ async function setup(baseline = new Baseline(), codec?: Codec, groupDuration?: T
 
 	const enabled = new Signal(true);
 	const encoder = new Encoder("audio", {
-		broadcast: { audio: () => rendition, baseline, net: new Signal(undefined) } as never,
+		broadcast: { audio: () => rendition, baseline } as never,
 		capture: capture as never,
 		enabled,
 		codec,
@@ -796,28 +796,20 @@ test("audio failure stays local through demand changes and capture format re-arm
 		await reconfiguring;
 		await settle();
 		expect(encoder.out.error.peek()).toBeUndefined();
-		const next = broadcast.net.peek();
-		if (!next || next === net) throw new Error("expected a new audio identity epoch");
-		expect(net.closed.peek()).toBeNull();
-		expect(next.route?.epoch).not.toBe(epoch);
-		for (let old = await catalog.latest(); old; old = await catalog.latest()) {
-			expect(old.value.audio?.renditions.audio?.numberOfChannels).toBe(Catalog.u53(1));
-		}
-		const nextCatalog = new Json.Snapshot.Consumer<Catalog.Root>({
-			track: next.track(Broadcast.CATALOG_TRACK).subscribe(),
-		});
-		const config = (await nextCatalog.latest())?.value.audio?.renditions.audio;
-		if (!config) throw new Error("expected the recovered rendition");
+		const config = (await catalog.latest())?.value.audio?.renditions.audio;
+		if (!config?.track) throw new Error("expected recovered track name");
+		expect(config.track).not.toBe("audio");
 		expect(config.numberOfChannels).toBe(Catalog.u53(2));
 		expect(config.enabled).not.toBe(false);
-		recovered = next.track(config.track ?? "audio").subscribe();
+		recovered = net.track(config.track).subscribe();
 		await settle();
 		await push(3, 2);
 		expect(recovered.latest()).toBe(0);
 		expect(encoder.out.active.peek()).toBe(true);
 		expect(recovered.closed.peek()).toBeUndefined();
-		expect(broadcast.net.peek()).toBe(next);
-		expect(siblingTrack.closed.peek()).toBeNull();
+		expect(broadcast.net.peek()).toBe(net);
+		expect(net.route?.epoch).toBe(epoch);
+		expect(siblingTrack.appendGroup().sequence).toBe(2);
 	} finally {
 		subscriber?.close();
 		siblingSubscriber?.close();

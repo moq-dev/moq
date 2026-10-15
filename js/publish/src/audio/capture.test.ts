@@ -563,11 +563,7 @@ test("a failed encoder stays failed until the capture source changes", async () 
 		close: () => {},
 	};
 	const encoder = new Encoder("audio", {
-		broadcast: {
-			audio: () => rendition,
-			baseline: new Baseline(),
-			net: new Signal(new Moq.Broadcast.Producer()),
-		} as never,
+		broadcast: { audio: () => rendition, baseline: new Baseline() } as never,
 		capture,
 		enabled,
 	});

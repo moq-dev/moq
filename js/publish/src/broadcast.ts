@@ -1,9 +1,10 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
+import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
 import { CatalogProducer } from "./catalog";
-import { catalogs, errors } from "./internal";
+import { errors } from "./internal";
 import { Baseline } from "./jitter";
 import { type Kind, Rendition } from "./rendition";
 
@@ -67,7 +68,7 @@ export class Broadcast {
 	// root sections (e.g. `scte35`) by locking it too.
 	readonly catalog = new CatalogProducer();
 
-	// The underlying network broadcast, recreated when its name, enabled state, maxAge, or a served media identity changes,
+	// The underlying network broadcast, recreated when the name, enabled state, or maxAge changes,
 	// and is `undefined` in between. It lives in the origin rather than any session, so it spans
 	// reconnects. Exposed so an application can serve its own tracks alongside the built-in
 	// catalog/audio/video, e.g. `net.createTrack("meta.json")` plus a matching `catalog` section.
@@ -91,12 +92,20 @@ export class Broadcast {
 	// The kind of each rendition track in the current network broadcast. A new one starts over.
 	#kinds = new Map<string, Kind>();
 
-	// Replacement tracks keep their catalog IDs but never reuse a closed track name.
+	// Each catalog ID's track name in the current network broadcast, when it is not the ID itself.
+	// A replacement for a closed track, or a rendition whose media identity changed, keeps its
+	// catalog ID under a fresh track name, so a name always means the same content.
 	readonly #names = new Signal<Record<string, string>>({});
 
+	// The media identity of each track name the current network broadcast's catalog has served, or
+	// undefined before it serves one. Kept across a rendition's removal, so a name returning with
+	// different media takes a fresh name too.
+	#identities: Map<string, Identity> | undefined;
+
+	// The identity of each track name in the latest catalog fold, recorded when the catalog is first served.
+	#listed = new Map<string, Identity>();
+
 	#signals = new Effect();
-	#restart = new Signal(0);
-	#catalogReady = new Signal<Moq.Broadcast.Producer | undefined>(undefined);
 
 	constructor(props?: Inputs<BroadcastInput>) {
 		this.in = {
@@ -177,23 +186,26 @@ export class Broadcast {
 		const enabled = effect.get(this.in.enabled);
 		const renditions = effect.get(this.#renditions);
 		const names = effect.get(this.#names);
-		const epoch = effect.get(this.net);
 
 		const video: Record<string, Catalog.VideoConfig> = {};
 		const audio: Record<string, Catalog.AudioConfig> = {};
 		const text: Record<string, Catalog.TextConfig> = {};
+		const listed = new Map<string, Identity>();
+		const renamed: Record<string, string> = {};
 
 		for (const rendition of Object.values(renditions)) {
-			const encoder = catalogs.get(rendition);
-			const state = encoder && effect.get(encoder);
-			if (enabled && encoder && (!state || state.epoch !== epoch)) {
-				this.#catalogReady.set(undefined);
-				return;
-			}
-			const source = enabled ? (encoder ? state?.config : effect.get(rendition.config)) : undefined;
+			const source = enabled ? effect.get(rendition.config) : undefined;
 			if (source === undefined) continue;
-			const track = names[rendition.name];
-			const config = track ? { ...(source as object), track } : source;
+			let track = names[rendition.name] ?? rendition.name;
+			const media = identity(source);
+			const served = this.#identities?.get(track);
+			if (served !== undefined && !Json.deepEqual(served, media)) {
+				track = `${rendition.name}/${Moq.Epoch.mint()}`;
+				renamed[rendition.name] = track;
+			}
+			this.#identities?.set(track, media);
+			listed.set(track, media);
+			const config = track !== rendition.name ? { ...(source as object), track } : source;
 
 			if (rendition.kind === "video") {
 				video[rendition.name] = config as Catalog.VideoConfig;
@@ -232,11 +244,13 @@ export class Broadcast {
 				delete catalog.text;
 			}
 		});
-		this.#catalogReady.set(epoch);
+		this.#listed = listed;
+
+		// The network loop ends each renamed rendition's old track and serves the new name.
+		if (Object.keys(renamed).length > 0) this.#names.update((names) => ({ ...names, ...renamed }));
 	}
 
 	#run(effect: Effect) {
-		effect.get(this.#restart);
 		const values = effect.getAll([this.in.enabled, this.in.origin]);
 		if (!values) return;
 		const [_enabled, origin] = values;
@@ -269,6 +283,7 @@ export class Broadcast {
 		// again finds its track; the catalog's stay out of reach of a colliding rendition.
 		const tracks = new Map<string, { track: Moq.Track.Producer; owner: Rendition<unknown> }>();
 		this.#names.set({});
+		this.#identities = undefined;
 		const kinds = new Map<string, Kind>();
 		this.#kinds = kinds;
 		effect.cleanup(() => {
@@ -278,7 +293,7 @@ export class Broadcast {
 
 		let serving = false;
 		effect.run((inner) => {
-			if (!inner.get(this.in.announce) || inner.get(this.#catalogReady) !== broadcast) {
+			if (!inner.get(this.in.announce)) {
 				broadcast.unannounce();
 				return;
 			}
@@ -288,6 +303,8 @@ export class Broadcast {
 			// is whatever the catalog holds at announce time.
 			if (!serving) {
 				serving = true;
+				// From here a name keeps the identity this first snapshot gives it.
+				this.#identities = new Map(this.#listed);
 				for (const [name, compression] of [
 					[Broadcast.CATALOG_TRACK, false],
 					[Broadcast.CATALOG_TRACK_COMPRESSED, true],
@@ -303,9 +320,6 @@ export class Broadcast {
 					});
 					effect.cleanup(() => track.close());
 					this.catalog.serve(track, effect, { compression });
-					effect.run((health) => {
-						if (health.get(track.closed) !== undefined) this.#restart.update((value) => value + 1);
-					});
 				}
 			}
 
@@ -316,6 +330,7 @@ export class Broadcast {
 		// so capture and encoding still stop when the final subscriber leaves.
 		effect.run((inner) => {
 			const renditions = inner.get(this.#renditions);
+			const names = inner.get(this.#names);
 
 			for (const rendition of Object.values(renditions)) {
 				const signal = this.#tracks.get(rendition.name);
@@ -324,10 +339,22 @@ export class Broadcast {
 				let entry = tracks.get(rendition.name);
 				const cause = entry && errors.get(entry.owner)?.peek();
 				if (entry && cause) entry.track.close(cause);
-				// An error leaves this rendition down. Only a replacement registration may
-				// recover, with a fresh track name so its group sequence can start over.
-				if (!entry || (entry.owner !== rendition && entry.track.closed.peek() !== undefined)) {
-					const name = entry ? `${rendition.name}/${Moq.Epoch.mint()}` : rendition.name;
+				const name = names[rendition.name] ?? rendition.name;
+				if (entry && entry.track.name !== name) {
+					// The catalog moved this rendition to a new name for new media. End the old track
+					// cleanly on its last identity, so its subscribers follow the catalog.
+					entry.track.close();
+					entry = undefined;
+				} else if (entry && entry.owner !== rendition && entry.track.closed.peek() !== undefined) {
+					// An error leaves this rendition down. Only a replacement registration may recover,
+					// with a fresh track name so its group sequence can start over.
+					this.#names.update((names) => ({
+						...names,
+						[rendition.name]: `${rendition.name}/${Moq.Epoch.mint()}`,
+					}));
+					continue;
+				}
+				if (!entry) {
 					const track = broadcast.createTrack(
 						name,
 						Container.trackInfo({ maxAge, priority: Catalog.PRIORITY[rendition.kind] }),
@@ -335,7 +362,6 @@ export class Broadcast {
 					entry = { track, owner: rendition };
 					tracks.set(rendition.name, entry);
 					kinds.set(rendition.name, rendition.kind);
-					if (name !== rendition.name) this.#names.update((names) => ({ ...names, [rendition.name]: name }));
 				} else {
 					entry.owner = rendition;
 				}
@@ -357,4 +383,16 @@ export class Broadcast {
 	close() {
 		this.#signals.close();
 	}
+}
+
+// The fields a consumer may configure its decoder from once per track name, plus the coded-size
+// ceilings: changing any of them takes a new track name.
+type Identity = Pick<
+	Partial<Catalog.AudioConfig & Catalog.VideoConfig>,
+	"codec" | "description" | "container" | "sampleRate" | "numberOfChannels" | "codedWidth" | "codedHeight"
+>;
+
+function identity(config: unknown): Identity {
+	const { codec, description, container, sampleRate, numberOfChannels, codedWidth, codedHeight } = config as Identity;
+	return { codec, description, container, sampleRate, numberOfChannels, codedWidth, codedHeight };
 }

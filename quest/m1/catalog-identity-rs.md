@@ -5,7 +5,7 @@
 No Rust publisher redefines a track it has published. A change to a
 rendition's identity (`codec`, `description`, `container`, `sample_rate`,
 `channel_count`) or growth past its `coded_width`/`coded_height` ceiling
-publishes a new rendition name or a new broadcast epoch, per the hang draft's
+publishes a new rendition name, per the hang draft's
 [Track Identity](/drafts/draft-lcurley-moq-hang.md#identity) section, and
 `bitrate`/`framerate` never fall. A replayed archive catalog then describes
 every group of the tracks it lists.
@@ -15,14 +15,15 @@ every group of the tracks it lists.
 - ✅ Decided 2026-10-13 (maintainer, #5459): split from the catalog identity
   quest. The contract, docs, and the `js/publish` ceiling landed there;
   `@moq/publish` enforces the browser side.
-- ✅ Decided 2026-10-13 (maintainer, #5459): JS enforces identity by
-  republishing under a new epoch with the Opus description probed up front,
-  and the `js/publish` video ceiling keeps growing per side.
-
-Open: whether each Rust violator mints a new rendition name (as FLV, HLS
-import, and transcode rungs already do) or restarts under a new epoch (as JS
-does). Recommended: mint a name where the catalog can keep both, and take a
-new epoch only for a whole-broadcast restart.
+- ✅ Decided 2026-10-13 (maintainer, #5459): the Opus description is probed
+  up front, and the `js/publish` video ceiling keeps growing per side.
+- ✅ Decided 2026-10-15 (maintainer): mint a new rendition name, not a new
+  epoch; reverses the #5459 decision. Restarting the whole broadcast is an
+  extreme response to one rendition changing, and a name always means the
+  same content, so changed content gets a new name. `@moq/publish` keeps the
+  catalog ID and points its `track` at a fresh name (#5552); each Rust
+  violator mints a name likewise, as FLV, HLS import, and transcode rungs
+  already do. A new epoch stays reserved for a whole-broadcast restart.
 
 Guard `moq-mux` `Rendition::set`, `replace`, and `stage`
 (`rs/moq-mux/src/catalog/tracks.rs`): refuse a change to identity or a set
@@ -62,4 +63,3 @@ of buffer when no `jitter` is advertised.
 ## Related
 
 - [Archive](/quest/m1/archive/README.md) - storage and replay consume the identity contract
-- [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - a restart is a new epoch rather than a changed track

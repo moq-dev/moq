@@ -106,11 +106,7 @@ test("encoding tracks encoder config in its child effect", async () => {
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		close: () => track.close(),
 	};
-	const broadcast = {
-		video: () => rendition,
-		baseline: new Baseline(),
-		net: new Signal(new Moq.Broadcast.Producer()),
-	};
+	const broadcast = { video: () => rendition, baseline: new Baseline() };
 	const capture = {
 		in: { source: new Signal(undefined) },
 		out: {
@@ -157,11 +153,7 @@ test("a demand gap marks a discontinuity and leaves the broadcast-owned track op
 	};
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: {
-			video: () => rendition,
-			baseline: new Baseline(),
-			net: new Signal(new Moq.Broadcast.Producer()),
-		} as never,
+		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
 		capture: capture as never,
 	});
 
@@ -218,11 +210,7 @@ test("a bandwidth estimate updates the bitrate without blanking the config or re
 
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: {
-			video: () => rendition,
-			baseline: new Baseline(),
-			net: new Signal(new Moq.Broadcast.Producer()),
-		} as never,
+		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
 		capture: capture as never,
 		bandwidth,
 	});
@@ -303,11 +291,7 @@ test("every published config fits a probe for its own codec", async () => {
 
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: {
-			video: () => rendition,
-			baseline: new Baseline(),
-			net: new Signal(new Moq.Broadcast.Producer()),
-		} as never,
+		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
 		capture: capture as never,
 		bandwidth,
 	});
@@ -628,11 +612,7 @@ test("disabling encodes one black keyframe and keeps the rendition with enabled:
 	const enabled = new Signal(true);
 	const encoder = new Encoder("video", {
 		enabled,
-		broadcast: {
-			video: () => rendition,
-			baseline: new Baseline(),
-			net: new Signal(new Moq.Broadcast.Producer()),
-		} as never,
+		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
 		capture: capture as never,
 	});
 
@@ -792,11 +772,7 @@ test("the probe encodes with the frame rate and bitrate ceiling", async () => {
 	const bandwidth = new Moq.Bandwidth.Allocator(estimate);
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: {
-			video: () => rendition,
-			baseline: new Baseline(),
-			net: new Signal(new Moq.Broadcast.Producer()),
-		} as never,
+		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
 		capture: capture as never,
 		bandwidth,
 	});
@@ -952,7 +928,7 @@ test("cut forces a keyframe, coalescing requests and spacing them at least 500ms
 	};
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition, net: new Signal(new Moq.Broadcast.Producer()) } as never,
+		broadcast: { video: () => rendition } as never,
 		capture: capture as never,
 	});
 
@@ -1179,11 +1155,7 @@ test("a shrinking capture resizes in band below the advertised ceiling", async (
 	};
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: {
-			video: () => rendition,
-			baseline: new Baseline(),
-			net: new Signal(new Moq.Broadcast.Producer()),
-		} as never,
+		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
 		capture: capture as never,
 	});
 	const send = async (millis: number) => {
@@ -1253,11 +1225,7 @@ test("the catalog bitrate and frame rate only rise", async () => {
 	const bandwidth = new Moq.Bandwidth.Allocator(estimate);
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: {
-			video: () => rendition,
-			baseline: new Baseline(),
-			net: new Signal(new Moq.Broadcast.Producer()),
-		} as never,
+		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
 		capture: capture as never,
 		bandwidth,
 	});
@@ -1302,7 +1270,7 @@ test("each broadcast keeps its own ceiling and maxima", async () => {
 		track: new Signal<Moq.Track.Producer | undefined>(undefined),
 		close: () => {},
 	});
-	const first = { video: rendition, baseline: new Baseline(), net: new Signal(new Moq.Broadcast.Producer()) };
+	const first = { video: rendition, baseline: new Baseline() };
 	const broadcast = new Signal<unknown>(first);
 	const capture = {
 		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
@@ -1324,7 +1292,7 @@ test("each broadcast keeps its own ceiling and maxima", async () => {
 		expect(encoder.out.catalog.peek()).toMatchObject({ codedWidth: 1920, codedHeight: 1072, framerate: 60 });
 		const bitrate = encoder.out.catalog.peek()?.bitrate ?? 0;
 
-		broadcast.set({ video: rendition, baseline: new Baseline(), net: new Signal(new Moq.Broadcast.Producer()) });
+		broadcast.set({ video: rendition, baseline: new Baseline() });
 		// The previous broadcast's probe never describes the new track, even while its own runs.
 		for (let i = 0; i < 5; i++) await Promise.resolve();
 		expect(encoder.out.catalog.peek()).toBeUndefined();
@@ -1347,7 +1315,7 @@ test("each broadcast keeps its own ceiling and maxima", async () => {
 		enabled.set(false);
 		await settle();
 		expect(encoder.out.catalog.peek()?.enabled).toBe(false);
-		broadcast.set({ video: rendition, baseline: new Baseline(), net: new Signal(new Moq.Broadcast.Producer()) });
+		broadcast.set({ video: rendition, baseline: new Baseline() });
 		await settle();
 		expect(encoder.out.catalog.peek()).toBeUndefined();
 	} finally {
@@ -1512,75 +1480,48 @@ test("a refused first ceiling recovers at a smaller size", async () => {
 	}
 });
 
-test("ceiling growth replaces the network epoch and resets its maxima", async () => {
+// Outgrowing the advertised ceiling is a new identity, so the broadcast serves the larger ceiling under
+// a fresh track name while the epoch and the maxima carry on. A shrink stays in band on the old name.
+test("ceiling growth moves the rendition to a fresh track name", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
 	using _probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockResolvedValue({ supported: true });
 	using _now = spyOn(performance, "now").mockReturnValue(0);
-	const origin = new Moq.Origin.Producer();
-	const announcements = origin.announced();
-	const broadcast = new Broadcast({ origin, name: Moq.Path.from("ceiling.hang") });
+	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("ceiling.hang") });
 	const capture = {
 		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
 		out: { display: new Signal({ width: 640, height: 480 }), frames: new Signal(undefined) },
 	};
 	const encoder = new Encoder("video", { broadcast, capture: capture as never, config: { frameRate: 60 } });
-	const subscribers: Moq.Track.Subscriber[] = [];
-	const catalog = (net: Moq.Broadcast.Producer) => {
-		const subscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
-		subscribers.push(subscriber);
-		return new Json.Snapshot.Consumer<Catalog.Root>({ track: subscriber });
+	const net = broadcast.net.peek() ?? (await broadcast.net.changed());
+	if (!net) throw new Error("expected a network broadcast");
+	const subscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
+	const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: subscriber });
+	const next = async (done: (config: Catalog.VideoConfig) => boolean) => {
+		for (;;) {
+			const config = (await catalog.latest())?.value.video?.renditions.video;
+			if (config && done(config)) return config;
+		}
 	};
 	try {
-		await encoder.out.catalog.changed();
-		const first = broadcast.net.peek();
-		if (!first) throw new Error("expected the first epoch");
-		await announcements.next();
-		const before = catalog(first);
-		let initial = await before.latest();
-		while (!initial?.value.video?.renditions.video) initial = await before.latest();
-		expect(initial.value.video.renditions.video).toMatchObject({
-			codedWidth: 640,
-			codedHeight: 480,
-			framerate: 60,
-		});
-		const epoch = first.route?.epoch;
-		const bitrate = initial.value.video.renditions.video.bitrate;
+		const initial = await next(() => true);
+		expect(initial).toMatchObject({ codedWidth: 640, codedHeight: 480, framerate: 60 });
+		expect(initial.track).toBeUndefined();
+
 		capture.out.display.set({ width: 320, height: 240 });
 		encoder.config.set({ frameRate: 15 });
 		let live = encoder.out.resolved.peek();
 		while (live?.width !== 320 || live.framerate !== 15) live = await encoder.out.resolved.changed();
-		expect(broadcast.net.peek()).toBe(first);
-		expect(encoder.out.catalog.peek()).toMatchObject({ codedWidth: 640, codedHeight: 480, framerate: 60, bitrate });
+		expect(encoder.out.catalog.peek()).toMatchObject({ codedWidth: 640, codedHeight: 480, framerate: 60 });
 
-		const restarting = broadcast.net.changed();
 		capture.out.display.set({ width: 1280, height: 720 });
-		const next = await restarting;
-		if (!next || next === first) throw new Error("expected a new epoch");
-		let announcement = await announcements.next();
-		while (announcement?.kind === "end" || announcement?.route.epoch === epoch)
-			announcement = await announcements.next();
-		const after = catalog(next);
-		let snapshot = await after.latest();
-		while (!snapshot?.value.video?.renditions.video) snapshot = await after.latest();
-		expect(snapshot.value.video.renditions.video).toMatchObject({
-			codedWidth: 1280,
-			codedHeight: 720,
-			framerate: 15,
-		});
-		expect(next.route?.epoch).not.toBe(epoch);
-		expect(first.closed.peek()).toBeNull();
-		for (let old = await before.latest(); old; old = await before.latest()) {
-			expect(old.value.video?.renditions.video).toMatchObject({
-				codedWidth: 640,
-				codedHeight: 480,
-				framerate: 60,
-			});
-		}
+		const grown = await next((config) => config.codedWidth === 1280);
+		expect(grown).toMatchObject({ codedHeight: 720, framerate: 60 });
+		expect(grown.track).toStartWith("video/");
+		expect(grown.bitrate ?? 0).toBeGreaterThanOrEqual(initial.bitrate ?? 0);
+		expect(broadcast.net.peek()).toBe(net);
 	} finally {
-		for (const subscriber of subscribers) subscriber.close();
+		subscriber.close();
 		encoder.close();
 		broadcast.close();
-		announcements.close();
-		origin.close();
 	}
 });

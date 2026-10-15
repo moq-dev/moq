@@ -174,6 +174,7 @@ Each rendition field falls in one of three classes:
 
 Every other rendition field is live state that MAY change in any update within its own rules (`jitter` and `delay` never fall), as MAY the video section's `display`, `rotation`, and `flip`, which describe presentation rather than decoding.
 A publisher that changes an identity field or exceeds a ceiling MUST publish the media under a new track name, or as a new broadcast under a new Epoch {{moql}}.
+A rendition MAY keep its ID and name the new track with `track` ({{field-track}}), so a consumer follows the new name rather than reusing a decoder configured for the ID.
 A track name removed from the catalog MUST NOT return with a different identity.
 A consumer MAY configure a decoder once per track from the catalog.
 
@@ -1123,7 +1124,7 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
-- Fixed a track's identity for its name ({{identity}}): codec, description, container, sample rate, and channel count never change; `codedWidth` and `codedHeight` are ceilings below which the picture resizes in band; `bitrate` and `framerate` are maxima that only rise. A change of identity takes a new track name or a new Epoch.
+- Fixed a track's identity for its name ({{identity}}): codec, description, container, sample rate, and channel count never change; `codedWidth` and `codedHeight` are ceilings below which the picture resizes in band; `bitrate` and `framerate` are maxima that only rise. A change of identity takes a new track name, which a rendition may name with `track` while keeping its ID, or a new Epoch.
 - Specified MSF text metadata preservation and refusal of unrepresentable text packaging during gateway conversion.
 - Specified conversion between relative broadcast references and MSF track namespaces without changing track identity, reading a namespace aligned with the catalog path's trailing segments as the catalog itself.
 
