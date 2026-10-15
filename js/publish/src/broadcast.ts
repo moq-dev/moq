@@ -72,6 +72,7 @@ export class Broadcast {
 	// and is `undefined` in between. It lives in the origin rather than any session, so it spans
 	// reconnects. Exposed so an application can serve its own tracks alongside the built-in
 	// catalog/audio/video, e.g. `net.createTrack("meta.json")` plus a matching `catalog` section.
+	// Names under a rendition's ID (`video/1`) are reserved for that rendition's replacement tracks.
 	// Reacquire it via an effect, since a rename swaps in a fresh producer.
 	readonly net = new Signal<Moq.Broadcast.Producer | undefined>(undefined);
 
@@ -252,8 +253,9 @@ export class Broadcast {
 	}
 
 	// The next unused `<id>/<n>` track name in the current network broadcast. This publisher owns the
-	// namespace, so skipping every name it has served, registered, or listed in the catalog (including
-	// an application's own sections) is enough to never reuse one.
+	// namespace and reserves `<id>/` for the rendition (see `net`), so skipping every name it has
+	// served, registered, or listed in the catalog (including an application's own sections) is
+	// enough to never reuse one.
 	#mint(id: string): string {
 		const taken = new Set([
 			...(this.#served?.keys() ?? []),
