@@ -5790,7 +5790,7 @@ async fn shutdown_times_out_on_an_unfinished_track() {
 			(&accepted, &client)
 		};
 		let broadcast = create_announced(&publisher.publish(), "live");
-		let track = broadcast.publish_track("data".into(), None).unwrap();
+		let track = broadcast.publish_track("data".into(), Some(timed_info())).unwrap();
 		let remote = await_announced(&subscriber.consume(), "live").await;
 		let reader = tokio::time::timeout(TIMEOUT, remote.subscribe_track("data".into(), None))
 			.await
