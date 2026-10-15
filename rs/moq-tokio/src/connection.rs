@@ -770,10 +770,11 @@ impl Connection {
 	}
 
 	/// Stop the loop for every clone, closing the live session (and any predecessor
-	/// still finishing after a GOAWAY) once the data it queued has been delivered.
+	/// still finishing after a GOAWAY) after draining its queued data.
 	///
-	/// See [`moq_net::Session::close`]: finished tracks deliver their last groups and
-	/// FIN and announcements are withdrawn first, bounded by a one second deadline
+	/// See [`moq_net::Session::close`]: explicit lite-07-wip waits for the subscriber
+	/// to receive finished tracks' tails; older Lite versions and IETF wait only for
+	/// transport ACKs. Announcements are withdrawn first, bounded by a one second deadline
 	/// (or a predecessor's remaining handover window, if sooner). Call this before
 	/// [`Client::close`], which closes the transport without waiting. Returns `Ok`
 	/// when nothing was live, and a session's error if it did not drain.

@@ -72,7 +72,12 @@ class Session:
         self._inner.cancel(code)
 
     async def shutdown(self) -> None:
-        """Drain finished tracks within one second, raising if delivery times out."""
+        """Drain within one second, raising on failure.
+
+        Explicit ``moq-lite-07-wip`` waits for the peer to receive finished tails;
+        older Lite versions, including the default lite-06, wait only for transport
+        ACKs. IETF also waits for transport ACKs.
+        """
         await self._inner.shutdown()
 
     def publish(self) -> OriginProducer:

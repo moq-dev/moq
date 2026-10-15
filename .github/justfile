@@ -23,6 +23,8 @@ test:
     bun sh/gh/queue.test.ts
     python3 sh/gh/install-formula.test.py
     sh/gh/release.test.sh
+    python3 sh/gh/ffi.test.py
+    bun test sh/gh/ffi.test.ts
     python3 sh/rs/package-rename.test.py
     python3 sh/rs/select.test.py
     python3 sh/js/workspace.test.py
@@ -78,3 +80,8 @@ gst-formula *args:
 # Run related Nightly benchmarks in one build environment, reporting every failure.
 nightly group:
     sh/gh/nightly.sh {{ quote(group) }}
+
+# Select shared native artifacts or check an upstream FFI publisher.
+[positional-arguments]
+ffi *args:
+    python3 sh/gh/ffi.py "$@"

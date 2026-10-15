@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Build and package moq-ffi native libraries for release.
-# Usage: ./build.sh [--target TARGET] [--version VERSION] [--output DIR] [--bindings-only] [--no-default-features]
+# Usage: ./build.sh [--target TARGET] [--version VERSION] [--output DIR] [--bindings-only [--library PATH]] [--no-default-features]
 #
 # Examples:
 #   ./build.sh                                    # Build for host, detect version from Cargo.toml
@@ -24,6 +24,7 @@ TARGET=""
 VERSION=""
 OUTPUT_DIR="dist"
 BINDINGS_ONLY=false
+LIBRARY=""
 ARCHIVE=false
 NO_DEFAULT_FEATURES=false
 
@@ -46,6 +47,10 @@ while [[ $# -gt 0 ]]; do
             BINDINGS_ONLY=true
             shift
             ;;
+        --library)
+            LIBRARY="$2"
+            shift 2
+            ;;
         --archive)
             # Default leaves the staging dir alone for upload-artifact;
             # --archive recreates the legacy tar.gz/zip behavior.
@@ -57,7 +62,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h | --help)
-            echo "Usage: $0 [--target TARGET] [--version VERSION] [--output DIR] [--bindings-only] [--archive] [--no-default-features]"
+            echo "Usage: $0 [--target TARGET] [--version VERSION] [--output DIR] [--bindings-only [--library PATH]] [--archive] [--no-default-features]"
             exit 0
             ;;
         *)
@@ -66,6 +71,13 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ -n "$LIBRARY" ]]; then
+    if [[ "$BINDINGS_ONLY" != true || ! -f "$LIBRARY" ]]; then
+        echo "Error: --library requires --bindings-only and an existing library" >&2
+        exit 1
+    fi
+fi
 
 # Get version from Cargo.toml if not specified
 if [[ -z "$VERSION" ]]; then
@@ -204,8 +216,12 @@ mkdir -p "$OUTPUT_DIR"
 
 # --- Bindings-only mode ---
 if [[ "$BINDINGS_ONLY" == true ]]; then
-    build_target "$HOST_TARGET"
-    cdylib=$(find_cdylib "$HOST_TARGET")
+    if [[ -n "$LIBRARY" ]]; then
+        cdylib="$LIBRARY"
+    else
+        build_target "$HOST_TARGET"
+        cdylib=$(find_cdylib "$HOST_TARGET")
+    fi
     if [[ ! -f "$cdylib" ]]; then
         echo "Error: cdylib not found at $cdylib" >&2
         exit 1

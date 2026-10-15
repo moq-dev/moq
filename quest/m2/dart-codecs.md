@@ -15,9 +15,9 @@ cannot originate media, which makes it the odd one out rather than the lean
 one.
 
 There is no cross-compilation reason for the difference, which is what makes
-this worth closing rather than documenting: `release-kt-ffi.yml` already
-builds the same Android and desktop targets with default features, and
-`release-swift-ffi.yml` the same iOS targets. The cost is real but known:
+this worth closing rather than documenting: `release-shared-ffi.yml` already
+builds the same Android, desktop and iOS targets with default features for
+Kotlin and Swift. The cost is real but known:
 `audio` and `video` pull roughly forty crates plus openh264's vendored C++,
 which is why Dart shipped without them first.
 
