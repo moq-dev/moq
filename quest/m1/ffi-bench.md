@@ -22,8 +22,9 @@ Decided with the maintainer on 2026-10-15:
 - **Shape**: an in-process publisher and subscriber, no network
   (`MoqTrackProducer::consume` connects them without a session).
   `write_frame` and `read_frame` throughput over frame sizes from 100 B to
-  1 MB, a no-op call, and a record round trip. Sweep subscriber count so a
-  cost that grows with fan-out shows as a slope.
+  1 MB, a no-op call, and a record round trip. Sweep publisher and
+  subscriber counts independently, as the Go bench it replaces does, so a
+  cost that grows with either axis shows as a slope.
 - **Metrics**: throughput and per-call time, plus process CPU (user + sys)
   per MB. Async bridging (asyncio, coroutines, goroutines) burns CPU on
   other threads that wall time hides.

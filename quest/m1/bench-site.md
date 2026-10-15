@@ -2,10 +2,11 @@
 
 ## Goal
 
-A public GitHub Pages site charts every nightly benchmark over time, so a
-regression or an optimization shows as a step in the trend. On day one it
-carries the [binding benchmarks](/quest/m1/ffi-bench.md) and the existing
-nightly Rust Criterion and JS benchmarks.
+A public GitHub Pages site charts nightly benchmarks over time, so a
+regression or an optimization shows as a step in the trend. It carries the
+[binding benchmarks](/quest/m1/ffi-bench.md) and the existing nightly Rust
+Criterion and JS benchmarks, and other sources can join without a new
+site.
 
 ## Plan
 
@@ -17,7 +18,10 @@ Decided with the maintainer on 2026-10-15:
 - **Sources**: the binding benchmark's JSON and the "Rust benchmarks" and
   "JS benchmarks" nightly jobs, converted to the action's input format where
   they don't already emit one. Nightly size history (today a 45-day
-  artifact) is a natural extra series if it fits cheaply.
+  artifact) is a natural extra series if it fits cheaply. The relay load
+  benches (`bench-audio`, `bench-lock`) and the audio-quality job's
+  benchmarks are out of scope here; they can join later through the same
+  input format.
 - **One branch for everything**: [bench-ci](/quest/m2/bench-ci.md) records
   its nightly Criterion history here instead of creating its own data
   branch.
