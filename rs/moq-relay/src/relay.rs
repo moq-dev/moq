@@ -870,6 +870,9 @@ mod tests {
 	/// A signal caught before the drain first polls, such as one sent right after a
 	/// client counted its session established, still drains that session. The
 	/// default action would otherwise kill the process with no GOAWAY.
+	///
+	/// The raised SIGTERM reaches every listener in the process, and `cargo test`
+	/// runs tests as threads of one, so no other test here listens for signals.
 	#[cfg(unix)]
 	#[tokio::test(start_paused = true)]
 	async fn a_signal_before_the_drain_polls_starts_it() {

@@ -949,8 +949,13 @@ mod tests {
 
 	type Pipeline = Pin<Box<dyn Future<Output = anyhow::Result<()>>>>;
 
+	/// Held by every test that builds [`Signals`]: a raised signal reaches each
+	/// listener in the process, and `cargo test` runs tests as threads of one.
+	static SIGNALS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 	#[tokio::test(start_paused = true)]
 	async fn drain_ends_when_the_last_admission_leaves() {
+		let _signals = SIGNALS.lock().await;
 		let (trigger, mut observer) = moq_relay::shutdown::Observer::new(std::time::Duration::from_secs(10));
 		let active = observer.activity().enter().unwrap();
 		let mut signals = Signals::new().unwrap();
@@ -971,6 +976,7 @@ mod tests {
 	#[cfg(unix)]
 	#[tokio::test(start_paused = true)]
 	async fn a_signal_before_the_driver_polls_drains() {
+		let _signals = SIGNALS.lock().await;
 		let (trigger, mut observer) = moq_relay::shutdown::Observer::new(std::time::Duration::from_secs(10));
 		let session = observer.activity().enter().unwrap();
 		let signals = Signals::new().unwrap();
@@ -991,6 +997,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn drain_bounds_a_pending_admission() {
+		let _signals = SIGNALS.lock().await;
 		let window = std::time::Duration::from_secs(10);
 		let (trigger, mut observer) = moq_relay::shutdown::Observer::new(window);
 		let _active = observer.activity().enter().unwrap();
@@ -1013,6 +1020,7 @@ mod tests {
 	/// with one broadcast silently gone.
 	#[tokio::test]
 	async fn a_panicking_pipeline_ends_the_process() {
+		let _signals = SIGNALS.lock().await;
 		let local = tokio::task::LocalSet::new();
 		let mut tasks = JoinSet::new();
 
@@ -1032,6 +1040,7 @@ mod tests {
 	/// The first to finish ends the process, which is how stdin EOF stops a run.
 	#[tokio::test]
 	async fn a_finished_pipeline_ends_the_process() {
+		let _signals = SIGNALS.lock().await;
 		let local = tokio::task::LocalSet::new();
 		let mut tasks = JoinSet::new();
 
