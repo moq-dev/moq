@@ -37,11 +37,16 @@ Recommendations:
   admission cannot be shared across the worker boundary, record why.
 - The ring connection spans two runtimes, so the `conn` span has to follow
   both its worker future and its shared-runtime task.
-- Regression: an io_uring session, logged with only the
-  `moq_relay::connection` target as the harness filters, shows its `conn`
-  span and its close, like `relay_websocket_logs_its_close_under_a_cluster_id`
-  in `rs/moq-relay/tests/smoke.rs`. It belongs in `tests/runtime_uring.rs`,
-  which skips loudly below the kernel floor.
+- Regressions, logged with only the `moq_relay::connection` target as the
+  harness filters:
+  - An io_uring session shows its `conn` span and its close, like
+    `relay_websocket_logs_its_close_under_a_cluster_id` in
+    `rs/moq-relay/tests/smoke.rs`. It belongs in `tests/runtime_uring.rs`,
+    which skips loudly below the kernel floor.
+  - A panic inside the lifecycle owner, forced on the ring's
+    shared-runtime supervision, still logs that connection's close. This is
+    the concrete missing close today: `serve_connection` isolates the
+    supervise task's panic and drops the result. It must fail without the fix.
 
 Public API: none expected. Wire: none.
 
