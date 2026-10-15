@@ -27,11 +27,20 @@ close the race.
 
 Root problem: the deadline arm treats two kinds of activity the same. Pending
 handshakes and admissions may never finish, so the deadline must cut them.
-An established session force-closed at the deadline has a finite amount of
-cleanup left, so the drain can wait for it without a new timer. Separate the
-two. After the deadline, wait for established sessions to finish their
-cleanup, and do not wait for pending handshakes. A second signal still exits
-at once.
+An established session needs both a guaranteed close at the deadline and
+time to finish its cleanup afterwards. Separate the two. After the deadline,
+wait for established sessions to finish their cleanup, and do not wait for
+pending handshakes. A second signal still exits at once.
+
+Today nothing guarantees that close. The IETF session (`rs/moq-net/src/ietf/session.rs`)
+writes the GOAWAY with `encode_message(..).await` before `goaway::enforce`
+arms its timeout. A peer that keeps the transport alive but stops reading
+the control stream can block that write forever, so the session never
+reaches its force-close. Waiting on it would hang shutdown (found in this
+plan's review). So the shared absolute deadline must close every remaining
+established session itself, whatever its GOAWAY write is doing. Only then
+can the drain safely wait for the cleanup and the auth `end`. Check the lite
+GOAWAY path for the same ordering.
 
 Recommendations:
 
@@ -42,7 +51,9 @@ Recommendations:
 - Tests on a paused clock for both binaries' drain paths. A session that
   ignores the GOAWAY is force-closed at the deadline, and the drain returns
   only after its lease recorded `Shutdown` with its bytes. With an HTTP auth
-  server, its `end` arrives. A handshake that never completes does not move
+  server, its `end` arrives. A peer whose GOAWAY write is blocked by flow
+  control is still closed at the deadline and cleaned up. A handshake that
+  never completes does not move
   the exit past the deadline. Keep `pending_handshake_cannot_extend_the_drain_deadline`
   and the CLI's `drain_bounds_a_pending_admission` passing.
 

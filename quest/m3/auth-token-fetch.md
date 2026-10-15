@@ -23,12 +23,17 @@ Open question for the maintainer. This reverses a settled decision:
 [#5148](https://github.com/moq-dev/moq/pull/5148)'s quest and
 [Request gate](/quest/m1/auth/request-gate.md)).
 
-1. (recommended) Do it here, after the request gate. The gate's dispatcher
-   then makes this one admission path for two more request types, not new
-   per-handler checks. Without it, the hook's interoperability claim stops
-   at SUBSCRIBE, while moq-transport peers routinely look a track up and
-   fetch its history.
-2. Park it in m3 with the other request-token surfaces until a consumer asks.
+1. (recommended) Do it in m1, after the request gate. Move this file under
+   [In-band auth](/quest/m1/auth/README.md) and list it in that epic's
+   Required. The gate's dispatcher then makes this one admission path for
+   two more request types, not new per-handler checks. Without it, the hook's
+   interoperability claim stops at SUBSCRIBE, while moq-transport peers
+   routinely look a track up and fetch its history.
+2. Leave it parked here with the other request-token surfaces until a
+   consumer asks.
+
+It is parked in m3 until the maintainer answers, so an undecided scope does
+not gate the breaking release (from this plan's review).
 
 Keep the hook's boundaries. Every token is verified, at most one per
 request, and a peer's AUTH_OK is a ceiling, never authority. Request tokens
