@@ -147,26 +147,14 @@ impl Programs {
 
 	/// Finish each program's tracks, then its catalog while it still lists them.
 	///
-	/// Fails, leaving the caller to [`abort`](Self::abort), when the input ended before its PAT
-	/// listed a program or before every listed program declared a track.
+	/// Fails when the input ended before its PAT listed a program.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
 		anyhow::ensure!(!self.programs.is_empty(), "input ended before its PAT listed a program");
 		for program in &mut self.programs {
-			// The drain can release a program's first catalog.
 			program.import.finish()?;
+			// EOF releases the catalog reservations, so this announces even a program whose PMT
+			// never arrived.
 			program.announce_if_listed()?;
-		}
-		let silent: Vec<u16> = self
-			.programs
-			.iter()
-			.filter(|program| program.pending.is_some())
-			.map(|program| program.number)
-			.collect();
-		anyhow::ensure!(
-			silent.is_empty(),
-			"input ended before programs {silent:?} declared a track"
-		);
-		for program in &mut self.programs {
 			program.catalog.finish()?;
 		}
 		Ok(())
