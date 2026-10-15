@@ -37,6 +37,10 @@ test("an approved wire break can retain its protocol name, but new drafts still 
 	expect(matrix([OLD], [OLD], { [OLD]: exception }).shared).toEqual([OLD]);
 	const cell = { lane: "fetch", version: OLD, relay: "current", publisher: "released" };
 	expect(planned({ [OLD]: exception }, cell)).toEqual([OLD]);
+	// The FETCH capability check is a cell too, so the break covers it.
+	expect(
+		planned({ [OLD]: exception }, { lane: "fetch-capability", version: OLD, relay: "both", publisher: "both" }),
+	).toEqual([OLD]);
 	expect(planned({ [OLD]: exception }, { ...cell, version: NEW })).toEqual([]);
 	expect(() => matrix([OLD], [OLD, NEW], { [OLD]: exception })).toThrow("removed published");
 });
