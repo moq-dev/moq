@@ -45,7 +45,22 @@ The **MoQ side** goes first and attaches the process to the network:
 `--connect <url>` dials a relay (the path is the auth path, `?jwt=`
 carries a token), and `--broadcast <name>` names the broadcast. A process can
 instead host sessions with `--listen`, or both at once, admitting clients the
-way the relay does (see [Authentication](/bin/relay/auth)).
+way the relay does (see [Authentication](/bin/relay/auth)). Listening imports and
+exports share the relay's shutdown behavior: SIGINT or SIGTERM sends accepted
+sessions a reconnect-to-me GOAWAY and waits up to `--drain-timeout` (default
+`10s`), exiting once they have all left. Sessions on versions without GOAWAY,
+such as `moq-lite-03`, get none and are closed when the window ends. A second
+signal exits immediately; `--drain-timeout 0s` closes sessions immediately.
+Pending handshakes and admission requests share the same drain window, and an
+open stdin pipe does not keep the process alive afterward.
+
+Add `--stats-enabled` before the first stage to publish accepted-session and
+traffic counters with the relay's `--stats-*` settings. An export-only listener
+publishes nothing to its sessions, so they cannot read these stats. These
+listener settings require a MoQ listener. Grants still scope which broadcasts
+each session can publish or subscribe to, including stats; see the relay's
+[statistics configuration](/bin/relay/config#stats).
+
 `moq import --help` lists the sources and `moq import rtmp --help` a specific
 one; every flag is documented there.
 

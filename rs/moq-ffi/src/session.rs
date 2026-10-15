@@ -165,20 +165,20 @@ impl Client {
 
 		connect.websocket.enabled = config.websocket.enabled;
 		if let Some(delay) = config.websocket.delay_us {
-			connect.websocket.delay = std::time::Duration::from_micros(delay);
+			connect.websocket.delay = Some(std::time::Duration::from_micros(delay));
 		}
 
 		connect.once = Some(config.once);
 
 		let backoff = config.backoff;
 		if let Some(initial) = backoff.initial_us {
-			connect.backoff.initial = std::time::Duration::from_micros(initial);
+			connect.backoff.initial = Some(std::time::Duration::from_micros(initial));
 		}
 		if let Some(multiplier) = backoff.multiplier {
 			connect.backoff.multiplier = multiplier;
 		}
 		if let Some(max) = backoff.max_us {
-			connect.backoff.max = std::time::Duration::from_micros(max);
+			connect.backoff.max = Some(std::time::Duration::from_micros(max));
 		}
 		if let Some(timeout) = backoff.timeout_us {
 			connect.backoff.timeout = Some(std::time::Duration::from_micros(timeout));

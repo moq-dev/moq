@@ -7535,6 +7535,64 @@ async fn the_same_instance_continues_after_a_drop() {
 	same_instance_returns(false).await;
 }
 
+/// A returning route serves the same publisher's catalog and monotonically numbered groups.
+#[tokio::test(start_paused = true)]
+async fn a_return_keeps_catalog_and_group_history() {
+	let wall =
+		std::time::SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 86_400_000);
+	crate::clock::fake_host_wall(wall);
+	let start = tokio::time::Instant::now();
+	let origin = crate::source::produce_origin();
+	let epoch = moq_net::Epoch::mint();
+	let route = moq_net::origin::Route::default().with_epoch(epoch.clone());
+	let (mut broadcast, mut catalog) = publish_live::<()>(&origin, route.clone());
+	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let mut groups = track.consume();
+	let clock = catalog.snapshot().clock;
+	let source = crate::source::resolved(&origin, "live").await;
+	let old = source.broadcast();
+	let mut export = Export::new(source)
+		.await
+		.unwrap()
+		.with_delay(RECORDING_MAX_AGE)
+		.with_replay();
+	for (sequence, ms) in (0..200).step_by(20).enumerate() {
+		write_aac(&mut track, ms);
+		assert_eq!(groups.recv_group().await.unwrap().unwrap().sequence, sequence as u64);
+	}
+	let mut frames = drain_frames(&mut export).await;
+	assert_eq!(pes_count(&frames), 10);
+
+	broadcast.unannounce();
+	old.closed().await;
+	tokio::time::advance(Duration::from_secs(1)).await;
+	crate::clock::fake_host_wall(wall + start.elapsed());
+	broadcast.announce(route).unwrap();
+	assert_eq!(catalog.snapshot().clock, clock, "a return must keep the catalog clock");
+	let back = origin.consume().routed_broadcast("live").await.unwrap();
+	assert_eq!(back.info().epoch.as_ref(), Some(&epoch));
+	assert!(!back.is_clone(&old), "the withdrawn front is replaced");
+	let mut export = export.follow(back).await.unwrap();
+	let resumed = start.elapsed().as_millis() as u64;
+	for (sequence, ms) in (resumed..resumed + 200).step_by(20).enumerate() {
+		write_aac(&mut track, ms);
+		assert_eq!(
+			groups.recv_group().await.unwrap().unwrap().sequence,
+			10 + sequence as u64
+		);
+	}
+	track.finish().unwrap();
+	catalog.finish().unwrap();
+	let (rest, end) = drain_to_end(&mut export).await;
+	frames.extend(rest);
+	end.expect("the publisher's final finish is clean");
+	assert_eq!(pes_count(&frames), 20, "each span goes out exactly once");
+	assert_eq!(count_discontinuity(&frames), 0);
+	assert_eq!(export.discontinuity(), 0);
+	assert!(pats(&frames).iter().all(|&(version, _)| version == 0));
+	assert!(pmts(&frames).iter().all(|(version, _)| *version == 0));
+}
+
 /// A switch onto an instance that is itself replaced before it builds its tables still
 /// reaches the next program as a switch: its tables carry a new version, every PID's first
 /// packet flags the break, and pacing sees a new generation.
@@ -8985,4 +9043,64 @@ async fn a_switch_reads_the_instance_it_followed() {
 		pts.iter().all(|&pts| pts < 60_200 * 90),
 		"nothing of the newer instance: {pts:?}"
 	);
+}
+
+/// A sink stall leaves arrived media in its source rather than draining it into the jitter buffer.
+#[tokio::test(start_paused = true)]
+async fn a_backlog_stays_in_the_source_until_due() {
+	use crate::container::test_util::{Live, raw_frame};
+
+	for delay in [Duration::ZERO, Duration::from_millis(100)] {
+		let mut config = AudioConfig::new(AAC { profile: 2 }, 44100, 2);
+		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
+		let mut live = Live::audio(config);
+		let mut export = Export::new(live.source().await).await.unwrap().with_delay(delay);
+		let start = tokio::time::Instant::now();
+		live.track.write(raw_frame(0, b"first", true)).unwrap();
+		// A zero-delay slot needs a later frame to prove it is complete.
+		live.track.write(raw_frame(40_000, b"warm", false)).unwrap();
+		while !export
+			.next()
+			.await
+			.unwrap()
+			.unwrap()
+			.payload
+			.windows(5)
+			.any(|part| part == b"first")
+		{}
+		// Acquiring the first clock advances mock time; the publisher keeps capturing on it.
+		let base = 40_000 + start.elapsed().as_micros() as u64;
+		for index in 1..=50 {
+			tokio::time::advance(Duration::from_millis(20)).await;
+			live.track
+				.write(raw_frame(base + index * 20_000, b"backlog", false))
+				.unwrap();
+		}
+		// Settle the final zero-delay slot while the publication stays live.
+		live.track.write(raw_frame(base + 1_040_000, b"tail", false)).unwrap();
+		// Keep the sink stalled until every backlog frame has reached its deadline.
+		tokio::time::advance(delay).await;
+		let mut frames = 0;
+		while frames < 50 {
+			let frame = tokio::time::timeout(DRAIN, export.next())
+				.await
+				.unwrap_or_else(|_| {
+					panic!(
+						"{delay:?}: {frames}/50 frames released, {} buffered, {} dropped",
+						export.buffered(),
+						export.dropped()
+					)
+				})
+				.unwrap()
+				.unwrap();
+			frames += frame.payload.windows(7).filter(|part| *part == b"backlog").count();
+			assert!(
+				export.buffered() <= 1,
+				"{delay:?}: {} frames buffered",
+				export.buffered()
+			);
+		}
+		assert_eq!(frames, 50);
+		assert_eq!(export.dropped(), 0, "the sink's stall does not make arrived media late");
+	}
 }

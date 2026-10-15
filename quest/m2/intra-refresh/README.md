@@ -32,26 +32,27 @@ make these presentation guarantees true even when sweep lengths change.
 - One group per refresh cycle. A group starts at the recovery point, the frame
   that begins a sweep, so a viewer joining at any group boundary is clean after
   exactly one cycle and relay shedding keeps its meaning.
-- The catalog carries a `warmup` duration per rendition. A Rust viewer does not
-  present decoded output stamped within `warmup` of a group start after a
-  non-continuous join, and joins that much further back so the first presented
-  frame lands at the latency target. A browser viewer uses it only to gate and
-  size its second decoder, so an imprecise value costs stripes, never a dirty
-  frame. The field is generic: audio gets the same one for Opus convergence.
-- A browser viewer stays live: a min-delay decoder may show stripes after a
-  cold join or skip, and a second decoder with one more sweep of delay takes
-  over once its timestamp catches up. A Rust viewer never shows a partially
-  refreshed picture: cold tune-in and a mid-stream skip both decode
-  everything and present nothing until recovery, freezing on the last good
-  frame. A group that opens on a true IDR shows at once.
+- The catalog carries a `warmup` duration per rendition. The transcoder
+  decodes enough preceding groups to cover it as history before each group it
+  transcodes. A player uses it only to gate and size its second decoder. That decoder is clean because it joins a whole group
+  earlier, not because of the value, so an imprecise `warmup` only changes how
+  long stripes last. The field is generic: audio gets the same one for Opus convergence.
+- A player stays live, in the browser and in Rust: a min-delay decoder may
+  show stripes after a cold join or skip, and a second decoder with one more
+  sweep of delay takes over once its timestamp catches up. The transcoder
+  never encodes a partially refreshed picture: every fetched group and every
+  group after a skip is preceded by decode-only history. A group that opens on
+  a true IDR needs none.
 - H.264 and H.265 only. AV1 and VP9 have no standard gradual refresh signal.
   WebCodecs has no intra-refresh option, so js/publish is consumer-only.
 
 ## Required
 
 - [Dual decoder](/quest/m2/intra-refresh/dual-decoder.md) - js/watch runs a min-delay and a max-delay decoder and shows the max-delay picture whenever it has caught up
+- [Native dual decoder](/quest/m2/intra-refresh/native-dual-decoder.md) - moq-ffi and moq-c players get the same two-decoder live playback through `decode::Consumer`
+- [Play dual decoder](/quest/m2/intra-refresh/play-dual-decoder.md) - `moq play`'s paced pipeline reuses that pair
 - [Plan: recovery boundaries](/quest/m2/intra-refresh/plan-boundary.md) - settle safe precision and publication ordering before consumers rely on a duration
-- [Consumer warmup](/quest/m2/intra-refresh/consumer-warmup.md) - Rust viewers join `warmup` earlier and withhold display until recovery, except at a true IDR
+- [Consumer warmup](/quest/m2/intra-refresh/consumer-warmup.md) - the transcoder decodes the groups covering `warmup` as history before each group, except at a true IDR
 - [H.264 import](/quest/m2/intra-refresh/h264-import.md) - the splitter keeps `recovery_frame_cnt` and import publishes `warmup` from it
 - [H.265 import](/quest/m2/intra-refresh/h265-import.md) - the splitter reads the recovery-point SEI so an HEVC intra-refresh stream forms groups and publishes `warmup`
 - [Export sync flags](/quest/m2/intra-refresh/export-sync-flags.md) - fmp4, MKV, and HLS stop advertising a refresh group start as a sync sample

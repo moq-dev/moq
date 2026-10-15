@@ -20,8 +20,9 @@ class SelectTest(unittest.TestCase):
             just.chmod(0o755)
             changed = scratch / "changed"
             changed.write_text("sh/rs/nextest.sh\n")
-            env = dict(os.environ, PATH=f"{scratch}:{os.environ['PATH']}", SELECT_CALLS=str(calls))
-            for action in ("check", "check-test", "test"):
+            env = dict(os.environ, PATH=f"{scratch}:{os.environ['PATH']}", SELECT_CALLS=str(calls),
+                       BASH_ENV=os.devnull)
+            for action in ("check", "check-test", "lint", "test"):
                 with self.subTest(action=action):
                     calls.write_text("")
                     subprocess.run(
@@ -32,6 +33,11 @@ class SelectTest(unittest.TestCase):
                         f"rs {action} --workspace --exclude moq-net-fuzz",
                         calls.read_text().splitlines(),
                     )
+                    if action == "lint":
+                        selected = calls.read_text().splitlines()
+                        for recipe in ("tokio-features", "wasm", "uring-check", "media-features"):
+                            self.assertIn(f"rs {recipe}", selected)
+                        self.assertNotIn("rs capture", selected)
 
 
 if __name__ == "__main__":

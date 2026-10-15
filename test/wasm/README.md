@@ -31,6 +31,21 @@ A failing run keeps its run directory, including a Playwright trace of the
 failing page, and CI uploads it; a passing run deletes its own. See
 [the harness contract](../README.md).
 
+## Rust clock
+
+`moq-clock`'s browser backend also runs here, using `wasm-bindgen-test` and the
+same Playwright Chromium installation:
+
+```bash
+bun install --frozen-lockfile
+bunx playwright install chromium
+just rs wasm-test
+```
+
+The suite covers monotonic time, sleep deadlines, timeouts, an interval's immediate
+first tick, and a controlled `Date.now()` reading. `rust.ts` opens wasm-bindgen's
+harness page and propagates failures through Cargo and `just`.
+
 ## Shape
 
 `run.sh` builds, starts the relays, and hands their URLs to `driver.ts`, which

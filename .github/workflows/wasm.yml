@@ -1,21 +1,23 @@
 name: WASM
 
 # Runs the @moq/wasm bindings in a real browser, which nothing in `just check`
-# can do. rs/moq-wasm is `#![cfg(target_arch = "wasm32")]`, so a host-target
-# `cargo check --workspace` compiles it to nothing, and `just rs wasm` is a
-# compile gate: it catches a moq-net change that stops the bindings building,
-# never one that stops them working. See test/wasm/README.md.
+# can do, and moq-clock's browser timers and wall clock through
+# wasm-bindgen-test on the same Chromium. rs/moq-wasm is
+# `#![cfg(target_arch = "wasm32")]`, so a host-target `cargo check --workspace`
+# compiles it to nothing, and `just rs wasm` is a compile gate: it catches a
+# moq-net change that stops the bindings building, never one that stops them
+# working. See test/wasm/README.md.
 #
 # Narrow trigger, like obs.yml. The filter covers what the bindings
 # are built out of: moq-net, because that is the break this exists to catch in
 # review (they are a thin wrapper over it, and every other gate compiles them to
 # nothing), and kio underneath it, because a lost wakeup or a timer regression
 # reaches the browser through moq-net without touching a file named here
-# otherwise. Those two are the whole in-repo dependency graph of the crate.
+# otherwise. moq-clock supplies the browser clock below those layers.
 #
 # The rest of the filter is the machinery that turns the crate into the package
 # under test, which is just as able to break it: the root `justfile` owns the
-# `wasm` recipe, and `.cargo/config.toml` carries the wasm32 rustflags
+# `wasm` recipe, `rs/justfile` the `wasm-test` recipe, and `.cargo/config.toml` carries the wasm32 rustflags
 # (`getrandom_backend`, `web_sys_unstable_apis`) without which it does not
 # compile at all.
 #
@@ -37,6 +39,7 @@ on:
     types: [opened, synchronize, reopened, closed]
     paths:
       - "rs/moq-wasm/**"
+      - "rs/moq-clock/**"
       - "rs/moq-net/**"
       - "rs/kio/**"
       - "js/wasm/**"
@@ -44,6 +47,7 @@ on:
       - "test/lib/**"
       - "justfile"
       - "js/justfile"
+      - "rs/justfile"
       - "test/justfile"
       - ".cargo/config.toml"
       - "package.json"
@@ -98,6 +102,10 @@ jobs:
       # `playwright install` then no-ops.
       - name: Playwright Chromium
         run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
+        shell: bash -leo pipefail {0}
+
+      - name: Browser clock
+        run: nix develop --command just rs wasm-test
         shell: bash -leo pipefail {0}
 
       - name: WASM

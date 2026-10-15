@@ -37,4 +37,3 @@ Open, for when the port starts:
 - [OBS native codecs](/quest/m2/obs-moq-video/README.md) - the plugin's codec work, which stays plugin-side
 - [Client settings parity](/quest/m1/obs-client-config.md) - the client settings a native service exposes
 - [Session report parity](/quest/m1/obs-session-report.md) - the session report a native output surfaces
-- [OBS publishes under epochs](/quest/m1/obs-epoch.md) - the per-start epoch the output keeps

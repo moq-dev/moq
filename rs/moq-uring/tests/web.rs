@@ -3,8 +3,7 @@
 //! streams and datagrams through the H3 framing; the other runs a whole
 //! moq-lite session over it, which is exactly the browser-to-relay path.
 //!
-//! Kernel-gated: skips loudly below the Linux 6.12 floor (GitHub-hosted CI),
-//! and runs everywhere else.
+//! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
 
 #![cfg(all(target_os = "linux", feature = "noq"))]
 
@@ -20,7 +19,7 @@ use web_transport_trait::poll::{RecvStream as _, SendStream as _, Session as _};
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
 		Ok(worker) => Some(worker),
-		Err(Error::Unsupported(reason)) => {
+		Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
 			eprintln!("skipping io_uring web test: {reason}");
 			None
 		}

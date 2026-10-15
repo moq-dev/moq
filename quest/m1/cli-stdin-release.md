@@ -9,7 +9,7 @@ stats interface, auth behavior, or wire format.
 
 ## Plan
 
-Found while implementing [listening CLI sessions](/quest/m1/cli-serve.md):
+Found while implementing listening CLI sessions (#5510):
 a regression that keeps the stdin writer open independently of `Child::wait`
 reproduced process teardown hanging after session drain. Tokio's default
 runtime drop waits for that blocking stdin read. Read-only release inspection
@@ -36,10 +36,6 @@ complete that quest.
 
 Public API: no signatures or CLI flags change; a stopped process no longer
 waits for an unrelated stdin writer to close. Wire: none.
-
-## Required
-
-- [Listening CLI sessions](/quest/m1/cli-serve.md) - land the main runtime-teardown source fix before the compatible backport
 
 ## Related
 

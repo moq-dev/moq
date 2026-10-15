@@ -23,7 +23,8 @@ export interface Established {
 
 	/**
 	 * Estimates measured by the peer, updated as PROBE messages arrive. Stays empty on
-	 * versions without PROBE. See {@link Stats} for what the local transport counts.
+	 * versions without PROBE. Observe it to request updates; `peek()` alone is passive.
+	 * See {@link Stats} for what the local transport counts.
 	 */
 	readonly probe: Getter<Probe>;
 
