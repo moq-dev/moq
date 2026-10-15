@@ -2940,6 +2940,9 @@ where
 			match type_id {
 				ietf::RequestOk::ID => {
 					let _ = ietf::RequestOk::decode_msg(&mut data, self.version)?;
+					if !data.is_empty() {
+						return Err(Error::WrongSize);
+					}
 					tracing::debug!(broadcast = %absolute, "request token refreshed");
 					if let Some(request) = ns.requests.get_mut(&suffix) {
 						request
@@ -2949,6 +2952,9 @@ where
 				}
 				ietf::RequestError::ID => {
 					let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
+					if !data.is_empty() {
+						return Err(Error::WrongSize);
+					}
 					// A refused renewal means the receiver closed its stream, so the announce
 					// cannot stand on the old grant: withdraw it and honor the refusal's retry
 					// interval, exactly as a repriced update does. The retry re-offers it fresh,
@@ -13053,6 +13059,72 @@ mod tests {
 		assert!(
 			matches!(result, Some(Err(Error::Decode(DecodeError::InvalidValue)))),
 			"a malformed answer must stay fatal, got {result:?}"
+		);
+	}
+
+	/// A token refresh answered with a REQUEST_OK that carries junk inside its declared size
+	/// ends the session, rather than marking the advertisement as standing on the new token.
+	#[moq_net_sim::test]
+	async fn a_token_refresh_answer_with_trailing_bytes_is_fatal() {
+		const VERSION: Version = Version::Draft17;
+		let first = bytes::Bytes::from_static(&[0x03, 0x00, b'a', b'a']);
+		let second = bytes::Bytes::from_static(&[0x03, 0x00, b'b', b'b']);
+
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
+		settle().await;
+
+		// The PUBLISH_NAMESPACE is accepted, then the renewal is answered by a REQUEST_OK whose
+		// declared size covers one byte more than the message.
+		let ok = publish_namespace_ok(VERSION).await;
+		assert_eq!(
+			ok[0],
+			ietf::RequestOk::ID as u8,
+			"a one-byte type, then a two-byte size"
+		);
+		let mut padded = ok.clone();
+		let size = u16::from_be_bytes([padded[1], padded[2]]) + 1;
+		padded[1..3].copy_from_slice(&size.to_be_bytes());
+		padded.push(0x00);
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![[ok, padded].concat()]);
+		let log = session.log.clone();
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer::default());
+
+		let token = crate::RequestToken::new(Some(typed(&first)));
+		let publisher = Publisher::new(
+			crate::time::Clock::sim(),
+			session,
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			peer_setup,
+			VERSION,
+		)
+		.with_request_token(token.clone());
+
+		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, &first) >= 1 {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(occurrences(&log, &first), 1, "the initial token rode the announce");
+
+		token.set(Some(typed(&second)));
+		let mut result = None;
+		for _ in 0..100 {
+			if let Poll::Ready(res) = futures::poll!(run.as_mut()) {
+				result = Some(res);
+				break;
+			}
+			settle().await;
+		}
+		assert!(
+			matches!(result, Some(Err(Error::WrongSize))),
+			"an answer with trailing bytes must be fatal, got {result:?}"
 		);
 	}
 
