@@ -308,7 +308,10 @@ mod tests {
 		let client = async {
 			let (session, driver) = moq_net::Client::new()
 				.with_versions(versions.clone())
-				.connect(now, crate::transport::Session::new(client))
+				.connect(
+					now,
+					crate::transport::Session::new(client, moq_net::transport::Binding::InBand),
+				)
 				.await
 				.unwrap();
 			(session, AbortOnDrop::new(tokio::spawn(moq_net::time::run(driver))))
@@ -316,7 +319,10 @@ mod tests {
 		let server = async {
 			let request = moq_net::Server::new()
 				.with_versions(versions.clone())
-				.accept_request(now, crate::transport::Session::new(server))
+				.accept_request(
+					now,
+					crate::transport::Session::new(server, moq_net::transport::Binding::InBand),
+				)
 				.await
 				.unwrap();
 			let mut requests = request.auth().requests().unwrap();

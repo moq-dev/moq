@@ -290,7 +290,7 @@ mod tests {
 	async fn withheld_websocket_setup_ends_at_the_deadline() {
 		let window = Duration::from_secs(1);
 		let mut config = crate::Config::default();
-		config.listen.timeout = Duration::ZERO;
+		config.listen.timeout = Some(Duration::ZERO);
 		config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 		config.listen.tls.generate = vec!["localhost".into()];
 		config.web.ws = true;

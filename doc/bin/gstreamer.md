@@ -69,7 +69,12 @@ reports `failed` on an answer redialing can't change, such as a rejected token.
 Each run from `READY` publishes under a fresh
 [publisher epoch](/concept/moq-lite#publisher-epochs), so on moq-lite 07 (opt-in)
 viewers switch to a restarted pipeline at once instead of stalling on the old
-one; reconnects within a run keep it.
+one; reconnects within a run keep it. The first catalog waits for every requested
+pad to negotiate its rendition, including any codec config carried in its first
+buffers. A linked pad that never negotiates holds back the whole catalog until
+it is released, reaches EOS, or fails; a flush or new stream after that EOS
+holds it back again. Opaque data pads are not listed. Later
+catalog updates do not wait for newly requested pads.
 
 `connection-stats` is null while disconnected. While connected it is a
 structure of the transport counters the active backend has (RTT, send and
@@ -105,12 +110,15 @@ rewound timestamps forward.
 ## moqsrc
 
 Pads are named by kind and appear as the catalog announces renditions:
-`video_0`, `video_1`, `audio_0`. Link the pad you want by name; the terse
+`video_0`, `video_1`, `audio_0`. A rendition referencing another broadcast reads
+that broadcast on the same connection. Link the pad you want by name; the terse
 `moqsrc ! decodebin3` form links only the first pad offered, which may be
 audio. `moqsrc` follows the broadcast's announcements: when the publisher
 restarts, it switches to the new broadcast on the same pads, kept by rendition
 name, so a pipeline linked by name keeps playing. A format change keeps its pad
-too, with new caps downstream must accept. A rendition that leaves the catalog
+too, with new caps downstream must accept. The new run's first catalog must list
+every returning rendition; one it omits gets EOS instead of keeping its old pad.
+A rendition that leaves the catalog
 gets EOS once its track ends. A broadcast that ends or loses its publisher holds
 its pads without EOS until it is announced again, so the pipeline does not end
 on its own; losing the relay connection posts an error. Properties: `url`,

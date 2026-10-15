@@ -267,9 +267,17 @@ asking it to reconnect elsewhere, including any that connect during the drain,
 and is force-closed if it is still connected when the window ends. Accepted
 connections still handshaking or awaiting authorization hold the drain until
 they finish, fail, or reach that same deadline, where any still pending is
-refused or closed. The relay exits as soon as
-every admitted connection has left (refusing any that arrive after), when
-the window ends, or immediately on a second signal. `0` skips the GOAWAY.
+refused or closed. Public HTTP/1.1 connections hold the drain from TCP accept
+through TLS and their first request's headers, including HLS, API, and health
+requests. A non-WebSocket first request releases that hold; HTTPS h2 releases at
+ALPN because extended CONNECT is disabled. A later WebSocket upgrade on the same
+keep-alive connection joins the drain when its headers arrive. The internal
+listener is unaffected.
+
+The relay exits as soon as every admitted connection has left, when the window
+ends, or immediately on a second signal. Once it commits to exit, WebSocket
+upgrades receive 503; plain HTTP is served until the public listener stops.
+`0` skips the GOAWAY.
 Only moq-lite-04+ and moq-transport clients act on a GOAWAY; older ones are
 closed when the window ends. An embedder can take over the signals; see
 [Embed](/bin/relay/#embed).

@@ -1,4 +1,4 @@
-import { type Dispose, type GetPromise, type Getter, race, Signal } from "@moq/signals";
+import { type Dispose, Effect, type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
 import * as broadcast from "../broadcast.ts";
@@ -8,7 +8,6 @@ import { BroadcastCache } from "../consume.ts";
 import * as DatagramStream from "../datagram_stream.ts";
 import type * as Epoch from "../epoch.ts";
 import {
-	closeReason,
 	controlTimeout,
 	error,
 	ProtocolViolation,
@@ -39,6 +38,7 @@ import {
 	decodeAnnounceBroadcastMaybe,
 } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
+import { closeViolation } from "./error.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
 import { frameDecoder, type Group as GroupMessage, readFrames } from "./group.ts";
 import { Probe } from "./probe.ts";
@@ -142,18 +142,9 @@ interface SubscribeEntry {
 	held?: Stream;
 }
 
-/**
- * Handles subscribing to broadcasts and managing their lifecycle.
- *
+/** Subscribe to the peer and own its receive-side protocol tasks.
  * @internal
  */
-// What we close a session with on a protocol violation.
-//
-// The draft names the condition but assigns no numbers, so this is the Rust
-// implementation's code for `Error::ProtocolViolation`: matching it is what makes the
-// two report the same thing, where the default 0 would tell the peer it closed cleanly.
-const PROTOCOL_VIOLATION_CODE = 15;
-
 export class Subscriber {
 	#quic: WebTransport;
 	// Advertisements the peer holds live across every announce stream on this session.
@@ -593,9 +584,7 @@ export class Subscriber {
 			// A violation ends the session, not just this stream, so a nonconforming peer
 			// cannot repeat it on the next one. Matches `ietf::Subscriber` and the Rust
 			// lite subscriber, where the announce half only ever ends the session on error.
-			if (e instanceof ProtocolViolation) {
-				this.#quic.close({ closeCode: PROTOCOL_VIOLATION_CODE, reason: closeReason(reason(e)) });
-			}
+			closeViolation(this.#quic, e);
 		} finally {
 			// Release only this interest's routes. Existing consumers remain pinned.
 			for (const path of advertised.keys()) this.#consumes.withdraw(path, announced);
@@ -722,6 +711,7 @@ export class Subscriber {
 			);
 			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
+			closeViolation(this.#quic, err);
 			// The setup outlived its deadline waiting for the first response: a control
 			// timeout, not content that arrived late. A revocation says so instead.
 			const e =
@@ -758,7 +748,7 @@ export class Subscriber {
 			// flight, so the track ends only once the tail is accounted for. A reset rejects
 			// instead, so the track ends with that error rather than a clean tail.
 			const responses = supportsTrackStream(this.version)
-				? this.#runResponses(stream, entry)
+				? this.runResponses(stream, entry)
 				: stream.reader.closed;
 			let tailSettled = false;
 			const closed = responses.then(async () => {
@@ -766,7 +756,9 @@ export class Subscriber {
 				tailSettled = true;
 			});
 			// A reset that lands after the race below settled is moot; the race observes one before.
-			closed.catch(() => {});
+			void closed.catch((err: unknown) => {
+				closeViolation(this.#quic, err);
+			});
 			const subscriptionUpdates =
 				this.version === Version.DRAFT_01 || this.version === Version.DRAFT_02
 					? undefined
@@ -925,6 +917,7 @@ export class Subscriber {
 			closed.throwIfAborted();
 			return await untilAborted(run(stream), closed);
 		} catch (err) {
+			closeViolation(this.#quic, err);
 			stream.abort(error(err));
 			throw err;
 		} finally {
@@ -1153,15 +1146,15 @@ export class Subscriber {
 	// Reads SUBSCRIBE_START/END/DROP on the subscribe stream until FIN (lite-05+), recording
 	// the range the tail is accounted against. SUBSCRIBE_END declares the track's end right
 	// away, so a consumer learns it before the last groups arrive. The publisher must declare
-	// the end before FIN; resets and malformed responses reject with their failure.
-	async #runResponses(stream: Stream, entry: SubscribeEntry): Promise<void> {
+	// the end before FIN unless we cancelled locally; resets and malformed responses reject.
+	private async runResponses(stream: Stream, entry: SubscribeEntry): Promise<void> {
 		for (;;) {
 			const resp = await decodeSubscribeResponseMaybe(stream.reader, this.version);
 			// The publisher answered, so its demand stands on the subscription from here.
 			entry.held?.close();
 			entry.held = undefined;
 			if (!resp) {
-				if (entry.end === undefined)
+				if (entry.end === undefined && entry.track.closed.peek() === undefined)
 					throw new ProtocolViolation("subscribe stream ended without SUBSCRIBE_END");
 				return;
 			}
@@ -1450,57 +1443,62 @@ export class Subscriber {
 	 */
 	// Await the peer's advertised probe level, blocking until its SETUP arrives. The peer
 	// MUST send exactly one SETUP, so this resolves once that stream is read.
-	async #peerProbeLevel(peerSetup: Signal<Setup | undefined>): Promise<ProbeLevel> {
+	async #peerProbeLevel(peerSetup: Signal<Setup | undefined>, scope: Effect): Promise<ProbeLevel | undefined> {
 		let setup = peerSetup.peek();
 		while (setup === undefined) {
-			setup = await peerSetup.changed();
+			setup = await scope.race(Signal.race(peerSetup));
+			if (setup === undefined) return;
 		}
 		return setup.probe;
 	}
 
-	async runProbe(): Promise<void> {
+	async runProbe(signal?: AbortSignal): Promise<void> {
 		if (!this.#probe) return;
 		if (this.version === Version.DRAFT_01 || this.version === Version.DRAFT_02) return;
+		const scope = new Effect();
+		const abort = signal ? AbortSignal.any([signal, this.#closed.signal]) : this.#closed.signal;
+		const stop = () => scope.close();
+		abort.addEventListener("abort", stop, { once: true });
+		if (abort.aborted) stop();
 
-		// Lite-05+ gates the PROBE stream on the peer advertising Probe >= Report in its
-		// SETUP. Wait for the SETUP, then bail if the peer can't report bitrate. Older
-		// drafts have no SETUP, so they keep probing unconditionally.
-		if (this.#peerSetup) {
-			const probe = await this.#peerProbeLevel(this.#peerSetup);
-			if (probe < ProbeLevel.Report) return;
-		}
-
-		// A session that is going away has no use for a new estimate.
-		if (this.#goingAway()) return;
-
-		// Probe is best-effort: any failure (stream reset by peer, missing peer support,
-		// transport hiccup) MUST NOT tear down the connection. On error, drop the
-		// estimates so consumers know they're stale.
+		// Probe is best-effort: transport failures stay per-stream, but malformed control
+		// input ends the session. Drop the estimates so consumers know they're stale.
 		try {
-			const stream = await Stream.open(this.#quic, { version: this.version });
-			await stream.writer.u53(StreamId.Probe);
-
+			// Lite-05+ gates PROBE on the peer advertising Probe >= Report in its SETUP.
+			if (this.#peerSetup) {
+				const level = await this.#peerProbeLevel(this.#peerSetup, scope);
+				if (level === undefined || level < ProbeLevel.Report) return;
+			}
+			if (this.#goingAway() || abort.aborted) return;
+			const opening = Stream.open(this.#quic, { version: this.version });
+			const stream = await scope.race(opening);
+			if (!stream) {
+				// A queued transport open cannot be cancelled; give its slot back unused.
+				void opening.then((stream) => stream.close()).catch(() => {});
+				return;
+			}
+			scope.cleanup(() => stream.close());
+			await scope.race(stream.writer.u53(StreamId.Probe));
 			for (;;) {
-				const probe = await Probe.decodeMaybe(stream.reader, this.version);
+				const probe = await scope.race(Probe.decodeMaybe(stream.reader, this.version));
 				if (!probe) break;
-				// lite-03 carries no RTT field, so an absent value there means "not
-				// carried" and the last reading stands. From lite-04 the field is
-				// always present and 0 explicitly means unknown, so undefined is the
-				// peer retracting a value we would otherwise hold forever.
+				// Lite-03 carries no RTT; newer drafts retract it with a zero.
 				const prev = this.#probe.peek();
 				const rtt = probe.rtt !== undefined ? Time.Milli(probe.rtt) : undefined;
 				this.#probe.set({
-					// `undefined` is the peer reporting "unknown", not an estimate of
-					// zero; letting it through would become a real 0 bps ABR target.
+					// `undefined` is the peer reporting "unknown"; a 0 would become a real ABR target.
 					estimatedRecvRate: probe.bitrate,
 					rtt: hasProbeRtt(this.version) ? rtt : (rtt ?? prev.rtt),
 				});
 			}
 		} catch (err: unknown) {
+			closeViolation(this.#quic, err);
 			if (!this.#closed.signal.aborted) {
 				console.warn("probe stream error", err);
 			}
 		} finally {
+			scope.close();
+			abort.removeEventListener("abort", stop);
 			this.#probe.set({});
 		}
 	}

@@ -1174,6 +1174,9 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Session for Con
 		self.inner.max_datagram_size()
 	}
 
+	fn binding(&self) -> crate::transport::Binding {
+		self.inner.binding()
+	}
 	fn protocol(&self) -> Option<&str> {
 		self.inner.protocol()
 	}

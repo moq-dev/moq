@@ -85,8 +85,24 @@ export function matrix(
 	};
 }
 
+/** Build same-source media controls on the published lite-06 baseline. */
+export function mediaControls(current: string[], released: string[]) {
+	const version = "moq-lite-06";
+	if (!current.includes(version) || !released.includes(version)) {
+		throw new Error(`media controls require ${version} on both binaries`);
+	}
+	return [
+		{ source: "current", version },
+		{ source: "released", version },
+	];
+}
+
 /** The planned break that skips `cell`, if any. */
 export function planned(skipped: Record<string, PlannedBreak>, cell: Cell): string | undefined {
+	if (cell.lane === "media-control") {
+		if (cell.relay !== cell.publisher) throw new Error("media control must use one source");
+		return undefined;
+	}
 	for (const [name, { cells }] of Object.entries(skipped)) {
 		if (
 			cells?.lanes.includes(cell.lane) &&
@@ -127,14 +143,13 @@ if (import.meta.main) {
 		console.log(JSON.stringify(result, null, 2));
 	} else if (command === "matrix") {
 		const skipped = JSON.parse(readFileSync(args[2], "utf8"));
-		const result = matrix(
-			versions(readFileSync(args[0], "utf8")),
-			versions(readFileSync(args[1], "utf8")),
-			skipped,
-			JSON.parse(readFileSync(args[4], "utf8")),
-		);
-		console.log(JSON.stringify(result, null, 2));
+		const current = versions(readFileSync(args[0], "utf8"));
+		const released = versions(readFileSync(args[1], "utf8"));
+		const result = matrix(current, released, skipped, JSON.parse(readFileSync(args[4], "utf8")));
+		const controls = mediaControls(current, released);
+		console.log(JSON.stringify({ ...result, controls }, null, 2));
 		writeFileSync(args[3], `${result.shared.join("\n")}\n`);
+		writeFileSync(args[5], `${controls.map(({ source, version }) => `${source} ${version}`).join("\n")}\n`);
 	} else if (command === "skip") {
 		const [file, lane, version, relay, publisher] = args;
 		const name = planned(JSON.parse(readFileSync(file, "utf8")), { lane, version, relay, publisher });

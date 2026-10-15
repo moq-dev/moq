@@ -45,7 +45,22 @@ The **MoQ side** goes first and attaches the process to the network:
 `--connect <url>` dials a relay (the path is the auth path, `?jwt=`
 carries a token), and `--broadcast <name>` names the broadcast. A process can
 instead host sessions with `--listen`, or both at once, admitting clients the
-way the relay does (see [Authentication](/bin/relay/auth)).
+way the relay does (see [Authentication](/bin/relay/auth)). Listening imports and
+exports share the relay's shutdown behavior: SIGINT or SIGTERM sends accepted
+sessions a reconnect-to-me GOAWAY and waits up to `--drain-timeout` (default
+`10s`), exiting once they have all left. Sessions on versions without GOAWAY,
+such as `moq-lite-03`, get none and are closed when the window ends. A second
+signal exits immediately; `--drain-timeout 0s` closes sessions immediately.
+Pending handshakes and admission requests share the same drain window, and an
+open stdin pipe does not keep the process alive afterward.
+
+Add `--stats-enabled` before the first stage to publish accepted-session and
+traffic counters with the relay's `--stats-*` settings. An export-only listener
+publishes nothing to its sessions, so they cannot read these stats. These
+listener settings require a MoQ listener. Grants still scope which broadcasts
+each session can publish or subscribe to, including stats; see the relay's
+[statistics configuration](/bin/relay/config#stats).
+
 `moq import --help` lists the sources and `moq import rtmp --help` a specific
 one; every flag is documented there.
 
@@ -335,8 +350,9 @@ keyframe. The delay also bounds how stale a group may get, so `--delay 0` writes
 frame as soon as it is read and drops none as late, but still skips a stalled
 group once a newer one is ready.
 FLV and MKV reject their former `--max-delay` spelling with a migration
-message. TS output's PCR follows the source's clock within what ISO/IEC
-13818-1 allows.
+message. The output follows the source's clock within what ISO/IEC 13818-1
+allows a TS PCR. A source further off fails the export, naming its rate, once
+it has used half the delay; a brief network stall only drops what it made late.
 
 `export ts --passthrough` reads the track an `import ts --passthrough` published
 and writes its packets back out unchanged, from its first group on, each run

@@ -35,7 +35,9 @@ hot-path survey, so quests don't re-litigate them:
   `Send` bounds. The remaining cross-thread costs live in the shared model:
   one `origin::Producer` spans all workers, so a subscriber on worker B reads
   `kio::Lock` state written on worker A. These quests shrink that cost
-  in place; they do not attempt per-worker model sharding.
+  in place; they do not attempt per-worker model sharding, unless the
+  [kio channel contention](/quest/m2/perf/kio-channel-contention/README.md)
+  spikes measure a win (decided 2026-10-14).
 - The batched write/read machinery (`frame::Buffer`, `write_frames`,
   the egress `Prefetch`) already exists in moq-net; egress is amortized,
   ingest and the stream-send path are not.
@@ -64,12 +66,17 @@ Decided 2026-10-10: #3122's per-turn clock read merged into
 [moq-uring on moq-clock](/quest/m1/time/uring.md), where the worker's turn
 sample becomes its `moq-clock` clock; it keeps #3122's measurement bar.
 
+Decided 2026-10-14: kio channel contention ranks first. Its 215% lock wait on
+the default tokio runtime is the largest measured cost, and the lock-wait
+recipe it needs has shipped. It stays in m2, since m1 defers general
+optimization.
+
 ## Required
 
+- [kio channel contention](/quest/m2/perf/kio-channel-contention/README.md) - workers spend less time blocked on kio channel-state mutexes (up to 215% of worker CPU on chat at 16 tokio workers), via a version counter, per-thread spikes, and an append-only log
 - [Relay profiling](/quest/m2/perf/lock-profile.md) - one recipe captures lock wait by stack (first), CPU stacks, and heap profiles, with no code in kio
 - [Lock-wait CPU from switches](/quest/m2/perf/switch-cpu.md) - wait/CPU takes CPU from the same perf recording as the waits, removing schedstat's ~2% low bias
 - [Bench relay port](/quest/m2/perf/bench-relay-port.md) - the bench harness proves its relay owns the port before reporting ready
-- [kio channel contention](/quest/m2/perf/kio-channel-contention.md) - workers spend less time blocked on kio channel-state mutexes (up to 215% of worker CPU on chat at 16 tokio workers)
 - [One enter per turn](/quest/m2/perf/uring-one-enter.md) - a parking turn pays one io_uring_enter, submits flush deferred completions, and SQEs per enter is a counter
 - [Group cost](/quest/m2/perf/group-cost.md) - count and cut the allocations and time spent relaying one small group to one viewer
 - [Run to quiescence](/quest/m2/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass and train budget that keeps the fairness rule

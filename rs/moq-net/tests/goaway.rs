@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! GOAWAY behavior tests over the in-memory mock transport.
 //!
 //! The mock delivers all queued bytes deterministically (no real QUIC or

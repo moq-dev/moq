@@ -22,9 +22,9 @@
 //! nobody has read or written for that long is reclaimed, no matter what retention
 //! its track advertises. Only a live track's latest group is exempt: once a track
 //! ends, a stale consumer can't pin any of it. Track retention
-//! ([`max_age`](crate::track::Info::max_age)) is measured in media timestamps, so a
-//! congestion stall can't age content out; the pool's expiry is the orthogonal
-//! wall-clock bound that keeps unwatched content from pinning RAM.
+//! ([`max_age`](crate::track::Info::max_age)) decides which groups readers skip as
+//! stale; the pool's expiry is the orthogonal bound that frees the bytes of content
+//! nobody touches.
 //!
 //! Expiry is driven by [`Pool::gc`], also called by each origin driver.
 //! Reads and writes clear the expiration timestamp without reading a clock.
@@ -38,6 +38,7 @@
 //! [`DEFAULT_EXPIRY`], while a relay creates one configured pool and shares it across
 //! every origin so the whole process caches into a single policy.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::Duration;
@@ -104,7 +105,7 @@ impl Config {
 	/// A cached group (other than a live track's latest) that nobody reads or writes
 	/// for this long is reclaimed, surfacing to any remaining reader as
 	/// [`Error::Old`](crate::Error::Old). This is independent of track retention:
-	/// [`max_age`](crate::track::Info::max_age) uses media timestamps, while this
+	/// [`max_age`](crate::track::Info::max_age) decides what readers skip, while this
 	/// window keeps idle content from pinning memory. Reclaiming without a write behind
 	/// it needs [`Pool::gc`] called periodically (origins do this automatically).
 	/// The value is fixed when the
@@ -155,6 +156,30 @@ struct Inner {
 	// budget needs no registry, since a track that never writes never grows the pool.
 	// Weak, because a track owns its account and the account must not outlive it.
 	tracks: kio::Lock<slab::Slab<Weak<Track>>>,
+	// The first instant a driver supplied, and the latest as micros past it, so reading
+	// the wall clock never runs behind the time the drivers keep; see [`Pool::now_wall`].
+	// Unset until a driver collects, which is also what arms wall-clock deadlines.
+	wall_epoch: OnceLock<crate::time::Instant>,
+	wall_micros: AtomicU64,
+	// Tracks with reads parked on a wall-clock deadline, by their earliest one.
+	wall: kio::Lock<WallDeadlines>,
+}
+
+/// The pool-wide index of wall-clock deadlines that [`Pool::gc`] fires.
+///
+/// One entry per track and earliest deadline: the reads themselves park in the track's
+/// own `expiry::Wakes`, so arming one takes this lock only when it moves its track's
+/// earliest deadline forward in time, never per read.
+#[derive(Default)]
+struct WallDeadlines {
+	// Keyed by the track account's address too, so tracks sharing an instant coexist.
+	due: BTreeMap<(crate::time::Instant, usize), Weak<Track>>,
+	// The drivers collecting this pool, woken when a deadline earlier than any they
+	// were told about is armed.
+	drivers: kio::WaiterList,
+	// Reads that met a deadline before any driver collected, woken by the first
+	// collection to arm it. Holds live waiters only, so an undriven pool stays bounded.
+	undriven: kio::WaiterList,
 }
 
 struct Clock {
@@ -189,6 +214,9 @@ impl Pool {
 				access_sum: AtomicU64::new(0),
 				access_count: AtomicU64::new(0),
 				tracks: kio::Lock::new(slab::Slab::new()),
+				wall_epoch: OnceLock::new(),
+				wall_micros: AtomicU64::new(0),
+				wall: kio::Lock::default(),
 			}),
 		}
 	}
@@ -263,38 +291,142 @@ impl Pool {
 
 	/// Collect idle cache entries and return the next cleanup time.
 	///
-	/// Call after polling and at the returned deadline, including when idle.
-	/// Calls before that deadline only advance the pool's sampled clock. A due
+	/// Collect idle cache entries and return the next cleanup time, like
+	/// [`Driver::poll`](crate::time::Driver::poll).
+	///
+	/// Call at the returned deadline, and again whenever `waiter` wakes, including when
+	/// idle. Calls before that deadline only advance the pool's sampled clock. A due
 	/// pass visits every cached group, dating accesses since the last pass and
 	/// reclaiming idle groups except each live track's latest. Delayed calls extend
 	/// retention. Shared pools use the latest supplied instant.
 	///
-	/// `None` means both cache policies are disabled. After enabling a capacity
+	/// `None` means both cache policies are disabled and no read waits on a wall-clock
+	/// deadline. After enabling a capacity
 	/// with [`Self::resize`], call this again to resume periodic clock sampling.
-	pub fn gc(&self, now: crate::time::Instant) -> Option<crate::time::Instant> {
-		self.advance(now, true)
+	///
+	/// It also releases reads parked on a wall-clock deadline (a group's successor
+	/// arriving plus the reader's budget), so the returned deadline includes the earliest
+	/// of those, and `waiter` wakes when a read arms one earlier than it. Until a pool is
+	/// first collected, no deadline fires; that first collection wakes the reads waiting
+	/// on one so they arm it.
+	pub fn gc(&self, now: crate::time::Instant, waiter: &kio::Waiter) -> Option<crate::time::Instant> {
+		self.advance(now, true, Some(waiter))
 	}
 
-	fn advance(&self, now: crate::time::Instant, sweep: bool) -> Option<crate::time::Instant> {
-		// Shared origins must not run overlapping collection passes.
-		let mut clock = self.inner.clock.lock().unwrap_or_else(PoisonError::into_inner);
-		let clock = clock.get_or_insert(Clock {
-			epoch: now,
-			now,
-			sweep: None,
-		});
-		let now = now.max(clock.now);
-		let tick = u64::try_from(now.duration_since(clock.epoch).as_millis() / u128::from(TICK_MS))
-			.expect("cache clock overflow");
-		self.inner.tick.store(tick, Ordering::Relaxed);
-		clock.now = now;
-		if self.sweep_interval().is_none() {
-			clock.sweep = None;
-		} else if sweep && clock.sweep.is_none_or(|at| at <= now) {
-			self.sweep();
-			clock.sweep = self.sweep_interval().and_then(|interval| now.checked_add(interval));
+	fn advance(
+		&self,
+		now: crate::time::Instant,
+		sweep: bool,
+		driver: Option<&kio::Waiter>,
+	) -> Option<crate::time::Instant> {
+		let first;
+		let next = {
+			// Shared origins must not run overlapping collection passes.
+			let mut clock = self.inner.clock.lock().unwrap_or_else(PoisonError::into_inner);
+			let clock = clock.get_or_insert(Clock {
+				epoch: now,
+				now,
+				sweep: None,
+			});
+			let now = now.max(clock.now);
+			let tick = u64::try_from(now.duration_since(clock.epoch).as_millis() / u128::from(TICK_MS))
+				.expect("cache clock overflow");
+			self.inner.tick.store(tick, Ordering::Relaxed);
+			clock.now = now;
+			// Collection passes are serialized by the clock lock, so only one sees the first.
+			first = self.inner.wall_epoch.get().is_none();
+			let epoch = *self.inner.wall_epoch.get_or_init(|| now);
+			let micros = u64::try_from(now.duration_since(epoch).as_micros()).unwrap_or(u64::MAX);
+			self.inner.wall_micros.fetch_max(micros, Ordering::Relaxed);
+			if self.sweep_interval().is_none() {
+				clock.sweep = None;
+			} else if sweep && clock.sweep.is_none_or(|at| at <= now) {
+				self.sweep();
+				clock.sweep = self.sweep_interval().and_then(|interval| now.checked_add(interval));
+			}
+			clock.sweep
+		};
+		if first {
+			let mut undriven = self.inner.wall.lock().undriven.take();
+			undriven.wake();
 		}
-		clock.sweep
+		let wall = self.release_due(self.now_wall(), driver);
+		next.into_iter().chain(wall).min()
+	}
+
+	/// Wake every read parked on a wall-clock deadline at or before `now`, returning the
+	/// earliest left and registering `driver` to hear of an earlier one.
+	fn release_due(&self, now: crate::time::Instant, driver: Option<&kio::Waiter>) -> Option<crate::time::Instant> {
+		loop {
+			let due: Vec<_> = {
+				let mut wall = self.inner.wall.lock();
+				let mut due = Vec::new();
+				while let Some(entry) = wall.due.first_entry()
+					&& entry.key().0 <= now
+				{
+					due.push(entry.remove());
+				}
+				if due.is_empty() {
+					if let Some(driver) = driver {
+						driver.register(&mut wall.drivers);
+					}
+					return wall.due.first_key_value().map(|((at, _), _)| *at);
+				}
+				due
+			};
+			// Outside the lock: a track re-arms its next deadline here.
+			for track in due.iter().filter_map(Weak::upgrade) {
+				if let Some(next) = track.wakes.release_wall(now) {
+					self.schedule(next, None, &track);
+				}
+			}
+		}
+	}
+
+	/// The instant wall-clock staleness is judged at: the model's clock, never behind the
+	/// latest instant a driver collected this pool at.
+	///
+	/// Both, because the clock alone runs behind a driver that is supplied time some other
+	/// way (a paused test runtime), which would leave a read woken at a deadline judging
+	/// it not yet reached and parking on it again.
+	pub(crate) fn now_wall(&self) -> crate::time::Instant {
+		let wall = super::clock::wall();
+		match self.inner.wall_epoch.get() {
+			Some(epoch) => {
+				let driven = *epoch + Duration::from_micros(self.inner.wall_micros.load(Ordering::Relaxed));
+				wall.max(driven)
+			}
+			None => wall,
+		}
+	}
+
+	/// Whether a driver collects this pool, so a wall-clock deadline armed in it fires.
+	/// If not, `waiter` wakes on the first collection, to arm its deadline then.
+	fn watch_driven(&self, waiter: &kio::Waiter) -> bool {
+		// Checked under the lock the first collection drains under, so none slips between.
+		let mut wall = self.inner.wall.lock();
+		if self.inner.wall_epoch.get().is_some() {
+			return true;
+		}
+		waiter.register(&mut wall.undriven);
+		false
+	}
+
+	/// Index `track`'s earliest wall-clock deadline `at` in place of `replaced`, waking the
+	/// drivers if it is now the pool's earliest.
+	fn schedule(&self, at: crate::time::Instant, replaced: Option<crate::time::Instant>, track: &Arc<Track>) {
+		let mut wall = self.inner.wall.lock();
+		let address = Arc::as_ptr(track) as usize;
+		if let Some(replaced) = replaced {
+			wall.due.remove(&(replaced, address));
+		}
+		let key = (at, address);
+		wall.due.insert(key, Arc::downgrade(track));
+		if wall.due.first_key_value().is_some_and(|(first, _)| *first == key) {
+			let mut drivers = std::mem::take(&mut wall.drivers);
+			drop(wall);
+			drivers.wake();
+		}
 	}
 
 	/// Move the pool's sampled clock forward by `duration`, dating accesses on either
@@ -308,14 +440,14 @@ impl Pool {
 			.unwrap_or_else(PoisonError::into_inner)
 			.as_ref()
 			.map(|clock| clock.now);
-		let now = now.unwrap_or_else(crate::time::Instant::now);
+		let now = now.unwrap_or_else(super::clock::wall);
 		self.date(now);
 		self.date(now + duration);
 	}
 
 	#[cfg(test)]
 	fn date(&self, now: crate::time::Instant) {
-		self.advance(now, false);
+		self.advance(now, false, None);
 		let tracks: Vec<_> = self
 			.inner
 			.tracks
@@ -537,6 +669,17 @@ impl Track {
 		&self.wakes
 	}
 
+	/// Park `waiter` until the pool's wall clock reaches `at`. While no driver collects the
+	/// pool, nothing would release it, so `waiter` parks on the first collection instead.
+	pub(crate) fn watch_wall(self: &Arc<Self>, at: crate::time::Instant, waiter: &kio::Waiter) {
+		if !self.pool.watch_driven(waiter) {
+			return;
+		}
+		if let Some(replaced) = self.wakes.watch_wall(at, waiter) {
+			self.pool.schedule(at, replaced, self);
+		}
+	}
+
 	/// Charge a new group's fixed overhead, returning its [`Charge`].
 	pub(crate) fn charge(self: &Arc<Self>) -> Charge {
 		self.pool.add(ENTRY_OVERHEAD);
@@ -651,6 +794,11 @@ impl Drop for Track {
 	fn drop(&mut self) {
 		if let Some(key) = self.sweep.get() {
 			self.pool.unregister(*key);
+		}
+		// Its deadline would otherwise linger in a shared pool until it came due.
+		if let Some(at) = self.wakes.wall_armed() {
+			let address = std::ptr::from_ref::<Self>(self) as usize;
+			self.pool.inner.wall.lock().due.remove(&(at, address));
 		}
 	}
 }
@@ -853,6 +1001,68 @@ mod test {
 	fn bounded(capacity: u64) -> Pool {
 		let config = Config::default().with_capacity(capacity).with_expiry(DEFAULT_EXPIRY);
 		Pool::new(config)
+	}
+
+	struct Flag(std::sync::atomic::AtomicBool);
+
+	impl std::task::Wake for Flag {
+		fn wake(self: Arc<Self>) {
+			self.0.store(true, Ordering::SeqCst);
+		}
+	}
+
+	fn flag() -> (Arc<Flag>, kio::Waiter) {
+		let flag = Arc::new(Flag(Default::default()));
+		let waiter = kio::Waiter::new(std::task::Waker::from(flag.clone()));
+		(flag, waiter)
+	}
+
+	/// A wall-clock deadline armed after the driver collected wakes it to collect again by
+	/// then, and that collection releases the read parked on it. Before any collection,
+	/// nothing would release it, so the read waits for the first one to arm it then.
+	#[test]
+	fn wall_deadlines_wake_the_driver_and_then_the_read() {
+		let pool = Pool::unbounded();
+		let track = Track::new(pool.clone(), kio::Weak::new());
+		let now = super::super::clock::wall();
+		let at = now + Duration::from_secs(1);
+		let (read, reading) = flag();
+		track.watch_wall(at, &reading);
+
+		let (driver, driving) = flag();
+		assert_eq!(pool.gc(now, &driving), None, "an undriven pool indexes nothing");
+		assert!(
+			read.0.load(Ordering::SeqCst),
+			"the first collection never woke the read"
+		);
+		read.0.store(false, Ordering::SeqCst);
+		track.watch_wall(at, &reading);
+		assert!(
+			driver.0.load(Ordering::SeqCst),
+			"the driver slept through an earlier deadline"
+		);
+		assert_eq!(pool.gc(now, &driving), Some(at));
+
+		pool.gc(at - Duration::from_millis(1), &driving);
+		assert!(!read.0.load(Ordering::SeqCst), "released early");
+		assert_eq!(pool.gc(at, &driving), None);
+		assert!(read.0.load(Ordering::SeqCst), "the read was never released");
+	}
+
+	/// A track indexes one wall-clock deadline, its earliest, and takes it along when dropped.
+	#[test]
+	fn a_dropped_track_leaves_the_wall_index() {
+		let pool = Pool::unbounded();
+		let now = super::super::clock::wall();
+		pool.gc(now, &kio::Waiter::noop());
+		let track = Track::new(pool.clone(), kio::Weak::new());
+		let (_read, reading) = flag();
+		track.watch_wall(now + Duration::from_secs(2), &reading);
+		track.watch_wall(now + Duration::from_secs(1), &reading);
+		assert_eq!(pool.inner.wall.lock().due.len(), 1, "the later deadline lingers");
+
+		drop(track);
+		assert!(pool.inner.wall.lock().due.is_empty(), "the dropped track lingers");
 	}
 
 	#[test]
@@ -1104,21 +1314,24 @@ mod test {
 	fn collecting_before_the_deadline_does_not_postpone_it() {
 		let pool = Pool::new(Config::default().with_expiry(Duration::from_secs(2)));
 		let now = crate::time::Instant::now();
-		let deadline = pool.gc(now);
-		assert_eq!(pool.gc(now + Duration::from_millis(500)), deadline);
+		let deadline = pool.gc(now, &kio::Waiter::noop());
+		assert_eq!(
+			pool.gc(now + Duration::from_millis(500), &kio::Waiter::noop()),
+			deadline
+		);
 	}
 
 	#[test]
 	fn bounded_pools_sample_recency_without_expiration() {
 		let pool = Pool::unbounded();
 		let now = crate::time::Instant::now();
-		assert_eq!(pool.gc(now), None);
+		assert_eq!(pool.gc(now, &kio::Waiter::noop()), None);
 		pool.resize(1024);
-		assert_eq!(pool.gc(now), Some(now + DEFAULT_EXPIRY / 2));
-		pool.gc(now + DEFAULT_EXPIRY);
+		assert_eq!(pool.gc(now, &kio::Waiter::noop()), Some(now + DEFAULT_EXPIRY / 2));
+		pool.gc(now + DEFAULT_EXPIRY, &kio::Waiter::noop());
 		assert!(pool.now() > 0);
 		pool.resize(None);
-		assert_eq!(pool.gc(now + DEFAULT_EXPIRY), None);
+		assert_eq!(pool.gc(now + DEFAULT_EXPIRY, &kio::Waiter::noop()), None);
 	}
 
 	#[test]

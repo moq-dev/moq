@@ -88,14 +88,19 @@ pub(crate) enum Push {
 /// The clock follows the source's: a source clock running slower than ours would make
 /// every frame late in the end, and a faster one would hold more and more. So the clock
 /// measures the source's rate and runs its decode timeline at it, holding the freshest
-/// frames of the track sent latest a delay. Each [`STEER`] of decode time gives a floor, the
+/// frames of the track sent latest a delay. Each [`STEER`] of our time gives a floor, the
 /// most slack a frame of that track arrived with (the least across tracks of each one's
-/// most), which queueing and retransmission only ever lower; the upper envelope of
-/// the floors over [`RATE_WINDOW`] gives the rate (its slope) and the slack now, so a
-/// spell of queueing shorter than half the window moves neither. The decode timeline is
-/// the output's system clock, so it keeps to what ISO/IEC 13818-1 2.4.2.1 allows one:
-/// within [`MAX_DRIFT`] of ours, changing by at most [`MAX_SLEW`]. A source past that is
-/// counted, and once it has used half the delay [`Buffer::push`] fails.
+/// most, a track not heard placed by its lead), which queueing and retransmission only ever
+/// lower; the upper envelope of the floors over [`RATE_WINDOW`] gives the rate (its slope)
+/// and the slack now, so a spell of queueing shorter than half the window moves neither.
+/// The backlog a network stall releases is read at once, so it gives one floor, its
+/// freshest frame's: stepped on decode time it would give one per step of the media it
+/// held, and early on, before the window fills, those would read as a source far slower
+/// than ours. The decode timeline is the output's system clock, so it keeps to what ISO/IEC
+/// 13818-1 2.4.2.1 allows one: within [`MAX_DRIFT`] of ours, changing by at most
+/// [`MAX_SLEW`]. A source past that is counted, and once it has cost half the delay
+/// [`Buffer::push`] fails. What anchoring on frames that reached us late or early left is
+/// not charged to it, while the clock pulls it shut.
 ///
 /// A zero delay holds nothing and drops nothing: each frame goes out as soon as it is
 /// read, ordered only among the frames read together.
@@ -124,23 +129,27 @@ pub(crate) struct Buffer<K, T> {
 	released: bool,
 	/// What the clock is steered on, since it last started.
 	steer: Steer<K>,
-	/// Each track's slack in the last steering step, in seconds, against the others'. How far
-	/// ahead of its decode time a source sends each track belongs to its mux, not to one
-	/// generation, so a new generation keeps the track sent latest at the delay even before
-	/// that track reaches it.
-	leads: BTreeMap<K, f64>,
+	/// How much more slack each track had than the track sent latest, in seconds, in the last
+	/// [`LEADS`] steering steps that heard it; [`Buffer::lead`] is their median. How far ahead
+	/// of its decode time a source sends each track belongs to its mux, not to one generation,
+	/// so a new generation keeps the track sent latest at the delay even before that track
+	/// reaches it, and a step that does not hear that track still measures against it.
+	leads: BTreeMap<K, VecDeque<f64>>,
 	timer: Option<Pin<Box<Sleep>>>,
 	dropped: u64,
 	/// Steps at which the source's clock ran further off ours than the clock may follow.
 	out_of_tolerance: u64,
 }
 
-/// How often the clock is steered, in decode time: long enough that the floor covers a
+/// How often the clock is steered, in our time: long enough that the floor covers a
 /// group's worth of frames sent ahead by different amounts.
 const STEER: Duration = Duration::from_secs(2);
 /// How far back the floors are kept, in decode time: a spell of queueing shorter than half
 /// of it moves neither the rate nor the slack.
 const RATE_WINDOW: f64 = 600.0;
+/// How many steering steps a track's lead is the median of: a window's worth, so a spell of
+/// queueing shorter than half of it does not move the lead either.
+const LEADS: usize = (RATE_WINDOW / STEER.as_secs_f64()) as usize;
 /// How quickly the clock pulls the slack back to the delay: it closes the gap over this
 /// many seconds, or slower where the slew limit could not stop it in time.
 const RESPONSE: f64 = 600.0;
@@ -221,6 +230,10 @@ struct Steer<K> {
 	steered: f64,
 	/// The source's clock rate off ours, as last measured: positive runs fast.
 	source: Option<f64>,
+	/// What is left of the gap between the slack and the delay that the rate's first
+	/// measurement found, in seconds: what anchoring on frames that reached us late or early
+	/// left, which the rate did not cost.
+	startup: Option<f64>,
 }
 
 impl<K> Default for Steer<K> {
@@ -230,6 +243,7 @@ impl<K> Default for Steer<K> {
 			phase: VecDeque::new(),
 			steered: 0.0,
 			source: None,
+			startup: None,
 		}
 	}
 }
@@ -240,8 +254,8 @@ struct Floor<K> {
 	/// Per track, its slack past the delay, less how far the drift has moved its deadline, and
 	/// when it decodes, in seconds.
 	tracks: BTreeMap<K, (f64, f64)>,
-	/// When the step's first frame decodes.
-	began: Timestamp,
+	/// When the step's first frame was read.
+	began: Instant,
 }
 
 struct Track<T> {
@@ -509,7 +523,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		arrived.max(self.horizon.unwrap_or(arrived)) + self.delay
 	}
 
-	/// Account for the slack a frame arrived with, and every [`STEER`] of decode time step the
+	/// Account for the slack a frame arrived with, and every [`STEER`] of our time step the
 	/// clock's drift toward the source's rate plus a pull back to the delay, as far as
 	/// [`MAX_SLEW`] allows.
 	fn steer(&mut self, key: &K, deadline: Option<Instant>, arrival: &Arrival<T>) -> anyhow::Result<()> {
@@ -525,13 +539,13 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		let phase = slack - delay - (self.steer.steered + elapsed * clock.drift);
 		let floor = self.steer.floor.get_or_insert_with(|| Floor {
 			tracks: BTreeMap::new(),
-			began: arrival.decode,
+			began: arrival.read,
 		});
 		let best = floor.tracks.entry(key.clone()).or_insert((phase, now));
 		if phase > best.0 {
 			*best = (phase, now);
 		}
-		if arrival.decode.as_nanos().saturating_sub(floor.began.as_nanos()) < STEER.as_nanos() {
+		if arrival.read.saturating_duration_since(floor.began) < STEER {
 			return Ok(());
 		}
 		// Re-anchor where this frame decodes, so the new drift starts from there.
@@ -539,14 +553,46 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			return Ok(());
 		};
 		let floor = self.steer.floor.take().expect("a floor");
-		for (key, (phase, _)) in &floor.tracks {
-			self.leads.insert(key.clone(), *phase);
-		}
-		let (phase, at) = floor
+		let (mut phase, mut at) = floor
 			.tracks
-			.into_values()
+			.values()
+			.copied()
 			.min_by(|a, b| a.0.total_cmp(&b.0))
 			.expect("a floor holds a track");
+		// A track not heard this step, as audio that ended before its video, may be sent later
+		// than every track heard: its lead places it below the heard track sent least ahead of
+		// it. Without that the floor would leap when it stopped, which reads as a source far
+		// faster than ours.
+		let lead = |key: &K| self.lead(key).unwrap_or(0.0);
+		let unheard = self
+			.leads
+			.keys()
+			.filter(|key| !floor.tracks.contains_key(*key))
+			.map(lead)
+			.reduce(f64::min);
+		let (heard, &(heard_phase, heard_at)) = floor
+			.tracks
+			.iter()
+			.min_by(|a, b| lead(a.0).total_cmp(&lead(b.0)))
+			.expect("a floor holds a track");
+		// Where the floor sits among the leads.
+		let mut base = 0.0;
+		if let Some(unheard) = unheard
+			&& unheard < lead(heard)
+		{
+			let placed = heard_phase - (lead(heard) - unheard);
+			if placed < phase {
+				(phase, at) = (placed, heard_at);
+			}
+			base = unheard + (phase - placed);
+		}
+		for (key, (track, _)) in &floor.tracks {
+			let leads = self.leads.entry(key.clone()).or_default();
+			leads.push_back(track - phase + base);
+			if leads.len() > LEADS {
+				leads.pop_front();
+			}
+		}
 		self.steer.steered += elapsed * clock.drift;
 		let phases = &mut self.steer.phase;
 		phases.push_back((at, phase));
@@ -565,6 +611,10 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		let slow = -rate;
 		let gap = at + self.steer.steered;
 		self.steer.source = Some(rate);
+		// The clock pulls the startup gap shut, so it shrinks with the gap and never reopens.
+		let startup = self.steer.startup.get_or_insert(gap);
+		*startup = startup.clamp(gap.min(0.0), gap.max(0.0));
+		let lost = gap - *startup;
 
 		// Pull the gap shut over [`RESPONSE`], no faster than the slew limit can stop on it.
 		let pull = (gap.abs() / RESPONSE).min((2.0 * MAX_SLEW * gap.abs()).sqrt());
@@ -582,8 +632,8 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		// To a hundredth of a ppm, so a source right at the limit is not out by rounding.
 		if (slow.abs() * 1e8).round() > (MAX_DRIFT * 1e8).round() {
 			self.out_of_tolerance += 1;
-			// At the limit and still losing ground, with half the delay gone.
-			if drift == MAX_DRIFT.copysign(slow) && gap * slow.signum() < -delay / 2.0 {
+			// The clock can never catch up, so fail once the rate has cost half the delay.
+			if lost * slow.signum() < -delay / 2.0 {
 				anyhow::bail!(
 					"the source's clock runs {:+.1} ppm off ours, past the {:.0} ppm the output's may follow",
 					rate * 1e6,
@@ -642,17 +692,25 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 	/// not heard from is sent, by the leads the previous generation measured: anchoring that
 	/// much later keeps that track at the delay when it reaches the new generation.
 	fn unheard_lag(&self, acquire: &Acquire<K, T>, fresh: &K) -> Duration {
-		let Some(lead) = self.leads.get(fresh) else {
+		let Some(lead) = self.lead(fresh) else {
 			return Duration::ZERO;
 		};
 		let lag = self
 			.expect
 			.iter()
 			.filter(|key| !acquire.tracks.contains_key(key))
-			.filter_map(|key| self.leads.get(key))
+			.filter_map(|key| self.lead(key))
 			.map(|other| lead - other)
 			.fold(0.0, f64::max);
 		Duration::from_secs_f64(lag)
+	}
+
+	/// How much more slack a track has than the track sent latest, in seconds: the median of
+	/// its last [`LEADS`], so a spell of queueing does not move it.
+	fn lead(&self, key: &K) -> Option<f64> {
+		let mut leads: Vec<f64> = self.leads.get(key)?.iter().copied().collect();
+		leads.sort_by(f64::total_cmp);
+		Some(leads[leads.len() / 2])
 	}
 
 	/// When `acquire` ends: a track not yet heard from may be the one sent latest, so until
@@ -1201,6 +1259,8 @@ mod tests {
 		clock: f64,
 		clock_before: f64,
 		out_of_tolerance: u64,
+		/// How far off the delay the frame the run failed on would have been held, in seconds.
+		off: f64,
 	}
 
 	/// Feed `hours` of 2 fps frames from a source whose clock runs `ppm` slower than ours
@@ -1219,6 +1279,7 @@ mod tests {
 			clock: 0.0,
 			clock_before: 0.0,
 			out_of_tolerance: 0,
+			off: 0.0,
 		};
 		let mut last: Option<(f64, Timestamp)> = None;
 		let mut stepped = false;
@@ -1243,9 +1304,13 @@ mod tests {
 				sync: true,
 				item: "v",
 			};
+			let held = buffer
+				.at(frame.decode)
+				.map(|deadline| since(arrived, deadline) as f64 / 1e9);
 			match buffer.push(1, frame) {
 				Ok(push) => assert_eq!(push, Push::Queued, "{ppm} ppm: frame {k} was late"),
 				Err(err) => {
+					run.off = held.expect("a clock") - delay.as_secs_f64();
 					run.err = Some(err);
 					break;
 				}
@@ -1326,13 +1391,167 @@ mod tests {
 	}
 
 	/// A source further off than the clock may follow is counted, and fails once it has used
-	/// half the delay, before any frame goes late.
+	/// half the delay, before any frame goes late, though the clock has not reached its limit.
 	#[tokio::test(start_paused = true)]
 	async fn a_source_past_the_drift_limit_fails() {
-		for ppm in [40.0, -40.0] {
+		for ppm in [40.0, -40.0, 400.0, -400.0] {
 			let run = drift(ppm, 6.0, 6.0, |_| Duration::ZERO).await;
 			assert!(run.err.is_some(), "{ppm} ppm: no error");
 			assert!(run.out_of_tolerance > 0, "{ppm} ppm: not counted");
+			assert!(
+				(0.25..0.26).contains(&run.off.abs()),
+				"{ppm} ppm: failed {} s off the delay",
+				run.off
+			);
+		}
+	}
+
+	/// What [`feed`] saw.
+	struct Fed {
+		/// The decode time a push failed at, in seconds, and its error.
+		err: Option<(f64, anyhow::Error)>,
+		dropped: u64,
+		/// What the last push did.
+		last: Option<Push>,
+	}
+
+	/// Feed `secs` of 10 fps frames of tracks 1 and 2 through a 500 ms buffer from a source
+	/// whose clock runs `ppm` slower than ours, the frame of `track` sent at `sent` seconds of
+	/// our clock reaching us at `arrive(track, sent)`, or with the frame of its track before it
+	/// if that is later, or never if `None`, in the order they reach us, until a push fails.
+	async fn feed(ppm: f64, secs: f64, arrive: impl Fn(u16, f64) -> Option<f64>) -> Fed {
+		let start = Instant::now();
+		let mut buffer = Buffer::new(Duration::from_millis(500));
+		let mut frames = Vec::new();
+		for track in [1, 2] {
+			let mut last = 0.0f64;
+			for k in 0..(secs * 10.0) as u64 {
+				let decode = Duration::from_millis(k * 100);
+				if let Some(sent) = arrive(track, decode.as_secs_f64() * (1.0 + ppm * 1e-6)) {
+					last = sent.max(last);
+					frames.push((last, track, decode));
+				}
+			}
+		}
+		frames.sort_by(|a, b| a.0.total_cmp(&b.0));
+		buffer.expect(frames.iter().map(|(_, track, _)| *track));
+		let mut fed = Fed {
+			err: None,
+			dropped: 0,
+			last: None,
+		};
+		for (sent, track, decode) in frames {
+			let arrived = start + Duration::from_secs_f64(sent);
+			tokio::time::advance(arrived.saturating_duration_since(Instant::now())).await;
+			let frame = Arrival {
+				arrived,
+				read: arrived,
+				decode: Timestamp::from_micros(decode.as_micros() as u64).unwrap(),
+				restart: 0,
+				skip: 0,
+				sync: true,
+				item: "v",
+			};
+			match buffer.push(track, frame) {
+				Ok(push) => fed.last = Some(push),
+				Err(err) => {
+					fed.err = Some((decode.as_secs_f64(), err));
+					break;
+				}
+			}
+			due(&mut buffer);
+		}
+		fed.dropped = buffer.dropped();
+		fed
+	}
+
+	/// A source far slower than real time, as an importer starved of CPU, fails within a few
+	/// seconds, naming its rate, rather than drop nearly every frame for hours.
+	#[tokio::test(start_paused = true)]
+	async fn a_source_far_off_real_time_fails_within_seconds() {
+		let fed = feed(220_000.0, 3_600.0, |track, sent| (track == 1).then_some(sent)).await;
+		let (at, err) = fed.err.expect("no error");
+		assert!(at < 10.0, "failed {at} s in");
+		let err = err.to_string();
+		assert!(err.contains("-220000.0 ppm"), "the error names the wrong rate: {err}");
+	}
+
+	/// A stall shorter than half [`RATE_WINDOW`] drops what it made late and recovers, even
+	/// early, when only a few floors were measured before it.
+	#[tokio::test(start_paused = true)]
+	async fn a_stall_drops_late_frames_and_recovers() {
+		for at in [5.0, 9.0, 1_200.0] {
+			for length in [3.0, 10.0, 60.0, 290.0] {
+				let stall = at..at + length;
+				let fed = feed(0.0, at + length + 30.0, |track, sent| {
+					(track == 1).then_some(if stall.contains(&sent) { stall.end } else { sent })
+				})
+				.await;
+				assert!(fed.err.is_none(), "{length} s stall at {at} s: {:?}", fed.err);
+				assert!(fed.dropped > 0, "{length} s stall at {at} s: nothing dropped");
+				assert_eq!(fed.last, Some(Push::Queued), "{length} s stall at {at} s");
+			}
+		}
+	}
+
+	/// A source within what the clock may follow never fails, though its first frames reached
+	/// us late, so the clock was anchored that much late, and each frame jitters a few ms, so
+	/// the first floors, a few ms apart over two seconds, measure a rate far past the limit.
+	#[tokio::test(start_paused = true)]
+	async fn a_late_start_within_the_drift_limit_never_fails() {
+		for ppm in [-20.0, 0.0, 20.0] {
+			for late in [0.3, 0.45] {
+				for phase in 0..5u64 {
+					let fed = feed(ppm, 600.0, |track, sent| {
+						let jitter = ((sent / 2.0) as u64 * 3 + phase) % 5;
+						let late = if sent < 1.0 { late } else { 0.0 };
+						(track == 1).then_some(sent + late + jitter as f64 * 0.002)
+					})
+					.await;
+					assert!(
+						fed.err.is_none(),
+						"{ppm} ppm, {late} s late, phase {phase}: {:?}",
+						fed.err
+					);
+				}
+			}
+		}
+	}
+
+	/// Closing a late start is the clock's own steering, not what the rate cost: hours after
+	/// the clock pulled a 450 ms late start shut, a source within the limit does not fail on
+	/// a rise in latency long enough to move the measured rate past the limit.
+	#[tokio::test(start_paused = true)]
+	async fn closing_a_late_start_is_not_charged_to_the_rate() {
+		let rise = 14_000.0..14_600.0;
+		let fed = feed(0.0, 16_000.0, |track, sent| {
+			let late = match sent {
+				_ if sent < 1.0 => 0.45,
+				_ if rise.contains(&sent) => 0.04,
+				_ => 0.0,
+			};
+			(track == 1).then_some(sent + late)
+		})
+		.await;
+		assert!(fed.err.is_none(), "{:?}", fed.err);
+	}
+
+	/// The track sent latest stopping, as audio sent 700 ms after its video ending first, keeps
+	/// the clock: each floor is still measured against that track, by how much earlier than it
+	/// the others are sent, rather than leap 700 ms, which would read as a source far faster
+	/// than ours. That holds when its last frames were queued 400 ms more on their way, since
+	/// a spell of queueing does not move the lead.
+	#[tokio::test(start_paused = true)]
+	async fn the_track_sent_latest_stopping_keeps_the_clock() {
+		for queued in [0.0, 0.4] {
+			let fed = feed(0.0, 300.0, |track, sent| match track {
+				1 => Some(sent),
+				_ if sent < 56.0 => Some(sent + 0.7),
+				_ => (sent < 60.0).then_some(sent + 0.7 + queued),
+			})
+			.await;
+			assert!(fed.err.is_none(), "{queued} s queued: {:?}", fed.err);
+			assert_eq!(fed.dropped, 0, "{queued} s queued");
 		}
 	}
 

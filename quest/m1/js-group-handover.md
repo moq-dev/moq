@@ -29,6 +29,17 @@ missing frame and byte. It does not copy through the earlier single-writer
 pump or immediately cancel every old copy. Decided in the 2026-10-10 audit:
 mirror the current identity, reader, recovery and lifetime contract, including
 the late-duplicate correction, rather than porting the obsolete pump.
+Decided 2026-10-13: every track reader, direct or resumed, hands out each group
+sequence at most once, including a group aborted and re-created and one a
+second route delivers, so no consumer ever dedupes itself. The record is a
+per-reader interval set of delivered sequences on the track subscriber, shared
+by direct and resumed reads, with no fixed-size history. Once a group is past
+the reader's budget (max delay, clamped by max age), the reader stops expecting
+every group below it and counts them as delivered, so only gaps within the
+budget cost memory. A genuinely unseen late group within the budget is still
+delivered. Group timestamps on a track never rewind; which late groups are
+delivered after a rewind is unspecified, so the floor is judged by the
+delivered group above a gap rather than the gap itself.
 Things to settle along the way:
 
 - Whether the request's `active` broadcast stays the same object across a swap,
@@ -46,8 +57,8 @@ Things to settle along the way:
   in Rust, so `drain.ts`'s publisher mints an epoch.
 - `js/watch` and `js/hang` consumers that re-subscribe on `active` changes.
   Check whether they still need to.
-- Giving up a resumed group no route continues. Mirror Rust's rule from
-  [One max_age meaning](/quest/m1/cache-max-age.md): give it up once its
+- Giving up a resumed group no route continues. Mirror Rust's rule, which
+  js/net's `#isStale` already applies to subscriptions: give it up once its
   wall-clock age since its successor arrived, or its media-time drift,
   reaches the reader's budget.
 
@@ -60,11 +71,6 @@ mirrors their final shape instead of chasing it.
 
 Public API: likely a behavior change to `Origin.Requesting.active` and track
 subscriptions across a swap. Report it in the PR.
-
-## Required
-
-- [One max_age meaning](/quest/m1/cache-max-age.md) - the rule that gives up a resumed group no route continues
-- [Resume duplicates](/quest/m0/broadcast-epoch/resume-duplicates.md) - the corrected once-only delivery contract for reordered copies
 
 ## Related
 

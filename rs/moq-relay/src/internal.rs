@@ -284,7 +284,11 @@ impl Internal {
 		// capturing a descriptor per health check would spend one for nothing.
 		crate::listener::server(
 			listener,
-			crate::listener::Config { health, timeout },
+			crate::listener::Config {
+				health,
+				timeout,
+				activity: None,
+			},
 			DefaultAcceptor::new(),
 		)?
 		.serve(app.into_make_service())

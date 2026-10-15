@@ -35,6 +35,7 @@ pub trait Driver {
 ///
 /// Tokio on native, `setTimeout` in the browser. Resolves with the driver's
 /// terminal error, [`Error::Closed`] for a clean finish.
+#[cfg(feature = "async")]
 pub async fn run<D: Driver>(mut driver: D) -> Error {
 	let mut timer: Option<std::pin::Pin<Box<web_async::time::Sleep>>> = None;
 	kio::wait(|waiter| {
@@ -92,6 +93,7 @@ impl Clock {
 	/// A clock the test executor advances with its simulated time. Outside the
 	/// executor, a synchronous test never waits on a deadline, so nothing advances it.
 	#[cfg(test)]
+	#[cfg(feature = "async")]
 	pub(crate) fn sim() -> Self {
 		if !moq_net_sim::is_running() {
 			return Self::new(Instant::now());
@@ -105,6 +107,7 @@ impl Clock {
 		clock
 	}
 
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn new(now: Instant) -> Self {
 		let clock = Self::default();
 		clock.advance(now);
@@ -202,6 +205,7 @@ impl Deadline {
 	/// A duration the clock cannot represent (e.g. [`std::time::Duration::MAX`])
 	/// leaves the deadline disarmed, so it never fires rather than panicking on
 	/// the overflow.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn after(clock: &Clock, duration: std::time::Duration) -> Self {
 		let mut deadline = Self::new(clock);
 		deadline.set(clock.now().checked_add(duration));
@@ -238,6 +242,7 @@ impl Deadline {
 	}
 
 	/// The instant this fires at, or `None` while disarmed.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn deadline(&self) -> Option<Instant> {
 		self.at
 	}

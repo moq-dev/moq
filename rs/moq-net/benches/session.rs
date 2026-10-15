@@ -452,7 +452,7 @@ impl Room {
 	fn tick(&mut self) {
 		self.cache_now += Duration::from_secs(1);
 		for pool in self.pools() {
-			pool.gc(self.cache_now);
+			pool.gc(self.cache_now, &kio::Waiter::noop());
 		}
 	}
 
@@ -813,7 +813,7 @@ impl ChurnRoom {
 		for _ in 0..shape.sessions {
 			let mut viewer = cluster.join(0).await;
 			viewer.watch(&path(0), &held, None).await;
-			broadcasts.push(viewer.origin.consume().routed_broadcast(&path(0)).await.unwrap());
+			broadcasts.push(viewer.origin.consume().routed_broadcast(path(0)).await.unwrap());
 			viewers.push(viewer);
 		}
 		Self {

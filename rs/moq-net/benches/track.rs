@@ -23,6 +23,24 @@
 //! each append must wake only the reads it can expire, so waking the backlog shows up
 //! as a slope over it.
 //!
+//! `track_sparse_read` hands out groups from a feed with every other sequence missing,
+//! holding a fixed number of gaps the reader still remembers: each hand-out must cost the
+//! same however many gaps it holds, so a walk over them shows up as a slope.
+//!
+//! `track_gap_flush` forgets every remembered gap in one hand-out, each below an aborted
+//! group still cached: the successor they share must be found once, not once per gap.
+//!
+//! `track_wall` is the wall-clock half of staleness, swept over tracks sharing one driven
+//! pool and the groups each caches: a collection pass with a parked read's deadline armed on
+//! every track (`idle`, none due, and `due`, every one due at once), and re-polling one of
+//! those parked reads (`repoll`). A cost that grows with the table instead of the touched
+//! path shows up as a slope.
+//!
+//! `track_empty_run` drains a run of groups that finished without a frame across readers,
+//! with the groups after it past the budget, within it, or the whole run retired by the
+//! wall clock: each empty group is handed out like any other, so a walk over the rest of
+//! the run per group shows up as a slope over it.
+//!
 //! Run with `cargo bench -p moq-net --bench track`.
 
 use std::hint::black_box;
@@ -68,6 +86,15 @@ const WRITERS: [usize; 4] = [1, 2, 4, 8];
 
 /// Tracks sharing one expiring pool: the table a due collection pass walks.
 const SWEPT: [usize; 4] = [1, 64, 1_024, 16_384];
+
+/// Tracks sharing one driven pool, for the wall-clock deadlines.
+const AGED_TRACKS: [usize; 4] = [1, 64, 1_024, 10_000];
+
+/// Groups cached per track behind its parked read.
+const AGED_GROUPS: [usize; 3] = [1, 32, 1_024];
+
+/// The budget a parked read's wall deadline is armed for, past any setup on the real clock.
+const AGED_BUDGET: Duration = Duration::from_secs(3600);
 
 /// Keeps the ownership chain alive around the track and its subscribers.
 struct Fanout {
@@ -188,7 +215,7 @@ impl Swept {
 			.collect();
 		// The first call starts the pool's clock and runs its first pass.
 		let now = Instant::now();
-		pool.gc(now);
+		pool.gc(now, &kio::Waiter::noop());
 		Self {
 			_broadcast: broadcast,
 			_tracks: tracks,
@@ -236,6 +263,100 @@ impl Churn {
 	}
 }
 
+/// Tracks sharing one driven pool, each caching `groups` groups behind a read parked on its
+/// oldest, which the group after it superseded: one wall-clock deadline per track.
+struct Aged {
+	_broadcast: broadcast::Producer,
+	_tracks: Vec<(track::Producer, track::Subscriber, moq_net::group::Producer)>,
+	reads: Vec<(moq_net::group::Consumer, kio::Waiter)>,
+	pool: cache::Pool,
+	now: Instant,
+}
+
+impl Aged {
+	fn new(tracks: usize, groups: usize) -> Self {
+		let broadcast = broadcast::Info::default().produce();
+		let pool = broadcast.info().pool.clone();
+		// The driver's first collection, which arms wall-clock deadlines.
+		let now = Instant::now();
+		pool.gc(now, &kio::Waiter::noop());
+		let mut reads = Vec::with_capacity(tracks);
+		let tracks = (0..tracks)
+			.map(|i| {
+				let track = broadcast.create_track(format!("bench{i}"), None).unwrap();
+				let mut sub = track.subscribe(track::Subscription::default().with_max_delay(AGED_BUDGET));
+				let mut held = track.append_group().unwrap();
+				held.write_frame(None, Bytes::from_static(b"x")).unwrap();
+				for _ in 1..groups.max(2) {
+					let mut group = track.append_group().unwrap();
+					group.write_frame(None, Bytes::from_static(b"x")).unwrap();
+					group.finish().unwrap();
+				}
+				let waiter = kio::Waiter::noop();
+				let Poll::Ready(Ok(Some(mut read))) = sub.poll_recv_group(&waiter) else {
+					panic!("the held group is cached");
+				};
+				assert!(matches!(read.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+				assert!(read.poll_read_frame(&waiter).is_pending());
+				reads.push((read, waiter));
+				(track, sub, held)
+			})
+			.collect();
+		Self {
+			_broadcast: broadcast,
+			_tracks: tracks,
+			reads,
+			pool,
+			now,
+		}
+	}
+}
+
+fn bench_wall(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_wall");
+	for tracks in AGED_TRACKS {
+		for groups in AGED_GROUPS {
+			// Skip the largest table: setup alone would dominate the run.
+			if tracks * groups > 1_000_000 {
+				continue;
+			}
+			let id = format!("{tracks}x{groups}");
+			// A collection with every deadline armed and none due: every origin poll.
+			group.throughput(Throughput::Elements(1));
+			group.bench_function(BenchmarkId::new("idle", &id), |b| {
+				let aged = Aged::new(tracks, groups);
+				b.iter(|| black_box(aged.pool.gc(aged.now, &kio::Waiter::noop())));
+			});
+			// Re-polling one parked read re-arms its deadline.
+			group.bench_function(BenchmarkId::new("repoll", &id), |b| {
+				let mut aged = Aged::new(tracks, groups);
+				b.iter(|| {
+					let (read, waiter) = &mut aged.reads[0];
+					assert!(black_box(read.poll_read_frame(waiter)).is_pending());
+				});
+			});
+			// The collection that releases every parked read at once. Its cost is per track
+			// released, so the cached groups behind each read are not swept.
+			if groups != 1 {
+				continue;
+			}
+			group.throughput(Throughput::Elements(tracks as u64));
+			group.bench_function(BenchmarkId::new("due", &id), |b| {
+				b.iter_batched(
+					|| Aged::new(tracks, groups),
+					|aged| {
+						// Past every deadline, which setup armed after `now`.
+						black_box(aged.pool.gc(aged.now + 2 * AGED_BUDGET, &kio::Waiter::noop()));
+						aged
+					},
+					BatchSize::PerIteration,
+				);
+			});
+		}
+	}
+	group.finish();
+}
+
 fn bench_gc(c: &mut Criterion) {
 	let mut group = c.benchmark_group("track_gc");
 	for tracks in SWEPT {
@@ -243,7 +364,7 @@ fn bench_gc(c: &mut Criterion) {
 		group.throughput(Throughput::Elements(1));
 		group.bench_with_input(BenchmarkId::new("idle", tracks), &tracks, |b, &tracks| {
 			let swept = Swept::new(tracks);
-			b.iter(|| black_box(swept.pool.gc(swept.now)));
+			b.iter(|| black_box(swept.pool.gc(swept.now, &kio::Waiter::noop())));
 		});
 		// A due pass, stepping one sweep interval per call.
 		group.throughput(Throughput::Elements(tracks as u64));
@@ -253,7 +374,7 @@ fn bench_gc(c: &mut Criterion) {
 			let mut now = swept.now;
 			b.iter(|| {
 				now += interval;
-				black_box(swept.pool.gc(now))
+				black_box(swept.pool.gc(now, &kio::Waiter::noop()))
 			});
 		});
 	}
@@ -521,6 +642,224 @@ fn bench_parked_read(c: &mut Criterion) {
 	group.finish();
 }
 
+/// Hand-outs from a sparse feed holding `gaps` remembered gaps, on an untimed track and on
+/// a timed one whose budget never writes a gap off. Each iteration hands out the next group,
+/// opening a gap at the top, and the lowest missing one, closing the gap at the bottom, so
+/// the count stays fixed. Swept over the gaps so a per-hand-out cost that grows with them
+/// shows up as a slope.
+fn bench_sparse_read(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_sparse_read");
+	group.throughput(Throughput::Elements(2));
+	for (name, info) in [("untimed", track::Info::default()), ("timed", timed())] {
+		for gaps in [16u64, 256, 4096] {
+			group.bench_function(BenchmarkId::new(name, gaps), |b| {
+				b.iter_custom(|iterations| {
+					let broadcast = broadcast::Info::default().produce();
+					let track = broadcast.create_track("bench", info.clone()).unwrap();
+					let mut sub =
+						track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+					// Microseconds, so no run lasts long enough to cross the budget.
+					let timestamp = |sequence: u64| info.timescale.map(|_| Timestamp::from_micros(sequence).unwrap());
+					let mut hand_out = |sequence: u64| {
+						let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+						group
+							.write_frame(timestamp(sequence), Bytes::from_static(b"x"))
+							.unwrap();
+						group.finish().unwrap();
+						let Poll::Ready(Ok(Some(read))) = sub.poll_recv_group(&kio::Waiter::noop()) else {
+							panic!("the group is cached");
+						};
+						black_box(read);
+					};
+					// Every odd sequence is missing until the bottom gap closes.
+					for gap in 0..gaps {
+						hand_out(gap * 2);
+					}
+					let start = Instant::now();
+					for iteration in 0..iterations {
+						hand_out((gaps + iteration) * 2);
+						hand_out(iteration * 2 + 1);
+					}
+					start.elapsed()
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
+/// A reader remembering `gaps` gaps, each below a handed-out group since aborted but still
+/// cached, then a stamped survivor after them all.
+struct GapFlush {
+	_broadcast: broadcast::Producer,
+	track: track::Producer,
+	sub: track::Subscriber,
+	gaps: u64,
+}
+
+impl GapFlush {
+	fn new(gaps: u64) -> Self {
+		let broadcast = broadcast::Info::default().produce();
+		let track = broadcast.create_track("bench", timed()).unwrap();
+		let mut sub = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+		let mut hand_out = |sequence: u64, millis: u64| {
+			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(millis).unwrap(), Bytes::from_static(b"x"))
+				.unwrap();
+			let Poll::Ready(Ok(Some(read))) = sub.poll_recv_group(&kio::Waiter::noop()) else {
+				panic!("the group is cached");
+			};
+			black_box(read);
+			group
+		};
+		// Every odd sequence is missing.
+		let handed: Vec<_> = (0..gaps).map(|gap| hand_out(gap * 2, gap)).collect();
+		hand_out(gaps * 2, gaps).finish().unwrap();
+		for group in handed {
+			group.abort(Error::Cancel).unwrap();
+		}
+		Self {
+			_broadcast: broadcast,
+			track,
+			sub,
+			gaps,
+		}
+	}
+
+	/// Hand out a group two hours on, which puts every remembered gap past the budget.
+	fn flush(&mut self) {
+		let mut group = self
+			.track
+			.create_group(moq_net::group::Info {
+				sequence: self.gaps * 2 + 1,
+			})
+			.unwrap();
+		group
+			.write_frame(Timestamp::from_millis(7_200_000).unwrap(), Bytes::from_static(b"x"))
+			.unwrap();
+		let Poll::Ready(Ok(Some(read))) = self.sub.poll_recv_group(&kio::Waiter::noop()) else {
+			panic!("the group is cached");
+		};
+		black_box(read);
+	}
+}
+
+/// One hand-out forgetting every remembered gap at once, each below a group that was
+/// aborted but is still cached, swept over the gaps. The groups judged share one
+/// successor past the aborted run, so finding it once per gap shows up as a slope.
+fn bench_gap_flush(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_gap_flush");
+	group.sample_size(10);
+	for gaps in [64u64, 512, 4096] {
+		group.throughput(Throughput::Elements(gaps));
+		group.bench_function(BenchmarkId::from_parameter(gaps), |b| {
+			b.iter_batched_ref(|| GapFlush::new(gaps), GapFlush::flush, BatchSize::PerIteration);
+		});
+	}
+	group.finish();
+}
+
+/// How the groups after an [`EmptyRun`] judge it.
+#[derive(Clone, Copy)]
+enum Run {
+	/// Two groups an hour apart in media time follow it, writing off its last group.
+	Stale,
+	/// One group follows it, keeping all of it within the budget.
+	Fresh,
+	/// A zero budget: the wall clock already retired every superseded group.
+	Retired,
+}
+
+/// Readers on one track holding group 0, a run of groups that finished without a frame,
+/// and the groups after it.
+struct EmptyRun {
+	_broadcast: broadcast::Producer,
+	_track: track::Producer,
+	readers: Vec<track::Subscriber>,
+	/// Groups each reader should be handed.
+	handed: usize,
+}
+
+impl EmptyRun {
+	/// Media-time budgets span an hour, so setup on the real clock never ages a group out on
+	/// the wall clock.
+	fn new(run: u64, readers: usize, mode: Run) -> Self {
+		let broadcast = broadcast::Info::default().produce();
+		let track = broadcast.create_track("bench", timed()).unwrap();
+		let append = |millis: Option<u64>| {
+			let mut group = track.append_group().unwrap();
+			if let Some(millis) = millis {
+				group
+					.write_frame(Timestamp::from_millis(millis).unwrap(), Bytes::from_static(b"x"))
+					.unwrap();
+			}
+			group.finish().unwrap();
+		};
+		append(Some(0));
+		for _ in 0..run {
+			append(None);
+		}
+		const HOUR: u64 = 3_600_000;
+		let after: &[u64] = match mode {
+			Run::Stale => &[2 * HOUR, 4 * HOUR],
+			Run::Fresh | Run::Retired => &[5],
+		};
+		for millis in after {
+			append(Some(*millis));
+		}
+		let (budget, handed) = match mode {
+			// The run's last group is written off, but two groups follow it.
+			Run::Stale => (Duration::from_millis(HOUR), run as usize + 2),
+			Run::Fresh => (Duration::from_millis(HOUR), run as usize + 2),
+			Run::Retired => (Duration::ZERO, 1),
+		};
+		let budget = track::Subscription::default().with_max_delay(budget);
+		Self {
+			readers: (0..readers).map(|_| track.subscribe(budget.clone())).collect(),
+			_broadcast: broadcast,
+			_track: track,
+			handed,
+		}
+	}
+
+	fn drain(&mut self) {
+		for reader in &mut self.readers {
+			let mut handed = 0;
+			while let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&kio::Waiter::noop()) {
+				black_box(group);
+				handed += 1;
+			}
+			assert_eq!(handed, self.handed);
+		}
+	}
+}
+
+/// Readers draining a run of groups that finished without a frame, swept over the run and
+/// the readers, with the groups after it past the budget (`stale`), within it (`fresh`), or
+/// the run retired by the wall clock (`retired`).
+/// A reader's cost must stay linear in the run, so a walk over the rest of the run per
+/// group shows up as a slope over it.
+fn bench_empty_run(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_empty_run");
+	group.sample_size(10);
+	for (name, mode) in [("stale", Run::Stale), ("fresh", Run::Fresh), ("retired", Run::Retired)] {
+		for readers in [1usize, 8, 64] {
+			for run in [64u64, 512, 4096] {
+				group.throughput(Throughput::Elements(run * readers as u64));
+				group.bench_function(BenchmarkId::new(format!("{name}/{readers}"), run), |b| {
+					b.iter_batched_ref(
+						|| EmptyRun::new(run, readers, mode),
+						EmptyRun::drain,
+						BatchSize::PerIteration,
+					);
+				});
+			}
+		}
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_fanout,
@@ -531,6 +870,10 @@ criterion_group!(
 	bench_subscriber_churn_after_peak,
 	bench_subscriber_join,
 	bench_datagram_subscriber_join,
-	bench_parked_read
+	bench_parked_read,
+	bench_sparse_read,
+	bench_gap_flush,
+	bench_wall,
+	bench_empty_run
 );
 criterion_main!(benches);

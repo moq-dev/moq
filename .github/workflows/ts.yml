@@ -106,6 +106,25 @@ jobs:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
+      # 1080p video with no HRD at its level's 24 Mb/s leak, so the export has to admit
+      # the leak's whole rate of payload to keep up (moq-dev/moq#5362).
+      - name: TS video at its full leak
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --leak
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # The same video beside two audio PIDs in a multiplex the source fills with no nulls,
+      # at the source's own rate: the export has no room to spend more packets than the
+      # source on clocks or audio framing (moq-dev/moq#5362).
+      - name: TS full multiplex at its own rate
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --full
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
       # The same video beside four audio PIDs in a multiplex faster than its Rx: each slot
       # has to interleave the video with the rest, or its transport buffer overflows.
       - name: TS multiplex above the video's Rx

@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A replacement session, end to end over real sessions: a second session from the
 //! same peer re-announces every route while the first one is still open, as a GOAWAY
 //! drain does.

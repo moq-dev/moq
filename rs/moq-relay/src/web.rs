@@ -1,7 +1,7 @@
 use std::{
 	net,
 	path::PathBuf,
-	sync::{Arc, atomic::AtomicU64},
+	sync::Arc,
 	task::{Context, Poll},
 };
 
@@ -162,9 +162,6 @@ pub(crate) struct WebState {
 	pub(crate) cluster: cluster::Cluster,
 	/// TLS certificate information served at `/certificate.sha256`.
 	pub(crate) certificates: moq_tokio::tls::Certificates,
-	/// Monotonically increasing connection counter for WebSocket sessions.
-	#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
-	pub(crate) conn_id: AtomicU64,
 	/// Relay-wide shutdown broadcast; WebSocket sessions drain with a GOAWAY
 	/// when it fires. Defaults to a handle that never fires.
 	#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
@@ -216,7 +213,6 @@ impl Web {
 			auth,
 			cluster,
 			certificates,
-			conn_id: AtomicU64::new(0),
 			shutdown: crate::shutdown::Observer::disabled(),
 			sessions: crate::session::Registry::new(),
 			timeout: moq_tokio::listen::Config::default().resolved_timeout(),
@@ -315,8 +311,8 @@ impl Web {
 		configured.then(|| self.health.clone())
 	}
 
-	/// Attach the relay-wide shutdown broadcast so WebSocket sessions drain with
-	/// a GOAWAY when it fires. Without it they are cut off on process exit.
+	/// Count accepted public connections in the relay drain and send WebSockets a GOAWAY.
+	/// Without this coordination they are cut off on process exit.
 	pub fn with_shutdown(mut self, shutdown: crate::shutdown::Observer) -> Self {
 		let state = Arc::get_mut(&mut self.state).expect("with_shutdown called after routes were built");
 		state.shutdown = shutdown;
@@ -417,6 +413,7 @@ impl Web {
 				crate::listener::Config {
 					health: health.clone(),
 					timeout: state.timeout,
+					activity: Some(state.shutdown.activity.clone()),
 				},
 				WebAcceptor::plain(ws),
 			)?;
@@ -441,6 +438,7 @@ impl Web {
 				crate::listener::Config {
 					health: health.clone(),
 					timeout: state.timeout,
+					activity: Some(state.shutdown.activity.clone()),
 				},
 				WebAcceptor::tls(rustls_config, ws),
 			)?;
@@ -637,23 +635,44 @@ impl WebAcceptor<RustlsAcceptor<DefaultAcceptor>> {
 	}
 }
 
-/// The mTLS marker a finished connection carries, if any.
+/// HTTP protocol and peer metadata available after a connection finishes TLS.
 ///
 /// Which streams can present a client certificate is a property of the stream type,
 /// not of the acceptor: only rustls has one to report, and a plain TCP connection
 /// never does.
-trait MtlsStream {
+trait HttpStream {
 	/// The marker for this connection's verified peer certificate.
 	fn mtls_peer(&self) -> Option<MtlsPeer>;
+	fn admission(&self) -> Option<crate::listener::Admission> {
+		None
+	}
+	fn is_http2(&self) -> bool {
+		false
+	}
 }
 
-impl MtlsStream for tokio::net::TcpStream {
+impl HttpStream for tokio::net::TcpStream {
 	fn mtls_peer(&self) -> Option<MtlsPeer> {
 		None
 	}
 }
 
-impl<I> MtlsStream for TlsStream<I> {
+impl HttpStream for crate::listener::Accepted {
+	fn mtls_peer(&self) -> Option<MtlsPeer> {
+		None
+	}
+	fn admission(&self) -> Option<crate::listener::Admission> {
+		self.admission.clone()
+	}
+}
+
+impl<I: HttpStream> HttpStream for TlsStream<I> {
+	fn admission(&self) -> Option<crate::listener::Admission> {
+		self.get_ref().0.admission()
+	}
+	fn is_http2(&self) -> bool {
+		self.get_ref().1.alpn_protocol() == Some(b"h2")
+	}
 	fn mtls_peer(&self) -> Option<MtlsPeer> {
 		self.get_ref()
 			.1
@@ -666,9 +685,8 @@ impl<I> MtlsStream for TlsStream<I> {
 /// The connection [`WebAcceptor`] is handed: a byte stream, plus a descriptor to
 /// read socket statistics from on platforms that expose them.
 ///
-/// The concrete stream is always the `TcpStream` from [`crate::listener::Peer`], so
-/// the extra bound narrows nothing; it exists because a `cfg` can't be written on a
-/// `where` clause directly.
+/// The stream owns the accepted TCP socket, so the extra bound narrows nothing;
+/// it exists because a `cfg` can't be written on a `where` clause directly.
 #[cfg(unix)]
 pub(crate) trait AcceptStream: AsyncRead + AsyncWrite + Unpin + Send + std::os::fd::AsFd + 'static {}
 #[cfg(unix)]
@@ -685,7 +703,7 @@ where
 	I: AcceptStream,
 	S: Send + 'static,
 	A: Accept<I, S>,
-	A::Stream: MtlsStream + Send + 'static,
+	A::Stream: HttpStream + Send + 'static,
 	A::Service: Send + 'static,
 	A::Future: Send + 'static,
 {
@@ -701,12 +719,18 @@ where
 		async move {
 			let (stream, service) = inner.await?;
 			let peer = stream.mtls_peer();
+			let admission = stream.admission();
+			if stream.is_http2() {
+				// Extended CONNECT is not enabled, so h2 cannot become a WebSocket.
+				drop(admission.as_ref().and_then(crate::listener::Admission::take));
+			}
 			Ok((
 				stream,
 				SetConnectionExtensions {
 					inner: service,
 					peer,
 					socket,
+					admission,
 				},
 			))
 		}
@@ -728,15 +752,16 @@ fn socket_stats<I: AcceptStream>(_stream: &I) -> Option<SocketStats> {
 	None
 }
 
-/// Per-connection tower service that injects the connection's extensions -- the
-/// mTLS marker and the captured socket -- on every request before forwarding to the
-/// inner service. Both are per-connection facts, so they are attached once at accept
-/// and replayed onto each request that arrives on it.
+/// Attaches connection facts to each request, handing the first upgrade its admission.
+///
+/// The mTLS marker and captured socket are replayed on every request. Admission
+/// is shared between service clones and consumed only once.
 #[derive(Clone)]
 struct SetConnectionExtensions<S> {
 	inner: S,
 	peer: Option<MtlsPeer>,
 	socket: Option<SocketStats>,
+	admission: Option<crate::listener::Admission>,
 }
 
 impl<S, B> Service<http::Request<B>> for SetConnectionExtensions<S>
@@ -752,6 +777,20 @@ where
 	}
 
 	fn call(&mut self, mut req: http::Request<B>) -> Self::Future {
+		// Taking from the shared slot classifies only the first request, even
+		// when hyper cloned the service. Plain HTTP releases at these headers;
+		// a later upgrade has no accept guard and enters from its handler.
+		if let Some(active) = self.admission.as_ref().and_then(crate::listener::Admission::take) {
+			let upgrade = req.version() != http::Version::HTTP_2
+				&& req
+					.headers()
+					.get(http::header::UPGRADE)
+					.is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"websocket"));
+			if upgrade {
+				req.extensions_mut().insert(crate::listener::Admission::new(active));
+			}
+		}
+
 		// Only insert when a cert was presented; handlers extract via
 		// `Option<Extension<MtlsPeer>>` so absence is the no-cert case.
 		if let Some(peer) = self.peer.clone() {
@@ -892,7 +931,11 @@ async fn admit_http(
 	request.server_name = request_host(uri, headers);
 	request.remote = Some(remote.0);
 	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| auth::peer(&identity));
-	state.auth.admit(request).await
+	state
+		.auth
+		.admit(request)
+		.await
+		.inspect_err(|err| state.cluster.refusals.record(err.into()))
 }
 
 /// Serve the announced broadcasts for a given prefix.
@@ -914,6 +957,7 @@ async fn serve_announced(
 
 	let lease = admit_http(&state, prefix, query, &uri, &headers, remote, mtls).await?;
 	let Some(origin) = state.cluster.subscriber(lease.token()) else {
+		state.cluster.refusals.record(crate::refusals::Refusal::Forbidden);
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
 
@@ -963,6 +1007,7 @@ async fn serve_fetch(
 	let broadcast = lease.token().root.to_string();
 
 	let Some(origin) = state.cluster.subscriber(lease.token()) else {
+		state.cluster.refusals.record(crate::refusals::Refusal::Forbidden);
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
 
@@ -1082,6 +1127,75 @@ mod tests {
 	use rcgen::{CertificateParams, KeyPair};
 	use std::io::Write;
 	use tempfile::TempDir;
+
+	#[tokio::test(start_paused = true)]
+	async fn http_refusals_count_at_both_endpoints() {
+		use crate::refusals::Refusal;
+		let dir = TempDir::new().unwrap();
+		let (_, cert, _) = make_certs(&dir);
+		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(cert).unwrap()).unwrap();
+		for fetch in [false, true] {
+			for publish_only in [false, true] {
+				let auth = if publish_only {
+					crate::auth::Config {
+						public_publish: vec![moq_auth::Pattern::all()],
+						..Default::default()
+					}
+					.init("test", &moq_tokio::tls::Connect::default(), false)
+					.unwrap()
+				} else {
+					auth::Auth::refuse("test")
+				};
+				let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+				let web = Web::new(auth, cluster, certificates.clone(), Config::default());
+				let state = web.state;
+				let remote = ConnectInfo(crate::listener::Peer("127.0.0.1:1234".parse().unwrap()));
+				let status = if fetch {
+					serve_fetch(
+						Path("room/video".to_owned()),
+						Query(FetchParams {
+							auth: AuthQuery { jwt: None },
+							group: FetchGroup::Latest,
+						}),
+						None,
+						remote,
+						"/fetch/room/video".parse().unwrap(),
+						http::HeaderMap::new(),
+						State(state.clone()),
+					)
+					.await
+					.map(|_| ())
+					.into_response()
+					.status()
+				} else {
+					serve_announced(
+						Some(Path("room".to_owned())),
+						Query(AuthQuery { jwt: None }),
+						None,
+						remote,
+						"/announced/room".parse().unwrap(),
+						http::HeaderMap::new(),
+						State(state.clone()),
+					)
+					.await
+					.map(|_| ())
+					.into_response()
+					.status()
+				};
+				assert_eq!(status, StatusCode::UNAUTHORIZED);
+				let reason = if publish_only {
+					Refusal::Forbidden
+				} else {
+					Refusal::Refused
+				};
+				assert_eq!(
+					state.cluster.refusals.count(reason),
+					1,
+					"fetch={fetch}, publish_only={publish_only}"
+				);
+			}
+		}
+	}
 
 	fn make_certs(dir: &TempDir) -> (PathBuf, PathBuf, PathBuf) {
 		make_named_certs(dir, "server", "localhost")
@@ -1566,11 +1680,13 @@ mod tests {
 			inner: EchoExt,
 			peer: Some(MtlsPeer(moq_tokio::tls::PeerIdentity::from_chain(Vec::new()))),
 			socket: None,
+			admission: None,
 		};
 		let mut no_peer = SetConnectionExtensions {
 			inner: EchoExt,
 			peer: None,
 			socket: None,
+			admission: None,
 		};
 
 		let req = Request::builder().body(()).unwrap();
@@ -1584,5 +1700,313 @@ mod tests {
 			!no_peer.call(req).await.unwrap(),
 			"SetConnectionExtensions(None) must NOT surface MtlsPeer"
 		);
+	}
+
+	#[cfg(all(feature = "websocket", any(unix, windows)))]
+	mod drain {
+		use super::*;
+
+		// Keep real socket progress from automatically advancing the paused clock.
+		// Tests advance the drain deadline explicitly, after the protocol step they inspect.
+		async fn socket_step<T>(future: impl Future<Output = T>) -> T {
+			tokio::pin!(future);
+			std::future::poll_fn(|cx| {
+				let result = future.as_mut().poll(cx);
+				if result.is_pending() {
+					cx.waker().wake_by_ref();
+				}
+				result
+			})
+			.await
+		}
+
+		struct DrainingWeb {
+			stream: tokio::net::TcpStream,
+			tls: Option<tokio_rustls::TlsConnector>,
+			shutdown: crate::shutdown::Observer,
+			trigger: crate::shutdown::Trigger,
+			running: tokio::task::JoinHandle<anyhow::Result<()>>,
+			_certs: TempDir,
+		}
+
+		const DRAIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+		const UPGRADE_HEAD: &[u8] = b"GET /room HTTP/1.1\r\nHost: localhost\r\n";
+		const UPGRADE_TAIL: &[u8] = b"Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: qmux-01.moq-lite-06\r\n\r\n";
+
+		impl DrainingWeb {
+			async fn new(tls: bool, embedded: bool) -> Self {
+				let certs = TempDir::new().unwrap();
+				let (ca, cert, key) = make_certs(&certs);
+				let mut config = crate::Config::default();
+				config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+				config.listen.timeout = Some(std::time::Duration::ZERO);
+				config.web.ws = true;
+				config.auth.public = vec![moq_auth::Pattern::all()];
+				config.drain_timeout = DRAIN_WINDOW;
+				if tls {
+					config.web.https.listen = Some("127.0.0.1:0".parse().unwrap());
+					config.web.https.cert = vec![cert];
+					config.web.https.key = vec![key];
+				} else {
+					config.web.http.listen = Some("127.0.0.1:0".parse().unwrap());
+				}
+				let mut relay = crate::Relay::load(config).await.unwrap().with_signals(false);
+				if embedded {
+					let routes = relay.web().routes().route("/embedded", get(|| async { "ok" }));
+					relay = relay.with_web(routes);
+				}
+				let health = relay.web().accept_health().unwrap();
+				// The next successful accept clears this marker, giving the test a
+				// socket-accept barrier without a wall-clock delay or a new test hook.
+				#[cfg(unix)]
+				let exhausted = libc::EMFILE;
+				#[cfg(windows)]
+				let exhausted = 10024; // Winsock WSAEMFILE.
+				let _ = health.failed(&std::io::Error::from_raw_os_error(exhausted));
+				assert!(health.stalled().is_some(), "the accept barrier was not armed");
+				let addr = relay.web_addrs();
+				let addr = if tls { addr.https.unwrap() } else { addr.http.unwrap() };
+				let shutdown = relay.shutdown().clone();
+				let trigger = relay.shutdown_trigger().clone();
+				let running = tokio::spawn(relay.run());
+				let stream = socket_step(tokio::net::TcpStream::connect(addr)).await.unwrap();
+				while health.stalled().is_some() {
+					tokio::task::yield_now().await;
+				}
+				let tls = if tls {
+					use rustls::pki_types::{CertificateDer, pem::PemObject};
+					let mut roots = rustls::RootCertStore::empty();
+					for cert in CertificateDer::pem_slice_iter(&std::fs::read(ca).unwrap()) {
+						roots.add(cert.unwrap()).unwrap();
+					}
+					let mut config = rustls::ClientConfig::builder()
+						.with_root_certificates(roots)
+						.with_no_client_auth();
+					config.alpn_protocols = vec![b"http/1.1".to_vec()];
+					Some(tokio_rustls::TlsConnector::from(Arc::new(config)))
+				} else {
+					None
+				};
+				Self {
+					stream,
+					tls,
+					shutdown,
+					trigger,
+					running,
+					_certs: certs,
+				}
+			}
+
+			fn holds_drain(&self) {
+				use futures::FutureExt;
+				assert!(
+					self.shutdown.activity().close().now_or_never().is_none(),
+					"a TCP-accepted web connection was absent from the drain before its upgrade"
+				);
+			}
+		}
+
+		async fn upgrade_while_draining<I>(mut stream: I, head_sent: bool) -> moq_net::Session
+		where
+			I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+		{
+			use tokio::io::{AsyncReadExt, AsyncWriteExt};
+			if !head_sent {
+				stream.write_all(UPGRADE_HEAD).await.unwrap();
+			}
+			stream.write_all(UPGRADE_TAIL).await.unwrap();
+			// Read only the HTTP headers: QMux may start writing immediately after
+			// the upgrade, and those bytes belong to the WebSocket decoder.
+			let mut response = Vec::new();
+			while !response.ends_with(b"\r\n\r\n") {
+				response.push(stream.read_u8().await.unwrap());
+			}
+			assert!(
+				response.starts_with(b"HTTP/1.1 101"),
+				"{}",
+				String::from_utf8_lossy(&response)
+			);
+			let socket = qmux::ws::tokio_tungstenite::WebSocketStream::from_raw_socket(
+				stream,
+				qmux::ws::tungstenite::protocol::Role::Client,
+				None,
+			)
+			.await;
+			let transport = qmux::ws::Upgraded::new(socket)
+				.with_alpn("qmux-01.moq-lite-06")
+				.connect();
+			let origin = moq_tokio::origin::spawn();
+			let (session, driver) = moq_net::Client::new()
+				.with_versions("moq-lite-06".parse::<moq_net::Version>().unwrap().into())
+				.with_publisher(origin.consume())
+				.connect(
+					tokio::time::Instant::now().into_std(),
+					moq_tokio::transport::Session::new(transport, moq_net::transport::Binding::Uri),
+				)
+				.await
+				.unwrap();
+			tokio::spawn(moq_net::time::run(driver));
+			session
+		}
+
+		#[tokio::test(start_paused = true)]
+		async fn accepted_web_connection_holds_drain_until_upgrade() {
+			use tokio::io::AsyncWriteExt;
+			for tls in [false, true] {
+				for embedded in [false, true] {
+					let mut web = DrainingWeb::new(tls, embedded).await;
+					if !tls {
+						socket_step(web.stream.write_all(UPGRADE_HEAD)).await.unwrap();
+					}
+					web.holds_drain();
+					web.trigger.start();
+					let session = match web.tls {
+						Some(connector) => {
+							let stream = socket_step(connector.connect("localhost".try_into().unwrap(), web.stream))
+								.await
+								.unwrap();
+							socket_step(upgrade_while_draining(stream, false)).await
+						}
+						None => socket_step(upgrade_while_draining(web.stream, true)).await,
+					};
+					let goaway = socket_step(session.draining().recv()).await.unwrap();
+					assert_eq!(goaway.uri(), "");
+					session.abort(moq_net::Error::Cancel);
+					socket_step(web.running).await.unwrap().unwrap();
+				}
+			}
+		}
+
+		#[tokio::test(start_paused = true)]
+		async fn accepted_web_connection_reaches_drain_deadline() {
+			for tls in [false, true] {
+				let web = DrainingWeb::new(tls, true).await;
+				web.holds_drain();
+				web.trigger.start();
+				tokio::time::advance(DRAIN_WINDOW).await;
+				web.running.await.unwrap().unwrap();
+			}
+		}
+
+		#[tokio::test(start_paused = true)]
+		async fn plain_first_web_request_releases_drain() {
+			use tokio::io::AsyncWriteExt;
+			let mut web = DrainingWeb::new(false, true).await;
+			socket_step(web.stream.write_all(b"GET /embedded HTTP/1.1\r\nHost: localhost\r\n"))
+				.await
+				.unwrap();
+			web.holds_drain();
+			web.trigger.start();
+			socket_step(web.stream.write_all(b"\r\n")).await.unwrap();
+			socket_step(web.running).await.unwrap().unwrap();
+		}
+
+		#[tokio::test(start_paused = true)]
+		async fn h2_alpn_releases_admission_before_headers() {
+			use axum_server::AddrListener;
+			use futures::FutureExt;
+			use rustls::pki_types::{CertificateDer, pem::PemObject};
+			let dir = TempDir::new().unwrap();
+			let (ca, cert, key) = make_certs(&dir);
+			let tls = build_https_config(&[cert], &[key], &[]).unwrap();
+			let mut roots = rustls::RootCertStore::empty();
+			for cert in CertificateDer::pem_slice_iter(&std::fs::read(ca).unwrap()) {
+				roots.add(cert.unwrap()).unwrap();
+			}
+			let mut client = rustls::ClientConfig::builder()
+				.with_root_certificates(roots)
+				.with_no_client_auth();
+			client.alpn_protocols = vec![b"h2".to_vec()];
+			let connector = tokio_rustls::TlsConnector::from(Arc::new(client));
+			let activity = moq_net::server::Activity::default();
+			let bound = moq_tokio::bind::tcp("127.0.0.1:0".parse().unwrap()).unwrap();
+			let addr = bound.local_addr().unwrap();
+			let listener =
+				crate::listener::Listener::new(bound, moq_tokio::accept::Health::new("h2"), Some(activity.clone()))
+					.unwrap();
+			let ((accepted, _), connected) =
+				socket_step(async { tokio::try_join!(listener.accept_stream(), tokio::net::TcpStream::connect(addr)) })
+					.await
+					.unwrap();
+			assert!(activity.close().now_or_never().is_none(), "TLS was not counted");
+			let acceptor = WebAcceptor::tls(RustlsConfig::from_config(tls), false);
+			let ((stream, _service), _client) = socket_step(async {
+				tokio::try_join!(
+					acceptor.accept(accepted, ()),
+					connector.connect("localhost".try_into().unwrap(), connected)
+				)
+			})
+			.await
+			.unwrap();
+			assert!(stream.is_http2());
+			assert!(
+				activity.close().now_or_never().is_some(),
+				"h2 awaited request headers before releasing its admission"
+			);
+		}
+
+		async fn plain_request(stream: &mut tokio::net::TcpStream) {
+			use tokio::io::{AsyncReadExt, AsyncWriteExt};
+			stream
+				.write_all(b"GET /embedded HTTP/1.1\r\nHost: localhost\r\n\r\n")
+				.await
+				.unwrap();
+			let mut response = Vec::new();
+			while !response.ends_with(b"\r\n\r\n") {
+				response.push(stream.read_u8().await.unwrap());
+			}
+			assert!(
+				response.starts_with(b"HTTP/1.1 200"),
+				"{}",
+				String::from_utf8_lossy(&response)
+			);
+			let mut body = [0; 2];
+			stream.read_exact(&mut body).await.unwrap();
+			assert_eq!(&body, b"ok");
+		}
+
+		#[tokio::test(start_paused = true)]
+		async fn later_keep_alive_upgrade_enters_from_the_handler() {
+			let mut web = DrainingWeb::new(false, true).await;
+			let pending = web.shutdown.activity().enter().unwrap();
+			socket_step(plain_request(&mut web.stream)).await;
+			web.trigger.start();
+			let session = socket_step(upgrade_while_draining(web.stream, false)).await;
+			drop(pending);
+			assert_eq!(socket_step(session.draining().recv()).await.unwrap().uri(), "");
+			session.abort(moq_net::Error::Cancel);
+			socket_step(web.running).await.unwrap().unwrap();
+		}
+
+		async fn refused_upgrade(stream: tokio::net::TcpStream) {
+			use qmux::ws::tungstenite::client::IntoClientRequest;
+			let mut request = format!("ws://{}/room", stream.peer_addr().unwrap())
+				.into_client_request()
+				.unwrap();
+			request
+				.headers_mut()
+				.insert("sec-websocket-protocol", "qmux-01.moq-lite-06".parse().unwrap());
+			let result = qmux::ws::tokio_tungstenite::client_async(request, stream).await;
+			let Err(qmux::ws::tungstenite::Error::Http(response)) = result else {
+				panic!("an upgrade after drain admission closed was not refused");
+			};
+			assert_eq!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+		}
+
+		#[tokio::test(start_paused = true)]
+		async fn committed_drain_refuses_upgrades_but_serves_plain_http() {
+			let mut web = DrainingWeb::new(false, true).await;
+			let addr = web.stream.peer_addr().unwrap();
+			socket_step(plain_request(&mut web.stream)).await;
+			// Keep the listener running while admission is closed, exposing the
+			// same boundary a connection can reach just before Relay::run stops it.
+			socket_step(web.shutdown.activity().close()).await;
+			socket_step(refused_upgrade(web.stream)).await;
+			let mut fresh = socket_step(tokio::net::TcpStream::connect(addr)).await.unwrap();
+			socket_step(plain_request(&mut fresh)).await;
+			socket_step(refused_upgrade(fresh)).await;
+			web.trigger.start();
+			socket_step(web.running).await.unwrap().unwrap();
+		}
 	}
 }

@@ -197,7 +197,7 @@ Each subscription carries the knobs that decide behavior under congestion:
 | --- | --- |
 | **Priority** (0..255) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. |
 | **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
-| **Max delay** | How far a non-latest group may fall behind the live edge before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
+| **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
 
 Order only decides what goes first, never what is skipped, so catching up oldest
 first needs a max delay that covers the backlog. When a relay serves subscribers of
@@ -205,16 +205,19 @@ both orders from one upstream subscription, it asks upstream for newest first, a
 still sends each subscriber its groups in that subscriber's own order. Over
 moq-transport the upstream order is fixed by whichever subscriber arrived first.
 
-Max delay is measured on the media timeline, not the wall clock, so a backlog
-delivered as a burst is still late while a congestion stall never expires
-anything on its own. Both ends apply it: the publisher skips a group rather
-than sending it, and the subscriber skips it again as it reads, since the
-publisher only ever sees the most tolerant budget across its subscribers.
+Max delay starts counting when a group's successor arrives, on two clocks, and
+whichever reaches it first skips the group: the wall clock since the successor
+arrived at this hop, and how far the successor's first timestamp trails the
+live edge. Media time catches a backlog delivered as a burst; the wall clock
+catches a publisher whose timestamps stall and an untimed track. The newest
+group has no successor, so it is never skipped. Both ends apply it: the
+publisher skips a group rather than sending it, and the subscriber skips it
+again as it reads, since the publisher only ever sees the most tolerant budget
+across its subscribers.
 
 A track is timed or untimed: it declares a timescale or none, and a frame that
-doesn't match is refused. No receiver fills in an arrival time. An untimed
-group never falls past max delay, so a new subscriber starts at its latest
-group unless it names a start. Tracks from moq-lite before 05, or from
+doesn't match is refused. No receiver fills in an arrival time, so an untimed
+track is judged by the wall clock alone. Tracks from moq-lite before 05, or from
 moq-transport without a `TIMESCALE` (every track on drafts 14-16), arrive
 untimed. moq-lite 05 and 06 cannot declare an untimed track, so there its
 frames go out stamped with their send time; the work-in-progress 07 carries it
@@ -228,9 +231,9 @@ nothing from it until the source answers again.
 The publisher may declare a retention window per track. Omission sets no limit;
 zero keeps only the live edge. Relays preserve that declaration, and may still
 evict sooner under their own cache ceiling. Media tracks explicitly use 30
-seconds so a segmented egress can still find its segments. Retention uses media
-timestamps and always keeps the newest group. IETF carries the same idea as
-`MAX_CACHE_DURATION`, measured in wall time, which is only an approximate match.
+seconds so a segmented egress can still find its segments. Retention ages a
+group by the same two clocks as max delay and always keeps the newest group.
+IETF carries the same idea as `MAX_CACHE_DURATION`, measured in wall time alone.
 
 Put together, a conference might use:
 

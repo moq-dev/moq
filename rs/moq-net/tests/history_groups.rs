@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A fresh subscription from group 0 receives a finished older group alongside the open
 //! newer one, however their streams race into a relay.
 //!

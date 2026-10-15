@@ -118,6 +118,9 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 				None => return Poll::Pending,
 			},
 		};
+		if session.binding() == crate::transport::Binding::Uri && setup.path.is_some() {
+			return Poll::Ready(Err(Error::ProtocolViolation));
+		}
 		// A stream need not have delivered even its type yet. Keep it intact for the
 		// session instead of letting it block SETUP or dropping it at the handoff.
 		early.append(pending);
@@ -265,7 +268,7 @@ where
 	// reads the peer's Setup stream; capability-gated streams (PROBE) wait on it.
 	// When the caller already read it (a gated server accept), seed the slot so the
 	// Setup stream isn't expected on the wire again.
-	let peer_setup_slot = PeerSetup::default();
+	let peer_setup_slot = PeerSetup::new(client, session.binding());
 	let early = if let Some(accepted) = peer_setup {
 		peer_setup_slot.set(accepted.setup);
 		accepted.early
@@ -275,9 +278,9 @@ where
 	let peer_setup = peer_setup_slot;
 
 	// GOAWAY wiring: the public Session holds one half (send trigger, received
-	// signal), the protocol tasks below hold the other. moq-lite lets either side
-	// name a redirect URI, unlike moq-transport.
-	let (goaway_handle, goaway) = crate::goaway::Handle::new(true);
+	// signal), the protocol tasks below hold the other. Only the server may
+	// name a redirect URI.
+	let (goaway_handle, goaway) = crate::goaway::Handle::new(!client);
 
 	// Read out before the setup machine takes ownership below.
 	let our_cost = our_setup.cost;
@@ -1153,6 +1156,133 @@ mod tests {
 					.iter()
 					.any(|(code, _)| *code == SessionError::ProtocolViolation.to_code()),
 				"{version:?}: a truncated SETUP must close the session"
+			);
+		}
+	}
+
+	fn raw_session(
+		transport: ScriptedSession,
+		version: Version,
+		client: bool,
+		peer_setup: Option<AcceptedSetup<ScriptedSession>>,
+	) -> SessionStart<ScriptedSession> {
+		start(Config {
+			runtime: crate::time::Clock::sim(),
+			client,
+			session: transport,
+			setup_stream: None,
+			publish: None,
+			subscribe: None,
+			peer_hop: None,
+			version,
+			our_setup: Setup::default(),
+			peer_setup,
+			auth: crate::auth::Handle::new(version.has_auth()),
+			limits: Default::default(),
+		})
+		.unwrap()
+	}
+
+	#[moq_net_sim::test]
+	async fn server_setup_client_parameters_close_the_session() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			for body in [vec![1, 2, 0], vec![1, 3, 1, 0], vec![1, 3, 1, 1], vec![1, 3, 1, 3]] {
+				let mut script = vec![1, body.len() as u8];
+				script.extend(body);
+				let transport = ScriptedSession::new(Vec::new()).with_incoming_unis(vec![script]);
+				let log = transport.log.clone();
+				let mut started = raw_session(transport, version, true, None);
+				let _ = started.driver.poll(&kio::Waiter::noop());
+				assert!(
+					log.closes()
+						.iter()
+						.any(|(code, _)| *code == SessionError::ProtocolViolation.to_code()),
+					"{version}"
+				);
+			}
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn unknown_client_role_remains_bidirectional() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let mut transport = ScriptedSession::new(Vec::new()).with_incoming_unis(vec![vec![1, 4, 1, 3, 1, 3]]);
+			let setup = accept_setup(&mut transport, version).await.unwrap();
+			assert_eq!(setup.setup.role, None);
+			let log = transport.log.clone();
+			let mut started = raw_session(transport, version, false, Some(setup));
+			let _ = started.driver.poll(&kio::Waiter::noop());
+			assert!(log.closes().is_empty(), "{version}");
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn malformed_probe_reports_close_the_session() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let transport = if version.has_auth() {
+				let grant = super::super::AuthReply::Ok(super::super::AuthOk {
+					publish: Default::default(),
+					subscribe: Default::default(),
+					expires: None,
+				});
+				ScriptedSession::per_stream(vec![grant.encode_bytes(version).unwrap().to_vec(), vec![0]])
+			} else {
+				ScriptedSession::new(vec![0])
+			};
+			let log = transport.log.clone();
+			let peer_setup = AcceptedSetup {
+				setup: Setup {
+					probe: super::super::ProbeLevel::Report,
+					..Default::default()
+				},
+				early: Vec::new(),
+			};
+			let mut started = raw_session(transport, version, true, Some(peer_setup));
+			let _bandwidth = started.recv_bandwidth.take().unwrap();
+			let _ = started.driver.poll(&kio::Waiter::noop());
+			assert!(
+				log.closes()
+					.iter()
+					.any(|(code, _)| *code == SessionError::ProtocolViolation.to_code()),
+				"{version}"
+			);
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn malformed_group_headers_remain_per_stream() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let transport = ScriptedSession::new(Vec::new()).with_incoming_unis(vec![vec![0, 0]]);
+			let log = transport.log.clone();
+			let mut started = raw_session(transport, version, true, None);
+			let _ = started.driver.poll(&kio::Waiter::noop());
+			assert!(log.closes().is_empty(), "{version}");
+			assert!(!log.stops().is_empty(), "{version}: data stream was not refused");
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn clients_never_emit_a_goaway_redirect() {
+		for version in [Version::Lite04, Version::Lite05, Version::Lite06, Version::Lite07] {
+			let client = raw_session(ScriptedSession::new(Vec::new()), version, true, None);
+			assert!(
+				matches!(
+					client
+						.goaway
+						.producer()
+						.send(crate::goaway::Goaway::redirect("https://other.example/")),
+					Err(Error::ProtocolViolation)
+				),
+				"{version}"
+			);
+			let server = raw_session(ScriptedSession::new(Vec::new()), version, false, None);
+			assert!(
+				server
+					.goaway
+					.producer()
+					.send(crate::goaway::Goaway::redirect("https://other.example/"))
+					.is_ok(),
+				"{version}"
 			);
 		}
 	}
