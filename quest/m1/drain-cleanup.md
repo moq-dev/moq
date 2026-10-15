@@ -46,6 +46,29 @@ Recommendations:
 
 - Prefer one drain shared by the relay and the CLI over two copies that
   drift. Keep any new `moq_relay::shutdown` export as small as the CLI needs.
+- Own when the signal handlers are installed. The `moq` CLI now builds its
+  `Signals` at the top of `run_stages`, before anything serves (#5575). The
+  relay still installs them lazily, on `drain`'s first poll in `Relay::run`.
+  That poll comes after the io_uring and QUIC workers start serving and after
+  READY, so a SIGTERM in that window kills the relay with no GOAWAY. #5575
+  tried moving the relay's registration and backed out: each placement broke
+  another case, and these need to be solved together:
+  - Embedder handler leak: tokio never uninstalls a handler. Registering
+    before a step that can fail (the admissions check, `cluster.start()`,
+    `uring.serve`) leaves an embedder that recovers from the error ignoring
+    SIGINT and SIGTERM.
+  - io_uring worker startup: `uring.serve` both serves and can fail, since its
+    first worker accepts while later ones start. Handlers installed before it
+    leak on failure, and handlers installed after it race the first worker.
+  - Signals during startup: a signal queued before READY should skip READY
+    and drain. A synchronous probe before READY can miss one that the IO driver
+    has not processed yet (for example, while `uring.serve` blocks).
+  - Queued second request: if startup consumes a signal, or the embedder has
+    already fired the trigger, a further queued signal must still be the
+    second request and exit at once. `drain`'s first wait must not take it as
+    another first signal; bias it toward a drain that has already started.
+  - The CLI reports ready from many stage paths (`notify_ready`) and checks no
+    stop state, so a signal during its startup drains right after READY.
 - Bound the `end` delivery by the auth client's own request timeout. Add no
   drain-specific cap.
 - Tests on a paused clock for both binaries' drain paths. A session that
@@ -65,6 +88,5 @@ Wire: none.
 
 ## Related
 
-- [Session registration](/quest/m1/test-flakes-2/cli-drain-register.md) - the start of the same drain: a session the client sees established is one the drain waits for
 - [Handshake deadline covers admission](/quest/m1/handshake-admission-deadline.md) - bounds pending admissions, which the drain deadline must keep cutting
 - [Session outcomes](/quest/m1/session-outcomes.md) - counts how sessions end, which needs this end recorded

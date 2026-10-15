@@ -281,16 +281,15 @@ struct Shutdown {
 }
 
 /// Keep all stages and listener tasks alive while admitted sessions drain.
-async fn drain(shutdown: Shutdown) -> anyhow::Result<()> {
+async fn drain(shutdown: Shutdown, signals: &mut Signals) {
 	let deadline = tokio::time::Instant::now() + shutdown.observer.drain_timeout;
 	shutdown.trigger.start();
 	tracing::info!(window = ?shutdown.observer.drain_timeout, "shutdown requested; draining sessions (signal again to exit immediately)");
 	tokio::select! {
-		result = shutdown_signal() => result?,
+		() = signals.recv() => {},
 		() = shutdown.observer.activity().close() => {},
 		() = tokio::time::sleep_until(deadline) => {},
 	}
-	Ok(())
 }
 
 fn main() -> anyhow::Result<()> {
@@ -528,6 +527,10 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 	// platform capture stream is not Send, so their futures cannot be spawned.
 	let mut locals: Vec<Publish> = Vec::new();
 
+	// Before anything listens: a client can count its session established as soon
+	// as the listener is up, and a signal then must drain it, not kill the process.
+	let signals = Signals::new()?;
+
 	// The stage combinations were refused up front by `Invocation::validate`, before
 	// anything bound a port or dialed out.
 	let client = net.client(moq.client.clone())?;
@@ -573,11 +576,11 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 		}
 
 		if locals.is_empty() {
-			drive(tasks, shutdown).await
+			drive(tasks, signals, shutdown).await
 		} else {
 			let local = tokio::task::LocalSet::new();
 			supervise(&local, locals.into_iter().map(Publish::run), &mut tasks);
-			local.run_until(drive(tasks, shutdown)).await
+			local.run_until(drive(tasks, signals, shutdown)).await
 		}
 	}
 	.await;
@@ -842,20 +845,19 @@ async fn run_stdout(consumer: moq_net::origin::Consumer, name: String, args: Sub
 }
 
 /// Run until an endpoint ends, keeping all tasks alive while a signalled listener drains.
-async fn drive(mut tasks: JoinSet<anyhow::Result<()>>, shutdown: Option<Shutdown>) -> anyhow::Result<()> {
-	let signal = shutdown_signal();
-	tokio::pin!(signal);
+async fn drive(
+	mut tasks: JoinSet<anyhow::Result<()>>,
+	mut signals: Signals,
+	shutdown: Option<Shutdown>,
+) -> anyhow::Result<()> {
 	let result = loop {
 		tokio::select! {
 			biased;
-			result = &mut signal => {
-				break match result {
-					Ok(()) => match shutdown {
-						Some(shutdown) => drain(shutdown).await,
-						None => Ok(()),
-					},
-					Err(err) => Err(err),
-				};
+			() = signals.recv() => {
+				if let Some(shutdown) = shutdown {
+					drain(shutdown, &mut signals).await;
+				}
+				break Ok(());
 			}
 			result = tasks.join_next() => match result {
 				Some(Ok(result)) => break result,
@@ -869,21 +871,44 @@ async fn drive(mut tasks: JoinSet<anyhow::Result<()>>, shutdown: Option<Shutdown
 	result
 }
 
-/// Resolve on SIGINT or, on unix, SIGTERM (what process supervisors send on stop).
-async fn shutdown_signal() -> anyhow::Result<()> {
+/// SIGINT or, on unix, SIGTERM (what process supervisors send on stop), caught from
+/// construction on. Until a handler is installed the default action kills the
+/// process, so build this before anything can accept a session.
+struct Signals {
 	#[cfg(unix)]
-	{
-		let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-			.context("failed to listen for SIGTERM")?;
-		tokio::select! {
-			res = tokio::signal::ctrl_c() => res.context("failed to listen for SIGINT")?,
-			_ = term.recv() => {}
-		}
-		Ok(())
-	}
+	interrupt: tokio::signal::unix::Signal,
+	#[cfg(unix)]
+	terminate: tokio::signal::unix::Signal,
 	#[cfg(not(unix))]
-	{
-		tokio::signal::ctrl_c().await.context("failed to listen for SIGINT")
+	ctrl_c: tokio::signal::windows::CtrlC,
+}
+
+impl Signals {
+	fn new() -> anyhow::Result<Self> {
+		#[cfg(unix)]
+		{
+			use tokio::signal::unix::{SignalKind, signal};
+			Ok(Self {
+				interrupt: signal(SignalKind::interrupt()).context("failed to listen for SIGINT")?,
+				terminate: signal(SignalKind::terminate()).context("failed to listen for SIGTERM")?,
+			})
+		}
+		#[cfg(not(unix))]
+		{
+			let ctrl_c = tokio::signal::windows::ctrl_c().context("failed to listen for Ctrl-C")?;
+			Ok(Self { ctrl_c })
+		}
+	}
+
+	/// Resolve on the next signal, including one caught before this was polled.
+	async fn recv(&mut self) {
+		#[cfg(unix)]
+		tokio::select! {
+			_ = self.interrupt.recv() => {}
+			_ = self.terminate.recv() => {}
+		}
+		#[cfg(not(unix))]
+		self.ctrl_c.recv().await;
 	}
 }
 
@@ -924,34 +949,69 @@ mod tests {
 
 	type Pipeline = Pin<Box<dyn Future<Output = anyhow::Result<()>>>>;
 
+	/// Held by every test that builds [`Signals`]: a raised signal reaches each
+	/// listener in the process, and `cargo test` runs tests as threads of one.
+	static SIGNALS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 	#[tokio::test(start_paused = true)]
 	async fn drain_ends_when_the_last_admission_leaves() {
+		let _signals = SIGNALS.lock().await;
 		let (trigger, mut observer) = moq_relay::shutdown::Observer::new(std::time::Duration::from_secs(10));
 		let active = observer.activity().enter().unwrap();
-		let draining = tokio::spawn(drain(Shutdown {
+		let mut signals = Signals::new().unwrap();
+		let shutdown = Shutdown {
 			trigger,
 			observer: observer.clone(),
-		}));
+		};
+		let draining = tokio::spawn(async move { drain(shutdown, &mut signals).await });
 		observer.started().await;
 		assert!(!draining.is_finished());
 		drop(active);
-		draining.await.unwrap().unwrap();
+		draining.await.unwrap();
+	}
+
+	/// A signal sent before the driver first polls, such as right after a client
+	/// counted its session established, still drains that session. The default
+	/// action would otherwise kill the process with no GOAWAY.
+	#[cfg(unix)]
+	#[tokio::test(start_paused = true)]
+	async fn a_signal_before_the_driver_polls_drains() {
+		let _signals = SIGNALS.lock().await;
+		let (trigger, mut observer) = moq_relay::shutdown::Observer::new(std::time::Duration::from_secs(10));
+		let session = observer.activity().enter().unwrap();
+		let signals = Signals::new().unwrap();
+		// SAFETY: raise has no memory-safety preconditions.
+		assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0);
+		let mut tasks = JoinSet::new();
+		tasks.spawn(std::future::pending());
+		let shutdown = Shutdown {
+			trigger,
+			observer: observer.clone(),
+		};
+		let driving = tokio::spawn(drive(tasks, signals, Some(shutdown)));
+		observer.started().await;
+		assert!(!driving.is_finished(), "drain ended under an established session");
+		drop(session);
+		driving.await.unwrap().unwrap();
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn drain_bounds_a_pending_admission() {
+		let _signals = SIGNALS.lock().await;
 		let window = std::time::Duration::from_secs(10);
 		let (trigger, mut observer) = moq_relay::shutdown::Observer::new(window);
 		let _active = observer.activity().enter().unwrap();
-		let draining = tokio::spawn(drain(Shutdown {
+		let mut signals = Signals::new().unwrap();
+		let shutdown = Shutdown {
 			trigger,
 			observer: observer.clone(),
-		}));
+		};
+		let draining = tokio::spawn(async move { drain(shutdown, &mut signals).await });
 		observer.started().await;
 		tokio::time::advance(window / 2).await;
 		assert!(!draining.is_finished());
 		tokio::time::advance(window / 2).await;
-		draining.await.unwrap().unwrap();
+		draining.await.unwrap();
 	}
 
 	/// A local pipeline that dies takes the process with it, even while another one is
@@ -960,6 +1020,7 @@ mod tests {
 	/// with one broadcast silently gone.
 	#[tokio::test]
 	async fn a_panicking_pipeline_ends_the_process() {
+		let _signals = SIGNALS.lock().await;
 		let local = tokio::task::LocalSet::new();
 		let mut tasks = JoinSet::new();
 
@@ -969,20 +1030,27 @@ mod tests {
 		];
 		supervise(&local, pipelines, &mut tasks);
 
-		let err = local.run_until(drive(tasks, None)).await.unwrap_err();
+		let err = local
+			.run_until(drive(tasks, Signals::new().unwrap(), None))
+			.await
+			.unwrap_err();
 		assert!(err.to_string().contains("pipeline panicked"), "{err}");
 	}
 
 	/// The first to finish ends the process, which is how stdin EOF stops a run.
 	#[tokio::test]
 	async fn a_finished_pipeline_ends_the_process() {
+		let _signals = SIGNALS.lock().await;
 		let local = tokio::task::LocalSet::new();
 		let mut tasks = JoinSet::new();
 
 		let pipelines: Vec<Pipeline> = vec![Box::pin(async { Ok(()) }), Box::pin(std::future::pending())];
 		supervise(&local, pipelines, &mut tasks);
 
-		local.run_until(drive(tasks, None)).await.unwrap();
+		local
+			.run_until(drive(tasks, Signals::new().unwrap(), None))
+			.await
+			.unwrap();
 	}
 
 	/// A stream bind failure is part of initialization, so systemd must never see

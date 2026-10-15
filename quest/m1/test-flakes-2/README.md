@@ -41,7 +41,6 @@ Public API: none. Wire: none.
 - [uring teardown close](/quest/m1/test-flakes-2/uring-teardown-close.md) - moq-uring's published-close teardown test holds under load, fixed at its cause
 - [Auth serve signals](/quest/m1/test-flakes-2/auth-serve-signals.md) - moq-cli's auth serve signal tests hold under load
 - [Export exit tests](/quest/m1/test-flakes-2/export-failure-exit.md) - moq-cli's failed-export and interrupted-publisher exit tests hold under load
-- [Session registration](/quest/m1/test-flakes-2/cli-drain-register.md) - a session the client sees established is one the CLI's drain waits for, so a SIGTERM right after the handshake still sends GOAWAY
 - [noq client close](/quest/m1/test-flakes-2/noq-client-close.md) - moq-tokio's client close test orders its close after the server's accept instead of racing it
 - [BBR marking seed](/quest/m1/test-flakes-2/bbr-marking-seed.md) - the BBR marking test seeds its probe schedule, replays a failing seed, and its rare drop is fixed at the cause
 
