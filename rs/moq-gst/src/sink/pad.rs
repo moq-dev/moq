@@ -250,7 +250,7 @@ pub enum PushOutcome {
 pub struct Pad {
 	/// The requested pad gates the first catalog even before CAPS can name its rendition.
 	reserved: Option<moq_mux::catalog::Reserved>,
-	epoch: Option<std::sync::Arc<super::epoch::Epoch>>,
+	wall: Option<std::sync::Arc<super::wall::Wall>>,
 	track: Option<Sink>,
 	caps: Option<gst::Caps>,
 	/// Set once a producer build rejects this pad's caps or bitstream; further buffers are dropped and
@@ -271,7 +271,7 @@ impl Pad {
 	pub fn new() -> Self {
 		Self {
 			reserved: None,
-			epoch: None,
+			wall: None,
 			track: None,
 			caps: None,
 			failed: false,
@@ -283,8 +283,8 @@ impl Pad {
 	}
 
 	/// Fill a run's slot once, including a pad visible before its admission confirms.
-	pub(super) fn reserve(&mut self, catalog: &moq_mux::catalog::Producer, epoch: std::sync::Arc<super::epoch::Epoch>) {
-		self.epoch = Some(epoch);
+	pub(super) fn reserve(&mut self, catalog: &moq_mux::catalog::Producer, wall: std::sync::Arc<super::wall::Wall>) {
+		self.wall = Some(wall);
 		if self.reserved.is_none() && self.track.is_none() && !self.failed {
 			self.reserved = Some(catalog.reserve());
 		}
@@ -720,9 +720,9 @@ impl Pad {
 		}
 	}
 
-	/// Place the run before its first valid timestamp can reach an importer.
-	pub(super) fn place_epoch(&self, buffer: &gst::BufferRef, sample: super::epoch::Sample) -> Result<()> {
-		let Some(epoch) = &self.epoch else { return Ok(()) };
+	/// Place the run on the wall clock before its first valid timestamp can reach an importer.
+	pub(super) fn place_wall(&self, buffer: &gst::BufferRef, sample: super::wall::Sample) -> Result<()> {
+		let Some(wall) = &self.wall else { return Ok(()) };
 		if self.failed || self.track.is_none() {
 			return Ok(());
 		}
@@ -738,7 +738,7 @@ impl Pad {
 			self.frame_timestamp(buffer.pts())
 		};
 		if let Ok(micros) = timestamp {
-			epoch.place(buffer, Duration::from_micros(micros), sample)?;
+			wall.place(buffer, Duration::from_micros(micros), sample)?;
 		}
 		Ok(())
 	}

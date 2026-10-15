@@ -70,14 +70,14 @@ Each run from `READY` publishes under a fresh
 [publisher epoch](/concept/moq-lite#publisher-epochs), so on moq-lite 07 (opt-in)
 viewers switch to a restarted pipeline at once instead of stalling on the old
 one; reconnects within a run keep it. The first catalog waits for a timed buffer
-to fix the shared wall epoch and for every requested pad to negotiate its
+to place the shared wall clock and for every requested pad to negotiate its
 rendition, including any codec config carried in its first buffers. A linked pad
 that never negotiates holds back the whole catalog until
 it is released, reaches EOS, or fails; a flush or new stream after that EOS
 holds it back again. Opaque data pads are not listed. Later
 catalog updates do not wait for newly requested pads.
 
-All pads share one media timeline and UTC epoch. The first timed buffer can place
+All pads share one media timeline on one wall clock. The first timed buffer places
 it using UNIX or NTP reference timestamp metadata; other clock domains use the
 pipeline running time and local wall clock. Delayed buffers keep their media
 time. Pauses and flushes keep this mapping; starting a new run chooses a new one.

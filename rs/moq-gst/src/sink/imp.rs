@@ -63,7 +63,7 @@ struct State {
 	session: Session,
 	broadcast: moq_net::broadcast::Producer,
 	catalog: Option<moq_mux::catalog::Producer>,
-	epoch: std::sync::Arc<super::epoch::Epoch>,
+	wall: std::sync::Arc<super::wall::Wall>,
 	/// Whether this publication's single EOS message already went out. One per publication, not per
 	/// entry to PLAYING: a finished publication is terminal here, so there is nothing to announce twice.
 	eos_delivered: bool,
@@ -446,7 +446,7 @@ impl ElementImpl for MoqSink {
 			if let Some(state) = control.live.as_ref()
 				&& let Some(catalog) = state.catalog.as_ref()
 			{
-				pad.lifecycle().media.reserve(catalog, state.epoch.clone());
+				pad.lifecycle().media.reserve(catalog, state.wall.clone());
 			}
 			control.admissions.insert(pad.clone());
 		}
@@ -583,20 +583,20 @@ impl MoqSink {
 				gst::StateChangeError
 			})?;
 		let completion = session.completion();
-		let epoch = super::epoch::Epoch::new(&catalog);
+		let wall = super::wall::Wall::new(&catalog);
 		let updates = {
 			let mut control = self.control.lock().unwrap();
 			control.live = Some(State {
 				session,
 				broadcast,
 				catalog: Some(catalog),
-				epoch,
+				wall,
 				eos_delivered: false,
 			});
 			let pads = self.pads_locked(&control);
 			let state = control.live.as_ref().unwrap();
 			let catalog = state.catalog.as_ref().unwrap();
-			let epoch = &state.epoch;
+			let wall = &state.wall;
 			pads.into_iter()
 				.map(|pad| {
 					let changes = {
@@ -604,7 +604,7 @@ impl MoqSink {
 						let changes = lifecycle.reset();
 						lifecycle.completion = Some(completion.clone());
 						if !lifecycle.releasing {
-							lifecycle.media.reserve(catalog, epoch.clone());
+							lifecycle.media.reserve(catalog, wall.clone());
 						}
 						changes
 					};
@@ -661,7 +661,7 @@ impl MoqSink {
 			],
 		);
 		let _rt = RUNTIME.enter();
-		state.epoch.finish();
+		state.wall.finish();
 		if let Some(mut catalog) = state.catalog.take()
 			&& let Err(err) = catalog.finish().context("finalize catalog")
 			&& failure.is_none()
@@ -695,7 +695,7 @@ impl MoqSink {
 				.then(|| self.obj().start_time())
 				.flatten()
 		});
-		let sample = super::epoch::Sample {
+		let sample = super::wall::Sample {
 			running: reference_running_time,
 			wall: std::time::SystemTime::now(),
 		};
@@ -725,7 +725,7 @@ impl MoqSink {
 			if lifecycle.media.is_failed() {
 				return Ok(gst::FlowSuccess::Ok);
 			}
-			let outcome = lifecycle.media.place_epoch(&buffer, sample).and_then(|()| {
+			let outcome = lifecycle.media.place_wall(&buffer, sample).and_then(|()| {
 				lifecycle
 					.media
 					.push_buffer(data, pts, duration, current_running_time, Instant::now())
@@ -888,7 +888,7 @@ impl MoqSink {
 					if !lifecycle.releasing {
 						lifecycle.ended = false;
 						if let Some(catalog) = &state.catalog {
-							lifecycle.media.reserve(catalog, state.epoch.clone());
+							lifecycle.media.reserve(catalog, state.wall.clone());
 						}
 					}
 				}
@@ -914,7 +914,7 @@ impl MoqSink {
 									lifecycle.media.flush();
 									let catalog = state.catalog.as_ref();
 									if let Some(catalog) = catalog {
-										lifecycle.media.reserve(catalog, state.epoch.clone());
+										lifecycle.media.reserve(catalog, state.wall.clone());
 									}
 									let caps = lifecycle.media.resumable_caps();
 									caps.zip(catalog).and_then(|(caps, catalog)| {
@@ -1031,7 +1031,7 @@ impl MoqSink {
 				updates.push(PadUpdate { pad, changes });
 			}
 		}
-		state.epoch.finish();
+		state.wall.finish();
 		if let Some(mut catalog) = state.catalog.take()
 			&& let Err(err) = catalog.finish().context("finalize catalog")
 			&& failure.is_none()
@@ -1153,7 +1153,7 @@ fn observe_caps(
 	lifecycle: &mut PadLifecycle,
 	caps: &gst::Caps,
 ) -> (Option<Notifications>, bool) {
-	lifecycle.media.reserve(catalog, state.epoch.clone());
+	lifecycle.media.reserve(catalog, state.wall.clone());
 	let requested = lifecycle.requested().map(str::to_owned);
 	let mut options = ProducerOptions::new(caps)
 		.with_container(lifecycle.container().into())
@@ -1207,11 +1207,11 @@ mod tests {
 				.live
 				.as_ref()
 				.unwrap()
-				.epoch
+				.wall
 				.place(
 					&gst::Buffer::new(),
 					Duration::ZERO,
-					super::super::epoch::Sample {
+					super::super::wall::Sample {
 						running: Some(gst::ClockTime::ZERO),
 						wall: std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_735_689_600),
 					},
@@ -1281,12 +1281,12 @@ mod tests {
 	}
 
 	#[test]
-	fn reference_metadata_places_the_broadcast_wall_epoch() {
+	fn reference_metadata_places_the_broadcast_wall_clock() {
 		let run = CatalogRun::new();
 		let pad = run.pad("audio");
 		let mut catalog = run.start_unplaced();
 		assert!(negotiate(&pad, &opus_caps()));
-		assert!(next_catalog(&mut catalog).is_pending(), "CAPS must wait for the epoch");
+		assert!(next_catalog(&mut catalog).is_pending(), "CAPS must wait for the wall clock");
 		assert!(pad.send_event(gst::event::Segment::new(&gst::FormattedSegment::<gst::ClockTime>::new())));
 		let mut buffer = gst::Buffer::from_slice([0xf8, 0xff, 0xfe]);
 		let buffer_mut = buffer.get_mut().unwrap();
@@ -1308,17 +1308,17 @@ mod tests {
 	}
 
 	#[test]
-	fn pads_keep_one_wall_epoch_and_verbatim_running_times_each_run() {
+	fn pads_keep_one_wall_clock_and_verbatim_running_times_each_run() {
 		let run = CatalogRun::new();
 		let video = run.pad("video");
 		let audio = run.pad("audio");
-		for epoch in [1_735_689_600u64, 1_735_689_660] {
+		for zero in [1_735_689_600u64, 1_735_689_660] {
 			let _catalog = run.start_unplaced();
 			assert!(negotiate(&video, &h264_caps()));
 			assert!(negotiate(&audio, &opus_caps()));
 			for (pad, origin, pts, payload, reference) in [
-				(&video, 10, 13, super::super::pad::h264_keyframe_au(), epoch + 3),
-				(&audio, 100, 105, Bytes::from_static(&[0xf8, 0xff, 0xfe]), epoch + 500),
+				(&video, 10, 13, super::super::pad::h264_keyframe_au(), zero + 3),
+				(&audio, 100, 105, Bytes::from_static(&[0xf8, 0xff, 0xfe]), zero + 500),
 			] {
 				let mut segment = gst::FormattedSegment::<gst::ClockTime>::new();
 				segment.set_start(gst::ClockTime::from_seconds(origin));
@@ -1344,7 +1344,7 @@ mod tests {
 			};
 			assert_eq!(
 				clock.wall.as_micros(),
-				((epoch - hang::catalog::MOQ_EPOCH_UNIX_MILLIS / 1000) * 1_000_000) as u128
+				((zero - hang::catalog::MOQ_EPOCH_UNIX_MILLIS / 1000) * 1_000_000) as u128
 			);
 			for (name, kind, expected) in [
 				("video", moq_mux::container::Kind::Video, 3),

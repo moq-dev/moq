@@ -1,4 +1,4 @@
-//! One wall mapping for every pad in a publication.
+//! The wall-clock time of running-time zero, shared by every pad in a publication.
 
 use std::sync::{
 	Arc, Mutex,
@@ -8,20 +8,22 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 
+/// The pipeline running time and local wall time, read together.
 #[derive(Clone, Copy)]
 pub(super) struct Sample {
 	pub running: Option<gst::ClockTime>,
 	pub wall: SystemTime,
 }
 
-pub(super) struct Epoch {
+/// Places running-time zero on the wall clock once per run, holding the first catalog until then.
+pub(super) struct Wall {
 	timebase: moq_mux::catalog::Timebase,
 	// CAPS can resolve every rendition before the first buffer supplies its reference timestamp.
 	pending: Mutex<Option<moq_mux::catalog::Reserved>>,
 	placed: AtomicBool,
 }
 
-impl Epoch {
+impl Wall {
 	pub(super) fn new(catalog: &moq_mux::catalog::Producer) -> Arc<Self> {
 		let timebase = catalog.timebase();
 		Arc::new(Self {
@@ -39,7 +41,7 @@ impl Epoch {
 		if pending.is_none() {
 			return Ok(());
 		}
-		let wall = wall_epoch(buffer, pts, sample)?;
+		let wall = wall_zero(buffer, pts, sample)?;
 		self.timebase.place(hang::container::Timestamp::from_micros(0)?, wall)?;
 		self.placed.store(true, Ordering::Release);
 		pending.take();
@@ -52,7 +54,7 @@ impl Epoch {
 	}
 }
 
-fn wall_epoch(buffer: &gst::BufferRef, pts: Duration, sample: Sample) -> Result<SystemTime> {
+fn wall_zero(buffer: &gst::BufferRef, pts: Duration, sample: Sample) -> Result<SystemTime> {
 	for meta in buffer.iter_meta::<gst::ReferenceTimestampMeta>() {
 		let Some(reference) = meta.reference().structure(0) else {
 			continue;
@@ -89,7 +91,7 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn delayed_buffers_and_unknown_domains_use_the_pipeline_epoch() {
+	fn delayed_buffers_and_unknown_domains_use_the_pipeline_clock() {
 		gst::init().unwrap();
 		let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_735_689_620);
 		let mut buffer = gst::Buffer::new();
@@ -101,7 +103,7 @@ mod tests {
 		);
 		for pts in [0, 3_000_000, 19_000_000] {
 			assert_eq!(
-				wall_epoch(
+				wall_zero(
 					&buffer,
 					Duration::from_micros(pts),
 					Sample {
@@ -114,7 +116,7 @@ mod tests {
 			);
 		}
 		assert!(
-			wall_epoch(
+			wall_zero(
 				&buffer,
 				Duration::ZERO,
 				Sample {
@@ -127,7 +129,7 @@ mod tests {
 	}
 
 	#[test]
-	fn unix_and_ntp_references_place_the_same_epoch() {
+	fn unix_and_ntp_references_place_the_same_wall_time() {
 		gst::init().unwrap();
 		for (domain, seconds) in [("timestamp/x-unix", 1_735_689_603), ("timestamp/x-ntp", 3_944_678_403)] {
 			let mut buffer = gst::Buffer::new();
@@ -138,7 +140,7 @@ mod tests {
 				None,
 			);
 			assert_eq!(
-				wall_epoch(
+				wall_zero(
 					&buffer,
 					Duration::from_secs(3),
 					Sample {
