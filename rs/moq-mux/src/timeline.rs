@@ -403,12 +403,16 @@ impl Producer {
 				actual: record.sequence,
 			});
 		}
-		self.sink.push(record).map_err(json)
+		self.sink
+			.push(moq_net::Timed::from(record).at(moq_net::Timestamp::now()))
+			.map_err(json)
 	}
 
 	/// Remove up to `count` oldest records from the window.
 	pub fn pop(&mut self, count: u64) -> crate::Result<()> {
-		self.sink.pop(count).map_err(json)
+		self.sink
+			.pop(moq_net::Timed::from(count).at(moq_net::Timestamp::now()))
+			.map_err(json)
 	}
 
 	/// Close the track's open group, so every push and pop so far sits in a complete group.

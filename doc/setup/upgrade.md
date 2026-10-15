@@ -242,10 +242,18 @@ These land with the next breaking release, not the 2026-09-23 train.
   `web.https.cert`, `key`, and `root` need `web.https.listen`. `moq` without a
   listener refuses `--listen-*` and `--auth-*` flags. Each used to be ignored;
   drop it, or add the listener it configures.
-- **moq-mux data producers take a broadcast-clock `Timestamp`.** `json` and
-  `binary` `Snapshot::update` and `Stream::append` take `Timed<_, Timestamp>`
-  instead of `Timed<_, Instant>`, and publish it as given. Convert a capture
-  `Instant` with `.at(catalog.clock().capture(instant)?)`. A timestamp ahead
+- **Data publishes preserve optional timestamps.** `moq_net::Timed<P>` drops
+  its clock type parameter. JSON and flate snapshot/stream producers and JSON
+  window `push` / `pop` publish `at: None` untimed, so their track must also be
+  untimed. Pass a timestamp explicitly on timed tracks. Snapshot `modify(at)`
+  and `mutate(at, f)` carry the caller's optional time through the edit guard.
+  moq-mux data timestamps use the broadcast clock; convert a capture `Instant`
+  with `.at(catalog.clock().capture(instant)?)`. FFI data operations take an
+  optional timestamp in microseconds, and raw track info's null timescale now
+  means untimed on publish as well as receive. Python/Swift raw writes no
+  longer default to zero. Whole-frame media writes now require caller time;
+  container imports keep their existing timeline handling. `media.CatalogProducer.now()` samples and fixes the
+  broadcast clock for explicit local-event stamps. A supplied timestamp ahead
   of now is published rather than refused.
 - **moq-mux importers publish the catalog at their first frame.** The fMP4,
   MKV, and MPEG-TS importers used to publish it at their init segment (`moov`,

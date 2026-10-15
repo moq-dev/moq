@@ -1876,6 +1876,11 @@ impl Producer {
 		&self.broadcast
 	}
 
+	/// The properties this track was created with.
+	pub fn info(&self) -> &Info {
+		&self.info
+	}
+
 	/// Create a new group with the given sequence number.
 	pub fn create_group(&self, group: group::Info) -> Result<group::Producer> {
 		self.insert(group, false)
