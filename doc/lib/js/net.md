@@ -46,7 +46,7 @@ broadcast.announce();
 - **Subscriber staleness is `maxDelay`.** It counts from a group's successor, by media time and by wall clock, whichever reaches it first. Passing the old `maxAge` key throws a `TypeError` naming `maxDelay`. Publisher retention is the separate `Track.Info.maxAge`.
 - **Hidden paths** stay out of discovery unless the announce request opts in. See [hidden broadcasts](/concept/moq-lite#hidden-broadcasts).
 - **Authorization is in band.** On moq-lite 07 (offered only when `moq-lite-07-wip` is listed in `webtransport.protocols`; the WebSocket fallback cannot offer it) and on moq-transport draft-17+ with the [MoQ Auth extension](/draft/moq-auth), `auth.grant` watches what the relay lets this side publish and subscribe to, and `auth.add(token)` presents another token without reconnecting. Publishing outside the grant closes the connection with `SessionCode.Unauthorized`, naming the path. On moq-lite, a subscription the grant stops covering resets with `StreamCode.Unauthorized` and the session stays up.
-- **A graceful close waits.** `await connection.close()` withdraws announcements and gives finished tracks up to one second. `abort()` ends immediately.
+- **A graceful close waits.** `await connection.close()` withdraws announcements and drains for up to one second. Application delivery requires explicit `moq-lite-07-wip`; older Lite versions wait only for transport ACKs. IETF media streams are not drained. `abort()` ends immediately.
 
 Examples:
 [`js/net/examples/`](https://github.com/moq-dev/moq/tree/main/js/net/examples).

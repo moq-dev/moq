@@ -208,9 +208,8 @@ impl Subscriber {
 		// broadcast (the catalog `broadcast` field) through the same origin.
 		let broadcast = origin.request_broadcast(path, None).await?;
 		let source = moq_mux::Source::new(origin.clone(), broadcast);
-		let export = ts::Export::with_ts(source, moq_mux::catalog::CatalogFormat::Hang)
-			.await?
-			.with_delay(options.latency);
+		let catalog = source.catalog::<ts::Ext>(moq_mux::catalog::CatalogFormat::Hang).await?;
+		let export = ts::Export::new(source, catalog).with_delay(options.latency);
 		let follower = ts::Follower::new(export)?
 			.with_linger(options.linger)
 			.with_stitch(options.stitch);

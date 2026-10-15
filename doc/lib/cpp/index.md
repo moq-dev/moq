@@ -191,6 +191,11 @@ Obtain a dynamic track request’s `demand()` before accepting it to watch subsc
 
 ## Shutdown
 
+`session->shutdown().get()` drains for up to one second and reports any error.
+Application delivery requires explicitly selecting `moq-lite-07-wip` on both
+peers; older Lite versions (including default lite-06) and IETF wait only for
+transport ACKs. Finish or abort live tracks first.
+
 `moq::shutdown()` stops the `moq-ffi` runtime workers, then the executor.
 Pending calls resolve `Cancelled`, and every object stays safe to drop. Call
 it once before a plugin or engine module unloads, from a thread that is not

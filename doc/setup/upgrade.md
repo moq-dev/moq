@@ -81,6 +81,11 @@ These land with the next breaking release, not the 2026-09-23 train.
   the same two flags. In Rust, moq-mux's `ts::Export::resume` is
   `ts::Export::follow`, `Source::returned` is gone, and `ts::Follower` follows a
   path's announcements the way both exports do.
+  `ts::Export::new(source, catalog)` now takes a catalog stream, like the other
+  container exporters. Subscribe with `source.catalog::<ts::Ext>(format).await?`
+  to retain MPEG-TS metadata, or use `()` for media only; select renditions on the
+  stream before passing it in. `follow(broadcast, catalog)` also takes the replacement
+  stream. Both methods are synchronous; `with_ts` and `with_catalog_format` are removed.
 - **moq-mux's `Source` is built from the resolved catalog broadcast.**
   `Source::new(origin, path)` is `Source::new(origin, broadcast)`: resolve the
   broadcast first (`origin.request_broadcast(path, None)`), and its path is

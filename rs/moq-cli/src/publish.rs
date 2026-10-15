@@ -65,10 +65,11 @@ pub struct CaptureArgs {
 	#[usage(long, group = "video-source", alias = "screen")]
 	pub display: Option<Option<String>>,
 
-	/// Capture a single window, by the id `moq devices` reports. Supported on
-	/// macOS, Windows, and X11.
+	/// Capture a single window, by the id `moq devices` reports on macOS,
+	/// Windows, or X11. Bare `--window` opens the Linux system portal picker
+	/// (requires the `pipewire` feature); no window id is needed.
 	#[usage(long, group = "video-source")]
-	pub window: Option<String>,
+	pub window: Option<Option<String>>,
 
 	/// Capture every window of an application, by the bundle id `moq devices`
 	/// reports. Windows opened later are included. macOS only.
@@ -569,23 +570,36 @@ impl CaptureArgs {
 	/// The video source named by the flags, defaulting to the default camera.
 	/// The `video-source` arg group makes these mutually exclusive, so the order
 	/// here only decides the default.
-	fn video_source(&self) -> moq_video::capture::Source {
+	fn video_source(&self) -> anyhow::Result<moq_video::capture::Source> {
 		use moq_video::capture::Source;
 
-		if let Some(id) = &self.window {
-			Source::Window(id.clone())
+		Ok(if let Some(id) = &self.window {
+			match id {
+				Some(id) => Source::Window(id.clone()),
+				None => {
+					#[cfg(all(target_os = "linux", feature = "pipewire"))]
+					{
+						use moq_video::capture::portal::{Kind, Selection};
+						Source::Portal(Selection::new(Kind::Window))
+					}
+					#[cfg(not(all(target_os = "linux", feature = "pipewire")))]
+					anyhow::bail!(
+						"bare --window requires Linux with the pipewire feature; use --window <ID> from `moq devices`"
+					);
+				}
+			}
 		} else if let Some(id) = &self.app {
 			Source::App(id.clone())
 		} else if let Some(index) = &self.display {
 			Source::Display(index.clone())
 		} else {
 			Source::Camera(self.camera.clone().flatten())
-		}
+		})
 	}
 
 	fn video_config(&self) -> anyhow::Result<moq_video::capture::Config> {
 		let mut config = moq_video::capture::Config::default();
-		config.source = self.video_source();
+		config.source = self.video_source()?;
 		config.width = self.width;
 		config.height = self.height;
 		config.framerate = self
@@ -656,6 +670,67 @@ pub(crate) mod tests {
 
 	use super::*;
 
+	#[cfg(feature = "capture")]
+	fn capture_args(flags: &[&str]) -> CaptureArgs {
+		let mut argv = vec!["moq", "--connect", "http://localhost", "import", "capture"];
+		argv.extend_from_slice(flags);
+		let cli = crate::args::Invocation::try_parse_from(argv).unwrap();
+		let crate::args::Command::Import(import) = cli.stages.into_iter().next().unwrap() else {
+			panic!("expected import");
+		};
+		let crate::args::ImportSource::Capture(args) = import.source else {
+			panic!("expected capture");
+		};
+		args
+	}
+
+	#[cfg(feature = "capture")]
+	#[test]
+	fn capture_window_picker_accepts_following_flags() {
+		let args = capture_args(&["--window", "--no-audio"]);
+		assert!(args.no_audio);
+		assert_eq!(args.window, Some(None));
+		assert_eq!(capture_args(&["--window"]).window, Some(None));
+	}
+
+	#[cfg(feature = "capture")]
+	#[test]
+	fn capture_window_id_preserves_native_selection() {
+		for id in ["39193", "x11:0x400001"] {
+			let config = capture_args(&["--window", id, "--no-audio"]).video_config().unwrap();
+			assert!(matches!(config.source, moq_video::capture::Source::Window(value) if value == id));
+		}
+	}
+
+	#[cfg(feature = "capture")]
+	#[test]
+	fn capture_window_picker_conflicts_with_other_sources() {
+		for flag in ["--camera", "--display", "--app"] {
+			assert!(
+				crate::args::Invocation::try_parse_from(["moq", "import", "capture", "--window", flag, "other",])
+					.is_err()
+			);
+		}
+	}
+
+	#[cfg(all(feature = "capture", target_os = "linux", feature = "pipewire"))]
+	#[test]
+	fn capture_window_picker_uses_portal() {
+		let config = capture_args(&["--window", "--no-audio"]).video_config().unwrap();
+		assert!(matches!(config.source, moq_video::capture::Source::Portal(_)));
+	}
+
+	#[cfg(all(feature = "capture", not(all(target_os = "linux", feature = "pipewire"))))]
+	#[test]
+	fn capture_window_picker_refuses_unsupported_builds() {
+		let error = capture_args(&["--window", "--no-audio"]).video_config().unwrap_err();
+		assert!(
+			error
+				.to_string()
+				.contains("bare --window requires Linux with the pipewire feature")
+		);
+	}
+
 	/// Real H.264 + AAC TS, reused to give the manufactured input a video clock
 	/// (section-framed verbatim export requires one) and decodable media tracks.
 	const BBB: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/bbb.ts");
@@ -675,10 +750,18 @@ pub(crate) mod tests {
 	const VERBATIM_PES_PID: u16 = 0x104;
 	const VERBATIM_PES_STREAM_ID: u8 = 0xC0;
 
+	async fn open_export(
+		source: moq_mux::Source,
+		format: CatalogFormat,
+	) -> moq_mux::Result<Export<moq_mux::catalog::Consumer<tscat::Ext>>> {
+		let catalog = source.catalog::<tscat::Ext>(format).await?;
+		Ok(Export::new(source, catalog))
+	}
+
 	/// Drain an exporter, concatenating every frame's payload until output stops. The
 	/// producers stay alive (retained tracks), so the stream never hard-ends; pull until a
 	/// `next()` blocks, surfaced here as a timeout once the buffered frames are gone.
-	async fn drain(mut exporter: Export<tscat::Ext>) -> Vec<u8> {
+	async fn drain(mut exporter: Export<moq_mux::catalog::Consumer<tscat::Ext>>) -> Vec<u8> {
 		let mut out = Vec::new();
 		// Past the export's release delay and the send-ahead window behind it, so the first
 		// frame goes out before it ends.
@@ -780,7 +863,7 @@ pub(crate) mod tests {
 		// `catalog`, the producers, and `import` stay alive: the exporter subscribes to
 		// the retained tracks.
 		drain(
-			Export::with_ts(resolved(&origin, "cli").await, CatalogFormat::Hang)
+			open_export(resolved(&origin, "cli").await, CatalogFormat::Hang)
 				.await
 				.unwrap()
 				.with_delay(RECORDING_MAX_AGE),
@@ -812,7 +895,7 @@ pub(crate) mod tests {
 	}
 
 	/// Full CLI round-trip: a TS feed with undecoded streams goes through `Publish`
-	/// (which selects the `mpegts` catalog) and the subscribe-side `Export::with_ts`,
+	/// (which selects the `mpegts` catalog) and the subscribe-side catalog stream,
 	/// and the SCTE-35 section and the verbatim PES survive with their PIDs, framing,
 	/// PES stream_id, and byte-exact payloads.
 	async fn ts_verbatim_round_trip(format: CatalogFormat) {
@@ -835,10 +918,10 @@ pub(crate) mod tests {
 		decoder.decode_chunk(&input).unwrap();
 		decoder.finish().unwrap();
 
-		// Subscribe side: the same `with_ts` call `run_ts` makes, re-emitting the
+		// Subscribe side: the same catalog stream `run_ts` selects, re-emitting the
 		// ancillary streams verbatim.
 		let output = drain(
-			Export::with_ts(resolved(&origin, "cli").await, format)
+			open_export(resolved(&origin, "cli").await, format)
 				.await
 				.unwrap()
 				.with_delay(RECORDING_MAX_AGE),

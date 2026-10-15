@@ -189,7 +189,11 @@ final class Moq {
   /// the room back.
   Bandwidth bandwidth() => session.bandwidth();
 
-  /// Gracefully close the session and stop the client.
+  /// Drain within one second, then stop the client.
+  ///
+  /// Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older
+  /// Lite versions, including the default lite-06, wait only for transport ACKs.
+  /// IETF also waits for transport ACKs.
   Future<void> close() async {
     try {
       await session.shutdown();
