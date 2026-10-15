@@ -16,7 +16,7 @@ cd "$(git rev-parse --show-toplevel)"
 
 # Print `ALL`, nothing (no crate affected), or cargo package ids.
 select_packages() {
-    if [[ "$action" == uring && -f "$list" ]] && grep -qE '^(justfile|flake\.(nix|lock)|sh/changed\.sh|sh/rs/uring-kernel\.sh|\.github/workflows/uring\.yml|\.cargo/.*|\.github/actions/.*)$' "$list"; then
+    if [[ "$action" == uring && -f "$list" ]] && grep -qE '^(justfile|flake\.(nix|lock)|sh/changed\.sh|\.github/workflows/uring\.yml|\.cargo/.*|\.github/actions/.*)$' "$list"; then
         echo ALL
         return
     fi
