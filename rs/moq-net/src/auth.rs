@@ -1688,11 +1688,19 @@ mod tests {
 			value: b"jwt".to_vec(),
 		};
 		let _verdict = handle.verify_request(token, Some(slot.clone()));
-		assert_eq!(std::sync::Arc::strong_count(&slot), 2, "queued, the token holds the slot");
+		assert_eq!(
+			std::sync::Arc::strong_count(&slot),
+			2,
+			"queued, the token holds the slot"
+		);
 		let Poll::Ready(Some(request)) = requests.poll_next(&kio::Waiter::noop()) else {
 			panic!("request token missing")
 		};
-		assert_eq!(std::sync::Arc::strong_count(&slot), 2, "taken, the token still holds the slot");
+		assert_eq!(
+			std::sync::Arc::strong_count(&slot),
+			2,
+			"taken, the token still holds the slot"
+		);
 		let _issued = request.accept(Grant::all());
 		assert_eq!(std::sync::Arc::strong_count(&slot), 1, "answered, the slot is released");
 	}
