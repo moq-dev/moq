@@ -45,7 +45,7 @@ func BenchmarkPublisher(b *testing.B) {
 						b.Fatal(err)
 					}
 					b.Cleanup(func() { _ = broadcast.Close() })
-					tracks[p], err = broadcast.PublishTrack("payload", nil)
+					tracks[p], err = broadcast.PublishTrack("payload", timedInfo())
 					if err != nil {
 						b.Fatal(err)
 					}

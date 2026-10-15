@@ -94,7 +94,7 @@ const _: () = assert!(moq_net::group::MAX_CACHE_BYTES <= crate::DEFAULT_MAX_FRAM
 
 impl Inner {
 	fn append(&mut self, payload: Timed<Bytes>) -> Result<usize> {
-		let timestamp = payload.at.unwrap_or_else(moq_net::Timestamp::now);
+		let timestamp = payload.at;
 		let payload = payload.value;
 
 		// A closed track refuses every append, so say so before the budget: `GroupTooLarge` promises

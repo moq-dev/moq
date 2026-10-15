@@ -1024,7 +1024,9 @@ mod tests {
 		fn publish(&mut self, path: &str, bytes: u64) {
 			let entry = self.frame.entry(path.to_string()).or_default();
 			entry.bytes += bytes;
-			self.traffic.update(&self.frame).expect("publish");
+			self.traffic
+				.update(moq_net::Timed::from(&self.frame).at(moq_net::Timestamp::now()))
+				.expect("publish");
 		}
 
 		/// Fail the node's reader: append a frame the snapshot decoder can't
@@ -1598,7 +1600,10 @@ mod tests {
 		published.subscriptions_ended = 1;
 		published.bytes = 100;
 		node_a.frame.insert("acme/room".to_string(), published);
-		node_a.traffic.update(&node_a.frame).expect("publish");
+		node_a
+			.traffic
+			.update(moq_net::Timed::from(&node_a.frame).at(moq_net::Timestamp::now()))
+			.expect("publish");
 
 		let agg = Consumer::new(origin.consume(), Config::new().with_depth(1));
 		let mut traffic = agg.traffic(&Tier::default(), Role::Publisher);
@@ -1770,7 +1775,9 @@ mod tests {
 			let mut totals = Totals::default();
 			totals.publisher.bytes = bytes;
 			self.totals
-				.update(&TotalsFrame::from([(String::new(), totals)]))
+				.update(
+					moq_net::Timed::from(&TotalsFrame::from([(String::new(), totals)])).at(moq_net::Timestamp::now()),
+				)
 				.expect("publish");
 		}
 	}

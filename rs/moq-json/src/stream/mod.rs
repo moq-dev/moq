@@ -58,15 +58,47 @@ mod test {
 	use super::*;
 	use crate::Compression;
 
+	#[test]
+	fn a_timed_track_refuses_a_bare_publish() {
+		let (mut producer, _) = producer_on(Config::default(), timed());
+		assert!(matches!(
+			producer.append(&json!({ "n": 1 })),
+			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
+		));
+	}
+
+	#[test]
+	fn a_bare_publish_stays_untimed() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("untimed", moq_net::track::Info::default())
+			.unwrap();
+		let mut groups = track.subscribe(None);
+		let mut producer = Producer::new(track, Config::default());
+		producer.append(&json!({ "n": 1 })).unwrap();
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
+			panic!("expected an untimed group");
+		};
+		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+			panic!("expected an untimed frame");
+		};
+		assert_eq!(frame.timestamp, None);
+	}
+
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {
 		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 	}
 
 	fn producer(config: Config) -> (Producer<Value>, moq_net::track::Subscriber) {
+		producer_on(config, moq_net::track::Info::default())
+	}
+
+	fn producer_on(config: Config, info: moq_net::track::Info) -> (Producer<Value>, moq_net::track::Subscriber) {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", timed())
+			.create_track("test", info)
 			.unwrap();
 		let consumer = track.subscribe(None);
 		(Producer::new(track, config), consumer)
@@ -133,7 +165,7 @@ mod test {
 	/// Each record keeps its own capture time, and the returned size is the encoded frame.
 	#[test]
 	fn a_stamped_append_writes_its_capture_time() {
-		let (mut producer, _track) = producer(compressed());
+		let (mut producer, _track) = producer_on(compressed(), timed());
 		let mut groups = producer.consume();
 		let captured = moq_net::Timestamp::from_millis(1_234).unwrap();
 		let record = json!({ "n": 1 });

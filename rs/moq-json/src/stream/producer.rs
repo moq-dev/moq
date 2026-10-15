@@ -126,7 +126,7 @@ impl<T: Serialize> Inner<T> {
 		let opened = track.open();
 		let published = opened.is_ok();
 		let result = match opened {
-			Ok(()) => track.write(payload.at.unwrap_or_else(moq_net::Timestamp::now), record.payload()),
+			Ok(()) => track.write(payload.at, record.payload()),
 			Err(err) => Err(err),
 		};
 
@@ -182,7 +182,7 @@ impl Track {
 	/// Append one encoded record to the log's group at `timestamp`.
 	fn write(
 		&mut self,
-		timestamp: moq_net::Timestamp,
+		timestamp: Option<moq_net::Timestamp>,
 		payload: &bytes::Bytes,
 	) -> std::result::Result<(), moq_net::Error> {
 		let group = self.group.as_mut().expect("a group is open");

@@ -67,7 +67,7 @@ struct Inner {
 
 impl Inner {
 	fn update(&mut self, payload: Timed<Bytes>) -> Result<usize> {
-		let timestamp = payload.at.unwrap_or_else(moq_net::Timestamp::now);
+		let timestamp = payload.at;
 		let payload = payload.value;
 
 		// One frame per group, so the window spans a single value and starts cold every time.

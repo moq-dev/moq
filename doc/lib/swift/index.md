@@ -17,6 +17,12 @@ slices for iOS 16+, the iOS Simulator, and macOS 12.3+.
 `.named(name:)` or `.requested(request)` target. `Media.CatalogProducer(broadcast:)`
 updates catalog properties and sections without keeping the broadcast open.
 Its writes fail after closing or releasing the broadcast.
+`Flate.SnapshotProducer` / `StreamProducer` publish opaque bytes with an optional `timestampUs`.
+A missing data timestamp stays untimed; the library never substitutes zero or now.
+Raw tracks with a `nil` timescale are untimed on both publish and receive.
+Whole-frame media writes require caller time; container imports keep their own timeline handling.
+Timed raw/data tracks require caller-supplied timestamps. Use `Media.CatalogProducer.now()` to stamp a locally
+created event on the broadcast clock; reading it fixes that clock for later media producers.
 For arrival-order reads, decode each group from `TrackConsumer.recvGroup()` with
 `Media.GroupConsumer(group:container:)`; frames carry container media time as they land.
 

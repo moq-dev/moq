@@ -66,15 +66,71 @@ mod test {
 
 	use super::*;
 
+	#[test]
+	fn pushes_and_pops_keep_the_callers_timestamps() {
+		let (mut producer, mut groups) = producer_on(ProducerConfig::default(), timed());
+		let first = moq_net::Timestamp::from_millis(100).unwrap();
+		let second = moq_net::Timestamp::from_millis(200).unwrap();
+		producer
+			.push(moq_net::Timed::from(&json!({ "n": 1 })).at(first))
+			.unwrap();
+		producer.pop(moq_net::Timed::from(1u64).at(second)).unwrap();
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
+			panic!("expected the window group");
+		};
+		for at in [first, second] {
+			let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+				panic!("expected the timestamped window edit");
+			};
+			assert_eq!(frame.timestamp, Some(at));
+		}
+	}
+
+	#[test]
+	fn a_timed_track_refuses_a_bare_publish() {
+		let (mut producer, _) = producer_on(ProducerConfig::default(), timed());
+		assert!(matches!(
+			producer.push(&json!({ "n": 1 })),
+			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
+		));
+	}
+
+	#[test]
+	fn a_bare_publish_stays_untimed() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("untimed", moq_net::track::Info::default())
+			.unwrap();
+		let mut groups = track.subscribe(None);
+		let mut producer = Producer::new(track, ProducerConfig::default());
+		producer.push(&json!({ "n": 1 })).unwrap();
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
+			panic!("expected an untimed group");
+		};
+		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+			panic!("expected an untimed frame");
+		};
+		assert_eq!(frame.timestamp, None);
+	}
+
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {
 		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 	}
 
 	fn producer(config: ProducerConfig) -> (Producer<Value>, moq_net::track::Subscriber) {
+		producer_on(config, moq_net::track::Info::default())
+	}
+
+	fn producer_on(
+		config: ProducerConfig,
+		info: moq_net::track::Info,
+	) -> (Producer<Value>, moq_net::track::Subscriber) {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", timed())
+			.create_track("test", info)
 			.unwrap();
 		let consumer = track.subscribe(None);
 		(Producer::new(track, config), consumer)
@@ -366,7 +422,7 @@ mod test {
 	fn a_fresh_consumer_adopts_the_offset_without_skipping_history() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", timed())
+			.create_track("test", moq_net::track::Info::default())
 			.unwrap();
 		let mut producer = Producer::<Value>::new(track, ProducerConfig::default().with_op_ratio(0));
 
@@ -661,7 +717,7 @@ mod test {
 	fn cut_finishes_the_group_and_the_next_edit_restates() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", timed())
+			.create_track("test", moq_net::track::Info::default())
 			.unwrap();
 		let replay = moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(30));
 		let mut groups = track.subscribe(replay);

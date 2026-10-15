@@ -52,12 +52,11 @@ def _opt_from_us(us: int | None) -> timedelta | None:
 class Frame:
     """A raw track frame: a payload and its presentation timestamp.
 
-    ``timestamp`` is ``None`` on a frame read from an untimed track. A raw track
-    published here is timed, so writing one needs it.
+    ``timestamp`` is ``None`` on an untimed track, on both publish and receive.
     """
 
     payload: bytes
-    timestamp: timedelta | None = timedelta(0)
+    timestamp: timedelta | None = None
 
     def _ffi(self) -> MoqFrame:
         return MoqFrame(payload=self.payload, timestamp_us=_opt_us(self.timestamp, "timestamp"))
@@ -120,8 +119,7 @@ class TrackInfo:
 
     ``priority`` defaults to 127, the middle of the range. ``max_age`` is how long the
     publisher caches a non-latest group, ``None`` for no limit. ``timescale`` is ticks
-    per second: ``None`` uses microseconds when publishing, and means the source
-    declared no timeline on a received track.
+    per second: ``None`` means the track is untimed, on both publish and receive.
     """
 
     priority: int = 127
