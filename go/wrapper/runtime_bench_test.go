@@ -156,7 +156,11 @@ func benchThroughput(b *testing.B, c benchCase) {
 			consumers = append(consumers, consumer)
 		}
 	}
-	payload := bytes.Repeat([]byte{0x5a}, c.size)
+	// A non-uniform payload, so a zero-filled or truncated copy fails the check.
+	payload := make([]byte, c.size)
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
 	delivered := int64(len(consumers) * frames * c.size)
 	b.SetBytes(delivered)
 
@@ -180,8 +184,8 @@ func benchThroughput(b *testing.B, c benchCase) {
 						return
 					}
 					want := time.Duration(n*frames+f) * time.Microsecond
-					if frame == nil || len(frame.Payload) != c.size || frame.Timestamp == nil || *frame.Timestamp != want {
-						done <- fmt.Errorf("missing, reordered, or truncated frame %d of round %d", f, n)
+					if frame == nil || !bytes.Equal(frame.Payload, payload) || frame.Timestamp == nil || *frame.Timestamp != want {
+						done <- fmt.Errorf("missing, reordered, or corrupt frame %d of round %d", f, n)
 						return
 					}
 				}

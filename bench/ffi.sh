@@ -8,7 +8,8 @@ export MOQ_BENCH_DIR="${MOQ_BENCH_DIR:-$root/target/bench/ffi}"
 rm -rf "$MOQ_BENCH_DIR"
 
 cd "$root"
-cargo test --locked --release -p moq-ffi --lib bench::benchmark_ffi -- --ignored --nocapture
+# Through nextest, so a wedged read hits the slow-test timeout instead of the job's.
+just rs test -p moq-ffi --cargo-profile release -E 'test(bench::benchmark_ffi)' --run-ignored only
 just go bench -benchtime="${MOQ_BENCH_SECONDS:-1}s"
 just py bench
 just kt bench

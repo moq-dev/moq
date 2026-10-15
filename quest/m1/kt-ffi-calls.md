@@ -4,11 +4,13 @@
 
 A Kotlin call into moq-ffi costs about what the same call costs from Python or
 Go, sync and async alike, proven on the
-[binding benchmark](/bench/README.md). Measured 2026-10-15: a sync
-`sequence()` took 11-22 us from Kotlin against 1.3 us from Python and 0.12 us
-from Go, and the 100 B throughput case kept about 5.8 cores busy for 2 MB/s.
+[binding benchmark](/bench/README.md).
 
 ## Plan
+
+Measured 2026-10-15: a sync `sequence()` took 11-22 us from Kotlin against
+1.3 us from Python and 0.12 us from Go, and the 100 B throughput case kept
+about 5.8 cores busy for 2 MB/s.
 
 Decided with the maintainer on 2026-10-15:
 

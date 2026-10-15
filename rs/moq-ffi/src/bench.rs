@@ -47,6 +47,11 @@ impl Case {
 		(self.publishers * self.subscribers * self.frames() * self.size) as u64
 	}
 
+	/// A non-uniform payload, so a zero-filled or truncated copy fails the check.
+	fn payload(&self) -> Vec<u8> {
+		(0..self.size).map(|i| (i % 251) as u8).collect()
+	}
+
 	fn name(&self) -> String {
 		format!("size={}/pub={}/sub={}", self.size, self.publishers, self.subscribers)
 	}
@@ -129,8 +134,8 @@ impl Report {
 	}
 }
 
-fn check(case: &Case, round: u64, frame: usize, payload: &[u8], timestamp_us: Option<u64>) {
-	assert_eq!(payload.len(), case.size, "frame {frame} of round {round}");
+fn check(case: &Case, round: u64, frame: usize, want: &[u8], payload: &[u8], timestamp_us: Option<u64>) {
+	assert!(payload == want, "corrupt frame {frame} of round {round}");
 	assert_eq!(timestamp_us, Some(round * case.frames() as u64 + frame as u64));
 }
 
@@ -138,20 +143,19 @@ async fn ffi_round(case: &Case, tracks: &[Arc<MoqTrackProducer>], consumers: &[A
 	let readers: Vec<_> = consumers
 		.iter()
 		.map(|consumer| {
-			let (consumer, frames, size) = (consumer.clone(), case.frames(), case.size);
+			let (consumer, frames) = (consumer.clone(), case.frames());
 			tokio::spawn(async move {
 				let group = consumer.recv_group().await.unwrap().expect("track ended");
 				let mut read = Vec::with_capacity(frames);
 				for _ in 0..frames {
 					let frame = group.read_frame().await.unwrap().expect("group ended");
-					read.push((frame.payload.len(), frame.timestamp_us));
+					read.push((frame.payload, frame.timestamp_us));
 				}
-				assert!(read.iter().all(|(len, _)| *len == size));
 				read
 			})
 		})
 		.collect();
-	let payload = vec![0x5a; case.size];
+	let payload = case.payload();
 	for track in tracks {
 		let group = track.append_group().unwrap();
 		for f in 0..case.frames() {
@@ -164,8 +168,8 @@ async fn ffi_round(case: &Case, tracks: &[Arc<MoqTrackProducer>], consumers: &[A
 		group.finish().unwrap();
 	}
 	for reader in readers {
-		for (f, (len, timestamp_us)) in reader.await.unwrap().into_iter().enumerate() {
-			check(case, n, f, &payload[..len], timestamp_us);
+		for (f, (read, timestamp_us)) in reader.await.unwrap().into_iter().enumerate() {
+			check(case, n, f, &payload, &read, timestamp_us);
 		}
 	}
 }
@@ -192,7 +196,7 @@ async fn net_round(
 			})
 		})
 		.collect();
-	let payload = bytes::Bytes::from(vec![0x5a; case.size]);
+	let payload = bytes::Bytes::from(case.payload());
 	for track in &mut tracks {
 		let mut group = track.append_group().unwrap();
 		for f in 0..case.frames() {
@@ -205,8 +209,8 @@ async fn net_round(
 	let mut consumers = Vec::with_capacity(readers.len());
 	for reader in readers {
 		let (consumer, read) = reader.await.unwrap();
-		for (f, (payload, timestamp_us)) in read.into_iter().enumerate() {
-			check(case, n, f, &payload, timestamp_us);
+		for (f, (read, timestamp_us)) in read.into_iter().enumerate() {
+			check(case, n, f, &payload, &read, timestamp_us);
 		}
 		consumers.push(consumer);
 	}

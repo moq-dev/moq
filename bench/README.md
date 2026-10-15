@@ -144,7 +144,7 @@ sweeps frame sizes from 100 B to 1 MiB at one publisher and subscriber, then
 1/4 publishers by 1/4 subscribers at 1 KiB, and times two sync calls
 (`sequence`, `info`). Each case reports delivered MB/s and process CPU (user +
 system, every thread) per MB. `MOQ_BENCH_SECONDS` sets each case's time budget
-(default 1).
+(default 1); every received frame is checked byte for byte.
 
 Each runner writes `target/bench/ffi/<runner>.json`; `bench/ffi.py` combines
 them into a table and `report.json`. Ratios are against `rust-ffi`, moq-ffi's

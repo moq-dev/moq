@@ -54,24 +54,25 @@ def cpu() -> float:
     return usage.ru_utime + usage.ru_stime
 
 
-async def read(case: Case, consumer: moq.TrackConsumer, n: int) -> None:
+async def read(case: Case, consumer: moq.TrackConsumer, payload: bytes, n: int) -> None:
     group = await consumer.recv_group()
     assert group is not None, "track ended"
     for f in range(case.frames):
         frame = await group.read_frame()
         assert frame is not None, "group ended"
-        assert len(frame.payload) == case.size, f"frame {f} of round {n}"
+        assert frame.payload == payload, f"corrupt frame {f} of round {n}"
         assert frame.timestamp == timedelta(microseconds=n * case.frames + f)
 
 
 async def throughput(case: Case, results: list[dict]) -> None:
     tracks = [moq.BroadcastProducer().publish_track(str(p)) for p in range(case.publishers)]
     consumers = [track.consume() for track in tracks for _ in range(case.subscribers)]
-    payload = b"\x5a" * case.size
+    # A non-uniform payload, so a zero-filled or truncated copy fails the check.
+    payload = bytes(i % 251 for i in range(case.size))
 
     async def step(n: int) -> None:
         # Each consumer reads on its own task while this one writes each group in turn.
-        readers = [asyncio.create_task(read(case, consumer, n)) for consumer in consumers]
+        readers = [asyncio.create_task(read(case, consumer, payload, n)) for consumer in consumers]
         for track in tracks:
             group = track.append_group()
             for f in range(case.frames):

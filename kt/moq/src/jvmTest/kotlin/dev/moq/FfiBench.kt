@@ -11,6 +11,7 @@ import kotlinx.serialization.json.addJsonObject
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 
 /** One throughput case: [publishers] tracks, each read by [subscribers] consumers. */
 private data class Case(val size: Int, val publishers: Int, val subscribers: Int) {
@@ -68,7 +69,8 @@ class FfiBench {
     private suspend fun throughput(case: Case, results: MutableList<Result>) = kotlinx.coroutines.coroutineScope {
         val tracks = (0 until case.publishers).map { BroadcastProducer().publishTrack("$it", null) }
         val consumers = tracks.flatMap { track -> (0 until case.subscribers).map { track.consume(null) } }
-        val payload = ByteArray(case.size) { 0x5a }
+        // A non-uniform payload, so a zero-filled or truncated copy fails the check.
+        val payload = ByteArray(case.size) { (it % 251).toByte() }
 
         // Each consumer reads on its own coroutine while this one writes each group in turn.
         suspend fun step(n: Long) {
@@ -77,7 +79,7 @@ class FfiBench {
                     val group = assertNotNull(consumer.recvGroup(), "track ended")
                     repeat(case.frames) { f ->
                         val frame = assertNotNull(group.readFrame(), "group ended")
-                        assertEquals(case.size, frame.payload.size, "frame $f of round $n")
+                        assertTrue(frame.payload.contentEquals(payload), "corrupt frame $f of round $n")
                         assertEquals((n * case.frames + f).toULong(), frame.timestampUs)
                     }
                 }
