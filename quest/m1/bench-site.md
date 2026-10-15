@@ -17,7 +17,11 @@ Decided with the maintainer on 2026-10-15:
   the site. Its own alerting stays off; tracking is informational.
 - **Sources**: the binding benchmark's JSON and the "Rust benchmarks" and
   "JS benchmarks" nightly jobs, converted to the action's input format where
-  they don't already emit one. Nightly size history (today a 45-day
+  they don't already emit one. Several are smoke runs today: most Rust
+  Criterion targets run with `-- --test`, which measures nothing. Switch the
+  charted targets to a measuring mode (or add a measurement pass), weighing
+  the added nightly runtime, and check each JS bench reports a measurement
+  before charting it. Nightly size history (today a 45-day
   artifact) is a natural extra series if it fits cheaply. The relay load
   benches (`bench-audio`, `bench-lock`) and the audio-quality job's
   benchmarks are out of scope here; they can join later through the same
