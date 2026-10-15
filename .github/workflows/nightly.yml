@@ -52,6 +52,7 @@ jobs:
         run: |
           nix develop --command just test audio-quality --profiles near-zero --codecs opus --rings isolated,plain --duration 60 --capture
           nix develop --command just test audio-quality --profiles near-zero --codecs opus --rings plain,isolated --duration 60 --capture
+          nix develop --command just test audio-quality --profiles near-zero --codecs opus --rings isolated --duration 60 --capture --trace
         shell: bash -leo pipefail {0}
         env:
           # Somewhere upload-artifact can reach; the harness default is under $TMPDIR.

@@ -36,6 +36,7 @@ const { values } = parseArgs({
 		tag: { type: "string" },
 		out: { type: "string" },
 		capture: { type: "boolean", default: false },
+		trace: { type: "boolean", default: false },
 	},
 });
 
@@ -51,10 +52,11 @@ if (
 	!out ||
 	!Number.isFinite(durationMs) ||
 	durationMs <= 0 ||
-	(ring !== "plain" && ring !== "isolated")
+	(ring !== "plain" && ring !== "isolated") ||
+	(values.trace && !values.capture)
 ) {
 	console.error(
-		"usage: driver.ts --url U --fingerprint F --broadcast B --page DIR --ring plain|isolated --tag T --out DIR [--delay auto] [--duration S>0] [--capture]",
+		"usage: driver.ts --url U --fingerprint F --broadcast B --page DIR --ring plain|isolated --tag T --out DIR [--delay auto] [--duration S>0] [--capture] [--trace]",
 	);
 	process.exit(2);
 }
@@ -140,12 +142,14 @@ try {
 				for (const task of entries.getEntries()) tasks.push({ at: task.startTime, duration: task.duration });
 			}).observe({ type: "longtask", buffered: true });
 		});
+	}
+	if (values.trace) {
 		const session = await page.context().newCDPSession(page);
 		const events: unknown[] = [];
 		session.on("Tracing.dataCollected", (event: { value: unknown[] }) => events.push(...event.value));
 		const complete = new Promise<void>((resolve) => session.once("Tracing.tracingComplete", () => resolve()));
 		await session.send("Tracing.start", {
-			categories: "v8,disabled-by-default-v8.gc,devtools.timeline,blink.user_timing",
+			categories: "disabled-by-default-v8.gc,blink.user_timing",
 			transferMode: "ReportEvents",
 		});
 		finishTrace = async () => {
