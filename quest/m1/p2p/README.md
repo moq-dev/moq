@@ -59,7 +59,7 @@ The relay is the nearest STUN server a client can name, but this line takes
 ICE servers from the application and works with any. Decided 2026-10-08: the
 public STUN responder moved out of the [one-port](/quest/m2/one-port/README.md)
 UDP demux into this line, since P2P is its only consumer. Decided 2026-10-13:
-[relay STUN](/quest/m1/p2p/relay-stun.md) is planned now on its own port,
+[Relay STUN](/doc/bin/relay/config.md#stun) runs on its own configured port,
 off by default, and used only when the application lists it.
 
 ### Policy is the application's
@@ -146,7 +146,6 @@ Backend choice does not change the policy that watching tabs never re-serve.
 - [Shard steering](/quest/m1/p2p/shard-steering.md) - the reuseport filter steers only QUIC by connection ID, so the demux sees whole STUN flows
 - [UDP demux](/quest/m1/p2p/udp-demux.md) - one classifier splits QUIC from STUN and WebRTC on the relay's socket and on a native pair's
 - [Native pairs over ICE and QUIC](/quest/m1/p2p/native-quic.md) - two native peers connect through ICE, then `moq-quic` over the nominated path with fingerprints pinned from the offer
-- [Relay STUN](/quest/m1/p2p/relay-stun.md) - `moq-relay` answers Binding on a `[stun] bind` port, off by default, for applications that list it
 - [moq-cli joins](/quest/m1/p2p/cli.md) - `--p2p` publishes a roster entry, dials native peers over ICE and QUIC, and serves browsers as a transit hop
 - [Peer route policy](/quest/m1/p2p/cost-scopes.md) - application priorities and total cost choose eligible routes, with epoch-aware handover
 - [Watch opts in](/quest/m1/p2p/watch.md) - one attribute turns it on in the demo and the watcher migrates to the best eligible route

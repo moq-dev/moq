@@ -42,7 +42,7 @@ it goes to the WebRTC hook, whose mux reads the local ufrag from it. A
 Binding request without USERNAME is a public query; drop and count it.
 Decided 2026-10-08: the public STUN responder is left to the P2P line,
 so `moq-sock` takes no STUN codec dependency (str0m included). Decided
-2026-10-13: it binds its own port ([relay STUN](/quest/m1/p2p/relay-stun.md)).
+2026-10-13: it binds its own port ([relay STUN](/doc/bin/relay/config.md#stun)).
 
 WebRTC: DTLS, RTP, and USERNAME-carrying STUN go to a `webrtc` hook that
 `moq-relay` leaves unconsumed and an embedder takes: the datagrams, a send

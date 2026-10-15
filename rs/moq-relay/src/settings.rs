@@ -41,6 +41,9 @@ pub struct Settings {
 	stats: Stats,
 
 	#[usage(flatten)]
+	stun: Stun,
+
+	#[usage(flatten)]
 	cache: Cache,
 
 	#[usage(flatten)]
@@ -228,4 +231,11 @@ struct Peer {
 	announces: Option<usize>,
 	#[usage(env = "MOQ_PEER_SUBSCRIPTIONS", cli("--peer-subscriptions"))]
 	subscriptions: Option<usize>,
+}
+
+#[derive(usage::Config)]
+#[usage(prefix = "stun")]
+struct Stun {
+	#[usage(env = "MOQ_STUN_BIND", cli("--stun-bind"))]
+	bind: Option<String>,
 }
