@@ -126,11 +126,18 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 - [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave
   the URL: a session starts on what the URL carried and its AUTH streams add
   the rest, with the URL kept for peers without the AUTH stream
+- [Join revocation](/quest/m1/auth/join-revocation.md) - a revoked grant ends our
+  subscription even while its joining FETCH waits for request-ID credit
 
 ## Related
 
 - [Request leases](/quest/m3/auth-request-lease.md) - deferred auth-server
   accounting that ends a request token's lease with its request
+- [Request tokens beyond Rust](/quest/m3/request-token-surfaces.md) - JS, moq-ffi,
+  and moq-cli request-token APIs, when a consumer needs one
+- [Token on FETCH](/quest/m3/auth-token-fetch.md) - TRACK_STATUS and FETCH carry
+  and honor a request token. Parked until the maintainer decides whether to
+  reverse the standalone-FETCH decision and bring it into this epic
 - [#5107](https://github.com/moq-dev/moq/pull/5107) - landed request-token
   decoding, including session-fatal REQUEST_UPDATE decode failures
 - [#5106](https://github.com/moq-dev/moq/pull/5106) - landed setup extension
