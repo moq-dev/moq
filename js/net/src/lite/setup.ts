@@ -8,16 +8,15 @@
 import { type Hop, HopSchema } from "../hop.ts";
 import { encodeVarint, Reader, type Writer } from "../stream.ts";
 import { decodeUtf8 } from "../util/utf8.ts";
+import * as Message from "./message.ts";
+import { hasSetupStream, type Version } from "./version.ts";
 
 const clientParameters = new WeakSet<Setup>();
 
-// Raw presence matters even when an unknown Role decodes as Both.
+/** Whether the peer's SETUP carried Path or Role; raw presence matters even when an unknown Role decodes as Both. */
 export function hasClientParameters(setup: Setup): boolean {
 	return clientParameters.has(setup);
 }
-
-import * as Message from "./message.ts";
-import { hasSetupStream, type Version } from "./version.ts";
 
 /** Setup Parameter id for the Probe capability level. */
 const PARAM_PROBE = 0x1n;
