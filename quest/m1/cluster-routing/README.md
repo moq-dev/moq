@@ -22,16 +22,35 @@ Decided with the maintainer, 2026-10-13:
   lifetimes. A wildcard claim is a capability, not a list of live broadcasts;
   withdrawing one origin's claim does not end other origins' copies of an epoch.
 - Applications choose connections and assign each a local priority, whether
-  it reaches a CDN or a peer. Priority precedes additive cost; at equal
-  priority use the lowest eligible total cost, with hop-count defaults.
-  Preserve deterministic path hashing among equal routes and newest-first
-  only for otherwise identical routes. A new connection alone does not
-  outrank a different equal-cost route. Cost includes the origin's prefix seed.
-- Mint a fresh opaque routing identity per process or tab restart, shared
-  across that live origin's authenticated sessions. Keep administrative
-  identity separate. Session scoping alone cannot identify one publisher
-  through both its CDN and P2P connections. Authentication must prevent a
-  peer claiming another origin or advancing its sequence number.
+  it reaches a CDN or a peer. Among Babel-feasible routes, priority precedes
+  additive cost; feasibility can override preference, and the resulting
+  arrival-order dependence is accepted. Link costs are strictly positive
+  (default one per link): zero is refused, overflow is unreachable, and there
+  is no hop-count component. Preserve deterministic path hashing among equal
+  routes and newest-first only for otherwise identical routes. A new
+  connection alone does not outrank a different equal-cost route. Cost
+  includes the origin's prefix seed, which may be zero.
+- The first hop selects the origin; forwarded requests name that identity
+  and aggregation preserves it.
+- GOAWAY gives the peer lowest preference and fails over to an eligible
+  alternative, keeping it as a last resort while connected. Drain is a
+  preference state, never a saturated metric.
+- Keep Babel. A detour longer than the lost route may wait for a sequence
+  refresh from the origin; instant failover is not required. Measure failure
+  detection, additional routing recovery, and total interruption separately.
+- Mint a fresh routing identity per process or tab restart, shared across
+  that live origin's authenticated sessions: the hash of a per-process key,
+  proven once per session ([identity proof](/quest/m1/cluster-routing/identity.md)).
+  Keep administrative identity separate; `cluster.id` is removed. Session
+  scoping alone cannot identify one publisher through both its CDN and P2P
+  connections. (Decided 2026-10-14.)
+- A connection's own proven identity stays bare everywhere. Identities a
+  connection forwards on behalf of others are filed under
+  `hash(subject, id)`, keyed by the grant's credential subject, when its
+  publish grant is scoped, and stay bare when it is unscoped. The key is
+  deterministic, so two uplinks of one subject share it across token refresh,
+  and a forger only damages routes inside its own scope. (Decided 2026-10-14;
+  subject decided 2026-10-15.)
 - Matching explicit epochs authorize resume. Epochless changes retain
   Restart and fresh resolution; neither node identity nor a healthy
   alternate grants permission to splice content.
@@ -39,21 +58,35 @@ Decided with the maintainer, 2026-10-13:
   representing unavailable forwarding separately. Never manufacture an END
   from route loss, imply successful delivery while unreachable, or retain
   unbounded stale state.
-- Keep upstream/down-only export policy so two local uplinks do not make
-  the local network CDN transit. Preserve longer exportable alternatives
-  even when a cheaper down-only route wins locally.
-- Browsers serve only their own publications. Relays and opted-in native
-  routing nodes may forward received content. Applications explicitly
-  select P2P connections; discovery does not dial everyone.
+- One route selection per identity. Each node advertises its best route,
+  with or without demand. Keep the `upstream` link mark and its down-only bit
+  so CDN relays never shortcut between each other through a local network;
+  CDN content still flows into the network and local content out, including
+  through a peer whose own uplink died. A cheaper exportable alternative
+  hidden behind a preferred down-only route is accepted; rank local peers
+  above a backup uplink to avoid it. The relay that accepted a request from
+  an upstream link ends that forwarded subscription when its route turns
+  down-only; no request bit on the wire. (Decided 2026-10-14, superseding
+  the two-view export plan.)
+- A local per-connection `proxy` preference decides whether a connection is
+  sent routes learned from other connections. Relays default on;
+  applications choose per P2P connection (on for redundancy, off for
+  conference offload). Browser tabs stay off until the
+  [Rust-to-TypeScript](/quest/m2/rs2ts/README.md) port. Applications
+  explicitly select P2P connections; discovery does not dial everyone.
+- Each CDN broadcast enters a local network once by configuration: local
+  peers outrank a backup uplink, and origin aggregation joins the rest.
 - Retain the CDN session and discovery during P2P use. Release unused CDN
   media demand, except for bounded overlap during a same-epoch handoff.
 
-The implementation is gated on [routing contracts](/quest/m1/cluster-routing/contracts.md)
-and [handoff proofs](/quest/m1/cluster-routing/handoff.md). Per-origin Babel
-feasibility alone does not prove that path-only subscriptions which reselect
-origins under local priorities make progress. Nor does a complete neighbor
-snapshot prove its claims are current. Settle those contracts before dropping
-hop-vector protections or fixing the wire.
+The implementation is gated on [handoff proofs](/quest/m1/cluster-routing/handoff.md):
+a complete neighbor snapshot does not prove its claims are current. The
+routing contract is recorded in [Routes and announces](/quest/m1/cluster-routing/routes.md)
+with deterministic counterexamples: path-only subscriptions that reselect
+origins at every hop loop and deadlock, so forwarded requests name their
+identity; feasibility makes transit priorities depend on arrival order;
+export keeps one selection with a down-only bit; and scoped forwarding is
+contained by subject-qualified identities.
 
 The new routing model and finalized lite-07 belong to the breaking release.
 Existing mesh deployments remain supported; the full edge/core topology
@@ -84,7 +117,7 @@ setup after the capabilities land.
 
 ## Required
 
-- [Routing contracts](/quest/m1/cluster-routing/contracts.md) - identity, local priority, loop freedom, and export views have a consistent tested model
+- [Identity proof](/quest/m1/cluster-routing/identity.md) - a routing identity is the hash of a per-process key that every session proves
 - [Next-hop handoff](/quest/m1/cluster-routing/handoff.md) - complete and fresh claims survive rerouting without resurrection or false END
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - implement the proven route layer with Rust/JS parity and tiered-cluster acceptance
 - [Outbound federation](/quest/m1/cluster-routing/federation.md) - an outbound-only local relay exchanges authorized broadcasts with the CDN and survives partition/healing

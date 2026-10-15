@@ -10,7 +10,7 @@ use crate::{
 use super::{
 	Control, Message, Publisher, Subscriber, Version, active_count,
 	adapter::ControlStreamAdapter,
-	auth, cluster, hidden, peer, solicit,
+	auth, cluster, hidden, peer, request_update, solicit,
 	subscriber::{is_protocol_violation, subscribe_prefixes},
 };
 
@@ -778,6 +778,7 @@ async fn run_setup<S: crate::transport::poll::Session>(
 		auth::into_setup(&mut parameters, version);
 	}
 	active_count::into_setup(&mut parameters, version);
+	request_update::into_setup(&mut parameters, version);
 	let parameters = parameters.encode_bytes(version)?;
 
 	writer.encode(&setup::Setup { parameters }).await?;
@@ -2531,6 +2532,7 @@ mod tests {
 			properties_wanted: true,
 			forward: true,
 			range_filters: false,
+			authorization_token: None,
 		}
 		.encode(&mut encoder, VERSION)
 		.unwrap();
@@ -2838,6 +2840,7 @@ mod tests {
 				request_id: RequestId(1),
 				track_namespace: crate::Path::new("room/host"),
 				cluster: None,
+				authorization_token: None,
 			})
 			.await
 			.unwrap();
@@ -2947,6 +2950,7 @@ mod tests {
 			properties_wanted: true,
 			forward: true,
 			range_filters: false,
+			authorization_token: None,
 		};
 		let mut body = Vec::new();
 		let mut w = crate::coding::Encoder::new(&mut body, version.into());

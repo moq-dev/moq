@@ -314,7 +314,7 @@ impl Message for Publish<'_> {
 				};
 				let forward = r.bool()?;
 				// parameters
-				super::token::unique(&Parameters::skip_request(r)?)?;
+				super::token::single(Parameters::skip_request(r)?)?;
 
 				Ok(Self {
 					request_id,
@@ -349,9 +349,9 @@ impl Message for Publish<'_> {
 					0x21 => _filter: Option<Filter> where Filter::is_draft20(version),
 					0x22 => group_order: Option<GroupOrder> where version == Version::Draft15 || Filter::is_draft20(version),
 				);
-				super::token::unique(&authorization_token)?;
-
 				let mut properties = Properties::decode(r, version)?;
+				// Last, so a malformed field closes the session before a token refusal.
+				super::token::single(authorization_token)?;
 				properties.group_order = properties.group_order.or(group_order);
 
 				let forward = forward.unwrap_or(true);

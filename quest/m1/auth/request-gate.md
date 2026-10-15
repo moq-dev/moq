@@ -22,21 +22,20 @@ Decisions settled while planning (2026-10-09):
   reset once FETCH_OK is out). Racing the whole handler future and dropping it
   was rejected because it loses those graceful refusals.
 - **Rust and JS together**, so the shape and names stay mirrored.
-- **Effective authorization.** Land after request-token support. Dispatch
-  admits a request carrying a token by its verified request grant, even when
-  local session permission covers it, and a request without one by local
-  session permission (revised on #5148); peer-issued AUTH_OK grants cannot
-  authorize incoming requests. Preserve
-  renewal, revocation, expiry and the session ceiling. Do not reject a valid
-  token-only request merely because it is outside the session union. Joining
-  FETCH follows the named subscription's live authorization and ends with
-  that subscription; standalone FETCH gains no request-token authority.
-  JS mirrors the gate structure without silently adding its deferred
-  request-token setter/acceptor.
+- ✅ Decided 2026-10-15 (maintainer, #5148): **effective authorization.**
+  An unnamed request is held to the union of session-lifetime auths; a
+  request named by its own auth (a moq-transport request token today,
+  `auth=id` on lite later) is held to that auth's issued grant alone, and
+  ends with it. Peer-issued AUTH_OK grants never authorize incoming
+  requests. Preserve renewal (a new auth replacing the old), revocation,
+  and expiry. Joining FETCH follows the named
+  subscription's live authorization and ends with that subscription;
+  standalone FETCH gains no request-token authority. JS mirrors the gate
+  structure.
 - **Structure only.** Finding new gaps is not the goal, but any request type
   the refactor shows was ungated gets a regression test in the same PR.
   Initial verification already consumes request capacity and observes
-  cancellation in the request-token hook; those fixes must not wait here.
+  cancellation (#5148); those fixes must not wait here.
 
 Today `auth::Gate` is built inside each handler: the IETF publisher's
 SUBSCRIBE, standalone FETCH, and TRACK_STATUS; the IETF subscriber; and the
@@ -45,13 +44,9 @@ A joining FETCH carries its subscription's namespace and observes that
 subscription's effective authorization. A surviving cache is not authority
 to continue a dependent join after the subscription ends.
 
-Test token-only admission outside the session union, session-union changes
-without revoking a still-valid request grant, request revoke/renewal/expiry,
-and dependent joining FETCH. Keep graceful terminal messages.
-
-## Required
-
-- [Request tokens](/quest/m1/auth/request-token.md) - both admission lifetimes exist before this refactor
+Test named admission outside the session union, session-union changes
+without revoking a still-valid named grant, revoke/renewal/expiry of a named
+auth, and dependent joining FETCH. Keep graceful terminal messages.
 
 ## Related
 
