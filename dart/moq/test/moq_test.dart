@@ -17,6 +17,39 @@ Future<AnnounceEvent> nextRoute(AnnounceConsumer announced) async {
 }
 
 void main() {
+  test('container timebase belongs to one broadcast', () {
+    final owner = BroadcastProducer();
+    final other = BroadcastProducer();
+    final timebase = moq_media.Timebase(broadcast: owner);
+    expect(
+      () => moq_media.ContainerProducer(
+        broadcast: other,
+        init: moq_media.ContainerInit(
+          format: moq_media.ContainerFormat.fmp4,
+          data: Uint8List(0),
+          timebase: timebase,
+        ),
+      ),
+      throwsA(isA<CodecMoqException>()),
+    );
+    expect(
+      () => moq_media.ContainerStreamProducer(
+        broadcast: other,
+        init: moq_media.ContainerStreamInit(
+          format: moq_media.ContainerFormat.fmp4,
+          timebase: timebase,
+        ),
+      ),
+      throwsA(isA<CodecMoqException>()),
+    );
+    owner.close();
+    expect(
+      () => moq_media.Timebase(broadcast: owner),
+      throwsA(isA<ClosedMoqException>()),
+    );
+    other.close();
+  });
+
   test('diagnostic errors expose their named reason', () {
     final error = TransportMoqException('reset');
     expect(error.reason, 'reset');

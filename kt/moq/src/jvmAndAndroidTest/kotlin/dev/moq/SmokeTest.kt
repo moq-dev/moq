@@ -51,6 +51,24 @@ private fun opusHead(): ByteArray =
 
 class SmokeTest {
     @Test
+    fun `container timebase belongs to one broadcast`() {
+        BroadcastProducer().use { owner ->
+            BroadcastProducer().use { other ->
+                Timebase(owner).use { timebase ->
+                    assertFailsWith<MoqException.Codec> {
+                        ContainerProducer(other, ContainerInit(ContainerFormat.FMP4, byteArrayOf(), timebase))
+                    }
+                    assertFailsWith<MoqException.Codec> {
+                        ContainerStreamProducer(other, ContainerStreamInit(ContainerFormat.FMP4, timebase))
+                    }
+                    owner.end()
+                    assertFailsWith<MoqException.Closed> { Timebase(owner) }
+                }
+            }
+        }
+    }
+
+    @Test
     fun `diagnostic errors expose their named reason`() {
         val error = MoqException.Transport(reason = "reset")
         assertEquals("reset", error.reason)
