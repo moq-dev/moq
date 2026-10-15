@@ -267,11 +267,17 @@ impl Copy {
 			start: max_some(reader.start, self.floor),
 			..reader.clone()
 		};
-		if let Some(until) = self.until {
-			let end = until.and_then(Position::after_group).unwrap_or_default();
+		if let Some(end) = self.end().map(Position::group) {
 			wire.end = Some(wire.end.map_or(end, |requested| requested.min(end)));
 		}
 		wire
+	}
+
+	/// The first group past where this copy was replaced, if any: one replaced before
+	/// any group ends at 0, and one replaced at `u64::MAX` has no end.
+	fn end(&self) -> Option<u64> {
+		self.until
+			.and_then(|last| last.map_or(Some(0), |last| last.checked_add(1)))
 	}
 
 	fn update(&mut self, reader: &Subscription) {
@@ -513,7 +519,7 @@ impl Reader {
 			if copy.done.is_some() {
 				return false;
 			}
-			let until = copy.until;
+			let end = copy.end();
 			let Poll::Ready(Ok(sub)) = copy.poll_ready(groups, &kio::Waiter::noop()) else {
 				return false;
 			};
@@ -522,7 +528,7 @@ impl Reader {
 			// cap here, since unread groups become eligible again when it rises.
 			sub.has_unread_group(&track::Unread {
 				start: groups.0,
-				end: until.and_then(|until| until.map_or(Some(0), |last| last.checked_add(1))),
+				end,
 				delivered,
 			})
 		});
@@ -1544,6 +1550,27 @@ mod test {
 
 		sub.start_at(0);
 		assert_eq!(recv(&mut sub).sequence, 6);
+	}
+
+	#[test]
+	fn a_replaced_copy_at_the_last_sequence_has_no_overflow_cap() {
+		for (last, end) in [(Some(u64::MAX), None), (None, Some(Position::default()))] {
+			let routes = Producer::new();
+			let a = copy();
+			routes.serve(a.consume());
+			let subscription = kio::Producer::new(Subscription::default());
+			let sub = routes.consume().subscribe(subscription);
+			let mut reader = sub.reader.lock().unwrap();
+			let old = &mut reader.copies[0];
+			old.until = Some(last);
+			assert_eq!(old.wire(&Subscription::default()).end, end);
+			// A reader's narrower bound survives an unbounded replacement cap.
+			let requested = Subscription {
+				end: Some(Position::group(7)),
+				..Default::default()
+			};
+			assert_eq!(old.wire(&requested).end, Some(end.unwrap_or(Position::group(7))));
+		}
 	}
 
 	#[test]

@@ -10,8 +10,9 @@ against a `release` build of `@moq/net` and `@moq/signals`, reports
 
 ## Plan
 
-[The main fix](/quest/m1/subscribe-close-throw.md) explains the three
-defects. `release` has all three.
+`release` still sends SUBSCRIBE after local setup cancellation, leaves a
+`raceUntil` loser rejection unobserved, and throws for a locally cancelled
+subscribe stream that ends without SUBSCRIBE_END.
 
 Decided 2026-10-14:
 
@@ -92,7 +93,3 @@ await sleep(200); connB.close(); connA.close(); await sleep(100);
 console.log(`delay=${delay} iterations=${iterations} unhandled=${unhandled}`);
 process.exit(0);
 ```
-
-## Required
-
-- [A local close never throws](/quest/m1/subscribe-close-throw.md) - the `main` fix this ports

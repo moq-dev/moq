@@ -3,7 +3,7 @@ import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import * as Epoch from "../epoch.ts";
-import { error, fromTransport, reason, StreamCode, StreamError } from "../error.ts";
+import { error, fromTransport, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
 import { HopSchema, isAnonymous, MAX_HOPS, Route, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
@@ -1612,4 +1612,108 @@ test("a cancelled queued PROBE open sends no request and releases its slot", asy
 	await streams[0].finished;
 	expect(streams[0].written).toEqual([]);
 	subscriber.close();
+});
+
+// Let all queued reactions finish without relying on host timers.
+function drainReactions(): Promise<void> {
+	return new Promise((resolve) => {
+		const channel = new MessageChannel();
+		channel.port1.onmessage = () => {
+			channel.port1.close();
+			channel.port2.close();
+			resolve();
+		};
+		channel.port2.postMessage(null);
+	});
+}
+
+test("a local unsubscribe owes no SUBSCRIBE_END", async () => {
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
+	const responseTask = Promise.withResolvers<void>();
+	const outcome = responseTask.promise.then(
+		() => undefined,
+		(err: unknown) => err,
+	);
+	// TypeScript-private so tests can observe the task without exporting a test hook.
+	const internal = subscriber as unknown as { runResponses: (...args: unknown[]) => Promise<void> };
+	const runResponses = internal.runResponses.bind(internal);
+	const responses = spyOn(internal, "runResponses").mockImplementation((...args) => {
+		const task = runResponses(...args);
+		responseTask.resolve(task);
+		return task;
+	});
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe();
+	const ordered = track.ordered();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], Version.DRAFT_07);
+		await (await opened(1)).reading;
+		const next = ordered.nextGroup();
+		await subscriber.runGroup(
+			new Group({ subscribe: 0n, sequence: 0 }),
+			new Reader(
+				new ReadableStream({
+					start: (controller) => controller.close(),
+				}),
+				undefined,
+				Version.DRAFT_07,
+			),
+		);
+		(await next)?.close();
+		ordered.close();
+		track.close();
+		await streams[1].finished;
+		await drainReactions();
+		expect(await outcome).toBeUndefined();
+	} finally {
+		responses.mockRestore();
+		ordered.close();
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
+test("a publisher FIN without SUBSCRIBE_END still violates an open subscription", async () => {
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], Version.DRAFT_07);
+		await (await opened(1)).reading;
+		streams[1].inbound.close();
+		expect(await track.closed).toBeInstanceOf(ProtocolViolation);
+		expect((track.closed.peek() as Error).message).toBe("subscribe stream ended without SUBSCRIBE_END");
+	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
+test("closing a broadcast while TRACK_INFO is pending leaves no unhandled rejection", async () => {
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
+	const unhandled: unknown[] = [];
+	const onUnhandled = (reason: unknown) => unhandled.push(reason);
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe();
+	process.on("unhandledRejection", onUnhandled);
+	try {
+		await opened(0);
+		await streams[0].reading;
+		broadcast.close();
+		track.close();
+		await streams[0].aborted;
+		await drainReactions();
+		expect(streams).toHaveLength(1);
+		expect(unhandled).toEqual([]);
+	} finally {
+		process.off("unhandledRejection", onUnhandled);
+		subscriber.close();
+	}
 });

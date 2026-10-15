@@ -886,7 +886,9 @@ mod tests {
 	#[tokio::test]
 	async fn pending_admission_is_abandoned_at_the_deadline() {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default()) {
+		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default())
+			&& std::env::var_os("MOQ_STRICT").is_none()
+		{
 			eprintln!("skipping io_uring relay test: {reason}");
 			return;
 		}

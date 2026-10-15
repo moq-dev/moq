@@ -3,8 +3,8 @@
 //! pinned io_uring workers, with authentication and supervision on the shared
 //! runtime and the frame crossing worker threads through the shared origin.
 //!
-//! Linux-only like the mode itself, and kernel-gated below the io_uring 6.12
-//! floor (GitHub-hosted CI), where it skips loudly.
+//! Linux-only like the mode itself. Unsupported local kernels skip loudly;
+//! MOQ_STRICT makes CI refuse them.
 #![cfg(all(target_os = "linux", feature = "_uring"))]
 
 use std::net::SocketAddr;
@@ -25,7 +25,7 @@ fn timed() -> moq_net::track::Info {
 fn supported() -> bool {
 	match moq_uring::Worker::new(Default::default()) {
 		Ok(_) => true,
-		Err(moq_uring::Error::Unsupported(reason)) => {
+		Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
 			eprintln!("skipping io_uring relay test: {reason}");
 			false
 		}

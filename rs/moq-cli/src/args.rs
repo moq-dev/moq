@@ -217,15 +217,19 @@ impl Invocation {
 		Ok(())
 	}
 
-	/// Refuse the listener flags (`--listen-*`, `--auth-*`) when nothing listens,
+	/// Refuse listener, auth, stats and drain settings when nothing listens,
 	/// rather than silently ignoring them. Answered from the command line, like
 	/// [`Self::reject`].
 	pub fn unserved(&self) -> anyhow::Result<()> {
 		if self.moq.serves() {
 			return Ok(());
 		}
-		let listens =
-			|flag: &&&usage::Flag<'_>| owns::<moq_tokio::listen::Config>(flag) || owns::<moq_relay::auth::Config>(flag);
+		let listens = |flag: &&&usage::Flag<'_>| {
+			owns::<moq_tokio::listen::Config>(flag)
+				|| owns::<moq_relay::auth::Config>(flag)
+				|| owns::<moq_relay::stats::Config>(flag)
+				|| flag.longs.contains(&"drain-timeout")
+		};
 		if let Some(flags) = Self::names(self.given.iter().filter(listens)) {
 			anyhow::bail!(
 				"{flags} configure a listener, but none is bound; add --listen, --listen-tcp-bind, --listen-unix-bind, or --cluster-lan"
@@ -301,6 +305,16 @@ impl Invocation {
 	/// Called before anything binds a port or dials out, so a refused invocation has
 	/// no side effects to unwind.
 	pub fn validate(&self) -> anyhow::Result<()> {
+		if !self.stages.iter().all(Command::is_stageable) {
+			let listener_settings = self
+				.given
+				.iter()
+				.filter(|flag| owns::<moq_relay::stats::Config>(flag) || flag.longs.contains(&"drain-timeout"));
+			if let Some(flags) = Self::names(listener_settings) {
+				anyhow::bail!("{flags} configure listening import/export stages");
+			}
+		}
+
 		if self.moq.epoch.is_some() {
 			let mut publishes = false;
 			for command in &self.stages {
@@ -457,6 +471,14 @@ pub struct MoqSide {
 	/// `moq-relay`; a listener needs exactly one.
 	#[usage(flatten)]
 	pub auth: moq_relay::auth::Config,
+
+	/// Publish accepted-session stats with the relay's `--stats-*` settings.
+	#[usage(flatten)]
+	pub stats: moq_relay::stats::Config,
+
+	/// Drain accepted sessions for up to this long after SIGINT or SIGTERM; defaults to 10s.
+	#[usage(long, env = "MOQ_DRAIN_TIMEOUT", help_heading = "MoQ")]
+	pub drain_timeout: Option<crate::duration::Duration>,
 }
 
 impl MoqSide {
@@ -477,7 +499,9 @@ impl MoqSide {
 	/// origin is its origin, whose Hop ID is random per run unless `--cluster-id`
 	/// names the node.
 	pub fn cluster(&self) -> anyhow::Result<moq_relay::cluster::Cluster> {
-		moq_relay::cluster::Cluster::new(moq_relay::cluster::Options::new(self.cluster.clone()))
+		let cluster = moq_relay::cluster::Cluster::new(moq_relay::cluster::Options::new(self.cluster.clone()))?;
+		let stats = self.stats.build(cluster.origin.clone());
+		Ok(cluster.with_stats(stats))
 	}
 
 	/// Whether `--cluster-lan` asked this process to mesh over the LAN.
@@ -1662,6 +1686,57 @@ mod tests {
 		assert!(parse(["--auth-url", "http://127.0.0.1:4440/"]).moq.validate().is_ok());
 	}
 
+	#[test]
+	fn listening_stats_and_drain_settings_parse() {
+		let cli = Invocation::try_parse_from([
+			"moq",
+			"--listen-tcp-bind",
+			"127.0.0.1:0",
+			"--auth-public",
+			"**",
+			"--stats-enabled",
+			"--stats-node",
+			"gateway",
+			"--drain-timeout",
+			"500ms",
+			"import",
+			"ts",
+		])
+		.unwrap();
+		cli.validate().unwrap();
+		cli.unserved().unwrap();
+		assert!(cli.moq.stats.enabled);
+		assert_eq!(cli.moq.stats.node.as_deref(), Some("gateway"));
+		assert_eq!(cli.moq.drain_timeout.unwrap().into_std(), Duration::from_millis(500));
+		for flags in [&["--stats-enabled"][..], &["--drain-timeout", "500ms"]] {
+			let cli = Invocation::try_parse_from(
+				["moq", "--connect", "https://relay.example"]
+					.iter()
+					.chain(flags)
+					.chain(&["import", "ts"])
+					.copied(),
+			)
+			.unwrap();
+			assert!(cli.unserved().unwrap_err().to_string().contains(flags[0]));
+		}
+	}
+
+	#[cfg(feature = "play")]
+	#[test]
+	fn listening_lifecycle_settings_do_not_apply_to_playback() {
+		for flags in [&["--stats-enabled"][..], &["--drain-timeout", "500ms"]] {
+			let cli = Invocation::try_parse_from(
+				["moq", "--listen-tcp-bind", "127.0.0.1:0", "--auth-public", "**"]
+					.iter()
+					.chain(flags)
+					.chain(&["play"])
+					.copied(),
+			)
+			.unwrap();
+			assert!(cli.validate().unwrap_err().to_string().contains(flags[0]));
+		}
+	}
+
 	/// A listener for ordinary clients admits nobody without a decision, so it
 	/// refuses to start with neither flag, and with both.
 	#[test]
@@ -2170,6 +2245,8 @@ mod tests {
 			&["--listen-tcp-bind", "127.0.0.1:0"],
 			&["--cluster-node", "https://self.example"],
 			&["--auth-public", "**"],
+			&["--stats-enabled"],
+			&["--drain-timeout", "500ms"],
 			&["--epoch", "0192a3b4-c5d6-7e8f-9a0b-1c2d3e4f5a6b"],
 		];
 		let dial: &[&[&str]] = &[

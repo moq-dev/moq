@@ -935,7 +935,11 @@ async fn admit_http(
 	request.server_name = request_host(uri, headers);
 	request.remote = Some(remote.0);
 	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| auth::peer(&identity));
-	state.auth.admit(request).await
+	state
+		.auth
+		.admit(request)
+		.await
+		.inspect_err(|err| state.cluster.refusals.record(err.into()))
 }
 
 /// Serve the announced broadcasts for a given prefix.
@@ -957,6 +961,7 @@ async fn serve_announced(
 
 	let lease = admit_http(&state, prefix, query, &uri, &headers, remote, mtls).await?;
 	let Some(origin) = state.cluster.subscriber(lease.token()) else {
+		state.cluster.refusals.record(crate::refusals::Refusal::Forbidden);
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
 
@@ -1006,6 +1011,7 @@ async fn serve_fetch(
 	let broadcast = lease.token().root.to_string();
 
 	let Some(origin) = state.cluster.subscriber(lease.token()) else {
+		state.cluster.refusals.record(crate::refusals::Refusal::Forbidden);
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
 
@@ -1125,6 +1131,75 @@ mod tests {
 	use rcgen::{CertificateParams, KeyPair};
 	use std::io::Write;
 	use tempfile::TempDir;
+
+	#[tokio::test(start_paused = true)]
+	async fn http_refusals_count_at_both_endpoints() {
+		use crate::refusals::Refusal;
+		let dir = TempDir::new().unwrap();
+		let (_, cert, _) = make_certs(&dir);
+		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(cert).unwrap()).unwrap();
+		for fetch in [false, true] {
+			for publish_only in [false, true] {
+				let auth = if publish_only {
+					crate::auth::Config {
+						public_publish: vec![moq_auth::Pattern::all()],
+						..Default::default()
+					}
+					.init("test", &moq_tokio::tls::Connect::default(), false)
+					.unwrap()
+				} else {
+					auth::Auth::refuse("test")
+				};
+				let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+				let web = Web::new(auth, cluster, certificates.clone(), Config::default());
+				let state = web.state;
+				let remote = ConnectInfo(crate::listener::Peer("127.0.0.1:1234".parse().unwrap()));
+				let status = if fetch {
+					serve_fetch(
+						Path("room/video".to_owned()),
+						Query(FetchParams {
+							auth: AuthQuery { jwt: None },
+							group: FetchGroup::Latest,
+						}),
+						None,
+						remote,
+						"/fetch/room/video".parse().unwrap(),
+						http::HeaderMap::new(),
+						State(state.clone()),
+					)
+					.await
+					.map(|_| ())
+					.into_response()
+					.status()
+				} else {
+					serve_announced(
+						Some(Path("room".to_owned())),
+						Query(AuthQuery { jwt: None }),
+						None,
+						remote,
+						"/announced/room".parse().unwrap(),
+						http::HeaderMap::new(),
+						State(state.clone()),
+					)
+					.await
+					.map(|_| ())
+					.into_response()
+					.status()
+				};
+				assert_eq!(status, StatusCode::UNAUTHORIZED);
+				let reason = if publish_only {
+					Refusal::Forbidden
+				} else {
+					Refusal::Refused
+				};
+				assert_eq!(
+					state.cluster.refusals.count(reason),
+					1,
+					"fetch={fetch}, publish_only={publish_only}"
+				);
+			}
+		}
+	}
 
 	fn make_certs(dir: &TempDir) -> (PathBuf, PathBuf, PathBuf) {
 		make_named_certs(dir, "server", "localhost")

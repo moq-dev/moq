@@ -682,21 +682,35 @@ mod tests {
 	use crate::Timer as Deadline;
 	use std::time::Duration;
 
-	/// Kernel-gated: `None` (with a loud skip) below the 6.12 floor, so these
-	/// tests pass vacuously on older CI kernels and run everywhere else.
+	/// Local unsupported kernels may skip; strict CI must exercise the worker.
 	fn worker() -> Option<Worker> {
 		worker_with(Config::default())
 	}
 
 	fn worker_with(config: Config) -> Option<Worker> {
-		match Worker::new(config) {
+		worker_result(Worker::new(config), std::env::var_os("MOQ_STRICT").is_some())
+	}
+
+	fn worker_result(result: Result<Worker, Error>, required: bool) -> Option<Worker> {
+		match result {
 			Ok(worker) => Some(worker),
-			Err(Error::Unsupported(reason)) => {
+			Err(Error::Unsupported(reason)) if !required => {
 				eprintln!("skipping io_uring test: {reason}");
 				None
 			}
 			Err(err) => panic!("worker setup failed: {err}"),
 		}
+	}
+
+	#[test]
+	#[should_panic(expected = "worker setup failed")]
+	fn strict_worker_refuses_unsupported() {
+		worker_result(Err(Error::Unsupported("test capability".into())), true);
+	}
+
+	#[test]
+	fn optional_worker_skips_unsupported() {
+		assert!(worker_result(Err(Error::Unsupported("test capability".into())), false).is_none());
 	}
 
 	#[test]

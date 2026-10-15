@@ -283,13 +283,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # `rs uring` is a separate feature compile (off the default set) and
-        # kernel-gated below 6.12. The embedding tests for io_uring live there.
+        # `rs uring` is a separate feature compile (off the default set), and
+        # MOQ_STRICT fails it below the 6.12 kernel floor. The embedding tests for
+        # io_uring live there; uring.yml also runs it on affected PRs.
         # `test drain` stands up two relays and drains one under a live JS
         # viewer: diff-independent, since a break can arrive through the relay,
         # js/net, or the wire between them.
         # `gh test` exercises workflow and release tooling, which no pull request runs.
-        recipe: ["rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "gh test"]
+        recipe: ["rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "gh test", "test json-properties"]
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main

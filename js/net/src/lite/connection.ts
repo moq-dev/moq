@@ -239,7 +239,9 @@ export class Connection implements Established {
 
 		let fatal: Error | undefined;
 		try {
-			await Promise.all(tasks);
+			// An application close rejects QMux's pending accepts with a teardown error.
+			// The transport's close result owns that termination, rather than the task failure.
+			await Promise.race([Promise.all(tasks), this.#quic.closed]);
 		} catch (err) {
 			console.error("fatal error running connection", err);
 			// A session-sourced failure is the peer's close, not the raw transport error.
