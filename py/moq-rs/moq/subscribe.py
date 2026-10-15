@@ -34,7 +34,7 @@ def _frame(frame: MoqFrame | None) -> Frame | None:
 
 
 class GroupConsumer:
-    """Async iterator of timestamped frames within a single group."""
+    """Async iterator of raw frames within a single group."""
 
     def __init__(self, inner: MoqGroupConsumer) -> None:
         self._inner = inner
@@ -60,7 +60,7 @@ class GroupConsumer:
         return Frame._from_ffi(frame)
 
     async def read_frame(self) -> Frame | None:
-        """Read the next timestamped frame. Returns `None` when the group ends."""
+        """Read the next raw frame. Returns `None` when the group ends."""
         return _frame(await self._inner.read_frame())
 
     def cancel(self) -> None:
@@ -74,7 +74,7 @@ class TrackConsumer:
     Iterating yields groups via :meth:`next_group`. Use :meth:`recv_group` (or
     :meth:`groups_as_arrived`) for arrival order instead.
 
-    Each group is itself an async iterator of timestamped frames. Same pattern as
+    Each group is itself an async iterator of raw frames. Same pattern as
     moq-boy's status/command tracks (one frame per group), but multi-frame
     groups are also supported.
     """
@@ -134,7 +134,7 @@ class TrackConsumer:
         return GroupConsumer(group)
 
     async def read_frame(self) -> Frame | None:
-        """Read the first timestamped frame of the next group.
+        """Read the first raw frame of the next group.
 
         Convenience for tracks using one-frame-per-group (like moq-boy's
         status/command tracks). Completed empty groups are skipped. Returns

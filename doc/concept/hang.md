@@ -51,21 +51,20 @@ VP9, AV1, AAC, and Opus are what the tools produce today. Properties shared by
 every video rendition (display size, rotation, flip) sit at the section root.
 
 A track name always means the same content, so a catalog update never
-redefines a track. Its codec, description, container, sample rate, and channel
-count are fixed. `codedWidth` and `codedHeight` are ceilings: the picture
-resizes in band at a keyframe below them, unless a `description` pins it.
-`bitrate` and `framerate` are maxima that only rise, like `jitter` and `delay`.
-Everything else, such as `enabled` and the section's display size, updates
-freely. A
-publisher that needs a new identity publishes a new track name, or restarts the
-broadcast under a new [epoch](/concept/moq-lite#publisher-epochs). A player can
-configure its decoder once per track.
+redefines a track. The fields a decoder can't change without reinitializing
+are fixed: codec, description, container, display aspect, sample rate, and
+channel count. Everything else, such as the coded size, `bitrate`,
+`framerate`, and `enabled`, updates in place; the picture resizes in band at a
+keyframe unless a `description` pins it. A publisher that needs a new identity
+publishes a new track name, or restarts the broadcast under a new
+[epoch](/concept/moq-lite#publisher-epochs). A player can configure its
+decoder once per track.
 
 A few things the catalog can express beyond decoder config:
 
 - **Labels.** Any rendition may carry a human-readable `label` for a track picker. The map key stays the rendition's ID, so labels need not be unique and renaming one doesn't rename the track.
 - **Renditions in another broadcast.** A rendition may point at a relative broadcast path, so a transcoder can publish a ladder that adds low rungs and references the source's original rendition without re-publishing its bytes. The path resolves against where the consumer found the catalog, so a reference that escapes above the root names nothing and the catalog is rejected.
-- **Track names.** The map key is a rendition's ID and, by default, its track name. A rendition sets `track` only when the two must differ, such as two renditions of same-named tracks in different broadcasts; readers subscribe to `track` when present. An ID can't name both a video and an audio rendition.
+- **Track names.** The map key is a rendition's ID and, by default, its track name. A rendition sets `track` only when the two must differ, such as two renditions of same-named tracks in different broadcasts, or a rendition whose media changed and so needs a new name; readers subscribe to `track` when present. An ID can't name both a video and an audio rendition.
 - **Jitter.** A rendition can say how far its frames fell behind the media clock before the publisher flushed them, in whole milliseconds rounded up. Encoders report the spread of lateness above each rendition's own recent minimum, so a constant encoder delay is not jitter; container imports estimate batch spans without counting ingest delay. It describes the publisher, never the network, only grows over the life of a stream, and a player sizes its buffer to at least this much. A `0` is read as absent.
 - **Delay.** A rendition can also say how far its frames reach the transport behind the broadcast's earliest rendition, measured the same way from each rendition's minimum lateness, so a video encoder running 200 ms behind audio advertises `delay: 200` on video. It follows the same rules as jitter. A player holds the largest `delay + jitter` among the renditions it subscribes to, and never subtracts one rendition's `delay` from another's.
 - **Disabled renditions.** An audio or video rendition with `enabled: false` has no frames coming, and a player must not select it. Pausing a rendition in `@moq/publish` keeps it in the catalog this way rather than removing it, so a mute is a one-field update; a disabled video rendition encodes one black keyframe first, so a player that predates the field shows black instead of a frozen picture. The field is written only when false. The older video `stalled` field is no longer written, and readers ignore it.

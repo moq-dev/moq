@@ -46,12 +46,10 @@ export class Capture {
 				const decoder = format(config);
 				const active = broadcast.relativeBroadcast(effect, config.broadcast);
 				if (!active) return;
-				const track = active
-					.track(name)
-					.subscribe({
-						priority: Catalog.PRIORITY.audio,
-						maxDelay: subscribed(input.delay.peek(), input.maxDelay.peek()),
-					});
+				const track = active.track(name).subscribe({
+					priority: Catalog.PRIORITY.audio,
+					maxDelay: subscribed(input.delay.peek(), input.maxDelay.peek()),
+				});
 				const groups = new Set<Group.Consumer>();
 				effect.cleanup(() => {
 					track.close();

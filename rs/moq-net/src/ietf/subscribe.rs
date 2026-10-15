@@ -8,6 +8,8 @@ use crate::{
 	ietf::{Fill, Filter, GroupOrder, Location, Opaque, Parameters, Properties, RequestId},
 };
 
+use super::token::RequestToken;
+
 use super::Message;
 use super::namespace::{decode_namespace, encode_namespace};
 
@@ -35,6 +37,9 @@ pub struct Subscribe<'a> {
 	/// MAX_FILTER_RANGES, so the request is refused rather than served unfiltered.
 	/// Never encoded; we send no range filters.
 	pub range_filters: bool,
+	/// The `AUTHORIZATION TOKEN` (0x03) this request presents. At most one is
+	/// accepted: decoding refuses a repeated or second token.
+	pub authorization_token: Option<RequestToken>,
 }
 
 /// NEW_GROUP_REQUEST (0x32) arrived in draft-16.
@@ -69,7 +74,8 @@ impl Message for Subscribe<'_> {
 				let forward = r.bool()?;
 				let filter = Filter::decode(r, version)?;
 
-				super::token::unique(&Parameters::skip_request(r)?)?;
+				let tokens = Parameters::skip_request(r)?;
+				let authorization_token = super::token::single(tokens)?;
 
 				Ok(Self {
 					request_id,
@@ -82,12 +88,12 @@ impl Message for Subscribe<'_> {
 					properties_wanted: true,
 					forward,
 					range_filters: false,
+					authorization_token,
 				})
 			}
 			_ => {
-				// The token decodes but grants nothing: the session's grant is what authorizes the request.
-				// NEW_GROUP_REQUEST is ignored too, as the draft lets a publisher without
-				// dynamic groups do.
+				// NEW_GROUP_REQUEST is ignored, as the draft lets a publisher without dynamic
+				// groups do.
 				decode_params!(r, version,
 					0x02 => _object_delivery_timeout: Option<u64>,
 					0x03 => authorization_token: Vec<super::token::RequestToken>,
@@ -107,7 +113,7 @@ impl Message for Subscribe<'_> {
 					0x32 => _new_group_request: Option<u64> where has_new_group_request(version),
 					0x35 => include_properties: Option<bool> where Filter::is_draft20(version),
 				);
-				super::token::unique(&authorization_token)?;
+				let authorization_token = super::token::single(authorization_token)?;
 
 				let range_filters = [
 					subgroup_filter,
@@ -143,6 +149,7 @@ impl Message for Subscribe<'_> {
 					// Absent means 1.
 					forward: forward.unwrap_or(true),
 					range_filters,
+					authorization_token,
 				})
 			}
 		}
@@ -163,7 +170,9 @@ impl Message for Subscribe<'_> {
 				w.bool(self.forward);
 
 				self.filter.encode(w, version)?;
-				w.u8(0); // no parameters
+				encode_params!(w, version,
+					0x03 => self.authorization_token.clone(),
+				);
 			}
 			_ => {
 				// FILL_PARAMETERS arrived in draft-20. Sending it to an older peer would be an
@@ -177,6 +186,7 @@ impl Message for Subscribe<'_> {
 				let include_properties = (!self.properties_wanted && Filter::is_draft20(version)).then_some(false);
 
 				encode_params!(w, version,
+					0x03 => self.authorization_token.clone(),
 					0x10 => self.forward,
 					0x20 => self.subscriber_priority,
 					0x21 => self.filter,
@@ -371,10 +381,20 @@ impl Message for Unsubscribe {
 pub struct SubscribeUpdate {
 	pub request_id: RequestId,
 	pub subscription_request_id: Option<RequestId>,
+	/// Draft-14's fixed start, which a peer must not see decrease; unused on later drafts.
 	pub start_location: Location,
+	/// Draft-14's fixed end group (0 for open-ended); unused on later drafts.
 	pub end_group: u64,
-	pub subscriber_priority: u8,
-	pub forward: bool,
+	/// `None` leaves the priority as it is. Draft-14 cannot omit it, so `None` sends the
+	/// default there.
+	pub subscriber_priority: Option<u8>,
+	/// `None` leaves forwarding as it is, as for the priority.
+	pub forward: Option<bool>,
+	/// The new LOCATION_FILTER (draft-15+); `None` keeps the subscription's own range.
+	pub filter: Option<Filter>,
+	/// The `AUTHORIZATION TOKEN` (0x03) renewing the request's credential, if any. At
+	/// most one is accepted: decoding refuses a repeated or second token.
+	pub authorization_token: Option<RequestToken>,
 }
 
 impl Message for SubscribeUpdate {
@@ -389,9 +409,11 @@ impl Message for SubscribeUpdate {
 					.encode(w, version)?;
 				self.start_location.encode(w, version)?;
 				w.varint(self.end_group)?;
-				w.u8(self.subscriber_priority);
-				w.bool(self.forward);
-				w.u8(0); // no parameters
+				w.u8(self.subscriber_priority.unwrap_or(128));
+				w.bool(self.forward.unwrap_or(true));
+				encode_params!(w, version,
+					0x03 => self.authorization_token.clone(),
+				);
 			}
 			Version::Draft15 | Version::Draft16 => {
 				self.request_id.encode(w, version)?;
@@ -399,9 +421,10 @@ impl Message for SubscribeUpdate {
 					.expect("subscription_request_id required for draft15-16")
 					.encode(w, version)?;
 				encode_params!(w, version,
+					0x03 => self.authorization_token.clone(),
 					0x10 => self.forward,
 					0x20 => self.subscriber_priority,
-					0x21 => Filter::NextObject,
+					0x21 => self.filter,
 				);
 			}
 			_ => {
@@ -415,9 +438,10 @@ impl Message for SubscribeUpdate {
 					w.varint(0)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
 				}
 				encode_params!(w, version,
+					0x03 => self.authorization_token.clone(),
 					0x10 => self.forward,
 					0x20 => self.subscriber_priority,
-					0x21 => Filter::NextObject,
+					0x21 => self.filter,
 				);
 			}
 		}
@@ -432,9 +456,10 @@ impl Message for SubscribeUpdate {
 				let subscription_request_id = Some(RequestId::decode(r, version)?);
 				let start_location = Location::decode(r, version)?;
 				let end_group = r.varint()?;
-				let subscriber_priority = r.u8()?;
-				let forward = r.bool()?;
-				Parameters::skip_request(r)?;
+				let subscriber_priority = Some(r.u8()?);
+				let forward = Some(r.bool()?);
+				let tokens = Parameters::skip_request(r)?;
+				let authorization_token = super::token::single(tokens)?;
 
 				Ok(Self {
 					request_id,
@@ -443,6 +468,8 @@ impl Message for SubscribeUpdate {
 					end_group,
 					subscriber_priority,
 					forward,
+					filter: None,
+					authorization_token,
 				})
 			}
 			Version::Draft15 | Version::Draft16 => {
@@ -450,15 +477,12 @@ impl Message for SubscribeUpdate {
 				let subscription_request_id = Some(RequestId::decode(r, version)?);
 				decode_params!(r, version,
 					0x02 => _object_delivery_timeout: Option<u64>,
-					0x03 => _authorization_token: Vec<super::token::RequestToken>,
+					0x03 => authorization_token: Vec<RequestToken>,
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
-					0x21 => _filter: Option<Filter>,
+					0x21 => filter: Option<Filter>,
 					0x32 => _new_group_request: Option<u64> where has_new_group_request(version),
 				);
-
-				let subscriber_priority = subscriber_priority.unwrap_or(128);
-				let forward = forward.unwrap_or(true);
 
 				Ok(Self {
 					request_id,
@@ -467,6 +491,8 @@ impl Message for SubscribeUpdate {
 					end_group: 0,
 					subscriber_priority,
 					forward,
+					filter,
+					authorization_token: super::token::single(authorization_token)?,
 				})
 			}
 			_ => {
@@ -479,11 +505,11 @@ impl Message for SubscribeUpdate {
 				// consumed so a legal update does not fail the session.
 				decode_params!(r, version,
 					0x02 => _object_delivery_timeout: Option<u64>,
-					0x03 => _authorization_token: Vec<super::token::RequestToken>,
+					0x03 => authorization_token: Vec<RequestToken>,
 					0x06 => _subgroup_delivery_timeout: Option<u64> where !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17),
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
-					0x21 => _filter: Option<Filter>,
+					0x21 => filter: Option<Filter>,
 					0x23 => _fill: Option<Fill> where Filter::is_draft20(version),
 					0x25 => _subgroup_filter: Vec<Opaque> where has_range_filters(version),
 					0x26 => _object_id_filter: Vec<Opaque> where has_range_filters(version),
@@ -493,9 +519,6 @@ impl Message for SubscribeUpdate {
 					0x32 => _new_group_request: Option<u64>,
 				);
 
-				let subscriber_priority = subscriber_priority.unwrap_or(128);
-				let forward = forward.unwrap_or(true);
-
 				Ok(Self {
 					request_id,
 					subscription_request_id: None,
@@ -503,6 +526,8 @@ impl Message for SubscribeUpdate {
 					end_group: 0,
 					subscriber_priority,
 					forward,
+					filter,
+					authorization_token: super::token::single(authorization_token)?,
 				})
 			}
 		}
@@ -538,6 +563,7 @@ mod tests {
 			properties_wanted: true,
 			forward: true,
 			range_filters: false,
+			authorization_token: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -562,6 +588,7 @@ mod tests {
 			properties_wanted: true,
 			forward: true,
 			range_filters: false,
+			authorization_token: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -656,6 +683,7 @@ mod tests {
 			properties_wanted: true,
 			forward: true,
 			range_filters: false,
+			authorization_token: None,
 		};
 
 		for version in [Version::Draft17, Version::Draft18, Version::Draft19, Version::Draft20] {
@@ -687,6 +715,7 @@ mod tests {
 			properties_wanted: true,
 			forward: true,
 			range_filters: false,
+			authorization_token: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -873,6 +902,7 @@ mod tests {
 				properties_wanted: wanted,
 				forward: true,
 				range_filters: false,
+				authorization_token: None,
 			};
 
 			let encoded = encode_message(&msg, version);
@@ -907,8 +937,10 @@ mod tests {
 			subscription_request_id: Some(RequestId(5)),
 			start_location: Location { group: 0, object: 0 },
 			end_group: 0,
-			subscriber_priority: 200,
-			forward: true,
+			subscriber_priority: Some(200),
+			forward: Some(true),
+			filter: Some(Filter::NextObject),
+			authorization_token: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -916,8 +948,8 @@ mod tests {
 
 		assert_eq!(decoded.request_id, RequestId(10));
 		assert_eq!(decoded.subscription_request_id, Some(RequestId(5)));
-		assert_eq!(decoded.subscriber_priority, 200);
-		assert!(decoded.forward);
+		assert_eq!(decoded.subscriber_priority, Some(200));
+		assert_eq!(decoded.forward, Some(true));
 	}
 
 	#[test]
@@ -927,8 +959,10 @@ mod tests {
 			subscription_request_id: Some(RequestId(5)),
 			start_location: Location { group: 1, object: 2 },
 			end_group: 100,
-			subscriber_priority: 200,
-			forward: true,
+			subscriber_priority: Some(200),
+			forward: Some(true),
+			filter: Some(Filter::NextObject),
+			authorization_token: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -938,8 +972,8 @@ mod tests {
 		assert_eq!(decoded.subscription_request_id, Some(RequestId(5)));
 		assert_eq!(decoded.start_location, Location { group: 1, object: 2 });
 		assert_eq!(decoded.end_group, 100);
-		assert_eq!(decoded.subscriber_priority, 200);
-		assert!(decoded.forward);
+		assert_eq!(decoded.subscriber_priority, Some(200));
+		assert_eq!(decoded.forward, Some(true));
 	}
 
 	#[test]
@@ -997,6 +1031,7 @@ mod tests {
 			properties_wanted: true,
 			forward: true,
 			range_filters: false,
+			authorization_token: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -1031,8 +1066,10 @@ mod tests {
 			subscription_request_id: None,
 			start_location: Location { group: 0, object: 0 },
 			end_group: 0,
-			subscriber_priority: 200,
-			forward: true,
+			subscriber_priority: Some(200),
+			forward: Some(true),
+			filter: Some(Filter::NextObject),
+			authorization_token: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -1040,8 +1077,8 @@ mod tests {
 
 		assert_eq!(decoded.request_id, RequestId(10));
 		assert_eq!(decoded.subscription_request_id, None);
-		assert_eq!(decoded.subscriber_priority, 200);
-		assert!(decoded.forward);
+		assert_eq!(decoded.subscriber_priority, Some(200));
+		assert_eq!(decoded.forward, Some(true));
 	}
 
 	#[test]
@@ -1057,6 +1094,7 @@ mod tests {
 			properties_wanted: true,
 			forward: true,
 			range_filters: false,
+			authorization_token: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -1233,8 +1271,10 @@ mod tests {
 			subscription_request_id: None,
 			start_location: Location { group: 0, object: 0 },
 			end_group: 0,
-			subscriber_priority: 200,
-			forward: true,
+			subscriber_priority: Some(200),
+			forward: Some(true),
+			filter: Some(Filter::NextObject),
+			authorization_token: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -1242,8 +1282,8 @@ mod tests {
 
 		assert_eq!(decoded.request_id, RequestId(10));
 		assert_eq!(decoded.subscription_request_id, None);
-		assert_eq!(decoded.subscriber_priority, 200);
-		assert!(decoded.forward);
+		assert_eq!(decoded.subscriber_priority, Some(200));
+		assert_eq!(decoded.forward, Some(true));
 	}
 
 	/// Cross-check: draft-17 emits an extra 0-byte (required_request_id_delta) that
@@ -1256,8 +1296,10 @@ mod tests {
 			subscription_request_id: None,
 			start_location: Location { group: 0, object: 0 },
 			end_group: 0,
-			subscriber_priority: 200,
-			forward: true,
+			subscriber_priority: Some(200),
+			forward: Some(true),
+			filter: Some(Filter::NextObject),
+			authorization_token: None,
 		};
 		let v18_msg = SubscribeUpdate { ..v17_msg.clone() };
 
@@ -1278,28 +1320,41 @@ mod tests {
 	}
 
 	/// Every parameter draft-20 lets a SUBSCRIBE carry that we don't act on still decodes,
-	/// with what we have to refuse recorded rather than failing the session.
+	/// with what we have to refuse recorded rather than failing the session. A second distinct
+	/// token, which the draft allows, refuses only the request.
 	#[test]
 	fn subscribe_decodes_every_draft20_parameter() {
+		let second: &[u8] = &[0x00, 0x03, 0x03, 0x00, 0xBB];
 		#[rustfmt::skip]
-		let body = subscribe_body(&[
-			0x06, // Number of Parameters
-			0x03, 0x03, 0x03, 0x00, 0xAA, // AUTHORIZATION TOKEN: USE_VALUE, type 0, one byte
-			0x00, 0x03, 0x03, 0x00, 0xBB, // a second one, which the draft allows
-			0x0D, 0x00, // FORWARD (0x10) = 0, a uint8
-			0x15, 0x03, 0x00, 0x00, 0x01, // SUBGROUP_FILTER (0x25): SetID 0, range 0-1
-			0x0D, 0x07, // NEW_GROUP_REQUEST (0x32), a varint
-			0x03, 0x00, // INCLUDE_PROPERTIES (0x35) = 0, a uint8
-		]);
+		let body = |second: &[u8]| subscribe_body(&<[&[u8]]>::concat(&[
+			&[0x05 + u8::from(!second.is_empty())], // Number of Parameters
+			&[0x03, 0x03, 0x03, 0x00, 0xAA], // AUTHORIZATION TOKEN: USE_VALUE, type 0, one byte
+			second, // a second, distinct one, which the draft allows
+			&[0x0D, 0x00], // FORWARD (0x10) = 0, a uint8
+			&[0x15, 0x03, 0x00, 0x00, 0x01], // SUBGROUP_FILTER (0x25): SetID 0, range 0-1
+			&[0x0D, 0x07], // NEW_GROUP_REQUEST (0x32), a varint
+			&[0x03, 0x00], // INCLUDE_PROPERTIES (0x35) = 0, a uint8
+		]));
 
 		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
-			let wire = body.clone();
+			let wire = body(&[]);
 			let mut buf = Decoder::new(&wire, version.into());
 			let msg = Subscribe::decode_msg(&mut buf, version).unwrap_or_else(|e| panic!("{version}: {e}"));
 			assert!(buf.is_empty(), "{version}: trailing bytes");
+			assert!(msg.authorization_token.is_some(), "{version}");
 			assert!(!msg.forward, "{version}");
 			assert!(msg.range_filters, "{version}");
 			assert!(!msg.properties_wanted, "{version}");
+
+			let wire = body(second);
+			let mut buf = Decoder::new(&wire, version.into());
+			assert!(
+				matches!(
+					Subscribe::decode_msg(&mut buf, version),
+					Err(DecodeError::MultipleAuthTokens)
+				),
+				"{version}"
+			);
 		}
 	}
 
@@ -1318,6 +1373,7 @@ mod tests {
 			properties_wanted: false,
 			forward: true,
 			range_filters: false,
+			authorization_token: None,
 		};
 
 		#[rustfmt::skip]
@@ -1379,6 +1435,7 @@ mod tests {
 				properties_wanted: true,
 				forward: false,
 				range_filters: false,
+				authorization_token: None,
 			};
 			let decoded: Subscribe = decode_message(&encode_message(&msg, version), version).unwrap();
 			assert!(!decoded.forward, "{version}");

@@ -986,7 +986,7 @@ mod tests {
 			.unwrap();
 		let mut subscriber = status.consume();
 		tokio::time::advance(Duration::from_secs(3)).await;
-		status.update(&1).unwrap();
+		status.update(moq_net::Timed::from(&1).at(adopted.now())).unwrap();
 
 		let waiter = kio::Waiter::noop();
 		let std::task::Poll::Ready(Ok(Some(mut group))) = subscriber.poll_recv_group(&waiter) else {

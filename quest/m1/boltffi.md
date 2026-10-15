@@ -37,7 +37,7 @@ Decided with the maintainer on 2026-10-13:
   `read_frame`, and one async read loop. Bind them with both generators side
   by side via `cfg_attr` in a spike crate, not in moq-ffi. The spike crate
   carries its own benchmarks, so it does not wait on the
-  [payload harness](/quest/m1/ffi-bytes.md). It also builds for wasm32:
+  [binding benchmark](/quest/m1/ffi-bench.md). It also builds for wasm32:
   the browser comparison in #5478 reuses this slice for per-call numbers,
   so tell that quest if the crate's location or shape changes.
 - **Measure**: no-op and record call overhead, payload throughput across

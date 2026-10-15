@@ -127,7 +127,7 @@ pub struct AudioConfig {
 	#[serde(rename = "numberOfChannels")]
 	pub channel_count: u32,
 
-	// The maximum bitrate of the audio track in bits per second. It only rises.
+	// The maximum bitrate of the audio track in bits per second.
 	#[serde(default)]
 	pub bitrate: Option<u64>,
 

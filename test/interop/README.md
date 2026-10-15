@@ -201,7 +201,8 @@ so a broken reader cannot make compatibility failures ambiguous.
 
 Each `moq-net` library states whether a draft has FETCH (lite-05 onward
 today). A draft without it in both is logged and its FETCH lanes skipped; one
-the release supports and the checkout dropped fails. Both Rust versions FETCH the group the
+the release supports and the checkout dropped fails, unless a planned break covers
+the `fetch-capability` cell for that version. Both Rust versions FETCH the group the
 publisher's own compat client observed and compare every frame's exact
 payload. JS publishers write one group after that subscriber's demand, and the
 opposite-source Rust CLI FETCHes it by the same observed ID.
