@@ -12,8 +12,8 @@ fails there while passing in a standalone clone.
 ## Plan
 
 Decided 2026-10-15: pass `--ignoreConfig` to the drafts `tsc` call, keeping
-its explicit flags as the whole configuration. Rejected: a `drafts/tsconfig.json`,
-which would still be found by the same upward search only if it moved the
-check to `-p`, and is more surface for one file. Reproduce by running the check
+its explicit flags as the whole configuration. Rejected: a
+`drafts/tsconfig.json` run with `-p`, which adds a config file for one script.
+Reproduce by running the check
 from a checkout nested under a directory holding a `tsconfig.json`, and confirm
 the standalone run is unchanged.
