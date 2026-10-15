@@ -133,7 +133,7 @@ hmac = "0.13"
 humantime = "2.3"
 humantime-serde = "1.1.1"
 hyper-util = { version = "0.1.21", features = ["tokio"] }
-io-uring = "0.7.14"
+io-uring = "0.7.15"
 jsonwebtoken = "11"
 kio = { version = "0.6.2", path = "rs/kio" }
 lazy_static = "1.5"

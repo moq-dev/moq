@@ -77,7 +77,6 @@ optimization.
 - [Relay profiling](/quest/m2/perf/lock-profile.md) - one recipe captures lock wait by stack (first), CPU stacks, and heap profiles, with no code in kio
 - [Lock-wait CPU from switches](/quest/m2/perf/switch-cpu.md) - wait/CPU takes CPU from the same perf recording as the waits, removing schedstat's ~2% low bias
 - [Bench relay port](/quest/m2/perf/bench-relay-port.md) - the bench harness proves its relay owns the port before reporting ready
-- [One enter per turn](/quest/m2/perf/uring-one-enter.md) - a parking turn pays one io_uring_enter, submits flush deferred completions, and SQEs per enter is a counter
 - [Group cost](/quest/m2/perf/group-cost.md) - count and cut the allocations and time spent relaying one small group to one viewer
 - [Run to quiescence](/quest/m2/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass and train budget that keeps the fairness rule
 - [Announce replay](/quest/m2/perf/announce-replay.md) - the initial announce set replays in linear time, so joins don't slow with the route count

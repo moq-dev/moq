@@ -60,7 +60,10 @@ A few worth alerting on:
   certificate reload) exits the relay instead.
 
 With `--runtime-io-uring`, each QUIC worker also reports `moq_relay_uring_*`
-counters under a `worker` label. A dead worker shows stuck zeros rather than
+counters under a `worker` label. Compare enters to turns for drive-loop
+amortization, and watch queue-pressure enters when batching collapses. The
+SQE and CQE per-enter histograms include empty enters, so they show whether
+syscalls carry useful work. A dead worker shows stuck zeros rather than
 disappearing.
 
 ### GET /sessions
