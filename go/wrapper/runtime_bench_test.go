@@ -1,3 +1,5 @@
+//go:build unix
+
 package moq_test
 
 import (
@@ -7,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -26,6 +29,10 @@ var benchCases = []benchCase{
 	{100, 1, 1}, {1024, 1, 1}, {64 * 1024, 1, 1}, {1024 * 1024, 1, 1},
 	{1024, 1, 4}, {1024, 4, 1}, {1024, 4, 4},
 }
+
+// benchCacheBytes is each case's origin cache budget: far above one round's groups, so
+// eviction only reclaims groups every subscriber has read, and memory stays flat.
+const benchCacheBytes uint64 = 64 << 20
 
 // frames per group, holding a group under moq-net's 32 MB group cache.
 func (c benchCase) frames() int { return min(max((8<<20)/c.size, 1), 64) }
@@ -143,10 +150,22 @@ func benchThroughput(b *testing.B, c benchCase) {
 	ctx, cancel := context.WithCancel(context.Background())
 	b.Cleanup(cancel)
 	frames := c.frames()
+	cacheBytes := benchCacheBytes
+	origin := moq.NewOriginProducerWithConfig(moq.OriginConfig{CacheCapacityBytes: &cacheBytes})
+	// The origin owns the cache policy; keep it until the case ends.
+	b.Cleanup(func() { runtime.KeepAlive(origin) })
+	broadcast, err := origin.CreateBroadcast("bench")
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = broadcast.Close() })
 	tracks := make([]*moq.TrackProducer, c.publishers)
 	consumers := make([]*moq.TrackConsumer, 0, c.publishers*c.subscribers)
 	for p := range tracks {
-		tracks[p] = benchTrack(b, fmt.Sprint(p))
+		tracks[p], err = broadcast.PublishTrack(fmt.Sprint(p), nil)
+		if err != nil {
+			b.Fatal(err)
+		}
 		for range c.subscribers {
 			consumer, err := tracks[p].Consume(nil)
 			if err != nil {

@@ -17,6 +17,9 @@ from typing import Callable
 import moq
 
 WARMUP = 3
+# Each case's origin cache budget: far above one round's groups, so eviction only
+# reclaims groups every subscriber has read, and memory stays flat over a long run.
+CACHE_BYTES = 64 << 20
 BUDGET = float(os.environ.get("MOQ_BENCH_SECONDS", "1"))
 
 
@@ -65,7 +68,9 @@ async def read(case: Case, consumer: moq.TrackConsumer, payload: bytes, n: int) 
 
 
 async def throughput(case: Case, results: list[dict]) -> None:
-    tracks = [moq.BroadcastProducer().publish_track(str(p)) for p in range(case.publishers)]
+    origin = moq.OriginProducer(cache_capacity_bytes=CACHE_BYTES)
+    broadcast = origin.create_broadcast("bench")
+    tracks = [broadcast.publish_track(str(p)) for p in range(case.publishers)]
     consumers = [track.consume() for track in tracks for _ in range(case.subscribers)]
     # A non-uniform payload, so a zero-filled or truncated copy fails the check.
     payload = bytes(i % 251 for i in range(case.size))

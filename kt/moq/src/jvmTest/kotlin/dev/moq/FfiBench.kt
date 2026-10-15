@@ -26,6 +26,10 @@ private val cases = listOf(100, 1024, 64 * 1024, 1024 * 1024).map { Case(it, 1, 
     listOf(1 to 4, 4 to 1, 4 to 4).map { (p, s) -> Case(1024, p, s) }
 
 private const val WARMUP = 3
+
+// Each case's origin cache budget: far above one round's groups, so eviction only
+// reclaims groups every subscriber has read, and memory stays flat over a long run.
+private const val CACHE_BYTES: ULong = 67_108_864uL // 64 MiB
 private val budgetNs = ((System.getenv("MOQ_BENCH_SECONDS")?.toDouble() ?: 1.0) * 1e9).toLong()
 
 /** Process CPU time, user plus system, across every thread. */
@@ -47,11 +51,14 @@ class FfiBench {
         val results = mutableListOf<Result>()
         runBlocking { cases.forEach { throughput(it, results) } }
 
-        val track = BroadcastProducer().publishTrack("calls", null)
-        val group = track.appendGroup().consume()
+        val broadcast = BroadcastProducer()
+        val track = broadcast.publishTrack("calls", null)
+        val producer = track.appendGroup()
+        val group = producer.consume()
         call("sequence", results) { group.sequence() }
         val consumer = track.consume(null)
         call("info", results) { consumer.info() }
+        listOf(consumer, group, producer, track, broadcast).forEach { it.close() }
 
         val json = buildJsonArray {
             results.forEach {
@@ -67,7 +74,10 @@ class FfiBench {
     }
 
     private suspend fun throughput(case: Case, results: MutableList<Result>) = kotlinx.coroutines.coroutineScope {
-        val tracks = (0 until case.publishers).map { BroadcastProducer().publishTrack("$it", null) }
+        // Close every handle inside the case, so native teardown never lands in a later one.
+        val origin = OriginProducer(OriginConfig(cacheCapacityBytes = CACHE_BYTES))
+        val broadcast = origin.createBroadcast("bench")
+        val tracks = (0 until case.publishers).map { broadcast.publishTrack("$it", null) }
         val consumers = tracks.flatMap { track -> (0 until case.subscribers).map { track.consume(null) } }
         // A non-uniform payload, so a zero-filled or truncated copy fails the check.
         val payload = ByteArray(case.size) { (it % 251).toByte() }
@@ -76,20 +86,22 @@ class FfiBench {
         suspend fun step(n: Long) {
             val readers = consumers.map { consumer ->
                 async {
-                    val group = assertNotNull(consumer.recvGroup(), "track ended")
-                    repeat(case.frames) { f ->
-                        val frame = assertNotNull(group.readFrame(), "group ended")
-                        assertTrue(frame.payload.contentEquals(payload), "corrupt frame $f of round $n")
-                        assertEquals((n * case.frames + f).toULong(), frame.timestampUs)
+                    assertNotNull(consumer.recvGroup(), "track ended").use { group ->
+                        repeat(case.frames) { f ->
+                            val frame = assertNotNull(group.readFrame(), "group ended")
+                            assertTrue(frame.payload.contentEquals(payload), "corrupt frame $f of round $n")
+                            assertEquals((n * case.frames + f).toULong(), frame.timestampUs)
+                        }
                     }
                 }
             }
             tracks.forEach { track ->
-                val group = track.appendGroup()
-                repeat(case.frames) { f ->
-                    group.writeFrame(Frame(payload = payload, timestampUs = (n * case.frames + f).toULong()))
+                track.appendGroup().use { group ->
+                    repeat(case.frames) { f ->
+                        group.writeFrame(Frame(payload = payload, timestampUs = (n * case.frames + f).toULong()))
+                    }
+                    group.finish()
                 }
-                group.finish()
             }
             readers.awaitAll()
         }
@@ -105,6 +117,7 @@ class FfiBench {
         val mb = (n - WARMUP) * case.delivered / 1e6
         results += Result("throughput/${case.name}", "MB/s", mb / (wallNs / 1e9))
         results += Result("cpu/${case.name}", "ms/MB", cpuUsedNs / 1e6 / mb)
+        (consumers + tracks + listOf(broadcast, origin)).forEach { it.close() }
     }
 
     private inline fun call(name: String, results: MutableList<Result>, fn: () -> Unit) {

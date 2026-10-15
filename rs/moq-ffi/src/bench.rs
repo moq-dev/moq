@@ -6,6 +6,7 @@
 
 use crate::consumer::MoqTrackConsumer;
 use crate::media::MoqFrame;
+use crate::origin::{MoqOriginConfig, MoqOriginProducer};
 use crate::producer::{MoqBroadcastProducer, MoqTrackProducer};
 
 use std::future::Future;
@@ -14,6 +15,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const WARMUP: u64 = 3;
+
+/// Each case's origin cache budget: far above one round's groups, so eviction only
+/// reclaims groups every subscriber has read, and memory stays flat over a long run.
+const CACHE_BYTES: u64 = 64 << 20;
 
 /// One throughput case: `publishers` tracks, each read by `subscribers` consumers.
 struct Case {
@@ -220,7 +225,10 @@ async fn net_round(
 async fn rust_ffi() {
 	let mut report = Report::default();
 	for case in Case::all() {
-		let broadcast = MoqBroadcastProducer::new().unwrap();
+		let origin = MoqOriginProducer::new(MoqOriginConfig {
+			cache_capacity_bytes: Some(CACHE_BYTES),
+		});
+		let broadcast = origin.create_broadcast("bench".into()).unwrap();
 		let tracks: Vec<_> = (0..case.publishers)
 			.map(|p| broadcast.publish_track(p.to_string(), None).unwrap())
 			.collect();
@@ -249,7 +257,14 @@ async fn rust_ffi() {
 async fn rust_net() {
 	let mut report = Report::default();
 	for case in Case::all() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
+		let mut config = moq_net::origin::Config::default();
+		let cache = moq_net::cache::Config::default()
+			.with_capacity(CACHE_BYTES)
+			.with_expiry(config.pool.expiry());
+		config.pool = moq_net::cache::Pool::new(cache);
+		let (origin, driver) = moq_net::origin::Producer::new(config);
+		let driver = tokio::spawn(moq_net::time::run(driver));
+		let broadcast = origin.create_broadcast("bench").unwrap();
 		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO);
 		let tracks: Vec<_> = (0..case.publishers)
 			.map(|p| broadcast.create_track(p.to_string(), Some(info.clone())).unwrap())
@@ -268,6 +283,7 @@ async fn rust_net() {
 				consumers.replace(returned);
 			})
 			.await;
+		driver.abort();
 	}
 	report.write("rust-net");
 }
