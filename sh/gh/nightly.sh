@@ -18,6 +18,7 @@ case "${1:-}" in
     rust)
         run just rs bench-latency
         run just rs bench-playback
+        run just rs bench-feed-fetch
         # Fuzz exposes moq-net's codec benches; it is not a feature of the other crates.
         run cargo bench --locked --no-fail-fast -p moq-net --features fuzz --bench '*' -- --test
         # Each kio routine once, including the contended bench's worker threads.

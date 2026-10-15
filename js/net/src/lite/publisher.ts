@@ -384,6 +384,7 @@ export class Publisher {
 
 	// Subscriptions and open TRACK streams the peer holds live on this session.
 	#interests: Interests;
+	#fetches: Slots;
 
 	// The one writer for the outbound datagram stream (getWriter locks it), acquired once at
 	// construction when this version + transport carry datagrams, released in close(). Its
@@ -435,6 +436,7 @@ export class Publisher {
 	) {
 		this.#quic = quic;
 		this.#interests = new Interests(new Slots(limits.subscriptions, { quic, reason: "too many subscriptions" }));
+		this.#fetches = new Slots(limits.fetches, { quic, reason: "too many fetches" });
 		this.#grant = auth?.grant;
 		this.#ready = auth?.ready ?? Promise.resolve();
 		this.version = version;
@@ -855,25 +857,30 @@ export class Publisher {
 	 * @internal
 	 */
 	async runFetch(msg: Fetch, stream: Stream) {
-		if (!supportsTrackStream(this.version)) {
-			stream.writer.reset(new Error("fetch requires moq-lite-05 or newer"));
-			return;
-		}
-		// Like a subscription, the fetch holds its watch until the last frame: a group can stay
-		// open as long as its track, so a check at accept alone would keep serving after a shrink.
-		const revoked = unauthorized(msg.broadcast);
-		let fetched: group.Consumer | undefined;
-		const watch = this.#watch(msg.broadcast, () => {
-			console.debug(`fetch revoked: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
-			fetched?.close(revoked);
-			stream.abort(revoked);
-		});
+		this.#fetches.acquire();
 		try {
-			await this.#serveFetch(msg, stream, watch, (group) => {
-				fetched = group;
+			if (!supportsTrackStream(this.version)) {
+				stream.writer.reset(new Error("fetch requires moq-lite-05 or newer"));
+				return;
+			}
+			// Like a subscription, the fetch holds its watch until the last frame: a group can stay
+			// open as long as its track, so a check at accept alone would keep serving after a shrink.
+			const revoked = unauthorized(msg.broadcast);
+			let fetched: group.Consumer | undefined;
+			const watch = this.#watch(msg.broadcast, () => {
+				console.debug(`fetch revoked: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
+				fetched?.close(revoked);
+				stream.abort(revoked);
 			});
+			try {
+				await this.#serveFetch(msg, stream, watch, (group) => {
+					fetched = group;
+				});
+			} finally {
+				watch.dispose();
+			}
 		} finally {
-			watch.dispose();
+			this.#fetches.release();
 		}
 	}
 

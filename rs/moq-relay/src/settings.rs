@@ -222,6 +222,8 @@ struct Session {
 	announces: Option<usize>,
 	#[usage(env = "MOQ_SESSION_SUBSCRIPTIONS", cli("--session-subscriptions"))]
 	subscriptions: Option<usize>,
+	#[usage(env = "MOQ_SESSION_FETCHES", cli("--session-fetches"))]
+	fetches: Option<usize>,
 }
 
 #[derive(usage::Config)]
@@ -231,4 +233,6 @@ struct Peer {
 	announces: Option<usize>,
 	#[usage(env = "MOQ_PEER_SUBSCRIPTIONS", cli("--peer-subscriptions"))]
 	subscriptions: Option<usize>,
+	#[usage(env = "MOQ_PEER_FETCHES", cli("--peer-fetches"))]
+	fetches: Option<usize>,
 }
