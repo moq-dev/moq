@@ -5956,16 +5956,19 @@ mod test {
 	fn cache_gc_dates_activity_before_expiring_it() {
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(1)));
 		let now = crate::model::clock::now();
-		assert_eq!(pool.gc(now), Some(now + Duration::from_millis(500)));
+		assert_eq!(
+			pool.gc(now, &kio::Waiter::noop()),
+			Some(now + Duration::from_millis(500))
+		);
 		let producer = track_producer_pooled("test", pool.clone());
 		let mut group = producer.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, b"first".as_slice()).unwrap();
 		producer.append_group().unwrap();
 		// Activity written while cleanup was idle gets the new supplied time.
 		let later = now + Duration::from_secs(60);
-		pool.gc(later);
+		pool.gc(later, &kio::Waiter::noop());
 		assert!(producer.state.read().lookup.contains_key(&0));
-		pool.gc(later + Duration::from_secs(2));
+		pool.gc(later + Duration::from_secs(2), &kio::Waiter::noop());
 		assert!(!producer.state.read().lookup.contains_key(&0));
 	}
 
@@ -5977,12 +5980,12 @@ mod test {
 		let now = crate::model::clock::now();
 		let groups: Vec<_> = (0..EVICT_SCAN * 3).map(|_| producer.append_group().unwrap()).collect();
 		producer.append_group().unwrap();
-		pool.gc(now);
+		pool.gc(now, &kio::Waiter::noop());
 		// Keep more than a write scan's worth of leading entries fresh.
 		for group in &groups[..EVICT_SCAN * 2] {
 			group.cache_refresh();
 		}
-		pool.gc(now + expiry * 2);
+		pool.gc(now + expiry * 2, &kio::Waiter::noop());
 		let state = producer.state.read();
 		for sequence in 0..EVICT_SCAN * 2 {
 			assert!(state.lookup.contains_key(&(sequence as u64)), "fresh front survives");

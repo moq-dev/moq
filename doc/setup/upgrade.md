@@ -27,6 +27,14 @@ These land with the next breaking release, not the 2026-09-23 train.
   now take effect on parsed and merged configs unless the flag or environment
   variable was actually given. TOML keys, C ABI, binding records, and wire
   formats are unchanged.
+- **Max age and max delay count wall-clock time too.** A superseded group is
+  stale once its successor arrived a full budget ago, as well as by media time,
+  so an untimed track is no longer exempt: with the default zero `max_delay`,
+  an untimed subscriber starts at the latest group and skips each superseded
+  one. Give it a budget to replay or tolerate reordering.
+- **`cache::Pool::gc` takes a waiter.** In Rust, `gc(now)` is
+  `gc(now, waiter)`, like `Driver::poll`: call it again when the waiter wakes,
+  since a parked read can arm an earlier deadline than the one returned.
 - **A QUIC load-balancer nonce needs its server id.** `listen.lb_nonce`,
   `--listen-quic-lb-nonce`, and `MOQ_LISTEN_QUIC_LB_NONCE` without `lb_id` stop
   startup. Setting `lb_id` (or `lb_nonce`) and `load_balancer` together also

@@ -452,7 +452,7 @@ impl Room {
 	fn tick(&mut self) {
 		self.cache_now += Duration::from_secs(1);
 		for pool in self.pools() {
-			pool.gc(self.cache_now);
+			pool.gc(self.cache_now, &kio::Waiter::noop());
 		}
 	}
 

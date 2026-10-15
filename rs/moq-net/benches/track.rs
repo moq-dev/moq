@@ -215,7 +215,7 @@ impl Swept {
 			.collect();
 		// The first call starts the pool's clock and runs its first pass.
 		let now = Instant::now();
-		pool.gc(now);
+		pool.gc(now, &kio::Waiter::noop());
 		Self {
 			_broadcast: broadcast,
 			_tracks: tracks,
@@ -279,7 +279,7 @@ impl Aged {
 		let pool = broadcast.info().pool.clone();
 		// The driver's first collection, which arms wall-clock deadlines.
 		let now = Instant::now();
-		pool.gc(now);
+		pool.gc(now, &kio::Waiter::noop());
 		let mut reads = Vec::with_capacity(tracks);
 		let tracks = (0..tracks)
 			.map(|i| {
@@ -325,7 +325,7 @@ fn bench_wall(c: &mut Criterion) {
 			group.throughput(Throughput::Elements(1));
 			group.bench_function(BenchmarkId::new("idle", &id), |b| {
 				let aged = Aged::new(tracks, groups);
-				b.iter(|| black_box(aged.pool.gc(aged.now)));
+				b.iter(|| black_box(aged.pool.gc(aged.now, &kio::Waiter::noop())));
 			});
 			// Re-polling one parked read re-arms its deadline.
 			group.bench_function(BenchmarkId::new("repoll", &id), |b| {
@@ -346,7 +346,7 @@ fn bench_wall(c: &mut Criterion) {
 					|| Aged::new(tracks, groups),
 					|aged| {
 						// Past every deadline, which setup armed after `now`.
-						black_box(aged.pool.gc(aged.now + 2 * AGED_BUDGET));
+						black_box(aged.pool.gc(aged.now + 2 * AGED_BUDGET, &kio::Waiter::noop()));
 						aged
 					},
 					BatchSize::PerIteration,
@@ -364,7 +364,7 @@ fn bench_gc(c: &mut Criterion) {
 		group.throughput(Throughput::Elements(1));
 		group.bench_with_input(BenchmarkId::new("idle", tracks), &tracks, |b, &tracks| {
 			let swept = Swept::new(tracks);
-			b.iter(|| black_box(swept.pool.gc(swept.now)));
+			b.iter(|| black_box(swept.pool.gc(swept.now, &kio::Waiter::noop())));
 		});
 		// A due pass, stepping one sweep interval per call.
 		group.throughput(Throughput::Elements(tracks as u64));
@@ -374,7 +374,7 @@ fn bench_gc(c: &mut Criterion) {
 			let mut now = swept.now;
 			b.iter(|| {
 				now += interval;
-				black_box(swept.pool.gc(now))
+				black_box(swept.pool.gc(now, &kio::Waiter::noop()))
 			});
 		});
 	}

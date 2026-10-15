@@ -288,8 +288,11 @@ impl Pool {
 
 	/// Collect idle cache entries and return the next cleanup time.
 	///
-	/// Call after polling and at the returned deadline, including when idle.
-	/// Calls before that deadline only advance the pool's sampled clock. A due
+	/// Collect idle cache entries and return the next cleanup time, like
+	/// [`Driver::poll`](crate::time::Driver::poll).
+	///
+	/// Call at the returned deadline, and again whenever `waiter` wakes, including when
+	/// idle. Calls before that deadline only advance the pool's sampled clock. A due
 	/// pass visits every cached group, dating accesses since the last pass and
 	/// reclaiming idle groups except each live track's latest. Delayed calls extend
 	/// retention. Shared pools use the latest supplied instant.
@@ -300,14 +303,9 @@ impl Pool {
 	///
 	/// It also releases reads parked on a wall-clock deadline (a group's successor
 	/// arriving plus the reader's budget), so the returned deadline includes the earliest
-	/// of those. Until a pool is first collected, nothing parks on one.
-	pub fn gc(&self, now: crate::time::Instant) -> Option<crate::time::Instant> {
-		self.advance(now, true, None)
-	}
-
-	/// [`Self::gc`] for a driver, which `waiter` wakes when a deadline earlier than the
-	/// one returned is armed.
-	pub(crate) fn collect(&self, now: crate::time::Instant, waiter: &kio::Waiter) -> Option<crate::time::Instant> {
+	/// of those, and `waiter` wakes when a read arms one earlier than it. Until a pool is
+	/// first collected, nothing parks on one.
+	pub fn gc(&self, now: crate::time::Instant, waiter: &kio::Waiter) -> Option<crate::time::Instant> {
 		self.advance(now, true, Some(waiter))
 	}
 
@@ -1002,21 +1000,25 @@ mod test {
 		let now = super::super::clock::wall();
 		let at = now + Duration::from_secs(1);
 		track.watch_wall(at, &kio::Waiter::noop());
-		assert_eq!(pool.gc(now), None, "an undriven pool parks nothing");
+		assert_eq!(
+			pool.gc(now, &kio::Waiter::noop()),
+			None,
+			"an undriven pool parks nothing"
+		);
 
 		let (driver, driving) = flag();
-		assert_eq!(pool.collect(now, &driving), None);
+		assert_eq!(pool.gc(now, &driving), None);
 		let (read, reading) = flag();
 		track.watch_wall(at, &reading);
 		assert!(
 			driver.0.load(Ordering::SeqCst),
 			"the driver slept through an earlier deadline"
 		);
-		assert_eq!(pool.collect(now, &driving), Some(at));
+		assert_eq!(pool.gc(now, &driving), Some(at));
 
-		pool.collect(at - Duration::from_millis(1), &driving);
+		pool.gc(at - Duration::from_millis(1), &driving);
 		assert!(!read.0.load(Ordering::SeqCst), "released early");
-		assert_eq!(pool.collect(at, &driving), None);
+		assert_eq!(pool.gc(at, &driving), None);
 		assert!(read.0.load(Ordering::SeqCst), "the read was never released");
 	}
 
@@ -1269,21 +1271,24 @@ mod test {
 	fn collecting_before_the_deadline_does_not_postpone_it() {
 		let pool = Pool::new(Config::default().with_expiry(Duration::from_secs(2)));
 		let now = crate::time::Instant::now();
-		let deadline = pool.gc(now);
-		assert_eq!(pool.gc(now + Duration::from_millis(500)), deadline);
+		let deadline = pool.gc(now, &kio::Waiter::noop());
+		assert_eq!(
+			pool.gc(now + Duration::from_millis(500), &kio::Waiter::noop()),
+			deadline
+		);
 	}
 
 	#[test]
 	fn bounded_pools_sample_recency_without_expiration() {
 		let pool = Pool::unbounded();
 		let now = crate::time::Instant::now();
-		assert_eq!(pool.gc(now), None);
+		assert_eq!(pool.gc(now, &kio::Waiter::noop()), None);
 		pool.resize(1024);
-		assert_eq!(pool.gc(now), Some(now + DEFAULT_EXPIRY / 2));
-		pool.gc(now + DEFAULT_EXPIRY);
+		assert_eq!(pool.gc(now, &kio::Waiter::noop()), Some(now + DEFAULT_EXPIRY / 2));
+		pool.gc(now + DEFAULT_EXPIRY, &kio::Waiter::noop());
 		assert!(pool.now() > 0);
 		pool.resize(None);
-		assert_eq!(pool.gc(now + DEFAULT_EXPIRY), None);
+		assert_eq!(pool.gc(now + DEFAULT_EXPIRY, &kio::Waiter::noop()), None);
 	}
 
 	#[test]

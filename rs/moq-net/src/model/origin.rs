@@ -2405,7 +2405,7 @@ impl Driver {
 		waiter.batch(|| {
 			self.timers.advance(now);
 			let result = self.state.poll(waiter);
-			let gc = self.pool.collect(now, waiter);
+			let gc = self.pool.gc(now, waiter);
 			if result.is_ready() {
 				return Err(Error::Closed);
 			}
