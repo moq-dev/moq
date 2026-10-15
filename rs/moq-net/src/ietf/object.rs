@@ -16,6 +16,30 @@ pub(super) fn encoding(version: Version) -> Encoding {
 	}
 }
 
+/// Before draft-19, 0x06 is no Object Property, so a publisher on draft-ietf-moq-loc-03
+/// used it for the Timestamp. Draft-19 assigns it to SUBGROUP_DELIVERY_TIMEOUT.
+fn legacy_time(version: Version) -> bool {
+	matches!(
+		version,
+		Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18
+	)
+}
+
+/// Only draft-14 lets a status object, such as END_OF_GROUP, carry properties.
+#[cfg(feature = "async")]
+pub(super) fn status_has_properties(version: Version) -> bool {
+	version == Version::Draft14
+}
+
+/// Refuse properties on a status object where its draft forbids them.
+#[cfg(feature = "async")]
+pub(super) fn check_status(version: Version, properties: &Properties) -> Result<(), Error> {
+	match status_has_properties(version) || properties.is_empty() {
+		true => Ok(()),
+		false => Err(Error::Session(crate::SessionError::ProtocolViolation)),
+	}
+}
+
 pub(super) struct Decoded {
 	pub properties: Properties,
 	pub timestamp: Option<Timestamp>,
@@ -48,7 +72,7 @@ fn list(data: &Bytes, version: Version, immutable: bool) -> Result<List, Error> 
 		previous = id;
 		let value = if id % 2 == 0 {
 			let value = decoder.varint()?;
-			if matches!(id, 0x10 | 0x06) {
+			if id == 0x10 || (id == 0x06 && legacy_time(version)) {
 				result.time = Some(value);
 			}
 			if id == 0x3e && result.gap.replace(value).is_some() {
@@ -92,6 +116,7 @@ pub(super) fn read(data: &Bytes, version: Version, timescale: Option<Timescale>)
 	let mut parsed = list(data, version, false)?;
 	parsed.properties.timescale = timescale.filter(|_| parsed.time.is_some());
 	parsed.properties.sealed_time = parsed.sealed_time;
+	parsed.properties.legacy_time = legacy_time(version);
 	let timestamp = match (parsed.time, timescale) {
 		(Some(value), Some(timescale)) => Some(Timestamp::new(value, timescale).map_err(|_| Error::MalformedTrack)?),
 		_ => None,
@@ -133,6 +158,12 @@ pub(super) fn write(properties: &Properties, version: Version, timescale: Option
 	if properties.sealed_time && (convert.is_some() || unstamped) {
 		return Err(Error::Unsupported);
 	}
+	// Across draft-19, 0x06 turns from a Timestamp into SUBGROUP_DELIVERY_TIMEOUT or back,
+	// so neither reading survives the hop. A mutable one is dropped; a sealed one refused.
+	let flipped = properties.legacy_time != legacy_time(version);
+	if flipped && sealed_key(properties, version, 0x06)? {
+		return Err(Error::Unsupported);
+	}
 	let timestamp = properties
 		.timestamp
 		.filter(|_| !unstamped)
@@ -143,17 +174,18 @@ pub(super) fn write(properties: &Properties, version: Version, timescale: Option
 			})
 		})
 		.transpose()?;
-	// The draft-03 Timestamp key carries the same units.
+	// The draft-03 Timestamp key carries the same units. Later, it is opaque.
 	let legacy = properties
 		.values
 		.iter()
-		.filter(|property| property.id == 0x06 && !unstamped)
-		.map(|property| match property.value {
-			Value::Int(value) => Ok(Property {
+		.filter(|property| property.id == 0x06 && !flipped && !(properties.legacy_time && unstamped))
+		.map(|property| match (properties.legacy_time, &property.value) {
+			(true, Value::Int(value)) => Ok(Property {
 				id: 0x06,
-				value: time(value)?,
+				value: time(*value)?,
 			}),
-			_ => Err(Error::MalformedTrack),
+			(true, Value::Bytes(_)) => Err(Error::MalformedTrack),
+			(false, _) => Ok(property.clone()),
 		})
 		.collect::<Result<Vec<_>, _>>()?;
 	let mut sorted: Vec<_> = properties
@@ -180,6 +212,18 @@ pub(super) fn write(properties: &Properties, version: Version, timescale: Option
 		}
 	}
 	Ok(out)
+}
+
+/// Whether the immutable block holds a property with `id`.
+fn sealed_key(properties: &Properties, version: Version, id: u64) -> Result<bool, Error> {
+	let Some(sealed) = properties.values.iter().find(|property| property.id == 0x0b) else {
+		return Ok(false);
+	};
+	let Value::Bytes(bytes) = &sealed.value else {
+		return Err(Error::MalformedTrack);
+	};
+	let nested = list(bytes, version, true)?;
+	Ok(nested.properties.values.iter().any(|property| property.id == id))
 }
 
 #[cfg(test)]
@@ -251,25 +295,59 @@ mod tests {
 	/// in the units the egress declares, not the ones it arrived in.
 	#[test]
 	fn mutable_timestamps_follow_the_egress_units() {
-		for key in [0x10, 0x06] {
+		for (key, version) in [(0x10, Version::Draft22), (0x06, Version::Draft18)] {
 			let bytes = Bytes::copy_from_slice(&[key, 42, 0x20, 7]);
-			let decoded = read(&bytes, Version::Draft22, Some(Timescale::MILLI)).unwrap();
-			let written = write(&decoded.properties, Version::Draft22, Some(Timescale::MICRO)).unwrap();
-			let again = read(&Bytes::from(written), Version::Draft22, Some(Timescale::MICRO)).unwrap();
+			let decoded = read(&bytes, version, Some(Timescale::MILLI)).unwrap();
+			let written = write(&decoded.properties, version, Some(Timescale::MICRO)).unwrap();
+			let again = read(&Bytes::from(written), version, Some(Timescale::MICRO)).unwrap();
 			let micros = Timestamp::new(42_000, Timescale::MICRO).unwrap();
 			assert_eq!(again.timestamp, Some(micros), "key {key:#x}");
 			assert_eq!(again.properties.values.last().unwrap().value, Value::Int(7));
 
 			// An egress that declares no units drops it, as a plain frame there has none.
-			let written = write(&decoded.properties, Version::Draft22, None).unwrap();
-			let again = read(&Bytes::from(written), Version::Draft22, None).unwrap();
+			let written = write(&decoded.properties, version, None).unwrap();
+			let again = read(&Bytes::from(written), version, None).unwrap();
 			assert_eq!(again.properties.timestamp, None, "key {key:#x}");
 			assert_eq!(again.properties.values.len(), 1, "key {key:#x}");
 			assert_eq!(again.properties.values[0].value, Value::Int(7));
 			// An untimed ingress forwards it untouched.
-			let untimed = read(&bytes, Version::Draft22, None).unwrap();
-			assert_eq!(write(&untimed.properties, Version::Draft22, None).unwrap(), bytes);
+			let untimed = read(&bytes, version, None).unwrap();
+			assert_eq!(write(&untimed.properties, version, None).unwrap(), bytes);
 		}
+	}
+
+	/// Draft-19 reassigns 0x06 from the draft-03 Timestamp to SUBGROUP_DELIVERY_TIMEOUT,
+	/// which keeps its value whatever the track's units.
+	#[test]
+	fn key_six_follows_its_draft() {
+		let bytes = Bytes::from_static(&[0x06, 42, 0x1a, 7]);
+		let milli = Some(Timescale::MILLI);
+		let decoded = read(&bytes, Version::Draft22, milli).unwrap();
+		assert_eq!(decoded.timestamp, None);
+		for timescale in [Some(Timescale::MICRO), None] {
+			assert_eq!(write(&decoded.properties, Version::Draft19, timescale).unwrap(), bytes);
+		}
+
+		// Across draft-19 neither reading survives: a mutable one is dropped.
+		let modern = Bytes::from_static(&[0x20, 7]);
+		assert_eq!(write(&decoded.properties, Version::Draft18, milli).unwrap(), modern);
+		let legacy = read(&bytes, Version::Draft18, milli).unwrap();
+		assert_eq!(write(&legacy.properties, Version::Draft19, milli).unwrap(), modern);
+
+		// A sealed one is refused.
+		let sealed = Bytes::from_static(&[0x0b, 2, 0x06, 42]);
+		let decoded = read(&sealed, Version::Draft22, milli).unwrap();
+		assert!(!decoded.properties.sealed_time);
+		assert_eq!(write(&decoded.properties, Version::Draft22, None).unwrap(), sealed);
+		assert!(matches!(
+			write(&decoded.properties, Version::Draft18, milli),
+			Err(Error::Unsupported)
+		));
+		let legacy = read(&sealed, Version::Draft18, milli).unwrap();
+		assert!(matches!(
+			write(&legacy.properties, Version::Draft19, milli),
+			Err(Error::Unsupported)
+		));
 	}
 
 	#[test]

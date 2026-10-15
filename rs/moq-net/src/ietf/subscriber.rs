@@ -3827,7 +3827,11 @@ where
 		}
 		let size = stream.varint().await?;
 		if size == 0 && matches!(self.version, Version::Draft14 | Version::Draft15) {
-			match stream.varint().await? {
+			let status = stream.varint().await?;
+			if status != 0 {
+				super::object::check_status(self.version, &decoded.properties)?;
+			}
+			match status {
 				0 => {}
 				END_OF_GROUP => {
 					if keep {
@@ -4648,7 +4652,10 @@ impl GroupIngest {
 							frame.finish()?;
 						}
 						self.phase = IngestPhase::Delta;
-					} else if status == END_OF_GROUP {
+						continue;
+					}
+					super::object::check_status(self.version, &self.properties)?;
+					if status == END_OF_GROUP {
 						group.mark_gap(self.prior_object.expect("properties follow Object ID"), self.gap)?;
 						group.set_end_object(crate::model::object::Fields {
 							id: self.prior_object.expect("status follows object ID"),
@@ -8793,11 +8800,21 @@ mod stitch_tests {
 	/// relay fills its cache from that answer. Later drafts end the answer at the last frame.
 	#[moq_net_sim::test]
 	async fn passthrough_fetch_keeps_the_end_of_group_object() {
-		for version in [Version::Draft15, Version::Draft16, Version::Draft17, Version::Draft22] {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft22,
+		] {
+			// Only draft-14 lets a status object carry properties, so later drafts cannot mark
+			// a gap before it.
+			let legacy = version == Version::Draft14;
+			let terminal = if legacy { (11, &[0x3e, 2][..]) } else { (9, &[][..]) };
 			let objects = [
 				(6, &[0x3e, 6][..], None),
 				(8, &[0x3e, 1][..], None),
-				(11, &[0x3e, 2][..], Some(END_OF_GROUP)),
+				(terminal.0, terminal.1, Some(END_OF_GROUP)),
 			];
 			let script = object_stream(version, true, &objects);
 			let (bytes, log) = relay_passthrough(script, version, version, Some((0, 12))).await;
@@ -8805,9 +8822,9 @@ mod stitch_tests {
 			let mut decoder = Decoder::new(&bytes, version.into());
 			assert_eq!(decoder.varint().unwrap(), ietf::FetchOk::ID, "{version}");
 			let ok = ietf::FetchOk::decode(&mut decoder, version).unwrap();
-			let carried = version == Version::Draft15;
+			let carried = matches!(version, Version::Draft14 | Version::Draft15);
 			let last = match () {
-				_ if carried => 12,
+				_ if carried => terminal.0 + 1,
 				_ if Filter::is_draft20(version) => 8,
 				_ => 9,
 			};
@@ -8836,13 +8853,57 @@ mod stitch_tests {
 			let end_object = reader.end_object();
 			assert_eq!(
 				end_object.as_ref().map(|end| end.id),
-				carried.then_some(11),
+				carried.then_some(terminal.0),
 				"{version}"
 			);
 			if let Some(end) = end_object {
-				assert_eq!(end.properties.values[0].id, 0x3e);
+				assert_eq!(
+					end.properties.values.first().map(|property| property.id),
+					legacy.then_some(0x3e)
+				);
 			}
 		}
+	}
+
+	/// Draft-15 on, only a Normal object may carry properties: a status object with them is
+	/// refused on ingest, and one relayed from draft-14 leaves without them.
+	#[moq_net_sim::test]
+	async fn passthrough_keeps_properties_off_status_objects() {
+		for version in [Version::Draft15, Version::Draft22] {
+			for status in [END_OF_GROUP, END_OF_TRACK] {
+				let script = object_stream(version, true, &[(0, &[], None), (1, &[0x20, 7], Some(status))]);
+				let mut h = Harness::with_timescale(Fill::Done, vec![script], None);
+				h.subscriber.version = version;
+				let mut stream = h.stream().await.with_version(version);
+				let result = h.subscriber.clone().recv_group(&mut stream).await;
+				assert!(
+					matches!(result, Err(Error::Session(SessionError::ProtocolViolation))),
+					"{version} {status}: {result:?}"
+				);
+			}
+		}
+
+		let script = object_stream(
+			Version::Draft14,
+			true,
+			&[(0, &[], None), (1, &[0x20, 7], Some(END_OF_GROUP))],
+		);
+		let (bytes, log) = relay_passthrough_stream(script, Version::Draft14, Version::Draft15).await;
+		assert!(log.resets().is_empty());
+		let mut decoder = Decoder::new(&bytes, Version::Draft15.into());
+		ietf::GroupHeader::decode(&mut decoder, Version::Draft15).unwrap();
+		assert_eq!(decoder.varint().unwrap(), 0);
+		decoder.bytes().unwrap();
+		assert_eq!(decoder.varint().unwrap(), 1);
+		assert_eq!(decoder.slice(1).unwrap(), &[99]);
+		assert_eq!(decoder.varint().unwrap(), 0);
+		assert!(
+			decoder.bytes().unwrap().is_empty(),
+			"the status object kept its properties"
+		);
+		assert_eq!(decoder.varint().unwrap(), 0);
+		assert_eq!(decoder.varint().unwrap(), END_OF_GROUP);
+		assert!(decoder.is_empty());
 	}
 
 	#[moq_net_sim::test]

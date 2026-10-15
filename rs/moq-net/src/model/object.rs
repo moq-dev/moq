@@ -34,12 +34,20 @@ pub(crate) struct Properties {
 	pub timescale: Option<Timescale>,
 	/// The immutable block holds a Timestamp, which keeps its ingress units.
 	pub sealed_time: bool,
+	/// The ingress draft predates 19, so 0x06 is a Timestamp rather than
+	/// SUBGROUP_DELIVERY_TIMEOUT.
+	pub legacy_time: bool,
 }
 
 impl Properties {
 	#[cfg(feature = "async")]
 	pub fn is_plain(&self) -> bool {
 		self.values.is_empty()
+	}
+
+	#[cfg(feature = "async")]
+	pub fn is_empty(&self) -> bool {
+		self.timestamp.is_none() && self.values.is_empty()
 	}
 
 	pub fn heap(&self) -> u64 {

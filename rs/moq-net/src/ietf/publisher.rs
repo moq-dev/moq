@@ -1787,6 +1787,7 @@ where
 		if !matches!(self.version, Version::Draft14 | Version::Draft15) {
 			group.end_object = None;
 		}
+		group.end_object = group.end_object.map(|end| status_fields(end, self.version));
 		// FETCH keeps each object's Timestamp, in the units FETCH_OK declares wherever the
 		// draft can declare them. Opting out of the properties strips nothing from the objects.
 		let timescale = group
@@ -3844,7 +3845,8 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 									}
 									Poll::Ready(Ok(None)) => {
 										if !self.ended
-											&& let Some(end) = self.group.end_object()
+											&& let Some(end) =
+												self.group.end_object().map(|end| status_fields(end, self.version))
 											&& end.id >= self.slice.skip && self
 											.slice
 											.until
@@ -3971,6 +3973,20 @@ fn object_delta(prior: Option<u64>, id: u64) -> Result<u64, Error> {
 			.checked_sub(prior)
 			.and_then(|step| step.checked_sub(1))
 			.ok_or(Error::MalformedTrack),
+	}
+}
+
+/// A status object's fields, without properties where its draft forbids them.
+fn status_fields(
+	end: std::sync::Arc<crate::model::object::Fields>,
+	version: Version,
+) -> std::sync::Arc<crate::model::object::Fields> {
+	match super::object::status_has_properties(version) || end.properties.is_empty() {
+		true => end,
+		false => std::sync::Arc::new(crate::model::object::Fields {
+			id: end.id,
+			properties: Default::default(),
+		}),
 	}
 }
 
