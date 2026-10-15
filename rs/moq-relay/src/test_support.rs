@@ -59,9 +59,7 @@ mod tests {
 		assert_eq!(fixture.fingerprint.len(), 64);
 		let ready = fixture.relay.ready();
 		let trigger = fixture.relay.shutdown_trigger().clone();
-		// The trigger ends it; a relay listening for signals would also catch one
-		// another test raises in the same `cargo test` process.
-		let running = tokio::spawn(fixture.relay.with_signals(false).run());
+		let running = tokio::spawn(fixture.relay.run());
 		ready.wait().await.expect("relay ready");
 		let served = reqwest::get(format!("http://{}/certificate.sha256", fixture.http))
 			.await
