@@ -37,7 +37,3 @@ Work:
   `doc/bin/cli.md` play install line drops `iroh` from its feature list.
 - Verify the default build, `--features iroh`, and `--no-default-features`
   of `moq-cli` all compile and pass tests.
-
-## Related
-
-- [Bump web-transport-iroh for the capsule close](/quest/m1/iroh-capsule-bump.md) - still applies to `--features iroh` builds
