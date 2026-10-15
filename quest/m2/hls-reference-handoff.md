@@ -20,14 +20,22 @@ catalog.
 Decided 2026-10-13 (maintainer): a separate quest, Required by simulcast
 rung disable; #5471 merged without it.
 
-- Pick the reference among enabled renditions, and hand it over when the
-  current one is disabled, at a segment boundary both renditions share.
-- Keep each media sequence and segment numbering continuous, so a player
-  sees no discontinuity unless the content has one.
+Decided 2026-10-15 (maintainer): preserve source-addressed segment URLs,
+use a separate continuous HLS media sequence, and start a new DASH Period
+on reference changes. If no shared boundary remains at the advertised
+tail, switch at the next replacement boundary with a gap/discontinuity;
+this exception must not change an already-advertised source span.
+
+- Pick an enabled reference and hand it over at a shared boundary when
+  possible, otherwise at the next replacement boundary with a discontinuity.
+- Keep each HLS media sequence continuous, while URI segment numbers keep
+  their source reference and sequence. Keep discontinuity sequences stable
+  when older segments retire.
 - Amend `drafts/draft-lcurley-moq-hang.md` and `doc/bin/hls.md` where they
   say the edge keeps its reference while it stays in the catalog.
 - Regression with mocked time: disable the reference rung mid-stream, and
   every enabled sibling's playlist keeps advancing with a continuous
-  sequence.
+  sequence. Cover aligned and unaligned tails, retained source URLs, recorder
+  cursors, and durable-history retention.
 
 Public API: none expected. Format: the hang draft's reference rule changes.
