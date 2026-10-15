@@ -177,6 +177,9 @@ struct WallDeadlines {
 	// The drivers collecting this pool, woken when a deadline earlier than any they
 	// were told about is armed.
 	drivers: kio::WaiterList,
+	// Reads that met a deadline before any driver collected, woken by the first
+	// collection to arm it. Holds live waiters only, so an undriven pool stays bounded.
+	undriven: kio::WaiterList,
 }
 
 struct Clock {
@@ -304,7 +307,8 @@ impl Pool {
 	/// It also releases reads parked on a wall-clock deadline (a group's successor
 	/// arriving plus the reader's budget), so the returned deadline includes the earliest
 	/// of those, and `waiter` wakes when a read arms one earlier than it. Until a pool is
-	/// first collected, nothing parks on one.
+	/// first collected, no deadline fires; that first collection wakes the reads waiting
+	/// on one so they arm it.
 	pub fn gc(&self, now: crate::time::Instant, waiter: &kio::Waiter) -> Option<crate::time::Instant> {
 		self.advance(now, true, Some(waiter))
 	}
@@ -315,6 +319,7 @@ impl Pool {
 		sweep: bool,
 		driver: Option<&kio::Waiter>,
 	) -> Option<crate::time::Instant> {
+		let first;
 		let next = {
 			// Shared origins must not run overlapping collection passes.
 			let mut clock = self.inner.clock.lock().unwrap_or_else(PoisonError::into_inner);
@@ -328,6 +333,8 @@ impl Pool {
 				.expect("cache clock overflow");
 			self.inner.tick.store(tick, Ordering::Relaxed);
 			clock.now = now;
+			// Collection passes are serialized by the clock lock, so only one sees the first.
+			first = self.inner.wall_epoch.get().is_none();
 			let epoch = *self.inner.wall_epoch.get_or_init(|| now);
 			let micros = u64::try_from(now.duration_since(epoch).as_micros()).unwrap_or(u64::MAX);
 			self.inner.wall_micros.fetch_max(micros, Ordering::Relaxed);
@@ -339,6 +346,10 @@ impl Pool {
 			}
 			clock.sweep
 		};
+		if first {
+			let mut undriven = self.inner.wall.lock().undriven.take();
+			undriven.wake();
+		}
 		let wall = self.release_due(self.now_wall(), driver);
 		next.into_iter().chain(wall).min()
 	}
@@ -390,8 +401,15 @@ impl Pool {
 	}
 
 	/// Whether a driver collects this pool, so a wall-clock deadline armed in it fires.
-	pub(crate) fn is_driven(&self) -> bool {
-		self.inner.wall_epoch.get().is_some()
+	/// If not, `waiter` wakes on the first collection, to arm its deadline then.
+	fn watch_driven(&self, waiter: &kio::Waiter) -> bool {
+		// Checked under the lock the first collection drains under, so none slips between.
+		let mut wall = self.inner.wall.lock();
+		if self.inner.wall_epoch.get().is_some() {
+			return true;
+		}
+		waiter.register(&mut wall.undriven);
+		false
 	}
 
 	/// Index `track`'s earliest wall-clock deadline `at`, waking the drivers if it is now
@@ -647,10 +665,10 @@ impl Track {
 		&self.wakes
 	}
 
-	/// Park `waiter` until the pool's wall clock reaches `at`. Nothing parks while no
-	/// driver collects the pool: nothing would release it.
+	/// Park `waiter` until the pool's wall clock reaches `at`. While no driver collects the
+	/// pool, nothing would release it, so `waiter` parks on the first collection instead.
 	pub(crate) fn watch_wall(self: &Arc<Self>, at: crate::time::Instant, waiter: &kio::Waiter) {
-		if !self.pool.is_driven() {
+		if !self.pool.watch_driven(waiter) {
 			return;
 		}
 		if self.wakes.watch_wall(at, waiter) {
@@ -992,23 +1010,23 @@ mod test {
 
 	/// A wall-clock deadline armed after the driver collected wakes it to collect again by
 	/// then, and that collection releases the read parked on it. Before any collection,
-	/// nothing parks: nothing would release it.
+	/// nothing would release it, so the read waits for the first one to arm it then.
 	#[test]
 	fn wall_deadlines_wake_the_driver_and_then_the_read() {
 		let pool = Pool::unbounded();
 		let track = Track::new(pool.clone(), kio::Weak::new());
 		let now = super::super::clock::wall();
 		let at = now + Duration::from_secs(1);
-		track.watch_wall(at, &kio::Waiter::noop());
-		assert_eq!(
-			pool.gc(now, &kio::Waiter::noop()),
-			None,
-			"an undriven pool parks nothing"
-		);
+		let (read, reading) = flag();
+		track.watch_wall(at, &reading);
 
 		let (driver, driving) = flag();
-		assert_eq!(pool.gc(now, &driving), None);
-		let (read, reading) = flag();
+		assert_eq!(pool.gc(now, &driving), None, "an undriven pool indexes nothing");
+		assert!(
+			read.0.load(Ordering::SeqCst),
+			"the first collection never woke the read"
+		);
+		read.0.store(false, Ordering::SeqCst);
 		track.watch_wall(at, &reading);
 		assert!(
 			driver.0.load(Ordering::SeqCst),

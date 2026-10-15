@@ -1178,10 +1178,13 @@ export class Subscriber {
 	// The group the frame-level helpers are currently draining, acquired through the
 	// sequence cursor so frame reads and {@link Ordered.nextGroup} share one floor.
 	#frameGroup?: GroupConsumer;
-	// Bumped when the earliest wall deadline a held read armed comes due. See #wakeAt.
-	#wall = new Signal(0);
-	#wallTimer?: ReturnType<typeof setTimeout>;
-	#wallAt = Number.POSITIVE_INFINITY;
+	// The earliest wall deadline a held read armed, and its timer, which bumps `revision`
+	// when it comes due. See #wakeAt. Kept apart from the subscriber so a pending timer
+	// retains only this, never the subscriber or its track state, once no read waits.
+	#wall: { revision: Signal<number>; at: number; timer?: ReturnType<typeof setTimeout> } = {
+		revision: new Signal(0),
+		at: Number.POSITIVE_INFINITY,
+	};
 
 	#drift(): {
 		budget: number;
@@ -1286,19 +1289,19 @@ export class Subscriber {
 	// Bump {@link #wall} at `at`, unless a wakeup is already armed sooner. Each held read
 	// re-arms on the bump, so one timer covers every deadline this subscriber waits on.
 	#wakeAt(at: number): void {
-		if (!Number.isFinite(at) || at >= this.#wallAt) return;
-		clearTimeout(this.#wallTimer);
+		const wall = this.#wall;
+		if (!Number.isFinite(at) || at >= wall.at) return;
+		clearTimeout(wall.timer);
 		// setTimeout fires at once past 2^31 ms, so a longer budget wakes early and re-arms.
 		const delay = Math.min(Math.max(0, at - performance.now()), 2 ** 31 - 1);
-		const timer = setTimeout(() => {
-			this.#wallTimer = undefined;
-			this.#wallAt = Number.POSITIVE_INFINITY;
-			this.#wall.update((revision) => revision + 1);
+		wall.timer = setTimeout(() => {
+			wall.timer = undefined;
+			wall.at = Number.POSITIVE_INFINITY;
+			wall.revision.update((revision) => revision + 1);
 		}, delay);
 		// A staleness wakeup is never a reason to hold a Node/Bun process open.
-		(timer as unknown as { unref?: () => void }).unref?.();
-		this.#wallTimer = timer;
-		this.#wallAt = at;
+		(wall.timer as unknown as { unref?: () => void }).unref?.();
+		wall.at = at;
 	}
 
 	#guard(group: GroupConsumer): GroupConsumer {
@@ -1308,7 +1311,7 @@ export class Subscriber {
 			changed: [
 				this.#state.groups,
 				this.#state.timelineChanged,
-				this.#wall,
+				this.#wall.revision,
 				this.#state.update,
 				this.#state.info,
 				this.#cursor,
@@ -1492,8 +1495,8 @@ export class Subscriber {
 		this.#frameGroup?.close(abort);
 		this.#frameGroup = undefined;
 		this.#state.timeline.length = 0;
-		clearTimeout(this.#wallTimer);
-		this.#wallTimer = undefined;
+		clearTimeout(this.#wall.timer);
+		this.#wall.timer = undefined;
 	}
 
 	/**

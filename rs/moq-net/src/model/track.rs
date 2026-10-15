@@ -6181,15 +6181,20 @@ mod test {
 	}
 
 	/// A read parked on a superseded group is released by the wall clock alone: nothing is
-	/// written after its successor arrives, so no write could wake it.
+	/// written after its successor arrives, so no write could wake it. That holds whether a
+	/// driver collected the pool before the read parked or only after.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_parked_read_wakes_at_its_wall_deadline() {
-		for info in [Info::default(), Info::timed()] {
+		for (info, primed) in [Info::default(), Info::timed()]
+			.into_iter()
+			.flat_map(|info| [(info.clone(), true), (info, false)])
+		{
 			let producer = track_producer("test", info.clone());
 			let at = info.timescale.map(|_| Timestamp::ZERO);
-			// A driver collects the pool, so its wall deadlines fire.
-			elapse(&producer, Duration::ZERO);
+			if primed {
+				elapse(&producer, Duration::ZERO);
+			}
 			let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(1)));
 			let mut held = producer.append_group().unwrap();
 			held.write_frame(at, bytes::Bytes::from_static(b"x")).unwrap();
@@ -6201,11 +6206,25 @@ mod test {
 			let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
 			let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
 			assert!(reading.poll_read_frame(&waiter).is_pending());
+			if !primed {
+				elapse(&producer, Duration::ZERO);
+				assert!(
+					woken.swap(false, Ordering::SeqCst),
+					"{info:?}: the first collection never woke the read"
+				);
+				assert!(reading.poll_read_frame(&waiter).is_pending());
+			}
 
 			elapse(&producer, Duration::from_millis(900));
-			assert!(!woken.load(Ordering::SeqCst), "{info:?}: woken before the deadline");
+			assert!(
+				!woken.load(Ordering::SeqCst),
+				"{info:?} primed={primed}: woken before the deadline"
+			);
 			elapse(&producer, Duration::from_millis(100));
-			assert!(woken.load(Ordering::SeqCst), "{info:?}: the wall deadline never fired");
+			assert!(
+				woken.load(Ordering::SeqCst),
+				"{info:?} primed={primed}: the wall deadline never fired"
+			);
 			let result = reading.poll_read_frame(&waiter);
 			assert!(matches!(result, Poll::Ready(Ok(None))), "{info:?}: {result:?}");
 		}
