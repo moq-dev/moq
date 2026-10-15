@@ -273,6 +273,7 @@ struct Candidate {
 	priority: i8,
 	prefix: usize,
 	epoch: Option<u32>,
+	down_only: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -289,6 +290,8 @@ struct Front {
 	id: Id,
 	epoch: Option<u32>,
 	total: Metric,
+	/// Whether the route it follows is down-only.
+	down_only: bool,
 	up: Up,
 }
 
@@ -585,12 +588,16 @@ impl Net {
 
 	/// The route `node` follows for `id` on behalf of a request from `from`.
 	fn route_from(&self, node: Node, id: Id, from: Option<Node>) -> Option<Selected> {
-		let upstream = from.is_some_and(|from| self.links[&(node, from)].upstream);
-		if upstream && self.cfg.recheck {
+		if self.exports_only(node, from) {
 			self.export_route(node, id)
 		} else {
 			self.route(node, id)
 		}
+	}
+
+	/// Whether `node` may follow only exportable routes for a request from `from`.
+	fn exports_only(&self, node: Node, from: Option<Node>) -> bool {
+		self.cfg.recheck && from.is_some_and(|from| self.links[&(node, from)].upstream)
 	}
 
 	/// Whether `node` holds a reachable route to `id` but none is feasible: it
@@ -686,6 +693,7 @@ impl Net {
 					priority: route.next.map_or(0, |next| self.links[&(node, next)].priority),
 					prefix: claim.prefix.len(),
 					epoch: claim.epoch,
+					down_only: route.down_only,
 				});
 			}
 		}
@@ -728,6 +736,7 @@ impl Net {
 				priority: 0,
 				prefix: 0,
 				epoch: carried.epoch,
+				down_only: route.down_only,
 			});
 		}
 		let mut candidates = self.candidates(node, path, from);
@@ -807,15 +816,10 @@ impl Net {
 	}
 
 	/// Readers at every node in `openers` subscribe to `path` at once; each
-	/// relay's forwarded request may join a subscription the relay already has.
-	/// Returns the nodes of a subscription cycle that no source feeds, if any.
-	pub fn subscribe_all(
-		&self,
-		path: &str,
-		openers: &[Node],
-		mode: Forward,
-		aggregate: Aggregate,
-	) -> Option<Vec<Node>> {
+	/// relay's forwarded request may join a subscription the relay already has,
+	/// if the request may follow that subscription's route. Returns each
+	/// opener's outcome; a subscription cycle that no source feeds is a loop.
+	pub fn subscribe_all(&self, path: &str, openers: &[Node], mode: Forward, aggregate: Aggregate) -> Vec<Outcome> {
 		let mut fronts: Vec<Front> = Vec::new();
 		let open = |net: &Self, node: Node, from: Option<Node>, carried: Carried| -> Front {
 			match net.choose(node, path, from, mode, carried) {
@@ -824,6 +828,7 @@ impl Net {
 					id: 0,
 					epoch: None,
 					total: 0,
+					down_only: false,
 					up: Up::Stalled,
 				},
 				Some(chosen) => Front {
@@ -831,6 +836,7 @@ impl Net {
 					id: chosen.id,
 					epoch: chosen.epoch,
 					total: chosen.total,
+					down_only: chosen.down_only,
 					up: match chosen.next {
 						None => Up::Serve,
 						Some(next) => Up::Pending(
@@ -849,9 +855,11 @@ impl Net {
 		let mut index = 0;
 		while index < fronts.len() {
 			if let Up::Pending(from, to, carried) = fronts[index].up {
+				let exports_only = self.exports_only(to, Some(from));
 				let joins = fronts.iter().position(|front| {
 					front.node == to
 						&& !matches!(front.up, Up::Stalled)
+						&& !(exports_only && front.down_only)
 						&& match aggregate {
 							Aggregate::Path => true,
 							Aggregate::Epoch => carried.epoch.is_some() && front.epoch == carried.epoch,
@@ -868,27 +876,33 @@ impl Net {
 			index += 1;
 		}
 
-		for start in 0..fronts.len() {
-			let mut seen = Vec::new();
-			let mut at = start;
-			loop {
-				if seen.contains(&at) {
-					return Some(seen.iter().map(|&i| fronts[i].node).collect());
+		// Every front hangs off an opener's chain, so any cycle shows up as a loop here.
+		(0..openers.len())
+			.map(|mut at| {
+				let mut seen = Vec::new();
+				loop {
+					let again = seen.contains(&at);
+					seen.push(at);
+					let path = seen.iter().map(|&i| fronts[i].node).collect();
+					if again {
+						return Outcome::Loop { path };
+					}
+					match fronts[at].up {
+						Up::Joined(next) => at = next,
+						Up::Serve => return Outcome::Served { by: fronts[at].id, path },
+						Up::Stalled => return Outcome::Stalled { path },
+						Up::Pending(..) => unreachable!("every pending front is resolved"),
+					}
 				}
-				seen.push(at);
-				match fronts[at].up {
-					Up::Joined(next) => at = next,
-					_ => break,
-				}
-			}
-		}
-		None
+			})
+			.collect()
 	}
 }
 
 /// The key a relay files `id` under when a connection admitted under `scope`
 /// forwards it. It depends on the scope, not the connection, so every uplink
-/// under one grant reaches the same key.
+/// under one grant reaches the same key. FNV keeps the model readable; the
+/// contract needs a collision-resistant hash, since the forwarder picks `id`.
 pub fn scoped(scope: &str, id: Id) -> Id {
 	fnv(scope, &[id]) | SCOPED
 }

@@ -117,7 +117,9 @@ freshness before coding:
   identity a connection forwards for another origin is filed under
   `hash(scope, id)` when the connection's publish grant is scoped, and stays
   bare when it is unscoped (publish `**` at the root). The hash has its own
-  domain, so it cannot collide with a key-derived identity. It depends on the
+  domain, so it cannot collide with a key-derived identity, and is
+  collision-resistant at the identity width, since the forwarder picks `id`
+  and could otherwise grind another scope's key. It depends on the
   scope, not the ingress peer, so two uplinks under one grant reach the same
   key at any relay, and the relay that files it translates it back when
   forwarding a request into that connection. Claims under it are refused

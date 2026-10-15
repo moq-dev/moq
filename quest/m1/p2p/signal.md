@@ -85,7 +85,7 @@ Instead the relay issues each session a peer grant, a relay-signed statement
 of that session's path scopes bound to its node id, its presenter public key,
 and short-lived, which the peer presents in band with a proof of possession;
 the other side verifies the relay's signature, the node id and key against
-the roster, and a fresh session-bound AUTH_POP, then serves only the granted paths. Issuance,
+the roster, and that the key is the one the session proved, then serves only the granted paths. Issuance,
 asymmetric keys, JWKS, PoP, and refresh live in
 [Peer grants](/quest/m1/p2p/peer-grant.md): HMAC keys cannot be given to
 browsers without also letting them forge grants, so an HS256-only relay

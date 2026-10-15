@@ -42,15 +42,13 @@ the old one. A node-id or key change mints a new grant; the old node id is
 dead.
 
 Verification on a direct session: the opener writes `AUTH { Token (b) }`
-with the JWT, then AUTH_POP proving possession for this authenticated
-session. The previous signature over only the JWT and receiver node id is
-replayable across sessions and is superseded. Bind proof to a fresh receiver
-challenge or authenticated session transcript, including the grant and identities;
-settle the exact exchange before fixing the wire, with replay tests. The receiver verifies the relay signature against the
-JWKS from its own AUTH_KEYS, checks `exp`, matches node id and `cnf`
-against the roster, and verifies AUTH_POP with `cnf`. The origin then
-serves only the granted paths. A missing, expired, HMAC-signed, or
-unproven grant is not a grant.
+with the JWT. Possession needs no separate AUTH_POP: Identity proof already
+binds the opener's key to this session, so the grant only has to name it. The
+receiver verifies the relay signature against the JWKS from its own
+AUTH_KEYS, checks `exp`, matches node id against the roster, and requires
+`cnf` to equal the key the session proved. The origin then serves only the
+granted paths. A missing, expired, HMAC-signed, or unproven grant, or one
+whose `cnf` is not the session's proven key, is not a grant.
 
 [Signaling and policy](/quest/m1/p2p/signal.md) presents the grant in band
 on each direct session. P2P is its only consumer, so it lives on this line
@@ -60,7 +58,7 @@ Docs: `doc/bin/relay/auth.md` states that peer grants need an asymmetric
 key, that HS256 operators get none, and that the public JWKS is not a
 secret. Tests: ES256 round trip; an HS256-only relay issues nothing; a
 peer grant fails `Claims` verification; a node-id mismatch is refused; a
-JWT presented without AUTH_POP is refused; a grant copied onto another
+grant whose `cnf` is not the session's proven key is refused; a grant copied onto another
 session without the private key is refused; copying both grant and a prior
 valid proof onto another session is refused; a refreshed grant replaces
 the old one without dropping the session.

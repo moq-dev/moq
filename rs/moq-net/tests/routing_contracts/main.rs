@@ -4,7 +4,8 @@
 //! against [`model`], under the rule that fails and the rule that holds. The
 //! model is a reference for the contract, not the relay: when lite-07's route
 //! layer lands, these topologies become its acceptance tests. Failover fixtures
-//! advance the origin's seqno by hand where the seqno request would.
+//! advance the origin's seqno by hand where the seqno request would. It sits in
+//! `tests/` rather than inline because it tests no moq-net module.
 
 mod model;
 
@@ -19,6 +20,10 @@ fn served_by(outcome: &Outcome) -> Option<(u64, usize)> {
 		Outcome::Served { by, path } => Some((*by, *path.last().unwrap())),
 		_ => None,
 	}
+}
+
+fn loops(outcomes: &[Outcome]) -> bool {
+	outcomes.iter().any(|outcome| matches!(outcome, Outcome::Loop { .. }))
 }
 
 // Identity: a fresh routing identity per process start, seqno per identity.
@@ -216,19 +221,12 @@ fn local_priorities_loop_path_only_requests() {
 fn aggregation_cycles_starve_without_a_forwarding_constraint() {
 	let net = priority_ring(1);
 	let all = [0, 1, 2];
-	assert!(net.subscribe_all("live/x", &all, PATH_ONLY, Aggregate::Path).is_some());
-	assert!(
-		net.subscribe_all("live/x", &all, Forward::Pinned, Aggregate::Epoch)
-			.is_some()
-	);
-	assert_eq!(
-		net.subscribe_all("live/x", &all, Forward::Pinned, Aggregate::Identity),
-		None
-	);
-	assert_eq!(
-		net.subscribe_all("live/x", &all, Forward::Bounded, Aggregate::Bound),
-		None
-	);
+	assert!(loops(&net.subscribe_all("live/x", &all, PATH_ONLY, Aggregate::Path)));
+	assert!(loops(&net.subscribe_all("live/x", &all, Forward::Pinned, Aggregate::Epoch)));
+	for (mode, aggregate) in [(Forward::Pinned, Aggregate::Identity), (Forward::Bounded, Aggregate::Bound)] {
+		let outcomes = net.subscribe_all("live/x", &all, mode, aggregate);
+		assert!(outcomes.iter().all(|outcome| served_by(outcome).is_some()), "{outcomes:?}");
+	}
 }
 
 /// Without an epoch, the serving identity is the instance. A relay that picks
@@ -329,12 +327,15 @@ fn sweep_forwarding_progress() {
 		}
 		let all: Vec<usize> = (0..RELAYS).collect();
 		for path in ["live/a/x", "live/b"] {
+			// Joining by identity delivers exactly what each request would alone.
+			let alone: Vec<Outcome> = all.iter().map(|&at| net.request(at, path, Forward::Pinned)).collect();
 			assert_eq!(
 				net.subscribe_all(path, &all, Forward::Pinned, Aggregate::Identity),
-				None
+				alone,
+				"scenario {scenario} for {path}"
 			);
-			assert_eq!(net.subscribe_all(path, &all, Forward::Bounded, Aggregate::Bound), None);
-			path_deadlocks += net.subscribe_all(path, &all, PATH_ONLY, Aggregate::Path).is_some() as usize;
+			assert!(!loops(&net.subscribe_all(path, &all, Forward::Bounded, Aggregate::Bound)));
+			path_deadlocks += loops(&net.subscribe_all(path, &all, PATH_ONLY, Aggregate::Path)) as usize;
 		}
 	}
 	assert!(path_only_loops > 0, "the sweep must reach a path-only loop");
@@ -679,6 +680,18 @@ fn upstream_ingress_ends_a_request_whose_route_turns_down_only() {
 				}
 			);
 		}
+		// L2's own reader follows the down-only route, and C2's request must not
+		// join that subscription either.
+		assert_eq!(
+			net.subscribe_all("live/x", &[c2, l2], Forward::Pinned, Aggregate::Identity),
+			vec![
+				outcome,
+				Outcome::Served {
+					by: 7,
+					path: vec![l2, l1, c1, origin]
+				}
+			]
+		);
 
 		net.release(l2, c2);
 		assert!(net.run());
