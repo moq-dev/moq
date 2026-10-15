@@ -561,13 +561,8 @@ impl Relay {
 				.context("failed to start the io_uring QUIC workers")?;
 		}
 
-		// A stop requested while starting (a queued signal or the embedder's
-		// trigger) skips readiness. The drain below still runs, and exits once
-		// nothing is left.
-		if futures::FutureExt::now_or_never(Signals::recv_some(&mut signals)).is_some() {
-			shutdown_trigger.start();
-		}
-		if shutdown.deadline().is_some() {
+		// The drain below still runs, and exits once nothing is left.
+		if stop_requested(&shutdown_trigger, &shutdown, &mut signals) {
 			tracing::info!("shutdown requested during startup; not reporting ready");
 		} else {
 			ready.send_replace(true);
@@ -705,6 +700,20 @@ impl Relay {
 
 		result
 	}
+}
+
+/// Whether a stop arrived while starting, so readiness is skipped: the embedder's
+/// trigger, or a queued signal, which starts the drain. A signal queued after the
+/// trigger is left for the drain, where it is the second request.
+fn stop_requested(trigger: &shutdown::Trigger, shutdown: &shutdown::Observer, signals: &mut Option<Signals>) -> bool {
+	if shutdown.deadline().is_some() {
+		return true;
+	}
+	if futures::FutureExt::now_or_never(Signals::recv_some(signals)).is_some() {
+		trigger.start();
+		return true;
+	}
+	false
 }
 
 /// Two-stage shutdown: the first signal, or an embedder firing
@@ -932,6 +941,30 @@ mod tests {
 				"the second signal waited for the drain"
 			);
 		}
+	}
+
+	/// A signal queued after the embedder already started the drain is the second
+	/// request, so `run` exits at once instead of waiting out an open admission.
+	#[cfg(unix)]
+	#[tokio::test(start_paused = true)]
+	async fn a_signal_after_an_early_trigger_exits_at_once() {
+		let _signals = SIGNALS.lock().await;
+		let (trigger, shutdown) = crate::shutdown::Observer::new(std::time::Duration::from_secs(10));
+		let _session = shutdown.activity.enter().expect("admission open before the drain");
+		let mut signals = Some(super::Signals::new().unwrap());
+		trigger.start();
+		let mut delivered = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+		// SAFETY: raise has no memory-safety preconditions.
+		assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0);
+		delivered.recv().await;
+		assert!(super::stop_requested(&trigger, &shutdown, &mut signals));
+		let started = tokio::time::Instant::now();
+		super::drain(trigger, shutdown, signals).await.unwrap();
+		assert_eq!(
+			started.elapsed(),
+			std::time::Duration::ZERO,
+			"the signal after the trigger waited for the drain"
+		);
 	}
 
 	/// A stop requested before startup finishes is never reported as ready, and
