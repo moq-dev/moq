@@ -655,6 +655,10 @@ impl Encoder {
 		config.bitrate = bitrate;
 		config.description = self.description.clone();
 		config.container = hang::catalog::Container::Legacy;
+		if matches!(self.settings.codec, Codec::Opus) {
+			// RFC 7845 section 4.6: 80 ms of pre-roll converges an Opus decoder after a join.
+			config.warmup = Some(Duration::from_millis(80));
+		}
 		config
 	}
 }
@@ -806,6 +810,7 @@ mod tests {
 		assert_eq!(desc.len(), 19);
 		let head = moq_mux::codec::opus::Config::parse(&mut desc.as_ref()).unwrap();
 		assert_eq!(head.pre_skip, 312);
+		assert_eq!(cfg.warmup, Some(Duration::from_millis(80)));
 	}
 
 	#[test]

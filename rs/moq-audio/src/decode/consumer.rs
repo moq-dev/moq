@@ -329,14 +329,15 @@ impl Consumer {
 			}
 
 			let rate = self.decoder.sample_rate();
+			let epoch = *self.epoch.get_or_insert(mux_frame.timestamp);
+			let delay = self.decoder.delay_remaining();
+			let decoded = self.decoder.decode(&mux_frame.payload)?;
+			// Anchored only once a packet decodes: a refused one primed nothing.
 			if self.warmup_pending {
 				let warmup = moq_net::Timestamp::try_from(self.warmup)?.convert(timestamp.scale())?;
 				self.warmup_until = Some(timestamp.checked_add(warmup)?);
 				self.warmup_pending = false;
 			}
-			let epoch = *self.epoch.get_or_insert(mux_frame.timestamp);
-			let delay = self.decoder.delay_remaining();
-			let decoded = self.decoder.decode(&mux_frame.payload)?;
 			// Codec delay trimmed off the front is media this packet covered even
 			// though no samples came out, so it still moves the packet after it along.
 			let trimmed = delay - self.decoder.delay_remaining();
@@ -773,6 +774,54 @@ mod tests {
 		);
 	}
 
+	/// A refused packet primed nothing, so the window starts at the first one that decodes.
+	#[tokio::test(start_paused = true)]
+	async fn warmup_starts_at_the_first_decoded_packet() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
+		catalog.warmup = Some(Duration::from_millis(80));
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
+		for packet in 0..7 {
+			let payload = if packet == 0 {
+				vec![0; 3]
+			} else {
+				vec![0; 960 * size_of::<f32>()]
+			};
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(packet * 20_000).unwrap(),
+					duration: None,
+					payload: payload.into(),
+					keyframe: true,
+				})
+				.unwrap();
+		}
+		producer.finish().unwrap();
+		let mut consumer = Consumer::new(
+			&broadcast.consume(),
+			&catalog,
+			"audio",
+			Options {
+				max_delay: Duration::from_secs(10),
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+		assert!(consumer.read().await.is_err());
+		let mut stamps = Vec::new();
+		while let Some(frame) = consumer.read().await.unwrap() {
+			stamps.push(frame.timestamp.as_micros());
+		}
+		assert_eq!(stamps, [100_000, 120_000]);
+	}
+
 	/// What the resampler holds at a marker belongs before it: draining it after the next
 	/// packet would splice it onto the resumed audio and stamp that late.
 	#[tokio::test(start_paused = true)]
@@ -844,9 +893,11 @@ mod tests {
 			..EncodeOptions::default()
 		};
 		let mut producer = Producer::new(&mut broadcast, catalog, input.clone(), &options).unwrap();
-		let catalog = Encoder::new(&Settings::new(input.sample_rate, input.layout))
+		let mut catalog = Encoder::new(&Settings::new(input.sample_rate, input.layout))
 			.unwrap()
 			.catalog();
+		// Every packet counts here; the warmup tests cover trimming.
+		catalog.warmup = None;
 		let mut consumer = Consumer::new(
 			&subscriber,
 			&catalog,
@@ -1278,7 +1329,9 @@ mod tests {
 			..Settings::new(48_000, Layout::Mono)
 		})
 		.unwrap();
-		let catalog = encoder.catalog();
+		let mut catalog = encoder.catalog();
+		// Every packet counts here; the warmup tests cover trimming.
+		catalog.warmup = None;
 
 		// One coded packet, then a withheld one to follow it. Taken from the same
 		// encoder rather than published in between, so nothing fills the resampler's
@@ -1392,7 +1445,9 @@ mod tests {
 			layout: Layout::Mono,
 		};
 		let mut encoder = Encoder::new(&Settings::new(input.sample_rate, input.layout)).unwrap();
-		let catalog = encoder.catalog();
+		let mut catalog = encoder.catalog();
+		// Every packet counts here; the warmup tests cover trimming.
+		catalog.warmup = None;
 
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
@@ -1558,7 +1613,9 @@ mod tests {
 	#[tokio::test]
 	async fn opus_states_its_own_frame_duration() {
 		let mut encoder = Encoder::new(&Settings::new(48_000, Layout::Mono)).unwrap();
-		let catalog = encoder.catalog();
+		let mut catalog = encoder.catalog();
+		// Every packet counts here; the warmup tests cover trimming.
+		catalog.warmup = None;
 
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
@@ -1652,7 +1709,9 @@ mod tests {
 			layout: Layout::Mono,
 		};
 		let mut encoder = Encoder::new(&Settings::new(input.sample_rate, input.layout)).unwrap();
-		let catalog = encoder.catalog();
+		let mut catalog = encoder.catalog();
+		// Every packet counts here; the warmup tests cover trimming.
+		catalog.warmup = None;
 
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
@@ -1703,7 +1762,9 @@ mod tests {
 			layout: Layout::Mono,
 		};
 		let mut encoder = Encoder::new(&Settings::new(input.sample_rate, input.layout)).unwrap();
-		let catalog = encoder.catalog();
+		let mut catalog = encoder.catalog();
+		// Every packet counts here; the warmup tests cover trimming.
+		catalog.warmup = None;
 		let frame_size = encoder.frame_size();
 
 		let broadcast = moq_net::broadcast::Info::new().produce();
@@ -1820,6 +1881,8 @@ mod tests {
 		// One real Opus packet, so a mis-framed read can't accidentally decode.
 		let mut encoder = Encoder::new(&Settings::new(input.sample_rate, input.layout)).unwrap();
 		let mut catalog = encoder.catalog();
+		// Every packet counts here; the warmup tests cover trimming.
+		catalog.warmup = None;
 		let pcm = vec![0.0f32; encoder.frame_size() * encoder.codec_channels() as usize];
 		let packet = encoder.encode(&pcm).unwrap();
 

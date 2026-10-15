@@ -180,11 +180,7 @@ impl<E: CatalogExt> Reserved<E> {
 			)?)
 		};
 
-		let mut config = encoder.catalog();
-		if matches!(options.settings.codec, super::Codec::Opus) {
-			config.warmup = Some(std::time::Duration::from_millis(80));
-		}
-		self.track.set(config)?;
+		self.track.set(encoder.catalog())?;
 
 		let group_samples = options.group_duration.as_nanos() * u128::from(encoder.codec_rate());
 		let group_samples = u64::try_from(group_samples.div_ceil(1_000_000_000)).unwrap_or(u64::MAX);
@@ -637,7 +633,9 @@ mod tests {
 				},
 				..Options::default()
 			};
-			let decoder_config = Encoder::new(&options.settings).unwrap().catalog();
+			let mut decoder_config = Encoder::new(&options.settings).unwrap().catalog();
+			// Every packet counts here; the consumer's warmup tests cover trimming.
+			decoder_config.warmup = None;
 
 			let mut broadcast = moq_net::broadcast::Info::new().produce();
 			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
@@ -815,7 +813,9 @@ mod tests {
 			settings: Settings::new(48_000, Layout::Mono),
 			..Options::default()
 		};
-		let decoder_config = Encoder::new(&options.settings).unwrap().catalog();
+		let mut decoder_config = Encoder::new(&options.settings).unwrap().catalog();
+		// Every packet counts here; the consumer's warmup tests cover trimming.
+		decoder_config.warmup = None;
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
@@ -867,7 +867,9 @@ mod tests {
 			},
 			..Options::default()
 		};
-		let decoder_config = Encoder::new(&options.settings).unwrap().catalog();
+		let mut decoder_config = Encoder::new(&options.settings).unwrap().catalog();
+		// Every packet counts here; the consumer's warmup tests cover trimming.
+		decoder_config.warmup = None;
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
