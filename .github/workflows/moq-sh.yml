@@ -34,8 +34,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macOS has shasum rather than sha256sum, and BSD mktemp and tar.
-        os: [ubuntu-latest, macos-latest]
+        # macOS runs in platform.yml, sharing the merge queue runner.
+        os: [ubuntu-latest]
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

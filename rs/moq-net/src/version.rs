@@ -8,6 +8,7 @@ use crate::{coding, ietf, lite};
 /// Ordered by preference, with the client's preference taking priority.
 /// This intentionally includes only SETUP-negotiated versions (Lite02, Lite01, Draft14);
 /// Lite03 and newer IETF drafts negotiate via dedicated ALPNs instead.
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) const NEGOTIATED: [Version; 3] = [
 	Version::Lite(lite::Version::Lite02),
 	Version::Lite(lite::Version::Lite01),
@@ -84,10 +85,11 @@ pub enum Version {
 }
 
 impl Version {
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn session_code(self, error: &crate::SessionError) -> u32 {
 		match self {
 			Self::Lite(_) => crate::lite::error::to_session_code(error),
-			Self::Ietf(_) => error.to_code(),
+			Self::Ietf(_) => crate::ietf::error::to_session_code(error),
 		}
 	}
 

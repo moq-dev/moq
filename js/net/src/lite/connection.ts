@@ -1,4 +1,4 @@
-import { type Getter, Once, Signal } from "@moq/signals";
+import { Effect, type Getter, Once, Signal } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
@@ -11,21 +11,23 @@ import { type Hop, randomHop } from "../hop.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
+import { Observed } from "../util/observed.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { registerWire } from "../wire.ts";
 import { AnnounceRequest } from "./announce.ts";
 import { LiteAuthWire } from "./auth.ts";
+import { closeViolation } from "./error.ts";
 import { Fetch } from "./fetch.ts";
 import { Goaway } from "./goaway.ts";
 import { Group } from "./group.ts";
 import { Publisher } from "./publisher.ts";
 import { SessionInfo } from "./session.ts";
-import { ProbeLevel, type Role, Setup } from "./setup.ts";
+import { hasClientParameters, ProbeLevel, type Role, Setup } from "./setup.ts";
 import { DataType, StreamId } from "./stream.ts";
 import { Subscribe } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { Track as TrackMessage } from "./track.ts";
-import { hasAuth, hasDatagrams, hasProbeRtt, hasSetupStream, type Version, versionName } from "./version.ts";
+import { hasAuth, hasDatagrams, hasProbeRtt, hasSetupStream, Version, versionName } from "./version.ts";
 
 /**
  * Constructor options for {@link Connection}.
@@ -41,8 +43,6 @@ export interface ConnectionProps {
 	version: Version;
 	/** The session stream, absent on drafts that have none. */
 	session?: Stream;
-	/** Whether the relay supports broadcast discovery. Defaults to true. */
-	discovery?: boolean;
 	/** The origin whose broadcasts are served to the peer. Omit to publish nothing. */
 	publish?: OriginConsumer;
 	/**
@@ -68,9 +68,6 @@ export class Connection implements Established {
 
 	// The wire transport this session runs over.
 	readonly transport: Transport;
-
-	/** Whether the relay supports broadcast discovery; see {@link Established.discovery}. */
-	readonly discovery: boolean;
 
 	// The version used for encoding/decoding.
 	#version: Version;
@@ -108,7 +105,7 @@ export class Connection implements Established {
 	#peerRole = new Signal<Role | undefined>(undefined);
 
 	// Written by the Subscriber as PROBE messages arrive.
-	#probe = new Signal<Probe>({});
+	#probe = new Observed<Probe>({});
 
 	// Whether we dialed; see {@link ConnectionProps.client}.
 	#client: boolean;
@@ -133,7 +130,7 @@ export class Connection implements Established {
 	 *
 	 * @internal
 	 */
-	constructor({ url, quic, version, session, discovery = true, publish, client = true }: ConnectionProps) {
+	constructor({ url, quic, version, session, publish, client = true }: ConnectionProps) {
 		this.url = url;
 		this.#quic = quic;
 		this.#session = session;
@@ -145,7 +142,6 @@ export class Connection implements Established {
 		this.version = versionName(version);
 		this.#version = version;
 		this.transport = transportOf(quic);
-		this.discovery = discovery;
 
 		this.probe = this.#probe;
 
@@ -161,7 +157,7 @@ export class Connection implements Established {
 		});
 		this.#auth.violated.subscribe((err) => {
 			if (!err) return;
-			this.#quic.close({ closeCode: err.code, reason: err.message });
+			closeViolation(this.#quic, err);
 			this.abort();
 		});
 
@@ -225,7 +221,10 @@ export class Connection implements Established {
 			tasks.push(this.#sendSetup());
 		}
 
-		tasks.push(this.#subscriber.runProbe());
+		const probes = new Effect((effect) => {
+			if (!effect.get(this.#probe.used)) return;
+			effect.spawn(() => this.#subscriber.runProbe(effect.abort));
+		});
 
 		// Fail loud on a publication our grant never covers, once the peer has answered the
 		// credential we presented at setup.
@@ -241,12 +240,15 @@ export class Connection implements Established {
 
 		let fatal: Error | undefined;
 		try {
-			await Promise.all(tasks);
+			// An application close rejects QMux's pending accepts with a teardown error.
+			// The transport's close result owns that termination, rather than the task failure.
+			await Promise.race([Promise.all(tasks), this.#quic.closed]);
 		} catch (err) {
 			console.error("fatal error running connection", err);
 			// A session-sourced failure is the peer's close, not the raw transport error.
 			fatal = await sessionCause(this.#quic, err);
 		} finally {
+			probes.close();
 			// The session died under every track it was receiving, so they end with its
 			// error. A deliberate close() already ended them cleanly, which makes this a no-op.
 			this.#subscriber.close(fatal ?? (await closeError(this.#quic)));
@@ -303,12 +305,8 @@ export class Connection implements Established {
 				.catch((err: unknown) => {
 					stream.writer.reset(err);
 					// A protocol violation on one stream is the peer breaking the session.
-					// Resetting that stream leaves it free to repeat the violation; a duplicate
-					// GOAWAY is the one this dispatcher raises.
-					if (err instanceof ProtocolViolation) {
-						this.#quic.close({ closeCode: err.code, reason: err.message });
-						this.abort();
-					}
+					// Resetting that stream would leave it free to repeat malformed input.
+					if (closeViolation(this.#quic, err)) this.abort();
 				})
 				.finally(() => {
 					stream.writer.close();
@@ -319,8 +317,10 @@ export class Connection implements Established {
 	async #runBidi(stream: Stream) {
 		const typ = await stream.reader.u53();
 
+		// A type this version does not know, including one it predates, is an extension stream
+		// opened without negotiating it: a plain error resets the stream and keeps the session.
 		if (typ === StreamId.Session) {
-			throw new Error("duplicate session stream");
+			throw new ProtocolViolation("duplicate session stream");
 		} else if (typ === StreamId.Announce) {
 			const msg = await AnnounceRequest.decode(stream.reader, this.#version);
 			await this.#publisher.runAnnounce(msg, stream);
@@ -333,6 +333,7 @@ export class Connection implements Established {
 				})(),
 			);
 		} else if (typ === StreamId.Fetch) {
+			if (!hasSetupStream(this.#version)) throw new Error("FETCH is not supported on this version");
 			await this.#publisher.owe(
 				(async () => {
 					const msg = await Fetch.decode(stream.reader, this.#version);
@@ -340,6 +341,7 @@ export class Connection implements Established {
 				})(),
 			);
 		} else if (typ === StreamId.Track) {
+			if (!hasSetupStream(this.#version)) throw new Error("TRACK is not supported on this version");
 			await this.#publisher.owe(
 				(async () => {
 					const msg = await TrackMessage.decode(stream.reader, this.#version);
@@ -347,13 +349,23 @@ export class Connection implements Established {
 				})(),
 			);
 		} else if (typ === StreamId.Probe) {
+			if (this.#version === Version.DRAFT_01 || this.#version === Version.DRAFT_02)
+				throw new Error("PROBE is not supported on this version");
 			await this.#publisher.runProbe(stream);
 		} else if (typ === StreamId.Auth) {
+			if (!hasAuth(this.#version)) throw new Error("AUTH is not supported on this version");
 			await this.#auth.serve(stream);
 		} else if (typ === StreamId.Goaway) {
+			if (
+				this.#version === Version.DRAFT_01 ||
+				this.#version === Version.DRAFT_02 ||
+				this.#version === Version.DRAFT_03
+			)
+				throw new Error("GOAWAY is not supported on this version");
 			const msg = await Goaway.decode(stream.reader, this.#version);
 			// A peer sends at most one; a second is a protocol violation.
 			if (this.#goaway.peek() !== undefined) throw new ProtocolViolation("duplicate GOAWAY");
+			if (!this.#client && msg.uri !== "") throw new ProtocolViolation("client GOAWAY URI must be empty");
 			this.#goaway.set({ uri: msg.uri });
 		} else {
 			throw new Error(`unknown stream type: ${typ.toString()}`);
@@ -373,9 +385,7 @@ export class Connection implements Established {
 				})
 				.catch((err: unknown) => {
 					stream.stop(err);
-					if (err instanceof ProtocolViolation) {
-						this.#quic.close({ closeCode: err.code, reason: err.message });
-					}
+					if (err instanceof ProtocolViolation) closeViolation(this.#quic, err);
 				});
 		}
 	}
@@ -396,6 +406,10 @@ export class Connection implements Established {
 			const setup = await Setup.decode(stream, this.#version).catch((err: unknown) => {
 				throw new ProtocolViolation("invalid SETUP", { cause: err });
 			});
+			if (this.#client && hasClientParameters(setup))
+				throw new ProtocolViolation("server SETUP contains Path or Role");
+			if (!this.#client && setup.path !== undefined)
+				throw new ProtocolViolation("Path on a URI-carrying binding");
 			this.#peerSetup.set(setup);
 			this.#peerRole.set(setup.role);
 		} else {

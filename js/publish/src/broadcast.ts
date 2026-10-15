@@ -3,6 +3,7 @@ import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
 import { CatalogProducer } from "./catalog";
+import { errors } from "./internal";
 import { Baseline } from "./jitter";
 import { type Kind, Rendition } from "./rendition";
 
@@ -67,7 +68,7 @@ export class Broadcast {
 	readonly catalog = new CatalogProducer();
 
 	// The underlying network broadcast, recreated when the name, enabled state, or maxAge changes,
-	// or when a closed rendition track must be replaced, and `undefined` in between. It lives in the origin rather than any session, so it spans
+	// and is `undefined` in between. It lives in the origin rather than any session, so it spans
 	// reconnects. Exposed so an application can serve its own tracks alongside the built-in
 	// catalog/audio/video, e.g. `net.createTrack("meta.json")` plus a matching `catalog` section.
 	// Reacquire it via an effect, since a rename swaps in a fresh producer.
@@ -90,8 +91,8 @@ export class Broadcast {
 	// The kind of each rendition track in the current network broadcast. A new one starts over.
 	#kinds = new Map<string, Kind>();
 
-	// Bumped to publish a new network broadcast, when a closed rendition track must be replaced.
-	readonly #restart = new Signal(0);
+	// Replacement tracks keep their catalog IDs but never reuse a closed track name.
+	readonly #names = new Signal<Record<string, string>>({});
 
 	#signals = new Effect();
 
@@ -173,14 +174,17 @@ export class Broadcast {
 	#runCatalog(effect: Effect) {
 		const enabled = effect.get(this.in.enabled);
 		const renditions = effect.get(this.#renditions);
+		const names = effect.get(this.#names);
 
 		const video: Record<string, Catalog.VideoConfig> = {};
 		const audio: Record<string, Catalog.AudioConfig> = {};
 		const text: Record<string, Catalog.TextConfig> = {};
 
 		for (const rendition of Object.values(renditions)) {
-			const config = enabled ? effect.get(rendition.config) : undefined;
-			if (config === undefined) continue;
+			const source = enabled ? effect.get(rendition.config) : undefined;
+			if (source === undefined) continue;
+			const track = names[rendition.name];
+			const config = track ? { ...(source as object), track } : source;
 
 			if (rendition.kind === "video") {
 				video[rendition.name] = config as Catalog.VideoConfig;
@@ -228,7 +232,6 @@ export class Broadcast {
 
 		const name = effect.get(this.in.name);
 		const maxAge = effect.get(this.in.maxAge);
-		effect.get(this.#restart);
 		if (Catalog.detectFormat(name) === undefined) {
 			console.warn(
 				`You should append .hang to broadcast name ${JSON.stringify(name)} to make the catalog format explicit.`,
@@ -253,11 +256,12 @@ export class Broadcast {
 		// so a re-announce or a rendition change keeps writing to it instead of restarting its
 		// group sequence under the same epoch. Rendition tracks by name, so registering a name
 		// again finds its track; the catalog's stay out of reach of a colliding rendition.
-		const tracks = new Map<string, Moq.Track.Producer>();
+		const tracks = new Map<string, { track: Moq.Track.Producer; owner: Rendition<unknown> }>();
+		this.#names.set({});
 		const kinds = new Map<string, Kind>();
 		this.#kinds = kinds;
 		effect.cleanup(() => {
-			for (const track of tracks.values()) track.close();
+			for (const { track } of tracks.values()) track.close();
 			if (this.#kinds === kinds) this.#kinds = new Map();
 		});
 
@@ -303,22 +307,32 @@ export class Broadcast {
 				const signal = this.#tracks.get(rendition.name);
 				if (!signal) continue;
 
-				// A track that closed (an encoder error) can't be continued, and a replacement under
-				// the same name would restart its sequences, so the tracks move to a new broadcast.
-				let track = tracks.get(rendition.name);
-				if (track?.closed.peek() !== undefined) {
-					this.#restart.update((restarts) => restarts + 1);
-					return;
-				}
-				if (!track) {
-					track = broadcast.createTrack(
-						rendition.name,
+				let entry = tracks.get(rendition.name);
+				const cause = entry && errors.get(entry.owner)?.peek();
+				if (entry && cause) entry.track.close(cause);
+				// An error leaves this rendition down. Only a replacement registration may
+				// recover, with a fresh track name so its group sequence can start over.
+				if (!entry || (entry.owner !== rendition && entry.track.closed.peek() !== undefined)) {
+					const name = entry ? `${rendition.name}/${Moq.Epoch.mint()}` : rendition.name;
+					const track = broadcast.createTrack(
+						name,
 						Container.trackInfo({ maxAge, priority: Catalog.PRIORITY[rendition.kind] }),
 					);
-					tracks.set(rendition.name, track);
+					entry = { track, owner: rendition };
+					tracks.set(rendition.name, entry);
 					kinds.set(rendition.name, rendition.kind);
+					if (name !== rendition.name) this.#names.update((names) => ({ ...names, [rendition.name]: name }));
+				} else {
+					entry.owner = rendition;
 				}
-				const served = track;
+				const served = entry.track;
+				const error = errors.get(rendition);
+				if (error) {
+					inner.run((failure) => {
+						const cause = failure.get(error);
+						if (cause) served.close(cause);
+					});
+				}
 				inner.run((demand) => {
 					demand.set(signal, demand.get(served.demand().used) ? served : undefined);
 				});

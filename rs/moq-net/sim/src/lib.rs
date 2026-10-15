@@ -3,13 +3,14 @@
 //! Time never moves on its own. Once every task has stalled, [`run`] jumps the clock
 //! to the earliest armed timer and wakes it, like tokio's paused clock, so a test
 //! never waits on the wall clock. A run whose tasks are all parked with nothing
-//! armed can never finish, so it panics rather than hang.
+//! armed can never finish, so it panics rather than hang, unless a task awaits
+//! [`idle`], which completes at exactly that point.
 //!
 //! Protocol drivers take time from their caller: [`drive`] polls one with the
 //! simulated instant, and [`attach`] keeps an externally owned clock in step.
 
 use std::{
-	cell::RefCell,
+	cell::{Cell, RefCell},
 	collections::BTreeMap,
 	future::{Future, IntoFuture},
 	pin::{Pin, pin},
@@ -41,6 +42,8 @@ struct Runtime {
 	spawned: RefCell<Vec<Task>>,
 	time: RefCell<Time>,
 	sources: RefCell<Vec<Source>>,
+	/// Awaiting [`idle`]: each flag is raised, and its waker woken, once nothing else can run.
+	idle: RefCell<Vec<(Rc<Cell<bool>>, Waker)>>,
 }
 
 struct Time {
@@ -135,7 +138,7 @@ impl Drop for Enter {
 /// # Panics
 ///
 /// When called inside another `run`, and when every task is parked with no timer
-/// armed, which is a deadlock.
+/// armed and none awaits [`idle`], which is a deadlock.
 pub fn run<F: IntoFuture>(future: F) -> F::Output {
 	let runtime = Rc::new(Runtime {
 		spawned: RefCell::new(Vec::new()),
@@ -145,6 +148,7 @@ pub fn run<F: IntoFuture>(future: F) -> F::Output {
 			timers: BTreeMap::new(),
 		}),
 		sources: RefCell::new(Vec::new()),
+		idle: RefCell::new(Vec::new()),
 	});
 	CURRENT.with(|current| {
 		let mut current = current.borrow_mut();
@@ -177,17 +181,23 @@ pub fn run<F: IntoFuture>(future: F) -> F::Output {
 		if root.0.load(Ordering::SeqCst) || pool.0.load(Ordering::SeqCst) || !runtime.spawned.borrow().is_empty() {
 			continue;
 		}
-		assert!(
-			runtime.advance(),
-			"deadlock: every task is parked and no timer is armed"
-		);
+		if runtime.advance() {
+			continue;
+		}
+		let idle = runtime.idle.take();
+		assert!(!idle.is_empty(), "deadlock: every task is parked and no timer is armed");
+		for (flag, waker) in idle {
+			flag.set(true);
+			waker.wake();
+		}
 	};
 
 	drop(tasks);
 	drop(runtime.spawned.take());
 	drop(enter);
-	// Sources and timers may hold wakers into the dropped tasks.
+	// Sources, timers and idle waiters may hold wakers into the dropped tasks.
 	runtime.sources.borrow_mut().clear();
+	runtime.idle.borrow_mut().clear();
 	runtime.time.borrow_mut().timers.clear();
 	output
 }
@@ -214,6 +224,20 @@ pub async fn advance(duration: Duration) {
 	let at = runtime.now() + duration;
 	runtime.advance_to(at);
 	yield_now().await;
+}
+
+/// Complete once every other task is parked and no timer or source is armed, so
+/// nothing can happen until something outside the run acts: the system has settled.
+pub fn idle() -> impl Future<Output = ()> {
+	let runtime = current();
+	let settled = Rc::new(Cell::new(false));
+	std::future::poll_fn(move |cx| {
+		if settled.get() {
+			return Poll::Ready(());
+		}
+		runtime.idle.borrow_mut().push((settled.clone(), cx.waker().clone()));
+		Poll::Pending
+	})
 }
 
 /// Yield once, letting every other ready task run first.
@@ -509,7 +533,8 @@ mod tests {
 	use std::cell::Cell;
 
 	use super::{
-		Duration, Elapsed, Poll, Rc, RefCell, Waker, advance, attach, drive, now, run, sleep, spawn, timeout, yield_now,
+		Duration, Elapsed, Poll, Rc, RefCell, Waker, advance, attach, drive, idle, now, run, sleep, spawn, timeout,
+		yield_now,
 	};
 
 	#[test]
@@ -615,6 +640,24 @@ mod tests {
 	#[should_panic(expected = "deadlock")]
 	fn a_deadlock_panics() {
 		run(std::future::pending::<()>());
+	}
+
+	#[test]
+	fn idle_waits_for_every_timer() {
+		run(async {
+			let start = now();
+			let fired = Rc::new(Cell::new(0));
+			for secs in [1, 5, 3] {
+				let fired = fired.clone();
+				drop(spawn(async move {
+					sleep(Duration::from_secs(secs)).await;
+					fired.set(fired.get() + 1);
+				}));
+			}
+			idle().await;
+			assert_eq!(fired.get(), 3);
+			assert_eq!(now(), start + Duration::from_secs(5));
+		});
 	}
 
 	#[test]

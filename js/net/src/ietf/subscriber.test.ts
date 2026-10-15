@@ -8,7 +8,7 @@ import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
-import { Timescale, Timestamp } from "../time.ts";
+import { Milli, Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { ControlStreamAdapter, NativeSession } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
@@ -960,15 +960,17 @@ function encodeObjects(deltas: number[]): Uint8Array {
 async function subscribeTrack({
 	version = VERSION,
 	properties = {},
+	subscription,
 }: {
 	version?: IetfVersion;
 	properties?: Properties;
+	subscription?: track.Subscription;
 } = {}): Promise<{ subscriber: Subscriber; track: track.Subscriber }> {
 	const pair = createMockTransportPair(version === Version.DRAFT_16 ? ALPN.DRAFT_16 : ALPN.DRAFT_19);
 	const session = new NativeSession(pair.server, version, true);
 	const subscriber = new Subscriber({ session });
 
-	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe(subscription);
 
 	const peer = await nextStream(pair.client);
 	if (!peer) throw new Error("the subscriber never opened a subscribe stream");
@@ -1447,7 +1449,8 @@ test.each([
 	[VERSION, true, [3, 4]],
 	[Version.DRAFT_16, true, [3, 4]],
 ])("draft %s with FIRST_OBJECT=%s: a header-only stream delivers %p", async (version, firstObject, expected) => {
-	const { subscriber, track } = await subscribeTrack({ version });
+	// A budget, so the empty group outlives its successor's arrival.
+	const { subscriber, track } = await subscribeTrack({ version, subscription: { maxDelay: Milli(60_000) } });
 
 	await subscriber.handleGroup(
 		new GroupMessage({
@@ -1976,3 +1979,32 @@ test.each(["waiting", "allocated"] as const)(
 		}
 	},
 );
+
+test("an announce consumer closed while waiting on request-ID credit takes no ID", async () => {
+	const version = Version.DRAFT_15;
+	const pair = createMockTransportPair(ALPN.DRAFT_15);
+	const control = await Stream.open(pair.server, { version });
+	const session = new ControlStreamAdapter(pair.server, control, version, 0n, true);
+	const running = session.run().catch(() => undefined);
+	// Stand in for exhausted credit: the allocation waits until its signal aborts.
+	let cancelled = false;
+	spyOn(session, "nextRequestId").mockImplementation(
+		(signal) =>
+			new Promise((_, reject) => {
+				signal?.addEventListener("abort", () => {
+					cancelled = true;
+					reject(signal.reason);
+				});
+			}),
+	);
+	const subscriber = new Subscriber({ session });
+
+	const announced = subscriber.announced(Path.Pattern.subtree(Path.from("room")));
+	await Promise.resolve();
+	announced.close();
+	for (let i = 0; i < 8; i++) await Promise.resolve();
+	expect(cancelled).toBe(true);
+
+	session.close();
+	void running;
+});

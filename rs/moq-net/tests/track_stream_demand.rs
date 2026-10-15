@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A subscription's demand holds across its TRACK and SUBSCRIBE streams.
 //!
 //! On moq-lite 05 and later a subscriber learns a track's properties over a TRACK stream

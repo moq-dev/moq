@@ -12,8 +12,8 @@ Consumers never decide behavior by matching an error; errors are diagnostics.
 
 - Rust already maps IETF `PUBLISH_DONE` Unauthorized to `Error::Unauthorized`,
   and a closed source's standing route no longer re-requests it.
-- #4179 fixes revoked upstream subscriptions and #4120 preserves session death
-  and resumed-track errors. After #4179 reaches `main`, verify the remaining
+- #4179 fixed revoked upstream subscriptions and #4120 preserves session death
+  and resumed-track errors. Both are on `main`; verify the remaining
   track paths (source close, route removal, broadcast withdrawal) locally and
   over a mock session, and map JS `PUBLISH_DONE` Unauthorized to #4179's shared
   error. Preserve causes at the source rather than remapping `Dropped` at
@@ -79,10 +79,6 @@ Consumers never decide behavior by matching an error; errors are diagnostics.
 
 Public API: none expected; error values consumers observe change. Wire: none.
 
-## Required
-
-- [Auth](/quest/m1/auth/README.md) - its Unauthorized quest (#4179, done on the line) supplies shared Unauthorized errors and revoked-stream handling
-
 ## Closes
 
 - [#5347](https://github.com/moq-dev/moq/issues/5347) - `export ts --stitch --linger` exits on `internal error` when a catalog request lands on a dying publisher
@@ -90,3 +86,4 @@ Public API: none expected; error values consumers observe change. Wire: none.
 ## Related
 
 - [#4179](https://github.com/moq-dev/moq/pull/4179) - owns the revoked-upstream path
+- [No made-up Dropped](/quest/m1/dropped-internal.md) - the same rule for internal sites in the subscribers, origin, and transcode

@@ -284,7 +284,11 @@ impl Internal {
 		// capturing a descriptor per health check would spend one for nothing.
 		crate::listener::server(
 			listener,
-			crate::listener::Config { health, timeout },
+			crate::listener::Config {
+				health,
+				timeout,
+				activity: None,
+			},
 			DefaultAcceptor::new(),
 		)?
 		.serve(app.into_make_service())
@@ -327,6 +331,7 @@ async fn serve_metrics(State(state): State<InternalState>) -> Response {
 	if let Some(refusals) = &state.refusals {
 		render_refusals(&mut body, refusals);
 	}
+	render_panics(&mut body, moq_tokio::panic::count());
 	([(http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
 }
 
@@ -537,6 +542,20 @@ fn render_refusals(out: &mut String, refusals: &crate::refusals::Refusals) {
 			refusals.count(refusal)
 		);
 	}
+}
+
+/// Panics contained to one session's task, process-wide. Each one is a bug that
+/// closed a session instead of the process; the error log carries its message and
+/// the session's span.
+fn render_panics(out: &mut String, panics: u64) {
+	use std::fmt::Write as _;
+
+	let _ = writeln!(
+		out,
+		"# HELP moq_relay_panics_total Panics that ended a single session instead of the process."
+	);
+	let _ = writeln!(out, "# TYPE moq_relay_panics_total counter");
+	let _ = writeln!(out, "moq_relay_panics_total {panics}");
 }
 
 /// The accept-loop health of every listener on the node.

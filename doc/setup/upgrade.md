@@ -19,6 +19,22 @@ error lists and rerun.
 
 These land with the next breaking release, not the 2026-09-23 train.
 
+- **moq-tokio config durations are optional.** Wrap durations in `Some(...)` for
+  connect `race`, `resolution_delay`, and `timeout`; listen `timeout`; QUIC
+  `idle_timeout` and `keep_alive`; backoff `initial`, `max`, and `timeout`;
+  GOAWAY `handover`; and WebSocket `delay`. `None` uses the default, while
+  `Some(Duration::ZERO)` keeps each knob's zero behavior. Values set in code
+  now take effect on parsed and merged configs unless the flag or environment
+  variable was actually given. TOML keys, C ABI, binding records, and wire
+  formats are unchanged.
+- **Max age and max delay count wall-clock time too.** A superseded group is
+  stale once its successor arrived a full budget ago, as well as by media time,
+  so an untimed track is no longer exempt: with the default zero `max_delay`,
+  an untimed subscriber starts at the latest group and skips each superseded
+  one. Give it a budget to replay or tolerate reordering.
+- **`cache::Pool::gc` takes a waiter.** In Rust, `gc(now)` is
+  `gc(now, waiter)`, like `Driver::poll`: call it again when the waiter wakes,
+  since a parked read can arm an earlier deadline than the one returned.
 - **A QUIC load-balancer nonce needs its server id.** `listen.lb_nonce`,
   `--listen-quic-lb-nonce`, and `MOQ_LISTEN_QUIC_LB_NONCE` without `lb_id` stop
   startup. Setting `lb_id` (or `lb_nonce`) and `load_balancer` together also
@@ -42,6 +58,15 @@ These land with the next breaking release, not the 2026-09-23 train.
   old single-instance behavior. `Origin.Producer` and `Origin.Consumer` drop
   `broadcasts(scope)`; iterate `announced(scope)` and keep the entries you need.
   `@moq/watch` with `announced` off no longer moves to a later publisher.
+- **@moq/net discovers only what something watches, and `discovery` is gone.**
+  A `consume` origin stays empty until a reader watches it with
+  `announced(scope)` or `request(path, { announced: true })`; the session then
+  asks the relay about those prefixes only. Code that peeked the table
+  (`request(path)` expecting a route) without watching should hold an
+  `announced(scope)` stream. The `discovery` option on `connect`, `accept`, and
+  `Connection` and `Established.discovery` are removed, and passing the option
+  throws a `TypeError`: drop it. A relay that refuses an announce request
+  downgrades that session to blind requests on its own.
 - **"Epoch" means only the publisher epoch.** The reconnect counter is
   `connects()`: `moq_tokio::Connection::epoch()` and moq-ffi's
   `MoqSession::epoch()` are `connects()`, which is Python's `connects()`, Go's
@@ -112,11 +137,13 @@ These land with the next breaking release, not the 2026-09-23 train.
   Construct `MoqMediaTrackProducer::audio` / `video` (from the broadcast, a
   `MoqMediaTarget::Named` or `Requested` target, and the init record),
   `MoqMediaContainerProducer`, `MoqMediaCatalogProducer`,
-  `MoqMediaCatalogConsumer::subscribe`, `MoqMediaContainerConsumer::subscribe`,
-  or `MoqMediaContainerGroupConsumer::fetch` instead. Producers drop `name`,
+  `MoqMediaCatalogConsumer::subscribe`, `MoqMediaTrackConsumer::subscribe`,
+  or `MoqMediaGroupConsumer::fetch` instead. Producers drop `name`,
   `used`, and `unused`; read them through `demand()`. The wrappers expose these
   as `moq.media` in Python, `moq.dev/moq/media` in Go, `dev.moq.media` in
-  Kotlin, `package:moq/media.dart` in Dart, and `Media` in Swift.
+  Kotlin, `package:moq/media.dart` in Dart, and `Media` in Swift. Go fetches a
+  group with `media.FetchGroup`; its `NewGroupConsumer` decodes
+  a raw group instead.
 - **moq-ffi error payloads are named.** `MoqError` cases that carried a
   positional string (`Transport`, `Internal`, `Connect`, ...) name it
   `reason` (`Reason` in Go, the `reason:` label in Swift). The Display text is
@@ -193,6 +220,10 @@ These land with the next breaking release, not the 2026-09-23 train.
   a `transport::Error`. moq-tokio's `Client` and `Server` are unchanged. A
   custom transport handed straight to moq-net implements these traits; a
   `moq-uring` session is wrapped with `moq_uring::transport::Session::new`.
+  Each session must report `binding()`: `transport::Binding::Uri` when the
+  transport handshake carries the request URI, or `InBand` when SETUP carries
+  it. The moq-tokio and moq-uring adapter constructors take this binding
+  explicitly; browser WebTransport adapters always report `Uri`.
 - **`--cluster-mesh` and `--cluster-linger` are unknown flags.** moq-relay
   0.17 refuses them by name; later relays reject them, and TOML `mesh` and
   `linger`, like any unknown setting. `MOQ_CLUSTER_MESH` and

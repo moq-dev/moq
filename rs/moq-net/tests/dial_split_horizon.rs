@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A dialed moq-transport session whose peer declares no hop must not be offered
 //! a route learned from that peer, and a SUBSCRIBE that arrives for that route
 //! must not be sent back to the peer that announced it.

@@ -217,15 +217,19 @@ impl Invocation {
 		Ok(())
 	}
 
-	/// Refuse the listener flags (`--listen-*`, `--auth-*`) when nothing listens,
+	/// Refuse listener, auth, stats and drain settings when nothing listens,
 	/// rather than silently ignoring them. Answered from the command line, like
 	/// [`Self::reject`].
 	pub fn unserved(&self) -> anyhow::Result<()> {
 		if self.moq.serves() {
 			return Ok(());
 		}
-		let listens =
-			|flag: &&&usage::Flag<'_>| owns::<moq_tokio::listen::Config>(flag) || owns::<moq_relay::auth::Config>(flag);
+		let listens = |flag: &&&usage::Flag<'_>| {
+			owns::<moq_tokio::listen::Config>(flag)
+				|| owns::<moq_relay::auth::Config>(flag)
+				|| owns::<moq_relay::stats::Config>(flag)
+				|| flag.longs.contains(&"drain-timeout")
+		};
 		if let Some(flags) = Self::names(self.given.iter().filter(listens)) {
 			anyhow::bail!(
 				"{flags} configure a listener, but none is bound; add --listen, --listen-tcp-bind, --listen-unix-bind, or --cluster-lan"
@@ -301,19 +305,30 @@ impl Invocation {
 	/// Called before anything binds a port or dials out, so a refused invocation has
 	/// no side effects to unwind.
 	pub fn validate(&self) -> anyhow::Result<()> {
+		if !self.stages.iter().all(Command::is_stageable) {
+			let listener_settings = self
+				.given
+				.iter()
+				.filter(|flag| owns::<moq_relay::stats::Config>(flag) || flag.longs.contains(&"drain-timeout"));
+			if let Some(flags) = Self::names(listener_settings) {
+				anyhow::bail!("{flags} configure listening import/export stages");
+			}
+		}
+
 		if self.moq.epoch.is_some() {
 			let mut publishes = false;
 			for command in &self.stages {
 				match command {
 					Command::Import(import) => {
-						anyhow::ensure!(
-							import.source.takes_epoch(),
-							"--epoch names one publisher instance, but the RTMP, SRT, and WHIP ingests and `import ts --program all` announce their own per connection or program"
-						);
+						if let Some(reason) = import.source.epoch_refusal() {
+							anyhow::bail!("--epoch makes instances one publisher of identical tracks, but {reason}");
+						}
 						publishes = true;
 					}
 					#[cfg(feature = "transcode")]
-					Command::Transcode(_) => publishes = true,
+					Command::Transcode(_) => anyhow::bail!(
+						"--epoch makes instances one publisher of identical tracks, but two `transcode` encoders never produce the same bytes"
+					),
 					_ => {}
 				}
 			}
@@ -422,6 +437,8 @@ pub struct MoqSide {
 	/// redundant publishers of one broadcast pass the same value and fail over
 	/// seamlessly. Leave it unset otherwise: a fresh epoch per run is what makes a
 	/// restarted publisher replace the old broadcast instead of resuming into it.
+	/// Only `import fmp4`, `flv`, `hls`, and `ts` (one program, or `--passthrough`)
+	/// accept it, since the other publishers' tracks differ between instances.
 	#[usage(long, env = "MOQ_EPOCH", help_heading = "MoQ")]
 	pub epoch: Option<hang::moq_net::Epoch>,
 
@@ -454,6 +471,14 @@ pub struct MoqSide {
 	/// `moq-relay`; a listener needs exactly one.
 	#[usage(flatten)]
 	pub auth: moq_relay::auth::Config,
+
+	/// Publish accepted-session stats with the relay's `--stats-*` settings.
+	#[usage(flatten)]
+	pub stats: moq_relay::stats::Config,
+
+	/// Drain accepted sessions for up to this long after SIGINT or SIGTERM; defaults to 10s.
+	#[usage(long, env = "MOQ_DRAIN_TIMEOUT", help_heading = "MoQ")]
+	pub drain_timeout: Option<crate::duration::Duration>,
 }
 
 impl MoqSide {
@@ -474,7 +499,9 @@ impl MoqSide {
 	/// origin is its origin, whose Hop ID is random per run unless `--cluster-id`
 	/// names the node.
 	pub fn cluster(&self) -> anyhow::Result<moq_relay::cluster::Cluster> {
-		moq_relay::cluster::Cluster::new(moq_relay::cluster::Options::new(self.cluster.clone()))
+		let cluster = moq_relay::cluster::Cluster::new(moq_relay::cluster::Options::new(self.cluster.clone()))?;
+		let stats = self.stats.build(cluster.origin.clone());
+		Ok(cluster.with_stats(stats))
 	}
 
 	/// Whether `--cluster-lan` asked this process to mesh over the LAN.
@@ -781,14 +808,23 @@ impl ImportSource {
 		})
 	}
 
-	/// Whether this source announces one publisher instance per run, which `--epoch`
-	/// can name. The ingest gateways and `ts --program all` announce their own.
-	pub fn takes_epoch(&self) -> bool {
+	/// Why `--epoch` can't name this source, or `None` when it can: the source must
+	/// announce once per run and derive its tracks from the input alone.
+	fn epoch_refusal(&self) -> Option<&'static str> {
 		match self {
-			Self::Ts(args) => args.program != Some(TsProgram::All),
-			Self::Rtmp(_) | Self::Srt(_) => false,
-			Self::Rtc(rtc) => rtc.listen.is_none(),
-			_ => true,
+			Self::Ts(args) if args.program == Some(TsProgram::All) => {
+				Some("`import ts --program all` mints an epoch per program")
+			}
+			Self::Rtmp(_) | Self::Srt(_) => Some("the RTMP and SRT imports mint an epoch per connection"),
+			Self::Rtc(rtc) if rtc.listen.is_some() => Some("the WHIP listener mints an epoch per connection"),
+			Self::Rtc(_) => Some("`import rtc --connect` timestamps frames from its own RTP session"),
+			Self::Avc3 => Some("`import avc3` timestamps frames from their arrival on stdin"),
+			Self::Archive(_) => {
+				Some("`import archive` rewrites the catalog and timeline groups it replays under the live names")
+			}
+			#[cfg(feature = "capture")]
+			Self::Capture(_) => Some("two `import capture` encoders never produce the same bytes"),
+			Self::Ts(_) | Self::Fmp4 | Self::Flv | Self::Hls(_) => None,
 		}
 	}
 }
@@ -1498,8 +1534,10 @@ mod tests {
 		}
 	}
 
-	/// `--epoch` reaches the stages that announce once per run, and is refused where
-	/// it would be ignored: an ingest that announces per connection, or no publisher.
+	/// `--epoch` reaches the importers that announce once per run and derive their tracks
+	/// from the input alone, and is refused everywhere else: an ingest that announces per
+	/// connection, a publisher whose timestamps or bytes come from the instance, or no
+	/// publisher at all.
 	#[test]
 	fn epoch_applies_only_to_a_once_per_run_publisher() {
 		let _env = crate::test_env::EnvGuard::clear(&["MOQ_EPOCH"]);
@@ -1513,9 +1551,31 @@ mod tests {
 		cli.validate().expect("a stdin import takes an epoch");
 		assert_eq!(cli.moq.epoch.map(|epoch| epoch.to_string()), Some(epoch.clone()));
 
+		for accepted in [
+			&["import", "ts"][..],
+			&["import", "ts", "--program", "1"],
+			&["import", "ts", "--passthrough"],
+			&["import", "flv"],
+			&["import", "hls", "https://example.com/live.m3u8"],
+		] {
+			parse(accepted)
+				.validate()
+				.unwrap_or_else(|err| panic!("{accepted:?} refused --epoch: {err:#}"));
+		}
+
 		for refused in [
 			&["import", "rtmp", "--listen", "[::]:1935"][..],
+			&["import", "rtmp", "--connect", "rtmp://example.com/live/key"],
+			&["import", "srt", "--connect", "srt://example.com:9000"],
+			&["import", "rtc", "--listen", "[::]:8080"],
+			&["import", "rtc", "--connect", "https://example.com/whep"],
 			&["import", "ts", "--program", "all"],
+			&["import", "avc3"],
+			&["import", "archive", "file:///tmp/recording"],
+			#[cfg(feature = "capture")]
+			&["import", "capture"],
+			#[cfg(feature = "transcode")]
+			&["transcode"],
 			&["export", "fmp4"],
 		] {
 			assert!(parse(refused).validate().is_err(), "{refused:?} accepted --epoch");
@@ -1624,6 +1684,57 @@ mod tests {
 		let err = parse(["--auth-public", "**"]).moq.validate().unwrap_err().to_string();
 		assert!(err.contains("--auth-public ignores"), "{err}");
 		assert!(parse(["--auth-url", "http://127.0.0.1:4440/"]).moq.validate().is_ok());
+	}
+
+	#[test]
+	fn listening_stats_and_drain_settings_parse() {
+		let cli = Invocation::try_parse_from([
+			"moq",
+			"--listen-tcp-bind",
+			"127.0.0.1:0",
+			"--auth-public",
+			"**",
+			"--stats-enabled",
+			"--stats-node",
+			"gateway",
+			"--drain-timeout",
+			"500ms",
+			"import",
+			"ts",
+		])
+		.unwrap();
+		cli.validate().unwrap();
+		cli.unserved().unwrap();
+		assert!(cli.moq.stats.enabled);
+		assert_eq!(cli.moq.stats.node.as_deref(), Some("gateway"));
+		assert_eq!(cli.moq.drain_timeout.unwrap().into_std(), Duration::from_millis(500));
+		for flags in [&["--stats-enabled"][..], &["--drain-timeout", "500ms"]] {
+			let cli = Invocation::try_parse_from(
+				["moq", "--connect", "https://relay.example"]
+					.iter()
+					.chain(flags)
+					.chain(&["import", "ts"])
+					.copied(),
+			)
+			.unwrap();
+			assert!(cli.unserved().unwrap_err().to_string().contains(flags[0]));
+		}
+	}
+
+	#[cfg(feature = "play")]
+	#[test]
+	fn listening_lifecycle_settings_do_not_apply_to_playback() {
+		for flags in [&["--stats-enabled"][..], &["--drain-timeout", "500ms"]] {
+			let cli = Invocation::try_parse_from(
+				["moq", "--listen-tcp-bind", "127.0.0.1:0", "--auth-public", "**"]
+					.iter()
+					.chain(flags)
+					.chain(&["play"])
+					.copied(),
+			)
+			.unwrap();
+			assert!(cli.validate().unwrap_err().to_string().contains(flags[0]));
+		}
 	}
 
 	/// A listener for ordinary clients admits nobody without a decision, so it
@@ -2134,6 +2245,8 @@ mod tests {
 			&["--listen-tcp-bind", "127.0.0.1:0"],
 			&["--cluster-node", "https://self.example"],
 			&["--auth-public", "**"],
+			&["--stats-enabled"],
+			&["--drain-timeout", "500ms"],
 			&["--epoch", "0192a3b4-c5d6-7e8f-9a0b-1c2d3e4f5a6b"],
 		];
 		let dial: &[&[&str]] = &[

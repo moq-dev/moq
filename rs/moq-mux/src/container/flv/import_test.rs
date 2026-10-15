@@ -181,7 +181,7 @@ async fn import_emits_frames() {
 		track,
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
-	let frame = decoder.read().await.unwrap().expect("a video frame");
+	let frame = decoder.read_frame().await.unwrap().expect("a video frame");
 	assert!(frame.keyframe);
 	// The payload is the length-prefixed NALU, carried through verbatim.
 	assert_eq!(frame.payload.as_ref(), &[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
@@ -207,7 +207,7 @@ async fn public_container_preserves_loc_for_flv() {
 		track,
 		crate::catalog::hang::Container::Loc(crate::container::Kind::Data),
 	);
-	let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read())
+	let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read_frame())
 		.await
 		.unwrap()
 		.unwrap()
@@ -504,7 +504,7 @@ async fn import_enhanced_av1() {
 		track,
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
-	let frame = decoder.read().await.unwrap().expect("an AV1 frame");
+	let frame = decoder.read_frame().await.unwrap().expect("an AV1 frame");
 	assert!(frame.keyframe);
 	assert_eq!(frame.payload.as_ref(), payload);
 }
@@ -638,7 +638,7 @@ async fn import_reports_negative_pts_and_can_resume() {
 		track,
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
-	let frame = decoder.read().await.unwrap().expect("the good frame");
+	let frame = decoder.read_frame().await.unwrap().expect("the good frame");
 	assert_eq!(frame.timestamp.as_millis(), 10);
 }
 
@@ -678,7 +678,7 @@ async fn import_enhanced_hvc1_applies_composition_time() {
 		track,
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
-	let frame = decoder.read().await.unwrap().expect("a video frame");
+	let frame = decoder.read_frame().await.unwrap().expect("a video frame");
 	assert_eq!(frame.timestamp.as_millis(), 17);
 }
 
@@ -790,7 +790,7 @@ async fn import_publishes_tag_timestamps_on_an_arrival_clock() {
 	let first = import.published[&import.video][0];
 	assert_eq!(first, (start_ms as u128 + 40) * 1000, "the source's own timestamp");
 
-	let tick = Duration::from_millis(1);
+	let tick = Duration::from_micros(1);
 	let wall = import
 		.clock
 		.wall_clock(moq_net::Timestamp::from_micros(first as u64).unwrap())

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import * as Catalog from "@moq/hang/catalog";
+import * as Msf from "@moq/msf";
 import * as Moq from "@moq/net";
 import { Origin, Path } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
@@ -568,6 +569,41 @@ describe("cross-broadcast renditions", () => {
 		}
 	});
 
+	it("watches each resolved reference and never the root", async () => {
+		const owner = new Origin.Producer();
+		const scopes: string[] = [];
+		const announced = owner.announced.bind(owner);
+		owner.announced = (scope, options) => {
+			scopes.push(scope?.text ?? "**");
+			return announced(scope, options);
+		};
+		const source = new Broadcast({
+			origin: owner,
+			name: Path.from("a/b/main.hang"),
+			enabled: true,
+			catalogFormat: "manual",
+			catalog: {
+				video: { renditions: { remote: video("avc1.640028", "../x") } },
+			} as Catalog.Root,
+		});
+
+		try {
+			await settle();
+			// `../x` from `a/b/main.hang` is `a/x`: watched exactly, so the origin's session asks
+			// its relay about that broadcast alone rather than everything the token allows.
+			expect(scopes).toEqual(["a/x"]);
+			expect(videoRenditions(source)).toEqual([]);
+
+			publish(owner, Path.from("a/x"));
+			await settle();
+			expect(videoRenditions(source)).toEqual(["remote"]);
+			expect(scopes).toEqual(["a/x"]);
+		} finally {
+			source.close();
+			owner.close();
+		}
+	});
+
 	it("follows a republished rendition broadcast through its announcement", async () => {
 		const owner = new Origin.Producer();
 		const source = new Broadcast({
@@ -812,4 +848,54 @@ describe("manual catalog", () => {
 			owner.close();
 		}
 	});
+});
+
+it("subscribes a cross-broadcast MSF rendition on its namespace", async () => {
+	const owner = new Origin.Producer();
+	const catalogBroadcast = publish(owner, Path.from("room/catalog.msf"));
+	const referenced = publish(owner, Path.from("room/left"));
+	catalogBroadcast.createTrack("video").writeFrame({ payload: new Uint8Array([1]) });
+	referenced.createTrack("video").writeFrame({ payload: new Uint8Array([2]) });
+	catalogBroadcast.createTrack("catalog").writeFrame({
+		payload: Msf.encode({
+			tracks: [
+				{
+					name: "video",
+					namespace: "room/left",
+					packaging: "loc",
+					role: "video",
+					codec: "vp8",
+				},
+			],
+		}),
+	});
+	const source = new Broadcast({
+		origin: owner,
+		name: Path.from("room/catalog.msf"),
+		enabled: true,
+		announced: false,
+	});
+	const effect = new Effect();
+	try {
+		await settle();
+		const config = source.out.catalog.peek()?.video?.renditions.video;
+		if (!config) throw new Error("MSF rendition missing");
+		let active: Moq.Broadcast.Consumer | undefined;
+		effect.run((inner) => {
+			active = source.relativeBroadcast(inner, config.broadcast);
+		});
+		await settle();
+		if (!active) throw new Error("referenced broadcast did not resolve");
+		const track = active.track("video").subscribe();
+		try {
+			const frame = await track.ordered().readFrame();
+			expect(frame?.payload).toEqual(new Uint8Array([2]));
+		} finally {
+			track.close();
+		}
+	} finally {
+		effect.close();
+		source.close();
+		owner.close();
+	}
 });

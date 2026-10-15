@@ -16,8 +16,8 @@
 //! # Where counting happens
 //!
 //! Counting lives in the model layer, not the wire loops. A session tags its
-//! origin pair with a [`Session`] context ([`crate::Client::with_stats`] /
-//! [`crate::Server::with_stats`], which call `origin::{Consumer, Producer}`
+//! origin pair with a [`Session`] context (`crate::Client::with_stats` /
+//! `crate::Server::with_stats`, which call `origin::{Consumer, Producer}`
 //! `with_stats`); every derived handle (broadcast, announce, track, group, frame)
 //! then attributes its reads (egress = publisher) and writes (ingress =
 //! subscriber) through that context. So any protocol that drives the model gets
@@ -61,7 +61,7 @@
 //!   the new one.
 //! * `announces_peak` / `subscriptions_peak` ([`Presence`]): the most
 //!   announcements, or subscriptions, any one session under the auth root held
-//!   at once, to compare against its [`crate::session::Limits`]. A peak never
+//!   at once, to compare against its `crate::session::Limits`. A peak never
 //!   goes down; a rollup takes the largest rather than the sum.
 //!
 //! Counters are strictly monotonic (only `fetch_add`); a counter going
@@ -115,7 +115,7 @@ use std::{
 	collections::HashMap,
 	fmt,
 	sync::{
-		Arc, Mutex, Weak,
+		Arc, Mutex, PoisonError, Weak,
 		atomic::{AtomicU64, AtomicUsize, Ordering},
 	},
 };
@@ -523,7 +523,7 @@ impl Traffic {
 /// Connected-session presence for one slice (an auth root on a tier, or any
 /// sum of such slices): cumulative connects and disconnects. `sessions_started
 /// - sessions_ended` is the current live session count. The peaks show how close
-/// one session came to its [`crate::session::Limits`].
+/// one session came to its `crate::session::Limits`.
 ///
 /// Like [`Traffic`], this is also the wire shape of one entry on a published
 /// sessions, presence, or totals track. Serialize writes both the canonical names and the legacy
@@ -862,7 +862,7 @@ impl BroadcastEntry {
 	fn tier(&self, tier: &Tier) -> Arc<TierCounters> {
 		self.tiers
 			.lock()
-			.expect("stats tiers poisoned")
+			.unwrap_or_else(PoisonError::into_inner)
 			.entry(tier.clone())
 			.or_default()
 			.clone()
@@ -925,6 +925,7 @@ impl Registry {
 	/// module exposes this to the stats producer bench. A report drops the entry
 	/// unless a guard still holds it.
 	#[cfg(any(test, feature = "fuzz"))]
+	#[cfg(feature = "async")]
 	pub(crate) fn bump_publisher_bytes(&self, path: impl AsPath, tier: &Tier, n: u64) {
 		let Some(entry) = self.entry(path) else {
 			return;
@@ -986,7 +987,7 @@ impl Registry {
 		{
 			let entries = shared.entries.lock();
 			for entry in entries.values() {
-				let tiers = entry.tiers.lock().expect("stats tiers poisoned");
+				let tiers = entry.tiers.lock().unwrap_or_else(PoisonError::into_inner);
 				for (tier, counters) in tiers.iter() {
 					let totals = snap.traffic.entry(tier.clone()).or_default();
 					totals[Role::Publisher.idx()].add(counters.publisher.snapshot());
@@ -1029,7 +1030,7 @@ impl Registry {
 		// totals, and dropped, with no bump able to land after it.
 		shared.entries.lock().retain(|path, entry| {
 			let free = Arc::strong_count(entry) == 1;
-			let mut tiers = entry.tiers.lock().expect("stats tiers poisoned");
+			let mut tiers = entry.tiers.lock().unwrap_or_else(PoisonError::into_inner);
 			tiers.retain(|tier, counters| {
 				let closed = free && Arc::strong_count(counters) == 1;
 				let publisher = counters.publisher.snapshot();
@@ -1078,8 +1079,8 @@ impl Default for Registry {
 	}
 }
 
-/// Tier-scoped wrapper around [`Registry`]. What [`crate::Client::with_stats`] and
-/// [`crate::Server::with_stats`] accept. Cheap to clone.
+/// Tier-scoped wrapper around [`Registry`]. What `crate::Client::with_stats` and
+/// `crate::Server::with_stats` accept. Cheap to clone.
 #[derive(Clone)]
 pub struct Handle {
 	stats: Registry,
@@ -1161,10 +1162,12 @@ pub struct Session {
 	inner: Option<Arc<SessionInner>>,
 }
 
-/// Which of a session's [`crate::session::Limits`] a [`Session::hold`] counts against.
+/// Which of a session's `crate::session::Limits` a [`Session::hold`] counts against.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Cap {
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	Announces,
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	Subscriptions,
 }
 
@@ -1223,7 +1226,7 @@ impl Session {
 	/// Record this session's presence and later traffic under `tier` from now on.
 	pub fn set_tier(&self, tier: Tier) {
 		let Some(inner) = &self.inner else { return };
-		let mut current = inner.current.lock().expect("stats session poisoned");
+		let mut current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);
 		if current.tier == tier {
 			return;
 		}
@@ -1233,7 +1236,7 @@ impl Session {
 		}
 		if let Some(presence) = &presence {
 			// Slots still held count on the new tier, but not the old tier's history.
-			let mut held = inner.held.lock().expect("stats session poisoned");
+			let mut held = inner.held.lock().unwrap_or_else(PoisonError::into_inner);
 			held.retain(|(cap, live)| {
 				let Some(live) = live.upgrade() else { return false };
 				presence
@@ -1251,9 +1254,10 @@ impl Session {
 	}
 
 	/// Count `live` as what this session holds against `cap`, so a tier change carries it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn track_held(&self, cap: Cap, live: &Arc<AtomicUsize>) {
 		let Some(inner) = &self.inner else { return };
-		let mut held = inner.held.lock().expect("stats session poisoned");
+		let mut held = inner.held.lock().unwrap_or_else(PoisonError::into_inner);
 		// A context reused across reconnects registers again each time: drop the gone ones.
 		held.retain(|(_, live)| live.strong_count() > 0);
 		held.push((cap, Arc::downgrade(live)));
@@ -1261,9 +1265,10 @@ impl Session {
 
 	/// Record that this session holds `held` of what `cap` limits, raising that peak on its
 	/// tier and root.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn hold(&self, cap: Cap, held: u64) {
 		let Some(inner) = &self.inner else { return };
-		let current = inner.current.lock().expect("stats session poisoned");
+		let current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);
 		let Some(presence) = &current.presence else { return };
 		presence.peak(cap).fetch_max(held, Ordering::Relaxed);
 	}
@@ -1297,7 +1302,7 @@ impl Session {
 	/// The first bumps `broadcasts_started` there.
 	fn viewer_open(&self, path: &PathOwned, counters: &Arc<TierCounters>) {
 		let Some(inner) = &self.inner else { return };
-		let mut viewers = inner.viewers.lock().expect("stats viewers poisoned");
+		let mut viewers = inner.viewers.lock().unwrap_or_else(PoisonError::into_inner);
 		let viewer = viewers.entry(path.clone()).or_insert_with(|| {
 			counters.publisher.broadcasts_started.fetch_add(1, Ordering::Relaxed);
 			Viewer {
@@ -1312,7 +1317,7 @@ impl Session {
 	/// `broadcasts_ended` on the counters the first opened on.
 	fn viewer_close(&self, path: &PathOwned) {
 		let Some(inner) = &self.inner else { return };
-		let mut viewers = inner.viewers.lock().expect("stats viewers poisoned");
+		let mut viewers = inner.viewers.lock().unwrap_or_else(PoisonError::into_inner);
 		let Some(viewer) = viewers.get_mut(path) else { return };
 		viewer.subscriptions -= 1;
 		if viewer.subscriptions == 0
@@ -1333,7 +1338,7 @@ impl SessionInner {
 	/// generation they were resolved at.
 	fn resolve(&self, path: &PathOwned) -> Resolved {
 		let (generation, tier) = {
-			let current = self.current.lock().expect("stats session poisoned");
+			let current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
 			(self.generation.load(Ordering::Relaxed), current.tier.clone())
 		};
 		Resolved {
@@ -1467,7 +1472,7 @@ impl Clone for Scope {
 			resolved: self
 				.resolved
 				.as_ref()
-				.map(|r| Box::new(Mutex::new(r.lock().expect("stats scope poisoned").clone()))),
+				.map(|r| Box::new(Mutex::new(r.lock().unwrap_or_else(PoisonError::into_inner).clone()))),
 			side: self.side,
 			path: self.path.clone(),
 		}
@@ -1480,7 +1485,7 @@ impl Scope {
 	fn counters(&self) -> Option<Arc<TierCounters>> {
 		let inner = self.session.inner.as_ref()?;
 		let generation = inner.generation.load(Ordering::Acquire);
-		let mut resolved = self.resolved.as_ref()?.lock().expect("stats scope poisoned");
+		let mut resolved = self.resolved.as_ref()?.lock().unwrap_or_else(PoisonError::into_inner);
 		if resolved.generation != generation {
 			*resolved = inner.resolve(&self.path);
 		}
@@ -1651,6 +1656,7 @@ mod tests {
 	/// Each root's sessions row carries the most any one of its sessions held against each
 	/// cap, which a slot released does not lower and a rollup does not sum.
 	#[test]
+	#[cfg(feature = "async")]
 	fn sessions_report_their_peaks_against_the_caps() {
 		use crate::session::Slots;
 
@@ -1683,6 +1689,7 @@ mod tests {
 	/// A session moving tiers brings the slots it still holds to the new tier's peak, but
 	/// not the old tier's history.
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_tier_change_carries_the_slots_still_held() {
 		use crate::session::Slots;
 

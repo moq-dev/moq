@@ -165,20 +165,20 @@ impl Client {
 
 		connect.websocket.enabled = config.websocket.enabled;
 		if let Some(delay) = config.websocket.delay_us {
-			connect.websocket.delay = std::time::Duration::from_micros(delay);
+			connect.websocket.delay = Some(std::time::Duration::from_micros(delay));
 		}
 
 		connect.once = Some(config.once);
 
 		let backoff = config.backoff;
 		if let Some(initial) = backoff.initial_us {
-			connect.backoff.initial = std::time::Duration::from_micros(initial);
+			connect.backoff.initial = Some(std::time::Duration::from_micros(initial));
 		}
 		if let Some(multiplier) = backoff.multiplier {
 			connect.backoff.multiplier = multiplier;
 		}
 		if let Some(max) = backoff.max_us {
-			connect.backoff.max = std::time::Duration::from_micros(max);
+			connect.backoff.max = Some(std::time::Duration::from_micros(max));
 		}
 		if let Some(timeout) = backoff.timeout_us {
 			connect.backoff.timeout = Some(std::time::Duration::from_micros(timeout));
@@ -744,8 +744,7 @@ impl Drop for MoqSession {
 	fn drop(&mut self) {
 		let _guard = crate::ffi::enter();
 		// Close the transport while the runtime is entered. The backend spawns a
-		// lingering CLOSE task, which panics (aborting under panic=abort) if no reactor
-		// is in context. We can't leave this to the last `Session` clone's drop: clones
+		// lingering CLOSE task, which panics if no reactor is in context. We can't leave this to the last `Session` clone's drop: clones
 		// live in the `closed`/`status` tasks and the connection state, released after
 		// this guard, off-runtime. Close-once dedup then makes those trailing drops no-ops.
 		self.teardown(moq_net::Error::Cancel);

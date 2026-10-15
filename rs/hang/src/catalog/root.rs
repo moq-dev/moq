@@ -47,6 +47,8 @@ pub struct Catalog<E = ()> {
 
 	/// Each track's timeline and any durable archive, if the publisher offers them.
 	/// See [`Archive`](crate::catalog::Archive) and the [`timeline`](crate::timeline) module.
+	/// An undecodable entry is absent so incompatible archive metadata cannot reject media.
+	#[serde_as(as = "serde_with::DefaultOnError<_>")]
 	pub archive: Option<crate::catalog::Archive>,
 
 	/// The broadcast's one continuous clock, if the publisher exposes one.
@@ -141,7 +143,8 @@ impl Catalog<()> {
 }
 
 impl<E> Catalog<E> {
-	/// Refuse a catalog with more renditions than a consumer can hold.
+	/// Refuse a catalog with more renditions than a consumer can hold, or with an ID naming both
+	/// a video and an audio rendition.
 	pub fn check_renditions(&self) -> Result<()> {
 		let count = self.video.renditions.len() + self.audio.renditions.len() + self.text.renditions.len();
 		if count > MAX_RENDITIONS {
@@ -252,6 +255,57 @@ mod test {
 	}
 
 	#[test]
+	fn track_name_defaults_to_the_id() {
+		use crate::catalog::Reference;
+
+		let catalog = Catalog::<()>::from_str(
+			r#"{
+				"video": {"renditions": {"hd": {"codec": "avc1.64001f", "container": {"kind": "legacy"}}}},
+				"audio": {"renditions": {"en": {"codec": "opus", "sampleRate": 48000, "numberOfChannels": 2, "container": {"kind": "legacy"}}}}
+			}"#,
+		)
+		.unwrap();
+		assert_eq!(catalog.video.renditions["hd"].track("hd"), "hd");
+		assert_eq!(catalog.audio.renditions["en"].track("en"), "en");
+		assert!(!catalog.to_json().unwrap().contains("\"track\""));
+	}
+
+	#[test]
+	fn one_track_name_in_two_broadcasts() {
+		use crate::catalog::Reference;
+
+		let encoded = r#"{
+			"video": {"renditions": {
+				"left": {"broadcast": "./left", "track": "video", "codec": "avc1.64001f", "container": {"kind": "legacy"}},
+				"right": {"broadcast": "./right", "track": "video", "codec": "avc1.64001f", "container": {"kind": "legacy"}}
+			}}
+		}"#;
+		let catalog = Catalog::<()>::from_str(encoded).unwrap();
+		assert!(catalog.check_renditions().is_ok());
+		for id in ["left", "right"] {
+			let config = &catalog.video.renditions[id];
+			assert_eq!(config.track(id), "video");
+			assert_eq!(config.broadcast().map(|b| b.as_str()), Some(id));
+		}
+		assert_eq!(Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap(), catalog);
+	}
+
+	#[test]
+	fn cross_kind_duplicate_id_is_refused() {
+		let catalog = Catalog::<()>::from_str(
+			r#"{
+				"video": {"renditions": {"main": {"codec": "avc1.64001f", "container": {"kind": "legacy"}}}},
+				"audio": {"renditions": {"main": {"codec": "opus", "sampleRate": 48000, "numberOfChannels": 2, "container": {"kind": "legacy"}}}}
+			}"#,
+		)
+		.unwrap();
+		assert!(matches!(
+			catalog.check_renditions(),
+			Err(crate::Error::DuplicateRendition(id)) if id == "main"
+		));
+	}
+
+	#[test]
 	fn simple() {
 		let mut encoded = r#"{
 			"video": {
@@ -351,6 +405,7 @@ mod test {
 			"video".to_string(),
 			VideoConfig {
 				broadcast: None,
+				track: None,
 				label: None,
 				codec: H264 {
 					profile: 0x64,
@@ -380,6 +435,7 @@ mod test {
 			"audio".to_string(),
 			AudioConfig {
 				broadcast: None,
+				track: None,
 				label: None,
 				codec: Opus,
 				sample_rate: 48_000,
@@ -801,6 +857,38 @@ mod test {
 			Catalog::<()>::from_str(&json).expect("failed to decode").archive,
 			Some(archive)
 		);
+	}
+
+	#[test]
+	fn an_incompatible_archive_leaves_media_playable() {
+		let video = serde_json::json!({
+			"renditions": {"video": {"codec": "avc1.64001f", "container": {"kind": "legacy"}}}
+		});
+		let media = Catalog::<()>::from_str(&serde_json::json!({"video": video}).to_string()).unwrap();
+		for archive in [
+			serde_json::json!({"track": "timeline.z", "timescale": 1000}),
+			serde_json::json!({"timelines": {}, "store": "not a url"}),
+			serde_json::json!({"timelines": {}, "timescale": 0}),
+			serde_json::json!({"timelines": {"video": 42}}),
+			serde_json::json!({"future": "archive"}),
+			serde_json::json!("archive"),
+			serde_json::json!([]),
+			serde_json::Value::Null,
+		] {
+			let json = serde_json::json!({"video": video, "archive": archive}).to_string();
+			let catalog = Catalog::<()>::from_str(&json).expect("archive metadata must not reject media");
+			assert_eq!(catalog.archive, None);
+			assert_eq!(catalog.video, media.video);
+			assert!(!catalog.to_json().unwrap().contains("\"archive\""));
+		}
+	}
+
+	#[test]
+	fn an_incompatible_archive_does_not_hide_invalid_media() {
+		Catalog::<()>::from_str(
+			r#"{"archive":{"track":"timeline.z"},"video":{"renditions":{"video":{"codec":42,"container":{"kind":"legacy"}}}}}"#,
+		)
+		.expect_err("invalid media must still reject the catalog");
 	}
 
 	#[test]

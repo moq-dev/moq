@@ -6,12 +6,11 @@ interface SampleSpan {
 	readonly numberOfFrames: number;
 }
 
-interface Update {
-	readonly discontinuity: number;
-	readonly group: number;
-	readonly end?: Time.Micro;
-	readonly frame?: { readonly timestamp: Time.Micro };
-}
+/** The parts of a container read the terminal tracks. */
+type Update =
+	| { readonly kind: "frame"; readonly group: number; readonly frame: { readonly timestamp: Time.Micro } }
+	| { readonly kind: "gap" }
+	| { readonly kind: "end"; readonly group: number; readonly end: Time.Micro };
 
 /** The portion of decoded audio that belongs to the source timeline. */
 export interface DecodedSpan {
@@ -25,7 +24,8 @@ export interface DecodedSpan {
 
 /** Track codec epochs and map decoded output onto the source timeline. */
 export class Terminal {
-	#discontinuity = 0;
+	// Whether a frame arrived since the last reset, so there is an epoch to end.
+	#started = false;
 	#end?: Time.Micro;
 	// The group that carried `#end`. It bounds only the terminal packets that follow it there.
 	#endGroup?: number;
@@ -40,28 +40,37 @@ export class Terminal {
 
 	/** Reset state for a new container consumer with Opus pre-skip in 48 kHz frames. */
 	clear(preSkip = 0): void {
-		this.#discontinuity = 0;
+		this.#started = false;
 		this.#end = undefined;
+		this.#endGroup = undefined;
 		this.#preSkip = preSkip;
 		this.#resetEpoch();
 	}
 
-	/** Apply one ordered consumer result and report whether its codec epoch changed. */
-	update(next: Update): boolean {
-		const reset = next.discontinuity !== this.#discontinuity;
-		if (reset) {
-			this.#discontinuity = next.discontinuity;
-			this.#end = undefined;
-			this.#resetEpoch();
+	/** Apply one ordered consumer read and report whether a codec epoch ended before it. */
+	update(read: Update): boolean {
+		if (read.kind === "gap") return this.#restart();
+		if (read.kind === "end") {
+			this.#end = read.end;
+			this.#endGroup = read.group;
+			return false;
 		}
-		// A frame from a later group is new media, e.g. resuming after a discontinuity marker.
-		if (next.frame && next.group !== this.#endGroup) this.#end = undefined;
-		if (next.frame && this.#epoch === undefined) this.#epoch = next.frame.timestamp;
-		if (next.end !== undefined) {
-			this.#end = next.end;
-			this.#endGroup = next.group;
-		}
+		// A later group after a declared end comes from a fresh encoder; the end's own group carries
+		// the stopped encoder's final packets.
+		const reset = this.#end !== undefined && read.group !== this.#endGroup && this.#restart();
+		this.#started = true;
+		this.#epoch ??= read.frame.timestamp;
 		return reset;
+	}
+
+	// Start a new epoch, reporting whether one was running.
+	#restart(): boolean {
+		const started = this.#started;
+		this.#started = false;
+		this.#end = undefined;
+		this.#endGroup = undefined;
+		this.#resetEpoch();
+		return started;
 	}
 
 	/** Remove codec pre-skip and terminal padding from one decoded sample. */

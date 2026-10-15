@@ -1366,7 +1366,7 @@ async fn import_publishes_decode_times_on_an_arrival_clock() {
 	);
 
 	// The advertised clock is micros, so allow its rounding.
-	let tick = std::time::Duration::from_millis(1);
+	let tick = std::time::Duration::from_micros(1);
 	let wall = import.clock.wall_clock(import.record).unwrap();
 	assert!(
 		*import.arrival.start() - tick <= wall && wall <= *import.arrival.end() + tick,
@@ -1485,7 +1485,7 @@ async fn an_import_shifts_onto_an_explicit_clock() {
 	fmp4.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
-	assert_eq!(snapshot.clock, Some(clock.wall()));
+	assert_eq!(snapshot.clock, clock.wall());
 	let published = crate::container::test_util::published(&consumer, &snapshot).await;
 	let first = published[snapshot.video.renditions.keys().next().unwrap()][0];
 	assert!((before - TICK..=after).contains(&first), "{before} {first} {after}");
@@ -1815,7 +1815,7 @@ async fn webvtt_samples_become_timed_text_with_source_metadata() {
 		track,
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
-	let frame = reader.read().await.unwrap().unwrap();
+	let frame = reader.read_frame().await.unwrap().unwrap();
 	assert_eq!(frame.timestamp.as_micros(), 250_000);
 	assert_eq!(
 		&frame.payload[..],
@@ -1885,7 +1885,7 @@ async fn webvtt_kind_and_lone_cr_terminators() {
 		track,
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
-	let frame = reader.read().await.unwrap().unwrap();
+	let frame = reader.read_frame().await.unwrap().unwrap();
 	assert_eq!(
 		&frame.payload[..],
 		b"WEBVTT\nKind: captions\n\n00:00:00.250 --> 00:00:01.500\nHello\nworld\n\n"
@@ -1996,6 +1996,6 @@ async fn webvtt_sub_millisecond_cue_stays_positive() {
 		track,
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
-	let frame = reader.read().await.unwrap().unwrap();
+	let frame = reader.read_frame().await.unwrap().unwrap();
 	assert_eq!(&frame.payload[..], b"WEBVTT\n\n00:00:00.250 --> 00:00:00.251\nhi\n\n");
 }

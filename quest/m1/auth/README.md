@@ -17,7 +17,7 @@ grant per token, the union of every accepted token as the session's scope,
 and a loud failure when a publish can never be honored. It ends with the
 credential able to travel in band, while the URL keeps working for every peer
 that predates the stream. Node-bound peer grants for direct sessions belong to
-[P2P](/quest/m3/p2p/peer-grant.md), their only consumer.
+[P2P](/quest/m1/p2p/peer-grant.md), their only consumer.
 
 ## Plan
 
@@ -110,7 +110,6 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 
 ## Required
 
-- [WebSocket refusal](/quest/m1/auth/ws-unauthorized.md) - the relay serves WebSocket through moq-tokio, so a refused token closes the session as Unauthorized, as QUIC does
 - [Request tokens](/quest/m1/auth/request-token.md) - an experimental Rust
   verifier hook confines a token's authority to its request and renews it
 - [Request gate](/quest/m1/auth/request-gate.md) - every incoming request is
@@ -136,7 +135,7 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
   session with PROTOCOL_VIOLATION in Rust and JS
 - [JS fetch grant watch](https://github.com/moq-dev/moq/pull/5260) - a JS `fetchGroup` ends `Unauthorized` when its path leaves the grant
 
-- [Peer grants](/quest/m3/p2p/peer-grant.md) - P2P's node-bound credential,
+- [Peer grants](/quest/m1/p2p/peer-grant.md) - P2P's node-bound credential,
   built on this line's relay tokens
 
 - [#5269](https://github.com/moq-dev/moq/pull/5269) - explicit Lite AUTH NOT_SUPPORTED, including grant updates

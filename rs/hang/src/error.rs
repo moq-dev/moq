@@ -17,6 +17,10 @@ pub enum Error {
 	#[error("catalog has {count} renditions, over the limit of {max}")]
 	TooManyRenditions { count: usize, max: usize },
 
+	/// A catalog uses one rendition ID for both a video and an audio rendition.
+	#[error("catalog rendition ID is both video and audio: {0}")]
+	DuplicateRendition(String),
+
 	/// A catalog broadcast reference escapes its root.
 	#[error("catalog broadcast reference escapes the root: {0}")]
 	EscapingBroadcast(String),

@@ -42,5 +42,4 @@ per-topic requests on the wire.
 
 ## Required
 
-- [JS lazy discovery](/quest/m1/lazy-discovery/js.md) - js/net sessions request announcements only for watched prefixes, and the `discovery` option is gone
 - [Rust lazy discovery](/quest/m1/lazy-discovery/rust.md) - the Rust client mirrors watch-driven discovery and the follow fold

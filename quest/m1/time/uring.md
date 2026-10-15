@@ -1,12 +1,12 @@
-# [M] moq-uring on moq-time
+# [M] moq-uring on moq-clock
 
 ## Goal
 
-moq-uring's worker is a `moq-time` backend. It reads the clock once per drive
+moq-uring's worker is a `moq-clock` backend. It reads the clock once per drive
 turn and hands that instant to `fire`, the QUIC `handle_timeout`, and
 `poll_transmit`, so `[vdso]` falls from its ~2.5% share of io_uring relay CPU
 to the tokio path's ~0.7%, with QUIC timeout and keep-alive arming unchanged
-in effect. moq-time's deadline queue replaces `timer::Heap`. The worker tests
+in effect. moq-clock's deadline queue replaces `timer::Heap`. The worker tests
 `deadline_fires_at_park` and `dropped_worker_rejects_operations` run on
 controlled time or event assertions and pass under load.
 
@@ -25,13 +25,17 @@ flavors, and relay CPU via `just bench BASE` on Linux. The existing keep-alive
 and idle-timeout tests stay unchanged. Ban direct clock reads in moq-uring
 outside its backend (the ratchet).
 
+Move `uring_workers_bound_stalled_handshakes` (`rs/moq-relay/tests/runtime_uring.rs`)
+onto controlled time too; it landed on the wall clock in #5244 rather than
+waiting for this quest.
+
 Public API: breaking. `moq_uring::Timer` is re-exported, and `Timer::set`
-takes `Option<moq_time::Instant>` instead of std's; no conversion shim.
+takes `Option<moq_clock::Instant>` instead of std's; no conversion shim.
 Wire: none.
 
 ## Required
 
-- [moq-net on moq-time](/quest/m1/time/net.md) - the driver's instant becomes moq-time's
+- [moq-net on moq-clock](/quest/m1/time/net.md) - the driver's instant becomes moq-clock's
 - [Switch](/quest/m1/quic/fork/switch.md) - the QUIC driver this edits moves onto `moq-quic`
 
 ## Closes
@@ -40,4 +44,4 @@ Wire: none.
 
 ## Related
 
-- [Run to quiescence](/quest/m1/perf/uring-quiescence.md) - reshapes the same worker turn
+- [Run to quiescence](/quest/m2/perf/uring-quiescence.md) - reshapes the same worker turn

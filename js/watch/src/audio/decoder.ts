@@ -13,6 +13,7 @@ import {
 	readonlys,
 	Signal,
 } from "@moq/signals";
+import { Producer as ArrivalProducer, type Arrivals, gap } from "../arrivals";
 import { hostedAssets } from "../assets";
 import { base64ToBytes } from "../base64";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
@@ -119,7 +120,7 @@ export class Decoder {
 	// The rendition is absent and the ring has drained its tail, so the graph has nothing to play.
 	readonly #idle: Computed<boolean>;
 
-	// Ordered discontinuity and endpoint state from the container consumer.
+	// Ordered epoch and endpoint state from the container consumer.
 	#terminal = new Terminal();
 
 	// The container consumer's arrival estimate, unset while nothing is subscribed.
@@ -136,6 +137,9 @@ export class Decoder {
 
 	// The broadcast instance the ring's timeline belongs to. See #runDecoder.
 	#instance?: Moq.Broadcast.Consumer["closed"];
+
+	// Fans received frames out to open `arrivals()` handles; retains nothing without one.
+	#arrivals = new ArrivalProducer();
 
 	#signals = new Effect();
 	#failed?: Failure;
@@ -387,7 +391,7 @@ export class Decoder {
 			attempt = run;
 			const sub = subscribeMedia(run, {
 				broadcast: active,
-				track,
+				track: Catalog.track(track, identity),
 				priority: Catalog.PRIORITY.audio,
 				maxDelay: this.#subscribeMaxDelay,
 			});
@@ -471,20 +475,18 @@ export class Decoder {
 			for (;;) {
 				const next = await nextMedia(consumer);
 				if (!next) break;
-				if (this.#onNext(next)) {
+				if (this.#onRead(next)) {
 					decoder.reset();
 					decoder.configure(decoderConfig);
 				}
-				if (next.end !== undefined) {
-					continue;
-				}
-
+				if (next.kind === "gap") this.#arrivals.write(gap(next));
+				if (next.kind !== "frame") continue;
 				const { frame } = next;
-				if (!frame) continue;
 
-				// Mark that we received this frame right now.
+				// Classify ingress before decoder backpressure changes the delivery clock.
 				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
-				this.sync.received(timestamp, "audio");
+				const late = this.sync.received(timestamp, "audio", frame.arrival);
+				this.#arrivals.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
 
 				const duration = packetDuration(config.codec, frame);
 				if (duration !== undefined) this.#frame.set(duration);
@@ -581,16 +583,17 @@ export class Decoder {
 				if (!next) break;
 
 				// Reset and re-anchor before decoding the first frame of a new codec epoch.
-				if (this.#onNext(next)) {
+				if (this.#onRead(next)) {
 					decoder.reset();
 					decoder.configure(decoderConfig);
 				}
-
+				if (next.kind === "gap") this.#arrivals.write(gap(next));
+				if (next.kind !== "frame") continue;
 				const { frame } = next;
-				if (!frame) continue;
 
 				const timestamp = Time.Milli.fromMicro(frame.timestamp);
-				this.sync.received(timestamp, "audio");
+				const late = this.sync.received(timestamp, "audio", frame.arrival);
+				this.#arrivals.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
 
 				const duration = packetDuration(config.codec, frame);
 				if (duration !== undefined) this.#frame.set(duration);
@@ -732,21 +735,22 @@ export class Decoder {
 		this.#ring.peek()?.reset();
 	}
 
-	// Apply ordered container metadata before handling the result. An endpoint that also
-	// starts a new epoch must survive the reset so its following drain is trimmed.
-	#onNext(next: {
-		discontinuity: number;
-		group: number;
-		end?: Time.Micro;
-		frame?: { timestamp: Time.Micro };
-	}): boolean {
-		if (!this.#terminal.update(next)) return false;
+	// Apply an ordered container read before handling it, reporting whether a codec epoch ended:
+	// a gap, or a later group after a declared end.
+	#onRead(read: Container.Read): boolean {
+		if (!this.#terminal.update(read)) return false;
 		this.#ring.peek()?.reset();
 		this.sync.reset();
 		return true;
 	}
 
+	/** Observe every frame and gap received from now until the handle or this decoder closes. */
+	arrivals(): Arrivals {
+		return this.#arrivals.consume();
+	}
+
 	close() {
+		this.#arrivals.close();
 		this.#signals.close();
 	}
 

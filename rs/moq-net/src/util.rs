@@ -45,6 +45,7 @@ fn future_task(mut task: MaybeSendBox<'static, ()>) -> MaybeSendTask {
 ///
 /// The building block for racing "watchdog" futures whose clean completion should
 /// not end the race (only their failure should).
+#[cfg(feature = "async")]
 pub(crate) async fn err_only<E>(fut: impl Future<Output = Result<(), E>>) -> E {
 	match fut.await {
 		Err(err) => err,
@@ -84,6 +85,7 @@ impl Tasks {
 	///
 	/// A task submitted after the set is gone is dropped: the driver has torn down,
 	/// so the task would have been cancelled anyway.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn push(&self, task: impl MaybeBoxedExt<'static, Output = ()>) {
 		let mut state = self.state.lock();
 		if !state.closed {
@@ -174,6 +176,7 @@ impl TaskSet {
 	}
 
 	/// Queue a future for polling by this set.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn push(&mut self, task: impl MaybeBoxedExt<'static, Output = ()>) {
 		self.active.push(future_task(task.maybe_boxed()));
 	}
@@ -222,6 +225,7 @@ impl TaskSet {
 	/// `f` is a poll function rather than a future, so an accept loop polls the
 	/// transport directly and there is no accept future to cancel or rebuild when
 	/// a child finishes.
+	#[cfg(feature = "async")]
 	pub async fn drive<T>(&mut self, mut f: impl FnMut(&kio::Waiter) -> Poll<T> + Unpin) -> T {
 		kio::wait(|waiter| {
 			if let Poll::Ready(output) = f(waiter) {
@@ -239,6 +243,7 @@ impl TaskSet {
 	/// active children finish. The async form of [`Self::poll`], for callers with
 	/// nothing else to poll.
 	#[cfg(test)]
+	#[cfg(feature = "async")]
 	pub async fn run(mut self) {
 		kio::wait(|waiter| self.poll(waiter)).await
 	}
@@ -258,7 +263,7 @@ impl Drop for TaskSet {
 	}
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "async"))]
 mod tests {
 	use std::sync::{
 		Arc,

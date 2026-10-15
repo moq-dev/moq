@@ -2193,7 +2193,10 @@ mod tests {
 
 			async fn read_new(&self, track: &mut Track, seen: &[u64]) -> u64 {
 				loop {
-					let packet = track.read().await.unwrap().expect("a published packet");
+					let Some(moq_mux::container::Read::Frame { frame: packet, .. }) = track.read().await.unwrap()
+					else {
+						continue;
+					};
 					let timestamp = u64::try_from(packet.timestamp.as_micros()).unwrap();
 					if !seen.contains(&timestamp) {
 						return timestamp;
@@ -2407,17 +2410,16 @@ mod tests {
 			let (samples, input) = stream(None);
 			let mut fixture = Fixture::start(Duration::from_secs(1), wall, [Open::Stream(input)]);
 			let advertised = fixture.catalog.snapshot().clock;
-			assert_eq!(advertised, Some(fixture.clock.wall()));
+			assert_eq!(advertised, fixture.clock.wall());
 
 			let mut track = fixture.subscribe().await;
 			let published = fixture.deliver(&samples, &mut track, &[]).await;
 
-			// The catalog maps to walls at millisecond precision.
 			let mapped = advertised
 				.unwrap()
 				.wall_clock(moq_net::Timestamp::from_micros(published).unwrap())
 				.unwrap();
-			assert_eq!(mapped, wall + Duration::from_millis(published / 1000));
+			assert_eq!(mapped, wall + Duration::from_micros(published));
 			assert_eq!(fixture.catalog.snapshot().clock, advertised);
 			fixture.finish().await;
 		}

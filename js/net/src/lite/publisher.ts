@@ -1,4 +1,4 @@
-import { type Dispose, type Getter, race, Signal } from "@moq/signals";
+import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
@@ -12,13 +12,14 @@ import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Priority, sendOrder } from "../priority.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
-import { Milli, Timescale, Timestamp } from "../time.ts";
+import { Milli, type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { Interests, LIMITS, type Limits, Slots } from "../util/limits.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
+import { closeViolation } from "./error.ts";
 import type { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { Probe } from "./probe.ts";
@@ -44,6 +45,7 @@ import {
 	resolvesStart,
 	Version,
 	waitsForSubscriberFin,
+	wireTimescale,
 } from "./version.ts";
 
 const PROBE_INTERVAL = 100; // ms
@@ -57,16 +59,8 @@ function zigzag(delta: bigint): bigint {
 }
 
 /**
- * The timescale TRACK_INFO declares for a track. Lite05+ requires one, so an untimed track
- * declares milliseconds, the scale its frames' send times go out at.
- */
-function wireTimescale(info: track.Info): Timescale {
-	return info.timescale ?? Timescale.MILLI;
-}
-
-/**
- * A frame or datagram timestamp as its raw value at the wire `timescale`. No lite version
- * encodes an absent timestamp yet, so an untimed payload carries its send time instead.
+ * A frame or datagram timestamp as its raw value at the wire `timescale`. Lite-05/06 cannot
+ * encode an untimed track, so its payloads carry their send time instead.
  */
 function wireTime(timestamp: Timestamp | undefined, timescale: Timescale): number {
 	return Math.round((timestamp ?? Timestamp.now()).as(timescale));
@@ -99,8 +93,8 @@ interface RunGroup {
 	/** The group to serve. */
 	group: group.Consumer;
 
-	/** The track's advertised timescale, applied to every frame timestamp. */
-	timescale: Timescale;
+	/** The track's wire timescale, applied to every frame timestamp, or undefined to send none. */
+	timescale: Timescale | undefined;
 
 	/** The subscription's ranking, which this stream joins for as long as it runs. */
 	priority: Priority;
@@ -169,8 +163,8 @@ function frameRange(bounds: FrameBounds, sequence: number): { start: number; end
 type ServeGroup = {
 	/** The Subscribe ID the GROUP message references. */
 	sub: bigint;
-	/** The track's advertised timescale, which every frame timestamp is converted to. */
-	timescale: Timescale;
+	/** The track's wire timescale, which every frame timestamp is converted to, or undefined to send none. */
+	timescale: Timescale | undefined;
 	/** First frame to send; anything below it was excluded by the subscription. */
 	start: number;
 	/** Last frame to send (inclusive), or undefined for the rest of the group. */
@@ -190,6 +184,7 @@ type Control =
 	| { kind: "error"; error: Error };
 
 type SubscriptionControlOptions = {
+	quic: WebTransport;
 	reader: Reader;
 	writer: Writer;
 	version: Version;
@@ -221,12 +216,13 @@ class SubscriptionControls {
 	/** Settles once decoding stops, so teardown can wait for it rather than leaving it running. */
 	readonly decoding: Promise<void>;
 
-	constructor({ reader, writer, version, apply }: SubscriptionControlOptions) {
+	constructor(options: SubscriptionControlOptions) {
+		const { writer } = options;
 		this.#writer = writer;
 		this.#ended = new Promise((resolve) => {
 			this.#resolveEnd = resolve;
 		});
-		this.decoding = this.#decode(reader, version, apply);
+		this.decoding = this.#decode(options);
 		// Our own half going away ends the loop too, and has to reach it the same way: the
 		// loop looks at nothing else.
 		void writer.closed.then(
@@ -284,7 +280,7 @@ class SubscriptionControls {
 		this.#changed.update((value) => value + 1);
 	}
 
-	async #decode(reader: Reader, version: Version, apply: (update: SubscribeUpdate) => void) {
+	async #decode({ reader, version, apply, quic }: SubscriptionControlOptions) {
 		try {
 			// Runs until the peer's half ends, even past our own FIN: a lite-07 publisher waits
 			// for that end, and every other teardown stops the reader.
@@ -296,6 +292,7 @@ class SubscriptionControls {
 				this.#changed.update((value) => value + 1);
 			}
 		} catch (err: unknown) {
+			closeViolation(quic, err);
 			this.#finish(error(err));
 			return;
 		}
@@ -734,7 +731,7 @@ export class Publisher {
 			front =
 				this.#publish &&
 				(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
-					(await untilAborted(wireOf(this.#publish).demand(msg.broadcast, msg.epoch), left.signal)));
+					(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch, left.signal)));
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
@@ -768,7 +765,8 @@ export class Publisher {
 		let controls: SubscriptionControls | undefined;
 
 		try {
-			let timescale: Timescale = Timescale.MILLI;
+			// Older drafts carry no timestamps.
+			let timescale: Timescale | undefined;
 
 			if (supportsTrackStream(this.version)) {
 				// Lite-05+ accepts implicitly: no SUBSCRIBE_OK (the immutable
@@ -781,7 +779,7 @@ export class Publisher {
 				// (accept never called, track closed) as an error here, which resets the
 				// stream.
 				const info = await untilAborted(track.info(), left.signal);
-				timescale = wireTimescale(info);
+				timescale = wireTimescale(this.version, info.timescale);
 			} else {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
 				const ok = new SubscribeOk({
@@ -802,6 +800,7 @@ export class Publisher {
 			}
 
 			controls = new SubscriptionControls({
+				quic: this.#quic,
 				reader: stream.reader,
 				writer: stream.writer,
 				version: this.version,
@@ -840,6 +839,7 @@ export class Publisher {
 			// A subscriber that left is owed nothing more, and its stream may already be reset.
 			await Promise.all([datagrams, controls.decoding, finished && acknowledged(stream.writer)]);
 		} catch (err: unknown) {
+			closeViolation(this.#quic, err);
 			const e = error(err);
 			if (e === cancel) console.debug(`publish cancelled: broadcast=${msg.broadcast} track=${track.name}`);
 			else console.warn(`publish error: broadcast=${msg.broadcast} track=${track.name} error=${reason(e)}`);
@@ -888,66 +888,71 @@ export class Publisher {
 			return;
 		}
 
-		let front: broadcast.Consumer | undefined;
-		try {
-			front =
-				this.#publish &&
-				(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
-					(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch)));
-		} catch (err: unknown) {
-			stream.writer.reset(error(err));
-			return;
-		}
-		if (!front) {
-			console.debug(`fetch unknown: broadcast=${msg.broadcast}`);
-			stream.writer.reset(new NotFound(`broadcast ${msg.broadcast}`));
-			return;
-		}
-		// Revoked while the broadcast resolved: the watch already reset the stream.
-		if (watch.revoked()) return;
-
-		// The subscriber opened this stream, so its send order only ranked the request. Rank the
-		// response here, on the same scale as the group streams it competes with.
-		stream.writer.setPriority(sendOrder({ priority: msg.priority }));
-
-		// A FETCH requester leaves early by resetting its stream or losing its session, which
-		// lets go of a lookup still waiting on the answer.
+		// A normal request FIN is not a cancellation: FETCH has no more request bytes.
 		const hold = new AbortController();
 		void stream.reader.closed.catch(() => hold.abort());
-
-		let group: group.Consumer | undefined;
+		void stream.writer.closed.catch(() => hold.abort());
 		try {
-			// The timescale is immutable, so serve exactly what TRACK_INFO advertised. Both
-			// come off the same front, so the metadata and the frames are one generation.
-			let info: TrackInfoMessage;
+			let front: broadcast.Consumer | undefined;
 			try {
-				info = await this.#resolveTrackInfo(front, msg.track, hold.signal, true);
-			} finally {
-				hold.abort();
-			}
-			group = await wireOf(front).fetchGroup(msg.track, msg.group, { priority: msg.priority });
-			serving(group);
-			// Revoked while the group resolved: the watch already reset the stream.
-			if (watch.revoked()) {
-				group.close(unauthorized(msg.broadcast));
+				front =
+					this.#publish &&
+					(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
+						(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch, hold.signal)));
+			} catch (err: unknown) {
+				stream.writer.reset(error(err));
 				return;
 			}
-			await this.#runFetchGroup(group, stream.writer, {
-				timescale: Timescale(info.timescale),
-				start: msg.startFrame,
-				end: msg.endFrame,
-			});
-			console.debug(`fetch done: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
-			stream.close();
-			group.close();
-			await acknowledged(stream.writer);
-		} catch (err: unknown) {
-			const e = error(err);
-			console.warn(
-				`fetch error: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group} error=${reason(e)}`,
-			);
-			group?.close(e);
-			stream.abort(e);
+			if (!front) {
+				console.debug(`fetch unknown: broadcast=${msg.broadcast}`);
+				stream.writer.reset(new NotFound(`broadcast ${msg.broadcast}`));
+				return;
+			}
+			// Revoked while the broadcast resolved: the watch already reset the stream.
+			if (watch.revoked()) return;
+
+			// The subscriber opened this stream, so its send order only ranked the request. Rank the
+			// response here, on the same scale as the group streams it competes with.
+			stream.writer.setPriority(sendOrder({ priority: msg.priority }));
+
+			// A FETCH requester leaves early by resetting its stream or losing its session, which
+			// lets go of a lookup still waiting on the answer.
+			let group: group.Consumer | undefined;
+			try {
+				// The timescale is immutable, so serve exactly what TRACK_INFO advertised. Both
+				// come off the same front, so the metadata and the frames are one generation.
+				let info: TrackInfoMessage;
+				try {
+					info = await this.#resolveTrackInfo(front, msg.track, hold.signal, true);
+				} finally {
+					hold.abort();
+				}
+				group = await wireOf(front).fetchGroup(msg.track, msg.group, { priority: msg.priority });
+				serving(group);
+				// Revoked while the group resolved: the watch already reset the stream.
+				if (watch.revoked()) {
+					group.close(unauthorized(msg.broadcast));
+					return;
+				}
+				await this.#runFetchGroup(group, stream.writer, {
+					timescale: wireTimescale(this.version, info.timescale),
+					start: msg.startFrame,
+					end: msg.endFrame,
+				});
+				console.debug(`fetch done: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
+				stream.close();
+				group.close();
+				await acknowledged(stream.writer);
+			} catch (err: unknown) {
+				const e = error(err);
+				console.warn(
+					`fetch error: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group} error=${reason(e)}`,
+				);
+				group?.close(e);
+				stream.abort(e);
+			}
+		} finally {
+			hold.abort();
 		}
 	}
 
@@ -966,7 +971,7 @@ export class Publisher {
 		track: track.Subscriber,
 		stream: Writer,
 		controls: SubscriptionControls,
-		serving: { sub: bigint; broadcast: Path.Valid; timescale: Timescale; bounds: FrameBounds },
+		serving: { sub: bigint; broadcast: Path.Valid; timescale: Timescale | undefined; bounds: FrameBounds },
 	): Promise<boolean> {
 		const { sub, broadcast, timescale, bounds } = serving;
 		// Lite-05+ resolves the range on the subscribe stream: SUBSCRIBE_START once the
@@ -1231,7 +1236,7 @@ export class Publisher {
 			const front =
 				this.#publish &&
 				(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
-					(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch)));
+					(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch, hold.signal)));
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
 
 			const info = await this.#resolveTrackInfo(front, msg.track, hold.signal);
@@ -1287,9 +1292,8 @@ export class Publisher {
 					// Publisher Max Age: the publisher's retention bound, advertised so
 					// relays re-serve with the same window.
 					maxAge: info.maxAge,
-					// Lite05 mandates per-frame timestamps. Advertise the track's timescale;
 					// `#serveGroup` emits each frame converted to it.
-					timescale: wireTimescale(info),
+					timescale: info.timescale ?? undefined,
 				});
 			})();
 
@@ -1329,7 +1333,7 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async #runDatagrams(sub: bigint, track: track.Subscriber, timescale: Timescale) {
+	async #runDatagrams(sub: bigint, track: track.Subscriber, timescale: Timescale | undefined) {
 		const writer = this.#datagramWriter;
 		if (!writer) return; // Only reached with a writer (see the #datagramWriter gate).
 		const maxSize = DatagramStream.maxDatagramSize(this.#quic);
@@ -1340,7 +1344,7 @@ export class Publisher {
 				if (!datagram) return; // Track finished; #runTrack tears the subscription down.
 
 				// Convert the timestamp to the track's advertised timescale, matching #serveGroup.
-				const ts = wireTime(datagram.timestamp, timescale);
+				const ts = timescale === undefined ? undefined : wireTime(datagram.timestamp, timescale);
 				const body = new DatagramMessage(sub, datagram.sequence, ts, datagram.payload).encode(this.version);
 
 				// No group fallback: drop anything that doesn't fit a single datagram.
@@ -1359,7 +1363,7 @@ export class Publisher {
 	}
 
 	// Serialize a fetched group's frames onto the FETCH stream as bare records: each a
-	// zigzag-delta timestamp (at the track's advertised timescale) followed by size + bytes.
+	// zigzag-delta timestamp (at the track's wire timescale, if any) followed by size + bytes.
 	async #runFetchGroup(
 		group: group.Consumer,
 		stream: Writer,
@@ -1379,9 +1383,11 @@ export class Publisher {
 			const frame = await race([group.readFrame(), stream.closed]);
 			if (!frame) break;
 
-			const ts = BigInt(wireTime(frame.timestamp, timescale));
-			await stream.u62(zigzag(ts - prevTs));
-			prevTs = ts;
+			if (timescale !== undefined) {
+				const ts = BigInt(wireTime(frame.timestamp, timescale));
+				await stream.u62(zigzag(ts - prevTs));
+				prevTs = ts;
+			}
 
 			await stream.u53(frame.payload.byteLength);
 			await stream.write(frame.payload);
@@ -1440,9 +1446,6 @@ export class Publisher {
 				await msg.encode(stream, this.version);
 			});
 
-			// Lite05+ prefixes every frame with a zigzag-delta timestamp at the track's
-			// advertised timescale; older drafts omit it.
-			const timestamps = supportsTrackStream(this.version);
 			let prevTs = 0n;
 			// Whether the cursor ever reached the requested start, which decides how the
 			// end of the group is read below.
@@ -1467,8 +1470,8 @@ export class Publisher {
 					if (read.sequence < startFrame) continue;
 					if (endFrame !== undefined && read.sequence > endFrame) break;
 
-					if (timestamps) {
-						// Convert each frame to the track's advertised timescale.
+					if (timescale !== undefined) {
+						// Convert each frame to the track's wire timescale.
 						const ts = BigInt(wireTime(read.frame.timestamp, timescale));
 						await hooks.guardGroup(group, () => stream.u62(zigzag(ts - prevTs)));
 						prevTs = ts;
@@ -1523,12 +1526,31 @@ export class Publisher {
 			return Math.abs(next - prev) / prev >= threshold;
 		};
 
+		const ended = new Once<Error | null>();
+		const reading = (async () => {
+			// Report ignores target values, but must consume them to observe the FIN.
+			while (await Probe.decodeMaybe(stream.reader, this.version)) {}
+		})().then(
+			() => ended.set(null),
+			(err: unknown) => {
+				closeViolation(this.#quic, err);
+				ended.set(error(err));
+			},
+		);
+
 		try {
 			for (;;) {
-				const timeout = new Promise<"timeout">((resolve) =>
-					setTimeout(() => resolve("timeout"), PROBE_INTERVAL),
-				);
-				const result = await race([timeout, stream.reader.closed]);
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				const timeout = new Promise<"timeout">((resolve) => {
+					timer = setTimeout(() => resolve("timeout"), PROBE_INTERVAL);
+				});
+				let result: "timeout" | Error | null;
+				try {
+					result = await race([timeout, ended]);
+				} finally {
+					clearTimeout(timer);
+				}
+				if (result instanceof Error) throw result;
 				if (result !== "timeout") break;
 
 				// The two fields are independent on the wire, each using 0 for
@@ -1577,8 +1599,11 @@ export class Publisher {
 				}
 			}
 		} catch (err: unknown) {
+			closeViolation(this.#quic, err);
 			console.warn("probe stream error", err);
+		} finally {
 			stream.close();
+			await reading;
 		}
 	}
 

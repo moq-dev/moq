@@ -218,7 +218,8 @@ impl<S: Stream> Export<S> {
 
 	/// Release frames a fixed delay after their decode time, dropping late frames.
 	///
-	/// The same delay bounds each source's staleness. Zero (the default) releases each frame as
+	/// A source whose clock runs further off ours than the output's may follow fails the export
+	/// once it has used half the delay. The same delay bounds each source's staleness. Zero (the default) releases each frame as
 	/// soon as it is read and drops none as late, but a stalled group is still skipped once a
 	/// newer one is ready.
 	pub fn with_delay(mut self, delay: Duration) -> Self {
@@ -409,7 +410,7 @@ impl<S: Stream> Export<S> {
 	}
 
 	fn update_catalog(&mut self, mut catalog: Catalog) -> Result<()> {
-		self.source.retain_valid_media(&mut catalog);
+		self.source.retain_selectable(&mut catalog);
 
 		let mut active: HashMap<String, ()> = HashMap::new();
 		for name in catalog.video.renditions.keys() {
@@ -419,17 +420,16 @@ impl<S: Stream> Export<S> {
 			active.insert(name.clone(), ());
 		}
 
-		// The MKV `Tracks` element is written once and can't be amended, so
-		// reject any rendition add/remove once the header has been emitted.
+		// The MKV `Tracks` element is written once and can't be amended, so reject a
+		// rendition added once the header has been emitted.
+		//
+		// A declared rendition that leaves the catalog (disabled, or retired) keeps its
+		// track and is read to its own end: a disabled rendition idles until it re-enables,
+		// and a retired one finishes on its own.
 		if self.header_emitted {
 			for name in active.keys() {
 				if !self.tracks.contains_key(name) {
 					return Err(Error::HeaderAddedTrack(name.clone()).into());
-				}
-			}
-			for name in self.tracks.keys() {
-				if !active.contains_key(name) {
-					return Err(Error::HeaderRemovedTrack(name.clone()).into());
 				}
 			}
 			for (name, config) in &catalog.video.renditions {

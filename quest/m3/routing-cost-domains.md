@@ -15,9 +15,12 @@ performance failover is authorized by this work.
 
 ## Plan
 
-Decided 2026-10-08: parked and speculative. It needs a second operator
-running lite-07 cluster routing to have a boundary at all; delete it if none
-appears.
+Decided 2026-10-13: basic outbound local-cluster federation is required and
+belongs to [Outbound federation](/quest/m1/cluster-routing/federation.md),
+not this quest. Identity, namespace admission, local connection priorities,
+and export policy are settled with cluster routing. This quest stays parked
+for economic cost translation and origin aggregation until those have a
+consumer; do not make them prerequisites of connecting a self-hosted relay.
 
 Costs reflect SKU, directional egress economics, provider affinity, and marginal
 transfer savings. A hosting provider is not necessarily a policy domain:

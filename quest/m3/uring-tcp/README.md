@@ -32,10 +32,10 @@ Measure before porting, the same way the echo bench
 (rs/moq-uring/benches/session_lite.rs) gated the UDP path. The ablation's
 number is what justifies the rest of the line.
 
-Decided in the 2026-09-30 audit: moved to m2. The
-[transport upgrade](/quest/m1/transport-upgrade/README.md) shrinks the
-WebSocket hot path by moving clients to QUIC, and no fleet demand asks for
-ring TCP.
+Decided in the 2026-09-30 audit: moved to m2, since no fleet demand asks
+for ring TCP. (Decided 2026-10-13: the WebSocket-to-QUIC upgrade that would
+have shrunk the WebSocket hot path is removed, so a WebSocket session stays
+on TCP for its lifetime.)
 
 Decided 2026-10-08: moved to m3. No fleet demand asks for ring TCP; the
 ablation stays the gate for the rest of the line.

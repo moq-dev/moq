@@ -187,6 +187,8 @@ export const hooks: {
 	pendingTrackProducer: (request: Request) => Producer;
 	/** Have a producer write through a broadcast's sequence namespace for its name. */
 	bindSequence: (producer: Producer, sequence: TrackSequence) => void;
+	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
+	cachedLargest: (producer: Producer) => Location | undefined;
 	/**
 	 * Take the next group the subscriber's cursor allows, without waiting; assigned by `track.ts`.
 	 *
@@ -221,6 +223,10 @@ export const hooks: {
 	/** Return a group's first timestamp, retained even after its first frame is read. */
 	groupTimestamp: (group: GroupConsumer) => Timestamp | undefined;
 	groupLatest: (group: GroupConsumer) => Timestamp | undefined;
+	/** Return when a group joined its track at this hop, in `performance.now()` milliseconds. */
+	groupArrived: (group: GroupConsumer) => number;
+	/** Record when a track's mirror of a group joined that track at this hop. */
+	arriveGroup: (group: GroupConsumer, at: number) => void;
 	/** Keep applying a subscription's drift policy after it hands a group out. */
 	expireGroup: (
 		group: GroupConsumer,
@@ -254,6 +260,9 @@ export const hooks: {
 	bindSequence: () => {
 		throw new Error("track.ts not loaded");
 	},
+	cachedLargest: () => {
+		throw new Error("track.ts not loaded");
+	},
 	tryRecvGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -272,10 +281,16 @@ export const hooks: {
 	limitGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
+	arriveGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
 	groupTimestamp: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupLatest: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupArrived: () => {
 		throw new Error("group.ts not loaded");
 	},
 	expireGroup: () => {

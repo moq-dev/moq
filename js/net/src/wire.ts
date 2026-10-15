@@ -22,6 +22,8 @@ export interface Broadcast {
 	subscribe(name: string, options?: track.Subscription): track.Subscriber;
 	/** The track's properties; `hold` keeps the track wanted until it aborts, the way a held TRACK stream does, and aborting it before the answer abandons the lookup. */
 	resolveTrackInfo(name: string, hold?: AbortSignal): Promise<track.Info>;
+	/** The newest frame the track's cache holds, read without subscribing; `undefined` while it holds none. */
+	largest(name: string): track.Location | undefined;
 	fetchGroup(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
 	requested(): Promise<track.Request | undefined>;
 	/**
@@ -31,10 +33,18 @@ export interface Broadcast {
 	fromSession?: boolean;
 }
 
+/** Receives one change to the watched prefixes: `prefix` is now (or no longer) wanted. */
+export type InterestListener = (prefix: Path.Valid, wanted: boolean) => void;
+
 /** The protocol-facing operations behind an origin producer. */
 export interface OriginProducer {
-	/** Minimal root-relative namespace prefixes that cover this origin scope. */
-	interests(): readonly Path.Valid[];
+	/**
+	 * Hear the root-relative prefixes readers of this origin are watching, narrowed to its
+	 * scope: each one currently wanted first, then every change. A prefix may be reported
+	 * wanted more than once, by overlapping watches, and is released as many times. Sessions
+	 * ask their peer for announcements under exactly these. Returns the unsubscribe.
+	 */
+	interests(listener: InterestListener): Dispose;
 	/** Whether an advertised prefix overlaps the handle's allowed paths. */
 	accepts(prefix: Path.Valid): boolean;
 	receive(
@@ -60,7 +70,7 @@ export interface OriginConsumer {
 	 * A request naming an `epoch` only matches a route serving it. */
 	local(path: Path.Valid, epoch?: Epoch.Valid): broadcast.Consumer | undefined;
 	/** Resolve `path` for serving; throws `Unroutable` when the route serves another `epoch`. */
-	demand(path: Path.Valid, epoch?: Epoch.Valid): Promise<broadcast.Consumer | undefined>;
+	demand(path: Path.Valid, epoch?: Epoch.Valid, signal?: AbortSignal): Promise<broadcast.Consumer | undefined>;
 }
 
 /** One originated advertisement exposed to the publishing wire. */

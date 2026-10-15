@@ -16,10 +16,11 @@
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::Poll;
 
 use anyhow::Context as _;
+use futures::FutureExt as _;
 
 use crate::{auth, cluster, refusals::Refusal, shutdown};
 
@@ -36,7 +37,7 @@ impl Stop {
 			if self.stopped.load(Ordering::Acquire) {
 				return Poll::Ready(());
 			}
-			*self.waker.lock().unwrap() = Some(cx.waker().clone());
+			*self.waker.lock().unwrap_or_else(PoisonError::into_inner) = Some(cx.waker().clone());
 			if self.stopped.load(Ordering::Acquire) {
 				return Poll::Ready(());
 			}
@@ -47,7 +48,7 @@ impl Stop {
 
 	fn stop(&self) {
 		self.stopped.store(true, Ordering::Release);
-		if let Some(waker) = self.waker.lock().unwrap().take() {
+		if let Some(waker) = self.waker.lock().unwrap_or_else(PoisonError::into_inner).take() {
 			waker.wake();
 		}
 	}
@@ -70,6 +71,9 @@ struct Serve {
 	versions: moq_net::Versions,
 	/// The address every worker socket shares, reported as a session's `local`.
 	local: SocketAddr,
+	/// `listen.timeout`, which each worker's endpoint starts at a connection's
+	/// first packet.
+	timeout: Option<std::time::Duration>,
 }
 
 /// A bound group of io_uring QUIC workers sharing one port.
@@ -94,6 +98,7 @@ pub struct Workers {
 	pin: bool,
 	alpns: Arc<Vec<String>>,
 	versions: moq_net::Versions,
+	timeout: Option<std::time::Duration>,
 
 	threads: Vec<(u16, std::thread::JoinHandle<()>)>,
 	stops: Vec<Arc<Stop>>,
@@ -249,6 +254,7 @@ impl Workers {
 			pin: config.pin,
 			alpns: Arc::new(alpns),
 			versions,
+			timeout: listen.resolved_timeout(),
 			threads: Vec::new(),
 			stops: Vec::new(),
 			failures,
@@ -300,6 +306,7 @@ impl Workers {
 			alpns: self.alpns.clone(),
 			versions: self.versions.clone(),
 			local: self.addr,
+			timeout: self.timeout,
 		};
 
 		let cores = match self.pin {
@@ -537,6 +544,7 @@ fn serve_worker(spawn: Spawn) -> bool {
 			.context("failed to adopt the worker socket")?;
 		let mut endpoint_config = moq_uring::quic::endpoint::Config::default().with_server(server);
 		endpoint_config.activity = serve.shutdown.activity.clone();
+		endpoint_config.handshake.timeout = serve.timeout;
 		let endpoint =
 			moq_uring::quic::Endpoint::new(socket, endpoint_config).context("failed to build the QUIC endpoint")?;
 		Ok((worker, endpoint))
@@ -561,11 +569,12 @@ fn serve_worker(spawn: Spawn) -> bool {
 					let id = serve.cluster.next_connection_id();
 					let conn_handle = accept_handle.clone();
 					let serve = serve.clone();
-					accept_handle.spawn(async move {
+					let connection = async move {
 						if let Err(err) = serve_connection(conn_handle, conn, id, serve).await {
 							tracing::warn!(id, %err, "connection closed");
 						}
-					});
+					};
+					accept_handle.spawn(moq_tokio::panic::isolate(connection).map(drop));
 				}
 				Err(err) => {
 					let _ = accept_failures
@@ -583,6 +592,45 @@ fn serve_worker(spawn: Spawn) -> bool {
 	true
 }
 
+/// What remains of a connection's handshake deadline, and how to tell the peer
+/// it passed.
+struct Deadline {
+	timer: moq_uring::Timer,
+	/// Closes with the timeout code once a session exists to carry it. Until
+	/// then a timed-out handshake is just dropped, and its guard closes in the
+	/// handshake's own error space, as HTTP/3 has no MoQ codes.
+	close: Option<moq_uring::quic::web::Session>,
+}
+
+impl Deadline {
+	fn new(handle: &moq_uring::Handle, conn: &moq_uring::quic::Connection) -> Self {
+		let mut timer = handle.timer();
+		timer.set(conn.handshake().deadline);
+		Self { timer, close: None }
+	}
+
+	async fn bound<T, E: Into<anyhow::Error>>(
+		&mut self,
+		handshake: impl Future<Output = Result<T, E>>,
+	) -> anyhow::Result<T> {
+		use web_transport_trait::poll::Session as _;
+		let timer = std::pin::pin!(self.timer.wait());
+		let handshake = std::pin::pin!(handshake);
+		match futures::future::select(timer, handshake).await {
+			futures::future::Either::Left(_) => {
+				// Close before dropping the pending handshake, whose cancellation guard
+				// would otherwise replace the timeout with an abandoned-handshake error.
+				let err = moq_net::Error::Timeout;
+				if let Some(close) = &mut self.close {
+					close.close(moq_net::SessionError::Timeout.to_code(), &err.to_string());
+				}
+				Err(err.into())
+			}
+			futures::future::Either::Right((result, _)) => result.map_err(Into::into),
+		}
+	}
+}
+
 /// Serve one accepted connection on its worker: handshake and session start
 /// here; authentication and supervision on the shared runtime.
 async fn serve_connection(
@@ -592,6 +640,10 @@ async fn serve_connection(
 	serve: Serve,
 ) -> anyhow::Result<()> {
 	use web_transport_trait::poll::Session as _;
+
+	// The endpoint started this deadline at the connection's first packet and
+	// enforced it through the QUIC handshake; it covers SETUP OK too.
+	let mut deadline = Deadline::new(&handle, &conn);
 
 	// Read the link facts now: the handshake below consumes the connection.
 	let remote = conn.remote_addr();
@@ -617,7 +669,8 @@ async fn serve_connection(
 	let mut alpn = conn.protocol().map(str::to_owned);
 	let (transport, url) = match conn.protocol() {
 		Some("h3") => {
-			let request = moq_uring::quic::web::Request::accept(conn)
+			let request = deadline
+				.bound(moq_uring::quic::web::Request::accept(conn))
 				.await
 				.context("WebTransport handshake failed")?;
 			let url = request.url().clone();
@@ -631,8 +684,8 @@ async fn serve_connection(
 				response = response.with_protocol(protocol);
 			}
 			alpn = protocol.clone();
-			let session = request
-				.respond(response)
+			let session = deadline
+				.bound(request.respond(response))
 				.await
 				.context("WebTransport response failed")?;
 			(session, Some(url))
@@ -640,9 +693,17 @@ async fn serve_connection(
 		_ => (moq_uring::quic::web::Session::raw(conn), None),
 	};
 
-	let request = moq_net::Server::new()
-		.with_versions(serve.versions.clone())
-		.accept_request_lite(std::time::Instant::now(), moq_uring::transport::Session::new(transport))
+	deadline.close = Some(transport.clone());
+	let server = moq_net::Server::new().with_versions(serve.versions.clone());
+	let binding = match url {
+		Some(_) => moq_net::transport::Binding::Uri,
+		None => moq_net::transport::Binding::InBand,
+	};
+	let request = deadline
+		.bound(server.accept_request_lite(
+			std::time::Instant::now(),
+			moq_uring::transport::Session::new(transport, binding),
+		))
 		.await
 		.context("moq handshake failed")?;
 
@@ -766,14 +827,15 @@ async fn serve_connection(
 		request = request.with_subscriber(publisher);
 	}
 	let lease = lease.preparing(request.auth(), request.role())?;
-	let (session, driver) = request.ok().await?;
+	let (session, driver) = deadline.bound(request.ok()).await?;
 	let driver_handle = handle.clone();
-	handle.spawn(async move {
+	let driver = async move {
 		match driver_handle.run(driver).await {
 			moq_net::Error::Closed => {}
 			err => tracing::debug!(%err, "session driver ended"),
 		}
-	});
+	};
+	handle.spawn(moq_tokio::panic::isolate(driver).map(drop));
 
 	tracing::info!(id, version = %session.version(), %transport, "negotiated");
 
@@ -781,14 +843,14 @@ async fn serve_connection(
 	// its lifecycle (credential expiry, GOAWAY drain) lives with the timers
 	// and the shutdown broadcast on the shared runtime.
 	let shutdown = serve.shutdown.clone();
-	serve.tokio.spawn(async move {
+	serve.tokio.spawn(moq_tokio::panic::isolate(async move {
 		match crate::connection::supervise(session, lease, shutdown, registration).await {
 			// A lease or shutdown ending the session closes it too: logged, so every
 			// accepted connection pairs with its end.
 			Ok(()) => tracing::info!(id, "connection closed"),
 			Err(err) => tracing::warn!(id, %err, "connection closed"),
 		}
-	});
+	}));
 
 	Ok(())
 }
@@ -831,7 +893,9 @@ mod tests {
 	#[tokio::test]
 	async fn pending_admission_is_abandoned_at_the_deadline() {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default()) {
+		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default())
+			&& std::env::var_os("MOQ_STRICT").is_none()
+		{
 			eprintln!("skipping io_uring relay test: {reason}");
 			return;
 		}

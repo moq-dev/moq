@@ -5,9 +5,11 @@ import { error, SessionCode, SessionError } from "../error.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import * as Time from "../time.ts";
+import { Follow } from "../util/observed.ts";
 import { wireOf } from "../wire.ts";
 import { type ConnectProps, connect, type WebSocketProps, type WebTransportProps } from "./connect.ts";
 import type { Established } from "./established.ts";
+import { DISCOVERY_REMOVED } from "./forward.ts";
 import { DEFAULT_HANDOVER, type Drain, dialed, type GoawayProps, handover, pinnedTransport, target } from "./goaway.ts";
 import type { Probe, Stats } from "./stats.ts";
 
@@ -119,9 +121,11 @@ export class Reload {
 	 * The current connection's PROBE estimates, spanning reconnects.
 	 *
 	 * Undefined while disconnected: the estimates belong to a single connection.
+	 * Observation requests updates; `peek()` alone is passive.
 	 * See {@link Established.probe}.
 	 */
 	readonly probe: Getter<Probe | undefined>;
+	#probeSource = new Signal<Getter<Probe> | undefined>(undefined);
 
 	/**
 	 * Divides this connection's send-rate estimate among the tracks sharing it.
@@ -139,12 +143,6 @@ export class Reload {
 	websocket: WebSocketProps | undefined;
 
 	/**
-	 * Whether the relay supports broadcast discovery, applied to each connection attempt (not
-	 * reactive). Undefined defers to the default for the URL. See {@link Established.discovery}.
-	 */
-	discovery?: boolean;
-
-	/**
 	 * The origin whose broadcasts are served, spanning reconnects (not reactive).
 	 *
 	 * Each session announces the origin's table when it attaches, so a broadcast published
@@ -157,9 +155,9 @@ export class Reload {
 	 * The origin fed with the peer's announced broadcasts, spanning reconnects (not
 	 * reactive).
 	 *
-	 * The entries a session fed retract when it dies, and the next session re-populates the
-	 * table, so a consumer watching the origin sees offline/online transitions across a
-	 * reconnect. See the `consume` connect option.
+	 * The entries a session fed retract when it dies, and the next session asks again for
+	 * whatever is still watched, so a consumer watching the origin sees offline/online
+	 * transitions across a reconnect. See the `consume` connect option.
 	 */
 	consume?: OriginProducer;
 
@@ -228,6 +226,7 @@ export class Reload {
 	// equality, but replacing one with an equivalent instance should not reconnect.
 	#url: Getter<string | undefined>;
 	constructor(props?: ReloadProps) {
+		if (props && "discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 		this.url = Signal.from(props?.url);
 		this.enabled = Signal.from(props?.enabled ?? true);
 		this.delay = props?.delay ?? {};
@@ -235,7 +234,6 @@ export class Reload {
 		this.redirect = this.#redirect;
 		this.webtransport = props?.webtransport;
 		this.websocket = props?.websocket;
-		this.discovery = props?.discovery;
 		this.publish = props?.publish;
 		this.consume = props?.consume;
 
@@ -261,9 +259,9 @@ export class Reload {
 			});
 		}
 
-		this.probe = this.#signals.computed((effect) => {
-			const connection = effect.get(this.established);
-			return connection && effect.get(connection.probe);
+		this.probe = new Follow(this.#probeSource);
+		this.#signals.run((effect) => {
+			effect.set(this.#probeSource, effect.get(this.established)?.probe, undefined);
 		});
 
 		this.bandwidth = new Allocator(this.#estimate);
@@ -376,7 +374,6 @@ export class Reload {
 							// A redirect names the relay; a fallback URL pinned for the old one does not follow.
 							websocket: this.#redirect.peek() ? { ...this.websocket, url: undefined } : this.websocket,
 							webtransport: this.webtransport,
-							discovery: this.discovery,
 							publish: this.publish,
 							consume: this.consume,
 							signal,
@@ -569,8 +566,6 @@ export class Reload {
 	 * The same {@link Announce.Consumer} stream as {@link Established.announced}, but everything active
 	 * is retracted (an `end` event) whenever the connection drops and re-announced on
 	 * reconnect, so a consumer draining `next()` never clings to a dead route across a reconnect.
-	 *
-	 * Stays empty while the relay lacks {@link Established.discovery}.
 	 */
 	announced(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
 		// With a consume origin the table already spans reconnects (the forwarder retracts
@@ -584,10 +579,6 @@ export class Reload {
 		pump.run((effect) => {
 			const conn = effect.get(this.established);
 			if (!conn) return;
-
-			// Without discovery the upstream announce stream never yields, so leave the
-			// consumer empty rather than opening a subscription that can't be answered.
-			if (!conn.discovery) return;
 
 			const upstream = conn.announced(scope, options);
 			effect.cleanup(() => upstream.close());

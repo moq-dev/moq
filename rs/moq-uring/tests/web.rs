@@ -3,8 +3,7 @@
 //! streams and datagrams through the H3 framing; the other runs a whole
 //! moq-lite session over it, which is exactly the browser-to-relay path.
 //!
-//! Kernel-gated: skips loudly below the Linux 6.12 floor (GitHub-hosted CI),
-//! and runs everywhere else.
+//! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
 
 #![cfg(all(target_os = "linux", feature = "noq"))]
 
@@ -20,7 +19,7 @@ use web_transport_trait::poll::{RecvStream as _, SendStream as _, Session as _};
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
 		Ok(worker) => Some(worker),
-		Err(Error::Unsupported(reason)) => {
+		Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
 			eprintln!("skipping io_uring web test: {reason}");
 			None
 		}
@@ -248,7 +247,10 @@ fn lite_session_over_webtransport() {
 
 			let (moq, session_driver) = moq_net::Client::new()
 				.with_subscriber(sub_origin.clone())
-				.connect_lite(std::time::Instant::now(), moq_tokio::transport::Session::new(session))
+				.connect_lite(
+					std::time::Instant::now(),
+					moq_tokio::transport::Session::new(session, moq_net::transport::Binding::Uri),
+				)
 				.await
 				.expect("connect_lite");
 			tokio::spawn(moq_net::time::run(session_driver));
@@ -296,7 +298,10 @@ fn lite_session_over_webtransport() {
 
 			let (session, driver) = moq_net::Server::new()
 				.with_publisher(&serve_origin)
-				.accept_lite(std::time::Instant::now(), moq_uring::transport::Session::new(session))
+				.accept_lite(
+					std::time::Instant::now(),
+					moq_uring::transport::Session::new(session, moq_net::transport::Binding::Uri),
+				)
 				.await
 				.expect("accept_lite");
 			let task_handle = handle.clone();
@@ -392,6 +397,35 @@ fn an_abandoned_handshake_closes_the_connection() {
 			within(
 				&handle,
 				"the abandoned connection to close",
+				std::future::poll_fn(|cx| watch.poll_closed(cx)),
+			)
+			.await;
+		})
+		.expect("worker");
+
+	client.join().expect("client thread");
+}
+
+/// A handshake dropped before its first poll, as when its deadline has already
+/// passed, still closes the connection.
+#[test]
+fn an_unpolled_handshake_closes_the_connection() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let endpoint = h3_endpoint(&handle, &certs);
+	let addr = endpoint.local_addr();
+
+	let client = noq_client_err(format!("https://{addr}/"));
+
+	worker
+		.block_on(async move {
+			let conn = endpoint.accept().await.expect("accept");
+			let mut watch = conn.clone();
+			drop(quic::web::Request::accept(conn));
+			within(
+				&handle,
+				"the unpolled handshake's connection to close",
 				std::future::poll_fn(|cx| watch.poll_closed(cx)),
 			)
 			.await;

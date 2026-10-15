@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 
-use hang::catalog::{Video, VideoConfig};
+use hang::catalog::{Reference, Video, VideoConfig};
 
 /// Picture identity for ladder follow: enabling or disabling a rendition is not a source change.
 fn same_picture(a: &VideoConfig, b: &VideoConfig) -> bool {
@@ -39,7 +39,7 @@ pub(crate) struct Pipeline {
 	/// Which codecs this host decodes, so a catalog edit never probes again.
 	decoders: catalog::Decoders,
 
-	/// The source rendition the rungs are sized against.
+	/// The catalog ID of the source rendition the rungs are sized against.
 	name: String,
 	rendition: VideoConfig,
 	/// The shared live decode of that rendition: one subscription and one
@@ -70,7 +70,12 @@ impl Pipeline {
 	) -> Result<Self, Error> {
 		// One shared live decode for every rung of this source: N active rungs
 		// share one subscription and one decoder instead of N.
-		let feed = Feed::new(source.clone(), name.clone(), rendition.clone(), config.feed_decoder());
+		let feed = Feed::new(
+			source.clone(),
+			rendition.track(&name).to_string(),
+			rendition.clone(),
+			config.feed_decoder(),
+		);
 
 		let mut ladder = Self {
 			source,
@@ -152,7 +157,7 @@ impl Pipeline {
 		self.serving.insert(published.rung.name.clone(), retired);
 
 		Some(rung::Rung {
-			source: self.name.clone(),
+			source: self.rendition.track(&self.name).to_string(),
 			feed: self.feed.clone(),
 			broadcast: self.source.clone(),
 			config: self.rendition.clone(),
@@ -185,7 +190,8 @@ impl Pipeline {
 		// A different track, or a different codec on the same one: every rung is
 		// decoding the wrong thing, so all of them retire whatever they resolve to
 		// and none of their names carries forward.
-		let rebuilt = name != self.name || !catalog::same_stream(&self.rendition, &rendition);
+		let rebuilt = rendition.track(&name) != self.rendition.track(&self.name)
+			|| !catalog::same_stream(&self.rendition, &rendition);
 		let carry = match rebuilt {
 			true => Vec::new(),
 			false => self.rungs.clone(),
@@ -211,7 +217,7 @@ impl Pipeline {
 			self.serving.clear();
 			self.feed = Feed::new(
 				self.source.clone(),
-				name.clone(),
+				rendition.track(&name).to_string(),
 				rendition.clone(),
 				self.config.feed_decoder(),
 			);

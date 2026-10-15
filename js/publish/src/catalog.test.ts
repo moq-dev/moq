@@ -32,6 +32,25 @@ test("catalog producer seeds subscribers and fans out edits", async () => {
 	effect.close();
 });
 
+test("catalog producer refuses an ID naming both a video and an audio rendition", () => {
+	const catalog = new CatalogProducer();
+	expect(() =>
+		catalog.mutate((c) => {
+			c.video = { renditions: { main: { codec: "avc1.64001f", container: { kind: "legacy" } } } };
+			c.audio = {
+				renditions: {
+					main: {
+						codec: "opus",
+						sampleRate: Catalog.u53(48000),
+						numberOfChannels: Catalog.u53(2),
+						container: { kind: "legacy" },
+					},
+				},
+			};
+		}),
+	).toThrow(Catalog.DuplicateRendition);
+});
+
 test("catalog producer publishes every update as a snapshot group", async () => {
 	const catalog = new CatalogProducer();
 	catalog.mutate((c) => {
@@ -92,6 +111,28 @@ test("catalog producer advertises the page clock from the first snapshot", async
 	expect(second.clock).toEqual(first.clock);
 
 	effect.close();
+});
+
+test("catalog producer omits the clock when the page's wall clock is unset", async () => {
+	// A device booted before it synced its clock: the page began in 1970.
+	Object.defineProperty(performance, "timeOrigin", { value: 86_400_000, configurable: true });
+	try {
+		const catalog = new CatalogProducer();
+		catalog.mutate((c) => {
+			c.video = { renditions: {} };
+		});
+
+		const effect = new Effect();
+		const track = new Track.Producer("catalog.json");
+		catalog.serve(track, effect);
+		const subscriber = track.subscribe().ordered();
+		const group = await subscriber.nextGroup();
+		expect(await group?.readJson()).toEqual({ video: { renditions: {} } });
+		effect.close();
+	} finally {
+		// Drops the override, uncovering the real getter.
+		Reflect.deleteProperty(performance, "timeOrigin");
+	}
 });
 
 test("a reconnecting subscriber is seeded with the full current catalog", async () => {

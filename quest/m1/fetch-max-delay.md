@@ -63,10 +63,6 @@ field if needed; published formats are unchanged. Update API, concept,
 CLI and matching draft documentation inline, including the changed FETCH
 exemption and the distinction between age and upstream wait budgets.
 
-## Required
-
-- [One max_age meaning](/quest/m1/cache-max-age.md) - one expiry rule and deadline wake mechanism
-
 ## Related
 
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - upstream waiting bounded through the existing FETCH parameter

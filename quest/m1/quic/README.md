@@ -12,7 +12,7 @@ relay peers, and endpoint sharding.
 Per-stream acknowledgment progress, per-stream deadlines, qmux on the shared
 stream state machine, and the experiments (the egress profile, ECN
 measurement, deadline keep-alive) live in [m2](/quest/m2/README.md); media
-probing is its own [m1 quest](/quest/m1/quic-probe.md); L4S,
+probing is its own [m2 quest](/quest/m2/quic-probe.md); L4S,
 careful resume, and a receive-timestamps spike toward GCC live in
 [m3](/quest/m3/README.md). None of them gate this line.
 
@@ -28,7 +28,7 @@ publish a fork release, pin it, or offer a change upstream are superseded:
 a change lands in-tree with its consumer, and upstreaming is optional.
 
 The seven BBR correctness fixes shipped in moq-noq 1.3.1 (#4206) are in
-`moq-quic`'s BBR3. The remaining BBR quests here and [BBR ACK cleanup](/quest/m1/bbr-ack-cleanup.md) all edit
+`moq-quic`'s BBR3. The remaining BBR quests here and [BBR ACK cleanup](/quest/m2/bbr-ack-cleanup.md) all edit
 `bbr3/mod.rs`, so one owner should work there at a time. Controller-level
 regressions extend the shared test `Sim` in `bbr3/mod.rs` with only what each
 needs, rather than adding another simulation loop; a fix at the transport
@@ -70,12 +70,8 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
 - [Hard fork](/quest/m1/quic/fork/README.md) - quinn in-tree as `moq-quic`, with BBR3 and lazy stream slots, and MoQ switched onto it
 - [Retain connection credit](/quest/m1/quic/receive-credit.md) - native receivers own connection credit independently of stream reads
 - [Bound message assembly](/quest/m1/quic/receive-memory.md) - complete headers and frames return credit, and receiver priority cancellation restores progress
-- [BBR idle burst](/quest/m1/quic/bbr-app-limited.md) - a fork regression proves a burst after a long idle is paced at the learned bandwidth, closing #4219
-- [Mark BBR starvation wherever the source runs dry](/quest/m1/quic/bbr-app-limited-edges.md) - partial polls count, local send caps do not, receiver credit is pinned
 - [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - `RESET_STREAM_AT`,
   so a reset WebTransport stream still delivers its header
-- [Pin retransmits to stream priority](/quest/m1/quic/retransmit-priority.md) - a test
-  proves a lost low-priority range waits behind higher-priority new data
 - [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - strict
   subscription priority, fair buckets, and newest-first group order replace
   the lossy scalar; retransmits follow the same order
@@ -91,7 +87,7 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
 
 - [Scope track priority](/quest/m1/track-priority-scope.md) - the
   per-broadcast fairness policy on cluster sessions
-- [Discover media headroom](/quest/m1/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
+- [Discover media headroom](/quest/m2/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
 - [L4S on the backbone](/quest/m3/quic-ecn.md) - an ECT(1) option in the fork, an `ecn` config knob, and a dualpi2 measurement
 - [Careful resume on reconnect](/quest/m3/quic-careful-resume.md) - a redial starts at the previous connection's rate
 - [Keep-alive from the idle timeout](/quest/m2/quic-keep-alive.md) - the keep-alive interval defaults to a fraction of the negotiated idle timeout; an explicit `quic.keep_alive` overrides

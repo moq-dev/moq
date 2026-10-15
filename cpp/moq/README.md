@@ -30,7 +30,7 @@ Every generated type lives in `namespace moq`. Objects are `std::shared_ptr`; re
 
 - A fallible call returns `moq::expected<T>`, which is `std::expected` on C++23 and a bundled `tl::expected` below it. The generated sources and every includer must agree on which, so `moq/moq.hpp` references a symbol named for the one it sees and `src/moq.cpp` defines the one it was built with: a mismatch fails to link.
 - An async call returns `moq::Future<T>`. Block on it with `get()` or `wait_for()`, attach a continuation with `std::move(future).then(executor, callback)`, which returns a `moq::Continuation`, or `co_await` it on C++20.
-- `moq::Error` is a value holding a `std::variant` of its cases, and `to_string()` gives Rust's `Display` message. Nothing throws. A Rust panic aborts with a message on stderr, and so does reading an invalid future (see [Cancellation](#cancellation)).
+- `moq::Error` is a value holding a `std::variant` of its cases, and `to_string()` gives Rust's `Display` message. Nothing throws. A Rust panic inside a call aborts with a message on stderr, and so does reading an invalid future (see [Cancellation](#cancellation)). A panic in a session's background work closes only that session.
 - Futures are polled on one process-wide executor thread unless the application installs its own with `moq::set_executor` before the first async call. The executor passed to `then()` dispatches only the continuation. `moq::shutdown()` stops the moq-ffi runtime workers (`moq_ffi_shutdown`), then the executor, before unloading the code a continuation could call into.
 
 ## C++ standard

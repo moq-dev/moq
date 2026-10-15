@@ -8,8 +8,7 @@
 //! datagram, and a QUIC close whose CONNECTION_CLOSE is the last thing a
 //! one-shot client ever sends.
 //!
-//! Kernel-gated: skips loudly below the Linux 6.12 floor (GitHub-hosted CI),
-//! and runs everywhere else.
+//! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
 
 #![cfg(all(target_os = "linux", feature = "noq"))]
 
@@ -29,7 +28,7 @@ const CLOSE_REASON: &str = "done";
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
 		Ok(worker) => Some(worker),
-		Err(Error::Unsupported(reason)) => {
+		Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
 			eprintln!("skipping io_uring teardown test: {reason}");
 			None
 		}

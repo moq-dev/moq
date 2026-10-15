@@ -20,6 +20,7 @@ This file is split into nested `AGENTS.md` files based on the language/situation
 - Keep the PR focused. No unrelated refactors, formatting churn, or drive-by changes; split when in doubt.
 - Refactor aggressively for long-term maintainability, but re-evaluate the direction as you learn.
 - Propose a course change, even suggest abandoning a PR, rather than finish a half-solution.
+- Be adversarial: attack your own approach, reports, reviews, and other PRs as hard as anyone else's, and argue for the best approach over the first one that works.
 - When a decision is the maintainer's (API shape, naming, scope), ask with 2-3 options and a recommendation.
 - All tests need to be wired into CI, at least a nightly.
 - Never edit an `AGENTS.md`, `CONTRIBUTING.md`, or skill without being prompted, and read `PROMPTING.md` first.
@@ -44,7 +45,6 @@ This file is split into nested `AGENTS.md` files based on the language/situation
 - Suggest follow up sessions and quests when finished, interactively prompting the user.
 - Prefer the simple solution.
 - Say it once, in the fewest words that hold up.
-- Critically think, and decide if the complexity is worth it. Simple is better.
 - Prefer a quest over a GitHub issue for work needing durable scope.
 - Use interactive prompts when possible.
 - Try to do stuff asynchronously. ex. ask about follow-ups while tests run.

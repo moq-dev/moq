@@ -17,6 +17,8 @@ var (
 	TrackProducer func(any) *ffi.MoqTrackProducer
 	// TrackConsumer returns the handle behind a *moq.TrackConsumer.
 	TrackConsumer func(any) *ffi.MoqTrackConsumer
+	// GroupConsumer returns the handle behind a *moq.GroupConsumer.
+	GroupConsumer func(any) *ffi.MoqGroupConsumer
 	// TrackDemand wraps a handle as a *moq.TrackDemand.
 	TrackDemand func(*ffi.MoqTrackDemand) any
 )

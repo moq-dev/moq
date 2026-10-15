@@ -24,6 +24,8 @@ groups not supported") in `run_fetch_stream`
 `FetchType::Filtered`. Capping at the Largest Object also lifts the draft-20
 refusal of a filter bounded by it ("FETCH relative to Largest Object not
 supported"): no filter, a relative start, or an absolute start with no end.
+A multi-group FETCH keeps its one queue entry and moves with priority updates
+(decided 2026-10-13).
 
 The same FETCH-end path sets End of Track only when the read hits FIN, so a
 bounded FETCH that ends exactly at the track's last object reports
@@ -37,6 +39,6 @@ a live track's Largest Object, and test both cases.
 
 ## Related
 
-- [Pipelined first FETCH](/quest/m1/pipeline-requests/fetch.md) - sends TRACK_STATUS alongside the FETCH in adjacent code (`ietf/subscriber.rs`, `model/origin.rs`); decided 2026-10-08 it lands first, since it is unblocked and this is not, and this rebases onto it
+- [Pipelined first FETCH](/quest/m2/pipeline-requests/fetch.md) - sends TRACK_STATUS alongside the FETCH in adjacent code (`ietf/subscriber.rs`, `model/origin.rs`); decided 2026-10-08 it lands first, since it is unblocked and this is not, and this rebases onto it
 - [FETCH max-delay](/quest/m1/fetch-max-delay.md) - preserve local age enforcement and the omitted-budget default when adapting IETF FETCH to ranges
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - handles native timeout gaps; do not mistake them for never-existing objects or media-age limits

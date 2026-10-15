@@ -34,7 +34,7 @@ import {
 } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
 import { MalformedAuthToken } from "./token.ts";
-import { TrackStatusRequest } from "./track.ts";
+import { TRACK_STATUS_ERROR_14, TrackStatusRequest } from "./track.ts";
 import { type IetfVersion, Version, versionName } from "./version.ts";
 
 // The PADDING stream type (draft-18+): bytes a peer sends to probe for bandwidth.
@@ -55,9 +55,6 @@ export class Connection implements Established {
 
 	// The wire transport this session runs over.
 	readonly transport: Transport;
-
-	/** Whether the relay supports broadcast discovery; see {@link Established.discovery}. */
-	readonly discovery: boolean;
 
 	/** moq-transport has no PROBE, so this stays empty; see {@link Established.probe}. */
 	readonly probe: Getter<Probe> = new Signal<Probe>({});
@@ -120,7 +117,6 @@ export class Connection implements Established {
 		maxRequestId,
 		version,
 		client,
-		discovery = true,
 		publish,
 		solicit,
 		hidden = false,
@@ -137,7 +133,6 @@ export class Connection implements Established {
 		version: IetfVersion;
 		/** Whether this peer initiated the session, selecting the even request-ID space. */
 		client: boolean;
-		discovery?: boolean;
 		/** The origin whose broadcasts are served to the peer. Omit to publish nothing. */
 		publish?: OriginConsumer;
 		/**
@@ -162,7 +157,6 @@ export class Connection implements Established {
 		extensions?: { solicit: boolean };
 	}) {
 		this.url = url;
-		this.discovery = discovery;
 		this.version = versionName(version);
 		this.transport = transportOf(quic);
 		this.#quic = quic;
@@ -519,8 +513,7 @@ export class Connection implements Established {
 			publish: PublishError.id,
 			publish_namespace: PublishNamespaceError.id,
 			subscribe_namespace: SubscribeNamespaceError.id,
-			// TRACK_STATUS_ERROR
-			track_status: 0x0f,
+			track_status: TRACK_STATUS_ERROR_14,
 		}[kind];
 		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
 		await stream.writer.u53(version === Version.DRAFT_14 ? id14 : RequestError.id);

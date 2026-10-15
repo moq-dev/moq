@@ -196,7 +196,6 @@ impl Server {
 			crate::session::Handles {
 				goaway: start.goaway,
 				auth: start.auth,
-				setup: start.setup,
 				estimate: Some(start.estimate),
 			},
 		))
@@ -617,7 +616,7 @@ where
 
 			// The client's SETUP was read at the pause; hand the stream back
 			// for GOAWAY. A server never advertises a path, hence `None`.
-			let (protocol, goaway, setup) = ietf::start(ietf::Config {
+			let (protocol, goaway) = ietf::start(ietf::Config {
 				runtime: runtime.clone(),
 				limits: server.limits,
 				session: session.clone(),
@@ -648,7 +647,6 @@ where
 				crate::session::Handles {
 					goaway,
 					auth,
-					setup,
 					estimate: None,
 				},
 			))
@@ -723,7 +721,7 @@ where
 			};
 			stream.writer.encode(&server_setup).await?;
 
-			let (recv_bw, protocol, goaway, auth, setup, estimate) = match version {
+			let (recv_bw, protocol, goaway, auth, estimate) = match version {
 				Version::Lite(v) => {
 					let stream = stream.with_version(v);
 					// Pre-lite-05: no Setup Stream, so nothing to advertise or seed.
@@ -746,14 +744,13 @@ where
 						crate::driver::Protocol::Lite(Box::new(start.driver)),
 						start.goaway,
 						start.auth,
-						start.setup,
 						Some(start.estimate),
 					)
 				}
 				Version::Ietf(v) => {
 					let stream = stream.with_version(v);
 					// Draft 14-16: path came in the bidi SETUP, no uni SETUP to hand back.
-					let (protocol, goaway, setup) = ietf::start(ietf::Config {
+					let (protocol, goaway) = ietf::start(ietf::Config {
 						runtime: runtime.clone(),
 						limits: server.limits,
 						session: session.clone(),
@@ -773,7 +770,7 @@ where
 						early_unis: Vec::new(),
 						extensions: server.extensions,
 					})?;
-					(None, crate::driver::Protocol::Ietf(protocol), goaway, auth, setup, None)
+					(None, crate::driver::Protocol::Ietf(protocol), goaway, auth, None)
 				}
 			};
 
@@ -783,12 +780,7 @@ where
 				version,
 				recv_bw,
 				protocol,
-				crate::session::Handles {
-					goaway,
-					auth,
-					setup,
-					estimate,
-				},
+				crate::session::Handles { goaway, auth, estimate },
 			))
 		}
 		.maybe_boxed()
@@ -998,6 +990,7 @@ mod tests {
 	/// else is inert.
 	#[derive(Clone)]
 	struct FakeSession {
+		binding: crate::transport::Binding,
 		protocol: Option<&'static str>,
 		uni: Arc<Mutex<VecDeque<Vec<u8>>>>,
 		bi: Arc<Mutex<VecDeque<Vec<u8>>>>,
@@ -1008,6 +1001,7 @@ mod tests {
 	impl FakeSession {
 		fn new(protocol: &'static str, uni: impl IntoIterator<Item = Vec<u8>>) -> Self {
 			Self {
+				binding: crate::transport::Binding::InBand,
 				protocol: Some(protocol),
 				uni: Arc::new(Mutex::new(uni.into_iter().collect())),
 				bi: Default::default(),
@@ -1086,6 +1080,9 @@ mod tests {
 		}
 		fn max_datagram_size(&self) -> usize {
 			1200
+		}
+		fn binding(&self) -> crate::transport::Binding {
+			self.binding
 		}
 		fn protocol(&self) -> Option<&str> {
 			self.protocol
@@ -1334,6 +1331,37 @@ mod tests {
 		// client that wants the root doesn't have to special-case the parameter.
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some(""), None, None)]);
 		let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
+		assert_eq!(request.path(), "");
+	}
+
+	#[moq_net_sim::test]
+	async fn uri_binding_rejects_setup_path_presence() {
+		for alpn in [ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP] {
+			for path in ["", "/team/room"] {
+				let mut session = FakeSession::new(alpn, [lite05_setup(Some(path), None, None)]);
+				session.binding = crate::transport::Binding::Uri;
+				let observed = session.clone();
+				let result = Server::new()
+					.with_versions(alpn.parse::<Version>().unwrap().into())
+					.accept_request_lite(moq_net_sim::now(), session)
+					.await;
+				assert!(
+					matches!(result, Err(Error::ProtocolViolation)),
+					"{alpn}: URI binding accepted a SETUP path"
+				);
+				assert_eq!(observed.close_code(), Some(3));
+			}
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn uri_binding_accepts_setup_without_path() {
+		let mut session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]);
+		session.binding = crate::transport::Binding::Uri;
+		let request = Server::new()
+			.accept_request_lite(moq_net_sim::now(), session)
+			.await
+			.unwrap();
 		assert_eq!(request.path(), "");
 	}
 

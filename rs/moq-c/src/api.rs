@@ -1110,11 +1110,11 @@ pub extern "C" fn moq_client_defaults() -> moq_client_config {
 		dst.websocket_delay_us = micros(websocket.delay);
 		dst.has_websocket_delay = true;
 
-		dst.backoff_initial_us = micros(config.connect.backoff.initial);
+		dst.backoff_initial_us = micros(config.connect.backoff.initial.unwrap());
 		dst.has_backoff_initial = true;
 		dst.backoff_multiplier = config.connect.backoff.multiplier;
 		dst.has_backoff_multiplier = true;
-		dst.backoff_max_us = micros(config.connect.backoff.max);
+		dst.backoff_max_us = micros(config.connect.backoff.max.unwrap());
 		dst.has_backoff_max = true;
 		if let Some(timeout) = config.connect.backoff.timeout {
 			dst.backoff_timeout_us = micros(timeout);

@@ -87,6 +87,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just go bench -benchtime=1x
 
+      - name: GStreamer catalog EOS benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs bench-gst-catalog -- --quick
+
       - name: Audio grouping relay benchmark
         if: ${{ !cancelled() }}
         run: nix develop --command just bench-audio
@@ -120,13 +124,15 @@ jobs:
         run: nix develop --command just js bench request-ids
 
       # A restart should cost the same whether one or many requests follow the path,
-      # and an unrelated route should wake none of them.
-      - name: JS origin request restart benchmark
+      # and an unrelated route should wake none of them. Cancellation also varies
+      # competing routes independently of cancelled waiters on the same path.
+      - name: JS origin request lifecycle benchmark
         if: ${{ !cancelled() }}
         run: nix develop --command just js bench requests
 
-      # A route above several interest heads lands once per head, so its re-price
-      # should expose any slope over heads times received routes.
+      # A route above several interest heads lands once, so its re-price should
+      # expose any slope over heads times received routes. A watch coming and going
+      # sweeps held watches against attached sessions.
       - name: JS origin announce forwarding benchmark
         if: ${{ !cancelled() }}
         run: nix develop --command just js bench forward
@@ -171,6 +177,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just js catalog-bench
 
+      - name: JS arrival window benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just js arrivals-bench
+
       # Times Effect create and close beside a bare `new Error()`. No threshold: it only
       # has to keep running, and its numbers track the creation stack's cost.
       - name: JS signals effect benchmark
@@ -186,6 +196,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command cargo bench --locked -p moq-net --features fuzz --bench '*' -- --test
 
+      # Runs each kio Criterion routine once, including the contended bench's
+      # worker threads, so one that deadlocks or panics fails here. Timing is
+      # not compared.
+      - name: kio benchmark smoke
+        if: ${{ !cancelled() }}
+        run: nix develop --command cargo bench --locked -p kio --bench '*' -- --test
+
       - name: HTTP idle accounting benchmark smoke
         if: ${{ !cancelled() }}
         run: nix develop --command cargo bench --locked -p moq-relay --bench http_idle -- --test
@@ -196,12 +213,12 @@ jobs:
 
       # One relay's stats tick (drain plus plain and compressed encode), swept
       # over held paths, tiers, and how many of those paths changed, plus the
-      # decode table. `--test` runs each tick routine once (decode ignores it
-      # and runs its whole table), so a panic (a plain
+      # decode and aggregate tables. `--test` runs each tick routine once (the
+      # tables ignore it and run every configuration), so a panic (a plain
       # frame past the cache cap, a drain that drops a held path) fails here
       # instead of on the next manual run. Timing is not compared. `bench`
       # exposes the hidden producer hook; without it the tick target is skipped.
-      - name: moq-stats producer tick and decode benchmarks
+      - name: moq-stats producer tick, decode and aggregate benchmarks
         if: ${{ !cancelled() }}
         run: nix develop --command just rs bench-stats --test
 
@@ -218,6 +235,10 @@ jobs:
       - name: TS damage PID benchmark
         if: ${{ !cancelled() }}
         run: nix develop --command just rs test -p moq-mux benchmark_damage_pid_fanout --run-ignored only --success-output immediate
+
+      - name: TS scheduler benchmark smoke
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs bench-ts-schedule --test
 
       - name: Container export benchmark smoke
         if: ${{ !cancelled() }}
@@ -255,36 +276,6 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just rs c-tests
 
-      - name: TS table alignment
-        if: ${{ !cancelled() }}
-        run: nix develop --command just test ts --pair
-        env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
-
-      # The TS exporter's PCR release timing. Everything else about the stream
-      # can be graded from a capture, but *when* the bytes were handed over
-      # cannot: the grader has to sit on the exporter's stdout for the length of
-      # the run, stamping each packet. That is a real-time window no per-PR gate
-      # should pay for, so it lives here (see test/ts/README.md).
-      #
-      # 120 s rather than the 20 s default, because the drift term needs it. The
-      # exporter builds its mux buffer once and holds it, and a window that ends
-      # while it is still filling cannot tell that from a pipe running slow: the
-      # lag reaches ~480 ms over the first ~48 s and is flat after. Nightly is the
-      # one arm with the wall-clock time to see the flat part.
-      - name: TS timing
-        if: ${{ !cancelled() }}
-        run: nix develop --command just test ts --live --duration 120
-
-      - name: Upload TS pair failure artifacts
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: nightly-ts-pair
-          path: ${{ runner.temp }}/moq-test-runs
-          if-no-files-found: ignore
-          retention-days: 7
-
   tests:
     name: Tests (${{ matrix.recipe }})
     runs-on: ubuntu-24.04-arm
@@ -292,13 +283,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # `rs uring` is a separate feature compile (off the default set) and
-        # kernel-gated below 6.12. The embedding tests for io_uring live there.
+        # `rs uring` is a separate feature compile (off the default set), and
+        # MOQ_STRICT fails it below the 6.12 kernel floor. The embedding tests for
+        # io_uring live there; uring.yml also runs it on affected PRs.
         # `test drain` stands up two relays and drains one under a live JS
         # viewer: diff-independent, since a break can arrive through the relay,
         # js/net, or the wire between them.
         # `gh test` exercises workflow and release tooling, which no pull request runs.
-        recipe: ["rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "gh test"]
+        recipe: ["rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "gh test", "test json-properties"]
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
@@ -324,45 +316,9 @@ jobs:
           NEXTEST_PROFILE: ci
           MOQ_STRICT: 1
 
-  # Instant/SystemTime ranges and native transport behavior differ by OS.
-  # The PR platform gate only compiles them; this job runs their tests nightly.
-  # Outside Nix like platform.yml, with no cache that would evict Linux's store.
-  platform-tests:
-    name: Tests (${{ matrix.recipe }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            recipe: rs windows-test
-          - os: macos-latest
-            recipe: rs macos-test
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      # aws-lc-rs assembles its x86_64 crypto with NASM on Windows.
-      - name: Install NASM
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          choco install nasm -y --no-progress
-          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-      - uses: ./.github/actions/just
-      - name: Install nextest
-        uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
-        with:
-          tool: nextest@0.9.146
-      - name: Test
-        shell: bash
-        run: just ${{ matrix.recipe }}
-        env:
-          NEXTEST_PROFILE: ci
+  # Full platform coverage without rebuilding after every main queue merge.
+  platform:
+    uses: ./.github/workflows/platform.yml
 
   # Plays the matrix in headless Chromium through moq-shaper and grades what the
   # listener heard against test/audio-quality/budgets.json. ARM64 like wasm.yml,
@@ -413,11 +369,12 @@ jobs:
         env:
           # Somewhere upload-artifact can reach; the harness default is under $TMPDIR.
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          # A passing run is kept too: budgets.json is measured from these nights.
+          MOQ_TEST_KEEP: 1
       # The run directory is the diagnosis: each process's log, the shaper's
-      # counters, the raw samples, and every row's summary. The harness keeps it
-      # on a failure without being asked.
-      - name: Keep the failing run
-        if: ${{ failure() }}
+      # counters, the raw samples, and every row's summary.
+      - name: Keep the run
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: audio-quality-run
@@ -442,6 +399,12 @@ jobs:
   release-kt-ffi:
     name: Release Kotlin FFI
     uses: ./.github/workflows/release-kt-ffi.yml
+    permissions:
+      contents: read
+
+  release-swift-lib:
+    name: Release Swift Lib
+    uses: ./.github/workflows/release-swift-lib.yml
     permissions:
       contents: read
 

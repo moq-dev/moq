@@ -461,7 +461,7 @@ async fn mtls_test(scheme: &str, reject: bool) {
 	// One shared tuning, handed to both roles the way a binary would.
 	let mut quic = moq_tokio::quic::Config::default();
 	quic.gso = Some(false);
-	quic.keep_alive = Duration::from_secs(1);
+	quic.keep_alive = Some(Duration::from_secs(1));
 
 	let server = server_config.init(quic.clone()).expect("failed to init server");
 	let mut server = server.listen().await.expect("failed to listen");
@@ -746,7 +746,7 @@ async fn iroh_connect_test(version: Option<&str>) {
 async fn noq_client_close_reaches_server() {
 	// An idle timeout inside TIMEOUT would hide a lost close.
 	let mut quic = moq_tokio::quic::Config::default();
-	quic.idle_timeout = TIMEOUT * 3;
+	quic.idle_timeout = Some(TIMEOUT * 3);
 
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("127.0.0.1:0".parse().unwrap());
@@ -1091,7 +1091,7 @@ async fn noq_client_close_keeps_predecessor_handover() {
 			config.tls.insecure = Some(true);
 			config.bind = Some("127.0.0.1:0".parse().unwrap());
 			// Well under the one second close window.
-			config.goaway.handover = Duration::from_millis(500);
+			config.goaway.handover = Some(Duration::from_millis(500));
 			let client = config
 				.init(quic)
 				.expect("failed to init client")
