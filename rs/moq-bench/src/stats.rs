@@ -10,8 +10,23 @@ use serde::Serialize;
 /// collecting larger values. Chat delivery should stay far below this ceiling.
 const LATENCY_BUCKETS: usize = 60_001;
 
+/// Fixed sums over every connection's startup roll.
+#[derive(Clone, Copy, Default, Serialize)]
+pub(crate) struct Targets {
+	pub connections: u64,
+	pub broadcasts: u64,
+	pub subscriptions: u64,
+}
+
 /// Shared counters bumped by the connection tasks and drained by the reporter.
 pub struct Stats {
+	targets: Targets,
+	/// Each rolled element increments once, so readiness survives a later loss.
+	connected: AtomicU64,
+	published: AtomicU64,
+	subscribed: AtomicU64,
+	/// Active subscriptions that have read a complete group.
+	pub subscriptions_established: AtomicU64,
 	pub connections: AtomicU64,
 	pub broadcasts: AtomicU64,
 	pub subscriptions: AtomicU64,
@@ -34,7 +49,18 @@ pub struct Stats {
 
 impl Default for Stats {
 	fn default() -> Self {
+		Self::new(Targets::default())
+	}
+}
+
+impl Stats {
+	pub(crate) fn new(targets: Targets) -> Self {
 		Self {
+			targets,
+			connected: AtomicU64::new(0),
+			published: AtomicU64::new(0),
+			subscribed: AtomicU64::new(0),
+			subscriptions_established: AtomicU64::new(0),
 			connections: AtomicU64::new(0),
 			broadcasts: AtomicU64::new(0),
 			subscriptions: AtomicU64::new(0),
@@ -49,9 +75,22 @@ impl Default for Stats {
 			latency: Latency::default(),
 		}
 	}
-}
 
-impl Stats {
+	pub(crate) fn ready(&self) -> bool {
+		self.connected.load(Ordering::Relaxed) >= self.targets.connections
+			&& self.published.load(Ordering::Relaxed) >= self.targets.broadcasts
+			&& self.subscribed.load(Ordering::Relaxed) >= self.targets.subscriptions
+	}
+	pub(crate) fn connection_established(&self) {
+		self.connected.fetch_add(1, Ordering::Relaxed);
+	}
+	pub(crate) fn broadcast_established(&self) {
+		self.published.fetch_add(1, Ordering::Relaxed);
+	}
+	pub(crate) fn subscription_established(&self) {
+		self.subscribed.fetch_add(1, Ordering::Relaxed);
+	}
+
 	pub fn frame_sent(&self, bytes: usize) {
 		self.frames_sent.fetch_add(1, Ordering::Relaxed);
 		self.bytes_sent.fetch_add(bytes as u64, Ordering::Relaxed);
@@ -189,6 +228,9 @@ impl<'a> Record<'a> {
 
 #[derive(Serialize)]
 struct Snapshot {
+	targets: Targets,
+	ready: bool,
+	subscriptions_established: u64,
 	#[serde(skip)]
 	captured_at: SystemTime,
 	connections: u64,
@@ -284,6 +326,9 @@ impl Snapshot {
 		let groups_lost = stats.groups_lost.load(Ordering::Acquire);
 		let groups_present = stats.groups_present.load(Ordering::Acquire);
 		Self {
+			targets: stats.targets,
+			ready: stats.ready(),
+			subscriptions_established: stats.subscriptions_established.load(Ordering::Relaxed),
 			captured_at: latency.captured_at,
 			connections: stats.connections.load(Ordering::Relaxed),
 			broadcasts: stats.broadcasts.load(Ordering::Relaxed),
@@ -428,6 +473,36 @@ mod tests {
 	/// A failed stats write must surface as an error so the run dies loudly.
 	/// Silently dropping output leaves a partial JSONL file behind a green exit,
 	/// which reads as a valid benchmark that quietly lost data.
+	#[test]
+	fn json_readiness_waits_for_each_target_and_survives_later_loss() {
+		let stats = Stats::new(Targets {
+			connections: 1,
+			broadcasts: 1,
+			subscriptions: 2,
+		});
+		let line = |stats: &Stats| {
+			let previous = Snapshot::take(stats);
+			let now = Snapshot::take(stats);
+			let interval = IntervalLatency::from_delta(&previous.latency_buckets, &now.latency_buckets);
+			serde_json::to_value(Record::new(&previous, &now, &interval).unwrap()).unwrap()
+		};
+		assert_eq!(line(&stats)["ready"], false);
+		stats.connection_established();
+		stats.broadcast_established();
+		stats.subscription_established();
+		assert_eq!(line(&stats)["ready"], false);
+		stats.subscription_established();
+		let ready = line(&stats);
+		assert_eq!(ready["ready"], true);
+		assert_eq!(ready["targets"]["connections"], 1);
+		assert_eq!(ready["targets"]["broadcasts"], 1);
+		assert_eq!(ready["targets"]["subscriptions"], 2);
+		// Gauges can fall all the way to zero after establishment without resetting readiness.
+		assert_eq!(ready["connections"], 0);
+		assert_eq!(ready["subscriptions_established"], 0);
+		assert_eq!(line(&stats)["ready"], true);
+	}
+
 	#[tokio::test]
 	async fn report_fails_on_output_error() {
 		tokio::time::pause();

@@ -121,6 +121,23 @@ The `config/` directory has a few starting points:
 
 ## Machine-readable output
 
+Every line carries `targets: { "connections": N, "broadcasts": N, "subscriptions": N }`,
+fixed sums over all startup rolls, including fan-out roles.
+`ready` first becomes true after every rolled connection has connected, every
+broadcast has connected or completed its first group, and every subscription has
+read a complete group end to end. Start a measurement window on the first `ready`
+line. It stays true after a later loss; use the live gauges to see work ending.
+`subscriptions_established` counts active subscriptions that have completed a
+group, while the existing `subscriptions` gauge includes drains still waiting to
+subscribe or finish their first group.
+
+A mesh publishing run refuses a subscription range larger than the smallest
+possible peer broadcast count: `(max(connections.min, 1) - 1) * broadcasts.min`,
+with inverted range ends normalized first. A publishing run with subscribers,
+including fan-out, refuses an fps range containing zero. Subscribe-only runs may
+use local fps zero and request any subscription count: their external publishers
+determine when the requested target is reached. Targets are never clamped.
+
 Each line includes `interval_start_ms` and `interval_end_ms` (Unix milliseconds),
 and `latency_interval_histogram`: `{ "version": 1, "unit": "ms", "buckets": [[index, count], ...] }`.
 Version 1 is a sparse encoding of 60,001 dense one-millisecond buckets: omitted
