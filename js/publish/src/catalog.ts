@@ -31,15 +31,14 @@ export class CatalogProducer {
 		fn(value);
 		// Every consumer refuses a catalog that fails this, so refuse the edit before it reaches one.
 		Catalog.checkRenditions(value);
+		// Estimates only rise for a track; a renamed rendition starts its new track over.
 		for (const field of ["jitter", "delay"] as const) {
-			const previous = advertised(this.#value, field);
-			for (const [section, next] of Object.entries(advertised(value, field))) {
-				for (const [name, estimate] of Object.entries(next)) {
-					if (estimate === 0) throw new Error(`omit ${field} rather than advertising 0`);
-					const before = previous[section]?.[name];
-					if (before !== undefined && (estimate === undefined || estimate < before)) {
-						throw new Error(`${field} cannot decrease for an existing track`);
-					}
+			const previous = new Map(advertised(this.#value, field));
+			for (const [track, estimate] of advertised(value, field)) {
+				if (estimate === 0) throw new Error(`omit ${field} rather than advertising 0`);
+				const before = previous.get(track);
+				if (before !== undefined && (estimate === undefined || estimate < before)) {
+					throw new Error(`${field} cannot decrease for an existing track`);
 				}
 			}
 		}
@@ -111,20 +110,25 @@ function structure(catalog: Catalog.Root): Catalog.Root {
 	return value;
 }
 
-/** Every track's advertised `field`, by section and then track name. */
-function advertised(
-	catalog: Catalog.Root,
-	field: "jitter" | "delay",
-): Record<string, Record<string, number | undefined>> {
-	const pick = (tracks: Record<string, { jitter?: number; delay?: number }> | undefined) =>
-		Object.fromEntries(Object.entries(tracks ?? {}).map(([name, config]) => [name, config[field]]));
-	return {
-		audio: pick(catalog.audio?.renditions),
-		video: pick(catalog.video?.renditions),
-		text: pick(catalog.text?.renditions),
-		json: pick(catalog.json?.tracks),
-		binary: pick(catalog.binary?.tracks),
+type Advertised = { broadcast?: string; track?: string; jitter?: number; delay?: number };
+
+/** Every entry's advertised `field`, keyed by its section, ID, broadcast, and track name. */
+function advertised(catalog: Catalog.Root, field: "jitter" | "delay"): [string, number | undefined][] {
+	const sections = {
+		audio: catalog.audio?.renditions,
+		video: catalog.video?.renditions,
+		text: catalog.text?.renditions,
+		json: catalog.json?.tracks,
+		binary: catalog.binary?.tracks,
 	};
+	return Object.entries(sections).flatMap(([section, tracks]) =>
+		Object.entries((tracks ?? {}) as Record<string, Advertised>).map(
+			([id, config]): [string, number | undefined] => [
+				JSON.stringify([section, id, config.broadcast, Catalog.track(id, config)]),
+				config[field],
+			],
+		),
+	);
 }
 
 // An empty root advertising the wall time of `performance.now() === 0`, the zero every js/publish
