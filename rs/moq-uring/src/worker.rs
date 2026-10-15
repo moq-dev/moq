@@ -204,13 +204,14 @@ impl Worker {
 
 	/// Dispatch completions, carrying parked submissions into the wait enter.
 	fn pump(&mut self) -> Result<(), Error> {
-		let full = self.shared.ring.borrow_mut().submission().is_full();
+		let notified = self.shared.unpark.word.load(Ordering::Acquire) == crate::park::NOTIFIED;
+		let full = !notified && !self.futex_armed && self.shared.ring.borrow_mut().submission().is_full();
 		if full {
 			self.shared.metrics.sq_full_enters.add(1);
 		}
 		// A notified turn will not park. Otherwise its SQEs can ride the
 		// parked enter, unless the futex wait would have no slot left.
-		if full || self.shared.unpark.word.load(Ordering::Acquire) == crate::park::NOTIFIED {
+		if notified || full {
 			self.submit()?;
 		}
 		self.reap(None)
@@ -787,6 +788,28 @@ mod tests {
 		assert_eq!(snapshot.sqes.sum, u64::from(SQ_ENTRIES));
 		assert_eq!(snapshot.sqes.count(), snapshot.enters);
 		assert_eq!(snapshot.cqes.count(), snapshot.enters);
+	}
+
+	#[test]
+	fn an_armed_futex_carries_a_full_queue_in_the_parked_enter() {
+		let Some(mut worker) = worker() else { return };
+		let mut timer = worker.handle().timer();
+		timer.set(Some(Instant::now()));
+		worker.maybe_park().expect("arm futex");
+		assert!(worker.futex_armed);
+		let before = worker.handle().metrics().snapshot();
+		for _ in 0..SQ_ENTRIES {
+			let key = worker.shared.insert(Op::Cancel);
+			worker
+				.shared
+				.push(&opcode::Nop::new().build().user_data(key))
+				.expect("stage NOP");
+		}
+		worker.pump().expect("full pump");
+		worker.maybe_park().expect("park with armed futex");
+		let after = worker.handle().metrics().snapshot();
+		assert_eq!(after.enters - before.enters, 1);
+		assert_eq!(after.sq_full_enters - before.sq_full_enters, 0);
 	}
 
 	#[test]
