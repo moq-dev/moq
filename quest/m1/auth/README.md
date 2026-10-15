@@ -26,10 +26,10 @@ Decisions settled while planning, recorded so review does not relitigate them:
 - **Per-request boundary (2026-10-12).** Request tokens are an experimental
   Rust interoperability hook with application-owned verification, retaining
   renewal. They are not a complete authentication scheme or a relay feature.
-  Local session permission may admit an incoming request; grants received
-  from the peer may not. The shared acceptor queue distinguishes session and
-  request events with separate acceptance handles. This is an intentional
-  Rust API change, not an optional scope field on the existing acceptor.
+  Local session permission may admit an incoming request without a token,
+  but a token on a request is always verified; grants received from the peer
+  never admit one. Request tokens arrive on their own opt-in `scoped()` queue
+  beside the unchanged session-token `requests()` (revised on #5148).
   Per-request relay integration, JS APIs, CLI, and bindings are deferred;
   session AUTH work continues. Document the hook only in minimal API comments,
   with no feature page or guide. The relay request-lease quest is related

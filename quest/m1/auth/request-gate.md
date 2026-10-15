@@ -23,9 +23,10 @@ Decisions settled while planning (2026-10-09):
   was rejected because it loses those graceful refusals.
 - **Rust and JS together**, so the shape and names stay mirrored.
 - **Effective authorization.** Land after request-token support. Dispatch
-  uses independently verified local session permission first, then the
-  admitted request grant; peer-issued AUTH_OK grants cannot authorize incoming
-  requests. Preserve
+  admits a request carrying a token by its verified request grant, even when
+  local session permission covers it, and a request without one by local
+  session permission (revised on #5148); peer-issued AUTH_OK grants cannot
+  authorize incoming requests. Preserve
   renewal, revocation, expiry and the session ceiling. Do not reject a valid
   token-only request merely because it is outside the session union. Joining
   FETCH follows the named subscription's live authorization and ends with

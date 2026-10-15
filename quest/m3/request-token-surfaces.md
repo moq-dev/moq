@@ -15,9 +15,8 @@ Rust interoperability hook. The JS setter and accept-side queue, a
 `moq --request-token` flag, and a moq-ffi setter wait for a consumer. Start
 by asking that consumer which surface it needs. Do not build all three.
 
-Mirror Rust: `set_request_token` (with `None` to stop presenting one) on the
-connection's auth handle, and an opt-in `scoped()` queue for verification.
-Through moq-ffi, follow the session AUTH shape that
+Mirror the Rust API that #5148 ships, its names and its opt-in verification
+included, rather than designing a new shape per surface. Through moq-ffi, follow the session AUTH shape that
 [Bindings](/quest/m1/auth/bindings.md) settles. Update every wrapper, as the
 cross-package table requires. A CLI flag keeps the token out of logs and
 `Debug`, like Rust's. moq-lite cannot carry a token. Fail loud there, as
