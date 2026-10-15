@@ -3,8 +3,9 @@
 ## Goal
 
 Replacing the request token renews all of a session's token-backed
-PUBLISH_NAMESPACE advertisements concurrently. The last namespace is renewed
-about one round trip after the refresh, not one round trip per namespace. The
+PUBLISH_NAMESPACE advertisements concurrently, as far as the peer's request-ID
+credit allows. With enough credit, the last namespace is renewed about one
+round trip after the refresh, not one round trip per namespace. The
 session's other announce work does not stall behind the renewals. A
 benchmark swept over namespaces and sessions shows the refresh cost growing
 only with the namespaces touched.
@@ -39,9 +40,13 @@ Keep the contracts #5148 settled:
 Benchmark in `rs/moq-net/benches` (`auth.rs` or `announce.rs`). Sweep live
 token-backed namespaces against sessions sharing an origin. A refresh's cost
 should grow with the namespaces it renews, not with the other sessions'.
-Test on mocked time: with many advertisements and a fixed peer round trip,
-every renewal answer arrives within about one round trip of the refresh,
-and an announcement made during a refresh goes out without waiting for it.
+Tests on mocked time with a fixed peer round trip:
+
+- When the peer grants request-ID credit for every live advertisement, every
+  renewal answer arrives within about one round trip of the refresh.
+- When credit is short, renewals stay within it and go out in allocation
+  order. Later ones start only as credit returns, and none bypasses the limit.
+- An announcement made during a refresh goes out without waiting for it.
 
 Public API: none. Wire: none, only the timing of the existing updates.
 

@@ -4,10 +4,12 @@
 
 Publishing a release that changes a package named in
 `test/interop/compat/planned-breaks.json` no longer turns the scheduled
-Interop job red. As part of the release, the maintainer runs
-`just test wire-compat` against the versions just published. Each planned
-break is then re-pinned with a fresh measurement, or deleted because it no
-longer fails. No entry is ever re-pinned without being re-measured.
+Interop job red. As part of the release, the maintainer re-measures the
+released wire compatibility against the versions just published, with
+planned breaks run rather than skipped. Each planned break is then re-pinned
+with a fresh measurement, or deleted because it no longer fails. No entry is
+ever re-pinned without being re-measured. Scheduled runs keep skipping
+planned breaks as they do today.
 
 ## Plan
 
@@ -24,7 +26,9 @@ undocumented step. Make it one command and part of the release procedure.
 - Give the harness a re-measure mode. It runs every cell, planned breaks
   included, and reports per entry whether it still fails and which cells do.
   It also reports an entry that no longer fails, so an obsolete break is
-  deleted rather than carried. Today a skip hides that.
+  deleted rather than carried. Today `just test wire-compat` always skips
+  the cells a planned break covers, so running it as-is at a release
+  measures nothing about the breaks.
 - Have the stale-entry error name that command, so the next person it hits
   knows the fix.
 - Add the step to `CONTRIBUTING.md`'s Releases section, after publication.
