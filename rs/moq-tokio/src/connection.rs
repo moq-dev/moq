@@ -906,7 +906,7 @@ impl Connection {
 						if let Some(mut old) = draining.take() {
 							old.retire();
 						}
-						draining = Some(Draining::new(session, goaway.handover(msg.timeout()), &shared.state));
+						draining = Some(Draining::new(session, goaway.handover(msg.timeout()), shared));
 						// After the predecessor is published, so a close woken by this
 						// status finds it and honors its handover deadline.
 						shared.migrating();
@@ -1317,14 +1317,17 @@ struct Draining {
 	deadline: std::pin::Pin<Box<tokio::time::Sleep>>,
 	/// Mirrors the session into [`State::predecessor`] for as long as this lives.
 	state: kio::Producer<State>,
+	/// Renews the session's token-authorized requests for as long as this lives.
+	request_token: RequestToken,
 }
 
 impl Draining {
-	fn new(session: moq_net::Session, handover: Duration, state: &kio::Producer<State>) -> Self {
+	fn new(session: moq_net::Session, handover: Duration, shared: &Shared) -> Self {
 		let deadline = Box::pin(tokio::time::sleep(handover));
-		if let Ok(mut state) = state.write() {
+		if let Ok(mut state) = shared.state.write() {
 			state.predecessor = Some((session.clone(), deadline.deadline()));
 		}
+		shared.request_token.drain();
 		let closed = {
 			let session = session.clone();
 			Box::pin(async move {
@@ -1336,7 +1339,8 @@ impl Draining {
 			session,
 			closed,
 			deadline,
-			state: state.clone(),
+			state: shared.state.clone(),
+			request_token: shared.request_token.clone(),
 		}
 	}
 
@@ -1365,6 +1369,7 @@ impl Drop for Draining {
 		if let Ok(mut state) = self.state.write() {
 			state.predecessor = None;
 		}
+		self.request_token.drained();
 	}
 }
 

@@ -83,28 +83,22 @@ struct Presenting {
 	token: Option<moq_net::setup::Token>,
 	/// The newest session, which a renewal reaches; `None` while nothing is live.
 	session: Option<Box<dyn Present>>,
-	/// Sessions a newer one replaced that still serve their requests through a GOAWAY
-	/// drain, which a renewal reaches too until they end.
-	draining: Vec<Box<dyn Present>>,
+	/// The session a GOAWAY migration replaced, still serving its requests until the
+	/// connection retires it, which a renewal reaches too.
+	draining: Option<Box<dyn Present>>,
 }
 
-/// Where a request token is presented: a session.
+/// Where a request token is presented: a session's auth handle, which never keeps the
+/// session itself alive.
 pub(crate) trait Present: Send {
 	/// Present `token` on this session's requests from now on (or none), or refuse it when
 	/// the session cannot carry one (moq-lite).
 	fn present(&self, token: Option<moq_net::setup::Token>) -> Result<(), moq_net::Error>;
-
-	/// Whether the session has ended, so nothing it serves needs the token any more.
-	fn ended(&self) -> bool;
 }
 
-impl Present for moq_net::Session {
+impl Present for auth::Handle {
 	fn present(&self, token: Option<moq_net::setup::Token>) -> Result<(), moq_net::Error> {
-		self.auth().set_request_token(token)
-	}
-
-	fn ended(&self) -> bool {
-		self.closed().now_or_never().is_some()
+		self.set_request_token(token)
 	}
 }
 
@@ -113,12 +107,12 @@ impl RequestToken {
 		Self(std::sync::Arc::new(std::sync::Mutex::new(Presenting {
 			token,
 			session: None,
-			draining: Vec::new(),
+			draining: None,
 		})))
 	}
 
-	/// Replace the token, on the newest session and the draining ones too, and seed every
-	/// later session with it.
+	/// Replace the token, on the newest session and a draining one too, and seed every later
+	/// session with it.
 	///
 	/// Errors when the newest session cannot carry it, keeping the token set before: one the
 	/// live session refused would only fail the next reconnect for good. A draining session
@@ -128,8 +122,7 @@ impl RequestToken {
 		if let Some(session) = &presenting.session {
 			session.present(token.clone())?;
 		}
-		presenting.draining.retain(|session| !session.ended());
-		for session in &presenting.draining {
+		if let Some(session) = &presenting.draining {
 			let _ = session.present(token.clone());
 		}
 		presenting.token = token;
@@ -137,7 +130,7 @@ impl RequestToken {
 	}
 
 	/// Seed `session` with the current token and make it the newest session later renewals
-	/// reach, the one it replaces draining until it ends.
+	/// reach.
 	///
 	/// Errors when the session cannot carry the token set, which leaves it unattached.
 	#[cfg_attr(
@@ -155,19 +148,31 @@ impl RequestToken {
 		if presenting.token.is_some() {
 			session.present(presenting.token.clone())?;
 		}
-		let presenting = &mut *presenting;
-		presenting.draining.retain(|session| !session.ended());
-		presenting
-			.draining
-			.extend(presenting.session.replace(Box::new(session)));
+		presenting.session = Some(Box::new(session));
 		Ok(())
 	}
 
-	/// Stop reaching the newest session once nothing is live; renewals then reach only what
-	/// still drains, and the seed.
+	/// Stop reaching the newest session once nothing is live; renewals then reach only one
+	/// still draining, and the seed.
 	pub(crate) fn detach(&self) {
 		// Also runs from `Shared`'s drop, so take a poisoned lock rather than panic while unwinding.
 		self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).session = None;
+	}
+
+	/// Keep renewing the newest session while a GOAWAY migration drains it, until
+	/// [`drained`](Self::drained).
+	pub(crate) fn drain(&self) {
+		let mut presenting = self.0.lock().unwrap();
+		presenting.draining = presenting.session.take();
+	}
+
+	/// Stop reaching the session [`drain`](Self::drain) kept, once the connection retires it.
+	pub(crate) fn drained(&self) {
+		// Runs from `Draining`'s drop, so take a poisoned lock rather than panic while unwinding.
+		self.0
+			.lock()
+			.unwrap_or_else(std::sync::PoisonError::into_inner)
+			.draining = None;
 	}
 }
 
@@ -464,10 +469,6 @@ mod request_token_tests {
 			self.presented.lock().unwrap().push(token);
 			Ok(())
 		}
-
-		fn ended(&self) -> bool {
-			false
-		}
 	}
 
 	/// Park the first present `write` makes on another thread, then race `renew` against it,
@@ -516,17 +517,12 @@ mod request_token_tests {
 				None => Ok(()),
 			}
 		}
-
-		fn ended(&self) -> bool {
-			false
-		}
 	}
 
-	/// A session double that records every token it is presented, ended once `ended` is set.
+	/// A session double that records every token it is presented.
 	#[derive(Clone, Default)]
 	struct Records {
 		presented: std::sync::Arc<std::sync::Mutex<Vec<Option<moq_net::setup::Token>>>>,
-		ended: std::sync::Arc<std::sync::atomic::AtomicBool>,
 	}
 
 	impl Records {
@@ -539,10 +535,6 @@ mod request_token_tests {
 		fn present(&self, token: Option<moq_net::setup::Token>) -> Result<(), moq_net::Error> {
 			self.presented.lock().unwrap().push(token);
 			Ok(())
-		}
-
-		fn ended(&self) -> bool {
-			self.ended.load(std::sync::atomic::Ordering::Relaxed)
 		}
 	}
 
@@ -576,27 +568,36 @@ mod request_token_tests {
 	}
 
 	/// A session replaced by a GOAWAY migration still serves its requests while it drains, so
-	/// a renewal reaches it too until it ends, and the newest session either way.
+	/// a renewal reaches it too until the connection retires it, and the newest session either
+	/// way.
 	#[test]
-	fn a_renewal_reaches_a_draining_session_until_it_ends() {
+	fn a_renewal_reaches_a_draining_session_until_it_retires() {
 		let (a, b) = (tok(b"token-a"), tok(b"token-b"));
 		let token = RequestToken::new(Some(a.clone()));
 		let old = Records::default();
 		let new = Records::default();
 		token.attach(old.clone()).unwrap();
-		token.attach(new.clone()).unwrap();
+		token.drain();
 		token.set(Some(b.clone())).unwrap();
 		assert_eq!(
 			old.presented(),
 			[Some(a.clone()), Some(b.clone())],
-			"the draining session renews"
+			"renewed between sessions"
 		);
-		assert_eq!(new.presented(), [Some(a.clone()), Some(b.clone())]);
 
-		old.ended.store(true, std::sync::atomic::Ordering::Relaxed);
+		token.attach(new.clone()).unwrap();
 		token.set(Some(a.clone())).unwrap();
-		assert_eq!(old.presented().len(), 2, "an ended session is presented nothing more");
-		assert_eq!(new.presented(), [Some(a.clone()), Some(b), Some(a)]);
+		assert_eq!(
+			old.presented(),
+			[Some(a.clone()), Some(b.clone()), Some(a.clone())],
+			"renewed while draining"
+		);
+		assert_eq!(new.presented(), [Some(b.clone()), Some(a.clone())]);
+
+		token.drained();
+		token.set(Some(b.clone())).unwrap();
+		assert_eq!(old.presented().len(), 3, "a retired session is presented nothing more");
+		assert_eq!(new.presented(), [Some(b.clone()), Some(a), Some(b)]);
 	}
 
 	/// A reconnect seeding its new session cannot replay the token it read over a renewal that
