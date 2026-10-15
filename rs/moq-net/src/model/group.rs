@@ -1497,8 +1497,8 @@ pub struct Consumer {
 	// clean end into `Error::Old` on the next poll, and a caller is allowed to probe
 	// again after the end.
 	ended: bool,
-	// A replacement copy was adopted and has not yet returned a frame. Its ordinals
-	// match this group's only while its Object IDs do.
+	// A replacement copy was adopted and has not yet returned a frame that matches. Its
+	// ordinals match this group's only while its Object IDs do.
 	adopted: bool,
 	// Cloned cursors are parallel views of one handed-out delivery. Whichever
 	// observes expiry first records its unread tail; the others must not repeat it.
@@ -1677,8 +1677,12 @@ impl Consumer {
 			let failed = match &res {
 				Poll::Ready(Ok(Some(_))) => {
 					// The old copy was dense through this frame, so the replacement must be too.
-					if std::mem::take(&mut self.adopted) && self.cursor.state.read().sparse() {
-						return Poll::Ready(Err(Error::Unsupported));
+					// The refusal stays: a batch that already holds frames swallows one error.
+					if self.adopted {
+						if self.cursor.state.read().sparse() {
+							return Poll::Ready(Err(Error::Unsupported));
+						}
+						self.adopted = false;
 					}
 					return res;
 				}
