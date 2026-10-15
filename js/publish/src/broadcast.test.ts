@@ -518,6 +518,29 @@ test("a minted track name skips a removed rendition's track", async () => {
 	broadcast.close();
 });
 
+// A minted name belongs to its rendition's media, so registering it as an ID fails loud.
+test("registering a replacement track's name throws", async () => {
+	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("owned.hang") });
+	const video = broadcast.video("video");
+	video.config.set(videoConfig);
+	await settle();
+	video.config.set({ ...videoConfig, codec: "vp8" });
+	await settle();
+	video.config.set({ ...videoConfig, codec: "vp9" });
+	await settle();
+	expect((await readCatalog(broadcast))?.video?.renditions.video?.track).toBe("video/2");
+
+	// Both the current replacement and a retired one stay owned.
+	expect(() => broadcast.video("video/2")).toThrow("replacement track");
+	expect(() => broadcast.video("video/1")).toThrow("replacement track");
+	// A sibling still registers and serves.
+	broadcast.audio("audio").config.set(audioConfig);
+	await settle();
+	expect((await readCatalog(broadcast))?.audio?.renditions.audio?.codec).toBe("opus");
+
+	broadcast.close();
+});
+
 // The served identity is a snapshot, so a producer mutating a container it shares can't rewrite it.
 test("mutating a shared container still takes a fresh track name", async () => {
 	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("shared.hang") });

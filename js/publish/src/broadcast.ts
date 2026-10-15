@@ -155,6 +155,11 @@ export class Broadcast {
 		if (previous !== undefined && previous !== kind) {
 			throw new Error(`rendition ${name} was registered as ${previous}, not ${kind}`);
 		}
+		// A replacement track holds or held the name, so another rendition's media owns it.
+		const replaced = this.#served?.has(name) && !this.#kinds.has(name);
+		if (replaced || Object.values(this.#names.peek()).includes(name)) {
+			throw new Error(`rendition ${name} names another rendition's replacement track`);
+		}
 
 		const track = new Signal<Moq.Track.Producer | undefined>(undefined);
 		this.#tracks.set(name, track);
