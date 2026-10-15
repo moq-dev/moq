@@ -2910,8 +2910,22 @@ where
 				.await;
 
 				match end {
-					// The newest token goes out once nothing holds it back, below.
-					End::Renew(token) => last_token = token,
+					// The newest token goes out once nothing holds it back, below. A renewal still
+					// waiting for its request ID takes the newest instead, or is dropped when the
+					// token was cleared or set back to the one presented: no ID is taken yet, so
+					// a superseded token never reaches the wire.
+					End::Renew(token) => {
+						last_token = token;
+						if sending.is_some() {
+							match last_token.is_some() && last_token != presented {
+								true => sending = last_token.clone(),
+								false => {
+									sending = None;
+									credit.set(futures::future::Fuse::terminated());
+								}
+							}
+						}
+					}
 					// The outstanding renewal was answered, so a replacement coalesced behind it
 					// may go out.
 					End::Answered => in_flight = None,
@@ -8756,6 +8770,79 @@ mod tests {
 			"the revocation waited for the credit wait to give up: {ended:?}"
 		);
 		assert_eq!(occurrences(&log, &second), 0, "the token never went out");
+	}
+
+	/// A token replaced or cleared while its renewal waits for a request ID never reaches the
+	/// wire: the renewal carries the newest token, or is dropped once the token is cleared.
+	#[moq_net_sim::test]
+	async fn a_superseded_renewal_never_goes_out() {
+		const VERSION: Version = Version::Draft14;
+		let first = bytes::Bytes::from_static(&[0x03, 0x00, b'a', b'a']);
+		let stale = bytes::Bytes::from_static(&[0x03, 0x00, b'b', b'b']);
+		let newest = bytes::Bytes::from_static(&[0x03, 0x00, b'c', b'c']);
+		let cleared = bytes::Bytes::from_static(&[0x03, 0x00, b'd', b'd']);
+		let session = crate::lite::test_transport::ScriptedSession::new(subscribe_ok_bytes(VERSION).await);
+		let log = session.log.clone();
+		// Credit for the SUBSCRIBE and its joining FETCH, none for a renewal.
+		let (mut subscriber, _auth, token, _task_set) =
+			renewal_subscriber(VERSION, session, Control::new(Some(RequestId(4)), false), &first);
+		let control = subscriber.control.clone();
+
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let track = consumer.track("video").unwrap();
+		let _subscription = track.subscribe(None);
+		let request = dynamic.requested_track().await.expect("no track requested");
+		let mut run = std::pin::pin!(subscriber.run_subscribe(Path::new("room/x"), dynamic, request));
+		for _ in 0..200 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, &first) >= 1 {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(occurrences(&log, &first), 1, "the initial token rides the SUBSCRIBE");
+
+		// Replaced while waiting for credit: only the newest goes out once credit arrives.
+		token.set(Some(typed(&stale)));
+		for _ in 0..20 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			settle().await;
+		}
+		token.set(Some(typed(&newest)));
+		for _ in 0..20 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			settle().await;
+		}
+		control.max_request_id(RequestId(6));
+		for _ in 0..50 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, &newest) >= 1 {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(occurrences(&log, &newest), 1, "the newest token goes out");
+		assert_eq!(occurrences(&log, &stale), 0, "the superseded token never does");
+
+		// Cleared while waiting for credit: nothing goes out once credit arrives.
+		token.set(Some(typed(&cleared)));
+		for _ in 0..20 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			settle().await;
+		}
+		token.set(None);
+		for _ in 0..20 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			settle().await;
+		}
+		control.max_request_id(RequestId(8));
+		for _ in 0..50 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			settle().await;
+		}
+		assert_eq!(occurrences(&log, &cleared), 0, "a cleared token never goes out");
 	}
 	/// A replaced token that cannot be presented, for want of request ID credit, ends the
 	/// subscription instead of leaving it on the old grant with no retry.
