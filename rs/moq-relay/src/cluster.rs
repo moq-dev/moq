@@ -3163,7 +3163,7 @@ mod tests {
 			while let Some(request) = listener.accept().await {
 				let conn = crate::Connection::new(request, accept.clone(), crate::auth::Auth::refuse("test"));
 				tokio::spawn(async move {
-					let _ = conn.run().await;
+					conn.run().await;
 				});
 			}
 		});

@@ -63,7 +63,7 @@ impl Fixture {
 			while let Some(request) = server.accept().await {
 				let connection = Connection::new(request, cluster.clone(), auth.clone());
 				serving.spawn(async move {
-					let _ = connection.run().await;
+					connection.run().await;
 				});
 			}
 		});

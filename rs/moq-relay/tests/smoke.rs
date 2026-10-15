@@ -259,11 +259,16 @@ impl tracing_subscriber::fmt::MakeWriter<'_> for Logs {
 /// a QUIC one, so the interop harness can pair its `conn{id=N}` span with that close.
 #[tokio::test]
 async fn relay_websocket_logs_its_close_under_a_cluster_id() {
+	use tracing_subscriber::layer::SubscriberExt;
+
 	let logs = Logs::default();
+	// Only the connection target, as the interop harness keeps, so the span and its close
+	// must both log there.
 	let subscriber = tracing_subscriber::fmt()
 		.with_ansi(false)
 		.with_writer(logs.clone())
-		.finish();
+		.finish()
+		.with(tracing_subscriber::filter::Targets::new().with_target("moq_relay::connection", tracing::Level::INFO));
 	// Thread-local, which covers the relay: the test's current-thread runtime runs its tasks.
 	let _logging = tracing::subscriber::set_default(subscriber);
 
@@ -704,7 +709,7 @@ async fn spawn_accept_relay(
 				.with_shutdown(moq_relay::shutdown::Observer::disabled());
 			id += 1;
 			tokio::spawn(async move {
-				let _ = conn.run().await;
+				conn.run().await;
 			});
 		}
 	});

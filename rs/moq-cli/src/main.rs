@@ -250,11 +250,13 @@ fn spawn_serve(tasks: &mut JoinSet<anyhow::Result<()>>, mut listener: moq_tokio:
 			let serving = serving.clone();
 			sessions.spawn(async move {
 				let result = if serving.lan && moq_relay::cluster::Cluster::is_lan_path(request.path()) {
+					// Logs its own close.
 					moq_relay::Connection::new(request, serving.cluster.clone(), serving.auth.clone())
 						.with_id(serving.cluster.next_connection_id())
 						.with_shutdown(serving.shutdown.clone())
 						.run()
-						.await
+						.await;
+					return;
 				} else if serving.lan && !is_public_transport(request.transport(), serving.public_quic) {
 					tracing::debug!(path = %request.path(), "refusing a non-peer request on the LAN mesh listener");
 					request.reject(moq_tokio::server::Reject::App(404)).await.ok();
