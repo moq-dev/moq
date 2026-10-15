@@ -528,10 +528,6 @@ impl Relay {
 			..
 		} = self;
 
-		// Before anything serves or reports ready: until a handler is installed the
-		// default action kills the process, cutting off sessions without a GOAWAY.
-		let mut signals = signals.then(Signals::new).transpose()?;
-
 		let web_routes = web_routes.unwrap_or_else(|| web.routes());
 		let internal_routes = internal_routes.unwrap_or_else(|| internal.routes());
 
@@ -548,6 +544,13 @@ impl Relay {
 		// relay that is about to exit.
 		let started = cluster.clone().start().await.context("cluster failed to start")?;
 
+		// After the checks that only fail: tokio never uninstalls a handler, so an
+		// embedder recovering from one would lose the signals' default action.
+		// Before anything serves, io_uring workers included (the first serves while
+		// the rest start): until then a signal kills the process, cutting off
+		// sessions without a GOAWAY.
+		let signals = signals.then(Signals::new).transpose()?;
+
 		// Before the readiness notify, for the same reason the cluster starts
 		// before it: an unsupported kernel, a refused ring, or a certificate
 		// certificate identity noq will not load fails here, and reporting ready first would
@@ -561,8 +564,9 @@ impl Relay {
 				.context("failed to start the io_uring QUIC workers")?;
 		}
 
-		// The drain below still runs, and exits once nothing is left.
-		if stop_requested(&shutdown_trigger, &shutdown, &mut signals) {
+		// An embedder that started the drain during startup is never told the relay
+		// is ready. The drain below still runs, and exits once nothing is left.
+		if shutdown.deadline().is_some() {
 			tracing::info!("shutdown requested during startup; not reporting ready");
 		} else {
 			ready.send_replace(true);
@@ -702,20 +706,6 @@ impl Relay {
 	}
 }
 
-/// Whether a stop arrived while starting, so readiness is skipped: the embedder's
-/// trigger, or a queued signal, which starts the drain. A signal queued after the
-/// trigger is left for the drain, where it is the second request.
-fn stop_requested(trigger: &shutdown::Trigger, shutdown: &shutdown::Observer, signals: &mut Option<Signals>) -> bool {
-	if shutdown.deadline().is_some() {
-		return true;
-	}
-	if futures::FutureExt::now_or_never(Signals::recv_some(signals)).is_some() {
-		trigger.start();
-		return true;
-	}
-	false
-}
-
 /// Two-stage shutdown: the first signal, or an embedder firing
 /// [`shutdown::Trigger::start`], starts the drain broadcast (every session sends
 /// GOAWAY and waits for its peer to leave). Returns from [`Relay::run`] once
@@ -728,8 +718,8 @@ async fn drain(
 	mut signals: Option<Signals>,
 ) -> anyhow::Result<()> {
 	let window = shutdown.drain_timeout;
-	// Biased: once the drain has started (startup consumed a queued signal, or
-	// the embedder fired the trigger), any signal left is the second one.
+	// Biased: once the embedder has started the drain, a signal is the second
+	// request.
 	tokio::select! {
 		biased;
 		_ = shutdown.started() => tracing::info!(?window, "shutdown requested; draining sessions"),
@@ -913,19 +903,17 @@ mod tests {
 		draining.await.unwrap().unwrap();
 	}
 
-	/// A signal still queued once the drain has started (startup consumed the
-	/// first of two) is the second one, so the drain exits at once instead of
-	/// waiting out an open admission. Repeated because an unbiased wait would
-	/// take either arm.
+	/// A signal queued after the embedder already started the drain is the second
+	/// request, so the drain exits at once instead of waiting out an open
+	/// admission. Repeated because an unbiased first wait would take either arm.
 	#[cfg(unix)]
 	#[tokio::test(start_paused = true)]
-	async fn a_signal_left_after_startup_exits_at_once() {
+	async fn a_signal_after_an_early_trigger_exits_at_once() {
 		let _signals = SIGNALS.lock().await;
 		for _ in 0..32 {
 			let (trigger, shutdown) = crate::shutdown::Observer::new(std::time::Duration::from_secs(10));
 			let _session = shutdown.activity.enter().expect("admission open before the drain");
 			let signals = super::Signals::new().unwrap();
-			// What the startup gate does with the first queued signal.
 			trigger.start();
 			let mut delivered = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
 			// SAFETY: raise has no memory-safety preconditions.
@@ -938,33 +926,9 @@ mod tests {
 			assert_eq!(
 				started.elapsed(),
 				std::time::Duration::ZERO,
-				"the second signal waited for the drain"
+				"the signal after the trigger waited for the drain"
 			);
 		}
-	}
-
-	/// A signal queued after the embedder already started the drain is the second
-	/// request, so `run` exits at once instead of waiting out an open admission.
-	#[cfg(unix)]
-	#[tokio::test(start_paused = true)]
-	async fn a_signal_after_an_early_trigger_exits_at_once() {
-		let _signals = SIGNALS.lock().await;
-		let (trigger, shutdown) = crate::shutdown::Observer::new(std::time::Duration::from_secs(10));
-		let _session = shutdown.activity.enter().expect("admission open before the drain");
-		let mut signals = Some(super::Signals::new().unwrap());
-		trigger.start();
-		let mut delivered = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
-		// SAFETY: raise has no memory-safety preconditions.
-		assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0);
-		delivered.recv().await;
-		assert!(super::stop_requested(&trigger, &shutdown, &mut signals));
-		let started = tokio::time::Instant::now();
-		super::drain(trigger, shutdown, signals).await.unwrap();
-		assert_eq!(
-			started.elapsed(),
-			std::time::Duration::ZERO,
-			"the signal after the trigger waited for the drain"
-		);
 	}
 
 	/// A stop requested before startup finishes is never reported as ready, and
