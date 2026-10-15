@@ -143,10 +143,10 @@ if its first credential expired earlier, after its attached grants stop. Each
 attached JWT counts against its own `--limit-token` cap until the connection
 ends. The initial credential remains responsible for the connection's stats tier.
 Certificate sessions cannot renew a certificate in band, and public rules
-cannot verify a presented token; both refuse it as unsupported. The relay does
-not verify a moq-transport `AUTHORIZATION TOKEN` on a `SUBSCRIBE` or
-`PUBLISH_NAMESPACE` either, so it refuses that request as unsupported, even one
-the connection's grant covers; send the credential at connect time instead. A burst of
+cannot verify a presented token; both refuse it as unsupported. A moq-transport
+`AUTHORIZATION TOKEN` on a `SUBSCRIBE` or `PUBLISH_NAMESPACE` is verified the
+same way on any draft, but its grant authorizes only that request and ends with
+it; it never joins the union. A burst of
 tokens past the session's pending-verification bound is refused. On moq-lite, an
 auth server that cannot answer, by timeout or outage, refuses a token as a
 transient error, and `Connection::auth()` presents it again on its reconnect

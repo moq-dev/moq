@@ -14,6 +14,12 @@
 //! [`authorize`](Handle::authorize) re-authorizes the peer on a live session, narrower
 //! or wider, on every version, whether or not it speaks AUTH.
 //!
+//! Every token the peer presents is one kind of [`Request`], answered on the same queue,
+//! wherever it rode: its own AUTH stream, or a moq-transport `AUTHORIZATION TOKEN` on a
+//! SUBSCRIBE or PUBLISH_NAMESPACE. The session enforces each grant it issues. A request
+//! that carried a token is held to that token's grant alone and ends with it; any other
+//! request is held to the session's scope, which a token carried by a request never joins.
+//!
 //! moq-transport draft-17+ carries the same exchange when both sides negotiate the
 //! MoQ Auth extension. Older versions, and peers that do not negotiate it, carry no
 //! AUTH exchange: there the grant stays `None` and `add` fails with
@@ -22,8 +28,7 @@
 //! union of subtrees rather than widen it.
 
 use std::{
-	collections::{BTreeMap, HashMap, VecDeque},
-	sync::{Arc, Mutex},
+	collections::{BTreeMap, VecDeque},
 	task::Poll,
 };
 
@@ -119,8 +124,6 @@ fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
 pub(crate) struct State {
 	/// Whether the negotiated version carries AUTH at all.
 	supported: bool,
-	/// The session speaks moq-lite, whose requests carry no token.
-	lite: bool,
 	/// Set once the session ends; every waiter resolves with it.
 	closed: Option<Error>,
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
@@ -133,16 +136,22 @@ pub(crate) struct State {
 	union: Option<Grant>,
 	/// The peer replied to some token, so the union is known even when empty.
 	replied: bool,
-	/// The most this side lets the peer do, in the peer's terms: `None` (only the
-	/// origin handles bound it) until [`Handle::authorize`] sets it; the grant it was
+	/// What the peer's connection credential lets it do, in the peer's terms: `None` (only
+	/// the origin handles bound it) until [`Handle::authorize`] sets it; the grant it was
 	/// last called with.
 	limit: Option<Grant>,
-	/// Bumped whenever the union or the limit changes, so the session's per-stream
+	/// The grants the application issued to the peer's AUTH tokens, by stream, in the
+	/// peer's terms. A token on a single request never joins them.
+	issued: BTreeMap<u64, Grant>,
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	next_issue: u64,
+	/// The session's scope for the peer: the limit and every issued grant, `None` while the
+	/// limit is.
+	scope: Option<Grant>,
+	/// Bumped whenever the union or the scope changes, so the session's per-stream
 	/// gates can skip re-matching paths on every wakeup.
 	epoch: u64,
 	acceptor: Acceptor,
-	/// The application's queue of the peer's request tokens, once it took [`Handle::scoped`].
-	verifier: Option<Pending<Scoped>>,
 }
 
 /// One presented token.
@@ -171,7 +180,7 @@ enum Acceptor {
 	Undecided,
 	/// The app answers every token.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	App(Pending<Request>),
+	App(Pending),
 	/// The session answers from its own origin handles.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	Default,
@@ -193,25 +202,40 @@ impl State {
 		}
 	}
 
+	/// Re-derive the scope from the limit and the issued grants.
+	fn rescope(&mut self) {
+		let scope = self.limit.as_ref().map(|limit| {
+			let mut scope = limit.clone();
+			for grant in self.issued.values() {
+				scope.union(grant);
+			}
+			scope
+		});
+		if self.scope != scope {
+			self.scope = scope;
+			self.epoch += 1;
+		}
+	}
+
 	/// The error handed to anything waiting on a session that has ended.
 	fn closed(&self) -> Option<Error> {
 		self.closed.clone()
 	}
 
-	/// The union's and the limit's patterns for `direction`, each `None` while
+	/// The union's and the scope's patterns for `direction`, each `None` while
 	/// unrestricted.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	fn parts(&self, direction: Direction) -> (Option<&Patterns>, Option<&Patterns>) {
-		// The peer's grant names what we may do; the limit names what the peer may,
+		// The peer's grant names what we may do; the scope names what the peer may,
 		// so what we send is what the peer may subscribe to, and the other way around.
 		match direction {
 			Direction::Publish => (
 				self.union.as_ref().map(|union| &union.publish),
-				self.limit.as_ref().map(|limit| &limit.subscribe),
+				self.scope.as_ref().map(|scope| &scope.subscribe),
 			),
 			Direction::Subscribe => (
 				self.union.as_ref().map(|union| &union.subscribe),
-				self.limit.as_ref().map(|limit| &limit.publish),
+				self.scope.as_ref().map(|scope| &scope.publish),
 			),
 		}
 	}
@@ -276,114 +300,12 @@ impl Permit {
 	}
 }
 
-/// The `AUTHORIZATION TOKEN` this side presents on its own SUBSCRIBE and PUBLISH_NAMESPACE
-/// requests (MoQ request-token), shared between a session's [`Handle`] and its driver.
-///
-/// The session reads the current value when it first sends a request, and re-presents a
-/// changed one on each live request as a REQUEST_UPDATE. The default presents no token,
-/// which is byte-identical to a session that never sets one.
-#[derive(Clone, Default)]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
-pub(crate) struct RequestToken {
-	token: kio::Shared<Option<crate::setup::Token>>,
-	/// Broadcasts whose live advertisement presented the token, counted per advertisement.
-	/// They keep standing on it after it is cleared, so grant enforcement leaves them be.
-	backed: Arc<Mutex<HashMap<crate::PathOwned, usize>>>,
-}
-
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
-impl RequestToken {
-	/// A credential presenting `token` (or none) until replaced.
-	#[cfg(test)]
-	pub(crate) fn new(token: Option<crate::setup::Token>) -> Self {
-		Self {
-			token: kio::Shared::new(token),
-			backed: Default::default(),
-		}
-	}
-
-	/// The token an advertisement of `path` presents now, with a guard marking `path` as backed
-	/// by it until dropped. Read under the token's lock, so a concurrent clear sees either no
-	/// token sent or the path already backed.
-	pub(crate) fn present(&self, path: &crate::PathOwned) -> (Option<crate::setup::Token>, Option<Backing>) {
-		let token = self.token.read();
-		let backing = token.is_some().then(|| self.back(path.clone()));
-		((*token).clone(), backing)
-	}
-
-	/// Mark `path` as backed by the token, such as after an accepted renewal.
-	pub(crate) fn back(&self, path: crate::PathOwned) -> Backing {
-		*self
-			.backed
-			.lock()
-			.unwrap_or_else(|e| e.into_inner())
-			.entry(path.clone())
-			.or_default() += 1;
-		Backing {
-			backed: self.backed.clone(),
-			path,
-		}
-	}
-
-	/// Whether a live advertisement of `path` presented the token.
-	pub(crate) fn backs(&self, path: &crate::PathOwned) -> bool {
-		self.backed.lock().unwrap_or_else(|e| e.into_inner()).contains_key(path)
-	}
-
-	/// Replace the token presented on this session's requests. A live request re-presents
-	/// it as a REQUEST_UPDATE on its next turn; setting the same value again is a no-op.
-	pub(crate) fn set(&self, token: Option<crate::setup::Token>) {
-		*self.token.lock() = token;
-	}
-
-	/// The token to present right now, read when a request is first sent.
-	pub(crate) fn peek(&self) -> Option<crate::setup::Token> {
-		self.token.read().clone()
-	}
-
-	/// Ready with the current token once it differs from `last`, registering `waiter`
-	/// otherwise. The send loops park here to re-present a replaced token on their live
-	/// requests; it reads without advancing `last`, so a poll that loses its turn to
-	/// another arm is re-offered the change rather than dropping it.
-	pub(crate) fn poll_changed(
-		&self,
-		last: &Option<crate::setup::Token>,
-		waiter: &kio::Waiter,
-	) -> Poll<Option<crate::setup::Token>> {
-		let guard = ready_or!(self.token.poll(waiter, |cur| match **cur == *last {
-			true => Poll::Pending,
-			false => Poll::Ready(()),
-		}));
-		Poll::Ready((*guard).clone())
-	}
-}
-
-/// One advertisement standing on the request token it presented; dropping it ends that.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
-pub(crate) struct Backing {
-	backed: Arc<Mutex<HashMap<crate::PathOwned, usize>>>,
-	path: crate::PathOwned,
-}
-
-impl Drop for Backing {
-	fn drop(&mut self) {
-		let mut backed = self.backed.lock().unwrap_or_else(|e| e.into_inner());
-		if let Some(count) = backed.get_mut(&self.path) {
-			*count -= 1;
-			if *count == 0 {
-				backed.remove(&self.path);
-			}
-		}
-	}
-}
-
 /// The session's auth handle, returned by `Session::auth`.
 ///
 /// Cheap to clone; every clone shares the session's tokens.
 #[derive(Clone)]
 pub struct Handle {
 	state: kio::Shared<State>,
-	request_token: RequestToken,
 }
 
 impl Handle {
@@ -395,51 +317,7 @@ impl Handle {
 				supported,
 				..Default::default()
 			}),
-			request_token: RequestToken::default(),
 		}
-	}
-
-	/// Present `token` as the `AUTHORIZATION TOKEN` on this side's own SUBSCRIBE and
-	/// PUBLISH_NAMESPACE requests (MoQ request-token), or stop presenting one with `None`.
-	/// Unlike `add`, which presents a credential for the whole session, the
-	/// peer verifies this one per request. Experimental.
-	///
-	/// Set it before running the session's driver to present it on the first request.
-	/// Replacing it later re-presents the new token on every live request that carried one,
-	/// as a REQUEST_UPDATE renewing it in place; a request sent without one stays without.
-	/// Setting the same value again sends nothing. A subscription whose renewal cannot be
-	/// sent ends. Only drafts 14 and 15 cannot renew an advertisement, which has no update
-	/// there, so it keeps the token it was offered with. `None` sends nothing either: live
-	/// requests keep the token they last presented, and later ones carry none.
-	/// Independent of the MoQ Auth extension.
-	///
-	/// While a token is set, this side stops closing the session over a broadcast its own
-	/// grant does not cover, since each announce carries the token for the peer to verify.
-	/// Clearing it resumes that check for broadcasts announced afterwards.
-	///
-	/// # Errors
-	///
-	/// [`Error::Unsupported`] for a token on a moq-lite session, whose requests cannot carry
-	/// one, rather than drop it.
-	pub fn set_request_token(&self, token: Option<crate::setup::Token>) -> Result<()> {
-		if token.is_some() && self.state.read().lite {
-			return Err(Error::Unsupported);
-		}
-		self.request_token.set(token);
-		Ok(())
-	}
-
-	/// The session speaks moq-lite, so [`set_request_token`](Self::set_request_token) and
-	/// [`scoped`](Self::scoped) refuse.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn lite(&self) {
-		self.state.lock().lite = true;
-	}
-
-	/// The request-token cell the session's publisher and subscriber present from.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn request_token(&self) -> RequestToken {
-		self.request_token.clone()
 	}
 
 	/// Whether this side speaks AUTH: false on a version without it, on a side that does
@@ -502,14 +380,15 @@ impl Handle {
 		})
 	}
 
-	/// Answer every session token the peer presents, instead of the default acceptor.
-	/// A token on one of the peer's requests goes to [`scoped`](Self::scoped) instead.
+	/// Answer every token the peer presents, instead of the default acceptor: on its own
+	/// AUTH stream, or riding one of its moq-transport SUBSCRIBE or PUBLISH_NAMESPACE
+	/// requests as an `AUTHORIZATION TOKEN`.
 	///
 	/// Call it before running the session's driver: whoever answers is decided
 	/// once, on the driver's first poll, so a later call cannot take over tokens
 	/// already in flight. Without it the session grants the peer what its own
 	/// origin handles allow for the connection's credential, and refuses any other
-	/// token as unsupported.
+	/// token as unsupported, along with the request that carried it.
 	///
 	/// At most 128 unanswered tokens queue, not counting withdrawn ones; more are
 	/// refused with [`SessionError::TooManyRequests`] (`UNAUTHORIZED` on moq-transport,
@@ -519,90 +398,48 @@ impl Handle {
 	///
 	/// [`Error::Duplicate`] if the requests were already taken, or the driver
 	/// already started answering them itself.
-	pub fn requests(&self) -> Result<Requests<Request>> {
+	pub fn requests(&self) -> Result<Requests> {
 		let mut state = self.state.lock();
 		if !matches!(state.acceptor, Acceptor::Undecided) {
-			return Err(Error::Duplicate);
-		}
-		let queue = Pending::default();
-		// A version without AUTH never receives a token, so its requests end with
-		// the session like any other.
-		if !state.supported {
-			queue.close();
-		}
-		state.acceptor = Acceptor::App(queue.clone());
-		Ok(Requests { queue })
-	}
-
-	/// Verify the `AUTHORIZATION TOKEN` on each of the peer's SUBSCRIBE and PUBLISH_NAMESPACE
-	/// requests, even one [`authorize`](Self::authorize) covers. Experimental.
-	///
-	/// Each token decides its request alone, with a grant that never joins the session's.
-	/// Without this, a request carrying one is refused as unsupported, and a session never
-	/// authorized admits every request without reading its token. A request or update
-	/// carrying more than one token is refused as unsupported. Take it before running the
-	/// session's driver, so no request is admitted before it. Independent of the MoQ Auth
-	/// extension, since the token rides the request itself.
-	///
-	/// At most 128 unanswered tokens queue, not counting withdrawn requests; more are
-	/// refused with [`SessionError::TooManyRequests`].
-	///
-	/// # Errors
-	///
-	/// [`Error::Duplicate`] if already taken, or [`Error::Unsupported`] on moq-lite, whose
-	/// requests carry no token.
-	pub fn scoped(&self) -> Result<Requests<Scoped>> {
-		let mut state = self.state.lock();
-		if state.lite {
-			return Err(Error::Unsupported);
-		}
-		if state.verifier.is_some() {
 			return Err(Error::Duplicate);
 		}
 		let queue = Pending::default();
 		if state.closed.is_some() {
 			queue.close();
 		}
-		state.verifier = Some(queue.clone());
+		state.acceptor = Acceptor::App(queue.clone());
 		Ok(Requests { queue })
 	}
 
-	/// Ask the application to verify a token that rode on one request.
+	/// Ask the acceptor to verify a token that rode on one of the peer's requests.
 	///
-	/// The token reaches it through [`scoped`](Self::scoped). The grant it answers covers only
-	/// this request, never joins the session union, and ends when the returned
-	/// [`RequestVerdict`] is dropped. Without a verifier the token cannot be verified, so the
-	/// verdict is [`Error::Unsupported`]. `hold` is the request's slot, kept while the
-	/// application verifies the token.
+	/// The token reaches it through [`requests`](Self::requests) like any other. The grant it
+	/// answers covers only this request, never joins the session's scope, and ends when the
+	/// returned [`RequestVerdict`] is dropped. Without an application acceptor, or for a token
+	/// type other than [`Token::OUT_OF_BAND`](crate::setup::Token::OUT_OF_BAND), which an AUTH
+	/// token cannot name, the verdict is [`Error::Unsupported`]. `hold` is the request's slot,
+	/// kept while the application verifies the token.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn verify_request(
-		&self,
-		token: crate::setup::Token,
-		path: crate::PathOwned,
-		kind: RequestKind,
-		hold: Option<Hold>,
-	) -> RequestVerdict {
-		let Some(queue) = self.state.read().verifier.clone() else {
+	pub(crate) fn verify_request(&self, token: crate::setup::Token, hold: Option<Hold>) -> RequestVerdict {
+		let Some(queue) = self.acceptor() else {
 			return RequestVerdict { issue: None };
 		};
+		if token.kind != crate::setup::Token::OUT_OF_BAND {
+			return RequestVerdict { issue: None };
+		}
 		let issue = kio::Shared::new(Issue {
 			hold,
 			..Default::default()
 		});
 		// A closed or full queue refuses the token.
-		queue.push(Scoped {
-			token,
-			path,
-			kind,
-			issue: Some(issue.clone()),
-		});
+		queue.push(Request::new(token.value.into(), issue.clone()));
 		RequestVerdict { issue: Some(issue) }
 	}
 
 	/// Decide who answers the peer's tokens: the app if it took the requests,
 	/// otherwise the session itself (`None`). Idempotent.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn acceptor(&self) -> Option<Pending<Request>> {
+	pub(crate) fn acceptor(&self) -> Option<Pending> {
 		let mut state = self.state.lock();
 		match &state.acceptor {
 			Acceptor::App(queue) => Some(queue.clone()),
@@ -711,30 +548,46 @@ impl Handle {
 		Poll::Ready(())
 	}
 
-	/// Authorize the peer for `grant` on this session, in the session's own paths.
-	/// Calling it again re-authorizes, narrower or wider, replacing the last grant. The
-	/// session's origin handles still bound it, so it never grants more than they allow.
+	/// Authorize the peer's connection credential for `grant` on this session, in the
+	/// session's own paths. Calling it again re-authorizes, narrower or wider, replacing the
+	/// last grant. The session's origin handles still bound it, so it never grants more than
+	/// they allow.
 	///
-	/// A request that carries its own token is decided by that token, inside it or not,
-	/// through [`scoped`](Self::scoped), or refused as unsupported when nothing verifies them.
+	/// The session's scope for the peer is this grant and every grant issued to one of its
+	/// AUTH tokens through [`requests`](Self::requests); a session never authorized is bound
+	/// only by its origin handles. A request that carries its own token is decided by that
+	/// token instead, inside the scope or not.
 	///
-	/// A narrower grant ends what falls outside at once, with [`Error::Unauthorized`]
+	/// A narrower scope ends what falls outside at once, with [`Error::Unauthorized`]
 	/// where it has a reader: announcements to the peer retract, its new requests are
 	/// refused, its subscriptions reset, and the broadcasts it published abort. A wider
-	/// one brings back what the old grant held back: announcements to the peer are made
+	/// one brings back what the old scope held back: announcements to the peer are made
 	/// again, and so are the peer's announcements it withheld from the origin, and new
 	/// requests are accepted. The rest of the session carries on. It works on every
 	/// version, since the session enforces it without the peer's help.
 	///
 	/// When the session answers the peer's connection credential itself, the peer is
-	/// told the grant, within what the origin handles allow, `expires` included. An application answering
-	/// tokens through [`requests`](Self::requests) updates its own [`Issued`] grants.
+	/// told the grant, within what the origin handles allow, `expires` included. An
+	/// application answering tokens through [`requests`](Self::requests) updates its own
+	/// [`Issued`] grants.
 	pub fn authorize(&self, grant: &Grant) {
 		let mut state = self.state.lock();
 		if state.limit.as_ref() != Some(grant) {
 			state.limit = Some(grant.clone());
 			state.epoch += 1;
+			state.rescope();
 		}
+	}
+
+	/// Record the grant an application issued to the peer's AUTH token `id`, or forget it with
+	/// `None`, resizing the scope.
+	fn issue(&self, id: u64, grant: Option<Grant>) {
+		let mut state = self.state.lock();
+		match grant {
+			Some(grant) => state.issued.insert(id, grant),
+			None => state.issued.remove(&id),
+		};
+		state.rescope();
 	}
 
 	/// The union once it changed since `epoch` last saw it, advancing `epoch`. It
@@ -779,17 +632,17 @@ impl Handle {
 		self.state.read().allows(direction, path)
 	}
 
-	/// Whether a request token decides the request carrying it, rather than this side's own
-	/// authorization of the peer: the application verifies every token, or the request is
-	/// refused as unsupported without a verifier, even where the limit already covers it. A
-	/// token admitted unread would leave the peer believing it backs a request this side holds
-	/// to its limit. A side that neither limits the peer nor verifies tokens has nothing to
-	/// check one against, and admits as it would without it.
+	/// Whether a request token decides the request carrying it, rather than the session's
+	/// scope: the application verifies every token, or the request is refused as unsupported
+	/// without an acceptor, even where the scope already covers it. A token admitted unread
+	/// would leave the peer believing it backs a request this side holds to its scope. A side
+	/// that neither scopes the peer nor answers tokens has nothing to check one against, and
+	/// admits as it would without it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn token_decides(&self, direction: Direction) -> bool {
 		let state = self.state.read();
-		let (_, limit) = state.parts(direction);
-		limit.is_some() || state.verifier.is_some()
+		let (_, scope) = state.parts(direction);
+		scope.is_some() || matches!(state.acceptor, Acceptor::App(_))
 	}
 
 	/// Whether the peer's grant alone allows `direction` at `path`, allowing everything
@@ -801,17 +654,18 @@ impl Handle {
 		granted.is_none_or(|granted| granted.matches(path))
 	}
 
-	/// Whether the limit alone allows `direction` at `path`: for a route the peer
+	/// Whether the scope alone allows `direction` at `path`: for a route the peer
 	/// offers us, which our own grant does not decide.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn within_limit(&self, direction: Direction, path: &str) -> bool {
 		let state = self.state.read();
-		let (_, limit) = state.parts(direction);
-		limit.is_none_or(|limit| limit.matches(path))
+		let (_, scope) = state.parts(direction);
+		scope.is_none_or(|scope| scope.matches(path))
 	}
 
-	/// The peer turned out not to negotiate AUTH: fail every token as unsupported and
-	/// close the requests, leaving the union unknown.
+	/// The peer turned out not to negotiate AUTH: fail every token we presented as
+	/// unsupported, leaving the union unknown. The peer's tokens can still ride its requests,
+	/// so their queue stays open.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn unsupported(&self) {
 		let mut state = self.state.lock();
@@ -823,10 +677,6 @@ impl Handle {
 		}
 		// Nothing will read a withdrawn slot again.
 		state.tokens.retain(|_, slot| !slot.withdrawn);
-		// Request tokens ride the requests themselves, so their queue stays open.
-		if let Acceptor::App(queue) = &state.acceptor {
-			queue.close();
-		}
 	}
 
 	/// End the session: fail every pending token, end every watch, and close the
@@ -845,10 +695,13 @@ impl Handle {
 			slot.ended.get_or_insert(err.clone());
 		}
 		state.recompute();
-		if let Acceptor::App(queue) = &state.acceptor {
-			queue.close();
-		}
-		if let Some(queue) = &state.verifier {
+		let queue = match &state.acceptor {
+			Acceptor::App(queue) => Some(queue.clone()),
+			_ => None,
+		};
+		// Refusing the queued tokens takes this lock again, to drop them from the scope.
+		drop(state);
+		if let Some(queue) = queue {
 			queue.close();
 		}
 	}
@@ -1004,134 +857,72 @@ impl Watch {
 	}
 }
 
-/// The tokens the peer presents, for an application that answers them itself: session
-/// tokens ([`Request`]) from [`Handle::requests`], and tokens on single requests
-/// ([`Scoped`]) from [`Handle::scoped`].
+/// The tokens the peer presents, for an application that answers them itself.
 ///
-/// Dropping it refuses every later token.
-pub struct Requests<T = Request> {
-	queue: Pending<T>,
+/// Returned by [`Handle::requests`]. Dropping it refuses every later token.
+pub struct Requests {
+	queue: Pending,
 }
 
-impl Requests<Request> {
-	/// Poll for the next session token, or `None` once the session ends.
+impl Requests {
+	/// Poll for the next token, or `None` once the session ends.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<Request>> {
 		self.queue.poll_next(waiter)
 	}
 
-	/// Wait for the next session token the peer presents, or `None` once the session ends.
+	/// Wait for the next token the peer presents, or `None` once the session ends.
 	#[cfg(feature = "async")]
 	pub async fn next(&mut self) -> Option<Request> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 }
 
-impl Requests<Scoped> {
-	/// Poll for the next request token, or `None` once the session ends.
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<Scoped>> {
-		self.queue.poll_next(waiter)
-	}
-
-	/// Wait for the next request token the peer presents, or `None` once the session ends.
-	#[cfg(feature = "async")]
-	pub async fn next(&mut self) -> Option<Scoped> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
-}
-
-impl<T> Drop for Requests<T> {
+impl Drop for Requests {
 	fn drop(&mut self) {
 		self.queue.close();
 	}
 }
 
-/// A token waiting in a [`Pending`] queue for the application's answer.
-pub(crate) trait Queued {
-	/// What the session and the application share about it.
-	fn issue(&self) -> &kio::Shared<Issue>;
-	/// Refuse it without asking the application.
-	fn refuse(self, code: SessionError, reason: &str);
-}
-
-impl Queued for Request {
-	fn issue(&self) -> &kio::Shared<Issue> {
-		self.issue.as_ref().expect("unanswered request")
-	}
-
-	fn refuse(self, code: SessionError, reason: &str) {
-		self.reject(code, reason)
-	}
-}
-
-impl Queued for Scoped {
-	fn issue(&self) -> &kio::Shared<Issue> {
-		self.issue.as_ref().expect("unanswered request")
-	}
-
-	fn refuse(self, code: SessionError, reason: &str) {
-		self.reject(code, reason)
-	}
-}
-
 /// Pending application decisions, bounded independently of transport stream credit.
-pub(crate) struct Pending<T> {
-	state: kio::Shared<PendingState<T>>,
+#[derive(Clone, Default)]
+pub(crate) struct Pending {
+	state: kio::Shared<PendingState>,
 }
 
-impl<T> Clone for Pending<T> {
-	fn clone(&self) -> Self {
-		Self {
-			state: self.state.clone(),
-		}
-	}
-}
-
-impl<T> Default for Pending<T> {
-	fn default() -> Self {
-		Self {
-			state: kio::Shared::new(PendingState {
-				requests: VecDeque::new(),
-				closed: false,
-			}),
-		}
-	}
-}
-
-struct PendingState<T> {
-	requests: VecDeque<T>,
+#[derive(Default)]
+struct PendingState {
+	requests: VecDeque<Request>,
 	closed: bool,
 }
 
-impl<T> Pending<T> {
+impl Pending {
 	fn close(&self) {
 		let mut state = self.state.lock();
 		state.closed = true;
 		state.requests.clear();
 	}
-}
 
-impl<T: Queued> Pending<T> {
 	/// Queue the token for the application, or refuse it when closed or full.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn push(&self, request: T) {
+	pub(crate) fn push(&self, request: Request) {
 		let mut state = self.state.lock();
 		// Dropping the request refuses it as unanswered.
 		if state.closed {
 			return;
 		}
-		// A withdrawn stream must not occupy a slot while the verifier is busy.
+		// A withdrawn token must not occupy a slot while the acceptor is busy.
 		if state.requests.len() >= 128 {
 			state.requests.retain(|request| request.issue().read().peer.is_none());
 		}
 		if state.requests.len() >= 128 {
 			drop(state);
-			request.refuse(SessionError::TooManyRequests, "too many pending tokens");
+			request.reject(SessionError::TooManyRequests, "too many pending tokens");
 			return;
 		}
 		state.requests.push_back(request);
 	}
 
-	fn poll_next(&self, waiter: &kio::Waiter) -> Poll<Option<T>> {
+	fn poll_next(&self, waiter: &kio::Waiter) -> Poll<Option<Request>> {
 		loop {
 			let mut state = std::task::ready!(self.state.poll(waiter, |state| {
 				if state.closed || !state.requests.is_empty() {
@@ -1176,8 +967,33 @@ pub(crate) struct Issue {
 	pub peer: Option<Error>,
 	/// A request token's share of its request's slot, held while the application verifies it.
 	hold: Option<Hold>,
-	/// The application took the request token off the queue.
+	/// The application took the token off the queue.
 	taken: bool,
+	/// An AUTH token's place in the session's scope, which its grant joins. A token that rode
+	/// on a request has none: its grant covers only that request.
+	scoped: Option<(Handle, u64)>,
+}
+
+impl Issue {
+	/// Push a reply, keeping the session's scope in step with the grant an AUTH token holds.
+	/// Called under the issue's lock, so a withdrawal recorded under it is never undone.
+	fn reply(&mut self, reply: Reply) {
+		if let Some((handle, id)) = &self.scoped {
+			match &reply {
+				Reply::Grant(grant) if self.peer.is_none() => handle.issue(*id, Some(grant.clone())),
+				_ => handle.issue(*id, None),
+			}
+		}
+		self.outbox.push_back(reply);
+	}
+
+	/// The application is done with the token: its grant leaves the scope.
+	fn finish(&mut self) {
+		self.done = true;
+		if let Some((handle, id)) = &self.scoped {
+			handle.issue(*id, None);
+		}
+	}
 }
 
 /// A request's slot against the session's cap, shared with the application's verification
@@ -1199,16 +1015,29 @@ impl Serving {
 	/// A fresh stream's shared state, settled by the session `handle` if the task drops.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn new(handle: Handle) -> Self {
+		let id = {
+			let mut state = handle.state.lock();
+			state.next_issue += 1;
+			state.next_issue
+		};
 		Self {
-			issue: kio::Shared::default(),
+			issue: kio::Shared::new(Issue {
+				scoped: Some((handle.clone(), id)),
+				..Default::default()
+			}),
 			handle,
 		}
 	}
 
-	/// Record why the stream ended on the peer's side; the first reason wins.
+	/// Record why the stream ended on the peer's side; the first reason wins. Whatever it
+	/// granted leaves the scope.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn end(&self, err: Error) {
-		self.issue.lock().peer.get_or_insert(err);
+		let mut issue = self.issue.lock();
+		issue.peer.get_or_insert(err);
+		if let Some((handle, id)) = &issue.scoped {
+			handle.issue(*id, None);
+		}
 	}
 }
 
@@ -1219,7 +1048,11 @@ impl Drop for Serving {
 	}
 }
 
-/// A token for the whole session, waiting for an answer.
+/// A token the peer presented, waiting for an answer.
+///
+/// It arrived on its own AUTH stream, or on one of the peer's moq-transport requests. Either
+/// way the grant it earns is enforced by the session: an AUTH token's joins the session's
+/// scope, while one that rode on a request admits only that request, which ends with it.
 ///
 /// Dropping it unanswered refuses the token with [`SessionError::Unauthorized`].
 pub struct Request {
@@ -1236,27 +1069,34 @@ impl Request {
 		}
 	}
 
+	fn issue(&self) -> &kio::Shared<Issue> {
+		self.issue.as_ref().expect("unanswered request")
+	}
+
 	/// The token the peer presented. Empty means the credential its connection
 	/// already carried, or none.
 	pub fn token(&self) -> &Bytes {
 		&self.token
 	}
 
-	/// Wait for the peer to withdraw this unanswered token or close the session.
+	/// Wait for the peer to withdraw this unanswered token, end the request it rode on, or
+	/// close the session.
 	#[cfg(feature = "async")]
 	pub async fn closed(&self) -> Error {
-		closed(self.issue.as_ref().expect("unanswered request")).await
+		closed(self.issue()).await
 	}
 
 	/// Grant the token. The grant holds until the returned [`Issued`] is revoked
-	/// or dropped, or the peer withdraws the token.
+	/// or dropped, or the peer withdraws the token or ends the request it rode on.
 	///
-	/// The session only tells the peer: the origin handles this side serves and
-	/// accepts with are what enforce the grant, and revoking it once `expires`
-	/// passes is the acceptor's job.
+	/// Revoking an AUTH token's grant once `expires` passes is the acceptor's job; a grant
+	/// on a request lapses at `expires` by itself.
 	pub fn accept(mut self, grant: Grant) -> Issued {
 		let issue = self.issue.take().expect("answered once");
-		issue.lock().outbox.push_back(Reply::Grant(grant));
+		let mut locked = issue.lock();
+		locked.reply(Reply::Grant(grant));
+		locked.hold = None;
+		drop(locked);
 		Issued { issue }
 	}
 
@@ -1264,6 +1104,7 @@ impl Request {
 	pub fn reject(mut self, code: SessionError, reason: impl Into<String>) {
 		let issue = self.issue.take().expect("answered once");
 		refuse(&issue, code, reason.into());
+		issue.lock().hold = None;
 	}
 }
 
@@ -1271,6 +1112,7 @@ impl Drop for Request {
 	fn drop(&mut self) {
 		if let Some(issue) = self.issue.take() {
 			refuse(&issue, SessionError::Unauthorized, "unanswered".to_string());
+			issue.lock().hold = None;
 		}
 	}
 }
@@ -1278,15 +1120,15 @@ impl Drop for Request {
 fn refuse(issue: &kio::Shared<Issue>, code: SessionError, reason: String) {
 	let mut issue = issue.lock();
 	if !issue.done {
-		issue.outbox.push_back(Reply::Refuse { code, reason });
-		issue.done = true;
+		issue.reply(Reply::Refuse { code, reason });
+		issue.finish();
 	}
 }
 
 /// Which request a token rode on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum RequestKind {
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
+pub(crate) enum RequestKind {
 	/// A SUBSCRIBE: the peer reads the named track.
 	Subscribe,
 	/// A PUBLISH_NAMESPACE: the peer announces a namespace it will publish under.
@@ -1302,71 +1144,6 @@ impl RequestKind {
 		match self {
 			Self::Subscribe => grant.subscribe.matches(path),
 			Self::PublishNamespace => grant.publish.matches(path),
-		}
-	}
-}
-
-/// A token on one SUBSCRIBE or PUBLISH_NAMESPACE, waiting for an answer. Experimental.
-///
-/// The session asks for every request carrying a token, even one its own authorization of
-/// the peer already covers, and the application verifies the token: carrying one proves nothing. The grant must cover
-/// the request, never joins the session's grant, and ends with the request.
-///
-/// Dropping it unanswered refuses the request with [`SessionError::Unauthorized`].
-pub struct Scoped {
-	token: crate::setup::Token,
-	path: crate::PathOwned,
-	kind: RequestKind,
-	issue: Option<kio::Shared<Issue>>,
-}
-
-impl Scoped {
-	/// The token the request carried.
-	pub fn token(&self) -> &crate::setup::Token {
-		&self.token
-	}
-
-	/// The request's path: the track's namespace, or the namespace announced.
-	pub fn path(&self) -> &crate::Path<'static> {
-		&self.path
-	}
-
-	/// Which request carried the token.
-	pub fn kind(&self) -> RequestKind {
-		self.kind
-	}
-
-	/// Wait for the request to end before an answer, or the session to close.
-	#[cfg(feature = "async")]
-	pub async fn closed(&self) -> Error {
-		closed(self.issue.as_ref().expect("unanswered request")).await
-	}
-
-	/// Admit the request on `grant`, which must cover it. The session enforces the grant on
-	/// that request alone until the returned [`Enforced`] is revoked or dropped, `expires`
-	/// passes, or the request ends.
-	pub fn accept(mut self, grant: Grant) -> Enforced {
-		let issue = self.issue.take().expect("answered once");
-		let mut locked = issue.lock();
-		locked.outbox.push_back(Reply::Grant(grant));
-		locked.hold = None;
-		drop(locked);
-		Enforced { issue }
-	}
-
-	/// Refuse the request with a session error code and a reason for the peer.
-	pub fn reject(mut self, code: SessionError, reason: impl Into<String>) {
-		let issue = self.issue.take().expect("answered once");
-		refuse(&issue, code, reason.into());
-		issue.lock().hold = None;
-	}
-}
-
-impl Drop for Scoped {
-	fn drop(&mut self) {
-		if let Some(issue) = self.issue.take() {
-			refuse(&issue, SessionError::Unauthorized, "unanswered".to_string());
-			issue.lock().hold = None;
 		}
 	}
 }
@@ -1561,7 +1338,7 @@ impl RequestGrant {
 	/// Start verifying a renewal's token, holding the request's slot while it runs.
 	pub(crate) fn verify_renewal(&self, handle: &Handle, token: crate::setup::Token) -> RequestVerdict {
 		let held = self.held();
-		handle.verify_request(token, held.path.clone(), held.kind, held.hold.clone())
+		handle.verify_request(token, held.hold.clone())
 	}
 
 	/// Apply a renewal's verdict, or return the refusal that ends the request.
@@ -1661,16 +1438,20 @@ fn live(clock: &crate::time::Clock, kind: RequestKind, path: &str, grant: &Grant
 	kind.covers(grant, path) && grant.expires.is_none_or(|expires| expires > clock.now())
 }
 
-/// A grant issued to one of the peer's session tokens, which the peer is told. Dropping it
-/// ends the grant.
+/// A grant issued to one of the peer's tokens, which the session enforces. Dropping it
+/// ends the grant: an AUTH token's leaves the scope, and a request's token ends the request.
 pub struct Issued {
 	issue: kio::Shared<Issue>,
 }
 
 impl Issued {
-	/// Replace the grant, such as with a lowered expiry.
+	/// Replace the grant, such as with a lowered expiry. A request's token whose new grant
+	/// no longer covers the request ends it.
 	pub fn update(&self, grant: Grant) {
-		update(&self.issue, grant);
+		let mut issue = self.issue.lock();
+		if !issue.done {
+			issue.reply(Reply::Grant(grant));
+		}
 	}
 
 	/// Revoke the grant with a session error code and a reason for the peer.
@@ -1678,8 +1459,8 @@ impl Issued {
 		refuse(&self.issue, code, reason.into());
 	}
 
-	/// Wait for the peer to withdraw the token ([`Error::Cancel`]), or for its
-	/// stream or the session to end.
+	/// Wait for the peer to withdraw the token ([`Error::Cancel`]), the request it rode on
+	/// to end ([`Error::Cancel`]), or its stream or the session to end.
 	#[cfg(feature = "async")]
 	pub async fn closed(&self) -> Error {
 		closed(&self.issue).await
@@ -1688,45 +1469,7 @@ impl Issued {
 
 impl Drop for Issued {
 	fn drop(&mut self) {
-		self.issue.lock().done = true;
-	}
-}
-
-/// A grant one request holds on the token it carried, enforced by this side and never told
-/// to the peer. Dropping it ends the request.
-pub struct Enforced {
-	issue: kio::Shared<Issue>,
-}
-
-impl Enforced {
-	/// Replace the grant, such as with a lowered expiry. One that no longer covers the
-	/// request ends it.
-	pub fn update(&self, grant: Grant) {
-		update(&self.issue, grant);
-	}
-
-	/// End the request with a session error code and a reason.
-	pub fn revoke(self, code: SessionError, reason: impl Into<String>) {
-		refuse(&self.issue, code, reason.into());
-	}
-
-	/// Wait for the request to end ([`Error::Cancel`]), or for the session to close.
-	#[cfg(feature = "async")]
-	pub async fn closed(&self) -> Error {
-		closed(&self.issue).await
-	}
-}
-
-impl Drop for Enforced {
-	fn drop(&mut self) {
-		self.issue.lock().done = true;
-	}
-}
-
-fn update(issue: &kio::Shared<Issue>, grant: Grant) {
-	let mut issue = issue.lock();
-	if !issue.done {
-		issue.outbox.push_back(Reply::Grant(grant));
+		self.issue.lock().finish();
 	}
 }
 
@@ -1774,12 +1517,10 @@ pub(crate) struct Gate {
 #[derive(Clone, Copy)]
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
 enum Part {
-	/// The peer's grant and the limit both.
+	/// The peer's grant and the scope both.
 	Both,
-	/// The peer's grant alone: a token the peer presented stands in for the limit.
+	/// The peer's grant alone: a token the peer presented stands in for the scope.
 	Granted,
-	/// The limit alone: a token we presented stands in for the peer's grant.
-	Limit,
 }
 
 impl Gate {
@@ -1803,16 +1544,6 @@ impl Gate {
 		}
 	}
 
-	/// A gate on the limit alone, for our request our own token authorized: the peer
-	/// verifies the token, but a narrowed limit still ends the request.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn limit(handle: Handle, path: crate::PathOwned, direction: Direction) -> Self {
-		Self {
-			part: Part::Limit,
-			..Self::new(handle, path, direction)
-		}
-	}
-
 	/// Resolve once the session no longer allows the path. A union that is still
 	/// `None` (no answer yet, or a version without AUTH) and a session never limited
 	/// allow everything.
@@ -1824,7 +1555,6 @@ impl Gate {
 			let allowed = match self.part {
 				Part::Both => permit.matches(path),
 				Part::Granted => permit.granted(path),
-				Part::Limit => permit.within_limit(path),
 			};
 			if !allowed {
 				return Poll::Ready(());
@@ -1944,12 +1674,6 @@ impl Enforce {
 			}
 		}
 	}
-
-	/// Admit one broadcast [`Self::poll`] found uncovered, such as one a request token carries.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn admit(&mut self, path: crate::PathOwned) {
-		self.live.insert(path);
-	}
 }
 
 #[cfg(test)]
@@ -1977,68 +1701,27 @@ mod tests {
 		));
 	}
 
-	/// Request tokens queue apart from session tokens, so a backlog of one never refuses the
-	/// other.
+	/// Request tokens share the session tokens' bound, so a full queue refuses one.
 	#[test]
-	fn request_tokens_are_bounded_apart_from_session_tokens() {
+	fn a_full_queue_refuses_a_request_token() {
 		let handle = Handle::new(true);
 		let _requests = handle.requests().unwrap();
-		let mut scoped = handle.scoped().unwrap();
 		let queue = handle.acceptor().unwrap();
 		for _ in 0..128 {
 			queue.push(Request::new(Bytes::new(), Default::default()));
 		}
 		let token = crate::setup::Token {
-			kind: 0,
+			kind: crate::setup::Token::OUT_OF_BAND,
 			value: b"jwt".to_vec(),
 		};
-		let path = crate::Path::new("room").to_owned();
-		let _verdict = handle.verify_request(token, path, RequestKind::Subscribe, None);
-		assert!(
-			matches!(scoped.poll_next(&kio::Waiter::noop()), Poll::Ready(Some(_))),
-			"a full session queue refused a request token"
-		);
-	}
-
-	/// Only an application that takes [`Handle::scoped`] verifies request tokens, and only once.
-	#[test]
-	fn request_tokens_are_opt_in() {
-		let handle = Handle::new(true);
-		let _requests = handle.requests().unwrap();
-		let path = || crate::Path::new("room").to_owned();
-		let token = || crate::setup::Token {
-			kind: 0,
-			value: b"jwt".to_vec(),
-		};
-		assert!(
-			!handle.token_decides(Direction::Publish),
-			"a session never limited and with no verifier ignores the token"
-		);
-		let verdict = handle.verify_request(token(), path(), RequestKind::Subscribe, None);
+		let verdict = handle.verify_request(token, None);
 		assert!(matches!(
 			verdict.poll_grant(&kio::Waiter::noop()),
 			Poll::Ready(Err(Refusal {
-				error: Error::Unsupported,
+				error: Error::Session(SessionError::TooManyRequests),
 				..
 			}))
 		));
-
-		let _scoped = handle.scoped().unwrap();
-		assert!(matches!(handle.scoped(), Err(Error::Duplicate)));
-		assert!(handle.token_decides(Direction::Publish));
-
-		let limited = Handle::new(true);
-		limited.authorize(&Grant::all());
-		assert!(
-			limited.token_decides(Direction::Publish),
-			"a limit, even one covering everything, leaves the token to decide"
-		);
-
-		let lite = Handle::new(false);
-		lite.lite();
-		assert!(matches!(lite.scoped(), Err(Error::Unsupported)));
-		assert!(matches!(lite.set_request_token(Some(token())), Err(Error::Unsupported)));
-		lite.set_request_token(None).expect("clearing is always allowed");
 	}
 
 	#[test]
@@ -2152,51 +1835,61 @@ mod request_token_tests {
 		crate::Path::new("room/alice").to_owned()
 	}
 
-	/// A request token reaches the app's acceptor tagged with the request it rode on, and
-	/// the grant the app answers is what the verdict resolves to.
+	/// A request token reaches the app's acceptor like any other token, and the grant the
+	/// app answers is what the verdict resolves to.
 	#[moq_net_sim::test]
-	async fn a_request_token_reaches_the_acceptor_with_its_context() {
+	async fn a_request_token_reaches_the_acceptor() {
 		let handle = Handle::new(true);
-		let mut requests = handle.scoped().expect("take the requests");
-		let verdict = handle.verify_request(token(b"jwt", 7), subscribe_path(), RequestKind::Subscribe, None);
+		let mut requests = handle.requests().expect("take the requests");
+		let verdict = handle.verify_request(token(b"jwt", 0), None);
 
 		let request = requests.next().await.expect("a request");
-		assert_eq!(request.token(), &token(b"jwt", 7));
-		assert_eq!(request.path(), &subscribe_path());
-		assert_eq!(request.kind(), RequestKind::Subscribe);
+		assert_eq!(request.token().as_ref(), b"jwt");
 		let _issued = request.accept(Grant::all());
 
 		let grant = verdict.grant().await.expect("granted");
 		assert!(grant.publish.matches("room/alice"));
 	}
 
+	/// An AUTH token has no type, so a request token of any type but out-of-band cannot reach
+	/// the acceptor as one: it is unsupported, never handed over as if it were a plain token.
+	#[moq_net_sim::test]
+	async fn a_typed_request_token_is_unsupported() {
+		let handle = Handle::new(true);
+		let mut requests = handle.requests().unwrap();
+		let verdict = handle.verify_request(token(b"cat", crate::setup::Token::CAT), None);
+		let err = verdict.grant().await.expect_err("a typed token");
+		assert!(matches!(err.error, Error::Unsupported), "{err:?}");
+		assert!(
+			requests.poll_next(&kio::Waiter::noop()).is_pending(),
+			"nothing reached the acceptor"
+		);
+	}
+
 	/// A request-borne token is verified even without the MoQ Auth extension: it rides the
-	/// request message, not the AUTH stream, so `scoped()` hands a live queue on a session
-	/// whose `supported` is false and the acceptor admits it. This is the shape a standard
-	/// moq-transport peer (an encoder or CDN) presents when it does not negotiate the moq-dev
-	/// AUTH extension.
+	/// request message, not the AUTH stream, so `requests()` stays live on a session whose
+	/// `supported` is false, even once the peer turns out not to speak AUTH. This is the shape
+	/// a standard moq-transport peer presents when it does not negotiate the AUTH extension.
 	#[moq_net_sim::test]
 	async fn a_request_token_is_verified_without_the_auth_extension() {
 		let handle = Handle::new(false);
-		let mut requests = handle.scoped().expect("take the requests");
-		for kind in [RequestKind::Subscribe, RequestKind::PublishNamespace] {
-			let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), kind, None);
-			let request = requests.next().await.expect("a request reaches the acceptor");
-			assert_eq!(request.kind(), kind);
-			let _issued = request.accept(Grant::all());
-			assert!(
-				verdict.grant().await.expect("granted").publish.matches("room/alice"),
-				"{kind:?} admitted without the AUTH extension"
-			);
-		}
+		let mut requests = handle.requests().expect("take the requests");
+		handle.unsupported();
+		let verdict = handle.verify_request(token(b"jwt", 0), None);
+		let request = requests.next().await.expect("a request reaches the acceptor");
+		let _issued = request.accept(Grant::all());
+		assert!(
+			verdict.grant().await.expect("granted").publish.matches("room/alice"),
+			"admitted without the AUTH extension"
+		);
 	}
 
-	/// With no `scoped()` consumer, a request token cannot be verified in band, so the verdict
+	/// With no `requests()` consumer, a request token cannot be verified in band, so the verdict
 	/// is Unsupported and the caller refuses the request NOT_SUPPORTED.
 	#[moq_net_sim::test]
 	async fn no_consumer_refuses_a_request_token_as_unsupported() {
 		let handle = Handle::new(true);
-		let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), RequestKind::Subscribe, None);
+		let verdict = handle.verify_request(token(b"jwt", 0), None);
 		let err = verdict.grant().await.expect_err("no verifier");
 		assert!(matches!(err.error, Error::Unsupported), "{err:?}");
 	}
@@ -2206,8 +1899,8 @@ mod request_token_tests {
 	#[moq_net_sim::test]
 	async fn a_refused_request_token_is_unauthorized() {
 		let handle = Handle::new(true);
-		let mut requests = handle.scoped().unwrap();
-		let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), RequestKind::Subscribe, None);
+		let mut requests = handle.requests().unwrap();
+		let verdict = handle.verify_request(token(b"jwt", 0), None);
 		requests.next().await.unwrap().reject(SessionError::Unauthorized, "no");
 		let err = verdict.grant().await.expect_err("refused");
 		assert!(
@@ -2221,15 +1914,15 @@ mod request_token_tests {
 	#[moq_net_sim::test]
 	async fn a_grant_ended_before_admission_is_refused() {
 		let handle = Handle::new(true);
-		let mut requests = handle.scoped().unwrap();
+		let mut requests = handle.requests().unwrap();
 
-		let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), RequestKind::Subscribe, None);
+		let verdict = handle.verify_request(token(b"jwt", 0), None);
 		let issued = requests.next().await.unwrap().accept(Grant::all());
 		issued.revoke(SessionError::Unauthorized, "revoked");
 		let err = verdict.grant().await.expect_err("revoked before admission");
 		assert_eq!(err.reason, "revoked");
 
-		let verdict = handle.verify_request(token(b"jwt", 1), subscribe_path(), RequestKind::Subscribe, None);
+		let verdict = handle.verify_request(token(b"jwt", 0), None);
 		drop(requests.next().await.unwrap().accept(Grant::all()));
 		let err = verdict.grant().await.expect_err("dropped before admission");
 		assert!(
@@ -2237,7 +1930,7 @@ mod request_token_tests {
 			"{err:?}"
 		);
 
-		let verdict = handle.verify_request(token(b"jwt", 2), subscribe_path(), RequestKind::Subscribe, None);
+		let verdict = handle.verify_request(token(b"jwt", 0), None);
 		let issued = requests.next().await.unwrap().accept(Grant::all());
 		issued.update(Grant::default());
 		let grant = verdict.grant().await.expect("still granted");
@@ -2252,8 +1945,8 @@ mod request_token_tests {
 	#[moq_net_sim::test]
 	async fn dropping_the_verdict_ends_the_grant() {
 		let handle = Handle::new(true);
-		let mut requests = handle.scoped().unwrap();
-		let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), RequestKind::Subscribe, None);
+		let mut requests = handle.requests().unwrap();
+		let verdict = handle.verify_request(token(b"jwt", 0), None);
 		let issued = requests.next().await.unwrap().accept(Grant::all());
 		verdict.grant().await.expect("granted");
 		drop(verdict);
@@ -2266,13 +1959,104 @@ mod request_token_tests {
 	#[moq_net_sim::test]
 	async fn a_request_token_never_joins_the_union() {
 		let handle = Handle::new(true);
-		let mut requests = handle.scoped().unwrap();
-		let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), RequestKind::Subscribe, None);
+		let mut requests = handle.requests().unwrap();
+		let verdict = handle.verify_request(token(b"jwt", 0), None);
 		let _issued = requests.next().await.unwrap().accept(Grant::all());
 		verdict.grant().await.expect("granted");
 		// The union only reflects tokens presented on this side (none here), never a
 		// request token the acceptor answered.
 		assert_eq!(handle.grant().peek(), None, "a request token must not widen the union");
+	}
+
+	fn subscribe_only(prefix: &str) -> Grant {
+		Grant {
+			publish: Patterns::new(),
+			subscribe: crate::Pattern::subtree(prefix).unwrap().into(),
+			expires: None,
+		}
+	}
+
+	/// The session's scope for unnamed requests is the connection credential's grant and every
+	/// grant issued to an AUTH token, and nothing a request token earned: a token on one
+	/// request never widens what tokenless requests may do.
+	#[moq_net_sim::test]
+	async fn the_scope_is_session_tokens_only() {
+		let handle = Handle::new(true);
+		let mut requests = handle.requests().unwrap();
+		handle.authorize(&subscribe_only("room/alice"));
+		assert!(!handle.allows(Direction::Publish, "room/bob"));
+
+		// A token on a request admits that request, and nothing else.
+		let verdict = handle.verify_request(token(b"request", 0), None);
+		let _request = requests.next().await.unwrap().accept(subscribe_only("room/bob"));
+		verdict.grant().await.expect("granted");
+		assert!(
+			!handle.allows(Direction::Publish, "room/bob"),
+			"a request token widened the scope"
+		);
+
+		// An AUTH token joins the scope while its grant stands.
+		let serving = Serving::new(handle.clone());
+		requests
+			.queue
+			.push(Request::new(Bytes::from_static(b"auth"), serving.issue.clone()));
+		let issued = requests.next().await.unwrap().accept(subscribe_only("room/carol"));
+		assert!(handle.allows(Direction::Publish, "room/carol"));
+		assert!(
+			handle.allows(Direction::Publish, "room/alice"),
+			"the connection grant still stands"
+		);
+
+		issued.update(subscribe_only("room/dave"));
+		assert!(
+			!handle.allows(Direction::Publish, "room/carol"),
+			"the update replaced it"
+		);
+		assert!(handle.allows(Direction::Publish, "room/dave"));
+
+		// Withdrawn by the peer, the grant leaves the scope, and a late update cannot bring it back.
+		serving.end(Error::Cancel);
+		assert!(!handle.allows(Direction::Publish, "room/dave"));
+		issued.update(subscribe_only("room/dave"));
+		assert!(
+			!handle.allows(Direction::Publish, "room/dave"),
+			"a withdrawn token rejoined the scope"
+		);
+	}
+
+	/// Revoking or dropping an AUTH token's grant takes it out of the scope.
+	#[moq_net_sim::test]
+	async fn an_ended_auth_grant_leaves_the_scope() {
+		let handle = Handle::new(true);
+		let mut requests = handle.requests().unwrap();
+		handle.authorize(&Grant::default());
+		for revoke in [true, false] {
+			let serving = Serving::new(handle.clone());
+			requests
+				.queue
+				.push(Request::new(Bytes::from_static(b"auth"), serving.issue.clone()));
+			let issued = requests.next().await.unwrap().accept(subscribe_only("room"));
+			assert!(handle.allows(Direction::Publish, "room/alice"));
+			match revoke {
+				true => issued.revoke(SessionError::Unauthorized, "revoked"),
+				false => drop(issued),
+			}
+			assert!(!handle.allows(Direction::Publish, "room/alice"), "revoke={revoke}");
+		}
+	}
+
+	/// A session never authorized is bound by its origin handles alone, whatever its AUTH
+	/// tokens were granted: the scope only exists once the connection credential has a grant.
+	#[moq_net_sim::test]
+	async fn an_unauthorized_session_has_no_scope() {
+		let handle = Handle::new(true);
+		let mut requests = handle.requests().unwrap();
+		let serving = Serving::new(handle.clone());
+		requests
+			.queue
+			.push(Request::new(Bytes::from_static(b"auth"), serving.issue.clone()));
+		let _issued = requests.next().await.unwrap().accept(subscribe_only("room"));
+		assert!(handle.allows(Direction::Publish, "other"));
 	}
 
 	use std::time::Duration;
@@ -2290,8 +2074,8 @@ mod request_token_tests {
 	async fn a_request_grant_has_the_acceptors_expiry() {
 		let runtime = crate::time::Clock::sim();
 		let handle = Handle::new(true);
-		let mut requests = handle.scoped().unwrap();
-		let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), RequestKind::Subscribe, None);
+		let mut requests = handle.requests().unwrap();
+		let verdict = handle.verify_request(token(b"jwt", 0), None);
 		let grant = grant_in(&runtime, 60);
 		let expires = grant.expires;
 		let _issued = requests.next().await.unwrap().accept(grant);
@@ -2315,13 +2099,13 @@ mod request_token_tests {
 	async fn an_already_expired_grant_is_refused() {
 		let runtime = crate::time::Clock::sim();
 		let handle = Handle::new(true);
-		let mut requests = handle.scoped().unwrap();
+		let mut requests = handle.requests().unwrap();
 		let expired = || Grant {
 			expires: Some(runtime.now()),
 			..grant_in(&runtime, 0)
 		};
 
-		let verdict = handle.verify_request(token(b"old", 0), subscribe_path(), RequestKind::Subscribe, None);
+		let verdict = handle.verify_request(token(b"old", 0), None);
 		let _issued = requests.next().await.unwrap().accept(expired());
 		let answered = verdict.grant().await;
 		let refused = RequestGrant::new(
@@ -2337,7 +2121,7 @@ mod request_token_tests {
 			"an expired grant admits nothing"
 		);
 
-		let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), RequestKind::Subscribe, None);
+		let verdict = handle.verify_request(token(b"jwt", 0), None);
 		let _issued = requests.next().await.unwrap().accept(grant_in(&runtime, 60));
 		let answered = verdict.grant().await;
 		let request_grant = RequestGrant::new(
@@ -2349,7 +2133,7 @@ mod request_token_tests {
 			None,
 		)
 		.unwrap();
-		let renewal = handle.verify_request(token(b"old2", 0), subscribe_path(), RequestKind::Subscribe, None);
+		let renewal = handle.verify_request(token(b"old2", 0), None);
 		let _issued = requests.next().await.unwrap().accept(expired());
 		let renewed = renewal.grant().await;
 		assert!(
@@ -2363,9 +2147,9 @@ mod request_token_tests {
 	async fn a_renewal_token_replaces_the_grant_and_expiry() {
 		let runtime = crate::time::Clock::sim();
 		let handle = Handle::new(true);
-		let mut requests = handle.scoped().unwrap();
+		let mut requests = handle.requests().unwrap();
 
-		let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), RequestKind::Subscribe, None);
+		let verdict = handle.verify_request(token(b"jwt", 0), None);
 		let first = grant_in(&runtime, 60);
 		let first_expires = first.expires;
 		let _issued = requests.next().await.unwrap().accept(first);
@@ -2381,7 +2165,7 @@ mod request_token_tests {
 		.unwrap();
 
 		// A REQUEST_UPDATE carrying a fresh token the acceptor accepts with a later expiry.
-		let renewal = handle.verify_request(token(b"jwt2", 0), subscribe_path(), RequestKind::Subscribe, None);
+		let renewal = handle.verify_request(token(b"jwt2", 0), None);
 		let second = grant_in(&runtime, 600);
 		let second_expires = second.expires;
 		let _issued2 = requests.next().await.unwrap().accept(second);
@@ -2401,8 +2185,8 @@ mod request_token_tests {
 	async fn the_deadline_ends_the_request_unauthorized_without_renewal() {
 		let runtime = crate::time::Clock::sim();
 		let handle = Handle::new(true);
-		let mut requests = handle.scoped().unwrap();
-		let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), RequestKind::Subscribe, None);
+		let mut requests = handle.requests().unwrap();
+		let verdict = handle.verify_request(token(b"jwt", 0), None);
 		// Held for the request's life, so only the deadline (not a drop) ends it.
 		let _issued = requests.next().await.unwrap().accept(grant_in(&runtime, 60));
 		let answered = verdict.grant().await.unwrap();
@@ -2429,8 +2213,8 @@ mod request_token_tests {
 	async fn a_refused_renewal_leaves_the_grant() {
 		let runtime = crate::time::Clock::sim();
 		let handle = Handle::new(true);
-		let mut requests = handle.scoped().unwrap();
-		let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), RequestKind::Subscribe, None);
+		let mut requests = handle.requests().unwrap();
+		let verdict = handle.verify_request(token(b"jwt", 0), None);
 		let first = grant_in(&runtime, 60);
 		let first_expires = first.expires;
 		let _issued = requests.next().await.unwrap().accept(first);
@@ -2446,7 +2230,7 @@ mod request_token_tests {
 		.unwrap();
 
 		// The renewal token is refused, so it renews nothing and the old grant is untouched.
-		let renewal = handle.verify_request(token(b"bad", 0), subscribe_path(), RequestKind::Subscribe, None);
+		let renewal = handle.verify_request(token(b"bad", 0), None);
 		requests
 			.next()
 			.await
@@ -2475,8 +2259,8 @@ mod request_token_tests {
 	async fn an_update_that_stops_covering_ends_the_request() {
 		let runtime = crate::time::Clock::sim();
 		let handle = Handle::new(true);
-		let mut requests = handle.scoped().unwrap();
-		let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), RequestKind::Subscribe, None);
+		let mut requests = handle.requests().unwrap();
+		let verdict = handle.verify_request(token(b"jwt", 0), None);
 		let issued = requests.next().await.unwrap().accept(Grant::all());
 		let answered = verdict.grant().await.unwrap();
 		let request_grant = RequestGrant::new(
@@ -2531,8 +2315,8 @@ mod request_token_tests {
 	async fn an_acceptor_revoke_ends_the_request() {
 		let runtime = crate::time::Clock::sim();
 		let handle = Handle::new(true);
-		let mut requests = handle.scoped().unwrap();
-		let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), RequestKind::Subscribe, None);
+		let mut requests = handle.requests().unwrap();
+		let verdict = handle.verify_request(token(b"jwt", 0), None);
 		// A grant that never expires, so only the revoke can end the request.
 		let issued = requests.next().await.unwrap().accept(Grant::all());
 		let answered = verdict.grant().await.unwrap();

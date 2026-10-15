@@ -661,8 +661,6 @@ pub struct ScriptedSession {
 	incoming_bidis: Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
 	/// Set by [`Self::with_unacked_fin`].
 	unacked_fin: bool,
-	/// Set by [`Self::with_send_gate`].
-	send_gate: Option<kio::Consumer<bool>>,
 }
 
 impl ScriptedSession {
@@ -683,15 +681,7 @@ impl ScriptedSession {
 			incoming_unis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			incoming_bidis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			unacked_fin: false,
-			send_gate: None,
 		}
-	}
-
-	/// Park writes on every opened stream while `gate` reads false, like a peer that stopped
-	/// reading and left no flow-control credit.
-	pub fn with_send_gate(mut self, gate: kio::Consumer<bool>) -> Self {
-		self.send_gate = Some(gate);
-		self
 	}
 
 	/// Never acknowledge an opened stream's FIN, like a peer that stopped reading.
@@ -824,10 +814,7 @@ impl poll::Session for ScriptedSession {
 			Some(queue) => Arc::new(Mutex::new(queue.lock().unwrap().pop_front().unwrap_or_default())),
 			None => self.script.clone(),
 		};
-		let mut send = match &self.send_gate {
-			Some(gate) => SinkSend::gated(self.log.clone(), gate.clone()),
-			None => SinkSend::new(self.log.clone()),
-		};
+		let mut send = SinkSend::new(self.log.clone());
 		send.unacked_fin = self.unacked_fin;
 		Poll::Ready(Ok((
 			send,

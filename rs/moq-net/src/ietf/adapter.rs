@@ -853,18 +853,7 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 			let raw = encode_raw(type_id, &body, self.version);
 
 			// Classify and route
-			let classified = classify(type_id, &body, self.version, &self.shared.namespaces)?;
-			// An answer to one of our updates names the update, which has no stream of its own,
-			// so it goes to the request the update targets. Only REQUEST_OK and REQUEST_ERROR
-			// answer an update.
-			if matches!(type_id, ietf::RequestOk::ID | ietf::RequestError::ID)
-				&& let Route::Response(id) | Route::CloseStream(id) = classified
-				&& let Some(target) = self.control.follow_up_target(id)
-			{
-				self.shared.push(target, raw);
-				continue;
-			}
-			match classified {
+			match classify(type_id, &body, self.version, &self.shared.namespaces)? {
 				Route::NewRequest(request_id) => {
 					let permit = self.control.accept(request_id)?;
 					self.shared.open_incoming(request_id, raw, permit)?

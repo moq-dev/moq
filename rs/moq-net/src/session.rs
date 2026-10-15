@@ -306,9 +306,6 @@ impl Session {
 		S: crate::transport::poll::Session,
 	{
 		let Handles { goaway, auth, estimate } = handles;
-		if version.is_lite() {
-			auth.lite();
-		}
 		let sample = snapshot(&session);
 		if let Some(estimate) = &estimate
 			&& let Ok(mut current) = estimate.write()

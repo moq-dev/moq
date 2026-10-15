@@ -133,7 +133,6 @@ where
 		early_unis,
 		extensions,
 	} = config;
-	let request_token = auth.request_token();
 
 	// GOAWAY wiring: the public Session holds one half (drain trigger, received
 	// signal), the protocol tasks below hold the other.
@@ -227,8 +226,7 @@ where
 					peer_setup.clone(),
 					version,
 				)
-				.with_auth(auth.clone())
-				.with_request_token(request_token.clone());
+				.with_auth(auth.clone());
 				let (tasks, mut task_set) = TaskSet::new();
 				publisher.withdrawal = withdrawing.clone();
 				publisher.owed = serving.clone();
@@ -248,7 +246,6 @@ where
 					goaway.going_away.clone(),
 				)
 				.with_auth(auth.clone())
-				.with_request_token(request_token.clone())
 				.with_solicit(extensions.solicit);
 				subscriber.announces = announces;
 
@@ -416,11 +413,9 @@ where
 					let auth = auth.clone();
 					let origin = publish.clone();
 					let session = session.clone();
-					let request_token = request_token.clone();
-					let peer_setup = peer_setup.clone();
 					async move {
 						match client {
-							true => enforce_grant(auth, origin, session, request_token, peer_setup, version).await,
+							true => enforce_grant(auth, origin, session).await,
 							false => std::future::pending().await,
 						}
 					}
@@ -434,8 +429,7 @@ where
 					peer_setup.clone(),
 					version,
 				)
-				.with_auth(auth.clone())
-				.with_request_token(request_token.clone());
+				.with_auth(auth.clone());
 				let (tasks, mut task_set) = TaskSet::new();
 				publisher.withdrawal = withdrawing.clone();
 				publisher.owed = serving.clone();
@@ -455,7 +449,6 @@ where
 					goaway.going_away.clone(),
 				)
 				.with_auth(auth.clone())
-				.with_request_token(request_token.clone())
 				.with_solicit(extensions.solicit);
 
 				// Our tokens, one Auth request each, once the peer's SETUP negotiates it.
@@ -1421,31 +1414,11 @@ async fn enforce_grant<S: crate::transport::poll::Session>(
 	auth: crate::auth::Handle,
 	origin: origin::Consumer,
 	mut session: S,
-	request_token: crate::RequestToken,
-	peer_setup: peer::PeerSetup,
-	version: Version,
 ) -> Result<(), Error> {
-	// A request token authorizes an announce outside the connection grant only when the
-	// announce carries it, which is when it rides its own PUBLISH_NAMESPACE request: always on
-	// draft-14/15, and on later drafts unless the peer requires solicitation, which turns every
-	// advertisement into an inline NAMESPACE entry with no token slot. Then the grant still
-	// bounds what we publish. The token can be set or cleared at any time, so it is read when
-	// an uncovered broadcast turns up: one is admitted while a token is set, or once cleared, if
-	// its live advertisement already presented one, since that still stands on it. The
-	// publisher marks that before the first byte, so this cursor lagging behind its own never
-	// mistakes a token-bearing advertisement for an unauthorized one.
 	let mut announced = origin.announced();
 	let mut check = crate::auth::Enforce::default();
-	let path = loop {
-		let Some(path) = kio::wait(|waiter| check.poll(&auth, &mut announced, waiter)).await else {
-			return Ok(());
-		};
-		let set = request_token.peek().is_some() && announces_carry_token(&peer_setup, version).await;
-		if set || request_token.backs(&path) {
-			check.admit(path);
-			continue;
-		}
-		break path;
+	let Some(path) = kio::wait(|waiter| check.poll(&auth, &mut announced, waiter)).await else {
+		return Ok(());
 	};
 	tracing::error!(broadcast = %origin.absolute(&path), "publishing outside our grant; closing the session");
 	let err = Error::Unauthorized;
@@ -1454,16 +1427,6 @@ async fn enforce_grant<S: crate::transport::poll::Session>(
 		&crate::auth::unauthorized_reason(&path),
 	);
 	Err(err)
-}
-
-/// Whether our announces will ride their own PUBLISH_NAMESPACE requests, the only form that
-/// carries a request token, rather than inline NAMESPACE entries. Draft-14/15 predate
-/// NAMESPACE; later drafts send requests unless the peer requires solicitation.
-async fn announces_carry_token(peer_setup: &peer::PeerSetup, version: Version) -> bool {
-	match version {
-		Version::Draft14 | Version::Draft15 => true,
-		_ => !peer_setup.get().await.solicit.unwrap_or(false),
-	}
 }
 
 #[cfg(test)]
@@ -1928,228 +1891,6 @@ mod tests {
 	/// paused in these tests, so each turn costs nothing and only runs the driver until it
 	/// parks again; a busy machine cannot turn a slow announce into a passing silence.
 	const ANNOUNCE_TURNS: usize = 100;
-
-	/// A client that presents a request token authorizes each announce at the server when the
-	/// announce carries the token, so dialing-side grant enforcement stands down for a peer
-	/// that takes unsolicited PUBLISH_NAMESPACE requests: enforcing it would close the client
-	/// for announcing outside the connection grant the token was meant to extend.
-	#[moq_net_sim::test]
-	async fn a_client_may_send_a_token_bearing_request_its_connection_grant_does_not_cover() {
-		let auth = crate::auth::Handle::new(true);
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cam = origin.announce("room/alice", crate::origin::Route::default()).unwrap();
-		let session = crate::lite::test_transport::SinkSession::new(Default::default());
-		let log = session.log.clone();
-		let peer_setup = peer::PeerSetup::default();
-		peer_setup.set(peer::Peer {
-			solicit: Some(false),
-			..Default::default()
-		});
-
-		let mut enforce = std::pin::pin!(enforce_grant(
-			auth,
-			origin.consume(),
-			session,
-			crate::RequestToken::new(Some(crate::setup::Token {
-				kind: 0,
-				value: b"jwt".to_vec(),
-			})),
-			peer_setup,
-			Version::Draft18,
-		));
-		for _ in 0..ANNOUNCE_TURNS {
-			assert!(
-				futures::poll!(enforce.as_mut()).is_pending(),
-				"a token-bearing client must not be closed by grant enforcement"
-			);
-			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
-		}
-		assert!(
-			log.closes().is_empty(),
-			"the session must stay open for a token-bearing client"
-		);
-	}
-
-	/// A request token set after the session started stands enforcement down just the same:
-	/// the announce that follows carries it, so the peer decides, not the connection grant.
-	#[moq_net_sim::test]
-	async fn a_request_token_stands_enforcement_down_until_cleared() {
-		let auth = crate::auth::Handle::new(true);
-		let setup = auth.present(bytes::Bytes::new(), true).unwrap();
-		auth.granted(
-			0,
-			crate::auth::Grant {
-				publish: crate::Pattern::subtree("room/alice").unwrap().into(),
-				subscribe: crate::Patterns::new(),
-				expires: None,
-			},
-		);
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let session = crate::lite::test_transport::SinkSession::new(Default::default());
-		let log = session.log.clone();
-		let peer_setup = peer::PeerSetup::default();
-		peer_setup.set(peer::Peer {
-			solicit: Some(false),
-			..Default::default()
-		});
-		let request_token = crate::RequestToken::new(None);
-
-		let mut enforce = std::pin::pin!(enforce_grant(
-			auth,
-			origin.consume(),
-			session,
-			request_token.clone(),
-			peer_setup,
-			Version::Draft18,
-		));
-		assert!(futures::poll!(enforce.as_mut()).is_pending(), "nothing to enforce yet");
-
-		request_token.set(Some(crate::setup::Token {
-			kind: 0,
-			value: b"jwt".to_vec(),
-		}));
-		let _cam = origin
-			.announce("room/bob/cam", crate::origin::Route::default())
-			.unwrap();
-		for _ in 0..ANNOUNCE_TURNS {
-			assert!(
-				futures::poll!(enforce.as_mut()).is_pending(),
-				"enforcement closed the session"
-			);
-			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
-		}
-		assert!(
-			log.closes().is_empty(),
-			"the session stays open for the token-bearing announce"
-		);
-
-		// Clearing the token leaves that announce standing on it, but the next one outside the
-		// grant carries no token, so the grant decides again.
-		request_token.set(None);
-		for _ in 0..ANNOUNCE_TURNS {
-			assert!(
-				futures::poll!(enforce.as_mut()).is_pending(),
-				"an announce made under the token was rechecked"
-			);
-			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
-		}
-		let _carol = origin
-			.announce("room/carol/cam", crate::origin::Route::default())
-			.unwrap();
-		let result = moq_net_sim::timeout(std::time::Duration::from_secs(1), enforce)
-			.await
-			.expect("clearing the token never resumed enforcement");
-		assert!(matches!(result, Err(Error::Unauthorized)), "{result:?}");
-		assert_eq!(log.closes().len(), 1, "the session closes for the token-less announce");
-		drop(setup);
-	}
-
-	/// The publisher's announce cursor can present the token on a broadcast before this
-	/// cursor reaches it, and the token can be cleared in between: the advertisement still
-	/// stands on the token it carried, so enforcement admits it rather than close the session.
-	#[moq_net_sim::test]
-	async fn a_token_cleared_behind_a_presented_announce_keeps_the_session() {
-		let auth = crate::auth::Handle::new(true);
-		let setup = auth.present(bytes::Bytes::new(), true).unwrap();
-		auth.granted(
-			0,
-			crate::auth::Grant {
-				publish: crate::Pattern::subtree("room/alice").unwrap().into(),
-				subscribe: crate::Patterns::new(),
-				expires: None,
-			},
-		);
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let session = crate::lite::test_transport::SinkSession::new(Default::default());
-		let log = session.log.clone();
-		let peer_setup = peer::PeerSetup::default();
-		peer_setup.set(peer::Peer {
-			solicit: Some(false),
-			..Default::default()
-		});
-		let request_token = crate::RequestToken::new(Some(crate::setup::Token {
-			kind: 0,
-			value: b"jwt".to_vec(),
-		}));
-
-		let mut enforce = std::pin::pin!(enforce_grant(
-			auth,
-			origin.consume(),
-			session,
-			request_token.clone(),
-			peer_setup,
-			Version::Draft18,
-		));
-		assert!(futures::poll!(enforce.as_mut()).is_pending(), "nothing to enforce yet");
-
-		// Between two polls of this loop: the broadcast appears, the publisher advertises it
-		// carrying the token, and the token is cleared.
-		let _bob = origin
-			.announce("room/bob/cam", crate::origin::Route::default())
-			.unwrap();
-		let (presented, backing) = request_token.present(&crate::Path::new("room/bob/cam").to_owned());
-		assert!(
-			presented.is_some() && backing.is_some(),
-			"the advertisement carries the token"
-		);
-		request_token.set(None);
-
-		for _ in 0..ANNOUNCE_TURNS {
-			assert!(
-				futures::poll!(enforce.as_mut()).is_pending(),
-				"enforcement closed over a token-bearing advertisement"
-			);
-			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
-		}
-		assert!(log.closes().is_empty(), "the session stays open");
-		drop(backing);
-		drop(setup);
-	}
-
-	/// When the peer requires solicitation, every advertisement is an inline NAMESPACE entry,
-	/// which has no slot for a request token. A token set for SUBSCRIBE must not let the client
-	/// advertise outside its connection grant there: the grant is still enforced.
-	#[moq_net_sim::test]
-	async fn a_request_token_does_not_lift_the_grant_when_announces_are_inline() {
-		let auth = crate::auth::Handle::new(true);
-		let setup = auth.present(bytes::Bytes::new(), true).unwrap();
-		auth.granted(
-			0,
-			crate::auth::Grant {
-				publish: crate::Pattern::subtree("room/alice").unwrap().into(),
-				subscribe: crate::Patterns::new(),
-				expires: None,
-			},
-		);
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cam = origin
-			.announce("room/bob/cam", crate::origin::Route::default())
-			.unwrap();
-		let session = crate::lite::test_transport::SinkSession::new(Default::default());
-		let log = session.log.clone();
-		let peer_setup = peer::PeerSetup::default();
-		peer_setup.set(peer::Peer {
-			solicit: Some(true),
-			..Default::default()
-		});
-
-		let result = enforce_grant(
-			auth,
-			origin.consume(),
-			session,
-			crate::RequestToken::new(Some(crate::setup::Token {
-				kind: 0,
-				value: b"jwt".to_vec(),
-			})),
-			peer_setup,
-			Version::Draft18,
-		)
-		.await;
-
-		assert!(matches!(result, Err(Error::Unauthorized)), "{result:?}");
-		assert_eq!(log.closes().len(), 1, "the session closes on the uncovered announce");
-		drop(setup);
-	}
 
 	/// Run a publish-only session against a peer that declared `peer_declared`, returning
 	/// how many times the namespace reached the wire.

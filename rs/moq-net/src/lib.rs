@@ -120,8 +120,6 @@ pub mod time;
 pub mod transport;
 
 #[cfg(feature = "async")]
-pub(crate) use auth::RequestToken;
-#[cfg(feature = "async")]
 pub use client::*;
 pub use coding::{BoundsExceeded, DecodeError, EncodeError, varint};
 #[cfg(feature = "async")]

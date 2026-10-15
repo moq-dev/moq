@@ -2,7 +2,6 @@
 
 pub mod auth;
 pub use auth::Auth;
-pub(crate) use auth::RequestToken;
 
 use std::task::{Poll, ready};
 use std::time::Duration;
@@ -502,8 +501,6 @@ struct Shared {
 	send_bw: BandwidthProducer,
 	recv_bw: BandwidthProducer,
 	closed: CloseGuard,
-	/// Attached to each session as its handshake completes, detached once nothing is live.
-	request_token: RequestToken,
 }
 
 impl Shared {
@@ -544,7 +541,7 @@ impl Shared {
 	}
 
 	/// Nothing is live. Clears the session so a handle can't be handed a closed one,
-	/// and drops the estimates and the request-token attachment that belonged to it.
+	/// and drops the estimates that belonged to it.
 	fn disconnected(&self) {
 		if let Ok(mut state) = self.state.write() {
 			// Count one close per live session; a second call without an
@@ -560,7 +557,6 @@ impl Shared {
 		}
 		let _ = self.send_bw.set(None);
 		let _ = self.recv_bw.set(None);
-		self.request_token.detach();
 	}
 
 	/// Record the error the loop gave up with, for [`Connection::closed`].
@@ -676,8 +672,6 @@ pub struct Connection {
 	/// The last status returned by [`status`](Self::status), for change detection.
 	/// Per-clone: a clone starts from its parent's cursor and diverges from there.
 	last_reported: Option<Status>,
-	/// The request token presented across reconnects, which the loop seeds each session from.
-	request_token: RequestToken,
 }
 
 /// The connection loop, shared by every [`Connection`] clone and aborted when the
@@ -713,9 +707,6 @@ impl Connection {
 		let closed: CloseGuard = Default::default();
 		let task_closed = closed.clone();
 
-		let request_token = RequestToken::new(client.request_token.clone());
-		let loop_token = request_token.clone();
-
 		let task = tokio::spawn(async move {
 			let reconnect = client.reconnect;
 			let shared = Shared {
@@ -723,7 +714,6 @@ impl Connection {
 				send_bw,
 				recv_bw,
 				closed: task_closed,
-				request_token: loop_token,
 			};
 			// Isolated inside `shared`, so a panic still records a terminal error
 			// instead of closing the channels as if the caller had stopped it.
@@ -751,7 +741,6 @@ impl Connection {
 			send_bandwidth,
 			recv_bandwidth,
 			last_reported: None,
-			request_token,
 		}
 	}
 
@@ -906,7 +895,7 @@ impl Connection {
 						if let Some(mut old) = draining.take() {
 							old.retire();
 						}
-						draining = Some(Draining::new(session, goaway.handover(msg.timeout()), shared));
+						draining = Some(Draining::new(session, goaway.handover(msg.timeout()), &shared.state));
 						// After the predecessor is published, so a close woken by this
 						// status finds it and honors its handover deadline.
 						shared.migrating();
@@ -1050,7 +1039,7 @@ impl Connection {
 			let url = addr.url();
 			tracing::info!(peer = %Endpoint(url), "connecting");
 
-			let mut dial = std::pin::pin!(client.dial(addr.clone(), &shared.request_token));
+			let mut dial = std::pin::pin!(client.dial(addr.clone()));
 			let dialed = kio::wait(|waiter| {
 				if poll_draining(draining, waiter) {
 					shared.disconnected();
@@ -1235,7 +1224,6 @@ impl Connection {
 		Auth {
 			connection: self.state.clone(),
 			pacing: self.pacing,
-			request: self.request_token.clone(),
 		}
 	}
 
@@ -1317,17 +1305,14 @@ struct Draining {
 	deadline: std::pin::Pin<Box<tokio::time::Sleep>>,
 	/// Mirrors the session into [`State::predecessor`] for as long as this lives.
 	state: kio::Producer<State>,
-	/// Renews the session's token-authorized requests for as long as this lives.
-	request_token: RequestToken,
 }
 
 impl Draining {
-	fn new(session: moq_net::Session, handover: Duration, shared: &Shared) -> Self {
+	fn new(session: moq_net::Session, handover: Duration, state: &kio::Producer<State>) -> Self {
 		let deadline = Box::pin(tokio::time::sleep(handover));
-		if let Ok(mut state) = shared.state.write() {
+		if let Ok(mut state) = state.write() {
 			state.predecessor = Some((session.clone(), deadline.deadline()));
 		}
-		shared.request_token.drain();
 		let closed = {
 			let session = session.clone();
 			Box::pin(async move {
@@ -1339,8 +1324,7 @@ impl Draining {
 			session,
 			closed,
 			deadline,
-			state: shared.state.clone(),
-			request_token: shared.request_token.clone(),
+			state: state.clone(),
 		}
 	}
 
@@ -1369,7 +1353,6 @@ impl Drop for Draining {
 		if let Ok(mut state) = self.state.write() {
 			state.predecessor = None;
 		}
-		self.request_token.drained();
 	}
 }
 
@@ -1997,206 +1980,12 @@ mod tests {
 		config.init(Default::default()).expect("build client")
 	}
 
-	/// A request token of kind 0 carrying `value`.
-	#[cfg(feature = "tcp")]
-	fn tok(value: &[u8]) -> moq_net::setup::Token {
-		moq_net::setup::Token {
-			kind: 0,
-			value: value.to_vec(),
-		}
-	}
-
-	/// The connection owns the request token across the reconnect loop: the dial config seeds
-	/// the cell the loop presents on each (re)connected session, and renewing through
-	/// [`Connection::auth`] updates that same cell, so a renewal survives into the next session.
-	#[cfg(feature = "tcp")]
-	#[tokio::test]
-	async fn the_connection_owns_the_request_token_across_the_loop() {
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-
-		let mut config = crate::connect::Config::default();
-		config.tls.insecure = Some(true);
-		let client = config
-			.with_request_token(tok(b"token-one"))
-			.init(Default::default())
-			.expect("client");
-
-		// A dead address: the loop never connects, but the handle and its cell exist at once.
-		let conn = client.connect(dead().await);
-		assert_eq!(
-			format!("{:?}", conn.request_token),
-			"kind=0 <9 bytes>",
-			"seeded by the config"
-		);
-
-		conn.auth().set_request_token(Some(tok(b"token-three"))).unwrap();
-		assert_eq!(
-			format!("{:?}", conn.request_token),
-			"kind=0 <11 bytes>",
-			"renewing through auth() updates the seed the next session reads"
-		);
-	}
-
-	/// A request token on a moq-lite session fails the connection at once, even with unlimited
-	/// reconnects: the server negotiates moq-lite again, so a retry cannot carry the token.
-	#[cfg(feature = "tcp")]
-	#[tokio::test]
-	async fn a_request_token_on_moq_lite_fails_at_once() {
-		let mut cfg = crate::listen::Config::default();
-		cfg.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
-		cfg.version = vec!["moq-lite-06".parse().unwrap()];
-		let mut listener = cfg
-			.init(Default::default())
-			.expect("server")
-			.listen()
-			.await
-			.expect("listen");
-		let addr = listener.tcp_local_addr().expect("tcp listener bound");
-		tokio::spawn(async move {
-			let mut sessions = Vec::new();
-			while let Some(request) = listener.accept().await {
-				if let Ok(session) = request.ok().await {
-					sessions.push(session);
-				}
-			}
-		});
-
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-		let mut config = crate::connect::Config::default();
-		config.tls.insecure = Some(true);
-		config.backoff.timeout = Some(Duration::ZERO);
-		let client = config
-			.with_request_token(tok(b"token"))
-			.init(Default::default())
-			.expect("client");
-		let connection = client.connect(url(&format!("tcp://{addr}/")));
-		let err = tokio::time::timeout(Duration::from_secs(10), connection.closed())
-			.await
-			.expect("kept retrying a session that cannot carry the token")
-			.expect_err("connected without carrying the token");
-		assert!(matches!(err, Error::MoqNet(moq_net::Error::Unsupported)), "{err}");
-	}
-
-	/// A draft-16 server for the first-request tests: it accepts one session, reports on
-	/// `paused` once the client's SETUP has arrived (the client's handshake then waits on this
-	/// side's reply), holds its SERVER_SETUP until `release` fires, and sends the first
-	/// request-borne token it verifies on the returned receiver.
-	///
-	/// It declines Solicit, so each announce rides its own PUBLISH_NAMESPACE, the request that
-	/// carries a token inline.
-	#[cfg(feature = "tcp")]
-	async fn first_request_token(
-		paused: tokio::sync::oneshot::Sender<()>,
-		release: tokio::sync::oneshot::Receiver<()>,
-	) -> (Url, tokio::sync::oneshot::Receiver<Vec<u8>>) {
-		let mut cfg = crate::listen::Config::default();
-		cfg.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
-		cfg.version = vec!["moq-transport-16".parse().unwrap()];
-		cfg.extensions.solicit = false;
-		let mut listener = cfg
-			.init(Default::default())
-			.expect("server")
-			.listen()
-			.await
-			.expect("listen");
-		let addr = listener.tcp_local_addr().expect("tcp listener bound");
-		let url = url(&format!("tcp://{addr}/"));
-		let (first_tx, first_rx) = tokio::sync::oneshot::channel();
-		tokio::spawn(async move {
-			let request = listener.accept().await.expect("the client dials");
-			let _ = paused.send(());
-			let _ = release.await;
-
-			let request = request.with_subscriber(crate::origin::spawn());
-			let mut requests = request.auth().scoped().expect("request tokens are taken before ok");
-			let _session = request.ok().await.expect("accept");
-			let mut first_tx = Some(first_tx);
-			let mut scoped = Vec::new();
-			while let Some(req) = requests.next().await {
-				if let Some(tx) = first_tx.take() {
-					let _ = tx.send(req.token().value.clone());
-				}
-				scoped.push(req.accept(moq_net::auth::Grant::all()));
-			}
-		});
-		(url, first_rx)
-	}
-
-	/// A draft-16 client presenting `token`, with a broadcast announced before it connects so
-	/// its first PUBLISH_NAMESPACE is pending when the session's driver starts. It declines the
-	/// AUTH extension, so the request token is the only authorizing artifact.
-	#[cfg(feature = "tcp")]
-	fn announcing_client(token: moq_net::setup::Token, url: Url) -> (Connection, moq_net::broadcast::Producer) {
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-		let origin = crate::origin::spawn();
-		let broadcast = origin.create_broadcast("room/alice").expect("broadcast");
-		broadcast.announce(Default::default()).expect("announce");
-
-		let mut cfg = crate::connect::Config::default();
-		cfg.tls.insecure = Some(true);
-		cfg.version = vec!["moq-transport-16".parse().unwrap()];
-		cfg.extensions.auth = false;
-		let client = cfg
-			.with_request_token(token)
-			.init(Default::default())
-			.expect("client")
-			.with_publisher(origin.consume())
-			.with_reconnect(false);
-		(client.connect(url), broadcast)
-	}
-
-	/// The dial config's token reaches the FIRST request on a connected session: the session
-	/// is attached to the connection's token before its driver starts, and nothing re-sets it
-	/// afterwards, so a session started without it would present nothing.
-	#[cfg(feature = "tcp")]
-	#[tokio::test]
-	async fn the_first_request_on_a_connected_session_carries_the_token() {
-		let (paused_tx, _paused) = tokio::sync::oneshot::channel();
-		let (release, release_rx) = tokio::sync::oneshot::channel();
-		let (url, first) = first_request_token(paused_tx, release_rx).await;
-		release.send(()).unwrap();
-
-		let (_conn, _broadcast) = announcing_client(tok(b"a"), url);
-		let first = tokio::time::timeout(Duration::from_secs(10), first)
-			.await
-			.expect("the first request never reached the server")
-			.expect("server ended");
-		assert_eq!(first, b"a", "the first request carries the configured token");
-	}
-
-	/// A token set while the handshake is still pending is the one the first request carries:
-	/// the session is seeded when it is created, not from a snapshot taken before dialing. The
-	/// server holds its SERVER_SETUP until the renewal returns, and draft-16 carries the token
-	/// inline on the first PUBLISH_NAMESPACE.
-	#[cfg(feature = "tcp")]
-	#[tokio::test]
-	async fn a_renewal_during_the_handshake_reaches_the_first_request() {
-		let (paused_tx, paused) = tokio::sync::oneshot::channel();
-		let (release, release_rx) = tokio::sync::oneshot::channel();
-		let (url, first) = first_request_token(paused_tx, release_rx).await;
-
-		let (conn, _broadcast) = announcing_client(tok(b"a"), url);
-		paused.await.expect("the client's SETUP reached the server");
-		conn.auth().set_request_token(Some(tok(b"b"))).unwrap();
-		release.send(()).unwrap();
-
-		let first = tokio::time::timeout(Duration::from_secs(10), first)
-			.await
-			.expect("the first request never reached the server")
-			.expect("server ended");
-		assert_eq!(
-			first, b"b",
-			"the first request carries the renewal, not the dial-time token"
-		);
-	}
-
 	fn shared() -> Shared {
 		Shared {
 			state: kio::Producer::default(),
 			send_bw: BandwidthProducer::new(),
 			recv_bw: BandwidthProducer::new(),
 			closed: CloseGuard::default(),
-			request_token: RequestToken::default(),
 		}
 	}
 

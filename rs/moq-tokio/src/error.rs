@@ -245,10 +245,6 @@ impl Error {
 			| Self::WindowRange(_)
 			| Self::QlogUnsupported
 			| Self::Connect(_) => true,
-			// Something this dial needs the negotiated session cannot do, such as carry a
-			// configured request token on moq-lite. The same peer negotiates the same way
-			// again, so retrying cannot help.
-			Self::MoqNet(moq_net::Error::Unsupported) => true,
 			#[cfg(feature = "noq")]
 			Self::Noq(err) => err.is_terminal(),
 			#[cfg(feature = "websocket")]
@@ -394,12 +390,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(all(test, feature = "websocket"))]
 mod tests {
 	use super::*;
-
-	/// The same peer negotiates the same way again, so a dial it cannot support fails for good.
-	#[test]
-	fn an_unsupported_dial_is_terminal() {
-		assert!(Error::MoqNet(moq_net::Error::Unsupported).is_terminal());
-	}
 
 	#[test]
 	fn a_transport_race_is_terminal_only_when_every_arm_is_terminal() {

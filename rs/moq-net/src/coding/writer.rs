@@ -224,20 +224,10 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 }
 
 impl<S: crate::transport::poll::SendStream> Writer<S, ietf::Version> {
-	/// Encode an IETF `Message` into the write buffer whole, `[type_id][size][body]`, to be sent
-	/// by [`Self::poll_flush`]. An encode error leaves the buffer untouched.
-	pub fn buffer_message<T: ietf::Message>(&mut self, msg: &T) -> Result<(), Error> {
-		let version = self.version;
-		self.buffer_with(|w| {
-			w.varint(T::ID)?;
-			msg.encode(w, version)
-		})
-	}
-
 	/// Encode an IETF `Message` to the stream, writing `[type_id][size][body]`.
 	pub async fn encode_message<T: ietf::Message>(&mut self, msg: &T) -> Result<(), Error> {
-		self.buffer_message(msg)?;
-		std::future::poll_fn(|cx| self.poll_flush(cx)).await
+		self.buffer_varint(T::ID)?;
+		self.encode(msg).await
 	}
 }
 

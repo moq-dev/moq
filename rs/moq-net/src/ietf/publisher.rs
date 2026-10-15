@@ -379,8 +379,6 @@ enum NamespaceEvent {
 	Retry,
 	/// Our grant (MoQ Auth) or the ceiling changed: re-check every namespace against it.
 	Regrant(crate::auth::Permit),
-	/// The client replaced its request token: re-present it on every live announce.
-	TokenRefresh(Option<crate::setup::Token>),
 }
 
 #[derive(Clone)]
@@ -415,10 +413,6 @@ pub(super) struct Publisher<S: crate::transport::poll::Session> {
 	pub(super) subscriptions: crate::session::Slots,
 	// Ranks every subscription's group streams against each other for the transport.
 	priority: PriorityQueue,
-	// The AUTHORIZATION TOKEN this side presents on its PUBLISH_NAMESPACE requests and their
-	// REQUEST_UPDATEs (MoQ request-token). A shared handle so a client can replace it while the
-	// session runs; the default presents none. A client credential.
-	request_token: crate::RequestToken,
 }
 
 struct Serve(Arc<AtomicUsize>);
@@ -493,22 +487,12 @@ where
 			owed: Default::default(),
 			subscriptions: Default::default(),
 			priority: Default::default(),
-			request_token: crate::RequestToken::default(),
 		}
 	}
 
 	/// Bound what we publish by the grant this session's tokens earn (MoQ Auth).
 	pub fn with_auth(mut self, auth: crate::auth::Handle) -> Self {
 		self.auth = auth;
-		self
-	}
-
-	/// Present this request token (the AUTHORIZATION TOKEN parameter value) on the
-	/// PUBLISH_NAMESPACE requests this side sends, and on their REQUEST_UPDATEs, so a client
-	/// authorizes its announces the standard draft-17+ way (MoQ request-token). A shared handle,
-	/// so a replaced token is re-presented on each live announce (draft-17+).
-	pub fn with_request_token(mut self, token: crate::RequestToken) -> Self {
-		self.request_token = token;
 		self
 	}
 
@@ -816,12 +800,7 @@ where
 			// once the limit does too.
 			let (mut gate, request_grant) = match token {
 				Some(token) => {
-					let verdict = self.auth.verify_request(
-						token,
-						msg.track_namespace.to_owned(),
-						crate::auth::RequestKind::Subscribe,
-						Some(slot.clone()),
-					);
+					let verdict = self.auth.verify_request(token, Some(slot.clone()));
 					// The subscriber cancelling or the session closing withdraws the token.
 					let mut session = self.session.clone();
 					let verified = kio::wait(|waiter| {
@@ -2475,19 +2454,7 @@ where
 		suffix: &crate::PathOwned,
 		path: &crate::PathOwned,
 	) -> Result<(), Error> {
-		// A request token authorizes an announce the connection grant does not cover, but only
-		// when the announce carries it: a PUBLISH_NAMESPACE request does, an inline NAMESPACE
-		// entry has no slot for one. So the grant still filters inline entries, and stands down
-		// only for requests, where the server's covers-gate refuses a bad token per request.
-		// The token never stands in for the limit this side set on the peer. A live request that
-		// presented one keeps standing on it after the token is cleared, as the peer still does.
-		let carries_token = matches!(ns.target, Target::Requests(_))
-			&& (self.request_token.peek().is_some()
-				|| ns.requests.get(suffix).is_some_and(|request| request.backing.is_some()));
-		let permitted = match carries_token {
-			true => ns.permit.within_limit(path.as_str()),
-			false => ns.permitted(path),
-		};
+		let permitted = ns.permitted(path);
 		let Namespaces {
 			peer,
 			target,
@@ -2622,9 +2589,6 @@ where
 			return Ok(Refused::No);
 		};
 
-		// Backed from before the first byte, so grant enforcement never sees this advertisement
-		// carry a token it does not know about.
-		let (token, backing) = self.request_token.present(path);
 		request.writer.varint(ietf::PublishNamespace::ID).await?;
 		request
 			.writer
@@ -2632,7 +2596,7 @@ where
 				request_id,
 				track_namespace: path.as_path(),
 				cluster,
-				authorization_token: token.map(crate::ietf::token::RequestToken),
+				authorization_token: None,
 			})
 			.await?;
 
@@ -2683,7 +2647,6 @@ where
 				path: path.clone(),
 				request_id,
 				stream: request,
-				backing,
 			},
 		);
 		Ok(Refused::No)
@@ -2866,136 +2829,6 @@ where
 						suffix: suffix.as_path(),
 					})
 					.await?;
-			}
-		}
-		Ok(())
-	}
-
-	/// Re-present the client's request token on every live announce as a token-only
-	/// REQUEST_UPDATE (MoQ request-token renewal), so a refreshed credential reaches the peer
-	/// before the old grant lapses.
-	///
-	/// Draft-16+ only: earlier drafts have no update for an advertisement, so a token set on
-	/// them rides the initial advertisement and is not renewed in place. Clearing the token (`None`)
-	/// is not a renewal and sends nothing. A refusal withdraws the announce, since the receiver
-	/// closes its stream on a renewal it cannot grant; the retry re-offers it carrying the new
-	/// token, honoring any retry interval the refusal named.
-	async fn refresh_request_token(
-		&self,
-		ns: &mut Namespaces<S>,
-		token: Option<crate::setup::Token>,
-	) -> Result<(), Error> {
-		let Some(token) = token else {
-			return Ok(());
-		};
-		if matches!(self.version, Version::Draft14 | Version::Draft15) {
-			return Ok(());
-		}
-
-		// Only an advertisement that carried a token stands on one: the rest stand on the
-		// connection grant, and a token arriving on them would be refused unread.
-		let suffixes: Vec<crate::PathOwned> = ns
-			.requests
-			.iter()
-			.filter(|(_, request)| request.backing.is_some())
-			.map(|(suffix, _)| suffix.clone())
-			.collect();
-		for suffix in suffixes {
-			let request_id = self.control.next_request_id(&self.runtime).await?;
-			let Some(request) = ns.requests.get_mut(&suffix) else {
-				continue;
-			};
-			// Draft-16 names the advertisement in the update, and its answer names the update,
-			// which the control stream routes back here while this is held.
-			let legacy = self.version == Version::Draft16;
-			let _follow_up = legacy.then(|| self.control.follow_up(request_id, request.request_id));
-			let update = ietf::PublishNamespaceUpdate {
-				request_id,
-				namespace_request_id: legacy.then_some(request.request_id),
-				hops: None,
-				cost: None,
-				authorization_token: Some(crate::ietf::token::RequestToken(token.clone())),
-			};
-			let answer = match request.stream.writer.encode_message(&update).await {
-				Ok(()) => self.read_response(&mut request.stream).await,
-				Err(err) => Err(err),
-			};
-
-			let absolute = self.origin.absolute(&request.path).to_owned();
-			// The old grant can lapse while this waits, and the peer then ends only this
-			// advertisement: by never answering, closing the stream, or (draft-16) sending
-			// PUBLISH_NAMESPACE_CANCEL on it. That drops the advertisement, never the session.
-			let answer = match answer {
-				Ok(Some((type_id, _))) if type_id == ietf::PublishNamespaceCancel::ID && legacy => {
-					tracing::debug!(broadcast = %absolute, "advertisement cancelled during the token refresh");
-					None
-				}
-				Ok(Some(answer)) => Some(answer),
-				Ok(None) => {
-					tracing::debug!(broadcast = %absolute, "no answer to the token refresh");
-					None
-				}
-				// A malformed answer is the peer's violation, not a closed stream, and ends the
-				// session. A stream that ends mid-message reads as Short, which is a closure.
-				Err(err)
-					if super::subscriber::is_protocol_violation(&err)
-						&& !matches!(err, Error::Decode(DecodeError::Short)) =>
-				{
-					return Err(err);
-				}
-				Err(err) => {
-					tracing::debug!(broadcast = %absolute, %err, "advertisement ended during the token refresh");
-					None
-				}
-			};
-			let Some((type_id, body)) = answer else {
-				ns.requests.remove(&suffix);
-				// Forget what was sent so reconcile re-offers it with the new token, and re-arm
-				// the deferred-only retry sweep if an earlier refusal still holds it back.
-				if let Some(watch) = ns.watched.get_mut(&suffix) {
-					watch.sent = Advert::None;
-					watch.deferred = watch.refused.pending();
-				}
-				continue;
-			};
-			let mut data = body.decoder(self.version);
-			match type_id {
-				ietf::RequestOk::ID => {
-					let _ = ietf::RequestOk::decode_msg(&mut data, self.version)?;
-					if !data.is_empty() {
-						return Err(Error::WrongSize);
-					}
-					tracing::debug!(broadcast = %absolute, "request token refreshed");
-					if let Some(request) = ns.requests.get_mut(&suffix) {
-						request
-							.backing
-							.get_or_insert_with(|| self.request_token.back(request.path.clone()));
-					}
-				}
-				ietf::RequestError::ID => {
-					let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
-					if !data.is_empty() {
-						return Err(Error::WrongSize);
-					}
-					// A refused renewal means the receiver closed its stream, so the announce
-					// cannot stand on the old grant: withdraw it and honor the refusal's retry
-					// interval, exactly as a repriced update does. The retry re-offers it fresh,
-					// carrying the new token.
-					tracing::warn!(broadcast = %absolute, message = ?msg, "request token refresh refused");
-					let refused = self.refusal(msg.retry_interval);
-					let deferred = refused.pending();
-					self.withdraw_namespace(&mut ns.target, &mut ns.requests, suffix.clone())
-						.await?;
-					if let Some(watch) = ns.watched.get_mut(&suffix) {
-						watch.refused = refused;
-						watch.sent = Advert::None;
-						// Re-arm the retry sweep (which only revisits deferred namespaces) so a
-						// bounded refusal re-offers this fresh with the new token once its interval
-						// passes; a permanent refusal (Never) is not pending and stays withdrawn.
-						watch.deferred = deferred;
-					}
-				}
-				_ => return Err(Error::UnexpectedMessage),
 			}
 		}
 		Ok(())
@@ -3230,10 +3063,6 @@ where
 			kio::wait(|waiter| self.auth.poll_setup_answered(waiter)).await;
 		}
 		(ns.permit, ns.epoch) = self.permit_now();
-		// The request token presented on these announces, read before the initial set goes
-		// out: a client replacing it mid-way wakes the loop, which re-presents the new one on
-		// each live announce.
-		let mut last_token = self.request_token.peek();
 		for update in initial {
 			self.apply_update(&mut ns, &prefix, update, true).await?;
 		}
@@ -3283,11 +3112,6 @@ where
 							crate::announce::Event::End(update) => (update, false, false),
 						})));
 					}
-					// A replaced request token is re-presented on each live announce, below the
-					// origin updates so a busy loop still makes progress on both.
-					if let Poll::Ready(token) = self.request_token.poll_changed(&last_token, waiter) {
-						return Poll::Ready(NamespaceEvent::TokenRefresh(token));
-					}
 					if retry.poll(waiter).is_ready() {
 						return Poll::Ready(NamespaceEvent::Retry);
 					}
@@ -3298,17 +3122,6 @@ where
 
 			match event {
 				NamespaceEvent::Closed(res) => break res,
-				NamespaceEvent::TokenRefresh(token) => {
-					last_token = token.clone();
-					self.refresh_request_token(&mut ns, token).await?;
-					// What the token now carries or no longer carries changes what may be offered: a
-					// namespace withheld for lack of a grant goes out once a token can carry it.
-					let suffixes: Vec<crate::PathOwned> = ns.watched.keys().cloned().collect();
-					for suffix in suffixes {
-						let path = prefix.join(&suffix);
-						self.sync_namespace(&mut ns, &suffix, &path).await?;
-					}
-				}
 				NamespaceEvent::Retry => {
 					retry_at = None;
 					retry_delay = (retry_delay * 2).min(RETRY_MAX);
@@ -4241,9 +4054,6 @@ struct NamespaceRequest<S: crate::transport::poll::Session> {
 	path: crate::PathOwned,
 	request_id: RequestId,
 	stream: Stream<S, Version>,
-	/// Set once the advertisement presented a request token, so the peer holds it on that
-	/// token's grant rather than the connection grant.
-	backing: Option<crate::auth::Backing>,
 }
 
 #[cfg(test)]
@@ -8344,7 +8154,7 @@ mod serve_tests {
 			let peer_setup = peer::PeerSetup::default();
 			peer_setup.set(peer::Peer::default());
 			let auth = crate::auth::Handle::new(false);
-			let mut requests = auth.scoped().unwrap();
+			let mut requests = auth.requests().unwrap();
 			// A limit of nothing, so only the token admits the subscription.
 			auth.authorize(&crate::auth::Grant::default());
 			let publisher = Publisher::new(
@@ -8473,7 +8283,7 @@ mod serve_tests {
 		let peer_setup = peer::PeerSetup::default();
 		peer_setup.set(peer::Peer::default());
 		let auth = crate::auth::Handle::new(false);
-		let mut requests = auth.scoped().unwrap();
+		let mut requests = auth.requests().unwrap();
 		// A limit of nothing, so only the token admits the subscription.
 		auth.authorize(&crate::auth::Grant::default());
 		let publisher = Publisher::new(
@@ -8960,13 +8770,9 @@ mod serve_tests {
 	/// An auth handle whose session grant covers only `other`, so a SUBSCRIBE for `room`
 	/// falls to its request token. The presented credential is kept alive by the returned
 	/// [`crate::auth::Token`].
-	fn auth_covering_other() -> (
-		crate::auth::Handle,
-		crate::auth::Requests<crate::auth::Scoped>,
-		crate::auth::Token,
-	) {
+	fn auth_covering_other() -> (crate::auth::Handle, crate::auth::Requests, crate::auth::Token) {
 		let auth = crate::auth::Handle::new(true);
-		let requests = auth.scoped().unwrap();
+		let requests = auth.requests().unwrap();
 		let cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 		// The peer lets us publish everything, and we let it read only "other".
 		auth.granted(0, crate::auth::Grant::all());
@@ -8981,200 +8787,11 @@ mod serve_tests {
 		);
 		(auth, requests, cred)
 	}
-
-	/// A token-bearing client does not self-censor on its connection grant: the
-	/// publisher advertises a namespace its connection grant does not cover, carrying the token,
-	/// and the server's covers-gate is left to be the authority. A token-less client with the same
-	/// grant filters that announce, as before.
-	#[moq_net_sim::test]
-	async fn a_token_bearing_client_announces_outside_its_connection_grant() {
-		const VERSION: Version = Version::Draft18;
-		let token = bytes::Bytes::from_static(&[0x03, 0x00, b'o', b'k']);
-
-		// A connection grant of "other", which does not cover "cam". The presented credential and
-		// its grant are held for the run's lifetime, else the union reverts to permissive.
-		fn seed_auth() -> (crate::auth::Handle, crate::auth::Token) {
-			let auth = crate::auth::Handle::new(true);
-			let cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
-			auth.granted(
-				0,
-				crate::auth::Grant {
-					publish: crate::Pattern::subtree("other").unwrap().into(),
-					subscribe: crate::Patterns::new(),
-					expires: None,
-				},
-			);
-			(auth, cred)
-		}
-
-		// With a token, "cam" is advertised despite the grant not covering it (the token rides it).
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
-		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]);
-		let log = session.log.clone();
-		let peer_setup = peer::PeerSetup::default();
-		peer_setup.set(peer::Peer::default());
-		let (auth, _cred) = seed_auth();
-		let publisher = Publisher::new(
-			crate::time::Clock::sim(),
-			session,
-			origin.consume(),
-			Control::new(None, false),
-			None,
-			peer_setup,
-			VERSION,
-		)
-		.with_auth(auth)
-		.with_request_token(crate::RequestToken::new(Some(typed(&token))));
-		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-		let mut advertised = false;
-		for _ in 0..200 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, &token) >= 1 {
-				advertised = true;
-				break;
-			}
-			settle().await;
-		}
-		assert!(
-			advertised,
-			"a token-bearing client must announce outside its connection grant"
-		);
-
-		// Without a token, the same grant filters "cam": nothing is advertised.
-		let origin2 = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cam2 = origin2.announce("cam", crate::origin::Route::default()).unwrap();
-		let session2 = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]);
-		let log2 = session2.log.clone();
-		let peer_setup2 = peer::PeerSetup::default();
-		peer_setup2.set(peer::Peer::default());
-		let (auth2, _cred2) = seed_auth();
-		let publisher2 = Publisher::new(
-			crate::time::Clock::sim(),
-			session2,
-			origin2.consume(),
-			Control::new(None, false),
-			None,
-			peer_setup2,
-			VERSION,
-		)
-		.with_auth(auth2);
-		let mut run2 = std::pin::pin!(publisher2.run_publish_namespaces());
-		for _ in 0..80 {
-			assert!(futures::poll!(run2.as_mut()).is_pending());
-			settle().await;
-		}
-		assert_eq!(
-			occurrences(&log2, b"cam"),
-			0,
-			"a token-less client self-censors on its grant"
-		);
-	}
-
-	/// A request token stands in for the connection grant, never for the limit this side set
-	/// on the peer: a token-bearing client still withholds an announce outside that limit.
-	#[moq_net_sim::test]
-	async fn a_request_token_does_not_lift_the_local_limit_on_announces() {
-		const VERSION: Version = Version::Draft18;
-		let token = bytes::Bytes::from_static(&[0x03, 0x00, b'o', b'k']);
-
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
-		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]);
-		let log = session.log.clone();
-		let peer_setup = peer::PeerSetup::default();
-		peer_setup.set(peer::Peer::default());
-		let auth = crate::auth::Handle::new(false);
-		auth.authorize(&crate::auth::Grant::default());
-		let publisher = Publisher::new(
-			crate::time::Clock::sim(),
-			session,
-			origin.consume(),
-			Control::new(None, false),
-			None,
-			peer_setup,
-			VERSION,
-		)
-		.with_auth(auth)
-		.with_request_token(crate::RequestToken::new(Some(typed(&token))));
-		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			settle().await;
-		}
-		assert_eq!(occurrences(&log, b"cam"), 0, "the limit still withholds the announce");
-	}
-
-	/// A peer that requires solicitation gets inline NAMESPACE entries, which have no slot for a
-	/// request token, so the token cannot authorize them: the connection grant still filters the
-	/// answer to its SUBSCRIBE_NAMESPACE.
-	#[moq_net_sim::test]
-	async fn a_request_token_does_not_lift_the_grant_on_inline_namespaces() {
-		const VERSION: Version = Version::Draft18;
-		let token = bytes::Bytes::from_static(&[0x03, 0x00, b'o', b'k']);
-
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
-		let _other = origin.announce("other/mic", crate::origin::Route::default()).unwrap();
-		settle().await;
-		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]);
-		let log = session.log.clone();
-		let peer_setup = peer::PeerSetup::default();
-		peer_setup.set(peer::Peer {
-			solicit: Some(true),
-			..Default::default()
-		});
-		let auth = crate::auth::Handle::new(true);
-		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
-		auth.granted(
-			0,
-			crate::auth::Grant {
-				publish: crate::Pattern::subtree("other").unwrap().into(),
-				subscribe: crate::Patterns::new(),
-				expires: None,
-			},
-		);
-		let publisher = Publisher::new(
-			crate::time::Clock::sim(),
-			session.clone(),
-			origin.consume(),
-			Control::new(None, false),
-			None,
-			peer_setup,
-			VERSION,
-		)
-		.with_auth(auth)
-		.with_request_token(crate::RequestToken::new(Some(typed(&token))));
-
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
-		let msg = ietf::SubscribeNamespace {
-			request_id: RequestId(1),
-			namespace: crate::Path::new(""),
-			hidden: false,
-		};
-		let mut run = std::pin::pin!(publisher.run_subscribe_namespace_stream(stream, msg));
-		let mut covered = false;
-		for _ in 0..200 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, b"mic") >= 1 {
-				covered = true;
-				break;
-			}
-			settle().await;
-		}
-		assert!(covered, "a namespace the grant covers is advertised inline");
-		for _ in 0..50 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			settle().await;
-		}
-		assert_eq!(occurrences(&log, b"cam"), 0, "the grant still filters inline entries");
-		assert_eq!(occurrences(&log, &token), 0, "an inline entry carries no token");
-	}
-
+	/// An out-of-band request token, the only kind a session verifies.
 	/// A request token whose Token Type takes two varint bytes.
 	fn request_token() -> crate::ietf::token::RequestToken {
 		crate::ietf::token::RequestToken(crate::setup::Token {
-			kind: 300,
+			kind: crate::setup::Token::OUT_OF_BAND,
 			value: vec![0x00, 0xff],
 		})
 	}
@@ -10239,7 +9856,7 @@ mod serve_tests {
 	async fn a_request_token_on_a_no_auth_session_is_verified() {
 		const VERSION: Version = Version::Draft18;
 		let auth = crate::auth::Handle::new(false);
-		let mut requests = auth.scoped().unwrap();
+		let mut requests = auth.requests().unwrap();
 		auth.authorize(&crate::auth::Grant::default());
 
 		let h = serve_with_auth(VERSION, auth, Vec::new());
@@ -10290,7 +9907,7 @@ mod serve_tests {
 	) -> (crate::auth::Handle, Serve, Serving) {
 		const VERSION: Version = Version::Draft18;
 		let auth = crate::auth::Handle::new(false);
-		let mut requests = auth.scoped().unwrap();
+		let mut requests = auth.requests().unwrap();
 		if let Some(limit) = &limit {
 			auth.authorize(limit);
 		}
@@ -10380,7 +9997,7 @@ mod serve_tests {
 	async fn a_covering_peer_grant_never_skips_the_verifier() {
 		const VERSION: Version = Version::Draft18;
 		let auth = crate::auth::Handle::new(true);
-		let mut requests = auth.scoped().unwrap();
+		let mut requests = auth.requests().unwrap();
 		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 		auth.granted(0, crate::auth::Grant::all());
 		let h = serve_with_auth(VERSION, auth, Vec::new());
@@ -10552,7 +10169,7 @@ mod serve_tests {
 
 		// Withdrawn before the application looked.
 		let auth = crate::auth::Handle::new(false);
-		let _requests = auth.scoped().unwrap();
+		let _requests = auth.requests().unwrap();
 		let mut h = serve_with_auth(VERSION, auth, Vec::new());
 		h.publisher.subscriptions = crate::session::Slots::new(1);
 		let stream = Stream::open(&mut h.session.clone(), VERSION).await.unwrap();
@@ -10574,7 +10191,7 @@ mod serve_tests {
 
 		// Withdrawn after the application took it.
 		let auth = crate::auth::Handle::new(false);
-		let mut requests = auth.scoped().unwrap();
+		let mut requests = auth.requests().unwrap();
 		let mut h = serve_with_auth(VERSION, auth, Vec::new());
 		h.publisher.subscriptions = crate::session::Slots::new(1);
 		let stream = Stream::open(&mut h.session.clone(), VERSION).await.unwrap();
@@ -10614,7 +10231,7 @@ mod serve_tests {
 	async fn a_request_token_cannot_exceed_the_peers_grant() {
 		const VERSION: Version = Version::Draft18;
 		let auth = crate::auth::Handle::new(true);
-		let mut requests = auth.scoped().unwrap();
+		let mut requests = auth.requests().unwrap();
 		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 		auth.granted(
 			0,
@@ -10658,15 +10275,6 @@ mod serve_tests {
 					.map(|_| ())
 			})
 			.await
-		}
-	}
-
-	/// The typed form of a raw USE_VALUE Token structure with a one-byte Token Type.
-	fn typed(raw: &[u8]) -> crate::setup::Token {
-		assert_eq!(raw[0], 0x03, "USE_VALUE");
-		crate::setup::Token {
-			kind: raw[1].into(),
-			value: raw[2..].to_vec(),
 		}
 	}
 }
@@ -12630,957 +12238,6 @@ mod tests {
 					"{version} {label}: stream reset, discarding the error"
 				);
 			}
-		}
-	}
-
-	/// A client configured with a request token puts it on the PUBLISH_NAMESPACE it sends, on
-	/// a legacy draft (draft-14 trailing block) and a strict one (draft-18 message
-	/// parameters). Without `with_request_token` the token bytes never reach the wire.
-	#[moq_net_sim::test]
-	async fn a_configured_request_token_rides_the_publish_namespace() {
-		let token = bytes::Bytes::from_static(&[0x03, 0x00, 0xfe, 0xed]);
-		for version in [
-			Version::Draft14,
-			Version::Draft15,
-			Version::Draft16,
-			Version::Draft17,
-			Version::Draft18,
-		] {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-			let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
-			settle().await;
-
-			let session =
-				crate::lite::test_transport::ScriptedSession::per_stream(vec![publish_namespace_ok(version).await]);
-			let log = session.log.clone();
-			let peer_setup = peer::PeerSetup::default();
-			peer_setup.set(peer::Peer::default());
-
-			let publisher = Publisher::new(
-				crate::time::Clock::sim(),
-				session,
-				origin.consume(),
-				Control::new(None, false),
-				None,
-				peer_setup,
-				version,
-			)
-			.with_request_token(crate::RequestToken::new(Some(typed(&token))));
-
-			let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-			let mut sent = false;
-			for _ in 0..100 {
-				assert!(futures::poll!(run.as_mut()).is_pending());
-				if occurrences(&log, &token) >= 1 {
-					sent = true;
-					break;
-				}
-				settle().await;
-			}
-			assert!(sent, "{version}: the request token must ride the PUBLISH_NAMESPACE");
-		}
-	}
-
-	/// Replacing the request token re-presents it on a live announce as a token-only
-	/// PUBLISH_NAMESPACE_UPDATE (MoQ request-token renewal), on the same stream, without a
-	/// reprice. Draft-17+, since earlier drafts have no PUBLISH_NAMESPACE_UPDATE.
-	#[moq_net_sim::test]
-	async fn setting_a_new_request_token_re_presents_it_on_a_live_announce() {
-		const VERSION: Version = Version::Draft18;
-		let first = bytes::Bytes::from_static(&[0x03, 0x00, b'a', b'a']);
-		let second = bytes::Bytes::from_static(&[0x03, 0x00, b'b', b'b']);
-
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
-		settle().await;
-
-		// One stream carries the announce: RequestOk answers the PUBLISH_NAMESPACE, then
-		// RequestOk answers the token-only REQUEST_UPDATE.
-		let mut script = publish_namespace_ok(VERSION).await;
-		script.extend(publish_namespace_ok(VERSION).await);
-		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![script]);
-		let log = session.log.clone();
-		let peer_setup = peer::PeerSetup::default();
-		peer_setup.set(peer::Peer::default());
-
-		let token = crate::RequestToken::new(Some(typed(&first)));
-		let publisher = Publisher::new(
-			crate::time::Clock::sim(),
-			session,
-			origin.consume(),
-			Control::new(None, false),
-			None,
-			peer_setup,
-			VERSION,
-		)
-		.with_request_token(token.clone());
-
-		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-		// The initial token rides the PUBLISH_NAMESPACE.
-		let mut initial = false;
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, &first) >= 1 {
-				initial = true;
-				break;
-			}
-			settle().await;
-		}
-		assert!(initial, "the initial token must ride the PUBLISH_NAMESPACE");
-
-		// Replacing it re-presents the new token on the live announce.
-		token.set(Some(typed(&second)));
-		let mut renewed = false;
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, &second) >= 1 {
-				renewed = true;
-				break;
-			}
-			settle().await;
-		}
-		assert!(renewed, "a replaced token must be re-presented on the live announce");
-	}
-
-	/// A namespace advertised without a token stands on the connection grant, so setting a
-	/// token later re-presents nothing on it: the receiver would refuse a token on an
-	/// advertisement it admitted without one.
-	#[moq_net_sim::test]
-	async fn a_token_set_later_never_renews_a_tokenless_announce() {
-		const VERSION: Version = Version::Draft18;
-		let token = bytes::Bytes::from_static(&[0x03, 0x00, b'b', b'b']);
-
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
-		settle().await;
-
-		let mut script = publish_namespace_ok(VERSION).await;
-		script.extend(publish_namespace_ok(VERSION).await);
-		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![script]);
-		let log = session.log.clone();
-		let peer_setup = peer::PeerSetup::default();
-		peer_setup.set(peer::Peer::default());
-
-		let request_token = crate::RequestToken::new(None);
-		let publisher = Publisher::new(
-			crate::time::Clock::sim(),
-			session,
-			origin.consume(),
-			Control::new(None, false),
-			None,
-			peer_setup,
-			VERSION,
-		)
-		.with_request_token(request_token.clone());
-
-		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-		let mut announced = false;
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if !log.writes.lock().unwrap().is_empty() {
-				announced = true;
-				break;
-			}
-			settle().await;
-		}
-		assert!(announced, "the namespace is advertised without a token");
-
-		request_token.set(Some(typed(&token)));
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			settle().await;
-		}
-		assert_eq!(occurrences(&log, &token), 0, "the token renewed a tokenless announce");
-	}
-
-	/// A token replaced while the initial PUBLISH_NAMESPACE awaits its answer is re-presented
-	/// once that answer arrives, rather than counted as the token the announce carried.
-	#[moq_net_sim::test]
-	async fn a_token_replaced_during_the_initial_announce_is_re_presented() {
-		const VERSION: Version = Version::Draft18;
-		let first = bytes::Bytes::from_static(&[0x03, 0x00, b'a', b'a']);
-		let second = bytes::Bytes::from_static(&[0x03, 0x00, b'b', b'b']);
-
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
-		settle().await;
-
-		// The peer holds its answer until the test pushes it.
-		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
-		let log = session.log.clone();
-		let peer_setup = peer::PeerSetup::default();
-		peer_setup.set(peer::Peer::default());
-
-		let token = crate::RequestToken::new(Some(typed(&first)));
-		let publisher = Publisher::new(
-			crate::time::Clock::sim(),
-			session.clone(),
-			origin.consume(),
-			Control::new(None, false),
-			None,
-			peer_setup,
-			VERSION,
-		)
-		.with_request_token(token.clone());
-
-		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, &first) >= 1 {
-				break;
-			}
-			settle().await;
-		}
-		assert_eq!(
-			occurrences(&log, &first),
-			1,
-			"the initial token rides the PUBLISH_NAMESPACE"
-		);
-
-		token.set(Some(typed(&second)));
-		let mut answers = publish_namespace_ok(VERSION).await;
-		answers.extend(publish_namespace_ok(VERSION).await);
-		session.push(&answers);
-		let mut renewed = false;
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, &second) >= 1 {
-				renewed = true;
-				break;
-			}
-			settle().await;
-		}
-		assert!(renewed, "a token replaced mid-announce must be re-presented");
-	}
-
-	/// Setting the same token again is a no-op: no second REQUEST_UPDATE is sent, so the token
-	/// bytes appear once (the initial PUBLISH_NAMESPACE) and no more.
-	#[moq_net_sim::test]
-	async fn an_unchanged_token_is_not_re_presented() {
-		const VERSION: Version = Version::Draft18;
-		let token_bytes = bytes::Bytes::from_static(&[0x03, 0x00, b'a', b'a']);
-
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
-		settle().await;
-
-		let mut script = publish_namespace_ok(VERSION).await;
-		script.extend(publish_namespace_ok(VERSION).await);
-		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![script]);
-		let log = session.log.clone();
-		let peer_setup = peer::PeerSetup::default();
-		peer_setup.set(peer::Peer::default());
-
-		let token = crate::RequestToken::new(Some(typed(&token_bytes)));
-		let publisher = Publisher::new(
-			crate::time::Clock::sim(),
-			session,
-			origin.consume(),
-			Control::new(None, false),
-			None,
-			peer_setup,
-			VERSION,
-		)
-		.with_request_token(token.clone());
-
-		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, &token_bytes) >= 1 {
-				break;
-			}
-			settle().await;
-		}
-		assert_eq!(
-			occurrences(&log, &token_bytes),
-			1,
-			"the initial token rode the announce once"
-		);
-
-		// Setting the same value again wakes the loop but changes nothing, so no REQUEST_UPDATE.
-		token.set(Some(typed(&token_bytes)));
-		for _ in 0..50 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			settle().await;
-		}
-		assert_eq!(
-			occurrences(&log, &token_bytes),
-			1,
-			"an unchanged token must not be re-presented"
-		);
-	}
-
-	/// A refused token refresh (REQUEST_ERROR with a retry interval) withdraws the announce and
-	/// re-offers it fresh, carrying the new token, once the interval passes. Without re-arming the
-	/// retry sweep (which only revisits deferred namespaces) the withdrawn namespace would never
-	/// come back. Draft-17+, since earlier drafts have no PUBLISH_NAMESPACE_UPDATE.
-	#[moq_net_sim::test]
-	async fn a_refused_token_refresh_re_offers_the_namespace_with_the_new_token() {
-		const VERSION: Version = Version::Draft18;
-		let first = bytes::Bytes::from_static(&[0x03, 0x00, b'a', b'a']);
-		let second = bytes::Bytes::from_static(&[0x03, 0x00, b'b', b'b']);
-
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
-		settle().await;
-
-		// Stream 1: the PUBLISH_NAMESPACE is accepted, then the token-refresh REQUEST_UPDATE is
-		// refused with a 1s retry interval. Stream 2: the re-offer is accepted.
-		let mut stream1 = publish_namespace_ok(VERSION).await;
-		stream1.extend(publish_namespace_error(VERSION, 1000).await);
-		let stream2 = publish_namespace_ok(VERSION).await;
-		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![stream1, stream2]);
-		let log = session.log.clone();
-		let peer_setup = peer::PeerSetup::default();
-		peer_setup.set(peer::Peer::default());
-
-		let token = crate::RequestToken::new(Some(typed(&first)));
-		let publisher = Publisher::new(
-			crate::time::Clock::sim(),
-			session,
-			origin.consume(),
-			Control::new(None, false),
-			None,
-			peer_setup,
-			VERSION,
-		)
-		.with_request_token(token.clone());
-
-		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, &first) >= 1 {
-				break;
-			}
-			settle().await;
-		}
-		assert_eq!(occurrences(&log, &first), 1, "the initial token rode the announce");
-
-		// Replace the token: the refresh REQUEST_UPDATE carries it and the peer refuses it,
-		// closing the stream.
-		token.set(Some(typed(&second)));
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, &second) >= 1 {
-				break;
-			}
-			settle().await;
-		}
-		assert_eq!(
-			occurrences(&log, &second),
-			1,
-			"the refused refresh carried the new token once"
-		);
-
-		// Past the 1s retry interval, the withdrawn namespace is re-offered on a fresh stream,
-		// carrying the new token.
-		moq_net_sim::advance(Duration::from_secs(2)).await;
-		let mut reoffered = false;
-		for _ in 0..300 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, &second) >= 2 {
-				reoffered = true;
-				break;
-			}
-			settle().await;
-		}
-		assert!(
-			reoffered,
-			"a refused refresh must re-offer the namespace with the new token after the interval"
-		);
-		assert!(
-			log.bi_opens() >= 2,
-			"the re-offer opened a fresh PUBLISH_NAMESPACE stream"
-		);
-	}
-
-	/// A token refresh the peer never answers drops the announce's stream and re-offers the
-	/// namespace fresh, carrying the new token. Without forgetting the sent advertisement,
-	/// reconcile would see it unchanged and the namespace would stay withdrawn. Draft-17+,
-	/// since earlier drafts have no PUBLISH_NAMESPACE_UPDATE.
-	#[moq_net_sim::test]
-	async fn an_unanswered_token_refresh_re_offers_the_namespace_with_the_new_token() {
-		const VERSION: Version = Version::Draft18;
-		let first = bytes::Bytes::from_static(&[0x03, 0x00, b'a', b'a']);
-		let second = bytes::Bytes::from_static(&[0x03, 0x00, b'b', b'b']);
-
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
-		settle().await;
-
-		// Stream 1: the PUBLISH_NAMESPACE is accepted, then the token-refresh REQUEST_UPDATE is
-		// never answered. Stream 2: the re-offer is accepted.
-		let stream1 = publish_namespace_ok(VERSION).await;
-		let stream2 = publish_namespace_ok(VERSION).await;
-		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![stream1, stream2]);
-		let log = session.log.clone();
-		let peer_setup = peer::PeerSetup::default();
-		peer_setup.set(peer::Peer::default());
-
-		let token = crate::RequestToken::new(Some(typed(&first)));
-		let publisher = Publisher::new(
-			crate::time::Clock::sim(),
-			session,
-			origin.consume(),
-			Control::new(None, false),
-			None,
-			peer_setup,
-			VERSION,
-		)
-		.with_request_token(token.clone());
-
-		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, &first) >= 1 {
-				break;
-			}
-			settle().await;
-		}
-		assert_eq!(occurrences(&log, &first), 1, "the initial token rode the announce");
-
-		token.set(Some(typed(&second)));
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, &second) >= 1 {
-				break;
-			}
-			settle().await;
-		}
-		assert_eq!(
-			occurrences(&log, &second),
-			1,
-			"the unanswered refresh carried the new token once"
-		);
-
-		// Past the answer timeout, the namespace is re-offered on a fresh stream with the new token.
-		moq_net_sim::advance(ADVERTISE_TIMEOUT + Duration::from_secs(1)).await;
-		let mut reoffered = false;
-		for _ in 0..300 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, &second) >= 2 {
-				reoffered = true;
-				break;
-			}
-			settle().await;
-		}
-		assert!(
-			reoffered,
-			"an unanswered refresh must re-offer the namespace with the new token"
-		);
-		assert!(
-			log.bi_opens() >= 2,
-			"the re-offer opened a fresh PUBLISH_NAMESPACE stream"
-		);
-	}
-
-	/// A peer that ends the advertisement while a token refresh waits for its answer (its old
-	/// grant lapsed) ends only that advertisement: the namespace is re-offered with the new
-	/// token and the session stays up. Draft-16 cancels it on the stream, draft-17+ closes it.
-	#[moq_net_sim::test]
-	async fn an_advertisement_ended_during_a_token_refresh_is_re_offered() {
-		for version in [Version::Draft16, Version::Draft18] {
-			let first = bytes::Bytes::from_static(&[0x03, 0x00, b'a', b'a']);
-			let second = bytes::Bytes::from_static(&[0x03, 0x00, b'b', b'b']);
-
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-			let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
-			settle().await;
-
-			// Stream 1: the PUBLISH_NAMESPACE is accepted, then the peer ends it. Stream 2: the
-			// re-offer is accepted.
-			let mut stream1 = publish_namespace_ok(version).await;
-			let session = match version {
-				Version::Draft16 => {
-					let cancel = crate::lite::test_transport::Log::default();
-					crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(cancel.clone()), version)
-						.encode_message(&ietf::PublishNamespaceCancel {
-							track_namespace: crate::Path::new("cam"),
-							request_id: RequestId(0),
-							error_code: 0x1,
-							reason_phrase: "expired".into(),
-						})
-						.await
-						.unwrap();
-					stream1.extend(cancel.writes.lock().unwrap().iter());
-					crate::lite::test_transport::ScriptedSession::per_stream(vec![
-						stream1,
-						publish_namespace_ok(version).await,
-					])
-				}
-				_ => crate::lite::test_transport::ScriptedSession::per_stream_eof(vec![
-					stream1,
-					publish_namespace_ok(version).await,
-				]),
-			};
-			let log = session.log.clone();
-			let peer_setup = peer::PeerSetup::default();
-			peer_setup.set(peer::Peer::default());
-
-			let token = crate::RequestToken::new(Some(typed(&first)));
-			let publisher = Publisher::new(
-				crate::time::Clock::sim(),
-				session,
-				origin.consume(),
-				Control::new(None, false),
-				None,
-				peer_setup,
-				version,
-			)
-			.with_request_token(token.clone());
-
-			let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-			for _ in 0..100 {
-				assert!(futures::poll!(run.as_mut()).is_pending());
-				if occurrences(&log, &first) >= 1 {
-					break;
-				}
-				settle().await;
-			}
-			assert_eq!(
-				occurrences(&log, &first),
-				1,
-				"{version}: the initial token rode the announce"
-			);
-
-			token.set(Some(typed(&second)));
-			let mut reoffered = false;
-			for _ in 0..300 {
-				assert!(
-					futures::poll!(run.as_mut()).is_pending(),
-					"{version}: an ended advertisement must not end the namespace loop"
-				);
-				if occurrences(&log, &second) >= 2 {
-					reoffered = true;
-					break;
-				}
-				settle().await;
-			}
-			assert!(
-				reoffered,
-				"{version}: the ended namespace is re-offered with the new token"
-			);
-			assert!(log.closes().is_empty(), "{version}: the session stays up");
-		}
-	}
-
-	/// A malformed answer to a token refresh is the peer's violation, not a closed stream: it
-	/// still ends the namespace loop, and with it the session.
-	#[moq_net_sim::test]
-	async fn a_malformed_token_refresh_answer_stays_fatal() {
-		const VERSION: Version = Version::Draft17;
-		let first = bytes::Bytes::from_static(&[0x03, 0x00, b'a', b'a']);
-		let second = bytes::Bytes::from_static(&[0x03, 0x00, b'b', b'b']);
-
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
-		settle().await;
-
-		// The PUBLISH_NAMESPACE is accepted, then the renewal is answered with a message type in
-		// the seven-byte varint form draft-17 forbids.
-		let mut stream1 = publish_namespace_ok(VERSION).await;
-		stream1.extend([0xfc, 0, 0, 0, 0, 0, 0]);
-		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![stream1]);
-		let log = session.log.clone();
-		let peer_setup = peer::PeerSetup::default();
-		peer_setup.set(peer::Peer::default());
-
-		let token = crate::RequestToken::new(Some(typed(&first)));
-		let publisher = Publisher::new(
-			crate::time::Clock::sim(),
-			session,
-			origin.consume(),
-			Control::new(None, false),
-			None,
-			peer_setup,
-			VERSION,
-		)
-		.with_request_token(token.clone());
-
-		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, &first) >= 1 {
-				break;
-			}
-			settle().await;
-		}
-		assert_eq!(occurrences(&log, &first), 1, "the initial token rode the announce");
-
-		token.set(Some(typed(&second)));
-		let mut result = None;
-		for _ in 0..100 {
-			if let Poll::Ready(res) = futures::poll!(run.as_mut()) {
-				result = Some(res);
-				break;
-			}
-			settle().await;
-		}
-		assert!(
-			matches!(result, Some(Err(Error::Decode(DecodeError::InvalidValue)))),
-			"a malformed answer must stay fatal, got {result:?}"
-		);
-	}
-
-	/// A token refresh answered with a REQUEST_OK that carries junk inside its declared size
-	/// ends the session, rather than marking the advertisement as standing on the new token.
-	#[moq_net_sim::test]
-	async fn a_token_refresh_answer_with_trailing_bytes_is_fatal() {
-		const VERSION: Version = Version::Draft17;
-		let first = bytes::Bytes::from_static(&[0x03, 0x00, b'a', b'a']);
-		let second = bytes::Bytes::from_static(&[0x03, 0x00, b'b', b'b']);
-
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
-		settle().await;
-
-		// The PUBLISH_NAMESPACE is accepted, then the renewal is answered by a REQUEST_OK whose
-		// declared size covers one byte more than the message.
-		let ok = publish_namespace_ok(VERSION).await;
-		assert_eq!(
-			ok[0],
-			ietf::RequestOk::ID as u8,
-			"a one-byte type, then a two-byte size"
-		);
-		let mut padded = ok.clone();
-		let size = u16::from_be_bytes([padded[1], padded[2]]) + 1;
-		padded[1..3].copy_from_slice(&size.to_be_bytes());
-		padded.push(0x00);
-		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![[ok, padded].concat()]);
-		let log = session.log.clone();
-		let peer_setup = peer::PeerSetup::default();
-		peer_setup.set(peer::Peer::default());
-
-		let token = crate::RequestToken::new(Some(typed(&first)));
-		let publisher = Publisher::new(
-			crate::time::Clock::sim(),
-			session,
-			origin.consume(),
-			Control::new(None, false),
-			None,
-			peer_setup,
-			VERSION,
-		)
-		.with_request_token(token.clone());
-
-		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, &first) >= 1 {
-				break;
-			}
-			settle().await;
-		}
-		assert_eq!(occurrences(&log, &first), 1, "the initial token rode the announce");
-
-		token.set(Some(typed(&second)));
-		let mut result = None;
-		for _ in 0..100 {
-			if let Poll::Ready(res) = futures::poll!(run.as_mut()) {
-				result = Some(res);
-				break;
-			}
-			settle().await;
-		}
-		assert!(
-			matches!(result, Some(Err(Error::WrongSize))),
-			"an answer with trailing bytes must be fatal, got {result:?}"
-		);
-	}
-
-	/// A token-bearing client's reprice carries only the cluster change, never the unchanged
-	/// token: a receiver renewing a token-authorized announce answers a token-bearing update as
-	/// a renewal, which would drop the HOP_PATH / ROUTE_COST riding it.
-	#[moq_net_sim::test]
-	async fn a_reprice_does_not_carry_the_request_token() {
-		const VERSION: Version = Version::Draft19;
-		let token = bytes::Bytes::from_static(&[0x03, 0x00, b'o', b'k']);
-
-		// Forward the reprice at once: the update hold is not what this checks.
-		let origin = crate::origin::Config {
-			update_hold: Duration::ZERO,
-			..crate::origin::Config::new(crate::Hop::new(1).unwrap())
-		}
-		.produce();
-		// One epoch, so the warm route re-prices the instance rather than restart it.
-		let epoch = crate::Epoch::mint();
-		let _cold = origin
-			.announce(
-				"cam",
-				crate::origin::Route::default().with_epoch(epoch.clone()).with_cost(4),
-			)
-			.unwrap();
-		settle().await;
-
-		let ok = publish_namespace_ok(VERSION).await;
-		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![[ok.clone(), ok].concat()]);
-		let log = session.log.clone();
-
-		let publisher = Publisher::new(
-			crate::time::Clock::sim(),
-			session,
-			origin.consume(),
-			Control::new(None, false),
-			None,
-			clustered(Some(false)),
-			VERSION,
-		)
-		.with_request_token(crate::RequestToken::new(Some(typed(&token))));
-
-		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, &token) >= 1 {
-				break;
-			}
-			settle().await;
-		}
-		assert_eq!(occurrences(&log, &token), 1, "the token rides the PUBLISH_NAMESPACE");
-
-		// The announce has gone out carrying the token exactly once; a reprice must then emit a
-		// PUBLISH_NAMESPACE_UPDATE that does NOT re-send the token.
-		let after_announce = log.writes.lock().unwrap().len();
-		let _warm = origin
-			.announce("cam", crate::origin::Route::default().with_epoch(epoch).with_cost(0))
-			.unwrap();
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if log.writes.lock().unwrap().len() > after_announce {
-				break;
-			}
-			settle().await;
-		}
-		assert!(
-			log.writes.lock().unwrap().len() > after_announce,
-			"the reprice update was never sent"
-		);
-		assert_eq!(
-			occurrences(&log, &token),
-			1,
-			"the reprice must not carry the request token: it rides only the initial announce"
-		);
-	}
-
-	/// Clearing the request token leaves a live advertisement on the token it presented: a
-	/// later reprice of a namespace outside the connection grant updates it in place rather
-	/// than withdrawing what the peer still holds on that token.
-	#[moq_net_sim::test]
-	async fn a_cleared_token_keeps_its_live_announce() {
-		const VERSION: Version = Version::Draft19;
-		let token = bytes::Bytes::from_static(&[0x03, 0x00, b'o', b'k']);
-
-		// Forward the reprice at once: the update hold is not what this checks.
-		let origin = crate::origin::Config {
-			update_hold: Duration::ZERO,
-			..crate::origin::Config::new(crate::Hop::new(1).unwrap())
-		}
-		.produce();
-		// One epoch, so the warm route re-prices the instance rather than restart it.
-		let epoch = crate::Epoch::mint();
-		let _cold = origin
-			.announce(
-				"cam",
-				crate::origin::Route::default().with_epoch(epoch.clone()).with_cost(4),
-			)
-			.unwrap();
-		settle().await;
-
-		// A connection grant of "other", which does not cover "cam".
-		let auth = crate::auth::Handle::new(true);
-		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
-		auth.granted(
-			0,
-			crate::auth::Grant {
-				publish: crate::Pattern::subtree("other").unwrap().into(),
-				subscribe: crate::Patterns::new(),
-				expires: None,
-			},
-		);
-
-		let ok = publish_namespace_ok(VERSION).await;
-		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![[ok.clone(), ok].concat()]);
-		let log = session.log.clone();
-		let request_token = crate::RequestToken::new(Some(typed(&token)));
-		let publisher = Publisher::new(
-			crate::time::Clock::sim(),
-			session,
-			origin.consume(),
-			Control::new(None, false),
-			None,
-			clustered(Some(false)),
-			VERSION,
-		)
-		.with_auth(auth)
-		.with_request_token(request_token.clone());
-
-		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, &token) >= 1 {
-				break;
-			}
-			settle().await;
-		}
-		assert_eq!(occurrences(&log, &token), 1, "the token rides the PUBLISH_NAMESPACE");
-		for _ in 0..20 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			settle().await;
-		}
-
-		request_token.set(None);
-		let after_announce = log.writes.lock().unwrap().len();
-		let _warm = origin
-			.announce("cam", crate::origin::Route::default().with_epoch(epoch).with_cost(0))
-			.unwrap();
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if log.writes.lock().unwrap().len() > after_announce {
-				break;
-			}
-			settle().await;
-		}
-		assert!(log.resets().is_empty(), "the live announce was withdrawn");
-		assert!(
-			log.writes.lock().unwrap().len() > after_announce,
-			"the reprice update was never sent"
-		);
-	}
-
-	/// A namespace withheld for lack of a grant goes out as soon as a request token is set
-	/// that can carry it, not on the next unrelated route or grant change.
-	#[moq_net_sim::test]
-	async fn setting_a_token_offers_a_withheld_namespace() {
-		const VERSION: Version = Version::Draft18;
-		let token = bytes::Bytes::from_static(&[0x03, 0x00, b'o', b'k']);
-
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
-		// A connection grant of "other", which does not cover "cam".
-		let auth = crate::auth::Handle::new(true);
-		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
-		auth.granted(
-			0,
-			crate::auth::Grant {
-				publish: crate::Pattern::subtree("other").unwrap().into(),
-				subscribe: crate::Patterns::new(),
-				expires: None,
-			},
-		);
-		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]);
-		let log = session.log.clone();
-		let peer_setup = peer::PeerSetup::default();
-		peer_setup.set(peer::Peer::default());
-		let request_token = crate::RequestToken::new(None);
-		let publisher = Publisher::new(
-			crate::time::Clock::sim(),
-			session,
-			origin.consume(),
-			Control::new(None, false),
-			None,
-			peer_setup,
-			VERSION,
-		)
-		.with_auth(auth)
-		.with_request_token(request_token.clone());
-
-		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-		for _ in 0..80 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			settle().await;
-		}
-		assert_eq!(occurrences(&log, b"cam"), 0, "withheld without a token");
-
-		request_token.set(Some(typed(&token)));
-		for _ in 0..80 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, &token) > 0 {
-				break;
-			}
-			settle().await;
-		}
-		assert_eq!(occurrences(&log, &token), 1, "the token carries the withheld namespace");
-	}
-
-	/// A token cleared while an advertisement outside the grant waits for its stream leaves
-	/// it carrying none: it is withdrawn, and setting a token again offers it afresh.
-	#[moq_net_sim::test]
-	async fn a_token_cleared_before_the_advertisement_goes_out_withdraws_it() {
-		const VERSION: Version = Version::Draft18;
-		let token = bytes::Bytes::from_static(&[0x03, 0x00, b'o', b'k']);
-
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
-		// A connection grant of "other", which does not cover "cam".
-		let auth = crate::auth::Handle::new(true);
-		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
-		auth.granted(
-			0,
-			crate::auth::Grant {
-				publish: crate::Pattern::subtree("other").unwrap().into(),
-				subscribe: crate::Patterns::new(),
-				expires: None,
-			},
-		);
-		let ok = publish_namespace_ok(VERSION).await;
-		let open = kio::Producer::new(false);
-		let session = crate::lite::test_transport::ScriptedSession::gated_open(vec![ok.clone(), ok], open.consume());
-		let log = session.log.clone();
-		let peer_setup = peer::PeerSetup::default();
-		peer_setup.set(peer::Peer::default());
-		let request_token = crate::RequestToken::new(Some(typed(&token)));
-		let publisher = Publisher::new(
-			crate::time::Clock::sim(),
-			session,
-			origin.consume(),
-			Control::new(None, false),
-			None,
-			peer_setup,
-			VERSION,
-		)
-		.with_auth(auth)
-		.with_request_token(request_token.clone());
-
-		// Offered under the token, then parked opening its stream while the token is cleared.
-		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-		for _ in 0..50 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			settle().await;
-		}
-		assert!(log.writes.lock().unwrap().is_empty(), "the advertisement was not held");
-		request_token.set(None);
-		let Ok(mut opened) = open.write() else {
-			panic!("stream gate closed");
-		};
-		*opened = true;
-		drop(opened);
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if !log.resets().is_empty() {
-				break;
-			}
-			settle().await;
-		}
-		assert_eq!(occurrences(&log, b"cam"), 1, "the advertisement went out");
-		assert_eq!(occurrences(&log, &token), 0, "carrying no token");
-		assert!(!log.resets().is_empty(), "and was withdrawn");
-
-		request_token.set(Some(typed(&token)));
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, &token) > 0 {
-				break;
-			}
-			settle().await;
-		}
-		assert_eq!(occurrences(&log, &token), 1, "a token set again offers it afresh");
-	}
-
-	/// The typed form of a raw USE_VALUE Token structure with a one-byte Token Type.
-	fn typed(raw: &[u8]) -> crate::setup::Token {
-		assert_eq!(raw[0], 0x03, "USE_VALUE");
-		crate::setup::Token {
-			kind: raw[1].into(),
-			value: raw[2..].to_vec(),
 		}
 	}
 }

@@ -4,7 +4,7 @@
 //! QUIC settings ([`crate::quic::Config`]) a binary shares with its accept half. The
 //! accept side is [`crate::server`].
 
-use crate::connection::{Goaway, RequestToken};
+use crate::connection::Goaway;
 use crate::{Addrs, Backoff, Connection, Error};
 #[cfg(all(feature = "websocket", feature = "noq"))]
 use std::future::Future;
@@ -42,9 +42,6 @@ impl Config {
 #[derive(Clone)]
 pub struct Client {
 	moq: moq_net::Client,
-	/// The request token from [`crate::connect::Config::with_request_token`], which seeds each
-	/// [`Connection`]'s own.
-	pub(crate) request_token: Option<moq_net::setup::Token>,
 	/// The single resolved set of protocol versions, used to advertise moq ALPNs across
 	/// every transport (passed into the QUIC backend's `connect` and used directly for
 	/// raw TCP/UDS qmux and WebSocket). Resolved once in [`Client::new`] so the ALPN list
@@ -147,7 +144,6 @@ impl Client {
 			moq: moq_net::Client::new()
 				.with_versions(versions.clone())
 				.with_extensions(config.extensions),
-			request_token: config.request_token.clone().map(|token| token.0),
 			#[cfg(any(
 				feature = "noq",
 				feature = "iroh",
@@ -325,7 +321,7 @@ impl Client {
 		feature = "tcp",
 		feature = "uds"
 	)))]
-	pub(crate) async fn dial(&self, _addr: crate::connect::Addr, _token: &RequestToken) -> crate::Result<Dialed> {
+	pub(crate) async fn dial(&self, _addr: crate::connect::Addr) -> crate::Result<Dialed> {
 		Err(Error::NoBackend(
 			"no backend compiled; enable noq, iroh, websocket, tcp, or uds feature",
 		))
@@ -344,10 +340,10 @@ impl Client {
 		feature = "tcp",
 		feature = "uds"
 	))]
-	pub(crate) async fn dial(&self, addr: crate::connect::Addr, token: &RequestToken) -> crate::Result<Dialed> {
+	pub(crate) async fn dial(&self, addr: crate::connect::Addr) -> crate::Result<Dialed> {
 		// Each compiled backend adds state to this dispatch future. Keep it off the
 		// caller's stack so all-feature builds remain safe on standard 2 MiB threads.
-		let attempt = Box::pin(self.connect_inner(addr, token));
+		let attempt = Box::pin(self.connect_inner(addr));
 
 		// The deadline covers the dial AND the handshake, for every transport: it is the
 		// only bound some of them have. Dropping `attempt` on expiry cancels whichever
@@ -386,7 +382,7 @@ impl Client {
 		feature = "tcp",
 		feature = "uds"
 	))]
-	async fn connect_inner(&self, addr: crate::connect::Addr, token: &RequestToken) -> crate::Result<Dialed> {
+	async fn connect_inner(&self, addr: crate::connect::Addr) -> crate::Result<Dialed> {
 		let url = addr.url().clone();
 		// Transports with no request URI of their own advertise the request target in the
 		// SETUP instead; `setup_path` returns `None` for the ones that carry a URI, where
@@ -408,7 +404,6 @@ impl Client {
 			let session = connect_session(
 				&moq,
 				crate::transport::Session::new(session, moq_net::transport::Binding::InBand),
-				token,
 			)
 			.await?;
 			return Ok(Dialed::new(session, crate::Transport::Tcp));
@@ -428,7 +423,6 @@ impl Client {
 			let session = connect_session(
 				&moq,
 				crate::transport::Session::new(session, moq_net::transport::Binding::InBand),
-				token,
 			)
 			.await?;
 			return Ok(Dialed::new(session, crate::Transport::Tcp));
@@ -442,7 +436,6 @@ impl Client {
 			let session = connect_session(
 				&moq,
 				crate::transport::Session::new(session, moq_net::transport::Binding::InBand),
-				token,
 			)
 			.await?;
 			return Ok(Dialed::new(session, crate::Transport::Unix));
@@ -452,7 +445,7 @@ impl Client {
 		// nothing to race and the fallback's answer is the connect's verdict.
 		#[cfg(feature = "websocket")]
 		if matches!(url.scheme(), "ws" | "wss") {
-			return self.connect_websocket(addr, token).await;
+			return self.connect_websocket(addr).await;
 		}
 
 		// iroh offers the moq ALPNs ahead of H3, so two moq endpoints normally land on raw
@@ -475,7 +468,7 @@ impl Client {
 				crate::iroh::Binding::Raw => moq_net::transport::Binding::InBand,
 				crate::iroh::Binding::H3 => moq_net::transport::Binding::Uri,
 			};
-			let session = connect_session(&moq, crate::transport::Session::new(session, binding), token).await?;
+			let session = connect_session(&moq, crate::transport::Session::new(session, binding)).await?;
 			return Ok(Dialed::new(session, crate::Transport::Iroh));
 		}
 
@@ -495,19 +488,19 @@ impl Client {
 
 			#[cfg(feature = "websocket")]
 			{
-				return self.race_moq_connect(&moq, addr, quic_handle, token).await;
+				return self.race_moq_connect(&moq, addr, quic_handle).await;
 			}
 
 			#[cfg(not(feature = "websocket"))]
 			{
 				let session = quic_handle.await?;
-				let session = connect_session(&moq, session, token).await?;
+				let session = connect_session(&moq, session).await?;
 				return Ok(Dialed::new(session, quic_transport(&url)));
 			}
 		}
 
 		#[cfg(feature = "websocket")]
-		return self.connect_websocket(addr, token).await;
+		return self.connect_websocket(addr).await;
 
 		#[cfg(not(feature = "websocket"))]
 		return Err(Error::NoBackend("no QUIC backend matched; this should not happen"));
@@ -516,14 +509,13 @@ impl Client {
 	/// Connect over WebSocket alone. qmux over WebSocket carries the path in its request
 	/// URI, so the plain builder is used: repeating it in the SETUP is a protocol violation.
 	#[cfg(feature = "websocket")]
-	async fn connect_websocket(&self, addr: crate::connect::Addr, token: &RequestToken) -> crate::Result<Dialed> {
+	async fn connect_websocket(&self, addr: crate::connect::Addr) -> crate::Result<Dialed> {
 		let alpns = self.versions.alpns();
 		let session =
 			crate::websocket::connect(&self.websocket, &self.tls, self.tls_host_name.as_deref(), addr, &alpns).await?;
 		let session = connect_session(
 			&self.moq,
 			crate::transport::Session::new(session, moq_net::transport::Binding::Uri),
-			token,
 		)
 		.await?;
 		Ok(Dialed::new(session, crate::Transport::WebSocket))
@@ -544,7 +536,6 @@ impl Client {
 		moq: &moq_net::Client,
 		addr: crate::connect::Addr,
 		quic: Q,
-		token: &RequestToken,
 	) -> crate::Result<Dialed>
 	where
 		Q: Future<Output = crate::Result<S>>,
@@ -563,12 +554,11 @@ impl Client {
 		};
 
 		match race_transport_connect(&url, quic, websocket).await? {
-			TransportRace::Quic(quic) => Ok(Dialed::new(connect_session(moq, quic, token).await?, transport)),
+			TransportRace::Quic(quic) => Ok(Dialed::new(connect_session(moq, quic).await?, transport)),
 			TransportRace::WebSocket(session) => {
 				let session = connect_session(
 					&self.moq,
 					crate::transport::Session::new(session, moq_net::transport::Binding::Uri),
-					token,
 				)
 				.await?;
 				Ok(Dialed::new(session, crate::Transport::WebSocket))
@@ -783,15 +773,10 @@ fn race_error(quic: Error, websocket: Error) -> Error {
 async fn connect_session<S: moq_net::transport::poll::Boxable>(
 	client: &moq_net::Client,
 	transport: S,
-	token: &RequestToken,
-) -> crate::Result<moq_net::Session> {
+) -> Result<moq_net::Session, moq_net::Error> {
 	let (session, driver) = client
 		.connect(tokio::time::Instant::now().into_std(), transport)
 		.await?;
-	// Before the driver runs, so the first request carries the newest token. A session that
-	// cannot carry one (moq-lite) fails the dial as Unsupported, which is terminal, rather
-	// than drop it.
-	token.attach(session.auth())?;
 	use tracing::Instrument;
 	tokio::spawn(crate::panic::isolate(moq_net::time::run(driver)).instrument(tracing::Span::current()));
 	Ok(session)
@@ -1461,7 +1446,7 @@ mod tests {
 
 		let dialed = tokio::time::timeout(
 			std::time::Duration::from_secs(10),
-			client.race_moq_connect(&client.moq, ws_addr, quic, &RequestToken::default()),
+			client.race_moq_connect(&client.moq, ws_addr, quic),
 		)
 		.await
 		.expect("client connect timed out")
@@ -1554,7 +1539,7 @@ mod tests {
 			))
 		});
 		let cc = client
-			.race_moq_connect(&client.moq, ws_addr, quic, &RequestToken::default())
+			.race_moq_connect(&client.moq, ws_addr, quic)
 			.await
 			.expect("client connect failed");
 
@@ -1775,8 +1760,7 @@ mod tests {
 
 		// `dial` rather than `connect`: this is about one attempt's deadline, and
 		// `connect` now hands back a reconnect loop that would redial past it.
-		let token = RequestToken::default();
-		let mut attempt = Box::pin(client.dial(url.into(), &token));
+		let mut attempt = Box::pin(client.dial(url.into()));
 		let _silent = tokio::select! {
 			res = &mut attempt => match res {
 				Err(err) => panic!("connect failed before the silent peer accepted it: {err}"),

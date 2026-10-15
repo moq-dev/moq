@@ -297,8 +297,6 @@ impl Server {
 			}
 			PausedHandshake::Boxed(_) => false,
 		});
-		// Refuse a request token set before `ok()` too.
-		auth.lite();
 		Ok(Handshake {
 			path,
 			role,
@@ -451,19 +449,14 @@ impl Server {
 			Version::Lite(_) => (None, None, None, ietf::peer::Peer::default()),
 		};
 
-		// Lite 01/02 and moq-transport 14-16 carry no AUTH.
-		let auth = crate::auth::Handle::new(false);
-		// Refuse a request token set before `ok()` too.
-		if matches!(version, Version::Lite(_)) {
-			auth.lite();
-		}
 		Ok(Handshake {
 			path,
 			role: None,
 			origin: None,
 			token,
 			assigned_hop: crate::Hop::random(),
-			auth,
+			// Lite 01/02 and moq-transport 14-16 carry no AUTH.
+			auth: crate::auth::Handle::new(false),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -1224,7 +1217,7 @@ mod tests {
 		params
 	}
 
-	/// A verifier taken with `Request::auth().scoped()` BEFORE `ok()` must govern the
+	/// An acceptor taken with `Request::auth().requests()` BEFORE `ok()` must govern the
 	/// session the driver then runs, through the REAL accept path (`accept_request` -> `ok`).
 	/// The session's own `auth()` (the handle the driver polls) routes a request token to that
 	/// pre-ok consumer instead of falling to the `Unsupported` default, and granting admits.
@@ -1251,7 +1244,7 @@ mod tests {
 				.unwrap_or_else(|e| panic!("accept at {version:?}: {e}"));
 
 			// Install the verifier before ok(), as a QUIC server must.
-			let mut requests = request.auth().scoped().expect("scoped() pre-ok");
+			let mut requests = request.auth().requests().expect("requests() pre-ok");
 			let (net_session, _driver) = request.ok().await.unwrap_or_else(|e| panic!("ok at {version:?}: {e}"));
 
 			// The session's own handle is the one the driver polls. Verifying a request token on
@@ -1259,20 +1252,13 @@ mod tests {
 			// the Unsupported default and the consumer would never see this request.
 			let verdict = net_session.auth().verify_request(
 				crate::setup::Token {
-					kind: 1,
+					kind: crate::setup::Token::OUT_OF_BAND,
 					value: b"jwt".to_vec(),
 				},
-				crate::PathOwned::from("room/alice".to_string()),
-				crate::auth::RequestKind::PublishNamespace,
 				None,
 			);
 			let received = requests.next().await.expect("the pre-ok consumer receives the request");
-			assert_eq!(received.path().as_str(), "room/alice", "{version:?}");
-			assert_eq!(
-				received.kind(),
-				crate::auth::RequestKind::PublishNamespace,
-				"{version:?}"
-			);
+			assert_eq!(received.token().as_ref(), b"jwt", "{version:?}");
 			let _issued = received.accept(crate::auth::Grant::all());
 			assert!(verdict.grant().await.is_ok(), "granting admits at {version:?}");
 		}
@@ -1377,21 +1363,6 @@ mod tests {
 		let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
 		assert_eq!(request.path(), "/team/room");
 		assert_eq!(request.role(), None, "a client that omits the role is bidirectional");
-	}
-
-	/// moq-lite carries no request token, so setting one before `ok()` already refuses.
-	#[moq_net_sim::test]
-	async fn a_lite_handshake_refuses_a_request_token() {
-		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]);
-		let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
-		let token = crate::setup::Token {
-			kind: 0,
-			value: b"jwt".to_vec(),
-		};
-		assert!(matches!(
-			request.auth().set_request_token(Some(token)),
-			Err(Error::Unsupported)
-		));
 	}
 
 	#[moq_net_sim::test]
