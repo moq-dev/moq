@@ -41,8 +41,7 @@ pub(super) fn poll_cancel<S: crate::transport::poll::Session>(
 /// Watch for the requester ending a request it has not been answered on yet, without consuming
 /// what it sent meanwhile: a waiting message (an update, say) ends the watch on the reader and
 /// is read once the request is answered. A withdrawal queued behind an update is therefore seen
-/// only then; until the verifier answers, the requester holds nothing but its own slot, and every
-/// update is still decoded and validated in order.
+/// only then; until the verifier answers, the requester holds nothing but its own slot.
 pub(super) fn poll_withdrawn<S: crate::transport::poll::Session>(
 	stream: &mut Stream<S, Version>,
 	version: Version,
