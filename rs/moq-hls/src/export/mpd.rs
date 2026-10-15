@@ -13,7 +13,7 @@
 //! `Representation` id keeps the raw name. The resources are shared byte-for-byte with the
 //! HLS routes; only the time-addressed segment alias `seg/t<pts>.m4s` is DASH's own.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -53,6 +53,8 @@ pub(crate) struct Representation {
 	/// Whether this rendition's window has ended (the broadcast finished). Not rendered;
 	/// [`Manifest`] callers use it to pick static vs dynamic.
 	pub ended: bool,
+	/// The content timestamp where this reference period started.
+	pub period: Duration,
 	/// The init segment's content hash (`init.{init}.mp4`).
 	pub init: String,
 	/// The [`tag`](super::segments::tag) of the reference numbering the segments.
@@ -95,9 +97,11 @@ fn escape(value: &str) -> String {
 	out
 }
 
-/// An `xs:duration` with millisecond precision (`PT2.000S`).
+/// An exact `xs:duration` with at least millisecond precision (`PT2.000S`).
 fn xs_duration(duration: Duration) -> String {
-	format!("PT{:.3}S", duration.as_secs_f64())
+	let nanos = format!("{:09}", duration.subsec_nanos());
+	let fraction = nanos.trim_end_matches('0');
+	format!("PT{}.{:0<3}S", duration.as_secs(), fraction)
 }
 
 /// `@frameRate` must be an integer or a fraction; approximate a fractional rate over 1000
@@ -118,16 +122,18 @@ fn duration(units: u64, timescale: u32) -> Duration {
 	Duration::from_nanos((u128::from(units) * 1_000_000_000 / u128::from(timescale.max(1))) as u64)
 }
 
-/// The longest span any representation lists, oldest segment start to newest segment end.
+/// The retained presentation span across representations and reference periods.
 fn listed_span<'a>(representations: impl Iterator<Item = &'a Representation>) -> Duration {
-	representations
+	let spans: Vec<_> = representations
 		.filter_map(|rep| {
 			let (first, _) = rep.segments.first()?;
 			let (last, d) = rep.segments.last()?;
-			Some(duration(last + d - first, rep.timescale))
+			Some((duration(*first, rep.timescale), duration(last + d, rep.timescale)))
 		})
-		.max()
-		.unwrap_or_default()
+		.collect();
+	let first = spans.iter().map(|(first, _)| *first).min().unwrap_or_default();
+	let last = spans.iter().map(|(_, last)| *last).max().unwrap_or_default();
+	last.saturating_sub(first)
 }
 
 /// The largest listed segment duration in whole seconds, for `MPD@maxSegmentDuration` (and the
@@ -186,9 +192,15 @@ fn render_representation(out: &mut String, rep: &Representation, query: Option<&
 		);
 	}
 
+	let offset = if rep.period.is_zero() {
+		String::new()
+	} else {
+		let offset = rep.period.as_nanos() * u128::from(rep.timescale.max(1)) / 1_000_000_000;
+		format!(" presentationTimeOffset=\"{offset}\"")
+	};
 	let _ = writeln!(
 		out,
-		"        <SegmentTemplate timescale=\"{}\" initialization=\"{initialization}\" media=\"{media}\">",
+		"        <SegmentTemplate timescale=\"{}\" initialization=\"{initialization}\" media=\"{media}\"{offset}>",
 		rep.timescale.max(1)
 	);
 	let _ = writeln!(out, "          <SegmentTimeline>");
@@ -202,7 +214,12 @@ fn render_representation(out: &mut String, rep: &Representation, query: Option<&
 	let _ = writeln!(out, "      </Representation>");
 }
 
-fn render_adaptation_sets(out: &mut String, kind: Kind, representations: &[Representation], query: Option<&str>) {
+fn render_adaptation_sets<'a>(
+	out: &mut String,
+	kind: Kind,
+	representations: impl Iterator<Item = &'a Representation>,
+	query: Option<&str>,
+) {
 	// Representations in one AdaptationSet must be seamlessly switchable, so group by codec
 	// (mirroring the HLS master's audio groups).
 	let mut codecs = BTreeMap::<&str, Vec<&Representation>>::new();
@@ -249,8 +266,8 @@ pub(crate) fn render_manifest(manifest: &Manifest, query: Option<&str>) -> Strin
 		"<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" profiles=\"urn:mpeg:dash:profile:isoff-live:2011\""
 	);
 	if manifest.finished {
-		// Presentation time stays anchored at pts 0 in both states (no
-		// presentationTimeOffset), so a player that followed the live presentation keeps the
+		// Period starts and presentationTimeOffset retain the absolute content time in
+		// both states, so a player that followed the live presentation keeps the
 		// same segment-to-time mapping when the manifest turns static; DASH forbids shifting
 		// representation timing across MPD updates. The duration therefore spans from pts 0,
 		// and a fresh static viewer starts at the earliest listed S@t (players seek to the
@@ -291,10 +308,28 @@ pub(crate) fn render_manifest(manifest: &Manifest, query: Option<&str>) -> Strin
 		xs_duration(Duration::from_secs(target)),
 	);
 
-	let _ = writeln!(out, "  <Period id=\"0\" start=\"PT0.000S\">");
-	render_adaptation_sets(&mut out, Kind::Video, &manifest.video, query);
-	render_adaptation_sets(&mut out, Kind::Audio, &manifest.audio, query);
-	let _ = writeln!(out, "  </Period>");
+	let periods: BTreeSet<_> = representations().map(|rep| rep.period).collect();
+	for period in periods {
+		let _ = writeln!(
+			out,
+			"  <Period id=\"{}\" start=\"{}\">",
+			period.as_nanos(),
+			xs_duration(period)
+		);
+		render_adaptation_sets(
+			&mut out,
+			Kind::Video,
+			manifest.video.iter().filter(|rep| rep.period == period),
+			query,
+		);
+		render_adaptation_sets(
+			&mut out,
+			Kind::Audio,
+			manifest.audio.iter().filter(|rep| rep.period == period),
+			query,
+		);
+		let _ = writeln!(out, "  </Period>");
+	}
 	let _ = writeln!(out, "</MPD>");
 	out
 }
@@ -317,10 +352,34 @@ mod tests {
 			timescale: 1000,
 			segments,
 			ended,
+			period: Duration::ZERO,
 			init: "0123abcd".into(),
 			tag: "ab12cd34".into(),
 			generation: None,
 		}
+	}
+
+	#[test]
+	fn handoff_periods_preserve_absolute_time_and_source_templates() {
+		let old = video(vec![(4_000, 2_000)], false);
+		let mut next = video(vec![(6_000, 2_000)], false);
+		next.period = Duration::from_secs(6);
+		next.tag = "next".into();
+		let manifest = Manifest {
+			availability_start: Some(SystemTime::UNIX_EPOCH),
+			publish: SystemTime::UNIX_EPOCH,
+			window: None,
+			finished: false,
+			video: vec![old, next],
+			audio: Vec::new(),
+		};
+		let rendered = render_manifest(&manifest, None);
+		assert_eq!(rendered.matches("<Period ").count(), 2);
+		assert!(rendered.contains("start=\"PT6.000S\""), "{rendered}");
+		assert!(rendered.contains("presentationTimeOffset=\"6000\""), "{rendered}");
+		assert!(rendered.contains("timeShiftBufferDepth=\"PT4.000S\""), "{rendered}");
+		assert!(rendered.contains("next.t$Time$"), "{rendered}");
+		assert_eq!(xs_duration(Duration::from_nanos(6_000_000_001)), "PT6.000000001S");
 	}
 
 	fn audio(segments: Vec<(u64, u64)>, ended: bool) -> Representation {
@@ -337,6 +396,7 @@ mod tests {
 			timescale: 1000,
 			segments,
 			ended,
+			period: Duration::ZERO,
 			init: "4567cdef".into(),
 			tag: "ab12cd34".into(),
 			generation: None,

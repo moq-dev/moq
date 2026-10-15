@@ -34,7 +34,7 @@ What that means for you:
 - **Live joins cost the window.** The default exporter reads the timeline checkpoint and lists at most 256 segments. `export::Config::history` reads a durable recording's retained timeline groups from the beginning instead of joining only the checkpoint tail.
 - **Publish timelines.** A broadcast whose catalog advertises no timelines is skipped.
 - **Align GOPs across video renditions.** Segment boundaries come from one reference rendition. Other video renditions snap to their nearest keyframe, and a segment with none nearby becomes an `EXT-X-GAP`.
-- **Disabled renditions are hidden.** A rendition the catalog marks `enabled: false` leaves the multivariant playlist and DASH manifest until it re-enables. Its media playlist keeps serving, so a player already on it is not ended with `EXT-X-ENDLIST`.
+- **Disabled renditions are hidden.** A rendition the catalog marks `enabled: false` leaves the multivariant playlist and DASH manifest until it re-enables. Its media playlist keeps serving, so a player already on it is not ended with `EXT-X-ENDLIST`. If it supplied segment boundaries, an enabled sibling takes over at a shared boundary; the HLS media sequence continues and DASH starts a new period. When the old tail has no shared boundary, export resumes at the next replacement boundary with a gap/discontinuity, preserving already-advertised segment URLs.
 - **Segment URLs are stable.** Every edge and every reload derive the same URLs, so a CDN in front of export caches them.
 
 A [`moq-archive`](https://docs.rs/moq-archive) recording replayed through its

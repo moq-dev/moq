@@ -50,7 +50,14 @@ struct Feed {
 	/// Recent reference records with their discontinuity sequence, replayed into a rendition
 	/// created mid-broadcast so its playlist window isn't empty until the next record. Evicted with
 	/// the same policy as the windows.
-	history: VecDeque<(u64, Entry, Reference, u64)>,
+	history: VecDeque<segments::Row>,
+	/// The last accepted row survives source pops, so a handoff cannot rewind or reuse a position.
+	last: Option<segments::Row>,
+	/// Catalog-managed reader identity; pointer identity also rejects a cancelled reader of
+	/// the same reference after a rapid disable/re-enable. No selected reader freezes the window.
+	selection: Option<Option<Reference>>,
+	/// A new watcher first replays its checkpoint, including records already advertised.
+	joining: bool,
 	/// Stamps each record once, so every rendition agrees on where the timeline breaks.
 	discontinuities: Discontinuities,
 	/// The timeline ended cleanly; late-created renditions start ended (`EXT-X-ENDLIST`).
@@ -70,6 +77,16 @@ struct Feed {
 	/// [`Config::history`](super::Config::history) mode, where only the source timeline's pops
 	/// trim the playlists.
 	window: Option<Duration>,
+}
+
+impl Feed {
+	fn accepts(&self, reference: &Reference) -> bool {
+		self.selection.as_ref().is_none_or(|selected| {
+			selected
+				.as_ref()
+				.is_some_and(|selected| Arc::ptr_eq(selected, reference))
+		})
+	}
 }
 
 /// The producing side of a broadcast's rendition set.
@@ -102,6 +119,9 @@ impl Producer {
 				feed: Arc::new(Mutex::new(Feed {
 					targets: Vec::new(),
 					history: VecDeque::new(),
+					last: None,
+					selection: None,
+					joining: false,
 					discontinuities: Discontinuities::default(),
 					ended: false,
 					closed: false,
@@ -179,8 +199,7 @@ impl Producer {
 	/// Close the channel, signalling consumers that no more renditions will appear.
 	///
 	/// Deliberately does NOT cascade into the renditions' own segment windows: those are ended
-	/// or closed by the timeline watcher (see [`Fanout::end_windows`] /
-	/// [`Fanout::close_windows`]), whose clean-end path must run `end()` before `close()` or
+	/// or closed by the timeline watcher (see [`Fanout::finish`]), whose clean-end path must run `end()` before `close()` or
 	/// the playlist never gets its `EXT-X-ENDLIST`.
 	pub fn close(&self) {
 		let _ = self.state.close();
@@ -194,66 +213,106 @@ impl Fanout {
 		self.feed.lock().unwrap().window = None;
 	}
 
-	/// Fan one reference timeline record out to every living rendition, and into the replay
-	/// history.
+	/// Select the next reference without discarding any advertised segment.
+	pub fn select(&self, reference: Option<Reference>) {
+		let mut feed = self.feed.lock().unwrap();
+		feed.selection = Some(reference);
+		feed.joining = true;
+	}
+
+	/// Fan one reference timeline record out to every living rendition, and into replay history.
 	pub fn push(&self, index: u64, entry: Entry, reference: &Reference) {
 		let mut feed = self.feed.lock().unwrap();
-
-		// Same eviction policy as the per-rendition windows, so a replay reconstructs the
-		// same window a live rendition would have.
-		if let Some((_, back, _, _)) = feed.history.back()
-			&& (Duration::from(entry.pts) < Duration::from(back.pts) || entry.sequence <= back.sequence)
-		{
-			feed.history.clear();
-			feed.anchor = None;
-		}
-		if feed.anchor.is_none() {
-			// A record publishes once its segment is complete, so assume it ended just now:
-			// pts 0 then maps to `now - (pts + duration)`.
-			let end = Duration::from(entry.pts) + entry.duration;
-			feed.anchor = Some(SystemTime::now().checked_sub(end).unwrap_or(SystemTime::UNIX_EPOCH));
+		if !feed.accepts(reference) {
+			return;
 		}
 		let pts = Duration::from(entry.pts);
-		let discontinuity = feed.discontinuities.stamp(pts, pts + entry.duration);
-		feed.history
-			.push_back((index, entry.clone(), reference.clone(), discontinuity));
+		let end = entry.end_time();
+		if let Some(last) = &feed.last {
+			if (feed.joining || last.reference != *reference) && pts < last.end && !segments::continues(last.end, pts) {
+				// A checkpoint can contain the new reference's earlier, differently numbered
+				// records. They must never replace content a player has already seen.
+				return;
+			}
+			if last.reference == *reference && (pts < Duration::from(last.pts) || entry.sequence <= last.segment) {
+				feed.history.clear();
+				feed.last = None;
+				feed.anchor = None;
+			}
+		}
+		feed.joining = false;
+		if feed.anchor.is_none() {
+			feed.anchor = Some(SystemTime::now().checked_sub(end).unwrap_or(SystemTime::UNIX_EPOCH));
+		}
+		let media_sequence = feed.last.as_ref().map_or(entry.sequence, |last| {
+			let advance = if last.reference == *reference {
+				entry.sequence - last.segment
+			} else {
+				1
+			};
+			last.media_sequence
+				.checked_add(advance)
+				.expect("HLS media sequence overflow")
+		});
+		let period = feed.last.as_ref().map_or(Duration::ZERO, |last| {
+			if last.reference == *reference { last.period } else { pts }
+		});
+		let discontinuity = feed.discontinuities.stamp(pts, end);
+		let row = segments::Row {
+			index,
+			segment: entry.sequence,
+			media_sequence,
+			period,
+			reference: reference.clone(),
+			frames: entry.start..entry.end,
+			keyframe: entry.keyframe,
+			duration: entry.duration,
+			pts: entry.pts,
+			end,
+			discontinuity,
+		};
+		feed.last = Some(row.clone());
+		feed.history.push_back(row.clone());
 		let window = feed.window;
 		while let Some(window) = window {
-			let rest = match feed.history.get(1) {
-				Some((_, second, ..)) => {
-					let newest = &feed.history.back().unwrap().1;
-					newest.end_time().saturating_sub(Duration::from(second.pts))
-				}
-				None => Duration::ZERO,
-			};
-			let starts = |(_, entry, reference, _): &(u64, Entry, Reference, u64)| {
-				segments::starts(reference, entry.keyframe, &entry.start)
-			};
-			let keeps_start = !starts(&feed.history[0]) || feed.history.iter().skip(1).any(starts);
+			let rest = feed.history.get(1).map_or(Duration::ZERO, |second| {
+				feed.history.back().unwrap().end.saturating_sub(second.pts.into())
+			});
+			let keeps_start = !feed.history[0].starts() || feed.history.iter().skip(1).any(segments::Row::starts);
 			if !segments::evicts(window, feed.history.len(), rest, keeps_start) {
 				break;
 			}
 			feed.history.pop_front();
 		}
-
 		feed.targets.retain(|target| {
 			let Some(rendition) = target.upgrade() else {
 				return false;
 			};
-			rendition.push(index, &entry, reference, discontinuity, window);
+			rendition.push(row.clone(), window);
 			true
 		});
 	}
 
 	/// Remove records that left the source timeline window from every rendition window.
-	pub fn pop(&self, range: std::ops::Range<u64>) {
+	pub fn pop(&self, range: std::ops::Range<u64>, reference: &Reference) {
 		let mut feed = self.feed.lock().unwrap();
-		feed.history.retain(|(index, ..)| !range.contains(index));
+		let Some(through) = feed
+			.history
+			.iter()
+			.filter(|row| row.reference == *reference && range.contains(&row.index))
+			.map(|row| row.media_sequence)
+			.max()
+		else {
+			return;
+		};
+		// HLS assigns consecutive positions within a playlist. Removing an interior row
+		// would renumber every later URI, so retention always retires a whole prefix.
+		feed.history.retain(|row| row.media_sequence > through);
 		feed.targets.retain(|target| {
 			let Some(rendition) = target.upgrade() else {
 				return false;
 			};
-			rendition.pop(range.clone());
+			rendition.retire(through);
 			true
 		});
 	}
@@ -272,6 +331,7 @@ impl Fanout {
 		feed.generation = generation.clone();
 		if restart {
 			feed.history.clear();
+			feed.last = None;
 			feed.discontinuities.interrupt();
 			feed.anchor = None;
 		}
@@ -289,9 +349,17 @@ impl Fanout {
 	}
 
 	/// Clear stale rows after source records were skipped before this reader saw them.
-	pub fn skip(&self) {
+	pub fn skip(&self, reference: Option<&Reference>) {
 		let mut feed = self.feed.lock().unwrap();
+		if let Some(reference) = reference
+			&& (feed.joining || !feed.accepts(reference))
+		{
+			return;
+		}
 		feed.history.clear();
+		if reference.is_none() {
+			feed.last = None;
+		}
 		feed.discontinuities.interrupt();
 		feed.targets.retain(|target| {
 			let Some(rendition) = target.upgrade() else {
@@ -302,31 +370,23 @@ impl Fanout {
 		});
 	}
 
-	/// Mark every living rendition's window ended (the timeline finished or failed).
-	pub fn end_windows(&self) {
+	/// End the selected watcher, ignoring a superseded watcher's completion.
+	pub fn finish(&self, reference: &Reference) -> bool {
 		let mut feed = self.feed.lock().unwrap();
+		if !feed.accepts(reference) {
+			return false;
+		}
 		feed.ended = true;
-		feed.targets.retain(|target| {
-			let Some(rendition) = target.upgrade() else {
-				return false;
-			};
-			rendition.end();
-			true
-		});
-	}
-
-	/// Close every living rendition's window: no more records will arrive. Cursors drain what
-	/// they can still see and end; the serve path keeps reading the frozen windows.
-	pub fn close_windows(&self) {
-		let mut feed = self.feed.lock().unwrap();
 		feed.closed = true;
 		feed.targets.retain(|target| {
 			let Some(rendition) = target.upgrade() else {
 				return false;
 			};
+			rendition.end();
 			rendition.close();
 			true
 		});
+		true
 	}
 }
 
@@ -376,8 +436,8 @@ impl Producer {
 		rendition.label(feed.generation.clone());
 		// An unwindowed feed is history mode: every rendition reads its timeline from the start.
 		rendition.watch(feed.window.is_none());
-		for (index, entry, reference, discontinuity) in &feed.history {
-			rendition.push(*index, entry, reference, *discontinuity, feed.window);
+		for row in &feed.history {
+			rendition.push(row.clone(), feed.window);
 		}
 		if feed.ended {
 			rendition.end();
@@ -553,4 +613,86 @@ fn next_event(current: &BTreeMap<Key, Arc<Rendition>>, seen: &BTreeMap<Key, Arc<
 		}
 	}
 	Poll::Pending
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn entry(sequence: u64, pts: u64) -> Entry {
+		let record = hang::timeline::Record::new(
+			sequence,
+			pts,
+			2_000,
+			hang::timeline::Position::group(sequence),
+			hang::timeline::Position::group(sequence + 1),
+		);
+		Entry::decode(record, moq_net::Timescale::MILLI).unwrap()
+	}
+
+	#[test]
+	fn a_source_skip_preserves_the_handoff_period_and_missing_positions() {
+		let fanout = Producer::new(Duration::from_secs(30)).fanout();
+		let old = Arc::new((Kind::Video, "old".into(), "old".into()));
+		let new = Arc::new((Kind::Video, "new".into(), "new".into()));
+		fanout.select(Some(old.clone()));
+		fanout.push(5, entry(5, 10_000), &old);
+		fanout.select(Some(new.clone()));
+		fanout.push(1, entry(1, 12_000), &new);
+		fanout.skip(Some(&new));
+		fanout.push(4, entry(4, 18_000), &new);
+		let feed = fanout.feed.lock().unwrap();
+		let last = feed.history.back().unwrap();
+		assert_eq!(last.media_sequence, 9);
+		assert_eq!(last.period, Duration::from_secs(12));
+		assert_eq!(last.discontinuity, 1);
+	}
+
+	#[test]
+	fn an_aborted_reader_of_the_same_reference_cannot_finish_its_replacement() {
+		let fanout = Producer::new(Duration::from_secs(30)).fanout();
+		let old = Arc::new((Kind::Video, "video".into(), "video".into()));
+		fanout.select(Some(old.clone()));
+		fanout.push(0, entry(0, 0), &old);
+		let replacement = Arc::new(old.as_ref().clone());
+		fanout.select(Some(replacement.clone()));
+		assert!(!fanout.finish(&old));
+		fanout.skip(Some(&old));
+		fanout.push(1, entry(1, 2_000), &old);
+		fanout.push(1, entry(1, 2_000), &replacement);
+		assert_eq!(fanout.feed.lock().unwrap().history.len(), 2);
+	}
+
+	#[test]
+	fn handoff_ignores_replayed_and_superseded_events() {
+		let producer = Producer::new(Duration::from_secs(30));
+		let fanout = producer.fanout();
+		let old = Arc::new((Kind::Video, "old".into(), "old".into()));
+		let new = Arc::new((Kind::Video, "new".into(), "new".into()));
+		fanout.select(Some(old.clone()));
+		fanout.push(5, entry(5, 10_000), &old);
+		fanout.select(Some(new.clone()));
+		fanout.push(6, entry(6, 12_000), &old);
+		assert!(!fanout.finish(&old));
+		fanout.skip(Some(&old));
+		fanout.skip(Some(&new));
+		fanout.push(0, entry(0, 0), &new);
+		fanout.push(4, entry(4, 12_000), &new);
+		{
+			let feed = fanout.feed.lock().unwrap();
+			assert_eq!(feed.history.len(), 2);
+			assert_eq!(feed.history.back().unwrap().media_sequence, 6);
+			assert_eq!(feed.history.back().unwrap().segment, 4);
+			assert!(!feed.ended);
+			assert_eq!(feed.history.back().unwrap().discontinuity, 0);
+		}
+		fanout.pop(0..4, &new);
+		assert_eq!(fanout.feed.lock().unwrap().history.len(), 2);
+		fanout.pop(0..6, &old);
+		assert_eq!(fanout.feed.lock().unwrap().history.len(), 1);
+		fanout.pop(4..5, &new);
+		assert!(fanout.feed.lock().unwrap().history.is_empty());
+		fanout.push(5, entry(5, 14_000), &new);
+		assert_eq!(fanout.feed.lock().unwrap().history.back().unwrap().media_sequence, 7);
+	}
 }

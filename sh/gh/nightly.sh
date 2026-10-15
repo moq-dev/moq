@@ -28,8 +28,8 @@ case "${1:-}" in
             --features moq-stats/bench \
             --bench http_idle --bench auth --bench producer_tick --bench decode --bench aggregate \
             --bench catalog --bench ts_schedule --bench export --bench chunk_interleaving -- --test
-        run just rs test -p moq-archive -p moq-mux --no-fail-fast \
-            -E 'test(benchmark_timeline_fetch_fanout) | test(benchmark_damage_pid_fanout)' \
+        run just rs test -p moq-archive -p moq-mux -p moq-hls --no-fail-fast \
+            -E 'test(benchmark_timeline_fetch_fanout) | test(benchmark_damage_pid_fanout) | test(benchmark_reference_handoff_fanout)' \
             --run-ignored only --success-output immediate
         # moq-gst's catalog bench shares a target name with moq-mux's, so it runs on its own.
         run just rs bench-gst-catalog -- --quick
