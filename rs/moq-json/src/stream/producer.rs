@@ -70,7 +70,9 @@ impl<T: Serialize> Producer<T> {
 	/// A record that might not fit in what is left of the group's budget is refused with
 	/// [`moq_net::Error::GroupTooLarge`] before anything is written, leaving the log intact. The
 	/// budget covers the whole log, so once it is spent every append is refused; a publisher with
-	/// more to say opens a new track.
+	/// more to say opens a new track. A timestamp whose presence doesn't match the track's timescale
+	/// is refused with [`moq_net::Error::TimestampMismatch`] the same way, so a corrected append
+	/// carries on.
 	///
 	/// Any other failure ends the track. A log missing a record is not the lossless log a stream
 	/// promises, and that holds whether the group rejected the record or it never encoded at all, so

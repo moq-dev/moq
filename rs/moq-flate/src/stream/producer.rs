@@ -54,7 +54,9 @@ impl Producer {
 	/// A payload that might not fit in what is left of the group's budget is refused with
 	/// [`moq_net::Error::GroupTooLarge`] before anything is written, leaving the log intact. The
 	/// budget covers the whole log, so once it is spent every append is refused; a publisher with
-	/// more to say opens a new track.
+	/// more to say opens a new track. A timestamp whose presence doesn't match the track's timescale
+	/// is refused with [`moq_net::Error::TimestampMismatch`] the same way, so a corrected append
+	/// carries on.
 	///
 	/// Any other payload that cannot be written ends the track: a log missing a record is not the
 	/// lossless log this mode promises, so the failure is surfaced rather than papered over with a
