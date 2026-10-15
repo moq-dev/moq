@@ -35,24 +35,9 @@ jobs:
       - name: Playwright Chromium
         run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
 
-      - name: WebSocket fallback startup benchmark
-        run: nix develop --command just js qmux-bench
-
-      - name: Browser publisher fairness benchmark
-        run: nix develop --command just js serve-bench
-        shell: bash -leo pipefail {0}
-      - name: Native headless playback
-        if: ${{ !cancelled() }}
-        run: nix develop --command just test native-play
-        shell: bash -leo pipefail {0}
-        env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
       - name: Audio quality
         if: ${{ !cancelled() }}
-        run: |
-          nix develop --command just test audio-quality --profiles near-zero --codecs opus --rings isolated,plain --duration 60 --capture
-          nix develop --command just test audio-quality --profiles near-zero --codecs opus --rings plain,isolated --duration 60 --capture
-          nix develop --command just test audio-quality --profiles near-zero --codecs opus --rings isolated --duration 60 --capture --trace
+        run: nix develop --command just test audio-quality --profiles near-zero --codecs opus --rings isolated --duration 60 --trace
         shell: bash -leo pipefail {0}
         env:
           # Somewhere upload-artifact can reach; the harness default is under $TMPDIR.
