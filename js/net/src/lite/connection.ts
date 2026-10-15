@@ -317,6 +317,8 @@ export class Connection implements Established {
 	async #runBidi(stream: Stream) {
 		const typ = await stream.reader.u53();
 
+		// A type this version does not know, including one it predates, is an extension stream
+		// opened without negotiating it: a plain error resets the stream and keeps the session.
 		if (typ === StreamId.Session) {
 			throw new ProtocolViolation("duplicate session stream");
 		} else if (typ === StreamId.Announce) {
@@ -331,7 +333,7 @@ export class Connection implements Established {
 				})(),
 			);
 		} else if (typ === StreamId.Fetch) {
-			if (!hasSetupStream(this.#version)) throw new ProtocolViolation("FETCH is not supported on this version");
+			if (!hasSetupStream(this.#version)) throw new Error("FETCH is not supported on this version");
 			await this.#publisher.owe(
 				(async () => {
 					const msg = await Fetch.decode(stream.reader, this.#version);
@@ -339,7 +341,7 @@ export class Connection implements Established {
 				})(),
 			);
 		} else if (typ === StreamId.Track) {
-			if (!hasSetupStream(this.#version)) throw new ProtocolViolation("TRACK is not supported on this version");
+			if (!hasSetupStream(this.#version)) throw new Error("TRACK is not supported on this version");
 			await this.#publisher.owe(
 				(async () => {
 					const msg = await TrackMessage.decode(stream.reader, this.#version);
@@ -348,10 +350,10 @@ export class Connection implements Established {
 			);
 		} else if (typ === StreamId.Probe) {
 			if (this.#version === Version.DRAFT_01 || this.#version === Version.DRAFT_02)
-				throw new ProtocolViolation("PROBE is not supported on this version");
+				throw new Error("PROBE is not supported on this version");
 			await this.#publisher.runProbe(stream);
 		} else if (typ === StreamId.Auth) {
-			if (!hasAuth(this.#version)) throw new ProtocolViolation("AUTH is not supported on this version");
+			if (!hasAuth(this.#version)) throw new Error("AUTH is not supported on this version");
 			await this.#auth.serve(stream);
 		} else if (typ === StreamId.Goaway) {
 			if (
@@ -359,14 +361,14 @@ export class Connection implements Established {
 				this.#version === Version.DRAFT_02 ||
 				this.#version === Version.DRAFT_03
 			)
-				throw new ProtocolViolation("GOAWAY is not supported on this version");
+				throw new Error("GOAWAY is not supported on this version");
 			const msg = await Goaway.decode(stream.reader, this.#version);
 			// A peer sends at most one; a second is a protocol violation.
 			if (this.#goaway.peek() !== undefined) throw new ProtocolViolation("duplicate GOAWAY");
 			if (!this.#client && msg.uri !== "") throw new ProtocolViolation("client GOAWAY URI must be empty");
 			this.#goaway.set({ uri: msg.uri });
 		} else {
-			throw new ProtocolViolation(`unknown stream type: ${typ.toString()}`);
+			throw new Error(`unknown stream type: ${typ.toString()}`);
 		}
 	}
 

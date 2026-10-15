@@ -131,6 +131,21 @@ for (const [alpn, version] of versions) {
 }
 
 for (const [alpn, version] of [[ALPN_04, Version.DRAFT_04], ...versions] as const) {
+	// An unassigned type, and the Auth Stream on versions that predate it.
+	for (const typ of version === Version.DRAFT_07 ? [8] : [8, StreamId.Auth]) {
+		test(`${alpn}: unknown stream type ${typ} resets only its stream`, async () => {
+			const f = fixture(alpn, version);
+			try {
+				const stream = await Stream.open(f.pair.server, { version });
+				await stream.writer.u53(typ);
+				await expect(stream.reader.closed).rejects.toThrow();
+				await settle();
+				expect(f.close).not.toHaveBeenCalled();
+			} finally {
+				await f.dispose();
+			}
+		});
+	}
 	test(`${alpn}: an oversized GOAWAY URI closes the session`, async () => {
 		const f = fixture(alpn, version);
 		try {
@@ -161,7 +176,7 @@ for (const [alpn, version] of [[ALPN_04, Version.DRAFT_04], ...versions] as cons
 			try {
 				const stream = await Stream.open(f.pair.server, { version });
 				await stream.writer.u53(StreamId.Goaway);
-				if (reset) stream.close();
+				if (reset) stream.abort(new StreamError(StreamCode.Cancel));
 				else stream.writer.close();
 				await settle();
 				expect(f.violated()).toBe(false);

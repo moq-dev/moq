@@ -1699,6 +1699,27 @@ test("a publisher FIN without SUBSCRIBE_END still violates an open subscription"
 	}
 });
 
+test("a retired subscribe response type closes the session", async () => {
+	const { quic, streams, opened, closes } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], Version.DRAFT_07);
+		await (await opened(1)).reading;
+		// lite-07 retired SUBSCRIBE_DROP (0x2), so it is no longer a response type.
+		streams[1].inbound.enqueue(new Uint8Array([2, 0]));
+		expect(await track.closed).toBeInstanceOf(ProtocolViolation);
+		await drainReactions();
+		expect(closes.map((info) => info?.closeCode)).toEqual([SessionCode.ProtocolViolation]);
+	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
 test("closing a broadcast while TRACK_INFO is pending leaves no unhandled rejection", async () => {
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));

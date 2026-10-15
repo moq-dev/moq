@@ -320,10 +320,28 @@ impl<S: crate::transport::poll::Session> Control<S> {
 			match &mut self.state {
 				ControlState::Start { stream } => {
 					let mut cx = waiter.context();
-					let kind = ready!(stream.reader.poll_decode::<lite::ControlType>(&mut cx))?;
+					let kind = match ready!(stream.reader.poll_decode::<lite::ControlType>(&mut cx)) {
+						Ok(kind) => Some(kind),
+						// The only way a type decodes invalid is an unknown value.
+						Err(Error::Decode(crate::DecodeError::InvalidValue)) => None,
+						Err(err) => return Poll::Ready(Err(err)),
+					};
+					let version = self.shared.version;
+					// The Track Stream and FETCH are lite-05+ only, and the Auth Stream lite-07+.
+					let kind = kind.filter(|kind| match kind {
+						lite::ControlType::Fetch | lite::ControlType::Track => version.has_track_stream(),
+						lite::ControlType::Auth => version.has_auth(),
+						_ => true,
+					});
 
 					let ControlState::Start { stream } = std::mem::replace(&mut self.state, ControlState::Done) else {
 						unreachable!()
+					};
+					let Some(kind) = kind else {
+						// A type this version does not know is an extension stream opened without
+						// negotiating it: the draft refuses the stream and keeps the session.
+						stream.writer.abort(&Error::Unsupported);
+						return Poll::Ready(Ok(()));
 					};
 					self.state = match kind {
 						lite::ControlType::Announce => {
@@ -331,12 +349,6 @@ impl<S: crate::transport::poll::Session> Control<S> {
 						}
 						lite::ControlType::Subscribe => {
 							ControlState::Subscribe(RequestServe::new(self.shared.clone(), stream))
-						}
-						// The Track Stream and FETCH are lite-05+ only.
-						lite::ControlType::Fetch | lite::ControlType::Track
-							if !self.shared.version.has_track_stream() =>
-						{
-							return Poll::Ready(Err(Error::UnexpectedStream));
 						}
 						lite::ControlType::Fetch => ControlState::Fetch(RequestServe::new(self.shared.clone(), stream)),
 						lite::ControlType::Track => {
@@ -618,6 +630,8 @@ struct ProbeServe<S: crate::transport::poll::Session> {
 	last_sent: Option<(lite::Probe, crate::time::Instant)>,
 	/// When the unsent change becomes worth reporting by age alone.
 	due: crate::time::Deadline,
+	/// A peer streaming targets still lets the session's other tasks run.
+	budget: kio::coop::Budget,
 }
 
 impl<S: crate::transport::poll::Session> ProbeServe<S> {
@@ -676,6 +690,7 @@ impl<S: crate::transport::poll::Session> ProbeServe<S> {
 			last_sent: None,
 			due: crate::time::Deadline::new(&runtime),
 			runtime,
+			budget: kio::coop::Budget::new(32),
 		}
 	}
 
@@ -703,7 +718,7 @@ impl<S: crate::transport::poll::Session> ProbeServe<S> {
 			// cannot hide the peer's FIN or a malformed complete message.
 			loop {
 				match stream.reader.poll_decode_maybe::<lite::Probe>(&mut cx) {
-					Poll::Ready(Ok(Some(_))) => continue,
+					Poll::Ready(Ok(Some(_))) => ready!(self.budget.poll_yield(waiter)),
 					Poll::Ready(Ok(None)) => return Poll::Ready(Ok(())),
 					Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 					Poll::Pending => break,
@@ -1502,6 +1517,8 @@ struct RequestServe<S: crate::transport::poll::Session, R: Request<S>> {
 	track: String,
 	// A reply that always has another group ready still lets the session's other tasks run.
 	budget: kio::coop::Budget,
+	// The requester's update failed to decode: the peer's fault, unlike a failed reply.
+	malformed: bool,
 }
 
 enum RequestState<M, R> {
@@ -1540,6 +1557,7 @@ impl<S: crate::transport::poll::Session, R: Request<S>> RequestServe<S, R> {
 			absolute: Default::default(),
 			track: Default::default(),
 			budget: kio::coop::Budget::new(32),
+			malformed: false,
 		}
 	}
 
@@ -1556,13 +1574,8 @@ impl<S: crate::transport::poll::Session, R: Request<S>> RequestServe<S, R> {
 				tracing::info!(broadcast = %self.absolute, track = %self.track, "{} complete", R::KIND);
 				Poll::Ready(Ok(()))
 			}
-			// A malformed update is still a control violation after request setup.
-			Err(err)
-				if matches!(self.state, RequestState::Decode)
-					|| matches!(err, Error::Decode(_) | Error::ProtocolViolation) =>
-			{
-				Poll::Ready(Err(err))
-			}
+			// The peer's own malformed bytes are a control violation, even after request setup.
+			Err(err) if matches!(self.state, RequestState::Decode) || self.malformed => Poll::Ready(Err(err)),
 			Err(err) => {
 				match &err {
 					err if is_cancel(err) => {
@@ -1729,8 +1742,13 @@ impl<S: crate::transport::poll::Session, R: Request<S>> RequestServe<S, R> {
 	fn poll_requester(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
 		let stream = self.stream.as_mut().expect("stream present");
 		loop {
-			let Some(update) = ready!(stream.reader.poll_decode_maybe::<R::Update>(cx))? else {
-				return Poll::Ready(Ok(()));
+			let update = match ready!(stream.reader.poll_decode_maybe::<R::Update>(cx)) {
+				Ok(Some(update)) => update,
+				Ok(None) => return Poll::Ready(Ok(())),
+				Err(err) => {
+					self.malformed = matches!(err, Error::Decode(_));
+					return Poll::Ready(Err(err));
+				}
 			};
 			match &mut self.state {
 				RequestState::Serve(request) => request.update(update),
@@ -5346,6 +5364,36 @@ mod tests {
 				Some(SessionError::ProtocolViolation.to_code()),
 				"{version}"
 			);
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn unknown_control_types_reset_only_their_stream() {
+		use kio::Task;
+		// An unassigned type everywhere, then types a version predates: FETCH and TRACK
+		// before lite-05, AUTH before lite-07.
+		let cases = [
+			(Version::Lite06, 8),
+			(Version::Lite07, 8),
+			(Version::Lite04, lite::ControlType::Fetch as u8),
+			(Version::Lite04, lite::ControlType::Track as u8),
+			(Version::Lite06, lite::ControlType::Auth as u8),
+		];
+		for (version, kind) in cases {
+			let mut session = ScriptedSession::new(vec![kind]);
+			let log = session.log.clone();
+			let stream = Stream::open(&mut session, version).await.unwrap();
+			let estimate = kio::Producer::default();
+			let probe = probe_server(session, stream, version, &estimate);
+			let stream = probe.stream.expect("probe stream");
+			let mut control = Control {
+				shared: probe.shared,
+				runtime: crate::time::Clock::sim(),
+				state: ControlState::Start { stream },
+			};
+			assert!(control.poll(&kio::Waiter::noop()).is_ready());
+			assert!(log.closes().is_empty(), "{version} type {kind}: session closed");
+			assert!(!log.resets().is_empty(), "{version} type {kind}: stream not refused");
 		}
 	}
 

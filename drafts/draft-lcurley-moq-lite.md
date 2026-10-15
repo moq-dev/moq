@@ -755,7 +755,7 @@ This length field does not include the length of the varint length itself.
 A message on the Setup Stream or any bidirectional stream that fails to decode, such as one whose fields disagree with its Message Length or carry a value this specification forbids, MUST close the session with a PROTOCOL_VIOLATION.
 Resetting only the stream would let the peer repeat the violation on the next one.
 A stream that ends or is reset before its message completes only terminates that stream, except on the Setup and Auth Streams.
-A GROUP or FRAME that fails to decode resets only its Group Stream.
+A GROUP or FRAME that fails to decode resets only its Group Stream, and a STREAM_TYPE the negotiated version does not define resets only its stream (see [STREAM_TYPE](#stream_type)).
 Except in FRAME, a Message Length over 65,535 bytes is unexpected: a sender MUST NOT exceed it, and a receiver MAY reject it based on the length prefix alone.
 The version and extensions should be used to support new fields, not the message length.
 
@@ -769,7 +769,7 @@ STREAM_TYPE {
 ~~~
 
 The stream ID depends on if it's a bidirectional or unidirectional stream, as indicated in the Streams section.
-A receiver MUST reset the stream if it receives an unknown stream type.
+A receiver MUST reset the stream if it receives an unknown stream type, including one the negotiated version predates.
 Unknown stream types MUST NOT be treated as fatal; this is the fallback when an extension stream is opened against a peer that did not negotiate it.
 
 
@@ -1589,7 +1589,7 @@ The `Message Length` describes the payload size on the wire.
 - Limited AUTH_OK Expires to 2^53 - 1 milliseconds, with an out-of-range value closing the session with PROTOCOL_VIOLATION.
 - Invalid UTF-8 or an oversized AUTH_ERROR reason closes the session with PROTOCOL_VIOLATION.
 - An Auth Stream message that fails to decode, has trailing body bytes, or has an unexpected type, or a second AUTH from the opener, closes the session with PROTOCOL_VIOLATION.
-- Any Setup Stream or bidirectional stream message that fails to decode closes the session with PROTOCOL_VIOLATION; previously only an unexpected Message Length did, as a SHOULD. A stream ending mid-message outside the Setup and Auth Streams, and a malformed GROUP or FRAME, still affect only that stream.
+- Any Setup Stream or bidirectional stream message that fails to decode closes the session with PROTOCOL_VIOLATION; previously only an unexpected Message Length did, as a SHOULD. A stream ending mid-message outside the Setup and Auth Streams, a malformed GROUP or FRAME, and a stream type the negotiated version predates still affect only that stream.
 - A Report-level publisher reads and ignores PROBE targets instead of resetting the Probe Stream.
 - Added NOT_SUPPORTED (0x30) to session errors; unsupported Auth Stream tokens and grants use AUTH_ERROR before or after a grant.
 - Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path patterns](#path-pattern) it may publish and subscribe to. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
