@@ -8,7 +8,7 @@ SQEs per enter, and how many enters were forced by a full submission queue,
 so the amortization the runtime exists for is a measured number rather than
 a ratio of two totals.
 
-## Progress
+## Plan
 
 The worker placement, deferred-work fix, dependency floor, and observations
 are implemented on `quest/m2/perf/uring-one-enter`. Parked-turn and
