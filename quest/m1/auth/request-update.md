@@ -36,7 +36,8 @@ model; read it there until it lands.
 - Settle the type and field names with the maintainer before implementing;
   mirror them in `js/net` and the bindings.
 - Describe request renewal in `doc/concept/moq-lite.md`'s Authorization
-  section.
+  section, and in `doc/concept/standard.md`, which says a request's token
+  grants nothing; the moq-transport path can land before the lite one.
 
 Public API: a new optional auth on routes and subscriptions in Rust and JS.
 Wire: none beyond existing REQUEST_UPDATE and SUBSCRIBE_UPDATE.
