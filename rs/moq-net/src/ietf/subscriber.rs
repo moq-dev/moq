@@ -8777,6 +8777,45 @@ mod stitch_tests {
 		}
 	}
 
+	/// A relayed END_OF_GROUP object ends the fetched group, and drafts 14 and 15 carry it.
+	#[moq_net_sim::test]
+	async fn passthrough_fetch_keeps_the_end_of_group_object() {
+		for version in [Version::Draft15, Version::Draft22] {
+			let objects = [
+				(6, &[0x3e, 6][..], None),
+				(8, &[0x3e, 1][..], None),
+				(11, &[0x3e, 2][..], Some(END_OF_GROUP)),
+			];
+			let script = object_stream(version, true, &objects);
+			let (bytes, log) = relay_passthrough(script, version, version, Some((0, 12))).await;
+			let mut decoder = Decoder::new(&bytes, version.into());
+			assert_eq!(decoder.varint().unwrap(), ietf::FetchOk::ID, "{version}");
+			let ok = ietf::FetchOk::decode(&mut decoder, version).unwrap();
+			let last = if Filter::is_draft20(version) { 11 } else { 12 };
+			assert_eq!(ok.end_location.object, last, "{version}");
+			assert_eq!(decoder.varint().unwrap(), ietf::FetchHeader::TYPE);
+			ietf::FetchHeader::decode(&mut decoder, version).unwrap();
+			for _ in [6, 8] {
+				ietf::FetchObject::decode(&mut decoder, version).unwrap();
+				assert_eq!(decoder.varint().unwrap(), 1);
+				assert_eq!(decoder.slice(1).unwrap(), &[99]);
+			}
+			if version == Version::Draft15 {
+				let ietf::FetchObject::Object { object, properties, .. } =
+					ietf::FetchObject::decode(&mut decoder, version).unwrap()
+				else {
+					panic!("status object");
+				};
+				assert_eq!(object, Some(11));
+				assert_eq!(properties.as_deref(), Some(&[0x3e, 2][..]));
+				assert_eq!(decoder.varint().unwrap(), 0);
+				assert_eq!(decoder.varint().unwrap(), END_OF_GROUP);
+			}
+			assert!(decoder.is_empty(), "{version}");
+			assert!(log.resets().is_empty());
+		}
+	}
+
 	#[moq_net_sim::test]
 	async fn passthrough_refuses_contradictory_gap_properties() {
 		for properties in [vec![0x3e, 2], vec![0x3e, 3], vec![0x3e, 1, 0, 1]] {

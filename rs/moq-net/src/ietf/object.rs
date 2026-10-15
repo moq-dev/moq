@@ -112,7 +112,9 @@ pub(super) fn write(properties: &Properties, version: Version, timescale: Option
 	{
 		return Err(Error::Unsupported);
 	}
-	// Without both units there is nothing to convert: an untimed track forwards them as is.
+	// An untimed ingress forwards its Timestamps as is. A timed one to an egress that
+	// declares no units drops them, as a plain frame there carries none.
+	let unstamped = properties.timescale.is_some() && timescale.is_none();
 	let convert = match (properties.timescale, timescale) {
 		(Some(from), Some(to)) if from != to => Some((from, to)),
 		_ => None,
@@ -126,12 +128,14 @@ pub(super) fn write(properties: &Properties, version: Version, timescale: Option
 			None => value,
 		}))
 	};
-	// Rewriting an immutable Timestamp would break it; forwarding it would change its meaning.
-	if properties.sealed_time && convert.is_some() {
+	// Rewriting or dropping an immutable Timestamp would break it; forwarding it would
+	// change its meaning.
+	if properties.sealed_time && (convert.is_some() || unstamped) {
 		return Err(Error::Unsupported);
 	}
 	let timestamp = properties
 		.timestamp
+		.filter(|_| !unstamped)
 		.map(|value| {
 			Ok::<_, Error>(Property {
 				id: 0x10,
@@ -143,7 +147,7 @@ pub(super) fn write(properties: &Properties, version: Version, timescale: Option
 	let legacy = properties
 		.values
 		.iter()
-		.filter(|property| property.id == 0x06)
+		.filter(|property| property.id == 0x06 && !unstamped)
 		.map(|property| match property.value {
 			Value::Int(value) => Ok(Property {
 				id: 0x06,
@@ -231,11 +235,16 @@ mod tests {
 			write(&decoded.properties, Version::Draft17, milli),
 			Err(Error::Unsupported)
 		));
-		// Its units cannot follow the egress's without rewriting the block.
-		assert!(matches!(
-			write(&decoded.properties, Version::Draft18, Some(Timescale::MICRO)),
-			Err(Error::Unsupported)
-		));
+		// Its units cannot follow the egress's, or vanish with them, without rewriting the block.
+		for timescale in [Some(Timescale::MICRO), None] {
+			assert!(matches!(
+				write(&decoded.properties, Version::Draft18, timescale),
+				Err(Error::Unsupported)
+			));
+		}
+		// An untimed ingress has no units to lose.
+		let untimed = read(&bytes, Version::Draft22, None).unwrap();
+		assert_eq!(write(&untimed.properties, Version::Draft18, None).unwrap(), bytes);
 	}
 
 	/// The cache keeps a timed track in its own units, so a relayed Timestamp must leave
@@ -251,8 +260,15 @@ mod tests {
 			assert_eq!(again.timestamp, Some(micros), "key {key:#x}");
 			assert_eq!(again.properties.values.last().unwrap().value, Value::Int(7));
 
-			// An egress that declares no units forwards the value untouched.
-			assert_eq!(write(&decoded.properties, Version::Draft22, None).unwrap(), bytes);
+			// An egress that declares no units drops it, as a plain frame there has none.
+			let written = write(&decoded.properties, Version::Draft22, None).unwrap();
+			let again = read(&Bytes::from(written), Version::Draft22, None).unwrap();
+			assert_eq!(again.properties.timestamp, None, "key {key:#x}");
+			assert_eq!(again.properties.values.len(), 1, "key {key:#x}");
+			assert_eq!(again.properties.values[0].value, Value::Int(7));
+			// An untimed ingress forwards it untouched.
+			let untimed = read(&bytes, Version::Draft22, None).unwrap();
+			assert_eq!(write(&untimed.properties, Version::Draft22, None).unwrap(), bytes);
 		}
 	}
 

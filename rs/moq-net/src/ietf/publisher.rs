@@ -80,6 +80,8 @@ struct FetchedGroup {
 	/// The Object ID of the first frame.
 	first: u64,
 	frames: Vec<frame::Object>,
+	/// The group's END_OF_GROUP status object, when it falls in the range.
+	end_object: Option<Arc<crate::model::object::Fields>>,
 	/// The fetched range reached the finished group's final object.
 	complete: bool,
 	/// The track's info, which FETCH_OK describes and whose units stamp the objects.
@@ -111,8 +113,11 @@ fn fetch_prior(version: Version, prior: Option<u64>, object: u64) -> Result<Fetc
 }
 
 impl FetchedGroup {
-	/// One past the last Object ID read.
+	/// One past the last Object ID read, including the END_OF_GROUP object.
 	fn end(&self) -> u64 {
+		if let Some(end) = &self.end_object {
+			return end.id.saturating_add(1);
+		}
 		self.frames.last().map_or(self.first, |frame| {
 			frame
 				.fields
@@ -188,6 +193,9 @@ async fn read_fetch(
 	let complete = !overshot
 		&& matches!(group.finished().now_or_never(), Some(Ok(_)))
 		&& group.index() >= group.frame_count() as u64;
+	let end_object = group
+		.end_object()
+		.filter(|end| complete && end.id >= skip && until.is_none_or(|until| end.id < until));
 
 	if group.wire().is_some_and(|wire| !wire.fetchable) {
 		return Err(Error::Unsupported);
@@ -196,6 +204,7 @@ async fn read_fetch(
 		sequence,
 		first,
 		frames,
+		end_object,
 		complete,
 		info,
 	})
@@ -1779,10 +1788,9 @@ where
 			.info
 			.timescale
 			.filter(|_| ietf::Properties::sends_timescale(self.version));
-		for frame in &group.frames {
-			if let Some(fields) = &frame.fields
-				&& let Err(err) = super::object::write(&fields.properties, self.version, timescale)
-			{
+		let fields = group.frames.iter().filter_map(|frame| frame.fields.as_deref());
+		for fields in fields.chain(group.end_object.as_deref()) {
+			if let Err(err) = super::object::write(&fields.properties, self.version, timescale) {
 				return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await;
 			}
 		}
@@ -1915,6 +1923,26 @@ where
 				)
 				.await?;
 				Self::write_fetch_payload(&mut writer, frame.frame.payload, self.version).await?;
+			}
+			// Only draft-14 and 15 FETCH objects carry a status; later drafts imply the end.
+			if let Some(end) = group.end_object.as_deref()
+				&& matches!(self.version, Version::Draft14 | Version::Draft15)
+			{
+				Self::write_fetch_object(
+					&mut writer,
+					FetchObjectInfo {
+						sequence: group.sequence,
+						object: end.id,
+						prior: fetch_prior(self.version, prior, end.id)?,
+						timestamp: None,
+						timescale,
+						version: self.version,
+						fields: Some(end),
+					},
+				)
+				.await?;
+				writer.varint(0).await?;
+				writer.varint(END_OF_GROUP).await?;
 			}
 			settle(&mut writer).await?;
 			Ok::<(), Error>(())
@@ -3916,6 +3944,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 }
 
 /// Object status: no object at or past this location exists.
+const END_OF_GROUP: u64 = 0x3;
 const END_OF_TRACK: u64 = 0x4;
 
 /// An object's header, with private relay fields when it came from an IETF peer.
