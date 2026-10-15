@@ -255,6 +255,11 @@ These land with the next breaking release, not the 2026-09-23 train.
   container imports keep their existing timeline handling. `media.CatalogProducer.now()` samples and fixes the
   broadcast clock for explicit local-event stamps. A supplied timestamp ahead
   of now is published rather than refused.
+- **Container byte-stream importers take an init record.** The bindings'
+  `ContainerStreamProducer` (moq-ffi's `MoqMediaContainerStreamProducer`) takes
+  a `ContainerStreamInit` holding the format instead of a bare format. Its
+  optional `timebase`, also on `ContainerInit`, shares one source's offset
+  across container imports; leave it unset for the previous independent offset.
 - **moq-mux importers publish the catalog at their first frame.** The fMP4,
   MKV, and MPEG-TS importers used to publish it at their init segment (`moov`,
   `Tracks`, or the first PMT) on a provisional clock, then re-anchor it on the
