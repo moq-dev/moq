@@ -68,3 +68,13 @@ test("deepEqual", () => {
 	expect(deepEqual({ a: 1 }, { a: 1, b: 2 })).toBe(false);
 	expect(deepEqual([1, 2], [1, 2, 3])).toBe(false);
 });
+
+// JSON.parse creates an own data field; merging must preserve that representation.
+test("prototype-named JSON keys stay own data fields", () => {
+	const patch = JSON.parse('{"__proto__":{"x":1}}');
+	const result = merge({}, patch) as Record<string, unknown>;
+	expect(Object.getPrototypeOf(result)).toBe(Object.prototype);
+	expect(Object.hasOwn(result, "__proto__")).toBe(true);
+	expect(Object.getOwnPropertyDescriptor(result, "__proto__")?.value).toEqual({ x: 1 });
+	expect(deepEqual(JSON.parse('{"__proto__":{}}'), { a: {} })).toBe(false);
+});

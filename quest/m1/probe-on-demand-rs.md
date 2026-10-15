@@ -29,7 +29,3 @@ Decided (2026-10-12, quest-plan):
 Test: a session nobody holds a consumer for opens no PROBE stream, and one that
 holds then drops a consumer opens and then resets it. Reuse the mock transport
 stats and the harness in `rs/moq-net/tests/idle_session.rs`.
-
-## Related
-
-- [JS PROBE on demand](/quest/m1/probe-on-demand-js.md) - the same outcome for js/net

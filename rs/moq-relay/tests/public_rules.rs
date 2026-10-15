@@ -22,7 +22,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 fn client() -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.once = Some(true);
-	config.websocket.delay = Duration::ZERO;
+	config.websocket.delay = Some(Duration::ZERO);
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 	config.init(Default::default()).expect("client init")
 }

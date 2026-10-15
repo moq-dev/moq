@@ -240,7 +240,7 @@ fn client_at(bind: &str) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
 	config.once = Some(true);
-	config.websocket.delay = Duration::ZERO;
+	config.websocket.delay = Some(Duration::ZERO);
 	config.bind = Some(bind.parse().expect("parse bind"));
 	config.init(Default::default()).expect("client init")
 }

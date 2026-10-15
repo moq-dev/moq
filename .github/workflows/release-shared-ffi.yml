@@ -1,0 +1,67 @@
+name: Release FFI
+
+# Default-feature libraries are identical across Go, Kotlin and Swift: build
+# each target once, then preserve each package's own artifacts and publishers.
+on:
+  push:
+    tags:
+      - "moq-ffi-v*"
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-shared-ffi-${{ github.ref_type == 'tag' && 'publish' || github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  native:
+    name: Shared moq-ffi
+    uses: ./.github/workflows/release-ffi.yml
+    with:
+      language: default
+      binding-languages: '["go", "kotlin", "swift"]'
+      targets: >-
+        [
+          "x86_64-unknown-linux-gnu",
+          "aarch64-unknown-linux-gnu",
+          "aarch64-apple-darwin",
+          "x86_64-pc-windows-msvc",
+          "aarch64-linux-android",
+          "armv7-linux-androideabi",
+          "x86_64-linux-android",
+          "aarch64-apple-ios",
+          "aarch64-apple-ios-sim"
+        ]
+
+  # A failed target must affect only packages that consume it. Each packager
+  # selects its own targets and fails if one of its libraries is missing.
+  go:
+    name: Release Go FFI
+    needs: [native]
+    if: ${{ always() && !cancelled() }}
+    uses: ./.github/workflows/release-go-ffi.yml
+    with:
+      reuse-native: true
+    secrets: inherit
+
+  kotlin:
+    name: Release Kotlin FFI
+    needs: [native]
+    if: ${{ always() && !cancelled() }}
+    uses: ./.github/workflows/release-kt-ffi.yml
+    with:
+      reuse-native: true
+    secrets: inherit
+
+  swift:
+    name: Release Swift FFI
+    needs: [native]
+    if: ${{ always() && !cancelled() }}
+    uses: ./.github/workflows/release-swift-ffi.yml
+    with:
+      reuse-native: true
+    permissions:
+      contents: write
+    secrets: inherit

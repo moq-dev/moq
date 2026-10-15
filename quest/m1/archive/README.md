@@ -167,6 +167,7 @@ owned by that prerequisite, not duplicated in archive storage.
 - [Replay catalog](/quest/m1/archive/replay-catalog.md) - `moq_archive::Reader` republishes the recorded catalog live with `store` set, so stock `moq export hls` serves the whole replay of `moq import archive`
 - [Idle flush](/quest/m1/archive/flush.md) - idle tracks are recorded within a bounded wall-clock delay, and `flush()` forces a track's pending record out
 - [History from the retained floor](/quest/m1/archive/history-floor.md) - history mode lists a retained (DVR) recording from its oldest retained segment instead of refusing it
+- [Untimed tracks](/quest/m1/archive/untimed.md) - untimed tracks are recorded and replayed untimed instead of refused, through an optional timestamp in the format
 
 ## Related
 

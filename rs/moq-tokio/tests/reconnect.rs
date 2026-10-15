@@ -22,8 +22,8 @@ fn client(backoff: moq_tokio::Backoff) -> moq_tokio::Client {
 #[tokio::test]
 async fn a_transient_failure_retries_until_the_budget_runs_out() {
 	let mut backoff = moq_tokio::Backoff::default();
-	backoff.initial = Duration::from_millis(20);
-	backoff.max = Duration::from_millis(40);
+	backoff.initial = Some(Duration::from_millis(20));
+	backoff.max = Some(Duration::from_millis(40));
 	backoff.timeout = Some(Duration::from_millis(200));
 
 	// Nothing listens on port 1, so every attempt is refused: transient as far as this layer knows.
@@ -201,8 +201,8 @@ async fn spawn_server() -> (
 /// A client that redials fast, so a migration lands inside the test's patience.
 fn quick_client(redirect: moq_tokio::Redirect) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
-	config.backoff.initial = Duration::from_millis(20);
-	config.backoff.max = Duration::from_millis(40);
+	config.backoff.initial = Some(Duration::from_millis(20));
+	config.backoff.max = Some(Duration::from_millis(40));
 	config.backoff.timeout = Some(Duration::ZERO);
 	config.goaway.redirect = redirect;
 	config.init(Default::default()).expect("failed to init client")
@@ -336,8 +336,8 @@ async fn a_draining_peer_does_not_exhaust_the_retry_window() {
 	// more than twice the window. A GOAWAY arriving inside the 200ms health bar is what makes a
 	// session count as drained at once rather than as a healthy session that later migrated.
 	let mut backoff = moq_tokio::Backoff::default();
-	backoff.initial = Duration::from_millis(200);
-	backoff.max = Duration::from_millis(200);
+	backoff.initial = Some(Duration::from_millis(200));
+	backoff.max = Some(Duration::from_millis(200));
 	backoff.timeout = Some(Duration::from_millis(500));
 	rides_out_a_drain(backoff, 12).await;
 }
@@ -348,8 +348,8 @@ async fn a_draining_peer_does_not_exhaust_the_retry_window() {
 async fn a_drain_backoff_longer_than_the_retry_window_still_redials() {
 	// From the second drained session on, the delay is 400ms against a 100ms window.
 	let mut backoff = moq_tokio::Backoff::default();
-	backoff.initial = Duration::from_millis(200);
-	backoff.max = Duration::from_millis(400);
+	backoff.initial = Some(Duration::from_millis(200));
+	backoff.max = Some(Duration::from_millis(400));
 	backoff.timeout = Some(Duration::from_millis(100));
 	rides_out_a_drain(backoff, 4).await;
 }

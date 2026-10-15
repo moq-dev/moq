@@ -16,6 +16,31 @@ pub(crate) fn now() -> crate::time::Instant {
 	crate::time::Instant::now()
 }
 
+/// The instant a cache judges wall-clock staleness by, before the time its drivers
+/// supplied is folded in; see `cache::Pool::now_wall`.
+///
+/// The ambient runtime's clock where there is one, so a paused test runtime pauses
+/// staleness along with the drivers it supplies time to.
+#[cfg(not(test))]
+pub(crate) fn wall() -> crate::time::Instant {
+	#[cfg(all(feature = "async", not(target_family = "wasm")))]
+	let now = web_async::time::Instant::now().into_std();
+	#[cfg(not(all(feature = "async", not(target_family = "wasm"))))]
+	let now = now();
+	now
+}
+
+/// Unit tests freeze the wall clock, so only time a test supplies moves it: the
+/// simulated clock inside `moq_net_sim`, or a pool stepped by hand outside it.
+#[cfg(test)]
+pub(crate) fn wall() -> crate::time::Instant {
+	static FROZEN: LazyLock<crate::time::Instant> = LazyLock::new(now);
+	match moq_net_sim::is_running() {
+		true => moq_net_sim::now(),
+		false => *FROZEN,
+	}
+}
+
 /// Where [`Timestamp`](crate::Timestamp)s count from: an instant, and the
 /// timestamp it maps to.
 ///

@@ -14,7 +14,7 @@ name: Release Go
 #                           release is mid-flight) or rs/moq-ffi changed since
 #                           its tag, the job skips: the workflow_run below
 #                           republishes once the ffi lands.
-#   * Release Go FFI done  — a new ffi just published to the moq-go-ffi mirror.
+#   * Release FFI done:      its Go publisher succeeded on the moq-go-ffi mirror.
 #                           Re-cut the wrapper so `moq.dev/moq@latest` floats to
 #                           the newest native core (Go MVS won't float on its own).
 #                           Chaining off the upstream run guarantees the mirror
@@ -28,7 +28,7 @@ on:
     branches:
       - release
   workflow_run:
-    workflows: ["Release Go FFI"]
+    workflows: ["Release FFI", "Release Go FFI"]
     types:
       - completed
 
@@ -42,20 +42,41 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build wrapper module
+  ffi-release:
+    name: Check FFI publisher
     runs-on: ubuntu-latest
-    # Owner gate, plus: only react to a successful Release Go FFI run for a
-    # moq-ffi-v* tag. Require event == 'push' so a fork PR whose head branch is
-    # named `moq-ffi-v*` can't satisfy head_branch and reach the publish secrets
-    # (workflow_run runs in the base repo's privileged context). Pushes here are
-    # unconditional.
+    # workflow_run is privileged. Preserve the owner, push and tag gates before
+    # reading the trusted upstream checkout or allowing wrapper publication.
     if: >-
       github.repository_owner == 'moq-dev' &&
       (github.event_name == 'push' ||
-       (github.event.workflow_run.conclusion == 'success' &&
+       ((github.event.workflow_run.name == 'Release FFI' || github.event.workflow_run.conclusion == 'success') &&
         github.event.workflow_run.event == 'push' &&
         startsWith(github.event.workflow_run.head_branch, 'moq-ffi-v')))
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      ready: ${{ steps.publisher.outputs.ready }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/just
+      - name: Check independent publisher
+        id: publisher
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_NAME: ${{ github.event.workflow_run.name }}
+          UPSTREAM_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: just gh ffi completed go
+
+  build:
+    name: Build wrapper module
+    needs: [ffi-release]
+    if: needs.ffi-release.outputs.ready == 'true'
+    runs-on: ubuntu-latest
     outputs:
       skip: ${{ steps.gate.outputs.skip }}
 
@@ -94,7 +115,7 @@ jobs:
           if [[ "$GITHUB_EVENT_NAME" == "workflow_run" ]]; then
             # Upstream tag ref, e.g. moq-ffi-v0.3.1.
             VERSION="${HEAD_BRANCH#moq-ffi-v}"
-            echo "Triggered by Release Go FFI: ffi v$VERSION"
+            echo "Triggered by FFI publisher: ffi v$VERSION"
           else
             VERSION=$(grep '^version' rs/moq-ffi/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
             echo "Using ffi version from Cargo.toml: $VERSION"
@@ -111,7 +132,7 @@ jobs:
         run: just gh release ffi-unreleased "$FFI_VERSION"
 
       # Skip on unreleased ffi changes, and when the pinned ffi's mirror tag is
-      # missing (release-plz merged but Release Go FFI hasn't published yet):
+      # missing (release-plz merged but the Go FFI publisher hasn't finished yet):
       # the workflow_run trigger republishes once the ffi lands. One existence
       # check, no polling. workflow_run runs are chained after that publish, so
       # the tag is guaranteed present and this gate doesn't run for them.
@@ -135,7 +156,7 @@ jobs:
             exit 1
           fi
           if [[ -z "$TAGS" ]]; then
-            echo "::warning::moq-go-ffi v${FFI_VERSION} not on the mirror yet; deferring to the Release Go FFI chain."
+            echo "::warning::moq-go-ffi v${FFI_VERSION} not on the mirror yet; deferring to the FFI release chain."
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -153,7 +174,7 @@ jobs:
           if grep -qE '^module[[:space:]]+moq\.dev/moq-ffi$' <<< "$MOD"; then
             echo "moq-go-ffi v${FFI_VERSION} is published and declares moq.dev/moq-ffi; proceeding."
           else
-            echo "::warning::moq-go-ffi v${FFI_VERSION} predates the module rename; deferring to the Release Go FFI chain."
+            echo "::warning::moq-go-ffi v${FFI_VERSION} predates the module rename; deferring to the FFI release chain."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
 

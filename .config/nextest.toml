@@ -19,9 +19,8 @@ slow-timeout = { period = "30s", terminate-after = 2 }
 # race until proven otherwise (see Root Cause First in AGENTS.md).
 retries = 0
 
-# `--all-targets` still compiles the criterion benches, which is what catches a
-# bench that no longer builds. Running them in test mode only replays the
-# workload once, and the large origin fan-outs take ~20s each for no signal.
+# PR recipes build library, binary, and integration-test targets. Nightly keeps
+# the exhaustive target compile, but executes benches through cargo bench smokes.
 default-filter = "not kind(bench)"
 
 # Limit ring concurrency within one invocation. Unit-test workers use small

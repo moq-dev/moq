@@ -669,7 +669,7 @@ export async function decodeSubscribeResponse(r: Reader, version: Version): Prom
 				case 0x1:
 					return { drop: await SubscribeDrop.decode(r) };
 				default:
-					throw new Error(`unknown subscribe response type: ${typ}`);
+					throw new ProtocolViolation(`unknown subscribe response type: ${typ}`);
 			}
 		}
 		default: {
@@ -680,10 +680,10 @@ export async function decodeSubscribeResponse(r: Reader, version: Version): Prom
 				case 0x1:
 					return { end: await SubscribeEnd.decode(r, version) };
 				case 0x2:
-					if (hasStreamCount(version)) throw new Error(`unknown subscribe response type: ${typ}`);
+					if (hasStreamCount(version)) throw new ProtocolViolation(`unknown subscribe response type: ${typ}`);
 					return { drop: await SubscribeDrop.decode(r) };
 				default:
-					throw new Error(`unknown subscribe response type: ${typ}`);
+					throw new ProtocolViolation(`unknown subscribe response type: ${typ}`);
 			}
 		}
 	}

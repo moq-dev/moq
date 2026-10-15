@@ -4,6 +4,7 @@ import { sharedStreamCode } from "./ietf/error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { Version } from "./ietf/version.ts";
 import { Version as Lite, type Version as LiteVersion } from "./lite/version.ts";
+import { decodeError } from "./util/decode_error.ts";
 import { TimeoutError, withTimeout } from "./util/timeout.ts";
 import { POW32, toBigInt, toNumber, U64 } from "./util/u64.ts";
 import { decodeUtf8 } from "./util/utf8.ts";
@@ -417,7 +418,7 @@ export class Reader {
 			this.#short = undefined;
 			return result;
 		} catch (err: unknown) {
-			if (!(err instanceof Short)) throw err;
+			if (!(err instanceof Short)) throw decodeError(err);
 			// Filling could never satisfy it, so retrying would spin.
 			if (err.need <= this.#buffer.byteLength) throw new Error("decode ran short of bytes it already had");
 			this.#short = { decode, err };

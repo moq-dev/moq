@@ -1,11 +1,14 @@
 //! The poll transport interface owned by `moq-net`.
 //!
 //! Implement these traits for a transport, or wrap a backend at the application
-//! boundary. `moq-tokio`, `moq-wasm`, and `moq-uring` provide their own adapters.
+//! boundary. `moq-tokio`, `moq-wasm`, and `moq-uring` provide their own adapters, and
+//! [`memory`] links two peers in one process.
 //! The async helpers only drive the required poll methods. Thread-local transports
 //! stay supported; [`poll::Boxable`] adds native thread bounds for boxed drivers.
 
 use std::time::Duration;
+
+pub mod memory;
 
 /// A trait that is Send on native targets and empty on WASM.
 #[cfg(not(target_family = "wasm"))]
@@ -34,6 +37,15 @@ impl<T> MaybeSend for T {}
 
 #[cfg(target_family = "wasm")]
 impl<T> MaybeSync for T {}
+
+/// Where the transport carries the request target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Binding {
+	/// The request target is carried by the transport URI.
+	Uri,
+	/// The request target is carried by the MoQ SETUP.
+	InBand,
+}
 
 /// Connection-level statistics.
 ///
@@ -175,6 +187,9 @@ pub mod poll {
 		/// than defaulted: a transport that negotiates an application protocol and
 		/// forgets to report it is a silent bug, and the default hid that.
 		fn protocol(&self) -> Option<&str>;
+
+		/// Return where this transport carries the request target.
+		fn binding(&self) -> super::Binding;
 
 		/// Close the connection immediately with a code and reason.
 		///

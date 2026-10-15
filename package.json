@@ -26,6 +26,7 @@
 	"workspaces": [
 		"doc",
 		"js/net",
+		"js/clock",
 		"js/pattern",
 		"js/auth",
 		"js/flate",
