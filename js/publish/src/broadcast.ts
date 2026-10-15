@@ -97,13 +97,13 @@ export class Broadcast {
 	// catalog ID under a fresh track name, so a name always means the same content.
 	readonly #names = new Signal<Record<string, string>>({});
 
-	// The media identity of each track name the current network broadcast's catalog has served, or
-	// undefined before it serves one. Kept across a rendition's removal, so a name returning with
-	// different media takes a fresh name too.
-	#identities: Map<string, Identity> | undefined;
+	// The media identity and maxima of each track name the current network broadcast's catalog has
+	// served, or undefined before it serves one. Kept across a rendition's removal, so a name returning
+	// with different media takes a fresh name, and one returning lower keeps advertising its maxima.
+	#served: Map<string, Served> | undefined;
 
-	// The identity of each track name in the latest catalog fold, recorded when the catalog is first served.
-	#listed = new Map<string, Identity>();
+	// What each track name in the latest catalog fold advertises, recorded when the catalog is first served.
+	#listed = new Map<string, Served>();
 
 	#signals = new Effect();
 
@@ -190,22 +190,30 @@ export class Broadcast {
 		const video: Record<string, Catalog.VideoConfig> = {};
 		const audio: Record<string, Catalog.AudioConfig> = {};
 		const text: Record<string, Catalog.TextConfig> = {};
-		const listed = new Map<string, Identity>();
+		const listed = new Map<string, Served>();
 		const renamed: Record<string, string> = {};
 
 		for (const rendition of Object.values(renditions)) {
 			const source = enabled ? effect.get(rendition.config) : undefined;
 			if (source === undefined) continue;
 			let track = names[rendition.name] ?? rendition.name;
-			const media = identity(source);
-			const served = this.#identities?.get(track);
-			if (served !== undefined && !Json.deepEqual(served, media)) {
+			const next = served(source);
+			let previous = this.#served?.get(track);
+			if (previous && !Json.deepEqual(previous.identity, next.identity)) {
 				track = `${rendition.name}/${Moq.Epoch.mint()}`;
 				renamed[rendition.name] = track;
+				previous = undefined;
 			}
-			this.#identities?.set(track, media);
-			listed.set(track, media);
-			const config = track !== rendition.name ? { ...(source as object), track } : source;
+			// The track has carried its served maxima, so a lower config never lowers them.
+			const bitrate = most(previous?.bitrate, next.bitrate);
+			const framerate = most(previous?.framerate, next.framerate);
+			const advertised = { identity: next.identity, bitrate, framerate };
+			this.#served?.set(track, advertised);
+			listed.set(track, advertised);
+			const config = { ...(source as object) } as Record<string, unknown>;
+			if (track !== rendition.name) config.track = track;
+			if (bitrate !== next.bitrate) config.bitrate = bitrate;
+			if (framerate !== next.framerate) config.framerate = framerate;
 
 			if (rendition.kind === "video") {
 				video[rendition.name] = config as Catalog.VideoConfig;
@@ -283,7 +291,7 @@ export class Broadcast {
 		// again finds its track; the catalog's stay out of reach of a colliding rendition.
 		const tracks = new Map<string, { track: Moq.Track.Producer; owner: Rendition<unknown> }>();
 		this.#names.set({});
-		this.#identities = undefined;
+		this.#served = undefined;
 		const kinds = new Map<string, Kind>();
 		this.#kinds = kinds;
 		effect.cleanup(() => {
@@ -304,7 +312,7 @@ export class Broadcast {
 			if (!serving) {
 				serving = true;
 				// From here a name keeps the identity this first snapshot gives it.
-				this.#identities = new Map(this.#listed);
+				this.#served = new Map(this.#listed);
 				for (const [name, compression] of [
 					[Broadcast.CATALOG_TRACK, false],
 					[Broadcast.CATALOG_TRACK_COMPRESSED, true],
@@ -386,14 +394,24 @@ export class Broadcast {
 }
 
 // The fields a consumer may configure its decoder from once per track name, plus the coded-size
-// ceilings: changing any of them takes a new track name. Cloned, so a producer mutating a config it
-// shares (such as its container) can't rewrite what a name was served with.
+// ceilings: changing any of them takes a new track name.
 type Identity = Pick<
 	Partial<Catalog.AudioConfig & Catalog.VideoConfig>,
 	"codec" | "description" | "container" | "sampleRate" | "numberOfChannels" | "codedWidth" | "codedHeight"
 >;
 
-function identity(config: unknown): Identity {
-	const { codec, description, container, sampleRate, numberOfChannels, codedWidth, codedHeight } = config as Identity;
-	return structuredClone({ codec, description, container, sampleRate, numberOfChannels, codedWidth, codedHeight });
+// What a track name was served with: its identity and the maxima it may never lower.
+type Served = { identity: Identity; bitrate?: number; framerate?: number };
+
+// Cloned, so a producer mutating a config it shares (such as its container) can't rewrite what a
+// name was served with.
+function served(config: unknown): Served {
+	const { codec, description, container, sampleRate, numberOfChannels, codedWidth, codedHeight, bitrate, framerate } =
+		config as Identity & Pick<Served, "bitrate" | "framerate">;
+	const identity = { codec, description, container, sampleRate, numberOfChannels, codedWidth, codedHeight };
+	return { identity: structuredClone(identity), bitrate, framerate };
+}
+
+function most(a: number | undefined, b: number | undefined): number | undefined {
+	return a === undefined ? b : b === undefined ? a : Math.max(a, b);
 }

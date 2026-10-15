@@ -465,6 +465,32 @@ test("a served identity change moves the rendition to a fresh track name", async
 	}
 });
 
+// A track keeps the most it has carried, even across its rendition's removal.
+test("a served track never lowers its maxima", async () => {
+	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("maxima.hang") });
+	let audio = broadcast.audio("audio");
+	audio.config.set({ ...audioConfig, bitrate: Catalog.u53(128_000) });
+	await settle();
+
+	audio.close();
+	await settle();
+	audio = broadcast.audio("audio");
+	audio.config.set({ ...audioConfig, bitrate: Catalog.u53(32_000) });
+	await settle();
+	let config = (await readCatalog(broadcast))?.audio?.renditions.audio;
+	expect(config?.bitrate).toBe(Catalog.u53(128_000));
+	expect(config?.track).toBeUndefined();
+
+	audio.config.set({ ...audioConfig, bitrate: Catalog.u53(256_000) });
+	await settle();
+	audio.config.set({ ...audioConfig, bitrate: Catalog.u53(64_000) });
+	await settle();
+	config = (await readCatalog(broadcast))?.audio?.renditions.audio;
+	expect(config?.bitrate).toBe(Catalog.u53(256_000));
+
+	broadcast.close();
+});
+
 // The served identity is a snapshot, so a producer mutating a container it shares can't rewrite it.
 test("mutating a shared container still takes a fresh track name", async () => {
 	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("shared.hang") });
