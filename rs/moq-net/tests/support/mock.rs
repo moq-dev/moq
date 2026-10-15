@@ -597,8 +597,9 @@ impl poll::Session for MockSession {
 	}
 
 	fn binding(&self) -> moq_net::transport::Binding {
-		moq_net::transport::Binding::InBand
+		self.inner.binding()
 	}
+
 	fn protocol(&self) -> Option<&str> {
 		self.inner.protocol()
 	}

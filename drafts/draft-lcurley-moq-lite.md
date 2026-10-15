@@ -533,7 +533,7 @@ The publisher advertises its Probe level in SETUP (see [Probe Parameter](#probe-
 The subscriber sends a PROBE message with a target bitrate on the bidirectional stream.
 The subscriber MAY send additional PROBE messages on the same stream to update the target bitrate; the publisher MUST treat each PROBE as a new target to attempt.
 If the publisher advertised the Increase capability, it SHOULD pad the connection (or send redundant data) to achieve the most recent target bitrate, without exceeding the congestion window.
-A publisher that advertised Report but not Increase ignores the target and only reports; it MUST NOT pad above its current sending rate.
+A publisher that advertised Report but not Increase reads and ignores the target and only reports; it MUST NOT pad above its current sending rate or reset the stream over a target.
 In either case the publisher periodically replies with PROBE messages on the same bidirectional stream containing the current estimated bitrate and smoothed RTT.
 
 If the publisher advertised no Probe capability (e.g., the congestion controller is not exposed), it MUST reset the stream.
@@ -752,7 +752,10 @@ A relay that cannot encode a value for a peer on an earlier version MUST NOT tru
 Most messages are prefixed with a variable-length integer indicating the number of bytes in the message payload that follows.
 This length field does not include the length of the varint length itself.
 
-An implementation SHOULD close the connection with a PROTOCOL_VIOLATION if it receives a message with an unexpected length.
+A message on the Setup Stream or any bidirectional stream that fails to decode, such as one whose fields disagree with its Message Length or carry a value this specification forbids, MUST close the session with a PROTOCOL_VIOLATION.
+Resetting only the stream would let the peer repeat the violation on the next one.
+A stream that ends or is reset before its message completes only terminates that stream, except on the Setup and Auth Streams.
+A GROUP or FRAME that fails to decode resets only its Group Stream.
 Except in FRAME, a Message Length over 65,535 bytes is unexpected: a sender MUST NOT exceed it, and a receiver MAY reject it based on the length prefix alone.
 The version and extensions should be used to support new fields, not the message length.
 
@@ -1586,6 +1589,8 @@ The `Message Length` describes the payload size on the wire.
 - Limited AUTH_OK Expires to 2^53 - 1 milliseconds, with an out-of-range value closing the session with PROTOCOL_VIOLATION.
 - Invalid UTF-8 or an oversized AUTH_ERROR reason closes the session with PROTOCOL_VIOLATION.
 - An Auth Stream message that fails to decode, has trailing body bytes, or has an unexpected type, or a second AUTH from the opener, closes the session with PROTOCOL_VIOLATION.
+- Any Setup Stream or bidirectional stream message that fails to decode closes the session with PROTOCOL_VIOLATION; previously only an unexpected Message Length did, as a SHOULD. A stream ending mid-message outside the Setup and Auth Streams, and a malformed GROUP or FRAME, still affect only that stream.
+- A Report-level publisher reads and ignores PROBE targets instead of resetting the Probe Stream.
 - Added NOT_SUPPORTED (0x30) to session errors; unsupported Auth Stream tokens and grants use AUTH_ERROR before or after a grant.
 - Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path patterns](#path-pattern) it may publish and subscribe to. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
 
