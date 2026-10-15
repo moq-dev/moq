@@ -327,8 +327,11 @@ impl<S: crate::transport::poll::Session> Control<S> {
 						Err(err) => return Poll::Ready(Err(err)),
 					};
 					let version = self.shared.version;
-					// The Track Stream and FETCH are lite-05+ only, and the Auth Stream lite-07+.
+					// PROBE is lite-03+, GOAWAY lite-04+, the Track Stream and FETCH lite-05+, and the
+					// Auth Stream lite-07+.
 					let kind = kind.filter(|kind| match kind {
+						lite::ControlType::Probe => !matches!(version, Version::Lite01 | Version::Lite02),
+						lite::ControlType::Goaway => version.has_goaway(),
 						lite::ControlType::Fetch | lite::ControlType::Track => version.has_track_stream(),
 						lite::ControlType::Auth => version.has_auth(),
 						_ => true,
@@ -5370,11 +5373,13 @@ mod tests {
 	#[moq_net_sim::test]
 	async fn unknown_control_types_reset_only_their_stream() {
 		use kio::Task;
-		// An unassigned type everywhere, then types a version predates: FETCH and TRACK
-		// before lite-05, AUTH before lite-07.
+		// An unassigned type everywhere, then types a version predates: PROBE before lite-03,
+		// GOAWAY before lite-04, FETCH and TRACK before lite-05, AUTH before lite-07.
 		let cases = [
 			(Version::Lite06, 8),
 			(Version::Lite07, 8),
+			(Version::Lite02, lite::ControlType::Probe as u8),
+			(Version::Lite03, lite::ControlType::Goaway as u8),
 			(Version::Lite04, lite::ControlType::Fetch as u8),
 			(Version::Lite04, lite::ControlType::Track as u8),
 			(Version::Lite06, lite::ControlType::Auth as u8),
@@ -6176,6 +6181,32 @@ mod tests {
 	}
 
 	#[moq_net_sim::test]
+	async fn draining_probe_targets_yields() {
+		const TARGETS: usize = 100;
+		let version = Version::Lite07;
+		let target = lite::Probe {
+			bitrate: Some(4_000_000),
+			rtt: Some(20),
+		};
+		let script = target.encode_bytes(version).unwrap().repeat(TARGETS);
+		let mut session = ScriptedSession::new(script)
+			.with_stats(crate::lite::test_transport::SinkStats::default().with_send_rate(1_000_000));
+		let stream = Stream::open(&mut session, version).await.unwrap();
+		session.close(Close::Fin);
+		let estimate = kio::Producer::default();
+		let mut serve = probe_server(session.clone(), stream, version, &estimate);
+		// Without a budget the first poll drains every target and reaches the FIN.
+		assert!(
+			serve.poll_probe(&kio::Waiter::noop()).is_pending(),
+			"one poll drained every buffered target"
+		);
+		assert!(
+			(0..TARGETS).any(|_| serve.poll_probe(&kio::Waiter::noop()).is_ready()),
+			"the FIN was never reached"
+		);
+	}
+
+	#[moq_net_sim::test]
 	async fn malformed_subscribe_update_closes_after_request_setup() {
 		use kio::Task;
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
@@ -6224,6 +6255,61 @@ mod tests {
 					.any(|(code, _)| *code == SessionError::ProtocolViolation.to_code()),
 				"{version}: late decode error was swallowed"
 			);
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn a_producer_decode_error_stays_on_its_request() {
+		use kio::Task;
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let origin = crate::origin::Config::new(Hop::random()).produce();
+			let broadcast = origin.create_broadcast("room").unwrap();
+			let mut dynamic = broadcast.dynamic();
+			broadcast.announce(Default::default()).unwrap();
+			let request = lite::Subscribe {
+				order: crate::track::Order::Descending,
+				epoch: None,
+				id: 0,
+				broadcast: crate::Path::new("room"),
+				track: "video".into(),
+				priority: 0,
+				max_delay: Duration::ZERO,
+				start_group: None,
+				end_group: None,
+				start_frame: 0,
+				end_frame: None,
+			};
+			let mut session = ScriptedSession::new(request.encode_bytes(version).unwrap().to_vec());
+			let log = session.log.clone();
+			let stream = Stream::open(&mut session, version).await.unwrap();
+			let estimate = kio::Producer::default();
+			let probe = probe_server(session.clone(), stream, version, &estimate);
+			probe.shared.peer_setup.set(lite::Setup::default());
+			let mut shared = probe.shared;
+			Arc::get_mut(&mut shared).expect("one owner").origin = origin.consume();
+			let mut control = Control {
+				shared: shared.clone(),
+				runtime: crate::time::Clock::sim(),
+				state: ControlState::Subscribe(RequestServe::new(shared, probe.stream.unwrap())),
+			};
+			let pending =
+				moq_net_sim::timeout(Duration::from_millis(1), kio::wait(|waiter| control.poll(waiter))).await;
+			assert!(pending.is_err(), "{version}: request did not wait for its track");
+			// The local producer fails with the same error type a malformed peer message
+			// would; it is still not the peer's fault.
+			let track = dynamic
+				.requested_track()
+				.now_or_never()
+				.expect("track requested")
+				.unwrap();
+			track.reject(Error::Decode(crate::DecodeError::InvalidValue));
+			let ended = moq_net_sim::timeout(Duration::from_millis(1), kio::wait(|waiter| control.poll(waiter))).await;
+			assert!(ended.is_ok(), "{version}: the request did not end");
+			assert!(
+				log.closes().is_empty(),
+				"{version}: a producer error closed the session"
+			);
+			assert!(!log.resets().is_empty(), "{version}: the request was not refused");
 		}
 	}
 
