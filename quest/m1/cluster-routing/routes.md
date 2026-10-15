@@ -140,6 +140,14 @@ freshness before coding:
   a wire change if a use case appears. Rejected: keying a forwarded identity
   by its bare id and the narrowest scope it crossed, which needs the scope in
   ROUTE, and accepting growth bounded only by metric overflow.
+- ✅ Decided 2026-10-15 (maintainer): scope is the credential subject. A
+  publish grant is a union of patterns that refresh and withdrawal change, so
+  neither the whole union nor one matching pattern is a key that survives
+  refresh and that two uplinks share. The subject stays stable across token
+  refresh and is shared by one operator's uplinks; each claim is still checked
+  against the current pattern union. Rejected: the connection root, too coarse
+  since two scoped peers under one root would share keys. Add multi-pattern,
+  overlapping-pattern, and refresh fixtures.
 - Loop freedom is Babel's feasibility condition (RFC 8966) keyed by node:
   accept a route if its seqno is newer, or equal with a metric below the
   feasibility distance. Only the origin advances its seqno. Retraction is an
@@ -291,14 +299,6 @@ Open, for the implementer to settle and record:
   open: [Next-hop handoff](/quest/m1/cluster-routing/handoff.md) settles it
   with deterministic acceptance tests before the wire is written.
 - How much of today's route trie, fronts, and `route_order` survives intact.
-- What `scope` names in `hash(scope, id)`. A publish grant is a union of
-  patterns that refresh and withdrawal change, so neither the whole union nor
-  one matching pattern is a key that survives refresh and that two uplinks
-  share. Recommended: the grant's credential subject, stable across refresh
-  and shared by one operator's uplinks, with each claim still checked against
-  the live union. The connection root alone is too coarse: two scoped peers
-  under one root would share keys. Settle with the maintainer before coding,
-  with multi-pattern, overlapping-pattern, and refresh fixtures.
 
 The #4349 counterexamples are the `residual_*` tests in
 `rs/moq-net/tests/mesh_withdraw.rs`. They pin today's hunting on lite-06:
