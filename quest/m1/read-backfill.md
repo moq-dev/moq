@@ -28,17 +28,18 @@ delivers a group that arrives below the cursor as a late backfill; Rust
   startup media (`consumer.outoforder.test.ts` covers that order). The floor
   is instead the lowest group of the subscription's requested ranges
   ([Subscribe ranges](/quest/m1/subscribe-ranges/README.md)): given for an
-  absolute start, and for a relative start resolved against the largest
-  location the publisher reports
-  ([Live largest location](/quest/m1/largest.md)). Every sequence in range
-  arrives or is named by SUBSCRIBE_DROP, so the read never waits on a group
-  that won't come.
-- SUBSCRIBE_OK's `Group` is not the floor: the lite draft lets a group
-  between the requested start and it arrive later.
-- Where group numbers are sparse (moq-transport), a relative start can't be
-  resolved from the largest location alone. Settle there whether the
-  publisher reports the resolved start or that read keeps today's
-  first-arrival cursor.
+  absolute start, and for a relative start the start the publisher resolved
+  for this request. Every sequence in range arrives or is named by
+  SUBSCRIBE_DROP, so the read never waits on a group that won't come.
+- Don't infer a relative start from the reported largest location: a
+  frameless newest group counts when a relative end resolves but not in
+  `largest()`, sparse moq-transport groups break the arithmetic, and a later
+  coalesced largest isn't this request's resolution. SUBSCRIBE_OK's `Group`
+  isn't it either, since the lite draft lets a group between the requested
+  start and it arrive later. If the wire doesn't carry the resolved start,
+  add it to lite-07 through [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md);
+  settle the moq-transport equivalent or keep today's first-arrival cursor
+  there.
 - The cursor is range-aware, not just floored: with disjoint ranges it skips
   straight across an unrequested gap (group 1, then 10 onward) instead of
   waiting for the latency budget, since no SUBSCRIBE_DROP is owed there.
@@ -46,16 +47,17 @@ delivers a group that arrives below the cursor as a late backfill; Rust
   JS, then make JS discard groups below the cursor. Add a test mirroring
   Rust's: a reordered group below the floor is never yielded and no extra
   `Gap` appears, and the out-of-order head case keeps passing. Add a
-  disjoint live-range regression for the skip.
+  disjoint live-range regression for the skip, and a relative start whose
+  newest group has no frames yet.
 - Check JS readers that relied on backfill (watch's audio/video decoders,
   `Sync`) and adjust them; one that wants every group reads an arrival-order
   API instead.
 
 Public API: no type change; the ordered read changes in Rust and JS (the
-floor comes from reported bounds, and JS drops backfill). Wire: none beyond
-the required quests.
+floor comes from reported bounds, and JS drops backfill). Wire: possibly a
+resolved start on lite-07 SUBSCRIBE_OK, through Lite-07 ranges.
 
 ## Required
 
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - the reader's requested ranges set the floor, and every sequence in them arrives or is dropped
-- [Live largest location](/quest/m1/largest.md) - the reader learns the live edge before the first group arrives, resolving a relative start
+- [Live largest location](/quest/m1/largest.md) - the reader learns the live edge before the first group arrives
