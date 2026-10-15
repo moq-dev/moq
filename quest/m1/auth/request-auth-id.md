@@ -49,6 +49,10 @@ until it lands.
   auth and names it for the carrying request, so that request ends when the
   auth ends or narrows away from it; USE_ALIAS on a later request names it;
   DELETE withdraws one.
+- An AUTH with ID `u64::MAX` is refused, since no request can name it as
+  ID plus 1. Cover the boundary in the Rust and JS interop tests.
+- Extend `rs/moq-net/benches/auth.rs` with a sweep over live auths and named
+  requests, measuring the end or narrowing of one auth.
 - Update `drafts/draft-lcurley-moq-lite.md` and
   `drafts/draft-lcurley-moq-auth.md`, Rust and `js/net`, and run
   `just test interop --all`. Update `doc/concept/moq-lite.md`'s
