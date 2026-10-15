@@ -791,7 +791,7 @@ async fn connect_session<S: moq_net::transport::poll::Boxable>(
 	// Before the driver runs, so the first request carries the newest token. A session that
 	// cannot carry one (moq-lite) fails the dial as Unsupported, which is terminal, rather
 	// than drop it.
-	token.attach(session.auth())?;
+	token.attach(session.clone())?;
 	use tracing::Instrument;
 	tokio::spawn(crate::panic::isolate(moq_net::time::run(driver)).instrument(tracing::Span::current()));
 	Ok(session)

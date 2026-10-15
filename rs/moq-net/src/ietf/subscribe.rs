@@ -37,8 +37,8 @@ pub struct Subscribe<'a> {
 	/// MAX_FILTER_RANGES, so the request is refused rather than served unfiltered.
 	/// Never encoded; we send no range filters.
 	pub range_filters: bool,
-	/// The `AUTHORIZATION TOKEN` (0x03) this request presents. The parameter may repeat; the
-	/// first instance is the request's credential, and every instance has been decoded.
+	/// The `AUTHORIZATION TOKEN` (0x03) this request presents. At most one is
+	/// accepted: decoding refuses a repeated or second token.
 	pub authorization_token: Option<RequestToken>,
 }
 
@@ -392,8 +392,8 @@ pub struct SubscribeUpdate {
 	pub forward: Option<bool>,
 	/// The new LOCATION_FILTER (draft-15+); `None` keeps the subscription's own range.
 	pub filter: Option<Filter>,
-	/// The `AUTHORIZATION TOKEN` (0x03) renewing the request's credential, if any. The
-	/// parameter may repeat; the first instance is kept, and every instance has been decoded.
+	/// The `AUTHORIZATION TOKEN` (0x03) renewing the request's credential, if any. At
+	/// most one is accepted: decoding refuses a repeated or second token.
 	pub authorization_token: Option<RequestToken>,
 }
 

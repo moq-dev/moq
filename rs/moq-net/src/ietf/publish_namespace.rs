@@ -23,8 +23,8 @@ pub struct PublishNamespace<'a> {
 	/// whether they appear on the wire at all.
 	pub cluster: Option<cluster::Advert>,
 
-	/// The `AUTHORIZATION TOKEN` (0x03) this request presents. The parameter may repeat; the
-	/// first instance is the request's credential, and every instance has been decoded.
+	/// The `AUTHORIZATION TOKEN` (0x03) this request presents. At most one is
+	/// accepted: decoding refuses a repeated or second token.
 	pub authorization_token: Option<RequestToken>,
 }
 
@@ -114,8 +114,8 @@ pub struct PublishNamespaceUpdate {
 	pub hops: Option<cluster::HopPath>,
 	/// ROUTE_COST, when the cost changed.
 	pub cost: Option<u64>,
-	/// The `AUTHORIZATION TOKEN` (0x03) renewing the advertisement's credential, if any. The
-	/// parameter may repeat; the first instance is kept, and every instance has been decoded.
+	/// The `AUTHORIZATION TOKEN` (0x03) renewing the advertisement's credential, if any. At
+	/// most one is accepted: decoding refuses a repeated or second token.
 	pub authorization_token: Option<RequestToken>,
 }
 
