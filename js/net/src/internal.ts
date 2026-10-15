@@ -220,13 +220,13 @@ export const hooks: {
 	 * Throws `ProtocolViolation` if a frame at or past the cap already exists.
 	 */
 	limitGroup: (group: GroupProducer, frames: number) => void;
-	/** Stamp a group's arrival at this hop as now, when it joins a track. */
-	arriveGroup: (group: GroupProducer) => void;
 	/** Return a group's first timestamp, retained even after its first frame is read. */
 	groupTimestamp: (group: GroupConsumer) => Timestamp | undefined;
 	groupLatest: (group: GroupConsumer) => Timestamp | undefined;
 	/** Return when a group joined its track at this hop, in `performance.now()` milliseconds. */
 	groupArrived: (group: GroupConsumer) => number;
+	/** Record when a track's mirror of a group joined that track at this hop. */
+	arriveGroup: (group: GroupConsumer, at: number) => void;
 	/** Keep applying a subscription's drift policy after it hands a group out. */
 	expireGroup: (
 		group: GroupConsumer,

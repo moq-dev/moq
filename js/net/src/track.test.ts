@@ -1074,6 +1074,30 @@ test("frozen timestamps still age out by wall clock", () => {
 	}
 });
 
+// Arrival is per track: a group joining a second track later doesn't restart the first
+// track's clock.
+test("a group shared by two tracks ages each from its own arrival", () => {
+	const clock = mockMonotonicTime(10_000);
+	const first = new TrackProducer("first").accept({});
+	const second = new TrackProducer("second").accept({});
+	try {
+		first.writeFrame({ payload: enc.encode("0") });
+		const shared = new GroupProducer(1);
+		shared.writeFrame({ payload: enc.encode("1") });
+		shared.close();
+		first.writeGroup(shared);
+		clock.set(11_000);
+		second.writeGroup(shared);
+
+		// Group 0's successor joined the first track a full budget ago.
+		expect(drain(first.subscribe({ maxDelay: Milli(1000) }))).toEqual([1]);
+	} finally {
+		first.close();
+		second.close();
+		clock.restore();
+	}
+});
+
 // Groups that arrive at once are judged by media time, which convicts them before the wall
 // clock can.
 test("a startup burst ages out by media time", () => {

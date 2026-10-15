@@ -56,7 +56,10 @@ pub struct Subscription {
 	/// this hop. That bounds what media time can't: a peer whose timestamps stop
 	/// advancing, a successor that never presents a frame, and an untimed track
 	/// (pre-Lite05 moq-lite, or moq-transport without TIMESCALE), which is judged by the
-	/// wall clock alone.
+	/// wall clock alone. A read waiting in a superseded group wakes at that deadline only
+	/// when something collects the track's cache pool: an origin's driver does, and a
+	/// standalone track needs [`Pool::gc`](crate::cache::Pool::gc) called, as its idle
+	/// expiry already does. Otherwise it is judged only when something else wakes the read.
 	pub max_delay: Duration,
 	/// The lowest [`Position`] the publisher may deliver, or `None` for no floor.
 	///
