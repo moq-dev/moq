@@ -143,8 +143,10 @@ freshness before coding:
   `moq_auth::Claims` drops `sub` and `moq_net::auth::Grant` holds only
   patterns and expiry, so the grant gains the verified subject, qualified by
   its issuer, in Rust and JS. Fail loud: a scoped token without a subject is
-  refused, and so is a token whose subject differs from the session's union.
-  The receiver derives the key from the token it verified, so no wire change.
+  refused, and so is a token added to a session (refresh or `auth().add`)
+  whose issuer-qualified subject differs from that of the session's current
+  grants. The receiver derives the key from the token it verified, so no wire
+  change.
 - Decided 2026-10-14: qualified keys carry a marker every relay recognizes,
   and a scoped connection forwarding an already qualified identity has that
   route refused, with no wire change. Otherwise a key sent down through a
@@ -306,6 +308,13 @@ Open, for the implementer to settle and record:
   open: [Next-hop handoff](/quest/m1/cluster-routing/handoff.md) settles it
   with deterministic acceptance tests before the wire is written.
 - How much of today's route trie, fronts, and `route_order` survives intact.
+- What happens when a session's grant union crosses the scoped boundary: a
+  `**` token added makes its forwarded identities bare, and that token
+  expiring makes them qualified again, so routes, feasibility distances, and
+  aliases filed under the old key go stale. Expiry cannot be refused.
+  Recommended: treat a crossing as retracting every forwarded route the
+  session delivered and re-filing its current advertisements under the new key, with
+  fixtures in both directions. Settle with the maintainer before coding.
 
 The #4349 counterexamples are the `residual_*` tests in
 `rs/moq-net/tests/mesh_withdraw.rs`. They pin today's hunting on lite-06:
