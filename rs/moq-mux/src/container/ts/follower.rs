@@ -85,7 +85,7 @@ enum State<E: catalog::Catalog> {
 ///
 /// An epochless route has no instance to match, so any return of one is a replacement.
 pub struct Follower<E: catalog::Catalog = ()> {
-	export: Export<E>,
+	export: Export<crate::catalog::Consumer<E>>,
 	state: State<E>,
 	announced: moq_net::announce::Follow,
 	path: moq_net::PathOwned,
@@ -107,7 +107,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 	/// Follow the path `export` reads, from the broadcast it resolved.
 	///
 	/// Fails when the export's origin can never cover its path.
-	pub fn new(export: Export<E>) -> crate::Result<Self> {
+	pub fn new(export: Export<crate::catalog::Consumer<E>>) -> crate::Result<Self> {
 		let source = export.source();
 		let announced = source.origin().follow(source.path())?;
 		let path = source.path().clone();
@@ -157,7 +157,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 	}
 
 	/// The export being carried on.
-	pub fn export(&self) -> &Export<E> {
+	pub fn export(&self) -> &Export<crate::catalog::Consumer<E>> {
 		&self.export
 	}
 

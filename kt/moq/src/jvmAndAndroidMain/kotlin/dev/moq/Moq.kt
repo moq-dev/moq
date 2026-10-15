@@ -67,7 +67,12 @@ class Moq internal constructor(
      */
     fun bandwidth(): Bandwidth = session.bandwidth()
 
-    /** Drain finished tracks within one second, throwing if delivery times out. */
+    /**
+     * Drain finished tracks within one second, throwing on failure.
+     * Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older
+     * Lite versions, including the default lite-06, wait only for transport ACKs.
+     * IETF also waits for transport ACKs.
+     */
     suspend fun shutdown() {
         try {
             session.shutdown()

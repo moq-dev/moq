@@ -233,6 +233,8 @@ features:
     cargo check --locked -p moq-relay --no-default-features
     just rs relay-minimal
     cargo check --locked -p moq-cli --no-default-features
+    just rs test -p moq-cli --no-default-features --features capture,websocket -E 'test(capture_window)'
+    just rs test -p moq-cli --no-default-features --features capture,pipewire,websocket -E 'test(capture_window)'
     cargo check --locked -p moq-bench --no-default-features
     cargo check --locked -p moq-boy --no-default-features
     cargo check --locked -p moq-hls -p moq-rtmp -p moq-rtc --no-default-features --all-targets

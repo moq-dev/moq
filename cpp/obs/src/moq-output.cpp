@@ -395,9 +395,9 @@ void MoQOutput::Reset()
 	broadcast.reset();
 	origin.reset();
 
-	// Drain once the tracks are finished, so the session delivers their tails instead
-	// of cutting them off. The future holds the session until the drain settles, and
-	// dropping it would abort the drain, so keep it past this attempt.
+	// Drain once tracks finish. Default lite-06 waits for transport ACKs, not
+	// confirmation that the peer received the tail. Keep the future past this
+	// attempt because dropping it aborts the drain.
 	if (retired) {
 		draining.erase(std::remove_if(draining.begin(), draining.end(),
 					      [](const moq::Future<void> &drain) {

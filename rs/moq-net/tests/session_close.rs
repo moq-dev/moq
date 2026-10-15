@@ -90,6 +90,29 @@ async fn setup(version: &str) -> Setup {
 	}
 }
 
+/// TRACK_INFO creates demand before any SUBSCRIBE, so demand alone cannot gate a drain test.
+#[moq_net_sim::test]
+async fn track_info_interest_precedes_a_subscription() {
+	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
+		let publisher = produce_origin(1);
+		let broadcast = publisher.create_broadcast("bcast").unwrap();
+		let track = broadcast.create_track("video", timed()).unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let subscriber = produce_origin(2);
+		let mut options = MockConnectOptions::new(version.parse().unwrap());
+		options.server_publish = Some(publisher.consume());
+		options.client_subscribe = Some(subscriber.clone());
+		let _pair = connect_mock(options).await;
+		let consumer = subscriber.consume();
+		consumer.routed("bcast").await.unwrap();
+		let remote = consumer.request_broadcast("bcast", None).await.unwrap();
+		let copy = remote.track("video").unwrap();
+		copy.query().await.expect("TRACK_INFO");
+		track.demand().used().await.expect("TRACK_INFO holds demand");
+		assert!(track.subscription().is_none(), "{version}: no SUBSCRIBE was requested");
+	}
+}
+
 /// A finished track's last group and FIN reach the subscriber, even though the
 /// close is requested before the session wrote them.
 #[moq_net_sim::test]

@@ -23,18 +23,19 @@ Continue [#5148](https://github.com/moq-dev/moq/pull/5148), which carries
 - **Scope.** Keep the Rust hook and renewal instead of reducing the work to
   decoding or expanding it into relay integration. Interoperability is the
   reason to expose it; carrying a token alone does not authenticate it.
-- **Verifier API.** Keep one event queue with explicit session/request
-  variants and distinct acceptance handles. A session-token consumer must
-  consciously handle or refuse the request variant; an optional `scope()`
-  on a shared `accept()` is insufficient. The types must distinguish a
-  session grant advertised to a peer from a locally enforced request grant.
-  Update existing consumers together, including the relay's explicit refusal
-  of request verification. This intentionally changes the acceptor API so
-  existing session handlers cannot silently acquire new security semantics.
-- **Admission.** Independently verified local session permission takes
-  precedence. Only when it does not cover the request is the request token
-  verified, with the accepted grant checked against that request's path and
-  kind. Grants received in AUTH_OK describe what the peer allows us to do;
+- **Verifier API** (revised by the maintainer on #5148, replacing the single
+  event queue first chosen). Two opt-in queues: `requests()` yields session
+  tokens, unchanged from main, and `scoped()` yields `Scoped` request tokens
+  with their own acceptance handle and bound. An application verifies request
+  tokens only by taking `scoped()`; if nothing takes it, a token-carrying
+  request is refused `NOT_SUPPORTED`, so the relay needs no code to refuse
+  them. The types distinguish a session grant advertised to a peer from a
+  locally enforced request grant (`Enforced`).
+- **Admission** (revised on #5148). Every request that carries a token is
+  verified by it, even when local session permission already covers the
+  request, with the accepted grant checked against that request's path and
+  kind. A request without a token is still admitted by local session
+  permission. Grants received in AUTH_OK describe what the peer allows us to do;
   they never skip verification of what the peer asks us to do. Without local
   permission or a verified request grant, refuse `UNAUTHORIZED`; without an
   application request verifier, refuse a token requiring verification as
@@ -104,9 +105,9 @@ FETCH on drafts 14-19 plus native fill on newer drafts. Keep unsupported
 protocols explicit. Run scoped checks, wire-draft validation when applicable,
 and cross-language interop for the wire changes.
 
-Public API: a breaking Rust acceptor event/type distinction, plus the
-request-token setter and persistent connection integration. Export only the
-types consumers need; do not keep the optional-scope compatibility shape.
+Public API: an additive opt-in `scoped()` request-token queue beside the
+unchanged `requests()`, plus the request-token setter and persistent
+connection integration. Export only the types consumers need.
 JS receives necessary decoder/registry parity, not a request-token API.
 Wire: existing 0x03 tokens and draft-specific renewal messages, plus
 MAX_REQUEST_UPDATES (0x08) and TOO_MANY_REQUEST_UPDATES (0x1B) for draft 19+;

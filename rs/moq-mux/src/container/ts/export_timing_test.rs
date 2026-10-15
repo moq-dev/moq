@@ -183,7 +183,7 @@ impl Live {
 
 	/// A receiver joining now.
 	async fn join(&self, every: Duration) -> Leg {
-		let export = Export::new(self.source.clone())
+		let export = super::export_test::open_export(self.source.clone())
 			.await
 			.unwrap()
 			.with_delay(DELAY)
@@ -295,7 +295,7 @@ impl Live {
 
 /// One receiver: an exporter and what it rendered, with the instant each slot went out.
 struct Leg {
-	export: Export,
+	export: Export<crate::catalog::Consumer>,
 	/// How often it reads its subscription. Zero reads after every frame the source sends; a
 	/// coarser cadence stands for a receiver behind a burstier network or scheduler.
 	every: Duration,
