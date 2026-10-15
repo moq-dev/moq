@@ -213,13 +213,15 @@ final class SmokeTests: XCTestCase {
         let broadcast = try BroadcastProducer()
         let catalog = try Media.CatalogProducer(broadcast: broadcast)
         try catalog.setSection(name: "app", json: "{\"value\":42}")
+        _ = try catalog.now()
         try broadcast.close()
         XCTAssertThrowsError(try catalog.removeSection(name: "app"))
+        XCTAssertThrowsError(try catalog.now())
     }
 
     func testBroadcastConsumerFetchesCachedGroup() async throws {
         let broadcast = try BroadcastProducer()
-        let track = try broadcast.publishTrack(name: "events")
+        let track = try broadcast.publishTrack(name: "events", info: TrackInfo(timescale: 1_000_000))
         let group = try track.appendGroup()
         try group.writeFrame(Data("cached".utf8), timestampUs: 0)
         try group.finish()
@@ -313,9 +315,49 @@ final class SmokeTests: XCTestCase {
         try broadcast.close()
     }
 
+    func testFlateTimestampsRoundTrip() async throws {
+        for timestamp in [nil, UInt64(123_456)] {
+            for mode in ["snapshot", "stream"] {
+                let broadcast = try BroadcastProducer()
+                let info: TrackInfo? = timestamp.map { _ in TrackInfo(timescale: 1_000_000) }
+                let track = try broadcast.publishTrack(name: "data", info: info)
+                let consumer = try track.consume()
+                let payload = Data("payload".utf8)
+                if mode == "snapshot" {
+                    let producer = try Flate.SnapshotProducer(broadcast: broadcast, track: track)
+                    try producer.update(payload, timestampUs: timestamp)
+                    try producer.finish()
+                } else {
+                    let producer = try Flate.StreamProducer(broadcast: broadcast, track: track)
+                    try producer.append(payload, timestampUs: timestamp)
+                    try producer.finish()
+                }
+                let received = try await consumer.readFrame()
+                let frame = try XCTUnwrap(received)
+                XCTAssertEqual(frame.payload, payload)
+                XCTAssertEqual(frame.timestampUs, timestamp)
+                try broadcast.close()
+            }
+        }
+    }
+
+    func testRawTrackWithoutTimestampStaysUntimed() async throws {
+        let broadcast = try BroadcastProducer()
+        let track = try broadcast.publishTrack(name: "untimed")
+        let consumer = try track.consume()
+        try track.writeFrame(Data("payload".utf8))
+        let received = try await consumer.readFrame()
+        let frame = try XCTUnwrap(received)
+        XCTAssertEqual(frame.payload, Data("payload".utf8))
+        XCTAssertNil(frame.timestampUs)
+        XCTAssertNil(try consumer.info().timescale)
+        try track.finish()
+        try broadcast.close()
+    }
+
     func testRawTrackTimestamps() async throws {
         let broadcast = try BroadcastProducer()
-        let track = try broadcast.publishTrack(name: "events")
+        let track = try broadcast.publishTrack(name: "events", info: TrackInfo(timescale: 1_000_000))
         let consumer = try track.consume()
 
         let payload = Data("ready".utf8)
@@ -341,7 +383,7 @@ final class SmokeTests: XCTestCase {
 
     func testReadFrameSkipsEmptyThenPopulatedGroups() async throws {
         let broadcast = try BroadcastProducer()
-        let track = try broadcast.publishTrack(name: "status")
+        let track = try broadcast.publishTrack(name: "status", info: TrackInfo(timescale: 1_000_000))
         let consumer = try track.consume()
 
         try track.appendGroup().finish()

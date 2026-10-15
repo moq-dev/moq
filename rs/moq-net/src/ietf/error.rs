@@ -318,7 +318,10 @@ pub(crate) mod request {
 			Error::Timeout | Error::Stream(StreamError::DeliveryTimeout) | Error::Session(SessionError::Timeout) => {
 				return TIMEOUT;
 			}
-			Error::Unsupported | Error::Version | Error::Session(SessionError::Version | SessionError::Unsupported) => {
+			Error::Unsupported
+			| Error::Version
+			| Error::Decode(DecodeError::MultipleAuthTokens)
+			| Error::Session(SessionError::Version | SessionError::Unsupported) => {
 				return NOT_SUPPORTED;
 			}
 			// moq-transport has no code for a FETCH that reached a datagram, which is never

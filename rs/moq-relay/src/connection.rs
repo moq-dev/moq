@@ -1,5 +1,3 @@
-use anyhow::Context;
-
 use crate::{auth, cluster, refusals::Refusal};
 
 use axum::http;
@@ -80,15 +78,22 @@ impl Connection {
 		self
 	}
 
-	/// Admits and serves this connection until it closes. A panic ends only this
-	/// connection, as an error.
+	/// Admits and serves this connection until it closes, then logs the close. A panic
+	/// ends only this connection, as an error.
 	#[tracing::instrument("conn", skip_all, fields(id = self.id, remote = self.request.remote_addr().map(tracing::field::display), session = tracing::field::Empty))]
-	pub async fn run(self) -> anyhow::Result<()> {
+	pub async fn run(self) {
+		let id = self.id;
 		// Boxed: debug builds copy the session's large future through each wrapper's
 		// stack frame, which overflows a test thread.
-		moq_tokio::panic::isolate(Box::pin(self.serve()))
+		let result = moq_tokio::panic::isolate(Box::pin(self.serve()))
 			.await
-			.context("connection panicked")?
+			.unwrap_or_else(|| Err(anyhow::anyhow!("connection panicked")));
+		// Logged here, under the same target as the span's other lines, so every
+		// transport's `conn{id=...}` pairs with its close under one log filter.
+		match result {
+			Ok(()) => tracing::info!(id, "connection closed"),
+			Err(err) => tracing::warn!(id, %err, "connection closed"),
+		}
 	}
 
 	async fn serve(self) -> anyhow::Result<()> {

@@ -445,11 +445,11 @@ def test_string_sequences_refuse_a_bare_string():
 async def test_fetch_group_and_serve_dynamic_miss():
     """Fetch a cached group, then serve an uncached sequence through TrackDynamic."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("events")
+    track = broadcast.publish_track("events", moq.TrackInfo(timescale=1_000_000))
     consumer = broadcast.consume()
 
     cached = track.append_group()
-    cached.write_frame(b"cached")
+    cached.write_frame(b"cached", timedelta(0))
     cached.finish()
 
     fetched = await consumer.fetch_group("events", 0, moq.FetchGroupOptions(priority=3))
@@ -616,7 +616,7 @@ async def test_dynamic_broadcast_request():
     assert request.path == "dynamic/broadcast"
 
     served = moq.BroadcastProducer()
-    track = served.publish_track("status")
+    track = served.publish_track("status", moq.TrackInfo(timescale=1_000_000))
     request.accept(served)
     with pytest.raises(Exception):
         _ = request.path
@@ -668,7 +668,7 @@ def test_raw_append_group_sequence_increments():
 def test_raw_group_write_multiple_frames():
     """A single group accepts multiple write_frame calls before finish."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("chunks")
+    track = broadcast.publish_track("chunks", moq.TrackInfo(timescale=1_000_000))
 
     group = track.append_group()
     for i in range(10):
@@ -742,15 +742,15 @@ def test_raw_parallel_groups():
     """Appending a new group before finishing the previous is allowed;
     both groups carry distinct sequences and can be written independently."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("parallel")
+    track = broadcast.publish_track("parallel", moq.TrackInfo(timescale=1_000_000))
 
     g0 = track.append_group()
     g1 = track.append_group()
     assert g0.sequence == 0
     assert g1.sequence == 1
 
-    g0.write_frame(b"a0")
-    g1.write_frame(b"b0")
+    g0.write_frame(b"a0", timedelta(0))
+    g1.write_frame(b"b0", timedelta(0))
     g0.write_frame(b"a1", timedelta(microseconds=1))
     g0.finish()
     g1.finish()
@@ -839,7 +839,7 @@ async def test_raw_multiple_frames():
 
     async for announcement in routes(consumer.announced()):
         broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
-        subscription = moq.Subscription(max_delay=timedelta(seconds=1))
+        subscription = moq.Subscription(max_delay=timedelta(seconds=1), group_start=0)
         raw_consumer = await broadcast_consumer.subscribe_track("commands", subscription)
 
         messages = [
@@ -865,7 +865,7 @@ async def test_raw_producer_consume_direct():
     """Consume a raw track directly from the producer, no origin/broadcast plumbing."""
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("direct")
-    consumer = track.consume(moq.Subscription(max_delay=timedelta(seconds=1)))
+    consumer = track.consume(moq.Subscription(max_delay=timedelta(seconds=1), group_start=0))
 
     track.write_frame(b"hello")
     track.write_frame(b"world")
@@ -916,13 +916,15 @@ async def test_raw_group_sequence():
     """Consumer sees the same sequence numbers the producer assigned."""
     origin = moq.OriginProducer()
     broadcast = create_announced(origin, "track/seq")
-    raw = broadcast.publish_track("seq")
+    raw = broadcast.publish_track("seq", moq.TrackInfo(timescale=1_000_000))
 
     consumer = origin.consume()
 
     async for announcement in routes(consumer.announced()):
         broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
-        raw_consumer = await broadcast_consumer.subscribe_track("seq", moq.Subscription(max_delay=timedelta(seconds=1)))
+        raw_consumer = await broadcast_consumer.subscribe_track(
+            "seq", moq.Subscription(max_delay=timedelta(seconds=1), group_start=0)
+        )
 
         sent_sequences = []
         for i in range(3):
@@ -953,7 +955,7 @@ async def test_default_iteration_is_sequence_order():
     broadcast = create_announced(origin, "track/ordering")
     raw = broadcast.publish_track("ordering")
 
-    subscription = moq.Subscription(max_delay=timedelta(seconds=1))
+    subscription = moq.Subscription(max_delay=timedelta(seconds=1), group_start=0)
     seq_consumer = raw.consume(subscription)
     arr_consumer = raw.consume(subscription)
 
@@ -1003,7 +1005,7 @@ async def test_container_group_decodes_arrival_order():
     stalled group is neither skipped nor blocks a newer one, and each timestamp
     is the container's media time, not the transport's."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("audio")
+    track = broadcast.publish_track("audio", moq.TrackInfo(timescale=1_000_000))
     consumer = await broadcast.consume().subscribe_track("audio")
 
     first = track.append_group()
@@ -1034,7 +1036,7 @@ async def test_container_group_decodes_arrival_order():
 async def test_container_group_takes_over_an_unread_group():
     """Decoding refuses a raw group that already read a frame, and closes the one it takes."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("audio")
+    track = broadcast.publish_track("audio", moq.TrackInfo(timescale=1_000_000))
     consumer = await broadcast.consume().subscribe_track("audio")
 
     group = track.append_group()
@@ -1057,7 +1059,7 @@ async def test_container_group_takes_over_an_unread_group():
 async def test_container_group_fails_loudly():
     """An unconfigurable container fails before taking the group; an undecodable frame fails the read."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("audio")
+    track = broadcast.publish_track("audio", moq.TrackInfo(timescale=1_000_000))
     consumer = await broadcast.consume().subscribe_track("audio")
 
     group = track.append_group()
@@ -1101,7 +1103,7 @@ async def test_read_frame_one_per_group():
     """read_frame() returns the first frame of each successive group."""
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("status")
-    consumer = track.consume(moq.Subscription(max_delay=timedelta(seconds=1)))
+    consumer = track.consume(moq.Subscription(max_delay=timedelta(seconds=1), group_start=0))
 
     track.write_frame(b"ready")
     track.write_frame(b"running")
@@ -1121,7 +1123,7 @@ async def test_read_frame_one_per_group():
 async def test_raw_read_frame_preserves_timestamp():
     """read_frame() returns raw payloads with their presentation timestamp."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("status")
+    track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000))
     consumer = track.consume()
 
     track.write_frame(b"ready", timedelta(microseconds=12_345))
@@ -1145,7 +1147,7 @@ async def test_read_frame_skips_remaining_frames_in_group():
     """read_frame() only returns the first frame of a multi-frame group."""
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("mixed")
-    consumer = track.consume(moq.Subscription(max_delay=timedelta(seconds=1)))
+    consumer = track.consume(moq.Subscription(max_delay=timedelta(seconds=1), group_start=0))
 
     group = track.append_group()
     group.write_frame(b"first")
@@ -1180,7 +1182,7 @@ async def test_read_frame_returns_none_when_track_finished():
 async def test_read_frame_skips_empty_group_on_open_track():
     """An empty completed group is not track EOF while the track is still open."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("status")
+    track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000))
     consumer = track.consume()
 
     track.append_group().finish()
@@ -1199,7 +1201,7 @@ async def test_read_frame_skips_empty_group_on_open_track():
 async def test_read_frame_skips_empty_then_populated_groups():
     """read_frame() walks past completed empty groups to the next first frame."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("status")
+    track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000))
     consumer = track.consume()
 
     track.append_group().finish()
@@ -1215,7 +1217,7 @@ async def test_read_frame_skips_empty_then_populated_groups():
 async def test_read_frame_keeps_group_across_cancelled_call():
     """Cancelling one read_frame() must not drop the group it already acquired."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("status")
+    track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000))
     consumer = track.consume()
 
     group = track.append_group()
