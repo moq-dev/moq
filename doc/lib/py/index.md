@@ -132,3 +132,7 @@ reconnecting with the same workload.
 - API reference: [moq-rs.readthedocs.io](https://moq-rs.readthedocs.io)
 - Source and examples: [`py/moq-rs`](https://github.com/moq-dev/moq/tree/main/py/moq-rs)
 - Raw bindings: [`moq-ffi`](https://pypi.org/project/moq-ffi/) on PyPI, for the unwrapped API
+
+## Background task errors
+
+A panic in an owned native background task reaches a pending or later fallible call on that object as a task error. Other objects keep running.

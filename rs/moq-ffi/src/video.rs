@@ -11,7 +11,7 @@
 //! timestamp.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use tokio::sync::oneshot;
@@ -191,14 +191,33 @@ struct Follow {
 	close: Option<oneshot::Sender<()>>,
 	thread: Option<std::thread::JoinHandle<()>>,
 	ceiling: Arc<AtomicU64>,
+	failed: Arc<AtomicBool>,
+}
+
+impl Follow {
+	fn check(&self) -> Result<(), MoqError> {
+		if self.failed.load(Ordering::Acquire) {
+			return Err(panic_error());
+		}
+		Ok(())
+	}
+
+	fn stop(&mut self) -> Result<(), MoqError> {
+		drop(self.close.take());
+		if let Some(thread) = self.thread.take() {
+			thread.join().map_err(|_| panic_error())?;
+		}
+		self.check()
+	}
+}
+
+fn panic_error() -> MoqError {
+	crate::session::map_closed_error(moq_tokio::Error::Panic)
 }
 
 impl Drop for Follow {
 	fn drop(&mut self) {
-		drop(self.close.take());
-		if let Some(thread) = self.thread.take() {
-			let _ = thread.join();
-		}
+		let _ = self.stop();
 	}
 }
 
@@ -247,8 +266,16 @@ pub struct MoqVideoProducer {
 }
 
 impl MoqVideoProducer {
+	fn check(&self) -> Result<(), MoqError> {
+		if let Some(follow) = self.follow.lock().unwrap().as_ref() {
+			follow.check()?;
+		}
+		Ok(())
+	}
+
 	fn track_demand(&self) -> Result<moq_net::track::Demand, MoqError> {
-		let guard = self.inner.lock().unwrap();
+		self.check()?;
+		let guard = self.inner.lock().map_err(|_| panic_error())?;
 		let producer = guard.as_ref().ok_or(MoqError::Closed)?;
 		Ok(producer.producer.demand())
 	}
@@ -293,8 +320,9 @@ impl MoqVideoProducer {
 	/// A backend that pipelines publishes an earlier frame's output here, so a
 	/// call that emits nothing on the wire is normal rather than an error.
 	pub fn write(&self, frame: MoqVideoFrame) -> Result<(), MoqError> {
+		self.check()?;
 		let _guard = crate::ffi::runtime().enter();
-		let mut guard = self.inner.lock().unwrap();
+		let mut guard = self.inner.lock().map_err(|_| panic_error())?;
 		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
 		producer.write(frame)
 	}
@@ -316,7 +344,8 @@ impl MoqVideoProducer {
 	/// without the control): nothing is queued, and groups keep falling at the
 	/// configured interval.
 	pub fn cut(&self) -> Result<(), MoqError> {
-		let mut guard = self.inner.lock().unwrap();
+		self.check()?;
+		let mut guard = self.inner.lock().map_err(|_| panic_error())?;
 		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
 		// A keyframe is what a cut is on the wire: the importer closes the open
 		// group and starts a new one at it.
@@ -341,9 +370,10 @@ impl MoqVideoProducer {
 	/// encoder keeps running at its current rate, so stop adapting rather than
 	/// stop publishing.
 	pub fn set_bitrate(&self, bitrate: u64) -> Result<(), MoqError> {
+		self.check()?;
 		let _guard = crate::ffi::runtime().enter();
 		{
-			let mut guard = self.inner.lock().unwrap();
+			let mut guard = self.inner.lock().map_err(|_| panic_error())?;
 			let producer = guard.as_mut().ok_or(MoqError::Closed)?;
 			block_on(
 				producer
@@ -372,11 +402,19 @@ impl MoqVideoProducer {
 
 	/// Flush any frames the codec is still holding and finalize the track.
 	pub fn finish(&self) -> Result<(), MoqError> {
+		self.check()?;
 		let _guard = crate::ffi::runtime().enter();
-		let producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
+		let producer = self
+			.inner
+			.lock()
+			.map_err(|_| panic_error())?
+			.take()
+			.ok_or(MoqError::Closed)?;
 		// Stop following and release the share before draining, so siblings can
 		// take the room while the last frames go out.
-		self.follow.lock().unwrap().take();
+		if let Some(mut follow) = self.follow.lock().unwrap().take() {
+			follow.stop()?;
+		}
 		self.reservation.lock().unwrap().take();
 		producer.finish()
 	}
@@ -497,28 +535,36 @@ fn spawn_follow(
 	let ceiling = Arc::new(AtomicU64::new(ceiling.as_bps()));
 	let (close, closed) = oneshot::channel();
 	let shared_ceiling = ceiling.clone();
+	let failed = Arc::new(AtomicBool::new(false));
+	let failure = failed.clone();
 	// A dedicated thread rather than the FFI current-thread runtime: this loop
 	// `pollster::block_on`s `set_bitrate`, which would stall that runtime.
 	let thread = std::thread::Builder::new()
 		.name("moq-ffi-rate".into())
 		.spawn(move || {
-			tokio::runtime::Builder::new_current_thread()
-				.enable_all()
-				.build()
-				.expect("rate-control runtime")
-				.block_on(async move {
-					tokio::select! {
-						biased;
-						_ = closed => {}
-						_ = follow_reservation(inner, consumer, shared_ceiling, applied) => {}
-					}
-				})
+			let completed = pollster::block_on(moq_tokio::panic::isolate(async move {
+				tokio::runtime::Builder::new_current_thread()
+					.enable_all()
+					.build()
+					.expect("rate-control runtime")
+					.block_on(async move {
+						tokio::select! {
+							biased;
+							_ = closed => {}
+							_ = follow_reservation(inner, consumer, shared_ceiling, applied) => {}
+						}
+					})
+			}));
+			if completed.is_none() {
+				failure.store(true, Ordering::Release);
+			}
 		})
 		.expect("failed to spawn rate-control thread");
 	Follow {
 		close: Some(close),
 		thread: Some(thread),
 		ceiling,
+		failed,
 	}
 }
 

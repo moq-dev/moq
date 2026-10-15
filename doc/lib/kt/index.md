@@ -115,3 +115,7 @@ reconnecting with the same workload.
 - API reference: [javadoc.io/doc/dev.moq/moq](https://javadoc.io/doc/dev.moq/moq)
 - Source: [`kt/`](https://github.com/moq-dev/moq/tree/main/kt); `just kt check` builds and tests locally
 - Artifacts: [dev.moq:moq](https://central.sonatype.com/artifact/dev.moq/moq), [dev.moq:moq-ffi](https://central.sonatype.com/artifact/dev.moq/moq-ffi)
+
+## Background task errors
+
+A panic in an owned native background task reaches a pending or later fallible call on that object as a task error. Other objects keep running.

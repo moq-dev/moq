@@ -230,10 +230,10 @@ impl Audio {
 		// `decode::Consumer::new` subscribes (blocking on SUBSCRIBE_OK), so run it
 		// inside the task to keep this entrypoint non-blocking.
 		tokio::spawn(async move {
-			let res = async move {
+			let res = crate::ffi::run(async move {
 				let consumer = moq_audio::decode::Consumer::new(&broadcast, &catalog, name, config).await?;
 				Self::run(on_frame, consumer, channel.1).await
-			}
+			})
 			.await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.

@@ -271,6 +271,7 @@ pub(crate) struct VideoEncoder {
 	size: moq_video::Size,
 	reservation: Option<Arc<moq_net::bandwidth::Reservation>>,
 	follow: Option<oneshot::Sender<()>>,
+	followed: Option<crate::ffi::Background>,
 	ceiling: Option<Arc<AtomicU64>>,
 }
 
@@ -368,6 +369,9 @@ struct VideoTaskEntry {
 
 impl VideoEncoder {
 	fn publish_frame(&mut self, timestamp_us: u64, data: &[u8]) -> Result<(), Error> {
+		if let Some(followed) = &self.followed {
+			followed.check()?;
+		}
 		// A buffer that isn't one picture at the configured size is rejected here,
 		// by the surface constructors, rather than reinterpreted.
 		let size = self.size;
@@ -387,12 +391,18 @@ impl VideoEncoder {
 	}
 
 	fn publish_cut(&mut self) -> Result<(), Error> {
+		if let Some(followed) = &self.followed {
+			followed.check()?;
+		}
 		// A keyframe is what a cut is on the wire: the importer closes the open
 		// group and starts a new one at it.
 		Ok(block_on(self.encoder.cut())?)
 	}
 
 	fn publish_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
+		if let Some(followed) = &self.followed {
+			followed.check()?;
+		}
 		block_on(self.encoder.set_bitrate(moq_net::bandwidth::Rate::from_bps(bitrate)))?;
 		// Ceiling first: `update` wakes the follower, which must not read the old
 		// floor and retune above this cap before parking on an unchanged grant.
@@ -406,6 +416,9 @@ impl VideoEncoder {
 	}
 
 	fn publish_finish(self) -> Result<(), Error> {
+		if let Some(followed) = &self.followed {
+			followed.check()?;
+		}
 		let VideoEncoder {
 			encoder, mut producer, ..
 		} = self;
@@ -439,6 +452,7 @@ impl Video {
 			size: config.size(),
 			reservation: None,
 			follow: None,
+			followed: None,
 			ceiling: None,
 		}))
 	}
@@ -463,13 +477,15 @@ impl Video {
 		let (close, closed) = oneshot::channel();
 		shared.lock().as_mut().ok_or(Error::MediaNotFound)?.follow = Some(close);
 		let follower = shared.clone();
-		tokio::spawn(async move {
+		let background = crate::ffi::Background::new(async move {
 			tokio::select! {
 				biased;
 				_ = closed => {}
 				_ = follow_reservation(follower, reservation.consumer(), ceiling) => {}
 			}
+			Ok(())
 		});
+		shared.lock().as_mut().ok_or(Error::MediaNotFound)?.followed = Some(background);
 		Ok(())
 	}
 
@@ -532,10 +548,10 @@ impl Video {
 		// `Consumer::new` subscribes (blocking on SUBSCRIBE_OK), so run it inside
 		// the task to keep this entrypoint non-blocking.
 		tokio::spawn(async move {
-			let res = async move {
+			let res = crate::ffi::run(async move {
 				let consumer = moq_video::decode::Consumer::new(&broadcast, &catalog, name, options).await?;
 				Self::run(on_frame, consumer, channel.1, output).await
-			}
+			})
 			.await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.

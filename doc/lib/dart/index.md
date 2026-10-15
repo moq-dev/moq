@@ -110,3 +110,7 @@ reconnecting with the same workload.
 - API reference: [pub.dev/documentation/moq](https://pub.dev/documentation/moq/latest/)
 - Source: [`dart/`](https://github.com/moq-dev/moq/tree/main/dart)
 - Packages: [moq](https://pub.dev/packages/moq), [moq\_ffi](https://pub.dev/packages/moq_ffi)
+
+## Background task errors
+
+A panic in an owned native background task reaches a pending or later fallible call on that object as a task error. Other objects keep running.
