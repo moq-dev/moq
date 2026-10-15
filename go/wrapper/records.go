@@ -41,8 +41,7 @@ func optFromMicros(us *uint64) *time.Duration {
 }
 
 // Frame is a raw track frame: a payload and its presentation timestamp.
-// Timestamp is nil on a frame read from an untimed track; a raw track published
-// here is timed, so writing one needs it.
+// Timestamp is nil on an untimed track, on both publish and receive.
 type Frame struct {
 	Payload   []byte
 	Timestamp *time.Duration
@@ -105,9 +104,8 @@ func subscriptionFFI(s *Subscription) (*ffi.MoqSubscription, error) {
 
 // TrackInfo holds publisher-side track properties: priority, how long a
 // non-latest group is cached (nil for no limit), and the timescale in ticks per
-// second (nil uses microseconds when publishing, and means the source declared no
-// timeline on a received track). A zero Priority is the least urgent, not the
-// default; set 127 for the midpoint a nil TrackInfo uses.
+// second (nil means untimed on both publish and receive). A zero Priority is
+// the least urgent; set 127 for the midpoint a nil TrackInfo uses.
 type TrackInfo struct {
 	Priority  uint8
 	MaxAge    *time.Duration

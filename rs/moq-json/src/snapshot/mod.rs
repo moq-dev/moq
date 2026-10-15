@@ -57,6 +57,87 @@ mod test {
 	use super::*;
 	use crate::Compression;
 
+	#[test]
+	fn editing_keeps_the_callers_timestamp_on_commit_and_drop() {
+		let (mut producer, _) = producer_on(cfg(100), timed());
+		let mut groups = producer.consume();
+		let first = moq_net::Timestamp::from_millis(100).unwrap();
+		let second = moq_net::Timestamp::from_millis(200).unwrap();
+		producer.modify(Some(first)).unwrap()["n"] = json!(1);
+		let mut edit = producer.modify(Some(second)).unwrap();
+		edit["n"] = json!(2);
+		edit.commit().unwrap();
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
+			panic!("expected the edited snapshot");
+		};
+		for at in [first, second] {
+			let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+				panic!("expected the edited value");
+			};
+			assert_eq!(frame.timestamp, Some(at));
+		}
+	}
+
+	#[test]
+	fn a_missing_edit_timestamp_is_refused_on_a_timed_track() {
+		let (mut producer, _) = producer_on(cfg(0), timed());
+		let mut edit = producer.modify(None).unwrap();
+		edit["n"] = json!(1);
+		assert!(matches!(
+			edit.commit(),
+			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
+		));
+		let at = moq_net::Timestamp::from_millis(100).unwrap();
+		producer.mutate(Some(at), |value| value["n"] = json!(2)).unwrap();
+		let waiter = kio::Waiter::noop();
+		let mut groups = producer.consume();
+		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
+			panic!("expected the subsequent explicit publish");
+		};
+		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+			panic!("expected a timed frame");
+		};
+		assert_eq!(frame.timestamp, Some(at));
+	}
+
+	/// Refused before a replacement group is published, so the last value stays readable.
+	#[test]
+	fn a_timed_track_refuses_a_bare_publish() {
+		for delta_ratio in [0, 100] {
+			let (mut producer, track) = producer_on(cfg(delta_ratio), timed());
+			let at = moq_net::Timestamp::from_millis(100).unwrap();
+			producer
+				.update(moq_net::Timed::from(&json!({ "n": 1 })).at(at))
+				.unwrap();
+			assert!(matches!(
+				producer.update(&json!({ "n": 2 })),
+				Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
+			));
+			producer.finish().unwrap();
+			assert_eq!(drain(track), vec![json!({ "n": 1 })], "delta_ratio={delta_ratio}");
+		}
+	}
+
+	#[test]
+	fn a_bare_publish_stays_untimed() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("untimed", moq_net::track::Info::default())
+			.unwrap();
+		let mut groups = track.subscribe(None);
+		let mut producer = Producer::new(track, Config::default());
+		producer.update(&json!({ "n": 1 })).unwrap();
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
+			panic!("expected an untimed group");
+		};
+		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+			panic!("expected an untimed frame");
+		};
+		assert_eq!(frame.timestamp, None);
+	}
+
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {
 		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
@@ -87,9 +168,13 @@ mod test {
 	}
 
 	fn producer(config: Config) -> (Producer<Value>, moq_net::track::Subscriber) {
+		producer_on(config, moq_net::track::Info::default())
+	}
+
+	fn producer_on(config: Config, info: moq_net::track::Info) -> (Producer<Value>, moq_net::track::Subscriber) {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", timed())
+			.create_track("test", info)
 			.unwrap();
 		let consumer = track.subscribe(None);
 		(Producer::new(track, config), consumer)
@@ -329,7 +414,7 @@ mod test {
 	/// size is the encoded frame.
 	#[test]
 	fn a_stamped_update_writes_its_capture_time() {
-		let (mut producer, _track) = producer(cfg(100));
+		let (mut producer, _track) = producer_on(cfg(100), timed());
 		let mut groups = producer.consume();
 		let first = moq_net::Timestamp::from_millis(1_000).unwrap();
 		let second = moq_net::Timestamp::from_millis(2_000).unwrap();
@@ -455,13 +540,13 @@ mod test {
 
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", timed())
+			.create_track("test", moq_net::track::Info::default())
 			.unwrap();
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::<Doc>::new(track, Config::default());
 		producer.update(&Doc { count: 1 }).unwrap();
 
-		assert!(matches!(producer.modify(), Err(crate::Error::Json(_))));
+		assert!(matches!(producer.modify(None), Err(crate::Error::Json(_))));
 
 		// The refused edit published nothing after the original value.
 		producer.finish().unwrap();
@@ -481,19 +566,19 @@ mod test {
 
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", timed())
+			.create_track("test", moq_net::track::Info::default())
 			.unwrap();
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::<Doc>::new(track, Config::default());
 
 		// First owner sets its field.
-		producer.modify().unwrap().video = Some("v1".to_string());
+		producer.modify(None).unwrap().video = Some("v1".to_string());
 
 		// Second owner starts from the latest value and adds its own field without clobbering.
-		producer.modify().unwrap().scte35 = Some(42);
+		producer.modify(None).unwrap().scte35 = Some(42);
 
 		// Locking without mutating publishes nothing (the guard stays clean).
-		let _ = producer.modify().unwrap();
+		let _ = producer.modify(None).unwrap();
 
 		producer.finish().unwrap();
 
@@ -525,19 +610,19 @@ mod test {
 
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", timed())
+			.create_track("test", moq_net::track::Info::default())
 			.unwrap();
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::<Doc>::new(track, cfg(0));
 
-		producer.mutate(|doc| doc.video = Some("v1".to_string())).unwrap();
+		producer.mutate(None, |doc| doc.video = Some("v1".to_string())).unwrap();
 
 		// The second owner starts from the latest value and adds its own field without clobbering.
-		producer.mutate(|doc| doc.scte35 = Some(42)).unwrap();
+		producer.mutate(None, |doc| doc.scte35 = Some(42)).unwrap();
 
 		// A closure that changes nothing publishes nothing: deltas are off, so each publish would
 		// otherwise open a group of its own.
-		producer.mutate(|_| {}).unwrap();
+		producer.mutate(None, |_| {}).unwrap();
 		assert_eq!(consumer.latest(), Some(1));
 
 		producer.finish().unwrap();
@@ -564,7 +649,7 @@ mod test {
 		producer.update(&json!({ "keep": true })).unwrap();
 
 		assert!(matches!(
-			producer.mutate(|value| {
+			producer.mutate(None, |value| {
 				*value = json!({ "big": "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1) });
 			}),
 			Err(crate::Error::Net(moq_net::Error::FrameTooLarge))
@@ -575,8 +660,8 @@ mod test {
 	fn a_dropped_edit_publishes_a_snapshot_then_a_delta() {
 		let (mut producer, track) = producer(cfg(100));
 
-		*producer.modify().unwrap() = json!({ "a": 1, "b": 1 });
-		*producer.modify().unwrap() = json!({ "a": 1, "b": 2 });
+		*producer.modify(None).unwrap() = json!({ "a": 1, "b": 1 });
+		*producer.modify(None).unwrap() = json!({ "a": 1, "b": 2 });
 		producer.finish().unwrap();
 
 		// The ratio keeps both edits in one group: a snapshot plus a merge-patch delta.
@@ -591,7 +676,7 @@ mod test {
 		producer.finish().unwrap();
 
 		assert!(matches!(
-			producer.modify(),
+			producer.modify(None),
 			Err(crate::Error::Net(moq_net::Error::Closed))
 		));
 		assert_eq!(drain(track), vec![json!({ "a": 1 })]);
@@ -603,12 +688,12 @@ mod test {
 		producer.update(&json!({ "keep": true })).unwrap();
 		let mut subscriber = track.ordered();
 
-		*producer.modify().unwrap() = json!({ "big": "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1) });
+		*producer.modify(None).unwrap() = json!({ "big": "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1) });
 
 		// The publisher learns the cause at its next edit. The consumer drains the snapshot
 		// that finished, then learns it from the aborted track.
 		assert!(matches!(
-			producer.modify(),
+			producer.modify(None),
 			Err(crate::Error::Net(moq_net::Error::FrameTooLarge))
 		));
 		assert!(matches!(
@@ -626,7 +711,7 @@ mod test {
 		let (mut producer, track) = producer(cfg(0));
 		producer.update(&json!({ "keep": true })).unwrap();
 
-		let mut guard = producer.modify().unwrap();
+		let mut guard = producer.modify(None).unwrap();
 		*guard = json!({ "big": "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1) });
 		assert!(matches!(
 			guard.commit(),
@@ -634,7 +719,7 @@ mod test {
 		));
 
 		// The caller got the error, so the track stays usable for a smaller value.
-		*producer.modify().unwrap() = json!({ "keep": false });
+		*producer.modify(None).unwrap() = json!({ "keep": false });
 		producer.finish().unwrap();
 		assert_eq!(drain(track).last().unwrap(), &json!({ "keep": false }));
 	}
@@ -645,14 +730,14 @@ mod test {
 		producer.update(&json!({ "a": 1 })).unwrap();
 
 		let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-			let mut guard = producer.modify().unwrap();
+			let mut guard = producer.modify(None).unwrap();
 			*guard = json!({ "a": 2 });
 			panic!("torn edit");
 		}));
 		assert!(panicked.is_err());
 
 		// A discarded edit is not a publish failure, so the track is still open for the next one.
-		*producer.modify().unwrap() = json!({ "a": 3 });
+		*producer.modify(None).unwrap() = json!({ "a": 3 });
 		producer.finish().unwrap();
 		assert_eq!(track.latest(), Some(1), "the torn edit took a group");
 		assert_eq!(drain(track).last().unwrap(), &json!({ "a": 3 }));
@@ -673,16 +758,16 @@ mod test {
 		// Every frame is rejected, so each publish fails and the encoder resynchronizes.
 		let mut producer = Producer::<Doc>::new(rejecting_track(), Config::default());
 
-		let mut guard = producer.modify().unwrap();
+		let mut guard = producer.modify(Some(late())).unwrap();
 		guard.video = Some("v1".to_string());
 		assert!(guard.commit().is_err());
 
-		let mut guard = producer.modify().unwrap();
+		let mut guard = producer.modify(Some(late())).unwrap();
 		guard.scte35 = Some(42);
 		assert!(guard.commit().is_err());
 
 		// The editing baseline still carries the composed value.
-		let guard = producer.modify().unwrap();
+		let guard = producer.modify(Some(late())).unwrap();
 		assert_eq!(
 			guard.video,
 			Some("v1".to_string()),
@@ -717,6 +802,12 @@ mod test {
 			.unwrap()
 	}
 
+	/// A time [`rejecting_track`] can't hold: it matches the timed track, so the publish gets as
+	/// far as the group before the conversion fails.
+	fn late() -> moq_net::Timestamp {
+		moq_net::Timestamp::from_millis(10_000).unwrap()
+	}
+
 	/// `append_group` publishes the group before the frame is written, and a rejected frame does not
 	/// close the track. Dropping the handle does not close the group either, so without an explicit
 	/// close a subscriber that advanced into it waits there forever.
@@ -726,7 +817,10 @@ mod test {
 		let mut subscriber = track.subscribe(None).ordered();
 		let mut producer = Producer::<Value>::new(track, cfg(0));
 
-		assert!(matches!(producer.update(&json!({ "a": 1 })), Err(crate::Error::Net(_))));
+		assert!(matches!(
+			producer.update(moq_net::Timed::from(&json!({ "a": 1 })).at(late())),
+			Err(crate::Error::Net(_))
+		));
 
 		let waiter = kio::Waiter::noop();
 		let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_next_group(&waiter) else {
@@ -747,12 +841,12 @@ mod test {
 
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", timed())
+			.create_track("test", moq_net::track::Info::default())
 			.unwrap();
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::<Doc>::new(track, cfg(0));
 
-		let mut guard = producer.modify().unwrap();
+		let mut guard = producer.modify(None).unwrap();
 		guard.a = 1;
 		guard.commit().unwrap();
 

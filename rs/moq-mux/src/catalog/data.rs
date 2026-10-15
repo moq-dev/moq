@@ -80,24 +80,17 @@ impl Listing {
 		self.rendition.name()
 	}
 
-	/// Stamp an untimed payload with the catalog's current clock reading, keeping a timed one as
-	/// given. Also returns the given time, if there was one.
-	pub(crate) fn stamp<P>(&mut self, timed: moq_net::Timed<P>) -> (moq_net::Timed<P>, Option<moq_net::Timestamp>) {
+	/// Measure a frame of `bytes` encoded bytes, just written, captured at `captured` on the
+	/// broadcast clock if known.
+	pub(crate) fn record(&mut self, bytes: usize, captured: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		let clock = self.rendition.clock();
-		// A re-anchor moves this track's timeline, which measured across would read as jitter. The
-		// whole clock is compared: on a host with an unset wall clock, every clock has no mapping.
+		// A re-anchor moves this track's timeline, which measured across would read as jitter.
+		// Compare the whole clock, since an unset host wall clock has no mapping to compare.
 		if clock != self.clock {
 			self.estimator.discontinuity();
 		}
 		self.clock = clock;
-		let given = timed.at;
-		(timed.at(given.unwrap_or_else(|| clock.now())), given)
-	}
-
-	/// Measure a frame of `bytes` encoded bytes, just written, captured at `captured` on the
-	/// broadcast clock if known.
-	pub(crate) fn record(&mut self, bytes: usize, captured: Option<moq_net::Timestamp>) -> crate::Result<()> {
-		let now = self.clock.now();
+		let now = clock.now();
 		let flush = captured.map(|captured| (captured, std::time::Instant::now()));
 		self.record_at(now, bytes, flush)
 	}

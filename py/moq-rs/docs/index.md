@@ -124,6 +124,19 @@ broadcast, and producers advertise it in the catalog.
    StreamConsumer
 ```
 
+## Opaque data
+
+```{eval-rst}
+.. currentmodule:: moq.flate
+
+.. autosummary::
+   :toctree: api
+   :nosignatures:
+
+   SnapshotProducer
+   StreamProducer
+```
+
 ## Origin and announcements
 
 ```{eval-rst}
