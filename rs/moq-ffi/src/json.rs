@@ -137,12 +137,17 @@ impl MoqJsonSnapshotProducer {
 
 	/// Publish a new value, encoded as a snapshot or delta automatically. `value` is a JSON
 	/// document. A no-op if unchanged from the previous update.
-	pub fn update(&self, value: String) -> Result<(), MoqError> {
+	/// `timestamp_us` is on the broadcast clock; null publishes untimed.
+	#[uniffi::method(default(timestamp_us = None))]
+	pub fn update(&self, value: String, timestamp_us: Option<u64>) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let value: Value = serde_json::from_str(&value)?;
 		let mut guard = self.inner.lock().unwrap();
 		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
-		producer.update(&value)?;
+		producer.update(moq_net::Timed {
+			value: &value,
+			at: timestamp_us.map(moq_net::Timestamp::from_micros).transpose()?,
+		})?;
 		Ok(())
 	}
 
@@ -244,12 +249,17 @@ impl MoqJsonStreamProducer {
 	}
 
 	/// Append one record to the log. `value` is a JSON document.
-	pub fn append(&self, value: String) -> Result<(), MoqError> {
+	/// `timestamp_us` is on the broadcast clock; null publishes untimed.
+	#[uniffi::method(default(timestamp_us = None))]
+	pub fn append(&self, value: String, timestamp_us: Option<u64>) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let value: Value = serde_json::from_str(&value)?;
 		let mut guard = self.inner.lock().unwrap();
 		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
-		producer.append(&value)?;
+		producer.append(moq_net::Timed {
+			value: &value,
+			at: timestamp_us.map(moq_net::Timestamp::from_micros).transpose()?,
+		})?;
 		Ok(())
 	}
 

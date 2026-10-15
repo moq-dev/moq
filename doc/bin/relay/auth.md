@@ -147,8 +147,14 @@ cannot verify a presented token; both refuse it as unsupported. A moq-transport
 `AUTHORIZATION TOKEN` on a `SUBSCRIBE` or `PUBLISH_NAMESPACE` is verified the
 same way on any draft, but its grant authorizes only that request and ends with
 it; it never joins the union. A `PUBLISH_NAMESPACE` grant must cover the whole
-namespace: `room/**`, not just `room`. A burst of
-tokens past the session's pending-verification bound is refused. On moq-lite, an
+namespace: `room/**`, not just `room`. A session verifies at most
+`verifications` tokens at once (`--auth-verifications`, default 128), counting
+checks still running past the admission timeout. Later tokens wait their turn
+rather than being refused. A waiting token the peer withdraws never reaches the
+auth server. The ten-second admission timeout counts from a token's arrival, so
+one that times out while waiting is refused without being sent. A sent check
+always runs to completion, so the connection's `end` stays its last request and
+`--limit-token` counts stay exact. On moq-lite, an
 auth server that cannot answer, by timeout or outage, refuses a token as a
 transient error, and `Connection::auth()` presents it again on its reconnect
 backoff. On moq-transport the refusal is final and the token ends. Retrying

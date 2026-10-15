@@ -60,6 +60,9 @@ public enum Media {
         let ffi: MoqMediaCatalogProducer
         /// Construct a weak catalog handle for this broadcast.
         public init(broadcast: BroadcastProducer) throws { ffi = try MoqMediaCatalogProducer(broadcast: broadcast.ffi) }
+
+        /// Read the broadcast clock in microseconds, fixing it for subsequent media producers.
+        public func now() throws -> UInt64 { try ffi.now() }
         /// Replace the video properties shared by every rendition.
         public func setVideoProperties(_ properties: VideoProperties) throws { try ffi.setVideoProperties(properties: properties) }
         /// Set an application catalog section from its serialized JSON value.
@@ -209,7 +212,7 @@ public enum Media {
         ///
         /// The importer derives keyframe status from the bitstream, so only the payload and its
         /// timestamp cross the boundary.
-        public func writeFrame(_ payload: Data, timestampUs: UInt64 = 0) throws {
+        public func writeFrame(_ payload: Data, timestampUs: UInt64) throws {
             try ffi.writeFrame(frame: Frame(payload: payload, timestampUs: timestampUs))
         }
 

@@ -102,6 +102,12 @@ func NewCatalogProducer(broadcast *moq.BroadcastProducer) (*CatalogProducer, err
 	return &CatalogProducer{inner: inner}, nil
 }
 
+// Now reads the broadcast clock, fixing it for subsequent media producers.
+func (c *CatalogProducer) Now() (time.Duration, error) {
+	us, err := c.inner.Now()
+	return time.Duration(us) * time.Microsecond, err
+}
+
 // SetVideoProperties replaces the video properties shared by all renditions.
 func (c *CatalogProducer) SetVideoProperties(properties VideoProperties) error {
 	return c.inner.SetVideoProperties(properties)

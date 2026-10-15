@@ -40,8 +40,8 @@ extension Json {
 
         /// Publish a new value, encoded as a snapshot or merge-patch delta automatically. A no-op
         /// if unchanged from the previous update.
-        public func update(_ value: Value) throws {
-            try ffi.update(value: encodeJson(value))
+        public func update(_ value: Value, timestampUs: UInt64? = nil) throws {
+            try ffi.update(value: encodeJson(value), timestampUs: timestampUs)
         }
 
         /// A watch-only handle to whether the track has subscribers.
@@ -109,8 +109,8 @@ extension Json {
         }
 
         /// Append one record to the log.
-        public func append(_ value: Value) throws {
-            try ffi.append(value: encodeJson(value))
+        public func append(_ value: Value, timestampUs: UInt64? = nil) throws {
+            try ffi.append(value: encodeJson(value), timestampUs: timestampUs)
         }
 
         /// A watch-only handle to whether the track has subscribers.
