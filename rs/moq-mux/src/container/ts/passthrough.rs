@@ -38,17 +38,22 @@
 //! bytes of that rate before its own PCR.
 //!
 //! Every timestamp is then shifted onto the catalog's [`Clock`](crate::Clock) by one offset, fixed
-//! through the reservation's [`Timebase`](crate::catalog::Timebase) by the first object: zero when
-//! that object places the clock, and otherwise whatever lands it at now on a clock already in use.
+//! through the reservation's [`Timebase`](crate::catalog::Timebase) by the first PCR: zero when
+//! that PCR places the clock, and otherwise whatever lands it at now on a clock already in use.
 //!
-//! PCRs are unwrapped into a 64-bit count of 27 MHz ticks that never goes back. A step forward of
-//! at most half the 2^33 * 300 tick period adds to the count, across the wrap included. A PCR with
-//! `discontinuity_indicator` whose step is forward by that measure adds the step too, after the
-//! bytes before it are timed at the rate before it, and starts a group behind a break marker. Any
-//! step back ends the import: [`PcrRewindError`] without the flag, [`PcrRestartError`] with it,
-//! since a signalled restart is new content and needs a new broadcast. The timeline therefore
-//! depends only on the bytes since the importer's first PCR and its shift, and two importers of one
-//! feed started at the same packet each placing its own catalog's clock publish identical objects.
+//! Each PCR takes the era (the whole number of 2^33 * 300 tick wraps) that lands it nearest the
+//! catalog clock's reading as it arrives, so the count runs on across the wrap. A PCR with
+//! `discontinuity_indicator` that lands at or past the one before starts a group behind a break
+//! marker, after the bytes before it are timed at the rate before it. Any PCR that lands below the
+//! one before ends the import: [`PcrRewindError`] without the flag, [`PcrRestartError`] with it,
+//! since a signalled restart is new content and needs a new broadcast. So does a jump that carries
+//! the PCR more than half a wrap (about 13.25 hours) from the clock's reading, since it lands a
+//! wrap back. The timeline therefore depends only on the bytes and the clock, and two importers of
+//! one feed whose timebases one shared epoch placed (see
+//! [`Timebase::place`](crate::catalog::Timebase::place)) publish identical objects wherever each
+//! started. Objects timed past the last PCR before a flagged jump smaller than their lead can land
+//! after the first ones behind it; if one of them starts a group, the group behind the break would
+//! start before it, and the import ends there.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
@@ -61,6 +66,12 @@ use super::psi::{self, Pmt};
 
 /// The PCR clock, in Hz.
 const PCR_HZ: u64 = 27_000_000;
+
+/// The PCR field: a 33-bit base of 300 ticks each.
+const PCR: crate::catalog::Wrap = crate::catalog::Wrap {
+	hz: PCR_HZ,
+	period: PCR_WRAP,
+};
 
 /// The longest a group runs without a random access point before a PCR starts the next.
 pub const FALLBACK: std::time::Duration = std::time::Duration::from_secs(1);
@@ -171,7 +182,8 @@ pub struct Passthrough<E: crate::catalog::hang::CatalogExt = ()> {
 	/// Held until the first group is written, so the first catalog already names the track with
 	/// its final `randomAccess`.
 	reservation: Option<crate::catalog::Reserved<E>>,
-	/// Shifts every object's PCR time onto the catalog clock, anchored by the first object.
+	/// Puts every PCR in its era and shifts every object's PCR time onto the catalog clock,
+	/// anchored by the first PCR.
 	shift: crate::catalog::Timebase<E>,
 	media: crate::container::Producer<crate::catalog::hang::Container>,
 	/// The section as last written to the catalog, `None` before the first group.
@@ -209,8 +221,6 @@ pub struct Passthrough<E: crate::catalog::hang::CatalogExt = ()> {
 	pending_break: bool,
 	/// Before the first group: the PCR time the importer started waiting for a group start at.
 	waiting_since: Option<u64>,
-	/// The PCR time of the last object written, which no later one goes below.
-	written: u64,
 
 	/// The object being filled, from its first packet.
 	open: Option<Object>,
@@ -320,7 +330,6 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			timebase: None,
 			pending_break: false,
 			waiting_since: None,
-			written: 0,
 			open: None,
 			queue: VecDeque::new(),
 			group: None,
@@ -508,14 +517,15 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		let at = at + PCR_OFFSET;
 		self.close_object();
 		let flagged = std::mem::take(&mut self.pending_break);
+		// The first PCR anchors the timebase, in era zero.
+		let ticks = self.shift.nearest(raw, PCR)?;
 
 		let Some(timebase) = self.timebase.as_mut() else {
-			// The first PCR starts the count at its own value.
 			self.timebase = Some(Timebase {
 				raw,
-				samples: VecDeque::from([Sample { at, ticks: raw }]),
+				samples: VecDeque::from([Sample { at, ticks }]),
 			});
-			self.waiting_since = self.mapped.then_some(raw);
+			self.waiting_since = self.mapped.then_some(ticks);
 			if self.mux_rate.pcr(raw) {
 				self.record()?;
 			}
@@ -524,21 +534,19 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 
 		// A retransmitted break (the same flagged PCR again) declares nothing new.
 		let flagged = flagged && !(timebase.samples.len() == 1 && timebase.raw == raw);
-		let step = (raw + PCR_WRAP - timebase.raw) % PCR_WRAP;
-		if step > PCR_WRAP / 2 {
+		let last = timebase.samples.back().expect("a timebase has a sample").ticks;
+		if ticks < last {
 			let from = timebase.raw;
 			return Err(match flagged {
 				true => PcrRestartError { pid, from, to: raw }.into(),
 				false => PcrRewindError { pid, from, to: raw }.into(),
 			});
 		}
-		let last = timebase.samples.back().expect("a timebase has a sample").ticks;
 
 		if flagged {
 			// No PCR on the old side is coming: what waits on one is timed by the rate before it,
 			// and the new side carries on from there.
 			self.drain_queue()?;
-			let ticks = (last + step).max(self.written);
 			self.timebase = Some(Timebase {
 				raw,
 				samples: VecDeque::from([Sample { at, ticks }]),
@@ -556,7 +564,6 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			return Ok(self.started().then_some(Start::Discontinuity));
 		}
 
-		let ticks = last + step;
 		timebase.raw = raw;
 		timebase.samples.push_back(Sample { at, ticks });
 		if timebase.samples.len() > 3 {
@@ -605,11 +612,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	}
 
 	fn write(&mut self, object: Object, ticks: u64) -> anyhow::Result<()> {
-		// Extrapolating past the last PCR before a small flagged jump can overshoot the jump.
-		let ticks = ticks.max(self.written);
-		self.written = ticks;
 		let timestamp = moq_net::Timestamp::from_micros(ticks / (PCR_HZ / 1_000_000))?;
-		// The first object, which starts a group, anchors the shift and is live on arrival.
 		let timestamp = self.shift.shift(timestamp)?;
 		let size = object.payload.len() as u64;
 		let start = object.start.or_else(|| {

@@ -65,12 +65,23 @@ pub struct Config {
 	///
 	/// This is a [`reqwest::Client`].
 	pub client: Option<Client>,
+
+	/// The timestamp base every rendition shifts by, minted from the catalog the import writes.
+	/// Defaults to a fresh one, which the first fragment to arrive anchors. Pass one placed with
+	/// [`Timebase::place`](moq_mux::catalog::Timebase::place) to keep the playlist's timestamps
+	/// there instead: under one shared epoch, so redundant importers of one playlist publish the
+	/// same timestamps whenever each started.
+	pub timebase: Option<moq_mux::catalog::Timebase>,
 }
 
 impl Config {
 	/// Create an import configuration for `playlist` using the default HTTP client.
 	pub fn new(playlist: Url) -> Self {
-		Self { playlist, client: None }
+		Self {
+			playlist,
+			client: None,
+			timebase: None,
+		}
 	}
 }
 
@@ -317,8 +328,12 @@ struct Sink {
 }
 
 impl Sink {
-	fn new(broadcast: moq_net::broadcast::Producer, catalog: CatalogProducer) -> Self {
-		let timebase = catalog.timebase();
+	fn new(
+		broadcast: moq_net::broadcast::Producer,
+		catalog: CatalogProducer,
+		timebase: Option<moq_mux::catalog::Timebase>,
+	) -> Self {
+		let timebase = timebase.unwrap_or_else(|| catalog.timebase());
 		Self {
 			broadcast,
 			catalog,
@@ -611,7 +626,7 @@ impl Import {
 	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: CatalogProducer, cfg: Config) -> Result<Self> {
 		let base_url = cfg.playlist;
 		Ok(Self {
-			sink: Sink::new(broadcast, catalog),
+			sink: Sink::new(broadcast, catalog, cfg.timebase),
 			fetcher: Fetcher::new(cfg.client)?,
 			base_url,
 			video: Vec::new(),
@@ -1130,7 +1145,7 @@ mod tests {
 	fn sink() -> Sink {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		Sink::new(broadcast, catalog)
+		Sink::new(broadcast, catalog, None)
 	}
 
 	fn track_state() -> TrackState {
@@ -1578,7 +1593,7 @@ mod tests {
 		let consumer = broadcast.consume();
 		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let mut catalogs = catalog.consume().unwrap();
-		let sink = Sink::new(broadcast, catalog.clone());
+		let sink = Sink::new(broadcast, catalog.clone(), None);
 
 		let mut first = sink.importer(&select_muxed());
 		first.decode(&init).unwrap();
@@ -1608,6 +1623,59 @@ mod tests {
 			"the replacement keeps that offset"
 		);
 		assert!(after.iter().any(|stamps| !stamps.is_empty()), "{after:?}");
+	}
+
+	/// Imports of one playlist given timebases placed by one epoch keep its timestamps on the
+	/// epoch's clock, so one started later publishes the same timestamps on the same root clock.
+	/// Each anchoring its own timebase would shift by its own arrival instead.
+	#[tokio::test]
+	async fn imports_placed_by_one_epoch_publish_the_same_timestamps() {
+		let (init, fragments) = fmp4_parts(2);
+		let mut resource = init.clone();
+		resource.extend_from_slice(&fragments[0]);
+		resource.extend_from_slice(&fragments[1]);
+		let playlist = format!(
+			"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"media.mp4\",BYTERANGE=\"{}@0\"\n#EXTINF:1,\n#EXT-X-BYTERANGE:{}@{}\nmedia.mp4\n#EXTINF:1,\n#EXT-X-BYTERANGE:{}\nmedia.mp4\n",
+			init.len(),
+			fragments[0].len(),
+			init.len(),
+			fragments[1].len()
+		);
+		let dir = temp_dir();
+		std::fs::write(dir.join("media.mp4"), &resource).unwrap();
+		std::fs::write(dir.join("media.m3u8"), &playlist).unwrap();
+
+		let epoch = std::time::SystemTime::now() - std::time::Duration::from_secs(1);
+		let placed = |broadcast: &mut moq_net::broadcast::Producer| {
+			let catalog = CatalogProducer::new(broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let timebase = catalog.timebase();
+			timebase.place(moq_net::Timestamp::ZERO, epoch).unwrap();
+			(catalog, timebase)
+		};
+		let mut imported = Vec::new();
+		for _ in 0..2 {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let consumer = broadcast.consume();
+			let (catalog, timebase) = placed(&mut broadcast);
+			let mut cfg = Config::new(Url::from_file_path(dir.join("media.m3u8")).unwrap());
+			cfg.timebase = Some(timebase);
+			let mut import = Import::new(broadcast, catalog.clone(), cfg).unwrap();
+			import.init().await.unwrap();
+			imported.push((catalog.snapshot().clock, published(&consumer, &catalog).await));
+			tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+		}
+
+		let reference = placed(&mut moq_net::broadcast::Info::new().produce()).0;
+		assert_eq!(
+			imported[0].0,
+			reference.snapshot().clock,
+			"the epoch places the root clock"
+		);
+		assert!(imported[0].1.iter().any(|stamps| !stamps.is_empty()), "{imported:?}");
+		assert_eq!(
+			imported[1], imported[0],
+			"the later import publishes the same timestamps"
+		);
 	}
 
 	/// Resolve `ensure_tracks` against a master playlist written to a temp file.
