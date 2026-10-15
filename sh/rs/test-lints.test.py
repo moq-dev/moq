@@ -30,7 +30,8 @@ class TestLints(unittest.TestCase):
             )
             toolchain = Path(shutil.which("clippy-driver")).parent
             env = dict(os.environ, CARGO_TARGET_DIR=str(root / "target"),
-                       PATH=f"{toolchain}:{os.environ['PATH']}")
+                       PATH=f"{toolchain}:{os.environ['PATH']}",
+                       NEXTEST_PROFILE="default")
             subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=root,
                            env=env, check=True, capture_output=True)
             result = subprocess.run(["just", "rs", "test"], cwd=root, env=env,

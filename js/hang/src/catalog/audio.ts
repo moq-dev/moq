@@ -43,7 +43,7 @@ export const AudioConfigSchema = z.object({
 	// The number of channels in the audio
 	numberOfChannels: u53Schema,
 
-	// The maximum bitrate of the audio in bits per second. It only rises.
+	// The maximum bitrate of the audio in bits per second.
 	// TODO: Support up to Number.MAX_SAFE_INTEGER
 	bitrate: z.optional(u53Schema),
 

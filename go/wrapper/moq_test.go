@@ -85,7 +85,7 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	track, err := served.PublishTrack("status", nil)
+	track, err := served.PublishTrack("status", timedInfo())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +401,7 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	track, err := broadcast.PublishTrack("events", nil)
+	track, err := broadcast.PublishTrack("events", timedInfo())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -601,7 +601,7 @@ func TestTrackPublishConsume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	track, err := broadcast.PublishTrack("data", nil)
+	track, err := broadcast.PublishTrack("data", timedInfo())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -661,7 +661,7 @@ func TestReadFrameSkipsEmptyThenPopulatedGroups(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	track, err := broadcast.PublishTrack("status", nil)
+	track, err := broadcast.PublishTrack("status", timedInfo())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -771,7 +771,7 @@ func TestDynamicTrackRequest(t *testing.T) {
 		t.Fatalf("request name = %q, want events", name)
 	}
 
-	track, err := request.Accept(nil)
+	track, err := request.Accept(timedInfo())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1110,7 +1110,7 @@ func TestUsedCancelKeepsTheTrack(t *testing.T) {
 	}
 	defer broadcast.Close()
 
-	track, err := broadcast.PublishTrack("status", nil)
+	track, err := broadcast.PublishTrack("status", timedInfo())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1450,3 +1450,9 @@ func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
 func us(v uint64) *uint64 { return &v }
 
 func ts(d time.Duration) *time.Duration { return &d }
+
+// timedInfo declares the microsecond timeline used by timed raw fixtures.
+func timedInfo() *moq.TrackInfo {
+	scale := uint64(1_000_000)
+	return &moq.TrackInfo{Priority: 127, Timescale: &scale}
+}

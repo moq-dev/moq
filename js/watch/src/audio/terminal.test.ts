@@ -10,6 +10,27 @@ const frame = (group: number, timestamp: number) => ({
 const end = (group: number, timestamp: number) => ({ kind: "end" as const, group, end: timestamp as Time.Micro });
 const gap = { kind: "gap" as const };
 
+test("warmup trims by timestamp across callback sizes, not ordinary groups or declared returns", () => {
+	const terminal = new Terminal();
+	terminal.clear(0, 80_000 as Time.Micro);
+	terminal.update(frame(10, 1_000_000));
+	expect(terminal.span({ timestamp: 1_000_000, sampleRate: 48_000, numberOfFrames: 2_880 }).frames).toBe(0);
+	terminal.update(frame(11, 1_060_000));
+	expect(terminal.span({ timestamp: 1_060_000, sampleRate: 48_000, numberOfFrames: 2_880 })).toEqual({
+		timestamp: 1_080_000 as Time.Micro,
+		frameOffset: 960,
+		frames: 1_920,
+	});
+	terminal.update(frame(12, 1_120_000));
+	expect(terminal.span({ timestamp: 1_120_000, sampleRate: 48_000, numberOfFrames: 960 }).frames).toBe(960);
+	terminal.update(end(13, 1_140_000));
+	terminal.update(frame(14, 2_000_000));
+	expect(terminal.span({ timestamp: 2_000_000, sampleRate: 48_000, numberOfFrames: 960 }).frames).toBe(960);
+	terminal.update(gap);
+	terminal.update(frame(16, 3_000_000));
+	expect(terminal.span({ timestamp: 3_000_000, sampleRate: 48_000, numberOfFrames: 960 }).frames).toBe(0);
+});
+
 test("Terminal trims a partial packet to the source endpoint", () => {
 	const terminal = new Terminal();
 	terminal.update(end(0, 17_916));

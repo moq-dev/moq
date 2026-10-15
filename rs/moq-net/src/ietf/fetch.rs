@@ -203,7 +203,7 @@ impl Message for Fetch<'_> {
 					let subscriber_priority = buf.u8()?;
 					let group_order = GroupOrder::decode(buf, version)?;
 					let fetch_type = FetchType::decode(buf, version)?;
-					super::token::unique(&Parameters::skip_request(buf)?)?;
+					super::token::single(Parameters::skip_request(buf)?)?;
 					(
 						fetch_type,
 						Some(subscriber_priority),
@@ -225,7 +225,7 @@ impl Message for Fetch<'_> {
 						0x27 => priority_filter: Vec<Opaque> where has_range_filters(version),
 						0x28 => object_property_filter: Vec<Opaque> where has_range_filters(version),
 					);
-					super::token::unique(&authorization_token)?;
+					super::token::single(authorization_token)?;
 					let range_filters = [
 						subgroup_filter,
 						object_id_filter,
@@ -260,7 +260,7 @@ impl Message for Fetch<'_> {
 						0x28 => object_property_filter: Vec<Opaque>,
 						0x35 => include_properties: Option<bool>,
 					);
-					super::token::unique(&authorization_token)?;
+					super::token::single(authorization_token)?;
 					let range_filters = [
 						subgroup_filter,
 						object_id_filter,

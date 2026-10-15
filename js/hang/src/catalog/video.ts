@@ -43,10 +43,10 @@ export const VideoConfigSchema = z.object({
 	displayAspectWidth: z.optional(u53Schema),
 	displayAspectHeight: z.optional(u53Schema),
 
-	// The maximum frame rate of the video in frames per second. It only rises.
+	// The maximum frame rate of the video in frames per second.
 	framerate: z.optional(z.number()),
 
-	// The maximum bitrate of the video in bits per second. It only rises.
+	// The maximum bitrate of the video in bits per second.
 	// TODO: Support up to Number.MAX_SAFE_INTEGER
 	bitrate: z.optional(u53Schema),
 
