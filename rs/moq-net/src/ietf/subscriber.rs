@@ -2929,7 +2929,20 @@ where
 						) {
 							Ok(follow_up) => {
 								presented = Some(token.clone());
-								unflushed = true;
+								// Hand it to the stream before anything else can take a request ID.
+								// Drafts 14-16 need IDs to arrive in order, and their adapter never
+								// parks, so this puts the update on the control stream ahead of any
+								// later request. A real stream that parks drains in the wait above.
+								unflushed =
+									match std::future::poll_fn(|cx| Poll::Ready(stream.writer.poll_flush(cx))).await {
+										Poll::Ready(Ok(())) => false,
+										Poll::Ready(Err(err)) => {
+											tracing::warn!(%err, "failed to re-present the request token");
+											let _ = track.clone().abort(err);
+											break true;
+										}
+										Poll::Pending => true,
+									};
 								if throttle {
 									in_flight = Some((token, follow_up));
 									// Only an answer that arrives after this send releases the
