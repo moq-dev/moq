@@ -186,3 +186,9 @@ bare-fin:
 # Explore JSON snapshot codec sequences with a fresh replayable seed.
 json-properties:
     bash json-properties.sh
+
+# Complete MoQ SETUP and transfer a frame over a real browser data-channel pair.
+p2p:
+    cd .. && bun install --frozen-lockfile
+    cd p2p && bunx playwright install chromium
+    cd p2p && bun test ./transport.browser.ts

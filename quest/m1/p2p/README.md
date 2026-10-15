@@ -139,7 +139,6 @@ Backend choice does not change the policy that watching tabs never re-serve.
 
 ## Required
 
-- [Data channel transport](/quest/m1/p2p/transport.md) - `@moq/p2p` speaks qmux over one ordered RTCDataChannel behind the WebTransport shape `@moq/net` consumes
 - [Peer grants](/quest/m1/p2p/peer-grant.md) - the relay issues a node-bound, asymmetrically signed grant a browser can verify; HS256 keys issue none
 - [Signaling and policy](/quest/m1/p2p/signal.md) - opted-in peers find each other under the prefix, the application picks who to dial, and the roster-size gate decides whether STUN is used
 - [Native data channel transport](/quest/m1/p2p/webrtc.md) - `moq-tokio` holds a moq-net session with a browser over str0m with a full ICE agent

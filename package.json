@@ -26,6 +26,7 @@
 	"workspaces": [
 		"doc",
 		"js/net",
+		"js/p2p",
 		"js/clock",
 		"js/pattern",
 		"js/auth",
@@ -48,6 +49,7 @@
 		"test/interop/clients/js-native",
 		"test/drain",
 		"test/video",
+		"test/p2p",
 		"test/wasm"
 	]
 }

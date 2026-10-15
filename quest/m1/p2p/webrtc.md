@@ -39,7 +39,6 @@ candidate is offered and selected. Browser interop is the harness's job.
 
 ## Related
 
-- [Data channel transport](/quest/m1/p2p/transport.md) - the browser side of the same binding
 - [moq-cli joins](/quest/m1/p2p/cli.md) - the first consumer
 - [Relay STUN](/quest/m1/p2p/relay-stun.md) - a relay-side STUN responder this client can be pointed at
 - [Native pairs over ICE and QUIC](/quest/m1/p2p/native-quic.md) - reuses the ICE gathering module this lifts out of `moq-rtc`
