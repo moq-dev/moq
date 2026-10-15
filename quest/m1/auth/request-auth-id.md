@@ -16,6 +16,9 @@ Step 2 of the unified auth model settled on
 [#5148](https://github.com/moq-dev/moq/pull/5148) on 2026-10-15. Step 1
 (#5148, [Request tokens](/quest/m1/auth/request-token.md)) makes a
 moq-transport request token an auth on the shared `requests()` queue.
+#5148 is rewriting that quest and the auth README from its older `scoped()`
+queue and `set_request_token` design to this unified model; read it there
+until it lands.
 
 - ✅ Decided 2026-10-15 (maintainer): one kind of auth. Each request names at
   most one (`auth=id`); moq-transport's per-request token is only an encoding
@@ -29,16 +32,23 @@ moq-transport request token an auth on the shared `requests()` queue.
 - ✅ Decided 2026-10-15 (maintainer): spec it in lite-07-wip now, before the
   cut, so it doesn't cost lite-08.
 - A request naming an ID that hasn't arrived yet waits for it while holding
-  its slot; one naming an ID that already ended is refused UNAUTHORIZED.
+  its slot; one naming an ID that already ended is refused UNAUTHORIZED. The
+  wait spends only the requester's own session budget (its stream and
+  subscription limits), and ends when the AUTH arrives, the requester cancels,
+  or the session closes; no timer.
 - Renewal on lite: add a new auth, SUBSCRIBE_UPDATE the request to it, drop
-  the old one.
+  the old one. AUTH and Subscribe streams are unordered, so dropping the old
+  auth must not race the update into an UNAUTHORIZED reset: settle what tells
+  the renewer the update applied before it drops the old auth, and spec it.
 - moq-transport: AUTH's Request ID becomes the auth id, and a new request
   parameter names it. The alias types map as: USE_VALUE registers a
   request-lifetime auth and names it; REGISTER registers a session-lifetime
   auth; USE_ALIAS names one; DELETE withdraws one.
 - Update `drafts/draft-lcurley-moq-lite.md` and
   `drafts/draft-lcurley-moq-auth.md`, Rust and `js/net`, and run
-  `just test interop --all`.
+  `just test interop --all`. Update `doc/concept/moq-lite.md`'s
+  Authorization section (scope is no longer only the session union) and
+  `doc/concept/standard.md`, which says a request's token grants nothing.
 
 Public API: none beyond step 1's `requests()` and `add()`; naming is
 automatic. Wire: lite-07-wip AUTH and five request messages gain fields.

@@ -25,12 +25,20 @@ delivers a group that arrives below the cursor as a late backfill; Rust
   bounds; then the ordered read takes its floor from them.
 - Groups are served newest-first, so the head of a retained window can arrive
   after the live edge; a cursor set from the first arrival would lose valid
-  startup media (`consumer.outoforder.test.ts` covers that order). With
-  bounds known up front, the floor is the oldest group the subscription
-  covers ([Subscribe ranges](/quest/m1/subscribe-ranges/README.md)) and the
-  live edge is the reported largest location
-  ([Live largest location](/quest/m1/largest.md)), so the read starts at the
-  right group without waiting.
+  startup media (`consumer.outoforder.test.ts` covers that order). The floor
+  is instead the lowest group of the subscription's requested ranges
+  ([Subscribe ranges](/quest/m1/subscribe-ranges/README.md)): given for an
+  absolute start, and for a relative start resolved against the largest
+  location the publisher reports
+  ([Live largest location](/quest/m1/largest.md)). Every sequence in range
+  arrives or is named by SUBSCRIBE_DROP, so the read never waits on a group
+  that won't come.
+- SUBSCRIBE_OK's `Group` is not the floor: the lite draft lets a group
+  between the requested start and it arrive later.
+- Where group numbers are sparse (moq-transport), a relative start can't be
+  resolved from the largest location alone. Settle there whether the
+  publisher reports the resolved start or that read keeps today's
+  first-arrival cursor.
 - Once both land: set the ordered read's floor from those bounds in Rust and
   JS, then make JS discard groups below the cursor. Add a test mirroring
   Rust's: a reordered group below the floor is never yielded and no extra
@@ -45,5 +53,5 @@ the required quests.
 
 ## Required
 
-- [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - the subscription reports the oldest group it covers
-- [Live largest location](/quest/m1/largest.md) - the reader learns the live edge before the first group arrives
+- [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - the reader's requested ranges set the floor, and every sequence in them arrives or is dropped
+- [Live largest location](/quest/m1/largest.md) - the reader learns the live edge before the first group arrives, resolving a relative start
