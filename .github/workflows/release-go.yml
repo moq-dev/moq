@@ -70,6 +70,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           UPSTREAM_NAME: ${{ github.event.workflow_run.name }}
           UPSTREAM_RUN_ID: ${{ github.event.workflow_run.id }}
+          UPSTREAM_RUN_STARTED_AT: ${{ github.event.workflow_run.run_started_at }}
         run: just gh ffi completed go
 
   build:
