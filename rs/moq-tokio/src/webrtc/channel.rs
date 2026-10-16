@@ -50,9 +50,8 @@ impl qmux::transport::Writer for Writer {
 
 /// Receives the records the driver read off the channel.
 pub(crate) struct Reader {
-	/// Unbounded because str0m pushes data as it arrives and cannot be paused; qmux
-	/// flow control is what bounds the bytes a peer can have in flight.
-	pub rx: mpsc::UnboundedReceiver<Result<Bytes, qmux::Error>>,
+	/// Bounded: while it is full, the driver stops reading the socket.
+	pub rx: mpsc::Receiver<Result<Bytes, qmux::Error>>,
 }
 
 impl qmux::transport::Reader for Reader {

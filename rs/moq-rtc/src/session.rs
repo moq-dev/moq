@@ -174,7 +174,7 @@ impl Session {
 					}
 				} => {
 					let wallclock = self.egress_clock.wallclock(req.time, Instant::now());
-					crate::egress::dispatch(self.agent.rtc(), req, wallclock);
+					self.agent.mutate(|rtc| crate::egress::dispatch(rtc, req, wallclock));
 				}
 
 				event = self.agent.next() => match event {

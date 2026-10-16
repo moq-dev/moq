@@ -14,7 +14,7 @@ fn protocol() -> &'static str {
 }
 
 /// A one-frame broadcast named `test` and the handles that keep it alive.
-fn broadcast() -> (moq_net::origin::Producer, impl Sized) {
+fn broadcast(payload: &[u8]) -> (moq_net::origin::Producer, impl Sized) {
 	let origin = crate::origin::spawn();
 	let broadcast = origin.create_broadcast("test").unwrap();
 	broadcast.announce(Default::default()).unwrap();
@@ -25,15 +25,15 @@ fn broadcast() -> (moq_net::origin::Producer, impl Sized) {
 		)
 		.unwrap();
 	let mut group = track.append_group().unwrap();
-	group.write_frame(moq_net::Timestamp::ZERO, &b"hello"[..]).unwrap();
+	group.write_frame(moq_net::Timestamp::ZERO, payload.to_vec()).unwrap();
 	group.finish().unwrap();
 	(origin, (broadcast, track))
 }
 
-/// Serve the broadcast from the answering peer, subscribe from the offering one,
-/// and read the frame back across the data channel.
-async fn transfer(offerer: &Offerer, answerer: &Answerer) {
-	let (origin, _keep) = broadcast();
+/// Serve a one-frame broadcast from the answering peer, subscribe from the
+/// offering one, and read the frame back across the data channel.
+async fn transfer(offerer: &Offerer, answerer: &Answerer, payload: &[u8]) {
+	let (origin, _keep) = broadcast(payload);
 	let listener = crate::listen::Config::default()
 		.init_streams()
 		.unwrap()
@@ -70,7 +70,7 @@ async fn transfer(offerer: &Offerer, answerer: &Answerer) {
 		group.read_frame().await.unwrap().unwrap()
 	};
 	let frame = tokio::time::timeout(TIMEOUT, read).await.expect("transfer timed out");
-	assert_eq!(&frame.payload[..], b"hello");
+	assert!(frame.payload[..] == *payload, "the frame arrived corrupted");
 }
 
 #[tokio::test]
@@ -80,7 +80,20 @@ async fn session_over_loopback() {
 	let (answerer, answer) = Answerer::with_hosts(&config, &offer, vec![LOOPBACK]).await.unwrap();
 	offerer.accept(&answer).await.unwrap();
 
-	transfer(&offerer, &answerer).await;
+	transfer(&offerer, &answerer, b"hello").await;
+}
+
+/// A frame many records long fills the SCTP send window and the read queue, so
+/// both sides have to wait for the other and resume.
+#[tokio::test]
+async fn large_frame_over_loopback() {
+	let config = Config::default();
+	let (offerer, offer) = Offerer::with_hosts(&config, protocol(), vec![LOOPBACK]).await.unwrap();
+	let (answerer, answer) = Answerer::with_hosts(&config, &offer, vec![LOOPBACK]).await.unwrap();
+	offerer.accept(&answer).await.unwrap();
+
+	let payload: Vec<u8> = (0..1024 * 1024).map(|i| i as u8).collect();
+	transfer(&offerer, &answerer, &payload).await;
 }
 
 /// Answer STUN Binding requests with the source address, as a public server would.
@@ -147,7 +160,7 @@ async fn server_reflexive_candidate_is_offered_and_selected() {
 		"gathering should end after the only server answers"
 	);
 
-	transfer(&offerer, &answerer).await;
+	transfer(&offerer, &answerer, b"hello").await;
 }
 
 #[tokio::test]

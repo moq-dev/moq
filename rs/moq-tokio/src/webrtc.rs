@@ -49,6 +49,11 @@ const DEFAULT_MAX_MESSAGE_SIZE: u64 = 64 * 1024;
 /// Bytes the channel may hold unsent before qmux's writer waits, as `@moq/p2p` allows.
 const SEND_WINDOW: usize = RECORD_SIZE as usize * 4;
 
+/// Records read off the channel that qmux has yet to take, matching the send
+/// window. A full queue stops the driver reading the socket, so a slow reader
+/// pushes back on the peer through SCTP's congestion control, as TCP would.
+const READ_QUEUE: usize = SEND_WINDOW / RECORD_SIZE as usize;
+
 /// How long to wait for a `.local` name to resolve: mdns-sd's first query plus its
 /// retransmissions at one and two seconds (RFC 6762 section 5.2).
 const MDNS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -477,7 +482,7 @@ enum Role {
 struct Open {
 	id: ChannelId,
 	protocol: String,
-	reads: mpsc::UnboundedSender<Result<Bytes, qmux::Error>>,
+	reads: mpsc::Sender<Result<Bytes, qmux::Error>>,
 	/// `None` once the session's writer closed.
 	writes: Option<mpsc::Receiver<Bytes>>,
 	max_record_size: u64,
@@ -505,6 +510,11 @@ impl Driver {
 	async fn run(mut self) {
 		let err = loop {
 			let writable = self.writable();
+			// Only a full read queue is kept, to wait for the session to take a record.
+			let full = match &self.channel {
+				Some(Ok(open)) if open.reads.capacity() == 0 && !open.reads.is_closed() => Some(open.reads.clone()),
+				_ => None,
+			};
 			let writes = match &mut self.channel {
 				Some(Ok(Open {
 					writes: Some(writes), ..
@@ -513,7 +523,8 @@ impl Driver {
 			};
 
 			tokio::select! {
-				event = self.agent.next() => match event {
+				// Each event carries at most one record, so the read queue never overflows.
+				event = self.agent.next(), if full.is_none() => match event {
 					Ok(event) => if let Err(err) = self.event(event) {
 						break err;
 					},
@@ -529,6 +540,8 @@ impl Driver {
 						break err;
 					}
 				}
+				// Closed or not, the queue has room once this returns.
+				_ = async { full.as_ref().unwrap().reserve().await.ok(); }, if full.is_some() => {}
 			}
 		};
 
@@ -550,10 +563,10 @@ impl Driver {
 			return false;
 		};
 		let id = *id;
-		self.agent
-			.rtc()
-			.channel(id)
-			.is_some_and(|mut channel| channel.buffered_amount() < SEND_WINDOW)
+		self.agent.mutate(|rtc| {
+			rtc.channel(id)
+				.is_some_and(|mut channel| channel.buffered_amount() < SEND_WINDOW)
+		})
 	}
 
 	/// Hand a record from the session to SCTP, or close the channel when the session's writer closed.
@@ -564,17 +577,19 @@ impl Driver {
 		let id = open.id;
 		let Some(data) = data else {
 			open.writes = None;
-			self.agent.rtc().direct_api().close_data_channel(id);
+			self.agent.mutate(|rtc| rtc.direct_api().close_data_channel(id));
 			return Ok(());
 		};
-		let Some(mut channel) = self.agent.rtc().channel(id) else {
-			return Err(ice::Error::Closed.into());
-		};
+		let written = self.agent.mutate(|rtc| {
+			let mut channel = rtc.channel(id).ok_or(ice::Error::Closed)?;
+			channel
+				.write(true, &data)
+				.map_err(|err| ice::Error::Rtc(err.to_string()))
+		})?;
 		// The send window keeps the buffer well below str0m's, so a refusal is a bug, not backpressure.
-		match channel.write(true, &data) {
-			Ok(true) => Ok(()),
-			Ok(false) => Err(ice::Error::Rtc("SCTP refused a record within the send window".into()).into()),
-			Err(err) => Err(ice::Error::Rtc(err.to_string()).into()),
+		match written {
+			true => Ok(()),
+			false => Err(ice::Error::Rtc("SCTP refused a record within the send window".into()).into()),
 		}
 	}
 
@@ -589,16 +604,14 @@ impl Driver {
 				let result = match pending {
 					Some(pending) => self
 						.agent
-						.rtc()
-						.sdp_api()
-						.accept_answer(pending, answer)
+						.mutate(|rtc| rtc.sdp_api().accept_answer(pending, answer))
 						.map(|()| self.max_message = Some(max_message))
 						.map_err(|err| Error::Sdp(err.to_string())),
 					None => Err(Error::Sdp("the answer was already applied".into())),
 				};
 				let _ = reply.send(result);
 			}
-			Command::Candidate(candidate) => self.agent.rtc().add_remote_candidate(candidate),
+			Command::Candidate(candidate) => self.agent.mutate(|rtc| rtc.add_remote_candidate(candidate)),
 			Command::Channel(reply) => {
 				if self.taken {
 					let _ = reply.send(Err(Error::Taken));
@@ -642,7 +655,10 @@ impl Driver {
 				} else {
 					Ok(Bytes::from(data.data))
 				};
-				let _ = open.reads.send(record);
+				// Room was checked before this event was taken; a closed reader drops it.
+				if let Err(mpsc::error::TrySendError::Full(_)) = open.reads.try_send(record) {
+					unreachable!("the driver takes no event while the read queue is full");
+				}
 			}
 			str0m::Event::ChannelClose(id) => {
 				if let Some(Ok(open)) = &self.channel
@@ -659,21 +675,24 @@ impl Driver {
 
 	/// Take a channel that opened as the session's, if it is the one this role expects.
 	fn open(&mut self, id: ChannelId) {
-		if self.channel.is_some() {
-			tracing::debug!(?id, "closing an extra data channel");
-			self.agent.rtc().direct_api().close_data_channel(id);
-			return;
-		}
-		if let Role::Offerer { channel, .. } = &self.role
-			&& *channel != id
-		{
-			self.agent.rtc().direct_api().close_data_channel(id);
+		let expected = match &self.role {
+			Role::Offerer { channel, .. } => *channel == id,
+			// The remote peer may open other channels first; only the `moq` one is the session's.
+			Role::Answerer => self.agent.mutate(|rtc| {
+				rtc.channel(id)
+					.and_then(|channel| channel.config().map(|config| config.label == LABEL))
+					.unwrap_or(false)
+			}),
+		};
+		if !expected || self.channel.is_some() {
+			tracing::debug!(?id, "closing an unexpected data channel");
+			self.agent.mutate(|rtc| rtc.direct_api().close_data_channel(id));
 			return;
 		}
 
 		let opened = self.adopt(id);
 		if opened.is_err() {
-			self.agent.rtc().direct_api().close_data_channel(id);
+			self.agent.mutate(|rtc| rtc.direct_api().close_data_channel(id));
 		}
 		self.channel = Some(opened);
 		self.deliver();
@@ -686,15 +705,18 @@ impl Driver {
 			return Err(Error::MessageSize(max_message));
 		}
 
-		let mut channel = self.agent.rtc().channel(id).ok_or(ice::Error::Closed)?;
-		let config = channel.config().ok_or(Error::Unreliable)?;
-		if !config.ordered || config.reliability != Reliability::Reliable {
-			return Err(Error::Unreliable);
-		}
-		let protocol = config.protocol.clone();
-		channel.set_buffered_amount_low_threshold(SEND_WINDOW / 2);
+		let protocol = self.agent.mutate(|rtc| {
+			let mut channel = rtc.channel(id).ok_or(ice::Error::Closed)?;
+			let config = channel.config().ok_or(Error::Unreliable)?;
+			if !config.ordered || config.reliability != Reliability::Reliable {
+				return Err(Error::Unreliable);
+			}
+			let protocol = config.protocol.clone();
+			channel.set_buffered_amount_low_threshold(SEND_WINDOW / 2);
+			Ok(protocol)
+		})?;
 
-		let (reads, rx) = mpsc::unbounded_channel();
+		let (reads, rx) = mpsc::channel(READ_QUEUE);
 		let (tx, writes) = mpsc::channel(1);
 		Ok(Open {
 			id,

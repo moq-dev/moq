@@ -1,12 +1,17 @@
 //! The ICE side of a str0m peer connection: one UDP socket, its candidates, and
 //! the loop that drives an [`Rtc`] over it.
 //!
-//! str0m is sans-IO, so [`Agent::next`] alternates between [`Rtc::poll_output`]
-//! (transmits, events, the next timeout) and [`Rtc::handle_input`] (datagrams and
-//! timeouts), and runs a STUN Binding client on the same socket so the agent can
+//! str0m is sans-IO, so [`Agent::next`] alternates between [`Rtc::handle_input`]
+//! (datagrams and timeouts) and [`Rtc::poll_output`] (transmits, events, the next
+//! timeout), and runs a STUN Binding client on the same socket so the agent can
 //! offer server-reflexive candidates. Shared by this crate's data channel
 //! transport and `moq-rtc`'s WHIP/WHEP gateway, which only differ in what they do
 //! with the events.
+//!
+//! str0m requires every mutation of an [`Rtc`] to be followed by draining
+//! `poll_output` to a timeout before the next one. The agent owns that cycle: it
+//! hands out only a shared [`Agent::rtc`], and [`Agent::mutate`] drains after the
+//! caller's change, queueing the events for [`Agent::next`].
 //!
 //! A dual-stack socket (`[::]`) reports an IPv4 peer as an IPv4-mapped IPv6
 //! address and refuses a send to a real `V4` destination. Neither form leaks past
@@ -166,6 +171,10 @@ pub struct Agent {
 	stun: Vec<Query>,
 	gathered: bool,
 	events: VecDeque<Event>,
+	/// Why the connection ended, found while draining and reported by the next [`Agent::next`].
+	failed: Option<Error>,
+	/// When str0m next wants a timeout, as of the last drain.
+	timeout: Instant,
 	/// Datagrams the socket refused for lack of buffer space, sent first next time.
 	outbox: VecDeque<(Vec<u8>, SocketAddr)>,
 	started: Instant,
@@ -185,7 +194,8 @@ impl Agent {
 			));
 		}
 		let socket_v6 = socket.local_addr()?.is_ipv6();
-		Ok(Self {
+		let now = Instant::now();
+		let mut agent = Self {
 			rtc,
 			socket,
 			socket_v6,
@@ -194,10 +204,15 @@ impl Agent {
 			stun: Vec::new(),
 			gathered: false,
 			events: VecDeque::new(),
+			failed: None,
+			timeout: now,
 			outbox: VecDeque::new(),
-			started: Instant::now(),
+			started: now,
 			connected: false,
-		})
+		};
+		// Signaling already changed the connection.
+		agent.drain();
+		Ok(agent)
 	}
 
 	/// Ask each STUN server for this socket's public mapping, offering what comes
@@ -226,9 +241,17 @@ impl Agent {
 		self
 	}
 
-	/// The connection being driven.
-	pub fn rtc(&mut self) -> &mut Rtc {
-		&mut self.rtc
+	/// The connection being driven, read only.
+	pub fn rtc(&self) -> &Rtc {
+		&self.rtc
+	}
+
+	/// Change the connection, then drain what the change produced: transmits are
+	/// sent, and events wait for [`Agent::next`].
+	pub fn mutate<T>(&mut self, change: impl FnOnce(&mut Rtc) -> T) -> T {
+		let result = change(&mut self.rtc);
+		self.drain();
+		result
 	}
 
 	/// The counters of the bytes exchanged with the peer.
@@ -238,12 +261,15 @@ impl Agent {
 
 	/// Drive the connection until it surfaces an [`Event`].
 	///
-	/// Cancel safe: a datagram the socket could not take yet is kept and sent first
-	/// on the next call.
+	/// Cancel safe: the connection is always drained between calls, and a datagram
+	/// the socket could not take yet is kept and sent first on the next call.
 	pub async fn next(&mut self) -> Result<Event, Error> {
 		loop {
 			if let Some(event) = self.events.pop_front() {
 				return Ok(event);
+			}
+			if let Some(err) = self.failed.take() {
+				return Err(err);
 			}
 			if !self.gathered && self.stun.is_empty() {
 				self.gathered = true;
@@ -267,25 +293,7 @@ impl Agent {
 				return Err(Error::Timeout);
 			}
 
-			let timeout = match self.rtc.poll_output().map_err(Error::rtc)? {
-				Output::Timeout(timeout) => timeout,
-				Output::Transmit(transmit) => {
-					self.send(&transmit.contents, transmit.destination);
-					continue;
-				}
-				Output::Event(event) => {
-					if let str0m::Event::IceConnectionStateChange(state) = &event {
-						tracing::debug!(?state, "ice state");
-						if *state == IceConnectionState::Disconnected {
-							return Err(Error::Closed);
-						}
-						self.connected |= state.is_connected();
-					}
-					return Ok(Event::Rtc(event));
-				}
-			};
-
-			let mut deadline = self.stun.iter().map(|q| q.deadline).fold(timeout, Instant::min);
+			let mut deadline = self.stun.iter().map(|q| q.deadline).fold(self.timeout, Instant::min);
 			if !self.connected {
 				deadline = deadline.min(self.started + ESTABLISH_TIMEOUT);
 			}
@@ -298,7 +306,7 @@ impl Agent {
 							// Every sender dropped: nothing more will arrive.
 							return Err(Error::Closed);
 						};
-						self.receive(&data, src)?;
+						self.receive(&data, src);
 						continue;
 					}
 					_ = tokio::time::sleep(deadline - now) => {}
@@ -306,9 +314,42 @@ impl Agent {
 			}
 
 			let now = Instant::now();
-			self.rtc.handle_input(Input::Timeout(now)).map_err(Error::rtc)?;
+			self.mutate(|rtc| rtc.handle_input(Input::Timeout(now)))
+				.unwrap_or_else(|err| self.fail(Error::rtc(err)));
 			self.retransmit(now);
 		}
+	}
+
+	/// Poll str0m until it asks for a timeout: transmits are sent, events queued.
+	fn drain(&mut self) {
+		while self.failed.is_none() {
+			let output = match self.rtc.poll_output() {
+				Ok(output) => output,
+				Err(err) => return self.fail(Error::rtc(err)),
+			};
+			match output {
+				Output::Timeout(timeout) => {
+					self.timeout = timeout;
+					return;
+				}
+				Output::Transmit(transmit) => self.send(&transmit.contents, transmit.destination),
+				Output::Event(event) => {
+					if let str0m::Event::IceConnectionStateChange(state) = &event {
+						tracing::debug!(?state, "ice state");
+						if *state == IceConnectionState::Disconnected {
+							return self.fail(Error::Closed);
+						}
+						self.connected |= state.is_connected();
+					}
+					self.events.push_back(Event::Rtc(event));
+				}
+			}
+		}
+	}
+
+	/// Keep the first reason the connection ended.
+	fn fail(&mut self, err: Error) {
+		self.failed.get_or_insert(err);
 	}
 
 	/// Send without waiting, keeping the datagram for later when the socket is full.
@@ -321,9 +362,9 @@ impl Agent {
 		}
 	}
 
-	fn receive(&mut self, data: &[u8], src: SocketAddr) -> Result<(), Error> {
+	fn receive(&mut self, data: &[u8], src: SocketAddr) {
 		if self.stun_reply(data, src) {
-			return Ok(());
+			return;
 		}
 
 		let local = pick_local(&self.locals, src);
@@ -331,11 +372,10 @@ impl Agent {
 		// datagram that is not STUN, DTLS, or RTP is noise, not a failure.
 		let Ok(receive) = Receive::new(Protocol::Udp, src, local, data) else {
 			tracing::debug!(%src, len = data.len(), "dropped unrecognized datagram");
-			return Ok(());
+			return;
 		};
-		self.rtc
-			.handle_input(Input::Receive(Instant::now(), receive))
-			.map_err(Error::rtc)
+		self.mutate(|rtc| rtc.handle_input(Input::Receive(Instant::now(), receive)))
+			.unwrap_or_else(|err| self.fail(Error::rtc(err)));
 	}
 
 	/// Consume a reply to one of our STUN queries, returning false for anything else.
@@ -365,8 +405,8 @@ impl Agent {
 		match Candidate::server_reflexive(mapped, query.base, "udp") {
 			// None: redundant with a candidate the agent already has, as when there is no NAT.
 			Ok(candidate) => {
-				if let Some(candidate) = self.rtc.add_local_candidate(candidate) {
-					self.events.push_back(Event::Candidate(candidate.clone()));
+				if let Some(candidate) = self.mutate(|rtc| rtc.add_local_candidate(candidate).cloned()) {
+					self.events.push_back(Event::Candidate(candidate));
 				}
 			}
 			Err(err) => tracing::debug!(%err, %mapped, "unusable server-reflexive address"),
