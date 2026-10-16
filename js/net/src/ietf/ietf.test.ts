@@ -7,7 +7,7 @@ import * as Varint from "../varint.ts";
 import { Fetch } from "./fetch.ts";
 import * as GoAway from "./goaway.ts";
 import * as Namespace from "./namespace.ts";
-import { FetchFrame, type FetchPosition, Frame, Group, type GroupFlags } from "./object.ts";
+import { EndOfTrackProperties, FetchFrame, type FetchPosition, Frame, Group, type GroupFlags } from "./object.ts";
 import { Parameters, SetupOptions } from "./parameters.ts";
 import { Publish, PublishDone } from "./publish.ts";
 import * as Announce from "./publish_namespace.ts";
@@ -1802,6 +1802,27 @@ test("Frame: END_OF_GROUP is accepted whether or not the header marks the end", 
 	);
 	expect(empty.payload).toEqual(new Uint8Array(0));
 	expect(empty.endOfTrack).toBe(false);
+});
+
+test("Frame refuses draft-14 END_OF_TRACK properties", async () => {
+	const flags: GroupFlags = {
+		hasExtensions: true,
+		hasSubgroup: false,
+		hasSubgroupObject: false,
+		hasEnd: false,
+		hasPriority: true,
+		firstObject: true,
+	};
+	// Object ID delta 0, one unknown integer property, zero payload length, END_OF_TRACK.
+	const wire = new Uint8Array([0, 2, 0x20, 7, 0, 4]);
+	const reader = new Reader(undefined, wire, Version.DRAFT_14);
+	await expect(reader.decode((c) => Frame.decode(c, flags, undefined))).rejects.toThrow(EndOfTrackProperties);
+
+	// From draft 15, no status object may carry properties at all.
+	for (const status of [3, 4]) {
+		const later = new Reader(undefined, new Uint8Array([0, 2, 0x20, 7, 0, status]), Version.DRAFT_15);
+		await expect(later.decode((c) => Frame.decode(c, flags, undefined))).rejects.toThrow(ProtocolViolation);
+	}
 });
 
 test("Frame decodes objects split at every byte", async () => {

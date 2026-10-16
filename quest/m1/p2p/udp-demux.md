@@ -32,9 +32,8 @@ one. Bound queues per stack with a per-source drop rather than unbounded
 growth; report drops as a counter.
 
 QUIC: the server takes the virtual socket through whatever the QUIC stack
-accepts: noq's `new_with_abstract_socket` today, `moq-quic`'s fed datagrams
-after [the switch](/quest/m1/quic/fork/switch.md). Build on whichever has
-landed rather than both. QUIC-bit greasing is already off for sharded endpoints.
+accepts: the driver's `new_with_abstract_socket` on `moq-quic`. QUIC-bit
+greasing is already off for sharded endpoints.
 
 STUN: an ICE connectivity check is a Binding request carrying USERNAME, so
 it goes to the WebRTC hook, whose mux reads the local ufrag from it. A

@@ -74,10 +74,9 @@ For non-trivial tasks, file an issue or offer to run `/quest-plan`.
 
 # Forks
 
-[moq-dev/noq](https://github.com/moq-dev/noq) publishes `moq-noq*`, the QUIC stack every published MoQ crate builds on; iroh keeps upstream noq.
-Its `moq-sync` workflow merges n0-computer/noq weekly as a PR; review it like any other, and `PARENT` names the upstream commit each release includes.
-A carried change lists its upstream PR, or the reason it has none, in the fork PR.
-For an advisory against noq or Quinn, compare the pinned release's `PARENT` with the fixing upstream commit, then sync, release the fork, and bump the pin here.
+`rs/moq-quic` is our hard fork of quinn, the QUIC stack MoQ builds on; iroh keeps upstream noq.
+It never merges upstream: fixes are cherry-picked by hand, and each carried change is listed in its README with its upstream PR, or the reason it has none.
+For an advisory against Quinn, follow the advisory triage in [`rs/moq-quic/README.md`](rs/moq-quic/README.md).
 
 # Releases
 
