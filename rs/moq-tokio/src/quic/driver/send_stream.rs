@@ -6,7 +6,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use moq_quic::{ClosedStream, ConnectionError, FinishError, ResetAtError, StreamId, Written};
+use moq_quic::{CheckpointError, ClosedStream, ConnectionError, FinishError, StreamId, Written};
 use thiserror::Error;
 
 use crate::quic::driver::{
@@ -214,22 +214,15 @@ impl SendStream {
         Ok(())
     }
 
-    /// Close the send stream immediately, except for its first `reliable_size` bytes.
-    ///
-    /// Like [`reset()`](Self::reset), but the peer still receives the stream up to
-    /// `reliable_size` before the error, using RESET_STREAM_AT. Fails without touching the stream
-    /// if the peer does not support it or `reliable_size` exceeds the bytes written, so the caller
-    /// can fall back to [`reset()`](Self::reset).
-    pub fn reset_at(&mut self, error_code: VarInt, reliable_size: u64) -> Result<(), ResetAtError> {
-        let mut conn = self.conn.state.lock("SendStream::reset_at");
-        if self.is_0rtt && conn.check_0rtt().is_err() {
-            return Ok(());
+    /// Mark the data written so far, so a later [`Checkpoint::reset()`] still delivers it.
+    pub fn checkpoint(&self) -> Checkpoint {
+        let mut conn = self.conn.state.lock("SendStream::checkpoint");
+        let inner = conn.inner.send_stream(self.stream).checkpoint();
+        Checkpoint {
+            conn: self.conn.clone(),
+            inner,
+            is_0rtt: self.is_0rtt,
         }
-        conn.inner
-            .send_stream(self.stream)
-            .reset_at(error_code, reliable_size)?;
-        conn.wake();
-        Ok(())
     }
 
     /// Set the priority of the send stream
@@ -348,6 +341,33 @@ impl tokio::io::AsyncWrite for SendStream {
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Poll::Ready(self.get_mut().finish().map_err(Into::into))
+    }
+}
+
+/// The data written to a [`SendStream`] up to some point, which a reset can still deliver
+///
+/// Taken with [`SendStream::checkpoint()`]. It keeps the connection open, like the stream does.
+#[derive(Debug)]
+pub struct Checkpoint {
+    conn: ConnectionRef,
+    inner: moq_quic::Checkpoint,
+    is_0rtt: bool,
+}
+
+impl Checkpoint {
+    /// Close the send stream immediately, but deliver everything written before the checkpoint.
+    ///
+    /// Like [`SendStream::reset()`], except the peer reads the data before the error, using
+    /// RESET_STREAM_AT. Fails without touching the stream if the peer does not support it, so the
+    /// caller can fall back to [`SendStream::reset()`].
+    pub fn reset(self, error_code: VarInt) -> Result<(), CheckpointError> {
+        let mut conn = self.conn.state.lock("Checkpoint::reset");
+        if self.is_0rtt && conn.check_0rtt().is_err() {
+            return Ok(());
+        }
+        self.inner.reset(&mut conn.inner, error_code)?;
+        conn.wake();
+        Ok(())
     }
 }
 

@@ -343,18 +343,15 @@ pub(super) enum SendState {
     },
 }
 
-/// Reasons why a reset with a Reliable Size might fail
+/// Reasons why resetting from a [`Checkpoint`](super::Checkpoint) might fail
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-pub enum ResetAtError {
+pub enum CheckpointError {
     /// The stream has not been opened or was already reset or fully acknowledged
     #[error("closed stream")]
     ClosedStream,
     /// The peer did not advertise support for RESET_STREAM_AT
     #[error("peer does not support RESET_STREAM_AT")]
     Unsupported,
-    /// The Reliable Size covers bytes that were never written to the stream
-    #[error("reliable size exceeds the bytes written")]
-    Unwritten,
 }
 
 /// Reasons why attempting to finish a stream might fail

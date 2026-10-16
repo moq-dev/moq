@@ -586,7 +586,7 @@ impl web_transport_trait::poll::Session for Session {
 				SendStream {
 					inner: send,
 					prefix: Bytes::new(),
-					header: 0,
+					header: None,
 					finishing: false,
 					web: false,
 				},
@@ -603,7 +603,7 @@ impl web_transport_trait::poll::Session for Session {
 					SendStream {
 						inner: send,
 						prefix: Bytes::new(),
-						header: 0,
+						header: None,
 						finishing: false,
 						web: true,
 					},
@@ -631,7 +631,7 @@ impl web_transport_trait::poll::Session for Session {
 		let prefix = self.web.as_ref().map(|web| web.header_uni.clone()).unwrap_or_default();
 		Poll::Ready(Ok(SendStream {
 			inner,
-			header: prefix.len(),
+			header: None,
 			prefix,
 			finishing: false,
 			web: self.web.is_some(),
@@ -648,7 +648,7 @@ impl web_transport_trait::poll::Session for Session {
 		Poll::Ready(Ok((
 			SendStream {
 				inner: send,
-				header: prefix.len(),
+				header: None,
 				prefix,
 				finishing: false,
 				web: self.web.is_some(),
@@ -816,8 +816,8 @@ pub struct SendStream {
 	inner: super::SendStream,
 	/// Header bytes still owed to the wire before any payload.
 	prefix: Bytes,
-	/// Length of the whole header, which a reset must still deliver.
-	header: usize,
+	/// Taken once the whole header is written, so a reset still delivers it.
+	header: Option<moq_quic::Checkpoint>,
 	/// [`finish`](web_transport_trait::poll::SendStream::finish) ran with the
 	/// header still owed, so [`poll_closed`](web_transport_trait::poll::SendStream::poll_closed)
 	/// writes the rest and finishes then.
@@ -833,15 +833,23 @@ impl SendStream {
 		}
 	}
 
+	/// Account for `n` header bytes written, checkpointing once the last one is.
+	fn advance_prefix(&mut self, n: usize) {
+		self.prefix.advance(n);
+		if n > 0 && self.prefix.is_empty() {
+			self.header = Some(self.inner.checkpoint());
+		}
+	}
+
 	/// Reset a WebTransport stream, still delivering its header so the peer
 	/// can tell which session the reset belongs to.
 	fn reset_web(&mut self, code: u64) {
 		if !self.prefix.is_empty() {
 			let n = self.inner.try_write(&self.prefix);
-			self.prefix.advance(n);
+			self.advance_prefix(n);
 		}
-		let written = self.header - self.prefix.len();
-		self.inner.reset_code(code, written as u64);
+		// A header the connection had no room for goes out as a plain reset
+		self.inner.reset_code(code, self.header.take());
 	}
 }
 
@@ -862,7 +870,7 @@ impl web_transport_trait::poll::SendStream for SendStream {
 				&self.prefix
 			))
 			.map_err(|err| self.map(err))?;
-			self.prefix.advance(n);
+			self.advance_prefix(n);
 		}
 		match web_transport_trait::poll::SendStream::poll_write(&mut self.inner, cx, buf) {
 			Poll::Ready(Err(err)) => Poll::Ready(Err(self.map(err))),
@@ -875,12 +883,13 @@ impl web_transport_trait::poll::SendStream for SendStream {
 			return Poll::Ready(Err(Error::Quic("stream already finished".to_string())));
 		}
 		while !self.prefix.is_empty() {
-			ready!(web_transport_trait::poll::SendStream::poll_write_buf(
+			let n = ready!(web_transport_trait::poll::SendStream::poll_write(
 				&mut self.inner,
 				cx,
-				&mut self.prefix
+				&self.prefix
 			))
 			.map_err(|err| self.map(err))?;
+			self.advance_prefix(n);
 		}
 		match web_transport_trait::poll::SendStream::poll_write_buf(&mut self.inner, cx, buf) {
 			Poll::Ready(Err(err)) => Poll::Ready(Err(self.map(err))),
@@ -897,7 +906,7 @@ impl web_transport_trait::poll::SendStream for SendStream {
 		// peer sees an unframed (and thus invalid) stream.
 		if !self.prefix.is_empty() {
 			let n = self.inner.try_write(&self.prefix);
-			self.prefix.advance(n);
+			self.advance_prefix(n);
 			if !self.prefix.is_empty() {
 				// Zero capacity here is ordinary flow control, which clears
 				// once the peer reads. Reporting it terminally would have the
@@ -926,7 +935,7 @@ impl web_transport_trait::poll::SendStream for SendStream {
 				cx,
 				&self.prefix
 			)) {
-				Ok(n) => self.prefix.advance(n),
+				Ok(n) => self.advance_prefix(n),
 				Err(err) => return Poll::Ready(Err(self.map(err))),
 			}
 			if self.prefix.is_empty() {
@@ -951,7 +960,7 @@ impl Drop for SendStream {
 		// cleanly go out as a cancellation.
 		if self.finishing {
 			let n = self.inner.try_write(&self.prefix);
-			self.prefix.advance(n);
+			self.advance_prefix(n);
 			if self.prefix.is_empty() {
 				let _ = web_transport_trait::poll::SendStream::finish(&mut self.inner);
 			}

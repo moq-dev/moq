@@ -55,11 +55,11 @@ pub(crate) use std::time::Duration;
 
 pub use moq_quic::BloomTokenLog;
 pub use moq_quic::{
-    AckFrequencyConfig, ApplicationClose, Chunk, ClientConfig, ClosedStream, ConfigError,
-    ConnectError, ConnectionClose, ConnectionError, ConnectionId, ConnectionIdGenerator,
-    ConnectionStats, Dir, EcnCodepoint, EndpointConfig, FrameStats, FrameType, IdleTimeout,
-    InvalidCid, MtuDiscoveryConfig, NoneTokenLog, NoneTokenStore, PathStats, ResetAtError,
-    ServerConfig, Side, StdSystemTime, StreamId, TimeSource, TokenLog, TokenMemoryCache,
+    AckFrequencyConfig, ApplicationClose, CheckpointError, Chunk, ClientConfig, ClosedStream,
+    ConfigError, ConnectError, ConnectionClose, ConnectionError, ConnectionId,
+    ConnectionIdGenerator, ConnectionStats, Dir, EcnCodepoint, EndpointConfig, FrameStats,
+    FrameType, IdleTimeout, InvalidCid, MtuDiscoveryConfig, NoneTokenLog, NoneTokenStore,
+    PathStats, ServerConfig, Side, StdSystemTime, StreamId, TimeSource, TokenLog, TokenMemoryCache,
     TokenReuseError, TokenStore, Transmit, TransportConfig, TransportErrorCode, UdpStats,
     ValidationTokenConfig, VarInt, VarIntBoundsExceeded, Written, congestion, crypto,
 };
@@ -78,7 +78,7 @@ pub use crate::quic::driver::recv_stream::{
 #[cfg(test)]
 pub(crate) use crate::quic::driver::runtime::wrap_udp_socket;
 pub use crate::quic::driver::runtime::{AsyncUdpSocket, UdpSender};
-pub use crate::quic::driver::send_stream::{SendStream, StoppedError, WriteError};
+pub use crate::quic::driver::send_stream::{Checkpoint, SendStream, StoppedError, WriteError};
 
 #[cfg(test)]
 mod tests;

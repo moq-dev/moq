@@ -8,7 +8,7 @@
 use std::task::{Context, Poll};
 
 use bytes::{Buf, Bytes, BytesMut};
-use moq_quic::{StreamId, VarInt};
+use moq_quic::{Checkpoint, CheckpointError, StreamId, VarInt};
 
 use super::super::Error;
 use super::{End, Shared};
@@ -70,25 +70,28 @@ impl SendStream {
 		n
 	}
 
+	/// Mark the data written so far, for a later [`reset_code`](Self::reset_code) to deliver.
+	pub(crate) fn checkpoint(&self) -> Checkpoint {
+		self.shared.conn.borrow_mut().send_stream(self.id).checkpoint()
+	}
+
 	/// [`reset`](web_transport_trait::poll::SendStream::reset) with a
 	/// full-width code, for the WebTransport HTTP/3 error mapping, that still
-	/// delivers the first `reliable_size` bytes when the peer accepts
-	/// RESET_STREAM_AT.
-	pub(crate) fn reset_code(&mut self, code: u64, reliable_size: u64) {
+	/// delivers the data before `checkpoint`, one this stream took, when the
+	/// peer accepts RESET_STREAM_AT.
+	pub(crate) fn reset_code(&mut self, code: u64, checkpoint: Option<Checkpoint>) {
 		if self.reset {
 			return;
 		}
 		let code = VarInt::from_u64(code).unwrap_or(VarInt::MAX);
 		let mut conn = self.shared.conn.borrow_mut();
-		let mut stream = conn.send_stream(self.id);
-		match stream.reset_at(code, reliable_size) {
+		match checkpoint.map(|checkpoint| checkpoint.reset(&mut conn, code)) {
 			// A peer without RESET_STREAM_AT gets the plain reset it understands.
-			Err(moq_quic::ResetAtError::Unsupported) => {
-				let _ = stream.reset(code);
+			None | Some(Err(CheckpointError::Unsupported)) => {
+				let _ = conn.send_stream(self.id).reset(code);
 			}
-			Err(moq_quic::ResetAtError::Unwritten) => unreachable!("only written bytes are kept"),
 			// Already gone, which is what we wanted.
-			Ok(()) | Err(moq_quic::ResetAtError::ClosedStream) => {}
+			Some(Ok(()) | Err(CheckpointError::ClosedStream)) => {}
 		}
 		drop(conn);
 		self.reset = true;
@@ -154,7 +157,7 @@ impl web_transport_trait::poll::SendStream for SendStream {
 	}
 
 	fn reset(&mut self, code: u32) {
-		self.reset_code(u64::from(code), 0);
+		self.reset_code(u64::from(code), None);
 	}
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {

@@ -36,6 +36,23 @@ fn accept(pair: &mut Pair, ch: ConnectionHandle) -> StreamId {
     pair.server_streams(ch).accept(Dir::Uni).unwrap()
 }
 
+/// Write `MSG` to a client stream, with a checkpoint after its first `RELIABLE` bytes
+fn write(pair: &mut Pair, ch: ConnectionHandle, s: StreamId) -> Checkpoint {
+    pair.client_send(ch, s).write(&MSG[..RELIABLE]).unwrap();
+    let checkpoint = pair.client_send(ch, s).checkpoint();
+    pair.client_send(ch, s).write(&MSG[RELIABLE..]).unwrap();
+    checkpoint
+}
+
+/// Reset a client stream, still delivering what was written before `checkpoint`
+fn reset(
+    pair: &mut Pair,
+    ch: ConnectionHandle,
+    checkpoint: Checkpoint,
+) -> Result<(), CheckpointError> {
+    checkpoint.reset(pair.client_conn_mut(ch), ERROR)
+}
+
 /// Transmit the client's pending packets and drop them
 fn lose_client_packets(pair: &mut Pair) {
     pair.client.drive(pair.time, pair.server.addr);
@@ -50,10 +67,8 @@ fn delivers_prefix_before_error() {
     let (client_ch, server_ch) = pair.connect();
 
     let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
-    pair.client_send(client_ch, s).write(MSG).unwrap();
-    pair.client_send(client_ch, s)
-        .reset_at(ERROR, RELIABLE as u64)
-        .unwrap();
+    let checkpoint = write(&mut pair, client_ch, s);
+    reset(&mut pair, client_ch, checkpoint).unwrap();
     pair.drive();
 
     assert_eq!(accept(&mut pair, server_ch), s);
@@ -81,9 +96,8 @@ fn delivers_unsent_prefix() {
     pair.client_send(client_ch, s)
         .write(&MSG[..RELIABLE])
         .unwrap();
-    pair.client_send(client_ch, s)
-        .reset_at(ERROR, RELIABLE as u64)
-        .unwrap();
+    let checkpoint = pair.client_send(client_ch, s).checkpoint();
+    reset(&mut pair, client_ch, checkpoint).unwrap();
     pair.drive();
 
     assert_eq!(accept(&mut pair, server_ch), s);
@@ -100,11 +114,9 @@ fn retransmits_lost_prefix() {
     let (client_ch, server_ch) = pair.connect();
 
     let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
-    pair.client_send(client_ch, s).write(MSG).unwrap();
+    let checkpoint = write(&mut pair, client_ch, s);
     lose_client_packets(&mut pair);
-    pair.client_send(client_ch, s)
-        .reset_at(ERROR, RELIABLE as u64)
-        .unwrap();
+    reset(&mut pair, client_ch, checkpoint).unwrap();
 
     // The reset arrives first, and withholds the error until the prefix is retransmitted
     pair.drive_client();
@@ -136,11 +148,9 @@ fn retransmits_lost_reset() {
     let (client_ch, server_ch) = pair.connect();
 
     let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
-    pair.client_send(client_ch, s).write(MSG).unwrap();
+    let checkpoint = write(&mut pair, client_ch, s);
     pair.drive();
-    pair.client_send(client_ch, s)
-        .reset_at(ERROR, RELIABLE as u64)
-        .unwrap();
+    reset(&mut pair, client_ch, checkpoint).unwrap();
     lose_client_packets(&mut pair);
     pair.drive();
 
@@ -160,10 +170,8 @@ fn received_reset_after_prefix() {
     let (client_ch, server_ch) = pair.connect();
 
     let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
-    pair.client_send(client_ch, s).write(MSG).unwrap();
-    pair.client_send(client_ch, s)
-        .reset_at(ERROR, RELIABLE as u64)
-        .unwrap();
+    let checkpoint = write(&mut pair, client_ch, s);
+    reset(&mut pair, client_ch, checkpoint).unwrap();
     pair.drive();
 
     assert_eq!(accept(&mut pair, server_ch), s);
@@ -193,11 +201,12 @@ fn after_finish() {
 
     for reliable in [RELIABLE, MSG.len()] {
         let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
-        pair.client_send(client_ch, s).write(MSG).unwrap();
+        let mut checkpoint = write(&mut pair, client_ch, s);
+        if reliable == MSG.len() {
+            checkpoint = pair.client_send(client_ch, s).checkpoint();
+        }
         pair.client_send(client_ch, s).finish().unwrap();
-        pair.client_send(client_ch, s)
-            .reset_at(ERROR, reliable as u64)
-            .unwrap();
+        reset(&mut pair, client_ch, checkpoint).unwrap();
         pair.drive();
 
         assert_eq!(accept(&mut pair, server_ch), s);
@@ -221,14 +230,19 @@ fn flow_control_blocked() {
     let (client_ch, server_ch) = pair.connect();
 
     let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
-    assert_eq!(pair.client_send(client_ch, s).write(MSG), Ok(10));
+    pair.client_send(client_ch, s)
+        .write(&MSG[..RELIABLE])
+        .unwrap();
+    let checkpoint = pair.client_send(client_ch, s).checkpoint();
+    assert_eq!(
+        pair.client_send(client_ch, s).write(&MSG[RELIABLE..]),
+        Ok(10 - RELIABLE)
+    );
     assert_eq!(
         pair.client_send(client_ch, s).write(MSG),
         Err(WriteError::Blocked)
     );
-    pair.client_send(client_ch, s)
-        .reset_at(ERROR, RELIABLE as u64)
-        .unwrap();
+    reset(&mut pair, client_ch, checkpoint).unwrap();
     pair.drive();
 
     assert_eq!(accept(&mut pair, server_ch), s);
@@ -246,11 +260,10 @@ fn unsupported_leaves_stream_open() {
     let (client_ch, server_ch) = pair.connect();
 
     let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
-    pair.client_send(client_ch, s).write(MSG).unwrap();
+    let checkpoint = write(&mut pair, client_ch, s);
     assert_eq!(
-        pair.client_send(client_ch, s)
-            .reset_at(ERROR, RELIABLE as u64),
-        Err(ResetAtError::Unsupported)
+        reset(&mut pair, client_ch, checkpoint),
+        Err(CheckpointError::Unsupported)
     );
     pair.client_send(client_ch, s).finish().unwrap();
     pair.drive();
@@ -267,8 +280,9 @@ fn unsupported_allows_zero() {
     let (client_ch, server_ch) = pair.connect();
 
     let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let checkpoint = pair.client_send(client_ch, s).checkpoint();
     pair.client_send(client_ch, s).write(MSG).unwrap();
-    pair.client_send(client_ch, s).reset_at(ERROR, 0).unwrap();
+    reset(&mut pair, client_ch, checkpoint).unwrap();
     pair.drive();
 
     assert_eq!(accept(&mut pair, server_ch), s);
@@ -279,39 +293,18 @@ fn unsupported_allows_zero() {
 }
 
 #[test]
-fn unwritten_leaves_stream_open() {
-    let _guard = subscribe();
-    let mut pair = pair(true);
-    let (client_ch, server_ch) = pair.connect();
-
-    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
-    pair.client_send(client_ch, s).write(MSG).unwrap();
-    assert_eq!(
-        pair.client_send(client_ch, s)
-            .reset_at(ERROR, MSG.len() as u64 + 1),
-        Err(ResetAtError::Unwritten)
-    );
-    pair.client_send(client_ch, s).finish().unwrap();
-    pair.drive();
-
-    assert_eq!(accept(&mut pair, server_ch), s);
-    assert_eq!(read(&mut pair, server_ch, s), (MSG.to_vec(), Ok(())));
-}
-
-#[test]
 fn repeated_reset_is_closed() {
     let _guard = subscribe();
     let mut pair = pair(true);
     let (client_ch, _) = pair.connect();
 
     let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
-    pair.client_send(client_ch, s).write(MSG).unwrap();
-    pair.client_send(client_ch, s)
-        .reset_at(ERROR, RELIABLE as u64)
-        .unwrap();
+    let checkpoint = write(&mut pair, client_ch, s);
+    let again = pair.client_send(client_ch, s).checkpoint();
+    reset(&mut pair, client_ch, checkpoint).unwrap();
     assert_eq!(
-        pair.client_send(client_ch, s).reset_at(ERROR, 0),
-        Err(ResetAtError::ClosedStream)
+        reset(&mut pair, client_ch, again),
+        Err(CheckpointError::ClosedStream)
     );
     assert!(pair.client_send(client_ch, s).reset(ERROR).is_err());
 }
@@ -341,10 +334,8 @@ fn zero_rtt() {
     let client_ch = pair.begin_connect(config);
     assert!(pair.client_conn_mut(client_ch).has_0rtt());
     let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
-    pair.client_send(client_ch, s).write(MSG).unwrap();
-    pair.client_send(client_ch, s)
-        .reset_at(ERROR, RELIABLE as u64)
-        .unwrap();
+    let checkpoint = write(&mut pair, client_ch, s);
+    reset(&mut pair, client_ch, checkpoint).unwrap();
     pair.drive();
 
     assert!(pair.client_conn_mut(client_ch).accepted_0rtt());

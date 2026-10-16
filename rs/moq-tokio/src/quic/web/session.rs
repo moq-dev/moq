@@ -255,7 +255,7 @@ impl Session {
 		} else {
 			let (send, recv) = self.conn.accept_bi().await.map_err(|e| self.map_error(e))?;
 			Ok((
-				SendStream::new(send, self.close.clone(), 0),
+				SendStream::new(send, self.close.clone(), None),
 				RecvStream::new(recv, self.close.clone()),
 			))
 		}
@@ -276,7 +276,8 @@ impl Session {
 
 		// Reset the stream priority back to the default of 0.
 		send.set_priority(0).ok();
-		Ok(SendStream::new(send, self.close.clone(), self.header_uni.len()))
+		let header = send.checkpoint();
+		Ok(SendStream::new(send, self.close.clone(), Some(header)))
 	}
 
 	/// Open a new bidirectional stream. See [`crate::quic::driver::Connection::open_bi`].
@@ -294,8 +295,9 @@ impl Session {
 
 		// Reset the stream priority back to the default of 0.
 		send.set_priority(0).ok();
+		let header = send.checkpoint();
 		Ok((
-			SendStream::new(send, self.close.clone(), self.header_bi.len()),
+			SendStream::new(send, self.close.clone(), Some(header)),
 			RecvStream::new(recv, self.close.clone()),
 		))
 	}
@@ -888,7 +890,7 @@ impl SessionAccept {
 			if let Some((send, recv)) = res {
 				// Wrap the streams in our own types for correct error codes.
 				// The peer opened it, so this half carries no header.
-				let send = SendStream::new(send, self.close.clone(), 0);
+				let send = SendStream::new(send, self.close.clone(), None);
 				let recv = RecvStream::new(recv, self.close.clone());
 				return Poll::Ready(Ok((send, recv)));
 			}

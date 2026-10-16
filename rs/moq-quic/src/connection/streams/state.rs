@@ -2802,7 +2802,7 @@ mod tests {
         let mut buf = Vec::new();
         let sent = stream.state.write_stream_frames(&mut buf, 100, true);
         assert_eq!(sent[0].offsets, 0..11);
-        stream.reset_at(7u32.into(), 4).unwrap();
+        stream.reset_to(7u32.into(), 4).unwrap();
         assert_eq!(server.buffered_data, 4);
 
         // Only the lost prefix is retransmitted, without the FIN of a stream that was never finished
@@ -2841,7 +2841,7 @@ mod tests {
         };
         stream.write(b"hello world").unwrap();
         stream.state.received_stop_sending(id, 9u32.into());
-        stream.reset_at(7u32.into(), 4).unwrap();
+        stream.reset_to(7u32.into(), 4).unwrap();
 
         let send = server.send[&id].as_ref().unwrap();
         let frame = send.reset_frame(id, 7u32.into()).unwrap();
