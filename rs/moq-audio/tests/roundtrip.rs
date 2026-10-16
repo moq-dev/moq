@@ -276,7 +276,7 @@ async fn next_frame(consumer: &mut decode::Consumer) -> Result<Option<moq_audio:
 	loop {
 		match consumer.read().await? {
 			Some(decode::Read::Frame { frame, .. }) => return Ok(Some(frame)),
-			Some(decode::Read::Gap { .. } | decode::Read::End { .. }) => {}
+			Some(decode::Read::End { .. }) => {}
 			None => return Ok(None),
 		}
 	}

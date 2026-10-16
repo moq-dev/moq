@@ -9,7 +9,7 @@ use tokio::time::Instant;
 
 use super::buffer::Buffer;
 use super::output::Output;
-use super::timeline::{Presentation, Role};
+use super::timeline::{Presentation, Role, Transition};
 use super::window::Event;
 
 /// A few surfaces, independent of the requested playout delay. A codec batch
@@ -70,12 +70,34 @@ impl Decoder for moq_video::decode::Sink {
 	}
 }
 
+/// One encoder segment's media, and the transition it resumes when it
+/// replaces the segment before it.
+#[derive(Default)]
+struct Segment {
+	media: Buffer,
+	resumes: Option<Transition>,
+}
+
+impl std::ops::Deref for Segment {
+	type Target = Buffer;
+
+	fn deref(&self) -> &Buffer {
+		&self.media
+	}
+}
+
+impl std::ops::DerefMut for Segment {
+	fn deref_mut(&mut self) -> &mut Buffer {
+		&mut self.media
+	}
+}
+
 impl<O: Output> Video<O> {
 	pub async fn run(self, mut track: Track, mut decoder: impl Decoder) -> anyhow::Result<()> {
 		let closed = std::sync::atomic::AtomicBool::new(false);
 		let advancing = std::sync::atomic::AtomicBool::new(false);
 		let revision = std::sync::atomic::AtomicU64::new(0);
-		let buffers = Mutex::new(VecDeque::from([Buffer::default()]));
+		let buffers = Mutex::new(VecDeque::from([Segment::default()]));
 		let role = Role::new(
 			self.presentation.clone(),
 			self.changed.clone(),
@@ -83,7 +105,8 @@ impl<O: Output> Video<O> {
 		);
 		let receive = async {
 			// The group of a declared end whose restart waits for a later group, so the
-			// media buffered before the end still plays out.
+			// media buffered before the end still plays out, and the transition that
+			// later group resumes.
 			let mut end = None;
 
 			loop {
@@ -93,9 +116,12 @@ impl<O: Output> Video<O> {
 				let before = buffers.front().unwrap().generation;
 				let ended = match read {
 					Some(Read::Frame { group, frame }) => {
-						if end.take_if(|end| *end != group).is_some() {
-							role.plan(frame.timestamp, None);
-							buffers.push_back(Buffer::default());
+						if let Some((_, transition)) = end.take_if(|(end, _)| *end != group) {
+							role.plan(transition, frame.timestamp, None);
+							buffers.push_back(Segment {
+								resumes: Some(transition),
+								..Default::default()
+							});
 						}
 						if active
 							&& buffers.len() == 1 && self
@@ -111,18 +137,24 @@ impl<O: Output> Video<O> {
 					}
 					// Applied in delivery order, so the restart lands before the frame after it.
 					Some(Read::Gap { .. }) => {
-						end = None;
+						let queued = buffers.iter().filter_map(|buffer| buffer.resumes);
+						for transition in end.take().map(|(_, transition)| transition).into_iter().chain(queued) {
+							role.abandon(transition);
+						}
 						revision.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 						role.gap();
 						buffers.clear();
-						buffers.push_back(Buffer::default());
+						buffers.push_back(Segment::default());
 						buffers.front_mut().unwrap().clear();
 						buffers.front_mut().unwrap().generation = before + 1;
 						self.presentation.lock().unwrap().video_restarted();
 						false
 					}
 					Some(Read::End { group, end: endpoint }) => {
-						end = Some(group);
+						if let Some((_, transition)) = end.take() {
+							role.abandon(transition);
+						}
+						end = Some((group, role.declare()));
 						buffers.back_mut().unwrap().ended = true;
 						buffers.back_mut().unwrap().end = Some(endpoint);
 						if active {
@@ -261,31 +293,33 @@ impl<O: Output> Video<O> {
 							// Eviction can empty a replacement until its next keyframe; one a
 							// later replacement already follows never gets another.
 							while buffers.len() > 2 && buffers[1].oldest().is_none() {
-								buffers.remove(1);
+								if let Some(transition) = buffers.remove(1).and_then(|skipped| skipped.resumes) {
+									role.abandon(transition);
+								}
 							}
-							match buffers.get(1).and_then(|next| next.oldest()) {
-								Some(start) => {
+							match buffers.get(1).and_then(|next| Some((next.oldest()?, next.resumes?))) {
+								Some((start, transition)) => {
 									advancing.store(true, std::sync::atomic::Ordering::Relaxed);
 									buffers.pop_front();
-									Some((start, revision.load(std::sync::atomic::Ordering::Relaxed)))
+									Some((start, transition, revision.load(std::sync::atomic::Ordering::Relaxed)))
 								}
 								None => None,
 							}
 						};
-						let Some((start, before)) = next else {
+						let Some((start, transition, before)) = next else {
 							if closed.load(std::sync::atomic::Ordering::Relaxed) {
 								break;
 							}
 							self.changed.notified().await;
 							continue;
 						};
-						let mapping = role.resume(start, None).await?;
+						let mapping = role.resume(transition, start, None).await?;
 						let buffers = buffers.lock().unwrap();
 						if revision.load(std::sync::atomic::Ordering::Relaxed) != before {
 							advancing.store(false, std::sync::atomic::Ordering::Relaxed);
 							continue;
 						}
-						role.apply(mapping);
+						role.apply(transition, mapping);
 						if let Some(end) = buffers.front().unwrap().end {
 							role.end(end)?;
 						}

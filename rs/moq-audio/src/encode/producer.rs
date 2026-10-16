@@ -563,7 +563,7 @@ mod tests {
 		loop {
 			match consumer.read().await? {
 				Some(crate::decode::Read::Frame { frame, .. }) => return Ok(Some(frame)),
-				Some(crate::decode::Read::Gap { .. } | crate::decode::Read::End { .. }) => {}
+				Some(crate::decode::Read::End { .. }) => {}
 				None => return Ok(None),
 			}
 		}

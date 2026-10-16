@@ -345,7 +345,7 @@ impl ConsumerInner {
 		loop {
 			match self.consumer.read().await? {
 				Some(moq_audio::decode::Read::Frame { frame, .. }) => return Ok(Some(frame.into())),
-				Some(moq_audio::decode::Read::Gap { .. } | moq_audio::decode::Read::End { .. }) => {}
+				Some(moq_audio::decode::Read::End { .. }) => {}
 				None => return Ok(None),
 			}
 		}

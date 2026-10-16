@@ -12,27 +12,25 @@ use crate::jitter::{self, Target};
 use crate::resample::{Remix, Resampler};
 use crate::{Activity, Error, Format, Frame, Layout};
 
-/// Decoded PCM and track boundaries in delivery order.
+/// Decoded PCM and encoder ends in delivery order.
+///
+/// `discontinuity` goes up wherever the decoded timeline breaks: at the fresh
+/// encoder after an [`End`](Self::End), or at a loss. A bump with no `End`
+/// before it is a loss, and the hole runs from the previous frame's end to the
+/// new frame's timestamp.
 #[derive(Clone, Debug)]
 pub enum Read {
-	/// PCM from one decoder segment, including its drained tail.
+	/// Decoded PCM, including the drained tail before a discontinuity.
 	Frame {
-		/// The decoder segment; only equality matters.
-		segment: u64,
+		/// The decoded timeline these samples belong to; only changes matter.
+		discontinuity: u64,
 		/// The decoded samples and their presentation time.
 		frame: Frame,
 	},
-	/// Media was lost before the next frame.
-	Gap {
-		/// The furthest presentation point read before the loss.
-		timestamp: moq_net::Timestamp,
-		/// The upper bound on the missing media span.
-		duration: moq_net::Timestamp,
-	},
-	/// The publisher stopped this encoder; final PCM may still follow in its segment.
+	/// The publisher stopped this encoder; its final PCM may still follow.
 	End {
-		/// The decoder segment containing the stopped encoder's final samples.
-		segment: u64,
+		/// The decoded timeline holding the stopped encoder's final samples.
+		discontinuity: u64,
 		/// Samples at or past this point are padding and are trimmed.
 		end: moq_net::Timestamp,
 	},
@@ -118,8 +116,8 @@ pub struct Consumer {
 	/// Frames decoded and not yet handed back, so a gap's tail can be returned
 	/// ahead of the packet that exposed it.
 	ready: VecDeque<Read>,
-	/// Stable across all groups and the resampler tail of one decoder segment.
-	segment: u64,
+	/// Stable across all groups and the resampler tail of one decoded timeline.
+	discontinuity: u64,
 	/// Codec activity spans the resampler's buffered output still covers.
 	spans: VecDeque<ActivitySpan>,
 	/// Activity of the last span the output ran past, for the rounding samples the
@@ -236,7 +234,7 @@ impl Consumer {
 			resolved_layout: layout,
 			next_start: None,
 			ready: VecDeque::new(),
-			segment: 0,
+			discontinuity: 0,
 			spans: VecDeque::new(),
 			trailing: Activity::Active,
 			epoch: None,
@@ -310,15 +308,15 @@ impl Consumer {
 					// own group carries the stopped encoder's final packets, trimmed below.
 					if self.end.is_some() && group != self.end_group {
 						self.restart()?;
-						self.segment += 1;
+						self.discontinuity += 1;
 					}
 					frame
 				}
-				Some(Encoded::Gap { timestamp, duration }) => {
+				// The loss shows as the next frame's discontinuity, with no end before it.
+				Some(Encoded::Gap { .. }) => {
 					self.restart()?;
-					self.segment += 1;
+					self.discontinuity += 1;
 					self.warmup_pending = !self.warmup.is_zero();
-					self.ready.push_back(Read::Gap { timestamp, duration });
 					continue;
 				}
 				Some(Encoded::End { group, end }) => {
@@ -327,13 +325,13 @@ impl Consumer {
 					self.frames_decoded = 0;
 					self.terminal_start = None;
 					return Ok(Some(Read::End {
-						segment: self.segment,
+						discontinuity: self.discontinuity,
 						end,
 					}));
 				}
 				None => {
-					let segment = self.segment;
-					return Ok(self.flush()?.map(|frame| Read::Frame { segment, frame }));
+					let discontinuity = self.discontinuity;
+					return Ok(self.flush()?.map(|frame| Read::Frame { discontinuity, frame }));
 				}
 			};
 
@@ -363,7 +361,7 @@ impl Consumer {
 				&& let Some(frame) = self.gap()?
 			{
 				self.ready.push_back(Read::Frame {
-					segment: self.segment,
+					discontinuity: self.discontinuity,
 					frame,
 				});
 			}
@@ -468,7 +466,7 @@ impl Consumer {
 			// same iteration still comes out first. The next turn of the loop pops it.
 			if let Some(frame) = self.frame(pcm, timestamp, activity)? {
 				self.ready.push_back(Read::Frame {
-					segment: self.segment,
+					discontinuity: self.discontinuity,
 					frame,
 				});
 			}
@@ -483,7 +481,7 @@ impl Consumer {
 	fn restart(&mut self) -> Result<(), Error> {
 		if let Some(frame) = self.drain()? {
 			self.ready.push_back(Read::Frame {
-				segment: self.segment,
+				discontinuity: self.discontinuity,
 				frame,
 			});
 		}
@@ -698,7 +696,7 @@ mod tests {
 		loop {
 			match consumer.read().await? {
 				Some(Read::Frame { frame, .. }) => return Ok(Some(frame)),
-				Some(Read::Gap { .. } | Read::End { .. }) => {}
+				Some(Read::End { .. }) => {}
 				None => return Ok(None),
 			}
 		}
@@ -1072,13 +1070,12 @@ mod tests {
 		let mut resumed = false;
 		while let Some(event) = consumer.read().await.unwrap() {
 			match event {
-				Read::End { segment, .. } if ended.is_none() => ended = Some(segment),
-				Read::Frame { segment, .. } if ended == Some(segment) => {
+				Read::End { discontinuity, .. } if ended.is_none() => ended = Some(discontinuity),
+				Read::Frame { discontinuity, .. } if ended == Some(discontinuity) => {
 					assert!(!resumed);
 					tail = true;
 				}
-				Read::Frame { segment, .. } if ended.is_some_and(|old| old != segment) => resumed = true,
-				Read::Gap { .. } => panic!("a declared encoder boundary is not loss"),
+				Read::Frame { discontinuity, .. } if ended.is_some_and(|old| old != discontinuity) => resumed = true,
 				_ => {}
 			}
 		}
@@ -1086,7 +1083,7 @@ mod tests {
 			tail,
 			"the old resampler tail must follow its End without looking like a new encoder"
 		);
-		assert!(resumed, "a later group opens a fresh decoded segment");
+		assert!(resumed, "a later group opens a fresh decoded timeline");
 	}
 
 	/// A packet whose sample count isn't a multiple of the resampler's chunk leaves

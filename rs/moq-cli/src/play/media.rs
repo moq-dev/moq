@@ -16,9 +16,17 @@ use tokio::time::Instant;
 use super::args::Args;
 use super::output::{Output, Sink, Speaker};
 use super::playback::{Kind, Playback, joined};
-use super::timeline::{AudioTimeline, Presentation, Role, fit, timestamp};
+use super::timeline::{AudioTimeline, Presentation, Role, Transition, fit, timestamp};
 use super::video::Video;
 use super::window::Event;
+
+/// What a frame that starts a new decoded timeline crossed.
+enum Crossing {
+	/// A declared end, whose transition the frame resumes.
+	Resume(Transition),
+	/// Lost media: no end was declared.
+	Loss,
+}
 
 /// The floor on the speaker's buffer, whatever delay was asked for. The device
 /// pulls on a fixed clock, so a ring shallower than this drops out on ordinary
@@ -455,11 +463,13 @@ async fn play_audio<O: Output>(
 	// all logs once rather than once per packet.
 	let mut dropping = false;
 
-	// A decoder segment only changes at a declared end or a gap, and a gap
-	// resets this, so any change of segment is a resume. A short segment can
-	// declare its end before its first PCM, so the end alone cannot mark it.
+	// Resolved in delivery order, ahead of playback, so each end's transition is
+	// declared before the replacement media that resumes it is planned. A short
+	// timeline can declare its end before its first PCM, so ends queue until a
+	// frame crosses them.
 	let receive = async {
-		let mut planned = None;
+		let mut current = None;
+		let mut ends = VecDeque::new();
 		loop {
 			let event = match consumer.read().await {
 				Err(err) if !matches!(err, moq_audio::Error::Decode(_)) => return Err(err.into()),
@@ -467,17 +477,38 @@ async fn play_audio<O: Output>(
 			};
 			let ended = matches!(event, Ok(None));
 			let delay = consumer.delay();
-			match &event {
-				Ok(Some(moq_audio::decode::Read::Gap { .. })) => planned = None,
-				Ok(Some(moq_audio::decode::Read::Frame { segment, frame })) => {
-					let resumed = planned.replace(*segment).is_some_and(|planned| planned != *segment);
-					if resumed {
-						role.plan(frame.timestamp, Some(lead(delay, frame)));
-					}
+			let crossing = match &event {
+				Ok(Some(moq_audio::decode::Read::End { discontinuity, .. })) => {
+					ends.push_back((*discontinuity, role.declare()));
+					None
 				}
-				_ => {}
-			}
-			received.lock().unwrap().push_back((event, delay));
+				Ok(Some(moq_audio::decode::Read::Frame { discontinuity, frame }))
+					if current
+						.replace(*discontinuity)
+						.is_some_and(|current| current != *discontinuity) =>
+				{
+					// Every end before this timeline was crossed. Only the last one has
+					// replacement media; the ones before it ended empty timelines.
+					let mut crossed = None;
+					while let Some(&(ended, transition)) = ends.front()
+						&& ended < *discontinuity
+					{
+						ends.pop_front();
+						if let Some(skipped) = crossed.replace(transition) {
+							role.abandon(skipped);
+						}
+					}
+					Some(match crossed {
+						Some(transition) => {
+							role.plan(transition, frame.timestamp, Some(lead(delay, frame)));
+							Crossing::Resume(transition)
+						}
+						None => Crossing::Loss,
+					})
+				}
+				_ => None,
+			};
+			received.lock().unwrap().push_back((event, delay, crossing));
 			arrived.notify_one();
 			if ended {
 				return Ok::<_, anyhow::Error>(());
@@ -485,58 +516,61 @@ async fn play_audio<O: Output>(
 		}
 	};
 	let play = async {
-		// The segment the role's mapping serves, and an end declared for a later
-		// one, which can only be mapped once that segment resumes.
+		// The timeline the role's mapping serves, and an end declared for a later
+		// one, which can only be mapped once that timeline resumes.
 		let mut mapped = None;
 		let mut deferred = None;
 		let mut sequential = false;
 		loop {
-			let (event, delay) = loop {
+			let (event, delay, crossing) = loop {
 				if let Some(event) = received.lock().unwrap().pop_front() {
 					break event;
 				}
 				arrived.notified().await;
 			};
 			let frame = match event {
-				Ok(Some(moq_audio::decode::Read::Frame { segment, frame })) => {
-					if mapped.replace(segment).is_some_and(|mapped| mapped != segment) {
-						// A declared boundary preserves the old sink, unlike an undeclared hole.
-						drain(sink).await;
-						let first = lead(delay, &frame);
-						role.apply(role.resume(frame.timestamp, Some(first)).await?);
-						let at = presentation
-							.lock()
-							.unwrap()
-							.due(role.map(frame.timestamp)?)
-							.and_then(|at| at.checked_sub(first));
-						if let Some(at) = at {
-							tokio::time::sleep_until(at.into()).await;
+				Ok(Some(moq_audio::decode::Read::Frame { discontinuity, frame })) => {
+					mapped = Some(discontinuity);
+					match crossing {
+						Some(Crossing::Loss) => {
+							deferred = None;
+							role.gap();
+							sequential = false;
 						}
-						if let Some((ended, end)) = deferred.take()
-							&& ended == segment
-						{
-							role.end(end)?;
+						Some(Crossing::Resume(transition)) => {
+							// A declared boundary preserves the old sink, unlike an undeclared hole.
+							drain(sink).await;
+							let first = lead(delay, &frame);
+							let mapping = role.resume(transition, frame.timestamp, Some(first)).await?;
+							role.apply(transition, mapping);
+							let at = presentation
+								.lock()
+								.unwrap()
+								.due(role.map(frame.timestamp)?)
+								.and_then(|at| at.checked_sub(first));
+							if let Some(at) = at {
+								tokio::time::sleep_until(at.into()).await;
+							}
+							if let Some((ended, end)) = deferred.take()
+								&& ended == discontinuity
+							{
+								role.end(end)?;
+							}
+							sequential = true;
+							timeline = AudioTimeline::default();
+							sink = speaker.sink(input.clone())?;
+							dry = true;
 						}
-						sequential = true;
-						timeline = AudioTimeline::default();
-						sink = speaker.sink(input.clone())?;
-						dry = true;
+						None => {}
 					}
 					frame
 				}
-				Ok(Some(moq_audio::decode::Read::End { segment, end })) => {
-					if mapped.is_none_or(|mapped| mapped == segment) {
+				Ok(Some(moq_audio::decode::Read::End { discontinuity, end })) => {
+					if mapped.is_none_or(|mapped| mapped == discontinuity) {
 						role.end(end)?;
 					} else {
-						deferred = Some((segment, end));
+						deferred = Some((discontinuity, end));
 					}
-					continue;
-				}
-				Ok(Some(moq_audio::decode::Read::Gap { .. })) => {
-					mapped = None;
-					deferred = None;
-					role.gap();
-					sequential = false;
 					continue;
 				}
 				Ok(None) => break,
@@ -903,6 +937,154 @@ mod tests {
 				&& sample.saturating_duration_since(picture) <= Duration::from_millis(1),
 			"new A/V clocks diverged: picture={picture:?} sample={sample:?}"
 		);
+	}
+
+	#[tokio::test]
+	async fn an_end_before_its_first_pcm_still_resumes_that_timeline() {
+		tokio::time::pause();
+		let delay = Duration::from_millis(200);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut producer = moq_mux::container::Producer::new(track, Container::Legacy(moq_mux::container::Kind::Audio));
+		let mut options = moq_audio::decode::Options::new();
+		options.delay = Some(delay);
+		options.max_delay = delay;
+		options.output.format = moq_audio::Format::F32;
+		options.output.sample_rate = Some(SAMPLE_RATE);
+		let consumer = moq_audio::decode::Consumer::new(
+			&broadcast.consume(),
+			&AudioConfig::new(AudioCodec::Pcm, 44_100, 1),
+			"audio",
+			options,
+		)
+		.await
+		.unwrap();
+		let recorder = Recorder::default();
+		let playback = AudioPlayback {
+			changed: Default::default(),
+			speaker: recorder.clone(),
+			presentation: Arc::new(Mutex::new(Presentation::new(delay))),
+			latency: delay,
+			output: recorder.clone(),
+		};
+		let task = tokio::spawn(async move {
+			play_audio(consumer, playback).await.unwrap().finish().await;
+		});
+		let pcm = |micros: u64, samples: usize, sample: f32| moq_mux::container::Frame {
+			timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
+			duration: Some(moq_net::Timestamp::from_scale(samples as u64, 44_100).unwrap()),
+			keyframe: true,
+			payload: std::iter::repeat_n(sample.to_le_bytes(), samples)
+				.flatten()
+				.collect::<Vec<_>>()
+				.into(),
+		};
+		for index in 0..4 {
+			producer.write(pcm(index * 23_220, 1024, 0.25)).unwrap();
+		}
+		producer.discontinuity().unwrap();
+		// Too short for the resampler to emit anything before this encoder ends too.
+		producer.write(pcm(100_000, 64, 0.5)).unwrap();
+		producer.discontinuity().unwrap();
+		for index in 0..4 {
+			producer.write(pcm(200_000 + index * 23_220, 1024, 0.75)).unwrap();
+		}
+		producer.finish().unwrap();
+		task.await.unwrap();
+		let played = recorder.played();
+		let sinks = |range: std::ops::Range<f32>| {
+			played
+				.iter()
+				.filter(|part| range.contains(&part.sample))
+				.map(|part| part.sink)
+				.collect::<std::collections::BTreeSet<_>>()
+		};
+		let (old, short, new) = (sinks(0.2..0.3), sinks(0.4..0.6), sinks(0.7..0.8));
+		assert!(!short.is_empty(), "the short timeline played: {played:?}");
+		assert!(
+			old.is_disjoint(&short),
+			"the short timeline resumed on its own sink: {played:?}"
+		);
+		assert!(
+			short.is_disjoint(&new),
+			"the next timeline resumed on its own sink: {played:?}"
+		);
+	}
+
+	#[tokio::test]
+	async fn an_evicted_replacement_gop_gives_way_to_the_next_replacement() {
+		struct Passthrough;
+		impl super::super::video::Decoder for Passthrough {
+			async fn decode(&mut self, frame: moq_mux::container::Frame) -> anyhow::Result<Vec<moq_video::Frame>> {
+				Ok(vec![moq_video::Frame::new(
+					moq_video::Surface::rgba(&[128; 16 * 16 * 4], moq_video::Size::new(16, 16))?,
+					frame.timestamp,
+				)])
+			}
+			async fn flush(&mut self) -> anyhow::Result<Vec<moq_video::Frame>> {
+				Ok(Vec::new())
+			}
+		}
+		tokio::time::pause();
+		let delay = Duration::from_millis(200);
+		let recorder = Recorder::default();
+		let origin = moq_tokio::origin::spawn();
+		let media = media(&origin, delay, recorder.clone());
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let video = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		// The network keeps every group; only the player's age budget evicts.
+		let subscriber = video
+			.consume()
+			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10)))
+			.await
+			.unwrap();
+		let mut video = moq_mux::container::Producer::new(video, Container::Legacy(moq_mux::container::Kind::Video));
+		let video_play = Video {
+			presentation: media.presentation.clone(),
+			frames: media.video.clone(),
+			changed: media.drained.clone(),
+			output: recorder.clone(),
+			max_delay: delay,
+		};
+		let video_task = tokio::spawn(video_play.run(
+			moq_mux::container::Consumer::new(subscriber, Container::Legacy(moq_mux::container::Kind::Video)),
+			Passthrough,
+		));
+		let picture = |millis: u64, keyframe: bool| moq_mux::container::Frame {
+			timestamp: moq_net::Timestamp::from_millis(millis).unwrap(),
+			duration: Some(moq_net::Timestamp::from_millis(20).unwrap()),
+			keyframe,
+			payload: Bytes::from_static(b"picture"),
+		};
+		for index in 0..3 {
+			video.write(picture(index * 20, index == 0)).unwrap();
+			tokio::time::sleep(PACKET_DURATION).await;
+		}
+		video.discontinuity().unwrap();
+		// A burst longer than the age budget evicts this replacement's only keyframe.
+		for index in 0..15 {
+			video.write(picture(index * 20, index == 0)).unwrap();
+		}
+		video.discontinuity().unwrap();
+		for index in 0..3 {
+			video.write(picture(5_000 + index * 20, index == 0)).unwrap();
+		}
+		video.finish().unwrap();
+		let mut shown = Vec::new();
+		for _ in 0..2_000 {
+			tokio::task::yield_now().await;
+			if let Some(timestamp) = recorder.present(&media) {
+				shown.push(timestamp.as_millis());
+			}
+			tokio::time::advance(Duration::from_millis(1)).await;
+		}
+		video_task.await.unwrap().unwrap();
+		assert_eq!(shown[..3], [0, 20, 40], "{shown:?}");
+		assert_eq!(shown.len(), 6, "the next replacement plays: {shown:?}");
 	}
 
 	/// A mono PCM rendition, published and named in the catalog until dropped.

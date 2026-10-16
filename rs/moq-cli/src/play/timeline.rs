@@ -31,19 +31,28 @@ pub(super) struct Presentation {
 	/// will never play.
 	restart: bool,
 	/// Endpoints declared by each role, on the shared playback timeline.
-	roles: [Segment; 2],
+	ends: [Option<Boundary>; 2],
+	/// Encoder restarts whose replacements have not all started playing.
+	transitions: std::collections::VecDeque<Pending>,
+	/// The latest transition each role declared.
+	declared: [Transition; 2],
+	next: Transition,
 	reference: Option<Timestamp>,
 }
 
-#[derive(Default)]
-struct Segment {
-	end: Option<Boundary>,
-	/// Whether a declared end is still waiting for its replacement.
-	pending: bool,
-	/// The peer's replacement mapping, applied while this role was pending.
-	paired: Option<Mapping>,
-	plans: std::collections::VecDeque<Plan>,
-	active: Option<Mapping>,
+/// One encoder restart, shared by the roles whose ends declared it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct Transition(u64);
+
+struct Pending {
+	id: Transition,
+	/// Roles whose declared end opened or joined this transition.
+	members: [bool; 2],
+	/// Members that applied its mapping.
+	resumed: [bool; 2],
+	/// Each member's first replacement media.
+	plans: [Option<Plan>; 2],
+	mapping: Option<Mapping>,
 }
 
 struct Boundary {
@@ -51,10 +60,10 @@ struct Boundary {
 	end: Duration,
 }
 
+#[derive(Clone, Copy)]
 struct Plan {
 	source: Duration,
 	delay: Duration,
-	mapping: Option<Mapping>,
 }
 
 impl Presentation {
@@ -64,9 +73,27 @@ impl Presentation {
 			delay,
 			speaker: false,
 			restart: false,
-			roles: Default::default(),
+			ends: Default::default(),
+			transitions: Default::default(),
+			declared: Default::default(),
+			next: Transition(1),
 			reference: None,
 		}
+	}
+
+	fn transition(&mut self, id: Transition) -> Option<&mut Pending> {
+		self.transitions.iter_mut().find(|pending| pending.id == id)
+	}
+
+	/// Forget transitions nobody resumes, or that every member resumed once
+	/// their replacement started and nothing can join them.
+	fn prune(&mut self, now: Instant) {
+		self.transitions.retain(|pending| {
+			let members = pending.members.iter().any(|member| *member);
+			let resumed = (0..2).all(|role| !pending.members[role] || pending.resumed[role]);
+			let started = pending.mapping.is_some_and(|mapping| mapping.started(now));
+			members && !(resumed && started)
+		});
 	}
 
 	/// The media position the shared clock will reach at `at`.
@@ -195,6 +222,10 @@ impl Mapping {
 		};
 		Ok(Timestamp::from_micros(u64::try_from(target.as_micros())?)?)
 	}
+
+	fn started(&self, now: Instant) -> bool {
+		self.starts.is_none_or(|starts| starts <= now)
+	}
 }
 
 impl Role {
@@ -215,63 +246,122 @@ impl Role {
 		self.mapping.lock().unwrap().map(source)
 	}
 
+	/// Declare that this role's encoder stopped, returning the transition its
+	/// replacement resumes.
+	///
+	/// A peer's transition this role has not joined yet is the same restart, as
+	/// long as its replacement has not started playing; otherwise this one opens
+	/// a transition of its own.
+	pub(super) fn declare(&self) -> Transition {
+		let now = tokio::time::Instant::now().into_std();
+		let own = self.role as usize;
+		let mut presentation = self.presentation.lock().unwrap();
+		presentation.prune(now);
+		let after = presentation.declared[own];
+		let joined = presentation
+			.transitions
+			.iter_mut()
+			.filter(|transition| transition.id > after)
+			.find(|transition| {
+				transition.members[1 - own]
+					&& !transition.members[own]
+					&& transition.mapping.is_none_or(|mapping| !mapping.started(now))
+			})
+			.map(|transition| {
+				transition.members[own] = true;
+				transition.id
+			});
+		let id = joined.unwrap_or_else(|| {
+			let id = presentation.next;
+			presentation.next = Transition(id.0 + 1);
+			let mut members = [false; 2];
+			members[own] = true;
+			presentation.transitions.push_back(Pending {
+				id,
+				members,
+				resumed: [false; 2],
+				plans: [None, None],
+				mapping: None,
+			});
+			id
+		});
+		presentation.declared[own] = id;
+		drop(presentation);
+		self.changed.notify_waiters();
+		id
+	}
+
+	/// Mark where this role's current segment ends on the shared clock.
 	pub(super) fn end(&self, source: Timestamp) -> anyhow::Result<()> {
 		let mapping = *self.mapping.lock().unwrap();
-		let mut presentation = self.presentation.lock().unwrap();
-		let segment = &mut presentation.roles[self.role as usize];
-		segment.end = Some(Boundary {
+		self.presentation.lock().unwrap().ends[self.role as usize] = Some(Boundary {
 			starts: mapping.starts,
 			end: timestamp(mapping.map(source)?),
 		});
-		segment.pending = true;
-		drop(presentation);
 		self.changed.notify_waiters();
 		Ok(())
 	}
 
-	pub(super) fn plan(&self, source: Timestamp, delay: Option<Duration>) {
+	/// Record the first replacement media for `transition`.
+	pub(super) fn plan(&self, transition: Transition, source: Timestamp, delay: Option<Duration>) {
 		let mut presentation = self.presentation.lock().unwrap();
 		let delay = delay.unwrap_or(presentation.delay);
-		presentation.roles[self.role as usize].plans.push_back(Plan {
-			source: Duration::from(source),
-			delay,
-			mapping: None,
-		});
-		self.changed.notify_waiters();
-	}
-
-	pub(super) fn gap(&self) {
-		self.presentation.lock().unwrap().roles[self.role as usize] = Segment::default();
-		self.changed.notify_waiters();
-	}
-
-	pub(super) fn apply(&self, mapping: Mapping) {
-		*self.mapping.lock().unwrap() = mapping;
-		let mut presentation = self.presentation.lock().unwrap();
-		let own = &mut presentation.roles[self.role as usize];
-		own.active = Some(mapping);
-		own.plans.pop_front();
-		own.pending = false;
-		own.paired = None;
-		// A peer that ended too resumes on this mapping, however late its media lands.
-		let peer = &mut presentation.roles[1 - self.role as usize];
-		if peer.pending {
-			peer.paired = Some(mapping);
+		if let Some(pending) = presentation.transition(transition) {
+			pending.plans[self.role as usize] = Some(Plan {
+				source: Duration::from(source),
+				delay,
+			});
 		}
 		drop(presentation);
 		self.changed.notify_waiters();
 	}
 
-	/// Drain declared old media, then align the new encoder to the running clock.
-	pub(super) async fn resume(&self, source: Timestamp, delay: Option<Duration>) -> anyhow::Result<Mapping> {
+	/// Media was lost: nothing waits for the discarded tail.
+	pub(super) fn gap(&self) {
+		self.presentation.lock().unwrap().ends[self.role as usize] = None;
+		self.changed.notify_waiters();
+	}
+
+	/// This role will never resume `transition`, so a peer must not pair with its plan.
+	pub(super) fn abandon(&self, transition: Transition) {
+		let own = self.role as usize;
+		let mut presentation = self.presentation.lock().unwrap();
+		if let Some(pending) = presentation.transition(transition) {
+			pending.members[own] = false;
+			pending.plans[own] = None;
+		}
+		presentation.prune(tokio::time::Instant::now().into_std());
+		drop(presentation);
+		self.changed.notify_waiters();
+	}
+
+	pub(super) fn apply(&self, transition: Transition, mapping: Mapping) {
+		*self.mapping.lock().unwrap() = mapping;
+		let mut presentation = self.presentation.lock().unwrap();
+		if let Some(pending) = presentation.transition(transition) {
+			pending.resumed[self.role as usize] = true;
+		}
+		presentation.prune(tokio::time::Instant::now().into_std());
+		drop(presentation);
+		self.changed.notify_waiters();
+	}
+
+	/// Drain declared old media, then map `transition`'s replacement onto the
+	/// running clock.
+	pub(super) async fn resume(
+		&self,
+		transition: Transition,
+		source: Timestamp,
+		delay: Option<Duration>,
+	) -> anyhow::Result<Mapping> {
 		loop {
 			let now = tokio::time::Instant::now().into_std();
 			let end = {
 				let presentation = self.presentation.lock().unwrap();
 				presentation
-					.roles
+					.ends
 					.iter()
-					.filter_map(|role| role.end.as_ref())
+					.flatten()
 					.filter(|boundary| boundary.starts.is_none_or(|start| start <= now))
 					.filter_map(|boundary| presentation.due(media(boundary.end)))
 					.max()
@@ -284,69 +374,56 @@ impl Role {
 				continue;
 			}
 			let mut presentation = self.presentation.lock().unwrap();
-			let own = self.role as usize;
-			let peer = 1 - own;
-			// The peer already resumed the transition this role is finishing.
-			if let Some(mapping) = presentation.roles[own]
-				.plans
-				.front()
-				.and_then(|plan| plan.mapping)
-				.or(presentation.roles[own].paired)
-			{
-				return Ok(mapping);
-			}
-			// Both roles already have replacement media. The speaker's first sample
-			// defines their common origin even when its adaptive delay differs from video's.
-			if presentation.roles[own]
-				.plans
-				.front()
-				.is_some_and(|plan| plan.mapping.is_none())
-				&& presentation.roles[peer]
-					.plans
-					.front()
-					.is_some_and(|plan| plan.mapping.is_none())
-			{
-				let audio = presentation.roles[Kind::Audio as usize].plans.front().unwrap();
-				let starts = now
-					.checked_add(audio.delay)
-					.context("playback delay exceeds the system clock")?;
-				let mapping = Mapping {
-					source: audio.source,
-					target: presentation.position(starts).unwrap_or(audio.source),
-					starts: Some(starts),
-				};
-				presentation.roles[own].plans.front_mut().unwrap().mapping = Some(mapping);
-				presentation.roles[peer].plans.front_mut().unwrap().mapping = Some(mapping);
-				return Ok(mapping);
-			}
-			if let Some(mapping) = presentation.roles[peer]
-				.active
-				.filter(|mapping| mapping.starts.is_some_and(|starts| starts > now))
-			{
-				return Ok(mapping);
-			}
-			let starts = now
-				.checked_add(delay.unwrap_or(presentation.delay))
-				.context("playback delay exceeds the system clock")?;
-			return Ok(Mapping {
-				source: Duration::from(source),
-				target: presentation.position(starts).unwrap_or_else(|| timestamp(source)),
-				starts: Some(starts),
+			let peer = 1 - self.role as usize;
+			// A transition abandoned under this resume, by a gap the caller rechecks,
+			// maps alone like one the peer never joined.
+			let (mapping, paired) = presentation.transition(transition).map_or((None, None), |pending| {
+				let both = pending.members[peer] && pending.plans.iter().all(Option::is_some);
+				(pending.mapping, pending.plans[Kind::Audio as usize].filter(|_| both))
 			});
+			// The peer already resumed this transition.
+			if let Some(mapping) = mapping {
+				return Ok(mapping);
+			}
+			// Both roles have replacement media. The speaker's first sample defines
+			// their common origin even when its adaptive delay differs from video's.
+			// Otherwise this role maps alone and a peer joining later follows it.
+			let (source, delay) = match paired {
+				Some(audio) => (audio.source, audio.delay),
+				None => (Duration::from(source), delay.unwrap_or(presentation.delay)),
+			};
+			let starts = now
+				.checked_add(delay)
+				.context("playback delay exceeds the system clock")?;
+			let mapping = Mapping {
+				source,
+				target: presentation.position(starts).unwrap_or(source),
+				starts: Some(starts),
+			};
+			if let Some(pending) = presentation.transition(transition) {
+				pending.mapping = Some(mapping);
+			}
+			return Ok(mapping);
 		}
 	}
 }
 
 impl Drop for Role {
 	fn drop(&mut self) {
+		let own = self.role as usize;
 		if let Ok(mut presentation) = self.presentation.lock() {
 			// A declared end stays: the sink handed back still plays the tail up to it,
 			// and once it is past, nothing waits on it.
-			let segment = &mut presentation.roles[self.role as usize];
-			*segment = Segment {
-				end: segment.end.take(),
-				..Default::default()
-			};
+			for pending in presentation
+				.transitions
+				.iter_mut()
+				.filter(|pending| !pending.resumed[own])
+			{
+				pending.members[own] = false;
+				pending.plans[own] = None;
+			}
+			presentation.declared[own] = Transition::default();
+			presentation.prune(tokio::time::Instant::now().into_std());
 		}
 		self.changed.notify_waiters();
 	}
@@ -475,10 +552,11 @@ mod tests {
 		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
 		presentation.lock().unwrap().video(ms(10_000), start.into_std());
+		let transition = audio.declare();
 		audio.end(ms(10_020)).unwrap();
 		tokio::time::advance(DELAY + Duration::from_millis(20)).await;
 		let unchanged = presentation.lock().unwrap().due(ms(10_500));
-		audio.apply(audio.resume(ms(0), Some(DELAY)).await.unwrap());
+		audio.apply(transition, audio.resume(transition, ms(0), Some(DELAY)).await.unwrap());
 		assert_eq!(audio.map(ms(0)).unwrap().as_millis(), 10_120);
 		assert_eq!(video.map(ms(10_500)).unwrap().as_millis(), 10_500);
 		assert_eq!(presentation.lock().unwrap().due(ms(10_500)), unchanged);
@@ -495,15 +573,17 @@ mod tests {
 			.audio(Duration::from_secs(10), DELAY, now.into_std());
 		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		let transition = audio.declare();
+		assert_eq!(video.declare(), transition, "one restart");
 		audio.end(ms(10_020)).unwrap();
 		video.end(ms(10_020)).unwrap();
-		audio.plan(ms(0), Some(DELAY));
+		audio.plan(transition, ms(0), Some(DELAY));
 		tokio::time::advance(DELAY + Duration::from_millis(20)).await;
-		audio.apply(audio.resume(ms(0), Some(DELAY)).await.unwrap());
+		audio.apply(transition, audio.resume(transition, ms(0), Some(DELAY)).await.unwrap());
 		// The video replacement lands after the resumed audio has started playing.
 		tokio::time::advance(DELAY * 2).await;
-		video.plan(ms(40), None);
-		video.apply(video.resume(ms(40), None).await.unwrap());
+		video.plan(transition, ms(40), None);
+		video.apply(transition, video.resume(transition, ms(40), None).await.unwrap());
 		assert_eq!(
 			video.map(ms(40)).unwrap().as_millis() - audio.map(ms(0)).unwrap().as_millis(),
 			40
@@ -521,19 +601,114 @@ mod tests {
 			.audio(Duration::from_secs(10), DELAY, now.into_std());
 		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		let transition = audio.declare();
+		video.declare();
 		audio.end(ms(10_020)).unwrap();
 		video.end(ms(10_020)).unwrap();
-		video.plan(ms(40), None);
+		video.plan(transition, ms(40), None);
 		tokio::time::advance(DELAY + Duration::from_millis(20)).await;
-		video.apply(video.resume(ms(40), None).await.unwrap());
+		video.apply(transition, video.resume(transition, ms(40), None).await.unwrap());
 		// Video already queued its next replacement when audio's first one lands.
+		let next = video.declare();
+		assert_ne!(next, transition);
 		video.end(ms(60)).unwrap();
-		video.plan(ms(5_000), None);
-		audio.plan(ms(0), Some(DELAY));
-		audio.apply(audio.resume(ms(0), Some(DELAY)).await.unwrap());
+		video.plan(next, ms(5_000), None);
+		audio.plan(transition, ms(0), Some(DELAY));
+		audio.apply(transition, audio.resume(transition, ms(0), Some(DELAY)).await.unwrap());
 		assert_eq!(
 			video.map(ms(40)).unwrap().as_millis() - audio.map(ms(0)).unwrap().as_millis(),
 			40
+		);
+	}
+
+	#[tokio::test]
+	async fn a_peer_two_restarts_ahead_pairs_with_the_first() {
+		tokio::time::pause();
+		let now = tokio::time::Instant::now();
+		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
+		presentation
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now.into_std());
+		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
+		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		let transition = audio.declare();
+		video.declare();
+		audio.end(ms(10_020)).unwrap();
+		video.end(ms(10_020)).unwrap();
+		tokio::time::advance(DELAY + Duration::from_millis(20)).await;
+		video.plan(transition, ms(40), None);
+		let first = video.resume(transition, ms(40), None).await.unwrap();
+		video.apply(transition, first);
+		// Video restarts again and resumes before audio's first replacement lands.
+		let next = video.declare();
+		video.plan(next, ms(5_000), None);
+		tokio::time::advance(Duration::from_millis(10)).await;
+		video.apply(next, video.resume(next, ms(5_000), None).await.unwrap());
+		audio.plan(transition, ms(0), Some(DELAY));
+		audio.apply(transition, audio.resume(transition, ms(0), Some(DELAY)).await.unwrap());
+		assert_eq!(
+			first.map(ms(40)).unwrap().as_millis() - audio.map(ms(0)).unwrap().as_millis(),
+			40
+		);
+	}
+
+	#[tokio::test]
+	async fn an_abandoned_replacement_leaves_the_next_transition_alone() {
+		tokio::time::pause();
+		let now = tokio::time::Instant::now();
+		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
+		presentation
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now.into_std());
+		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
+		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		let transition = audio.declare();
+		video.declare();
+		audio.end(ms(10_020)).unwrap();
+		video.end(ms(10_020)).unwrap();
+		// Video's first replacement is evicted before it plays, then it restarts again.
+		video.plan(transition, ms(40), None);
+		video.abandon(transition);
+		let next = video.declare();
+		video.plan(next, ms(5_000), None);
+		audio.plan(transition, ms(0), Some(DELAY));
+		tokio::time::advance(DELAY + Duration::from_millis(20)).await;
+		audio.apply(transition, audio.resume(transition, ms(0), Some(DELAY)).await.unwrap());
+		video.apply(next, video.resume(next, ms(5_000), None).await.unwrap());
+		// The later replacement maps onto the running clock, not the audio restart's.
+		let resumed = tokio::time::Instant::now() + DELAY;
+		assert_eq!(
+			presentation.lock().unwrap().due(video.map(ms(5_000)).unwrap()),
+			Some(resumed.into_std())
+		);
+	}
+
+	#[tokio::test]
+	async fn an_abandoned_peer_plan_is_not_paired() {
+		tokio::time::pause();
+		let now = tokio::time::Instant::now();
+		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
+		presentation
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now.into_std());
+		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
+		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		let transition = audio.declare();
+		video.declare();
+		audio.end(ms(10_020)).unwrap();
+		video.end(ms(10_020)).unwrap();
+		audio.plan(transition, ms(0), Some(Duration::from_millis(80)));
+		audio.abandon(transition);
+		video.plan(transition, ms(40), None);
+		tokio::time::advance(DELAY + Duration::from_millis(20)).await;
+		video.apply(transition, video.resume(transition, ms(40), None).await.unwrap());
+		let resumed = tokio::time::Instant::now() + DELAY;
+		assert_eq!(
+			presentation.lock().unwrap().due(video.map(ms(40)).unwrap()),
+			Some(resumed.into_std())
 		);
 	}
 
@@ -548,12 +723,18 @@ mod tests {
 			.audio(Duration::from_secs(10), DELAY, now.into_std());
 		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		audio.declare();
 		audio.end(ms(10_200)).unwrap();
 		// The track closed, but its returned sink still plays the tail up to the end.
 		drop(audio);
+		let transition = video.declare();
 		video.end(ms(10_000)).unwrap();
-		video.plan(ms(0), None);
-		let resume = tokio::time::timeout(DELAY + Duration::from_millis(150), video.resume(ms(0), None)).await;
+		video.plan(transition, ms(0), None);
+		let resume = tokio::time::timeout(
+			DELAY + Duration::from_millis(150),
+			video.resume(transition, ms(0), None),
+		)
+		.await;
 		assert!(resume.is_err(), "video resumed before the audio tail played");
 	}
 
@@ -568,13 +749,21 @@ mod tests {
 			.audio(Duration::from_secs(10), DELAY, now.into_std());
 		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		let transition = audio.declare();
+		video.declare();
 		audio.end(ms(10_020)).unwrap();
 		video.end(ms(10_020)).unwrap();
-		audio.plan(ms(0), Some(Duration::from_millis(80)));
-		video.plan(ms(40), None);
+		audio.plan(transition, ms(0), Some(Duration::from_millis(80)));
+		video.plan(transition, ms(40), None);
 		tokio::time::advance(DELAY + Duration::from_millis(20)).await;
-		video.apply(video.resume(ms(40), None).await.unwrap());
-		audio.apply(audio.resume(ms(0), Some(Duration::from_millis(80))).await.unwrap());
+		video.apply(transition, video.resume(transition, ms(40), None).await.unwrap());
+		audio.apply(
+			transition,
+			audio
+				.resume(transition, ms(0), Some(Duration::from_millis(80)))
+				.await
+				.unwrap(),
+		);
 		assert_eq!(
 			video.map(ms(40)).unwrap().as_millis() - audio.map(ms(0)).unwrap().as_millis(),
 			40

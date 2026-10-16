@@ -34,6 +34,7 @@ impl Default for Buffer {
 			// A join resumes at its first keyframe, like any other break.
 			waiting_keyframe: true,
 			ended: false,
+			end: None,
 		}
 	}
 }
