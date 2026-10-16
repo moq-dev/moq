@@ -129,7 +129,7 @@ func (s *Session) RecvBandwidth() *BandwidthConsumer {
 	if inner == nil {
 		return nil
 	}
-	return &BandwidthConsumer{inner: inner}
+	return &BandwidthConsumer{inner: *inner}
 }
 
 // BandwidthConsumer owns a bandwidth estimate, in bits per second.
