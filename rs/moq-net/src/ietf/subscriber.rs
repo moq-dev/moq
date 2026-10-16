@@ -14404,6 +14404,22 @@ mod new_group_tests {
 		relay.serving.abort();
 	}
 
+	/// An outstanding 0 covers only the group after the Largest Group, so a higher request
+	/// arriving meanwhile still goes upstream.
+	#[moq_net_sim::test]
+	async fn a_higher_request_passes_an_outstanding_zero() {
+		let (mut relay, _first) = relay(None).await;
+		let (mut stream, _) = relay.accept().await;
+		accept(&mut stream, true, 5).await;
+
+		let _a = subscribe(&relay.track, Some(0));
+		assert_eq!(update(&mut stream).await, Some(0));
+		answer(&mut stream).await;
+		let _b = subscribe(&relay.track, Some(9));
+		assert_eq!(update(&mut stream).await, Some(9));
+		relay.serving.abort();
+	}
+
 	/// A request for 0 goes up once, and stays outstanding until the Largest Group grows.
 	#[moq_net_sim::test]
 	async fn zero_is_rearmed_by_a_new_group() {

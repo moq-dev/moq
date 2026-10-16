@@ -128,18 +128,12 @@ impl NewGroup {
 		Self { value, first }
 	}
 
-	/// Two subscribers' requests as one, answered once both are. A 0 asks the publisher
-	/// for a new group whatever it has, so it covers any value; otherwise the higher
-	/// value covers the lower.
+	/// Two subscribers' requests as one: the one answered later, whose answer answers
+	/// both. A value names its own answer, so a value at or past a 0's answer goes upstream
+	/// in its place, and a 0 is kept only over values this hop already has.
 	fn merge(self, other: Self) -> Self {
-		let value = match (self.value, other.value) {
-			(0, _) | (_, 0) => 0,
-			(a, b) => a.max(b),
-		};
-		Self {
-			value,
-			first: self.first.max(other.first),
-		}
+		// On a tie, the value says more upstream than a 0 does.
+		std::cmp::max_by_key(self, other, |request| (request.first, request.value != 0))
 	}
 }
 
@@ -596,10 +590,21 @@ mod tests {
 	fn new_group_requests_merge() {
 		let zero = NewGroup::new(0, Some(5));
 		assert_eq!(zero, NewGroup { value: 0, first: 6 });
-		assert_eq!(zero.merge(NewGroup::new(9, None)), NewGroup { value: 0, first: 9 });
-		assert_eq!(
-			NewGroup::new(7, Some(5)).merge(NewGroup::new(9, None)),
-			NewGroup { value: 9, first: 9 }
-		);
+		let nine = NewGroup::new(9, Some(5));
+		// A value past the 0's answer goes up instead, and its answer answers both.
+		assert_eq!(zero.merge(nine), nine);
+		assert_eq!(nine.merge(zero), nine);
+		// A value naming the 0's own answer is the same request, said precisely.
+		let six = NewGroup::new(6, Some(5));
+		assert_eq!(zero.merge(six), six);
+		assert_eq!(six.merge(zero), six);
+		// A value this hop already had is stale, so the 0 still asks.
+		let three = NewGroup::new(3, Some(5));
+		assert_eq!(zero.merge(three), zero);
+		assert_eq!(three.merge(zero), zero);
+		// Two 0s are answered by the later of their answers.
+		assert_eq!(zero.merge(NewGroup::new(0, Some(7))), NewGroup { value: 0, first: 8 });
+		// Otherwise the higher value.
+		assert_eq!(NewGroup::new(7, Some(5)).merge(nine), nine);
 	}
 }
