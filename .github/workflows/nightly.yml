@@ -189,6 +189,43 @@ jobs:
           NEXTEST_PROFILE: ci
           MOQ_STRICT: 1
 
+  # Media QA with non-Chromium players against a Chromium fixture. The Chromium
+  # player already runs in interop.yml, on PRs and nightly.
+  media-engines:
+    name: Media (${{ matrix.engine }} player)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [firefox, webkit]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+        with:
+          determinate: false
+          extra-conf: |
+            extra-substituters = https://kixelated.cachix.org
+            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+      - name: Rust cache
+        uses: ./.github/actions/rust-cache
+      - name: Install publisher and player engines
+        run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium ${{ matrix.engine }}"
+      - name: Media and negative controls
+        run: nix develop --command just test media --media-engines ${{ matrix.engine }}
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+      - name: Preserve measurements and traces
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: media-${{ matrix.engine }}
+          path: ${{ runner.temp }}/moq-test-runs
+          if-no-files-found: error
+
   # Full platform coverage without rebuilding after every main queue merge.
   platform:
     uses: ./.github/workflows/platform.yml
