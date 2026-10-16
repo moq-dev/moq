@@ -441,6 +441,36 @@ mod tests {
 		assert_eq!(config.peer.resolve().fetches, 2000);
 	}
 
+	/// `[peer.quic]` mirrors `[quic]`'s keys without touching `[quic]` itself.
+	#[test]
+	fn peer_quic_table_merges_with_flags() {
+		let _env = EnvGuard::clear(&[
+			"MOQ_QUIC_MAX_STREAMS",
+			"MOQ_PEER_QUIC_MAX_STREAMS",
+			"MOQ_PEER_QUIC_RECEIVE_WINDOW",
+			"MOQ_PEER_QUIC_SEND_WINDOW",
+		]);
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("peer-quic.toml");
+		std::fs::write(
+			&path,
+			"[quic]\nmax_streams = 4\n[peer.quic]\nmax_streams = 64\nsend_window = 1000\n",
+		)
+		.unwrap();
+		let config = Config::parse_and_merge([
+			std::ffi::OsString::from("moq-relay"),
+			path.into(),
+			"--peer-quic-receive-window=2000".into(),
+		])
+		.unwrap();
+		assert_eq!(config.quic.max_streams, Some(4));
+		assert_eq!(config.peer.quic.max_streams, 64);
+		assert_eq!(config.peer.quic.receive_window, 2000);
+		assert_eq!(config.peer.quic.send_window, 1000);
+
+		assert!(toml::from_str::<Config>("[peer]\nmax_streams = 64\n").is_err());
+	}
+
 	#[cfg(not(feature = "iroh"))]
 	#[test]
 	fn iroh_environment_requires_the_feature() {

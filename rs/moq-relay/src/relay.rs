@@ -242,7 +242,7 @@ impl Relay {
 		};
 		// Every link the cluster dials is a peer, so it gets the peer limits from
 		// the handshake on rather than widening after SETUP.
-		let dial_quic = crate::limits::dial(&config.quic, config.peer.quic(&config.quic)?);
+		let dial_quic = config.peer.quic.dial(&config.quic);
 		let client = config.connect.clone().init(dial_quic.clone())?;
 
 		// `None` for a stream-only server (no QUIC); any other error is real.
@@ -286,7 +286,6 @@ impl Relay {
 		let mut cluster_options = cluster::Options::new(config.cluster).with_cache(cache);
 		cluster_options.session = config.session;
 		cluster_options.peer = config.peer;
-		cluster_options.quic = config.quic.clone();
 		let cluster = cluster::Cluster::new(cluster_options)?
 			.with_client(client.clone())
 			.with_client_tls(config.connect.tls.build()?)

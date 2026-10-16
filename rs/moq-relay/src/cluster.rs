@@ -820,8 +820,6 @@ pub struct Options {
 	pub session: crate::limits::Session,
 	/// Request caps and QUIC limits for authenticated peers and outbound cluster links.
 	pub peer: crate::limits::Peer,
-	/// The QUIC settings every session starts with, which `peer` may only widen.
-	pub quic: moq_tokio::quic::Config,
 	/// Cluster identity, peers, and discovery.
 	pub config: Config,
 
@@ -1030,9 +1028,7 @@ impl Cluster {
 			cache,
 			session,
 			peer,
-			quic,
 		} = options;
-		let peer_quic = peer.quic(&quic)?;
 		let id = match config.id {
 			Some(0) => anyhow::bail!("--cluster-id must be non-zero"),
 			Some(id) if id >= 1 << 62 => {
@@ -1065,7 +1061,7 @@ impl Cluster {
 		Ok(Cluster {
 			session_limits: session.resolve(),
 			peer_limits: peer.resolve(),
-			peer_quic,
+			peer_quic: peer.quic.resolve(),
 			config,
 			client: None,
 			connect: None,

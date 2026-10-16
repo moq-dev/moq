@@ -35,7 +35,7 @@ fn config(dir: &std::path::Path) -> Config {
 	config.listen.tls.cert = vec![cert];
 	config.listen.tls.key = vec![key];
 	config.quic.max_streams = Some(VIEWER_STREAMS);
-	config.peer.max_streams = 4 * PROBE as u64;
+	config.peer.quic.max_streams = 4 * PROBE as u64;
 	config
 }
 
