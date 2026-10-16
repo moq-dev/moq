@@ -30,7 +30,6 @@ import {
 	inspect,
 	launch,
 	open,
-	type PlayerState,
 	POLL_INTERVAL_MS,
 	pageUrl,
 	pause,
@@ -48,7 +47,15 @@ import {
 	waitForWatch,
 } from "./harness";
 import { type Capabilities, missing, probe, type Role } from "./src/capabilities";
-import { type CaptureState, FAULTS, leakedPlayerStarted, reachesLive, SAMPLE_MS, SAMPLE_RATE } from "./src/contract";
+import {
+	type CaptureState,
+	FAULTS,
+	leakedPlayerStarted,
+	reachesLive,
+	SAMPLE_MS,
+	SAMPLE_RATE,
+	type Sample,
+} from "./src/contract";
 import * as Pattern from "./src/pattern";
 import { resumeSkew } from "./src/resume";
 
@@ -131,8 +138,8 @@ const percentile = (values: number[], p: number) => {
 };
 
 /** Collect distinct samples from the player for `ms`, so a window can be measured after the fact. */
-async function collect(page: Page, errors: BrowserErrors, ms: number): Promise<PlayerState[]> {
-	const samples: PlayerState[] = [];
+async function collect(page: Page, errors: BrowserErrors, ms: number): Promise<Sample[]> {
+	const samples: Sample[] = [];
 	const deadline = Date.now() + ms;
 	while (Date.now() < deadline) {
 		throwPageErrors(errors);
@@ -291,7 +298,7 @@ async function measurePlayback(player: Page, playerErrors: BrowserErrors, label:
 // One sample as a line: elapsed time, the frame on the canvas, the tone step heard against the one
 // that frame belongs to, how far the tone stood above the noise floor, and whether audio was
 // arriving at all, which separates a silent player from a publisher that stopped sending.
-function traceLine(sample: PlayerState, start: number): string {
+function traceLine(sample: Sample, start: number): string {
 	const step = sample.frameId === undefined ? "?" : Pattern.expectedStep(sample.frameId);
 	const margin = sample.toneDb !== undefined && sample.noiseDb !== undefined ? sample.toneDb - sample.noiseDb : 0;
 	return (
@@ -309,7 +316,7 @@ function traceLine(sample: PlayerState, start: number): string {
  * the tone off the graph root that feeds the speakers. A failure prints every reading in the window,
  * so the summary can be traced back to the readings behind it.
  */
-function assertMedia(samples: PlayerState[], label: string): void {
+function assertMedia(samples: Sample[], label: string): void {
 	try {
 		measure(samples, label);
 	} catch (err) {
@@ -320,7 +327,7 @@ function assertMedia(samples: PlayerState[], label: string): void {
 	}
 }
 
-function measure(samples: PlayerState[], label: string): void {
+function measure(samples: Sample[], label: string): void {
 	check(samples.length >= 10, "sampling", () => `${label}: only ${samples.length} samples in the window`);
 
 	const readable = samples.filter((s) => s.frameId !== undefined);

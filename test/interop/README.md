@@ -263,12 +263,12 @@ Each run covers, against a real local relay:
 - **user gesture** - Chromium is launched with
   `--autoplay-policy=document-user-activation-required`, which applies to
   top-level Web Audio contexts. The fixture and player graphs must be suspended
-  before either page is clicked, then both must carry audio afterwards. Harness
-  state probes use CDP with `userGesture: false`. Firefox retains its default
-  Web Audio autoplay block. Firefox/WebKit observations consume the page's
-  existing sample events without executing scripts in the measured page:
-  Playwright's usual reads grant activation and would invalidate this assertion.
-  Capability probes run in a separate context before the measured page opens.
+  before either page is clicked, then both must carry audio afterwards. Firefox
+  is launched with its Web Audio autoplay block enabled. Playwright's usual page
+  reads grant activation and would invalidate this assertion, so the player logs
+  each sample to the console and the harness never evaluates in a player page
+  before its click. The Chromium fixture is read over CDP with
+  `userGesture: false`, and capability probes run in a separate page.
 - **capture permission** - the camera case uses a fake device for deterministic
   input, while Playwright denies and then grants permissions. Both source errors
   must be visible; neither a full nor a microphone-only denial may announce a

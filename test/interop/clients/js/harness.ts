@@ -48,14 +48,6 @@ export function check(ok: boolean, assertion: string, detail: () => string): voi
 	if (!ok) throw new Failure(assertion, detail());
 }
 
-/** The page's own measurements plus the player chrome, which lives in a shadow root. */
-export type PlayerState = Sample & {
-	/** `aria-label` of the primary control button: "Pause" while playing, "Play" while paused. */
-	controlLabel?: string;
-	/** Whether the big center play button is showing. */
-	centerPlayVisible: boolean;
-};
-
 /** Errors the page reported, collected so any wait can fail on them instead of timing out. */
 export type BrowserErrors = {
 	page: string[];
@@ -66,7 +58,6 @@ export type BrowserErrors = {
 export const SELECTORS = {
 	watch: "moq-watch",
 	ui: "moq-watch-ui",
-	control: "button.control[aria-label]",
 	pauseControl: 'button.control[aria-label="Pause"]',
 	centerPlay: "button.center-play",
 	fixture: "#fixture",
@@ -133,6 +124,8 @@ export function launch(args: string[] = [], engine: Engine = "chromium"): Promis
 	return webkit.launch({ headless: true, handleSIGTERM: false });
 }
 
+// The latest sample each player page logged. Cleared on navigation so a reload cannot read the
+// previous document's state.
 const samples = new WeakMap<Page, Sample>();
 
 /** Contexts tracing this process, saved by {@link finishTraces} when the run fails. */
@@ -180,6 +173,9 @@ export async function open(
 ): Promise<[Page, BrowserErrors]> {
 	const page = await browser.newPage(options);
 	const errors: BrowserErrors = { page: [], console: [] };
+	page.on("framenavigated", (frame) => {
+		if (frame === page.mainFrame()) samples.delete(page);
+	});
 	page.on("console", (message) => {
 		if (message.text().startsWith(SAMPLE_EVENT)) {
 			samples.set(page, JSON.parse(message.text().slice(SAMPLE_EVENT.length)) as Sample);
@@ -210,12 +206,8 @@ export function throwPageErrors(errors: BrowserErrors): void {
 // before the deliberate click would therefore unlock Web Audio and invalidate the gesture test.
 const sessions = new WeakMap<Page, CDPSession>();
 
-/** Inspect page state without granting user activation to the document. */
+/** Inspect a Chromium page without granting user activation to the document. Players log samples instead. */
 export async function inspect<A, T>(page: Page, fn: (arg: A) => T, arg: A): Promise<Awaited<T>> {
-	// Non-Chromium reads here follow an explicit gesture. Pre-gesture player reads
-	// use the page's read-only sample events instead of evaluation.
-	if (page.context().browser()?.browserType().name() !== "chromium")
-		return (await page.evaluate(`(${fn.toString()})(${JSON.stringify(arg) ?? "undefined"})`)) as Awaited<T>;
 	let session = sessions.get(page);
 	if (!session) {
 		session = await page.context().newCDPSession(page);
@@ -235,50 +227,17 @@ export async function inspect<A, T>(page: Page, fn: (arg: A) => T, arg: A): Prom
 export async function waitForWatch(page: Page): Promise<void> {
 	const deadline = Date.now() + 30_000;
 	while (Date.now() < deadline) {
-		const ready =
-			page.context().browser()?.browserType().name() !== "chromium"
-				? samples.has(page)
-				: await inspect(
-						page,
-						(tag) => document.querySelector(`${tag}[data-interop-ready]`) !== null,
-						SELECTORS.watch,
-					);
-		if (ready) return;
+		if (samples.has(page)) return;
 		await sleep(POLL_INTERVAL_MS);
 	}
 	throw new Error("the player did not publish its first sample");
 }
 
-/** Read one sample plus the player chrome. Throws until the page has sampled at least once. */
-export async function readPlayerState(page: Page): Promise<PlayerState> {
-	if (page.context().browser()?.browserType().name() !== "chromium") {
-		const sample = samples.get(page);
-		if (!sample) throw new Error("the player has not published a sample");
-		return { ...sample, centerPlayVisible: sample.centerPlayVisible ?? false };
-	}
-	const state = await inspect(
-		page,
-		(selectors) => {
-			const watch = document.querySelector<HTMLElement>(selectors.watch);
-			const ui = document.querySelector(selectors.ui);
-			const control = ui?.shadowRoot?.querySelector<HTMLButtonElement>(selectors.control);
-			const centerPlay = ui?.shadowRoot?.querySelector<HTMLButtonElement>(selectors.centerPlay);
-
-			return {
-				sample: watch?.dataset.interopState,
-				controlLabel: control?.getAttribute("aria-label") ?? undefined,
-				centerPlayVisible: centerPlay ? getComputedStyle(centerPlay).display !== "none" : false,
-			};
-		},
-		SELECTORS,
-	);
-
-	if (!state.sample) throw new Error("the player has not published a sample");
-	return {
-		...(JSON.parse(state.sample) as Sample),
-		controlLabel: state.controlLabel,
-		centerPlayVisible: state.centerPlayVisible,
-	};
+/** Read the latest player sample. Throws until the page has sampled at least once. */
+export async function readPlayerState(page: Page): Promise<Sample> {
+	const sample = samples.get(page);
+	if (!sample) throw new Error("the player has not published a sample");
+	return sample;
 }
 
 /** Read what the fixture publisher says about itself. Throws until it has published anything. */
@@ -344,7 +303,7 @@ export async function waitFor<T>(
 }
 
 /** Poll the player until `predicate` holds. See {@link waitFor}. */
-export function waitForState(page: Page, errors: BrowserErrors, props: WaitProps<PlayerState>): Promise<PlayerState> {
+export function waitForState(page: Page, errors: BrowserErrors, props: WaitProps<Sample>): Promise<Sample> {
 	return waitFor(page, errors, readPlayerState, props);
 }
 

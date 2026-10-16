@@ -177,6 +177,8 @@ jobs:
           NEXTEST_PROFILE: ci
           MOQ_STRICT: 1
 
+  # Media QA with non-Chromium players against a Chromium fixture. The Chromium
+  # player already runs in interop.yml, on PRs and nightly.
   media-engines:
     name: Media (${{ matrix.engine }} player)
     runs-on: ubuntu-24.04-arm
@@ -184,7 +186,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        engine: [chromium, firefox, webkit]
+        engine: [firefox, webkit]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -7,9 +7,9 @@
  * Both are sampled in the same tick, which is what makes their difference a synchronization
  * measurement rather than two unrelated timelines.
  *
- * Samples reach both the element's dataset and a console event. Playwright may evaluate in a
- * different JavaScript world, where custom-element instance fields are not shared. Alternate
- * engines use console observations because evaluating even a read grants user activation.
+ * Each sample is logged to the console for the driver. Reading the page instead would mean
+ * evaluating in it, and Playwright evaluation grants user activation, which would invalidate the
+ * gesture checks.
  *
  * @module
  */
@@ -100,7 +100,7 @@ export function watchResources(): void {
 }
 
 /**
- * Start sampling a player onto `el.dataset.interopState`, and mark it ready for a driver to poll.
+ * Start sampling a player to the console, beginning immediately.
  *
  * Returns a function that stops sampling.
  */
@@ -150,12 +150,10 @@ export function attach(el: MoqWatch): () => void {
 			resources: resources(),
 		};
 
-		el.dataset.interopState = JSON.stringify(state);
 		console.debug(SAMPLE_EVENT + JSON.stringify(state));
 	};
 
 	sample();
-	el.dataset.interopReady = "";
 
 	const timer = self.setInterval(sample, SAMPLE_MS);
 	return () => self.clearInterval(timer);

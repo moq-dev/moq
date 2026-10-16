@@ -3,27 +3,45 @@ import type { Browser, Page } from "playwright";
 import { open, readPlayerState, waitForWatch } from "./harness";
 import { SAMPLE_EVENT } from "./src/contract";
 
-test("Firefox player observations never evaluate in the page before its gesture", async () => {
-	let consoleListener: (message: { text: () => string }) => void = () => {};
-	const sample = { seq: 1, userActivated: false, centerPlayVisible: true, controlLabel: "Play" };
+// A page that logs samples on demand and refuses evaluation, since evaluating would grant
+// user activation before the gesture checks.
+function fakePage() {
+	const listeners = new Map<string, (arg: unknown) => void>();
+	const frame = {};
 	const page = {
-		on(event: string, listener: typeof consoleListener) {
-			if (event === "console") consoleListener = listener;
+		on(event: string, listener: (arg: unknown) => void) {
+			listeners.set(event, listener);
 		},
-		context: () => ({ browser: () => ({ browserType: () => ({ name: () => "firefox" }) }) }),
+		mainFrame: () => frame,
 		evaluate() {
 			throw new Error("evaluation would grant user activation");
 		},
-		goto() {
-			consoleListener({ text: () => SAMPLE_EVENT + JSON.stringify(sample) });
-		},
+		goto() {},
 	} as unknown as Page;
-	const browser = { newPage: () => page } as unknown as Browser;
+	const log = (sample: object) => listeners.get("console")?.({ text: () => SAMPLE_EVENT + JSON.stringify(sample) });
+	const navigate = () => listeners.get("framenavigated")?.(frame);
+	return { page, log, navigate, browser: { newPage: () => page } as unknown as Browser };
+}
+
+test("player observations never evaluate in the page", async () => {
+	const { page, log, browser } = fakePage();
 	await open(browser, "http://localhost");
+	log({ seq: 1, userActivated: false, centerPlayVisible: true, controlLabel: "Play" });
 	await waitForWatch(page);
-	const observed = await readPlayerState(page);
-	expect(observed.seq).toBe(1);
-	expect(observed.userActivated).toBe(false);
-	expect(observed.centerPlayVisible).toBe(true);
-	expect(observed.controlLabel).toBe("Play");
+	expect(await readPlayerState(page)).toMatchObject({
+		seq: 1,
+		userActivated: false,
+		centerPlayVisible: true,
+		controlLabel: "Play",
+	});
+});
+
+test("a navigation discards the previous document's sample", async () => {
+	const { page, log, navigate, browser } = fakePage();
+	await open(browser, "http://localhost");
+	log({ seq: 7 });
+	navigate();
+	await expect(readPlayerState(page)).rejects.toThrow("has not published a sample");
+	log({ seq: 0 });
+	expect((await readPlayerState(page)).seq).toBe(0);
 });

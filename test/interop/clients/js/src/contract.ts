@@ -145,9 +145,10 @@ export type Sample = {
 	/** Root mean square of the graph root's output over the analyser window. */
 	rms?: number;
 
-	/** Current player chrome, sampled without a driver granting user activation. */
+	/** `aria-label` of the primary control button: "Pause" while playing, "Play" while paused. */
 	controlLabel?: string;
-	centerPlayVisible?: boolean;
+	/** Whether the big center play button is showing. */
+	centerPlayVisible: boolean;
 
 	/** Whether the player is paused. */
 	paused: boolean;
@@ -218,5 +219,5 @@ export function publish(commands: Partial<InteropControl>): void {
 	(window as unknown as Record<string, unknown>)[CONTROL] = commands;
 }
 
-/** Prefix for read-only player samples delivered to the driver through console events. */
+/** Prefix of the console line carrying each player {@link Sample} to the driver. */
 export const SAMPLE_EVENT = "__moqInteropSample:";
