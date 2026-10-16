@@ -76,6 +76,15 @@ moq-tokio's `quic::web` path) for the same ordering.
 
 Public API: none. Wire: none.
 
+The receive drain also requires qmux to end unfinished stream reads after the
+session closes, once their buffered data is consumed. In qmux 0.6.3,
+`SessionState` teardown leaves stream channel senders in the shared `Streams`
+map retained by `Session` handles, so such reads can remain pending forever.
+Fix that lifecycle in `moq-dev/web-transport` and ship a dependency update
+before enabling the drain across qmux transports. Keep the TCP publisher
+restart regression in `moq-gst` passing; it checks that the closed session's
+source withdraws without waiting on an unfinished media stream.
+
 ## Related
 
 - [Publisher linger](/quest/m1/publisher-linger.md) - keeps a finished broadcast servable so subscribers can drain it, a layer above this

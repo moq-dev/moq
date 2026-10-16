@@ -224,6 +224,9 @@ impl Session {
 
 	/// Block until the transport session is closed, returning the reason.
 	///
+	/// The driver keeps draining group streams already delivered to the transport
+	/// after this resolves, so keep driving it until it completes.
+	///
 	/// A close code the peer sent is decoded through the session registry (so an auth
 	/// rejection arrives as `Error::Session(SessionError::Unauthorized)`); every peer code is
 	/// preserved as [`Error::Session`], and a close carrying no application code surfaces as

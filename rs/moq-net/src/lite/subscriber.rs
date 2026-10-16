@@ -620,6 +620,18 @@ impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
 		self.cleanup.close();
 	}
 
+	/// Read only the closed transport's buffered uni streams. Control machines
+	/// stay owned, so their cancellation guards cannot remove subscription state.
+	pub fn poll_drain(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let closed = self.uni.poll(waiter).is_ready();
+		let drained = self.uni.children.poll(waiter).is_ready();
+		if closed && drained {
+			Poll::Ready(())
+		} else {
+			Poll::Pending
+		}
+	}
+
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let mut i = 0;
 		while i < self.prefixes.len() {
