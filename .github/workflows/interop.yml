@@ -21,6 +21,9 @@ on:
       - "test/max-age/**"
       - "test/portrait/**"
       - "rs/moq-tokio/tests/integration/max_age.rs"
+      - "test/receive-credit/**"
+      - "rs/moq-tokio/tests/integration/receive_credit.rs"
+      - "rs/moq-uring/tests/integration/receive_credit.rs"
       # The interop job also depends on the recipe that invokes it and the
       # workspace membership that links the JS clients to source.
       - "test/justfile"
@@ -88,6 +91,14 @@ jobs:
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test max-age
         shell: bash -leo pipefail {0}
+
+      - name: Receive credit recovery
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: nix develop --command just test receive-credit
+        shell: bash -leo pipefail {0}
+        env:
+          # Fail rather than skip the io_uring arm if the runner's kernel lacks it.
+          MOQ_STRICT: 1
 
       - name: Harness regressions
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}

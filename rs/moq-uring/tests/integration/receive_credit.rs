@@ -4,7 +4,9 @@
 //!
 //! The subscriber's connection window is far smaller than a moq session would allow,
 //! which keeps the payloads small. Without recovery the high-priority frame never
-//! arrives: the window is spent on a low-priority frame that can never complete.
+//! arrives: the window is spent on a low-priority frame that can never complete. The
+//! JavaScript arm serves WebTransport to a Bun publisher; it needs Bun and runs in the
+//! interop workflow.
 //!
 //! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
 
@@ -220,4 +222,152 @@ fn partial_frame_gives_way() {
 	drop(broadcast);
 	drop(sub_origin);
 	origins.join().expect("origin drivers");
+}
+
+/// A Bun publisher (`test/receive-credit/sender.ts`) dials a WebTransport endpoint whose
+/// connection window is [`WINDOW`] and sends a low-priority frame twice that size. The
+/// subscriber stops it, a high-priority frame completes, and a later low group arrives.
+/// The worker speaks moq-lite only.
+#[test]
+#[ignore = "requires Bun; run by just test receive-credit in the interop workflow"]
+fn javascript_partial_frame_gives_way() {
+	use std::io::Write;
+
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+
+	let (sub_origin, sub_driver) = origin::Producer::new(origin::Config::default());
+	let origins = std::thread::spawn(move || {
+		let rt = tokio::runtime::Builder::new_current_thread()
+			.enable_time()
+			.build()
+			.expect("tokio runtime");
+		rt.block_on(moq_net::time::run(sub_driver));
+	});
+
+	let certs = support::certs().expect("certificates");
+	let mut server = quic::server::Config::new(
+		quic::Identity::open(&certs.cert, &certs.key)
+			.expect("identity")
+			.server(&["h3"], quic::server::ClientAuth::None)
+			.expect("tls"),
+	);
+	server.transport.receive_window = Some(WINDOW as u64);
+	let sock = handle
+		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+		.expect("socket");
+	let endpoint = quic::Endpoint::new(sock, quic::endpoint::Config::default().with_server(server)).expect("endpoint");
+
+	let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/receive-credit/sender.ts");
+	let mut child = std::process::Command::new("bun")
+		.arg(script)
+		.arg(format!("https://{}/", endpoint.local_addr()))
+		.arg(ALPN)
+		.arg(&certs.cert)
+		.arg(WINDOW.to_string())
+		.stdin(std::process::Stdio::piped())
+		.stdout(std::process::Stdio::null())
+		.stderr(std::process::Stdio::inherit())
+		.spawn()
+		.expect("spawn bun");
+	let mut commands = child.stdin.take().unwrap();
+	// Waiting would block the worker, so a thread waits and reports back.
+	let (exited, exit) = tokio::sync::oneshot::channel();
+	let waiter = std::thread::spawn(move || {
+		let _ = exited.send(child.wait());
+	});
+
+	let sub = sub_origin.clone();
+	worker
+		.block_on(async move {
+			let conn = within(&handle, "the connection", endpoint.accept())
+				.await
+				.expect("accept");
+			let request = within(&handle, "the CONNECT", quic::web::Request::accept(conn))
+				.await
+				.expect("handshake");
+			let session = request
+				.respond(quic::web::Response::default().with_protocol(ALPN))
+				.await
+				.expect("respond");
+			let (session, driver) = moq_net::Server::new()
+				.with_subscriber(sub.clone())
+				.accept_lite(
+					std::time::Instant::now(),
+					moq_uring::transport::Session::new(session, moq_net::transport::Binding::Uri),
+				)
+				.await
+				.expect("accept");
+			let task_handle = handle.clone();
+			handle.spawn(async move {
+				let _ = task_handle.run(driver).await;
+			});
+
+			let consumer = sub.consume();
+			within(&handle, "the route", consumer.routed("room"))
+				.await
+				.expect("routed");
+			let remote = within(&handle, "the broadcast", consumer.request_broadcast("room", None))
+				.await
+				.expect("broadcast resolves");
+			let subscribe = |name: &str, priority: u8| {
+				let track = remote.track(name).expect("track");
+				async move {
+					track
+						.subscribe(Subscription::default().with_priority(priority))
+						.await
+						.expect("subscribe")
+				}
+			};
+			let mut low = within(&handle, "the low subscription", subscribe("low", 1)).await;
+			let mut high = within(&handle, "the high subscription", subscribe("high", 200)).await;
+
+			// Wait until three quarters of the window holds a frame that can never complete.
+			commands.write_all(b"low\n").expect("command");
+			let mut partial = within(&handle, "the low group", low.recv_group())
+				.await
+				.expect("group")
+				.expect("track ended");
+			let mut partial = within(&handle, "the low frame header", partial.next_frame())
+				.await
+				.expect("frame")
+				.expect("group ended");
+			let mut seen = 0;
+			while seen < WINDOW * 3 / 4 {
+				seen += within(&handle, "the partial payload", partial.read_chunk())
+					.await
+					.expect("chunk")
+					.expect("frame ended")
+					.len();
+			}
+
+			// Half the window, which only fits once the low frame lets go.
+			commands.write_all(b"high\n").expect("command");
+			assert_eq!(next_frame(&handle, &mut high).await, vec![2u8; WINDOW / 2]);
+			loop {
+				match within(&handle, "the low stop", partial.read_chunk()).await {
+					Ok(Some(_)) => {}
+					Ok(None) => panic!("a frame larger than the window completed"),
+					Err(_) => break,
+				}
+			}
+
+			// The session survives, and the low track keeps delivering what fits.
+			commands.write_all(b"after\n").expect("command");
+			assert_eq!(next_frame(&handle, &mut low).await, &b"after"[..]);
+
+			drop(commands);
+			let status = within(&handle, "the sender to exit", exit)
+				.await
+				.expect("waiter")
+				.expect("sender");
+			assert!(status.success(), "JS sender failed");
+			drop(session);
+		})
+		.expect("worker");
+
+	waiter.join().expect("waiter");
+	drop(worker);
+	drop(sub_origin);
+	origins.join().expect("origin driver");
 }

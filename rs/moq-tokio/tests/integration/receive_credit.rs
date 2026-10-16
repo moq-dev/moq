@@ -1,38 +1,49 @@
 //! Over native QUIC, incomplete frames hold the receiver's connection credit, and when
 //! they fill its window the receiver stops the least urgent stream and keeps going.
 //!
-//! The server publishes with the stock config. The client dials over the raw driver so
-//! its connection window can be far smaller than the stack allows, which keeps the
-//! payloads small. Without recovery the high-priority frame never arrives: the window
-//! is spent on a low-priority frame that can never complete.
+//! The receiver runs on the raw driver so its connection window can be far smaller than
+//! the stack allows, which keeps the payloads small. Without recovery the high-priority
+//! frame never arrives: the window is spent on a low-priority frame that can never
+//! complete. The Rust arm dials a stock server. The JavaScript arm serves WebTransport
+//! to a Bun publisher; it needs Bun and runs in the interop workflow.
 
 #![cfg(feature = "quic")]
 
-use std::{sync::Arc, time::Duration};
+use std::{process::Stdio, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use moq_tokio::moq_net::{self, Timestamp, frame, track::Subscription};
-use moq_tokio::quic::driver;
+use moq_tokio::quic::{driver, web};
+use tokio::io::AsyncWriteExt;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The client's connection receive window.
+/// The receiver's connection receive window.
 const WINDOW: usize = 256 * 1024;
 
 fn timed() -> moq_net::track::Info {
 	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 }
 
+/// Raw-driver transport settings with a connection receive window of `window`.
+fn transport(window: u64) -> driver::TransportConfig {
+	let mut transport = driver::TransportConfig::default();
+	transport.receive_window(driver::VarInt::from_u64(window).unwrap());
+	transport
+}
+
 /// A server publishing broadcast `room`, and a client subscribed to its origin over a
-/// connection whose receive window is [`WINDOW`].
+/// connection with the given transport settings.
 struct Setup {
 	broadcast: moq_net::broadcast::Producer,
 	remote: moq_net::broadcast::Consumer,
+	/// The client's connection, for its credit stats.
+	conn: driver::Connection,
 	_client: moq_net::Session,
 	_endpoint: driver::Endpoint,
 }
 
-async fn setup(version: &str) -> Setup {
+async fn setup(version: &str, transport: driver::TransportConfig) -> Setup {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let version: moq_net::Version = version.parse().expect("version");
 
@@ -63,8 +74,6 @@ async fn setup(version: &str) -> Setup {
 		.with_no_client_auth();
 	tls.alpn_protocols = vec![version.alpn().as_bytes().to_vec()];
 	let quic = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic config");
-	let mut transport = driver::TransportConfig::default();
-	transport.receive_window((WINDOW as u32).into());
 	let mut client = driver::ClientConfig::new(Arc::new(quic));
 	client.transport_config(Arc::new(transport));
 
@@ -76,10 +85,8 @@ async fn setup(version: &str) -> Setup {
 		.expect("handshake");
 
 	let subscriber = moq_tokio::origin::spawn();
-	let session = moq_tokio::transport::Session::new(
-		moq_tokio::quic::web::Session::raw(conn),
-		moq_net::transport::Binding::InBand,
-	);
+	let session =
+		moq_tokio::transport::Session::new(web::Session::raw(conn.clone()), moq_net::transport::Binding::InBand);
 	let (client, driver) = moq_net::Client::new()
 		.with_versions(version.into())
 		.with_subscriber(subscriber.clone())
@@ -88,39 +95,47 @@ async fn setup(version: &str) -> Setup {
 		.expect("client handshake");
 	tokio::spawn(moq_net::time::run(driver));
 
-	let consumer = subscriber.consume();
+	Setup {
+		broadcast,
+		remote: room(&subscriber).await,
+		conn,
+		_client: client,
+		_endpoint: endpoint,
+	}
+}
+
+/// Broadcast `room`, once the peer announces it into `origin`.
+async fn room(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Consumer {
+	let consumer = origin.consume();
 	tokio::time::timeout(TIMEOUT, consumer.routed("room"))
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let remote = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("room", None))
+	tokio::time::timeout(TIMEOUT, consumer.request_broadcast("room", None))
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves")
+}
 
-	Setup {
-		broadcast,
-		remote,
-		_client: client,
-		_endpoint: endpoint,
-	}
+/// Subscribe to track `name` of `remote` at `priority`.
+async fn subscribe(remote: &moq_net::broadcast::Consumer, name: &str, priority: u8) -> moq_net::track::Subscriber {
+	tokio::time::timeout(
+		TIMEOUT,
+		remote
+			.track(name)
+			.unwrap()
+			.subscribe(Subscription::default().with_priority(priority)),
+	)
+	.await
+	.expect("subscribe timeout")
+	.expect("subscribe")
 }
 
 impl Setup {
 	/// Subscribe to a new track at `priority`.
 	async fn subscribe(&self, name: &str, priority: u8) -> (moq_net::track::Producer, moq_net::track::Subscriber) {
 		let track = self.broadcast.create_track(name, timed()).unwrap();
-		let sub = tokio::time::timeout(
-			TIMEOUT,
-			self.remote
-				.track(name)
-				.unwrap()
-				.subscribe(Subscription::default().with_priority(priority)),
-		)
-		.await
-		.expect("subscribe timeout")
-		.expect("subscribe");
-		(track, sub)
+		(track, subscribe(&self.remote, name, priority).await)
 	}
 }
 
@@ -144,10 +159,33 @@ async fn next_frame(sub: &mut moq_net::track::Subscriber) -> Bytes {
 		.payload
 }
 
+/// The next group's first frame, still arriving.
+async fn partial_frame(sub: &mut moq_net::track::Subscriber) -> moq_net::frame::Consumer {
+	let mut group = next_group(sub).await;
+	tokio::time::timeout(TIMEOUT, group.next_frame())
+		.await
+		.expect("frame header timed out")
+		.expect("frame")
+		.expect("group ended")
+}
+
+/// Read `frame` until `bytes` of it arrived.
+async fn read_partial(frame: &mut moq_net::frame::Consumer, bytes: usize) {
+	let mut seen = 0;
+	while seen < bytes {
+		let chunk = tokio::time::timeout(TIMEOUT, frame.read_chunk())
+			.await
+			.expect("partial payload timed out")
+			.expect("chunk")
+			.expect("frame ended");
+		seen += chunk.len();
+	}
+}
+
 /// Two partial frames that together exceed the window: the lower-priority one is
 /// stopped, and the higher-priority one completes on the credit it returns.
 async fn the_less_urgent_partial_frame_gives_way(version: &str) {
-	let setup = setup(version).await;
+	let setup = setup(version, transport(WINDOW as u64)).await;
 	let (low, mut low_sub) = setup.subscribe("low", 1).await;
 	let (high, mut high_sub) = setup.subscribe("high", 200).await;
 
@@ -162,21 +200,7 @@ async fn the_less_urgent_partial_frame_gives_way(version: &str) {
 	low_frame.write(vec![1u8; WINDOW * 3 / 4]).unwrap();
 
 	// Wait until the receiver holds all of it, so nothing else got there first.
-	let mut partial = next_group(&mut low_sub).await;
-	let mut partial = tokio::time::timeout(TIMEOUT, partial.next_frame())
-		.await
-		.expect("frame header timed out")
-		.expect("frame")
-		.expect("group ended");
-	let mut seen = 0;
-	while seen < WINDOW * 3 / 4 {
-		let chunk = tokio::time::timeout(TIMEOUT, partial.read_chunk())
-			.await
-			.expect("partial payload timed out")
-			.expect("chunk")
-			.expect("frame ended");
-		seen += chunk.len();
-	}
+	read_partial(&mut partial_frame(&mut low_sub).await, WINDOW * 3 / 4).await;
 
 	// Half the window, which only fits once the low frame lets go.
 	let payload = Bytes::from(vec![2u8; WINDOW / 2]);
@@ -202,6 +226,243 @@ async fn lite_partial_frame_gives_way() {
 #[tokio::test]
 async fn ietf_partial_frame_gives_way() {
 	the_less_urgent_partial_frame_gives_way("moq-transport-16").await;
+}
+
+/// A Bun publisher (`test/receive-credit/sender.ts`) dials a WebTransport server whose
+/// connection window is [`WINDOW`] and sends a low-priority frame twice that size. The
+/// receiver stops it, a high-priority frame completes, and a later low group arrives.
+async fn javascript_partial_frame_gives_way(version: &str) {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let version: moq_net::Version = version.parse().expect("version");
+
+	// The sender pins this certificate, so it needs no name or CA.
+	let rcgen::CertifiedKey { cert, signing_key } =
+		rcgen::generate_simple_self_signed(["localhost".to_string()]).expect("certificate");
+	let dir = tempfile::tempdir().expect("tempdir");
+	let pem = dir.path().join("cert.pem");
+	std::fs::write(&pem, cert.pem()).expect("write certificate");
+	let key = rustls::pki_types::PrivatePkcs8KeyDer::from(signing_key.serialize_der());
+	let mut tls = rustls::ServerConfig::builder()
+		.with_no_client_auth()
+		.with_single_cert(vec![cert.der().clone()], key.into())
+		.expect("tls");
+	tls.alpn_protocols = vec![web::ALPN.as_bytes().to_vec()];
+	let quic = driver::crypto::rustls::QuicServerConfig::try_from(tls).expect("quic config");
+	let mut config = driver::ServerConfig::with_crypto(Arc::new(quic));
+	config.transport_config(Arc::new(transport(WINDOW as u64)));
+	let endpoint = driver::Endpoint::server(config, "127.0.0.1:0".parse().unwrap()).expect("endpoint");
+	let port = endpoint.local_addr().expect("addr").port();
+	let mut server = web::Server::new(endpoint);
+
+	let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/receive-credit/sender.ts");
+	let mut child = tokio::process::Command::new("bun")
+		.arg(script)
+		.arg(format!("https://127.0.0.1:{port}/"))
+		.arg(version.alpn())
+		.arg(&pem)
+		.arg(WINDOW.to_string())
+		.stdin(Stdio::piped())
+		.stdout(Stdio::null())
+		.stderr(Stdio::inherit())
+		.kill_on_drop(true)
+		.spawn()
+		.expect("spawn bun");
+	let mut commands = child.stdin.take().unwrap();
+
+	let request = tokio::time::timeout(TIMEOUT, server.accept())
+		.await
+		.expect("connect timeout")
+		.expect("request");
+	let session = request
+		.respond(web::proto::ConnectResponse::OK.with_protocol(version.alpn()))
+		.await
+		.expect("respond");
+	let origin = moq_tokio::origin::spawn();
+	let (session, driver) = moq_net::Server::new()
+		.with_versions(version.into())
+		.with_subscriber(origin.clone())
+		.accept(
+			std::time::Instant::now(),
+			moq_tokio::transport::Session::new(session, moq_net::transport::Binding::Uri),
+		)
+		.await
+		.expect("server handshake");
+	tokio::spawn(moq_net::time::run(driver));
+	let remote = room(&origin).await;
+	let mut low = subscribe(&remote, "low", 1).await;
+	let mut high = subscribe(&remote, "high", 200).await;
+
+	// Wait until three quarters of the window holds a frame that can never complete.
+	commands.write_all(b"low\n").await.unwrap();
+	let mut partial = partial_frame(&mut low).await;
+	read_partial(&mut partial, WINDOW * 3 / 4).await;
+
+	// Half the window, which only fits once the low frame lets go.
+	commands.write_all(b"high\n").await.unwrap();
+	assert_eq!(next_frame(&mut high).await, vec![2u8; WINDOW / 2], "{version}");
+	loop {
+		let chunk = tokio::time::timeout(TIMEOUT, partial.read_chunk())
+			.await
+			.expect("stop timed out");
+		match chunk {
+			Ok(Some(_)) => {}
+			Ok(None) => panic!("{version}: a frame larger than the window completed"),
+			Err(_) => break,
+		}
+	}
+
+	// The session survives, and the low track keeps delivering what fits.
+	commands.write_all(b"after\n").await.unwrap();
+	assert_eq!(next_frame(&mut low).await, &b"after"[..], "{version}");
+
+	drop(commands);
+	let status = tokio::time::timeout(TIMEOUT, child.wait())
+		.await
+		.expect("sender exit timed out")
+		.expect("sender");
+	assert!(status.success(), "{version}: JS sender failed");
+	drop(session);
+}
+
+#[tokio::test]
+#[ignore = "requires Bun; run by just test receive-credit in the interop workflow"]
+async fn javascript_partial_frame_gives_way_tokio() {
+	for version in ["moq-lite-06", "moq-transport-16"] {
+		javascript_partial_frame_gives_way(version).await;
+	}
+}
+
+/// moq-tokio's default connection receive window.
+const STOCK_WINDOW: u64 = 128 << 20;
+/// Bytes each benchmark run delivers.
+const BENCH_BYTES: usize = 256 << 20;
+
+/// What one benchmark run measured.
+struct Measured {
+	/// The most the receiver held plus received without reading, in bytes.
+	retained: u64,
+	/// Payload bytes delivered per second.
+	throughput: f64,
+	/// How long frames took from the write to the receiver completing them, sorted.
+	latency: Vec<Duration>,
+}
+
+/// Deliver [`BENCH_BYTES`] over `streams` tracks of one-frame groups of `frame` bytes,
+/// each track writing its next group once the last arrived, so `streams` streams are
+/// open at once. `follow` gives each stream the whole connection window; otherwise it
+/// keeps the driver's finite default.
+async fn measure(streams: usize, frame: usize, follow: bool) -> Measured {
+	let mut transport = transport(STOCK_WINDOW);
+	let max = driver::VarInt::from_u64(moq_tokio::quic::DEFAULT_MAX_STREAMS).unwrap();
+	transport.max_concurrent_uni_streams(max);
+	transport.max_concurrent_bidi_streams(max);
+	if follow {
+		transport.stream_receive_window(driver::VarInt::from_u64(STOCK_WINDOW).unwrap());
+	}
+	let setup = setup("moq-lite-06", transport).await;
+	let mut tracks = Vec::with_capacity(streams);
+	for index in 0..streams {
+		tracks.push(setup.subscribe(&index.to_string(), 0).await);
+	}
+
+	let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+	let sampler = tokio::spawn({
+		let conn = setup.conn.clone();
+		let done = done.clone();
+		async move {
+			let mut peak = 0;
+			while !done.load(std::sync::atomic::Ordering::Relaxed) {
+				let credit = conn.stats().credit;
+				peak = peak.max(credit.held + credit.unread);
+				tokio::time::sleep(Duration::from_millis(1)).await;
+			}
+			peak
+		}
+	});
+
+	let rounds = (BENCH_BYTES / frame / streams).max(1);
+	let payload = Bytes::from(vec![7u8; frame]);
+	let start = std::time::Instant::now();
+	let tasks: Vec<_> = tracks
+		.into_iter()
+		.map(|(track, mut sub)| {
+			let payload = payload.clone();
+			tokio::spawn(async move {
+				let mut latency = Vec::with_capacity(rounds);
+				for _ in 0..rounds {
+					let sent = std::time::Instant::now();
+					let mut group = track.append_group().unwrap();
+					group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+					group.finish().unwrap();
+					assert_eq!(next_frame(&mut sub).await.len(), payload.len());
+					latency.push(sent.elapsed());
+				}
+				latency
+			})
+		})
+		.collect();
+	let mut latency = Vec::with_capacity(rounds * streams);
+	for task in tasks {
+		latency.extend(task.await.unwrap());
+	}
+	let elapsed = start.elapsed();
+	done.store(true, std::sync::atomic::Ordering::Relaxed);
+	latency.sort();
+	Measured {
+		retained: sampler.await.unwrap(),
+		throughput: (rounds * streams * frame) as f64 / elapsed.as_secs_f64(),
+		latency,
+	}
+}
+
+/// What bounded receive memory costs: a finite stream window against one that follows the
+/// connection window, swept over concurrent streams and frame sizes on separate axes so
+/// a cost that grows with either shows up as a slope. Reports the peak retained bytes
+/// (held plus unread credit), throughput, and frame completion latency, each the median
+/// of the runs. The publisher is a stock server, so its send window bounds what is in
+/// flight as it would in production. Run by nightly.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "release benchmark, run by nightly"]
+async fn benchmark_receive_windows() {
+	const RUNS: usize = 3;
+	const FRAME: usize = 256 * 1024;
+	const STREAMS: usize = 16;
+	let cells = [1, 16, 256]
+		.map(|streams| ("streams", streams, FRAME))
+		.into_iter()
+		.chain([16 * 1024, 256 * 1024, 4 << 20].map(|frame| ("frame", STREAMS, frame)));
+	println!("axis,streams,frame,stream_window,retained_mib,mib_per_s,p50_ms,p99_ms");
+	for (axis, streams, frame) in cells {
+		let mut runs: [Vec<Measured>; 2] = Default::default();
+		// Alternate the modes so drift in the host hits both alike.
+		for _ in 0..RUNS {
+			for (mode, follow) in [false, true].into_iter().enumerate() {
+				runs[mode].push(measure(streams, frame, follow).await);
+			}
+		}
+		for (runs, mode) in runs.iter().zip(["finite", "follow"]) {
+			let median = |mut values: Vec<f64>| {
+				values.sort_by(f64::total_cmp);
+				values[values.len() / 2]
+			};
+			let percentile = |p: usize| {
+				median(
+					runs.iter()
+						.map(|run| run.latency[(run.latency.len() - 1) * p / 100].as_secs_f64() * 1e3)
+						.collect(),
+				)
+			};
+			let retained = median(runs.iter().map(|run| run.retained as f64).collect());
+			let throughput = median(runs.iter().map(|run| run.throughput).collect());
+			println!(
+				"{axis},{streams},{frame},{mode},{:.1},{:.0},{:.2},{:.2}",
+				retained / (1 << 20) as f64,
+				throughput / (1 << 20) as f64,
+				percentile(50),
+				percentile(99),
+			);
+		}
+	}
 }
 
 /// Accepts any server certificate: the test dials its own self-signed server.
