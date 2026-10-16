@@ -16,7 +16,7 @@ claim whose withdrawal is already known.
 Keep the 2026-10-01 two-layer direction, reconciled with the maintainer's
 2026-10-13 [decisions](/quest/m1/cluster-routing/README.md) and the routing
 contract below. The routing contract's fixtures live in
-`rs/moq-net/tests/routing_contracts/` and run against a small reference model;
+`rs/moq-net/tests/integration/routing_contracts/` and run against a small reference model;
 port each topology to the implementation as acceptance, then delete the model.
 The sketch stays conditional on Next-hop handoff, which settles claim
 freshness before coding:
@@ -316,7 +316,7 @@ Open, for the implementer to settle and record:
 - How much of today's route trie, fronts, and `route_order` survives intact.
 
 The #4349 counterexamples are the `residual_*` tests in
-`rs/moq-net/tests/mesh_withdraw.rs`. They pin today's hunting on lite-06:
+`rs/moq-net/tests/integration/mesh_withdraw.rs`. They pin today's hunting on lite-06:
 a stale path outlasting the 300 ms hold, a revival the quarantine misses,
 and 179 hunting relays (3 reviving) over 200 seeded meshes. Turn each into a
 single retraction everywhere, and keep `cross_node_close_retracts_once`
