@@ -479,7 +479,7 @@ struct Present<S: crate::transport::poll::Session> {
 	/// Whether the first poll decided who answers the peer's tokens.
 	started: bool,
 	/// The connection's own credential, held for the life of the session.
-	_setup: Option<crate::auth::Token>,
+	_setup: Option<crate::auth::Auth>,
 }
 
 impl<S: crate::transport::poll::Session> Present<S> {

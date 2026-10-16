@@ -133,6 +133,63 @@ async fn moqt_16_has_no_grant() {
 	older_versions_have_no_grant("moq-transport-16").await
 }
 
+#[moq_net_sim::test]
+async fn moqt_16_route_auth_renews_its_announce() {
+	a_route_auth_renews_its_announce("moq-transport-16").await
+}
+
+#[moq_net_sim::test]
+async fn moqt_22_route_auth_renews_its_announce() {
+	a_route_auth_renews_its_announce(MOQT_22).await
+}
+
+/// A route's auth reaches the peer's acceptor on the announcement, and swapping it
+/// renews the announcement with the new token, keeping it live. The client declines MoQ Auth, so every token the server sees
+/// rode a request, and the server declines MoQ Solicit, so the client announces with
+/// PUBLISH_NAMESPACE rather than answering a SUBSCRIBE_NAMESPACE.
+async fn a_route_auth_renews_its_announce(version: &'static str) {
+	within(async {
+		let declined = |f: fn(&mut moq_net::setup::Extensions)| {
+			let mut extensions = moq_net::setup::Extensions::default();
+			f(&mut extensions);
+			Some(extensions)
+		};
+		let client_origin = produce_origin(2);
+		let server_origin = produce_origin(1);
+		let mut pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(client_origin.clone()),
+			server_subscribe: Some(server_origin.clone()),
+			server_requests: true,
+			client_extensions: declined(|e| e.auth = false),
+			server_extensions: declined(|e| e.solicit = false),
+			..Default::default()
+		})
+		.await;
+		let mut tokens = serve(pair.requests.take().unwrap(), |_| Some(Grant::all()));
+
+		let first = pair.client.auth().add("first").await.expect("kept for requests");
+		let broadcast = client_origin.create_broadcast("room/x").unwrap();
+		broadcast
+			.announce(origin::Route::default().with_auth(first))
+			.unwrap();
+		let (token, _first) = tokens.next().await.expect("the announce's token");
+		assert_eq!(token, b"first");
+		wait_announced(&server_origin.consume(), "room/x", true).await;
+
+		let second = pair.client.auth().add("second").await.expect("kept for requests");
+		broadcast
+			.announce(origin::Route::default().with_auth(second))
+			.unwrap();
+		let (token, _second) = tokens.next().await.expect("the renewal's token");
+		assert_eq!(token, b"second");
+		wait_announced(&server_origin.consume(), "room/x", true).await;
+		assert_eq!(pair.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
 /// Build an origin producer, spawning its driver on the ambient runtime.
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
@@ -206,6 +263,9 @@ struct Options {
 	server_subscribe: Option<origin::Producer>,
 	/// Take the server's AUTH requests before its driver runs.
 	server_requests: bool,
+	/// Each side's extensions, when not the defaults.
+	client_extensions: Option<moq_net::setup::Extensions>,
+	server_extensions: Option<moq_net::setup::Extensions>,
 	version: Option<&'static str>,
 }
 
@@ -224,6 +284,9 @@ async fn connect(opts: Options) -> Pair {
 	let (client_transport, server_transport) = create_mock_session_pair(Some(version.alpn()));
 
 	let mut client = Client::new().with_versions(version.into());
+	if let Some(extensions) = opts.client_extensions {
+		client = client.with_extensions(extensions);
+	}
 	if let Some(publish) = &opts.client_publish {
 		client = client.with_publisher(publish);
 	}
@@ -232,6 +295,9 @@ async fn connect(opts: Options) -> Pair {
 	}
 
 	let mut server = Server::new().with_versions(version.into());
+	if let Some(extensions) = opts.server_extensions {
+		server = server.with_extensions(extensions);
+	}
 	if let Some(publish) = &opts.server_publish {
 		server = server.with_publisher(publish);
 	}
@@ -703,12 +769,21 @@ async fn a_reset_auth_stream_reports_unsupported(version: &'static str) {
 	.expect("timed out");
 }
 
-/// Versions without AUTH never open the stream: no grant, and no way to add a token.
+/// Versions without AUTH never open the stream: no grant. moq-transport keeps an added
+/// token, with a grant that stays unknown, for the requests that name it; moq-lite has
+/// nothing that could carry one.
 async fn older_versions_have_no_grant(version: &'static str) {
 	within(async {
 		let (pair, _broadcast) = connect_announced(version).await;
 		assert_eq!(pair.client.auth().grant().peek(), None);
-		assert!(matches!(pair.client.auth().add("token").await, Err(Error::Unsupported)));
+		match version.starts_with("moq-lite") {
+			true => assert!(matches!(pair.client.auth().add("token").await, Err(Error::Unsupported))),
+			false => {
+				let auth = pair.client.auth().add("token").await.expect("kept for requests");
+				assert_eq!(auth.grant().peek(), None);
+				assert_eq!(pair.client.auth().grant().peek(), None);
+			}
+		}
 		// moq-transport's request streams have no stream type to look for.
 		if version.starts_with("moq-lite") {
 			for transport in [&pair.client_transport, &pair.server_transport] {
@@ -769,6 +844,7 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 			server_publish: Some(server_origin.clone()),
 			server_subscribe: Some(server_origin.clone()),
 			server_requests: true,
+			..Default::default()
 		})
 		.await;
 		let mut issued = serve(pair.requests.take().unwrap(), |token| {

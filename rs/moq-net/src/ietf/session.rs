@@ -147,8 +147,8 @@ where
 	// Present the connection's own credential (the empty token) right away, so both
 	// sides learn their grant without waiting on the app. Draft-17+ only; the peer's
 	// SETUP then decides whether it is ever sent.
-	// A handle that already knows the peer declined (a gated server accept) refuses it.
-	let setup_token = match auth::supported(version) {
+	// A handle that already knows the peer declined (a gated server accept) skips it.
+	let setup_token = match auth::supported(version) && auth.supported() {
 		true => auth.present(bytes::Bytes::new(), true).ok(),
 		false => None,
 	};
@@ -2010,7 +2010,7 @@ mod tests {
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
 		let log = session.log.clone();
 
-		let handle = crate::auth::Handle::new(true);
+		let handle = crate::auth::Handle::ietf(true);
 		let (driver, goaway) = start(Config {
 			runtime: crate::time::Clock::sim(),
 			session,
@@ -2046,19 +2046,19 @@ mod tests {
 		}
 	}
 
-	/// A peer that never offered MoQ Auth sees no Auth request, the session keeps
-	/// working, and every token fails as unsupported rather than hanging.
+	/// A peer that never offered MoQ Auth sees no Auth request and the session keeps
+	/// working. A token resolves promptly rather than hanging, kept with an unknown grant
+	/// for the requests that name it.
 	#[moq_net_sim::test]
 	async fn a_peer_without_auth_sees_no_auth_request() {
 		let session = auth_session(false);
 		let (handle, log) = (&session.handle, &session.log);
 
-		let err = moq_net_sim::timeout(std::time::Duration::from_secs(1), handle.add("token"))
+		let auth = moq_net_sim::timeout(std::time::Duration::from_secs(1), handle.add("token"))
 			.await
-			.expect("unsupported promptly")
-			.err()
-			.expect("no AUTH on this session");
-		assert!(matches!(err, Error::Unsupported), "{err:?}");
+			.expect("resolved promptly")
+			.expect("kept for requests");
+		assert_eq!(auth.grant().peek(), None, "no grant without the extension");
 		assert_eq!(handle.grant().peek(), None, "no grant without the extension");
 
 		for _ in 0..ANNOUNCE_TURNS {
