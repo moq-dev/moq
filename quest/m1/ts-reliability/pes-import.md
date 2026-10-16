@@ -27,7 +27,10 @@ round-trip test first.
   existing `Retained` bound; it never spans a PCR discontinuity. The value
   depends only on the input bytes, so same-epoch importers agree. A program
   with no PCR PID cannot place its PES, so its private PES streams are
-  refused.
+  refused. The timebase offset is anchored only by a PTS today, so a PES
+  also waits for that anchor within the same bound; a program whose PES
+  never carry a PTS (data only) is refused and tested, unless the PCR can
+  anchor the timebase without breaking same-epoch agreement.
 - **Trailing PES.** A PES that starts after its timebase's last PCR (end of
   input, or a PCR discontinuity before the next PCR) has no PCR on the far
   side. Place it by extrapolating from that timebase's last two PCRs, which
