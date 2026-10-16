@@ -24,8 +24,14 @@ pub(crate) struct Arrival<T> {
 	/// How many times the source's playhead had jumped (a skipped group, or a restart)
 	/// when the frame was read.
 	pub skip: u64,
+	/// How many times the source had lost the rest of a group it had begun delivering when the
+	/// frame was read: the skips that cut a group short.
+	pub cut: u64,
 	/// Whether the frame decodes without the track's earlier frames.
 	pub sync: bool,
+	/// Whether it presents before the track's last sync frame, so it also references frames
+	/// before that one: an open GOP's leading picture.
+	pub leading: bool,
 	pub item: T,
 }
 
@@ -46,7 +52,7 @@ pub(crate) enum Push {
 	Queued,
 	/// It missed its deadline and was dropped; the track resumes at its next sync frame.
 	Late,
-	/// It was dropped because the track is waiting for a sync frame.
+	/// It was dropped because the track is waiting for a sync frame, or leads the one it resumed at.
 	Waiting,
 }
 
@@ -70,8 +76,9 @@ pub(crate) enum Push {
 /// makes due before the acquisition ended is dropped instead.
 ///
 /// A track starts on a whole group. Until a frame of it has gone out, a loss (a frame
-/// dropped here, or media its source skipped) takes everything the track holds with it, and
-/// the track starts at its next sync frame: a joiner whose zero-budget live-edge pick has the
+/// dropped here, or the rest of a group its source cut short) takes everything the track
+/// holds with it, and the track starts at its next sync frame. Whole groups missing after one
+/// that ended take nothing: a joiner whose zero-budget live-edge pick has the
 /// publisher cut its group short starts at the next group rather than on the cut-off start.
 /// What goes before a track's first frame out is [`Buffer::trimmed`], not lost; what drops
 /// after it is [`Buffer::dropped`].
@@ -308,13 +315,17 @@ struct Floor<K> {
 struct Track<T> {
 	/// Frames in arrival order, each with its generation, decode time and deadline.
 	queue: VecDeque<(u64, Timestamp, Instant, T)>,
-	/// The source's restart and skip counters at the last frame.
+	/// The source's restart, skip and cut counters at the last frame.
 	restart: u64,
 	skip: u64,
+	cut: u64,
 	/// The generation of the last frame.
 	generation: u64,
 	/// Frames are dropped until the next sync frame.
 	waiting: bool,
+	/// Whether the track resumed at its last sync frame after waiting, whose leading frames are
+	/// dropped too.
+	resumed: bool,
 	/// Whether a frame of it has gone out. Until one has, a loss takes everything it holds.
 	started: bool,
 }
@@ -526,26 +537,28 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 
 	/// Queue a frame on `generation` due at `deadline`, unless it is `stale` or cannot make it.
 	///
-	/// Until a frame of the track has gone out, a loss (a frame dropped here, or media its
-	/// source skipped) takes everything the track holds with it, so its output starts on a
+	/// Until a frame of the track has gone out, a loss (a frame dropped here, or the rest of a
+	/// group its source cut short) takes everything the track holds with it, so its output starts on a
 	/// whole group at its next sync frame rather than on a group's cut-off start.
 	fn queue(&mut self, key: K, arrival: Arrival<T>, generation: u64, deadline: Option<Instant>, stale: bool) -> Push {
 		let track = self.tracks.entry(key).or_insert_with(|| Track {
 			queue: VecDeque::new(),
 			restart: arrival.restart,
 			skip: arrival.skip,
+			cut: arrival.cut,
 			generation,
 			waiting: false,
+			resumed: false,
 			started: false,
 		});
-		// A skip the source declared no restart for: media it will never deliver.
-		let gap = arrival.skip.wrapping_sub(arrival.restart) != track.skip.wrapping_sub(track.restart);
-		if gap && !track.started {
+		// The rest of the group the track holds will never arrive.
+		if arrival.cut != track.cut && !track.started {
 			self.trimmed += track.queue.len() as u64;
 			track.queue.clear();
 		}
 		track.restart = arrival.restart;
 		track.skip = arrival.skip;
+		track.cut = arrival.cut;
 		track.generation = generation;
 		let push = match deadline {
 			_ if stale => {
@@ -553,7 +566,11 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 				Push::Waiting
 			}
 			_ if track.waiting && !arrival.sync => Push::Waiting,
+			_ if track.resumed && arrival.leading => Push::Waiting,
 			Some(deadline) if arrival.arrived <= deadline || self.delay.is_zero() => {
+				if arrival.sync {
+					track.resumed = track.waiting;
+				}
 				track.waiting = false;
 				track
 					.queue
@@ -570,6 +587,8 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		match push {
 			Push::Queued => {}
 			_ if track.started => self.dropped += 1,
+			// A leading frame of the sync frame the track starts at, which stays queued.
+			_ if !track.waiting => self.trimmed += 1,
 			_ => {
 				self.trimmed += 1 + track.queue.len() as u64;
 				track.queue.clear();
@@ -905,7 +924,8 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 	}
 
 	/// How many frames were dropped after their track's first went out: late, due before a new
-	/// generation's acquisition ended, or waiting for a sync frame after one of those.
+	/// generation's acquisition ended, or lost with one of those, waiting for a sync frame after
+	/// it or leading the sync frame the track resumed at.
 	pub fn dropped(&self) -> u64 {
 		self.dropped
 	}
@@ -991,7 +1011,9 @@ mod tests {
 			decode: ms(decode),
 			restart: 0,
 			skip: 0,
+			cut: 0,
 			sync: true,
+			leading: false,
 			item,
 		}
 	}
@@ -1105,6 +1127,52 @@ mod tests {
 
 		tokio::time::advance(Duration::from_secs(1)).await;
 		assert_eq!(due(&mut buffer), ["a180", "v240"]);
+	}
+
+	/// The sync frame a track resumes at after a drop loses its leading frames too, since
+	/// they reference the dropped ones. The next sync frame's leading frames are kept.
+	/// The track has started, so both are losses ([`Buffer::dropped`]).
+	#[tokio::test(start_paused = true)]
+	async fn a_resumed_sync_frame_drops_its_leading_frames() {
+		let start = Instant::now();
+		let mut buffer = Buffer::new(DELAY).replay();
+		let video = |arrived, decode, sync, leading, item| Arrival {
+			sync,
+			leading,
+			..arrival(arrived, decode, item)
+		};
+		buffer.push(1, video(start, 0, true, false, "v0")).unwrap();
+		tokio::time::advance(DELAY).await;
+		assert_eq!(due(&mut buffer), ["v0"]);
+		let late = start + Duration::from_millis(200);
+		assert_eq!(
+			buffer.push(1, video(late, 40, false, false, "v40")).unwrap(),
+			Push::Late
+		);
+		assert_eq!(
+			buffer.push(1, video(late, 200, true, false, "v200")).unwrap(),
+			Push::Queued
+		);
+		assert_eq!(
+			buffer.push(1, video(late, 240, false, true, "v240")).unwrap(),
+			Push::Waiting
+		);
+		assert_eq!(
+			buffer.push(1, video(late, 280, false, false, "v280")).unwrap(),
+			Push::Queued
+		);
+		assert_eq!(
+			buffer.push(1, video(late, 320, true, false, "v320")).unwrap(),
+			Push::Queued
+		);
+		assert_eq!(
+			buffer.push(1, video(late, 360, false, true, "v360")).unwrap(),
+			Push::Queued
+		);
+		assert_eq!(buffer.dropped(), 2, "the leading frame was lost with the late one");
+
+		tokio::time::advance(Duration::from_secs(1)).await;
+		assert_eq!(due(&mut buffer), ["v200", "v280", "v320", "v360"]);
 	}
 
 	/// A restart before anything went out keeps the clock, so the tracks stay on one.
@@ -1427,7 +1495,9 @@ mod tests {
 				decode: Timestamp::from_micros(decode.as_micros() as u64).unwrap(),
 				restart: 0,
 				skip: 0,
+				cut: 0,
 				sync: true,
+				leading: false,
 				item: "v",
 			};
 			let held = buffer
@@ -1601,7 +1671,9 @@ mod tests {
 				decode: Timestamp::from_micros(decode.as_micros() as u64).unwrap(),
 				restart: 0,
 				skip: 0,
+				cut: 0,
 				sync: true,
+				leading: false,
 				item: "v",
 			};
 			match buffer.push(track, frame) {
@@ -1827,30 +1899,34 @@ mod tests {
 	}
 
 	/// A start group its source cuts short before anything of it went out is dropped whole,
-	/// so the track starts on the next group rather than on the cut-off start.
+	/// so the track starts on the next group rather than on the cut-off start. Whole groups
+	/// missing after one that ended take nothing with them.
 	#[tokio::test(start_paused = true)]
 	async fn a_start_group_cut_by_a_gap_is_dropped_whole() {
 		let start = Instant::now();
 		let mut buffer = Buffer::new(DELAY).replay();
-		let video = |decode, sync, skip, item| Arrival {
+		let video = |decode, sync, skip, cut, item| Arrival {
 			sync,
 			skip,
+			cut,
 			..arrival(start, decode, item)
 		};
-		buffer.push(1, video(0, true, 0, "v0")).unwrap();
-		buffer.push(1, video(40, false, 0, "v40")).unwrap();
-		// The rest of the group never arrives: the source skips to the next.
-		assert_eq!(buffer.push(1, video(120, true, 1, "v120")).unwrap(), Push::Queued);
-		buffer.push(1, video(160, false, 1, "v160")).unwrap();
+		buffer.push(1, video(0, true, 0, 0, "v0")).unwrap();
+		buffer.push(1, video(40, false, 0, 0, "v40")).unwrap();
+		// The rest of the group never arrives: the source cuts it short.
+		assert_eq!(buffer.push(1, video(120, true, 1, 1, "v120")).unwrap(), Push::Queued);
+		buffer.push(1, video(160, false, 1, 1, "v160")).unwrap();
+		// A whole group is missing after that one ended.
+		assert_eq!(buffer.push(1, video(280, true, 2, 1, "v280")).unwrap(), Push::Queued);
 		tokio::time::advance(Duration::from_secs(1)).await;
-		assert_eq!(due(&mut buffer), ["v120", "v160"]);
+		assert_eq!(due(&mut buffer), ["v120", "v160", "v280"]);
 		assert_eq!((buffer.dropped(), buffer.trimmed()), (0, 2));
 
-		// Once a frame went out, a gap is a loss in the output, and the rest still goes out.
-		buffer.push(1, video(200, false, 1, "v200")).unwrap();
-		buffer.push(1, video(280, true, 2, "v280")).unwrap();
+		// Once a frame went out, a cut is a loss in the output, and the rest still goes out.
+		buffer.push(1, video(320, false, 2, 1, "v320")).unwrap();
+		buffer.push(1, video(400, true, 3, 2, "v400")).unwrap();
 		tokio::time::advance(Duration::from_secs(1)).await;
-		assert_eq!(due(&mut buffer), ["v200", "v280"]);
+		assert_eq!(due(&mut buffer), ["v320", "v400"]);
 		assert_eq!((buffer.dropped(), buffer.trimmed()), (0, 2));
 	}
 

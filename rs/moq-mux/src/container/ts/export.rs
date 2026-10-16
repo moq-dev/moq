@@ -215,6 +215,8 @@ struct Pending {
 	restart: u64,
 	/// How many times its playhead had jumped, markers included ([`jitter::Arrival::skip`]).
 	skip: u64,
+	/// How many of those jumps cut a group short ([`jitter::Arrival::cut`]).
+	cut: u64,
 	/// The earliest the frame could have arrived: when its source was last found empty.
 	arrived: web_async::time::Instant,
 	/// When it was read: the latest it could have arrived.
@@ -250,9 +252,9 @@ struct Track {
 	empty: web_async::time::Instant,
 	/// The marker count the decode clock runs under.
 	restart: u64,
-	/// The marker and skip counts of the sources the track read before this one, so the
+	/// The marker, skip and cut counts of the sources the track read before this one, so the
 	/// counts keep rising across a resubscription.
-	base: (u64, u64),
+	base: (u64, u64, u64),
 	finished: bool,
 	pid: u16,
 	kind: Kind,
@@ -261,6 +263,12 @@ struct Track {
 	descriptors: Vec<catalog::Descriptor>,
 	/// Authors each video frame's DTS, holding the frames until it can.
 	clock: DecodeClock<(Pending, Option<Bytes>)>,
+	/// Loss counter at the last read, excluding declared ends.
+	recovery_gap: Option<u64>,
+	/// Leading pictures below the recovery keyframe have unavailable references.
+	leading_floor: Option<Timestamp>,
+	/// The PTS of the last keyframe queued, which leading pictures present before.
+	keyframe: Option<Timestamp>,
 	/// What the catalog and the SPS declare about the video's reordering.
 	timing: Timing,
 	/// The receiver's buffers for an audio or verbatim track; video's come from [`Timing`].
@@ -291,12 +299,15 @@ impl Track {
 			pending: None,
 			empty: web_async::time::Instant::now(),
 			restart: 0,
-			base: (0, 0),
+			base: (0, 0, 0),
 			finished: false,
 			pid: 0,
 			kind,
 			descriptors: Vec::new(),
 			clock: DecodeClock::default(),
+			recovery_gap: None,
+			leading_floor: None,
+			keyframe: None,
 			timing: Timing::default(),
 			buffer: None,
 			ac3_carry: None,
@@ -323,6 +334,15 @@ impl Track {
 		let Kind::Video(stream_type) = self.kind else {
 			return self.push(name, pending, None, None, jitter);
 		};
+		// A declared endpoint increments both counters; only delivery loss arms recovery.
+		let gap = pending.skip.saturating_sub(pending.restart);
+		let recover = self.recovery_gap.replace(gap).is_none_or(|previous| previous != gap);
+		if pending.frame.keyframe {
+			self.leading_floor = recover.then_some(pending.frame.timestamp);
+		}
+		if self.leading_floor.is_some_and(|floor| pending.frame.timestamp < floor) {
+			return Ok(());
+		}
 		if pending.frame.keyframe {
 			self.timing.describe(stream_type, self.source.description(), name);
 		}
@@ -351,6 +371,7 @@ impl Track {
 						frame,
 						restart: self.base.0 + self.source.markers(),
 						skip: self.base.1 + self.source.skips(),
+						cut: self.base.2 + self.source.cuts(),
 						arrived: self.empty,
 						read: web_async::time::Instant::now(),
 					};
@@ -399,6 +420,7 @@ impl Track {
 			frame,
 			restart,
 			skip,
+			cut,
 			arrived,
 			read,
 		} = pending;
@@ -407,6 +429,7 @@ impl Track {
 				frame,
 				restart,
 				skip,
+				cut,
 				arrived,
 				read,
 			};
@@ -424,6 +447,7 @@ impl Track {
 				frame,
 				restart,
 				skip,
+				cut,
 				arrived,
 				read,
 			};
@@ -601,6 +625,7 @@ impl Track {
 			frame,
 			restart,
 			skip,
+			cut,
 			arrived,
 			read,
 		} = pending;
@@ -609,6 +634,11 @@ impl Track {
 			.and_then(|ticks| Timestamp::from_scale(ticks, 90_000).ok())
 			.unwrap_or(frame.timestamp);
 		let (key, pes) = self.release_key(decode, jitter.delay(), &frame)?;
+		let video = matches!(self.kind, Kind::Video(_));
+		let leading = video && !frame.keyframe && self.keyframe.is_some_and(|keyframe| frame.timestamp < keyframe);
+		if video && frame.keyframe {
+			self.keyframe = Some(frame.timestamp);
+		}
 		// Replaying anchors on the first frame, and the tracks arrive together rather than each
 		// sent ahead by its send-ahead: judged as arriving that much earlier, as a live source
 		// sends it, every track's first frames are on the clock whichever anchors it.
@@ -622,7 +652,9 @@ impl Track {
 			decode: key,
 			restart,
 			skip,
-			sync: frame.keyframe || !matches!(self.kind, Kind::Video(_)),
+			cut,
+			sync: frame.keyframe || !video,
+			leading,
 			item: Queued {
 				frame,
 				decode,
@@ -1666,8 +1698,10 @@ where
 				continue;
 			};
 			self.stale.remove(name);
+			// The new subscription counts as cutting whatever group the old one was reading.
 			track.base.0 += track.source.markers();
 			track.base.1 += track.source.skips() + 1;
+			track.base.2 += track.source.cuts() + 1;
 			track.source = source;
 			track.finished = false;
 			track.empty = web_async::time::Instant::now();
@@ -3455,6 +3489,7 @@ mod tests {
 				frame,
 				restart: 0,
 				skip: 0,
+				cut: 0,
 				arrived: now,
 				read: now,
 			};

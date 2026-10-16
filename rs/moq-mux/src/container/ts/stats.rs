@@ -176,7 +176,7 @@ pub struct Export {
 	pub streams: BTreeMap<u16, Stream>,
 	/// Frames dropped after their stream's first went out: for arriving after their deadline,
 	/// for falling due before a new timeline's clock was acquired, and the frames a video track
-	/// then dropped waiting for its next keyframe.
+	/// then dropped waiting for its next keyframe or leading the keyframe it resumed at.
 	pub dropped: u64,
 	/// Frames dropped before their stream's first went out, so the output starts on a whole
 	/// group led by the video keyframe: what a joiner is handed older than the delay, a start

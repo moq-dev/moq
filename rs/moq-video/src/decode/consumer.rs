@@ -86,6 +86,9 @@ pub struct Consumer {
 	pending: VecDeque<Frame>,
 	/// Whether the ended track's decoder has already been drained.
 	drained: bool,
+	/// The first recovery group lacks the preceding GOP's references.
+	recover: bool,
+	leading_floor: Option<moq_net::Timestamp>,
 }
 
 impl Consumer {
@@ -139,6 +142,8 @@ impl Consumer {
 			track,
 			pending: VecDeque::new(),
 			drained: false,
+			recover: true,
+			leading_floor: None,
 		})
 	}
 
@@ -149,6 +154,8 @@ impl Consumer {
 
 	/// Read the next decoded frame, or `None` after the track ends and the
 	/// decoder's buffered tail has been drained.
+	///
+	/// Join and delivery-gap recovery trim leading pictures whose previous GOP is absent.
 	///
 	/// This inherits [`Sink`]'s cancellation contract. If a queued codec
 	/// operation is cancelled, the next read returns a codec error: a cancelled
@@ -166,9 +173,12 @@ impl Consumer {
 
 			let mux_frame = match self.track.read().await? {
 				Some(Read::Frame { frame, .. }) => Some(frame),
-				// The next group starts on a keyframe with parameter sets, so neither a
-				// gap nor a declared end flushes the decoder.
-				Some(Read::Gap { .. } | Read::End { .. }) => continue,
+				Some(Read::Gap { .. }) => {
+					self.recover = true;
+					continue;
+				}
+				// A fresh encoder has no preceding GOP to reference.
+				Some(Read::End { .. }) => continue,
 				None => None,
 			};
 
@@ -188,6 +198,14 @@ impl Consumer {
 				self.pending.extend(tail?);
 				continue;
 			};
+
+			if mux_frame.keyframe {
+				self.leading_floor = self.recover.then_some(mux_frame.timestamp);
+				self.recover = false;
+			}
+			if self.leading_floor.is_some_and(|floor| mux_frame.timestamp < floor) {
+				continue;
+			}
 
 			self.pending.extend(
 				self.decoder
@@ -221,6 +239,7 @@ mod tests {
 	use crate::decode::Kind;
 	use crate::decode::backend::probe;
 	use crate::encode::{Config as EncodeConfig, Encoder, Kind as EncodeKind, Producer as EncodeProducer};
+	use moq_mux::container::Container as _;
 
 	#[tokio::test]
 	#[cfg(feature = "openh264")]
@@ -509,6 +528,76 @@ mod tests {
 		assert!(
 			matches!(frame.surface, crate::Surface::I420(_)),
 			"CPU output was not enforced"
+		);
+	}
+
+	#[tokio::test]
+	async fn leading_pictures_require_a_continuous_previous_group() {
+		tokio::time::pause();
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let catalog = VideoConfig::new(hang::catalog::H264 {
+			inline: true,
+			profile: 0x42,
+			constraints: 0,
+			level: 30,
+		});
+		let mut consumer = Consumer::new(
+			&broadcast.consume(),
+			&catalog,
+			"video",
+			Options {
+				decoder: Config {
+					kind: Kind::Named(probe::BUFFERED_NAME.into()),
+					..Config::new()
+				},
+				max_delay: std::time::Duration::from_secs(10),
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+		let wire = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
+		let write = |sequence, stamps: &[u64]| {
+			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+			let frames: Vec<_> = stamps
+				.iter()
+				.enumerate()
+				.map(|(index, stamp)| moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(*stamp).unwrap(),
+					duration: None,
+					payload: Bytes::from_static(b"access unit"),
+					keyframe: index == 0,
+				})
+				.collect();
+			wire.write(&mut group, &frames).unwrap();
+			group.finish().unwrap();
+		};
+		write(10, &[1000, 800, 900, 1100]);
+		write(11, &[2000, 1800, 1900, 2100]);
+		let mut got = Vec::new();
+		for _ in 0..5 {
+			got.push(consumer.read().await.unwrap().unwrap().timestamp.as_micros());
+		}
+		assert_eq!(
+			got,
+			[1000, 1100, 2000, 1800, 1900],
+			"join trims, continuous delivery keeps every leading picture"
+		);
+		consumer.track.set_max_delay(std::time::Duration::ZERO);
+		write(12, &[3000]);
+		write(13, &[4000, 3800, 3900, 4100]);
+		track.finish().unwrap();
+		got.clear();
+		while let Some(frame) = consumer.read().await.unwrap() {
+			got.push(frame.timestamp.as_micros());
+		}
+		assert_eq!(
+			got,
+			[2100, 4000, 4100],
+			"a later latency skip must trim its recovery group too"
 		);
 	}
 
