@@ -325,6 +325,7 @@ pub mod poll {
 	}
 
 	/// The send group of a session's streams.
+	#[cfg(feature = "async")]
 	pub(crate) type GroupOf<S> = <<S as Session>::SendStream as SendStream>::Group;
 
 	/// A transport's send group, from [`Session::send_group`].
