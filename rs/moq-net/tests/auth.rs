@@ -143,44 +143,95 @@ async fn moqt_22_route_auth_renews_its_announce() {
 	a_route_auth_renews_its_announce(MOQT_22).await
 }
 
-/// A route's auth reaches the peer's acceptor on the announcement, and swapping it
-/// renews the announcement with the new token, keeping it live. The client declines MoQ Auth, so every token the server sees
-/// rode a request, and the server declines MoQ Solicit, so the client announces with
+#[moq_net_sim::test]
+async fn moqt_22_renewing_a_cancelled_announce_keeps_the_session() {
+	within(async {
+		let (mut pair, client_origin, _server_origin) = connect_route_auth(MOQT_22).await;
+		let mut tokens = serve(pair.requests.take().unwrap(), |_| Some(Grant::all()));
+		let first = pair.client.auth().add("first").await.expect("kept for requests");
+		let broadcast = client_origin.create_broadcast("room/x").unwrap();
+		broadcast.announce(origin::Route::default().with_auth(first)).unwrap();
+		let (_, first) = tokens.next().await.expect("the announce's token");
+
+		// Ending the grant cancels the announcement, which the client has yet to read when
+		// the swap writes its update.
+		drop(first);
+		moq_net_sim::sleep(Duration::from_secs(1)).await;
+		let second = pair.client.auth().add("second").await.expect("kept for requests");
+		broadcast.announce(origin::Route::default().with_auth(second)).unwrap();
+		let (token, _second) = tokens.next().await.expect("announced again");
+		assert_eq!(token, b"second");
+		assert_eq!(pair.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
+#[moq_net_sim::test]
+async fn moqt_22_a_cancelled_renewal_keeps_the_session() {
+	within(async {
+		let (mut pair, client_origin, _server_origin) = connect_route_auth(MOQT_22).await;
+		// The renewal's token goes unanswered, so its update is still in flight when the
+		// first grant ends and the server cancels the announcement.
+		let mut tokens = serve(pair.requests.take().unwrap(), |token| {
+			(token == b"first").then(Grant::all)
+		});
+		let first = pair.client.auth().add("first").await.expect("kept for requests");
+		let broadcast = client_origin.create_broadcast("room/x").unwrap();
+		broadcast.announce(origin::Route::default().with_auth(first)).unwrap();
+		let (_, first) = tokens.next().await.expect("the announce's token");
+
+		let second = pair.client.auth().add("second").await.expect("kept for requests");
+		broadcast.announce(origin::Route::default().with_auth(second)).unwrap();
+		moq_net_sim::sleep(Duration::from_secs(1)).await;
+		drop(first);
+		moq_net_sim::sleep(Duration::from_secs(1)).await;
+		assert_eq!(pair.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
+/// A pair where the client declines MoQ Auth, so every token the server sees rode a
+/// request, and the server declines MoQ Solicit, so the client announces with
 /// PUBLISH_NAMESPACE rather than answering a SUBSCRIBE_NAMESPACE.
+async fn connect_route_auth(version: &'static str) -> (Pair, origin::Producer, origin::Producer) {
+	let declined = |f: fn(&mut moq_net::setup::Extensions)| {
+		let mut extensions = moq_net::setup::Extensions::default();
+		f(&mut extensions);
+		Some(extensions)
+	};
+	let client_origin = produce_origin(2);
+	let server_origin = produce_origin(1);
+	let pair = connect(Options {
+		version: Some(version),
+		client_publish: Some(client_origin.clone()),
+		server_subscribe: Some(server_origin.clone()),
+		server_requests: true,
+		client_extensions: declined(|e| e.auth = false),
+		server_extensions: declined(|e| e.solicit = false),
+		..Default::default()
+	})
+	.await;
+	(pair, client_origin, server_origin)
+}
+
+/// A route's auth reaches the peer's acceptor on the announcement, and swapping it
+/// renews the announcement with the new token, keeping it live.
 async fn a_route_auth_renews_its_announce(version: &'static str) {
 	within(async {
-		let declined = |f: fn(&mut moq_net::setup::Extensions)| {
-			let mut extensions = moq_net::setup::Extensions::default();
-			f(&mut extensions);
-			Some(extensions)
-		};
-		let client_origin = produce_origin(2);
-		let server_origin = produce_origin(1);
-		let mut pair = connect(Options {
-			version: Some(version),
-			client_publish: Some(client_origin.clone()),
-			server_subscribe: Some(server_origin.clone()),
-			server_requests: true,
-			client_extensions: declined(|e| e.auth = false),
-			server_extensions: declined(|e| e.solicit = false),
-			..Default::default()
-		})
-		.await;
+		let (mut pair, client_origin, server_origin) = connect_route_auth(version).await;
 		let mut tokens = serve(pair.requests.take().unwrap(), |_| Some(Grant::all()));
 
 		let first = pair.client.auth().add("first").await.expect("kept for requests");
 		let broadcast = client_origin.create_broadcast("room/x").unwrap();
-		broadcast
-			.announce(origin::Route::default().with_auth(first))
-			.unwrap();
+		broadcast.announce(origin::Route::default().with_auth(first)).unwrap();
 		let (token, _first) = tokens.next().await.expect("the announce's token");
 		assert_eq!(token, b"first");
 		wait_announced(&server_origin.consume(), "room/x", true).await;
 
 		let second = pair.client.auth().add("second").await.expect("kept for requests");
-		broadcast
-			.announce(origin::Route::default().with_auth(second))
-			.unwrap();
+		broadcast.announce(origin::Route::default().with_auth(second)).unwrap();
 		let (token, _second) = tokens.next().await.expect("the renewal's token");
 		assert_eq!(token, b"second");
 		wait_announced(&server_origin.consume(), "room/x", true).await;
@@ -644,9 +695,9 @@ async fn a_refused_token_reports_the_code(version: &'static str) {
 			}
 		});
 
-		let err = pair.client.auth().add("forged").await.err().expect("refused");
+		let err = pair.client.auth().add("forged").await.expect_err("refused");
 		assert!(matches!(err, Error::Session(SessionError::Unauthorized)), "{err:?}");
-		let err = pair.client.auth().add("opaque").await.err().expect("refused");
+		let err = pair.client.auth().add("opaque").await.expect_err("refused");
 		assert!(matches!(err, Error::Unsupported), "{err:?}");
 	})
 	.await
@@ -761,7 +812,7 @@ async fn a_reset_auth_stream_reports_unsupported(version: &'static str) {
 		.await;
 		granted(&pair.client).await;
 
-		let err = pair.client.auth().add("token").await.err().expect("no acceptor");
+		let err = pair.client.auth().add("token").await.expect_err("no acceptor");
 		assert!(matches!(err, Error::Unsupported), "{err:?}");
 		assert_eq!(pair.client_transport.close_reason(), None);
 	})
@@ -940,7 +991,7 @@ async fn an_unrepresentable_grant_is_unsupported(version: &'static str) {
 		assert_eq!(granted(&pair.client).await, grant(&["a"], &[]));
 
 		for token in ["exact", "mixed", "wildcard"] {
-			let err = pair.client.auth().add(token).await.err().expect("not representable");
+			let err = pair.client.auth().add(token).await.expect_err("not representable");
 			assert!(matches!(err, Error::Unsupported), "{token}: {err:?}");
 		}
 		// The other token is untouched, and so is the session.
@@ -1018,7 +1069,7 @@ async fn a_grant_too_large_for_one_message_is_unsupported(version: &'static str)
 		let (_, _setup) = issued.next().await.unwrap();
 		assert_eq!(granted(&pair.client).await, grant(&["a"], &[]));
 
-		let err = pair.client.auth().add("huge").await.err().expect("too large");
+		let err = pair.client.auth().add("huge").await.expect_err("too large");
 		assert!(matches!(err, Error::Unsupported), "{err:?}");
 		// No AUTH_OK for it reached the wire: the union is still just the setup grant.
 		assert_eq!(pair.client.auth().grant().peek(), Some(grant(&["a"], &[])));

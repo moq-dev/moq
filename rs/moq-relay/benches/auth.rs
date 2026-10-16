@@ -16,7 +16,7 @@ fn grant(prefix: &str) -> Grant {
 
 struct Fixture {
 	_connections: Vec<moq_tokio::Connection>,
-	_tokens: Vec<moq_tokio::connection::auth::Token>,
+	_tokens: Vec<moq_tokio::connection::auth::Auth>,
 	producers: Vec<lease::Producer>,
 	selected: usize,
 	watch: moq_tokio::connection::auth::Watch,
@@ -149,7 +149,7 @@ fn refresh(c: &mut Criterion) {
 /// oldest waiting token, and presents one more so the queue keeps its depth.
 struct Queue {
 	_connection: moq_tokio::Connection,
-	auth: moq_tokio::connection::auth::Auth,
+	auth: moq_tokio::connection::auth::Handle,
 	admissions: auth::Admissions,
 	held: std::collections::VecDeque<auth::Admission>,
 	presented: usize,

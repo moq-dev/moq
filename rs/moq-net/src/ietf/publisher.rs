@@ -1,7 +1,7 @@
 use crate::{frame, group, origin, track};
 use futures::FutureExt as _;
 use std::{
-	collections::{HashMap, HashSet, VecDeque},
+	collections::{HashMap, VecDeque},
 	ops::Bound,
 	sync::{
 		Arc,
@@ -417,8 +417,13 @@ struct Namespaces<S: crate::transport::poll::Session> {
 	/// waits for credit beside the loop's other work and computes its update when it gets
 	/// one, so a later change supersedes an earlier one that is still waiting.
 	updates: VecDeque<crate::PathOwned>,
-	/// Requests with an update in flight, each answered on its own stream.
-	inflight: HashSet<crate::PathOwned>,
+	/// Requests with an update in flight, each answered on its own stream, by when each
+	/// gives up. Sent in order with one timeout, so the front is the earliest; an entry
+	/// whose request moved on is skipped when it reaches the front.
+	inflight: VecDeque<(crate::time::Instant, crate::PathOwned)>,
+	/// Requests whose stream woke the loop, so a wake polls those rather than every
+	/// update in flight.
+	woken: Arc<Woken>,
 	/// What we may advertise: our grant (MoQ Auth) and the ceiling on the peer.
 	permit: crate::auth::Permit,
 	/// The auth epoch last applied to `permit`.
@@ -435,7 +440,8 @@ impl<S: crate::transport::poll::Session> Namespaces<S> {
 			watched: HashMap::new(),
 			requests: HashMap::new(),
 			updates: VecDeque::new(),
-			inflight: HashSet::new(),
+			inflight: VecDeque::new(),
+			woken: Default::default(),
 			permit: Default::default(),
 			epoch: 0,
 			hidden: false,
@@ -499,8 +505,54 @@ enum NamespaceEvent {
 	Regrant(crate::auth::Permit),
 	/// The queued update at the front got this request ID.
 	Renew(RequestId),
-	/// An update in flight was answered, or `None` once its deadline passed.
-	Answered(crate::PathOwned, Option<Result<super::request_stream::Framed, Error>>),
+	/// What came back for an update in flight.
+	Answered(crate::PathOwned, Result<Answer, Error>),
+}
+
+/// What came back for an update in flight.
+enum Answer {
+	/// The peer's REQUEST_OK or REQUEST_ERROR.
+	Message(super::request_stream::Framed),
+	/// The peer ended the request instead, a cancel from draft 17.
+	Ended,
+	/// Nothing before its deadline.
+	Late,
+}
+
+/// The requests whose stream woke an announce loop since it last looked.
+#[derive(Default)]
+struct Woken {
+	suffixes: std::sync::Mutex<Vec<crate::PathOwned>>,
+	/// The loop, woken in turn.
+	owner: std::sync::Mutex<Option<std::task::Waker>>,
+}
+
+impl Woken {
+	/// A waker that marks `suffix` woken.
+	fn waker(self: &Arc<Self>, suffix: crate::PathOwned) -> std::task::Waker {
+		std::task::Waker::from(Arc::new(RequestWaker {
+			woken: self.clone(),
+			suffix,
+		}))
+	}
+}
+
+struct RequestWaker {
+	woken: Arc<Woken>,
+	suffix: crate::PathOwned,
+}
+
+impl std::task::Wake for RequestWaker {
+	fn wake(self: Arc<Self>) {
+		self.wake_by_ref()
+	}
+
+	fn wake_by_ref(self: &Arc<Self>) {
+		self.woken.suffixes.lock().unwrap().push(self.suffix.clone());
+		if let Some(owner) = &*self.woken.owner.lock().unwrap() {
+			owner.wake_by_ref();
+		}
+	}
 }
 
 #[derive(Clone)]
@@ -2747,7 +2799,8 @@ where
 		// An update already waiting or in flight carries whatever is current once it goes
 		// out, and its answer brings the loop back here for anything after that.
 		if wanted
-			&& !restart && let Some(request) = request
+			&& !restart
+			&& let Some(request) = request
 			&& !unchanged
 		{
 			if !request.queued && request.pending.is_none() {
@@ -2933,6 +2986,7 @@ where
 				auth,
 				queued: false,
 				pending: None,
+				waker: None,
 			},
 		);
 		Ok(Refused::No)
@@ -2985,7 +3039,9 @@ where
 					&& request.pending.is_none()
 					&& ns.watched.get(suffix).is_some_and(|watch| {
 						self.offer(ns, suffix, &prefix.join(suffix))
-							.is_some_and(|(advert, auth)| advert.wanted() && (advert != watch.sent || auth != request.auth))
+							.is_some_and(|(advert, auth)| {
+								advert.wanted() && (advert != watch.sent || auth != request.auth)
+							})
 					})
 			});
 			if wants {
@@ -3034,36 +3090,75 @@ where
 			update.authorization_token = auth.as_ref().and_then(|auth| self.request_token(auth));
 		}
 		tracing::debug!(broadcast = %self.origin.absolute(&request.path), "publish_namespace update");
-		request.stream.writer.varint(ietf::PublishNamespaceUpdate::ID).await?;
-		request.stream.writer.encode(&update).await?;
+		let written = async {
+			request.stream.writer.varint(ietf::PublishNamespaceUpdate::ID).await?;
+			request.stream.writer.encode(&update).await
+		}
+		.await;
+		if let Err(err) = written {
+			// The peer ended the request before the update reached it, which ends only this
+			// advertisement: closing our side completes the withdrawal, and the retry
+			// re-offers it fresh.
+			tracing::debug!(%err, "publish_namespace update not sent");
+			self.withdraw_namespace(&mut ns.target, &mut ns.requests, suffix.clone())
+				.await?;
+			if let Some(watch) = ns.watched.get_mut(&suffix) {
+				watch.refused = Refused::No;
+				watch.deferred = Refused::No.pending();
+				watch.sent = Advert::None;
+			}
+			return Ok(());
+		}
 
 		// The peer holds the update unless its answer says otherwise.
-		request.pending = Some(self.runtime.now() + ADVERTISE_TIMEOUT);
+		let deadline = self.runtime.now() + ADVERTISE_TIMEOUT;
+		request.pending = Some(deadline);
 		request.auth = auth;
 		watch.sent = advert;
-		ns.inflight.insert(suffix);
+		// Marked woken, so the loop's next pass reads the answer it may already have.
+		ns.woken.suffixes.lock().unwrap().push(suffix.clone());
+		ns.inflight.push_back((deadline, suffix));
 		Ok(())
 	}
 
-	/// The answer to an update in flight, or `None` for one past its deadline.
+	/// What came back for an update in flight, polling only the requests that woke.
 	fn poll_answer(
 		requests: &mut HashMap<crate::PathOwned, NamespaceRequest<S>>,
-		inflight: &HashSet<crate::PathOwned>,
+		inflight: &mut VecDeque<(crate::time::Instant, crate::PathOwned)>,
+		woken: &Arc<Woken>,
 		now: crate::time::Instant,
 		cx: &mut std::task::Context<'_>,
-	) -> Poll<(crate::PathOwned, Option<Result<super::request_stream::Framed, Error>>)> {
-		for suffix in inflight {
-			let Some(request) = requests.get_mut(suffix) else {
+	) -> Poll<(crate::PathOwned, Result<Answer, Error>)> {
+		// Registered before the take, so a wake landing between them is not lost.
+		*woken.owner.lock().unwrap() = Some(cx.waker().clone());
+		let mut suffixes = std::mem::take(&mut *woken.suffixes.lock().unwrap());
+		while let Some(suffix) = suffixes.pop() {
+			let Some(request) = requests.get_mut(&suffix) else {
 				continue;
 			};
-			let Some(deadline) = request.pending else {
+			if request.pending.is_none() {
 				continue;
-			};
-			if let Poll::Ready(answer) = request.stream.reader.poll_decode(cx) {
-				return Poll::Ready((suffix.clone(), Some(answer)));
 			}
-			if now >= deadline {
-				return Poll::Ready((suffix.clone(), None));
+			let waker = request.waker.get_or_insert_with(|| woken.waker(suffix.clone())).clone();
+			if let Poll::Ready(answer) = request
+				.stream
+				.reader
+				.poll_decode_maybe(&mut std::task::Context::from_waker(&waker))
+			{
+				// The rest stay woken for the next pass.
+				woken.suffixes.lock().unwrap().append(&mut suffixes);
+				let answer = answer.map(|answer| answer.map_or(Answer::Ended, Answer::Message));
+				return Poll::Ready((suffix, answer));
+			}
+		}
+		while let Some((deadline, suffix)) = inflight.front() {
+			let current = requests.get(suffix).and_then(|request| request.pending) == Some(*deadline);
+			if current && now < *deadline {
+				break;
+			}
+			let (_, suffix) = inflight.pop_front().expect("just peeked");
+			if current {
+				return Poll::Ready((suffix, Ok(Answer::Late)));
 			}
 		}
 		Poll::Pending
@@ -3073,30 +3168,35 @@ where
 	/// REQUEST_ERROR closed the stream and withdrew the advertisement (moq-transport Section
 	/// 9.5.1), so the request is dropped and the retry re-offers it fresh. An unanswered
 	/// update is dropped the same way, since a peer that ignored it cannot be assumed to hold
-	/// either version.
+	/// either version, and so is one the peer cancelled instead of answering.
 	async fn answered(
 		&self,
 		ns: &mut Namespaces<S>,
 		prefix: &crate::PathOwned,
 		suffix: crate::PathOwned,
-		answer: Option<Result<super::request_stream::Framed, Error>>,
+		answer: Result<Answer, Error>,
 	) -> Result<(), Error> {
-		ns.inflight.remove(&suffix);
 		let Some(request) = ns.requests.get_mut(&suffix) else {
 			return Ok(());
 		};
 		request.pending = None;
 		let absolute = self.origin.absolute(&request.path).to_owned();
 
-		let refused = match answer {
-			None => {
+		let refused = match answer? {
+			Answer::Late => {
 				tracing::debug!(broadcast = %absolute, "no answer to the update");
 				// Abrupt: a peer that never answers is not owed the FIN handshake.
 				ns.requests.remove(&suffix);
 				Refused::No
 			}
-			Some(answer) => {
-				let super::request_stream::Framed(type_id, body) = answer?;
+			Answer::Ended => {
+				tracing::debug!(broadcast = %absolute, "update cancelled");
+				// The peer closed its side; closing ours completes the withdrawal.
+				self.withdraw_namespace(&mut ns.target, &mut ns.requests, suffix.clone())
+					.await?;
+				Refused::No
+			}
+			Answer::Message(super::request_stream::Framed(type_id, body)) => {
 				let mut data = body.decoder(self.version);
 				match type_id {
 					ietf::RequestOk::ID => {
@@ -3504,10 +3604,6 @@ where
 				}
 			}
 			retry.set(retry_at);
-			// Requests an update was withdrawn from leave the in-flight set here.
-			let Namespaces { requests, inflight, .. } = &mut ns;
-			inflight.retain(|suffix| requests.get(suffix).is_some_and(|request| request.pending.is_some()));
-			answer_by.set(inflight.iter().filter_map(|suffix| requests[suffix].pending).min());
 			self.prune_updates(&mut ns, &prefix);
 
 			let event = {
@@ -3516,6 +3612,7 @@ where
 					epoch,
 					requests,
 					inflight,
+					woken,
 					updates,
 					..
 				} = &mut ns;
@@ -3534,11 +3631,13 @@ where
 					}
 					// Each update in flight is answered on its own stream, so many renew at
 					// once and none holds up the announcements behind it.
-					let _ = answer_by.poll(waiter);
 					let now = self.runtime.now();
-					if let Poll::Ready((suffix, answer)) = Self::poll_answer(requests, inflight, now, &mut cx) {
+					if let Poll::Ready((suffix, answer)) = Self::poll_answer(requests, inflight, woken, now, &mut cx) {
 						return Poll::Ready(NamespaceEvent::Answered(suffix, answer));
 					}
+					// The front is now the earliest update still waiting.
+					answer_by.set(inflight.front().map(|(deadline, _)| *deadline));
+					let _ = answer_by.poll(waiter);
 					// Credit goes to queued updates in order, as the drafts before 17 require.
 					if !updates.is_empty()
 						&& let Poll::Ready(id) = self.control.poll_next_request_id(waiter)
@@ -4728,6 +4827,8 @@ struct NamespaceRequest<S: crate::transport::poll::Session> {
 	queued: bool,
 	/// When to give up on the update in flight, which has no answer yet.
 	pending: Option<crate::time::Instant>,
+	/// Marks this request woken when its stream has an answer.
+	waker: Option<std::task::Waker>,
 }
 
 #[cfg(test)]
@@ -12824,7 +12925,10 @@ mod tests {
 		auth: &crate::auth::Handle,
 		scripts: Vec<Vec<u8>>,
 		version: Version,
-	) -> (Publisher<crate::lite::test_transport::ScriptedSession>, crate::lite::test_transport::Log) {
+	) -> (
+		Publisher<crate::lite::test_transport::ScriptedSession>,
+		crate::lite::test_transport::Log,
+	) {
 		let session = crate::lite::test_transport::ScriptedSession::per_stream(scripts);
 		let log = session.log.clone();
 		let publisher = Publisher::new(
@@ -12875,7 +12979,9 @@ mod tests {
 		let origin = unheld_origin();
 		let auth = crate::auth::Handle::ietf(false);
 		let first = auth.present(bytes::Bytes::from_static(b"first-secret"), false).unwrap();
-		let second = auth.present(bytes::Bytes::from_static(b"second-secret"), false).unwrap();
+		let second = auth
+			.present(bytes::Bytes::from_static(b"second-secret"), false)
+			.unwrap();
 		let cam = origin
 			.announce("cam", crate::origin::Route::default().with_auth(first))
 			.unwrap();
@@ -12886,7 +12992,11 @@ mod tests {
 		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
 		poll_until(&mut run, &log, b"cam", 1).await;
 		assert_eq!(occurrences(&log, b"cam"), 1, "the advertisement never went out");
-		assert_eq!(occurrences(&log, b"first-secret"), 1, "PUBLISH_NAMESPACE carries the auth");
+		assert_eq!(
+			occurrences(&log, b"first-secret"),
+			1,
+			"PUBLISH_NAMESPACE carries the auth"
+		);
 
 		cam.update(crate::origin::Route::default().with_auth(second)).unwrap();
 		let expected = request_update(
@@ -12915,7 +13025,9 @@ mod tests {
 
 		let origin = unheld_origin();
 		let other = crate::auth::Handle::ietf(false);
-		let foreign = other.present(bytes::Bytes::from_static(b"foreign-secret"), false).unwrap();
+		let foreign = other
+			.present(bytes::Bytes::from_static(b"foreign-secret"), false)
+			.unwrap();
 		let _cam = origin
 			.announce("cam", crate::origin::Route::default().with_auth(foreign))
 			.unwrap();
@@ -12927,7 +13039,11 @@ mod tests {
 		poll_until(&mut run, &log, b"cam", 1).await;
 
 		assert_eq!(occurrences(&log, b"cam"), 1, "the advertisement never went out");
-		assert_eq!(occurrences(&log, b"foreign-secret"), 0, "sent another handle's credential");
+		assert_eq!(
+			occurrences(&log, b"foreign-secret"),
+			0,
+			"sent another handle's credential"
+		);
 	}
 
 	/// moq-transport cannot name an auth on a request that had none, so naming one
@@ -12965,7 +13081,9 @@ mod tests {
 		let origin = unheld_origin();
 		let auth = crate::auth::Handle::ietf(false);
 		let first = auth.present(bytes::Bytes::from_static(b"first-secret"), false).unwrap();
-		let second = auth.present(bytes::Bytes::from_static(b"second-secret"), false).unwrap();
+		let second = auth
+			.present(bytes::Bytes::from_static(b"second-secret"), false)
+			.unwrap();
 		let cam = origin
 			.announce("cam", crate::origin::Route::default().with_auth(first))
 			.unwrap();
@@ -12980,7 +13098,11 @@ mod tests {
 		poll_until(&mut run, &log, b"second-secret", 1).await;
 
 		assert_eq!(occurrences(&log, b"second-secret"), 1, "the renewal never went out");
-		assert_eq!(occurrences(&log, b"first-secret"), 1, "the first token was not repeated");
+		assert_eq!(
+			occurrences(&log, b"first-secret"),
+			1,
+			"the first token was not repeated"
+		);
 		assert_eq!(log.bi_opens(), 2, "a fresh request for the renewal");
 	}
 
@@ -13027,6 +13149,43 @@ mod tests {
 			occurrences(&log, b"cam-c"),
 			1,
 			"a new announcement waited on the renewals"
+		);
+	}
+
+	/// An update the peer never answers drops its request once the timeout passes, and
+	/// the retry advertises the namespace afresh under the current auth.
+	#[moq_net_sim::test]
+	async fn an_unanswered_renewal_advertises_again() {
+		const VERSION: Version = Version::Draft19;
+
+		let origin = unheld_origin();
+		let auth = crate::auth::Handle::ietf(false);
+		let present = |token: &'static [u8]| auth.present(bytes::Bytes::from_static(token), false).unwrap();
+		let cam = origin
+			.announce("cam", crate::origin::Route::default().with_auth(present(b"first")))
+			.unwrap();
+		settle().await;
+
+		let ok = publish_namespace_ok(VERSION).await;
+		let (publisher, log) = auth_publisher(&origin, &auth, vec![ok.clone(), ok], VERSION);
+		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+		poll_until(&mut run, &log, b"first", 1).await;
+		cam.update(crate::origin::Route::default().with_auth(present(b"second")))
+			.unwrap();
+		poll_until(&mut run, &log, b"second", 1).await;
+		assert_eq!(occurrences(&log, b"second"), 1, "the renewal never went out");
+
+		for _ in 0..20 {
+			if occurrences(&log, b"second") >= 2 {
+				break;
+			}
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			moq_net_sim::sleep(Duration::from_secs(1)).await;
+		}
+		assert_eq!(
+			occurrences(&log, b"second"),
+			2,
+			"the unanswered renewal was never retried"
 		);
 	}
 

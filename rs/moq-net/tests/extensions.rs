@@ -9,7 +9,7 @@ mod support;
 
 use std::time::Duration;
 
-use moq_net::{Error, Hop, Version, origin, setup::Extensions};
+use moq_net::{Hop, Version, origin, setup::Extensions};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// Long enough, in virtual time, for anything in flight to reach the far side.

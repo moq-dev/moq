@@ -1943,7 +1943,10 @@ mod tests {
 		assert!(ietf.state.read().opening.is_empty(), "nothing to open a stream for");
 
 		let lite = Handle::new(false);
-		assert!(matches!(lite.present(Bytes::from_static(b"jwt"), false), Err(Error::Unsupported)));
+		assert!(matches!(
+			lite.present(Bytes::from_static(b"jwt"), false),
+			Err(Error::Unsupported)
+		));
 	}
 
 	/// A peer that turns out not to speak AUTH leaves a moq-transport auth for its
