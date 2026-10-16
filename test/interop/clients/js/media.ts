@@ -50,6 +50,8 @@ import { type Capabilities, missing, probe, type Role } from "./src/capabilities
 import {
 	type CaptureState,
 	FAULTS,
+	LONG_FRAMES,
+	type LongFrame,
 	leakedPlayerStarted,
 	reachesLive,
 	SAMPLE_MS,
@@ -294,7 +296,101 @@ async function measurePlayback(player: Page, playerErrors: BrowserErrors, label:
 		description: `${label}: the audio buffer to fill to the player's delay and play`,
 		predicate: (state) => state.audioContext === "running" && !state.audioStalled,
 	});
-	assertMedia(await collect(player, playerErrors, WINDOW_MS), label);
+	const host = watchHost();
+	const samples = await collect(player, playerErrors, WINDOW_MS);
+	try {
+		assertMedia(samples, label);
+	} catch (err) {
+		await explainStalls(player, samples, label, host);
+		throw err;
+	} finally {
+		host?.process.kill();
+	}
+}
+
+/** How often the host's busiest processes are read during a window. */
+const HOST_INTERVAL_S = 0.5;
+
+/**
+ * Read the host's busiest processes for the length of one window, on Linux, where `top` has a batch
+ * mode. A page's main thread stopping for hundreds of milliseconds is either the page's own work or a
+ * starved host, and only the host can say which.
+ */
+function watchHost(): { process: Bun.Subprocess<"ignore", "pipe", "ignore">; output: Promise<string> } | undefined {
+	if (process.platform !== "linux") return undefined;
+	const iterations = Math.ceil(WINDOW_MS / 1000 / HOST_INTERVAL_S) + 1;
+	const top = Bun.spawn(["top", "-b", "-c", "-w", "512", "-d", String(HOST_INTERVAL_S), "-n", String(iterations)], {
+		stdin: "ignore",
+		stdout: "pipe",
+		stderr: "ignore",
+	});
+	return { process: top, output: new Response(top.stdout).text() };
+}
+
+// A process as `top -c` prints it, cut to what tells the processes apart: the binary, plus the type of
+// a Chromium child (renderer, gpu-process, utility), whose binaries all share one name.
+function processName(command: string): string {
+	const [binary = "", ...args] = command.split(/\s+/);
+	const type = args.find((arg) => arg.startsWith("--type="))?.slice("--type=".length);
+	const name = binary.split("/").pop() ?? binary;
+	return type ? `${name}:${type}` : name;
+}
+
+/**
+ * Print what stopped the pages' main threads during a failed window: each page's long animation
+ * frames with the scripts that ran in them, and the host's busiest processes.
+ *
+ * Evidence only. A page that cannot be read leaves its part out rather than masking the failure.
+ */
+async function explainStalls(
+	player: Page,
+	samples: PlayerState[],
+	label: string,
+	host: ReturnType<typeof watchHost>,
+): Promise<void> {
+	try {
+		const origin = await inspect(player, () => performance.timeOrigin, undefined);
+		const start = origin + (samples[0]?.at ?? 0);
+		const end = origin + (samples[samples.length - 1]?.at ?? 0);
+		for (const [name, page] of [
+			["player", player],
+			["fixture", fixturePage],
+		] as const) {
+			if (!page) continue;
+			const frames = await inspect(
+				page,
+				({ key, from, to }) =>
+					((globalThis as unknown as Record<string, LongFrame[] | undefined>)[key] ?? []).filter(
+						(frame) => frame.at + frame.duration >= from && frame.at <= to,
+					),
+				{ key: LONG_FRAMES, from: start, to: end },
+			);
+			console.error(`  ${label}: ${name} long animation frames: ${frames.length}`);
+			for (const frame of frames) {
+				console.error(
+					`    +${((frame.at - start) / 1000).toFixed(2)}s ${frame.duration}ms (blocking ${frame.blocking}ms) ${frame.scripts}`,
+				);
+			}
+		}
+	} catch (err) {
+		console.error(`  ${label}: long animation frames unavailable: ${err}`);
+	}
+
+	if (!host) return;
+	host.process.kill();
+	const snapshots = (await host.output).split(/^top - /m).slice(1);
+	console.error(`  ${label}: busiest host processes every ${HOST_INTERVAL_S}s from the window's start`);
+	for (const [index, snapshot] of snapshots.entries()) {
+		const lines = snapshot.split("\n");
+		const idle = lines.find((line) => line.startsWith("%Cpu"))?.match(/([\d.]+) id/)?.[1];
+		const header = lines.findIndex((line) => /^\s*PID\s/.test(line));
+		const busiest = lines
+			.slice(header + 1, header + 7)
+			.map((line) => line.trim().split(/\s+/))
+			.filter((fields) => fields.length >= 12)
+			.map((fields) => `${processName(fields.slice(11).join(" "))} ${fields[8]}%`);
+		console.error(`    +${(index * HOST_INTERVAL_S).toFixed(1)}s idle ${idle ?? "?"}%: ${busiest.join(", ")}`);
+	}
 }
 
 // One sample as a line: elapsed time, the frame on the canvas, the tone step heard against the one
@@ -439,6 +535,9 @@ async function capabilities(browser: Browser, engine: Engine, role: Role): Promi
 }
 
 const server = serve();
+
+/** The fixture publisher, whose stalls {@link explainStalls} reports beside the player's. */
+let fixturePage: Page | undefined;
 const browsers: Browser[] = [];
 
 // One browser per role. Chromium's default autoplay behavior varies with engagement and when the
@@ -592,6 +691,7 @@ try {
 		pageUrl(server.origin, "fixture", { url: relay, broadcast, fault }),
 		"fixture",
 	);
+	fixturePage = publisher;
 
 	console.error("=== publisher readiness ===");
 	const beforePublisherGesture = await readFixtureState(publisher);
