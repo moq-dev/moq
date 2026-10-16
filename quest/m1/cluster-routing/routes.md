@@ -18,8 +18,7 @@ Keep the 2026-10-01 two-layer direction, reconciled with the maintainer's
 contract below. The routing contract's fixtures live in
 `rs/moq-net/tests/routing_contracts/` and run against a small reference model;
 port each topology to the implementation as acceptance, then delete the model.
-The handoff contract below settles claim freshness; its proposals marked open
-await the maintainer before the wire is written:
+The handoff contract below, decided 2026-10-16, settles claim freshness:
 
 - Wire sketch, flexible in detail. ROUTE_START carries the node id, a seqno,
   the metric, and the down-only bit (below), and implicitly takes the next
@@ -43,6 +42,7 @@ await the maintainer before the wire is written:
   never changes its Route ID: another origin
   serving the same path is another ANNOUNCE. An ANNOUNCE naming an unknown
   Route ID is a protocol violation. A ROUTE_UPDATE with an infinite metric
+  (2^64-1, the largest lite-07 varint; a sum reaching it is unreachable)
   means held: the sender has no usable route but still holds the origin's
   announcements while it recovers. ROUTE_END means the sender let go of the
   origin on this stream; neither is proof that the origin withdrew its
@@ -174,21 +174,20 @@ await the maintainer before the wire is written:
   2026-10-12). A node whose routes to an origin are all infeasible sends
   ROUTE_REQUEST for that origin, with its feasibility seqno plus one, to the
   neighbour it would use. A node holding a route at least that new answers
-  with it, and only the origin advances its seqno to answer. Otherwise, while
-  the hop count is at least two, it forwards the request with the hop count
-  decremented, never to the requesting neighbour (RFC 8966 s3.8.1.2): through
-  a feasible route's next hop if one avoids the requester, else through an
-  infeasible route's, else it drops the request. Every node holding a
-  request, its own or forwarded, keeps one per origin pending, suppressing
-  duplicates, until it selects a route at least that new or has no usable
-  route left, and sends it again whenever the neighbour it would send it to
-  changes. No retry timer and no hop count: a looping copy meets its own
-  pending entry and stops. Proposed by the handoff proof, open: the earlier
-  sketch (a few timed resends, then wait for the next infeasible update)
-  leaves a node starved for good behind a quiet origin when every attempt is
-  dropped by a forwarder whose retraction is still in flight, and the
-  previous hop then moves to an equal-metric route that changes nothing it
-  advertises (`a_quiet_origin_stays_starved_after_bounded_retries`).
+  with it, and only the origin advances its seqno to answer. Otherwise it
+  forwards the request, never to the requesting neighbour (RFC 8966
+  s3.8.1.2): through a feasible route's next hop if one avoids the requester,
+  else through an infeasible route's, else it drops the request. Every node
+  holding a request, its own or forwarded, keeps one per origin pending,
+  suppressing duplicates, until it selects a route at least that new or has
+  no usable route left, and sends it again whenever the neighbour it would
+  send it to changes. No retry timer and no hop count: a looping copy meets
+  its own pending entry and stops. Decided 2026-10-16 from the handoff
+  proof: the earlier sketch (a few timed resends, then wait for the next
+  infeasible update) leaves a node starved for good behind a quiet origin
+  when every attempt is dropped by a forwarder whose retraction is still in
+  flight, and the previous hop then moves to an equal-metric route that
+  changes nothing it advertises (`a_quiet_origin_stays_starved_after_bounded_retries`).
   Recovery is eventual without timers: a drop happens only at a node with no
   usable route, whose retraction then changes the previous hop's next hop
   and resends the request, and once the topology is quiet the selected next
@@ -312,7 +311,8 @@ loss never reports an END:
   an infinite metric. Holds therefore follow strictly decreasing metrics
   down to a starved node and cannot prop each other up. Otherwise the node
   lets go: ROUTE_END to every neighbor it advertised to, and its reader sees
-  the announcements go offline, distinct from an END the origin sent. The
+  the announcements go offline, a distinct event from an END the origin
+  sent; while held, the reader sees them unavailable. The
   detour window keeps presence at the starved relay and behind it
   (`a_starved_relay_keeps_presence_unavailable_until_its_request_recovers_it`);
   a dead origin or a total partition goes offline everywhere with no timer
@@ -355,25 +355,30 @@ loss never reports an END:
   Merged floors' re-announcements follow an offline period or a collection,
   never a known withdrawal. Byte counts are estimates in virtual time.
 
-Proposed by the handoff proof, open for the maintainer:
+Decided with the maintainer 2026-10-16, from the handoff proof:
 
-1. Floor encoding. (a) Recommended: ANNOUNCE_FLOOR (Route ID, revision)
-   closes each batch, and ANNOUNCEs carry no revision. (b) A revision on every
-   ANNOUNCE: a receiver still needs each session's last view to apply a
-   batch from a sender whose own view jumped, so it adds bytes and removes no
-   state. (c) The floor on ROUTE_UPDATE, which ties claim churn to route
-   processing.
-2. Held encoding. (a) Recommended: an infinite metric means held and
-   ROUTE_END means let go, with no new field. (b) An explicit held bit.
-3. Reader API. (a) Recommended: an announcement carries availability, and
-   letting go is reported as offline, distinct from the origin's END. (b) No
-   availability signal: presence alone, with requests waiting. (c) Let-go
-   reported as END, as today.
-4. Collection. (a) Recommended: collect once no route entry remains, since
-   correctness does not depend on the delay. (b) Babel's source GC timer.
-5. Seqno requests. (a) Recommended: hop-by-hop pending with resend on
-   next-hop change, no timer, no hop count. (b) The bounded-retry sketch,
-   which strands a quiet origin's node.
+1. Floor encoding: ✅ ANNOUNCE_FLOOR (Route ID, revision) closes each batch,
+   and ANNOUNCEs carry no revision. Rejected: a revision on every ANNOUNCE,
+   which adds bytes and removes no state, since a receiver still needs each
+   session's last view to apply a batch from a sender whose own view jumped;
+   and the floor on ROUTE_UPDATE, which ties claim churn to route processing.
+2. Held encoding: ✅ an infinite metric (2^64-1) means held and ROUTE_END
+   means let go, with no new field. Rejected: an explicit held bit.
+3. Reader API: ✅ an announcement carries availability, and letting go is a
+   distinct offline event, separate from the origin's END, in Rust and JS.
+   Rejected: presence alone, which gives a reader nothing to re-request on
+   when a held route recovers; let-go reported as END, as today; and
+   availability with let-go kept as END, which hides whether the origin
+   ended or the network lost it.
+4. Collection: ✅ collect once no neighbor's route entry remains, held
+   entries included. Babel's source GC timer guards against a late stale
+   advertisement, which an ordered session cannot deliver after its
+   retraction. `sweep_handoff` checks selected routes stay loop-free at every
+   step; collecting while a neighbor's entry remains loops at once.
+   Rejected: Babel's source GC timer.
+5. Seqno requests: ✅ one pending request per origin at every hop, resent on
+   a next-hop change, with no timer and no hop count. Rejected: the
+   bounded-retry sketch, which strands a quiet origin's node.
 
 Why not a hold-down: #4644 retracted at once and re-announced a replacement
 after 1 s, which ended a downstream front whose only path ran through the
@@ -475,7 +480,9 @@ rather than adding a browser forwarding engine. Public API: the route-change
 surface on `broadcast::Route` and its bindings will likely change, `Hops`
 and saturating `Cost` go, zero-cost links are refused, a per-connection
 `proxy` preference is added, and `cluster.id`/`--cluster-id` is removed
-rather than kept as an unused label (decided 2026-10-13). `Preference`
+rather than kept as an unused label (decided 2026-10-13). Announcements
+expose availability, and a let-go is reported as offline rather than END
+(decided 2026-10-16). `Preference`
 continues to rank feasible transit routes; report it. This may
 split at start (Rust and draft, then JS), as long as both land in one
 release.
