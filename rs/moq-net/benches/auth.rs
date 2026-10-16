@@ -21,7 +21,10 @@ struct Pair {
 }
 
 async fn pair(version: Version) -> Pair {
-	let (client, server) = create_mock_session_pair(Some(version.alpn()));
+	let (client, server) = create_mock_session_pair(moq_net::transport::memory::Config {
+		protocol: Some(version.alpn().to_string()),
+		..Default::default()
+	});
 	let client = async {
 		let (session, driver) = moq_net::Client::new()
 			.with_versions(version.into())

@@ -44,7 +44,10 @@ async fn dial(dialer: &origin::Producer, edge: &origin::Producer) -> Link {
 	let version = version();
 	let registry = stats::Registry::new(stats::Config::new());
 	let session_stats = registry.tier(stats::Tier::default()).session("");
-	let (client_transport, server_transport) = create_mock_session_pair(Some(version.alpn()));
+	let (client_transport, server_transport) = create_mock_session_pair(moq_net::transport::memory::Config {
+		protocol: Some(version.alpn().to_string()),
+		..Default::default()
+	});
 
 	// Cluster dials publish and subscribe through a peer handle, which is what
 	// records the announcing session on the route.
