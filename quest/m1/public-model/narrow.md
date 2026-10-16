@@ -3,7 +3,7 @@
 ## Goal
 
 Every model-internal Rust item in `rs/moq-net/src/model/` is
-`pub(in crate::model)` (or `pub(super)`), so a `pub(crate)` left there is
+`pub(in crate::model)` (or `pub(super)` outside `model/mod.rs`), so a `pub(crate)` left there is
 either marked deliberately private (passthrough, tuning, capability gap,
 test-only) or marked pending with the
 [public model](/quest/m1/public-model/README.md) child that owns it. A new
