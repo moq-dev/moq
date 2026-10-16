@@ -18,7 +18,7 @@
 //! adopted as a member of a steered `SO_REUSEPORT` group (one worker per core
 //! on one port; see [`udp::Bound`](crate::udp::Bound)) brings its slot along,
 //! and every id the endpoint issues then carries the
-//! [`moq_sock::shard::cid_prefix`] steering byte, so the kernel keeps
+//! [`moq_sock::shard::cid`] steering marker, so the kernel keeps
 //! delivering a connection's packets to the worker that owns it. Dials
 //! through the endpoint carry it too, which is what steers a cluster peer's
 //! responses back to the dialing worker.
@@ -30,7 +30,7 @@ pub use super::noq::Endpoint;
 /// Every connection id this endpoint issues is this long: long enough to be
 /// unguessable per socket, and fixed because a short header does not encode
 /// the id's length, so parsing one assumes it.
-pub const CID_LEN: usize = 8;
+pub const CID_LEN: usize = moq_sock::shard::CID_LEN;
 
 /// What an endpoint serves, beyond dialing.
 #[derive(Clone, Debug)]
@@ -76,9 +76,5 @@ impl Config {
 /// A fresh [`CID_LEN`]-byte connection id, leading with the steering prefix
 /// when the endpoint's socket is a member of a reuseport group.
 pub(crate) fn cid(shard: Option<moq_sock::shard::Shard>) -> [u8; CID_LEN] {
-	let mut cid: [u8; CID_LEN] = rand::random();
-	if let Some(shard) = shard {
-		cid[0] = moq_sock::shard::cid_prefix(shard);
-	}
-	cid
+	shard.map_or_else(rand::random, moq_sock::shard::cid)
 }

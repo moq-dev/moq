@@ -31,6 +31,6 @@ for f in draft-*.md; do
 done
 
 for f in moq-e2ee-*.ts; do
-    bun tsc --noEmit --skipLibCheck --target esnext --module esnext --moduleResolution bundler --types bun "$f"
+    bun tsc --ignoreConfig --noEmit --skipLibCheck --target esnext --module esnext --moduleResolution bundler --types bun "$f"
     bun "$f"
 done

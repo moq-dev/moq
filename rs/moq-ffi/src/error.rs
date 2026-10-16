@@ -201,7 +201,7 @@ pub enum MoqError {
 	#[error("log level: {reason}")]
 	LogLevel { reason: String },
 
-	// Only the native path spawns onto a runtime, so only it can fail to join.
+	/// An owned native task panicked; cancellation is reported separately.
 	#[cfg(not(target_arch = "wasm32"))]
 	#[error("task: {reason}")]
 	Task { reason: String },
