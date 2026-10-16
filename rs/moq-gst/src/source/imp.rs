@@ -826,8 +826,8 @@ async fn follow_catalog(
 /// Bring the run's pumps in line with `catalog`: spawn pumps for newly announced renditions,
 /// hand the pad of any whose [`Shape`] changed to a new pump, leave ones that vanished to
 /// end with their track, stop disabled ones, and end the kept pads of renditions it no longer
-/// lists. A rendition whose track already finished keeps its pad but gets no pump. Returns the
-/// renditions it lists.
+/// lists. A rendition that already played its track to the end keeps its pad but gets no pump.
+/// Returns the renditions it lists.
 ///
 /// Infallible by design: every way a single rendition can be unusable (unsupported codec,
 /// malformed init, a name the broadcast refuses) skips just that rendition, so one bad entry in
@@ -947,7 +947,8 @@ fn reconcile(
 			broadcast: source.resolve_reference(d.shape.broadcast.as_ref()),
 			name: d.shape.track.clone(),
 		};
-		if playback.finished.lock().unwrap().contains(&track) {
+		let played = ((d.kind, name.clone()), track.clone());
+		if playback.finished.lock().unwrap().contains(&played) {
 			continue;
 		}
 		let container = match moq_mux::catalog::hang::Container::new(
@@ -1044,12 +1045,15 @@ fn plan_reconcile<S: PartialEq>(desired: &HashMap<String, S>, active: &HashMap<S
 struct Playback {
 	pads: Pads,
 	timeline: Arc<Timeline>,
-	/// Tracks that ended on their own. A new subscription to one replays its last group, so a
-	/// catalog update that still lists it (a publisher's final snapshot lands after its tracks
-	/// end) must not start it again. Shared with the pumps, since a pump that replaces another
-	/// on its pad learns this only once the other lets go.
-	finished: Arc<Mutex<HashSet<Track>>>,
+	finished: Finished,
 }
+
+/// Each pad's rendition with a track it played to the end. A new subscription to a finished
+/// track replays its last group, so a catalog update that still lists the rendition (a
+/// publisher's final snapshot lands after its tracks end) must not start it on that pad again. A
+/// pad that never played the track joins it like any late subscriber. Shared with the pumps,
+/// since a pump that replaces another on its pad learns this only once the other lets go.
+type Finished = Arc<Mutex<HashSet<(Rendition, Track)>>>;
 
 /// The first decoded frame fixes one mapping for every rendition of this broadcast run.
 #[derive(Default)]
@@ -1081,7 +1085,7 @@ struct Pump {
 	pads: Pads,
 	timeline: Arc<Timeline>,
 	/// The run's [`Playback::finished`].
-	finished: Arc<Mutex<HashSet<Track>>>,
+	finished: Finished,
 	/// Shared with this rendition's [`ActiveTrack::state`].
 	state: Arc<PumpState>,
 	cancel: watch::Receiver<bool>,
@@ -1160,7 +1164,11 @@ impl Pump {
 				};
 				// The pump this one replaces records its track as finished before letting go, so a
 				// replacement started while it was reading the end (a reshape) can't replay it.
-				if finished.lock().unwrap().contains(&media) {
+				if finished
+					.lock()
+					.unwrap()
+					.contains(&((kind, name.clone()), media.clone()))
+				{
 					return Some((kind, name));
 				}
 				tokio::task::block_in_place(|| begin(&pad, &name, &caps));
@@ -1218,7 +1226,7 @@ impl Pump {
 					}
 					Ok(None) => {
 						// Recorded while this pump still owns the pad, before any replacement can claim it.
-						finished.lock().unwrap().insert(media);
+						finished.lock().unwrap().insert(((kind, name.clone()), media));
 						return Some((kind, name));
 					}
 					Err(err) => {
@@ -2269,7 +2277,8 @@ mod session_tests {
 
 	/// A publisher's last catalog snapshot can land after its tracks end, such as when finishing
 	/// the catalog declares pending timelines. A new subscription to a finished track replays its
-	/// last group, so the update must not start the rendition again, even reshaped.
+	/// last group, so the update must not start the rendition again, even reshaped. A new
+	/// rendition over the same track still joins it on a pad of its own.
 	#[test]
 	fn a_finished_track_is_not_replayed_after_a_catalog_update() {
 		const FRAMES: u64 = 3;
@@ -2287,14 +2296,15 @@ mod session_tests {
 			.unwrap();
 		catalog.modify().unwrap().video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
 
-		// Count what reaches the video pad once it is added. A pump adds a new pad from the signal,
-		// before it pushes anything, so every buffer and every later stream is seen.
+		// Count what reaches the first video pad once it is added. A pump adds a new pad from the
+		// signal, before it pushes anything, so every buffer and every later stream is seen.
 		let buffers = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 		let restarts = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 		let (counted, restarted) = (buffers.clone(), restarts.clone());
+		let probed = std::sync::atomic::AtomicBool::new(false);
 		let (added, mut adds) = tokio::sync::mpsc::unbounded_channel();
 		element.connect_pad_added(move |_, pad| {
-			if pad.name().starts_with("video_") {
+			if pad.name().starts_with("video_") && !probed.swap(true, Ordering::Relaxed) {
 				let (counted, restarted) = (counted.clone(), restarted.clone());
 				pad.add_probe(
 					gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM,
@@ -2350,14 +2360,23 @@ mod session_tests {
 		assert_eq!(buffers.load(Ordering::Relaxed), FRAMES, "the track never played");
 
 		// The update reshapes the finished rendition over the same track, which hands its pad to a
-		// new pump. Its audio pad proves the session acted on it.
+		// new pump, and lists a second rendition of that track. Its audio pad proves the session
+		// acted on it.
 		{
 			let mut guard = catalog.modify().unwrap();
 			guard.video.renditions.get_mut("video").unwrap().description = Some(bytes::Bytes::from_static(&[1]));
+			let mut again = video_rendition();
+			again.track = Some("video".into());
+			guard.video.renditions.insert("again".into(), again);
 			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
 		}
-		let pad = super::RUNTIME.block_on(adds.recv()).unwrap();
-		assert!(pad.starts_with("audio_"), "{pad} was added by the update");
+		let mut added: Vec<String> =
+			super::RUNTIME.block_on(async { vec![adds.recv().await.unwrap(), adds.recv().await.unwrap()] });
+		added.sort();
+		assert!(
+			added[0].starts_with("audio_") && added[1].starts_with("video_"),
+			"the update added {added:?}"
+		);
 
 		// The run ends only once every pump drains, a replaying one included.
 		audio.finish().unwrap();
