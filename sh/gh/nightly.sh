@@ -39,7 +39,7 @@ case "${1:-}" in
         run just rs test -p moq-cli -E 'test(benchmark_stream_import)' --run-ignored only --success-output immediate
         ;;
     js)
-        for benchmark in broadcasts request-ids requests forward reader frames varint lite-varint track interests; do
+        for benchmark in broadcasts request-ids requests forward reader frames varint lite-varint track interests priority; do
             run just js bench "$benchmark"
         done
         run just js catalog-bench

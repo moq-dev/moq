@@ -711,9 +711,8 @@ impl TrackState {
 	/// as though it were a live replacement.
 	fn live_edge(&self, cap: Option<u64>) -> Option<PresentationEdge> {
 		self.lookup
-			.range(..)
+			.range((Bound::Unbounded, cap.map_or(Bound::Unbounded, Bound::Excluded)))
 			.rev()
-			.filter(|(seq, _)| super::subscription::before_end(**seq, cap))
 			.find_map(|(_, slot)| {
 				if !slot.is_shown() {
 					return None;
@@ -3938,6 +3937,7 @@ struct Cursor {
 	/// are parked here instead of dropped). Keyed by sequence so the lowest is
 	/// re-offered first.
 	parked: BTreeMap<u64, group::Consumer>,
+	aborts: Option<Box<super::aborts::Watch>>,
 	/// [`Self::end_sequence`], shared with the groups this cursor hands out so their
 	/// expiry measures drift against the same servable window after a cap moves.
 	///
@@ -3991,6 +3991,7 @@ impl Cursor {
 			next_sequence: Some(0),
 			end_sequence: None,
 			parked: BTreeMap::new(),
+			aborts: None,
 			drift_cap: kio::Producer::new(None),
 			stale: stats::Content::default(),
 			seek_pending: BTreeMap::new(),
@@ -4106,26 +4107,46 @@ impl Cursor {
 		}))
 	}
 
-	fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
-		// An eviction aborts a parked group without touching any cursor this
-		// subscriber polls, so each entry needs a waiter or this poll would never
-		// rerun. `poll_closed` observes-or-registers under one lock: `Pending`
-		// parks the waiter while the group is open (an open group cannot be
-		// aborted), and `Ready` means closed, where only an abort invalidates the
-		// entry. Checking `is_aborted` separately from the registration would leave
-		// a window where an abort lands between the two and wakes nobody.
-		let watch = |group: &group::Consumer| match group.poll_closed(waiter) {
-			Poll::Pending => true,
-			Poll::Ready(()) => !group.is_aborted(),
-		};
+	/// Hold a capped group without losing another copy's abort notification.
+	fn park(&mut self, consumer: group::Consumer, waiter: &kio::Waiter) {
+		let aborts = self
+			.aborts
+			.get_or_insert_with(|| Box::new(self.state.read().cache.watch_aborts()));
+		// Register before checking: an abort on either side of the check is
+		// observed now or queued for the next poll.
+		aborts.insert(consumer.sequence);
+		if consumer.is_aborted() {
+			if !self.parked.contains_key(&consumer.sequence) {
+				aborts.remove(consumer.sequence);
+			}
+		} else {
+			self.parked.insert(consumer.sequence, consumer);
+		}
+		aborts.register(waiter);
+	}
 
-		// A raised `start_at` drops parked groups it overtook, and eviction/expiry
-		// (which aborts a cached group) drops its parked entry. The latter is what
-		// bounds parking: a subscription capped indefinitely holds only what the
-		// track's cache policy still retains, not every group it ever observed.
-		let min_sequence = self.min_sequence;
-		self.parked
-			.retain(|sequence, group| *sequence >= min_sequence && watch(group));
+	fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+		if let Some(aborts) = &self.aborts {
+			// A sequence may name both a live group and its fetched head. Only the
+			// consumer we parked decides whether this notification invalidates it.
+			for sequence in aborts.poll(waiter) {
+				if self.parked.get(&sequence).is_some_and(group::Consumer::is_aborted) {
+					self.parked.remove(&sequence);
+					aborts.remove(sequence);
+				}
+			}
+			// Each overtaken entry is removed once, rather than scanning every entry
+			// again for every delivered group.
+			while let Some((&sequence, _)) = self.parked.first_key_value()
+				&& sequence < self.min_sequence
+			{
+				self.parked.pop_first();
+				aborts.remove(sequence);
+			}
+			if self.parked.is_empty() {
+				self.aborts = None;
+			}
+		}
 
 		// One scan for the whole poll, so walking a backlog off stays linear in its size.
 		let drift = ready!(self.poll_drift(self.end_sequence, waiter))?;
@@ -4136,6 +4157,10 @@ impl Cursor {
 			let consumer = match self.parked.keys().next().copied() {
 				Some(sequence) if super::subscription::before_end(sequence, self.end_sequence) => {
 					let group = self.parked.remove(&sequence).expect("just looked it up");
+					self.aborts
+						.as_ref()
+						.expect("parked groups are watched")
+						.remove(sequence);
 					// A re-offer is a delivery: stamp it like a fresh hand-out.
 					group.cache_refresh();
 					group
@@ -4160,12 +4185,8 @@ impl Cursor {
 					// Park a group beyond the cap instead of dropping it, and keep scanning
 					// so an in-range group that arrived behind it still flows.
 					if !super::subscription::before_end(consumer.sequence, self.end_sequence) {
-						// Watch it from the moment it parks: the retain pass above already
-						// ran, so an entry admitted here would otherwise sit unwatched for
-						// the rest of this poll, and an abort could wake nobody.
-						if watch(&consumer) {
-							self.parked.insert(consumer.sequence, consumer);
-						}
+						self.park(consumer, waiter);
+
 						continue;
 					}
 					consumer
@@ -10093,6 +10114,65 @@ mod test {
 		head.finish().unwrap();
 		assert_eq!(fetch.await.unwrap().index(), 0);
 		(live, head)
+	}
+
+	#[moq_net_sim::test]
+	#[cfg(feature = "async")]
+	async fn a_live_abort_does_not_remove_a_parked_fetched_head() {
+		let producer = track_producer("test", Info::timed());
+		let (live, _head) = live_group_with_head(&producer).await;
+		let mut subscriber = producer.subscribe(replay());
+		subscriber.set_groups(..0);
+		assert!(subscriber.poll_recv_group(&kio::Waiter::noop()).is_pending());
+		live.abort(Error::Cancel).unwrap();
+		assert!(subscriber.poll_recv_group(&kio::Waiter::noop()).is_pending());
+		subscriber.set_groups(..);
+		let mut group = subscriber.recv_group().await.unwrap().unwrap();
+		assert_eq!(
+			group.read_frame().await.unwrap().unwrap().payload,
+			bytes::Bytes::from_static(b"snapshot")
+		);
+	}
+
+	#[test]
+	fn an_aborted_candidate_keeps_the_parked_copy_watched() {
+		let producer = track_producer("test", Info::timed());
+		let live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut subscriber = producer.subscribe(replay());
+		subscriber.set_groups(..0);
+		let waiter = kio::Waiter::noop();
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+
+		// A second copy can abort after lookup but before the cursor parks it.
+		let candidate = group::Info { sequence: 0 }.produce();
+		let aborted = candidate.consume();
+		candidate.abort(Error::Old).unwrap();
+		let Inner::Plain(cursor) = &mut subscriber.inner else {
+			unreachable!()
+		};
+		cursor.park(aborted, &waiter);
+
+		live.abort(Error::Old).unwrap();
+		producer.finish().unwrap();
+		assert!(matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
+	}
+
+	#[test]
+	fn an_abort_removes_a_non_prefix_parked_entry() {
+		let producer = track_producer("test", Info::timed());
+		let groups: Vec<_> = (0..3)
+			.map(|sequence| producer.create_group(group::Info { sequence }).unwrap())
+			.collect();
+		let mut subscriber = producer.subscribe(replay());
+		subscriber.set_groups(..0);
+		let waiter = kio::Waiter::noop();
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		groups[1].clone().abort(Error::Old).unwrap();
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		let Inner::Plain(cursor) = &subscriber.inner else {
+			unreachable!()
+		};
+		assert_eq!(cursor.parked.keys().copied().collect::<Vec<_>>(), vec![0, 2]);
 	}
 
 	/// The live copy ending early (its subscription went away) leaves a fetched head

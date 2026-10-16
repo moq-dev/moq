@@ -164,7 +164,6 @@ ranked just below deterministic TS legs, which it requires.
 - [A release carries multi-vendor GPU input](/quest/m2/gpu-release.md) - `release` carries the GPU surface validated on AMD and Intel; health follows separately
 - [moq-transport request codes](/quest/m2/ietf-request-codes.md) - Range Filters (INVALID_FILTER), reserved namespaces, and RENDEZVOUS_TIMEOUT get the draft's answer, or a recorded fallback code, and the deliberate deviations are documented
 - [Kotlin JVM exit](/quest/m2/kt-jvm-exit.md) - a Kotlin/JVM program exits cleanly whatever the moq-ffi runtime thread is doing, like Python does since #3766
-- [JS audio ranking](/quest/m2/js-audio-ranked.md) - @moq/hang ranks audio and video renditions like Rust, enabled first, and HLS lists audio by that rank
 - [Draft changelog audit](/quest/m2/drafts-changelog-audit.md) - every published draft's changelog lists only what that version published
 - [Runtime trait](/quest/m2/runtime-trait.md) - one runtime trait for spawn and time replaces web-async, with tokio, browser, io_uring, and sim implementations
 - [QUIC on the sim](/quest/m2/quic-sim.md) - the sim drives `moq-quic` over in-memory datagrams with latency and loss
@@ -180,7 +179,5 @@ ranked just below deterministic TS legs, which it requires.
 - [Publisher timeliness at relay ingest](/quest/m2/qos-publisher-timeliness.md) - follow-on capability after the release contract is stable
 
 - [Release execution](/quest/m2/release/README.md) - publication, installed-artifact proof, cleanup, and downstream adoption after m1
-- [IETF driver double poll](/quest/m2/ietf-driver-double-poll.md) - a fired deadline costs a moq-transport session's driver one poll, as #5393 makes moq-lite's
 - [Play resume](/quest/m2/play-resume.md) - `moq-cli play` plays out pictures buffered before a declared end when new media arrives quickly
 - [Task supervision](/quest/m2/task-supervision.md) - the auth decider loop, stats publisher, and moq-tokio's token and WebSocket internals are supervised like #5447's tasks
-- [JS fill first](/quest/m2/js-fill-first.md) - the JS publisher sends a group's fill ahead of its live rest, matching Rust

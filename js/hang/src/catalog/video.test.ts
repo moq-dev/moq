@@ -1,5 +1,16 @@
 import { expect, test } from "bun:test";
+import * as Catalog from "./index.ts";
 import { ranked, VideoConfigSchema, VideoSchema } from "./video.ts";
+
+test("ranked puts enabled video before a larger disabled picture", () => {
+	const renditions = {
+		disabled: { ...rendition({ codedWidth: 1920, codedHeight: 1080 }, 6_000_000), enabled: false },
+		implicit: rendition({ codedWidth: 640, codedHeight: 360 }, 1_000_000),
+		explicit: { ...rendition({ codedWidth: 1280, codedHeight: 720 }, 3_000_000), enabled: true },
+	};
+	expect(ranked(renditions).map(([name]) => name)).toEqual(["explicit", "implicit", "disabled"]);
+	expect(Catalog.Video.ranked(renditions)).toEqual(ranked(renditions));
+});
 
 function rendition(size?: { codedWidth: number; codedHeight: number }, bitrate?: number) {
 	return VideoConfigSchema.parse({

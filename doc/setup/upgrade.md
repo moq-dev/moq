@@ -19,6 +19,10 @@ error lists and rerun.
 
 These land with the next breaking release, not the 2026-09-23 train.
 
+- **JS catalog ranking names its media kind.** Replace `Catalog.ranked(renditions)`
+  with `Catalog.Video.ranked(renditions)`. `Catalog.Audio.ranked(renditions)`
+  orders audio by enabled state, bitrate, sample rate, channel count, and name.
+  Both helpers put disabled renditions last.
 - **moq-tokio config durations are optional.** Wrap durations in `Some(...)` for
   connect `race`, `resolution_delay`, and `timeout`; listen `timeout`; QUIC
   `idle_timeout` and `keep_alive`; backoff `initial`, `max`, and `timeout`;
