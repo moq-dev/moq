@@ -68,6 +68,8 @@ jobs:
             artifact-path: target/bench/ffi
           - name: Audio grouping relay benchmark
             recipe: bench-audio
+          - name: Relay shard sweep
+            recipe: bench-shard
           # Smoke-tests the capture path: exact off-CPU waits, resolved worker stacks and CPU.
           - name: Relay lock-wait profile
             recipe: bench-lock fanout-heavy 4

@@ -62,15 +62,16 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
 
 ## Required
 
+- [Regression net](/quest/m1/quic/coverage/README.md) - benchmarks, fuzzing, characterization tests, and a seeded simulation, so later QUIC changes see every behavior or cost change
 - [Bound message assembly](/quest/m1/quic/receive-memory.md) - complete headers and frames return credit, and receiver priority cancellation restores progress
-- [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - `RESET_STREAM_AT`,
-  so a reset WebTransport stream still delivers its header
+- [A reset group keeps its header](/quest/m1/quic/group-reset.md) - a lite
+  publisher resets a group with `RESET_STREAM_AT`, so its subscriber drops the
+  tail grace
 - [Schedule datagrams by subscription priority](/quest/m1/quic/datagram-priority.md) -
   datagrams join their subscription's send group instead of preempting every stream
 - [Relay peers get wider limits](/quest/m1/quic/peer-limits.md) - MAX_STREAMS
   and MAX_DATA are raised after SETUP identifies a cluster peer
-- [Shard the endpoint](/quest/m1/quic/shard.md) - the library shards a
-  server endpoint across cores by default, replacing the `--workers` group
+- [Delete NewReno](/quest/m1/quic/new-reno.md) - the unused public controller goes
 
 ## Related
 
