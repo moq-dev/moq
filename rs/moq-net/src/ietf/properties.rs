@@ -470,7 +470,8 @@ mod tests {
 			(Version::Draft16, &[0x30, 0x01][..]),
 		] {
 			let mut buf = Vec::new();
-			both.encode(&mut Encoder::new(&mut buf, version.into()), version).unwrap();
+			both.encode(&mut Encoder::new(&mut buf, version.into()), version)
+				.unwrap();
 			assert_eq!(buf, expected, "{version}");
 		}
 

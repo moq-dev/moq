@@ -98,14 +98,49 @@ pub struct Subscription {
 	/// subscribers fresh. Each subscriber's own publisher (a relay's downstream session)
 	/// still serves it in its own order.
 	pub order: Order,
-	/// A moq-transport NEW_GROUP_REQUEST this subscriber is waiting on: the first group
-	/// sequence it would count as new, or 0 when it knows of no group at all.
+	/// A moq-transport NEW_GROUP_REQUEST this subscriber is waiting on.
 	///
 	/// Relay-only, so it stays out of the public API: the aggregate the public getters
-	/// report leaves it out. Aggregated by the highest value, and cleared once this
-	/// subscriber is handed a group at or past it, so a request never outlives what it
-	/// asked for.
-	pub(crate) new_group: Option<u64>,
+	/// report leaves it out. Cleared once this subscriber is handed a group that answers
+	/// it, so a request never outlives what it asked for.
+	pub(crate) new_group: Option<NewGroup>,
+}
+
+/// A NEW_GROUP_REQUEST as one hop holds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NewGroup {
+	/// The value as received, which is what goes upstream: the subscriber's largest known
+	/// group plus one, or 0 when it knows none.
+	pub value: u64,
+	/// The first group sequence that answers it here. A 0 is answered by the group after
+	/// the newest this hop held when it arrived, not by the one it is about to join.
+	pub first: u64,
+}
+
+impl NewGroup {
+	/// A request for `value`, arriving while this hop's newest group is `latest`.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub fn new(value: u64, latest: Option<u64>) -> Self {
+		let first = match (value, latest) {
+			(0, Some(latest)) => latest.saturating_add(1),
+			_ => value,
+		};
+		Self { value, first }
+	}
+
+	/// Two subscribers' requests as one, answered once both are. A 0 asks the publisher
+	/// for a new group whatever it has, so it covers any value; otherwise the higher
+	/// value covers the lower.
+	fn merge(self, other: Self) -> Self {
+		let value = match (self.value, other.value) {
+			(0, _) | (_, 0) => 0,
+			(a, b) => a.max(b),
+		};
+		Self {
+			value,
+			first: self.first.max(other.first),
+		}
+	}
 }
 
 /// Which of a subscription's pending groups the publisher sends first.
@@ -211,8 +246,10 @@ impl Subscription {
 				(Order::Ascending, Order::Ascending) => Order::Ascending,
 				_ => Order::Descending,
 			},
-			// A higher value names a newer group, which covers every lower request.
-			new_group: self.new_group.max(combined.new_group),
+			new_group: match (self.new_group, combined.new_group) {
+				(Some(a), Some(b)) => Some(a.merge(b)),
+				(a, b) => a.or(b),
+			},
 		};
 
 		if &merged != combined {
@@ -551,5 +588,18 @@ mod tests {
 		let combined = combine(&[early, late]).unwrap();
 
 		assert_eq!(combined.end, Some(Position::group(21)));
+	}
+
+	/// A 0 asks the publisher for a new group whatever it holds, so it covers any value,
+	/// and the merged request is answered only once every subscriber's would be.
+	#[test]
+	fn new_group_requests_merge() {
+		let zero = NewGroup::new(0, Some(5));
+		assert_eq!(zero, NewGroup { value: 0, first: 6 });
+		assert_eq!(zero.merge(NewGroup::new(9, None)), NewGroup { value: 0, first: 9 });
+		assert_eq!(
+			NewGroup::new(7, Some(5)).merge(NewGroup::new(9, None)),
+			NewGroup { value: 9, first: 9 }
+		);
 	}
 }

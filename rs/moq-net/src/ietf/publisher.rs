@@ -17,6 +17,7 @@ use crate::{
 	AsPath, DecodeError, Error, Timescale, Timestamp,
 	coding::{Decode as _, Encode as _, Encoder, Stream, Writer},
 	ietf::{self, Control, EndLocation, FetchHeader, FetchType, Filter, GroupOrder, Location, RequestId},
+	model::NewGroup,
 	priority::{Priority, PriorityHandle, PriorityQueue},
 	track::{Order, Subscription},
 	util::{MaybeBoxedExt, MaybeSendBox},
@@ -58,16 +59,6 @@ fn track_properties(info: &track::Info, wanted: bool) -> ietf::Properties {
 		// Advertised only where an upstream session carries the request back to the
 		// original publisher; a local track has nothing to answer it.
 		dynamic_groups: info.dynamic_groups,
-	}
-}
-
-/// The NEW_GROUP_REQUEST a relay holds for a downstream `value`, given the newest group it
-/// has seen. A subscriber that knows of no group sends 0, but the relay may know some, and
-/// naming the group past them keeps a stale 0 from asking for another group once one came.
-fn new_group_request(value: u64, latest: Option<u64>) -> u64 {
-	match (value, latest) {
-		(0, Some(latest)) => latest.saturating_add(1),
-		_ => value,
 	}
 }
 
@@ -1057,7 +1048,7 @@ where
 					let mut subscription = serving_subscription(msg.subscriber_priority).with_order(order);
 					// Set before subscribing, so a relay that has no upstream subscription yet
 					// carries it on the SUBSCRIBE it opens, as the draft requires.
-					subscription.new_group = msg.new_group;
+					subscription.new_group = msg.new_group.map(|value| NewGroup::new(value, None));
 
 					// Subscribe before resolving the filter: on a routed broadcast the live edge only
 					// becomes readable once the subscription's demand attaches a route, so the edge
@@ -1092,7 +1083,7 @@ where
 						None => track::Position::after_group(end.group),
 					});
 					// The live edge is only known once subscribed.
-					subscription.new_group = msg.new_group.map(|value| new_group_request(value, edge.latest));
+					subscription.new_group = msg.new_group.map(|value| NewGroup::new(value, edge.latest));
 					let _ = track.update(subscription);
 					// A Timestamp goes out wherever the draft can declare its units and the track
 					// has them. A subscriber that opted out of this SUBSCRIBE_OK's properties learns
@@ -3677,7 +3668,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 	/// session decides whether it goes further.
 	fn request_new_group(&mut self, value: u64) -> Result<(), Error> {
 		let mut subscription = self.track.subscription();
-		subscription.new_group = Some(new_group_request(value, self.track.latest()));
+		subscription.new_group = Some(NewGroup::new(value, self.track.latest()));
 		self.track.update(subscription)
 	}
 
@@ -6156,8 +6147,9 @@ mod serve_tests {
 		ietf::SubscribeOk::decode_msg(&mut Decoder::new(&rest[2..2 + size], version.into()), version).unwrap()
 	}
 
-	/// A SUBSCRIBE's NEW_GROUP_REQUEST for 0 reaches the track as the group after its
-	/// latest, and SUBSCRIBE_OK advertises DYNAMIC_GROUPS only for a track that supports it.
+	/// A SUBSCRIBE's NEW_GROUP_REQUEST for 0 reaches the track still 0, so a relay behind
+	/// the original publisher forwards what was asked, but answered only by a group past
+	/// the latest. SUBSCRIBE_OK advertises DYNAMIC_GROUPS only for a track that supports it.
 	#[moq_net_sim::test]
 	async fn a_subscribe_new_group_request_reaches_the_track() {
 		for (version, dynamic_groups) in [
@@ -6181,7 +6173,7 @@ mod serve_tests {
 			};
 			let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
 			serve_until(serve.as_mut(), "the request reached the track past group 4", || {
-				h.track.new_group() == Some(5)
+				h.track.new_group() == Some(NewGroup { value: 0, first: 5 })
 			})
 			.await;
 			assert_eq!(
@@ -6221,7 +6213,7 @@ mod serve_tests {
 						.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None)
 				);
 			assert!(futures::poll!(run.as_mut()).is_pending(), "{version}: update ended it");
-			assert_eq!(h.track.new_group(), Some(9), "{version}");
+			assert_eq!(h.track.new_group(), Some(NewGroup { value: 9, first: 9 }), "{version}");
 			// Draft 16 names the update it answers; later drafts answer on its own stream.
 			let written = session.log.writes.lock().unwrap().clone();
 			assert_eq!(written[0], ietf::RequestOk::ID as u8, "{version}: {written:?}");

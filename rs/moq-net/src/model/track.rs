@@ -20,6 +20,7 @@ use super::delivered::Delivered;
 use super::{Datagram, Requests};
 
 use super::Cap;
+use super::subscription::NewGroup;
 pub use super::subscription::{Order, Position, Subscription};
 
 use std::{
@@ -2439,7 +2440,7 @@ impl Producer {
 	/// The NEW_GROUP_REQUEST the subscribers hold now, if any; see
 	/// [`Subscription::new_group`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn new_group(&self) -> Option<u64> {
+	pub(crate) fn new_group(&self) -> Option<NewGroup> {
 		new_group(self.aggregate())
 	}
 
@@ -2447,7 +2448,11 @@ impl Producer {
 	/// highest one whenever it changes, `None` once none does. Errors once the track is
 	/// aborted.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn poll_new_group(&self, prev: &mut Option<u64>, waiter: &kio::Waiter) -> Poll<Result<Option<u64>>> {
+	pub(crate) fn poll_new_group(
+		&self,
+		prev: &mut Option<NewGroup>,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<NewGroup>>> {
 		if self.state.poll_closed(waiter).is_ready() {
 			let abort = self.state.read().abort.clone();
 			return Poll::Ready(Err(abort.unwrap_or(Error::Dropped)));
@@ -2773,7 +2778,7 @@ fn public(combined: Option<Subscription>) -> Option<Subscription> {
 }
 
 /// The aggregate's NEW_GROUP_REQUEST, if any subscriber holds one.
-fn new_group(combined: Option<Subscription>) -> Option<u64> {
+fn new_group(combined: Option<Subscription>) -> Option<NewGroup> {
 	combined.and_then(|sub| sub.new_group)
 }
 
@@ -4529,7 +4534,11 @@ impl Subscriber {
 			Inner::Resume(resume, _) => resume.subscription(),
 		};
 		// Read first: a write wakes everything aggregating this subscriber.
-		if !channel.read().new_group.is_some_and(|new_group| sequence >= new_group) {
+		if !channel
+			.read()
+			.new_group
+			.is_some_and(|new_group| sequence >= new_group.first)
+		{
 			return;
 		}
 		if let Ok(mut subscription) = channel.write() {
@@ -5155,7 +5164,7 @@ impl Request {
 	/// The NEW_GROUP_REQUEST the waiting subscribers hold now, if any; see
 	/// [`Subscription::new_group`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn new_group(&self) -> Option<u64> {
+	pub(crate) fn new_group(&self) -> Option<NewGroup> {
 		new_group(self.aggregate())
 	}
 
@@ -8307,8 +8316,8 @@ mod test {
 			..Info::timed()
 		};
 		let mut producer = track_producer("test", info);
-		let wants = |new_group| Subscription {
-			new_group: Some(new_group),
+		let wants = |value| Subscription {
+			new_group: Some(NewGroup::new(value, None)),
 			..Default::default()
 		};
 		let mut a = producer.subscribe(wants(5));
@@ -8318,7 +8327,7 @@ mod test {
 		let mut poll = |producer: &Producer| {
 			kio::wait(|waiter| producer.poll_new_group(&mut prev, waiter))
 				.now_or_never()
-				.map(Result::unwrap)
+				.map(|polled| polled.unwrap().map(|new_group| new_group.value))
 		};
 		assert_eq!(poll(&producer), Some(Some(5)));
 		assert_eq!(poll(&producer), None, "unchanged");

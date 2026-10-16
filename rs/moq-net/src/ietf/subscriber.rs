@@ -427,10 +427,11 @@ impl Target {
 
 	/// The NEW_GROUP_REQUEST the subscribers hold, which a new SUBSCRIBE carries.
 	fn new_group(&self) -> Option<u64> {
-		match self {
+		let request = match self {
 			Self::Request(request) => request.new_group(),
 			Self::Resume(idle) => idle.track.new_group(),
-		}
+		};
+		request.map(|request| request.value)
 	}
 
 	fn producer(&self) -> Option<&track::Producer> {
@@ -2898,10 +2899,10 @@ where
 					// once its answer lands. Polled after the answers are read for that reason.
 					if dynamic_groups
 						&& unanswered.load(Ordering::Relaxed) == 0
-						&& let Poll::Ready(Ok(Some(value))) = track.poll_new_group(&mut asked, waiter)
-						&& new_groups.forward(value, largest_group(&track, largest))
+						&& let Poll::Ready(Ok(Some(request))) = track.poll_new_group(&mut asked, waiter)
+						&& new_groups.forward(request.value, largest_group(&track, largest))
 					{
-						return Poll::Ready(End::NewGroup(value));
+						return Poll::Ready(End::NewGroup(request.value));
 					}
 					Poll::Pending
 				})
@@ -14192,7 +14193,7 @@ mod new_group_tests {
 	/// A downstream subscriber holding `new_group`, as the downstream session sets it.
 	fn subscribe(track: &track::Consumer, new_group: Option<u64>) -> kio::Pending<track::Subscribing> {
 		track.subscribe(track::Subscription {
-			new_group,
+			new_group: new_group.map(|value| crate::model::NewGroup::new(value, None)),
 			..Default::default()
 		})
 	}

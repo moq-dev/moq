@@ -1251,7 +1251,7 @@ impl RequestValidity {
 /// A relay's tracks, each with its downstream subscribers, for the private
 /// NEW_GROUP_REQUEST benchmark.
 pub struct NewGroups {
-	tracks: Vec<(track::Producer, Vec<track::Subscriber>, Option<u64>)>,
+	tracks: Vec<(track::Producer, Vec<track::Subscriber>, Option<crate::model::NewGroup>)>,
 	_broadcast: broadcast::Producer,
 }
 
@@ -1278,12 +1278,12 @@ impl NewGroups {
 		let (producer, subscribers, asked) = &mut self.tracks[track];
 		subscribers[subscriber]
 			.update(track::Subscription {
-				new_group: Some(value),
+				new_group: Some(crate::model::NewGroup::new(value, None)),
 				..Default::default()
 			})
 			.unwrap();
 		match producer.poll_new_group(asked, &kio::Waiter::noop()) {
-			std::task::Poll::Ready(Ok(new_group)) => new_group,
+			std::task::Poll::Ready(Ok(new_group)) => new_group.map(|new_group| new_group.value),
 			_ => None,
 		}
 	}
