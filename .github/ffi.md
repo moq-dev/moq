@@ -86,14 +86,14 @@ Linux candidate crosses from an x86 Linux host.
 
 | Target | C++ host | Shared candidate host | Native archive comparison |
 | --- | --- | --- | --- |
-| x86_64-unknown-linux-gnu | Ubuntu 24.04, image 20261004.327.1 | Same image and architecture | 772 common objects byte-identical; one differently named Rust LTO object |
+| x86\_64-unknown-linux-gnu | Ubuntu 24.04, image 20261004.327.1 | Same image and architecture | 772 common objects byte-identical; one differently named Rust LTO object |
 | aarch64-unknown-linux-gnu | Ubuntu 24.04 ARM, image 20261012.149.1 | Ubuntu 24.04 x86, image 20261004.327.1, GCC cross toolchain | 879 common objects byte-identical; one differently named Rust LTO object |
 | aarch64-apple-darwin | macOS 26 ARM, image 20260907.0351.1 | Same image and architecture | 847 common objects byte-identical; one differently named Rust LTO object |
-| x86_64-pc-windows-msvc | Windows 2025 VS2026, image 20260925.250.1 | Same image and architecture | 665 members each; COFF timestamps and native object build paths differ, plus one differently named Rust LTO object |
+| x86\_64-pc-windows-msvc | Windows 2025 VS2026, image 20260925.250.1 | Same image and architecture | 665 members each; COFF timestamps and native object build paths differ, plus one differently named Rust LTO object |
 
 The Linux native and cross compilers are GCC 13.3.0. Both runners use Ubuntu
 24.04; the ARM cross sysroot is Ubuntu's `libc6-dev-arm64-cross`. The sampled
-shared ARM cdylib requires up to GLIBC_2.38 and GLIBCXX_3.4. The installed C++
+shared ARM cdylib requires up to GLIBC\_2.38 and GLIBCXX\_3.4. The installed C++
 archive carries unversioned imports, so its glibc minimum cannot be read as a
 linked executable's version requirement. Its native objects are nevertheless
 byte-identical to the cross build, and the two Linux archive pairs have the
