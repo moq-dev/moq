@@ -1282,6 +1282,8 @@ export class Publisher {
 						ns.offered.clear();
 						ns.refused.clear();
 						prefix = update.prefix;
+						// A new cursor starts its backoff fresh, as in Rust.
+						retry = 0;
 					}
 					await stream.writer.u53(RequestOk.id);
 					await new RequestOk({ requestId: undefined }).encode(stream.writer, version);
