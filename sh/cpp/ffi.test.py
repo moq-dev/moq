@@ -45,6 +45,14 @@ class Inputs(unittest.TestCase):
                 ffi.fetch("x86_64-unknown-linux-gnu", self.root / "out")
             download.assert_not_called()
 
+    def test_fetch_rejects_absent_or_malformed_selection_before_network(self):
+        for pin in ("", "# unset\n", "1.2.3\n4.5.6\n", "latest\n"):
+            (self.root / "cpp/moq/FFI_VERSION").write_text(pin)
+            with patch.object(ffi.urllib.request, "urlretrieve") as download:
+                with self.assertRaises(ValueError):
+                    ffi.fetch("x86_64-unknown-linux-gnu", self.root / "out")
+                download.assert_not_called()
+
     def test_checksum_mismatch_never_extracts(self):
         path = self.root / "bad"
         path.write_bytes(b"changed")
@@ -88,6 +96,20 @@ class Inputs(unittest.TestCase):
         with patch.object(ffi.urllib.request, "urlretrieve", side_effect=lambda url, dest: shutil.copyfile(path, dest)):
             ffi.fetch("x86_64-unknown-linux-gnu", self.root / "out")
         self.assertEqual((self.root / "out/library").read_bytes(), b"static native library")
+
+    def test_same_run_extract_checks_sidecar_and_manifest(self):
+        directory = self.root / "input"
+        directory.mkdir()
+        manifest = {"version": "1.2.3", "target": "x86_64-unknown-linux-gnu", "features": "default", "profile": "release"}
+        (directory / "manifest.json").write_text(json.dumps(manifest))
+        ffi.archive(directory, self.root / "archives")
+        ffi.extract("1.2.3", manifest["target"], self.root / "archives", self.root / "good")
+        self.assertEqual(json.loads((self.root / "good/manifest.json").read_text()), manifest)
+        path = next((self.root / "archives").glob("*.tar.gz"))
+        path.write_bytes(b"changed")
+        with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+            ffi.extract("1.2.3", manifest["target"], self.root / "archives", self.root / "bad")
+        self.assertFalse((self.root / "bad").exists())
 
     def test_checksummed_archive_must_match_selected_manifest(self):
         directory = self.root / "input"
@@ -142,7 +164,6 @@ class Configure(unittest.TestCase):
             root = pathlib.Path(tmp)
             source = root / "source"
             shutil.copytree(REPO / "cpp/moq", source, ignore=shutil.ignore_patterns("build"))
-            (source / "FFI_VERSION").write_text("# not yet published\n")
             native = root / "native"
             (native / "lib").mkdir(parents=True)
             for name in ("libmoq_ffi.a", "libmoq_ffi.so"):
@@ -156,24 +177,21 @@ class Configure(unittest.TestCase):
             generator.write_text("#!/usr/bin/env python3\nimport pathlib, sys\nout=pathlib.Path(sys.argv[sys.argv.index('--out-dir')+1]); out.mkdir(parents=True)\nfor name in ('moq.hpp','moq.cpp','moq_scaffolding.hpp','uniffi_expected.hpp'): (out/name).touch()\n")
             generator.chmod(0o755)
             cargo = tools / "cargo"
-            cargo.write_text("#!/bin/sh\necho unexpected Rust build >&2\nexit 99\n")
+            cargo.write_text("#!/usr/bin/env bash\necho unexpected Rust build >&2\nexit 99\n")
             cargo.chmod(0o755)
             env = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ["PATH"])
-            def configure(build):
+            def configure():
                 return subprocess.run(["cmake", "-S", str(source), "-B", str(root / "good"),
                                        f"-DMOQ_FFI_DIR={native}"], env=env, capture_output=True, text=True)
             (native / "manifest.json").write_text(json.dumps(manifest))
-            configured = configure("good")
+            configured = configure()
             self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
             built = subprocess.run(["cmake", "--build", str(root / "good"), "--target", "moq_ffi"],
                                    env=env, capture_output=True, text=True)
             self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
             for field, value in (("target", "unsupported"), ("features", "minimal"), ("profile", "debug"), ("version", "unsupported")):
                 (native / "manifest.json").write_text(json.dumps(dict(manifest, **{field: value})))
-                self.assertNotEqual(configure(field).returncode, 0)
-            (native / "manifest.json").write_text(json.dumps(manifest))
-            (source / "FFI_VERSION").write_text("x\n")
-            self.assertIn("Malformed FFI_VERSION", configure("malformed-version").stderr)
+                self.assertNotEqual(configure().returncode, 0)
 
 
 if __name__ == "__main__":

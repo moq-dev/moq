@@ -6,7 +6,8 @@ It builds nine distinct default-feature targets, replacing fourteen native
 builds across those packages. Dart retains its eleven minimal-feature targets;
 Python retains its wheel builds and Python-specific environment.
 
-C++ retains its host CMake builds and independent `cpp-v*` release tags. All
+C++ retains source builds as its default and independent `cpp-v*` release tags.
+Nightly packages reuse the coordinator's validated same-run native archives. All
 four sampled C++ static libraries have different hashes from the candidates
 shared here. In particular, ARM Linux builds natively on Ubuntu 24.04 rather
 than on the shared cross-compilation host. Sharing those packages needs
@@ -188,9 +189,10 @@ source commit, target, feature set and profile; it carries the static library,
 metadata cdylib and native linker inputs together. CMake generates bindings
 from that cdylib without invoking Cargo. Direct directories are explicit local
 or same-run inputs; release downloads additionally require the checked-in hash.
-Without an explicit directory, `just cpp package` fetches exactly the pinned release input;
-direct CMake source builds require an explicit directory instead of silently
-ignoring the pin.
+Without an explicit directory, `just cpp package` fetches exactly the pinned
+release input. The pin selects package-release inputs; direct CMake builds and
+`just cpp check` build the current checkout unless `MOQ_FFI_DIR` or `--ffi-dir`
+is explicitly supplied. A failed selected release fetch never builds source.
 
 The shared coordinator downloads its four exact `default-lib-<target>`
 artifacts on Ubuntu x86, Ubuntu 24.04 ARM, macOS ARM and Windows MSVC. Each runs
@@ -211,12 +213,19 @@ pinned downloads through the same four-host consumer path before activation.
 
 A branch-only `release-cpp.yml` dispatch with `prebuilt-test=true` builds just
 these four shared targets and exercises the prebuilt package and installed
-consumers without publishing. Nightly exercises the coordinator's same-run
-path. `just cpp check` and nightly `just gh test` also cover hash refusal,
+consumers without publishing. Nightly waits for the shared coordinator, then
+packages each target from its
+`cpp-native-<target>` artifact, which exists only after that target's installed
+consumers succeed. It verifies the archive sidecar and manifest before CMake
+uses it, with no source fallback. An unrelated coordinator failure does not
+suppress a successful C++ target. Tag releases refuse same-run inputs and keep
+the explicit release pin path. `just cpp check` and nightly `just gh test` also
+cover hash refusal,
 archive traversal/symlink refusal, reproducible packaging, publication refusal,
 and CMake's build-free prebuilt path with malformed-input fixtures.
 
-PR #5727 changes the generator and overlaps the C++ checks and release workflow.
-Repeat binding generation and the installed-consumer matrix with its final
-generator/config before selecting the first pin. The old sampled binding
-matches alone do not validate a new generator.
+PR #5727 independently changes the generator and overlaps the C++ checks and
+release workflow. Today's matrix validates this checkout's coherent generator
+and config. If that PR lands before this change or the selected release, rerun
+the same gates on the final checkout. The old sampled binding matches alone
+do not validate a new generator.

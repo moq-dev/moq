@@ -29,6 +29,8 @@ def version(value):
 
 
 def name(release, target):
+    if target not in TARGETS:
+        raise ValueError(f"unsupported native target: {target!r}")
     return f"moq-ffi-default-{version(release)}-{target}"
 
 
@@ -88,11 +90,18 @@ def fetch(target, output):
         raise ValueError(f"output already exists: {output}")
     with tempfile.TemporaryDirectory() as tmp:
         path = pathlib.Path(tmp) / filename
-        extracted = pathlib.Path(tmp) / "extracted"
         urllib.request.urlretrieve(
             f"https://github.com/moq-dev/moq/releases/download/moq-ffi-v{release}/{filename}", path)
-        if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
-            raise ValueError(f"checksum mismatch: {filename}")
+        unpack(path, output, release, target, expected)
+
+
+def unpack(path, output, release, target, expected):
+    if output.exists():
+        raise ValueError(f"output already exists: {output}")
+    if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+        raise ValueError(f"checksum mismatch: {path.name}")
+    with tempfile.TemporaryDirectory() as tmp:
+        extracted = pathlib.Path(tmp) / "extracted"
         # These archives contain only directories and regular files at their root.
         with tarfile.open(path) as tar:
             for member in tar.getmembers():
@@ -108,6 +117,14 @@ def fetch(target, output):
             raise ValueError("downloaded native manifest disagrees with the selected release input")
         output.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(extracted), output)
+
+
+def extract(release, target, directory, output):
+    filename = name(release, target) + ".tar.gz"
+    sidecar = (directory / (filename + ".sha256")).read_text()
+    if not re.fullmatch(r"[a-f0-9]{64}  " + re.escape(filename) + r"\n", sidecar):
+        raise ValueError(f"malformed native checksum: {filename}")
+    unpack(directory / filename, output, release, target, sidecar[:64])
 
 
 def publish(release, directory):
@@ -149,15 +166,15 @@ def publish(release, directory):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for command in ("stage", "fetch", "archive", "publish"):
+    for command in ("stage", "fetch", "archive", "extract", "publish"):
         sub = commands.add_parser(command)
-        if command in ("stage", "publish"):
+        if command in ("stage", "extract", "publish"):
             sub.add_argument("--version", required=True)
-        if command in ("stage", "fetch"):
+        if command in ("stage", "fetch", "extract"):
             sub.add_argument("--target", required=True, choices=TARGETS)
         if command == "stage":
             sub.add_argument("--library", type=pathlib.Path, required=True)
-        if command in ("archive", "publish"):
+        if command in ("archive", "extract", "publish"):
             sub.add_argument("--directory", type=pathlib.Path, required=True)
         if command != "publish":
             sub.add_argument("--output", type=pathlib.Path, required=True)
@@ -168,6 +185,8 @@ def main():
         archive(args.directory, args.output)
     elif args.command == "fetch":
         fetch(args.target, args.output)
+    elif args.command == "extract":
+        extract(args.version, args.target, args.directory, args.output)
     else:
         publish(args.version, args.directory)
 

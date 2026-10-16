@@ -18,7 +18,7 @@ class NightlyTest(unittest.TestCase):
             for command in ("just", "cargo"):
                 stub = scratch / command
                 stub.write_text(
-                    '#!/bin/bash\n'
+                    '#!/usr/bin/env bash\n'
                     'printf "%s %s\n" "${0##*/}" "$*" >> "$NIGHTLY_CALLS"\n'
                     '[[ "$*" != "$NIGHTLY_FAIL" ]]\n'
                 )

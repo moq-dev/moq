@@ -55,7 +55,7 @@ OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
 PACKAGE_DIR="$OUTPUT_DIR/$NAME"
 BUILD_DIR="$SCRIPT_DIR/build/release"
 
-if [[ -z "$FFI_DIR" ]] && sed '/^#/d; /^[[:space:]]*$/d' "$SCRIPT_DIR/FFI_VERSION" | grep -q .; then
+if [[ -z "$FFI_DIR" ]] && sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$SCRIPT_DIR/FFI_VERSION" | grep -q .; then
     FFI_DIR="$BUILD_DIR/ffi"
     rm -rf "$FFI_DIR"
     python3 "$SCRIPT_DIR/../../sh/cpp/ffi.py" fetch --target "$TARGET" --output "$FFI_DIR"

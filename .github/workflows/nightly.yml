@@ -293,7 +293,11 @@ jobs:
 
   release-cpp:
     name: Release Cpp
+    needs: [release-shared-ffi]
+    if: ${{ always() && !cancelled() }}
     uses: ./.github/workflows/release-cpp.yml
+    with:
+      reuse-native: true
     permissions:
       contents: write
 

@@ -63,8 +63,9 @@ FFI package instead, set `MOQ_FFI_DIR` to its extracted directory, or pass
 metadata library and links its static library without compiling Rust. Without
 an explicit directory, a release pin in `cpp/moq/FFI_VERSION` selects the default
 input; `just cpp package` fetches it with the checked-in SHA-256 hashes and fails
-if it cannot verify it. The package is `moq-cpp`, so it installs beside the C
-package, `moq-c`, without colliding.
+if it cannot verify it. Direct CMake builds and `just cpp check` build the
+current checkout unless given an explicit native directory. The package is
+`moq-cpp`, so it installs beside the C package, `moq-c`, without colliding.
 
 ## Example
 
