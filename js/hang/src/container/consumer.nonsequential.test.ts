@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import type { Micro, Milli } from "@moq/clock";
 import { Group, Time, Track, Varint } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Format as LegacyFormat } from "./legacy.ts";
@@ -13,7 +14,7 @@ async function nextFrame(consumer: Consumer) {
 	}
 }
 
-function encodeLegacyFrame(timestamp: Time.Micro, payload: Uint8Array): Uint8Array {
+function encodeLegacyFrame(timestamp: Micro, payload: Uint8Array): Uint8Array {
 	const tsBytes = Varint.encode(timestamp);
 	const data = new Uint8Array(tsBytes.byteLength + payload.byteLength);
 	data.set(tsBytes, 0);
@@ -36,13 +37,13 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), {
 		format: new LegacyFormat("data"),
-		maxDelay: 5000 as Time.Milli,
+		maxDelay: 5000 as Milli,
 	});
 
 	// Group A at a large sequence, completed so the cursor advances past it.
 	const a = new Group.Producer(1_000_000);
 	a.writeFrame({
-		payload: encodeLegacyFrame(0 as Time.Micro, new Uint8Array([0x01])),
+		payload: encodeLegacyFrame(0 as Micro, new Uint8Array([0x01])),
 		timestamp: Time.Timestamp.now(),
 	});
 	a.close();
@@ -61,7 +62,7 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 	const b = new Group.Producer(1_090_000);
 	track.writeGroup(b);
 	b.writeFrame({
-		payload: encodeLegacyFrame(1_000_000 as Time.Micro, new Uint8Array([0x02])),
+		payload: encodeLegacyFrame(1_000_000 as Micro, new Uint8Array([0x02])),
 		timestamp: Time.Timestamp.now(),
 	});
 

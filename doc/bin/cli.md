@@ -168,7 +168,7 @@ Playback is behind the `play` feature, since it pulls in windowing and
 audio-device dependencies:
 
 ```bash
-cargo install moq-cli --no-default-features --features "noq,websocket,play"
+cargo install moq-cli --no-default-features --features "quic,websocket,play"
 ```
 
 `moq play` skips disabled renditions. If none are enabled, it waits for a later catalog. Disabling the current rendition stops it and selects an enabled replacement.
@@ -259,11 +259,13 @@ moq --connect https://relay.example.com/anon --broadcast event-replay.hang impor
 
 `export archive` records one broadcast with
 [moq-archive](https://docs.rs/moq-archive), cutting each track into 2-10 s
-spans at group boundaries. A store that already holds the recording is
+spans at group boundaries. An [untimed](/concept/moq-lite#subscriptions) track,
+as every track is over moq-lite before 05 and moq-transport 14-16, is stored
+one group per span and replays untimed. A store that already holds the recording is
 continued, unless the source now announces another
 [epoch](/concept/moq-lite#publisher-epochs): that is a restart, so the export
 fails; record it under a new prefix. `--retention 1h` keeps only the last
-hour, a DVR.
+hour, a DVR, which refuses an untimed track since it has no time to measure.
 
 `import archive` republishes a recording as live tracks, fetching spans on
 request. It ends where the recording ends; `--follow 2s` keeps polling a

@@ -42,8 +42,8 @@ listen = "127.0.0.1:9101"
 
 ### GET /metrics
 
-Prometheus text: bytes, frames, groups, subscriptions, viewers, requests, and sessions
-split by `tier` and `role`, plus accept-loop counters per TCP listener. Traffic
+Prometheus text: bytes, frames, groups, announces, subscriptions, viewers, requests,
+and sessions split by `tier` and `role`, plus accept-loop counters per TCP listener. Traffic
 counters accumulate for the node's lifetime and leave out the stats feed's own
 traffic. Host CPU and memory belong to a node exporter.
 

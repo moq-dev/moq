@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Exercise sampler-owned generator lifetime with deterministic fake counters."""
 import os
+import signal
+import socket
+import sys
 from pathlib import Path
 import subprocess
 import tempfile
@@ -55,6 +58,107 @@ run_workload fixture ignored video
             self.assertEqual(result['cpu_cores'], 1)
             self.assertEqual(result['generator']['cpu_cores'], 1)
             self.assertEqual(result['host_window_start_ms'], result['throughput_window_start_ms'])
+
+
+@unittest.skipUnless(sys.platform == 'linux', 'relay process metrics require Linux')
+class PortOwnership(unittest.TestCase):
+    def run_shell(self, script, directory, relay, **env):
+        process = subprocess.Popen(['bash', '-c', script, 'test', str(ROOT), str(directory), str(relay)],
+                                   env=dict(os.environ, **env), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, start_new_session=True)
+        try:
+            stdout, stderr = process.communicate(timeout=15)
+            return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+        finally:
+            if process.poll() is None:
+                # This session contains only the fixture shell and its own children.
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait()
+
+    def test_a_foreign_listener_never_proves_relay_readiness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            holder = run / 'hold.py'
+            holder.write_text('''#!/usr/bin/env python3
+import signal, socket, sys
+prefix, port = sys.argv[1], int(sys.argv[2])
+tcp = socket.socket()
+tcp.bind(('127.0.0.1', port))
+tcp.listen()
+udp = socket.socket(type=socket.SOCK_DGRAM)
+udp.bind(('127.0.0.1', port))
+with open(prefix + '.ready', 'w') as ready: ready.write('ready\\n')
+connection, _ = tcp.accept()
+connection.close()
+with open(prefix + '.release', 'w') as release: release.write('release\\n')
+while True: signal.pause()
+''')
+            relay = run / 'relay.py'
+            relay.write_text('''#!/usr/bin/env python3
+import sys
+# Stay alive until the harness probes the foreign listener, making the race deterministic.
+with open(sys.argv[1] + '.release') as release: release.read()
+sys.exit('Address already in use: fixture collision')
+''')
+            relay.chmod(0o755)
+            script = '''set -euo pipefail
+ROOT=$1 RUN=$2 RELAY_PID=
+HOLDERS=()
+trap 'for pid in "${HOLDERS[@]}" "$RELAY_PID"; do if [[ -n $pid ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; done' EXIT
+source "$ROOT/bench/relay.sh"
+relay_config() {
+    : > "$1"
+    mkfifo "$1.ready" "$1.release"
+    python3 "$RUN/hold.py" "$1" "$2" &
+    HOLDERS+=("$!")
+    IFS= read -r ready < "$1.ready"
+}
+start_relay "$3" "$RUN"
+'''
+            result = self.run_shell(script, run, relay)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn('relay failed to start', result.stderr)
+            self.assertIn('Address already in use: fixture collision', result.stderr)
+
+    def test_startup_requires_tcp_and_udp_owned_by_the_relay(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            relay = run / 'relay.py'
+            relay.write_text('''#!/usr/bin/env python3
+import signal, socket, sys, tomllib
+config = tomllib.loads(open(sys.argv[1]).read())
+port = int(config['listen']['bind'].rsplit(':', 1)[1])
+tcp = socket.socket()
+tcp.bind(('127.0.0.1', port))
+tcp.listen()
+udp = socket.socket(type=socket.SOCK_DGRAM)
+udp.bind(('127.0.0.1', port))
+while True: signal.pause()
+''')
+            relay.chmod(0o755)
+            script = '''set -euo pipefail
+ROOT=$1 RUN=$2 RELAY_PID=
+trap 'if [[ -n $RELAY_PID ]]; then kill "$RELAY_PID" 2>/dev/null || true; wait "$RELAY_PID" 2>/dev/null || true; fi' EXIT
+source "$ROOT/bench/relay.sh"
+start_relay "$3" "$RUN"
+relay_owns_port "$RELAY_PID" "$RELAY_PORT"
+stop_relay
+'''
+            result = self.run_shell(script, run, relay)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_tcp_without_udp_is_not_owned_as_a_relay_port(self):
+        with tempfile.TemporaryDirectory() as directory, socket.socket() as tcp:
+            tcp.bind(('127.0.0.1', 0))
+            tcp.listen()
+            script = '''set -euo pipefail
+ROOT=$1 RUN=$2
+source "$ROOT/bench/relay.sh"
+relay_owns_port "$OWNER_PID" "$PORT"
+'''
+            result = self.run_shell(script, Path(directory), 'unused',
+                                    OWNER_PID=str(os.getpid()), PORT=str(tcp.getsockname()[1]))
+            self.assertEqual(result.returncode, 1, result.stderr)
 
 
 unittest.main()

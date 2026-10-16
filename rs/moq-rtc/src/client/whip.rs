@@ -22,7 +22,7 @@ pub(crate) async fn dial(
 	url: Url,
 	origin: moq_net::origin::Consumer,
 	path: impl moq_net::AsPath,
-) -> Result<()> {
+) -> Result<crate::wire::Source> {
 	let broadcast = origin.request_broadcast(path, None).await?;
 	let source = EgressSource::new(moq_mux::Source::new(origin, broadcast)).await?;
 	let codecs = source.catalog_codecs();
@@ -83,10 +83,11 @@ pub(crate) async fn dial(
 	for mid in mids {
 		session.open_media(mid)?;
 	}
+	let wire = session.wire();
 	tokio::spawn(async move {
 		let result = session.run().await;
 		session::log_session_end("whip client", &result);
 	});
 
-	Ok(())
+	Ok(wire)
 }

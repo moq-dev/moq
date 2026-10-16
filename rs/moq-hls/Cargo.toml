@@ -40,6 +40,6 @@ url = { workspace = true }
 async-trait = "0.1"
 futures = { workspace = true }
 moq-archive = { path = "../moq-archive" }
-moq-tokio = { path = "../moq-tokio", default-features = false, features = ["tcp", "noq", "aws-lc-rs"] }
+moq-tokio = { path = "../moq-tokio", default-features = false, features = ["tcp", "quic", "aws-lc-rs"] }
 tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }

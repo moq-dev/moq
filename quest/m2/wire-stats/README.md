@@ -64,5 +64,3 @@ see cost per tenant.
   reports its TCP bytes
 - [moq-srt wire source](/quest/m2/wire-stats/srt.md) - an SRT connection
   reports its wire bytes
-- [moq-rtc wire source](/quest/m2/wire-stats/rtc.md) - a WebRTC peer reports
-  its wire bytes

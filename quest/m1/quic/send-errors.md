@@ -20,10 +20,6 @@ Only fatal, destination-specific errors end the attempt; transient ones
 against an unroutable family, and check that moq-uring maps the same errors
 through its ring.
 
-## Required
-
-- [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq_sock::udp` and moq-tokio's imported quinn layer
-
 ## Related
 
 - [quinn#2766](https://github.com/quinn-rs/quinn/issues/2766) - the upstream issue
