@@ -476,6 +476,8 @@ class DecoderTrack {
 					// received(), so it predates the current timeline. Drop it: painting it would
 					// set `timestamp` from the old timeline and late-reject what follows.
 					if (this.sync.out.reference.peek() === undefined) return;
+					// WebCodecs can hold a picture until after another track skipped the playhead past it.
+					if (this.sync.skipped(timestamp)) return;
 
 					if (this.frame.peek() === undefined) {
 						// Render something while we wait for the sync to catch up.
@@ -487,7 +489,7 @@ class DecoderTrack {
 					const signal = effect.abort;
 					await this.sync.wait(timestamp, signal);
 					if (signal.aborted) return;
-					if (epoch !== this.sync.epoch) return;
+					if (epoch !== this.sync.epoch || this.sync.skipped(timestamp)) return;
 
 					if (timestamp < (this.timestamp.peek() ?? 0)) {
 						// Late frame, don't render it.
