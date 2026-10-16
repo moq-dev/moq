@@ -29,7 +29,9 @@ round-trip test first.
   under half a wrap) so a start near the wrap does not split them, shifted onto the catalog clock by the timebase
   offset that shifts the PTS. A PES waits for the next PCR, within the
   existing `Retained` bound; it never spans a PCR discontinuity. The value
-  depends only on the input bytes, so same-epoch importers agree. A program
+  depends only on the input bytes and the timebase offset, so it adds no
+  disagreement of its own; same-epoch importers agree once the
+  [epoch anchor](/quest/m1/epoch-anchor.md) fixes that offset. A program
   with no PCR PID cannot place its PES, so its private PES streams are
   refused. The timebase offset is anchored only by a PTS today, so a PES
   also waits for that anchor within the same bound; a program whose PES
@@ -57,7 +59,7 @@ round-trip test first.
   silently leaves the stream out of its TS; that is the accepted cost.
 - **Refusal.** A PES carrying a clock this does not rebase (ESCR, a
   `pack_header_field`, TREF), PES-level scrambling, or a zero
-  `PES_packet_length` on a non-video stream_id (export refuses it too)
+  `PES_packet_length` on a non-video payload, by export's rule
   refuses its stream:
   no track is advertised, or an advertised one ends with an error and loses
   its catalog entry, with a warning and an importer health count.

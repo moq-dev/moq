@@ -47,7 +47,8 @@ writes the member, so the round trip never meets a catalog export can't read.
   (start code, a `PES_packet_length` matching the frame, a complete
   optional header where the stream_id has one) fails the track, like a
   malformed section frame does. A length of zero is allowed only for a
-  video stream_id (0xE0-0xEF), as H.222.0 permits.
+  video payload, as H.222.0 permits: a video stream_id (0xE0-0xEF), or an
+  extended one (0xFD) whose stream type is video, such as VC-1.
 
 Leave the legacy `pes` framing as it is here; the
 [importer quest](/quest/m1/ts-reliability/pes-import.md) deletes it once
