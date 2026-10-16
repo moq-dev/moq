@@ -171,6 +171,8 @@ pub struct Connection {
     retry_src_cid: Option<ConnectionId>,
     events: VecDeque<Event>,
     endpoint_events: VecDeque<EndpointEventInner>,
+    /// Whether `EndpointEventInner::Draining` was emitted, which happens once.
+    draining_reported: bool,
     /// Whether the spin bit is in use for this connection
     spin_enabled: bool,
     /// Outgoing spin bit state
@@ -317,6 +319,7 @@ impl Connection {
             retry_src_cid: None,
             events: VecDeque::new(),
             endpoint_events: VecDeque::new(),
+            draining_reported: false,
             spin_enabled: config.allow_spin && rng.random_ratio(7, 8),
             spin: false,
             spaces: [initial_space, PacketSpace::new(now), PacketSpace::new(now)],
@@ -1256,6 +1259,7 @@ impl Connection {
             match timer {
                 Timer::Close => {
                     self.state = State::Drained;
+                    self.report_draining();
                     self.endpoint_events.push_back(EndpointEventInner::Drained);
                 }
                 Timer::Idle => {
@@ -2625,6 +2629,9 @@ impl Connection {
                 self.set_close_timer(now);
             }
         }
+        if matches!(self.state, State::Draining | State::Drained) {
+            self.report_draining();
+        }
         if !was_drained && self.state.is_drained() {
             self.endpoint_events.push_back(EndpointEventInner::Drained);
             // Close timer may have been started previously, e.g. if we sent a close and got a
@@ -3968,7 +3975,15 @@ impl Connection {
         self.close_common();
         self.error = Some(reason);
         self.state = State::Drained;
+        self.report_draining();
         self.endpoint_events.push_back(EndpointEventInner::Drained);
+    }
+
+    /// Tell the endpoint the connection is no longer active, the first time it stops being so
+    fn report_draining(&mut self) {
+        if !mem::replace(&mut self.draining_reported, true) {
+            self.endpoint_events.push_back(EndpointEventInner::Draining);
+        }
     }
 
     /// Storage size required for the largest packet known to be supported by the current path

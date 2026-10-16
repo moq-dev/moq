@@ -1,8 +1,8 @@
 import { describe, expect, it, spyOn } from "bun:test";
+import { Manual, Micro, Milli, Nano, now } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
-import { Time } from "@moq/net";
 import { type Effect, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import { type Delay, Sync } from "../sync";
@@ -49,7 +49,7 @@ async function play(catalog: Signal<Catalog.Root>): Promise<{
 		broadcast,
 		supported: async () => true,
 	});
-	const sync = new Sync({ delay: Time.Milli(0) });
+	const sync = new Sync({ delay: Milli(0) });
 	await settle();
 	const decoder = new Decoder({ source, sync });
 	await settle();
@@ -63,14 +63,14 @@ describe("Decoder jitter across a source switch", () => {
 		});
 		const { broadcast, source, sync, decoder } = await play(outgoing);
 		try {
-			expect(decoder.out.jitter.peek()).toBe(Time.Milli(260));
+			expect(decoder.out.jitter.peek()).toBe(Milli(260));
 
 			// A rise on the catalog this rendition subscribed to still resizes the floor.
 			outgoing.set({
 				video: { renditions: { video: config({ delay: 300, jitter: 60 }) } },
 			});
 			await settle();
-			expect(decoder.out.jitter.peek()).toBe(Time.Milli(360));
+			expect(decoder.out.jitter.peek()).toBe(Milli(360));
 
 			broadcast.set(
 				watchBroadcast(
@@ -81,7 +81,7 @@ describe("Decoder jitter across a source switch", () => {
 			);
 			await settle();
 			// The old frames are still on screen. The new catalog's same name is not their floor.
-			expect(decoder.out.jitter.peek()).toBe(Time.Milli(360));
+			expect(decoder.out.jitter.peek()).toBe(Milli(360));
 		} finally {
 			decoder.close();
 			source.close();
@@ -95,7 +95,7 @@ describe("Decoder jitter across a source switch", () => {
 		});
 		const { broadcast, source, sync, decoder } = await play(outgoing);
 		try {
-			expect(decoder.out.jitter.peek()).toBe(Time.Milli(20));
+			expect(decoder.out.jitter.peek()).toBe(Milli(20));
 
 			broadcast.set(
 				watchBroadcast(
@@ -105,7 +105,7 @@ describe("Decoder jitter across a source switch", () => {
 				),
 			);
 			await settle();
-			expect(decoder.out.jitter.peek()).toBe(Time.Milli(200));
+			expect(decoder.out.jitter.peek()).toBe(Milli(200));
 
 			const newest = new Signal<Catalog.Root>({
 				video: { renditions: { video: config({ delay: 500 }) } },
@@ -113,13 +113,13 @@ describe("Decoder jitter across a source switch", () => {
 			broadcast.set(watchBroadcast(newest));
 			await settle();
 			// The first switch is still pending, so the name did not change. The new catalog still has to win.
-			expect(decoder.out.jitter.peek()).toBe(Time.Milli(500));
+			expect(decoder.out.jitter.peek()).toBe(Milli(500));
 
 			newest.set({
 				video: { renditions: { video: config({ delay: 700 }) } },
 			});
 			await settle();
-			expect(decoder.out.jitter.peek()).toBe(Time.Milli(700));
+			expect(decoder.out.jitter.peek()).toBe(Milli(700));
 		} finally {
 			decoder.close();
 			source.close();
@@ -133,7 +133,7 @@ describe("Decoder jitter across a source switch", () => {
 		});
 		const { broadcast, source, sync, decoder } = await play(outgoing);
 		try {
-			expect(decoder.out.jitter.peek()).toBe(Time.Milli(260));
+			expect(decoder.out.jitter.peek()).toBe(Milli(260));
 
 			broadcast.set(
 				watchBroadcast(
@@ -143,7 +143,7 @@ describe("Decoder jitter across a source switch", () => {
 				),
 			);
 			await settle();
-			expect(decoder.out.jitter.peek()).toBe(Time.Milli(260));
+			expect(decoder.out.jitter.peek()).toBe(Milli(260));
 		} finally {
 			decoder.close();
 			source.close();
@@ -174,14 +174,27 @@ class Picture {
 }
 
 type Read = Container.Read;
+
+// A manual clock installed at `ms`, so parked sleeps only wake when a test advances it.
+function manualAt(ms: number) {
+	const clock = new Manual();
+	clock.advance(Nano.fromMilli(Milli(ms)));
+	const restore = clock.install();
+	return { advance: (by: number) => clock.advanceAsync(Nano.fromMilli(Milli(by))), restore };
+}
 function sample(group: number, timestamp: number, keyframe = true): Read {
 	return {
 		kind: "frame",
 		group,
-		frame: { arrival: Time.Milli.now(), timestamp: Time.Micro(timestamp), payload: new Uint8Array([1]), keyframe },
+		frame: {
+			arrival: Nano.toMilli(Nano(now())),
+			timestamp: Micro(timestamp),
+			payload: new Uint8Array([1]),
+			keyframe,
+		},
 	};
 }
-const gap: Read = { kind: "gap", timestamp: Time.Micro(0), duration: Time.Micro(0) };
+const gap: Read = { kind: "gap", timestamp: Micro(0), duration: Micro(0) };
 
 async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: readonly number[] = []) {
 	const originalDecoder = Object.getOwnPropertyDescriptor(globalThis, "VideoDecoder");
@@ -297,6 +310,9 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 		get resets() {
 			return resets;
 		},
+		release() {
+			for (const emit of pending.splice(0)) emit();
+		},
 		// A restarted publisher takes the name: another instance of the same broadcast.
 		republish() {
 			closeAll();
@@ -339,13 +355,13 @@ it("promoting from no active track holds its picture and timestamp until a frame
 	try {
 		const held = playback.decoder.out.frame.peek();
 		expect(held).toBeDefined();
-		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(1));
+		expect(playback.decoder.out.timestamp.peek()).toBe(Milli(1));
 		playback.enabled.set(false);
 		await microtasks();
 		playback.enabled.set(true);
 		await microtasks();
 		expect(playback.decoder.out.frame.peek()).toBe(held);
-		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(1));
+		expect(playback.decoder.out.timestamp.peek()).toBe(Milli(1));
 		expect((held as unknown as Picture).closed).toBe(false);
 	} finally {
 		playback.close();
@@ -356,7 +372,7 @@ it("switches to a republished broadcast at once, its timeline starting over", as
 	const reads = [sample(10, 10_000_000)];
 	const playback = await guardedPlayback("legacy", reads);
 	try {
-		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(10_000));
+		expect(playback.decoder.out.timestamp.peek()).toBe(Milli(10_000));
 		const reset = spyOn(playback.sync, "reset");
 
 		reads.push(sample(0, 1000));
@@ -364,7 +380,7 @@ it("switches to a republished broadcast at once, its timeline starting over", as
 		await microtasks();
 
 		// Waiting to catch up to the old picture would hold it until the new timeline passed 10s.
-		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(1));
+		expect(playback.decoder.out.timestamp.peek()).toBe(Milli(1));
 		expect(reset).toHaveBeenCalledTimes(1);
 	} finally {
 		playback.close();
@@ -381,7 +397,7 @@ it("switches at once when only the media a rendition reads is republished", asyn
 		playback.republishMedia();
 		await microtasks();
 
-		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(1));
+		expect(playback.decoder.out.timestamp.peek()).toBe(Milli(1));
 		expect(reset).toHaveBeenCalledTimes(1);
 	} finally {
 		playback.close();
@@ -398,7 +414,7 @@ it("keeps the clock when only the catalog's broadcast is republished", async () 
 		await microtasks();
 
 		// The media is the same instance, so its timeline did not start over.
-		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(10_000));
+		expect(playback.decoder.out.timestamp.peek()).toBe(Milli(10_000));
 		expect(reset).not.toHaveBeenCalled();
 	} finally {
 		playback.close();
@@ -425,10 +441,73 @@ it("clears the picture once no rendition is selectable", async () => {
 
 // A late marker from older history breaks the timeline without making older groups newer.
 function marker(group: number, end: number): Read {
-	return { kind: "end", group, end: Time.Micro(end) };
+	return { kind: "end", group, end: Micro(end) };
 }
 
 for (const kind of ["legacy", "cmaf"] as const) {
+	// Another track skips the shared playhead to `skipTo` while a 1s picture is still inside
+	// WebCodecs (`queued`) or parked in Sync.wait, with a 100ms delay and no buffer. Reports what
+	// was showing before the skip and whether the picture presented once its deadline came due.
+	async function skipDuring(stage: "queued" | "parked", skipTo: number) {
+		const clock = manualAt(5000);
+		const reads: Read[] = [];
+		const picture = 1_000_000;
+		const playback = await guardedPlayback(kind, reads, stage === "queued" ? [picture] : []);
+		try {
+			playback.enabled.set(false);
+			playback.delay.set(Milli(100));
+			await microtasks();
+			reads.push(sample(1, picture));
+			playback.enabled.set(true);
+			await microtasks();
+			expect(playback.outputs).toEqual(stage === "queued" ? [] : [picture]);
+			const before = playback.decoder.out.frame.peek();
+
+			playback.sync.received(Milli(skipTo), "audio", Milli(5000));
+			playback.release();
+			await microtasks();
+			const due = playback.decoder.out.frame.peek();
+			await clock.advance(100);
+			const after = playback.decoder.out.frame.peek();
+			return { before, after, presented: after !== due };
+		} finally {
+			playback.close();
+			await microtasks();
+			clock.restore();
+		}
+	}
+
+	for (const stage of ["queued", "parked"] as const) {
+		it(`${kind} drops a ${stage} picture another track skips the playhead past`, async () => {
+			const skip = await skipDuring(stage, 10_000);
+			expect(skip.presented).toBe(false);
+			expect(skip.after).toBe(skip.before);
+		});
+
+		// A startup burst: audio 50ms newer re-anchors the playhead to 950ms, still behind the picture.
+		it(`${kind} presents a ${stage} picture still ahead of the playhead a skip moved to`, async () => {
+			const skip = await skipDuring(stage, 1050);
+			expect(skip.presented).toBe(true);
+		});
+	}
+
+	it(`${kind} instant presents a queued picture after a newer frame arrives`, async () => {
+		const queued = 1_000_000;
+		const playback = await guardedPlayback(kind, [sample(1, queued)], [queued]);
+		try {
+			expect(playback.outputs).toEqual([]);
+
+			// "instant" has no cap, so every newer frame skips the playhead without passing over anything.
+			playback.sync.received(Milli(10_000), "video", Nano.toMilli(Nano(now())));
+			playback.release();
+			await microtasks();
+
+			expect(playback.decoder.out.timestamp.peek()).toBe(Milli(1000));
+		} finally {
+			playback.close();
+		}
+	});
+
 	it(`${kind} skips older groups before decode, even across a stale marker`, async () => {
 		const playback = await guardedPlayback(kind, [
 			sample(10, 1000),
@@ -443,7 +522,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 			for (const timestamp of [1, 1.1, 1.2])
 				expect(await playback.arrivals.next()).toMatchObject({
 					kind: "frame",
-					timestamp: Time.Milli(timestamp),
+					timestamp: Milli(timestamp),
 				});
 			// Rejected payloads were still received, but never counted as frames.
 			expect(playback.decoder.out.stats.peek()).toEqual({ frameCount: 3, bytesReceived: 5 });
@@ -461,7 +540,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 			expect(playback.submitted).toEqual([0, queued, 0]);
 			expect(playback.outputs).toEqual([0, 0]);
 			expect(playback.resets).toBe(1);
-			expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(0));
+			expect(playback.decoder.out.timestamp.peek()).toBe(Milli(0));
 		} finally {
 			playback.close();
 		}
@@ -550,7 +629,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 	it(`reports the outgoing ${kind} decoder failing during a rendition handover`, async () => {
 		const playback = await guardedPlayback(kind, [sample(1, 100_000)]);
 		try {
-			expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(100));
+			expect(playback.decoder.out.timestamp.peek()).toBe(Milli(100));
 			playback.switchRendition();
 			await microtasks();
 			expect(playback.codecs).toBe(2);
@@ -560,7 +639,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 			expect(playback.decoder.out.error.peek()).toBe(failure);
 			playback.emit(200_000, 1);
 			await microtasks();
-			expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(200));
+			expect(playback.decoder.out.timestamp.peek()).toBe(Milli(200));
 			expect(playback.decoder.out.error.peek()).toBeUndefined();
 			playback.switchRendition("video");
 			await microtasks();
@@ -600,46 +679,36 @@ for (const kind of ["legacy", "cmaf"] as const) {
 }
 
 it("a shared audio clock reset cannot present a parked video frame", async () => {
-	const now = spyOn(Time.Milli, "now").mockReturnValue(Time.Milli(1000));
-	const timer = spyOn(globalThis, "setTimeout").mockImplementation(
-		(() => 1 as unknown as ReturnType<typeof setTimeout>) as unknown as typeof setTimeout,
-	);
-	const clear = spyOn(globalThis, "clearTimeout").mockImplementation(() => {});
+	const clock = manualAt(1000);
 	const reads: Read[] = [];
 	const playback = await guardedPlayback("legacy", reads);
 	try {
 		playback.enabled.set(false);
-		playback.delay.set(Time.Milli(1000));
+		playback.delay.set(Milli(1000));
 		await microtasks();
 		reads.push(sample(0, 0), sample(0, 100_000, false));
 		playback.enabled.set(true);
 		await microtasks();
 		expect(playback.submitted).toEqual([0, 100_000]);
-		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(0));
+		expect(playback.decoder.out.timestamp.peek()).toBe(Milli(0));
 		// Audio can reset the shared reference while this video's own container
 		// discontinuity remains unchanged.
 		playback.sync.reset();
 		await microtasks();
-		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(0));
+		expect(playback.decoder.out.timestamp.peek()).toBe(Milli(0));
 		// The next utterance anchors the clock past the parked frame's deadline.
-		playback.sync.received(Time.Milli(2000));
+		playback.sync.received(Milli(2000));
 		await microtasks();
-		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(0));
+		expect(playback.decoder.out.timestamp.peek()).toBe(Milli(0));
 	} finally {
 		playback.close();
 		await microtasks();
-		clear.mockRestore();
-		timer.mockRestore();
-		now.mockRestore();
+		clock.restore();
 	}
 });
 
 it("closing the track releases a video wait parked across a reset", async () => {
-	const now = spyOn(Time.Milli, "now").mockReturnValue(Time.Milli(1000));
-	const timer = spyOn(globalThis, "setTimeout").mockImplementation(
-		(() => 1 as unknown as ReturnType<typeof setTimeout>) as unknown as typeof setTimeout,
-	);
-	const clear = spyOn(globalThis, "clearTimeout").mockImplementation(() => {});
+	const clock = manualAt(1000);
 	const reads: Read[] = [];
 	const playback = await guardedPlayback("legacy", reads);
 	const waits: Promise<void>[] = [];
@@ -651,7 +720,7 @@ it("closing the track releases a video wait parked across a reset", async () => 
 	});
 	try {
 		playback.enabled.set(false);
-		playback.delay.set(Time.Milli(1000));
+		playback.delay.set(Milli(1000));
 		await microtasks();
 		reads.push(sample(0, 0), sample(0, 100_000, false));
 		playback.enabled.set(true);
@@ -668,25 +737,17 @@ it("closing the track releases a video wait parked across a reset", async () => 
 		wait.mockRestore();
 		playback.close();
 		await microtasks();
-		clear.mockRestore();
-		timer.mockRestore();
-		now.mockRestore();
+		clock.restore();
 	}
 });
 
 it("a reset drops a parked video frame even when the next anchor restores the reference", async () => {
-	const now = spyOn(Time.Milli, "now").mockReturnValue(Time.Milli(1000));
-	const timers: Array<() => void> = [];
-	const timer = spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void) => {
-		timers.push(fn);
-		return timers.length as unknown as ReturnType<typeof setTimeout>;
-	}) as unknown as typeof setTimeout);
-	const clear = spyOn(globalThis, "clearTimeout").mockImplementation(() => {});
+	const clock = manualAt(1000);
 	const reads: Read[] = [];
 	const playback = await guardedPlayback("legacy", reads);
 	try {
 		playback.enabled.set(false);
-		playback.delay.set(Time.Milli(1000));
+		playback.delay.set(Milli(1000));
 		await microtasks();
 		reads.push(sample(0, 0), sample(0, 100_000, false));
 		playback.enabled.set(true);
@@ -694,16 +755,48 @@ it("a reset drops a parked video frame even when the next anchor restores the re
 		expect(playback.submitted).toEqual([0, 100_000]);
 		// In one turn, so the reference never visibly changes and the parked sleep keeps its timer.
 		playback.sync.reset();
-		playback.sync.received(Time.Milli(0));
+		playback.sync.received(Milli(0));
 		await microtasks();
-		for (const fn of timers.splice(0)) fn();
-		await microtasks();
-		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(0));
+		// The parked sleep comes due; its frame belongs to the timeline the reset ended.
+		await clock.advance(1000);
+		expect(playback.decoder.out.timestamp.peek()).toBe(Milli(0));
 	} finally {
 		playback.close();
 		await microtasks();
-		clear.mockRestore();
-		timer.mockRestore();
-		now.mockRestore();
+		clock.restore();
 	}
 });
+
+for (const kind of ["legacy", "cmaf"] as const) {
+	it(`${kind} trims orphan leading pictures on join and later gap, preserving continuous groups`, async () => {
+		const reads: Read[] = [
+			sample(10, 1000),
+			sample(10, 800, false),
+			sample(10, 900, false),
+			sample(10, 1100, false),
+			sample(11, 2000),
+			sample(11, 1800, false),
+			sample(11, 1900, false),
+			sample(11, 2100, false),
+			gap,
+			sample(13, 4000),
+			sample(13, 3800, false),
+			sample(13, 3900, false),
+			sample(13, 4100, false),
+			{ kind: "end", group: 14, end: Micro(4200) },
+			sample(15, 5000),
+			sample(15, 4800, false),
+			sample(15, 4900, false),
+			sample(15, 5100, false),
+		];
+		const playback = await guardedPlayback(kind, reads);
+		try {
+			await microtasks();
+			expect(playback.submitted).toEqual([
+				1000, 1100, 2000, 1800, 1900, 2100, 4000, 4100, 5000, 4800, 4900, 5100,
+			]);
+		} finally {
+			playback.close();
+		}
+	});
+}

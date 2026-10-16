@@ -65,6 +65,14 @@ relay_config() {
         "${runtime_config[@]}" >"$path"
 }
 
+# A connect can succeed against somebody else's listener while our child is alive.
+# Check both sockets on the actual relay PID before treating that probe as readiness.
+relay_owns_port() {
+    local pid=$1 port=$2
+    lsof -nP -a -p "$pid" -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1 &&
+        lsof -nP -a -p "$pid" -iUDP:"$port" >/dev/null 2>&1
+}
+
 start_relay() {
     local relay=$1
     local directory=$2
@@ -83,6 +91,11 @@ start_relay() {
             tokio_threads=
             ;;
     esac
+
+    if ! command -v lsof >/dev/null; then
+        printf 'relay socket ownership requires lsof; run through nix develop\n' >&2
+        return 1
+    fi
 
     for attempt in {1..5}; do
         port=$((40000 + (RANDOM % 20000)))
@@ -104,7 +117,7 @@ start_relay() {
                 RELAY_PID=
                 break
             fi
-            if (: <>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+            if (: <>"/dev/tcp/127.0.0.1/$port") 2>/dev/null && relay_owns_port "$RELAY_PID" "$port"; then
                 RELAY_PORT=$port
                 return 0
             fi

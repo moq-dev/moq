@@ -26,7 +26,6 @@ ranked just below deterministic TS legs, which it requires.
 - [Time test sweep](/quest/m2/time-test-sweep.md) - unrelated test conversion and the workspace lint ratchet
 
 - [Binding audio delay](/quest/m2/binding-surface.md) - moq-ffi and every wrapper configure and observe audio playout delay
-- [Biome on doc/ and demo/](/quest/m2/biome-doc-demo.md) - `just check` and CI lint and format `doc/` and `demo/` with Biome, and both pass
 - [Pipelined requests](/quest/m2/pipeline-requests/README.md) - SUBSCRIBE and the first FETCH go out with the track-info request at every hop, so first data arrives a round trip sooner per hop
 - [OBS native codecs](/quest/m2/obs-moq-video/README.md) - replace FFmpeg video and audio decoding with moq-video and moq-audio, deliver GPU frames, and use native audio/video encoders
 - [OBS multitrack](/quest/m2/obs-multitrack.md) - the obs-moq output publishes OBS's native multitrack video encoders as simulcast renditions, configured like OBS multitrack and over obs-websocket
@@ -96,7 +95,7 @@ ranked just below deterministic TS legs, which it requires.
 - [Per-stream deadlines](/quest/m2/quic-deadline.md) - hopeless retransmits
   become resets, and a tail loss probe fires early while there is still time
 - [qmux on the QUIC stream state machine](/quest/m2/quic-qmux.md) - qmux is a
-  first-class crate in the fork over the shared stream state machine
+  first-class crate over `moq-quic`'s shared stream state machine
 - [Align BBR loss handling with draft-06](/quest/m2/quic-bbr-loss-parity.md) - losses use their own sample and the draft-05 links go, keeping the spurious-loss undo that already re-enters ProbeUp through Refill
 - [Measure ECN on the backbone](/quest/m2/quic-ecn-measure.md) - a written
   verdict on marking versus dropping, and whether Linode and OVH keep marks
@@ -110,7 +109,6 @@ ranked just below deterministic TS legs, which it requires.
   with a delivery-delay histogram for jitter
 - [#3199](/quest/m2/3199-moq-uring-remove-sq-indirection-and-per-enter-ring-fd.md) - moq-uring: remove SQ indirection and per-enter ring fd lookup, if a profile shows the win
 - [#3200](/quest/m2/3200-moq-uring-batch-completion-wakeups-with-min-timeout.md) - moq-uring: batch completion wakeups with MIN_TIMEOUT
-- [Send depth](/quest/m2/send-depth.md) - moq-net futures prove Send at the default recursion limit, so downstream crates see no nightly lint
 - [Browser benchmarks](/quest/m2/browser-benchmarks.md) - measure JS transport, container, decode, and render costs in an identified browser
 - [Browser media report](/quest/m2/rs2ts-browser-report.md) - compare Rust-backed and handwritten @moq/net through full media workloads, supplementing the pre-adoption comparisons
 - [mTLS on tls://](/quest/m2/tls-listener-mtls.md) - a `tls://` listener can identify a cluster peer by its client certificate
@@ -118,7 +116,6 @@ ranked just below deterministic TS legs, which it requires.
 - [One transport adapter](/quest/m2/transport-adapter-dedup.md) - the poll transport adapter exists once, and the 64 KiB cap in moq-net's default `poll_read_buf` (not in the adapter) has a test
 - [Archive S3 wire proof](/quest/m2/archive-s3.md) - the archive proof also runs through the S3 client against an in-process S3-compatible server
 - [Archive recovery listing](/quest/m2/archive-recovery-listing.md) - a resumed DVR lists what changed since its checkpoint, not every stored group
-- [Range-addressed HLS playlists](/quest/m2/hls-ranges.md) - `moq-hls` lists a start-to-end range of a recording as its own playlist, for moq.pro's managed HLS
 - [IETF on the ring](/quest/m2/uring-ietf.md) - the io_uring workers serve moq-transport sessions too, so a uring relay drops no client protocol
 - [Dropped uring session closes](/quest/m2/uring-drop-close.md) - a moq-uring session dropped without close() closes its connection
 - [One connection lifecycle](/quest/m2/uring-connection-log.md) - every accept path, io_uring included, logs a connection's span and close from one owner, so Interop's accounting works on the ring
@@ -140,7 +137,6 @@ ranked just below deterministic TS legs, which it requires.
 - [Keep-alive from the idle timeout](/quest/m2/quic-keep-alive.md) - the keep-alive interval defaults to a fraction of the negotiated idle timeout; an explicit `quic.keep_alive` overrides
 - [Socket close](/quest/m2/noq-socket-close.md) - moq-tokio's QUIC endpoint releases its socket on close, so it drops its wrapper
 - [TS health stats](/quest/m2/ts-health-stats.md) - the TS counters ride the stats plumbing beside the media counters
-- [Teleoperation](/quest/m2/teleop/README.md) - MoQ carries robot video down and control up on one session as a library capability
 - [Media QA on other engines](/quest/m2/browser-media-qa-engines.md) - the media harness measures a Firefox or WebKit player over the fallback and names what each engine lacks
 - [Windows.Graphics.Capture](/quest/m2/capture-wgc.md) - the WGC display and window backend verified on real Windows hardware
 - [Windows capture parity](/quest/m2/capture-windows.md) - system audio and a settled app-capture policy
@@ -168,3 +164,4 @@ ranked just below deterministic TS legs, which it requires.
 - [Release execution](/quest/m2/release/README.md) - publication, installed-artifact proof, cleanup, and downstream adoption after m1
 - [Play resume](/quest/m2/play-resume.md) - `moq-cli play` plays out pictures buffered before a declared end when new media arrives quickly
 - [Task supervision](/quest/m2/task-supervision.md) - the auth decider loop, stats publisher, and moq-tokio's token and WebSocket internals are supervised like #5447's tasks
+- [Auth serve bound address](/quest/m2/auth-serve-bound-addr.md) - `moq auth serve` logs the port it actually bound

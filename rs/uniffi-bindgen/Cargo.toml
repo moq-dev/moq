@@ -13,4 +13,6 @@ name = "uniffi-bindgen"
 path = "src/main.rs"
 
 [dependencies]
-uniffi = { workspace = true, features = ["cli"] }
+# Generator-only fork of UniFFI 0.32.2. moq-ffi stays on crates.io so its
+# published package has no git dependencies.
+uniffi = { git = "https://github.com/kixelated/uniffi-rs", rev = "88d835d", features = ["cli"] }

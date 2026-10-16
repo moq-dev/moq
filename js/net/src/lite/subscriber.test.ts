@@ -1,4 +1,5 @@
 import { expect, jest, spyOn, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
@@ -7,7 +8,6 @@ import { error, fromTransport, ProtocolViolation, reason, SessionCode, StreamCod
 import { HopSchema, isAnonymous, MAX_HOPS, Route, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
-import * as Time from "../time.ts";
 import { type AnnounceBroadcast, AnnounceInit, AnnounceOk, encodeAnnounceBroadcast } from "./announce.ts";
 import { Group } from "./group.ts";
 import { Probe } from "./probe.ts";
@@ -541,10 +541,10 @@ test("an RTT retraction clears the reading on lite-04+", async () => {
 // Seeded rather than sent, because lite-03 has no way to put one on the wire.
 test("lite-03 keeps an existing RTT, since its PROBE cannot carry one", async () => {
 	const got = await runProbeScript(Version.DRAFT_03, [new Probe({ bitrate: 2_000_000 })], {
-		rtt: Time.Milli(40),
+		rtt: Milli(40),
 	});
 	expect(got.estimatedRecvRate).toBe(2_000_000);
-	expect(got.rtt).toBe(Time.Milli(40));
+	expect(got.rtt).toBe(Milli(40));
 });
 
 test("an announce skipped as a reflected loop still holds its path", async () => {

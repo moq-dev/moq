@@ -149,6 +149,7 @@ mdns-sd = { version = "0.21", features = ["async"] }
 moq-archive = { version = "0.0.11", path = "rs/moq-archive" }
 moq-audio = { version = "0.1.10", path = "rs/moq-audio", default-features = false }
 moq-auth = { version = "0.2.1", path = "rs/moq-auth" }
+moq-clock = { version = "0.11.0", path = "rs/moq-clock" }
 moq-clock-macros = { version = "0.1.0", path = "rs/moq-clock/macros" }
 moq-flate = { version = "0.2.0", path = "rs/moq-flate" }
 moq-hls = { version = "0.5.11", path = "rs/moq-hls", default-features = false }
@@ -157,14 +158,13 @@ moq-loc = { version = "0.2.19", path = "rs/moq-loc" }
 moq-msf = { version = "0.5.1", path = "rs/moq-msf" }
 moq-mux = { version = "0.10.11", path = "rs/moq-mux" }
 moq-net = { version = "0.3.10", path = "rs/moq-net" }
-# The MoQ fork of noq (moq-dev/noq). iroh keeps upstream noq, so a build with the
-# iroh feature carries both stacks.
-moq-noq-proto = { version = "2.0.5", default-features = false }
 # NVENC bindings, forked from ViliamVadocz/nvidia-video-codec-sdk to dlopen the
 # driver at runtime. Compiles on any platform (macOS included) but only actually
 # used by moq-video on Linux.
 moq-nvenc = { version = "0.1.2", path = "rs/moq-nvenc" }
 moq-pattern = { version = "0.1.2", path = "rs/moq-pattern" }
+# default-features off so each consumer picks its crypto provider.
+moq-quic = { version = "0.1.0", path = "rs/moq-quic", default-features = false }
 moq-relay = { version = "0.17.2", path = "rs/moq-relay", default-features = false }
 moq-rtc = { version = "0.3.12", path = "rs/moq-rtc" }
 moq-rtmp = { version = "0.3.11", path = "rs/moq-rtmp" }
@@ -178,7 +178,7 @@ moq-tokio = { version = "0.19.23", path = "rs/moq-tokio", default-features = fal
 # VAAPI is opt-in everywhere; its decoder is hardware-validated, while its
 # encoder is not yet.
 moq-transcode = { version = "0.1.10", path = "rs/moq-transcode", default-features = false }
-# default-features off (the noq backend) so the consumer picks which QUIC
+# default-features off (the `quic` backend) so the consumer opts into the QUIC
 # stack the io_uring path compiles; cargo features are additive, so a default-on
 # backend could not be opted out of.
 moq-uring = { version = "0.0.12", path = "rs/moq-uring", default-features = false }
@@ -232,18 +232,14 @@ tower-http = { version = "0.7", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 tracing-test = "0.2"
-# The runtime pin and the bindgen CLI pin must not drift; the `uniffi-bindgen`
-# package owns the `cli` feature, moq-ffi the rest.
+# Runtime used by the published moq-ffi crate. The unpublished bindgen CLI
+# carries generator-only patches against this release in its own manifest.
 uniffi = "0.32"
 url = "2"
 usage = { package = "usage-rs", version = "6.11.1" }
 uuid = { version = "1.26", features = ["v7"] }
 web-async = { version = "0.1.5", features = ["tracing"] }
 web-transport-iroh = "0.8.3"
-# default-features off so the QUIC crypto provider is chosen by moq-tokio's
-# aws-lc-rs / ring features.
-# The WebTransport adapter released with moq-noq, from the same repository.
-web-transport-moq = { version = "2.0.5", default-features = false }
 web-transport-proto = "0.6"
 web-transport-trait = "0.5"
 web-transport-wasm = "0.8"
