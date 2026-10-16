@@ -29,6 +29,7 @@ normative:
     date: false
   RFC3986:
   RFC6455:
+  RFC8831:
   RFC9000:
   RFC9002:
   RFC9562:
@@ -93,7 +94,6 @@ The moq-lite layer provides fanout, prioritization, and caching even for latency
 
 ## Session
 A Session consists of a connection between a client and a server.
-There is currently no P2P support within QUIC so it's out of scope for moq-lite.
 
 The moq-lite version identifier is `moq-lite-xx` where `xx` is the two-digit draft version.
 The identifier for this draft is `moq-lite-07-wip` while it is a work in progress, and becomes `moq-lite-07` once finalized.
@@ -218,8 +218,8 @@ See [Transports](#transports) for the bindings.
 How the underlying connection is authenticated is out-of-scope for this draft.
 
 ## Transports {#transports}
-moq-lite defines four transport bindings.
-All four carry the same control and data streams defined elsewhere in this document; they differ only in how QUIC streams are multiplexed onto the underlying connection.
+moq-lite defines five transport bindings.
+All five carry the same control and data streams defined elsewhere in this document; they differ only in how QUIC streams are multiplexed onto the underlying connection.
 
 |----|---------------------|------------------|----------------------|
 |    | Transport           | ALPN / Identifier | Record framing      |
@@ -228,14 +228,22 @@ All four carry the same control and data streams defined elsewhere in this docum
 | 2  | WebTransport / H3   | `moq-lite-xx` (CONNECT header) | Native WebTransport streams |
 | 3  | Qmux over TCP/TLS   | `moq-lite-xx` (ALPN over TLS)  | Qmux Record [qmux]  |
 | 4  | Qmux over WebSocket | `moq-lite-xx` (Sec-WebSocket-Protocol) | WebSocket message [qmuxws] |
+| 5  | Qmux over RTCDataChannel | `moq-lite-xx` (signaling and DataChannel protocol) | DataChannel message |
 
 For bindings 1 and 2, moq-lite uses the underlying QUIC/WebTransport stream APIs directly.
-QUIC datagrams (see [Datagrams](#datagrams)) are supported by bindings 1 and 2 only; a publisher MUST NOT emit datagrams on bindings 3 and 4.
+QUIC datagrams (see [Datagrams](#datagrams)) are supported by bindings 1 and 2 only; a publisher MUST NOT emit datagrams on bindings 3, 4, and 5.
 
 For binding 3, a client opens a TCP connection, performs a TLS handshake, and negotiates the moq-lite version as the ALPN token.
 Each direction of the TLS byte stream then carries Qmux Records as defined in [qmux].
 
 For binding 4, a client opens a WebSocket connection [RFC6455] offering the moq-lite version as the subprotocol, per [qmuxws]: each WebSocket binary message carries one Qmux Record's `Frames` payload, with the message boundary replacing the Record `Size` field.
+
+For binding 5, WebRTC Data Channels [RFC8831] carry Qmux. Signaling agrees the moq-lite version before establishing the peer connection.
+The client creates one reliable, ordered RTCDataChannel with that version as its protocol; the server MUST refuse a channel whose protocol differs or whose delivery is unordered or partially reliable.
+The binding uses Qmux draft-01: each binary DataChannel message carries one Record's `Frames` payload, with the message boundary replacing the Record `Size` field.
+The record limit defaults to 16 KiB and MUST NOT exceed the negotiated SCTP `maxMessageSize`; an endpoint MUST refuse a message limit below Qmux's minimum record size.
+A sender splits stream payloads at frame boundaries to fit this limit, never within a frame.
+Signaling, peer admission, and ICE server selection are application concerns.
 
 All other moq-lite semantics (stream types, message encoding, flow control, etc.) are identical across bindings.
 
@@ -1561,6 +1569,8 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
+- Added the reliable ordered RTCDataChannel binding, with one Qmux Record per binary message and no datagrams.
+
 - Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1). A relay requests descending upstream unless every subscription it serves is ascending.
 - Listed the shared INVALID_REQUEST_ID (0x4) session code used by moq-transport drafts 14 through 16.
 
@@ -1762,7 +1772,7 @@ Some of these fields occur in multiple messages.
 
 
 # Security Considerations
-moq-lite inherits the transport security of the underlying connection: QUIC and WebTransport provide confidentiality and integrity via TLS 1.3, and the Qmux bindings run over TLS (TCP) or a `wss://` WebSocket. How that connection is authenticated is out of scope (see [Connection](#connection)). The considerations below are specific to moq-lite.
+moq-lite inherits the transport security of the underlying connection: QUIC and WebTransport provide confidentiality and integrity via TLS 1.3, the Qmux TCP and WebSocket bindings run over TLS, and the RTCDataChannel binding inherits DTLS security. How that connection is authenticated is out of scope (see [Connection](#connection)). The considerations below are specific to moq-lite.
 
 ## Bandwidth Probing
 The `Increase` Probe level (see [Probe Parameter](#probe-parameter)) lets a subscriber ask the publisher to pad the connection up to a target bitrate. A publisher MUST NOT treat the target as authorization to send beyond what congestion control allows: padding is bounded by the congestion window, so probing cannot be used to amplify traffic toward the subscriber or a spoofed address. A publisher that only advertised `Report` MUST NOT pad above its current sending rate. Because all data flows on an established, congestion-controlled session to the connecting peer, moq-lite offers no off-path amplification vector.

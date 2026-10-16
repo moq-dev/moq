@@ -361,7 +361,9 @@ ui.run((effect) => {
 // Report the transport negotiated by the live connection.
 ui.run((effect) => {
 	const transport = effect.get(publish.connection.transport);
-	$("network-transport").textContent = transport ? (transport === "websocket" ? "WebSocket" : "WebTransport") : "";
+	$("network-transport").textContent = transport
+		? { websocket: "WebSocket", webtransport: "WebTransport", webrtc: "WebRTC" }[transport]
+		: "";
 });
 
 // Audio: the resolved audio config (codec / sample rate / channels / bitrate).

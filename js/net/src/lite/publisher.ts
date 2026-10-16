@@ -1408,7 +1408,7 @@ export class Publisher {
 	 * @internal
 	 */
 	async #openGroup(options: RunGroup): Promise<Writer | undefined> {
-		const { group, priority, unsubscribed } = options;
+		const { group, priority, unsubscribed, start } = options;
 		try {
 			// The transport drains streams by send order, so this is what makes a high-priority
 			// track (and a newer group within it) win the link when there isn't room for both.
@@ -1419,7 +1419,7 @@ export class Publisher {
 			// Failing here drops the group and lets the next one compete for the next slot.
 			const stream = await Writer.tryOpen(this.#quic, {
 				version: this.version,
-				sendOrder: priority.rank(group.sequence),
+				sendOrder: priority.rank(group.sequence, start),
 				cancel: unsubscribed,
 				waitUntilAvailable: false,
 			});
@@ -1446,7 +1446,7 @@ export class Publisher {
 		try {
 			// A SUBSCRIBE_UPDATE re-ranks the subscription, so a group already on the wire
 			// follows it too rather than keeping a stale rank until it finishes.
-			priority.add(stream, group.sequence);
+			priority.add(stream, group.sequence, startFrame);
 
 			await hooks.guardGroup(group, async () => {
 				await stream.u53(0); // stream type

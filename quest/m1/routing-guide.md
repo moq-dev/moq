@@ -24,7 +24,9 @@ restart.
 
 Keep economic domain aggregation and measured link-cost policy outside the
 basic setup. Use generic public examples, validate CLI/config examples against
-the implemented help, and cross-link `doc/bin/relay/cluster.md`, JS/native P2P,
+the implemented help. In the P2P setup, list an explicitly selected relay STUN
+endpoint (`stun:relay.example.com:3478`) among the application's ICE servers;
+link to `/bin/relay/config#stun` for the separate opt-in listener. Cross-link `doc/bin/relay/cluster.md`, JS/native P2P,
 and identity guidance without duplicating reference material.
 
 Public API/wire: documentation only, reflecting the completed implementations.

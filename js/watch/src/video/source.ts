@@ -359,7 +359,7 @@ export class Source {
 
 		// No cap: the same rank as Rust's single-rendition egresses.
 		if (filters.length === 0) {
-			return Catalog.ranked(renditions)[0][0];
+			return Catalog.Video.ranked(renditions)[0][0];
 		}
 
 		// Run each filter to get ranked preference lists.

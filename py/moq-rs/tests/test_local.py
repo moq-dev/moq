@@ -1451,3 +1451,21 @@ def test_media_catalog_handle_closes_with_broadcast():
     broadcast.close()
     with pytest.raises(moq.Error.Closed):  # type: ignore[attr-defined]
         catalog.remove_section("app")
+
+
+def test_container_timebase_belongs_to_one_broadcast():
+    owner = moq.BroadcastProducer()
+    other = moq.BroadcastProducer()
+    timebase = moq.media.Timebase(owner)
+    with pytest.raises(moq.Error.Codec, match="another broadcast"):
+        moq.media.ContainerProducer(
+            other, moq.media.ContainerInit(moq.media.ContainerFormat.FMP4, b"", timebase=timebase)
+        )
+    with pytest.raises(moq.Error.Codec, match="another broadcast"):
+        moq.media.ContainerStreamProducer(
+            other, moq.media.ContainerStreamInit(moq.media.ContainerFormat.FMP4, timebase=timebase)
+        )
+    owner.close()
+    with pytest.raises(moq.Error.Closed):
+        moq.media.Timebase(owner)
+    other.close()

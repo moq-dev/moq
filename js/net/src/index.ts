@@ -1,6 +1,6 @@
 /**
  * MoQ networking layer for browsers: connect to a relay, then publish and consume
- * broadcasts, tracks, groups, and frames over WebTransport (or a WebSocket fallback).
+ * broadcasts, tracks, groups, and frames over WebTransport, its WebSocket fallback, or a supplied transport.
  *
  * @module
  */

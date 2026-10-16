@@ -3,9 +3,9 @@
 ## Goal
 
 A second round after [#4286](https://github.com/moq-dev/moq/pull/4286):
-tests that pass alone but have failed under a loaded `just check` pass
-reliably, each fixed at its cause, never by raising a timeout or adding a
-retry.
+tests that pass alone but have failed under a loaded `just check`, or
+intermittently in CI or interop, pass reliably, each fixed at its cause,
+never by raising a timeout or adding a retry.
 
 ## Plan
 
@@ -22,6 +22,9 @@ Rules every child keeps:
 - A paused clock auto-advances while the runtime idles, so it can fire a
   timer before a real socket delivers. Where real sockets fight the paused
   clock, make the timers mockable or move the test off real sockets.
+
+Added 2026-10-15 (maintainer): three flakes seen while landing that day's
+merge batch, ranked by how likely each hides a product bug.
 
 This README's own work, after the children: run `just check --all` several
 times on a loaded machine, as the first round did. moq-tokio's
@@ -41,6 +44,9 @@ Public API: none. Wire: none.
 - [Auth serve signals](/quest/m1/test-flakes-2/auth-serve-signals.md) - moq-cli's auth serve signal tests hold under load
 - [Export exit tests](/quest/m1/test-flakes-2/export-failure-exit.md) - moq-cli's failed-export and interrupted-publisher exit tests hold under load
 - [noq client close](/quest/m1/test-flakes-2/noq-client-close.md) - moq-tokio's client close test orders its close after the server's accept instead of racing it
+- [js -> go rewind](/quest/m1/test-flakes-2/js-go-rewind.md) - the `js -> go` interop cell never reads a frame below the previous group's start, fixed on the side that produced it
+- [WASM IETF read](/quest/m1/test-flakes-2/wasm-ietf-read.md) - the WASM suite's IETF read case reads whole groups on a loaded runner, fixed at the burst or the assertion as the evidence says
+- [announced fixture connect](/quest/m1/test-flakes-2/cli-announced-connect.md) - moq-cli's `announced` fixture publisher connects to its ready relay under load
 - [BBR marking seed](/quest/m1/test-flakes-2/bbr-marking-seed.md) - the BBR marking test seeds its probe schedule, replays a failing seed, and its rare drop is fixed at the cause
 
 ## Related
