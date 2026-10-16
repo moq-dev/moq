@@ -114,7 +114,7 @@ Read the specifications:
 ## Stability
 
 The `release` branch is stable and is what gets published; `main` is the trunk where breaking API changes land between releases.
-Every package follows [semver](https://semver.org): a breaking API change ships only in a major release, or a minor release before 1.0.
+Every package follows [semver](https://semver.org): a breaking API change bumps the first nonzero version number (`1.2.0` to `2.0.0`, `0.3.1` to `0.4.0`, `0.0.5` to `0.0.6`).
 Breaking wire changes are extremely rare.
 
 ## Development
