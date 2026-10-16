@@ -72,7 +72,6 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
   datagrams join their subscription's send group instead of preempting every stream
 - [Shard the endpoint](/quest/m1/quic/shard.md) - the library shards a
   server endpoint across cores by default, replacing the `--workers` group
-- [Surface UDP send errors](/quest/m1/quic/send-errors.md) - a client drops a QUIC attempt the moment its address family is unreachable
 
 ## Related
 
