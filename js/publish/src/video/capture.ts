@@ -96,6 +96,10 @@ class Frames extends Fanout<VideoFrame> {
 	// Copies handed to new readers and not yet read, released on close like the fanout's own queues.
 	readonly #unread = new Set<VideoFrame>();
 
+	// The latest stamp handed to a new reader. Live frames follow the source's order, but a replay is
+	// stamped here, and a later frame can be held below it.
+	#replayed = 0;
+
 	constructor(source: ReadableStream<VideoFrame>) {
 		const held: Held = { closed: false, at: Instant(0) };
 		const hold = new TransformStream<VideoFrame, VideoFrame>({
@@ -126,10 +130,11 @@ class Frames extends Fanout<VideoFrame> {
 		// would deliver it that late, a delay the jitter estimate keeps for the life of the stream.
 		// Capture stamps can run ahead of the clock (the first frame's arrival anchors them), so now
 		// alone could fall below frames an earlier reader published, rewinding a track resumed after a
-		// gap. Never stamp below the held stamp plus how long it was held.
+		// gap. Never stamp below the held stamp plus how long it was held, nor below an earlier replay.
 		const clock = now();
 		const elapsed = Nano.toMicro(Instant.durationSince(clock, this.#held.at));
-		const at = Math.round(Math.max(held.timestamp + elapsed, Nano.toMicro(Nano(clock))));
+		const at = Math.round(Math.max(held.timestamp + elapsed, Nano.toMicro(Nano(clock)), this.#replayed));
+		this.#replayed = at;
 		let first: VideoFrame | undefined = new VideoFrame(held, { timestamp: at });
 		this.#unread.add(first);
 		const release = () => {

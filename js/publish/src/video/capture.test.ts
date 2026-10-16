@@ -1,4 +1,5 @@
 import { expect, mock, spyOn, test } from "bun:test";
+import { Manual, Milli, Nano } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { Baseline } from "../jitter";
@@ -198,6 +199,54 @@ test("a reader attaching to a frame held late still starts at now", async () => 
 		second.close();
 		capture.close();
 		clock.mockRestore();
+	}
+
+	expect(open()).toEqual([]);
+});
+
+test("a replay never starts below an earlier replay", async () => {
+	using input = frameSource();
+	const clock = new Manual();
+	const restore = clock.install();
+	const advance = (ms: number) => clock.advance(Nano.fromMilli(Milli(ms)));
+	const capture = new Capture({ source: input.source });
+	const watch = new Effect();
+	const first = new Effect();
+	const second = new Effect();
+
+	try {
+		const fanout = capture.out.frames.peek() ?? (await capture.out.frames.changed());
+		if (!fanout) throw new Error("no fanout");
+		// Reads every live frame, so awaiting it proves the fanout held that frame.
+		const live = fanout.subscribe(watch).getReader();
+
+		// Capture stamps 200ms ahead of the clock.
+		advance(1_000);
+		input.push(1_200_000);
+		(await live.read()).value?.close();
+
+		advance(50);
+		const before = fanout.subscribe(first).getReader();
+		const replayed = (await before.read()).value as unknown as Frame;
+		expect(replayed.timestamp).toBe(1_250_000);
+		replayed.close();
+		first.close();
+
+		// The next frame reaches the fanout late, so it holds a stamp below that replay.
+		advance(50);
+		input.push(1_210_000);
+		(await live.read()).value?.close();
+
+		advance(1);
+		const after = fanout.subscribe(second).getReader();
+		const resumed = (await after.read()).value as unknown as Frame;
+		expect(resumed.timestamp).toBe(1_250_000);
+		resumed.close();
+	} finally {
+		watch.close();
+		second.close();
+		capture.close();
+		restore();
 	}
 
 	expect(open()).toEqual([]);
