@@ -34,12 +34,17 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
     only the resume cursor does; the arrival-order (Plain) cursor walks a
     monotonic arrival index, so it must rescan below its old floor for
     groups it never handed out. Rewrite the doc ("without rewinding read
-    progress") to say what lowering does. Open for the implementer to bring
-    back: whether `group::Consumer::set_frames` and
-    `Subscription::with_groups` follow the rename.
+    progress") to say what lowering does. JS's chaining form,
+    `withGroups` on `Track.Subscriber` and `Track.Ordered`, becomes
+    `withBounds`.
   - A second public `replace_groups`.
+- **Bounds naming** (decided 2026-10-16 in #5717): ✅ the siblings follow the
+  rename, so every range setter says bounds. `group::Consumer::set_frames`
+  becomes `set_bounds`, and `Subscription::with_groups` becomes
+  `with_bounds`, with the JS mirrors (the `Subscription.groups` field
+  becomes `bounds`, and any group-level frame bounds setter matches).
 - `group::Consumer::start_at`, `end_at` (both publishers): remove the need;
-  the public `set_frames` and `skip_to` cover them.
+  the public `set_bounds` (today `set_frames`) and `skip_to` cover them.
 - `subscription::Position::final_sequence` (lite publisher): public, the
   one-line wire translation of an exclusive end that both languages
   already duplicate. `track::Consumer::final_sequence` (IETF publisher) goes;

@@ -105,15 +105,16 @@ JS items (`js/net/src/`):
     `Origin.Dynamic` requests and mints a source per request, as Rust
     sessions do, so the slot loop and its view go.
   - Make the `wire.ts` views public.
-- **Blind answers** (the same loop, settled in review of #5717). Every JS
+- **Blind answers** (the same loop, raised in review of #5717). Every JS
   session answers each request no route covers by subscribing on its peer:
   always, and as the only path after a peer refuses or resets discovery.
   [Lazy discovery](/quest/m1/lazy-discovery/README.md) keeps a plain
   `request(path)` blind, and its Rust child adds the same downgrade, so
   blind answering stays and needs a public shape before the loop goes.
-  **Decision**:
-  - Recommended: a fallback answerer, `origin::Producer::fallback()` in Rust
-    and `Origin.Producer.fallback()` in JS (name open). It returns the same
+  **Decision** (settled 2026-10-16):
+  - ✅ A fallback answerer, `origin::Producer::fallback()` in Rust and
+    `Origin.Producer.fallback()` in JS. The name is still open: propose
+    alternatives in this quest's PR before shipping it. It returns the same
     `Dynamic` request stream, scoped to the handle's allowed paths. It
     receives only requests that no announced or served route covers. Once
     the table routes a path, the new route takes only unresolved and new
