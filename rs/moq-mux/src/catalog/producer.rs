@@ -1308,11 +1308,6 @@ mod test {
 		}
 	}
 
-	/// The catalog, its MSF twin, and the timeline all rank above media. They're the
-	/// index a player reads before any media is useful, and they're small enough that
-	/// sitting above media can't starve it. Regression: the MSF and timeline tracks
-	/// were minted with no `Info` at all, so one broadcast advertised its hang catalog
-	/// at 100 and the same catalog in MSF at 0.
 	#[test]
 	fn msf_omits_media_report_discovery() {
 		let catalog =
@@ -1324,6 +1319,11 @@ mod test {
 		assert!(!value["tracks"].as_array().unwrap().is_empty());
 	}
 
+	/// The catalog, its MSF twin, and the timeline all rank above media. They're the
+	/// index a player reads before any media is useful, and they're small enough that
+	/// sitting above media can't starve it. Regression: the MSF and timeline tracks
+	/// were minted with no `Info` at all, so one broadcast advertised its hang catalog
+	/// at 100 and the same catalog in MSF at 0.
 	#[tokio::test]
 	async fn non_media_tracks_rank_above_media() {
 		use hang::catalog::PRIORITY;

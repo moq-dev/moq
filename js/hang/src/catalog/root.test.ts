@@ -264,4 +264,6 @@ test("shared stats and echo discovery round trips without changing old catalogs"
 	).json();
 	expect(RootSchema.parse(fixture)).toEqual(fixture);
 	expect(RootSchema.parse({})).toEqual({});
+	expect(() => RootSchema.parse({ stats: {} })).toThrow();
+	expect(() => RootSchema.parse({ echo: {} })).toThrow();
 });

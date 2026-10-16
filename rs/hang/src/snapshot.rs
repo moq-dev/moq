@@ -112,6 +112,8 @@ mod tests {
 		let catalog = Catalog::<()>::from_str("{}").unwrap();
 		assert!(catalog.stats.is_none() && catalog.echo.is_none());
 		assert_eq!(catalog.to_json().unwrap(), "{}");
+		assert!(Catalog::<()>::from_str(r#"{"stats":{}}"#).is_err());
+		assert!(Catalog::<()>::from_str(r#"{"echo":{}}"#).is_err());
 	}
 
 	#[test]
