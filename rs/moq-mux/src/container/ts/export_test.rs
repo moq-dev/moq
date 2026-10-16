@@ -5550,6 +5550,82 @@ async fn a_start_group_cut_short_starts_at_the_next() {
 	assert!(stats.trimmed >= 5, "the cut-off start is counted: {}", stats.trimmed);
 }
 
+/// Audio released while the video's start moves to its next group is dropped ahead of the
+/// keyframe, and its track has still sent nothing: audio that then misses its deadline is
+/// trimmed with it, not counted as lost from the output.
+#[tokio::test(start_paused = true)]
+async fn audio_dropped_ahead_of_a_moved_start_is_not_started() {
+	use crate::container::Container as _;
+
+	let delay = Duration::from_millis(200);
+	let mut rig = Interleave::new().await;
+	let mut export = rig.export(delay).await;
+	let track = rig.video.track().clone();
+	let wire = HangContainer::Legacy(crate::container::Kind::Video);
+	let picture = |tick: u64| {
+		let keyframe = tick.is_multiple_of(GOP);
+		let slice = vec![if keyframe { 0x65u8 } else { 0x41 }; 400];
+		Frame {
+			timestamp: Timestamp::from_micros(tick * VIDEO_US).unwrap(),
+			duration: None,
+			payload: length_prefixed(&[&slice]),
+			keyframe,
+		}
+	};
+	let mut out = Vec::new();
+
+	// The first group delivers three pictures, then the next group lands, sent ahead, and the
+	// publisher resets the first.
+	let mut cut = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+	for tick in 0..3 {
+		rig.at(tick * VIDEO_US).await;
+		wire.write(&mut cut, &[picture(tick)]).unwrap();
+		out.extend(poll_frames(&mut export));
+		rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
+	}
+	let mut group = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+	wire.write(&mut group, &[picture(GOP)]).unwrap();
+	cut.abort(moq_net::Error::Old).unwrap();
+	// The audio flows long enough for some of it to go out and be dropped ahead of the
+	// keyframe, then stalls past its deadline.
+	for tick in 3..10 {
+		rig.at(tick * VIDEO_US).await;
+		out.extend(poll_frames(&mut export));
+		if tick < 5 {
+			rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
+		}
+	}
+	for tick in 10..3 * GOP {
+		rig.at(tick * VIDEO_US).await;
+		if tick > GOP {
+			if tick.is_multiple_of(GOP) {
+				group.finish().unwrap();
+				group = track
+					.create_group(moq_net::group::Info { sequence: tick / GOP })
+					.unwrap();
+			}
+			wire.write(&mut group, &[picture(tick)]).unwrap();
+		}
+		out.extend(poll_frames(&mut export));
+		rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
+	}
+	group.finish().unwrap();
+	rig.finish();
+	out.extend(drain_frames(&mut export).await);
+
+	let ts: Vec<u8> = out.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	let (video, audio) = collect_pes_pts(&ts);
+	let pts = |tick: u64| tick * VIDEO_US * 90 / 1_000;
+	assert_eq!(video.first(), Some(&pts(GOP)), "the export starts at the next group");
+	assert!(
+		audio.iter().all(|&p| p >= pts(GOP)),
+		"no audio leads the keyframe: {audio:?}"
+	);
+	let stats = export.stats();
+	assert_eq!(stats.dropped, 0, "nothing was lost from the output");
+	assert!(stats.trimmed > 0);
+}
+
 /// A section lost before the cycle wraps commits an observed subset; the next
 /// cycle must *converge* to the full set rather than flip-flop between subsets.
 /// The repetition fast-path skips sections already active, so without the

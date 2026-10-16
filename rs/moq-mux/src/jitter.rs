@@ -36,6 +36,8 @@ pub(crate) struct Ready<K, T> {
 	/// frame of one generation goes out before any frame of the next.
 	pub generation: u64,
 	pub item: T,
+	/// Whether it is the first frame of its track to go out.
+	pub first: bool,
 }
 
 /// What [`Buffer::push`] did with a frame.
@@ -823,7 +825,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			{
 				let track = self.tracks.get_mut(key).expect("the front's track");
 				let (generation, _, _, item) = track.queue.pop_front().expect("the front frame");
-				track.started = true;
+				let first = !std::mem::replace(&mut track.started, true);
 				self.released = true;
 				// A previous-generation frame queued now would go out after this one.
 				if self.clock.is_some_and(|clock| clock.generation == generation) {
@@ -833,6 +835,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 					track: key.clone(),
 					generation,
 					item,
+					first,
 				});
 			}
 			let Some(wake) = front.map(|(deadline, _)| deadline).into_iter().chain(acquired).min() else {
@@ -848,6 +851,19 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			if waiter.poll_future(timer.as_mut()).is_pending() {
 				return Poll::Pending;
 			}
+		}
+	}
+
+	/// Count a frame the caller dropped after [`Self::poll_next`] released it. The first of its
+	/// track is trimmed and leaves the track not started; a later one is a loss.
+	pub fn discard(&mut self, ready: &Ready<K, T>) {
+		if !ready.first {
+			self.dropped += 1;
+			return;
+		}
+		self.trimmed += 1;
+		if let Some(track) = self.tracks.get_mut(&ready.track) {
+			track.started = false;
 		}
 	}
 

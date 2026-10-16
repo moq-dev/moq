@@ -191,7 +191,8 @@ where
 	/// what the other tracks release is dropped: a video track whose start group was cut
 	/// before it went out starts at its next keyframe instead ([`jitter::Buffer`]).
 	video_out: bool,
-	/// Frames dropped ahead of the first video keyframe, or of their codec config.
+	/// Frames dropped before the jitter buffer: ahead of the first video keyframe, or of their
+	/// codec config.
 	trimmed: u64,
 	/// Each elementary stream's access units and silence on the PCR returned ([`Self::stats`]).
 	liveness: super::import::Liveness,
@@ -1277,7 +1278,7 @@ where
 				.map(|(name, t)| (name.clone(), matches!(t.kind, Kind::Video(_))))
 				.context("frame for an unknown PID")?;
 			if self.leads_video(is_video, ready.item.frame.timestamp) {
-				self.trimmed += 1;
+				self.jitter.discard(&ready);
 			} else {
 				self.last_timestamp = Some(ready.item.frame.timestamp);
 				let decode = ready.item.decode.as_nanos();
