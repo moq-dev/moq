@@ -46,7 +46,12 @@ declarations. Neither needs a new `@internal` tag. The classification
 marker is a separate comment from the shared vocabulary above, not the
 `@internal` tag. Add it to: every export of `js/net/src/internal.ts`
 and `wire.ts` (each `hooks` entry and view member included), and every
-`@internal` member in the model modules. Then add an import-edge grep to the
+`@internal` member in the model modules, plus every declaration session
+code already imports from a module the index does not export (for example
+`lite/subscriber.ts` reaching `BroadcastCache` in `consume.ts`, `Tail` in
+`tail.ts`, and `sendOrder` in `priority.ts`), so the check passes on its
+first run. Seed them by running the grep below and marking each hit. Then
+add an import-edge grep to the
 same lint. It fails when a non-test file under `src/{ietf,lite,connection}/`
 imports a name from `internal.ts`, `wire.ts`, or a module the index does not
 export, or reads a `hooks.<name>` or view member, whose declaration has no
