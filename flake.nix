@@ -362,16 +362,20 @@
         #
         # Like uniffi-bindgen-go, the tag pairs the generator's version with the
         # uniffi release it reads, so it moves with the `uniffi` dependency in
-        # rs/moq-ffi/Cargo.toml. Five other places name the same tag and must be
+        # rs/moq-ffi/Cargo.toml. Other places name the same tag and must be
         # bumped together: the `cargo install` lines in rs/moq-ffi/build.sh,
         # cpp/moq/README.md, .github/workflows/cpp.yml,
-        # .github/workflows/obs.yml, and .github/workflows/release-cpp.yml.
+        # .github/workflows/platform.yml, and .github/workflows/release-cpp.yml.
         #
         # This points at a fork of LiveKit's async branch (livekit/uniffi-bindgen-cpp
         # PR #1): neither LiveKit nor NordSecurity has a uniffi 0.32 generator,
-        # and the fork adds `error_style = "expected"`, which cpp/moq/uniffi.toml
-        # turns on. Its tags add a `-kixelated.N` pre-release so they never
-        # collide with upstream's. Move back upstream once one tags both.
+        # and the fork adds `error_style = "expected"` and `strip_type_prefix`,
+        # which cpp/moq/uniffi.toml turns on. Its tags add a `-kixelated.N`
+        # pre-release so they never collide with upstream's. Move back upstream
+        # once one tags both.
+        #
+        # TODO: pin v0.11.0-kixelated.5+v0.32.2 once kixelated/uniffi-bindgen-cpp#4
+        # is released; until then this is that PR's head.
         uniffi-bindgen-cpp = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-cpp";
           version = "0.11.0-kixelated.4+v0.32.2";
@@ -379,8 +383,8 @@
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-bindgen-cpp";
-            rev = "v${version}";
-            hash = "sha256-pmk9M5Wt6DYlXZYPjJ2Nn0tbDi1ve3wCH0Lel9xomCY=";
+            rev = "40c99525a125acd3ac0f2eb792c452640dbae388";
+            hash = "sha256-x39ZeM4mh96FjUKXCgPBSWVojvcPiUpSLcTFr/hNvnM=";
           };
 
           cargoHash = "sha256-/DRrwhJiKFCzibiJU2D3QaBM3XTmieRgUNc7tHDiGXI=";

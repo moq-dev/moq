@@ -2,3 +2,5 @@
 # bindings build with exceptions disabled (Unreal's default).
 [bindings.cpp]
 error_style = "expected"
+# moq-ffi prefixes its types for languages without namespaces; C++ has `moq::`.
+strip_type_prefix = "Moq"

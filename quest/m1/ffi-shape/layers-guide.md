@@ -12,9 +12,8 @@ another.
 Waits for [Codecs](/quest/m1/ffi-shape/codec.md), since `audio` and `video` have
 no namespace to map until then (decided 2026-10-09 on #4519). Keep it a table
 per layer, not a method reference: the API docs own the names (see
-`doc/AGENTS.md`). C++ stays flat until
-[One expected type and unprefixed names](/quest/m1/cpp-generated-shape.md)
-lands, so its column names the `moq::Media*` types instead of a namespace.
+`doc/AGENTS.md`). C++ is one flat `moq::` namespace of the generated
+types, so its column names the `moq::Media*` types instead of a namespace.
 
 ## Required
 

@@ -98,7 +98,7 @@ jobs:
       - name: Install uniffi-bindgen-cpp
         if: needs.scope.outputs.cpp == 'true' || needs.scope.outputs.obs == 'true'
         shell: bash
-        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.4+v0.32.2
+        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --rev 40c99525a125acd3ac0f2eb792c452640dbae388
       - name: Rust compile and tests
         if: needs.scope.outputs.rs == 'true'
         shell: bash
@@ -137,7 +137,7 @@ jobs:
           tool: nextest@0.9.146
       - name: Install uniffi-bindgen-cpp
         if: needs.scope.outputs.obs == 'true'
-        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.4+v0.32.2
+        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --rev 40c99525a125acd3ac0f2eb792c452640dbae388
       - name: Rust compile and tests
         if: needs.scope.outputs.rs == 'true'
         env:
