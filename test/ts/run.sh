@@ -23,6 +23,7 @@
 #   ./run.sh --headroom            # the same with four audio PIDs, muxed above the video's Rx
 #   ./run.sh --leak                # 1080p video with no HRD, filling its level's 24 Mb/s leak
 #   ./run.sh --full                # the same with two audio PIDs, filling its multiplex with no nulls
+#   ./run.sh --fragment-pes        # split generated clear PES headers across packets
 #   ./run.sh --delay 1s            # pass the exporter's --delay
 
 # `--live` swaps the analyzer, not the rig. compliance.py grades a captured file
@@ -69,15 +70,16 @@ BITRATE="${TSC_BITRATE:-10000000}"
 PORT="${TSC_PORT:-}"
 PROFILE="${TSC_PROFILE:-debug}"
 STRICT=""
-WITH_EIT="" # add a synthetic EPG to the source and report which SI survived
-LIVE=""     # grade the exporter's stdout as it arrives, rather than a capture
-PAIR=""     # subscribe twice and grade the two captures against each other
-OPEN_GOP="" # publish open GOP with leading pictures, and grade them through the round-trip
-HRD=""      # publish video that fills a broadcast-sized CPB, as a contribution encoder does
-HEADROOM="" # the same plus four audio PIDs, in a multiplex faster than the video's Rx
-LEAK=""     # publish video with no HRD at its level's leak, as a full-rate feed does
-FULL=""     # the same with audio, in a multiplex the source fills with no nulls
-EXPORT=()   # extra `export ts` flags (--delay)
+WITH_EIT=""     # add a synthetic EPG to the source and report which SI survived
+LIVE=""         # grade the exporter's stdout as it arrives, rather than a capture
+PAIR=""         # subscribe twice and grade the two captures against each other
+OPEN_GOP=""     # publish open GOP with leading pictures, and grade them through the round-trip
+HRD=""          # publish video that fills a broadcast-sized CPB, as a contribution encoder does
+HEADROOM=""     # the same plus four audio PIDs, in a multiplex faster than the video's Rx
+LEAK=""         # publish video with no HRD at its level's leak, as a full-rate feed does
+FULL=""         # the same with audio, in a multiplex the source fills with no nulls
+FRAGMENT_PES="" # use following null slots for fragmented PES headers
+EXPORT=()       # extra `export ts` flags (--delay)
 # How far into the run the second subscriber joins. A late join is the point: two
 # exporters started together can share a cadence by starting together, which is
 # exactly the thing under test.
@@ -157,6 +159,10 @@ while [[ $# -gt 0 ]]; do
             FULL=1
             shift
             ;;
+        --fragment-pes)
+            FRAGMENT_PES=1
+            shift
+            ;;
         --delay)
             EXPORT=(--delay "$2")
             shift 2
@@ -222,6 +228,11 @@ fi
 [[ -n "$FULL" && ${#EXPORT[@]} -eq 0 ]] && EXPORT=(--delay 900ms)
 if [[ -n "$OPEN_GOP" && -n "$ANALYZE_ONLY$LIVE$PAIR" ]]; then
     echo "error: --open-gop cannot be combined with --analyze-only, --live, or --pair" >&2
+    exit 1
+fi
+
+if [[ -n "$FRAGMENT_PES" && -n "$SOURCE$ANALYZE_ONLY$HRD$HEADROOM$LEAK$FULL$OPEN_GOP$PAIR$LIVE" ]]; then
+    echo "error: --fragment-pes requires the generated closed-GOP H.264/AAC profile" >&2
     exit 1
 fi
 
@@ -401,6 +412,12 @@ else
         -x264-params "$X264" -b:v 8M \
         -c:a aac -b:a 128k \
         -f mpegts -muxrate "$BITRATE" -pcr_period 20 -pes_payload_size 0 "$SRC_TS"
+fi
+
+if [[ -n "$FRAGMENT_PES" ]]; then
+    python3 "$DIR/fragment_pes.py" "$SRC_TS" "$HARNESS_RUN/source-fragmented.ts" \
+        --report "$HARNESS_RUN/fragmented-pes.json"
+    mv "$HARNESS_RUN/source-fragmented.ts" "$SRC_TS"
 fi
 
 # No capture in this repository carries EIT, so the import path's EIT handling is

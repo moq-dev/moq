@@ -346,6 +346,7 @@ enum GroupFetch {
 	/// Accepted into the track cache, waiting for the fetch stream to write it.
 	Ready {
 		producer: group::Producer,
+		track: kio::Producer<track::TrackState>,
 		timescale: Option<Timescale>,
 		/// The first Object ID requested, which the producer starts at.
 		start: u64,
@@ -4439,6 +4440,7 @@ where
 		// Joined fetches still count until they pick the accepted group up from the cache.
 		let joined = request.result.clone();
 		// The track was accepted before any fetch was asked, so it keeps that info.
+		let track = request.state.clone();
 		let mut producer = match request.accept(None) {
 			Ok(producer) => producer,
 			// Already served by a concurrent fetch, or the track closed.
@@ -4458,6 +4460,7 @@ where
 		if let Ok(mut state) = slot.write() {
 			*state = GroupFetch::Ready {
 				producer,
+				track,
 				timescale,
 				start,
 				end,
@@ -4573,10 +4576,11 @@ where
 					Poll::Ready(match std::mem::replace(&mut *state, GroupFetch::Receiving) {
 						GroupFetch::Ready {
 							producer,
+							track,
 							timescale,
 							start,
 							end,
-						} => Ok((producer, timescale, start, end)),
+						} => Ok((producer, track, timescale, start, end)),
 						other => {
 							*state = other;
 							Err(Error::Unsupported)
@@ -4588,7 +4592,7 @@ where
 			}
 		})
 		.await;
-		let (producer, timescale, start, end) = taken?;
+		let (producer, track, timescale, start, end) = taken?;
 		producer.set_wire(group::Wire {
 			sparse: false,
 			first_object: start == 0,
@@ -4620,6 +4624,9 @@ where
 			Ok(()) => producer.finish(),
 			Err(err) => {
 				let _ = producer.abort(err.clone());
+				if matches!(err, Error::MalformedTrack) {
+					let _ = track::TrackState::abort(&track, Error::MalformedTrack);
+				}
 				Err(err)
 			}
 		};
@@ -12547,15 +12554,14 @@ mod stitch_tests {
 			"timed",
 			track::Info::default().with_timescale(Timescale::MICRO),
 		);
-		let group = track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
-		let slot = kio::Producer::new(GroupFetch::Ready {
-			producer: group,
-			timescale: Some(Timescale::MICRO),
-			start: 0,
-			end: None,
-		});
+		run.track = track.clone();
+		let (slot, _) = run.slot(Some(Timescale::MICRO), None).await;
 		let res = run.subscriber.recv_group_fetch(&mut run.stream, slot).await;
 		assert!(matches!(res, Err(Error::MalformedTrack)), "{res:?}");
+		assert!(matches!(
+			futures::FutureExt::now_or_never(track.closed()),
+			Some(Error::MalformedTrack)
+		));
 	}
 
 	/// FETCH_OK's End Location inside the group bounds the stream: one that runs past it
@@ -12571,16 +12577,10 @@ mod stitch_tests {
 				let payloads: Vec<&[u8]> = [b"a", b"b", b"c", b"d"][..count].iter().map(|p| &p[..]).collect();
 				let mut run = GroupFetchRun::new(version, group_fetch_objects(SEQUENCE, 0, &payloads)).await;
 
-				let group = run.track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
-				let mut consumer = group.consume();
-				let slot = kio::Producer::new(GroupFetch::Ready {
-					producer: group,
-					timescale: None,
-					start: 0,
-					end: Some(END),
-				});
+				let (slot, mut consumer) = run.slot(None, Some(END)).await;
 				let res = run.subscriber.recv_group_fetch(&mut run.stream, slot).await;
 				assert_eq!(res.is_ok(), complete, "{version} {count} objects: {res:?}");
+				assert!(futures::FutureExt::now_or_never(run.track.closed()).is_none());
 
 				let mut read = 0;
 				let end = loop {
@@ -12719,14 +12719,7 @@ mod stitch_tests {
 	#[moq_net_sim::test]
 	async fn a_group_fetch_refuses_a_datagram_object() {
 		let mut run = GroupFetchRun::new(VERSION, datagram_object(SEQUENCE)).await;
-		let group = run.track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
-		let mut consumer = group.consume();
-		let slot = kio::Producer::new(GroupFetch::Ready {
-			producer: group,
-			timescale: None,
-			start: 0,
-			end: None,
-		});
+		let (slot, mut consumer) = run.slot(None, None).await;
 
 		let res = run.subscriber.recv_group_fetch(&mut run.stream, slot).await;
 		assert!(matches!(res, Err(Error::NotFetchable)), "{res:?}");
@@ -12834,6 +12827,29 @@ mod stitch_tests {
 				track,
 				_tasks: tasks,
 			}
+		}
+
+		/// Accept the cache miss through the same request state as a wire FETCH.
+		async fn slot(
+			&self,
+			timescale: Option<Timescale>,
+			end: Option<u64>,
+		) -> (kio::Producer<GroupFetch>, group::Consumer) {
+			let dynamic = self.track.dynamic();
+			let mut fetch = Box::pin(self.track.consume().fetch_group(SEQUENCE, None));
+			assert!(futures::poll!(fetch.as_mut()).is_pending());
+			let request = dynamic.requested_group().await.expect("group request");
+			let track = request.state.clone();
+			let producer = request.accept(None).unwrap();
+			let consumer = producer.consume();
+			let slot = kio::Producer::new(GroupFetch::Ready {
+				producer,
+				track,
+				timescale,
+				start: 0,
+				end,
+			});
+			(slot, consumer)
 		}
 
 		/// Decode the stream into a fresh group numbered from `start`.

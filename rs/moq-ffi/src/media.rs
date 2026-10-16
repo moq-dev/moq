@@ -286,7 +286,78 @@ pub struct MoqVideoInit {
 	pub hint: Option<MoqVideoHint>,
 }
 
-/// What a container publish needs: a format and its leading bytes.
+/// Shares one source's timestamp offset across containers without keeping its broadcast open.
+#[derive(uniffi::Object)]
+pub struct MoqMediaTimebase {
+	broadcast: Weak<MoqBroadcastProducer>,
+	// Stable identity even when a Rust caller unwraps the outer Arc and moves the handle.
+	key: Arc<()>,
+}
+
+#[uniffi::export]
+impl MoqMediaTimebase {
+	/// Create a source timebase owned by this broadcast.
+	#[uniffi::constructor]
+	pub fn new(broadcast: Arc<MoqBroadcastProducer>) -> Result<Arc<Self>, MoqError> {
+		let handle = Arc::new(Self {
+			broadcast: Arc::downgrade(&broadcast),
+			key: Arc::new(()),
+		});
+		broadcast.with_state(|state| {
+			state
+				.timebases
+				.insert(Arc::as_ptr(&handle.key) as usize, state.catalog.timebase());
+			Ok(())
+		})?;
+		Ok(handle)
+	}
+}
+
+impl MoqMediaTimebase {
+	fn reserve(
+		&self,
+		broadcast: &MoqBroadcastProducer,
+		state: &crate::producer::BroadcastProducer,
+	) -> Result<moq_mux::catalog::Reserved<Extra>, MoqError> {
+		if !std::ptr::eq(self.broadcast.as_ptr(), broadcast) {
+			return Err(MoqError::Codec {
+				reason: "timebase belongs to another broadcast".into(),
+			});
+		}
+		let timebase = state
+			.timebases
+			.get(&(Arc::as_ptr(&self.key) as usize))
+			.ok_or(MoqError::Closed)?;
+		Ok(timebase.reserve())
+	}
+}
+
+impl Drop for MoqMediaTimebase {
+	fn drop(&mut self) {
+		if let Some(broadcast) = self.broadcast.upgrade()
+			&& let Some(state) = broadcast.state.lock().unwrap().as_mut()
+		{
+			state.timebases.remove(&(Arc::as_ptr(&self.key) as usize));
+		}
+	}
+}
+
+/// Reserve a container's catalog slot under the owner lock, from `timebase` when shared, so the
+/// importer is constructed after the lock is released.
+fn reserve_container(
+	broadcast: &MoqBroadcastProducer,
+	timebase: Option<&MoqMediaTimebase>,
+) -> Result<(moq_net::broadcast::Producer, moq_mux::catalog::Reserved<Extra>), MoqError> {
+	broadcast.with_state(|state| {
+		let reserved = match timebase {
+			Some(timebase) => timebase.reserve(broadcast, state)?,
+			None => state.catalog.reserve(),
+		};
+		Ok((state.broadcast.clone(), reserved))
+	})
+}
+
+/// A container format, its leading bytes, and an optional shared source timebase.
 ///
 /// A container publishes and describes its own tracks, so there is no label or hint here: a
 /// rendition field would have no single track to land on.
@@ -296,6 +367,19 @@ pub struct MoqContainerInit {
 	pub format: MoqContainerFormat,
 	/// The leading chunk of the container, decoded immediately. May be empty.
 	pub data: Vec<u8>,
+	/// A shared source timebase, or absent for an independent offset.
+	#[uniffi(default = None)]
+	pub timebase: Option<Arc<MoqMediaTimebase>>,
+}
+
+/// A byte-stream container format and an optional shared source timebase.
+#[derive(Clone, uniffi::Record)]
+pub struct MoqContainerStreamInit {
+	/// The container format.
+	pub format: MoqContainerFormat,
+	/// A shared source timebase, or absent for an independent offset.
+	#[uniffi(default = None)]
+	pub timebase: Option<Arc<MoqMediaTimebase>>,
 }
 
 impl From<MoqVideoHint> for moq_mux::catalog::VideoHint {
@@ -364,12 +448,6 @@ impl From<MoqVideoInit> for moq_mux::import::VideoInit {
 			out.hint = hint.into();
 		}
 		out
-	}
-}
-
-impl From<MoqContainerInit> for moq_mux::import::ContainerInit {
-	fn from(init: MoqContainerInit) -> Self {
-		moq_mux::import::ContainerInit::new(init.format.into(), init.data)
 	}
 }
 
@@ -720,21 +798,19 @@ impl MoqMediaTrackProducer {
 #[uniffi::export]
 impl MoqMediaContainerProducer {
 	/// Construct an importer from this broadcast.
+	///
+	/// A supplied timebase must belong to this broadcast; absence gives it an independent offset.
 	#[uniffi::constructor]
 	pub fn new(
 		broadcast: &MoqBroadcastProducer,
 		init: MoqContainerInit,
 	) -> Result<Arc<MoqMediaContainerProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let guard = broadcast.state.lock().unwrap();
-		let state = guard.as_ref().ok_or(MoqError::Closed)?;
-
-		let init: moq_mux::import::ContainerInit = init.into();
-		let import = moq_mux::import::Container::new(state.broadcast.clone(), state.catalog.reserve(), &init).map_err(
-			|err| MoqError::Codec {
-				reason: format!("init failed: {err}"),
-			},
-		)?;
+		let native = moq_mux::import::ContainerInit::new(init.format.into(), init.data);
+		let (target, reserved) = reserve_container(broadcast, init.timebase.as_deref())?;
+		let import = moq_mux::import::Container::new(target, reserved, &native).map_err(|err| MoqError::Codec {
+			reason: format!("init failed: {err}"),
+		})?;
 
 		Ok(Arc::new(MoqMediaContainerProducer {
 			inner: std::sync::Mutex::new(Some(ContainerProducer { import })),
@@ -778,20 +854,20 @@ impl MoqMediaTrackStreamProducer {
 #[uniffi::export]
 impl MoqMediaContainerStreamProducer {
 	/// Construct an importer from this broadcast.
+	///
+	/// A supplied timebase must belong to this broadcast; absence gives it an independent offset.
 	#[uniffi::constructor]
 	pub fn new(
 		broadcast: &MoqBroadcastProducer,
-		format: MoqContainerFormat,
+		init: MoqContainerStreamInit,
 	) -> Result<Arc<MoqMediaContainerStreamProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let guard = broadcast.state.lock().unwrap();
-		let state = guard.as_ref().ok_or(MoqError::Closed)?;
-
-		let import =
-			moq_mux::import::ContainerStream::new(state.broadcast.clone(), state.catalog.reserve(), format.into())
-				.map_err(|err| MoqError::Codec {
-					reason: format!("init failed: {err}"),
-				})?;
+		let (target, reserved) = reserve_container(broadcast, init.timebase.as_deref())?;
+		let import = moq_mux::import::ContainerStream::new(target, reserved, init.format.into()).map_err(|err| {
+			MoqError::Codec {
+				reason: format!("init failed: {err}"),
+			}
+		})?;
 
 		Ok(Arc::new(MoqMediaContainerStreamProducer {
 			inner: std::sync::Mutex::new(Some(ContainerStreamProducer { import })),
@@ -1338,5 +1414,291 @@ mod catalog_tests {
 		assert!(catalog.set_section("video".into(), "{}".into()).is_err());
 		assert!(catalog.set_section("app".into(), "{".into()).is_err());
 		consumer.cancel();
+	}
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod timebase_tests {
+	use super::*;
+	use std::time::Duration;
+
+	fn source() -> moq_mux::container::fmp4::Muxer {
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.coded_width = Some(16);
+		config.coded_height = Some(16);
+		moq_mux::container::fmp4::Muxer::video(&config).unwrap()
+	}
+
+	fn fragment(source: &moq_mux::container::fmp4::Muxer, seconds: u64, tag: u8) -> bytes::Bytes {
+		source
+			.fragment(
+				0,
+				&[moq_mux::container::Frame {
+					timestamp: moq_net::Timestamp::from_scale(seconds, 1).unwrap(),
+					payload: bytes::Bytes::from(vec![tag]),
+					keyframe: true,
+					duration: Some(moq_net::Timestamp::from_millis(20).unwrap()),
+				}],
+			)
+			.unwrap()
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn containers_of_one_source_keep_their_relative_media_time() {
+		for shared in [false, true] {
+			// Construct under the paused runtime, before exported entry points enter their worker.
+			let broadcast =
+				Arc::new(MoqBroadcastProducer::from_inner(moq_net::broadcast::Info::new().produce()).unwrap());
+			let catalog = broadcast.with_state(|state| Ok(state.catalog.clone())).unwrap();
+			let clock = catalog.clock();
+			let consumer = broadcast.consume_inner().unwrap();
+			let source = source();
+			let init = source.init().unwrap().unwrap();
+			let audio = moq_mux::container::fmp4::Muxer::audio(&hang::catalog::AudioConfig::new(
+				hang::catalog::AudioCodec::Opus,
+				48_000,
+				2,
+			))
+			.unwrap();
+			let audio_init = audio.init().unwrap().unwrap();
+			let timebase = shared.then(|| MoqMediaTimebase::new(broadcast.clone()).unwrap());
+			let chunks = MoqMediaContainerProducer::new(
+				&broadcast,
+				MoqContainerInit {
+					format: MoqContainerFormat::Fmp4,
+					data: init.to_vec(),
+					timebase: timebase.clone(),
+				},
+			)
+			.unwrap();
+			let stream = MoqMediaContainerStreamProducer::new(
+				&broadcast,
+				MoqContainerStreamInit {
+					format: MoqContainerFormat::Fmp4,
+					timebase,
+				},
+			)
+			.unwrap();
+			stream
+				.inner
+				.lock()
+				.unwrap()
+				.as_mut()
+				.unwrap()
+				.import
+				.decode(&audio_init)
+				.unwrap();
+			tokio::time::advance(Duration::from_secs(1)).await;
+			let first = clock.now().as_micros();
+			// Drive the private importers on the paused clock, without entering the unpaused FFI worker.
+			chunks
+				.inner
+				.lock()
+				.unwrap()
+				.as_mut()
+				.unwrap()
+				.import
+				.decode(&fragment(&source, 3600, 1))
+				.unwrap();
+			tokio::time::advance(Duration::from_secs(5)).await;
+			stream
+				.inner
+				.lock()
+				.unwrap()
+				.as_mut()
+				.unwrap()
+				.import
+				.decode(&fragment(&audio, 3602, 2))
+				.unwrap();
+			let mut readers = Vec::new();
+			let snapshot = catalog.snapshot();
+			let containers =
+				snapshot
+					.video
+					.renditions
+					.into_iter()
+					.map(|(name, config)| (name, moq_mux::catalog::hang::Container::try_from(&config).unwrap()))
+					.chain(
+						snapshot.audio.renditions.into_iter().map(|(name, config)| {
+							(name, moq_mux::catalog::hang::Container::try_from(&config).unwrap())
+						}),
+					);
+			for (name, container) in containers {
+				let track = consumer
+					.track(&name)
+					.unwrap()
+					.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(30)))
+					.await
+					.unwrap();
+				readers.push(moq_mux::container::Consumer::new(track, container));
+			}
+			chunks.finish().unwrap();
+			stream.finish().unwrap();
+			let mut times = HashMap::new();
+			for mut media in readers {
+				while let Some(read) = media.read().await.unwrap() {
+					if let moq_mux::container::Read::Frame { frame, .. } = read {
+						times.insert(frame.payload[0], frame.timestamp.as_micros());
+					}
+				}
+			}
+			assert_eq!(times[&1], first);
+			assert_eq!(
+				times[&2],
+				first + if shared { 2_000_000 } else { 5_000_000 },
+				"shared={shared}"
+			);
+		}
+	}
+
+	#[test]
+	fn a_timebase_refuses_foreign_or_closed_broadcasts() {
+		let owner = MoqBroadcastProducer::new().unwrap();
+		let other = MoqBroadcastProducer::new().unwrap();
+		let timebase = MoqMediaTimebase::new(owner.clone()).unwrap();
+		assert!(matches!(MoqMediaContainerProducer::new(&other, MoqContainerInit {
+			format: MoqContainerFormat::Fmp4, data: Vec::new(), timebase: Some(timebase.clone()),
+		}), Err(MoqError::Codec { reason }) if reason.contains("another broadcast")));
+		assert!(
+			matches!(MoqMediaContainerStreamProducer::new(&other, MoqContainerStreamInit {
+			format: MoqContainerFormat::Fmp4, timebase: Some(timebase.clone()),
+		}), Err(MoqError::Codec { reason }) if reason.contains("another broadcast"))
+		);
+		owner.close().unwrap();
+		assert!(matches!(MoqMediaTimebase::new(owner.clone()), Err(MoqError::Closed)));
+		assert!(matches!(
+			MoqMediaContainerStreamProducer::new(
+				&owner,
+				MoqContainerStreamInit {
+					format: MoqContainerFormat::Fmp4,
+					timebase: Some(timebase),
+				}
+			),
+			Err(MoqError::Closed)
+		));
+	}
+
+	#[test]
+	fn moving_a_rust_handle_still_releases_its_owner_entry() {
+		let owner = MoqBroadcastProducer::new().unwrap();
+		let handle = MoqMediaTimebase::new(owner.clone()).unwrap();
+		let Ok(handle) = Arc::try_unwrap(handle) else {
+			panic!("timebase acquired a strong owner")
+		};
+		drop(handle);
+		assert!(owner.with_state(|state| Ok(state.timebases.is_empty())).unwrap());
+	}
+
+	#[test]
+	fn temporary_timebases_leave_only_the_importers_reservation() {
+		let broadcast = MoqBroadcastProducer::new().unwrap();
+		let chunks = MoqMediaContainerProducer::new(
+			&broadcast,
+			MoqContainerInit {
+				format: MoqContainerFormat::Fmp4,
+				data: Vec::new(),
+				timebase: Some(MoqMediaTimebase::new(broadcast.clone()).unwrap()),
+			},
+		)
+		.unwrap();
+		let stream = MoqMediaContainerStreamProducer::new(
+			&broadcast,
+			MoqContainerStreamInit {
+				format: MoqContainerFormat::Fmp4,
+				timebase: Some(MoqMediaTimebase::new(broadcast.clone()).unwrap()),
+			},
+		)
+		.unwrap();
+		assert!(broadcast.with_state(|state| Ok(state.timebases.is_empty())).unwrap());
+		chunks.finish().unwrap();
+		stream.finish().unwrap();
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_timebase_never_holds_the_publication_open() {
+		for close in [false, true] {
+			let broadcast = MoqBroadcastProducer::new().unwrap();
+			let timebase = MoqMediaTimebase::new(broadcast.clone()).unwrap();
+			let track = broadcast
+				.consume_inner()
+				.unwrap()
+				.track(hang::catalog::Catalog::DEFAULT_NAME)
+				.unwrap()
+				.subscribe(moq_net::track::Subscription::default())
+				.await
+				.unwrap();
+			let mut catalog = moq_mux::catalog::hang::Consumer::<Extra>::new(track);
+			assert!(catalog.poll_next(&kio::Waiter::noop()).is_pending());
+			let weak = Arc::downgrade(&broadcast);
+			if close {
+				broadcast.close().unwrap();
+			}
+			drop(broadcast);
+			assert!(weak.upgrade().is_none(), "timebase retained its broadcast handle");
+			assert!(
+				catalog.poll_next(&kio::Waiter::noop()).is_ready(),
+				"timebase retained catalog outputs"
+			);
+			drop(timebase);
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn an_unused_timebase_does_not_withhold_the_catalog() {
+		let owner = MoqBroadcastProducer::new().unwrap();
+		let _timebase = MoqMediaTimebase::new(owner.clone()).unwrap();
+		let track = owner
+			.consume_inner()
+			.unwrap()
+			.track(hang::catalog::Catalog::DEFAULT_NAME)
+			.unwrap()
+			.subscribe(moq_net::track::Subscription::default())
+			.await
+			.unwrap();
+		let mut reader = moq_mux::catalog::hang::Consumer::<Extra>::new(track);
+		let catalog = MoqMediaCatalogProducer::new(owner.clone()).unwrap();
+		catalog.set_section("app".into(), "{}".into()).unwrap();
+		assert!(matches!(
+			reader.poll_next(&kio::Waiter::noop()),
+			std::task::Poll::Ready(Ok(Some(_)))
+		));
+	}
+
+	/// Sweep the owner table and the touched importer count independently.
+	#[test]
+	#[ignore = "benchmark, runs in Nightly"]
+	fn benchmark_timebase_reservation_fanout() {
+		eprintln!("timebases,containers,ns_per_container");
+		for entries in [1, 32, 1024] {
+			let owner = MoqBroadcastProducer::new().unwrap();
+			let timebases: Vec<_> = (0..entries)
+				.map(|_| MoqMediaTimebase::new(owner.clone()).unwrap())
+				.collect();
+			let reserve = || {
+				let importer = MoqMediaContainerStreamProducer::new(
+					&owner,
+					MoqContainerStreamInit {
+						format: MoqContainerFormat::Fmp4,
+						timebase: Some(std::hint::black_box(timebases.last().unwrap()).clone()),
+					},
+				)
+				.unwrap();
+				importer.finish().unwrap();
+			};
+			for _ in 0..100 {
+				reserve();
+			}
+			for touched in [1, 16, 256] {
+				let start = std::time::Instant::now();
+				for _ in 0..1000 {
+					for _ in 0..touched {
+						reserve();
+					}
+				}
+				let nanos = start.elapsed().as_nanos() as f64 / (1000 * touched) as f64;
+				eprintln!("{entries},{touched},{nanos:.1}");
+			}
+			owner.close().unwrap();
+		}
 	}
 }

@@ -6,8 +6,21 @@
  * @module
  */
 
+import * as audio from "./audio";
+import * as video from "./video";
+
+/** Audio schemas and quality ordering. */
+export const Audio = audio;
+/** The catalog audio section. */
+export type Audio = audio.Audio;
+/** Video schemas and quality ordering. */
+export const Video = video;
+/** The catalog video section. */
+export type Video = video.Video;
+
 export * from "./archive";
-export * from "./audio";
+export type { AudioConfig } from "./audio";
+export { AudioConfigSchema, AudioSchema } from "./audio";
 export * from "./binary";
 export * from "./clock";
 export * from "./compression";
@@ -22,4 +35,5 @@ export * from "./priority";
 export * from "./root";
 export * from "./text";
 export * from "./track";
-export * from "./video";
+export type { VideoConfig } from "./video";
+export { VideoConfigSchema, VideoSchema } from "./video";

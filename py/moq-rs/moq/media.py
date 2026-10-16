@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, cast
 
@@ -22,10 +22,8 @@ from moq_ffi import (
     MoqContainerFormat as ContainerFormat,
 )
 from moq_ffi import (
-    MoqContainerInit as ContainerInit,
-)
-from moq_ffi import MoqDimensions as Dimensions
-from moq_ffi import (
+    MoqContainerInit,
+    MoqContainerStreamInit,
     MoqError,
     MoqMediaCatalogConsumer,
     MoqMediaCatalogProducer,
@@ -35,11 +33,13 @@ from moq_ffi import (
     MoqMediaGroupConfig,
     MoqMediaGroupConsumer,
     MoqMediaTarget,
+    MoqMediaTimebase,
     MoqMediaTrackConfig,
     MoqMediaTrackConsumer,
     MoqMediaTrackProducer,
     MoqMediaTrackStreamProducer,
 )
+from moq_ffi import MoqDimensions as Dimensions
 from moq_ffi import MoqVideo as Video
 from moq_ffi import MoqVideoFormat as VideoFormat
 from moq_ffi import MoqVideoHint as VideoHint
@@ -55,6 +55,38 @@ from ._records import Frame, Subscription, _from_us, _subscription, _to_us
 from .publish import BroadcastProducer, TrackDemand, TrackRequest
 from .subscribe import BroadcastConsumer
 from .types import FetchGroupOptions
+
+
+class Timebase:
+    """Share one source's timestamp offset without keeping its broadcast open."""
+
+    def __init__(self, broadcast: BroadcastProducer) -> None:
+        self._inner = MoqMediaTimebase(broadcast._inner)
+
+
+@dataclass(frozen=True)
+class ContainerInit:
+    """A container format, its leading bytes, and an optional shared source timebase."""
+
+    format: ContainerFormat
+    data: bytes
+    timebase: Timebase | None = field(default=None, kw_only=True)
+
+    def _ffi(self) -> MoqContainerInit:
+        return MoqContainerInit(
+            format=self.format, data=self.data, timebase=self.timebase._inner if self.timebase else None
+        )
+
+
+@dataclass(frozen=True)
+class ContainerStreamInit:
+    """A byte-stream container format and an optional shared source timebase."""
+
+    format: ContainerFormat
+    timebase: Timebase | None = field(default=None, kw_only=True)
+
+    def _ffi(self) -> MoqContainerStreamInit:
+        return MoqContainerStreamInit(format=self.format, timebase=self.timebase._inner if self.timebase else None)
 
 
 @dataclass(frozen=True)
@@ -190,7 +222,7 @@ class ContainerProducer:
     """
 
     def __init__(self, broadcast: BroadcastProducer, init: ContainerInit) -> None:
-        self._inner = MoqMediaContainerProducer(broadcast._inner, init)
+        self._inner = MoqMediaContainerProducer(broadcast._inner, init._ffi())
 
     def write(self, payload: bytes) -> None:
         """Write a whole chunk of container bytes."""
@@ -217,8 +249,8 @@ class ContainerProducer:
 class ContainerStreamProducer:
     """Publish a container fed by a raw byte stream, which recovers its own framing."""
 
-    def __init__(self, broadcast: BroadcastProducer, format: ContainerFormat) -> None:
-        self._inner = MoqMediaContainerStreamProducer(broadcast._inner, format)
+    def __init__(self, broadcast: BroadcastProducer, init: ContainerStreamInit) -> None:
+        self._inner = MoqMediaContainerStreamProducer(broadcast._inner, init._ffi())
 
     def write(self, payload: bytes) -> None:
         """Push raw container bytes; chunk boundaries don't matter."""
@@ -434,5 +466,7 @@ __all__ = [
     "AudioInit",
     "VideoInit",
     "ContainerInit",
+    "ContainerStreamInit",
+    "Timebase",
     "catalog",
 ]

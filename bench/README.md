@@ -131,16 +131,26 @@ hide a relay improvement behind generator saturation. CPU efficiency remains
 withheld until offered load and delivery/loss are comparable. Zero-baseline
 metrics retain absolute deltas when their percentage ratio is undefined.
 
-Measure delivered payload through the Go bindings and a local QUIC relay:
+Measure what each binding adds over Rust:
 
 ```bash
-nix develop --command just go bench -benchtime=3s -count=3
+nix develop --command just bench-ffi
 ```
 
-This independently sweeps 1/4 publishers and 1/4 subscribers per publisher,
-checks every received frame's payload and timestamp, and acknowledges each batch before publishing the
-next. Reported MB/s counts delivery to every subscriber. The optimized native
-library, relay and clients share the process, so pin the benchmark process with
-`taskset` to compare one CPU with multiple CPUs. Compare identical CPU sets and
-traffic shapes across revisions; the nightly smoke runs each shape once without
-a timing threshold.
+Every runner (Rust, Go, Python, Kotlin) runs the same in-process rounds with no
+network: each publisher writes one group from the driving thread while every
+subscriber reads it on its own task, and a round waits for every subscriber. It
+sweeps frame sizes from 100 B to 1 MiB at one publisher and subscriber, then
+1/4 publishers by 1/4 subscribers at 1 KiB, and times two sync calls
+(`sequence`, `info`). Each case reports delivered MB/s and process CPU (user +
+system, every thread) per MB. `MOQ_BENCH_SECONDS` sets each case's time budget
+(default 1); every received frame is checked byte for byte.
+
+Each runner writes `target/bench/ffi/<runner>.json`; `bench/ffi.py` combines
+them into a table and `report.json`. Ratios are against `rust-ffi`, moq-ffi's
+API called from Rust without crossing the FFI, so a wrapper's ratio is what its
+boundary and wrapper cost. `rust-net` runs the same rounds on moq-net, so its
+ratio is what moq-ffi's handles and runtime cost. Ratios hold only within one
+machine. The nightly runs it, prints the table in the job summary, and keeps the
+results as the `bench-ffi` artifact. Each language also has its own recipe
+(`just go bench`, `just py bench`, `just kt bench`).
