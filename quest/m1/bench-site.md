@@ -10,6 +10,11 @@ site.
 
 ## Plan
 
+The implementation is prepared in a draft PR. The remaining maintainer action
+is enabling repository Pages with **Source: GitHub Actions**, then verifying
+the first Nightly deployment at <https://moq-dev.github.io/moq/bench/>.
+Repository settings have not been changed.
+
 Decided with the maintainer on 2026-10-15:
 
 - **GitHub Pages via github-action-benchmark**: the nightly pushes each
