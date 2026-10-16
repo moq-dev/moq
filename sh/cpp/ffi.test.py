@@ -135,7 +135,7 @@ class Inputs(unittest.TestCase):
                 (directory / (ffi.name("1.2.3", target) + suffix)).write_bytes(b"bad")
         with patch.object(ffi.subprocess, "run") as command:
             with self.assertRaisesRegex(ValueError, "checksum disagrees"):
-                ffi.publish("1.2.3", directory)
+                ffi.publish("1.2.3", directory, "")
             command.assert_not_called()
 
     def test_publish_refuses_changed_existing_asset(self):
@@ -153,9 +153,28 @@ class Inputs(unittest.TestCase):
         with patch.object(ffi.subprocess, "run", side_effect=run) as calls, patch.object(
             ffi.subprocess, "check_output", return_value=json.dumps({"assets": [{"name": existing}]})):
             with self.assertRaisesRegex(ValueError, "refusing to replace"):
-                ffi.publish("1.2.3", directory)
+                ffi.publish("1.2.3", directory, "")
             self.assertFalse(any(call.args[0][2] == "upload" for call in calls.call_args_list))
 
+
+    def test_publish_creates_release_like_other_ffi_publishers(self):
+        directory = self.root / "assets"
+        directory.mkdir()
+        for target in ffi.TARGETS:
+            filename = ffi.name("1.2.3", target) + ".tar.gz"
+            (directory / filename).write_bytes(b"new")
+            (directory / (filename + ".sha256")).write_text(f"{hashlib.sha256(b'new').hexdigest()}  {filename}\n")
+        def run(args, **kwargs):
+            if args[2] == "view":
+                return subprocess.CompletedProcess(args, 1, b"", b"release not found")
+            return subprocess.CompletedProcess(args, 0)
+        with patch.object(ffi.subprocess, "run", side_effect=run) as calls, patch.object(
+            ffi.subprocess, "check_output", return_value=json.dumps({"assets": []})):
+            ffi.publish("1.2.3", directory, "moq-ffi-v1.2.2")
+        create = next(call.args[0] for call in calls.call_args_list if call.args[0][2] == "create")
+        self.assertEqual(create[-3:], ["--generate-notes", "--notes-start-tag", "moq-ffi-v1.2.2"])
+        self.assertNotIn("--notes", create)
+        self.assertEqual(sum(call.args[0][2] == "upload" for call in calls.call_args_list), 8)
 
 @unittest.skipUnless(platform.system() == "Linux", "Linux CMake input fixtures")
 class Configure(unittest.TestCase):

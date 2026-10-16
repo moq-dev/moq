@@ -127,8 +127,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/just
+      - name: Find previous tag
+        id: prev_tag
+        run: just gh release prev-tag moq-ffi
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: cpp-native-*
@@ -141,4 +145,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.parse.outputs.version }}
-        run: just cpp ffi publish --version "$VERSION" --directory native-dist
+          PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
+        run: just cpp ffi publish --version "$VERSION" --directory native-dist --prev-tag "$PREV_TAG"

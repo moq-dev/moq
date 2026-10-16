@@ -127,7 +127,7 @@ def extract(release, target, directory, output):
     unpack(directory / filename, output, release, target, sidecar[:64])
 
 
-def publish(release, directory):
+def publish(release, directory, prev_tag):
     tag = f"moq-ffi-v{version(release)}"
     files = sorted(directory.iterdir())
     if len(files) != 8 or {p.name for p in files} != {
@@ -144,8 +144,9 @@ def publish(release, directory):
     if result.returncode:
         if b"release not found" not in result.stderr.lower():
             raise RuntimeError(result.stderr.decode())
-        created = subprocess.run(["gh", "release", "create", tag, "--verify-tag", "--title", f"moq-ffi v{release}",
-                                  "--notes", "Default-feature native FFI assets.\n\n(written by GPT-6)"])
+        # Match the other moq-ffi publishers (sh/gh/release.sh) so the notes never depend on who wins the race.
+        notes = ["--generate-notes"] + (["--notes-start-tag", prev_tag] if prev_tag else [])
+        created = subprocess.run(["gh", "release", "create", tag, "--verify-tag", "--title", f"moq-ffi v{release}", *notes])
         if created.returncode:
             # Another language publisher can create the same release concurrently.
             subprocess.run(["gh", "release", "view", tag], check=True)
@@ -176,6 +177,8 @@ def main():
             sub.add_argument("--library", type=pathlib.Path, required=True)
         if command in ("archive", "extract", "publish"):
             sub.add_argument("--directory", type=pathlib.Path, required=True)
+        if command == "publish":
+            sub.add_argument("--prev-tag", default="")
         if command != "publish":
             sub.add_argument("--output", type=pathlib.Path, required=True)
     args = parser.parse_args()
@@ -188,7 +191,7 @@ def main():
     elif args.command == "extract":
         extract(args.version, args.target, args.directory, args.output)
     else:
-        publish(args.version, args.directory)
+        publish(args.version, args.directory, args.prev_tag)
 
 
 if __name__ == "__main__":
