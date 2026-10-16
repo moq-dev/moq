@@ -115,6 +115,7 @@ using FlateConfig = MoqFlateConfig;
 using Frame = MoqFrame;
 using JsonSnapshotConfig = MoqJsonSnapshotConfig;
 using JsonStreamConfig = MoqJsonStreamConfig;
+using JsonValue = MoqJsonValue;
 using MediaTrackConfig = MoqMediaTrackConfig;
 using MediaGroupConfig = MoqMediaGroupConfig;
 using MediaFrame = MoqMediaFrame;

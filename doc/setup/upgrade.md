@@ -152,6 +152,16 @@ These land with the next breaking release, not the 2026-09-23 train.
   `max_delay` when following a playhead behind live. The mux wrappers refuse
   `latest` on a stream rather than discard lossless records. Track framing is
   unchanged.
+- **JSON consumers in every binding return the frame timestamp.** moq-ffi's
+  `MoqJsonSnapshotConsumer` and `MoqJsonStreamConsumer` `next()` return a
+  `MoqJsonValue` (`value` plus `timestamp_us`, null when untimed) instead of a
+  string, and the snapshot consumer adds `latest()`. Its `next()` now yields each
+  state in order; call `latest()` for the old collapse-to-newest read. Python
+  and Go consumers yield `json.Timed` (`value`, `timestamp` as a duration), Swift
+  yields `Json.Timed` (`value`, `timestampUs`), Kotlin's `values()` emits `Value`
+  and `valuesAs<T>()` emits `Timed<T>`, and Dart and C++ return `Value` /
+  `JsonValue`. C's `moq_json_value` gains `timestamp_us` and `timestamp_present`,
+  and a snapshot callback now fires for each state rather than only the newest.
 - **moq-ffi data tracks wrap a track.** The broadcast's
   `publish_binary_*`, `publish_json_*`, and `subscribe_json_*` are gone.
   Create the track with `publish_track` or `subscribe_track`, then construct
