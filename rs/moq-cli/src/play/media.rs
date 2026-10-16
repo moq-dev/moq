@@ -444,6 +444,13 @@ async fn play_audio<O: Output>(
 
 	let mut timeline = AudioTimeline::default();
 
+	// How far ahead of its due time a frame is written: the playout target less
+	// the frame itself, never under the sink's floor.
+	let lead = |delay: Duration, frame: &moq_audio::Frame| {
+		let duration = Duration::from_secs_f64((frame.data.len() / stride) as f64 / sample_rate as f64);
+		latency.max(delay.min(max_delay).max(AUDIO_BUFFER_MIN).saturating_sub(duration))
+	};
+
 	// Tracks whether the last read failed, so a stream the decoder can't read at
 	// all logs once rather than once per packet.
 	let mut dropping = false;
@@ -463,15 +470,7 @@ async fn play_audio<O: Output>(
 				Ok(Some(moq_audio::decode::Read::Frame { segment, frame }))
 					if end.is_some_and(|end| end != *segment) =>
 				{
-					let frame_duration =
-						Duration::from_secs_f64((frame.data.len() / stride) as f64 / sample_rate as f64);
-					let first = latency.max(
-						delay
-							.min(max_delay)
-							.max(AUDIO_BUFFER_MIN)
-							.saturating_sub(frame_duration),
-					);
-					role.plan(frame.timestamp, Some(first));
+					role.plan(frame.timestamp, Some(lead(delay, frame)));
 					end = None;
 				}
 				_ => {}
@@ -485,7 +484,7 @@ async fn play_audio<O: Output>(
 	};
 	let play = async {
 		let mut end_segment = None;
-		let mut sequential = None;
+		let mut sequential = false;
 		loop {
 			let (event, delay) = loop {
 				if let Some(event) = received.lock().unwrap().pop_front() {
@@ -498,14 +497,7 @@ async fn play_audio<O: Output>(
 					if end_segment.take_if(|end| *end != segment).is_some() {
 						// A declared boundary preserves the old sink, unlike an undeclared hole.
 						drain(sink).await;
-						let frame_duration =
-							Duration::from_secs_f64((frame.data.len() / stride) as f64 / sample_rate as f64);
-						let first = latency.max(
-							delay
-								.min(max_delay)
-								.max(AUDIO_BUFFER_MIN)
-								.saturating_sub(frame_duration),
-						);
+						let first = lead(delay, &frame);
 						role.apply(role.resume(frame.timestamp, Some(first)).await?);
 						let at = presentation
 							.lock()
@@ -515,7 +507,7 @@ async fn play_audio<O: Output>(
 						if let Some(at) = at {
 							tokio::time::sleep_until(at.into()).await;
 						}
-						sequential = Some(first);
+						sequential = true;
 						timeline = AudioTimeline::default();
 						sink = speaker.sink(input.clone())?;
 						dry = true;
@@ -530,7 +522,7 @@ async fn play_audio<O: Output>(
 				Ok(Some(moq_audio::decode::Read::Gap { .. })) => {
 					end_segment = None;
 					role.gap();
-					sequential = None;
+					sequential = false;
 					continue;
 				}
 				Ok(None) => break,
@@ -559,7 +551,7 @@ async fn play_audio<O: Output>(
 			// sink has no media clock, so its buffered audio cannot be carried across a
 			// timeline region the player skipped.
 			if timing.reset_sink {
-				sequential = None;
+				sequential = false;
 				drop(sink);
 				presentation.lock().unwrap().restarted();
 				sink = speaker.sink(input.clone())?;
@@ -568,12 +560,13 @@ async fn play_audio<O: Output>(
 
 			// Resumed media was received while the old tail played. Keep its
 			// spacing instead of fitting that queued burst as if it arrived live.
-			if let Some(lead) = sequential {
+			// The lead follows the current target so jitter can still deepen the sink.
+			if sequential {
 				let at = presentation
 					.lock()
 					.unwrap()
 					.due(mapped)
-					.and_then(|at| at.checked_sub(lead));
+					.and_then(|at| at.checked_sub(lead(delay, &frame)));
 				if let Some(at) = at {
 					tokio::time::sleep_until(at.into()).await;
 				}
