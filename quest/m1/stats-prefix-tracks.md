@@ -26,15 +26,13 @@ Decided 2026-10-05 and 2026-10-07:
   Nothing is produced for a prefix no one holds. The relay's `--stats-depth`
   only places the group broadcasts; requests are not capped by it. Track names
   must stay injective: tiers and paths both contain `/`.
-- Flow counters (bytes, frames, groups, fetches) count from zero when the
-  prefix is first held and fold in members that end while it is held. Their
-  absolute values are not authoritative, so readers take differences within
-  one subscription; the group totals carry the real sums.
-- Started/ended pairs (announces, broadcasts, subscriptions) are seeded at
-  registration: `started` with each current member's `started - ended`,
-  `ended` at zero, so every `active` stays exact for a prefix held
-  mid-stream. Test a prefix held while 300 subscriptions are live, then watch
-  them leave.
+- Counters follow presence (revised 2026-10-16, #5719): each drain sums the
+  live members' readouts plus the closing readouts of members that ended
+  while the prefix was held. Live members carry their history from before
+  the hold, so absolute values are not authoritative and readers take
+  differences within one subscription; the group totals carry the real sums.
+  Every `active` (started less ended) is exact for a prefix held mid-stream.
+  Test a prefix held while 300 subscriptions are live, then watch them leave.
 - A request for a prefix with no members is held open at zero and reclaimed
   when its last consumer leaves.
 - A child leaves the one-level map after the frame carrying its closing
@@ -50,14 +48,14 @@ Decided 2026-10-05 and 2026-10-07:
   upstream (node, epoch) hold and treats a decrease as that upstream's reset,
   so a merged prefix track never regresses within one downstream
   subscription. Test a join, a leave, and a restart under a held prefix.
-- **Hot path.** Reopened in #5719: summing held prefixes per drain in
-  `moq-stats`, as presence does, may replace this. Keep it lock-free: a held prefix registers atomic
-  accumulators, each entry caches its held ancestors (and the matching child
-  slot in each), and an update bumps them in a loop, about twice the held
-  depth per update. Registration and release reach existing entries without a
-  lock or a walk of every entry, for example an `ArcSwap` ancestor list or a
-  generation counter rechecked on bump. Benchmark across held-prefix count and
-  depth.
+- **Drain-time sums** (revised 2026-10-16, #5719). Sum held prefixes in
+  `moq-stats` per drain with `Cumulative`, like presence: walk each report
+  row's ancestors and look each up in the held set, so the cost scales with
+  rows times path depth, not held prefixes, and nothing touches the per-frame
+  path. No `moq-net` API change: registry-level prefix accumulators would
+  push request lifecycle into the collection layer and put shared atomics on
+  every frame bump under a held prefix. Extend `producer_tick` to sweep rows,
+  held prefixes, and depth.
 - Held prefixes have no cap: a hold is reclaimed when its last reader leaves,
   like presence tracks, whose cap was dropped for that reason (decided
   2026-10-12 in #5084).
