@@ -2,7 +2,7 @@
 //! the peer's `Packet::ecn` reads back, over IPv4 and IPv6, as a lone
 //! datagram and as a GSO train, with CE surviving too. Without the TOS and
 //! traffic-class control messages the peer sees no mark, its ACKs carry no
-//! ECN counts, and noq disables ECN on the first one.
+//! ECN counts, and moq-quic disables ECN on the first one.
 //!
 //! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
 
