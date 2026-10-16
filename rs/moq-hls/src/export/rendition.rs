@@ -644,6 +644,10 @@ impl Rendition {
 		if !super::durable(&self.section) {
 			return Err(crate::Error::RangeNotDurable);
 		}
+		// Without its own timeline every listed segment would be a gap.
+		if !self.section.timelines.contains_key(self.track_name()) {
+			return Err(crate::Error::RangeUnavailable("rendition has no timeline".into()));
+		}
 		if !self.history.load(Ordering::Relaxed) {
 			return Err(crate::Error::RangeUnavailable(
 				"range playlists require Config::history".into(),

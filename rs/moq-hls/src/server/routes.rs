@@ -264,12 +264,12 @@ async fn manifest(server: &Server, broadcast: &str, query: Option<&str>) -> Resp
 }
 
 async fn media(server: &Server, broadcast: &str, kind: Kind, rendition: &str, query: Option<&str>) -> Response {
-	let Some(rendition) = rendition_for(server, broadcast, kind, rendition).await else {
-		return not_found();
-	};
 	let (range, child_query) = match playlist_range(query) {
 		Ok(parsed) => parsed,
 		Err(()) => return bad_request(),
+	};
+	let Some(rendition) = rendition_for(server, broadcast, kind, rendition).await else {
+		return not_found();
 	};
 	match tokio::time::timeout(READY_TIMEOUT, rendition.playlist(range, child_query.as_deref())).await {
 		Ok(Ok(Some(playlist))) => m3u8(playlist),
