@@ -457,8 +457,7 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 		raw.estimated_send_rate_bps ? static_cast<double>(*raw.estimated_send_rate_bps) : 0;
 	const auto recv_rate = receive ? receive->peek() : std::nullopt;
 	snapshot.estimated_recv_rate_valid = recv_rate.has_value();
-	snapshot.estimated_recv_rate_bps =
-		recv_rate ? static_cast<double>(*recv_rate) : 0;
+	snapshot.estimated_recv_rate_bps = recv_rate ? static_cast<double>(*recv_rate) : 0;
 	snapshot.bytes_sent_valid = raw.bytes_sent.has_value();
 	snapshot.bytes_sent = raw.bytes_sent.value_or(0);
 	if (raw.packets_sent && raw.packets_lost && *raw.packets_sent > 0) {
