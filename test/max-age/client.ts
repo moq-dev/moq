@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
+import { Milli } from "@moq/clock";
 import Session from "@moq/qmux";
 import { connect } from "../../js/net/src/connection/connect.ts";
 import { Producer } from "../../js/net/src/origin.ts";
 import * as Path from "../../js/net/src/path.ts";
-import { Milli } from "../../js/net/src/time.ts";
 
 // stdout carries the `ready` handshake to the Rust test, so library debug logs go to stderr.
 console.debug = console.error;

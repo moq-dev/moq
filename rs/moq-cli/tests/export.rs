@@ -19,6 +19,10 @@ use tokio::task::JoinHandle;
 const TIMEOUT: Duration = Duration::from_secs(30);
 /// About three seconds of HEVC and Opus.
 const CLIP: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/bbb_cbr.ts");
+/// Five seconds of the same capture at the same rate, which leaves media to come once an export
+/// has waited out the PCR-rate window and its delay (`ffmpeg -i scte35/bbb5s.ts -c copy
+/// -muxrate 400000 -f mpegts bbb5s_cbr.ts`).
+const LONG: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/bbb5s_cbr.ts");
 /// Fragmented AV1, which the TS export does not carry.
 const AV1: &[u8] = include_bytes!("../../moq-mux/src/container/fmp4/test_data/av1.mp4");
 
@@ -508,18 +512,23 @@ async fn the_same_instance_within_the_linger_continues() {
 
 	// Continue one capture across a transport loss. Replaying its beginning in a fresh
 	// importer would change the catalog clock and reuse groups for already sent content.
-	// The TS catalog waits for its PCR-rate measurement; a fixed midpoint can still
-	// be behind that gate. Publish to the measured rate, leaving the new tail unread.
+	// The capture keeps its schedule throughout, as a live one does: the export releases
+	// each frame a delay after its time, so pausing the capture while the export joins or
+	// the publisher reconnects would make the rest late by the pause, and dropped. The
+	// interval bursts whatever a stall held back. The export joins after the catalog's
+	// PCR-rate window and writes a delay after that, so publish until it has written.
+	let mut pace = tokio::time::interval(Duration::from_millis(150));
+	let mut chunks = LONG.chunks(188 * 40);
 	let mut split = 0;
-	for chunk in CLIP.chunks(188 * 40) {
-		feed(&mut import, chunk).await;
+	while output.lock().unwrap().is_empty()
+		&& let Some(chunk) = chunks.next()
+	{
+		pace.tick().await;
+		import.decode(chunk).unwrap();
 		split += chunk.len();
-		if catalog.snapshot().ext.mpegts.mux_rate.is_some() {
-			break;
-		}
 	}
-	assert!(split < CLIP.len(), "the capture has a tail after its PCR-rate window");
 	export.output_past(0).await;
+	assert!(split < LONG.len(), "the capture has a tail after the export joined");
 	let old = relay.origin.request_broadcast("demo", None).await.unwrap();
 	assert_eq!(old.info().epoch.as_ref(), Some(&epoch));
 	let clock = catalog.snapshot().clock;
@@ -536,7 +545,10 @@ async fn the_same_instance_within_the_linger_continues() {
 		.unwrap();
 	assert_eq!(back.info().epoch.as_ref(), Some(&epoch));
 	assert!(!back.is_clone(&old), "the old relay copy was replaced");
-	feed(&mut import, &CLIP[split..]).await;
+	for chunk in chunks {
+		pace.tick().await;
+		import.decode(chunk).unwrap();
+	}
 	assert_eq!(catalog.snapshot().clock, clock, "the capture keeps its catalog clock");
 	import.finish().unwrap();
 	catalog.finish().unwrap();
@@ -550,28 +562,19 @@ async fn the_same_instance_within_the_linger_continues() {
 
 	let output = output.lock().unwrap();
 	let after = &output[mark..];
-	// The rate-measurement prefix leaves less than a second of this capture. Its
-	// packet count depends on the buffered prefix; only new capture timestamps
-	// prove the return continued instead of replaying already served content.
+	// The packet count after the mark depends on the buffered prefix; only new capture
+	// timestamps prove the return continued instead of replaying already served content.
 	assert!(
-		latest_pts(&output) > latest_pts(&CLIP[..split]),
+		latest_pts(&output) > latest_pts(&LONG[..split]),
 		"the returned output carries the capture's new tail: {} packets after {mark} bytes, capture split {split}/{}; exporter stderr: {errors}",
 		packets(after).count(),
-		CLIP.len()
+		LONG.len()
 	);
 	let versions: Vec<u8> = packets(&output).filter_map(|p| pat_version(p)).collect();
 	assert!(
 		versions.iter().all(|&version| version == 0),
 		"the same instance keeps the PSI version: {versions:?}"
 	);
-}
-
-/// Feed the capture at the same pace as the stdin importer fixture.
-async fn feed(import: &mut ts::Import<ts::Ext>, data: &[u8]) {
-	for chunk in data.chunks(188 * 40) {
-		import.decode(chunk).unwrap();
-		tokio::time::sleep(Duration::from_millis(150)).await;
-	}
 }
 
 /// The latest PES timestamp, so replayed content cannot masquerade as a continuation.

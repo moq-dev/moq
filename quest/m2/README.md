@@ -26,7 +26,6 @@ ranked just below deterministic TS legs, which it requires.
 - [Time test sweep](/quest/m2/time-test-sweep.md) - unrelated test conversion and the workspace lint ratchet
 
 - [Binding audio delay](/quest/m2/binding-surface.md) - moq-ffi and every wrapper configure and observe audio playout delay
-- [Biome on doc/ and demo/](/quest/m2/biome-doc-demo.md) - `just check` and CI lint and format `doc/` and `demo/` with Biome, and both pass
 - [Pipelined requests](/quest/m2/pipeline-requests/README.md) - SUBSCRIBE and the first FETCH go out with the track-info request at every hop, so first data arrives a round trip sooner per hop
 - [OBS native codecs](/quest/m2/obs-moq-video/README.md) - replace FFmpeg video and audio decoding with moq-video and moq-audio, deliver GPU frames, and use native audio/video encoders
 - [OBS multitrack](/quest/m2/obs-multitrack.md) - the obs-moq output publishes OBS's native multitrack video encoders as simulcast renditions, configured like OBS multitrack and over obs-websocket
@@ -84,7 +83,6 @@ ranked just below deterministic TS legs, which it requires.
 - [Deterministic TS legs](/quest/m2/ts-hitless.md) - two `--sync` legs of one broadcast render every common slot identically, continuity counters included, through complementary loss
 - [TS over RTP legs](/quest/m2/ts-rtp-egress.md) - two legs send identical RTP packets, headers included, so an ST 2022-7 receiver can merge them
 - [DVB E-AC-3](/quest/m2/ts-eac3.md) - E-AC-3 private data is split per access unit (independent frame plus its dependent substreams) and buffer-modelled in TS export
-- [T-STD controls](/quest/m2/tstd-controls.md) - the harness gains an MB-overflow control and an AAC broadcast reference
 - [moqsrc A/V sync](/quest/m2/moqsrc-av-sync.md) - a nightly test measures A/V skew from `moqsrc` through clock-synced sinks
 - [MP4 export](/quest/m2/mp4-export.md) - `moq export mp4 --output` records crash-safe fragments, then finishes a regular MP4 with moov at the end
 - [fMP4 edit lists](/quest/m2/fmp4-edit-lists.md) - the fMP4 importer applies edit lists to frame timestamps
@@ -97,7 +95,7 @@ ranked just below deterministic TS legs, which it requires.
 - [Per-stream deadlines](/quest/m2/quic-deadline.md) - hopeless retransmits
   become resets, and a tail loss probe fires early while there is still time
 - [qmux on the QUIC stream state machine](/quest/m2/quic-qmux.md) - qmux is a
-  first-class crate in the fork over the shared stream state machine
+  first-class crate over `moq-quic`'s shared stream state machine
 - [Align BBR loss handling with draft-06](/quest/m2/quic-bbr-loss-parity.md) - losses use their own sample and the draft-05 links go, keeping the spurious-loss undo that already re-enters ProbeUp through Refill
 - [Measure ECN on the backbone](/quest/m2/quic-ecn-measure.md) - a written
   verdict on marking versus dropping, and whether Linode and OVH keep marks
@@ -112,7 +110,6 @@ ranked just below deterministic TS legs, which it requires.
 - [#3199](/quest/m2/3199-moq-uring-remove-sq-indirection-and-per-enter-ring-fd.md) - moq-uring: remove SQ indirection and per-enter ring fd lookup, if a profile shows the win
 - [#3200](/quest/m2/3200-moq-uring-batch-completion-wakeups-with-min-timeout.md) - moq-uring: batch completion wakeups with MIN_TIMEOUT
 - [Send depth](/quest/m2/send-depth.md) - moq-net futures prove Send at the default recursion limit, so downstream crates see no nightly lint
-- [Bench coverage](/quest/m2/bench-coverage.md) - Criterion targets for moq-pattern matching first, then moq-mux containers
 - [Browser benchmarks](/quest/m2/browser-benchmarks.md) - measure JS transport, container, decode, and render costs in an identified browser
 - [Browser media report](/quest/m2/rs2ts-browser-report.md) - compare Rust-backed and handwritten @moq/net through full media workloads, supplementing the pre-adoption comparisons
 - [mTLS on tls://](/quest/m2/tls-listener-mtls.md) - a `tls://` listener can identify a cluster peer by its client certificate
@@ -142,7 +139,6 @@ ranked just below deterministic TS legs, which it requires.
 - [Keep-alive from the idle timeout](/quest/m2/quic-keep-alive.md) - the keep-alive interval defaults to a fraction of the negotiated idle timeout; an explicit `quic.keep_alive` overrides
 - [Socket close](/quest/m2/noq-socket-close.md) - moq-tokio's QUIC endpoint releases its socket on close, so it drops its wrapper
 - [TS health stats](/quest/m2/ts-health-stats.md) - the TS counters ride the stats plumbing beside the media counters
-- [Teleoperation](/quest/m2/teleop/README.md) - MoQ carries robot video down and control up on one session as a library capability
 - [Media QA on other engines](/quest/m2/browser-media-qa-engines.md) - the media harness measures a Firefox or WebKit player over the fallback and names what each engine lacks
 - [Windows.Graphics.Capture](/quest/m2/capture-wgc.md) - the WGC display and window backend verified on real Windows hardware
 - [Windows capture parity](/quest/m2/capture-windows.md) - system audio and a settled app-capture policy

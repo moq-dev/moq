@@ -1,3 +1,4 @@
+import { Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Json from "@moq/json";
@@ -44,7 +45,7 @@ export type BroadcastInput = {
 	 * shortens how far back a fetch can reach. A track's retention is fixed when it is created,
 	 * so changing this publishes a new network broadcast.
 	 */
-	maxAge: Getter<Moq.Time.Milli | undefined>;
+	maxAge: Getter<Milli | undefined>;
 };
 
 /**
@@ -142,7 +143,7 @@ export class Broadcast {
 	 *
 	 * Set the returned rendition's `config` to a {@link Catalog.TextConfig}, then write one cue per
 	 * group into its `track` with `Hang.Container.Legacy.Producer` (each cue is a keyframe, so it opens
-	 * its own group). See the module docs for the cue framing. Stamp cues with `performance.now()` in
+	 * its own group). See the module docs for the cue framing. Stamp cues with `@moq/clock`'s `now()` in
 	 * microseconds, the broadcast clock the catalog advertises.
 	 */
 	text(name: string): Rendition<Catalog.TextConfig> {
@@ -365,7 +366,7 @@ export class Broadcast {
 					const track = broadcast.createTrack(name, {
 						// Each catalog snapshot is stamped when written.
 						timescale: Moq.Time.Timescale.MILLI,
-						maxAge: Moq.Time.Milli(Number.MAX_SAFE_INTEGER),
+						maxAge: Milli(Number.MAX_SAFE_INTEGER),
 						priority: Catalog.PRIORITY.catalog,
 					});
 					effect.cleanup(() => track.close());

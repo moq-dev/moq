@@ -1012,7 +1012,7 @@ impl std::fmt::Debug for RecvStream {
 
 /// Unmap a raw-QUIC stream code that arrived in the HTTP/3 code space.
 ///
-/// Older `web-transport-moq` raw sessions map RESET_STREAM and STOP_SENDING
+/// Older moq-tokio raw sessions map RESET_STREAM and STOP_SENDING
 /// codes as if they were WebTransport. No `u32` application code reaches that
 /// range, so a code in it can only be the mapped form. Anything else is the
 /// peer's own code and passes through.

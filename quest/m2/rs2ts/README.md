@@ -8,6 +8,9 @@ layer, covering publishing and consumption for lite and moq-transport.
 first; the eventual browser distribution is JS-only, built from Rust.
 Hand-written TypeScript provides browser integration and the public interface.
 
+The [backend baseline](/test/wasm/README.md#backend-baseline) retains
+handwritten JS and current async WASM consumer samples and explicit parity gaps.
+
 This m2 line delivers the WASM replacement. The
 [JS-only stage](/quest/m2/rs2ts-js.md) follows in m2.
 
@@ -58,7 +61,6 @@ any necessary breaks. Wire: no changes intended.
 
 ## Required
 
-- [Browser backend baseline](/quest/m2/rs2ts/spike.md) - reproducible browser fixtures and measurements before choosing or adopting a backend
 - [Binding generator](/quest/m2/rs2ts/generator.md) - the maintainer picks UniFFI- or BoltFFI-generated moq-ffi, or hand-written moq-wasm, from measurements
 - [Complete WASM bindings](/quest/m2/rs2ts/wasm-bindings.md) - Rust publishing and consumption cover the browser protocol and model surface
 - [Adopt WASM in @moq/net](/quest/m2/rs2ts/wasm-adopt.md) - the TypeScript interface uses Rust, with measured tradeoffs accepted before replacement
