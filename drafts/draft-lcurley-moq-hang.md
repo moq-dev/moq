@@ -476,7 +476,7 @@ The `deflate` value is the group-scoped DEFLATE of {{compression}}.
 A `snapshot` group covers a single value (plus any deltas), so its window spans that group alone; a `stream` group's frames compress against the earlier ones in the log.
 
 ### broadcast and track {#data-shared}
-The `broadcast` and `track` fields carry the same meaning here as they do for a media rendition ({{field-broadcast}}, {{field-track}}).
+The `broadcast`, `epoch`, and `track` fields carry the same meaning here as they do for a media rendition ({{field-broadcast}}, {{field-epoch}}, {{field-track}}).
 
 ### bitrate, jitter, and delay {#data-estimates}
 The optional `bitrate` field is the track's maximum bitrate in bits per second.
@@ -500,6 +500,7 @@ Audio, video, and text renditions share the following fields, extending the WebC
 ~~~
 type CommonExtensions = {
   "broadcast": string | undefined,
+  "epoch": string | undefined,
   "track": string | undefined,
   "label": string | undefined,
   "container": Container,
@@ -530,6 +531,27 @@ An MSF {{moqmsf}} gateway maps the resolved broadcast path to the track's absolu
 An absent MSF `namespace` inherits the catalog's broadcast.
 Since each endpoint sees paths under its own connection root, a `namespace` equal to the catalog broadcast's path, or matching it on whole trailing segments, also names the catalog's broadcast; a gateway MUST NOT emit a different broadcast's `namespace` that matches so.
 A gateway MUST preserve the namespace and track-name pair or refuse the rendition; it MUST NOT substitute the catalog's broadcast for an unrepresentable reference.
+
+### epoch {#field-epoch}
+The optional `epoch` field names the publisher instance of the broadcast a rendition references ({{field-broadcast}}), as the canonical text of its Epoch {{moql}}: a lowercase hyphenated UUIDv7.
+Without `broadcast`, it names the instance of the catalog's own broadcast.
+A consumer MUST reject a catalog containing any other `epoch` value.
+
+A consumer reads each path a catalog instance references from the first broadcast it resolves there, so the catalog and its renditions never resolve one path independently across a replacement.
+An absent `epoch` accepts that first broadcast, whichever instance it is.
+A consumer that follows a referenced broadcast's announcements MAY move a rendition without `epoch` onto a restarted instance.
+
+When `epoch` is present and the route that resolved the referenced broadcast carries an Epoch, the consumer MUST read the rendition only from that instance.
+It MUST fail the rendition rather than fall back to another instance, including one that replaced it before or after resolution, and MUST NOT follow a restart onto another instance for it.
+A later catalog update naming another Epoch for an already-resolved path MUST NOT replace the resolved broadcast; the renditions naming the other Epoch fail instead.
+A new catalog instance resolves its references afresh.
+
+A route without an Epoch, such as one over an older moq-lite version or MoQ Transport, cannot prove which instance it serves, so there `epoch` is best effort: the consumer reads the broadcast it resolved.
+A consumer MUST NOT treat a catalog's `epoch` as evidence that a subscription may resume across routes.
+A consumer that predates the field ignores it and does not gain its guarantee.
+
+A publisher SHOULD set `epoch` only when it knows the instance it references, and MUST omit it for a broadcast produced on demand, which has no instance until a worker accepts the request.
+MSF {{moqmsf}} has no field for an instance, so a gateway converting to MSF drops `epoch` and SHOULD report that it did; its readers accept the first instance they resolve.
 
 ### track {#field-track}
 A rendition's key in its map is its ID, and by default also the name of its track.
@@ -708,6 +730,7 @@ type ArchiveSchema = {
   "timescale": number | undefined,
   "durationMax": number | undefined,
   "replay": string | undefined,
+  "replayEpoch": string | undefined,
   "store": string | undefined,
   "version": number | undefined,
 }
@@ -735,6 +758,8 @@ Wall-clock mapping is the catalog root `clock` ({{clock}}), not this section: a 
 The `replay` field, if present, is a relative MoQ broadcast path ({{field-broadcast}}) the archive is served back from.
 Absent, the timelines live on the catalog's own broadcast.
 A wildcard replay path names no generation.
+
+The `replayEpoch` field, if present, names the publisher instance of `replay`, with the meaning and rules of a rendition's `epoch` ({{field-epoch}}).
 
 The `store` field, if present, is the object-store URL the recording objects ({{recording}}) live under.
 Authorization for `replay` and `store` is external.
@@ -1135,6 +1160,7 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- Added an optional `epoch` beside every rendition and data track `broadcast` reference, and `replayEpoch` beside the archive's `replay` ({{field-epoch}}). A consumer reads each referenced path from the first broadcast it resolves for a catalog instance; a present `epoch` fails a rendition proven to resolve another instance, and is best effort over a route without an Epoch.
 - Derived HLS and DASH exports hand disabled references to enabled renditions at the first record numbered past the advertised ones, keeping the record `sequence` as the HLS media sequence and starting a DASH period.
 
 - Fixed a track's identity for its name ({{identity}}): codec, description, container, display aspect, sample rate, and channel count never change, while every other field, including size, bitrate, and framerate, updates in place. A change of identity takes a new track name, which a rendition may name with `track` while keeping its ID, or a new Epoch.

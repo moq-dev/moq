@@ -251,6 +251,20 @@ pub enum Error {
 	#[error("broadcast reference escapes the root: {0}")]
 	EscapingBroadcast(String),
 
+	/// A reference's `epoch` names another publisher instance than the one serving its broadcast.
+	///
+	/// The served instance is the one the source resolved first for that path, so a later
+	/// reference cannot move it; the reference fails instead of reading other content.
+	#[error("broadcast {path} serves epoch {actual}, not the referenced {expected}")]
+	EpochMismatch {
+		/// The broadcast's path, relative to the origin root.
+		path: String,
+		/// The epoch the reference names.
+		expected: moq_net::Epoch,
+		/// The epoch the resolved broadcast serves.
+		actual: moq_net::Epoch,
+	},
+
 	/// A rendition tried to lower jitter already advertised to subscribers.
 	#[error("catalog jitter cannot decrease for a published rendition")]
 	JitterDecreased,

@@ -126,6 +126,15 @@ These land with the next breaking release, not the 2026-09-23 train.
   `Source` to follow a new instance. moq-hls's `Broadcaster::new` no longer
   awaits or fails, and a rendition whose sibling broadcast ends now ends its
   playlist instead of rebinding.
+- **Catalog references may name their instance.** Every hang rendition and data
+  track gains an optional `epoch` beside `broadcast`, and the archive gains
+  `replayEpoch` beside `replay`. In Rust, moq-mux's `Source::bind(rel)`,
+  `resolve(rel)`, and `subscribe_track(rel, name)` take the reference's epoch
+  after `rel`: pass `config.epoch.as_ref()`, or `None` to accept the first
+  instance resolved as before. A reference whose broadcast proves another epoch
+  fails with `Error::EpochMismatch`; over a route without an epoch it is best
+  effort. `@moq/watch`'s `relativeBroadcast(effect, rel, epoch?)` takes the same
+  optional argument. Omitting the field keeps older catalogs and readers working.
 - **fMP4 export of Annex-B H.264 and H.265 inits from the catalog.** When the
   catalog codec string and dimensions are enough, `moq export fmp4` writes an
   `avc3` or `hev1` init segment before the first keyframe and leaves SPS, PPS,
