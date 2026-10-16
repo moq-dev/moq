@@ -254,7 +254,7 @@ void MoQOutput::OnConnect(const std::shared_ptr<Attempt> &current, moq::expected
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		session = current->session;
-		recv_bandwidth = session->recv_bandwidth().value_or(nullptr);
+		recv_bandwidth = session->recv_bandwidth();
 		connected = true;
 		live = true;
 		last_failure_code = MoQError::None;
