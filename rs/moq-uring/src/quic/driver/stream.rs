@@ -71,18 +71,26 @@ impl SendStream {
 	}
 
 	/// [`reset`](web_transport_trait::poll::SendStream::reset) with a
-	/// full-width code, for the WebTransport HTTP/3 error mapping.
-	pub(crate) fn reset_code(&mut self, code: u64) {
+	/// full-width code, for the WebTransport HTTP/3 error mapping, that still
+	/// delivers the first `reliable_size` bytes when the peer accepts
+	/// RESET_STREAM_AT.
+	pub(crate) fn reset_code(&mut self, code: u64, reliable_size: u64) {
 		if self.reset {
 			return;
 		}
-		// Err means the stream is already gone, which is what we wanted.
-		let _ = self
-			.shared
-			.conn
-			.borrow_mut()
-			.send_stream(self.id)
-			.reset(VarInt::from_u64(code).unwrap_or(VarInt::MAX));
+		let code = VarInt::from_u64(code).unwrap_or(VarInt::MAX);
+		let mut conn = self.shared.conn.borrow_mut();
+		let mut stream = conn.send_stream(self.id);
+		match stream.reset_at(code, reliable_size) {
+			// A peer without RESET_STREAM_AT gets the plain reset it understands.
+			Err(moq_quic::ResetAtError::Unsupported) => {
+				let _ = stream.reset(code);
+			}
+			Err(moq_quic::ResetAtError::Unwritten) => unreachable!("only written bytes are kept"),
+			// Already gone, which is what we wanted.
+			Ok(()) | Err(moq_quic::ResetAtError::ClosedStream) => {}
+		}
+		drop(conn);
 		self.reset = true;
 		self.shared.kick();
 	}
@@ -146,7 +154,7 @@ impl web_transport_trait::poll::SendStream for SendStream {
 	}
 
 	fn reset(&mut self, code: u32) {
-		self.reset_code(u64::from(code));
+		self.reset_code(u64::from(code), 0);
 	}
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {

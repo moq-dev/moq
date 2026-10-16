@@ -586,6 +586,7 @@ impl web_transport_trait::poll::Session for Session {
 				SendStream {
 					inner: send,
 					prefix: Bytes::new(),
+					header: 0,
 					finishing: false,
 					web: false,
 				},
@@ -602,6 +603,7 @@ impl web_transport_trait::poll::Session for Session {
 					SendStream {
 						inner: send,
 						prefix: Bytes::new(),
+						header: 0,
 						finishing: false,
 						web: true,
 					},
@@ -629,6 +631,7 @@ impl web_transport_trait::poll::Session for Session {
 		let prefix = self.web.as_ref().map(|web| web.header_uni.clone()).unwrap_or_default();
 		Poll::Ready(Ok(SendStream {
 			inner,
+			header: prefix.len(),
 			prefix,
 			finishing: false,
 			web: self.web.is_some(),
@@ -645,6 +648,7 @@ impl web_transport_trait::poll::Session for Session {
 		Poll::Ready(Ok((
 			SendStream {
 				inner: send,
+				header: prefix.len(),
 				prefix,
 				finishing: false,
 				web: self.web.is_some(),
@@ -812,6 +816,8 @@ pub struct SendStream {
 	inner: super::SendStream,
 	/// Header bytes still owed to the wire before any payload.
 	prefix: Bytes,
+	/// Length of the whole header, which a reset must still deliver.
+	header: usize,
 	/// [`finish`](web_transport_trait::poll::SendStream::finish) ran with the
 	/// header still owed, so [`poll_closed`](web_transport_trait::poll::SendStream::poll_closed)
 	/// writes the rest and finishes then.
@@ -825,6 +831,17 @@ impl SendStream {
 			true => unmap_err(err),
 			false => unmap_legacy(err),
 		}
+	}
+
+	/// Reset a WebTransport stream, still delivering its header so the peer
+	/// can tell which session the reset belongs to.
+	fn reset_web(&mut self, code: u64) {
+		if !self.prefix.is_empty() {
+			let n = self.inner.try_write(&self.prefix);
+			self.prefix.advance(n);
+		}
+		let written = self.header - self.prefix.len();
+		self.inner.reset_code(code, written as u64);
 	}
 }
 
@@ -896,7 +913,7 @@ impl web_transport_trait::poll::SendStream for SendStream {
 
 	fn reset(&mut self, code: u32) {
 		match self.web {
-			true => self.inner.reset_code(proto::error_to_http3(code)),
+			true => self.reset_web(proto::error_to_http3(code)),
 			false => web_transport_trait::poll::SendStream::reset(&mut self.inner, code),
 		}
 	}
@@ -944,7 +961,7 @@ impl Drop for SendStream {
 		// dropping a stream means. moq cancels subscriptions by dropping, so
 		// this is the ordinary path.
 		if self.web && !self.inner.ended() {
-			self.inner.reset_code(proto::error_to_http3(0));
+			self.reset_web(proto::error_to_http3(0));
 		}
 	}
 }

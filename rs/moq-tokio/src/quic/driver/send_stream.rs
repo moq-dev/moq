@@ -6,7 +6,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use moq_quic::{ClosedStream, ConnectionError, FinishError, StreamId, Written};
+use moq_quic::{ClosedStream, ConnectionError, FinishError, ResetAtError, StreamId, Written};
 use thiserror::Error;
 
 use crate::quic::driver::{
@@ -210,6 +210,24 @@ impl SendStream {
             return Ok(());
         }
         conn.inner.send_stream(self.stream).reset(error_code)?;
+        conn.wake();
+        Ok(())
+    }
+
+    /// Close the send stream immediately, except for its first `reliable_size` bytes.
+    ///
+    /// Like [`reset()`](Self::reset), but the peer still receives the stream up to
+    /// `reliable_size` before the error, using RESET_STREAM_AT. Fails without touching the stream
+    /// if the peer does not support it or `reliable_size` exceeds the bytes written, so the caller
+    /// can fall back to [`reset()`](Self::reset).
+    pub fn reset_at(&mut self, error_code: VarInt, reliable_size: u64) -> Result<(), ResetAtError> {
+        let mut conn = self.conn.state.lock("SendStream::reset_at");
+        if self.is_0rtt && conn.check_0rtt().is_err() {
+            return Ok(());
+        }
+        conn.inner
+            .send_stream(self.stream)
+            .reset_at(error_code, reliable_size)?;
         conn.wake();
         Ok(())
     }

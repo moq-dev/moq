@@ -587,6 +587,64 @@ async fn read_more(recv: &mut quic::RecvStream, out: &mut Vec<u8>) {
 	out.extend_from_slice(&buf[..n]);
 }
 
+/// A stream reset before any payload still delivers its WebTransport header,
+/// so the peer attributes the reset to the session rather than dropping a
+/// stream it cannot place: uring to tokio, and back.
+#[test]
+fn a_reset_stream_keeps_its_header() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let endpoint = h3_endpoint(&handle, &certs);
+	let addr = endpoint.local_addr();
+
+	let client = tokio_client(format!("https://{addr}/"), |session| {
+		Box::pin(async move {
+			let mut recv = session.accept_uni().await.expect("accept_uni");
+			let err = recv.read_chunk(usize::MAX).await.expect_err("the server reset it");
+			assert!(matches!(err, moq_tokio::quic::web::ReadError::Reset(7)), "got {err:?}");
+
+			session.open_uni().await.expect("open_uni").reset(8).expect("reset");
+			session.closed().await;
+		})
+	});
+
+	worker
+		.block_on(async move {
+			let conn = endpoint.accept().await.expect("accept");
+			let request = quic::web::Request::accept(conn).await.expect("handshake");
+			let mut session = request
+				.respond(quic::web::Response::default().with_protocol(PROTO))
+				.await
+				.expect("respond");
+
+			// Reset before the lazily written header ever went out.
+			let mut send = std::future::poll_fn(|cx| session.poll_open_uni(cx))
+				.await
+				.expect("open_uni");
+			send.reset(7);
+
+			let mut recv = within(
+				&handle,
+				"the client's reset stream",
+				std::future::poll_fn(|cx| session.poll_accept_uni(cx)),
+			)
+			.await
+			.expect("accept_uni");
+			let mut buf = [0u8; 16];
+			let err = std::future::poll_fn(|cx| recv.poll_read(cx, &mut buf))
+				.await
+				.expect_err("the client reset it");
+			assert!(matches!(err, quic::Error::Reset(8)), "got {err:?}");
+
+			session.close(CLOSE_CODE, CLOSE_REASON);
+			std::future::poll_fn(|cx| session.poll_closed(cx)).await;
+		})
+		.expect("worker");
+
+	client.join().expect("client thread");
+}
+
 /// Closing a session and dropping it on the spot still delivers the close
 /// capsule, with the HTTP/3 critical streams open underneath it.
 ///

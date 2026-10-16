@@ -17,11 +17,17 @@ use crate::quic::web::{CloseReason, ClosedStream, SessionError, WriteError};
 pub struct SendStream {
 	stream: crate::quic::driver::SendStream,
 	close: Arc<CloseReason>,
+	/// Length of the WebTransport header this side wrote first, which a reset must still deliver.
+	header: u64,
 }
 
 impl SendStream {
-	pub(crate) fn new(stream: crate::quic::driver::SendStream, close: Arc<CloseReason>) -> Self {
-		Self { stream, close }
+	pub(crate) fn new(stream: crate::quic::driver::SendStream, close: Arc<CloseReason>, header: usize) -> Self {
+		Self {
+			stream,
+			close,
+			header: header as u64,
+		}
 	}
 
 	/// Decode the peer's stop code, and report a session error as the session's close reason.
@@ -41,9 +47,19 @@ impl SendStream {
 	/// Abruptly reset the stream with the provided error code. See [`crate::quic::driver::SendStream::reset`].
 	/// This is a u32 with WebTransport because we share the error space with HTTP/3.
 	/// A raw QUIC session sends the code as is.
+	///
+	/// The WebTransport header still reaches the peer, so it can tell which session the reset
+	/// belongs to, unless the peer cannot receive RESET_STREAM_AT.
 	pub fn reset(&mut self, code: u32) -> Result<(), ClosedStream> {
 		let code = self.close.encode_stream_code(code);
-		self.stream.reset(code).map_err(Into::into)
+		match self.stream.reset_at(code, self.header) {
+			Ok(()) => Ok(()),
+			Err(crate::quic::driver::ResetAtError::ClosedStream) => Err(ClosedStream),
+			Err(crate::quic::driver::ResetAtError::Unsupported) => self.stream.reset(code).map_err(Into::into),
+			Err(crate::quic::driver::ResetAtError::Unwritten) => {
+				unreachable!("the header is written before the stream is handed out")
+			}
+		}
 	}
 
 	/// Wait until the stream has been stopped and return the error code. See
