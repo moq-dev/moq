@@ -66,9 +66,19 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
   `frame::ProducerOwned::write`) and `notify`: stay private, "tunes the
   built-in sessions" (batches wakes per poll turn).
 - **Allocation budget** (`frame::Budget`; both subscribers): remove the
-  need. A peer-declared frame size is untrusted for every wire, so the model
-  bounds up-front allocation itself (from the origin's cache pool, or a
-  per-producer budget the model owns) instead of taking a caller's budget.
+  caller-supplied argument, but keep the aggregate bound. Today one 16 MiB
+  budget is shared by every frame a lite or IETF subscriber session
+  receives, so a peer that opens many streams declaring maximum-size frames
+  gets lazy growth past it, not memory. A per-producer budget would lose
+  that, and so would the origin's cache pool, which is unbounded by
+  default. Recommended: the budget lives on the origin producer handle a
+  session ingests through (the one that already carries its stats and
+  identity), with the same default, and is shared by every source, track,
+  and group minted from that handle. A frame whose declared size does not
+  fit grows with the bytes received, as today. The alternative is no
+  up-front allocation at all (always lazy), which needs no budget but pays
+  a reallocation per doubling on every large frame. Measure it against the
+  ingest benchmarks before choosing it.
 - `group::Producer::info` (IETF subscriber): public, mirroring
   `track::Producer::info`.
 - **Received end** (`track::Producer::finish_at_pending`, `set_tail_pending`;
@@ -105,11 +115,9 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
     peer resolves later); if it does, the gap closes there.
   - Public as an idle handle whose `live(largest)` resumes readers.
 - Fetch ingest (`group::Request` fields `state` and `result`,
-  `track::TrackState` with `TrackState::abort`, `track::FetchOutcome`,
-  `group::Request::finish_track_at`, `track::Consumer::poll_landed`): remove
-  the need through [Model ranges](/quest/m1/subscribe-ranges/model.md), which
-  replaces per-group requests with ranges; that quest's public range answer
-  is the ingest path. Re-inventory once it lands.
+  `track::TrackState`, `track::FetchOutcome`, `finish_track_at`,
+  `poll_landed`): moved to [the deferred quest](/quest/m1/public-model/deferred.md),
+  which waits on Model ranges.
 - Passthrough, stay private and marked: `group::Producer::wire`,
   `set_wire`, `mark_gap`, `set_end_object`, `group::Wire`, the `object` and
   `datagram` modules, `track::Producer::insert_wire_datagram`,
@@ -121,16 +129,15 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
 JS items (`js/net/src/`): mirror each Rust decision under the same name.
 
 - `hooks.endTrack` (`internal.ts`, IETF subscriber; the JS
-  `finish_at_pending`) follows the received-end decision, after
-  [JS pending tail](/quest/m1/js-pending-tail.md).
+  `finish_at_pending`): moved to the deferred quest, which waits on JS
+  pending tail.
 - `hooks.pendingTrackProducer` (IETF subscriber) reaches the producer behind
   an unaccepted request so objects landing before SUBSCRIBE_OK are kept.
   Replace it with the resolved-start shape above: the request is accepted
   with its start pending, so early data has a public producer to land in.
-- `Group.Producer.mirror` (`@internal`, lite subscriber fetch coalescing)
-  goes with the fetch items: remove the need through Model ranges and
-  [JS track handover](/quest/m1/js-group-handover.md), which owns the JS
-  fan-out copy.
+- `Group.Producer.mirror` (`@internal`, lite subscriber fetch coalescing):
+  moved to the deferred quest, which waits on Model ranges and JS track
+  handover.
 - `internal.ts` `finalSequence` (IETF subscriber) is public with the serving
   quest's `Position::final_sequence`.
 - `tail.ts` `Tail` and `TAIL_GRACE_MS`, `consume.ts` `BroadcastCache`: stay
@@ -147,6 +154,4 @@ cover the behavior.
 
 ## Related
 
-- [Model ranges](/quest/m1/subscribe-ranges/model.md) - replaces the fetch ingest items
-- [JS track handover](/quest/m1/js-group-handover.md) - owns `Group.Producer.mirror`
-- [JS pending tail](/quest/m1/js-pending-tail.md) - the JS received-end hold
+- [Public model after ranges, handover, and the JS tail](/quest/m1/public-model/deferred.md) - the fetch ingest, `mirror`, and `endTrack` items split out of this quest

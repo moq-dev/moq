@@ -52,10 +52,8 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
   saves a poll.
 - **Cache peeks** (`track::Consumer::peek_latest`, `peek_before`,
   `peek_group`, `is_live`; IETF publisher, for Largest Object and FETCH):
-  remove the need through [Model ranges](/quest/m1/subscribe-ranges/model.md)
-  (IETF FETCH served from ranges) and Live largest location. If either
-  leaves a caller, bring the shape back to the maintainer rather than
-  publishing peeks.
+  moved to [the deferred quest](/quest/m1/public-model/deferred.md), which
+  waits on Model ranges.
 - Passthrough, stay private and marked: `group::Consumer::wire`,
   `end_object`, `last_object`, `first_frame`, `poll_read_object`,
   `poll_read_objects`, `frame::Object`, `frame::Consumer::fields`,
@@ -84,7 +82,7 @@ JS items (`js/net/src/`):
   written; keep that behavior behind the public read rather than a second
   method if it can be.
 - `Track.Subscriber.fork` (`@internal`, IETF publisher fill and cache
-  reads): remove the need with the cache peeks, through Model ranges.
+  reads): moved to the deferred quest with the cache peeks.
 - `wire.ts` `Broadcast.subscribe`, `fetchGroup`: remove the need; the public
   `Broadcast.Consumer.track(name)` paths cover them.
 - `wire.ts` `Broadcast.largest` and `hooks.cachedLargest`: remove the need
@@ -110,4 +108,4 @@ cover the behavior.
 
 ## Related
 
-- [Model ranges](/quest/m1/subscribe-ranges/model.md) - replaces the cache peeks and `fork`
+- [Public model after ranges, handover, and the JS tail](/quest/m1/public-model/deferred.md) - the cache peeks and `fork`, split out of this quest

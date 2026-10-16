@@ -39,10 +39,16 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
   sessions; a third party drops or closes its own source.
 - **Request validity** (`broadcast::RequestValidity`, `origin::Selection`;
   both subscribers). **Decision**:
-  - ✅ Remove the need. The source minted for a `Dynamic` request ends
-    itself with `Unroutable` once its route is replaced or its selection
-    period retires, so no session can serve a stale instance by forgetting
-    a check. The answering session sees it through its writes failing.
+  - ✅ Remove the need. The source minted for a `Dynamic` request enforces
+    validity itself, so no session can serve a stale instance by forgetting
+    a check. Revised in review (#5717): once its route is replaced or its
+    selection period retires, the source refuses new track requests with
+    `Unroutable`, but tracks it already accepted keep running and finish.
+    `origin::Dynamic::update` and the subscriber drain paths rely on that,
+    so producer writes must not start failing. The answering session learns
+    it separately: the source's request stream (`poll_requested_track`)
+    ends, so it stops answering and drops the source once its accepted
+    tracks are done.
   - A public validity handle every answerer must poll.
 - **Unused races** (`broadcast::Producer::poll_unheld`, `close_unheld`,
   `group::Producer::poll_unused`, `abort_unused`,
@@ -124,14 +130,22 @@ JS items (`js/net/src/`):
   decision above: ✅ public, mirroring Rust's
   `broadcast::Producer::dynamic()`: a broadcast producer hands out track
   requests on demand, and a track's info and fetches are answered through
-  its `Track.Request` and `Track.Dynamic` (ranges once Model ranges lands).
-  A subclass of `Broadcast.Consumer` cannot do either today.
+  its `Track.Request` and `Track.Dynamic`. A subclass of
+  `Broadcast.Consumer` cannot do either today. The track-request handout
+  lands here. Fetch and info answering through ranges (`overrideBroadcastWire`)
+  moved to [the deferred quest](/quest/m1/public-model/deferred.md), which
+  waits on Model ranges.
 - `wire.ts` `OriginConsumer.broadcasts`: registered and never read; delete.
 - `hop.ts` `HopSchema`, `randomHop`, `UNKNOWN_HOP`, `MAX_HOPS`,
   `Cost.zero`, `Route.default`, `Route.normalize`, `routesEqual`: public
   values under `Origin`, mirroring Rust's `Hop::new`, `Hop::UNKNOWN`,
   `Route::default` and `PartialEq`. `Hop` is branded, so a third party
-  cannot build `Route.hops` without a cast today.
+  cannot build `Route.hops` without a cast today. Today `Route.default` is
+  one shared mutable object (`{ hops: [], cost: 0n }`), so a caller's
+  `hops.push` would pollute every later route. Publish it as a factory
+  returning a fresh route (`Route.empty()`, like Rust's `Route::default()`),
+  and move the internal readers onto it, rather than exporting the shared
+  object.
 - `announced.ts` `Announce.Producer`: remove the need; a session's route
   ingestion goes through the origin.
 - `wireOf`, `registerWire`, `trackOf`, `registerTrackConsumer`: stay
@@ -149,4 +163,4 @@ cover the behavior.
 ## Related
 
 - [Rust PROBE on demand](/quest/m1/probe-on-demand-rs.md) - the receive side of the bandwidth handle
-- [Model ranges](/quest/m1/subscribe-ranges/model.md) - the track info and fetch answers
+- [Public model after ranges, handover, and the JS tail](/quest/m1/public-model/deferred.md) - the track info and fetch answers, split out of this quest
