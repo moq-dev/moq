@@ -147,8 +147,7 @@ test("a reader attaching after another never starts below what that one read", a
 	const second = new Effect();
 
 	try {
-		await flush();
-		const fanout = capture.out.frames.peek();
+		const fanout = capture.out.frames.peek() ?? (await capture.out.frames.changed());
 		if (!fanout) throw new Error("no fanout");
 
 		const before = fanout.subscribe(first).getReader();
@@ -160,6 +159,37 @@ test("a reader attaching after another never starts below what that one read", a
 
 		// A demand gap shorter than the clocks' offset.
 		clock.mockReturnValue(1_050);
+		const after = fanout.subscribe(second).getReader();
+		const resumed = (await after.read()).value as unknown as Frame;
+		expect(resumed.timestamp).toBe(1_250_000);
+		resumed.close();
+	} finally {
+		second.close();
+		capture.close();
+		clock.mockRestore();
+	}
+
+	expect(open()).toEqual([]);
+});
+
+test("a reader attaching to a frame held late still starts at now", async () => {
+	using input = frameSource();
+	// The frame reached the fanout 200ms after its stamp, as on a busy main thread.
+	const clock = spyOn(performance, "now").mockReturnValue(1_200);
+	const capture = new Capture({ source: input.source });
+	const first = new Effect();
+	const second = new Effect();
+
+	try {
+		const fanout = capture.out.frames.peek() ?? (await capture.out.frames.changed());
+		if (!fanout) throw new Error("no fanout");
+
+		const before = fanout.subscribe(first).getReader();
+		input.push(1_000_000);
+		(await before.read()).value?.close();
+		first.close();
+
+		clock.mockReturnValue(1_250);
 		const after = fanout.subscribe(second).getReader();
 		const resumed = (await after.read()).value as unknown as Frame;
 		expect(resumed.timestamp).toBe(1_250_000);

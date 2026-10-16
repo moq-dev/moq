@@ -124,11 +124,14 @@ class Frames extends Fanout<VideoFrame> {
 
 		// Re-stamped to now. The held frame may be minutes old, and publishing it at its capture time
 		// would deliver it that late, a delay the jitter estimate keeps for the life of the stream.
-		// Now is on the capture clock: the held stamp plus how long it was held. Capture stamps can run
-		// ahead of performance.now() (the first frame's arrival anchors them), so a stamp read off it
-		// could fall below frames an earlier reader published, rewinding a track resumed after a gap.
-		const elapsed = Time.Micro.fromMilli((performance.now() - this.#held.at) as Time.Milli);
-		const at = Math.round(held.timestamp + elapsed) as Time.Micro;
+		// Capture stamps can run ahead of performance.now() (the first frame's arrival anchors them), so
+		// now alone could fall below frames an earlier reader published, rewinding a track resumed after
+		// a gap. Never stamp below the held stamp plus how long it was held.
+		const now = performance.now();
+		const elapsed = Time.Micro.fromMilli((now - this.#held.at) as Time.Milli);
+		const at = Math.round(
+			Math.max(held.timestamp + elapsed, Time.Micro.fromMilli(now as Time.Milli)),
+		) as Time.Micro;
 		let first: VideoFrame | undefined = new VideoFrame(held, { timestamp: at });
 		this.#unread.add(first);
 		const release = () => {
