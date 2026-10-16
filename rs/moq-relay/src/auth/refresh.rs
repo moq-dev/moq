@@ -125,13 +125,13 @@ impl Refresh {
 		handle: auth::Handle,
 		role: Option<Role>,
 	) -> Result<Self, moq_net::Error> {
-		let requests = handle.requests()?;
 		let mut initial = Credential::new(lease.consumer.clone());
 		// Admission and protocol setup can observe different live grant versions.
 		if super::check_rates(&initial.grant.publish, &initial.grant.subscribe).is_err() {
 			return Err(moq_net::Error::Unauthorized);
 		}
 		initial.initial = true;
+		let requests = handle.requests()?;
 		let this = Self {
 			handle,
 			requests,
@@ -461,7 +461,7 @@ mod tests {
 		grant
 	}
 
-	async fn sessions(lease: super::super::Lease) -> (moq_net::Session, tokio::task::JoinHandle<lease::Reason>) {
+	async fn transports() -> (qmux::Session, qmux::Session) {
 		let config = || {
 			let mut config = qmux::Config::new(qmux::Version::QMux01);
 			config.protocol = qmux::Protocol::Negotiate(
@@ -475,11 +475,15 @@ mod tests {
 		};
 		let stream = |io| qmux::transport::Stream::new(io, qmux::Version::QMux01, config().max_record_size);
 		let (client, server) = tokio::io::duplex(64 * 1024);
-		let (client, server) = tokio::try_join!(
+		tokio::try_join!(
 			qmux::Session::connect(stream(client), config()),
 			qmux::Session::accept(stream(server), config())
 		)
-		.unwrap();
+		.unwrap()
+	}
+
+	async fn sessions(lease: super::super::Lease) -> (moq_net::Session, tokio::task::JoinHandle<lease::Reason>) {
+		let (client, server) = transports().await;
 		let now = tokio::time::Instant::now().into_std();
 		let client = async {
 			let origin = moq_tokio::origin::spawn();
@@ -561,20 +565,48 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn a_cap_added_before_protocol_setup_is_refused() {
-		let (admitted, _) = admission(grant("a/**", 3000)).await;
-		let (client, supervising) = sessions(admitted).await;
 		let (producer, consumer) = lease::Producer::new(grant("a/**", 3000));
-		let mut lease = super::super::Lease::new("/room", consumer);
-		let mut capped = grant("a/**", 3000);
-		capped.publish.rate = Some(moq_auth::Rate::from_bps(8000).unwrap());
-		producer.update(capped);
-		assert!(matches!(
-			Refresh::new(&mut lease, client.auth(), None),
-			Err(moq_net::Error::Unauthorized)
-		));
-		client.abort(moq_net::Error::Cancel);
-		supervising.abort();
-		let _ = supervising.await;
+		let lease = super::super::Lease::new("/room", consumer);
+		let (client_transport, server) = transports().await;
+		let now = tokio::time::Instant::now().into_std();
+		let origin = moq_tokio::origin::spawn();
+		let client = moq_net::Client::new()
+			.with_versions("moq-lite-07-wip".parse::<moq_net::Version>().unwrap().into())
+			.with_publisher(origin.consume());
+		let connecting = async {
+			let (session, driver) = client
+				.connect(
+					now,
+					moq_tokio::transport::Session::new(client_transport, moq_net::transport::Binding::InBand),
+				)
+				.await
+				.unwrap();
+			(session, tokio::spawn(moq_net::time::run(driver)))
+		};
+		let refusing = async {
+			let request = moq_net::Server::new()
+				.with_versions("moq-lite-07-wip".parse::<moq_net::Version>().unwrap().into())
+				.with_subscriber(origin)
+				.accept_request(
+					now,
+					moq_tokio::transport::Session::new(server, moq_net::transport::Binding::InBand),
+				)
+				.await
+				.unwrap();
+			let mut capped = grant("a/**", 3000);
+			capped.publish.rate = Some(moq_auth::Rate::from_bps(8000).unwrap());
+			producer.update(capped);
+			let handle = request.auth();
+			assert!(matches!(
+				lease.preparing(handle.clone(), request.role()),
+				Err(moq_net::Error::Unauthorized)
+			));
+			handle.requests().expect("refused before taking the request queue");
+			request.close(moq_net::Error::Unauthorized);
+		};
+		let ((session, driver), ()) = tokio::join!(connecting, refusing);
+		assert!(driver.await.unwrap().to_string().contains("unauthorized"));
+		drop(session);
 	}
 
 	#[tokio::test(start_paused = true)]
