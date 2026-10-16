@@ -73,6 +73,8 @@ pub(crate) fn initial_max_request_id(window: u64, peer_client: bool) -> u64 {
 
 struct ControlState {
 	request_id_next: RequestId,
+	/// A legacy request header must finish before a later ID can be allocated.
+	request_id_sending: bool,
 	/// None means no flow control (draft17 removed MaxRequestId).
 	request_id_max: Option<RequestId>,
 	/// The peer's requests, flow controlled on drafts 14 to 16 only.
@@ -106,11 +108,21 @@ pub(super) struct Control {
 	state: kio::Shared<ControlState>,
 }
 
+/// The session must keep a committed legacy header alive until this hold ends.
+pub(super) struct RequestSend(Control);
+
+impl Drop for RequestSend {
+	fn drop(&mut self) {
+		self.0.state.lock().request_id_sending = false;
+	}
+}
+
 impl Control {
 	pub fn new(request_id_max: Option<RequestId>, client: bool) -> Self {
 		Self {
 			state: kio::Shared::new(ControlState {
 				request_id_next: if client { RequestId(0) } else { RequestId(1) },
+				request_id_sending: false,
 				request_id_max,
 				incoming: None,
 				// The peer takes the other parity: a client's IDs are even, a server's odd.
@@ -222,7 +234,15 @@ impl Control {
 		Poll::Ready(RequestId(incoming.max))
 	}
 
-	/// Allocate the next request_id, blocking until MAX_REQUEST_ID allows it.
+	/// Hold later allocations until an already allocated legacy header is sent.
+	pub fn sending(&self) -> RequestSend {
+		let mut state = self.state.lock();
+		debug_assert!(!state.request_id_sending);
+		state.request_id_sending = true;
+		RequestSend(self.clone())
+	}
+
+	/// Allocate the next request_id once credit and the committed header allow it.
 	///
 	/// `runtime` arms the give-up timer, so the wait cannot outlive the caller's
 	/// clock.
@@ -235,7 +255,11 @@ impl Control {
 					None => true,
 					Some(max) => state.request_id_next < max,
 				};
-				if allowed { Poll::Ready(()) } else { Poll::Pending }
+				if allowed && !state.request_id_sending {
+					Poll::Ready(())
+				} else {
+					Poll::Pending
+				}
 			});
 
 			if let Poll::Ready(mut state) = allowed {
