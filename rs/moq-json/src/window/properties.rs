@@ -12,8 +12,18 @@ use super::{ConsumerConfig, Decoder, Encoded, Encoder, Event, ProducerConfig};
 // Mirror the JS generator, including nulls and keys that are special to JS objects.
 fn value() -> BoxedStrategy<Value> {
 	let key = prop_oneof![
-		proptest::sample::select(vec!["a", "b", "c", "", "__proto__", "constructor", "prototype", "\0", "雪"])
-			.prop_map(str::to_owned),
+		proptest::sample::select(vec![
+			"a",
+			"b",
+			"c",
+			"",
+			"__proto__",
+			"constructor",
+			"prototype",
+			"\0",
+			"雪"
+		])
+		.prop_map(str::to_owned),
 		"[ -~]{0,8}",
 	];
 	let leaf = prop_oneof![
@@ -81,30 +91,39 @@ fn check(config: ProducerConfig, steps: Vec<Step>, join: usize) -> TestCaseResul
 			encoder.reset();
 		}
 		{
-		let frame = match step.edit {
-			Edit::Push(value) => {
-				let frame = encoder.push(&value).unwrap();
-				records.push(value);
-				Some(frame)
+			let frame = match step.edit {
+				Edit::Push(value) => {
+					let frame = encoder.push(&value).unwrap();
+					records.push(value);
+					Some(frame)
+				}
+				Edit::Pop(count) => {
+					let frame = encoder.pop(count).unwrap();
+					let count = (count as usize).min(records.len());
+					prop_assert_eq!(frame.is_some(), count > 0);
+					offset += count as u64;
+					records.drain(..count);
+					frame
+				}
+			};
+			if let Some(frame) = frame {
+				if frame.keyframe {
+					groups.push(Group {
+						frames: Vec::new(),
+						drop: step.drop,
+					});
+				}
+				groups
+					.last_mut()
+					.expect("first frame must open a group")
+					.frames
+					.push(Frame {
+						encoded: (*frame).clone(),
+						offset,
+						records: records.clone(),
+					});
+				frame.commit();
 			}
-			Edit::Pop(count) => {
-				let frame = encoder.pop(count).unwrap();
-				let count = (count as usize).min(records.len());
-				offset += count as u64;
-				records.drain(..count);
-				frame
-			}
-		};
-		let Some(frame) = frame else { continue };
-		if frame.keyframe {
-			groups.push(Group { frames: Vec::new(), drop: step.drop });
-		}
-		groups.last_mut().expect("first frame must open a group").frames.push(Frame {
-			encoded: (*frame).clone(),
-			offset,
-			records: records.clone(),
-		});
-		frame.commit();
 		}
 		prop_assert_eq!(encoder.range(), offset..offset + records.len() as u64);
 	}
@@ -128,10 +147,14 @@ fn check(config: ProducerConfig, steps: Vec<Step>, join: usize) -> TestCaseResul
 			for (f, frame) in encoded.frames.iter().enumerate() {
 				let floor = *floor.get_or_insert(frame.offset);
 				let mut expected: Vec<_> = ranges(timeline.iter().copied().filter(|index| *index < frame.offset))
-					.into_iter().map(Event::Pop).collect();
+					.into_iter()
+					.map(Event::Pop)
+					.collect();
 				let end = frame.offset + frame.records.len() as u64;
 				let start = if f == 0 {
-					frame.offset.max(end.saturating_sub(config.checkpoint_records.unwrap_or(frame.records.len()) as u64))
+					frame
+						.offset
+						.max(end.saturating_sub(config.checkpoint_records.unwrap_or(frame.records.len()) as u64))
 				} else {
 					frame.offset
 				};
@@ -145,7 +168,10 @@ fn check(config: ProducerConfig, steps: Vec<Step>, join: usize) -> TestCaseResul
 				for (i, value) in frame.records.iter().enumerate() {
 					let index = frame.offset + i as u64;
 					if index >= start && notified.insert(index) {
-						expected.push(Event::Push { index, value: value.clone() });
+						expected.push(Event::Push {
+							index,
+							value: value.clone(),
+						});
 					}
 				}
 				group.decode(&frame.encoded.payload).unwrap();
@@ -158,10 +184,14 @@ fn check(config: ProducerConfig, steps: Vec<Step>, join: usize) -> TestCaseResul
 							contents.insert(index, value);
 						}
 						Event::Pop(range) => {
-							for index in range { contents.remove(&index); }
+							for index in range {
+								contents.remove(&index);
+							}
 						}
 						Event::Skip(range) => {
-							for index in range { prop_assert!(!received.contains(&index), "skipped received {}", index); }
+							for index in range {
+								prop_assert!(!received.contains(&index), "skipped received {}", index);
+							}
 						}
 					}
 				}
@@ -172,7 +202,10 @@ fn check(config: ProducerConfig, steps: Vec<Step>, join: usize) -> TestCaseResul
 					prop_assert_eq!(value, &frame.records[(*index - frame.offset) as usize]);
 				}
 				if mode == "following" {
-					prop_assert_eq!(contents.values().collect::<Vec<_>>(), frame.records.iter().collect::<Vec<_>>());
+					prop_assert_eq!(
+						contents.values().collect::<Vec<_>>(),
+						frame.records.iter().collect::<Vec<_>>()
+					);
 				}
 			}
 		}
@@ -183,26 +216,52 @@ fn check(config: ProducerConfig, steps: Vec<Step>, join: usize) -> TestCaseResul
 #[test]
 fn window_codec_property_matches_every_readers_logical_window() {
 	let setting = |name: &str, fallback: u32, min: u32| {
-		let value = std::env::var(name).map_or(fallback, |value| value.parse::<u32>().expect("integer property setting"));
-		assert!((min..=i32::MAX as u32).contains(&value), "{name} outside supported range");
+		let value = std::env::var(name).map_or(fallback, |value| {
+			value.parse::<u32>().expect("integer property setting")
+		});
+		assert!(
+			(min..=i32::MAX as u32).contains(&value),
+			"{name} outside supported range"
+		);
 		value
 	};
 	let seed = setting("MOQ_JSON_SEED", 0x6d6f71, 0);
 	let cases = setting("MOQ_JSON_CASES", 256, 1);
 	eprintln!("MOQ_JSON_SEED={seed} MOQ_JSON_CASES={cases}");
 	let mut runner = TestRunner::new(Config {
-		cases, rng_seed: RngSeed::Fixed(u64::from(seed)), failure_persistence: None, ..Default::default()
+		cases,
+		rng_seed: RngSeed::Fixed(u64::from(seed)),
+		failure_persistence: None,
+		..Default::default()
 	});
 	let steps = proptest::collection::vec(
-		(prop_oneof![value().prop_map(Edit::Push), (0u64..=8).prop_map(Edit::Pop)], 0u8..16, any::<bool>())
-			.prop_map(|(edit, reset, drop)| Step { edit, reset: reset == 0, drop }),
+		(
+			prop_oneof![value().prop_map(Edit::Push), (0u64..=8).prop_map(Edit::Pop)],
+			0u8..16,
+			any::<bool>(),
+		)
+			.prop_map(|(edit, reset, drop)| Step {
+				edit,
+				reset: reset == 0,
+				drop,
+			}),
 		1..65,
 	);
 	let sequence = (
-		(proptest::sample::select(vec![0, 1, 2, 8, 100]), any::<bool>(), proptest::option::of(1usize..=8))
-			.prop_map(|(op_ratio, compression, checkpoint_records)| ProducerConfig { op_ratio, compression, checkpoint_records }),
+		(
+			proptest::sample::select(vec![0, 1, 2, 8, 100]),
+			any::<bool>(),
+			proptest::option::of(1usize..=8),
+		)
+			.prop_map(|(op_ratio, compression, checkpoint_records)| ProducerConfig {
+				op_ratio,
+				compression,
+				checkpoint_records,
+			}),
 		steps,
 		0usize..64,
 	);
-	runner.run(&sequence, |(config, steps, join)| check(config, steps, join)).unwrap();
+	runner
+		.run(&sequence, |(config, steps, join)| check(config, steps, join))
+		.unwrap();
 }

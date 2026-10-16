@@ -63,10 +63,15 @@ function check(config: Config, steps: Step[], join: number): void {
 		} else {
 			frame = encoder.pop(step.edit.pop);
 			const count = Math.min(step.edit.pop, records.length);
+			expect(frame !== undefined).toBe(count > 0);
 			offset += count;
 			records = records.slice(count);
 		}
-		if (!frame) continue;
+		if (!frame) {
+			expect(encoder.offset).toBe(offset);
+			expect(encoder.end).toBe(offset + records.length);
+			continue;
+		}
 		if (frame.keyframe) groups.push({ frames: [], drop: step.drop });
 		const group = groups.at(-1);
 		if (!group) throw new Error("first frame must open a group");
