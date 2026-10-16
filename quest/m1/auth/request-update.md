@@ -66,9 +66,9 @@ because it has a consumer now. The decisions are recorded in the
   section, and in `doc/concept/standard.md`, which describes only incoming request
   tokens; the moq-transport path can land before the lite one.
 
-Public API: a new optional auth on routes and subscriptions in Rust and JS.
-Wire: none beyond existing REQUEST_UPDATE, SUBSCRIBE_UPDATE and ANNOUNCE_UPDATE,
-with lite's auth field from Requests name their auth.
+Public API: a new optional auth on routes in Rust and JS.
+Wire: none beyond the existing AUTHORIZATION TOKEN on PUBLISH_NAMESPACE and its
+REQUEST_UPDATE; lite's ANNOUNCE_UPDATE waits on Requests name their auth.
 
 ## Related
 

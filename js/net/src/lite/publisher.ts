@@ -479,7 +479,12 @@ export class Publisher {
 
 		// What the peer decodes for a route: pre-lite-06 wires carry no cost, so a re-price
 		// there must not restart.
-		const onWire = (route: Route): Route => (hasRouteCost(this.version) ? route : { ...route, cost: Cost.zero });
+		// moq-lite carries no per-request auth, so a swap alone sends nothing.
+		const onWire = (route: Route): Route => ({
+			...route,
+			cost: hasRouteCost(this.version) ? route.cost : Cost.zero,
+			auth: undefined,
+		});
 
 		const announce = async (suffix: Path.Valid, route: Route) => {
 			console.debug(`announce: broadcast=${suffix} active=true epoch=${route.epoch}`);

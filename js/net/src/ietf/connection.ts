@@ -191,6 +191,7 @@ export class Connection implements Established {
 		const session = this.#session;
 		this.#auth = new AuthSession({
 			wire: auth && authSupported(version) ? new IetfAuthWire(session) : undefined,
+			requests: true,
 			peerGrant: {
 				publish: new Path.Patterns([Path.Pattern.all()]),
 				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
@@ -210,6 +211,7 @@ export class Connection implements Established {
 			hidden,
 			cluster,
 			grant: this.#auth.grant,
+			auth: this.#auth,
 			ready: this.#auth.setupAnswered(),
 		});
 		this.#solicit = solicit;

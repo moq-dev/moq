@@ -764,7 +764,7 @@ impl Handle {
 	}
 }
 
-/// One credential this side presented, returned by [`Handle::add`].
+/// One credential this side presented, returned by [`Handle`]'s `add`.
 ///
 /// Cheap to clone, and every clone names the same credential. It stays presented
 /// until the last clone drops, which closes its stream and removes its grant from

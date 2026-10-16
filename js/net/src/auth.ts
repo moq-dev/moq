@@ -5,9 +5,10 @@
  * sides negotiate MoQ Auth, presents the credential its connection already carried (the
  * URL, or nothing) right after setup, and learns the {@link Grant} it earned. Older
  * versions, and peers that do not negotiate it, carry no AUTH exchange: the grant stays
- * undefined and {@link Auth.add} rejects with {@link Unsupported}. {@link Auth.grant} is
- * the union of every token this side presented, and {@link Auth.add} presents another
- * without reconnecting. Mirrors the Rust `moq_net::auth`.
+ * undefined. There {@link Auth.add} rejects with {@link Unsupported} on moq-lite, and on
+ * moq-transport keeps the token, with no grant, for the announcements whose route names it.
+ * {@link Auth.grant} is the union of every token this side presented, and {@link Auth.add}
+ * presents another without reconnecting. Mirrors the Rust `moq_net::auth`.
  *
  * @module
  */
@@ -101,7 +102,8 @@ export interface Auth {
 	/**
 	 * Present another token, resolving once the peer answers it. Rejects with
 	 * {@link Unsupported} when the session or the peer takes no tokens in band, or with the
-	 * peer's refusal as an `Error.Session`.
+	 * peer's refusal as an `Error.Session`. On moq-transport without AUTH it resolves at
+	 * once with no grant: only a request whose route names it carries it.
 	 */
 	add(token: string | Uint8Array): Promise<Token>;
 

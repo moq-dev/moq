@@ -367,10 +367,21 @@ test("lite-07 carries literal and wildcard grants exactly", async () => {
 	server.abort();
 });
 
-test.each([Lite.ALPN_05, Lite.ALPN_06, Ietf.ALPN.DRAFT_16])("%s has no grant", async (protocol) => {
+// moq-transport keeps the token for the requests that name it, with no grant of its own.
+test.each([
+	[Lite.ALPN_05, false],
+	[Lite.ALPN_06, false],
+	[Ietf.ALPN.DRAFT_16, true],
+])("%s has no grant, keeping a token for requests: %p", async (protocol, kept) => {
 	const { client, server } = await connect({ publish: new OriginProducer(), protocol });
 	expect(client.auth.grant.peek()).toBeUndefined();
-	await expect(client.auth.add("token")).rejects.toBeInstanceOf(Unsupported);
+	if (kept) {
+		const token = await client.auth.add("token");
+		expect(token.grant.peek()).toBeUndefined();
+		expect(client.auth.grant.peek()).toBeUndefined();
+	} else {
+		await expect(client.auth.add("token")).rejects.toBeInstanceOf(Unsupported);
+	}
 	client.abort();
 	server.abort();
 });
