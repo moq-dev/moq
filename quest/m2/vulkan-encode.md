@@ -75,5 +75,5 @@ Public API: a new encoder backend and feature. Wire: none.
 
 ## Related
 
-- [VA-API encodes an external Vulkan image](/quest/m1/vaapi-vulkan-import.md) - the Intel half of the same proof
+- [VA-API encodes an external Vulkan image](/quest/m2/vaapi-vulkan-import.md) - the Intel half of the same proof
 - [Intra-refresh GOPs](/quest/m2/intra-refresh/README.md) - import and playback of intra-refresh video, which this encoder does not produce

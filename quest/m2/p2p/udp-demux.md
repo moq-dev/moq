@@ -10,9 +10,7 @@ splits a native P2P session's socket into ICE's STUN and QUIC.
 
 ## Plan
 
-Decided 2026-10-13: moved from the m2 [one-port](/quest/m2/one-port/README.md)
-line into m1 whole, with shard steering,
-so [native P2P pairs](/quest/m1/p2p/native-quic.md) share one demux with the
+Decided 2026-10-15: deferred to m2 with P2P as a whole, so [native P2P pairs](/quest/m2/p2p/native-quic.md) share one demux with the
 relay rather than a P2P-only classifier (maintainer's choice over splitting
 the classifier out). A native P2P session's socket uses the same classifier:
 STUN goes to its ICE agent and QUIC to its endpoint; it has no flow table

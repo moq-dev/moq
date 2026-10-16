@@ -25,7 +25,7 @@ archive, and transcode) refuse a shared epoch.
 
 Decided 2026-10-13 by the maintainer: every importer of an epoch stays live
 and derives one coordinate from the epoch and its source alone
-([Epoch anchor](/quest/m1/epoch-anchor.md)), superseding the same day's plan
+([Epoch anchor](/quest/m2/epoch-anchor.md)), superseding the same day's plan
 where later importers adopted the first one's. This quest numbers groups on
 that coordinate and proves the pair end to end. A raw PTS or PCR value alone
 does not supply it, and arrival time chooses only the era. Considered
@@ -75,8 +75,8 @@ stopping and restarting; repeat it with `--passthrough`.
 
 ## Required
 
-- [Epoch anchor](/quest/m1/epoch-anchor.md) - every importer derives one catalog clock and timestamp era from the epoch
-- [Raw TS cuts on the epoch timeline](/quest/m1/ts-passthrough-epoch-cuts.md) - passthrough groups start where every instance cuts
+- [Epoch anchor](/quest/m2/epoch-anchor.md) - every importer derives one catalog clock and timestamp era from the epoch
+- [Raw TS cuts on the epoch timeline](/quest/m2/ts-passthrough-epoch-cuts.md) - passthrough groups start where every instance cuts
 
 ## Related
 

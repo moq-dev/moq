@@ -4,7 +4,7 @@
 
 `moq-cli --p2p` publishes a roster entry on its relay session, advertises how
 it can be reached, dials other native peers over
-[ICE and QUIC](/quest/m1/p2p/native-quic.md), and accepts browsers over data channels as a transit hop between
+[ICE and QUIC](/quest/m2/p2p/native-quic.md), and accepts browsers over data channels as a transit hop between
 them and the relay. Its policy knobs mirror `@moq/p2p`.
 
 ## Plan
@@ -19,7 +19,7 @@ surface and per-connection priority/cost mirroring the application API; settle
 its concrete CLI shape before coding and update all invocations against --help.
 
 The roster entry mirrors the `info.json` schema from
-[signaling](/quest/m1/p2p/signal.md): the listener's LAN addresses as
+[signaling](/quest/m2/p2p/signal.md): the listener's LAN addresses as
 WebTransport URLs, ordered the way `mdns::Peer::urls` orders them, with the
 listener's certificate fingerprint. Use signaling's ordered-list shape and
 dialing order, confirmed in the quest audit, so multi-interface listeners
@@ -41,6 +41,6 @@ Docs: a "P2P" section in `doc/bin/cli.md` beside the LAN cluster one.
 
 ## Required
 
-- [Native data channel transport](/quest/m1/p2p/webrtc.md)
-- [Native pairs over ICE and QUIC](/quest/m1/p2p/native-quic.md) - the native-to-native path
-- [Signaling and policy](/quest/m1/p2p/signal.md) - the roster and offer schema this mirrors
+- [Native data channel transport](/quest/m2/p2p/webrtc.md)
+- [Native pairs over ICE and QUIC](/quest/m2/p2p/native-quic.md) - the native-to-native path
+- [Signaling and policy](/quest/m2/p2p/signal.md) - the roster and offer schema this mirrors

@@ -7,8 +7,8 @@ whether the app reads it, drops the stream unread, or it arrives after
 STOP_SENDING, so a long-lived session never stalls on MAX_DATA. `close()`
 delivers its APPLICATION_CLOSE frame before the transport drops, so a TCP or
 WebSocket peer sees the close code whenever the transport stays writable
-within the close bound. Both hold on the 0.5 line that
-`release` pins and the 0.6 line `main` uses.
+within the close bound. This quest updates the 0.6 line `main` uses; the
+0.5 release-line backport is independent.
 
 ## Plan
 
@@ -43,10 +43,10 @@ targets `qmux-v0.5.x`):
   delivering past its initial window, and a peer reads the close code after a
   close issued mid-write.
 
-Remaining here, once both ship: bump `main` to that 0.6.x and backport
-`release`'s pin to that 0.5.x. `release` stays on 0.5: 0.6 needs web-transport-trait 0.5, a
-breaking change. Sized XS (2026-10-08), since the fixes live upstream and only
-the pin bumps remain here.
+Remaining here: bump `main` once the patched 0.6.x ships. The independent
+[release backport](/quest/m0/qmux-credit-backport.md) stays on 0.5 because
+0.6 needs web-transport-trait 0.5, a breaking change. The old-line publication
+is not a prerequisite of m1. Sized XS: only the pin bump remains here.
 
 Why m0: the WebSocket fallback, moq.pro's Voice, and the edge-to-core
 `tls://` links (#4816) that moq.pro's cluster sessions move to all run on
@@ -56,7 +56,7 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [web-transport releases the fixes](/quest/m0/qmux-credit-upstream.md) - #412 and #413 merge and ship as patched 0.6.x and 0.5.x
+- [web-transport releases the fixes](/quest/m0/qmux-credit-upstream.md) - #412 merges and ships as a patched 0.6.x
 
 ## Related
 

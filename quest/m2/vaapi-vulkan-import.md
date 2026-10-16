@@ -7,7 +7,7 @@ DMA-BUF with a DRM format modifier, from a producer that synchronizes
 explicitly through a timeline, encodes through VA-API on Intel (iHD) without a
 CPU round trip. An ignored hardware test proves it on an Arrow Lake iGPU, and
 `Kind::Auto` picks VA-API for a surface on an Intel device, through the same
-seam as [Vulkan encode](/quest/m1/vulkan-encode.md): `encode::Config::input`
+seam as [Vulkan encode](/quest/m2/vulkan-encode.md): `encode::Config::input`
 and a VA-API candidate with `vulkan: true` in
 `rs/moq-video/src/encode/backend/mod.rs`.
 
@@ -69,7 +69,7 @@ Public API: none; the surface landed in #4975. Wire: none.
 
 ## Related
 
-- [Vulkan Video encode on AMD](/quest/m1/vulkan-encode.md) - the AMD half of the same proof
+- [Vulkan Video encode on AMD](/quest/m2/vulkan-encode.md) - the AMD half of the same proof
 - [VAAPI encode and decode](/quest/m2/video-vaapi.md) - H.265 encode on the same backend
 - [GPU capacity and health](/quest/m2/gpu-health.md) - reports per device keyed by the same render node `dev_t`
 - [Linux OBS GPU input](/quest/m3/obs-linux-gpu.md) - a DMA-BUF producer that needs the same explicit sync

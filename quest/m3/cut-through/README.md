@@ -75,5 +75,5 @@ stats field, which its quest documents inline.
 
 ## Related
 
-- [QoS](/quest/m1/qos/README.md) - the loss-delay counter follows its per-broadcast ingress row conventions
+- [QoS](/quest/m2/qos/README.md) - the loss-delay counter follows its per-broadcast ingress row conventions
 - [Frame slots are cached for free](https://github.com/moq-dev/moq/pull/5239) - changes how the cache charges the in-flight frames a cut-through build would hold
