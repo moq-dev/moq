@@ -1798,3 +1798,157 @@ unsafe fn drop_waker(data: *const ()) {
     // SAFETY: pointer always comes from `Arc::into_raw()` (see `raw_waker()`)
     drop(unsafe { Arc::<WakeCounter>::from_raw(data as *const WakeCounter) });
 }
+
+/// A dial to an address the host cannot route fails at once with `NO_VIABLE_PATH`, rather than at
+/// the handshake timeout, so a dial race can move on to the next address.
+///
+/// Linux refuses a v4-mapped destination on an IPv6-only socket with `ENETUNREACH`, which makes an
+/// unroutable family without touching the host's routes.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn unroutable_dial_fails_with_no_viable_path() {
+    let _guard = subscribe();
+
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV6,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )
+    .unwrap();
+    socket.set_only_v6(true).unwrap();
+    socket
+        .bind(&SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0).into())
+        .unwrap();
+    let client = Endpoint::new(EndpointConfig::default(), None, socket.into()).unwrap();
+
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(cert.cert.into()).unwrap();
+    let client_config = ClientConfig::with_root_certificates(Arc::new(roots)).unwrap();
+
+    let unroutable = SocketAddr::new(IpAddr::V6(Ipv4Addr::LOCALHOST.to_ipv6_mapped()), 1);
+    let err = client
+        .connect_with(client_config, unroutable, "localhost")
+        .unwrap()
+        .await
+        .expect_err("nothing can be sent to an unroutable address");
+
+    // A swallowed send error waits out the handshake instead and reports `TimedOut`.
+    let crate::quic::driver::ConnectionError::TransportError(err) = err else {
+        panic!("expected a transport error, got {err:?}");
+    };
+    assert_eq!(err.code, moq_quic::TransportErrorCode::NO_VIABLE_PATH);
+}
+
+/// Once established, a connection treats an unreachable destination as loss: a route that drops
+/// for a moment, as when a client switches networks, must not end the connection.
+#[tokio::test]
+async fn unreachable_sends_are_loss_once_established() {
+    let _guard = subscribe();
+
+    let factory = EndpointFactory::new();
+    let server = factory.endpoint();
+    let outage = Arc::new(Outage::default());
+    let client = Endpoint::new_with_abstract_socket(
+        EndpointConfig::default(),
+        None,
+        Box::new(UnreachableSocket {
+            inner: localhost_socket(),
+            outage: outage.clone(),
+        }),
+    )
+    .unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(factory.cert.cert.der().clone()).unwrap();
+    client
+        .set_default_client_config(ClientConfig::with_root_certificates(Arc::new(roots)).unwrap());
+
+    let (client_conn, server_conn) = join!(
+        async {
+            client
+                .connect(server.local_addr().unwrap(), "localhost")
+                .unwrap()
+                .await
+        },
+        async { server.accept().await.unwrap().await }
+    );
+    let client_conn = client_conn.unwrap();
+    let server_conn = server_conn.unwrap();
+
+    outage.active.store(true, Ordering::SeqCst);
+    let mut send = client_conn.open_uni().await.unwrap();
+    send.write_all(b"hello").await.unwrap();
+    send.finish().unwrap();
+    outage.dropped.notified().await;
+    outage.active.store(false, Ordering::SeqCst);
+
+    // The stream arrives on a retransmission once the route is back.
+    let received = async {
+        let mut recv = server_conn.accept_uni().await.unwrap();
+        recv.read_to_end(usize::MAX).await.unwrap()
+    };
+    tokio::select! {
+        received = received => assert_eq!(received, b"hello"),
+        reason = client_conn.closed() => panic!("the outage closed the connection: {reason}"),
+    }
+}
+
+/// Whether [`UnreachableSocket`] is refusing sends, and a signal once it has refused one.
+#[derive(Debug, Default)]
+struct Outage {
+    active: AtomicBool,
+    dropped: tokio::sync::Notify,
+}
+
+/// Wraps a socket so that a test can make every send fail as though the peer had no route.
+#[derive(Debug)]
+struct UnreachableSocket {
+    inner: Box<dyn AsyncUdpSocket>,
+    outage: Arc<Outage>,
+}
+
+impl AsyncUdpSocket for UnreachableSocket {
+    fn create_sender(&self) -> Pin<Box<dyn UdpSender>> {
+        Box::pin(UnreachableSender {
+            inner: self.inner.create_sender(),
+            outage: self.outage.clone(),
+        })
+    }
+
+    fn poll_recv(
+        &mut self,
+        cx: &mut Context<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+        meta: &mut [RecvMeta],
+    ) -> Poll<io::Result<usize>> {
+        self.inner.poll_recv(cx, bufs, meta)
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.inner.local_addr()
+    }
+}
+
+#[derive(Debug)]
+struct UnreachableSender {
+    inner: Pin<Box<dyn UdpSender>>,
+    outage: Arc<Outage>,
+}
+
+impl UdpSender for UnreachableSender {
+    fn poll_send(
+        mut self: Pin<&mut Self>,
+        transmit: &moq_sock::udp::Transmit<'_>,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.outage.active.load(Ordering::SeqCst) {
+            self.outage.dropped.notify_one();
+            return Poll::Ready(Err(io::ErrorKind::NetworkUnreachable.into()));
+        }
+        self.inner.as_mut().poll_send(transmit, cx)
+    }
+
+    fn max_transmit_segments(&self) -> usize {
+        self.inner.max_transmit_segments()
+    }
+}

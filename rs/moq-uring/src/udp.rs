@@ -342,6 +342,10 @@ struct Rx {
 	starved: bool,
 	/// Terminal failure, surfaced by `poll_recv` once the queue drains.
 	error: Option<i32>,
+	/// Destinations a send found no route to, each with its errno, for the
+	/// demux task to hand to the connections dialing them. Here rather than
+	/// on the send side because the demux task is what parks on `waiters`.
+	unreachable: Vec<(SocketAddr, i32)>,
 }
 
 /// Send-side state.
@@ -472,6 +476,16 @@ impl SockShared {
 	fn fail_rx(&self, code: i32) {
 		let mut rx = self.rx.borrow_mut();
 		rx.error.get_or_insert(code);
+		rx.waiters.wake();
+	}
+
+	/// A send to `to` found no route. Unlike other send failures this says
+	/// nothing about the socket, so only the connections dialing `to` hear it.
+	fn unreachable(&self, to: SocketAddr, code: i32) {
+		let mut rx = self.rx.borrow_mut();
+		if !rx.unreachable.iter().any(|(addr, _)| *addr == to) {
+			rx.unreachable.push((to, code));
+		}
 		rx.waiters.wake();
 	}
 
@@ -625,6 +639,7 @@ impl Socket {
 				armed: None,
 				starved: false,
 				error: None,
+				unreachable: Vec::new(),
 			}),
 			tx: RefCell::new(tx),
 		});
@@ -679,6 +694,16 @@ impl Socket {
 		}
 		waiter.register(&mut rx.waiters);
 		Poll::Pending
+	}
+
+	/// A destination a send found no route to, and why, once per report.
+	///
+	/// Reported through the receive waiters, so whoever parks in
+	/// [`poll_recv`](Self::poll_recv) is woken to collect it.
+	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
+	pub(crate) fn take_unreachable(&self) -> Option<(SocketAddr, io::Error)> {
+		let (to, code) = self.shared.rx.borrow_mut().unreachable.pop()?;
+		Some((to, io::Error::from_raw_os_error(code)))
 	}
 
 	/// Await [`poll_recv`](Self::poll_recv).
@@ -978,6 +1003,7 @@ pub(crate) struct SendOp {
 	sock: Rc<SockShared>,
 	id: u16,
 	expect: usize,
+	to: SocketAddr,
 	/// A GSO send's payload and destination, to resend it unsegmented if the
 	/// kernel rejects the train.
 	train: Option<(NonNull<u8>, SendOne)>,
@@ -1071,6 +1097,7 @@ fn send_one(
 		sock: staging.sock.clone(),
 		id: staging.id,
 		expect: len,
+		to,
 		train: segment.and(NonNull::new(base)).map(|base| (base, *one)),
 	}));
 	let entry = opcode::SendMsg::new(types::Fd(staging.sock.io.as_raw_fd()), hdr_ptr)
@@ -1354,6 +1381,10 @@ pub(crate) fn on_send(op: SendOp, cqe: Cqe) {
 			}
 			return;
 		}
+		if moq_sock::udp::is_unreachable_err(&io::Error::from_raw_os_error(code)) {
+			op.sock.unreachable(op.to, code);
+			return;
+		}
 		if code != libc::ECANCELED {
 			op.sock.fail_tx(code);
 		}
@@ -1582,6 +1613,7 @@ mod tests {
 			armed: None,
 			starved: false,
 			error: None,
+			unreachable: Vec::new(),
 		}
 	}
 

@@ -228,6 +228,10 @@ impl Inner {
 		// Handle drops and connection teardowns re-check the exit condition.
 		waiter.register(&mut self.task_waiters.borrow_mut());
 
+		while let Some((addr, err)) = self.socket.take_unreachable() {
+			self.unreachable(addr, &err);
+		}
+
 		loop {
 			if self.handles.get() == 0 && self.conns.borrow().is_empty() {
 				return Poll::Ready(());
@@ -443,6 +447,26 @@ impl Inner {
 		self.conns.borrow_mut().remove(&key);
 		// The demux task may be waiting on us to exit.
 		self.task_waiters.borrow_mut().wake();
+	}
+
+	/// A send to `addr` found no route, so a handshake dialing it can never
+	/// finish: fail it now rather than at the handshake timeout. An established
+	/// connection rides it out as loss, since a route that drops for a moment
+	/// (a client switching networks) comes back.
+	fn unreachable(&self, addr: SocketAddr, err: &std::io::Error) {
+		let conns: Vec<connection::Shared> = self
+			.conns
+			.borrow()
+			.values()
+			.filter(|shared| {
+				let conn = shared.conn.borrow();
+				conn.is_handshaking() && conn.remote_address() == addr
+			})
+			.cloned()
+			.collect();
+		for conn in conns {
+			conn.unreachable(err);
+		}
 	}
 
 	/// The socket died: everything on it fails with `err`.
