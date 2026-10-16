@@ -9,7 +9,7 @@
 //! shared with the rest of the endpoint implementation.
 
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -50,6 +50,9 @@ pub(crate) struct Inner {
 	/// owns connection-id routing (and its hasher choices) itself, so nothing
 	/// a peer picks reaches this map.
 	conns: RefCell<FxHashMap<ConnectionHandle, connection::Shared>>,
+	/// Every live connection by the peer it was launched toward, so a send
+	/// that finds no route only visits the connections dialing that peer.
+	peers: RefCell<BTreeSet<(SocketAddr, ConnectionHandle)>>,
 	/// Incoming handshakes in flight. Together with the accept queue this is
 	/// bounded by [`Config::backlog`].
 	pending: Cell<usize>,
@@ -88,6 +91,7 @@ impl Endpoint {
 			return Err(Error::Io(Shared::gone_error().to_string()));
 		};
 		let local = socket.local_addr().map_err(|err| Error::Io(err.to_string()))?;
+		socket.route_unreachable();
 		let server = match &config.server {
 			Some(server) => {
 				let mut server = super::server_config(server)?;
@@ -111,6 +115,7 @@ impl Endpoint {
 			endpoint: RefCell::new(endpoint),
 			accepting: RefCell::new(accepting),
 			conns: RefCell::new(FxHashMap::default()),
+			peers: RefCell::new(BTreeSet::new()),
 			pending: Cell::new(0),
 			backlog: config.backlog,
 			handshake: config.handshake,
@@ -227,6 +232,10 @@ impl Inner {
 	fn poll_run(self: &Rc<Self>, waiter: &kio::Waiter) -> Poll<()> {
 		// Handle drops and connection teardowns re-check the exit condition.
 		waiter.register(&mut self.task_waiters.borrow_mut());
+
+		while let Some((addr, err)) = self.socket.take_unreachable() {
+			self.unreachable(addr, &err);
+		}
 
 		loop {
 			if self.handles.get() == 0 && self.conns.borrow().is_empty() {
@@ -417,13 +426,15 @@ impl Inner {
 
 	/// Register `conn`, spawn its driver, and arrange its teardown.
 	fn launch(self: &Rc<Self>, key: ConnectionHandle, conn: moq_quic::Connection) -> connection::Shared {
+		let peer = conn.remote_address();
 		let (shared, driver) = connection::launch(&self.owner, self.socket.clone(), Rc::downgrade(self), key, conn);
 		self.conns.borrow_mut().insert(key, shared.clone());
+		self.peers.borrow_mut().insert((peer, key));
 
 		let inner = self.clone();
 		self.owner.spawn(async move {
 			driver.await;
-			inner.release(key);
+			inner.release(key, peer);
 		});
 		shared
 	}
@@ -439,10 +450,31 @@ impl Inner {
 	}
 
 	/// A connection's driver ended; forget it.
-	fn release(&self, key: ConnectionHandle) {
+	fn release(&self, key: ConnectionHandle, peer: SocketAddr) {
 		self.conns.borrow_mut().remove(&key);
+		self.peers.borrow_mut().remove(&(peer, key));
 		// The demux task may be waiting on us to exit.
 		self.task_waiters.borrow_mut().wake();
+	}
+
+	/// A send to `addr` found no route, so a handshake dialing it can never
+	/// finish: fail it now rather than at the handshake timeout. An established
+	/// connection rides it out as loss, since a route that drops for a moment
+	/// (a client switching networks) comes back.
+	fn unreachable(&self, addr: SocketAddr, err: &std::io::Error) {
+		let conns: Vec<connection::Shared> = {
+			let all = self.conns.borrow();
+			self.peers
+				.borrow()
+				.range((addr, ConnectionHandle(0))..=(addr, ConnectionHandle(usize::MAX)))
+				.filter_map(|(_, key)| all.get(key))
+				.filter(|shared| shared.conn.borrow().is_handshaking())
+				.cloned()
+				.collect()
+		};
+		for conn in conns {
+			conn.unreachable(err);
+		}
 	}
 
 	/// The socket died: everything on it fails with `err`.

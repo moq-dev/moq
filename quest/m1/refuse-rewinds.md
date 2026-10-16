@@ -136,5 +136,5 @@ code 0x39 broadens.
 
 - [#5446](https://github.com/moq-dev/moq/pull/5446) - where the maintainer decided rewinds are never supported
 - [JS track handover](/quest/m1/js-group-handover.md) - mirrors Rust's resume contract, which relies on starts never falling
-- [Same-epoch importers](/quest/m1/hop-aligned-import.md) - importers already refuse a rewind at the container layer
-- [Epoch anchor](/quest/m1/epoch-anchor.md) - a rewind stays fatal to an importer, which restarts under a successor epoch
+- [Same-epoch importers](/quest/m2/hop-aligned-import.md) - importers already refuse a rewind at the container layer
+- [Epoch anchor](/quest/m2/epoch-anchor.md) - a rewind stays fatal to an importer, which restarts under a successor epoch

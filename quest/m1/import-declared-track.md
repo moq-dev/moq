@@ -47,5 +47,4 @@ Public API: none expected. Wire: none.
 
 ## Related
 
-- [No made-up Dropped](/quest/m1/dropped-internal.md) - covers the same imports' failure path, which drops its catalog instead of aborting it with the cause
-- [Same-epoch importers](/quest/m1/hop-aligned-import.md) - same-epoch importers publish identical tracks
+- [Same-epoch importers](/quest/m2/hop-aligned-import.md) - same-epoch importers publish identical tracks

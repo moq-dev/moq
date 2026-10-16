@@ -19,12 +19,12 @@ landed on main; the line may still reshape both.
 
 ### Compatibility
 
-Decided (2026-09-28): the line may break the hang `archive` catalog entry and
-the recording format in place on `main`, without a version bump
-(for example the track-timeline rework in #4280). No archives exist
-yet, so nothing recorded or published depends on either shape. This is an
-exception for this line only; once a release ships
-recordings, later format changes go through the entry's format version.
+The release branch and `moq-archive-v0.0.14` carry format v1; main carries
+v2. Published recordings therefore exist as a compatibility obligation, even
+without evidence of deployed archives. Preserve version recognition and
+explicit refusal of unsupported versions. Before reshaping v2, check whether
+it has published; a published format changes through a new version. The old
+blanket permission to break recordings in place no longer applies.
 
 ### Landed
 
@@ -134,7 +134,8 @@ portable layout and codecs:
 A recorded track's `segments/<n>` holds record `n` of its timeline; its
 timeline, named with a `.timeline.z` suffix, stores the window groups committed
 with record `n` under its own `segments/<n>`. `.info` is versioned JSON with
-the immutable priority and timescale. A segment object is a versioned binary
+the immutable priority and timescale, absent for an untimed track, whose
+frames store no timestamps and whose records carry no `pts` or `duration`. A segment object is a versioned binary
 envelope: a frame start, a group/frame table with timestamps and payload
 offsets, then the original payloads. One GET populates an LRU with the adjacent
 groups, while audio-only or low-rendition playback never downloads unrelated
@@ -167,7 +168,6 @@ owned by that prerequisite, not duplicated in archive storage.
 - [Replay catalog](/quest/m1/archive/replay-catalog.md) - `moq_archive::Reader` republishes the recorded catalog live with `store` set, so stock `moq export hls` serves the whole replay of `moq import archive`
 - [Idle flush](/quest/m1/archive/flush.md) - idle tracks are recorded within a bounded wall-clock delay, and `flush()` forces a track's pending record out
 - [History from the retained floor](/quest/m1/archive/history-floor.md) - history mode lists a retained (DVR) recording from its oldest retained segment instead of refusing it
-- [Untimed tracks](/quest/m1/archive/untimed.md) - untimed tracks are recorded and replayed untimed instead of refused, through an optional timestamp in the format
 
 ## Related
 

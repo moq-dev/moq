@@ -182,6 +182,11 @@ impl<F: Container> Consumer<F> {
 		self.group
 	}
 
+	/// The track's name.
+	pub(crate) fn name(&self) -> &str {
+		self.track.name()
+	}
+
 	/// Read the next frame from the track.
 	///
 	/// This method handles timestamp decoding, group ordering, and age management

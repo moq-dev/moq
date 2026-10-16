@@ -100,17 +100,22 @@ const connection = new Publish.Net.Connection({
     enabled: true,
 });
 
+// Capture, then encode. The orientation turns a phone's landscape frames upright
+// while it is held in portrait.
+const camera = new Publish.Source.Camera({ enabled: true });
+const video = new Publish.Signals.Computed((effect) => effect.get(camera.out.source)?.video);
+const capture = new Publish.Video.Capture({ source: video, orientation: camera.out.orientation });
+
 const broadcast = new Publish.Broadcast({
     origin: connection.origin,
     enabled: true,
     name: Publish.Net.Path.from("room/alice.hang"),
+    display: capture.out.display,
+    rotation: capture.out.rotation,
 });
 
-// Capture, then encode. Each encoder registers its rendition on the broadcast
-// and encodes only while someone is subscribed.
-const camera = new Publish.Source.Camera({ enabled: true });
-const video = new Publish.Signals.Computed((effect) => effect.get(camera.out.source)?.video);
-const capture = new Publish.Video.Capture({ source: video });
+// Each encoder registers its rendition on the broadcast and encodes only while
+// someone is subscribed.
 
 const hd = new Publish.Video.Encoder("video/hd", { broadcast, capture, enabled: true });
 const sd = new Publish.Video.Encoder("video/sd", { broadcast, capture, enabled: true, config: { maxScale: 0.25 } });

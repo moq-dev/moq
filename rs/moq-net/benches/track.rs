@@ -70,13 +70,10 @@ const PAYLOAD: usize = 64;
 const CACHE_CAPACITY: u64 = 64 * 1024;
 
 /// Steady viewers that stay subscribed while others churn.
-const STEADY: [usize; 3] = [1, 8, 64];
+const STEADY: [usize; 4] = [1, 100, 1000, 10_000];
 
 /// Viewers that join and leave, one at a time, during one measured run.
-const CHURN: [usize; 3] = [8, 64, 512];
-
-/// Viewers that join at once and stay, during one measured run.
-const JOIN: [usize; 3] = [64, 1024, 16384];
+const CHURN: [usize; 3] = [1, 8, 64];
 
 /// Viewers that joined and left before the churn, leaving the list room for that many.
 const PEAK: [usize; 3] = [0, 1024, 16384];
@@ -473,11 +470,8 @@ fn bench_subscriber_churn(c: &mut Criterion) {
 				BenchmarkId::new(format!("steady_{steady}"), churn),
 				&churn,
 				|b, &churn| {
-					b.iter_batched_ref(
-						|| Churn::new(steady, 0),
-						|setup| setup.run(churn),
-						BatchSize::SmallInput,
-					);
+					let mut setup = Churn::new(steady, 0);
+					b.iter(|| setup.run(churn));
 				},
 			);
 		}
@@ -491,29 +485,86 @@ fn bench_subscriber_churn_after_peak(c: &mut Criterion) {
 	group.throughput(Throughput::Elements(CHURN as u64));
 	for peak in PEAK {
 		group.bench_with_input(BenchmarkId::from_parameter(peak), &peak, |b, &peak| {
-			b.iter_batched_ref(|| Churn::new(1, peak), |setup| setup.run(CHURN), BatchSize::SmallInput);
+			let mut setup = Churn::new(1, peak);
+			b.iter(|| setup.run(CHURN));
 		});
 	}
 	group.finish();
 }
 
+/// One join and its aggregate poll, excluding the departure between iterations.
 fn bench_subscriber_join(c: &mut Criterion) {
 	let mut group = c.benchmark_group("track_subscriber_join");
-	for join in JOIN {
-		group.throughput(Throughput::Elements(join as u64));
-		group.bench_with_input(BenchmarkId::from_parameter(join), &join, |b, &join| {
-			b.iter_batched(
-				|| {
-					let broadcast = broadcast::Info::default().produce();
-					let track = broadcast.create_track("bench", None).unwrap();
-					(broadcast, track)
-				},
-				|(broadcast, track)| {
-					let viewers: Vec<_> = (0..join).map(|_| track.subscribe(None)).collect();
-					(broadcast, track, viewers)
-				},
-				BatchSize::SmallInput,
-			);
+	group.throughput(Throughput::Elements(1));
+	for steady in STEADY {
+		group.bench_function(BenchmarkId::from_parameter(steady), |b| {
+			let mut setup = Churn::new(steady, 0);
+			b.iter_custom(|iterations| {
+				let mut elapsed = Duration::ZERO;
+				for _ in 0..iterations {
+					let start = Instant::now();
+					let viewer = setup.track.subscribe(None);
+					assert!(black_box(setup.track.poll_subscription_changed(&setup.waiter)).is_pending());
+					elapsed += start.elapsed();
+					drop(viewer);
+					assert!(setup.track.poll_subscription_changed(&setup.waiter).is_pending());
+				}
+				elapsed
+			});
+		});
+	}
+	group.finish();
+}
+
+/// Preference changes and an extreme holder leaving, over the already held audience.
+fn bench_subscriber_preferences(c: &mut Criterion) {
+	let ordinary = track::Subscription::default()
+		.with_start(track::Position::group(100))
+		.with_end(track::Position::group(200))
+		.with_order(track::Order::Ascending);
+	let extreme = track::Subscription::default()
+		.with_priority(255)
+		.with_max_delay(Duration::from_secs(10));
+	let mut group = c.benchmark_group("track_subscriber_preferences");
+	for steady in STEADY {
+		for touched in CHURN {
+			group.throughput(Throughput::Elements(2 * touched as u64));
+			group.bench_function(BenchmarkId::new(format!("update/{steady}"), touched), |b| {
+				let mut setup = Churn::new(steady, 0);
+				for subscriber in &mut setup._steady {
+					subscriber.update(ordinary.clone()).unwrap();
+				}
+				let mut viewer = setup.track.subscribe(ordinary.clone());
+				assert!(setup.track.poll_subscription_changed(&setup.waiter).is_ready());
+				b.iter(|| {
+					for _ in 0..touched {
+						viewer.update(extreme.clone()).unwrap();
+						assert!(black_box(setup.track.poll_subscription_changed(&setup.waiter)).is_ready());
+						viewer.update(ordinary.clone()).unwrap();
+						assert!(black_box(setup.track.poll_subscription_changed(&setup.waiter)).is_ready());
+					}
+				});
+			});
+		}
+		group.throughput(Throughput::Elements(1));
+		group.bench_function(BenchmarkId::new("extreme_leave", steady), |b| {
+			let mut setup = Churn::new(steady, 0);
+			for subscriber in &mut setup._steady {
+				subscriber.update(ordinary.clone()).unwrap();
+			}
+			assert!(setup.track.poll_subscription_changed(&setup.waiter).is_ready());
+			b.iter_custom(|iterations| {
+				let mut elapsed = Duration::ZERO;
+				for _ in 0..iterations {
+					let viewer = setup.track.subscribe(extreme.clone());
+					assert!(setup.track.poll_subscription_changed(&setup.waiter).is_ready());
+					let start = Instant::now();
+					drop(viewer);
+					assert!(black_box(setup.track.poll_subscription_changed(&setup.waiter)).is_ready());
+					elapsed += start.elapsed();
+				}
+				elapsed
+			});
 		});
 	}
 	group.finish();
@@ -917,6 +968,7 @@ criterion_group!(
 	bench_subscriber_churn,
 	bench_subscriber_churn_after_peak,
 	bench_subscriber_join,
+	bench_subscriber_preferences,
 	bench_datagram_subscriber_join,
 	bench_parked_read,
 	bench_sparse_read,

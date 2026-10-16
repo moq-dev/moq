@@ -26,14 +26,15 @@ export interface Position {
 
 /**
  * One timeline record: a span of one track holding every frame from `start` (inclusive) to
- * `end` (exclusive). `pts` and `duration` are in the archive's timescale. An `end` at frame zero
- * of group `g` holds every frame of group `g - 1` and nothing of `g`.
+ * `end` (exclusive). `pts` and `duration` are in the archive's timescale, and both are absent on
+ * an untimed track, whose records each hold one group. An `end` at frame zero of group `g` holds
+ * every frame of group `g - 1` and nothing of `g`.
  */
 export interface Record {
 	/** The record's number, consecutive within its track's timeline. */
 	sequence: number;
-	pts: number;
-	duration: number;
+	pts?: number;
+	duration?: number;
 	start: Position;
 	end: Position;
 	/** Whether the span starts with a keyframe. Omitted when true (the default). */
@@ -44,8 +45,8 @@ const PositionSchema = z.object({ group: u53Schema, frame: z.optional(u53Schema)
 
 const RecordSchema = z.looseObject({
 	sequence: u53Schema,
-	pts: u53Schema,
-	duration: u53Schema,
+	pts: z.optional(u53Schema),
+	duration: z.optional(u53Schema),
 	start: PositionSchema,
 	end: PositionSchema,
 	keyframe: z.optional(z.boolean()),
@@ -54,7 +55,7 @@ const RecordSchema = z.looseObject({
 /** The conventional suffix appended to a track name to name its timeline track. */
 export const SUFFIX = ".timeline.z";
 
-/** A record with timestamps converted to microseconds. */
+/** A timed record with timestamps converted to microseconds. */
 export type Entry = Omit<Record, "pts" | "duration"> & { pts: Micro; duration: Micro };
 
 /** One change to the visible timeline window. */
@@ -82,7 +83,7 @@ export class Consumer implements AsyncIterable<Event> {
 		return new Consumer(broadcast.track(name).subscribe(), archive);
 	}
 
-	/** Get the next timeline event, or `undefined` when the track ends. */
+	/** Get the next timeline event, or `undefined` when the track ends. Throws on an untimed record. */
 	async next(): Promise<Event | undefined> {
 		const event = await this.#window.next();
 		if (event === undefined) return undefined;
@@ -90,6 +91,9 @@ export class Consumer implements AsyncIterable<Event> {
 			const { index } = event.push;
 			const value = RecordSchema.parse(event.push.value);
 			if (value.sequence !== index) throw new Error("timeline record sequence differs from its index");
+			if (value.pts === undefined || value.duration === undefined) {
+				throw new Error(`timeline record ${value.sequence} is untimed`);
+			}
 			const pts = this.#micros(value.pts);
 			const duration = this.#micros(value.duration);
 			return { push: { index, entry: { ...value, pts, duration } } };

@@ -140,7 +140,7 @@ impl Consumer {
 	}
 
 	/// Subscribe to the logical track with the reader's own preferences.
-	pub(crate) fn subscribe(&self, subscription: kio::Producer<Subscription>) -> Subscriber {
+	pub(crate) fn subscribe(&self, subscription: track::Preferences) -> Subscriber {
 		let mirrored = subscription.read().clone();
 		let reader = Arc::new_cyclic(|this| {
 			Mutex::new(Reader {
@@ -311,7 +311,7 @@ pub(crate) struct Subscriber {
 	/// Shared with the groups it hands out, so one stuck on a dead route can follow the
 	/// reader onto the next route without the reader polling for groups.
 	reader: Arc<Mutex<Reader>>,
-	subscription: kio::Producer<Subscription>,
+	subscription: track::Preferences,
 }
 
 impl Subscriber {
@@ -320,7 +320,7 @@ impl Subscriber {
 	}
 
 	/// The reader's preferences channel, shared with its [`track::Control`].
-	pub(crate) fn subscription(&self) -> &kio::Producer<Subscription> {
+	pub(crate) fn subscription(&self) -> &track::Preferences {
 		&self.subscription
 	}
 
@@ -435,7 +435,7 @@ struct Reader {
 	this: Weak<Mutex<Reader>>,
 	route: Consumer,
 	/// The reader's own preferences, mirrored into every copy's subscription.
-	subscription: kio::Producer<Subscription>,
+	subscription: track::Preferences,
 	mirrored: Subscription,
 	/// The route generation last read.
 	generation: Option<u64>,
@@ -1568,7 +1568,7 @@ mod test {
 			let a = copy();
 			routes.serve(a.consume());
 			let subscription = kio::Producer::new(Subscription::default());
-			let sub = routes.consume().subscribe(subscription);
+			let sub = routes.consume().subscribe(subscription.into());
 			let mut reader = sub.reader.lock().unwrap();
 			let old = &mut reader.copies[0];
 			old.until = Some(last);
