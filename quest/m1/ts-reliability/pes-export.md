@@ -25,12 +25,15 @@ writes the member, so the round trip never meets a catalog export can't read.
   it has no `streamId`. An entry with both `verbatim` and `pesPacket` is
   refused.
 - **Mux.** Packetize the frame's bytes unchanged on the track's PID: no
-  `PesHeader`, no AC-3 repacking. The unit is due at its timestamp, the way
-  an unbuffered PID already is. Where `verbatim_buffer` models the PID (DVB
-  AC-3, teletext), admission reads the PTS from the header bytes. That PTS
-  covers only the first AC-3 sync frame, so the model walks the sync frames
-  in the bytes and removes each at its own decode time, as `ac3_frames`
-  does today, without rewriting the PES.
+  `PesHeader`, no AC-3 repacking. The timestamp is an arrival time, not
+  a decode deadline: the first byte goes out at the placement, never
+  earlier, so this needs its own path rather than `Track::push`'s
+  decode-time deadline and `Schedule`'s early slots. A regression test
+  asserts the first byte's output position. Where `verbatim_buffer` models
+  the PID (DVB AC-3, teletext), admission reads the PTS from the header
+  bytes. That PTS covers only the first AC-3 sync frame, so the model
+  walks the sync frames in the bytes and removes each at its own decode
+  time, as `ac3_frames` does today, without rewriting the PES.
 - **Tune-in.** The rule that drops non-video frames before `video_start`
   compares a `pesPacket` frame's placement with the tune-in keyframe's
   departure in this export's schedule, not its PTS. Placement is the
