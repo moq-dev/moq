@@ -69,6 +69,7 @@ async function pull(): Promise<void> {
 	if (!reader) throw new Error("not started");
 
 	const { value } = await reader.read();
+	// biome-ignore lint/style/noRestrictedGlobals: a Unix-anchored stamp the main thread maps onto its clock.
 	const at = performance.timeOrigin + performance.now();
 
 	if (!value) {
