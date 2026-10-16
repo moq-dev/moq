@@ -11,7 +11,9 @@ use crate::coding::{BufMutExt, Codec};
 mod endpoint;
 mod frames;
 mod limits;
+mod paths;
 mod reset;
+mod schedule;
 
 /// The transport every characterization pair runs: Cubic with deterministic packet numbers
 fn transport() -> TransportConfig {
