@@ -125,6 +125,12 @@ impl State {
 		self.readable.remove(&id);
 	}
 
+	/// The handshake is done as far as the peer can tell: hand the handle over.
+	fn establish(&mut self) {
+		self.established = true;
+		self.establish_waiters.wake();
+	}
+
 	/// Terminate with `err` (the first one wins) and wake absolutely everyone,
 	/// the driver included: an externally failed driver has to notice.
 	fn fail(&mut self, err: Error) {
@@ -379,6 +385,7 @@ pub(crate) fn launch(
 		deadline: owner.timer(),
 		scratch: Vec::with_capacity(TRAIN_SEGMENTS * SEGMENT),
 		close_staged: false,
+		finished_after: None,
 	};
 	let future = async move { kio::wait(|waiter| driver.poll(waiter)).await };
 	(shared, future)
@@ -707,6 +714,14 @@ struct Driver {
 	/// flush that came back empty: noq paces the close like any other packet,
 	/// so it can sit behind a pacing timer after the application asked for it.
 	close_staged: bool,
+	/// A client that has completed its handshake but not yet staged its
+	/// Finished: the CRYPTO frames it had sent when noq said `Connected`.
+	///
+	/// noq raises `Connected` with the Finished still queued, and paces it
+	/// like any other packet. A close in that gap replaces it, so the server
+	/// never completes its side and only sees a handshake-level close with the
+	/// application code stripped. The handle waits for the Finished instead.
+	finished_after: Option<u64>,
 }
 
 impl Driver {
@@ -792,8 +807,12 @@ impl Driver {
 			let mut state = self.shared.state.borrow_mut();
 			match event {
 				moq_noq_proto::Event::Connected => {
-					state.established = true;
-					state.establish_waiters.wake();
+					let mut conn = self.shared.conn.borrow_mut();
+					if conn.side().is_client() {
+						self.finished_after = Some(conn.stats().frame_tx.crypto);
+					} else {
+						state.establish();
+					}
 				}
 				moq_noq_proto::Event::ConnectionLost { reason } => state.fail(reason.into()),
 				moq_noq_proto::Event::DatagramReceived => state.datagram_recv_waiters.wake(),
@@ -884,6 +903,12 @@ impl Driver {
 			return Poll::Ready(Err(Error::Io(err.to_string())));
 		}
 		self.close_staged |= closing;
+		if let Some(sent) = self.finished_after
+			&& self.shared.conn.borrow_mut().stats().frame_tx.crypto > sent
+		{
+			self.finished_after = None;
+			self.shared.state.borrow_mut().establish();
+		}
 		// A flush frees datagram-send queue space.
 		self.shared.state.borrow_mut().datagram_send_waiters.wake();
 		Poll::Ready(Ok(()))

@@ -15,8 +15,8 @@
 #[path = "support.rs"]
 mod support;
 
-use std::net::UdpSocket;
-use std::time::Duration;
+use std::net::{SocketAddr, UdpSocket};
+use std::time::{Duration, Instant};
 
 use moq_uring::{Config, Error, Worker, quic, udp};
 use web_transport_trait::poll::Session as _;
@@ -85,7 +85,7 @@ fn server_config(certs: &support::Certs) -> quic::server::Config {
 	)
 }
 
-fn dial_config(peer: std::net::SocketAddr) -> quic::client::Config {
+fn dial_config(peer: SocketAddr) -> quic::client::Config {
 	let mut config = quic::client::Config::new(peer, "localhost");
 	config.alpn = vec![ALPN.to_string()];
 	config.verify = false;
@@ -98,11 +98,32 @@ fn dial_config(peer: std::net::SocketAddr) -> quic::client::Config {
 /// like.
 #[test]
 fn a_published_close_has_already_left_the_client() {
+	close_right_after_dialing(None);
+}
+
+/// The same, with the client's Finished held back by its pacer, which is how
+/// a loaded host first hit it. The slow return leg makes the client's first
+/// RTT sample long, so its pacer refills slowly: the padded ACK it sends for
+/// the server's first datagram drains it, and the Finished owed once the
+/// second arrives has to wait. A close in that gap must not replace the
+/// Finished, or the server never completes its side, sees only a
+/// handshake-level close stripped of the application code, and never hands
+/// the connection to `accept`.
+#[test]
+fn a_close_right_after_dialing_follows_the_handshake() {
+	close_right_after_dialing(Some(Duration::from_millis(100)));
+}
+
+fn close_right_after_dialing(slow_return: Option<Duration>) {
 	let Some(mut client_worker) = worker() else { return };
 	let certs = support::certs().expect("certificates");
 
 	let server_sock = UdpSocket::bind("127.0.0.1:0").expect("bind server");
 	let server_addr = server_sock.local_addr().expect("server addr");
+	let dial_addr = match slow_return {
+		Some(delay) => slow_return_path(server_addr, delay),
+		None => server_addr,
+	};
 
 	// The server outlives the client's teardown, so its verdict is only about
 	// what the client managed to send. It reports in once serving, so a setup
@@ -138,7 +159,7 @@ fn a_published_close_has_already_left_the_client() {
 
 	client_worker
 		.block_on(async move {
-			let mut conn = endpoint.connect(&dial_config(server_addr)).await.expect("dial");
+			let mut conn = endpoint.connect(&dial_config(dial_addr)).await.expect("dial");
 			conn.close(CLOSE_CODE, CLOSE_REASON);
 			std::future::poll_fn(|cx| conn.poll_closed(cx)).await;
 		})
@@ -150,4 +171,47 @@ fn a_published_close_has_already_left_the_client() {
 		matches!(&err, quic::Error::App { code, reason } if *code == u64::from(CLOSE_CODE) && reason == CLOSE_REASON),
 		"the server saw {err} instead of the application close"
 	);
+}
+
+/// A UDP relay to `server` that passes client datagrams straight through and
+/// holds each server datagram for `delay`. Returns the address to dial; its
+/// threads live as long as the test process.
+///
+/// Released server datagrams are spaced a little apart, so the client handles
+/// each on a turn of its own rather than as one batch, but closer than its
+/// pacer refills at an RTT of `delay`.
+fn slow_return_path(server: SocketAddr, delay: Duration) -> SocketAddr {
+	const SPACING: Duration = Duration::from_millis(2);
+
+	let relay = UdpSocket::bind("127.0.0.1:0").expect("bind relay");
+	let addr = relay.local_addr().expect("relay addr");
+	let out = relay.try_clone().expect("clone relay");
+	let (hold, release) = std::sync::mpsc::channel::<(Instant, Vec<u8>, SocketAddr)>();
+
+	std::thread::spawn(move || {
+		let mut client = None;
+		let mut buf = vec![0u8; u16::MAX as usize];
+		while let Ok((len, from)) = relay.recv_from(&mut buf) {
+			if from != server {
+				client = Some(from);
+				relay.send_to(&buf[..len], server).expect("relay to server");
+			} else if let Some(client) = client
+				&& hold
+					.send((Instant::now() + delay, buf[..len].to_vec(), client))
+					.is_err()
+			{
+				return;
+			}
+		}
+	});
+	std::thread::spawn(move || {
+		let mut next = Instant::now();
+		for (at, datagram, client) in release {
+			next = next.max(at);
+			std::thread::sleep(next.saturating_duration_since(Instant::now()));
+			out.send_to(&datagram, client).expect("relay to client");
+			next += SPACING;
+		}
+	});
+	addr
 }

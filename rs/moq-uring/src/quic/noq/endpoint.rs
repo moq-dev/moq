@@ -156,6 +156,9 @@ impl Endpoint {
 
 	/// Dial [`Config::peer`](crate::quic::client::Config::peer) through this
 	/// endpoint's socket, driving the handshake to completion.
+	///
+	/// Resolves once the client's Finished is staged, so the server can
+	/// complete its side even if the connection is closed right away.
 	pub async fn connect(&self, config: &crate::quic::client::Config) -> Result<Connection, Error> {
 		if let Some(err) = self.inner.closed() {
 			return Err(err);
