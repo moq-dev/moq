@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Poll, ready};
 
 use crate::error::MoqError;
-use crate::ffi::{Guard, Task};
+use crate::ffi::{Background, Guard, Task};
 use crate::media::*;
 use crate::producer::MoqTrackInfo;
 
@@ -77,13 +77,19 @@ pub struct MoqBroadcastConsumer {
 	/// The origin this broadcast was resolved through, if any. A catalog rendition may name a
 	/// sibling broadcast, and only an origin can fetch one; a standalone broadcast (a local
 	/// producer's `consume`) has none, so such a rendition is unresolvable rather than wrong.
-	origin: Option<moq_net::origin::Consumer>,
+	pub(crate) origin: Option<moq_net::origin::Consumer>,
+	pub(crate) driver: Background,
 }
 
 impl MoqBroadcastConsumer {
 	/// Wrap a standalone broadcast, with no origin to resolve cross-broadcast references against.
+	#[cfg(test)]
 	pub(crate) fn new(inner: moq_net::broadcast::Consumer) -> Self {
-		Self { inner, origin: None }
+		Self {
+			inner,
+			origin: None,
+			driver: Background::default(),
+		}
 	}
 
 	/// Wrap a broadcast the origin handed out, so a rendition referencing a sibling broadcast
@@ -92,10 +98,15 @@ impl MoqBroadcastConsumer {
 	/// `origin` must be the cursor that named `inner`: the broadcast's path is stamped per
 	/// cursor, and a reference resolves against that path, so an origin rooted elsewhere would
 	/// read a legal reference as escaping (or worse, resolve it to the wrong broadcast).
-	pub(crate) fn routed(inner: moq_net::broadcast::Consumer, origin: moq_net::origin::Consumer) -> Self {
+	pub(crate) fn routed(
+		inner: moq_net::broadcast::Consumer,
+		origin: moq_net::origin::Consumer,
+		driver: Background,
+	) -> Self {
 		Self {
 			inner,
 			origin: Some(origin),
+			driver,
 		}
 	}
 
@@ -109,22 +120,26 @@ impl MoqBroadcastConsumer {
 		&self,
 		reference: Option<&str>,
 	) -> Result<moq_net::broadcast::Consumer, MoqError> {
-		// Normalize before testing emptiness: this is a caller-supplied string, and one made only
-		// of slashes normalizes to the empty reference, which names this broadcast.
-		let reference = reference.map(moq_net::path::Relative::new);
+		self.driver
+			.watch(async {
+				// Normalize before testing emptiness: this is a caller-supplied string, and one made only
+				// of slashes normalizes to the empty reference, which names this broadcast.
+				let reference = reference.map(moq_net::path::Relative::new);
 
-		// An absent or empty reference names the catalog's own broadcast, which we already hold.
-		// Short-circuiting also keeps a standalone broadcast usable: the common case needs no origin.
-		let Some(reference) = reference.filter(|reference| !reference.is_empty()) else {
-			return Ok(self.inner.clone());
-		};
+				// An absent or empty reference names the catalog's own broadcast, which we already hold.
+				// Short-circuiting also keeps a standalone broadcast usable: the common case needs no origin.
+				let Some(reference) = reference.filter(|reference| !reference.is_empty()) else {
+					return Ok(self.inner.clone());
+				};
 
-		let origin = self.origin.clone().ok_or_else(|| MoqError::UnresolvableBroadcast {
-			reason: reference.as_str().to_string(),
-		})?;
+				let origin = self.origin.clone().ok_or_else(|| MoqError::UnresolvableBroadcast {
+					reason: reference.as_str().to_string(),
+				})?;
 
-		let source = moq_mux::Source::new(origin, self.inner.clone());
-		Ok(source.resolve(Some(&reference)).await?)
+				let source = moq_mux::Source::new(origin, self.inner.clone());
+				Ok(source.resolve(Some(&reference)).await?)
+			})
+			.await
 	}
 }
 
@@ -147,8 +162,12 @@ impl MoqBroadcastConsumer {
 	pub async fn resolve(&self, reference: Option<String>) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		let broadcast = self.resolve_inner(reference.as_deref()).await?;
 		Ok(Arc::new(match self.origin.clone() {
-			Some(origin) => Self::routed(broadcast, origin),
-			None => Self::new(broadcast),
+			Some(origin) => Self::routed(broadcast, origin, self.driver.clone()),
+			None => Self {
+				inner: broadcast,
+				origin: None,
+				driver: self.driver.clone(),
+			},
 		}))
 	}
 
@@ -161,9 +180,13 @@ impl MoqBroadcastConsumer {
 		name: String,
 		subscription: Option<MoqSubscription>,
 	) -> Result<Arc<MoqTrackConsumer>, MoqError> {
-		let subscription = subscription.map(moq_net::track::Subscription::from);
-		let track = self.inner.track(&name)?.subscribe(subscription).await?;
-		Ok(Arc::new(MoqTrackConsumer::new(track)))
+		self.driver
+			.watch(async {
+				let subscription = subscription.map(moq_net::track::Subscription::from);
+				let track = self.inner.track(&name)?.subscribe(subscription).await?;
+				Ok(Arc::new(MoqTrackConsumer::new(track, self.driver.clone())))
+			})
+			.await
 	}
 
 	/// Fetch one complete group by track name and group sequence.
@@ -177,10 +200,14 @@ impl MoqBroadcastConsumer {
 		sequence: u64,
 		options: Option<MoqFetchGroupOptions>,
 	) -> Result<Arc<MoqGroupConsumer>, MoqError> {
-		let options = options.map(moq_net::group::Fetch::from);
-		let track = self.inner.track(&name).map_err(map_fetch_error)?;
-		let group = track.fetch_group(sequence, options).await.map_err(map_fetch_error)?;
-		Ok(Arc::new(MoqGroupConsumer::new(group)))
+		self.driver
+			.watch(async {
+				let options = options.map(moq_net::group::Fetch::from);
+				let track = self.inner.track(&name).map_err(map_fetch_error)?;
+				let group = track.fetch_group(sequence, options).await.map_err(map_fetch_error)?;
+				Ok(Arc::new(MoqGroupConsumer::new(group, self.driver.clone())))
+			})
+			.await
 	}
 }
 
@@ -409,10 +436,12 @@ pub struct MoqTrackConsumer {
 	datagrams: Task<ReadLane>,
 	control: moq_net::track::Control,
 	info: moq_net::track::Info,
+	/// The owner whose panic ends this track's reads, handed to every group and reader taken from it.
+	driver: Background,
 }
 
 impl MoqTrackConsumer {
-	pub(crate) fn new(track: moq_net::track::Subscriber) -> Self {
+	pub(crate) fn new(track: moq_net::track::Subscriber, driver: Background) -> Self {
 		let control = track.control();
 		let info = track.info().clone();
 		Self {
@@ -421,10 +450,11 @@ impl MoqTrackConsumer {
 					track: Cursor::Uncommitted(track),
 				})),
 			}),
-			groups: Task::new(ReadLane),
-			datagrams: Task::new(ReadLane),
+			groups: Task::new(ReadLane).supervised(driver.clone()),
+			datagrams: Task::new(ReadLane).supervised(driver.clone()),
 			control,
 			info,
+			driver,
 		}
 	}
 
@@ -432,7 +462,8 @@ impl MoqTrackConsumer {
 	///
 	/// Errors with [`MoqError::AlreadyCommitted`] once a group read has started, since the reader
 	/// would miss whatever that read consumed.
-	pub(crate) fn take(&self) -> Result<moq_net::track::Subscriber, MoqError> {
+	pub(crate) fn take(&self) -> Result<(moq_net::track::Subscriber, Background), MoqError> {
+		self.driver.check()?;
 		let mut guard = self.shared.inner.lock().expect("track reader");
 		match guard.as_ref().map(|inner| &inner.track) {
 			Some(Cursor::Uncommitted(_)) => {}
@@ -448,7 +479,7 @@ impl MoqTrackConsumer {
 		drop(guard);
 		// Wake any datagram read still parked on the subscriber this handle no longer owns.
 		self.cancel_lanes();
-		Ok(track)
+		Ok((track, self.driver.clone()))
 	}
 
 	fn cancel_lanes(&self) {
@@ -484,15 +515,14 @@ impl MoqTrackConsumer {
 	/// [`MoqError::AlreadyCommitted`] afterwards.
 	pub async fn recv_group(&self) -> Result<Option<Arc<MoqGroupConsumer>>, MoqError> {
 		let shared = self.shared.clone();
+		let driver = self.driver.clone();
 		self.groups
 			.run(move |lane| {
 				with_lane(lane, async move {
-					Ok(shared.recv_group().await?.map(|group| {
-						Arc::new(MoqGroupConsumer {
-							sequence: group.sequence,
-							task: Task::new(GroupInner { group }),
-						})
-					}))
+					Ok(shared
+						.recv_group()
+						.await?
+						.map(|group| Arc::new(MoqGroupConsumer::new(group, driver))))
 				})
 			})
 			.await
@@ -509,15 +539,14 @@ impl MoqTrackConsumer {
 	/// ([`Self::recv_group`]) fail with [`MoqError::AlreadyCommitted`] afterwards.
 	pub async fn next_group(&self) -> Result<Option<Arc<MoqGroupConsumer>>, MoqError> {
 		let shared = self.shared.clone();
+		let driver = self.driver.clone();
 		self.groups
 			.run(move |lane| {
 				with_lane(lane, async move {
-					Ok(shared.next_group().await?.map(|group| {
-						Arc::new(MoqGroupConsumer {
-							sequence: group.sequence,
-							task: Task::new(GroupInner { group }),
-						})
-					}))
+					Ok(shared
+						.next_group()
+						.await?
+						.map(|group| Arc::new(MoqGroupConsumer::new(group, driver))))
 				})
 			})
 			.await
@@ -588,13 +617,15 @@ impl GroupInner {
 pub struct MoqGroupConsumer {
 	sequence: u64,
 	task: Task<GroupInner>,
+	driver: Background,
 }
 
 impl MoqGroupConsumer {
-	pub(crate) fn new(group: moq_net::group::Consumer) -> Self {
+	pub(crate) fn new(group: moq_net::group::Consumer, driver: Background) -> Self {
 		Self {
 			sequence: group.sequence,
-			task: Task::new(GroupInner { group }),
+			task: Task::new(GroupInner { group }).supervised(driver.clone()),
+			driver,
 		}
 	}
 
@@ -602,12 +633,12 @@ impl MoqGroupConsumer {
 	///
 	/// Errors with [`MoqError::AlreadyCommitted`] once a frame has been read, since the reader
 	/// would start mid-group, and [`MoqError::Busy`] while a read is in flight.
-	pub(crate) fn take(&self) -> Result<moq_net::group::Consumer, MoqError> {
+	pub(crate) fn take(&self) -> Result<(moq_net::group::Consumer, Background), MoqError> {
 		let inner = self.task.take(|inner| match inner.group.index() {
 			0 => Ok(()),
 			_ => Err(MoqError::AlreadyCommitted),
 		})?;
-		Ok(inner.group)
+		Ok((inner.group, self.driver.clone()))
 	}
 }
 
