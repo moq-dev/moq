@@ -67,7 +67,8 @@ MoQError::Code FailureCode(const moq::Error &error)
 	if (const auto *protocol = std::get_if<moq::Error::kProtocol>(&variant)) {
 		if (protocol->details.kind == moq::ProtocolKind::kTooManyRequests)
 			return MoQError::Code::TooManyRequests;
-		if (protocol->details.kind == moq::ProtocolKind::kUnauthorized)
+		if (protocol->details.kind == moq::ProtocolKind::kUnauthorized ||
+		    protocol->details.kind == moq::ProtocolKind::kExpired)
 			return MoQError::Code::Unauthorized;
 	}
 	return MoQError::Code::Other;

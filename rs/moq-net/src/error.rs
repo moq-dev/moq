@@ -651,8 +651,9 @@ impl From<&Error> for StreamError {
 			Error::FrameTooLarge => Self::FrameTooLarge,
 			Error::GroupTooLarge => Self::GroupTooLarge,
 			Error::TimestampMismatch => Self::TimestampMismatch,
-			// Losing access ends this stream, not the session.
-			Error::Unauthorized => Self::Unauthorized,
+			// Losing access ends this stream, not the session. A request can expire on its
+			// own (REQUEST_ERROR 0x5), and the stream registry has no expiry code.
+			Error::Unauthorized | Error::Expired => Self::Unauthorized,
 			Error::Timeout => Self::DeliveryTimeout,
 			Error::GoingAway => Self::GoingAway,
 			// Our own parse failure is, from the peer's side, a malformed track.
@@ -668,7 +669,6 @@ impl From<&Error> for StreamError {
 			// SESSION_CLOSED; there is no stream-scoped PROTOCOL_VIOLATION to send instead.
 			Error::UnexpectedStream => Self::Internal,
 			Error::Version
-			| Error::Expired
 			| Error::UnknownAlpn(_)
 			| Error::TooManyParameters
 			| Error::GoawayTimeout
@@ -753,6 +753,10 @@ mod tests {
 			SessionError::ProtocolViolation
 		);
 		assert_eq!(StreamError::from(&Error::UnexpectedStream), StreamError::Internal);
+
+		// An expired request (REQUEST_ERROR 0x5) relayed onto a stream ends only that
+		// request; SESSION_CLOSED would falsely tell the peer its session is going away.
+		assert_eq!(StreamError::from(&Error::Expired), StreamError::Unauthorized);
 	}
 
 	#[test]

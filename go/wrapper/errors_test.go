@@ -117,3 +117,12 @@ func TestSessionLimitProtocolKind(t *testing.T) {
 		t.Fatalf("session limit lost its kind: %+v, %v", details, err)
 	}
 }
+
+func TestExpiredIsAuthError(t *testing.T) {
+	err := ffi.NewMoqErrorProtocol(ffi.MoqProtocolError{
+		Scope: moq.ErrorScopeSession, Code: 0x18, Kind: moq.ProtocolKindExpired, Message: "expired",
+	})
+	if !moq.IsAuthError(err) {
+		t.Fatalf("expired credentials are not an auth error: %v", err)
+	}
+}

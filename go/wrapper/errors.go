@@ -97,13 +97,13 @@ func IsShutdown(err error) bool {
 }
 
 // IsAuthError reports whether err is an authentication/authorization failure
-// (HTTP 401/403, or a protocol Unauthorized session close).
+// (HTTP 401/403, or a protocol Unauthorized or Expired session close).
 func IsAuthError(err error) bool {
 	if errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrForbidden) {
 		return true
 	}
 	protocol, ok := ProtocolError(err)
-	return ok && protocol.Kind == ffi.MoqProtocolKindUnauthorized
+	return ok && (protocol.Kind == ffi.MoqProtocolKindUnauthorized || protocol.Kind == ffi.MoqProtocolKindExpired)
 }
 
 // ProtocolError reports the structured protocol failure, if err is one.

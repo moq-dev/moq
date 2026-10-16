@@ -241,6 +241,7 @@ impl Error {
 			Self::MoqNet(err) => matches!(
 				moq_net::SessionError::from(err),
 				moq_net::SessionError::Unauthorized
+					| moq_net::SessionError::Expired
 					| moq_net::SessionError::ProtocolViolation
 					| moq_net::SessionError::KeyValueFormatting
 					| moq_net::SessionError::InvalidRequestId
@@ -425,6 +426,13 @@ mod tests {
 		// A root file can be briefly absent or empty while it rotates, so rereading it may succeed.
 		assert!(!Error::Tls(Arc::new(crate::tls::Error::EmptyRoots("roots.pem".into()))).is_terminal());
 		assert!(!Error::Tls(Arc::new(crate::tls::Error::Open(std::io::ErrorKind::NotFound.into()))).is_terminal());
+	}
+
+	/// Redialing with the same expired credentials cannot succeed; the caller must refresh them.
+	#[test]
+	fn expired_credentials_are_terminal() {
+		assert!(Error::MoqNet(moq_net::Error::Expired).is_terminal());
+		assert!(Error::MoqNet(moq_net::SessionError::Expired.into()).is_terminal());
 	}
 
 	/// Every raced address building the same malformed request is as terminal as one address doing so.
