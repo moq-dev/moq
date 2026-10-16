@@ -1,6 +1,5 @@
 use std::{
 	ops::{Bound, RangeBounds, RangeFull, RangeTo, RangeToInclusive},
-	task::Poll,
 	time::Duration,
 };
 
@@ -375,34 +374,36 @@ impl Subscription {
 		}
 		Some(floor.unwrap_or(0))
 	}
+}
 
-	// Fold this subscription into the running aggregate: Ready with the merged
-	// result when it demands more than `combined`, Pending when it's a subset
-	// (so callers can skip a redundant broadcast of the same aggregate).
-	pub(super) fn poll_combined(&self, combined: &Option<Subscription>) -> Poll<Subscription> {
-		let Some(combined) = combined else {
-			return Poll::Ready(Subscription {
-				ranges: union(self.ranges.iter().copied()),
-				..self.clone()
-			});
+/// The most demanding request across subscribers, folded in one at a time.
+///
+/// Ranges are only collected per subscriber and merged once in [`Self::finish`], so an
+/// aggregate of many disjoint ranges costs one union rather than one per subscriber.
+#[derive(Default)]
+pub(super) struct Combined(Option<Subscription>);
+
+impl Combined {
+	/// Fold in one subscriber's preferences.
+	pub(super) fn add(&mut self, sub: &Subscription) {
+		let Some(combined) = &mut self.0 else {
+			self.0 = Some(sub.clone());
+			return;
 		};
-
-		let merged = Subscription {
-			priority: self.priority.max(combined.priority),
-			// Sequence-first prioritization is enabled only when every subscriber wants it.
-			max_delay: self.max_delay.max(combined.max_delay),
-			ranges: union(self.ranges.iter().chain(&combined.ranges).copied()),
-			order: match (self.order, combined.order) {
-				(Order::Ascending, Order::Ascending) => Order::Ascending,
-				_ => Order::Descending,
-			},
-		};
-
-		if &merged != combined {
-			return Poll::Ready(merged);
+		combined.priority = combined.priority.max(sub.priority);
+		combined.max_delay = combined.max_delay.max(sub.max_delay);
+		combined.ranges.extend_from_slice(&sub.ranges);
+		// Sequence-first prioritization is enabled only when every subscriber wants it.
+		if let Order::Descending = sub.order {
+			combined.order = Order::Descending;
 		}
+	}
 
-		Poll::Pending
+	/// The aggregate, or `None` without a subscriber.
+	pub(super) fn finish(self) -> Option<Subscription> {
+		let mut combined = self.0?;
+		combined.ranges = union(std::mem::take(&mut combined.ranges));
+		Some(combined)
 	}
 }
 
@@ -540,13 +541,11 @@ mod tests {
 	use super::*;
 
 	fn combine(subscriptions: &[Subscription]) -> Option<Subscription> {
-		let mut combined = None;
+		let mut combined = Combined::default();
 		for sub in subscriptions {
-			if let Poll::Ready(merged) = sub.poll_combined(&combined) {
-				combined = Some(merged);
-			}
+			combined.add(sub);
 		}
-		combined
+		combined.finish()
 	}
 
 	fn absolute(group: u64, frame: u64) -> Anchor {
@@ -751,7 +750,7 @@ mod tests {
 		assert_eq!(combine(&[a.clone(), b.clone()]), combine(&[b.clone(), a.clone()]));
 
 		let combined = combine(&[a.clone(), b]);
-		assert!(a.poll_combined(&combined).is_pending(), "a subset adds nothing");
+		assert_eq!(combine(&[combined.clone().unwrap(), a]), combined, "a subset adds nothing");
 	}
 
 	#[test]

@@ -2735,7 +2735,7 @@ fn combined_subscription(
 	bound: Option<Duration>,
 	waiter: &kio::Waiter,
 ) -> (Option<Subscription>, bool) {
-	let mut combined = None;
+	let mut combined = super::subscription::Combined::default();
 	let mut departed = false;
 	for sub in subs.iter() {
 		// A closed consumer means the subscriber dropped: it holds no live demand.
@@ -2754,26 +2754,22 @@ fn combined_subscription(
 		// upstream parked at that cap for good.
 		let _ = sub.poll_closed(waiter);
 		let _ = sub.poll(waiter, |_| Poll::<()>::Pending);
-		if let Poll::Ready(merged) = sub.read().poll_combined(&combined) {
-			combined = Some(merged);
-		}
+		combined.add(&sub.read());
 	}
-	(clamp_combined(combined, bound), departed)
+	(clamp_combined(combined.finish(), bound), departed)
 }
 
 /// A non-blocking aggregate of the current subscriptions, without arming any waiter.
 fn snapshot_subscription(subs: &kio::Shared<Subscriptions>, bound: Option<Duration>) -> Option<Subscription> {
-	let mut combined: Option<Subscription> = None;
+	let mut combined = super::subscription::Combined::default();
 	for sub in subs.read().iter() {
 		// Skip dropped subscribers, matching `combined_subscription`.
 		if sub.is_closed() {
 			continue;
 		}
-		if let Poll::Ready(merged) = sub.read().poll_combined(&combined) {
-			combined = Some(merged);
-		}
+		combined.add(&sub.read());
 	}
-	clamp_combined(combined, bound)
+	clamp_combined(combined.finish(), bound)
 }
 
 /// Clamp a drift budget to the publisher's retention window: nobody can wait for a late

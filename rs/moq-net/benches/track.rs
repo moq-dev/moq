@@ -41,6 +41,11 @@
 //! wall clock: each empty group is handed out like any other, so a walk over the rest of
 //! the run per group shows up as a slope over it.
 //!
+//! `track_subscription_ranges` aggregates subscribers that each ask for a disjoint range,
+//! swept over how many ranges and how many groups each spans: the union must cost the
+//! same per range whatever it spans, and fold every subscriber's ranges at once rather
+//! than re-merging the aggregate per subscriber, which would show up as a slope over them.
+//!
 //! Run with `cargo bench -p moq-net --bench track`.
 
 use std::hint::black_box;
@@ -80,6 +85,12 @@ const JOIN: [usize; 3] = [64, 1024, 16384];
 
 /// Viewers that joined and left before the churn, leaving the list room for that many.
 const PEAK: [usize; 3] = [0, 1024, 16384];
+
+/// Disjoint ranges in one aggregate, one per subscriber.
+const RANGES: [u64; 4] = [1, 16, 256, 4096];
+
+/// Groups each aggregated range spans.
+const SPAN: [u64; 3] = [1, 64, 4096];
 
 /// Concurrent publishers sharing one relay-style cache pool.
 const WRITERS: [usize; 4] = [1, 2, 4, 8];
@@ -519,6 +530,31 @@ fn bench_subscriber_join(c: &mut Criterion) {
 	group.finish();
 }
 
+fn bench_subscription_ranges(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_subscription_ranges");
+	for span in SPAN {
+		for ranges in RANGES {
+			let broadcast = broadcast::Info::default().produce();
+			let track = broadcast.create_track("bench", None).unwrap();
+			// A gap between neighbors keeps every range distinct in the union.
+			let viewers: Vec<_> = (0..ranges)
+				.map(|i| {
+					let start = i * (span + 1);
+					track.subscribe(track::Subscription::default().with_groups(start..start + span))
+				})
+				.collect();
+			assert_eq!(track.subscription().unwrap().ranges.len(), ranges as usize);
+
+			group.throughput(Throughput::Elements(ranges));
+			group.bench_function(BenchmarkId::new(format!("span_{span}"), ranges), |b| {
+				b.iter(|| black_box(track.subscription()));
+			});
+			drop((viewers, track, broadcast));
+		}
+	}
+	group.finish();
+}
+
 /// Late joins scan a bounded datagram ring; sweep both the backlog and the joining audience.
 fn bench_datagram_subscriber_join(c: &mut Criterion) {
 	let mut group = c.benchmark_group("track_datagram_subscriber_join");
@@ -917,6 +953,7 @@ criterion_group!(
 	bench_subscriber_churn,
 	bench_subscriber_churn_after_peak,
 	bench_subscriber_join,
+	bench_subscription_ranges,
 	bench_datagram_subscriber_join,
 	bench_parked_read,
 	bench_sparse_read,
