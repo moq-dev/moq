@@ -6,11 +6,11 @@
 //! subscription it never made with STOP_SENDING, and the client reads that code off the
 //! wire. moq-transport codes take the same raw session.
 
-#![cfg(feature = "noq")]
+#![cfg(feature = "quic")]
 
 use std::{sync::Arc, time::Duration};
 
-use web_transport_moq::noq;
+use moq_tokio::quic::driver;
 
 /// moq-lite sends CANCEL (0x1) for a group it has no subscription for.
 const CANCEL: u32 = 0x1;
@@ -68,7 +68,7 @@ async fn serve() -> Server {
 
 /// Dial the server over raw QUIC with `alpn`, send an empty SETUP and a GROUP for an
 /// unknown subscription, and return the code the server stopped the GROUP with.
-async fn refused_code(server: &Server, alpn: &str) -> Option<noq::VarInt> {
+async fn refused_code(server: &Server, alpn: &str) -> Option<driver::VarInt> {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 	let mut roots = rustls::RootCertStore::empty();
@@ -77,12 +77,12 @@ async fn refused_code(server: &Server, alpn: &str) -> Option<noq::VarInt> {
 		.with_root_certificates(roots)
 		.with_no_client_auth();
 	tls.alpn_protocols = vec![alpn.as_bytes().to_vec()];
-	let quic = noq::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic config");
+	let quic = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic config");
 
-	let endpoint = noq::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("endpoint");
+	let endpoint = driver::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("endpoint");
 	let conn = endpoint
 		.connect_with(
-			noq::ClientConfig::new(Arc::new(quic)),
+			driver::ClientConfig::new(Arc::new(quic)),
 			([127, 0, 0, 1], server.port).into(),
 			"localhost",
 		)

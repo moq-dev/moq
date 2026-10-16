@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { Manual, Milli, Nano, Wall } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import { Track } from "@moq/net";
@@ -84,6 +85,9 @@ test("catalog producer publishes every update as a snapshot group", async () => 
 });
 
 test("catalog producer advertises the page clock from the first snapshot", async () => {
+	const clock = new Manual();
+	clock.advance(Nano.fromMilli(Milli(5000)));
+	const restore = clock.install();
 	const catalog = new CatalogProducer();
 
 	const effect = new Effect();
@@ -97,13 +101,13 @@ test("catalog producer advertises the page clock from the first snapshot", async
 	expect(first.archive).toBeUndefined();
 	expect(first.clock.timescale).toBe(1_000_000);
 
-	// A timestamp stamped the way capture does (performance.now() in microseconds) maps onto the
-	// page's own wall timeline, not Date.now(), which a system-clock adjustment can move.
-	const now = performance.now();
-	const wall = Catalog.wallClockTime(first.clock, Math.round(now * 1000), 1_000_000).getTime();
-	expect(Math.abs(wall - (performance.timeOrigin + now))).toBeLessThanOrEqual(1);
+	// A timestamp stamped the way capture does (the clock's instant in microseconds) maps onto the
+	// wall clock the page was reading at that instant.
+	const wall = Catalog.wallClockTime(first.clock, 5_000_000, 1_000_000).getTime();
+	expect(wall).toBe(Manual.WALL_START + 5000);
 
-	// Later edits keep the mapping: it is fixed for the broadcast.
+	// Later edits keep the mapping, even across a system-clock adjustment: it is fixed for the broadcast.
+	clock.stepWall(Wall(Manual.WALL_START + 60_000));
 	catalog.mutate((c) => {
 		c.video = { renditions: {} };
 	});
@@ -111,11 +115,14 @@ test("catalog producer advertises the page clock from the first snapshot", async
 	expect(second.clock).toEqual(first.clock);
 
 	effect.close();
+	restore();
 });
 
 test("catalog producer omits the clock when the page's wall clock is unset", async () => {
 	// A device booted before it synced its clock: the page began in 1970.
-	Object.defineProperty(performance, "timeOrigin", { value: 86_400_000, configurable: true });
+	const clock = new Manual();
+	clock.stepWall(Wall(86_400_000));
+	const restore = clock.install();
 	try {
 		const catalog = new CatalogProducer();
 		catalog.mutate((c) => {
@@ -130,8 +137,7 @@ test("catalog producer omits the clock when the page's wall clock is unset", asy
 		expect(await group?.readJson()).toEqual({ video: { renditions: {} } });
 		effect.close();
 	} finally {
-		// Drops the override, uncovering the real getter.
-		Reflect.deleteProperty(performance, "timeOrigin");
+		restore();
 	}
 });
 
@@ -304,37 +310,17 @@ for (const section of ["json", "binary"] as const) {
 }
 
 describe("estimate publication window", () => {
-	let now = 0;
-	let timers: { at: number; run: () => void }[] = [];
+	let clock = new Manual();
+	let restore: (() => void) | undefined;
 	const scopes: Effect[] = [];
-	function clock() {
-		now = 0;
-		timers = [];
-		spyOn(performance, "now").mockImplementation(() => now);
-		spyOn(Effect.prototype, "timer").mockImplementation(function (this: Effect, fn, ms) {
-			const timer = { at: now + ms, run: fn };
-			timers.push(timer);
-			this.cleanup(() => {
-				timers = timers.filter((pending) => pending !== timer);
-			});
-		});
-	}
-	function advance(ms: number) {
-		now += ms;
-		for (const timer of [...timers]) {
-			if (timer.at <= now) {
-				timers = timers.filter((pending) => pending !== timer);
-				timer.run();
-			}
-		}
-	}
+	const advance = (ms: number) => clock.advanceAsync(Nano.fromMilli(Milli(ms)));
 	afterEach(() => {
 		for (const scope of scopes.splice(0)) scope.close();
-		spyOn(performance, "now").mockRestore();
-		spyOn(Effect.prototype, "timer").mockRestore();
+		restore?.();
 	});
 	function fixture() {
-		clock();
+		clock = new Manual();
+		restore = clock.install();
 		const producer = new CatalogProducer();
 		producer.mutate((catalog) => {
 			catalog.video = { renditions: { v: { codec: "avc1.640028", container: { kind: "legacy" } } } };
@@ -359,15 +345,15 @@ describe("estimate publication window", () => {
 		estimate(1);
 		expect((await consumer.latest())?.value.video?.renditions.v.jitter).toBe(Catalog.u53(1));
 		const first = track.latest();
-		advance(100);
+		await advance(100);
 		estimate(2);
-		advance(899);
+		await advance(899);
 		estimate(17);
 		expect(track.latest()).toBe(first);
-		advance(1);
+		await advance(1);
 		expect((await consumer.latest())?.value.video?.renditions.v.jitter).toBe(Catalog.u53(17));
 		const trailing = track.latest();
-		advance(1000);
+		await advance(1000);
 		expect(track.latest()).toBe(trailing);
 		estimate(18);
 		expect((await consumer.latest())?.value.video?.renditions.v.jitter).toBe(Catalog.u53(18));
@@ -378,7 +364,7 @@ describe("estimate publication window", () => {
 		await consumer.latest();
 		estimate(1);
 		await consumer.latest();
-		advance(100);
+		await advance(100);
 		estimate(2);
 		producer.mutate((catalog) => {
 			if (!catalog.video) throw new Error("video missing");
@@ -388,7 +374,7 @@ describe("estimate publication window", () => {
 		expect(catalog?.video?.renditions.v.jitter).toBe(Catalog.u53(2));
 		expect(catalog?.video?.renditions.v.codedWidth).toBe(Catalog.u53(1280));
 		const folded = track.latest();
-		advance(900);
+		await advance(900);
 		expect(track.latest()).toBe(folded);
 	});
 
@@ -403,31 +389,41 @@ describe("estimate publication window", () => {
 		});
 		expect((await consumer.latest())?.value.video).toBeUndefined();
 		const removed = track.latest();
-		advance(1000);
+		await advance(1000);
 		expect(track.latest()).toBe(removed);
 	});
 
 	test("closing the last output cancels its trailing timer", async () => {
-		const { effect, consumer, estimate } = fixture();
+		const { producer, effect, consumer, estimate } = fixture();
 		await consumer.latest();
 		estimate(1);
 		await consumer.latest();
 		estimate(2);
 		effect.close();
-		expect(timers).toHaveLength(0);
+		await advance(1000);
+
+		// The window closed with the output, so a new subscriber's first estimate is immediate.
+		const again = new Effect();
+		scopes.push(again);
+		const track = new Track.Producer("catalog.json");
+		producer.serve(track, again);
+		const reader = new Json.Snapshot.Consumer<Catalog.Root>({ track: track.subscribe() });
+		await reader.latest();
+		estimate(3);
+		expect((await reader.latest())?.value.video?.renditions.v.jitter).toBe(Catalog.u53(3));
 	});
 	test("delay shares the window across tracks and new tracks remain immediate", async () => {
 		const { producer, track, consumer, estimate } = fixture();
 		await consumer.latest();
 		estimate(1);
 		await consumer.latest();
-		advance(10);
+		await advance(10);
 		producer.mutate((catalog) => {
 			if (!catalog.video) throw new Error("video missing");
 			catalog.video.renditions.v.delay = Catalog.u53(7);
 		});
 		const leading = track.latest();
-		advance(990);
+		await advance(990);
 		expect((await consumer.latest())?.value.video?.renditions.v.delay).toBe(Catalog.u53(7));
 		expect(track.latest()).toBe((leading ?? 0) + 1);
 		producer.mutate((catalog) => {
@@ -442,7 +438,7 @@ describe("estimate publication window", () => {
 		await consumer.latest();
 		estimate(1);
 		await consumer.latest();
-		advance(100);
+		await advance(100);
 		estimate(2);
 		producer.mutate((catalog) => {
 			catalog.scte35 = { jitter: 3 };
@@ -450,9 +446,9 @@ describe("estimate publication window", () => {
 		expect((await consumer.latest())?.value.scte35).toEqual({ jitter: 3 });
 		estimate(3);
 		const folded = track.latest();
-		advance(900);
+		await advance(900);
 		expect(track.latest()).toBe(folded);
-		advance(100);
+		await advance(100);
 		expect((await consumer.latest())?.value.video?.renditions.v.jitter).toBe(Catalog.u53(3));
 	});
 });

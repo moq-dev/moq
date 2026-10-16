@@ -3,7 +3,7 @@
 //! Each case runs several fresh connections, since the losses this guards against were
 //! races between the peer's close and whatever the transport reported next.
 
-#![cfg(all(feature = "noq", feature = "websocket"))]
+#![cfg(all(feature = "quic", feature = "websocket"))]
 
 use std::time::Duration;
 

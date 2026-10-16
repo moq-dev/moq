@@ -1193,10 +1193,9 @@ fn is_cache_miss(err: &moq_net::Error) -> bool {
 
 /// True if the bound publisher is gone, so a listed segment can never be served.
 ///
-/// A disconnect that crossed a session arrives as `Error::Session(SessionError::Cancel)`;
-/// locally it is [`moq_net::Error::Dropped`]. The bound broadcast being closed is the
-/// condition: matching a session cancel alone would 404 a clean close while the publisher
-/// is still live.
+/// An application dropping its producer, or a local cancellation, leaves the track
+/// unservable. A session-scoped cancellation alone can leave its publisher live,
+/// so it only counts once the bound broadcast closed.
 fn is_gone_publisher(err: &moq_net::Error, broadcast: &moq_net::broadcast::Consumer) -> bool {
 	broadcast.is_closed() || matches!(err, moq_net::Error::Dropped | moq_net::Error::Cancel)
 }

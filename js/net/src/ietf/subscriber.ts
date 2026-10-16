@@ -1,3 +1,4 @@
+import { Milli, Nano } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
@@ -22,7 +23,7 @@ import { finalSequence, hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverl
 import * as Path from "../path.ts";
 import { type Cursor, Reader, type Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
-import { Milli, type Timescale, type Timestamp } from "../time.ts";
+import type { Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
@@ -34,7 +35,14 @@ import * as Cluster from "./cluster.ts";
 import { ObjectDatagram } from "./datagram.ts";
 import { requestReason, toRequestCode } from "./error.ts";
 import * as Namespace from "./namespace.ts";
-import { decodeObjectTime, Frame, type Group as GroupMessage, hasFirstObjectBit, ObjectIdGap } from "./object.ts";
+import {
+	decodeObjectTime,
+	EndOfTrackProperties,
+	Frame,
+	type Group as GroupMessage,
+	hasFirstObjectBit,
+	ObjectIdGap,
+} from "./object.ts";
 import { fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishDone, PublishError, publishDoneClean } from "./publish.ts";
 import {
@@ -688,7 +696,7 @@ export class Subscriber {
 			// Returning demand keeps the same setup and its original deadline.
 			const accepted = withTimeout(
 				setup,
-				SUBSCRIBE_OK_TIMEOUT_MS,
+				Nano.fromMilli(Milli(SUBSCRIBE_OK_TIMEOUT_MS)),
 				`subscribe timed out after ${SUBSCRIBE_OK_TIMEOUT_MS}ms waiting for SUBSCRIBE_OK (browser stream limit reached?)`,
 			);
 			for (;;) {
@@ -1340,7 +1348,14 @@ export class Subscriber {
 				return;
 			}
 			if (e instanceof ObjectIdGap) console.warn(`unsupported object gap: ${reason(e)}`);
-			if (e instanceof ProtocolViolation || (e instanceof StreamError && e.code === StreamCode.MalformedTrack)) {
+			if (e instanceof EndOfTrackProperties) {
+				// The group before the marker is complete; only the track's end can't be carried.
+				producer?.close();
+				track.close(e);
+			} else if (
+				e instanceof ProtocolViolation ||
+				(e instanceof StreamError && e.code === StreamCode.MalformedTrack)
+			) {
 				// The publisher broke the track's end or its content, which no later group can repair.
 				producer?.close(e);
 				track.close(e);

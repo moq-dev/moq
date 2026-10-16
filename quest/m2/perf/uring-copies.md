@@ -9,7 +9,7 @@ supports zero-copy, with a measured before/after.
 
 Found in the 2026-09-30 fork planning; none needs a QUIC API change:
 
-- Egress: `quic/noq/connection.rs` copies each GSO train from `scratch` into
+- Egress: `quic/driver/connection.rs` copies each GSO train from `scratch` into
   the TX buffer. Hand the TX pool's `Vec` to `poll_transmit` directly; it
   encrypts in place and only reserves when capacity is short.
 - Stream send: moq-net's `write_chunk(Bytes)` falls back to the trait's
@@ -22,8 +22,4 @@ Found in the 2026-09-30 fork planning; none needs a QUIC API change:
   Copy once per completion and split it into segments.
 
 The clock-read fix is [moq-uring on moq-clock](/quest/m1/time/uring.md).
-Measure with the echo benches and `just bench`. Paths above are pre-fork names.
-
-## Required
-
-- [Hard fork](/quest/m1/quic/fork/README.md) - the copies are removed on `moq-quic`, not the frozen fork
+Measure with the echo benches and `just bench`.
