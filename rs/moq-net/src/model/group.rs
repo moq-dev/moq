@@ -2898,6 +2898,48 @@ mod test {
 
 	#[test]
 	#[cfg(feature = "async")]
+	fn keep_alive_restarts_expiry_within_one_sampled_tick() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(std::time::Duration::from_secs(1)));
+		let (producer, consumer) = prefetched_consumer(&pool, std::time::Duration::MAX);
+		consumer.keep_alive();
+		let stamp = producer.cache_accessed();
+		assert_eq!(producer.cache_accessed_tick(Some(pool.now())), Some(pool.now()));
+		consumer.keep_alive();
+		assert_eq!(
+			producer.cache_accessed(),
+			stamp,
+			"same-tick reads do not inflate eviction rank"
+		);
+		assert_eq!(
+			producer.cache_accessed_tick(None),
+			None,
+			"every frame resets the idle clock"
+		);
+	}
+
+	#[test]
+	#[cfg(feature = "async")]
+	fn keep_alive_keeps_the_counted_access_mean_balanced() {
+		let pool = cache::Pool::new(cache::Config::default().with_capacity(1_000_000));
+		let (producer, consumer) = prefetched_consumer(&pool, std::time::Duration::MAX);
+		producer.cache_demote();
+		consumer.keep_alive();
+		assert_eq!(pool.average(), Some(producer.cache_accessed()));
+		let before = producer.cache_accessed();
+		pool.step(std::time::Duration::from_millis(100));
+		consumer.keep_alive();
+		assert!(producer.cache_accessed() > before);
+		assert_eq!(pool.average(), Some(producer.cache_accessed()));
+		producer.abort(Error::Cancel).unwrap();
+		assert_eq!(
+			pool.average(),
+			None,
+			"removal subtracts the same sample that was inserted"
+		);
+	}
+
+	#[test]
+	#[cfg(feature = "async")]
 	fn prefetch_refresh_honors_pool_expiry() {
 		let config = cache::Config::default().with_expiry(std::time::Duration::from_secs(1));
 		let pool = cache::Pool::new(config);
