@@ -1285,6 +1285,114 @@ async fn split_accept_close_during_pending_accept() {
     assert_eq!(server.open_connections(), 0);
 }
 
+/// An accept still in progress when the endpoint closes will send a close of its own, so
+/// `wait_all_draining` must not report the endpoint drained until that accept finishes.
+#[tokio::test]
+async fn split_accept_close_holds_off_all_draining() {
+    let _guard = subscribe();
+    let BlockedHandshake {
+        client,
+        server,
+        blocker,
+        release_guard: _release_guard,
+        accept,
+        connect,
+    } = blocked_handshake(b"test", b"test");
+
+    wait_for_blocked_handshake(blocker.clone()).await;
+    server.close(0u32.into(), b"closing");
+
+    let mut draining = pin!(server.wait_all_draining());
+    let (waker, _) = new_count_waker();
+    assert!(
+        draining
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+
+    blocker.release();
+    // The waiter parked above resolves only if the accept's close is accounted for and announced.
+    timeout(Duration::from_secs(5), draining).await.unwrap();
+    assert!(await_connection(connect).await.is_err());
+
+    let _ = await_connection(accept).await;
+    wait_idle(&server).await;
+    wait_idle(&client).await;
+}
+
+/// `close` refuses attempts still queued for `accept`, so the peer hears back before
+/// `wait_all_draining` lets the caller release the socket.
+#[tokio::test]
+async fn close_refuses_queued_incoming() {
+    let _guard = subscribe();
+    let factory = EndpointFactory::new();
+    let server = factory.endpoint();
+    let client = factory.endpoint();
+
+    let connect = client
+        .connect(server.local_addr().unwrap(), "localhost")
+        .unwrap();
+    timeout(Duration::from_secs(5), server.wait_queued())
+        .await
+        .unwrap();
+
+    server.close(0u32.into(), b"closing");
+    timeout(Duration::from_secs(5), server.wait_all_draining())
+        .await
+        .unwrap();
+    assert!(server.accept().await.is_none());
+
+    // Without the refusal, the attempt sits in the queue and the client waits out its timeout.
+    let error = timeout(Duration::from_secs(5), connect)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::quic::driver::ConnectionError::ConnectionClosed(close)
+            if close.error_code == moq_quic::TransportErrorCode::CONNECTION_REFUSED
+    ));
+}
+
+/// Taking the last queued attempt and refusing it sends no event, so `accept` itself must wake a
+/// parked `wait_all_draining`.
+#[tokio::test]
+async fn refused_incoming_wakes_all_draining_waiter() {
+    let _guard = subscribe();
+    let factory = EndpointFactory::new();
+    let server = factory.endpoint();
+    let client = factory.endpoint();
+
+    let connect = client
+        .connect(server.local_addr().unwrap(), "localhost")
+        .unwrap();
+    timeout(Duration::from_secs(5), server.wait_queued())
+        .await
+        .unwrap();
+
+    let mut draining = pin!(server.wait_all_draining());
+    let (waker, wake_counter) = new_count_waker();
+    assert!(
+        draining
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+    assert_eq!(wake_counter.wakes(), 0);
+
+    server.accept().await.unwrap().refuse();
+    assert!(wake_counter.wakes() > 0);
+    timeout(Duration::from_secs(5), draining).await.unwrap();
+
+    assert!(
+        timeout(Duration::from_secs(5), connect)
+            .await
+            .unwrap()
+            .is_err()
+    );
+}
+
 /// The endpoint driver may exit while an accept runs without the lock. The connection registered
 /// afterwards must still be told that the driver is gone, so that its `Connecting` fails promptly
 /// and `wait_idle` does not wait on a connection nobody drives.

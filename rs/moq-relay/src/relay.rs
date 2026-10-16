@@ -115,7 +115,12 @@ impl Relay {
 	/// reading key material, spawning the cache governor), so a returned `Relay`
 	/// reports its ephemeral ports and a taken port fails here; no session is
 	/// admitted until [`Self::run`] drives it.
-	pub async fn load(mut config: Config) -> anyhow::Result<Self> {
+	pub async fn load(config: Config) -> anyhow::Result<Self> {
+		// Keep the large debug state machine off the embedder's main-thread stack.
+		Box::pin(Self::load_inner(config)).await
+	}
+
+	async fn load_inner(mut config: Config) -> anyhow::Result<Self> {
 		config.resolve()?;
 		let resolved_config = config.clone();
 		let drain_timeout = config.drain_timeout();
@@ -512,6 +517,11 @@ impl Relay {
 	/// This is also the embedding loop. Extra routes go on via [`Self::with_web`]
 	/// / [`Self::with_internal`] before calling this; cloned handles outlive it.
 	pub async fn run(self) -> anyhow::Result<()> {
+		// Serving branches must not inflate the caller's stack frame.
+		Box::pin(self.run_inner()).await
+	}
+
+	async fn run_inner(self) -> anyhow::Result<()> {
 		let Relay {
 			ready,
 			mut server,

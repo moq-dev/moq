@@ -54,6 +54,7 @@ impl Log {
 			.with_default_directive(self.level().into()) // Default to our -q/-v args
 			.from_env_lossy() // Allow overriding with RUST_LOG
 			.add_directive("h2=warn".parse()?)
+			.add_directive("moq_quic=info".parse()?)
 			.add_directive("moq_tokio::quic::driver=info".parse()?)
 			.add_directive("tungstenite=info".parse()?)
 			.add_directive("rustls=info".parse()?)

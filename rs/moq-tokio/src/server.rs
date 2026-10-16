@@ -708,6 +708,8 @@ impl Server {
 						// this one, so stop accepting at all and let the owner fail loudly.
 						Err(err) => {
 							tracing::error!(%err, "a stream accept loop died");
+							self.shutdown().await;
+							if err.is_panic() { std::panic::resume_unwind(err.into_panic()); }
 							return None;
 						}
 					}
@@ -868,8 +870,8 @@ impl Listener {
 	/// [Request::reject] to complete the handshake.
 	///
 	/// `None` means nothing can arrive again: every configured listener has stopped
-	/// with no handshake in flight, or one of them died (logged), which ends them all
-	/// rather than serving on a partial set of transports. Everything is already
+	/// with no handshake in flight. An accept-loop panic closes every listener before
+	/// resuming the panic in this call. Everything is already
 	/// bound, so a bind failure cannot arrive here. No process signal is watched:
 	/// race this against your own ctrl-C future and drop the listener if you want
 	/// one to stop the loop.
@@ -937,7 +939,8 @@ impl Drop for Listener {
 
 /// Complete one accepted [`Request`] and wait for the session to close.
 async fn serve_session(request: Request) -> crate::Result<()> {
-	let session = request.ok().await?;
+	let (session, driver) = request.ok().await?;
+	driver.await.map_err(|_| Error::Panic)??;
 	Err(session.closed().await.into())
 }
 
@@ -1689,12 +1692,14 @@ impl Request {
 		self
 	}
 
-	/// Accept the session, starting the MoQ session loops.
+	/// Accept the session and return its supervised driver task.
+	///
+	/// Await the driver before classifying the session close so a panic cannot look like cancellation.
 	///
 	/// Bounded by what remains of the handshake deadline: answering SETUP can wait
 	/// on a peer that withholds flow-control credit, which keep-alives would
 	/// otherwise hold open.
-	pub async fn ok(self) -> crate::Result<Session> {
+	pub async fn ok(self) -> crate::Result<(Session, tokio::task::JoinHandle<crate::Result<()>>)> {
 		let Request {
 			kind, deadline, active, ..
 		} = self;
@@ -1702,11 +1707,14 @@ impl Request {
 			Ok(request_into!(kind, request => {
 				let (session, driver) = request.ok().await?;
 				use tracing::Instrument;
-				tokio::spawn(crate::panic::isolate(async move {
-					let _active = active;
-					moq_net::time::run(driver).await
-				}).instrument(tracing::Span::current()));
-				session
+				let driver = tokio::spawn(async move {
+					crate::panic::isolate(async move {
+						let _active = active;
+						moq_net::time::run(driver).await;
+						Ok(())
+					}).await.unwrap_or(Err(Error::Panic))
+				}.instrument(tracing::Span::current()));
+				(session, driver)
 			}))
 		};
 		Deadline::bound(deadline.as_ref(), ok).await
@@ -2627,6 +2635,33 @@ mod tests {
 		let _ = std::fs::remove_file(&path);
 	}
 
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn a_panicked_accept_loop_ends_its_listener() {
+		let mut config = crate::listen::Config::default();
+		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		let mut listener = Config {
+			listen: config,
+			..Default::default()
+		}
+		.init()
+		.unwrap()
+		.listen()
+		.await
+		.unwrap();
+		let address = listener.tcp_local_addr().unwrap();
+		listener
+			.server
+			.streams
+			.tasks
+			.push(tokio::spawn(async { panic!("injected accept loop panic") }));
+		assert!(crate::panic::isolate(listener.accept()).await.is_none());
+		assert!(
+			tokio::net::TcpListener::bind(address).await.is_ok(),
+			"a dead accept loop left its listener bound"
+		);
+	}
+
 	/// Closing a listener must release its TCP socket before returning. Reusing it
 	/// afterwards is unrepresentable: `listen` consumes the `Server` and `close`
 	/// consumes the `Listener`.
@@ -2677,7 +2712,7 @@ mod tests {
 		let connection = client.with_reconnect(false).connect(url);
 
 		let request = listener.accept().await.expect("no incoming connection");
-		let session = request.with_publisher(&origin).ok().await.expect("server handshake");
+		let (session, _driver) = request.with_publisher(&origin).ok().await.expect("server handshake");
 
 		listener.close().await;
 		std::net::UdpSocket::bind(addr).expect("close must release the QUIC socket");

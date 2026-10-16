@@ -447,6 +447,7 @@ impl ffi::ReturnCode for Error {
 			Error::Audio(_) => MOQ_ERROR_AUDIO,
 			Error::BufferNotConsumed => MOQ_ERROR_BUFFER_NOT_CONSUMED,
 			Error::GroupNotFound => MOQ_ERROR_GROUP_NOT_FOUND,
+			Error::Native(moq_tokio::Error::Panic) => MOQ_ERROR_PANIC,
 			Error::Native(_) => MOQ_ERROR_NATIVE,
 			Error::Unauthorized => MOQ_ERROR_UNAUTHORIZED,
 			Error::Forbidden => MOQ_ERROR_FORBIDDEN,

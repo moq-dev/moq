@@ -6,6 +6,7 @@ use crate::quic::web::{ConnectError, SettingsError};
 
 /// An error returned when connecting to a WebTransport endpoint.
 #[derive(Error, Debug, Clone)]
+#[non_exhaustive]
 pub enum ClientError {
 	#[error("unexpected end of stream")]
 	UnexpectedEnd,
@@ -39,6 +40,7 @@ pub enum ClientError {
 /// An errors returned by [`crate::quic::web::Session`], split based on if they are underlying QUIC errors or
 /// WebTransport errors.
 #[derive(Clone, Error, Debug)]
+#[non_exhaustive]
 pub enum SessionError {
 	#[error("connection error: {0}")]
 	ConnectionError(crate::quic::driver::ConnectionError),
@@ -140,6 +142,7 @@ impl CloseReason {
 
 /// An error that can occur when reading/writing the WebTransport stream header.
 #[derive(Clone, Error, Debug)]
+#[non_exhaustive]
 pub enum WebTransportError {
 	#[error("closed: code={0} reason={1}")]
 	Closed(u32, String),
@@ -156,6 +159,7 @@ pub enum WebTransportError {
 
 /// An error when writing to [`crate::quic::web::SendStream`]. Similar to [`crate::quic::driver::WriteError`].
 #[derive(Clone, Error, Debug)]
+#[non_exhaustive]
 pub enum WriteError {
 	#[error("STOP_SENDING: {0}")]
 	Stopped(u32),
@@ -188,6 +192,7 @@ impl From<crate::quic::driver::WriteError> for WriteError {
 
 /// An error when reading from [`crate::quic::web::RecvStream`]. Similar to [`crate::quic::driver::ReadError`].
 #[derive(Clone, Error, Debug)]
+#[non_exhaustive]
 pub enum ReadError {
 	#[error("session error: {0}")]
 	SessionError(#[from] SessionError),
@@ -223,6 +228,7 @@ impl From<crate::quic::driver::ReadError> for ReadError {
 
 /// An error returned by [`crate::quic::web::RecvStream::read_exact`]. Similar to [`crate::quic::driver::ReadExactError`].
 #[derive(Clone, Error, Debug)]
+#[non_exhaustive]
 pub enum ReadExactError {
 	#[error("finished early")]
 	FinishedEarly(usize),
@@ -242,6 +248,7 @@ impl From<crate::quic::driver::ReadExactError> for ReadExactError {
 
 /// An error returned by [`crate::quic::web::RecvStream::read_to_end`]. Similar to [`crate::quic::driver::ReadToEndError`].
 #[derive(Clone, Error, Debug)]
+#[non_exhaustive]
 pub enum ReadToEndError {
 	#[error("too long")]
 	TooLong,
@@ -272,6 +279,7 @@ impl From<crate::quic::driver::ClosedStream> for ClosedStream {
 
 /// An error returned when receiving a new WebTransport session.
 #[derive(Error, Debug, Clone)]
+#[non_exhaustive]
 pub enum ServerError {
 	#[error("unexpected end of stream")]
 	UnexpectedEnd,

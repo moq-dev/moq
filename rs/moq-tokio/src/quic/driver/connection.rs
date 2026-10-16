@@ -1422,6 +1422,7 @@ fn wake_all_notify(wakers: &mut FxHashMap<StreamId, Arc<Notify>>) {
 
 /// Errors that can arise when sending a datagram
 #[derive(Debug, Error, Clone, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum SendDatagramError {
     /// The peer does not support receiving datagram frames
     #[error("datagrams not supported by peer")]

@@ -11,7 +11,7 @@ splits a native P2P session's socket into ICE's STUN and QUIC.
 ## Plan
 
 Decided 2026-10-13: moved from the m2 [one-port](/quest/m2/one-port/README.md)
-line into m1 whole, with [shard steering](/quest/m1/p2p/shard-steering.md),
+line into m1 whole, with shard steering,
 so [native P2P pairs](/quest/m1/p2p/native-quic.md) share one demux with the
 relay rather than a P2P-only classifier (maintainer's choice over splitting
 the classifier out). A native P2P session's socket uses the same classifier:
@@ -32,8 +32,8 @@ one. Bound queues per stack with a per-source drop rather than unbounded
 growth; report drops as a counter.
 
 QUIC: the server takes the virtual socket through whatever the QUIC stack
-accepts: the driver's `new_with_abstract_socket` on `moq-quic`. QUIC-bit greasing is already off, from
-[shard steering](/quest/m1/p2p/shard-steering.md).
+accepts: the driver's `new_with_abstract_socket` on `moq-quic`. QUIC-bit
+greasing is already off for sharded endpoints.
 
 STUN: an ICE connectivity check is a Binding request carrying USERNAME, so
 it goes to the WebRTC hook, whose mux reads the local ufrag from it. A
@@ -56,10 +56,6 @@ rtc-feed, because `moq-rtc` is an upstream, generic crate.
 Tests: a unit test per first-byte class routes to the right virtual socket,
 including the WebRTC hook; an integration test runs a QUIC client against
 the demuxed port. `moq-relay` docs list the port once.
-
-## Required
-
-- [Steer only QUIC by connection ID](/quest/m1/p2p/shard-steering.md) - the flow table is per shard, so each non-QUIC flow has to stay on one
 
 ## Related
 

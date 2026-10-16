@@ -2533,6 +2533,7 @@ mod tests {
 			fill: None,
 			properties_wanted: true,
 			forward: true,
+			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
 		}
@@ -2951,6 +2952,7 @@ mod tests {
 			fill: None,
 			properties_wanted: true,
 			forward: true,
+			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
 		};

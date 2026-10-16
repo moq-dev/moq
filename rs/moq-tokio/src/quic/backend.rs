@@ -627,8 +627,12 @@ impl driver::AsyncUdpSocket for Socket {
 		// Only the endpoint driver receives, so the one readiness waker is enough.
 		loop {
 			ready!(io.poll_recv_ready(cx))?;
-			if let Ok(res) = io.try_io(tokio::io::Interest::READABLE, || self.state.recv(io.into(), bufs, meta)) {
-				return Poll::Ready(Ok(res));
+			match io.try_io(tokio::io::Interest::READABLE, || self.state.recv(io.into(), bufs, meta)) {
+				Ok(res) => return Poll::Ready(Ok(res)),
+				// `try_io` clears readiness only for `WouldBlock`; retrying any other error
+				// would spin, since `poll_recv_ready` completes at once and the recv fails again.
+				Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+				Err(err) => return Poll::Ready(Err(err)),
 			}
 		}
 	}
@@ -768,6 +772,8 @@ impl Server {
 			if load_balancer.is_some() {
 				return Err(Error::ShardWithQuicLb);
 			}
+			// The steering filter recognizes short headers by their fixed bit.
+			endpoint_config.grease_quic_bit(false);
 			tracing::debug!(
 				index = shard.index(),
 				count = shard.count(),
@@ -956,9 +962,6 @@ struct ShardIdGenerator {
 }
 
 impl ShardIdGenerator {
-	/// Only the first byte is spoken for; the rest stays random.
-	const LEN: usize = 8;
-
 	fn new(shard: crate::listen::Shard) -> Self {
 		Self { shard }
 	}
@@ -966,15 +969,11 @@ impl ShardIdGenerator {
 
 impl driver::ConnectionIdGenerator for ShardIdGenerator {
 	fn generate_cid(&mut self) -> driver::ConnectionId {
-		use rand::RngExt;
-		let mut cid = Vec::with_capacity(Self::LEN);
-		cid.push(moq_sock::shard::cid_prefix(self.shard));
-		cid.extend(rand::rng().random_iter::<u8>().take(Self::LEN - 1));
-		driver::ConnectionId::new(cid.as_slice())
+		driver::ConnectionId::new(&moq_sock::shard::cid(self.shard))
 	}
 
 	fn cid_len(&self) -> usize {
-		Self::LEN
+		moq_sock::shard::CID_LEN
 	}
 
 	fn cid_lifetime(&self) -> Option<Duration> {

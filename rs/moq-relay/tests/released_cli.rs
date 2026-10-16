@@ -89,9 +89,13 @@ const RELEASED: &[(&str, Option<&str>)] = &[
 	("server-quic-qlog", Some("MOQ_SERVER_QUIC_QLOG")),
 	("server-tcp-bind", Some("MOQ_SERVER_TCP_BIND")),
 	("server-tls-root", Some("MOQ_SERVER_TLS_ROOT")),
+	#[cfg(all(feature = "uds", unix))]
 	("server-unix-allow-gid", Some("MOQ_SERVER_UNIX_ALLOW_GID")),
+	#[cfg(all(feature = "uds", unix))]
 	("server-unix-allow-pid", Some("MOQ_SERVER_UNIX_ALLOW_PID")),
+	#[cfg(all(feature = "uds", unix))]
 	("server-unix-allow-uid", Some("MOQ_SERVER_UNIX_ALLOW_UID")),
+	#[cfg(all(feature = "uds", unix))]
 	("server-unix-bind", Some("MOQ_SERVER_UNIX_BIND")),
 	("server-version", Some("MOQ_SERVER_VERSION")),
 	("stats-depth", Some("MOQ_STATS_DEPTH")),
