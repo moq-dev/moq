@@ -137,9 +137,9 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		}
 	}
 
-	/// The recorded session end, or [`Error::Dropped`] when nothing recorded one.
+	/// The recorded session end, or cancellation when the dispatcher was dropped.
 	fn end_reason(&self) -> Error {
-		self.ended.lock().clone().unwrap_or(Error::Dropped)
+		self.ended.lock().clone().unwrap_or(Error::Cancel)
 	}
 
 	/// What pulling content across this session's link costs, added to the route cost
@@ -2812,6 +2812,77 @@ mod tests {
 		}
 	}
 
+	#[moq_net_sim::test]
+	async fn internal_cancel_without_a_recorded_session_end_is_cancel() {
+		let h = Harness::new(VERSION);
+		assert!(matches!(h.serve.subscriber.end_reason(), Error::Cancel));
+	}
+
+	#[moq_net_sim::test]
+	async fn internal_serve_preserves_an_abort_from_a_live_clone() {
+		for dynamic_first in [true, false] {
+			let h = Harness::new(VERSION);
+			let request = h._broadcast.reserve_track("pending").unwrap();
+			let mut serving = ServeLoop::new(&h.serve, request, Default::default(), None);
+			let other = h._broadcast.create_track("other", None).unwrap();
+			if !dynamic_first {
+				// Isolate the subscription-changed arm, which can observe a concurrent
+				// abort after the dynamic-request poll returned Pending.
+				serving.dynamic = other.dynamic();
+			}
+			serving.serving.clone().abort(Error::ProtocolViolation).unwrap();
+			assert!(matches!(
+				serving.poll(&h.serve, &kio::Waiter::noop()),
+				Poll::Ready(ServeEnd::GiveBack(Error::ProtocolViolation))
+			));
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn internal_tail_settle_preserves_the_session_error() {
+		use crate::transport::poll::Session as _;
+		let (session, mut peer) = crate::transport::memory::pair(Default::default());
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::sim(),
+			session,
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Handle::new(false),
+		});
+		let serve = TrackServe {
+			validity: Default::default(),
+			subscriber,
+			path: Path::new("room").to_owned(),
+			epoch: None,
+			name: "video".into(),
+		};
+		let broadcast = crate::broadcast::Info::new().produce();
+		let mut serving = ServeLoop::new(
+			&serve,
+			broadcast.reserve_track("video").unwrap(),
+			Default::default(),
+			None,
+		);
+		let _reader = serving.serving.subscribe(None);
+		let tail = kio::Producer::new(Tail::default());
+		serving.mode = ServeMode::Tail {
+			settle: Settle::new(&serve.subscriber.runtime, tail.consume()),
+			owed: Some(0..1),
+			streams: None,
+		};
+		assert!(serving.poll(&serve, &kio::Waiter::noop()).is_pending());
+		peer.close(crate::SessionError::Unauthorized.to_code(), "revoked");
+		assert!(matches!(
+			serving.poll(&serve, &kio::Waiter::noop()),
+			Poll::Ready(ServeEnd::GiveBack(Error::Session(crate::SessionError::Unauthorized)))
+		));
+	}
+
 	/// Mid-group demand: a subscriber resuming at frame 3 of group 5, capped by a later
 	/// bound in the same group.
 	fn mid_group_demand() -> Subscription {
@@ -5446,8 +5517,8 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 						return Poll::Ready(ServeEnd::Idle);
 					}
 					let mut cx = std::task::Context::from_waker(waiter.waker());
-					if self.closed.poll_closed(&mut cx).is_ready() {
-						return Poll::Ready(ServeEnd::GiveBack(Error::Dropped));
+					if let Poll::Ready(err) = self.closed.poll_closed(&mut cx) {
+						return Poll::Ready(ServeEnd::GiveBack(crate::lite::error::from_transport(err)));
 					}
 					return Poll::Pending;
 				}
@@ -5488,8 +5559,8 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 							}
 							continue;
 						}
-						// Our own producer is alive (we hold it); treat as terminal anyway.
-						Poll::Ready(Err(_)) => return Poll::Ready(ServeEnd::GiveBack(Error::Dropped)),
+						// A live clone can abort the producer with a specific cause.
+						Poll::Ready(Err(err)) => return Poll::Ready(ServeEnd::GiveBack(err)),
 						Poll::Pending => {}
 					}
 					match self.serving.poll_subscription_changed(waiter) {
@@ -5509,7 +5580,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 							}
 							continue;
 						}
-						Poll::Ready(Err(_)) => return Poll::Ready(ServeEnd::GiveBack(Error::Dropped)),
+						Poll::Ready(Err(err)) => return Poll::Ready(ServeEnd::GiveBack(err)),
 						Poll::Pending => {}
 					}
 

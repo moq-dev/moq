@@ -74,7 +74,6 @@ optimization.
 - [kio channel contention](/quest/m2/perf/kio-channel-contention/README.md) - workers spend less time blocked on kio channel-state mutexes (up to 215% of worker CPU on chat at 16 tokio workers), via a version counter, per-thread spikes, and an append-only log
 - [Relay profiling](/quest/m2/perf/lock-profile.md) - one recipe captures lock wait by stack (first), CPU stacks, and heap profiles, with no code in kio
 - [One enter per turn](/quest/m2/perf/uring-one-enter.md) - a parking turn pays one io_uring_enter, submits flush deferred completions, and SQEs per enter is a counter
-- [Group cost](/quest/m2/perf/group-cost.md) - count and cut the allocations and time spent relaying one small group to one viewer
 - [Run to quiescence](/quest/m2/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass and train budget that keeps the fairness rule
 - [Demand aggregate](/quest/m2/perf/demand-aggregate.md) - a track subscribe, leave, or preference update no longer walks every reader of the track
 - [Ingest batch](/quest/m2/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per burst of whole frames instead of per frame
