@@ -4526,6 +4526,7 @@ impl Subscriber {
 		// delivered whole here, so count it as the single-frame group it stands in for.
 		if let Poll::Ready(Ok(Some(datagram))) = &res {
 			meter.datagram(datagram.payload.len() as u64);
+			self.answer_new_group(datagram.sequence);
 		}
 		res
 	}
@@ -5203,6 +5204,28 @@ mod test {
 		assert_eq!(got.sequence, seq);
 		assert_eq!(got.timestamp, Some(ts));
 		assert_eq!(&got.payload[..], b"hello");
+	}
+
+	/// A datagram answers a NEW_GROUP_REQUEST the way a group does, so the request never
+	/// outlives its answer.
+	#[test]
+	fn a_datagram_answers_a_new_group_request() {
+		let info = Info {
+			dynamic_groups: true,
+			..Info::timed()
+		};
+		let mut producer = track_producer("test", info);
+		producer.append_datagram(Timestamp::ZERO, &b"a"[..]).unwrap();
+		let mut dg = producer.subscribe(Subscription {
+			new_group: NewGroup::new(0, Some(0)),
+			..Default::default()
+		});
+		assert_eq!(recv_datagram(&mut dg).sequence, 0);
+		assert!(producer.new_group().is_some(), "the datagram it joined on asks still");
+
+		producer.append_datagram(Timestamp::ZERO, &b"b"[..]).unwrap();
+		assert_eq!(recv_datagram(&mut dg).sequence, 1);
+		assert_eq!(producer.new_group(), None);
 	}
 
 	#[test]
