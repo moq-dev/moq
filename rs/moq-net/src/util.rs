@@ -54,10 +54,14 @@ fn future_task(mut task: MaybeSendBox<'static, ()>) -> MaybeSendTask {
 /// The building block for racing "watchdog" futures whose clean completion should
 /// not end the race (only their failure should).
 #[cfg(feature = "async")]
-pub(crate) async fn err_only<E>(fut: impl Future<Output = Result<(), E>>) -> E {
-	match fut.await {
-		Err(err) => err,
-		Ok(()) => std::future::pending().await,
+pub(crate) fn err_only<E>(
+	fut: impl Future<Output = Result<(), E>> + kio::MaybeSend,
+) -> impl Future<Output = E> + kio::MaybeSend {
+	async move {
+		if let Err(err) = fut.await {
+			return err;
+		}
+		std::future::pending().await
 	}
 }
 

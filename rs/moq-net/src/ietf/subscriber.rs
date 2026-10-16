@@ -3443,7 +3443,14 @@ where
 		let passthrough = !fill.read().outstanding() && resume.is_none();
 		let opened = {
 			let mut opening = track.clone();
-			let mut open = std::pin::pin!(self.open_group(stream, &mut opening, &fill, resume, &group, &mut reading));
+			let mut open = std::pin::pin!(crate::util::send(self.open_group(
+				stream,
+				&mut opening,
+				&fill,
+				resume,
+				&group,
+				&mut reading
+			)));
 			kio::wait(|waiter| {
 				if let Poll::Ready(err) = track.poll_closed(waiter) {
 					return Poll::Ready(Err(err));
@@ -3977,7 +3984,14 @@ where
 		// track does not close a group producer, since those lifecycles are independent.
 		let res = {
 			let mut serving = track.clone();
-			let mut serve = std::pin::pin!(crate::util::send(self.run_fill(stream, &mut serving, timescale, joining, largest, resume)));
+			let mut serve = std::pin::pin!(crate::util::send(self.run_fill(
+				stream,
+				&mut serving,
+				timescale,
+				joining,
+				largest,
+				resume
+			)));
 			kio::wait(|waiter| {
 				if let Poll::Ready(err) = track.poll_closed(waiter) {
 					return Poll::Ready(Err(err));
@@ -4606,8 +4620,13 @@ where
 		let closed = producer.clone();
 		let mut producer = crate::recv::Group::new(producer);
 		let res = {
-			let mut receive =
-				std::pin::pin!(self.recv_group_fetch_objects(stream, &mut producer, start, end, timescale));
+			let mut receive = std::pin::pin!(crate::util::send(self.recv_group_fetch_objects(
+				stream,
+				&mut producer,
+				start,
+				end,
+				timescale
+			)));
 			kio::wait(|waiter| {
 				if let Poll::Ready(res) = waiter.poll_future(receive.as_mut()) {
 					return Poll::Ready(res);
