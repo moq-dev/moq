@@ -58,7 +58,8 @@ std::string DialSchemeLabel(const std::string &url)
 MoQError::Code FailureCode(const moq::Error &error)
 {
 	const auto &variant = error.get_variant();
-	if (std::holds_alternative<moq::Error::kUnauthorized>(variant))
+	if (std::holds_alternative<moq::Error::kUnauthorized>(variant) ||
+	    std::holds_alternative<moq::Error::kExpired>(variant))
 		return MoQError::Code::Unauthorized;
 	if (std::holds_alternative<moq::Error::kForbidden>(variant))
 		return MoQError::Code::Forbidden;
@@ -67,7 +68,8 @@ MoQError::Code FailureCode(const moq::Error &error)
 	if (const auto *protocol = std::get_if<moq::Error::kProtocol>(&variant)) {
 		if (protocol->details.kind == moq::ProtocolKind::kTooManyRequests)
 			return MoQError::Code::TooManyRequests;
-		if (protocol->details.kind == moq::ProtocolKind::kUnauthorized)
+		if (protocol->details.kind == moq::ProtocolKind::kUnauthorized ||
+		    protocol->details.kind == moq::ProtocolKind::kExpired)
 			return MoQError::Code::Unauthorized;
 	}
 	return MoQError::Code::Other;

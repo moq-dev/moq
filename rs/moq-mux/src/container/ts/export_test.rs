@@ -1022,8 +1022,17 @@ async fn export_trims_leading_pictures_after_each_delivery_break() {
 		group.finish().unwrap();
 	}
 	track.finish().unwrap();
-	let ts = drain(consumer).await;
-	let (video, _) = collect_pes_pts(&ts);
+	let mut export = open_export(crate::source::announced(&consumer).await)
+		.await
+		.unwrap()
+		.with_delay(RECORDING_MAX_AGE)
+		.with_replay();
+	let bytes: Vec<u8> = drain_frames(&mut export)
+		.await
+		.iter()
+		.flat_map(|frame| frame.payload.iter().copied())
+		.collect();
+	let (video, _) = collect_pes_pts(&bytes);
 	let expected: Vec<_> = [100, 110, 200, 180, 190, 210, 400, 410]
 		.into_iter()
 		.map(|ms| ms * 90)
@@ -1031,6 +1040,12 @@ async fn export_trims_leading_pictures_after_each_delivery_break() {
 	assert_eq!(
 		video, expected,
 		"continuous leading pictures survive; only join and later-hole orphans are trimmed"
+	);
+	let stats = export.stats();
+	assert_eq!(
+		(stats.dropped, stats.trimmed),
+		(2, 2),
+		"the join's orphans precede the output; the hole's are lost in it"
 	);
 }
 
@@ -1591,7 +1606,9 @@ async fn export_skips_an_unconfirmed_ac3_sync_word_at_a_join() {
 }
 
 /// A declared marker breaks the timeline even where the timestamps run on, so a frame left
-/// unfinished before it is dropped rather than completed with the first bytes after it.
+/// unfinished before it is dropped rather than completed with the first bytes after it. A
+/// data track declares the break by skipping a sequence after its group ended, so nothing it
+/// held before the break is trimmed.
 #[tokio::test(start_paused = true)]
 async fn export_drops_an_ac3_frame_cut_by_a_marker() {
 	let stream: Vec<u8> = (0..4).flat_map(ac3_frame).collect();
@@ -5597,6 +5614,158 @@ async fn tune_in_does_not_wait_on_dropped_audio() {
 	tokio::time::advance(2 * delay + Duration::from_micros(4 * VIDEO_US)).await;
 	out.extend(poll_frames(&mut export));
 	assert!(!out.is_empty(), "the tune-in waited on audio it had dropped");
+}
+
+/// A join whose first group the publisher cuts short, as a zero-budget live-edge subscribe
+/// is cut when the next group lands before the raised budget reaches it (moq-dev/moq#5565),
+/// starts at the next group: nothing of the cut-off start goes out, the next keyframe leads
+/// the audio, and the rest is intact.
+#[tokio::test(start_paused = true)]
+async fn a_start_group_cut_short_starts_at_the_next() {
+	use crate::container::Container as _;
+
+	let delay = Duration::from_secs(1);
+	let mut rig = Interleave::new().await;
+	let mut export = rig.export(delay).await;
+	let track = rig.video.track().clone();
+	let wire = HangContainer::Legacy(crate::container::Kind::Video);
+	let picture = |tick: u64| {
+		let keyframe = tick.is_multiple_of(GOP);
+		let slice = vec![if keyframe { 0x65u8 } else { 0x41 }; 400];
+		Frame {
+			timestamp: Timestamp::from_micros(tick * VIDEO_US).unwrap(),
+			duration: None,
+			payload: length_prefixed(&[&slice]),
+			keyframe,
+		}
+	};
+	let mut out = Vec::new();
+
+	// The first group delivers five pictures before the next group lands and the publisher
+	// resets it.
+	let mut cut = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+	for tick in 0..5 {
+		rig.at(tick * VIDEO_US).await;
+		wire.write(&mut cut, &[picture(tick)]).unwrap();
+		out.extend(poll_frames(&mut export));
+		rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
+	}
+	let mut group = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+	wire.write(&mut group, &[picture(GOP)]).unwrap();
+	cut.abort(moq_net::Error::Old).unwrap();
+	for tick in 5..GOP {
+		rig.at(tick * VIDEO_US).await;
+		out.extend(poll_frames(&mut export));
+		rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
+	}
+	for tick in GOP + 1..4 * GOP {
+		rig.at(tick * VIDEO_US).await;
+		if tick.is_multiple_of(GOP) {
+			group.finish().unwrap();
+			group = track
+				.create_group(moq_net::group::Info { sequence: tick / GOP })
+				.unwrap();
+		}
+		wire.write(&mut group, &[picture(tick)]).unwrap();
+		out.extend(poll_frames(&mut export));
+		rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
+	}
+	group.finish().unwrap();
+	rig.finish();
+	out.extend(drain_frames(&mut export).await);
+
+	let ts: Vec<u8> = out.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	let (video, audio) = collect_pes_pts(&ts);
+	let pts = |tick: u64| tick * VIDEO_US * 90 / 1_000;
+	assert_eq!(
+		video,
+		(GOP..4 * GOP).map(pts).collect::<Vec<_>>(),
+		"the export starts at the next group, whole"
+	);
+	assert!(
+		audio.iter().all(|&p| p >= pts(GOP)),
+		"no audio leads the keyframe the export starts at: {audio:?}"
+	);
+	let stats = export.stats();
+	assert_eq!(stats.dropped, 0, "nothing that went out lost a frame");
+	assert_eq!(stats.gaps, 1, "the cut is counted");
+	assert!(stats.trimmed >= 5, "the cut-off start is counted: {}", stats.trimmed);
+}
+
+/// Audio released while the video's start moves to its next group is dropped ahead of the
+/// keyframe, and its track has still sent nothing: audio that then misses its deadline is
+/// trimmed with it, not counted as lost from the output.
+#[tokio::test(start_paused = true)]
+async fn audio_dropped_ahead_of_a_moved_start_is_not_started() {
+	use crate::container::Container as _;
+
+	let delay = Duration::from_millis(200);
+	let mut rig = Interleave::new().await;
+	let mut export = rig.export(delay).await;
+	let track = rig.video.track().clone();
+	let wire = HangContainer::Legacy(crate::container::Kind::Video);
+	let picture = |tick: u64| {
+		let keyframe = tick.is_multiple_of(GOP);
+		let slice = vec![if keyframe { 0x65u8 } else { 0x41 }; 400];
+		Frame {
+			timestamp: Timestamp::from_micros(tick * VIDEO_US).unwrap(),
+			duration: None,
+			payload: length_prefixed(&[&slice]),
+			keyframe,
+		}
+	};
+	let mut out = Vec::new();
+
+	// The first group delivers three pictures, then the next group lands, sent ahead, and the
+	// publisher resets the first.
+	let mut cut = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+	for tick in 0..3 {
+		rig.at(tick * VIDEO_US).await;
+		wire.write(&mut cut, &[picture(tick)]).unwrap();
+		out.extend(poll_frames(&mut export));
+		rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
+	}
+	let mut group = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+	wire.write(&mut group, &[picture(GOP)]).unwrap();
+	cut.abort(moq_net::Error::Old).unwrap();
+	// The audio flows long enough for some of it to go out and be dropped ahead of the
+	// keyframe, then stalls past its deadline.
+	for tick in 3..10 {
+		rig.at(tick * VIDEO_US).await;
+		out.extend(poll_frames(&mut export));
+		if tick < 5 {
+			rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
+		}
+	}
+	for tick in 10..3 * GOP {
+		rig.at(tick * VIDEO_US).await;
+		if tick > GOP {
+			if tick.is_multiple_of(GOP) {
+				group.finish().unwrap();
+				group = track
+					.create_group(moq_net::group::Info { sequence: tick / GOP })
+					.unwrap();
+			}
+			wire.write(&mut group, &[picture(tick)]).unwrap();
+		}
+		out.extend(poll_frames(&mut export));
+		rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
+	}
+	group.finish().unwrap();
+	rig.finish();
+	out.extend(drain_frames(&mut export).await);
+
+	let ts: Vec<u8> = out.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	let (video, audio) = collect_pes_pts(&ts);
+	let pts = |tick: u64| tick * VIDEO_US * 90 / 1_000;
+	assert_eq!(video.first(), Some(&pts(GOP)), "the export starts at the next group");
+	assert!(
+		audio.iter().all(|&p| p >= pts(GOP)),
+		"no audio leads the keyframe: {audio:?}"
+	);
+	let stats = export.stats();
+	assert_eq!(stats.dropped, 0, "nothing was lost from the output");
+	assert!(stats.trimmed > 0);
 }
 
 /// A section lost before the cycle wraps commits an observed subset; the next

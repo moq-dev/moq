@@ -177,6 +177,8 @@ const (
 	ProtocolKindInternal = ffi.MoqProtocolKindInternal
 	// ProtocolKindUnauthorized identifies unauthorized.
 	ProtocolKindUnauthorized = ffi.MoqProtocolKindUnauthorized
+	// ProtocolKindExpired identifies an expired authorization token.
+	ProtocolKindExpired = ffi.MoqProtocolKindExpired
 	// ProtocolKindProtocolViolation identifies protocol violation.
 	ProtocolKindProtocolViolation = ffi.MoqProtocolKindProtocolViolation
 	// ProtocolKindKeyValueFormatting identifies key value formatting.

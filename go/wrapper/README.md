@@ -125,7 +125,7 @@ re-exported as sentinels (`moq.ErrClosed`, `moq.ErrUnauthorized`, ...) so you ca
 `errors.Is` against them without importing `moq.dev/moq-ffi`. Two helpers cover the
 common cases: `moq.IsShutdown(err)` (a stream ended because it was cancelled or
 the session closed, i.e. not a real failure) and `moq.IsAuthError(err)` (HTTP
-401/403).
+401/403 or an expired token).
 
 Every call that can block takes a `context.Context` and aborts cleanly when it is
 cancelled, leaving nothing running in the background. A one-shot call (a subscribe,
