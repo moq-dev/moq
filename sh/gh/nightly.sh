@@ -30,10 +30,11 @@ case "${1:-}" in
         run cargo bench --locked --no-fail-fast -p kio --bench '*' -- --test
         # One invocation unifies this release build instead of rebuilding shared crates
         # independently for each target. Keep the explicit targets: '*' would add coverage.
-        run cargo bench --locked --no-fail-fast -p moq-relay -p moq-stats -p moq-mux -p moq-rtmp -p moq-uring \
+        run cargo bench --locked --no-fail-fast -p moq-relay -p moq-stats -p moq-mux -p moq-rtmp -p moq-uring -p moq-pattern \
             --features moq-stats/bench \
             --bench http_idle --bench auth --bench producer_tick --bench decode --bench aggregate \
-            --bench catalog --bench ts_schedule --bench export --bench chunk_interleaving --bench worker_turns -- --test
+            --bench catalog --bench ts_schedule --bench export --bench containers --bench matching \
+            --bench chunk_interleaving --bench worker_turns -- --test
         run just rs test -p moq-archive -p moq-mux -p moq-hls --no-fail-fast \
             -E 'test(benchmark_timeline_fetch_fanout) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging) | test(benchmark_reference_handoff_fanout)' \
             --run-ignored only --success-output immediate

@@ -48,4 +48,3 @@ a GitHub App:
 
 - [Benchmark reporting](/bench/README.md) - the existing `bench/run.sh` retains repeated paired rounds
 - [Benchmark trend site](/quest/m1/bench-site.md) - where the nightly history is charted
-- [Bench coverage](/quest/m2/bench-coverage.md) - more targets for this job to track
