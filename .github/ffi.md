@@ -154,14 +154,29 @@ DLL because this generator cannot read its static archive's long member names.
 Compare generated `moq.cpp` with the installed `include/moq/ffi/moq.cpp`, not
 the separate handwritten `share/moq-cpp/moq.cpp` wrapper.
 
-The sampled revision's C++17 consumer probe passes on Linux x86 after linking
+The sampled revision's C++17 consumer probe passed on Linux x86 after linking
 the installed headers and wrapper source against the shared candidate static
-library. This is a manual experiment using the Nix development toolchain,
-not a new CI gate. ARM Linux, macOS and Windows installed consumers have not
-run with substituted libraries. Keep the current build until those checks
-and the remaining object differences are resolved. PR #5727 separately owns
-the generated C++ type/expected shape; repeat this metadata comparison with
-its final generator before enabling reuse.
+library. That manual experiment used the Nix development toolchain. ARM Linux,
+macOS and Windows consumers were not run with that historical sample; it alone
+did not justify reuse. The current-source proof below tests all four hosts
+without claiming byte-for-byte executable equivalence.
+
+### Current installed-consumer proof
+
+The [2026-10-16 focused dry-run](https://github.com/moq-dev/moq/actions/runs/38969347067)
+passed at implementation commit `cbbcf9b2c92aa88c5550d9175adcc317f8137f4a`.
+All four shared default-feature release builds passed, followed by installed
+C++17 and C++23 consumers on Linux x86, Linux ARM, macOS ARM and Windows MSVC.
+Both C++23 forms ran their coroutine probes. Unix also passed pkg-config
+consumers and compiled the documented examples. Each job then archived,
+verified and extracted its checked input and produced its final C++ package.
+The consumer and package jobs did not rebuild moq-ffi with Cargo. Release and
+OBS publication jobs were skipped.
+
+This validates the same-run prebuilt path for that coherent source, generator
+and configuration on those runners. No published release pin has been tested,
+and this does not establish an older Linux runtime baseline. Documentation-only
+evidence updates after that implementation commit do not change the tested code.
 
 ### Release input decision
 
