@@ -4,14 +4,21 @@
 /// caller. The private field keeps construction behind these bounds; wasm keeps
 /// its single-threaded, non-Send transport values.
 ///
-/// ```compile_fail
+/// The include stays at item level: in statement position it fails to parse,
+/// which would pass these tests for the wrong reason.
+///
+/// ```compile_fail,E0277
 /// include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/util/cell.rs"));
-/// let _ = SendCell::new(std::rc::Rc::new(()));
+/// fn main() {
+///     let _ = SendCell::new(std::rc::Rc::new(()));
+/// }
 /// ```
 ///
-/// ```compile_fail
+/// ```compile_fail,E0277
 /// include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/util/cell.rs"));
-/// let _ = SendCell::new(std::cell::Cell::new(0));
+/// fn main() {
+///     let _ = SendCell::new(std::cell::Cell::new(0));
+/// }
 /// ```
 #[derive(Clone, Debug)]
 pub(crate) struct SendCell<T>(T);

@@ -19,12 +19,12 @@ use crate::sync::{Mutex, MutexGuard};
 ///
 /// State that cannot cross threads keeps the lock on its thread too.
 ///
-/// ```compile_fail
+/// ```compile_fail,E0277
 /// fn require_send(_: impl Send) {}
 /// require_send(kio::Lock::new(std::rc::Rc::new(())));
 /// ```
 ///
-/// ```compile_fail
+/// ```compile_fail,E0277
 /// fn require_sync(_: impl Sync) {}
 /// require_sync(kio::Lock::new(std::rc::Rc::new(())));
 /// ```
