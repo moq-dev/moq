@@ -1682,10 +1682,10 @@ pub unsafe extern "C" fn moq_broadcast_request_prepare(
 			.map_err(|_| Error::InvalidCode)?;
 		let broadcast_out = unsafe { broadcast.as_mut() }.ok_or(Error::InvalidPointer)?;
 		let mut state = State::lock();
-		let pending = state.origin.broadcast_request_take(request)?;
+		let (pending, driver) = state.origin.broadcast_request_take(request)?;
 		let prepared = pending.prepare(epoch)?;
-		let broadcast = state.publish.create(prepared.broadcast().clone())?;
-		let id = state.origin.prepared_insert(prepared)?;
+		let broadcast = state.publish.create((prepared.broadcast().clone(), driver.clone()))?;
+		let id = state.origin.prepared_insert(prepared, driver)?;
 		*broadcast_out = broadcast.into();
 		Ok(id)
 	})
@@ -1699,7 +1699,11 @@ pub unsafe extern "C" fn moq_broadcast_request_prepare(
 pub extern "C" fn moq_broadcast_prepared_publish(prepared: u32) -> i32 {
 	ffi::enter(move || {
 		let prepared = ffi::parse_id(prepared)?;
-		State::lock().origin.prepared_take(prepared)?.publish()?;
+		let (prepared, driver) = State::lock().origin.prepared_take(prepared)?;
+		driver.check()?;
+		let result = prepared.publish();
+		driver.check()?;
+		result?;
 		Ok(())
 	})
 }
@@ -1722,8 +1726,10 @@ pub extern "C" fn moq_broadcast_prepared_free(prepared: u32) -> i32 {
 pub extern "C" fn moq_broadcast_request_reject(request: u32, error_code: u16) -> i32 {
 	ffi::enter(move || {
 		let request = ffi::parse_id(request)?;
-		let pending = State::lock().origin.broadcast_request_take(request)?;
+		let (pending, driver) = State::lock().origin.broadcast_request_take(request)?;
+		driver.check()?;
 		pending.reject(moq_net::Error::App(error_code));
+		driver.check()?;
 		Ok(())
 	})
 }

@@ -1078,9 +1078,7 @@ export interface Table {
 	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer;
 
 	/** Advertise a prefix and serve requests under it; see {@link Producer.dynamic}. */
-	dynamic(
-		prefix: Path.Valid,
-	): Dynamic;
+	dynamic(prefix: Path.Valid): Dynamic;
 
 	/** Insert a route with protocol metadata. @internal */
 	dynamicRoute(
@@ -2180,7 +2178,13 @@ export class Dynamic {
 	#publisher?: Producer;
 	#closed = false;
 
-	private constructor(prefix: Path.Valid, entry: RouteEntry, state: OriginState, retract: Dispose, publisher?: Producer) {
+	private constructor(
+		prefix: Path.Valid,
+		entry: RouteEntry,
+		state: OriginState,
+		retract: Dispose,
+		publisher?: Producer,
+	) {
 		this.prefix = Path.stripPrefix(entry.scope.root, prefix) ?? Path.empty();
 		this.#entry = entry;
 		this.#state = state;
@@ -2189,7 +2193,8 @@ export class Dynamic {
 	}
 
 	static {
-		makeDynamic = (prefix, entry, state, retract, publisher) => new Dynamic(prefix, entry, state, retract, publisher);
+		makeDynamic = (prefix, entry, state, retract, publisher) =>
+			new Dynamic(prefix, entry, state, retract, publisher);
 	}
 
 	/** The route this handle advertises. */

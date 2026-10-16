@@ -74,7 +74,7 @@ Settled shape:
   [generated C](/quest/m1/c/README.md) and C++
   bindings inherit this shape from moq-ffi, so reshaping the hand-written C
   ABI would break C users twice. The narrow
-  [claim-epoch correctness exception](/quest/m1/claim-answer-epochs.md) does
+  [claim-epoch correctness exception](https://github.com/moq-dev/moq/pull/5678) does
   not expand this layer reshaping to the hand-written ABI.
 - `rs/moq-ffi/AGENTS.md` records the per-language namespace pattern `json`
   set.

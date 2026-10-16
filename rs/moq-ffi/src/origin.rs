@@ -149,7 +149,6 @@ pub struct MoqAnnounceConsumer {
 /// `MoqOriginProducer` is gone.
 pub struct MoqOriginDynamic {
 	slot: Slot,
-	driver: Background,
 	task: std::sync::Mutex<Option<Arc<Task<OriginDynamic>>>>,
 }
 
@@ -157,6 +156,7 @@ pub struct MoqOriginDynamic {
 /// A pending dynamic broadcast request that must be accepted or rejected.
 pub struct MoqBroadcastRequest {
 	inner: std::sync::Mutex<Option<moq_net::origin::Request>>,
+	driver: Background,
 }
 
 #[derive(uniffi::Object)]
@@ -164,6 +164,7 @@ pub struct MoqBroadcastRequest {
 pub struct MoqBroadcastPrepared {
 	inner: std::sync::Mutex<Option<moq_net::origin::Prepared>>,
 	broadcast: Arc<MoqBroadcastProducer>,
+	driver: Background,
 }
 
 struct Announced {
@@ -197,7 +198,7 @@ impl OriginDynamic {
 				})
 			})
 			.await?;
-		Ok(Arc::new(MoqBroadcastRequest::new(request)))
+		Ok(Arc::new(MoqBroadcastRequest::new(request, self.driver.clone())))
 	}
 }
 
@@ -399,7 +400,6 @@ impl MoqOriginProducer {
 		let slot = Arc::new(std::sync::Mutex::new(Some(dynamic)));
 		Ok(Arc::new(MoqOriginDynamic {
 			slot: slot.clone(),
-			driver: self.inner.driver.clone(),
 			task: std::sync::Mutex::new(Some(Arc::new(Task::new(OriginDynamic {
 				slot,
 				driver: self.inner.driver.clone(),
@@ -537,9 +537,10 @@ impl MoqOriginDynamic {
 // ---- MoqBroadcastRequest ----
 
 impl MoqBroadcastRequest {
-	fn new(request: moq_net::origin::Request) -> Self {
+	fn new(request: moq_net::origin::Request, driver: Background) -> Self {
 		Self {
 			inner: std::sync::Mutex::new(Some(request)),
+			driver,
 		}
 	}
 
@@ -560,12 +561,19 @@ impl MoqBroadcastRequest {
 	/// Start answering as a new publisher instance, hidden until published.
 	pub fn prepare(&self, epoch: String) -> Result<Arc<MoqBroadcastPrepared>, MoqError> {
 		let _guard = crate::ffi::enter();
+		self.driver.check()?;
 		let request = self.take()?;
-		let prepared = request.prepare(epoch.parse()?)?;
-		let broadcast = Arc::new(MoqBroadcastProducer::from_inner(prepared.broadcast().clone())?);
+		let result = request.prepare(epoch.parse()?);
+		self.driver.check()?;
+		let prepared = result?;
+		let broadcast = Arc::new(MoqBroadcastProducer::from_inner(
+			prepared.broadcast().clone(),
+			self.driver.clone(),
+		)?);
 		Ok(Arc::new(MoqBroadcastPrepared {
 			inner: std::sync::Mutex::new(Some(prepared)),
 			broadcast,
+			driver: self.driver.clone(),
 		}))
 	}
 
@@ -588,8 +596,11 @@ impl MoqBroadcastPrepared {
 	/// Announce the filled broadcast and resolve every waiting requester.
 	pub fn publish(&self) -> Result<Arc<MoqBroadcastProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
+		self.driver.check()?;
 		let prepared = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
-		prepared.publish()?;
+		let result = prepared.publish();
+		self.driver.check()?;
+		result?;
 		Ok(self.broadcast.clone())
 	}
 }
