@@ -10,7 +10,7 @@ import moq_ffi
 import pytest
 
 # Every group from the first, rather than only what the live edge still reaches.
-FROM_GROUP_0 = [moq.Range(start=moq.Anchor.ABSOLUTE(group=0, frame=0))]
+FROM_GROUP_0 = [moq.Range(start=cast(moq.Anchor, moq.Anchor.ABSOLUTE(group=0, frame=0)))]
 
 
 def create_announced(origin: moq.OriginProducer, path: str) -> moq.BroadcastProducer:
@@ -895,7 +895,7 @@ async def test_ascending_subscription_reads_a_cached_backlog_oldest_first():
     consumer = track.consume(
         moq.Subscription(
             max_delay=timedelta(seconds=10),
-            ranges=[moq.Range(start=moq.Anchor.RELATIVE(groups=2))],
+            ranges=[moq.Range(start=cast(moq.Anchor, moq.Anchor.RELATIVE(groups=2)))],
             order=moq.Order.ASCENDING,
         )
     )
