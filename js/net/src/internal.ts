@@ -95,6 +95,8 @@ export function scopeCaptures(scope: Path.Pattern, prefix: Path.Valid): Path.Pat
 export type Recv =
 	/** A group to serve. It has already left the buffer, so dropping this is dropping the group. */
 	| { kind: "group"; group: GroupConsumer }
+	/** A sequence this cursor gave up without serving. */
+	| { kind: "drop"; sequence: number }
 	/** Nothing readable, but the track is live and may produce more. */
 	| { kind: "idle" }
 	/** The producer finished, yet groups above the cap are still held: raising it releases them. */
@@ -189,13 +191,15 @@ export const hooks: {
 	bindSequence: (producer: Producer, sequence: TrackSequence) => void;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
 	cachedLargest: (producer: Producer) => Location | undefined;
+	/** Record an explicit upstream drop on a received track. */
+	dropTrackGroup: (producer: Producer, sequence: number) => void;
 	/**
 	 * Take the next group the subscriber's cursor allows, without waiting; assigned by `track.ts`.
 	 *
 	 * Synchronous so a caller can pop a group and act on it in the same turn. Park on
 	 * {@link groupChanged} when it reports `idle` or `boundary`.
 	 */
-	tryRecvGroup: (subscriber: Subscriber) => Recv;
+	tryRecvGroup: (subscriber: Subscriber, started: boolean) => Recv;
 	/** Wake once a subscriber's group cursor may read differently; assigned by `track.ts`. */
 	groupChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
 	/**
@@ -261,6 +265,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	cachedLargest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	dropTrackGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
 	tryRecvGroup: () => {

@@ -1091,6 +1091,11 @@ impl Producer {
 		self.alive.aborted.load(Ordering::Acquire)
 	}
 
+	/// Whether the publisher gave this group up, rather than cache policy skipping it.
+	pub(crate) fn is_cut(&self) -> bool {
+		self.is_aborted() && !matches!(self.abort_reason(), Error::Old | Error::Timeout)
+	}
+
 	/// Whether the group was finished: it holds every frame it will ever have.
 	pub(crate) fn is_finished(&self) -> bool {
 		self.state.read().fin.is_some()
@@ -1283,7 +1288,7 @@ impl Producer {
 	}
 
 	/// The recorded abort reason, or [`Error::Dropped`] if the group closed without one.
-	fn abort_reason(&self) -> Error {
+	pub(crate) fn abort_reason(&self) -> Error {
 		self.state.read().abort.clone().unwrap_or(Error::Dropped)
 	}
 }

@@ -375,6 +375,16 @@ impl Subscriber {
 		}
 	}
 
+	/// Poll for an explicit drop from the serving copy.
+	pub(crate) fn poll_drop(&mut self, waiter: &kio::Waiter) -> Poll<u64> {
+		let mut reader = self.reader();
+		let sub = ready!(reader.poll_serving(waiter));
+		match sub {
+			Some(sub) => sub.poll_drop(waiter),
+			None => Poll::Pending,
+		}
+	}
+
 	/// Raise the local read floor; see [`track::Subscriber::set_groups`].
 	pub(crate) fn raise_start_to(&mut self, start: u64) {
 		self.reader().raise_start_to(start)

@@ -2399,6 +2399,22 @@ test("an explicit start floors an untimed track", () => {
 	expect(drain(live)).toEqual([4]);
 });
 
+test("explicit and producer-cut drops survive outside the group cache", async () => {
+	const producer = new TrackProducer("video").accept({});
+	const reader = producer.subscribe({ maxDelay: Milli(60_000) });
+	hooks.dropTrackGroup(producer, 3);
+	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", sequence: 3 });
+
+	const group = new GroupProducer(4);
+	producer.writeGroup(group);
+	group.close(new Error("cut"));
+	await settle();
+	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", sequence: 4 });
+
+	reader.close();
+	producer.close();
+});
+
 test("a mid-group end survives eviction and a filtered late reader", () => {
 	const clock = mockCacheTime(10_000);
 	const producer = new TrackProducer("video").accept({});

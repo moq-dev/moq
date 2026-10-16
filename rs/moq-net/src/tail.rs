@@ -47,6 +47,9 @@ pub(crate) struct Tail {
 	// final: a later, longer grace or a lowered floor cannot reopen it.
 	runs: Vec<Run>,
 	grace: Duration,
+	// Subscribers fold missing streams after grace. Publishers retain gaps until
+	// their end sweep can name every never-arrived sequence.
+	fold: bool,
 	streams: u64,
 	// Streams whose header arrived and that are still being read.
 	active: u64,
@@ -65,6 +68,7 @@ impl Default for Tail {
 		Self {
 			runs: Vec::new(),
 			grace: GRACE,
+			fold: true,
 			streams: 0,
 			active: 0,
 			waiting: Default::default(),
@@ -77,6 +81,15 @@ impl Tail {
 	pub fn new(grace: Duration) -> Self {
 		Self {
 			grace,
+			..Self::default()
+		}
+	}
+
+	/// A publisher ledger that never infers a missing group was delivered.
+	pub fn persistent(grace: Duration) -> Self {
+		Self {
+			grace,
+			fold: false,
 			..Self::default()
 		}
 	}
@@ -132,6 +145,9 @@ impl Tail {
 
 	/// Fold every gap older than the grace into the runs around it.
 	pub fn expire(&mut self, now: Instant) {
+		if !self.fold {
+			return;
+		}
 		let grace = self.grace;
 		for (gap, at) in self.folds() {
 			if at <= now {

@@ -5619,6 +5619,9 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 												serve.subscriber.runtime.now(),
 											);
 										}
+										for sequence in dropped.start..=dropped.end {
+											self.serving.drop_group(sequence);
+										}
 									}
 									// OK just resolves the range (the producer already orders
 									// groups).

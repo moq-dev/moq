@@ -393,6 +393,9 @@ class TrackState {
 	/** The producer fanning into this sink, so a subscriber can mint a sibling of itself. */
 	producer?: Producer;
 	groups = new Signal<GroupConsumer[]>([]);
+	// Explicit upstream drops live outside the cache, so reclaim cannot erase a
+	// disposition a downstream publisher still has to forward.
+	drops = new Signal<number[]>([]);
 	// Every group still in the producer's replay cache, including groups this
 	// subscriber already consumed, sorted by sequence. Drift anchors have the same
 	// lifetime as content. Sorted so the latency guard, evaluated per group and per
@@ -597,6 +600,20 @@ export class Producer {
 		};
 		hooks.bindSequence = bindProducerSequence;
 		hooks.cachedLargest = (producer) => producer.#largest();
+		hooks.dropTrackGroup = (producer, sequence) => producer.#drop(sequence);
+	}
+
+	#drop(sequence: number): void {
+		this.#recordDrop(this.#state, sequence);
+		for (const sink of this.#sinks) this.#recordDrop(sink, sequence);
+	}
+
+	#recordDrop(state: TrackState, sequence: number): void {
+		state.drops.mutate((drops) => {
+			if (drops.includes(sequence)) return;
+			drops.push(sequence);
+			drops.sort((a, b) => a - b);
+		});
 	}
 
 	/**
@@ -728,6 +745,7 @@ export class Producer {
 
 		this.#prune();
 		for (const entry of this.#cache) this.#mirror(entry, sink);
+		for (const sequence of this.#state.drops.peek()) this.#recordDrop(sink, sequence);
 
 		sink.received.set(this.#received);
 		sink.end.set(this.#state.end.peek());
@@ -891,6 +909,9 @@ export class Producer {
 	// Retain a source group and fan it out to every live sink.
 	#publish(group: GroupProducer): void {
 		const entry: CachedGroup = { group, mirrors: new Map<TrackState, GroupConsumer>(), arrived: performance.now() };
+		group.closed.then((closed) => {
+			if (closed instanceof Error && !(closed instanceof TooFarBehind)) this.#drop(group.sequence);
+		});
 		this.#cache.push(entry);
 		this.#cached.set(group.sequence, entry);
 		this.#advance(group.sequence);
@@ -1175,6 +1196,9 @@ export class Subscriber {
 	// it to sequence order; whichever wins is the only one allowed from here on.
 	// Datagrams are a separate cursor and never commit.
 	#mode?: "arrival" | "ordered";
+	// Drop notifications are persistent track state, so remember which ones this
+	// subscription already forwarded without removing them for other subscribers.
+	#reportedDrops = new Set<number>();
 	// The group the frame-level helpers are currently draining, acquired through the
 	// sequence cursor so frame reads and {@link Ordered.nextGroup} share one floor.
 	#frameGroup?: GroupConsumer;
@@ -1333,7 +1357,7 @@ export class Subscriber {
 
 	static {
 		makeSubscriber = (name, state) => new Subscriber(name, state);
-		hooks.tryRecvGroup = (subscriber) => subscriber.#tryRecvGroup();
+		hooks.tryRecvGroup = (subscriber, started) => subscriber.#tryRecvGroup(started);
 		hooks.groupChanged = (subscriber, fn) => subscriber.#groupChanged(fn);
 		hooks.exemptFetch = (subscriber) => {
 			subscriber.#enforceLatency = false;
@@ -1525,6 +1549,8 @@ export class Subscriber {
 			switch (recv.kind) {
 				case "group":
 					return recv.group;
+				case "drop":
+					continue;
 				case "done":
 					return undefined;
 				case "error":
@@ -1544,10 +1570,30 @@ export class Subscriber {
 
 	// Package-internal synchronous half of recvGroup. The lite publisher uses this so applying
 	// control state, popping the group, and positioning its frames are one JavaScript turn.
-	#tryRecvGroup(): Recv {
+	#tryRecvGroup(dispositions = false): Recv {
 		const groups = this.#state.groups.peek();
 		const { start, end } = this.#cursor.peek();
-		while (groups.length > 0 && groups[0].sequence < start) groups.shift()?.close();
+		while (groups.length > 0 && groups[0].sequence < start) {
+			const skipped = groups.shift();
+			if (!skipped) break;
+			const sequence = skipped.sequence;
+			skipped.close();
+			if (dispositions && !this.#reportedDrops.has(sequence)) {
+				this.#reportedDrops.add(sequence);
+				return { kind: "drop", sequence };
+			}
+		}
+		for (const sequence of this.#state.drops.peek()) {
+			if (
+				sequence >= start &&
+				(end === undefined || sequence < end) &&
+				dispositions &&
+				!this.#reportedDrops.has(sequence)
+			) {
+				this.#reportedDrops.add(sequence);
+				return { kind: "drop", sequence };
+			}
+		}
 		const drift = this.#drift();
 
 		for (;;) {
@@ -1556,8 +1602,20 @@ export class Subscriber {
 			const group = groups[0];
 			if (!group || (end !== undefined && group.sequence >= end)) break;
 			groups.shift();
+			const abort = group.closed.peek();
+			if (dispositions && abort instanceof Error) {
+				if (dispositions && !this.#reportedDrops.has(group.sequence)) {
+					this.#reportedDrops.add(group.sequence);
+					return { kind: "drop", sequence: group.sequence };
+				}
+				continue;
+			}
 			if (this.#isStale(group, drift)) {
 				group.close();
+				if (dispositions && !this.#reportedDrops.has(group.sequence)) {
+					this.#reportedDrops.add(group.sequence);
+					return { kind: "drop", sequence: group.sequence };
+				}
 				continue;
 			}
 			return { kind: "group", group: this.#guard(group) };
@@ -1585,6 +1643,7 @@ export class Subscriber {
 	#groupChanged(fn: () => void): Dispose {
 		const dispose = [
 			this.#state.groups.changed(fn),
+			this.#state.drops.changed(fn),
 			this.#cursor.changed(fn),
 			this.#state.closed.changed(fn),
 			this.#state.end.changed(fn),

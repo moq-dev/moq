@@ -27,6 +27,7 @@ import {
 	encodeSubscribeResponse,
 	exclusiveGroupEnd,
 	type Subscribe,
+	SubscribeDrop,
 	SubscribeEnd,
 	SubscribeOk,
 	SubscribeStart,
@@ -992,7 +993,26 @@ export class Publisher {
 		// first group is known, SUBSCRIBE_END when the track finishes.
 		const emitRange = supportsTrackStream(this.version);
 		let startSent = false;
+		let startSequence: number | undefined;
 		let endSent = false;
+		const served = new Set<number>();
+		const dropped = new Set<number>();
+		const pendingDrops = new Set<number>();
+		const sendDropRange = async (start: number, end: number): Promise<boolean> => {
+			if (start > end) return true;
+			return controls.response(
+				encodeSubscribeResponse(stream, { drop: new SubscribeDrop({ start, end, error: 0 }) }, this.version),
+			);
+		};
+		const sendDrop = async (sequence: number): Promise<boolean> => {
+			if (!emitRange || countStreams || dropped.has(sequence)) return true;
+			if (!startSent) {
+				pendingDrops.add(sequence);
+				return true;
+			}
+			dropped.add(sequence);
+			return sendDropRange(sequence, sequence);
+		};
 
 		// Lite-07+ counts the group streams in SUBSCRIBE_END, so it goes out only once every
 		// served group has opened its stream or given up, and a cap holding groups back
@@ -1088,10 +1108,13 @@ export class Publisher {
 				// and frameRange call are the operation's linearization point.
 				// Popping or filtering a group removes the subscriber's view of its edge.
 				const largest = !startSent && hasLargest(this.version) ? track.largest() : undefined;
-				const recv = hooks.tryRecvGroup(track);
+				const recv = hooks.tryRecvGroup(track, startSent);
 				switch (recv.kind) {
 					case "error":
 						throw recv.error;
+					case "drop":
+						if (!(await sendDrop(recv.sequence))) return false;
+						continue;
 					case "idle":
 						// A start past everything the track has (a subscriber resuming just after
 						// what it holds) is answered at once with the largest position, on
@@ -1105,6 +1128,7 @@ export class Publisher {
 									(bounds.startGroup === largest.group && startFrame > largest.frame))
 							) {
 								startSent = true;
+								startSequence = bounds.startGroup;
 								hooks.replaceGroups(track, {
 									start: { included: bounds.startGroup },
 									end: bounds.endGroup === undefined ? undefined : { included: bounds.endGroup },
@@ -1136,6 +1160,20 @@ export class Publisher {
 						await waitForSubscription(controls, track);
 						continue;
 					case "done": {
+						if (startSequence !== undefined && !countStreams) {
+							const start = startSequence;
+							const end = boundary();
+							const accounted = [...served, ...dropped]
+								.filter((sequence) => sequence >= start && sequence < end)
+								.sort((a, b) => a - b);
+							let next = start;
+							for (const sequence of accounted) {
+								if (sequence < next) continue;
+								if (sequence > next && !(await sendDropRange(next, sequence - 1))) return false;
+								next = sequence + 1;
+							}
+							if (next < end && !(await sendDropRange(next, end - 1))) return false;
+						}
 						if (!endSent) {
 							if (!(await sendEnd())) return false;
 							continue;
@@ -1157,6 +1195,7 @@ export class Publisher {
 
 				if (emitRange && !startSent) {
 					startSent = true;
+					startSequence = group.sequence;
 					// SUBSCRIBE_START names the first group served now. A later group at or
 					// above an explicit floor is still delivered, so the cursor stays put.
 					// A pre-06 subscribe that named no group is the exception: an absent
@@ -1178,7 +1217,12 @@ export class Publisher {
 						))
 					)
 						return false;
+					for (const sequence of pendingDrops) {
+						if (sequence >= group.sequence && !(await sendDrop(sequence))) return false;
+					}
+					pendingDrops.clear();
 				}
+				served.add(group.sequence);
 
 				const options: RunGroup = {
 					sub,
