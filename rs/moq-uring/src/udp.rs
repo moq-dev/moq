@@ -385,7 +385,7 @@ pub enum Bound {
 	Lone(UdpSocket),
 	/// One member of a completed steered `SO_REUSEPORT` group. Every
 	/// connection id an endpoint on it issues then leads with the member's
-	/// [`cid_prefix`](moq_sock::shard::cid_prefix), so the group's filter
+	/// [`cid`](moq_sock::shard::cid), so the group's filter
 	/// keeps delivering a connection's packets to this socket.
 	Member(moq_sock::shard::Socket),
 }

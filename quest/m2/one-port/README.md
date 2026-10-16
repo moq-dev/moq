@@ -26,14 +26,12 @@ sans-io `srt-protocol` directly instead of waiting on a socket abstraction in
 srt-tokio.
 
 Decided 2026-10-05, from moq.pro's audit: `moq-rtc` taking a fed socket
-([rtc-feed](/quest/m2/one-port/rtc-feed.md)) and the steering filter
-([shard steering](/quest/m1/p2p/shard-steering.md)) join this line, and
+([rtc-feed](/quest/m2/one-port/rtc-feed.md)) and the shard steering filter join this line, and
 [the io_uring demux](/quest/m2/uring-demux.md) is planned beside it, all in
 m2 rather than m3, since moq.pro's edge cutover and its uring rollout wait on
 them.
 
-Decided 2026-10-13: [UDP demux](/quest/m1/p2p/udp-demux.md) and
-[shard steering](/quest/m1/p2p/shard-steering.md) moved to m1 under P2P,
+Decided 2026-10-13: [UDP demux](/quest/m1/p2p/udp-demux.md) and shard steering moved to m1 under P2P,
 because [native pairs](/quest/m1/p2p/native-quic.md) run QUIC and ICE's
 STUN on one socket through the same demux. The rest of this line builds on
 them from m1.
@@ -99,6 +97,5 @@ pre-accepted streams can stand behind.
 ## Related
 
 - [UDP demux](/quest/m1/p2p/udp-demux.md) - one socket carries QUIC, with a WebRTC hook for embedders; moved to m1 for native P2P
-- [Steer only QUIC by connection ID](/quest/m1/p2p/shard-steering.md) - QUIC-bit greasing goes off and the reuseport filter leaves RTP, SRT, and STUN flows on one shard each
 - [One port on the io_uring workers](/quest/m2/uring-demux.md) - the io_uring workers host the UDP demux
 - [Stream sessions](/quest/m3/uring-tcp/README.md) - the io_uring workers that would host the TCP acceptor later
