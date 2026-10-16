@@ -49,8 +49,9 @@ export async function namespaceUpdate(
 	version: IetfVersion,
 ): Promise<{ requestId: bigint; prefix?: Path.Valid; refused?: RequestCondition } | undefined> {
 	if (await reader.done()) return undefined;
-	if ((await reader.u53()) !== 0x02) throw new ProtocolViolation("expected namespace REQUEST_UPDATE");
 	try {
+		// Inside the normalization, so an oversized or truncated type is malformed too.
+		if ((await reader.u53()) !== 0x02) throw new ProtocolViolation("expected namespace REQUEST_UPDATE");
 		return await Message.decode(reader, async (body) => {
 			const requestId = await body.u62();
 			const params = await Parameters.decode(body, version, "namespace-update");

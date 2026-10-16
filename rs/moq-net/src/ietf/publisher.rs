@@ -1296,6 +1296,8 @@ where
 		enum Turn {
 			// The track and any fill finished, or the stream failed.
 			Served(Result<(), Error>),
+			// Reading the requester's next update failed.
+			Malformed(Error),
 			// The peer cancelled, or the session ended.
 			Cancelled,
 			// A REQUEST_UPDATE, already decoded.
@@ -1336,12 +1338,12 @@ where
 							Poll::Ready(Ok(Some(FollowUp::Update(body)))) => {
 								return Poll::Ready(match Update::decode_legacy(&body, self.version) {
 									Ok(update) => Turn::Update(update),
-									Err(err) => Turn::Served(Err(err)),
+									Err(err) => Turn::Malformed(err),
 								});
 							}
 							// UNSUBSCRIBE, or the control stream going away.
 							Poll::Ready(Ok(Some(FollowUp::End) | None)) => return Poll::Ready(Turn::Cancelled),
-							Poll::Ready(Err(err)) => return Poll::Ready(Turn::Served(Err(err))),
+							Poll::Ready(Err(err)) => return Poll::Ready(Turn::Malformed(err)),
 							Poll::Pending => {}
 						}
 					} else {
@@ -1363,7 +1365,7 @@ where
 								*finished = true
 							}
 							Poll::Ready(Ok(None)) => return Poll::Ready(Turn::Cancelled),
-							Poll::Ready(Err(err)) => return Poll::Ready(Turn::Served(Err(err))),
+							Poll::Ready(Err(err)) => return Poll::Ready(Turn::Malformed(err)),
 							Poll::Pending => {}
 						}
 					}
@@ -1389,14 +1391,17 @@ where
 			let answer = self.version != Version::Draft14;
 
 			match turn {
-				// An update the draft answers by closing the session, such as one whose
-				// AUTHORIZATION TOKEN names an alias, closes it rather than only ending this
-				// subscription, as the same token on the request itself would.
-				Turn::Served(Err(err @ Error::Decode(_))) => {
-					self.session.clone().close(
-						super::error::to_session_code(&crate::SessionError::from(&err)),
-						&err.to_string(),
-					);
+				// A malformed update, such as one whose AUTHORIZATION TOKEN names an alias,
+				// closes the session rather than only ending this subscription, as the same
+				// token on the request itself would. A source track's decode failure is not
+				// this requester's fault, so it reaches Served and ends only this subscription.
+				Turn::Malformed(err) => {
+					if let Error::Decode(_) = err {
+						self.session.clone().close(
+							super::error::to_session_code(&crate::SessionError::from(&err)),
+							&err.to_string(),
+						);
+					}
 					return Some(Served::Track(Err(err)));
 				}
 				Turn::Served(res) => return Some(Served::Track(res)),
@@ -3394,8 +3399,9 @@ where
 						let stream = ns.target.stream().expect("update has a stream");
 						stream.writer.varint(ietf::RequestError::ID).await?;
 						stream.writer.encode(&error).await?;
+						// Dropping a finished writer resets it, which could discard the refusal.
 						stream.writer.finish()?;
-						break Ok(());
+						break stream.writer.closed().await;
 					}
 					if let Some(next) = update.prefix.filter(|next| next != &prefix) {
 						// DONE still names the old prefix. After OK every suffix is relative
@@ -6279,6 +6285,34 @@ mod serve_tests {
 		}
 	}
 
+	/// A source track failing to decode ends only the subscriptions it feeds, not the requester's session.
+	#[moq_net_sim::test]
+	async fn source_decode_failure_keeps_the_session() {
+		for version in [Version::Draft16, Version::Draft19, Version::Draft22] {
+			let h = serve(version);
+			let mut session = ScriptedSession::new(Vec::new());
+			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut serving = TrackServe::new(
+				h.session.clone(),
+				h.track.subscribe(None),
+				RequestId(0),
+				version,
+				ServeRange::default(),
+				None,
+			);
+			h.track.clone().abort(Error::Decode(DecodeError::InvalidValue)).unwrap();
+			let result = h
+				.publisher
+				.run_subscription(&mut stream, &mut serving, &mut false, async {}, None)
+				.await;
+			assert!(
+				matches!(result, Some(Served::Track(Err(Error::Decode(_))))),
+				"{version}: {result:?}"
+			);
+			assert!(h.log.closes().is_empty(), "{version}: the session closed");
+		}
+	}
+
 	#[moq_net_sim::test]
 	async fn namespace_updates_do_not_postpone_an_auth_withdrawal() {
 		for version in [Version::Draft18, Version::Draft21, Version::Draft22] {
@@ -6314,6 +6348,43 @@ mod serve_tests {
 			assert_eq!(wire.varint().unwrap(), ietf::RequestOk::ID);
 			ietf::RequestOk::decode(&mut wire, version).unwrap();
 			assert!(wire.is_empty());
+		}
+	}
+
+	/// A refused namespace update waits for its REQUEST_ERROR to be acknowledged instead of
+	/// letting the writer's drop reset discard it.
+	#[moq_net_sim::test]
+	async fn refused_namespace_update_is_delivered_before_the_stream_ends() {
+		for version in [Version::Draft21, Version::Draft22] {
+			let h = serve(version);
+			settle().await;
+			let mut session = ScriptedSession::new(Vec::new()).with_unacked_fin();
+			let stream = Stream::open(&mut session, version).await.unwrap();
+			let msg = ietf::SubscribeNamespace {
+				request_id: RequestId(0),
+				namespace: crate::Path::new("room"),
+				hidden: false,
+			};
+			let mut running = std::pin::pin!(h.publisher.clone().run_subscribe_namespace_stream(stream, msg));
+			assert!(futures::poll!(running.as_mut()).is_pending());
+			// Request ID 2; TRACK_NAMESPACE_PREFIX is the reserved one-field tuple ".session".
+			let mut update = vec![0x02, 0, 13, 2, 1, 0x34, 1, 8];
+			update.extend_from_slice(b".session");
+			session.push(&update);
+			assert!(
+				futures::poll!(running.as_mut()).is_pending(),
+				"{version}: ended before the ack"
+			);
+			assert!(
+				session
+					.log
+					.trail()
+					.iter()
+					.any(|(_, sent)| matches!(sent, crate::lite::test_transport::Sent::Finish)),
+				"{version}: no FIN"
+			);
+			assert!(session.log.resets().is_empty(), "{version}: the refusal was reset");
+			assert!(h.log.closes().is_empty(), "{version}: the session closed");
 		}
 	}
 
