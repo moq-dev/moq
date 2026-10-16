@@ -50,7 +50,7 @@ revised in the #5734 review.
   examples. The tracks they create set `track::Info::refresh` where they
   keep deltas.
 - **Bindings.** Replace `delta_ratio` with `deltas` in moq-ffi
-  (`rs/moq-ffi/src/json.rs`), moq-c, the py, go, kt, and dart wrappers, and
+  (`rs/moq-ffi/src/json.rs`), moq-c, the py, swift, go, kt, and dart wrappers, and
   `doc/lib/*`. The ratio reaches them through `MoqTrackInfo::refresh` from
   [core](/quest/m1/refresh/core.md). Update the moq-json and `@moq/json`
   READMEs and the Unreleased section of `doc/setup/upgrade.md`.
