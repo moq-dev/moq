@@ -14,30 +14,31 @@ today.
 
 ## Plan
 
-[#5574](https://github.com/moq-dev/moq/pull/5574) fixed the H.265 Annex-B path
-(`config_from_sps`, `rs/moq-mux/src/codec/h265/import.rs`). The remaining
-gaps:
+The known-SPS paths now share their metadata: H.264 reads predefined and
+extended VUI sample aspect through Annex-B and avcC; HEVC uses the same SPS/VUI
+resolver for Annex-B and hvcC. Matroska and fMP4's avc1, avc3, hvc1 and hev1
+initializers also take that metadata. Square samples leave the display aspect
+unset, so the existing hint remains a fallback. The FFI's existing dimensions
+and aspect fields are documented.
 
-- `config_from_hvcc` sets only the coded size and description. Share the
-  Annex-B path's VUI read rather than duplicating it.
-- The H.264 SPS parser skips `sar_width`/`sar_height`.
-- AV1 has no sample aspect in its sequence header. Check whether
-  `render_size` should count as a display aspect before adding it. If not,
-  record why and leave AV1 out.
-- `MoqVideo.display_aspect` (and `coded`) in `rs/moq-ffi/src/media.rs` have
-  no doc line.
+AV1's sequence header carries no sample aspect. Its
+[render size](https://aomediacodec.github.io/av1-spec/#render-size-syntax) is a
+per-frame hint that may inherit reference-frame dimensions, so it does not
+establish a fixed aspect for the rendition.
 
-Keep #5574's choice that an encode hint fills in only square samples.
+A scope decision remains: valid avc3/hev1 initializers may omit parameter sets
+and carry the SPS only inside later CMAF media. The passthrough importer does
+not inspect those payloads, so their bitstream aspect stays unknown. Decide
+whether that acquisition belongs here or in a follow-up before closing this
+quest. The current fix preserves headerless initialization and does not add
+media-payload inspection.
 
-Tests: a non-square fixture per codec path, and a square one that stays
-unset.
+Tests cover non-square and square SPS fixtures through the codec, Matroska and
+all four fMP4 paths, plus headerless avc3/hev1 controls. The metadata regressions
+fail before their fixes.
 
-Not planned: an upstream scuffle_h265 issue for the unchecked arithmetic in
-`cropped_width()`/`cropped_height()`. We never call them, since our SPS
-reader crops with checked math.
-
-Public API: doc only. Wire: the catalog's existing display aspect fields are
-populated in more cases.
+Public API: no shape change; existing FFI fields gain docs. Wire: existing
+catalog aspect and fixed-frame-rate fields are populated in more cases.
 
 ## Related
 

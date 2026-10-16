@@ -1,6 +1,6 @@
 use futures::FutureExt;
 use hang::catalog::Container;
-use mp4_atom::{Decode, Encode};
+use mp4_atom::{Atom, Decode, Encode};
 
 /// A drift budget no test timeline comes close to, so every group is read.
 ///
@@ -64,6 +64,128 @@ fn decode_init(init: &[u8]) -> (mp4_atom::Ftyp, mp4_atom::Moov) {
 	let ftyp = mp4_atom::Ftyp::decode(&mut cursor).expect("invalid ftyp");
 	let moov = mp4_atom::Moov::decode(&mut cursor).expect("invalid moov");
 	(ftyp, moov)
+}
+
+fn video_config(codec: mp4_atom::Codec) -> hang::catalog::VideoConfig {
+	let (ftyp, mut moov) = decode_init(include_bytes!("test_data/bbb.mp4"));
+	let trak = moov
+		.trak
+		.iter_mut()
+		.find(|trak| matches!(trak.mdia.minf.stbl.stsd.codecs.first(), Some(mp4_atom::Codec::Avc1(_))))
+		.unwrap();
+	trak.mdia.minf.stbl.stsd.codecs = vec![codec];
+	let mut init = Vec::new();
+	ftyp.encode(&mut init).unwrap();
+	moov.encode(&mut init).unwrap();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut import = super::Import::new(broadcast, catalog.reserve());
+	import.decode(&init).unwrap();
+	import.finish().unwrap();
+	catalog.snapshot().video.renditions.values().next().unwrap().clone()
+}
+
+#[test]
+fn sample_entries_resolve_display_aspect() {
+	use crate::codec::{h264, h265};
+	for (avc, hevc, expected) in [
+		(h264::fixtures::SPS_IPB, h265::fixtures::SPS_NVENC, (None, None)),
+		(
+			h264::fixtures::SPS_ANAMORPHIC,
+			h265::fixtures::SPS_ANAMORPHIC,
+			(Some(16), Some(9)),
+		),
+	] {
+		let avcc = mp4_atom::Avcc::new(avc, h264::fixtures::PPS).unwrap();
+		let mut bytes = h265::build_hvcc(
+			&[bytes::Bytes::from_static(h265::fixtures::VPS)],
+			&[bytes::Bytes::from_static(hevc)],
+			&[bytes::Bytes::from_static(h265::fixtures::PPS)],
+		)
+		.unwrap();
+		let hvcc = mp4_atom::Hvcc::decode_body(&mut bytes).unwrap();
+		let mut avc_visual = mp4_atom::Visual {
+			width: 1440,
+			height: 1080,
+			..Default::default()
+		};
+		let mut hevc_visual = avc_visual.clone();
+		if expected == (None, None) {
+			avc_visual.width = 64;
+			avc_visual.height = 64;
+			hevc_visual.width = 1280;
+			hevc_visual.height = 720;
+		}
+		for codec in [
+			mp4_atom::Codec::Avc1(mp4_atom::Avc1 {
+				avcc: avcc.clone(),
+				visual: avc_visual.clone(),
+				..Default::default()
+			}),
+			mp4_atom::Codec::Avc3(mp4_atom::Avc3 {
+				avcc: avcc.clone(),
+				visual: avc_visual.clone(),
+				..Default::default()
+			}),
+			mp4_atom::Codec::Hvc1(mp4_atom::Hvc1 {
+				hvcc: hvcc.clone(),
+				visual: hevc_visual.clone(),
+				..Default::default()
+			}),
+			mp4_atom::Codec::Hev1(mp4_atom::Hev1 {
+				hvcc: hvcc.clone(),
+				visual: hevc_visual.clone(),
+				..Default::default()
+			}),
+		] {
+			let config = video_config(codec);
+			assert_eq!(
+				(config.display_aspect_width, config.display_aspect_height),
+				expected,
+				"{}",
+				config.codec
+			);
+		}
+	}
+}
+
+#[test]
+fn in_band_entries_without_parameter_sets_keep_visual_dimensions() {
+	let mut avcc =
+		mp4_atom::Avcc::new(crate::codec::h264::fixtures::SPS_IPB, crate::codec::h264::fixtures::PPS).unwrap();
+	avcc.sequence_parameter_sets.clear();
+	avcc.picture_parameter_sets.clear();
+	let mut bytes = crate::codec::h265::fixtures::hvcc();
+	let mut hvcc = mp4_atom::Hvcc::decode_body(&mut bytes).unwrap();
+	hvcc.arrays.clear();
+	let visual = mp4_atom::Visual {
+		width: 720,
+		height: 576,
+		..Default::default()
+	};
+	for codec in [
+		mp4_atom::Codec::Avc3(mp4_atom::Avc3 {
+			avcc,
+			visual: visual.clone(),
+			..Default::default()
+		}),
+		mp4_atom::Codec::Hev1(mp4_atom::Hev1 {
+			hvcc,
+			visual,
+			..Default::default()
+		}),
+	] {
+		let config = video_config(codec);
+		assert_eq!((config.coded_width, config.coded_height), (Some(720), Some(576)));
+		assert_eq!(
+			(config.display_aspect_width, config.display_aspect_height),
+			(None, None)
+		);
+		assert!(
+			matches!(&config.codec, hang::catalog::VideoCodec::H264(h264) if h264.inline)
+				|| matches!(&config.codec, hang::catalog::VideoCodec::H265(h265) if h265.in_band)
+		);
+	}
 }
 
 #[test]
