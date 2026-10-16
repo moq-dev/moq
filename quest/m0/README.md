@@ -83,6 +83,10 @@ have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
 
 - [qmux release backport](/quest/m0/qmux-credit-backport.md) - adopt the 0.5 fix independently of the next breaking cut
 
+- [noq 1.3.x close fix](/quest/m0/refusal-close-backport-upstream.md) - a published 1.3.x `web-transport-moq` acknowledges the CLOSE capsule before teardown
+
+- [Refusal close backport](/quest/m0/refusal-close-backport.md) - `release` reports a refused browser session as `unauthorized`, never "Connection lost"
+
 - [Lite SETUP backport](/quest/m0/lite-setup-backport.md) - `release` closes a moq-lite session on a repeated SETUP parameter or a second Setup Stream, in a later 0.14.x patch (#5521)
 - [Kotlin wrapper POM release](/quest/m0/kt-ffi-pom.md) - `dev.moq:moq` 0.5.2 ships from `release`, its POMs naming moq-ffi at `[0.4.3,0.5)`
 
