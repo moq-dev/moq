@@ -207,8 +207,14 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	/// scheduler) and the model's [`Subscription::priority`](crate::track::Subscription),
 	/// where higher values preempt lower ones. The lite priority queue's rank is the
 	/// opposite (0 = most urgent); rank holders convert via `PriorityHandle::send_order`.
-	pub fn set_priority(&mut self, send_order: u8) {
-		self.stream.as_mut().unwrap().set_priority(send_order.into());
+	/// In a send group, the order ranks the stream only against the group's others.
+	pub fn set_priority(&mut self, send_order: i64) {
+		self.stream.as_mut().unwrap().set_priority(send_order);
+	}
+
+	/// Move the stream into a send group from its session.
+	pub fn set_group(&mut self, group: &S::Group) {
+		self.stream.as_mut().unwrap().set_group(group);
 	}
 
 	/// Cast the writer to a different version, used during version negotiation.
@@ -265,12 +271,17 @@ mod tests {
 
 	impl crate::transport::poll::SendStream for Stopped {
 		type Error = Self;
+		type Group = crate::transport::poll::Ungrouped;
 
 		fn poll_write(&mut self, _: &mut Context<'_>, _: &[u8]) -> Poll<Result<usize, Self::Error>> {
 			Poll::Ready(Err(self.clone()))
 		}
 
-		fn set_priority(&mut self, _: i32) {}
+		fn set_priority(&mut self, _: i64) {}
+
+		fn set_group(&mut self, group: &Self::Group) {
+			match *group {}
+		}
 
 		fn finish(&mut self) -> Result<(), Self::Error> {
 			Err(self.clone())
@@ -323,7 +334,7 @@ mod tests {
 		let mut writer = Writer::new(SinkSend::new(log.clone()), crate::lite::Version::Lite05);
 
 		for send_order in 0u8..=255 {
-			writer.set_priority(send_order);
+			writer.set_priority(send_order.into());
 		}
 
 		assert_eq!(log.priorities(), (0u8..=255).collect::<Vec<_>>());
