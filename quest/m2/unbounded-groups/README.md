@@ -47,9 +47,11 @@ Decided 2026-10-16 (maintainer interview):
 - Refills patch the group's state in place, as sorted runs, written only
   below `committed` so they never race the tail writer. They replace
   today's separate `Slot.head` copy.
-- Recency only, no pinning: reads refresh recency as today. A reader that
+- Readers pin nothing: reads refresh recency as today. A reader that
   falls into an evicted run refills like a joiner. With nothing to refill
-  from, it gets `Error::Evicted`.
+  from, it gets `Error::Evicted`. Within a group, victims go front to back
+  until [Middle eviction](/quest/m2/unbounded-groups/middle-eviction.md)
+  makes the head the last victim, however stale it is.
 - Whole cold groups are still evicted first. A group loses part of itself
   only when it is the protected live edge or is being read.
 - Over moq-transport, an object with a hole fails the reader with `Evicted`

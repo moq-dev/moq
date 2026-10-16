@@ -15,8 +15,9 @@ See the [epic](/quest/m2/unbounded-groups/README.md) for the decisions.
   [Front eviction](/quest/m2/unbounded-groups/front-eviction.md). The new
   part is choosing what to keep.
 - Decide how much head to keep from what a join needs (e.g. the first frame,
-  or what a fast join reads), not from a fixed constant. The head is still
-  evictable as a last resort. This is not pinning.
+  or what a fast join reads), not from a fixed constant. Within a group,
+  the head is the last victim regardless of recency: middle runs go first,
+  then the head, and only then the group. This is not pinning.
 - Test a long-GOP live group under pressure: a joiner starts from the
   cached head with no upstream request, and a live reader is unaffected.
 
