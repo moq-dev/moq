@@ -38,6 +38,7 @@ fn admission(c: &mut Criterion) {
 								leak: None,
 								size: Some(1_000_000),
 								transport: 512,
+								reach: Duration::from_secs(1),
 							},
 						);
 					}

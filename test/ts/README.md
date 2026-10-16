@@ -39,7 +39,7 @@ just test ts --headroom         # the same with four audio PIDs, muxed above the
 just test ts --leak             # 1080p video with no HRD, filling its level's 24 Mb/s leak
 just test ts --full             # the same with two audio PIDs, filling its multiplex with no nulls
 just test ts --fragment-pes    # legal headers split across packets, with FFmpeg/TSDuck grading
-just test ts --delay 1s         # pass the exporter's --delay
+just test ts --delay 2s         # pass the exporter's --delay
 ```
 
 `--fragment-pes` shifts generated audio/video PES bursts into their following
@@ -77,6 +77,8 @@ moq --connect http://localhost:4443 --broadcast live.hang export ts > sub.ts
 
 Requirements: `tsp`, `tsanalyze` and `tstables` (TSDuck) and `python3` for every mode; the
 round-trip modes also need `cargo`, `ffmpeg`, `ffprobe`, `curl`, and `timeout`.
+`just test ts-tstd` also needs `ffmpeg` (with libx264) and `ffprobe` for its generated
+references.
 
 ## Checks
 
@@ -198,8 +200,11 @@ changes:
 | delivered at 4x | TB and B overflow, audio held over 1 s |
 | delivered at 15x (a burst) | TB and B overflow, audio held over 1 s |
 
-No restamp can overflow the video MB: it holds the level's whole CPB less the
-declared one, about 3.6 MB, more than the 4 s capture carries.
+No restamp of the Kyrion capture can overflow its video MB: it holds the level's
+whole CPB less the declared one, about 3.6 MB, more than the 4 s capture carries.
+An 8 s FFmpeg AVC Baseline@2.0 clip has no declared NAL HRD, so its MB uses the
+much smaller level defaults. It passes as encoded; restamping only its PCRs at
+4x overflows MB (and TB), closing the separate MB negative-control gap.
 
 The packet layouts a capture cannot be edited into are built synthetically: a
 10 Mb/s single-video stream carrying the Kyrion SPS, one access unit per PES, with
@@ -221,9 +226,16 @@ partway through packets, and the last is cut off by the end of the capture:
 | four frames per PES, the first decoded 0.3 ms after its last byte leaves TB, before the rest of that packet has | pass |
 | seven frames per PES, the first decoded as B passes its size partway through a packet | B overflow |
 
-The ffmpeg clip `run.sh` generates is not a positive control: its muxer sends
-audio 0.7 s ahead by default (`-muxdelay`), which overflows the 3,584-byte ADTS
-buffer, and even at 0.1 s a four-packet audio burst overflows TB.
+A generated AVC/AAC reference also passes: stereo 48 kHz AAC at 128 kb/s,
+`-muxdelay 0.1 -muxpreload 0.1 -pes_payload_size 0`, in a 2 Mb/s TS. The short
+lead keeps the 3,584-byte AAC buffer below capacity, and the mux rate keeps
+audio packet bursts within the TB drain. Every elementary stream must have
+access units to grade; the builder also checks that AAC is actually present.
+
+The 10 Mb/s FFmpeg clip `run.sh` generates remains unsuitable as a positive
+control: its default 0.7 s audio lead overflows B, and even at 0.1 s a
+four-packet audio burst at that transport rate overflows TB. These references
+close the named MB/AAC gaps, not every codec, buffer or packet layout.
 
 ### Gate
 
@@ -298,7 +310,7 @@ the total and reports the rate over the tail of the sample beside it. A sender
 that buffers builds a standing lag once and then runs at the media rate: the lag
 is a constant offset no receiver can see, and it cannot grow past the latency
 budget the sender is allowed to hold, so set `--drift-ms` to that budget
-(`export ts --delay`, 500 ms by default). A pipe that is not running at the
+(`export ts --delay`, 1 s by default). A pipe that is not running at the
 media rate never stops accumulating and so breaches any fixed bound given a long
 enough sample. The tail rate is what tells the two apart, and it needs a sample
 longer than the lag takes to build: measured against the grid-sliced exporter,
@@ -374,7 +386,7 @@ outgrow a 6 kB slot, so the exporter has to spread each over the slots before it
 DTS; CI runs that too (`just test ts --bitrate 2000000`). `--hrd` goes further: a
 1080p encode with a 9 Mbit NAL HRD kept near full by noise, the shape of a
 contribution encoder's output, which sends pictures most of a second ahead of their
-decode time and loads the decoder buffer past 60 % at the default delay (the recipe
+decode time and fills the decoder buffer to its declared size at the default delay (the recipe
 moq-dev/moq#4645 graded with; CI runs it too). Every other clip muxes at or below the
 video's Rx, where its transport buffer cannot fill. `--headroom` puts that video
 beside three MPEG-1 Layer II PIDs and an AC-3 one in a 12.5 Mb/s multiplex, above

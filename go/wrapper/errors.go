@@ -45,7 +45,7 @@ var (
 	ErrTimeOverflow = ffi.ErrMoqErrorTimeOverflow
 	// ErrLogLevel matches an unparseable log level string passed to LogLevel.
 	ErrLogLevel = ffi.ErrMoqErrorLogLevel
-	// ErrTask matches a panic or cancellation in a background native task.
+	// ErrTask matches a panic in an owned background native task; cancellation is ErrCancelled.
 	ErrTask = ffi.ErrMoqErrorTask
 	// ErrJSON matches malformed JSON passed through the FFI API.
 	ErrJSON = ffi.ErrMoqErrorJson

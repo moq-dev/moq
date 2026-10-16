@@ -1857,9 +1857,7 @@ test("Frame rejects a property that runs past its block", async () => {
 	);
 });
 
-// Draft-19 reassigns property 0x06 from the draft-ietf-moq-loc-03 Timestamp to
-// SUBGROUP_DELIVERY_TIMEOUT, which must not be read as a time.
-test("Frame reads property 0x06 as a Timestamp only before draft-19", async () => {
+test("Frame reads only the current LOC Timestamp ID on every draft", async () => {
 	const flags: GroupFlags = {
 		hasExtensions: true,
 		hasSubgroup: false,
@@ -1868,13 +1866,22 @@ test("Frame reads property 0x06 as a Timestamp only before draft-19", async () =
 		hasPriority: true,
 		firstObject: true,
 	};
-	for (const [version, expected] of [
-		[Version.DRAFT_18, 42],
-		[Version.DRAFT_19, undefined],
+	for (const version of [
+		Version.DRAFT_14,
+		Version.DRAFT_15,
+		Version.DRAFT_16,
+		Version.DRAFT_17,
+		Version.DRAFT_18,
+		Version.DRAFT_19,
+		Version.DRAFT_20,
+		Version.DRAFT_21,
+		Version.DRAFT_22,
 	] as const) {
-		const reader = new Reader(undefined, new Uint8Array([0, 2, 0x06, 42, 1, 0xaa]), version);
-		const frame = await reader.decode((c) => Frame.decode(c, flags, Timescale.MILLI));
-		expect(frame.timestamp?.value).toBe(expected);
+		for (const id of [0x06, 0x10]) {
+			const reader = new Reader(undefined, new Uint8Array([0, 2, id, 42, 1, 0xaa]), version);
+			const frame = await reader.decode((c) => Frame.decode(c, flags, Timescale.MILLI));
+			expect(frame.timestamp?.value).toBe(id === 0x10 ? 42 : undefined);
+		}
 	}
 });
 

@@ -670,10 +670,10 @@ def main():
     ap.add_argument(
         "--drift-ms",
         type=float,
-        default=500.0,
+        default=1000.0,
         help="bound on accumulated release drift, being the standing lag the sender may "
         "hold; set it to the sender's latency budget (moq export ts --delay, "
-        "itself 500ms by default)",
+        "itself 1s by default)",
     )
     ap.add_argument(
         "--rate-ppm",
