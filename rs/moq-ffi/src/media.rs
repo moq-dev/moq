@@ -344,16 +344,25 @@ impl Drop for MoqMediaTimebase {
 
 /// Reserve a container's catalog slot under the owner lock, from `timebase` when shared, so the
 /// importer is constructed after the lock is released.
+///
+/// Also returns the broadcast's driver, which the importer checks so a driver panic reaches it.
 fn reserve_container(
 	broadcast: &MoqBroadcastProducer,
 	timebase: Option<&MoqMediaTimebase>,
-) -> Result<(moq_net::broadcast::Producer, moq_mux::catalog::Reserved<Extra>), MoqError> {
+) -> Result<
+	(
+		moq_net::broadcast::Producer,
+		moq_mux::catalog::Reserved<Extra>,
+		crate::ffi::Background,
+	),
+	MoqError,
+> {
 	broadcast.with_state(|state| {
 		let reserved = match timebase {
 			Some(timebase) => timebase.reserve(broadcast, state)?,
 			None => state.catalog.reserve(),
 		};
-		Ok((state.broadcast.clone(), reserved))
+		Ok((state.broadcast.clone(), reserved, state.driver.clone()))
 	})
 }
 
@@ -721,12 +730,14 @@ struct ContainerStreamProducer {
 /// Imports complete container chunks into a broadcast.
 #[derive(uniffi::Object)]
 pub struct MoqMediaContainerProducer {
+	driver: crate::ffi::Background,
 	inner: std::sync::Mutex<Option<ContainerProducer>>,
 }
 
 /// Imports a container byte stream into a broadcast.
 #[derive(uniffi::Object)]
 pub struct MoqMediaContainerStreamProducer {
+	driver: crate::ffi::Background,
 	inner: std::sync::Mutex<Option<ContainerStreamProducer>>,
 }
 
@@ -754,17 +765,17 @@ impl MoqMediaTrackProducer {
 		init: MoqAudioInit,
 	) -> Result<Arc<MoqMediaTrackProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let guard = broadcast.state.lock().unwrap();
-		let state = guard.as_ref().ok_or(MoqError::Closed)?;
+		broadcast.with_state(|state| {
+			let init: moq_mux::import::AudioInit = init.into();
+			let request = target.resolve(&state.broadcast, &init.format)?;
 
-		let init: moq_mux::import::AudioInit = init.into();
-		let request = target.resolve(&state.broadcast, &init.format)?;
-
-		let import =
-			moq_mux::import::Track::audio(request, state.catalog.reserve(), init).map_err(|err| MoqError::Codec {
-				reason: format!("init failed: {err}"),
+			let import = moq_mux::import::Track::audio(request, state.catalog.reserve(), init).map_err(|err| {
+				MoqError::Codec {
+					reason: format!("init failed: {err}"),
+				}
 			})?;
-		Ok(MoqMediaTrackProducer::from_import(import))
+			Ok(MoqMediaTrackProducer::from_import(import))
+		})
 	}
 }
 
@@ -781,17 +792,17 @@ impl MoqMediaTrackProducer {
 		init: MoqVideoInit,
 	) -> Result<Arc<MoqMediaTrackProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let guard = broadcast.state.lock().unwrap();
-		let state = guard.as_ref().ok_or(MoqError::Closed)?;
+		broadcast.with_state(|state| {
+			let init: moq_mux::import::VideoInit = init.into();
+			let request = target.resolve(&state.broadcast, &init.format)?;
 
-		let init: moq_mux::import::VideoInit = init.into();
-		let request = target.resolve(&state.broadcast, &init.format)?;
-
-		let import =
-			moq_mux::import::Track::video(request, state.catalog.reserve(), init).map_err(|err| MoqError::Codec {
-				reason: format!("init failed: {err}"),
+			let import = moq_mux::import::Track::video(request, state.catalog.reserve(), init).map_err(|err| {
+				MoqError::Codec {
+					reason: format!("init failed: {err}"),
+				}
 			})?;
-		Ok(MoqMediaTrackProducer::from_import(import))
+			Ok(MoqMediaTrackProducer::from_import(import))
+		})
 	}
 }
 
@@ -807,12 +818,13 @@ impl MoqMediaContainerProducer {
 	) -> Result<Arc<MoqMediaContainerProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let native = moq_mux::import::ContainerInit::new(init.format.into(), init.data);
-		let (target, reserved) = reserve_container(broadcast, init.timebase.as_deref())?;
+		let (target, reserved, driver) = reserve_container(broadcast, init.timebase.as_deref())?;
 		let import = moq_mux::import::Container::new(target, reserved, &native).map_err(|err| MoqError::Codec {
 			reason: format!("init failed: {err}"),
 		})?;
 
 		Ok(Arc::new(MoqMediaContainerProducer {
+			driver,
 			inner: std::sync::Mutex::new(Some(ContainerProducer { import })),
 		}))
 	}
@@ -831,23 +843,23 @@ impl MoqMediaTrackStreamProducer {
 		init: MoqVideoInit,
 	) -> Result<Arc<MoqMediaTrackStreamProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let guard = broadcast.state.lock().unwrap();
-		let state = guard.as_ref().ok_or(MoqError::Closed)?;
+		broadcast.with_state(|state| {
+			let init: moq_mux::import::VideoInit = init.into();
+			let request = target.resolve(&state.broadcast, &init.format)?;
 
-		let init: moq_mux::import::VideoInit = init.into();
-		let request = target.resolve(&state.broadcast, &init.format)?;
+			let import =
+				moq_mux::import::TrackStream::video(request, state.catalog.reserve(), init).map_err(|err| {
+					MoqError::Codec {
+						reason: format!("init failed: {err}"),
+					}
+				})?;
 
-		let import = moq_mux::import::TrackStream::video(request, state.catalog.reserve(), init).map_err(|err| {
-			MoqError::Codec {
-				reason: format!("init failed: {err}"),
-			}
-		})?;
-
-		Ok(Arc::new(MoqMediaTrackStreamProducer {
-			inner: std::sync::Mutex::new(Some(MediaStreamProducer {
-				import: Box::new(import),
-			})),
-		}))
+			Ok(Arc::new(MoqMediaTrackStreamProducer {
+				inner: std::sync::Mutex::new(Some(MediaStreamProducer {
+					import: Box::new(import),
+				})),
+			}))
+		})
 	}
 }
 
@@ -862,7 +874,7 @@ impl MoqMediaContainerStreamProducer {
 		init: MoqContainerStreamInit,
 	) -> Result<Arc<MoqMediaContainerStreamProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let (target, reserved) = reserve_container(broadcast, init.timebase.as_deref())?;
+		let (target, reserved, driver) = reserve_container(broadcast, init.timebase.as_deref())?;
 		let import = moq_mux::import::ContainerStream::new(target, reserved, init.format.into()).map_err(|err| {
 			MoqError::Codec {
 				reason: format!("init failed: {err}"),
@@ -870,6 +882,7 @@ impl MoqMediaContainerStreamProducer {
 		})?;
 
 		Ok(Arc::new(MoqMediaContainerStreamProducer {
+			driver,
 			inner: std::sync::Mutex::new(Some(ContainerStreamProducer { import })),
 		}))
 	}
@@ -995,13 +1008,18 @@ impl MoqMediaContainerProducer {
 	/// No timestamp: a container carries its tracks' timing itself, and the importer reads it out
 	/// rather than taking the caller's word for it.
 	pub fn write(&self, payload: Vec<u8>) -> Result<(), MoqError> {
-		let _guard = crate::ffi::enter();
-		let mut guard = self.inner.lock().unwrap();
-		let container = guard.as_mut().ok_or(MoqError::Closed)?;
-		container.import.decode(&payload).map_err(|err| MoqError::Codec {
-			reason: format!("decode failed: {err}"),
-		})?;
-		Ok(())
+		self.driver.check()?;
+		let result = (|| {
+			let _guard = crate::ffi::enter();
+			let mut guard = self.inner.lock().unwrap();
+			let container = guard.as_mut().ok_or(MoqError::Closed)?;
+			container.import.decode(&payload).map_err(|err| MoqError::Codec {
+				reason: format!("decode failed: {err}"),
+			})?;
+			Ok(())
+		})();
+		self.driver.check()?;
+		result
 	}
 
 	/// Declare that the next chunk starts a new segment, rolling a group on every track this
@@ -1011,33 +1029,47 @@ impl MoqMediaContainerProducer {
 	/// `styp` atoms declares its own, so this is only needed when it doesn't, and formats with no
 	/// segment concept (MKV, TS, FLV) ignore it.
 	pub fn cut(&self) -> Result<(), MoqError> {
-		let _guard = crate::ffi::enter();
-		let mut guard = self.inner.lock().unwrap();
-		let container = guard.as_mut().ok_or(MoqError::Closed)?;
-		container.import.cut();
-		Ok(())
+		self.driver.check()?;
+		let result = (|| {
+			let _guard = crate::ffi::enter();
+			let mut guard = self.inner.lock().unwrap();
+			let container = guard.as_mut().ok_or(MoqError::Closed)?;
+			container.import.cut();
+			Ok(())
+		})();
+		self.driver.check()?;
+		result
 	}
 
 	/// Start a new segment and number its groups `sequence`.
 	pub fn seek(&self, sequence: u64) -> Result<(), MoqError> {
-		let _guard = crate::ffi::enter();
-		let mut guard = self.inner.lock().unwrap();
-		let container = guard.as_mut().ok_or(MoqError::Closed)?;
-		container.import.seek(sequence).map_err(|err| MoqError::Codec {
-			reason: format!("seek failed: {err}"),
-		})?;
-		Ok(())
+		self.driver.check()?;
+		let result = (|| {
+			let _guard = crate::ffi::enter();
+			let mut guard = self.inner.lock().unwrap();
+			let container = guard.as_mut().ok_or(MoqError::Closed)?;
+			container.import.seek(sequence).map_err(|err| MoqError::Codec {
+				reason: format!("seek failed: {err}"),
+			})?;
+			Ok(())
+		})();
+		self.driver.check()?;
+		result
 	}
 
 	/// Finish every track this container publishes.
 	pub fn finish(&self) -> Result<(), MoqError> {
-		let _guard = crate::ffi::enter();
-		let mut guard = self.inner.lock().unwrap();
-		let mut container = guard.take().ok_or(MoqError::Closed)?;
-		container.import.finish().map_err(|err| MoqError::Codec {
-			reason: format!("finish failed: {err}"),
-		})?;
-		Ok(())
+		let result = (|| {
+			let _guard = crate::ffi::enter();
+			let mut guard = self.inner.lock().unwrap();
+			let mut container = guard.take().ok_or(MoqError::Closed)?;
+			container.import.finish().map_err(|err| MoqError::Codec {
+				reason: format!("finish failed: {err}"),
+			})?;
+			Ok(())
+		})();
+		self.driver.check()?;
+		result
 	}
 }
 
@@ -1085,24 +1117,33 @@ impl MoqMediaContainerStreamProducer {
 	/// Push raw container bytes. The importer recovers its own framing, so callers can write
 	/// arbitrary chunks.
 	pub fn write(&self, payload: Vec<u8>) -> Result<(), MoqError> {
-		let _guard = crate::ffi::enter();
-		let mut guard = self.inner.lock().unwrap();
-		let container = guard.as_mut().ok_or(MoqError::Closed)?;
-		container.import.decode(&payload).map_err(|err| MoqError::Codec {
-			reason: format!("decode failed: {err}"),
-		})?;
-		Ok(())
+		self.driver.check()?;
+		let result = (|| {
+			let _guard = crate::ffi::enter();
+			let mut guard = self.inner.lock().unwrap();
+			let container = guard.as_mut().ok_or(MoqError::Closed)?;
+			container.import.decode(&payload).map_err(|err| MoqError::Codec {
+				reason: format!("decode failed: {err}"),
+			})?;
+			Ok(())
+		})();
+		self.driver.check()?;
+		result
 	}
 
 	/// Finish every track this container publishes.
 	pub fn finish(&self) -> Result<(), MoqError> {
-		let _guard = crate::ffi::enter();
-		let mut guard = self.inner.lock().unwrap();
-		let mut container = guard.take().ok_or(MoqError::Closed)?;
-		container.import.finish().map_err(|err| MoqError::Codec {
-			reason: format!("finish failed: {err}"),
-		})?;
-		Ok(())
+		let result = (|| {
+			let _guard = crate::ffi::enter();
+			let mut guard = self.inner.lock().unwrap();
+			let mut container = guard.take().ok_or(MoqError::Closed)?;
+			container.import.finish().map_err(|err| MoqError::Codec {
+				reason: format!("finish failed: {err}"),
+			})?;
+			Ok(())
+		})();
+		self.driver.check()?;
+		result
 	}
 }
 
@@ -1226,11 +1267,15 @@ pub struct MoqMediaGroupConsumer {
 }
 
 impl MoqMediaGroupConsumer {
-	fn from_inner(group: moq_net::group::Consumer, container: moq_mux::catalog::hang::Container) -> Self {
+	fn from_inner(
+		group: moq_net::group::Consumer,
+		container: moq_mux::catalog::hang::Container,
+		driver: crate::ffi::Background,
+	) -> Self {
 		let inner = moq_mux::container::GroupConsumer::new(group, container);
 		Self {
 			sequence: inner.sequence(),
-			task: Task::new(MediaGroupInner { inner }),
+			task: Task::new(MediaGroupInner { inner }).supervised(driver),
 		}
 	}
 }
@@ -1295,13 +1340,18 @@ impl MoqMediaCatalogConsumer {
 	#[uniffi::constructor]
 	pub async fn subscribe(broadcast: &MoqBroadcastConsumer) -> Result<Arc<MoqMediaCatalogConsumer>, MoqError> {
 		let track = broadcast
-			.inner
-			.track(hang::catalog::Catalog::DEFAULT_NAME)?
-			.subscribe(hang::catalog::Catalog::default_subscription())
+			.driver
+			.watch(async {
+				Ok(broadcast
+					.inner
+					.track(hang::catalog::Catalog::DEFAULT_NAME)?
+					.subscribe(hang::catalog::Catalog::default_subscription())
+					.await?)
+			})
 			.await?;
 		let consumer = moq_mux::catalog::hang::Consumer::from(track);
 		Ok(Arc::new(MoqMediaCatalogConsumer {
-			task: Task::new(Catalog { inner: consumer }),
+			task: Task::new(Catalog { inner: consumer }).supervised(broadcast.driver.clone()),
 		}))
 	}
 }
@@ -1323,10 +1373,13 @@ impl MoqMediaTrackConsumer {
 		// subscription if init parsing fails.
 		let media = media_container(container)?;
 		let subscription = subscription.map(moq_net::track::Subscription::from).unwrap_or_default();
-		let track = broadcast.inner.track(&name)?.subscribe(subscription).await?;
+		let track = broadcast
+			.driver
+			.watch(async { Ok(broadcast.inner.track(&name)?.subscribe(subscription).await?) })
+			.await?;
 		let consumer = moq_mux::container::Consumer::new(track, media);
 		Ok(Arc::new(MoqMediaTrackConsumer {
-			task: Task::new(Media { inner: consumer }),
+			task: Task::new(Media { inner: consumer }).supervised(broadcast.driver.clone()),
 		}))
 	}
 }
@@ -1344,7 +1397,8 @@ impl MoqMediaGroupConsumer {
 	pub fn new(group: &MoqGroupConsumer, container: MoqContainer) -> Result<Arc<Self>, MoqError> {
 		// Parse the container first, so a bad init leaves the raw group readable.
 		let media = media_container(container)?;
-		Ok(Arc::new(Self::from_inner(group.take()?, media)))
+		let (group, driver) = group.take()?;
+		Ok(Arc::new(Self::from_inner(group, media, driver)))
 	}
 
 	/// Fetch and decode exactly one media group.
@@ -1363,9 +1417,18 @@ impl MoqMediaGroupConsumer {
 		// dynamic group request waiting for a consumer that can never read it.
 		let media = media_container(container)?;
 		let options = options.map(moq_net::group::Fetch::from);
-		let track = broadcast.inner.track(&name).map_err(map_fetch_error)?;
-		let group = track.fetch_group(sequence, options).await.map_err(map_fetch_error)?;
-		Ok(Arc::new(MoqMediaGroupConsumer::from_inner(group, media)))
+		let group = broadcast
+			.driver
+			.watch(async {
+				let track = broadcast.inner.track(&name).map_err(map_fetch_error)?;
+				track.fetch_group(sequence, options).await.map_err(map_fetch_error)
+			})
+			.await?;
+		Ok(Arc::new(MoqMediaGroupConsumer::from_inner(
+			group,
+			media,
+			broadcast.driver.clone(),
+		)))
 	}
 }
 
@@ -1447,8 +1510,13 @@ mod timebase_tests {
 	async fn containers_of_one_source_keep_their_relative_media_time() {
 		for shared in [false, true] {
 			// Construct under the paused runtime, before exported entry points enter their worker.
-			let broadcast =
-				Arc::new(MoqBroadcastProducer::from_inner(moq_net::broadcast::Info::new().produce()).unwrap());
+			let broadcast = Arc::new(
+				MoqBroadcastProducer::from_inner(
+					moq_net::broadcast::Info::new().produce(),
+					crate::ffi::Background::default(),
+				)
+				.unwrap(),
+			);
 			let catalog = broadcast.with_state(|state| Ok(state.catalog.clone())).unwrap();
 			let clock = catalog.clock();
 			let consumer = broadcast.consume_inner().unwrap();

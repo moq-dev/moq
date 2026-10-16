@@ -20,8 +20,7 @@ Decided 2026-10-10: in-memory, on moq-net's poll transport traits, not a
 moq-dev/web-transport. Backend-only methods (`poll_acked`, `set_deadline`,
 `set_limits`) answer "unsupported", as
 [one adapter](/quest/m2/transport-adapter-dedup.md) decided. Optional latency
-and loss run on the moq-clock clock. It waits for the switch, which reshapes
-moq-tokio's server types the seam abstracts over.
+and loss run on the moq-clock clock.
 
 Find the smallest seam that keeps `moq_relay`'s public API narrow. Propose
 where the session lives (recommended: a moq-net module behind a cargo
@@ -29,7 +28,3 @@ feature, since other crates' tests consume it) and its name in the PR.
 Simulated UDP is [QUIC on the sim](/quest/m2/quic-sim.md).
 
 Public API: the in-memory session and the relay seam. Wire: none.
-
-## Required
-
-- [Switch](/quest/m1/quic/fork/switch.md) - moq-tokio's server types settle first

@@ -8,7 +8,7 @@
 //! Origin drivers run through Tokio's explicit-time adapter while session
 //! drivers use the worker's clock and timer.
 
-#![cfg(all(target_os = "linux", feature = "noq"))]
+#![cfg(all(target_os = "linux", feature = "quic"))]
 
 #[path = "support.rs"]
 mod support;
@@ -308,7 +308,7 @@ fn two_lite_sessions_share_the_server_socket() {
 }
 
 /// The client verifies for real, trusting only the certificate the server
-/// presents: nothing handshakes unless the configured roots reach noq.
+/// presents: nothing handshakes unless the configured roots reach moq-quic.
 #[test]
 fn configured_roots_verify_the_server() {
 	let Some(mut worker) = worker() else { return };

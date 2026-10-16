@@ -3,7 +3,6 @@
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use moq_clock::Instant;
 use moq_net::Timestamp;
 
 #[path = "../src/jitter.rs"]

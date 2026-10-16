@@ -3,7 +3,7 @@
 //! Linux-only, because the mode is: every worker binds the listen address with
 //! `SO_REUSEPORT`, and no other platform load-balances a unicast UDP port across
 //! the group.
-#![cfg(all(target_os = "linux", feature = "noq"))]
+#![cfg(all(target_os = "linux", feature = "quic"))]
 
 use std::net::UdpSocket;
 
@@ -741,7 +741,7 @@ async fn rotated_identity_reaches_every_worker() {
 				let send = send.clone();
 				let certificates = certificates.clone();
 				tokio::spawn(async move {
-					let session = request.ok().await.unwrap();
+					let (session, _driver) = request.ok().await.unwrap();
 					send.send((index, certificates.fingerprints())).unwrap();
 					let _ = session.closed().await;
 				});

@@ -271,6 +271,7 @@ pub(crate) struct VideoEncoder {
 	size: moq_video::Size,
 	reservation: Option<Arc<moq_net::bandwidth::Reservation>>,
 	follow: Option<oneshot::Sender<()>>,
+	followed: Option<crate::ffi::Background>,
 	ceiling: Option<Arc<AtomicU64>>,
 }
 
@@ -368,6 +369,9 @@ struct VideoTaskEntry {
 
 impl VideoEncoder {
 	fn publish_frame(&mut self, timestamp_us: u64, data: &[u8]) -> Result<(), Error> {
+		if let Some(followed) = &self.followed {
+			followed.check()?;
+		}
 		// A buffer that isn't one picture at the configured size is rejected here,
 		// by the surface constructors, rather than reinterpreted.
 		let size = self.size;
@@ -387,12 +391,18 @@ impl VideoEncoder {
 	}
 
 	fn publish_cut(&mut self) -> Result<(), Error> {
+		if let Some(followed) = &self.followed {
+			followed.check()?;
+		}
 		// A keyframe is what a cut is on the wire: the importer closes the open
 		// group and starts a new one at it.
 		Ok(block_on(self.encoder.cut())?)
 	}
 
 	fn publish_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
+		if let Some(followed) = &self.followed {
+			followed.check()?;
+		}
 		block_on(self.encoder.set_bitrate(moq_net::bandwidth::Rate::from_bps(bitrate)))?;
 		// Ceiling first: `update` wakes the follower, which must not read the old
 		// floor and retune above this cap before parking on an unchanged grant.
@@ -407,12 +417,18 @@ impl VideoEncoder {
 
 	fn publish_finish(self) -> Result<(), Error> {
 		let VideoEncoder {
-			encoder, mut producer, ..
+			encoder,
+			mut producer,
+			followed,
+			..
 		} = self;
 		// Drain the codec into the track before ending it, so the last frames land
 		// in it rather than being dropped with the encoder.
 		let drained = block_on(encoder.finish()).and_then(|encoded| producer.publish(&encoded));
-		finalize(producer, drained)
+		finalize(producer, drained)?;
+		// A follower panic only stops rate adaptation, so the track still ends
+		// cleanly before the panic is reported.
+		followed.map_or(Ok(()), |followed| followed.check())
 	}
 }
 
@@ -439,6 +455,7 @@ impl Video {
 			size: config.size(),
 			reservation: None,
 			follow: None,
+			followed: None,
 			ceiling: None,
 		}))
 	}
@@ -463,13 +480,15 @@ impl Video {
 		let (close, closed) = oneshot::channel();
 		shared.lock().as_mut().ok_or(Error::MediaNotFound)?.follow = Some(close);
 		let follower = shared.clone();
-		tokio::spawn(async move {
+		let background = crate::ffi::Background::new(async move {
 			tokio::select! {
 				biased;
 				_ = closed => {}
 				_ = follow_reservation(follower, reservation.consumer(), ceiling) => {}
 			}
+			Ok(())
 		});
+		shared.lock().as_mut().ok_or(Error::MediaNotFound)?.followed = Some(background);
 		Ok(())
 	}
 
@@ -511,16 +530,17 @@ impl Video {
 
 	pub fn consume(
 		&mut self,
-		broadcast: &moq_net::broadcast::Consumer,
-		catalog: &hang::catalog::VideoConfig,
-		name: &str,
+		rendition: crate::consume::Rendition<hang::catalog::VideoConfig>,
 		options: moq_video::decode::Options,
 		output: DecoderOutput,
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
-		let broadcast = broadcast.clone();
-		let catalog = catalog.clone();
-		let name = name.to_string();
+		let crate::consume::Rendition {
+			broadcast,
+			config: catalog,
+			name,
+			driver,
+		} = rendition;
 
 		let channel = oneshot::channel();
 		let entry = VideoTaskEntry {
@@ -532,10 +552,10 @@ impl Video {
 		// `Consumer::new` subscribes (blocking on SUBSCRIBE_OK), so run it inside
 		// the task to keep this entrypoint non-blocking.
 		tokio::spawn(async move {
-			let res = async move {
+			let res = crate::ffi::run(driver.watch(async move {
 				let consumer = moq_video::decode::Consumer::new(&broadcast, &catalog, name, options).await?;
 				Self::run(on_frame, consumer, channel.1, output).await
-			}
+			}))
 			.await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
@@ -924,10 +944,10 @@ pub unsafe extern "C" fn moq_decode_video(
 		let on_frame = unsafe { OnStatus::new(user_data, on_frame)? };
 
 		let mut state = State::lock();
-		let (broadcast, video_cfg, name) = state.consume.video_rendition(catalog, index as usize)?;
+		let rendition = state.consume.video_rendition(catalog, index as usize)?;
 
 		let State { video, .. } = &mut *state;
-		video.consume(&broadcast, &video_cfg, &name, options, output, on_frame)
+		video.consume(rendition, options, output, on_frame)
 	})
 }
 
@@ -1044,5 +1064,33 @@ mod tests {
 			err.to_string().contains("the codec lost the tail"),
 			"the abort should carry the drain failure: {err}"
 		);
+	}
+
+	/// A rate follower panic stops adaptation, not the track: finishing still ends
+	/// it cleanly, then reports the panic.
+	#[tokio::test]
+	async fn finish_ends_the_track_after_a_rate_follower_panic() {
+		let (producer, mut track) = track_under_test().await;
+		let mut config = moq_video::encode::Config::new(320, 240, moq_video::Rate::new(30, 1).unwrap());
+		config.kind = moq_video::encode::Kind::Software;
+		let encoder = moq_video::encode::Sink::open(&config).await.unwrap();
+		let followed = crate::ffi::Background::new(async { panic!("injected rate follower panic") });
+		assert!(matches!(followed.finished().await, Err(Error::Panic)));
+		let video = VideoEncoder {
+			encoder,
+			producer,
+			format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420,
+			size: config.size(),
+			reservation: None,
+			follow: None,
+			followed: Some(followed),
+			ceiling: None,
+		};
+
+		let result = tokio::task::spawn_blocking(move || video.publish_finish())
+			.await
+			.unwrap();
+		assert!(matches!(result, Err(Error::Panic)), "{result:?}");
+		assert!(matches!(track.recv_group().await, Ok(None)), "expected a clean end");
 	}
 }

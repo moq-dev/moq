@@ -12,7 +12,7 @@ tests live in each language's own justfile.
 | [audio-quality](audio-quality/README.md) | `just test audio-quality` | browser audio playout stays within budget over an impaired path |
 | [drain](drain/README.md) | `just test drain` | a JS viewer migrates off a draining relay without a dropped group |
 | video | `just test video` | the `@moq/video` renderer paints through WebGPU and falls back to Canvas2D after losing the GPU |
-| [json-properties](json-properties.md) | `just test json-properties` | both Snapshot codecs reconstruct random JSON sequences with replayable seeds |
+| [json-properties](json-properties.md) | `just test json-properties` | both Snapshot codecs reconstruct, and both Window codecs emit the exact events for, random JSON sequences with replayable seeds |
 
 The first five stand up a `moq-relay` and clients, so two of them running at once, or
 the same one running from two worktrees, would otherwise collide. `lib/harness.sh`

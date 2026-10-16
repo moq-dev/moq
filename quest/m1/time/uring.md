@@ -33,10 +33,6 @@ Public API: breaking. `moq_uring::Timer` is re-exported, and `Timer::set`
 takes `Option<moq_clock::Instant>` instead of std's; no conversion shim.
 Wire: none.
 
-## Required
-
-- [Switch](/quest/m1/quic/fork/switch.md) - the QUIC driver this edits moves onto `moq-quic`
-
 ## Closes
 
 - [#3122](https://github.com/moq-dev/moq/issues/3122) - close this issue when the quest finishes

@@ -44,4 +44,3 @@ Update `doc/bin/relay/` for the flag change.
 ## Related
 
 - [UDP demux](/quest/m1/p2p/udp-demux.md) - demuxes each shard's socket; keep the demux over whatever the library hands out
-- [Steer only QUIC by connection ID](/quest/m1/p2p/shard-steering.md) - the filter this moves leaves non-QUIC flows to the kernel's 4-tuple hash

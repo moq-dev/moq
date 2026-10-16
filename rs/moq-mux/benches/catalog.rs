@@ -14,7 +14,7 @@
 
 use std::hint::black_box;
 use std::task::Poll;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_mux::catalog::Stream;
@@ -37,7 +37,7 @@ struct Fanout {
 	tracks: Vec<moq_mux::container::Producer<Container, hang::catalog::VideoConfig>>,
 	subscribers: Vec<moq_mux::catalog::Consumer>,
 	waiter: kio::Waiter,
-	anchor: Instant,
+	anchor: moq_clock::Instant,
 }
 
 impl Fanout {
@@ -64,7 +64,7 @@ impl Fanout {
 					.await
 					.unwrap()
 			} else {
-				moq_mux::catalog::Consumer::Hang(catalog.consume().unwrap())
+				moq_mux::catalog::Consumer::from(catalog.consume().unwrap())
 			};
 			readers.push(reader);
 		}
@@ -74,7 +74,7 @@ impl Fanout {
 			_catalog: catalog,
 			tracks,
 			waiter: kio::Waiter::noop(),
-			anchor: Instant::now(),
+			anchor: moq_clock::now(),
 		};
 		// The initial track set is configuration, not estimate traffic.
 		fanout.receive();

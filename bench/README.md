@@ -6,6 +6,10 @@ microbenchmarks stay beside their crates under `rs/*/benches`, while the
 
 `run.sh` owns builds, comparison rounds, and reporting. `relay.sh` owns the
 temporary relay lifecycle and load execution shared by each comparison mode.
+A temporary relay is ready only once its PID owns both the TCP listener and UDP
+socket on its assigned port. `lsof`, included in the Nix shell, verifies
+ownership. A collision uses the existing startup attempts; exhausted attempts
+fail with the relay log before any load starts.
 
 ## Commands
 
@@ -68,7 +72,12 @@ frame pointers in the relay, perf's DWARF unwinder stops at the first relay
 frame. Both are needed. An interval counts as a mutex wait only when the worker is blocked in
 the futex under std's `Mutex::lock_contended` (`kio::Lock`). Condvar,
 allocator and parking waits are counted separately, and spinning is excluded.
-`/proc` schedstat supplies CPU, so wait/CPU can exceed one.
+CPU runs from each switch-in to the sampled switch-out, where the next wait
+begins, clipped to the same recorded window as waits.
+`/proc` schedstat only identifies workers that slept throughout: a silent worker
+whose counter advanced is ambiguous and refused. A worker with switch records
+but no sampled switch-out is refused too. `lock.json` version 3 uses this
+recorded CPU denominator; wait/CPU can exceed one.
 `lock/mutex.folded` holds the blocking stacks, weighted by microseconds
 waited, in flamegraph folded format.
 
@@ -154,3 +163,14 @@ ratio is what moq-ffi's handles and runtime cost. Ratios hold only within one
 machine. The nightly runs it, prints the table in the job summary, and keeps the
 results as the `bench-ffi` artifact. Each language also has its own recipe
 (`just go bench`, `just py bench`, `just kt bench`).
+
+## Pattern and container coverage
+
+Rust Criterion coverage includes `moq-pattern`'s
+`matching` (pattern count and path depth, last match and miss) and `moq-mux`'s
+`containers` (CMAF and Annex-B import/export). Container cases vary frame count
+and payload size; CMAF also varies track count. Separate frame and byte rates
+use the same fixtures, with byte rates counting the encoded stream size.
+Fixture generation, publisher setup and destruction stay outside timing.
+The existing shared Rust benchmark nightly invocation runs both targets; their `--test` mode
+exercises every case without making timing claims.
