@@ -887,9 +887,18 @@ impl Schedule {
 			let left = (empty - time(0)).max(0) as u128;
 			self.system = Some((time(0) + (left * before).div_ceil(rsys) as i128, rsys));
 		}
-		// How long Bsys takes at Rsys to remove a packet, and all it holds.
+		// How long Bsys takes at Rsys to remove a packet.
 		let hold = (TsPacket::SIZE as u128 * 8 * 1_000_000_000).div_ceil(rsys) as i128;
-		let room = (BSYS * 8 * 1_000_000_000 / rsys) as i128;
+		// A lower rate's first slot may begin up to a packet of its own before this one ends,
+		// so Rsys may fall as far as its floor anywhere in this slot. Every system packet must
+		// fit Bsys as it would be had Rsys fallen at the slot's start, which at or below 40
+		// Mb/s, where Rsys is its floor, is Bsys itself.
+		let floor = system_rate(0);
+		let mut floored = self
+			.system
+			.map(|(empty, rsys)| time(0) + ((empty - time(0)).max(0) as u128 * rsys).div_ceil(floor) as i128);
+		let floor_hold = (TsPacket::SIZE as u128 * 8 * 1_000_000_000).div_ceil(floor) as i128;
+		let floor_room = (BSYS * 8 * 1_000_000_000 / floor) as i128;
 		// The transport buffer every slot's PCR rides and how long it holds the packet carrying
 		// it, which each later slot's PCR may add to a busy stretch without the chance to wait.
 		let clock_buffer = clock.map(|pid| {
@@ -1024,28 +1033,25 @@ impl Schedule {
 				let done = leak.map_or(arrived, |(leaked, _)| arrived.max(leaked));
 				// TBsys passes a system packet whole into Bsys, each byte as it leaves (2.4.2.3),
 				// and Bsys empties at Rsys whenever it holds one, so it holds the most as the
-				// packet's last byte gets there. Past BSsys the packet waits for Bsys to drain:
-				// from the time this gives, it fits whatever TBsys then holds. This slot's Rsys
-				// holds only to its end, past which a lower rate may cut it to its floor, so a
-				// packet still reaching Bsys then must fit at the floor; and with the clock on
-				// TBsys, the next slot's clock packet must fit after it. Either waits for the
-				// next slot, as starting later in this one leaves more at its end.
+				// packet's last byte gets there. Past BSsys at the floor the packet waits for Bsys
+				// to drain: from the time this gives, it fits whatever TBsys then holds. With the
+				// clock on TBsys, the next slot's clock packet must fit after it, or it waits for
+				// the next slot, as starting later in this one leaves more at its end.
 				let bsys = (tb == 0).then(|| {
 					let before = self.system.map_or(i128::MIN, |(empty, _)| empty);
 					let empty = before.max(last.max(now)) + hold;
-					let end = time(count);
-					let left = (empty - end).max(0) as u128 * rsys;
-					let past =
-						arrived > end && left > BSYS * 8 * 1_000_000_000 + (arrived - end) as u128 * system_rate(0);
+					let floor_before = floored.unwrap_or(i128::MIN);
+					let floor_empty = floor_before.max(last.max(now)) + floor_hold;
 					let clocked = clock_buffer.is_some_and(|(clock, _)| clock == 0)
-						&& left > (BSYS - TsPacket::SIZE as u128) * 8 * 1_000_000_000;
-					let ready = match empty - arrived > room {
-						true => Some(before + hold - duration as i128 - room),
-						false => (past || clocked).then_some(end),
+						&& (floor_empty - time(count)).max(0) as u128 * floor
+							> (BSYS - TsPacket::SIZE as u128) * 8 * 1_000_000_000;
+					let ready = match floor_empty - arrived > floor_room {
+						true => Some(floor_before + floor_hold - duration as i128 - floor_room),
+						false => clocked.then_some(time(count)),
 					};
-					(empty, ready)
+					(empty, floor_empty, ready)
 				});
-				if let Some((_, Some(ready))) = bsys {
+				if let Some((_, _, Some(ready))) = bsys {
 					waiting.push(Reverse((ready, lane)));
 					continue;
 				}
@@ -1086,8 +1092,9 @@ impl Schedule {
 					return Err(self.missed(pid, rate));
 				}
 				self.transport.insert(tb, (arrived, since));
-				if let Some((empty, _)) = bsys {
+				if let Some((empty, floor_empty, _)) = bsys {
 					self.system = Some((empty, rsys));
+					floored = Some(floor_empty);
 				}
 				if let Some((leaked, _)) = leak {
 					self.mb.insert(pid, leaked);
@@ -1147,6 +1154,7 @@ impl Schedule {
 					if tb == 0 {
 						let before = self.system.map_or(i128::MIN, |(empty, _)| empty);
 						self.system = Some((before.max(start) + hold, rsys));
+						floored = Some(floored.unwrap_or(i128::MIN).max(start) + floor_hold);
 					}
 				}
 				position = 1;
@@ -1495,15 +1503,26 @@ mod tests {
 	/// Bsys keeps the bytes it holds when the multiplex rate falls and Rsys with it, so tables
 	/// still to go wait for the slower drain rather than overflow it, and a table still reaching
 	/// Bsys as the rate falls already fits at the slower drain. The rate falls after each slot
-	/// in turn.
+	/// in turn, between rates whose packet lattices start the next slot up to a packet early.
 	#[test]
 	fn bsys_keeps_its_bytes_across_a_rate_fall() {
 		let mut null = unit(0, 1);
 		(null[1], null[2]) = (0x1f, 0xff);
+		for (from, to) in [
+			(100_000_000, 25_000_000),
+			(95_250_000, 25_000_000),
+			(95_250_000, 2_000_000),
+			(60_500_000, 50_000_000),
+		] {
+			bsys_across_falls(&null, from, to);
+		}
+	}
+
+	fn bsys_across_falls(null: &[u8], from: u64, to: u64) {
 		let mut full = false;
 		for fall in 0.. {
 			let mut schedule = Schedule::new(Duration::from_millis(500));
-			schedule.set_rate(Some(100_000_000));
+			schedule.set_rate(Some(from));
 			schedule.set_clock(7);
 			schedule.set_buffer(7, VIDEO);
 			schedule.set_tables(100);
@@ -1531,7 +1550,7 @@ mod tests {
 					peak = peak.max(level);
 				}
 				(at, drain) = (at.max(begin), rsys);
-				for (position, packet) in slot.layout(&unit(7, 1), 100, &null).chunks(TsPacket::SIZE).enumerate() {
+				for (position, packet) in slot.layout(&unit(7, 1), 100, null).chunks(TsPacket::SIZE).enumerate() {
 					if ![0, 100].contains(&pid(packet)) {
 						continue;
 					}
@@ -1545,16 +1564,19 @@ mod tests {
 				}
 				if slots == fall {
 					full |= level > 1_000.0;
-					schedule.set_rate(Some(25_000_000));
+					schedule.set_rate(Some(to));
 				}
 				slots += 1;
 			}
-			assert!(peak <= 1536.001, "a fall after slot {fall}: Bsys peak {peak:.2} B");
+			assert!(
+				peak <= 1536.001,
+				"{from} to {to} b/s after slot {fall}: Bsys peak {peak:.2} B"
+			);
 			if fall >= slots {
 				break;
 			}
 		}
-		assert!(full, "Bsys never held 1,000 B at a fall");
+		assert!(full, "Bsys never held 1,000 B at a fall from {from} b/s");
 	}
 
 	/// A clock on the PMT's PID rides TBsys and goes on into Bsys, so the tables leave room in
