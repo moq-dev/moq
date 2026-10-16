@@ -22,7 +22,7 @@ struct Inner {
 }
 
 impl SendGroup {
-    pub(crate) fn new(conn: Arc<ConnectionInner>, priority: i32) -> Self {
+    pub(crate) fn new(conn: Arc<ConnectionInner>, priority: i64) -> Self {
         let group = conn
             .state
             .lock("SendGroup::new")
@@ -36,13 +36,13 @@ impl SendGroup {
     }
 
     /// Change the group's priority, moving any data it has queued along with it
-    pub fn set_priority(&self, priority: i32) {
+    pub fn set_priority(&self, priority: i64) {
         let mut conn = self.0.conn.state.lock("SendGroup::set_priority");
         conn.inner.send_groups().set_priority(self.id(), priority);
     }
 
     /// Get the group's priority
-    pub fn priority(&self) -> i32 {
+    pub fn priority(&self) -> i64 {
         let mut conn = self.0.conn.state.lock("SendGroup::priority");
         conn.inner.send_groups().priority(self.id())
     }

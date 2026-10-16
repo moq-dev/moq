@@ -349,7 +349,7 @@ impl Connection {
     /// Open a send group at `priority`, for streams to join with [`SendStream::set_group`].
     ///
     /// [`SendStream::set_group`]: crate::quic::driver::SendStream::set_group
-    pub fn send_group(&self, priority: i32) -> SendGroup {
+    pub fn send_group(&self, priority: i64) -> SendGroup {
         SendGroup::new(self.0.0.clone(), priority)
     }
 

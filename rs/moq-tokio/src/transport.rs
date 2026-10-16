@@ -859,7 +859,7 @@ impl<S: web_transport_trait::RecvStream + 'static> Drop for RecvStream<S> {
 
 #[cfg(feature = "quic")]
 impl Grouped for crate::quic::web::Session {
-	fn send_group(&self, priority: i32) -> Option<crate::quic::driver::SendGroup> {
+	fn send_group(&self, priority: i64) -> Option<crate::quic::driver::SendGroup> {
 		Some(Self::send_group(self, priority))
 	}
 
@@ -889,7 +889,7 @@ impl GroupedSend for crate::quic::web::SendStream {
 
 #[cfg(feature = "quic")]
 impl moq_net::transport::poll::SendGroup for crate::quic::driver::SendGroup {
-	fn set_priority(&mut self, priority: i32) {
+	fn set_priority(&mut self, priority: i64) {
 		Self::set_priority(self, priority)
 	}
 }
@@ -1008,7 +1008,7 @@ mod tests {
 	struct FakeGroup(u32);
 
 	impl moq_net::transport::poll::SendGroup for FakeGroup {
-		fn set_priority(&mut self, _: i32) {}
+		fn set_priority(&mut self, _: i64) {}
 	}
 
 	impl GroupedSend for FakeSend {

@@ -6,7 +6,7 @@ use adapter::{Grouped, GroupedSend};
 use crate::quic;
 
 impl Grouped for quic::web::Session {
-	fn send_group(&mut self, priority: i32) -> Option<quic::SendGroup> {
+	fn send_group(&mut self, priority: i64) -> Option<quic::SendGroup> {
 		Some(quic::web::Session::send_group(self, priority))
 	}
 
@@ -33,7 +33,7 @@ impl GroupedSend for quic::web::SendStream {
 }
 
 impl moq_net::transport::poll::SendGroup for quic::SendGroup {
-	fn set_priority(&mut self, priority: i32) {
+	fn set_priority(&mut self, priority: i64) {
 		quic::SendGroup::set_priority(self, priority)
 	}
 }

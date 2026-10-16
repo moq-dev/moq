@@ -60,7 +60,7 @@ impl<S: super::Grouped<SendStream: 'static, RecvStream: 'static>> poll::Session 
 	fn poll_open_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		backend::Session::poll_open_bi(self, cx).map_err(Error)
 	}
-	fn send_group(&mut self, priority: i32) -> Option<<S::SendStream as super::GroupedSend>::Group> {
+	fn send_group(&mut self, priority: i64) -> Option<<S::SendStream as super::GroupedSend>::Group> {
 		self.session.send_group(priority)
 	}
 	fn send_datagram(

@@ -434,7 +434,7 @@ impl SendGroups<'_> {
     ///
     /// # Panics
     /// - when `domain` was opened on another connection
-    pub fn open(&mut self, priority: i32, domain: Option<&SendDomain>) -> SendGroup {
+    pub fn open(&mut self, priority: i64, domain: Option<&SendDomain>) -> SendGroup {
         let tag = self.state.tag;
         let domain = domain.map(|d| d.index(tag));
         SendGroup {
@@ -456,7 +456,7 @@ impl SendGroups<'_> {
     ///
     /// # Panics
     /// - when `group` was opened on another connection
-    pub fn set_priority(&mut self, group: &SendGroup, priority: i32) {
+    pub fn set_priority(&mut self, group: &SendGroup, priority: i64) {
         let index = group.index(self.state.tag);
         self.state.pending.set_group_priority(index, priority);
     }
@@ -465,7 +465,7 @@ impl SendGroups<'_> {
     ///
     /// # Panics
     /// - when `group` was opened on another connection
-    pub fn priority(&self, group: &SendGroup) -> i32 {
+    pub fn priority(&self, group: &SendGroup) -> i64 {
         self.state
             .pending
             .group_priority(group.index(self.state.tag))

@@ -77,7 +77,7 @@ impl<S: backend::Session<SendStream: 'static, RecvStream: 'static> + Clone + 'st
 			.map_err(Error)
 			.map(|res| res.map(|(send, recv)| (SendStream(send), RecvStream(recv))))
 	}
-	fn send_group(&mut self, _: i32) -> Option<poll::Ungrouped> {
+	fn send_group(&mut self, _: i64) -> Option<poll::Ungrouped> {
 		None
 	}
 	/// The backend cannot rank a datagram against a stream, so the group and order are ignored,

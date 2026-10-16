@@ -22,7 +22,7 @@ struct Inner {
 }
 
 impl SendGroup {
-	pub(crate) fn new(shared: Shared, priority: i32) -> Self {
+	pub(crate) fn new(shared: Shared, priority: i64) -> Self {
 		let group = shared.conn.borrow_mut().send_groups().open(priority, None);
 		Self(Rc::new(Inner {
 			shared,
@@ -31,7 +31,7 @@ impl SendGroup {
 	}
 
 	/// Change the group's priority, moving any data it has queued along with it.
-	pub fn set_priority(&self, priority: i32) {
+	pub fn set_priority(&self, priority: i64) {
 		self.0
 			.shared
 			.conn
@@ -41,7 +41,7 @@ impl SendGroup {
 	}
 
 	/// The group's priority.
-	pub fn priority(&self) -> i32 {
+	pub fn priority(&self) -> i64 {
 		self.0.shared.conn.borrow_mut().send_groups().priority(self.id())
 	}
 

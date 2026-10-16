@@ -54,7 +54,7 @@ pub struct Log {
 	priorities: Arc<Mutex<Vec<u8>>>,
 	/// Hands each send group its id.
 	group_ids: Arc<AtomicUsize>,
-	groups: Arc<Mutex<Vec<(usize, i32)>>>,
+	groups: Arc<Mutex<Vec<(usize, i64)>>>,
 	joins: Arc<Mutex<Vec<(usize, usize)>>>,
 	orders: Arc<Mutex<Vec<(usize, i64)>>>,
 }
@@ -103,7 +103,7 @@ impl Log {
 
 	/// Every send group's priority, as (group, priority) in call order: its opening, then
 	/// each move.
-	pub fn groups(&self) -> Vec<(usize, i32)> {
+	pub fn groups(&self) -> Vec<(usize, i64)> {
 		self.groups.lock().unwrap().clone()
 	}
 
@@ -172,7 +172,7 @@ pub struct SinkGroup {
 }
 
 impl SinkGroup {
-	fn open(log: Log, priority: i32) -> Self {
+	fn open(log: Log, priority: i64) -> Self {
 		let id = log.group_ids.fetch_add(1, Ordering::Relaxed);
 		log.groups.lock().unwrap().push((id, priority));
 		Self { id, log }
@@ -180,7 +180,7 @@ impl SinkGroup {
 }
 
 impl poll::SendGroup for SinkGroup {
-	fn set_priority(&mut self, priority: i32) {
+	fn set_priority(&mut self, priority: i64) {
 		self.log.groups.lock().unwrap().push((self.id, priority));
 	}
 }
@@ -423,7 +423,7 @@ impl poll::Session for DeadStreamSession {
 		Poll::Ready(Ok(SinkSend::new(self.log.clone())))
 	}
 
-	fn send_group(&mut self, _: i32) -> Option<SinkGroup> {
+	fn send_group(&mut self, _: i64) -> Option<SinkGroup> {
 		None
 	}
 
@@ -637,7 +637,7 @@ impl poll::Session for SinkSession {
 		Poll::Ready(Ok(send))
 	}
 
-	fn send_group(&mut self, priority: i32) -> Option<SinkGroup> {
+	fn send_group(&mut self, priority: i64) -> Option<SinkGroup> {
 		self.groups.then(|| SinkGroup::open(self.log.clone(), priority))
 	}
 
@@ -968,7 +968,7 @@ impl poll::Session for ScriptedSession {
 		Poll::Ready(Ok(SinkSend::new(self.log.clone())))
 	}
 
-	fn send_group(&mut self, _: i32) -> Option<SinkGroup> {
+	fn send_group(&mut self, _: i64) -> Option<SinkGroup> {
 		None
 	}
 
