@@ -30,8 +30,13 @@ pub(super) struct Presentation {
 	/// audio frame pins the anchor outright instead of pacing against media it
 	/// will never play.
 	restart: bool,
-	/// Endpoints declared by each role, on the shared playback timeline.
+	/// Endpoints declared by each live role, on the shared playback timeline.
 	ends: [Option<Boundary>; 2],
+	/// When each retired role's tail finishes playing, frozen on the wall clock:
+	/// a later rendition re-pins the anchor, which would carry a media endpoint
+	/// onto an unrelated timeline. Kept apart from `ends` so a successor role
+	/// never clears its predecessor's tail.
+	tails: Vec<Instant>,
 	/// Encoder restarts whose replacements have not all started playing.
 	transitions: std::collections::VecDeque<Pending>,
 	/// The latest transition each role declared.
@@ -55,11 +60,9 @@ struct Pending {
 	mapping: Option<Mapping>,
 }
 
-enum Boundary {
-	/// A playing role's end on the shared timeline, which moves with the anchor.
-	Mapped { starts: Option<Instant>, end: Duration },
-	/// When a retired role's tail finishes playing, whatever the anchor does after.
-	Drained(Instant),
+struct Boundary {
+	starts: Option<Instant>,
+	end: Duration,
 }
 
 #[derive(Clone, Copy)]
@@ -76,6 +79,7 @@ impl Presentation {
 			speaker: false,
 			restart: false,
 			ends: Default::default(),
+			tails: Vec::new(),
 			transitions: Default::default(),
 			declared: Default::default(),
 			next: Transition(1),
@@ -201,8 +205,6 @@ pub(super) struct Role {
 	changed: std::sync::Arc<tokio::sync::Notify>,
 	role: Kind,
 	mapping: std::sync::Mutex<Mapping>,
-	/// Whether the declared end was frozen for a tail that outlives the role.
-	retired: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -243,21 +245,20 @@ impl Role {
 			changed,
 			role,
 			mapping: Default::default(),
-			retired: false,
 		}
 	}
 
 	/// Stop while a tail still plays until `drained`, holding a declared end until
 	/// then. Dropping instead discards the tail with the end.
-	///
-	/// The end is frozen on the wall clock: a later rendition re-pins the anchor,
-	/// which would carry a media timestamp onto an unrelated timeline.
-	pub(super) fn retire(mut self, drained: Option<Instant>) {
+	pub(super) fn retire(self, drained: Option<Instant>) {
+		let now = tokio::time::Instant::now().into_std();
 		let mut presentation = self.presentation.lock().unwrap();
-		let end = &mut presentation.ends[self.role as usize];
-		*end = end.take().and(drained.map(Boundary::Drained));
-		drop(presentation);
-		self.retired = true;
+		presentation.tails.retain(|tail| *tail > now);
+		if presentation.ends[self.role as usize].take().is_some()
+			&& let Some(drained) = drained
+		{
+			presentation.tails.push(drained);
+		}
 	}
 
 	pub(super) fn map(&self, source: Timestamp) -> anyhow::Result<Timestamp> {
@@ -312,7 +313,7 @@ impl Role {
 	/// Mark where this role's current segment ends on the shared clock.
 	pub(super) fn end(&self, source: Timestamp) -> anyhow::Result<()> {
 		let mapping = *self.mapping.lock().unwrap();
-		self.presentation.lock().unwrap().ends[self.role as usize] = Some(Boundary::Mapped {
+		self.presentation.lock().unwrap().ends[self.role as usize] = Some(Boundary {
 			starts: mapping.starts,
 			end: timestamp(mapping.map(source)?),
 		});
@@ -373,6 +374,11 @@ impl Role {
 		delay: Option<Duration>,
 	) -> anyhow::Result<Mapping> {
 		loop {
+			// Armed before reading the boundaries, so a change made between the read
+			// and the wait still wakes it.
+			let changed = self.changed.notified();
+			let mut changed = std::pin::pin!(changed);
+			changed.as_mut().enable();
 			let now = tokio::time::Instant::now().into_std();
 			let end = {
 				let mut presentation = self.presentation.lock().unwrap();
@@ -385,19 +391,15 @@ impl Role {
 					.ends
 					.iter()
 					.flatten()
-					.filter_map(|boundary| match boundary {
-						Boundary::Mapped { starts, end } => starts
-							.is_none_or(|start| start <= now)
-							.then(|| presentation.due(media(*end)))
-							.flatten(),
-						Boundary::Drained(at) => Some(*at),
-					})
+					.filter(|boundary| boundary.starts.is_none_or(|start| start <= now))
+					.filter_map(|boundary| presentation.due(media(boundary.end)))
+					.chain(presentation.tails.iter().copied())
 					.max()
 			};
 			if let Some(end) = end.filter(|end| *end > now) {
 				tokio::select! {
 					_ = tokio::time::sleep_until(end.into()) => {},
-					_ = self.changed.notified() => {},
+					_ = changed => {},
 				}
 				continue;
 			}
@@ -440,10 +442,7 @@ impl Drop for Role {
 	fn drop(&mut self) {
 		let own = self.role as usize;
 		if let Ok(mut presentation) = self.presentation.lock() {
-			// A retired end stays until it drains; nothing waits on it after that.
-			if !self.retired {
-				presentation.ends[own] = None;
-			}
+			presentation.ends[own] = None;
 			for pending in presentation
 				.transitions
 				.iter_mut()
@@ -847,6 +846,30 @@ mod tests {
 		video.plan(transition, ms(0), None);
 		let resume = tokio::time::timeout(Duration::from_millis(400), video.resume(transition, ms(0), None)).await;
 		assert!(resume.is_ok(), "video waited past the drained tail");
+	}
+
+	#[tokio::test]
+	async fn a_cancelled_successor_keeps_a_retired_tail() {
+		tokio::time::pause();
+		let now = tokio::time::Instant::now();
+		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
+		presentation
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now.into_std());
+		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
+		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		audio.declare();
+		audio.end(ms(10_200)).unwrap();
+		audio.retire(Some((now + Duration::from_millis(300)).into_std()));
+		// The next rendition fails while the retired sink still plays.
+		let successor = Role::new(presentation.clone(), Default::default(), Kind::Audio);
+		successor.declare();
+		drop(successor);
+		let transition = video.declare();
+		video.plan(transition, ms(0), None);
+		let resume = tokio::time::timeout(Duration::from_millis(250), video.resume(transition, ms(0), None)).await;
+		assert!(resume.is_err(), "video resumed over the retired audio tail");
 	}
 
 	#[tokio::test]
