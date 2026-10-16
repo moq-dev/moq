@@ -28,7 +28,3 @@ budget no longer decides which jobs get a cache. Only workflows running on
   Swatinem caches (Swift) rather than run both.
 - Measure restore time against the 150-210s Actions restore of the ~6 GB
   store; R2 transfers only the objects a build misses, so it may be faster.
-
-## Related
-
-- [Platform in the merge queue](/quest/m0/ci/platform-queue.md) - the macOS and Windows jobs this gives a cache
