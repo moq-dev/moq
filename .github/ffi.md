@@ -7,13 +7,13 @@ builds across those packages. Dart retains its eleven minimal-feature targets;
 Python retains its wheel builds and Python-specific environment.
 
 C++ retains source builds as its default and independent `cpp-v*` release tags.
-Nightly packages reuse the coordinator's validated same-run native archives. All
-four sampled C++ static libraries have different hashes from the candidates
-shared here. In particular, ARM Linux builds natively on Ubuntu 24.04 rather
-than on the shared cross-compilation host. Sharing those packages needs
-separate artifact/ABI proof and a settled prebuilt-library CMake interface.
-The [C++ comparison](#c-comparison) below narrows those differences; it does
-not yet establish the four installed-consumer checks needed to switch builds.
+Nightly packages reuse the coordinator's validated same-run native archives.
+The [historical C++ comparison](#c-comparison) records differing archive hashes,
+including native versus cross-built ARM Linux inputs. The
+[current installed-consumer proof](#current-installed-consumer-proof) separately
+validates the prebuilt path on all four C++ hosts. Pinned C++ release reuse
+still awaits real published default-feature assets and validation of their
+exact version and checksum pins.
 
 The shared build uploads `default-lib-<target>`. Binding jobs read the built
 Linux library with `just rs package-ffi --bindings-only --library PATH`, so
