@@ -354,8 +354,9 @@ interface TransportErrorOptions {
  *
  * Lossy on purpose. An error describes what went wrong here, while the registry is what the peer
  * can act on, so anything without a code of its own degrades to {@link StreamCode.Internal}
- * rather than inventing one. A {@link Session} lands there too: the two registries are
- * disjoint, so forwarding its code onto a stream would mistranslate it.
+ * rather than inventing one. A {@link Session} is {@link StreamCode.Unroutable}: a stream that
+ * can still be reset outlived the session that failed, so that was the route it was served
+ * through, and forwarding the session's code would mistranslate it across disjoint registries.
  *
  * On an IETF stream the code has to be one the negotiated draft assigns the same meaning to,
  * so a condition it does not register degrades to INTERNAL_ERROR as well. See
@@ -375,6 +376,7 @@ function localStreamCode(err: unknown): StreamCode {
 	if (err instanceof TimeoutError) return StreamCode.DeliveryTimeout;
 	// Session-scoped: the peer learns which rule it broke from the session close, not from here.
 	if (err instanceof ProtocolViolation) return StreamCode.SessionClosed;
+	if (err instanceof Session) return StreamCode.Unroutable;
 	return StreamCode.Internal;
 }
 

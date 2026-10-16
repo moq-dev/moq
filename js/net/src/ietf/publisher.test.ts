@@ -4,7 +4,7 @@ import { Signal } from "@moq/signals";
 import type { Auth, Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import * as Epoch from "../epoch.ts";
-import { error, ProtocolViolation, StreamCode } from "../error.ts";
+import { error, ProtocolViolation, StreamCode, unauthorized } from "../error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "../group.ts";
 import { type Hop, HopSchema } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
@@ -1918,7 +1918,12 @@ test("subscription completion sends PUBLISH_DONE on every supported draft", asyn
 	] as const;
 
 	for (const version of versions) {
-		for (const abort of [undefined, new Error("failed")]) {
+		// A revocation bridged from upstream keeps its meaning: UNAUTHORIZED, not INTERNAL_ERROR.
+		for (const [abort, status] of [
+			[undefined, 0x2],
+			[new Error("failed"), 0x0],
+			[unauthorized("test"), 0x1],
+		] as const) {
 			const pair = createMockTransportPair(ALPN.DRAFT_19);
 			const session = new NativeSession(pair.server, version, true);
 			const path = Path.from("test");
@@ -1943,7 +1948,7 @@ test("subscription completion sends PUBLISH_DONE on every supported draft", asyn
 			expect(await client.reader.u53()).toBe(PublishDone.id);
 			const done = await PublishDone.decode(client.reader, version);
 			expect(done.requestId).toBe(version <= Version.DRAFT_16 ? requestId : undefined);
-			expect(done.statusCode).toBe(abort ? 0x0 : 0x2);
+			expect(done.statusCode).toBe(status);
 
 			await running;
 			client.close();

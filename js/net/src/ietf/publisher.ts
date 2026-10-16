@@ -11,6 +11,8 @@ import {
 	NotFound,
 	ProtocolViolation,
 	reason,
+	SessionCode,
+	SessionError,
 	StreamCode,
 	StreamError,
 	unauthorized,
@@ -774,6 +776,14 @@ export class Publisher {
 			console.debug(`publish done: broadcast=${name} track=${track.name}`);
 			if (publishError) {
 				console.warn(`publish error: broadcast=${name} track=${track.name} error=${reason(publishError)}`);
+			}
+
+			// A revocation bridged from upstream, such as a moq-lite UNAUTHORIZED reset, is one here too.
+			if (
+				(publishError instanceof StreamError && publishError.code === StreamCode.Unauthorized) ||
+				(publishError instanceof SessionError && publishError.code === SessionCode.Unauthorized)
+			) {
+				unauthorized = true;
 			}
 
 			// PUBLISH_DONE is required for every supported draft. The peer may have already

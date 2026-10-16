@@ -668,10 +668,11 @@ impl Reader {
 				None | Some(Some(_)) => return Some(Poll::Ready(Ok(None))),
 				Some(None) => {}
 			},
-			// No front is left to replace the copy: the track ends as it does. A locally
-			// closed copy ends it cleanly; a connection ending retains its session error.
+			// No front is left to replace the copy: the track ends as it does, or unroutable
+			// when no route served it. A locally closed copy ends it cleanly; a connection
+			// ending retains its session error.
 			Some(None) => match serving.map(&done) {
-				None => return Some(Poll::Ready(Err(Error::Dropped))),
+				None => return Some(Poll::Ready(Err(Error::Unroutable))),
 				Some(Some(Ok(()) | Err(Error::Closed))) => return Some(Poll::Ready(Ok(None))),
 				Some(Some(Err(err))) => return Some(Poll::Ready(Err(err))),
 				Some(None) => {}
@@ -769,7 +770,7 @@ impl Reader {
 				_ => {}
 			}
 		} else if concluded.is_some() {
-			return Poll::Ready(Err(Error::Dropped));
+			return Poll::Ready(Err(Error::Unroutable));
 		}
 		let _ = self.route.poll_changed(serving.unwrap_or_default(), waiter);
 		Poll::Pending

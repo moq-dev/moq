@@ -518,7 +518,9 @@ test("Writer reset forwards only a stream error code", async () => {
 		() => undefined,
 		(err: unknown) => err,
 	);
-	expect(sessionResult).toBe(session);
+	// The session code means nothing on a stream; the stream only lost its route.
+	expect(sessionResult).toBeInstanceOf(StreamError);
+	expect((sessionResult as StreamError).code).toBe(StreamCode.Unroutable);
 
 	const stream = new StreamError(StreamCode.DeliveryTimeout);
 	const streamWriter = new Writer(new WritableStream<Uint8Array>(), QUIC);
