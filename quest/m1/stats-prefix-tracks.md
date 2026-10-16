@@ -80,10 +80,14 @@ Decided 2026-10-16 (#5719):
   `children: {"<segment>": {publisher, subscriber}}`, keyed by the child's
   next path segment.
 - **Encodings.** Plain and `.json.z` siblings, like every other stats track.
-- **No cap or paging on children.** `publisher.json` already carries every
-  path in the group uncapped and fails loud with `FrameTooLarge`; a prefix's
-  child map is a subset of that frame. A cap would make the rollup disagree
-  with its visible children.
+- **No cap or paging on children.** A cap would make the rollup disagree with
+  its visible children, and paging adds ordering and consistency rules no
+  measurement asks for yet. A child entry carries both roles per tier, so the
+  frame reaches the 32 MB `MAX_CACHE_BYTES` limit sooner than `publisher.json`
+  does (roughly ten thousand children across four tiers), far past the
+  hundreds a channel holds. An oversized frame must fail loud: end the prefix
+  track with `FrameTooLarge` instead of the existing tracks' debug log, which
+  leaves readers on a stale snapshot. Test a prefix whose frame overflows.
 
 Public API: `moq-stats` producer and consumer types. Wire: stats track names
 and payloads.
