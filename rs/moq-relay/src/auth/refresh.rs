@@ -350,7 +350,10 @@ impl Refresh {
 						continue;
 					};
 					// Validate the exact snapshot that is issued, not a later read.
-					let credential = result.map(Credential::new);
+					let credential = result.map(Credential::new).and_then(|credential| {
+						super::check_rates(&credential.grant.publish, &credential.grant.subscribe)?;
+						Ok(credential)
+					});
 					match credential {
 						Ok(mut credential) if self.valid(&credential.grant) => {
 							credential.issued = Some(request.accept(credential.wire(self.role)));
@@ -386,7 +389,10 @@ impl Refresh {
 					let reason = match change {
 						Change::Ended(reason) => reason,
 						Change::Withdrawn => lease::Reason::Dropped,
-						Change::Grant(_) => lease::Reason::Narrowed,
+						Change::Grant(grant) => match super::check_rates(&grant.publish, &grant.subscribe) {
+							Err(err) => err.to_string().into(),
+							Ok(()) => lease::Reason::Narrowed,
+						},
 					};
 					if !withdrawn && let Some(issued) = credential.issued {
 						issued.revoke(SessionError::Unauthorized, reason.to_string());
@@ -409,6 +415,7 @@ fn refuse(request: auth::Request, err: super::Error) {
 			tracing::debug!(%reason, "in-band token not verified; auth server unavailable");
 			request.reject(SessionError::Internal, "auth server unavailable");
 		}
+		super::Error::Forbidden(reason) => request.reject(SessionError::Unauthorized, reason),
 		_ => request.reject(SessionError::Unauthorized, "token refused"),
 	}
 }
@@ -531,6 +538,28 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
+	async fn an_in_band_recheck_cannot_turn_the_connection_into_capped_access() {
+		let (auth, mut admissions) = super::super::Auth::embedded("test");
+		let (producer, consumer) = lease::Producer::new(grant("a/**", 3000));
+		let request = auth.request(moq_auth::Transport::Quic, "/room");
+		let (lease, ()) = tokio::join!(auth.admit(request), async {
+			admissions.next().await.unwrap().grant(consumer);
+		});
+		let (client, supervising) = sessions(lease.unwrap()).await;
+		let mut capped = grant("a/**", 3000);
+		capped.subscribe.rate = Some(moq_auth::Rate::from_bps(8000).unwrap());
+		producer.update(capped);
+		assert!(
+			supervising
+				.await
+				.unwrap()
+				.to_string()
+				.contains("cannot enforce bitrate caps")
+		);
+		client.abort(moq_net::Error::Cancel);
+	}
+
+	#[tokio::test(start_paused = true)]
 	async fn a_cap_added_before_protocol_setup_is_refused() {
 		let (admitted, _) = admission(grant("a/**", 3000)).await;
 		let (client, supervising) = sessions(admitted).await;
@@ -539,7 +568,10 @@ mod tests {
 		let mut capped = grant("a/**", 3000);
 		capped.publish.rate = Some(moq_auth::Rate::from_bps(8000).unwrap());
 		producer.update(capped);
-		assert!(matches!(Refresh::new(&mut lease, client.auth(), None), Err(moq_net::Error::Unauthorized)));
+		assert!(matches!(
+			Refresh::new(&mut lease, client.auth(), None),
+			Err(moq_net::Error::Unauthorized)
+		));
 		client.abort(moq_net::Error::Cancel);
 		supervising.abort();
 		let _ = supervising.await;

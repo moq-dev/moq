@@ -19,7 +19,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use moq_auth::{Event, Grant, Pattern, Patterns, Request};
+use moq_auth::{Access, Event, Grant, Pattern, Request};
 use moq_relay::{Config, Connection, Relay, auth, cluster, web};
 use moq_tokio::moq_net;
 use moq_tokio::moq_net::stats;
@@ -113,7 +113,7 @@ impl Script {
 	}
 }
 
-fn all() -> Patterns {
+fn all() -> Access {
 	[Pattern::all()].into_iter().collect()
 }
 
@@ -1015,7 +1015,7 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	// A narrow grant: the certificate publishes under `mine/**` and nothing else.
 	let narrow = serve(policy(moq_auth::Permissions::new(
 		["mine/**".parse().unwrap()].into_iter().collect(),
-		Patterns::new(),
+		Default::default(),
 	)))
 	.await;
 	let (addr, relay) = spawn_quic_relay(build_auth(narrow), Some(root.clone())).await;
@@ -1612,7 +1612,7 @@ async fn websocket_refusal_is_in_band() {
 /// The role seen at SETUP reaches the shared admission gate on the WebSocket path.
 #[tokio::test]
 async fn websocket_publisher_role_is_refused_by_a_subscribe_only_grant() {
-	let script = Script::new(Grant::new(Patterns::new(), all()));
+	let script = Script::new(Grant::new(Default::default(), all()));
 	let (port, relay) = spawn_ws_relay(build_auth(script.spawn().await)).await;
 	let url = room_url("ws", port);
 	let origin = moq_tokio::origin::spawn();

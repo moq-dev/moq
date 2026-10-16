@@ -983,7 +983,7 @@ mod tests {
 	use super::*;
 	use std::time::SystemTime;
 
-	fn patterns(texts: &[&str]) -> Patterns {
+	fn patterns(texts: &[&str]) -> moq_auth::Access {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
 	}
 
@@ -1054,7 +1054,7 @@ mod tests {
 		assert!(config(None, &["anon/**"]).validate(false).is_ok());
 
 		let split = Config {
-			public_subscribe: patterns(&["anon/**"]).into_iter().collect(),
+			public_subscribe: patterns(&["anon/**"]).path.into_iter().collect(),
 			..Default::default()
 		};
 		assert!(split.validate(false).is_ok());
@@ -1098,8 +1098,8 @@ mod tests {
 	#[tokio::test]
 	async fn public_rules_are_rooted_at_slash() {
 		let auth = Config {
-			public_publish: patterns(&["anon/**"]).into_iter().collect(),
-			public_subscribe: patterns(&["anon/**", "*/chat"]).into_iter().collect(),
+			public_publish: patterns(&["anon/**"]).path.into_iter().collect(),
+			public_subscribe: patterns(&["anon/**", "*/chat"]).path.into_iter().collect(),
 			..Default::default()
 		}
 		.init("relay-1", &moq_tokio::tls::Connect::default(), false)
@@ -1187,7 +1187,7 @@ mod tests {
 			assert!(err.contains(&format!("`{hint}`")), "{public}: {err}");
 		}
 		let split = Config {
-			public_subscribe: patterns(&["anon/**", "live"]).into_iter().collect(),
+			public_subscribe: patterns(&["anon/**", "live"]).path.into_iter().collect(),
 			..Default::default()
 		};
 		let err = split.validate(false).unwrap_err().to_string();
@@ -1230,7 +1230,7 @@ mod tests {
 			admission.refuse(Error::Refused);
 			// A grant that admits nothing is the decider's mistake, refused like a server's.
 			let admission = admissions.next().await.expect("an admission");
-			admission.grant(lease::Consumer::fixed(Grant::new(Patterns::new(), Patterns::new())));
+			admission.grant(lease::Consumer::fixed(Grant::new(Default::default(), Default::default())));
 			// Dropped without an answer.
 			drop(admissions.next().await.expect("an admission"));
 			admissions
@@ -1318,7 +1318,7 @@ mod tests {
 		assert_eq!(token.tier, Tier::new("gold"));
 
 		let patterns = patterns(&["*/chat", "alice", ""]);
-		let token = Token::new("/", &Grant::new(patterns.clone(), Patterns::new()));
+		let token = Token::new("/", &Grant::new(patterns.clone(), Default::default()));
 		assert_eq!(token.publish, patterns);
 	}
 

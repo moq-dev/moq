@@ -2115,7 +2115,7 @@ mod tests {
 	async fn session_handles_apply_grant_mounts() {
 		let cluster = new_cluster(Config::default()).expect("cluster");
 		let everything = || moq_net::Patterns::from(moq_net::Pattern::all());
-		let mut grant = moq_auth::Grant::new(everything(), everything());
+		let mut grant = moq_auth::Grant::new(everything().into(), everything().into());
 		grant.mounts.insert(".svc".into(), ".svc/pid".into());
 		let token = auth::Token::new("/pid", &grant);
 
@@ -2150,7 +2150,7 @@ mod tests {
 		let everything = || moq_net::Patterns::from(moq_net::Pattern::all());
 		let invalid: [&[(&str, &str)]; 2] = [&[(".a", "pid/.z"), (".z", "secret")], &[("*", ".svc/pid")]];
 		for mounts in invalid {
-			let mut grant = moq_auth::Grant::new(everything(), everything());
+			let mut grant = moq_auth::Grant::new(everything().into(), everything().into());
 			for (at, target) in mounts {
 				grant.mounts.insert((*at).into(), (*target).into());
 			}
@@ -3246,8 +3246,8 @@ mod tests {
 		let cluster = new_cluster(Config::default()).expect("cluster");
 		let all: moq_net::Patterns = [moq_net::Pattern::all()].into_iter().collect();
 
-		let client = auth::Token::new("/", &moq_auth::Grant::new(all.clone(), all.clone()));
-		let mut grant = moq_auth::Grant::new(all.clone(), all);
+		let client = auth::Token::new("/", &moq_auth::Grant::new(all.clone().into(), all.clone().into()));
+		let mut grant = moq_auth::Grant::new(all.clone().into(), all.into());
 		grant.peer = true;
 		let peer = auth::Token::new("/", &grant);
 
@@ -3282,8 +3282,8 @@ mod tests {
 		let cluster = new_cluster(Config::default()).expect("cluster");
 		let all: moq_net::Patterns = [moq_net::Pattern::all()].into_iter().collect();
 
-		let client = auth::Token::new("/", &moq_auth::Grant::new(all.clone(), all.clone()));
-		let mut grant = moq_auth::Grant::new(all.clone(), all);
+		let client = auth::Token::new("/", &moq_auth::Grant::new(all.clone().into(), all.clone().into()));
+		let mut grant = moq_auth::Grant::new(all.clone().into(), all.into());
 		grant.peer = true;
 		let peer = auth::Token::new("/", &grant);
 		grant.upstream = true;

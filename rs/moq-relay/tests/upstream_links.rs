@@ -73,7 +73,7 @@ impl Node {
 /// upstream when asked.
 fn grant(path: &str) -> Grant {
 	let all: moq_net::Patterns = [Pattern::all()].into_iter().collect();
-	let mut grant = Grant::new(all.clone(), all);
+	let mut grant = Grant::new(all.clone().into(), all.into());
 	grant.root = Some(String::new());
 	grant.peer = true;
 	grant.upstream = path == "/upstream";

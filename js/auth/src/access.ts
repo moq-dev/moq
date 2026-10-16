@@ -60,7 +60,7 @@ export class Access {
 }
 
 /** @internal */
-export type AccessInput = string | string[] | Patterns | { path: string | string[] | Patterns; rate?: number };
+type AccessInput = string | string[] | Patterns | { path: string | string[] | Patterns; rate?: number };
 
 /** @internal */
 export function normalizeAccess(value: AccessInput): Access {

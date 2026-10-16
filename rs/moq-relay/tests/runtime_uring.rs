@@ -739,7 +739,7 @@ async fn uring_auth_reports_distinct_quic_and_webtransport() {
 					.as_ref()
 					.is_some_and(|alpn| alpn.starts_with("moq-lite-"))
 			);
-			let all: moq_auth::Patterns = [moq_auth::Pattern::all()].into_iter().collect();
+			let all: moq_auth::Access = [moq_auth::Pattern::all()].into_iter().collect();
 			let grant = moq_auth::Grant::new(all.clone(), all);
 			let (producer, consumer) = moq_auth::lease::Producer::new(grant);
 			leases.push(producer);

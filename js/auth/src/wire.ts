@@ -9,7 +9,10 @@
  */
 
 import { Pattern } from "@moq/pattern";
-import { type AccessInput, normalizeAccess } from "./access.ts";
+import type * as z from "@zod/mini";
+import { type AccessSchema, normalizeAccess } from "./access.ts";
+
+type AccessInput = z.input<typeof AccessSchema>;
 
 /** One grant in whichever encoding it arrived: legacy `put`/`get` prefix lists, or patterns. */
 type WireGrants = {

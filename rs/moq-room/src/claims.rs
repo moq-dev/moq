@@ -18,15 +18,15 @@ pub fn claims(room: impl moq_net::AsPath, identity: impl moq_net::AsPath) -> Res
 	let publish = moq_auth::Pattern::subtree(identity.as_str())?;
 	Ok(moq_auth::Claims::default()
 		.with_root(room.as_str())
-		.with_subscribe([moq_auth::Pattern::all()])
-		.with_publish([publish]))
+		.with_subscribe(moq_auth::Pattern::all().into())
+		.with_publish(publish.into()))
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
 
-	fn patterns(texts: &[&str]) -> moq_auth::Patterns {
+	fn patterns(texts: &[&str]) -> moq_auth::Access {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
 	}
 
