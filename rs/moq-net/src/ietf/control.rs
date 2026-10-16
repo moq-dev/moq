@@ -73,8 +73,9 @@ pub(crate) fn initial_max_request_id(window: u64, peer_client: bool) -> u64 {
 
 struct ControlState {
 	request_id_next: RequestId,
-	/// A legacy request header must finish before a later ID can be allocated.
-	request_id_sending: bool,
+	/// Legacy request headers that must finish before a later ID can be allocated.
+	/// A count, since two tasks can allocate before either takes its hold.
+	request_id_sending: usize,
 	/// None means no flow control (draft17 removed MaxRequestId).
 	request_id_max: Option<RequestId>,
 	/// The peer's requests, flow controlled on drafts 14 to 16 only.
@@ -113,7 +114,7 @@ pub(super) struct RequestSend(Control);
 
 impl Drop for RequestSend {
 	fn drop(&mut self) {
-		self.0.state.lock().request_id_sending = false;
+		self.0.state.lock().request_id_sending -= 1;
 	}
 }
 
@@ -122,7 +123,7 @@ impl Control {
 		Self {
 			state: kio::Shared::new(ControlState {
 				request_id_next: if client { RequestId(0) } else { RequestId(1) },
-				request_id_sending: false,
+				request_id_sending: 0,
 				request_id_max,
 				incoming: None,
 				// The peer takes the other parity: a client's IDs are even, a server's odd.
@@ -236,9 +237,7 @@ impl Control {
 
 	/// Hold later allocations until an already allocated legacy header is sent.
 	pub fn sending(&self) -> RequestSend {
-		let mut state = self.state.lock();
-		debug_assert!(!state.request_id_sending);
-		state.request_id_sending = true;
+		self.state.lock().request_id_sending += 1;
 		RequestSend(self.clone())
 	}
 
@@ -255,7 +254,7 @@ impl Control {
 					None => true,
 					Some(max) => state.request_id_next < max,
 				};
-				if allowed && !state.request_id_sending {
+				if allowed && state.request_id_sending == 0 {
 					Poll::Ready(())
 				} else {
 					Poll::Pending
@@ -514,5 +513,22 @@ mod tests {
 		let control = Control::new(None, true);
 		assert!(control.accept(RequestId(1)).unwrap().is_none());
 		assert_eq!(granted(&control), None);
+	}
+
+	/// Allocation waits until every overlapping legacy header hold has ended.
+	#[test]
+	fn overlapping_send_holds_block_allocation_until_all_end() {
+		let control = Control::new(None, false);
+		let clock = crate::time::Clock::sim();
+		let a = control.sending();
+		let b = control.sending();
+		drop(a);
+		let mut next = std::pin::pin!(control.next_request_id(&clock));
+		assert!(kio::Waiter::noop().poll_future(next.as_mut()).is_pending());
+		drop(b);
+		assert!(matches!(
+			kio::Waiter::noop().poll_future(next.as_mut()),
+			Poll::Ready(Ok(RequestId(1)))
+		));
 	}
 }
