@@ -44,10 +44,10 @@ pub use bloom_token_log::BloomTokenLog;
 
 mod connection;
 pub use crate::connection::{
-    Chunk, Chunks, ClosedStream, Connection, ConnectionError, ConnectionStats, Datagrams, Event,
-    FinishError, FrameStats, PathStats, ReadError, ReadableError, RecvStream, RttEstimator,
-    SendDatagramError, SendStream, ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError,
-    Written,
+    Chunk, Chunks, ClosedStream, Connection, ConnectionError, ConnectionStats, Credit, CreditStats,
+    Datagrams, Event, FinishError, FrameStats, PathStats, ReadError, ReadableError, RecvStream,
+    RttEstimator, SendDatagramError, SendStream, ShouldTransmit, StreamEvent, Streams, UdpStats,
+    WriteError, Written,
 };
 #[cfg(feature = "qlog")]
 pub use connection::qlog::QlogStream;
@@ -105,10 +105,12 @@ pub use token_memory_cache::TokenMemoryCache;
 use arbitrary::Arbitrary;
 
 // Deal with time
+// MoQ's clock, so a caller-driven clock (a test's or the simulator's) reaches the state machine.
+pub(crate) use moq_clock::Instant;
 #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
-pub(crate) use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+pub(crate) use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(all(target_family = "wasm", target_os = "unknown"))]
-pub(crate) use web_time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+pub(crate) use web_time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(fuzzing)]
 pub mod fuzzing {

@@ -21,13 +21,20 @@ pub(crate) fn now() -> crate::time::Instant {
 ///
 /// The ambient runtime's clock where there is one, so a paused test runtime pauses
 /// staleness along with the drivers it supplies time to.
-#[cfg(not(test))]
+#[cfg(not(any(test, loom)))]
 pub(crate) fn wall() -> crate::time::Instant {
 	#[cfg(all(feature = "async", not(target_family = "wasm")))]
 	let now = web_async::time::Instant::now().into_std();
 	#[cfg(not(all(feature = "async", not(target_family = "wasm"))))]
 	let now = now();
 	now
+}
+
+/// Loom permutes handoffs without advancing time, so scheduling cannot age groups.
+#[cfg(all(loom, not(test)))]
+pub(crate) fn wall() -> crate::time::Instant {
+	static FROZEN: LazyLock<crate::time::Instant> = LazyLock::new(now);
+	*FROZEN
 }
 
 /// Unit tests freeze the wall clock, so only time a test supplies moves it: the

@@ -41,6 +41,9 @@ pub struct Settings {
 	stats: Stats,
 
 	#[usage(flatten)]
+	stun: Stun,
+
+	#[usage(flatten)]
 	cache: Cache,
 
 	#[usage(flatten)]
@@ -132,6 +135,9 @@ struct Auth {
 		parse = "list_by_comma"
 	)]
 	public_publish: Option<Vec<String>>,
+
+	#[usage(env = "MOQ_AUTH_VERIFICATIONS", cli("--auth-verifications"))]
+	verifications: Option<usize>,
 }
 
 #[derive(usage::Config)]
@@ -219,6 +225,8 @@ struct Session {
 	announces: Option<usize>,
 	#[usage(env = "MOQ_SESSION_SUBSCRIPTIONS", cli("--session-subscriptions"))]
 	subscriptions: Option<usize>,
+	#[usage(env = "MOQ_SESSION_FETCHES", cli("--session-fetches"))]
+	fetches: Option<usize>,
 }
 
 #[derive(usage::Config)]
@@ -228,4 +236,13 @@ struct Peer {
 	announces: Option<usize>,
 	#[usage(env = "MOQ_PEER_SUBSCRIPTIONS", cli("--peer-subscriptions"))]
 	subscriptions: Option<usize>,
+	#[usage(env = "MOQ_PEER_FETCHES", cli("--peer-fetches"))]
+	fetches: Option<usize>,
+}
+
+#[derive(usage::Config)]
+#[usage(prefix = "stun")]
+struct Stun {
+	#[usage(env = "MOQ_STUN_BIND", cli("--stun-bind"))]
+	bind: Option<String>,
 }

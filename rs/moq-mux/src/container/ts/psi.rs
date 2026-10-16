@@ -270,8 +270,7 @@ fn descriptors(mut data: &[u8]) -> Option<Vec<Descriptor>> {
 	Some(out)
 }
 
-/// The start of a PES packet: its header, and the payload bytes that follow it in this
-/// TS packet.
+/// A complete PES header and the payload bytes that follow it.
 pub(super) struct PesStart<'a> {
 	pub stream_id: u8,
 	/// Raw 90 kHz.
@@ -285,33 +284,57 @@ pub(super) struct PesStart<'a> {
 }
 
 impl<'a> PesStart<'a> {
-	/// Parse the PES header at the start of a payload-unit-start packet's payload.
+	/// The next header boundary needed before parsing, capped by the 8-bit optional length.
+	pub fn header_len(payload: &[u8]) -> anyhow::Result<usize> {
+		let prefix = payload.len().min(3);
+		anyhow::ensure!(
+			payload[..prefix] == [0, 0, 1][..prefix],
+			"missing PES start code prefix"
+		);
+		if payload.len() < 6 {
+			return Ok(6);
+		}
+		if matches!(payload[3], 0xbc | 0xbe | 0xbf | 0xf0 | 0xf1 | 0xf2 | 0xf8 | 0xff) {
+			return Ok(6);
+		}
+		if payload.len() < 9 {
+			return Ok(9);
+		}
+		anyhow::ensure!(payload[6] & 0xc0 == 0x80, "unexpected PES header marker bits");
+		anyhow::ensure!(payload[6] & 0x30 == 0, "scrambled PES is not supported");
+		anyhow::ensure!(payload[7] & 0xc0 != 0x40, "PES DTS without a PTS");
+		let len = usize::from(payload[8]);
+		let packet_len = usize::from(u16::from_be_bytes([payload[4], payload[5]]));
+		anyhow::ensure!(
+			packet_len == 0 || packet_len >= 3 + len,
+			"PES packet length shorter than its header"
+		);
+		Ok(9 + len)
+	}
+
+	/// Parse a complete clear PES header and its following payload.
 	///
 	/// Optional fields this demux has no use for (ESCR, ES rate, trick mode, copy info, the
-	/// PES CRC, extensions, stuffing) are skipped by `PES_header_data_length`. A payload that
-	/// is not a PES header at all is an error, as it was when an external reader parsed it.
+	/// PES CRC, extensions, stuffing) are skipped by `PES_header_data_length`. Incomplete headers
+	/// must be assembled before parsing; malformed headers are refused.
 	pub fn parse(payload: &'a [u8]) -> anyhow::Result<Self> {
-		anyhow::ensure!(payload.len() >= 6, "PES header truncated");
-		anyhow::ensure!(payload[..3] == [0, 0, 1], "missing PES start code prefix");
+		let header_len = Self::header_len(payload)?;
+		anyhow::ensure!(payload.len() >= header_len, "PES header truncated");
 		let stream_id = payload[3];
 		let packet_len = usize::from(u16::from_be_bytes([payload[4], payload[5]]));
 
 		// Streams that carry no optional header (ISO/IEC 13818-1 table 2-21).
-		if matches!(stream_id, 0xbc | 0xbe | 0xbf | 0xf0 | 0xf1 | 0xf2 | 0xf8 | 0xff) {
+		if header_len == 6 {
 			return Ok(Self {
 				stream_id,
 				pts: None,
 				dts: None,
-				data_len: Some(packet_len).filter(|&len| len != 0),
+				data_len: Some(packet_len),
 				data: &payload[6..],
 			});
 		}
 
-		anyhow::ensure!(payload.len() >= 9, "PES header truncated");
-		anyhow::ensure!(payload[6] & 0xc0 == 0x80, "unexpected PES header marker bits");
-		anyhow::ensure!(payload[6] & 0x30 == 0, "scrambled PES is not supported");
 		let (pts_flag, dts_flag) = (payload[7] & 0x80 != 0, payload[7] & 0x40 != 0);
-		anyhow::ensure!(pts_flag || !dts_flag, "PES DTS without a PTS");
 		let header_len = usize::from(payload[8]);
 		let optional = payload.get(9..9 + header_len).context("PES header truncated")?;
 		let data_len = match packet_len {

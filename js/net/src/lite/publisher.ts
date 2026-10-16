@@ -1,3 +1,4 @@
+import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { enforceGrant } from "../auth_session.ts";
@@ -12,10 +13,11 @@ import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Priority, sendOrder } from "../priority.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
-import { Milli, type Timescale, Timestamp } from "../time.ts";
+import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { Interests, LIMITS, type Limits, Slots } from "../util/limits.ts";
+import { nextTask } from "../util/yield.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
@@ -300,12 +302,6 @@ class SubscriptionControls {
 	}
 }
 
-// A microtask is too short: decoding one framed update crosses several awaits, each of which
-// can requeue behind the serving continuation. A task boundary lets the decoder finish whatever
-// the transport already delivered before the next group pop. Updates are rare, so groups do not
-// pay this scheduling cost on the normal path.
-const yieldToControls = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
-
 // Register both readiness sources in the same turn after the caller observed neither ready.
 // The winner disposes both registrations, so an idle subscription accumulates nothing no
 // matter how many times it wakes.
@@ -384,6 +380,7 @@ export class Publisher {
 
 	// Subscriptions and open TRACK streams the peer holds live on this session.
 	#interests: Interests;
+	#fetches: Slots;
 
 	// The one writer for the outbound datagram stream (getWriter locks it), acquired once at
 	// construction when this version + transport carry datagrams, released in close(). Its
@@ -435,6 +432,7 @@ export class Publisher {
 	) {
 		this.#quic = quic;
 		this.#interests = new Interests(new Slots(limits.subscriptions, { quic, reason: "too many subscriptions" }));
+		this.#fetches = new Slots(limits.fetches, { quic, reason: "too many fetches" });
 		this.#grant = auth?.grant;
 		this.#ready = auth?.ready ?? Promise.resolve();
 		this.version = version;
@@ -855,25 +853,30 @@ export class Publisher {
 	 * @internal
 	 */
 	async runFetch(msg: Fetch, stream: Stream) {
-		if (!supportsTrackStream(this.version)) {
-			stream.writer.reset(new Error("fetch requires moq-lite-05 or newer"));
-			return;
-		}
-		// Like a subscription, the fetch holds its watch until the last frame: a group can stay
-		// open as long as its track, so a check at accept alone would keep serving after a shrink.
-		const revoked = unauthorized(msg.broadcast);
-		let fetched: group.Consumer | undefined;
-		const watch = this.#watch(msg.broadcast, () => {
-			console.debug(`fetch revoked: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
-			fetched?.close(revoked);
-			stream.abort(revoked);
-		});
+		this.#fetches.acquire();
 		try {
-			await this.#serveFetch(msg, stream, watch, (group) => {
-				fetched = group;
+			if (!supportsTrackStream(this.version)) {
+				stream.writer.reset(new Error("fetch requires moq-lite-05 or newer"));
+				return;
+			}
+			// Like a subscription, the fetch holds its watch until the last frame: a group can stay
+			// open as long as its track, so a check at accept alone would keep serving after a shrink.
+			const revoked = unauthorized(msg.broadcast);
+			let fetched: group.Consumer | undefined;
+			const watch = this.#watch(msg.broadcast, () => {
+				console.debug(`fetch revoked: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
+				fetched?.close(revoked);
+				stream.abort(revoked);
 			});
+			try {
+				await this.#serveFetch(msg, stream, watch, (group) => {
+					fetched = group;
+				});
+			} finally {
+				watch.dispose();
+			}
 		} finally {
-			watch.dispose();
+			this.#fetches.release();
 		}
 	}
 
@@ -889,16 +892,19 @@ export class Publisher {
 		}
 
 		// A normal request FIN is not a cancellation: FETCH has no more request bytes.
+		const left = new AbortController();
+		void stream.reader.closed.catch(() => left.abort());
+		void stream.writer.closed.catch(() => left.abort());
+		// The lookups hold the broadcast and track only until the track info answers.
 		const hold = new AbortController();
-		void stream.reader.closed.catch(() => hold.abort());
-		void stream.writer.closed.catch(() => hold.abort());
+		const holding = AbortSignal.any([left.signal, hold.signal]);
 		try {
 			let front: broadcast.Consumer | undefined;
 			try {
 				front =
 					this.#publish &&
 					(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
-						(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch, hold.signal)));
+						(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch, holding)));
 			} catch (err: unknown) {
 				stream.writer.reset(error(err));
 				return;
@@ -923,11 +929,15 @@ export class Publisher {
 				// come off the same front, so the metadata and the frames are one generation.
 				let info: TrackInfoMessage;
 				try {
-					info = await this.#resolveTrackInfo(front, msg.track, hold.signal, true);
+					info = await this.#resolveTrackInfo(front, msg.track, holding, true);
 				} finally {
 					hold.abort();
 				}
-				group = await wireOf(front).fetchGroup(msg.track, msg.group, { priority: msg.priority });
+				// A group that has not arrived yet holds this FETCH's slot until the requester leaves.
+				group = await wireOf(front).fetchGroup(msg.track, msg.group, {
+					priority: msg.priority,
+					signal: left.signal,
+				});
 				serving(group);
 				// Revoked while the group resolved: the watch already reset the stream.
 				if (watch.revoked()) {
@@ -1064,7 +1074,12 @@ export class Publisher {
 							bounds.startFrame = update.startFrame;
 							bounds.endGroup = update.endGroup;
 							bounds.endFrame = update.endFrame;
-							await yieldToControls();
+							// A microtask is too short: decoding one framed update crosses several
+							// awaits, each of which can requeue behind the serving continuation. A
+							// task boundary lets the decoder finish whatever the transport already
+							// delivered before the next group pop. Updates are rare, so groups do
+							// not pay this scheduling cost on the normal path.
+							await nextTask();
 							continue;
 						}
 					}
@@ -1401,7 +1416,7 @@ export class Publisher {
 	 * @internal
 	 */
 	async #openGroup(options: RunGroup): Promise<Writer | undefined> {
-		const { group, priority, unsubscribed } = options;
+		const { group, priority, unsubscribed, start } = options;
 		try {
 			// The transport drains streams by send order, so this is what makes a high-priority
 			// track (and a newer group within it) win the link when there isn't room for both.
@@ -1412,7 +1427,7 @@ export class Publisher {
 			// Failing here drops the group and lets the next one compete for the next slot.
 			const stream = await Writer.tryOpen(this.#quic, {
 				version: this.version,
-				sendOrder: priority.rank(group.sequence),
+				sendOrder: priority.rank(group.sequence, start),
 				cancel: unsubscribed,
 				waitUntilAvailable: false,
 			});
@@ -1439,7 +1454,7 @@ export class Publisher {
 		try {
 			// A SUBSCRIBE_UPDATE re-ranks the subscription, so a group already on the wire
 			// follows it too rather than keeping a stale rank until it finishes.
-			priority.add(stream, group.sequence);
+			priority.add(stream, group.sequence, startFrame);
 
 			await hooks.guardGroup(group, async () => {
 				await stream.u53(0); // stream type
@@ -1515,7 +1530,7 @@ export class Publisher {
 		}
 
 		let lastSent: Probe | undefined;
-		let lastSentTime: number | undefined;
+		let lastSentTime: Instant | undefined;
 
 		// Whether a metric moved enough to be worth another report. Gaining or
 		// losing a value always counts; both unknown never does.
@@ -1540,15 +1555,16 @@ export class Publisher {
 
 		try {
 			for (;;) {
-				let timer: ReturnType<typeof setTimeout> | undefined;
-				const timeout = new Promise<"timeout">((resolve) => {
-					timer = setTimeout(() => resolve("timeout"), PROBE_INTERVAL);
-				});
+				const timer = new AbortController();
+				const timeout = sleep(Nano.fromMilli(Milli(PROBE_INTERVAL)), { signal: timer.signal }).then(
+					() => "timeout" as const,
+					() => "timeout" as const,
+				);
 				let result: "timeout" | Error | null;
 				try {
 					result = await race([timeout, ended]);
 				} finally {
-					clearTimeout(timer);
+					timer.abort();
 				}
 				if (result instanceof Error) throw result;
 				if (result !== "timeout") break;
@@ -1580,7 +1596,7 @@ export class Publisher {
 				if (lastSent === undefined || lastSentTime === undefined) {
 					shouldSend = true;
 				} else {
-					const elapsed = performance.now() - lastSentTime;
+					const elapsed = Nano.toMilli(Instant.durationSince(now(), lastSentTime));
 					// The bitrate threshold decays to zero as the last report ages: a
 					// stale estimate is worth refreshing for a smaller move.
 					const t = Math.max(PROBE_INTERVAL, Math.min(PROBE_MAX_AGE, elapsed));
@@ -1595,7 +1611,7 @@ export class Publisher {
 				if (shouldSend) {
 					await report.encode(stream.writer, this.version);
 					lastSent = report;
-					lastSentTime = performance.now();
+					lastSentTime = now();
 				}
 			}
 		} catch (err: unknown) {

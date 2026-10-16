@@ -776,7 +776,12 @@ class FfiConverterMoqCatalog {
 class MoqContainerInit {
   final MoqContainerFormat format;
   final Uint8List data;
-  MoqContainerInit({required this.format, required this.data});
+  final MoqMediaTimebase? timebase;
+  MoqContainerInit({
+    required this.format,
+    required this.data,
+    this.timebase = null,
+  });
 }
 
 class FfiConverterMoqContainerInit {
@@ -796,8 +801,13 @@ class FfiConverterMoqContainerInit {
     );
     final data = data_lifted.value;
     new_offset += data_lifted.bytesRead;
+    final timebase_lifted = FfiConverterOptionalMoqMediaTimebase.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final timebase = timebase_lifted.value;
+    new_offset += timebase_lifted.bytesRead;
     return LiftRetVal(
-      MoqContainerInit(format: format, data: data),
+      MoqContainerInit(format: format, data: data, timebase: timebase),
       new_offset - buf.offsetInBytes,
     );
   }
@@ -806,6 +816,7 @@ class FfiConverterMoqContainerInit {
     final total_length =
         FfiConverterMoqContainerFormat.allocationSize(value.format) +
         FfiConverterUint8List.allocationSize(value.data) +
+        FfiConverterOptionalMoqMediaTimebase.allocationSize(value.timebase) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -822,12 +833,76 @@ class FfiConverterMoqContainerInit {
       value.data,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterOptionalMoqMediaTimebase.write(
+      value.timebase,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     return new_offset - buf.offsetInBytes;
   }
 
   static int allocationSize(MoqContainerInit value) {
     return FfiConverterMoqContainerFormat.allocationSize(value.format) +
         FfiConverterUint8List.allocationSize(value.data) +
+        FfiConverterOptionalMoqMediaTimebase.allocationSize(value.timebase) +
+        0;
+  }
+}
+
+class MoqContainerStreamInit {
+  final MoqContainerFormat format;
+  final MoqMediaTimebase? timebase;
+  MoqContainerStreamInit({required this.format, this.timebase = null});
+}
+
+class FfiConverterMoqContainerStreamInit {
+  static MoqContainerStreamInit lift(RustBuffer buf) {
+    return FfiConverterMoqContainerStreamInit.read(buf.asUint8List()).value;
+  }
+
+  static LiftRetVal<MoqContainerStreamInit> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final format_lifted = FfiConverterMoqContainerFormat.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final format = format_lifted.value;
+    new_offset += format_lifted.bytesRead;
+    final timebase_lifted = FfiConverterOptionalMoqMediaTimebase.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final timebase = timebase_lifted.value;
+    new_offset += timebase_lifted.bytesRead;
+    return LiftRetVal(
+      MoqContainerStreamInit(format: format, timebase: timebase),
+      new_offset - buf.offsetInBytes,
+    );
+  }
+
+  static RustBuffer lower(MoqContainerStreamInit value) {
+    final total_length =
+        FfiConverterMoqContainerFormat.allocationSize(value.format) +
+        FfiConverterOptionalMoqMediaTimebase.allocationSize(value.timebase) +
+        0;
+    final buf = Uint8List(total_length);
+    write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqContainerStreamInit value, Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    new_offset += FfiConverterMoqContainerFormat.write(
+      value.format,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    new_offset += FfiConverterOptionalMoqMediaTimebase.write(
+      value.timebase,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset - buf.offsetInBytes;
+  }
+
+  static int allocationSize(MoqContainerStreamInit value) {
+    return FfiConverterMoqContainerFormat.allocationSize(value.format) +
+        FfiConverterOptionalMoqMediaTimebase.allocationSize(value.timebase) +
         0;
   }
 }
@@ -3092,54 +3167,60 @@ class FfiConverterMoqException {
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 22:
-        final lifted = NotFoundMoqException.read(subview);
+        final lifted = ExpiredMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 23:
-        final lifted = UnsupportedMoqException.read(subview);
+        final lifted = NotFoundMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 24:
-        final lifted = AlreadyCommittedMoqException.read(subview);
+        final lifted = UnsupportedMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 25:
-        final lifted = InvalidRouteMoqException.read(subview);
+        final lifted = AlreadyCommittedMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 26:
-        final lifted = InvalidPatternMoqException.read(subview);
+        final lifted = InvalidRouteMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 27:
-        final lifted = InvalidEpochMoqException.read(subview);
+        final lifted = InvalidPatternMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 28:
-        final lifted = UnresolvableBroadcastMoqException.read(subview);
+        final lifted = InvalidEpochMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 29:
-        final lifted = LogMoqException.read(subview);
+        final lifted = UnresolvableBroadcastMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 30:
+        final lifted = LogMoqException.read(subview);
+        return LiftRetVal<MoqException>(
+          lifted.value,
+          lifted.bytesRead - subview.offsetInBytes + 4,
+        );
+      case 31:
         final lifted = ConfigMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
@@ -3894,6 +3975,34 @@ class ForbiddenMoqException extends MoqException {
   }
 }
 
+class ExpiredMoqException extends MoqException {
+  ExpiredMoqException();
+  ExpiredMoqException._();
+  static LiftRetVal<ExpiredMoqException> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    return LiftRetVal(ExpiredMoqException._(), new_offset);
+  }
+
+  @override
+  RustBuffer lower() {
+    final buf = Uint8List(allocationSize());
+    write(buf);
+    return toRustBuffer(buf);
+  }
+
+  @override
+  int allocationSize() {
+    return 4;
+  }
+
+  @override
+  int write(Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 22);
+    int new_offset = buf.offsetInBytes + 4;
+    return new_offset;
+  }
+}
+
 class NotFoundMoqException extends MoqException {
   NotFoundMoqException();
   NotFoundMoqException._();
@@ -3916,7 +4025,7 @@ class NotFoundMoqException extends MoqException {
 
   @override
   int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 22);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 23);
     int new_offset = buf.offsetInBytes + 4;
     return new_offset;
   }
@@ -3944,7 +4053,7 @@ class UnsupportedMoqException extends MoqException {
 
   @override
   int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 23);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 24);
     int new_offset = buf.offsetInBytes + 4;
     return new_offset;
   }
@@ -3972,7 +4081,7 @@ class AlreadyCommittedMoqException extends MoqException {
 
   @override
   int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 24);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 25);
     int new_offset = buf.offsetInBytes + 4;
     return new_offset;
   }
@@ -4006,7 +4115,7 @@ class InvalidRouteMoqException extends MoqException {
 
   @override
   int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 25);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 26);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
       reason,
@@ -4044,7 +4153,7 @@ class InvalidPatternMoqException extends MoqException {
 
   @override
   int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 26);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 27);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
       reason,
@@ -4082,7 +4191,7 @@ class InvalidEpochMoqException extends MoqException {
 
   @override
   int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 27);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 28);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
       reason,
@@ -4120,7 +4229,7 @@ class UnresolvableBroadcastMoqException extends MoqException {
 
   @override
   int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 28);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 29);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
       reason,
@@ -4158,7 +4267,7 @@ class LogMoqException extends MoqException {
 
   @override
   int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 29);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 30);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
       reason,
@@ -4196,7 +4305,7 @@ class ConfigMoqException extends MoqException {
 
   @override
   int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 30);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 31);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
       reason,
@@ -4276,6 +4385,7 @@ enum MoqProtocolKind {
   app,
   unknown,
   tooManyRequests,
+  expired,
 }
 
 class FfiConverterMoqProtocolKind {
@@ -4328,6 +4438,8 @@ class FfiConverterMoqProtocolKind {
         return LiftRetVal(MoqProtocolKind.unknown, 4);
       case 23:
         return LiftRetVal(MoqProtocolKind.tooManyRequests, 4);
+      case 24:
+        return LiftRetVal(MoqProtocolKind.expired, 4);
       default:
         throw UniffiInternalError(
           UniffiInternalError.unexpectedEnumCase,
@@ -5059,6 +5171,7 @@ final _MoqBandwidthFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqBandwidth implements MoqBandwidthInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqBandwidth._(this._ptr) {
     _MoqBandwidthFinalizer.attach(this, _ptr, detach: this);
   }
@@ -5066,12 +5179,19 @@ class MoqBandwidth implements MoqBandwidthInterface {
     return MoqBandwidth._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqbandwidth(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqBandwidthFinalizer.detach(this);
     rustCall((status) => uniffi_moq_ffi_fn_free_moqbandwidth(_ptr, status));
   }
@@ -5130,6 +5250,7 @@ final _MoqReservationFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqReservation implements MoqReservationInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqReservation._(this._ptr) {
     _MoqReservationFinalizer.attach(this, _ptr, detach: this);
   }
@@ -5137,12 +5258,19 @@ class MoqReservation implements MoqReservationInterface {
     return MoqReservation._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqreservation(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqReservationFinalizer.detach(this);
     rustCall((status) => uniffi_moq_ffi_fn_free_moqreservation(_ptr, status));
   }
@@ -5216,6 +5344,7 @@ final _MoqBroadcastConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqBroadcastConsumer implements MoqBroadcastConsumerInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqBroadcastConsumer._(this._ptr) {
     _MoqBroadcastConsumerFinalizer.attach(this, _ptr, detach: this);
   }
@@ -5223,12 +5352,19 @@ class MoqBroadcastConsumer implements MoqBroadcastConsumerInterface {
     return MoqBroadcastConsumer._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqbroadcastconsumer(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqBroadcastConsumerFinalizer.detach(this);
     rustCall(
       (status) => uniffi_moq_ffi_fn_free_moqbroadcastconsumer(_ptr, status),
@@ -5329,6 +5465,7 @@ final _MoqGroupConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqGroupConsumer implements MoqGroupConsumerInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqGroupConsumer._(this._ptr) {
     _MoqGroupConsumerFinalizer.attach(this, _ptr, detach: this);
   }
@@ -5336,12 +5473,19 @@ class MoqGroupConsumer implements MoqGroupConsumerInterface {
     return MoqGroupConsumer._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqgroupconsumer(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqGroupConsumerFinalizer.detach(this);
     rustCall((status) => uniffi_moq_ffi_fn_free_moqgroupconsumer(_ptr, status));
   }
@@ -5422,6 +5566,7 @@ final _MoqTrackConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqTrackConsumer implements MoqTrackConsumerInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqTrackConsumer._(this._ptr) {
     _MoqTrackConsumerFinalizer.attach(this, _ptr, detach: this);
   }
@@ -5429,12 +5574,19 @@ class MoqTrackConsumer implements MoqTrackConsumerInterface {
     return MoqTrackConsumer._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqtrackconsumer(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqTrackConsumerFinalizer.detach(this);
     rustCall((status) => uniffi_moq_ffi_fn_free_moqtrackconsumer(_ptr, status));
   }
@@ -5561,6 +5713,7 @@ final _MoqGroupDemandFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqGroupDemand implements MoqGroupDemandInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqGroupDemand._(this._ptr) {
     _MoqGroupDemandFinalizer.attach(this, _ptr, detach: this);
   }
@@ -5568,12 +5721,19 @@ class MoqGroupDemand implements MoqGroupDemandInterface {
     return MoqGroupDemand._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqgroupdemand(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqGroupDemandFinalizer.detach(this);
     rustCall((status) => uniffi_moq_ffi_fn_free_moqgroupdemand(_ptr, status));
   }
@@ -5663,6 +5823,7 @@ final _MoqTrackDemandFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqTrackDemand implements MoqTrackDemandInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqTrackDemand._(this._ptr) {
     _MoqTrackDemandFinalizer.attach(this, _ptr, detach: this);
   }
@@ -5670,12 +5831,19 @@ class MoqTrackDemand implements MoqTrackDemandInterface {
     return MoqTrackDemand._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqtrackdemand(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqTrackDemandFinalizer.detach(this);
     rustCall((status) => uniffi_moq_ffi_fn_free_moqtrackdemand(_ptr, status));
   }
@@ -5754,7 +5922,7 @@ class FfiConverterMoqTrackDemand {
 
 abstract class MoqFlateSnapshotProducerInterface {
   void finish();
-  void update({required Uint8List payload});
+  void update({required Uint8List payload, int? timestampUs = null});
 }
 
 final _MoqFlateSnapshotProducerFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -5765,6 +5933,7 @@ final _MoqFlateSnapshotProducerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqFlateSnapshotProducer implements MoqFlateSnapshotProducerInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqFlateSnapshotProducer._(this._ptr) {
     _MoqFlateSnapshotProducerFinalizer.attach(this, _ptr, detach: this);
   }
@@ -5787,6 +5956,9 @@ class MoqFlateSnapshotProducer implements MoqFlateSnapshotProducerInterface {
     return MoqFlateSnapshotProducer._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) =>
           uniffi_moq_ffi_fn_clone_moqflatesnapshotproducer(_ptr, status),
@@ -5794,6 +5966,10 @@ class MoqFlateSnapshotProducer implements MoqFlateSnapshotProducerInterface {
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqFlateSnapshotProducerFinalizer.detach(this);
     rustCall(
       (status) => uniffi_moq_ffi_fn_free_moqflatesnapshotproducer(_ptr, status),
@@ -5809,11 +5985,12 @@ class MoqFlateSnapshotProducer implements MoqFlateSnapshotProducerInterface {
     }, moqExceptionErrorHandler);
   }
 
-  void update({required Uint8List payload}) {
+  void update({required Uint8List payload, int? timestampUs = null}) {
     return rustCall((status) {
       uniffi_moq_ffi_fn_method_moqflatesnapshotproducer_update(
         uniffiClonePointer(),
         FfiConverterUint8List.lower(payload),
+        FfiConverterOptionalUInt64.lower(timestampUs),
         status,
       );
     }, moqExceptionErrorHandler);
@@ -5847,7 +6024,7 @@ class FfiConverterMoqFlateSnapshotProducer {
 }
 
 abstract class MoqFlateStreamProducerInterface {
-  void append({required Uint8List payload});
+  void append({required Uint8List payload, int? timestampUs = null});
   void finish();
 }
 
@@ -5859,6 +6036,7 @@ final _MoqFlateStreamProducerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqFlateStreamProducer implements MoqFlateStreamProducerInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqFlateStreamProducer._(this._ptr) {
     _MoqFlateStreamProducerFinalizer.attach(this, _ptr, detach: this);
   }
@@ -5881,23 +6059,31 @@ class MoqFlateStreamProducer implements MoqFlateStreamProducerInterface {
     return MoqFlateStreamProducer._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqflatestreamproducer(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqFlateStreamProducerFinalizer.detach(this);
     rustCall(
       (status) => uniffi_moq_ffi_fn_free_moqflatestreamproducer(_ptr, status),
     );
   }
 
-  void append({required Uint8List payload}) {
+  void append({required Uint8List payload, int? timestampUs = null}) {
     return rustCall((status) {
       uniffi_moq_ffi_fn_method_moqflatestreamproducer_append(
         uniffiClonePointer(),
         FfiConverterUint8List.lower(payload),
+        FfiConverterOptionalUInt64.lower(timestampUs),
         status,
       );
     }, moqExceptionErrorHandler);
@@ -5952,6 +6138,7 @@ final _MoqJsonSnapshotConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqJsonSnapshotConsumer implements MoqJsonSnapshotConsumerInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqJsonSnapshotConsumer._(this._ptr) {
     _MoqJsonSnapshotConsumerFinalizer.attach(this, _ptr, detach: this);
   }
@@ -5972,12 +6159,19 @@ class MoqJsonSnapshotConsumer implements MoqJsonSnapshotConsumerInterface {
     return MoqJsonSnapshotConsumer._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqjsonsnapshotconsumer(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqJsonSnapshotConsumerFinalizer.detach(this);
     rustCall(
       (status) => uniffi_moq_ffi_fn_free_moqjsonsnapshotconsumer(_ptr, status),
@@ -6036,7 +6230,7 @@ class FfiConverterMoqJsonSnapshotConsumer {
 abstract class MoqJsonSnapshotProducerInterface {
   MoqTrackDemand demand();
   void finish();
-  void update({required String value});
+  void update({required String value, int? timestampUs = null});
 }
 
 final _MoqJsonSnapshotProducerFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -6047,6 +6241,7 @@ final _MoqJsonSnapshotProducerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqJsonSnapshotProducer implements MoqJsonSnapshotProducerInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqJsonSnapshotProducer._(this._ptr) {
     _MoqJsonSnapshotProducerFinalizer.attach(this, _ptr, detach: this);
   }
@@ -6069,12 +6264,19 @@ class MoqJsonSnapshotProducer implements MoqJsonSnapshotProducerInterface {
     return MoqJsonSnapshotProducer._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqjsonsnapshotproducer(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqJsonSnapshotProducerFinalizer.detach(this);
     rustCall(
       (status) => uniffi_moq_ffi_fn_free_moqjsonsnapshotproducer(_ptr, status),
@@ -6101,11 +6303,12 @@ class MoqJsonSnapshotProducer implements MoqJsonSnapshotProducerInterface {
     }, moqExceptionErrorHandler);
   }
 
-  void update({required String value}) {
+  void update({required String value, int? timestampUs = null}) {
     return rustCall((status) {
       uniffi_moq_ffi_fn_method_moqjsonsnapshotproducer_update(
         uniffiClonePointer(),
         FfiConverterString.lower(value),
+        FfiConverterOptionalUInt64.lower(timestampUs),
         status,
       );
     }, moqExceptionErrorHandler);
@@ -6151,6 +6354,7 @@ final _MoqJsonStreamConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqJsonStreamConsumer implements MoqJsonStreamConsumerInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqJsonStreamConsumer._(this._ptr) {
     _MoqJsonStreamConsumerFinalizer.attach(this, _ptr, detach: this);
   }
@@ -6171,12 +6375,19 @@ class MoqJsonStreamConsumer implements MoqJsonStreamConsumerInterface {
     return MoqJsonStreamConsumer._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqjsonstreamconsumer(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqJsonStreamConsumerFinalizer.detach(this);
     rustCall(
       (status) => uniffi_moq_ffi_fn_free_moqjsonstreamconsumer(_ptr, status),
@@ -6233,7 +6444,7 @@ class FfiConverterMoqJsonStreamConsumer {
 }
 
 abstract class MoqJsonStreamProducerInterface {
-  void append({required String value});
+  void append({required String value, int? timestampUs = null});
   MoqTrackDemand demand();
   void finish();
 }
@@ -6246,6 +6457,7 @@ final _MoqJsonStreamProducerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqJsonStreamProducer implements MoqJsonStreamProducerInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqJsonStreamProducer._(this._ptr) {
     _MoqJsonStreamProducerFinalizer.attach(this, _ptr, detach: this);
   }
@@ -6268,23 +6480,31 @@ class MoqJsonStreamProducer implements MoqJsonStreamProducerInterface {
     return MoqJsonStreamProducer._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqjsonstreamproducer(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqJsonStreamProducerFinalizer.detach(this);
     rustCall(
       (status) => uniffi_moq_ffi_fn_free_moqjsonstreamproducer(_ptr, status),
     );
   }
 
-  void append({required String value}) {
+  void append({required String value, int? timestampUs = null}) {
     return rustCall((status) {
       uniffi_moq_ffi_fn_method_moqjsonstreamproducer_append(
         uniffiClonePointer(),
         FfiConverterString.lower(value),
+        FfiConverterOptionalUInt64.lower(timestampUs),
         status,
       );
     }, moqExceptionErrorHandler);
@@ -6350,6 +6570,7 @@ final _MoqMediaCatalogConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqMediaCatalogConsumer implements MoqMediaCatalogConsumerInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqMediaCatalogConsumer._(this._ptr) {
     _MoqMediaCatalogConsumerFinalizer.attach(this, _ptr, detach: this);
   }
@@ -6373,12 +6594,19 @@ class MoqMediaCatalogConsumer implements MoqMediaCatalogConsumerInterface {
     return MoqMediaCatalogConsumer._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqmediacatalogconsumer(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqMediaCatalogConsumerFinalizer.detach(this);
     rustCall(
       (status) => uniffi_moq_ffi_fn_free_moqmediacatalogconsumer(_ptr, status),
@@ -6435,6 +6663,7 @@ class FfiConverterMoqMediaCatalogConsumer {
 }
 
 abstract class MoqMediaCatalogProducerInterface {
+  int now();
   void removeSection({required String name});
   void setSection({required String name, required String json});
   void setVideoProperties({required MoqVideoProperties properties});
@@ -6448,6 +6677,7 @@ final _MoqMediaCatalogProducerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqMediaCatalogProducer implements MoqMediaCatalogProducerInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqMediaCatalogProducer._(this._ptr) {
     _MoqMediaCatalogProducerFinalizer.attach(this, _ptr, detach: this);
   }
@@ -6465,15 +6695,33 @@ class MoqMediaCatalogProducer implements MoqMediaCatalogProducerInterface {
     return MoqMediaCatalogProducer._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqmediacatalogproducer(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqMediaCatalogProducerFinalizer.detach(this);
     rustCall(
       (status) => uniffi_moq_ffi_fn_free_moqmediacatalogproducer(_ptr, status),
+    );
+  }
+
+  int now() {
+    return rustCallWithLifter(
+      (status) => uniffi_moq_ffi_fn_method_moqmediacatalogproducer_now(
+        uniffiClonePointer(),
+        status,
+      ),
+      FfiConverterUInt64.lift,
+      moqExceptionErrorHandler,
     );
   }
 
@@ -6550,6 +6798,7 @@ final _MoqMediaContainerProducerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqMediaContainerProducer implements MoqMediaContainerProducerInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqMediaContainerProducer._(this._ptr) {
     _MoqMediaContainerProducerFinalizer.attach(this, _ptr, detach: this);
   }
@@ -6571,6 +6820,9 @@ class MoqMediaContainerProducer implements MoqMediaContainerProducerInterface {
     return MoqMediaContainerProducer._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) =>
           uniffi_moq_ffi_fn_clone_moqmediacontainerproducer(_ptr, status),
@@ -6578,6 +6830,10 @@ class MoqMediaContainerProducer implements MoqMediaContainerProducerInterface {
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqMediaContainerProducerFinalizer.detach(this);
     rustCall(
       (status) =>
@@ -6667,17 +6923,18 @@ final _MoqMediaContainerStreamProducerFinalizer = Finalizer<Pointer<Void>>((
 class MoqMediaContainerStreamProducer
     implements MoqMediaContainerStreamProducerInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqMediaContainerStreamProducer._(this._ptr) {
     _MoqMediaContainerStreamProducerFinalizer.attach(this, _ptr, detach: this);
   }
   MoqMediaContainerStreamProducer({
     required MoqBroadcastProducer broadcast,
-    required MoqContainerFormat format,
+    required MoqContainerStreamInit init,
   }) : _ptr = rustCall(
          (status) =>
              uniffi_moq_ffi_fn_constructor_moqmediacontainerstreamproducer_new(
                FfiConverterMoqBroadcastProducer.lower(broadcast),
-               FfiConverterMoqContainerFormat.lower(format),
+               FfiConverterMoqContainerStreamInit.lower(init),
                status,
              ),
          moqExceptionErrorHandler,
@@ -6688,6 +6945,9 @@ class MoqMediaContainerStreamProducer
     return MoqMediaContainerStreamProducer._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) =>
           uniffi_moq_ffi_fn_clone_moqmediacontainerstreamproducer(_ptr, status),
@@ -6695,6 +6955,10 @@ class MoqMediaContainerStreamProducer
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqMediaContainerStreamProducerFinalizer.detach(this);
     rustCall(
       (status) =>
@@ -6762,6 +7026,7 @@ final _MoqMediaGroupConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqMediaGroupConsumer implements MoqMediaGroupConsumerInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqMediaGroupConsumer._(this._ptr) {
     _MoqMediaGroupConsumerFinalizer.attach(this, _ptr, detach: this);
   }
@@ -6800,12 +7065,19 @@ class MoqMediaGroupConsumer implements MoqMediaGroupConsumerInterface {
     return MoqMediaGroupConsumer._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqmediagroupconsumer(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqMediaGroupConsumerFinalizer.detach(this);
     rustCall(
       (status) => uniffi_moq_ffi_fn_free_moqmediagroupconsumer(_ptr, status),
@@ -6872,6 +7144,76 @@ class FfiConverterMoqMediaGroupConsumer {
   }
 }
 
+abstract class MoqMediaTimebaseInterface {}
+
+final _MoqMediaTimebaseFinalizer = Finalizer<Pointer<Void>>((ptr) {
+  rustCall((status) => uniffi_moq_ffi_fn_free_moqmediatimebase(ptr, status));
+});
+
+class MoqMediaTimebase implements MoqMediaTimebaseInterface {
+  late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
+  MoqMediaTimebase._(this._ptr) {
+    _MoqMediaTimebaseFinalizer.attach(this, _ptr, detach: this);
+  }
+  MoqMediaTimebase({required MoqBroadcastProducer broadcast})
+    : _ptr = rustCall(
+        (status) => uniffi_moq_ffi_fn_constructor_moqmediatimebase_new(
+          FfiConverterMoqBroadcastProducer.lower(broadcast),
+          status,
+        ),
+        moqExceptionErrorHandler,
+      ) {
+    _MoqMediaTimebaseFinalizer.attach(this, _ptr, detach: this);
+  }
+  factory MoqMediaTimebase.lift(Pointer<Void> ptr) {
+    return MoqMediaTimebase._(ptr);
+  }
+  Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
+    return rustCall(
+      (status) => uniffi_moq_ffi_fn_clone_moqmediatimebase(_ptr, status),
+    );
+  }
+
+  void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
+    _MoqMediaTimebaseFinalizer.detach(this);
+    rustCall((status) => uniffi_moq_ffi_fn_free_moqmediatimebase(_ptr, status));
+  }
+}
+
+class FfiConverterMoqMediaTimebase {
+  static MoqMediaTimebase lift(Pointer<Void> ptr) {
+    return MoqMediaTimebase.lift(ptr);
+  }
+
+  static Pointer<Void> lower(MoqMediaTimebase value) {
+    return value.uniffiClonePointer();
+  }
+
+  static int allocationSize(MoqMediaTimebase value) {
+    return 8;
+  }
+
+  static LiftRetVal<MoqMediaTimebase> read(Uint8List buf) {
+    final handle = buf.buffer.asByteData(buf.offsetInBytes).getInt64(0);
+    final pointer = Pointer<Void>.fromAddress(handle);
+    return LiftRetVal(MoqMediaTimebase.lift(pointer), 8);
+  }
+
+  static int write(MoqMediaTimebase value, Uint8List buf) {
+    final handle = lower(value);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt64(0, handle.address);
+    return 8;
+  }
+}
+
 abstract class MoqMediaTrackConsumerInterface {
   void cancel();
   Future<MoqMediaFrame?> next();
@@ -6885,6 +7227,7 @@ final _MoqMediaTrackConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqMediaTrackConsumer implements MoqMediaTrackConsumerInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqMediaTrackConsumer._(this._ptr) {
     _MoqMediaTrackConsumerFinalizer.attach(this, _ptr, detach: this);
   }
@@ -6910,12 +7253,19 @@ class MoqMediaTrackConsumer implements MoqMediaTrackConsumerInterface {
     return MoqMediaTrackConsumer._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqmediatrackconsumer(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqMediaTrackConsumerFinalizer.detach(this);
     rustCall(
       (status) => uniffi_moq_ffi_fn_free_moqmediatrackconsumer(_ptr, status),
@@ -6989,6 +7339,7 @@ final _MoqMediaTrackProducerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqMediaTrackProducer implements MoqMediaTrackProducerInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqMediaTrackProducer._(this._ptr) {
     _MoqMediaTrackProducerFinalizer.attach(this, _ptr, detach: this);
   }
@@ -7026,12 +7377,19 @@ class MoqMediaTrackProducer implements MoqMediaTrackProducerInterface {
     return MoqMediaTrackProducer._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqmediatrackproducer(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqMediaTrackProducerFinalizer.detach(this);
     rustCall(
       (status) => uniffi_moq_ffi_fn_free_moqmediatrackproducer(_ptr, status),
@@ -7148,6 +7506,7 @@ final _MoqMediaTrackStreamProducerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 class MoqMediaTrackStreamProducer
     implements MoqMediaTrackStreamProducerInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqMediaTrackStreamProducer._(this._ptr) {
     _MoqMediaTrackStreamProducerFinalizer.attach(this, _ptr, detach: this);
   }
@@ -7171,6 +7530,9 @@ class MoqMediaTrackStreamProducer
     return MoqMediaTrackStreamProducer._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) =>
           uniffi_moq_ffi_fn_clone_moqmediatrackstreamproducer(_ptr, status),
@@ -7178,6 +7540,10 @@ class MoqMediaTrackStreamProducer
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqMediaTrackStreamProducerFinalizer.detach(this);
     rustCall(
       (status) =>
@@ -7253,6 +7619,7 @@ final _MoqAnnounceConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqAnnounceConsumer implements MoqAnnounceConsumerInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqAnnounceConsumer._(this._ptr) {
     _MoqAnnounceConsumerFinalizer.attach(this, _ptr, detach: this);
   }
@@ -7260,12 +7627,19 @@ class MoqAnnounceConsumer implements MoqAnnounceConsumerInterface {
     return MoqAnnounceConsumer._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqannounceconsumer(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqAnnounceConsumerFinalizer.detach(this);
     rustCall(
       (status) => uniffi_moq_ffi_fn_free_moqannounceconsumer(_ptr, status),
@@ -7334,6 +7708,7 @@ final _MoqAnnouncedBroadcastFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqAnnouncedBroadcast implements MoqAnnouncedBroadcastInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqAnnouncedBroadcast._(this._ptr) {
     _MoqAnnouncedBroadcastFinalizer.attach(this, _ptr, detach: this);
   }
@@ -7341,12 +7716,19 @@ class MoqAnnouncedBroadcast implements MoqAnnouncedBroadcastInterface {
     return MoqAnnouncedBroadcast._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqannouncedbroadcast(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqAnnouncedBroadcastFinalizer.detach(this);
     rustCall(
       (status) => uniffi_moq_ffi_fn_free_moqannouncedbroadcast(_ptr, status),
@@ -7415,6 +7797,7 @@ final _MoqBroadcastRequestFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqBroadcastRequest implements MoqBroadcastRequestInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqBroadcastRequest._(this._ptr) {
     _MoqBroadcastRequestFinalizer.attach(this, _ptr, detach: this);
   }
@@ -7422,12 +7805,19 @@ class MoqBroadcastRequest implements MoqBroadcastRequestInterface {
     return MoqBroadcastRequest._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqbroadcastrequest(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqBroadcastRequestFinalizer.detach(this);
     rustCall(
       (status) => uniffi_moq_ffi_fn_free_moqbroadcastrequest(_ptr, status),
@@ -7504,6 +7894,7 @@ final _MoqOriginConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqOriginConsumer implements MoqOriginConsumerInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqOriginConsumer._(this._ptr) {
     _MoqOriginConsumerFinalizer.attach(this, _ptr, detach: this);
   }
@@ -7511,12 +7902,19 @@ class MoqOriginConsumer implements MoqOriginConsumerInterface {
     return MoqOriginConsumer._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqoriginconsumer(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqOriginConsumerFinalizer.detach(this);
     rustCall(
       (status) => uniffi_moq_ffi_fn_free_moqoriginconsumer(_ptr, status),
@@ -7602,6 +8000,7 @@ final _MoqOriginDynamicFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqOriginDynamic implements MoqOriginDynamicInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqOriginDynamic._(this._ptr) {
     _MoqOriginDynamicFinalizer.attach(this, _ptr, detach: this);
   }
@@ -7609,12 +8008,19 @@ class MoqOriginDynamic implements MoqOriginDynamicInterface {
     return MoqOriginDynamic._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqorigindynamic(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqOriginDynamicFinalizer.detach(this);
     rustCall((status) => uniffi_moq_ffi_fn_free_moqorigindynamic(_ptr, status));
   }
@@ -7691,6 +8097,7 @@ final _MoqOriginProducerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqOriginProducer implements MoqOriginProducerInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqOriginProducer._(this._ptr) {
     _MoqOriginProducerFinalizer.attach(this, _ptr, detach: this);
   }
@@ -7708,12 +8115,19 @@ class MoqOriginProducer implements MoqOriginProducerInterface {
     return MoqOriginProducer._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqoriginproducer(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqOriginProducerFinalizer.detach(this);
     rustCall(
       (status) => uniffi_moq_ffi_fn_free_moqoriginproducer(_ptr, status),
@@ -7794,6 +8208,7 @@ final _MoqBroadcastDynamicFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqBroadcastDynamic implements MoqBroadcastDynamicInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqBroadcastDynamic._(this._ptr) {
     _MoqBroadcastDynamicFinalizer.attach(this, _ptr, detach: this);
   }
@@ -7801,12 +8216,19 @@ class MoqBroadcastDynamic implements MoqBroadcastDynamicInterface {
     return MoqBroadcastDynamic._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqbroadcastdynamic(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqBroadcastDynamicFinalizer.detach(this);
     rustCall(
       (status) => uniffi_moq_ffi_fn_free_moqbroadcastdynamic(_ptr, status),
@@ -7882,6 +8304,7 @@ final _MoqBroadcastProducerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqBroadcastProducer implements MoqBroadcastProducerInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqBroadcastProducer._(this._ptr) {
     _MoqBroadcastProducerFinalizer.attach(this, _ptr, detach: this);
   }
@@ -7897,12 +8320,19 @@ class MoqBroadcastProducer implements MoqBroadcastProducerInterface {
     return MoqBroadcastProducer._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqbroadcastproducer(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqBroadcastProducerFinalizer.detach(this);
     rustCall(
       (status) => uniffi_moq_ffi_fn_free_moqbroadcastproducer(_ptr, status),
@@ -8016,6 +8446,7 @@ final _MoqGroupProducerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqGroupProducer implements MoqGroupProducerInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqGroupProducer._(this._ptr) {
     _MoqGroupProducerFinalizer.attach(this, _ptr, detach: this);
   }
@@ -8023,12 +8454,19 @@ class MoqGroupProducer implements MoqGroupProducerInterface {
     return MoqGroupProducer._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqgroupproducer(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqGroupProducerFinalizer.detach(this);
     rustCall((status) => uniffi_moq_ffi_fn_free_moqgroupproducer(_ptr, status));
   }
@@ -8125,6 +8563,7 @@ final _MoqGroupRequestFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqGroupRequest implements MoqGroupRequestInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqGroupRequest._(this._ptr) {
     _MoqGroupRequestFinalizer.attach(this, _ptr, detach: this);
   }
@@ -8132,12 +8571,19 @@ class MoqGroupRequest implements MoqGroupRequestInterface {
     return MoqGroupRequest._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqgrouprequest(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqGroupRequestFinalizer.detach(this);
     rustCall((status) => uniffi_moq_ffi_fn_free_moqgrouprequest(_ptr, status));
   }
@@ -8234,6 +8680,7 @@ final _MoqTrackDynamicFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqTrackDynamic implements MoqTrackDynamicInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqTrackDynamic._(this._ptr) {
     _MoqTrackDynamicFinalizer.attach(this, _ptr, detach: this);
   }
@@ -8241,12 +8688,19 @@ class MoqTrackDynamic implements MoqTrackDynamicInterface {
     return MoqTrackDynamic._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqtrackdynamic(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqTrackDynamicFinalizer.detach(this);
     rustCall((status) => uniffi_moq_ffi_fn_free_moqtrackdynamic(_ptr, status));
   }
@@ -8319,6 +8773,7 @@ final _MoqTrackProducerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqTrackProducer implements MoqTrackProducerInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqTrackProducer._(this._ptr) {
     _MoqTrackProducerFinalizer.attach(this, _ptr, detach: this);
   }
@@ -8326,12 +8781,19 @@ class MoqTrackProducer implements MoqTrackProducerInterface {
     return MoqTrackProducer._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqtrackproducer(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqTrackProducerFinalizer.detach(this);
     rustCall((status) => uniffi_moq_ffi_fn_free_moqtrackproducer(_ptr, status));
   }
@@ -8485,6 +8947,7 @@ final _MoqTrackRequestFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqTrackRequest implements MoqTrackRequestInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqTrackRequest._(this._ptr) {
     _MoqTrackRequestFinalizer.attach(this, _ptr, detach: this);
   }
@@ -8492,12 +8955,19 @@ class MoqTrackRequest implements MoqTrackRequestInterface {
     return MoqTrackRequest._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqtrackrequest(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqTrackRequestFinalizer.detach(this);
     rustCall((status) => uniffi_moq_ffi_fn_free_moqtrackrequest(_ptr, status));
   }
@@ -8603,6 +9073,7 @@ final _MoqRequestFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqRequest implements MoqRequestInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqRequest._(this._ptr) {
     _MoqRequestFinalizer.attach(this, _ptr, detach: this);
   }
@@ -8610,12 +9081,19 @@ class MoqRequest implements MoqRequestInterface {
     return MoqRequest._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqrequest(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqRequestFinalizer.detach(this);
     rustCall((status) => uniffi_moq_ffi_fn_free_moqrequest(_ptr, status));
   }
@@ -8740,6 +9218,7 @@ final _MoqServerFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqServer implements MoqServerInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqServer._(this._ptr) {
     _MoqServerFinalizer.attach(this, _ptr, detach: this);
   }
@@ -8757,12 +9236,19 @@ class MoqServer implements MoqServerInterface {
     return MoqServer._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqserver(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqServerFinalizer.detach(this);
     rustCall((status) => uniffi_moq_ffi_fn_free_moqserver(_ptr, status));
   }
@@ -8844,6 +9330,7 @@ final _MoqClientFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqClient implements MoqClientInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqClient._(this._ptr) {
     _MoqClientFinalizer.attach(this, _ptr, detach: this);
   }
@@ -8861,12 +9348,19 @@ class MoqClient implements MoqClientInterface {
     return MoqClient._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqclient(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqClientFinalizer.detach(this);
     rustCall((status) => uniffi_moq_ffi_fn_free_moqclient(_ptr, status));
   }
@@ -8936,6 +9430,7 @@ final _MoqSessionFinalizer = Finalizer<Pointer<Void>>((ptr) {
 
 class MoqSession implements MoqSessionInterface {
   late final Pointer<Void> _ptr;
+  bool _isDisposed = false;
   MoqSession._(this._ptr) {
     _MoqSessionFinalizer.attach(this, _ptr, detach: this);
   }
@@ -8943,12 +9438,19 @@ class MoqSession implements MoqSessionInterface {
     return MoqSession._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
+    if (_isDisposed) {
+      throw StateError("Object has already been disposed");
+    }
     return rustCall(
       (status) => uniffi_moq_ffi_fn_clone_moqsession(_ptr, status),
     );
   }
 
   void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
     _MoqSessionFinalizer.detach(this);
     rustCall((status) => uniffi_moq_ffi_fn_free_moqsession(_ptr, status));
   }
@@ -9741,6 +10243,53 @@ class FfiConverterOptionalMoqMediaFrame {
     }
     buf[0] = 1;
     return FfiConverterMoqMediaFrame.write(
+          value,
+          Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+        ) +
+        1;
+  }
+}
+
+class FfiConverterOptionalMoqMediaTimebase {
+  static MoqMediaTimebase? lift(RustBuffer buf) {
+    return FfiConverterOptionalMoqMediaTimebase.read(buf.asUint8List()).value;
+  }
+
+  static LiftRetVal<MoqMediaTimebase?> read(Uint8List buf) {
+    if (ByteData.view(buf.buffer, buf.offsetInBytes).getInt8(0) == 0) {
+      return LiftRetVal(null, 1);
+    }
+    final result = FfiConverterMoqMediaTimebase.read(
+      Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+    );
+    return LiftRetVal<MoqMediaTimebase?>(result.value, result.bytesRead + 1);
+  }
+
+  static int allocationSize([MoqMediaTimebase? value]) {
+    if (value == null) {
+      return 1;
+    }
+    return FfiConverterMoqMediaTimebase.allocationSize(value) + 1;
+  }
+
+  static RustBuffer lower(MoqMediaTimebase? value) {
+    if (value == null) {
+      return toRustBuffer(Uint8List.fromList([0]));
+    }
+    final buf = Uint8List(
+      FfiConverterOptionalMoqMediaTimebase.allocationSize(value),
+    );
+    FfiConverterOptionalMoqMediaTimebase.write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqMediaTimebase? value, Uint8List buf) {
+    if (value == null) {
+      buf[0] = 0;
+      return 1;
+    }
+    buf[0] = 1;
+    return FfiConverterMoqMediaTimebase.write(
           value,
           Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
         ) +
@@ -10777,12 +11326,13 @@ external void uniffi_moq_ffi_fn_method_moqflatesnapshotproducer_finish(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
-@Native<Void Function(Pointer<Void>, RustBuffer, Pointer<RustCallStatus>)>(
-  assetId: _uniffiAssetId,
-)
+@Native<
+  Void Function(Pointer<Void>, RustBuffer, RustBuffer, Pointer<RustCallStatus>)
+>(assetId: _uniffiAssetId)
 external void uniffi_moq_ffi_fn_method_moqflatesnapshotproducer_update(
   Pointer<Void> ptr,
   RustBuffer payload,
+  RustBuffer timestamp_us,
   Pointer<RustCallStatus> uniffiStatus,
 );
 
@@ -10817,12 +11367,13 @@ external Pointer<Void> uniffi_moq_ffi_fn_constructor_moqflatestreamproducer_new(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
-@Native<Void Function(Pointer<Void>, RustBuffer, Pointer<RustCallStatus>)>(
-  assetId: _uniffiAssetId,
-)
+@Native<
+  Void Function(Pointer<Void>, RustBuffer, RustBuffer, Pointer<RustCallStatus>)
+>(assetId: _uniffiAssetId)
 external void uniffi_moq_ffi_fn_method_moqflatestreamproducer_append(
   Pointer<Void> ptr,
   RustBuffer payload,
+  RustBuffer timestamp_us,
   Pointer<RustCallStatus> uniffiStatus,
 );
 
@@ -10921,12 +11472,13 @@ external void uniffi_moq_ffi_fn_method_moqjsonsnapshotproducer_finish(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
-@Native<Void Function(Pointer<Void>, RustBuffer, Pointer<RustCallStatus>)>(
-  assetId: _uniffiAssetId,
-)
+@Native<
+  Void Function(Pointer<Void>, RustBuffer, RustBuffer, Pointer<RustCallStatus>)
+>(assetId: _uniffiAssetId)
 external void uniffi_moq_ffi_fn_method_moqjsonsnapshotproducer_update(
   Pointer<Void> ptr,
   RustBuffer value,
+  RustBuffer timestamp_us,
   Pointer<RustCallStatus> uniffiStatus,
 );
 
@@ -10999,12 +11551,13 @@ external Pointer<Void> uniffi_moq_ffi_fn_constructor_moqjsonstreamproducer_new(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
-@Native<Void Function(Pointer<Void>, RustBuffer, Pointer<RustCallStatus>)>(
-  assetId: _uniffiAssetId,
-)
+@Native<
+  Void Function(Pointer<Void>, RustBuffer, RustBuffer, Pointer<RustCallStatus>)
+>(assetId: _uniffiAssetId)
 external void uniffi_moq_ffi_fn_method_moqjsonstreamproducer_append(
   Pointer<Void> ptr,
   RustBuffer value,
+  RustBuffer timestamp_us,
   Pointer<RustCallStatus> uniffiStatus,
 );
 
@@ -11081,6 +11634,14 @@ external void uniffi_moq_ffi_fn_free_moqmediacatalogproducer(
 external Pointer<Void>
 uniffi_moq_ffi_fn_constructor_moqmediacatalogproducer_new(
   Pointer<Void> broadcast,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Uint64 Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external int uniffi_moq_ffi_fn_method_moqmediacatalogproducer_now(
+  Pointer<Void> ptr,
   Pointer<RustCallStatus> uniffiStatus,
 );
 
@@ -11195,7 +11756,7 @@ external void uniffi_moq_ffi_fn_free_moqmediacontainerstreamproducer(
 external Pointer<Void>
 uniffi_moq_ffi_fn_constructor_moqmediacontainerstreamproducer_new(
   Pointer<Void> broadcast,
-  RustBuffer format,
+  RustBuffer init,
   Pointer<RustCallStatus> uniffiStatus,
 );
 
@@ -11268,6 +11829,30 @@ external Pointer<Void> uniffi_moq_ffi_fn_method_moqmediagroupconsumer_next(
 )
 external int uniffi_moq_ffi_fn_method_moqmediagroupconsumer_sequence(
   Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external Pointer<Void> uniffi_moq_ffi_fn_clone_moqmediatimebase(
+  Pointer<Void> handle,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_free_moqmediatimebase(
+  Pointer<Void> handle,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external Pointer<Void> uniffi_moq_ffi_fn_constructor_moqmediatimebase_new(
+  Pointer<Void> broadcast,
   Pointer<RustCallStatus> uniffiStatus,
 );
 
@@ -12851,6 +13436,9 @@ external int uniffi_moq_ffi_checksum_method_moqmediacatalogconsumer_cancel();
 external int uniffi_moq_ffi_checksum_method_moqmediacatalogconsumer_next();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqmediacatalogproducer_now();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int
 uniffi_moq_ffi_checksum_method_moqmediacatalogproducer_remove_section();
 
@@ -13195,6 +13783,9 @@ external int uniffi_moq_ffi_checksum_constructor_moqmediagroupconsumer_fetch();
 external int uniffi_moq_ffi_checksum_constructor_moqmediagroupconsumer_new();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_constructor_moqmediatimebase_new();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int
 uniffi_moq_ffi_checksum_constructor_moqmediatrackconsumer_subscribe();
 
@@ -13323,10 +13914,10 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqflatesnapshotproducer_update() !=
-      28820) {
+      29136) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqflatestreamproducer_append() != 38961) {
+  if (uniffi_moq_ffi_checksum_method_moqflatestreamproducer_append() != 45773) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqflatestreamproducer_finish() != 6982) {
@@ -13348,7 +13939,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqjsonsnapshotproducer_update() !=
-      18037) {
+      17590) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqjsonstreamconsumer_cancel() != 29308) {
@@ -13357,7 +13948,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqjsonstreamconsumer_next() != 7523) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqjsonstreamproducer_append() != 12571) {
+  if (uniffi_moq_ffi_checksum_method_moqjsonstreamproducer_append() != 36078) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqjsonstreamproducer_demand() != 52854) {
@@ -13371,6 +13962,9 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqmediacatalogconsumer_next() != 43296) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqmediacatalogproducer_now() != 14140) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqmediacatalogproducer_remove_section() !=
@@ -13443,7 +14037,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqmediatrackproducer_write_frame() !=
-      53915) {
+      7616) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqmediatrackstreamproducer_demand() !=
@@ -13550,7 +14144,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqgroupproducer_sequence() != 21067) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqgroupproducer_write_frame() != 51857) {
+  if (uniffi_moq_ffi_checksum_method_moqgroupproducer_write_frame() != 42053) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqgrouprequest_abort() != 26970) {
@@ -13579,7 +14173,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqtrackproducer_append_datagram() !=
-      31895) {
+      8934) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqtrackproducer_append_group() != 45225) {
@@ -13603,7 +14197,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqtrackproducer_finish_at() != 24581) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqtrackproducer_write_frame() != 1418) {
+  if (uniffi_moq_ffi_checksum_method_moqtrackproducer_write_frame() != 32196) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqtrackrequest_abort() != 62713) {
@@ -13719,11 +14313,11 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqmediacontainerproducer_new() !=
-      7951) {
+      41369) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqmediacontainerstreamproducer_new() !=
-      32133) {
+      54958) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqmediagroupconsumer_fetch() !=
@@ -13732,6 +14326,9 @@ void _checkApiChecksums() {
   }
   if (uniffi_moq_ffi_checksum_constructor_moqmediagroupconsumer_new() !=
       14424) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_constructor_moqmediatimebase_new() != 21606) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqmediatrackconsumer_subscribe() !=

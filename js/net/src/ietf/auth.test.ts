@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Unsupported } from "../auth.ts";
-import { SessionError } from "../error.ts";
+import { SessionCode, type SessionError } from "../error.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import { AuthError, AuthMessage, AuthOk, fromSetup, intoSetup } from "./auth.ts";
@@ -124,10 +124,13 @@ test("a grant too large for one message is refused before anything is written", 
 	expect(written).toBe(0);
 });
 
-test("NOT_SUPPORTED is unsupported, every other code a refusal", async () => {
+test("AUTH_ERROR preserves actionable refusal kinds", async () => {
 	const r = await afterType((w) => new AuthError(0x3, "prefixes only").encode(w, Version.DRAFT_17));
 	expect((await AuthError.decode(r, Version.DRAFT_17)).toError()).toBeInstanceOf(Unsupported);
-	expect(new AuthError(0x1, "bad").toError()).toBeInstanceOf(SessionError);
+	const expired = new AuthError(0x5, "expired").toError() as SessionError;
+	expect(expired.code).toBe(SessionCode.Expired);
+	const unauthorized = new AuthError(0x1, "bad").toError() as SessionError;
+	expect(unauthorized.code).toBe(SessionCode.Unauthorized);
 });
 
 test("drafts before 17 carry no AUTH", async () => {

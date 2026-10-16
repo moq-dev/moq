@@ -25,5 +25,5 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [moqsrc reconnect](/quest/m1/moqsrc-reconnect.md) - redials and resumes on the same pads, a natural second scenario for this check
+- [moqsrc reconnect](/doc/bin/gstreamer.md#moqsrc) - redials and resumes on the same pads, a natural second scenario for this check
 - [A/V clock](/quest/m1/av-clock.md) - the browser side of A/V sync

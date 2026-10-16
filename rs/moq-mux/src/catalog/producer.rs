@@ -26,7 +26,7 @@ struct State<E: CatalogExt> {
 	reservations: Reservations,
 
 	/// Why the catalog tracks are closed, so [`Producer::modify`] refuses further edits with the
-	/// cause: [`Producer::finish`], or a drop-time publish that failed and aborted them.
+	/// cause: [`Producer::finish`], [`Producer::abort`], or a failed drop-time publish.
 	closed: Option<crate::Error>,
 
 	/// The broadcast's shared clock, advertised at the catalog root. Every importer on this
@@ -176,9 +176,11 @@ impl<E: CatalogExt> Outputs<E> {
 		// Every consumer refuses a catalog that fails this, so refuse it before it reaches one.
 		catalog.check_renditions()?;
 		// One snapshot per group while deltas are disabled; the `.z` track carries the identical catalog.
-		self.hang.update(catalog)?;
+		self.hang
+			.update(moq_net::Timed::from(catalog).at(moq_net::Timestamp::now()))?;
 		self.catalog_timeline.lock().unwrap().record(&self.hang_track);
-		self.hangz.update(catalog)?;
+		self.hangz
+			.update(moq_net::Timed::from(catalog).at(moq_net::Timestamp::now()))?;
 
 		// The MSF catalog is derived from our own types, so a serialize failure means an extension broke
 		// the shape; report it like any other JSON failure rather than panicking. `abort` below is
@@ -909,11 +911,31 @@ impl<E: CatalogExt> Producer<E> {
 		Ok(Consumer::new(self.outputs.hang.consume()))
 	}
 
+	/// Abort every catalog track with `err`, preventing further edits.
+	pub fn abort(mut self, err: moq_net::Error) {
+		let reason = crate::Error::from(err);
+		{
+			let mut state = take(&self.current);
+			if state.closed.is_some() {
+				return;
+			}
+			state.closed = Some(reason.clone());
+		}
+		self.outputs.abort(&reason);
+		self.timeline.finish();
+	}
+
 	/// Finish publishing to this catalog.
 	///
 	/// An estimate rise still held by the once-a-second limit is not published: media has ended.
 	pub fn finish(&mut self) -> crate::Result<()> {
-		take(&self.current).closed = Some(moq_net::Error::Closed.into());
+		{
+			let mut state = take(&self.current);
+			if let Some(err) = &state.closed {
+				return Err(err.clone());
+			}
+			state.closed = Some(moq_net::Error::Closed.into());
+		}
 		self.outputs.hang.finish()?;
 		self.outputs.hangz.finish()?;
 		self.outputs.msf_track.finish()?;
@@ -1304,6 +1326,52 @@ mod test {
 			assert_eq!(wire["tracks"][0]["namespace"], expected);
 			driver.abort();
 		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn abort_preserves_the_cause_on_every_catalog_format_and_clone() {
+		let mut broadcast = moq_net::broadcast::Info::default().produce();
+		let catalog = Producer::<()>::new(&mut broadcast, Config::default()).unwrap();
+		let mut copy = catalog.clone();
+		let mut readers = Vec::new();
+		for name in [
+			hang::Catalog::DEFAULT_NAME,
+			hang::Catalog::COMPRESSED_NAME,
+			moq_msf::DEFAULT_NAME,
+		] {
+			readers.push(broadcast.consume().track(name).unwrap().subscribe(None).await.unwrap());
+		}
+		catalog.abort(moq_net::Error::Unauthorized);
+		for reader in &mut readers {
+			assert!(matches!(reader.recv_group().await, Err(moq_net::Error::Unauthorized)));
+		}
+		assert!(copy.finish().is_err());
+		assert!(matches!(
+			copy.modify().err(),
+			Some(crate::Error::Moq(moq_net::Error::Unauthorized))
+		));
+		copy.abort(moq_net::Error::Cancel);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn abort_does_not_replace_a_finished_catalog() {
+		let mut broadcast = moq_net::broadcast::Info::default().produce();
+		let mut catalog = Producer::<()>::new(&mut broadcast, Config::default()).unwrap();
+		let copy = catalog.clone();
+		let mut reader = broadcast
+			.consume()
+			.track(hang::Catalog::DEFAULT_NAME)
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		catalog.finish().unwrap();
+		copy.abort(moq_net::Error::Unauthorized);
+		while reader.recv_group().await.unwrap().is_some() {}
+		assert!(matches!(
+			catalog.modify().err(),
+			Some(crate::Error::Moq(moq_net::Error::Closed))
+		));
 	}
 
 	/// The catalog, its MSF twin, and the timeline all rank above media. They're the
@@ -1725,6 +1793,56 @@ mod test {
 		let snapshot = catalog.snapshot();
 		assert_eq!(snapshot.archive, None);
 		assert_eq!(snapshot.clock, catalog.clock().wall());
+	}
+
+	#[test]
+	fn sibling_broadcasts_share_a_clock_and_capture_time() {
+		use std::time::{Duration, Instant, SystemTime};
+
+		let captured = Instant::now();
+		let wall = SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 60_000);
+		let clock = crate::Clock::at(captured, wall).unwrap();
+		let (origin, _driver) = moq_net::origin::Producer::new(Default::default());
+		let mut front = origin.create_broadcast("robot/front.hang").unwrap();
+		let mut rear = origin.create_broadcast("robot/rear.hang").unwrap();
+		let catalogs = [
+			Producer::new(&mut front, Config::default().with_clock(clock)).unwrap(),
+			Producer::new(&mut rear, Config::default().with_clock(clock)).unwrap(),
+		];
+		let mut broadcasts = [front, rear];
+		for (catalog, broadcast) in catalogs.iter().zip(&mut broadcasts) {
+			assert_eq!(catalog.snapshot().clock, clock.wall());
+			let timestamp = catalog.clock().capture(captured).unwrap();
+			let track = broadcast
+				.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
+				.unwrap();
+			let mut video = catalog
+				.video(
+					track,
+					crate::catalog::hang::Container::Legacy(crate::container::Kind::Video),
+					VideoConfig::new(hang::catalog::VideoCodec::VP8),
+				)
+				.unwrap();
+			let mut consumer = video.consume();
+			video
+				.write(crate::container::Frame {
+					timestamp,
+					duration: None,
+					payload: Bytes::from_static(b"keyframe"),
+					keyframe: true,
+				})
+				.unwrap();
+			let waiter = kio::Waiter::noop();
+			let Poll::Ready(Ok(Some(mut group))) = consumer.poll_recv_group(&waiter) else {
+				panic!("captured group is published");
+			};
+			let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+				panic!("captured frame is published");
+			};
+			let timestamp = frame.timestamp.expect("captured frame is timed");
+			assert_eq!(catalog.clock().wall_clock(timestamp).unwrap(), wall);
+			assert_eq!(catalog.snapshot().clock.unwrap().wall_clock(timestamp).unwrap(), wall);
+		}
 	}
 
 	/// How far `pts` lands from `clock`'s reading now, which is zero for a frame live on arrival.

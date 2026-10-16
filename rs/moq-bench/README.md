@@ -121,6 +121,41 @@ The `config/` directory has a few starting points:
 
 ## Machine-readable output
 
+Every line groups load counts by resource:
+
+```json
+{
+  "connections": { "target": 2, "established": 2 },
+  "broadcasts": { "target": 2, "active": 2, "established": 2 },
+  "subscriptions": { "target": 2, "active": 2, "established": 2 },
+  "ready": true
+}
+```
+
+Targets are fixed sums over all startup rolls, including fan-out roles.
+Established counts are live: connections have connected, broadcasts have connected
+or completed their first group, and subscriptions have read a complete group end
+to end. Broadcast `active` counts producers before establishment; subscription
+`active` includes drains still waiting to subscribe or finish their first group.
+
+`ready` first becomes true on a line whose `established` counts all reach their
+targets at once. Start a measurement window on the first `ready` line. It stays
+true after a later loss; use each resource's `established` count to see
+established work ending.
+
+This changes the previous numeric JSONL fields into objects. Migrate reads of
+`connections` to `connections.established`, `broadcasts` to `broadcasts.active`,
+and `subscriptions` to `subscriptions.active`; those gauges retain their meanings.
+Frame, byte, group and latency fields are unchanged. The human-readable stats log
+also keeps its existing numeric fields.
+
+A mesh publishing run refuses a subscription range larger than the smallest
+possible peer broadcast count: `(max(connections.min, 1) - 1) * broadcasts.min`,
+with inverted range ends normalized first. A publishing run with subscribers,
+including fan-out, refuses an fps range containing zero. Subscribe-only runs may
+use local fps zero and request any subscription count: their external publishers
+determine when the requested target is reached. Targets are never clamped.
+
 Each line includes `interval_start_ms` and `interval_end_ms` (Unix milliseconds),
 and `latency_interval_histogram`: `{ "version": 1, "unit": "ms", "buckets": [[index, count], ...] }`.
 Version 1 is a sparse encoding of 60,001 dense one-millisecond buckets: omitted
@@ -146,9 +181,8 @@ independent atomic samples.
 `--output stats.jsonl` mirrors every report interval to a file as one JSON
 line, each stamped with `timestamp_ms`. The frame, byte, and group counters are
 cumulative and monotonic, so a consumer diffs successive lines to compute
-rates, the same convention as `moq-stats` frames. `connections`, `broadcasts`,
-and `subscriptions` are live gauges that fall as work ends; diff only the
-counters.
+rates, the same convention as `moq-stats` frames. Resource `active` and
+`established` counts are live gauges that fall as work ends; diff only the counters.
 
 `groups_lost` is the logged `lost_groups`, so its increase over a window is the
 groups lost inside it. `groups_expected - groups_present` is the gaps still

@@ -146,7 +146,10 @@ export class Local {
 			effect.set(this.#cameraAudio, effect.get(this.microphone.out.source)?.audio);
 		});
 
-		this.cameraCapture = new Publish.Video.Capture({ source: this.#cameraVideo });
+		this.cameraCapture = new Publish.Video.Capture({
+			source: this.#cameraVideo,
+			orientation: this.webcam.out.orientation,
+		});
 		this.#signals.cleanup(() => this.cameraCapture.close());
 
 		this.screenCapture = new Publish.Video.Capture({ source: this.#screenVideo });
@@ -166,6 +169,7 @@ export class Local {
 			name: cameraName,
 			display: this.cameraCapture.out.display,
 			flip: true,
+			rotation: this.cameraCapture.out.rotation,
 		});
 		this.#signals.cleanup(() => this.camera.close());
 

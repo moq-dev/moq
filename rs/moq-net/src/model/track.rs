@@ -22,6 +22,10 @@ use super::{Datagram, Requests};
 use super::Cap;
 pub use super::subscription::{Order, Position, Subscription};
 
+mod demand;
+pub(super) use demand::Preferences;
+use demand::Subscriptions;
+
 use std::{
 	collections::{BTreeMap, VecDeque},
 	ops::{Bound, RangeBounds},
@@ -344,10 +348,10 @@ pub(crate) struct TrackState {
 	// produced and finished before the abort landed. See [`Self::is_complete`].
 	settled: bool,
 
-	// Active subscriptions, in their own [`kio::Shared`] so a read-only `Consumer`
+	// Active subscriptions, in their own [`kio::Lock`] so a read-only `Consumer`
 	// registers under that lock instead of writing back into the track state.
 	// Kept here (rather than threaded through every handle) so any holder reaches it.
-	subscriptions: kio::Shared<Subscriptions>,
+	subscriptions: kio::Lock<Subscriptions>,
 
 	// The reverse fetch queue (see [`FetchState`]), same reasoning: cache-miss
 	// `fetch_group` calls enqueue here and a `Dynamic` drains.
@@ -476,9 +480,6 @@ impl Slot {
 /// twice the entries in it. Half of [`cache::ENTRY_OVERHEAD`]; see it for why this is
 /// derived rather than measured.
 pub(crate) const CACHE_OVERHEAD: u64 = 2 * (size_of::<u64>() + size_of::<Slot>() + 2 * size_of::<(u64, u32)>()) as u64;
-
-/// The registered subscriptions, aggregated by the producer.
-type Subscriptions = Vec<kio::Consumer<Subscription>>;
 
 /// Reverse state for [`Consumer::fetch_group`], beside the track state in its own
 /// [`kio::Shared`]: consumers enqueue (coalescing per sequence, so a relay opens one
@@ -711,9 +712,8 @@ impl TrackState {
 	/// as though it were a live replacement.
 	fn live_edge(&self, cap: Option<u64>) -> Option<PresentationEdge> {
 		self.lookup
-			.range(..)
+			.range((Bound::Unbounded, cap.map_or(Bound::Unbounded, Bound::Excluded)))
 			.rev()
-			.filter(|(seq, _)| super::subscription::before_end(**seq, cap))
 			.find_map(|(_, slot)| {
 				if !slot.is_shown() {
 					return None;
@@ -1257,6 +1257,7 @@ impl TrackState {
 				head: None,
 			},
 		);
+		self.cache.wakes().arrived(sequence..=sequence);
 		if visible && !pending {
 			self.arrival.push_back((sequence, stamp));
 			self.landed(sequence);
@@ -1464,6 +1465,9 @@ impl TrackState {
 	fn set_start(&mut self, start_sequence: Option<u64>, pending: bool) {
 		self.start_sequence = start_sequence;
 		self.start_pending = pending;
+		if let Some(start) = start_sequence {
+			self.cache.wakes().arrived(..start);
+		}
 	}
 
 	/// Record the exclusive end, rejecting a second end, one that would orphan
@@ -1493,6 +1497,7 @@ impl TrackState {
 			}
 		}
 		self.end = Some(end);
+		self.cache.wakes().arrived(fin..);
 		Ok(())
 	}
 
@@ -1702,6 +1707,12 @@ impl TrackState {
 		producer.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 
+	/// Abort shared track state without extending its publisher lifetime.
+	pub(crate) fn abort(producer: &kio::Producer<Self>, err: Error) -> Result<()> {
+		commit_abort(Self::modify(producer)?, err);
+		Ok(())
+	}
+
 	/// Insert a group fetched for a [`group::Request`], setting the track's [`Info`]
 	/// if it isn't accepted yet. The group's timescale comes from that info, so a
 	/// fetch can serve an as-yet-unaccepted track (e.g. a relay with no live
@@ -1868,6 +1879,11 @@ impl Producer {
 	/// The parent broadcast this track belongs to.
 	pub fn broadcast(&self) -> &broadcast::Info {
 		&self.broadcast
+	}
+
+	/// The properties this track was created with.
+	pub fn info(&self) -> &Info {
+		&self.info
 	}
 
 	/// Create a new group with the given sequence number.
@@ -2252,8 +2268,7 @@ impl Producer {
 	/// [`finish`](Self::finish) is deliberately not terminal: it declares the final
 	/// sequence, and lower-numbered groups may still be written afterwards.
 	pub fn abort(self, err: Error) -> Result<()> {
-		commit_abort(self.modify()?, err);
-		Ok(())
+		TrackState::abort(&self.state, err)
 	}
 
 	/// Abort an unused track, returning the producer unchanged if consumers remain.
@@ -2367,8 +2382,7 @@ impl Producer {
 		// subscriber surfaces the close/abort on its first read; the preferences are
 		// simply never registered (nothing aggregates them anymore).
 		let info = self.info.clone();
-		let subscription = kio::Producer::new(preferences);
-		register_subscription(self.state.read(), &subscription);
+		let subscription = Preferences::register(self.state.read(), preferences);
 
 		// Hoisted: an inline `read()` guard would live to the end of the struct literal,
 		// deadlocking against the `consume()` below.
@@ -2676,90 +2690,19 @@ impl Drop for Alive {
 	}
 }
 
-/// Poll until the aggregate across `subs` differs from `prev`, then store and return it.
-///
-/// Departed subscribers are pruned whenever the scan meets one, even when the aggregate
-/// holds. Churn with a steady viewer's preferences never changes it, so otherwise every
-/// wake would walk every departed entry the list has room for since its peak.
+/// Poll the counted aggregate without registering on individual readers.
 fn poll_combined_changed(
-	subs: &kio::Shared<Subscriptions>,
+	subs: &kio::Lock<Subscriptions>,
 	bound: Option<Duration>,
 	prev: &mut Option<Subscription>,
 	waiter: &kio::Waiter,
 ) -> Poll<Option<Subscription>> {
-	loop {
-		let mut next = None;
-		let mut departed = false;
-		let mut guard = ready!(subs.poll(waiter, |subs| {
-			(next, departed) = combined_subscription(subs, bound, waiter);
-			if departed || next != *prev {
-				Poll::Ready(())
-			} else {
-				Poll::Pending
-			}
-		}));
-		if departed {
-			guard.retain(|sub| !sub.is_closed());
-		}
-		drop(guard);
-		if next != *prev {
-			*prev = next.clone();
-			return Poll::Ready(next);
-		}
-		// Only pruned: a ready poll skips registering, so poll again to park on the list.
-	}
+	subs.lock().poll_changed(bound, prev, waiter)
 }
 
-/// Aggregate every live subscriber's preferences into the most demanding request, and
-/// report whether any departed subscriber is still listed.
-///
-/// Read-only: iterates the subscriptions immutably and registers `waiter` on each, so a
-/// preference update (or a subscriber dropping) wakes the caller's poll. Callers decide
-/// readiness from the returned value, then prune closed subscribers through the `Mut`.
-fn combined_subscription(
-	subs: &Subscriptions,
-	bound: Option<Duration>,
-	waiter: &kio::Waiter,
-) -> (Option<Subscription>, bool) {
-	let mut combined = None;
-	let mut departed = false;
-	for sub in subs.iter() {
-		// A closed consumer means the subscriber dropped: it holds no live demand.
-		// `Consumer::poll` evaluates the closure before the closed flag, so it would
-		// still replay the final value into the aggregate; skip it explicitly so a
-		// departed subscriber can't keep the aggregate pinned to its last request.
-		if sub.is_closed() {
-			departed = true;
-			continue;
-		}
-		// Arm both waiters explicitly. `poll` registers on the value channel only
-		// when it returns Pending, and a subscriber that contributes demand (always
-		// the case for the first one) folds as Ready, so nothing would watch for its
-		// departure or its next update: the last one leaving would never wake this
-		// poll, and a reader lifting the cap it had set would leave the publisher's
-		// upstream parked at that cap for good.
-		let _ = sub.poll_closed(waiter);
-		let _ = sub.poll(waiter, |_| Poll::<()>::Pending);
-		if let Poll::Ready(merged) = sub.read().poll_combined(&combined) {
-			combined = Some(merged);
-		}
-	}
-	(clamp_combined(combined, bound), departed)
-}
-
-/// A non-blocking aggregate of the current subscriptions, without arming any waiter.
-fn snapshot_subscription(subs: &kio::Shared<Subscriptions>, bound: Option<Duration>) -> Option<Subscription> {
-	let mut combined: Option<Subscription> = None;
-	for sub in subs.read().iter() {
-		// Skip dropped subscribers, matching `combined_subscription`.
-		if sub.is_closed() {
-			continue;
-		}
-		if let Poll::Ready(merged) = sub.read().poll_combined(&combined) {
-			combined = Some(merged);
-		}
-	}
-	clamp_combined(combined, bound)
+/// Read the counted aggregate without walking the audience.
+fn snapshot_subscription(subs: &kio::Lock<Subscriptions>, bound: Option<Duration>) -> Option<Subscription> {
+	clamp_combined(subs.lock().combined(), bound)
 }
 
 /// The read cursor's floor: the group the subscription named, or 0 (no floor).
@@ -2795,29 +2738,6 @@ fn clamp_combined(combined: Option<Subscription>, bound: Option<Duration>) -> Op
 	let mut combined = combined?;
 	combined.max_delay = clamp_max_delay(combined.max_delay, bound);
 	Some(combined)
-}
-
-/// Register a subscription if the track is live: clone the shared list out of the
-/// state, release the track lock, then push under the list's own lock. A closed
-/// track skips the push; nothing aggregates the preferences anymore.
-///
-/// Departed subscribers are pruned here too, so the list stays bounded on a track whose
-/// aggregate nobody polls. Pruning on every push would make a burst of N joins O(N^2),
-/// so, like `kio::WaiterList::register`, it only sweeps when the list is about to grow.
-fn register_subscription(state: kio::Ref<'_, TrackState>, subscription: &kio::Producer<Subscription>) {
-	if state.is_closed() {
-		return;
-	}
-	let subs = state.subscriptions.clone();
-	drop(state);
-	let mut subs = subs.lock();
-	if subs.len() == subs.capacity() {
-		subs.retain(|sub| !sub.is_closed());
-		// Leave at least half free, so each sweep is paid for by the pushes before it.
-		let live = subs.len();
-		subs.reserve(live);
-	}
-	subs.push(subscription.consume());
 }
 
 /// A weak reference to a track that doesn't prevent auto-close.
@@ -3106,11 +3026,7 @@ impl Consumer {
 	/// the floor that the budget convicts, so the default budget of zero delivers only
 	/// the latest group and a larger one reaches back over what it can still use.
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> kio::Pending<Subscribing> {
-		let subscription = kio::Producer::new(subscription.into().unwrap_or_default());
-
-		// Register the subscription if the track is live. If it is already closed, the
-		// returned future resolves to the abort error via `Subscribing::poll_ok`.
-		register_subscription(self.state.read(), &subscription);
+		let subscription = Preferences::register(self.state.read(), subscription.into().unwrap_or_default());
 
 		kio::Pending::new(Subscribing {
 			name: self.name.clone(),
@@ -3205,9 +3121,16 @@ impl Consumer {
 	/// feed starts past it or ends before it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn poll_landed(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<Option<group::Consumer>> {
-		match self.state.poll(waiter, |state| state.landing(sequence)) {
-			Poll::Ready(Ok(group)) => Poll::Ready(group),
-			Poll::Ready(Err(_)) => Poll::Ready(None),
+		let state = self.state.read();
+		if let Poll::Ready(group) = state.landing(sequence) {
+			return Poll::Ready(group);
+		}
+		// Register under the track lock, so an insert cannot slip between the lookup
+		// and its exact-group registration. Closure has a separate channel waiter.
+		state.cache.wakes().watch_arrival(sequence, waiter);
+		drop(state);
+		match self.state.poll_closed(waiter) {
+			Poll::Ready(()) => Poll::Ready(None),
 			Poll::Pending => Poll::Pending,
 		}
 	}
@@ -3422,7 +3345,7 @@ pub struct Subscribing {
 	name: Arc<str>,
 	broadcast: Arc<broadcast::Info>,
 	state: kio::Consumer<TrackState>,
-	subscription: kio::Producer<Subscription>,
+	subscription: Preferences,
 	stats: stats::Scope,
 }
 
@@ -3458,9 +3381,7 @@ impl Subscribing {
 	/// Returns [`Error::Closed`] if the track already ended; the update is
 	/// meaningless at that point and can usually be ignored.
 	pub fn update(&mut self, subscription: Subscription) -> Result<()> {
-		let mut state = self.subscription.write().map_err(|_| Error::Closed)?;
-		*state = subscription;
-		Ok(())
+		self.subscription.update(subscription)
 	}
 }
 
@@ -3911,7 +3832,7 @@ impl PresentationEdge {
 struct Cursor {
 	state: kio::Consumer<TrackState>,
 
-	subscription: kio::Producer<Subscription>,
+	subscription: Preferences,
 	/// Arrival-order cursor used by `recv_group`.
 	index: usize,
 	/// Arrival-order cursor used by `recv_datagram`, independent of groups.
@@ -3933,6 +3854,7 @@ struct Cursor {
 	/// are parked here instead of dropped). Keyed by sequence so the lowest is
 	/// re-offered first.
 	parked: BTreeMap<u64, group::Consumer>,
+	aborts: Option<Box<super::aborts::Watch>>,
 	/// [`Self::end_sequence`], shared with the groups this cursor hands out so their
 	/// expiry measures drift against the same servable window after a cap moves.
 	///
@@ -3953,7 +3875,7 @@ struct Cursor {
 }
 
 impl Cursor {
-	fn new(state: kio::Consumer<TrackState>, subscription: kio::Producer<Subscription>) -> Self {
+	fn new(state: kio::Consumer<TrackState>, subscription: Preferences) -> Self {
 		// The budget picks where to start, timed or not: delivery skips the cached groups
 		// it already judges stale, on whichever clock convicts them.
 		let (min_sequence, datagram_index) = {
@@ -3986,6 +3908,7 @@ impl Cursor {
 			next_sequence: Some(0),
 			end_sequence: None,
 			parked: BTreeMap::new(),
+			aborts: None,
 			drift_cap: kio::Producer::new(None),
 			stale: stats::Content::default(),
 			seek_pending: BTreeMap::new(),
@@ -4031,7 +3954,7 @@ impl Cursor {
 	/// get anyway.
 	fn poll_drift(&self, cap: Option<u64>, waiter: &kio::Waiter) -> Poll<Result<Drift>> {
 		let mut max_delay = Duration::default();
-		let _ = self.subscription.poll(waiter, |subscription| {
+		let _ = self.subscription.poll_ref(waiter, |subscription| {
 			max_delay = subscription.max_delay;
 			Poll::<()>::Pending
 		});
@@ -4101,26 +4024,46 @@ impl Cursor {
 		}))
 	}
 
-	fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
-		// An eviction aborts a parked group without touching any cursor this
-		// subscriber polls, so each entry needs a waiter or this poll would never
-		// rerun. `poll_closed` observes-or-registers under one lock: `Pending`
-		// parks the waiter while the group is open (an open group cannot be
-		// aborted), and `Ready` means closed, where only an abort invalidates the
-		// entry. Checking `is_aborted` separately from the registration would leave
-		// a window where an abort lands between the two and wakes nobody.
-		let watch = |group: &group::Consumer| match group.poll_closed(waiter) {
-			Poll::Pending => true,
-			Poll::Ready(()) => !group.is_aborted(),
-		};
+	/// Hold a capped group without losing another copy's abort notification.
+	fn park(&mut self, consumer: group::Consumer, waiter: &kio::Waiter) {
+		let aborts = self
+			.aborts
+			.get_or_insert_with(|| Box::new(self.state.read().cache.watch_aborts()));
+		// Register before checking: an abort on either side of the check is
+		// observed now or queued for the next poll.
+		aborts.insert(consumer.sequence);
+		if consumer.is_aborted() {
+			if !self.parked.contains_key(&consumer.sequence) {
+				aborts.remove(consumer.sequence);
+			}
+		} else {
+			self.parked.insert(consumer.sequence, consumer);
+		}
+		aborts.register(waiter);
+	}
 
-		// A raised `start_at` drops parked groups it overtook, and eviction/expiry
-		// (which aborts a cached group) drops its parked entry. The latter is what
-		// bounds parking: a subscription capped indefinitely holds only what the
-		// track's cache policy still retains, not every group it ever observed.
-		let min_sequence = self.min_sequence;
-		self.parked
-			.retain(|sequence, group| *sequence >= min_sequence && watch(group));
+	fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+		if let Some(aborts) = &self.aborts {
+			// A sequence may name both a live group and its fetched head. Only the
+			// consumer we parked decides whether this notification invalidates it.
+			for sequence in aborts.poll(waiter) {
+				if self.parked.get(&sequence).is_some_and(group::Consumer::is_aborted) {
+					self.parked.remove(&sequence);
+					aborts.remove(sequence);
+				}
+			}
+			// Each overtaken entry is removed once, rather than scanning every entry
+			// again for every delivered group.
+			while let Some((&sequence, _)) = self.parked.first_key_value()
+				&& sequence < self.min_sequence
+			{
+				self.parked.pop_first();
+				aborts.remove(sequence);
+			}
+			if self.parked.is_empty() {
+				self.aborts = None;
+			}
+		}
 
 		// One scan for the whole poll, so walking a backlog off stays linear in its size.
 		let drift = ready!(self.poll_drift(self.end_sequence, waiter))?;
@@ -4131,6 +4074,10 @@ impl Cursor {
 			let consumer = match self.parked.keys().next().copied() {
 				Some(sequence) if super::subscription::before_end(sequence, self.end_sequence) => {
 					let group = self.parked.remove(&sequence).expect("just looked it up");
+					self.aborts
+						.as_ref()
+						.expect("parked groups are watched")
+						.remove(sequence);
 					// A re-offer is a delivery: stamp it like a fresh hand-out.
 					group.cache_refresh();
 					group
@@ -4155,12 +4102,8 @@ impl Cursor {
 					// Park a group beyond the cap instead of dropping it, and keep scanning
 					// so an in-range group that arrived behind it still flows.
 					if !super::subscription::before_end(consumer.sequence, self.end_sequence) {
-						// Watch it from the moment it parks: the retain pass above already
-						// ran, so an entry admitted here would otherwise sit unwatched for
-						// the rest of this poll, and an abort could wake nobody.
-						if watch(&consumer) {
-							self.parked.insert(consumer.sequence, consumer);
-						}
+						self.park(consumer, waiter);
+
 						continue;
 					}
 					consumer
@@ -4277,7 +4220,7 @@ impl Cursor {
 /// budget, or group bounds while another task is waiting for groups.
 #[derive(Clone)]
 pub struct Control {
-	subscription: kio::Producer<Subscription>,
+	subscription: Preferences,
 }
 
 impl Control {
@@ -4291,9 +4234,7 @@ impl Control {
 	/// Returns [`Error::Closed`] if the track already ended; the update is
 	/// meaningless at that point and can usually be ignored.
 	pub fn update(&self, subscription: Subscription) -> Result<()> {
-		let mut state = self.subscription.write().map_err(|_| Error::Closed)?;
-		*state = subscription;
-		Ok(())
+		self.subscription.update(subscription)
 	}
 }
 
@@ -4688,9 +4629,7 @@ impl Subscriber {
 			Inner::Plain(cursor) => &cursor.subscription,
 			Inner::Resume(resume, _) => resume.subscription(),
 		};
-		let mut state = channel.write().map_err(|_| Error::Closed)?;
-		*state = subscription;
-		Ok(())
+		channel.update(subscription)
 	}
 
 	/// Return the latest sequence number in the track.
@@ -6495,35 +6434,33 @@ mod test {
 		let consumer = producer.consume();
 		let _steady = producer.subscribe(None);
 
-		// Nobody polls the aggregate here, so registration alone has to bound the list.
+		// Departures remove their contribution even when nobody polls the aggregate.
 		for _ in 0..100 {
 			drop(producer.subscribe(None));
 			drop(consumer.subscribe(None));
 		}
 
-		// Registration sweeps only when the list is about to grow, so it holds a small
-		// multiple of the peak live count (2) rather than all 200 departures.
+		// Only the steady reader remains registered.
 		let subs = producer.state.read().subscriptions.clone();
-		let len = subs.read().len();
-		assert!(len <= 8, "departed subscribers accumulated: {len}");
+		let len = subs.lock().len();
+		assert_eq!(len, 1, "departed subscribers accumulated");
 	}
 
 	#[test]
-	fn aggregate_poll_prunes_after_a_peak() {
+	fn departures_release_demand_after_a_peak() {
 		let mut producer = track_producer("test", Info::timed());
 		let waiter = kio::Waiter::noop();
 		let _steady = producer.subscribe(None);
 		assert!(producer.poll_subscription_changed(&waiter).is_ready());
 
-		// A departed burst leaves room for many entries, and identical preferences never
-		// change the aggregate, so each wake has to prune what it walks.
+		// A departed burst leaves no demand, even when its preferences matched the steady reader.
 		drop((0..1000).map(|_| producer.subscribe(None)).collect::<Vec<_>>());
 		for _ in 0..100 {
 			drop(producer.subscribe(None));
 			assert!(producer.poll_subscription_changed(&waiter).is_pending());
 
 			let subs = producer.state.read().subscriptions.clone();
-			assert_eq!(subs.read().len(), 1, "the poll walked past departed subscribers");
+			assert_eq!(subs.lock().len(), 1, "departed demand survived");
 		}
 	}
 
@@ -10088,6 +10025,65 @@ mod test {
 		head.finish().unwrap();
 		assert_eq!(fetch.await.unwrap().index(), 0);
 		(live, head)
+	}
+
+	#[moq_net_sim::test]
+	#[cfg(feature = "async")]
+	async fn a_live_abort_does_not_remove_a_parked_fetched_head() {
+		let producer = track_producer("test", Info::timed());
+		let (live, _head) = live_group_with_head(&producer).await;
+		let mut subscriber = producer.subscribe(replay());
+		subscriber.set_groups(..0);
+		assert!(subscriber.poll_recv_group(&kio::Waiter::noop()).is_pending());
+		live.abort(Error::Cancel).unwrap();
+		assert!(subscriber.poll_recv_group(&kio::Waiter::noop()).is_pending());
+		subscriber.set_groups(..);
+		let mut group = subscriber.recv_group().await.unwrap().unwrap();
+		assert_eq!(
+			group.read_frame().await.unwrap().unwrap().payload,
+			bytes::Bytes::from_static(b"snapshot")
+		);
+	}
+
+	#[test]
+	fn an_aborted_candidate_keeps_the_parked_copy_watched() {
+		let producer = track_producer("test", Info::timed());
+		let live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut subscriber = producer.subscribe(replay());
+		subscriber.set_groups(..0);
+		let waiter = kio::Waiter::noop();
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+
+		// A second copy can abort after lookup but before the cursor parks it.
+		let candidate = group::Info { sequence: 0 }.produce();
+		let aborted = candidate.consume();
+		candidate.abort(Error::Old).unwrap();
+		let Inner::Plain(cursor) = &mut subscriber.inner else {
+			unreachable!()
+		};
+		cursor.park(aborted, &waiter);
+
+		live.abort(Error::Old).unwrap();
+		producer.finish().unwrap();
+		assert!(matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
+	}
+
+	#[test]
+	fn an_abort_removes_a_non_prefix_parked_entry() {
+		let producer = track_producer("test", Info::timed());
+		let groups: Vec<_> = (0..3)
+			.map(|sequence| producer.create_group(group::Info { sequence }).unwrap())
+			.collect();
+		let mut subscriber = producer.subscribe(replay());
+		subscriber.set_groups(..0);
+		let waiter = kio::Waiter::noop();
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		groups[1].clone().abort(Error::Old).unwrap();
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		let Inner::Plain(cursor) = &subscriber.inner else {
+			unreachable!()
+		};
+		assert_eq!(cursor.parked.keys().copied().collect::<Vec<_>>(), vec![0, 2]);
 	}
 
 	/// The live copy ending early (its subscription went away) leaves a fetched head

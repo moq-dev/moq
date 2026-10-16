@@ -1065,6 +1065,7 @@ impl Producer {
 		self.alive.aborted.store(true, Ordering::Release);
 		guard.release();
 		guard.close();
+		self.cache.aborted(self.sequence);
 	}
 
 	/// Abort a write that would grow the group past its budget, holding the lock already
@@ -1075,6 +1076,7 @@ impl Producer {
 		self.alive.aborted.store(true, Ordering::Release);
 		state.release();
 		state.close();
+		self.cache.aborted(self.sequence);
 		err
 	}
 
@@ -1807,14 +1809,6 @@ impl Consumer {
 	/// its subscriber. Same stamp as [`Producer::cache_refresh`].
 	pub(crate) fn cache_refresh(&self) {
 		self.keep_alive();
-	}
-
-	/// Park `waiter` until the group closes: an abort (including eviction), or its last
-	/// producer dropping. Finishing does not close it, since a finished group can still be
-	/// evicted. Subscribers register on parked groups so an eviction wakes them; a group
-	/// that closed without an abort can never abort, so no waiter is needed.
-	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.cursor.state.poll_closed(waiter)
 	}
 
 	/// The parent track's timescale, or `None` when it declared no timeline.
@@ -2654,6 +2648,33 @@ mod test {
 		assert!(end.is_none());
 	}
 
+	/// Draining the first parked group must not enter an unrelated group's lock.
+	/// Holding an unrelated group guard makes a backlog walk deadlock.
+	#[test]
+	fn draining_a_parked_group_does_not_lock_the_backlog() {
+		let broadcast = super::super::broadcast::Producer::new(Default::default());
+		let track = broadcast.create_track("parked", track::Info::timed()).unwrap();
+		let mut subscriber =
+			track.subscribe(track::Subscription::default().with_max_delay(std::time::Duration::from_secs(3600)));
+		let groups: Vec<_> = (0..3)
+			.map(|sequence| {
+				let mut group = track.create_group(Info { sequence }).unwrap();
+				group.write_frame(Timestamp::ZERO, b"f".as_ref()).unwrap();
+				group.clone().finish().unwrap();
+				group
+			})
+			.collect();
+		subscriber.set_groups(..0);
+		let waiter = kio::Waiter::noop();
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		subscriber.set_groups(..1);
+		let _unrelated = groups[2].state.read();
+		let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&waiter) else {
+			panic!("group zero is in range")
+		};
+		assert_eq!(group.sequence, 0);
+	}
+
 	#[test]
 	#[cfg(feature = "async")]
 	fn abort_propagates() {
@@ -2873,6 +2894,48 @@ mod test {
 		let mut consumer = producer.consume();
 		consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
 		(producer, consumer)
+	}
+
+	#[test]
+	#[cfg(feature = "async")]
+	fn keep_alive_restarts_expiry_within_one_sampled_tick() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(std::time::Duration::from_secs(1)));
+		let (producer, consumer) = prefetched_consumer(&pool, std::time::Duration::MAX);
+		consumer.keep_alive();
+		let stamp = producer.cache_accessed();
+		assert_eq!(producer.cache_accessed_tick(Some(pool.now())), Some(pool.now()));
+		consumer.keep_alive();
+		assert_eq!(
+			producer.cache_accessed(),
+			stamp,
+			"same-tick reads do not inflate eviction rank"
+		);
+		assert_eq!(
+			producer.cache_accessed_tick(None),
+			None,
+			"every frame resets the idle clock"
+		);
+	}
+
+	#[test]
+	#[cfg(feature = "async")]
+	fn keep_alive_keeps_the_counted_access_mean_balanced() {
+		let pool = cache::Pool::new(cache::Config::default().with_capacity(1_000_000));
+		let (producer, consumer) = prefetched_consumer(&pool, std::time::Duration::MAX);
+		producer.cache_demote();
+		consumer.keep_alive();
+		assert_eq!(pool.average(), Some(producer.cache_accessed()));
+		let before = producer.cache_accessed();
+		pool.step(std::time::Duration::from_millis(100));
+		consumer.keep_alive();
+		assert!(producer.cache_accessed() > before);
+		assert_eq!(pool.average(), Some(producer.cache_accessed()));
+		producer.abort(Error::Cancel).unwrap();
+		assert_eq!(
+			pool.average(),
+			None,
+			"removal subtracts the same sample that was inserted"
+		);
 	}
 
 	#[test]

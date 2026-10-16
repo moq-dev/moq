@@ -1,5 +1,6 @@
-//! Revalidate one token while sweeping unrelated sessions and held credentials.
-//! The real relay/controller runs over loopback TCP; timings include one AUTH_OK.
+//! Revalidate one token while sweeping unrelated sessions and held credentials, and
+//! cycle one verification slot while sweeping the waiting tokens and the slot count.
+//! The real relay/controller runs over loopback TCP; timings include one AUTH round trip.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use moq_auth::{Grant, lease};
@@ -143,5 +144,118 @@ fn refresh(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, refresh);
+/// One session with `verifications` slots held by an unanswered decider and `waiting`
+/// tokens queued behind them. Each round refuses the oldest held check, which sends the
+/// oldest waiting token, and presents one more so the queue keeps its depth.
+struct Queue {
+	_connection: moq_tokio::Connection,
+	auth: moq_tokio::connection::auth::Auth,
+	admissions: auth::Admissions,
+	held: std::collections::VecDeque<auth::Admission>,
+	presented: usize,
+	tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for Queue {
+	fn drop(&mut self) {
+		for task in &self.tasks {
+			task.abort();
+		}
+	}
+}
+
+impl Queue {
+	async fn new(verifications: usize, waiting: usize) -> Self {
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let (auth, mut admissions) = auth::Auth::embedded("bench");
+		let auth = auth.with_verifications(verifications);
+		let mut config = moq_tokio::listen::Config::default();
+		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		let mut server = config.init(Default::default()).unwrap().listen().await.unwrap();
+		let port = server.tcp_local_addr().unwrap().port();
+		let cluster = cluster::Cluster::new(Default::default()).unwrap();
+		let listener = tokio::spawn(async move {
+			let mut serving = tokio::task::JoinSet::new();
+			while let Some(request) = server.accept().await {
+				let connection = Connection::new(request, cluster.clone(), auth.clone());
+				serving.spawn(async move {
+					connection.run().await;
+				});
+			}
+		});
+		let mut config = moq_tokio::connect::Config::default();
+		config.once = Some(true);
+		config.version = vec!["moq-transport-22".parse().unwrap()];
+		let client = config.init(Default::default()).unwrap();
+		let url: url::Url = format!("tcp://127.0.0.1:{port}/").parse().unwrap();
+		let (connection, ()) = tokio::join!(async { client.connect(url).established().await.unwrap() }, async {
+			let admission = admissions.next().await.unwrap();
+			admission.grant(lease::Consumer::fixed(grant("initial")));
+		});
+		let mut queue = Self {
+			auth: connection.auth(),
+			_connection: connection,
+			admissions,
+			held: Default::default(),
+			presented: 0,
+			tasks: vec![listener],
+		};
+		for _ in 0..verifications {
+			queue.present();
+			let admission = queue.admissions.next().await.unwrap();
+			queue.held.push_back(admission);
+		}
+		for _ in 0..waiting {
+			queue.present();
+		}
+		// Let the waiting tokens reach the relay's queue before measuring.
+		tokio::time::sleep(Duration::from_millis(50)).await;
+		queue
+	}
+
+	fn present(&mut self) {
+		let auth = self.auth.clone();
+		let token = format!("token{}", self.presented);
+		self.presented += 1;
+		self.tasks.push(tokio::spawn(async move {
+			let _ = auth.add(token).await;
+		}));
+	}
+
+	async fn round(&mut self) {
+		self.held.pop_front().unwrap().refuse(auth::Error::Refused);
+		self.present();
+		let admission = self.admissions.next().await.unwrap();
+		self.held.push_back(admission);
+		// Refused tokens finish; drop their handles so the table stays flat.
+		self.tasks.retain(|task| !task.is_finished());
+	}
+}
+
+fn queue(c: &mut Criterion) {
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.unwrap();
+	let mut group = c.benchmark_group("relay_auth_queue");
+	group.sample_size(10);
+	group.warm_up_time(Duration::from_millis(100));
+	group.measurement_time(Duration::from_millis(300));
+	// QMux grants 100 bidirectional streams, and every held or waiting token holds one.
+	for verifications in [1, 8, 32] {
+		for waiting in [0, 16, 48] {
+			let mut fixture = runtime.block_on(Queue::new(verifications, waiting));
+			group.bench_with_input(
+				BenchmarkId::new(verifications.to_string(), waiting),
+				&(verifications, waiting),
+				|b, _| {
+					b.iter(|| runtime.block_on(fixture.round()));
+				},
+			);
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, refresh, queue);
 criterion_main!(benches);

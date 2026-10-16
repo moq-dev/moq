@@ -17,6 +17,17 @@ linux/amd64, linux/arm64, darwin/arm64 (macOS 12.3+), windows/amd64.
 Construct `NewAudioTrackProducer` / `NewVideoTrackProducer` from a broadcast, an init record,
 and a `Named` or `Requested` target. `NewCatalogProducer` holds its broadcast weakly;
 catalog writes fail with `ErrClosed` after the broadcast closes. Media timestamps use `time.Duration`.
+A missing data timestamp stays untimed; the library never substitutes zero or now.
+Raw tracks with a `nil` timescale are untimed on both publish and receive.
+`moq.dev/moq/flate` publishes opaque snapshot and stream payloads; its `Update` / `Append`
+and the JSON producers take a final `*time.Duration` timestamp argument (`nil` for untimed).
+Whole-frame media writes require caller time; container imports keep their own timeline handling.
+Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.Now()` to stamp a locally
+created event on the broadcast clock; reading it fixes that clock for later media producers.
+Share `media.NewTimebase(broadcast)` through container init records when several imports
+use one source timeline. `NewContainerStreamProducer` takes `ContainerStreamInit`;
+omitting its timebase keeps an independent offset. Timebases belong to one broadcast
+and do not keep it open; release the handle with `Close` on the calling goroutine.
 For arrival-order reads, decode each group from `moq.TrackConsumer.RecvGroup` with
 `media.NewGroupConsumer`; frames carry container media time as they land. `media.FetchGroup`
 fetches and decodes one past group.
@@ -118,12 +129,15 @@ Native I/O and background tasks run on a Tokio worker pool. Calls awaited by the
 host still poll in place; independent native wake callbacks can run concurrently.
 The generated bridge synchronizes wakeups before resuming the awaiting goroutine.
 Application goroutines remain responsible for serializing their own shared state.
+A panic in a native background task reaches the pending and later fallible calls
+of every object that depends on it as a task error; other objects keep running.
 
 A session closed for exceeding the relay's request caps reports the protocol
 kind `ProtocolKindTooManyRequests`. Reduce
 the simultaneous announcements or subscriptions, or ask the relay operator
 to adjust the [session limits](/bin/relay/config#session-and-peer), before
 reconnecting with the same workload.
+A session closed because its credential expired reports `ProtocolKindExpired`, and a request refused for an expired token raises `moq.ErrExpired`; refresh the token before retrying.
 
 ## Reference
 

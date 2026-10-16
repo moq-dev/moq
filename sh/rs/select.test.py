@@ -92,7 +92,8 @@ class RecipeTest(unittest.TestCase):
                 (scratch / "benches/unexecuted.rs").write_text(
                     'compile_error!("nextest must not compile a benchmark it never runs");\nfn main() {}\n'
                 )
-                env = dict(os.environ, BASH_ENV=os.devnull, TMPDIR="/tmp")
+                env = dict(os.environ, BASH_ENV=os.devnull, TMPDIR="/tmp",
+                           NEXTEST_PROFILE="default")
                 result = subprocess.run(
                     ["just", "rs", "test", "--manifest-path", str(scratch / "Cargo.toml")],
                     cwd=ROOT, env=env, capture_output=True, text=True,
@@ -134,7 +135,7 @@ class FeatureTest(unittest.TestCase):
 
 CARGO_STUB = r"""#!/bin/bash
 printf '%s\n' "$*" >> "$FEATURE_CALLS"
-if [[ "$*" == 'check --locked -p moq-tokio --no-default-features --features noq' ]]; then
+if [[ "$*" == 'check --locked -p moq-tokio --no-default-features --features quic' ]]; then
  echo 'a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature' >&2
  exit 1
 fi

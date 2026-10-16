@@ -17,7 +17,18 @@ x64.
 Use `Named(name)` or `Requested(request)` as the target for `TrackProducer.audio` / `.video`.
 `CatalogProducer(broadcast)` holds the broadcast weakly and owns catalog properties and sections;
 its writes fail with `Error.Closed` after the broadcast closes or is released.
+Share `media.Timebase(broadcast)` through container init records when several imports
+use one source timeline. `ContainerStreamProducer` takes `ContainerStreamInit`;
+omitting its timebase keeps an independent offset. A timebase belongs to its broadcast
+and does not keep it open.
 `MediaFrame.timestamp`, media writes, and `flush` use `datetime.timedelta`.
+A missing data timestamp stays untimed; the library never substitutes zero or now.
+Raw tracks with a `None` timescale are untimed on both publish and receive.
+`moq.flate.SnapshotProducer` / `StreamProducer` publish opaque payloads; their `update` / `append`
+and the JSON producers accept `timestamp=timedelta(...)` (`None` for untimed).
+Whole-frame media writes require caller time; container imports keep their own timeline handling.
+Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
+created event on the broadcast clock; reading it fixes that clock for later media producers.
 For arrival-order reads, decode each group from `TrackConsumer.recv_group()` with
 `media.GroupConsumer(group, container)`; frames carry container media time as they land.
 
@@ -58,7 +69,7 @@ async def main():
 
         # Already-encoded frames: the catalog is filled from the bitstream
         audio = moq.media.TrackProducer.audio(broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_init_bytes))
-        audio.write_frame(payload)
+        audio.write_frame(payload, moq.media.CatalogProducer(broadcast).now())
         audio.cut()   # audio has no keyframes, so this is what gives it groups
 
         # Or raw pixels, encoded inside the binding (VideoToolbox, Media Foundation, NVENC, openh264)
@@ -109,12 +120,15 @@ Native I/O and background tasks run on a Tokio worker pool. Calls awaited by the
 host still poll in place; independent native wake callbacks can run concurrently.
 The generated bindings wake Python futures through the asyncio event loop. The
 package exit hook joins native workers before interpreter finalization.
+A panic in a native background task reaches the pending and later fallible calls
+of every object that depends on it as a task error; other objects keep running.
 
 A session closed for exceeding the relay's request caps reports the protocol
 kind `ProtocolKind.TOO_MANY_REQUESTS`. Reduce
 the simultaneous announcements or subscriptions, or ask the relay operator
 to adjust the [session limits](/bin/relay/config#session-and-peer), before
 reconnecting with the same workload.
+A session closed because its credential expired reports `ProtocolKind.EXPIRED`, and a request refused for an expired token raises `Error.Expired`; refresh the token before retrying.
 
 ## Reference
 

@@ -1405,7 +1405,9 @@ async fn join_after(earlier: Earlier, start_us: u64) {
 				)
 				.unwrap();
 			let mut stream = catalog.binary_stream(track, crate::binary::Config::default()).unwrap();
-			stream.append(&b"before"[..]).unwrap();
+			stream
+				.append(moq_net::Timed::from(&b"before"[..]).at(catalog.clock().now()))
+				.unwrap();
 			Some(stream)
 		}
 		Earlier::Capture => None,
@@ -1420,7 +1422,9 @@ async fn join_after(earlier: Earlier, start_us: u64) {
 	fmp4.decode(&live_session(start_us, 20)).unwrap();
 	let after = clock.now().as_micros();
 	if let Some(stream) = data.as_mut() {
-		stream.append(&b"after"[..]).unwrap();
+		stream
+			.append(moq_net::Timed::from(&b"after"[..]).at(catalog.clock().now()))
+			.unwrap();
 	}
 	fmp4.finish().unwrap();
 
@@ -1999,4 +2003,78 @@ async fn webvtt_sub_millisecond_cue_stays_positive() {
 	);
 	let frame = reader.read_frame().await.unwrap().unwrap();
 	assert_eq!(&frame.payload[..], b"WEBVTT\n\n00:00:00.250 --> 00:00:00.251\nhi\n\n");
+}
+
+async fn imported_webvtt(payload: Vec<u8>) -> bytes::Bytes {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&webvtt_input(payload, 1250)).unwrap();
+	importer.finish().unwrap();
+	let snapshot = catalog.snapshot();
+	let name = snapshot.text.renditions.keys().next().unwrap();
+	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+	let mut reader = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
+	reader.read_frame().await.unwrap().unwrap().payload
+}
+
+#[tokio::test(start_paused = true)]
+async fn webvtt_ctim_rebases_inline_timestamps_to_the_sample_clock() {
+	let mut cue = subtitle_box(b"ctim", b"00:00:10.000");
+	cue.extend(subtitle_box(b"payl", b"Hello <00:00:10.500>world"));
+	assert_eq!(
+		&imported_webvtt(subtitle_box(b"vttc", &cue)).await[..],
+		b"WEBVTT\n\n00:00:00.250 --> 00:00:01.500\nHello <00:00:00.750>world\n\n"
+	);
+}
+
+#[tokio::test(start_paused = true)]
+async fn webvtt_vtta_preserves_comments_in_sample_order() {
+	let mut sample = subtitle_box(b"vtta", b"NOTE before");
+	sample.extend(subtitle_box(b"vttc", &subtitle_box(b"payl", b"first")));
+	sample.extend(subtitle_box(b"vtta", b"NOTE between"));
+	sample.extend(subtitle_box(b"vttc", &subtitle_box(b"payl", b"second")));
+	assert_eq!(
+		&imported_webvtt(sample).await[..],
+		b"WEBVTT\n\nNOTE before\n\n00:00:00.250 --> 00:00:01.500\nfirst\n\nNOTE between\n\n00:00:00.250 --> 00:00:01.500\nsecond\n\n"
+	);
+}
+
+#[test]
+fn malformed_webvtt_origins_and_comments_are_refused() {
+	let mut duplicate = subtitle_box(b"ctim", b"00:00:10.000");
+	duplicate.extend(subtitle_box(b"ctim", b"00:00:10.000"));
+	duplicate.extend(subtitle_box(b"payl", b"text"));
+	let mut cases = vec![
+		subtitle_box(b"vttc", &duplicate),
+		subtitle_box(b"vtta", b"not a comment"),
+		subtitle_box(b"vtta", b"NOTE invalid\0comment"),
+		subtitle_box(b"vtta", b"NOTE 00:00.000 --> 00:01.000"),
+		subtitle_box(b"vtta", b"\xff"),
+	];
+	for origin in [b"bad".as_slice(), b"00:60.000", b"\xff"] {
+		let mut cue = subtitle_box(b"ctim", origin);
+		cue.extend(subtitle_box(b"payl", b"text"));
+		cases.push(subtitle_box(b"vttc", &cue));
+	}
+	for body in [
+		b"before <00:00:09.999>origin".as_slice(),
+		b"at <00:00:10.000>origin",
+		b"at <00:00:11.250>end",
+		b"after <00:00:11.251>end",
+	] {
+		let mut cue = subtitle_box(b"ctim", b"00:00:10.000");
+		cue.extend(subtitle_box(b"payl", body));
+		cases.push(subtitle_box(b"vttc", &cue));
+	}
+	for payload in cases {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut importer = super::Import::new(broadcast, catalog.reserve());
+		assert!(importer.decode(&webvtt_input(payload, 1250)).is_err());
+	}
 }

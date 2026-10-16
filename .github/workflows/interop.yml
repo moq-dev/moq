@@ -15,6 +15,8 @@ on:
   pull_request:
     paths:
       - "test/lib/**"
+      - "test/p2p/**"
+      - "js/p2p/**"
       - "test/interop/**"
       - "test/max-age/**"
       - "test/portrait/**"
@@ -45,11 +47,6 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
-        with:
-          tool-cache: false
-
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -100,6 +97,11 @@ jobs:
       - name: Subscription termination interop
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test bare-fin
+        shell: bash -leo pipefail {0}
+
+      - name: P2P data-channel transport
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: nix develop --command just test p2p
         shell: bash -leo pipefail {0}
 
       - name: Interop (full matrix)

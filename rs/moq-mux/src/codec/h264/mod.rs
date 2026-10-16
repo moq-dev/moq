@@ -747,6 +747,12 @@ pub(crate) mod fixtures {
 		0x67, 0xf4, 0x00, 0x15, 0x91, 0x9d, 0x02, 0x82, 0x1f, 0x89, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00, 0x04, 0x00,
 		0x00, 0x03, 0x00, 0xca, 0x7c, 0x50, 0xaa, 0x80,
 	];
+	/// `bframes=1:force-cfr=1:nal-hrd=cbr:bitrate=9000:vbv-maxrate=9000:vbv-bufsize=9000`: a
+	/// contribution encoder's 9 Mbit CBR NAL HRD at 9 Mb/s, one second of buffer delay.
+	pub(crate) const SPS_HRD: &[u8] = &[
+		0x67, 0x64, 0x00, 0x1e, 0xac, 0xe4, 0x10, 0x9b, 0x01, 0x10, 0x00, 0x00, 0x03, 0x00, 0x10, 0x00, 0x00, 0x03,
+		0x03, 0x2e, 0x04, 0x00, 0x00, 0x89, 0x54, 0x40, 0x00, 0x11, 0x2a, 0x8e, 0x4c, 0x30, 0x07, 0x8b, 0x16, 0x89,
+	];
 	pub(crate) const PPS: &[u8] = &[0x68, 0xeb, 0xe3, 0xcb, 0x22, 0xc0];
 }
 
@@ -802,6 +808,28 @@ mod tests {
 		// A field-capable SPS makes the tick a field or a frame depending on `pic_struct`.
 		assert_eq!(sps_framerate(fixtures::SPS_FIELD), None);
 		assert_eq!(sps_framerate(&[0x67, 0x42, 0xc0, 0x1f, 0xde]), None);
+	}
+
+	#[test]
+	fn sps_hrd_reads_the_nal_hrd() {
+		use crate::codec::video::{Hrd, Reorder};
+
+		assert_eq!(
+			sps_hrd(fixtures::SPS_HRD),
+			Some(Hrd {
+				bit_rate: 9_000_000,
+				cpb_size: 9_000_000
+			})
+		);
+		// The bitstream restriction follows the HRD in the VUI, so it still reads past it.
+		assert_eq!(
+			sps_reorder(fixtures::SPS_HRD),
+			Some(Reorder {
+				depth: 1,
+				period: Some((2, 50))
+			})
+		);
+		assert_eq!(sps_hrd(fixtures::SPS_IPB), None);
 	}
 
 	fn annexb_frame(nals: &[&[u8]]) -> Bytes {

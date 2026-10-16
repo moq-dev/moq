@@ -361,7 +361,8 @@ impl Mergeable for Presence {
 	}
 
 	fn regressed(&self, prev: &Self) -> bool {
-		self.sessions_started < prev.sessions_started
+		self.requests < prev.requests
+			|| self.sessions_started < prev.sessions_started
 			|| self.sessions_ended < prev.sessions_ended
 			|| self.announces_peak < prev.announces_peak
 			|| self.subscriptions_peak < prev.subscriptions_peak
@@ -1024,7 +1025,9 @@ mod tests {
 		fn publish(&mut self, path: &str, bytes: u64) {
 			let entry = self.frame.entry(path.to_string()).or_default();
 			entry.bytes += bytes;
-			self.traffic.update(&self.frame).expect("publish");
+			self.traffic
+				.update(moq_net::Timed::from(&self.frame).at(moq_net::Timestamp::now()))
+				.expect("publish");
 		}
 
 		/// Fail the node's reader: append a frame the snapshot decoder can't
@@ -1598,7 +1601,10 @@ mod tests {
 		published.subscriptions_ended = 1;
 		published.bytes = 100;
 		node_a.frame.insert("acme/room".to_string(), published);
-		node_a.traffic.update(&node_a.frame).expect("publish");
+		node_a
+			.traffic
+			.update(moq_net::Timed::from(&node_a.frame).at(moq_net::Timestamp::now()))
+			.expect("publish");
 
 		let agg = Consumer::new(origin.consume(), Config::new().with_depth(1));
 		let mut traffic = agg.traffic(&Tier::default(), Role::Publisher);
@@ -1770,7 +1776,9 @@ mod tests {
 			let mut totals = Totals::default();
 			totals.publisher.bytes = bytes;
 			self.totals
-				.update(&TotalsFrame::from([(String::new(), totals)]))
+				.update(
+					moq_net::Timed::from(&TotalsFrame::from([(String::new(), totals)])).at(moq_net::Timestamp::now()),
+				)
 				.expect("publish");
 		}
 	}
@@ -1835,6 +1843,48 @@ mod tests {
 		let node = merged.nodes.values_mut().next().expect("node");
 		node.observe(BTreeMap::from([(String::new(), presence(1, 0))]));
 		assert_eq!(merged.merged()[""], presence(7, 6));
+	}
+
+	#[test]
+	fn request_totals_survive_departure_resume_and_request_only_reset() {
+		let (mut merged, key) = hand_merged::<Presence>();
+		let request = |requests| {
+			let mut presence = Presence::default();
+			presence.requests = requests;
+			presence
+		};
+		merged
+			.nodes
+			.get_mut(&key)
+			.unwrap()
+			.observe(BTreeMap::from([(String::new(), request(5))]));
+		merged.nodes.get_mut(&key).unwrap().depart();
+		assert_eq!(merged.merged()[""], request(5));
+		merged
+			.nodes
+			.get_mut(&key)
+			.unwrap()
+			.observe(BTreeMap::from([(String::new(), request(5))]));
+		assert_eq!(
+			merged.merged()[""],
+			request(5),
+			"resuming does not admit requests again"
+		);
+		merged
+			.nodes
+			.get_mut(&key)
+			.unwrap()
+			.observe(BTreeMap::from([(String::new(), request(6))]));
+		merged
+			.nodes
+			.get_mut(&key)
+			.unwrap()
+			.observe(BTreeMap::from([(String::new(), request(2))]));
+		assert_eq!(
+			merged.merged()[""],
+			request(8),
+			"request-only regression begins another segment"
+		);
 	}
 
 	#[test]
