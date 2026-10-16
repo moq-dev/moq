@@ -1,9 +1,9 @@
 ---
-title: Teleoperation
+title: MoQ for Teleoperation
 description: Carry video, current control state, and ordered commands on one session
 ---
 
-# Teleoperation
+# MoQ for Teleoperation
 
 A remote operator needs fresh video from a machine and a responsive control path
 back to it. MoQ carries both directions over one session to a relay. The machine
