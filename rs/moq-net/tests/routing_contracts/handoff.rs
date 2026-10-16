@@ -344,6 +344,42 @@ fn widening_hides_what_was_frozen_until_a_covering_floor_arrives() {
 	net.check().unwrap();
 }
 
+/// A snapshot sent before the client narrowed still waits on one session when
+/// it widens again. Its floor covers the widened region but answers the old
+/// interest, so it must not lift the guard on what stayed frozen.
+#[test]
+fn a_snapshot_queued_before_widening_keeps_the_frozen_rest_hidden() {
+	let (origin, r1, r2, client) = (0, 1, 2, 3);
+	let mut net = lagging(FLOORS, "");
+	net.announce(origin, "live/a/x", 0, None);
+	net.announce(origin, "live/b/y", 0, None);
+	assert!(net.run());
+	net.hold(r2, client);
+	net.announce(origin, "live/b/z", 0, None);
+	assert!(net.run());
+	assert!(net.queued(r2, client) > 0, "a root snapshot waits");
+	net.watch(client, "live/b/");
+	assert!(net.run());
+	net.unannounce(origin, "live/a/x");
+	assert!(net.run());
+
+	net.hold(r1, client);
+	net.watch(client, "");
+	assert!(net.deliver(r2, client), "the root snapshot from before narrowing");
+	assert_eq!(net.shows(client, 7, "live/a/x"), None, "it answers the old interest");
+
+	net.release(r1, client);
+	net.release(r2, client);
+	assert!(net.run());
+	let life: Vec<Kind> = at(&net, client)
+		.iter()
+		.filter(|event| event.claim == "live/a/x")
+		.map(|event| event.kind)
+		.collect();
+	assert_eq!(life, [Kind::Start, Kind::Unwatched]);
+	net.check().unwrap();
+}
+
 /// An exact claim covers only its own path, so it is outside an interest
 /// below it, and only a wildcard ancestor is inside.
 #[test]
@@ -582,6 +618,100 @@ fn a_quiet_origin_stays_starved_after_bounded_retries() {
 			assert!(net.starved(n, 7), "nothing will ever ask the origin again");
 		}
 	}
+}
+
+/// Random meshes churn sessions and hold and deliver messages out of step, then
+/// release every hold without reconnecting anything. Every relay that can
+/// still reach a quiet origin must end with a route to it, which only a seqno
+/// request can bring. A forwarder that skipped its requesters stranded some:
+/// its only next hop was a requester that had long stopped waiting, and no
+/// message ever cancels a request.
+#[test]
+fn sweep_requests_reach_a_quiet_origin() {
+	const RELAYS: usize = 5;
+	let mut stranded = 0;
+	for seed in 0..1000u64 {
+		let mut rng = XorShift(0x9e37_79b9 ^ (seed * 0x1234_5678_9abc));
+		let nodes = RELAYS + 2;
+		let mut net = Net::new(config(FLOORS, Requests::HopByHop), nodes);
+		let mut links = Vec::new();
+		for a in 0..RELAYS {
+			for b in a + 1..RELAYS {
+				if b == a + 1 || rng.chance(40) {
+					net.join(a, b, 1 + rng.next(3));
+					links.push((a, b));
+				}
+			}
+		}
+		for origin in RELAYS..nodes {
+			net.leaf(origin);
+			for _ in 0..2 {
+				let relay = rng.next(RELAYS as u64) as usize;
+				if !links.contains(&(relay, origin)) {
+					net.join(origin, relay, 1 + rng.next(3));
+					links.push((relay, origin));
+				}
+			}
+			net.originate(origin, origin as u64, 0);
+		}
+		assert!(net.run());
+		for _ in 0..30 {
+			match rng.next(6) {
+				0 | 1 => {
+					let (a, b) = links[rng.next(links.len() as u64) as usize];
+					if net.connected(a, b) {
+						net.disconnect(a, b);
+					} else {
+						net.connect(a, b);
+					}
+				}
+				2 | 3 => {
+					let (a, b) = links[rng.next(links.len() as u64) as usize];
+					let (from, to) = if rng.chance(50) { (a, b) } else { (b, a) };
+					if rng.chance(60) {
+						net.hold(from, to);
+					} else {
+						net.release(from, to);
+					}
+				}
+				_ => {
+					let busy = net.busy();
+					if !busy.is_empty() {
+						let (from, to) = busy[rng.next(busy.len() as u64) as usize];
+						net.deliver(from, to);
+					}
+				}
+			}
+			net.settle(1);
+		}
+		for &(a, b) in &links {
+			net.release(a, b);
+			net.release(b, a);
+		}
+		assert!(net.run());
+		for origin in RELAYS..nodes {
+			// The relays an up session path still joins to the origin.
+			let mut reach = BTreeSet::from([origin]);
+			let mut frontier = vec![origin];
+			while let Some(at) = frontier.pop() {
+				for &(a, b) in &links {
+					let next = match at {
+						_ if at == a => b,
+						_ if at == b => a,
+						_ => continue,
+					};
+					if next < RELAYS && net.connected(a, b) && reach.insert(next) {
+						frontier.push(next);
+					}
+				}
+			}
+			stranded += reach
+				.iter()
+				.filter(|&&node| node < RELAYS && net.route(node, origin as Id).is_none())
+				.count();
+		}
+	}
+	assert_eq!(stranded, 0, "relays left without a route to a reachable origin");
 }
 
 /// One change to a claim costs one batch per session carrying its origin's
