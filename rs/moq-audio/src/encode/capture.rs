@@ -1187,9 +1187,8 @@ impl Supervisor {
 	}
 }
 
-/// A dropped or closed track is the normal end of a publish; any other cause is
-/// a real abort (e.g. a transport reset) worth surfacing rather than treating as
-/// a clean exit.
+/// An application dropping or closing its producer ends publishing normally;
+/// a specific abort (such as a transport reset) stays visible in diagnostics.
 fn log_track_ended(err: moq_net::Error) {
 	if matches!(err, moq_net::Error::Dropped | moq_net::Error::Closed) {
 		tracing::debug!("audio track no longer announced; stopping capture");

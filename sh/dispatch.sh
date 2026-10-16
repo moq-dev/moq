@@ -157,6 +157,19 @@ declare -A tools=(
     [gh]='actionlint bun'
 )
 
+# `check` and `ci-check` share every lint; they differ in how rs compiles and
+# whether the tests run.
+verb=${action#ci-}
+
+# The modules whose run compiles Rust through Cargo, so CI restores the Rust
+# build cache only when one is selected. JS checks build @moq/wasm for its
+# consumers, and the bindings build moq-ffi.
+declare -A compiles=(
+    [check]='rs bench js py kt go dart cpp obs_compile'
+    [fix]='rs'
+    [test]='rs py'
+)
+
 case "$action" in
     check | ci-check) modules=(js workers moq_sh drafts rs bench quest drill py kt swift go dart cpp obs_compile obs flake markdown shell toml nix justfile gh) ;;
     fix) modules=(js rs py dart obs markdown shell toml nix justfile) ;;
@@ -188,12 +201,17 @@ for module in "${modules[@]}"; do
     fi
 done
 
-# A query runs on the host before Nix, cache restore, or disk cleanup. Keep the
-# normal selection loop authoritative, including its repository-wide lints.
+# A query runs on the host before Nix or cache restore. Keep the normal
+# selection loop authoritative, including its repository-wide lints.
 if [[ -n "$query" ]]; then
     needed=false
-    ((${#selected[@]} == 0)) || needed=true
+    rust=false
+    for module in "${selected[@]}"; do
+        needed=true
+        [[ " ${compiles[$verb]} " != *" $module "* ]] || rust=true
+    done
     echo "needed=$needed"
+    echo "rust=$rust"
     exit
 fi
 
@@ -219,10 +237,6 @@ fi
 files() {
     git ls-files -z --cached --others --exclude-standard -- "$@"
 }
-
-# `check` and `ci-check` share every lint; they differ in how rs compiles and
-# whether the tests run.
-verb=${action#ci-}
 
 for module in "${selected[@]}"; do
     case "$verb:$module" in

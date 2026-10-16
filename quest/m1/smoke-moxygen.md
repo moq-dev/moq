@@ -1,33 +1,36 @@
-# [S] Moxygen announce-subscribe works through moq-relay
+# [XS] Moxygen's interop client sends a registered filter type
 
 ## Goal
 
-moq-dev/smoke's minimal Moxygen interop client passes `announce-subscribe`
-through moq-relay on each transport and draft the lane claims to cover,
-and that failure no longer hides behind `continue-on-error`.
+Waiting on upstream Moxygen. moq-dev/smoke's Moxygen lane passes all six
+cases through moq-relay on WebTransport and raw QUIC at draft-16, and its
+`continue-on-error` exception is removed.
+
+Check by running `just moxygen` in moq-dev/smoke, or by reading the latest
+Moxygen job there. Delete this quest once the lane passes and the exception
+is gone.
 
 ## Plan
 
-The [2026-10-15 Moxygen job](https://github.com/moq-dev/smoke/actions/runs/38739639896/job/116437673088)
-reports success while its script fails. Both WebTransport and raw QUIC
-negotiate draft-16, then TAP case 4 (`announce-subscribe`) fails with
-`Subscribe failed: Session closed`. The other five cases pass. The workflow
-explicitly marks the step `continue-on-error` for this known mismatch.
+The failure is Moxygen's, not moq-relay's. The interop client builds every
+SUBSCRIBE with `SubscribeRequest::make`, whose default `locType` is Moxygen's
+`LocationType::LargestGroup` (0xFA). Draft-16 section 5.1.2 registers Filter
+Types 0x1-0x4 only and says an endpoint receiving any other "MUST close the
+session with PROTOCOL_VIOLATION", which moq-relay does. The reduced
+reproducer is the draft-16 SUBSCRIBE body
+`00 01 0b "nonexistent" 0d "no-such-track" 01 21 02 40 fa`: one
+SUBSCRIPTION_FILTER parameter whose Filter Type varint is 250.
+`test_subscribe_v16_rejects_unregistered_filter_type` in
+`rs/moq-net/src/ietf/subscribe.rs` pins that refusal.
 
-Reproduce the minimal lane and trace the failed request before choosing a
-protocol or routing change. Fix a first-party defect in moq-dev/moq with a
-regression at its source, then verify smoke's Git-head lane. An upstream
-client defect needs a reduced reproducer and a clearly attributed result;
-posting outside moq-dev and kixelated requires maintainer approval.
+`subscribe-error` and `subscribe-before-announce` report `ok` only because
+they accept any subscribe error, including that session close; once the
+client is fixed they must still pass on a real REQUEST_ERROR.
 
-Remove the exception once the full claimed lane passes. Do not accept a
-session close as successful media exchange or hide the failing case. Any
-wire change keeps published drafts compatible and updates Rust, JS, and
-the matching draft together.
-
-This minimal six-case lane is independent of the larger moq-test
-passthrough conformance work. The maintainer requested fixes or quests for
-the investigated failures on 2026-10-15.
+Advance it by reporting the reproducer to facebookexperimental/moxygen once
+the maintainer approves posting there; the fix is a registered default
+(Largest Object or Next Group Start) for drafts that lack LargestGroup.
+Do not accept 0xFA in moq-relay.
 
 ## Related
 

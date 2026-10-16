@@ -19,7 +19,7 @@ mod backend;
 #[cfg(feature = "quic")]
 pub use backend::Error;
 #[cfg(feature = "quic")]
-pub(crate) use backend::{Client, Options, Server, accept};
+pub(crate) use backend::{Client, Closer, Options, Server, accept};
 
 // The async QUIC layer driving `moq-quic` on tokio, forked from quinn (see its module docs).
 // Public only so the workspace's tests can dial a bare endpoint; not a stable API.

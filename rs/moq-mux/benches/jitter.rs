@@ -27,7 +27,9 @@ async fn steer(tracks: u16, floors: u64) -> u64 {
 				decode: Timestamp::from_millis(second * 1_000).unwrap(),
 				restart: 0,
 				skip: 0,
+				cut: 0,
 				sync: true,
+				leading: false,
 				item: (),
 			};
 			buffer.push(track, arrival).unwrap();

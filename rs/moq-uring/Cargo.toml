@@ -32,7 +32,6 @@ moq-clock = { workspace = true, optional = true }
 moq-net = { workspace = true }
 moq-quic = { workspace = true, features = ["bloom", "rustls-aws-lc-rs"], optional = true }
 moq-sock = { workspace = true }
-rand = "0.10"
 rustc-hash = { workspace = true }
 rustls = { version = "0.23", optional = true }
 # OS-native server-cert verifier for the rustls backends. Version matched to
@@ -87,3 +86,8 @@ harness = false
 [[bench]]
 name = "worker_turns"
 harness = false
+
+[[bench]]
+name = "unreachable_dials"
+harness = false
+required-features = ["quic"]

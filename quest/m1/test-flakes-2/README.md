@@ -35,10 +35,8 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [TS decoded content](/quest/m1/test-flakes-2/ts-video-content.md) - CI's TS compliance decoded-content checks fail only on real loss, and the exporter names every frame it drops
 - [Auth refresh mocks time](/quest/m1/test-flakes-2/auth-refresh-mock-time.md) - moq-relay's auth refresh and fixed-lease tests measure a grant's life on one mocked clock
 - [uring teardown close](/quest/m1/test-flakes-2/uring-teardown-close.md) - moq-uring's published-close teardown test holds under load, fixed at its cause
-- [js -> go rewind](/quest/m1/test-flakes-2/js-go-rewind.md) - the `js -> go` interop cell never reads a frame below the previous group's start, fixed on the side that produced it
 
 ## Related
 

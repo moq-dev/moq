@@ -1510,7 +1510,7 @@ mod tests {
 		let quic_addr: crate::connect::Addr = Url::parse(&format!("https://localhost:{quic_port}")).unwrap().into();
 		let ws_addr: crate::connect::Addr = Url::parse(&format!("http://localhost:{ws_port}")).unwrap().into();
 
-		// Keep this aligned with the newest default Lite version, as in tests/broadcast.rs.
+		// Keep this aligned with the newest default Lite version, as in tests/integration/broadcast.rs.
 		let expected_version: moq_net::Version = "moq-lite-06".parse().expect("invalid version");
 
 		let server_handle = tokio::spawn(async move {

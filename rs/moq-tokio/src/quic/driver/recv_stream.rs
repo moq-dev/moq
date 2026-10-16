@@ -1,7 +1,9 @@
 use std::{
+    fmt,
     future::{Future, poll_fn},
-    io,
+    io, mem,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll, ready},
 };
 
@@ -10,7 +12,10 @@ use moq_quic::{Chunk, Chunks, ClosedStream, ConnectionError, ReadableError, Stre
 use thiserror::Error;
 use tokio::io::ReadBuf;
 
-use crate::quic::driver::{VarInt, connection::ConnectionRef};
+use crate::quic::driver::{
+    VarInt,
+    connection::{ConnectionInner, ConnectionRef},
+};
 
 /// A stream that can only be used to receive data
 ///
@@ -94,6 +99,50 @@ impl RecvStream {
         .await
     }
 
+    /// Read data contiguously from the stream, keeping its connection flow control credit.
+    ///
+    /// Like [`read()`], but yields the [`Credit`] for exactly the bytes read into `buf`, or `None`
+    /// if the stream was finished. Stream credit still advances, so a stream window smaller than
+    /// an application message keeps the message flowing, while the connection window these bytes
+    /// occupy stays spent until the credit is dropped.
+    ///
+    /// This operation is cancel-safe.
+    ///
+    /// [`read()`]: RecvStream::read
+    pub async fn read_held(&mut self, buf: &mut [u8]) -> Result<Option<Credit>, ReadError> {
+        poll_fn(|cx| self.poll_read_held(cx, buf)).await
+    }
+
+    /// Attempts to read from the stream into the provided buffer, keeping the bytes' connection
+    /// flow control credit.
+    ///
+    /// See [`read_held()`] for details.
+    ///
+    /// [`read_held()`]: RecvStream::read_held
+    pub fn poll_read_held(
+        &mut self,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<Result<Option<Credit>, ReadError>> {
+        let mut buf = ReadBuf::new(buf);
+        let mut held = moq_quic::Credit::default();
+        let read = match buf.remaining() {
+            0 => Poll::Ready(Ok(Some(()))),
+            _ => self.poll_read_generic(cx, true, |chunks| {
+                let status = fill(chunks, &mut buf);
+                held.merge(chunks.hold());
+                status
+            }),
+        };
+        // Bytes are read exactly when the read yields `Some`.
+        read.map_ok(|read| {
+            read.map(|()| Credit {
+                conn: self.conn.0.clone(),
+                inner: mem::take(&mut held),
+            })
+        })
+    }
+
     /// Attempts to read from the stream into the provided buffer
     ///
     /// On success, returns `Poll::Ready(Ok(num_bytes_read))` and places data into `buf`. If this
@@ -136,24 +185,8 @@ impl RecvStream {
             return Poll::Ready(Ok(()));
         }
 
-        self.poll_read_generic(cx, true, |chunks| {
-            let mut read = false;
-            loop {
-                if buf.remaining() == 0 {
-                    // We know `read` is `true` because `buf.remaining()` was not 0 before
-                    return ReadStatus::Readable(());
-                }
-
-                match chunks.next(buf.remaining()) {
-                    Ok(Some(chunk)) => {
-                        buf.put_slice(&chunk.bytes);
-                        read = true;
-                    }
-                    res => return (if read { Some(()) } else { None }, res.err()).into(),
-                }
-            }
-        })
-        .map(|res| res.map(|_| ()))
+        self.poll_read_generic(cx, true, |chunks| fill(chunks, buf))
+            .map(|res| res.map(|_| ()))
     }
 
     /// Read the next segment of data
@@ -426,6 +459,91 @@ impl RecvStream {
                 }
             },
         }
+    }
+}
+
+/// Copy from `chunks` until `buf` is full or nothing more is readable.
+fn fill(chunks: &mut Chunks<'_>, buf: &mut ReadBuf<'_>) -> ReadStatus<()> {
+    let mut read = false;
+    loop {
+        if buf.remaining() == 0 {
+            // We know `read` is `true` because `buf.remaining()` was not 0 before
+            return ReadStatus::Readable(());
+        }
+
+        match chunks.next(buf.remaining()) {
+            Ok(Some(chunk)) => {
+                buf.put_slice(&chunk.bytes);
+                read = true;
+            }
+            res => return (if read { Some(()) } else { None }, res.err()).into(),
+        }
+    }
+}
+
+/// Connection flow control credit for bytes read with [`RecvStream::read_held`].
+///
+/// The peer cannot reuse the connection window these bytes occupy until this is dropped, which
+/// returns it even after the stream or connection is gone.
+pub struct Credit {
+    conn: Arc<ConnectionInner>,
+    inner: moq_quic::Credit,
+}
+
+impl Credit {
+    /// The number of bytes this credit covers.
+    pub fn len(&self) -> u64 {
+        self.inner.len()
+    }
+
+    /// Whether this credit covers no bytes.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Split off the credit for the first `bytes`, keeping the rest.
+    ///
+    /// # Panics
+    /// If `bytes` exceeds [`Self::len()`].
+    pub fn split(&mut self, bytes: u64) -> Self {
+        Self {
+            conn: self.conn.clone(),
+            inner: self.inner.split(bytes),
+        }
+    }
+
+    /// Take over the bytes covered by `other`.
+    ///
+    /// # Panics
+    /// If `other` came from another connection.
+    pub fn merge(&mut self, mut other: Self) {
+        assert!(
+            Arc::ptr_eq(&self.conn, &other.conn),
+            "merged credit from another connection"
+        );
+        self.inner.merge(mem::take(&mut other.inner));
+    }
+}
+
+impl Drop for Credit {
+    fn drop(&mut self) {
+        if self.inner.is_empty() {
+            return;
+        }
+        let mut conn = self.conn.state.lock("Credit::drop");
+        if conn
+            .inner
+            .release(mem::take(&mut self.inner))
+            .should_transmit()
+        {
+            conn.wake();
+        }
+    }
+}
+
+impl fmt::Debug for Credit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Credit").field("len", &self.len()).finish()
     }
 }
 
