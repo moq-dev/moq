@@ -39,8 +39,8 @@ impl CatalogExt for () {}
 /// cross. Publish/consume a [`hang::Catalog<Extra>`] and use [`set`](Self::set)/[`get`](Self::get).
 /// The default extension stays `()` (unknown sections dropped); opt into `Extra` explicitly.
 ///
-/// `video`, `audio`, `text`, `archive`, `clock`, `json`, `binary`, and the retired `timeline`
-/// key are reserved, so decoding and [`set`](Self::set) reject them to keep the wire JSON free of
+/// `version`, `video`, `audio`, `text`, `archive`, `clock`, `json`, `binary`, and the retired
+/// `timeline` key are reserved, so decoding and [`set`](Self::set) reject them to keep the wire JSON free of
 /// duplicate or retired keys.
 #[derive(Serialize, Clone, Default, Debug, PartialEq)]
 #[serde(transparent)]
@@ -61,7 +61,7 @@ impl<'de> Deserialize<'de> for Extra {
 fn reserved(name: &str) -> bool {
 	matches!(
 		name,
-		"video" | "audio" | "text" | "archive" | "clock" | "json" | "binary" | "timeline"
+		"version" | "video" | "audio" | "text" | "archive" | "clock" | "json" | "binary" | "timeline"
 	) || moq_msf::reserved_root(name)
 }
 

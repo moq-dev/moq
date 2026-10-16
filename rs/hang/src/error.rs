@@ -21,6 +21,10 @@ pub enum Error {
 	#[error("catalog rendition ID is both video and audio: {0}")]
 	DuplicateRendition(String),
 
+	/// A catalog needs a newer moq-hang draft than this reader implements.
+	#[error("unsupported catalog version {0}: upgrade to read it")]
+	UnsupportedVersion(u64),
+
 	/// A catalog broadcast reference escapes its root.
 	#[error("catalog broadcast reference escapes the root: {0}")]
 	EscapingBroadcast(String),

@@ -35,6 +35,10 @@ export class CatalogProducer {
 		fn(value);
 		// Every consumer refuses a catalog that fails this, so refuse the edit before it reaches one.
 		Catalog.checkRenditions(value);
+		// Computed, never carried, so an edit can't claim less than the catalog uses.
+		const version = Catalog.minVersion(value);
+		if (version === undefined) delete value.version;
+		else value.version = version;
 		// Estimates only rise for a track; a renamed rendition starts its new track over.
 		for (const field of ["jitter", "delay"] as const) {
 			const previous = new Map(advertised(this.#value, field));

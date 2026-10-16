@@ -3226,6 +3226,12 @@ class FfiConverterMoqException {
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
+      case 32:
+        final lifted = UnsupportedCatalogMoqException.read(subview);
+        return LiftRetVal<MoqException>(
+          lifted.value,
+          lifted.bytesRead - subview.offsetInBytes + 4,
+        );
       default:
         throw UniffiInternalError(
           UniffiInternalError.unexpectedEnumCase,
@@ -4309,6 +4315,44 @@ class ConfigMoqException extends MoqException {
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
       reason,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset;
+  }
+}
+
+class UnsupportedCatalogMoqException extends MoqException {
+  final int version;
+  UnsupportedCatalogMoqException(int this.version);
+  UnsupportedCatalogMoqException._(int this.version);
+  static LiftRetVal<UnsupportedCatalogMoqException> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final version_lifted = FfiConverterUInt64.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final version = version_lifted.value;
+    new_offset += version_lifted.bytesRead;
+    return LiftRetVal(UnsupportedCatalogMoqException._(version), new_offset);
+  }
+
+  @override
+  RustBuffer lower() {
+    final buf = Uint8List(allocationSize());
+    write(buf);
+    return toRustBuffer(buf);
+  }
+
+  @override
+  int allocationSize() {
+    return FfiConverterUInt64.allocationSize(version) + 4;
+  }
+
+  @override
+  int write(Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 32);
+    int new_offset = buf.offsetInBytes + 4;
+    new_offset += FfiConverterUInt64.write(
+      version,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;

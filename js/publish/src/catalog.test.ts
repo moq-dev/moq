@@ -52,6 +52,29 @@ test("catalog producer refuses an ID naming both a video and an audio rendition"
 	).toThrow(Catalog.DuplicateRendition);
 });
 
+test("catalog producer computes the version from the fields it uses", async () => {
+	const catalog = new CatalogProducer();
+	const effect = new Effect();
+	const track = new Track.Producer("catalog.json");
+	catalog.serve(track, effect);
+	const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track: track.subscribe() });
+	const video = { codec: "avc1.64001f", container: { kind: "legacy" as const } };
+
+	// A caller's own version is replaced by the computed one.
+	catalog.mutate((c) => {
+		c.video = { renditions: { hd: { ...video, track: "video" } } };
+		c.version = 3;
+	});
+	expect((await consumer.latest())?.value.version).toBe(4);
+
+	catalog.mutate((c) => {
+		c.video = { renditions: { hd: video } };
+	});
+	expect((await consumer.latest())?.value).not.toHaveProperty("version");
+
+	effect.close();
+});
+
 test("catalog producer publishes every update as a snapshot group", async () => {
 	const catalog = new CatalogProducer();
 	catalog.mutate((c) => {

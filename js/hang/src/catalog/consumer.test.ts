@@ -9,6 +9,8 @@ import {
 	MAX_RENDITIONS,
 	type Root,
 	TooManyRenditions,
+	UnsupportedVersion,
+	VERSION,
 	watch,
 } from "./root";
 
@@ -62,6 +64,17 @@ test("watch refuses an oversized catalog update", async () => {
 	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
 	producer.update({ value: catalog(MAX_RENDITIONS + 1), at: Moq.Time.Timestamp.now() });
 	await expect(consumer.next()).rejects.toBeInstanceOf(TooManyRenditions);
+	producer.finish();
+	broadcast.close();
+});
+
+test("watch refuses a catalog needing a newer reader", async () => {
+	const broadcast = new Moq.Broadcast.Producer();
+	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
+	const producer = new Json.Snapshot.Producer<Root>({ track, deltaRatio: 0 });
+	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
+	producer.update({ value: { version: VERSION + 1 }, at: Moq.Time.Timestamp.now() });
+	await expect(consumer.next()).rejects.toBeInstanceOf(UnsupportedVersion);
 	producer.finish();
 	broadcast.close();
 });
