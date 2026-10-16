@@ -18,6 +18,9 @@ Decided 2026-10-16 with the maintainer:
 - The `connection` target switches to it, so injected and mutated packets
   decrypt instead of being dropped at the AEAD. Today it runs about 64
   inputs/s, almost all spent in the handshake.
+- A decrypted injected packet can carry a valid STREAM frame, so the
+  target's delivered-bytes-match-written check excludes the streams injected
+  frames touch; no-panic still covers every input.
 - Not a debug transport: nothing outside the `fuzz` feature can name it.
 
 ## Required
