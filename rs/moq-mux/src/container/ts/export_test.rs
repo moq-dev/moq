@@ -1022,8 +1022,17 @@ async fn export_trims_leading_pictures_after_each_delivery_break() {
 		group.finish().unwrap();
 	}
 	track.finish().unwrap();
-	let ts = drain(consumer).await;
-	let (video, _) = collect_pes_pts(&ts);
+	let mut export = open_export(crate::source::announced(&consumer).await)
+		.await
+		.unwrap()
+		.with_delay(RECORDING_MAX_AGE)
+		.with_replay();
+	let bytes: Vec<u8> = drain_frames(&mut export)
+		.await
+		.iter()
+		.flat_map(|frame| frame.payload.iter().copied())
+		.collect();
+	let (video, _) = collect_pes_pts(&bytes);
 	let expected: Vec<_> = [100, 110, 200, 180, 190, 210, 400, 410]
 		.into_iter()
 		.map(|ms| ms * 90)
@@ -1031,6 +1040,12 @@ async fn export_trims_leading_pictures_after_each_delivery_break() {
 	assert_eq!(
 		video, expected,
 		"continuous leading pictures survive; only join and later-hole orphans are trimmed"
+	);
+	let stats = export.stats();
+	assert_eq!(
+		(stats.dropped, stats.trimmed),
+		(2, 2),
+		"the join's orphans precede the output; the hole's are lost in it"
 	);
 }
 

@@ -265,8 +265,12 @@ struct Track {
 	clock: DecodeClock<(Pending, Option<Bytes>)>,
 	/// Loss counter at the last read, excluding declared ends.
 	recovery_gap: Option<u64>,
-	/// Leading pictures below the recovery keyframe have unavailable references.
-	leading_floor: Option<Timestamp>,
+	/// Leading pictures below the recovery keyframe have unavailable references, and whether
+	/// the track queued frames ahead of that keyframe, so dropping them leaves a hole.
+	leading_floor: Option<(Timestamp, bool)>,
+	/// The source's cut count at the last frame queued. A cut since clears what a track that
+	/// has not started holds.
+	held: Option<u64>,
 	/// The PTS of the last keyframe queued, which leading pictures present before.
 	keyframe: Option<Timestamp>,
 	/// What the catalog and the SPS declare about the video's reordering.
@@ -307,6 +311,7 @@ impl Track {
 			clock: DecodeClock::default(),
 			recovery_gap: None,
 			leading_floor: None,
+			held: None,
 			keyframe: None,
 			timing: Timing::default(),
 			buffer: None,
@@ -338,11 +343,16 @@ impl Track {
 		let gap = pending.skip.saturating_sub(pending.restart);
 		let recover = self.recovery_gap.replace(gap).is_none_or(|previous| previous != gap);
 		if pending.frame.keyframe {
-			self.leading_floor = recover.then_some(pending.frame.timestamp);
+			let ahead = self.held == Some(pending.cut);
+			self.leading_floor = recover.then_some((pending.frame.timestamp, ahead));
 		}
-		if self.leading_floor.is_some_and(|floor| pending.frame.timestamp < floor) {
+		if let Some((floor, ahead)) = self.leading_floor
+			&& pending.frame.timestamp < floor
+		{
+			jitter.lose(&self.pid, ahead);
 			return Ok(());
 		}
+		self.held = Some(pending.cut);
 		if pending.frame.keyframe {
 			self.timing.describe(stream_type, self.source.description(), name);
 		}

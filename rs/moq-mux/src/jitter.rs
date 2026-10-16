@@ -886,6 +886,15 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		}
 	}
 
+	/// Count a frame of `key` the caller dropped before queuing it: a loss once the track
+	/// started or when the caller queued frames `ahead` of it, else trimmed.
+	pub fn lose(&mut self, key: &K, ahead: bool) {
+		match ahead || self.tracks.get(key).is_some_and(|track| track.started) {
+			true => self.dropped += 1,
+			false => self.trimmed += 1,
+		}
+	}
+
 	/// The frame `key` releases next, if it has one queued.
 	pub fn peek(&self, key: &K) -> Option<&T> {
 		let (_, _, _, item) = self.tracks.get(key)?.queue.front()?;
