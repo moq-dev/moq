@@ -429,8 +429,10 @@ struct State {
 ///
 /// [`Request::respond`] builds the web
 /// flavor; [`Session::raw`] wraps a raw-QUIC [`Connection`] with the layering
-/// disabled. Clones share the session.
+/// disabled. Clones share the session; dropping the last closes the connection.
 pub struct Session {
+	// Capsule tasks retain Web/Connection, but only public session handles own this.
+	handles: Rc<()>,
 	conn: Connection,
 	web: Option<Rc<Web>>,
 	/// What [`protocol`](web_transport_trait::poll::Session::protocol)
@@ -444,6 +446,7 @@ impl Session {
 	pub fn raw(conn: Connection) -> Self {
 		let protocol = web_transport_trait::poll::Session::protocol(&conn).map(str::to_owned);
 		Self {
+			handles: Rc::new(()),
 			conn,
 			web: None,
 			protocol,
@@ -509,6 +512,7 @@ impl Session {
 			.spawn(async move { read_capsules(capsules, capsule_conn, recv).await });
 
 		Self {
+			handles: Rc::new(()),
 			conn,
 			web: Some(web),
 			protocol,
@@ -527,9 +531,18 @@ impl Session {
 impl Clone for Session {
 	fn clone(&self) -> Self {
 		Self {
+			handles: self.handles.clone(),
 			conn: self.conn.clone(),
 			web: self.web.clone(),
 			protocol: self.protocol.clone(),
+		}
+	}
+}
+
+impl Drop for Session {
+	fn drop(&mut self) {
+		if Rc::strong_count(&self.handles) == 1 {
+			web_transport_trait::poll::Session::close(self, 0, "dropped");
 		}
 	}
 }
