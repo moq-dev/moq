@@ -120,7 +120,7 @@ pub struct Quic {
 		default = "671088640",
 		setting = "peer.quic.receive_window"
 	)]
-	pub receive_window: u64,
+	pub receive_window: std::num::NonZeroU64,
 	/// Cap on unacknowledged outgoing QUIC data, in bytes.
 	#[usage(
 		long = "peer-quic-send-window",
@@ -128,17 +128,18 @@ pub struct Quic {
 		default = "671088640",
 		setting = "peer.quic.send_window"
 	)]
-	pub send_window: u64,
+	pub send_window: std::num::NonZeroU64,
 }
 
 impl Default for Quic {
 	fn default() -> Self {
 		// An order of magnitude above the `[quic]` defaults, which are sized for
 		// one viewer rather than a link carrying a whole cluster's traffic.
+		let window = std::num::NonZeroU64::new(10 * moq_tokio::quic::DEFAULT_RECEIVE_WINDOW).expect("non-zero");
 		Self {
 			max_streams: 10 * moq_tokio::quic::DEFAULT_MAX_STREAMS,
-			receive_window: 10 * moq_tokio::quic::DEFAULT_RECEIVE_WINDOW,
-			send_window: 10 * moq_tokio::quic::DEFAULT_RECEIVE_WINDOW,
+			receive_window: window,
+			send_window: window,
 		}
 	}
 }
@@ -150,16 +151,6 @@ impl Quic {
 			receive_window: self.receive_window,
 			send_window: self.send_window,
 		}
-	}
-
-	/// `client` with these limits applied, for the links the cluster dials:
-	/// every one of them is a peer, so it gets them from the handshake on.
-	pub(crate) fn dial(&self, client: &moq_tokio::quic::Config) -> moq_tokio::quic::Config {
-		let mut dial = client.clone();
-		dial.max_streams = Some(self.max_streams);
-		dial.receive_window = Some(self.receive_window);
-		dial.send_window = Some(self.send_window);
-		dial
 	}
 }
 

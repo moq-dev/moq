@@ -245,10 +245,7 @@ impl Relay {
 			true => server_config.init_streams()?,
 			false => server_config.init()?,
 		};
-		// Every link the cluster dials is a peer, so it gets the peer limits from
-		// the handshake on rather than widening after SETUP.
-		let dial_quic = config.peer.quic.dial(&config.quic);
-		let client = config.connect.clone().init(dial_quic.clone())?;
+		let client = config.connect.clone().init(config.quic.clone())?;
 
 		// `None` for a stream-only server (no QUIC); any other error is real.
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
@@ -294,7 +291,7 @@ impl Relay {
 		let cluster = cluster::Cluster::new(cluster_options)?
 			.with_client(client.clone())
 			.with_client_tls(config.connect.tls.build()?)
-			.with_connect(config.connect.clone(), dial_quic)
+			.with_connect(config.connect.clone(), config.quic.clone())
 			.with_advertise(advertise);
 		let stats = config.stats.build(cluster.origin.clone());
 		// The cluster takes over keeping the publish task alive, so an embedder that
@@ -405,7 +402,8 @@ impl Relay {
 		self.server.tcp_local_addr()
 	}
 
-	/// The client used to dial cluster peers. Already handed to [`Self::cluster`];
+	/// The client used to dial cluster peers, with the `[quic]` limits. Already
+	/// handed to [`Self::cluster`], which widens its own copy to `[peer.quic]`;
 	/// clone it for your own outbound dials so they share the connection config.
 	pub fn client(&self) -> &moq_tokio::Client {
 		&self.client

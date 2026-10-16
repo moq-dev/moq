@@ -125,18 +125,19 @@ pub(crate) const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// another (plus QUIC's probe retransmits) before the peer's timer runs out.
 pub(crate) const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(3);
 
-/// The flow-control limits an established QUIC connection can change, such as
-/// a relay widening them once it knows the peer is another relay.
+/// The flow-control limits a QUIC connection can be widened to, such as by a
+/// relay once it knows the peer is another relay.
 ///
-/// Values past what QUIC can express saturate to its maximum.
+/// Values past what QUIC can express saturate to its maximum. The windows are
+/// non-zero because a zero window credits nothing and wedges the connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
 	/// Max concurrent streams the peer may open, per direction.
 	pub max_streams: u64,
 	/// Connection-wide receive window, in bytes.
-	pub receive_window: u64,
+	pub receive_window: std::num::NonZeroU64,
 	/// Cap on unacknowledged outgoing data, in bytes.
-	pub send_window: u64,
+	pub send_window: std::num::NonZeroU64,
 }
 
 /// The `--quic-*` transport section, applied to dialed and accepted connections alike.

@@ -345,8 +345,8 @@ impl Connection {
 		let mut conn = self.shared.conn.borrow_mut();
 		conn.set_max_concurrent_streams(Dir::Bi, streams);
 		conn.set_max_concurrent_streams(Dir::Uni, streams);
-		conn.set_receive_window(VarInt::from_u64(limits.receive_window).unwrap_or(VarInt::MAX));
-		conn.set_send_window(limits.send_window);
+		conn.set_receive_window(VarInt::from_u64(limits.receive_window.get()).unwrap_or(VarInt::MAX));
+		conn.set_send_window(limits.send_window.get());
 		drop(conn);
 		self.shared.kick();
 	}

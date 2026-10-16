@@ -465,10 +465,24 @@ mod tests {
 		.unwrap();
 		assert_eq!(config.quic.max_streams, Some(4));
 		assert_eq!(config.peer.quic.max_streams, 64);
-		assert_eq!(config.peer.quic.receive_window, 2000);
-		assert_eq!(config.peer.quic.send_window, 1000);
+		assert_eq!(config.peer.quic.receive_window.get(), 2000);
+		assert_eq!(config.peer.quic.send_window.get(), 1000);
 
 		assert!(toml::from_str::<Config>("[peer]\nmax_streams = 64\n").is_err());
+	}
+
+	/// A zero peer window would wedge the connection, so it never parses.
+	#[test]
+	fn zero_peer_quic_windows_are_refused() {
+		let _env = EnvGuard::clear(&["MOQ_PEER_QUIC_RECEIVE_WINDOW", "MOQ_PEER_QUIC_SEND_WINDOW"]);
+		assert!(toml::from_str::<Config>("[peer.quic]\nreceive_window = 0\n").is_err());
+		assert!(toml::from_str::<Config>("[peer.quic]\nsend_window = 0\n").is_err());
+		for flag in ["--peer-quic-receive-window=0", "--peer-quic-send-window=0"] {
+			assert!(
+				Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), flag.into()]).is_err(),
+				"{flag} must be refused"
+			);
+		}
 	}
 
 	#[cfg(not(feature = "iroh"))]

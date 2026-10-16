@@ -1173,12 +1173,13 @@ impl Cluster {
 		})
 	}
 
-	/// Attach a QUIC client used to dial cluster peers.
+	/// Attach a QUIC client used to dial cluster peers. Its dials get the
+	/// [`Options::peer`] QUIC limits, since every one of them is a peer.
 	///
 	/// Required when `config.connect` is non-empty; [`start`](Self::start) returns
 	/// an error otherwise.
 	pub fn with_client(mut self, client: moq_tokio::Client) -> Self {
-		self.client = Some(client);
+		self.client = Some(client.with_quic_limits(self.peer_quic));
 		self
 	}
 
@@ -1867,7 +1868,7 @@ impl Cluster {
 			connect.tls.fingerprint = vec![fingerprint.to_string()];
 		}
 		let quic = self.quic.clone().unwrap_or_default();
-		Ok(connect.init(quic)?)
+		Ok(connect.init(quic)?.with_quic_limits(self.peer_quic))
 	}
 
 	/// Start a reconnecting LAN session from discovered details. Tests wire this

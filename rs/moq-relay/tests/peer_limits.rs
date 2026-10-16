@@ -140,6 +140,75 @@ async fn tokio_peer_session_widens_quic_limits() {
 	peer_widens_and_viewer_does_not(relay, port).await;
 }
 
+/// Every cluster dial is a peer link, so a client built from the plain `[quic]`
+/// settings still advertises the peer limits from the handshake on.
+#[tokio::test]
+async fn cluster_dials_widen_a_plain_client() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	let mut connect = moq_tokio::connect::Config::default();
+	connect.tls.insecure = Some(true);
+
+	// A bare QUIC server: the dialer's stream limit is a transport parameter, so
+	// the handshake alone shows it.
+	let key = rcgen::KeyPair::generate().expect("keypair");
+	let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+		.expect("cert params")
+		.self_signed(&key)
+		.expect("self-signed cert");
+	let mut tls = rustls::ServerConfig::builder()
+		.with_no_client_auth()
+		.with_single_cert(
+			vec![cert.der().clone()],
+			rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+		)
+		.expect("server tls");
+	tls.alpn_protocols = connect
+		.versions()
+		.alpns()
+		.iter()
+		.map(|alpn| alpn.as_bytes().to_vec())
+		.collect();
+	let crypto = driver::crypto::rustls::QuicServerConfig::try_from(tls).expect("quic crypto");
+	let server = driver::Endpoint::server(
+		driver::ServerConfig::with_crypto(std::sync::Arc::new(crypto)),
+		"127.0.0.1:0".parse().unwrap(),
+	)
+	.expect("server endpoint");
+	let port = server.local_addr().expect("server addr").port();
+
+	let mut quic = moq_tokio::quic::Config::default();
+	quic.max_streams = Some(VIEWER_STREAMS);
+	let client = connect.init(quic).expect("client init");
+
+	let mut options = moq_relay::cluster::Options::new(Default::default());
+	options.config.connect = vec![moq_relay::cluster::Peer::new(format!("moql://127.0.0.1:{port}/"))];
+	options.peer.quic.max_streams = 4 * PROBE as u64;
+	let cluster = moq_relay::cluster::Cluster::new(options)
+		.expect("cluster init")
+		.with_client(client);
+	let running = tokio::spawn(cluster.start().await.expect("cluster start").run());
+
+	let conn = tokio::time::timeout(TIMEOUT, server.accept())
+		.await
+		.expect("dial timeout")
+		.expect("incoming")
+		.await
+		.expect("handshake");
+	let mut streams = Vec::new();
+	while streams.len() < PROBE {
+		match conn.open_uni().now_or_never() {
+			Some(stream) => streams.push(stream.expect("open")),
+			None => break,
+		}
+	}
+	assert_eq!(streams.len(), PROBE, "the dial advertises the peer stream limit");
+
+	running.abort();
+	let _ = running.await;
+	conn.close(driver::VarInt::from_u32(0), b"done");
+}
+
 #[cfg(all(target_os = "linux", feature = "_uring"))]
 #[tokio::test]
 async fn uring_peer_session_widens_quic_limits() {
