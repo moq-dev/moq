@@ -257,6 +257,7 @@ export class Publisher {
 	#requiresSolicitation: boolean;
 	// Subscriptions the peer holds live on this session.
 	#subscriptions: Slots;
+	#fetches: Slots;
 
 	// The one writer for the outbound datagram stream, shared by every subscription since a
 	// second getWriter would throw. Undefined when the transport carries no datagrams, which
@@ -323,6 +324,7 @@ export class Publisher {
 	}) {
 		this.#quic = quic;
 		this.#subscriptions = new Slots(limits.subscriptions, { quic, reason: "too many subscriptions" });
+		this.#fetches = new Slots(limits.fetches, { quic, reason: "too many fetches" });
 		this.#grant = grant;
 		this.#ready = ready;
 		this.#session = session;
@@ -1818,18 +1820,23 @@ export class Publisher {
 	 * @internal
 	 */
 	async runFetch(msg: Fetch, stream: Stream) {
-		if (msg.trackNamespace !== undefined && Namespace.reserved(msg.trackNamespace, this.#session.version)) {
-			await refuseReserved(stream, this.#session.version);
-			return;
+		this.#fetches.acquire();
+		try {
+			if (msg.trackNamespace !== undefined && Namespace.reserved(msg.trackNamespace, this.#session.version)) {
+				await refuseReserved(stream, this.#session.version);
+				return;
+			}
+			if (msg.rangeFilters) {
+				await this.#refuse(stream, msg.requestId, FetchError.id, {
+					errorCode: toRequestCode("invalid_filter", "fetch", this.#session.version),
+					reasonPhrase: "Range Filters exceed MAX_FILTER_RANGES=0",
+				});
+				return;
+			}
+			await this.#refuseUnsupported(stream, msg.requestId, "fetch", FetchError.id, "FETCH is not supported");
+		} finally {
+			this.#fetches.release();
 		}
-		if (msg.rangeFilters) {
-			await this.#refuse(stream, msg.requestId, FetchError.id, {
-				errorCode: toRequestCode("invalid_filter", "fetch", this.#session.version),
-				reasonPhrase: "Range Filters exceed MAX_FILTER_RANGES=0",
-			});
-			return;
-		}
-		await this.#refuseUnsupported(stream, msg.requestId, "fetch", FetchError.id, "FETCH is not supported");
 	}
 
 	/** Refuse a request NOT_SUPPORTED. */

@@ -390,7 +390,7 @@ mod tests {
 	/// Skipping to the top of a production-sized window records one run, not every ID.
 	#[test]
 	fn draft16_a_jump_is_one_run_split_only_by_requests_inside_it() {
-		let window = 220_000;
+		let window = crate::session::Limits::default().requests();
 		let control = Control::new(None, false).with_window(window, false, Version::Draft16);
 		let top = 2 * (window - 1);
 		let runs = |control: &Control| {
