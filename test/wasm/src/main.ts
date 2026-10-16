@@ -215,11 +215,9 @@ async function expectGroups(track: Track, count: number): Promise<void> {
 	let previous: bigint | undefined;
 	let read = 0;
 
-	// A skip is legal (see `isOld`), so bound the attempts rather than the skips: a
-	// subscription that never delivers a whole group fails here instead of looping.
-	for (let attempt = 0; read < count; attempt++) {
-		if (attempt >= count * 4) throw new Error(`read ${read} whole groups in ${attempt} attempts, want ${count}`);
-
+	// A skip is legal (see `isOld`) and real-time delivery puts no bound on how many
+	// can occur. The case deadline still catches a subscription that makes no progress.
+	while (read < count) {
 		let group: Group | undefined;
 		try {
 			group = await track.recvGroup();

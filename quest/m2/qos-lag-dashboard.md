@@ -10,9 +10,9 @@ and per node like the existing counters.
 ## Plan
 
 - Read both from the stats totals and [prefix
-  tracks](/quest/m1/stats-prefix-tracks.md), which land first,
+  tracks](/quest/m2/stats-prefix-tracks.md), which land first,
   rather than the `publisher.json` rows they sit on today (decided in the
-  2026-10-06 audit; the rows stay for existing readers, 2026-10-12); [viewer lag histogram](/quest/m1/qos/lag-histogram.md)
+  2026-10-06 audit; the rows stay for existing readers, 2026-10-12); [viewer lag histogram](/quest/m2/qos/lag-histogram.md)
   lands them on the egress side of its per-group totals and prefix tracks
   (decided 2026-10-08). `lag` is a cumulative byte count per bucket keyed
   by its upper edge (`"50ms"` to `"5s"`, then `"inf"`, empty buckets
@@ -34,5 +34,5 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Viewer lag histogram](/quest/m1/qos/lag-histogram.md) - the `lag` histogram and `dropped` counters the dashboard reads
-- [Stats prefix tracks](/quest/m1/stats-prefix-tracks.md) - the prefix tracks the dashboard reads lag from, beside the totals
+- [Viewer lag histogram](/quest/m2/qos/lag-histogram.md) - the `lag` histogram and `dropped` counters the dashboard reads
+- [Stats prefix tracks](/quest/m2/stats-prefix-tracks.md) - the prefix tracks the dashboard reads lag from, beside the totals

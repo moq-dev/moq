@@ -120,12 +120,15 @@ Native I/O and background tasks run on a Tokio worker pool. Calls awaited by the
 host still poll in place; independent native wake callbacks can run concurrently.
 The generated bindings wake Python futures through the asyncio event loop. The
 package exit hook joins native workers before interpreter finalization.
+A panic in a native background task reaches the pending and later fallible calls
+of every object that depends on it as a task error; other objects keep running.
 
 A session closed for exceeding the relay's request caps reports the protocol
 kind `ProtocolKind.TOO_MANY_REQUESTS`. Reduce
 the simultaneous announcements or subscriptions, or ask the relay operator
 to adjust the [session limits](/bin/relay/config#session-and-peer), before
 reconnecting with the same workload.
+A session closed because its credential expired reports `ProtocolKind.EXPIRED`, and a request refused for an expired token raises `Error.Expired`; refresh the token before retrying.
 
 ## Reference
 

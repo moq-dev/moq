@@ -1,4 +1,4 @@
-import { Time } from "@moq/net";
+import { Micro, type Milli, Second } from "@moq/clock";
 
 export class AudioRingBuffer {
 	#buffer: Float32Array[];
@@ -26,14 +26,14 @@ export class AudioRingBuffer {
 	constructor(props: {
 		rate: number;
 		channels: number;
-		latency: Time.Milli;
+		latency: Milli;
 		buffered?: boolean;
 	}) {
 		if (props.channels <= 0) throw new Error("invalid channels");
 		if (props.rate <= 0) throw new Error("invalid sample rate");
 		if (props.latency <= 0) throw new Error("invalid latency");
 
-		this.#latencySamples = Math.ceil(props.rate * Time.Second.fromMilli(props.latency));
+		this.#latencySamples = Math.ceil(props.rate * Second.fromMilli(props.latency));
 		if (this.#latencySamples === 0) throw new Error("empty buffer");
 
 		this.rate = props.rate;
@@ -66,8 +66,8 @@ export class AudioRingBuffer {
 		return this.#underruns;
 	}
 
-	get timestamp(): Time.Micro {
-		return Time.Micro.fromSecond((this.#readIndex / this.rate) as Time.Second);
+	get timestamp(): Micro {
+		return Micro.fromSecond((this.#readIndex / this.rate) as Second);
 	}
 
 	get length(): number {
@@ -78,8 +78,8 @@ export class AudioRingBuffer {
 		return this.#buffer[0]?.length;
 	}
 
-	resize(latency: Time.Milli): void {
-		const latencySamples = Math.ceil(this.rate * Time.Second.fromMilli(latency));
+	resize(latency: Milli): void {
+		const latencySamples = Math.ceil(this.rate * Second.fromMilli(latency));
 
 		// A deeper floor parks playback until it refills. Video holds the extra delay on its own, so
 		// audio that kept draining at the old depth would run ahead by the difference. Parking keeps
@@ -126,10 +126,10 @@ export class AudioRingBuffer {
 		if (samplesToKeep === 0) this.#stalled = true;
 	}
 
-	write(timestamp: Time.Micro, data: Float32Array[]): void {
+	write(timestamp: Micro, data: Float32Array[]): void {
 		if (data.length !== this.channels) throw new Error("wrong number of channels");
 
-		let start = Math.round(Time.Second.fromMicro(timestamp) * this.rate);
+		let start = Math.round(Second.fromMicro(timestamp) * this.rate);
 		let samples = data[0].length;
 
 		// Anchor both indices to the first sample so we play from its timestamp instead of
@@ -218,8 +218,8 @@ export class AudioRingBuffer {
 	 * A successor track overwrites the slots its own samples land on, but anything the previous
 	 * track wrote beyond them would otherwise still play once the successor runs out.
 	 */
-	truncate(timestamp: Time.Micro): void {
-		const target = Math.round(Time.Second.fromMicro(timestamp) * this.rate);
+	truncate(timestamp: Micro): void {
+		const target = Math.round(Second.fromMicro(timestamp) * this.rate);
 		if (target >= this.#writeIndex) return;
 		// Never retreat past the playhead: those samples are already due.
 		this.#writeIndex = Math.max(target, this.#readIndex);

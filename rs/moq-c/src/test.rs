@@ -368,6 +368,12 @@ fn last_error_protocol_captures_session_known_app_and_unknown() {
 			moq_protocol_kind::MOQ_PROTOCOL_KIND_UNAUTHORIZED as u32,
 		),
 		(
+			moq_net::Error::from(moq_net::SessionError::Expired),
+			moq_error_scope::MOQ_ERROR_SCOPE_SESSION as u32,
+			0x18,
+			moq_protocol_kind::MOQ_PROTOCOL_KIND_EXPIRED as u32,
+		),
+		(
 			moq_net::Error::from(moq_net::StreamError::Unauthorized),
 			moq_error_scope::MOQ_ERROR_SCOPE_STREAM as u32,
 			0x3b,
@@ -5177,6 +5183,27 @@ fn data_track_names_cannot_collide() {
 	);
 
 	assert_eq!(moq_publish_json_snapshot_finish(first), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[tokio::test]
+async fn a_background_panic_reaches_the_terminal_callback_and_keeps_another_origin_working() {
+	let callback = Callback::new();
+	let status = unsafe { crate::ffi::OnStatus::new(callback.ptr, Some(channel_callback)) }.unwrap();
+	let origin = id(moq_origin_create());
+	let task = crate::ffi::RUNTIME.spawn(async move {
+		let result = crate::ffi::run(async {
+			panic!("injected background panic");
+			#[allow(unreachable_code)]
+			Ok::<(), Error>(())
+		})
+		.await;
+		status.call(result);
+	});
+	assert!(task.await.is_ok(), "background panic lost the terminal callback");
+	assert_eq!(callback.rx.try_recv().unwrap(), MOQ_ERROR_PANIC);
+	let broadcast = publish_broadcast(origin, b"survivor");
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }

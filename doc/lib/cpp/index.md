@@ -215,14 +215,15 @@ Error cases carrying a diagnostic expose it as `reason`; protocol failures expos
 rejections are their own cases, so you don't retry them. `error.to_string()`
 gives the message Rust's `Display` does, for logs; branch on the case, not the
 text. A Rust panic inside a call, or a misused future (`get()` twice), aborts
-with a message on stderr instead of throwing. A panic in a session's background
-work closes only that session.
+with a message on stderr instead of throwing. A panic in owned background work reaches the next call on that object as a task error;
+other objects keep running.
 
 A session closed for exceeding the relay's request caps reports the protocol
 kind `ProtocolKind::kTooManyRequests`. Reduce
 the simultaneous announcements or subscriptions, or ask the relay operator
 to adjust the [session limits](/bin/relay/config#session-and-peer), before
 reconnecting with the same workload.
+A session closed because its credential expired reports `ProtocolKind::kExpired`, and a request refused for an expired token is `moq::Error::kExpired`; refresh the token before retrying.
 
 Check a result before reading it. With exceptions off below C++23, reading the
 value of an error is undefined, through `*result` and `value()` alike, since

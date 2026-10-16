@@ -418,10 +418,13 @@ impl MoqBroadcastConsumer {
 		config.output.layout = output.channels.map(moq_audio::Layout::from_channels).transpose()?;
 		config.max_delay = output.max_delay_us.map(Duration::from_micros).unwrap_or_default();
 
-		let consumer = moq_audio::decode::Consumer::new(&broadcast, &cfg, name, config).await?;
+		let consumer = self
+			.driver
+			.watch(async { Ok(moq_audio::decode::Consumer::new(&broadcast, &cfg, name, config).await?) })
+			.await?;
 
 		Ok(Arc::new(MoqAudioConsumer {
-			task: Task::new(ConsumerInner { consumer }),
+			task: Task::new(ConsumerInner { consumer }).supervised(self.driver.clone()),
 		}))
 	}
 }

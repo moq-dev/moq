@@ -3,19 +3,20 @@
 ## Goal
 
 A real browser keeps playing when a codec identity change makes
-`@moq/publish` mint a new `track` for the same rendition, and when coded-size
-growth keeps the codec and therefore the existing track. This follows the
-merged #5552 contract: coded size alone is mutable. The check runs at least
-nightly in CI.
+`@moq/publish` mint a new track for the same rendition. A size-only change,
+including coded-size ceiling growth, keeps the track identity and also plays
+without a stall. The check runs at least nightly in CI.
 
 ## Plan
 
-#5552 landed with unit tests only and listed this check as a follow-up. Unit
-tests do not show what WebCodecs and the watch path do across the switch.
+The publisher's `broadcast.ts` excludes size from decoder identity; its unit
+tests cover same-track size changes. Exercise that contract through WebCodecs
+and watch using the existing browser media QA (`just test media`).
 
-Extend the browser media QA (`just test media`) rather than building a new
-harness. Fail on a stall, a decode error, or a frame from the old track after
-the switch. Check that it fails with the rename disabled.
+Test a codec change that requires a new track and a size-only change that
+must preserve it. Assert the expected identity in each case, continued
+playback, and no decode errors. The codec case must fail with renaming
+disabled; the size case must catch an unnecessary rename.
 
 Public API: none. Wire: none.
 
@@ -35,8 +36,7 @@ returned after the new generation started presenting.
 
 With the publisher's identity-minting block removed, the real-browser case
 fails at the existing decode-error oracle: WebCodecs refuses a chunk marked as
-key that is not a keyframe after reconfiguration. The exact production source
-was restored before committing; no product behavior changes in this draft.
+key that is not a keyframe after reconfiguration.
 
 The whole oracle is not green. The original full run stopped before the new
 case at cold-start audio tone (59/70 samples, below the unchanged 90% floor).
@@ -49,6 +49,5 @@ tone or skew threshold has been relaxed.
 ## Related
 
 - [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - the same contract for the Rust publishers
-
 - [Capture channel count and cold-start tone](/quest/m1/publish-audio-channel-count.md) - already owns the unpinned cold-start audio-tone symptom
 - [Isolated Opus target](/quest/m1/audio-jitter-target/opus-isolated-target.md) - related playout stalls, with no shared cause established

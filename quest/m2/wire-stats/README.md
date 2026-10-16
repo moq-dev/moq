@@ -64,12 +64,8 @@ see cost per tenant.
   reports its TCP bytes
 - [moq-srt wire source](/quest/m2/wire-stats/srt.md) - an SRT connection
   reports its wire bytes
-- [moq-rtc wire source](/quest/m2/wire-stats/rtc.md) - a WebRTC peer reports
-  its wire bytes
 
 ## Related
 
 - [Session outcomes](/quest/m1/session-outcomes.md) - the other per-root
   `Presence` counters and the embedder stats-handle pattern
-- [HTTP fetch stats](/quest/m2/http-fetch-stats.md) - HTTP `/fetch`, which
-  has no session and stays payload-only

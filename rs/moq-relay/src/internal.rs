@@ -323,7 +323,7 @@ async fn serve_health() -> Response {
 }
 
 /// Prometheus text-exposition metrics for this node's own MoQ traffic counters
-/// (bytes/frames/groups, subscriptions, viewers, and connected sessions),
+/// (bytes/frames/groups, announces, subscriptions, viewers, and connected sessions),
 /// summed across broadcasts and split by `tier`/`role`.
 ///
 /// Unauthenticated, which is why it lives on the internal listener rather than
@@ -465,6 +465,18 @@ fn render_metrics(
 	);
 	counter(
 		&mut out,
+		"moq_relay_announces_started_total",
+		"Broadcast announces started.",
+		|c| c.announces_started,
+	);
+	counter(
+		&mut out,
+		"moq_relay_announces_ended_total",
+		"Broadcast announces ended; subtract from started for live announces.",
+		|c| c.announces_ended,
+	);
+	counter(
+		&mut out,
 		"moq_relay_subscriptions_opened_total",
 		"Track subscriptions opened.",
 		|c| c.subscriptions_started,
@@ -487,6 +499,20 @@ fn render_metrics(
 		"Distinct (broadcast, session) subscriptions closed; subtract from opened for live viewers.",
 		|c| c.broadcasts_ended,
 	);
+
+	let _ = writeln!(
+		out,
+		"# HELP moq_relay_requests_total Admitted request/response exchanges."
+	);
+	let _ = writeln!(out, "# TYPE moq_relay_requests_total counter");
+	for (tier, presence) in &snap.sessions() {
+		let _ = writeln!(
+			out,
+			"moq_relay_requests_total{{tier=\"{}\"}} {}",
+			tier.as_str(),
+			presence.requests
+		);
+	}
 
 	// Sessions are per-tier only (no role), so they don't fit the helper above.
 	let _ = writeln!(out, "# HELP moq_relay_sessions_opened_total Connected sessions opened.");
@@ -701,6 +727,16 @@ fn render_uring(out: &mut String, workers: &[UringWorker]) {
 		|snap| snap.enters,
 	);
 	counter(
+		"moq_relay_uring_turns_total",
+		"Worker drive-loop turns, including the final poll that completes the root future.",
+		|snap| snap.turns,
+	);
+	counter(
+		"moq_relay_uring_sq_full_enters_total",
+		"io_uring_enter calls forced by a full submission queue.",
+		|snap| snap.sq_full_enters,
+	);
+	counter(
 		"moq_relay_uring_parks_total",
 		"Times a worker parked in io_uring_enter with nothing left to poll.",
 		|snap| snap.parks,
@@ -731,6 +767,32 @@ fn render_uring(out: &mut String, workers: &[UringWorker]) {
 		"Timers currently in a worker's heap.",
 		|snap| snap.timers_active(),
 	);
+
+	for (suffix, help, field) in [
+		(
+			"sqes_per_enter",
+			"Submission entries accepted by each enter, including zero.",
+			(|snap: &moq_uring::metrics::Snapshot| snap.sqes) as fn(&_) -> _,
+		),
+		(
+			"cqes_per_enter",
+			"Completion entries made visible by each enter, including zero.",
+			|snap: &moq_uring::metrics::Snapshot| snap.cqes,
+		),
+	] {
+		let name = format!("moq_relay_uring_{suffix}");
+		let _ = writeln!(out, "# HELP {name} {help}");
+		let _ = writeln!(out, "# TYPE {name} histogram");
+		for (worker, snap) in snaps.iter().enumerate() {
+			let histogram = field(snap);
+			for (bound, count) in moq_uring::metrics::Histogram::BOUNDS.into_iter().zip(histogram.buckets) {
+				let bound = bound.map_or_else(|| "+Inf".to_string(), |bound| bound.to_string());
+				let _ = writeln!(out, "{name}_bucket{{worker=\"{worker}\",le=\"{bound}\"}} {count}");
+			}
+			let _ = writeln!(out, "{name}_sum{{worker=\"{worker}\"}} {}", histogram.sum);
+			let _ = writeln!(out, "{name}_count{{worker=\"{worker}\"}} {}", histogram.count());
+		}
+	}
 }
 
 /// Off the io_uring path there are no workers to describe, and [`UringWorker`]
@@ -915,6 +977,8 @@ mod tests {
 			"submissions",
 			"completions",
 			"enters",
+			"turns",
+			"sq_full_enters",
 			"parks",
 			"wakes",
 			"timers_armed",
@@ -930,6 +994,17 @@ mod tests {
 			for worker in 0..2 {
 				let line = format!("{name}{{worker=\"{worker}\"}} 0");
 				assert!(body.contains(&line), "missing {line} in:\n{body}");
+			}
+		}
+		for name in ["sqes_per_enter", "cqes_per_enter"] {
+			let name = format!("moq_relay_uring_{name}");
+			assert!(body.contains(&format!("# TYPE {name} histogram")));
+			for worker in 0..2 {
+				for bound in ["0", "1", "2", "4", "8", "16", "32", "64", "128", "256", "+Inf"] {
+					assert!(body.contains(&format!("{name}_bucket{{worker=\"{worker}\",le=\"{bound}\"}} 0")));
+				}
+				assert!(body.contains(&format!("{name}_count{{worker=\"{worker}\"}} 0")));
+				assert!(body.contains(&format!("{name}_sum{{worker=\"{worker}\"}} 0")));
 			}
 		}
 		assert!(body.contains("# TYPE moq_relay_uring_timers_active gauge"));
@@ -1058,6 +1133,59 @@ mod tests {
 			);
 			assert!(body.contains(&row), "missing {row}:\n{body}");
 		}
+	}
+
+	#[test]
+	fn request_metrics_never_open_a_session() {
+		let stats = moq_net::stats::Registry::new(Default::default());
+		let request = stats.tier(moq_net::stats::Tier::new("http")).request("root");
+		drop(request);
+		let body = render_metrics(&stats.snapshot(), &[], &[]);
+		assert!(body.contains("# TYPE moq_relay_requests_total counter"), "{body}");
+		assert!(body.contains("moq_relay_requests_total{tier=\"http\"} 1"), "{body}");
+		assert!(
+			body.contains("moq_relay_sessions_opened_total{tier=\"http\"} 0"),
+			"{body}"
+		);
+		assert!(
+			body.contains("moq_relay_sessions_closed_total{tier=\"http\"} 0"),
+			"{body}"
+		);
+	}
+
+	#[tokio::test]
+	async fn announce_metrics_keep_retired_totals() {
+		let stats = moq_net::stats::Registry::new(Default::default());
+		let producer =
+			moq_tokio::origin::spawn().with_stats(stats.tier(moq_net::stats::Tier::new("edge")).session("root"));
+		let broadcast = producer.create_broadcast("demo/retired").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+
+		let body = render_metrics(&stats.snapshot(), &[], &[]);
+		assert!(
+			body.contains("moq_relay_announces_started_total{tier=\"edge\",role=\"subscriber\"} 1"),
+			"live announce start:\n{body}"
+		);
+		assert!(
+			body.contains("moq_relay_announces_ended_total{tier=\"edge\",role=\"subscriber\"} 0"),
+			"live announce end:\n{body}"
+		);
+
+		broadcast.unannounce();
+		drop(broadcast);
+		drop(producer);
+		let mut report = moq_net::stats::Report::default();
+		stats.report(&mut report);
+
+		let body = render_metrics(&stats.snapshot(), &[], &[]);
+		assert!(
+			body.contains("moq_relay_announces_started_total{tier=\"edge\",role=\"subscriber\"} 1"),
+			"retired announce start:\n{body}"
+		);
+		assert!(
+			body.contains("moq_relay_announces_ended_total{tier=\"edge\",role=\"subscriber\"} 1"),
+			"retired announce end:\n{body}"
+		);
 	}
 
 	/// The `/metrics` renderer emits well-formed Prometheus exposition: a

@@ -33,6 +33,11 @@ the implementation PR.
 - Nightly and releases share the five-job macOS cap. Measure overlap with
   queue runs before reserving capacity or reducing the queue build limit.
 
+## Required
+
+- [Windows restart drill](/quest/m0/ci/platform-windows-drill.md) - a required Platform gate would block every merge while it fails
+- [macOS zero-RTT test](/quest/m0/ci/platform-macos-zero-rtt.md) - a required Platform gate would block every merge while it fails
+
 ## Related
 
 - [mbx on R2](/quest/m0/ci/mbx-r2.md) - gives platform jobs a Rust cache
