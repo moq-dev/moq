@@ -4659,6 +4659,34 @@ mod serve_group_test {
 		}
 	}
 
+	/// A group the publisher cuts is dropped once, while the track is live, and the end
+	/// sweep does not name it again.
+	#[moq_net_sim::test]
+	async fn a_cut_is_dropped_early_once() {
+		let version = Version::Lite06;
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber = track.subscribe(None);
+		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+		write_group(&mut track, 0, 0);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert!(run.start.is_some());
+
+		let group = track.create_group(group::Info { sequence: 1 }).unwrap();
+		group.abort(Error::App(1)).unwrap();
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
+
+		write_group(&mut track, 2, 2);
+		track.finish_at(track::Position::group(3)).unwrap();
+		drop(track);
+		kio::wait(|waiter| run.poll(&mut writer, waiter)).await.unwrap();
+		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
+	}
+
 	/// A wide upstream DROP is held and forwarded as a range, never one entry per sequence,
 	/// and a wider one later forwards only what is new.
 	#[moq_net_sim::test]

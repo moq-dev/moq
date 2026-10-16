@@ -324,6 +324,8 @@ pub(crate) struct TrackState {
 	// cut. Kept apart from the cache so reclaiming a slot cannot erase a disposition a
 	// relay must forward, and as ranges so a wide DROP costs one entry.
 	drops: RangeSet<u64>,
+	// Bumped on every insert into `drops`, so a cursor rescans it only after a change.
+	drops_revision: u64,
 
 	// Whether the cache reflects the live feed: readers get nothing from it while it does
 	// not, since how stale it is cannot be told; fetches still do. A track is live from
@@ -518,19 +520,21 @@ pub(crate) struct FetchOutcome {
 }
 
 impl TrackState {
-	/// The lowest run of `within` given up upstream that `reported` does not cover yet.
+	/// Record sequences the upstream publisher gave up.
+	fn drop_groups(&mut self, groups: Range<u64>) {
+		if groups.is_empty() {
+			return;
+		}
+		self.drops.insert(groups);
+		self.drops_revision += 1;
+	}
+
+	/// Whether the cached group at `sequence` is one readers saw and the publisher cut.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	fn dropped_in_range(&self, within: Range<u64>, reported: &RangeSet<u64>) -> Option<Range<u64>> {
-		let explicit = self.drops.overlapping(&within).find_map(|dropped| {
-			let clipped = dropped.start.max(within.start)..dropped.end.min(within.end);
-			reported.gaps(&clipped).next()
-		});
-		let cached = self
-			.lookup
-			.range(within.clone())
-			.find(|(sequence, slot)| !reported.contains(sequence) && slot.visible && slot.group.is_cut())
-			.map(|(&sequence, _)| sequence..sequence + 1);
-		explicit.into_iter().chain(cached).min_by_key(|range| range.start)
+	fn is_cut(&self, sequence: u64) -> bool {
+		self.lookup
+			.get(&sequence)
+			.is_some_and(|slot| slot.visible && slot.group.is_cut())
 	}
 
 	fn accept(&mut self, info: Info) {
@@ -1095,7 +1099,7 @@ impl TrackState {
 						&& slot.group.is_cut()
 						&& let Some(end) = sequence.checked_add(1)
 					{
-						self.drops.insert(sequence..end);
+						self.drop_groups(sequence..end);
 					}
 					continue;
 				}
@@ -1172,13 +1176,14 @@ impl TrackState {
 	/// keep the finished ones for readers still draining. A consumer that already
 	/// pulled an open group keeps its own handle and ends with it.
 	fn drop_open_groups(&mut self) {
-		for (&sequence, slot) in &self.lookup {
-			if slot.visible
-				&& !slot.copies().any(group::Producer::is_finished)
-				&& let Some(end) = sequence.checked_add(1)
-			{
-				self.drops.insert(sequence..end);
-			}
+		let open: Vec<_> = self
+			.lookup
+			.iter()
+			.filter(|(_, slot)| slot.visible && !slot.copies().any(group::Producer::is_finished))
+			.filter_map(|(&sequence, _)| Some(sequence..sequence.checked_add(1)?))
+			.collect();
+		for groups in open {
+			self.drop_groups(groups);
 		}
 		self.lookup
 			.retain(|_, slot| slot.copies().any(group::Producer::is_finished));
@@ -2235,7 +2240,7 @@ impl Producer {
 			return;
 		}
 		if let Ok(mut state) = self.modify() {
-			state.drops.insert(groups);
+			state.drop_groups(groups);
 		}
 	}
 
@@ -4022,12 +4027,77 @@ struct Cursor {
 	drops: Option<Box<DropCursor>>,
 }
 
-#[derive(Default)]
+/// What a wire publisher's cursor gave up, found as it changes rather than by rescanning
+/// the cache on every poll.
 struct DropCursor {
-	/// Groups this cursor skipped as stale, not yet reported.
-	pending: BTreeSet<u64>,
+	/// Every group the publisher cuts.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	cuts: super::aborts::Watch,
+	/// Sequences given up and not reported yet: stale skips, cuts, and upstream drops.
+	pending: RangeSet<u64>,
+	/// The [`TrackState::drops_revision`] last folded into `pending`.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	revision: Option<u64>,
 	/// Every sequence this cursor already reported.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	reported: RangeSet<u64>,
+}
+
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
+impl DropCursor {
+	fn new(state: &TrackState) -> Self {
+		// Watch before scanning, so a cut landing between the two is still seen.
+		let cuts = state.cache.watch_cuts();
+		let mut pending = RangeSet::new();
+		for (&sequence, slot) in &state.lookup {
+			if slot.visible
+				&& slot.group.is_cut()
+				&& let Some(end) = sequence.checked_add(1)
+			{
+				pending.insert(sequence..end);
+			}
+		}
+		Self {
+			cuts,
+			pending,
+			revision: None,
+			reported: RangeSet::new(),
+		}
+	}
+
+	/// The lowest unreported run of `within` given up, now marked reported.
+	fn next(&mut self, state: &TrackState, cut: BTreeSet<u64>, within: &Range<u64>) -> Option<Range<u64>> {
+		for sequence in cut {
+			// A cut already reclaimed from the cache is in the track's drops instead.
+			if state.is_cut(sequence)
+				&& let Some(end) = sequence.checked_add(1)
+			{
+				self.pending.insert(sequence..end);
+			}
+		}
+		if self.revision != Some(state.drops_revision) {
+			self.revision = Some(state.drops_revision);
+			for dropped in state.drops.overlapping(within) {
+				self.pending
+					.insert(dropped.start.max(within.start)..dropped.end.min(within.end));
+			}
+		}
+		while let Some(range) = self.pending.iter().next().cloned() {
+			self.pending.remove(range.clone());
+			let clipped = range.start.max(within.start)..range.end.min(within.end);
+			if clipped.is_empty() {
+				continue;
+			}
+			if let Some(gap) = self.reported.gaps(&clipped).next() {
+				if gap.end < range.end {
+					self.pending.insert(gap.end..range.end);
+				}
+				self.reported.insert(gap.clone());
+				return Some(gap);
+			}
+		}
+		None
+	}
 }
 
 impl Cursor {
@@ -4074,43 +4144,23 @@ impl Cursor {
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	fn poll_drop(&mut self, waiter: &kio::Waiter) -> Poll<Range<u64>> {
-		let drops = self.drops.get_or_insert_default();
-		// `u64::MAX` cannot be named as a range, and no wire can carry it anyway.
-		while let Some(sequence) = drops.pending.pop_first() {
-			if let Some(end) = sequence.checked_add(1) {
-				drops.reported.insert(sequence..end);
-				return Poll::Ready(sequence..end);
-			}
-		}
-		// A producer cut closes the group without modifying the track state. Watch the
-		// currently visible cache slots before scanning them, so an abort cannot leave
-		// an idle wire publisher asleep.
-		{
-			let state = self.state.read();
-			let aborts = self.aborts.get_or_insert_with(|| Box::new(state.cache.watch_aborts()));
-			for (&sequence, slot) in state.lookup.iter() {
-				if slot.visible {
-					aborts.insert(sequence);
-				}
-			}
-			aborts.register(waiter);
-		}
 		let within = self.min_sequence..self.end_sequence.unwrap_or(u64::MAX);
-		let drops = self.drops.as_mut().expect("initialized above");
-		let find = |state: &TrackState| state.dropped_in_range(within.clone(), &drops.reported);
-		let range = match self
-			.state
-			.poll(waiter, |state| find(state).map_or(Poll::Pending, Poll::Ready))
-		{
-			Poll::Ready(Ok(range)) => range,
-			Poll::Ready(Err(state)) => match find(&state) {
-				Some(range) => range,
-				None => return Poll::Pending,
-			},
-			Poll::Pending => return Poll::Pending,
+		let drops = match &mut self.drops {
+			Some(drops) => drops,
+			None => self.drops.insert(Box::new(DropCursor::new(&self.state.read()))),
 		};
-		drops.reported.insert(range.clone());
-		Poll::Ready(range)
+		// A cut closes its group without modifying the track state, so its own watch wakes
+		// this. Taken before reading the track, so a cut after the read still wakes.
+		let cut = drops.cuts.poll(waiter);
+		match self.state.poll(waiter, |state| {
+			drops.next(state, cut, &within).map_or(Poll::Pending, Poll::Ready)
+		}) {
+			Poll::Ready(Ok(range)) => Poll::Ready(range),
+			Poll::Ready(Err(state)) => drops
+				.next(&state, BTreeSet::new(), &within)
+				.map_or(Poll::Pending, Poll::Ready),
+			Poll::Pending => Poll::Pending,
+		}
 	}
 
 	/// Publish [`Self::end_sequence`] to the groups already handed out.
@@ -4312,8 +4362,10 @@ impl Cursor {
 			// poll walks a whole backlog off rather than handing it out group by group.
 			if ready!(self.poll_stale(&consumer, drift, waiter))? {
 				self.stale.add(consumer.content());
-				if let Some(drops) = &mut self.drops {
-					drops.pending.insert(consumer.sequence);
+				if let Some(drops) = &mut self.drops
+					&& let Some(end) = consumer.sequence.checked_add(1)
+				{
+					drops.pending.insert(consumer.sequence..end);
 				}
 				continue;
 			}
