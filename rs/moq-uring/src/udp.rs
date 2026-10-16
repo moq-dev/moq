@@ -388,10 +388,10 @@ impl TxSlot {
 pub enum Bound {
 	/// A socket on its own, bound by the caller.
 	Lone(UdpSocket),
-	/// One member of a completed steered `SO_REUSEPORT` group. Every
-	/// connection id an endpoint on it issues then leads with the member's
-	/// [`cid`](moq_sock::shard::cid), so the group's filter
-	/// keeps delivering a connection's packets to this socket.
+	/// One member of a steered `SO_REUSEPORT` group. Every connection id an
+	/// endpoint on it issues then names the member's
+	/// [`Shard`](moq_sock::shard::Shard), so the group's filter keeps
+	/// delivering a connection's packets to this socket.
 	Member(moq_sock::shard::Socket),
 }
 
