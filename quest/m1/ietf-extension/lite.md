@@ -20,9 +20,9 @@ Decided 2026-10-13 (see the [epic](/quest/m1/ietf-extension/README.md)).
 - lite-07 only, while it is the wip version. Frozen versions get no framing
   branches.
 - When negotiated, the fields are always present, with no flag bits:
-  - The Group message gains the subgroup ID, the optional publisher
-    priority, and the explicit FIRST_OBJECT state. The first object ID
-    alone cannot recover the FIRST_OBJECT bit.
+  - The Group message gains the explicit FIRST_OBJECT state. The first
+    object ID alone cannot recover the FIRST_OBJECT bit. Subgroups other
+    than 0 are not carried (see the [epic](/quest/m1/ietf-extension/README.md)).
   - Every frame gains a `skip` varint and a length-prefixed properties block,
     2 bytes per frame when empty.
   - A terminal record after the frames carries the END_OF_GROUP status
@@ -35,8 +35,6 @@ Decided 2026-10-13 (see the [epic](/quest/m1/ietf-extension/README.md)).
     encodings.
 - Dynamic-group requests are not this extension's job. Native lite-07
   carries them as [refresh](/quest/m1/refresh/lite.md), decided 2026-10-16.
-- Each subgroup travels on its own lite group stream, keyed by (sequence,
-  subgroup).
 - Write `drafts/draft-lcurley-moq-ietf.md` for the extension and pass
   `just drafts check`. List it with the other project drafts in
   `doc/concept/standard.md`, and note in `doc/bin/relay/` that relays enable
@@ -44,7 +42,7 @@ Decided 2026-10-13 (see the [epic](/quest/m1/ietf-extension/README.md)).
 - js/net does not implement it and never offers it.
 
 Tests: per-feature cases through a two-relay cluster. Cover a cluster peer
-without the extension (subgroup 0, no properties), and run
+without the extension (no properties), and run
 `just test interop --all`.
 Prove that frames arrive through both relays while the upstream group is
 still open, then preserve its terminal status position. Cover FIRST_OBJECT
@@ -56,7 +54,6 @@ and the framing above, only when negotiated.
 
 ## Required
 
-- [Subgroups](/quest/m1/ietf-extension/subgroups.md) - the subgroup streams it frames
 - [Track properties](/quest/m1/ietf-extension/track-properties.md) - the track properties it frames
 
 ## Related

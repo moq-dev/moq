@@ -1,3 +1,4 @@
+import { Milli, Nano } from "@moq/clock";
 import { race } from "@moq/signals";
 import { fromTransport, StreamCode, toStreamCode, toTransport } from "./error.ts";
 import { sharedStreamCode } from "./ietf/error.ts";
@@ -71,7 +72,11 @@ const OPEN_TIMEOUT_MS = 10_000;
  */
 async function openWithin<T>(opening: Promise<T>, timeout: number, discard: (stream: T) => void): Promise<T> {
 	try {
-		return await withTimeout(opening, timeout, `stream open timed out after ${timeout}ms waiting for a slot`);
+		return await withTimeout(
+			opening,
+			Nano.fromMilli(Milli(timeout)),
+			`stream open timed out after ${timeout}ms waiting for a slot`,
+		);
 	} catch (err: unknown) {
 		opening.then(discard).catch(() => void 0);
 		throw err;

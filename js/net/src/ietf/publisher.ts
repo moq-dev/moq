@@ -1,3 +1,4 @@
+import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
 import { type Dispose, type Getter, race, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { enforceGrant } from "../auth_session.ts";
@@ -21,7 +22,7 @@ import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Priority } from "../priority.ts";
 import { type Stream, Writer } from "../stream.ts";
-import { Milli, Timescale } from "../time.ts";
+import { Timescale } from "../time.ts";
 import type { Location as TrackLocation, Subscriber as TrackSubscriber } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { LIMITS, type Limits, Slots } from "../util/limits.ts";
@@ -118,10 +119,11 @@ function sameHops(a: Hop[], b: Hop[]): boolean {
  * loop just as effectively as one it never grants.
  */
 const ADVERTISE_TIMEOUT_MS = 5000;
+const ADVERTISE_TIMEOUT = Nano.fromMilli(Milli(ADVERTISE_TIMEOUT_MS));
 
 /** Sleep `delay`, jittered, so a relay's namespaces don't all retry on the same tick. */
 function retryAfter(delay: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, delay * (0.5 + Math.random() / 2)));
+	return sleep(Nano.fromMilli(Milli(delay * (0.5 + Math.random() / 2))));
 }
 
 /**
@@ -1502,7 +1504,7 @@ export class Publisher {
 	#offerable(key: Path.Valid, refused: Map<Path.Valid, Refused>): boolean {
 		const entry = refused.get(key);
 		if (entry === undefined) return true;
-		return entry !== "never" && Date.now() >= entry;
+		return entry !== "never" && now() >= entry;
 	}
 
 	/**
@@ -1527,7 +1529,9 @@ export class Publisher {
 	#refusal(err: RequestError): Answer {
 		const version = this.#session.version;
 		if (version === Version.DRAFT_14 || version === Version.DRAFT_15) return "dropped";
-		return err.retryInterval === 0n ? "never" : Date.now() + Number(err.retryInterval);
+		return err.retryInterval === 0n
+			? "never"
+			: Instant.add(now(), Nano.fromMilli(Milli(Number(err.retryInterval))));
 	}
 
 	/**
@@ -1587,7 +1591,7 @@ export class Publisher {
 					}
 					return "held";
 				})(),
-				ADVERTISE_TIMEOUT_MS,
+				ADVERTISE_TIMEOUT,
 				`advertisement timed out after ${ADVERTISE_TIMEOUT_MS}ms waiting for the peer's answer`,
 			);
 
@@ -1649,7 +1653,7 @@ export class Publisher {
 					await RequestOk.decode(reader, version);
 					return "held";
 				})(),
-				ADVERTISE_TIMEOUT_MS,
+				ADVERTISE_TIMEOUT,
 				`update timed out after ${ADVERTISE_TIMEOUT_MS}ms waiting for the peer's answer`,
 			);
 		} catch (err: unknown) {

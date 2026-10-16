@@ -73,7 +73,7 @@ lands before the cut.
 - [Hard fork](/quest/m1/quic/fork/README.md) - quinn hard-forked in-tree as `moq-quic`, ranked ahead of perf; the rest of the QUIC line follows it
 - [Own the QUIC stack](/quest/m1/quic/README.md) - quinn hard-forked in-tree as `moq-quic`, carrying BBR, reliable reset, hierarchical scheduling, peer limits, and endpoint sharding
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
-- [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - subgroups, object IDs, properties, end status, datagram objects, and unknown track properties survive moq-transport -> moq-relay (and a relay cluster) -> moq-transport; moxygen's moq-test passes nightly
+- [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - object IDs, properties, end status, datagram objects, and unknown track properties survive moq-transport -> moq-relay (and a relay cluster) -> moq-transport; moxygen's moq-test sections 1-7 pass nightly, except cases that use a subgroup other than 0
 - [Refresh](/quest/m1/refresh/README.md) - a join asks for a fresh group once the current group's deltas exceed a publisher-advertised byte ratio, at every hop; replaces `Demand::used`/`unused` and moq-json's `delta_ratio`
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - announce-subscribe passes and the smoke lane stops hiding its failure
 - [Stitcher public relay smoke](/quest/m1/smoke-stitcher.md) - the first-party deployment is tested under an anonymous namespace and only on transports it serves
@@ -86,7 +86,6 @@ lands before the cut.
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges with absolute or relative ends, in either order, and replaces FETCH; merged ranges never starve a subscriber; relays fill misses by range, including over moq-transport
 - [Live largest location](/quest/m1/largest.md) - `largest()` replaces `latest()` in Rust and JS as a live stream of the track's largest location, known before the first group from the publisher's report
 - [Live TS clock validation](/quest/m1/ts-live-clock.md) - resolve the local PCR-rate failure with reproducible timing evidence and CI controls
-- [TS export start-up drift](/quest/m1/ts-drift-startup.md) - a TS export never exits on start-up latency from a source within tolerance, while a far-off source still fails within seconds (#5564)
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
 - [Plan: a public model](/quest/m1/model-public-surface.md) - every crate-private model item is made public or unnecessary, so a custom publisher or subscriber builds from the public model alone
 - [Lazy discovery](/quest/m1/lazy-discovery/README.md) - a `consume` session requests announcements only for prefixes the origin is watching, in JS then Rust; `follow`, `broadcasts`, and the `discovery` option go away

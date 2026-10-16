@@ -3,6 +3,8 @@
  *
  * @module
  */
+
+import { Instant, Milli, Nano, now, sleepUntil } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type { Datagram } from "./datagram.ts";
 import { GroupTooLarge, ProtocolViolation, TimestampMismatch, TooFarBehind } from "./error.ts";
@@ -16,14 +18,14 @@ import {
 	type TrackSequence,
 	type TrackSequences,
 } from "./internal.ts";
-import { Milli, Timescale, type Timestamp } from "./time.ts";
+import { Timescale, type Timestamp } from "./time.ts";
 import { type Broadcast as BroadcastWire, registerTrackConsumer } from "./wire.ts";
 
 export type { Datagram } from "./datagram.ts";
 
 // Wall-clock bound for idle cached content, matching Rust cache::DEFAULT_EXPIRY.
 // Media maxDelay only bounds how far behind the live edge a reader may fall.
-const CACHE_WINDOW_MS = 30_000;
+const CACHE_WINDOW = Nano.fromMilli(Milli(30_000));
 
 // The cache scans at most this many times per idle cache window.
 const PRUNE_SLICES = 8;
@@ -453,7 +455,7 @@ async function resolveInfo(state: TrackState): Promise<Info> {
 // A source group retained in the producer cache, with the mirror handed to each sink
 // so eviction can drop them together.
 // `arrived` is when the group joined this track, which its mirrors age a predecessor from.
-type CachedGroup = { group: GroupProducer; mirrors: Map<TrackState, GroupConsumer>; arrived: number };
+type CachedGroup = { group: GroupProducer; mirrors: Map<TrackState, GroupConsumer>; arrived: Instant };
 
 let bindProducerSequence: (producer: Producer, sequence: TrackSequence) => void;
 
@@ -568,7 +570,7 @@ export class Producer {
 	// Wakeup for the next entry due to age out. Writes settle retention inline, but a
 	// publisher that stalls stops writing, so without this an abandoned group (and any
 	// reader parked in it) would wait for a write that never comes.
-	#pruneTimer?: ReturnType<typeof setTimeout>;
+	#pruneTimer?: AbortController;
 	#pruneTimerAt = 0;
 
 	// One independent downstream state per live subscriber.
@@ -742,7 +744,7 @@ export class Producer {
 		const combined = combineSubscriptions(this.#sinks);
 		const retained = this.#state.info.peek()?.maxAge;
 		if (combined && retained !== undefined)
-			combined.maxDelay = Milli.min(combined.maxDelay ?? Milli.zero, retained);
+			combined.maxDelay = Milli(Math.min(combined.maxDelay ?? Milli.zero, retained));
 		this.#state.update.set(combined);
 	}
 
@@ -830,16 +832,16 @@ export class Producer {
 	// evicts a run of groups per scan instead of scanning everything to evict one per
 	// write. A group can outlive the window by up to one slice.
 	#prune(): void {
-		const now = performance.now();
-		const slice = CACHE_WINDOW_MS / PRUNE_SLICES;
-		if (now < this.#pruned + slice) {
+		const at = now();
+		const slice = CACHE_WINDOW / PRUNE_SLICES;
+		if (at < this.#pruned + slice) {
 			// Something may have come due since the last scan, so make sure another follows.
 			this.#wake(this.#pruned + slice);
 			return;
 		}
-		this.#pruned = now;
+		this.#pruned = at;
 
-		const cutoff = now - CACHE_WINDOW_MS;
+		const cutoff = at - CACHE_WINDOW;
 		const edge = this.#edge();
 		const live = this.#state.closed.peek() === undefined;
 
@@ -865,32 +867,35 @@ export class Producer {
 		// Replace the wakeup with one for the next entry due to age out. Writes settle
 		// retention inline, so this only has to cover the case no write follows. Cheap to
 		// over-arm: an entry written since is retained and re-armed.
-		clearTimeout(this.#pruneTimer);
+		this.#pruneTimer?.abort();
 		this.#pruneTimer = undefined;
-		if (oldest !== undefined) this.#wake(Math.max(oldest + CACHE_WINDOW_MS, now + slice));
+		if (oldest !== undefined) this.#wake(Math.max(oldest + CACHE_WINDOW, at + slice));
 	}
 
 	// Arm the prune wakeup for `at`, unless one is already armed sooner. Kept after a close,
 	// until the cache empties, so what the track left behind still ages out.
 	#wake(at: number): void {
 		if (this.#pruneTimer !== undefined && this.#pruneTimerAt <= at) return;
-		clearTimeout(this.#pruneTimer);
+		this.#pruneTimer?.abort();
 
-		// setTimeout truncates delays past 2^31 ms; the fixed window stays far below that.
-		const delay = Math.max(0, at - performance.now());
-		const timer = setTimeout(() => {
-			this.#pruneTimer = undefined;
-			this.#prune();
-		}, delay);
+		const timer = new AbortController();
 		// A cache prune is never a reason to hold a Node/Bun process open.
-		(timer as unknown as { unref?: () => void }).unref?.();
+		void sleepUntil(Instant(at), { signal: timer.signal, ref: false }).then(
+			() => {
+				// The wakeup can already be queued when a sooner one replaces it.
+				if (timer.signal.aborted) return;
+				this.#pruneTimer = undefined;
+				this.#prune();
+			},
+			() => {},
+		);
 		this.#pruneTimer = timer;
 		this.#pruneTimerAt = at;
 	}
 
 	// Retain a source group and fan it out to every live sink.
 	#publish(group: GroupProducer): void {
-		const entry: CachedGroup = { group, mirrors: new Map<TrackState, GroupConsumer>(), arrived: performance.now() };
+		const entry: CachedGroup = { group, mirrors: new Map<TrackState, GroupConsumer>(), arrived: now() };
 		this.#cache.push(entry);
 		this.#cached.set(group.sequence, entry);
 		this.#advance(group.sequence);
@@ -1127,7 +1132,7 @@ export class Producer {
 			closeTrackState(sink, abort);
 		}
 		this.#sinks.clear();
-		this.#closedAt = performance.now();
+		this.#closedAt = now();
 		this.#prune();
 	}
 
@@ -1181,7 +1186,7 @@ export class Subscriber {
 	// The earliest wall deadline a held read armed, and its timer, which bumps `revision`
 	// when it comes due. See #wakeAt. Kept apart from the subscriber so a pending timer
 	// retains only this, never the subscriber or its track state, once no read waits.
-	#wall: { revision: Signal<number>; at: number; timer?: ReturnType<typeof setTimeout> } = {
+	#wall: { revision: Signal<number>; at: number; timer?: AbortController } = {
 		revision: new Signal(0),
 		at: Number.POSITIVE_INFINITY,
 	};
@@ -1273,8 +1278,9 @@ export class Subscriber {
 
 		const successor = this.#successor(group.sequence, drift.end);
 		if (!successor) return false;
-		const deadline = hooks.groupArrived(successor) + drift.budget;
-		if (performance.now() >= deadline) return true;
+		// Plain arithmetic: an unenforced budget is infinite, which no duration brand holds.
+		const deadline = hooks.groupArrived(successor) + drift.budget * 1_000_000;
+		if (now() >= deadline) return true;
 		if (wake) this.#wakeAt(deadline);
 
 		const reach = hooks.groupTimestamp(successor)?.asMillis();
@@ -1291,16 +1297,19 @@ export class Subscriber {
 	#wakeAt(at: number): void {
 		const wall = this.#wall;
 		if (!Number.isFinite(at) || at >= wall.at) return;
-		clearTimeout(wall.timer);
-		// setTimeout fires at once past 2^31 ms, so a longer budget wakes early and re-arms.
-		const delay = Math.min(Math.max(0, at - performance.now()), 2 ** 31 - 1);
-		wall.timer = setTimeout(() => {
-			wall.timer = undefined;
-			wall.at = Number.POSITIVE_INFINITY;
-			wall.revision.update((revision) => revision + 1);
-		}, delay);
+		wall.timer?.abort();
+		const timer = new AbortController();
 		// A staleness wakeup is never a reason to hold a Node/Bun process open.
-		(wall.timer as unknown as { unref?: () => void }).unref?.();
+		void sleepUntil(Instant(at), { signal: timer.signal, ref: false }).then(
+			() => {
+				if (timer.signal.aborted) return;
+				wall.timer = undefined;
+				wall.at = Number.POSITIVE_INFINITY;
+				wall.revision.update((revision) => revision + 1);
+			},
+			() => {},
+		);
+		wall.timer = timer;
 		wall.at = at;
 	}
 
@@ -1495,7 +1504,7 @@ export class Subscriber {
 		this.#frameGroup?.close(abort);
 		this.#frameGroup = undefined;
 		this.#state.timeline.length = 0;
-		clearTimeout(this.#wall.timer);
+		this.#wall.timer?.abort();
 		this.#wall.timer = undefined;
 	}
 
