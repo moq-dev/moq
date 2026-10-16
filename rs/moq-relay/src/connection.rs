@@ -98,8 +98,16 @@ impl Connection {
 
 	async fn serve(self) -> anyhow::Result<()> {
 		// Abandoned at the drain deadline, so the deadline bounds this task and its
-		// socket like it bounds a session.
-		let admitted = self.shutdown.admit(self.admit()).await;
+		// socket like it bounds a session, and at the handshake deadline, so a peer
+		// cannot hold the connection open behind a decision that never comes.
+		let admitted = match self.request.within(self.shutdown.admit(self.admit())).await {
+			Ok(admitted) => admitted,
+			Err(err) => {
+				// `within` already closed the session with the timeout code.
+				self.cluster.refusals.record(Refusal::Unavailable);
+				return Err(anyhow::Error::new(err).context("admission timed out"));
+			}
+		};
 		let (admitted, registration) = match admitted {
 			Ok(admitted) => admitted,
 			Err(err) => {

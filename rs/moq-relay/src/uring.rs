@@ -778,18 +778,28 @@ async fn serve_connection(
 		let cluster = serve.cluster.clone();
 		let sessions = serve.sessions.clone();
 		let shutdown = serve.shutdown.clone();
-		match serve
-			.tokio
-			.spawn(async move {
-				// Abandoned at the drain deadline: worker teardown only detaches this task.
-				let admitted = shutdown
-					.admit(cluster.admit_session(&auth, auth_request.clone()))
-					.await?;
-				Ok::<_, crate::auth::Error>((admitted, sessions.register(auth_request)))
-			})
+		let deciding = serve.tokio.spawn(async move {
+			// Abandoned at the drain deadline: worker teardown only detaches this task.
+			let admitted = shutdown
+				.admit(cluster.admit_session(&auth, auth_request.clone()))
+				.await?;
+			Ok::<_, crate::auth::Error>((admitted, sessions.register(auth_request)))
+		});
+		// The handshake deadline covers admission too. Aborting the task withdraws the
+		// admission from the decider, so nothing runs on past the connection.
+		let abort = deciding.abort_handle();
+		let decided = match deadline
+			.bound(async { deciding.await.context("auth task failed") })
 			.await
-			.context("auth task failed")?
 		{
+			Ok(decided) => decided,
+			Err(err) => {
+				abort.abort();
+				serve.cluster.refusals.record(Refusal::Unavailable);
+				return Err(err.context("admission timed out"));
+			}
+		};
+		match decided {
 			Ok((admitted, registered)) => {
 				registration = Some(registered);
 				admitted
@@ -941,6 +951,64 @@ mod tests {
 		tokio::time::timeout(window + std::time::Duration::from_secs(1), admission.abandoned())
 			.await
 			.expect("the admission outlived the drain deadline");
+		running.await.unwrap().unwrap();
+		connecting.abort();
+	}
+
+	/// `listen.timeout` bounds admission on the io_uring listener too: a decision
+	/// that never comes is abandoned at the handshake deadline.
+	#[tokio::test]
+	async fn pending_admission_is_abandoned_at_the_handshake_deadline() {
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default())
+			&& std::env::var_os("MOQ_STRICT").is_none()
+		{
+			eprintln!("skipping io_uring relay test: {reason}");
+			return;
+		}
+
+		let dir = tempfile::tempdir().unwrap();
+		let key = rcgen::KeyPair::generate().unwrap();
+		let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+			.unwrap()
+			.self_signed(&key)
+			.unwrap();
+		let (cert_path, key_path) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
+		std::fs::write(&cert_path, cert.pem()).unwrap();
+		std::fs::write(&key_path, key.serialize_pem()).unwrap();
+
+		let timeout = std::time::Duration::from_secs(1);
+		let mut config = crate::Config::default();
+		config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.listen.tls.cert = vec![cert_path];
+		config.listen.tls.key = vec![key_path];
+		config.listen.timeout = Some(timeout);
+		config.runtime.workers = Some(1);
+		config.runtime.pin = false;
+		config.runtime.io_uring = true;
+		config.drain_timeout = std::time::Duration::from_millis(100);
+		let mut relay = crate::Relay::load(config).await.unwrap().with_signals(false);
+		let port = relay.addr().unwrap().port();
+		let mut admissions = relay.admissions().unwrap();
+		let trigger = relay.shutdown_trigger().clone();
+		let running = tokio::spawn(relay.run());
+
+		let mut client = moq_tokio::connect::Config::default();
+		client.tls.insecure = Some(true);
+		client.once = Some(true);
+		client.bind = Some("127.0.0.1:0".parse().unwrap());
+		let url: url::Url = format!("moql://127.0.0.1:{port}/deadline").parse().unwrap();
+		let client = client.init(Default::default()).unwrap();
+		let connecting = tokio::spawn(async move { client.with_reconnect(false).connect(url).established().await });
+		let mut admission = admissions.next().await.unwrap();
+
+		// Only timers decide what follows: the deadline passes with nobody answering.
+		tokio::time::pause();
+		tokio::time::timeout(timeout + std::time::Duration::from_secs(1), admission.abandoned())
+			.await
+			.expect("the admission outlived the handshake deadline");
+		tokio::time::resume();
+		trigger.start();
 		running.await.unwrap().unwrap();
 		connecting.abort();
 	}

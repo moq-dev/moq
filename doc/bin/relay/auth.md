@@ -343,8 +343,9 @@ admissions itself, without the HTTP: leave `[auth]` empty and take
 `moq_auth::Request` a server would read, and is answered with a lease or a
 refusal. A fixed lease never changes; a `lease::Producer` the application keeps
 re-checks, updates, and revokes on its own clock. The relay still closes the
-session at the grant's `expires`, and an admission left unanswered for ten
-seconds is refused. `Admission::attached()` marks a token presented
+session at the grant's `expires`, and a connection whose admission is still
+unanswered at its `listen.timeout` handshake deadline is closed; a token
+presented in band is refused after ten seconds. `Admission::attached()` marks a token presented
 [in band](#in-band-renewal) for a session already admitted under the same id,
 so count sessions only on the others. Gateway accept loops can call `Cluster::admit` for the same
 scoped session as a native connection. See
