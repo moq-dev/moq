@@ -1,6 +1,9 @@
 //! The runtime backend: tokio's clock on native (paused tokio included), and
 //! `performance.now()` with `setTimeout` in the browser, both through
 //! `web_async::time`. The only module, with the simulator, that reads a host clock.
+//!
+//! Without the `runtime` feature there are no timers, and reads fall back to std,
+//! except in the browser, where std has no clock and `web_async::time` still reads.
 #![allow(clippy::disallowed_methods)]
 
 #[cfg(feature = "runtime")]
@@ -10,16 +13,16 @@ use std::{
 	task::{Context, Poll},
 };
 
-#[cfg(feature = "runtime")]
+#[cfg(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi"))))]
 use web_async::time as host;
 
 use crate::{Instant, Wall};
 
 /// Where every unpaused clock counts from, so instants read on any thread, in any
 /// runtime or none, stay comparable.
-#[cfg(feature = "runtime")]
+#[cfg(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi"))))]
 static ORIGIN: OnceLock<host::Instant> = OnceLock::new();
-#[cfg(feature = "runtime")]
+#[cfg(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi"))))]
 static ANCHOR: OnceLock<(Instant, Wall)> = OnceLock::new();
 
 /// The origin this context counts from, and a reading of its clock.
@@ -28,7 +31,7 @@ static ANCHOR: OnceLock<(Instant, Wall)> = OnceLock::new();
 /// never reads below it. A paused tokio runtime's clock starts at the runtime's
 /// build, which can precede the origin; that runtime counts from its own first
 /// reading instead (see [`paused`]).
-#[cfg(feature = "runtime")]
+#[cfg(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi"))))]
 fn read() -> (host::Instant, host::Instant) {
 	#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 	let origin = *ORIGIN.get_or_init(|| host::Instant::from_std(std::time::Instant::now()));
@@ -42,13 +45,13 @@ fn read() -> (host::Instant, host::Instant) {
 	(origin, reading)
 }
 
-#[cfg(feature = "runtime")]
+#[cfg(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi"))))]
 pub(crate) fn now() -> Instant {
 	let (origin, reading) = read();
 	Instant::from_origin(reading.duration_since(origin))
 }
 
-#[cfg(feature = "runtime")]
+#[cfg(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi"))))]
 pub(crate) fn wall() -> Wall {
 	let since = host::SystemTime::now()
 		.duration_since(host::UNIX_EPOCH)
@@ -56,8 +59,12 @@ pub(crate) fn wall() -> Wall {
 	Wall::UNIX_EPOCH + since
 }
 
-#[cfg(feature = "runtime")]
+#[cfg(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi"))))]
 pub(crate) fn anchor() -> (Instant, Wall) {
+	#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+	if let Some(anchor) = paused::anchor() {
+		return anchor;
+	}
 	*ANCHOR.get_or_init(|| (now(), wall()))
 }
 
@@ -92,15 +99,15 @@ impl Timer {
 	}
 }
 
-#[cfg(not(feature = "runtime"))]
+#[cfg(not(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi")))))]
 static STD_ORIGIN: OnceLock<(std::time::Instant, Wall)> = OnceLock::new();
 
-#[cfg(not(feature = "runtime"))]
+#[cfg(not(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi")))))]
 fn std_origin() -> (std::time::Instant, Wall) {
 	*STD_ORIGIN.get_or_init(|| (std::time::Instant::now(), system_wall()))
 }
 
-#[cfg(not(feature = "runtime"))]
+#[cfg(not(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi")))))]
 fn system_wall() -> Wall {
 	let since = std::time::SystemTime::now()
 		.duration_since(std::time::UNIX_EPOCH)
@@ -108,17 +115,17 @@ fn system_wall() -> Wall {
 	Wall::UNIX_EPOCH + since
 }
 
-#[cfg(not(feature = "runtime"))]
+#[cfg(not(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi")))))]
 pub(crate) fn now() -> Instant {
 	Instant::from_origin(std_origin().0.elapsed())
 }
 
-#[cfg(not(feature = "runtime"))]
+#[cfg(not(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi")))))]
 pub(crate) fn wall() -> Wall {
 	system_wall()
 }
 
-#[cfg(not(feature = "runtime"))]
+#[cfg(not(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi")))))]
 pub(crate) fn anchor() -> (Instant, Wall) {
 	(Instant::ZERO, std_origin().1)
 }
@@ -152,11 +159,20 @@ mod paused {
 	};
 
 	use super::host;
+	use crate::{Instant, Wall};
 
-	/// Paused runtimes whose clock started before [`ORIGIN`](super::ORIGIN), with the
-	/// first reading each counts from. Only test runtimes land here: an unpaused
-	/// clock never reads below the origin. Never pruned; one entry per such runtime.
-	static OWN: LazyLock<Mutex<HashMap<tokio::runtime::Id, host::Instant>>> = LazyLock::new(Default::default);
+	/// A paused runtime counting from its own origin.
+	struct Own {
+		/// The first reading it counts from.
+		origin: host::Instant,
+		/// Its own [`anchor`], since its instants share no scale with [`ANCHOR`](super::ANCHOR).
+		anchor: Option<(Instant, Wall)>,
+	}
+
+	/// Paused runtimes whose clock started before [`ORIGIN`](super::ORIGIN). Only test
+	/// runtimes land here: an unpaused clock never reads below the origin. Never
+	/// pruned; one entry per such runtime.
+	static OWN: LazyLock<Mutex<HashMap<tokio::runtime::Id, Own>>> = LazyLock::new(Default::default);
 	/// Whether [`OWN`] has any entry, so production reads skip its lock.
 	static ANY: AtomicBool = AtomicBool::new(false);
 
@@ -170,14 +186,33 @@ mod paused {
 		};
 		let mut own = OWN.lock().unwrap();
 		if let Some(own) = own.get(&runtime.id()) {
-			return *own;
+			return own.origin;
 		}
 		if reading >= origin {
 			return origin;
 		}
-		own.insert(runtime.id(), reading);
+		own.insert(
+			runtime.id(),
+			Own {
+				origin: reading,
+				anchor: None,
+			},
+		);
 		ANY.store(true, Ordering::Release);
 		reading
+	}
+
+	/// The anchor of the calling runtime, if it counts from its own origin.
+	pub(super) fn anchor() -> Option<(Instant, Wall)> {
+		// Read first: it registers a runtime whose clock starts before the origin.
+		let now = super::now();
+		if !ANY.load(Ordering::Acquire) {
+			return None;
+		}
+		let runtime = tokio::runtime::Handle::try_current().ok()?;
+		let mut own = OWN.lock().unwrap();
+		let own = own.get_mut(&runtime.id())?;
+		Some(*own.anchor.get_or_insert_with(|| (now, super::wall())))
 	}
 }
 
@@ -207,6 +242,33 @@ mod tests {
 			assert_eq!(at.deadline(), start + Duration::from_secs(70));
 			at.await;
 			assert_eq!(crate::now(), start + Duration::from_secs(70));
+		});
+	}
+
+	/// A paused runtime counting from its own origin anchors on its own clock, not
+	/// on one another runtime advanced.
+	#[test]
+	fn paused_runtimes_own_their_anchors() {
+		let paused = || {
+			tokio::runtime::Builder::new_current_thread()
+				.enable_time()
+				.start_paused(true)
+				.build()
+				.unwrap()
+		};
+		// Built before anything reads the clock, so in a fresh process each counts
+		// from its own origin.
+		let first = paused();
+		let second = paused();
+		let _ = crate::now();
+		first.block_on(async {
+			let _ = crate::now();
+			tokio::time::advance(Duration::from_secs(60)).await;
+			let _ = crate::anchor();
+		});
+		second.block_on(async {
+			let (instant, _) = crate::anchor();
+			assert_eq!(instant, crate::now());
 		});
 	}
 
@@ -294,5 +356,22 @@ export function restoreWall() { Date.now = originalNow; }
 		let wall = crate::wall();
 		restore_wall();
 		assert_eq!(wall, crate::Wall::UNIX_EPOCH + Duration::from_millis(1_700_000_000_123));
+	}
+}
+
+#[cfg(all(test, not(feature = "runtime"), target_arch = "wasm32", not(target_os = "wasi")))]
+mod browser_read_tests {
+	use wasm_bindgen_test::*;
+
+	wasm_bindgen_test_configure!(run_in_browser);
+
+	/// Reads work without the runtime, since std has no clock in the browser.
+	#[wasm_bindgen_test]
+	fn reads_without_runtime() {
+		let start = crate::now();
+		assert!(crate::now() >= start);
+		assert!(crate::wall() > crate::Wall::UNIX_EPOCH);
+		let (instant, _) = crate::anchor();
+		assert!(instant <= crate::now());
 	}
 }
