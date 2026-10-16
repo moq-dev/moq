@@ -593,6 +593,24 @@ fn zero_rtt_rejected_checkpoint_is_closed() {
     assert_eq!(read(&mut pair, server_ch, s), (MSG.to_vec(), Ok(())));
 }
 
+/// A checkpoint from another connection panics, even where that connection has a stream of the
+/// same id holding at least as much data.
+#[test]
+#[should_panic(expected = "checkpoint used on another connection")]
+fn checkpoint_from_another_connection() {
+    let _guard = subscribe();
+    let mut pair = pair(true);
+    let (a, _) = pair.connect();
+    let (b, _) = pair.connect();
+
+    let s = pair.client_streams(a).open(Dir::Uni).unwrap();
+    let checkpoint = write(&mut pair, a, s);
+    let other = pair.client_streams(b).open(Dir::Uni).unwrap();
+    assert_eq!(other, s);
+    pair.client_send(b, other).write(MSG).unwrap();
+    let _ = reset(&mut pair, b, checkpoint);
+}
+
 /// A client remembers the server's support for 0-RTT, and may use it there.
 #[test]
 fn zero_rtt() {

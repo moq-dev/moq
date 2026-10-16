@@ -8,7 +8,11 @@ use thiserror::Error;
 use tracing::trace;
 
 use super::spaces::{Retransmits, ThinRetransmits};
-use crate::{Dir, StreamId, VarInt, connection::streams::state::get_or_insert_recv, frame};
+use crate::{
+    Dir, StreamId, VarInt,
+    connection::{ConnectionTag, streams::state::get_or_insert_recv},
+    frame,
+};
 
 mod recv;
 use recv::Recv;
@@ -339,6 +343,7 @@ impl<'a> SendStream<'a> {
         };
         Checkpoint {
             id: self.id,
+            tag: self.state.tag,
             generation: self.state.generation,
             offset,
         }
@@ -359,11 +364,8 @@ impl<'a> SendStream<'a> {
             // Redundant reset call
             return Err(ClosedStream { _private: () });
         }
-        // Stream IDs are never reused, so only a checkpoint from another connection gets here
-        assert!(
-            reliable_size <= stream.offset(),
-            "checkpoint used on another connection"
-        );
+        // A checkpoint names its stream's connection and generation, so it never runs past the data
+        debug_assert!(reliable_size <= stream.offset());
         // The peer that sent STOP_SENDING will not read the prefix
         let reliable_size = match stream.stop_reason {
             Some(_) => 0,
@@ -422,6 +424,7 @@ impl<'a> SendStream<'a> {
 #[derive(Debug)]
 pub struct Checkpoint {
     id: StreamId,
+    tag: ConnectionTag,
     generation: u64,
     offset: u64,
 }
@@ -441,15 +444,19 @@ impl Checkpoint {
     /// rejected 0-RTT discarded, even if a new stream has since taken its id.
     ///
     /// # Panics
-    /// - when used on a connection other than the one it came from, if that is detected
+    /// If the checkpoint came from another connection.
     pub fn reset(
         self,
         conn: &mut crate::Connection,
         error_code: VarInt,
     ) -> Result<(), ClosedStream> {
         let mut stream = conn.send_stream(self.id);
+        assert!(
+            self.tag == stream.state.tag,
+            "checkpoint used on another connection"
+        );
         // Rejected 0-RTT discarded the stream, and a new one may have its id
-        if stream.state.generation != self.generation {
+        if self.generation != stream.state.generation {
             return Err(ClosedStream { _private: () });
         }
         stream.reset_to(error_code, self.offset)
