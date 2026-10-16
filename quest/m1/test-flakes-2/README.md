@@ -38,6 +38,7 @@ Public API: none. Wire: none.
 - [Interop close code](/quest/m1/test-flakes-2/interop-close-code.md) - the browser reliably sees `unauthorized` for a refused session
 - [Auth refresh mocks time](/quest/m1/test-flakes-2/auth-refresh-mock-time.md) - moq-relay's auth refresh and fixed-lease tests measure a grant's life on one mocked clock
 - [uring teardown close](/quest/m1/test-flakes-2/uring-teardown-close.md) - moq-uring's published-close teardown test holds under load, fixed at its cause
+- [Relay burst drill](/quest/m1/test-flakes-2/relay-burst-impaired.md) - the impaired transport-peer burst drill never aborts its subscription while the link is up
 
 ## Related
 
