@@ -248,7 +248,7 @@ pub async fn supervise(
 			}
 			why = lease.ended() => {
 				tracing::info!(%why, "lease ended, closing session");
-				session.abort(moq_net::Error::Unauthorized);
+				session.abort(crate::auth::error(&why));
 				lease.close(why, session_bytes(&session));
 				return Ok(());
 			}

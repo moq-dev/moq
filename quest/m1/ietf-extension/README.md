@@ -59,7 +59,7 @@ cannot answer unambiguously is refused.
   Rewriting them would violate immutability; forwarding unchanged
   across those families would change their meaning.
 - **Public model carve-out.** These fields stay crate-private on purpose,
-  an exception to [a public model](/quest/m1/model-public-surface.md). A
+  an exception to [a public model](/quest/m1/public-model/README.md). A
   third-party relay built on the public model drops them, as plain lite
   does.
 - **Verification:** Rust integration tests per feature in each child, plus
@@ -91,4 +91,4 @@ Work owned by this README, after the children land:
 ## Related
 
 - [#4926](https://github.com/moq-dev/moq/issues/4926) - the declined request for an object-level API; this carries the fields for relays only
-- [Plan: a public model](/quest/m1/model-public-surface.md) - these fields are its deliberate exception
+- [A public model](/quest/m1/public-model/README.md) - these fields are its deliberate exception
