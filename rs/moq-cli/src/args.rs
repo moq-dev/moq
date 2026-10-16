@@ -1052,7 +1052,8 @@ impl ExportSink {
 /// A stdout sink's format and the options that apply to it.
 pub struct Stdout {
 	pub format: SubscribeFormat,
-	/// The staleness budget, also used as the TS/FLV/MKV release delay.
+	/// The staleness budget, also the FLV/MKV release delay and how far behind the source `ts`
+	/// runs (`--delay`).
 	pub max_delay: Duration,
 	pub linger: Duration,
 	/// Follow a replacement as a program switch (`ts` only).
@@ -1152,10 +1153,11 @@ pub struct BufferedFragmented {
 #[derive(usage::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Transport {
-	/// How long after its decode time each frame is written (e.g. `500ms`), like an SRT
-	/// receiver's latency. A frame that arrives later than this is dropped, and a stalled
-	/// group is skipped once it falls half this behind the newest content.
-	#[usage(long, default = "500ms")]
+	/// How far behind the source the output runs (e.g. `2s`), like an SRT receiver's latency,
+	/// including how far ahead of its decode time each frame is sent. A frame that arrives
+	/// later than this is dropped, and a stalled group is skipped once it falls half this
+	/// behind the newest content.
+	#[usage(long, default = "1s")]
 	pub delay: crate::duration::Duration,
 
 	/// How long to wait for the same publisher instance to come back once it ends (e.g. `10s`),
@@ -1193,13 +1195,13 @@ pub struct Transport {
 
 impl Transport {
 	fn deprecated(&self) -> moq_tokio::cli::Deprecated {
-		const HOLDS: &str = "it also holds every frame that long after its decode time";
+		const BEHIND: &str = "it also sets how far behind the source the output runs";
 		let mut found = moq_tokio::cli::Deprecated::default();
 		if self.max_age.is_some() {
-			found.changed("--max-age", None, "--delay", HOLDS);
+			found.changed("--max-age", None, "--delay", BEHIND);
 		}
 		if self.latency_max.is_some() {
-			found.changed("--latency-max", None, "--delay", HOLDS);
+			found.changed("--latency-max", None, "--delay", BEHIND);
 		}
 		found
 	}
@@ -1280,7 +1282,7 @@ mod tests {
 			};
 			export.sink.stdout().unwrap().max_delay
 		};
-		assert_eq!(stdout(&[]), Duration::from_millis(500));
+		assert_eq!(stdout(&[]), Duration::from_secs(1));
 		assert_eq!(stdout(&["--delay", "2s"]), Duration::from_secs(2));
 		for old in ["--max-age", "--latency-max"] {
 			let Err(err) = parse(&[old, "1s"]) else {

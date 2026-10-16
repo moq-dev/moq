@@ -169,3 +169,8 @@ mavenPublishing {
         }
     }
 }
+
+// A child JVM needs the raw test runtime, including the native JNA resources.
+tasks.withType<Test>().configureEach {
+    systemProperty("moq.test.classpath", classpath.asPath)
+}

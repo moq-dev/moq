@@ -107,11 +107,13 @@ impl Shared {
 					return Ok(());
 				}
 			}
-			self.metrics.enters.add(1);
+			self.metrics.sq_full_enters.add(1);
+			let before = ring.completion().len();
 			let submitted = ring.submit();
-			if let Ok(count) = &submitted {
-				self.metrics.submissions.add(*count as u64);
-			}
+			self.metrics.entered(
+				submitted.as_ref().map_or(0, |count| *count),
+				ring.completion().len().saturating_sub(before),
+			);
 			if let Err(err) = submitted {
 				// A deadline-bounded teardown can safely retry an interrupted
 				// enter; ordinary callers surface it to their worker.

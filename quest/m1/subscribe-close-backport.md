@@ -20,9 +20,8 @@ Decided 2026-10-14:
   - the `#runResponses` fix from the main quest;
   - the `raceUntil` loser fix from ca8995280, its `js/signals` hunk and test
     only (the rest of #5232 is unrelated).
-- It does not hold #5420; it ships in a later 0.17 patch, like the
-  [FETCH edge cases](/quest/m1/fetch-edge-cases.md). The `@moq/signals` and
-  `@moq/net` patch bumps happen at that cut.
+- It does not hold #5420; it ships in a later 0.17 patch. The `@moq/signals`
+  and `@moq/net` patch bumps happen at that cut.
 - `#openSubscribe` keeps sending a SUBSCRIBE for a producer closed during
   setup. With both fixes that is a SUBSCRIBE cancelled at once, and `main`
   avoids it through its retire logic, so the backport stays minimal.
