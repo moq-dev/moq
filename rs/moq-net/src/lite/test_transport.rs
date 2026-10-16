@@ -35,13 +35,16 @@ impl crate::transport::Error for SinkError {
 	}
 }
 
+/// A datagram's send group id and in-group order.
+pub type Rank = (Option<usize>, i64);
+
 /// What the session's send streams recorded. Resets are a list, not a last-value, so a
 /// stray second reset (a drop fallback firing behind an abort) is visible.
 #[derive(Clone, Default)]
 pub struct Log {
 	pub datagrams: Arc<Mutex<Vec<bytes::Bytes>>>,
 	/// The send group and order each datagram was sent with, beside [`Self::datagrams`].
-	datagram_ranks: Arc<Mutex<Vec<(Option<usize>, i64)>>>,
+	datagram_ranks: Arc<Mutex<Vec<Rank>>>,
 	pub writes: Arc<Mutex<Vec<u8>>>,
 	pub resets: Arc<Mutex<Vec<u32>>>,
 	/// Every write, FIN and reset on every send stream, in call order. See [`Self::trail`].
@@ -119,7 +122,7 @@ impl Log {
 	}
 
 	/// The send group and order of every datagram, as (group, order) in call order.
-	pub fn datagram_ranks(&self) -> Vec<(Option<usize>, i64)> {
+	pub fn datagram_ranks(&self) -> Vec<Rank> {
 		self.datagram_ranks.lock().unwrap().clone()
 	}
 
