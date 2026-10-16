@@ -186,8 +186,9 @@ function frameSource() {
 	};
 }
 
-// Let the capture pump drain everything pushed so far.
-const flush = () => new Promise((resolve) => setTimeout(resolve, 10));
+// Let the capture pump drain everything pushed so far. The pipeline runs on promises alone, so one
+// macrotask turn settles every microtask queued before it, with no wall-clock wait.
+const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 const open = () => Frame.all.filter((frame) => !frame.closed);
 
