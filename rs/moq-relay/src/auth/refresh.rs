@@ -233,7 +233,7 @@ impl Refresh {
 		self.waiting.push_back(Waiting {
 			request,
 			facts,
-			deadline: tokio::time::Instant::now() + super::ADMIT_TIMEOUT,
+			deadline: tokio::time::Instant::now() + super::ATTACH_TIMEOUT,
 		});
 		self.dispatch();
 	}
