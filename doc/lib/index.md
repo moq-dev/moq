@@ -47,3 +47,8 @@ how it looks in that language:
 
 Dart is the exception on codecs: its published binaries carry no encoder or
 decoder, so it moves already-encoded frames.
+
+## Upgrading
+
+Each package keeps a `MIGRATE.md` with a before/after snippet for every
+breaking change; [Upgrade](/setup/upgrade#migration-guides) links them all.

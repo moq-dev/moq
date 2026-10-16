@@ -118,6 +118,11 @@ Delete the calls.
 `fmp4::Export` ends with one of these where it used to write a track missing from the moov, and a broadcast that ends with media queued behind an undescribed track is an error instead of `Ok(None)`.
 Restart the export to pick up a new rendition.
 
+### fMP4 export of Annex-B H.264 and H.265 starts from the catalog
+
+When the catalog codec string and dimensions are enough, the export writes an `avc3` or `hev1` init before the first keyframe and leaves the parameter sets in the samples.
+A keyframe whose parameter sets never appeared ends the export instead of waiting 30 seconds.
+
 ### CMAF timescales must match the init
 
 CMAF `Wire::write` refuses a track whose timescale is not the init's `mdhd` timescale with `fmp4::Error::TimescaleMismatch`.

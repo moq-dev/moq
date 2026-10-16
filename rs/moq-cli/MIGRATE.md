@@ -49,6 +49,7 @@ Recording a track with no timestamps fails with `Untimed`, so an archive over mo
 
 A rendition added, changed, or left undescribed after the init segment ends the export with an error instead of writing a track missing from the moov.
 Restart the export to pick up a new rendition.
+Annex-B H.264 and H.265 sources get an `avc3` or `hev1` init from the catalog when it carries enough, and a keyframe whose parameter sets never appeared ends the export instead of waiting 30 seconds.
 
 ### `moq play --delay` defaults to `auto` (#4162)
 
