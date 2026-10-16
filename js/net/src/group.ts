@@ -3,6 +3,7 @@
  *
  * @module
  */
+import { Instant, now } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import { FrameTooLarge, GroupTooLarge, ProtocolViolation, TimestampMismatch, TooFarBehind } from "./error.ts";
 import { hooks, type ReadGroupFrame } from "./internal.ts";
@@ -68,10 +69,9 @@ class GroupState {
 	timestamp?: Timestamp;
 	// The newest frame's timestamp: where a reader that has taken every frame sits.
 	latest?: Timestamp;
-	// When the group joined the track this mirror belongs to, at this hop, in
-	// `performance.now()` milliseconds: the wall clock a superseded predecessor ages from.
-	// Per track, since one group can join several.
-	arrived = 0;
+	// When the group joined the track this mirror belongs to, at this hop: the wall clock a
+	// superseded predecessor ages from. Per track, since one group can join several.
+	arrived = Instant.zero;
 
 	constructor(sequence: number) {
 		this.sequence = sequence;
@@ -157,7 +157,7 @@ export class Producer {
 
 	// When the group was created or last written. Retention ages a group from this,
 	// not from its creation, so a group still being filled is never reclaimed.
-	#activity = performance.now();
+	#activity = now();
 
 	constructor(sequence: number) {
 		this.#state = new GroupState(sequence);
@@ -185,11 +185,11 @@ export class Producer {
 	}
 
 	/**
-	 * When the group was created or last written, in `performance.now()` milliseconds.
+	 * When the group was created or last written, on the installed clock.
 	 *
 	 * @internal Idle cache eviction only.
 	 */
-	get activity(): number {
+	get activity(): Instant {
 		return this.#activity;
 	}
 
@@ -282,7 +282,7 @@ export class Producer {
 			throw err;
 		}
 
-		this.#activity = performance.now();
+		this.#activity = now();
 		appendFrame(this.#state, frame);
 
 		if (this.#mirrors) {
