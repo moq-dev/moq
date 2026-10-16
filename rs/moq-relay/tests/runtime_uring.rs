@@ -273,7 +273,7 @@ async fn uring_workers_drain_on_the_trigger() {
 
 	let connecting = tokio::spawn(connect(client.clone(), url.clone()));
 	let first = admissions.next().await.expect("first admission");
-	let all = || [moq_auth::Pattern::all()].into_iter().collect();
+	let all = moq_auth::Pattern::all;
 	let (_first_lease, first_consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
 	first.grant(first_consumer);
 	let established = connecting.await.expect("client task");
@@ -683,10 +683,7 @@ async fn uring_refusals_reach_metrics() {
 /// A policy admitting verified certificates and nobody else.
 fn mtls_only() -> moq_auth::serve::Policy {
 	let mut policy = moq_auth::serve::Policy::default();
-	policy.mtls = moq_auth::Permissions::new(
-		[moq_auth::Pattern::all()].into_iter().collect(),
-		[moq_auth::Pattern::all()].into_iter().collect(),
-	);
+	policy.mtls = moq_auth::Permissions::new(moq_auth::Pattern::all(), moq_auth::Pattern::all());
 	policy
 }
 
@@ -739,7 +736,7 @@ async fn uring_auth_reports_distinct_quic_and_webtransport() {
 					.as_ref()
 					.is_some_and(|alpn| alpn.starts_with("moq-lite-"))
 			);
-			let all: moq_auth::Access = [moq_auth::Pattern::all()].into_iter().collect();
+			let all: moq_auth::Patterns = [moq_auth::Pattern::all()].into_iter().collect();
 			let grant = moq_auth::Grant::new(all.clone(), all);
 			let (producer, consumer) = moq_auth::lease::Producer::new(grant);
 			leases.push(producer);

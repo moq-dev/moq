@@ -19,7 +19,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use moq_auth::{Access, Event, Grant, Pattern, Request};
+use moq_auth::{Event, Grant, Pattern, Patterns, Request};
 use moq_relay::{Config, Connection, Relay, auth, cluster, web};
 use moq_tokio::moq_net;
 use moq_tokio::moq_net::stats;
@@ -113,7 +113,7 @@ impl Script {
 	}
 }
 
-fn all() -> Access {
+fn all() -> Patterns {
 	[Pattern::all()].into_iter().collect()
 }
 
@@ -1014,8 +1014,8 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 
 	// A narrow grant: the certificate publishes under `mine/**` and nothing else.
 	let narrow = serve(policy(moq_auth::Permissions::new(
-		["mine/**".parse().unwrap()].into_iter().collect(),
-		Default::default(),
+		"mine/**".parse::<moq_auth::Pattern>().unwrap(),
+		Patterns::new(),
 	)))
 	.await;
 	let (addr, relay) = spawn_quic_relay(build_auth(narrow), Some(root.clone())).await;
@@ -1414,7 +1414,7 @@ async fn quic_and_webtransport_report_distinct_auth_transports() {
 #[tokio::test]
 async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 	for scheme in ["tcp", "ws"] {
-		let mut initial = Grant::new(all(), ["a/**".parse().unwrap()].into_iter().collect());
+		let mut initial = Grant::new(all(), "a/**".parse::<moq_auth::Pattern>().unwrap());
 		initial.expires = Some(SystemTime::now() + Duration::from_secs(3600));
 		let script = Script::new(initial);
 		let auth = build_auth(script.spawn().await);
@@ -1464,7 +1464,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			.unwrap()
 			.unwrap();
 		let mut a_sub = a_read.track("video").unwrap().subscribe(None).await.unwrap();
-		let mut replacement = Grant::new(all(), ["b/**".parse().unwrap()].into_iter().collect());
+		let mut replacement = Grant::new(all(), "b/**".parse::<moq_auth::Pattern>().unwrap());
 		replacement.expires = Some(SystemTime::now() + Duration::from_secs(3600));
 		script.on_connect(Answer::Grant(replacement));
 		let token = tokio::time::timeout(TIMEOUT, subscriber.auth().add("replacement"))
@@ -1612,7 +1612,7 @@ async fn websocket_refusal_is_in_band() {
 /// The role seen at SETUP reaches the shared admission gate on the WebSocket path.
 #[tokio::test]
 async fn websocket_publisher_role_is_refused_by_a_subscribe_only_grant() {
-	let script = Script::new(Grant::new(Default::default(), all()));
+	let script = Script::new(Grant::new(Patterns::new(), all()));
 	let (port, relay) = spawn_ws_relay(build_auth(script.spawn().await)).await;
 	let url = room_url("ws", port);
 	let origin = moq_tokio::origin::spawn();

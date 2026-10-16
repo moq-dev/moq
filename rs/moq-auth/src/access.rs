@@ -56,28 +56,8 @@ impl Access {
 		self.path.is_empty()
 	}
 
-	/// Whether these paths and this cap permit everything in `other`.
-	pub fn covers(&self, other: &Self) -> bool {
-		self.path.covers(&other.path)
-			&& match (self.rate, other.rate) {
-				(None, _) => true,
-				(Some(a), Some(b)) => a >= b,
-				(Some(_), None) => false,
-			}
-	}
-
 	pub(crate) fn is_default(&self) -> bool {
 		self.path.is_empty() && self.rate.is_none()
-	}
-
-	/// Combine path grants, keeping the higher cap or uncapped access.
-	pub fn union(mut self, other: Self) -> Self {
-		self.path.extend(other.path);
-		self.rate = match (self.rate, other.rate) {
-			(Some(a), Some(b)) => Some(a.max(b)),
-			_ => None,
-		};
-		self
 	}
 }
 
@@ -90,6 +70,18 @@ impl From<Pattern> for Access {
 impl From<Patterns> for Access {
 	fn from(path: Patterns) -> Self {
 		Self { path, rate: None }
+	}
+}
+
+impl From<Vec<Pattern>> for Access {
+	fn from(path: Vec<Pattern>) -> Self {
+		path.into_iter().collect()
+	}
+}
+
+impl<const N: usize> From<[Pattern; N]> for Access {
+	fn from(path: [Pattern; N]) -> Self {
+		path.into_iter().collect()
 	}
 }
 
@@ -195,17 +187,6 @@ mod tests {
 		assert!(serde_json::from_str::<Access>(r#"{"path":"**","raet":8000}"#).is_err());
 	}
 
-	#[test]
-	fn unions_choose_the_highest_cap_and_uncapped_lifts_it() {
-		let access = |rate| Access {
-			path: Pattern::all().into(),
-			rate: Some(Rate::from_bps(rate).unwrap()),
-		};
-		assert_eq!(access(8000).union(access(16000)).rate.unwrap().as_bps(), 16000);
-		let uncapped: Access = [Pattern::all()].into_iter().collect();
-		assert_eq!(access(8000).union(uncapped.clone()).rate, None);
-		assert_eq!(uncapped.union(access(8000)).rate, None);
-	}
 	#[test]
 	fn shared_wire_vectors() {
 		let vectors: serde_json::Value = serde_json::from_str(include_str!("../rate.json")).unwrap();

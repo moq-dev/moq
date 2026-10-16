@@ -1322,10 +1322,7 @@ impl Cluster {
 	/// billed under `--cluster-tier`. The proof is a secret this relay minted for
 	/// itself, so no auth server is asked.
 	pub(crate) fn lan_peer_grant(&self) -> moq_auth::Grant {
-		let mut grant = moq_auth::Grant::new(
-			[moq_auth::Pattern::all()].into_iter().collect(),
-			[moq_auth::Pattern::all()].into_iter().collect(),
-		);
+		let mut grant = moq_auth::Grant::new(moq_auth::Pattern::all(), moq_auth::Pattern::all());
 		grant.tier = self.config.tier.clone().filter(|tier| !tier.is_empty());
 		grant.peer = true;
 		grant
@@ -2049,7 +2046,7 @@ mod tests {
 	#[tokio::test]
 	async fn fixed_leases_cannot_bypass_cap_refusal() {
 		let cluster = Cluster::new(Options::default()).unwrap();
-		let mut grant = moq_auth::Grant::new(moq_net::Pattern::all().into(), Default::default());
+		let mut grant = moq_auth::Grant::new(moq_net::Pattern::all(), moq_net::Patterns::new());
 		grant.publish.rate = Some(moq_auth::Rate::from_bps(8000).unwrap());
 		let lease = auth::Lease::new("/room", moq_auth::lease::Consumer::fixed(grant));
 		let request = moq_auth::Request::new("test", moq_auth::Transport::Http, "/room");
@@ -2071,7 +2068,7 @@ mod tests {
 			(true, false, (20, 30, 40)),
 			(true, true, (20, 30, 40)),
 		] {
-			let mut grant = moq_auth::Grant::new(Default::default(), Default::default());
+			let mut grant = moq_auth::Grant::new(moq_auth::Patterns::new(), moq_auth::Patterns::new());
 			grant.peer = peer;
 			grant.upstream = upstream;
 			let (_producer, consumer) = moq_auth::lease::Producer::new(grant);
@@ -2115,7 +2112,7 @@ mod tests {
 	async fn session_handles_apply_grant_mounts() {
 		let cluster = new_cluster(Config::default()).expect("cluster");
 		let everything = || moq_net::Patterns::from(moq_net::Pattern::all());
-		let mut grant = moq_auth::Grant::new(everything().into(), everything().into());
+		let mut grant = moq_auth::Grant::new(everything(), everything());
 		grant.mounts.insert(".svc".into(), ".svc/pid".into());
 		let token = auth::Token::new("/pid", &grant);
 
@@ -2150,7 +2147,7 @@ mod tests {
 		let everything = || moq_net::Patterns::from(moq_net::Pattern::all());
 		let invalid: [&[(&str, &str)]; 2] = [&[(".a", "pid/.z"), (".z", "secret")], &[("*", ".svc/pid")]];
 		for mounts in invalid {
-			let mut grant = moq_auth::Grant::new(everything().into(), everything().into());
+			let mut grant = moq_auth::Grant::new(everything(), everything());
 			for (at, target) in mounts {
 				grant.mounts.insert((*at).into(), (*target).into());
 			}
@@ -3246,8 +3243,8 @@ mod tests {
 		let cluster = new_cluster(Config::default()).expect("cluster");
 		let all: moq_net::Patterns = [moq_net::Pattern::all()].into_iter().collect();
 
-		let client = auth::Token::new("/", &moq_auth::Grant::new(all.clone().into(), all.clone().into()));
-		let mut grant = moq_auth::Grant::new(all.clone().into(), all.into());
+		let client = auth::Token::new("/", &moq_auth::Grant::new(all.clone(), all.clone()));
+		let mut grant = moq_auth::Grant::new(all.clone(), all);
 		grant.peer = true;
 		let peer = auth::Token::new("/", &grant);
 
@@ -3282,8 +3279,8 @@ mod tests {
 		let cluster = new_cluster(Config::default()).expect("cluster");
 		let all: moq_net::Patterns = [moq_net::Pattern::all()].into_iter().collect();
 
-		let client = auth::Token::new("/", &moq_auth::Grant::new(all.clone().into(), all.clone().into()));
-		let mut grant = moq_auth::Grant::new(all.clone().into(), all.into());
+		let client = auth::Token::new("/", &moq_auth::Grant::new(all.clone(), all.clone()));
+		let mut grant = moq_auth::Grant::new(all.clone(), all);
 		grant.peer = true;
 		let peer = auth::Token::new("/", &grant);
 		grant.upstream = true;

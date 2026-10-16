@@ -1209,7 +1209,7 @@ mod tests {
 			for _ in 0..6 {
 				let admission = admissions.next().await.unwrap();
 				assert_eq!(admission.request.transport, moq_auth::Transport::Http);
-				let mut grant = moq_auth::Grant::new(Default::default(), moq_auth::Pattern::all().into());
+				let mut grant = moq_auth::Grant::new(moq_auth::Patterns::new(), moq_auth::Pattern::all());
 				grant.tier = Some(
 					admission
 						.request
@@ -1324,7 +1324,7 @@ mod tests {
 			for _ in 0..2 {
 				let admission = admissions.next().await.unwrap();
 				// Publish-only: admitted by auth, but forbidden from reading.
-				let grant = moq_auth::Grant::new(moq_auth::Pattern::all().into(), Default::default());
+				let grant = moq_auth::Grant::new(moq_auth::Pattern::all(), moq_auth::Patterns::new());
 				let (producer, consumer) = moq_auth::lease::Producer::new(grant);
 				leases.push(producer);
 				admission.grant(consumer);

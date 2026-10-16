@@ -196,7 +196,7 @@ impl Config {
 	pub fn public_grant(&self) -> Option<Grant> {
 		let publish: Patterns = self.public.iter().chain(&self.public_publish).cloned().collect();
 		let subscribe: Patterns = self.public.iter().chain(&self.public_subscribe).cloned().collect();
-		(!publish.is_empty() || !subscribe.is_empty()).then(|| Grant::new(publish.into(), subscribe.into()))
+		(!publish.is_empty() || !subscribe.is_empty()).then(|| Grant::new(publish, subscribe))
 	}
 
 	/// The 0.14 settings in use, each paired with what replaced it. A relay refuses
@@ -464,12 +464,13 @@ impl Token {
 	}
 
 	/// Whether `other` still covers everything this token scopes: the same root and
-	/// mounts, and every grant still held.
+	/// mounts, and every path still held. Caps are not compared: a cap change is
+	/// applied to the live connection rather than ending it.
 	pub(crate) fn covered_by(&self, other: &Self) -> bool {
 		self.root == other.root
 			&& self.mounts == other.mounts
-			&& other.subscribe.covers(&self.subscribe)
-			&& other.publish.covers(&self.publish)
+			&& other.subscribe.path.covers(&self.subscribe.path)
+			&& other.publish.path.covers(&self.publish.path)
 	}
 }
 
@@ -1015,7 +1016,7 @@ mod tests {
 				let (auth, mut admissions) = Auth::embedded("test");
 				let request = auth.request(transport, "/room");
 				let (result, ()) = tokio::join!(auth.admit(request), async {
-					let mut grant = Grant::new(moq_net::Pattern::all().into(), moq_net::Pattern::all().into());
+					let mut grant = Grant::new(moq_net::Pattern::all(), moq_net::Pattern::all());
 					let access = if publish {
 						&mut grant.publish
 					} else {
@@ -1037,7 +1038,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn a_cap_added_at_revalidation_ends_the_lease() {
-		let grant = Grant::new(moq_net::Pattern::all().into(), moq_net::Pattern::all().into());
+		let grant = Grant::new(moq_net::Pattern::all(), moq_net::Pattern::all());
 		let (producer, consumer) = lease::Producer::new(grant.clone());
 		let mut lease = Lease::new("/room", consumer);
 		let mut capped = grant;
@@ -1230,10 +1231,7 @@ mod tests {
 			admission.refuse(Error::Refused);
 			// A grant that admits nothing is the decider's mistake, refused like a server's.
 			let admission = admissions.next().await.expect("an admission");
-			admission.grant(lease::Consumer::fixed(Grant::new(
-				Default::default(),
-				Default::default(),
-			)));
+			admission.grant(lease::Consumer::fixed(Grant::new(Patterns::new(), Patterns::new())));
 			// Dropped without an answer.
 			drop(admissions.next().await.expect("an admission"));
 			admissions
@@ -1321,7 +1319,7 @@ mod tests {
 		assert_eq!(token.tier, Tier::new("gold"));
 
 		let patterns = patterns(&["*/chat", "alice", ""]);
-		let token = Token::new("/", &Grant::new(patterns.clone(), Default::default()));
+		let token = Token::new("/", &Grant::new(patterns.clone(), Patterns::new()));
 		assert_eq!(token.publish, patterns);
 	}
 

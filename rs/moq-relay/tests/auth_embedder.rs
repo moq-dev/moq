@@ -1,9 +1,9 @@
 //! Admission and lease behavior for a gateway embedding the relay.
 
-use moq_auth::{Access, Grant, Pattern, Role, Transport, lease};
+use moq_auth::{Grant, Pattern, Patterns, Role, Transport, lease};
 use moq_relay::{auth, cluster};
 
-fn patterns(texts: &[&str]) -> Access {
+fn patterns(texts: &[&str]) -> Patterns {
 	texts.iter().map(|text| text.parse::<Pattern>().unwrap()).collect()
 }
 
@@ -26,10 +26,7 @@ async fn gateway_admission_scopes_origins_and_revoke_stops_work() {
 	request.role = Some(Role::Publisher);
 	let admitted = cluster.admit(&auth, request).await.unwrap();
 	assert_eq!(admitted.lease.token().root.as_str(), "canonical");
-	assert_eq!(
-		admitted.publisher.as_ref().unwrap().allowed(),
-		patterns(&["media/**"]).path
-	);
+	assert_eq!(admitted.publisher.as_ref().unwrap().allowed(), patterns(&["media/**"]));
 	assert!(
 		admitted.subscriber.is_none(),
 		"publisher-only gateway must not subscribe"
@@ -51,7 +48,7 @@ async fn a_gateway_role_without_scope_is_forbidden() {
 		let admission = admissions.next().await.unwrap();
 		admission.grant(lease::Consumer::fixed(Grant::new(
 			patterns(&["media/**"]),
-			Default::default(),
+			Patterns::new(),
 		)));
 	});
 	let mut request = auth.request(Transport::WebRtc, "/room");
@@ -68,7 +65,7 @@ async fn completed_gateway_work_closes_its_lease() {
 	let (auth, mut admissions) = auth::Auth::embedded("edge");
 	let decider = tokio::spawn(async move {
 		let admission = admissions.next().await.unwrap();
-		let (producer, consumer) = lease::Producer::new(Grant::new(patterns(&["media/**"]), Default::default()));
+		let (producer, consumer) = lease::Producer::new(Grant::new(patterns(&["media/**"]), Patterns::new()));
 		admission.grant(consumer);
 		producer
 	});
@@ -87,7 +84,7 @@ async fn a_narrowed_gateway_grant_stops_work() {
 	let (auth, mut admissions) = auth::Auth::embedded("edge");
 	let decider = tokio::spawn(async move {
 		let admission = admissions.next().await.unwrap();
-		let (producer, consumer) = lease::Producer::new(Grant::new(patterns(&["media/**"]), Default::default()));
+		let (producer, consumer) = lease::Producer::new(Grant::new(patterns(&["media/**"]), Patterns::new()));
 		admission.grant(consumer);
 		producer
 	});
@@ -95,7 +92,7 @@ async fn a_narrowed_gateway_grant_stops_work() {
 	request.role = Some(Role::Publisher);
 	let admitted = cluster.admit(&auth, request).await.unwrap();
 	let producer = decider.await.unwrap();
-	producer.update(Grant::new(patterns(&["media/video/**"]), Default::default()));
+	producer.update(Grant::new(patterns(&["media/video/**"]), Patterns::new()));
 	assert_eq!(
 		auth::hold(admitted.lease, std::future::pending::<()>()).await,
 		Err(lease::Reason::Narrowed)
@@ -119,7 +116,7 @@ async fn a_moved_gateway_tier_retags_its_stats() {
 	};
 
 	let (auth, mut admissions) = auth::Auth::embedded("edge");
-	let mut grant = Grant::new(patterns(&["media/**"]), Default::default());
+	let mut grant = Grant::new(patterns(&["media/**"]), Patterns::new());
 	grant.tier = Some("gateway".into());
 	let decider = tokio::spawn({
 		let grant = grant.clone();

@@ -21,11 +21,8 @@ test("shared bitrate wire vectors roundtrip without losing caps", () => {
 	}
 });
 
-test("unions choose the highest cap and uncapped access lifts it", () => {
+test("access refuses rates that are not positive safe integers", () => {
 	const access = (rate?: number) => new Access({ path: patterns(["**"]), rate });
-	expect(access(8000).union(access(16000)).rate).toBe(16000);
-	expect(access(8000).union(access()).rate).toBeUndefined();
-	expect(access().union(access(8000)).rate).toBeUndefined();
 	for (const rate of [Number.NaN, Number.POSITIVE_INFINITY, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
 		expect(() => access(rate)).toThrow();
 		expect(AccessSchema.safeParse({ path: "**", rate }).success).toBe(false);

@@ -59,10 +59,10 @@ pub struct Grant {
 
 impl Grant {
 	/// A grant of these paths and bitrate caps, with no other restrictions.
-	pub fn new(publish: Access, subscribe: Access) -> Self {
+	pub fn new(publish: impl Into<Access>, subscribe: impl Into<Access>) -> Self {
 		Self {
-			publish,
-			subscribe,
+			publish: publish.into(),
+			subscribe: subscribe.into(),
 			..Default::default()
 		}
 	}

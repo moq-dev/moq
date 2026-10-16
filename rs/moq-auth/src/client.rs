@@ -514,7 +514,7 @@ mod tests {
 	/// The wire carries whole seconds, so a cadence under one second would serialize
 	/// as zero and be refused; these tests run on a one-second cadence.
 	fn grant(expires_in: Option<Duration>, revalidate: Option<Duration>) -> Grant {
-		let mut grant = Grant::new(patterns(&["**"]).into(), Patterns::new().into());
+		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
 		grant.expires = expires_in.map(|d| SystemTime::now() + d);
 		grant.revalidate = revalidate;
 		grant
@@ -871,7 +871,7 @@ mod tests {
 	#[tokio::test]
 	async fn an_expired_grant_is_refused() {
 		tokio::time::pause();
-		let mut grant = Grant::new(patterns(&["**"]).into(), Patterns::new().into());
+		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
 		grant.expires = Some(SystemTime::now() - Duration::from_secs(1));
 		let script = Script::new(Log::default(), move |_| Some(Ok(grant.clone())));
 		assert!(matches!(script.connect().await, Err(Error::GrantExpired)));

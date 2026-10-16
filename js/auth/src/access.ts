@@ -44,14 +44,6 @@ export class Access {
 		this.rate = config.rate === undefined ? undefined : RateSchema.parse(config.rate);
 	}
 
-	/** Combine path grants, keeping the higher cap or uncapped access. */
-	union(other: Access): Access {
-		return new Access({
-			path: new Patterns([...this.path, ...other.path]),
-			rate: this.rate === undefined || other.rate === undefined ? undefined : Math.max(this.rate, other.rate),
-		});
-	}
-
 	/** Encode uncapped paths compactly and keep every cap explicit. */
 	toJSON(): string[] | { path: string[]; rate: number } {
 		const path = this.path.toJSON();

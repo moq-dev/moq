@@ -455,8 +455,7 @@ mod tests {
 	use std::time::{Duration, SystemTime};
 
 	fn grant(prefix: &str, seconds: u64) -> Grant {
-		let patterns = [prefix.parse().unwrap()].into_iter().collect();
-		let mut grant = Grant::new(patterns, Default::default());
+		let mut grant = Grant::new(prefix.parse::<moq_auth::Pattern>().unwrap(), moq_auth::Patterns::new());
 		grant.expires = Some(SystemTime::now() + Duration::from_secs(seconds));
 		grant
 	}

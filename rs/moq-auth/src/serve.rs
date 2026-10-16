@@ -453,7 +453,7 @@ mod tests {
 	}
 
 	fn rules(publish: &[&str], subscribe: &[&str]) -> Permissions {
-		Permissions::new(patterns(publish).into(), patterns(subscribe).into())
+		Permissions::new(patterns(publish), patterns(subscribe))
 	}
 
 	fn request(path: &str) -> Request {
@@ -488,8 +488,8 @@ mod tests {
 	fn sign(key: &Key, root: &str, publish: &[&str], subscribe: &[&str], expires: Option<SystemTime>) -> String {
 		let claims = Claims::default()
 			.with_root(root)
-			.with_publish(patterns(publish).into())
-			.with_subscribe(patterns(subscribe).into())
+			.with_publish(patterns(publish))
+			.with_subscribe(patterns(subscribe))
 			.with_expires(expires);
 		key.sign(&claims).unwrap()
 	}

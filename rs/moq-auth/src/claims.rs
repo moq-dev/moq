@@ -78,8 +78,11 @@ pub struct Permissions {
 
 impl Permissions {
 	/// Grant access to these publish and subscribe paths, with optional bitrate caps.
-	pub fn new(publish: crate::Access, subscribe: crate::Access) -> Self {
-		Self { publish, subscribe }
+	pub fn new(publish: impl Into<crate::Access>, subscribe: impl Into<crate::Access>) -> Self {
+		Self {
+			publish: publish.into(),
+			subscribe: subscribe.into(),
+		}
 	}
 
 	/// Whether nothing is granted, which is a refusal.
@@ -98,8 +101,8 @@ impl Permissions {
 /// ```no_run
 /// let claims = moq_auth::Claims::default()
 ///     .with_root("room/123")
-///     .with_publish(["alice/**".parse().unwrap()].into_iter().collect())
-///     .with_subscribe(["**".parse().unwrap()].into_iter().collect());
+///     .with_publish(["alice/**".parse().unwrap()])
+///     .with_subscribe(["**".parse().unwrap()]);
 /// ```
 ///
 /// Legacy `moq-token` claims are read too: each `put`/`get` prefix `p` is the subtree
@@ -141,14 +144,14 @@ impl Claims {
 	}
 
 	/// Set publish access and its optional bitrate cap, relative to the root.
-	pub fn with_publish(mut self, access: crate::Access) -> Self {
-		self.publish = access;
+	pub fn with_publish(mut self, access: impl Into<crate::Access>) -> Self {
+		self.publish = access.into();
 		self
 	}
 
 	/// Set subscribe access and its optional bitrate cap, relative to the root.
-	pub fn with_subscribe(mut self, access: crate::Access) -> Self {
-		self.subscribe = access;
+	pub fn with_subscribe(mut self, access: impl Into<crate::Access>) -> Self {
+		self.subscribe = access.into();
 		self
 	}
 

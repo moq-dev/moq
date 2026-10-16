@@ -9,8 +9,8 @@ use std::time::Duration;
 
 fn grant(prefix: &str) -> Grant {
 	Grant::new(
-		[format!("{prefix}/**").parse().unwrap()].into_iter().collect(),
-		Default::default(),
+		format!("{prefix}/**").parse::<moq_auth::Pattern>().unwrap(),
+		moq_auth::Patterns::new(),
 	)
 }
 

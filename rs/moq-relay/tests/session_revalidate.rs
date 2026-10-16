@@ -13,7 +13,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use moq_auth::{Access, Event, Grant, Pattern, Request};
+use moq_auth::{Event, Grant, Pattern, Patterns, Request};
 use moq_relay::session::{Filter, List, Nudged};
 use moq_relay::{Connection, auth, cluster, internal, web};
 use moq_tokio::moq_net;
@@ -92,7 +92,7 @@ impl Script {
 	}
 }
 
-fn all() -> Access {
+fn all() -> Patterns {
 	[Pattern::all()].into_iter().collect()
 }
 

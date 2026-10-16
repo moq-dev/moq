@@ -96,8 +96,8 @@ impl Args {
 
 				let payload = moq_auth::Claims::default()
 					.with_root(root)
-					.with_publish(publish.into_iter().collect())
-					.with_subscribe(subscribe.into_iter().collect())
+					.with_publish(publish)
+					.with_subscribe(subscribe)
 					.with_expires(expires.map(Into::into))
 					.with_issued(issued.map(Into::into));
 
@@ -469,9 +469,7 @@ impl Serve {
 				}
 			}
 		}
-		let rules = |publish: &[Pattern], subscribe: &[Pattern]| {
-			Permissions::new(publish.iter().cloned().collect(), subscribe.iter().cloned().collect())
-		};
+		let rules = |publish: &[Pattern], subscribe: &[Pattern]| Permissions::new(publish.to_vec(), subscribe.to_vec());
 		if self.key_set.is_some() && (self.key.is_some() || self.key_dir.is_some()) {
 			anyhow::bail!("--key-set conflicts with --key and --key-dir");
 		}
@@ -855,7 +853,7 @@ mod tests {
 			.sign(
 				&moq_auth::Claims::default()
 					.with_root("demo")
-					.with_publish(["alice/**".parse().unwrap()].into_iter().collect()),
+					.with_publish(["alice/**".parse().unwrap()]),
 			)
 			.unwrap();
 		let path = dir.path().join("alice.jwt");
