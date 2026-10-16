@@ -77,6 +77,8 @@ moq --connect http://localhost:4443 --broadcast live.hang export ts > sub.ts
 
 Requirements: `tsp`, `tsanalyze` and `tstables` (TSDuck) and `python3` for every mode; the
 round-trip modes also need `cargo`, `ffmpeg`, `ffprobe`, `curl`, and `timeout`.
+`just test ts-tstd` also needs `ffmpeg` (with libx264) and `ffprobe` for its generated
+references.
 
 ## Checks
 
@@ -198,8 +200,11 @@ changes:
 | delivered at 4x | TB and B overflow, audio held over 1 s |
 | delivered at 15x (a burst) | TB and B overflow, audio held over 1 s |
 
-No restamp can overflow the video MB: it holds the level's whole CPB less the
-declared one, about 3.6 MB, more than the 4 s capture carries.
+No restamp of the Kyrion capture can overflow its video MB: it holds the level's
+whole CPB less the declared one, about 3.6 MB, more than the 4 s capture carries.
+An 8 s FFmpeg AVC Baseline@2.0 clip has no declared NAL HRD, so its MB uses the
+much smaller level defaults. It passes as encoded; restamping only its PCRs at
+4x overflows MB (and TB), closing the separate MB negative-control gap.
 
 The packet layouts a capture cannot be edited into are built synthetically: a
 10 Mb/s single-video stream carrying the Kyrion SPS, one access unit per PES, with
@@ -221,9 +226,16 @@ partway through packets, and the last is cut off by the end of the capture:
 | four frames per PES, the first decoded 0.3 ms after its last byte leaves TB, before the rest of that packet has | pass |
 | seven frames per PES, the first decoded as B passes its size partway through a packet | B overflow |
 
-The ffmpeg clip `run.sh` generates is not a positive control: its muxer sends
-audio 0.7 s ahead by default (`-muxdelay`), which overflows the 3,584-byte ADTS
-buffer, and even at 0.1 s a four-packet audio burst overflows TB.
+A generated AVC/AAC reference also passes: stereo 48 kHz AAC at 128 kb/s,
+`-muxdelay 0.1 -muxpreload 0.1 -pes_payload_size 0`, in a 2 Mb/s TS. The short
+lead keeps the 3,584-byte AAC buffer below capacity, and the mux rate keeps
+audio packet bursts within the TB drain. Every elementary stream must have
+access units to grade; the builder also checks that AAC is actually present.
+
+The 10 Mb/s FFmpeg clip `run.sh` generates remains unsuitable as a positive
+control: its default 0.7 s audio lead overflows B, and even at 0.1 s a
+four-packet audio burst at that transport rate overflows TB. These references
+close the named MB/AAC gaps, not every codec, buffer or packet layout.
 
 ### Gate
 

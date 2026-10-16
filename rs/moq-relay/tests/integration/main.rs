@@ -21,4 +21,5 @@ mod runtime_workers;
 mod session_revalidate;
 mod shutdown_signal;
 mod smoke;
+mod stack;
 mod upstream_links;
