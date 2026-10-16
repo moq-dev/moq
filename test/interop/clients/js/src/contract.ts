@@ -145,6 +145,10 @@ export type Sample = {
 	/** Root mean square of the graph root's output over the analyser window. */
 	rms?: number;
 
+	/** Current player chrome, sampled without a driver granting user activation. */
+	controlLabel?: string;
+	centerPlayVisible?: boolean;
+
 	/** Whether the player is paused. */
 	paused: boolean;
 	/** Whether the `paused` attribute is reflected onto the element. */
@@ -213,3 +217,6 @@ export const CONTROL = "__moqInterop";
 export function publish(commands: Partial<InteropControl>): void {
 	(window as unknown as Record<string, unknown>)[CONTROL] = commands;
 }
+
+/** Prefix for read-only player samples delivered to the driver through console events. */
+export const SAMPLE_EVENT = "__moqInteropSample:";

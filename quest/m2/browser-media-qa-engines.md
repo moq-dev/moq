@@ -11,17 +11,17 @@ measured and which APIs each one lacked.
 
 `just test media` measures presented frame progress, tone presence,
 and audio/video skew against a deterministic fixture, but `harness.ts`
-launches only Playwright's Chromium and nothing installs another engine. Its
-capability probe already enumerates what the player needs (WebTransport,
-WebCodecs encode and decode, AudioWorklet, `MediaStreamTrackProcessor`,
-`canvas.captureStream`) and fails naming what is missing.
+supports pinned Chromium, Firefox, and WebKit players with a Chromium fixture.
+Its capability probe enumerates WebTransport, WebSocket, WebCodecs encode and
+decode, AudioWorklet, `MediaStreamTrackProcessor`, and `canvas.captureStream`,
+then names what is missing separately for publisher and player roles.
 
-Neither Playwright Firefox nor Playwright WebKit ships WebTransport, and
-WebKit also lacks the WebCodecs encoder, so neither can publish and neither
-can play over QUIC. What they can do is play over the WebSocket fallback.
-Real Firefox does use WebTransport; only Playwright's build lacks it, so a
-fallback run covers the player, not Firefox's transport path (see
-[#4460](https://github.com/moq-dev/moq/pull/4460), merged 2026-10-01).
+Playwright capabilities change with the pinned engine. A native probe of
+Playwright 1.63 Firefox 155 found WebTransport and WebCodecs, but no
+`MediaStreamTrackProcessor`, so it can play but cannot publish this fixture.
+The alternate players explicitly use WebSocket to isolate player behavior;
+this does not prove their QUIC transport. Probe publisher and player roles
+separately instead of assuming API support from the engine name.
 
 - Split the harness's publisher and subscriber roles so an engine can take
   one side: a Chromium fixture with a Firefox or WebKit player over the
@@ -36,3 +36,31 @@ fallback run covers the player, not Firefox's transport path (see
 - Real Firefox 155 still needs a manual run too: it reports a non-empty
   `WebTransport.protocol` and lands on lite-06 against the in-tree relay, while
   153/154 take the draft-14 SETUP path.
+
+## Validation evidence (2026-10-15)
+
+The engine role split, shared graders, explicit WebSocket alternate players,
+read-only pre-gesture observations, and nightly Chromium/Firefox/WebKit matrix
+are implemented. This quest remains open until a complete alternate-engine
+media run passes.
+
+Firefox 155.0 renders the fixture over WebSocket and passes the pre-gesture
+gate, but its audio context remains suspended after the real click with
+`userActivated: true`; `gesture starts audio` correctly fails. A standalone
+AudioContext also remained suspended across pointerdown, pointerup, and click
+resume attempts. The production cause is not established. Negative controls
+that fail at this earlier gate are failures, not sensitivity proof.
+
+WebKit 2359 is installed locally but cannot launch because host runtime
+libraries are absent. This is a runtime dependency failure, not evidence about
+WebKit APIs. Nightly installs dependencies with Playwright `--with-deps`.
+No tolerance or autoplay gate has been relaxed.
+
+The default Chromium path still enforces its original gate and tolerances. Its
+full run fails cold-start tone presence at 65/80 samples against the unchanged
+90% floor, matching the previously recorded class of cold-start refusal in
+#5635. This does not establish a common cause with the Firefox startup failure.
+The Chromium silent-audio, offset-audio, leaked-session, and lagging-latecomer
+negative controls pass. Its frozen-video control instead fails publisher
+readiness with a suspended fixture context, so that row is not sensitivity
+proof in this run. No repeat was used to turn either failure into a pass.

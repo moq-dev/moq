@@ -67,7 +67,7 @@ interop-negative *args:
 # republish, late join). Ends with negative controls that inject a frozen picture, silence, a
 # shifted tone, and a leaked session; each must fail the assertion it names. --timeout 30 gives
 
-# headless Chromium cold-start headroom.
+# headless Chromium cold-start headroom. --media-engines selects player engines; the fixture stays Chromium.
 [positional-arguments]
 media *args:
     ./interop/interop.sh --media --timeout 30 "$@"

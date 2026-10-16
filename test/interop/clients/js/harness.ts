@@ -1,5 +1,5 @@
 /**
- * Shared Playwright plumbing for the browser clients: serve the built page, launch Chromium, and
+ * Shared Playwright plumbing for the browser clients: serve the built page, launch an engine, and
  * read back the state each role mirrors onto the DOM.
  *
  * Used by `driver.ts` (the interop matrix) and `media.ts` (the media-output and lifecycle checks).
@@ -14,9 +14,18 @@ import {
 	type BrowserContextOptions,
 	type CDPSession,
 	chromium,
+	firefox,
 	type Page,
+	webkit,
 } from "playwright";
-import { CONTROL, type FixtureState, type InteropControl, type Resources, type Sample } from "./src/contract";
+import {
+	CONTROL,
+	type FixtureState,
+	type InteropControl,
+	type Resources,
+	SAMPLE_EVENT,
+	type Sample,
+} from "./src/contract";
 
 /**
  * A failed check, named after the property it was measuring.
@@ -103,18 +112,28 @@ export function pageUrl(origin: string, role: string, params: Record<string, str
 	return `${origin}/?${query}`;
 }
 
-/**
- * Launch headless Chromium.
- *
- * The "chromium" channel is full Chromium (new headless); the headless shell lacks WebTransport and
- * WebCodecs. `args` is empty by default: the media checks deliberately run without the fake-device
- * and autoplay overrides, so those belong to the caller that needs them.
- */
-export function launch(args: string[] = []): Promise<Browser> {
+/** Browser engines the media harness can launch. */
+export const ENGINES = ["chromium", "firefox", "webkit"] as const;
+/** One of the pinned Playwright engines. */
+export type Engine = (typeof ENGINES)[number];
+
+/** Launch an engine with its normal gesture gate and caller-supplied Chromium arguments. */
+export function launch(args: string[] = [], engine: Engine = "chromium"): Promise<Browser> {
 	// Playwright closes the browser on SIGTERM by default, which ends its sessions without a
 	// close. The drivers close it themselves; the harness reaps whatever a signal leaves behind.
-	return chromium.launch({ channel: "chromium", headless: true, args, handleSIGTERM: false });
+	// Full Chromium includes WebTransport and WebCodecs; the headless shell does not.
+	if (engine === "chromium")
+		return chromium.launch({ channel: "chromium", headless: true, args, handleSIGTERM: false });
+	if (engine === "firefox")
+		return firefox.launch({
+			headless: true,
+			handleSIGTERM: false,
+			firefoxUserPrefs: { "media.autoplay.default": 1, "media.autoplay.block-webaudio": true },
+		});
+	return webkit.launch({ headless: true, handleSIGTERM: false });
 }
+
+const samples = new WeakMap<Page, Sample>();
 
 /** Contexts tracing this process, saved by {@link finishTraces} when the run fails. */
 const traces: Array<{ context: BrowserContext; name: string }> = [];
@@ -162,6 +181,10 @@ export async function open(
 	const page = await browser.newPage(options);
 	const errors: BrowserErrors = { page: [], console: [] };
 	page.on("console", (message) => {
+		if (message.text().startsWith(SAMPLE_EVENT)) {
+			samples.set(page, JSON.parse(message.text().slice(SAMPLE_EVENT.length)) as Sample);
+			return;
+		}
 		console.error(`[${label}] ${message.text()}`);
 		if (message.type() === "error") errors.console.push(message.text());
 	});
@@ -183,12 +206,16 @@ export function throwPageErrors(errors: BrowserErrors): void {
 	if (messages.length > 0) throw new Error(messages.join("\n"));
 }
 
-// Playwright's page.evaluate and locator reads grant user activation in Chromium. A state probe
+// Playwright's page.evaluate and locator reads grant user activation. A state probe
 // before the deliberate click would therefore unlock Web Audio and invalidate the gesture test.
 const sessions = new WeakMap<Page, CDPSession>();
 
 /** Inspect page state without granting user activation to the document. */
 export async function inspect<A, T>(page: Page, fn: (arg: A) => T, arg: A): Promise<Awaited<T>> {
+	// Non-Chromium reads here follow an explicit gesture. Pre-gesture player reads
+	// use the page's read-only sample events instead of evaluation.
+	if (page.context().browser()?.browserType().name() !== "chromium")
+		return (await page.evaluate(`(${fn.toString()})(${JSON.stringify(arg) ?? "undefined"})`)) as Awaited<T>;
 	let session = sessions.get(page);
 	if (!session) {
 		session = await page.context().newCDPSession(page);
@@ -208,11 +235,14 @@ export async function inspect<A, T>(page: Page, fn: (arg: A) => T, arg: A): Prom
 export async function waitForWatch(page: Page): Promise<void> {
 	const deadline = Date.now() + 30_000;
 	while (Date.now() < deadline) {
-		const ready = await inspect(
-			page,
-			(tag) => document.querySelector(`${tag}[data-interop-ready]`) !== null,
-			SELECTORS.watch,
-		);
+		const ready =
+			page.context().browser()?.browserType().name() !== "chromium"
+				? samples.has(page)
+				: await inspect(
+						page,
+						(tag) => document.querySelector(`${tag}[data-interop-ready]`) !== null,
+						SELECTORS.watch,
+					);
 		if (ready) return;
 		await sleep(POLL_INTERVAL_MS);
 	}
@@ -221,6 +251,11 @@ export async function waitForWatch(page: Page): Promise<void> {
 
 /** Read one sample plus the player chrome. Throws until the page has sampled at least once. */
 export async function readPlayerState(page: Page): Promise<PlayerState> {
+	if (page.context().browser()?.browserType().name() !== "chromium") {
+		const sample = samples.get(page);
+		if (!sample) throw new Error("the player has not published a sample");
+		return { ...sample, centerPlayVisible: sample.centerPlayVisible ?? false };
+	}
 	const state = await inspect(
 		page,
 		(selectors) => {

@@ -7,14 +7,14 @@
  * Both are sampled in the same tick, which is what makes their difference a synchronization
  * measurement rather than two unrelated timelines.
  *
- * Everything lands on the element's dataset. Playwright may evaluate in a different JavaScript
- * world, where DOM nodes are shared but custom-element instance fields are not, so a dataset string
- * is the only reading a driver can trust.
+ * Samples reach both the element's dataset and a console event. Playwright may evaluate in a
+ * different JavaScript world, where custom-element instance fields are not shared. Alternate
+ * engines use console observations because evaluating even a read grants user activation.
  *
  * @module
  */
 import type MoqWatch from "@moq/watch/element";
-import { AUDIBLE_RMS, SAMPLE_MS, type Sample, TONE_FLOOR_DB } from "./contract";
+import { AUDIBLE_RMS, SAMPLE_EVENT, SAMPLE_MS, type Sample, TONE_FLOOR_DB } from "./contract";
 import { resources } from "./instrument";
 import * as Pattern from "./pattern";
 
@@ -124,6 +124,9 @@ export function attach(el: MoqWatch): () => void {
 			}
 		}
 
+		const ui = document.querySelector("moq-watch-ui")?.shadowRoot;
+		const control = ui?.querySelector<HTMLButtonElement>("button.control[aria-label]");
+		const centerPlay = ui?.querySelector<HTMLButtonElement>("button.center-play");
 		const state: Sample = {
 			seq: seq++,
 			broadcastActive: el.broadcast.out.active.peek() !== undefined,
@@ -140,12 +143,15 @@ export function attach(el: MoqWatch): () => void {
 			audioStalled: el.audio.out.stalled.peek(),
 			delay: el.sync.out.delay.peek(),
 			...(analyser ? analyze(analyser, spectrum, wave) : {}),
+			controlLabel: control?.getAttribute("aria-label") ?? undefined,
+			centerPlayVisible: centerPlay ? getComputedStyle(centerPlay).display !== "none" : false,
 			paused: el.paused,
 			pausedAttribute: el.hasAttribute("paused"),
 			resources: resources(),
 		};
 
 		el.dataset.interopState = JSON.stringify(state);
+		console.debug(SAMPLE_EVENT + JSON.stringify(state));
 	};
 
 	sample();
