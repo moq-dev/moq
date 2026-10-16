@@ -91,7 +91,7 @@ Linux candidate crosses from an x86 Linux host.
 | x86\_64-unknown-linux-gnu | Ubuntu 24.04, image 20261004.327.1 | Same image and architecture | 772 common objects byte-identical; one differently named Rust LTO object |
 | aarch64-unknown-linux-gnu | Ubuntu 24.04 ARM, image 20261012.149.1 | Ubuntu 24.04 x86, image 20261004.327.1, GCC cross toolchain | 879 common objects byte-identical; one differently named Rust LTO object |
 | aarch64-apple-darwin | macOS 26 ARM, image 20260907.0351.1 | Same image and architecture | 847 common objects byte-identical; one differently named Rust LTO object |
-| x86\_64-pc-windows-msvc | Windows 2025 VS2026, image 20260925.250.1 | Same image and architecture | 665 members each; COFF timestamps and native object build paths differ, plus one differently named Rust LTO object |
+| x86\_64-pc-windows-msvc | Windows 2025 VS2026, image 20260925.250.1 | Same image and architecture | 6,077 members each, preserving duplicate basenames; timestamps, debug paths and six assembly code sections differ, plus one differently named Rust LTO object |
 
 The Linux native and cross compilers are GCC 13.3.0. Both runners use Ubuntu
 24.04; the ARM cross sysroot is Ubuntu's `libc6-dev-arm64-cross`. The sampled
@@ -104,13 +104,28 @@ change in this sample, without proving an older-distro runtime baseline.
 
 The Windows C++ job identifies MSVC 19.51.36260.0; both jobs use the same
 runner image. A sampled AWS-LC object requests `MSVCRT` and `OLDNAMES` in both
-archives, preserving the release CRT. Its differing `.debug$S` records contain
-`target\release\build\...` versus
-`target\x86_64-pc-windows-msvc\release\build\...`; changing the path length
-also changes subsequent COFF offsets. Timestamp normalization alone therefore
-does not make these C++ archives identical. The remaining Windows members and
-the four Rust LTO objects have not been normalized into an executable-code
-equivalence proof. No incompatible ABI difference has been established.
+archives, preserving the release CRT. Preserving duplicate archive member
+names gives 6,077 members per archive; the earlier 665 count was distinct
+basename keys. Of 6,076 matched members, 5,685 are identical, 43 differ only
+in timestamps, and 342 differ only in debug/discarded sections and their
+associated auxiliary symbols, timestamps and offsets. Their `.debug$S`
+records contain `target\release\build` versus
+`target\x86_64-pc-windows-msvc\release\build` paths.
+
+Six OpenH264 assembly members have executable `.text` differences: `dct.o`,
+`downsample_bilinear.o`, `matrix_transpose.o`, `mb_copy.o`, `mc_luma.o`, and
+the second `vaa.o`. For `matrix_transpose.o`, `mb_copy.o`, and the second
+`vaa.o`, normalized instruction listings match after accounting for
+CDQE versus MOVSXD sign extension and alignment padding. The other three
+remain unproven. The C++ job installed NASM 3.2.0; the shared assembler's
+version was not logged, so a tool-version cause is plausible, not established.
+
+On each Linux target, all 427 `.text.uniffi_*` and 295
+`.rodata.UNIFFI_META*` payloads match. Their relocations and internal symbols
+differ, so equal section payloads do not prove linked equivalence. None of
+the four Rust fat-LTO objects has a complete executable-code equivalence
+proof. No incompatible ABI difference has been established; installed
+consumers must still execute against the actual selected prebuilt libraries.
 
 Static-library SHA-256 hashes, C++ first and shared candidate second:
 
@@ -156,12 +171,52 @@ C++ release must not depend on those artifacts still existing. Current
 packages, not standalone default-feature static libraries for all four C++
 targets. The minimal-feature assets cannot replace these candidates.
 
-Recommended, pending maintainer direction: record an explicit FFI version in
-`cpp/moq/FFI_VERSION` and publish immutable, checksummed default-feature native
-assets under that `moq-ffi-v*` release. A C++ release would select that version;
-nightly could use the coordinator's same-run artifacts. This adds a release
-asset contract and a public build input, so neither is introduced by this
-evidence-only change. The alternatives are an explicit workflow-run input
-(with artifact expiry making old releases unrebuildable), or retaining native
-C++ builds. Settle the release input and CMake/build-script configuration before
-implementing reuse; never resolve an absent input to the newest FFI release.
+The maintainer approved an explicit `cpp/moq/FFI_VERSION` pin selecting
+checksummed default-feature assets on the corresponding `moq-ffi-v*` release.
+`FFI_SHA256.json` pins every selected archive by its complete filename and
+SHA-256. There is no newest-release lookup. The pin is intentionally unset:
+existing releases lack this four-target asset contract. Source builds remain
+the default until a real release publishes all four validated assets and a
+subsequent pin change supplies their exact hashes. A malformed pin, missing
+asset, wrong hash, wrong feature/profile, or incompatible target fails.
+
+### Native input and release gates
+
+`MOQ_FFI_DIR` in CMake and `--ffi-dir DIR` in `just cpp package` select an
+extracted default-feature native input. Its manifest names the FFI version,
+source commit, target, feature set and profile; it carries the static library,
+metadata cdylib and native linker inputs together. CMake generates bindings
+from that cdylib without invoking Cargo. Direct directories are explicit local
+or same-run inputs; release downloads additionally require the checked-in hash.
+Without an explicit directory, `just cpp package` fetches exactly the pinned release input;
+direct CMake source builds require an explicit directory instead of silently
+ignoring the pin.
+
+The shared coordinator downloads its four exact `default-lib-<target>`
+artifacts on Ubuntu x86, Ubuntu 24.04 ARM, macOS ARM and Windows MSVC. Each runs
+`just cpp check --ffi-dir DIR`: install the package, then build and execute the
+existing C++17 and C++23 consumers, including the standard set on the consumer
+target, with exceptions/RTTI disabled. Unix also tests installed pkg-config
+linking and compiles the documented examples. No prebuilt error invokes Cargo.
+The cross-built ARM input therefore executes on an ARM host. This checks that
+runner's baseline only; it does not establish an older Linux runtime baseline.
+
+Only after all four consumers succeed can the tag coordinator publish
+`moq-ffi-default-<version>-<target>.tar.gz` and one `.sha256` per archive.
+The publisher refuses changed bytes under an existing asset name and never
+clobbers assets. These names are separate from Dart's minimal-feature assets.
+A first publication is an external condition for selecting a release pin;
+this change creates no release or tag. After publication, validate the actual
+pinned downloads through the same four-host consumer path before activation.
+
+A branch-only `release-cpp.yml` dispatch with `prebuilt-test=true` builds just
+these four shared targets and exercises the prebuilt package and installed
+consumers without publishing. Nightly exercises the coordinator's same-run
+path. `just cpp check` and nightly `just gh test` also cover hash refusal,
+archive traversal/symlink refusal, reproducible packaging, publication refusal,
+and CMake's build-free prebuilt path with malformed-input fixtures.
+
+PR #5727 changes the generator and overlaps the C++ checks and release workflow.
+Repeat binding generation and the installed-consumer matrix with its final
+generator/config before selecting the first pin. The old sampled binding
+matches alone do not validate a new generator.
