@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { Time, Track, Varint } from "@moq/net";
+import { type Micro, Milli } from "@moq/clock";
+import { Track, Varint } from "@moq/net";
 import { Format, Producer } from "./index.ts";
 
 const PROP_TIMESCALE = 0x08;
@@ -32,7 +33,7 @@ test("Format treats an empty payload as a duration marker", () => {
 	const fmt = new Format("video");
 	const [decoded] = fmt.decode(frame);
 	expect(decoded.payload.byteLength).toBe(0);
-	expect(fmt.end(decoded)).toBe(33_000 as Time.Micro);
+	expect(fmt.end(decoded)).toBe(33_000 as Micro);
 });
 
 test("Format preserves empty data payloads", () => {
@@ -51,7 +52,7 @@ test("Format decodes timestamp at default microseconds timescale", () => {
 	const fmt = new Format();
 	const [decoded] = fmt.decode(frame);
 
-	expect(decoded.timestamp).toBe(12_345 as Time.Micro);
+	expect(decoded.timestamp).toBe(12_345 as Micro);
 	expect(decoded.payload).toEqual(payload);
 	expect(decoded.keyframe).toBe(false);
 });
@@ -69,7 +70,7 @@ test("Format honors per-frame timescale property", () => {
 	const fmt = new Format();
 	const [decoded] = fmt.decode(frame);
 
-	expect(decoded.timestamp).toBe(2_000_000 as Time.Micro);
+	expect(decoded.timestamp).toBe(2_000_000 as Micro);
 });
 
 test("Format skips unknown odd-typed properties", () => {
@@ -87,7 +88,7 @@ test("Format skips unknown odd-typed properties", () => {
 	const fmt = new Format();
 	const [decoded] = fmt.decode(frame);
 
-	expect(decoded.timestamp).toBe(10 as Time.Micro);
+	expect(decoded.timestamp).toBe(10 as Micro);
 	expect(decoded.payload).toEqual(payload);
 });
 
@@ -130,7 +131,7 @@ test("Format decodes the draft-03 timestamp property", () => {
 	const fmt = new Format();
 	const [decoded] = fmt.decode(frame);
 
-	expect(decoded.timestamp).toBe(4242 as Time.Micro);
+	expect(decoded.timestamp).toBe(4242 as Micro);
 	expect(decoded.payload).toEqual(payload);
 });
 
@@ -142,7 +143,7 @@ test("Format skips an unknown property whose value needs all 62 bits", () => {
 		Varint.encode(1_000),
 	);
 	const [decoded] = new Format().decode(buildFrame(props, new Uint8Array([1])));
-	expect(decoded.timestamp).toBe(1_000 as Time.Micro);
+	expect(decoded.timestamp).toBe(1_000 as Micro);
 });
 
 test("Format rejects a timestamp past 2^53 - 1 instead of rounding", () => {
@@ -152,7 +153,7 @@ test("Format rejects a timestamp past 2^53 - 1 instead of rounding", () => {
 
 /** Each group's (LOC timestamp, payload size, net timestamp) after the producer has closed the track. */
 async function readGroups(track: Track.Producer) {
-	const subscriber = track.subscribe({ maxDelay: Time.Milli(30_000) });
+	const subscriber = track.subscribe({ maxDelay: Milli(30_000) });
 	const format = new Format("video");
 	const groups: { timestamp: number; size: number; net: number | undefined }[][] = [];
 	for (;;) {
@@ -177,9 +178,9 @@ async function readGroups(track: Track.Producer) {
 test("Producer ends a group with an empty frame at the next keyframe", async () => {
 	const track = new Track.Producer("video");
 	const producer = new Producer(track);
-	producer.encode(new Uint8Array([0xde, 0xad]), 0 as Time.Micro, true);
-	producer.encode(new Uint8Array([0xbe, 0xef]), 10_000 as Time.Micro, false);
-	producer.encode(new Uint8Array([0xca, 0xfe]), 20_000 as Time.Micro, true);
+	producer.encode(new Uint8Array([0xde, 0xad]), 0 as Micro, true);
+	producer.encode(new Uint8Array([0xbe, 0xef]), 10_000 as Micro, false);
+	producer.encode(new Uint8Array([0xca, 0xfe]), 20_000 as Micro, true);
 	producer.close();
 
 	const groups = await readGroups(track);
@@ -199,16 +200,16 @@ test("Producer ends a group with an empty frame at the next keyframe", async () 
 	expect(
 		new Format("video").end({
 			payload: new Uint8Array(marker.size),
-			timestamp: marker.timestamp as Time.Micro,
+			timestamp: marker.timestamp as Micro,
 			keyframe: false,
 		}),
-	).toBe(20_000 as Time.Micro);
+	).toBe(20_000 as Micro);
 });
 
 test("Producer omits the marker when a group has no interval to close", async () => {
 	const track = new Track.Producer("video");
 	const producer = new Producer(track);
-	producer.encode(new Uint8Array([1]), 0 as Time.Micro, true);
+	producer.encode(new Uint8Array([1]), 0 as Micro, true);
 	producer.close();
 
 	expect(await readGroups(track)).toEqual([[{ timestamp: 0, size: 1, net: 0 }]]);
@@ -217,9 +218,9 @@ test("Producer omits the marker when a group has no interval to close", async ()
 test("Producer estimates the marker when the next keyframe overlaps an ordered tail", async () => {
 	const track = new Track.Producer("video");
 	const producer = new Producer(track);
-	producer.encode(new Uint8Array([1]), 0 as Time.Micro, true);
-	producer.encode(new Uint8Array([1]), 10_000 as Time.Micro, false);
-	producer.encode(new Uint8Array([1]), 5_000 as Time.Micro, true);
+	producer.encode(new Uint8Array([1]), 0 as Micro, true);
+	producer.encode(new Uint8Array([1]), 10_000 as Micro, false);
+	producer.encode(new Uint8Array([1]), 5_000 as Micro, true);
 	producer.close();
 
 	expect(await readGroups(track)).toEqual([
@@ -236,10 +237,10 @@ test("Producer omits a reordered group's marker and a keyframe that overlaps the
 	const track = new Track.Producer("video");
 	const producer = new Producer(track);
 	for (const [index, timestamp] of [0, 120_000, 40_000, 80_000].entries()) {
-		producer.encode(new Uint8Array([1]), timestamp as Time.Micro, index === 0);
+		producer.encode(new Uint8Array([1]), timestamp as Micro, index === 0);
 	}
 	// Overlaps the previous frame, so it is not that group's end, and the cadence does not carry over.
-	producer.encode(new Uint8Array([1]), 50_000 as Time.Micro, true);
+	producer.encode(new Uint8Array([1]), 50_000 as Micro, true);
 	producer.close();
 
 	expect(await readGroups(track)).toEqual([

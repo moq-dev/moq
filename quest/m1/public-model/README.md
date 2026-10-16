@@ -24,8 +24,8 @@ Rules every child follows:
   in its PR for review.
 - Deliberately private, marked in a comment on the item so the next
   inventory skips it:
-  - "moq-transport passthrough only" (decided 2026-10-13): subgroups, object
-    IDs and `skip`, object and unknown track properties, END_OF_GROUP status
+  - "moq-transport passthrough only" (decided 2026-10-13; subgroups were
+    dropped from it in #5704): object IDs and `skip`, object and unknown track properties, END_OF_GROUP status
     objects, datagram object IDs, dynamic groups, and upstream request
     signaling. Owned by [moq-transport passthrough](/quest/m1/ietf-extension/README.md).
     A relay built on the public model drops them, as plain moq-lite does.
