@@ -41,8 +41,18 @@ with each AU in its own PES, a PCR packet between AUs and nulls elsewhere.
                         with a refreshed OPCR
     moved PMT burst     the PAT moves the PMT, then the Bsys burst    Bsys overflow (on the new PMT)
                         on its new PID
-    rate-fall burst     PMT copies filling Bsys at 100 Mb/s, three    Bsys overflow (it keeps its bytes
-                        more once the rate falls to 25 Mb/s           as Rsys falls)
+    split PMT burst     the Bsys burst, six copies before the PAT     Bsys overflow (one Bsys across
+                        moves the PMT and four after                  the move)
+
+and tables-only streams on a PCR PID at 100 Mb/s:
+
+    rate-fall burst     PMT copies filling Bsys, three more once      Bsys overflow (it keeps its bytes
+                        the rate falls to 25 Mb/s                     as Rsys falls)
+    rate fall           the same copies, the fall 10 ms later, two    must pass (Bsys drains at the old
+                        more                                          Rsys until the fall)
+    PCR PID move        the PMT moves the PCR to a 10 Mb/s PID, then  must pass (each PID's clock only
+                        four copies spaced for TBsys at 10 Mb/s       while it is the PCR PID)
+    unclocked tables    a discontinuity with one PCR, then copies     outside a clocked time base
 
 and an MPEG audio stream whose frames end partway through a packet, each decoded
 just after its last byte leaves TB, but before the rest of that packet has; its
@@ -163,7 +173,7 @@ def synthetic(path: str, layout: str) -> None:
     busy = layout == "TBsys kept busy"
     for k in range(frames):
         begin = len(out)
-        pmt_pid = MOVED_PID if layout == "moved PMT burst" and k >= 25 else PMT_PID
+        pmt_pid = MOVED_PID if layout in ("moved PMT burst", "split PMT burst") and k >= 25 else PMT_PID
         if not busy or k == 0:
             emit(0, b"\x00" + (moved if pmt_pid == MOVED_PID else pat), pusi=True)
             emit(pmt_pid, b"\x00" + pmt, pusi=True)
@@ -176,6 +186,12 @@ def synthetic(path: str, layout: str) -> None:
             # Ten copies, one every 10 positions: the 1,504 us TBsys takes to pass one on, so
             # it holds 320 B at most, while Bsys takes 2 KB against its 10 kB/s drain.
             table_at, tables = len(out) + 10, 10
+        if layout == "split PMT burst" and k == 24:
+            # The same ten, six of them on the old PID before the PAT moves the PMT.
+            table_at, tables = begin + 206, 10
+        if layout == "split PMT burst" and k == 25:
+            # The moved PAT and its PMT take two copies' places in TBsys.
+            table_at += 20
         if layout == "duplicate tables" and k == 20:
             # Six copies, each sent twice, every 21 positions once TBsys has passed the PMT
             # on: 1.1 KB into Bsys, but 2.3 KB were each duplicate charged to it as well.
@@ -260,29 +276,54 @@ def synthetic_audio(path: str, frames: int, decode_s: float) -> None:
         handle.write(b"".join(out))
 
 
-def synthetic_rate_fall(path: str) -> None:
-    """PMT copies at 100 Mb/s, where Rsys is 200 kb/s, every 107 positions (1.6 ms, as TBsys
-    passes each on), until Bsys holds 1.3 KB; then the transport rate falls to 25 Mb/s, where
-    Rsys is 80 kb/s, and three more copies overflow it. Bsys's 54 ms to drain at the old Rsys
-    would pass them, had it drained that long at the new one."""
-    pcr_pid = 0x102
+def synthetic_system(path: str, layout: str) -> None:
+    """A PAT and PMT, then PMT copies among PCRs and nulls at 100 Mb/s, where Rsys is 200 kb/s,
+    until the transport rate falls at `fall`, bent into `layout`. A copy every 107 positions
+    (1.6 ms) meets TBsys just as it passes the last one on."""
+    old, new = 0x102, 0x103
     pat = section(0x00, 1, (1).to_bytes(2, "big") + (0xE000 | PMT_PID).to_bytes(2, "big"))
-    pmt = section(0x02, 1, (0xE000 | pcr_pid).to_bytes(2, "big") + bytes([0xF0, 0x00]))
-    fall = 6_650 + 9 * 107
-    copies = [6_650 + n * 107 for n in range(9)] + [fall + 13 + n * 27 for n in range(3)]
+    pmt = section(0x02, 1, (0xE000 | old).to_bytes(2, "big") + bytes([0xF0, 0x00]))
+    # The PMT's next version, which moves the PCR.
+    moved = section(0x02, 1, (0xE000 | new).to_bytes(2, "big") + bytes([0xF0, 0x00]), version=1)
+    burst = [6_650 + n * 107 for n in range(9)]
+    if layout == "rate-fall burst":
+        # Bsys holds 1.3 KB as the rate falls to 25 Mb/s, where Rsys is 80 kb/s, and three
+        # more copies overflow it: its 54 ms to drain at the old Rsys would pass them, had
+        # it drained that long at the new one.
+        fall, after = burst[-1] + 107, 25_000_000
+        copies = burst + [fall + 13 + n * 27 for n in range(3)]
+    elif layout == "rate fall":
+        # The same nine, then the fall 10 ms later and two more copies: Bsys drained at 200
+        # kb/s until the fall, so they take it to 1,427 B.
+        fall, after = burst[0] + 1_621, 25_000_000
+        copies = burst + [fall + 1, fall + 28]
+    elif layout == "PCR PID move":
+        # The PMT moves the PCR to a PID that carries it at 10 Mb/s, then four copies every
+        # 11 positions (1.65 ms): the old PID's clock, run on, would put them 165 us apart.
+        fall, after = 6_650, 10_000_000
+        copies = [fall - 1] + [fall + 11 * n for n in range(1, 5)]
+    else:  # "unclocked tables": a signalled discontinuity, one PCR, then three copies
+        fall, after = 6_650, 100_000_000
+        copies = [fall + 20 + n * 107 for n in range(3)]
     out: list[bytes] = []
     at, cc = 0.0, 0
     for index in range(fall + 1_700):
+        pcr_pid = new if layout == "PCR PID move" and index >= fall else old
+        ticks = round((1.0 + at) * compliance.PCR_HZ)
         if index == 1:
             out.append(packet(0, 0, b"\x00" + pat, pusi=True))
         elif index == 2 or index in copies:
-            out.append(packet(PMT_PID, cc, b"\x00" + pmt, pusi=True))
+            table = moved if layout == "PCR PID move" and index >= fall - 1 else pmt
+            out.append(packet(PMT_PID, cc, b"\x00" + table, pusi=True))
             cc = (cc + 1) & 0x0F
-        elif index % 16 == 0 or index == fall:
-            out.append(packet(pcr_pid, 0, adaptation=clock(0x10, round((1.0 + at) * compliance.PCR_HZ))))
+        elif layout == "unclocked tables" and index == fall:
+            # The discontinuity indicator (0x80) with the new time base's only PCR.
+            out.append(packet(old, 0, adaptation=clock(0x90, ticks + 10 * compliance.PCR_HZ)))
+        elif (index % 16 == 0 or index == fall) and not (layout == "unclocked tables" and index > fall):
+            out.append(packet(pcr_pid, 0, adaptation=clock(0x10, ticks)))
         else:
             out.append(packet(0x1FFF, 0, b"\xff" * 184))
-        at += 188 * 8 / (100_000_000 if index < fall else 25_000_000)
+        at += 188 * 8 / (100_000_000 if index < fall else after)
     with open(path, "wb") as handle:
         handle.write(b"".join(out))
 
@@ -343,10 +384,14 @@ def built(layout: str):
     return build
 
 
-def rate_fall(path: str) -> str:
-    """The builder for the rate-fall stream."""
-    synthetic_rate_fall(path)
-    return path
+def system(layout: str):
+    """A builder for one tables-only layout."""
+
+    def build(path: str) -> str:
+        synthetic_system(path, layout)
+        return path
+
+    return build
 
 
 def audio(frames: int, decode_s: float):
@@ -372,7 +417,7 @@ MID_PACKET_S = 19 * 6 * SLOT_S + 100 * BYTE_S
 
 # (name, builder, expected): violations that must all appear, "pass", a refusal's text,
 # ("fails", check) for a check other than tstd that must fail, or (check, violations)
-# for the system buffers.
+# or (check, "pass") for the system buffers.
 CASES = [
     ("as captured", lambda _path: FIXTURE, "pass"),
     ("restamped 1x", restamp(1.0), "pass"),
@@ -397,7 +442,11 @@ CASES = [
     ),
     ("duplicate tables", built("duplicate tables"), "pass"),
     ("moved PMT burst", built("moved PMT burst"), ("system-buffers", {"Bsys overflow"})),
-    ("rate-fall burst", rate_fall, ("system-buffers", {"Bsys overflow"})),
+    ("split PMT burst", built("split PMT burst"), ("system-buffers", {"Bsys overflow"})),
+    ("rate-fall burst", system("rate-fall burst"), ("system-buffers", {"Bsys overflow"})),
+    ("rate fall", system("rate fall"), ("system-buffers", "pass")),
+    ("PCR PID move", system("PCR PID move"), ("system-buffers", "pass")),
+    ("unclocked tables", system("unclocked tables"), ("system-buffers", {"outside a clocked time base"})),
     ("straddling audio", audio(4, STRADDLE_S), "pass"),
     ("mid-packet overflow", audio(7, MID_PACKET_S), {"B overflow"}),
 ]
@@ -427,6 +476,9 @@ def main(tmp: str) -> int:
         elif isinstance(expected, tuple) and expected[0] == "fails":
             check = checks[expected[1]]
             ok = check.status == compliance.Status.FAIL
+        elif isinstance(expected, tuple) and expected[1] == "pass":
+            check = system
+            ok = system.status == compliance.Status.PASS
         elif isinstance(expected, tuple):
             check = system
             ok = expected[1] <= {v for p in system.metrics.get("programs", {}).values() for v in p["violations"]}
@@ -435,7 +487,9 @@ def main(tmp: str) -> int:
         else:
             ok = expected <= seen
         failed += not ok
-        if isinstance(expected, tuple):
+        if isinstance(expected, tuple) and expected[1] == "pass":
+            want = f"{expected[0]} pass"
+        elif isinstance(expected, tuple):
             want = f"{expected[1]} fails" if expected[0] == "fails" else ", ".join(sorted(expected[1]))
         else:
             want = expected if isinstance(expected, str) else ", ".join(sorted(expected))

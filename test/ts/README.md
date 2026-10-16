@@ -162,11 +162,13 @@ does not establish conformance for them.
 Rxsys = 1 Mb/s) and on into one Bsys (1,536 B, emptied at Rsys = max(80 kb/s,
 transport rate / 500)), on the program's PCR, as 2.4.2.3 specifies: a packet's
 bytes enter Bsys as they leave TBsys, and a duplicate (2.4.3.3, the same bytes
-but for a refreshed PCR or OPCR) enters TBsys but not Bsys. Bsys keeps its bytes
-when the transport rate changes, and Rsys with it. Each PMT PID and PCR PID pair
-the PMTs declare is modelled, so a program that moves either is graded on both. A
-program with a PCR PID but no system packet inside a time base fails, since
-nothing was checked; one declaring no PCR (0x1FFF) has no clock to model. The
+but for a refreshed PCR or OPCR) enters TBsys but not Bsys. Each program is
+followed through the PAT and its PMTs, as a receiver would: its packets on the PMT
+PID then in force count, timed on the PCR PID then in force, and both buffers keep
+their bytes when either PID moves. Rsys drains Bsys at the transport rate each pair
+of PCRs gives, so a rate change takes effect where it happens. A system packet on a
+stretch of the PCR PID with fewer than two PCRs fails, since nothing checked it;
+a program declaring no PCR (0x1FFF) has no clock to model. The
 exporter paces its tables against both buffers only when it pads to a
 multiplex rate. Unpadded output makes no system-buffer claim: its tables go out
 as muxed. A signalled PCR discontinuity starts fresh buffers, since the timestamps
