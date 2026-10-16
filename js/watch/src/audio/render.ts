@@ -1,4 +1,4 @@
-import type { Time } from "@moq/net";
+import type { Micro, Milli } from "@moq/clock";
 import type { SharedRingBufferInit } from "./shared-ring-buffer";
 
 /** Everything the main thread sends the render worklet over its port. */
@@ -15,7 +15,7 @@ export interface InitPost {
 	type: "init-post";
 	channels: number;
 	rate: number;
-	latency: Time.Milli;
+	latency: Milli;
 	// Buffered mode: anchor to the first frame and play through; the ring is sized to the floor and
 	// the lookahead above it is held back upstream (the main thread applies the backpressure).
 	buffered: boolean;
@@ -32,26 +32,26 @@ export interface Reset {
  */
 export interface Truncate {
 	type: "truncate";
-	timestamp: Time.Micro;
+	timestamp: Micro;
 }
 
 /** Audio samples sent via postMessage (fallback path only). */
 export interface Data {
 	type: "data";
 	data: Float32Array[];
-	timestamp: Time.Micro;
+	timestamp: Micro;
 }
 
 /** Latency update sent via postMessage (fallback path only). */
 export interface Latency {
 	type: "latency";
-	latency: Time.Milli;
+	latency: Milli;
 }
 
 /** State update from the worklet back to main thread (fallback path only). */
 export interface State {
 	type: "state";
-	timestamp: Time.Micro;
+	timestamp: Micro;
 	stalled: boolean;
 	// How many times the ring has run dry mid-playback, cumulative.
 	underruns: number;

@@ -20,7 +20,9 @@ export function mint(): Valid {
 }
 
 /** Read the wall-clock time encoded in the UUID, with millisecond precision. */
+// biome-ignore lint/style/noRestrictedGlobals: decodes a timestamp, not a clock read.
 export function time(epoch: Valid): Date {
+	// biome-ignore lint/style/noRestrictedGlobals: decodes a timestamp, not a clock read.
 	return new Date(Number.parseInt(epoch.slice(0, 8) + epoch.slice(9, 13), 16));
 }
 

@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
+import type { Micro } from "@moq/clock";
 import * as Json from "@moq/json";
 import { Broadcast, Time } from "@moq/net";
 import { u53 } from "./catalog";
 import { Consumer, type Record } from "./timeline.ts";
 
-const us = (ms: number): Time.Micro => (ms * 1000) as Time.Micro;
+const us = (ms: number): Micro => (ms * 1000) as Micro;
 
 const archive = (timescale: number) => ({ timelines: { video: "video.timeline.z" }, timescale: u53(timescale) });
 
@@ -44,8 +45,8 @@ test("timeline consumer floors fractional microseconds without floating point dr
 			index: 0,
 			entry: {
 				sequence: 0,
-				pts: 333_333 as Time.Micro,
-				duration: 666_666 as Time.Micro,
+				pts: 333_333 as Micro,
+				duration: 666_666 as Micro,
 				start: { group: 0 },
 				end: { group: 1 },
 			},
