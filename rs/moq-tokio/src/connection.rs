@@ -1449,16 +1449,28 @@ impl RecvBandwidth {
 		waiter: &kio::Waiter,
 		source: impl FnOnce() -> Option<BandwidthConsumer>,
 	) {
-		if out.poll_unused(waiter).is_ready() {
-			self.source = None;
-			let _ = out.set(None);
-			let _ = out.poll_used(waiter);
-		} else {
-			if self.source.is_none() {
-				self.source = source();
+		loop {
+			match out.poll_unused(waiter) {
+				Poll::Pending => break,
+				Poll::Ready(Err(_)) => {
+					self.source = None;
+					return;
+				}
+				Poll::Ready(Ok(())) => {
+					self.source = None;
+					let _ = out.set(None);
+				}
 			}
-			poll_forward(&mut self.source, out, waiter);
+			match out.poll_used(waiter) {
+				// Demand can arrive during retirement, before a waiter was armed.
+				Poll::Ready(Ok(())) => continue,
+				Poll::Ready(Err(_)) | Poll::Pending => return,
+			}
 		}
+		if self.source.is_none() {
+			self.source = source();
+		}
+		poll_forward(&mut self.source, out, waiter);
 	}
 }
 
@@ -1995,6 +2007,52 @@ mod tests {
 		drop(reader);
 		forward.poll(&out, &waiter, || Some(second.consume()));
 		assert!(!second.is_used());
+	}
+
+	#[test]
+	fn receive_demand_arriving_during_retirement_is_forwarded() {
+		use std::sync::{Arc, Mutex};
+		use std::task::{Wake, Waker};
+
+		struct Demand {
+			handle: moq_net::bandwidth::Weak,
+			consumer: Mutex<Option<BandwidthConsumer>>,
+		}
+		impl Wake for Demand {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				*self.consumer.lock().unwrap() = Some(self.handle.consume());
+			}
+		}
+
+		let out = BandwidthProducer::new();
+		out.set(Some(moq_net::bandwidth::Rate::from_bps(123))).unwrap();
+		let demand = Arc::new(Demand {
+			handle: out.weak(),
+			consumer: Mutex::new(None),
+		});
+		let waiter = kio::Waiter::new(Waker::from(demand.clone()));
+		let mut reader = out.consume();
+		assert!(reader.poll_changed(&waiter).is_ready());
+		assert!(reader.poll_changed(&waiter).is_pending());
+		drop(reader);
+		let source = BandwidthProducer::new();
+		let mut forward = RecvBandwidth::default();
+		// Clearing the unused estimate wakes the old reader's waiter. It creates
+		// fresh demand precisely between the unused and used checks.
+		forward.poll(&out, &kio::Waiter::noop(), || Some(source.consume()));
+		assert!(demand.consumer.lock().unwrap().is_some());
+		assert!(
+			source.is_used(),
+			"new demand must be forwarded without unrelated activity"
+		);
+		out.abort(moq_net::Error::Cancel).unwrap();
+		forward.poll(&out, &kio::Waiter::noop(), || {
+			panic!("a closed output must not acquire a source")
+		});
+		assert!(!source.is_used());
 	}
 
 	const WALK_TIMEOUT: Duration = Duration::from_secs(30);
