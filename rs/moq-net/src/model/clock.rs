@@ -22,8 +22,27 @@ pub(crate) fn now() -> crate::time::Instant {
 ///
 /// The ambient runtime's clock where there is one, so a paused test runtime pauses
 /// staleness along with the drivers it supplies time to.
+#[cfg(not(any(test, loom)))]
 pub(crate) fn wall() -> crate::time::Instant {
 	moq_clock::now()
+}
+
+/// Loom permutes handoffs without advancing time, so scheduling cannot age groups.
+#[cfg(all(loom, not(test)))]
+pub(crate) fn wall() -> crate::time::Instant {
+	static FROZEN: LazyLock<crate::time::Instant> = LazyLock::new(moq_clock::now);
+	*FROZEN
+}
+
+/// Unit tests freeze the wall clock, so only time a test supplies moves it: the
+/// simulated clock inside `moq_clock::sim`, or a pool stepped by hand outside it.
+#[cfg(test)]
+pub(crate) fn wall() -> crate::time::Instant {
+	static FROZEN: LazyLock<crate::time::Instant> = LazyLock::new(moq_clock::now);
+	match moq_clock::sim::is_running() {
+		true => moq_clock::now(),
+		false => *FROZEN,
+	}
 }
 
 /// Where [`Timestamp`](crate::Timestamp)s count from: an instant, and the
@@ -60,6 +79,17 @@ fn offset(wall: moq_clock::Wall, jitter: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// Outside the simulator the host clock moves on its own, which must not age
+	/// cached groups a test never stepped.
+	#[test]
+	fn unit_tests_freeze_the_cache_clock() {
+		let frozen = wall();
+		while moq_clock::now() <= frozen {
+			std::hint::spin_loop();
+		}
+		assert_eq!(wall(), frozen);
+	}
 
 	#[test]
 	fn each_ambient_clock_owns_its_wall_anchor() {
