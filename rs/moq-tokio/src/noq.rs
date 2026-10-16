@@ -740,6 +740,7 @@ impl NoqServer {
 
 		// Configure connection ID generator with server ID if provided
 		let mut endpoint_config = noq::EndpointConfig::default();
+		endpoint_config.grease_quic_bit(false);
 		if let Some(shard) = member.as_ref().map(listen::Socket::shard) {
 			if load_balancer.is_some() {
 				return Err(Error::ShardWithQuicLb);
@@ -931,9 +932,6 @@ struct ShardIdGenerator {
 }
 
 impl ShardIdGenerator {
-	/// Only the first byte is spoken for; the rest stays random.
-	const LEN: usize = 8;
-
 	fn new(shard: crate::listen::Shard) -> Self {
 		Self { shard }
 	}
@@ -941,15 +939,11 @@ impl ShardIdGenerator {
 
 impl noq::ConnectionIdGenerator for ShardIdGenerator {
 	fn generate_cid(&mut self) -> noq::ConnectionId {
-		use rand::RngExt;
-		let mut cid = Vec::with_capacity(Self::LEN);
-		cid.push(moq_sock::shard::cid_prefix(self.shard));
-		cid.extend(rand::rng().random_iter::<u8>().take(Self::LEN - 1));
-		noq::ConnectionId::new(cid.as_slice())
+		noq::ConnectionId::new(&moq_sock::shard::cid(self.shard))
 	}
 
 	fn cid_len(&self) -> usize {
-		Self::LEN
+		moq_sock::shard::CID_LEN
 	}
 
 	fn cid_lifetime(&self) -> Option<Duration> {

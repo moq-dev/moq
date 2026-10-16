@@ -95,6 +95,7 @@ pub(crate) fn endpoint_config(
 	shard: Option<moq_sock::shard::Shard>,
 ) -> Result<Arc<moq_noq_proto::EndpointConfig>, Error> {
 	let mut config = moq_noq_proto::EndpointConfig::default();
+	config.grease_quic_bit(false);
 	config.cid_generator(Arc::new(move || Box::new(Cids { shard })));
 	config
 		.max_udp_payload_size(SEGMENT as u16)
