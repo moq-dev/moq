@@ -2969,6 +2969,54 @@ fn datagram_send_recv() {
     assert_matches!(pair.server_datagrams(server_ch).recv(), None);
 }
 
+/// Writes more than a congestion window to a stream in a group at `stream`, queues datagrams in
+/// a group at `datagram`, and returns how many datagrams the first flight carried.
+fn first_flight_datagrams(stream: i64, datagram: i64) -> usize {
+    const DATAGRAMS: usize = 8;
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let (client_ch, server_ch) = pair.connect();
+    let conn = pair.server_conn_mut(server_ch);
+    let streams = conn.send_groups().open(stream, None);
+    let datagrams = conn.send_groups().open(datagram, None);
+    let s = conn.streams().open(Dir::Uni).unwrap();
+    conn.send_stream(s).set_group(Some(&streams)).unwrap();
+    conn.send_stream(s).write(&[0; 256 * 1024]).unwrap();
+    for _ in 0..DATAGRAMS {
+        conn.datagrams()
+            .send(vec![1; 100].into(), Some(&datagrams), 0)
+            .unwrap();
+    }
+
+    // One congestion-limited flight.
+    pair.drive_server();
+    pair.drive_client();
+    assert!(pair.client_streams(client_ch).accept(Dir::Uni).is_some());
+    let mut first = 0;
+    while pair.client_datagrams(client_ch).recv().is_some() {
+        first += 1;
+    }
+
+    // Nothing is dropped, only ordered.
+    pair.drive();
+    let mut rest = 0;
+    while pair.client_datagrams(client_ch).recv().is_some() {
+        rest += 1;
+    }
+    assert_eq!(first + rest, DATAGRAMS);
+    first
+}
+
+#[test]
+fn low_priority_datagrams_wait_behind_streams() {
+    assert_eq!(first_flight_datagrams(1, 0), 0);
+}
+
+#[test]
+fn high_priority_datagrams_preempt_streams() {
+    assert_eq!(first_flight_datagrams(0, 1), 8);
+}
+
 #[test]
 fn datagram_recv_buffer_overflow() {
     let _guard = subscribe();
