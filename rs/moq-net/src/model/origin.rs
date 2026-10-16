@@ -21,7 +21,7 @@ use crate::{
 	coding::{BoundsExceeded, Decode, DecodeError, Decoder, Encode, EncodeError, Encoder},
 	path::Segment,
 	time::{Clock, Instant},
-	util::{Keepalive, TaskSet, Tasks, TasksWeak},
+	util::{Keepalive, SendCell, TaskSet, Tasks, TasksWeak},
 };
 
 /// One relay's identity in a broadcast's hop chain: a 62-bit varint on the wire.
@@ -1608,7 +1608,7 @@ pub struct Producer {
 
 	// The origin's shared state: the route table, announce cursors, and the
 	// remotely-served fronts. Shared with every derived consumer.
-	shared: kio::Shared<OriginState>,
+	shared: SendCell<kio::Shared<OriginState>>,
 
 	// The cache pool inherited by broadcasts created under this origin (sessions
 	// mint their remote broadcasts with it). Unbounded by default.
@@ -1650,7 +1650,7 @@ impl Producer {
 		let (tasks, set) = TaskSet::new();
 		let scope = OriginScope::default();
 		let timers = Clock::default();
-		let shared = kio::Shared::new(OriginState::new(config.update_hold, timers.clone()));
+		let shared = SendCell::new(kio::Shared::new(OriginState::new(config.update_hold, timers.clone())));
 		let pool = config.pool.clone();
 		let producer = Self {
 			hop: config.hop,
@@ -1760,7 +1760,10 @@ impl Producer {
 			hop,
 			scope: OriginScope::empty(),
 			root: PathOwned::default(),
-			shared: kio::Shared::new(OriginState::new(DEFAULT_UPDATE_HOLD, Clock::default())),
+			shared: SendCell::new(kio::Shared::new(OriginState::new(
+				DEFAULT_UPDATE_HOLD,
+				Clock::default(),
+			))),
 			pool: cache::Pool::default(),
 			cache_duration: Duration::MAX,
 			stats: stats::Session::default(),
@@ -2066,7 +2069,7 @@ impl Producer {
 /// and [`Announcer`], which is the same advertisement re-issued from a broadcast.
 struct Announcing {
 	hop: Hop,
-	shared: kio::Shared<OriginState>,
+	shared: SendCell<kio::Shared<OriginState>>,
 	/// The absolute advertised prefix, which also keys the ingress announce counters.
 	requested: PathOwned,
 	/// The prefix inserted into the table, with its [`prefix_claim`]. Pattern
@@ -2215,7 +2218,7 @@ impl Announcer {
 /// from their peers.
 #[must_use = "dropping an announcement retracts the route"]
 pub(crate) struct AnnounceProducer {
-	shared: kio::Shared<OriginState>,
+	shared: SendCell<kio::Shared<OriginState>>,
 	/// The table entries this advertisement created, by prefix and id. A prefix
 	/// remains unchanged; pattern scopes only filter its visibility and requests.
 	entries: Vec<(PathOwned, u64)>,
@@ -2389,7 +2392,7 @@ struct DriverState {
 	set: TaskSet,
 	/// The route table, announce cursors, and the remotely-served fronts, for
 	/// ending everything on drop.
-	shared: kio::Shared<OriginState>,
+	shared: SendCell<kio::Shared<OriginState>>,
 	/// Cached completion so a poll after `Ready` doesn't re-poll the drained set.
 	done: bool,
 }
@@ -2498,7 +2501,7 @@ impl Drop for DriverState {
 /// Everything [`run_front`] owns, queued by [`Consumer::request_broadcast`].
 struct FrontTask {
 	/// The route table the front selects from.
-	shared: kio::Shared<OriginState>,
+	shared: SendCell<kio::Shared<OriginState>>,
 	/// The broadcast the front serves.
 	broadcast: broadcast::Producer,
 	/// Absolute path of the front.
@@ -3510,7 +3513,7 @@ impl Selected {
 /// The lifetime of path requests while this peer still selects the held instance.
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) struct Selection {
-	shared: kio::Shared<OriginState>,
+	shared: SendCell<kio::Shared<OriginState>>,
 	path: PathOwned,
 	id: u64,
 	signal: kio::Consumer<Selected>,
@@ -3553,7 +3556,7 @@ impl Drop for Selection {
 /// Dropping it unregisters, which takes the table lock: never drop one while
 /// holding it.
 struct Watch {
-	shared: kio::Shared<OriginState>,
+	shared: SendCell<kio::Shared<OriginState>>,
 	path: PathOwned,
 	id: u64,
 	signal: kio::Consumer<Watched>,
@@ -4073,7 +4076,7 @@ impl OriginState {
 	}
 
 	/// Register a [`Watch`] on the routes covering `path`.
-	fn watch(&mut self, shared: &kio::Shared<OriginState>, path: &Path) -> Watch {
+	fn watch(&mut self, shared: &SendCell<kio::Shared<OriginState>>, path: &Path) -> Watch {
 		let id = self.next_watch;
 		self.next_watch += 1;
 		let signal = self.routes.add_watch(path, id);
@@ -4797,7 +4800,7 @@ pub struct Consumer {
 
 	// The origin's shared state: the route table, announce cursors, and the
 	// remotely-served fronts.
-	shared: kio::Shared<OriginState>,
+	shared: SendCell<kio::Shared<OriginState>>,
 
 	// Egress stats context. Broadcasts handed out through this consumer (and any
 	// handle derived from them) are attributed to it (reads counted on the
@@ -5372,7 +5375,7 @@ pub struct AnnounceConsumer {
 	// One registration per table cursor feeding `state`: more than one when the
 	// consumer reads through a mount.
 	ids: Vec<ConsumerId>,
-	shared: kio::Shared<OriginState>,
+	shared: SendCell<kio::Shared<OriginState>>,
 	root: PathOwned,
 
 	// Pending updates queued for this cursor. Coalesced so a slow consumer
@@ -5412,7 +5415,7 @@ impl AnnounceConsumer {
 		cursors: Vec<TableCursor>,
 		state: kio::Producer<OriginConsumerState>,
 		stats: stats::Session,
-		shared: &kio::Shared<OriginState>,
+		shared: &SendCell<kio::Shared<OriginState>>,
 		timers: Clock,
 	) -> Self {
 		let mut ids = Vec::with_capacity(cursors.len());

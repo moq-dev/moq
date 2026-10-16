@@ -766,3 +766,37 @@ it("a reset drops a parked video frame even when the next anchor restores the re
 		clock.restore();
 	}
 });
+
+for (const kind of ["legacy", "cmaf"] as const) {
+	it(`${kind} trims orphan leading pictures on join and later gap, preserving continuous groups`, async () => {
+		const reads: Read[] = [
+			sample(10, 1000),
+			sample(10, 800, false),
+			sample(10, 900, false),
+			sample(10, 1100, false),
+			sample(11, 2000),
+			sample(11, 1800, false),
+			sample(11, 1900, false),
+			sample(11, 2100, false),
+			gap,
+			sample(13, 4000),
+			sample(13, 3800, false),
+			sample(13, 3900, false),
+			sample(13, 4100, false),
+			{ kind: "end", group: 14, end: Micro(4200) },
+			sample(15, 5000),
+			sample(15, 4800, false),
+			sample(15, 4900, false),
+			sample(15, 5100, false),
+		];
+		const playback = await guardedPlayback(kind, reads);
+		try {
+			await microtasks();
+			expect(playback.submitted).toEqual([
+				1000, 1100, 2000, 1800, 1900, 2100, 4000, 4100, 5000, 4800, 4900, 5100,
+			]);
+		} finally {
+			playback.close();
+		}
+	});
+}

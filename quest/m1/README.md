@@ -60,6 +60,7 @@ above them.
 - [Release builds](/quest/m0/release-link.md) - package artifacts can be built
 - [qmux credit](/quest/m0/qmux-credit.md) - dropped/stopped streams return credit and close is delivered
 
+- [Per-package MIGRATE.md](/quest/m1/migrate.md) - every published package documents how to migrate each breaking change, and breaking PRs add their entry
 - [Restart followers](/quest/m1/restart-followers.md) - first-party consumers follow an epochless `Restart`, from a GOAWAY drain or a publisher replacement, by resolving the path again
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
 - [P2P](/quest/m1/p2p/README.md) - application-selected peer sessions use shared priorities, routing, and same-epoch handover
@@ -68,7 +69,7 @@ above them.
 - [Own the QUIC stack](/quest/m1/quic/README.md) - quinn hard-forked in-tree as `moq-quic`, carrying BBR, reliable reset, hierarchical scheduling, peer limits, and endpoint sharding
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - object IDs, properties, end status, datagram objects, and unknown track properties survive moq-transport -> moq-relay (and a relay cluster) -> moq-transport; moxygen's moq-test sections 1-7 pass nightly, except cases that use a subgroup other than 0
-- [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - announce-subscribe passes and the smoke lane stops hiding its failure
+- [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - waiting on Moxygen to send a registered filter type, then the smoke lane stops hiding its failure
 - [Stitcher public relay smoke](/quest/m1/smoke-stitcher.md) - the first-party deployment is tested under an anonymous namespace and only on transports it serves
 - [FETCH max-delay](/quest/m1/fetch-max-delay.md) - historical readers obey publisher max-age and an optional tighter reader budget, including while holding a group
 - [Lite SETUP backport](/quest/m1/lite-setup-backport.md) - `release` closes a moq-lite session on a repeated SETUP parameter or a second Setup Stream, in a later 0.14.x patch (#5521)
@@ -89,7 +90,6 @@ above them.
 - [Raw TS cuts on the epoch timeline](/quest/m1/ts-passthrough-epoch-cuts.md) - passthrough fallback cuts fall on the epoch's grid and the M2ts section derives from the epoch and content, so instances started apart publish identical groups and catalogs
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - importers sharing one `--epoch` and fed one stream publish identical groups and timestamps, so failover between a redundant pair survives
 - [Importers announce with a track](/quest/m1/import-declared-track.md) - every importer announces once its catalog names a servable track (a rendition or an extension track like `m2ts`), and input that ends with none exits non-zero unannounced
-- [Plan: untimed verbatim PES](/quest/m1/plan-ts-pes-untimed.md) - decide how a verbatim TS track carries a PES that has no PTS, then write the implementation quest
 - [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) - json and binary consumers return each value's timestamp, in Rust and every binding; snapshots add `latest()` beside an in-order `next()`
 - [JSON window timestamps](/quest/m1/json-window-timestamps.md) - Rust and JS window consumers return each event's frame timestamp like the snapshot and stream consumers
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
@@ -133,11 +133,9 @@ above them.
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS container consumer drops groups below its read cursor like Rust
 - [Rust request credit](/quest/m1/rs-request-credit.md) - a moq-net request fails at once without stream credit instead of waiting
 - [qmux no-wait opens](/quest/m1/qmux-no-wait.md) - @moq/qmux rejects an over-limit create when waitUntilAvailable is false, like Chrome
-- [#933](/quest/m1/933-video-rotation-metadata-not-propagated-from-mobile-camera.md) - the catalog rotation follows the live camera's orientation
 - [Encoder colour](/quest/m1/color-model.md) - every moq-video encode path signals the colour its output actually has, or refuses instead of mislabelling
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [T-STD TS export](/quest/m1/tstd/README.md) - `moq export ts` is a proper remux that passes the supported T-STD buffer models, starting with a fixed `--delay`
-- [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - a viewer joining at a recovery point drops the leading pictures it cannot decode; continuous viewers keep them
 - [Draft 14-16 updates](/quest/m1/ietf-legacy-updates.md) - Rust and JS apply and answer moq-transport 14-16 request updates without ending or leaking the request
 - [Tail arrivals](/quest/m1/tail-arrivals.md) - a track judges its pending tail from recorded arrivals, not a cache scan, and errors a reader whose tail ends short
 - [Resume reorder](/quest/m1/resume-reorder.md) - a group whose stream header arrives after its successor's still resumes on failover; only a dropped or long-gone group fails

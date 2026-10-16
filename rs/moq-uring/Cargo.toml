@@ -87,3 +87,8 @@ harness = false
 [[bench]]
 name = "worker_turns"
 harness = false
+
+[[bench]]
+name = "unreachable_dials"
+harness = false
+required-features = ["quic"]

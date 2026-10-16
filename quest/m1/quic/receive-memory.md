@@ -18,6 +18,17 @@ peer-visible QUIC flow control instead of a separate header quota error.
 The native transport primitive is a separate prerequisite; do not activate
 whole-message retention without its recovery policy in this quest.
 
+That primitive landed as a provisional seam to finalize here: both native
+drivers' receive streams have a copying `poll_read_held` that yields a
+`Credit` for exactly the bytes read. Dropping a `Credit` returns it, so a
+reader buffer keeps one merged `Credit` and drops `split(n)` for each
+complete unit; read-ahead stays in the remainder. io_uring's `poll_closed`
+read-ahead keeps its credit until the application reads it. Both drivers'
+`Connection::stats().credit` reports held and still-available credit.
+`poll_read_held` stays separate until this quest folds it into `poll_read`.
+moq-net's transport trait and the WebTransport wrappers do not carry it yet;
+reshape any of it to fit the consumer.
+
 Hold connection credit through reader buffers, type/length prefixes, headers,
 extensions, and frame assembly. Attribute read-ahead bytes to the next unit
 rather than releasing them with the completed one. Release on complete-unit
@@ -32,6 +43,11 @@ Give the native path a very large default so it normally adds no round trips;
 stream credit is replenished on reads, independently of message completion.
 Do not remove or ignore the setting without benchmark evidence and a new
 maintainer decision. The connection memory allowance is the shared cap.
+
+Decided 2026-10-16: once [Segmented frames](/quest/m2/unbounded-groups/segmented-frames.md)
+lands, a frame payload releases credit per segment rather than per frame,
+so frames of any size never need a matching allowance. Do not build on
+whole-frame units beyond what that change replaces.
 
 Require that allowance to fit every supported encoded message, including
 framing and extensions. Validate configuration and align native defaults
@@ -86,12 +102,9 @@ Browser/iroh receive-side guarantees and completed-cache limits are outside
 this quest. Update existing configuration and transport docs inline; no
 separate guide quest is needed.
 
-## Required
-
-- [Retain connection credit](/quest/m1/quic/receive-credit.md) - core and native adapters support separate byte ownership and stream-credit release
-
 ## Related
 
+- [Unbounded groups](/quest/m2/unbounded-groups/README.md) - removes the frame cap; frame payload credit becomes per segment
 - [Scope track priority](/quest/m1/track-priority-scope.md) - broadcast fairness domains and subscription priority semantics
 - [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - share priority semantics without requiring sender-side recovery
 - [QUIC bitrate caps](/quest/m2/rate-quic.md) - pace credit grants inside the independently bounded memory allowance
