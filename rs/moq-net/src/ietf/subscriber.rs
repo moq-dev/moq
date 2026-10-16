@@ -11168,12 +11168,18 @@ mod stitch_tests {
 			}
 		}
 
-		let script = object_stream(Version::Draft14, true, &[(0, &[0x20, 7], Some(END_OF_TRACK))]);
-		let mut h = Harness::with_timescale(Fill::Done, vec![script], None);
-		h.subscriber.version = Version::Draft14;
-		let mut stream = h.stream().await.with_version(Version::Draft14);
-		let result = h.subscriber.clone().recv_group(&mut stream).await;
-		assert!(matches!(result, Err(Error::Unsupported)), "{result:?}");
+		// Draft-14 allows them, but END_OF_TRACK has nowhere to keep them: a standalone one
+		// is peeked before any group, and one after an object is ingested with the group.
+		let standalone: &[(u64, &[u8], Option<u64>)] = &[(0, &[0x20, 7], Some(END_OF_TRACK))];
+		let trailing: &[(u64, &[u8], Option<u64>)] = &[(0, &[], None), (1, &[0x20, 7], Some(END_OF_TRACK))];
+		for objects in [standalone, trailing] {
+			let script = object_stream(Version::Draft14, true, objects);
+			let mut h = Harness::with_timescale(Fill::Done, vec![script], None);
+			h.subscriber.version = Version::Draft14;
+			let mut stream = h.stream().await.with_version(Version::Draft14);
+			let result = h.subscriber.clone().recv_group(&mut stream).await;
+			assert!(matches!(result, Err(Error::Unsupported)), "{objects:?}: {result:?}");
+		}
 
 		let script = object_stream(
 			Version::Draft14,
