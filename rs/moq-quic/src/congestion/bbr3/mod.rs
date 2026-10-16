@@ -1,6 +1,13 @@
+#[cfg(all(test, not(target_family = "wasm")))]
+mod cleanup_bench;
+#[cfg(test)]
+mod cleanup_test;
 mod max_filter;
+mod packets;
 
+use self::packets::Packets;
 use std::any::Any;
+#[cfg(test)]
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -20,10 +27,9 @@ const MAX_BW_FILTER_LEN: usize = 2;
 /// equivalent to BBR.ExtraAckedFilterLen <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-2.11>
 const EXTRA_ACKED_FILTER_LEN: usize = 10;
 
-/// safety mechanism to flag packets as stale within our tracking VecDeque. rounds refer to <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.1>.
+/// Safety bound for retaining an unacknowledged packet snapshot. Rounds refer to <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.1>.
 /// The value of 10 rounds is picked because normally after max(kTimeThreshold * max(smoothed_rtt, latest_rtt), kGranularity) <https://datatracker.ietf.org/doc/html/rfc9002#section-6.1.2>
-/// the packet should have been declared lost already, this is just to guarantee that the VecDeque
-/// doesn't grow indefinitely.
+/// the packet should have been declared lost already; this bounds snapshots left by key-space discard.
 const ROUND_COUNT_WINDOW: u64 = 10;
 
 /// the minimum for the maximum datagram size <https://datatracker.ietf.org/doc/html/rfc9000#section-14>
@@ -218,12 +224,9 @@ struct BbrPacket {
     size: u16,
     /// equivalent to P.lost: C.lost when the packet was sent
     lost: u64,
-    /// used to flag acknowledgement within our VecDeque, a packet can be flagged lost after having
-    /// been flagged acknowledged hence the necessity of this flag being set before we remove
-    /// it from packets.
+    /// Acknowledged snapshots remain available for a loss reported in the next ACK batch.
     acknowledged: bool,
-    /// once a packet has been acknowledged on a given round it is marked for removal on the next
-    /// round.
+    /// Marked for retirement at the next ACK batch, preserving late-loss metadata.
     stale: bool,
     /// used to mark packets stale if they're far from the current round <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.1>
     round_count: u64,
@@ -511,10 +514,8 @@ pub struct Bbr3 {
     /// equivalent to C.lost: the number of bytes that have been lost during the lifetime of this
     /// connection
     lost: u64,
-    /// collection of packets in flight or just acknowledged / lost, one queue per packet number
-    /// space indexed by `SpaceId as usize`. Packet numbers are only unique and only monotonic
-    /// within a space, so the queues must be kept separate for the ordered lookups below to hold.
-    packets: [VecDeque<BbrPacket>; 3],
+    /// Delivery snapshots indexed by packet number within each independent QUIC space.
+    packets: Packets,
     /// equivalent to RS: Per-ACK Rate Sample State <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-2.2>
     rs: Option<BbrRateSample>,
     /// equivalent to RS.has_data: true once the ACK being processed has delivered a tracked
@@ -1565,12 +1566,10 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRHandleLostPacket <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.10.2-11>
-    fn process_lost_packet(&mut self, packet_index: usize, space: SpaceId, now: Instant) {
-        let p = self.packets[space as usize][packet_index];
+    fn process_lost_packet(&mut self, p: BbrPacket, now: Instant) {
         self.enter_recovery(now, p.send_time);
-        self.note_loss(space, p.packet_number);
+        self.note_loss(p.space, p.packet_number);
         if !self.bw_probe_samples {
-            self.packets[space as usize].remove(packet_index);
             return;
         }
         if let Some(mut rate_sample) = self.rs {
@@ -1584,7 +1583,6 @@ impl Bbr3 {
                 self.handle_inflight_too_high(now, self.rs);
             }
         }
-        self.packets[space as usize].remove(packet_index);
     }
 
     /// equivalent to BBRNoteLoss <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.10.2-11>
@@ -1772,7 +1770,7 @@ impl Controller for Bbr3 {
         }
         let added_bytes = bytes as u64;
         self.inflight += added_bytes;
-        self.packets[space as usize].push_back(BbrPacket {
+        self.packets.insert(BbrPacket {
             delivered: self.delivered,
             delivered_time: self.delivered_time.unwrap_or(now),
             first_send_time: self.first_send_time.unwrap_or(now),
@@ -1823,12 +1821,9 @@ impl Controller for Bbr3 {
         self.delivered += bytes;
         self.delivered_time = Some(now);
         self.newly_acked += bytes;
-        let packets = &mut self.packets[space as usize];
-        let Ok(index) = packets.binary_search_by_key(&packet_number, |p| p.packet_number) else {
+        let Some(p) = self.packets.acknowledge(space, packet_number) else {
             return;
         };
-        packets[index].acknowledged = true;
-        let p = packets[index];
         // The first packet of each ACK starts its sample even if older than the last ACK's newest,
         // so a reordered ACK never inherits the previous ACK's labels.
         if self.rs_has_data && !self.is_newest_packet(sent, space, packet_number) {
@@ -1869,15 +1864,7 @@ impl Controller for Bbr3 {
             } else if app_limited {
                 self.app_limited = Ord::max(self.delivered + self.inflight, 1);
             }
-            let round_count = self.round_count;
-            for packets in self.packets.iter_mut() {
-                packets.retain(|&p| !p.stale);
-                for p in packets.iter_mut() {
-                    if p.acknowledged || round_count - p.round_count > ROUND_COUNT_WINDOW {
-                        p.stale = true;
-                    }
-                }
-            }
+            self.packets.cleanup(self.round_count);
         }
         let newly_acked = std::mem::take(&mut self.newly_acked);
         // An ACK that delivered no tracked packet has no sample, and a finished one is never
@@ -1945,10 +1932,8 @@ impl Controller for Bbr3 {
         // because the transport also reports losses of packets this count may not include, such
         // as padded ones that were not ack-eliciting.
         self.inflight = self.inflight.saturating_sub(lost_bytes_64);
-        let p_index_result =
-            self.packets[space as usize].binary_search_by_key(&packet_number, |p| p.packet_number);
-        if let Ok(p_index) = p_index_result {
-            self.process_lost_packet(p_index, space, now);
+        if let Some(packet) = self.packets.remove(space, packet_number) {
+            self.process_lost_packet(packet, now);
         }
     }
 
@@ -7245,7 +7230,7 @@ mod test {
         sim.lose(12 * MS, 1);
         // BBR stops tracking a packet left unacked for more than `ROUND_COUNT_WINDOW` rounds. A
         // re-fold would pair its bytes with packet 0's interval and double the rate.
-        sim.bbr.packets[SpaceId::Data as usize].retain(|p| p.packet_number != 2);
+        sim.bbr.packets.remove(SpaceId::Data, 2);
         sim.ack(15 * MS, [2], false);
         assert_eq!(sim.bbr.round_count, round_count);
         assert_eq!(sim.bbr.max_bw, 120_000.0);
@@ -7570,12 +7555,8 @@ mod test {
     #[test]
     fn probe_rtt_protects_its_samples() {
         let mut sim = probing_rtt();
-        let newest_limited = |sim: &Sim| {
-            sim.bbr.packets[SpaceId::Data as usize]
-                .back()
-                .unwrap()
-                .is_app_limited
-        };
+        let newest_limited =
+            |sim: &Sim| sim.bbr.packets.last(SpaceId::Data).unwrap().is_app_limited;
 
         // Each 10ms, send 4 packets and acknowledge the previous 4.
         let mut now = 20 * MS;
@@ -7893,8 +7874,8 @@ mod test {
     fn tracked_send_ms(bbr: &Bbr3, t0: Instant) -> Vec<u128> {
         let mut times: Vec<_> = bbr
             .packets
+            .snapshot()
             .iter()
-            .flatten()
             .map(|p| (p.send_time - t0).as_millis())
             .collect();
         times.sort();

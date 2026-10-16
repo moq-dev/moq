@@ -28,4 +28,3 @@ from an unseeded RNG.
 ## Related
 
 - [Seeded sim](/quest/m2/sim-seed.md) - the same replay rule for the moq-clock sim
-- [BBR ACK cleanup](/quest/m2/bbr-ack-cleanup.md) - the change that surfaced it

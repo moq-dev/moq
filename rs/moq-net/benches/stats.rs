@@ -64,5 +64,28 @@ fn report(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, report);
+fn request(c: &mut Criterion) {
+	let mut group = c.benchmark_group("stats/request");
+	for roots in [1, 100, 1000] {
+		for tiers in [1, 10] {
+			let registry = stats::Registry::new(stats::Config::new());
+			let mut contexts = Vec::new();
+			for tier in 0..tiers {
+				let handle = registry.tier(stats::Tier::new(format!("tier{tier}")));
+				for root in 0..roots {
+					contexts.push(handle.request(format!("room/{root}")));
+				}
+			}
+			let handle = registry.tier(stats::Tier::new(format!("tier{}", tiers - 1)));
+			let root = format!("room/{}", roots - 1);
+			group.bench_function(BenchmarkId::from_parameter(format!("{roots}x{tiers}")), |b| {
+				b.iter(|| std::hint::black_box(handle.request(&root)));
+			});
+			std::hint::black_box(contexts);
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, report, request);
 criterion_main!(benches);

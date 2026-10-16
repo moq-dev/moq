@@ -200,6 +200,9 @@ pub(crate) mod request {
 	const INVALID_RANGE_14: u64 = 0x5;
 	const INVALID_RANGE: u64 = 0x11;
 
+	/// A Range Filter exceeds MAX_FILTER_RANGES (draft-19 and later).
+	pub(crate) const INVALID_FILTER: u64 = 0x36;
+
 	/// A joining FETCH named no active subscription. Removed from the registry in draft-20.
 	const INVALID_JOINING_REQUEST_ID_14: u64 = 0x7;
 	const INVALID_JOINING_REQUEST_ID: u64 = 0x32;

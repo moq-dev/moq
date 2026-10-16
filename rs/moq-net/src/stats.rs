@@ -54,6 +54,9 @@
 //!   datagrams. A datagram is metered as the group it stands in for, so it also
 //!   bumps `groups`, `frames`, and `bytes`; this counter breaks out how many of
 //!   those took the datagram path.
+//! * `requests` ([`Presence`]): cumulative request/response admissions under the
+//!   auth root and tier at admission. [`Handle::request`] meters their traffic
+//!   without starting or ending a connected session.
 //! * `sessions_started` / `sessions_ended` ([`Presence`]): cumulative count of
 //!   sessions connected/disconnected under an auth root on this tier.
 //!   Driven by [`Handle::session`] (the [`Session`] context); a
@@ -266,6 +269,7 @@ impl Content {
 /// bumps on connect, `sessions_ended` on disconnect.
 #[derive(Default, Debug)]
 struct SessionCounters {
+	requests: AtomicU64,
 	sessions_started: AtomicU64,
 	sessions_ended: AtomicU64,
 	announces_peak: AtomicU64,
@@ -287,6 +291,7 @@ impl SessionCounters {
 		let sessions_ended = self.sessions_ended.load(Ordering::Acquire);
 		let sessions_started = self.sessions_started.load(Ordering::Relaxed);
 		Presence {
+			requests: self.requests.load(Ordering::Relaxed),
 			sessions_started,
 			sessions_ended,
 			announces_peak: self.announces_peak.load(Ordering::Relaxed),
@@ -520,8 +525,8 @@ impl Traffic {
 	}
 }
 
-/// Connected-session presence for one slice (an auth root on a tier, or any
-/// sum of such slices): cumulative connects and disconnects. `sessions_started
+/// Request admissions and connected-session presence for an auth root on a tier, or their sum.
+/// The session counters are cumulative connects and disconnects. `sessions_started
 /// - sessions_ended` is the current live session count. The peaks show how close
 /// one session came to its `crate::session::Limits`.
 ///
@@ -532,6 +537,8 @@ impl Traffic {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Presence {
+	/// Cumulative request/response exchanges admitted.
+	pub requests: u64,
 	/// Cumulative sessions connected.
 	pub sessions_started: u64,
 	/// Cumulative sessions disconnected.
@@ -545,6 +552,7 @@ pub struct Presence {
 
 #[derive(Serialize)]
 struct PresenceSer {
+	requests: u64,
 	sessions_started: u64,
 	sessions: u64,
 	sessions_ended: u64,
@@ -556,6 +564,7 @@ struct PresenceSer {
 impl From<Presence> for PresenceSer {
 	fn from(p: Presence) -> Self {
 		Self {
+			requests: p.requests,
 			sessions_started: p.sessions_started,
 			sessions: p.sessions_started,
 			sessions_ended: p.sessions_ended,
@@ -569,6 +578,7 @@ impl From<Presence> for PresenceSer {
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct PresenceDe {
+	requests: u64,
 	sessions_started: Edge,
 	sessions: Edge,
 	sessions_ended: Edge,
@@ -580,6 +590,7 @@ struct PresenceDe {
 impl From<PresenceDe> for Presence {
 	fn from(d: PresenceDe) -> Self {
 		Self {
+			requests: d.requests,
 			sessions_started: counter_edge(d.sessions_started, d.sessions),
 			sessions_ended: counter_edge(d.sessions_ended, d.sessions_closed),
 			announces_peak: d.announces_peak,
@@ -603,6 +614,7 @@ impl<'de> Deserialize<'de> for Presence {
 impl Presence {
 	/// Fold another readout into this one. The peaks are per session, so they take the larger.
 	pub fn add(&mut self, other: Presence) {
+		self.requests += other.requests;
 		self.sessions_started += other.sessions_started;
 		self.sessions_ended += other.sessions_ended;
 		self.announces_peak = self.announces_peak.max(other.announces_peak);
@@ -780,10 +792,10 @@ pub struct SessionEntry {
 	pub tier: Tier,
 	/// The auth root the sessions connected under.
 	pub root: PathOwned,
-	/// The cumulative connect/disconnect gauge.
+	/// Cumulative request admissions and connect/disconnect gauge.
 	pub presence: Presence,
-	/// This is the root's final readout: its last session disconnected, so the
-	/// registry pruned it, and a later session under the root starts from zero.
+	/// This is the root's final readout: its last session or request ended, so the
+	/// registry pruned it, and a later context under the root starts from zero.
 	pub closed: bool,
 }
 
@@ -1105,7 +1117,38 @@ impl Handle {
 	/// track for this tier, keyed by `root`, in its totals, and in `root`'s
 	/// presence track.
 	pub fn session(&self, root: impl AsPath) -> Session {
-		Session::new(self.stats.clone(), self.tier.clone(), root)
+		self.context(root, true)
+	}
+
+	/// Count one admitted request under `root` and meter its traffic without session presence.
+	pub fn request(&self, root: impl AsPath) -> Session {
+		self.context(root, false)
+	}
+
+	fn context(&self, root: impl AsPath, connected: bool) -> Session {
+		let root = root.as_path().to_owned();
+		let presence = self.stats.session_counters(&self.tier, &root);
+		if let Some(presence) = &presence {
+			if connected {
+				presence.sessions_started.fetch_add(1, Ordering::Relaxed);
+			} else {
+				presence.requests.fetch_add(1, Ordering::Relaxed);
+			}
+		}
+		Session {
+			inner: Some(Arc::new(SessionInner {
+				registry: self.stats.clone(),
+				root,
+				connected,
+				current: Mutex::new(Current {
+					tier: self.tier.clone(),
+					presence,
+				}),
+				generation: AtomicU64::new(0),
+				viewers: Mutex::new(HashMap::new()),
+				held: Mutex::new(Vec::new()),
+			})),
+		}
 	}
 }
 
@@ -1135,7 +1178,7 @@ impl Side {
 	}
 }
 
-/// Per-connection stats context, created via [`Handle::session`].
+/// Traffic context for a connection or request, created by [`Handle::session`] or [`Handle::request`].
 ///
 /// Cheap to clone (an `Arc` inside): one context is shared by both origin handles
 /// of a session (its publish and subscribe halves) so presence and viewer counts
@@ -1144,8 +1187,8 @@ impl Side {
 /// * the tier + auth root, so any broadcast reached through a tagged origin handle
 ///   resolves the right per-`(path, tier)` counters,
 /// * the presence gauge: `sessions_started` bumps when the context is created and
-///   `sessions_ended` when the last clone drops (a more honest close than a
-///   separately-held guard),
+///   `sessions_ended` when the last clone drops; a request instead bumps `requests`
+///   once at admission and never touches session presence,
 /// * the egress viewer refcount map (first/last active subscription per broadcast),
 ///   driving `broadcasts_started` / `broadcasts_ended`.
 ///
@@ -1171,9 +1214,10 @@ pub(crate) enum Cap {
 	Subscriptions,
 }
 
-/// The shared state behind a [`Session`]. Its `Drop` (on the last clone) records
-/// the session as closed.
+/// The shared traffic context; its last clone closes presence only for a session.
 struct SessionInner {
+	/// Requests meter traffic but never open or close connected-session presence.
+	connected: bool,
 	registry: Registry,
 	/// The auth root the presence gauge is keyed by.
 	root: PathOwned,
@@ -1205,25 +1249,7 @@ struct Viewer {
 }
 
 impl Session {
-	fn new(registry: Registry, tier: Tier, root: impl AsPath) -> Self {
-		let root = root.as_path().to_owned();
-		let presence = registry.session_counters(&tier, &root);
-		if let Some(presence) = &presence {
-			presence.sessions_started.fetch_add(1, Ordering::Relaxed);
-		}
-		Self {
-			inner: Some(Arc::new(SessionInner {
-				registry,
-				root,
-				current: Mutex::new(Current { tier, presence }),
-				generation: AtomicU64::new(0),
-				viewers: Mutex::new(HashMap::new()),
-				held: Mutex::new(Vec::new()),
-			})),
-		}
-	}
-
-	/// Record this session's presence and later traffic under `tier` from now on.
+	/// Record later traffic and session presence under `tier`; a request stays counted where admitted.
 	pub fn set_tier(&self, tier: Tier) {
 		let Some(inner) = &self.inner else { return };
 		let mut current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1231,7 +1257,9 @@ impl Session {
 			return;
 		}
 		let presence = inner.registry.session_counters(&tier, &inner.root);
-		if let Some(presence) = &presence {
+		if inner.connected
+			&& let Some(presence) = &presence
+		{
 			presence.sessions_started.fetch_add(1, Ordering::Relaxed);
 		}
 		if let Some(presence) = &presence {
@@ -1245,7 +1273,9 @@ impl Session {
 				true
 			});
 		}
-		if let Some(old) = std::mem::replace(&mut current.presence, presence) {
+		if let Some(old) = std::mem::replace(&mut current.presence, presence)
+			&& inner.connected
+		{
 			// Release pairs with the readout's Acquire load of `sessions_ended`.
 			old.sessions_ended.fetch_add(1, Ordering::Release);
 		}
@@ -1351,7 +1381,9 @@ impl SessionInner {
 impl Drop for SessionInner {
 	fn drop(&mut self) {
 		let current = self.current.get_mut().expect("stats session poisoned");
-		if let Some(presence) = &current.presence {
+		if self.connected
+			&& let Some(presence) = &current.presence
+		{
 			// Release pairs with the readout's Acquire load of `sessions_ended`
 			// (see the module-level "Snapshot atomicity" note).
 			presence.sessions_ended.fetch_add(1, Ordering::Release);
@@ -2264,6 +2296,65 @@ mod tests {
 				.subscriptions_ended,
 			1
 		);
+	}
+
+	#[test]
+	fn request_admission_survives_clones_retiering_and_retirement_without_presence() {
+		let stats = test_stats();
+		let request = stats.tier(Tier::new("old")).request("root");
+		let clone = request.clone();
+		request.egress("root/video").meter().bytes(7);
+		request.set_tier(Tier::new("new"));
+		clone.egress("root/video").meter().bytes(11);
+		drop(request);
+		drop(clone);
+		let mut report = Report::default();
+		stats.report(&mut report);
+		for (label, requests, bytes) in [("old", 1, 7), ("new", 0, 11)] {
+			let tier = Tier::new(label);
+			let presence = report.sessions.iter().find(|entry| entry.tier == tier).unwrap();
+			assert_eq!(presence.presence.requests, requests);
+			assert_eq!(presence.presence.active(), 0);
+			assert_eq!(
+				(presence.presence.sessions_started, presence.presence.sessions_ended),
+				(0, 0)
+			);
+			assert!(presence.closed);
+			assert_eq!(
+				report
+					.traffic
+					.iter()
+					.find(|entry| entry.tier == tier)
+					.unwrap()
+					.publisher
+					.bytes,
+				bytes
+			);
+		}
+		stats.report(&mut report);
+		assert!(report.sessions.is_empty());
+		let totals = stats.snapshot().sessions();
+		assert_eq!(totals.iter().map(|(_, p)| p.requests).sum::<u64>(), 1);
+	}
+
+	#[test]
+	fn request_counter_is_additive_and_compatible_with_old_frames() {
+		let old: Presence = serde_json::from_str(r#"{"sessions":2,"sessions_closed":1}"#).unwrap();
+		assert_eq!(old.requests, 0);
+		let mut requests = Presence {
+			requests: 3,
+			..Default::default()
+		};
+		requests.add(old);
+		assert_eq!(
+			serde_json::from_str::<Presence>(&serde_json::to_string(&requests).unwrap()).unwrap(),
+			requests
+		);
+		assert_eq!(
+			(requests.requests, requests.sessions_started, requests.sessions_ended),
+			(3, 2, 1)
+		);
+		assert!(serde_json::from_str::<Presence>(r#"{"requests":null}"#).is_err());
 	}
 
 	#[test]

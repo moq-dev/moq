@@ -86,6 +86,13 @@ jobs:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
+      - name: TS fragmented PES headers
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --fragment-pes
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
       # The same round-trip at 2 Mb/s, where every keyframe outgrows a 25 ms PCR slot,
       # so the export has to spread it over the slots before its DTS and still keep
       # the constant-rate schedule.

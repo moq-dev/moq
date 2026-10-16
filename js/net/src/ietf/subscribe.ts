@@ -81,6 +81,9 @@ export class Subscribe {
 	/** Whether the request carried a Range Filter, which we refuse. Never encoded. */
 	rangeFilters: boolean;
 
+	/** Whether RENDEZVOUS_TIMEOUT requested a wait; never encoded. */
+	rendezvous: boolean;
+
 	constructor({
 		requestId,
 		trackNamespace,
@@ -92,6 +95,7 @@ export class Subscribe {
 		propertiesWanted,
 		forward,
 		rangeFilters,
+		rendezvous,
 	}: {
 		requestId: bigint;
 		trackNamespace: Path.Valid;
@@ -103,6 +107,7 @@ export class Subscribe {
 		propertiesWanted?: boolean;
 		forward?: boolean;
 		rangeFilters?: boolean;
+		rendezvous?: boolean;
 	}) {
 		this.requestId = requestId;
 		this.trackNamespace = trackNamespace;
@@ -114,6 +119,7 @@ export class Subscribe {
 		this.propertiesWanted = propertiesWanted ?? true;
 		this.forward = forward ?? true;
 		this.rangeFilters = rangeFilters ?? false;
+		this.rendezvous = rendezvous ?? false;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -228,6 +234,7 @@ export class Subscribe {
 			propertiesWanted: params.includeProperties ?? true,
 			forward: params.forward ?? true,
 			rangeFilters: params.rangeFilters,
+			rendezvous: (params.vars.get(0x04n) ?? 0n) > 0n,
 		});
 	}
 }

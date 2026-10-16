@@ -76,7 +76,9 @@ channel. SCTP ordering means one lost packet can hold back every stream.
 [iroh](https://www.iroh.computer/) swaps "dial a hostname" for "dial a public
 key". Two native MoQ endpoints on the same network can exchange media with no
 relay, no DNS, and no certificate authority: the endpoint's key is its address
-and its TLS identity.
+and its TLS identity. Build `moq` from source with
+`cargo build -p moq-cli --release --features iroh,play` for native playback;
+published binaries, Docker images, and the Nix package leave iroh out.
 
 ```bash
 moq --iroh-enabled --iroh-disable-relay \

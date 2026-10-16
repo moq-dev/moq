@@ -46,9 +46,8 @@ Decided 2026-10-10 by maintainer priority, extended 2026-10-11:
 - **Wire.** The sessions output gains sent and received byte fields per
   label. The change is additive: an older reader ignores them and a newer one
   defaults them to zero.
-- **HTTP.** A `/fetch` request context
-  ([HTTP fetch stats](/quest/m2/http-fetch-stats.md)) counts its bytes under
-  the label too, beside its `requests`.
+- **HTTP.** A `/fetch` request context counts its bytes under the label too,
+  beside its `requests`.
 - **Re-checked grants retag live.** A changed or removed label on a re-checked
   grant moves the session to the new label, the way a changed tier does
   today. Generalize `stats::Session::set_tier` into one `(tier, label)` retag
@@ -81,8 +80,6 @@ HTTP grant body and the stats track's per-label byte fields, not MoQ.
 
 ## Related
 
-- [HTTP fetch stats](/quest/m2/http-fetch-stats.md) - adds the request
-  context whose bytes this counts under the label
 - [Session outcomes](/quest/m1/session-outcomes.md) - its per-root counters
   follow the same label
 - [Typed refusal reason](/quest/m1/refusal-reason.md) - a refusal body names

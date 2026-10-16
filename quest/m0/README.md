@@ -85,4 +85,3 @@ have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
 - [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on moq-dev/web-transport#412 and #413 to merge and ship, which qmux credit bumps to
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
-- [iroh off by default in moq-cli](/quest/m0/iroh-opt-in.md) - `moq-cli` and every distribution build without iroh; `--features iroh` restores it
