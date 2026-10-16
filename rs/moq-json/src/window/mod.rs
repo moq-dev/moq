@@ -53,6 +53,9 @@ mod encoder;
 mod op;
 mod producer;
 
+#[cfg(test)]
+mod properties;
+
 pub use consumer::Consumer;
 pub use decoder::{ConsumerConfig, Decoder, Event, Group};
 pub use encoder::{Checkpoint, Encoded, Encoder, Pending, ProducerConfig};

@@ -31,16 +31,16 @@
 //! while let Some(member) = group.member()? {
 //!     members.push((member.shard(), member.into_inner()));
 //! }
-//! // Serve each socket, issuing connection IDs led by `cid_prefix(shard)`.
+//! // Serve each socket, issuing connection IDs with `cid(shard)`.
 //! # Ok(())
 //! # }
 //! ```
 //!
 //! # The encoding
 //!
-//! [`cid_prefix`] makes the first byte of every connection ID this member issues
-//! congruent to its index modulo the group size, keeping the remaining
-//! `256 / count` values of that byte (and every later byte) random. The kernel
+//! [`cid`] makes the first byte of every connection ID this member issues
+//! congruent to its index modulo the group size. It also marks the ID with a
+//! bit pattern that no valid SRT data header can carry. The kernel
 //! selects `socks[A % count]` for a returned accumulator `A`, so feeding it that
 //! byte lands on the owner.
 //!
@@ -55,7 +55,7 @@
 //!
 //! `SO_ATTACH_REUSEPORT_CBPF` runs the program with the UDP payload at offset 0
 //! (the kernel pulls the header off first) and uses the return value as the
-//! index. That is the whole rule in seven instructions, with no `CAP_BPF`, no
+//! index. That rule fits in classic BPF, with no `CAP_BPF`, no
 //! BPF toolchain in the build, and no map to keep alive across restarts. The
 //! cost is that the kernel selects by *position*, so the group has to be built
 //! once, in order, and never resized, which is what [`Group`] is for.
@@ -73,8 +73,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 /// meaningful only inside a group that was bound once, in index order, and is
 /// never resized.
 ///
-/// Carry it wherever the member issues connection IDs, which [`cid_prefix`]
-/// leads with its index.
+/// Carry it wherever the member issues connection IDs, which [`cid`] marks
+/// with its index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Shard {
 	index: u16,
@@ -86,7 +86,7 @@ impl Shard {
 	/// exist: a `count` of zero or past [`MAX_SHARDS`], or an `index` at or past
 	/// the end.
 	///
-	/// The upper bound is what makes every shard safe to steer: [`cid_prefix`]
+	/// The upper bound is what makes every shard safe to steer: [`cid`]
 	/// spends `256 / count` values of a byte, so a larger group would leave it
 	/// none to spend.
 	fn new(index: u16, count: u16) -> Option<Self> {
@@ -282,7 +282,7 @@ pub struct Member {
 
 impl Member {
 	/// This member's slot, which its connection IDs have to encode
-	/// ([`cid_prefix`]).
+	/// ([`cid`]).
 	pub fn shard(&self) -> Shard {
 		self.shard
 	}
@@ -649,27 +649,35 @@ fn prepare(dir: std::path::PathBuf) -> Option<std::path::PathBuf> {
 /// The largest group the steering filter can address.
 ///
 /// It selects with one byte of the connection ID, so a member past 255 could
-/// never be named: [`cid_prefix`] would have no stride to spend and the filter's
+/// never be named: [`cid`] would have no stride to spend and the filter's
 /// `byte % count` could never return that index.
 pub const MAX_SHARDS: u16 = 256;
 
-/// The first byte of a connection ID issued by `shard`.
+/// The length of a connection ID that the steering filter recognizes.
+pub const CID_LEN: usize = 8;
+
+/// A connection ID that routes to `shard` without matching a valid SRT data header.
 ///
 /// `count` values of the byte are reserved per member, so this keeps
-/// `256 / count` of its randomness: 32 values across 8 members, and the other
-/// bytes of the ID stay fully random either way. Connection IDs are not secrets,
-/// but they are unlinkable only while they look random, which is why this spends
-/// as little of that byte as it can.
-pub fn cid_prefix(shard: Shard) -> u8 {
+/// `256 / count` of its randomness: 32 values across 8 members. Two marker bits
+/// are fixed in the fourth byte and every other bit stays random. Connection IDs
+/// are not secrets, but they are unlinkable only while they look random, which
+/// is why the encoding spends only what routing and classification need.
+pub fn cid(shard: Shard) -> [u8; CID_LEN] {
 	use rand::RngExt;
 
+	let mut cid: [u8; CID_LEN] = rand::random();
 	let count = u32::from(shard.count());
 	// The number of whole strides of `count` that fit in a byte. At least one,
 	// because a group is never larger than `MAX_SHARDS`.
 	let strides = 256 / count;
 	let stride = rand::rng().random_range(0..strides);
 
-	(stride * count + u32::from(shard.index())) as u8
+	cid[0] = (stride * count + u32::from(shard.index())) as u8;
+	// On an SRT data packet this byte overlays the PP/O/KK/R flags. KK=0b11
+	// is reserved, so the pattern cannot persist on a valid SRT flow.
+	cid[3] |= 0x18;
+	cid
 }
 
 /// Attach the steering filter to a socket in a reuseport group of `count`.
@@ -718,24 +726,32 @@ fn attach(_socket: &UdpSocket, _count: u16) -> io::Result<()> {
 
 /// The classic-BPF program that maps a QUIC packet to its owner's index.
 ///
-/// Reads the first byte of the destination connection ID, whose offset depends
-/// on the header form, and reduces it modulo the group size. The packet starts
-/// at offset 0 because the kernel pulls the UDP header off before running this.
+/// A long header is QUIC when it carries v1 or v2. A short header is QUIC when
+/// its fixed bit and relay CID marker are set. For either, the first destination
+/// CID byte is reduced modulo the group size. Everything else returns an invalid
+/// index, which asks reuseport to use its 4-tuple hash. The packet starts at
+/// offset 0 because the kernel pulls the UDP header off before running this.
 ///
-/// A long header carries an explicit ID length, and a zero there would make
-/// offset 6 the *source* ID's length byte instead. Not worth a branch: only a
-/// malformed or hostile packet gets there, since a client's Initial must carry a
-/// destination ID of at least 8 bytes, and the worst outcome is that one junk
-/// packet reaches a member that discards it.
+/// A load past the end of the datagram aborts the program with 0, which
+/// reuseport takes as member 0, so anything too short for every load is
+/// rejected first.
 #[cfg(target_os = "linux")]
-fn program(count: u16) -> [libc::sock_filter; 7] {
+fn program(count: u16) -> [libc::sock_filter; 18] {
 	/// Long-header form bit in the first byte of a QUIC packet.
 	const LONG_HEADER: u32 = 0x80;
+	/// Fixed bit on short headers. Greasing is disabled on sharded endpoints.
+	const FIXED_BIT: u32 = 0x40;
+	const VERSION_1: u32 = 0x0000_0001;
+	const VERSION_2: u32 = 0x6b33_43cf;
+	/// The SRT key-encryption bits overlaid by the fourth destination CID byte.
+	const MAGIC_MASK: u32 = 0x18;
 	/// 1 first byte + 4 version bytes + 1 length byte precede a long header's
 	/// destination connection ID.
 	const LONG_DCID: u32 = 6;
 	/// A short header's destination connection ID follows the first byte.
 	const SHORT_DCID: u32 = 1;
+	/// The shortest datagram every load below stays inside.
+	const MIN_LEN: u32 = LONG_DCID + 1;
 
 	fn insn(code: u32, jt: u8, jf: u8, k: u32) -> libc::sock_filter {
 		libc::sock_filter {
@@ -747,18 +763,32 @@ fn program(count: u16) -> [libc::sock_filter; 7] {
 	}
 
 	[
+		// A = datagram length; too short to be QUIC uses the kernel hash.
+		insn(libc::BPF_LD | libc::BPF_W | libc::BPF_LEN, 0, 0, 0),
+		insn(libc::BPF_JMP | libc::BPF_JGE | libc::BPF_K, 0, 12, MIN_LEN),
 		// A = packet[0]
 		insn(libc::BPF_LD | libc::BPF_B | libc::BPF_ABS, 0, 0, 0),
-		// Long header? Skip the short-header load.
-		insn(libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K, 2, 0, LONG_HEADER),
+		// Long header? Jump to its version check.
+		insn(libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K, 7, 0, LONG_HEADER),
+		// A short header must retain QUIC's fixed bit.
+		insn(libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K, 0, 9, FIXED_BIT),
+		// A = packet[4], the fourth destination CID byte.
+		insn(libc::BPF_LD | libc::BPF_B | libc::BPF_ABS, 0, 0, SHORT_DCID + 3),
+		insn(libc::BPF_ALU | libc::BPF_AND | libc::BPF_K, 0, 0, MAGIC_MASK),
+		// A short header without the relay CID marker uses the kernel hash.
+		insn(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K, 0, 6, MAGIC_MASK),
 		// A = packet[1]
 		insn(libc::BPF_LD | libc::BPF_B | libc::BPF_ABS, 0, 0, SHORT_DCID),
-		// Skip the long-header load.
-		insn(libc::BPF_JMP | libc::BPF_JA | libc::BPF_K, 0, 0, 1),
+		insn(libc::BPF_ALU | libc::BPF_MOD | libc::BPF_K, 0, 0, u32::from(count)),
+		insn(libc::BPF_RET | libc::BPF_A, 0, 0, 0),
+		// Long headers steer only supported QUIC versions.
+		insn(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 1),
+		insn(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K, 2, 0, VERSION_1),
+		insn(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K, 1, 0, VERSION_2),
+		// An out-of-range result asks reuseport to use its 4-tuple hash.
+		insn(libc::BPF_RET | libc::BPF_K, 0, 0, u32::from(count)),
 		// A = packet[6]
 		insn(libc::BPF_LD | libc::BPF_B | libc::BPF_ABS, 0, 0, LONG_DCID),
-		// A %= count. The kernel would reduce out-of-range indices to a 4-tuple
-		// hash rather than an index, so the program has to land in range itself.
 		insn(libc::BPF_ALU | libc::BPF_MOD | libc::BPF_K, 0, 0, u32::from(count)),
 		insn(libc::BPF_RET | libc::BPF_A, 0, 0, 0),
 	]
@@ -769,7 +799,7 @@ mod tests {
 	use super::*;
 
 	/// A slot has to exist in the group it names, and the group has to be one
-	/// the steering filter can address: `cid_prefix` divides by the count, so
+	/// the steering filter can address: `cid` divides by the count, so
 	/// an oversized group would panic on a zero-width stride.
 	#[test]
 	fn shard_slots_are_bounded() {
@@ -831,12 +861,14 @@ mod tests {
 				let shard = Shard::new(index, count).unwrap();
 				// Sampled, since the prefix is randomized within the member's stride.
 				for _ in 0..64 {
-					let prefix = cid_prefix(shard);
+					let id = cid(shard);
+					let prefix = id[0];
 					assert_eq!(
 						u16::from(prefix) % count,
 						index,
 						"prefix {prefix} of shard {index}/{count} steers elsewhere"
 					);
+					assert_eq!(id[3] & 0x18, 0x18, "CID lacks the non-SRT marker");
 				}
 			}
 		}
@@ -851,7 +883,7 @@ mod tests {
 		for index in 0..COUNT {
 			let shard = Shard::new(index, COUNT).unwrap();
 			for _ in 0..256 {
-				seen.insert(u16::from(cid_prefix(shard)) % COUNT);
+				seen.insert(u16::from(cid(shard)[0]) % COUNT);
 			}
 		}
 		assert_eq!(seen.len(), usize::from(COUNT));
@@ -950,14 +982,22 @@ mod tests {
 		}
 
 		for (index, shard) in shards.into_iter().enumerate() {
-			let prefix = cid_prefix(shard);
+			let id = cid(shard);
 
 			// A short header: form bit clear, connection ID straight after.
-			let short = [0x40, prefix, 1, 2, 3, 4, 5, 6, 7, 8];
-			// A long header: form bit set, then version, then the ID's length.
-			let long = [0xc0, 0, 0, 0, 1, 8, prefix, 1, 2, 3, 4, 5, 6, 7];
+			let mut short = [0; CID_LEN + 1];
+			short[0] = 0x40;
+			short[1..].copy_from_slice(&id);
+			let long = |version: [u8; 4]| {
+				let mut packet = [0; CID_LEN + 6];
+				packet[..6].copy_from_slice(&[0xc0, version[0], version[1], version[2], version[3], CID_LEN as u8]);
+				packet[6..].copy_from_slice(&id);
+				packet
+			};
+			let v1 = long([0, 0, 0, 1]);
+			let v2 = long([0x6b, 0x33, 0x43, 0xcf]);
 
-			for (form, packet) in [("short", &short[..]), ("long", &long[..])] {
+			for (form, packet) in [("short", &short[..]), ("v1", &v1[..]), ("v2", &v2[..])] {
 				// A fresh source port per packet, so nothing but the connection ID
 				// can be steering this.
 				let sender = crate::bind::udp(crate::bind::Udp::new("127.0.0.1:0".parse().unwrap())).unwrap();
@@ -972,6 +1012,68 @@ mod tests {
 					"{form} header for member {index} landed on the wrong socket"
 				);
 			}
+		}
+	}
+
+	/// Datagram protocols that share the port stay on the kernel's 4-tuple hash,
+	/// even when fields at the QUIC connection-ID offsets change or are missing.
+	#[test]
+	#[cfg(target_os = "linux")]
+	fn non_quic_flows_stay_on_one_member() {
+		const COUNT: u16 = 4;
+		let mut group = Group::acquire("127.0.0.1:0".parse().unwrap(), COUNT).unwrap();
+		let mut claims = Vec::new();
+		while let Some(member) = group.member() {
+			claims.push(member.bind().expect("bind group member"));
+		}
+		let mut group = group.complete(claims).expect("complete group");
+		let mut sockets = Vec::new();
+		while let Some(member) = group.member().expect("clone retained socket") {
+			let socket = member.into_inner();
+			socket
+				.set_read_timeout(Some(std::time::Duration::from_millis(100)))
+				.unwrap();
+			sockets.push(socket);
+		}
+
+		let flows = [
+			("rtp", [0x80, 96, 0, 1, 0, 0, 0, 1, 0x12, 0x34, 0x56, 0x78]),
+			// SRT data with KK=0b10 (no encryption); R is toggled below.
+			("srt", [0x40, 0, 0, 1, 0x10, 0, 0, 1, 0x12, 0x34, 0x56, 0x78]),
+			("stun", [0, 1, 0, 0, 0x21, 0x12, 0xa4, 0x42, 1, 2, 3, 4]),
+			("dtls", [22, 0xfe, 0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+		];
+		for (name, mut packet) in flows {
+			let mut buf = [0; 64];
+			// A flow hashed off member 0, so a filter that faults to index 0 shows up.
+			let (sender, owner) = (0..64)
+				.find_map(|_| {
+					let sender = crate::bind::udp(crate::bind::Udp::new("127.0.0.1:0".parse().unwrap())).unwrap();
+					sender.send_to(&packet, group.addr()).unwrap();
+					let owner = sockets
+						.iter()
+						.position(|socket| socket.recv_from(&mut buf).is_ok())
+						.expect("one member receives the flow");
+					(owner != 0).then_some((sender, owner))
+				})
+				.expect("a flow hashed off member 0");
+
+			for sequence in 2..18u8 {
+				packet[3] = sequence;
+				if name == "srt" {
+					packet[4] ^= 0x04; // retransmission flag
+				}
+				sender.send_to(&packet, group.addr()).unwrap();
+				sockets[owner]
+					.recv_from(&mut buf)
+					.unwrap_or_else(|err| panic!("{name} packet {sequence} changed shards: {err}"));
+			}
+
+			// Too short to reach the connection-ID offsets the filter reads.
+			sender.send_to(&packet[..2], group.addr()).unwrap();
+			sockets[owner]
+				.recv_from(&mut buf)
+				.unwrap_or_else(|err| panic!("truncated {name} packet changed shards: {err}"));
 		}
 	}
 
@@ -995,7 +1097,9 @@ mod tests {
 			.unwrap();
 		drop(first);
 
-		let packet = [0x40, cid_prefix(shard), 1, 2, 3, 4, 5, 6, 7, 8];
+		let mut packet = [0; CID_LEN + 1];
+		packet[0] = 0x40;
+		packet[1..].copy_from_slice(&cid(shard));
 		let sender = crate::bind::udp(crate::bind::Udp::new("127.0.0.1:0".parse().unwrap())).unwrap();
 		sender.send_to(&packet, group.addr()).unwrap();
 
@@ -1093,15 +1197,21 @@ mod tests {
 	#[cfg(target_os = "linux")]
 	fn the_program_branches_to_the_right_loads() {
 		let program = program(4);
-		assert_eq!(program.len(), 7);
+		assert_eq!(program.len(), 18);
 
-		// Instruction 1 falls through to the short-header load at 2, and jumps
-		// over it (and its trailing jump) to the long-header load at 4.
-		assert_eq!(program[1].jt, 2, "long header must land on the long load");
-		assert_eq!(program[1].jf, 0, "short header must fall through");
-		assert_eq!(program[2].k, 1, "short header reads the byte after the first");
-		assert_eq!(program[3].k, 1, "the short path must skip the long load");
-		assert_eq!(program[4].k, 6, "long header reads past version and length");
-		assert_eq!(program[5].k, 4, "the modulus is the group size");
+		// Instruction 1 sends a short datagram to the kernel-hash return at 14.
+		assert_eq!(program[1].k, 7, "every load must stay inside the datagram");
+		assert_eq!(program[1].jf, 12, "a short datagram must use the kernel hash");
+		assert_eq!(program[14].k, 4, "the kernel-hash return is out of range");
+		// Instruction 3 falls through to the short-header checks, and jumps to
+		// the long-header version load at 11.
+		assert_eq!(program[3].jt, 7, "long header must land on the version load");
+		assert_eq!(program[3].jf, 0, "short header must fall through");
+		assert_eq!(program[5].k, 4, "short header reads the fourth CID byte");
+		assert_eq!(program[8].k, 1, "short header reads the shard byte");
+		assert_eq!(program[11].k, 1, "long header reads its version");
+		assert_eq!(program[15].k, 6, "long header reads past version and length");
+		assert_eq!(program[9].k, 4, "the short modulus is the group size");
+		assert_eq!(program[16].k, 4, "the long modulus is the group size");
 	}
 }

@@ -18,7 +18,7 @@
 //! [`web`] layer's HTTP/3 CONNECT handshake on top of the same adapter, with
 //! [`web::Session`] as the one transport type covering both.
 //!
-//! Noq is the sans-IO QUIC stack underneath the worker.
+//! moq-quic is the sans-IO QUIC stack underneath the worker.
 
 pub mod client;
 pub mod endpoint;
@@ -28,10 +28,10 @@ pub mod qlog;
 pub mod server;
 pub mod web;
 
-mod noq;
+mod driver;
 
+pub use driver::{Connection, Credit, RecvStream, SendStream};
 pub use endpoint::Endpoint;
-pub use noq::{Connection, RecvStream, SendStream};
 
 /// The QUIC payload size every full datagram in a GSO train uses, and the
 /// stride GRO coalesces with.
@@ -77,7 +77,7 @@ impl Identity {
 		client_auth: server::ClientAuth,
 	) -> Result<std::sync::Arc<rustls::ServerConfig>, Error> {
 		let alpn = alpn.iter().map(|proto| proto.as_ref().as_bytes().to_vec()).collect();
-		noq::identity_server_config(self, alpn, &client_auth)
+		driver::identity_server_config(self, alpn, &client_auth)
 	}
 
 	/// The PEM certificate chain being presented, for a caller that publishes
@@ -135,8 +135,9 @@ pub struct Transport {
 	pub keep_alive: Option<std::time::Duration>,
 	/// Where to write qlog traces, or `None` (the default) to write none.
 	///
-	/// Noq takes one sink per configuration and writes one file per connection,
-	/// named from that connection's Initial destination connection ID.
+	/// moq-quic takes one sink per transport config, so this writes one file
+	/// per endpoint on the accept side and per dial on the connect side, each
+	/// event tagged with the qlog `group_id` of the connection it belongs to.
 	///
 	/// Only compiled with the `qlog` feature, so a build without it cannot ask
 	/// for traces the backends would not produce.
@@ -162,9 +163,9 @@ impl Default for Transport {
 
 /// The congestion control family a connection runs.
 ///
-/// Noq uses CUBIC for loss-based control and BBRv3 for delay-based control.
+/// CUBIC is used for loss-based control and BBRv3 for delay-based control.
 ///
-/// The default is [`Loss`](Self::Loss), which is what noq runs
+/// The default is [`Loss`](Self::Loss), which is what moq-quic runs
 /// unasked. An application carrying live media wants [`Delay`](Self::Delay)
 /// and should say so; the relay does.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

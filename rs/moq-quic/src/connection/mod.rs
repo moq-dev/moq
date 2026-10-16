@@ -76,7 +76,22 @@ use spaces::Retransmits;
 use spaces::{PacketNumberFilter, PacketSpace, SendableFrames, SentPacket, ThinRetransmits};
 
 mod stats;
-pub use stats::{ConnectionStats, FrameStats, PathStats, UdpStats};
+
+/// Identifies one connection, so state handed out by it cannot be returned to another.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ConnectionTag(u64);
+
+impl ConnectionTag {
+    /// No connection, for state that has not come from one yet.
+    pub(crate) const NONE: Self = Self(0);
+
+    /// A tag no other connection in this process has.
+    pub(crate) fn next() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+pub use stats::{ConnectionStats, CreditStats, FrameStats, PathStats, UdpStats};
 
 mod streams;
 #[cfg(fuzzing)]
@@ -84,7 +99,7 @@ pub use streams::StreamsState;
 #[cfg(not(fuzzing))]
 use streams::StreamsState;
 pub use streams::{
-    Chunks, ClosedStream, FinishError, ReadError, ReadableError, RecvStream, SendStream,
+    Chunks, ClosedStream, Credit, FinishError, ReadError, ReadableError, RecvStream, SendStream,
     ShouldTransmit, StreamEvent, Streams, WriteError, Written,
 };
 
@@ -171,6 +186,8 @@ pub struct Connection {
     retry_src_cid: Option<ConnectionId>,
     events: VecDeque<Event>,
     endpoint_events: VecDeque<EndpointEventInner>,
+    /// Whether `EndpointEventInner::Draining` was emitted, which happens once.
+    draining_reported: bool,
     /// Whether the spin bit is in use for this connection
     spin_enabled: bool,
     /// Outgoing spin bit state
@@ -317,6 +334,7 @@ impl Connection {
             retry_src_cid: None,
             events: VecDeque::new(),
             endpoint_events: VecDeque::new(),
+            draining_reported: false,
             spin_enabled: config.allow_spin && rng.random_ratio(7, 8),
             spin: false,
             spaces: [initial_space, PacketSpace::new(now), PacketSpace::new(now)],
@@ -1256,6 +1274,7 @@ impl Connection {
             match timer {
                 Timer::Close => {
                     self.state = State::Drained;
+                    self.report_draining();
                     self.endpoint_events.push_back(EndpointEventInner::Drained);
                 }
                 Timer::Idle => {
@@ -1354,8 +1373,22 @@ impl Connection {
         stats.path.cwnd = self.path.congestion.window();
         stats.path.bandwidth_estimate = self.path.congestion.metrics().bandwidth_estimate;
         stats.path.current_mtu = self.path.mtud.current_mtu();
+        stats.credit = self.streams.credit_stats();
 
         stats
+    }
+
+    /// Return connection flow control credit taken by [`Chunks::hold()`] to the peer.
+    ///
+    /// If [`ShouldTransmit::should_transmit()`] returns `true`, call
+    /// [`Self::poll_transmit()`] soon so the peer learns of the larger window.
+    ///
+    /// # Panics
+    /// If `credit` came from another connection.
+    pub fn release(&mut self, credit: Credit) -> ShouldTransmit {
+        let transmit = self.streams.release(credit);
+        self.spaces[SpaceId::Data].pending.max_data |= transmit.should_transmit();
+        transmit
     }
 
     /// Ping the remote endpoint
@@ -2624,6 +2657,9 @@ impl Connection {
             if !self.state.is_drained() {
                 self.set_close_timer(now);
             }
+        }
+        if matches!(self.state, State::Draining | State::Drained) {
+            self.report_draining();
         }
         if !was_drained && self.state.is_drained() {
             self.endpoint_events.push_back(EndpointEventInner::Drained);
@@ -3968,7 +4004,15 @@ impl Connection {
         self.close_common();
         self.error = Some(reason);
         self.state = State::Drained;
+        self.report_draining();
         self.endpoint_events.push_back(EndpointEventInner::Drained);
+    }
+
+    /// Tell the endpoint the connection is no longer active, the first time it stops being so
+    fn report_draining(&mut self) {
+        if !mem::replace(&mut self.draining_reported, true) {
+            self.endpoint_events.push_back(EndpointEventInner::Draining);
+        }
     }
 
     /// Storage size required for the largest packet known to be supported by the current path

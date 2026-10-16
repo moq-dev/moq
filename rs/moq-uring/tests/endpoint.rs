@@ -4,7 +4,7 @@
 //!
 //! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
 
-#![cfg(all(target_os = "linux", feature = "noq"))]
+#![cfg(all(target_os = "linux", feature = "quic"))]
 
 #[path = "support.rs"]
 mod support;
@@ -200,7 +200,7 @@ fn unsupported_version_is_negotiated_only_by_servers() {
 
 			// Junk first: it must not be fatal, and whatever answer it draws
 			// must be smaller than it was, so the socket is never an
-			// amplifier. Noq answers a packet naming no connection with a
+			// amplifier. moq-quic answers a packet naming no connection with a
 			// stateless reset, which is what tells a
 			// peer holding stale state to give up.
 			let junk = [0u8; 64];
@@ -276,7 +276,7 @@ fn unsupported_version_is_negotiated_only_by_servers() {
 	assert!(
 		versions
 			.iter()
-			.any(|version| moq_noq_proto::DEFAULT_SUPPORTED_VERSIONS.contains(version)),
+			.any(|version| moq_quic::DEFAULT_SUPPORTED_VERSIONS.contains(version)),
 		"the supported version is offered: {versions:?}"
 	);
 	drop((endpoint, dial_only));
@@ -382,13 +382,73 @@ fn an_unanswered_dial_times_out() {
 	let client_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("client socket");
-	// The dial ends at noq's handshake idle timeout (10s), not the idle timeout.
+	// The dial ends at moq-quic's handshake idle timeout (10s), not the idle timeout.
 	let dial = dial_config(hole.local_addr().expect("addr"));
 
 	let result = worker
 		.block_on(async move { quic::client::connect(client_sock, &dial).await })
 		.expect("worker");
 	assert!(result.is_err(), "a dial into a black hole must time out");
+}
+
+/// A dial to an address the host cannot route fails at once with
+/// `NO_VIABLE_PATH` rather than at the handshake timeout, and fails alone: the
+/// socket it shares goes on dialing. Linux refuses a v4-mapped destination on
+/// an IPv6-only socket with `ENETUNREACH`, an unroutable family without
+/// touching the host's routes.
+#[test]
+fn an_unroutable_dial_fails_alone() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+
+	let server = quic::Endpoint::new(
+		handle
+			.udp(UdpSocket::bind("[::1]:0").expect("bind"), udp::Config::default())
+			.expect("server socket"),
+		quic::endpoint::Config::default().with_server(server_config(&certs)),
+	)
+	.expect("server endpoint");
+	let v6_only = {
+		use nix::sys::socket::{AddressFamily, SockFlag, SockType, SockaddrIn6, bind, setsockopt, socket, sockopt};
+		use std::os::fd::AsRawFd;
+		let fd = socket(AddressFamily::Inet6, SockType::Datagram, SockFlag::empty(), None).expect("socket");
+		setsockopt(&fd, sockopt::Ipv6V6Only, &true).expect("IPV6_V6ONLY");
+		let local: std::net::SocketAddrV6 = "[::1]:0".parse().expect("addr");
+		bind(fd.as_raw_fd(), &SockaddrIn6::from(local)).expect("bind");
+		UdpSocket::from(fd)
+	};
+	let client = quic::Endpoint::new(
+		handle.udp(v6_only, udp::Config::default()).expect("client socket"),
+		quic::endpoint::Config::default(),
+	)
+	.expect("dial-only endpoint");
+
+	let port = server.local_addr().port();
+	let unroutable = std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.to_ipv6_mapped().into(), port);
+	worker
+		.block_on(async move {
+			// Well inside the 10s handshake timeout a swallowed error waits for.
+			match within(
+				&handle,
+				"the unroutable dial to fail",
+				client.connect(&dial_config(unroutable)),
+			)
+			.await
+			{
+				Err(quic::Error::Transport { code: 0x10, .. }) => {}
+				other => panic!("expected NO_VIABLE_PATH, got {other:?}"),
+			}
+
+			let dialed = within(
+				&handle,
+				"a dial on the same socket",
+				client.connect(&dial_config(server.local_addr())),
+			)
+			.await;
+			dialed.expect("the socket outlives one unroutable destination");
+		})
+		.expect("worker");
 }
 
 /// The handshake backlog bounds what an unauthenticated Initial can allocate:
@@ -419,7 +479,7 @@ fn the_backlog_bounds_pending_handshakes() {
 	let client_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("client socket");
-	// The server never answers, so the dial ends at noq's handshake idle
+	// The server never answers, so the dial ends at moq-quic's handshake idle
 	// timeout (10s).
 	let dial = dial_config(server);
 

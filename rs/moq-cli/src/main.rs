@@ -225,8 +225,10 @@ impl Serving {
 		if let Some(subscribe) = subscribe {
 			request = request.with_subscriber(subscribe);
 		}
-		let session = request.ok().await?;
-		moq_relay::supervise(session, lease, self.shutdown.clone(), None).await
+		let (session, driver) = request.ok().await?;
+		let result = moq_relay::supervise(session, lease, self.shutdown.clone(), None).await;
+		driver.await??;
+		result
 	}
 }
 

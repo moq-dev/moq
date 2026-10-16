@@ -3,8 +3,8 @@
 ## Goal
 
 MoQ owns the QUIC features it needs in an in-tree stack, `moq-quic`, hard
-forked from quinn (see [the fork](/quest/m1/quic/fork/README.md) for why
-quinn and not noq). One core serves the tokio backend, the thread-per-core
+forked from quinn rather than noq, whose multipath, NAT traversal, and QAD
+MoQ never negotiates. One core serves the tokio backend, the thread-per-core
 `moq-uring` backend, and qmux; iroh stays on upstream noq. The features are
 BBR correctness, reliable stream resets, hierarchical stream scheduling with
 per-broadcast fairness, bounded incomplete-message memory, wider limits for
@@ -19,13 +19,9 @@ careful resume, and a receive-timestamps spike toward GCC live in
 ## Plan
 
 Decided in the 2026-09-30 plan: the moq-dev/noq soft fork is replaced by a
-hard fork of quinn in `rs/`, so every QUIC change here waits for
-[the fork](/quest/m1/quic/fork/README.md). moq-dev/noq is frozen to
-security patches for `release`.
-
-Older quests say "the fork" or "noq"; read that as `moq-quic`. Their steps to
-publish a fork release, pin it, or offer a change upstream are superseded:
-a change lands in-tree with its consumer, and upstreaming is optional.
+hard fork of quinn in `rs/`, where every QUIC change here lands.
+moq-dev/noq is frozen to security patches for `release` and archived once
+no released MoQ crate depends on it.
 
 The seven BBR correctness fixes shipped in moq-noq 1.3.1 (#4206) are in
 `moq-quic`'s BBR3. The remaining BBR quests here all edit
@@ -55,7 +51,6 @@ Decided in the 2026-09-30 audit: deadlines, qmux, BBR loss parity, ECN
 measurement, ACK progress, and the ACK hook moved to m2, since no m1 quest
 consumes them. Decided 2026-10-08: L4S and careful resume moved on to m3,
 and GCC shrank to a receive-timestamps spike, since none has a consumer.
-The BBR app-limited fixes land in `moq-quic` without waiting for the switch.
 
 Decided in the 2026-10-10 receive-memory plan: native message assembly holds
 connection credit until complete-unit handoff, while stream credit advances
@@ -67,8 +62,6 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
 
 ## Required
 
-- [Hard fork](/quest/m1/quic/fork/README.md) - quinn in-tree as `moq-quic`, with BBR3 and lazy stream slots, and MoQ switched onto it
-- [Retain connection credit](/quest/m1/quic/receive-credit.md) - native receivers own connection credit independently of stream reads
 - [Bound message assembly](/quest/m1/quic/receive-memory.md) - complete headers and frames return credit, and receiver priority cancellation restores progress
 - [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - `RESET_STREAM_AT`,
   so a reset WebTransport stream still delivers its header
@@ -81,14 +74,13 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
   and MAX_DATA are raised after SETUP identifies a cluster peer
 - [Shard the endpoint](/quest/m1/quic/shard.md) - the library shards a
   server endpoint across cores by default, replacing the `--workers` group
-- [Surface UDP send errors](/quest/m1/quic/send-errors.md) - a client drops a QUIC attempt the moment its address family is unreachable
 
 ## Related
 
 - [Scope track priority](/quest/m1/track-priority-scope.md) - the
   per-broadcast fairness policy on cluster sessions
 - [Discover media headroom](/quest/m2/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
-- [L4S on the backbone](/quest/m3/quic-ecn.md) - an ECT(1) option in the fork, an `ecn` config knob, and a dualpi2 measurement
+- [L4S on the backbone](/quest/m3/quic-ecn.md) - an ECT(1) option in `moq-quic`, an `ecn` config knob, and a dualpi2 measurement
 - [Careful resume on reconnect](/quest/m3/quic-careful-resume.md) - a redial starts at the previous connection's rate
 - [Keep-alive from the idle timeout](/quest/m2/quic-keep-alive.md) - the keep-alive interval defaults to a fraction of the negotiated idle timeout; an explicit `quic.keep_alive` overrides
 - [QUIC receive-timestamps spike](/quest/m3/quic-gcc.md) - measures whether receive timestamps give a cheaper, more accurate forward delay than half the RTT
