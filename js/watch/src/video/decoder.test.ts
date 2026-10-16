@@ -717,7 +717,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 			sample(13, 3800, false),
 			sample(13, 3900, false),
 			sample(13, 4100, false),
-			{ kind: "end", group: 14, end: Time.Micro(4200) },
+			{ kind: "end", group: 14, end: Micro(4200) },
 			sample(15, 5000),
 			sample(15, 4800, false),
 			sample(15, 4900, false),

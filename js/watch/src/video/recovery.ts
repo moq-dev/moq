@@ -1,10 +1,10 @@
+import type { Micro } from "@moq/clock";
 import type { Container } from "@moq/hang";
-import type { Time } from "@moq/net";
 
 /** Refuse leading pictures whose previous GOP was not delivered to this decoder. @internal */
 export class Recovery {
 	#needed = true;
-	#floor?: Time.Micro;
+	#floor?: Micro;
 
 	/** Arm recovery after media was lost, preserving continuous groups and declared ends. */
 	gap(): void {

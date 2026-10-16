@@ -1,3 +1,4 @@
+import { Micro, Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
@@ -67,7 +68,7 @@ window.runRecovery = async (packets) => {
 			group = new Moq.Group.Producer(packet.group);
 			track.writeGroup(group);
 		}
-		const timestamp = Moq.Time.Micro(packet.timestamp);
+		const timestamp = Micro(packet.timestamp);
 		const payload = Uint8Array.from(atob(packet.data), (c) => c.charCodeAt(0));
 		group.writeFrame({
 			payload: Container.Legacy.encodeFrame(payload, timestamp),
@@ -89,7 +90,7 @@ window.runRecovery = async (packets) => {
 		relativeBroadcast: () => media,
 	} as unknown as Broadcast);
 	const source = new Source({ broadcast, supported: async () => true });
-	const sync = new Sync({ delay: Moq.Time.Milli(0), buffer: Moq.Time.Milli(10_000) });
+	const sync = new Sync({ delay: Milli(0), buffer: Milli(10_000) });
 	const decoder = new Decoder({ source, sync });
 	try {
 		await inputDone;

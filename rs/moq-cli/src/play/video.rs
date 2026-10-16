@@ -76,22 +76,12 @@ impl<O: Output> Video<O> {
 			// The group of a declared end whose restart waits for a later group, so the
 			// media buffered before the end still plays out.
 			let mut end = None;
-			// Leading pictures need the missing preceding GOP, unlike a declared encoder end.
-			let mut recover = true;
-			let mut leading_floor = None;
 			loop {
 				let read = track.read().await?;
 				let mut buffer = buffer.lock().unwrap();
 				let before = buffer.generation;
 				let ended = match read {
 					Some(Read::Frame { group, frame }) => {
-						if frame.keyframe {
-							leading_floor = recover.then_some(frame.timestamp);
-							recover = false;
-						}
-						if leading_floor.is_some_and(|floor| frame.timestamp < floor) {
-							continue;
-						}
 						if end.take_if(|end| *end != group).is_some() {
 							buffer.clear();
 							self.presentation.lock().unwrap().video_restarted();
@@ -109,7 +99,6 @@ impl<O: Output> Video<O> {
 					}
 					// Applied in delivery order, so the restart lands before the frame after it.
 					Some(Read::Gap { .. }) => {
-						recover = true;
 						end = None;
 						buffer.clear();
 						self.presentation.lock().unwrap().video_restarted();

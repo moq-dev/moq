@@ -258,6 +258,8 @@ struct Track {
 	recovery_gap: Option<u64>,
 	/// Leading pictures below the recovery keyframe have unavailable references.
 	leading_floor: Option<Timestamp>,
+	/// The PTS of the last keyframe queued, which leading pictures present before.
+	keyframe: Option<Timestamp>,
 	/// What the catalog and the SPS declare about the video's reordering.
 	timing: Timing,
 	/// The receiver's buffers for an audio or verbatim track; video's come from [`Timing`].
@@ -294,6 +296,7 @@ impl Track {
 			clock: DecodeClock::default(),
 			recovery_gap: None,
 			leading_floor: None,
+			keyframe: None,
 			timing: Timing::default(),
 			buffer: None,
 			ac3_carry: None,
@@ -613,6 +616,11 @@ impl Track {
 			.and_then(|ticks| Timestamp::from_scale(ticks, 90_000).ok())
 			.unwrap_or(frame.timestamp);
 		let (key, pes) = self.release_key(decode, jitter.delay(), &frame)?;
+		let video = matches!(self.kind, Kind::Video(_));
+		let leading = video && !frame.keyframe && self.keyframe.is_some_and(|keyframe| frame.timestamp < keyframe);
+		if video && frame.keyframe {
+			self.keyframe = Some(frame.timestamp);
+		}
 		// Replaying anchors on the first frame, and the tracks arrive together rather than each
 		// sent ahead by its send-ahead: judged as arriving that much earlier, as a live source
 		// sends it, every track's first frames are on the clock whichever anchors it.
@@ -626,7 +634,8 @@ impl Track {
 			decode: key,
 			restart,
 			skip,
-			sync: frame.keyframe || !matches!(self.kind, Kind::Video(_)),
+			sync: frame.keyframe || !video,
+			leading,
 			item: Queued {
 				frame,
 				decode,
