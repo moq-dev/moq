@@ -28,10 +28,20 @@ revised in the #5734 review.
   False makes every update its own snapshot group, and refresh is moot.
   Rust `with_delta_ratio` and `with_op_ratio` and JS `deltaRatio` and
   `opRatio` go away.
-- **Producers.** A producer awaits `Demand::wanted`. When it passes the
-  largest group, the producer re-emits the current value as a snapshot (or
-  the current window) in a new group immediately, rather than waiting for
-  the next update.
+- **Producers.** When `Demand::wanted` passes the largest group, the
+  producer re-emits the current value as a snapshot (or the current window)
+  in a new group immediately, rather than waiting for the next update.
+- **Driver (Rust).** The producers are synchronous and moq-json has no
+  runtime, so the caller drives refresh: `Producer::refresh(&self).await`
+  (plus `poll_refresh` for sync owners) waits until `wanted` passes the
+  largest group, then re-emits. Callers loop or select on it beside their
+  updates. JS producers drive it internally. Decided in the #5734 review,
+  over a driver handle returned by the constructor and over checking only
+  on update, which never refreshes an idle value.
+- **Timestamp.** Producers and encoders retain the timestamp of the last
+  committed update, and a refresh restates the value at it. That is the
+  state's own time and never rewinds, because it equals the previous
+  group's last frame. Untimed tracks restate untimed.
 - **Track-free encoders.** `snapshot::Encoder` (and the window encoder, JS
   too) gain a `snapshot()` operation that re-encodes the retained value as a
   snapshot now, for owners that open groups themselves. moq-stats moves to
@@ -61,11 +71,12 @@ Tests: under simulated time, a joiner below the ratio gets the current
 group, and a joiner above it gets a fresh snapshot group. With no joiner the
 group grows to the caps. `refresh: None` never rolls early, `deltas: false`
 writes one snapshot group per update, and `Encoder::snapshot()` restates the
-retained value. Run in Rust and JS.
+retained value. A refresh on a timed track reuses the last committed
+timestamp. Run in Rust and JS.
 
 Public API: breaking (`delta_ratio` and `op_ratio` replaced by `deltas` and
 `ops` in Rust, JS, and every binding that exposes them; `Encoder::snapshot()`
-added). Wire: none.
+and Rust `Producer::refresh` / `poll_refresh` added). Wire: none.
 
 ## Required
 
