@@ -39,18 +39,29 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
 - **Owned frame writer** (`group::Producer::create_frame_owned`,
   `frame::ProducerOwned`; both subscribers, `coding/reader.rs`). A
   poll-driven wire driver cannot hold the borrowing `frame::Producer<'a>`
-  across polls. **Decision**:
-  - One owned `frame::Producer` that borrows nothing, relying on the
-    runtime `Error::FrameOpen` refusal `open_frame` already has.
+  across polls. **Decision**, reopened for the maintainer 2026-10-16 after
+  review:
+  - Recommended: one owned `frame::Producer` that borrows nothing. The
+    runtime `Error::FrameOpen` refusal (`group.rs` already checks it in
+    three places) stays the guard. The borrowing `create_frame` and
+    `ProducerOwned` both go, and so does the stale "caller's promise" doc on
+    `create_frame_owned`.
   - A second, public owned type (AGENTS.md's no-twins rule argues against
     it).
-  - ✅ The frame writer consumes the `group::Producer` and hands it back
-    when the frame finishes, so one open frame per group stays a
-    compile-time guarantee and the writer holds no borrow. Group calls
-    needed while a frame is open (abort, expiry) go through the frame
-    writer. The borrowing `create_frame` and `ProducerOwned` both go, and
-    the stale "caller's promise" doc on `create_frame_owned` goes with
-    them.
+  - ~~The frame writer consumes the `group::Producer` and hands it back when
+    the frame finishes, as a compile-time guarantee.~~ Settled earlier,
+    then reopened. `group::Producer` is publicly `Clone`, so a clone taken
+    before the frame opens can open a second one. The runtime check is the
+    real guard either way, as it already is for today's `&mut self`
+    borrow.
+  - Make the guarantee real: drop public `Clone` from `group::Producer`, or
+    add a unique write capability. Not recommended. The crate docs promise
+    every producer is cheaply cloneable into another writer, and the model
+    keeps clones of its own groups (track slots, abort), so this breaks a
+    crate-wide convention to replace a check that already works. Downstream
+    holders (moq-ffi, moq-e2ee, moq-transcode) already treat the group as
+    exclusive, so the breakage looks small, but no compile probe has
+    confirmed it.
 - The frame writer's write without a wake (today
   `frame::ProducerOwned::write`) and `notify`: stay private, "tunes the
   built-in sessions" (batches wakes per poll turn).
