@@ -112,7 +112,6 @@ above them.
 - [Hard-fork the binding generator](/quest/m1/uniffi-fork.md) - one moq-dev repo holds the chosen generator's core and every language backend, released under one tag and one pin
 - [Benchmark trend site](/quest/m1/bench-site.md) - a GitHub Pages site charts the binding, Rust, and JS nightly benchmarks over time
 - [Link the benchmark trends](/quest/m1/bench-site-doc.md) - the docs point language choosers at the trend site
-- [Swift, Dart, and C++ benchmarks](/quest/m1/ffi-bench-wrappers.md) - the other three wrappers join the nightly binding benchmark
 - [Payload bytes](/quest/m1/ffi-bytes.md) - payloads cross the FFI in one bulk copy, proven on the binding benchmark in every wrapper
 - [Kotlin calls](/quest/m1/kt-ffi-calls.md) - Kotlin calls into moq-ffi cost about what Python's and Go's do, sync and async, once the fork's Kotlin generator drops JNA's per-call overhead
 - [Poll-native async spike](/quest/m1/ffi-poll.md) - measure kio poll-native exports and foreign poll against `ffi::Task`, then pick the shape
