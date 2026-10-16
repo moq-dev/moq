@@ -456,8 +456,12 @@ mod test {
 	fn drain(mut consumer: Consumer) -> Vec<Bytes> {
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
-		while let Poll::Ready(Ok(Some(payload))) = consumer.poll_next(&waiter) {
-			out.push(payload);
+		while let Poll::Ready(Ok(Some(payload))) = if consumer.mode() == &Mode::Snapshot {
+			consumer.poll_latest(&waiter)
+		} else {
+			consumer.poll_next(&waiter)
+		} {
+			out.push(payload.value);
 		}
 		out
 	}
@@ -869,8 +873,11 @@ mod test {
 				.await
 				.unwrap();
 			telemetry.finish().unwrap();
-			assert_eq!(reader.next().await.unwrap(), Some(Bytes::from_static(b"heartbeat")));
-			assert_eq!(reader.next().await.unwrap(), None);
+			assert_eq!(
+				reader.next().await.unwrap().map(|value| value.value),
+				Some(Bytes::from_static(b"heartbeat"))
+			);
+			assert_eq!(reader.next().await.unwrap().map(|value| value.value), None);
 		}
 
 		#[test]

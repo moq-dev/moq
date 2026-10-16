@@ -195,12 +195,12 @@ mod test {
 		assert!(demand.poll_unused(&waiter).is_pending());
 	}
 
-	/// Drain every value currently available from a plaintext consumer without blocking.
+	/// Drain newest states currently available from a plaintext consumer without blocking.
 	fn drain(track: moq_net::track::Subscriber) -> Vec<Value> {
 		drain_with(Consumer::<Value>::new(track, consumer::Config::default()))
 	}
 
-	/// Drain every value currently available from an already-built consumer without blocking.
+	/// Drain newest states currently available from an already-built consumer without blocking.
 	fn drain_with(mut consumer: Consumer<Value>) -> Vec<Value> {
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();

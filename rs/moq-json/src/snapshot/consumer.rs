@@ -26,7 +26,8 @@ pub struct Config {
 /// Consumes a JSON value from a track, reconstructing it from snapshots and deltas.
 ///
 /// A [`Decoder`] that owns its track: it reads groups, routes each frame by its position, and
-/// yields the reconstructed value. When something else already owns the track, use the [`Decoder`]
+/// yields each reconstructed state and its frame timestamp, or skips to the newest with `latest`.
+/// When something else already owns the track, use the [`Decoder`]
 /// directly.
 pub struct Consumer<T> {
 	track: moq_net::track::Ordered,
@@ -93,6 +94,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 		}
 
 		let mut advanced = None;
+		let mut finished = false;
 		loop {
 			let Some(group) = &mut self.group else {
 				match self.track.poll_next_group(waiter)? {
@@ -102,11 +104,8 @@ impl<T: DeserializeOwned> Consumer<T> {
 						continue;
 					}
 					Poll::Ready(None) => {
-						return Poll::Ready(Ok(if let Some(at) = advanced {
-							self.decoder.decode()?.map(|value| moq_net::Timed { value, at })
-						} else {
-							None
-						}));
+						finished = true;
+						break;
 					}
 					Poll::Pending => break,
 				}
@@ -125,12 +124,14 @@ impl<T: DeserializeOwned> Consumer<T> {
 				}
 				Poll::Ready(Ok(None)) => self.group = None,
 				Poll::Ready(Err(
-					moq_net::Error::Old
+					err @ (moq_net::Error::Old
 					| moq_net::Error::Evicted
 					| moq_net::Error::Lagged
-					| moq_net::Error::GroupTooLarge,
+					| moq_net::Error::GroupTooLarge),
 				)) => {
 					// A later group starts a fresh snapshot and compression window.
+					tracing::warn!(track = self.track.name(), group = group.sequence, error = ?err,
+						"snapshot group lost; waiting for a newer one");
 					self.group = None;
 				}
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err.into())),
@@ -139,6 +140,8 @@ impl<T: DeserializeOwned> Consumer<T> {
 		}
 		if let Some(at) = advanced {
 			Poll::Ready(Ok(self.decoder.decode()?.map(|value| moq_net::Timed { value, at })))
+		} else if finished {
+			Poll::Ready(Ok(None))
 		} else {
 			Poll::Pending
 		}
@@ -181,6 +184,13 @@ mod timestamps {
 					..Default::default()
 				},
 			);
+			let mut newest = Consumer::<serde_json::Value>::new(
+				producer.consume(),
+				crate::snapshot::consumer::Config {
+					compression,
+					..Default::default()
+				},
+			);
 			let times = [0, 810_001, 990_007];
 			for (n, ticks) in times.into_iter().enumerate() {
 				let at = moq_net::Timestamp::new(ticks, scale).unwrap();
@@ -208,6 +218,12 @@ mod timestamps {
 				consumer.poll_next(&kio::Waiter::noop()),
 				Poll::Ready(Ok(None))
 			));
+			let Poll::Ready(Ok(Some(value))) = newest.poll_latest(&kio::Waiter::noop()) else {
+				panic!("missing latest state")
+			};
+			assert_eq!(value.value["n"].as_u64().unwrap(), 2);
+			assert_eq!(value.at.unwrap().value(), 990_007);
+			assert_eq!(value.at.unwrap().scale(), scale);
 		}
 	}
 

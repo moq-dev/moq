@@ -95,12 +95,14 @@ impl Consumer {
 				}
 				Poll::Ready(Ok(None)) => self.group = None,
 				Poll::Ready(Err(
-					moq_net::Error::Old
+					err @ (moq_net::Error::Old
 					| moq_net::Error::Evicted
 					| moq_net::Error::Lagged
-					| moq_net::Error::GroupTooLarge,
+					| moq_net::Error::GroupTooLarge),
 				)) => {
 					// A later group starts a fresh snapshot and compression window.
+					tracing::warn!(track = self.track.name(), group = group.sequence, error = ?err,
+						"snapshot group lost; waiting for a newer one");
 					self.group = None;
 				}
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err.into())),
@@ -141,6 +143,7 @@ mod timestamps {
 			let config = crate::snapshot::Config { compression };
 			let mut producer = crate::snapshot::Producer::new(track, config.clone());
 			let mut consumer = Consumer::new(subscriber, config);
+			let mut newest = Consumer::new(producer.consume(), crate::snapshot::Config { compression });
 			let times = [0, 810_001, 990_007];
 			for (n, ticks) in times.into_iter().enumerate() {
 				let at = moq_net::Timestamp::new(ticks, scale).unwrap();
@@ -165,6 +168,12 @@ mod timestamps {
 				consumer.poll_next(&kio::Waiter::noop()),
 				Poll::Ready(Ok(None))
 			));
+			let Poll::Ready(Ok(Some(value))) = newest.poll_latest(&kio::Waiter::noop()) else {
+				panic!("missing latest state")
+			};
+			assert_eq!(value.value[0] as u64, 2);
+			assert_eq!(value.at.unwrap().value(), 990_007);
+			assert_eq!(value.at.unwrap().scale(), scale);
 		}
 	}
 

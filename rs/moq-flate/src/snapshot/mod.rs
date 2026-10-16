@@ -108,7 +108,7 @@ mod test {
 		Consumer::new(track, cfg(compression))
 	}
 
-	/// Drain every value currently available without blocking.
+	/// Drain newest states currently available without blocking.
 	fn drain(mut consumer: Consumer) -> Vec<Bytes> {
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();

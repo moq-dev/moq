@@ -501,8 +501,12 @@ mod test {
 	fn drain(mut consumer: Consumer<Value>) -> Vec<Value> {
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
-		while let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) {
-			out.push(value);
+		while let Poll::Ready(Ok(Some(value))) = if consumer.mode() == &Mode::Snapshot {
+			consumer.poll_latest(&waiter)
+		} else {
+			consumer.poll_next(&waiter)
+		} {
+			out.push(value.value);
 		}
 		out
 	}
@@ -807,8 +811,15 @@ mod test {
 		let mut consumer = entry.subscribe::<Value>(&source).await.unwrap();
 		chat.finish().unwrap();
 
-		assert_eq!(consumer.next().await.unwrap(), Some(json!({ "text": "hello" })));
-		assert_eq!(consumer.next().await.unwrap(), None);
+		assert!(matches!(
+			consumer.poll_latest(&kio::Waiter::noop()),
+			Poll::Ready(Err(crate::Error::UnsupportedMode(_)))
+		));
+		assert_eq!(
+			consumer.next().await.unwrap().map(|value| value.value),
+			Some(json!({ "text": "hello" }))
+		);
+		assert_eq!(consumer.next().await.unwrap().map(|value| value.value), None);
 	}
 
 	/// A value that fails to serialize never reaches the track, but the log is missing it all the
