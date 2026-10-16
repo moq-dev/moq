@@ -303,6 +303,7 @@ impl Subscription {
 	/// the latest group. An empty list is the empty range, `Position::group(0)`.
 	///
 	/// The form a wire without ranges carries, alongside [`Self::start`].
+	#[cfg(any(feature = "async", test))]
 	pub(crate) fn end(&self) -> Option<Position> {
 		let mut end = Some(Position::default());
 		for range in &self.ranges {
@@ -316,6 +317,7 @@ impl Subscription {
 
 	/// Replace the ranges with one from `start` (or [`Range::oldest`]'s) to `end`: the form
 	/// a wire without ranges carries.
+	#[cfg(any(feature = "async", test))]
 	pub(crate) fn set_bounds(&mut self, start: Option<Position>, end: Option<Position>) {
 		self.ranges = vec![Range {
 			start: start.map_or(Range::oldest().start, Anchor::Absolute),
@@ -324,12 +326,14 @@ impl Subscription {
 	}
 
 	/// Replace the start of [`Self::set_bounds`]'s one range, keeping its end.
+	#[cfg(feature = "async")]
 	pub(crate) fn with_start(mut self, start: impl Into<Option<Position>>) -> Self {
 		self.set_bounds(start.into(), self.end());
 		self
 	}
 
 	/// Replace the end of [`Self::set_bounds`]'s one range, keeping its start.
+	#[cfg(any(feature = "async", test))]
 	pub(crate) fn with_end(mut self, end: impl Into<Option<Position>>) -> Self {
 		self.set_bounds(self.start(), end.into());
 		self
