@@ -56,9 +56,9 @@ type TimelineWatchers =
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Range {
 	/// The first requested media time.
-	pub start: Duration,
+	start: Duration,
 	/// The first media time outside the request.
-	pub end: Duration,
+	end: Duration,
 }
 
 impl Range {
@@ -3871,6 +3871,13 @@ mod tests {
 
 		let reference = test.listed("video0", 6).await;
 		assert!(!reference.finished, "the other renditions go on");
+
+		// A range the failed timeline can never finish is refused, not frozen as a partial clip.
+		let range = Range::new(Duration::ZERO, Duration::from_secs(12)).unwrap();
+		assert!(matches!(
+			test.rendition("video1").snapshot_range(range, None),
+			Err(crate::Error::RangeUnavailable(_))
+		));
 	}
 
 	// A failed reference timeline is not retried. Every playlist ends (`EXT-X-ENDLIST`) instead

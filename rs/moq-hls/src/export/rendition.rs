@@ -581,14 +581,7 @@ impl Rendition {
 	/// The requested start is widened to the preceding independently decodable segment. The
 	/// playlist grows while `range.end` is ahead of the live edge and becomes VOD once covered.
 	pub(crate) fn range_playlist(&self, range: super::Range, query: Option<&str>) -> Result<Option<String>> {
-		if !super::durable(&self.section) {
-			return Err(crate::Error::RangeNotDurable);
-		}
-		if !self.history.load(Ordering::Relaxed) {
-			return Err(crate::Error::RangeUnavailable(
-				"range playlists require Config::history".into(),
-			));
-		}
+		self.check_range()?;
 		let run = self.run();
 		let Some(init) = self.built_init(&run) else {
 			return Ok(None);
@@ -611,6 +604,10 @@ impl Rendition {
 	/// [`RangeNotDurable`](crate::Error::RangeNotDurable) or
 	/// [`RangeUnavailable`](crate::Error::RangeUnavailable) rather than listing a partial clip.
 	pub async fn playlist(&self, range: Option<super::Range>, query: Option<&str>) -> Result<Option<String>> {
+		// Refuse an unsupported range up front rather than wait for media it can never list.
+		if range.is_some() {
+			self.check_range()?;
+		}
 		self.playable().await;
 		// An inline-codec init needs a keyframe group fetched first. init() caches, so the
 		// player's follow-up GET of the init is free.
@@ -642,7 +639,20 @@ impl Rendition {
 		self.snapshot_from_window(window, finished, generation)
 	}
 
-	fn snapshot_range(&self, range: super::Range, generation: Option<Arc<str>>) -> Result<Snapshot> {
+	/// Whether this rendition can serve range playlists: a durable timeline followed from its start.
+	fn check_range(&self) -> Result<()> {
+		if !super::durable(&self.section) {
+			return Err(crate::Error::RangeNotDurable);
+		}
+		if !self.history.load(Ordering::Relaxed) {
+			return Err(crate::Error::RangeUnavailable(
+				"range playlists require Config::history".into(),
+			));
+		}
+		Ok(())
+	}
+
+	pub(super) fn snapshot_range(&self, range: super::Range, generation: Option<Arc<str>>) -> Result<Snapshot> {
 		self.media.sync(&self.live);
 		let mut window = self.live.window();
 		let Some(first) = window.segments.first() else {
@@ -679,6 +689,12 @@ impl Rendition {
 			.segments
 			.first()
 			.map_or(window.discontinuity, |row| row.discontinuity);
+		// A failed timeline can never list the rest of the range, so refuse the partial clip.
+		if window.segments.last().is_some_and(|row| self.is_failed(row)) {
+			return Err(crate::Error::RangeUnavailable(
+				"timeline failed within the range".into(),
+			));
+		}
 		let resolved = self.resolved(&window.segments).count();
 		let covered =
 			resolved == window.segments.len() && window.segments.last().is_some_and(|row| row.end >= range.end);

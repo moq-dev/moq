@@ -643,7 +643,7 @@ async fn history_mode_lists_a_durable_timeline_past_the_window() {
 
 /// A media-time range lists the overlapping durable segments, uses their source sequence, and
 /// becomes a VOD playlist once the requested end is covered. Independent edges agree.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn range_playlist_clips_durable_history() {
 	let recording = bounded_segments(12).await;
 	let config = Config {
@@ -682,15 +682,21 @@ async fn range_playlist_clips_durable_history() {
 	assert!(first_playlist.ends_with("#EXT-X-ENDLIST\n"), "{first_playlist}");
 }
 
-#[tokio::test]
+/// An unsupported range is refused before waiting for media, so a server answers 416 rather than
+/// timing out.
+#[tokio::test(start_paused = true)]
 async fn range_playlist_refuses_non_durable_or_windowed_timelines() {
+	use futures::FutureExt;
+
 	let recording = bounded_segments(3).await;
 	let range = super::Range::new(Duration::ZERO, Duration::from_secs(2)).unwrap();
 	let windowed = Replay::open(&recording, 64 * 1024 * 1024, durable()).await;
-	windowed.playlist(Kind::Video, "1080p").await;
 	assert!(matches!(
-		windowed.rendition(Kind::Video, "1080p").range_playlist(range, None),
-		Err(crate::Error::RangeUnavailable(_))
+		windowed
+			.rendition(Kind::Video, "1080p")
+			.playlist(Some(range), None)
+			.now_or_never(),
+		Some(Err(crate::Error::RangeUnavailable(_)))
 	));
 
 	let config = Config {
@@ -698,10 +704,11 @@ async fn range_playlist_refuses_non_durable_or_windowed_timelines() {
 		..Config::default()
 	};
 	let live = Replay::open_with(&recording, 64 * 1024 * 1024, live(), config).await;
-	live.playlist(Kind::Video, "1080p").await;
 	assert!(matches!(
-		live.rendition(Kind::Video, "1080p").range_playlist(range, None),
-		Err(crate::Error::RangeNotDurable)
+		live.rendition(Kind::Video, "1080p")
+			.playlist(Some(range), None)
+			.now_or_never(),
+		Some(Err(crate::Error::RangeNotDurable))
 	));
 }
 
