@@ -78,7 +78,6 @@ the fork plan the same day kept it there.
 
 ## Required
 
-- [Hard fork](/quest/m1/quic/fork/README.md) - qmux drives `moq-quic`
 - [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - qmux must
   expose the same scheduling contract as native QUIC
 

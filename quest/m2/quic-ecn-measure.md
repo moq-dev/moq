@@ -14,11 +14,13 @@ A manual procedure on Linux, run as root, with the commands and what to
 record written here so the dualpi2 run and any later provider re-check
 repeat it.
 
-Use moq-noq 1.3.2 or later, which carries the classic BBR CE response
-([moq-dev/noq#12](https://github.com/moq-dev/noq/pull/12)), for the
-controller-response verdict and record the exact dependency version. Provider
-mark-survival captures alone do not establish a controller response; a result
-from 1.3.1 is a defective baseline, not evidence that classic ECN cannot help.
+Use `moq-quic`, whose BBR3 carries the classic CE response ported from
+[moq-dev/noq#12](https://github.com/moq-dev/noq/pull/12) (see
+`rs/moq-quic/README.md`), for the controller-response verdict and record the
+exact commit. Provider mark-survival captures alone do not establish a
+controller response; a result from a stack without that response, such as
+moq-noq 1.3.1, is a defective baseline, not evidence that classic ECN cannot
+help.
 
 - Bottleneck: two relays on the io_uring runtime across a netem link with a
   rate limit and delay, once with `fq_codel` marking (`ecn` on) and once
@@ -40,7 +42,6 @@ from 1.3.1 is a defective baseline, not evidence that classic ECN cannot help.
 Decided in the 2026-09-30 audit: moved to m2 with its only consumer,
 [L4S on the backbone](/quest/m3/quic-ecn.md).
 
-Decided in the 2026-10-06 audit: no longer waits on the hard fork. No code
-lands here, and the pinned moq-noq-proto 2.0.1 already carries the classic
-CE response, so the study runs today. The fork stays Required on L4S on the
-backbone, which does land code in `moq-quic`.
+Decided in the 2026-10-06 audit: no code lands here, and `moq-quic` already
+carries the classic CE response, so the study runs today. L4S on the
+backbone lands its code in `moq-quic`.

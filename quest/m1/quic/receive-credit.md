@@ -10,8 +10,8 @@ an entire application message to fit before more bytes arrive.
 
 ## Plan
 
-Decided in the 2026-10-10 receive-memory interview: use `moq-quic` after the
-fork switch, not a new feature in the frozen moq-dev/noq fork. This quest
+Decided in the 2026-10-10 receive-memory interview: use `moq-quic`, not a
+new feature in the frozen moq-dev/noq fork. This quest
 provides the transport primitive; [message assembly](/quest/m1/quic/receive-memory.md)
 activates it with the recovery policy needed for progress.
 

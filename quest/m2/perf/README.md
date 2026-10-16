@@ -20,13 +20,11 @@ Planning quests can settle their contracts independently. Facts from the 2026-09
 hot-path survey, so quests don't re-litigate them:
 
 - Decided in the 2026-10-05 audit: perf quests that edit moq-uring's QUIC
-  driver (Run to quiescence) Require the
-  [hard fork](/quest/m1/quic/fork/README.md), so their before and after are
-  measured on `moq-quic` instead of being invalidated by the switch.
-- `moq-uring`'s only backend is noq. Every profile names its backend. The
+  driver (Run to quiescence) measure their before and after on `moq-quic`.
+- `moq-uring`'s only backend is `moq-quic`. Every profile names its backend. The
   historical quiche-flavor numbers cited in
   [Run to quiescence](/quest/m2/perf/uring-quiescence.md) and
-  [moq-uring on moq-clock](/quest/m1/time/uring.md) are re-measured on noq.
+  [moq-uring on moq-clock](/quest/m1/time/uring.md) are re-measured on `moq-quic`.
 - Cross-thread wakeups are already cheap: one futex word per worker, at most
   one `futex(FUTEX_WAKE)` per park cycle, wake bursts coalesce through the
   `kio::Tasks` bitset. No eventfd, no MSG_RING, by design (`SINGLE_ISSUER`).
@@ -47,7 +45,7 @@ The relay's `/metrics` endpoint already carries the ring-level counters
 row per io_uring worker.
 
 Decided in the 2026-09-30 audit: io_uring is off by default and ships in no
-package, and none of the uring micro-opts is measured on noq. The unmeasured
+package, and none of the uring micro-opts is measured on `moq-quic`. The unmeasured
 ones moved out (3200 to m2; 3129 with the open contract, 3201, 3202, and 3204
 to m3), and NAPI busy polling (3203), registered wait arguments (3205), and
 the priority `set_track` wakes were dropped. Egress requeue folded into Run to
@@ -80,7 +78,7 @@ optimization.
 - [Run to quiescence](/quest/m2/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass and train budget that keeps the fairness rule
 - [Demand aggregate](/quest/m2/perf/demand-aggregate.md) - a track subscribe, leave, or preference update no longer walks every reader of the track
 - [Ingest batch](/quest/m2/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per burst of whole frames instead of per frame
-- [Remove moq-uring copies](/quest/m2/perf/uring-copies.md) - egress, stream send and receive, and datagram receive stop copying where the QUIC core already allows it, after the fork
+- [Remove moq-uring copies](/quest/m2/perf/uring-copies.md) - egress, stream send and receive, and datagram receive stop copying where the QUIC core already allows it, with before/after measurements on `moq-quic`
 
 ## Related
 
