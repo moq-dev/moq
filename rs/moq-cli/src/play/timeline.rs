@@ -195,7 +195,9 @@ impl Role {
 
 impl Drop for Role {
 	fn drop(&mut self) {
-		self.presentation.lock().unwrap().finished(self.role);
+		if let Ok(mut presentation) = self.presentation.lock() {
+			presentation.finished(self.role);
+		}
 		self.changed.notify_waiters();
 	}
 }

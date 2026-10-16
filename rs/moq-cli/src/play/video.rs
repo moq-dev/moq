@@ -498,7 +498,7 @@ mod tests {
 		assert_eq!(shown, [0, 33, 66, 99], "reordered output was not presented in order");
 	}
 	#[tokio::test]
-	async fn a_discontinuity_discards_old_pictures_and_restarts_the_delay() {
+	async fn a_gap_discards_old_pictures_and_restarts_the_delay() {
 		tokio::time::pause();
 		let delay = Duration::from_secs(2);
 		let media = media(delay);
@@ -527,7 +527,7 @@ mod tests {
 		tokio::time::advance(delay).await;
 		tokio::task::yield_now().await;
 		assert_eq!(decoded.lock().unwrap().len(), 1, "old picture held inside decoder");
-		producer.discontinuity().unwrap();
+		producer.seek(2).unwrap();
 		producer.write(frame(500, true)).unwrap();
 		producer.finish().unwrap();
 		let restarted = Instant::now();
