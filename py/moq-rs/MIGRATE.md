@@ -3,3 +3,163 @@
 How to update your code for each breaking change, newest first.
 
 ## Unreleased
+
+### Background panics are reported (#5562)
+
+A panic in a background task raises `moq.Error.Task` with the panic message as `reason`, and other objects keep running.
+
+### Announcements are events with a restart
+
+`AnnounceConsumer` yields an `AnnounceEvent`: `AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, or `AnnounceEventRestart`, each carrying an `Announce` as `announce`.
+`AnnounceUpdate` is gone.
+A restart means another publisher instance now serves the prefix: request the path again.
+
+```python
+# Before
+async for update in client.announced():
+    if update.active:
+        subscribe(update.prefix)
+# After
+async for event in client.announced():
+    if isinstance(event, (moq.AnnounceEventStart, moq.AnnounceEventRestart)):
+        subscribe(event.announce.prefix)
+```
+
+### "Epoch" means only the publisher epoch (#5146)
+
+`Session.epoch()` is `connects()`, and `AudioProducer.reset_epoch()` is `reanchor()`.
+
+```python
+# Before
+n = session.epoch()
+audio.reset_epoch()
+# After
+n = session.connects()
+audio.reanchor()
+```
+
+### The consume origin is `consume`
+
+`Client(..., subscribe=origin)` is `Client(..., consume=origin)`.
+A server request takes its origins in `accept(publish=..., consume=...)`, where `None` inherits the server's origin.
+A value the native side cannot use raises `moq.Error.Config` at construction, including a bad bind address.
+
+```python
+# Before
+client = moq.Client(url, publish=origin, subscribe=origin)
+# After
+client = moq.Client(url, publish=origin, consume=origin)
+```
+
+### JSON data tracks wrap a track
+
+`BroadcastProducer.publish_json_snapshot` / `publish_json_stream` and the matching consumers are gone.
+Create the track, then wrap it with `moq.json` (or `moq.flate` for opaque bytes).
+
+```python
+# Before
+state = broadcast.publish_json_snapshot("state")
+# After
+track = broadcast.publish_track("state")
+state = moq.json.SnapshotProducer(broadcast, track)
+```
+
+### Media lives in `moq.media`
+
+`BroadcastProducer.publish_audio`, `publish_video`, `publish_container`, their `_on_track` and `_stream` variants, `set_video_properties`, and `set_catalog_section`, and the consumer's catalog and media subscriptions, are gone.
+Use `moq.media.TrackProducer.audio` / `video`, `ContainerProducer`, `CatalogProducer`, `CatalogConsumer`, `TrackConsumer`, and `GroupConsumer`.
+Producers drop `name`, `used`, and `unused`; read them through `demand()`.
+
+```python
+# Before
+audio = broadcast.publish_audio(moq.AudioFormat.OPUS, opus_head)
+# After
+audio = moq.media.TrackProducer.audio(broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_head))
+```
+
+### Container byte-stream importers take an init record
+
+`moq.media.ContainerStreamProducer` takes a `ContainerStreamInit` holding the format instead of a bare format.
+Its optional `timebase`, also on `ContainerInit`, shares one source's offset across container imports.
+
+### Durations are `timedelta`
+
+`Frame`, `Datagram`, `Subscription`, `TrackInfo`, and `ConnectionStats` carry `timedelta` instead of microsecond integers: `timestamp_us` is `timestamp`, and `rtt_us` is `rtt`.
+A string passed where a list of strings belongs (`tls_roots="ca.pem"`) raises `TypeError` instead of splitting into characters.
+
+```python
+# Before
+track.write_frame(payload, timestamp_us=1_000)
+# After
+track.write_frame(payload, timestamp=timedelta(milliseconds=1))
+```
+
+### Timestamps are optional
+
+A frame read from an untimed track has `timestamp` set to `None`.
+Raw writes no longer default to zero, so a write to a timed track without a timestamp raises `TimestampMismatch`; whole-frame media writes require one.
+`moq.media.CatalogProducer.now()` samples the broadcast clock for local-event stamps.
+
+### Subscriber staleness is `max_delay`
+
+`Subscription.max_age_us` is `max_delay`, a `timedelta`, and the decoder outputs take `max_delay_us`.
+`TrackInfo` keeps its `max_age`: it is the publisher's retention.
+
+### Error payloads are named `reason`
+
+Errors that carried a positional string (`Transport`, `Internal`, `Connect`, ...) name it `reason`.
+
+### `stalled` is `enabled` (#4915)
+
+`moq.media.Video.stalled` is `enabled`, defaulting to `True` with the meaning inverted, and `moq.media.Audio` gains `enabled`.
+
+### Routes have one cost (#4661)
+
+`Route.cold` is removed.
+
+### Decoded video frames are objects
+
+A `VideoDecodedFrame`'s fields are methods: `timestamp_us()`, `width()`, `height()`, and `pixels(format)` replacing `data` and `format`.
+`VideoDecoderOutput.format` is gone; set `surface=True` to keep the decoder's native surface.
+
+```python
+# Before
+rgba = frame.data
+# After
+rgba = frame.pixels(moq.VideoPixelFormat.RGBA)
+```
+
+### `BroadcastProducer.finish()` is removed (#4152)
+
+Close the broadcast instead.
+
+```python
+# Before
+broadcast.finish()
+# After
+broadcast.close()
+```
+
+## 0.4 -> 0.5
+
+### Publish split by kind
+
+`publish_media*` is `publish_audio`, `publish_video`, or `publish_container`, each taking its own init.
+The raw encoder paths that used to be `publish_audio` / `publish_video` are `encode_audio` / `encode_video`.
+
+### Renames
+
+| Before | After |
+| --- | --- |
+| millisecond durations | microseconds (`max_age_us`, `Backoff.initial_us`) |
+| `estimated_send_bitrate` / `estimated_recv_bitrate` | `estimated_send_rate` / `estimated_recv_rate` |
+| `tls_disable_verify=True` | `tls_verify=False` |
+| `Announced` / `Announcement` | `AnnounceConsumer` / `AnnounceUpdate` |
+| `BroadcastRequest.abort` | `reject` |
+| `OriginOptions` | `OriginConfig` |
+
+### Errors are structured
+
+`Error.Protocol` carries a `ProtocolError` (scope, wire code, kind) instead of a flattened message.
+Setters raise (`Busy` during connect or listen) instead of dropping the value.
+Track and group `finish()` keep the handle open, so a later `abort()` can still run.
