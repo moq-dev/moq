@@ -4706,6 +4706,9 @@ async fn client_reconnects_and_resumes_announcements() {
 		.expect("status errored");
 	assert_eq!(status, MoqConnectionStatus::Connected);
 	assert_eq!(cs.connects(), 1);
+	assert!(cs.failure().is_none(), "nothing has failed yet");
+	let version = cs.stats().version.expect("a live connection reports its version");
+	crate::session::parse_versions(&[version]).expect("the version is spelled like the config's");
 
 	// Kill the transport under the client, simulating a relay restart.
 	// Nothing accepts the redial until the gate opens.
@@ -4720,6 +4723,9 @@ async fn client_reconnects_and_resumes_announcements() {
 		.expect("disconnect status timed out")
 		.expect("disconnect status errored");
 	assert_eq!(status, MoqConnectionStatus::Disconnected);
+	// Recorded before the status moved, so the watcher woken by the drop finds why.
+	assert!(cs.failure().is_some(), "the drop must report its reason");
+	assert!(cs.stats().version.is_none(), "nothing is live to report a version");
 
 	// Open the gate; the redial completes.
 	regate_tx.send(()).expect("accept task gone");
@@ -4728,6 +4734,8 @@ async fn client_reconnects_and_resumes_announcements() {
 		.expect("reconnect status timed out")
 		.expect("reconnect status errored");
 	assert_eq!(status, MoqConnectionStatus::Connected);
+	assert!(cs.failure().is_none(), "the reconnect must clear the failure");
+	assert!(cs.stats().version.is_some(), "the reconnect reports its version");
 
 	// The reconnect advances the count. The watcher may land just after the status
 	// edge it watched, so poll rather than assume ordering.
