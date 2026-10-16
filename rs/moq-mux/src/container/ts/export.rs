@@ -632,7 +632,12 @@ impl Track {
 			},
 		};
 		if jitter.push(self.pid, arrival)? == Push::Late {
-			tracing::warn!(track = %name, dropped = jitter.dropped(), "frame missed its deadline; dropped");
+			tracing::warn!(
+				track = %name,
+				dropped = jitter.dropped(),
+				trimmed = jitter.trimmed(),
+				"frame missed its deadline; dropped"
+			);
 		}
 		Ok(())
 	}
