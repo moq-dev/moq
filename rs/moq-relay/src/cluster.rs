@@ -2064,6 +2064,8 @@ fn remote_status(
 				stats.fail(kind);
 			}
 		}
+		// The retry window ran out after the link was lost, so the link failed to recover.
+		Err(moq_tokio::Error::Reconnect(_)) if *established => stats.fail(moq_net::stats::Failure::Transport),
 		_ => {}
 	}
 	status
@@ -2273,6 +2275,28 @@ mod tests {
 		assert_eq!(presence.sessions_ended, 1);
 		assert_eq!(presence.sessions_failed.idle_timeout, 1);
 		assert_eq!(presence.sessions_failed.application, 0);
+	}
+
+	#[test]
+	fn remote_reconnect_exhaustion_fails_only_an_established_link() {
+		use moq_net::stats::{Failure, Registry};
+		let exhausted = |established: bool| {
+			let registry = Registry::new(Default::default());
+			let stats = registry.tier(Tier::default()).session("");
+			let mut connected = false;
+			if established {
+				remote_status(&stats, &mut connected, Ok(moq_tokio::Status::Connected)).unwrap();
+			}
+			let gave_up = Err(moq_tokio::Error::Reconnect("gave up".into()));
+			let _ = remote_status(&stats, &mut connected, gave_up);
+			drop(stats);
+			registry.snapshot().sessions()[0]
+				.1
+				.sessions_failed
+				.count(Failure::Transport)
+		};
+		assert_eq!(exhausted(false), 0);
+		assert_eq!(exhausted(true), 1);
 	}
 
 	/// `?cost=` is read and stripped (it rides SETUP, not the URL), other

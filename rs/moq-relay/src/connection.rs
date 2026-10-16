@@ -131,7 +131,10 @@ impl Connection {
 		//
 		// moq-net defaults the unset side to a fresh no-op origin, which is fine for a
 		// publish-only or subscribe-only session.
-		let mut request = self.request.with_stats(stats).with_limits(self.cluster.limits(&lease));
+		let mut request = self
+			.request
+			.with_stats(stats.clone())
+			.with_limits(self.cluster.limits(&lease));
 		if let Some(subscriber) = subscriber {
 			request = request.with_publisher(subscriber);
 		}
@@ -144,7 +147,14 @@ impl Connection {
 			.shutdown
 			.until_deadline(request.ok())
 			.await
-			.ok_or_else(|| anyhow::anyhow!("the SETUP reply was still pending at the drain deadline"))??;
+			.ok_or_else(|| anyhow::anyhow!("the SETUP reply was still pending at the drain deadline"))?
+			.inspect_err(|err| {
+				let cause = match err {
+					moq_tokio::Error::MoqNet(err) => Some(err),
+					_ => None,
+				};
+				setup_failed(&stats, cause);
+			})?;
 
 		tracing::info!(version = %session.version(), %transport, "negotiated");
 
@@ -283,6 +293,14 @@ pub(crate) fn session_bytes(session: &moq_net::Session) -> moq_auth::Bytes {
 	}
 }
 
+/// Admission already started the stats session, so a failed SETUP reply ends it.
+/// A cause without a MoQ error is the transport's.
+pub(crate) fn setup_failed(stats: &moq_net::stats::Session, cause: Option<&moq_net::Error>) {
+	if let Some(kind) = cause.map_or(Some(moq_net::stats::Failure::Transport), failure) {
+		stats.fail(kind);
+	}
+}
+
 /// Close classification comes only from typed protocol and transport causes.
 pub(crate) fn failure(error: &moq_net::Error) -> Option<moq_net::stats::Failure> {
 	use moq_net::stats::Failure;
@@ -303,6 +321,21 @@ pub(crate) fn failure(error: &moq_net::Error) -> Option<moq_net::stats::Failure>
 mod tests {
 	use super::*;
 	use moq_net::{Error, SessionError, stats::Failure};
+
+	#[test]
+	fn a_failed_setup_reply_ends_the_admitted_session_by_its_cause() {
+		let outcome = |cause: Option<&Error>| {
+			let registry = moq_net::stats::Registry::new(Default::default());
+			let stats = registry.tier(moq_net::stats::Tier::default()).session("root");
+			setup_failed(&stats, cause);
+			drop(stats);
+			registry.snapshot().sessions()[0].1.sessions_failed
+		};
+		assert_eq!(outcome(Some(&Error::Cancel)), Default::default());
+		assert_eq!(outcome(None).count(Failure::Transport), 1);
+		assert_eq!(outcome(Some(&Error::IdleTimeout)).count(Failure::IdleTimeout), 1);
+		assert_eq!(outcome(Some(&Error::Timeout)).count(Failure::Application), 1);
+	}
 
 	#[test]
 	fn clean_closes_are_not_failures_and_typed_causes_keep_their_kind() {

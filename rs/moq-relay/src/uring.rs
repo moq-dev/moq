@@ -821,7 +821,9 @@ async fn serve_connection(
 		stats,
 	} = admitted;
 
-	let mut request = request.with_stats(stats).with_limits(serve.cluster.limits(&lease));
+	let mut request = request
+		.with_stats(stats.clone())
+		.with_limits(serve.cluster.limits(&lease));
 	if let Some(subscriber) = subscriber {
 		request = request.with_publisher(subscriber);
 	}
@@ -829,7 +831,10 @@ async fn serve_connection(
 		request = request.with_subscriber(publisher);
 	}
 	let lease = lease.preparing(request.auth(), request.role())?;
-	let (session, driver) = deadline.bound(request.ok()).await?;
+	let (session, driver) = deadline
+		.bound(request.ok())
+		.await
+		.inspect_err(|err| crate::connection::setup_failed(&stats, err.downcast_ref()))?;
 	let driver_handle = handle.clone();
 	let driver = async move {
 		match driver_handle.run(driver).await {
