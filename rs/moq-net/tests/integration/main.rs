@@ -3,7 +3,8 @@
 //! Each `tests/*.rs` file is its own crate that links this package and its
 //! dependencies again, so add new integration tests here as a module.
 //! `loom.rs`, `wasm.rs`, and `send.rs` stay apart because they build for
-//! another cfg, target, or toolchain.
+//! another cfg, target, or toolchain. `group_charge.rs` stays apart because its
+//! counting global allocator would apply to every test in the binary.
 
 mod announce_covering_route;
 mod announce_to_serve;
@@ -22,7 +23,6 @@ mod fetch_only;
 mod finished_broadcast_mock;
 mod finite_relay;
 mod goaway;
-mod group_charge;
 mod group_order;
 mod head_fetch;
 mod history_groups;
