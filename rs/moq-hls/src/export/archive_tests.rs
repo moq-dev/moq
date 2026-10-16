@@ -129,9 +129,9 @@ impl Recording {
 		let mut encoders = HashMap::new();
 		for track in tracks {
 			// Legacy media is stamped in microseconds.
-			store.put_info(track, &Info::new(1, 1_000_000).unwrap()).await.unwrap();
+			store.put_info(track, &Info::new(1, Some(1_000_000)).unwrap()).await.unwrap();
 			store
-				.put_info(&timeline(track), &Info::new(0, 1000).unwrap())
+				.put_info(&timeline(track), &Info::new(0, Some(1000)).unwrap())
 				.await
 				.unwrap();
 			let config = window::ProducerConfig::default()
@@ -239,7 +239,7 @@ fn legacy(track: &str, micros: u64, keyframe: bool) -> Frame {
 	let mut encoded = BytesMut::new();
 	frame.encode(&mut encoded).unwrap();
 	Frame {
-		timestamp: micros,
+		timestamp: Some(micros),
 		payload: encoded.freeze(),
 	}
 }

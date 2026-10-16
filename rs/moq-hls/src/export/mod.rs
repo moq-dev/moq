@@ -4060,7 +4060,7 @@ mod tests {
 				let refs = [reference(0), reference(1)];
 				let entry = |sequence, at| {
 					let mut record = gop(sequence);
-					record.pts = at * 2_000;
+					record.pts = Some(at * 2_000);
 					moq_mux::timeline::Entry::decode(record, moq_net::Timescale::MILLI).unwrap()
 				};
 				for at in 0..retained {
