@@ -164,7 +164,10 @@ fn duplicate_packet_is_discarded() {
     let before = pair.server_conn_mut(server_ch).stats().frame_rx.stream;
     pair.drive();
 
-    assert_eq!(pair.server_conn_mut(server_ch).stats().frame_rx.stream, before + 1);
+    assert_eq!(
+        pair.server_conn_mut(server_ch).stats().frame_rx.stream,
+        before + 1
+    );
     assert_eq!(pair.server_streams(server_ch).accept(Dir::Uni), Some(s));
     let mut recv = pair.server_recv(server_ch, s);
     let mut chunks = recv.read(true).unwrap();
@@ -235,7 +238,11 @@ fn retried(mangle: Mangle) -> (Pair, ConnectionHandle, ConnectionId) {
 #[test]
 fn invalid_retry_is_discarded() {
     let _guard = subscribe();
-    for (mangle, accepted) in [(bad_tag as Mangle, false), (same_cid, false), (second, true)] {
+    for (mangle, accepted) in [
+        (bad_tag as Mangle, false),
+        (same_cid, false),
+        (second, true),
+    ] {
         let (mut pair, _, orig_dst_cid) = retried(mangle);
         pair.drive_client();
         while pair.server.inbound.is_empty() {

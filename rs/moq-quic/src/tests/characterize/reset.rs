@@ -21,7 +21,12 @@ fn read_all(pair: &mut Pair, ch: ConnectionHandle, s: StreamId) -> (Vec<u8>, Rea
 }
 
 /// Opens a client uni stream carrying `data`, delivered and accepted by the server
-fn open(pair: &mut Pair, client_ch: ConnectionHandle, server_ch: ConnectionHandle, data: &[u8]) -> StreamId {
+fn open(
+    pair: &mut Pair,
+    client_ch: ConnectionHandle,
+    server_ch: ConnectionHandle,
+    data: &[u8],
+) -> StreamId {
     let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
     pair.client_send(client_ch, s).write(data).unwrap();
     pair.drive();
@@ -40,7 +45,10 @@ fn received_reset_reports_the_code_once() {
     pair.drive();
 
     // Observing the reset frees the stream, so every later access finds it closed
-    assert_eq!(pair.server_recv(server_ch, s).received_reset(), Ok(Some(CODE)));
+    assert_eq!(
+        pair.server_recv(server_ch, s).received_reset(),
+        Ok(Some(CODE))
+    );
     assert!(pair.server_recv(server_ch, s).received_reset().is_err());
     assert_eq!(
         pair.server_recv(server_ch, s).read(true).err(),
@@ -56,7 +64,11 @@ fn received_reset_on_closed_streams() {
 
     // Never opened
     let unopened = StreamId::new(Side::Client, Dir::Uni, 5);
-    assert!(pair.server_recv(server_ch, unopened).received_reset().is_err());
+    assert!(
+        pair.server_recv(server_ch, unopened)
+            .received_reset()
+            .is_err()
+    );
 
     // Stopped by the reader, even after the peer resets in response
     let s = open(&mut pair, client_ch, server_ch, b"hello");
@@ -119,7 +131,10 @@ fn chunks_end_in_finished() {
 
     let mut recv = pair.server_recv(server_ch, s);
     let mut chunks = recv.read(true).unwrap();
-    assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes, &b"hello"[..]);
+    assert_eq!(
+        chunks.next(usize::MAX).unwrap().unwrap().bytes,
+        &b"hello"[..]
+    );
     assert_eq!(chunks.next(usize::MAX), Ok(None));
     assert_eq!(chunks.next(usize::MAX), Ok(None));
     let _ = chunks.finalize();
@@ -138,7 +153,10 @@ fn reset_codes() {
         let s = open(&mut pair, client_ch, server_ch, b"x");
         pair.client_send(client_ch, s).reset(code).unwrap();
         pair.drive();
-        assert_eq!(read_all(&mut pair, server_ch, s), (Vec::new(), ReadError::Reset(code)));
+        assert_eq!(
+            read_all(&mut pair, server_ch, s),
+            (Vec::new(), ReadError::Reset(code))
+        );
 
         let s = open(&mut pair, client_ch, server_ch, b"x");
         pair.server_recv(server_ch, s).stop(code).unwrap();
@@ -233,7 +251,8 @@ fn zero_rtt_rejection_returns_connection_credit() {
     pair.drive();
 
     // A server with a fresh session cache cannot resume, so it rejects the 0-RTT data
-    pair.server.set_server_config(Some(server(Arc::new(server_crypto()))));
+    pair.server
+        .set_server_config(Some(server(Arc::new(server_crypto()))));
     let client_ch = pair.begin_connect(config);
     assert!(pair.client_conn_mut(client_ch).has_0rtt());
     assert_eq!(writable(&mut pair, client_ch), WINDOW as usize);

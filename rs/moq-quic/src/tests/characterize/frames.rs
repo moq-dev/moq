@@ -118,10 +118,8 @@ fn max_stream_data_on_unopened() {
 
 #[test]
 fn stop_sending_on_recv_only() {
-    let frames = Frames::default().var(
-        FrameType::STOP_SENDING,
-        &[id(Side::Client, Dir::Uni, 0), 0],
-    );
+    let frames =
+        Frames::default().var(FrameType::STOP_SENDING, &[id(Side::Client, Dir::Uni, 0), 0]);
     assert_eq!(
         server_answer(frames),
         Some(TransportErrorCode::STREAM_STATE_ERROR)
@@ -130,8 +128,7 @@ fn stop_sending_on_recv_only() {
 
 #[test]
 fn stop_sending_on_unopened() {
-    let frames =
-        Frames::default().var(FrameType::STOP_SENDING, &[id(Side::Server, Dir::Bi, 0), 0]);
+    let frames = Frames::default().var(FrameType::STOP_SENDING, &[id(Side::Server, Dir::Bi, 0), 0]);
     assert_eq!(
         server_answer(frames),
         Some(TransportErrorCode::STREAM_STATE_ERROR)
@@ -140,7 +137,10 @@ fn stop_sending_on_unopened() {
 
 #[test]
 fn streams_blocked_above_limit() {
-    for ty in [FrameType::STREAMS_BLOCKED_BIDI, FrameType::STREAMS_BLOCKED_UNI] {
+    for ty in [
+        FrameType::STREAMS_BLOCKED_BIDI,
+        FrameType::STREAMS_BLOCKED_UNI,
+    ] {
         // The largest representable limit is fine
         let frames = Frames::default().var(ty, &[1 << 60]);
         assert_eq!(server_answer(frames), None);
@@ -427,11 +427,7 @@ fn reset_on_send_only() {
 
 #[test]
 fn stream_on_send_only() {
-    let frames = Frames::default().stream(id(Side::Server, Dir::Uni, 0),
-        0,
-        b"x",
-        false,
-    );
+    let frames = Frames::default().stream(id(Side::Server, Dir::Uni, 0), 0, b"x", false);
     assert_eq!(
         server_answer(frames),
         Some(TransportErrorCode::STREAM_STATE_ERROR)
@@ -440,11 +436,7 @@ fn stream_on_send_only() {
 
 #[test]
 fn stream_above_stream_limit() {
-    let frames = Frames::default().stream(id(Side::Client, Dir::Uni, 1_000_000),
-        0,
-        b"x",
-        false,
-    );
+    let frames = Frames::default().stream(id(Side::Client, Dir::Uni, 1_000_000), 0, b"x", false);
     assert_eq!(
         server_answer(frames),
         Some(TransportErrorCode::STREAM_LIMIT_ERROR)

@@ -8,7 +8,12 @@ fn openable(pair: &mut Pair, ch: ConnectionHandle) -> Vec<StreamId> {
 }
 
 /// Finishes each client stream and has the server read it to the end
-fn finish_all(pair: &mut Pair, client_ch: ConnectionHandle, server_ch: ConnectionHandle, streams: &[StreamId]) {
+fn finish_all(
+    pair: &mut Pair,
+    client_ch: ConnectionHandle,
+    server_ch: ConnectionHandle,
+    streams: &[StreamId],
+) {
     for &s in streams {
         pair.client_send(client_ch, s).write(b"x").unwrap();
         pair.client_send(client_ch, s).finish().unwrap();
@@ -32,7 +37,11 @@ fn max_concurrent_streams_raised() {
 
     pair.server_conn_mut(server_ch)
         .set_max_concurrent_streams(Dir::Uni, VarInt(3));
-    assert_eq!(pair.server_conn_mut(server_ch).max_concurrent_streams(Dir::Uni), 3);
+    assert_eq!(
+        pair.server_conn_mut(server_ch)
+            .max_concurrent_streams(Dir::Uni),
+        3
+    );
     pair.drive();
     assert_eq!(openable(&mut pair, client_ch).len(), 2);
 }
@@ -46,13 +55,21 @@ fn max_concurrent_streams_lowered() {
         connected_with(|t| _ = t.max_concurrent_uni_streams(VarInt(3)), |_| {});
     pair.server_conn_mut(server_ch)
         .set_max_concurrent_streams(Dir::Uni, VarInt(1));
-    assert_eq!(pair.server_conn_mut(server_ch).max_concurrent_streams(Dir::Uni), 3);
+    assert_eq!(
+        pair.server_conn_mut(server_ch)
+            .max_concurrent_streams(Dir::Uni),
+        3
+    );
     pair.drive();
 
     let streams = openable(&mut pair, client_ch);
     assert_eq!(streams.len(), 3);
     finish_all(&mut pair, client_ch, server_ch, &streams);
-    assert_eq!(pair.server_conn_mut(server_ch).max_concurrent_streams(Dir::Uni), 1);
+    assert_eq!(
+        pair.server_conn_mut(server_ch)
+            .max_concurrent_streams(Dir::Uni),
+        1
+    );
     assert_eq!(openable(&mut pair, client_ch).len(), 1);
 }
 
@@ -86,30 +103,47 @@ fn receive_window_raised() {
     let _guard = subscribe();
     let (mut pair, client_ch, server_ch) =
         connected_with(|t| _ = t.receive_window(VarInt::from_u32(WINDOW)), |_| {});
-    assert_eq!(writable(&mut pair, client_ch, 2 * WINDOW as usize), WINDOW as usize);
+    assert_eq!(
+        writable(&mut pair, client_ch, 2 * WINDOW as usize),
+        WINDOW as usize
+    );
     pair.drive();
 
     pair.server_conn_mut(server_ch)
         .set_receive_window(VarInt::from_u32(2 * WINDOW));
     pair.drive();
-    assert_eq!(writable(&mut pair, client_ch, 2 * WINDOW as usize), WINDOW as usize);
+    assert_eq!(
+        writable(&mut pair, client_ch, 2 * WINDOW as usize),
+        WINDOW as usize
+    );
 }
 
 /// A lowered window is paid down from credit the reader would otherwise return
 #[test]
 fn receive_window_lowered() {
     let _guard = subscribe();
-    let (mut pair, client_ch, server_ch) =
-        connected_with(|t| _ = t.receive_window(VarInt::from_u32(2 * WINDOW)), |_| {});
-    assert_eq!(writable(&mut pair, client_ch, 4 * WINDOW as usize), 2 * WINDOW as usize);
+    let (mut pair, client_ch, server_ch) = connected_with(
+        |t| _ = t.receive_window(VarInt::from_u32(2 * WINDOW)),
+        |_| {},
+    );
+    assert_eq!(
+        writable(&mut pair, client_ch, 4 * WINDOW as usize),
+        2 * WINDOW as usize
+    );
     pair.drive();
 
     pair.server_conn_mut(server_ch)
         .set_receive_window(VarInt::from_u32(WINDOW));
     let mut streams = Vec::new();
-    assert_eq!(read_buffered(&mut pair, server_ch, &mut streams), 2 * WINDOW as usize);
+    assert_eq!(
+        read_buffered(&mut pair, server_ch, &mut streams),
+        2 * WINDOW as usize
+    );
     pair.drive();
-    assert_eq!(writable(&mut pair, client_ch, 4 * WINDOW as usize), WINDOW as usize);
+    assert_eq!(
+        writable(&mut pair, client_ch, 4 * WINDOW as usize),
+        WINDOW as usize
+    );
 }
 
 /// The send window bounds unacknowledged data, so lowering it blocks writes until acks drain

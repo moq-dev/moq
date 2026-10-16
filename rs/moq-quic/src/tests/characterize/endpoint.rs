@@ -8,7 +8,9 @@ const REMOTE: &str = "[::2]:7890";
 /// An endpoint config whose CIDs come from a hashed generator with a known key
 fn endpoint_config() -> EndpointConfig {
     let mut config = EndpointConfig::default();
-    config.cid_generator(Arc::new(|| Box::new(HashedConnectionIdGenerator::from_key(CID_KEY))));
+    config.cid_generator(Arc::new(|| {
+        Box::new(HashedConnectionIdGenerator::from_key(CID_KEY))
+    }));
     config
 }
 
@@ -55,7 +57,14 @@ fn long(ty: u8, version: u32, dst_cid: &[u8], len: usize) -> Vec<u8> {
 /// What `endpoint` answers `packet` with, at `now`
 fn answer(endpoint: &mut Endpoint, now: Instant, packet: &[u8]) -> Answer {
     let mut buf = Vec::new();
-    match endpoint.handle(now, REMOTE.parse().unwrap(), None, None, packet.into(), &mut buf) {
+    match endpoint.handle(
+        now,
+        REMOTE.parse().unwrap(),
+        None,
+        None,
+        packet.into(),
+        &mut buf,
+    ) {
         None => Answer::Nothing,
         Some(DatagramEvent::Response(transmit)) => Answer::Response(buf[..transmit.size].to_vec()),
         Some(DatagramEvent::NewConnection(incoming)) => {
@@ -102,7 +111,10 @@ fn unknown_cid_gets_stateless_reset() {
 
     assert_eq!(answer(&mut server, now, &packet), Answer::Nothing);
     let later = now + server.config().min_reset_interval;
-    assert!(matches!(answer(&mut server, later, &packet), Answer::Response(_)));
+    assert!(matches!(
+        answer(&mut server, later, &packet),
+        Answer::Response(_)
+    ));
 }
 
 /// A reset must be smaller than its inciting datagram yet look like a short header, so datagrams
@@ -112,7 +124,10 @@ fn small_unknown_packet_gets_no_reset() {
     let _guard = subscribe();
     let now = Instant::now();
     let cid = valid_cid();
-    assert_eq!(answer(&mut endpoint(true), now, &short(&cid, 21)), Answer::Nothing);
+    assert_eq!(
+        answer(&mut endpoint(true), now, &short(&cid, 21)),
+        Answer::Nothing
+    );
     let Answer::Response(reset) = answer(&mut endpoint(true), now, &short(&cid, 22)) else {
         panic!("expected a stateless reset");
     };
@@ -136,7 +151,10 @@ fn zero_length_cid_short_packet_is_dropped() {
     let mut config = EndpointConfig::default();
     config.cid_generator(Arc::new(|| Box::new(RandomConnectionIdGenerator::new(0))));
     let mut server = Endpoint::new(Arc::new(config), Some(Arc::new(server_config())), true);
-    assert_eq!(answer(&mut server, Instant::now(), &short(&[], 100)), Answer::Nothing);
+    assert_eq!(
+        answer(&mut server, Instant::now(), &short(&[], 100)),
+        Answer::Nothing
+    );
 }
 
 /// Only Initials can start a connection, so another long header for an unknown CID is dropped
@@ -154,7 +172,10 @@ fn long_header_for_unknown_connection_is_dropped() {
 fn short_initial_is_dropped() {
     let _guard = subscribe();
     let packet = long(0, DEFAULT_SUPPORTED_VERSIONS[0], &[0x11; 8], 1199);
-    assert_eq!(answer(&mut endpoint(true), Instant::now(), &packet), Answer::Nothing);
+    assert_eq!(
+        answer(&mut endpoint(true), Instant::now(), &packet),
+        Answer::Nothing
+    );
 
     let mut pair = pair_with(|_| {});
     pair.begin_connect(client_with(|_| {}));
@@ -162,7 +183,10 @@ fn short_initial_is_dropped() {
     let (_, _, datagram) = pair.server.inbound.pop_front().unwrap();
     assert_eq!(datagram.len(), 1200);
     let now = pair.time;
-    assert_eq!(answer(&mut pair.server, now, &datagram), Answer::NewConnection);
+    assert_eq!(
+        answer(&mut pair.server, now, &datagram),
+        Answer::NewConnection
+    );
 }
 
 /// An Initial whose DCID is shorter than RFC 9000's 8 bytes is refused with a close
@@ -194,7 +218,14 @@ fn undecryptable_initial() {
     let incoming = (0..=u8::MAX)
         .find_map(|byte| {
             packet[26] = byte;
-            match server.handle(now, REMOTE.parse().unwrap(), None, None, packet[..].into(), &mut buf) {
+            match server.handle(
+                now,
+                REMOTE.parse().unwrap(),
+                None,
+                None,
+                packet[..].into(),
+                &mut buf,
+            ) {
                 Some(DatagramEvent::NewConnection(incoming)) => Some(incoming),
                 None => None,
                 Some(_) => panic!("unexpected response"),
@@ -212,7 +243,10 @@ fn undecodable_datagram_is_dropped() {
     let _guard = subscribe();
     let now = Instant::now();
     // A long header cut off inside its version
-    assert_eq!(answer(&mut endpoint(true), now, &[0xc0, 0, 0]), Answer::Nothing);
+    assert_eq!(
+        answer(&mut endpoint(true), now, &[0xc0, 0, 0]),
+        Answer::Nothing
+    );
     // An Initial whose two-byte length field, after its 20 bytes of header, runs past the
     // datagram
     let mut packet = long(0, DEFAULT_SUPPORTED_VERSIONS[0], &[0x11; 8], 1200);
