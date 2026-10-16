@@ -424,8 +424,62 @@ fn reset_frees_a_released_group() {
         fin: true,
     });
     assert!(!sender.state.pending.is_clean());
-    sender.state.reset_acked(reset);
+    sender.state.reset_acked(reset, 0);
     assert!(sender.state.pending.is_clean());
+}
+
+/// A reset that still delivers its first bytes keeps the stream in its group for just
+/// that prefix, and the released group is freed once the reset is acknowledged.
+#[test]
+fn reliable_reset_sends_its_prefix_then_frees_its_group() {
+    let mut sender = Sender::new();
+    let group = sender.group(0);
+    let reset = sender.open(Some(&group), 0, 10_000);
+    let finished = sender.open(Some(&group), 0, 10_000);
+    sender.send(finished).finish().unwrap();
+    sender.groups().close(group);
+
+    sender.send(reset).reset_to(0u32.into(), 3_000).unwrap();
+    assert!(sender.state.can_send_stream_data());
+    sender.drain(100);
+    assert_eq!(sender.bytes(&[reset]), 3_000, "only the reliable prefix");
+    assert_eq!(sender.bytes(&[finished]), 10_000);
+    assert!(!sender.state.can_send_stream_data());
+
+    sender.state.received_ack_of(StreamMeta {
+        id: finished,
+        offsets: 0..10_000,
+        fin: true,
+    });
+    sender.state.received_ack_of(StreamMeta {
+        id: reset,
+        offsets: 0..3_000,
+        fin: false,
+    });
+    assert!(
+        !sender.state.pending.is_clean(),
+        "the reset is unacknowledged"
+    );
+    sender.state.reset_acked(reset, 3_000);
+    assert!(sender.state.pending.is_clean());
+}
+
+/// STOP_SENDING abandons the prefix a reset still owed, so the stream leaves the
+/// schedule rather than linger in it.
+#[test]
+fn stop_sending_drops_a_reliable_prefix_from_the_schedule() {
+    let mut sender = Sender::new();
+    let group = sender.group(0);
+    let reset = sender.open(Some(&group), 0, 10_000);
+    sender.send(reset).reset_to(0u32.into(), 3_000).unwrap();
+    assert!(sender.state.can_send_stream_data());
+
+    assert_eq!(
+        sender.state.received_stop_sending(reset, 0u32.into()),
+        Some(0)
+    );
+    assert!(!sender.state.can_send_stream_data());
+    assert!(sender.drain(1).is_empty());
 }
 
 /// A stream can leave its group for the ungrouped queue, keeping its data queued.

@@ -31,7 +31,7 @@ Decided:
 - lite-07 restores SUBSCRIBE_DROP and removes `Stream Count`. With every
   sequence accounted for, the count is redundant; one mechanism instead of two.
   A reset whose header may be lost is covered by a DROP.
-- A reliable reset ([Reliable stream reset](/quest/m1/quic/reliable-reset.md))
+- A reliable reset ([A reset group keeps its header](/quest/m1/quic/group-reset.md))
   that keeps the stream header acts as a one-group drop, an optimization over
   sending the DROP.
 - Publishers send SUBSCRIBE_DROP on lite-05 and lite-06 too: for every group
