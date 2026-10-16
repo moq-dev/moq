@@ -383,16 +383,15 @@ pub mod poll {
 			Poll::Ready(Ok(size))
 		}
 
-		/// Set the stream's priority.
+		/// Set the priority within the stream's send group, or session-wide when ungrouped.
 		///
 		/// Streams with higher values will be sent first, but are not guaranteed to
 		/// arrive first. This matches the W3C WebTransport `sendOrder` convention (and
-		/// quinn's scheduler). In a send group, the priority orders the stream only against
-		/// the group's other streams.
+		/// quinn's scheduler).
 		///
 		/// Backends with a narrower priority saturate or approximate it, so treat the
 		/// ordering as best-effort.
-		fn set_priority(&mut self, order: i64);
+		fn set_priority(&mut self, priority: i64);
 
 		/// Move the stream into `group`, which belongs to this stream's session.
 		fn set_group(&mut self, group: &Self::Group);

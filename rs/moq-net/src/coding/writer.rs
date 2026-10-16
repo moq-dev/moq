@@ -201,15 +201,15 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 		std::future::poll_fn(|cx| self.poll_closed(cx)).await
 	}
 
-	/// Set the stream's send order: streams with HIGHER values are transmitted first.
+	/// Set the priority within the stream's send group, or session-wide when ungrouped.
 	///
-	/// This is the transport trait's convention (matching W3C `sendOrder` and quinn's
-	/// scheduler) and the model's [`Subscription::priority`](crate::track::Subscription),
-	/// where higher values preempt lower ones. The lite priority queue's rank is the
-	/// opposite (0 = most urgent); rank holders convert via `PriorityHandle::send_order`.
-	/// In a send group, the order ranks the stream only against the group's others.
-	pub fn set_priority(&mut self, send_order: i64) {
-		self.stream.as_mut().unwrap().set_priority(send_order);
+	/// Streams with HIGHER values are transmitted first. This is the transport trait's
+	/// convention (matching W3C `sendOrder` and quinn's scheduler) and the model's
+	/// [`Subscription::priority`](crate::track::Subscription), where higher values preempt
+	/// lower ones. The lite priority queue's rank is the opposite (0 = most urgent); rank
+	/// holders convert via `PriorityHandle::send_order`.
+	pub fn set_priority(&mut self, priority: i64) {
+		self.stream.as_mut().unwrap().set_priority(priority);
 	}
 
 	/// Move the stream into a send group from its session.

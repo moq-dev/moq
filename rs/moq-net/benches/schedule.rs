@@ -286,7 +286,7 @@ impl Sim {
 			let Track {
 				rate, cadence, step, ..
 			} = self.tracks[track];
-			if self.tick % cadence == 0 {
+			if self.tick.is_multiple_of(cadence) {
 				let old = self.current[track];
 				let stream = self.streams.get_mut(&old).unwrap();
 				stream.finished = true;

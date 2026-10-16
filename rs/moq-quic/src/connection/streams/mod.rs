@@ -355,7 +355,7 @@ impl<'a> SendStream<'a> {
         Ok(())
     }
 
-    /// Set the priority of a stream within its send group
+    /// Set the priority within the stream's send group, or session-wide when ungrouped
     ///
     /// Higher values go first; equal values share bytes round robin. A queued stream moves to
     /// its new priority the next time it is requeued, which is after every frame when

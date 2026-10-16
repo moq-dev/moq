@@ -1,6 +1,7 @@
 //! Adapt backend poll sessions to moq-net without changing thread affinity.
 mod adapter;
-pub use adapter::{Error, Grouped, GroupedSend, RecvStream, SendStream, Session};
+pub use adapter::{Error, RecvStream, SendStream, Session};
+use adapter::{Grouped, GroupedSend};
 
 use crate::quic;
 
@@ -17,8 +18,8 @@ impl GroupedSend for quic::web::SendStream {
 		quic::web::SendStream::set_group(self, Some(group));
 	}
 
-	fn set_order(&mut self, order: i64) {
-		quic::web::SendStream::set_priority(self, order);
+	fn set_priority(&mut self, priority: i64) {
+		quic::web::SendStream::set_priority(self, priority);
 	}
 }
 

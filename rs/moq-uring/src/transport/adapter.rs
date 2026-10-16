@@ -46,6 +46,10 @@ impl<S: wt::Stats> moq::Stats for Stats<S> {
 }
 /// A backend session whose send streams may join send groups, as native QUIC's do.
 ///
+/// `pub` only because `pub(crate)` is refused (E0446): the adapter's `type Group` projects
+/// through [`GroupedSend`]. The module is private and the trait is not re-exported, so
+/// other crates can neither name nor implement it.
+///
 /// The backend interface has no groups, so moq-net's
 /// [`send_group`](poll::Session::send_group) reaches a backend through this. A backend
 /// without groups implements it empty.
@@ -65,9 +69,11 @@ pub trait GroupedSend: backend::SendStream {
 	/// Move the stream into `group`.
 	fn set_group(&mut self, group: &Self::Group);
 
-	/// Set the stream's full-width priority, saturated into the backend's by default.
-	fn set_order(&mut self, order: i64) {
-		self.set_priority(order.clamp(i32::MIN.into(), i32::MAX.into()) as i32);
+	/// Set the priority within the stream's send group, or session-wide when ungrouped.
+	///
+	/// Saturated into the backend's narrower priority by default.
+	fn set_priority(&mut self, priority: i64) {
+		backend::SendStream::set_priority(self, priority.clamp(i32::MIN.into(), i32::MAX.into()) as i32);
 	}
 }
 
@@ -143,8 +149,8 @@ impl<S: GroupedSend + 'static> poll::SendStream for SendStream<S> {
 	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
 		backend::SendStream::poll_write_buf(&mut self.0, cx, buf).map_err(Error)
 	}
-	fn set_priority(&mut self, order: i64) {
-		self.0.set_order(order)
+	fn set_priority(&mut self, priority: i64) {
+		GroupedSend::set_priority(&mut self.0, priority)
 	}
 	fn set_group(&mut self, group: &Self::Group) {
 		GroupedSend::set_group(&mut self.0, group)

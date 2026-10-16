@@ -92,10 +92,9 @@ impl SendStream {
 		self.stream.finish().map_err(Into::into)
 	}
 
-	/// Set the stream's priority, within its send group if it joined one. See
-	/// [`crate::quic::driver::SendStream::set_priority`].
-	pub fn set_priority(&self, order: i64) -> Result<(), ClosedStream> {
-		self.stream.set_priority(order).map_err(Into::into)
+	/// Set the priority within the stream's send group, or session-wide when ungrouped.
+	pub fn set_priority(&self, priority: i64) -> Result<(), ClosedStream> {
+		self.stream.set_priority(priority).map_err(Into::into)
 	}
 
 	/// Get the stream's priority. See [`crate::quic::driver::SendStream::priority`].

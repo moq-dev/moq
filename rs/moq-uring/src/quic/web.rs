@@ -834,10 +834,9 @@ impl SendStream {
 		}
 	}
 
-	/// Set the stream's priority within its send group. See
-	/// [`super::SendStream::set_priority`].
-	pub fn set_priority(&mut self, order: i64) {
-		self.inner.set_priority(order);
+	/// Set the priority within the stream's send group, or session-wide when ungrouped.
+	pub fn set_priority(&mut self, priority: i64) {
+		self.inner.set_priority(priority);
 	}
 
 	/// Move the stream into a send group, or with `None` back out. See

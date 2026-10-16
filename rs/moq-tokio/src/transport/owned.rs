@@ -97,8 +97,8 @@ impl<S: super::GroupedSend + 'static> poll::SendStream for super::SendStream<S> 
 	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
 		backend::SendStream::poll_write_buf(self, cx, buf).map_err(Error)
 	}
-	fn set_priority(&mut self, order: i64) {
-		self.prioritize(order)
+	fn set_priority(&mut self, priority: i64) {
+		self.prioritize(priority)
 	}
 	fn set_group(&mut self, group: &Self::Group) {
 		self.join(group)

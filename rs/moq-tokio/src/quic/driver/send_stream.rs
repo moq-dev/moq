@@ -214,15 +214,13 @@ impl SendStream {
         Ok(())
     }
 
-    /// Set the priority of the send stream
+    /// Set the priority within the stream's send group, or session-wide when ungrouped
     ///
     /// Every send stream has an initial priority of 0. Locally buffered data from streams with
     /// higher priority will be transmitted before data from streams with lower priority. Changing
     /// the priority of a stream with pending data may only take effect after that data has been
     /// transmitted. Using many different priority levels per connection may have a negative
     /// impact on performance.
-    ///
-    /// In a [`SendGroup`], the priority orders the stream only against the group's other streams.
     pub fn set_priority(&self, priority: i64) -> Result<(), ClosedStream> {
         let mut conn = self.conn.state.lock("SendStream::set_priority");
         conn.inner.send_stream(self.stream).set_priority(priority)?;

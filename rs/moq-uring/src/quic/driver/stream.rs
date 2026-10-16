@@ -70,10 +70,16 @@ impl SendStream {
 		n
 	}
 
-	/// Set the stream's priority, which orders it against the other streams
-	/// of its send group, or of the ungrouped streams. Higher goes first.
-	pub fn set_priority(&mut self, order: i64) {
-		let _ = self.shared.conn.borrow_mut().send_stream(self.id).set_priority(order);
+	/// Set the priority within the stream's send group, or session-wide when ungrouped.
+	///
+	/// Higher goes first.
+	pub fn set_priority(&mut self, priority: i64) {
+		let _ = self
+			.shared
+			.conn
+			.borrow_mut()
+			.send_stream(self.id)
+			.set_priority(priority);
 	}
 
 	/// Move the stream into a send group, or with `None` back to the
