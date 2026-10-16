@@ -19,6 +19,13 @@ error lists and rerun.
 
 These land with the next breaking release, not the 2026-09-23 train.
 
+- **A claim answers by publishing.** `origin.dynamic(prefix)` takes no route, in
+  Rust, JS, C, and every binding. Answer each request with `prepare(epoch)` (a
+  fresh `Epoch::mint()` per output run), fill the returned broadcast, then
+  `publish()`, which announces it at the exact path under that epoch. `accept`
+  is gone, and dropping a prepared answer refuses the request (JS:
+  `prepared.reject(err)`). A restarted output is a new epoch, so readers never
+  splice it onto the old one.
 - **moq-mux's catalog consumer is opaque.** Construct `catalog::Consumer` with
   `Consumer::new(broadcast, format).await` or convert an existing
   `catalog::hang::Consumer` with `.into()`, then read it through `catalog::Stream`.
@@ -568,8 +575,7 @@ Other changes to a deployment:
 - **Announcements are prefix routes** (#3225, #3770). `announce::Update` is
   `{ prefix, route, kind, captures }`: skip `!update.kind.is_active()` and
   resolve the broadcast with `consumer.request_broadcast(&update.prefix, update.route.epoch)`.
-  Serve a subtree on demand with `origin.dynamic(prefix)`. Answer each request by
-  preparing a new epoch, filling its broadcast, then publishing it.
+  Serve a subtree on demand with `origin.dynamic(prefix, route)`.
 - **Tracks.** `with_latency_max` / `latency_max` is `with_max_age` / `max_age`.
   `write_datagram(Datagram)` is `insert_datagram(sequence, timestamp, payload)`
   (#3666); `append_datagram` is unchanged. `track::SubscriberControl` is

@@ -6804,7 +6804,8 @@ mod tests {
 		assert_eq!(announced.assert_next_restarted("room").cost, Cost::new(1));
 		quiet(&mut announced).await;
 
-		c.update_route(Route::default().with_hops(hops(&[12])).with_cost(3)).unwrap();
+		c.update_route(Route::default().with_hops(hops(&[12])).with_cost(3))
+			.unwrap();
 		assert_eq!(announced.assert_next_restarted("room").cost, Cost::new(2));
 		quiet(&mut announced).await;
 	}
@@ -6822,7 +6823,8 @@ mod tests {
 		assert_eq!(announced.assert_next_active("room").cost, Cost::new(5));
 		let _sticky = hold(&consumer, "room/job", &a).await;
 
-		b.update_route(Route::default().with_hops(hops(&[11])).with_cost(3)).unwrap();
+		b.update_route(Route::default().with_hops(hops(&[11])).with_cost(3))
+			.unwrap();
 		assert_eq!(announced.assert_next_restarted("room").cost, Cost::new(3));
 		quiet(&mut announced).await;
 	}
@@ -8860,7 +8862,9 @@ mod tests {
 		let _pending = producer.consume().request_broadcast("room/alice", None);
 		let prepared = queued(&claim).await.prepare(crate::Epoch::mint()).unwrap();
 
-		claim.update_route(Route::default().with_epoch(crate::Epoch::mint())).unwrap();
+		claim
+			.update_route(Route::default().with_epoch(crate::Epoch::mint()))
+			.unwrap();
 		announced.assert_next_restarted("room");
 		assert!(matches!(prepared.publish(), Err(Error::Unroutable)));
 		announced.assert_next_wait();
@@ -8895,7 +8899,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let claim = producer.dynamic("room").unwrap();
 		let _pending = producer.consume().request_broadcast("room/alice", None);
-		queued(&claim).await.accept(&broadcast::Info::new().produce());
+		queued(&claim).await.accept(broadcast::Info::new().produce());
 	}
 
 	/// A refusal from the longest prefix is the answer: neither a costlier advertiser of
@@ -9276,7 +9280,7 @@ mod tests {
 	#[test]
 	fn internal_route_requests_are_closed_on_teardown() {
 		let (producer, mut driver) = Producer::new(Config::new(origin(1)));
-		let server = producer.dynamic("room", Route::default()).unwrap();
+		let server = producer.dynamic_route("room", Route::default()).unwrap();
 		let _pending = producer.consume().request_broadcast("room/alice", None);
 		driver.poll(Instant::now(), &kio::Waiter::noop()).unwrap();
 		let Poll::Ready(Ok(request)) = server.poll_requested_broadcast(&kio::Waiter::noop()) else {
