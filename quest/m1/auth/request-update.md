@@ -1,13 +1,13 @@
-# [M] Live requests follow their auth
+# [L] Live requests follow their auth
 
 ## Goal
 
-A publisher or subscriber renews the credential behind a live request
-without reopening it. A `Route` or `Subscription` holds an optional
-`moq_net::Auth`; when the application swaps it, the session sends
-REQUEST_UPDATE (moq-transport) naming the new auth; on lite a `Route` renews
-via ANNOUNCE_UPDATE and a `Subscription` via SUBSCRIBE_UPDATE. The request
-stays up. The first consumer is a client that keeps a
+A publisher renews the credential behind a live announcement without
+reopening it. A `Route` holds an optional `moq_net::auth::Auth`; when the
+application swaps it, the session sends REQUEST_UPDATE (moq-transport)
+carrying the new auth, and the request stays up. Lite renews by
+ANNOUNCE_UPDATE once [Requests name their auth](/quest/m1/auth/request-auth-id.md)
+gives it a way to name one. The first consumer is a client that keeps a
 PUBLISH_NAMESPACE alive past its credential's expiry by sending
 REQUEST_UPDATE with a fresh token before it expires.
 
@@ -31,6 +31,19 @@ because it has a consumer now. The decisions are recorded in the
   `Subscription::auth` hold `Option<Auth>`. Not a cloneable `auth::Token`,
   which conflates the credential bytes with the auth a request names, and
   not credential bytes on the request, which bypass `add()`.
+- ✅ Decided 2026-10-16 (maintainer, #5695): an `Auth` is bound to the auth
+  handle that issued it. A `Route` lives on an origin that outlives any one
+  session, so a connection-level handle spans that connection's sessions:
+  `moq_tokio::Connection::auth().add()` returns a `moq_net::auth::Auth` every
+  later session of that connection presents. Any other session sends the
+  request with no auth, under its scope. Not presented by any session, which
+  would send the credential to every peer the origin feeds, and not bound to
+  one session, which would make the app re-add and re-announce after every
+  reconnect. moq-tokio's `connection::Auth` and `connection::Token` are
+  renamed so the names match across layers.
+- ✅ Decided 2026-10-16 (maintainer, #5695): `Route::auth` only. A
+  `Subscription` is aggregated across subscribers before it reaches the
+  wire, so `Subscription::auth` and its aggregation rule are a follow-up.
 - Renewing many live requests at once must not take one round trip per
   request: each request's update is its own in-flight step, polled beside the
   session's other announce and subscribe work, so new announcements and
@@ -42,20 +55,13 @@ because it has a consumer now. The decisions are recorded in the
   sessions sharing an origin, so the cost grows only with the requests
   renewed. (From the deleted concurrent-renewal quest, which measured this
   against #5148's earlier serial refresh.)
-- PUBLISH_NAMESPACE renewal comes first. Per-SUBSCRIBE tokens follow the same
-  shape but have no consumer yet; include them only if they fall out of the
-  same code.
 - On moq-transport the update carries the token as USE_VALUE and needs only
   step 1, so the PUBLISH_NAMESPACE consumer doesn't wait on the lite wire. On
   lite it names the auth registered through
   [Requests name their auth](/quest/m1/auth/request-auth-id.md), so the lite
   path follows that quest. A refused update ends only that request.
-- Mirror `Auth`, `Route::auth` and `Subscription::auth` in `js/net` and the
-  bindings.
-- Open (2026-10-16): a `Route` lives on an origin shared by every session it
-  feeds, including a reconnecting connection's later sessions, while `add()`
-  belongs to one session's handle. Which sessions may present a route's
-  `Auth` is unsettled; see #5695.
+- Mirror `Auth` and `Route::auth` in `js/net`; the bindings expose no auth
+  yet, so [Bindings](/quest/m1/auth/bindings.md) carries them.
 - Describe request renewal in `doc/concept/moq-lite.md`'s Authorization
   section, and in `doc/concept/standard.md`, which describes only incoming request
   tokens; the moq-transport path can land before the lite one.
