@@ -9062,7 +9062,7 @@ mod tests {
 		assert!(announced.next().now_or_never().expect("ended").is_none());
 
 		// Pending requests reject; new work refuses.
-		assert!(pending.now_or_never().expect("rejected").is_err());
+		assert!(matches!(pending.now_or_never().expect("rejected"), Err(Error::Closed)));
 		assert!(matches!(producer.announce("x", Route::default()), Err(Error::Closed)));
 		assert!(matches!(producer.create_broadcast("x"), Err(Error::Closed)));
 		let err = consumer
@@ -9076,6 +9076,19 @@ mod tests {
 		// A cursor born after the teardown is born ended.
 		let mut late = consumer.announced();
 		assert!(late.next().now_or_never().expect("ended").is_none());
+	}
+
+	#[test]
+	fn internal_route_requests_are_closed_on_teardown() {
+		let (producer, mut driver) = Producer::new(Config::new(origin(1)));
+		let server = producer.dynamic("room", Route::default()).unwrap();
+		let _pending = producer.consume().request_broadcast("room/alice", None);
+		driver.poll(Instant::now(), &kio::Waiter::noop()).unwrap();
+		let Poll::Ready(Ok(request)) = server.poll_requested_broadcast(&kio::Waiter::noop()) else {
+			panic!("front requested its route");
+		};
+		drop(driver);
+		assert!(matches!(request.producer.read().resolved, Some(Err(Error::Closed))));
 	}
 
 	/// One live subscription reading a track through a remote front, plus the

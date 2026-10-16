@@ -2812,6 +2812,77 @@ mod tests {
 		}
 	}
 
+	#[moq_net_sim::test]
+	async fn internal_cancel_without_a_recorded_session_end_is_cancel() {
+		let h = Harness::new(VERSION);
+		assert!(matches!(h.serve.subscriber.end_reason(), Error::Cancel));
+	}
+
+	#[moq_net_sim::test]
+	async fn internal_serve_preserves_an_abort_from_a_live_clone() {
+		for dynamic_first in [true, false] {
+			let h = Harness::new(VERSION);
+			let request = h._broadcast.reserve_track("pending").unwrap();
+			let mut serving = ServeLoop::new(&h.serve, request, Default::default(), None);
+			let other = h._broadcast.create_track("other", None).unwrap();
+			if !dynamic_first {
+				// Isolate the subscription-changed arm, which can observe a concurrent
+				// abort after the dynamic-request poll returned Pending.
+				serving.dynamic = other.dynamic();
+			}
+			serving.serving.clone().abort(Error::ProtocolViolation).unwrap();
+			assert!(matches!(
+				serving.poll(&h.serve, &kio::Waiter::noop()),
+				Poll::Ready(ServeEnd::GiveBack(Error::ProtocolViolation))
+			));
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn internal_tail_settle_preserves_the_session_error() {
+		use crate::transport::poll::Session as _;
+		let (session, mut peer) = crate::transport::memory::pair(Default::default());
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::sim(),
+			session,
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Handle::new(false),
+		});
+		let serve = TrackServe {
+			validity: Default::default(),
+			subscriber,
+			path: Path::new("room").to_owned(),
+			epoch: None,
+			name: "video".into(),
+		};
+		let broadcast = crate::broadcast::Info::new().produce();
+		let mut serving = ServeLoop::new(
+			&serve,
+			broadcast.reserve_track("video").unwrap(),
+			Default::default(),
+			None,
+		);
+		let _reader = serving.serving.subscribe(None);
+		let tail = kio::Producer::new(Tail::default());
+		serving.mode = ServeMode::Tail {
+			settle: Settle::new(&serve.subscriber.runtime, tail.consume()),
+			owed: Some(0..1),
+			streams: None,
+		};
+		assert!(serving.poll(&serve, &kio::Waiter::noop()).is_pending());
+		peer.close(crate::SessionError::Unauthorized.to_code(), "revoked");
+		assert!(matches!(
+			serving.poll(&serve, &kio::Waiter::noop()),
+			Poll::Ready(ServeEnd::GiveBack(Error::Session(crate::SessionError::Unauthorized)))
+		));
+	}
+
 	/// Mid-group demand: a subscriber resuming at frame 3 of group 5, capped by a later
 	/// bound in the same group.
 	fn mid_group_demand() -> Subscription {

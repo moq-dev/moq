@@ -5110,6 +5110,17 @@ mod tests {
 
 	use super::*;
 
+	#[moq_net_sim::test]
+	async fn internal_alias_resolution_ends_with_its_session() {
+		let aliases = TrackAliases::default();
+		let consumer = aliases.consume();
+		drop(aliases);
+		assert!(matches!(
+			resolve_track_alias(&crate::time::Clock::sim(), consumer, 7).await,
+			Err(Error::Cancel)
+		));
+	}
+
 	async fn check_publish_fin(responses: Vec<u8>, clean: bool) {
 		use crate::lite::test_transport::ScriptedSession;
 		use crate::transport::poll::Session as _;
@@ -12796,6 +12807,18 @@ mod stitch_tests {
 			buf.extend_from_slice(payload);
 		}
 		buf.to_vec()
+	}
+
+	#[moq_net_sim::test]
+	async fn internal_group_fetch_setup_cancellation_is_cancel() {
+		let mut run = GroupFetchRun::new(VERSION, Vec::new()).await;
+		let slot = kio::Producer::new(GroupFetch::Pending);
+		let entry = GroupFetchEntry::new(&run.subscriber.state, RequestId(23), slot.clone());
+		let mut receiving = run.subscriber.clone();
+		let mut receive = std::pin::pin!(receiving.recv_group_fetch(&mut run.stream, slot));
+		assert!(futures::poll!(&mut receive).is_pending());
+		drop(entry);
+		assert!(matches!(receive.await, Err(Error::Cancel)));
 	}
 
 	/// A subscriber reading one scripted group fetch stream, already past its header.
