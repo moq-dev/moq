@@ -1246,12 +1246,20 @@ impl Pump {
 	}
 }
 
-/// Whether the track's end is the next thing to read, without waiting for it. Anything else that
-/// is ready is read and dropped.
+/// Whether the track's end is the next media item, without waiting for it. Markers ready before it
+/// are passed over; a frame or anything not ready yet means it has not ended.
 fn ended(track: &mut moq_mux::container::Consumer<moq_mux::catalog::hang::Container>) -> bool {
-	let mut read = std::pin::pin!(track.read());
 	let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-	matches!(read.as_mut().poll(&mut cx), std::task::Poll::Ready(Ok(None)))
+	loop {
+		let mut read = std::pin::pin!(track.read());
+		match read.as_mut().poll(&mut cx) {
+			std::task::Poll::Ready(Ok(None)) => return true,
+			std::task::Poll::Ready(Ok(Some(
+				moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. },
+			))) => continue,
+			_ => return false,
+		}
+	}
 }
 
 /// Start a new stream on the pad: a fresh stream-start and the rendition's caps. The segment
@@ -1376,9 +1384,10 @@ mod tests {
 	use moq_net::Timestamp;
 	use std::collections::HashMap;
 
-	/// A pump cancelled as its track ends records the end only when nothing is left to read.
+	/// A pump cancelled as its track ends records the end only when no media is left to read,
+	/// passing over the markers a publisher closes with.
 	#[test]
-	fn ended_sees_only_an_end_with_nothing_before_it() {
+	fn ended_sees_only_an_end_with_no_media_before_it() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast.create_track("video", hang::container::track_info(0)).unwrap();
 		let legacy = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
@@ -1394,9 +1403,11 @@ mod tests {
 				duration: None,
 			})
 			.unwrap();
-		producer.finish().unwrap();
 		assert!(!ended(&mut consumer), "a frame was still unread");
-		assert!(ended(&mut consumer));
+
+		producer.discontinuity().unwrap();
+		producer.finish().unwrap();
+		assert!(ended(&mut consumer), "the closing marker hid the end");
 	}
 
 	#[test]
