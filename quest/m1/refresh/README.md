@@ -16,9 +16,8 @@ Boundaries:
   themselves without a timer.
 - Joining is the only trigger. There is no explicit subscriber request; a
   decoder that lost sync rereads the cached group from its start.
-- Non-goals: refresh on moq-ffi's track info and the binding wrappers (only
-  the renamed json config and the replaced `Demand` reach them), flate modes,
-  json stream mode, and importers that cannot force a keyframe (CMAF, TS).
+- Non-goals: flate modes, json stream mode, and importers that cannot force
+  a keyframe (CMAF, TS).
 
 ## Plan
 
@@ -43,7 +42,8 @@ Decided with the maintainer on 2026-10-16.
   new event, which would leave two ways to say the same thing.
 - **Names.** `track::Info::refresh: Option<u32>` is the ratio, in the same
   unit as moq-json's `delta_ratio`, which it replaces. `None` means joins
-  never trigger groups.
+  never trigger groups. It is the only home of the ratio: producers that
+  receive a created track read it from there.
 - **Order.** [Relay requests for dynamic groups](/quest/m1/ietf-extension/dynamic-groups.md)
   lands first as relay-internal IETF support. The core quest then makes its
   private request path public, so the work is promoted rather than
@@ -65,7 +65,7 @@ Work owned by this README, after the children land:
 
 - [Core](/quest/m1/refresh/core.md) - `track::Info::refresh` and `Demand::wanted` in Rust, JS, and moq-ffi; each hop evaluates the ratio on a join; IETF dynamic groups map onto it
 - [Lite wire](/quest/m1/refresh/lite.md) - lite-07 TRACK_INFO advertises the ratio and SUBSCRIBE_UPDATE carries the wanted group, so a join at any relay reaches the origin
-- [moq-json](/quest/m1/refresh/json.md) - snapshot and window groups roll on a qualifying join instead of on `delta_ratio`, which is renamed `refresh` in every binding
+- [moq-json](/quest/m1/refresh/json.md) - snapshot and window groups roll on a qualifying join, reading the ratio from the track; `delta_ratio` and `op_ratio` become `deltas` and `ops` switches in every binding
 - [Video](/quest/m1/refresh/video.md) - video publishers advertise refresh and force a keyframe on demand, keeping the encoder's max GOP
 
 ## Related

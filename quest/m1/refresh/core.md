@@ -26,7 +26,9 @@ Decided 2026-10-16 (see the [epic](/quest/m1/refresh/README.md)).
   js/json, js/flate, and the other callers.
 - **moq-ffi and bindings.** moq-ffi's `Demand` (`rs/moq-ffi/src/demand.rs`)
   follows, as do moq-c, the py, swift, kt, go, and dart wrappers, and
-  `doc/lib/*`. `track::Info::refresh` itself is not bound yet.
+  `doc/lib/*`. `MoqTrackInfo` gains `refresh`, beside `max_age_us`.
+  Because json producers read the ratio from the track, a binding could not
+  otherwise publish a refreshing json track (revised in the #5734 review).
 - **Semantics.**
   - The first consumer of a track with no group yields `Some(0)`. A paused
     producer resumes on `Some` and opens a group when `n` passes its
@@ -66,7 +68,7 @@ Decided 2026-10-16 (see the [epic](/quest/m1/refresh/README.md)).
   break, and `doc/concept/standard.md` for the IETF mapping.
 
 Public API: breaking (`Demand` in Rust, JS, moq-ffi, and every binding;
-`track::Info::refresh` added). Wire: none in this quest. IETF fields are
+`track::Info::refresh` and `MoqTrackInfo::refresh` added). Wire: none in this quest. IETF fields are
 interpreted as described above.
 
 ## Required
