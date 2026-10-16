@@ -561,7 +561,8 @@ impl Error {
 
 		match err.close_kind() {
 			crate::transport::CloseKind::IdleTimeout => Self::IdleTimeout,
-			crate::transport::CloseKind::Closed => Self::Closed,
+			// A connection ending must not become the model's clean end-of-content.
+			crate::transport::CloseKind::Closed => SessionError::Cancel.into(),
 			_ => Self::Transport(err.to_string()),
 		}
 	}

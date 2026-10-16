@@ -652,8 +652,8 @@ impl Reader {
 				None | Some(Some(_)) => return Some(Poll::Ready(Ok(None))),
 				Some(None) => {}
 			},
-			// No front is left to replace the copy: the track ends as it does. A copy whose
-			// session closed locally ends it cleanly.
+			// No front is left to replace the copy: the track ends as it does. A locally
+			// closed copy ends it cleanly; a connection ending retains its session error.
 			Some(None) => match serving.map(&done) {
 				None => return Some(Poll::Ready(Err(Error::Dropped))),
 				Some(Some(Ok(()) | Err(Error::Closed))) => return Some(Poll::Ready(Ok(None))),

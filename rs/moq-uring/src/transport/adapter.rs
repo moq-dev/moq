@@ -339,6 +339,9 @@ mod outcome_tests {
 			moq_net::Error::IdleTimeout
 		));
 		let local = Error(crate::quic::Error::Closed);
-		assert!(matches!(moq_net::Error::from_transport(local), moq_net::Error::Closed));
+		assert!(matches!(
+			moq_net::Error::from_transport(local),
+			moq_net::Error::Session(moq_net::SessionError::Cancel)
+		));
 	}
 }

@@ -172,7 +172,10 @@ mod outcome_tests {
 		));
 		assert_eq!(idle.close_kind(), moq::CloseKind::IdleTimeout);
 		let local = Error(SessionError::ConnectionError(ConnectionError::LocallyClosed));
-		assert!(matches!(moq_net::Error::from_transport(local), moq_net::Error::Closed));
+		assert!(matches!(
+			moq_net::Error::from_transport(local),
+			moq_net::Error::Session(moq_net::SessionError::Cancel)
+		));
 	}
 }
 
@@ -189,6 +192,9 @@ mod iroh_outcome_tests {
 			moq_net::Error::IdleTimeout
 		));
 		let local = Error(SessionError::ConnectionError(ConnectionError::LocallyClosed));
-		assert!(matches!(moq_net::Error::from_transport(local), moq_net::Error::Closed));
+		assert!(matches!(
+			moq_net::Error::from_transport(local),
+			moq_net::Error::Session(moq_net::SessionError::Cancel)
+		));
 	}
 }
