@@ -488,6 +488,89 @@ fn bench_request(c: &mut Criterion) {
 	group.finish();
 }
 
+/// Waiting requests have already received an unroutable verdict. Repricing a
+/// covering route wakes them; repricing an unrelated route must leave them parked.
+/// Shared paths isolate requester fan-out from the cost of minting one front per path.
+fn bench_unroutable_churn(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/unroutable_churn");
+	group.sample_size(20);
+	for covering in [false, true] {
+		for requesters in [0, 1, 32, 256] {
+			for distinct in [false, true] {
+				if distinct && requesters <= 1 {
+					continue;
+				}
+				for changes in [1, 32] {
+					let scope = if covering { "covering" } else { "unrelated" };
+					let paths = if distinct { "distinct" } else { "shared" };
+					let id = BenchmarkId::new(scope, format!("{requesters}r_{changes}c_{paths}"));
+					group.throughput(Throughput::Elements(changes));
+					group.bench_function(id, |b| {
+						let (producer, mut driver) = origin::Producer::new(origin::Config::default());
+						let consumer = producer.consume();
+						let server = producer.dynamic("room", origin::Route::default()).unwrap();
+						let unrelated = producer.dynamic("other", origin::Route::default()).unwrap();
+						let mut waiting: Vec<_> = (0..requesters)
+							.map(|i| {
+								Box::pin(
+									consumer.routed_broadcast(format!("room/job-{}", if distinct { i } else { 0 })),
+								)
+							})
+							.collect();
+						let waiter = kio::Waiter::noop();
+						let now = moq_net::time::Instant::now();
+						// Drive the first requests to refusal before measuring any route churn.
+						for request in &mut waiting {
+							assert!(request.as_mut().now_or_never().is_none());
+						}
+						driver.poll(now, &waiter).unwrap();
+						let expected = if distinct {
+							requesters
+						} else {
+							usize::from(requesters > 0)
+						};
+						for _ in 0..expected {
+							let Poll::Ready(Ok(request)) = server.poll_requested_broadcast(&waiter) else {
+								panic!("every distinct path reaches the covering handler");
+							};
+							request.reject(moq_net::Error::Unroutable);
+						}
+						driver.poll(now, &waiter).unwrap();
+						for request in &mut waiting {
+							assert!(request.as_mut().now_or_never().is_none());
+						}
+						assert!(server.poll_requested_broadcast(&waiter).is_pending());
+						let changed = if covering { &server } else { &unrelated };
+						let mut cost = 1;
+						b.iter(|| {
+							for _ in 0..changes {
+								cost = 3 - cost;
+								changed.update(origin::Route::default().with_cost(cost)).unwrap();
+								for request in &mut waiting {
+									assert!(request.as_mut().now_or_never().is_none());
+								}
+								driver.poll(now, &waiter).unwrap();
+								for _ in 0..if covering { expected } else { 0 } {
+									let Poll::Ready(Ok(request)) = server.poll_requested_broadcast(&waiter) else {
+										panic!("covering churn re-asks every distinct path");
+									};
+									request.reject(moq_net::Error::Unroutable);
+								}
+								assert!(server.poll_requested_broadcast(&waiter).is_pending());
+								driver.poll(now, &waiter).unwrap();
+								for request in &mut waiting {
+									assert!(request.as_mut().now_or_never().is_none());
+								}
+							}
+						});
+					});
+				}
+			}
+		}
+	}
+	group.finish();
+}
+
 /// A front minted, resolved, and retired once its holder leaves, among `fronts`
 /// others held open. A retiring front leaves the table it shares with them, so a
 /// cost that grows with the table rather than with the one path shows up as a slope.
@@ -1265,6 +1348,7 @@ criterion_group!(
 	bench_serve_idle,
 	bench_subscribe,
 	bench_request,
+	bench_unroutable_churn,
 	bench_retire,
 	bench_pool_churn,
 	bench_pool_cursors,
