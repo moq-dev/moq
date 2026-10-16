@@ -254,38 +254,33 @@ impl<O: Output> Video<O> {
 						decoder.decode(frame).await?
 					}
 					Step::Resume => {
+						// Read under the same lock as the pop: a gap replaces the buffers and
+						// bumps the revision while holding it.
 						let next = {
 							let mut buffers = buffers.lock().unwrap();
 							if buffers.len() > 1 {
 								advancing.store(true, std::sync::atomic::Ordering::Relaxed);
 								buffers.pop_front();
-								true
+								let start = buffers.front().unwrap().oldest().expect("a resumed group has a frame");
+								Some((start, revision.load(std::sync::atomic::Ordering::Relaxed)))
 							} else {
-								false
+								None
 							}
 						};
-						if !next {
+						let Some((start, before)) = next else {
 							if closed.load(std::sync::atomic::Ordering::Relaxed) {
 								break;
 							}
 							self.changed.notified().await;
 							continue;
-						}
-						let start = buffers
-							.lock()
-							.unwrap()
-							.front()
-							.unwrap()
-							.oldest()
-							.expect("a resumed group has a frame");
-						let before = revision.load(std::sync::atomic::Ordering::Relaxed);
+						};
 						let mapping = role.resume(start, None).await?;
+						let buffers = buffers.lock().unwrap();
 						if revision.load(std::sync::atomic::Ordering::Relaxed) != before {
 							advancing.store(false, std::sync::atomic::Ordering::Relaxed);
 							continue;
 						}
 						role.apply(mapping);
-						let buffers = buffers.lock().unwrap();
 						if let Some(end) = buffers.front().unwrap().end {
 							role.end(end)?;
 						}

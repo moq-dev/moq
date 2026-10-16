@@ -286,7 +286,13 @@ impl Role {
 			let mut presentation = self.presentation.lock().unwrap();
 			let own = self.role as usize;
 			let peer = 1 - own;
-			if let Some(mapping) = presentation.roles[own].plans.front().and_then(|plan| plan.mapping) {
+			// The peer already resumed the transition this role is finishing.
+			if let Some(mapping) = presentation.roles[own]
+				.plans
+				.front()
+				.and_then(|plan| plan.mapping)
+				.or(presentation.roles[own].paired)
+			{
 				return Ok(mapping);
 			}
 			// Both roles already have replacement media. The speaker's first sample
@@ -313,11 +319,10 @@ impl Role {
 				presentation.roles[peer].plans.front_mut().unwrap().mapping = Some(mapping);
 				return Ok(mapping);
 			}
-			if let Some(mapping) = presentation.roles[own].paired.or_else(|| {
-				presentation.roles[peer]
-					.active
-					.filter(|mapping| mapping.starts.is_some_and(|starts| starts > now))
-			}) {
+			if let Some(mapping) = presentation.roles[peer]
+				.active
+				.filter(|mapping| mapping.starts.is_some_and(|starts| starts > now))
+			{
 				return Ok(mapping);
 			}
 			let starts = now
@@ -499,6 +504,33 @@ mod tests {
 		tokio::time::advance(DELAY * 2).await;
 		video.plan(ms(40), None);
 		video.apply(video.resume(ms(40), None).await.unwrap());
+		assert_eq!(
+			video.map(ms(40)).unwrap().as_millis() - audio.map(ms(0)).unwrap().as_millis(),
+			40
+		);
+	}
+
+	#[tokio::test]
+	async fn a_late_replacement_pairs_with_its_own_transition() {
+		tokio::time::pause();
+		let now = tokio::time::Instant::now();
+		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
+		presentation
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now.into_std());
+		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
+		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		audio.end(ms(10_020)).unwrap();
+		video.end(ms(10_020)).unwrap();
+		video.plan(ms(40), None);
+		tokio::time::advance(DELAY + Duration::from_millis(20)).await;
+		video.apply(video.resume(ms(40), None).await.unwrap());
+		// Video already queued its next replacement when audio's first one lands.
+		video.end(ms(60)).unwrap();
+		video.plan(ms(5_000), None);
+		audio.plan(ms(0), Some(DELAY));
+		audio.apply(audio.resume(ms(0), Some(DELAY)).await.unwrap());
 		assert_eq!(
 			video.map(ms(40)).unwrap().as_millis() - audio.map(ms(0)).unwrap().as_millis(),
 			40
