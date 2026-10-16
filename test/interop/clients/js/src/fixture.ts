@@ -52,11 +52,15 @@ export class Fixture {
 	readonly #audioState = new Signal<AudioContextState>("suspended");
 	readonly #videoEnabled = new Signal(true);
 	#timer: number | undefined;
+	readonly #canvas: HTMLCanvasElement;
+	readonly #video: Publish.Video.Encoder;
+	#generation = 0;
 
 	constructor(host: HTMLElement, url: string, name: string, fault: Fault) {
 		this.host = host;
 
 		const canvas = document.createElement("canvas");
+		this.#canvas = canvas;
 		canvas.width = Pattern.WIDTH;
 		canvas.height = Pattern.HEIGHT;
 		host.appendChild(canvas);
@@ -100,8 +104,14 @@ export class Fixture {
 			broadcast,
 			capture,
 			enabled: this.#videoEnabled,
-			config: { frameRate: Pattern.FPS, keyframeInterval: KEYFRAME_INTERVAL, maxBitrate: MAX_BITRATE },
+			config: {
+				codec: "avc1",
+				frameRate: Pattern.FPS,
+				keyframeInterval: KEYFRAME_INTERVAL,
+				maxBitrate: MAX_BITRATE,
+			},
 		});
+		this.#video = video;
 		this.#signals.cleanup(() => video.close());
 
 		// Handed the source at page load, before any gesture, like a pre-granted microphone. Readiness
@@ -198,7 +208,7 @@ export class Fixture {
 			if (frameId === painted) return;
 			painted = frameId;
 
-			Pattern.paint(ctx, fault === "frozen-video" ? 0 : frameId);
+			Pattern.paint(ctx, fault === "frozen-video" ? 0 : frameId, this.#generation);
 			track.requestFrame();
 			this.#frameId.set(frameId);
 		};
@@ -215,6 +225,19 @@ export class Fixture {
 	/** Enable or disable the video rendition, which stays in the catalog either way. */
 	setVideo(enabled: boolean): void {
 		this.#videoEnabled.set(enabled);
+	}
+
+	/** Switch codecs on the existing rendition and mark subsequent source pictures. */
+	changeVideoCodec(): void {
+		this.#generation = 1;
+		this.#video.config.update((config) => ({ ...config, codec: "vp8" }));
+	}
+
+	/** Grow past the accepted coded-size ceiling without changing the VP8 codec. */
+	resizeVideo(): void {
+		this.#generation = 2;
+		this.#canvas.width = Pattern.WIDTH * 2;
+		this.#canvas.height = Pattern.HEIGHT * 2;
 	}
 
 	/** Stop publishing and release the capture, audio graph, and session. */

@@ -60,6 +60,7 @@ URL=""
 KEY="" # the HMAC key every cell's token is signed with (set once the relay's auth server starts)
 NEGATIVE=0
 MEDIA=0
+MEDIA_CASES=""
 TAIL_ONLY=0
 
 # Cargo profile for the relay/cli/moq-c builds. Debug compiles faster, which is
@@ -109,6 +110,11 @@ while [[ $# -gt 0 ]]; do
             MEDIA=1
             shift
             ;;
+        --media-cases)
+            require_value "$@"
+            MEDIA_CASES="$2"
+            shift 2
+            ;;
         # The full matrix. --timeout 30 gives headless Chromium cold-start
         # headroom; flags after it still override.
         --all)
@@ -123,6 +129,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ -n "$MEDIA_CASES" && "$MEDIA" -ne 1 ]]; then
+    echo "error: --media-cases requires --media" >&2
+    exit 2
+fi
 
 # Numeric guards so a fat-fingered --timeout / INTEROP_PORT fails clearly here
 # instead of surfacing later as a cryptic `timeout` or relay-bind error.
@@ -1087,12 +1098,16 @@ if [[ "$MEDIA" -eq 1 ]]; then
         overall=1
     else
         echo "=== media output and lifecycle ==="
-        run_media "media output + lifecycle"
-        run_media "control: frozen video" --fault frozen-video --cases none --expect-fail "video progress"
-        run_media "control: silent audio" --fault silent-audio --cases none --expect-fail "audio tone"
-        run_media "control: offset audio" --fault audio-offset --cases none --expect-fail "audio/video sync"
-        run_media "control: leaked session" --leak --cases detach --expect-fail "resource baseline"
-        run_media "control: lagging latecomer" --lag --cases late-join --expect-fail "late join reaches live"
+        if [[ -n "$MEDIA_CASES" ]]; then
+            run_media "media cases: $MEDIA_CASES" --cases "$MEDIA_CASES" --focused
+        else
+            run_media "media output + lifecycle"
+            run_media "control: frozen video" --fault frozen-video --cases none --expect-fail "video progress"
+            run_media "control: silent audio" --fault silent-audio --cases none --expect-fail "audio tone"
+            run_media "control: offset audio" --fault audio-offset --cases none --expect-fail "audio/video sync"
+            run_media "control: leaked session" --leak --cases detach --expect-fail "resource baseline"
+            run_media "control: lagging latecomer" --lag --cases late-join --expect-fail "late join reaches live"
+        fi
     fi
 elif [[ "$NEGATIVE" -eq 1 ]]; then
     # Negative control: no publisher. Every subscriber must FAIL (time out with
