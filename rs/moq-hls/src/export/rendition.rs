@@ -9,7 +9,6 @@ use std::time::{Duration, SystemTime};
 use bytes::Bytes;
 use hang::catalog::{Archive, AudioConfig, Clock, Reference, VideoConfig};
 use moq_mux::container::fmp4::Muxer;
-use moq_mux::timeline::Entry;
 use sha2::{Digest, Sha256};
 
 use super::playlist::{Segment, Snapshot};
@@ -421,29 +420,11 @@ impl Rendition {
 
 	/// Feed one reference timeline record into this rendition's window as a segment. With no
 	/// `window`, only source timeline pops trim it.
-	pub(crate) fn push(
-		&self,
-		index: u64,
-		entry: &Entry,
-		reference: &segments::Reference,
-		discontinuity: u64,
-		window: Option<Duration>,
-	) {
+	pub(crate) fn push(&self, row: segments::Row, window: Option<Duration>) {
 		if !self.media.admits(&self.live) {
 			return;
 		}
-		let row = segments::Row {
-			index,
-			segment: entry.sequence,
-			reference: reference.clone(),
-			frames: entry.start..entry.end,
-			keyframe: entry.keyframe,
-			duration: entry.duration,
-			pts: entry.pts,
-			end: entry.end_time(),
-			discontinuity,
-		};
-		let starts = self.is(reference) && row.starts_sync();
+		let starts = self.is(&row.reference) && row.starts_sync();
 		let resets = self.live.push(row, window);
 		if starts {
 			self.latch(resets);
@@ -485,9 +466,9 @@ impl Rendition {
 		reference.0 == self.kind && reference.1 == self.name && reference.2 == self.track_name()
 	}
 
-	/// Remove source timeline records in `range` from this rendition's window.
-	pub(crate) fn pop(&self, range: std::ops::Range<u64>) {
-		self.live.pop(range);
+	/// Retire the playlist prefix through this shared media sequence.
+	pub(crate) fn retire(&self, through: u64) {
+		self.live.retire(through);
 		self.trim();
 	}
 
@@ -653,6 +634,7 @@ impl Rendition {
 		Snapshot {
 			target_duration,
 			media_sequence: window.sequence,
+			discontinuity_sequence: window.discontinuity,
 			segments,
 			finished: (window.ended && complete) || failed,
 			program_date_time,
@@ -736,53 +718,63 @@ impl Rendition {
 
 	/// This rendition's DASH representation: its master-level metadata plus its track's
 	/// timeline as `(t, d)` pairs in the timeline's own timescale (the record values
-	/// verbatim, so `$Time$` addressing resolves exactly). `None` until the init is known, as
+	/// verbatim, so `$Time$` addressing resolves exactly). Empty until the init is known, as
 	/// for [`media_playlist`](Self::media_playlist).
-	pub(crate) fn representation(&self) -> Option<mpd::Representation> {
+	pub(crate) fn representations(&self) -> Vec<mpd::Representation> {
 		// Read the run before the rows (see `restart`).
 		let run = self.run();
-		let init = self.built_init(&run)?;
+		let Some(init) = self.built_init(&run) else {
+			return Vec::new();
+		};
 		self.media.sync(&self.live);
 		let window = self.live.window();
 		let timescale = self.timescale();
-		// Static only once every row resolved here, like the playlist's `EXT-X-ENDLIST`.
 		let complete = self.resolved(&window.segments).count() == window.segments.len();
-		let segments = self
-			.resolved(&window.segments)
-			.filter(|(_, content)| *content != Content::Gap)
-			.filter_map(|(row, _)| {
-				let t = row.pts.as_scale(timescale) as u64;
-				let span = row.end.saturating_sub(row.pts.into());
-				let d = (span.as_nanos() * timescale.as_u64() as u128 / 1_000_000_000) as u64;
-				// A zero-duration record (the terminal segment when the publisher couldn't
-				// bound its final sample) would sit exactly at the presentation end, so a
-				// conforming player would never request it; advertising it in a
-				// SegmentTimeline is contradictory timing, so leave it out. (HLS still lists
-				// it as EXTINF:0, which players fetch by URL rather than by timing.)
-				(d > 0).then_some((t, d))
-			})
-			.collect();
+		let ended = (window.ended && complete) || window.segments.last().is_some_and(|row| self.is_failed(row));
+		let mut periods = std::collections::BTreeMap::<moq_net::Timestamp, (String, Vec<(u64, u64)>)>::new();
+		for (row, content) in self.resolved(&window.segments) {
+			if content == Content::Gap {
+				continue;
+			}
+			let t = row.pts.as_scale(timescale) as u64;
+			let span = row.end.saturating_sub(row.pts.into());
+			let d = (span.as_nanos() * timescale.as_u64() as u128 / 1_000_000_000) as u64;
+			// A zero-duration terminal record sits at the presentation end and cannot be
+			// requested by DASH timing. HLS still serves it by its source-addressed URL.
+			if d == 0 {
+				continue;
+			}
+			periods
+				.entry(row.period)
+				.or_insert_with(|| (segments::tag(&row.reference), Vec::new()))
+				.1
+				.push((t, d));
+		}
 		let (framerate, sample_rate, channel_count) = match &self.config {
 			Config::Video(_) => (self.framerate(), None, None),
 			Config::Audio(config) => (None, Some(config.sample_rate), Some(config.channel_count)),
 		};
-		Some(mpd::Representation {
-			name: self.name.clone(),
-			kind: self.kind,
-			bandwidth: self.bandwidth(),
-			codec: self.codec.clone(),
-			width: self.width,
-			height: self.height,
-			framerate,
-			sample_rate,
-			channel_count,
-			timescale: self.section.timescale.max(1),
-			segments,
-			ended: (window.ended && complete) || window.segments.last().is_some_and(|row| self.is_failed(row)),
-			tag: listed_tag(&window.segments),
-			init: init.hash.clone(),
-			generation: run.generation,
-		})
+		periods
+			.into_iter()
+			.map(|(period, (tag, segments))| mpd::Representation {
+				name: self.name.clone(),
+				kind: self.kind,
+				bandwidth: self.bandwidth(),
+				codec: self.codec.clone(),
+				width: self.width,
+				height: self.height,
+				framerate,
+				sample_rate,
+				channel_count,
+				timescale: self.section.timescale.max(1),
+				segments,
+				ended,
+				period,
+				tag,
+				init: init.hash.clone(),
+				generation: run.generation.clone(),
+			})
+			.collect()
 	}
 
 	/// Fetch and transmux the segment of the reference tagged `tag` whose timeline `pts` is
@@ -1042,8 +1034,8 @@ impl Rendition {
 	}
 }
 
-/// The tag of the reference numbering `rows`, empty when none are listed. A reference switch
-/// clears every row, so the listed rows share one.
+/// The first retained reference tag, used by number-only test helpers for a single reference.
+#[cfg(test)]
 fn listed_tag(rows: &[segments::Row]) -> String {
 	rows.first()
 		.map(|row| segments::tag(&row.reference))

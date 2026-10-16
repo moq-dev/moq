@@ -3,7 +3,7 @@ import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import * as Epoch from "../epoch.ts";
-import { error, StreamCode } from "../error.ts";
+import { error, ProtocolViolation, StreamCode } from "../error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "../group.ts";
 import { type Hop, HopSchema } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
@@ -398,6 +398,111 @@ test("FETCH and a non-forwarding SUBSCRIBE get NOT_SUPPORTED", async () => {
 		);
 		expect(paused[0]).toBe(0x05);
 		expect(paused[version <= Version.DRAFT_16 ? 4 : 3]).toBe(0x3);
+	}
+});
+
+test("Range Filters over MAX_FILTER_RANGES zero get INVALID_FILTER", async () => {
+	for (const version of [Version.DRAFT_19, Version.DRAFT_21, Version.DRAFT_22]) {
+		const pair = createMockTransportPair(ALPNS[version]);
+		const { pub, origin } = publisher(pair.server, { session: new NativeSession(pair.server, version, true) });
+		for (const fetch of [false, true]) {
+			const request = requestStream(version);
+			try {
+				const name = [1, 4, ...new TextEncoder().encode("test"), 5, ...new TextEncoder().encode("video")];
+				const fields = [
+					7,
+					...(fetch && version === Version.DRAFT_19 ? [1] : []),
+					...name,
+					...(fetch && version === Version.DRAFT_19 ? [0, 0, 0, 0] : []),
+					1,
+					0x25,
+					0,
+				];
+				const encoded = new Reader(undefined, Uint8Array.from([0, fields.length, ...fields]), version);
+				if (fetch) await pub.runFetch(await Fetch.decode(encoded, version), request.stream);
+				else await pub.runSubscribe(await Subscribe.decode(encoded, version), request.stream);
+				await request.stream.writer.closed;
+				const wire = request.wire();
+				expect(await wire.u53()).toBe(RequestError.id);
+				expect((await RequestError.decode(wire, version)).errorCode).toBe(0x36);
+			} finally {
+				request.cancel();
+			}
+		}
+		origin.close();
+	}
+});
+
+test("RENDEZVOUS_TIMEOUT has a zero cap with TIMEOUT for a requested wait", async () => {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_21, Version.DRAFT_22]) {
+		// A wait applies only to a missing publisher; a missing track on a live one does not exist.
+		for (const [namespace, trackName, live] of [
+			["missing", "video", false],
+			["room", "audio", true],
+		] as const) {
+			for (const millis of [undefined, 0, 7]) {
+				const pair = createMockTransportPair(ALPNS[version]);
+				const { pub, origin } = publisher(pair.server, {
+					session: new NativeSession(pair.server, version, true),
+				});
+				const broadcast = live ? publish(origin, Path.from(namespace)) : undefined;
+				const track = broadcast?.createTrack("video", { timescale: Timescale.MILLI });
+				const request = requestStream(version);
+				const fields = [
+					7,
+					1,
+					namespace.length,
+					...new TextEncoder().encode(namespace),
+					trackName.length,
+					...new TextEncoder().encode(trackName),
+					...(millis === undefined ? [0] : [1, 0x04, millis]),
+				];
+				const msg = await Subscribe.decode(
+					new Reader(undefined, Uint8Array.from([0, fields.length, ...fields]), version),
+					version,
+				);
+				try {
+					await pub.runSubscribe(msg, request.stream);
+					await request.stream.writer.closed;
+					const wire = request.wire();
+					expect(await wire.u53()).toBe(RequestError.id);
+					expect((await RequestError.decode(wire, version)).errorCode).toBe(millis && !live ? 0x02 : 0x10);
+				} finally {
+					track?.close();
+					broadcast?.close();
+					origin.close();
+					request.cancel();
+				}
+			}
+		}
+	}
+});
+
+test("reserved namespace requests get DOES_NOT_EXIST while other dot namespaces are served", async () => {
+	for (const version of [Version.DRAFT_21, Version.DRAFT_22]) {
+		for (const path of [".", "./child", ".session", ".session/extension", ".application", ".sessionish"]) {
+			const pair = createMockTransportPair(ALPNS[version]);
+			const { pub, origin } = publisher(pair.server, { session: new NativeSession(pair.server, version, true) });
+			const broadcast = publish(origin, Path.from(path));
+			const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			const request = requestStream(version);
+			try {
+				await pub.runTrackStatusRequest(trackStatus(path), request.stream);
+				await request.stream.writer.closed;
+				const wire = request.wire();
+				if (path.split("/")[0] === "." || path.split("/")[0] === ".session") {
+					expect(await wire.u53()).toBe(RequestError.id);
+					expect((await RequestError.decode(wire, version)).errorCode).toBe(0x10);
+				} else {
+					expect(await wire.u53()).toBe(TrackStatusOk.id(version));
+				}
+			} finally {
+				request.cancel();
+				track.close();
+				broadcast.close();
+				origin.close();
+			}
+		}
 	}
 });
 
@@ -2889,6 +2994,66 @@ test("REQUEST_UPDATE applies priority and preserves it when omitted", async () =
 	}
 });
 
+test("REQUEST_UPDATE accepts delivery timeouts without changing the subscription", async () => {
+	const fx = fixture(Version.DRAFT_19);
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 128,
+		}),
+	);
+	try {
+		const before = track.subscription.peek();
+		await client.writer.write(new Uint8Array([0x02, 0, 6, 2, 2, 0x02, 7, 0x04, 9]));
+		expect(await client.reader.u53()).toBe(RequestOk.id);
+		await RequestOk.decode(client.reader, fx.version);
+		expect(track.subscription.peek()).toEqual(before);
+	} finally {
+		client.close();
+		track.close();
+		fx.close();
+	}
+});
+
+test("TRACK_PROPERTY_FILTER on a subscription update closes with PROTOCOL_VIOLATION", async () => {
+	const fx = fixture(Version.DRAFT_19);
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const client = await Stream.open(fx.pair.client, { version: fx.version });
+	const server = await Stream.accept(fx.pair.server, fx.version);
+	if (!server) throw new Error("missing subscribe stream");
+	const serving = fx.pub
+		.runSubscribe(
+			new Subscribe({
+				requestId: 0n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 128,
+			}),
+			server,
+		)
+		.then(
+			() => undefined,
+			(err: unknown) => err,
+		);
+	try {
+		expect(await client.reader.u53()).toBe(SubscribeOk.id);
+		await SubscribeOk.decode(client.reader, fx.version);
+		await client.writer.write(new Uint8Array([0x02, 0, 6, 2, 1, 0x29, 2, 0, 0]));
+		const failure = await serving;
+		expect(failure).toBeInstanceOf(ProtocolViolation);
+		expect(Number((failure as ProtocolViolation).code)).toBe(0x03);
+	} finally {
+		client.close();
+		track.close();
+		fx.close();
+		await serving;
+	}
+});
+
 test("unsupported REQUEST_UPDATE is refused and ends with UPDATE_FAILED", async () => {
 	const fx = fixture(Version.DRAFT_19);
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
@@ -2940,5 +3105,51 @@ test("namespace subscription survives requester FIN and stops on STOP_SENDING", 
 	} finally {
 		client.close();
 		origin.close();
+	}
+});
+
+test("namespace updates move the prefix after acknowledgement", async () => {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_21, Version.DRAFT_22]) {
+		const pair = createMockTransportPair(ALPNS[version]);
+		const { pub, origin } = publisher(pair.server, {
+			session: new NativeSession(pair.server, version, false),
+			requiresSolicitation: true,
+		});
+		const old = publish(origin, Path.from("old/first"));
+		const fresh = publish(origin, Path.from("new/second"));
+		const client = await Stream.open(pair.client, { version });
+		const server = await Stream.accept(pair.server, version);
+		if (!server) throw new Error("missing namespace stream");
+		const running = pub.runSubscribeNamespace(
+			new SubscribeNamespace({ requestId: 0n, namespace: Path.from("old") }),
+			server,
+		);
+		try {
+			expect(await client.reader.u53()).toBe(RequestOk.id);
+			await RequestOk.decode(client.reader, version);
+			expect(await client.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+			expect((await SubscribeNamespaceEntry.decode(client.reader, version)).suffix).toBe(Path.from("first"));
+			await client.writer.write(Uint8Array.from([0x02, 0, 8, 2, 1, 0x34]));
+			// Finishing the same frame must apply it exactly once.
+			await client.writer.write(Uint8Array.from([1, 3, 110, 101, 119]));
+			expect(await client.reader.u53()).toBe(SubscribeNamespaceEntryDone.id);
+			expect((await SubscribeNamespaceEntryDone.decode(client.reader, version)).suffix).toBe(Path.from("first"));
+			expect(await client.reader.u53()).toBe(RequestOk.id);
+			await RequestOk.decode(client.reader, version);
+			expect(await client.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+			expect((await SubscribeNamespaceEntry.decode(client.reader, version)).suffix).toBe(Path.from("second"));
+			if (version >= Version.DRAFT_21) {
+				await client.writer.write(Uint8Array.from([0x02, 0, 6, 4, 1, 0x34, 1, 1, 46]));
+				expect(await client.reader.u53()).toBe(RequestError.id);
+				expect((await RequestError.decode(client.reader, version)).errorCode).toBe(0x10);
+				await running;
+			}
+		} finally {
+			client.close();
+			origin.close();
+			old.close();
+			fresh.close();
+			await running;
+		}
 	}
 });
