@@ -230,6 +230,11 @@ pub enum Error {
 	#[cfg(all(feature = "uds", unix))]
 	#[error(transparent)]
 	Unix(Arc<crate::unix::Error>),
+
+	/// The WebRTC data channel transport failed.
+	#[cfg(feature = "webrtc")]
+	#[error(transparent)]
+	WebRtc(Arc<crate::webrtc::Error>),
 }
 
 impl Error {
@@ -388,6 +393,13 @@ impl From<crate::tcp::Error> for Error {
 impl From<crate::unix::Error> for Error {
 	fn from(err: crate::unix::Error) -> Self {
 		Self::Unix(Arc::new(err))
+	}
+}
+
+#[cfg(feature = "webrtc")]
+impl From<crate::webrtc::Error> for Error {
+	fn from(err: crate::webrtc::Error) -> Self {
+		Self::WebRtc(Arc::new(err))
 	}
 }
 

@@ -78,8 +78,8 @@ pub(crate) async fn dial(
 	// 1:1 socket (no demux on the client): pump its datagrams into the session.
 	// The session tags each datagram with the advertised candidate matching its
 	// family (str0m matches the destination against a host candidate, not the bind).
-	let inbound = session::spawn_socket_reader(socket.clone());
-	let mut session = session::Session::egress(rtc, socket, candidates, inbound, source);
+	let inbound = moq_tokio::webrtc::ice::reader(socket.clone());
+	let mut session = session::Session::egress(rtc, socket, candidates, inbound, source)?;
 	for mid in mids {
 		session.open_media(mid)?;
 	}

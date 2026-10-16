@@ -18,9 +18,19 @@ use url::Url;
 // the stream listeners hand back an already-built `Request`.
 #[cfg(any(feature = "noq", feature = "iroh", feature = "websocket"))]
 use futures::FutureExt;
-use futures::future::BoxFuture;
-use futures::stream::FuturesUnordered;
-use futures::stream::StreamExt;
+// The pending handshakes of the transports `Server` accepts itself; WebRTC
+// signaling is the caller's, so a WebRTC-only build has none.
+#[cfg(any(
+	feature = "noq",
+	feature = "iroh",
+	feature = "websocket",
+	feature = "tcp",
+	all(feature = "uds", unix)
+))]
+use futures::{
+	future::BoxFuture,
+	stream::{FuturesUnordered, StreamExt},
+};
 
 impl crate::listen::Config {
 	/// Build the [`Server`] this config describes, binding its listeners.
@@ -227,6 +237,13 @@ pub struct Server {
 	versions: moq_net::Versions,
 	/// From [`crate::listen::Config::resolved_timeout`].
 	timeout: Option<std::time::Duration>,
+	#[cfg(any(
+		feature = "noq",
+		feature = "iroh",
+		feature = "websocket",
+		feature = "tcp",
+		all(feature = "uds", unix)
+	))]
 	accept: FuturesUnordered<BoxFuture<'static, crate::Result<Request>>>,
 	#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 	streams: StreamListeners,
@@ -429,6 +446,13 @@ impl Server {
 
 		Ok(Server {
 			activity,
+			#[cfg(any(
+				feature = "noq",
+				feature = "iroh",
+				feature = "websocket",
+				feature = "tcp",
+				all(feature = "uds", unix)
+			))]
 			accept: Default::default(),
 			moq,
 			versions,
@@ -538,11 +562,11 @@ impl Server {
 		feature = "tcp",
 		all(feature = "uds", unix)
 	)))]
-	/// Returns the next partially established session.
-	///
-	/// Panics: no transport feature is compiled in, so nothing can be accepted.
+	/// Returns the next partially established session: none, since no compiled
+	/// transport is one this server listens on (WebRTC sessions arrive through
+	/// [`Listener::accept_webrtc`]).
 	async fn accept_next(&mut self) -> Option<Request> {
-		unreachable!("no transport compiled; enable a QUIC backend, websocket, tcp, or uds feature");
+		None
 	}
 
 	/// The accept-loop health of every listener this server owns that performs a real
@@ -879,6 +903,56 @@ impl Listener {
 		self.server.accept_next().await
 	}
 
+	/// Read the MoQ SETUP from the data channel the browser opened on an answering
+	/// [`crate::webrtc::Peer`], leaving admission to the returned [`Request`].
+	///
+	/// Waits for ICE and the channel to come up, bounded by the handshake timeout.
+	/// The channel's protocol must be a MoQ ALPN this server speaks.
+	#[cfg(feature = "webrtc")]
+	pub async fn accept_webrtc(&self, peer: &crate::webrtc::Peer) -> crate::Result<Request> {
+		use crate::webrtc::Error as WebRtcError;
+
+		if !peer.answering() {
+			return Err(WebRtcError::Role("only the answering peer adopts a data channel").into());
+		}
+		let server = &self.server;
+		let active = server
+			.activity
+			.enter()
+			.ok_or(Error::NoBackend("the listener is closing"))?;
+		let deadline = server
+			.timeout
+			.and_then(|timeout| tokio::time::Instant::now().checked_add(timeout));
+
+		let handshake = async {
+			let opened = peer.channel().await?;
+			if !server.versions.alpns().contains(&opened.protocol.as_str()) {
+				return Err(WebRtcError::Protocol(opened.protocol));
+			}
+			let config = opened.config();
+			let protocol = opened.protocol;
+			let session = qmux::Session::accept(opened.channel, config).await?;
+			Ok((session, protocol))
+		};
+		let (session, protocol) = within(deadline, handshake).await?;
+
+		let (request, deadline) =
+			accept_request(&server.moq, session, moq_net::transport::Binding::InBand, deadline).await?;
+		Ok(Request {
+			transport: Transport::WebRtc,
+			url: None,
+			authority: None,
+			identity: None,
+			link: Link {
+				alpn: Some(protocol),
+				..Default::default()
+			},
+			kind: RequestKind::Qmux(Box::new(request)),
+			deadline,
+			active,
+		})
+	}
+
 	/// Close every listener and connection, once each QUIC peer has been sent the
 	/// close.
 	///
@@ -979,7 +1053,8 @@ impl Setup {
 	feature = "iroh",
 	feature = "websocket",
 	feature = "tcp",
-	all(feature = "uds", unix)
+	all(feature = "uds", unix),
+	feature = "webrtc"
 ))]
 /// Read the peer's MoQ SETUP by `deadline`, closing the session with a timeout
 /// code if it hasn't arrived. The deadline comes back too, since answering the
@@ -1042,7 +1117,8 @@ impl Deadline {
 		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
-		all(feature = "uds", unix)
+		all(feature = "uds", unix),
+		feature = "webrtc"
 	))]
 	fn new<S>(at: tokio::time::Instant, session: S) -> Self
 	where
@@ -1085,7 +1161,8 @@ impl Deadline {
 	feature = "iroh",
 	feature = "websocket",
 	feature = "tcp",
-	all(feature = "uds", unix)
+	all(feature = "uds", unix),
+	feature = "webrtc"
 ))]
 async fn within<T, E>(
 	deadline: Option<tokio::time::Instant>,
@@ -1533,7 +1610,12 @@ pub(crate) enum RequestKind {
 	Noq(Box<PendingRequest<crate::transport::Session<web_transport_moq::Session>>>),
 	#[cfg(feature = "iroh")]
 	Iroh(Box<PendingRequest<crate::transport::Session<web_transport_iroh::Session>>>),
-	#[cfg(any(feature = "tcp", all(feature = "uds", unix), feature = "websocket"))]
+	#[cfg(any(
+		feature = "tcp",
+		all(feature = "uds", unix),
+		feature = "websocket",
+		feature = "webrtc"
+	))]
 	Qmux(Box<PendingRequest<crate::transport::Session<qmux::Session>>>),
 }
 
@@ -1613,7 +1695,12 @@ macro_rules! request_ref {
 			RequestKind::Noq($r) => $body,
 			#[cfg(feature = "iroh")]
 			RequestKind::Iroh($r) => $body,
-			#[cfg(any(feature = "tcp", all(feature = "uds", unix), feature = "websocket"))]
+			#[cfg(any(
+				feature = "tcp",
+				all(feature = "uds", unix),
+				feature = "websocket",
+				feature = "webrtc"
+			))]
 			RequestKind::Qmux($r) => $body,
 		}
 	};
@@ -1627,7 +1714,12 @@ macro_rules! request_into {
 			RequestKind::Noq($r) => $body,
 			#[cfg(feature = "iroh")]
 			RequestKind::Iroh($r) => $body,
-			#[cfg(any(feature = "tcp", all(feature = "uds", unix), feature = "websocket"))]
+			#[cfg(any(
+				feature = "tcp",
+				all(feature = "uds", unix),
+				feature = "websocket",
+				feature = "webrtc"
+			))]
 			RequestKind::Qmux($r) => $body,
 		}
 	};
@@ -1641,7 +1733,12 @@ macro_rules! request_map {
 			RequestKind::Noq($r) => RequestKind::Noq(Box::new($body)),
 			#[cfg(feature = "iroh")]
 			RequestKind::Iroh($r) => RequestKind::Iroh(Box::new($body)),
-			#[cfg(any(feature = "tcp", all(feature = "uds", unix), feature = "websocket"))]
+			#[cfg(any(
+				feature = "tcp",
+				all(feature = "uds", unix),
+				feature = "websocket",
+				feature = "webrtc"
+			))]
 			RequestKind::Qmux($r) => RequestKind::Qmux(Box::new($body)),
 		}
 	};

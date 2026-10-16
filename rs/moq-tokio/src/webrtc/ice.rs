@@ -1,0 +1,505 @@
+//! The ICE side of a str0m peer connection: one UDP socket, its candidates, and
+//! the loop that drives an [`Rtc`] over it.
+//!
+//! str0m is sans-IO, so [`Agent::next`] alternates between [`Rtc::poll_output`]
+//! (transmits, events, the next timeout) and [`Rtc::handle_input`] (datagrams and
+//! timeouts), and runs a STUN Binding client on the same socket so the agent can
+//! offer server-reflexive candidates. Shared by this crate's data channel
+//! transport and `moq-rtc`'s WHIP/WHEP gateway, which only differ in what they do
+//! with the events.
+//!
+//! A dual-stack socket (`[::]`) reports an IPv4 peer as an IPv4-mapped IPv6
+//! address and refuses a send to a real `V4` destination. Neither form leaks past
+//! this module: inbound sources are unmapped by [`canonical`], since ICE pairs
+//! candidates by address family, and outbound destinations are mapped back.
+
+use std::collections::VecDeque;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+use str0m::net::{Protocol, Receive};
+use str0m::{Candidate, IceConnectionState, Input, Output, Rtc};
+use stun_types::attribute::XorMappedAddress;
+use stun_types::message::{BINDING, Message, MessageClass, MessageWriteVec, TransactionId};
+use stun_types::prelude::*;
+use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
+
+/// One inbound UDP datagram and the address it came from.
+pub type Packet = (Vec<u8>, SocketAddr);
+
+/// The datagrams routed to one [`Agent`], and the counters they are tallied in.
+pub struct Inbound {
+	/// Ends once every sender is dropped, which ends the agent.
+	pub packets: mpsc::Receiver<Packet>,
+	/// Counts `rx` where datagrams are routed, so a full queue's drops count too;
+	/// the agent counts `tx`.
+	pub wire: Wire,
+}
+
+/// Cumulative UDP payload bytes exchanged with one peer, excluding IP and UDP
+/// headers. Clones share counters, which outlive the agent.
+#[derive(Clone, Debug, Default)]
+pub struct Wire(Arc<Counters>);
+
+#[derive(Debug, Default)]
+struct Counters {
+	tx: AtomicU64,
+	rx: AtomicU64,
+}
+
+/// A snapshot of a [`Wire`]'s counters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stats {
+	/// Bytes the socket accepted, including ICE, DTLS, and retransmissions.
+	pub tx: u64,
+	/// Bytes routed to the peer, including those its full queue dropped.
+	pub rx: u64,
+}
+
+impl Wire {
+	/// Read both counters without consuming them.
+	pub fn stats(&self) -> Stats {
+		Stats {
+			tx: self.0.tx.load(Ordering::Relaxed),
+			rx: self.0.rx.load(Ordering::Relaxed),
+		}
+	}
+
+	/// Count a datagram routed to this peer.
+	pub fn received(&self, bytes: usize) {
+		self.0.rx.fetch_add(bytes as u64, Ordering::Relaxed);
+	}
+
+	fn sent(&self, bytes: usize) {
+		self.0.tx.fetch_add(bytes as u64, Ordering::Relaxed);
+	}
+}
+
+/// Bound on a session's inbound datagram queue, sized like a socket buffer: past
+/// it, datagrams are dropped rather than buffered, since ICE and SCTP tolerate loss
+/// and a stalled session must not grow memory without limit.
+pub const INBOX: usize = 256;
+
+/// Backstop deadline for reaching a connected ICE state, covering the one case
+/// str0m's agent deliberately never times out: a peer that provides no remote
+/// candidates and sends nothing. str0m ends a connection whose candidate pairs were
+/// tried and exhausted (after ~21s at its defaults), but with no remote candidates
+/// it treats the session as still possible forever, since trickle ICE could add
+/// one. Set above str0m's own exhaustion so a slow but real peer is not clipped.
+const ESTABLISH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// RFC 8489 section 6.2.1: the first retransmission timeout of a STUN request.
+const STUN_RTO: Duration = Duration::from_millis(500);
+
+/// RFC 8489 section 6.2.1: how many times a STUN request is sent (`Rc`).
+const STUN_SENDS: u32 = 7;
+
+/// RFC 8489 section 6.2.1: how long to wait after the last send, in RTOs (`Rm`).
+const STUN_LAST_WAIT: u32 = 16;
+
+/// Why an [`Agent`] stopped.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	/// The peer disconnected, str0m closed the connection, or the inbound queue ended.
+	#[error("peer connection closed")]
+	Closed,
+
+	/// ICE never connected before the establishment deadline.
+	#[error("ICE did not connect before the establishment deadline")]
+	Timeout,
+
+	/// str0m failed (SDP, DTLS, SCTP, or ICE state).
+	#[error("rtc error: {0}")]
+	Rtc(String),
+}
+
+impl Error {
+	fn rtc(err: impl std::fmt::Display) -> Self {
+		Self::Rtc(err.to_string())
+	}
+}
+
+/// What [`Agent::next`] surfaced.
+#[derive(Debug)]
+#[non_exhaustive]
+// Moved once per poll; boxing would allocate for every data channel message.
+#[allow(clippy::large_enum_variant)]
+pub enum Event {
+	/// An event from str0m. ICE disconnection is reported as [`Error::Closed`] instead.
+	Rtc(str0m::Event),
+	/// A server-reflexive candidate, already added locally, to signal to the peer.
+	Candidate(Candidate),
+	/// Every STUN server answered or gave up: no more local candidates follow.
+	Gathered,
+}
+
+/// A STUN Binding request in flight to one server.
+struct Query {
+	server: SocketAddr,
+	/// The host candidate the request leaves from, which a reply's mapping is the reflexive form of.
+	base: SocketAddr,
+	id: TransactionId,
+	request: Vec<u8>,
+	sends: u32,
+	rto: Duration,
+	/// When to retransmit, or give up after the last send.
+	deadline: Instant,
+}
+
+/// Drives one [`Rtc`] over a UDP socket until the connection ends.
+pub struct Agent {
+	rtc: Rtc,
+	/// Send side, possibly shared by several agents (a demuxed server socket).
+	socket: Arc<UdpSocket>,
+	/// Whether `socket` is AF_INET6, which needs IPv4 destinations mapped.
+	socket_v6: bool,
+	/// The host candidates advertised to the peer. Each inbound datagram is tagged
+	/// with the one whose family matches its source: str0m drops a STUN request
+	/// whose destination is not a local candidate, and a wildcard bind is not one.
+	/// Never empty.
+	locals: Vec<SocketAddr>,
+	inbound: Inbound,
+	stun: Vec<Query>,
+	gathered: bool,
+	events: VecDeque<Event>,
+	/// Datagrams the socket refused for lack of buffer space, sent first next time.
+	outbox: VecDeque<(Vec<u8>, SocketAddr)>,
+	started: Instant,
+	connected: bool,
+}
+
+impl Agent {
+	/// Drive `rtc`, sending from `socket` and receiving from `inbound`.
+	///
+	/// `locals` are the host candidates advertised to the peer, not the socket's
+	/// bind address, and must not be empty.
+	pub fn new(rtc: Rtc, socket: Arc<UdpSocket>, locals: Vec<SocketAddr>, inbound: Inbound) -> std::io::Result<Self> {
+		if locals.is_empty() {
+			return Err(std::io::Error::new(
+				std::io::ErrorKind::InvalidInput,
+				"no host candidate to receive on",
+			));
+		}
+		let socket_v6 = socket.local_addr()?.is_ipv6();
+		Ok(Self {
+			rtc,
+			socket,
+			socket_v6,
+			locals,
+			inbound,
+			stun: Vec::new(),
+			gathered: false,
+			events: VecDeque::new(),
+			outbox: VecDeque::new(),
+			started: Instant::now(),
+			connected: false,
+		})
+	}
+
+	/// Ask each STUN server for this socket's public mapping, offering what comes
+	/// back as a server-reflexive candidate. Servers of a family with no host
+	/// candidate are skipped.
+	pub fn with_stun(mut self, servers: &[SocketAddr]) -> Self {
+		let now = Instant::now();
+		for &server in servers {
+			let server = canonical(server);
+			let Some(base) = self.locals.iter().find(|l| l.is_ipv4() == server.is_ipv4()).copied() else {
+				tracing::debug!(%server, "no host candidate of this family; skipping STUN server");
+				continue;
+			};
+			let request = Message::builder_request(BINDING, MessageWriteVec::new());
+			let id = request.transaction_id();
+			self.stun.push(Query {
+				server,
+				base,
+				id,
+				request: request.finish(),
+				sends: 0,
+				rto: STUN_RTO,
+				deadline: now,
+			});
+		}
+		self
+	}
+
+	/// The connection being driven.
+	pub fn rtc(&mut self) -> &mut Rtc {
+		&mut self.rtc
+	}
+
+	/// The counters of the bytes exchanged with the peer.
+	pub fn wire(&self) -> &Wire {
+		&self.inbound.wire
+	}
+
+	/// Drive the connection until it surfaces an [`Event`].
+	///
+	/// Cancel safe: a datagram the socket could not take yet is kept and sent first
+	/// on the next call.
+	pub async fn next(&mut self) -> Result<Event, Error> {
+		loop {
+			if let Some(event) = self.events.pop_front() {
+				return Ok(event);
+			}
+			if !self.gathered && self.stun.is_empty() {
+				self.gathered = true;
+				return Ok(Event::Gathered);
+			}
+
+			while let Some((data, dst)) = self.outbox.front() {
+				match self.socket.send_to(data, *dst).await {
+					Ok(len) => self.inbound.wire.sent(len),
+					Err(err) => tracing::warn!(%err, dst = %dst, "send failed"),
+				}
+				self.outbox.pop_front();
+			}
+
+			// A dead Rtc (DTLS failure, explicit disconnect) reports a never-firing
+			// timeout instead of an error, which would park this loop forever.
+			if !self.rtc.is_alive() {
+				return Err(Error::Closed);
+			}
+			if !self.connected && self.started.elapsed() >= ESTABLISH_TIMEOUT {
+				return Err(Error::Timeout);
+			}
+
+			let timeout = match self.rtc.poll_output().map_err(Error::rtc)? {
+				Output::Timeout(timeout) => timeout,
+				Output::Transmit(transmit) => {
+					self.send(&transmit.contents, transmit.destination);
+					continue;
+				}
+				Output::Event(event) => {
+					if let str0m::Event::IceConnectionStateChange(state) = &event {
+						tracing::debug!(?state, "ice state");
+						if *state == IceConnectionState::Disconnected {
+							return Err(Error::Closed);
+						}
+						self.connected |= state.is_connected();
+					}
+					return Ok(Event::Rtc(event));
+				}
+			};
+
+			let mut deadline = self.stun.iter().map(|q| q.deadline).fold(timeout, Instant::min);
+			if !self.connected {
+				deadline = deadline.min(self.started + ESTABLISH_TIMEOUT);
+			}
+
+			let now = Instant::now();
+			if deadline > now {
+				tokio::select! {
+					packet = self.inbound.packets.recv() => {
+						let Some((data, src)) = packet else {
+							// Every sender dropped: nothing more will arrive.
+							return Err(Error::Closed);
+						};
+						self.receive(&data, src)?;
+						continue;
+					}
+					_ = tokio::time::sleep(deadline - now) => {}
+				}
+			}
+
+			let now = Instant::now();
+			self.rtc.handle_input(Input::Timeout(now)).map_err(Error::rtc)?;
+			self.retransmit(now);
+		}
+	}
+
+	/// Send without waiting, keeping the datagram for later when the socket is full.
+	fn send(&mut self, data: &[u8], dst: SocketAddr) {
+		let dst = to_family(dst, self.socket_v6);
+		match self.socket.try_send_to(data, dst) {
+			Ok(len) => self.inbound.wire.sent(len),
+			Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => self.outbox.push_back((data.to_vec(), dst)),
+			Err(err) => tracing::warn!(%err, %dst, "send failed"),
+		}
+	}
+
+	fn receive(&mut self, data: &[u8], src: SocketAddr) -> Result<(), Error> {
+		if self.stun_reply(data, src) {
+			return Ok(());
+		}
+
+		let local = pick_local(&self.locals, src);
+		// Anything can arrive on a socket a server-reflexive candidate exposes, so a
+		// datagram that is not STUN, DTLS, or RTP is noise, not a failure.
+		let Ok(receive) = Receive::new(Protocol::Udp, src, local, data) else {
+			tracing::debug!(%src, len = data.len(), "dropped unrecognized datagram");
+			return Ok(());
+		};
+		self.rtc
+			.handle_input(Input::Receive(Instant::now(), receive))
+			.map_err(Error::rtc)
+	}
+
+	/// Consume a reply to one of our STUN queries, returning false for anything else.
+	fn stun_reply(&mut self, data: &[u8], src: SocketAddr) -> bool {
+		if self.stun.is_empty() {
+			return false;
+		}
+		let Ok(reply) = Message::from_bytes(data) else {
+			return false;
+		};
+		let id = reply.transaction_id();
+		let Some(index) = self.stun.iter().position(|q| q.id == id && q.server == src) else {
+			return false;
+		};
+		let query = self.stun.swap_remove(index);
+
+		if !reply.has_method(BINDING) || !reply.has_class(MessageClass::Success) {
+			tracing::debug!(server = %query.server, "STUN server refused the binding request");
+			return true;
+		}
+		let Ok(mapped) = reply.attribute::<XorMappedAddress>() else {
+			tracing::debug!(server = %query.server, "STUN reply carries no mapped address");
+			return true;
+		};
+
+		let mapped = canonical(mapped.addr(id));
+		match Candidate::server_reflexive(mapped, query.base, "udp") {
+			// None: redundant with a candidate the agent already has, as when there is no NAT.
+			Ok(candidate) => {
+				if let Some(candidate) = self.rtc.add_local_candidate(candidate) {
+					self.events.push_back(Event::Candidate(candidate.clone()));
+				}
+			}
+			Err(err) => tracing::debug!(%err, %mapped, "unusable server-reflexive address"),
+		}
+		true
+	}
+
+	/// Send each STUN request that is due, dropping those out of attempts.
+	fn retransmit(&mut self, now: Instant) {
+		let mut due = Vec::new();
+		self.stun.retain_mut(|query| {
+			if query.deadline > now {
+				return true;
+			}
+			if query.sends == STUN_SENDS {
+				tracing::debug!(server = %query.server, "STUN server did not answer");
+				return false;
+			}
+			query.sends += 1;
+			query.deadline = now
+				+ match query.sends {
+					STUN_SENDS => STUN_RTO * STUN_LAST_WAIT,
+					_ => query.rto,
+				};
+			query.rto *= 2;
+			due.push((query.request.clone(), query.server));
+			true
+		});
+		for (request, server) in due {
+			self.send(&request, server);
+		}
+	}
+}
+
+/// Unmap an IPv4-mapped address to the `V4` it really is; others pass through.
+pub fn canonical(addr: SocketAddr) -> SocketAddr {
+	SocketAddr::new(addr.ip().to_canonical(), addr.port())
+}
+
+/// Adapt a destination to what the socket accepts: an AF_INET6 socket only sends
+/// to IPv6, so an IPv4 destination goes back to its mapped form.
+fn to_family(addr: SocketAddr, socket_v6: bool) -> SocketAddr {
+	match addr.ip() {
+		IpAddr::V4(ip) if socket_v6 => SocketAddr::new(IpAddr::V6(ip.to_ipv6_mapped()), addr.port()),
+		_ => addr,
+	}
+}
+
+/// The advertised candidate to tag an inbound datagram with: the first of the
+/// source's family, falling back to the first, so a dual-stack peer's packets keep
+/// a same-family host candidate and str0m's pairing stays consistent.
+fn pick_local(locals: &[SocketAddr], src: SocketAddr) -> SocketAddr {
+	locals
+		.iter()
+		.find(|l| l.is_ipv4() == src.is_ipv4())
+		.copied()
+		.unwrap_or(locals[0])
+}
+
+/// Pump every datagram from a socket the caller owns 1:1 into a queue for
+/// [`Agent::new`], until the queue's receiver is dropped.
+pub fn reader(socket: Arc<UdpSocket>) -> Inbound {
+	let (tx, rx) = mpsc::channel(INBOX);
+	let wire = Wire::default();
+	let counted = wire.clone();
+	tokio::spawn(async move {
+		let mut buf = vec![0u8; 65_535];
+		loop {
+			tokio::select! {
+				res = socket.recv_from(&mut buf) => match res {
+					Ok((len, src)) => {
+						counted.received(len);
+						// Bounded like a socket buffer: drop on full.
+						if let Err(mpsc::error::TrySendError::Closed(_)) = tx.try_send((buf[..len].to_vec(), canonical(src))) {
+							break;
+						}
+					}
+					Err(err) => {
+						tracing::warn!(%err, "webrtc socket recv failed");
+						break;
+					}
+				},
+				_ = tx.closed() => break,
+			}
+		}
+	});
+	Inbound { packets: rx, wire }
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn pick_local_matches_address_family() {
+		let v4: SocketAddr = "1.2.3.4:5000".parse().unwrap();
+		let v6: SocketAddr = "[2001:db8::1]:5000".parse().unwrap();
+		let locals = vec![v4, v6];
+		assert_eq!(pick_local(&locals, "9.9.9.9:1".parse().unwrap()), v4);
+		assert_eq!(pick_local(&locals, "[2001:db8::2]:1".parse().unwrap()), v6);
+		// No same-family candidate falls back to the first.
+		assert_eq!(pick_local(&[v4], "[2001:db8::2]:1".parse().unwrap()), v4);
+	}
+
+	#[tokio::test]
+	async fn wire_counts_only_accepted_payload() {
+		let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+		let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		let local = socket.local_addr().unwrap();
+		let inbound = reader(socket.clone());
+		let wire = inbound.wire.clone();
+		let mut agent = Agent::new(Rtc::builder().build(Instant::now()), socket, vec![local], inbound).unwrap();
+
+		// Until tokio has seen the socket writable, a send waits in the outbox.
+		agent.socket.writable().await.unwrap();
+		agent.send(&[42; 73], peer.local_addr().unwrap());
+		// UDP refuses an oversized datagram, which is never counted as sent.
+		agent.send(&vec![0; 65_536], peer.local_addr().unwrap());
+		assert_eq!(wire.stats(), Stats { tx: 73, rx: 0 });
+
+		peer.send_to(&[7; 11], local).await.unwrap();
+		let (data, _) = agent.inbound.packets.recv().await.unwrap();
+		assert_eq!(data.len(), 11);
+		drop(agent);
+		assert_eq!(wire.stats(), Stats { tx: 73, rx: 11 });
+	}
+
+	#[test]
+	fn mapped_addresses_round_trip() {
+		let v4: SocketAddr = "1.2.3.4:5000".parse().unwrap();
+		let mapped = to_family(v4, true);
+		assert_eq!(mapped, "[::ffff:1.2.3.4]:5000".parse().unwrap());
+		assert_eq!(canonical(mapped), v4);
+		assert_eq!(to_family(v4, false), v4);
+	}
+}

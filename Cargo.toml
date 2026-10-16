@@ -133,6 +133,8 @@ hmac = "0.13"
 humantime = "2.3"
 humantime-serde = "1.1.1"
 hyper-util = { version = "0.1.21", features = ["tokio"] }
+# Interface addresses for WebRTC host candidates (moq-tokio's `webrtc` feature).
+if-addrs = "0.15"
 io-uring = "0.7.15"
 jsonwebtoken = "11"
 kio = { version = "0.6.2", path = "rs/kio" }
@@ -222,6 +224,10 @@ serde_with = "3"
 sha2 = "0.11"
 slab = "0.4.12"
 socket2 = "0.6"
+# Sans-IO WebRTC. The default `examples` feature pulls in a web server, and aws-lc-rs
+# is the provider rustls already brings.
+str0m = { version = "0.24.1", default-features = false, features = ["aws-lc-rs"] }
+stun-types = "2.0.3"
 subtle = "2.6"
 tempfile = "3"
 thiserror = "2"

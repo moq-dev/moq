@@ -28,10 +28,11 @@ bytes = { workspace = true }
 hang = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
-# `RedactedUrl` keeps a dialed URL's query token and userinfo out of the logs.
-moq-tokio = { workspace = true }
+# `RedactedUrl` keeps a dialed URL's query token and userinfo out of the logs, and
+# `webrtc::ice` drives each str0m connection over its UDP socket.
+moq-tokio = { workspace = true, features = ["webrtc"] }
 reqwest = { workspace = true, features = ["rustls"] }
-str0m = "0.24"
+str0m = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }

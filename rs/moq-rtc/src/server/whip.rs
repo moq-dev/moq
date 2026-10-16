@@ -153,7 +153,7 @@ pub async fn accept(
 	handle.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))?;
 
 	let resource_id = sdp::new_resource_id();
-	let session = session::Session::ingest(rtc, mux.socket(), mux.candidates().to_vec(), inbound, sink);
+	let session = session::Session::ingest(rtc, mux.socket(), mux.candidates().to_vec(), inbound, sink)?;
 
 	// Register before returning so a DELETE that races the first packet still
 	// finds the session; Response::run unregisters itself when it ends.

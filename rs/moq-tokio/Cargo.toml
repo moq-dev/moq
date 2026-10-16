@@ -44,6 +44,8 @@ tcp = ["_transport", "dep:qmux", "dep:dns-lookup"]
 # Unix-domain-socket qmux transport (`unix://`), unix-only. Adds peer-credential
 # inspection on accept. Pulls in `tcp` (shares qmux's stream transport).
 uds = ["tcp", "qmux/uds"]
+# Native WebRTC data channels over str0m, with a full ICE agent (the `webrtc` module).
+webrtc = ["_transport", "dep:qmux", "dep:str0m", "dep:stun-types", "dep:if-addrs", "dep:mdns-sd"]
 ring = ["_certs", "rustls/ring", "rcgen/ring", "web-transport-moq?/ring"]
 
 [dependencies]
@@ -55,6 +57,7 @@ futures = "0.3"
 hex = { workspace = true }
 hmac = { workspace = true, optional = true }
 humantime = "2.3"
+if-addrs = { workspace = true, optional = true }
 mdns-sd = { workspace = true, optional = true }
 
 moq-net = { workspace = true }
@@ -75,6 +78,8 @@ rustls-webpki = { version = "0.103", features = ["aws-lc-rs"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_with = { version = "3", features = ["hex"] }
 sha2 = { workspace = true, optional = true }
+str0m = { workspace = true, optional = true }
+stun-types = { workspace = true, optional = true }
 subtle = { workspace = true, optional = true }
 thiserror = "2"
 tikv-jemalloc-ctl = { version = "0.6", optional = true }
