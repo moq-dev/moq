@@ -1545,7 +1545,8 @@ pub(crate) mod tests {
 	}
 
 	/// Input that ends before declaring any track fails, rather than announcing a broadcast
-	/// with nothing in it. Stream metadata alone (a PMT, an FLV header, an AUD) declares none.
+	/// with nothing in it. These inputs hold only metadata (a PMT, an FLV header, an AUD)
+	/// that configures no track.
 	#[tokio::test(start_paused = true)]
 	async fn an_import_with_no_track_fails_unannounced() {
 		let tables = two_programs()[..3 * 188].to_vec();

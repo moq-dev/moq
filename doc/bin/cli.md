@@ -309,9 +309,9 @@ program, or `--passthrough`) accept it. The RTMP, SRT, and WHIP ingests and
 avc3`, `capture`, `rtc --connect`, `archive`, and `transcode` because their
 timestamps or bytes come from the instance rather than the input. Each that
 accepts it announces once its catalog names a servable track, so a standby
-started ahead of its feed is never asked for tracks it cannot serve yet; input
-that ends before then (empty, or only a PMT or header) exits 1 without
-announcing.
+started ahead of its feed is never asked for tracks it cannot serve yet. Input
+that ends before then, such as an empty input or a PMT or header that
+configures no track, exits 1 without announcing.
 
 ## Cluster
 
