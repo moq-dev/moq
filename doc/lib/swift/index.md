@@ -103,6 +103,8 @@ Native I/O and background tasks run on a Tokio worker pool. Calls awaited by the
 host still poll in place; independent native wake callbacks can run concurrently.
 The generated bindings resume Swift continuations. Use the appropriate actor
 when updating UI state.
+A panic in a native background task reaches the pending and later fallible calls
+of every object that depends on it as a task error; other objects keep running.
 
 A session closed for exceeding the relay's request caps reports the protocol
 kind `ProtocolKind.tooManyRequests`. Reduce
@@ -115,7 +117,3 @@ reconnecting with the same workload.
 - API reference: [Swift Package Index (DocC)](https://swiftpackageindex.com/moq-dev/moq-swift/documentation/moq)
 - Source: [`swift/`](https://github.com/moq-dev/moq/tree/main/swift); `just swift check` builds and tests on a Mac
 - Packages SPM resolves: [moq-dev/moq-swift](https://github.com/moq-dev/moq-swift), [moq-dev/moq-swift-ffi](https://github.com/moq-dev/moq-swift-ffi)
-
-## Background task errors
-
-A panic in an owned native background task reaches a pending or later fallible call on that object as a task error. Other objects keep running.

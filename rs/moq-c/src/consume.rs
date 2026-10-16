@@ -34,6 +34,30 @@ struct ConsumeCatalog {
 	sections: Vec<(String, String)>,
 }
 
+impl ConsumeCatalog {
+	fn rendition<C: Clone>(&self, name: &str, config: &C) -> Rendition<C> {
+		Rendition {
+			broadcast: self.broadcast.clone(),
+			config: config.clone(),
+			name: name.to_string(),
+			driver: self
+				.origin
+				.as_ref()
+				.map(|origin| origin.driver.clone())
+				.unwrap_or_default(),
+		}
+	}
+}
+
+/// A catalog rendition to decode: the broadcast and track serving it, and the owner whose panic
+/// ends the decode.
+pub struct Rendition<C> {
+	pub broadcast: moq_net::broadcast::Consumer,
+	pub config: C,
+	pub name: String,
+	pub driver: crate::ffi::Background,
+}
+
 /// A broadcast handed to C, plus the origin cursor that named it.
 ///
 /// The origin is what lets a catalog rendition reference a sibling broadcast: only an origin
@@ -894,14 +918,8 @@ impl Consume {
 		Ok(())
 	}
 
-	/// Look up a video rendition by catalog index, returning the
-	/// (broadcast, config, name) tuple needed to subscribe, mirroring
-	/// the index-based selection in `video`.
-	pub fn video_rendition(
-		&self,
-		catalog: Id,
-		index: usize,
-	) -> Result<(moq_net::broadcast::Consumer, hang::catalog::VideoConfig, String), Error> {
+	/// Look up a video rendition by catalog index, mirroring the index-based selection in `video`.
+	pub fn video_rendition(&self, catalog: Id, index: usize) -> Result<Rendition<hang::catalog::VideoConfig>, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 		let (name, config) = consume
 			.catalog
@@ -910,7 +928,7 @@ impl Consume {
 			.iter()
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
-		Ok((consume.broadcast.clone(), config.clone(), name.clone()))
+		Ok(consume.rendition(name, config))
 	}
 
 	/// Subscribe to a JSON snapshot track (lossy latest-value) by name.
@@ -1082,14 +1100,8 @@ impl Consume {
 		self.json_value.remove(value).ok_or(Error::FrameNotFound)?;
 		Ok(())
 	}
-	/// Look up an audio rendition by catalog index, returning the
-	/// (broadcast, config, name) tuple needed to subscribe, mirroring
-	/// the index-based selection in `audio`.
-	pub fn audio_rendition(
-		&self,
-		catalog: Id,
-		index: usize,
-	) -> Result<(moq_net::broadcast::Consumer, hang::catalog::AudioConfig, String), Error> {
+	/// Look up an audio rendition by catalog index, mirroring the index-based selection in `audio`.
+	pub fn audio_rendition(&self, catalog: Id, index: usize) -> Result<Rendition<hang::catalog::AudioConfig>, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 		let (name, config) = consume
 			.catalog
@@ -1098,6 +1110,47 @@ impl Consume {
 			.iter()
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
-		Ok((consume.broadcast.clone(), config.clone(), name.clone()))
+		Ok(consume.rendition(name, config))
+	}
+}
+
+#[cfg(test)]
+mod supervision_tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn a_decoded_rendition_watches_the_origin_that_named_it() {
+		let (origin, driver, trigger) = crate::ffi::panicking_origin();
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = moq_mux::catalog::hang::Catalog::<moq_mux::catalog::hang::Extra>::default();
+		catalog.audio.renditions.insert(
+			"audio".into(),
+			hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2),
+		);
+		let mut consume = Consume::default();
+		let id = consume
+			.catalog
+			.insert(ConsumeCatalog {
+				broadcast: broadcast.consume(),
+				origin: Some(crate::origin::Consumer {
+					inner: origin.consume(),
+					driver: driver.clone(),
+				}),
+				catalog,
+				audio_codec: Vec::new(),
+				video_codec: Vec::new(),
+				sections: Vec::new(),
+			})
+			.unwrap();
+		let rendition = consume.audio_rendition(id, 0).unwrap();
+		*trigger
+			.write()
+			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;
+		assert!(matches!(driver.finished().await, Err(Error::Panic)));
+		let result = rendition
+			.driver
+			.watch(std::future::pending::<Result<(), Error>>())
+			.await;
+		assert!(matches!(result, Err(Error::Panic)), "{result:?}");
 	}
 }

@@ -120,6 +120,8 @@ Native I/O and background tasks run on a Tokio worker pool. Calls awaited by the
 host still poll in place; independent native wake callbacks can run concurrently.
 The generated bindings wake Python futures through the asyncio event loop. The
 package exit hook joins native workers before interpreter finalization.
+A panic in a native background task reaches the pending and later fallible calls
+of every object that depends on it as a task error; other objects keep running.
 
 A session closed for exceeding the relay's request caps reports the protocol
 kind `ProtocolKind.TOO_MANY_REQUESTS`. Reduce
@@ -132,7 +134,3 @@ reconnecting with the same workload.
 - API reference: [moq-rs.readthedocs.io](https://moq-rs.readthedocs.io)
 - Source and examples: [`py/moq-rs`](https://github.com/moq-dev/moq/tree/main/py/moq-rs)
 - Raw bindings: [`moq-ffi`](https://pypi.org/project/moq-ffi/) on PyPI, for the unwrapped API
-
-## Background task errors
-
-A panic in an owned native background task reaches a pending or later fallible call on that object as a task error. Other objects keep running.

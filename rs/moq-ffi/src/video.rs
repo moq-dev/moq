@@ -833,10 +833,13 @@ impl MoqBroadcastConsumer {
 			.map(std::time::Duration::from_micros)
 			.unwrap_or_default();
 
-		let consumer = moq_video::decode::Consumer::new(&broadcast, &cfg, name, options).await?;
+		let consumer = self
+			.driver
+			.watch(async { Ok(moq_video::decode::Consumer::new(&broadcast, &cfg, name, options).await?) })
+			.await?;
 
 		Ok(Arc::new(MoqVideoConsumer {
-			task: crate::ffi::Task::new(VideoConsumerInner { consumer }),
+			task: crate::ffi::Task::new(VideoConsumerInner { consumer }).supervised(self.driver.clone()),
 		}))
 	}
 }

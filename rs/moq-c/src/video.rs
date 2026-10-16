@@ -527,16 +527,17 @@ impl Video {
 
 	pub fn consume(
 		&mut self,
-		broadcast: &moq_net::broadcast::Consumer,
-		catalog: &hang::catalog::VideoConfig,
-		name: &str,
+		rendition: crate::consume::Rendition<hang::catalog::VideoConfig>,
 		options: moq_video::decode::Options,
 		output: DecoderOutput,
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
-		let broadcast = broadcast.clone();
-		let catalog = catalog.clone();
-		let name = name.to_string();
+		let crate::consume::Rendition {
+			broadcast,
+			config: catalog,
+			name,
+			driver,
+		} = rendition;
 
 		let channel = oneshot::channel();
 		let entry = VideoTaskEntry {
@@ -548,10 +549,10 @@ impl Video {
 		// `Consumer::new` subscribes (blocking on SUBSCRIBE_OK), so run it inside
 		// the task to keep this entrypoint non-blocking.
 		tokio::spawn(async move {
-			let res = crate::ffi::run(async move {
+			let res = crate::ffi::run(driver.watch(async move {
 				let consumer = moq_video::decode::Consumer::new(&broadcast, &catalog, name, options).await?;
 				Self::run(on_frame, consumer, channel.1, output).await
-			})
+			}))
 			.await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
@@ -940,10 +941,10 @@ pub unsafe extern "C" fn moq_decode_video(
 		let on_frame = unsafe { OnStatus::new(user_data, on_frame)? };
 
 		let mut state = State::lock();
-		let (broadcast, video_cfg, name) = state.consume.video_rendition(catalog, index as usize)?;
+		let rendition = state.consume.video_rendition(catalog, index as usize)?;
 
 		let State { video, .. } = &mut *state;
-		video.consume(&broadcast, &video_cfg, &name, options, output, on_frame)
+		video.consume(rendition, options, output, on_frame)
 	})
 }
 

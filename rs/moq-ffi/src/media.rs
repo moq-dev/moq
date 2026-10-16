@@ -1267,11 +1267,15 @@ pub struct MoqMediaGroupConsumer {
 }
 
 impl MoqMediaGroupConsumer {
-	fn from_inner(group: moq_net::group::Consumer, container: moq_mux::catalog::hang::Container) -> Self {
+	fn from_inner(
+		group: moq_net::group::Consumer,
+		container: moq_mux::catalog::hang::Container,
+		driver: crate::ffi::Background,
+	) -> Self {
 		let inner = moq_mux::container::GroupConsumer::new(group, container);
 		Self {
 			sequence: inner.sequence(),
-			task: Task::new(MediaGroupInner { inner }),
+			task: Task::new(MediaGroupInner { inner }).supervised(driver),
 		}
 	}
 }
@@ -1336,13 +1340,18 @@ impl MoqMediaCatalogConsumer {
 	#[uniffi::constructor]
 	pub async fn subscribe(broadcast: &MoqBroadcastConsumer) -> Result<Arc<MoqMediaCatalogConsumer>, MoqError> {
 		let track = broadcast
-			.inner
-			.track(hang::catalog::Catalog::DEFAULT_NAME)?
-			.subscribe(hang::catalog::Catalog::default_subscription())
+			.driver
+			.watch(async {
+				Ok(broadcast
+					.inner
+					.track(hang::catalog::Catalog::DEFAULT_NAME)?
+					.subscribe(hang::catalog::Catalog::default_subscription())
+					.await?)
+			})
 			.await?;
 		let consumer = moq_mux::catalog::hang::Consumer::from(track);
 		Ok(Arc::new(MoqMediaCatalogConsumer {
-			task: Task::new(Catalog { inner: consumer }),
+			task: Task::new(Catalog { inner: consumer }).supervised(broadcast.driver.clone()),
 		}))
 	}
 }
@@ -1364,10 +1373,13 @@ impl MoqMediaTrackConsumer {
 		// subscription if init parsing fails.
 		let media = media_container(container)?;
 		let subscription = subscription.map(moq_net::track::Subscription::from).unwrap_or_default();
-		let track = broadcast.inner.track(&name)?.subscribe(subscription).await?;
+		let track = broadcast
+			.driver
+			.watch(async { Ok(broadcast.inner.track(&name)?.subscribe(subscription).await?) })
+			.await?;
 		let consumer = moq_mux::container::Consumer::new(track, media);
 		Ok(Arc::new(MoqMediaTrackConsumer {
-			task: Task::new(Media { inner: consumer }),
+			task: Task::new(Media { inner: consumer }).supervised(broadcast.driver.clone()),
 		}))
 	}
 }
@@ -1385,7 +1397,8 @@ impl MoqMediaGroupConsumer {
 	pub fn new(group: &MoqGroupConsumer, container: MoqContainer) -> Result<Arc<Self>, MoqError> {
 		// Parse the container first, so a bad init leaves the raw group readable.
 		let media = media_container(container)?;
-		Ok(Arc::new(Self::from_inner(group.take()?, media)))
+		let (group, driver) = group.take()?;
+		Ok(Arc::new(Self::from_inner(group, media, driver)))
 	}
 
 	/// Fetch and decode exactly one media group.
@@ -1404,9 +1417,18 @@ impl MoqMediaGroupConsumer {
 		// dynamic group request waiting for a consumer that can never read it.
 		let media = media_container(container)?;
 		let options = options.map(moq_net::group::Fetch::from);
-		let track = broadcast.inner.track(&name).map_err(map_fetch_error)?;
-		let group = track.fetch_group(sequence, options).await.map_err(map_fetch_error)?;
-		Ok(Arc::new(MoqMediaGroupConsumer::from_inner(group, media)))
+		let group = broadcast
+			.driver
+			.watch(async {
+				let track = broadcast.inner.track(&name).map_err(map_fetch_error)?;
+				track.fetch_group(sequence, options).await.map_err(map_fetch_error)
+			})
+			.await?;
+		Ok(Arc::new(MoqMediaGroupConsumer::from_inner(
+			group,
+			media,
+			broadcast.driver.clone(),
+		)))
 	}
 }
 

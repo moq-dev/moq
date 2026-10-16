@@ -184,7 +184,7 @@ impl MoqBroadcastConsumer {
 			.watch(async {
 				let subscription = subscription.map(moq_net::track::Subscription::from);
 				let track = self.inner.track(&name)?.subscribe(subscription).await?;
-				Ok(Arc::new(MoqTrackConsumer::new(track)))
+				Ok(Arc::new(MoqTrackConsumer::new(track, self.driver.clone())))
 			})
 			.await
 	}
@@ -205,7 +205,7 @@ impl MoqBroadcastConsumer {
 				let options = options.map(moq_net::group::Fetch::from);
 				let track = self.inner.track(&name).map_err(map_fetch_error)?;
 				let group = track.fetch_group(sequence, options).await.map_err(map_fetch_error)?;
-				Ok(Arc::new(MoqGroupConsumer::new(group)))
+				Ok(Arc::new(MoqGroupConsumer::new(group, self.driver.clone())))
 			})
 			.await
 	}
@@ -436,10 +436,12 @@ pub struct MoqTrackConsumer {
 	datagrams: Task<ReadLane>,
 	control: moq_net::track::Control,
 	info: moq_net::track::Info,
+	/// The owner whose panic ends this track's reads, handed to every group and reader taken from it.
+	driver: Background,
 }
 
 impl MoqTrackConsumer {
-	pub(crate) fn new(track: moq_net::track::Subscriber) -> Self {
+	pub(crate) fn new(track: moq_net::track::Subscriber, driver: Background) -> Self {
 		let control = track.control();
 		let info = track.info().clone();
 		Self {
@@ -448,10 +450,11 @@ impl MoqTrackConsumer {
 					track: Cursor::Uncommitted(track),
 				})),
 			}),
-			groups: Task::new(ReadLane),
-			datagrams: Task::new(ReadLane),
+			groups: Task::new(ReadLane).supervised(driver.clone()),
+			datagrams: Task::new(ReadLane).supervised(driver.clone()),
 			control,
 			info,
+			driver,
 		}
 	}
 
@@ -459,7 +462,8 @@ impl MoqTrackConsumer {
 	///
 	/// Errors with [`MoqError::AlreadyCommitted`] once a group read has started, since the reader
 	/// would miss whatever that read consumed.
-	pub(crate) fn take(&self) -> Result<moq_net::track::Subscriber, MoqError> {
+	pub(crate) fn take(&self) -> Result<(moq_net::track::Subscriber, Background), MoqError> {
+		self.driver.check()?;
 		let mut guard = self.shared.inner.lock().expect("track reader");
 		match guard.as_ref().map(|inner| &inner.track) {
 			Some(Cursor::Uncommitted(_)) => {}
@@ -475,7 +479,7 @@ impl MoqTrackConsumer {
 		drop(guard);
 		// Wake any datagram read still parked on the subscriber this handle no longer owns.
 		self.cancel_lanes();
-		Ok(track)
+		Ok((track, self.driver.clone()))
 	}
 
 	fn cancel_lanes(&self) {
@@ -511,15 +515,14 @@ impl MoqTrackConsumer {
 	/// [`MoqError::AlreadyCommitted`] afterwards.
 	pub async fn recv_group(&self) -> Result<Option<Arc<MoqGroupConsumer>>, MoqError> {
 		let shared = self.shared.clone();
+		let driver = self.driver.clone();
 		self.groups
 			.run(move |lane| {
 				with_lane(lane, async move {
-					Ok(shared.recv_group().await?.map(|group| {
-						Arc::new(MoqGroupConsumer {
-							sequence: group.sequence,
-							task: Task::new(GroupInner { group }),
-						})
-					}))
+					Ok(shared
+						.recv_group()
+						.await?
+						.map(|group| Arc::new(MoqGroupConsumer::new(group, driver))))
 				})
 			})
 			.await
@@ -536,15 +539,14 @@ impl MoqTrackConsumer {
 	/// ([`Self::recv_group`]) fail with [`MoqError::AlreadyCommitted`] afterwards.
 	pub async fn next_group(&self) -> Result<Option<Arc<MoqGroupConsumer>>, MoqError> {
 		let shared = self.shared.clone();
+		let driver = self.driver.clone();
 		self.groups
 			.run(move |lane| {
 				with_lane(lane, async move {
-					Ok(shared.next_group().await?.map(|group| {
-						Arc::new(MoqGroupConsumer {
-							sequence: group.sequence,
-							task: Task::new(GroupInner { group }),
-						})
-					}))
+					Ok(shared
+						.next_group()
+						.await?
+						.map(|group| Arc::new(MoqGroupConsumer::new(group, driver))))
 				})
 			})
 			.await
@@ -615,13 +617,15 @@ impl GroupInner {
 pub struct MoqGroupConsumer {
 	sequence: u64,
 	task: Task<GroupInner>,
+	driver: Background,
 }
 
 impl MoqGroupConsumer {
-	pub(crate) fn new(group: moq_net::group::Consumer) -> Self {
+	pub(crate) fn new(group: moq_net::group::Consumer, driver: Background) -> Self {
 		Self {
 			sequence: group.sequence,
-			task: Task::new(GroupInner { group }),
+			task: Task::new(GroupInner { group }).supervised(driver.clone()),
+			driver,
 		}
 	}
 
@@ -629,12 +633,12 @@ impl MoqGroupConsumer {
 	///
 	/// Errors with [`MoqError::AlreadyCommitted`] once a frame has been read, since the reader
 	/// would start mid-group, and [`MoqError::Busy`] while a read is in flight.
-	pub(crate) fn take(&self) -> Result<moq_net::group::Consumer, MoqError> {
+	pub(crate) fn take(&self) -> Result<(moq_net::group::Consumer, Background), MoqError> {
 		let inner = self.task.take(|inner| match inner.group.index() {
 			0 => Ok(()),
 			_ => Err(MoqError::AlreadyCommitted),
 		})?;
-		Ok(inner.group)
+		Ok((inner.group, self.driver.clone()))
 	}
 }
 

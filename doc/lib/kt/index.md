@@ -103,6 +103,8 @@ Native I/O and background tasks run on a Tokio worker pool. Calls awaited by the
 host still poll in place; independent native wake callbacks can run concurrently.
 The generated bindings resume Kotlin coroutines through their dispatcher. Use
 the UI dispatcher when updating UI state.
+A panic in a native background task reaches the pending and later fallible calls
+of every object that depends on it as a task error; other objects keep running.
 
 A session closed for exceeding the relay's request caps reports the protocol
 kind `ProtocolKind.TOO_MANY_REQUESTS`. Reduce
@@ -115,7 +117,3 @@ reconnecting with the same workload.
 - API reference: [javadoc.io/doc/dev.moq/moq](https://javadoc.io/doc/dev.moq/moq)
 - Source: [`kt/`](https://github.com/moq-dev/moq/tree/main/kt); `just kt check` builds and tests locally
 - Artifacts: [dev.moq:moq](https://central.sonatype.com/artifact/dev.moq/moq), [dev.moq:moq-ffi](https://central.sonatype.com/artifact/dev.moq/moq-ffi)
-
-## Background task errors
-
-A panic in an owned native background task reaches a pending or later fallible call on that object as a task error. Other objects keep running.

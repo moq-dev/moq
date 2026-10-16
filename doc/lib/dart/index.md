@@ -98,6 +98,8 @@ Native I/O and background tasks run on a Tokio worker pool. Calls awaited by the
 host still poll in place; independent native wake callbacks can run concurrently.
 The generated bindings deliver native wakeups to the Dart isolate. Keep UI work
 on its owning isolate.
+A panic in a native background task reaches the pending and later fallible calls
+of every object that depends on it as a task error; other objects keep running.
 
 A session closed for exceeding the relay's request caps reports the protocol
 kind `ProtocolKind.tooManyRequests`. Reduce
@@ -110,7 +112,3 @@ reconnecting with the same workload.
 - API reference: [pub.dev/documentation/moq](https://pub.dev/documentation/moq/latest/)
 - Source: [`dart/`](https://github.com/moq-dev/moq/tree/main/dart)
 - Packages: [moq](https://pub.dev/packages/moq), [moq\_ffi](https://pub.dev/packages/moq_ffi)
-
-## Background task errors
-
-A panic in an owned native background task reaches a pending or later fallible call on that object as a task error. Other objects keep running.

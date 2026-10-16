@@ -712,6 +712,40 @@ mod supervision_tests {
 	}
 
 	#[tokio::test]
+	async fn readers_derived_from_a_routed_broadcast_report_the_origin_panic() {
+		let (inner, completion, trigger) = crate::ffi::panicking_origin();
+		let origin = MoqOriginProducer::from_inner(Origin {
+			inner,
+			driver: completion.clone(),
+		});
+		let broadcast = origin.create_broadcast("routed".into()).unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let track = broadcast.publish_track("data".into(), None).unwrap();
+		let open = track.append_group().unwrap();
+		let consumer = origin.consume().request_broadcast("routed".into()).await.unwrap();
+		let subscriber = consumer.subscribe_track("data".into(), None).await.unwrap();
+		let group = subscriber.recv_group().await.unwrap().unwrap();
+		let catalog = crate::media::MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+		drop(consumer);
+		drop(origin);
+		*trigger
+			.write()
+			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;
+		assert!(matches!(completion.finished().await, Err(MoqError::Task { .. })));
+		drop(completion);
+		// Teardown drops the producers too, which the readers would otherwise report as `dropped`.
+		drop(open);
+		drop(track);
+		drop(broadcast);
+		let result = subscriber.recv_group().await.map(|group| group.is_some());
+		assert!(matches!(result, Err(MoqError::Task { .. })), "{result:?}");
+		let result = group.read_frame().await.map(|frame| frame.is_some());
+		assert!(matches!(result, Err(MoqError::Task { .. })), "{result:?}");
+		let result = catalog.next().await.map(|catalog| catalog.is_some());
+		assert!(matches!(result, Err(MoqError::Task { .. })), "{result:?}");
+	}
+
+	#[tokio::test]
 	async fn a_driver_panic_is_recorded_before_teardown_wakes_the_host() {
 		struct Driver {
 			dropped: Option<tokio::sync::oneshot::Sender<()>>,

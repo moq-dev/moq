@@ -518,7 +518,10 @@ impl MoqTrackProducer {
 		let guard = self.inner.lock().unwrap();
 		let track = guard.as_ref().ok_or(MoqError::Closed)?;
 		let subscription = subscription.map(moq_net::track::Subscription::from);
-		Ok(Arc::new(MoqTrackConsumer::new(track.subscribe(subscription))))
+		Ok(Arc::new(MoqTrackConsumer::new(
+			track.subscribe(subscription),
+			Background::default(),
+		)))
 	}
 
 	/// Append a new group to the track, returning a producer for writing frames into it.
@@ -630,7 +633,7 @@ impl MoqGroupProducer {
 		let _guard = crate::ffi::enter();
 		let guard = self.inner.lock().unwrap();
 		let group = guard.as_ref().ok_or(MoqError::Closed)?;
-		Ok(Arc::new(MoqGroupConsumer::new(group.consume())))
+		Ok(Arc::new(MoqGroupConsumer::new(group.consume(), Background::default())))
 	}
 
 	/// Write `frame` into this group.
