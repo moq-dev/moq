@@ -1270,6 +1270,16 @@ def test_audio_encoder_returns_namespaced_records():
     assert isinstance(finish, moq.audio.EncoderFinish)
 
 
+def test_video_namespace_names_its_configuration_types():
+    """``moq.video`` names every type its records take."""
+    output = moq.video.EncoderOutput(
+        codec=moq.video.Codec.H264,
+        kind=cast(moq.video.EncoderKind, moq.video.EncoderKind.AUTO()),
+    )
+    assert output.codec == moq.VideoCodec.H264
+    assert moq.video.PixelFormat.RGBA == moq.VideoPixelFormat.RGBA
+
+
 def test_encode_audio_with_opus_object():
     """Construct the Opus selection, encode actual audio, release in either order."""
     for codec_first in (True, False):

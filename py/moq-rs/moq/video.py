@@ -19,10 +19,13 @@ from .media import CatalogProducer, Dimensions, Video
 from .publish import TrackDemand
 from .session import Bandwidth, Reservation
 from .subscribe import BroadcastConsumer
+from .types import VideoCodec as Codec
 from .types import VideoDecodedFrame
 from .types import VideoEncoderInput as EncoderInput
+from .types import VideoEncoderKind as EncoderKind
 from .types import VideoEncoderOutput as EncoderOutput
 from .types import VideoGop as Gop
+from .types import VideoPixelFormat as PixelFormat
 
 
 @dataclass(frozen=True)
@@ -192,13 +195,16 @@ class Encoder:
 
 
 __all__ = [
+    "Codec",
     "Consumer",
     "DecoderOutput",
     "Encoder",
     "EncoderInput",
+    "EncoderKind",
     "EncoderOutput",
     "Frame",
     "Gop",
     "Packet",
+    "PixelFormat",
     "Producer",
 ]

@@ -14,6 +14,12 @@ public enum Video {
     public typealias Packet = MoqVideoPacket
     /// How pictures are split into independently decodable groups.
     public typealias Gop = MoqVideoGop
+    /// A video codec identifier (H.264 or H.265).
+    public typealias Codec = VideoCodec
+    /// A CPU pixel layout (I420 or RGBA).
+    public typealias PixelFormat = VideoPixelFormat
+    /// Which encoder implementation to use: automatic, hardware, software, or one named backend.
+    public typealias EncoderKind = VideoEncoderKind
 
     /// Write side of a raw-video track. Pixels written here are encoded (H.264 or
     /// H.265) inside the FFI boundary per the `EncoderInput`/`EncoderOutput` given

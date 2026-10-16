@@ -14,6 +14,10 @@ public enum Audio {
     public typealias Packet = MoqAudioPacket
     /// The packets an `Encoder` drains on finish and the padded samples to discard.
     public typealias EncoderFinish = MoqAudioEncoderFinish
+    /// Selects the audio encoder codec. Build one with `Codec.opus()` or `Codec.aac()`.
+    public typealias Codec = AudioCodec
+    /// The PCM sample layout written to a `Producer` or delivered by a `Consumer`.
+    public typealias SampleFormat = AudioSampleFormat
 
     /// Write side of a raw-audio track. PCM written here is encoded (e.g. to Opus)
     /// inside the FFI boundary per the `EncoderInput`/`EncoderOutput` given at construction.
