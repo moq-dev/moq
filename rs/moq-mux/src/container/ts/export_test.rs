@@ -16,6 +16,7 @@ use mpeg2ts::pes::{PesPacketReader, ReadPesPacket};
 use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
 
 use crate::catalog::hang::Container as HangContainer;
+use crate::container::Container as _;
 use crate::container::ts::export::PCR_INTERVAL;
 use crate::container::ts::{Export, catalog as tscat, stats};
 use crate::container::{Frame, Kind, Producer};
@@ -977,6 +978,132 @@ async fn export_bframe_video_authors_dts() {
 	for (i, (&d, &p)) in effective.iter().zip(pts.iter()).enumerate() {
 		assert!(d <= p, "DTS {d} after PTS {p} at frame {i}");
 	}
+}
+
+#[tokio::test(start_paused = true)]
+async fn export_trims_leading_pictures_after_each_delivery_break() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let track = broadcast
+		.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+		.unwrap();
+	catalog.modify().unwrap().video.renditions.insert(
+		"video".into(),
+		VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: true,
+		}),
+	);
+	let format = HangContainer::Legacy(Kind::Video);
+	for (sequence, stamps) in [
+		(10, vec![100, 80, 90, 110]),
+		(11, vec![200, 180, 190, 210]),
+		(13, vec![400, 380, 390, 410]),
+	] {
+		let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+		let frames: Vec<_> = stamps
+			.into_iter()
+			.enumerate()
+			.map(|(index, ms)| Frame {
+				timestamp: Timestamp::from_millis(ms).unwrap(),
+				duration: None,
+				keyframe: index == 0,
+				payload: if index == 0 {
+					annexb(&[SPS, PPS, &[0x65, 0xab, 0xcd]])
+				} else {
+					annexb(&[&[0x41, 0xab, 0xcd]])
+				},
+			})
+			.collect();
+		format.write(&mut group, &frames).unwrap();
+		group.finish().unwrap();
+	}
+	track.finish().unwrap();
+	let ts = drain(consumer).await;
+	let (video, _) = collect_pes_pts(&ts);
+	let expected: Vec<_> = [100, 110, 200, 180, 190, 210, 400, 410]
+		.into_iter()
+		.map(|ms| ms * 90)
+		.collect();
+	assert_eq!(
+		video, expected,
+		"continuous leading pictures survive; only join and later-hole orphans are trimmed"
+	);
+}
+
+/// A frame dropped for missing its deadline takes the leading pictures of the keyframe the
+/// track resumes at with it, though nothing was lost upstream.
+#[tokio::test(start_paused = true)]
+async fn export_trims_leading_pictures_after_a_late_drop() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let track = broadcast
+		.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+		.unwrap();
+	catalog.modify().unwrap().video.renditions.insert(
+		"video".into(),
+		VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: true,
+		}),
+	);
+	let mut video = Producer::new(track, HangContainer::Legacy(Kind::Video));
+	let mut export = open_export(crate::source::announced(&consumer).await)
+		.await
+		.unwrap()
+		.with_delay(Duration::from_millis(500));
+	let start = tokio::time::Instant::now();
+	let mut out = Vec::new();
+	// (arrival, PTS) in milliseconds, in decode order. The second group acquires the clock.
+	// Its 160 ms picture stalls past its deadline, before the next group exists for the
+	// source to skip to. That group arrives on time with its 1920 and 1960 ms leading pictures.
+	for (at, pts, keyframe) in [
+		(0, 0, true),
+		(40, 40, false),
+		(80, 80, true),
+		(120, 120, false),
+		(1000, 160, false),
+		(2000, 2000, true),
+		(2000, 1920, false),
+		(2000, 1960, false),
+		(2040, 2040, false),
+		(2080, 2080, true),
+		(2080, 2060, false),
+		(2120, 2120, false),
+	] {
+		tokio::time::sleep_until(start + Duration::from_millis(at)).await;
+		// Finding the source empty dates the next frame's arrival.
+		out.extend(poll_frames(&mut export));
+		video
+			.write(Frame {
+				timestamp: Timestamp::from_millis(pts).unwrap(),
+				duration: None,
+				keyframe,
+				payload: if keyframe {
+					annexb(&[SPS, PPS, &[0x65, 0xab, 0xcd]])
+				} else {
+					annexb(&[&[0x41, 0xab, 0xcd]])
+				},
+			})
+			.unwrap();
+		out.extend(poll_frames(&mut export));
+	}
+	video.finish().unwrap();
+	out.extend(drain_frames(&mut export).await);
+	let bytes: Vec<u8> = out.iter().flat_map(|frame| frame.payload.iter().copied()).collect();
+	let (pts, _) = collect_pes_pts(&bytes);
+	let expected: Vec<_> = [0, 40, 80, 120, 2000, 2040, 2080, 2060, 2120]
+		.into_iter()
+		.map(|ms| ms * 90)
+		.collect();
+	assert_eq!(pts, expected, "only the resumed keyframe's leading pictures go");
+	assert_eq!(export.dropped(), 3, "the late picture and the two it orphaned");
 }
 
 /// `(PTS, DTS)` of every video PES start, in transport (decode) order. Read raw, so a capture
@@ -8252,14 +8379,14 @@ async fn a_large_pmt_is_split_across_packets() {
 }
 
 /// A PMT spanning three packets at 20 Mb/s goes out at TBsys's rate: the PAT and PMT share its
-/// 512 bytes, which drain at Rxsys (ISO 13818-1 2.4.2.3).
+/// 512 bytes, which drain at Rxsys into Bsys's 1,536 (ISO 13818-1 2.4.2.3).
 #[tokio::test(start_paused = true)]
 async fn a_large_pmt_keeps_within_the_system_buffer() {
 	assert_eq!(large_pmt(48, Some(20_000_000)).await, 3);
 }
 
 /// Export `streams` language-tagged AAC streams, check the PMT reassembles across its packets
-/// and keeps within TBsys at `mux_rate`, and return how many packets it spans.
+/// and keeps within TBsys and Bsys at `mux_rate`, and return how many packets it spans.
 async fn large_pmt(streams: u16, mux_rate: Option<u64>) -> usize {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let mut catalog = crate::catalog::Producer::new(
@@ -8312,17 +8439,25 @@ async fn large_pmt(streams: u16, mux_rate: Option<u64>) -> usize {
 	let packets = ts.as_chunks::<188>().0;
 	let pid = |packet: &[u8; 188]| (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2]);
 	if let Some(mux_rate) = mux_rate {
-		// TBsys: 188 B in per table packet, drained at Rxsys over each packet's time.
-		let drain = 1_000_000.0 / mux_rate as f64 * 188.0;
-		let (mut tb, mut peak) = (0.0f64, 0.0f64);
-		for packet in packets {
-			tb = (tb - drain).max(0.0);
-			if [0, 0x1000].contains(&pid(packet)) {
-				tb += 188.0;
-				peak = peak.max(tb);
-			}
+		// A table packet's bytes leave TBsys at Rxsys once those ahead have, never before they
+		// arrive, into Bsys, which drains at Rsys (ISO 13818-1 2.4.2.3).
+		let wire = 1504.0 / mux_rate as f64;
+		let rsys = (mux_rate as f64 / 500.0).max(80_000.0);
+		let (mut leave, mut empty, mut tbsys, mut bsys) = (f64::MIN, f64::MIN, 0.0f64, 0.0f64);
+		for (k, _) in packets
+			.iter()
+			.enumerate()
+			.filter(|(_, packet)| [0, 0x1000].contains(&pid(packet)))
+		{
+			let start = k as f64 * wire;
+			let free = leave.max(start);
+			leave = (start + wire).max(free + 1504.0 / 1_000_000.0);
+			tbsys = tbsys.max((leave - start - wire) * 125_000.0);
+			empty = empty.max(free) + 1504.0 / rsys;
+			bsys = bsys.max((empty - leave) * rsys / 8.0);
 		}
-		assert!(peak <= 512.0, "TBsys peak {peak:.0} B");
+		assert!(tbsys <= 512.001, "TBsys peak {tbsys:.0} B");
+		assert!(bsys <= 1536.001, "Bsys peak {bsys:.0} B");
 	}
 	let mut section = Vec::new();
 	let mut counters = Vec::new();
