@@ -2810,9 +2810,9 @@ mod tests {
 	fn reloadable_client_roots_disable_server_resumption() {
 		let (ca_a, server_cert, server_key, client_cert, client_key) = signed_certificates();
 		let (ca_b, _, _, _, _) = signed_certificates();
-		// A dedicated directory, not `/tmp`: the watcher registers the parent, so
-		// unrelated churn there fires a reload that can read `ca_a` and store it
-		// after this test's own `reload()` installed `ca_b`.
+		// A dedicated directory, not `/tmp`: the watcher matches by file name within
+		// the parent, so another test's `root.pem` there fires a reload that can read
+		// `ca_a` and store it after this test's own `reload()` installed `ca_b`.
 		let dir = tempfile::TempDir::new().unwrap();
 		let root_path = dir.path().join("root.pem");
 		std::fs::write(&root_path, ca_a).unwrap();
