@@ -523,9 +523,11 @@ async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()
 		consume: true,
 		..Default::default()
 	};
-	let Attached { origin, .. } = spawn_moq(&moq, &net, cluster, directions, &mut tasks).await?;
+	let Attached { origin, .. } = spawn_moq(&moq, &net, cluster.clone(), directions, &mut tasks).await?;
 
-	play::run(origin.consume(), name, args, tasks).await
+	let result = play::run(origin.consume(), name, args, tasks).await;
+	cluster.close().await;
+	result
 }
 
 /// Run every stage over one Origin and one MoQ attachment.
@@ -555,7 +557,7 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 			client: dialer,
 			connection: attached,
 			shutdown,
-		} = spawn_moq(&moq, &net, cluster, Directions::of(&stages), &mut tasks).await?;
+		} = spawn_moq(&moq, &net, cluster.clone(), Directions::of(&stages), &mut tasks).await?;
 		client = dialer;
 		connection = attached;
 
@@ -611,6 +613,7 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 	if let Some(client) = client {
 		client.close().await;
 	}
+	cluster.close().await;
 	result
 }
 

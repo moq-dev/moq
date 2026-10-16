@@ -554,6 +554,105 @@ impl DialMap {
 	}
 }
 
+/// Every QUIC client the cluster dials peers with, so [`Cluster::close`] can send
+/// each peer its close before the runtime stops: a dropped link only queues the
+/// close, and the peer then keeps the link and its routes until its idle timeout.
+#[derive(Clone)]
+struct Dialers(Arc<Mutex<Option<DialersState>>>);
+
+/// `None` in [`Dialers`] once closed, which refuses any further dial.
+struct DialersState {
+	clients: HashMap<u64, moq_tokio::Client>,
+	next: u64,
+	/// Cloned into each background close, so `finished` ends once they all have.
+	closing: tokio::sync::mpsc::Sender<()>,
+	finished: tokio::sync::mpsc::Receiver<()>,
+}
+
+impl Dialers {
+	fn new() -> Self {
+		let (closing, finished) = tokio::sync::mpsc::channel(1);
+		Self(Arc::new(Mutex::new(Some(DialersState {
+			clients: HashMap::new(),
+			next: 0,
+			closing,
+			finished,
+		}))))
+	}
+
+	fn lock(&self) -> std::sync::MutexGuard<'_, Option<DialersState>> {
+		self.0.lock().unwrap_or_else(PoisonError::into_inner)
+	}
+
+	/// Keep `client` until [`Self::close`].
+	fn insert(&self, client: &moq_tokio::Client) -> anyhow::Result<u64> {
+		let mut state = self.lock();
+		let state = state.as_mut().context("cluster closed")?;
+		let id = state.next;
+		state.next += 1;
+		state.clients.insert(id, client.clone());
+		Ok(id)
+	}
+
+	/// Keep `client` until [`Self::close`] or until the guard drops, which closes it
+	/// in the background.
+	fn hold(&self, client: &moq_tokio::Client) -> anyhow::Result<Held> {
+		Ok(Held {
+			id: self.insert(client)?,
+			dialers: self.clone(),
+		})
+	}
+
+	fn is_closed(&self) -> bool {
+		self.lock().is_none()
+	}
+
+	/// Close every client, including those a dropped guard is still closing, and
+	/// refuse further dials.
+	async fn close(&self) {
+		let Some(state) = self.lock().take() else {
+			return;
+		};
+		let DialersState {
+			clients,
+			closing,
+			mut finished,
+			..
+		} = state;
+		futures::future::join_all(clients.into_values().map(moq_tokio::Client::close)).await;
+		drop(closing);
+		// Nothing is ever sent: this returns `None` once every sender has dropped.
+		let _ = finished.recv().await;
+	}
+}
+
+/// A dial's claim on its client in [`Dialers`].
+struct Held {
+	dialers: Dialers,
+	id: u64,
+}
+
+impl Drop for Held {
+	fn drop(&mut self) {
+		let mut state = self.dialers.lock();
+		// Already taken by `Dialers::close`, which closes the client itself.
+		let Some(state) = state.as_mut() else {
+			return;
+		};
+		let Some(client) = state.clients.remove(&self.id) else {
+			return;
+		};
+		let closing = state.closing.clone();
+		// Without a runtime nothing could send the close anyway.
+		if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+			runtime.spawn(async move {
+				client.close().await;
+				drop(closing);
+			});
+		}
+	}
+}
+
 /// Configuration for relay clustering.
 ///
 /// [`Self::connect`] / [`Self::connect_api`] list peers to dial, and
@@ -934,6 +1033,8 @@ pub struct Cluster {
 	/// a fixed `[connect]` bind port stays the cluster's egress port. Built by
 	/// [`Self::start`].
 	dial: Option<moq_tokio::Client>,
+	/// Every dial client, shared by all clones, for [`Self::close`].
+	dialers: Dialers,
 	/// Bound listen port and optional generated-certificate fingerprint.
 	advertise: Option<LanAdvertise>,
 	/// Set by [`Self::start`] when LAN discovery is on, so inbound
@@ -1071,6 +1172,7 @@ impl Cluster {
 			connect: None,
 			quic: None,
 			dial: None,
+			dialers: Dialers::new(),
 			#[cfg(feature = "iroh")]
 			iroh: None,
 			advertise: None,
@@ -1364,6 +1466,15 @@ impl Cluster {
 		Ok(())
 	}
 
+	/// Close every peer link this cluster dialed, and wait until each peer has been
+	/// sent its close. Call it before the runtime stops: a dropped link only queues
+	/// its close, so the peer would keep the link and its routes until its idle
+	/// timeout. Dialing stops for good, on every clone. [`Relay::run`](crate::Relay::run)
+	/// calls it on the way out.
+	pub async fn close(&self) {
+		self.dialers.close().await;
+	}
+
 	/// Validate the cluster config and bind anything that can fail, returning a
 	/// [`Started`] to run.
 	///
@@ -1419,7 +1530,10 @@ impl Cluster {
 		let client = self
 			.peer_client(!statics, None)
 			.context("cluster peers configured but the dial template is unusable")?;
-		self.dial = statics.then_some(client);
+		if statics {
+			self.dialers.insert(&client)?;
+			self.dial = Some(client);
+		}
 
 		// Build here so malformed API roots fail startup, before background work.
 		let http = if self.config.connect_api.as_deref().is_some_and(connect_api_is_http) {
@@ -1779,6 +1893,9 @@ impl Cluster {
 				}
 			}
 
+			if self.dialers.is_closed() {
+				return Ok(());
+			}
 			tokio::time::sleep(backoff).await;
 		}
 	}
@@ -1802,12 +1919,19 @@ impl Cluster {
 		let redacted = moq_tokio::RedactedUrl::new(first);
 		tracing::info!(url = %redacted, "dialing cluster peer");
 
-		let client = match target.lan {
-			true => self.peer_client(true, target.fingerprint.as_deref())?,
-			false => self
-				.dial
-				.clone()
-				.context("internal: cluster peer dial before Cluster::start")?,
+		// A LAN client is this dial's alone, so it closes when the dial ends.
+		let (client, _held) = match target.lan {
+			true => {
+				let client = self.peer_client(true, target.fingerprint.as_deref())?;
+				let held = self.dialers.hold(&client)?;
+				(client, Some(held))
+			}
+			false => (
+				self.dial
+					.clone()
+					.context("internal: cluster peer dial before Cluster::start")?,
+				None,
+			),
 		};
 
 		// Cluster dials use their configured stats tier. Cluster peers carry no auth
@@ -3256,6 +3380,98 @@ mod tests {
 			try_next_announced(&mut local).is_none(),
 			"a peer's broadcast is not local"
 		);
+	}
+
+	/// A LAN dial owns its client, so closing the cluster closes that too: the peer
+	/// drops the dialer's routes at once, though the dialing runtime stops right
+	/// after, as a process exit would. Both idle timeouts are far past the wait.
+	#[cfg(feature = "cluster-lan")]
+	#[tokio::test]
+	async fn closing_a_cluster_closes_its_lan_dials() {
+		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+		const IDLE: std::time::Duration = std::time::Duration::from_secs(300);
+		let _ = moq_tokio::crypto::install_default();
+		let mut quic = moq_tokio::quic::Config::default();
+		quic.idle_timeout = Some(IDLE);
+
+		let node = new_cluster(Config::default()).expect("node cluster");
+		let mut listen = moq_tokio::listen::Config::default();
+		listen.bind = Some("127.0.0.1:0".parse().unwrap());
+		listen.tls.generate = vec!["moq-cluster-lan".to_string()];
+		let server = listen.init(quic.clone()).expect("bind");
+		let port = server.local_addr().expect("local addr").port();
+		let fp = server
+			.certificates()
+			.fingerprints()
+			.into_iter()
+			.next()
+			.expect("generated fingerprint");
+		let listener = server.listen().await.expect("listen");
+		node.set_lan_credential("listener-proof");
+		let accept = node.clone();
+		tokio::spawn(async move {
+			let mut listener = listener;
+			while let Some(request) = listener.accept().await {
+				let conn = crate::Connection::new(request, accept.clone(), crate::auth::Auth::refuse("test"));
+				tokio::spawn(conn.run());
+			}
+		});
+
+		let url: Url = format!("moqt://127.0.0.1:{port}{CLUSTER_PATH}/listener-proof")
+			.parse()
+			.expect("url");
+		let target = DialTarget {
+			key: format!("moqt://127.0.0.1:{port}/"),
+			url: url.clone(),
+			urls: vec![url],
+			cost: None,
+			fingerprint: Some(fp),
+			lan: true,
+			upstream: false,
+		};
+		let runtime = tokio::runtime::Builder::new_multi_thread()
+			.worker_threads(1)
+			.enable_all()
+			.build()
+			.expect("dialer runtime");
+		let (dialer, broadcast) = runtime
+			.spawn(async move {
+				let dialer = new_cluster(Config::default())
+					.expect("dialer cluster")
+					.with_connect(Default::default(), quic);
+				let broadcast = dialer.origin.create_broadcast("from-dialer").expect("create");
+				broadcast.announce(Default::default()).expect("announce");
+				tokio::spawn(dialer.clone().supervise_remote(target, String::new()));
+				(dialer, broadcast)
+			})
+			.await
+			.expect("dialer task");
+
+		let mut announced = node.origin.consume().announced();
+		loop {
+			let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
+				.await
+				.expect("timed out waiting for from-dialer")
+				.expect("origin closed");
+			if update.prefix.as_str() == "from-dialer" && active {
+				break;
+			}
+		}
+
+		runtime.spawn(async move { dialer.close().await }).await.expect("close");
+		runtime.shutdown_background();
+		// Held throughout: dropping it would unannounce over a live link instead.
+		let _broadcast = broadcast;
+
+		loop {
+			let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
+				.await
+				.expect("the peer kept the dialer's route past the close")
+				.expect("origin closed");
+			if update.prefix.as_str() == "from-dialer" && !active {
+				break;
+			}
+		}
 	}
 
 	/// A grant naming a cluster peer marks the session's routes as a peer's, so the

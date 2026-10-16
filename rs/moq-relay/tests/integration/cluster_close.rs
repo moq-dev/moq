@@ -1,0 +1,123 @@
+//! A cluster sends each dialed peer its close before the runtime stops, so the
+//! peer drops the link and its routes at once instead of at its idle timeout.
+//!
+//! Each dialer runs on its own runtime, shut down right after, as a process exit
+//! would: a dropped link only queues its close, which nothing sends then.
+#![cfg(feature = "quic")]
+
+use std::time::Duration;
+
+use moq_tokio::quic::driver;
+
+use crate::peer_limits::{BARE_IDLE, bare_server, config};
+
+/// Far short of [`BARE_IDLE`] and the dial's idle timeout, so only a close explains
+/// the link ending in time.
+const TIMEOUT: Duration = Duration::from_secs(10);
+
+fn dialer_runtime() -> tokio::runtime::Runtime {
+	tokio::runtime::Builder::new_multi_thread()
+		.worker_threads(1)
+		.enable_all()
+		.build()
+		.expect("dialer runtime")
+}
+
+fn dial_template() -> (moq_tokio::connect::Config, moq_tokio::quic::Config) {
+	let mut connect = moq_tokio::connect::Config::default();
+	connect.tls.insecure = Some(true);
+	let mut quic = moq_tokio::quic::Config::default();
+	quic.idle_timeout = Some(BARE_IDLE);
+	(connect, quic)
+}
+
+fn peer_url(server: &driver::Endpoint) -> String {
+	let port = server.local_addr().expect("server addr").port();
+	format!("moql://127.0.0.1:{port}/")
+}
+
+async fn accept(server: &driver::Endpoint) -> driver::Connection {
+	tokio::time::timeout(TIMEOUT, server.accept())
+		.await
+		.expect("dial timeout")
+		.expect("incoming")
+		.await
+		.expect("handshake")
+}
+
+/// The link ends with the dialer's own shutdown close, not a timeout or a SETUP error.
+async fn assert_closed_by_shutdown(conn: driver::Connection) {
+	let err = tokio::time::timeout(TIMEOUT, conn.closed())
+		.await
+		.expect("the peer heard no close before its idle timeout");
+	match err {
+		driver::ConnectionError::ApplicationClosed(close) => assert_eq!(&close.reason[..], b"client shutdown"),
+		other => panic!("the link ended with {other:?}, not the shutdown close"),
+	}
+}
+
+#[tokio::test]
+async fn closing_a_cluster_closes_its_static_dials() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let (connect, quic) = dial_template();
+	let server = bare_server(&connect);
+
+	let mut options = moq_relay::cluster::Options::new(Default::default());
+	options.config.connect = vec![moq_relay::cluster::Peer::new(peer_url(&server))];
+	let runtime = dialer_runtime();
+	let cluster = runtime
+		.spawn(async move {
+			let cluster = moq_relay::cluster::Cluster::new(options)
+				.expect("cluster init")
+				.with_connect(connect, quic);
+			let started = cluster.clone().start().await.expect("cluster start");
+			tokio::spawn(started.run());
+			cluster
+		})
+		.await
+		.expect("cluster task");
+
+	let conn = accept(&server).await;
+	runtime
+		.spawn(async move { cluster.close().await })
+		.await
+		.expect("close");
+	runtime.shutdown_background();
+
+	assert_closed_by_shutdown(conn).await;
+}
+
+#[tokio::test]
+async fn a_relay_shutdown_closes_its_cluster_dials() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let (connect, quic) = dial_template();
+	let server = bare_server(&connect);
+
+	let dir = tempfile::tempdir().expect("tempdir");
+	let mut config = config(dir.path());
+	config.connect = connect;
+	config.quic.idle_timeout = quic.idle_timeout;
+	config.cluster.connect = vec![moq_relay::cluster::Peer::new(peer_url(&server))];
+	config.auth.public = vec![moq_auth::Pattern::all()];
+
+	let runtime = dialer_runtime();
+	let (trigger, running) = runtime
+		.spawn(async move {
+			let relay = moq_relay::Relay::load(config).await.expect("load relay");
+			let trigger = relay.shutdown_trigger().clone();
+			(trigger, tokio::spawn(relay.run()))
+		})
+		.await
+		.expect("relay task");
+
+	let conn = accept(&server).await;
+	trigger.start();
+	tokio::time::timeout(TIMEOUT, running)
+		.await
+		.expect("relay drain")
+		.expect("relay task")
+		.expect("relay run");
+	runtime.shutdown_background();
+
+	assert_closed_by_shutdown(conn).await;
+}

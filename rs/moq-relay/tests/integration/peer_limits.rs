@@ -15,6 +15,8 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const VIEWER_STREAMS: u64 = 4;
 /// How many streams the probe tries to open without waiting for credit.
 const PROBE: usize = 16;
+/// The [`bare_server`] idle timeout.
+pub(crate) const BARE_IDLE: Duration = Duration::from_secs(300);
 
 /// A self-signed certificate on disk.
 fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -28,7 +30,7 @@ fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf
 	(cert_path, key_path)
 }
 
-fn config(dir: &std::path::Path) -> Config {
+pub(crate) fn config(dir: &std::path::Path) -> Config {
 	let (cert, key) = certificate(dir);
 	let mut config = Config::default();
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
@@ -185,8 +187,9 @@ async fn unadvertisable_quic_limits_are_refused_at_load() {
 }
 
 /// A bare QUIC server speaking the dial template's ALPNs: the dialer's stream
-/// limit is a transport parameter, so the handshake alone shows it.
-fn bare_server(connect: &moq_tokio::connect::Config) -> driver::Endpoint {
+/// limit is a transport parameter, so the handshake alone shows it. Its idle
+/// timeout is far past any test's, so only a close ends a link in time.
+pub(crate) fn bare_server(connect: &moq_tokio::connect::Config) -> driver::Endpoint {
 	let key = rcgen::KeyPair::generate().expect("keypair");
 	let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
 		.expect("cert params")
@@ -206,11 +209,11 @@ fn bare_server(connect: &moq_tokio::connect::Config) -> driver::Endpoint {
 		.map(|alpn| alpn.as_bytes().to_vec())
 		.collect();
 	let crypto = driver::crypto::rustls::QuicServerConfig::try_from(tls).expect("quic crypto");
-	driver::Endpoint::server(
-		driver::ServerConfig::with_crypto(std::sync::Arc::new(crypto)),
-		"127.0.0.1:0".parse().unwrap(),
-	)
-	.expect("server endpoint")
+	let mut transport = driver::TransportConfig::default();
+	transport.max_idle_timeout(Some(BARE_IDLE.try_into().expect("idle timeout")));
+	let mut config = driver::ServerConfig::with_crypto(std::sync::Arc::new(crypto));
+	config.transport_config(std::sync::Arc::new(transport));
+	driver::Endpoint::server(config, "127.0.0.1:0".parse().unwrap()).expect("server endpoint")
 }
 
 /// Start a cluster whose one static peer is `server`, and accept its dial.

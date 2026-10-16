@@ -686,6 +686,9 @@ impl Relay {
 			else => Ok(()),
 		};
 
+		// Before the runtime goes, so each dialed peer drops our routes at once.
+		cluster.close().await;
+
 		// Dropping the listener would leave its QUIC socket open until the
 		// endpoint's closing connections finish in the background, past `run`.
 		server.close().await;

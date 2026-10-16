@@ -7,6 +7,7 @@
 
 mod auth_embedder;
 mod auth_lifetime;
+mod cluster_close;
 mod cluster_idle;
 mod cluster_unknown;
 mod embed;
