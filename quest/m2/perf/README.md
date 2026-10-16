@@ -78,7 +78,6 @@ optimization.
 - [Lock-wait CPU from switches](/quest/m2/perf/switch-cpu.md) - wait/CPU takes CPU from the same perf recording as the waits, removing schedstat's ~2% low bias
 - [Bench relay port](/quest/m2/perf/bench-relay-port.md) - the bench harness proves its relay owns the port before reporting ready
 - [One enter per turn](/quest/m2/perf/uring-one-enter.md) - a parking turn pays one io_uring_enter, submits flush deferred completions, and SQEs per enter is a counter
-- [Group cost](/quest/m2/perf/group-cost.md) - count and cut the allocations and time spent relaying one small group to one viewer
 - [Run to quiescence](/quest/m2/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass and train budget that keeps the fairness rule
 - [Demand aggregate](/quest/m2/perf/demand-aggregate.md) - a track subscribe, leave, or preference update no longer walks every reader of the track
 - [Ingest batch](/quest/m2/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per burst of whole frames instead of per frame

@@ -1802,13 +1802,7 @@ impl Consumer {
 
 	/// Mark the group as still being read, so a slow batch drain does not expire it.
 	pub fn keep_alive(&self) {
-		// Every completed frame restarts idle expiry, even while the eviction-rank
-		// sample stays unchanged. Only a new sampled read needs the state lock to
-		// keep the pool's counted access mean in step with its stamp.
-		self.cursor.access.touch();
-		if !self.cursor.access.read_current(self.cursor.cache.pool()) {
-			self.cursor.state.read().charge.refresh();
-		}
+		self.cursor.state.read().charge.refresh();
 	}
 
 	/// Record a cache access from the consumer side: a parked group re-offered to

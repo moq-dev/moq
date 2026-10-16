@@ -870,11 +870,6 @@ impl Access {
 		self.stamp.load(Ordering::Relaxed)
 	}
 
-	/// Whether a read has already updated this group's sample in the current pool tick.
-	pub(crate) fn read_current(&self, pool: &Pool) -> bool {
-		self.get() >= pool.stamp(READ_BOOST)
-	}
-
 	/// Clear the expiration timestamp until a cleanup pass observes this access.
 	pub(crate) fn touch(&self) {
 		self.expires.store(u64::MAX, Ordering::Relaxed);
