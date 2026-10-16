@@ -732,7 +732,7 @@ A zero `timescale` is invalid and MUST be refused.
 
 Each declared timeline duration is a nominal target, not a bound: a publisher MAY overrun it to end at a group boundary.
 The value MUST NOT change for the life of that timeline track.
-A publisher that does not know the target MUST omit that timeline until its first record closes, then declare that record's duration.
+A publisher that does not know the target MUST omit that timeline until its first record closes, then declare that record's duration, or its minimum ({{timeline-cutting}}) when a gap or the end of the content closed the record before a boundary.
 
 Wall-clock mapping is the catalog root `clock` ({{clock}}), not this section: a consumer derives the wall-clock time of any record as `clock.wall + pts` after converting `pts` into the clock's timescale.
 

@@ -141,7 +141,7 @@ struct Open {
 /// Closed records queue until [`Iterator::next`] takes them.
 pub struct Segmenter {
 	config: Config,
-	/// Fixed nominal duration in wire units; absent until an unhinted first record closes.
+	/// Fixed nominal duration in wire units; absent until an unhinted track's first record closes.
 	declared: Option<u64>,
 	/// The number the next closed record gets.
 	sequence: u64,
@@ -251,13 +251,15 @@ impl Segmenter {
 		}
 
 		if let (Some(start), Some(last)) = (self.open.as_ref().map(|open| open.pts), self.last) {
-			let end = match (start, pts) {
-				(Some(start), Some(pts)) => self.timed_end(start, pts, position, last),
+			match (start, pts) {
+				(Some(start), Some(pts)) => {
+					if let Some(end) = self.timed_end(start, pts, position, last) {
+						self.emit(end, Some(pts), true);
+					}
+				}
 				// An untimed record holds one group, ended where the next one starts.
-				_ => (position.group != last.group).then_some((Position::group(last.group + 1), None)),
-			};
-			if let Some((end, pts)) = end {
-				self.emit(end, pts);
+				_ if position.group != last.group => self.emit(Position::group(last.group + 1), None, true),
+				_ => {}
 			}
 		}
 
@@ -277,27 +279,23 @@ impl Segmenter {
 		Ok(())
 	}
 
-	/// Where a timed record that started at `start` ends, if a frame at `position` and `pts` ends it.
-	fn timed_end(
-		&mut self,
-		start: Timestamp,
-		pts: Timestamp,
-		position: Position,
-		last: Position,
-	) -> Option<(Position, Option<Timestamp>)> {
+	/// Where pacing ends a timed record that started at `start`, if a frame at `position` and `pts`
+	/// ends it there. A gap instead closes the record itself and returns `None`.
+	fn timed_end(&mut self, start: Timestamp, pts: Timestamp, position: Position, last: Position) -> Option<Position> {
 		let elapsed = pts.as_micros().saturating_sub(start.as_micros());
 		if position.group == last.group {
-			return (elapsed >= self.ceiling().as_micros()).then_some((position, Some(pts)));
+			return (elapsed >= self.ceiling().as_micros()).then_some(position);
 		}
 		let contiguous = position.group == last.group + 1 && position.frame == 0;
 		if !contiguous {
 			// A skipped sequence or a group joined mid-way always closes, so a record's groups are
 			// contiguous and the reader never has to guess what lies between. The skipped time is
 			// not content, so the record ends at its newest report rather than at this frame.
-			return Some((Position::group(last.group + 1), self.frontier));
+			self.emit(Position::group(last.group + 1), self.frontier, false);
+			return None;
 		}
 		if elapsed >= self.ceiling().as_micros() || self.boundary(start, pts, elapsed) {
-			return Some((Position::group(last.group + 1), Some(pts)));
+			return Some(Position::group(last.group + 1));
 		}
 		None
 	}
@@ -331,7 +329,7 @@ impl Segmenter {
 		self.finished = true;
 		let each = self.config.duration_min.is_zero() || self.timed == Some(false);
 		if each && self.open.is_some() {
-			self.emit(Position::group(group + 1), self.frontier);
+			self.emit(Position::group(group + 1), self.frontier, true);
 		}
 	}
 
@@ -385,7 +383,7 @@ impl Segmenter {
 			true => Position::group(last.group + 1),
 			false => Position::new(last.group, last.frame + 1),
 		};
-		self.emit(end, self.frontier);
+		self.emit(end, self.frontier, false);
 	}
 
 	/// Flush, then ignore every later report.
@@ -395,8 +393,8 @@ impl Segmenter {
 	}
 
 	/// Close the open record at `end`, its content running to `pts`, which is `None` only when
-	/// the track is untimed.
-	fn emit(&mut self, end: Position, pts: Option<Timestamp>) {
+	/// the track is untimed. `paced` is false when a gap or flush closes the record early.
+	fn emit(&mut self, end: Position, pts: Option<Timestamp>, paced: bool) {
 		let Some(open) = self.open.take() else {
 			return;
 		};
@@ -407,7 +405,12 @@ impl Segmenter {
 				// Frames farther apart than the maximum leave nothing to split at, so the record stops at
 				// the advertised bound and the rest of the gap is uncovered.
 				let duration = wire(pts).saturating_sub(start).min(units(self.ceiling()));
-				self.declared.get_or_insert(duration);
+				// The first record fixes an unhinted declaration. One closed early says nothing about
+				// the cadence, so the target falls back to the minimum.
+				self.declared.get_or_insert(match paced {
+					true => duration,
+					false => units(self.config.duration_min),
+				});
 				Record::new(self.sequence, start, duration, open.start, end)
 			}
 			None => Record::untimed(self.sequence, open.start, end),
@@ -874,6 +877,11 @@ mod test {
 		Config::default().with_duration_min(Duration::ZERO)
 	}
 
+	/// Media whose encoder reports a 4s cadence, so its timeline declares before any record.
+	fn hinted() -> Config {
+		Config::default().with_duration_hint(Duration::from_secs(4))
+	}
+
 	fn ms(v: u64) -> Timestamp {
 		Timestamp::from_millis(v).unwrap()
 	}
@@ -959,6 +967,28 @@ mod test {
 		groups(&mut audio, 0..202, 20);
 		assert_eq!(audio.declared_duration(), Some(4_000));
 		assert_eq!(audio.next().unwrap().duration, Some(4_000));
+	}
+
+	#[test]
+	fn an_early_first_record_declares_the_minimum() {
+		// A flushed tail is not a cadence: one frame would otherwise declare zero, as if sparse.
+		let mut flushed = Segmenter::new(Config::default());
+		flushed.frame(at(0), ms(0), true).unwrap();
+		flushed.flush();
+		assert_eq!(flushed.next().unwrap().duration, Some(0));
+		assert_eq!(flushed.declared_duration(), Some(4_000));
+
+		// A skipped sequence ends the record early too.
+		let mut skipped = Segmenter::new(Config::default());
+		skipped.frame(at(0), ms(0), true).unwrap();
+		skipped.frame(at(2), ms(9_000), true).unwrap();
+		assert_eq!(skipped.next().unwrap().duration, Some(0));
+		assert_eq!(skipped.declared_duration(), Some(4_000));
+
+		// Later paced records keep the declaration.
+		skipped.frame(at(3), ms(15_000), true).unwrap();
+		assert_eq!(skipped.next().unwrap().duration, Some(6_000));
+		assert_eq!(skipped.declared_duration(), Some(4_000));
 	}
 
 	#[test]
@@ -1056,7 +1086,7 @@ mod test {
 			drain(&mut audio),
 			vec![
 				(0, 300, at(0), at(2)),
-				(600, 900, at(5), at(6)),
+				(600, 1_100, at(5), at(6)),
 				(1_700, 0, at(6), Position::new(6, 1))
 			]
 		);
@@ -1254,9 +1284,7 @@ mod test {
 	async fn tracks_publish_independent_timelines() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let timelines = Timelines::new(&broadcast);
-		let mut video = timelines
-			.track("video0", Config::default().with_duration_hint(Duration::from_secs(4)))
-			.unwrap();
+		let mut video = timelines.track("video0", hinted()).unwrap();
 		let mut catalog = timelines.track("catalog.json", sparse()).unwrap();
 
 		catalog.frame(at(0), ms(0), true);
@@ -1312,9 +1340,7 @@ mod test {
 	async fn a_rejected_report_fails_the_timeline() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let timelines = Timelines::new(&broadcast);
-		let mut video = timelines
-			.track("video0", Config::default().with_duration_hint(Duration::from_secs(4)))
-			.unwrap();
+		let mut video = timelines.track("video0", hinted()).unwrap();
 		let mut consumer = Consumer::<()>::subscribe(&broadcast.consume(), &timelines.section(), "video0")
 			.await
 			.unwrap();
@@ -1444,9 +1470,7 @@ mod test {
 	async fn rejects_an_invalid_timescale() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let timelines = Timelines::new(&broadcast);
-		let _recorder = timelines
-			.track("video0", Config::default().with_duration_hint(Duration::from_secs(4)))
-			.unwrap();
+		let _recorder = timelines.track("video0", hinted()).unwrap();
 		let mut section = timelines.section();
 		section.timescale = 0;
 		let err = Consumer::<()>::subscribe(&broadcast.consume(), &section, "video0").await;
