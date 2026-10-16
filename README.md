@@ -111,6 +111,12 @@ Read the specifications:
 - [hang](https://moq-dev.github.io/drafts/draft-lcurley-moq-hang.html)
 - [use-cases](https://moq-dev.github.io/drafts/draft-lcurley-moq-use-cases.html)
 
+## Stability
+
+The `release` branch is stable and is what gets published; `main` is the trunk where breaking API changes land between releases.
+Every package follows [semver](https://semver.org): a breaking API change ships only in a major release, or a minor release before 1.0.
+Breaking wire changes are extremely rare.
+
 ## Development
 
 Contributions are welcome, including AI-assisted issues, pull requests, reviews, and comments. See [CONTRIBUTING.md](CONTRIBUTING.md#ai-contributions) for the attribution policy and guidance on when to open an issue before writing code.
