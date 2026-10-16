@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, jest, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
 import { SessionCode, SessionError } from "../error.ts";
 import * as Lite from "../lite/index.ts";
@@ -34,7 +35,7 @@ async function advance(ms = 0) {
 	}
 }
 
-const linger = Time.Milli(20);
+const linger = Milli(20);
 
 const original = globalThis.WebTransport;
 const originalWebSocket = globalThis.WebSocket;
@@ -109,7 +110,7 @@ test("the connection closes after the last handle and the linger window", async 
 test("a handle taken within the linger window reuses the warm connection", async () => {
 	const dials = stubTransports();
 
-	const first = new Connection({ url, linger: Time.Milli(10_000) });
+	const first = new Connection({ url, linger: Milli(10_000) });
 	await advance();
 	expect(first.status.peek()).toBe("connected");
 	const origin = first.origin.peek();
@@ -126,8 +127,8 @@ test("a handle taken within the linger window reuses the warm connection", async
 test("the longest requested linger keeps the shared connection warm", async () => {
 	stubTransports();
 
-	const first = new Connection({ url, linger: Time.Milli(1) });
-	const second = new Connection({ url, linger: Time.Milli(500) });
+	const first = new Connection({ url, linger: Milli(1) });
+	const second = new Connection({ url, linger: Milli(500) });
 	await advance();
 	expect(second.status.peek()).toBe("connected");
 	const origin = first.origin.peek();
@@ -297,7 +298,7 @@ test("connection-specific options infer a private loop and origin", async () => 
 		const options = [
 			{ webtransport: { congestionControl: "throughput" as const } },
 			{ websocket: { enabled: false } },
-			{ delay: { timeout: Time.Milli(0) } },
+			{ delay: { timeout: Milli(0) } },
 			{ publish: origin.consume() },
 			{ consume: origin },
 		];
@@ -331,7 +332,7 @@ test("explicit share: true refuses connection-specific options", () => {
 			/share: false/,
 		);
 		expect(() => new Connection({ share: true, websocket: { enabled: false } })).toThrow(/share: false/);
-		expect(() => new Connection({ share: true, delay: { timeout: Time.Milli(0) } })).toThrow(/share: false/);
+		expect(() => new Connection({ share: true, delay: { timeout: Milli(0) } })).toThrow(/share: false/);
 	} finally {
 		origin.close();
 	}
@@ -432,7 +433,7 @@ test("exhausted retries then a new URL recovers a private handle", async () => {
 		url,
 		share: false,
 		websocket: { enabled: false },
-		delay: { initial: Time.Milli(1), multiplier: 1, max: Time.Milli(1), timeout: Time.Milli(1) },
+		delay: { initial: Milli(1), multiplier: 1, max: Milli(1), timeout: Milli(1) },
 	});
 	try {
 		await advance(2);
@@ -461,7 +462,7 @@ test("a private partial delay keeps the unlimited retry timeout", async () => {
 		url,
 		share: false,
 		websocket: { enabled: false },
-		delay: { initial: Time.Milli(1000), multiplier: 1, max: Time.Milli(1000) },
+		delay: { initial: Milli(1000), multiplier: 1, max: Milli(1000) },
 	});
 	try {
 		await advance(60_000);

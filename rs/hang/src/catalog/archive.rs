@@ -13,16 +13,18 @@ pub struct Timeline {
 	/// The MoQ track carrying this index's records.
 	pub track: String,
 
-	/// The nominal record duration in the archive's timescale, or zero for sparse data.
-	pub duration: u64,
+	/// The nominal record duration in the archive's timescale, zero for sparse data, or `None` for
+	/// an untimed track, whose records carry no duration.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub duration: Option<u64>,
 }
 
 impl Timeline {
-	/// Declare `track` with its nominal `duration` in the archive timescale.
-	pub fn new(track: impl Into<String>, duration: u64) -> Self {
+	/// Declare `track` with its nominal `duration` in the archive timescale, `None` when untimed.
+	pub fn new(track: impl Into<String>, duration: impl Into<Option<u64>>) -> Self {
 		Self {
 			track: track.into(),
-			duration,
+			duration: duration.into(),
 		}
 	}
 }
@@ -121,6 +123,17 @@ mod test {
 			json,
 			r#"{"timelines":{"video":{"track":"video.timeline.z","duration":4000}},"timescale":1000,"replay":"recordings/clip","store":"https://objects.example/rec/","version":2}"#
 		);
+		assert_eq!(serde_json::from_str::<Archive>(&json).unwrap(), archive);
+	}
+
+	#[test]
+	fn an_untimed_timeline_declares_no_duration() {
+		let mut archive = Archive::new();
+		archive
+			.timelines
+			.insert("data".to_string(), Timeline::new("data.timeline.z", None));
+		let json = serde_json::to_string(&archive).unwrap();
+		assert_eq!(json, r#"{"timelines":{"data":{"track":"data.timeline.z"}},"timescale":1000}"#);
 		assert_eq!(serde_json::from_str::<Archive>(&json).unwrap(), archive);
 	}
 

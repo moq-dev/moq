@@ -27,7 +27,8 @@ export const ArchiveSchema = z.object({
 		z.string(),
 		z.object({
 			track: z.string(),
-			duration: u53Schema,
+			// The nominal record duration, zero for sparse data, absent for an untimed track.
+			duration: z.optional(u53Schema),
 		}),
 	),
 

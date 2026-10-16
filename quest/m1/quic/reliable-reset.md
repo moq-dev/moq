@@ -2,7 +2,7 @@
 
 ## Goal
 
-noq-proto and its WebTransport adapter implement
+`moq-quic` and moq-tokio's WebTransport adapter (`quic::web`) implement
 [QUIC Stream Resets with Partial Delivery](https://datatracker.ietf.org/doc/draft-ietf-quic-reliable-stream-reset/).
 A reset WebTransport data stream reliably delivers enough prefix bytes for the
 receiver to associate it with its session before surfacing the application
@@ -16,7 +16,7 @@ the receiver may discard that header and cannot attribute the reset.
 
 ## Plan
 
-Implement the current reliable-reset draft in noq-proto:
+Implement the current reliable-reset draft in `moq-quic`:
 
 - advertise and validate the empty `reset_stream_at` transport parameter,
   including remembered negotiation state for 0-RTT;
@@ -62,10 +62,6 @@ WebTransport exposes reliable reset.
 Track the unversioned draft during implementation. The planning baseline is
 draft 10, with transport parameter `0x1d` and frame type `0x24`; do not freeze
 provisional codepoints if the document changes before release.
-
-## Required
-
-- [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic`, not the frozen fork
 
 ## Related
 

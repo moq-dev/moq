@@ -78,7 +78,6 @@ the fork plan the same day kept it there.
 
 ## Required
 
-- [Hard fork](/quest/m1/quic/fork/README.md) - qmux drives `moq-quic`
 - [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - qmux reuses the
   extension's stream state rather than implementing reset locally
 - [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - qmux must
