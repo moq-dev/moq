@@ -294,6 +294,10 @@ loom *args:
     RUSTFLAGS="--cfg loom" cargo test --locked --release -p kio --lib loom:: "$@"
     RUSTFLAGS="--cfg loom" cargo test --locked --release -p moq-net --test loom "$@"
 
+# Prove downstream futures are Send at the default recursion limit on nightly.
+send-depth:
+    bash sh/rs/send-depth.sh
+
 # Needs nightly and cargo-fuzz; CI replays the corpus on stable through
 # moq-net's own tests instead. See rs/moq-net/fuzz/README.md.
 

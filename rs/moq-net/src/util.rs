@@ -7,6 +7,14 @@
 
 use std::{collections::VecDeque, future::Future, pin::Pin, task::Poll};
 
+mod cell;
+pub(crate) use cell::SendCell;
+
+/// Prove a future's native Send bound here rather than inside every caller's future.
+pub(crate) fn send<F: Future + kio::MaybeSend>(future: F) -> impl Future<Output = F::Output> + kio::MaybeSend {
+	future
+}
+
 #[cfg(not(target_family = "wasm"))]
 pub(crate) type MaybeSendBox<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 #[cfg(target_family = "wasm")]

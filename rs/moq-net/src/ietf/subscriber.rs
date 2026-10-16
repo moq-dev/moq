@@ -3977,7 +3977,7 @@ where
 		// track does not close a group producer, since those lifecycles are independent.
 		let res = {
 			let mut serving = track.clone();
-			let mut serve = std::pin::pin!(self.run_fill(stream, &mut serving, timescale, joining, largest, resume));
+			let mut serve = std::pin::pin!(crate::util::send(self.run_fill(stream, &mut serving, timescale, joining, largest, resume)));
 			kio::wait(|waiter| {
 				if let Poll::Ready(err) = track.poll_closed(waiter) {
 					return Poll::Ready(Err(err));
