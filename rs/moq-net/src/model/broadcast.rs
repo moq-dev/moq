@@ -3,7 +3,8 @@
 //! A [Producer] creates tracks on demand: a [Consumer] subscribes by name, and the
 //! producer either serves a track it already has or is handed a [`track::Request`] to
 //! fill. Both handles are refcounted clones of one broadcast, which ends on
-//! [`Producer::close`] or when the last producer drops.
+//! [`Producer::close`], when the last producer drops, or once a [`Producer::finish`]
+//! has kept its finished tracks up until their media is stale.
 //!
 //! [Info] is the broadcast's static metadata, fixed for its lifetime.
 use crate::{cache, stats, track};
@@ -184,7 +185,9 @@ impl BroadcastState {
 /// # Lifetime
 ///
 /// A broadcast lives until [`Self::close`] or until the last [`Producer`] (or
-/// [`Dynamic`]) drops, whichever comes first; both end it the same way. Children
+/// [`Dynamic`]) drops, whichever comes first; both end it the same way. A publisher
+/// whose input ended cleanly calls [`Self::finish`] instead, so a subscriber still
+/// catching up can drain what it published. Children
 /// do *not* keep it alive: cloning a [`Consumer`] or holding a [`track::Producer`]
 /// does nothing for the broadcast's lifetime.
 #[derive(Clone)]
@@ -412,6 +415,41 @@ impl Producer {
 		self.alive.close();
 	}
 
+	/// End the broadcast cleanly, keeping it servable until its media goes stale.
+	///
+	/// A subscriber still catching up, one that read the final catalog late or is draining a
+	/// backlog, can still request and drain the finished tracks. The broadcast stays announced
+	/// and holds every track finished by now, so their producers can drop, for the longest of
+	/// their [`max_age`](track::Info::max_age)s. Then it [closes](Self::close). Tracks still
+	/// live, and tracks without a max-age, add nothing to the wait.
+	///
+	/// The tracks are held, and the wait counts, from this call rather than the first poll.
+	/// Dropping the future closes the broadcast early, which is how an interrupt ends the
+	/// wait; a [`Self::close`] elsewhere ends it too.
+	#[cfg(feature = "async")]
+	pub fn finish(&self) -> impl Future<Output = ()> + use<> {
+		let held: Vec<track::Hold> = self
+			.state
+			.lock()
+			.tracks
+			.values()
+			.filter_map(track::TrackWeak::hold_finished)
+			.collect();
+		let linger = held.iter().filter_map(|hold| hold.max_age).max().unwrap_or_default();
+		let expired = super::clock::sleep(linger);
+		let closing = CloseOnDrop(self.clone());
+		async move {
+			{
+				let expired = std::pin::pin!(expired);
+				let closed = std::pin::pin!(closing.0.alive.token.closed());
+				futures::future::select(expired, closed).await;
+			}
+			// Closed before the tracks are let go, so a late lookup answers `Unroutable`.
+			drop(closing);
+			drop(held);
+		}
+	}
+
 	/// Whether any [`Consumer`] handle exists, unlike [`Self::demand`], which counts tracks.
 	pub(crate) fn is_held(&self) -> bool {
 		self.alive.token.is_used()
@@ -437,6 +475,17 @@ impl Producer {
 	/// Return true if this is the same broadcast instance.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
+	}
+}
+
+/// Closes the broadcast when dropped, so abandoning [`Producer::finish`] ends it too.
+#[cfg(feature = "async")]
+struct CloseOnDrop(Producer);
+
+#[cfg(feature = "async")]
+impl Drop for CloseOnDrop {
+	fn drop(&mut self) {
+		self.0.close();
 	}
 }
 
@@ -1848,5 +1897,60 @@ mod test {
 		assert!(!track.demand().is_used());
 		assert!(track.abort_unused(Error::Cancel).is_ok());
 		producer.close();
+	}
+
+	/// A finished broadcast keeps serving its finished tracks after their producers drop,
+	/// so a late subscriber still gets the media, and closes once the longest max-age passes.
+	/// A live track and a track without a max-age add nothing to the wait.
+	#[moq_net_sim::test]
+	#[cfg(feature = "async")]
+	async fn finish_serves_finished_tracks_until_stale() {
+		let producer = Info::new().produce();
+		let consumer = producer.consume();
+		let secs = |secs| crate::track::Info::timed().with_max_age(Duration::from_secs(secs));
+		let video = producer.create_track("video", secs(2)).unwrap();
+		let audio = producer.create_track("audio", secs(5)).unwrap();
+		let catalog = producer.create_track("catalog", None).unwrap();
+		let live = producer.create_track("live", secs(60)).unwrap();
+		for track in [&video, &audio, &catalog] {
+			track.append_group().unwrap().finish().unwrap();
+			track.finish().unwrap();
+		}
+
+		let start = moq_net_sim::now();
+		let finish = moq_net_sim::spawn(producer.finish());
+		drop((video, audio, catalog, producer));
+
+		moq_net_sim::sleep(Duration::from_secs(4)).await;
+		let mut late = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
+		late.assert_group();
+		assert!(!consumer.is_closed());
+
+		finish.await.unwrap();
+		assert_eq!(moq_net_sim::now() - start, Duration::from_secs(5));
+		assert!(consumer.is_closed());
+		assert!(matches!(consumer.track("audio"), Err(Error::Unroutable)));
+		live.finish().unwrap();
+	}
+
+	/// Dropping the wait, the library's interrupt, closes the broadcast at once, even
+	/// while another producer handle is alive.
+	#[moq_net_sim::test]
+	#[cfg(feature = "async")]
+	async fn dropping_finish_closes_early() {
+		let producer = Info::new().produce();
+		let consumer = producer.consume();
+		let track = producer
+			.create_track(
+				"video",
+				crate::track::Info::timed().with_max_age(Duration::from_secs(30)),
+			)
+			.unwrap();
+		track.finish().unwrap();
+
+		let finish = producer.finish();
+		assert!(!consumer.is_closed());
+		drop(finish);
+		assert!(consumer.is_closed());
 	}
 }

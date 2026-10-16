@@ -2340,6 +2340,7 @@ impl Producer {
 		TrackWeak {
 			name: self.name.clone(),
 			state: self.state.weak(),
+			alive: Arc::downgrade(&self.alive),
 		}
 	}
 
@@ -2745,9 +2746,37 @@ fn clamp_combined(combined: Option<Subscription>, bound: Option<Duration>) -> Op
 pub(crate) struct TrackWeak {
 	name: Arc<str>,
 	state: kio::ProducerWeak<TrackState>,
+	// The producers' teardown guard, upgraded by [`Self::hold_finished`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	alive: std::sync::Weak<Alive>,
+}
+
+/// Keeps a finished track servable after its producers drop; see [`TrackWeak::hold_finished`].
+#[cfg(feature = "async")]
+pub(crate) struct Hold {
+	_alive: Arc<Alive>,
+	/// The track's [`Info::max_age`].
+	pub max_age: Option<Duration>,
 }
 
 impl TrackWeak {
+	/// Hold the track open if it finished cleanly, so lookups keep finding it after its
+	/// producers drop. `None` for a track still live, aborted, never published, or gone.
+	#[cfg(feature = "async")]
+	pub(crate) fn hold_finished(&self) -> Option<Hold> {
+		let alive = self.alive.upgrade()?;
+		if !alive.published.load(Ordering::Relaxed) {
+			return None;
+		}
+		let state = alive.state.read();
+		if state.end.is_none() || state.abort.is_some() {
+			return None;
+		}
+		let max_age = state.info.as_ref().and_then(|info| info.max_age);
+		drop(state);
+		Some(Hold { _alive: alive, max_age })
+	}
+
 	/// A [`Consumer`] for the cached track, or `None` once it has closed.
 	///
 	/// The count moves under the same lock the close takes, which is the other half
@@ -4987,6 +5016,7 @@ impl Request {
 		TrackWeak {
 			name: self.name.clone(),
 			state: self.state.weak(),
+			alive: Arc::downgrade(&self.alive),
 		}
 	}
 }

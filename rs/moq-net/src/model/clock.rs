@@ -2,9 +2,9 @@
 //!
 //! Everything else takes time from its caller: drivers are polled with an instant,
 //! and cache pools collect at the one they are handed. What reads the clock here is
-//! the explicit [`Timestamp::now`](crate::Timestamp::now) convenience and the
-//! [`anchor`] that maps an instant onto a timestamp, so a port swaps this module
-//! for its platform's clock.
+//! the explicit [`Timestamp::now`](crate::Timestamp::now) convenience, the
+//! [`anchor`] that maps an instant onto a timestamp, and the `sleep` a finished
+//! broadcast lingers on, so a port swaps this module for its platform's clock.
 
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -46,6 +46,25 @@ pub(crate) fn wall() -> crate::time::Instant {
 		true => moq_net_sim::now(),
 		false => *FROZEN,
 	}
+}
+
+/// Wait until `duration` past this call on the ambient runtime's clock, which a paused
+/// test runtime controls. Only the wait needs a runtime, not this call.
+#[cfg(all(feature = "async", not(test)))]
+pub(crate) fn sleep(duration: Duration) -> impl Future<Output = ()> {
+	let at = web_async::time::Instant::now().checked_add(duration);
+	async move {
+		match at {
+			Some(at) => web_async::time::sleep_until(at).await,
+			None => std::future::pending().await,
+		}
+	}
+}
+
+/// Unit tests wait on the simulated clock, like [`wall`].
+#[cfg(all(feature = "async", test))]
+pub(crate) fn sleep(duration: Duration) -> impl Future<Output = ()> {
+	moq_net_sim::sleep(duration)
 }
 
 /// Where [`Timestamp`](crate::Timestamp)s count from: an instant, and the
