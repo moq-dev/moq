@@ -28,6 +28,7 @@ async fn steer(tracks: u16, floors: u64) -> u64 {
 				restart: 0,
 				skip: 0,
 				sync: true,
+				leading: false,
 				item: (),
 			};
 			buffer.push(track, arrival).unwrap();

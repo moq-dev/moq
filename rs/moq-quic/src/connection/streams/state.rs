@@ -9,13 +9,14 @@ use rustc_hash::FxHashMap;
 use tracing::{debug, trace};
 
 use super::{
-    PendingStreamsQueue, Recv, Retransmits, Send, SendState, ShouldTransmit, StreamEvent,
+    Credit, PendingStreamsQueue, Recv, Retransmits, Send, SendState, ShouldTransmit, StreamEvent,
     StreamHalf, ThinRetransmits,
 };
 use crate::{
     Dir, MAX_STREAM_COUNT, Side, StreamId, TransportError, VarInt,
     coding::BufMutExt,
-    connection::stats::FrameStats,
+    connection::ConnectionTag,
+    connection::stats::{CreditStats, FrameStats},
     frame::{self, FrameStruct, StreamMetaVec},
     transport_parameters::TransportParameters,
 };
@@ -121,6 +122,11 @@ pub struct StreamsState {
     pub(super) data_sent: u64,
     /// Sum of end offsets of all receive streams. Includes gaps, so it's an upper bound.
     data_recvd: u64,
+    /// Bytes read with [`Chunks::hold`](super::Chunks::hold) whose connection credit the
+    /// application has not released yet
+    pub(super) held: u64,
+    /// Which connection [`Credit`]s handed out here belong to
+    pub(super) tag: ConnectionTag,
     /// Total quantity of outgoing data retained in send buffers, including acknowledged data
     pub(super) buffered_data: u64,
     /// Configured upper bound for `buffered_data`.
@@ -180,6 +186,8 @@ impl StreamsState {
             sent_max_data: receive_window,
             data_sent: 0,
             data_recvd: 0,
+            held: 0,
+            tag: ConnectionTag::next(),
             buffered_data: 0,
             send_window,
             stream_receive_window: stream_receive_window.into(),
@@ -282,7 +290,9 @@ impl StreamsState {
 
         if !rs.stopped {
             self.events.push_back(StreamEvent::Readable { id });
-            return Ok(ShouldTransmit(false));
+            // Credit released while the peer still had room may not have been worth a frame
+            // then; it is now that the peer is about to block.
+            return Ok(ShouldTransmit(self.max_data_due()));
         }
 
         // Stopped streams become closed instantly on FIN, so check whether we need to clean up
@@ -991,17 +1001,46 @@ impl StreamsState {
             self.receive_window_shrink_debt -= credits;
         }
 
+        ShouldTransmit(self.max_data_due())
+    }
+
+    /// Return the connection credit held by `credit` to the peer.
+    pub(crate) fn release(&mut self, credit: Credit) -> ShouldTransmit {
+        assert!(
+            credit.is_empty() || credit.tag == self.tag,
+            "released credit from another connection"
+        );
+        let bytes = credit.into_bytes();
+        assert!(
+            bytes <= self.held,
+            "released {bytes} bytes of credit with only {} held",
+            self.held
+        );
+        self.held -= bytes;
+        self.add_read_credits(bytes)
+    }
+
+    /// Whether the window has grown enough since the last `MAX_DATA` to be worth announcing.
+    ///
+    /// Updates are batched to a fraction of the receive window, which accommodates bigger windows
+    /// with fewer frames. Once the peer is within that fraction of its limit any increase is
+    /// worth a frame, because the credit an application holds may never add up to the fraction.
+    fn max_data_due(&self) -> bool {
         if self.local_max_data > VarInt::MAX.into_inner() {
-            return ShouldTransmit(false);
+            return false;
         }
 
-        // Only announce a window update if it's significant enough
-        // to make it worthwhile sending a MAX_DATA frame.
-        // We use a fraction of the configured connection receive window to make
-        // the decision, to accommodate for connection using bigger windows requiring
-        // less updates.
-        let diff = self.local_max_data - self.sent_max_data.into_inner();
-        ShouldTransmit(diff >= (self.receive_window / 8))
+        let sent = self.sent_max_data.into_inner();
+        let threshold = self.receive_window / 8;
+        let diff = self.local_max_data - sent;
+        diff >= threshold || (diff > 0 && sent.saturating_sub(self.data_recvd) < threshold)
+    }
+
+    pub(crate) fn credit_stats(&self) -> CreditStats {
+        CreditStats {
+            held: self.held,
+            available: self.local_max_data.saturating_sub(self.data_recvd),
+        }
     }
 
     /// Update counters for removal of a stream
@@ -2527,5 +2566,247 @@ mod tests {
             "next_remote is now {}",
             server.next_remote[Dir::Bi as usize]
         );
+    }
+
+    /// How a held stream ends in [`held_credit_returns_once`].
+    #[derive(Debug, Clone, Copy)]
+    enum End {
+        Fin,
+        Stop,
+        Reset,
+        StopThenReset,
+    }
+
+    fn data(client: &mut StreamsState, id: StreamId, offset: u64, len: usize, fin: bool) {
+        let _ = client
+            .received(
+                frame::Stream {
+                    id,
+                    offset,
+                    fin,
+                    data: Bytes::from(vec![0; len]),
+                },
+                len,
+            )
+            .unwrap();
+    }
+
+    fn reset(client: &mut StreamsState, id: StreamId, final_offset: u32) {
+        let _ = client
+            .received_reset(frame::ResetStream {
+                id,
+                error_code: 0u32.into(),
+                final_offset: final_offset.into(),
+            })
+            .unwrap();
+    }
+
+    /// Read everything readable now, holding its connection credit.
+    fn read_held(client: &mut StreamsState, id: StreamId) -> Credit {
+        let mut pending = Retransmits::default();
+        let mut recv = RecvStream {
+            id,
+            state: client,
+            pending: &mut pending,
+        };
+        let mut chunks = recv.read(true).unwrap();
+        while let Ok(Some(_)) = chunks.next(usize::MAX) {}
+        let credit = chunks.hold();
+        let _ = chunks.finalize();
+        credit
+    }
+
+    /// Every byte of a stream returns its connection credit exactly once, whichever terminal path
+    /// it takes and whether the held bytes are released before or after its state is reclaimed.
+    #[test]
+    fn held_credit_returns_once() {
+        for end in [End::Fin, End::Stop, End::Reset, End::StopThenReset] {
+            let mut client = make(Side::Client);
+            let initial = client.local_max_data;
+            let id = StreamId::new(Side::Server, Dir::Uni, 0);
+
+            // A readable prefix, then a gap the transport must account for itself.
+            data(&mut client, id, 0, 32, false);
+            data(&mut client, id, 64, 16, false);
+            let credit = read_held(&mut client, id);
+            assert_eq!(credit.len(), 32, "{end:?}");
+            assert_eq!(client.credit_stats().held, 32, "{end:?}");
+            assert_eq!(
+                client.local_max_data, initial,
+                "{end:?}: held, not returned"
+            );
+
+            let size = match end {
+                End::Fin => {
+                    data(&mut client, id, 32, 32, false);
+                    data(&mut client, id, 80, 16, true);
+                    let rest = read_held(&mut client, id);
+                    assert_eq!(rest.len(), 64, "{end:?}");
+                    let _ = client.release(rest);
+                    96
+                }
+                End::Stop => {
+                    let mut pending = Retransmits::default();
+                    RecvStream {
+                        id,
+                        state: &mut client,
+                        pending: &mut pending,
+                    }
+                    .stop(0u32.into())
+                    .unwrap();
+                    // Late data below and beyond the stop is credited on arrival.
+                    data(&mut client, id, 32, 32, false);
+                    data(&mut client, id, 80, 16, true);
+                    96
+                }
+                End::Reset => {
+                    reset(&mut client, id, 128);
+                    let mut pending = Retransmits::default();
+                    let mut recv = RecvStream {
+                        id,
+                        state: &mut client,
+                        pending: &mut pending,
+                    };
+                    let mut chunks = recv.read(true).unwrap();
+                    assert!(chunks.next(usize::MAX).is_err(), "{end:?}");
+                    let _ = chunks.finalize();
+                    128
+                }
+                End::StopThenReset => {
+                    let mut pending = Retransmits::default();
+                    RecvStream {
+                        id,
+                        state: &mut client,
+                        pending: &mut pending,
+                    }
+                    .stop(0u32.into())
+                    .unwrap();
+                    reset(&mut client, id, 128);
+                    // A duplicate reset after reclamation changes nothing.
+                    reset(&mut client, id, 128);
+                    128
+                }
+            };
+            assert!(
+                !client.recv.contains_key(&id),
+                "{end:?}: state reclaimed while credit is held"
+            );
+            assert_eq!(
+                client.local_max_data,
+                initial + size - 32,
+                "{end:?}: everything but the held prefix"
+            );
+
+            let _ = client.release(credit);
+            assert_eq!(client.local_max_data, initial + size, "{end:?}");
+            assert_eq!(client.credit_stats().held, 0, "{end:?}");
+        }
+    }
+
+    #[test]
+    fn held_credit_pays_shrink_debt() {
+        let mut client = make(Side::Client);
+        let initial = client.local_max_data;
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        data(&mut client, id, 0, 32, false);
+        let credit = read_held(&mut client, id);
+        client.set_receive_window((client.receive_window - 16).try_into().unwrap());
+        let _ = client.release(credit);
+        assert_eq!(client.local_max_data, initial + 16);
+    }
+
+    /// Another connection holding at least as much credit still refuses it.
+    #[test]
+    #[should_panic(expected = "released credit from another connection")]
+    fn release_from_another_connection() {
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        let mut a = make(Side::Client);
+        data(&mut a, id, 0, 32, false);
+        let credit = read_held(&mut a, id);
+        let mut b = make(Side::Client);
+        data(&mut b, id, 0, 32, false);
+        let _held = read_held(&mut b, id);
+        let _ = b.release(credit);
+    }
+
+    #[test]
+    #[should_panic(expected = "merged credit from another connection")]
+    fn merge_from_another_connection() {
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        let mut a = make(Side::Client);
+        data(&mut a, id, 0, 32, false);
+        let mut b = make(Side::Client);
+        data(&mut b, id, 0, 32, false);
+        let mut credit = read_held(&mut a, id);
+        credit.merge(read_held(&mut b, id));
+    }
+
+    /// An empty default credit takes on the connection of the first credit merged into it.
+    #[test]
+    fn default_credit_adopts_its_connection() {
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        let mut a = make(Side::Client);
+        data(&mut a, id, 0, 32, false);
+        let mut credit = Credit::default();
+        credit.merge(read_held(&mut a, id));
+        assert_eq!(credit.len(), 32);
+        let _ = a.release(credit);
+        assert_eq!(a.credit_stats().held, 0);
+    }
+
+    /// Ingest and read rounds across many streams, with and without holding and releasing each
+    /// read's connection credit. The held cost must stay flat as the stream count grows.
+    #[test]
+    #[ignore = "release benchmark, run by nightly"]
+    fn benchmark_receive_credit() {
+        const BYTES: usize = 1 << 30;
+        println!("streams,payload,plain_ns_per_read,held_ns_per_read");
+        for streams in [1u64, 64, 4096] {
+            for payload in [1200usize, 64 * 1024] {
+                let rounds = (BYTES / payload / streams as usize).max(1) as u64;
+                let chunk = Bytes::from(vec![0; payload]);
+                let mut ns = [0f64; 2];
+                for (mode, held) in [false, true].into_iter().enumerate() {
+                    let mut client = StreamsState::new(
+                        Side::Client,
+                        VarInt::from_u64(streams).unwrap(),
+                        0u32.into(),
+                        0,
+                        VarInt::from_u64(1 << 50).unwrap(),
+                        VarInt::from_u64(1 << 40).unwrap(),
+                    );
+                    let mut pending = Retransmits::default();
+                    let start = std::time::Instant::now();
+                    for round in 0..rounds {
+                        for index in 0..streams {
+                            let id = StreamId::new(Side::Server, Dir::Uni, index);
+                            let frame = frame::Stream {
+                                id,
+                                offset: round * payload as u64,
+                                fin: false,
+                                data: chunk.clone(),
+                            };
+                            let _ = client.received(frame, payload).unwrap();
+                            let mut recv = RecvStream {
+                                id,
+                                state: &mut client,
+                                pending: &mut pending,
+                            };
+                            let mut chunks = recv.read(true).unwrap();
+                            std::hint::black_box(chunks.next(usize::MAX).unwrap());
+                            if held {
+                                let credit = chunks.hold();
+                                let _ = chunks.finalize();
+                                let _ = client.release(credit);
+                            } else {
+                                let _ = chunks.finalize();
+                            }
+                        }
+                    }
+                    ns[mode] = start.elapsed().as_nanos() as f64 / (rounds * streams) as f64;
+                }
+                println!("{streams},{payload},{:.1},{:.1}", ns[0], ns[1]);
+            }
+        }
     }
 }
