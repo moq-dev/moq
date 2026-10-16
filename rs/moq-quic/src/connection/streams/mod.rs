@@ -339,6 +339,7 @@ impl<'a> SendStream<'a> {
         };
         Checkpoint {
             id: self.id,
+            generation: self.state.generation,
             offset,
         }
     }
@@ -421,6 +422,7 @@ impl<'a> SendStream<'a> {
 #[derive(Debug)]
 pub struct Checkpoint {
     id: StreamId,
+    generation: u64,
     offset: u64,
 }
 
@@ -435,6 +437,9 @@ impl Checkpoint {
     /// only reliably delivers data the peer parses on arrival, like a WebTransport stream header.
     /// A peer that asked us to stop sending gets the reset at once, without the data.
     ///
+    /// Fails with [`ClosedStream`] if the stream was already reset or is gone, including one
+    /// rejected 0-RTT discarded, even if a new stream has since taken its id.
+    ///
     /// # Panics
     /// - when used on a connection other than the one it came from, if that is detected
     pub fn reset(
@@ -442,7 +447,12 @@ impl Checkpoint {
         conn: &mut crate::Connection,
         error_code: VarInt,
     ) -> Result<(), ClosedStream> {
-        conn.send_stream(self.id).reset_to(error_code, self.offset)
+        let mut stream = conn.send_stream(self.id);
+        // Rejected 0-RTT discarded the stream, and a new one may have its id
+        if stream.state.generation != self.generation {
+            return Err(ClosedStream { _private: () });
+        }
+        stream.reset_to(error_code, self.offset)
     }
 }
 

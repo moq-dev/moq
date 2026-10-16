@@ -136,6 +136,9 @@ pub struct StreamsState {
     initial_max_stream_data_bidi_remote: VarInt,
     /// Whether the peer accepts RESET_STREAM_AT
     pub(super) peer_reset_stream_at: bool,
+    /// Bumped when rejected 0-RTT discards our streams and their ids are opened again, so a
+    /// [`Checkpoint`](super::Checkpoint) from before cannot reach the new stream of the same id
+    pub(super) generation: u64,
 
     /// The shrink to be applied to local_max_data when receive_window is shrunk
     receive_window_shrink_debt: u64,
@@ -189,6 +192,7 @@ impl StreamsState {
             initial_max_stream_data_bidi_local: 0u32.into(),
             initial_max_stream_data_bidi_remote: 0u32.into(),
             peer_reset_stream_at: false,
+            generation: 0,
             receive_window_shrink_debt: 0,
             streams_blocked: [false, false],
             data_blocked_limit: None,
@@ -243,6 +247,7 @@ impl StreamsState {
             }
         }
 
+        self.generation += 1;
         self.pending.clear();
         self.send_streams = 0;
         self.data_sent = 0;

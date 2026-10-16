@@ -545,6 +545,54 @@ fn repeated_reset_is_closed() {
     assert!(pair.client_send(client_ch, s).reset(ERROR).is_err());
 }
 
+/// A checkpoint taken in 0-RTT that the server rejects names a discarded stream, so it stays
+/// closed even once the same stream id is opened again.
+#[test]
+fn zero_rtt_rejected_checkpoint_is_closed() {
+    let _guard = subscribe();
+    let server_config = ServerConfig::with_crypto(Arc::new(server_crypto_with_alpn(vec![
+        "foo".into(),
+        "bar".into(),
+    ])));
+    let mut pair = Pair::new(Arc::new(EndpointConfig::default()), server_config);
+    let mut client_crypto = Arc::new(client_crypto_with_alpn(vec!["foo".into()]));
+
+    let client_ch = pair.begin_connect(ClientConfig::new(client_crypto.clone()));
+    pair.drive();
+    pair.server.assert_accept();
+    let now = pair.time;
+    pair.client_conn_mut(client_ch)
+        .close(now, VarInt(0), Bytes::new());
+    pair.drive();
+    pair.client.connections.clear();
+    pair.server.connections.clear();
+
+    // A changed ALPN makes the server reject the resumed session's 0-RTT
+    let this = Arc::get_mut(&mut client_crypto).expect("QuicClientConfig is shared");
+    let inner = Arc::get_mut(&mut this.inner).expect("QuicClientConfig.inner is shared");
+    inner.alpn_protocols = vec!["bar".into()];
+    let client_ch = pair.begin_connect(ClientConfig::new(client_crypto));
+    assert!(pair.client_conn_mut(client_ch).has_0rtt());
+    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let checkpoint = write(&mut pair, client_ch, s);
+    pair.drive();
+    assert!(!pair.client_conn_mut(client_ch).accepted_0rtt());
+
+    let reopened = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    assert_eq!(reopened, s);
+    pair.client_send(client_ch, reopened).write(MSG).unwrap();
+    assert_eq!(
+        reset(&mut pair, client_ch, checkpoint),
+        Err(ClosedStream::default())
+    );
+    pair.client_send(client_ch, reopened).finish().unwrap();
+    pair.drive();
+
+    let server_ch = pair.server.assert_accept();
+    assert_eq!(accept(&mut pair, server_ch), s);
+    assert_eq!(read(&mut pair, server_ch, s), (MSG.to_vec(), Ok(())));
+}
+
 /// A client remembers the server's support for 0-RTT, and may use it there.
 #[test]
 fn zero_rtt() {
