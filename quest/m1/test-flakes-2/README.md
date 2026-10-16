@@ -46,7 +46,6 @@ Public API: none. Wire: none.
 - [js -> go rewind](/quest/m1/test-flakes-2/js-go-rewind.md) - the `js -> go` interop cell never reads a frame below the previous group's start, fixed on the side that produced it
 - [WASM IETF read](/quest/m1/test-flakes-2/wasm-ietf-read.md) - the WASM suite's IETF read case reads whole groups on a loaded runner, fixed at the burst or the assertion as the evidence says
 - [announced fixture connect](/quest/m1/test-flakes-2/cli-announced-connect.md) - moq-cli's `announced` fixture publisher connects to its ready relay under load
-- [BBR marking seed](/quest/m1/test-flakes-2/bbr-marking-seed.md) - the BBR marking test seeds its probe schedule, replays a failing seed, and its rare drop is fixed at the cause
 
 ## Related
 

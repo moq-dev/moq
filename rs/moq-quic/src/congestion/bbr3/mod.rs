@@ -2072,6 +2072,12 @@ impl Bbr3Config {
         self.initial_window = value;
         self
     }
+
+    #[cfg(test)]
+    pub(crate) fn probe_rng_seed(&mut self, seed: [u8; 16]) -> &mut Self {
+        self.probe_rng_seed = Some(seed);
+        self
+    }
 }
 
 impl Default for Bbr3Config {
