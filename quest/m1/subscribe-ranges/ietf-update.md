@@ -50,16 +50,10 @@ Implementation: the IETF subscriber watches the aggregate the way
 `lite/subscriber.rs` does (`buffer_update`), sending one update per change
 and coalescing changes while one is in flight. The publisher side already
 applies a priority update to open group streams
-(`subscription_update_reprioritizes_open_group_streams`). The JS publisher on
-drafts 14 to 16 still reads and discards updates, which
-[the legacy updates quest](/quest/m1/ietf-legacy-updates.md) fixes first.
-Test on mock time,
+(`subscription_update_reprioritizes_open_group_streams`), and so does the JS
+publisher on every draft. Test on mock time,
 in Rust and JS, directly and through a relay: a second downstream subscriber
 at a higher priority raises the upstream priority, and leaving lowers it again.
-
-## Required
-
-- [Apply draft 14-16 request updates](/quest/m1/ietf-legacy-updates.md) - the JS publisher applies the priority this sends
 
 ## Related
 
