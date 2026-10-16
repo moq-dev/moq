@@ -17,8 +17,15 @@ See the [epic](/quest/m2/unbounded-groups/README.md) for the decisions.
   stream that starts mid-frame still states the frame's full size. Older
   lite versions and moq-transport refill only at frame or object
   boundaries. An object with a hole is `Evicted` there.
-- Keep the segment that a live reader or writer is on resident. Every other
-  sealed segment is evictable under the same policy as front frames.
+- Every sealed segment is evictable under the same policy as front frames,
+  including one a reader is on. A reader keeps its current segment alive
+  through its own reference, as prefetched frames are today. That memory
+  is bounded by readers times one segment, not by the cache. Only the
+  writer's open segment stays resident.
+- Route failover mid-frame (`frame::Consumer`'s `Recover`) requests only
+  the missing suffix by byte, instead of refetching the frame from its
+  start. Cover it with a regression: a route fails partway through a frame
+  larger than the pool.
 - Update `drafts/draft-lcurley-moq-lite.md` and run `just drafts check`.
   Also drop the 32 MiB interop cap in `drafts/draft-lcurley-moq-e2ee.md` if
   it no longer follows from a model limit.

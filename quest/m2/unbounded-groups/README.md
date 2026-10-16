@@ -35,8 +35,10 @@ Decided 2026-10-16 (maintainer interview):
   content: there are no validators, and runs never need to be stitched by
   version.
 - Holes and refills are addressed by `(frame, byte)` positions, not
-  group-wide byte offsets. Route failover's `Recover` already resumes at a
-  frame and byte. Small frames never use the byte.
+  group-wide byte offsets. Small frames never use the byte. Route
+  failover's `Recover` continues a half-read frame at its byte, but it
+  refetches the frame from its start and skips locally, so a byte-precise
+  request is new work.
 - Large frames become chains of sealed segments. Small frames keep a single
   `Bytes`.
 - QUIC receive credit is released per segment, so an arbitrary-size frame
