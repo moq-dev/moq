@@ -15,9 +15,6 @@ from moq_ffi import (
     MoqOriginDynamic,
     MoqOriginProducer,
 )
-from moq_ffi import (
-    MoqRoute as Route,
-)
 
 from .publish import BroadcastProducer
 from .subscribe import BroadcastConsumer
@@ -169,10 +166,6 @@ class OriginDynamic:
     async def requested_broadcast(self) -> BroadcastRequest:
         """Await the next broadcast a consumer requested but that isn't published yet."""
         return BroadcastRequest(await self._inner.requested_broadcast())
-
-    def update(self, route: Route) -> None:
-        """Re-price the route in place: replace its hops and costs."""
-        self._inner.update(route)
 
     def cancel(self) -> None:
         """Stop serving and retract the route."""
