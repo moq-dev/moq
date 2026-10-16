@@ -41,18 +41,16 @@ broken.
 
 Public API: none. Wire: none.
 
-### Publication blocker
+### Release
 
-PR #5219 removes publication-time project substitution and validates generated
-POMs, but publication is not complete. Maven Central's latest bindings are
-`0.4.12` (checked 2026-10-10). Compiling the wrapper against that artifact
-fails because it lacks current client configuration, announcement, group demand,
-and media APIs. Generating valid POMs alone does not prove a usable publication.
+PR #5219 rewrites the target POMs' bindings version to `MOQ_FFI_RANGE` and
+checks the generated POMs in `just kt check` and the publication dry-run. The
+sibling-project substitution stays: release-kt-lib.yml publishes only when
+`rs/moq-ffi` matches a released `moq-ffi-v*` tag, so the local bindings are the
+published ones. Dropping the substitution instead makes the dry-run on `main`
+compile against older Maven bindings and fail whenever `main` carries unreleased
+FFI API.
 
-Recommended: publish matching bindings through the normal release process, set
-the wrapper's supported bindings range to the actual compatible release, then
-validate the JVM and Android publication dry-run before publishing a wrapper
-patch. Alternatively, backport the POM correction onto a compatible release
-wrapper. Do not compile against unpublished local bindings while claiming that
-an older Maven artifact supplies those APIs. Existing broken Central artifacts
-are immutable; this work remains open until a usable replacement ships.
+Remaining: cherry-pick the fix onto `release` with `moq.version=0.5.2`. The
+`release` wrapper builds against `moq-ffi` 0.4.15, which is on Maven Central
+(checked 2026-10-15).

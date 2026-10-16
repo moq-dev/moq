@@ -12,8 +12,9 @@
 // floating range so consumers transitively pick up new bindings patches
 // without this wrapper being re-cut. See MOQ_FFI_RANGE below.
 //
-// `just kt check` opts into the sibling project so tests use fresh bindings.
-// Publication resolves the declared module range without that substitution.
+// Local builds and CI resolve `moq-ffi` from the sibling project via the
+// dependency substitution below, so tests run against freshly-built bindings.
+// release-kt-lib.yml publishes only once those bindings match a released tag.
 //
 // Publishing uses com.vanniktech.maven.publish; CI runs
 // `:moq:publishAndReleaseToMavenCentral`. Credentials come from env vars set by
@@ -52,11 +53,9 @@ if (androidEnabled) {
 
 // Resolve `dev.moq:moq-ffi` from the sibling project for local/CI builds while
 // the published metadata keeps the floating range declared below.
-if (providers.gradleProperty("moqffi.local").orNull == "true") {
-    configurations.configureEach {
-        resolutionStrategy.dependencySubstitution {
-            substitute(module("dev.moq:moq-ffi")).using(project(":moq-ffi"))
-        }
+configurations.all {
+    resolutionStrategy.dependencySubstitution {
+        substitute(module("dev.moq:moq-ffi")).using(project(":moq-ffi"))
     }
 }
 
@@ -154,8 +153,8 @@ mavenPublishing {
     coordinates("dev.moq", "moq", version.toString())
 
     pom {
-        // KMP resolves target artifact coordinates but replaces the declared range with
-        // the selected patch. Maven consumers need the same patch range as Gradle metadata.
+        // The target POMs (moq-jvm, moq-android) name the substituted project's
+        // version, which is never published. Restore the range Gradle metadata keeps.
         withXml {
             val dependencies = asElement().getElementsByTagName("dependency")
             for (index in 0 until dependencies.length) {

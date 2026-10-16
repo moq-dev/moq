@@ -9,10 +9,12 @@ name: Release Kotlin lib
 #
 # The wrapper is pure Kotlin layered on `dev.moq:moq-ffi`; its POM depends on
 # moq-ffi via a floating range so consumers float to the newest bindings patch
-# without the wrapper being re-cut. Publication compiles against the published
-# module range; local sibling-project substitution is only used by Kotlin tests.
+# without the wrapper being re-cut. We still generate the UniFFI bindings here
+# so the sibling `:moq-ffi` project compiles (the wrapper resolves it via the
+# project substitution in kt/moq/build.gradle.kts); native libs aren't needed
+# because JNA is compileOnly.
 #
-# A push is deferred while rs/moq-ffi
+# Those bindings come from this checkout, so a push is deferred while rs/moq-ffi
 # has changes since its release tag: the wrapper could call FFI API that no
 # published moq-ffi has. The FFI coordinator re-triggers this workflow after
 # its Kotlin publisher succeeds, then publishes from that tag's commit.
@@ -196,6 +198,22 @@ jobs:
           persist-credentials: false
 
       - uses: ./.github/actions/just
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      # No Rust cache: its entry would evict the store every pull request
+      # restores from the 10 GB budget. See cache.yml.
+
+      # Generate the UniFFI Kotlin so the sibling :moq-ffi project compiles.
+      - name: Generate bindings
+        env:
+          BUILD_VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          just rs package-ffi --bindings-only --version "$BUILD_VERSION" --output dist
+          mkdir -p kt/moq-ffi/src/jvmAndAndroidMain/kotlin/uniffi/moq
+          cp dist/bindings/kotlin/uniffi/moq/moq.kt \
+            kt/moq-ffi/src/jvmAndAndroidMain/kotlin/uniffi/moq/moq.kt
 
       - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
