@@ -72,7 +72,7 @@ above them.
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - subgroups, object IDs, properties, end status, datagram objects, and unknown track properties survive moq-transport -> moq-relay (and a relay cluster) -> moq-transport; moxygen's moq-test passes nightly
 - [CDN smoke diagnosis](/quest/m1/smoke-cdn.md) - jsDelivr failures retain their response evidence and any first-party cause is fixed
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - announce-subscribe passes and the smoke lane stops hiding its failure
-- [Public relay diagnosis](/quest/m1/smoke-relays.md) - optional failed cells get attributed causes and focused first-party follow-ups
+- [Stitcher public relay smoke](/quest/m1/smoke-stitcher.md) - the first-party deployment is tested under an anonymous namespace and only on transports it serves
 - [FETCH max-delay](/quest/m1/fetch-max-delay.md) - historical readers obey publisher max-age and an optional tighter reader budget, including while holding a group
 - [Lite SETUP backport](/quest/m1/lite-setup-backport.md) - `release` closes a moq-lite session on a repeated SETUP parameter or a second Setup Stream, in a later 0.14.x patch (#5521)
 - [Claim answer epochs](/quest/m1/claim-answer-epochs.md) - a claim answers each output by publishing it at its exact path under its own epoch, so a restarted output never reaches a returning reader as the old one's cache
