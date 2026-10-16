@@ -3394,7 +3394,7 @@ where
 
 		match type_id {
 			ietf::FetchOk::ID => {
-				let _msg: ietf::FetchOk = self.decode_response(&mut data)?;
+				let _msg = ietf::FetchOk::decode_msg(&mut data, self.version)?;
 				Ok(true)
 			}
 			ietf::FetchError::ID if self.version == Version::Draft14 => {
@@ -3409,19 +3409,6 @@ where
 		}
 	}
 
-	/// Decode an answer to one of our requests. A fault the draft makes session-wide, such
-	/// as a DYNAMIC_GROUPS above 1, closes the session rather than failing only the request.
-	fn decode_response<M: ietf::Message>(&self, data: &mut Decoder<'_>) -> Result<M, Error> {
-		M::decode_msg(data, self.version).map_err(|err| {
-			if let DecodeError::Session(code) = &err {
-				self.session
-					.clone()
-					.close(super::error::to_session_code(code), &err.to_string());
-			}
-			Error::Decode(err)
-		})
-	}
-
 	async fn read_subscribe_response(&self, stream: &mut Stream<S, Version>) -> Result<Option<Accepted>, Error> {
 		// Read type_id + size + body from the stream
 		let type_id = stream.reader.varint().await?;
@@ -3430,7 +3417,7 @@ where
 
 		match type_id {
 			ietf::SubscribeOk::ID => {
-				let msg: ietf::SubscribeOk = self.decode_response(&mut data)?;
+				let msg = ietf::SubscribeOk::decode_msg(&mut data, self.version)?;
 				tracing::debug!(message = ?msg, "received subscribe ok");
 				Ok(Some(Accepted {
 					alias: msg.track_alias,
@@ -3583,7 +3570,7 @@ where
 
 		let code = match type_id {
 			id if id == ietf::TrackStatusOk::id(self.version) => {
-				return self.decode_response(&mut data);
+				return Ok(ietf::TrackStatusOk::decode_msg(&mut data, self.version)?);
 			}
 			ietf::TRACK_STATUS_ERROR_14 if self.version == Version::Draft14 => {
 				ietf::SubscribeError::decode_msg(&mut data, self.version)?.error_code
@@ -4776,7 +4763,7 @@ where
 		let mut data = body.decoder(self.version);
 
 		match type_id {
-			ietf::FetchOk::ID => self.decode_response(&mut data),
+			ietf::FetchOk::ID => Ok(ietf::FetchOk::decode_msg(&mut data, self.version)?),
 			ietf::FetchError::ID if self.version == Version::Draft14 => {
 				let msg = ietf::FetchError::decode_msg(&mut data, self.version)?;
 				Err(request::from_code(msg.error_code, request::Kind::Fetch, self.version))
@@ -14455,42 +14442,6 @@ mod new_group_tests {
 		relay.land(6);
 		let _c = subscribe(&relay.track, Some(0));
 		assert_eq!(update(&mut stream).await, Some(0));
-		relay.serving.abort();
-	}
-
-	/// A DYNAMIC_GROUPS value above 1 is a PROTOCOL_VIOLATION (draft-22 section 10.6), which
-	/// closes the session rather than failing only the track.
-	#[moq_net_sim::test]
-	async fn dynamic_groups_above_one_closes_the_session() {
-		use crate::{coding::Encoder, ietf::Message as _, transport::poll::Session as _};
-
-		let (mut relay, _first) = relay(None).await;
-		let (mut stream, _) = relay.accept().await;
-		let mut body = Vec::new();
-		ietf::SubscribeOk {
-			request_id: None,
-			track_alias: 7,
-			largest: None,
-			properties: Default::default(),
-		}
-		.encode_msg(&mut Encoder::new(&mut body, VERSION.into()), VERSION)
-		.unwrap();
-		// The properties block ends the message: DYNAMIC_GROUPS (0x30) = 2.
-		body.extend([0x30, 0x02]);
-		let mut frame = u16::try_from(body.len()).unwrap().to_be_bytes().to_vec();
-		frame.extend(body);
-		stream.writer.varint(ietf::SubscribeOk::ID).await.unwrap();
-		stream.writer.write_all(&mut bytes::Bytes::from(frame)).await.unwrap();
-
-		let closed = std::future::poll_fn(|cx| relay.peer.poll_closed(cx));
-		let err = moq_net_sim::timeout(Duration::from_secs(1), closed)
-			.await
-			.expect("the session stayed open");
-		let violation = super::super::error::to_session_code(&SessionError::ProtocolViolation);
-		assert!(
-			matches!(err, memory::Error::Session { code, .. } if code == violation),
-			"{err:?}"
-		);
 		relay.serving.abort();
 	}
 
