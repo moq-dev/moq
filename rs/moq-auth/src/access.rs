@@ -1,4 +1,8 @@
 use moq_pattern::{Pattern, Patterns};
+use serde::de::{
+	MapAccess, SeqAccess, Visitor,
+	value::{MapAccessDeserializer, SeqAccessDeserializer},
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A positive bitrate in bits per second, exactly representable in JSON.
@@ -95,19 +99,32 @@ impl FromIterator<Pattern> for Access {
 	}
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum Paths {
-	One(Pattern),
-	Many(Patterns),
+struct Paths(Patterns);
+
+impl<'de> Deserialize<'de> for Paths {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		deserializer.deserialize_any(PathsVisitor)
+	}
 }
 
-impl Paths {
-	fn into_patterns(self) -> Patterns {
-		match self {
-			Self::One(path) => path.into(),
-			Self::Many(paths) => paths,
-		}
+struct PathsVisitor;
+
+impl<'de> Visitor<'de> for PathsVisitor {
+	type Value = Paths;
+
+	fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		formatter.write_str("a path pattern or list of path patterns")
+	}
+
+	fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Paths, E> {
+		value
+			.parse::<Pattern>()
+			.map(|path| Paths(path.into()))
+			.map_err(E::custom)
+	}
+
+	fn visit_seq<A: SeqAccess<'de>>(self, value: A) -> Result<Paths, A::Error> {
+		Patterns::deserialize(SeqAccessDeserializer::new(value)).map(Paths)
 	}
 }
 
@@ -119,22 +136,33 @@ struct Object {
 	rate: Option<Rate>,
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum Wire {
-	Paths(Paths),
-	Object(Object),
-}
-
 impl<'de> Deserialize<'de> for Access {
 	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-		Ok(match Wire::deserialize(deserializer)? {
-			Wire::Paths(path) => path.into_patterns().into(),
-			Wire::Object(Object { path, rate }) => Self {
-				path: path.into_patterns(),
-				rate,
-			},
-		})
+		// Dispatch by shape without an untagged fallback hiding pattern errors.
+		deserializer.deserialize_any(AccessVisitor)
+	}
+}
+
+struct AccessVisitor;
+
+impl<'de> Visitor<'de> for AccessVisitor {
+	type Value = Access;
+
+	fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		formatter.write_str("a path pattern, list, or access object")
+	}
+
+	fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Access, E> {
+		PathsVisitor.visit_str(value).map(|path| path.0.into())
+	}
+
+	fn visit_seq<A: SeqAccess<'de>>(self, value: A) -> Result<Access, A::Error> {
+		PathsVisitor.visit_seq(value).map(|path| path.0.into())
+	}
+
+	fn visit_map<A: MapAccess<'de>>(self, value: A) -> Result<Access, A::Error> {
+		let Object { path, rate } = Object::deserialize(MapAccessDeserializer::new(value))?;
+		Ok(Access { path: path.0, rate })
 	}
 }
 

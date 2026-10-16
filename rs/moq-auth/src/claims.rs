@@ -69,15 +69,15 @@ impl Scope {
 /// policy holds its anonymous and mTLS rules as this pair too, authorized at `/`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Permissions {
-	/// Patterns the holder may subscribe to, relative to the authorized path.
+	/// Subscribe paths and an optional download cap, relative to the authorized path.
 	pub subscribe: crate::Access,
 
-	/// Patterns the holder may publish to, relative to the authorized path.
+	/// Publish paths and an optional upload cap, relative to the authorized path.
 	pub publish: crate::Access,
 }
 
 impl Permissions {
-	/// Access granted as these pattern unions.
+	/// Grant access to these publish and subscribe paths, with optional bitrate caps.
 	pub fn new(publish: crate::Access, subscribe: crate::Access) -> Self {
 		Self { publish, subscribe }
 	}
@@ -116,12 +116,10 @@ pub struct Claims {
 	/// It's mostly for compression and is optional, defaulting to the empty string.
 	pub root: String,
 
-	/// If specified, the user can publish any matching broadcasts.
-	/// If not specified, the user will not publish any broadcasts.
+	/// Publish paths and an optional upload cap, relative to the root.
 	pub publish: crate::Access,
 
-	/// If specified, the user can subscribe to any matching broadcasts.
-	/// If not specified, the user will not receive announcements and cannot subscribe to any broadcasts.
+	/// Subscribe paths and an optional download cap, relative to the root.
 	pub subscribe: crate::Access,
 
 	/// The expiration time of the token as a unix timestamp (`exp`).
@@ -142,13 +140,13 @@ impl Claims {
 		self
 	}
 
-	/// Grant publish access to these patterns, relative to the root.
+	/// Set publish access and its optional bitrate cap, relative to the root.
 	pub fn with_publish(mut self, access: crate::Access) -> Self {
 		self.publish = access;
 		self
 	}
 
-	/// Grant subscribe access to these patterns, relative to the root.
+	/// Set subscribe access and its optional bitrate cap, relative to the root.
 	pub fn with_subscribe(mut self, access: crate::Access) -> Self {
 		self.subscribe = access;
 		self

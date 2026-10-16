@@ -417,9 +417,9 @@ pub struct Token {
 	/// Subtrees read from elsewhere on the origin: each path, relative to `root`,
 	/// resolves at the absolute path it maps to.
 	pub mounts: Vec<(PathOwned, PathOwned)>,
-	/// The patterns the holder may subscribe to, relative to `root`.
+	/// Subscribe paths and an optional download cap, relative to `root`.
 	pub subscribe: moq_auth::Access,
-	/// The patterns the holder may publish to, relative to `root`.
+	/// Publish paths and an optional upload cap, relative to `root`.
 	pub publish: moq_auth::Access,
 	/// The tier this session's stats record under.
 	pub tier: Tier,
@@ -1230,7 +1230,10 @@ mod tests {
 			admission.refuse(Error::Refused);
 			// A grant that admits nothing is the decider's mistake, refused like a server's.
 			let admission = admissions.next().await.expect("an admission");
-			admission.grant(lease::Consumer::fixed(Grant::new(Default::default(), Default::default())));
+			admission.grant(lease::Consumer::fixed(Grant::new(
+				Default::default(),
+				Default::default(),
+			)));
 			// Dropped without an answer.
 			drop(admissions.next().await.expect("an admission"));
 			admissions

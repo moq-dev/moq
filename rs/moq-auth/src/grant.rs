@@ -16,11 +16,11 @@ use std::time::{Duration, SystemTime};
 #[serde(default)]
 #[non_exhaustive]
 pub struct Grant {
-	/// Patterns the session may publish, relative to the root.
+	/// Publish paths and an optional upload cap, relative to the root.
 	#[serde(skip_serializing_if = "Access::is_default")]
 	pub publish: Access,
 
-	/// Patterns the session may subscribe to, relative to the root.
+	/// Subscribe paths and an optional download cap, relative to the root.
 	#[serde(skip_serializing_if = "Access::is_default")]
 	pub subscribe: Access,
 
@@ -58,7 +58,7 @@ pub struct Grant {
 }
 
 impl Grant {
-	/// A grant of these patterns and nothing else.
+	/// A grant of these paths and bitrate caps, with no other restrictions.
 	pub fn new(publish: Access, subscribe: Access) -> Self {
 		Self {
 			publish,

@@ -125,9 +125,9 @@ export type Claims = z.output<typeof ClaimsSchema>;
  * it; the empty pattern grants exactly the path.
  */
 export interface Permissions {
-	/** Patterns the holder may subscribe to, relative to the authorized path. */
+	/** Subscribe paths and an optional download cap, relative to the authorized path. */
 	subscribe: Access;
-	/** Patterns the holder may publish to, relative to the authorized path. */
+	/** Publish paths and an optional upload cap, relative to the authorized path. */
 	publish: Access;
 }
 

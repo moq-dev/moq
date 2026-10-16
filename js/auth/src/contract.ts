@@ -139,9 +139,9 @@ export type Request = z.infer<typeof RequestSchema>;
  */
 export const GrantSchema = z
 	.object({
-		/** Patterns the session may publish, relative to the root. */
+		/** Publish paths and an optional upload cap, relative to the root. */
 		publish: z.optional(AccessSchema),
-		/** Patterns the session may subscribe to, relative to the root. */
+		/** Subscribe paths and an optional download cap, relative to the root. */
 		subscribe: z.optional(AccessSchema),
 		/** The path the patterns are relative to, replacing the dialed one. Absent means the dialed path. */
 		root: z.optional(z.string()),
