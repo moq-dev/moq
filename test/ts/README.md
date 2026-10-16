@@ -77,6 +77,8 @@ moq --connect http://localhost:4443 --broadcast live.hang export ts > sub.ts
 
 Requirements: `tsp`, `tsanalyze` and `tstables` (TSDuck) and `python3` for every mode; the
 round-trip modes also need `cargo`, `ffmpeg`, `ffprobe`, `curl`, and `timeout`.
+`just test ts-tstd` also needs `ffmpeg` (with libx264) and `ffprobe` for its generated
+references.
 
 ## Checks
 
