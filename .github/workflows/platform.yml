@@ -75,7 +75,7 @@ jobs:
     if: needs.scope.outputs.rs == 'true' || needs.scope.outputs.cpp == 'true' || needs.scope.outputs.obs == 'true'
     # OBS uses the Visual Studio 17 2022 CMake generator.
     runs-on: windows-2022
-    # The suites run serially without a Rust cache; the full macOS suite measured 43 min.
+    # The suites run serially; the full macOS suite measured 43 min without a Rust cache.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -95,6 +95,12 @@ jobs:
         uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
         with:
           tool: nextest@0.9.146
+      # Read only: cache.yml warms these platforms from `main`.
+      - name: Rust cache
+        uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
       - name: Install uniffi-bindgen-cpp
         if: needs.scope.outputs.cpp == 'true' || needs.scope.outputs.obs == 'true'
         shell: bash
@@ -135,6 +141,11 @@ jobs:
         uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
         with:
           tool: nextest@0.9.146
+      - name: Rust cache
+        uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
       - name: Install uniffi-bindgen-cpp
         if: needs.scope.outputs.obs == 'true'
         run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.4+v0.32.2
