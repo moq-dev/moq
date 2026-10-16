@@ -180,7 +180,6 @@ cover the behavior.
 
 ## Required
 
-- [Narrow the model before it goes public](/quest/m1/public-model/narrow.md) - its visibility rewrite and marker lint guard every model API this child edits
 - [Tail arrivals](/quest/m1/tail-arrivals.md) - settles the received-end semantics before they become public
 
 ## Related

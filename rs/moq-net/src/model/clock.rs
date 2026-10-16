@@ -12,7 +12,7 @@ use std::time::Duration;
 use rand::RngExt;
 
 /// The current instant on the model's clock.
-pub(crate) fn now() -> crate::time::Instant {
+pub(super) fn now() -> crate::time::Instant {
 	crate::time::Instant::now()
 }
 
@@ -22,7 +22,7 @@ pub(crate) fn now() -> crate::time::Instant {
 /// The ambient runtime's clock where there is one, so a paused test runtime pauses
 /// staleness along with the drivers it supplies time to.
 #[cfg(not(any(test, loom)))]
-pub(crate) fn wall() -> crate::time::Instant {
+pub(super) fn wall() -> crate::time::Instant {
 	#[cfg(all(feature = "async", not(target_family = "wasm")))]
 	let now = web_async::time::Instant::now().into_std();
 	#[cfg(not(all(feature = "async", not(target_family = "wasm"))))]
@@ -32,7 +32,7 @@ pub(crate) fn wall() -> crate::time::Instant {
 
 /// Loom permutes handoffs without advancing time, so scheduling cannot age groups.
 #[cfg(all(loom, not(test)))]
-pub(crate) fn wall() -> crate::time::Instant {
+pub(super) fn wall() -> crate::time::Instant {
 	static FROZEN: LazyLock<crate::time::Instant> = LazyLock::new(now);
 	*FROZEN
 }
@@ -40,7 +40,7 @@ pub(crate) fn wall() -> crate::time::Instant {
 /// Unit tests freeze the wall clock, so only time a test supplies moves it: the
 /// simulated clock inside `moq_net_sim`, or a pool stepped by hand outside it.
 #[cfg(test)]
-pub(crate) fn wall() -> crate::time::Instant {
+pub(super) fn wall() -> crate::time::Instant {
 	static FROZEN: LazyLock<crate::time::Instant> = LazyLock::new(now);
 	match moq_net_sim::is_running() {
 		true => moq_net_sim::now(),
@@ -55,7 +55,7 @@ pub(crate) fn wall() -> crate::time::Instant {
 /// monotonic with wall time. A random per-process jitter makes it read late, which
 /// deters using it as a wall clock and catches implementations that assume
 /// unrelated broadcasts are synchronized.
-pub(crate) fn anchor() -> (crate::time::Instant, Duration) {
+pub(super) fn anchor() -> (crate::time::Instant, Duration) {
 	static ANCHOR: LazyLock<(crate::time::Instant, Duration)> = LazyLock::new(|| {
 		let jitter = Duration::from_millis(rand::rng().random_range(1..69_420));
 		(now(), offset(jitter))

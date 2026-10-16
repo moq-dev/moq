@@ -10,6 +10,7 @@
 import * as z from "zod/mini";
 import type * as Epoch from "./epoch.ts";
 
+// pending: /quest/m1/public-model/answer.md
 /**
  * One relay's identity in a broadcast's hop chain, encoded as a 62-bit varint on the wire.
  *
@@ -28,6 +29,7 @@ export const HopSchema = z
 
 export type Hop = z.infer<typeof HopSchema>;
 
+// pending: /quest/m1/public-model/answer.md
 /**
  * The reserved id 0, meaning "no identity".
  *
@@ -38,6 +40,7 @@ export type Hop = z.infer<typeof HopSchema>;
  */
 export const UNKNOWN_HOP: Hop = HopSchema.parse(0n);
 
+// pending: /quest/m1/public-model/answer.md
 /**
  * Maximum length of a hop chain. Must match `MAX_HOPS` in Rust's `model/origin.rs`.
  *
@@ -46,6 +49,7 @@ export const UNKNOWN_HOP: Hop = HopSchema.parse(0n);
  */
 export const MAX_HOPS = 32;
 
+// pending: /quest/m1/public-model/answer.md
 /**
  * Generate a fresh hop with a random non-zero id.
  *
@@ -67,6 +71,7 @@ export function randomHop(): Hop {
 	return HopSchema.parse(raw === 0n ? 1n : raw);
 }
 
+// pending: /quest/m1/public-model/answer.md
 /** The static cost of pulling content through a route; lower wins. */
 export type Cost = bigint;
 
@@ -121,6 +126,7 @@ export function isAnonymous(route: Route): boolean {
 	return route.hops.includes(UNKNOWN_HOP);
 }
 
+// pending: /quest/m1/public-model/answer.md
 /** Whether two routes name the same epoch, hop chain, and cost. */
 export function routesEqual(a: Route | undefined, b: Route | undefined): boolean {
 	if (a === b) return true;

@@ -106,6 +106,7 @@ impl Producer {
 
 	/// A handle that mints consumers without being one, so holding it is not demand.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn weak(&self) -> Weak {
 		Weak(self.state.weak())
 	}
@@ -173,11 +174,13 @@ impl Default for Producer {
 /// Mints [`Consumer`]s on demand without counting as one, nor keeping the channel open.
 #[derive(Clone)]
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
+// pending: /quest/m1/public-model/answer.md
 pub(crate) struct Weak(kio::ProducerWeak<State>);
 
 impl Weak {
 	/// A new consumer, which reports the closure once the producer is gone.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn consume(&self) -> Consumer {
 		Consumer {
 			inner: Inner::Whole(self.0.consume()),
