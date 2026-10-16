@@ -26,7 +26,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 criterion = { workspace = true }
 json-patch = "4"
-proptest = { version = "1.12.0", default-features = false, features = ["std", "handle-panics"] }
+proptest = { workspace = true, features = ["handle-panics"] }
 
 [[bench]]
 name = "codec"

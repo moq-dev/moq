@@ -488,8 +488,9 @@ fn run(case: &Case) -> Result<Outcome, TestCaseError> {
         }
     }
 
-    // Heal the path so the close cannot be lost
+    // Heal the path so the close cannot be lost, including to a full bottleneck's tail drop
     for link in [&mut pair.to_server, &mut pair.to_client] {
+        link.bottleneck = None;
         link.loss = 0.0;
         link.reorder = 0.0;
     }
