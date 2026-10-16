@@ -16,7 +16,7 @@ use tokio::time::Instant;
 use super::args::Args;
 use super::output::{Output, Sink, Speaker};
 use super::playback::{Kind, Playback, joined};
-use super::timeline::{AudioTimeline, Presentation, fit, timestamp};
+use super::timeline::{AudioTimeline, Presentation, Role, fit, timestamp};
 use super::video::Video;
 use super::window::Event;
 
@@ -409,6 +409,10 @@ async fn play_audio<O: Output>(
 	// comes and lets `fit` hold the sink on the target instead. The window
 	// schedules video against where the speaker actually is, which keeps the two
 	// together whatever the target does.
+	let mut role = Role::new(presentation.clone(), changed.clone(), Kind::Audio);
+	let received = Mutex::new(VecDeque::new());
+	let arrived = tokio::sync::Notify::new();
+	let max_delay = consumer.max_delay();
 	let sample_rate = consumer.sample_rate();
 	let layout = consumer.layout();
 	let channels = layout.channels();
@@ -435,7 +439,7 @@ async fn play_audio<O: Output>(
 	// decoder's latency budget says: anything longer is what that budget chose to
 	// skip, so playing it as silence would hand back the delay the skip avoided.
 	// Past it the sink skips the hole and the clock re-anchors, as it does today.
-	let fill_max = samples(consumer.max_delay());
+	let fill_max = samples(max_delay);
 
 	let mut timeline = AudioTimeline::default();
 
@@ -443,80 +447,124 @@ async fn play_audio<O: Output>(
 	// all logs once rather than once per packet.
 	let mut dropping = false;
 
-	loop {
-		let frame = match consumer.read().await {
-			Ok(Some(frame)) => frame,
-			Ok(None) => break,
-			// One bad packet is that packet's problem: the decoder stays usable, so
-			// skip it rather than ending playback and taking the video window down
-			// with it.
-			Err(err @ moq_audio::Error::Decode(_)) => {
-				if dropping {
-					tracing::debug!(%err, "dropping an audio frame");
-				} else {
-					tracing::warn!(%err, "dropping an audio frame");
-					dropping = true;
-				}
-				continue;
+	let receive = async {
+		loop {
+			let event = match consumer.read().await {
+				Err(err) if !matches!(err, moq_audio::Error::Decode(_)) => return Err(err.into()),
+				event => event,
+			};
+			let ended = matches!(event, Ok(None));
+			let delay = consumer.delay();
+			received.lock().unwrap().push_back((event, delay));
+			arrived.notify_one();
+			if ended {
+				return Ok::<_, anyhow::Error>(());
 			}
-			Err(err) => return Err(err.into()),
-		};
-		dropping = false;
+		}
+	};
+	let play = async {
+		let mut end_segment = None;
+		loop {
+			let (event, delay) = loop {
+				if let Some(event) = received.lock().unwrap().pop_front() {
+					break event;
+				}
+				arrived.notified().await;
+			};
+			let frame = match event {
+				Ok(Some(moq_audio::decode::Read::Frame { segment, frame })) => {
+					if end_segment.take_if(|end| *end != segment).is_some() {
+						// A declared boundary preserves the old sink, unlike an undeclared hole.
+						drain(sink).await;
+						role.resume().await;
+						timeline = AudioTimeline::default();
+						sink = speaker.sink(input.clone())?;
+						dry = true;
+					}
+					frame
+				}
+				Ok(Some(moq_audio::decode::Read::End { segment, .. })) => {
+					end_segment = Some(segment);
+					continue;
+				}
+				Ok(Some(moq_audio::decode::Read::Gap { .. })) => {
+					end_segment = None;
+					continue;
+				}
+				Ok(None) => break,
+				// One bad packet is that packet's problem: the decoder stays usable, so
+				// skip it rather than ending playback and taking the video window down
+				// with it.
+				Err(err @ moq_audio::Error::Decode(_)) => {
+					if dropping {
+						tracing::debug!(%err, "dropping an audio frame");
+					} else {
+						tracing::warn!(%err, "dropping an audio frame");
+						dropping = true;
+					}
+					continue;
+				}
+				Err(err) => return Err(err.into()),
+			};
+			dropping = false;
 
-		let length = frame.data.len() / stride;
-		let start = timestamp(frame.timestamp);
-		let timing = timeline.push(start, length, sample_rate, fill_max);
+			let length = frame.data.len() / stride;
+			let start = timestamp(frame.timestamp);
+			let timing = timeline.push(start, length, sample_rate, fill_max);
 
-		// A rewind or a hole too large to fill starts a new playback sink. The old
-		// sink has no media clock, so its buffered audio cannot be carried across a
-		// timeline region the player skipped.
-		if timing.reset_sink {
-			drop(sink);
-			presentation.lock().unwrap().restarted();
-			sink = speaker.sink(input.clone())?;
-			dry = true;
+			// A rewind or a hole too large to fill starts a new playback sink. The old
+			// sink has no media clock, so its buffered audio cannot be carried across a
+			// timeline region the player skipped.
+			if timing.reset_sink {
+				drop(sink);
+				presentation.lock().unwrap().restarted();
+				sink = speaker.sink(input.clone())?;
+				dry = true;
+			}
+
+			// A hole in the media is a hole in the audio, not a splice. Handing the next
+			// frame straight to the speaker shortens the track by the missing duration,
+			// which leaves it running ahead of media time until the clock below
+			// re-anchors, taking the video with it. So the hole goes in as silence ahead
+			// of the frame, and the pair is fitted to the target as one write.
+			let buffered = samples(sink.buffered());
+			dry |= buffered == 0;
+			// Capped at the age budget: audio older than it is skipped rather than held,
+			// so a deeper target could never fill. The advertised floor needs the cap,
+			// being a number the publisher declared about itself, unbounded. The budget
+			// is also what the sink's ring was sized to hold.
+			let target = samples(delay.min(max_delay).max(AUDIO_BUFFER_MIN));
+			let fit = fit(dry, buffered, target, slack, timing.silence + length as u64);
+			dry = false;
+
+			// Playback drops stay on the live timeline; retrying them would add latency,
+			// and the sink already reports them in its logs.
+			let mut quiet = fit.pad + timing.silence.saturating_sub(fit.skip);
+			while quiet > 0 {
+				let part = (quiet as usize * stride).min(silence.len());
+				sink.write(&silence[..part])?;
+				quiet -= (part / stride) as u64;
+			}
+			let skip = fit.skip.saturating_sub(timing.silence) as usize * stride;
+			sink.write(&frame.data[skip.min(frame.data.len())..])?;
+
+			// Anchor the playout clock on where the speaker has actually reached, which
+			// is the only half of the pipeline that cannot skip ahead. A move has to
+			// wake the window: it is asleep on a deadline computed from the old anchor,
+			// and every queued frame is due earlier now.
+			let moved = presentation
+				.lock()
+				.unwrap()
+				.audio(timing.end, sink.buffered(), Instant::now().into_std());
+			if moved {
+				changed.notify_one();
+				output.send(Event::Wake);
+			}
 		}
 
-		// A hole in the media is a hole in the audio, not a splice. Handing the next
-		// frame straight to the speaker shortens the track by the missing duration,
-		// which leaves it running ahead of media time until the clock below
-		// re-anchors, taking the video with it. So the hole goes in as silence ahead
-		// of the frame, and the pair is fitted to the target as one write.
-		let buffered = samples(sink.buffered());
-		dry |= buffered == 0;
-		// Capped at the age budget: audio older than it is skipped rather than held,
-		// so a deeper target could never fill. The advertised floor needs the cap,
-		// being a number the publisher declared about itself, unbounded. The budget
-		// is also what the sink's ring was sized to hold.
-		let target = samples(consumer.delay().min(consumer.max_delay()).max(AUDIO_BUFFER_MIN));
-		let fit = fit(dry, buffered, target, slack, timing.silence + length as u64);
-		dry = false;
-
-		// Playback drops stay on the live timeline; retrying them would add latency,
-		// and the sink already reports them in its logs.
-		let mut quiet = fit.pad + timing.silence.saturating_sub(fit.skip);
-		while quiet > 0 {
-			let part = (quiet as usize * stride).min(silence.len());
-			sink.write(&silence[..part])?;
-			quiet -= (part / stride) as u64;
-		}
-		let skip = fit.skip.saturating_sub(timing.silence) as usize * stride;
-		sink.write(&frame.data[skip.min(frame.data.len())..])?;
-
-		// Anchor the playout clock on where the speaker has actually reached, which
-		// is the only half of the pipeline that cannot skip ahead. A move has to
-		// wake the window: it is asleep on a deadline computed from the old anchor,
-		// and every queued frame is due earlier now.
-		let moved = presentation
-			.lock()
-			.unwrap()
-			.audio(timing.end, sink.buffered(), Instant::now().into_std());
-		if moved {
-			changed.notify_one();
-			output.send(Event::Wake);
-		}
-	}
-
+		Ok::<_, anyhow::Error>(sink)
+	};
+	let (_, sink) = tokio::try_join!(receive, play)?;
 	Ok(sink)
 }
 
@@ -542,6 +590,58 @@ mod tests {
 	/// Samples per packet.
 	const PACKET: u64 = 960;
 	const PACKET_DURATION: Duration = Duration::from_millis(20);
+
+	#[tokio::test]
+	async fn a_quick_audio_resume_preserves_the_old_speaker_tail() {
+		tokio::time::pause();
+		let delay = Duration::from_millis(200);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut producer = moq_mux::container::Producer::new(track, Container::Legacy(moq_mux::container::Kind::Audio));
+		let mut options = moq_audio::decode::Options::new();
+		options.delay = Some(delay);
+		options.max_delay = delay;
+		options.output.format = moq_audio::Format::F32;
+		let consumer = moq_audio::decode::Consumer::new(
+			&broadcast.consume(),
+			&AudioConfig::new(AudioCodec::Pcm, SAMPLE_RATE, 1),
+			"audio",
+			options,
+		)
+		.await
+		.unwrap();
+		let recorder = Recorder::default();
+		let playback = AudioPlayback {
+			changed: Default::default(),
+			speaker: recorder.clone(),
+			presentation: Arc::new(Mutex::new(Presentation::new(delay))),
+			latency: delay,
+			output: recorder.clone(),
+		};
+		let task = tokio::spawn(async move {
+			play_audio(consumer, playback).await.unwrap().finish().await;
+		});
+		producer.write(packet(0, 0.25)).unwrap();
+		tokio::task::yield_now().await;
+		producer.discontinuity().unwrap();
+		producer.write(packet(0, 0.5)).unwrap();
+		producer.finish().unwrap();
+		task.await.unwrap();
+		let played = recorder.played();
+		let old: Vec<_> = played.iter().filter(|part| part.sample == 0.25).collect();
+		let new: Vec<_> = played.iter().filter(|part| part.sample == 0.5).collect();
+		assert_eq!(
+			old.iter().map(|part| part.to - part.from).sum::<Duration>(),
+			PACKET_DURATION
+		);
+		assert_eq!(
+			new.iter().map(|part| part.to - part.from).sum::<Duration>(),
+			PACKET_DURATION
+		);
+		assert!(old.last().unwrap().to <= new.first().unwrap().from);
+	}
 
 	/// A mono PCM rendition, published and named in the catalog until dropped.
 	fn rendition(

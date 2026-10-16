@@ -2,6 +2,7 @@
 
 use std::time::{Duration, Instant};
 
+use super::playback::Kind;
 use hang::moq_net::Timestamp;
 
 /// The playout clock: one anchor the window and the speaker both present
@@ -28,6 +29,9 @@ pub(super) struct Presentation {
 	/// audio frame pins the anchor outright instead of pacing against media it
 	/// will never play.
 	restart: bool,
+	/// Segment reached by each active playback role.
+	roles: [Option<u64>; 2],
+	segment: u64,
 }
 
 impl Presentation {
@@ -37,7 +41,32 @@ impl Presentation {
 			delay,
 			speaker: false,
 			restart: false,
+			roles: [None; 2],
+			segment: 0,
 		}
+	}
+
+	pub(super) fn started(&mut self, role: Kind) {
+		self.roles[role as usize] = Some(0);
+	}
+
+	pub(super) fn finished(&mut self, role: Kind) {
+		self.roles[role as usize] = None;
+	}
+
+	/// Rebase once every active role has played out the previous segment.
+	pub(super) fn resume(&mut self, role: Kind, segment: u64) -> bool {
+		self.roles[role as usize] = Some(segment);
+		if self.roles.iter().flatten().any(|ready| *ready < segment) {
+			return false;
+		}
+		if self.segment < segment {
+			self.segment = segment;
+			self.pacer = moq_mux::Pacer::default().with_delay(self.delay);
+			self.speaker = false;
+			self.restart = false;
+		}
+		true
 	}
 
 	/// Fold an arriving video frame into the anchor, unless the speaker owns it,
@@ -120,6 +149,54 @@ impl Presentation {
 	/// left to wait for.
 	pub(super) fn due(&self, timestamp: Timestamp) -> Option<Instant> {
 		self.pacer.due(timestamp)
+	}
+}
+
+/// Releases a role when its track ends or the task is cancelled.
+pub(super) struct Role {
+	presentation: std::sync::Arc<std::sync::Mutex<Presentation>>,
+	changed: std::sync::Arc<tokio::sync::Notify>,
+	role: Kind,
+	segment: u64,
+}
+
+impl Role {
+	pub(super) fn new(
+		presentation: std::sync::Arc<std::sync::Mutex<Presentation>>,
+		changed: std::sync::Arc<tokio::sync::Notify>,
+		role: Kind,
+	) -> Self {
+		presentation.lock().unwrap().started(role);
+		Self {
+			presentation,
+			changed,
+			role,
+			segment: 0,
+		}
+	}
+
+	pub(super) async fn resume(&mut self) {
+		self.segment += 1;
+		self.presentation.lock().unwrap().resume(self.role, self.segment);
+		self.changed.notify_waiters();
+		loop {
+			let changed = self.changed.notified();
+			// Register before inspecting shared state so a peer cannot finish between them.
+			tokio::pin!(changed);
+			changed.as_mut().enable();
+			if self.presentation.lock().unwrap().resume(self.role, self.segment) {
+				self.changed.notify_waiters();
+				return;
+			}
+			changed.await;
+		}
+	}
+}
+
+impl Drop for Role {
+	fn drop(&mut self) {
+		self.presentation.lock().unwrap().finished(self.role);
+		self.changed.notify_waiters();
 	}
 }
 
@@ -236,6 +313,33 @@ mod tests {
 
 	fn ms(millis: u64) -> Timestamp {
 		Timestamp::from_millis(millis).unwrap()
+	}
+
+	#[test]
+	fn a_segment_rebases_only_after_both_playback_roles_drain() {
+		let start = Instant::now();
+		let mut presentation = Presentation::new(DELAY);
+		presentation.started(Kind::Video);
+		presentation.started(Kind::Audio);
+		presentation.audio(Duration::from_secs(10), DELAY, start);
+		let old = presentation.due(ms(10_000));
+		assert!(!presentation.resume(Kind::Video, 1));
+		assert_eq!(presentation.due(ms(10_000)), old);
+		assert!(presentation.resume(Kind::Audio, 1));
+		assert_eq!(presentation.due(ms(10_000)), None);
+		presentation.audio(Duration::from_secs(1), DELAY, start);
+		assert!(presentation.resume(Kind::Video, 1));
+		assert_eq!(
+			presentation.due(ms(1_000)),
+			Some(start + DELAY),
+			"one rebase per segment"
+		);
+		assert!(!presentation.resume(Kind::Audio, 2));
+		presentation.finished(Kind::Video);
+		assert!(
+			presentation.resume(Kind::Audio, 2),
+			"a closed track cannot hold its peer forever"
+		);
 	}
 
 	/// Earlier arrivals pull the anchor forward so playback converges on the live
