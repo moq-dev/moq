@@ -17,6 +17,10 @@ x64.
 Use `Named(name)` or `Requested(request)` as the target for `TrackProducer.audio` / `.video`.
 `CatalogProducer(broadcast)` holds the broadcast weakly and owns catalog properties and sections;
 its writes fail with `Error.Closed` after the broadcast closes or is released.
+Share `media.Timebase(broadcast)` through container init records when several imports
+use one source timeline. `ContainerStreamProducer` takes `ContainerStreamInit`;
+omitting its timebase keeps an independent offset. A timebase belongs to its broadcast
+and does not keep it open.
 `MediaFrame.timestamp`, media writes, and `flush` use `datetime.timedelta`.
 A missing data timestamp stays untimed; the library never substitutes zero or now.
 Raw tracks with a `None` timescale are untimed on both publish and receive.

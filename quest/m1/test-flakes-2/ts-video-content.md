@@ -55,6 +55,19 @@ failed 3 of 4 runs, in two other ways:
   (43 to 64 ms) vanished mid-stream with no warning anywhere, and the
   exporter's release clock reported `dropped=0`.
 
+Then [#5565](https://github.com/moq-dev/moq/issues/5565), on 2026-10-15:
+4 of 51 `ts.yml` runs between 2026-10-14 19:57Z and 2026-10-15 03:55Z failed
+`video-content` the same way, two on branches that change nothing in moq-net,
+moq-relay or moq-mux's consumer: 38634848576 (`fix/tokio-windows-refused-dial`),
+38657903232 (#5553), 38662560784 (`quest/m1/papercuts-rs`) and 38677047938
+(#5548's branch). Their artifacts expire about 2026-10-22. Each `sub.log` has
+`current group evicted; skipping to next buffered group track="0.avc3"
+group=1 error=Hang(Moq(Stream(Old)))`, 17 to 21 ms after a video subscribe
+at about 1.98 s, and the capture keeps pictures 25 to about 33, then 50
+onward. #5548 moved the zero-budget conviction from the successor's first
+frame to its arrival, essentially the same instant, so it should not change
+the rate. Not reproduced locally: 0 of 15 on main (3abf0161c, macOS arm64).
+
 So in each case the checks saw real loss. The flake is what makes the
 exporter lose content, and the loss goes unreported.
 

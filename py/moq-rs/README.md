@@ -184,7 +184,10 @@ client = moq.Client(
   `Requested(request)` takes over a pending subscriber request, whose name is already fixed.
 - `media.TrackStreamProducer.video(...)` infers video frame boundaries from a byte stream.
 - `media.ContainerProducer(broadcast, ContainerInit(...))` demuxes complete container chunks;
-  `media.ContainerStreamProducer(broadcast, format)` recovers framing from a byte stream.
+  `media.ContainerStreamProducer(broadcast, ContainerStreamInit(...))` recovers framing from a byte stream.
+  Share `media.Timebase(broadcast)` in the init records for containers on one source timeline;
+  omitting it gives each container an independent offset. Timebases belong to one broadcast
+  and do not keep it open.
 - `media.CatalogProducer(broadcast)` owns `set_video_properties`, `set_section`, and
   `remove_section`. It holds the broadcast weakly; writes fail with `Error.Closed` after closing
   or releasing the broadcast. `.now()` returns its current media time as `timedelta` and fixes

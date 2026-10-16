@@ -46,9 +46,40 @@ type (
 	AudioInit = ffi.MoqAudioInit
 	// VideoInit describes a video codec, initialization bytes, and hints.
 	VideoInit = ffi.MoqVideoInit
-	// ContainerInit describes a container and its leading bytes.
-	ContainerInit = ffi.MoqContainerInit
 )
+
+// Timebase shares a source's timestamp offset without keeping its broadcast open.
+type Timebase struct{ inner *ffi.MoqMediaTimebase }
+
+// NewTimebase creates a shared source timebase owned by broadcast.
+func NewTimebase(broadcast *moq.BroadcastProducer) (*Timebase, error) {
+	inner, err := ffi.NewMoqMediaTimebase(bridge.BroadcastProducer(broadcast))
+	if err != nil {
+		return nil, err
+	}
+	return &Timebase{inner: inner}, nil
+}
+
+// Close releases this timebase handle on the calling goroutine; existing imports keep their offset.
+func (t *Timebase) Close() { t.inner.Destroy() }
+
+// ContainerInit describes a container, its leading bytes and an optional shared timebase.
+type ContainerInit struct {
+	// Format selects the container parser.
+	Format ContainerFormat
+	// Data supplies the leading container bytes.
+	Data []byte
+	// Timebase shares a source offset, or nil for an independent offset.
+	Timebase *Timebase
+}
+
+// ContainerStreamInit describes a byte-stream container and an optional shared timebase.
+type ContainerStreamInit struct {
+	// Format selects the container parser.
+	Format ContainerFormat
+	// Timebase shares a source offset, or nil for an independent offset.
+	Timebase *Timebase
+}
 
 // MediaFrame is a container-decoded payload, presentation timestamp, and keyframe flag.
 type MediaFrame struct {
@@ -166,7 +197,11 @@ func NewVideoTrackStreamProducer(broadcast *moq.BroadcastProducer, target Target
 
 // NewContainerProducer imports complete container chunks.
 func NewContainerProducer(broadcast *moq.BroadcastProducer, init ContainerInit) (*ContainerProducer, error) {
-	inner, err := ffi.NewMoqMediaContainerProducer(bridge.BroadcastProducer(broadcast), init)
+	var timebase **ffi.MoqMediaTimebase
+	if init.Timebase != nil {
+		timebase = &init.Timebase.inner
+	}
+	inner, err := ffi.NewMoqMediaContainerProducer(bridge.BroadcastProducer(broadcast), ffi.MoqContainerInit{Format: init.Format, Data: init.Data, Timebase: timebase})
 	if err != nil {
 		return nil, err
 	}
@@ -174,8 +209,12 @@ func NewContainerProducer(broadcast *moq.BroadcastProducer, init ContainerInit) 
 }
 
 // NewContainerStreamProducer imports a container byte stream.
-func NewContainerStreamProducer(broadcast *moq.BroadcastProducer, format ContainerFormat) (*ContainerStreamProducer, error) {
-	inner, err := ffi.NewMoqMediaContainerStreamProducer(bridge.BroadcastProducer(broadcast), format)
+func NewContainerStreamProducer(broadcast *moq.BroadcastProducer, init ContainerStreamInit) (*ContainerStreamProducer, error) {
+	var timebase **ffi.MoqMediaTimebase
+	if init.Timebase != nil {
+		timebase = &init.Timebase.inner
+	}
+	inner, err := ffi.NewMoqMediaContainerStreamProducer(bridge.BroadcastProducer(broadcast), ffi.MoqContainerStreamInit{Format: init.Format, Timebase: timebase})
 	if err != nil {
 		return nil, err
 	}

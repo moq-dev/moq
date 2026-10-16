@@ -306,18 +306,16 @@ impl Rendition {
 		self.bitrate().unwrap_or(default_bandwidth(self.kind))
 	}
 
-	/// Take the advertised bitrate, framerate, and `enabled` flag from a catalog update that
-	/// [`matches`](Self::matches_video) this rendition (audio passes no framerate). Returns whether
-	/// the rendition was enabled or disabled, which changes what the master playlist lists.
+	/// Update mutable catalog metadata without resetting the rendition.
 	///
 	/// The publisher's estimator republishes the catalog whenever its measured bitrate moves, so
 	/// this is the common update by far: rebuilding the rendition for it would reset the playlist
 	/// window, the cached init segment, and `EXT-X-MEDIA-SEQUENCE` several times a minute. A
 	/// disable keeps all three too, so a rendition that re-enables resumes where it was.
-	pub(crate) fn refresh(&self, bitrate: Option<u64>, framerate: Option<f64>, enabled: bool) -> bool {
+	pub(crate) fn refresh(&self, bitrate: Option<u64>, framerate: Option<f64>, enabled: bool) {
 		*self.bitrate.write().expect("bitrate lock poisoned") = bitrate;
 		*self.framerate.write().expect("framerate lock poisoned") = framerate;
-		self.enabled.swap(enabled, Ordering::Relaxed) != enabled
+		self.enabled.store(enabled, Ordering::Relaxed);
 	}
 
 	/// Whether the catalog enables this rendition, so the master playlist and DASH manifest

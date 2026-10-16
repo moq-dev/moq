@@ -27,6 +27,7 @@ ranked just below deterministic TS legs, which it requires.
 
 - [Binding audio delay](/quest/m2/binding-surface.md) - moq-ffi and every wrapper configure and observe audio playout delay
 - [Drill mutation gate](/quest/m2/drill-mutation-gate.md) - a PR touching a drill mutation's target runs that mutation's sensitivity check, advisory until the drills run on controlled time
+- [Biome on doc/ and demo/](/quest/m2/biome-doc-demo.md) - `just check` and CI lint and format `doc/` and `demo/` with Biome, and both pass
 - [Window properties](/quest/m2/json-window-properties.md) - random push/pop sequences through the JS and Rust Window codecs decode to the producer's window, for readers that keep up or join late
 - [Pipelined requests](/quest/m2/pipeline-requests/README.md) - SUBSCRIBE and the first FETCH go out with the track-info request at every hop, so first data arrives a round trip sooner per hop
 - [OBS native codecs](/quest/m2/obs-moq-video/README.md) - replace FFmpeg video and audio decoding with moq-video and moq-audio, deliver GPU frames, and use native audio/video encoders
@@ -129,6 +130,7 @@ ranked just below deterministic TS legs, which it requires.
 - [Range-addressed HLS playlists](/quest/m2/hls-ranges.md) - `moq-hls` lists a start-to-end range of a recording as its own playlist, for moq.pro's managed HLS
 - [IETF on the ring](/quest/m2/uring-ietf.md) - the io_uring workers serve moq-transport sessions too, so a uring relay drops no client protocol
 - [Dropped uring session closes](/quest/m2/uring-drop-close.md) - a moq-uring session dropped without close() closes its connection
+- [One connection lifecycle](/quest/m2/uring-connection-log.md) - every accept path, io_uring included, logs a connection's span and close from one owner, so Interop's accounting works on the ring
 - [Relay io_uring packages](/quest/m2/relay-io-uring-package.md) - Linux relay packages ship io_uring once the ring is on par with tokio
 - [Opus implementation](/quest/m2/audio-opus-backend.md) - compare Opus codec quality, CPU, build cost, and the loss recovery each backend offers
 - [Latency ledger](/quest/m2/latency-ledger.md) - a viewer reports its share of playback delay stage by stage: jitter buffer, decode, render, and device
@@ -161,7 +163,6 @@ ranked just below deterministic TS legs, which it requires.
 - [GPU capacity and health](/quest/m2/gpu-health.md) - moq-video reports each device's sessions, memory, utilization, and health on NVIDIA, AMD, and Intel alike
 - [A release carries multi-vendor GPU input](/quest/m2/gpu-release.md) - `release` carries the GPU surface validated on AMD and Intel; health follows separately
 - [moq-transport request codes](/quest/m2/ietf-request-codes.md) - Range Filters (INVALID_FILTER), reserved namespaces, and RENDEZVOUS_TIMEOUT get the draft's answer, or a recorded fallback code, and the deliberate deviations are documented
-- [JS audio ranking](/quest/m2/js-audio-ranked.md) - @moq/hang ranks audio and video renditions like Rust, enabled first, and HLS lists audio by that rank
 - [Draft changelog audit](/quest/m2/drafts-changelog-audit.md) - every published draft's changelog lists only what that version published
 - [Runtime trait](/quest/m2/runtime-trait.md) - one runtime trait for spawn and time replaces web-async, with tokio, browser, io_uring, and sim implementations
 - [QUIC on the sim](/quest/m2/quic-sim.md) - the sim drives `moq-quic` over in-memory datagrams with latency and loss
@@ -177,7 +178,5 @@ ranked just below deterministic TS legs, which it requires.
 - [Publisher timeliness at relay ingest](/quest/m2/qos-publisher-timeliness.md) - follow-on capability after the release contract is stable
 
 - [Release execution](/quest/m2/release/README.md) - publication, installed-artifact proof, cleanup, and downstream adoption after m1
-- [IETF driver double poll](/quest/m2/ietf-driver-double-poll.md) - a fired deadline costs a moq-transport session's driver one poll, as #5393 makes moq-lite's
 - [Play resume](/quest/m2/play-resume.md) - `moq-cli play` plays out pictures buffered before a declared end when new media arrives quickly
 - [Task supervision](/quest/m2/task-supervision.md) - the auth decider loop, stats publisher, and moq-tokio's token and WebSocket internals are supervised like #5447's tasks
-- [JS fill first](/quest/m2/js-fill-first.md) - the JS publisher sends a group's fill ahead of its live rest, matching Rust

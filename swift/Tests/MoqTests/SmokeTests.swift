@@ -9,6 +9,17 @@ private func nextRoute(_ announced: AnnounceConsumer) async throws -> AnnounceEv
 }
 
 final class SmokeTests: XCTestCase {
+    func testContainerTimebaseBelongsToOneBroadcast() throws {
+        let owner = try BroadcastProducer()
+        let other = try BroadcastProducer()
+        let timebase = try Media.Timebase(broadcast: owner)
+        XCTAssertThrowsError(try Media.ContainerProducer(broadcast: other, initData: Media.ContainerInit(format: .fmp4, data: [], timebase: timebase)))
+        XCTAssertThrowsError(try Media.ContainerStreamProducer(broadcast: other, initData: Media.ContainerStreamInit(format: .fmp4, timebase: timebase)))
+        try owner.close()
+        XCTAssertThrowsError(try Media.Timebase(broadcast: owner))
+        try other.close()
+    }
+
     func testStreamAbortPreservesProtocolDetails() async throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "errors")
