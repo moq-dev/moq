@@ -117,10 +117,16 @@ pub struct Catalog<E = ()> {
 }
 
 /// A whole broadcast whose catalog describes its own renditions.
+#[serde_with::serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Contribution {
 	/// Reference resolved relative to the catalog broadcast.
 	pub broadcast: moq_net::path::RelativeOwned,
+
+	/// The publisher instance the contribution must resolve to, when known.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
+	pub epoch: Option<moq_net::Epoch>,
 }
 
 impl Catalog<()> {
@@ -315,6 +321,7 @@ mod test {
 		const EPOCH: &str = "01890a5d-ac96-774b-bcce-b302099a8057";
 		let encoded = format!(
 			r#"{{
+				"contributions": {{"c": {{"broadcast": "./a", "epoch": "{EPOCH}"}}}},
 				"video": {{"renditions": {{"v": {{"broadcast": "./a", "epoch": "{EPOCH}", "codec": "avc1.64001f", "container": {{"kind": "legacy"}}}}}}}},
 				"audio": {{"renditions": {{"a": {{"broadcast": "./a", "epoch": "{EPOCH}", "codec": "opus", "sampleRate": 48000, "numberOfChannels": 2, "container": {{"kind": "legacy"}}}}}}}},
 				"text": {{"renditions": {{"t": {{"broadcast": "./a", "epoch": "{EPOCH}", "format": "vtt"}}}}}},
@@ -335,7 +342,8 @@ mod test {
 		for reference in references {
 			assert_eq!(reference.epoch(), Some(&epoch));
 		}
-		assert_eq!(catalog.archive.as_ref().unwrap().replay_epoch, Some(epoch));
+		assert_eq!(catalog.archive.as_ref().unwrap().replay_epoch.as_ref(), Some(&epoch));
+		assert_eq!(catalog.contributions["c"].epoch.as_ref(), Some(&epoch));
 		assert_eq!(Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap(), catalog);
 
 		// Omitted stays omitted, and a malformed or noncanonical epoch refuses the catalog.
@@ -352,14 +360,19 @@ mod test {
 
 	#[test]
 	fn contributions_round_trip_and_refuse_malformed_entries() {
-		let json = r#"{"contributions":{"extra":{"broadcast":"./extra.hang"}}}"#;
+		let json = r#"{"contributions":{"extra":{"broadcast":"./extra.hang","epoch":"01890a5d-ac96-774b-bcce-b302099a8057"}}}"#;
 		let catalog = Catalog::<()>::from_str(json).unwrap();
 		assert_eq!(catalog.contributions["extra"].broadcast.as_str(), "extra.hang");
+		assert_eq!(
+			catalog.contributions["extra"].epoch.as_ref().unwrap().to_string(),
+			"01890a5d-ac96-774b-bcce-b302099a8057"
+		);
 		assert_eq!(Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap(), catalog);
 		for json in [
 			r#"{"contributions":{"extra":null}}"#,
 			r#"{"contributions":{"extra":{}}}"#,
 			r#"{"contributions":{"extra":{"broadcast":42}}}"#,
+			r#"{"contributions":{"extra":{"broadcast":"./extra.hang","epoch":"not-an-epoch"}}}"#,
 		] {
 			assert!(Catalog::<()>::from_str(json).is_err());
 		}

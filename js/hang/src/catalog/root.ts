@@ -8,7 +8,7 @@ import { BinarySchema } from "./binary";
 import { ClockSchema } from "./clock";
 import { TRACK } from "./format";
 import { JsonSchema } from "./json";
-import { type RelativeBroadcast, RelativeBroadcastSchema } from "./path";
+import { EpochSchema, type RelativeBroadcast, RelativeBroadcastSchema } from "./path";
 import { PRIORITY } from "./priority";
 import { section } from "./section";
 import { TextSchema } from "./text";
@@ -29,7 +29,9 @@ import { VideoSchema } from "./video";
  */
 export const RootSchema = z.looseObject({
 	// Whole broadcasts are listed without opening their catalogs. IDs stay scoped to each broadcast.
-	contributions: z.optional(z.record(z.string(), z.object({ broadcast: RelativeBroadcastSchema }))),
+	contributions: z.optional(
+		z.record(z.string(), z.object({ broadcast: RelativeBroadcastSchema, epoch: z.optional(EpochSchema) })),
+	),
 	video: z.optional(VideoSchema),
 	audio: z.optional(AudioSchema),
 	// An incompatible archive disables seeking/recording, not the rest of the catalog.

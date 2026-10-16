@@ -49,6 +49,7 @@ test("rendition broadcast reference is parsed and normalized", () => {
 test("every reference-bearing section carries an optional epoch", () => {
 	const EPOCH = "01890a5d-ac96-774b-bcce-b302099a8057" as ReferenceEpoch;
 	const catalog = (epoch: string) => ({
+		contributions: { c: { broadcast: "./a", epoch } },
 		video: {
 			renditions: {
 				v: { broadcast: "./a", epoch, codec: "avc1.64001f", container: { kind: "legacy" } },
@@ -81,6 +82,7 @@ test("every reference-bearing section carries an optional epoch", () => {
 	expect(parsed.json?.tracks.j?.epoch).toBe(EPOCH);
 	expect(parsed.binary?.tracks.b?.epoch).toBe(EPOCH);
 	expect(parsed.archive?.replayEpoch).toBe(EPOCH);
+	expect(parsed.contributions?.c?.epoch).toBe(EPOCH);
 
 	// A malformed or noncanonical epoch refuses the catalog, as in Rust.
 	for (const bad of ["not-a-uuid", EPOCH.toUpperCase(), "01890a5d-ac96-474b-bcce-b302099a8057"]) {

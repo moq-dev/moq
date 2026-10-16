@@ -123,7 +123,10 @@ The root of the catalog is a JSON document with the following schema:
 
 ~~~
 type Catalog = {
-  "contributions": Record<string, { "broadcast": string }> | undefined,
+  "contributions": Record<string, {
+    "broadcast": string,
+    "epoch": string | undefined,
+  }> | undefined,
   "audio": AudioSchema | undefined,
   "video": VideoSchema | undefined,
   "archive": ArchiveSchema | undefined,
@@ -147,10 +150,13 @@ This specification defines audio, video, and text media tracks, plus an optional
 
 ## Contributions {#contributions}
 The optional `contributions` map names whole broadcasts whose catalogs describe their renditions.
-Each entry MUST contain a string `broadcast`, resolved relative to this catalog's broadcast using {{field-broadcast}}.
+Each entry MUST contain a string `broadcast`, resolved relative to this catalog's broadcast using {{field-broadcast}}, and MAY contain an `epoch` using {{field-epoch}}.
 A malformed entry or a reference escaping the root MUST cause the catalog to be rejected.
 
 Listing an entry MUST NOT subscribe to the contribution; a consumer opens its catalog only upon explicit selection.
+A selected contribution stays on the first publisher instance it resolves for the referring catalog instance.
+When `epoch` is present, a route proving another instance MUST fail the selection; without it, a route carrying no Epoch cannot authorize stitching onto a replacement.
+A later catalog update MUST NOT retarget a resolved selection, while a new referring catalog instance resolves it afresh.
 A contribution's rendition identifiers belong to that contribution and MUST NOT replace identifiers in the referring catalog.
 An unavailable contribution does not invalidate the referring catalog.
 References are not recursively expanded: each further contribution requires an explicit selection.

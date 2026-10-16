@@ -1,6 +1,6 @@
 import { expect, it } from "bun:test";
 import * as Catalog from "@moq/hang/catalog";
-import { Origin, Path } from "@moq/net";
+import { Epoch, Origin, Path } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { Broadcast } from "./broadcast";
 import { Source } from "./video/source";
@@ -92,14 +92,14 @@ it("lists contributions without demand and keeps selected rendition IDs in their
 });
 
 it("refuses malformed and escaping contribution entries", () => {
-	for (const entry of [null, {}, { broadcast: 42 }]) {
+	for (const entry of [null, {}, { broadcast: 42 }, { broadcast: "./extra.hang", epoch: "not-an-epoch" }]) {
 		expect(() => Catalog.RootSchema.parse({ contributions: { extra: entry } })).toThrow();
 	}
 	const catalog = Catalog.RootSchema.parse({ contributions: { extra: { broadcast: "../../escape" } } });
 	expect(() => Catalog.checkResolvable(catalog, Path.from("room/main.hang"))).toThrow(Catalog.EscapingBroadcast);
 });
 
-it("keeps a reactive selection through unrelated catalog updates and follows replacement and removal", async () => {
+it("pins the first resolved contribution through catalog retargeting and removal", async () => {
 	const origin = new Origin.Producer();
 	const main = origin.createBroadcast(Path.from("room/main.hang"));
 	main.announce();
@@ -140,18 +140,89 @@ it("keeps a reactive selection through unrelated catalog updates and follows rep
 			}),
 		);
 		await parent.out.catalog.changed();
-		// The next selected-path update fences the unrelated update without a timer or flush count.
+		// Once resolved, neither a changed path nor removing the entry retargets this selection.
 		catalog.set(Catalog.RootSchema.parse({ contributions: { extra: { broadcast: "./second.hang" } } }));
-		await second.demand().used.changed();
+		await parent.out.catalog.changed();
 		expect(selections).toBe(1);
 		expect(selected.peek()).toBe(child);
 		expect(active?.path).toBe(Path.from("room/first.hang"));
-		expect(child.out.active.peek()?.path).toBe(Path.from("room/second.hang"));
-		expect(withdrawals).toBe(1);
+		expect(child.out.active.peek()?.path).toBe(Path.from("room/first.hang"));
+		expect(second.demand().used.peek()).toBe(false);
+		expect(withdrawals).toBe(0);
 		catalog.set(Catalog.RootSchema.parse({}));
-		await second.demand().unused();
-		expect(child.in.enabled.peek()).toBe(false);
+		await parent.out.catalog.changed();
+		expect(child.in.enabled.peek()).toBe(true);
+		expect(child.out.active.peek()?.path).toBe(Path.from("room/first.hang"));
 		expect(selections).toBe(1);
+	} finally {
+		owner.close();
+		parent.close();
+		origin.close();
+	}
+});
+
+it("pins and validates a contribution epoch before reading its catalog", async () => {
+	const origin = new Origin.Producer();
+	const main = origin.createBroadcast(Path.from("room/main.hang"));
+	main.announce();
+	const contribution = origin.createBroadcast(Path.from("room/extra.hang"));
+	const epoch = Epoch.mint();
+	contribution.announce({ epoch });
+	contribution.createTrack(Catalog.TRACK).writeFrame({ payload: new TextEncoder().encode("{}") });
+	const other = Epoch.mint();
+	const catalog = new Signal(
+		Catalog.RootSchema.parse({ contributions: { extra: { broadcast: "./extra.hang", epoch } } }),
+	);
+	const parent = new Broadcast({
+		origin,
+		name: Path.from("room/main.hang"),
+		catalogFormat: "manual",
+		catalog,
+		announced: false,
+	});
+	const owner = new Effect();
+	try {
+		const child = parent.contribution(owner, "extra");
+		await child.out.catalog.changed();
+		expect(child.out.active.peek()?.epoch).toBe(epoch);
+		expect(child.in.epoch.peek()).toBe(epoch);
+
+		catalog.set(
+			Catalog.RootSchema.parse({ contributions: { extra: { broadcast: "./extra.hang", epoch: other } } }),
+		);
+		await parent.out.catalog.changed();
+		expect(child.in.epoch.peek()).toBe(epoch);
+		expect(child.out.active.peek()?.epoch).toBe(epoch);
+	} finally {
+		owner.close();
+		parent.close();
+		origin.close();
+	}
+});
+
+it("refuses a contribution served by another known epoch", async () => {
+	const origin = new Origin.Producer();
+	const main = origin.createBroadcast(Path.from("room/main.hang"));
+	main.announce();
+	const contribution = origin.createBroadcast(Path.from("room/extra.hang"));
+	contribution.announce({ epoch: Epoch.mint() });
+	const track = contribution.createTrack(Catalog.TRACK);
+	const parent = new Broadcast({
+		origin,
+		name: Path.from("room/main.hang"),
+		catalogFormat: "manual",
+		catalog: Catalog.RootSchema.parse({
+			contributions: { extra: { broadcast: "./extra.hang", epoch: Epoch.mint() } },
+		}),
+		announced: false,
+	});
+	const owner = new Effect();
+	try {
+		const child = parent.contribution(owner, "extra");
+		await child.out.error.changed();
+		expect(child.out.active.peek()).toBeUndefined();
+		expect(contribution.demand().used.peek()).toBe(false);
+		expect(track.demand().used.peek()).toBe(false);
 	} finally {
 		owner.close();
 		parent.close();
