@@ -403,20 +403,20 @@ impl<T: DeserializeOwned> Consumer<T> {
 
 	/// The mode the publisher chose.
 	///
-	/// [`Mode::Snapshot`] is lossy: intermediate values are superseded and only the newest is
-	/// yielded. [`Mode::Stream`] preserves every record. Check this when the application can only
+	/// [`Mode::Snapshot`] is lossy: groups may be skipped once superseded beyond the subscription
+	/// drift budget. [`Mode::Stream`] preserves every record. Check this when the application can only
 	/// work with one of them.
 	pub fn mode(&self) -> &Mode {
 		&self.mode
 	}
 
 	/// Get the next value, or `None` once the track ends.
-	pub async fn next(&mut self) -> crate::Result<Option<T>> {
+	pub async fn next(&mut self) -> crate::Result<Option<Timed<T>>> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
 	/// Poll for the next value, without blocking.
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> std::task::Poll<crate::Result<Option<T>>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> std::task::Poll<crate::Result<Option<Timed<T>>>> {
 		let result = match &mut self.inner {
 			Inner::Snapshot(consumer) => consumer.poll_next(waiter),
 			Inner::Stream(consumer) => consumer.poll_next(waiter),
@@ -425,6 +425,19 @@ impl<T: DeserializeOwned> Consumer<T> {
 		match result {
 			std::task::Poll::Ready(value) => std::task::Poll::Ready(value.map_err(Into::into)),
 			std::task::Poll::Pending => std::task::Poll::Pending,
+		}
+	}
+
+	/// Skip to the newest snapshot state; stream mode returns `UnsupportedMode`.
+	pub async fn latest(&mut self) -> crate::Result<Option<Timed<T>>> {
+		kio::wait(|waiter| self.poll_latest(waiter)).await
+	}
+
+	/// Poll for the newest snapshot state without discarding records from a lossless stream.
+	pub fn poll_latest(&mut self, waiter: &kio::Waiter) -> std::task::Poll<crate::Result<Option<Timed<T>>>> {
+		match &mut self.inner {
+			Inner::Snapshot(consumer) => consumer.poll_latest(waiter).map(|result| result.map_err(Into::into)),
+			Inner::Stream(_) => std::task::Poll::Ready(Err(crate::Error::UnsupportedMode(self.mode.to_string()))),
 		}
 	}
 }

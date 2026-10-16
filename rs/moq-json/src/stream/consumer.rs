@@ -47,8 +47,8 @@ impl<T: DeserializeOwned> Consumer<T> {
 		}
 	}
 
-	/// Get the next record, or `None` once the track ends.
-	pub async fn next(&mut self) -> Result<Option<T>>
+	/// Get the next record and its exact frame timestamp, or `None` once the track ends.
+	pub async fn next(&mut self) -> Result<Option<moq_net::Timed<T>>>
 	where
 		T: Unpin,
 	{
@@ -56,7 +56,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 	}
 
 	/// Poll for the next record, without blocking.
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<T>>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::Timed<T>>>> {
 		loop {
 			if self.rolled {
 				return Poll::Ready(Err(crate::Error::Rolled));
@@ -81,7 +81,12 @@ impl<T: DeserializeOwned> Consumer<T> {
 			};
 
 			match group.poll_read_frame(waiter)? {
-				Poll::Ready(Some(frame)) => return Poll::Ready(Ok(Some(self.decoder.decode(&frame.payload)?))),
+				Poll::Ready(Some(frame)) => {
+					return Poll::Ready(Ok(Some(moq_net::Timed {
+						value: self.decoder.decode(&frame.payload)?,
+						at: frame.timestamp,
+					})));
+				}
 				Poll::Ready(None) => {
 					// The log's one group is exhausted. Keep polling the track so a clean end still
 					// reports the log as complete, and so a second group is caught as `Rolled`.
@@ -97,6 +102,53 @@ impl<T: DeserializeOwned> Consumer<T> {
 					Poll::Ready(None) | Poll::Pending => return Poll::Pending,
 				},
 			}
+		}
+	}
+}
+
+#[cfg(test)]
+mod timestamps {
+	use super::*;
+
+	#[test]
+	fn exact_timestamps_survive_reads() {
+		for compression in [crate::Compression::None, crate::Compression::Deflate] {
+			let scale = moq_net::Timescale::new(90_000).unwrap();
+			let track = moq_net::broadcast::Info::new()
+				.produce()
+				.create_track("data", moq_net::track::Info::default().with_timescale(scale))
+				.unwrap();
+			let mut subscriber = track.subscribe(None);
+			let mut subscription = subscriber.subscription();
+			subscription.max_delay = std::time::Duration::MAX;
+			subscriber.update(subscription).unwrap();
+			let config = crate::stream::Config { compression };
+			let mut producer = crate::stream::Producer::new(track, config.clone());
+			let mut consumer = Consumer::<serde_json::Value>::new(subscriber, config);
+			let times = [0, 810_001, 990_007];
+			for (n, ticks) in times.into_iter().enumerate() {
+				let at = moq_net::Timestamp::new(ticks, scale).unwrap();
+				producer
+					.append(moq_net::Timed {
+						value: &serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}),
+						at: Some(at),
+					})
+					.unwrap();
+			}
+			producer.finish().unwrap();
+			for (n, ticks) in times.into_iter().enumerate() {
+				let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&kio::Waiter::noop()) else {
+					panic!("missing state {n}")
+				};
+				assert_eq!(value.value["n"].as_u64().unwrap(), n as u64);
+				let at = value.at.unwrap();
+				assert_eq!(at.value(), ticks);
+				assert_eq!(at.scale(), scale);
+			}
+			assert!(matches!(
+				consumer.poll_next(&kio::Waiter::noop()),
+				Poll::Ready(Ok(None))
+			));
 		}
 	}
 }

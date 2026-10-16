@@ -1,17 +1,15 @@
 //! Lossy latest-value JSON publishing over [`moq-net`](moq_net) tracks.
 //!
-//! One JSON value updated over time, for consumers that only care about the current state (a
-//! catalog, a status document). This mode is **lossy** by design: a consumer yields only the
-//! most recent value. A late joiner (or a consumer that falls behind) jumps straight to the
-//! newest group and collapses any buffered backlog into a single yield, and older groups are
-//! dropped entirely. Intermediate updates are never replayed. For an ordered log where every
-//! record is preserved, use [`stream`](crate::stream) instead.
+//! One value updated over time. `Consumer::next` yields each state with its frame timestamp,
+//! in order within the subscription's drift budget; `Consumer::latest` skips to the newest
+//! state. Superseded groups may be lost, so use [`stream`](crate::stream) when every record
+//! must survive. A playhead reader sets `max_delay` to its distance behind the live edge.
 //!
 //! On the wire the value is published as a series of groups, where each group is
 //! self-contained: its first frame is a full snapshot and any following frames are
 //! [RFC 7396](https://www.rfc-editor.org/rfc/rfc7396.html) JSON Merge Patch deltas applied in
-//! order. A consumer jumps to the newest group, reads the snapshot, and applies the deltas, so
-//! a late joiner never needs older groups.
+//! order. Every group starts independently, so a reader can resynchronize after skipping
+//! superseded groups without needing earlier deltas.
 //!
 //! Deltas are controlled by [`Config::delta_ratio`]. A ratio of `0` disables them, so every
 //! change is a fresh snapshot group, matching a plain "one JSON blob per group" track.
@@ -206,10 +204,31 @@ mod test {
 	fn drain_with(mut consumer: Consumer<Value>) -> Vec<Value> {
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
-		while let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) {
-			out.push(value);
+		while let Poll::Ready(Ok(Some(value))) = consumer.poll_latest(&waiter) {
+			out.push(value.value);
 		}
 		out
+	}
+
+	#[test]
+	fn next_preserves_intermediate_states() {
+		let (mut producer, mut track) = producer(cfg(100));
+		let mut subscription = track.subscription();
+		subscription.max_delay = std::time::Duration::MAX;
+		track.update(subscription).unwrap();
+		for n in [1, 2, 3] {
+			producer
+				.update(&json!({ "padding": "same-long-value-so-deltas-stay-in-one-group", "n": n }))
+				.unwrap();
+		}
+		producer.finish().unwrap();
+		let mut consumer = Consumer::<Value>::new(track, consumer::Config::default());
+		let mut values = Vec::new();
+		while let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&kio::Waiter::noop()) {
+			assert_eq!(value.at, None);
+			values.push(value.value["n"].as_u64().unwrap());
+		}
+		assert_eq!(values, vec![1, 2, 3]);
 	}
 
 	/// A snapshot group the transport can no longer serve -- `Old` when the relay reclaims a
@@ -231,13 +250,13 @@ mod test {
 		group
 			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(br#"{"a":1}"#))
 			.unwrap();
-		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(Some(v))) if v == json!({ "a": 1 })));
-		assert!(consumer.poll_next(&waiter).is_pending());
+		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == json!({ "a": 1 })));
+		assert!(consumer.poll_latest(&waiter).is_pending());
 
 		// The relay reclaims the group out from under the reader.
 		group.abort(moq_net::Error::Old).unwrap();
 		assert!(
-			consumer.poll_next(&waiter).is_pending(),
+			consumer.poll_latest(&waiter).is_pending(),
 			"a lost group must not end the reader"
 		);
 
@@ -246,7 +265,7 @@ mod test {
 		group
 			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(br#"{"a":2}"#))
 			.unwrap();
-		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(Some(v))) if v == json!({ "a": 2 })));
+		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == json!({ "a": 2 })));
 	}
 
 	/// Nothing replaces a lost group once the track is finished, so the reader ends cleanly on the
@@ -264,11 +283,11 @@ mod test {
 		group
 			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(br#"{"a":1}"#))
 			.unwrap();
-		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(Some(v))) if v == json!({ "a": 1 })));
+		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == json!({ "a": 1 })));
 
 		group.abort(moq_net::Error::Old).unwrap();
 		track.finish().unwrap();
-		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(None))));
+		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(None))));
 	}
 
 	#[test]
@@ -370,8 +389,8 @@ mod test {
 
 		for n in 1..=3 {
 			producer.update(&json!({ "a": n })).unwrap();
-			match consumer.poll_next(&waiter) {
-				Poll::Ready(Ok(Some(value))) => assert_eq!(value, json!({ "a": n })),
+			match consumer.poll_latest(&waiter) {
+				Poll::Ready(Ok(Some(value))) => assert_eq!(value.value, json!({ "a": n })),
 				other => panic!("expected value, got {other:?}"),
 			}
 		}
@@ -585,8 +604,8 @@ mod test {
 		let mut consumer = Consumer::<Doc>::new(consumer, consumer::Config::default());
 		let waiter = kio::Waiter::noop();
 		let mut last = None;
-		while let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) {
-			last = Some(value);
+		while let Poll::Ready(Ok(Some(value))) = consumer.poll_latest(&waiter) {
+			last = Some(value.value);
 		}
 		assert_eq!(
 			last.unwrap(),
@@ -630,8 +649,8 @@ mod test {
 		let mut consumer = Consumer::<Doc>::new(consumer, consumer::Config::default());
 		let waiter = kio::Waiter::noop();
 		let mut last = None;
-		while let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) {
-			last = Some(value);
+		while let Poll::Ready(Ok(Some(value))) = consumer.poll_latest(&waiter) {
+			last = Some(value.value);
 		}
 		assert_eq!(
 			last.unwrap(),
@@ -865,8 +884,8 @@ mod test {
 		let waiter = kio::Waiter::noop();
 
 		producer.update(&json!({ "a": 1 })).unwrap(); // snapshot, group 0
-		match consumer.poll_next(&waiter) {
-			Poll::Ready(Ok(Some(value))) => assert_eq!(value, json!({ "a": 1 })),
+		match consumer.poll_latest(&waiter) {
+			Poll::Ready(Ok(Some(value))) => assert_eq!(value.value, json!({ "a": 1 })),
 			other => panic!("expected first value, got {other:?}"),
 		}
 
@@ -878,8 +897,8 @@ mod test {
 
 		// The consumer jumps to the newest group and never yields a stale value.
 		let mut last = None;
-		while let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) {
-			last = Some(value);
+		while let Poll::Ready(Ok(Some(value))) = consumer.poll_latest(&waiter) {
+			last = Some(value.value);
 		}
 		assert_eq!(last.unwrap(), json!({ "a": 4 }));
 	}
@@ -900,7 +919,7 @@ mod test {
 		let waiter = kio::Waiter::noop();
 
 		// Track is finished but the open group is empty: pending, not end-of-stream.
-		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
+		assert!(matches!(consumer.poll_latest(&waiter), Poll::Pending));
 
 		group
 			.write_frame(
@@ -910,8 +929,8 @@ mod test {
 			.unwrap();
 		group.finish().unwrap();
 
-		match consumer.poll_next(&waiter) {
-			Poll::Ready(Ok(Some(value))) => assert_eq!(value, json!({ "a": 1 })),
+		match consumer.poll_latest(&waiter) {
+			Poll::Ready(Ok(Some(value))) => assert_eq!(value.value, json!({ "a": 1 })),
 			other => panic!("expected the catalog value, got {other:?}"),
 		}
 	}

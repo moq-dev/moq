@@ -47,13 +47,13 @@ impl Consumer {
 		}
 	}
 
-	/// Get the next payload, or `None` once the track ends.
-	pub async fn next(&mut self) -> Result<Option<Bytes>> {
+	/// Get the next payload and its exact frame timestamp, or `None` once the track ends.
+	pub async fn next(&mut self) -> Result<Option<moq_net::Timed<Bytes>>> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
 	/// Poll for the next payload, without blocking.
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::Timed<Bytes>>>> {
 		loop {
 			if self.rolled {
 				return Poll::Ready(Err(crate::Error::Rolled));
@@ -78,7 +78,12 @@ impl Consumer {
 			};
 
 			match group.poll_read_frame(waiter)? {
-				Poll::Ready(Some(frame)) => return Poll::Ready(self.decode(&frame.payload).map(Some)),
+				Poll::Ready(Some(frame)) => {
+					return Poll::Ready(Ok(Some(moq_net::Timed {
+						value: self.decode(&frame.payload)?,
+						at: frame.timestamp,
+					})));
+				}
 				Poll::Ready(None) => {
 					// The log's one group is exhausted. Keep polling the track so a clean end still
 					// reports the log as complete, and so a second group is caught as `Rolled`.
@@ -103,5 +108,52 @@ impl Consumer {
 			Some(flate) => flate.frame(payload)?,
 			None => payload.clone(),
 		})
+	}
+}
+
+#[cfg(test)]
+mod timestamps {
+	use super::*;
+
+	#[test]
+	fn exact_timestamps_survive_reads() {
+		for compression in [crate::Compression::None, crate::Compression::Deflate] {
+			let scale = moq_net::Timescale::new(90_000).unwrap();
+			let track = moq_net::broadcast::Info::new()
+				.produce()
+				.create_track("data", moq_net::track::Info::default().with_timescale(scale))
+				.unwrap();
+			let mut subscriber = track.subscribe(None);
+			let mut subscription = subscriber.subscription();
+			subscription.max_delay = std::time::Duration::MAX;
+			subscriber.update(subscription).unwrap();
+			let config = crate::stream::Config { compression };
+			let mut producer = crate::stream::Producer::new(track, config.clone());
+			let mut consumer = Consumer::new(subscriber, config);
+			let times = [0, 810_001, 990_007];
+			for (n, ticks) in times.into_iter().enumerate() {
+				let at = moq_net::Timestamp::new(ticks, scale).unwrap();
+				producer
+					.append(moq_net::Timed {
+						value: Bytes::from(vec![n as u8; 32]),
+						at: Some(at),
+					})
+					.unwrap();
+			}
+			producer.finish().unwrap();
+			for (n, ticks) in times.into_iter().enumerate() {
+				let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&kio::Waiter::noop()) else {
+					panic!("missing state {n}")
+				};
+				assert_eq!(value.value[0] as u64, n as u64);
+				let at = value.at.unwrap();
+				assert_eq!(at.value(), ticks);
+				assert_eq!(at.scale(), scale);
+			}
+			assert!(matches!(
+				consumer.poll_next(&kio::Waiter::noop()),
+				Poll::Ready(Ok(None))
+			));
+		}
 	}
 }

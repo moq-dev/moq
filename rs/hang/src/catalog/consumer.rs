@@ -36,7 +36,9 @@ impl<E: DeserializeOwned + Default> Consumer<E> {
 
 	/// Poll for the next catalog update.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog<E>>>> {
-		let catalog = ready!(self.inner.poll_next(waiter)).map_err(|err| crate::Error::Json(err.to_string()))?;
+		let catalog = ready!(self.inner.poll_latest(waiter))
+			.map_err(|err| crate::Error::Json(err.to_string()))?
+			.map(|value| value.value);
 		if let Some(catalog) = catalog.as_ref() {
 			catalog.check_renditions()?;
 			check_resolvable(&self.base, catalog)?;

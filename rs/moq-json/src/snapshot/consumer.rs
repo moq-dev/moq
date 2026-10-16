@@ -49,95 +49,96 @@ impl<T: DeserializeOwned> Consumer<T> {
 		}
 	}
 
-	/// Get the next reconstructed value, or `None` once the track ends.
-	pub async fn next(&mut self) -> Result<Option<T>>
+	/// Get the next state and its exact frame timestamp, or `None` once the track ends.
+	pub async fn next(&mut self) -> Result<Option<moq_net::Timed<T>>>
 	where
 		T: Unpin,
 	{
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
-	/// Poll for the next reconstructed value, without blocking.
+	/// Poll for each state in order, retaining the subscription's drift budget.
 	///
-	/// Jumps to the newest group, reads its snapshot, and applies deltas in order. All frames already
-	/// buffered in the group are applied in one poll but only the resulting *latest* value is yielded:
-	/// the intermediate reconstructions are stale, so a late joiner (or any consumer that has fallen
-	/// behind) catches up to the head in a single step instead of replaying every superseded state.
-	/// Frames must still be decoded in order (the DEFLATE window and merge patches are sequential);
-	/// only the per-frame deserialize and yield are skipped. Switching to a newer group discards the
-	/// older one.
-	///
-	/// A group the transport can no longer serve is discarded the same way, not reported: on a
-	/// snapshot track its content is superseded by definition, so the reader waits for the
-	/// replacement. Only a failure of the track itself ends the stream.
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<T>>> {
-		// Drain to the newest group, resetting reconstruction state whenever we switch.
-		let track_finished = loop {
-			match self.track.poll_next_group(waiter)? {
-				Poll::Ready(Some(group)) => {
-					self.group = Some(group);
-					// The next frame is the new group's snapshot, which also restarts the decoder's window.
-					self.frames_read = 0;
-				}
-				Poll::Ready(None) => break true,
-				Poll::Pending => break false,
-			}
-		};
+	/// Finish the current group before taking the next. Lost groups resynchronize from a
+	/// later snapshot. A timed playhead reader sets its subscription's `max_delay` to its
+	/// distance behind live; the default zero budget keeps only groups not yet superseded.
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::Timed<T>>>> {
+		self.poll_read(waiter, false)
+	}
 
-		// Apply every frame currently buffered in the group, tracking whether any moved us forward and
-		// whether the group is still open with nothing buffered yet (vs. exhausted).
-		// `poll_read_frame` returns an owned `Poll`, so the borrow of `self.group` ends before the
-		// match arms, leaving `apply` (and clearing the group) free to take `&mut self`.
-		let mut advanced = false;
-		let mut group_pending = false;
-		while let Some(group) = &mut self.group {
+	/// Skip to the newest buffered state and its timestamp, or wait for a new one.
+	pub async fn latest(&mut self) -> Result<Option<moq_net::Timed<T>>>
+	where
+		T: Unpin,
+	{
+		kio::wait(|waiter| self.poll_latest(waiter)).await
+	}
+
+	/// Poll for the newest state, discarding superseded groups and intermediate yields.
+	///
+	/// Frames inside the newest group are still decoded in order. What this skips is gone;
+	/// a subsequent `next` resumes after it. An untimed frame keeps `at: None`.
+	pub fn poll_latest(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::Timed<T>>>> {
+		self.poll_read(waiter, true)
+	}
+
+	fn poll_read(&mut self, waiter: &kio::Waiter, skip: bool) -> Poll<Result<Option<moq_net::Timed<T>>>> {
+		if skip && let Some(latest) = self.track.latest() {
+			if self.group.as_ref().is_some_and(|group| group.sequence < latest) {
+				self.group = None;
+			}
+			if self.group.is_none() {
+				self.track.set_groups(latest..);
+			}
+		}
+
+		let mut advanced = None;
+		loop {
+			let Some(group) = &mut self.group else {
+				match self.track.poll_next_group(waiter)? {
+					Poll::Ready(Some(group)) => {
+						self.group = Some(group);
+						self.frames_read = 0;
+						continue;
+					}
+					Poll::Ready(None) => {
+						return Poll::Ready(Ok(if let Some(at) = advanced {
+							self.decoder.decode()?.map(|value| moq_net::Timed { value, at })
+						} else {
+							None
+						}));
+					}
+					Poll::Pending => break,
+				}
+			};
+
 			match group.poll_read_frame(waiter) {
 				Poll::Ready(Ok(Some(frame))) => {
 					self.apply(&frame.payload)?;
-					advanced = true;
+					if !skip {
+						return Poll::Ready(Ok(self.decoder.decode()?.map(|value| moq_net::Timed {
+							value,
+							at: frame.timestamp,
+						})));
+					}
+					advanced = Some(frame.timestamp);
 				}
-				// The current group is exhausted; wait for a newer one.
-				Poll::Ready(Ok(None)) => {
+				Poll::Ready(Ok(None)) => self.group = None,
+				Poll::Ready(Err(
+					moq_net::Error::Old
+					| moq_net::Error::Evicted
+					| moq_net::Error::Lagged
+					| moq_net::Error::GroupTooLarge,
+				)) => {
+					// A later group starts a fresh snapshot and compression window.
 					self.group = None;
-					break;
 				}
-				// The transport can no longer serve the rest of this group: it was superseded and
-				// reclaimed (`Old`), dropped under memory pressure (`Evicted`), or read past the
-				// drift budget (`Lagged`). A snapshot reader only ever wants the newest value, so a
-				// group whose content is gone is never fatal: drop it and wait for its replacement.
-				// A track- or session-level failure still arrives through `poll_next_group` above.
-				Poll::Ready(Err(err)) => {
-					let sequence = group.sequence;
-					self.group = None;
-					tracing::warn!(
-						track = self.track.name(),
-						group = sequence,
-						error = ?err,
-						"snapshot group lost; waiting for a newer one"
-					);
-					break;
-				}
-				// The group is still open but has nothing buffered yet.
-				Poll::Pending => {
-					group_pending = true;
-					break;
-				}
+				Poll::Ready(Err(err)) => return Poll::Ready(Err(err.into())),
+				Poll::Pending => break,
 			}
 		}
-
-		if advanced {
-			// Deserialize once, from the head of the backlog we just drained.
-			return Poll::Ready(Ok(self.decoder.decode()?));
-		}
-
-		// An open group may still deliver frames even after the track finishes (it was appended before
-		// the finish), so wait on it rather than ending the stream.
-		if group_pending {
-			return Poll::Pending;
-		}
-
-		if track_finished {
-			Poll::Ready(Ok(None))
+		if let Some(at) = advanced {
+			Poll::Ready(Ok(self.decoder.decode()?.map(|value| moq_net::Timed { value, at })))
 		} else {
 			Poll::Pending
 		}
@@ -151,5 +152,112 @@ impl<T: DeserializeOwned> Consumer<T> {
 		}
 		self.frames_read += 1;
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod timestamps {
+	use super::*;
+
+	#[test]
+	fn exact_timestamps_survive_reads() {
+		for compression in [crate::Compression::None, crate::Compression::Deflate] {
+			let scale = moq_net::Timescale::new(90_000).unwrap();
+			let track = moq_net::broadcast::Info::new()
+				.produce()
+				.create_track("data", moq_net::track::Info::default().with_timescale(scale))
+				.unwrap();
+			let mut subscriber = track.subscribe(None);
+			let mut subscription = subscriber.subscription();
+			subscription.max_delay = std::time::Duration::MAX;
+			subscriber.update(subscription).unwrap();
+			let mut config = crate::snapshot::Config::default().with_delta_ratio(100);
+			config.compression = compression;
+			let mut producer = crate::snapshot::Producer::new(track, config.clone());
+			let mut consumer = Consumer::<serde_json::Value>::new(
+				subscriber,
+				crate::snapshot::consumer::Config {
+					compression,
+					..Default::default()
+				},
+			);
+			let times = [0, 810_001, 990_007];
+			for (n, ticks) in times.into_iter().enumerate() {
+				let at = moq_net::Timestamp::new(ticks, scale).unwrap();
+				producer
+					.update(moq_net::Timed {
+						value: &serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}),
+						at: Some(at),
+					})
+					.unwrap();
+				if n == 1 {
+					producer.cut().unwrap();
+				}
+			}
+			producer.finish().unwrap();
+			for (n, ticks) in times.into_iter().enumerate() {
+				let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&kio::Waiter::noop()) else {
+					panic!("missing state {n}")
+				};
+				assert_eq!(value.value["n"].as_u64().unwrap(), n as u64);
+				let at = value.at.unwrap();
+				assert_eq!(at.value(), ticks);
+				assert_eq!(at.scale(), scale);
+			}
+			assert!(matches!(
+				consumer.poll_next(&kio::Waiter::noop()),
+				Poll::Ready(Ok(None))
+			));
+		}
+	}
+
+	#[test]
+	fn latest_advances_the_same_cursor_as_next() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("data", moq_net::track::Info::default())
+			.unwrap();
+		let subscriber = track.subscribe(None);
+		let config = crate::snapshot::Config {
+			compression: crate::Compression::Deflate,
+			..crate::snapshot::Config::default().with_delta_ratio(100)
+		};
+		let mut producer = crate::snapshot::Producer::new(track, config.clone());
+		let mut consumer = Consumer::<serde_json::Value>::new(
+			subscriber,
+			crate::snapshot::consumer::Config {
+				compression: crate::Compression::Deflate,
+				..Default::default()
+			},
+		);
+		let waiter = kio::Waiter::noop();
+		for n in 0..3 {
+			producer
+				.update(&serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}))
+				.unwrap();
+			if n == 0 {
+				let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) else {
+					panic!("missing first state")
+				};
+				assert_eq!(value.value["n"].as_u64().unwrap(), 0);
+				assert_eq!(value.at, None);
+			}
+		}
+		let Poll::Ready(Ok(Some(value))) = consumer.poll_latest(&waiter) else {
+			panic!("missing latest state")
+		};
+		assert_eq!(value.value["n"].as_u64().unwrap(), 2);
+		assert_eq!(value.at, None);
+		assert!(consumer.poll_next(&waiter).is_pending());
+		let n = 3;
+		producer
+			.update(&serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}))
+			.unwrap();
+		let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) else {
+			panic!("missing new state")
+		};
+		assert_eq!(value.value["n"].as_u64().unwrap(), 3);
+		producer.finish().unwrap();
+		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(None))));
 	}
 }
