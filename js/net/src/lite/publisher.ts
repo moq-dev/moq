@@ -940,6 +940,7 @@ export class Publisher {
 				// A group that has not arrived yet holds this FETCH's slot until the requester leaves.
 				group = await wireOf(front).fetchGroup(msg.track, msg.group, {
 					priority: msg.priority,
+					maxDelay: msg.maxDelay,
 					signal: left.signal,
 				});
 				serving(group);

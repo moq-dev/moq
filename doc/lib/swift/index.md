@@ -5,6 +5,10 @@ description: Async sequences for iOS and macOS via the Moq package
 
 # Swift
 
+`FetchGroupOptions.maxDelayUs` optionally tightens a one-group fetch's
+freshness window. Leave it nil to apply publisher retention alone; zero is an
+explicit live-edge budget.
+
 [![Swift Package Index](https://img.shields.io/github/v/release/moq-dev/moq-swift?label=moq-swift)](https://github.com/moq-dev/moq-swift/releases)
 
 The `Moq` Swift package: de-prefixed types, `AsyncSequence` on every

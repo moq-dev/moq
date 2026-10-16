@@ -1473,7 +1473,14 @@ async fn fetches_cached_group_without_subscribing() {
 
 	let consumer = broadcast.consume().unwrap();
 	let fetched = consumer
-		.fetch_group("events".into(), 0, Some(MoqFetchGroupOptions { priority: 7 }))
+		.fetch_group(
+			"events".into(),
+			0,
+			Some(MoqFetchGroupOptions {
+				priority: 7,
+				max_delay_us: None,
+			}),
+		)
 		.await
 		.unwrap();
 
@@ -1521,7 +1528,10 @@ async fn fetches_cached_media_group_and_decodes_container() {
 			name: "media".into(),
 			sequence: 0,
 			container: crate::media::MoqContainer::Legacy,
-			options: Some(MoqFetchGroupOptions { priority: 7 }),
+			options: Some(MoqFetchGroupOptions {
+				priority: 7,
+				max_delay_us: None,
+			}),
 		},
 	)
 	.await
@@ -1791,7 +1801,14 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 
 	let fetch = tokio::spawn(async move {
 		consumer
-			.fetch_group("events".into(), 5, Some(MoqFetchGroupOptions { priority: 11 }))
+			.fetch_group(
+				"events".into(),
+				5,
+				Some(MoqFetchGroupOptions {
+					priority: 11,
+					max_delay_us: None,
+				}),
+			)
 			.await
 	});
 

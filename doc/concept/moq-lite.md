@@ -235,6 +235,13 @@ seconds so a segmented egress can still find its segments. Retention ages a
 group by the same two clocks as max delay and always keeps the newest group.
 IETF carries the same idea as `MAX_CACHE_DURATION`, measured in wall time alone.
 
+A one-group `FETCH` obeys the publisher retention window too. Its optional
+reader max delay can only tighten that window; omitting it adds no reader cap,
+while an explicit zero accepts only the live edge. The same limit remains in
+force if the returned group stalls while being read. moq-lite 07 carries this
+preference directly. Published lite and moq-transport wires enforce it locally,
+without adding a protocol extension.
+
 Put together, a conference might use:
 
 | Track | Priority | Order | Max delay |

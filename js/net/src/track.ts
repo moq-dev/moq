@@ -310,6 +310,9 @@ export interface FetchGroupOptions {
 	/** Delivery priority for the fetch stream. Defaults to `0`. */
 	priority?: number;
 
+	/** Maximum age behind the live edge this caller accepts. Omission uses publisher retention alone. */
+	maxDelay?: Milli;
+
 	/**
 	 * Abandons this fetch, rejecting with the signal's reason. Concurrent fetches of the same
 	 * group share one stream, cancelled only once every caller has left. An already-aborted
@@ -358,6 +361,9 @@ export class Consumer {
 
 	/** Fetch a single group by sequence without holding a live subscription. */
 	fetchGroup(sequence: number, options?: FetchGroupOptions): Promise<GroupConsumer> {
+		if (options?.maxDelay !== undefined) {
+			options = { ...options, maxDelay: wireMillis("maxDelay", options.maxDelay) };
+		}
 		return this.#broadcast.fetchGroup(this.name, sequence, options);
 	}
 }
@@ -1169,7 +1175,9 @@ export class Subscriber {
 	#state: TrackState;
 	#nextSequence = 0;
 	#cursor = new Signal<{ start: number; end?: number }>({ start: 0 });
-	#enforceLatency = true;
+	// FETCH omission is unbounded, unlike SUBSCRIBE's zero default. Undefined means
+	// this is an ordinary subscription; null means an omitted FETCH budget.
+	#fetchMaxDelay?: Milli | null;
 	// Which cursor owns this subscription. Both cursors draw from one buffer, so the
 	// first group read commits the track to arrival order and {@link ordered} commits
 	// it to sequence order; whichever wins is the only one allowed from here on.
@@ -1205,14 +1213,13 @@ export class Subscriber {
 			break;
 		}
 
-		const requested = this.#state.update.peek()?.maxDelay ?? 0;
+		const requested =
+			this.#fetchMaxDelay === undefined
+				? (this.#state.update.peek()?.maxDelay ?? 0)
+				: (this.#fetchMaxDelay ?? Number.POSITIVE_INFINITY);
 		const retained = this.#state.info.peek()?.maxAge;
 		return {
-			budget: this.#enforceLatency
-				? retained === undefined
-					? requested
-					: Math.min(requested, retained)
-				: Number.POSITIVE_INFINITY,
+			budget: retained === undefined ? requested : Math.min(requested, retained),
 			presentation,
 			end,
 		};
@@ -1305,7 +1312,6 @@ export class Subscriber {
 	}
 
 	#guard(group: GroupConsumer): GroupConsumer {
-		if (!this.#enforceLatency) return group;
 		hooks.expireGroup(group, {
 			expired: () => this.#isStale(group, this.#drift(), true),
 			changed: [
@@ -1335,8 +1341,8 @@ export class Subscriber {
 		makeSubscriber = (name, state) => new Subscriber(name, state);
 		hooks.tryRecvGroup = (subscriber) => subscriber.#tryRecvGroup();
 		hooks.groupChanged = (subscriber, fn) => subscriber.#groupChanged(fn);
-		hooks.exemptFetch = (subscriber) => {
-			subscriber.#enforceLatency = false;
+		hooks.fetchBudget = (subscriber, maxDelay) => {
+			subscriber.#fetchMaxDelay = maxDelay ?? null;
 		};
 		hooks.replaceGroups = (subscriber, groups) => subscriber.#replaceGroups(groups);
 		// The sequence cursor lives here (it shares the buffer and the drift anchor with

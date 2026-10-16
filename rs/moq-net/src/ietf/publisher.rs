@@ -166,7 +166,14 @@ async fn read_fetch(
 		_ => skip,
 	};
 	let mut group = track
-		.fetch_group(sequence, group::Fetch { priority, frame_start })
+		.fetch_group(
+			sequence,
+			group::Fetch {
+				priority,
+				frame_start,
+				..Default::default()
+			},
+		)
 		.await?;
 	let mut first = skip;
 	let mut frames = Vec::new();

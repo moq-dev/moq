@@ -11,7 +11,7 @@ import type * as Epoch from "./epoch.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { isAnonymous, type Route } from "./hop.ts";
 import * as Path from "./path.ts";
-import type { Timestamp } from "./time.ts";
+import type { Milli, Timestamp } from "./time.ts";
 import type { Groups, Location, Producer, Request, Subscriber } from "./track.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
@@ -198,12 +198,8 @@ export const hooks: {
 	tryRecvGroup: (subscriber: Subscriber) => Recv;
 	/** Wake once a subscriber's group cursor may read differently; assigned by `track.ts`. */
 	groupChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
-	/**
-	 * Exempt a subscriber from live-delivery policy for a one-shot FETCH scan: it names one
-	 * old group explicitly, so it is neither late against the live edge nor bound by the start
-	 * a live subscription resolves to.
-	 */
-	exemptFetch: (subscriber: Subscriber) => void;
+	/** Apply a FETCH reader budget without inheriting SUBSCRIBE's zero default. */
+	fetchBudget: (subscriber: Subscriber, maxDelay: Milli | undefined) => void;
 	/**
 	 * Replace a serving cursor. An omitted start keeps the current floor; a provided start
 	 * can lower it. Wire publishers apply SUBSCRIBE_UPDATE here rather than through
@@ -269,7 +265,7 @@ export const hooks: {
 	groupChanged: () => {
 		throw new Error("track.ts not loaded");
 	},
-	exemptFetch: () => {
+	fetchBudget: () => {
 		throw new Error("track.ts not loaded");
 	},
 	replaceGroups: () => {

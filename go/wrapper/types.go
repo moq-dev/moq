@@ -27,7 +27,7 @@ type (
 	ConnectionStatus = ffi.MoqConnectionStatus
 	// ErrorScope is whether a protocol code is from the session or stream registry.
 	ErrorScope = ffi.MoqErrorScope
-	// FetchGroupOptions configures a single FetchGroup call, currently just the delivery priority.
+	// FetchGroupOptions configures a single FetchGroup call, including its optional freshness budget.
 	FetchGroupOptions = ffi.MoqFetchGroupOptions
 	// ProtocolKind is a recognized protocol kind, or App / Unknown when the code is not named.
 	ProtocolKind = ffi.MoqProtocolKind

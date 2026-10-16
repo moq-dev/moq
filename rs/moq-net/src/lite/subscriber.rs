@@ -5861,6 +5861,10 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 						broadcast: self.serve.path.as_path(),
 						track: self.serve.name.as_str().into(),
 						priority: request.priority(),
+						max_delay: match self.serve.subscriber.version {
+							lite::Version::Lite07 => request.max_delay(),
+							_ => None,
+						},
 						group: self.group,
 						start_frame: frame_start,
 						// Always through the end of the group: a fetch that stopped short

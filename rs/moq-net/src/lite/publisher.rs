@@ -2104,8 +2104,8 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 				msg.group,
 				group::Fetch {
 					priority: msg.priority,
+					max_delay: msg.max_delay,
 					frame_start: msg.start_frame,
-					..Default::default()
 				},
 			)
 			.into_inner();
@@ -5731,6 +5731,7 @@ mod tests {
 						broadcast: broadcast.clone(),
 						track: "video".into(),
 						priority: 0,
+						max_delay: None,
 						group: 0,
 						start_frame: 0,
 						end_frame: None,
@@ -6149,6 +6150,7 @@ mod tests {
 			broadcast: crate::Path::new("room"),
 			track: "video".into(),
 			priority: 0,
+			max_delay: None,
 			group: 7,
 			start_frame: 0,
 			end_frame: None,

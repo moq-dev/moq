@@ -30,7 +30,8 @@ omitting its timebase keeps an independent offset. Timebases belong to one broad
 and do not keep it open; release the handle with `Close` on the calling goroutine.
 For arrival-order reads, decode each group from `moq.TrackConsumer.RecvGroup` with
 `media.NewGroupConsumer`; frames carry container media time as they land. `media.FetchGroup`
-fetches and decodes one past group.
+fetches and decodes one past group. `FetchGroupOptions.MaxDelayUs` optionally tightens
+the publisher's retention window; leaving it nil applies publisher retention alone.
 
 ```bash
 go get moq.dev/moq@latest
