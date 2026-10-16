@@ -1,9 +1,11 @@
 import { describe, expect, it, spyOn } from "bun:test";
-import { Manual, Micro, Milli, Nano, now } from "@moq/clock";
+import { Manual, Micro, Milli, Nano, now, type Second } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
-import { type Effect, Signal } from "@moq/signals";
+import { Effect, Signal } from "@moq/signals";
+import { ringSamples } from "../audio/latency";
+import { AudioRingBuffer } from "../audio/ring-buffer";
 import type { Broadcast } from "../broadcast";
 import { type Delay, Sync } from "../sync";
 import { Decoder } from "./decoder";
@@ -196,7 +198,9 @@ function sample(group: number, timestamp: number, keyframe = true): Read {
 }
 const gap: Read = { kind: "gap", timestamp: Micro(0), duration: Micro(0) };
 
-async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: readonly number[] = []) {
+// `reads` stands in for the container consumer, unless `live`, which reads what tests publish into
+// `producer` through real consumers instead.
+async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: readonly number[] = [], live = false) {
 	const originalDecoder = Object.getOwnPropertyDescriptor(globalThis, "VideoDecoder");
 	const originalChunk = Object.getOwnPropertyDescriptor(globalThis, "EncodedVideoChunk");
 	const submitted: number[] = [];
@@ -207,6 +211,7 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 	const errors: VideoDecoderInit["error"][] = [];
 	const frames: VideoDecoderInit["output"][] = [];
 	const next = spyOn(Container.Consumer.prototype, "next").mockImplementation(async () => reads.shift());
+	if (live) next.mockRestore();
 	class Codec {
 		state = "unconfigured";
 		// Like WebCodecs, a configure requires a key chunk before any delta.
@@ -286,6 +291,9 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 	const delay = new Signal<Delay>("instant");
 	const sync = new Sync({ delay });
 	const enabled = new Signal(true);
+	// Published before the decoder subscribes, since a broadcast with no request handler refuses
+	// an unknown track.
+	const track = live ? mediaProducer.createTrack("video", { timescale: Moq.Time.Timescale.MILLI }) : undefined;
 	const decoder = new Decoder({ source, sync, enabled });
 	// Opened before the reads below, so it observes every one of them.
 	const arrivals = decoder.arrivals();
@@ -304,6 +312,11 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 		},
 		enabled,
 		catalog,
+		// The broadcast the rendition reads, and its first track, for a live playback to publish into.
+		get producer() {
+			return mediaProducer;
+		},
+		track,
 		submitted,
 		outputs,
 		sync,
@@ -800,3 +813,99 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		}
 	});
 }
+
+// A legacy container frame: the media timestamp, then one payload byte.
+function legacyFrame(media: Micro): Moq.Group.Frame {
+	const timestamp = Moq.Varint.encode(media);
+	const payload = new Uint8Array(timestamp.byteLength + 1);
+	payload.set(timestamp, 0);
+	return { payload, timestamp: Moq.Time.Timestamp.fromMicros(media) };
+}
+
+// A codec change renames the video track, and the replacement's consumer starts reading the same
+// path. Restarting its arrival estimate from the cold-start prior dropped the shared "auto" delay
+// at promotion and climbed back as the new track relearned the lateness, so the audio ring
+// skipped ahead on the drop and went silent refilling on each rise. moq-dev/moq#5635.
+it("a renamed video track keeps the delay, so audio neither skips nor goes silent", async () => {
+	const clock = manualAt(0);
+	const playback = await guardedPlayback("legacy", [], [], true);
+
+	// The postMessage ring every page without cross-origin isolation plays from, following the
+	// shared delay the way the audio decoder drives the worklet.
+	const RATE = 48_000;
+	const STEP = 20; // ms of audio inserted and rendered per tick, one Opus frame
+	const samples = (RATE * STEP) / 1000;
+	const ring = new AudioRingBuffer({ rate: RATE, channels: 1, latency: Milli(STEP) });
+	const follow = new Effect();
+	follow.subscribe(playback.sync.out.delay, (delay) => {
+		ring.resize(Milli.fromSecond((ringSamples(RATE, delay) / RATE) as Second));
+	});
+
+	// One frame per group every 33ms, flushed in runs of 12: each run's first frame lands ~360ms late.
+	const FRAME = 33;
+	const BURST = 12;
+	let track = playback.track as Moq.Track.Producer;
+	let sequence = 0;
+	let held: number[] = [];
+	let frame = 0;
+
+	let inserted = 0;
+	let played = 0;
+	let silent = 0;
+	const output = [new Float32Array(samples)];
+
+	const run = async (from: number, until: number) => {
+		for (let t = from + STEP; t <= until; t += STEP) {
+			await clock.advance(STEP);
+			for (; frame * FRAME <= t; frame++) {
+				held.push(frame * FRAME);
+				if (held.length < BURST) continue;
+				for (const media of held) {
+					const group = new Moq.Group.Producer(sequence++);
+					group.writeFrame(legacyFrame(Micro.fromMilli(Milli(media))));
+					group.close();
+					track.writeGroup(group);
+				}
+				held = [];
+			}
+			await new Promise((resolve) => setImmediate(resolve));
+			await microtasks();
+
+			ring.write(Micro.fromMilli(Milli(t - STEP)), [new Float32Array(samples).fill(0.5)]);
+			inserted += samples;
+			const count = ring.read(output);
+			played += count;
+			if (count < samples) silent++;
+		}
+	};
+
+	try {
+		playback.delay.set("auto");
+		await microtasks();
+
+		// Long enough for the estimate to settle on the lateness this path shows.
+		await run(0, 20_000);
+		const delay = playback.sync.out.delay.peek();
+		expect(delay).toBeGreaterThan(Milli(300));
+
+		const before = { inserted, played, buffered: ring.length };
+		silent = 0;
+
+		track.close();
+		playback.switchRendition("video/1");
+		track = playback.producer.createTrack("video/1", { timescale: Moq.Time.Timescale.MILLI });
+		sequence = 0;
+		await run(20_000, 26_000);
+
+		// The replacement read the new track and showed it.
+		expect(playback.decoder.out.timestamp.peek()).toBeGreaterThan(Milli(25_000));
+		const skipped = inserted - before.inserted - (played - before.played) - (ring.length - before.buffered);
+		expect({ skipped, silent }).toEqual({ skipped: 0, silent: 0 });
+		expect(playback.sync.out.delay.peek()).toBeGreaterThanOrEqual(delay);
+	} finally {
+		follow.close();
+		playback.close();
+		await microtasks();
+		clock.restore();
+	}
+});
