@@ -20,6 +20,11 @@ Decided 2026-10-16 (maintainer interview):
   HLS `EXT-X-VERSION`. Root only: one number for the whole catalog, never
   per section, so a too-new video section can't be silently dropped into an
   audio-only play.
+- The bare key is the spec's to claim: the spec already tells applications
+  to namespace their own root keys so they can't collide with a section a
+  later draft defines. Reserve `version` the way `rs/moq-msf` reserves its
+  root key, so a flattened Rust extension or a JS passthrough field can't
+  emit a duplicate.
 - The number is the moq-hang draft number (`"version": 4` needs a
   moq-hang-04 reader). A missing field means 3, the catalog `release`
   ships today, so published catalogs stay readable without an update.
