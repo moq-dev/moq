@@ -1260,6 +1260,16 @@ def test_optional_binding_records_use_none_defaults():
     assert decoder.max_delay is None
 
 
+def test_audio_encoder_returns_namespaced_records():
+    """The codec-only encoder's results are named under ``moq.audio``."""
+    encoder = moq.audio.Encoder(moq.audio.EncoderOutput(codec=moq.AudioCodec.opus(), sample_rate=48000, channels=1))
+    packet = encoder.encode([0.0] * encoder.frame_size)
+    assert isinstance(packet, moq.audio.Packet)
+    assert packet.data
+    finish = encoder.finish()
+    assert isinstance(finish, moq.audio.EncoderFinish)
+
+
 def test_encode_audio_with_opus_object():
     """Construct the Opus selection, encode actual audio, release in either order."""
     for codec_first in (True, False):

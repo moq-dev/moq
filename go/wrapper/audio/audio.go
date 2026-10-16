@@ -3,7 +3,9 @@ package audio
 
 import (
 	"context"
+	"fmt"
 	"iter"
+	"math"
 	"time"
 
 	"moq.dev/moq"
@@ -39,6 +41,9 @@ type EncoderOutput struct {
 
 func (o EncoderOutput) ffi() (ffi.MoqAudioEncoderOutput, error) {
 	frame, err := bridge.Duration(o.FrameDuration, "audio frame duration")
+	if err == nil && frame > math.MaxUint32 {
+		err = fmt.Errorf("audio frame duration %v exceeds %d microseconds", o.FrameDuration, uint32(math.MaxUint32))
+	}
 	return ffi.MoqAudioEncoderOutput{Codec: o.Codec, Track: o.Track, SampleRate: o.SampleRate, Channels: o.Channels, Bitrate: o.Bitrate, FrameDurationUs: uint32(frame)}, err
 }
 

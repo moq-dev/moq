@@ -25,6 +25,12 @@ from .types import AudioCodec as Codec
 from .types import AudioEncoderInput as EncoderInput
 from .types import AudioSampleFormat as SampleFormat
 
+Packet = MoqAudioPacket
+"""One encoded payload from an :class:`Encoder`."""
+
+EncoderFinish = MoqAudioEncoderFinish
+"""The packets :meth:`Encoder.finish` drains and the padded samples to discard."""
+
 
 @dataclass(frozen=True)
 class Frame:
@@ -174,11 +180,11 @@ class Encoder:
         """Samples per channel required by each encode call."""
         return self._inner.frame_size()
 
-    def encode(self, pcm: list[float]) -> MoqAudioPacket:
+    def encode(self, pcm: list[float]) -> Packet:
         """Encode one full PCM frame."""
         return self._inner.encode(pcm)
 
-    def finish(self, pcm: list[float] | None = None) -> MoqAudioEncoderFinish:
+    def finish(self, pcm: list[float] | None = None) -> EncoderFinish:
         """Pad an optional partial frame and drain the codec."""
         return self._inner.finish(pcm or [])
 
@@ -188,9 +194,11 @@ __all__ = [
     "DecoderOutput",
     "Encoder",
     "EncoderInput",
+    "EncoderFinish",
     "EncoderOutput",
     "Frame",
     "Codec",
-    "SampleFormat",
+    "Packet",
     "Producer",
+    "SampleFormat",
 ]
