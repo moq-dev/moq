@@ -1,14 +1,15 @@
 //! MoQ over one reliable, ordered WebRTC data channel, for sessions with browser peers.
 //!
-//! A [`Peer`] is one str0m peer connection with a full ICE agent: a dual-stack UDP
-//! socket, a host candidate per non-loopback interface address, a server-reflexive
-//! candidate from each configured STUN server, and remote `.local` candidates
-//! resolved over mDNS. Signaling is the caller's: send the [`Offer`] or [`Answer`]
-//! and the local [`Candidate`]s to the remote peer, and feed its replies back.
+//! An [`Offerer`] or [`Answerer`] is one side of a str0m peer connection with a
+//! full ICE agent: a dual-stack UDP socket, a host candidate per non-loopback
+//! interface address, a server-reflexive candidate from each configured STUN
+//! server, and remote `.local` candidates resolved over mDNS. Signaling is the
+//! caller's: send the [`Offer`] or [`Answer`] and the local [`Candidate`]s to the
+//! remote peer, and feed its replies back.
 //!
-//! The offering peer opens the data channel, labelled `moq` and carrying the
-//! agreed MoQ ALPN as its protocol, and runs the MoQ client over it with
-//! [`crate::Client::connect_webrtc`]. The answering peer adopts that channel and
+//! The [`Offerer`] opens the data channel, labelled `moq` and carrying the agreed
+//! MoQ ALPN as its protocol, and runs the MoQ client over it with
+//! [`crate::Client::connect_webrtc`]. The [`Answerer`] adopts that channel and
 //! runs the MoQ server with [`crate::Listener::accept_webrtc`]. This matches
 //! `@moq/p2p`, where `Transport.connect` creates the channel and
 //! `Transport.accept` adopts it.
@@ -87,11 +88,6 @@ pub enum Error {
 	#[error("mDNS resolution failed: {0}")]
 	Mdns(String),
 
-	/// The call needs the other role: only the offering peer opens the data channel
-	/// and applies an answer, and only the answering peer adopts a channel.
-	#[error("wrong role: {0}")]
-	Role(&'static str),
-
 	/// The data channel was already taken by a session.
 	#[error("the data channel is already in use")]
 	Taken,
@@ -115,7 +111,7 @@ pub enum Error {
 
 crate::error::from_message!(qmux::Error => Qmux);
 
-/// How a [`Peer`] gathers its local candidates.
+/// How an [`Offerer`] or [`Answerer`] gathers its local candidates.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct Config {
@@ -222,27 +218,27 @@ text!(Offer);
 text!(Answer);
 text!(Candidate);
 
-/// One side of a WebRTC peer connection, for signaling.
+/// The offering side of a WebRTC peer connection, which opens the MoQ data channel
+/// and runs the MoQ client over it with [`crate::Client::connect_webrtc`].
 ///
 /// A background task drives the connection from creation, so ICE checks and STUN
 /// replies are answered while signaling is still in progress. It runs until both
 /// this handle and any session over its data channel are gone. Dropping the handle
 /// stops signaling but leaves a running session alone.
-pub struct Peer {
-	commands: mpsc::UnboundedSender<Command>,
-	candidates: mpsc::UnboundedReceiver<Candidate>,
-	/// The ALPN the offerer's channel carries, or `None` for the answering peer.
-	protocol: Option<String>,
+pub struct Offerer {
+	peer: Peer,
+	/// The MoQ ALPN the channel carries.
+	protocol: String,
 }
 
-impl Peer {
-	/// Start the offering side, opening a data channel for MoQ `protocol`, the ALPN
-	/// the peers agreed through signaling.
-	pub async fn offer(config: &Config, protocol: &str) -> Result<(Self, Offer), Error> {
-		Self::offer_from(config, protocol, hosts()?).await
+impl Offerer {
+	/// Start a peer connection with a data channel for MoQ `protocol`, the ALPN the
+	/// peers agreed through signaling, returning the offer to send.
+	pub async fn new(config: &Config, protocol: &str) -> Result<(Self, Offer), Error> {
+		Self::with_hosts(config, protocol, hosts()?).await
 	}
 
-	async fn offer_from(config: &Config, protocol: &str, hosts: Vec<IpAddr>) -> Result<(Self, Offer), Error> {
+	async fn with_hosts(config: &Config, protocol: &str, hosts: Vec<IpAddr>) -> Result<(Self, Offer), Error> {
 		if protocol.is_empty() || protocol.contains(char::is_whitespace) {
 			return Err(Error::Protocol(protocol.to_string()));
 		}
@@ -263,22 +259,69 @@ impl Peer {
 			channel: id,
 			pending: Some(pending),
 		};
-		let peer = Self::spawn(config, rtc, socket, locals, role, None).await?;
-		Ok((
-			Self {
-				protocol: Some(protocol.to_string()),
-				..peer
-			},
-			Offer(offer.to_sdp_string()),
-		))
+		let peer = Peer::spawn(config, rtc, socket, locals, role, None).await?;
+		let offerer = Self {
+			peer,
+			protocol: protocol.to_string(),
+		};
+		Ok((offerer, Offer(offer.to_sdp_string())))
 	}
 
-	/// Start the answering side for a browser's offer.
-	pub async fn answer(config: &Config, offer: &Offer) -> Result<(Self, Answer), Error> {
-		Self::answer_from(config, offer, hosts()?).await
+	/// Apply the remote peer's answer to this offer.
+	pub async fn accept(&self, answer: &Answer) -> Result<(), Error> {
+		let (sdp, mdns) = split_mdns(answer.as_str());
+		let max_message = max_message_size(answer.as_str())?;
+		let parsed = SdpAnswer::from_sdp_string(&sdp).map_err(|err| Error::Sdp(err.to_string()))?;
+
+		let (tx, rx) = oneshot::channel();
+		self.peer.send(Command::Answer(parsed, max_message, tx))?;
+		rx.await.map_err(|_| ice::Error::Closed)??;
+		self.peer.resolve(mdns);
+		Ok(())
 	}
 
-	async fn answer_from(config: &Config, offer: &Offer, hosts: Vec<IpAddr>) -> Result<(Self, Answer), Error> {
+	/// The next local candidate to send the remote peer, or `None` once gathering is done.
+	///
+	/// Host candidates ride in the offer; these are the server-reflexive ones that
+	/// STUN finds afterwards.
+	pub async fn candidate(&mut self) -> Option<Candidate> {
+		self.peer.candidates.recv().await
+	}
+
+	/// Add a candidate the remote peer sent, resolving a `.local` address over mDNS first.
+	///
+	/// An empty candidate, which a browser sends to mark the end of its candidates, is ignored.
+	pub async fn add_candidate(&self, candidate: &Candidate) -> Result<(), Error> {
+		self.peer.add_candidate(candidate).await
+	}
+
+	/// The MoQ ALPN this peer's data channel carries.
+	pub(crate) fn protocol(&self) -> &str {
+		&self.protocol
+	}
+
+	/// Wait for the data channel to open, and take it.
+	pub(crate) async fn channel(&self) -> Result<Opened, Error> {
+		self.peer.channel().await
+	}
+}
+
+/// The answering side of a WebRTC peer connection, which adopts the remote peer's
+/// MoQ data channel and serves it with [`crate::Listener::accept_webrtc`].
+///
+/// Like [`Offerer`], a background task drives the connection until both this
+/// handle and any session over its data channel are gone.
+pub struct Answerer {
+	peer: Peer,
+}
+
+impl Answerer {
+	/// Start a peer connection for the remote peer's offer, returning the answer to send.
+	pub async fn new(config: &Config, offer: &Offer) -> Result<(Self, Answer), Error> {
+		Self::with_hosts(config, offer, hosts()?).await
+	}
+
+	async fn with_hosts(config: &Config, offer: &Offer, hosts: Vec<IpAddr>) -> Result<(Self, Answer), Error> {
 		let (sdp, mdns) = split_mdns(offer.as_str());
 		let max_message = max_message_size(offer.as_str())?;
 		let parsed = SdpOffer::from_sdp_string(&sdp).map_err(|err| Error::Sdp(err.to_string()))?;
@@ -290,11 +333,40 @@ impl Peer {
 			.accept_offer(parsed)
 			.map_err(|err| Error::Sdp(err.to_string()))?;
 
-		let peer = Self::spawn(config, rtc, socket, locals, Role::Answerer, Some(max_message)).await?;
+		let peer = Peer::spawn(config, rtc, socket, locals, Role::Answerer, Some(max_message)).await?;
 		peer.resolve(mdns);
-		Ok((peer, Answer(answer.to_sdp_string())))
+		Ok((Self { peer }, Answer(answer.to_sdp_string())))
 	}
 
+	/// The next local candidate to send the remote peer, or `None` once gathering is done.
+	///
+	/// Host candidates ride in the answer; these are the server-reflexive ones that
+	/// STUN finds afterwards.
+	pub async fn candidate(&mut self) -> Option<Candidate> {
+		self.peer.candidates.recv().await
+	}
+
+	/// Add a candidate the remote peer sent, resolving a `.local` address over mDNS first.
+	///
+	/// An empty candidate, which a browser sends to mark the end of its candidates, is ignored.
+	pub async fn add_candidate(&self, candidate: &Candidate) -> Result<(), Error> {
+		self.peer.add_candidate(candidate).await
+	}
+
+	/// Wait for the remote peer's data channel to open, and take it.
+	pub(crate) async fn channel(&self) -> Result<Opened, Error> {
+		self.peer.channel().await
+	}
+}
+
+/// The signaling handle both roles share: commands to the driver task and the
+/// candidates it gathers.
+struct Peer {
+	commands: mpsc::UnboundedSender<Command>,
+	candidates: mpsc::UnboundedReceiver<Candidate>,
+}
+
+impl Peer {
 	async fn spawn(
 		config: &Config,
 		rtc: Rtc,
@@ -322,41 +394,10 @@ impl Peer {
 		use tracing::Instrument;
 		tokio::spawn(driver.run().instrument(tracing::Span::current()));
 
-		Ok(Self {
-			commands,
-			candidates,
-			protocol: None,
-		})
+		Ok(Self { commands, candidates })
 	}
 
-	/// Apply the browser's answer to this peer's offer.
-	pub async fn accept(&self, answer: &Answer) -> Result<(), Error> {
-		if self.protocol.is_none() {
-			return Err(Error::Role("only the offering peer applies an answer"));
-		}
-		let (sdp, mdns) = split_mdns(answer.as_str());
-		let max_message = max_message_size(answer.as_str())?;
-		let parsed = SdpAnswer::from_sdp_string(&sdp).map_err(|err| Error::Sdp(err.to_string()))?;
-
-		let (tx, rx) = oneshot::channel();
-		self.send(Command::Answer(parsed, max_message, tx))?;
-		rx.await.map_err(|_| ice::Error::Closed)??;
-		self.resolve(mdns);
-		Ok(())
-	}
-
-	/// The next local candidate to send the remote peer, or `None` once gathering is done.
-	///
-	/// Host candidates ride in the description; these are the server-reflexive ones
-	/// that STUN finds afterwards.
-	pub async fn candidate(&mut self) -> Option<Candidate> {
-		self.candidates.recv().await
-	}
-
-	/// Add a candidate the remote peer sent, resolving a `.local` address over mDNS first.
-	///
-	/// An empty candidate, which a browser sends to mark the end of its candidates, is ignored.
-	pub async fn add_candidate(&self, candidate: &Candidate) -> Result<(), Error> {
+	async fn add_candidate(&self, candidate: &Candidate) -> Result<(), Error> {
 		let line = candidate.as_str().trim();
 		let line = line.strip_prefix("a=").unwrap_or(line);
 		if line.is_empty() {
@@ -366,20 +407,7 @@ impl Peer {
 		self.send(Command::Candidate(candidate))
 	}
 
-	/// The MoQ ALPN this peer's data channel carries, for the offering side.
-	pub(crate) fn protocol(&self) -> Result<&str, Error> {
-		self.protocol
-			.as_deref()
-			.ok_or(Error::Role("only the offering peer opens the data channel"))
-	}
-
-	/// Whether this is the answering side, which adopts the remote peer's channel.
-	pub(crate) fn answering(&self) -> bool {
-		self.protocol.is_none()
-	}
-
-	/// Wait for the data channel to open, and take it.
-	pub(crate) async fn channel(&self) -> Result<Opened, Error> {
+	async fn channel(&self) -> Result<Opened, Error> {
 		let (tx, rx) = oneshot::channel();
 		self.send(Command::Channel(tx))?;
 		let mut opened = rx.await.map_err(|_| ice::Error::Closed)??;
@@ -461,7 +489,7 @@ struct Open {
 struct Driver {
 	agent: ice::Agent,
 	commands: mpsc::UnboundedReceiver<Command>,
-	/// Dropped once gathering finishes, ending [`Peer::candidate`].
+	/// Dropped once gathering finishes, ending [`Offerer::candidate`] and [`Answerer::candidate`].
 	candidates: Option<mpsc::UnboundedSender<Candidate>>,
 	role: Role,
 	/// The remote peer's SCTP message limit, once its description is applied.
@@ -553,18 +581,20 @@ impl Driver {
 	fn command(&mut self, command: Command) {
 		match command {
 			Command::Answer(answer, max_message, reply) => {
-				let result = match &mut self.role {
-					Role::Offerer { pending, .. } => match pending.take() {
-						Some(pending) => self
-							.agent
-							.rtc()
-							.sdp_api()
-							.accept_answer(pending, answer)
-							.map(|()| self.max_message = Some(max_message))
-							.map_err(|err| Error::Sdp(err.to_string())),
-						None => Err(Error::Sdp("the answer was already applied".into())),
-					},
-					Role::Answerer => Err(Error::Role("only the offering peer applies an answer")),
+				// Only an `Offerer` sends an answer, so the answering role never has one pending.
+				let pending = match &mut self.role {
+					Role::Offerer { pending, .. } => pending.take(),
+					Role::Answerer => None,
+				};
+				let result = match pending {
+					Some(pending) => self
+						.agent
+						.rtc()
+						.sdp_api()
+						.accept_answer(pending, answer)
+						.map(|()| self.max_message = Some(max_message))
+						.map_err(|err| Error::Sdp(err.to_string())),
+					None => Err(Error::Sdp("the answer was already applied".into())),
 				};
 				let _ = reply.send(result);
 			}

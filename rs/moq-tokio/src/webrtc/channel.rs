@@ -29,7 +29,7 @@ pub(crate) struct Writer {
 	pub tx: Option<mpsc::Sender<Bytes>>,
 	/// The largest message the peer accepts.
 	pub max: usize,
-	/// Keeps the driver running while the session outlives the [`super::Peer`].
+	/// Keeps the driver running while the session outlives the signaling handle.
 	pub _driver: Option<mpsc::UnboundedSender<super::Command>>,
 }
 

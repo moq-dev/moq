@@ -903,18 +903,15 @@ impl Listener {
 		self.server.accept_next().await
 	}
 
-	/// Read the MoQ SETUP from the data channel the browser opened on an answering
-	/// [`crate::webrtc::Peer`], leaving admission to the returned [`Request`].
+	/// Read the MoQ SETUP from the data channel the remote peer opened on an
+	/// [`crate::webrtc::Answerer`], leaving admission to the returned [`Request`].
 	///
 	/// Waits for ICE and the channel to come up, bounded by the handshake timeout.
 	/// The channel's protocol must be a MoQ ALPN this server speaks.
 	#[cfg(feature = "webrtc")]
-	pub async fn accept_webrtc(&self, peer: &crate::webrtc::Peer) -> crate::Result<Request> {
+	pub async fn accept_webrtc(&self, peer: &crate::webrtc::Answerer) -> crate::Result<Request> {
 		use crate::webrtc::Error as WebRtcError;
 
-		if !peer.answering() {
-			return Err(WebRtcError::Role("only the answering peer adopts a data channel").into());
-		}
 		let server = &self.server;
 		let active = server
 			.activity

@@ -32,7 +32,7 @@ fn broadcast() -> (moq_net::origin::Producer, impl Sized) {
 
 /// Serve the broadcast from the answering peer, subscribe from the offering one,
 /// and read the frame back across the data channel.
-async fn transfer(offerer: &Peer, answerer: &Peer) {
+async fn transfer(offerer: &Offerer, answerer: &Answerer) {
 	let (origin, _keep) = broadcast();
 	let listener = crate::listen::Config::default()
 		.init_streams()
@@ -76,8 +76,8 @@ async fn transfer(offerer: &Peer, answerer: &Peer) {
 #[tokio::test]
 async fn session_over_loopback() {
 	let config = Config::default();
-	let (offerer, offer) = Peer::offer_from(&config, protocol(), vec![LOOPBACK]).await.unwrap();
-	let (answerer, answer) = Peer::answer_from(&config, &offer, vec![LOOPBACK]).await.unwrap();
+	let (offerer, offer) = Offerer::with_hosts(&config, protocol(), vec![LOOPBACK]).await.unwrap();
+	let (answerer, answer) = Answerer::with_hosts(&config, &offer, vec![LOOPBACK]).await.unwrap();
 	offerer.accept(&answer).await.unwrap();
 
 	transfer(&offerer, &answerer).await;
@@ -123,9 +123,9 @@ async fn server_reflexive_candidate_is_offered_and_selected() {
 		stun: vec![format!("stun:{stun}").parse().unwrap()],
 	};
 	let private = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
-	let (mut offerer, offer) = Peer::offer_from(&config, protocol(), vec![private]).await.unwrap();
+	let (mut offerer, offer) = Offerer::with_hosts(&config, protocol(), vec![private]).await.unwrap();
 	let offer = Offer::new(strip_candidates(offer.as_str()));
-	let (answerer, answer) = Peer::answer_from(&Config::default(), &offer, vec![LOOPBACK])
+	let (answerer, answer) = Answerer::with_hosts(&Config::default(), &offer, vec![LOOPBACK])
 		.await
 		.unwrap();
 	offerer
@@ -151,32 +151,8 @@ async fn server_reflexive_candidate_is_offered_and_selected() {
 }
 
 #[tokio::test]
-async fn roles_are_enforced() {
-	let config = Config::default();
-	let (offerer, offer) = Peer::offer_from(&config, protocol(), vec![LOOPBACK]).await.unwrap();
-	let (answerer, answer) = Peer::answer_from(&config, &offer, vec![LOOPBACK]).await.unwrap();
-
-	assert!(matches!(answerer.accept(&answer).await, Err(Error::Role(_))));
-	let client = crate::client::Config::default().init().unwrap();
-	assert!(matches!(
-		client.connect_webrtc(&answerer).await,
-		Err(crate::Error::WebRtc(err)) if matches!(*err, Error::Role(_))
-	));
-	let listener = crate::listen::Config::default()
-		.init_streams()
-		.unwrap()
-		.listen()
-		.await
-		.unwrap();
-	assert!(matches!(
-		listener.accept_webrtc(&offerer).await,
-		Err(crate::Error::WebRtc(err)) if matches!(*err, Error::Role(_))
-	));
-}
-
-#[tokio::test]
 async fn unsupported_protocol_is_refused() {
-	let (offerer, _) = Peer::offer_from(&Config::default(), "not-moq", vec![LOOPBACK])
+	let (offerer, _) = Offerer::with_hosts(&Config::default(), "not-moq", vec![LOOPBACK])
 		.await
 		.unwrap();
 	let client = crate::client::Config::default().init().unwrap();

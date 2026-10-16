@@ -298,14 +298,14 @@ impl Client {
 		Some(self.with_subscriber(origin).connect(url))
 	}
 
-	/// Run a MoQ client session over the data channel an offering [`crate::webrtc::Peer`] opened.
+	/// Run a MoQ client session over the data channel an [`crate::webrtc::Offerer`] opened.
 	///
 	/// Waits for ICE and the channel to come up, bounded by the connect timeout. A
 	/// peer link cannot be redialed, so there is no reconnect: the session ends with
 	/// the peer connection.
 	#[cfg(feature = "webrtc")]
-	pub async fn connect_webrtc(&self, peer: &crate::webrtc::Peer) -> crate::Result<moq_net::Session> {
-		let protocol = peer.protocol()?;
+	pub async fn connect_webrtc(&self, peer: &crate::webrtc::Offerer) -> crate::Result<moq_net::Session> {
+		let protocol = peer.protocol();
 		if !self.versions.alpns().contains(&protocol) {
 			return Err(crate::webrtc::Error::Protocol(protocol.to_string()).into());
 		}
