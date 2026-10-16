@@ -17,5 +17,9 @@ need, reducing latency and CPU without moving the existing Check/Test gates.
 - Audit repeated installs and builds only where equivalent outputs can be
   reused. Record before/after setup and total job timings, including cache
   misses; avoid trading lower reported setup for hidden repeated work.
+- The Dart check builds release `moq-ffi` twice: `sh/dart/generate.sh`, then
+  `dart test`'s build hook, probably because the hook's filtered environment
+  changes Cargo's fingerprint. Check [run 38853884676](https://github.com/moq-dev/moq/actions/runs/38853884676)
+  spent about 6.7 and 6 minutes on them; confirm the cause and reuse one build.
 - Decided 2026-10-15: m0. Keep hosted runners, PR Check/Test, and the platform
   merge-queue policy. Existing R2/Nix cache and FFI-reuse quests keep ownership.

@@ -183,7 +183,7 @@ video:
 
 # Optional publisher retention across Rust/JS sessions through a Rust relay.
 max-age:
-    cargo nextest run --locked -p moq-tokio --test max_age --run-ignored all
+    cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^max_age::/)' --run-ignored all
 
 # Cross-language subscription termination over in-memory transports.
 bare-fin:

@@ -3,7 +3,7 @@
 ## Goal
 
 One in-memory session pair implements moq-net's poll transport traits and
-replaces the duplicate poll-session mocks (`rs/moq-net/tests/support/mock.rs`,
+replaces the duplicate poll-session mocks (`rs/moq-net/tests/integration/support/mock.rs`,
 `rs/moq-e2ee/tests/support/mock.rs`, and the session bench's transport).
 moq-tokio's `FakeSession` and `Scripted` stay: they implement
 `web_transport_trait::Session` to test moq-tokio's adapter onto the poll

@@ -3,7 +3,7 @@
 //! Measures the pending queue and complete grant/withdrawal lifecycle. Run the same
 //! matrix before and after queue changes so a per-session scan appears on its own axis.
 
-#[path = "../tests/support/mod.rs"]
+#[path = "../tests/integration/support/mod.rs"]
 mod support;
 
 use bytes::Bytes;

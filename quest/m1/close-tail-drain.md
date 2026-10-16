@@ -34,7 +34,7 @@ Found while reworking the in-memory transport (#5530). Facts at 813a92b48:
   and IETF the receiver throws away a tail its transport already holds.
   lite-07 already avoids this at the protocol level: the closer waits for the
   subscriber's Subscribe-stream FIN (`drafts/draft-lcurley-moq-lite.md`).
-- The test mock (`rs/moq-net/tests/support/mock.rs`) hid it: its FIN counts as
+- The test mock (`rs/moq-net/tests/integration/support/mock.rs`) hid it: its FIN counts as
   acked only once the reading application stops or drops the stream.
   `older_lite_close_keeps_ack_drain` never checks what the reader got.
 

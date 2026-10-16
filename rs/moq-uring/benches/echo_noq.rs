@@ -3,7 +3,7 @@
 use criterion::{criterion_group, criterion_main};
 
 #[cfg(target_os = "linux")]
-#[path = "../tests/support.rs"]
+#[path = "../tests/integration/support.rs"]
 mod support;
 
 #[cfg(target_os = "linux")]

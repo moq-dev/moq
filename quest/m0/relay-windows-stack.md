@@ -20,7 +20,7 @@ Likely cause, not yet confirmed: `rs/moq-relay/src/main.rs` is one
 and polls that state machine on the main thread, and debug builds copy it by
 value several times. Logging starts inside `Config::load`, which is why
 nothing prints. The relay tests already sidestep this with 32 MiB threads
-(`rs/moq-relay/tests/goaway_cluster.rs` and others), and
+(`rs/moq-relay/tests/integration/goaway_cluster.rs` and others), and
 `rs/moq-relay/src/connection.rs` and `rs/moq-tokio/src/client.rs` already box
 large futures for the same reason.
 
@@ -39,7 +39,7 @@ Decided 2026-10-15 (maintainer):
 - Windows CI adds `-p moq-relay` to `windows-test` (`rs/justfile`), so the
   relay's tests, the regression above included, run on Windows. That needs
   the tests' Unix-only expectations gated first, keeping them on Unix:
-  `rs/moq-relay/tests/released_cli.rs` requires the `server-unix-*` flags and
+  `rs/moq-relay/tests/integration/released_cli.rs` requires the `server-unix-*` flags and
   their env vars, which exist only under `cfg(all(feature = "uds", unix))`
   (`rs/moq-tokio/src/listen.rs`).
 
