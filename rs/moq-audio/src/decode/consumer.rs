@@ -358,12 +358,14 @@ impl Consumer {
 				&& self
 					.next_start
 					.is_some_and(|next| discontinuous(next, mux_frame.timestamp))
-				&& let Some(frame) = self.gap()?
 			{
-				self.ready.push_back(Read::Frame {
-					discontinuity: self.discontinuity,
-					frame,
-				});
+				if let Some(frame) = self.gap()? {
+					self.ready.push_back(Read::Frame {
+						discontinuity: self.discontinuity,
+						frame,
+					});
+				}
+				self.discontinuity += 1;
 			}
 
 			let rate = self.decoder.sample_rate();
@@ -1022,6 +1024,46 @@ mod tests {
 			assert_eq!(frame.timestamp.as_micros(), micros);
 			assert_eq!(frame.data.len() / size_of::<f32>(), frames);
 		}
+	}
+
+	#[tokio::test]
+	async fn an_undeclared_timestamp_hole_is_a_discontinuity() {
+		tokio::time::pause();
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
+		let options = Options {
+			max_delay: Duration::from_secs(1),
+			..Options::new()
+		};
+		let mut consumer = Consumer::new(&broadcast.consume(), &catalog, "audio", options)
+			.await
+			.unwrap();
+		// Contiguous groups, so the container sees no gap: only the stamps jump.
+		for micros in [0, 20_000, 500_000] {
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(micros).unwrap(),
+					duration: Some(Timestamp::from_micros(20_000).unwrap()),
+					keyframe: true,
+					payload: (0..960).flat_map(|_| 0.25f32.to_le_bytes()).collect::<Vec<_>>().into(),
+				})
+				.unwrap();
+		}
+		producer.finish().unwrap();
+		let mut timelines = Vec::new();
+		while let Some(event) = consumer.read().await.unwrap() {
+			if let Read::Frame { discontinuity, frame } = event {
+				timelines.push((frame.timestamp.as_micros(), discontinuity));
+			}
+		}
+		assert_eq!(timelines, [(0, 0), (20_000, 0), (500_000, 1)]);
 	}
 
 	#[tokio::test]
