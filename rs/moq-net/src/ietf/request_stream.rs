@@ -143,6 +143,8 @@ pub(super) struct Update {
 	pub(super) refused: Option<Error>,
 	/// The AUTHORIZATION TOKEN renewing the request's credential.
 	pub(super) authorization_token: Option<super::token::RequestToken>,
+	/// NEW_GROUP_REQUEST (draft-16+), which only a track advertising DYNAMIC_GROUPS takes.
+	pub(super) new_group: Option<u64>,
 }
 
 impl Update {
@@ -180,6 +182,7 @@ impl Update {
 					priority: Some(priority),
 					refused,
 					authorization_token,
+					new_group: None,
 				});
 			}
 			// The request it updates, which the adapter already routed by.
@@ -204,7 +207,7 @@ impl Update {
 			0x27 => priority_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
 			0x28 => property_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
 			0x29 => track_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
-			0x32 => new_group: Option<u64> where !matches!(version, Version::Draft14 | Version::Draft15),
+			0x32 => new_group: Option<u64> where super::subscribe::has_new_group_request(version),
 		);
 		if !data.is_empty() {
 			return Err(DecodeError::InvalidValue);
@@ -219,14 +222,14 @@ impl Update {
 			|| !subgroup_filter.is_empty()
 			|| !object_filter.is_empty()
 			|| !priority_filter.is_empty()
-			|| !property_filter.is_empty()
-			|| new_group.is_some();
+			|| !property_filter.is_empty();
 		let (refused, authorization_token) = Self::refused(token, unsupported);
 		Ok(Self {
 			request_id,
 			priority,
 			refused,
 			authorization_token,
+			new_group,
 		})
 	}
 

@@ -7,8 +7,8 @@
 /// Unlike Message Parameters which have a count prefix, Track Properties
 /// have no count and are read until the end of the message payload.
 ///
-/// MAX_CACHE_DURATION, TIMESCALE, DEFAULT_PUBLISHER_PRIORITY, and DEFAULT_PUBLISHER_GROUP_ORDER are understood;
-/// the rest are parsed and discarded.
+/// MAX_CACHE_DURATION, TIMESCALE, DEFAULT_PUBLISHER_PRIORITY, DEFAULT_PUBLISHER_GROUP_ORDER,
+/// and DYNAMIC_GROUPS are understood; the rest are parsed and discarded.
 use std::time::Duration;
 
 use crate::Timescale;
@@ -34,6 +34,14 @@ const TIMESCALE: u64 = 0x08;
 const DEFAULT_PUBLISHER_PRIORITY: u64 = 0x0e;
 const DEFAULT_PUBLISHER_GROUP_ORDER: u64 = 0x22;
 
+/// DYNAMIC_GROUPS (0x30): a subscriber may ask the original publisher for a new group with
+/// NEW_GROUP_REQUEST. Draft-16 calls it a Track Extension; same number and meaning.
+const DYNAMIC_GROUPS: u64 = 0x30;
+
+/// Immutable Properties (0x0b): Key-Value-Pairs the original publisher sealed, which a
+/// processor searches like the mutable list.
+const IMMUTABLE: u64 = 0x0b;
+
 /// The Track Properties block carried at the end of SUBSCRIBE_OK, PUBLISH, and FETCH_OK.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Properties {
@@ -53,6 +61,9 @@ pub struct Properties {
 	///
 	/// `None` means the draft default, Ascending.
 	pub group_order: Option<GroupOrder>,
+
+	/// Whether the track takes NEW_GROUP_REQUEST (DYNAMIC_GROUPS = 1), mutable or sealed.
+	pub dynamic_groups: bool,
 }
 
 impl Properties {
@@ -98,6 +109,13 @@ impl Properties {
 		if let Some(group_order) = self.group_order {
 			w.varint(DEFAULT_PUBLISHER_GROUP_ORDER - prev_type)?;
 			w.varint(u64::from(u8::from(group_order)))?;
+			prev_type = DEFAULT_PUBLISHER_GROUP_ORDER;
+		}
+
+		// Omitted means 0, so only support is worth bytes.
+		if self.dynamic_groups {
+			w.varint(DYNAMIC_GROUPS - prev_type)?;
+			w.varint(1u64)?;
 		}
 
 		Ok(())
@@ -125,6 +143,8 @@ impl Properties {
 
 		let mut prev_type: u64 = 0;
 		let mut i: u64 = 0;
+		// Searched in both lists, but it holds one value: a second is malformed.
+		let mut dynamic_groups = None;
 
 		while !r.is_empty() {
 			if i >= MAX_PROPERTIES {
@@ -162,6 +182,7 @@ impl Properties {
 							_ => return Err(DecodeError::InvalidValue),
 						};
 					}
+					DYNAMIC_GROUPS => set_dynamic_groups(&mut dynamic_groups, value)?,
 					_ => {}
 				}
 			} else {
@@ -170,12 +191,51 @@ impl Properties {
 				if len > MAX_KVP_VALUE_LEN {
 					return Err(DecodeError::BoundsExceeded);
 				}
-				r.slice(len)?;
+				let value = r.slice(len)?;
+				if abs == IMMUTABLE {
+					sealed_dynamic_groups(&mut Decoder::new(value, version.into()), &mut dynamic_groups)?;
+				}
 			}
 		}
 
+		properties.dynamic_groups = dynamic_groups.unwrap_or(false);
 		Ok(properties)
 	}
+}
+
+/// Record a DYNAMIC_GROUPS value, refusing anything but 0 or 1, and a second occurrence.
+fn set_dynamic_groups(dynamic_groups: &mut Option<bool>, value: u64) -> Result<(), DecodeError> {
+	let value = match value {
+		0 => false,
+		1 => true,
+		_ => return Err(DecodeError::InvalidValue),
+	};
+	match dynamic_groups.replace(value) {
+		Some(_) => Err(DecodeError::InvalidValue),
+		None => Ok(()),
+	}
+}
+
+/// Look for DYNAMIC_GROUPS inside an Immutable Properties value, which the draft makes a
+/// processor search too. Its pairs are delta-encoded like the outer list, and nesting
+/// another Immutable Properties makes the track malformed.
+fn sealed_dynamic_groups(r: &mut Decoder<'_>, dynamic_groups: &mut Option<bool>) -> Result<(), DecodeError> {
+	let mut id: u64 = 0;
+	while !r.is_empty() {
+		id = id.checked_add(r.varint()?).ok_or(DecodeError::BoundsExceeded)?;
+		if id.is_multiple_of(2) {
+			let value = r.varint()?;
+			if id == DYNAMIC_GROUPS {
+				set_dynamic_groups(dynamic_groups, value)?;
+			}
+		} else {
+			if id == IMMUTABLE {
+				return Err(DecodeError::InvalidValue);
+			}
+			r.bytes()?;
+		}
+	}
+	Ok(())
 }
 
 #[cfg(test)]
@@ -208,7 +268,7 @@ mod tests {
 		let mut buf = Vec::new();
 		Encoder::new(&mut buf, Version::Draft17.into()).varint(0x0Bu64).unwrap(); // delta type
 		Encoder::new(&mut buf, Version::Draft17.into()).varint(3u64).unwrap(); // length
-		buf.extend_from_slice(&[0x01, 0x02, 0x03]); // value bytes
+		buf.extend_from_slice(&[0x03, 0x01, 0x2A]); // sealed type 0x03, one byte
 		let mut bytes = bytes::Bytes::from(buf);
 		crate::coding::decode_buf(&mut bytes, Version::Draft17, Properties::decode).unwrap();
 		assert!(bytes.is_empty());
@@ -226,7 +286,7 @@ mod tests {
 		// Third: delta = 0x07 → abs type 0x0B (odd), length-prefixed
 		Encoder::new(&mut buf, Version::Draft17.into()).varint(0x07u64).unwrap();
 		Encoder::new(&mut buf, Version::Draft17.into()).varint(2u64).unwrap();
-		buf.extend_from_slice(&[0xAA, 0xBB]);
+		buf.extend_from_slice(&[0x02, 0x2A]); // sealed type 0x02 = 42
 
 		let mut bytes = bytes::Bytes::from(buf);
 		crate::coding::decode_buf(&mut bytes, Version::Draft17, Properties::decode).unwrap();
@@ -240,6 +300,7 @@ mod tests {
 			timescale: Some(Timescale::MICRO),
 			priority: Some(37),
 			group_order: Some(GroupOrder::Descending),
+			dynamic_groups: true,
 		};
 
 		let mut buf = Vec::new();
@@ -307,6 +368,7 @@ mod tests {
 	#[test]
 	fn drafts_14_through_16_write_no_timescale() {
 		let properties = Properties {
+			dynamic_groups: false,
 			max_cache_duration: None,
 			timescale: Some(Timescale::MILLI),
 			priority: None,
@@ -327,6 +389,7 @@ mod tests {
 	#[test]
 	fn test_round_trip_group_order_only() {
 		let properties = Properties {
+			dynamic_groups: false,
 			max_cache_duration: None,
 			timescale: None,
 			priority: None,
@@ -344,5 +407,56 @@ mod tests {
 			properties
 		);
 		assert!(bytes.is_empty());
+	}
+
+	fn decode_draft22(pairs: &[u8]) -> Result<Properties, DecodeError> {
+		crate::coding::decode_buf(
+			&mut bytes::Bytes::from(pairs.to_vec()),
+			Version::Draft22,
+			Properties::decode,
+		)
+	}
+
+	/// DYNAMIC_GROUPS holds 0 or 1, and the draft closes the session over anything else.
+	#[test]
+	fn dynamic_groups_is_a_boolean() {
+		assert!(decode_draft22(&[0x30, 0x01]).unwrap().dynamic_groups);
+		assert!(!decode_draft22(&[0x30, 0x00]).unwrap().dynamic_groups);
+		assert!(!decode_draft22(&[]).unwrap().dynamic_groups);
+		assert!(matches!(decode_draft22(&[0x30, 0x02]), Err(DecodeError::InvalidValue)));
+	}
+
+	/// A processor searches Immutable Properties too, with the same validation.
+	#[test]
+	fn dynamic_groups_inside_immutable_properties() {
+		// 0x0b, length 2: { 0x30 = 1 }
+		assert!(decode_draft22(&[0x0b, 0x02, 0x30, 0x01]).unwrap().dynamic_groups);
+		assert!(matches!(
+			decode_draft22(&[0x0b, 0x02, 0x30, 0x02]),
+			Err(DecodeError::InvalidValue)
+		));
+		// Immutable Properties nested inside Immutable Properties is malformed.
+		assert!(decode_draft22(&[0x0b, 0x02, 0x0b, 0x00]).is_err());
+		// One value: the property cannot appear both mutable and sealed.
+		assert!(decode_draft22(&[0x0b, 0x02, 0x30, 0x01, 0x25, 0x01]).is_err());
+	}
+
+	/// Only support is written: an absent property already means 0.
+	#[test]
+	fn dynamic_groups_is_written_only_when_supported() {
+		let mut buf = Vec::new();
+		Properties {
+			dynamic_groups: true,
+			..Default::default()
+		}
+		.encode(&mut Encoder::new(&mut buf, Version::Draft22.into()), Version::Draft22)
+		.unwrap();
+		assert_eq!(buf, [0x30, 0x01]);
+
+		let mut buf = Vec::new();
+		Properties::default()
+			.encode(&mut Encoder::new(&mut buf, Version::Draft22.into()), Version::Draft22)
+			.unwrap();
+		assert!(buf.is_empty());
 	}
 }

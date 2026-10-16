@@ -2524,6 +2524,7 @@ mod tests {
 		let mut encoder = crate::coding::Encoder::new(&mut subscribe, VERSION.into());
 		encoder.varint(ietf::Subscribe::ID).unwrap();
 		ietf::Subscribe {
+			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: crate::Path::new("room"),
 			track_name: "video".into(),
@@ -2943,6 +2944,7 @@ mod tests {
 	/// `token`, framed as a control message.
 	fn subscribe_with_token(version: Version, token: &[u8]) -> Vec<u8> {
 		let msg = ietf::Subscribe {
+			new_group: None,
 			request_id: RequestId(0),
 			track_namespace: crate::Path::new("room"),
 			track_name: "video".into(),

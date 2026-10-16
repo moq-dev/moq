@@ -98,6 +98,14 @@ pub struct Subscription {
 	/// subscribers fresh. Each subscriber's own publisher (a relay's downstream session)
 	/// still serves it in its own order.
 	pub order: Order,
+	/// A moq-transport NEW_GROUP_REQUEST this subscriber is waiting on: the first group
+	/// sequence it would count as new, or 0 when it knows of no group at all.
+	///
+	/// Relay-only, so it stays out of the public API: the aggregate the public getters
+	/// report leaves it out. Aggregated by the highest value, and cleared once this
+	/// subscriber is handed a group at or past it, so a request never outlives what it
+	/// asked for.
+	pub(crate) new_group: Option<u64>,
 }
 
 /// Which of a subscription's pending groups the publisher sends first.
@@ -122,6 +130,7 @@ impl Default for Subscription {
 			start: None,
 			end: None,
 			order: Order::Descending,
+			new_group: None,
 		}
 	}
 }
@@ -202,6 +211,8 @@ impl Subscription {
 				(Order::Ascending, Order::Ascending) => Order::Ascending,
 				_ => Order::Descending,
 			},
+			// A higher value names a newer group, which covers every lower request.
+			new_group: self.new_group.max(combined.new_group),
 		};
 
 		if &merged != combined {

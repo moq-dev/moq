@@ -42,10 +42,13 @@ pub struct Subscribe<'a> {
 	/// The `AUTHORIZATION TOKEN` (0x03) this request presents. At most one is
 	/// accepted: decoding refuses a repeated or second token.
 	pub authorization_token: Option<RequestToken>,
+	/// NEW_GROUP_REQUEST (0x32, draft-16+): the subscriber's largest known Group ID plus
+	/// one, or 0 when it knows none. Never encoded where the draft has no such parameter.
+	pub new_group: Option<u64>,
 }
 
 /// NEW_GROUP_REQUEST (0x32) arrived in draft-16.
-fn has_new_group_request(version: Version) -> bool {
+pub(super) fn has_new_group_request(version: Version) -> bool {
 	!matches!(version, Version::Draft14 | Version::Draft15)
 }
 
@@ -92,11 +95,10 @@ impl Message for Subscribe<'_> {
 					rendezvous: false,
 					range_filters: false,
 					authorization_token,
+					new_group: None,
 				})
 			}
 			_ => {
-				// NEW_GROUP_REQUEST is ignored, as the draft lets a publisher without dynamic
-				// groups do.
 				decode_params!(r, version,
 					0x02 => _object_delivery_timeout: Option<u64>,
 					0x03 => authorization_token: Vec<super::token::RequestToken>,
@@ -113,7 +115,7 @@ impl Message for Subscribe<'_> {
 					0x26 => object_id_filter: Vec<Opaque> where has_range_filters(version),
 					0x27 => priority_filter: Vec<Opaque> where has_range_filters(version),
 					0x28 => object_property_filter: Vec<Opaque> where has_range_filters(version),
-					0x32 => _new_group_request: Option<u64> where has_new_group_request(version),
+					0x32 => new_group: Option<u64> where has_new_group_request(version),
 					0x35 => include_properties: Option<bool> where Filter::is_draft20(version),
 				);
 				let authorization_token = super::token::single(authorization_token)?;
@@ -152,6 +154,7 @@ impl Message for Subscribe<'_> {
 					rendezvous,
 					range_filters,
 					authorization_token,
+					new_group,
 				})
 			}
 		}
@@ -186,6 +189,7 @@ impl Message for Subscribe<'_> {
 				// arrived in draft-20, and an older peer would read it as an unknown
 				// parameter, which is a protocol violation.
 				let include_properties = (!self.properties_wanted && Filter::is_draft20(version)).then_some(false);
+				let new_group = self.new_group.filter(|_| has_new_group_request(version));
 
 				encode_params!(w, version,
 					0x03 => self.authorization_token.clone(),
@@ -194,6 +198,7 @@ impl Message for Subscribe<'_> {
 					0x21 => self.filter,
 					0x22 => self.group_order,
 					0x23 => fill,
+					0x32 => new_group,
 					0x35 => include_properties,
 				);
 			}
@@ -397,6 +402,8 @@ pub struct SubscribeUpdate {
 	/// The `AUTHORIZATION TOKEN` (0x03) renewing the request's credential, if any. At
 	/// most one is accepted: decoding refuses a repeated or second token.
 	pub authorization_token: Option<RequestToken>,
+	/// NEW_GROUP_REQUEST (0x32, draft-16+), as on [`Subscribe::new_group`].
+	pub new_group: Option<u64>,
 }
 
 impl Message for SubscribeUpdate {
@@ -427,6 +434,7 @@ impl Message for SubscribeUpdate {
 					0x10 => self.forward,
 					0x20 => self.subscriber_priority,
 					0x21 => self.filter,
+					0x32 => self.new_group.filter(|_| has_new_group_request(version)),
 				);
 			}
 			_ => {
@@ -444,6 +452,7 @@ impl Message for SubscribeUpdate {
 					0x10 => self.forward,
 					0x20 => self.subscriber_priority,
 					0x21 => self.filter,
+					0x32 => self.new_group,
 				);
 			}
 		}
@@ -472,6 +481,7 @@ impl Message for SubscribeUpdate {
 					forward,
 					filter: None,
 					authorization_token,
+					new_group: None,
 				})
 			}
 			Version::Draft15 | Version::Draft16 => {
@@ -483,7 +493,7 @@ impl Message for SubscribeUpdate {
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
 					0x21 => filter: Option<Filter>,
-					0x32 => _new_group_request: Option<u64> where has_new_group_request(version),
+					0x32 => new_group: Option<u64> where has_new_group_request(version),
 				);
 
 				Ok(Self {
@@ -495,6 +505,7 @@ impl Message for SubscribeUpdate {
 					forward,
 					filter,
 					authorization_token: super::token::single(authorization_token)?,
+					new_group,
 				})
 			}
 			_ => {
@@ -518,7 +529,7 @@ impl Message for SubscribeUpdate {
 					0x27 => _priority_filter: Vec<Opaque> where has_range_filters(version),
 					0x28 => _object_property_filter: Vec<Opaque> where has_range_filters(version),
 					0x29 => _track_property_filter: Vec<Opaque> where has_range_filters(version),
-					0x32 => _new_group_request: Option<u64>,
+					0x32 => new_group: Option<u64>,
 				);
 
 				Ok(Self {
@@ -530,6 +541,7 @@ impl Message for SubscribeUpdate {
 					forward,
 					filter,
 					authorization_token: super::token::single(authorization_token)?,
+					new_group,
 				})
 			}
 		}
@@ -555,6 +567,7 @@ mod tests {
 	#[test]
 	fn test_subscribe_round_trip() {
 		let msg = Subscribe {
+			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: Path::new("test"),
 			track_name: "video".into(),
@@ -581,6 +594,7 @@ mod tests {
 	#[test]
 	fn test_subscribe_round_trip_v15() {
 		let msg = Subscribe {
+			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: Path::new("test"),
 			track_name: "video".into(),
@@ -605,6 +619,59 @@ mod tests {
 	}
 
 	/// Build a SUBSCRIBE body carrying a single RENDEZVOUS_TIMEOUT parameter.
+	const VERSIONS: [Version; 9] = [
+		Version::Draft14,
+		Version::Draft15,
+		Version::Draft16,
+		Version::Draft17,
+		Version::Draft18,
+		Version::Draft19,
+		Version::Draft20,
+		Version::Draft21,
+		Version::Draft22,
+	];
+
+	/// NEW_GROUP_REQUEST survives SUBSCRIBE and REQUEST_UPDATE from draft 16 on, and is
+	/// never written before.
+	#[test]
+	fn new_group_request_round_trips_where_the_draft_has_it() {
+		for version in VERSIONS {
+			let expected = has_new_group_request(version).then_some(7);
+			let subscribe = Subscribe {
+				new_group: Some(7),
+				request_id: RequestId(1),
+				track_namespace: Path::new("test"),
+				track_name: "video".into(),
+				subscriber_priority: 128,
+				group_order: GroupOrder::Descending,
+				filter: Filter::NextObject,
+				fill: None,
+				properties_wanted: true,
+				forward: true,
+				rendezvous: false,
+				range_filters: false,
+				authorization_token: None,
+			};
+			let decoded: Subscribe = decode_message(&encode_message(&subscribe, version), version).unwrap();
+			assert_eq!(decoded.new_group, expected, "{version}: SUBSCRIBE");
+
+			let update = SubscribeUpdate {
+				new_group: Some(7),
+				request_id: RequestId(3),
+				subscription_request_id: matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+					.then_some(RequestId(1)),
+				start_location: Location { group: 0, object: 0 },
+				end_group: 0,
+				subscriber_priority: None,
+				forward: None,
+				filter: None,
+				authorization_token: None,
+			};
+			let decoded: SubscribeUpdate = decode_message(&encode_message(&update, version), version).unwrap();
+			assert_eq!(decoded.new_group, expected, "{version}: REQUEST_UPDATE");
+		}
+	}
+
 	fn subscribe_with_rendezvous(millis: u64, version: Version) -> Vec<u8> {
 		fn build(millis: u64, version: Version) -> Result<Vec<u8>, EncodeError> {
 			let mut buf = Vec::new();
@@ -678,6 +745,7 @@ mod tests {
 	#[test]
 	fn rendezvous_timeout_is_never_sent() {
 		let msg = Subscribe {
+			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: Path::new("test"),
 			track_name: "video".into(),
@@ -711,6 +779,7 @@ mod tests {
 	#[test]
 	fn test_subscribe_nested_namespace() {
 		let msg = Subscribe {
+			new_group: None,
 			request_id: RequestId(100),
 			track_namespace: Path::new("conference/room123"),
 			track_name: "audio".into(),
@@ -899,6 +968,7 @@ mod tests {
 			(true, Version::Draft19),
 		] {
 			let msg = Subscribe {
+				new_group: None,
 				request_id: RequestId(1),
 				track_namespace: crate::Path::new("broadcast"),
 				track_name: "video".into(),
@@ -941,6 +1011,7 @@ mod tests {
 	#[test]
 	fn test_subscribe_update_v15_round_trip() {
 		let msg = SubscribeUpdate {
+			new_group: None,
 			request_id: RequestId(10),
 			subscription_request_id: Some(RequestId(5)),
 			start_location: Location { group: 0, object: 0 },
@@ -963,6 +1034,7 @@ mod tests {
 	#[test]
 	fn test_subscribe_update_v14_round_trip() {
 		let msg = SubscribeUpdate {
+			new_group: None,
 			request_id: RequestId(10),
 			subscription_request_id: Some(RequestId(5)),
 			start_location: Location { group: 1, object: 2 },
@@ -1029,6 +1101,7 @@ mod tests {
 	#[test]
 	fn test_subscribe_v17_round_trip() {
 		let msg = Subscribe {
+			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: Path::new("test"),
 			track_name: "video".into(),
@@ -1071,6 +1144,7 @@ mod tests {
 	#[test]
 	fn test_subscribe_update_v17_round_trip() {
 		let msg = SubscribeUpdate {
+			new_group: None,
 			request_id: RequestId(10),
 			subscription_request_id: None,
 			start_location: Location { group: 0, object: 0 },
@@ -1093,6 +1167,7 @@ mod tests {
 	#[test]
 	fn test_subscribe_v18_round_trip() {
 		let msg = Subscribe {
+			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: Path::new("test"),
 			track_name: "video".into(),
@@ -1183,6 +1258,7 @@ mod tests {
 			track_alias: 42,
 			largest: None,
 			properties: Properties {
+				dynamic_groups: false,
 				max_cache_duration: None,
 				timescale: None,
 				priority: None,
@@ -1212,6 +1288,7 @@ mod tests {
 			track_alias: 42,
 			largest: None,
 			properties: Properties {
+				dynamic_groups: false,
 				max_cache_duration: None,
 				timescale: None,
 				priority: None,
@@ -1277,6 +1354,7 @@ mod tests {
 	#[test]
 	fn test_subscribe_update_v18_round_trip() {
 		let msg = SubscribeUpdate {
+			new_group: None,
 			request_id: RequestId(10),
 			subscription_request_id: None,
 			start_location: Location { group: 0, object: 0 },
@@ -1302,6 +1380,7 @@ mod tests {
 	#[test]
 	fn test_subscribe_update_v17_v18_size_differs() {
 		let v17_msg = SubscribeUpdate {
+			new_group: None,
 			request_id: RequestId(10),
 			subscription_request_id: None,
 			start_location: Location { group: 0, object: 0 },
@@ -1373,6 +1452,7 @@ mod tests {
 	#[test]
 	fn include_properties_is_a_uint8() {
 		let msg = Subscribe {
+			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: crate::Path::new("live"),
 			track_name: "video".into(),
@@ -1436,6 +1516,7 @@ mod tests {
 			Version::Draft20,
 		] {
 			let msg = Subscribe {
+				new_group: None,
 				request_id: RequestId(1),
 				track_namespace: crate::Path::new("live"),
 				track_name: "video".into(),

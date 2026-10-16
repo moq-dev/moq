@@ -270,6 +270,10 @@ impl Copy {
 		if let Some(end) = self.end().map(Position::group) {
 			wire.end = Some(wire.end.map_or(end, |requested| requested.min(end)));
 		}
+		// A replaced copy only finishes what it had, so a new group from it never arrives.
+		if self.until.is_some() {
+			wire.new_group = None;
+		}
 		wire
 	}
 
