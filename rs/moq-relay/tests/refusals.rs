@@ -190,7 +190,10 @@ async fn unavailable_auth_server_is_counted() {
 	let closed = tokio::net::TcpSocket::new_v4().expect("auth socket");
 	closed.bind("127.0.0.1:0".parse().unwrap()).expect("reserve auth port");
 	let address = closed.local_addr().expect("reserved address");
-	assert!(std::net::TcpListener::bind(address).is_err(), "auth port must stay reserved");
+	assert!(
+		std::net::TcpListener::bind(address).is_err(),
+		"auth port must stay reserved"
+	);
 	assert_eq!(
 		tokio::net::TcpStream::connect(address)
 			.await
