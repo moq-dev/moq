@@ -389,6 +389,7 @@ struct Shape {
 	container: hang::catalog::Container,
 	track: String,
 	broadcast: Option<moq_net::path::RelativeOwned>,
+	epoch: Option<moq_net::Epoch>,
 }
 
 /// A pump's progress, shared with its [`ActiveTrack`] so teardown and pad creation can't both
@@ -855,6 +856,7 @@ fn reconcile(
 				container: container.clone(),
 				track: reference.track(name).to_string(),
 				broadcast: reference.broadcast().cloned(),
+				epoch: reference.epoch().cloned(),
 			};
 			desired.insert(name.clone(), Desired { kind, shape });
 		}
@@ -949,7 +951,7 @@ fn reconcile(
 
 		// Bind without waiting: an unavailable sibling or track must not park the catalog loop
 		// and hold up every other rendition. The pump resolves both under its cancellation scope.
-		let binding = match source.bind(d.shape.broadcast.as_ref()) {
+		let binding = match source.bind(d.shape.broadcast.as_ref(), d.shape.epoch.as_ref()) {
 			Ok(binding) => binding,
 			Err(err) => {
 				gst::warning!(CAT, "ignoring rendition {name}: {err:?}");

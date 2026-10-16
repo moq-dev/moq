@@ -159,7 +159,7 @@ impl ExportSource {
 	) -> Result<Option<Self>, crate::Error> {
 		let media: HangContainer = config.try_into()?;
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
-		let Some(request) = source.try_request(config.broadcast.as_ref()) else {
+		let Some(request) = source.try_request(config) else {
 			return Ok(None);
 		};
 
@@ -194,7 +194,7 @@ impl ExportSource {
 	) -> Result<Option<Self>, crate::Error> {
 		let media: HangContainer = config.try_into()?;
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
-		let Some(request) = source.try_request(config.broadcast.as_ref()) else {
+		let Some(request) = source.try_request(config) else {
 			return Ok(None);
 		};
 

@@ -10,6 +10,7 @@ pub const MOQ_EPOCH_UNIX_MILLIS: u64 = 1_577_836_800_000;
 /// A live publisher sets the timeline fields (`timelines`, `timescale`, `duration_max`) alone,
 /// and a recording also names the replay broadcast and object store those spans live under.
 /// Every advertised span is FETCHable; with a store they are durable.
+#[serde_with::serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -31,6 +32,12 @@ pub struct Archive {
 	/// The MoQ broadcast the archive is served back from, relative to this catalog, if any.
 	#[serde(default)]
 	pub replay: Option<moq_net::path::RelativeOwned>,
+
+	/// The publisher instance [`replay`](Self::replay) names, when known. Absent accepts the
+	/// first one a reader resolves; see [`Reference::epoch`](super::Reference::epoch).
+	#[serde(default)]
+	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
+	pub replay_epoch: Option<moq_net::Epoch>,
 
 	/// The object-store URL the recording objects live under, if exposed by the publisher.
 	#[serde(default)]
@@ -57,6 +64,7 @@ impl Archive {
 			timescale: Self::default_timescale(),
 			duration_max: None,
 			replay: None,
+			replay_epoch: None,
 			store: None,
 			version: None,
 		}

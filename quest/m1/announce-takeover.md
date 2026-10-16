@@ -94,6 +94,6 @@ ANNOUNCE_TAKEOVER; published versions retain their framing.
 ## Related
 
 - [IETF takeover](/quest/m1/ietf-takeover.md) - negotiated IETF counterpart
-- [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - a proven continuation preserves the same pin
+- [Reference announcements](/quest/m0/broadcast-epoch/reference-announcements.md) - a proven continuation keeps a followed reference on its instance
 - [Retired requests](https://github.com/moq-dev/moq/pull/5294) - replacements never substitute content into held handles
 - [Identity and recovery guide](/quest/m1/identity-guide.md) - explains takeover alongside restart and legacy behavior

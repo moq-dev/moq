@@ -331,7 +331,7 @@ export class Decoder {
 		// tell whether a failure's source is still selected.
 		const active =
 			broadcast && track && identity && (running || this.#failed)
-				? broadcast.relativeBroadcast(effect, identity.broadcast)
+				? broadcast.relativeBroadcast(effect, identity.broadcast, identity.epoch)
 				: undefined;
 		const key = identity && JSON.stringify(identity);
 

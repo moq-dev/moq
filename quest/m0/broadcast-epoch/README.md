@@ -69,9 +69,10 @@ Decided:
   resolved sibling for the catalog instance's lifetime in players and
   exporters. Optional reference epochs constrain the first resolution on
   epoch-aware transports; on epochless transports they remain best effort.
-  This supersedes following the newest sibling by name. The
-  [catalog references quest](/quest/m0/broadcast-epoch/catalog-references.md)
-  owns the schemas, readers, and compatibility documentation.
+  This supersedes following the newest sibling by name. The schemas, shared
+  resolution, and compatibility documentation landed; readers that follow a
+  referenced broadcast's announcements (decided 2026-10-14) are owned by
+  [reference announcements](/quest/m0/broadcast-epoch/reference-announcements.md).
 - Every first-party publisher that can restart mints its own: the apps,
   moq-boy, the ingest gateways, moqsink, OBS, and the bindings. Players
   (`moq play`, `@moq/watch`, demo/web) follow the announce `Restart`. moq-stats mints one per
@@ -120,7 +121,7 @@ End+Start. The child quests own their focused regressions.
 
 ## Required
 
-- [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - players and exporters pin siblings consistently, with optional reference epochs and documented legacy best effort
+- [Reference announcements](/quest/m0/broadcast-epoch/reference-announcements.md) - native readers follow a referenced broadcast's announcements, never past a named epoch
 
 ## Related
 

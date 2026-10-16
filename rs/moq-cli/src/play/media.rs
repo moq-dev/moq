@@ -222,7 +222,7 @@ impl<O: Output> Media<O> {
 					// A rendition pointing at a broadcast we can't reach is that
 					// rendition's problem, not the catalog's: fall through to the
 					// next one like an unsupported codec does.
-					let rendition = match source.resolve(config.broadcast.as_ref()).await {
+					let rendition = match source.resolve(config.broadcast.as_ref(), config.epoch.as_ref()).await {
 						Ok(rendition) => rendition,
 						Err(err) => {
 							tracing::warn!(track = name, %err, "cannot resolve video rendition");
@@ -287,7 +287,7 @@ impl<O: Output> Media<O> {
 			if playback.wants(Kind::Audio) {
 				playback.read(Kind::Audio);
 				for (name, config) in snapshot.audio.enabled() {
-					let rendition = match source.resolve(config.broadcast.as_ref()).await {
+					let rendition = match source.resolve(config.broadcast.as_ref(), config.epoch.as_ref()).await {
 						Ok(rendition) => rendition,
 						Err(err) => {
 							tracing::warn!(track = name, %err, "cannot resolve audio rendition");
