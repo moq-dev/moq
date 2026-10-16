@@ -6,9 +6,12 @@ The seeded simulation's random workloads in `rs/moq-quic/src/tests/sim.rs`
 also exercise the paths the QUIC rewrites cut, each with its own invariant,
 so a refactor that breaks one fails a replayable seed:
 
-- **Resets and stops**: RESET_STREAM, STOP_SENDING, and RESET_STREAM_AT
-  mid-transfer. The reader gets exactly the bytes up to the reliable size,
+- **Resets**: RESET_STREAM and RESET_STREAM_AT mid-transfer. The reader
+  gets exactly the bytes up to the reliable size (none for RESET_STREAM),
   then the reset code, and stream and connection credit come back.
+- **Stops**: STOP_SENDING mid-transfer. The sender observes the code
+  through `SendStream::stopped` or `WriteError::Stopped`, the stopped
+  reader sees nothing further, and credit comes back.
 - **Bidirectional streams**: both sides write on the same streams, and every
   byte arrives once and in order in each direction.
 - **Datagrams** interleaved with streams: each arrives at most once and
