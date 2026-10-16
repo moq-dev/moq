@@ -115,7 +115,9 @@ fn retransmits_lost_prefix() {
         (Vec::new(), Err(ReadError::Blocked))
     );
     assert_matches!(
-        pair.server_conn_mut(server_ch).recv_stream(s).received_reset(),
+        pair.server_conn_mut(server_ch)
+            .recv_stream(s)
+            .received_reset(),
         Ok(None)
     );
 
@@ -166,7 +168,9 @@ fn received_reset_after_prefix() {
 
     assert_eq!(accept(&mut pair, server_ch), s);
     assert_matches!(
-        pair.server_conn_mut(server_ch).recv_stream(s).received_reset(),
+        pair.server_conn_mut(server_ch)
+            .recv_stream(s)
+            .received_reset(),
         Ok(None)
     );
     let mut recv = pair.server_recv(server_ch, s);
@@ -174,7 +178,9 @@ fn received_reset_after_prefix() {
     assert_matches!(chunks.next(RELIABLE), Ok(Some(chunk)) if chunk.bytes == MSG[..RELIABLE]);
     let _ = chunks.finalize();
     assert_matches!(
-        pair.server_conn_mut(server_ch).recv_stream(s).received_reset(),
+        pair.server_conn_mut(server_ch)
+            .recv_stream(s)
+            .received_reset(),
         Ok(Some(ERROR))
     );
 }

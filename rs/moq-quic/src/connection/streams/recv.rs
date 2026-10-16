@@ -78,7 +78,9 @@ impl Recv {
         self.end = self.end.max(end);
         // A reset stream only still delivers the data below its Reliable Size
         if let RecvState::ResetRecvd { reliable_size, .. } = self.state {
-            let len = reliable_size.saturating_sub(frame.offset).min(frame.data.len() as u64);
+            let len = reliable_size
+                .saturating_sub(frame.offset)
+                .min(frame.data.len() as u64);
             frame.data.truncate(len as usize);
         }
         // Don't bother storing data or releasing stream-level flow control credit if the stream's

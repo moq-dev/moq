@@ -2537,7 +2537,12 @@ mod tests {
         );
     }
 
-    fn reset_at(id: StreamId, error_code: u32, final_offset: u32, reliable_size: Option<u32>) -> frame::ResetStream {
+    fn reset_at(
+        id: StreamId,
+        error_code: u32,
+        final_offset: u32,
+        reliable_size: Option<u32>,
+    ) -> frame::ResetStream {
         frame::ResetStream {
             id,
             error_code: error_code.into(),
@@ -2590,14 +2595,19 @@ mod tests {
         receive(&mut client, id, 0..4);
 
         // Everything past the Reliable Size is credited at once
-        let _ = client.received_reset(reset_at(id, 7, 100, Some(10))).unwrap();
+        let _ = client
+            .received_reset(reset_at(id, 7, 100, Some(10)))
+            .unwrap();
         assert_eq!(client.data_recvd, 100);
         assert_eq!(client.local_max_data - initial_max, 90);
 
         // Data past the Reliable Size is dropped without counting twice
         receive(&mut client, id, 4..20);
         assert_eq!(client.data_recvd, 100);
-        assert_eq!(drain(&mut client, id, true), (10, crate::ReadError::Reset(7u32.into())));
+        assert_eq!(
+            drain(&mut client, id, true),
+            (10, crate::ReadError::Reset(7u32.into()))
+        );
         assert_eq!(client.local_max_data - initial_max, 100);
     }
 
@@ -2606,11 +2616,16 @@ mod tests {
         let mut client = make(Side::Client);
         let id = StreamId::new(Side::Server, Dir::Uni, 0);
         let initial_max = client.local_max_data;
-        let _ = client.received_reset(reset_at(id, 7, 20, Some(10))).unwrap();
+        let _ = client
+            .received_reset(reset_at(id, 7, 20, Some(10)))
+            .unwrap();
         receive(&mut client, id, 4..20);
         assert_eq!(drain(&mut client, id, true), (0, crate::ReadError::Blocked));
         receive(&mut client, id, 0..4);
-        assert_eq!(drain(&mut client, id, true), (10, crate::ReadError::Reset(7u32.into())));
+        assert_eq!(
+            drain(&mut client, id, true),
+            (10, crate::ReadError::Reset(7u32.into()))
+        );
         assert_eq!(client.local_max_data - initial_max, 20);
     }
 
@@ -2621,14 +2636,23 @@ mod tests {
         let initial_max = client.local_max_data;
         receive(&mut client, id, 5..10);
         receive(&mut client, id, 0..2);
-        assert_eq!(drain(&mut client, id, false), (7, crate::ReadError::Blocked));
+        assert_eq!(
+            drain(&mut client, id, false),
+            (7, crate::ReadError::Blocked)
+        );
 
         // Only 2..4 of the prefix is still owed, though bytes past it were already read
         let _ = client.received_reset(reset_at(id, 7, 20, Some(4))).unwrap();
         assert_eq!(client.local_max_data - initial_max, 18);
-        assert_eq!(drain(&mut client, id, false), (0, crate::ReadError::Blocked));
+        assert_eq!(
+            drain(&mut client, id, false),
+            (0, crate::ReadError::Blocked)
+        );
         receive(&mut client, id, 2..4);
-        assert_eq!(drain(&mut client, id, false), (2, crate::ReadError::Reset(7u32.into())));
+        assert_eq!(
+            drain(&mut client, id, false),
+            (2, crate::ReadError::Reset(7u32.into()))
+        );
         assert_eq!(client.local_max_data - initial_max, 20);
     }
 
@@ -2637,7 +2661,9 @@ mod tests {
         let mut client = make(Side::Client);
         let id = StreamId::new(Side::Server, Dir::Uni, 0);
         let initial_max = client.local_max_data;
-        let _ = client.received_reset(reset_at(id, 7, 20, Some(10))).unwrap();
+        let _ = client
+            .received_reset(reset_at(id, 7, 20, Some(10)))
+            .unwrap();
         let _ = client.received_reset(reset_at(id, 7, 20, Some(4))).unwrap();
         assert_eq!(client.local_max_data - initial_max, 16);
         // A reordered, larger Reliable Size is ignored
@@ -2647,7 +2673,10 @@ mod tests {
         );
         assert_eq!(client.local_max_data - initial_max, 16);
         receive(&mut client, id, 0..20);
-        assert_eq!(drain(&mut client, id, true), (4, crate::ReadError::Reset(7u32.into())));
+        assert_eq!(
+            drain(&mut client, id, true),
+            (4, crate::ReadError::Reset(7u32.into()))
+        );
         assert_eq!(client.local_max_data - initial_max, 20);
     }
 
@@ -2658,9 +2687,14 @@ mod tests {
         let id = StreamId::new(Side::Server, Dir::Uni, 0);
         let initial_max = client.local_max_data;
         receive(&mut client, id, 0..2);
-        let _ = client.received_reset(reset_at(id, 7, 20, Some(10))).unwrap();
+        let _ = client
+            .received_reset(reset_at(id, 7, 20, Some(10)))
+            .unwrap();
         let _ = client.received_reset(reset_at(id, 7, 20, None)).unwrap();
-        assert_eq!(drain(&mut client, id, true), (0, crate::ReadError::Reset(7u32.into())));
+        assert_eq!(
+            drain(&mut client, id, true),
+            (0, crate::ReadError::Reset(7u32.into()))
+        );
         assert_eq!(client.local_max_data - initial_max, 20);
     }
 
@@ -2668,7 +2702,9 @@ mod tests {
     fn reset_at_error_code_change() {
         let mut client = make(Side::Client);
         let id = StreamId::new(Side::Server, Dir::Uni, 0);
-        let _ = client.received_reset(reset_at(id, 7, 20, Some(10))).unwrap();
+        let _ = client
+            .received_reset(reset_at(id, 7, 20, Some(10)))
+            .unwrap();
         assert_eq!(
             client
                 .received_reset(reset_at(id, 8, 20, Some(4)))
@@ -2681,7 +2717,9 @@ mod tests {
     fn reset_at_final_size_change() {
         let mut client = make(Side::Client);
         let id = StreamId::new(Side::Server, Dir::Uni, 0);
-        let _ = client.received_reset(reset_at(id, 7, 20, Some(10))).unwrap();
+        let _ = client
+            .received_reset(reset_at(id, 7, 20, Some(10)))
+            .unwrap();
         assert_eq!(
             client
                 .received_reset(reset_at(id, 7, 21, Some(4)))
@@ -2689,7 +2727,9 @@ mod tests {
             Err(TransportErrorCode::FINAL_SIZE_ERROR)
         );
         let mut client = make(Side::Client);
-        let _ = client.received_reset(reset_at(id, 7, 20, Some(10))).unwrap();
+        let _ = client
+            .received_reset(reset_at(id, 7, 20, Some(10)))
+            .unwrap();
         assert_eq!(
             client
                 .received(

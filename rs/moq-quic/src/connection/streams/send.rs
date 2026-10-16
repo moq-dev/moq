@@ -106,7 +106,11 @@ impl Send {
     }
 
     /// The frame announcing this stream's reset, if it was reset
-    pub(super) fn reset_frame(&self, id: StreamId, error_code: VarInt) -> Option<frame::ResetStream> {
+    pub(super) fn reset_frame(
+        &self,
+        id: StreamId,
+        error_code: VarInt,
+    ) -> Option<frame::ResetStream> {
         let SendState::ResetSent {
             final_size,
             reliable_size,

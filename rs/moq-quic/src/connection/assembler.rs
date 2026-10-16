@@ -994,11 +994,17 @@ mod test {
         x.ensure_ordering(false).unwrap();
         x.insert(4, Bytes::from_static(b"efgh"), 4).unwrap();
         x.insert(0, Bytes::from_static(b"a"), 1).unwrap();
-        assert_eq!(next_unordered(&mut x), Chunk::new(0, Bytes::from_static(b"a")));
+        assert_eq!(
+            next_unordered(&mut x),
+            Chunk::new(0, Bytes::from_static(b"a"))
+        );
         // 1..4 was never received, and 4..6 is buffered
         assert_eq!(x.unread_before(6), 5);
         x.truncate(6);
-        assert_eq!(next_unordered(&mut x), Chunk::new(4, Bytes::from_static(b"ef")));
+        assert_eq!(
+            next_unordered(&mut x),
+            Chunk::new(4, Bytes::from_static(b"ef"))
+        );
         assert_eq!(x.unread_before(6), 3);
         assert_eq!(x.read(usize::MAX, false), None);
     }
