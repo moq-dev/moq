@@ -8,7 +8,7 @@
   #   nix run github:moq-dev/moq/moq-relay-v0.12.4#moq-relay --accept-flake-config
   #
   # --accept-flake-config opts into the nixConfig below for one command. To
-  # trust the cache permanently instead, add both settings to nix.conf.
+  # trust the cache permanently instead, add these settings to nix.conf.
   #
   # The dev shell paths expire 30 days after upload, possibly before a path
   # that depends on them; `fallback` builds whatever is missing instead of
@@ -257,6 +257,8 @@
           jq
           # Runs the moq.sh installer tests under a strict POSIX shell.
           dash
+          # Proves the temporary bench relay owns its TCP and UDP sockets.
+          lsof
         ];
 
         # Linters / formatters used by `just check` and `just fix`, which
@@ -338,13 +340,13 @@
         # `-kixelated.N` pre-release so they never collide with upstream's.
         uniffi-bindgen-dart = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-dart";
-          version = "0.3.1-kixelated.5+v0.32.0";
+          version = "0.3.1-kixelated.6+v0.32.0";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-dart";
             rev = "v${version}";
-            hash = "sha256-MobLv4aov+ySk3X8bd6Sr5MLiXxCprkoFqEFt5xOerw=";
+            hash = "sha256-Ff5o3n4l1O578gJ5pInAqf6/MkM+lkwzovJtEffvpqk=";
           };
 
           # The upstream repository ignores Cargo.lock so cargo installs test

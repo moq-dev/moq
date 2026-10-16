@@ -1,3 +1,4 @@
+import { Nano, Second } from "@moq/clock";
 import { type Getter, Once, Signal } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
@@ -235,9 +236,11 @@ export class Connection implements Established {
 
 	/** Withdraw announcements and wait up to one second for delivery before closing. */
 	close(): Promise<void> {
-		this.#closing ??= withTimeout(this.#publisher.withdraw(), 1000, "session close timed out").finally(() =>
-			this.abort(),
-		);
+		this.#closing ??= withTimeout(
+			this.#publisher.withdraw(),
+			Nano.fromSecond(Second(1)),
+			"session close timed out",
+		).finally(() => this.abort());
 		return this.#closing;
 	}
 

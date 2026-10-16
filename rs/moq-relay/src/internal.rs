@@ -323,7 +323,7 @@ async fn serve_health() -> Response {
 }
 
 /// Prometheus text-exposition metrics for this node's own MoQ traffic counters
-/// (bytes/frames/groups, subscriptions, viewers, and connected sessions),
+/// (bytes/frames/groups, announces, subscriptions, viewers, and connected sessions),
 /// summed across broadcasts and split by `tier`/`role`.
 ///
 /// Unauthenticated, which is why it lives on the internal listener rather than
@@ -462,6 +462,18 @@ fn render_metrics(
 		"moq_relay_fetches_total",
 		"One-shot group fetches requested.",
 		|c| c.fetches,
+	);
+	counter(
+		&mut out,
+		"moq_relay_announces_started_total",
+		"Broadcast announces started.",
+		|c| c.announces_started,
+	);
+	counter(
+		&mut out,
+		"moq_relay_announces_ended_total",
+		"Broadcast announces ended; subtract from started for live announces.",
+		|c| c.announces_ended,
 	);
 	counter(
 		&mut out,
@@ -1138,6 +1150,41 @@ mod tests {
 		assert!(
 			body.contains("moq_relay_sessions_closed_total{tier=\"http\"} 0"),
 			"{body}"
+		);
+	}
+
+	#[tokio::test]
+	async fn announce_metrics_keep_retired_totals() {
+		let stats = moq_net::stats::Registry::new(Default::default());
+		let producer =
+			moq_tokio::origin::spawn().with_stats(stats.tier(moq_net::stats::Tier::new("edge")).session("root"));
+		let broadcast = producer.create_broadcast("demo/retired").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+
+		let body = render_metrics(&stats.snapshot(), &[], &[]);
+		assert!(
+			body.contains("moq_relay_announces_started_total{tier=\"edge\",role=\"subscriber\"} 1"),
+			"live announce start:\n{body}"
+		);
+		assert!(
+			body.contains("moq_relay_announces_ended_total{tier=\"edge\",role=\"subscriber\"} 0"),
+			"live announce end:\n{body}"
+		);
+
+		broadcast.unannounce();
+		drop(broadcast);
+		drop(producer);
+		let mut report = moq_net::stats::Report::default();
+		stats.report(&mut report);
+
+		let body = render_metrics(&stats.snapshot(), &[], &[]);
+		assert!(
+			body.contains("moq_relay_announces_started_total{tier=\"edge\",role=\"subscriber\"} 1"),
+			"retired announce start:\n{body}"
+		);
+		assert!(
+			body.contains("moq_relay_announces_ended_total{tier=\"edge\",role=\"subscriber\"} 1"),
+			"retired announce end:\n{body}"
 		);
 	}
 

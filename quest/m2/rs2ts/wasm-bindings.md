@@ -28,6 +28,8 @@ Rust and JS must agree on clock origin, units, deadlines, and controlled-time
 behavior across the boundary. Integrate with moq-clock/@moq/clock if available;
 otherwise preserve current semantics without blocking on the whole time line.
 
+Extend the [backend baseline](/test/wasm/README.md#backend-baseline) for full API parity.
+
 Update the bindings' README and existing API docs for the surface added.
 
 Public API: extends the unpublished browser bindings; any changes needed to
@@ -36,4 +38,3 @@ Public API: extends the unpublished browser bindings; any changes needed to
 ## Required
 
 - [Binding generator](/quest/m2/rs2ts/generator.md) - which binding this completes
-- [Browser backend baseline](/quest/m2/rs2ts/spike.md) - the measurements and parity harness this extends

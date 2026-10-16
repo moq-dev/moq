@@ -1,10 +1,10 @@
+import { Milli } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
-import { Time } from "@moq/net";
 
 // How far the incoming rendition may still trail the picture it replaces when we promote it,
 // absorbing scheduling noise so the switch doesn't hinge on landing inside a single frame
 // interval. This is also the largest step backwards a switch can make visible.
-const SLACK = Time.Milli(100);
+const SLACK = Milli(100);
 
 /**
  * How far behind live a rendition's playhead can sit while still being at its own live edge.
@@ -15,22 +15,22 @@ const SLACK = Time.Milli(100);
  * it's encoded, so a frame interval is the longest we wait. Undefined when the catalog declares
  * none of them.
  */
-export function renditionJitter(config: Catalog.VideoConfig): Time.Milli | undefined {
-	let spread: Time.Milli | undefined;
-	if (config.jitter !== undefined) spread = Time.Milli(config.jitter);
-	else if (config.framerate) spread = Time.Milli(Math.ceil(1000 / config.framerate));
+export function renditionJitter(config: Catalog.VideoConfig): Milli | undefined {
+	let spread: Milli | undefined;
+	if (config.jitter !== undefined) spread = Milli(config.jitter);
+	else if (config.framerate) spread = Milli(Math.ceil(1000 / config.framerate));
 
 	if (config.delay === undefined) return spread;
-	return Time.Milli.add(Time.Milli(config.delay), spread ?? Time.Milli.zero);
+	return Milli(config.delay + (spread ?? Milli.zero));
 }
 
 /** The playheads involved in promoting a new rendition. */
 export interface CaughtUp {
 	/** The incoming rendition's playhead: the most recent timestamp it has rendered. */
-	playhead: Time.Milli;
+	playhead: Milli;
 
 	/** The outgoing rendition's playhead, or undefined when it has rendered nothing. */
-	active?: Time.Milli;
+	active?: Milli;
 }
 
 /**
@@ -48,21 +48,21 @@ export function caughtUp(props: CaughtUp): boolean {
 	// Nothing is rendering from the outgoing rendition, so there's no picture to step back from.
 	if (props.active === undefined) return true;
 
-	return Time.Milli.add(props.playhead, SLACK) >= props.active;
+	return props.playhead + SLACK >= props.active;
 }
 
 /** The rendition delays that can be present during a track handoff. */
 export interface SwitchJitter {
 	/** The delay required by the rendition currently on screen. */
-	active?: Time.Milli;
+	active?: Milli;
 
 	/** The delay required by the rendition preparing to replace it. */
-	pending?: Time.Milli;
+	pending?: Milli;
 }
 
 /** The delay Sync must cover while a rendition switch is in flight. */
-export function switchJitter(props: SwitchJitter): Time.Milli | undefined {
+export function switchJitter(props: SwitchJitter): Milli | undefined {
 	if (props.active === undefined) return props.pending;
 	if (props.pending === undefined) return props.active;
-	return Time.Milli.max(props.active, props.pending);
+	return Milli(Math.max(props.active, props.pending));
 }

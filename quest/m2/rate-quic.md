@@ -60,10 +60,9 @@ backpressure the peer cannot ignore, rather than metering and closing.
   connection and reset on revalidation or a union change. Reuse the runtime
   limits seam [peer limits](/quest/m1/quic/peer-limits.md) adds
   (`set_limits(Limits)` on moq-net's transport trait, implemented by the
-  moq-tokio and moq-uring adapters after the fork switch), extended with
-  the two rates.
-- Lands in `moq-quic`, so it waits for the [fork](/quest/m1/quic/fork/README.md).
-  The relay drops its refusal for QUIC sessions in the same PR.
+  moq-tokio and moq-uring adapters), extended with the two rates.
+- Lands in `moq-quic`. The relay drops its refusal for QUIC sessions in
+  the same PR.
 
 Tests, on a simulated clock: a peer sending flat out is held to the cap
 within the burst; a peer that ignores credit is closed with a flow-control
@@ -84,7 +83,6 @@ that a one-second rate window can also be the complete assembly allowance.
 
 ## Required
 
-- [Hard fork](/quest/m1/quic/fork/README.md) - the credit and pacer changes land in `moq-quic`
 - [Peer limits](/quest/m1/quic/peer-limits.md) - adds the runtime `set_limits(Limits)` seam and shrink-as-debt behavior this extends
 - [Bound message assembly](/quest/m1/quic/receive-memory.md) - separate retained memory from paced outstanding credit
 - [Bitrate claim](/quest/m2/rate-claim.md) - the cap this enforces

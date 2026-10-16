@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import type { Time } from "@moq/net";
+import type { Milli } from "@moq/clock";
 import { ringSamples, target } from "./latency";
 
-const ms = (value: number) => value as Time.Milli;
+const ms = (value: number) => value as Milli;
 
 describe("target", () => {
 	it("adds one frame to the measured term", () => {

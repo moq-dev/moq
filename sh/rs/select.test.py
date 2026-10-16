@@ -128,7 +128,7 @@ class FeatureTest(unittest.TestCase):
 
 CARGO_STUB = r"""#!/bin/bash
 printf '%s\n' "$*" >> "$FEATURE_CALLS"
-if [[ "$*" == 'check --locked -p moq-tokio --no-default-features --features noq' ]]; then
+if [[ "$*" == 'check --locked -p moq-tokio --no-default-features --features quic' ]]; then
  echo 'a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature' >&2
  exit 1
 fi

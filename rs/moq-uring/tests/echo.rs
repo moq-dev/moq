@@ -1,6 +1,6 @@
-//! A tokio noq peer echoing through the io_uring WebTransport server.
+//! A tokio QUIC peer echoing through the io_uring WebTransport server.
 
-#![cfg(all(target_os = "linux", feature = "noq"))]
+#![cfg(all(target_os = "linux", feature = "quic"))]
 
 #[path = "support.rs"]
 mod support;
@@ -48,7 +48,7 @@ async fn write_finish(send: &mut quic::web::SendStream, mut buf: &[u8]) {
 }
 
 #[test]
-fn echo_noq_peer() {
+fn echo_tokio_peer() {
 	let Some(mut worker) = worker() else { return };
 	let handle = worker.handle();
 	let certs = support::certs().expect("certificates");
@@ -56,7 +56,7 @@ fn echo_noq_peer() {
 	let server = quic::server::Config::new(
 		quic::Identity::open(&certs.cert, &certs.key)
 			.expect("identity")
-			.server(&[web_transport_moq::ALPN], quic::server::ClientAuth::None)
+			.server(&[moq_tokio::quic::web::ALPN], quic::server::ClientAuth::None)
 			.expect("tls"),
 	);
 	let socket = handle
@@ -78,11 +78,11 @@ fn echo_noq_peer() {
 			.build()
 			.expect("runtime");
 		runtime.block_on(async move {
-			let client = web_transport_moq::ClientBuilder::new()
+			let client = moq_tokio::quic::web::ClientBuilder::new()
 				.dangerous()
 				.with_no_certificate_verification()
 				.expect("client");
-			let request = web_transport_moq::proto::ConnectRequest::new(
+			let request = moq_tokio::quic::web::proto::ConnectRequest::new(
 				url::Url::parse(&format!("https://{addr}/echo")).expect("url"),
 			);
 			let session = client.connect(request).await.expect("connect");
