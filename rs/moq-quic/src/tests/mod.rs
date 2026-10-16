@@ -43,6 +43,7 @@ mod util;
 use util::*;
 
 mod reset_stream_at;
+mod sim;
 mod token;
 
 #[cfg(all(target_family = "wasm", target_os = "unknown"))]
@@ -860,10 +861,7 @@ fn zero_rtt_happypath() {
         .close(pair.time, VarInt(0), [][..].into());
     pair.drive();
 
-    pair.client.addr = SocketAddr::new(
-        Ipv6Addr::LOCALHOST.into(),
-        CLIENT_PORTS.lock().unwrap().next().unwrap(),
-    );
+    pair.client.addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), pair.next_port());
     info!("resuming session");
     let client_ch = pair.begin_connect(config);
     assert!(pair.client_conn_mut(client_ch).has_0rtt());
@@ -1044,10 +1042,7 @@ fn test_zero_rtt_incoming_limit<F: FnOnce(&mut ServerConfig)>(configure_server: 
         .close(pair.time, VarInt(0), [][..].into());
     pair.drive();
 
-    pair.client.addr = SocketAddr::new(
-        Ipv6Addr::LOCALHOST.into(),
-        CLIENT_PORTS.lock().unwrap().next().unwrap(),
-    );
+    pair.client.addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), pair.next_port());
     info!("resuming session");
     pair.server.handle_incoming = Box::new(|_| IncomingConnectionBehavior::Wait);
     let client_ch = pair.begin_connect(config);
@@ -2264,10 +2259,7 @@ fn migration() {
 
     let client_stats_after_connect = pair.client_conn_mut(client_ch).stats();
 
-    pair.client.addr = SocketAddr::new(
-        Ipv4Addr::new(127, 0, 0, 1).into(),
-        CLIENT_PORTS.lock().unwrap().next().unwrap(),
-    );
+    pair.client.addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), pair.next_port());
     pair.client_conn_mut(client_ch).ping();
 
     // Assert that just receiving the ping message is accounted into the servers
@@ -3653,10 +3645,7 @@ fn migrate_detects_new_mtu_and_respects_original_peer_max_udp_payload_size() {
 
     // Migrate client to a different port (and simulate a higher path MTU)
     pair.mtu = 1500;
-    pair.client.addr = SocketAddr::new(
-        Ipv4Addr::new(127, 0, 0, 1).into(),
-        CLIENT_PORTS.lock().unwrap().next().unwrap(),
-    );
+    pair.client.addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), pair.next_port());
     pair.client_conn_mut(client_ch).ping();
     pair.drive();
 
@@ -4940,9 +4929,8 @@ fn path_changes_unblock_oversized_datagrams() {
 
         pair.mtu = 1200;
         if migrate {
-            pair.client
-                .addr
-                .set_port(CLIENT_PORTS.lock().unwrap().next().unwrap());
+            let port = pair.next_port();
+            pair.client.addr.set_port(port);
             pair.client_conn_mut(client_ch).ping();
             pair.drive_client();
             // Process migration without transmitting, so sends cannot free the buffer first.
@@ -6262,11 +6250,11 @@ fn bbr_marking_versus_dropping() {
         let mut client_cfg = client_config();
         client_cfg.transport = transport;
         let (client_ch, server_ch) = pair.connect_with(client_cfg);
-        pair.bottleneck = Some(Bottleneck::new(BPS_LIMIT, 20_000, marks_ce));
+        pair.to_server.bottleneck = Some(Bottleneck::new(BPS_LIMIT, 20_000, marks_ce));
         let time = upload(&mut pair, client_ch, server_ch, TOTAL_BYTES, |_| {});
         let goodput = TOTAL_BYTES as f64 / time.as_secs_f64();
         let ecn = pair.client_conn_mut(client_ch).using_ecn();
-        let queue = pair.bottleneck.take().unwrap().stats;
+        let queue = pair.to_server.bottleneck.take().unwrap().stats;
         info!(
             marks_ce,
             ecn,
@@ -6321,7 +6309,7 @@ fn bbr_burst_after_long_idle_keeps_learned_bandwidth() {
     let mut client_cfg = client_config();
     client_cfg.transport = Arc::new(transport);
     let (client_ch, server_ch) = pair.connect_with(client_cfg);
-    pair.bottleneck = Some(Bottleneck::new(BPS_LIMIT, 100_000, false));
+    pair.to_server.bottleneck = Some(Bottleneck::new(BPS_LIMIT, 100_000, false));
 
     let metrics = |pair: &mut Pair| pair.client_conn_mut(client_ch).congestion_state().metrics();
     upload(&mut pair, client_ch, server_ch, 4_000_000, |_| {});
