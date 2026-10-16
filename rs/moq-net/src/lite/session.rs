@@ -307,6 +307,7 @@ where
 		peer_grant,
 		client,
 		subscriptions,
+		fetches: crate::session::Slots::new(limits.fetches),
 	});
 	let mut subscriber = Subscriber::new(SubscriberConfig {
 		runtime: runtime.clone(),

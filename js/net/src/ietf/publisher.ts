@@ -256,6 +256,7 @@ export class Publisher {
 	#requiresSolicitation: boolean;
 	// Subscriptions the peer holds live on this session.
 	#subscriptions: Slots;
+	#fetches: Slots;
 
 	// The one writer for the outbound datagram stream, shared by every subscription since a
 	// second getWriter would throw. Undefined when the transport carries no datagrams, which
@@ -322,6 +323,7 @@ export class Publisher {
 	}) {
 		this.#quic = quic;
 		this.#subscriptions = new Slots(limits.subscriptions, { quic, reason: "too many subscriptions" });
+		this.#fetches = new Slots(limits.fetches, { quic, reason: "too many fetches" });
 		this.#grant = grant;
 		this.#ready = ready;
 		this.#session = session;
@@ -1724,7 +1726,12 @@ export class Publisher {
 	 * @internal
 	 */
 	async runFetch(msg: Fetch, stream: Stream) {
-		await this.#refuseUnsupported(stream, msg.requestId, "fetch", FetchError.id, "FETCH is not supported");
+		this.#fetches.acquire();
+		try {
+			await this.#refuseUnsupported(stream, msg.requestId, "fetch", FetchError.id, "FETCH is not supported");
+		} finally {
+			this.#fetches.release();
+		}
 	}
 
 	/** Refuse a request NOT_SUPPORTED. */

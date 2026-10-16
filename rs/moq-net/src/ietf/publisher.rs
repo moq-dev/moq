@@ -475,6 +475,7 @@ pub(super) struct Publisher<S: crate::transport::poll::Session> {
 	pub(super) owed: Arc<AtomicUsize>,
 	// Subscriptions the peer may hold at once (`session::Limits::subscriptions`).
 	pub(super) subscriptions: crate::session::Slots,
+	pub(super) fetches: crate::session::Slots,
 	// Ranks every subscription's group streams against each other for the transport.
 	priority: PriorityQueue,
 }
@@ -550,6 +551,7 @@ where
 			auth: crate::auth::Handle::new(false),
 			owed: Default::default(),
 			subscriptions: Default::default(),
+			fetches: Default::default(),
 			priority: Default::default(),
 		}
 	}
@@ -1867,6 +1869,16 @@ where
 	/// which a range running past the track only learns by reading it, and a refusal can
 	/// still replace it until then.
 	async fn run_fetch_stream(mut self, mut stream: Stream<S, Version>, msg: ietf::Fetch<'_>) -> Result<(), Error> {
+		let _slot = match self.fetches.acquire() {
+			Ok(slot) => slot,
+			Err(err) => {
+				self.session.close(
+					super::error::to_session_code(&crate::SessionError::from(&err)),
+					"too many fetches",
+				);
+				return Err(err);
+			}
+		};
 		let priority = super::priority::from_wire(msg.subscriber_priority);
 
 		// Serving a Range Filter unfiltered would deliver objects the subscriber excluded.
