@@ -1,0 +1,163 @@
+//! A session admitted as a cluster peer widens its QUIC limits before SETUP OK,
+//! while a viewer keeps the `--quic-*` ones, on the tokio listener and the
+//! io_uring workers alike.
+#![cfg(feature = "quic")]
+
+use std::time::Duration;
+
+use futures::FutureExt;
+use moq_relay::{Config, Relay};
+use moq_tokio::quic::driver;
+
+const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The viewer stream limit. Small, so a peer's widened one is unmistakable.
+const VIEWER_STREAMS: u64 = 4;
+/// How many streams the probe tries to open without waiting for credit.
+const PROBE: usize = 16;
+
+/// A self-signed certificate on disk.
+fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+	let key = rcgen::KeyPair::generate().expect("keypair");
+	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("cert params");
+	let cert = params.self_signed(&key).expect("self-signed cert");
+	let cert_path = dir.join("cert.pem");
+	let key_path = dir.join("key.pem");
+	std::fs::write(&cert_path, cert.pem()).expect("write cert");
+	std::fs::write(&key_path, key.serialize_pem()).expect("write key");
+	(cert_path, key_path)
+}
+
+fn config(dir: &std::path::Path) -> Config {
+	let (cert, key) = certificate(dir);
+	let mut config = Config::default();
+	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+	config.listen.tls.cert = vec![cert];
+	config.listen.tls.key = vec![key];
+	config.quic.max_streams = Some(VIEWER_STREAMS);
+	config.peer.max_streams = 4 * PROBE as u64;
+	config
+}
+
+/// What a raw QUIC client sees after SETUP: how many unidirectional streams it
+/// can open at once, and how many MAX_DATA frames the relay sent.
+struct Seen {
+	streams: usize,
+	max_data: u64,
+}
+
+/// Dial with an empty moq-lite SETUP, wait for the relay's SETUP, then probe.
+async fn probe(port: u16) -> Seen {
+	let mut connect = moq_tokio::connect::Config::default();
+	connect.tls.insecure = Some(true);
+	let mut tls = connect.tls.build().expect("tls config");
+	tls.alpn_protocols = vec![b"moq-lite-06".to_vec()];
+	let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic crypto");
+	let endpoint = driver::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("endpoint");
+	let conn = endpoint
+		.connect_with(
+			driver::ClientConfig::new(std::sync::Arc::new(crypto)),
+			([127, 0, 0, 1], port).into(),
+			"localhost",
+		)
+		.expect("connect")
+		.await
+		.expect("handshake");
+
+	// SETUP type, then a one-byte message holding zero parameters.
+	let mut setup = conn.open_uni().await.expect("open");
+	setup.write_all(&[0x01, 0x01, 0x00]).await.expect("write");
+	setup.finish().expect("finish");
+
+	// The relay widens a peer before it answers SETUP, so its SETUP stream
+	// arrives behind the new credit.
+	let _setup = tokio::time::timeout(TIMEOUT, conn.accept_uni())
+		.await
+		.expect("relay SETUP timeout")
+		.expect("relay SETUP");
+
+	let mut streams = Vec::new();
+	while streams.len() < PROBE {
+		match conn.open_uni().now_or_never() {
+			Some(stream) => streams.push(stream.expect("open")),
+			None => break,
+		}
+	}
+	let seen = Seen {
+		streams: streams.len(),
+		max_data: conn.stats().frame_rx.max_data,
+	};
+	conn.close(driver::VarInt::from_u32(0), b"done");
+	endpoint.wait_idle().await;
+	seen
+}
+
+/// Admit the first session as a cluster peer and the second as a viewer, and
+/// check that only the peer saw wider limits.
+async fn peer_widens_and_viewer_does_not(mut relay: Relay, port: u16) {
+	let mut admissions = relay.admissions().expect("embedded auth");
+	let deciding = tokio::spawn(async move {
+		let mut leases = Vec::new();
+		for peer in [true, false] {
+			let admission = tokio::time::timeout(TIMEOUT, admissions.next())
+				.await
+				.expect("admission timeout")
+				.expect("admission");
+			let all: moq_auth::Patterns = [moq_auth::Pattern::all()].into_iter().collect();
+			let mut grant = moq_auth::Grant::new(all.clone(), all);
+			grant.peer = peer;
+			let (producer, consumer) = moq_auth::lease::Producer::new(grant);
+			leases.push(producer);
+			admission.grant(consumer);
+		}
+		leases
+	});
+	let running = tokio::spawn(relay.run());
+
+	let peer = probe(port).await;
+	assert_eq!(peer.streams, PROBE, "a peer opens past the viewer stream limit");
+	assert!(peer.max_data > 0, "a peer's wider receive window is advertised");
+
+	let viewer = probe(port).await;
+	assert!(
+		viewer.streams < PROBE && viewer.streams as u64 <= VIEWER_STREAMS + 1,
+		"a viewer keeps the stream limit, opened {}",
+		viewer.streams
+	);
+	assert_eq!(viewer.max_data, 0, "a viewer's receive window is unchanged");
+
+	let _leases = deciding.await.expect("decider");
+	running.abort();
+	let _ = running.await;
+}
+
+#[tokio::test]
+async fn tokio_peer_session_widens_quic_limits() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let dir = tempfile::tempdir().expect("tempdir");
+	let relay = Relay::load(config(dir.path())).await.expect("load relay");
+	let port = relay.quic_addr().expect("quic listener bound").port();
+	peer_widens_and_viewer_does_not(relay, port).await;
+}
+
+#[cfg(all(target_os = "linux", feature = "_uring"))]
+#[tokio::test]
+async fn uring_peer_session_widens_quic_limits() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	match moq_uring::Worker::new(Default::default()) {
+		Ok(_) => {}
+		Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+			eprintln!("skipping io_uring relay test: {reason}");
+			return;
+		}
+		Err(err) => panic!("io_uring worker setup failed: {err}"),
+	}
+	let dir = tempfile::tempdir().expect("tempdir");
+	let mut config = config(dir.path());
+	config.runtime.workers = Some(1);
+	config.runtime.pin = false;
+	config.runtime.io_uring = true;
+	let relay = Relay::load(config).await.expect("load relay");
+	let port = relay.addr().expect("workers bound an address").port();
+	peer_widens_and_viewer_does_not(relay, port).await;
+}

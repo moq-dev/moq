@@ -818,8 +818,10 @@ struct LanAuth {
 pub struct Options {
 	/// Request caps for ordinary client sessions.
 	pub session: crate::limits::Session,
-	/// Request caps for authenticated peers and outbound cluster links.
+	/// Request caps and QUIC limits for authenticated peers and outbound cluster links.
 	pub peer: crate::limits::Peer,
+	/// The QUIC settings every session starts with, which `peer` may only widen.
+	pub quic: moq_tokio::quic::Config,
 	/// Cluster identity, peers, and discovery.
 	pub config: Config,
 
@@ -923,6 +925,7 @@ struct Work {
 pub struct Cluster {
 	session_limits: moq_net::session::Limits,
 	peer_limits: moq_net::session::Limits,
+	peer_quic: moq_tokio::quic::Limits,
 	config: Config,
 	client: Option<moq_tokio::Client>,
 	/// Dial template for LAN peers that pin a fingerprint; static and API
@@ -997,6 +1000,11 @@ impl Cluster {
 		}
 	}
 
+	/// The QUIC limits an admitted session widens to, if any: only a `peer` grant does.
+	pub(crate) fn quic_limits(&self, lease: &auth::Lease) -> Option<moq_tokio::quic::Limits> {
+		lease.token().peer.then_some(self.peer_quic)
+	}
+
 	/// The origin ID used by this relay on the wire.
 	pub fn id(&self) -> u64 {
 		self.origin.hop().id()
@@ -1022,7 +1030,9 @@ impl Cluster {
 			cache,
 			session,
 			peer,
+			quic,
 		} = options;
+		let peer_quic = peer.quic(&quic)?;
 		let id = match config.id {
 			Some(0) => anyhow::bail!("--cluster-id must be non-zero"),
 			Some(id) if id >= 1 << 62 => {
@@ -1055,6 +1065,7 @@ impl Cluster {
 		Ok(Cluster {
 			session_limits: session.resolve(),
 			peer_limits: peer.resolve(),
+			peer_quic,
 			config,
 			client: None,
 			connect: None,

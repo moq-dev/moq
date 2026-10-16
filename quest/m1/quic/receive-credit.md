@@ -28,7 +28,9 @@ state reclamation. Unread discarded bytes, late data on stopped streams,
 reset final-size gaps, and already-read retained bytes must not leak or
 return the same credit twice. Releasing useful credit must eventually wake
 a blocked peer even below the normal window-update threshold; do not depend
-on optional DATA_BLOCKED frames. Runtime window shrink debt still applies.
+on optional DATA_BLOCKED frames. Runtime window changes, such as the relay
+widening a cluster peer's receive window, keep this accounting; shrink debt
+still applies.
 
 Expose enough credit accounting and events for MoQ to detect assembly
 pressure. QUIC performs cancellation but does not choose application victims.
@@ -55,4 +57,3 @@ capability their transports cannot provide.
 
 - [Bound message assembly](/quest/m1/quic/receive-memory.md) - retains connection credit until a complete message is handed off
 - [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - compose retained credit with reliable prefixes and final-size accounting
-- [Relay peers get wider limits](/quest/m1/quic/peer-limits.md) - runtime receive-window changes preserve retained-credit accounting

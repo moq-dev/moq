@@ -238,6 +238,12 @@ struct Peer {
 	subscriptions: Option<usize>,
 	#[usage(env = "MOQ_PEER_FETCHES", cli("--peer-fetches"))]
 	fetches: Option<usize>,
+	#[usage(env = "MOQ_PEER_MAX_STREAMS", cli("--peer-max-streams"))]
+	max_streams: Option<u64>,
+	#[usage(env = "MOQ_PEER_RECEIVE_WINDOW", cli("--peer-receive-window"))]
+	receive_window: Option<u64>,
+	#[usage(env = "MOQ_PEER_SEND_WINDOW", cli("--peer-send-window"))]
+	send_window: Option<u64>,
 }
 
 #[derive(usage::Config)]

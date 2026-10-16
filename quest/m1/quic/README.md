@@ -77,8 +77,6 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
   the lossy scalar; retransmits follow the same order
 - [Schedule datagrams by subscription priority](/quest/m1/quic/datagram-priority.md) -
   datagrams join their subscription's send group instead of preempting every stream
-- [Relay peers get wider limits](/quest/m1/quic/peer-limits.md) - MAX_STREAMS
-  and MAX_DATA are raised after SETUP identifies a cluster peer
 - [Shard the endpoint](/quest/m1/quic/shard.md) - the library shards a
   server endpoint across cores by default, replacing the `--workers` group
 - [Surface UDP send errors](/quest/m1/quic/send-errors.md) - a client drops a QUIC attempt the moment its address family is unreachable

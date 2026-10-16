@@ -161,6 +161,20 @@ impl Default for Transport {
 	}
 }
 
+/// The flow-control limits an established connection can change, such as a
+/// relay widening them once it knows the peer is another relay.
+///
+/// Values past what QUIC can express saturate to its maximum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+	/// Max concurrent streams the peer may open, per direction.
+	pub max_streams: u64,
+	/// Connection-wide receive window, in bytes.
+	pub receive_window: u64,
+	/// Cap on unacknowledged outgoing data, in bytes.
+	pub send_window: u64,
+}
+
 /// The congestion control family a connection runs.
 ///
 /// CUBIC is used for loss-based control and BBRv3 for delay-based control.

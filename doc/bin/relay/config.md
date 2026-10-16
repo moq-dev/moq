@@ -95,7 +95,17 @@ fetches = 10000                      # Independent simultaneous FETCH requests.
 announces = 100000
 subscriptions = 10000
 fetches = 10000
+max_streams = 100000                 # Concurrent QUIC streams per direction.
+receive_window = 671088640           # Connection-wide QUIC receive window (640 MiB).
+send_window = 671088640              # Unacknowledged outgoing QUIC data (640 MiB).
 ```
+
+The last three widen a peer's QUIC connection once its grant is known, before
+the SETUP reply, and apply from the handshake on to links the relay dials, so
+a link carrying a whole cluster is not throttled by the `[quic]` limits sized
+for one viewer. Startup fails if one is below its `[quic]` counterpart (an
+unset window counts as 64 MiB), since applying it would shrink the connection.
+Peers over WebSocket, TCP, or iroh keep their transport's own limits.
 
 These are the defaults. For example, `--peer-subscriptions=50000` raises the
 subscription cap on cluster links. `--session-fetches` and `--peer-fetches`

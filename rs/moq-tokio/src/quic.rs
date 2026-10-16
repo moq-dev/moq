@@ -110,8 +110,7 @@ pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
 /// Bounds how much unread data one peer can make us buffer across all of its streams,
 /// which the backends otherwise leave unlimited. Sized so a relay-to-relay session, which
 /// shares one connection, can still sustain several Gbps at intercontinental RTTs.
-#[cfg(any(feature = "quic", feature = "iroh"))]
-pub(crate) const DEFAULT_RECEIVE_WINDOW: u64 = 64 << 20;
+pub const DEFAULT_RECEIVE_WINDOW: u64 = 64 << 20;
 
 /// Default idle timeout before an inactive connection is dropped.
 ///
@@ -125,6 +124,20 @@ pub(crate) const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Under a third of [`DEFAULT_IDLE_TIMEOUT`], so a lost ping is followed by
 /// another (plus QUIC's probe retransmits) before the peer's timer runs out.
 pub(crate) const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(3);
+
+/// The flow-control limits an established QUIC connection can change, such as
+/// a relay widening them once it knows the peer is another relay.
+///
+/// Values past what QUIC can express saturate to its maximum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+	/// Max concurrent streams the peer may open, per direction.
+	pub max_streams: u64,
+	/// Connection-wide receive window, in bytes.
+	pub receive_window: u64,
+	/// Cap on unacknowledged outgoing data, in bytes.
+	pub send_window: u64,
+}
 
 /// The `--quic-*` transport section, applied to dialed and accepted connections alike.
 #[derive(Clone, Debug, usage::Args, serde::Serialize, serde::Deserialize)]

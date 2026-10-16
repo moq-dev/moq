@@ -240,7 +240,10 @@ impl Relay {
 			true => server_config.init_streams()?,
 			false => server_config.init()?,
 		};
-		let client = config.connect.clone().init(config.quic.clone())?;
+		// Every link the cluster dials is a peer, so it gets the peer limits from
+		// the handshake on rather than widening after SETUP.
+		let dial_quic = crate::limits::dial(&config.quic, config.peer.quic(&config.quic)?);
+		let client = config.connect.clone().init(dial_quic.clone())?;
 
 		// `None` for a stream-only server (no QUIC); any other error is real.
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
@@ -283,10 +286,11 @@ impl Relay {
 		let mut cluster_options = cluster::Options::new(config.cluster).with_cache(cache);
 		cluster_options.session = config.session;
 		cluster_options.peer = config.peer;
+		cluster_options.quic = config.quic.clone();
 		let cluster = cluster::Cluster::new(cluster_options)?
 			.with_client(client.clone())
 			.with_client_tls(config.connect.tls.build()?)
-			.with_connect(config.connect.clone(), config.quic.clone())
+			.with_connect(config.connect.clone(), dial_quic)
 			.with_advertise(advertise);
 		let stats = config.stats.build(cluster.origin.clone());
 		// The cluster takes over keeping the publish task alive, so an embedder that
