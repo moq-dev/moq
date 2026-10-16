@@ -46,6 +46,25 @@ a coverage table linking each supported profile and loss guarantee to its
 test; unsupported or unmeasured cells stay explicit. Keep CLI instructions
 and the MPEG-TS draft consistent in each feature change.
 
+Decided 2026-10-16, for private PES timing and headers: a PES without a PTS
+is not untimed. The multiplex places every byte on the program clock; only
+its presentation time is absent. So a verbatim PES track stays timed on the
+legacy container, the only one whose timing survives transports without
+net-level timestamps (IETF drafts 14-16, lite-05/06's send-time stamps), and
+never becomes an untimed track. Each frame's timestamp is the PES's source
+placement: the PCR-interpolated arrival of its first byte, moved onto the
+catalog clock like the media. Its payload is the whole PES packet, a new
+`pesPacket` framing that old consumers refuse rather than misread: PTS and
+DTS rebased, every other header byte kept, so PTS presence, special
+stream-ID forms and optional fields round-trip without per-stream-type
+timing rules. Clock fields it does not rebase (ESCR, pack header, TREF) and
+PES-level scrambling are refused. TS-packet-layer details (continuity,
+adaptation fields, packet boundaries) stay with the raw fallback.
+Rejected: an untimed track with a container that takes time from the net
+frame, which loses timing on those transports and in archive replay and
+needs timedness fixed before the first PES; and a per-track "no PTS" flag,
+which keeps the synthesized header and misleads old exporters.
+
 The planning children settle catalog and clock contracts before production
 changes. Their output adds independently completable implementation quests to
 this line; an audit finding is not authorization to guess a public API.
@@ -56,7 +75,10 @@ remain with their current quests.
 ## Required
 
 - [Plan: semantic fidelity](/quest/m1/ts-reliability/fidelity.md) - explicit profiles and PMT lifecycle contracts produce implementation quests
-- [Plan: PES timing and headers](/quest/m1/plan-ts-pes-untimed.md) - private PES semantics have a settled carriage and placement contract
+- [Raw stream types](/quest/m1/ts-reliability/stream-type.md) - unknown stream types survive export instead of failing the PMT
+- [Whole-PES export](/quest/m1/ts-reliability/pes-export.md) - export writes `pesPacket` frames byte for byte at their placement
+- [Whole-PES import](/quest/m1/ts-reliability/pes-import.md) - private PES travels whole at its source placement, a missing PTS stays missing
+- [Section placement](/quest/m1/ts-reliability/section-placement.md) - sections share the PCR placement clock instead of the video PTS
 - [Loss and recovery tests](/quest/m1/ts-reliability/recovery.md) - actual MoQ omissions exercise reacquisition and unaffected tracks
 - [T-STD TS export](/quest/m1/tstd/README.md) - the semantic mux schedules the content it admits within its supported buffer models
 

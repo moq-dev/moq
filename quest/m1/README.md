@@ -92,7 +92,6 @@ above them.
 - [Raw TS cuts on the epoch timeline](/quest/m1/ts-passthrough-epoch-cuts.md) - passthrough fallback cuts fall on the epoch's grid and the M2ts section derives from the epoch and content, so instances started apart publish identical groups and catalogs
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - importers sharing one `--epoch` and fed one stream publish identical groups and timestamps, so failover between a redundant pair survives
 - [Importers announce with a track](/quest/m1/import-declared-track.md) - every importer announces once its catalog names a servable track (a rendition or an extension track like `m2ts`), and input that ends with none exits non-zero unannounced
-- [Plan: untimed verbatim PES](/quest/m1/plan-ts-pes-untimed.md) - decide how a verbatim TS track carries a PES that has no PTS, then write the implementation quest
 - [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) - json and binary consumers return each value's timestamp, in Rust and every binding; snapshots add `latest()` beside an in-order `next()`
 - [JSON window timestamps](/quest/m1/json-window-timestamps.md) - Rust and JS window consumers return each event's frame timestamp like the snapshot and stream consumers
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface

@@ -30,8 +30,8 @@ distinct. Whole SPTS maps to `unmodified-program`, whole MPTS to
 The fallback will not split PIDs or add source-position reconstruction
 metadata. Use [the current draft](https://datatracker.ietf.org/doc/html/draft-gregoire-moq-msfts)
 to document both semantic and scheduling differences; shared terminology
-does not establish wire interoperability. Coordinate PES decisions with
-[private PES timing and headers](/quest/m1/plan-ts-pes-untimed.md).
+does not establish wire interoperability. Verbatim PES carries the whole PES packet at its source placement
+([whole-PES import](/quest/m1/ts-reliability/pes-import.md)).
 
 Update `drafts/draft-lcurley-moq-mpegts.md` and `doc/concept` with whatever
 lands. [#4577](https://github.com/moq-dev/moq/pull/4577) (per-ES access
