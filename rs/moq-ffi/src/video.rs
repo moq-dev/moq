@@ -464,7 +464,7 @@ impl MoqBroadcastProducer {
 		// closes its encoder before this one opens, so only one codec session is live.
 		let rendition = block_on(config.probe())?;
 		let encoder = block_on(moq_video::encode::Sink::open(&config))?;
-		let gop = Some(config.gop.duration(config.framerate));
+		let gop = config.gop.duration(config.framerate);
 		let ceiling = video_ceiling(&config, &rendition);
 		let producer = self.with_state(|state| match output.track {
 			Some(name) => {
@@ -473,16 +473,14 @@ impl MoqBroadcastProducer {
 					.create_track(name, state.catalog.track_info(hang::catalog::PRIORITY.video))?;
 				Ok(moq_video::encode::Producer::with_track(
 					track,
-					state.catalog.clone(),
+					state.catalog.reserve().with_timeline_hint(gop),
 					rendition,
-					gop,
 				)?)
 			}
 			None => Ok(moq_video::encode::Producer::new(
 				state.broadcast.clone(),
-				state.catalog.clone(),
+				state.catalog.reserve().with_timeline_hint(gop),
 				rendition,
-				gop,
 			)?),
 		})?;
 

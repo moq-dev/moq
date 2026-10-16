@@ -83,8 +83,11 @@ pub struct Producer<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> Producer<E> {
-	/// Publish a track carrying `rendition` into `broadcast`, registering it in
-	/// `catalog`. The frames fed to [`publish`](Self::publish) must be in that
+	/// Publish a track carrying `rendition` into `broadcast`, registering it under
+	/// `reserved`, a [`catalog::Producer::reserve`](moq_mux::catalog::Producer::reserve)
+	/// that carries any per-track hint such as the encoder's GOP duration
+	/// ([`Reserved::with_timeline_hint`](moq_mux::catalog::Reserved::with_timeline_hint)).
+	/// The frames fed to [`publish`](Self::publish) must be in that
 	/// codec's framing, which is what the [`Encoder`](super::Encoder) the
 	/// rendition was probed from emits.
 	///
@@ -96,9 +99,8 @@ impl<E: CatalogExt> Producer<E> {
 	/// catalog instead of correcting it.
 	pub fn new(
 		broadcast: moq_net::broadcast::Producer,
-		catalog: moq_mux::catalog::Producer<E>,
+		reserved: moq_mux::catalog::Reserved<E>,
 		rendition: hang::catalog::VideoConfig,
-		gop: Option<std::time::Duration>,
 	) -> Result<Self, Error> {
 		let suffix = match &rendition.codec {
 			hang::catalog::VideoCodec::H264(_) => ".avc3",
@@ -109,21 +111,19 @@ impl<E: CatalogExt> Producer<E> {
 				)));
 			}
 		};
-		let track = broadcast.unique_track(suffix, catalog.track_info(hang::catalog::PRIORITY.video))?;
-		Self::with_track(track, catalog, rendition, gop)
+		let track = broadcast.unique_track(suffix, reserved.track_info(hang::catalog::PRIORITY.video))?;
+		Self::with_track(track, reserved, rendition)
 	}
 
-	/// Publish `rendition` on an existing track, registering it in `catalog`.
+	/// Publish `rendition` on an existing track, registering it under `reserved`.
 	///
 	/// Use this when the caller owns the track name. [`new`](Self::new) derives a
 	/// unique name from the codec instead.
 	pub fn with_track(
 		track: moq_net::track::Producer,
-		catalog: moq_mux::catalog::Producer<E>,
+		reserved: moq_mux::catalog::Reserved<E>,
 		rendition: hang::catalog::VideoConfig,
-		gop: Option<std::time::Duration>,
 	) -> Result<Self, Error> {
-		let reserved = catalog.reserve().with_timeline_hint(gop);
 		let codecs = match &rendition.codec {
 			hang::catalog::VideoCodec::H264(_) => Codecs::H264 {
 				split: moq_mux::codec::h264::Split::new(),
@@ -424,7 +424,8 @@ impl<E: CatalogExt> Driver<E> {
 			let (rendition, mut sink) = probe_config.probe_sink().await?;
 			// Learned here so a caller finds out before the first viewer, not on its first cut.
 			learn(&requests, refusal(&mut sink).await?);
-			Ok::<_, Error>(rendition)
+			// The encoder is built from the same defaults, so the probe's GOP is the one it emits.
+			Ok::<_, Error>((rendition, probe_config.gop.duration(probe_config.framerate)))
 		};
 		// Every wait below races the controls closing, so an abandoned publish never holds a camera
 		// or a permission prompt open for an owner that is gone.
@@ -437,8 +438,8 @@ impl<E: CatalogExt> Driver<E> {
 			}
 			rendition = rendition => rendition,
 		};
-		let rendition = match rendition {
-			Ok(rendition) => rendition,
+		let (rendition, gop) = match rendition {
+			Ok(probed) => probed,
 			Err(err) => {
 				// A track that already ended has nobody left to tell.
 				let _ = track.abort(moq_net::Error::Transport(err.to_string()));
@@ -446,7 +447,7 @@ impl<E: CatalogExt> Driver<E> {
 			}
 		};
 
-		let mut producer = Producer::with_track(track, catalog, rendition, Some(std::time::Duration::from_secs(2)))?;
+		let mut producer = Producer::with_track(track, catalog.reserve().with_timeline_hint(gop), rendition)?;
 		let demand = producer.demand();
 
 		let result = tokio::select! {
@@ -816,9 +817,10 @@ mod tests {
 
 		let mut producer = Producer::new(
 			broadcast,
-			catalog.clone(),
+			catalog
+				.reserve()
+				.with_timeline_hint(config.gop.duration(config.framerate)),
 			config.probe().await.unwrap(),
-			Some(config.gop.duration(config.framerate)),
 		)
 		.unwrap();
 		let advertised = rendition(&catalog).expect("the rendition publishes before any frame").1;
@@ -888,9 +890,10 @@ mod tests {
 		config.kind = encoder::Kind::Software;
 		let mut producer = Producer::with_track(
 			track,
-			catalog,
+			catalog
+				.reserve()
+				.with_timeline_hint(config.gop.duration(config.framerate)),
 			config.probe().await.unwrap(),
-			Some(config.gop.duration(config.framerate)),
 		)
 		.unwrap();
 		let mut encoder = Encoder::new(&config).unwrap();
@@ -919,9 +922,10 @@ mod tests {
 		initial.kind = encoder::Kind::Software;
 		let mut producer = Producer::new(
 			broadcast,
-			catalog.clone(),
+			catalog
+				.reserve()
+				.with_timeline_hint(initial.gop.duration(initial.framerate)),
 			initial.probe().await.unwrap(),
-			Some(initial.gop.duration(initial.framerate)),
 		)
 		.unwrap();
 
@@ -962,7 +966,7 @@ mod tests {
 		let mut selected = config.probe().await.unwrap();
 		selected.container = hang::catalog::Container::Loc;
 
-		let _producer = Producer::new(broadcast, catalog.clone(), selected, None).unwrap();
+		let _producer = Producer::new(broadcast, catalog.reserve(), selected).unwrap();
 
 		let (_, published) = rendition(&catalog).expect("the rendition publishes before any frame");
 		assert_eq!(published.container, hang::catalog::Container::Loc);
@@ -988,9 +992,10 @@ mod tests {
 		config.kind = encoder::Kind::Software;
 		let _producer = Producer::new(
 			broadcast,
-			catalog,
+			catalog
+				.reserve()
+				.with_timeline_hint(config.gop.duration(config.framerate)),
 			config.probe().await.unwrap(),
-			Some(config.gop.duration(config.framerate)),
 		)
 		.unwrap();
 
@@ -1035,9 +1040,10 @@ mod tests {
 		let mut subscriber = track.subscribe(None);
 		let mut producer = Producer::with_track(
 			track,
-			catalog,
+			catalog
+				.reserve()
+				.with_timeline_hint(config.gop.duration(config.framerate)),
 			config.probe().await.unwrap(),
-			Some(config.gop.duration(config.framerate)),
 		)
 		.unwrap();
 		let mut encoder = Encoder::new(&config).unwrap();
@@ -1140,9 +1146,10 @@ mod tests {
 				probe.kind = encoder::Kind::Software;
 				let mut producer = Producer::with_track(
 					track,
-					catalog.clone(),
+					catalog
+						.reserve()
+						.with_timeline_hint(probe.gop.duration(probe.framerate)),
 					probe.probe().await.unwrap(),
-					Some(probe.gop.duration(probe.framerate)),
 				)
 				.unwrap();
 				let demand = producer.demand();
@@ -1684,9 +1691,10 @@ mod tests {
 			rendition.kind = encoder::Kind::Software;
 			let mut producer = Producer::with_track(
 				track,
-				catalog.clone(),
+				catalog
+					.reserve()
+					.with_timeline_hint(rendition.gop.duration(rendition.framerate)),
 				rendition.probe().await.unwrap(),
-				Some(rendition.gop.duration(rendition.framerate)),
 			)
 			.unwrap();
 			let demand = producer.demand();
