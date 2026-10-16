@@ -8,7 +8,7 @@
 use std::task::{Context, Poll};
 
 use bytes::{Buf, Bytes, BytesMut};
-use moq_quic::{Checkpoint, CheckpointError, StreamId, VarInt};
+use moq_quic::{Checkpoint, StreamId, VarInt};
 
 use super::super::Error;
 use super::{End, Shared};
@@ -77,22 +77,18 @@ impl SendStream {
 
 	/// [`reset`](web_transport_trait::poll::SendStream::reset) with a
 	/// full-width code, for the WebTransport HTTP/3 error mapping, that still
-	/// delivers the data before `checkpoint`, one this stream took, when the
-	/// peer accepts RESET_STREAM_AT.
+	/// delivers the data before `checkpoint`, one this stream took.
 	pub(crate) fn reset_code(&mut self, code: u64, checkpoint: Option<Checkpoint>) {
 		if self.reset {
 			return;
 		}
 		let code = VarInt::from_u64(code).unwrap_or(VarInt::MAX);
 		let mut conn = self.shared.conn.borrow_mut();
-		match checkpoint.map(|checkpoint| checkpoint.reset(&mut conn, code)) {
-			// A peer without RESET_STREAM_AT gets the plain reset it understands.
-			None | Some(Err(CheckpointError::Unsupported)) => {
-				let _ = conn.send_stream(self.id).reset(code);
-			}
-			// Already gone, which is what we wanted.
-			Some(Ok(()) | Err(CheckpointError::ClosedStream)) => {}
-		}
+		// Err means the stream is already gone, which is what we wanted.
+		let _ = match checkpoint {
+			Some(checkpoint) => checkpoint.reset(&mut conn, code),
+			None => conn.send_stream(self.id).reset(code),
+		};
 		drop(conn);
 		self.reset = true;
 		self.shared.kick();

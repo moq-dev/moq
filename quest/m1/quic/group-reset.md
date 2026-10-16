@@ -16,8 +16,18 @@ Split from the transport half, which landed in `moq-quic`,
 `moq_tokio::quic::web`, and moq-uring's WebTransport adapter (#5690). There,
 `SendStream::checkpoint()` marks the data written so far and
 `Checkpoint::reset(code)` sends `RESET_STREAM_AT` with that offset as the
-Reliable Size. The WebTransport adapters already keep their own stream header
+Reliable Size. A peer without the extension instead gets a plain
+`RESET_STREAM` once it has acknowledged the data before the checkpoint, a round
+trip later. The WebTransport adapters already keep their own stream header
 this way.
+
+That fallback is weaker than it looks. An ACK only means the peer's QUIC stack
+holds the bytes, not that its application read them, and RFC 9000 lets a
+receiver discard unread data on `RESET_STREAM`. The WebTransport header
+survives because receiving stacks parse it on arrival. A MoQ group header is
+read by the application, so check whether Chrome hands it to JS when a plain
+`RESET_STREAM` follows the ACK, and treat a peer without `reset_stream_at` as
+unable to keep the header unless it does.
 
 - Give moq-net's `transport::poll::SendStream` a reset that keeps a
   checkpoint, using `Checkpoint` rather than a byte count, so a size past the

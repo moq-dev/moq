@@ -49,15 +49,12 @@ impl SendStream {
 	/// A raw QUIC session sends the code as is.
 	///
 	/// The WebTransport header still reaches the peer, so it can tell which session the reset
-	/// belongs to, unless the peer cannot receive RESET_STREAM_AT.
+	/// belongs to.
 	pub fn reset(&mut self, code: u32) -> Result<(), ClosedStream> {
 		let code = self.close.encode_stream_code(code);
-		match self.header.take().map(|header| header.reset(code)) {
-			Some(Ok(())) => Ok(()),
-			Some(Err(crate::quic::driver::CheckpointError::ClosedStream)) => Err(ClosedStream),
-			Some(Err(crate::quic::driver::CheckpointError::Unsupported)) | None => {
-				self.stream.reset(code).map_err(Into::into)
-			}
+		match self.header.take() {
+			Some(header) => header.reset(code).map_err(Into::into),
+			None => self.stream.reset(code).map_err(Into::into),
 		}
 	}
 

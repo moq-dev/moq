@@ -90,26 +90,71 @@ impl Send {
 
     /// Update stream state due to a reset sent by the local application
     ///
-    /// Data below `reliable_size` is still delivered; everything after it is abandoned.
-    pub(super) fn reset(&mut self, reliable_size: u64) {
+    /// Data below `reliable_size` is still delivered; everything after it is abandoned. Returns
+    /// the error code to send now, or `None` while a peer without RESET_STREAM_AT (`!at`) still
+    /// has data below `reliable_size` to acknowledge, after which
+    /// [`take_held_reset`](Self::take_held_reset) releases it.
+    pub(super) fn reset(
+        &mut self,
+        error_code: VarInt,
+        reliable_size: u64,
+        at: bool,
+    ) -> Option<VarInt> {
         use SendState::*;
-        if let DataSent { .. } | Ready = self.state {
-            debug_assert!(reliable_size <= self.pending.offset());
-            self.state = ResetSent {
-                final_size: self.pending.offset(),
-                reliable_size,
-                reset_acked: false,
-            };
-            self.pending.truncate(reliable_size);
-            self.fin_pending = false;
+        let (DataSent { .. } | Ready) = self.state else {
+            return None;
+        };
+        debug_assert!(reliable_size <= self.pending.offset());
+        let final_size = self.pending.offset();
+        self.pending.truncate(reliable_size);
+        self.fin_pending = false;
+        let send = at || self.pending.is_fully_acked();
+        self.state = ResetSent {
+            final_size,
+            reliable_size,
+            held: (!send).then_some(error_code),
+            reset_acked: false,
+        };
+        send.then_some(error_code)
+    }
+
+    /// The error code of a held RESET_STREAM, once all the data it holds for has been acknowledged
+    pub(super) fn take_held_reset(&mut self) -> Option<VarInt> {
+        let SendState::ResetSent { held, .. } = &mut self.state else {
+            return None;
+        };
+        match self.pending.is_fully_acked() {
+            true => held.take(),
+            false => None,
         }
     }
 
+    /// Abandon the data a held RESET_STREAM waits on, returning its error code to send now
+    ///
+    /// For a peer that sent STOP_SENDING, which will not read it.
+    pub(super) fn release_held_reset(&mut self) -> Option<VarInt> {
+        let SendState::ResetSent {
+            held,
+            reliable_size,
+            ..
+        } = &mut self.state
+        else {
+            return None;
+        };
+        let error_code = held.take()?;
+        *reliable_size = 0;
+        self.pending.truncate(0);
+        Some(error_code)
+    }
+
     /// The frame announcing this stream's reset, if it was reset
+    ///
+    /// It carries a Reliable Size only when the peer accepts RESET_STREAM_AT (`at`).
     pub(super) fn reset_frame(
         &self,
         id: StreamId,
         error_code: VarInt,
+        at: bool,
     ) -> Option<frame::ResetStream> {
         let SendState::ResetSent {
             final_size,
@@ -124,7 +169,7 @@ impl Send {
             error_code,
             final_offset: VarInt::try_from(final_size).expect("impossibly large offset"),
             // A zero Reliable Size is a plain RESET_STREAM, which any peer accepts
-            reliable_size: (reliable_size > 0)
+            reliable_size: (at && reliable_size > 0)
                 .then(|| VarInt::try_from(reliable_size).expect("impossibly large offset")),
         })
     }
@@ -335,23 +380,16 @@ pub(super) enum SendState {
     Ready,
     /// Stream was finished; now sending retransmits only
     DataSent { finish_acked: bool },
-    /// Sent RESET_STREAM, or RESET_STREAM_AT while data below `reliable_size` is still delivered
+    /// Reset by the application, while data below `reliable_size` is still delivered
+    ///
+    /// The peer gets RESET_STREAM_AT, or, without it, a RESET_STREAM `held` until it has
+    /// acknowledged that data.
     ResetSent {
         final_size: u64,
         reliable_size: u64,
+        held: Option<VarInt>,
         reset_acked: bool,
     },
-}
-
-/// Reasons why resetting from a [`Checkpoint`](super::Checkpoint) might fail
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-pub enum CheckpointError {
-    /// The stream has not been opened or was already reset or fully acknowledged
-    #[error("closed stream")]
-    ClosedStream,
-    /// The peer did not advertise support for RESET_STREAM_AT
-    #[error("peer does not support RESET_STREAM_AT")]
-    Unsupported,
 }
 
 /// Reasons why attempting to finish a stream might fail

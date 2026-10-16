@@ -55,7 +55,7 @@ pub(crate) use std::time::Duration;
 
 pub use moq_quic::BloomTokenLog;
 pub use moq_quic::{
-    AckFrequencyConfig, ApplicationClose, CheckpointError, Chunk, ClientConfig, ClosedStream,
+    AckFrequencyConfig, ApplicationClose, Chunk, ClientConfig, ClosedStream,
     ConfigError, ConnectError, ConnectionClose, ConnectionError, ConnectionId,
     ConnectionIdGenerator, ConnectionStats, Dir, EcnCodepoint, EndpointConfig, FrameStats,
     FrameType, IdleTimeout, InvalidCid, MtuDiscoveryConfig, NoneTokenLog, NoneTokenStore,

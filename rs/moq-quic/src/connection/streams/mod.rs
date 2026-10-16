@@ -17,7 +17,7 @@ pub use recv::{Chunks, ReadError, ReadableError};
 mod send;
 pub(crate) use send::{ByteSlice, BytesArray};
 use send::{BytesSource, Send, SendState};
-pub use send::{CheckpointError, FinishError, WriteError, Written};
+pub use send::{FinishError, WriteError, Written};
 
 mod state;
 #[allow(unreachable_pub)] // fuzzing only
@@ -324,13 +324,7 @@ impl<'a> SendStream<'a> {
     /// # Panics
     /// - when applied to a receive stream
     pub fn reset(&mut self, error_code: VarInt) -> Result<(), ClosedStream> {
-        match self.reset_to(error_code, 0) {
-            Ok(()) => Ok(()),
-            Err(CheckpointError::ClosedStream) => Err(ClosedStream { _private: () }),
-            Err(CheckpointError::Unsupported) => {
-                unreachable!("a zero Reliable Size is always valid")
-            }
-        }
+        self.reset_to(error_code, 0)
     }
 
     /// Mark the data written so far, so a later [`Checkpoint::reset`] still delivers it
@@ -350,28 +344,25 @@ impl<'a> SendStream<'a> {
     }
 
     /// Reset the stream, still delivering its first `reliable_size` bytes
-    fn reset_to(&mut self, error_code: VarInt, reliable_size: u64) -> Result<(), CheckpointError> {
+    fn reset_to(&mut self, error_code: VarInt, reliable_size: u64) -> Result<(), ClosedStream> {
         let max_send_data = self.state.max_send_data(self.id);
-        let supported = self.state.peer_reset_stream_at;
+        let at = self.state.peer_reset_stream_at;
         let stream = self
             .state
             .send
             .get_mut(&self.id)
-            .ok_or(CheckpointError::ClosedStream)?
+            .ok_or(ClosedStream { _private: () })?
             .get_or_insert_with(|| Send::new(max_send_data));
 
         if stream.is_reset() {
             // Redundant reset call
-            return Err(CheckpointError::ClosedStream);
+            return Err(ClosedStream { _private: () });
         }
         // Stream IDs are never reused, so only a checkpoint from another connection gets here
         assert!(
             reliable_size <= stream.offset(),
             "checkpoint used on another connection"
         );
-        if reliable_size > 0 && !supported {
-            return Err(CheckpointError::Unsupported);
-        }
         // The peer that sent STOP_SENDING will not read the prefix
         let reliable_size = match stream.stop_reason {
             Some(_) => 0,
@@ -382,9 +373,11 @@ impl<'a> SendStream<'a> {
         // send. We leave flow control alone because the peer's responsible for issuing additional
         // credit based on the final offset communicated in the RESET_STREAM frame we send.
         let buffered = stream.pending.buffered();
-        stream.reset(reliable_size);
+        let send = stream.reset(error_code, reliable_size, at);
         self.state.buffered_data -= buffered - stream.pending.buffered();
-        self.pending.reset_stream.push((self.id, error_code));
+        if let Some(error_code) = send {
+            self.pending.reset_stream.push((self.id, error_code));
+        }
 
         // Don't reopen an already-closed stream we haven't forgotten yet
         Ok(())
@@ -432,19 +425,19 @@ pub struct Checkpoint {
 }
 
 impl Checkpoint {
-    /// Abandon the stream, but deliver everything written before the checkpoint with RESET_STREAM_AT
+    /// Abandon the stream, but still deliver everything written before the checkpoint
     ///
-    /// The peer reads that data before the error, unless it already asked us to stop sending.
-    /// Fails without changing the stream if the peer cannot receive RESET_STREAM_AT, so the caller
-    /// can fall back to [`SendStream::reset`].
+    /// Nothing past the checkpoint is sent or retransmitted. A peer that accepts RESET_STREAM_AT
+    /// gets it at once, and reads the data before the error. Otherwise the data keeps being
+    /// retransmitted, and a plain RESET_STREAM follows once the peer has acknowledged all of it, a
+    /// round trip later. An acknowledgment only means the peer's QUIC stack holds the data:
+    /// RFC 9000 lets it discard data its application has not read yet on RESET_STREAM, so this
+    /// only reliably delivers data the peer parses on arrival, like a WebTransport stream header.
+    /// A peer that asked us to stop sending gets the reset at once, without the data.
     ///
     /// # Panics
     /// - when used on a connection other than the one it came from, if that is detected
-    pub fn reset(
-        self,
-        conn: &mut crate::Connection,
-        error_code: VarInt,
-    ) -> Result<(), CheckpointError> {
+    pub fn reset(self, conn: &mut crate::Connection, error_code: VarInt) -> Result<(), ClosedStream> {
         conn.send_stream(self.id).reset_to(error_code, self.offset)
     }
 }

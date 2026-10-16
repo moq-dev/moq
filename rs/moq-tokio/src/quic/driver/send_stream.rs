@@ -6,7 +6,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use moq_quic::{CheckpointError, ClosedStream, ConnectionError, FinishError, StreamId, Written};
+use moq_quic::{ClosedStream, ConnectionError, FinishError, StreamId, Written};
 use thiserror::Error;
 
 use crate::quic::driver::{
@@ -355,12 +355,13 @@ pub struct Checkpoint {
 }
 
 impl Checkpoint {
-    /// Close the send stream immediately, but deliver everything written before the checkpoint.
+    /// Close the send stream immediately, but still deliver everything written before the checkpoint.
     ///
-    /// Like [`SendStream::reset()`], except the peer reads the data before the error, using
-    /// RESET_STREAM_AT. Fails without touching the stream if the peer does not support it, so the
-    /// caller can fall back to [`SendStream::reset()`].
-    pub fn reset(self, error_code: VarInt) -> Result<(), CheckpointError> {
+    /// Like [`SendStream::reset()`], except the data before the checkpoint still reaches the peer.
+    /// A peer that accepts RESET_STREAM_AT reads it before the error. Otherwise the reset waits a
+    /// round trip until the peer acknowledges the data, and the peer's application may never read
+    /// it: see [`moq_quic::Checkpoint::reset`].
+    pub fn reset(self, error_code: VarInt) -> Result<(), ClosedStream> {
         let mut conn = self.conn.state.lock("Checkpoint::reset");
         if self.is_0rtt && conn.check_0rtt().is_err() {
             return Ok(());

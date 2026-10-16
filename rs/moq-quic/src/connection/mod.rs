@@ -84,7 +84,7 @@ pub use streams::StreamsState;
 #[cfg(not(fuzzing))]
 use streams::StreamsState;
 pub use streams::{
-    Checkpoint, CheckpointError, Chunks, ClosedStream, FinishError, ReadError, ReadableError,
+    Checkpoint, Chunks, ClosedStream, FinishError, ReadError, ReadableError,
     RecvStream, SendStream, ShouldTransmit, StreamEvent, Streams, WriteError, Written,
 };
 
@@ -1758,7 +1758,14 @@ impl Connection {
         }
 
         for frame in info.stream_frames {
-            self.streams.received_ack_of(frame);
+            let id = frame.id;
+            // A reset held for a peer without RESET_STREAM_AT goes out once it holds the data
+            if let Some(error_code) = self.streams.received_ack_of(frame) {
+                self.spaces[SpaceId::Data]
+                    .pending
+                    .reset_stream
+                    .push((id, error_code));
+            }
         }
     }
 
@@ -3125,7 +3132,12 @@ impl Connection {
                             "STOP_SENDING on unopened stream",
                         ));
                     }
-                    self.streams.received_stop_sending(id, error_code);
+                    if let Some(error_code) = self.streams.received_stop_sending(id, error_code) {
+                        self.spaces[SpaceId::Data]
+                            .pending
+                            .reset_stream
+                            .push((id, error_code));
+                    }
                 }
                 Frame::RetireConnectionId { sequence } => {
                     let allow_more_cids = self
