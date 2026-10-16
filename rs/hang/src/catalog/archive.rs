@@ -133,7 +133,10 @@ mod test {
 			.timelines
 			.insert("data".to_string(), Timeline::new("data.timeline.z", None));
 		let json = serde_json::to_string(&archive).unwrap();
-		assert_eq!(json, r#"{"timelines":{"data":{"track":"data.timeline.z"}},"timescale":1000}"#);
+		assert_eq!(
+			json,
+			r#"{"timelines":{"data":{"track":"data.timeline.z"}},"timescale":1000}"#
+		);
 		assert_eq!(serde_json::from_str::<Archive>(&json).unwrap(), archive);
 	}
 
