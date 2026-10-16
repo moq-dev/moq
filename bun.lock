@@ -377,6 +377,7 @@
     "test/interop/clients/js": {
       "name": "@moq/interop-browser",
       "dependencies": {
+        "@moq/hang": "workspace:*",
         "@moq/net": "workspace:*",
         "@moq/publish": "workspace:*",
         "@moq/signals": "workspace:*",

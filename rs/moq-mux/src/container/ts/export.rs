@@ -254,6 +254,10 @@ struct Track {
 	descriptors: Vec<catalog::Descriptor>,
 	/// Authors each video frame's DTS, holding the frames until it can.
 	clock: DecodeClock<(Pending, Option<Bytes>)>,
+	/// Loss counter at the last read, excluding declared ends.
+	recovery_gap: Option<u64>,
+	/// Leading pictures below the recovery keyframe have unavailable references.
+	leading_floor: Option<Timestamp>,
 	/// What the catalog and the SPS declare about the video's reordering.
 	timing: Timing,
 	/// The receiver's buffers for an audio or verbatim track; video's come from [`Timing`].
@@ -288,6 +292,8 @@ impl Track {
 			kind,
 			descriptors: Vec::new(),
 			clock: DecodeClock::default(),
+			recovery_gap: None,
+			leading_floor: None,
 			timing: Timing::default(),
 			buffer: None,
 			ac3_carry: None,
@@ -314,6 +320,15 @@ impl Track {
 		let Kind::Video(stream_type) = self.kind else {
 			return self.push(name, pending, None, None, jitter);
 		};
+		// A declared endpoint increments both counters; only delivery loss arms recovery.
+		let gap = pending.skip.saturating_sub(pending.restart);
+		let recover = self.recovery_gap.replace(gap).is_none_or(|previous| previous != gap);
+		if pending.frame.keyframe {
+			self.leading_floor = recover.then_some(pending.frame.timestamp);
+		}
+		if self.leading_floor.is_some_and(|floor| pending.frame.timestamp < floor) {
+			return Ok(());
+		}
 		if pending.frame.keyframe {
 			self.timing.describe(stream_type, self.source.description(), name);
 		}
